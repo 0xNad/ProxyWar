@@ -38,6 +38,13 @@ import type {
   FeaturedMatchState,
   FeaturedMatchStoreFile,
 } from "./agents/FeaturedMatch";
+import {
+  EMPTY_EVENT_PACKAGE_STORE,
+  findEventPackage,
+  type EventPackage,
+  type EventPackageStoreFile,
+} from "./agents/season/EventPackage";
+import { isPubliclyPromotable } from "./agents/season/EventPackageGate";
 
 /**
  * The typed, already-normalized public data model every Stage 2+ page
@@ -235,6 +242,21 @@ export interface PublicFeaturedMatch {
   revealAt: string | null;
   postMatchSummary: string | null;
   result: PublicFeaturedMatchResult | null;
+  /**
+   * Season Zero activation prompt Phase 4 ("No anonymous public
+   * Premiere", spec §2) — the single, server-computed authority every
+   * consuming hero/watch-programme/schedule surface must check before
+   * treating this record as a promotable Featured Event. `false`
+   * whenever no complete `EventPackage` exists yet for this match (see
+   * `EventPackageGate.isPubliclyPromotable`) — an anonymous, package-less
+   * premiere/archive record NEVER reports `true`, it simply stays
+   * reachable at its own direct URL without hero/schedule promotion. The
+   * DETAILED missing-field list stays operator-only (`isPubliclyPromotable`
+   * itself, used by `premiere:package --validate`) — this public
+   * projection exposes only the boolean a client actually needs to
+   * decide hero vs. ordinary archive presentation.
+   */
+  isPubliclyPromotable: boolean;
 }
 
 export interface PublicPremiereState {
@@ -522,8 +544,20 @@ function publicFeaturedMatchResult(
   };
 }
 
-/** Exported for reuse by the narrow, per-match `/api/featured-matches/:matchId` route (never the bulk read model — see `PublicFeaturedMatch`'s own doc) so both share the exact same embargo projection rather than a parallel reimplementation that could drift. */
-export function publicFeaturedMatch(match: FeaturedMatch): PublicFeaturedMatch {
+/**
+ * Exported for reuse by the narrow, per-match `/api/featured-matches/:matchId`
+ * route (never the bulk read model — see `PublicFeaturedMatch`'s own doc) so
+ * both share the exact same embargo projection rather than a parallel
+ * reimplementation that could drift. `pkg` defaults to `null` (nothing
+ * generated / not looked up yet) — see `isPubliclyPromotable` field's own
+ * doc: that call site currently passes no package (a future turn's job to
+ * wire an event-package lookup into the per-match route), which is a safe
+ * "not promotable" default, never a false positive.
+ */
+export function publicFeaturedMatch(
+  match: FeaturedMatch,
+  pkg: EventPackage | null = null,
+): PublicFeaturedMatch {
   const revealed = isFeaturedMatchRevealed(match);
   return {
     matchId: match.matchId,
@@ -541,6 +575,7 @@ export function publicFeaturedMatch(match: FeaturedMatch): PublicFeaturedMatch {
     // store's own validation alone.
     postMatchSummary: revealed ? match.postMatchSummary : null,
     result: publicFeaturedMatchResult(match),
+    isPubliclyPromotable: isPubliclyPromotable(match, pkg).ok,
   };
 }
 
@@ -548,15 +583,19 @@ export function publicFeaturedMatch(match: FeaturedMatch): PublicFeaturedMatch {
  * Projects the `FeaturedMatch` store into the public read model (spec
  * Stage 3 items 1/5). `"candidate"` records are operator-only ranked
  * drafts from `premiere:candidates`/`feature:candidates` — never public —
- * so they're filtered out entirely, not just embargoed.
+ * so they're filtered out entirely, not just embargoed. `packageStore`
+ * resolves each match's `EventPackage` (Season Zero Phase 4) for the
+ * `isPubliclyPromotable` gate — see that field's own doc.
  */
 function publicFeaturedMatches(
   store: FeaturedMatchStoreFile,
+  packageStore: EventPackageStoreFile,
 ): PublicFeaturedMatch[] {
   return store.matches
     .filter((match) => match.state !== "candidate")
-    .map(publicFeaturedMatch);
+    .map((match) => publicFeaturedMatch(match, findEventPackage(packageStore, match.matchId)));
 }
+
 
 export function buildProxyWarPublicReadModel(
   mirror: CoworldLeagueMirrorData,
@@ -577,6 +616,16 @@ export function buildProxyWarPublicReadModel(
    * required-argument break.
    */
   standingsHistory: StandingsHistoryStore = EMPTY_STANDINGS_HISTORY_STORE,
+  /**
+   * Season Zero activation prompt Phase 4: resolves each `FeaturedMatch`'s
+   * `EventPackage` for the `isPubliclyPromotable` gate (see
+   * `PublicFeaturedMatch.isPubliclyPromotable`'s own doc). Defaults to the
+   * empty store — same "existing caller that doesn't pass one gets an
+   * honest default" contract as `standingsHistory` above; every match
+   * simply reports `isPubliclyPromotable: false` until a real store is
+   * wired in (see `CoworldLeagueSiteWriter.ts`'s production call site).
+   */
+  eventPackageStore: EventPackageStoreFile = EMPTY_EVENT_PACKAGE_STORE,
 ): ProxyWarPublicReadModel {
   const agentSlugByPlayerName = new Map(
     identity.agents.map((agent) => [
@@ -607,7 +656,7 @@ export function buildProxyWarPublicReadModel(
     matches: mirror.episodes.map((episode) =>
       publicMatch(episode, agentSlugByPlayerName),
     ),
-    featuredMatches: publicFeaturedMatches(featuredMatchStore),
+    featuredMatches: publicFeaturedMatches(featuredMatchStore, eventPackageStore),
     premieres: {
       live: mirror.premiere ?? null,
       latest: mirror.premiere === undefined ? (mirror.latestPremiere ?? null) : null,

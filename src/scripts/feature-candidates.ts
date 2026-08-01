@@ -10,6 +10,7 @@ import {
 import type {
   CoworldLeagueEpisodeRow,
   CoworldLeagueMirrorData,
+  CoworldLeagueStandingRow,
 } from "../server/agents/CoworldLeagueSiteWriter";
 import {
   FeaturedMatchSchema,
@@ -25,6 +26,8 @@ import {
   loadIdentityRegistrySnapshot,
   type IdentityRegistrySnapshot,
 } from "../server/identity/IdentityRegistry";
+import { buildReasonToWatchClaims } from "../server/agents/season/CandidateReasonToWatch";
+import type { EventPackageClaim } from "../server/agents/season/EventPackage";
 
 /**
  * `feature:candidates` — Stage 3 item 2/3, ARCHIVE lane. Scans COMPLETED,
@@ -106,6 +109,14 @@ export interface RankedFeatureCandidate {
    * `null` when neither exists for this run.
    */
   dramaScoreSource: "curated" | "legacy" | null;
+  /**
+   * Season Zero activation prompt Phase 4 item 3 ("Candidate evidence
+   * upgrade"): structured, evidence-backed reason-to-watch claims — see
+   * `CandidateReasonToWatch.ts`'s own doc for exactly what data each
+   * claim source is grounded in. `[]` (never fabricated filler) when no
+   * signal clears its sample-size floor for this candidate.
+   */
+  reasonToWatchClaims: EventPackageClaim[];
 }
 
 function parseArgs(argv: readonly string[]): CliOptions {
@@ -485,6 +496,8 @@ async function buildCandidate(
   row: CoworldLeagueEpisodeRow,
   runsRootDir: string,
   identity: IdentityRegistrySnapshot,
+  standings: readonly CoworldLeagueStandingRow[],
+  retainedEpisodes: readonly CoworldLeagueEpisodeRow[],
   now: Date,
 ): Promise<Omit<RankedFeatureCandidate, "rank">> {
   const directory = findArtifactDirectory(row, runsRootDir);
@@ -535,6 +548,14 @@ async function buildCandidate(
     dramaArtifactFound: drama !== null,
     matchStoryArtifactFound: story !== null,
     dramaScoreSource: curated !== null ? "curated" : drama !== null ? "legacy" : null,
+    reasonToWatchClaims: buildReasonToWatchClaims(
+      match.participants,
+      row.map,
+      identity,
+      standings,
+      retainedEpisodes,
+      now,
+    ),
   };
 }
 
@@ -575,6 +596,7 @@ function formatTable(ranked: readonly RankedFeatureCandidate[]): string {
     "drama",
     "story",
     "flags",
+    "claims",
     "title",
   ];
   const rows = ranked.map((candidate) => {
@@ -605,6 +627,7 @@ function formatTable(ranked: readonly RankedFeatureCandidate[]): string {
         ? "—"
         : String(evidence.entertainmentScore),
       flags === "" ? "—" : flags,
+      String(candidate.reasonToWatchClaims.length),
       candidate.match.title,
     ];
   });
@@ -649,7 +672,7 @@ export async function runFeatureCandidatesCli(
     );
     const now = new Date();
     const built = await Promise.all(
-      episodes.map((row) => buildCandidate(row, runsRootDir, identity, now)),
+      episodes.map((row) => buildCandidate(row, runsRootDir, identity, mirrorData?.standings ?? [], episodes, now)),
     );
     const ranked: RankedFeatureCandidate[] = [...built]
       .sort(compareCandidates)

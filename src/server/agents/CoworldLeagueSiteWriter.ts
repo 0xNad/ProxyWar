@@ -17,6 +17,10 @@ import {
   readFeaturedMatchStore,
   resolveFeaturedMatchStateRoot,
 } from "./FeaturedMatch";
+import {
+  readEventPackageStore,
+  resolveEventPackageStateRoot,
+} from "./season/EventPackage";
 import { generateEmblemSvg } from "../identity/IdentityEmblems";
 import {
   AgentIdentityView,
@@ -578,6 +582,15 @@ async function writeCoworldLeagueSiteUnlocked(
   const featuredMatchStore = await readFeaturedMatchStore(
     resolveFeaturedMatchStateRoot(),
   );
+  // Season Zero activation prompt Phase 4: event packages are operator-
+  // authored per-`FeaturedMatch` completeness records (`premiere:package`
+  // CLI) — same "operator-maintained, out-of-band, missing store means
+  // nothing generated yet" contract as `featuredMatchStore` above; a
+  // corrupt store still throws loudly (same `EventPackage.ts` read
+  // contract as `readFeaturedMatchStore`).
+  const eventPackageStore = await readEventPackageStore(
+    resolveEventPackageStateRoot(),
+  );
   // Product overhaul spec Stage 6: best-effort, tolerant of absence (the
   // stats batch job runs on its own periodic cadence — see
   // `compute-agent-stats.ts`'s own doc for why this must never be a
@@ -625,6 +638,7 @@ async function writeCoworldLeagueSiteUnlocked(
     featuredMatchStore,
     statsArtifact,
     standingsHistory,
+    eventPackageStore,
   );
   await writeFileAtomic(clientPath, coworldLeagueClientJavaScript());
   await writeFileAtomic(indexPath, coworldLeagueIndexHtml(data, identity));

@@ -1,0 +1,216 @@
+import { promises as fs } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  readFeaturedMatchStore,
+  resolveFeaturedMatchStateRoot,
+  type FeaturedMatch,
+} from "../server/agents/FeaturedMatch";
+import {
+  findEventPackage,
+  readEventPackageStore,
+  resolveEventPackageStateRoot,
+  upsertEventPackage,
+  type EventPackage,
+} from "../server/agents/season/EventPackage";
+import {
+  isFeaturedEventRevealed,
+  isPubliclyPromotable,
+} from "../server/agents/season/EventPackageGate";
+import { findUnreferencedProseClaims } from "../server/agents/season/EventPackageProseClaims";
+import { buildReasonToWatchClaims } from "../server/agents/season/CandidateReasonToWatch";
+import { derivePremiereId } from "../server/replay-premiere/ReplayPremiereLoopCore";
+import {
+  loadIdentityRegistrySnapshot,
+  type IdentityRegistrySnapshot,
+} from "../server/identity/IdentityRegistry";
+import type { CoworldLeagueMirrorData } from "../server/agents/CoworldLeagueSiteWriter";
+import { resolveDefaultArtifactsRoot } from "./premiere-candidates";
+import { parseValueArg } from "./season-lib";
+
+/**
+ * `premiere:package --featured=<feat_id> [--title=] [--subtitle=]
+ * [--editorial-notes=] [--embargo=embargoed|revealed] [--validate] [--json]`
+ * — Season Zero activation prompt Phase 4 item 4 ("Event package"):
+ * "interactive-free generation of the full EventPackage draft" from real
+ * evidence, with operator-editable prose layered on top.
+ *
+ * Every run REGENERATES the structured/evidence fields (claims,
+ * map/format, canonical URLs, Director Cut estimate, embargo default)
+ * fresh from the current `FeaturedMatch`/mirror/identity state — these
+ * are never operator-authored, so there is nothing to preserve. Operator
+ * prose (`title`/`subtitle`/`editorialNotes`) is PRESERVED across runs
+ * unless the matching `--flag=` is passed this time, so re-running this
+ * command to refresh evidence never silently discards an operator's
+ * hand-written subtitle.
+ *
+ * `--validate` skips regeneration entirely and just re-runs
+ * `isPubliclyPromotable`/`findUnreferencedProseClaims` against whatever
+ * package already exists — the read-only half of `premiere:validate`'s
+ * own split, applied to the package layer instead of the schedule layer.
+ */
+
+function canonicalMatchUrl(match: FeaturedMatch): string {
+  return `/match/${match.matchId}`;
+}
+
+function canonicalPremiereUrl(match: FeaturedMatch): string | null {
+  if (match.lane !== "premiere" || match.episodeRequestId === null) return null;
+  return `/premiere/${derivePremiereId(match.episodeRequestId)}`;
+}
+
+/** Mirrors `feature-candidates.ts`'s own tolerant-read contract: a missing/malformed live mirror is a normal "no evidence yet" state, never a crash. */
+async function readLiveMirrorData(artifactsRoot: string): Promise<CoworldLeagueMirrorData | null> {
+  const dataPath = path.join(artifactsRoot, "ai-league-runs", "league", "data.json");
+  try {
+    const raw = await fs.readFile(dataPath, "utf8");
+    const value: unknown = JSON.parse(raw);
+    if (typeof value !== "object" || value === null || !("episodes" in value) || !Array.isArray(value.episodes)) {
+      return null;
+    }
+    return value as CoworldLeagueMirrorData;
+  } catch {
+    return null;
+  }
+}
+
+function directorCutEstimateSeconds(
+  match: FeaturedMatch,
+  mirror: CoworldLeagueMirrorData | null,
+): number | null {
+  if (match.episodeRequestId === null || mirror === null) return null;
+  const episode = mirror.episodes.find((row) => row.episodeRequestId === match.episodeRequestId);
+  return episode?.directorCut?.durationEstimateSeconds ?? null;
+}
+
+function defaultSubtitle(match: FeaturedMatch): string {
+  return `${match.map} — ${match.format}`;
+}
+
+export interface BuildEventPackageDraftOptions {
+  titleOverride?: string;
+  subtitleOverride?: string;
+  editorialNotesOverride?: string;
+  embargoOverride?: "embargoed" | "revealed";
+}
+
+export function buildEventPackageDraft(
+  match: FeaturedMatch,
+  existing: EventPackage | null,
+  identity: IdentityRegistrySnapshot,
+  mirror: CoworldLeagueMirrorData | null,
+  now: string,
+  options: BuildEventPackageDraftOptions = {},
+): EventPackage {
+  const claims = buildReasonToWatchClaims(
+    match.participants,
+    match.map,
+    identity,
+    mirror?.standings ?? [],
+    mirror?.episodes ?? [],
+    new Date(now),
+  );
+  const draft: EventPackage = {
+    schemaVersion: 1,
+    featuredMatchId: match.matchId,
+    title: options.titleOverride ?? existing?.title ?? match.title,
+    subtitle: options.subtitleOverride ?? existing?.subtitle ?? defaultSubtitle(match),
+    reasonToWatch: { claims },
+    mapLabel: match.map,
+    format: match.format,
+    scheduledAt: match.scheduledAt,
+    directorCutEstimateSeconds: directorCutEstimateSeconds(match, mirror),
+    canonicalMatchUrl: canonicalMatchUrl(match),
+    canonicalPremiereUrl: canonicalPremiereUrl(match),
+    embargoState:
+      options.embargoOverride ?? existing?.embargoState ?? (isFeaturedEventRevealed(match) ? "revealed" : "embargoed"),
+    editorialNotes: options.editorialNotesOverride ?? existing?.editorialNotes ?? "",
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+  };
+  return draft;
+}
+
+function printCompleteness(match: FeaturedMatch, pkg: EventPackage, identity: IdentityRegistrySnapshot): void {
+  const gate = isPubliclyPromotable(match, pkg);
+  console.log(`isPubliclyPromotable: ${gate.ok}`);
+  if (!gate.ok) {
+    console.log("missing:");
+    for (const reason of gate.missing) console.log(`  - ${reason}`);
+  }
+  const prose = [pkg.title, pkg.subtitle, pkg.editorialNotes].join("\n");
+  const warnings = findUnreferencedProseClaims(
+    prose,
+    pkg.reasonToWatch.claims,
+    identity.agents.map((agent) => agent.displayName),
+  );
+  if (warnings.length > 0) {
+    console.log("prose warnings (not blocking):");
+    for (const warning of warnings) console.log(`  - ${warning}`);
+  }
+}
+
+async function main(): Promise<void> {
+  const argv = process.argv.slice(2);
+  const featuredMatchId = parseValueArg(argv, "--featured=");
+  if (featuredMatchId === undefined) {
+    console.error("usage: premiere:package --featured=<feat_id> [--title=] [--subtitle=] [--editorial-notes=] [--embargo=embargoed|revealed] [--validate] [--json]");
+    process.exitCode = 1;
+    return;
+  }
+
+  const featuredMatchStateRoot = resolveFeaturedMatchStateRoot();
+  const featuredMatchStore = await readFeaturedMatchStore(featuredMatchStateRoot);
+  const match = featuredMatchStore.matches.find((entry) => entry.matchId === featuredMatchId);
+  if (match === undefined) {
+    console.error(`featured match not found in store: ${featuredMatchId}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const eventPackageStateRoot = resolveEventPackageStateRoot();
+  const eventPackageStore = await readEventPackageStore(eventPackageStateRoot);
+  const existing = findEventPackage(eventPackageStore, featuredMatchId);
+
+  const identity = await loadIdentityRegistrySnapshot().catch(
+    (): IdentityRegistrySnapshot => ({ builders: [], agents: [], versions: [] }),
+  );
+
+  if (argv.includes("--validate")) {
+    if (existing === null) {
+      console.error(`no event package exists yet for ${featuredMatchId} — run premiere:package without --validate first`);
+      process.exitCode = 1;
+      return;
+    }
+    printCompleteness(match, existing, identity);
+    if (!isPubliclyPromotable(match, existing).ok) process.exitCode = 1;
+    return;
+  }
+
+  const artifactsRoot = resolveDefaultArtifactsRoot();
+  const mirror = await readLiveMirrorData(artifactsRoot);
+  const draft = buildEventPackageDraft(match, existing, identity, mirror, new Date().toISOString(), {
+    titleOverride: parseValueArg(argv, "--title="),
+    subtitleOverride: parseValueArg(argv, "--subtitle="),
+    editorialNotesOverride: parseValueArg(argv, "--editorial-notes="),
+    embargoOverride: parseValueArg(argv, "--embargo=") as "embargoed" | "revealed" | undefined,
+  });
+  await upsertEventPackage(eventPackageStateRoot, draft);
+
+  if (argv.includes("--json")) {
+    console.log(JSON.stringify(draft, null, 2));
+  } else {
+    console.log(`event package saved for ${featuredMatchId}`);
+  }
+  printCompleteness(match, draft, identity);
+}
+
+const isMainModule =
+  process.argv[1] !== undefined &&
+  path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
+if (isMainModule) {
+  main().catch((error: unknown) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}

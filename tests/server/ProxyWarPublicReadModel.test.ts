@@ -8,6 +8,7 @@ import {
   type FeaturedMatch,
   type FeaturedMatchStoreFile,
 } from "../../src/server/agents/FeaturedMatch";
+import type { EventPackage, EventPackageStoreFile } from "../../src/server/agents/season/EventPackage";
 
 function agent(overrides: Partial<AgentProfile> = {}): AgentProfile {
   return {
@@ -306,6 +307,7 @@ describe("buildProxyWarPublicReadModel", () => {
       revealAt: "2026-07-31T01:00:00.000Z",
       postMatchSummary: null,
       result: null,
+      isPubliclyPromotable: false,
     });
     // The participant's own player name must never reach the wire through this projection.
     expect(JSON.stringify(model.featuredMatches)).not.toContain("daveey");
@@ -394,6 +396,103 @@ describe("buildProxyWarPublicReadModel", () => {
   test("an empty featured match store still yields an empty (never fabricated) featuredMatches array", () => {
     const model = buildProxyWarPublicReadModel(baseMirror(), identitySnapshot(), featuredMatchStoreOf());
     expect(model.featuredMatches).toEqual([]);
+  });
+
+  describe("isPubliclyPromotable (Season Zero Phase 4 gate wiring)", () => {
+    function completePackage(overrides: Partial<EventPackage> = {}): EventPackage {
+      return {
+        schemaVersion: 1,
+        featuredMatchId: "feat_3333333333333333eeee",
+        title: "Round 100: Pangaea",
+        subtitle: "A tense four-way standoff",
+        reasonToWatch: {
+          claims: [
+            { text: "daveey enters ranked #1.", source: "standings_rank", reference: "standings:daveey:rank=1" },
+          ],
+        },
+        mapLabel: "Pangaea",
+        format: "4p FFA",
+        scheduledAt: "2026-07-31T00:10:00.000Z",
+        directorCutEstimateSeconds: 420,
+        canonicalMatchUrl: "/match/feat_3333333333333333eeee",
+        canonicalPremiereUrl: "/premiere/abc123",
+        embargoState: "embargoed",
+        editorialNotes: "",
+        createdAt: "2026-07-31T00:00:00.000Z",
+        updatedAt: "2026-07-31T00:00:00.000Z",
+        ...overrides,
+      };
+    }
+    function packageStoreOf(...packages: EventPackage[]): EventPackageStoreFile {
+      return { schemaVersion: 1, packages };
+    }
+
+    test("a package-less premiere-lane record is DEMOTED — isPubliclyPromotable is false with no package store passed at all", () => {
+      const record = featuredMatch({ matchId: "feat_3333333333333333eeee", state: "scheduled" });
+      const model = buildProxyWarPublicReadModel(baseMirror(), identitySnapshot(), featuredMatchStoreOf(record));
+      expect(model.featuredMatches[0]?.isPubliclyPromotable).toBe(false);
+    });
+
+    test("a package-less premiere-lane record is DEMOTED even when an (empty) event package store is explicitly passed", () => {
+      const record = featuredMatch({ matchId: "feat_3333333333333333eeee", state: "scheduled" });
+      const model = buildProxyWarPublicReadModel(
+        baseMirror(),
+        identitySnapshot(),
+        featuredMatchStoreOf(record),
+        null,
+        undefined,
+        packageStoreOf(),
+      );
+      expect(model.featuredMatches[0]?.isPubliclyPromotable).toBe(false);
+    });
+
+    test("a record with a complete backing EventPackage and fully-resolved participants is promotable", () => {
+      const record = featuredMatch({
+        matchId: "feat_3333333333333333eeee",
+        state: "scheduled",
+        episodeRequestId: "ereq_x",
+        participants: [
+          { playerName: "daveey", agentId: "agt_daveey", agentVersionId: "agtv_daveey_v1", builderId: null },
+        ],
+      });
+      const model = buildProxyWarPublicReadModel(
+        baseMirror(),
+        identitySnapshot(),
+        featuredMatchStoreOf(record),
+        null,
+        undefined,
+        packageStoreOf(completePackage()),
+      );
+      expect(model.featuredMatches[0]?.isPubliclyPromotable).toBe(true);
+    });
+
+    test("a record with an EventPackage that is missing the reason-to-watch claims stays demoted", () => {
+      const record = featuredMatch({
+        matchId: "feat_3333333333333333eeee",
+        state: "scheduled",
+        episodeRequestId: "ereq_x",
+        participants: [
+          { playerName: "daveey", agentId: "agt_daveey", agentVersionId: "agtv_daveey_v1", builderId: null },
+        ],
+      });
+      const model = buildProxyWarPublicReadModel(
+        baseMirror(),
+        identitySnapshot(),
+        featuredMatchStoreOf(record),
+        null,
+        undefined,
+        packageStoreOf(completePackage({ reasonToWatch: { claims: [] } })),
+      );
+      expect(model.featuredMatches[0]?.isPubliclyPromotable).toBe(false);
+    });
+
+    test("an anonymous System-B-style record (still reachable, but never a package) never reports promotable across every non-candidate state", () => {
+      for (const state of ["scheduled", "published", "revealed", "archived"] as const) {
+        const record = featuredMatch({ matchId: "feat_3333333333333333eeee", state });
+        const model = buildProxyWarPublicReadModel(baseMirror(), identitySnapshot(), featuredMatchStoreOf(record));
+        expect(model.featuredMatches[0]?.isPubliclyPromotable).toBe(false);
+      }
+    });
   });
 
   test("premieres.live reflects an active premiere card and suppresses latest", () => {

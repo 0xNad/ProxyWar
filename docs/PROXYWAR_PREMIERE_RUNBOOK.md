@@ -544,6 +544,154 @@ subsystem is off by default in the public/league-showcase deployment via
 `PROXYWAR_WAGERING_ENABLED` (absent by default) — is covered in
 `docs/PROXYWAR_BETA_RELEASE_CHECKLIST.md`; this doc does not restate it.
 
+## 8. Season Zero programme (model + gate layer)
+
+Season Zero activation prompt Phase 4. This is the **editorial programme
+layer** on top of everything in §1–§7: a Season is a bounded, titled
+window of the ordinary premiere/archive lifecycle above — never a second
+rating system, never a points table. The official Coworld standings
+remain the one competitive truth; a Season only REFERENCES snapshots of
+it (`CoworldLeagueStandingsHistory.ts`), never copies scores.
+
+### 8.1 Season registry
+
+`src/server/agents/season/SeasonSchemas.ts` + `SeasonRegistry.ts`. Tracked,
+git-reviewed JSON at `resources/season/seasons.json`
+(`PROXYWAR_SEASON_REGISTRY_DIR` overrides the directory) — the **same**
+storage pattern `src/server/identity/*` uses for Builders/Agents/Versions,
+deliberately **not** `FeaturedMatch.ts`'s locked operational store: a
+Season is rare, operator-authored editorial content (draft → active →
+completed, once per programme cycle) with no automatic runtime writer
+ever touching it, unlike `featured-matches.json`, which a demo server
+route and several CLIs mutate continuously from separate OS processes.
+
+A Season carries: id/slug, title, description, `startDate`/`endDate`,
+`state` (`draft` | `active` | `completed`, forward-only, one active
+season at a time), `eventSlots` (REFERENCES to `FeaturedMatch` ids +
+the programme's own scheduled time), `archiveFeaturedMatchIds`
+(archive-lane references), and `standingsSnapshotRefs` (references into
+the standings-history store by `snapshotGeneratedAt`). No points field
+exists anywhere on this type.
+
+```bash
+npm run season:create -- --slug=zero --title="Season Zero" --start=2026-08-01 --end=2026-09-26 --description="..."
+npm run season:activate -- --season=season_zero
+npm run season:add-event -- --season=season_zero --featured=<feat_id> --scheduled-at=<ISO>
+npm run season:add-event -- --season=season_zero --featured=<feat_id> --archive
+npm run season:add-event -- --season=season_zero --standings-snapshot=<snapshotGeneratedAtISO> --label="season open"
+npm run season:status -- --season=season_zero
+npm run season:complete -- --season=season_zero
+```
+
+### 8.2 The "no anonymous public Premiere" gate
+
+`src/server/agents/season/EventPackage.ts` (schema + locked store,
+`event-packages.json`, same physical state root as `featured-matches.json`
+by default) + `EventPackageGate.ts`. An `EventPackage` is the typed,
+operator-generated completeness record layered on top of one
+`FeaturedMatch`: title, subtitle, evidence-backed reason-to-watch
+(`claims[]`), map/format, schedule, Director Cut estimate, canonical
+`/match/:matchId` and `/premiere/:premiereId` URLs, and an embargo
+checklist.
+
+`isPubliclyPromotable(featuredMatch, package): { ok, missing[] }` is
+**the single authority** every public promotion surface (hero, watch
+programme, schedule) must consult before treating a record as a
+promoted Featured Event. It is wired into `ProxyWarPublicReadModel.ts`'s
+projection now: every `PublicFeaturedMatch` carries
+`isPubliclyPromotable: boolean`. A record fails the gate (and is
+demoted to ordinary archive presentation, never removed) when it is
+missing ANY of: a package at all, title/subtitle, at least one
+reason-to-watch claim, a canonical episode reference (premiere lane),
+full participant identity + exact version resolution for every seat, map
+or format, a scheduled time (premiere lane), a Director Cut estimate, a
+canonical match URL, a canonical premiere URL (premiere lane), or a
+self-consistent embargo state.
+
+**System B's continuous, anonymous premieres (§1.5) never generate an
+`EventPackage` and therefore never pass this gate.** They keep running
+and stay reachable at their own direct `/premiere/:id` URL — honest
+content — but the projection reports `isPubliclyPromotable: false` for
+them, which is the signal the (later-phase) client hero/watch/schedule
+surfaces must check before ever promoting a record as the flagship
+event. The client redesign that consumes this signal is a later pass;
+this phase only guarantees the server never claims a package-less
+premiere is complete.
+
+### 8.3 Evidence-backed reason-to-watch claims
+
+`src/server/agents/season/CandidateReasonToWatch.ts`'s
+`buildReasonToWatchClaims` emits `EventPackageClaim[]`
+(`{ text, source, reference }`, `source` one of `standings_rank` |
+`version_debut` | `head_to_head` | `recent_form`) — never a generated
+adjective. Every claim's `reference` names the exact registry/mirror data
+it rests on (an `AgentVersion.id` + `firstObservedAt`, a standings rank,
+a set of episode ids). Wired into both ranking CLIs' output
+(`reasonToWatchClaims` field) and into `premiere:package`'s draft
+generation — see §8.4.
+
+`premiere:candidates` never resolves participant identity (§2 table), so
+its `reasonToWatchClaims` is honestly always `[]`. `feature:candidates`
+resolves real participants and standings/episode history, so its claims
+are real: version-debut (an `AgentVersion.firstObservedAt` within the
+last 14 days, paired with the agent's recent-form record across retained
+episodes — attributed to the agent, not the specific prior version,
+since `CoworldLeagueEpisodeRow` has no per-episode version tag), a
+top-8 standings rank, and a head-to-head record between exactly two
+participants (preferring a same-map sample when at least two exist,
+falling back to the all-map sample).
+
+### 8.4 Package generation — `premiere:package`
+
+```bash
+npm run premiere:package -- --featured=<feat_id>                       # generate/refresh + save, print gate result
+npm run premiere:package -- --featured=<feat_id> --title="..." --subtitle="..." --editorial-notes="..."
+npm run premiere:package -- --featured=<feat_id> --embargo=revealed
+npm run premiere:package -- --featured=<feat_id> --validate            # read-only: re-check an existing package
+```
+
+Interactive-free: every run regenerates the structured/evidence fields
+(claims, map/format, canonical URLs, Director Cut estimate, embargo
+default) fresh from the current `FeaturedMatch`/mirror/identity state.
+Operator prose (`title`/`subtitle`/`editorialNotes`) is PRESERVED across
+runs unless the matching `--flag=` is passed, so re-running to refresh
+evidence never clobbers a hand-written subtitle. After every save (and
+on `--validate`), it prints `isPubliclyPromotable` plus any missing
+fields, and separately runs `EventPackageProseClaims.findUnreferencedProseClaims`
+against the prose fields — a conservative, NEVER-blocking check that
+flags (never rejects) a number or known Agent display name mentioned in
+prose with no matching `claims[]` entry backing it.
+
+### 8.5 Weekly programming workflow
+
+Matches the doc's own cadence: **one flagship Featured Event per week**,
+optional midweek highlights from ordinary league matches, continuous
+league activity underneath. Do not schedule more Premieres than the
+audience can support.
+
+1. `npm run premiere:candidates` / `npm run feature:candidates` — pick a
+   candidate with a real reason to watch (§8.3's claims are now visible
+   in the CLI output).
+2. `npm run premiere:schedule -- --episode=<id> --at=<ISO>` (§2.1) to
+   commit the pick into `featured-matches.json`.
+3. `npm run premiere:package -- --featured=<feat_id>` to generate the
+   `EventPackage` draft; edit prose via `--title=`/`--subtitle=`/
+   `--editorial-notes=` and re-run to refresh evidence.
+4. `npm run premiere:package -- --featured=<feat_id> --validate` — confirm
+   `isPubliclyPromotable: true` before treating the event as ready.
+5. `npm run premiere:validate` (§2.1) for the ordinary schedule-integrity
+   check, then `npm run premiere:publish` when it's time to go live.
+6. `npm run season:add-event -- --season=<id> --featured=<feat_id> --scheduled-at=<ISO>`
+   to fold the event into the active Season's programme.
+
+**Never promote a package-less record as the featured hero.** If
+`premiere:package --validate` reports `isPubliclyPromotable: false`,
+the record stays reachable at its own URL but must not be presented as
+the flagship event — fix the missing fields (the exact reasons are
+printed) and re-validate, or fall back to the best recent Director Cut
+per the doc's own "no scheduled Featured Event" guidance (a client-side
+decision, out of this phase's scope).
+
 ## Known gaps
 
 - **`premiere-schedule.ts`'s own module doc comment is stale.** It describes

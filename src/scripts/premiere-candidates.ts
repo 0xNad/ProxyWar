@@ -77,6 +77,18 @@ export interface PremiereQueueCandidate {
   featuredMatch: FeaturedMatch;
   severelyDegraded: boolean;
   degradedReasons: string[];
+  /**
+   * Season Zero activation prompt Phase 4 item 3 ("Candidate evidence
+   * upgrade") — always `[]` for THIS lane: `buildReasonToWatchClaims`
+   * (`CandidateReasonToWatch.ts`) needs resolved participant identity to
+   * emit anything, and this lane's `featuredMatch.participants` is always
+   * `[]` (see `buildFeaturedMatchDraft`'s own doc — this CLI deliberately
+   * never opens `bundle.source.json`). Kept as a real field (not omitted)
+   * so the sealed lane's output shape matches `feature:candidates`'
+   * `reasonToWatchClaims`, an honest "no evidence available" rather than
+   * a missing key a consumer has to special-case.
+   */
+  reasonToWatchClaims: [];
 }
 
 export interface PremiereQueueRejection {
@@ -344,6 +356,7 @@ export async function rankPremiereCandidates(options: {
       featuredMatch: buildFeaturedMatchDraft(queueItemName, meta, now),
       severelyDegraded: degradedReasons.length > 0,
       degradedReasons,
+      reasonToWatchClaims: [],
     });
   }
 
@@ -432,6 +445,7 @@ async function main(): Promise<void> {
             rank: index + 1,
             severelyDegraded: candidate.severelyDegraded,
             featuredMatch: candidate.featuredMatch,
+            reasonToWatchClaims: candidate.reasonToWatchClaims,
           })),
           rejected: result.rejected,
         },
