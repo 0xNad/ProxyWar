@@ -226,8 +226,32 @@ function finalConfrontationCandidate(
   };
 }
 
+/**
+ * Real-production-data quality pass (Season Zero Phase 2 polish): read as
+ * an editor against ~10 real retained matches, `reversal` candidates were
+ * systematically winning slots over `lead_change`/`territorial_swing`
+ * purely because the opening spawn/expansion phase produces the LARGEST
+ * rank-place swings of any match (a player landing a strong start jumps
+ * from rank 12 to rank 1 in the first few hundred turns almost every
+ * game — big in PLACES, rarely the actual story), while a genuinely
+ * decisive LATE lead change or conquest wave scored lower purely for
+ * having a smaller place-count or share-delta. Two changes: (1)
+ * `lead_change`'s floor/ceiling are raised (70-95, was 60-90) — a
+ * CONFIRMED lead change (already past `computeLeadChanges`'s own margin
+ * + hysteresis filter) is "who is actually winning changed", the single
+ * most decisive fact a match-state series can report, and now
+ * consistently outranks an ordinary early reversal. (2) `reversal` and
+ * `territorial_swing` both gain an explicit RECENCY term
+ * (`turn / series.totalTurns`, 0..1) added on top of their magnitude
+ * term: two swings of the same size no longer score identically — the
+ * one happening later, when standings should be more settled and a big
+ * move is more surprising, outranks the earlier one. `reversal`'s
+ * magnitude term is also stretched (divisor 10 places instead of 8) so
+ * magnitude alone caps lower, leaving room for recency to matter.
+ */
 function candidatesFromSeries(series: MatchStateSeries): Candidate[] {
   const candidates: Candidate[] = [];
+  const totalTurns = series.totalTurns;
 
   for (const change of computeLeadChanges(series)) {
     candidates.push({
@@ -235,12 +259,13 @@ function candidatesFromSeries(series: MatchStateSeries): Candidate[] {
       type: "lead_change",
       headline: `${change.toUsername} overtakes ${change.fromUsername} for the territory lead.`,
       involvedAgents: [change.fromUsername, change.toUsername],
-      importance: Math.round(60 + Math.min(1, change.marginShare / 0.3) * 30),
+      importance: Math.round(70 + Math.min(1, change.marginShare / 0.25) * 25),
     });
   }
 
   for (const reversal of computeMajorReversals(series)) {
     const climbed = reversal.placesChanged > 0;
+    const recency = totalTurns > 0 ? reversal.toTurn / totalTurns : 0;
     candidates.push({
       turn: reversal.toTurn,
       type: "reversal",
@@ -248,7 +273,11 @@ function candidatesFromSeries(series: MatchStateSeries): Candidate[] {
         ? `${reversal.username} claws back to ${ordinalLabel(reversal.toRank)} place from ${ordinalLabel(reversal.fromRank)}.`
         : `${reversal.username} collapses to ${ordinalLabel(reversal.toRank)} place from ${ordinalLabel(reversal.fromRank)}.`,
       involvedAgents: [reversal.username],
-      importance: Math.round(55 + Math.min(1, Math.abs(reversal.placesChanged) / 8) * 30),
+      importance: Math.round(
+        45 +
+          Math.min(1, Math.abs(reversal.placesChanged) / 10) * 25 +
+          recency * 15,
+      ),
     });
   }
 
@@ -264,6 +293,7 @@ function candidatesFromSeries(series: MatchStateSeries): Candidate[] {
 
   for (const swing of computeTerritorialSwings(series)) {
     const expanding = swing.deltaShare > 0;
+    const recency = totalTurns > 0 ? swing.toTurn / totalTurns : 0;
     candidates.push({
       turn: swing.toTurn,
       type: "territorial_swing",
@@ -271,7 +301,9 @@ function candidatesFromSeries(series: MatchStateSeries): Candidate[] {
         ? `${swing.username} seizes ${Math.round(swing.deltaShare * 100)}% of the map's territory in a single wave.`
         : `${swing.username} loses ${Math.round(Math.abs(swing.deltaShare) * 100)}% of the map's territory in a single wave.`,
       involvedAgents: [swing.username],
-      importance: Math.round(50 + Math.min(1, Math.abs(swing.deltaShare) / 0.3) * 25),
+      importance: Math.round(
+        50 + Math.min(1, Math.abs(swing.deltaShare) / 0.25) * 25 + recency * 10,
+      ),
     });
   }
 

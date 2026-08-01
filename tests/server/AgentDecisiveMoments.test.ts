@@ -181,3 +181,123 @@ describe("buildAgentDecisiveMoments", () => {
     expect(artifact).toBeNull();
   });
 });
+
+describe("buildAgentDecisiveMoments — importance rebalance (real-production-data quality pass)", () => {
+  /**
+   * A real-production-data editorial review of ~10 retained matches found
+   * `reversal` candidates from the volatile opening spawn/expansion phase
+   * (huge rank-place swings, small real consequence) systematically
+   * crowding out genuinely decisive `lead_change`/late `territorial_swing`
+   * moments. This fixture reproduces the pattern directly: Alpha leads
+   * early; Bravo overtakes for a large, confirmed, held lead at turn 2000
+   * (the match's real turning point); Charlie has an EARLY 3-place
+   * reversal (rank 3->6, turn 0->1000) AND a LATER 3-place reversal of
+   * the same magnitude climbing back (rank 6->3, turn 1000->8000).
+   */
+  function player(playerID: string, username: string, tilesOwned: number, isAlive = true) {
+    return {
+      agentID: `agent-${playerID}`,
+      clientID: `c-${playerID}`,
+      playerID,
+      username,
+      profile: null,
+      brainType: null,
+      color: "#000",
+      isAlive,
+      hasSpawned: true,
+      tilesOwned,
+      troops: 100,
+      gold: "0",
+      tiles: [],
+      units: [],
+    };
+  }
+  function snapshot(turnNumber: number, players: ReturnType<typeof player>[]): AgentSpectatorSnapshot {
+    return { label: `t${turnNumber}`, turnNumber, tick: turnNumber, phase: "active", decisions: [], players };
+  }
+  function buildFixture() {
+    const snapshots: AgentSpectatorSnapshot[] = [
+      snapshot(0, [
+        player("p1", "Alpha", 30),
+        player("p2", "Bravo", 25),
+        player("p3", "Charlie", 20),
+        player("p4", "Delta", 15),
+        player("p5", "Echo", 10),
+        player("p6", "Foxtrot", 5),
+      ]),
+      snapshot(1000, [
+        player("p1", "Alpha", 32),
+        player("p2", "Bravo", 27),
+        player("p3", "Charlie", 3),
+        player("p4", "Delta", 17),
+        player("p5", "Echo", 12),
+        player("p6", "Foxtrot", 9),
+      ]),
+      snapshot(2000, [
+        player("p1", "Alpha", 20),
+        player("p2", "Bravo", 45),
+        player("p3", "Charlie", 5),
+        player("p4", "Delta", 15),
+        player("p5", "Echo", 10),
+        player("p6", "Foxtrot", 5, false),
+      ]),
+      snapshot(8000, [
+        player("p1", "Alpha", 15),
+        player("p2", "Bravo", 50),
+        player("p3", "Charlie", 10),
+        player("p4", "Delta", 10),
+        player("p5", "Echo", 10),
+        player("p6", "Foxtrot", 0, false),
+      ]),
+      snapshot(10000, [
+        player("p1", "Alpha", 10),
+        player("p2", "Bravo", 55),
+        player("p3", "Charlie", 10),
+        player("p4", "Delta", 10),
+        player("p5", "Echo", 10),
+        player("p6", "Foxtrot", 0, false),
+      ]),
+    ];
+    const series = buildAgentMatchStateSeries({
+      runID: "run-rebalance",
+      matchID: "match-rebalance",
+      replay: { snapshots },
+      telemetry: null,
+    })!;
+    return buildAgentDecisiveMoments({
+      runID: "run-rebalance",
+      series,
+      telemetryEvents: [],
+      totalTurns: series.totalTurns,
+      replaySnapshots: snapshots,
+    });
+  }
+
+  it("selects the confirmed lead change over Charlie's same-magnitude EARLY reversal — the real turning point wins", () => {
+    const artifact = buildFixture();
+    expect(artifact).not.toBeNull();
+    const leadChangeMoment = artifact!.moments.find((m) => m.type === "lead_change");
+    expect(leadChangeMoment).toBeDefined();
+    expect(leadChangeMoment!.turn).toBe(2000);
+    expect(leadChangeMoment!.headline).toBe("Bravo overtakes Alpha for the territory lead.");
+  });
+
+  it("prefers Charlie's LATER reversal (turn 8000, climbing back) over the earlier same-magnitude one (turn 1000, collapsing) once both are candidates", () => {
+    const artifact = buildFixture();
+    expect(artifact).not.toBeNull();
+    const reversalMoment = artifact!.moments.find((m) => m.type === "reversal");
+    expect(reversalMoment).toBeDefined();
+    expect(reversalMoment!.turn).toBe(8000);
+    expect(reversalMoment!.headline).toBe("Charlie claws back to 3rd place from 6th.");
+  });
+
+  it("stays within the 3-5 bound and chronologically ordered even with the rebalanced weights", () => {
+    const artifact = buildFixture();
+    expect(artifact).not.toBeNull();
+    expect(artifact!.moments.length).toBeGreaterThanOrEqual(MIN_DECISIVE_MOMENTS);
+    expect(artifact!.moments.length).toBeLessThanOrEqual(MAX_DECISIVE_MOMENTS);
+    for (let i = 1; i < artifact!.moments.length; i += 1) {
+      expect(artifact!.moments[i].turn).toBeGreaterThanOrEqual(artifact!.moments[i - 1].turn);
+    }
+  });
+});

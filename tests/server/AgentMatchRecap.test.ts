@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildAgentMatchRecap,
+  compressTerminalEliminations,
   type AgentMatchRecapBeat,
 } from "../../src/server/agents/AgentMatchRecap";
 import { buildAgentSpectatorTelemetry } from "../../src/server/agents/AgentSpectatorTelemetry";
@@ -392,6 +393,215 @@ describe("buildAgentMatchRecap", () => {
   });
 });
 
+describe("compressTerminalEliminations", () => {
+  it("compresses 2+ eliminations that all land at the match's final turn into one summary beat", () => {
+    const totalTurns = 5000;
+    const beats: AgentMatchRecapBeat[] = [
+      { turnNumber: totalTurns, kind: "elimination", message: "Alpha is eliminated." },
+      { turnNumber: totalTurns, kind: "elimination", message: "Bravo is eliminated." },
+      { turnNumber: totalTurns, kind: "elimination", message: "Charlie is eliminated." },
+    ];
+    const result = compressTerminalEliminations(beats, totalTurns);
+    expect(result.beats).toEqual([
+      {
+        turnNumber: totalTurns,
+        kind: "elimination",
+        message: "Final turn: 3 agents eliminated as the match ends.",
+      },
+    ]);
+    expect(result.nonTerminalCount).toBe(0);
+  });
+
+  it("leaves a SINGLE final-turn elimination as its own individual beat — no compression needed for one", () => {
+    const totalTurns = 5000;
+    const beats: AgentMatchRecapBeat[] = [
+      { turnNumber: totalTurns, kind: "elimination", message: "Alpha is eliminated." },
+    ];
+    const result = compressTerminalEliminations(beats, totalTurns);
+    expect(result.beats).toEqual(beats);
+    expect(result.nonTerminalCount).toBe(0);
+  });
+
+  it("keeps a genuinely mid-match elimination (turnNumber < totalTurns) individual, never swept into the terminal group", () => {
+    const totalTurns = 5000;
+    const beats: AgentMatchRecapBeat[] = [
+      { turnNumber: 2000, kind: "elimination", message: "Alpha is eliminated." },
+      { turnNumber: totalTurns, kind: "elimination", message: "Bravo is eliminated." },
+      { turnNumber: totalTurns, kind: "elimination", message: "Charlie is eliminated." },
+    ];
+    const result = compressTerminalEliminations(beats, totalTurns);
+    expect(result.beats).toEqual([
+      { turnNumber: 2000, kind: "elimination", message: "Alpha is eliminated." },
+      {
+        turnNumber: totalTurns,
+        kind: "elimination",
+        message: "Final turn: 2 agents eliminated as the match ends.",
+      },
+    ]);
+    expect(result.nonTerminalCount).toBe(1);
+  });
+
+  it("mid-match eliminations that never reach 2 at any single turn are all left individual, unmodified", () => {
+    const totalTurns = 5000;
+    const beats: AgentMatchRecapBeat[] = [
+      { turnNumber: 1000, kind: "elimination", message: "Alpha is eliminated." },
+      { turnNumber: 2000, kind: "elimination", message: "Bravo is eliminated." },
+    ];
+    const result = compressTerminalEliminations(beats, totalTurns);
+    expect(result.beats).toEqual(beats);
+    expect(result.nonTerminalCount).toBe(2);
+  });
+});
+
+describe("buildAgentMatchRecap — terminal elimination compression (real production pattern)", () => {
+  it("a match ending with 8 simultaneous eliminations produces ONE 'Final turn' beat, not eight, and it does not inflate curatedDramaScore", () => {
+    const totalTurns = 29_200;
+    const survivorRecords = [
+      record(1, 100, "s1", "Survivor1", "p-s1", "alliance_request", {
+        recipientID: "p-s2",
+        recipientName: "Survivor2",
+      }),
+      record(2, 101, "s2", "Survivor2", "p-s2", "alliance_request", {
+        recipientID: "p-s1",
+        recipientName: "Survivor1",
+      }),
+    ];
+    const roster = [
+      { agentID: "s1", username: "Survivor1", profile: "diplomatic" as const, clientID: "cs1", brainType: "planner-executor" as const },
+      { agentID: "s2", username: "Survivor2", profile: "diplomatic" as const, clientID: "cs2", brainType: "planner-executor" as const },
+      ...Array.from({ length: 8 }, (_, i) => ({
+        agentID: `x${i + 1}`,
+        username: `Fallen${i + 1}`,
+        profile: "aggressive" as const,
+        clientID: `cx${i + 1}`,
+        brainType: "planner-executor" as const,
+      })),
+    ];
+    const players = roster.map((entry) => ({
+      agentID: entry.agentID,
+      username: entry.username,
+      isAlive: entry.agentID === "s1" || entry.agentID === "s2",
+    }));
+    const telemetry = buildAgentSpectatorTelemetry({
+      runID: "run-mass-elim",
+      records: survivorRecords,
+      roster,
+      finalState: finalState(totalTurns, players),
+    });
+    const recap = buildAgentMatchRecap({
+      runID: "run-mass-elim",
+      telemetry,
+      finalTurnCount: totalTurns,
+      series: null,
+    });
+    expect(recap).not.toBeNull();
+    if (recap === null) return;
+    const eliminationBeats = recap.beats.filter((beat) => beat.kind === "elimination");
+    expect(eliminationBeats).toHaveLength(1);
+    expect(eliminationBeats[0].message).toBe(
+      "Final turn: 8 agents eliminated as the match ends.",
+    );
+    expect(eliminationBeats[0].turnNumber).toBe(totalTurns);
+    // A normal match ending, however many agents fall at once, contributes
+    // ZERO to the drama score — only the one real alliance beat scores here.
+    expect(recap.curatedDramaScore).toBeLessThanOrEqual(8);
+  });
+});
+
+describe("buildAgentMatchRecap — repeat betrayal aggregation", () => {
+  it("aggregates the SAME pair's repeat betrayals after the first (daveey/CYAN triple-break pattern)", () => {
+    const totalTurns = 30_000;
+    const records: AgentDecisionRecord[] = [];
+    let sequence = 0;
+    // Three full form-break cycles between the same unordered pair.
+    const cycles: readonly [number, number][] = [
+      [1000, 1100],
+      [1500, 1600],
+      [2000, 2100],
+    ];
+    for (const [formTurn, breakTurn] of cycles) {
+      sequence += 1;
+      records.push(
+        record(sequence, formTurn, "daveey", "daveey", "p-daveey", "alliance_request", {
+          recipientID: "p-cyan",
+          recipientName: "CYAN",
+        }),
+      );
+      sequence += 1;
+      records.push(
+        record(sequence, formTurn + 1, "cyan", "CYAN", "p-cyan", "alliance_request", {
+          recipientID: "p-daveey",
+          recipientName: "daveey",
+        }),
+      );
+      sequence += 1;
+      records.push(
+        record(sequence, breakTurn, "daveey", "daveey", "p-daveey", "break_alliance", {
+          recipientID: "p-cyan",
+          recipientName: "CYAN",
+        }),
+      );
+    }
+    const roster = [
+      { agentID: "daveey", username: "daveey", profile: "diplomatic" as const, clientID: "cd", brainType: "planner-executor" as const },
+      { agentID: "cyan", username: "CYAN", profile: "diplomatic" as const, clientID: "cc", brainType: "planner-executor" as const },
+    ];
+    const telemetry = buildAgentSpectatorTelemetry({
+      runID: "run-repeat-betrayal",
+      records,
+      roster,
+      finalState: finalState(totalTurns, [
+        { agentID: "daveey", username: "daveey", isAlive: true },
+        { agentID: "cyan", username: "CYAN", isAlive: true },
+      ]),
+    });
+    const recap = buildAgentMatchRecap({
+      runID: "run-repeat-betrayal",
+      telemetry,
+      finalTurnCount: totalTurns,
+      series: null,
+    });
+    expect(recap).not.toBeNull();
+    if (recap === null) return;
+    const betrayalBeats = recap.beats.filter((beat) => beat.kind === "betrayal");
+    // 3 real betrayals -> exactly 2 beats: the first individual, the
+    // 2nd+3rd aggregated into one "again" beat — not 3 near-identical beats.
+    expect(betrayalBeats).toHaveLength(2);
+    expect(betrayalBeats[0].turnNumber).toBe(1100);
+    expect(betrayalBeats[1].turnNumber).toBe(1600);
+    expect(betrayalBeats[1].message).toContain("again");
+    expect(betrayalBeats[1].message).toContain("3rd time");
+    // The raw count is still honestly reported in the summary.
+    expect(recap.summary).toContain("3 betrayals");
+  });
+
+  it("a single betrayal between a pair is left completely unchanged (regression safety)", () => {
+    const totalTurns = 10_000;
+    const records = dramaticRecords(totalTurns);
+    const telemetry = buildAgentSpectatorTelemetry({
+      runID: "run-single-betrayal",
+      records,
+      roster: ROSTER,
+      finalState: finalState(totalTurns, [
+        { agentID: "a1", username: "Atlas", isAlive: true },
+        { agentID: "a2", username: "Blitz", isAlive: true },
+        { agentID: "a3", username: "Cinder", isAlive: false },
+      ]),
+    });
+    const recap = buildAgentMatchRecap({
+      runID: "run-single-betrayal",
+      telemetry,
+      finalTurnCount: totalTurns,
+      series: null,
+    });
+    expect(recap).not.toBeNull();
+    if (recap === null) return;
+    const betrayalBeats = recap.beats.filter((beat) => beat.kind === "betrayal");
+    expect(betrayalBeats).toHaveLength(1);
+    expect(betrayalBeats[0].message).not.toContain("again");
+  });
+});
+
 describe("curatedDramaScore", () => {
   // The discriminating assertion this whole fix exists for: the legacy
   // `AgentDramaReport.dramaScore` saturates at 100 on raw, un-deduped
@@ -523,7 +733,10 @@ describe("curatedDramaScore", () => {
     expect(recap).not.toBeNull();
     if (recap === null) return;
     expect(recap.beats.filter((b) => b.kind === "betrayal").length).toBe(4);
-    expect(recap.beats.filter((b) => b.kind === "elimination").length).toBe(3);
+    // e1/e2/e3 all die at the match's final turn (see
+    // `AgentSpectatorTelemetry.ts`'s `addEliminationEvents`) — compressed
+    // into ONE "Final turn: N agents eliminated" beat, not three.
+    expect(recap.beats.filter((b) => b.kind === "elimination").length).toBe(1);
     expect(recap.beats.some((b) => b.kind === "final_confrontation")).toBe(true);
     expect(recap.curatedDramaScore).toBeGreaterThanOrEqual(90);
     expect(recap.curatedDramaScore).toBeLessThanOrEqual(100);
