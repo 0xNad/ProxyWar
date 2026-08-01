@@ -504,7 +504,15 @@ export class PremiereBettingOverlay extends LitElement {
           </span>
         </div>
         <p class="text-xs text-ink-muted">
-          ${model.mapName} · ${model.matchFormat}
+          ${model.mapName} · ${model.matchFormat}${model.sourceKind ===
+          "controlled_exhibition"
+            ? html` ·
+                <span
+                  class="font-semibold text-caution"
+                  title="House exhibition match — built-in agents keep the demo running between league rounds."
+                  >House exhibition — not a league round</span
+                >`
+            : nothing}
         </p>
       </header>
     `;
@@ -530,8 +538,9 @@ export class PremiereBettingOverlay extends LitElement {
                           .join(" · ")}</span
                       >`
                   : nothing}.
-                Buy shares in whichever one you think wins; the crowd's own
-                trading sets the odds as the match plays out.
+                Buy shares in whichever one you think wins; trading — from
+                visitors and a simulated house crowd — sets the odds as the
+                match plays out.
               </p>
             </div>
             <div class="text-left">
@@ -747,6 +756,15 @@ export class PremiereBettingOverlay extends LitElement {
         <p>
           No house edge: buying then immediately selling the same shares back
           nets exactly 0 cr.
+        </p>
+        <p>
+          Play money only — credits are demo points, not currency, and cannot
+          be cashed out or exchanged for anything.
+        </p>
+        <p>
+          A simulated house crowd trades in this market alongside visitors, so
+          prices keep moving even when few people are online. The points
+          leaderboard ranks real visitors only, never the simulated crowd.
         </p>
       </div>
     `;

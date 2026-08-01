@@ -276,3 +276,37 @@ describe("premiere-betting-overlay trade draft survives poll refreshes and ticke
     el.remove();
   });
 });
+
+describe("premiere-betting-overlay provenance and play-money honesty", () => {
+  it("labels a house exhibition match as not a league round", async () => {
+    const el = mount();
+    el.model = model({
+      state: "scheduled",
+      sourceKind: "controlled_exhibition",
+    });
+    el.market = market(null);
+    await el.updateComplete;
+    expect(el.textContent).toContain("House exhibition — not a league round");
+    el.remove();
+  });
+
+  it("shows no exhibition label for a rated league premiere", async () => {
+    const el = mount();
+    el.model = model({ state: "scheduled", sourceKind: "rated_coworld" });
+    el.market = market(null);
+    await el.updateComplete;
+    expect(el.textContent).not.toContain("House exhibition");
+    el.remove();
+  });
+
+  it("discloses play money and the simulated house crowd in the market facts", async () => {
+    const el = mount();
+    el.model = model({ state: "scheduled" });
+    el.market = market(null);
+    await el.updateComplete;
+    expect(el.textContent).toContain("Play money only");
+    expect(el.textContent).toContain("simulated house crowd");
+    expect(el.textContent).toContain("ranks real visitors only");
+    el.remove();
+  });
+});

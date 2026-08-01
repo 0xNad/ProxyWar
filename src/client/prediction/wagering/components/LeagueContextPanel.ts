@@ -115,13 +115,21 @@ export class PremiereLeagueContextPanel extends LitElement {
   private renderSeat(seat: MarketSeatOption, data: LeagueDataSnapshot) {
     const standing = resolveSeatStanding(data, seat);
     if (standing === null) {
+      // Per RealRoster's contract (see `resolveSeatStanding`), a
+      // `local_manifest` identity is definitively a house exhibition
+      // persona — say so outright rather than implying a league agent
+      // whose standings link is merely missing.
+      const isHousePersona =
+        seat.policyIdentity?.namespace === "local_manifest";
       return html`
         <div class="flex flex-col gap-0.5 rounded-md bg-surface-3 px-2.5 py-2">
           <span class="truncate text-xs font-semibold text-ink"
             >${seat.displayName}</span
           >
           <span class="text-[11px] text-ink-muted"
-            >Not yet linked to league standings.</span
+            >${isHousePersona
+              ? "House exhibition agent — not a league competitor."
+              : "Not yet linked to league standings."}</span
           >
         </div>
       `;

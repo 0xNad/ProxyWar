@@ -185,12 +185,20 @@ describe("premiere-league-context-panel", () => {
           contentSha256: "def",
         },
       },
+      // A verified league identity that simply isn't in standings yet —
+      // must NOT be labeled a house persona.
+      realSeat("newcomer", "newcomer-proxywar:v1"),
     ];
     await el.updateComplete;
     await vi.waitFor(() => {
       expect(el.textContent).toContain("Rank 1");
     });
 
+    // The local_manifest seat is definitively a house exhibition persona;
+    // the unmapped league seat keeps the neutral "not linked" copy.
+    expect(el.textContent).toContain(
+      "House exhibition agent — not a league competitor.",
+    );
     expect(el.textContent).toContain("Not yet linked to league standings.");
   });
 
