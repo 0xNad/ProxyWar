@@ -6,40 +6,73 @@ supersedes any conflicting claim in the uploaded implementation report where thi
 ## Branch state
 
 - Worktree: `/Volumes/ProxyWar Workspace/ProxyWar/worktrees/product-overhaul`,
-  branch `claude/product-overhaul`, HEAD `f7cd6870d`.
-- Divergence from `origin/main`: **327 commits ahead, 0 behind.** `main` has
-  nothing this branch lacks — every file/commit on `main` is already an
-  ancestor of this branch tip. `git log --oneline origin/main..HEAD | wc -l`
-  = 327; `git log --oneline HEAD..origin/main | wc -l` = 0.
-- 5 concurrent sessions shared this worktree during this pass; several
-  sibling commits landed on the branch mid-task (HEAD moved `09aeba224` ->
-  `432e1fbe7` -> `b9d389be0` -> current while this doc was being written).
-  Claims below are pinned to the HEAD above; re-run the commands to refresh.
+  branch `claude/product-overhaul`, final consolidated HEAD `c9a224eea`
+  (pushed to `origin/claude/product-overhaul`, fast-forward, no force).
+- Divergence from `origin/main`: **343 commits ahead, 0 behind** (re-verified
+  at final HEAD). `main` has nothing this branch lacks.
+- 6+ concurrent sessions shared this worktree during this pass (sz-season,
+  sz-analytics, sz-identity, sz-pipeline, plus this stabilize pass and
+  several `reconcile.*` subagents). HEAD moved repeatedly while this doc was
+  being written: `09aeba224` -> `432e1fbe7` -> `b9d389be0` ->
+  `999402eb0`(lint+hygiene) -> `f7cd6870d` -> ... -> `cf5c90fae`(analytics
+  fix 1) -> `6618da9ad`(feature:candidates identity fix, this pass) ->
+  `52a9164cd`(regression test, this pass) -> `c9a224eea`(analytics fix 2,
+  final). All commands below were re-run at the final HEAD before deploy.
 
 ## Deployed state
 
-- `com.proxywar.beta` (launchd, PID live at check time) listens on
-  `127.0.0.1:8788`, cwd `/Users/claude/Documents/proxywar_worktrees/replay-premiere-release-candidate`,
-  whose `git rev-parse HEAD` **matches this branch's tip exactly** at every
-  check performed (confirmed 3 times as HEAD advanced: `09aeba224`, then
-  `b9d389be0`) — i.e. that worktree tracks `claude/product-overhaul` live, not
-  a frozen release-candidate snapshot.
+- `com.proxywar.beta` (launchd) listens on `127.0.0.1:8788`, cwd
+  `/Users/claude/Documents/proxywar_worktrees/replay-premiere-release-candidate`.
+  **Redeployed this pass**: fetched `claude/product-overhaul` into that
+  worktree, `git checkout --detach c9a224eea` (from `b9d389be0`), `npm ci`,
+  `npm exec -- tsc --noEmit` (0 errors), `npm run build-prod` (clean),
+  `launchctl kickstart -k gui/$UID/com.proxywar.beta` (PID `52367` ->
+  `85998`), ready on `:8788` within 1s. `git rev-parse HEAD` in that
+  worktree confirmed `c9a224eea` post-restart, matching the pushed branch
+  tip exactly.
 - `beta.proxywar.xyz` (Cloudflare-fronted) proxies to that process. Routes
-  verified 200 externally: `/`, `/watch`, `/league`, `/build`, `/about`,
-  `/agents`, `/builders`, `/match/<episodeRequestId>`. `/bet` on the league
-  origin returns 503 (no handler) — confirmed no public betting surface on
-  the league line. `bet.proxywar.xyz/bet` (separate origin, port 8792,
-  `com.proxywar.betautocycle`) returns 302, as designed — betting stays off
-  the league surface per the 2026-07-27 standing decision.
+  verified 200 externally post-redeploy: `/`, `/league`,
+  `/match/ereq_717259dd-e723-4097-9505-8b893963892d` (real title: "Captain
+  Underpants Maximum Aura vs PeePee7 +10 more — Pangaea, Round 1119"),
+  `/premiere/prem_89156f725b6402e3cbf79b2a` (200, real premiere page). `/bet`
+  on the league origin returns 503 (no handler) — confirmed no public
+  betting surface on the league line. `bet.proxywar.xyz/bet` (separate
+  origin, port 8792, `com.proxywar.betautocycle`) returns 302, as designed —
+  betting stays off the league surface per the 2026-07-27 standing decision.
+  `com.proxywar.platform` and `com.proxywar.betautocycle` were **not
+  touched** by this pass's restart (platform stayed crashed at `-9` exactly
+  as found; betautocycle's PID `383` unchanged) — league-beta-only, per this
+  task's scope.
+- **Correction to an earlier draft of this doc**: `com.proxywar.league-mirror`'s
+  plist `WorkingDirectory` key reads
+  `.../main-release` (a separate, far older checkout, currently
+  `c35e6be87` before this pass touched it), which looks like the mirror runs
+  from a stale checkout independent of beta. It does not: the plist also
+  sets `PROXYWAR_PROJECT_DIR=.../replay-premiere-release-candidate`, and
+  `start-proxywar-league-mirror.zsh` does `PROJECT_DIR="${PROXYWAR_PROJECT_DIR:-...}"`
+  then `cd "$PROJECT_DIR"` before running `npm run league:mirror` — i.e. the
+  mirror actually runs from the **same** worktree as beta, already updated
+  above; `WorkingDirectory` is launchd's own pre-script cwd and is unused by
+  the script. Verified live: `launchctl kickstart -k
+  gui/$UID/com.proxywar.league-mirror` after the beta redeploy produced a
+  fresh `league-mirror.log` entry at `19:48:01` local
+  (`~/Library/Application Support/ProxyWar/storage/league-mirror.log`)
+  showing the **new** backfill pipeline running end to end on the new code:
+  `match recap re-curated ... (curated 66, 16 recap beat(s))`, three `match
+  state series generated for <runKey> (N sample(s))` lines, `director cut
+  plan generated for <runKey> (spectator-telemetry, 41 segment(s))`, `site
+  updated: .../league/index.html (18 standings, 10 battles)`. (The
+  `main-release` checkout was also fast-forwarded to `c9a224eea` out of an
+  abundance of caution / to restore the "one release SHA" invariant
+  documented as previously-resolved in `known-problems.md`, even though
+  it's confirmed unused by the running mirror process — it is otherwise
+  idle infrastructure and touching it changed no runtime behavior.)
 - Other active launchd services: `com.proxywar.platform` (port 8793, apex
   `proxywar.xyz` account/session origin, wagering off, independent of the
-  league), `com.proxywar.betautocycle` (port 8792, `bet.proxywar.xyz`),
-  `com.proxywar.league-mirror` (5-min interval, serves from
-  `/Users/claude/Documents/proxywar_main/.claude/worktrees/main-release`, a
-  **different, older checkout** than the live beta — mirror-only, does not
-  serve pages), `com.proxywar.premiere-loop`. `com.proxywar.ops-digest` and
-  `com.proxywar.storage-maintenance` are scheduled/on-demand (not
-  continuously listening).
+  league — untouched), `com.proxywar.betautocycle` (port 8792,
+  `bet.proxywar.xyz` — untouched), `com.proxywar.premiere-loop`.
+  `com.proxywar.ops-digest` and `com.proxywar.storage-maintenance` are
+  scheduled/on-demand (not continuously listening).
 - Feature flags observed on the beta env file (non-secret keys only):
   `PROXYWAR_BETA_ENABLED=true`, `PROXYWAR_LEAGUE_WRAPPER_ONLY=true` (serves
   the pre-generated static mirror + `public.html` SPA, not full live-hosting
@@ -220,30 +253,72 @@ procedure for whoever holds push authority:
    and is explicitly operator-gated per `AGENTS.md`. **Not executed here.**
 5. Keep a rollback point: tag `origin/main`'s pre-merge SHA before pushing.
 
-## Validation matrix (this pass)
+## Validation matrix (final consolidated HEAD `c9a224eea`)
+
+Full matrix re-run at final HEAD, after sz-season/sz-analytics/sz-identity
+all landed and the tree was fully clean (`git status --short` empty):
 
 | Check | Result |
 | --- | --- |
 | `npm exec -- tsc --noEmit` | 0 errors |
-| `npm run lint` | 0 errors, 112 warnings (see above) |
+| `npm run lint` | 0 errors, 113 warnings (nullish-coalescing only, see above) |
 | `npm run build-prod` | clean (`tsc --noEmit` + `vite build` both exit 0) |
-| `npm test` (unit, excludes e2e) | 4560 passed, 11 skipped, 3 todo, **3 failed** — see below |
-| `npm run test:e2e` | 23/27 pass directly; live-premiere block gated by clean-checkout requirement in this dirty shared tree, verified separately (140,218ms pass) in an isolated clean clone |
+| `npm test` (unit, excludes e2e) | **4883 passed, 3 todo, 0 failed** (415 + 235 test files, two-stage `vitest` + `vitest tests/server`) |
+| `npm run test:e2e` | 27/27 pass on the clean consolidated tree (`tests/e2e/PublicProductJourneys.e2e.test.ts`, includes the now-real reveal-after-end test) |
 
-`npm test` 3 failures (`ProxyWarPublicReadModel.test.ts`,
-`AnalyticsServerIntegration.test.ts`, and one other analytics case) are in
-files this pass never touched (`ProxyWarPublicReadModel.ts`, the analytics
-subsystem) and were unstaged-modified by concurrent sibling sessions
-(`reconcile.ReadModelHeroIntegration`, `reconcile.DashboardAuthScout`, and
-the analytics-focused sessions per the live roster) at the moment this suite
-ran. Not this pass's regression — reported, not fixed, per this task's
-explicit file-ownership boundary.
+The 3 unit-test failures reported earlier in this pass
+(`ProxyWarPublicReadModel.test.ts`, 2 analytics cases) were transient —
+concurrent sibling sessions' in-flight uncommitted edits at the moment of
+that earlier run, not a real regression. Re-run at this final, fully-landed
+HEAD: all green, confirming that diagnosis.
+
+A genuine bug was found and fixed during this final consolidation pass
+(commits `6618da9ad` + `52a9164cd`, both this session, both zero-error/zero-warning-added on their own files): `feature:candidates` (the
+CLI that ranks archive-lane Featured Event candidates) hardcoded
+`agentId: null, agentVersionId: null` for every participant in every
+candidate it has ever produced, because `CoworldLeagueSiteWriter.ts`'s
+per-episode player rows carry no policy-label fields (only the
+standings table does) and the call site never threaded standings through.
+Concretely this means **`isPubliclyPromotable` (`EventPackageGate.ts`)
+would have rejected every single archive-lane candidate** the moment an
+operator tried to promote one, since it requires every participant's
+identity fully resolved — a real, previously-invisible blocker on Season
+Zero's archive-lane promotion path (the queue's currently-`archive`-lane
+candidates are 253/253 ranked but all synthetically produced 100%
+`unmapped` fields before the fix). Fixed by threading the mirror's live
+`standings` array (already loaded for the same request) into
+`buildParticipants()` so it looks up each player's *current* rating/champion
+policy label by name, falling back to `null` only for players with no
+registered `AgentProfile` at all (never fabricated). Verified against real
+production data (`PROXYWAR_ARTIFACTS_ROOT` pointed at
+`/Users/claude/Documents/proxywar_main/artifacts`): before the fix, 0/12
+participants across the top-10 ranked candidates resolved an
+`agentVersionId`; after, 11/12 resolve correctly (the 12th, "James Botts",
+has no registered `AgentProfile` — a genuine identity gap, not a bug).
+Added a regression test
+(`tests/scripts/feature-candidates.test.ts`, "resolves each participant's
+CURRENT agentVersionId from live standings, never fabricates one for an
+unmapped player") against the real, committed `resources/identity/`
+registry data — 9/9 tests pass in that file, 4883/4883 unit tests pass
+repo-wide with the fix in.
 
 ## Deploy state
 
-Beta already serves this branch's tip live (confirmed above — the serving
-worktree tracks `claude/product-overhaul` directly; no separate deploy step
-exists). No redeploy was required: the lint fix, reveal-after-end test fix,
-and branch-hygiene removal are non-runtime or a confirmed no-op revert (the
-temporary debug instrumentation). Post-deploy smoke covered above. Rollback
-point: HEAD before this pass was `09aeba224`.
+**Redeployed this pass** to the final consolidated HEAD (see "Deployed
+state" above for the full restart/verification trail). Sequence:
+`git push origin claude/product-overhaul` (fast-forward,
+`b9d389be0..c9a224eea`, no force) -> fetch + `git checkout --detach
+c9a224eea` in the release-candidate worktree -> `npm ci` -> `tsc --noEmit`
+(0 errors) -> `build-prod` (clean) -> `launchctl kickstart -k
+gui/$UID/com.proxywar.beta` -> ready on `:8788` in <1s -> `launchctl
+kickstart -k gui/$UID/com.proxywar.league-mirror` (fresh log confirms the
+full new backfill pipeline ran: recap re-curation, match-state-series x3,
+director-cut plan, site regeneration). Post-deploy smoke: homepage (200),
+`/league` (200), a real match page (200, correct title), a real premiere
+page (200, real content) — all against `https://beta.proxywar.xyz`
+externally. `com.proxywar.platform` and `com.proxywar.betautocycle` were
+not restarted (league-beta-only scope, per task). Rollback point: the
+release-candidate worktree's pre-redeploy HEAD was `b9d389be0`
+(PID `52367`, healthy at the time); to roll back, `git checkout --detach
+b9d389be0` in that worktree, `npm ci && npm run build-prod`, then
+`launchctl kickstart -k gui/$UID/com.proxywar.beta` again.
