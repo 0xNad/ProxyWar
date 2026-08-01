@@ -285,23 +285,41 @@ function curateWarRoomBeats(events: readonly SpectatorEvent[]): CuratedWarRoomBe
  * recap beats, so it is only ever as inflated as what a reader actually
  * SEES in the recap.
  *
- * Weights mirror `AgentDramaReport.dramaScore`'s recognizable shape
- * (betrayals heaviest, then eliminations, then alliances, lightest-weight
- * signal last) but every input here is a DISTINCT, already-deduped count:
+ * Weights mirror `AgentDramaReport.dramaScore`'s recognizable per-unit
+ * order (betrayals heaviest, then eliminations, then alliances, first
+ * strikes lightest) but every input here is a DISTINCT, already-deduped
+ * count, AND every category is capped BEFORE weighting — calibrated
+ *2026-08-01 against a live sample of real 12-player league matches after
+ * the uncapped version was caught saturating ~100% of them at the 100
+ * ceiling (not just the churn-affected ones): in this game's standard
+ * free-for-all format, first-strike-pair counts (30-60+, one nearly every
+ * player fights someone by match end) and elimination counts (5-10 of 11
+ * possible losers) are close to a STRUCTURAL CONSTANT of any match played
+ * to completion, not a drama signal — an uncapped weight on either
+ * mechanically saturates almost every real match regardless of how
+ * politically eventful it was, which is the exact universal-100 failure
+ * this fix exists to avoid. Capping each category turns "eliminations"
+ * and "first strikes" into a small, near-constant baseline (as legacy's
+ * own `min(communicationCount, 20) * 0.5` treats communication events)
+ * while `betrayals`/`alliances` — genuinely rare and variable in the
+ * sampled data (0-6 per match) — stay the real discriminators:
  *
  *   - betrayals: every individual betrayal beat, never aggregated away
- *     (`curated.betrayalBeats.length`) x 20 — the single most decisive
- *     "this actually happened" political signal.
- *   - eliminations: `curated.eliminationBeats.length` x 14 — a match's
- *     hardest outcome-anchored beat.
+ *     (`curated.betrayalBeats.length`, capped at 4) x 20 — the single
+ *     most decisive "this actually happened" political signal.
+ *   - eliminations: `curated.eliminationBeats.length`, capped at 4, x 10
+ *     — a real outcome, but ordinary for a completed free-for-all, so
+ *     capped low rather than left to reward every match equally hard.
  *   - alliances: DISTINCT unordered pairs, one beat per pair no matter how
  *     many times they re-request (`curated.allianceBeats.length` — the
  *     exact aggregation `curateWarRoomBeats` already performs for the
- *     recap itself) x 9 — this is the direct fix for the churn-saturation
- *     bug: 37 re-formations between one pair score the SAME as 1.
+ *     recap itself), capped at 4, x 8 — the direct fix for the
+ *     churn-saturation bug: 37 re-formations between one pair score the
+ *     SAME as 1.
  *   - first strikes: DISTINCT ordered actor/target pairs, already deduped
- *     one-per-pair at capture time (`curated.firstStrikeBeats.length`) x 3.
- *   - final confrontation: +12 flat when the endgame window produced a
+ *     one-per-pair at capture time (`curated.firstStrikeBeats.length`),
+ *     capped at 10, x 1 — a minor garnish signal only.
+ *   - final confrontation: +8 flat when the endgame window produced a
  *     genuine attack/nuke beat (0/1, never a count).
  *
  * Summed, then capped to [0, 100]. Pure and deterministic — same curated
@@ -313,27 +331,36 @@ function curateWarRoomBeats(events: readonly SpectatorEvent[]): CuratedWarRoomBe
  */
 const CURATED_DRAMA_WEIGHTS = {
   betrayal: 20,
-  elimination: 14,
-  alliancePair: 9,
-  firstStrikePair: 3,
-  finalConfrontation: 12,
+  betrayalCap: 4,
+  elimination: 10,
+  eliminationCap: 4,
+  alliancePair: 8,
+  alliancePairCap: 4,
+  firstStrikePair: 1,
+  firstStrikePairCap: 10,
+  finalConfrontation: 8,
 } as const;
 
 export const CURATED_DRAMA_SCORE_METHODOLOGY =
-  `betrayal beats x${CURATED_DRAMA_WEIGHTS.betrayal} + elimination beats x${CURATED_DRAMA_WEIGHTS.elimination} + ` +
-  `distinct alliance pairs x${CURATED_DRAMA_WEIGHTS.alliancePair} (same-pair re-formations aggregate into one pair, never scored per re-request) + ` +
-  `distinct first-strike pairs x${CURATED_DRAMA_WEIGHTS.firstStrikePair} + ${CURATED_DRAMA_WEIGHTS.finalConfrontation} if the match ended on a genuine final clash beat; ` +
-  `summed and capped to [0, 100] — computed from the same deduped War Room beats this recap shows, never from raw un-deduped event counts`;
+  `min(betrayal beats, ${CURATED_DRAMA_WEIGHTS.betrayalCap}) x${CURATED_DRAMA_WEIGHTS.betrayal} + ` +
+  `min(elimination beats, ${CURATED_DRAMA_WEIGHTS.eliminationCap}) x${CURATED_DRAMA_WEIGHTS.elimination} + ` +
+  `min(distinct alliance pairs, ${CURATED_DRAMA_WEIGHTS.alliancePairCap}) x${CURATED_DRAMA_WEIGHTS.alliancePair} (same-pair re-formations aggregate into one pair, never scored per re-request) + ` +
+  `min(distinct first-strike pairs, ${CURATED_DRAMA_WEIGHTS.firstStrikePairCap}) x${CURATED_DRAMA_WEIGHTS.firstStrikePair} + ${CURATED_DRAMA_WEIGHTS.finalConfrontation} if the match ended on a genuine final clash beat; ` +
+  `summed and capped to [0, 100] — computed from the same deduped War Room beats this recap shows, never from raw un-deduped event counts, with each category capped before weighting so a structurally-large-but-ordinary count (e.g. first strikes/eliminations in a completed free-for-all) cannot alone saturate the score`;
 
 function computeCuratedDramaScore(
   curated: CuratedWarRoomBeats,
   hasFinalConfrontation: boolean,
 ): number {
   const raw =
-    curated.betrayalBeats.length * CURATED_DRAMA_WEIGHTS.betrayal +
-    curated.eliminationBeats.length * CURATED_DRAMA_WEIGHTS.elimination +
-    curated.allianceBeats.length * CURATED_DRAMA_WEIGHTS.alliancePair +
-    curated.firstStrikeBeats.length * CURATED_DRAMA_WEIGHTS.firstStrikePair +
+    Math.min(curated.betrayalBeats.length, CURATED_DRAMA_WEIGHTS.betrayalCap) *
+      CURATED_DRAMA_WEIGHTS.betrayal +
+    Math.min(curated.eliminationBeats.length, CURATED_DRAMA_WEIGHTS.eliminationCap) *
+      CURATED_DRAMA_WEIGHTS.elimination +
+    Math.min(curated.allianceBeats.length, CURATED_DRAMA_WEIGHTS.alliancePairCap) *
+      CURATED_DRAMA_WEIGHTS.alliancePair +
+    Math.min(curated.firstStrikeBeats.length, CURATED_DRAMA_WEIGHTS.firstStrikePairCap) *
+      CURATED_DRAMA_WEIGHTS.firstStrikePair +
     (hasFinalConfrontation ? CURATED_DRAMA_WEIGHTS.finalConfrontation : 0);
   return Math.min(100, Math.round(raw));
 }
