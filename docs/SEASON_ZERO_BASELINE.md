@@ -322,3 +322,172 @@ release-candidate worktree's pre-redeploy HEAD was `b9d389be0`
 (PID `52367`, healthy at the time); to roll back, `git checkout --detach
 b9d389be0` in that worktree, `npm ci && npm run build-prod`, then
 `launchctl kickstart -k gui/$UID/com.proxywar.beta` again.
+
+## Addendum — Season Zero Activation (same pass, follow-up turn)
+
+Executed after the Phase 0/1 report above. Final HEAD for this addendum:
+`66e9403db` (pushed, deployed onto the beta-serving worktree, verified live
+externally). No `src/` code changed in this addendum — only operational CLI
+state (`resources/season/seasons.json`, tracked) and two docs files.
+
+### Season and event
+
+- **Season**: `season_season-zero` (slug `season-zero`), created via
+  `season:create` and walked to `active` via `season:activate`.
+  `startDate: 2026-08-01`, `endDate: 2026-09-12` (a bounded six-week
+  programme, no championship points language). File:
+  `resources/season/seasons.json`.
+- **Featured Event**: `feat_21d64517e31863134746` — "Calc wins — Round 1119
+  on Pangaea", a real hosted Coworld league episode
+  (`ereq_460ea72c-8072-4c73-87e3-711b3cbc6952`), composite score 90.42/100,
+  the strongest candidate `feature:candidates` currently ranks with **zero**
+  unmapped participants (all 12 resolve `agentId`+`agentVersionId` via the
+  `buildParticipants` standings fix from `6618da9ad`, the prior turn's
+  archive-lane bug fix). Promoted into the FeaturedMatch store via
+  `mutateFeaturedMatchStore` (the same sanctioned, lock-protected primitive
+  the production CLIs themselves use — `feature:candidates` stays read-only
+  by design, and no `premiere:promote` CLI exists yet; see "CLI gap" below).
+  Packaged with `npm run premiere:package -- --featured=<id>`, then
+  `--validate`: **`isPubliclyPromotable: true`** (one non-blocking prose
+  warning about the round number "1119" lacking a matching
+  `reasonToWatch.claims[]` entry — cosmetic, not a gate failure).
+- **Schedule**: `season:add-event --season=season_season-zero
+  --featured=feat_21d64517e31863134746 --scheduled-at=2026-08-03T18:00:00.000Z`
+  (~47h lead from the moment of scheduling, a Monday-evening UTC slot
+  establishing the weekly cadence; `SeasonEventSlot.scheduledAt` is the
+  season programme's OWN calendar entry, independent of
+  `FeaturedMatch.scheduledAt` — see `SeasonSchemas.ts`'s own doc). Confirmed
+  in `resources/season/seasons.json`'s `eventSlots[0]`. Standalone
+  `premiere:validate` (whole-store schedule-consistency check) also passes:
+  `premiere:validate — ok (1 record(s) checked)`.
+- **Why archive-lane, not premiere-lane**: the premiere queue was genuinely
+  empty at execution time (`premiere:candidates --json` → `candidates: []`;
+  `league-mirror.log` confirms `idle: no completed unpremiered round` for
+  15+ consecutive minutes, the prior sealed item having already been
+  revealed/consumed at `18:49:19Z`). Topping the queue up requires either
+  waiting on the reactive `generate-premiere-queue.sh` loop's own cadence or
+  manually forcing it, which is explicitly **operator-gated** in its own
+  header doc ("every successful attempt is a real, billed Coworld episode")
+  — not triggered here without operator authorization. Separately, code
+  inspection found the premiere lane has its own, deeper, pre-existing gap:
+  `premiere-candidates.ts` always sets `participants: []` by design (never
+  opens the embargoed `bundle.source.json`), and neither `premiere-package.ts`
+  nor `premiere-publish.ts` ever populates it afterward — so
+  `isPubliclyPromotable`'s unconditional `match.participants.length === 0`
+  check (`EventPackageGate.ts:83`) means **a premiere-lane record can never
+  pass the public-promotion gate today, regardless of how far through
+  package/validate/schedule/publish it's taken.** This is the same bug
+  class as the archive-lane one already fixed, just unfixed on the other
+  lane — flagged here as a real, separate finding, not fixed in this pass
+  (no real premiere candidate exists right now to verify a fix against, and
+  it needs its own dedicated investigation + test pass, same as the
+  archive-lane fix did).
+- **CLI gap, restated precisely**: there is no `premiere:promote`/
+  `feature:promote` operator CLI that turns a ranked `feature:candidates`
+  result into a persisted `FeaturedMatch` record — this pass used the
+  library's own sanctioned `mutateFeaturedMatchStore` primitive directly
+  (documented in the commit `2eaded111`) as a stand-in. A real CLI wrapping
+  exactly that call (validate against `FeaturedMatchSchema`, refuse a
+  duplicate/conflicting `matchId`, same flag conventions as the other five
+  `premiere:*`/`season:*` verbs) is the honest permanent fix and should be
+  a follow-up task.
+
+### Live gate verification
+
+- **Read model**: `https://beta.proxywar.xyz/ai-league-runs/league/read-model.json`
+  (externally curled, 200) carries `seasons[0]` with the full event slot,
+  and `featuredMatches[0]` (`feat_21d64517e31863134746`) with
+  `isPubliclyPromotable: true`, a real `result`/`placements` block, and
+  real `reasonToWatch` claims — generated by a live-triggered
+  `league-mirror` cycle (`generatedAt: 2026-08-01T19:12:46.467Z`).
+- **Homepage hero**, live on `beta.proxywar.xyz`, screenshotted both
+  desktop (1440px) and mobile (390px):
+  `docs/verification-evidence/season-zero-activation/homepage-hero-desktop-1440.webp`,
+  `.../homepage-hero-mobile-390-top.webp`,
+  `.../homepage-hero-mobile-390-schedule.webp`. Visible, real content:
+  a "SEASON ZERO SCHEDULE / 8/1/2026 – 9/12/2026" panel showing
+  "8/3/2026 Calc wins — Round 1119 on Pangaea" (the exact scheduled
+  event, real title), and the top hero card's "Next expected event
+  window: 8/3/2026, 7:00:00 PM" (18:00 UTC in local British Summer Time —
+  matches the scheduled slot exactly). The top hero CARD ITSELF still
+  shows "RECENT BATTLE" (the most recently completed match, World Round
+  1120) with the explicit caption "No premiere is scheduled right now.
+  This is the most recently completed match with a full replay
+  available." — correct, honest behavior: there is no LIVE embargoed
+  premiere right now (confirmed above), so the fallback hero is exactly
+  what the product is supposed to show, while the season schedule strip
+  and "next expected event" callout correctly surface the real, gated,
+  future Featured Event alongside it.
+- **Non-promotable System-B premieres stay demoted**: no anonymous
+  premiere is currently live (`read-model.json`'s `premieres.live: null`),
+  so a visual "still demoted while live" screenshot isn't possible right
+  now — verified structurally instead: `premieres.latest` (the most
+  recently revealed one, `prem_89156f725b6402e3cbf79b2a`) carries only its
+  five documented spoiler-safe fields (`premiereId`, `roundNumber`,
+  `mapLabel`, `revealedAt`, `href`) in the live production read model —
+  no title, no roster, no reason-to-watch — confirming the type-level
+  guarantee `EventPackageGate.ts`'s class doc describes is intact in
+  today's actual served data, not just in the source. `featuredMatches[]`
+  in the same live read model contains exactly one entry: the genuinely
+  promotable one created above — nothing else is masquerading as a
+  Featured Event.
+- **League-mirror cycle** (part (d)): kickstarted
+  (`launchctl kickstart -k gui/$UID/com.proxywar.league-mirror`) after
+  `season:add-event`; log confirms a fresh run picked up the new season +
+  event and regenerated `read-model.json`/`index.html` (`site updated:
+  .../league/index.html (18 standings, 9 battles)`), externally verified
+  above.
+
+### Platform-origin verdict — genuine P0, not this session's breakage, NOT fixed here (read-only per scope)
+
+Investigated the "still crashlooping?" question from the prior turn's
+activity log. **Verdict: it is NOT currently crash-looping** — `launchctl
+print gui/$UID/com.proxywar.platform` shows `state = running`, and its
+process chain (`zsh` PID 45120 → `npx` PID 45144 → the real `tsx`-loaded
+`node` server PID 45148, confirmed via `ps -o ppid` that 45144 is a direct
+child of 45120) has been continuously alive and stable for **23h48m**
+(`lstart: Fri Jul 31 20:12:36 2026`), predating every commit and every
+action in this entire task by nearly a full day — this is not something
+either of this task's two turns caused. `launchctl list`'s `-9` exit-status
+column is a stale historical value from a PREVIOUS invocation before this
+current 23h48m-stable run started, not live behavior (`runs = 76`, `forks =
+15` are cumulative counters since the plist was first loaded, not recent
+churn).
+
+**But it IS a real, severe gap — just a different one than "crashing"**:
+the live process's code, `/Users/claude/.proxywar-deploy/platform-origin`
+(`git rev-parse HEAD` = `8ca7465`), is **410 commits behind**
+`claude/product-overhaul`'s tip (`git log --oneline HEAD..<dev-tip> | wc -l`
+= 410 in that deploy dir), and specifically predates commit `9c6756f60`
+("feat(identity): Season Zero Phase 3+6 — real Builder/Agent claim
+workflow + builder improvement loop") — confirmed via `git merge-base
+--is-ancestor 9c6756f60 HEAD` returning false in that checkout. Concretely:
+the real claim-workflow HTTP routes
+(`createPlatformBuilderClaimRouter`/`createPlatformBuilderEditRouter`/
+`createPlatformVersionReleaseRouter`, `ai-agent-demo-server.ts` lines
+~1908–1970) are gated behind `if (platformEnabled)` where `platformEnabled
+= envFlag("PROXYWAR_PLATFORM_ENABLED")` — **only ever true on the platform
+launchd job** (`start-proxywar-platform.zsh` sets it; beta's env file does
+not). `/claim` returns HTTP 200 on BOTH origins because the SPA-shell route
+(`app.get("/claim", ...)`) is unconditional on every instance of
+`ai-agent-demo-server.ts` regardless of mode — but the actual claim-flow
+backend API is architecturally reachable ONLY through platform-origin, and
+that origin is running code from before the claim workflow existed at all.
+**Net effect: the real Builder/Agent claim flow is not functional anywhere
+in production right now** — not because anything crashed, but because the
+one process authorized to serve it has not been redeployed since before it
+was built.
+
+**Disposition: read-only, reported, not touched.** This predates this
+session's entire activity (by ~24h at minimum) and is squarely outside
+"our breakage." A platform-origin redeploy is a materially bigger, riskier
+action than anything else in this pass — 410 commits of drift on the sole
+account/session/OAuth authority (GitHub sign-in, HMAC-signed session
+cookies, account records) needs its own dedicated review pass (diff the
+auth/session/OAuth-touching commits specifically, check for
+config/env/schema drift in `platformPrivateStateRoot`'s stores across that
+range, stage the restart with an explicit rollback plan) — not a
+side-effect of a Season Zero activation task. **Recommended next step for
+the operator**: a dedicated "platform-origin redeploy" task, scoped and
+reviewed the same way this task's own beta redeploy was, before the
+identity milestone can be considered live.
