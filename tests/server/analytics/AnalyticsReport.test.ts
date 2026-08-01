@@ -22,6 +22,9 @@ describe("buildAnalyticsReport", () => {
     expect(report.homepageToWatchCtr.status).toBe("not_yet_instrumented");
     expect(report.replayLoadSuccessRate.status).toBe("not_yet_instrumented");
     expect(report.sevenDayReturnRate.status).toBe("not_yet_instrumented");
+    expect(report.returningAuthenticatedVisitors.status).toBe("not_yet_instrumented");
+    expect(report.returningAuthenticatedVisitors.count).toBe(0);
+    expect(report.sevenDayCohortReturnRate.status).toBe("not_yet_instrumented");
     expect(report.agentBuilderProfileCtr.status).toBe("not_yet_instrumented");
     for (const milestone of report.directorCutMilestones) {
       expect(milestone.status).toBe("not_yet_instrumented");
@@ -278,6 +281,75 @@ describe("buildAnalyticsReport", () => {
     expect(report.sevenDayReturnRate.numerator).toBe(6);
     expect(report.sevenDayReturnRate.denominator).toBe(30);
     expect(report.sevenDayReturnRate.methodology).toContain("capped at ONE emission per visitor id per UTC day");
+  });
+
+  test("a plain returning GUEST (returning_anonymous_visitor only) counts as exactly ONE numerator event toward sevenDayReturnRate — never doubled by an auto-minted platform-account cookie", async () => {
+    artifactsRoot = await mkdtemp(path.join(os.tmpdir(), "pw-analytics-report-"));
+    const store = new AnalyticsAggregateStore(artifactsRoot);
+    const now = new Date("2026-08-01T00:00:00.000Z");
+    // A single returning guest visit: the client emits ONE
+    // returning_anonymous_visitor. It must NOT also count toward
+    // returning_authenticated_visitor just because every visitor (guest
+    // or not) carries an auto-minted platform-account cookie server-side.
+    const events: AnalyticsEvent[] = [
+      { name: "page_viewed", occurredAt: now.toISOString(), route: "/" },
+      { name: "returning_anonymous_visitor", occurredAt: now.toISOString(), route: "/" },
+    ];
+    await store.recordEvents(events, new Date("2026-07-30T00:00:00.000Z"));
+    const report = buildAnalyticsReport(await store.readAll(), now);
+    expect(report.sevenDayReturnRate.numerator).toBe(1);
+    expect(report.sevenDayReturnRate.denominator).toBe(1);
+    expect(report.returningAuthenticatedVisitors.count).toBe(0);
+  });
+
+  test("a genuinely signed-in return adds to returningAuthenticatedVisitors's raw count WITHOUT touching sevenDayReturnRate's numerator or denominator", async () => {
+    artifactsRoot = await mkdtemp(path.join(os.tmpdir(), "pw-analytics-report-"));
+    const store = new AnalyticsAggregateStore(artifactsRoot);
+    const now = new Date("2026-08-01T00:00:00.000Z");
+    const events: AnalyticsEvent[] = [
+      // One returning guest (anonymous share numerator)...
+      { name: "page_viewed", occurredAt: now.toISOString(), route: "/" },
+      { name: "returning_anonymous_visitor", occurredAt: now.toISOString(), route: "/" },
+      // ...and, on a SEPARATE page view, one genuinely signed-in return —
+      // server-emitted, never client-emitted, so it never inflates
+      // returning_anonymous_visitor either.
+      { name: "page_viewed", occurredAt: now.toISOString(), route: "/" },
+      { name: "returning_authenticated_visitor", occurredAt: now.toISOString(), route: "/" },
+    ];
+    await store.recordEvents(events, new Date("2026-07-30T00:00:00.000Z"));
+    const report = buildAnalyticsReport(await store.readAll(), now);
+    // The share metric only ever reflects returning_anonymous_visitor.
+    expect(report.sevenDayReturnRate.numerator).toBe(1);
+    expect(report.sevenDayReturnRate.denominator).toBe(2);
+    // The signed-in return shows up ONLY in its own separate raw count.
+    expect(report.returningAuthenticatedVisitors.count).toBe(1);
+    expect(report.returningAuthenticatedVisitors.status).toBe("measured");
+  });
+
+  test("sevenDayCohortReturnRate is always not_yet_instrumented — never silently substitutes the day-share proxy for a real N-days-later cohort", async () => {
+    artifactsRoot = await mkdtemp(path.join(os.tmpdir(), "pw-analytics-report-"));
+    const store = new AnalyticsAggregateStore(artifactsRoot);
+    const now = new Date("2026-08-01T00:00:00.000Z");
+    // Plenty of traffic — enough to clear MIN_SAMPLE_FOR_RATE on every
+    // OTHER metric — but the cohort metric has no data source at all and
+    // must stay honestly not_yet_instrumented regardless.
+    const events: AnalyticsEvent[] = [
+      ...Array.from({ length: 50 }, (): AnalyticsEvent => ({
+        name: "page_viewed",
+        occurredAt: now.toISOString(),
+        route: "/",
+      })),
+      ...Array.from({ length: 30 }, (): AnalyticsEvent => ({
+        name: "returning_anonymous_visitor",
+        occurredAt: now.toISOString(),
+        route: "/",
+      })),
+    ];
+    await store.recordEvents(events, now);
+    const report = buildAnalyticsReport(await store.readAll(), now);
+    expect(report.sevenDayCohortReturnRate.status).toBe("not_yet_instrumented");
+    expect(report.sevenDayCohortReturnRate.ratePercent).toBeNull();
+    expect(report.sevenDayCohortReturnRate.methodology).toContain("NOT IMPLEMENTED");
   });
 
   test("builder funnel reports raw stage counts, including the final-step breakdown", async () => {

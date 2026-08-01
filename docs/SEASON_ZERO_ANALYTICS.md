@@ -32,12 +32,15 @@ methodology reference the report itself links back to.
   server-side session table, no IP matching. The `returning_*_visitor`
   EVENT itself is additionally gated to at most ONE emission per visitor
   id per UTC day (`shouldEmitReturningVisitorToday`, a small
-  `localStorage`-keyed day-marker) — without this, a visitor id that
-  already existed is "returning" on every page load after the first
-  within a single browsing session, which would drive the report's
-  return-rate metric toward "pages per session" rather than any real
-  day-over-day signal. See "Report metrics" below for exactly what the
-  resulting metric measures.
+  `localStorage`-keyed day-marker KEYED BY THE VISITOR ID ITSELF — not one
+  shared global key, so a mid-day id rotation or a shared machine handing
+  the same browser storage to a second visitor can never wrongly suppress
+  or wrongly permit an emission for either id) — without this gate at
+  all, a visitor id that already existed is "returning" on every page
+  load after the first within a single browsing session, which would
+  drive the report's return-rate metric toward "pages per session" rather
+  than any real day-over-day signal. See "Report metrics" below for
+  exactly what the resulting metric measures.
 - **Storage is aggregate, not raw.** `AnalyticsAggregateStore.ts` keeps one
   JSON file: per-UTC-day, per-event-name counts, a bounded `byRoute`
   breakdown, and a bounded `byDimension` breakdown (event/agent/builder
@@ -112,18 +115,37 @@ Wired into the product surfaces as of this pass:
 Emitted server-side, not client-side: the platform account cookie
 (`PlatformAccountSecurity`) is HttpOnly, so the client genuinely has no
 cheap way to know "is this visitor already established" — but the SERVER
-does, for free, on every `GET /api/account` call. `bootstrapRead` returns
-`setCookie: null` precisely when it found an ALREADY-ESTABLISHED account
-cookie rather than minting a fresh one; that is the emission trigger.
+does, for free, on every `GET /api/account` call.
+
+**Requires BOTH signals, not just one.** `bootstrapRead` returning
+`setCookie: null` means it found an ALREADY-ESTABLISHED account cookie
+rather than minting a fresh one — but that alone is NOT "authenticated":
+every platform visitor, signed in or not, gets an auto-minted GUEST
+account cookie on first touch, so a plain returning GUEST also satisfies
+`setCookie: null` on their second visit. Emitting on that signal alone
+double-counted the SAME visit against the report's return metric — once
+here (`returning_authenticated_visitor`, because the guest account cookie
+already existed), once client-side (`returning_anonymous_visitor`,
+because the localStorage visitor id already existed too) — which could
+push `sevenDayReturnRate` over 100% on traffic that was entirely
+anonymous. The fix: this event now requires an already-established cookie
+**AND** a genuinely GitHub-linked identity (`githubStatus.login !== null`,
+resolved via `identityLinkStore.getStatus` before the emission check
+runs) — "carries an established, GitHub-linked platform identity", not
+merely "has ever loaded a page here before".
 
 This is an **authenticated visit-DAY** count, not strict per-session
-counting, and "authenticated" means "carries an established platform
-account identity" — not necessarily a GitHub-linked one (an anonymous
-platform visitor still gets a stable `accountId` on first touch). Deduped
-to at most one emission per `accountId` per UTC day via a bounded,
-in-memory, day-keyed set inside `PlatformAccountHttp.ts` (best-effort: a
-process restart resets it, matching the "raw counts, don't overinterpret"
-posture the whole report already takes).
+counting. Deduped to at most one emission per `accountId` per UTC day via
+a bounded, in-memory, day-keyed set inside `PlatformAccountHttp.ts`
+(best-effort: a process restart resets it, matching the "raw counts,
+don't overinterpret" posture the whole report already takes).
+
+**Reported separately from the anonymous share, never blended.** Because
+every visitor already gets a guest cookie, a signed-in return and an
+anonymous return can never be safely summed into one numerator without
+risking exactly the double-count above resurfacing in some other form —
+so `returningAuthenticatedVisitors` is its own raw-count metric (see the
+table below), not folded into `sevenDayReturnRate`.
 
 **Known, honest gaps** (the report shows `not_yet_instrumented` for these
 until a real feature/signal exists to hook, never a fabricated number):
@@ -161,7 +183,9 @@ Every report metric still carries one of three honest states:
 | Full Replay 30s/2m/50%/completion | `watched_30s`/`watched_2m`/`watched_50pct`/`completed` WITH `context.replayMode="full_replay"` — raw counts, no rate (no "started" baseline event exists for Full Replay) | all-time |
 | Most-watched matches | `director_cut_started` grouped by `matchId`, ranked descending, labeled via a read-model lookup at report-serve time (falls back to the raw match id) | all-time |
 | Agent/Builder profile CTR | (`agent_profile_opened_from_match` + `builder_profile_opened`) ÷ `director_cut_started` | all-time |
-| Returning-visitor-day share | (`returning_anonymous_visitor` + `returning_authenticated_visitor`, each capped at ONE emission per visitor id per UTC day) ÷ `page_viewed` — the share of page views from an already-established visitor identity, NOT a strict N-days-later cohort return rate | trailing 7 UTC days |
+| Returning-visitor-day share (anonymous) | `returning_anonymous_visitor` (capped at ONE emission per visitor id per UTC day) ÷ `page_viewed` — the share of page views from an already-established ANONYMOUS visitor identity. Deliberately excludes `returning_authenticated_visitor`: every visitor (signed in or not) gets an auto-minted guest account cookie, so blending the two would double-count the same visit | trailing 7 UTC days |
+| Returning authenticated visits | raw count of `returning_authenticated_visitor` (emitted server-side ONLY for a genuinely GitHub-linked account, never a plain returning guest) — NOT divided by `page_viewed` and NOT added into the anonymous share above, to avoid reintroducing the same double-count | trailing 7 UTC days, raw count |
+| Seven-day cohort return rate | **NOT IMPLEMENTED** — hardcoded `not_yet_instrumented`. A true cohort ("of visitors first seen on day N, the share seen again within 7 days") needs durable per-visitor last-seen retention, which this store deliberately never keeps (`AnalyticsAggregateStore.ts`'s "no visitor id is ever written to this file" contract; the bounded 300-key/day dimension cap is sized for route/event/agent dimensions, not one slot per unique visitor). The day-share metric above is the closest available honest proxy and is never silently substituted here | n/a |
 | Build flow funnel | raw stage counts: `build_flow_started`, `build_step_reached` at the final (7th) step, `registration_draft_submitted` | all-time, raw counts (see below) |
 | Claims and version releases | raw counts of `claim_started`, `claim_verified`, `version_release_created`, `version_observed` | all-time |
 | Failures by route | `replay_load_failed` grouped by normalized route template | all-time |
@@ -201,8 +225,10 @@ universal truths, and not something to hardcode as permanent product law.
 - at least 50% of Director Cut starters reach 30 seconds;
 - at least 25% reach 50%;
 - at least 10% click an Agent or Builder profile;
-- measure seven-day return rather than declaring success from
-  registrations alone.
+- measure seven-day return (the returning-visitor-day share proxy — see
+  "Report metrics" above; the true cohort rate is honestly
+  `not_yet_instrumented`) rather than declaring success from registrations
+  alone.
 
 ## The overinterpretation rule
 

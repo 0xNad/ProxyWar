@@ -74,6 +74,8 @@ export function renderAnalyticsReportHtml(model: AnalyticsReportPageModel): stri
         ${rateStatCard(report.homepageToWatchCtr)}
         ${rateStatCard(report.replayLoadSuccessRate)}
         ${rateStatCard(report.sevenDayReturnRate)}
+        ${countStatCard(report.returningAuthenticatedVisitors)}
+        ${rateStatCard(report.sevenDayCohortReturnRate)}
         ${rateStatCard(report.agentBuilderProfileCtr)}
       </div>
     </section>

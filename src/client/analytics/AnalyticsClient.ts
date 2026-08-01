@@ -71,7 +71,7 @@ export class AnalyticsClient {
     const visitor = this.ensureStarted();
     if (
       visitor?.isReturning === true &&
-      shouldEmitReturningVisitorToday(this.storage)
+      shouldEmitReturningVisitorToday(visitor.id, this.storage)
     ) {
       this.track(options.authenticated ? "returning_authenticated_visitor" : "returning_anonymous_visitor");
     }

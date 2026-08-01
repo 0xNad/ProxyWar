@@ -95,14 +95,27 @@ export function createPlatformAccountRouter(
         );
       // `setCookie === null` means `bootstrapRead` found an ALREADY-
       // established account cookie rather than minting a fresh one (see
-      // `PlatformAccountSecurity.bootstrap`'s doc) — the honest, cheap,
-      // server-side "this is a returning platform visitor" signal that has
-      // no equivalent on the client (the account cookie is HttpOnly).
-      // "Authenticated" here means "carries an established platform
-      // account identity", not necessarily a GitHub-linked one — this is
-      // an authenticated visit-DAY count, not strict per-session counting;
-      // see docs/SEASON_ZERO_ANALYTICS.md.
-      if (bootstrap.setCookie === null) {
+      // `PlatformAccountSecurity.bootstrap`'s doc) — but that alone is NOT
+      // "authenticated": every platform visitor, signed in or not, gets an
+      // auto-minted GUEST account cookie on first touch, so a plain
+      // returning GUEST would also satisfy `setCookie === null` on their
+      // second visit. If this fired `returning_authenticated_visitor` for
+      // that guest, the SAME visit would be double-counted against the
+      // report's return metric — once here, once client-side via
+      // `returning_anonymous_visitor` (the localStorage visitor id already
+      // existed too). `returning_authenticated_visitor` therefore requires
+      // BOTH signals: an already-established cookie AND a genuinely
+      // GitHub-linked identity (`githubStatus.login !== null`) — "carries
+      // an established, GitHub-linked platform identity", not merely "has
+      // ever loaded a page here before". This is an authenticated
+      // visit-DAY count, not strict per-session counting; see
+      // docs/SEASON_ZERO_ANALYTICS.md.
+      const [account, claims, githubStatus] = await Promise.all([
+        options.accounts.getAccount(canonicalAccountId),
+        options.claims.getClaims(canonicalAccountId),
+        options.identityLinkStore.getStatus(canonicalAccountId),
+      ]);
+      if (bootstrap.setCookie === null && githubStatus.login !== null) {
         const dayKey = new Date().toISOString().slice(0, 10);
         if (dayKey !== dedupDayKey) {
           dedupDayKey = dayKey;
@@ -118,11 +131,6 @@ export function createPlatformAccountRouter(
           );
         }
       }
-      const [account, claims, githubStatus] = await Promise.all([
-        options.accounts.getAccount(canonicalAccountId),
-        options.claims.getClaims(canonicalAccountId),
-        options.identityLinkStore.getStatus(canonicalAccountId),
-      ]);
       res.status(200).json({
         schemaVersion: 1,
         csrfToken: bootstrap.csrfToken,

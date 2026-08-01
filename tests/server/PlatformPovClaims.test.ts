@@ -42,6 +42,7 @@ let server: http.Server;
 let baseUrl: string;
 let security: PlatformAccountSecurity;
 let claims: PlatformPolicyClaimStore;
+let identityLinkStore: PlatformGithubIdentityLinkStore;
 
 interface Fetched {
   readonly status: number;
@@ -90,7 +91,7 @@ beforeEach(async () => {
   // linking merges claims across accounts.
   const accounts = await PlatformAccountStore.open(stateRoot);
   claims = await PlatformPolicyClaimStore.open(stateRoot);
-  const identityLinkStore = await PlatformGithubIdentityLinkStore.open(
+  identityLinkStore = await PlatformGithubIdentityLinkStore.open(
     stateRoot,
     accounts,
     claims,
@@ -149,6 +150,25 @@ async function signedInCookieWithClaim(slug: string): Promise<string> {
     .accountId;
   // `addClaim` derives the lineage from the label — `<lineage>:v<n>`.
   await claims.addClaim(accountId, `${slug}:v1`);
+  return cookie;
+}
+
+let nextGithubUserId = 900_000;
+/** Establishes a real session and links it to a GitHub identity directly through the store (bypassing OAuth), returning its cookie header. Distinct from `signedInCookieWithClaim`: this account is genuinely GitHub-linked, not merely a guest with an established cookie. */
+async function githubLinkedCookie(login: string): Promise<string> {
+  const bootstrap = await get("/api/account", { Origin: PLATFORM_ORIGIN });
+  const cookie = accountCookieFor(bootstrap.headers["set-cookie"] ?? []);
+  const bootstrapSchema = z.object({
+    identity: z.object({ accountId: z.string() }),
+  });
+  const accountId = bootstrapSchema.parse(JSON.parse(bootstrap.body)).identity
+    .accountId;
+  nextGithubUserId += 1;
+  await identityLinkStore.linkOrMerge(accountId, {
+    githubUserId: nextGithubUserId,
+    login,
+    avatarUrl: null,
+  });
   return cookie;
 }
 
@@ -279,7 +299,7 @@ describe("returning_authenticated_visitor (GET /api/account)", () => {
     expect(totalEventCount(file, "returning_authenticated_visitor")).toBe(0);
   });
 
-  test("emits once a request carries an ALREADY-ESTABLISHED account cookie", async () => {
+  test("does NOT emit for a plain returning GUEST account — regression: every visitor (signed in or not) auto-mints an account cookie, so 'already-established cookie' alone is NOT 'authenticated' and must never double-count the same visit that returning_anonymous_visitor already counts client-side", async () => {
     const first = await get("/api/account", { Origin: PLATFORM_ORIGIN });
     const cookie = accountCookieFor(first.headers["set-cookie"] ?? []);
     const second = await get("/api/account", {
@@ -287,14 +307,30 @@ describe("returning_authenticated_visitor (GET /api/account)", () => {
       Cookie: cookie,
     });
     expect(second.status).toBe(200);
-    // The cookie already existed, so bootstrapRead must not re-mint it.
+    // The cookie already existed, so bootstrapRead must not re-mint it —
+    // this guest genuinely IS "returning" by the cookie signal alone...
+    expect(second.headers["set-cookie"]).toBeUndefined();
+    // ...but never having linked GitHub, must NOT be counted as an
+    // authenticated return. Give a real chance for an (incorrect)
+    // emission to land before asserting absence.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const file = await new AnalyticsAggregateStore(stateRoot).readAll();
+    expect(totalEventCount(file, "returning_authenticated_visitor")).toBe(0);
+  });
+
+  test("emits once a request carries an already-established cookie for a GENUINELY GitHub-linked account", async () => {
+    const cookie = await githubLinkedCookie("octocat-returner");
+    const second = await get("/api/account", {
+      Origin: PLATFORM_ORIGIN,
+      Cookie: cookie,
+    });
+    expect(second.status).toBe(200);
     expect(second.headers["set-cookie"]).toBeUndefined();
     expect(await waitForCount(1)).toBe(1);
   });
 
-  test("dedupes to at most one emission per account id per day across repeated requests", async () => {
-    const first = await get("/api/account", { Origin: PLATFORM_ORIGIN });
-    const cookie = accountCookieFor(first.headers["set-cookie"] ?? []);
+  test("dedupes to at most one emission per account id per day across repeated requests, for a GitHub-linked account", async () => {
+    const cookie = await githubLinkedCookie("octocat-repeat");
     for (let i = 0; i < 5; i++) {
       await get("/api/account", { Origin: PLATFORM_ORIGIN, Cookie: cookie });
     }
@@ -306,11 +342,9 @@ describe("returning_authenticated_visitor (GET /api/account)", () => {
     expect(totalEventCount(file, "returning_authenticated_visitor")).toBe(1);
   });
 
-  test("two distinct returning accounts each emit their own count", async () => {
-    const accountA = await get("/api/account", { Origin: PLATFORM_ORIGIN });
-    const cookieA = accountCookieFor(accountA.headers["set-cookie"] ?? []);
-    const accountB = await get("/api/account", { Origin: PLATFORM_ORIGIN });
-    const cookieB = accountCookieFor(accountB.headers["set-cookie"] ?? []);
+  test("two distinct GitHub-linked returning accounts each emit their own count", async () => {
+    const cookieA = await githubLinkedCookie("octocat-a");
+    const cookieB = await githubLinkedCookie("octocat-b");
     await get("/api/account", { Origin: PLATFORM_ORIGIN, Cookie: cookieA });
     await get("/api/account", { Origin: PLATFORM_ORIGIN, Cookie: cookieB });
     expect(await waitForCount(2)).toBe(2);

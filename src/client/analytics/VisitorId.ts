@@ -85,7 +85,7 @@ function safeLocalStorage(): Storage | undefined {
   }
 }
 
-export const RETURNING_VISITOR_EMIT_DAY_KEY = "pw_analytics_returning_emit_day";
+export const RETURNING_VISITOR_EMIT_DAY_KEY_PREFIX = "pw_analytics_returning_emit_day:";
 
 /**
  * Gates `returning_anonymous_visitor`/`returning_authenticated_visitor` to
@@ -97,7 +97,20 @@ export const RETURNING_VISITOR_EMIT_DAY_KEY = "pw_analytics_returning_emit_day";
  * session" rather than any real day-over-day return signal. Call once per
  * page load, immediately before deciding whether to emit; returns `true`
  * (and marks today as emitted) only the first time it's called on a given
- * UTC day, `false` on every subsequent call that same day.
+ * UTC day FOR THIS visitor id, `false` on every subsequent call that same
+ * day for that same id.
+ *
+ * The day marker is keyed BY visitor id (`${PREFIX}${visitorId}`), not one
+ * shared global key — a shared key would let a mid-day id rotation (or a
+ * shared machine where a second visitor id takes over the same browser
+ * profile) either wrongly suppress the NEW id's own first-of-day emission
+ * (if the old id already emitted today) or wrongly permit a second
+ * emission under the old id's name. Scoping by id means each visitor id's
+ * dedup state is independent, exactly as the "per visitor id" contract
+ * promises. The one stale, now-orphaned key an old rotated-away id leaves
+ * behind is a single small string — harmless, and `localStorage` is
+ * already this origin's own bounded storage, not a structure this module
+ * needs to actively garbage-collect.
  *
  * Mirrors the server-side `returning_authenticated_visitor` dedup in
  * `PlatformAccountHttp.ts` (bounded, day-keyed, best-effort) — same
@@ -105,6 +118,7 @@ export const RETURNING_VISITOR_EMIT_DAY_KEY = "pw_analytics_returning_emit_day";
  * both the client and server side of this event family.
  */
 export function shouldEmitReturningVisitorToday(
+  visitorId: string,
   storage: Storage | undefined = safeLocalStorage(),
   now: number = Date.now(),
 ): boolean {
@@ -115,11 +129,12 @@ export function shouldEmitReturningVisitorToday(
     return true;
   }
   try {
+    const storageKey = `${RETURNING_VISITOR_EMIT_DAY_KEY_PREFIX}${visitorId}`;
     const todayKey = new Date(now).toISOString().slice(0, 10);
-    if (storage.getItem(RETURNING_VISITOR_EMIT_DAY_KEY) === todayKey) {
+    if (storage.getItem(storageKey) === todayKey) {
       return false;
     }
-    storage.setItem(RETURNING_VISITOR_EMIT_DAY_KEY, todayKey);
+    storage.setItem(storageKey, todayKey);
     return true;
   } catch {
     return true;

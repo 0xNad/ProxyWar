@@ -81,7 +81,12 @@ export interface AnalyticsReportModel {
   fullReplayMilestones: CountMetric[];
   mostWatchedEvents: RankingMetric;
   agentBuilderProfileCtr: RateMetric;
+  /** Anonymous-only visitor-day share — see the field's own methodology text for exactly why authenticated visits are excluded from this numerator (double-count risk with guest accounts). */
   sevenDayReturnRate: RateMetric;
+  /** Raw count, NOT blended into `sevenDayReturnRate`'s numerator — every visitor auto-mints a guest platform-account cookie, so an authenticated-visitor signal would double-count the SAME visit `sevenDayReturnRate` already counts via `returning_anonymous_visitor`. Shown separately so a genuinely-signed-in return is still visible without corrupting the share metric. */
+  returningAuthenticatedVisitors: CountMetric;
+  /** Deliberately hardcoded `not_yet_instrumented` — see the field's own methodology text for why a true N-days-later cohort isn't implemented. Never let `sevenDayReturnRate`'s day-share proxy stand in for this without saying so explicitly. */
+  sevenDayCohortReturnRate: RateMetric;
   builderFunnel: FunnelStageMetric;
   claimsAndReleases: CountMetric[];
   failuresByRoute: RouteBreakdownMetric;
@@ -212,27 +217,69 @@ export function buildAnalyticsReport(
       "(agent_profile_opened_from_match + builder_profile_opened) ÷ director_cut_started, all-time.",
   });
 
-  // `returning_*_visitor` is emitted client-side at most ONCE per visitor
-  // id per UTC day (see `VisitorId.ts`'s `shouldEmitReturningVisitorToday`)
-  // — same-session/same-day navigation can never inflate this numerator,
-  // so it genuinely counts distinct RETURNING-VISITOR-DAYS, not page
-  // loads. This is still not a strict "came back N days later" cohort
-  // metric (that would require per-visitor last-seen retention, which
-  // this store deliberately never keeps — see AnalyticsAggregateStore.ts's
-  // doc), so the label/methodology says exactly what it measures: the
-  // share of page views in the window attributable to an
-  // already-established visitor identity.
-  const returning7d =
-    trailingEventCount(file, "returning_anonymous_visitor", 7, now) +
-    trailingEventCount(file, "returning_authenticated_visitor", 7, now);
+  // `returning_anonymous_visitor` is emitted client-side at most ONCE per
+  // visitor id per UTC day (see `VisitorId.ts`'s
+  // `shouldEmitReturningVisitorToday`) — same-session/same-day navigation
+  // can never inflate this numerator, so it genuinely counts distinct
+  // RETURNING-VISITOR-DAYS, not page loads.
+  //
+  // Deliberately ANONYMOUS-ONLY, not blended with
+  // `returning_authenticated_visitor`: every visitor — signed in or not —
+  // gets an auto-minted platform-account cookie on first touch (see
+  // `PlatformAccountHttp.ts`'s bootstrap), so a plain returning GUEST
+  // trips the server-side "established account cookie" signal too. If
+  // this numerator summed both event names, the SAME visit would be
+  // counted twice — once client-side (`returning_anonymous_visitor`,
+  // fired because the localStorage visitor id already existed) and once
+  // server-side (`returning_authenticated_visitor`, fired because the
+  // guest account cookie already existed) — pushing the share over 100%
+  // on traffic that is entirely anonymous. `returning_authenticated_visitor`
+  // is now gated server-side to genuinely GitHub-linked accounts only
+  // (see `PlatformAccountHttp.ts`), so it is never a superset of the
+  // anonymous signal, but it still describes a DIFFERENT population (
+  // signed-in returners) than "share of all page views" answers for —
+  // reported as its own raw count below instead.
+  const returningAnonymous7d = trailingEventCount(file, "returning_anonymous_visitor", 7, now);
   const pageViews7d = trailingEventCount(file, "page_viewed", 7, now);
   const sevenDayReturnRate = rateMetric({
-    id: "returning_visitor_day_share_7d",
-    label: "Returning-visitor-day share (trailing 7 days)",
-    numerator: returning7d,
+    id: "returning_anonymous_visitor_day_share_7d",
+    label: "Returning-visitor-day share, anonymous (trailing 7 days)",
+    numerator: returningAnonymous7d,
     denominator: pageViews7d,
     methodology:
-      '(returning_anonymous_visitor + returning_authenticated_visitor, each capped at ONE emission per visitor id per UTC day) ÷ page_viewed, trailing 7 UTC days. Measures the share of page views attributable to an already-established visitor identity — same-day/same-session navigation never inflates it. NOT a strict "came back N days later" cohort return rate (this store never retains per-visitor history to compute one).',
+      'returning_anonymous_visitor (capped at ONE emission per visitor id per UTC day) ÷ page_viewed, trailing 7 UTC days. Anonymous-only — see returningAuthenticatedVisitors for signed-in returners, kept separate because every visitor (signed in or not) gets an auto-minted guest account cookie, so blending the two would double-count the same visit. NOT a strict "came back N days later" cohort return rate (this store never retains per-visitor history to compute one) — see sevenDayCohortReturnRate.',
+  });
+
+  const returningAuthenticatedVisitors = countMetric(
+    "returning_authenticated_visitor_7d",
+    "Returning authenticated visits (trailing 7 days)",
+    trailingEventCount(file, "returning_authenticated_visitor", 7, now),
+    "returning_authenticated_visitor events, trailing 7 UTC days — emitted server-side ONLY for a genuinely GitHub-linked account whose session cookie already existed (see PlatformAccountHttp.ts), never for a plain returning guest. A raw count, not folded into sevenDayReturnRate's numerator or divided by page_viewed: a signed-in return is a materially different, much rarer signal than \"any returning visit,\" and blending it back in would reintroduce the same double-count this split exists to avoid.",
+  );
+
+  // A true cohort metric ("of visitors seen on day N, what share were
+  // seen again within the next 7 days") needs per-visitor LAST-SEEN
+  // retention keyed by visitor id, across day boundaries. This store
+  // deliberately never keeps one: `AnalyticsAggregateStore.ts`'s own
+  // contract is "no visitor id is ever written to this file" (see
+  // docs/SEASON_ZERO_ANALYTICS.md's "What's collected, and what isn't"),
+  // and the bounded 300-key/day dimension cap that discipline relies on
+  // is sized for a handful of route/event/agent dimensions, not one
+  // entry per unique visitor — every real visitor, not just the busiest
+  // 300, would need a slot for a cohort to be accurate, which is exactly
+  // the unbounded-cardinality, persistent-identity structure the "no raw
+  // visitor tracking" design this system commits to rules out. Rather
+  // than silently reusing the day-share proxy above as a stand-in for a
+  // real cohort figure, this is hardcoded not_yet_instrumented so nobody
+  // reads a "seven-day return rate" from this report and mistakes it for
+  // one.
+  const sevenDayCohortReturnRate = rateMetric({
+    id: "seven_day_cohort_return_rate",
+    label: "Seven-day cohort return rate",
+    numerator: 0,
+    denominator: 0,
+    methodology:
+      "NOT IMPLEMENTED. A true cohort rate (of visitors first seen on day N, the share seen again within 7 days) requires durable per-visitor last-seen retention, which this store deliberately never keeps — see AnalyticsAggregateStore.ts's \"no visitor id is ever written to this file\" contract. sevenDayReturnRate (returning-visitor-day share) is the closest available honest proxy and is reported separately, explicitly labeled as a proxy, never substituted here.",
   });
 
   const builderFunnel: FunnelStageMetric = {
@@ -310,6 +357,8 @@ export function buildAnalyticsReport(
     mostWatchedEvents,
     agentBuilderProfileCtr,
     sevenDayReturnRate,
+    returningAuthenticatedVisitors,
+    sevenDayCohortReturnRate,
     builderFunnel,
     claimsAndReleases,
     failuresByRoute,

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test } from "vitest";
 import {
   loadOrCreateVisitorIdentity,
-  RETURNING_VISITOR_EMIT_DAY_KEY,
+  RETURNING_VISITOR_EMIT_DAY_KEY_PREFIX,
   shouldEmitReturningVisitorToday,
   VISITOR_ID_CREATED_AT_STORAGE_KEY,
   VISITOR_ID_ROTATION_MS,
@@ -70,29 +70,54 @@ describe("shouldEmitReturningVisitorToday", () => {
   const DAY_MS = 24 * 60 * 60 * 1000;
   const T0 = Date.parse("2026-08-01T00:00:00.000Z");
 
-  test("returns true on the first call of a UTC day, and marks that day as emitted", () => {
-    expect(shouldEmitReturningVisitorToday(window.localStorage, T0)).toBe(true);
-    expect(window.localStorage.getItem(RETURNING_VISITOR_EMIT_DAY_KEY)).toBe(
+  test("returns true on the first call of a UTC day, and marks that day as emitted for THIS visitor id", () => {
+    expect(shouldEmitReturningVisitorToday("visitor-a", window.localStorage, T0)).toBe(true);
+    expect(window.localStorage.getItem(`${RETURNING_VISITOR_EMIT_DAY_KEY_PREFIX}visitor-a`)).toBe(
       "2026-08-01",
     );
   });
 
-  test("returns false on every subsequent call the SAME UTC day — same-session navigation never re-fires", () => {
-    expect(shouldEmitReturningVisitorToday(window.localStorage, T0)).toBe(true);
+  test("returns false on every subsequent call the SAME UTC day for the SAME visitor id — same-session navigation never re-fires", () => {
+    expect(shouldEmitReturningVisitorToday("visitor-a", window.localStorage, T0)).toBe(true);
     // Same day, minutes later (e.g. the visitor's second, third, fourth
     // page load in one browsing session).
-    expect(shouldEmitReturningVisitorToday(window.localStorage, T0 + 60_000)).toBe(
-      false,
-    );
     expect(
-      shouldEmitReturningVisitorToday(window.localStorage, T0 + 23 * 60 * 60 * 1000),
+      shouldEmitReturningVisitorToday("visitor-a", window.localStorage, T0 + 60_000),
+    ).toBe(false);
+    expect(
+      shouldEmitReturningVisitorToday(
+        "visitor-a",
+        window.localStorage,
+        T0 + 23 * 60 * 60 * 1000,
+      ),
     ).toBe(false);
   });
 
-  test("returns true again once the UTC day rolls over", () => {
-    expect(shouldEmitReturningVisitorToday(window.localStorage, T0)).toBe(true);
-    expect(shouldEmitReturningVisitorToday(window.localStorage, T0 + DAY_MS)).toBe(
+  test("returns true again once the UTC day rolls over, for the same visitor id", () => {
+    expect(shouldEmitReturningVisitorToday("visitor-a", window.localStorage, T0)).toBe(true);
+    expect(
+      shouldEmitReturningVisitorToday("visitor-a", window.localStorage, T0 + DAY_MS),
+    ).toBe(true);
+  });
+
+  test("a DIFFERENT visitor id gets its own independent same-day dedup slot — a mid-day id rotation (or a shared machine with a second visitor) never gets blocked by a stranger's emission, and never inherits a stranger's day marker", () => {
+    // visitor-a already emitted today.
+    expect(shouldEmitReturningVisitorToday("visitor-a", window.localStorage, T0)).toBe(true);
+    // visitor-b — a fresh id that took over this browser's storage later
+    // the SAME day — must still get its own first-of-day emission; a
+    // single shared/global day key would have wrongly suppressed this.
+    expect(shouldEmitReturningVisitorToday("visitor-b", window.localStorage, T0 + 120_000)).toBe(
       true,
+    );
+    // visitor-b's second call the same day is correctly suppressed...
+    expect(shouldEmitReturningVisitorToday("visitor-b", window.localStorage, T0 + 180_000)).toBe(
+      false,
+    );
+    // ...but visitor-a's own dedup state is untouched by visitor-b's
+    // activity — a single shared key would have wrongly reset or
+    // clobbered it.
+    expect(shouldEmitReturningVisitorToday("visitor-a", window.localStorage, T0 + 240_000)).toBe(
+      false,
     );
   });
 
@@ -105,7 +130,7 @@ describe("shouldEmitReturningVisitorToday", () => {
         throw new Error("storage disabled");
       },
     } as unknown as Storage;
-    expect(shouldEmitReturningVisitorToday(throwingStorage, T0)).toBe(true);
-    expect(shouldEmitReturningVisitorToday(throwingStorage, T0 + 1)).toBe(true);
+    expect(shouldEmitReturningVisitorToday("visitor-a", throwingStorage, T0)).toBe(true);
+    expect(shouldEmitReturningVisitorToday("visitor-a", throwingStorage, T0 + 1)).toBe(true);
   });
 });
