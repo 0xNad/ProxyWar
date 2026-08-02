@@ -1,5 +1,10 @@
 {
   "$schema": "https://raw.githubusercontent.com/Metta-AI/coworld/main/src/coworld/coworld_manifest_schema.json",
+  "tags": [
+    "strategy",
+    "multiplayer",
+    "ai-agents"
+  ],
   "game": {
     "name": "proxywar",
     "version": "0.1.17",
@@ -93,6 +98,12 @@
             "Medium"
           ]
         },
+        "seed": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 308915775,
+          "description": "Optional deterministic episode seed. Encoded as six base-26 A-Z letters so OpenFront simpleHash remains injective over the supported range."
+        },
         "replay_tail_turns": {
           "type": "integer",
           "minimum": 0,
@@ -124,6 +135,8 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "seed",
+        "game_id",
         "scores",
         "winner_slot",
         "turn_count",
@@ -134,6 +147,18 @@
         "players"
       ],
       "properties": {
+        "seed": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 308915775
+        },
+        "game_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9]{8}$"
+        },
         "scores": {
           "type": "array",
           "minItems": 2,
@@ -226,7 +251,7 @@
     },
     "runnable": {
       "type": "game",
-      "image": "proxywar-coworld-local:coworld-3e7e218fc73f",
+      "image": "proxywar-coworld-local:coworld-bfc17fcd56f2",
       "run": [
         "node",
         "--max-old-space-size=640",
@@ -239,7 +264,7 @@
     "protocols": {
       "player": {
         "type": "text",
-        "value": "Proxy War Coworld player protocol: connect to COWORLD_PLAYER_WS_URL. The game sends {type:'decision_request', requestID, request:{protocolVersion:'proxywar-agent-v1', observation, legalActions, responseContract}}. The player replies {type:'decision_response', requestID, selectedLegalActionId, reason, confidence?}. selectedLegalActionId must be one offered LegalAction.id from legalActions[].id. The game still validates through Proxy War AgentDecisionValidator."
+        "value": "Proxy War Coworld player protocol: connect to COWORLD_PLAYER_WS_URL. The game sends {type:'decision_request', requestID, request:{protocolVersion:'proxywar-agent-v1', observation, legalActions, responseContract}}. The player replies {type:'decision_response', requestID, selectedLegalActionId, reason, confidence?}. selectedLegalActionId must be one offered LegalAction.id from legalActions[].id. At episode end the game sends {type:'final', slot}; the player must finish any optional COWORLD_PLAYER_ARTIFACT_UPLOAD_URL upload before closing because websocket close acknowledges terminal work is complete. The game still validates decisions through Proxy War AgentDecisionValidator."
       },
       "global": {
         "type": "text",
@@ -257,7 +282,7 @@
   "player": [
     {
       "type": "player",
-      "image": "proxywar-coworld-local:coworld-3e7e218fc73f",
+      "image": "proxywar-coworld-local:coworld-bfc17fcd56f2",
       "run": [
         "node",
         "/app/integration/src/starter-player.mjs"
@@ -272,7 +297,7 @@
   "commissioner": [
     {
       "type": "commissioner",
-      "image": "proxywar-commissioner-local:coworld-712f3ec10f3b",
+      "image": "proxywar-commissioner-local:coworld-7f562b4a49c6",
       "run": [],
       "env": {},
       "id": "proxywar-ladder-commissioner",
@@ -285,7 +310,7 @@
   "optimizer": [
     {
       "type": "optimizer",
-      "image": "proxywar-coworld-local:coworld-3e7e218fc73f",
+      "image": "proxywar-coworld-local:coworld-bfc17fcd56f2",
       "run": [
         "node",
         "/app/integration/src/proxywar-optimizer-plan.mjs"
