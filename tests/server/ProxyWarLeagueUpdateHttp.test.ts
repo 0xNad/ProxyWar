@@ -535,6 +535,29 @@ describe("league update HTTP contract", () => {
     expect(body).toContain('href="/league"');
   });
 
+  test("a malformed /bet/:id never falls back to the stale /league copy — same themed 404 as the generic catch-all (wave-4 scope check, 2026-08-02)", async () => {
+    // /bet/:id (BettingPremierePage's page route) only matches the exact
+    // prem_[a-z0-9]{16,32} shape (ProxyWarPublicArtifacts.ts). A malformed
+    // id doesn't match createReplayPremierePublicPageRouter's own route
+    // either, so it falls through that router's `next()` to this same
+    // wrapper-only gate — isProxyWarPublicPremiereReadPath rejects it,
+    // isProxyWarReplayOrRunPath doesn't cover "/bet/" at all, so it must
+    // land on the SAME themed-404 catch-all as any other unrecognized
+    // path, never a stale copy of bet's own frozen /league mirror.
+    for (const malformedId of [
+      "not-a-premiere-id",
+      "prem_short",
+      "PREM_UPPERCASE1234567",
+    ]) {
+      const response = await rawRequest(origin, `/bet/${malformedId}`);
+      expect(response.status, malformedId).toBe(404);
+      expect(response.headers.location, malformedId).toBeUndefined();
+      const body = response.body.toString("utf8");
+      expect(body, malformedId).toContain("<!doctype html>");
+      expect(body, malformedId).toContain('href="/league"');
+    }
+  });
+
   test("the /proxywar-replay and /openfront-replay aliases redirect only for a run that actually exists, and never echo an unknown run id", async () => {
     // Exercised against the open (non-wrapper) server: in
     // PROXYWAR_LEAGUE_WRAPPER_ONLY mode this alias never even reaches its
