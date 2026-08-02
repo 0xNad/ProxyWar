@@ -1,6 +1,7 @@
 import { html, LitElement, nothing } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { z } from "zod";
+import { afterFirstIdentityBootstrap } from "../../../identity/GuestBootstrapGate";
 import "../components/GithubSignIn";
 import {
   fetchLeagueData,
@@ -108,12 +109,14 @@ export class PremiereAccountPage extends LitElement {
     this.loading = true;
     this.loadError = false;
     try {
-      const response = await fetch("/api/account", {
-        method: "GET",
-        headers: { Accept: "application/json" },
-        credentials: "same-origin",
-        cache: "no-store",
-      });
+      const response = await afterFirstIdentityBootstrap(() =>
+        fetch("/api/account", {
+          method: "GET",
+          headers: { Accept: "application/json" },
+          credentials: "same-origin",
+          cache: "no-store",
+        }),
+      );
       const body: unknown = await response.json().catch(() => null);
       const parsed = accountResponseSchema.safeParse(body);
       if (!response.ok || !parsed.success) {

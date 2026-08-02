@@ -2,6 +2,7 @@ import { html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { z } from "zod";
 import { formatSignedCredits } from "./pnlDisplay";
+import { afterFirstIdentityBootstrap } from "../../../identity/GuestBootstrapGate";
 import { accountProfileUrl } from "../../../platform/playerProfileLink";
 
 /** Octicon "mark-github" path data — same mark used by `GithubSignIn.ts`. */
@@ -108,12 +109,14 @@ export class PremierePointsLeaderboard extends LitElement {
     this.loading = true;
     this.loadError = null;
     try {
-      const response = await fetch("/api/premieres/points/leaderboard", {
-        method: "GET",
-        headers: { Accept: "application/json" },
-        credentials: "same-origin",
-        cache: "no-store",
-      });
+      const response = await afterFirstIdentityBootstrap(() =>
+        fetch("/api/premieres/points/leaderboard", {
+          method: "GET",
+          headers: { Accept: "application/json" },
+          credentials: "same-origin",
+          cache: "no-store",
+        }),
+      );
       const body: unknown = await response.json().catch(() => null);
       const parsed = leaderboardResponseSchema.safeParse(body);
       if (!response.ok || !parsed.success) {

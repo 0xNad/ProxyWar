@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { afterFirstIdentityBootstrap } from "./identity/GuestBootstrapGate";
 import type { GameStartInfo } from "../core/Schemas";
 import {
   readProxyWarClipGenerationCapabilities,
@@ -771,14 +772,17 @@ export class ReplayPremiereServiceClient {
     } catch (error) {
       throw serviceErrorWithPhase(error, "input");
     }
-    const response = await this.postJson(
-      "sessions",
-      this.sessionBootstrapBody,
-      this.sessionIdempotencyKey,
-      sessionResponseSchema,
-      201,
-      false,
-      true,
+    const sessionBootstrapBody = this.sessionBootstrapBody;
+    const response = await afterFirstIdentityBootstrap(() =>
+      this.postJson(
+        "sessions",
+        sessionBootstrapBody,
+        this.sessionIdempotencyKey,
+        sessionResponseSchema,
+        201,
+        false,
+        true,
+      ),
     );
     try {
       this.assertSessionResponseBound(

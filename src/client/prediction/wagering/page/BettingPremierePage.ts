@@ -16,10 +16,20 @@ const MARKET_POLL_INTERVAL_MS = 2_500;
 
 /**
  * Retry delay for a poll that raced the join session's own bootstrap (see
- * `pollOnce`'s `session_required` handling) — short, since it's a one-shot
- * startup race, not a steady-state failure worth the full poll interval.
+ * `pollOnce`'s `session_required`/startup-auth handling) — short, since
+ * it's a one-shot startup race, not a steady-state failure worth the full
+ * poll interval.
  */
 const SESSION_RETRY_DELAY_MS = 200;
+
+/**
+ * Cap on silent startup-auth retries (see `pollOnce`) — bounds a race that
+ * should self-resolve within one or two ticks of `SESSION_RETRY_DELAY_MS`
+ * to a fixed ~1s window, so a GENUINELY broken guest identity (never
+ * recovers) still surfaces as a real, visible error instead of retrying
+ * forever in silence.
+ */
+const STARTUP_AUTH_RETRY_LIMIT = 5;
 
 /**
  * The betting page joins through the exact same client game engine as a
@@ -135,6 +145,10 @@ export class BettingPremiereMarketController {
   private polling = false;
   private started = false;
   private disposed = false;
+  // Bounded count of silent startup-auth retries (see `pollOnce`) — reset
+  // the instant a poll succeeds, so it only ever measures ONE continuous
+  // startup race, never accumulates across the page's whole lifetime.
+  private startupAuthRetryCount = 0;
   // Freshest observed anti-replay freshness bound — echoed back on the
   // NEXT order only (never cached across multiple orders); updated from
   // every poll AND every trade response's own market snapshot.
@@ -235,15 +249,26 @@ export class BettingPremiereMarketController {
       if (this.disposed) return;
       this.applyMarket(marketStateFromService(response.market));
       if (this.overlay !== null) this.overlay.marketLoadError = null;
+      this.startupAuthRetryCount = 0;
     } catch (error) {
       if (this.disposed) return;
-      if (
+      const isStartupAuthRace =
         error instanceof ReplayPremiereServiceError &&
-        error.code === "session_required"
-      ) {
-        // Startup race: this poll starts the instant the projection is
-        // ready, concurrently with the join session's own CSRF bootstrap
-        // — not a real failure. Retry shortly, without flashing an error.
+        (error.code === "session_required" ||
+          // The join session's own POST .../sessions and this poll's GET
+          // .../market/me can land in either order on a cold boot — a
+          // 401/403 here as often means "the guest cookie/CSRF the
+          // session bootstrap is about to (re)establish hasn't landed on
+          // THIS request yet" as it means a real rejection. Indistinguishable
+          // from the outside, so treat it exactly like `session_required`:
+          // a bounded, silent retry, never a flashed raw error code, for
+          // the first `STARTUP_AUTH_RETRY_LIMIT` attempts. Mirrors
+          // `ReplayPremiereRuntime.sendHeartbeat`'s identical 401/403
+          // recovery for the exact same race, one level up the stack.
+          (error.code === "request_rejected" &&
+            (error.status === 401 || error.status === 403)));
+      if (isStartupAuthRace && this.startupAuthRetryCount < STARTUP_AUTH_RETRY_LIMIT) {
+        this.startupAuthRetryCount += 1;
         window.setTimeout(() => void this.pollOnce(), SESSION_RETRY_DELAY_MS);
         return;
       }
