@@ -2185,3 +2185,220 @@ after a natural cycle transition) twice, plus one steady-state click:
 All three converged in low-single-digit seconds with an honest,
 monotonically-climbing (or instant) veil and no throttle applied — the
 exact scenario pass-6/pass-7 reported as broken for 5-12+ minutes.
+
+## 22. Real-league markets voiding 40-57% of the time — root-caused as a generation-budget/variant-design mismatch, stopgap shipped, two cures gated on the operator (void-investigation session, 2026-08-02)
+
+### 22.1 The symptom
+
+QA (pass-7/pass-8, `/tmp/proxywar-qa/`) reported real-league premieres
+freezing at ~65-71% territorial dominance for one leading agent for an
+extended stretch, then resolving `"Voided — no winner declared"` (full
+refund) instead of a winner — 3-of-last-4 recent cycles by QA's count.
+Independently reproduced here at 4-of-7 in the current autocycle window:
+`prem_b9d3b0b31dcb05052273`, `prem_bc2674d0fd498c4a5845`,
+`prem_dd7f1dbda363ae6c4de9`, `prem_174e82b378c1b4ac8f83` all cross-checked
+live via `GET /api/premieres/<id>/settlement` — all `outcome:"refunded"`,
+`winnerSeatId:null`; the interleaved `prem_596522f6fa4d5b08f22e`/
+`prem_492566ce1baabe9a9572`/`prem_1e2a5a64113a68a65fc4` all settled with
+real winners in the same window. A void refunds every bettor's cost basis
+in full and is honestly labeled throughout (no dishonest copy anywhere in
+this investigation) — but a market that refunds nearly half the time is
+still a real product defect, independent of how honestly it's disclosed.
+
+### 22.2 Settlement code is innocent — traced the void trigger to its exact source
+
+`deriveReplayPremierePredictionOutcome` (`ReplayPremiereInteractions.ts`)
+voids with reason `no_winner` iff `result.winner === null` — one condition,
+no other void path was ever observed for these four cycles (the other two
+void reasons, `ambiguous_winner`/`invalid_result`, require a malformed
+*non-null* winner tuple, a different and much rarer failure class). That
+`winner` field is a verbatim passthrough, not independently computed or
+validated by our runtime: `parseHostedReplayPayload`
+(`src/server/agents/CoworldLeagueMirrorCore.ts`) reads `winner_slot`
+straight off the raw Coworld replay payload's own `results` object;
+`PremiereWageringSourceBundle.ts` maps `rosterFile.winnerSlot` (itself
+`replay.winnerSlot` from that same parse, written verbatim into
+`xp-request-roster.json` by `generate-xp-request-episode.ts`) into
+`winnerClientID`, then into the `authoritativeResult.winner` value that
+`ReplayPremierePublication.ts`'s checkpoint/reveal machinery and
+`ReplayPremiereSettlementLedger.ts` all treat as ground truth. Settlement
+is doing exactly what it should with the data generation handed it.
+
+### 22.3 The freeze is real — it's the engine's own win condition, not a playback artifact
+
+The `sixteen-player-ffa-world` Coworld package variant's own manifest
+description (`coworld-adapter/coworld/coworld_manifest_ffa16p.json:410`)
+states the win condition explicitly: *"ending when a player controls 80%
+of the map or the decision-step cap is reached."* `percentageTilesOwnedToWin()`
+confirms 80 for FFA mode (`src/core/configuration/DefaultConfig.ts:597-601`).
+`WinCheckExecution.checkWinnerFFA` (`src/core/execution/WinCheckExecution.ts:80-89`)
+only calls `setWinner` when `ownedPercentage > 80` OR a `maxTimerValue` OR
+its own `HARD_TIME_LIMIT_SECONDS = 170*60` (170 simulated minutes, line 24)
+is reached — the engine's built-in "always eventually pick someone"
+failsafe. `max_decision_steps=300 × turns_per_decision_step=100 = 30,000`
+turns (+ a fixed spawn-phase allotment) caps simulated time at
+`timeElapsed=(ticks-numSpawnPhaseTurns)/10` ≈ **50 simulated minutes** —
+roughly **3.4x short** of the 170-minute failsafe. So when a 16-agent FFA
+stalls below 80% (QA's observed 65-71% plateau — a real, common outcome in
+a large free-for-all where the trailing agents gang up on the leader
+instead of getting eliminated), the episode simply runs out of decision
+budget before either win condition can fire, and `getWinner()` is still
+`null` when Coworld stops. Nothing truncates mid-computation incorrectly;
+nothing in the premiere/checkpoint/staged-release pipeline mishandles a
+completed result — this is the SOURCE match genuinely ending without a
+winner.
+
+### 22.4 Generation side, not runtime — and not a Coworld/engine platform bug either
+
+`~/.proxywar-deploy/premiere-queue/cost-ledger.jsonl` (93 rows) proves the
+cap is hit constantly, not as rare noise: **38/88 (43%)** of successful
+generation runs land on the exact same `turnCount=30400` ceiling (the
+deterministic `max_decision_steps × turns_per_decision_step` + fixed
+spawn-phase turns), with `turnCount` never once exceeding it across all 88
+rows (`min=7700, max=30400`). `PW_QUEUE_MAX_DECISION_STEPS`
+(`generate-premiere-queue.sh`, default `300`) already requests exactly the
+package's own certified ceiling (`"maximum": 300` in
+`coworld_manifest_ffa16p.json`'s JSON Schema) — we are not under-requesting
+budget from Coworld. This is a **self-inflicted mismatch in our own
+certified package config**: the variant's decision-step ceiling (which we
+authored and control) is simply too low for the engine's own 16-agent-FFA
+dynamics (which we also authored and control) to reliably converge to 80%
+within it. Coworld itself ran exactly the budget we asked for and correctly
+reported no winner existed within it — **no evidence supports an operator
+escalation to Softmax on this finding; do not file one.**
+
+### 22.5 Fix shipped: discard no-winner episodes at generation, before they can ever be admitted
+
+Committed `b61d97969` on `claude/product-overhaul`, pushed to `origin`.
+`generate-premiere-queue.sh`'s `attempt_generate()` now reads `winnerSlot`
+out of `xp-request-roster.json` immediately after generation (right after
+the existing `map`/`episode_id`/`xreq_id`/`turn_count` parse) and, if
+`null`, discards the bundle and returns failure through the *existing*
+failure/backoff/`MAX_PER_HOUR`/`MAX_PER_DAY`-bounded retry path
+(`ledger_append failure "no_winner_within_decision_budget" ...`) instead of
+sealing/publishing/admitting a real-money betting market for an episode
+already known, at generation time, to be doomed to void. This moves the
+failure out of the user-facing product entirely — a bettor can no longer
+be offered a market that's going to refund everyone — without touching
+settlement/checkpoint semantics or the definition of a win anywhere.
+`bash -n` clean; the exact `winnerSlot`-discrimination logic (the
+`"null" if d.get("winnerSlot") is None else d.get("winnerSlot")` /
+`[ "$winner_slot" = "null" ]` pairing) was smoke-tested standalone against
+both a null-winner and a real-winner mock roster JSON before shipping.
+
+**Cost tradeoff, explicit and cap-bounded, not unbounded:** since ~43% of
+attempts will now be discarded and retried rather than published, this
+roughly doubles the average number of billed generation attempts needed
+per successfully published bundle. Bounded by the pre-existing
+`PW_QUEUE_MAX_PER_HOUR=4`/`PW_QUEUE_MAX_PER_DAY=80` caps (`generate-
+premiere-queue.sh`) — worst case the ready queue simply lags further
+behind consumption (more exhibition-fallback cycles until it catches up),
+never runaway spend.
+
+### 22.6 Two real cures exist — deliberately NOT implemented here, OPERATOR-PENDING
+
+Both were considered and rejected as out of scope for a unilateral code
+change in this session — they are product/operator decisions, not bugs:
+
+1. **Raise `max_decision_steps` above 300.** This is the Coworld PACKAGE's
+   own certified JSON-Schema ceiling
+   (`coworld_manifest_ffa16p.json`'s `"maximum": 300`), not an env var —
+   raising it means re-certifying the `sixteen-player-ffa-world` package
+   with Coworld/Softmax, an external platform action with its own review
+   process and turnaround, not something shippable from this repo alone.
+   This is the cleaner cure (matches typical episode length to what the
+   engine actually needs to resolve a 16-agent FFA) but needs the operator
+   to actually run that certification.
+2. **Settle a decision-budget stalemate as "leader wins" instead of void.**
+   Mechanically this is exactly the SAME rule `WinCheckExecution`'s own
+   time-limit tiebreak would eventually apply (most tiles owned wins),
+   just applied earlier using tile-ownership data already present in the
+   sealed, hash-verified `GameRecord` — not a fabricated or dishonest
+   outcome in the data-integrity sense. But it is a genuine **product/
+   economics decision**, not a bug fix: it changes who wins money whenever
+   a stalemate occurs (someone holding the leader's shares at the
+   decision-step cap would go from "refunded" to "paid out"), and needs
+   new, honest disclosure copy explaining that a real-league round can
+   settle on a plurality/tiebreak basis rather than an outright 80%
+   conquest — the market's rules, as currently disclosed anywhere in the
+   product, only describe an outright win. Do not implement without that
+   copy and explicit operator sign-off; this was correctly identified and
+   left alone this session.
+
+Until one of these ships, the §22.5 stopgap is the full mitigation: voids
+should become rare (limited to genuine `ambiguous_winner`/`invalid_result`
+data anomalies) rather than a near-majority outcome, but a 16-agent FFA
+that stalemates below 80% within budget will still, correctly, never
+reach a betting market at all under the stopgap — it's silently discarded
+and retried, not fixed at the source.
+
+### 22.7 Deploy + live verification
+
+Deployed per §17.3's model, but for the queue GENERATOR, not the origin
+server — this change never touches the live market. `com.proxywar.betqueue`
+(`launchctl print gui/$UID/com.proxywar.betqueue`) is the launchd job
+running `generate-premiere-queue.sh` as a long-lived, polling bash
+process (`start-proxywar-betqueue.zsh` → `exec /bin/bash
+"$DEPLOY_DIR/generate-premiere-queue.sh"`); like any long-running
+interpreter, it had the OLD script body already parsed into memory and
+would not see the fix until restarted — updating the checked-out file
+alone is not enough. Procedure: `cd ~/.proxywar-deploy/bet-origin && git
+fetch origin claude/product-overhaul` (`git ls-remote` confirmed the true
+tip `b61d97969`, no stale-ref trap this time), `git checkout --detach
+b61d97969bcaa727e97870206e72477a84cb35a6` (confirmed via `git show
+HEAD:generate-premiere-queue.sh` that the `winnerSlot` check landed on
+disk). No `npm run build-prod` needed (raw bash script, no client/server
+TS build in its path) and the live origin/autocycle process was never
+touched. Waited for the in-flight generation attempt that was already
+running under the OLD script (started 21:38:48, a real billed episode
+already submitted to Coworld before the deploy) to finish naturally
+(published 21:53:35) rather than killing a paid-for attempt mid-flight,
+then `launchctl kickstart -k gui/$UID/com.proxywar.betqueue` — confirmed a
+fresh PID and a fresh `starting (...)` banner in `/tmp/pw-bet-queue.log` at
+21:53:55, proving the new script body was actually loaded.
+
+**Live-observed discard/publish ratio, the four real generation attempts
+run after the restart** (`/tmp/pw-bet-queue.log` + cross-checked against
+`cost-ledger.jsonl`, exact rows below):
+
+| Time (UTC) | Result | turnCount | Ledger reason |
+| --- | --- | --- | --- |
+| 22:16:37 | DISCARDED | 30400 (cap) | `no_winner_within_decision_budget` |
+| 22:32:17 | DISCARDED | 30400 (cap) | `no_winner_within_decision_budget` |
+| 22:54:45 | DISCARDED | 30400 (cap) | `no_winner_within_decision_budget` |
+| 23:06:23 | **PUBLISHED** | 14900 (real winner, well under cap) | `success` |
+
+3 of 4 (75%) discarded in this small live sample — directionally consistent
+with (and, on this sample, even higher than) the 43% historical null-rate
+from §22.4's ledger analysis; small-n variance plus this window's roster
+being 18 active policies (vs the historical 14-16) is the likely reason
+it ran hot. The mechanism worked exactly as designed on every single
+attempt: all three `turnCount=30400` (decision-step-cap, `winnerSlot=null`)
+episodes were caught immediately after generation and never sealed,
+published, or admitted; the one real-winner episode (`turnCount=14900`,
+far short of the cap) published through the completely unchanged
+seal/build-source/`pq_publish` path and is now sitting in
+`~/.proxywar-deploy/premiere-queue/ready/` waiting for the next autocycle
+to claim it — end-to-end pipeline health confirmed, not just the discard
+branch in isolation.
+
+**Cost tradeoff observed live, not just predicted:** the real-world
+autocycle log (`/tmp/pw-bet-autocycle.log`) shows the ready queue actually
+ran dry once during this window — `22:32:49 up: prem_09416c8d5c3ef0e075a8`
+/ `match kind: exhibition (fallback - real-league queue was empty, depth
+now 0)` — a direct, visible consequence of discarding 3 doomed episodes in
+a row before the 4th finally produced a winner. This is the exact,
+pre-disclosed tradeoff (§22.5): more exhibition-fallback cycles while the
+queue catches up, in exchange for a real-league market never opening on an
+episode already known to be doomed to void. `cycle-premiere.sh`'s
+pre-existing (unmodified) exhibition-fallback logic absorbed this
+correctly and automatically — no crash, no manual intervention, and the
+live market was never touched or disrupted by this deploy.
+
+Not reached this session: a second full days-long observation window to
+converge the live discard rate closer to the historical 43% baseline (this
+was 4 real, ~13-22-minute, billed attempts — enough to prove the mechanism
+correct end-to-end at both the discard AND publish branches, not enough to
+be a statistically tight rate estimate). The two OPERATOR-PENDING cures in
+§22.6 remain unimplemented and are the actual long-term fix; this stopgap
+is confirmed live and working as designed in the meantime.
