@@ -668,7 +668,7 @@ describe("lobby-page recent Director Cuts module", () => {
     expect(el.textContent).toContain("Agent One");
   });
 
-  it("gates View match / Watch replay links behind the same reveal disclosure as the winner text (P0 fix, live 2026-08-02)", async () => {
+  it("gates View match / Watch replay links behind the same reveal disclosure as the winner text (P0 fix, live 2026-08-02) — no anchor exists in the DOM at all until revealed (P2 defense-in-depth, pass-3 2026-08-02)", async () => {
     stubReadModelFetch(
       readModel({
         matches: [
@@ -697,17 +697,31 @@ describe("lobby-page recent Director Cuts module", () => {
     await flushMicrotasks();
     const details = el.querySelector("details");
     expect(details).not.toBeNull();
+    // Pre-reveal: neither anchor exists ANYWHERE in the DOM, not merely
+    // hidden by <details>'s own display:none — a devtools/source
+    // inspection before ever clicking "Reveal result" finds no href to
+    // the archive page or the replay at all. (The winner text itself
+    // stays inside the collapsed <details> unconditionally, same as
+    // before this fix — this scope is the anchors only.)
+    expect(el.querySelector('a[href="/match/m_recent"]')).toBeNull();
+    expect(
+      el.querySelector('a[href="/ai-league-runs/coworld-run/spectator.html"]'),
+    ).toBeNull();
+
+    // Reveal: opening the <details> (the same state change a real click on
+    // <summary> produces) now renders both anchors as descendants of that
+    // exact <details>. Set `.open` directly + dispatch "toggle" rather than
+    // a synthetic click, since jsdom does not implement the browser's
+    // native <summary>-click-toggles-<details> behavior.
+    (details as HTMLDetailsElement).open = true;
+    details!.dispatchEvent(new Event("toggle"));
+    await flushMicrotasks();
     const matchLink = el.querySelector('a[href="/match/m_recent"]');
     const replayLink = el.querySelector(
       'a[href="/ai-league-runs/coworld-run/spectator.html"]',
     );
     expect(matchLink).not.toBeNull();
     expect(replayLink).not.toBeNull();
-    // The live bug: both links sat as siblings AFTER </details>, so a
-    // visitor who never expanded "Reveal result" could still click
-    // straight through to the ungated /match/:matchId archive page (full
-    // placements) or the replay. Both must now be DESCENDANTS of the same
-    // <details> the winner text is gated behind.
     expect(matchLink!.closest("details")).toBe(details);
     expect(replayLink!.closest("details")).toBe(details);
     expect(details!.textContent).toContain("lobby.winner_announcement");
