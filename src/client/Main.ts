@@ -60,9 +60,9 @@ import {
   replayClipPreviewTarget,
 } from "./ReplayClipControl";
 import {
+  createJoinSyncWatchdog,
   finishReplayLoadingScreen,
   holdReplayLoadingScreenUntilFirstFrame,
-  JOIN_SYNC_TIMEOUT_MS,
   REPLAY_LOADING_SLOW_TIMEOUT_MS,
   runReplayStartup,
   setReplayLoadingProgress,
@@ -1099,13 +1099,25 @@ class Client {
         veilSlowTimer = null;
       }
     };
-    let joinSyncTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
-    const clearJoinSyncTimeout = () => {
-      if (joinSyncTimeoutTimer !== null) {
-        clearTimeout(joinSyncTimeoutTimer);
-        joinSyncTimeoutTimer = null;
-      }
-    };
+    // Honest, INACTIVITY-based join-sync watchdog (not a fixed deadline):
+    // see `createJoinSyncWatchdog`'s own doc for the full rationale --
+    // a catch-up on a backlogged market can legitimately take longer
+    // than JOIN_SYNC_TIMEOUT_MS while still actively converging, so a
+    // fixed one-shot timer used to fire regardless, latching a "Replay
+    // unavailable" failure OVER a sync that was still advancing (the
+    // turn counter kept climbing behind the dishonest error).
+    const joinSyncWatchdog = createJoinSyncWatchdog({
+      onStalled: () => {
+        if (!veilFinished) showReplayLoadingFailure();
+      },
+      onRecovered: () => {
+        // The underlying sync recovered after a latched stall notice --
+        // clear the dishonest-looking failure and resume the honest
+        // veil instead of leaving "Replay unavailable" up over a join
+        // that is actively making progress again.
+        if (!veilFinished) showReplayLoadingScreen("replay_premiere.joining_live");
+      },
+    });
     const onVeilReplayError = () => {
       if (veilFinished) return;
       veilFinished = true;
@@ -1129,7 +1141,7 @@ class Client {
     const finishVeil = () => {
       if (veilFinished) return;
       veilFinished = true;
-      clearJoinSyncTimeout();
+      joinSyncWatchdog.clear();
       releaseVeilHold();
       setReplayLoadingProgress(null);
       finishReplayLoadingScreen();
@@ -1161,11 +1173,7 @@ class Client {
             // rather than hang indefinitely with nothing reachable. Left
             // running (not `veilFinished`-gated) so a join that genuinely
             // finishes late still lifts the veil normally afterward.
-            clearJoinSyncTimeout();
-            joinSyncTimeoutTimer = setTimeout(() => {
-              joinSyncTimeoutTimer = null;
-              if (!veilFinished) showReplayLoadingFailure();
-            }, JOIN_SYNC_TIMEOUT_MS);
+            joinSyncWatchdog.arm();
           }
           return;
         }
@@ -1192,6 +1200,8 @@ class Client {
           return;
         }
         if (veilFinished) return;
+        joinSyncWatchdog.recordProgress(update.currentTurn);
+        if (joinSyncWatchdog.stalled) return;
         setReplayLoadingProgress(
           update.currentTurn === null
             ? translateText("replay_premiere.join_sync_target", {
@@ -1240,7 +1250,7 @@ class Client {
     const cleanupAttempt = () => {
       if (!active) return;
       active = false;
-      clearJoinSyncTimeout();
+      joinSyncWatchdog.clear();
       runtime.dispose();
       if (this.replayPremiereRuntime === runtime) {
         this.replayPremiereRuntime = null;
@@ -1306,13 +1316,21 @@ class Client {
         veilSlowTimer = null;
       }
     };
-    let joinSyncTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
-    const clearJoinSyncTimeout = () => {
-      if (joinSyncTimeoutTimer !== null) {
-        clearTimeout(joinSyncTimeoutTimer);
-        joinSyncTimeoutTimer = null;
-      }
-    };
+    // Honest, INACTIVITY-based join-sync watchdog (not a fixed deadline):
+    // see `createJoinSyncWatchdog`'s own doc / `openReplayPremiere`'s
+    // identical wiring for the full rationale -- a catch-up on a
+    // backlogged market can legitimately take longer than
+    // JOIN_SYNC_TIMEOUT_MS while still actively converging, so a fixed
+    // one-shot timer used to fire regardless, latching a "Replay
+    // unavailable" failure OVER a sync that was still advancing.
+    const joinSyncWatchdog = createJoinSyncWatchdog({
+      onStalled: () => {
+        if (!veilFinished) showReplayLoadingFailure();
+      },
+      onRecovered: () => {
+        if (!veilFinished) showReplayLoadingScreen("replay_premiere.joining_live");
+      },
+    });
     const onVeilReplayError = () => {
       if (veilFinished) return;
       veilFinished = true;
@@ -1336,7 +1354,7 @@ class Client {
     const finishVeil = () => {
       if (veilFinished) return;
       veilFinished = true;
-      clearJoinSyncTimeout();
+      joinSyncWatchdog.clear();
       releaseVeilHold();
       setReplayLoadingProgress(null);
       finishReplayLoadingScreen();
@@ -1362,11 +1380,7 @@ class Client {
             // See openReplayPremiere's identical wiring: independent of
             // the (now-cleared) slow-load timer, and left running so a
             // join that genuinely finishes late still lifts normally.
-            clearJoinSyncTimeout();
-            joinSyncTimeoutTimer = setTimeout(() => {
-              joinSyncTimeoutTimer = null;
-              if (!veilFinished) showReplayLoadingFailure();
-            }, JOIN_SYNC_TIMEOUT_MS);
+            joinSyncWatchdog.arm();
           }
           return;
         }
@@ -1389,6 +1403,8 @@ class Client {
           return;
         }
         if (veilFinished) return;
+        joinSyncWatchdog.recordProgress(update.currentTurn);
+        if (joinSyncWatchdog.stalled) return;
         setReplayLoadingProgress(
           update.currentTurn === null
             ? translateText("replay_premiere.join_sync_target", {
@@ -1438,7 +1454,7 @@ class Client {
     const cleanupAttempt = () => {
       if (!active) return;
       active = false;
-      clearJoinSyncTimeout();
+      joinSyncWatchdog.clear();
       handle.dispose();
       if (this.replayPremiereRuntime === handle.runtime) {
         this.replayPremiereRuntime = null;
