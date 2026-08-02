@@ -19,7 +19,23 @@ COMPETITION_LADDER: list[tuple[int, list[str]]] = [
     (2, ["tournament-2p-pangaea", "tournament-2p-asia"]),
     (4, ["tournament-4p-pangaea", "tournament-4p-asia", "tournament-4p-europe"]),
     (8, ["tournament-8p-pangaea", "tournament-8p-world", "tournament-8p-asia"]),
-    (12, ["tournament-12p-pangaea", "tournament-12p-world"]),
+    (
+        12,
+        [
+            # Battle-tested first (fresh-league round 1 lands on index 0); the
+            # 2026-08-02 additions are ordered by hosted confidence and were
+            # each qualified through the memory-regression gate (80-step native
+            # 12P episode under the hosted heap posture) before shipping.
+            "tournament-12p-pangaea",
+            "tournament-12p-world",
+            "tournament-12p-asia",
+            "tournament-12p-britannia",
+            "tournament-12p-blacksea",
+            "tournament-12p-eastasia",
+            "tournament-12p-northamerica",
+            "tournament-12p-oceania",
+        ],
+    ),
 ]
 
 
@@ -54,9 +70,21 @@ class ProxyWarCommissioner(RulesetStrategyCommissioner):
         variant_id, num_agents = self._fit_ladder_rung(
             len(entries), available_variant_ids, round_number
         )
+        pool = view.pool(rule)
+        pool_config = dict(pool.config)
+        # rolling_window advances by one entrant per episode.  The shared
+        # ceil(entries / seats) minimum assumes disjoint windows, so it can
+        # leave a suffix of the field unscheduled when entries > seats.  Keep
+        # the configured episode floor, but add enough one-seat offsets for
+        # the final entrant to appear.
+        pool_config["num_episodes"] = max(
+            int(pool_config.get("num_episodes", 1)),
+            len(entries) - num_agents + 1,
+        )
+        pool = pool.model_copy(update={"config": pool_config})
 
         return schedule_entries(
-            pool=view.pool(rule),
+            pool=pool,
             primary_entries=entries,
             filler_entries=view.filler_entries(entries),
             num_agents=num_agents,

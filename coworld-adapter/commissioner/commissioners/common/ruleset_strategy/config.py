@@ -100,6 +100,9 @@ class RankingConfig(_ConfigModel):
     result_metadata: dict[str, Any] = Field(default_factory=dict)
     filter_metadata: dict[str, Any] = Field(default_factory=dict)
     ewma_halflife_hours: float = Field(default=2.0, gt=0)
+    ewma_halflife_rounds: float | None = Field(default=None, gt=0)
+    score_scale: float = Field(default=1.0, gt=0)
+    provisional_min_rounds: int = Field(default=0, ge=0)
 
 
 class ChangeMatch(_ConfigModel):
@@ -166,6 +169,9 @@ class LeaderboardScoringConfig(_ConfigModel):
     #        not raw score. Displayed MMR is the conservative ordinal mu - 3*sigma.
     type: Literal["ewma", "mmr"] = "ewma"
     half_life_hours: float = Field(default=2.0, gt=0)
+    half_life_rounds: float | None = Field(default=None, gt=0)
+    score_scale: float = Field(default=1.0, gt=0)
+    provisional_min_rounds: int = Field(default=0, ge=0)
 
 
 class ScoringConfig(_ConfigModel):
@@ -415,6 +421,9 @@ class RulesetStrategyCommissionerConfig(_ConfigModel):
             result_metadata={"score_kind": self.round_score_kind},
             filter_metadata={"score_kind": self.round_score_kind},
             ewma_halflife_hours=self.scoring.leaderboard.half_life_hours,
+            ewma_halflife_rounds=self.scoring.leaderboard.half_life_rounds,
+            score_scale=self.scoring.leaderboard.score_scale,
+            provisional_min_rounds=self.scoring.leaderboard.provisional_min_rounds,
         )
 
     @property
@@ -423,33 +432,56 @@ class RulesetStrategyCommissionerConfig(_ConfigModel):
             return None
         if self.scoring.mechanics is not None:
             return self.scoring.mechanics
-        half_life_hours = self.scoring.leaderboard.half_life_hours
+        leaderboard = self.scoring.leaderboard
+        half_life_hours = leaderboard.half_life_hours
         round_score = self.scoring.round_score
-        if half_life_hours == 2:
+        if (
+            leaderboard.half_life_rounds is None
+            and half_life_hours == 2
+            and leaderboard.score_scale == 1
+            and leaderboard.provisional_min_rounds == 0
+        ):
             return {
                 "rank": RANK_EPISODE_EWMA_SCORING_MECHANICS,
                 "win": WIN_EPISODE_EWMA_SCORING_MECHANICS,
             }.get(round_score, MEAN_SCORE_EWMA_SCORING_MECHANICS)
-        half_life_text = int(half_life_hours) if half_life_hours.is_integer() else half_life_hours
+        if leaderboard.half_life_rounds is not None:
+            half_life_rounds = leaderboard.half_life_rounds
+            half_life_text = int(half_life_rounds) if half_life_rounds.is_integer() else half_life_rounds
+            decay_description = f"an EWMA whose half-life is {half_life_text} completed rounds"
+        else:
+            half_life_text = int(half_life_hours) if half_life_hours.is_integer() else half_life_hours
+            decay_description = f"a {half_life_text}-hour half-life EWMA"
         if round_score == "rank":
-            return (
+            description = (
                 "Rounds rank policies by placement within each episode (N points for the episode winner of an "
                 "N-policy game down to 1 for last, ties sharing the better place), averaged across the episodes "
-                "each policy played. The division leaderboard combines completed rounds with a "
-                f"{half_life_text}-hour half-life EWMA, so newer rounds count more than older rounds."
+                f"each policy played. The division leaderboard combines completed rounds with {decay_description}, "
+                "so newer rounds count more than older rounds."
             )
-        if round_score == "win":
-            return (
+        elif round_score == "win":
+            description = (
                 "Rounds score policies by win rate within each episode (1 for the episode winner, 0 for everyone "
                 "else, a tie for first sharing the win), averaged across the episodes each policy played. The "
-                "division leaderboard combines completed rounds with a "
-                f"{half_life_text}-hour half-life EWMA, so newer rounds count more than older rounds."
+                f"division leaderboard combines completed rounds with {decay_description}, so newer rounds count "
+                "more than older rounds."
             )
-        return (
-            "Rounds rank policies by the average score reported by the game across each policy's episode slots. "
-            "The division leaderboard only uses current average-score round results and combines completed rounds "
-            f"with a {half_life_text}-hour half-life EWMA, so newer rounds count more than older rounds."
-        )
+        else:
+            description = (
+                "Rounds rank policies by the average score reported by the game across each policy's episode slots. "
+                "The division leaderboard only uses current average-score round results and combines completed "
+                f"rounds with {decay_description}, so newer rounds count more than older rounds."
+            )
+        if leaderboard.score_scale != 1:
+            scale = int(leaderboard.score_scale) if leaderboard.score_scale.is_integer() else leaderboard.score_scale
+            description += f" Displayed leaderboard scores are the EWMA multiplied by {scale}."
+        if leaderboard.provisional_min_rounds > 0:
+            rounds = leaderboard.provisional_min_rounds
+            description += (
+                f" Players with fewer than {rounds} valid scored rounds remain provisional and are listed after "
+                "established players regardless of score; this history follows the player across policy versions."
+            )
+        return description
 
     @property
     def migration_divisions(self) -> list[DivisionConfig]:

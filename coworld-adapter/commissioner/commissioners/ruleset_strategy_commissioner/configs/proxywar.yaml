@@ -2,15 +2,18 @@ schedule_interval_minutes: 30
 
 scoring:
   # Per-episode win rate, not raw score: a conquest game's winner is whoever ends the episode
-  # dominant, not whoever racked up the biggest score number, and win rate is directly comparable
-  # whether the episode was a 2p duel or a 12p FFA.
+  # dominant, not whoever racked up the biggest score number. The current-form leaderboard keeps
+  # one continuous history as the population ladder expands through 2p/4p/8p/12p; old-rung evidence
+  # decays under the same rule instead of resetting or being normalized at a rung transition.
   round_score: win
   leaderboard:
-    # MMR (OpenSkill / Plackett-Luce), not an EWMA of raw round scores: the population-aware ladder
-    # (see the custom commissioner) runs Competition episodes at varying seat counts (2/4/8/12) as
-    # the real champion count grows, and only a placement-based skill rating is comparable across
-    # match sizes -- an EWMA of win-rate would conflate "won a 2-way duel" with "won an FFA of 12."
-    type: mmr
+    # Current form is the player-level EWMA of mean round win rate. Twenty-four completed rounds is
+    # about twelve hours at the nominal half-hour cadence. Scores stay on a readable 0-100 scale.
+    # A five-round placement period prevents one lucky first result from leading the established board.
+    type: ewma
+    half_life_rounds: 24
+    score_scale: 100
+    provisional_min_rounds: 5
 
 defaults:
   seating: rolling_window
