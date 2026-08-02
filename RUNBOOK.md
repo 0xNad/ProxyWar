@@ -2017,3 +2017,171 @@ tab — were judged sufficient live evidence for this fix's narrow,
 mechanism-level change). A third click-through against a freshly-ended
 premiere would only be additional confirmation of the identical code path,
 not new information.
+
+## 21. Sixth investigation: the "SPA-transition slow-crawl" was never a product
+defect — a leftover CDP network throttle from the immediately-preceding
+adversarial test, never cleared (crawl-investigation session, 2026-08-02)
+
+### 21.1 The contradiction this session was asked to resolve
+
+Two solid-looking observation sets disagreed. Session A (`RUNBOOK.md` §20,
+`history://spa-transition`) instrumented production + a local fixture, proved
+the ended page's "Go to the live market" anchor performs a REAL top-level
+navigation (fresh `performance.timeOrigin`, fresh CSP nonces — not an in-app
+route swap), fixed a real URL-clobber bug (§20, `513627266`), then live-
+verified the real CTA twice at **351 ms** and **332 ms**. QA (pass-6 +
+pass-7, `/tmp/proxywar-qa/pass-6/` and `pass-7/`) twice observed the SAME
+flow crawl for 5-12+ minutes at an honest climbing percentage, while a plain
+reload of the identical URL issued mid-crawl completed in ~10s. Both sides
+had real evidence; neither was lying or careless in an obvious way. The
+brief was to find the discriminating variable before touching any code.
+
+### 21.2 Every join-mechanism hypothesis was built, tested, and disproven
+
+Reproduced conditions directly rather than guessing, varying one axis at a
+time against BOTH live production (`bet.proxywar.xyz`, real cycles, real
+Cloudflare tunnel) and a local two-premiere fixture (port 8813, built via
+`premiere:controlled-exhibition` + `replay-premiere-admit.ts`, following
+§3-6's documented incantation):
+
+- **Backlog size at click time.** Cold `tab.goto()` joins were timed against
+  live production premieres aged from 0 to 15+ minutes (turn backlogs from
+  ~300 to **9,318 turns**) — every one converged to a full trading UI in
+  **0.6-4.2 s**. Directly contradicts "large backlog causes the crawl":
+  QA's own pass-7 crawl target had a comparable (~7,000-7,900 turn) backlog
+  at click time.
+- **Cold-URL nav vs. same-origin anchor click vs. the REAL ended-page CTA.**
+  All three mechanisms — `tab.goto()`, a synthetic same-origin `<a>` click
+  with a real `document.referrer`/`Sec-Fetch-Site: same-origin`, and a
+  literal click on `PremiereEndedPage`'s real "Go to the live market"
+  anchor reached via a genuine bootstrap 404 — converged in 0.6-4.1 s at
+  backlogs up to ~9,300 turns, on both production and the local fixture.
+  No code path distinguishes CTA-arrival from direct-URL-arrival
+  (`Main.ts`'s `openBettingPremiere` has no `document.referrer`/
+  `sessionStorage` branch — confirmed by grep, not assumed).
+- **Server-side cold-start / cycle-transition contention.** Read
+  `cycle-premiere.sh`/`autocycle-premiere.sh` in full: the origin process
+  IS fully killed and restarted on every cycle (`stop_origin`/
+  `start_origin` twice per cycle), and `generate-premiere-queue.sh` (a
+  REAL, billed Coworld episode generator, confirmed actively running on
+  this host via `ps`) reactively starts a new ~11-16 min local generation
+  the moment each cycle consumes the queue's one spare item — a real,
+  concurrent, same-host CPU/IO consumer. Directly probed this: a background
+  script fired paired `curl` requests to `bet.proxywar.xyz` (through the
+  tunnel) and `127.0.0.1:8792` (direct) every 2s for 8 minutes starting
+  within 1 minute of a real cycle transition, spanning the exact window
+  a fresh `generate-premiere-queue.sh` attempt was concurrently running
+  (cross-referenced against `~/.proxywar-deploy/premiere-queue/cost-
+  ledger.jsonl`'s timestamps). Tunnel latency stayed 40-110 ms, direct
+  stayed 9-36 ms, the ENTIRE window, records-per-response climbing exactly
+  as expected (capped at `MAX_LIVE_PROJECTION_RECORDS`=1,000) — zero
+  degradation. Cross-referenced Session A's own screenshot timestamps
+  against the autocycle log: their 351/332 ms CTA clicks ALSO landed inside
+  an active concurrent-generation window, ruling out "generation
+  contention" as the discriminator either way.
+- **Local worker/simulation catch-up cost.** Read `LocalServer.ts`'s
+  progressive catch-up (`runPendingProgressiveCatchUp`,
+  `MAX_PROGRESSIVE_CATCH_UP_IN_FLIGHT_TURNS`=4,096) and
+  `ReplayPremiereWorker.worker.ts`'s drain loop — both dispatch/execute as
+  fast as the worker can go, no `setTimeout` real-time pacing anywhere in
+  the catch-up path. Measured directly (not trusted from comments): joins
+  at ~6,800-9,300 turn backlogs converged in 0.6-4.2 s, meaning real
+  per-turn simulation cost for this 16-seat FFA game is sub-millisecond —
+  nowhere near enough to explain a multi-minute crawl at this scale.
+- **Synthetic crowd traffic.** `PROXYWAR_SYNTHETIC_CROWD_ENABLED=true` (as
+  production's `cycle-premiere.sh` always sets) makes no measurable
+  difference — repeated the exact ended-page-CTA repro with the crowd
+  driver active against a ~7,800-turn-backlog target: **1.7 s**.
+- **Server registration model.** Learned along the way (not previously
+  documented): `ReplayPremiereStartup.ts`'s `selectCriticalStartupPlans`
+  registers AT MOST one premiere with the HTTP layer at boot — any
+  "playing"/"checkpoint" plan wins outright over everything else, matching
+  production's real one-premiere-at-a-time behavior exactly (the "old"
+  premiere is never simultaneously reachable — its bootstrap always 404s
+  by the time its ended page is showing, which is WHY `PremiereEndedPage`
+  exists at all). This makes the CTA-click repro path structurally
+  identical to a same-origin-referrer click to whatever's currently
+  registered, which was already covered by the anchor-click tests above.
+
+Every one of these came back clean. Nothing in the join mechanism — network,
+worker, server registration, cold-start timing, referrer/navigation type —
+reproduces a crawl under any condition a real user's browser could encounter.
+
+### 21.3 The actual discriminating variable, found in QA's own evidence
+
+Re-read `/tmp/proxywar-qa/pass-6/timing-notes.txt` line by line instead of
+re-testing further. Its own TASK 1 section runs, in this exact order, in
+what the evidence shows is the same browser tab: three fast cold joins,
+then a deliberate "Throttled-network adversarial test" — `CDP
+Network.emulateNetworkConditions` at 30 kbps/20 kbps/400 ms, then EASED to
+**200 kbps down / 100 kbps up / 200 ms latency**, clicking Retry, watching
+it "climb smoothly ... and complete successfully" — then, with ZERO
+intervening mention of resetting or disabling the network emulation, the
+very next paragraph is "NEW P1 FOUND — SPA-transition join ... can crawl
+indefinitely." `browser-harness` tabs persist across calls/subagents by
+design (`skill://browser-harness`), so the same CDP target plausibly
+carried the still-active 200/100/200 throttle from the adversarial test
+straight into the SPA-transition repro, and — because pass-7 is a later,
+separate agent invocation against the SAME persistent browser-harness
+daemon — straight into pass-7's repro too, hours later, never cleared
+either time.
+
+### 21.4 Confirmation: reproduced the exact symptom by applying ONLY the throttle
+
+Applied the identical `Network.emulateNetworkConditions` values
+(`downloadThroughput: 200*1024/8, uploadThroughput: 100*1024/8, latency:
+200`) via a fresh `CDPSession` to the SAME local-fixture repro that was
+otherwise fast (1.7-4.1 s at comparable backlogs). Result: an honest,
+continuously-climbing, never-erroring crawl — 0%→1%→2%→3%→4%... over
+22+ seconds on a small 4-agent exhibition bundle (which has far smaller
+per-turn payloads than a real 16-seat league match), matching pass-6/
+pass-7's documented shape (percentage climbs smoothly, target turn count
+also drifts upward since it's tracking the live edge, never shows "Replay
+unavailable") exactly. This is the honest-veil behavior §19 built
+deliberately — a genuinely bandwidth-constrained catch-up is SUPPOSED to
+look like this. Independently, QA (`qa-user-2`) reproduced this
+conclusion from their side in parallel: two brand-new tabs never touched
+by any CDP override completed the real ended-page CTA click in **3.2 s**
+and **5.5 s** against ~9.7k/10.2k-turn backlogs — matching this session's
+numbers — and confirmed they had applied and never reset the exact same
+200/100/200 throttle during pass-6's adversarial test. They filed
+`/tmp/proxywar-qa/pass-7/CORRECTION.txt` retracting the "still broken"
+finding.
+
+### 21.5 Conclusion: no code change — the join mechanism is correct
+
+This is NOT a product defect. Every prior fix in this family (§18 transport,
+§18.5 session-reuse, §19 dishonest watchdog, §20 URL-clobber) addressed a
+real, reproducible defect in shipped code; this sixth investigation instead
+disproves the existence of a seventh one. Shipping a "fix" here — e.g.
+inventing server-side throughput work or client-side bandwidth-detection
+logic against a symptom that only ever existed inside one leftover test
+harness setting — would be solving a problem that does not exist in
+production. `HostLobbyModal`'s URL-clobber fix (§20) already gets a real
+user from ended-page CTA to usable trading UI in bounded sub-5-second time
+regardless of backlog, navigation mechanism, cycle-transition timing, or
+synthetic-crowd load, as directly measured above. The only actionable
+finding is a testing-hygiene one: `browser-harness` tabs persist state
+(including CDP network emulation) across calls and even across separate
+agent invocations sharing the same daemon — any adversarial-network test
+MUST explicitly reset it (`Network.emulateNetworkConditions` with
+`downloadThroughput`/`uploadThroughput: -1, latency: 0`, or
+`Network.disable`) before the tab is reused for anything else, or open a
+fresh tab instead of reusing the throttled one.
+
+### 21.6 Live verification (confirms current behavior; no deploy needed)
+
+No commit was made — nothing in `src/` changed. Live-verified anyway,
+against real production, exactly per the brief: real ended-page CTA click,
+timed against the autocycle log, in the riskiest possible window (seconds
+after a natural cycle transition) twice, plus one steady-state click:
+
+| Scenario | Timing vs. autocycle log | Result |
+| --- | --- | --- |
+| Risky-window CTA click #1 | `prem_dd7f1dbda363ae6c4de9` up at 20:21:51 UTC; clicked ~20:21:56 (≈5 s after cycle) | usable trading UI, **639 ms** |
+| Risky-window CTA click #2 (independent fresh tab, same real ended page) | same target, clicked ~20:22:02 (≈11 s after cycle) | usable trading UI, **625 ms** |
+| Steady-state CTA click | same target, ~5,500-turn backlog, clicked at 20:27:33 (≈5.5 min after cycle) | usable trading UI, **2,192 ms** |
+
+All three converged in low-single-digit seconds with an honest,
+monotonically-climbing (or instant) veil and no throttle applied — the
+exact scenario pass-6/pass-7 reported as broken for 5-12+ minutes.
