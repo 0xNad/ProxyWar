@@ -1543,7 +1543,9 @@
     "settings": "Settings",
     "exit": "Leave match",
     "exit_confirmation_betting": "Leave this live match? Trading will stop until you return.",
-    "toolbar_label": "Video playback controls"
+    "toolbar_label": "Video playback controls",
+    "replay_catching_up": "Catching up — turn {rendered} of {total}",
+    "replay_catching_up_tip": "The replay is dispatching turns faster than they've rendered yet. This will clear automatically."
   },
   "lobby": {
     "live_premiere_badge": "Live Premiere",
