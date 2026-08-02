@@ -81,6 +81,10 @@ import {
   ReplayPremiereRuntimeController,
 } from "./ReplayPremiereRuntime";
 import {
+  loadResumableReplayTurn,
+  watchReplayPositionForResume,
+} from "./ReplayPositionPersistence";
+import {
   openBettingPremierePage,
   parseBettingPremiereRoute,
 } from "./prediction/wagering/page/BettingPremierePage";
@@ -1593,6 +1597,41 @@ class Client {
           jumpAfterFirstFrame,
         ),
       );
+    }
+
+    // P2 fix (2026-08-02): refresh-resume for archived Full Replay -- see
+    // ReplayPositionPersistence.ts's own doc. An explicit `?turn=` URL
+    // param (just above) is a deliberate share-link target and always
+    // wins; resume only applies when the visitor arrived with no such
+    // param. Never for `coworld-replay` (a distinct lightweight replay
+    // source with no equivalent "leave and come back" viewing pattern).
+    if (
+      options.source !== "coworld-replay" &&
+      !(previewTarget === null && Number.isFinite(requestedTurn) && requestedTurn > 0)
+    ) {
+      const resumeTurn = loadResumableReplayTurn(runID);
+      if (resumeTurn !== null) {
+        const resumeAfterFirstFrame = () => {
+          this.eventBus.emit(new ReplayJumpToTurnEvent(resumeTurn));
+          document.removeEventListener(
+            "ai-league-replay-frame",
+            resumeAfterFirstFrame,
+          );
+        };
+        document.addEventListener(
+          "ai-league-replay-frame",
+          resumeAfterFirstFrame,
+        );
+        attemptCleanups.push(() =>
+          document.removeEventListener(
+            "ai-league-replay-frame",
+            resumeAfterFirstFrame,
+          ),
+        );
+      }
+    }
+    if (options.source !== "coworld-replay") {
+      attemptCleanups.push(watchReplayPositionForResume(runID));
     }
 
     const hydrateAfterFirstFrame = () => {
