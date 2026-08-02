@@ -1570,3 +1570,118 @@ root, but the live end-to-end click-through on the newly-deployed build
 was not completed before this session's budget ran out. Whoever picks
 this up next: the deploy is already live (or about to go live on the next
 natural cycle) — just click through it.
+
+## 18. The live-join sync collapse on aged matches — root-caused, fixed, and live-verified (LiveSync session, 2026-08-02)
+
+### 18.1 The bug
+
+QA CDP trace (`/tmp/proxywar-qa/pass-3/v-16..v-19`) on a real ~20+ min-old
+match: a fresh page load's `GET .../live-projection?after=-1` catch-up poll
+streamed ~4.7 MB over 26 data events and never completed — the client stuck
+at "Joining live… Syncing to turn X", eventually falling over to permanent
+"Replay unavailable." / "Replay is taking longer than expected…". Root
+cause, confirmed by reading the actual client code (`ReplayPremiereNetwork.ts`),
+not guessed: `DEFAULT_REQUEST_TIMEOUT_MS`/`MAX_REQUEST_TIMEOUT_MS` were BOTH
+hard-capped at **2 000 ms** for every premiere network request — a budget
+sized for small steady-state polls (manifest, empty tap deltas), not a real
+catch-up payload. `MAX_LIVE_PROJECTION_RECORDS` (server) already capped a
+single response at 4 000 records, but 4 000 real Turn records is still
+hundreds of KB to multiple MB uncompressed — structurally unable to
+download+parse inside 2 s on anything but a fast connection. Every poll got
+aborted mid-download, classified `request_failed`/`recoverable: true`, and
+retried — against the IDENTICAL still-too-large response (the cursor never
+advances because nothing was ever appended) — forever, until the INDEPENDENT
+outer `JOIN_SYNC_TIMEOUT_MS` (60 s, `ReplayLoadingScreen.ts`) watchdog gave
+up. This is a pure network-transport defect: the server-authoritative
+`liveVisibleSequence` boundary and its elapsed-clock gate in
+`readLiveProjection` were never touched or at risk.
+
+### 18.2 The fix (transport-level only)
+
+1. `ai-agent-demo-server.ts` mounts `compression()` (gzip/brotli) — the same
+   `compression` package already used in `src/server/Worker.ts`. Real
+   Turn-JSON is highly repetitive; live-measured **8.1x** reduction (see
+   §18.3). Pure transport change: the client's hash/integrity checks run on
+   the transparently-decompressed bytes exactly as before.
+2. `MAX_LIVE_PROJECTION_RECORDS` (`ReplayPremiereRuntimeCoordinator.ts`)
+   4 000 → **1 000** — bounds a single response's worst-case size/latency
+   regardless of compression ratio, trading more round trips for each one
+   being small/fast/reliable (and more frequent honest "Syncing to turn X"
+   progress ticks for a cold join on an aged match).
+3. `ReplayPremiereNetwork.ts`: `DEFAULT_REQUEST_TIMEOUT_MS`/
+   `MAX_REQUEST_TIMEOUT_MS` 2 000 → **10 000 ms** — a realistic budget for a
+   genuine catch-up response, still well inside the 60 s outer join-sync
+   watchdog. `LIVE_PROJECTION_MAX_POLLS_PER_TICK` 64→256,
+   `LIVE_PROJECTION_MAX_DRAIN_POLLS` 4 096→16 384 — raised 4x in lockstep
+   with the smaller per-call cap, so one sync tick's total catch-up capacity
+   is UNCHANGED (256×1 000 = 64×4 000).
+
+Retry-resumes-not-restarts was already correct (each successful poll commits
+straight to `playback` before any later failure can unwind it) — proven by a
+new test with an injected mid-catch-up failure
+(`tests/client/ReplayPremiereNetworkLiveProjectionTap.test.ts`).
+
+### 18.3 Deploy + live before/after proof
+
+Committed `d56a52881` on `claude/product-overhaul`, pushed to `origin`.
+Deploy hit the EXACT §17.3-documented stale-ref trap again — `bet-origin`'s
+`origin` remote is a local `file://` pointer at the canonical checkout, and
+`git fetch origin claude/product-overhaul` reported "up to date" at a stale
+SHA even though `git ls-remote origin claude/product-overhaul` correctly
+showed the true tip; the fetch DID download the object (`git cat-file -t
+<sha>` confirmed), so `git checkout --detach <exact SHA>` (not the branch
+ref) worked as documented. `npm run build-prod` clean (`tsc --noEmit` +
+`vite build`, both exit 0). Picked up by the autocycler's own natural
+restart at 05:48 UTC (never forced mid-market) — served
+`main-huTOBRi5.js`, byte-hash-identical to the local build.
+
+**Real production measurement, same live service, before vs. after**, both
+on real ~15-19 min-old real-league matches (curl, no client-side faking):
+
+| | before (`prem_5db38…`, ~14-19 min in) | after (`prem_b34a1c…`, ~16 min in, `liveVisibleSequence` 22 653) |
+| --- | --- | --- |
+| records/response cap | 4 000 | 1 000 |
+| compression | none | gzip (`content-encoding: gzip`) |
+| bytes/poll | 445 858-9 | 109 008 → **13 494** (8.1x) |
+
+**Real-browser proof against production** (headless CDP session, cold load
+of `/bet/prem_b34a1c0913b87a8fad1a` while it was live and ~16 min in — the
+exact failing repro): "Joining live…" progress climbed HONESTLY the whole
+way (target turn advanced live as the match kept playing during the join:
+11 999→22 647→…→22 753), veil cleared, and a fully usable trading UI (live
+territory map rendering, per-seat market prices, standings, "Your bankroll:
+1,000 cr") was interactive at **7.16 s** — screenshot-confirmed. Before this
+fix, the identical scenario would never have converged (permanent "Replay
+unavailable." after the 60 s watchdog).
+
+Tests: two new tests in `ReplayPremiereNetworkLiveProjectionTap.test.ts`
+(compression wiring measured against a real server + `compression()`
+middleware; retry-resumes-and-boundary-holds with an injected mid-catch-up
+failure); two pre-existing tests in `ReplayPremiereNetwork.test.ts` that
+pinned the OLD 2 s/2 001 ms production ceiling recomputed for the new 10 s/
+10 001 ms one (exact convergence-timing math redone, not just bumped).
+Full replay-premiere suite (900 tests) green; `tsc --noEmit`/`npm run lint`
+clean (0 errors, same warning baseline).
+
+### 18.4 P2, investigated, NOT confirmed: the "Signed in" header
+
+Checked whether `bet.proxywar.xyz`'s header binds `signedIn` to "a session/
+intent cookie exists" (would false-positive for a guest who merely visited
+the sign-in page) rather than "a completed platform link" (correct).
+`BettingIdentityHandoff.ts`'s own class doc and code confirm the latter:
+`GET /api/identity/status`'s `signedIn` reads `BettingPlatformAccountLinkStore
+.getStatus().linked`, which only becomes `true` inside `linkOrMerge` —
+called EXCLUSIVELY from the `/handoff/callback` handler after a real code
+redemption succeeds. `/handoff/start` (clicking "Sign in", reaching the
+platform's consent page) mints only a short-lived, never-linking intent
+cookie. Added a new real two-server end-to-end test
+(`tests/server/PlatformBettingHandoff.test.ts`) that reproduces the EXACT
+reported scenario — reach the platform's `/handoff/start` (a real one-time
+code IS minted, proving the surface was genuinely reached), then abandon
+without ever hitting betting's own `/handoff/callback` — and both
+`/api/identity/status` (`signedIn`) and `/api/premieres/account`
+(`identity.platformLinked`) correctly read `false` throughout. **Not
+confirmed against current code; no fix made.** The new test guards this
+contract going forward. If a future live trace reproduces the symptom with
+an actual CDP network capture (not just a screenshot), re-open with that
+evidence.
