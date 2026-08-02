@@ -215,9 +215,9 @@ export class PointOfViewSelector extends LitElement implements Layer {
     // A manual pan request always resolves to a camera move: a followed
     // player pans/tracks to them (GoToPlayerEvent, unchanged); "Whole
     // board" instead recentres to the literal whole-map fit
-    // (FitWholeMapEvent) — the one-gesture way back out of the portrait
-    // spectator overzoom default (see TransformHandler.centerAll's
-    // PORTRAIT_TARGET_VERTICAL_FILL). The initial silent resolution in
+    // (FitWholeMapEvent) — the one-gesture way back out of the portrait/
+    // landscape spectator overzoom default (see TransformHandler's
+    // SPECTATOR_OVERZOOM_TARGET_FILL).
     // applyInitialSelection() always passes `pan: false`, so this never
     // fires on load — only in direct response to the viewer's own dropdown
     // pick, rail click, or crosshair tap.
