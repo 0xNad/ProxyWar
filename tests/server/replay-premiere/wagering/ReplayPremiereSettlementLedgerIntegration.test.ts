@@ -445,4 +445,38 @@ describe("ReplayPremiereInteractions unattended settlement — real (non-fake) d
     const pointsEntry = await pointsLedger.readParticipant(guestA);
     expect(pointsEntry).not.toBeNull();
   });
+
+  test("real Coworld episodeRequestId shape (a bare UUID, no ereq_ prefix) is accepted — the exact value that 404'd every real settlement before this fix", async () => {
+    // 2026-08-02 production incident, root-caused via a live probe against
+    // the real Coworld API: `PremiereWageringSourceBundle.ts`'s
+    // `rosterFile.episodeRequestId` (fed into `sourceId` here) is
+    // `str(epi.episode_id)` from the Coworld Python SDK's
+    // `get_episode_request()` — a bare UUID, e.g.
+    // `749516f2-4ab4-4fe0-a6ef-1bbc956c5e14`, NEVER `ereq_`-prefixed. The
+    // OLD `EPISODE_REQUEST_ID_PATTERN` (`/^ereq_.../`) rejected every real
+    // one of these via `storedRecordSchema.parse()`, throwing inside
+    // `ReplayPremiereSettlementLedger.recordSettlement` and getting
+    // silently swallowed by `recordSettlementLedgerIfNeeded`'s catch — so
+    // this MUST run against the REAL (non-fake) ledger to catch it; the
+    // `fakeSettlementLedger()` stub used above never validates anything.
+    const settlementLedger = await ReplayPremiereSettlementLedger.open(root);
+    const h = harness(settlementLedger);
+
+    await tradeAndResolve(
+      h,
+      authoritativeResult({
+        winner: ["player", "seat-1"],
+        sourceKind: "coworld_result",
+        sourceId: "749516f2-4ab4-4fe0-a6ef-1bbc956c5e14",
+      }),
+    );
+
+    const record = await settlementLedger.readSettlement(premiereId);
+    expect(record).not.toBeNull();
+    expect(record?.episodeRequestId).toBe(
+      "749516f2-4ab4-4fe0-a6ef-1bbc956c5e14",
+    );
+    expect(record?.matchKind).toBe("real-league");
+    expect(record?.winnerSeatId).toBe("seat-1");
+  });
 });

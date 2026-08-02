@@ -13,7 +13,21 @@ import { z } from "zod";
 
 const PREMIERE_ID_PATTERN = /^prem_[a-z0-9]{16,32}$/;
 const SEAT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
-const EPISODE_REQUEST_ID_PATTERN = /^ereq_[A-Za-z0-9_-]+$/;
+// NOT "ereq_"-prefixed, despite that being the shape of a handful of OTHER
+// "episodeRequestId"-named fields elsewhere in this codebase (a
+// pre-existing naming collision across two different Coworld id spaces —
+// see PremiereWageringXpRequest.ts's CompletedExperienceRequest doc
+// comment). This is fed exclusively from PremiereWageringSourceBundle.ts's
+// `rosterFile.episodeRequestId`, itself `str(epi.episode_id)` from the
+// Coworld Python SDK's `get_episode_request()` — confirmed live against
+// the real Coworld API 2026-08-02: a bare UUID
+// (`749516f2-4ab4-4fe0-a6ef-1bbc956c5e14`), not `ereq_...`. Every real
+// natural settlement failed this exact regex until this fix (see
+// docs/project-state/known-problems.md, 2026-08-02). Same generic
+// opaque-identifier shape as SEAT_ID_PATTERN above and OPAQUE_ID_PATTERN
+// in replay-premiere-ingest-coworld.ts, deliberately not UUID-specific so
+// a future Coworld id-format change doesn't reopen this gap.
+const EPISODE_REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SETTLEMENT_LEDGER_FILE_NAME = "settlement-ledger-v1.json";
 const SCHEMA_VERSION = 1 as const;
 /** Defensive cap on the placements array — real rosters top out around a dozen seats; this only guards against a corrupt/oversized caller. */

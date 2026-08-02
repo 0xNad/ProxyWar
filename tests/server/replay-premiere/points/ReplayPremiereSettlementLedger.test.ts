@@ -6,7 +6,11 @@ import { ReplayPremiereSettlementLedger } from "../../../../src/server/replay-pr
 const premiereOne = "prem_aaaaaaaaaaaaaaaa";
 const premiereTwo = "prem_bbbbbbbbbbbbbbbb";
 
-function winnerRecord(overrides: Partial<Parameters<ReplayPremiereSettlementLedger["recordSettlement"]>[0]> = {}) {
+function winnerRecord(
+  overrides: Partial<
+    Parameters<ReplayPremiereSettlementLedger["recordSettlement"]>[0]
+  > = {},
+) {
   return {
     premiereId: premiereOne,
     episodeRequestId: "ereq_abc123",
@@ -15,7 +19,11 @@ function winnerRecord(overrides: Partial<Parameters<ReplayPremiereSettlementLedg
     winnerSeatId: "seat_1",
     winnerDisplayName: "Aggressive Expander",
     placements: [
-      { seatId: "seat_1", displayName: "Aggressive Expander", placement: 1 as const },
+      {
+        seatId: "seat_1",
+        displayName: "Aggressive Expander",
+        placement: 1 as const,
+      },
       { seatId: "seat_2", displayName: "Defensive Builder", placement: null },
       { seatId: "seat_3", displayName: "Turtle", placement: null },
     ],
@@ -71,8 +79,16 @@ describe("ReplayPremiereSettlementLedger", () => {
         winnerSeatId: null,
         winnerDisplayName: null,
         placements: [
-          { seatId: "seat_1", displayName: "Aggressive Expander", placement: null },
-          { seatId: "seat_2", displayName: "Defensive Builder", placement: null },
+          {
+            seatId: "seat_1",
+            displayName: "Aggressive Expander",
+            placement: null,
+          },
+          {
+            seatId: "seat_2",
+            displayName: "Defensive Builder",
+            placement: null,
+          },
         ],
       }),
     );
@@ -94,7 +110,10 @@ describe("ReplayPremiereSettlementLedger", () => {
     // A retried resolution call reporting a DIFFERENT (wrong) winner must
     // never clobber the first, authoritative record.
     await ledger.recordSettlement(
-      winnerRecord({ winnerSeatId: "seat_2", winnerDisplayName: "Defensive Builder" }),
+      winnerRecord({
+        winnerSeatId: "seat_2",
+        winnerDisplayName: "Defensive Builder",
+      }),
     );
     const read = await ledger.readSettlement(premiereOne);
     expect(read?.winnerSeatId).toBe("seat_1");
@@ -135,12 +154,10 @@ describe("ReplayPremiereSettlementLedger", () => {
     const settlementLedgerRoot = path.join(root, "settlement-ledger-root");
     await fs.mkdir(premiereStateRoot, { recursive: true });
     // Something a real premiere state root would hold, to prove the wipe is real.
-    await fs.writeFile(
-      path.join(premiereStateRoot, "registry.json"),
-      "{}",
-    );
+    await fs.writeFile(path.join(premiereStateRoot, "registry.json"), "{}");
 
-    const ledger = await ReplayPremiereSettlementLedger.open(settlementLedgerRoot);
+    const ledger =
+      await ReplayPremiereSettlementLedger.open(settlementLedgerRoot);
     await ledger.recordSettlement(winnerRecord());
 
     // Exactly what cycle-premiere.sh does to the premiere private state root.
@@ -149,7 +166,8 @@ describe("ReplayPremiereSettlementLedger", () => {
       "premiere-state-root-simulated",
     );
 
-    const reopened = await ReplayPremiereSettlementLedger.open(settlementLedgerRoot);
+    const reopened =
+      await ReplayPremiereSettlementLedger.open(settlementLedgerRoot);
     const read = await reopened.readSettlement(premiereOne);
     expect(read?.winnerDisplayName).toBe("Aggressive Expander");
     expect(read?.outcome).toBe("winner");
@@ -171,10 +189,29 @@ describe("ReplayPremiereSettlementLedger", () => {
   test("rejects an invalid premiere id", async () => {
     const ledger = await ReplayPremiereSettlementLedger.open(root);
     await expect(
-      ledger.recordSettlement(winnerRecord({ premiereId: "not-a-premiere-id" })),
+      ledger.recordSettlement(
+        winnerRecord({ premiereId: "not-a-premiere-id" }),
+      ),
     ).rejects.toThrow(/invalid_premiere_id/);
     await expect(ledger.readSettlement("not-a-premiere-id")).rejects.toThrow(
       /invalid_premiere_id/,
     );
+  });
+
+  test("accepts the real Coworld episodeRequestId shape: a bare UUID, never 'ereq_'-prefixed", async () => {
+    // 2026-08-02 production incident: `EPISODE_REQUEST_ID_PATTERN` used to
+    // require an `ereq_` prefix, but the value actually threaded through
+    // from `PremiereWageringSourceBundle.ts` (Coworld's `get_episode_request()`
+    // `.episode_id` attribute) is a bare UUID — confirmed live against the
+    // real Coworld API. Every real-league settlement's write threw a
+    // ZodError on this exact field until the pattern was fixed.
+    const ledger = await ReplayPremiereSettlementLedger.open(root);
+    await ledger.recordSettlement(
+      winnerRecord({
+        episodeRequestId: "749516f2-4ab4-4fe0-a6ef-1bbc956c5e14",
+      }),
+    );
+    const read = await ledger.readSettlement(premiereOne);
+    expect(read?.episodeRequestId).toBe("749516f2-4ab4-4fe0-a6ef-1bbc956c5e14");
   });
 });
