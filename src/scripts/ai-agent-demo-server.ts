@@ -219,6 +219,7 @@ import {
   ReplayPremierePointsLedger,
   resolveReplayPremierePointsLedgerRoot,
 } from "../server/replay-premiere/points/ReplayPremierePointsLedger";
+import { ReplayPremiereSettlementLedger } from "../server/replay-premiere/points/ReplayPremiereSettlementLedger";
 import { ReplayPremiereAnonymousWriteLimiter } from "../server/replay-premiere/ReplayPremiereAnonymousWriteLimiter";
 import { ReplayPremiereArchivedClipPromoter } from "../server/replay-premiere/ReplayPremiereArchivedClipPromoter";
 import { ReplayPremiereArchiveStore } from "../server/replay-premiere/ReplayPremiereArchiveIndex";
@@ -234,7 +235,10 @@ import {
   ReplayPremiereClips,
   ReplayPremiereRevealAutoClip,
 } from "../server/replay-premiere/ReplayPremiereClips";
-import { premiereClipRepresentativeAnchorTurn } from "../server/replay-premiere/ReplayPremiereContracts";
+import {
+  PREMIERE_ID_PATTERN,
+  premiereClipRepresentativeAnchorTurn,
+} from "../server/replay-premiere/ReplayPremiereContracts";
 import {
   ReplayPremiereError,
   toPublicReplayPremiereFailure,
@@ -425,6 +429,14 @@ const replayPremierePointsLedgerRoot = resolveReplayPremierePointsLedgerRoot();
 export const replayPremierePointsLedger = await ReplayPremierePointsLedger.open(
   replayPremierePointsLedgerRoot,
 );
+// Durable "who won" settlement ledger — beside the points ledger, same
+// root, same atomic write-temp-then-rename convention, its own file (the
+// exact precedent `BettingPlatformAccountLinkStore` already set for a
+// second store sharing this root). Survives `cycle-premiere.sh`'s state-
+// root wipe for the same reason the points ledger does: this root is
+// outside it. See `ReplayPremiereSettlementLedger`'s doc comment.
+export const replayPremiereSettlementLedger =
+  await ReplayPremiereSettlementLedger.open(replayPremierePointsLedgerRoot);
 // Betting's link to the platform account authority — proxywar.xyz is
 // the sole account/session authority now (see the platform build's
 // contract), so betting never talks to GitHub directly and never writes a
@@ -564,6 +576,7 @@ const replayPremiereProduction = await startReplayPremiereProduction({
   // checkpoint-gated) for local/dev testing.
   wageringEnabled: envFlag("PROXYWAR_WAGERING_ENABLED"),
   pointsLedger: replayPremierePointsRecorder,
+  settlementLedger: replayPremiereSettlementLedger,
   // Deterministic, seeded synthetic bettors that keep a thin local/dev
   // market legible for demos/tester sessions. Requires PROXYWAR_WAGERING_ENABLED=1
   // too. Off by default, never for production.
@@ -1199,6 +1212,38 @@ app.get("/api/premieres/account", async (req, res) => {
         currentPremiere,
       },
     });
+  } catch (error) {
+    sendReplayPremiereFailure(res, error);
+  }
+});
+
+// Narrow, public "who won" read for a premiere whose market has already
+// settled — see `ReplayPremiereSettlementLedger`'s class doc for the
+// durability/scope reasoning and `PremiereEndedPage.ts` for the one
+// caller. Public data, deliberately no guest bootstrap/cookie: the winner
+// was always public the instant the market settled, and this route never
+// exposes anything narrower than that (no episode payloads, no turn
+// data, no per-viewer position). 404 for an id with no recorded
+// settlement — a pre-feature premiere, an unsettled/void-without-refund
+// premiere state that never reaches this ledger, or simply a bad id; the
+// three are indistinguishable on purpose (nothing here should hint at
+// whether an id is real).
+app.get("/api/premieres/:id/settlement", async (req, res) => {
+  if (!pointsRoutesEnabled) {
+    res.status(404).json({ error: { code: "PREMIERE_UNAVAILABLE" } });
+    return;
+  }
+  res.setHeader("Cache-Control", "no-store, max-age=0");
+  try {
+    const premiereId = req.params.id;
+    const record = PREMIERE_ID_PATTERN.test(premiereId)
+      ? await replayPremiereSettlementLedger.readSettlement(premiereId)
+      : null;
+    if (record === null) {
+      res.status(404).json({ error: { code: "SETTLEMENT_NOT_FOUND" } });
+      return;
+    }
+    res.status(200).json({ schemaVersion: 1, settlement: record });
   } catch (error) {
     sendReplayPremiereFailure(res, error);
   }

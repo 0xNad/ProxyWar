@@ -269,6 +269,34 @@ export interface ReplayPremiereSettlementPointsRecorder {
   ): Promise<void>;
 }
 
+/**
+ * Durable sink for "who won, and what did the market close at" — see
+ * `ReplayPremiereSettlementLedger` for the storage reasoning. Duck-typed
+ * here, same as `ReplayPremiereSettlementPointsRecorder` above, so this
+ * module never imports that concrete class. `recordSettlement` MUST be
+ * idempotent per `premiereId`: invoked once per resolution call, and
+ * prediction resolution's own idempotent replay can legitimately invoke
+ * it again for an already-settled premiere.
+ */
+export interface ReplayPremiereSettlementLedgerRecorder {
+  recordSettlement(record: {
+    premiereId: string;
+    episodeRequestId: string | null;
+    matchKind: "real-league" | "exhibition";
+    outcome: "winner" | "refunded";
+    winnerSeatId: string | null;
+    winnerDisplayName: string | null;
+    placements: readonly {
+      seatId: string;
+      displayName: string;
+      placement: 1 | null;
+    }[];
+    settledAt: string;
+    marketFinalPrices: readonly { seatId: string; price: number }[];
+    totalParticipants: number;
+  }): Promise<void>;
+}
+
 export interface ReplayPremiereInteractionsOptions {
   premiereId: string;
   checkpointDescriptors: readonly [
@@ -315,6 +343,15 @@ export interface ReplayPremiereInteractionsOptions {
    * premiere behaves byte-identically with this unset.
    */
   pointsLedger?: ReplayPremiereSettlementPointsRecorder;
+  /**
+   * Durable cross-premiere settlement-ledger sink. When set and the
+   * market reaches `"settled"`, one immutable record ("who won", final
+   * placements, market closing prices) is written for this premiere
+   * exactly once, the moment predictions resolve (see
+   * `recordSettlementLedgerIfNeeded`). Absent by default — an existing
+   * premiere behaves byte-identically with this unset.
+   */
+  settlementLedger?: ReplayPremiereSettlementLedgerRecorder;
 }
 
 export type ReplayPremiereInteractionSnapshotValidationOptions = Pick<
@@ -680,6 +717,7 @@ export class ReplayPremiereInteractions {
   private readonly admitAnonymousWrite: ReplayPremiereAnonymousWriteAdmission;
   private readonly wageringEnabled: boolean;
   private readonly pointsLedger: ReplayPremiereSettlementPointsRecorder | null;
+  private readonly settlementLedger: ReplayPremiereSettlementLedgerRecorder | null;
   private readonly snapshotValidationOptions: ReplayPremiereInteractionsOptions;
   private mutationQueue: Promise<void> = Promise.resolve();
   private pendingMutations = 0;
@@ -743,6 +781,7 @@ export class ReplayPremiereInteractions {
     this.admitAnonymousWrite = options.admitAnonymousWrite;
     this.wageringEnabled = options.wageringEnabled ?? false;
     this.pointsLedger = options.pointsLedger ?? null;
+    this.settlementLedger = options.settlementLedger ?? null;
     this.snapshotValidationOptions = {
       ...options,
       limits: this.limits,
@@ -1200,6 +1239,7 @@ export class ReplayPremiereInteractions {
       };
     });
     await this.recordSettlementPointsIfNeeded();
+    await this.recordSettlementLedgerIfNeeded(options.result, options.resolvedAt);
     return outcome;
   }
 
@@ -1236,6 +1276,79 @@ export class ReplayPremiereInteractions {
         this.premiereId,
         settlements,
       );
+    } catch {
+      // Best-effort durable side-channel — never fail resolution over it.
+    }
+  }
+
+  /**
+   * Writes the one durable "who won, and what did the market close at"
+   * record for this premiere, once, the moment predictions resolve. A
+   * no-op unless `settlementLedger` was configured and the market has
+   * actually reached `"settled"` — reads `this.state` directly, so this
+   * MUST only be called after `mutate()` has resolved, same requirement
+   * as `recordSettlementPointsIfNeeded`. Safe to call for an
+   * already-recorded premiere: `settlementLedger.recordSettlement` is
+   * itself idempotent per `premiereId`. Never throws — a durable
+   * settlement side-channel failing is never a reason to fail prediction
+   * resolution itself.
+   *
+   * `outcome`/`winnerSeatId` are read off `market.winnerSeatId`, the
+   * SAME value `settleMarket` just derived and already paid out against
+   * — not re-derived from `result.winner` a second time. `null` there
+   * means the market refunded everyone (a void/no-winner/ambiguous-winner
+   * result, or an invalid one — see `deriveReplayPremierePredictionOutcome`),
+   * which is recorded honestly as `outcome: "refunded"` rather than left
+   * unrecorded: "the market voided and refunded you" is real settlement
+   * information, not an absence of one.
+   *
+   * `matchKind`/`episodeRequestId` come from `result.sourceKind`/
+   * `result.sourceId`: for a `"coworld_result"`, `sourceId` IS the
+   * Coworld `episodeRequestId` (`PremiereWageringSourceBundle.ts` sets
+   * `sourceId: rosterFile.episodeRequestId` at seal time) — no separate
+   * provenance plumbing needed. A `"controlled_result"` (house exhibition)
+   * has no episode behind it, so `episodeRequestId` is `null`.
+   */
+  private async recordSettlementLedgerIfNeeded(
+    result: PremiereCanonicalAuthoritativeResult,
+    resolvedAt: string,
+  ): Promise<void> {
+    if (this.settlementLedger === null) return;
+    const market = this.state.market;
+    if (market === null || market.status !== "settled") return;
+    const totalParticipants = Object.entries(market.ledgerGranted).filter(
+      ([participantId, granted]) =>
+        granted > 0 && REAL_GUEST_PARTICIPANT_ID_PATTERN.test(participantId),
+    ).length;
+    const prices = computeMarketPrices(market);
+    const marketFinalPrices = market.outcomeSeatIds.map((seatId, index) => ({
+      seatId,
+      price: prices[index],
+    }));
+    const winnerSeat =
+      market.winnerSeatId === null
+        ? null
+        : (result.seats.find((seat) => seat.seatId === market.winnerSeatId) ??
+          null);
+    try {
+      await this.settlementLedger.recordSettlement({
+        premiereId: this.premiereId,
+        episodeRequestId:
+          result.sourceKind === "coworld_result" ? result.sourceId : null,
+        matchKind:
+          result.sourceKind === "coworld_result" ? "real-league" : "exhibition",
+        outcome: market.winnerSeatId === null ? "refunded" : "winner",
+        winnerSeatId: market.winnerSeatId,
+        winnerDisplayName: winnerSeat?.displayName ?? null,
+        placements: result.seats.map((seat) => ({
+          seatId: seat.seatId,
+          displayName: seat.displayName,
+          placement: seat.won ? (1 as const) : null,
+        })),
+        settledAt: resolvedAt,
+        marketFinalPrices,
+        totalParticipants,
+      });
     } catch {
       // Best-effort durable side-channel — never fail resolution over it.
     }

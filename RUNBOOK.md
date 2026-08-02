@@ -803,6 +803,19 @@ on screen before any click.
   within one working session (only §9's full-directory-delete applies
   between genuinely separate sessions/branches).
 
+### 13.7 Durability pattern reused for settlement data (see §19)
+
+`ReplayPremierePointsLedger.ts`'s storage pattern documented above (rooted
+OUTSIDE the wiped `PROXYWAR_REPLAY_PREMIERE_STATE_ROOT`, flat JSON,
+atomic write-temp-then-rename, no event-sourcing) is exactly what §19's
+new `ReplayPremiereSettlementLedger.ts` mirrors — same root
+(`resolveReplayPremierePointsLedgerRoot()`), its own file
+(`settlement-ledger-v1.json`), same precedent
+`BettingPlatformAccountLinkStore` already set for a second store sharing
+that root. It closes the gap this section's bankroll/points work left
+open: the points ledger only ever recorded a viewer's own net P&L, never
+the market's winner — see §19 for the full account.
+
 ## 14. The false "could not continue" fix, and what's still open (EndRace session)
 
 ### 14.1 Root-caused and fixed: `applyServiceProjection` was the real trigger

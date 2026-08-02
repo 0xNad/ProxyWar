@@ -44,6 +44,7 @@ import {
 import type {
   ReplayPremiereInteractionLimits,
   ReplayPremiereReleasedContext,
+  ReplayPremiereSettlementLedgerRecorder,
   ReplayPremiereSettlementPointsRecorder,
 } from "./ReplayPremiereInteractions";
 import {
@@ -192,6 +193,8 @@ export interface ReplayPremiereProductionStartupOptions {
   wageringEnabled?: boolean;
   /** Durable cross-premiere points-ledger sink — see `ReplayPremiereSettlementPointsRecorder`. Absent by default; no leaderboard recording happens without it. */
   pointsLedger?: ReplayPremiereSettlementPointsRecorder;
+  /** Durable "who won" settlement-ledger sink — see `ReplayPremiereSettlementLedgerRecorder`. Absent by default; no settlement record is written without it. */
+  settlementLedger?: ReplayPremiereSettlementLedgerRecorder;
   /**
    * Deterministic, seeded synthetic bettors trading the same LMSR market
    * real participants use, to keep thin markets legible for demos/tester
@@ -849,6 +852,7 @@ export async function startReplayPremiereProduction(
             interactionLimits: options.interactionLimits,
             wageringEnabled: options.wageringEnabled,
             pointsLedger: options.pointsLedger,
+            settlementLedger: options.settlementLedger,
             syntheticCrowdEnabled: options.syntheticCrowdEnabled,
             syntheticCrowdConfig: options.syntheticCrowdConfig,
             syntheticCrowdPollIntervalMs: options.syntheticCrowdPollIntervalMs,
@@ -944,6 +948,7 @@ export async function startReplayPremiereProduction(
                   interactionLimits: options.interactionLimits,
                   wageringEnabled: options.wageringEnabled,
                   pointsLedger: options.pointsLedger,
+                  settlementLedger: options.settlementLedger,
                   syntheticCrowdEnabled: options.syntheticCrowdEnabled,
                   syntheticCrowdConfig: options.syntheticCrowdConfig,
                   syntheticCrowdPollIntervalMs: options.syntheticCrowdPollIntervalMs,
@@ -1154,6 +1159,7 @@ async function assemblePremiereTarget(options: {
   interactionLimits?: Partial<ReplayPremiereInteractionLimits>;
   wageringEnabled?: boolean;
   pointsLedger?: ReplayPremiereSettlementPointsRecorder;
+  settlementLedger?: ReplayPremiereSettlementLedgerRecorder;
   syntheticCrowdEnabled?: boolean;
   syntheticCrowdConfig?: Partial<SyntheticCrowdConfig>;
   syntheticCrowdPollIntervalMs?: number;
@@ -1226,6 +1232,7 @@ async function assemblePremiereTarget(options: {
       limits: options.interactionLimits,
       wageringEnabled: options.wageringEnabled,
       pointsLedger: options.pointsLedger,
+      settlementLedger: options.settlementLedger,
       admitAnonymousWrite: options.httpRegistry.admitAnonymousWrite,
     },
   });
