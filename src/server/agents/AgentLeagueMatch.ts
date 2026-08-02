@@ -56,6 +56,14 @@ export interface AgentParticipant {
 
 export interface CreateAgentParticipantsOptions {
   brainFactory?: (spec: AgentSpec, index: number) => AgentBrain;
+  /**
+   * Retain type:"turn" server messages only on the primary (index 0) runner.
+   * The mirror and spawn-phase driver read the turn stream from
+   * participants[0] exclusively; every other seat's copy of the whole game's
+   * turn history is dead weight that scales with seats x turns. Non-turn
+   * messages (join/start/error) are always retained on every seat.
+   */
+  retainTurnMessagesPrimaryOnly?: boolean;
 }
 
 export interface AgentLeagueMatchOptions {
@@ -124,6 +132,9 @@ export function createAgentParticipants(
       username: spec.username,
       persistentID: spec.persistentID,
       log,
+      ...(options.retainTurnMessagesPrimaryOnly === true
+        ? { retainTurnMessages: index === 0 }
+        : {}),
     }),
   }));
 }

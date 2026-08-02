@@ -36,18 +36,37 @@ export interface AgentRunnerOptions {
   ip?: string;
   cosmetics?: PlayerCosmetics;
   log: Logger;
+  /** See InProcessAgentSocket — drop type:"turn" from the retained history. */
+  retainTurnMessages?: boolean;
 }
 
 class InProcessAgentSocket extends EventEmitter {
   public readyState: number = WebSocket.OPEN;
   private readonly sentMessages: ServerMessage[] = [];
 
+  /**
+   * `retainTurnMessages: false` drops type:"turn" messages from the retained
+   * history (everything else — join/start/error/... — is kept, so the
+   * synchronous intent-acceptance error scan and the attach handshake are
+   * unaffected). Turn messages are the O(turns) bulk of the history and are
+   * only ever consumed from ONE runner per match (the mirror reads
+   * participants[0]); retaining them on every seat multiplied the whole
+   * game's turn stream by the seat count for nothing — on a 12-seat World
+   * episode that was 11 dead copies of every turn (with each socket's Zod
+   * parse re-materializing its own object tree).
+   */
+  constructor(private readonly retainTurnMessages: boolean = true) {
+    super();
+  }
+
   send(data: unknown, cb?: (err?: Error) => void): void {
     const text = this.toText(data);
     try {
       const parsed = ServerMessageSchema.safeParse(JSON.parse(text));
       if (parsed.success) {
-        this.sentMessages.push(parsed.data);
+        if (this.retainTurnMessages || parsed.data.type !== "turn") {
+          this.sentMessages.push(parsed.data);
+        }
       }
       cb?.();
     } catch (error) {
@@ -110,6 +129,7 @@ export class AgentRunner {
 
   private client: Client | null = null;
   private socket: InProcessAgentSocket | null = null;
+  private readonly retainTurnMessages: boolean;
 
   constructor(options: AgentRunnerOptions) {
     this.agentID = options.agentID ?? generateID();
@@ -119,6 +139,7 @@ export class AgentRunner {
     this.clanTag = options.clanTag ?? null;
     this.ip = options.ip ?? "127.0.0.1";
     this.cosmetics = options.cosmetics;
+    this.retainTurnMessages = options.retainTurnMessages ?? true;
     this.log = options.log.child({
       comp: "agent_runner",
       agentID: this.agentID,
@@ -139,7 +160,7 @@ export class AgentRunner {
       return { status: "already_joined", clientID: this.client.clientID };
     }
 
-    const socket = new InProcessAgentSocket();
+    const socket = new InProcessAgentSocket(this.retainTurnMessages);
     const client = new Client(
       this.initialClientID,
       this.persistentID,

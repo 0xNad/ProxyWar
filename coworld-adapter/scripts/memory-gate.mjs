@@ -129,6 +129,11 @@ const child = spawn(
   process.execPath,
   [
     "--max-old-space-size=640",
+    // --expose-gc + PROXYWAR_MEM_TELEMETRY_FORCE_GC: every [MEM] sample is
+    // taken after a full collection, so the slope fit measures the live set.
+    // Raw (sawtooth) sampling made the fit flip between 2.1 and 13.4 MB/1k
+    // on identical code depending on where GC landed in the run.
+    "--expose-gc",
     "--import",
     "tsx/esm",
     path.join(adapterRoot, "src", "no-docker-coworld-episode.ts"),
@@ -145,6 +150,7 @@ const child = spawn(
       // Per-decision-step [MEM] cadence (~one sample per 100 turns) — the
       // slope fit needs a dense curve, not the sparse hosted default.
       PROXYWAR_MEM_TELEMETRY_EVERY: "1",
+      PROXYWAR_MEM_TELEMETRY_FORCE_GC: "1",
       // The app-shell/replay route checks need a built client bundle; this
       // gate measures episode memory, and certify covers the full container
       // contract (including the built client) on the actual image.
