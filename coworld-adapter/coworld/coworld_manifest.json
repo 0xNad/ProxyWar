@@ -251,7 +251,7 @@
     },
     "runnable": {
       "type": "game",
-      "image": "proxywar-coworld-local:coworld-78bbfd4f0631",
+      "image": "proxywar-coworld-local:coworld-bfc17fcd56f2",
       "run": [
         "node",
         "--max-old-space-size=640",
@@ -282,7 +282,7 @@
   "player": [
     {
       "type": "player",
-      "image": "proxywar-coworld-local:coworld-9f8b668b9f41",
+      "image": "proxywar-coworld-local:coworld-bfc17fcd56f2",
       "run": [
         "node",
         "/app/integration/src/starter-player.mjs"
@@ -297,12 +297,12 @@
   "commissioner": [
     {
       "type": "commissioner",
-      "image": "proxywar-commissioner-local:coworld-4f9aa7c3c37f",
+      "image": "proxywar-commissioner-local:coworld-7f562b4a49c6",
       "run": [],
       "env": {},
       "id": "proxywar-ladder-commissioner",
       "name": "ProxyWar Ladder Commissioner",
-      "description": "Config-driven ruleset_strategy commissioner (Qualifiers self-play crash check -> Competition), with one custom override: each Competition round counts the real distinct champions currently in the league and routes to the largest declared seat count (2/4/8/12) that fits them, then rotates that rung's map pool (Pangaea/Asia/World/Europe) by round number - so the league runs today at 2p, scales up as more committed policies join, and sweeps every map across a season, with no re-publish required. Competition ranks current form as 100 times each player's exponentially weighted mean round win rate, with a 24-completed-round half-life across the continuous population ladder. Players with fewer than five valid scored rounds remain provisional and list after established players; form history follows the player across policy-version upgrades."
+      "description": "Config-driven ruleset_strategy commissioner (Qualifiers self-play crash check -> Competition), with one custom override: each Competition round counts the real distinct champions currently in the league and routes to the largest declared seat count (2/4/8/12) that fits them, then rotates that rung's map pool (Pangaea/Asia/World/Europe) by round number - so the league runs today at 2p, scales up as more committed policies join, and sweeps every map across a season, with no re-publish required. Scoring is win-rate per episode aggregated into an OpenSkill (MMR) rating, since the same league runs episodes of varying size over time and only a placement-based rating is comparable across match sizes."
     }
   ],
   "grader": [],
@@ -310,7 +310,7 @@
   "optimizer": [
     {
       "type": "optimizer",
-      "image": "proxywar-coworld-local:coworld-9f8b668b9f41",
+      "image": "proxywar-coworld-local:coworld-bfc17fcd56f2",
       "run": [
         "node",
         "/app/integration/src/proxywar-optimizer-plan.mjs"
