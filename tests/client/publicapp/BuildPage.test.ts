@@ -416,4 +416,36 @@ describe("build-page", () => {
       "build_page.step7.observatory_explainer",
     );
   });
+
+  it("Step 2 no longer links the retired '/agent-start' exhibition route (t3-02, 2026-08-02)", async () => {
+    // /agent-start 404s on the live app router (only the historical,
+    // maintenance-only ai-agent-demo-server.ts still serves it) — the
+    // callout was removed rather than left pointing at a dead link.
+    const el = mount();
+    await flushMicrotasks();
+    el.querySelectorAll<HTMLButtonElement>('button[aria-current]')[1].click();
+    await flushMicrotasks();
+    expect(el.querySelector('a[href="/agent-start"]')).toBeNull();
+    expect(normalizedText(el)).not.toContain("build_page.step2.exhibition_note");
+    expect(normalizedText(el)).not.toContain("build_page.step2.exhibition_link");
+  });
+
+  it("Step 4 fulfills Step 2's 'linked in Step 4' protocol-reference promise with a real link (t3-02, 2026-08-02)", async () => {
+    const el = mount();
+    await flushMicrotasks();
+    const stepButtons = () =>
+      el.querySelectorAll<HTMLButtonElement>('button[aria-current]');
+    stepButtons()[1].click();
+    await flushMicrotasks();
+    expect(normalizedText(el)).toContain("build_page.step2.byo_desc");
+    stepButtons()[3].click();
+    await flushMicrotasks();
+    const protocolLink = el.querySelector<HTMLAnchorElement>(
+      'a[href="https://github.com/0xNad/ProxyWar/blob/main/coworld-adapter/docs/player-protocol.md"]',
+    );
+    expect(protocolLink).not.toBeNull();
+    expect(normalizedText(el)).toContain(
+      "build_page.step4.protocol_reference_prefix",
+    );
+  });
 });

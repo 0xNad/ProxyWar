@@ -750,6 +750,44 @@ describe("watch-page replay archive", () => {
       ),
     ).toHaveLength(1);
   });
+
+  it("discloses the rolling-window retention cap and shows 'N of M retained' so a filtered-away result reads as expected, not as a hidden cap (t3-01, 2026-08-02)", async () => {
+    stubReadModelAndParticipantsFetch(
+      readModel({
+        matches: [
+          match({ matchId: "m1", completedAt: "2026-06-15T00:00:00.000Z", map: "Alpha" }),
+          match({ matchId: "m2", completedAt: "2026-06-16T00:00:00.000Z", map: "Beta" }),
+          match({ matchId: "m3", completedAt: "2026-06-17T00:00:00.000Z", map: "Gamma" }),
+        ],
+      }),
+    );
+    const el = mount();
+    await flushMicrotasks();
+
+    // Retention disclosure is always visible once any match is retained —
+    // not just after a filter narrows the result to a confusing zero.
+    expect(el.textContent).toContain("watch.archive_retention_note");
+    // Unfiltered: shown === total.
+    expect(el.textContent).toContain(
+      'watch.archive_showing_count:{"shown":3,"total":3}',
+    );
+
+    // Narrow via the real map filter (matches an option's value = "Alpha").
+    const selects = el.querySelectorAll<HTMLSelectElement>("select");
+    const mapSelect = Array.from(selects).find((select) =>
+      Array.from(select.options).some((option) => option.value === "Alpha"),
+    )!;
+    mapSelect.value = "Alpha";
+    mapSelect.dispatchEvent(new Event("change"));
+    await flushMicrotasks();
+
+    // Filtered: shown reflects the narrowed count, total stays the full
+    // retained pool — proving a viewer can tell "filtered away" from
+    // "aged out of the retained window" (the exact gap pass-7 QA found).
+    expect(el.textContent).toContain(
+      'watch.archive_showing_count:{"shown":1,"total":3}',
+    );
+  });
 });
 
 describe("computeDegradedShare", () => {

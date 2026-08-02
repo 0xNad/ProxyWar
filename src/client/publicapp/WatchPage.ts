@@ -466,6 +466,15 @@ export class WatchPage extends LitElement {
               ${translateText("watch.no_completed_matches")}
             </p>`
           : html`
+              <p class="mb-3 text-xs text-ink-muted">
+                ${translateText("watch.archive_retention_note")}
+              </p>
+              <p class="mb-3 text-xs text-ink-muted" role="status">
+                ${translateText("watch.archive_showing_count", {
+                  shown: sorted.length,
+                  total: completed.length,
+                })}
+              </p>
               <details class="mb-4 rounded-md border border-line bg-surface-2">
                 <summary class="cursor-pointer px-3 py-2 text-sm font-semibold text-ink outline-none focus-visible:ring-2 focus-visible:ring-accent">
                   ${translateText("watch.filters_heading")}

@@ -44,7 +44,9 @@ function validateClaimedGithub(raw: string): string | null {
  * 4. Run locally — exact `coworld run-episode --verify-replay` +
  *    STRATEGY/buildState/choose editing, verified against the starter's
  *    actual source (`llm-player.mjs`/`starter-player.mjs`) and
- *    `coworld-adapter/ENTER_THE_LEAGUE.md`.
+ *    `coworld-adapter/ENTER_THE_LEAGUE.md`; also links the full
+ *    `player-protocol.md` decision-contract reference that Step 2's
+ *    bring-your-own-policy option promises.
  * 5. Upload and enter — the real `launch.sh` + `coworld upload-policy` /
  *    `coworld leagues` / `coworld submit` sequence.
  * 6. Verify — a checklist an entrant can actually act on; the backstage
@@ -52,10 +54,11 @@ function validateClaimedGithub(raw: string): string | null {
  *    CI script, not something a builder without repo access can run).
  * 7. Improve — where results/feedback live, next-version workflow.
  *
- * Step 2's "exhibition/beta" callout deliberately points at the SEPARATE
- * `/agent-start` relay/Agent-Card path rather than duplicating it — spec
- * item 2: "reference, don't duplicate... present both honestly, clearly
- * separated."
+ * Step 2 used to also point at a SEPARATE `/agent-start` relay/Agent-Card
+ * exhibition path; that route now 404s on the live app router (it only still
+ * exists under the historical `ai-agent-demo-server.ts`, marked
+ * maintenance-only in AGENTS.md), so the callout was removed rather than
+ * left pointing at a dead link (2026-08-02).
  */
 @customElement("build-page")
 export class BuildPage extends LitElement {
@@ -472,14 +475,6 @@ export class BuildPage extends LitElement {
           </p>
         </div>
       </div>
-      <p class="mt-4 text-xs text-ink-muted">
-        ${translateText("build_page.step2.exhibition_note")}
-        <a
-          href="/agent-start"
-          class="text-cyan-400 underline outline-none hover:text-cyan-300 focus-visible:ring-2 focus-visible:ring-accent"
-          >${translateText("build_page.step2.exhibition_link")}</a
-        >.
-      </p>
     `;
   }
 
@@ -776,6 +771,16 @@ export class BuildPage extends LitElement {
         <li>${translateText("build_page.step4.contract_timeout")}</li>
         <li>${translateText("build_page.step4.contract_degradation")}</li>
       </ul>
+      <p class="mt-4 text-xs text-ink-muted">
+        ${translateText("build_page.step4.protocol_reference_prefix")}
+        <a
+          href="https://github.com/0xNad/ProxyWar/blob/main/coworld-adapter/docs/player-protocol.md"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="text-cyan-400 underline outline-none hover:text-cyan-300 focus-visible:ring-2 focus-visible:ring-accent"
+          >${translateText("build_page.step4.protocol_reference_link")}</a
+        >.
+      </p>
     `;
   }
 

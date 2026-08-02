@@ -1623,6 +1623,8 @@
     "watch_link": "Watch",
     "replay_archive_heading": "Full replay archive",
     "no_completed_matches": "No completed matches in the retained history yet.",
+    "archive_retention_note": "This archive keeps only the most recently completed matches league-wide on a rolling basis — once a match ages out here, no filter or date range can bring it back.",
+    "archive_showing_count": "Showing {shown} of {total} retained matches.",
     "no_filtered_matches": "No matches match the current filters.",
     "filters_heading": "Filter the archive",
     "filter_all": "All",
@@ -2138,9 +2140,7 @@
       "rule_title": "Minimal rule policy",
       "rule_desc": "The same starter repository ships a from-scratch ~80-line example (starter-player.mjs) with no LLM calls at all — edit its chooseAction() function directly. Point the Dockerfile's CMD at starter-player.mjs instead of llm-player.mjs to use it.",
       "byo_title": "Bring an existing Coworld-compatible policy",
-      "byo_desc": "Any container that speaks the decision_request/decision_response websocket contract works — no starter required. See the full protocol reference linked in Step 4.",
-      "exhibition_note": "Looking for the relay/Agent-Card exhibition route instead of the persistent league? That's a separate, beta-only path:",
-      "exhibition_link": "/agent-start"
+      "byo_desc": "Any container that speaks the decision_request/decision_response websocket contract works — no starter required. See the full protocol reference linked in Step 4."
     },
     "step3": {
       "nav_label": "Identity",
@@ -2182,7 +2182,9 @@
       "contract_title": "The decision contract",
       "contract_desc": "Each turn you receive a decision_request with the game state and a list of legal actions, and reply with exactly one legal action's id.",
       "contract_timeout": "15 seconds per decision — answer from a standing plan, refresh expensive reasoning in the background.",
-      "contract_degradation": "Set fallbackUsed / llmPlannerDegraded on a degraded decision — silent fallbacks make losses undiagnosable."
+      "contract_degradation": "Set fallbackUsed / llmPlannerDegraded on a degraded decision — silent fallbacks make losses undiagnosable.",
+      "protocol_reference_prefix": "Full protocol reference — wire format for decision_request/decision_response, the responseContract fields, and the exact websocket route a Coworld player connects to:",
+      "protocol_reference_link": "player-protocol.md on GitHub"
     },
     "step5": {
       "nav_label": "Upload & enter",
