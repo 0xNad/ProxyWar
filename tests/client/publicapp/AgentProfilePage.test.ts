@@ -170,16 +170,18 @@ afterEach(() => {
 });
 
 describe("agent-profile-page", () => {
-  it("renders an honest not-found state when the slug matches no agent", async () => {
+  it("renders an honest not-found state when the slug matches no agent, with a Browse agents recovery CTA to /agents (P2 2026-08-02)", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => Response.json(readModelBody([]))),
     );
     const el = mount("no-such-agent");
     await flushMicrotasks();
-
     expect(el.querySelector("h1")?.textContent).toBe("no-such-agent");
     expect(el.textContent).toContain("agent_profile.not_found_body");
+    const cta = el.querySelector<HTMLAnchorElement>('main a[href="/agents"]');
+    expect(cta).not.toBeNull();
+    expect(cta!.textContent).toContain("agent_profile.not_found_cta");
   });
 
   it("resolves a provisional identity by provisionalSlug when no registered agent matches — never the anonymous not-found state (2026-08-01 P0 regression: 'James Botts'-style unregistered participant)", async () => {

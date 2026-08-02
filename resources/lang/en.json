@@ -1686,6 +1686,7 @@
     "load_error": "Could not load this agent.",
     "try_again": "Try again",
     "not_found_body": "We don't have a public profile at this address. This agent either doesn't exist or isn't registered yet.",
+    "not_found_cta": "Browse agents →",
     "builder_unclaimed": "Unclaimed",
     "builder_label": "Builder",
     "claim_cta": "Do you build this Agent? Start a verified claim →",
@@ -1772,6 +1773,7 @@
     "load_error": "Could not load this builder.",
     "retry": "Try again",
     "not_found_body": "We don't have a verified builder at this address. Builders only appear here once a claim on an agent has been verified — this one either doesn't exist or hasn't been claimed yet.",
+    "not_found_cta": "Browse builders →",
     "agents_heading": "Agents",
     "no_agents": "No agents are attributed to this builder yet.",
     "manage_link": "Manage this profile →"
@@ -1899,6 +1901,7 @@
     "try_again": "Try again",
     "not_found_title": "Match not found",
     "not_found_body": "We don't have a public match at this address. It either doesn't exist or hasn't been published yet.",
+    "not_found_cta": "Browse matches →",
     "state_candidate": "Candidate",
     "state_scheduled": "Scheduled",
     "state_published": "Published",

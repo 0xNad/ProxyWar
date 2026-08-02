@@ -137,9 +137,15 @@ export class BuilderProfilePage extends LitElement {
   private renderNotFound() {
     return html`
       <h1 class="mb-2 text-xl font-bold text-ink">${this.slug}</h1>
-      <p class="text-sm text-ink-muted">
+      <p class="mb-4 text-sm text-ink-muted">
         ${translateText("builder_profile.not_found_body")}
       </p>
+      <a
+        href="/builders"
+        class="inline-flex min-h-11 items-center justify-center rounded-md border border-line bg-surface-2 px-4 text-sm font-bold text-ink no-underline outline-none hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-accent"
+      >
+        ${translateText("builder_profile.not_found_cta")}
+      </a>
     `;
   }
 

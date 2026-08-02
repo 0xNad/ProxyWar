@@ -1530,6 +1530,7 @@ app.get("/trader/:accountId", async (_req, res) => {
 async function sendPublicAppShellPage(
   res: Response,
   failureLabel: string,
+  status = 200,
 ): Promise<void> {
   try {
     const appShell = await getAppShellContent(
@@ -1544,7 +1545,7 @@ async function sendPublicAppShellPage(
       ),
     );
     setHtmlNoCacheHeaders(res);
-    res.send(nonceInlineScripts(appShell, scriptNonce));
+    res.status(status).send(nonceInlineScripts(appShell, scriptNonce));
   } catch (error) {
     console.error(
       `Failed to serve ${failureLabel}: ${
@@ -1745,6 +1746,54 @@ async function resolveMatchDetailPageMetadata(
   };
 }
 
+/**
+ * Best-effort agent/builder slug existence check for the /agent/:slug and
+ * /builder/:slug status-code-parity fix (P2, 2026-08-02): reads the SAME
+ * `read-model.json` `AgentProfilePage.ts`/`BuilderProfilePage.ts` already
+ * fetch client-side, replicating each page's own `load()` match rule
+ * exactly — a registered agent's `slug`, OR (agents only) any
+ * UNREGISTERED agent's `provisionalSlug` (see `AgentProfilePage.ts`'s own
+ * doc for why a live provisional identity must resolve too, same as
+ * `loadAnalyticsMatchLabels` above reads this file). Never throws and a
+ * read/parse failure returns `null` rather than empty sets — the route
+ * handlers below treat that as "can't tell", degrading to 200 (serve
+ * normally) rather than falsely 404ing a page that might be real.
+ */
+async function loadReadModelSlugSets(): Promise<{
+  agentSlugs: Set<string>;
+  builderSlugs: Set<string>;
+} | null> {
+  try {
+    const raw = await fs.readFile(
+      path.join(runsRootDir, "league", "read-model.json"),
+      "utf8",
+    );
+    const parsed = JSON.parse(raw) as { agents?: unknown; builders?: unknown };
+    const agentSlugs = new Set<string>();
+    for (const entry of Array.isArray(parsed.agents) ? parsed.agents : []) {
+      const agent = entry as {
+        slug?: unknown;
+        registered?: unknown;
+        provisionalSlug?: unknown;
+      };
+      if (typeof agent.slug === "string") agentSlugs.add(agent.slug);
+      if (
+        agent.registered === false &&
+        typeof agent.provisionalSlug === "string"
+      ) {
+        agentSlugs.add(agent.provisionalSlug);
+      }
+    }
+    const builderSlugs = new Set<string>();
+    for (const entry of Array.isArray(parsed.builders) ? parsed.builders : []) {
+      const builder = entry as { slug?: unknown };
+      if (typeof builder.slug === "string") builderSlugs.add(builder.slug);
+    }
+    return { agentSlugs, builderSlugs };
+  } catch {
+    return null;
+  }
+}
 // Serves `/match/:matchId` — same `public.html` shell as every other
 // `sendPublicAppShellPage` route, but with per-match OG/social metadata
 // spliced into `<head>` (title, description, canonical, `og:*`,
@@ -1781,8 +1830,14 @@ async function sendMatchDetailPageShell(
       ),
     );
     setHtmlNoCacheHeaders(res);
+    // P2 status-code-parity fix (2026-08-02): `metadata === null` means
+    // `resolveMatchDetailPageMetadata` couldn't resolve this id to a real,
+    // revealed record — the SAME condition `MatchDetailPage.ts`'s client
+    // renders its own honest not-found state for. A crawler or health
+    // check must see a genuine 404, not a 200 for a page whose only
+    // content is "not found" (see item 2 of the 2026-08-02 P2 batch).
     if (metadata === null) {
-      res.send(nonceInlineScripts(appShell, scriptNonce));
+      res.status(404).send(nonceInlineScripts(appShell, scriptNonce));
       return;
     }
     const canonicalUrl = new URL(
@@ -1866,14 +1921,24 @@ app.get("/watch", async (_req, res) => {
 app.get("/agents", async (_req, res) => {
   await sendPublicAppShellPage(res, "the agents directory");
 });
-app.get("/agent/:slug", async (_req, res) => {
-  await sendPublicAppShellPage(res, "the agent profile page");
+app.get("/agent/:slug", async (req, res) => {
+  // P2 status-code-parity fix (2026-08-02): see `loadReadModelSlugSets`'s
+  // own doc — `null` means "can't tell", never a false 404.
+  const slugs = await loadReadModelSlugSets();
+  const status =
+    slugs !== null && !slugs.agentSlugs.has(req.params.slug) ? 404 : 200;
+  await sendPublicAppShellPage(res, "the agent profile page", status);
 });
 app.get("/builders", async (_req, res) => {
   await sendPublicAppShellPage(res, "the builders directory");
 });
-app.get("/builder/:slug", async (_req, res) => {
-  await sendPublicAppShellPage(res, "the builder profile page");
+app.get("/builder/:slug", async (req, res) => {
+  // P2 status-code-parity fix (2026-08-02): see `loadReadModelSlugSets`'s
+  // own doc — `null` means "can't tell", never a false 404.
+  const slugs = await loadReadModelSlugSets();
+  const status =
+    slugs !== null && !slugs.builderSlugs.has(req.params.slug) ? 404 : 200;
+  await sendPublicAppShellPage(res, "the builder profile page", status);
 });
 app.get("/match/:matchId", async (req, res) => {
   await sendMatchDetailPageShell(req, res);
