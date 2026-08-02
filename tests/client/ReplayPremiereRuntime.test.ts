@@ -325,6 +325,89 @@ describe("ReplayPremiereRuntimeController", () => {
     runtime.dispose();
   });
 
+  it("joins cleanly when the server hands back a REUSED live session (new tab / cold reload for an existing participant) instead of a freshly-created one", async () => {
+    // Root cause of a real production P0: a participant with an existing
+    // live session for this premiere (an already-open tab, or a session
+    // sessionStorage lost track of) gets that EXISTING session back from
+    // `POST /sessions` — `created: false`, and its `idempotencyKey` is
+    // necessarily the ORIGINAL request's, never this fresh page load's own
+    // randomly-generated one (see `ReplayPremiereInteractions.
+    // createViewerSession`'s participant-scoped convergence branch, and
+    // `ReplayPremiereSessionConvergence.test.ts` for the server-side half
+    // of this proof). The client used to unconditionally require
+    // `session.idempotencyKey === (what I just sent)`, latching a fatal
+    // `integrity_failure` for this entirely legitimate, intentional server
+    // behavior — stranding the join forever with no retry (the exact
+    // "Joining live..." hang QA reproduced). This must now converge.
+    const reusedSession = viewerSession({
+      idempotencyKey: `idem_${"ff".repeat(16)}`,
+      startedAt: "2026-07-20T17:40:00.000Z",
+      lastHeartbeatAt: STARTED_AT,
+      connectedDurationMs: 1_251_040,
+      firstReleasedSequenceObserved: -1,
+    });
+    const fetchMock = vi.fn(
+      (_input: RequestInfo | URL, _init?: RequestInit): Promise<Response> =>
+        Promise.resolve(
+          jsonResponse(
+            { ...sessionResponse("playing"), session: reusedSession, created: false },
+            201,
+          ),
+        ),
+    );
+    const service = new ReplayPremiereServiceClient({
+      premiereId: PREMIERE_ID,
+      origin: window.location.origin,
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      // Deliberately DIFFERENT from `reusedSession.idempotencyKey` above —
+      // this IS the fresh page load's own randomly-generated key, distinct
+      // from whatever request originally created the session being reused.
+      randomBytes: () => new Uint8Array(16).fill(2),
+    });
+    let callbacks!: ReplayPremiereNetworkCallbacks;
+    const onJoin = vi.fn();
+    const models: ReplayPremiereOverlayModel[] = [];
+    const runtime = new ReplayPremiereRuntimeController({
+      premiereId: PREMIERE_ID,
+      onJoinReady: onJoin,
+      dependencies: {
+        windowRef: window,
+        documentRef: document,
+        serviceFactory: () => service,
+        networkFactory: (options) => {
+          callbacks = options.callbacks;
+          return {
+            start: vi.fn(async () => ({ status: "active" })),
+            syncOnce: vi.fn(async () => ({ status: "active" })),
+            dispose: vi.fn(),
+          };
+        },
+        overlayFactory: (model) => {
+          models.push(model);
+          return {
+            element: document.createElement("aside"),
+            hydrate(nextModel) {
+              models.push(nextModel);
+            },
+            dispose: vi.fn(),
+          };
+        },
+      },
+    });
+
+    const started = runtime.start();
+    await callbacks.onReady?.(projection("playing"));
+    await started;
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(onJoin).toHaveBeenCalledOnce();
+    expect(models.at(-1)).toMatchObject({
+      state: "playing",
+      failureCode: null,
+    });
+    runtime.dispose();
+  });
+
   it("retries a transient heartbeat within one second without latching a fatal state", async () => {
     vi.useFakeTimers();
     const heartbeat = vi
@@ -4553,6 +4636,7 @@ function sessionResponse(
     schemaVersion: 2,
     csrfToken: CSRF_TOKEN,
     session: viewerSession(),
+    created: true,
     premiereState,
     checkpoints: [checkpoint("cp_12345678", 10), checkpoint("cp_abcdef12", 20)],
     incomingMoment: null,

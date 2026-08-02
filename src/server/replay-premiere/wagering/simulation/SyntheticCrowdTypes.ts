@@ -125,7 +125,7 @@ export interface SyntheticCrowdMarketTarget {
     observedSequence: number;
     excludedAsOperator: boolean;
     excludedAsBot: boolean;
-  }): Promise<{ id: string }>;
+  }): Promise<{ session: { id: string } }>;
   submitMarketOrder(options: {
     participantId: string;
     participantKind: "real" | "synthetic";

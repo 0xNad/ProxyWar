@@ -318,6 +318,14 @@ const sessionResponseV1Schema = z
     schemaVersion: z.literal(1),
     csrfToken: z.string().min(1).max(512).regex(CSRF_PATTERN),
     session: viewerSessionSchema,
+    // False whenever `session` was NOT created by THIS request — a
+    // reused-live-session (new tab / cold reload for an existing
+    // participant) or an exact idempotent replay both hand back a session
+    // an EARLIER request created, whose `idempotencyKey` therefore never
+    // matches this request's own. `assertSessionResponseBound` only
+    // enforces `session.idempotencyKey === idempotencyKey` when `created`
+    // is true — see `ReplayPremiereInteractions.ts#createViewerSession`.
+    created: z.boolean(),
     premiereState: premiereLifecycleStateSchema,
     checkpoints: checkpointPairSchema,
     incomingMoment: incomingMomentSchema.nullable(),
@@ -1653,8 +1661,18 @@ export class ReplayPremiereServiceClient {
     const { session } = response;
     if (
       session.premiereId !== binding.premiereId ||
-      session.idempotencyKey !== idempotencyKey ||
-      session.firstReleasedSequenceObserved !== input.observedSequence ||
+      // Only a genuinely-fresh creation guarantees the returned session's
+      // idempotencyKey is the one THIS request sent. A reused-live-session
+      // (new tab / cold reload for an existing participant — see
+      // `ReplayPremiereInteractions.ts#createViewerSession`'s
+      // participant-scoped convergence branch) or an exact idempotent
+      // replay both correctly hand back an EARLIER request's session,
+      // carrying THAT request's own key — comparing it against this
+      // request's freshly-randomized key would reject a legitimate,
+      // intentional resumption path as an integrity violation.
+      (response.created && session.idempotencyKey !== idempotencyKey) ||
+      (response.created &&
+        session.firstReleasedSequenceObserved !== input.observedSequence) ||
       session.lastReleasedSequenceObserved < input.observedSequence ||
       session.visibleDurationMs > session.connectedDurationMs ||
       Date.parse(session.lastHeartbeatAt) < Date.parse(session.startedAt) ||

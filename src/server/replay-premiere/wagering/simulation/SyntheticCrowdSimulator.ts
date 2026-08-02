@@ -214,7 +214,7 @@ export class SyntheticCrowdSimulator {
     }
     try {
       if (bettor.sessionId === null) {
-        const session = await this.target.createViewerSession({
+        const { session } = await this.target.createViewerSession({
           participantId: bettor.participantId,
           idempotencyKey: this.nextIdempotencyKey(bettor, "sess"),
           requesterBucketId: bettor.requesterBucketId,

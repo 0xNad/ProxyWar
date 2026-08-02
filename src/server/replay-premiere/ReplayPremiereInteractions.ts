@@ -1892,6 +1892,18 @@ export class ReplayPremiereInteractions {
     });
   }
 
+  /**
+   * Returns `created: false` whenever `session.idempotencyKey` does NOT
+   * belong to THIS request — both the exact-idempotency-replay branch and
+   * the reused-live-session convergence branch below hand back a session
+   * some EARLIER request (possibly a different tab, possibly minutes ago)
+   * created, carrying THAT request's own idempotencyKey, never this one's.
+   * `created: true` only for the genuinely-new branch, where the returned
+   * session's idempotencyKey is guaranteed to equal `options.idempotencyKey`.
+   * The caller (`ReplayPremiereHttp.ts`) must surface this on the wire —
+   * see `ReplayPremiereRuntime.ts`'s `assertSessionResponseBound`, which
+   * only enforces exact idempotencyKey equality when `created` is true.
+   */
   async createViewerSession(options: {
     participantId: string;
     idempotencyKey: string;
@@ -1901,7 +1913,7 @@ export class ReplayPremiereInteractions {
     excludedAsOperator: boolean;
     excludedAsBot: boolean;
     incomingAttribution?: ReplayPremiereShareAttribution | null;
-  }): Promise<ReplayPremiereViewerSession> {
+  }): Promise<{ session: ReplayPremiereViewerSession; created: boolean }> {
     this.assertWritesOpen();
     const occurredAt = this.nowChecked().toISOString();
     assertParticipantId(options.participantId);
@@ -1917,7 +1929,10 @@ export class ReplayPremiereInteractions {
       occurredAt,
       currentPremiereRecordCount: premiereRecordCount(this.state),
     });
-    return this.mutate("viewer_session_started", occurredAt, (next) => {
+    return this.mutate<{
+      session: ReplayPremiereViewerSession;
+      created: boolean;
+    }>("viewer_session_started", occurredAt, (next) => {
       assertParticipantId(options.participantId);
       assertIdempotencyKey(options.idempotencyKey);
       assertRequesterBucketId(options.requesterBucketId);
@@ -1952,7 +1967,7 @@ export class ReplayPremiereInteractions {
           throw conflict("session_idempotency_conflict");
         }
         return {
-          result: clone(existingSession),
+          result: { session: clone(existingSession), created: false },
           payload: json({ sessionId: existingSession.id, idempotent: true }),
           persist: false,
         };
@@ -1976,7 +1991,7 @@ export class ReplayPremiereInteractions {
       );
       if (existingLiveSession !== undefined) {
         return {
-          result: clone(existingLiveSession),
+          result: { session: clone(existingLiveSession), created: false },
           payload: json({ sessionId: existingLiveSession.id, reused: true }),
           persist: false,
         };
@@ -2069,7 +2084,7 @@ export class ReplayPremiereInteractions {
       };
       next.sessions.push(session);
       return {
-        result: clone(session),
+        result: { session: clone(session), created: true },
         payload: json({ session }),
         persistenceIdempotencyKey: `interaction:session:${options.participantId}:${options.idempotencyKey}`,
       };

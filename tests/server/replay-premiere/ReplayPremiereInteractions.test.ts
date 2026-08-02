@@ -132,7 +132,7 @@ describe("ReplayPremiereInteractions", () => {
     h: ReturnType<typeof harness>,
     participantId: string,
   ) {
-    return h.interactions.createViewerSession({
+    const { session } = await h.interactions.createViewerSession({
       participantId,
       idempotencyKey: h.nextIdempotencyKey(),
       requesterBucketId: `ip_${"1".repeat(32)}`,
@@ -141,6 +141,7 @@ describe("ReplayPremiereInteractions", () => {
       excludedAsOperator: false,
       excludedAsBot: false,
     });
+    return session;
   }
 
   function submitPrediction(
@@ -354,7 +355,7 @@ describe("ReplayPremiereInteractions", () => {
   it("derives reaction context only from released sequence and rejects future markers", async () => {
     const h = harness();
     h.setReleased(10);
-    const session = await h.interactions.createViewerSession({
+    const { session } = await h.interactions.createViewerSession({
       participantId: guestA,
       idempotencyKey: h.nextIdempotencyKey(),
       requesterBucketId: `ip_${"1".repeat(32)}`,
@@ -578,7 +579,7 @@ describe("ReplayPremiereInteractions", () => {
 
   it("qualifies visible or interacting sessions once per participant and preserves last non-direct attribution", async () => {
     const h = harness();
-    const sourceSession = await h.interactions.createViewerSession({
+    const { session: sourceSession } = await h.interactions.createViewerSession({
       participantId: guestB,
       idempotencyKey: h.nextIdempotencyKey(),
       requesterBucketId: `ip_${"2".repeat(32)}`,
@@ -603,7 +604,7 @@ describe("ReplayPremiereInteractions", () => {
         Date.parse(h.now()) + 7 * 24 * 60 * 60 * 1_000,
       ).toISOString(),
     };
-    const session = await h.interactions.createViewerSession({
+    const { session } = await h.interactions.createViewerSession({
       participantId: guestA,
       idempotencyKey: h.nextIdempotencyKey(),
       requesterBucketId: `ip_${"1".repeat(32)}`,
@@ -908,7 +909,7 @@ describe("ReplayPremiereInteractions", () => {
       excludedAsOperator: false,
       excludedAsBot: false,
     };
-    const [first, retry] = await Promise.all([
+    const [{ session: first }, { session: retry }] = await Promise.all([
       h.interactions.createViewerSession(request),
       h.interactions.createViewerSession(request),
     ]);
@@ -927,7 +928,7 @@ describe("ReplayPremiereInteractions", () => {
     // time, and the session record count for this participant never
     // grows past 1, no matter how many tabs are opened.
     for (let tab = 0; tab < 8; tab += 1) {
-      const opened = await h.interactions.createViewerSession({
+      const { session: opened } = await h.interactions.createViewerSession({
         ...request,
         idempotencyKey: h.nextIdempotencyKey(),
       });

@@ -1685,3 +1685,70 @@ confirmed against current code; no fix made.** The new test guards this
 contract going forward. If a future live trace reproduces the symptom with
 an actual CDP network capture (not just a screenshot), re-open with that
 evidence.
+
+### 18.5 REOPENED and re-root-caused: the transport fix was necessary but not
+sufficient — a client-side session-reuse assertion bug (LiveSync-2 session,
+2026-08-02)
+
+**The §18.1-18.3 transport fix was real and stayed** (compression,
+smaller/more-frequent catch-up batches, realistic timeouts) but did not fully
+close the bug: production re-verification against a genuinely aged
+(~30-45 min) live match showed the first join attempt still failing to
+converge, with a same-URL retry then succeeding. That is a signature of a
+race, not of catch-up volume — so the P0 was reopened rather than treated as
+closed.
+
+**Real root cause** (found by instrumenting a headless CDP session against
+the live production origin and capturing the actual abort/error chain, not
+by re-guessing): a genuinely-benign server behavior — returning an EXISTING
+live session instead of minting a new one when `POST /api/premieres/{id}/
+sessions` finds the participant already has one (new tab, cold reload,
+concurrent identity-mint race on first click, a retried request) — was being
+treated by the CLIENT as an integrity violation. `ReplayPremiereServiceClient
+.assertSessionResponseBound` unconditionally asserted
+`session.idempotencyKey === (the key THIS request just sent)`. A reused
+session's `idempotencyKey` is necessarily the key from whatever EARLIER
+request first created it — never this one's — so every reused-session join
+threw `invalid_response`/`integrity_failure` client-side and latched a
+terminal failure with no retry path. This is exactly the "stuck at Joining
+live…" / "Replay unavailable." symptom on aged matches: the older a match,
+the more likely a participant's session already exists (prior tab, earlier
+abandoned attempt, a concurrent identity-mint retry during bootstrap), so
+the failure rate climbs with match age even though nothing about catch-up
+volume changed.
+
+**The fix**: the server's session-creation response now carries an explicit
+`created: boolean` alongside the session
+(`ReplayPremiereInteractions.createViewerSession` returns
+`{ session, created }`; `created` is `false` for both the exact-idempotency-
+replay branch and the reused-live-session convergence branch, `true` only
+for a genuinely new record; `ReplayPremiereHttp.ts` surfaces it on the wire;
+the client's `sessionResponseV1Schema` — inherited by v2-v4 — gained the
+field). `assertSessionResponseBound` now only enforces the idempotency-key
+and `firstReleasedSequenceObserved` equality checks when `created === true`;
+a reused/replayed session is asserted against instead on what actually must
+hold for it (bound to the same premiere, records not gapped/backward). This
+closes the client-side hole without weakening the server-authoritative
+`liveVisibleSequence` boundary — the assertion narrowed to when it is
+actually meaningful, not removed.
+
+Fixing the return shape (`{ id: string }` → `{ session: { id: string } }`,
+etc.) rippled mechanically through every `createViewerSession` caller: the
+production `SyntheticCrowdSimulator`, its `SyntheticCrowdMarketTarget`
+interface, and ~15 existing test files/fakes across
+`tests/server/replay-premiere/**` that destructured or asserted on the old
+flat return. All updated to the new `{ session, created }` shape with no
+behavior change beyond the new field. New regression test
+(`tests/client/ReplayPremiereRuntime.test.ts`, "joins cleanly when the
+server hands back a REUSED live session…") constructs a real
+`ReplayPremiereServiceClient` + `ReplayPremiereRuntimeController` against a
+mocked `fetch` returning `created: false` with a session `idempotencyKey`
+deliberately different from the request's own — verified BOTH ways: fails
+with the exact production `integrity_failure`/`callback_failure` error
+before the fix, passes after. Full replay-premiere suite green (909 tests,
+65 files); `tsc --noEmit` clean.
+
+Deploy + live re-verification: see the next commit's report for the
+production before/after (deployed via the §17.3 procedure — fetch
+`claude/product-overhaul` by name, detach to the exact SHA, `npm run
+build-prod`, natural autocycler pickup, never a forced restart mid-market).

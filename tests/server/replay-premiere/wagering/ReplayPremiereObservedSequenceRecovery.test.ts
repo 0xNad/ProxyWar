@@ -95,7 +95,7 @@ describe("observedSequence recovery: the live-path widening survives a server re
       liveVisibleSequence: 100,
       clock,
     });
-    const session = await live.createViewerSession({
+    const { session } = await live.createViewerSession({
       participantId: guestA,
       idempotencyKey: "idem_session_0000000000000001",
       requesterBucketId: `ip_${"1".repeat(32)}`,
@@ -137,7 +137,7 @@ describe("observedSequence recovery: the live-path widening survives a server re
       coarseReleasedThroughSequence: 20,
       liveVisibleSequence: 100,
     });
-    const session = await live.createViewerSession({
+    const { session } = await live.createViewerSession({
       participantId: guestA,
       idempotencyKey: "idem_session_0000000000000002",
       requesterBucketId: `ip_${"1".repeat(32)}`,
