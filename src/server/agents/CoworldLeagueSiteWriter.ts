@@ -1252,6 +1252,22 @@ function builderNoteMarkup(view: AgentIdentityView, isHouse: boolean): string {
  * `AgentProfilePage.ts` resolves a provisional profile there too), else
  * the `/player/:name` fallback so a row with neither never links to a
  * profile page that doesn't exist.
+ *
+ * The two `/agent/:slug` branches are deliberately RELATIVE, unlike the
+ * `/player/:name` fallback and the `/account` chip elsewhere in this file:
+ * `/agent/:slug` is mounted unconditionally on every process
+ * (`ai-agent-demo-server.ts`'s `app.get("/agent/:slug", ...)` has no
+ * `platformEnabled`/`leagueWrapperOnly` gate), so it exists at the same
+ * path on beta, the platform apex, and the betting origin alike. A hardcoded
+ * `PLAYER_PROFILE_ORIGIN` (`https://proxywar.xyz` by default) here was a
+ * live P0 bug: every standings-row agent link on beta.proxywar.xyz/league
+ * navigated cross-origin to `proxywar.xyz/agent/<slug>` instead of staying
+ * on the origin that served the page, a permanent error for any slug that
+ * isn't ALSO registered identically on the apex. `/player/:name`, by
+ * contrast, genuinely IS platform-only (`PlayerProfilePage.ts`'s own doc:
+ * "Lives on the platform origin... a platform-level feature now that
+ * accounts are platform-level"), so its absolute cross-origin link stays —
+ * see `playerProfileUrl` below and the `/account` chip's own comment.
  */
 function standingsRowProfileUrl(
   view: AgentIdentityView,
@@ -1259,10 +1275,10 @@ function standingsRowProfileUrl(
   provisional: ProvisionalIdentity | null = null,
 ): string {
   if (view.agent !== null) {
-    return `${PLAYER_PROFILE_ORIGIN}/agent/${encodeURIComponent(view.agent.slug)}`;
+    return `/agent/${encodeURIComponent(view.agent.slug)}`;
   }
   if (provisional !== null) {
-    return `${PLAYER_PROFILE_ORIGIN}/agent/${encodeURIComponent(provisional.slug)}`;
+    return `/agent/${encodeURIComponent(provisional.slug)}`;
   }
   return playerProfileUrl(fallbackPlayerName);
 }

@@ -1,6 +1,7 @@
 import { html, LitElement, nothing } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { z } from "zod";
+import { afterFirstIdentityBootstrap } from "../../../identity/GuestBootstrapGate";
 
 /**
  * Compact "Sign in" control + "signed in as" indicator, mounted in the
@@ -72,12 +73,14 @@ export class PremiereGithubSignIn extends LitElement {
 
   private async load(): Promise<void> {
     try {
-      const response = await fetch("/api/identity/status", {
-        method: "GET",
-        headers: { Accept: "application/json" },
-        credentials: "same-origin",
-        cache: "no-store",
-      });
+      const response = await afterFirstIdentityBootstrap(() =>
+        fetch("/api/identity/status", {
+          method: "GET",
+          headers: { Accept: "application/json" },
+          credentials: "same-origin",
+          cache: "no-store",
+        }),
+      );
       if (!response.ok) {
         this.identity = null;
         return;

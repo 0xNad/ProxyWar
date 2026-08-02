@@ -1109,17 +1109,18 @@ code**, redeemed server-to-server and consumed atomically. Query strings leak
 through history, server logs, and `Referer`, and "one-time" cannot be enforced
 by a signature — hence a code, not a signed token.
 
-**The handoff is built but NOT live on `bet.proxywar.xyz`.** Its routes mount
-only when the betting process sets `PROXYWAR_PLATFORM_ORIGIN` (see the
-`else if (configuredPlatformOrigin !== undefined)` branch in
-`ai-agent-demo-server.ts`), and the deploy's betting launcher never sets it —
-so `GET /api/premieres/auth/handoff/start` answers 404 today and betting shows
-the no-handoff identity status. One env line in
-`start-proxywar-betautocycle.zsh` would mount it, and no shared secret is
-needed (the platform authorises a redemption from its own
-`PROXYWAR_PLATFORM_RETURN_ORIGINS` audience map). Deliberately left off: the
-operator's call on 2026-07-30 was that betting identity is inactive for now.
-Do not describe this link as live until that env line ships.
+**The handoff is LIVE on `bet.proxywar.xyz` as of 2026-08-02 (superseded —
+see §17.5).** Operator, 2026-08-02: "implement identity handoff for
+betting" — the 2026-07-30 hold below is lifted. `PROXYWAR_PLATFORM_ORIGIN`
+is now set in `cycle-premiere.sh`'s `start_origin()` (commit `548e9088b`),
+which mounts the three `/api/premieres/auth/handoff/*` routes (the `else if
+(configuredPlatformOrigin !== undefined)` branch in
+`ai-agent-demo-server.ts`). Verified live end-to-end: `GET
+/api/premieres/auth/handoff/start` → 302 to the platform → platform mints
+an account + code → 302 back to `/api/premieres/auth/handoff/callback` →
+redeemed → `platformLinked: true`; a replayed code correctly fails
+(`already_redeemed`, one-time enforced). Historical context below (was
+accurate through 2026-08-02, before this operator decision).
 
 ### 16.2 The apex cutover and GitHub sign-in (both live, 2026-07-30)
 
@@ -1178,9 +1179,9 @@ env -u PROXYWAR_PLATFORM_ORIGIN npx vite build   # unset ON PURPOSE: exercises t
 curl -sS -D - -o /dev/null https://bet.proxywar.xyz/league | grep -i content-security-policy
 ```
 
-Do NOT "fix" this by setting `PROXYWAR_PLATFORM_ORIGIN` on the betting
-launcher: that env var is also what mounts the identity handoff routes (16.1),
-which the operator has deliberately left off.
+**Superseded 2026-08-02**: `PROXYWAR_PLATFORM_ORIGIN` IS now set on the
+betting launcher (§16.1, §17.5) — the operator lifted the 2026-07-30 hold.
+This also fixes the CSP/PoV gap this subsection originally described.
 
 **2. GitHub sign-in is live (2026-07-30).** App `3760561` (client id
 `Ov23likxrRLTNNoQd5Dy`) is named "Proxy War", homepage `https://proxywar.xyz`,
@@ -1483,3 +1484,89 @@ avg wall-clock ~1047s (~17.5 min), avg turnCount ~24,970. Once the queue has
 one ready item, `cycle-premiere.sh` picks it up automatically on its next
 cycle — no separate admission step, and no further action beyond the one
 `launchctl bootstrap` command.
+
+### 17.5 Both operator gates lifted and verified live (Activation session, 2026-08-02)
+
+Two explicit operator decisions, quoted and dated: **"use xprequests for
+betting matches"** — real billed xp-request episode generation authorized
+for the betting premiere queue; **"implement identity handoff for
+betting"** — the platform→bet handoff (§15-16, off since 2026-07-30) is to
+be enabled and verified. Both superseded prior holds in §16.1/§16.2/§17.4.
+
+**Real episodes**: `launchctl bootstrap` failed with `Bootstrap failed: 5:
+Input/output error` from this session's shell context (no GUI-session
+bootstrap capability) — `launchctl load -w
+~/Library/LaunchAgents/com.proxywar.betqueue.plist` worked instead (older
+API, same effect, service came up running). First real generation
+succeeded in 596s/21,500 turns (cost ledger `2026-08-02T03:01:56Z`,
+`episodeId ereq_2fb85305-...`); the next natural cycle admitted it as
+`prem_ba2ae0a0c2626d524d41`, autocycle logged `match kind: real-league`
+(first non-fallback cycle since 2026-07-28), fallback streak reset, and the
+queue immediately started generating episode #2 (caps holding: 1/4 hour,
+1/80 day). Live-verified: manifest `provenance.coworld.episodeId` matches
+the ledger entry exactly; seats carry real `policyIdentity.namespace:
+"softmax_policy_version"` agents (softmaxwell, daveey, docxology, etc.);
+the page renders "Proxy War Live Market - Real AI League Premiere" / "LIVE"
+— the exhibition label is gone; synthetic crowd moved prices off the
+uniform baseline within the first poll.
+
+**Identity handoff**: enabled via one line in `cycle-premiere.sh`'s
+`start_origin()` (not the untracked launcher script — that env var is set
+once at process start and would need a betautocycle restart to take
+effect; `cycle-premiere.sh` itself is re-read fresh from disk every cycle,
+so a plain redeploy + natural cycle was enough), defaulting to
+`https://proxywar.xyz` (matches the platform's own
+`PROXYWAR_PLATFORM_RETURN_ORIGINS`, already configured). Security audit
+against live code, no gaps found: `PlatformHandoffStore` — 2min code TTL,
+64-hex-char random code, atomic one-time redeem (synchronous check-then-
+delete), bound to state+returnOrigin+audience+childSessionId;
+`PlatformReturnOrigins` — explicit non-reflecting allowlist, malformed
+entries dropped per-entry not fail-closed-whole-map; cookies — HttpOnly,
+SameSite=Lax, Secure (in production, derived from `publicOrigin.startsWith
+("https://")`, not GAME_ENV so this holds despite `GAME_ENV=dev` on the
+hosted deploy), no `Domain=` (host-only). Verified live end-to-end via
+curl with a real guest cookie (no real GitHub credential needed — both
+ends bootstrap anonymous-first): `/handoff/start` → 302 to platform with
+state/audience/childSessionId → platform mints an account + code → 302
+back to `/handoff/callback` → redeemed → `platformLinked: true`; replaying
+the same code afterward correctly 302s to `?identity=error` (one-time
+enforced). As a direct, honest side effect: `bet.proxywar.xyz/account`'s
+raw "account management is not available on this deployment" 503 (P1,
+live-QA) is gone — `configuredPlatformOrigin` being defined now makes that
+route's existing branch 302 to the platform's own `/account`; no code
+change needed for this, verified live.
+
+**A real, live-reproduced P0 found during verification, unrelated to
+either gate but blocking honest use of both**: guest bankroll/positions
+silently wiped on reload. Root cause, confirmed via CDP against a real
+cold `/bet/<id>` load: `PremiereGithubSignIn`'s `GET /api/identity/status`
+and `ReplayPremiereRuntimeController`'s `POST .../sessions` fire
+concurrently with no coordination; each independently sees "no guest
+cookie yet" and mints its own distinct identity via `Set-Cookie`
+(`bootstrap()` itself correctly reuses an existing cookie — the gap was
+purely a missing client-side ordering guarantee). One cold load minted
+BOTH `guest_14fe29a1...` and `guest_1dd20142...`; the browser keeps
+whichever `Set-Cookie` lands last, silently orphaning the other identity's
+trades. Fixed: `src/client/identity/GuestBootstrapGate.ts`, a page-scoped
+gate serializing every identity-touching fetch behind the first to start,
+wired into `GithubSignIn.ts`, `ReplayPremiereRuntime.ts`'s session
+creation, `AccountPage.ts`, `PointsLeaderboard.ts`. A visible symptom of
+the same race — a raw `request_rejected` error-code flash on cold boot,
+self-healing within seconds — got its own bounded-retry fix in
+`BettingPremierePage.ts`'s `pollOnce` (extends the pre-existing
+`session_required` startup-race allowance to a 401/403 `request_rejected`
+too, capped at `STARTUP_AUTH_RETRY_LIMIT=5` so a genuinely broken identity
+still surfaces a real error). Commit `50747bb73`; 353/353 tests green,
+`tsc`/`eslint` clean; deployed to bet-origin, pending the next natural
+cycle to go live (never forced mid-market).
+
+**What was NOT reached this session, genuinely out of budget, not worked
+around**: the market's own full reload/second-tab persistence proof on the
+REAL premiere (trade → reload → position intact) post-deploy, and a
+signed-in (post-handoff) identity's positions surviving a reload — the
+P0 fix's client-side unit tests (gate serialization, startup-auth retry
+bound) are green and the mechanism is directly reproduced/fixed at its
+root, but the live end-to-end click-through on the newly-deployed build
+was not completed before this session's budget ran out. Whoever picks
+this up next: the deploy is already live (or about to go live on the next
+natural cycle) — just click through it.

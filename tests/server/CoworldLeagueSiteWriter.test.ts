@@ -169,15 +169,17 @@ describe("coworldLeagueIndexHtml", () => {
 
   test("links each standings row to a provisional /agent/:slug profile with a generated emblem (2026-08-01 P0 fix)", () => {
     const html = coworldLeagueIndexHtml(sampleData());
-    // Asserted against the shared constant, not a literal: this process does
-    // not set PROXYWAR_PLATFORM_ORIGIN, so this IS the fallback path, and a
-    // literal here is what let the origin move without the league site
-    // noticing (see `core/PlatformOrigin.ts`). No registered agent exists
-    // for "odin free" (default `EMPTY_LEAGUE_IDENTITY_SNAPSHOT`), so it gets
-    // a provisional identity: `/agent/odin-free` (slugified playerName)
-    // plus a generated emblem, never the old bare `/player/:name` link.
+    // RELATIVE, not `${DEFAULT_PLATFORM_ORIGIN}/agent/...`: `/agent/:slug`
+    // is mounted unconditionally on every process (beta, apex, and the
+    // betting origin alike), so baking in the platform origin here is what
+    // sent every standings-row agent link on beta.proxywar.xyz/league
+    // cross-origin to a 404 on the apex (live P0, found 2026-08-02) — see
+    // `standingsRowProfileUrl`'s own doc. No registered agent exists for
+    // "odin free" (default `EMPTY_LEAGUE_IDENTITY_SNAPSHOT`), so it gets a
+    // provisional identity: `/agent/odin-free` (slugified playerName) plus
+    // a generated emblem, never the old bare `/player/:name` link.
     expect(html).toContain(
-      `<a class="player-profile-link" href="${DEFAULT_PLATFORM_ORIGIN}/agent/odin-free"><span class="agent-identity"><span class="agent-emblem">`,
+      `<a class="player-profile-link" href="/agent/odin-free"><span class="agent-identity"><span class="agent-emblem">`,
     );
     expect(html).toContain(`</span>odin free</span></a>`);
   });
@@ -191,13 +193,35 @@ describe("coworldLeagueIndexHtml", () => {
     // still link. Neither "daveey" nor "Loki" is registered in this test's
     // default empty identity snapshot, so both get provisional identities.
     expect(html).toContain(
-      `<a class="player-profile-link" href="${DEFAULT_PLATFORM_ORIGIN}/agent/daveey"><span class="agent-identity"><span class="agent-emblem">`,
+      `<a class="player-profile-link" href="/agent/daveey"><span class="agent-identity"><span class="agent-emblem">`,
     );
     expect(html).toContain(`</span>daveey</span></a>`);
     expect(html).toContain(
-      `<a class="player-profile-link" href="${DEFAULT_PLATFORM_ORIGIN}/agent/loki"><span class="agent-identity"><span class="agent-emblem">`,
+      `<a class="player-profile-link" href="/agent/loki"><span class="agent-identity"><span class="agent-emblem">`,
     );
     expect(html).toContain(`</span>Loki</span></a>`);
+  });
+
+  test("never emits an absolute-origin /agent/:slug link — regression pin for the beta.proxywar.xyz 404 (live P0, 2026-08-02)", () => {
+    // Broader than the two fixture-specific tests above: scans every
+    // player-profile-link anchor on the page (standings rows AND battle
+    // cards) and fails if ANY of them route an agent link through
+    // `PLAYER_PROFILE_ORIGIN`/`DEFAULT_PLATFORM_ORIGIN` again, regardless of
+    // which row/card a future change adds it to. `/agent/:slug` is mounted
+    // unconditionally on every origin, so it must always stay relative;
+    // `/player/:name` genuinely is platform-only and is deliberately
+    // excluded from this scan (see `standingsRowProfileUrl`'s doc).
+    const html = coworldLeagueIndexHtml(sampleData());
+    const agentLinkHrefs = [
+      ...html.matchAll(/class="player-profile-link" href="([^"]+)"/g),
+    ].map((match) => match[1]);
+    expect(agentLinkHrefs.length).toBeGreaterThan(0);
+    for (const href of agentLinkHrefs) {
+      expect(href.startsWith("/agent/") || href.startsWith("/player/")).toBe(
+        true,
+      );
+      expect(href).not.toMatch(/^https?:\/\//);
+    }
   });
 
   test("offers one link off the mirror to the account authority", () => {
@@ -552,14 +576,15 @@ describe("coworldLeagueIndexHtml", () => {
     };
     const html = coworldLeagueIndexHtml(sampleData(), identity);
     expect(html).toContain(
-      `<a class="player-profile-link" href="${DEFAULT_PLATFORM_ORIGIN}/agent/auri-prime">`,
+      `<a class="player-profile-link" href="/agent/auri-prime">`,
     );
     expect(html).toContain("Auri Prime");
     // odin free has no registered Agent — its row must still resolve, never
     // 404: a provisional identity now gives it its own `/agent/:slug`
     // profile route (2026-08-01 P0 fix), not the old bare `/player/:name`.
+    // Relative, same reasoning as the P0 fix above the standings-row test.
     expect(html).toContain(
-      `<a class="player-profile-link" href="${DEFAULT_PLATFORM_ORIGIN}/agent/odin-free">`,
+      `<a class="player-profile-link" href="/agent/odin-free">`,
     );
   });
 

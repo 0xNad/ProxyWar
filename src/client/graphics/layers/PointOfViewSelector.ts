@@ -258,10 +258,32 @@ export class PointOfViewSelector extends LitElement implements Layer {
       : `Following ${name}`;
   }
 
+  /**
+   * P0 fix (found live 2026-08-02 at 390x844 and 844x390): this widget used
+   * to sit `fixed top-4 left-1/2 -translate-x-1/2` at EVERY viewport width,
+   * with `z-[50003]` — far above `game-right-sidebar`'s own container
+   * (`z-1000`, `fixed top-0 right-0` below the 1200px breakpoint; see
+   * `index.html`). Below 1200px wide the two never reflow apart, so this
+   * centered, high-z pill visually sat on top of the Pause/Speed/Settings
+   * buttons — `elementFromPoint` on their centers returned this `<select>`
+   * instead, making them untappable.
+   *
+   * Fix: reflow, not a z-index change (lowering this one would just make
+   * the SIDEBAR untappable by the same overlap instead). Below 1200px this
+   * moves to `top-14 left-2` (clear of the sidebar's own `top-0`/`right-0`
+   * row, however wide the sidebar's own button cluster gets) and caps its
+   * width to the viewport so it can never run under the sidebar's lane on
+   * a narrow screen. At/above 1200px — `game-right-sidebar`'s own
+   * breakpoint, where it drops to a compact `top-4 right-4` corner with
+   * room to spare — this keeps its original centered-at-top placement.
+   * The "from your league claim" caption below (rendered only when
+   * `source === "claim"`) follows the SAME reflow, offset to sit under
+   * wherever the main pill actually landed at each breakpoint.
+   */
   render() {
     return html`
       <div
-        class="fixed top-4 left-1/2 -translate-x-1/2 z-[50003] flex items-center gap-1.5 rounded-lg bg-gray-800/85 text-white text-[11px] md:text-xs px-2 py-1.5 shadow-lg"
+        class="fixed top-14 left-2 z-[50003] flex items-center gap-1.5 rounded-lg bg-gray-800/85 text-white text-[11px] md:text-xs px-2 py-1.5 shadow-lg max-w-[calc(100vw-1rem)] min-[1200px]:top-4 min-[1200px]:left-1/2 min-[1200px]:max-w-none min-[1200px]:-translate-x-1/2"
       >
         <label for="pov-select" class="font-semibold whitespace-nowrap"
           >Follow:</label
@@ -308,7 +330,7 @@ export class PointOfViewSelector extends LitElement implements Layer {
       </div>
       ${this.source === "claim"
         ? html`<div
-            class="fixed top-[52px] left-1/2 -translate-x-1/2 z-[50003] text-[10px] text-slate-300/90 bg-gray-800/70 rounded px-2 py-0.5 max-w-[280px] text-center"
+            class="fixed top-24 left-2 z-[50003] text-[10px] text-slate-300/90 bg-gray-800/70 rounded px-2 py-0.5 max-w-[calc(100vw-1rem)] text-center min-[1200px]:top-[52px] min-[1200px]:left-1/2 min-[1200px]:-translate-x-1/2 min-[1200px]:max-w-[280px]"
           >
             from your league claim — self-asserted, not verified
           </div>`

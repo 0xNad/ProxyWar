@@ -297,6 +297,29 @@ describe("leagueEpisodeSpoilerSafeTitle / leagueEpisodeSpoilerSafeDescription", 
     expect(title).toContain("| Proxy War");
   });
 
+  test("orders the roster by SLOT, never by final placement — a link preview must not leak the winner (live P0, 2026-08-02)", () => {
+    // The winner ("PeePee7") sits in slot 1, NOT slot 0. Before this fix,
+    // the title/description used `row.players`' own order, which upstream
+    // sources can (and did, live) deliver in final-placement order — so
+    // "Captain Underpants vs PeePee7 +10 more" told a viewer who won
+    // before they ever opened the page. Slot order carries no outcome
+    // signal, so this must always read "Captain Underpants vs PeePee7",
+    // never "PeePee7 vs Captain Underpants" or any placement-derived order.
+    const row = episode({
+      winnerName: "PeePee7",
+      players: [
+        { slot: 0, name: "Captain Underpants", tilesOwned: 1, isAlive: false, isWinner: false, color: "#111" },
+        { slot: 1, name: "PeePee7", tilesOwned: 999_999, isAlive: true, isWinner: true, color: "#222" },
+      ],
+    });
+    const title = leagueEpisodeSpoilerSafeTitle(row);
+    const description = leagueEpisodeSpoilerSafeDescription(row);
+    expect(title).toContain("Captain Underpants vs PeePee7");
+    expect(title).not.toContain("PeePee7 vs Captain Underpants");
+    expect(description).toContain("Captain Underpants, PeePee7");
+    expect(description).not.toContain("PeePee7, Captain Underpants");
+  });
+
   test("caps the roster at two names plus a '+N more' suffix for larger matches", () => {
     const row = episode({
       players: [
