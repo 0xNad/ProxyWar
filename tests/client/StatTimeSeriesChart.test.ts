@@ -141,6 +141,73 @@ describe("renderTimeSeriesChart", () => {
     expect(circles[0].querySelector("title")?.textContent).toContain("50%");
   });
 
+  it("makes each point focusable and pairs it with a visible tooltip text sibling — a tap-accessible readout, since native SVG <title> alone never fires on touch (P3-04, 2026-08-02)", () => {
+    const container = mountedContainer();
+    render(
+      renderTimeSeriesChart({
+        ...baseProps,
+        points: [
+          { at: "2026-07-01", value: 0.5 },
+          { at: "2026-07-02", value: 0.6 },
+        ],
+      }),
+      container,
+    );
+    const circles = container.querySelectorAll("circle");
+    for (const circle of circles) {
+      expect(circle.getAttribute("tabindex")).toBe("0");
+      const tooltip = circle.nextElementSibling;
+      expect(tooltip?.tagName.toLowerCase()).toBe("text");
+      expect(tooltip?.classList.contains("stat-chart-point-tooltip")).toBe(
+        true,
+      );
+    }
+    expect(circles[0].nextElementSibling?.textContent).toContain("50%");
+    expect(circles[1].nextElementSibling?.textContent).toContain("60%");
+  });
+
+  it("draws y-axis min/max value labels and x-axis first/last-date labels — a sparkline otherwise has no visible scale (P3-04, 2026-08-02)", () => {
+    const container = mountedContainer();
+    render(
+      renderTimeSeriesChart({
+        ...baseProps,
+        points: [
+          { at: "2026-07-01", value: 0.2 },
+          { at: "2026-07-15", value: 0.5 },
+          { at: "2026-07-30", value: 0.9 },
+        ],
+      }),
+      container,
+    );
+    const labels = Array.from(
+      container.querySelectorAll(".stat-chart-axis-label"),
+      (el) => el.textContent?.trim(),
+    );
+    // yDomain is fixed [0, 1] in baseProps, so min/max are the domain
+    // bounds, not the data's own min/max.
+    expect(labels).toContain("100%");
+    expect(labels).toContain("0%");
+    // formatX is the identity function in baseProps.
+    expect(labels).toContain("2026-07-01");
+    expect(labels).toContain("2026-07-30");
+  });
+
+  it("draws only one x-axis date label for a single-point series — never a duplicate", () => {
+    const container = mountedContainer();
+    render(
+      renderTimeSeriesChart({
+        ...baseProps,
+        points: [{ at: "2026-07-01", value: 0.5 }],
+      }),
+      container,
+    );
+    const dateLabels = Array.from(
+      container.querySelectorAll(".stat-chart-axis-label"),
+      (el) => el.textContent?.trim(),
+    ).filter((text) => text === "2026-07-01");
+    expect(dateLabels).toHaveLength(1);
+  });
+
   it("renders a version-marker line only for points that carry one", () => {
     const container = mountedContainer();
     render(

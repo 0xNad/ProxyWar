@@ -46,7 +46,15 @@ export interface TimeSeriesChartProps {
 
 const CHART_WIDTH = 480;
 const CHART_HEIGHT = 160;
-const CHART_PADDING = { top: 12, right: 12, bottom: 12, left: 12 };
+/**
+ * P3-04 fix (2026-08-02): widened from the original uniform 12px so the
+ * axis min/max value labels and the first/last-point date labels
+ * `renderTimeSeriesChart` now draws have their own margin — `left` for
+ * the y-axis value column, `bottom` for the x-axis date row — without
+ * ever overlapping the plotted line/points, which still only ever occupy
+ * the inner (padding-inset) rectangle `computeChartGeometry` computes.
+ */
+const CHART_PADDING = { top: 12, right: 12, bottom: 24, left: 44 };
 
 export interface PlottedPoint extends TimeSeriesPoint {
   readonly x: number;
@@ -107,12 +115,31 @@ export function computeChartGeometry(
  * non-null) before calling this, so an empty `points` array here would only
  * happen on a genuine bug upstream; rendering nothing is still the honest,
  * non-crashing choice.
+ *
+ * P3-04 fix (2026-08-02): a sparkline with no scale is unreadable on its
+ * own — added y-axis min/max value labels (in the left margin, never
+ * overlapping the plotted line since it lives entirely right of
+ * `CHART_PADDING.left`) and x-axis first/last-point date labels (in the
+ * bottom margin). The existing native SVG `<title>` per point stays for
+ * desktop mouse hover and screen readers; ALSO added a visible SVG
+ * `<text>` tooltip sibling shown via CSS on `:hover`/`:focus-visible` —
+ * `<title>` alone never fires on tap (most mobile browsers require a real
+ * hover, which touch doesn't produce), so `tabindex="0"` makes each point
+ * focusable, and a tap DOES focus an element, giving touch users the same
+ * value+date readout hover gives a mouse user. The existing accessible
+ * `<table>` fallback is untouched — this is a visual/touch affordance on
+ * top of it, not a replacement.
  */
 export function renderTimeSeriesChart(
   props: TimeSeriesChartProps,
 ): TemplateResult | typeof nothing {
   if (props.points.length === 0) return nothing;
-  const { plotted, path } = computeChartGeometry(props.points, props.yDomain);
+  const { plotted, path, yMin, yMax } = computeChartGeometry(
+    props.points,
+    props.yDomain,
+  );
+  const firstPoint = plotted[0];
+  const lastPoint = plotted[plotted.length - 1];
   return html`
     <figure class="stat-chart">
       <svg
@@ -122,6 +149,41 @@ export function renderTimeSeriesChart(
         aria-label=${props.ariaLabel}
         preserveAspectRatio="none"
       >
+        <text
+          class="stat-chart-axis-label"
+          x=${CHART_PADDING.left - 6}
+          y=${CHART_PADDING.top}
+          text-anchor="end"
+          dominant-baseline="hanging"
+        >
+          ${props.formatValue(yMax)}
+        </text>
+        <text
+          class="stat-chart-axis-label"
+          x=${CHART_PADDING.left - 6}
+          y=${CHART_HEIGHT - CHART_PADDING.bottom}
+          text-anchor="end"
+        >
+          ${props.formatValue(yMin)}
+        </text>
+        <text
+          class="stat-chart-axis-label"
+          x=${CHART_PADDING.left}
+          y=${CHART_HEIGHT - 4}
+          text-anchor="start"
+        >
+          ${props.formatX(firstPoint.at)}
+        </text>
+        ${plotted.length > 1
+          ? html`<text
+              class="stat-chart-axis-label"
+              x=${CHART_WIDTH - CHART_PADDING.right}
+              y=${CHART_HEIGHT - 4}
+              text-anchor="end"
+            >
+              ${props.formatX(lastPoint.at)}
+            </text>`
+          : nothing}
         ${plotted
           .filter((point) => point.marker !== null && point.marker !== undefined)
           .map(
@@ -145,10 +207,19 @@ export function renderTimeSeriesChart(
               cx=${point.x}
               cy=${point.y}
               r="3"
+              tabindex="0"
               style=${`fill: ${props.color}`}
             >
               <title>${props.formatX(point.at)}: ${props.formatValue(point.value)}</title>
             </circle>
+            <text
+              class="stat-chart-point-tooltip"
+              x=${point.x}
+              y=${point.y - 8}
+              text-anchor="middle"
+            >
+              ${props.formatX(point.at)}: ${props.formatValue(point.value)}
+            </text>
           `,
         )}
       </svg>

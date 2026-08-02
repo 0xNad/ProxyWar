@@ -132,8 +132,41 @@
 .stat-chart-point {
   transition: r 120ms ease;
 }
-.stat-chart-point:hover {
+.stat-chart-point:hover,
+.stat-chart-point:focus-visible {
   r: 5;
+}
+.stat-chart-point:focus-visible {
+  outline: none;
+}
+/* P3-04 fix (2026-08-02): a per-point value+date readout, visible on
+   hover (mouse) AND focus (keyboard, and touch — tapping an SVG element
+   with `tabindex` focuses it, unlike the existing native `<title>`
+   tooltip below it, which most mobile browsers never surface on tap).
+   The `+` sibling selector relies on `renderTimeSeriesChart` always
+   emitting this `<text>` immediately after its point's own `<circle>`. */
+.stat-chart-point-tooltip {
+  opacity: 0;
+  pointer-events: none;
+  font-size: 9px;
+  font-weight: 700;
+  fill: var(--pw-text, #edf1f7);
+  paint-order: stroke;
+  stroke: var(--pw-surface-2, #18202b);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+  transition: opacity 120ms ease;
+}
+.stat-chart-point:hover + .stat-chart-point-tooltip,
+.stat-chart-point:focus-visible + .stat-chart-point-tooltip {
+  opacity: 1;
+}
+/* Y-axis min/max + x-axis first/last-date labels — see
+   `CHART_PADDING`'s own doc for why there's margin to draw these in
+   without ever overlapping the plotted line/points. */
+.stat-chart-axis-label {
+  font-size: 10px;
+  fill: var(--pw-muted, #a4afbf);
 }
 @media (prefers-reduced-motion: reduce) {
   .stat-chart-point {
