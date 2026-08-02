@@ -7,7 +7,7 @@
   ],
   "game": {
     "name": "proxywar",
-    "version": "0.1.12",
+    "version": "0.1.16",
     "description": "Hosted Proxy War Coworld adapter that preserves the LegalAction.id decision path.",
     "owner": "proxywar",
     "config_schema": {
@@ -41,7 +41,9 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["name"],
+            "required": [
+              "name"
+            ],
             "properties": {
               "name": {
                 "type": "string",
@@ -81,11 +83,17 @@
         },
         "map_size": {
           "type": "string",
-          "enum": ["Compact", "Normal"]
+          "enum": [
+            "Compact",
+            "Normal"
+          ]
         },
         "difficulty": {
           "type": "string",
-          "enum": ["Easy", "Medium"]
+          "enum": [
+            "Easy",
+            "Medium"
+          ]
         },
         "seed": {
           "type": "integer",
@@ -157,16 +165,25 @@
           }
         },
         "winner_slot": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0,
           "maximum": 11
         },
         "turn_count": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0
         },
         "tick": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0
         },
         "decision_count": {
@@ -192,7 +209,13 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["slot", "name", "score", "tiles_owned", "is_alive"],
+            "required": [
+              "slot",
+              "name",
+              "score",
+              "tiles_owned",
+              "is_alive"
+            ],
             "properties": {
               "slot": {
                 "type": "integer",
@@ -206,11 +229,17 @@
                 "type": "number"
               },
               "tiles_owned": {
-                "type": ["integer", "null"],
+                "type": [
+                  "integer",
+                  "null"
+                ],
                 "minimum": 0
               },
               "is_alive": {
-                "type": ["boolean", "null"]
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           }
