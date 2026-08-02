@@ -1554,6 +1554,97 @@ async function sendPublicAppShellPage(
     res.status(503).send(`Proxy War ${failureLabel} is not built for this server.`);
   }
 }
+/**
+ * P0 fix (found live 2026-08-02): `/ai-league-replay/<bad-id>` rendered a
+ * raw, unstyled plain-text response — no branding, no nav — while
+ * `/match`/`/agent`/`/builder` bad-ids stay inside the app shell (a
+ * themed page, client-rendered not-found state). The replay route can't
+ * follow that exact pattern: `assessPremiereLeakAudit`'s `statusHidden`
+ * check (`ReplayPremiereEligibility.ts`) requires EXACTLY 403/404 for
+ * this precise path when the run id isn't publicly allowlisted — proof a
+ * private artifact isn't exposed — so a 200 app-shell response (or a
+ * redirect) is not an option here without breaking that safety check
+ * every premiere admission depends on. This keeps the required status
+ * code and replaces only the body: a small, self-contained branded page
+ * (matching the site's dark theme) with working nav links, instead of a
+ * bare string.
+ */
+function sendThemedNotFoundPage(
+  res: Response,
+  status: number,
+  message: string,
+): void {
+  res.status(status).type("html").send(`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Not found | Proxy War</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background: #07090d;
+    color: #e7ebf2;
+    font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+  }
+  nav {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    padding: 16px 24px;
+    border-bottom: 1px solid #232a3a;
+  }
+  nav a, .brand {
+    color: #8b93a6;
+    text-decoration: none;
+    font-weight: 700;
+    font-size: 13px;
+  }
+  .brand { color: #e7ebf2; font-size: 15px; margin-right: auto; }
+  nav a:hover { color: #e7ebf2; }
+  main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 48px 20px;
+  }
+  h1 { font-size: 28px; margin: 0 0 12px; }
+  p { color: #9fb0c3; max-width: 32em; margin: 0 0 24px; }
+  a.cta {
+    color: #04121e;
+    background: #56c7f5;
+    text-decoration: none;
+    font-weight: 800;
+    padding: 10px 20px;
+    border-radius: 8px;
+  }
+</style>
+</head>
+<body>
+  <nav>
+    <span class="brand">Proxy War</span>
+    <a href="/league">League</a>
+    <a href="/watch">Watch</a>
+    <a href="/agents">Agents</a>
+    <a href="/builders">Builders</a>
+    <a href="/build">Build</a>
+  </nav>
+  <main>
+    <h1>Not found</h1>
+    <p>${escapeHtml(message)}</p>
+    <a class="cta" href="/league">Go to the league</a>
+  </main>
+</body>
+</html>`);
+}
 // Resolves the spoiler-safe `{title, description}` pair `/match/:matchId`'s
 // OG/social card and `<title>` use, from the SAME two sources
 // `MatchDetailPage.ts` itself resolves against, in the same order: the
@@ -2277,7 +2368,7 @@ if (leagueWrapperOnly) {
         return;
       }
       if (isProxyWarReplayOrRunPath(req.path)) {
-        res.status(404).send("AI league replay record not found.");
+        sendThemedNotFoundPage(res, 404, "AI league replay record not found.");
         return;
       }
       res.redirect("/league");
@@ -2929,7 +3020,7 @@ if (betaAccess.enabled) {
 if (leagueWrapperOnly) {
   app.get("/ai-league-replay/:runID", async (req, res) => {
     if (!isProxyWarPublicLeaguePath(req.path)) {
-      res.status(404).send("AI league replay record not found.");
+      sendThemedNotFoundPage(res, 404, "AI league replay record not found.");
       return;
     }
     const runID = stringParam(req.params.runID);
@@ -4182,7 +4273,7 @@ for (const replayRoute of [
   app.get(replayRoute, async (req, res) => {
     const runID = String(req.params.runID);
     if (!isSafeProxyWarArtifactSegment(runID)) {
-      res.status(404).send("AI league replay record not found.");
+      sendThemedNotFoundPage(res, 404, "AI league replay record not found.");
       return;
     }
     // This is a bare redirect to the canonical /ai-league-replay/<runID>
@@ -4199,7 +4290,7 @@ for (const replayRoute of [
       !isInsideRoot(gameRecordPath, runsRootDir) ||
       !(await publicReplayRecordIsRenderable(gameRecordPath))
     ) {
-      res.status(404).send("AI league replay record not found.");
+      sendThemedNotFoundPage(res, 404, "AI league replay record not found.");
       return;
     }
     res.redirect(`/ai-league-replay/${encodeURIComponent(runID)}`);

@@ -492,6 +492,28 @@ describe("league update HTTP contract", () => {
     }
   });
 
+  test("/ai-league-replay/<bad-id> renders a themed, nav-intact page — never a raw plain-text response (live P0, 2026-08-02)", async () => {
+    // The status code MUST stay exactly 404: `assessPremiereLeakAudit`'s
+    // statusHidden check (ReplayPremiereEligibility.ts) requires 403/404
+    // for this exact path as proof a private artifact isn't publicly
+    // exposed — this fix only replaces the BODY, matching /match, /agent,
+    // and /builder's own themed (nav-intact) treatment of a bad id.
+    const response = await rawRequest(
+      origin,
+      "/ai-league-replay/controlled-source-1",
+    );
+    expect(response.status).toBe(404);
+    const body = response.body.toString("utf8");
+    expect(body).toContain("<!doctype html>");
+    expect(body).not.toBe("AI league replay record not found.");
+    // Nav intact: real links to the other public surfaces, not a dead end.
+    expect(body).toContain('href="/league"');
+    expect(body).toContain('href="/watch"');
+    expect(body).toContain('href="/agents"');
+    expect(body).toContain('href="/builders"');
+    expect(body).toContain('href="/build"');
+  });
+
   test("the /proxywar-replay and /openfront-replay aliases redirect only for a run that actually exists, and never echo an unknown run id", async () => {
     // Exercised against the open (non-wrapper) server: in
     // PROXYWAR_LEAGUE_WRAPPER_ONLY mode this alias never even reaches its
