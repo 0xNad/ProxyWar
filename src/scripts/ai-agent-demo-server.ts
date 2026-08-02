@@ -385,7 +385,7 @@ const platformLeagueHomeUrl =
 const platformMarketHomeUrl =
   firstConfiguredEnv("PROXYWAR_MARKET_HOME_URL") ?? `${bettingOrigin}/bet`;
 const platformReplaysHomeUrl =
-  firstConfiguredEnv("PROXYWAR_REPLAYS_HOME_URL") ?? `${bettingOrigin}/bet`;
+  firstConfiguredEnv("PROXYWAR_REPLAYS_HOME_URL") ?? "https://beta.proxywar.xyz/watch";
 const replayPremiereGuestSecurity = new ReplayPremiereGuestSecurity({
   hmacKey: await loadOrCreateReplayPremiereGuestHmacKey({
     privateStateRoot: replayPremierePrivateStateRoot,

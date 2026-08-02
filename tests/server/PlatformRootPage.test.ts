@@ -37,7 +37,7 @@ describe("renderPlatformRootHtml (pure)", () => {
   test("states what Proxy War is and gives exactly four ways in", () => {
     const html = renderPlatformRootHtml({
       leagueUrl: "https://beta.example/league",
-      replaysUrl: "https://bet.example/bet",
+      replaysUrl: "https://beta.example/watch",
       marketUrl: "https://bet.example/bet",
       githubSignInAvailable: true,
     });
@@ -49,8 +49,16 @@ describe("renderPlatformRootHtml (pure)", () => {
       expect(html).toContain(`<h2>${label}</h2>`);
     }
     expect(html).toContain('href="https://beta.example/league"');
+    expect(html).toContain('href="https://beta.example/watch"');
     expect(html).toContain('href="https://bet.example/bet"');
-    expect(html).toContain('href="/account"');
+    // Replays and Market cards must have different hrefs
+    const replayMatch = html.match(/href="([^"]*)"[^<]*<h2>Replays<\/h2>/);
+    const marketMatch = html.match(/href="([^"]*)"[^<]*<h2>Market<\/h2>/);
+    expect(replayMatch).toBeTruthy();
+    expect(marketMatch).toBeTruthy();
+    expect(replayMatch![1]).not.toEqual(marketMatch![1]);
+    // Replays href must not point to /bet
+    expect(replayMatch![1]).not.toMatch(/\/bet($|[?#])/);
     // Never a duplicate of the account page's own content/controls.
     expect(html).not.toContain("display-name");
     expect(html).not.toContain("csrfToken");
@@ -63,7 +71,7 @@ describe("renderPlatformRootHtml (pure)", () => {
     // league has no handoff integration, so identity reaches the market only.
     const html = renderPlatformRootHtml({
       leagueUrl: "https://beta.example/league",
-      replaysUrl: "https://bet.example/bet",
+      replaysUrl: "https://beta.example/watch",
       marketUrl: "https://bet.example/bet",
       githubSignInAvailable: false,
     });
