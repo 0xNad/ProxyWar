@@ -2668,9 +2668,23 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       }
       .broadcast-analyst-chart-row {
         display: grid;
-        grid-template-columns: 90px 1fr 32px;
+        grid-template-columns: 90px 1fr auto;
         align-items: center;
         gap: 8px;
+      }
+      /*
+       * P2 fix (pass-1 p1-05/p1-06, 2026-08-02): the count column was a
+       * fixed 32px — plenty for a single/double-digit count but silently
+       * clipping mid-digit once a match's action-kind tally passed 999
+       * (CSS Grid clips overflowing content with no ellipsis by
+       * default). "auto" above sizes the column to its real content;
+       * tabular-nums (same fix .broadcast-war-room-turn already
+       * uses) keeps digits from jittering in width as they tick up live.
+       */
+      .broadcast-analyst-chart-count {
+        white-space: nowrap;
+        font-variant-numeric: tabular-nums;
+        text-align: right;
       }
       .broadcast-analyst-chart-bar {
         height: 8px;

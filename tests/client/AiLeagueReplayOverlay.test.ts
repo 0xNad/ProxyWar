@@ -632,6 +632,28 @@ describe("AiLeagueReplayOverlay", () => {
     expect(style).toMatch(/#ai-league-replay-overlay header \{[^}]*min-width: 0/);
   });
 
+  it("sizes the Analyst chart count column to its content instead of clipping a 3+ digit tally mid-digit (P2 pass-1 p1-05/p1-06, 2026-08-02)", () => {
+    mountAiLeagueReplayOverlay({
+      runID: "analyst-chart-count-width",
+      artifactBasePath: "/ai-league-runs/x",
+      decisions: [],
+    });
+    const style = document.querySelector("#ai-league-replay-overlay style")
+      ?.textContent;
+    expect(style).toMatch(
+      /\.broadcast-analyst-chart-row \{[^}]*grid-template-columns: 90px 1fr auto/,
+    );
+    expect(style).not.toMatch(
+      /\.broadcast-analyst-chart-row \{[^}]*grid-template-columns: 90px 1fr 32px/,
+    );
+    expect(style).toMatch(
+      /\.broadcast-analyst-chart-count \{[^}]*white-space: nowrap/,
+    );
+    expect(style).toMatch(
+      /\.broadcast-analyst-chart-count \{[^}]*font-variant-numeric: tabular-nums/,
+    );
+  });
+
   it("omits the built-in-opponent clause and difficulty for agent-vs-agent matches", () => {
     // A league match has no built-in nations/bots. The setup line used to read
     // "12 Proxy War agents vs 0 built-in opponents", and showed a built-in
