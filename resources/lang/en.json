@@ -2067,6 +2067,7 @@
     "war_room_jump_to_turn": "Jump to turn {turn}",
     "war_room_collapse": "Collapse War Room panel",
     "war_room_expand": "Expand War Room panel",
+    "war_room_show_earlier": "Show {count} earlier",
     "timeline_marker_upcoming": "Upcoming event — not yet revealed",
     "timeline_heading": "Match timeline",
     "drawer_heading": "Broadcast panels",

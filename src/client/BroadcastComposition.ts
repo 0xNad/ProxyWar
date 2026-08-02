@@ -410,7 +410,7 @@ export function renderWarRoomFeed(
   return section;
 }
 
-function renderWarRoomEvent(
+export function renderWarRoomEvent(
   event: CuratedWarRoomEvent,
   callbacks: WarRoomFeedCallbacks,
 ): HTMLElement {

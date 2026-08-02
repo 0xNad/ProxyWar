@@ -2193,6 +2193,540 @@ describe("AiLeagueReplayOverlay", () => {
       expect(document.querySelectorAll(".broadcast-war-room-item")).toHaveLength(2);
     });
 
+    // Raised timeout (matches package.json's own test:coverage/test:e2e
+    // precedent of a longer testTimeout for heavier suites): fast in
+    // isolation (well under 1s for the whole 2,000-event fixture), but a
+    // full parallel `npm test` run under CPU contention needs more margin
+    // than the 5s default.
+    it("caps the War Room ticker's DOM node count under a large curated event set, backfills via 'show earlier' in bounded chunks, and never renders past the playhead regardless of window size (P2 ticker windowing)", () => {
+      const runID = "broadcast-window-cap-1";
+      // 2,000 distinct eliminations, one per turn — mirrors the real
+      // production shape that grew the ticker unbounded (P2-Fxx: ~1,957
+      // rows on a real replay). `decisions` stays empty: the Analyst
+      // panel's own table is a SEPARATE, already-existing, out-of-scope
+      // concern (it maps 1:1 off `decisions`, not the curated War Room
+      // set) — inflating it here would only slow this test down without
+      // exercising anything this change touches.
+      const events = Array.from({ length: 2000 }, (_, index) =>
+        event(
+          index + 1,
+          index + 1,
+          "elimination",
+          "war",
+          `a${index + 1}`,
+          `Agent ${index + 1}`,
+          null,
+          null,
+          `Agent ${index + 1} is eliminated.`,
+        ),
+      );
+      // One MORE event, far beyond the viewer's playhead below — proof
+      // that a generous DOM window never widens what spoiler windowing
+      // already hides (spec item 4: windowing only ever shows LESS).
+      events.push(
+        event(
+          9999,
+          2500,
+          "elimination",
+          "war",
+          "a9999",
+          "Secret future agent",
+          null,
+          null,
+          "Secret future agent is eliminated.",
+        ),
+      );
+
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+        currentTurn: 2000,
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events,
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+
+      const warRoom = document.querySelector(".broadcast-war-room");
+      expect(warRoom).not.toBeNull();
+      // The full curated set is 2,000 — the DOM only ever mounts the
+      // AI_LEAGUE_WAR_ROOM_DOM_WINDOW-sized (60) most-recent slice.
+      expect(
+        warRoom?.querySelectorAll(".broadcast-war-room-item"),
+      ).toHaveLength(60);
+      expect(warRoom?.textContent).not.toContain("Secret future agent");
+
+      const earlier = warRoom?.querySelector<HTMLButtonElement>(
+        ".broadcast-war-room-earlier button",
+      );
+      expect(earlier).not.toBeNull();
+      expect(earlier?.textContent).toContain("broadcast.war_room_show_earlier");
+      // translateText falls back to the raw key with no LangSelector
+      // mounted in this test environment, so the interpolated {count} isn't
+      // observable here — the hidden count is verified structurally below,
+      // via how many rows "show earlier" actually reveals. Its click's own
+      // `replaceWith` also swaps in a brand-new `.broadcast-war-room` node
+      // (a window-size change is a deliberate rare exception to the
+      // incremental fast path — see patchVolatile's own doc), so re-query
+      // rather than reuse the pre-click `warRoom` reference below.
+      earlier?.click();
+      const warRoomAfter = document.querySelector(".broadcast-war-room");
+      expect(
+        warRoomAfter?.querySelectorAll(".broadcast-war-room-item"),
+      ).toHaveLength(120);
+      expect(
+        warRoomAfter?.querySelector<HTMLButtonElement>(
+          ".broadcast-war-room-earlier button",
+        ),
+      ).not.toBeNull();
+      // Backfilling never leaks the future event either.
+      expect(warRoomAfter?.textContent).not.toContain("Secret future agent");
+    }, 30_000);
+
+    it("appends new ticker rows incrementally without tearing down retained rows, and keeps their jump-to-turn buttons live (spec item 3, no full-subtree teardown per chunk)", () => {
+      const runID = "broadcast-incremental-append-1";
+      const jumps: number[] = [];
+      document.addEventListener("ai-league-replay-jump-turn", (domEvent) => {
+        jumps.push(
+          (domEvent as CustomEvent<{ turnNumber: number }>).detail.turnNumber,
+        );
+      });
+      const events = Array.from({ length: 40 }, (_, index) =>
+        event(
+          index + 1,
+          index + 1,
+          "elimination",
+          "war",
+          `a${index + 1}`,
+          `Agent ${index + 1}`,
+          null,
+          null,
+          `Agent ${index + 1} is eliminated.`,
+        ),
+      );
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events,
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+      const frame = (turnNumber: number) =>
+        document.dispatchEvent(
+          new CustomEvent("ai-league-replay-frame", {
+            detail: { tick: turnNumber, turnNumber, players: [] },
+          }),
+        );
+
+      frame(1);
+      const firstRowBefore = document.querySelector(
+        ".broadcast-war-room-item",
+      );
+      expect(firstRowBefore).not.toBeNull();
+      const listBefore = document.querySelector(".broadcast-war-room-list");
+
+      // 39 more forward ticks, one event revealed per tick — all 40 stay
+      // under the DOM window (60), so nothing is ever pruned; every tick
+      // must be a pure append, never a rebuild.
+      for (let turn = 2; turn <= 40; turn += 1) {
+        frame(turn);
+      }
+
+      expect(
+        document.querySelectorAll(".broadcast-war-room-item"),
+      ).toHaveLength(40);
+      // The list container and the very first rendered row are the SAME DOM
+      // nodes 39 ticks later — proof of incremental append, not a
+      // teardown-and-rebuild-per-chunk.
+      expect(document.querySelector(".broadcast-war-room-list")).toBe(
+        listBefore,
+      );
+      expect(document.querySelector(".broadcast-war-room-item")).toBe(
+        firstRowBefore,
+      );
+      // The retained row's own interactive chrome is still live — expand it
+      // and jump, exactly like a freshly-built row would (spec item 2:
+      // windowing/incrementality must never strip per-row functionality).
+      firstRowBefore
+        ?.querySelector<HTMLButtonElement>(".broadcast-war-room-summary")
+        ?.click();
+      firstRowBefore
+        ?.querySelector<HTMLButtonElement>(".broadcast-war-room-jump")
+        ?.click();
+      expect(jumps).toEqual([1]);
+    });
+
+    it("auto-follows the newest ticker entry when the viewer is at the tail, and preserves (height-compensates) scroll position when they've scrolled up to read older entries, across the window's incremental prune (spec item 3)", () => {
+      const runID = "broadcast-ticker-scroll-1";
+      const events = Array.from({ length: 300 }, (_, index) =>
+        event(
+          index + 1,
+          index + 1,
+          "elimination",
+          "war",
+          `a${index + 1}`,
+          `Agent ${index + 1}`,
+          null,
+          null,
+          `Agent ${index + 1} is eliminated.`,
+        ),
+      );
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+        currentTurn: 200,
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events,
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+      const list = document.querySelector<HTMLElement>(
+        ".broadcast-war-room-list",
+      );
+      expect(list).not.toBeNull();
+      expect(list?.querySelectorAll(".broadcast-war-room-item")).toHaveLength(
+        60,
+      );
+
+      // --- Scrolled up (reading older entries): must not be yanked. ---
+      const oldestRows = Array.from(
+        list!.querySelectorAll<HTMLElement>(".broadcast-war-room-item"),
+      ).slice(0, 3);
+      for (const row of oldestRows) {
+        vi.spyOn(row, "getBoundingClientRect").mockReturnValue({
+          height: 40,
+        } as DOMRect);
+      }
+      Object.defineProperty(list, "scrollHeight", {
+        configurable: true,
+        value: 2400,
+      });
+      Object.defineProperty(list, "clientHeight", {
+        configurable: true,
+        value: 200,
+      });
+      let scrollTopValue = 500; // far short of the tail (2400 - 200 = 2200)
+      Object.defineProperty(list, "scrollTop", {
+        configurable: true,
+        get: () => scrollTopValue,
+        set: (value: number) => {
+          scrollTopValue = value;
+        },
+      });
+
+      // 3 more turns -> 3 more eligible events -> the 60-row window prunes
+      // exactly the 3 oldest (just mocked above) to stay at 60.
+      document.dispatchEvent(
+        new CustomEvent("ai-league-replay-frame", {
+          detail: { tick: 203, turnNumber: 203, players: [] },
+        }),
+      );
+
+      for (const row of oldestRows) {
+        expect(row.isConnected).toBe(false);
+      }
+      expect(list?.querySelectorAll(".broadcast-war-room-item")).toHaveLength(
+        60,
+      );
+      // Never yanked to the top or the tail — compensated by exactly the
+      // pruned rows' own height (3 x 40px), so on-screen content holds still.
+      expect(scrollTopValue).toBe(500 - 3 * 40);
+
+      // --- At the tail (following live playback): auto-follows the newest
+      // entry. ---
+      Object.defineProperty(list, "scrollHeight", {
+        configurable: true,
+        value: 2600,
+      });
+      scrollTopValue = 2600 - 200; // already at the tail
+      document.dispatchEvent(
+        new CustomEvent("ai-league-replay-frame", {
+          detail: { tick: 204, turnNumber: 204, players: [] },
+        }),
+      );
+      expect(scrollTopValue).toBe(2600);
+    });
+
+    it("caps mounted rows at the window size on a large forward seek within a SINGLE tick — the append source is bounded to the window, not the whole eligible delta (regression: a jump bigger than the window used to defeat the DOM cap entirely)", () => {
+      const runID = "broadcast-large-seek-1";
+      // 200 events, indices 0..199 (turn = index+1), all "elimination"
+      // except two boundary markers: index 139 (one BEFORE the expected
+      // window start) is "betrayal", index 140 (the expected window
+      // start once all 200 are eligible with a 60-row window,
+      // 200 - 60 = 140) is "alliance". translateText returns the bare
+      // key in this jsdom environment (no <lang-selector>), so
+      // interpolated turn/actor text isn't observable — `data-kind`
+      // (never translated) is the only reliable per-row identity signal,
+      // so the two boundary events get distinct kinds instead of relying
+      // on the shared "elimination" kind everything else uses.
+      const events = Array.from({ length: 200 }, (_, index) => {
+        const sequence = index + 1;
+        const turn = index + 1;
+        if (index === 139) {
+          return event(
+            sequence,
+            turn,
+            "alliance_break",
+            "betrayal",
+            "aB",
+            "Boundary Betrayer",
+            "aBT",
+            "Boundary Target",
+            "boundary betrayal",
+          );
+        }
+        if (index === 140) {
+          return event(
+            sequence,
+            turn,
+            "alliance_formed",
+            "pact",
+            "aA",
+            "Boundary Ally",
+            "aAT",
+            "Boundary Ally Target",
+            "boundary alliance",
+          );
+        }
+        return event(
+          sequence,
+          turn,
+          "elimination",
+          "war",
+          `a${sequence}`,
+          `Agent ${sequence}`,
+          null,
+          null,
+          `Agent ${sequence} is eliminated.`,
+        );
+      });
+      // Mount small (10 of 200 eligible) — well under the 60-row window,
+      // so the DOM starts in the ordinary "not yet full" incremental
+      // state, not the already-capped state.
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+        currentTurn: 10,
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events,
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+      expect(
+        document.querySelectorAll(".broadcast-war-room-item"),
+      ).toHaveLength(10);
+
+      // ONE tick jumps the playhead from turn 10 straight to turn 300 (all
+      // 200 events become eligible at once) — a single-frame delta of 190,
+      // more than 3x the 60-row window. This is the exact shape a real
+      // replay produces on a coarse/throttled frame stream, or a
+      // jump-to-turn/seek: the eligible COUNT can jump by far more than
+      // the window in one `ai-league-replay-frame` tick.
+      document.dispatchEvent(
+        new CustomEvent("ai-league-replay-frame", {
+          detail: { tick: 300, turnNumber: 300, players: [] },
+        }),
+      );
+
+      const items = document.querySelectorAll<HTMLElement>(
+        ".broadcast-war-room-item",
+      );
+      // The cap held — NOT 190+ rows silently mounted.
+      expect(items).toHaveLength(60);
+      // The row exactly one index before the window start (139) must never
+      // have been mounted at all.
+      expect(
+        document.querySelector('.broadcast-war-room-item[data-kind="betrayal"]'),
+      ).toBeNull();
+      // The row exactly at the window start (140, i.e. eligibleCount(200) -
+      // windowSize(60)) is the OLDEST mounted row — first in DOM order
+      // (rows append oldest-to-newest) among the actual event rows.
+      const list = document.querySelector(".broadcast-war-room-list");
+      const firstItem = list?.querySelector(".broadcast-war-room-item");
+      expect(firstItem?.getAttribute("data-kind")).toBe("alliance");
+    });
+
+    it("preserves incremental append (node identity) for a multi-event forward seek that stays UNDER the window size — only a jump bigger than the window forces a rebuild", () => {
+      const runID = "broadcast-medium-seek-1";
+      const events = Array.from({ length: 100 }, (_, index) =>
+        event(
+          index + 1,
+          index + 1,
+          "elimination",
+          "war",
+          `a${index + 1}`,
+          `Agent ${index + 1}`,
+          null,
+          null,
+          `Agent ${index + 1} is eliminated.`,
+        ),
+      );
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+        currentTurn: 5,
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events,
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+      const firstItemBefore = document.querySelector(
+        ".broadcast-war-room-item",
+      );
+      expect(firstItemBefore).not.toBeNull();
+      expect(
+        document.querySelectorAll(".broadcast-war-room-item"),
+      ).toHaveLength(5);
+
+      // One tick reveals 20 more events at once (5 -> 25 eligible) — a
+      // multi-event jump, but still comfortably under the 60-row window,
+      // so every row (old AND new) must end up mounted, and the original
+      // first row must survive as the exact same DOM node (incremental
+      // append, never a rebuild, when the delta fits the window).
+      document.dispatchEvent(
+        new CustomEvent("ai-league-replay-frame", {
+          detail: { tick: 25, turnNumber: 25, players: [] },
+        }),
+      );
+      expect(
+        document.querySelectorAll(".broadcast-war-room-item"),
+      ).toHaveLength(25);
+      expect(document.querySelector(".broadcast-war-room-item")).toBe(
+        firstItemBefore,
+      );
+    });
+
+    it("recovers correctly from a backward seek followed by another large forward seek — the window cap and boundary stay correct, not just on the very first jump", () => {
+      const runID = "broadcast-backward-then-forward-seek-1";
+      const events = Array.from({ length: 200 }, (_, index) => {
+        const sequence = index + 1;
+        const turn = index + 1;
+        if (index === 139) {
+          return event(
+            sequence,
+            turn,
+            "alliance_break",
+            "betrayal",
+            "aB",
+            "Boundary Betrayer",
+            "aBT",
+            "Boundary Target",
+            "boundary betrayal",
+          );
+        }
+        if (index === 140) {
+          return event(
+            sequence,
+            turn,
+            "alliance_formed",
+            "pact",
+            "aA",
+            "Boundary Ally",
+            "aAT",
+            "Boundary Ally Target",
+            "boundary alliance",
+          );
+        }
+        return event(
+          sequence,
+          turn,
+          "elimination",
+          "war",
+          `a${sequence}`,
+          `Agent ${sequence}`,
+          null,
+          null,
+          `Agent ${sequence} is eliminated.`,
+        );
+      });
+      // Mount already at the full 200-eligible / 60-row-window state.
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+        currentTurn: 300,
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events,
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+      expect(
+        document.querySelectorAll(".broadcast-war-room-item"),
+      ).toHaveLength(60);
+
+      // Backward seek (e.g. a jump-to-turn to earlier content, or a replay
+      // scrub): eligible count drops from 200 to 50 — fewer than the
+      // window, so every eligible row fits and no "earlier" affordance is
+      // needed.
+      document.dispatchEvent(
+        new CustomEvent("ai-league-replay-frame", {
+          detail: { tick: 50, turnNumber: 50, players: [] },
+        }),
+      );
+      expect(
+        document.querySelectorAll(".broadcast-war-room-item"),
+      ).toHaveLength(50);
+      expect(
+        document.querySelector(".broadcast-war-room-earlier"),
+      ).toBeNull();
+
+      // Then a large forward seek again, right back to all 200 eligible —
+      // the SAME bounded-append fix must still hold after the backward
+      // rebuild reset its own bookkeeping, not just on a mount's first
+      // ever incremental tick.
+      document.dispatchEvent(
+        new CustomEvent("ai-league-replay-frame", {
+          detail: { tick: 300, turnNumber: 300, players: [] },
+        }),
+      );
+      const items = document.querySelectorAll<HTMLElement>(
+        ".broadcast-war-room-item",
+      );
+      expect(items).toHaveLength(60);
+      expect(
+        document.querySelector('.broadcast-war-room-item[data-kind="betrayal"]'),
+      ).toBeNull();
+      const list = document.querySelector(".broadcast-war-room-list");
+      const firstItem = list?.querySelector(".broadcast-war-room-item");
+      expect(firstItem?.getAttribute("data-kind")).toBe("alliance");
+    });
+
     it("redacts a future timeline marker's kind and label until the playhead reaches it, then reveals the real content (spec item 2)", () => {
       const runID = "broadcast-marker-redaction-1";
       mountAiLeagueReplayOverlay({

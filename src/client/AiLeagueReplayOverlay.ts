@@ -11,6 +11,7 @@ import {
   renderMatchStateStrip,
   renderMatchTimeline,
   renderWarRoomFeed,
+  renderWarRoomEvent,
   type AnalystActionKindCount,
   type AnalystDecisionRow,
   type AnalystEventRow,
@@ -23,6 +24,7 @@ import {
   type MatchStateStripInput,
   type TimelineMarker,
   type TimelineMarkerKind,
+  type WarRoomFeedCallbacks,
 } from "./BroadcastComposition";
 import {
   BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT,
@@ -2456,6 +2458,10 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         color: var(--pw-muted, #a4afbf);
         font-size: 12px;
       }
+      .broadcast-war-room-earlier {
+        display: flex;
+        justify-content: center;
+      }
       .broadcast-war-room-item {
         border: 1px solid var(--pw-line, #2a3442);
         border-radius: 8px;
@@ -3769,6 +3775,188 @@ function relocateAiLeagueBroadcastDrawerPanels(
   }
 }
 
+// DOM-count window for the War Room list (the public-facing "decision
+// ticker"). Spoiler windowing (`event.turn <= turnNumber`, already applied
+// before this constant is ever consulted) bounds WHICH curated events are
+// eligible to render; this separately bounds HOW MANY of those eligible
+// events are ever mounted as `<li>` DOM nodes at once. A live Premiere
+// never needs this — ReplayPremiereRuntime.ts's own MAX_WAR_ROOM_EVENTS
+// already caps that feed at the MODEL level (64 entries: "a generous cap
+// . . . a hard ceiling"). Full Replay keeps the COMPLETE curated history in
+// memory on purpose (spoiler-safety here is a pure turn-window, never a
+// data truncation — a viewer must always be able to see everything up to
+// their own playhead), so an unbounded match can mount thousands of `<li>`
+// rows: the measured production bloat this constant fixes (~1,957 rows +
+// ~527 per-row action buttons on a real replay, growing without bound
+// during playback, P2-Fxx spectator-overlay-subtree report). 60 mirrors
+// that same "generous ceiling" reasoning — comfortably more than the
+// ~340px own-scroll viewport (BroadcastComposition.ts's
+// `.broadcast-war-room-list`, styled here and reused by
+// ReplayPremiereOverlay.ts) ever shows without scrolling, while cutting a
+// multi-thousand-row list down to a number that costs nothing to lay out.
+// "Show earlier" (below) grows the window by the same amount per click —
+// the same reveal-in-chunks shape as the decisions panel's own
+// AI_LEAGUE_DECISION_LOG_CAP expander.
+const AI_LEAGUE_WAR_ROOM_DOM_WINDOW = 60;
+
+interface WarRoomWindowCallbacks extends WarRoomFeedCallbacks {
+  /** Grows the DOM window by AI_LEAGUE_WAR_ROOM_DOM_WINDOW and re-renders — the manual backfill affordance. Only ever rendered as a row when there is something older to reveal (see buildWarRoomEarlierRow/patchWarRoomWindowForward). */
+  onShowEarlier: () => void;
+}
+
+/**
+ * Count of `events` (sorted ascending by `turn` — `curatedWarRoomEvents`'s
+ * own contract) eligible at `turnNumber`. Equivalent to
+ * `events.filter(e => e.turn <= turnNumber).length` but O(log n) instead of
+ * O(n): this runs on every `ai-league-replay-frame` tick against a Full
+ * Replay's full, unbounded curated set.
+ */
+function warRoomEligibleCount(
+  events: readonly CuratedWarRoomEvent[],
+  turnNumber: number,
+): number {
+  let lo = 0;
+  let hi = events.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (events[mid]!.turn <= turnNumber) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo;
+}
+
+/** First eligible index still inside the DOM window. */
+function warRoomWindowStart(eligibleCount: number, windowSize: number): number {
+  return Math.max(0, eligibleCount - windowSize);
+}
+
+function buildWarRoomEarlierRow(
+  hiddenCount: number,
+  onShowEarlier: () => void,
+): HTMLLIElement {
+  const row = document.createElement("li");
+  row.className = "broadcast-war-room-earlier";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "ai-league-badge";
+  button.textContent = translateText("broadcast.war_room_show_earlier", {
+    count: hiddenCount,
+  });
+  button.addEventListener("click", onShowEarlier);
+  row.append(button);
+  return row;
+}
+
+/**
+ * Builds the whole War Room region for the current window — used whenever
+ * the window can't be reached by a pure incremental append: first mount, a
+ * backward seek/jump that drops trailing events out of the window, or
+ * `onShowEarlier` growing the window. `patchWarRoomWindowForward` below is
+ * the hot per-tick path that avoids this.
+ */
+function buildWarRoomSection(
+  allEvents: readonly CuratedWarRoomEvent[],
+  eligibleCount: number,
+  windowSize: number,
+  callbacks: WarRoomWindowCallbacks,
+): HTMLElement {
+  const start = warRoomWindowStart(eligibleCount, windowSize);
+  const section = renderWarRoomFeed(
+    allEvents.slice(start, eligibleCount),
+    callbacks,
+  );
+  if (start > 0) {
+    const list = section.querySelector<HTMLElement>(
+      ".broadcast-war-room-list",
+    );
+    list?.prepend(buildWarRoomEarlierRow(start, callbacks.onShowEarlier));
+  }
+  return section;
+}
+
+/**
+ * Incrementally patches an already-mounted War Room region for a pure
+ * forward tick (more eligible events, same window size): appends the newly
+ * eligible rows and prunes whichever rows the sliding window drops off the
+ * front, WITHOUT tearing down or rebuilding rows that stay in the window
+ * (spec item 3: appends must be incremental, never a full-subtree teardown
+ * per chunk). Retained rows keep their exact DOM node identity, so an
+ * expanded row's open/closed state survives the tick — the same
+ * correctness property `ReplayPremiereOverlay.ts`'s own
+ * `applyVolatileModelUpdates` war-room patch already relies on.
+ *
+ * Also preserves the viewer's own scroll intent: auto-follows the newest
+ * entry only while the viewer is already scrolled to the tail, and never
+ * yanks the view while they've scrolled up to read older entries (pruned
+ * height above the viewport is subtracted from `scrollTop` instead, so
+ * whatever content is already on screen doesn't jump).
+ */
+function patchWarRoomWindowForward(
+  section: HTMLElement,
+  allEvents: readonly CuratedWarRoomEvent[],
+  prevEligibleCount: number,
+  nextEligibleCount: number,
+  windowSize: number,
+  callbacks: WarRoomWindowCallbacks,
+): void {
+  const list = section.querySelector<HTMLElement>(".broadcast-war-room-list");
+  if (list === null) return;
+  const prevStart = warRoomWindowStart(prevEligibleCount, windowSize);
+  const nextStart = warRoomWindowStart(nextEligibleCount, windowSize);
+  const removedCount = nextStart - prevStart;
+
+  const TAIL_EPSILON_PX = 4;
+  const wasAtTail =
+    list.scrollHeight - list.scrollTop - list.clientHeight <= TAIL_EPSILON_PX;
+
+  const rows = list.querySelectorAll<HTMLElement>(".broadcast-war-room-item");
+  let removedHeight = 0;
+  for (let i = 0; i < removedCount && i < rows.length; i++) {
+    removedHeight += rows[i]!.getBoundingClientRect().height;
+    rows[i]!.remove();
+  }
+  // The append source is NEVER `[prevEligibleCount, nextEligibleCount)` —
+  // for a jump bigger than the window (e.g. a long idle tick, or a
+  // forward seek/jump-to-turn that crosses hundreds of eligible events at
+  // once) that range is far wider than `windowSize` and would silently
+  // defeat the whole DOM cap. Only the slice that actually lands inside
+  // the new window — `[max(prevEligibleCount, nextStart), nextEligibleCount)`
+  // — may ever be appended; anything older than `nextStart` was already
+  // excluded by the removal loop above (or never mounted to begin with).
+  const appendStart = Math.max(prevEligibleCount, nextStart);
+  for (const event of allEvents.slice(appendStart, nextEligibleCount)) {
+    list.append(renderWarRoomEvent(event, callbacks));
+  }
+
+  const earlierRow = list.querySelector<HTMLElement>(
+    ".broadcast-war-room-earlier",
+  );
+  if (nextStart > 0) {
+    if (earlierRow === null) {
+      list.prepend(buildWarRoomEarlierRow(nextStart, callbacks.onShowEarlier));
+    } else {
+      const button = earlierRow.querySelector("button");
+      if (button !== null) {
+        button.textContent = translateText(
+          "broadcast.war_room_show_earlier",
+          { count: nextStart },
+        );
+      }
+    }
+  } else {
+    earlierRow?.remove();
+  }
+
+  if (wasAtTail) {
+    list.scrollTop = list.scrollHeight;
+  } else if (removedHeight > 0) {
+    list.scrollTop = Math.max(0, list.scrollTop - removedHeight);
+  }
+}
+
 function mountAiLeagueBroadcastDrawer(
   overlay: HTMLElement,
   input: AiLeagueReplayOverlayInput,
@@ -3798,8 +3986,9 @@ function mountAiLeagueBroadcastDrawer(
   const decisions = input.decisions;
   const totalTurns = aiLeagueFinishTurn(input, telemetry);
   // Full, unwindowed curated set — NEVER rendered directly (spec item 2: a
-  // viewer at turn N must never see an event from turn > N). `render` below
-  // windows this down to the viewer's own playhead on every call.
+  // viewer at turn N must never see an event from turn > N). Both render
+  // paths below window this down to the viewer's own playhead AND (spec
+  // item 1, AI_LEAGUE_WAR_ROOM_DOM_WINDOW above) to a bounded DOM count.
   const allWarRoomEvents = curatedWarRoomEvents(telemetry, decisions);
   const timelineMarkers: TimelineMarker[] = [
     ...matchTimelineEventMarkers(telemetry),
@@ -3841,17 +4030,87 @@ function mountAiLeagueBroadcastDrawer(
     // Collapse-state persistence is optional.
   }
 
-  // Same per-tick memoization approach as mountAiLeagueDiplomacyStrip: frames
-  // fire every game tick, so skip the DOM rebuild when nothing actually
-  // changed for this frame/tab-selection combination — but always re-check
-  // panel placement (cheap) since a viewport resize alone (no content
-  // change) still needs to relocate panels across the desktop/mobile
-  // breakpoint.
-  let lastSnapshot = "";
-  const render = (
+  // War Room DOM window (spec item 1) — grows via onShowEarlier below.
+  let warRoomWindowSize = AI_LEAGUE_WAR_ROOM_DOM_WINDOW;
+  // Eligible-count/window-size the DOM currently reflects, as of the last
+  // structural OR incremental render. -1 (and 0, the structural "no events
+  // yet" placeholder) both force the next tick through a structural rebuild
+  // rather than the incremental fast path — see patchVolatile below.
+  let mountedWarRoomCount = -1;
+  let mountedWarRoomWindowSize = warRoomWindowSize;
+  // Match-state strip key (spec item 3): the strip is a single small,
+  // display-only element, but it can appear/disappear (null <-> non-null)
+  // as match-state samples arrive, so it still needs its own change gate
+  // rather than being unconditionally rebuilt every tick.
+  let lastStripKey: string | null = null;
+
+  const rerenderWithLastFrame = (): void => {
+    renderStructural(
+      AI_LEAGUE_BROADCAST_DRAWER_LAST_FRAME.get(container) ?? [],
+      AI_LEAGUE_BROADCAST_DRAWER_LAST_TURN.get(container) ?? 0,
+    );
+  };
+
+  const railCallbacks = () => ({
+    onSelect: (playerName: string) => {
+      document.dispatchEvent(
+        new CustomEvent(BROADCAST_RAIL_FOLLOW_EVENT, {
+          detail: { playerName },
+        }),
+      );
+    },
+    collapsed: railCollapsed,
+    onToggleCollapsed: () => {
+      railCollapsed = !railCollapsed;
+      try {
+        localStorage.setItem(
+          AI_LEAGUE_RAIL_COLLAPSED_KEY,
+          String(railCollapsed),
+        );
+      } catch {
+        // Collapse-state persistence is optional.
+      }
+      rerenderWithLastFrame();
+    },
+  });
+
+  const warRoomCallbacks = (): WarRoomWindowCallbacks => ({
+    onJumpToTurn: dispatchJumpToTurn,
+    collapsed: warRoomCollapsed,
+    onToggleCollapsed: () => {
+      warRoomCollapsed = !warRoomCollapsed;
+      try {
+        localStorage.setItem(
+          AI_LEAGUE_WAR_ROOM_COLLAPSED_KEY,
+          String(warRoomCollapsed),
+        );
+      } catch {
+        // Collapse-state persistence is optional.
+      }
+      rerenderWithLastFrame();
+    },
+    onShowEarlier: () => {
+      warRoomWindowSize += AI_LEAGUE_WAR_ROOM_DOM_WINDOW;
+      // patchVolatile (not renderStructural): its own per-region key checks
+      // no-op the rail/timeline/strip (nothing about them changed) and take
+      // the war-room "else" branch below (window size changed), so this
+      // ends up rebuilding ONLY the war-room region, never the whole drawer.
+      patchVolatile(
+        AI_LEAGUE_BROADCAST_DRAWER_LAST_FRAME.get(container) ?? [],
+        AI_LEAGUE_BROADCAST_DRAWER_LAST_TURN.get(container) ?? 0,
+      );
+    },
+  });
+
+  // Full structural rebuild of all four tabs — used only for genuinely
+  // structural changes: first mount, active-tab switch, and a collapse
+  // toggle (same "toggle re-renders in full" precedent
+  // ReplayPremiereOverlay.ts's own BroadcastState setters already use).
+  // `patchVolatile` below is the automatic per-tick path.
+  const renderStructural = (
     framePlayers: readonly AiLeagueReplayFramePlayer[],
     turnNumber: number,
-  ) => {
+  ): void => {
     AI_LEAGUE_BROADCAST_DRAWER_LAST_FRAME.set(container, framePlayers);
     AI_LEAGUE_BROADCAST_DRAWER_LAST_TURN.set(container, turnNumber);
     const activeTab = AI_LEAGUE_DRAWER_ACTIVE_TAB.get(container) ?? "agents";
@@ -3864,13 +4123,9 @@ function mountAiLeagueBroadcastDrawer(
       ...entry,
       followed: entry.playerName === followedPlayerName,
     }));
-    // Windowed to the viewer's own playhead (spec item 2): an event from a
-    // turn the viewer hasn't reached yet must never render, in Full Replay
-    // exactly as much as in a live/sealed Premiere — this is the ONLY line
-    // that turns the full curated set above into what actually reaches the
-    // DOM.
-    const warRoomEvents = allWarRoomEvents.filter(
-      (event) => event.turn <= turnNumber,
+    const eligibleWarRoomCount = warRoomEligibleCount(
+      allWarRoomEvents,
+      turnNumber,
     );
     // Director Cut segment (when that mode is on) takes priority over the
     // sample's own phase — spec item 3. `segmentForTurn` is a cheap binary
@@ -3903,98 +4158,36 @@ function mountAiLeagueBroadcastDrawer(
                     MATCH_STATE_PHASE_LABEL_KEYS[stripFields.samplePhase],
                   ),
           };
-    const snapshot = JSON.stringify({
-      railEntries,
-      warRoomEvents,
-      timelineMarkers,
-      turnNumber,
-      analystData,
-      activeTab,
-      railCollapsed,
-      warRoomCollapsed,
-      stripInput,
-    });
-    const panelsHost = container.querySelector<HTMLElement>(
-      ".broadcast-drawer-panels",
-    );
-    if (snapshot === lastSnapshot) {
-      if (panelsHost !== null) {
-        relocateAiLeagueBroadcastDrawerPanels(drawerPortal, panelsHost);
-      }
-      return;
-    }
-    lastSnapshot = snapshot;
     // A previous render generation may have relocated panels into the
     // portal; those are now-orphaned nodes container.replaceChildren()
     // below can never reach (they live outside `container`), so clear them
     // explicitly before building the new generation.
     drawerPortal.replaceChildren();
-    const rerenderWithLastFrame = (): void => {
-      render(
-        AI_LEAGUE_BROADCAST_DRAWER_LAST_FRAME.get(container) ?? [],
-        AI_LEAGUE_BROADCAST_DRAWER_LAST_TURN.get(container) ?? 0,
-      );
-    };
+    const rail = renderCompetitorRail(railEntries, railCallbacks());
+    rail.dataset.railKey = JSON.stringify(railEntries);
+    const warRoomRegion = buildWarRoomSection(
+      allWarRoomEvents,
+      eligibleWarRoomCount,
+      warRoomWindowSize,
+      warRoomCallbacks(),
+    );
+    const timeline = renderMatchTimeline(timelineMarkers, {
+      totalTurns,
+      // Full Replay is unrestricted (unlike a live Premiere, which must
+      // never seek past the live edge) — this literally IS the spec's
+      // `maxSeekableTurn: null` case.
+      maxSeekableTurn: null,
+      // Content-free ticks ahead of playhead is the safe default (spec
+      // item 2): a marker's own tooltip is itself a spoiler surface,
+      // independent of `maxSeekableTurn` above.
+      currentTurn: turnNumber,
+      onSeek: dispatchJumpToTurn,
+    });
+    timeline.dataset.timelineKey = String(turnNumber);
     const tabs: BroadcastDrawerTab[] = [
-      {
-        id: "agents",
-        content: renderCompetitorRail(railEntries, {
-          onSelect: (playerName) => {
-            document.dispatchEvent(
-              new CustomEvent(BROADCAST_RAIL_FOLLOW_EVENT, {
-                detail: { playerName },
-              }),
-            );
-          },
-          collapsed: railCollapsed,
-          onToggleCollapsed: () => {
-            railCollapsed = !railCollapsed;
-            try {
-              localStorage.setItem(
-                AI_LEAGUE_RAIL_COLLAPSED_KEY,
-                String(railCollapsed),
-              );
-            } catch {
-              // Collapse-state persistence is optional.
-            }
-            rerenderWithLastFrame();
-          },
-        }),
-      },
-      {
-        id: "events",
-        content: renderWarRoomFeed(warRoomEvents, {
-          onJumpToTurn: dispatchJumpToTurn,
-          collapsed: warRoomCollapsed,
-          onToggleCollapsed: () => {
-            warRoomCollapsed = !warRoomCollapsed;
-            try {
-              localStorage.setItem(
-                AI_LEAGUE_WAR_ROOM_COLLAPSED_KEY,
-                String(warRoomCollapsed),
-              );
-            } catch {
-              // Collapse-state persistence is optional.
-            }
-            rerenderWithLastFrame();
-          },
-        }),
-      },
-      {
-        id: "timeline",
-        content: renderMatchTimeline(timelineMarkers, {
-          totalTurns,
-          // Full Replay is unrestricted (unlike a live Premiere, which must
-          // never seek past the live edge) — this literally IS the spec's
-          // `maxSeekableTurn: null` case.
-          maxSeekableTurn: null,
-          // Content-free ticks ahead of playhead is the safe default (spec
-          // item 2): a marker's own tooltip is itself a spoiler surface,
-          // independent of `maxSeekableTurn` above.
-          currentTurn: turnNumber,
-          onSeek: dispatchJumpToTurn,
-        }),
-      },
+      { id: "agents", content: rail },
+      { id: "events", content: warRoomRegion },
+      { id: "timeline", content: timeline },
       { id: "analysis", content: renderAnalystPanel(analystData) },
     ];
     container.replaceChildren(
@@ -4007,6 +4200,9 @@ function mountAiLeagueBroadcastDrawer(
         },
       }),
     );
+    mountedWarRoomCount = eligibleWarRoomCount;
+    mountedWarRoomWindowSize = warRoomWindowSize;
+    lastStripKey = JSON.stringify(stripInput);
     const nextPanelsHost = container.querySelector<HTMLElement>(
       ".broadcast-drawer-panels",
     );
@@ -4014,7 +4210,157 @@ function mountAiLeagueBroadcastDrawer(
       relocateAiLeagueBroadcastDrawerPanels(drawerPortal, nextPanelsHost);
     }
   };
-  render(
+
+  // Automatic per-tick path (spec item 3: "no full-subtree teardown per
+  // chunk"). Patches exactly the regions whose own derived content changed
+  // in place — never a `container.replaceChildren()` teardown of all four
+  // tabs — mirroring ReplayPremiereOverlay.ts's own
+  // `applyVolatileModelUpdates`/structural-key split. `activeTab` and the
+  // collapse flags never change on this path (only user clicks change
+  // them, always via renderStructural above), so only rail/war-room/
+  // timeline/strip need a key check here; the analyst panel is static per
+  // mount (built once, above) and is never touched again.
+  const patchVolatile = (
+    framePlayers: readonly AiLeagueReplayFramePlayer[],
+    turnNumber: number,
+  ): void => {
+    const drawer = container.querySelector<HTMLElement>(".broadcast-drawer");
+    if (drawer === null) {
+      renderStructural(framePlayers, turnNumber);
+      return;
+    }
+    AI_LEAGUE_BROADCAST_DRAWER_LAST_FRAME.set(container, framePlayers);
+    AI_LEAGUE_BROADCAST_DRAWER_LAST_TURN.set(container, turnNumber);
+
+    const railEntries = competitorRailEntries(
+      telemetry,
+      decisions,
+      framePlayers,
+      identityByPlayerName,
+    ).map((entry) => ({
+      ...entry,
+      followed: entry.playerName === followedPlayerName,
+    }));
+    const rail = container.querySelector<HTMLElement>(".broadcast-rail");
+    if (rail !== null) {
+      const nextRailKey = JSON.stringify(railEntries);
+      if (rail.dataset.railKey !== nextRailKey) {
+        const nextRail = renderCompetitorRail(railEntries, railCallbacks());
+        nextRail.dataset.railKey = nextRailKey;
+        rail.replaceWith(nextRail);
+      }
+    }
+
+    // "events"/"timeline" panels may currently live inside `drawerPortal`
+    // (a `document.body` child, outside `container` — see
+    // relocateAiLeagueBroadcastDrawerPanels's own doc), so — exactly like
+    // that function's own panel lookups — these are document-scoped, not
+    // container-scoped.
+    const warRoomSection = document.querySelector<HTMLElement>(
+      ".broadcast-war-room",
+    );
+    if (warRoomSection !== null) {
+      const eligibleWarRoomCount = warRoomEligibleCount(
+        allWarRoomEvents,
+        turnNumber,
+      );
+      if (
+        mountedWarRoomCount > 0 &&
+        eligibleWarRoomCount >= mountedWarRoomCount &&
+        warRoomWindowSize === mountedWarRoomWindowSize
+      ) {
+        // Pure forward tick: incremental append/prune, no rebuild.
+        if (eligibleWarRoomCount !== mountedWarRoomCount) {
+          patchWarRoomWindowForward(
+            warRoomSection,
+            allWarRoomEvents,
+            mountedWarRoomCount,
+            eligibleWarRoomCount,
+            warRoomWindowSize,
+            warRoomCallbacks(),
+          );
+        }
+      } else {
+        // Non-monotonic (a seek/jump backward dropped trailing events),
+        // still in the empty placeholder state, or the window size just
+        // changed (onShowEarlier) — rebuild ONLY this region, never the
+        // whole drawer.
+        const nextWarRoom = buildWarRoomSection(
+          allWarRoomEvents,
+          eligibleWarRoomCount,
+          warRoomWindowSize,
+          warRoomCallbacks(),
+        );
+        warRoomSection.replaceWith(nextWarRoom);
+      }
+      mountedWarRoomCount = eligibleWarRoomCount;
+      mountedWarRoomWindowSize = warRoomWindowSize;
+    }
+
+    const timeline = document.querySelector<HTMLElement>(
+      ".broadcast-timeline",
+    );
+    if (timeline !== null) {
+      const nextTimelineKey = String(turnNumber);
+      if (timeline.dataset.timelineKey !== nextTimelineKey) {
+        const nextTimeline = renderMatchTimeline(timelineMarkers, {
+          totalTurns,
+          maxSeekableTurn: null,
+          currentTurn: turnNumber,
+          onSeek: dispatchJumpToTurn,
+        });
+        nextTimeline.dataset.timelineKey = nextTimelineKey;
+        timeline.replaceWith(nextTimeline);
+      }
+    }
+
+    const activeSegment =
+      directorCutHandle?.isEnabled() === true && directorCutPlan !== null
+        ? (segmentForTurn(directorCutPlan, turnNumber)?.segment ?? null)
+        : null;
+    const stripFields = deriveMatchStateStripFields(
+      matchStateSeries,
+      turnNumber,
+      framePlayers,
+      identityByPlayerName,
+    );
+    const stripInput: MatchStateStripInput | null =
+      stripFields === null
+        ? null
+        : {
+            leader: stripFields.leader,
+            territoryShareDeltaPercent: stripFields.territoryShareDeltaPercent,
+            aliveCount: stripFields.aliveCount,
+            totalCount: stripFields.totalCount,
+            activeAllianceCount: stripFields.activeAllianceCount,
+            activeWarCount: stripFields.activeWarCount,
+            currentPhaseLabel:
+              activeSegment !== null
+                ? activeSegment.eventReason
+                : translateText(
+                    MATCH_STATE_PHASE_LABEL_KEYS[stripFields.samplePhase],
+                  ),
+          };
+    const nextStripKey = JSON.stringify(stripInput);
+    if (nextStripKey !== lastStripKey) {
+      lastStripKey = nextStripKey;
+      const existingStrip = container.querySelector<HTMLElement>(
+        ".broadcast-state-strip",
+      );
+      if (stripInput === null) {
+        existingStrip?.remove();
+      } else if (existingStrip !== null) {
+        existingStrip.replaceWith(renderMatchStateStrip(stripInput));
+      } else {
+        container.insertBefore(
+          renderMatchStateStrip(stripInput),
+          container.firstChild,
+        );
+      }
+    }
+  };
+
+  renderStructural(
     AI_LEAGUE_BROADCAST_DRAWER_LAST_FRAME.get(container) ?? [],
     AI_LEAGUE_BROADCAST_DRAWER_LAST_TURN.get(container) ?? input.currentTurn ?? 0,
   );
@@ -4027,7 +4373,7 @@ function mountAiLeagueBroadcastDrawer(
     const turnNumber = Number.isFinite(detail.turnNumber)
       ? detail.turnNumber
       : (AI_LEAGUE_BROADCAST_DRAWER_LAST_TURN.get(container) ?? 0);
-    render(detail.players, turnNumber);
+    patchVolatile(detail.players, turnNumber);
   };
   const onResize = (): void => {
     const panelsHost = container.querySelector<HTMLElement>(
