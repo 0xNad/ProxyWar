@@ -1031,6 +1031,15 @@ class Client {
     this.replayLoadingCleanup?.();
     this.replayLoadingCleanup = null;
     this.replayAttemptCleanup?.();
+    // `showReplayLoadingScreen` (already active by this point on both
+    // callers) marks `document.documentElement` with the CSS class that
+    // hides every OTHER body child until a real frame/ready state lifts
+    // it (index.html's `proxywar-replay-booting` rule) — `replaceChildren`
+    // below removes the veil element itself but never that class, so
+    // without this the freshly-mounted page would render fully correct
+    // markup that CSS keeps invisible. Same lift `finishVeil()` already
+    // does for every OTHER terminal outcome.
+    finishReplayLoadingScreen();
     ensureHeadLangSelector();
     const page = document.createElement("premiere-ended-page");
     page.setAttribute("premiere-id", premiereId);
