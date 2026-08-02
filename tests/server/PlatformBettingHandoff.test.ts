@@ -110,6 +110,35 @@ describe("platform account authority <-> betting handoff (real servers)", () => 
     expect(body.identity.displayName).toBeNull();
   });
 
+  test("/api/identity/status sees the SAME guest cookie /api/premieres/account issued -- regression for a live P0: a Path=/api/premieres cookie is invisible to /api/identity/status (outside that path), so it silently re-minted a fresh identity on every call", async () => {
+    const bootstrapResponse = await rawRequest(betting!.origin, "GET", "/api/premieres/account");
+    const guestCookie = firstCookiePair(bootstrapResponse.headers, "proxywar_premiere_guest");
+    expect(guestCookie).not.toBeNull();
+    const bootstrapBody = JSON.parse(bootstrapResponse.body) as {
+      identity: { participantId: string };
+    };
+
+    const statusResponse = await rawRequest(betting!.origin, "GET", "/api/identity/status", {
+      cookie: guestCookie!,
+    });
+    expect(statusResponse.status).toBe(200);
+    // The whole bug: this must NOT set a competing cookie for a
+    // participant the caller never asked to become.
+    expect(firstCookiePair(statusResponse.headers, "proxywar_premiere_guest")).toBeNull();
+
+    // The identity read afterward must still resolve to the SAME
+    // participant /api/premieres/account bootstrapped -- not a fresh one.
+    const afterStatus = await rawRequest(betting!.origin, "GET", "/api/premieres/account", {
+      cookie: guestCookie!,
+    });
+    const afterStatusBody = JSON.parse(afterStatus.body) as {
+      identity: { participantId: string };
+    };
+    expect(afterStatusBody.identity.participantId).toBe(
+      bootstrapBody.identity.participantId,
+    );
+  });
+
   test("the full handoff: betting -> platform -> back to betting, sets a display name AND a private lineage claim SET (two lineages, both survive), both resolve on the betting side without betting ever writing them, and the claims never reach a public route", async () => {
     // 1. Establish a betting guest session.
     const bootstrapResponse = await rawRequest(betting!.origin, "GET", "/api/premieres/account");
