@@ -740,6 +740,18 @@ export class BuildPage extends LitElement {
     `;
   }
 
+  /**
+   * P0 fix (found live 2026-08-02): this step used to introduce the
+   * coworld CLI (list/run-episode) with no explanation of how it relates
+   * to Step 5's launch.sh — two parallel toolchains, no cross-reference.
+   * `toolchain_note` names the relationship explicitly (this is Softmax's
+   * own coworld CLI, a lower-level/advanced tool launch.sh wraps
+   * internally — confirmed against `coworld-adapter/ENTER_THE_LEAGUE.md`
+   * and `tester-starter-llm/launch.sh`'s own `coworld upload-policy`
+   * call). The sign-in command also moved here from Step 5: `coworld
+   * list`/`run-episode` need it directly, while launch.sh signs itself in
+   * and never did.
+   */
   private renderStep4(): TemplateResult {
     return html`
       <h2 class="text-lg font-bold text-ink">
@@ -748,6 +760,16 @@ export class BuildPage extends LitElement {
       <p class="mt-2 text-sm text-ink-muted">
         ${translateText("build_page.step4.prereqs")}
       </p>
+      <p class="mt-2 text-sm text-ink-muted">
+        ${translateText("build_page.step4.toolchain_note")}
+      </p>
+      <p class="mt-4 text-sm text-ink-muted">
+        ${translateText("build_page.step4.sign_in")}
+      </p>
+      ${this.renderCopyBlock(
+        "uvx --from softmax-cli softmax login",
+        "step4-login",
+      )}
       <p class="mt-4 text-sm font-bold text-ink">
         ${translateText("build_page.step4.find_coworld_id")}
       </p>
@@ -790,10 +812,6 @@ export class BuildPage extends LitElement {
         ${translateText("build_page.step5.heading")}
       </h2>
       <p class="mt-2 text-sm text-ink-muted">
-        ${translateText("build_page.step5.sign_in")}
-      </p>
-      ${this.renderCopyBlock("uv run softmax login", "step5-login")}
-      <p class="mt-4 text-sm text-ink-muted">
         ${translateText("build_page.step5.launch_intro")}
       </p>
       ${this.renderCopyBlock(
@@ -805,6 +823,9 @@ export class BuildPage extends LitElement {
       </p>
       <p class="mt-4 text-sm font-bold text-ink">
         ${translateText("build_page.step5.enter_title")}
+      </p>
+      <p class="mt-1 text-xs text-ink-muted">
+        ${translateText("build_page.step5.enter_toolchain_note")}
       </p>
       ${this.renderCopyBlock(
         "uvx --from coworld coworld leagues        # find the Proxywar row",
@@ -821,12 +842,7 @@ export class BuildPage extends LitElement {
   }
 
   private renderStep6(): TemplateResult {
-    const items = [
-      "build_page.step6.image_uploaded",
-      "build_page.step6.policy_connects",
-      "build_page.step6.legal_decision",
-      "build_page.step6.no_crash",
-      "build_page.step6.replay_produced",
+    const remainingItems = [
       "build_page.step6.result_valid",
       "build_page.step6.qualifier_passed",
       "build_page.step6.profile_mapped",
@@ -836,7 +852,36 @@ export class BuildPage extends LitElement {
         ${translateText("build_page.step6.heading")}
       </h2>
       <ul class="mt-3 space-y-2 text-sm text-ink-muted">
-        ${items.map(
+        <li class="flex items-start gap-2">
+          <span class="mt-0.5 text-accent">&#9633;</span>
+          <span>${translateText("build_page.step6.image_uploaded")}</span>
+        </li>
+        <li class="flex items-start gap-2">
+          <span class="mt-0.5 text-accent">&#9633;</span>
+          <span>${translateText("build_page.step6.policy_connects")}</span>
+        </li>
+        <li class="flex items-start gap-2">
+          <span class="mt-0.5 text-accent">&#9633;</span>
+          <span>${translateText("build_page.step6.legal_decision")}</span>
+        </li>
+        <li class="flex items-start gap-2">
+          <span class="mt-0.5 text-accent">&#9633;</span>
+          <span>${translateText("build_page.step6.no_crash")}</span>
+        </li>
+        <li class="flex items-start gap-2">
+          <span class="mt-0.5 text-accent">&#9633;</span>
+          <span
+            >${translateText("build_page.step6.replay_produced_prefix")}
+            <a
+              href="https://softmax.com/observatory"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="text-cyan-400 underline outline-none hover:text-cyan-300 focus-visible:ring-2 focus-visible:ring-accent"
+              >softmax.com/observatory</a
+            >.</span
+          >
+        </li>
+        ${remainingItems.map(
           (key) => html`
             <li class="flex items-start gap-2">
               <span class="mt-0.5 text-accent">&#9633;</span>
@@ -851,13 +896,31 @@ export class BuildPage extends LitElement {
     `;
   }
 
+  /**
+   * P0 fix (found live 2026-08-02): "softmax.com/observatory" used to
+   * appear as bare unlinked text on both this step and Step 6, with no
+   * explanation of what it is or how it relates to ProxyWar. Now a real
+   * link, plus one sentence naming the relationship: Observatory is
+   * Softmax's own hosting console (raw per-decision logs/scores);
+   * ProxyWar surfaces the public league identity built on top of it.
+   */
   private renderStep7(): TemplateResult {
     return html`
       <h2 class="text-lg font-bold text-ink">
         ${translateText("build_page.step7.heading")}
       </h2>
       <p class="mt-2 text-sm text-ink-muted">
-        ${translateText("build_page.step7.replays")}
+        ${translateText("build_page.step7.replays_prefix")}
+        <a
+          href="https://softmax.com/observatory"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="text-cyan-400 underline outline-none hover:text-cyan-300 focus-visible:ring-2 focus-visible:ring-accent"
+          >softmax.com/observatory</a
+        >.
+      </p>
+      <p class="mt-2 text-xs text-ink-muted">
+        ${translateText("build_page.step7.observatory_explainer")}
       </p>
       <p class="mt-2 text-sm text-ink-muted">
         ${translateText("build_page.step7.results")}

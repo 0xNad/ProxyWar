@@ -359,4 +359,61 @@ describe("build-page", () => {
     expect(normalizedText(el)).toContain("build_page.step6.profile_mapped");
     expect(normalizedText(el)).toContain("build_page.step6.mapping_explainer");
   });
+
+  it("Step 4: signs in with the starter-documented softmax-cli command, never the broken 'uv run softmax login' (live P0, 2026-08-02)", async () => {
+    // Confirmed against the actual published starter repo
+    // (github.com/0xNad/proxywar-coworld-starter/ONBOARDING.md's
+    // Troubleshooting table): "uvx --from softmax-cli softmax login" is
+    // the documented redo-manually form. "uv run softmax login" needs an
+    // existing uv project (pyproject.toml/venv) a fresh clone never has.
+    const el = mount();
+    await flushMicrotasks();
+    el.querySelectorAll<HTMLButtonElement>('button[aria-current]')[3].click();
+    await flushMicrotasks();
+    const text = normalizedText(el);
+    expect(text).toContain("uvx --from softmax-cli softmax login");
+    expect(text).not.toContain("uv run softmax login");
+  });
+
+  it("Step 4/5 cross-reference the coworld CLI and launch.sh as two named, related tools instead of two silent parallel toolchains (live P0, 2026-08-02)", async () => {
+    const el = mount();
+    await flushMicrotasks();
+    const stepButtons = () =>
+      el.querySelectorAll<HTMLButtonElement>('button[aria-current]');
+    stepButtons()[3].click();
+    await flushMicrotasks();
+    expect(normalizedText(el)).toContain("build_page.step4.toolchain_note");
+    stepButtons()[4].click();
+    await flushMicrotasks();
+    expect(normalizedText(el)).toContain(
+      "build_page.step5.enter_toolchain_note",
+    );
+    // Step 5's own launch.sh command is unchanged and does not repeat the
+    // Step 4 sign-in step (launch.sh signs itself in).
+    expect(normalizedText(el)).not.toContain("softmax login");
+  });
+
+  it("Step 6/7 hyperlink softmax.com/observatory instead of leaving it as bare unlinked text (live P0, 2026-08-02)", async () => {
+    const el = mount();
+    await flushMicrotasks();
+    const stepButtons = () =>
+      el.querySelectorAll<HTMLButtonElement>('button[aria-current]');
+    stepButtons()[5].click();
+    await flushMicrotasks();
+    const step6Link = el.querySelector<HTMLAnchorElement>(
+      'a[href="https://softmax.com/observatory"]',
+    );
+    expect(step6Link).not.toBeNull();
+    expect(step6Link?.textContent?.trim()).toBe("softmax.com/observatory");
+
+    stepButtons()[6].click();
+    await flushMicrotasks();
+    const step7Link = el.querySelector<HTMLAnchorElement>(
+      'a[href="https://softmax.com/observatory"]',
+    );
+    expect(step7Link).not.toBeNull();
+    expect(normalizedText(el)).toContain(
+      "build_page.step7.observatory_explainer",
+    );
+  });
 });
