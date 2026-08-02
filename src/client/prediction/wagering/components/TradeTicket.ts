@@ -2,10 +2,15 @@ import { html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { createRef, ref, type Ref } from "lit/directives/ref.js";
 import { ReplayPremiereServiceError } from "src/client/ReplayPremiereRuntime";
-import { MIN_STAKE, maxStake } from "src/prediction/types";
-import { minTradeableStake, quoteBuy, quoteSell, type TradeQuote } from "../marketMath";
-import { validateBuyDraft, validateSellDraft } from "../validate";
+import { maxStake, MIN_STAKE } from "src/prediction/types";
+import {
+  minTradeableStake,
+  quoteBuy,
+  quoteSell,
+  type TradeQuote,
+} from "../marketMath";
 import type { MarketSeatOption, MarketState, TradeSide } from "../types";
+import { validateBuyDraft, validateSellDraft } from "../validate";
 import "./MarketBankrollBadge";
 
 /**
@@ -79,8 +84,9 @@ export class PremiereTradeTicket extends LitElement {
   @property({ type: Number }) bankroll: number | null = null;
   @property({ type: Boolean }) loading = false;
   /** External load failure (e.g. the market poll itself failed). */
-  @property({ type: String, attribute: "load-error" }) loadError: string | null =
-    null;
+  @property({ type: String, attribute: "load-error" }) loadError:
+    | string
+    | null = null;
   @property({ attribute: false }) onTrade?: (
     seatId: string,
     side: TradeSide,
@@ -124,7 +130,8 @@ export class PremiereTradeTicket extends LitElement {
     const key = `${seatId}|${this.draftSide}|${this.draftAmountText.trim()}`;
     if (key !== this.draftKeyTracked) {
       this.draftKeyTracked = key;
-      this.quoteBaselinePrice = seatId !== null ? this.market?.prices[seatId] ?? null : null;
+      this.quoteBaselinePrice =
+        seatId !== null ? (this.market?.prices[seatId] ?? null) : null;
     }
   }
 
@@ -139,7 +146,12 @@ export class PremiereTradeTicket extends LitElement {
     const seatId = this.draftSeatId;
     const market = this.market;
     const trimmed = this.draftAmountText.trim();
-    if (seatId === null || market === null || trimmed === "" || !/^\d+$/.test(trimmed)) {
+    if (
+      seatId === null ||
+      market === null ||
+      trimmed === "" ||
+      !/^\d+$/.test(trimmed)
+    ) {
       return null;
     }
     const amount = Number(trimmed);
@@ -185,7 +197,12 @@ export class PremiereTradeTicket extends LitElement {
     this.submitting = true;
     this.submitError = null;
     try {
-      await this.onTrade?.(seatId, this.draftSide, amount, quote.suggestedLimitPrice);
+      await this.onTrade?.(
+        seatId,
+        this.draftSide,
+        amount,
+        quote.suggestedLimitPrice,
+      );
       this.onDraftAmountChange?.("");
     } catch (error) {
       this.submitError = describeTradeError(error);
@@ -214,7 +231,8 @@ export class PremiereTradeTicket extends LitElement {
           : "Enter a share count you hold."}
       </p>`;
     }
-    const seatLabel = this.seats.find((seat) => seat.seatId === seatId)?.displayName ?? "";
+    const seatLabel =
+      this.seats.find((seat) => seat.seatId === seatId)?.displayName ?? "";
     const currentPrice = this.market?.prices[seatId] ?? 0;
     const nextPrice = quote.pricesAfter[seatId] ?? 0;
     const priceMoved =
@@ -228,7 +246,8 @@ export class PremiereTradeTicket extends LitElement {
               role="status"
             >
               <span aria-hidden="true">⚠</span>
-              Price moved since you set this order — the numbers below have already updated, review before submitting.
+              Price moved since you set this order — the numbers below have
+              already updated, review before submitting.
             </p>`
           : nothing}
         <div
@@ -236,22 +255,28 @@ export class PremiereTradeTicket extends LitElement {
           aria-live="polite"
         >
           <div class="flex items-baseline justify-between gap-2">
-            <span class="text-[11px] font-semibold uppercase tracking-wide text-ink-muted"
+            <span
+              class="text-[11px] font-semibold uppercase tracking-wide text-ink-muted"
               >${this.draftSide === "buy" ? "You pay" : "You receive"}</span
             >
             <span class="font-mono text-xl font-bold tabular-nums text-ink"
               >${quote.chips.toLocaleString()} cr</span
             >
           </div>
-          <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs text-ink-muted">
+          <div
+            class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs text-ink-muted"
+          >
             <span
-              >${quote.shares} sh of <span class="font-semibold text-ink">${seatLabel}</span> @ avg
+              >${quote.shares} sh of
+              <span class="font-semibold text-ink">${seatLabel}</span> @ avg
               ${quote.avgPrice.toFixed(1)}%</span
             >
             <span class="flex items-center gap-1 font-mono tabular-nums">
               ${currentPrice.toFixed(1)}%
               <span aria-hidden="true" class="text-ink-muted">→</span>
-              <span class="font-semibold text-ink">${nextPrice.toFixed(1)}%</span>
+              <span class="font-semibold text-ink"
+                >${nextPrice.toFixed(1)}%</span
+              >
             </span>
           </div>
           <p class="text-[11px] leading-snug text-ink-muted">
@@ -292,7 +317,8 @@ export class PremiereTradeTicket extends LitElement {
               >
                 <span class="truncate">${seat.displayName}</span>
                 ${price !== undefined
-                  ? html`<span class="shrink-0 font-mono text-xs tabular-nums text-ink-muted"
+                  ? html`<span
+                      class="shrink-0 font-mono text-xs tabular-nums text-ink-muted"
                       >${price.toFixed(1)}%</span
                     >`
                   : nothing}
@@ -354,7 +380,10 @@ export class PremiereTradeTicket extends LitElement {
           )}
         </div>
         ${this.renderSeatPicker()}
-        <label for="trade-amount-input" class="flex flex-col gap-1 text-xs text-ink-muted">
+        <label
+          for="trade-amount-input"
+          class="flex flex-col gap-1 text-xs text-ink-muted"
+        >
           ${this.draftSide === "buy" ? "Budget (chips)" : "Shares"}
           <div class="relative">
             <input
@@ -365,7 +394,9 @@ export class PremiereTradeTicket extends LitElement {
               step="1"
               .value=${this.draftAmountText}
               @input=${(event: Event) => {
-                this.onDraftAmountChange?.((event.target as HTMLInputElement).value);
+                this.onDraftAmountChange?.(
+                  (event.target as HTMLInputElement).value,
+                );
                 this.submitError = null;
               }}
               class="w-full rounded-md border border-line bg-surface-2 px-3 py-1.5 pr-9 font-mono text-base tabular-nums text-ink outline-none focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent"
@@ -385,6 +416,7 @@ export class PremiereTradeTicket extends LitElement {
               return html`
                 <button
                   type="button"
+                  aria-pressed=${active}
                   @click=${() => {
                     this.onDraftAmountChange?.(String(amount));
                     this.submitError = null;
@@ -400,7 +432,9 @@ export class PremiereTradeTicket extends LitElement {
         </div>
         ${seatId !== null ? this.renderQuote(seatId, quote) : nothing}
         ${this.submitError !== null
-          ? html`<p class="text-xs text-danger" role="alert">${this.submitError}</p>`
+          ? html`<p class="text-xs text-danger" role="alert">
+              ${this.submitError}
+            </p>`
           : nothing}
         <button
           type="button"
@@ -440,9 +474,13 @@ export class PremiereTradeTicket extends LitElement {
       `;
     }
     return html`
-      <div class="flex flex-col gap-3 rounded-lg border border-line bg-surface p-4">
+      <div
+        class="flex flex-col gap-3 rounded-lg border border-line bg-surface p-4"
+      >
         <div class="flex items-center justify-between gap-2">
-          <h3 class="text-sm font-semibold uppercase tracking-wide text-ink-muted">
+          <h3
+            class="text-sm font-semibold uppercase tracking-wide text-ink-muted"
+          >
             Trade
           </h3>
           <premiere-market-bankroll-badge

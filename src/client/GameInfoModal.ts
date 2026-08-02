@@ -13,6 +13,7 @@ import {
 import "./components/baseComponents/ranking/PlayerRow";
 import "./components/baseComponents/ranking/RankingControls";
 import "./components/baseComponents/ranking/RankingHeader";
+import { waitForTranslationsReady } from "./publicapp/AppShellChrome";
 
 @customElement("game-info-modal")
 export class GameInfoModal extends LitElement {
@@ -32,9 +33,23 @@ export class GameInfoModal extends LitElement {
 
   private ranking: Ranking | null = null;
 
+  /**
+   * Third instance of the raw-i18n-key leak class QA has now reported
+   * (`chat.cat.help` pass-5b, nav pass-2, `game_info_modal.title` here,
+   * pass-8): `translateText()` reads `<lang-selector>`'s own translation
+   * state at call time with no subscription of its own (see
+   * `waitForTranslationsReady`'s doc), so this modal's title — evaluated
+   * every `render()` — shows the raw key verbatim until SOMETHING
+   * re-renders after translations finish loading. The 11 `publicapp/`
+   * pages already fixed this by re-requesting an update once translations
+   * are ready; this modal lives outside `publicapp/` and never got that
+   * fix applied. Same root, same fix, reused verbatim rather than
+   * reimplemented.
+   */
   connectedCallback() {
     super.connectedCallback();
     this.updateRanking();
+    void waitForTranslationsReady().then(() => this.requestUpdate());
   }
 
   createRenderRoot() {

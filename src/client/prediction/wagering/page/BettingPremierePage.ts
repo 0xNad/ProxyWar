@@ -1,5 +1,5 @@
-import type { ReplayPremiereOverlayHandle } from "src/client/ReplayPremiereOverlay";
 import type { ReplayPremiereReadyProjection } from "src/client/ReplayPremiereNetwork";
+import type { ReplayPremiereOverlayHandle } from "src/client/ReplayPremiereOverlay";
 import {
   ReplayPremiereRuntimeController,
   ReplayPremiereServiceError,
@@ -7,9 +7,12 @@ import {
   type ReplayPremiereJoinSyncUpdate,
   type ReplayPremiereServiceTradeResponse,
 } from "src/client/ReplayPremiereRuntime";
-import { mountBettingOverlay, type PremiereBettingOverlay } from "./BettingOverlay";
 import { marketStateFromService } from "../serviceMapping";
 import type { MarketState, TradeSide } from "../types";
+import {
+  mountBettingOverlay,
+  type PremiereBettingOverlay,
+} from "./BettingOverlay";
 
 /** How often the standalone market poll refreshes prices while the market is live. */
 const MARKET_POLL_INTERVAL_MS = 2_500;
@@ -153,6 +156,24 @@ export class BettingPremiereMarketController {
   // NEXT order only (never cached across multiple orders); updated from
   // every poll AND every trade response's own market snapshot.
   private latestLiveVisibleSequence = 0;
+  /**
+   * Fires (once) when the ongoing poll proves THIS premiereId no longer
+   * exists on the server at all — status 404 with the catalog's own
+   * `PREMIERE_UNAVAILABLE` code (`registry.get(premiereId) === null` in
+   * `ReplayPremiereHttp.ts`), never a transient 503 use of the same
+   * public code (see `pollOnce`). Real cause: the origin process behind
+   * `bet.proxywar.xyz` restarts on every premiere cycle (`cycle-
+   * premiere.sh`'s `restart_origin`, "admission never hot-registers, the
+   * catalog is rebuilt at boot") and mints a brand-new random premiereId
+   * every time — this page's own premiereId is simply gone once that
+   * happens, regardless of whether it voided or won. The runtime's own
+   * manifest/reveal state has no way to notice this (nothing about it is
+   * malformed FOR THAT premiere — it stays validly, permanently
+   * terminal), so the caller (`Main.ts`) is the one place that can
+   * honestly recover: re-resolve and rejoin whatever premiere is
+   * actually live now (P1 t3-01/t3-02).
+   */
+  public onPremiereGone?: () => void;
 
   constructor(
     private readonly runtime: ReplayPremiereRuntimeController,
@@ -192,7 +213,12 @@ export class BettingPremiereMarketController {
     amount: number,
     limitPrice: number,
   ): Promise<void> {
-    const response = await this.submitTradeWithRetry(seatId, side, amount, limitPrice);
+    const response = await this.submitTradeWithRetry(
+      seatId,
+      side,
+      amount,
+      limitPrice,
+    );
     if (this.disposed) return;
     // The order response's own `market` field already carries this
     // participant's positions and available balance, freshly recomputed
@@ -267,9 +293,30 @@ export class BettingPremiereMarketController {
           // recovery for the exact same race, one level up the stack.
           (error.code === "request_rejected" &&
             (error.status === 401 || error.status === 403)));
-      if (isStartupAuthRace && this.startupAuthRetryCount < STARTUP_AUTH_RETRY_LIMIT) {
+      if (
+        isStartupAuthRace &&
+        this.startupAuthRetryCount < STARTUP_AUTH_RETRY_LIMIT
+      ) {
         this.startupAuthRetryCount += 1;
         window.setTimeout(() => void this.pollOnce(), SESSION_RETRY_DELAY_MS);
+        return;
+      }
+      // Distinct from `isStartupAuthRace` above and from the generic
+      // `marketLoadError` fallback below: a 404 carrying the catalog's
+      // own "not registered" public code is never transient (unlike the
+      // SAME public code's 503 uses elsewhere for "temporarily
+      // unavailable, try again") — it is proof this premiereId was
+      // dropped from the server's registry entirely (see
+      // `onPremiereGone`'s own doc). Fire at most once; the caller
+      // disposes this controller in response, so further polls never
+      // reach here anyway, but a same-tick double-fire is guarded
+      // regardless.
+      const premiereGone =
+        error instanceof ReplayPremiereServiceError &&
+        error.status === 404 &&
+        error.publicCode === "PREMIERE_UNAVAILABLE";
+      if (premiereGone) {
+        this.onPremiereGone?.();
         return;
       }
       if (this.overlay === null) return;
@@ -298,6 +345,8 @@ export interface BettingPremierePageCallbacks {
   ) => void;
   onJoinSync?: (update: ReplayPremiereJoinSyncUpdate) => void;
   onRevealSeek?: (turn: number) => void;
+  /** See `BettingPremiereMarketController.onPremiereGone`'s own doc. */
+  onPremiereGone?: () => void;
 }
 
 export interface BettingPremierePageHandle {
@@ -346,6 +395,7 @@ export function openBettingPremierePage(
     },
   });
   market = new BettingPremiereMarketController(runtime, premiereId);
+  market.onPremiereGone = callbacks.onPremiereGone;
   return {
     runtime,
     dispose: () => {
@@ -364,4 +414,37 @@ export function openBettingPremierePage(
 export function parseBettingPremiereRoute(pathname: string): string | null {
   const match = pathname.match(/^\/bet\/(prem_[a-z0-9]{16,32})$/);
   return match?.[1] ?? null;
+}
+
+/**
+ * Re-resolves "whichever premiere is live right now" via the EXACT same
+ * server-side redirect the "Go to the live market" CTA on the themed
+ * ended page already relies on (`GET /bet` 302s to `/bet/<currentId>` —
+ * `PremiereEndedPage.ts`'s primary link, `href="/bet"`) — never a client
+ * guess, never a second source of truth. Used to recover automatically
+ * when an already-joined betting page's poll discovers its own
+ * premiereId is gone (`BettingPremiereMarketController.onPremiereGone`,
+ * P1 t3-01/t3-02: the origin process restarts and mints a fresh random
+ * premiereId on every single premiere cycle, void or not — see that
+ * field's doc). Returns `null` on any network failure or if `/bet`
+ * didn't resolve to a betting-premiere route — never fabricates an id.
+ * `fetchImpl` is injectable for tests, same pattern as this module's own
+ * `runtime`/`overlay` seams.
+ */
+export async function resolveCurrentBettingPremiereId(
+  fetchImpl: typeof fetch = fetch,
+): Promise<string | null> {
+  try {
+    const response = await fetchImpl("/bet", {
+      method: "GET",
+      redirect: "follow",
+      credentials: "same-origin",
+      headers: { Accept: "text/html" },
+    });
+    void response.body?.cancel();
+    if (!response.ok) return null;
+    return parseBettingPremiereRoute(new URL(response.url).pathname);
+  } catch {
+    return null;
+  }
 }

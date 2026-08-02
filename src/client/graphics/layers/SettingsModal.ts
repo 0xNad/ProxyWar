@@ -7,6 +7,10 @@ import { EventBus } from "../../../core/EventBus";
 import { UserSettings } from "../../../core/game/UserSettings";
 import { AlternateViewEvent, RefreshGraphicsEvent } from "../../InputHandler";
 import { translateText } from "../../Utils";
+import {
+  activateFocusTrap,
+  type FocusTrapHandle,
+} from "../../components/FocusTrap";
 import { Layer } from "./Layer";
 const structureIcon = assetUrl("images/CityIconWhite.svg");
 const cursorPriceIcon = assetUrl("images/CursorPriceIconWhite.svg");
@@ -43,6 +47,8 @@ export class SettingsModal extends LitElement implements Layer {
   @query(".modal-overlay")
   private modalOverlay!: HTMLElement;
 
+  private focusTrapHandle: FocusTrapHandle | null = null;
+
   @property({ type: Boolean })
   shouldPause = false;
 
@@ -71,7 +77,31 @@ export class SettingsModal extends LitElement implements Layer {
   disconnectedCallback() {
     window.removeEventListener("click", this.handleOutsideClick, true);
     window.removeEventListener("keydown", this.handleKeyDown);
+    this.focusTrapHandle?.deactivate();
+    this.focusTrapHandle = null;
     super.disconnectedCallback();
+  }
+
+  /**
+   * Traps Tab/Shift+Tab within the modal and restores focus to whatever
+   * invoked it on close (P1 t1-02, pass-8 QA: tabbed through all 12
+   * toggle rows, then focus landed on "Sign in" in the page header while
+   * the modal stayed visually open). Covers BOTH ways `isVisible` can
+   * flip true — `openModal()` and the `ShowSettingsModalEvent` listener
+   * in `init()` — from one place rather than duplicating the hookup in
+   * each.
+   */
+  protected updated(changedProperties: Map<string, unknown>): void {
+    if (!changedProperties.has("isVisible")) return;
+    if (this.isVisible) {
+      queueMicrotask(() => {
+        if (!this.isVisible) return;
+        this.focusTrapHandle = activateFocusTrap(this);
+      });
+    } else {
+      this.focusTrapHandle?.deactivate();
+      this.focusTrapHandle = null;
+    }
   }
 
   private handleOutsideClick = (event: MouseEvent) => {

@@ -70,29 +70,21 @@ import {
   showReplayLoadingScreen,
 } from "./ReplayLoadingScreen";
 import {
+  loadResumableReplayTurn,
+  watchReplayPositionForResume,
+} from "./ReplayPositionPersistence";
+import {
   mountArchivedReplayPremiereOverlay,
   readReplayPremiereArchivePayload,
   type ReplayPremiereArchivePayload,
 } from "./ReplayPremiereArchiveView";
+import { ReplayPremiereNetworkError } from "./ReplayPremiereNetwork";
 import type { ReplayPremiereOverlayHandle } from "./ReplayPremiereOverlay";
 import type { ReplayPremiereProgressiveReplayConfig } from "./ReplayPremierePlayback";
 import {
   parseReplayPremiereRoute,
   ReplayPremiereRuntimeController,
 } from "./ReplayPremiereRuntime";
-import { ReplayPremiereNetworkError } from "./ReplayPremiereNetwork";
-import {
-  loadResumableReplayTurn,
-  watchReplayPositionForResume,
-} from "./ReplayPositionPersistence";
-import {
-  openBettingPremierePage,
-  parseBettingPremiereRoute,
-} from "./prediction/wagering/page/BettingPremierePage";
-import "./platform/PlayerProfilePage";
-import "./platform/TraderProfilePage";
-import "./prediction/wagering/page/AccountPage";
-import "./prediction/wagering/page/PremiereEndedPage";
 import "./SinglePlayerModal";
 import { StoreModal } from "./Store";
 import "./TerritoryPatternsModal";
@@ -113,6 +105,15 @@ import {
   isInIframe,
   translateText,
 } from "./Utils";
+import "./platform/PlayerProfilePage";
+import "./platform/TraderProfilePage";
+import "./prediction/wagering/page/AccountPage";
+import {
+  openBettingPremierePage,
+  parseBettingPremiereRoute,
+  resolveCurrentBettingPremiereId,
+} from "./prediction/wagering/page/BettingPremierePage";
+import "./prediction/wagering/page/PremiereEndedPage";
 import { ReplaySpeedMultiplier } from "./utilities/ReplaySpeedMultiplier";
 
 import {
@@ -753,9 +754,8 @@ class Client {
     }
     // The player profile page is likewise standalone — same reasoning as
     // the account-page branch just above.
-    const playerProfileMatch = window.location.pathname.match(
-      /^\/player\/([^/]+)$/,
-    );
+    const playerProfileMatch =
+      window.location.pathname.match(/^\/player\/([^/]+)$/);
     if (playerProfileMatch !== null) {
       await this.openPlayerProfilePage(
         decodeURIComponent(playerProfileMatch[1]),
@@ -765,9 +765,8 @@ class Client {
     // The trader profile page is likewise standalone — same reasoning as
     // the account-page branch above, but keyed by the platform's opaque
     // accountId, never a display name (see `TraderProfilePage.ts`'s doc).
-    const traderProfileMatch = window.location.pathname.match(
-      /^\/trader\/([^/]+)$/,
-    );
+    const traderProfileMatch =
+      window.location.pathname.match(/^\/trader\/([^/]+)$/);
     if (traderProfileMatch !== null) {
       await this.openTraderProfilePage(
         decodeURIComponent(traderProfileMatch[1]),
@@ -1115,7 +1114,8 @@ class Client {
         // clear the dishonest-looking failure and resume the honest
         // veil instead of leaving "Replay unavailable" up over a join
         // that is actively making progress again.
-        if (!veilFinished) showReplayLoadingScreen("replay_premiere.joining_live");
+        if (!veilFinished)
+          showReplayLoadingScreen("replay_premiere.joining_live");
       },
     });
     const onVeilReplayError = () => {
@@ -1328,7 +1328,8 @@ class Client {
         if (!veilFinished) showReplayLoadingFailure();
       },
       onRecovered: () => {
-        if (!veilFinished) showReplayLoadingScreen("replay_premiere.joining_live");
+        if (!veilFinished)
+          showReplayLoadingScreen("replay_premiere.joining_live");
       },
     });
     const onVeilReplayError = () => {
@@ -1450,6 +1451,11 @@ class Client {
         if (!active || this.replayPremiereRuntime !== handle.runtime) return;
         this.eventBus.emit(new ReplayJumpToTurnEvent(turn));
       },
+      onPremiereGone: () => {
+        if (!active) return;
+        cleanupAttempt();
+        void this.rejoinCurrentBettingPremiere(premiereId);
+      },
     });
     const cleanupAttempt = () => {
       if (!active) return;
@@ -1488,6 +1494,31 @@ class Client {
         error,
       );
     }
+  }
+
+  /**
+   * Recovery for `onPremiereGone` (see
+   * `BettingPremiereMarketController.onPremiereGone`'s own doc): the
+   * origin behind `bet.proxywar.xyz` restarts and mints a brand-new
+   * random premiereId on every premiere cycle, void or not, so an
+   * already-joined betting page's own id is simply gone once that
+   * happens — re-resolve whatever premiere is ACTUALLY live right now
+   * and rejoin it in place, rather than leaving the viewer stuck on a
+   * dead id's frozen terminal view (P1 t3-01/t3-02). Reuses
+   * `openBettingPremiere` verbatim for the rejoin — its own fresh
+   * join-lobby dispatch canonicalizes the URL to the new `/bet/<id>` via
+   * `handleJoinLobby`'s existing `premierePath` branch, so this method
+   * never touches history itself. Falls back to the existing, proven
+   * `PremiereEndedPage` CTA (never a silent dead end) when no live
+   * premiere can be honestly resolved.
+   */
+  private async rejoinCurrentBettingPremiere(staleId: string): Promise<void> {
+    const nextId = await resolveCurrentBettingPremiereId();
+    if (nextId === null) {
+      this.openPremiereEndedPage(staleId, "bet");
+      return;
+    }
+    await this.openBettingPremiere(nextId);
   }
 
   private async openAiLeagueReplay(
@@ -1676,7 +1707,11 @@ class Client {
     // source with no equivalent "leave and come back" viewing pattern).
     if (
       options.source !== "coworld-replay" &&
-      !(previewTarget === null && Number.isFinite(requestedTurn) && requestedTurn > 0)
+      !(
+        previewTarget === null &&
+        Number.isFinite(requestedTurn) &&
+        requestedTurn > 0
+      )
     ) {
       const resumeTurn = loadResumableReplayTurn(runID);
       if (resumeTurn !== null) {
@@ -2025,9 +2060,8 @@ class Client {
       // `pathnameAtJoinStart`'s doc) rather than re-read live here — by
       // this point several `await`s deep, `window.location.pathname` can
       // no longer be trusted to still reflect the real navigation.
-      const alreadyOnOwnTargetShape = isReplayOrGamePathShape(
-        pathnameAtJoinStart,
-      );
+      const alreadyOnOwnTargetShape =
+        isReplayOrGamePathShape(pathnameAtJoinStart);
       if (
         !preserveCoworldReplayUrl &&
         !alreadyOnOwnTargetShape &&
@@ -2043,9 +2077,10 @@ class Client {
         // silently stranding a `/bet/<id>` viewer on the wrong route (no
         // trade ticket/bankroll/positions there) the instant the join
         // completed, and breaking reload/second-tab for the betting page.
-        const premierePath = lobby.isBettingPremiere === true
-          ? `/bet/${encodeURIComponent(lobby.premiereId)}`
-          : `/premiere/${encodeURIComponent(lobby.premiereId)}`;
+        const premierePath =
+          lobby.isBettingPremiere === true
+            ? `/bet/${encodeURIComponent(lobby.premiereId)}`
+            : `/premiere/${encodeURIComponent(lobby.premiereId)}`;
         if (pathnameAtJoinStart !== premierePath) {
           history.replaceState(
             null,
@@ -2083,7 +2118,12 @@ class Client {
             // -- this is the first real history entry for it, as close to
             // the triggering user gesture as this async chain gets, so
             // `pushState` (adds a new entry) is correct and safe here.
-            if (shouldPushAiLeagueReplayHistoryEntry(pathnameAtJoinStart, replayPath)) {
+            if (
+              shouldPushAiLeagueReplayHistoryEntry(
+                pathnameAtJoinStart,
+                replayPath,
+              )
+            ) {
               history.pushState(null, "", replayPath);
             }
           } else if (window.location.pathname !== replayPath) {
@@ -2115,12 +2155,17 @@ class Client {
         if (runtimeWindow.__openFrontPromoCaptureLock === true) {
           this.eventBus.emit(new PauseGameIntentEvent(true));
         } else if (clipPreviewTarget === null) {
-          console.log("[DEBUG] Main.ts emitting ReplaySpeedChangeEvent(fastest)");
+          console.log(
+            "[DEBUG] Main.ts emitting ReplaySpeedChangeEvent(fastest)",
+          );
           this.eventBus.emit(
             new ReplaySpeedChangeEvent(ReplaySpeedMultiplier.fastest),
           );
         } else {
-          console.log("[DEBUG] Main.ts NOT emitting fastest, clipPreviewTarget=", clipPreviewTarget);
+          console.log(
+            "[DEBUG] Main.ts NOT emitting fastest, clipPreviewTarget=",
+            clipPreviewTarget,
+          );
         }
       } else {
         history.pushState(
