@@ -372,16 +372,19 @@ const bettingOrigin =
 const platformLeagueHomeUrl =
   firstConfiguredEnv("PROXYWAR_LEAGUE_HOME_URL") ??
   "https://beta.proxywar.xyz/league";
-// Replays and the Market are, today, literally the same page — betting's
-// `/bet` resolves to whichever premiere is currently live, and its
-// wagering panel is an overlay on top of the replay, not a separate
-// surface (see `BettingPremierePage.ts`'s doc: "sibling to — never the
-// same as — `/premiere/<id>`" is about the ROUTE, not a different match).
-// The homepage still gives them separate cards with separate framing
-// (spectate vs. trade) because that IS how a stranger decides which one
-// they want; there is no dedicated "replays only" origin to point at
-// instead, and inventing one would be a fake distinction this codebase
-// doesn't have.
+// Replays and the Market used to be, deliberately, the same page (betting's
+// `/bet` resolved to whichever premiere was live, and the homepage's
+// Replays card pointed there too) — that decision is SUPERSEDED as of
+// `b9ca3238a` (2026-08-02, "point Replays card to watch URL instead of
+// betting URL"). A visitor clicking "Replays" wants the non-wagering
+// archive, not a page whose whole point is a live wagering panel; sharing
+// one URL between the two cards meant "Replays" silently dropped a
+// stranger onto the betting surface with no way to tell the cards apart
+// by where they actually went. The homepage still gives them separate
+// cards with separate framing (spectate vs. trade) because that IS how a
+// stranger decides which one they want — see `platformReplaysHomeUrl`
+// below (now `beta.proxywar.xyz/watch`) and `platformMarketHomeUrl`
+// (still `${bettingOrigin}/bet`).
 const platformMarketHomeUrl =
   firstConfiguredEnv("PROXYWAR_MARKET_HOME_URL") ?? `${bettingOrigin}/bet`;
 const platformReplaysHomeUrl =
@@ -2778,6 +2781,69 @@ if (aiLeagueRunClips !== null) {
     next();
   });
 }
+
+// Bet-origin's own copy of the league mirror (this route's static file,
+// plus its `/ai-league-runs/league*` and `/runs/league*` aliases below,
+// which resolve to the identical file) is a byte-for-byte snapshot from
+// whenever this deploy's clone was checked out. `cycle-premiere.sh`'s
+// `refresh_league_data` keeps only the STANDINGS JSON current every cycle;
+// the HTML shell's baked `generated-at`/`data-stale="false"` attributes are
+// never touched, so a visitor can land on a confidently "LIVE" page that
+// silently stopped advancing weeks ago (found live 2026-08-02: bet's copy
+// frozen at 2026-07-27T12:04:13Z while beta had already moved on).
+// Product separation: a league standings PAGE belongs on the league
+// origin, not a wagering mirror — redirect a real visitor there instead of
+// trying to keep a second copy fresh forever.
+//
+// Deliberately narrow, not a blanket redirect on these paths:
+//  - `pointsRoutesEnabled` is this file's own established signal for "this
+//    is the wagering/bet origin" (see the points-leaderboard gate above);
+//    beta and the platform apex keep their OWN mirrors fresh via separate
+//    launchd refreshers (RUNBOOK §16.1) and must never be redirected here.
+//  - `isTrustedLocalRelayRequest` excludes a request that genuinely never
+//    left the box (no Cloudflare forwarding headers), so a local tester
+//    hitting 127.0.0.1:<port>/league directly still sees their own build.
+//  - `Sec-Fetch-Dest: document` (sent by every real browser navigation,
+//    never by curl or Node's fetch/undici) is the condition that actually
+//    matters in production. Two internal safety checks require this exact
+//    path to answer 200 with real content and cannot be pointed anywhere
+//    else: `wait_for_origin` (cycle-premiere.sh) and `restartReadyUrl`
+//    (replay-premiere-loop.ts) poll it over loopback to confirm a restart
+//    landed (already covered by the trusted-local check above — this is
+//    belt-and-suspenders for them), but replay-premiere-admit.ts's
+//    leak-audit collector fetches this exact URL over the PUBLIC origin
+//    with `redirect: "error"` as a wagering safety check, and
+//    `assertProductionLeakAuditOrigin`
+//    (ReplayPremiereCheckpointProjectionStore.ts) pins every leak-audit
+//    target to this single deployment origin — there is no second origin
+//    to point that check at instead. A blanket redirect here would fail
+//    every premiere admission with `collector_redirect_rejected` and take
+//    the market down (confirmed by reading the collector's `redirect:
+//    "error"` fetch mode, not merely inferred).
+function isCopiedLeagueMirrorPagePath(requestPath: string): boolean {
+  return (
+    requestPath === "/league" ||
+    requestPath === "/runs/league" ||
+    requestPath === "/runs/league/" ||
+    requestPath.startsWith("/runs/league/") ||
+    requestPath === "/ai-league-runs/league" ||
+    requestPath === "/ai-league-runs/league/" ||
+    requestPath.startsWith("/ai-league-runs/league/")
+  );
+}
+app.use((req, res, next) => {
+  if (
+    !pointsRoutesEnabled ||
+    (req.method !== "GET" && req.method !== "HEAD") ||
+    !isCopiedLeagueMirrorPagePath(req.path) ||
+    isTrustedLocalRelayRequest(req) ||
+    req.headers["sec-fetch-dest"] !== "document"
+  ) {
+    next();
+    return;
+  }
+  res.redirect(302, platformLeagueHomeUrl);
+});
 
 app.get("/league", (req, res) => {
   res.setHeader("Content-Security-Policy", leagueContentSecurityPolicy());
