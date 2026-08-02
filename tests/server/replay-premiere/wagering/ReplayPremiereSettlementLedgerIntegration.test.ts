@@ -6,7 +6,20 @@
  * moment predictions resolve; records an honest `refunded` outcome for a
  * void market instead of staying silent; and never fires on any path
  * other than the market reaching `"settled"`.
+ *
+ * The "unattended settlement" block below additionally proves this against
+ * the REAL `ReplayPremiereSettlementLedger`/`ReplayPremierePointsLedger`
+ * sinks (not the `fakeSettlementLedger()` stub the rest of this file uses)
+ * with ZERO client polling driving the resolution call — see the
+ * 2026-08-02 production incident this closes in
+ * `docs/project-state/known-problems.md`: a real natural settlement with
+ * zero active real-participant sessions never wrote its durable settlement
+ * record, and the fake sink's schema-free stub had let that gap ship
+ * undetected.
  */
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import type { PremiereCanonicalAuthoritativeResult } from "../../../../src/server/replay-premiere/ReplayPremiereAuthoritativeResult";
 import type { PremiereState } from "../../../../src/server/replay-premiere/ReplayPremiereContracts";
 import { REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS } from "../../../../src/server/replay-premiere/ReplayPremiereContracts";
@@ -14,6 +27,8 @@ import {
   ReplayPremiereInteractions,
   type ReplayPremiereSettlementLedgerRecorder,
 } from "../../../../src/server/replay-premiere/ReplayPremiereInteractions";
+import { ReplayPremierePointsLedger } from "../../../../src/server/replay-premiere/points/ReplayPremierePointsLedger";
+import { ReplayPremiereSettlementLedger } from "../../../../src/server/replay-premiere/points/ReplayPremiereSettlementLedger";
 
 const premiereId = "prem_abcdefghijklmnop";
 const guestA = `guest_${"a".repeat(32)}`;
@@ -44,6 +59,9 @@ interface PremiereInteractionsTestHarness {
 
 function harness(
   settlementLedger?: ReplayPremiereSettlementLedgerRecorder,
+  pointsLedger?: ConstructorParameters<
+    typeof ReplayPremiereInteractions
+  >[0]["pointsLedger"],
 ): PremiereInteractionsTestHarness {
   let nowMs = Date.parse("2026-07-20T12:00:00.000Z");
   let premiereState: PremiereState = "playing";
@@ -94,6 +112,7 @@ function harness(
     wageringEnabled: true,
     admitAnonymousWrite: () => undefined,
     settlementLedger,
+    pointsLedger,
   });
   return {
     interactions,
@@ -168,8 +187,16 @@ function authoritativeResult(options: {
     turnCount: 80,
     winner: options.winner,
     seats: [
-      { seatId: "seat-1", displayName: "Alpha", won: winningSeatId === "seat-1" },
-      { seatId: "SEAT0001", displayName: "Beta", won: winningSeatId === "SEAT0001" },
+      {
+        seatId: "seat-1",
+        displayName: "Alpha",
+        won: winningSeatId === "seat-1",
+      },
+      {
+        seatId: "SEAT0001",
+        displayName: "Beta",
+        won: winningSeatId === "SEAT0001",
+      },
     ],
   };
 }
@@ -295,9 +322,11 @@ describe("ReplayPremiereInteractions settlement -> settlement ledger hook", () =
       result,
       resolvedAt: h.now(),
     });
-    const second = await h.interactions.resolvePredictionsFromAuthoritativeResult(
-      { result, resolvedAt: h.now() },
-    );
+    const second =
+      await h.interactions.resolvePredictionsFromAuthoritativeResult({
+        result,
+        resolvedAt: h.now(),
+      });
     expect(second.idempotent).toBe(true);
     expect(settlement.calls).toHaveLength(2);
     expect(settlement.calls[1]).toEqual(settlement.calls[0]);
@@ -308,5 +337,112 @@ describe("ReplayPremiereInteractions settlement -> settlement ledger hook", () =
     await expect(
       tradeAndResolve(h, authoritativeResult({ winner: ["player", "seat-1"] })),
     ).resolves.toBeDefined();
+  });
+});
+
+describe("ReplayPremiereInteractions unattended settlement — real (non-fake) durable sinks", () => {
+  // The 2026-08-02 production incident this closes: a real natural
+  // settlement with zero real-participant sessions and zero external
+  // `/market` polling never wrote its settlement-ledger record. These
+  // tests exercise the ACTUAL `ReplayPremiereSettlementLedger`/
+  // `ReplayPremierePointsLedger` classes (schema validation included),
+  // pointed at a real temp-dir filesystem root, driven by nothing but a
+  // single `resolvePredictionsFromAuthoritativeResult` call — the same
+  // call the internal release-clock ticker (`ReplayPremiereRuntimeSupervisor`)
+  // makes on its own schedule with no client ever polling anything.
+  let root: string;
+
+  beforeEach(async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), "unattended-settlement-"));
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  test("zero real participants (synthetic-crowd-only market): the real settlement ledger still durably records the winner", async () => {
+    const settlementLedger = await ReplayPremiereSettlementLedger.open(root);
+    const h = harness(settlementLedger);
+
+    // Only a synthetic-crowd trade — the exact production shape: real
+    // guests never showed up, only `sim_*` bettors funded the market.
+    const simSession = await h.interactions.createViewerSession({
+      participantId: `sim_${"c".repeat(32)}`,
+      idempotencyKey: "idem_session_sim_0001",
+      requesterBucketId: `ip_${"2".repeat(32)}`,
+      visible: false,
+      observedSequence: 35,
+      excludedAsOperator: false,
+      excludedAsBot: true,
+    });
+    await h.interactions.submitMarketOrder({
+      participantId: `sim_${"c".repeat(32)}`,
+      participantKind: "synthetic",
+      sessionId: simSession.session.id,
+      seatId: "seat-1",
+      side: "buy",
+      amount: 200,
+      limitPrice: 90,
+      sequence: 80,
+      idempotencyKey: "idem_order_sim_0001",
+      requesterBucketId: `ip_${"2".repeat(32)}`,
+    });
+    await closeBothCheckpoints(h);
+    h.setPremiereState("revealed");
+
+    // No poll, no read, nothing external — resolution alone must durably
+    // write the record.
+    await h.interactions.resolvePredictionsFromAuthoritativeResult({
+      result: authoritativeResult({ winner: ["player", "seat-1"] }),
+      resolvedAt: h.now(),
+    });
+
+    const record = await settlementLedger.readSettlement(premiereId);
+    expect(record).not.toBeNull();
+    expect(record?.outcome).toBe("winner");
+    expect(record?.winnerSeatId).toBe("seat-1");
+    expect(record?.winnerDisplayName).toBe("Alpha");
+    // Zero REAL (guest_*) participants funded this market — synthetic
+    // crowd trades correctly don't count, and the record still exists.
+    expect(record?.totalParticipants).toBe(0);
+  });
+
+  test("a real trader present, zero external polling: both the points ledger and the settlement ledger are durably written by resolution alone", async () => {
+    const settlementLedger = await ReplayPremiereSettlementLedger.open(root);
+    const pointsLedger = await ReplayPremierePointsLedger.open(root);
+    const h = harness(settlementLedger, pointsLedger);
+
+    const realSession = await session(
+      h,
+      guestA,
+      "idem_session_real_unattended",
+    );
+    await h.interactions.submitMarketOrder({
+      participantId: guestA,
+      participantKind: "real",
+      sessionId: realSession.id,
+      seatId: "seat-1",
+      side: "buy",
+      amount: 200,
+      limitPrice: 90,
+      sequence: 80,
+      idempotencyKey: "idem_order_real_unattended",
+      requesterBucketId: `ip_${"1".repeat(64)}`,
+    });
+    await closeBothCheckpoints(h);
+    h.setPremiereState("revealed");
+
+    await h.interactions.resolvePredictionsFromAuthoritativeResult({
+      result: authoritativeResult({ winner: ["player", "seat-1"] }),
+      resolvedAt: h.now(),
+    });
+
+    const settlementRecord = await settlementLedger.readSettlement(premiereId);
+    expect(settlementRecord).not.toBeNull();
+    expect(settlementRecord?.winnerSeatId).toBe("seat-1");
+    expect(settlementRecord?.totalParticipants).toBe(1);
+
+    const pointsEntry = await pointsLedger.readParticipant(guestA);
+    expect(pointsEntry).not.toBeNull();
   });
 });

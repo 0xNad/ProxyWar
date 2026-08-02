@@ -231,7 +231,14 @@ export interface ReplayPremiereInteractionLimits {
 }
 
 export interface ReplayPremiereAnonymousWriteAdmissionRequest {
-  route: "session" | "heartbeat" | "prediction" | "reaction" | "share" | "clip" | "market_order";
+  route:
+    | "session"
+    | "heartbeat"
+    | "prediction"
+    | "reaction"
+    | "share"
+    | "clip"
+    | "market_order";
   premiereId: string;
   participantId: string;
   sessionId: string | null;
@@ -1239,7 +1246,10 @@ export class ReplayPremiereInteractions {
       };
     });
     await this.recordSettlementPointsIfNeeded();
-    await this.recordSettlementLedgerIfNeeded(options.result, options.resolvedAt);
+    await this.recordSettlementLedgerIfNeeded(
+      options.result,
+      options.resolvedAt,
+    );
     return outcome;
   }
 
@@ -1276,8 +1286,15 @@ export class ReplayPremiereInteractions {
         this.premiereId,
         settlements,
       );
-    } catch {
-      // Best-effort durable side-channel — never fail resolution over it.
+    } catch (error) {
+      // Best-effort durable side-channel — never fail resolution over it,
+      // but a swallowed failure here is silent data loss (see the
+      // production gap this closed: a real settled premiere with zero
+      // console trace of why its points ledger write never landed).
+      console.error(
+        `settlement_points_ledger_write_failed premiereId=${this.premiereId}:`,
+        error,
+      );
     }
   }
 
@@ -1349,8 +1366,15 @@ export class ReplayPremiereInteractions {
         marketFinalPrices,
         totalParticipants,
       });
-    } catch {
-      // Best-effort durable side-channel — never fail resolution over it.
+    } catch (error) {
+      // Best-effort durable side-channel — never fail resolution over it,
+      // but see the sibling catch above: silent loss here is exactly what
+      // let the "expired premiere can honestly show who won" feature
+      // ship with an undetected gap for a fully unattended settlement.
+      console.error(
+        `settlement_ledger_write_failed premiereId=${this.premiereId}:`,
+        error,
+      );
     }
   }
 
@@ -1578,14 +1602,22 @@ export class ReplayPremiereInteractions {
         if (!validation.ok) {
           throw invalidInteraction(`order_rejected_${validation.reason}`);
         }
-        shares = maxSharesForBudget(next.market, options.seatId, options.amount);
+        shares = maxSharesForBudget(
+          next.market,
+          options.seatId,
+          options.amount,
+        );
         if (shares <= 0) throw invalidInteraction("order_rejected_zero_shares");
         const fill = quoteBuy(next.market, options.seatId, shares);
         if (fill.avgPrice > options.limitPrice) {
           throw invalidInteraction("order_rejected_slippage_exceeded");
         }
       } else {
-        const held = sharesHeld(next.market, options.participantId, options.seatId);
+        const held = sharesHeld(
+          next.market,
+          options.participantId,
+          options.seatId,
+        );
         if (held <= 0) {
           throw invalidInteraction("order_rejected_no_shares_to_sell");
         }
@@ -3046,7 +3078,8 @@ function validateSnapshotMarket(
 ): void {
   const market = snapshot.market;
   if (!options.wageringEnabled) {
-    if (market !== null) throw invalidInteraction("market_present_while_disabled");
+    if (market !== null)
+      throw invalidInteraction("market_present_while_disabled");
     return;
   }
   if (market === null) throw invalidInteraction("market_missing_while_enabled");
@@ -3068,13 +3101,16 @@ function validateSnapshotMarket(
     market.premiereId !== snapshot.premiereId ||
     !Array.isArray(market.outcomeSeatIds) ||
     market.outcomeSeatIds.length !== expectedSeatIds.length ||
-    market.outcomeSeatIds.some((seatId, index) => seatId !== expectedSeatIds[index]) ||
+    market.outcomeSeatIds.some(
+      (seatId, index) => seatId !== expectedSeatIds[index],
+    ) ||
     market.b !== liquidityForOutcomeCount(expectedSeatIds.length) ||
     !Array.isArray(market.q) ||
     market.q.length !== expectedSeatIds.length ||
     market.q.some((value) => !Number.isSafeInteger(value) || value < 0) ||
     (market.status !== "open" && market.status !== "settled") ||
-    (market.winnerSeatId !== null && !expectedSeatIds.includes(market.winnerSeatId)) ||
+    (market.winnerSeatId !== null &&
+      !expectedSeatIds.includes(market.winnerSeatId)) ||
     (market.status === "open" && market.winnerSeatId !== null)
   ) {
     throw invalidInteraction("invalid_snapshot_market");
@@ -3119,7 +3155,9 @@ function validateSnapshotMarket(
   }
 }
 
-function validateSnapshotTrades(snapshot: ReplayPremiereInteractionsSnapshot): void {
+function validateSnapshotTrades(
+  snapshot: ReplayPremiereInteractionsSnapshot,
+): void {
   const ids = new Set<string>();
   const dedupe = new Set<string>();
   for (const trade of snapshot.trades) {
@@ -3142,7 +3180,10 @@ function validateSnapshotTrades(snapshot: ReplayPremiereInteractionsSnapshot): v
     assertParticipantId(trade.participantId);
     assertSeatId(trade.seatId);
     assertIdempotencyKey(trade.idempotencyKey);
-    if (trade.participantKind !== "real" && trade.participantKind !== "synthetic") {
+    if (
+      trade.participantKind !== "real" &&
+      trade.participantKind !== "synthetic"
+    ) {
       throw invalidInteraction("invalid_trade_participant_kind");
     }
     if (trade.side !== "buy" && trade.side !== "sell") {
