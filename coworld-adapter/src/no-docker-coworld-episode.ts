@@ -886,14 +886,29 @@ async function runProxyWarEpisode(
         index,
         modules.buildExternalAgentRequestPayload,
       ),
+    // Only participants[0] feeds the mirror/spawn driver; the other seats'
+    // copies of the full turn stream were seats x turns of dead retention.
+    retainTurnMessagesPrimaryOnly: true,
   });
   const roster = agentRunRoster(participants);
   const spectatorSnapshots: unknown[] = [];
   let memTelemetrySnapshots = 0;
   // stderr, NOT the winston logger: the episode logger is level "warn", and pod
   // log retrieval is the whole point — this is the hosted OOM/crash forensics line.
+  // PROXYWAR_MEM_TELEMETRY_FORCE_GC=1 (+ --expose-gc): collect a full GC
+  // before each sample so the series is the true live set, not the allocator
+  // sawtooth. A least-squares slope over raw samples flips sign with GC phase
+  // between otherwise-identical runs (measured: same code, fits of 2.1 vs
+  // 13.4 MB/1k) — the memory gate needs the clean series to assert growth.
+  // Never enable on hosted episodes: full GCs stall the world.
+  const memTelemetryForceGc =
+    process.env.PROXYWAR_MEM_TELEMETRY_FORCE_GC === "1" &&
+    typeof globalThis.gc === "function";
   const logMemTelemetry = (label: string, turnNumber: number) => {
     const mb = (bytes: number) => Math.round(bytes / (1024 * 1024));
+    if (memTelemetryForceGc) {
+      globalThis.gc?.();
+    }
     const usage = process.memoryUsage();
     // Split the heap pools so a hosted OOM/crash tail says WHICH pool grew:
     // old-space (heapUsed/heapTotal, bounded by --max-old-space-size) vs
