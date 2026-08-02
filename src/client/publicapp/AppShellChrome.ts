@@ -90,7 +90,7 @@ export function appShellHeader(
       </a>
       <nav
         aria-label=${translateText("app_shell.nav_primary")}
-        class="order-3 flex w-full gap-1 overflow-x-auto sm:order-none sm:w-auto"
+        class="app-shell-nav order-3 flex w-full gap-1 overflow-x-auto sm:order-none sm:w-auto"
       >
         ${NAV_ITEMS.map(
           (item) => html`

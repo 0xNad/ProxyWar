@@ -173,6 +173,39 @@
     transition: none;
   }
 }
+/*
+ * P2 mobile-nav fix (2026-08-02): AppShellChrome.ts's public-page nav
+ * (5 items: Watch/League/Agents/Builders/Build) scrolls horizontally on
+ * narrow viewports rather than wrapping or collapsing to a hamburger —
+ * cheap, matches the house style of every other public page, and never
+ * breaks layout. But with no visual cue, "Build" was simply cut off at
+ * the right edge with nothing suggesting more content sits offscreen.
+ * A right-edge-only fade (never a left fade — the strip always starts
+ * at scrollLeft 0, so a left fade there would misleadingly suggest
+ * content the visitor cannot actually scroll BACK to) is the standard
+ * low-cost affordance for a horizontally-scrollable strip -- `mask-
+ * image` costs no JS and degrades harmlessly (a plain edge, same as
+ * before) on the rare engine without support. Cleared entirely at the
+ * `sm:` breakpoint, where the nav stops scrolling at all (`sm:w-auto`).
+ */
+.app-shell-nav {
+  -webkit-mask-image: linear-gradient(
+    to right,
+    black calc(100% - 20px),
+    transparent
+  );
+  mask-image: linear-gradient(
+    to right,
+    black calc(100% - 20px),
+    transparent
+  );
+}
+@media (min-width: 640px) {
+  .app-shell-nav {
+    -webkit-mask-image: none;
+    mask-image: none;
+  }
+}
 
 * {
   -webkit-box-sizing: border-box;

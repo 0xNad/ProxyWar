@@ -82,6 +82,26 @@ describe("appShellHeader account chip", () => {
 });
 
 /**
+ * P2 mobile-nav fix (2026-08-02): the 5-item nav scrolls horizontally on
+ * narrow viewports (`overflow-x-auto`) rather than wrapping or
+ * collapsing to a hamburger — but with no visual cue, the last item
+ * ("Build") was simply cut off with nothing suggesting more content sat
+ * offscreen. `.app-shell-nav` carries a right-edge scroll-fade
+ * (`mask-image`, styles.css), cleared above the `sm:` breakpoint where
+ * the nav stops scrolling.
+ */
+describe("appShellHeader nav scroll-fade affordance", () => {
+  it("marks the nav with the scroll-fade class every render, regardless of active route", () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    render(appShellHeader("/watch"), container);
+    const nav = container.querySelector("header nav");
+    expect(nav?.classList.contains("app-shell-nav")).toBe(true);
+    container.remove();
+  });
+});
+
+/**
  * P0 fix (found live 2026-08-02, under 3G throttle): the shared shell's
  * nav (`app_shell.nav_*`, rendered by `appShellHeader` above) showed raw
  * translation keys for as long as a slow connection took — `translateText`
