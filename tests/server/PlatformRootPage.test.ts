@@ -144,7 +144,14 @@ describe("GET / (real servers)", () => {
           PROXYWAR_PLATFORM_STATE_ROOT: platformStateRoot,
           PROXYWAR_LEAGUE_HOME_URL: "https://beta.proxywar.test/league",
           PROXYWAR_MARKET_HOME_URL: "https://bet.proxywar.test/bet",
-          PROXYWAR_REPLAYS_HOME_URL: "https://bet.proxywar.test/bet",
+          // Deliberately NOT overridden: this is the one test that must
+          // exercise the REAL default (`platformReplaysHomeUrl` in
+          // ai-agent-demo-server.ts, currently `https://beta.proxywar.xyz/
+          // watch`) instead of an env value that happens to already be
+          // correct. Overriding it to a bet.-shaped URL here would make
+          // this suite pass even if the default regressed back to
+          // `${bettingOrigin}/bet` (see `b9ca3238a`'s fix and its own
+          // supersession note above `platformMarketHomeUrl` in that file).
         },
         stdio: ["ignore", "pipe", "pipe"],
       },
@@ -205,6 +212,16 @@ describe("GET / (real servers)", () => {
     expect(response.body).toContain('href="https://beta.proxywar.test/league"');
     expect(response.body).toContain('href="https://bet.proxywar.test/bet"');
     expect(response.body).toContain('href="/account"');
+    // The Replays card must use the REAL, un-overridden production default
+    // (`platformReplaysHomeUrl`) — scoped to that card's own anchor, not a
+    // bare substring match, so this fails if a future regression points
+    // Replays back at the betting origin (the exact bug `b9ca3238a` fixed:
+    // Replays and Market sharing one URL with no way to tell them apart).
+    const replaysCardHref = /href="([^"]+)"[^>]*>\s*<h2>Replays<\/h2>/.exec(
+      response.body,
+    )?.[1];
+    expect(replaysCardHref).toBe("https://beta.proxywar.xyz/watch");
+    expect(replaysCardHref).not.toContain("bet.");
     // Not the internal demo hub.
     expect(response.body).not.toContain("Proxy War Demo");
   });
