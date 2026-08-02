@@ -2089,6 +2089,7 @@
     "analyst_latency_ms": "{ms}ms",
     "analyst_events_heading": "Full public event log",
     "analyst_events_empty": "No events recorded yet.",
+    "analyst_show_earlier": "Show {count} earlier",
     "analyst_unavailable_premiere_sealed": "Decision data is sealed until this premiere reveals — the curated War Room and timeline stay live.",
     "analyst_unavailable_no_data": "No decision data is available for this match.",
     "state_strip_heading": "Match state",

@@ -6,6 +6,10 @@ import {
 import {
   LowerThirdController,
   renderAnalystPanel,
+  renderAnalystDecisions,
+  renderAnalystDecisionRow,
+  renderAnalystEventLog,
+  renderAnalystEventRow,
   renderBroadcastDrawer,
   renderCompetitorRail,
   renderMatchStateStrip,
@@ -15,6 +19,7 @@ import {
   type AnalystActionKindCount,
   type AnalystDecisionRow,
   type AnalystEventRow,
+  type AnalystModeUnavailableReason,
   type AnalystPanelData,
   type BroadcastDrawerTab,
   type BroadcastDrawerTabId,
@@ -760,6 +765,18 @@ function mountAiLeagueRadioToggle(overlay: HTMLElement): void {
 }
 
 /**
+ * Fired whenever the desktop analyst-mode toggle flips. Independent from
+ * the mobile drawer's own "Analysis" tab switch (that path already
+ * re-renders through `AI_LEAGUE_DRAWER_ACTIVE_TAB` + `rerenderWithLastFrame`
+ * on every tab click) — this toggle instead flips a `document.body` class
+ * with no render cycle of its own, so `mountAiLeagueBroadcastDrawer`
+ * listens for this event to lazy-mount/unmount the Analyst tab's heavy
+ * content (spec item 1 follow-up, P2 review) the instant visibility
+ * changes, without waiting for the next `ai-league-replay-frame` tick.
+ */
+const AI_LEAGUE_ANALYST_MODE_CHANGE_EVENT = "ai-league-analyst-mode-change";
+
+/**
  * Analyst mode (spec item 5): a separate, explicit desktop toggle from the
  * mobile drawer's "Analysis" tab — shows/hides the SAME renderAnalystPanel()
  * output the drawer's "analysis" tab already renders. The class lives on
@@ -790,6 +807,9 @@ function mountAiLeagueAnalystToggle(overlay: HTMLElement): void {
     document.body.classList.toggle("ai-league-analyst-mode", on);
     toggle.setAttribute("aria-pressed", String(on));
     toggle.classList.toggle("is-on", on);
+    document.dispatchEvent(
+      new CustomEvent(AI_LEAGUE_ANALYST_MODE_CHANGE_EVENT),
+    );
   };
   apply(false);
   toggle.addEventListener("click", () => {
@@ -2678,6 +2698,11 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         color: var(--pw-muted, #a4afbf);
         font-size: 12px;
       }
+      .broadcast-analyst-decisions-earlier td,
+      .broadcast-analyst-events-earlier {
+        display: flex;
+        justify-content: center;
+      }
       /*
        * Lower thirds (spec item 3): fixed over the map (never inside this
        * panel's scrollable body), pointer-events: none on the host so a
@@ -3670,32 +3695,55 @@ const AI_LEAGUE_DRAWER_ACTIVE_TAB = new WeakMap<
 
 /**
  * Analyst mode (spec item 5): the SAME already-public decisions/events this
- * overlay's curated rail/War Room/timeline already read, unfiltered. Full
- * Replay is complete, unbounded data (no premiere seal, no released-chunks
- * boundary) — decisionsUnavailableReason is only ever "no_data" (a
- * genuinely decision-less match/context), never "premiere_sealed".
+ * overlay's curated rail/War Room/timeline already read. Full Replay is
+ * complete data (no premiere seal, no released-chunks boundary) —
+ * decisionsUnavailableReason is only ever "no_data" (a genuinely
+ * decision-less match/context), never "premiere_sealed".
+ *
+ * SUPERSEDED (P2 ticker-fix follow-up review, 2026-08-02): this file's own
+ * prior design record here read "...unfiltered" — Analyst mode was
+ * deliberately scoped as an explicit toggle exposing every already-public
+ * row raw and complete, un-curated by importance/kind AND un-windowed by
+ * the viewer's own playhead, on the reasoning that Full Replay covers an
+ * already-finished match with no live spoiler risk. That data-exposure
+ * scope is UNCHANGED (every field here is still exactly as public as it
+ * always was — see BroadcastComposition.ts's own "uncurated" doc for the
+ * still-current importance/kind boundary) — only WHEN within a viewing
+ * session changed: the caller below (see allAnalystDecisions/
+ * allAnalystEvents in mountAiLeagueBroadcastDrawer) now filters both lists
+ * to `turnNumber <= playhead`, matching the SAME convention every other
+ * region in this file already follows post-fix (War Room feed, timeline
+ * markers, match-state strip) — a re-watching viewer parked at turn 0
+ * used to see the match's ENTIRE analyst-mode history immediately, which
+ * is exactly the "future rows leak on a re-watch" shape the War Room DOM-
+ * window fix (AI_LEAGUE_TICKER_DOM_WINDOW above) was written to close
+ * everywhere else. Returns the FULL, sorted-ascending-by-turn sets — the
+ * caller applies both the playhead filter and the DOM window, exactly
+ * like `curatedWarRoomEvents`'s own contract.
  */
 function aiLeagueAnalystPanelData(
   input: AiLeagueReplayOverlayInput,
   telemetry: AiLeagueSpectatorTelemetry | null,
 ): AnalystPanelData {
   const hasDecisions = input.decisions.length > 0;
-  const decisions: AnalystDecisionRow[] = input.decisions.map((decision) => ({
-    sequence: decision.sequence,
-    turnNumber: decision.turnNumber,
-    playerName: decision.username,
-    brainType: decision.brainType,
-    selectedActionKind: decision.selectedActionKind,
-    selectedLegalActionId: decision.selectedLegalActionId,
-    reason: decision.reason,
-    planObjective: decision.planObjective ?? null,
-    decisionLatencyMs: decision.decisionLatencyMs,
-    fallbackUsed: decision.fallbackUsed,
-    accepted: decision.result.accepted,
-    auditStatus: decision.auditStatus ?? null,
-  }));
-  const events: AnalystEventRow[] = (telemetry?.events ?? []).map(
-    (event) => ({
+  const decisions: AnalystDecisionRow[] = input.decisions
+    .map((decision) => ({
+      sequence: decision.sequence,
+      turnNumber: decision.turnNumber,
+      playerName: decision.username,
+      brainType: decision.brainType,
+      selectedActionKind: decision.selectedActionKind,
+      selectedLegalActionId: decision.selectedLegalActionId,
+      reason: decision.reason,
+      planObjective: decision.planObjective ?? null,
+      decisionLatencyMs: decision.decisionLatencyMs,
+      fallbackUsed: decision.fallbackUsed,
+      accepted: decision.result.accepted,
+      auditStatus: decision.auditStatus ?? null,
+    }))
+    .sort((a, b) => a.turnNumber - b.turnNumber || a.sequence - b.sequence);
+  const events: AnalystEventRow[] = (telemetry?.events ?? [])
+    .map((event) => ({
       sequence: event.sequence,
       turnNumber: event.turnNumber,
       kind: event.kind,
@@ -3704,8 +3752,8 @@ function aiLeagueAnalystPanelData(
       targetName: event.targetName,
       secondaryName: null,
       message: event.publicText ?? event.message,
-    }),
-  );
+    }))
+    .sort((a, b) => a.turnNumber - b.turnNumber || a.sequence - b.sequence);
   return {
     decisions: hasDecisions ? decisions : null,
     decisionsUnavailableReason: hasDecisions ? null : "no_data",
@@ -3775,51 +3823,59 @@ function relocateAiLeagueBroadcastDrawerPanels(
   }
 }
 
-// DOM-count window for the War Room list (the public-facing "decision
-// ticker"). Spoiler windowing (`event.turn <= turnNumber`, already applied
-// before this constant is ever consulted) bounds WHICH curated events are
-// eligible to render; this separately bounds HOW MANY of those eligible
-// events are ever mounted as `<li>` DOM nodes at once. A live Premiere
-// never needs this — ReplayPremiereRuntime.ts's own MAX_WAR_ROOM_EVENTS
+// DOM-count window shared by every bounded ticker list in this file: the
+// War Room event feed (the public-facing "decision ticker"), and (per the
+// P2 ticker-fix follow-up review) the Analyst tab's own decisions table
+// and event log. Spoiler windowing (`turn <= turnNumber`, already applied
+// before this constant is ever consulted) bounds WHICH items are eligible
+// to render; this separately bounds HOW MANY of those eligible items are
+// ever mounted as DOM nodes at once. A live Premiere never needs this for
+// the War Room feed — ReplayPremiereRuntime.ts's own MAX_WAR_ROOM_EVENTS
 // already caps that feed at the MODEL level (64 entries: "a generous cap
-// . . . a hard ceiling"). Full Replay keeps the COMPLETE curated history in
-// memory on purpose (spoiler-safety here is a pure turn-window, never a
-// data truncation — a viewer must always be able to see everything up to
-// their own playhead), so an unbounded match can mount thousands of `<li>`
-// rows: the measured production bloat this constant fixes (~1,957 rows +
-// ~527 per-row action buttons on a real replay, growing without bound
-// during playback, P2-Fxx spectator-overlay-subtree report). 60 mirrors
-// that same "generous ceiling" reasoning — comfortably more than the
-// ~340px own-scroll viewport (BroadcastComposition.ts's
-// `.broadcast-war-room-list`, styled here and reused by
-// ReplayPremiereOverlay.ts) ever shows without scrolling, while cutting a
-// multi-thousand-row list down to a number that costs nothing to lay out.
-// "Show earlier" (below) grows the window by the same amount per click —
-// the same reveal-in-chunks shape as the decisions panel's own
-// AI_LEAGUE_DECISION_LOG_CAP expander.
-const AI_LEAGUE_WAR_ROOM_DOM_WINDOW = 60;
+// . . . a hard ceiling") — and its own Analyst events read from that SAME
+// already-bounded source (see ReplayPremiereOverlay.ts's own model doc);
+// only Full Replay keeps COMPLETE, unbounded history for all three lists
+// on purpose (spoiler-safety here is a pure turn-window, never a data
+// truncation — a viewer must always be able to see everything up to their
+// own playhead), so an unbounded match can mount thousands of DOM rows in
+// any of them: the measured production bloat this constant fixes (War
+// Room: ~1,957 rows + ~527 per-row action buttons on a real replay,
+// growing without bound during playback, P2-Fxx spectator-overlay-subtree
+// report; Analyst decisions/events: the same shape, off `decisions`/
+// `telemetry.events` directly, confirmed separately during the P2
+// follow-up review). 60 mirrors that same "generous ceiling" reasoning —
+// comfortably more than the ~340px own-scroll viewport
+// (BroadcastComposition.ts's `.broadcast-war-room-list`, styled here and
+// reused by ReplayPremiereOverlay.ts) ever shows without scrolling, while
+// cutting a multi-thousand-row list down to a number that costs nothing to
+// lay out. "Show earlier" (below) grows each window by the same amount
+// per click — the same reveal-in-chunks shape as the decisions panel's
+// own AI_LEAGUE_DECISION_LOG_CAP expander.
+const AI_LEAGUE_TICKER_DOM_WINDOW = 60;
 
 interface WarRoomWindowCallbacks extends WarRoomFeedCallbacks {
-  /** Grows the DOM window by AI_LEAGUE_WAR_ROOM_DOM_WINDOW and re-renders — the manual backfill affordance. Only ever rendered as a row when there is something older to reveal (see buildWarRoomEarlierRow/patchWarRoomWindowForward). */
+  /** Grows the DOM window by AI_LEAGUE_TICKER_DOM_WINDOW and re-renders — the manual backfill affordance. Only ever rendered as a row when there is something older to reveal (see buildWarRoomEarlierRow/patchWarRoomWindowForward). */
   onShowEarlier: () => void;
 }
 
 /**
- * Count of `events` (sorted ascending by `turn` — `curatedWarRoomEvents`'s
- * own contract) eligible at `turnNumber`. Equivalent to
- * `events.filter(e => e.turn <= turnNumber).length` but O(log n) instead of
- * O(n): this runs on every `ai-league-replay-frame` tick against a Full
- * Replay's full, unbounded curated set.
+ * Count of `sortedByTurn` items (ascending by `turnOf`) eligible at
+ * `turnNumber`. Equivalent to `sortedByTurn.filter(x => turnOf(x) <=
+ * turnNumber).length` but O(log n) instead of O(n) — shared by every
+ * bounded list in this file (War Room, Analyst decisions, Analyst
+ * events), each of which re-runs this on every `ai-league-replay-frame`
+ * tick against its own full, unbounded set.
  */
-function warRoomEligibleCount(
-  events: readonly CuratedWarRoomEvent[],
+function domEligibleCount<T>(
+  sortedByTurn: readonly T[],
+  turnOf: (item: T) => number,
   turnNumber: number,
 ): number {
   let lo = 0;
-  let hi = events.length;
+  let hi = sortedByTurn.length;
   while (lo < hi) {
     const mid = (lo + hi) >>> 1;
-    if (events[mid]!.turn <= turnNumber) {
+    if (turnOf(sortedByTurn[mid]!) <= turnNumber) {
       lo = mid + 1;
     } else {
       hi = mid;
@@ -3828,9 +3884,103 @@ function warRoomEligibleCount(
   return lo;
 }
 
-/** First eligible index still inside the DOM window. */
-function warRoomWindowStart(eligibleCount: number, windowSize: number): number {
+/** First eligible index still inside a DOM window of `windowSize`, given `eligibleCount` total eligible items. Shared by every bounded list in this file. */
+function domWindowStart(eligibleCount: number, windowSize: number): number {
   return Math.max(0, eligibleCount - windowSize);
+}
+
+/**
+ * Inserts, updates, or removes the shared "N earlier" backfill row/button
+ * for a bounded list — used by every `patchDomWindowForward` caller so the
+ * affordance itself never needs a list rebuild just to update its own
+ * hidden count as the window slides forward.
+ */
+function syncDomWindowEarlierRow(
+  list: HTMLElement,
+  earlierSelector: string,
+  hiddenCount: number,
+  buildEarlierRow: (hiddenCount: number) => HTMLElement,
+  earlierLabel: (hiddenCount: number) => string,
+): void {
+  const earlierRow = list.querySelector<HTMLElement>(earlierSelector);
+  if (hiddenCount > 0) {
+    if (earlierRow === null) {
+      list.prepend(buildEarlierRow(hiddenCount));
+    } else {
+      const button = earlierRow.querySelector("button");
+      if (button !== null) {
+        button.textContent = earlierLabel(hiddenCount);
+      }
+    }
+  } else {
+    earlierRow?.remove();
+  }
+}
+
+/**
+ * Generic DOM-window incremental-append/prune primitive shared by every
+ * bounded ticker list in this file (War Room, Analyst decisions, Analyst
+ * events): for a pure forward tick (more eligible items, same window
+ * size), appends the newly eligible rows and prunes whichever rows the
+ * sliding window drops off the front, WITHOUT tearing down or rebuilding
+ * rows that stay in the window (spec item 3: appends must be incremental,
+ * never a full-subtree teardown per chunk). Retained rows keep their
+ * exact DOM node identity, so any per-row open/closed state survives the
+ * tick — the same correctness property `ReplayPremiereOverlay.ts`'s own
+ * `applyVolatileModelUpdates` war-room patch already relies on. Also
+ * preserves the viewer's own scroll intent: auto-follows the newest entry
+ * only while the viewer is already scrolled to the tail, and never yanks
+ * the view while they've scrolled up to read older entries (pruned height
+ * above the viewport is subtracted from `scrollTop` instead, so whatever
+ * content is already on screen doesn't jump).
+ *
+ * The append source is NEVER `[prevEligibleCount, nextEligibleCount)` —
+ * for a jump bigger than the window (a long idle tick, a forward
+ * seek/jump-to-turn that crosses hundreds of eligible items at once) that
+ * range is far wider than `windowSize` and would silently defeat the
+ * whole DOM cap (a real, shipped regression this exact bound fixed — see
+ * the seek-shape regression tests). Only the slice that actually lands
+ * inside the new window — `[max(prevEligibleCount, nextStart),
+ * nextEligibleCount)` — may ever be appended; anything older than
+ * `nextStart` was already excluded by the removal loop below (or never
+ * mounted to begin with).
+ */
+function patchDomWindowForward<T>(
+  list: HTMLElement,
+  rowSelector: string,
+  allItems: readonly T[],
+  prevEligibleCount: number,
+  nextEligibleCount: number,
+  windowSize: number,
+  buildRow: (item: T) => HTMLElement,
+  syncEarlier: (hiddenCount: number) => void,
+): void {
+  const prevStart = domWindowStart(prevEligibleCount, windowSize);
+  const nextStart = domWindowStart(nextEligibleCount, windowSize);
+  const removedCount = nextStart - prevStart;
+
+  const TAIL_EPSILON_PX = 4;
+  const wasAtTail =
+    list.scrollHeight - list.scrollTop - list.clientHeight <= TAIL_EPSILON_PX;
+
+  const rows = list.querySelectorAll<HTMLElement>(rowSelector);
+  let removedHeight = 0;
+  for (let i = 0; i < removedCount && i < rows.length; i++) {
+    removedHeight += rows[i]!.getBoundingClientRect().height;
+    rows[i]!.remove();
+  }
+  const appendStart = Math.max(prevEligibleCount, nextStart);
+  for (const item of allItems.slice(appendStart, nextEligibleCount)) {
+    list.append(buildRow(item));
+  }
+
+  syncEarlier(nextStart);
+
+  if (wasAtTail) {
+    list.scrollTop = list.scrollHeight;
+  } else if (removedHeight > 0) {
+    list.scrollTop = Math.max(0, list.scrollTop - removedHeight);
+  }
 }
 
 function buildWarRoomEarlierRow(
@@ -3863,7 +4013,7 @@ function buildWarRoomSection(
   windowSize: number,
   callbacks: WarRoomWindowCallbacks,
 ): HTMLElement {
-  const start = warRoomWindowStart(eligibleCount, windowSize);
+  const start = domWindowStart(eligibleCount, windowSize);
   const section = renderWarRoomFeed(
     allEvents.slice(start, eligibleCount),
     callbacks,
@@ -3879,20 +4029,10 @@ function buildWarRoomSection(
 
 /**
  * Incrementally patches an already-mounted War Room region for a pure
- * forward tick (more eligible events, same window size): appends the newly
- * eligible rows and prunes whichever rows the sliding window drops off the
- * front, WITHOUT tearing down or rebuilding rows that stay in the window
- * (spec item 3: appends must be incremental, never a full-subtree teardown
- * per chunk). Retained rows keep their exact DOM node identity, so an
- * expanded row's open/closed state survives the tick — the same
- * correctness property `ReplayPremiereOverlay.ts`'s own
- * `applyVolatileModelUpdates` war-room patch already relies on.
- *
- * Also preserves the viewer's own scroll intent: auto-follows the newest
- * entry only while the viewer is already scrolled to the tail, and never
- * yanks the view while they've scrolled up to read older entries (pruned
- * height above the viewport is subtracted from `scrollTop` instead, so
- * whatever content is already on screen doesn't jump).
+ * forward tick — a thin `patchDomWindowForward` adapter wiring the War
+ * Room's own list selector, row builder, and "show earlier" affordance
+ * into the shared primitive (see that function's own doc for the full
+ * correctness rationale).
  */
 function patchWarRoomWindowForward(
   section: HTMLElement,
@@ -3904,57 +4044,261 @@ function patchWarRoomWindowForward(
 ): void {
   const list = section.querySelector<HTMLElement>(".broadcast-war-room-list");
   if (list === null) return;
-  const prevStart = warRoomWindowStart(prevEligibleCount, windowSize);
-  const nextStart = warRoomWindowStart(nextEligibleCount, windowSize);
-  const removedCount = nextStart - prevStart;
-
-  const TAIL_EPSILON_PX = 4;
-  const wasAtTail =
-    list.scrollHeight - list.scrollTop - list.clientHeight <= TAIL_EPSILON_PX;
-
-  const rows = list.querySelectorAll<HTMLElement>(".broadcast-war-room-item");
-  let removedHeight = 0;
-  for (let i = 0; i < removedCount && i < rows.length; i++) {
-    removedHeight += rows[i]!.getBoundingClientRect().height;
-    rows[i]!.remove();
-  }
-  // The append source is NEVER `[prevEligibleCount, nextEligibleCount)` —
-  // for a jump bigger than the window (e.g. a long idle tick, or a
-  // forward seek/jump-to-turn that crosses hundreds of eligible events at
-  // once) that range is far wider than `windowSize` and would silently
-  // defeat the whole DOM cap. Only the slice that actually lands inside
-  // the new window — `[max(prevEligibleCount, nextStart), nextEligibleCount)`
-  // — may ever be appended; anything older than `nextStart` was already
-  // excluded by the removal loop above (or never mounted to begin with).
-  const appendStart = Math.max(prevEligibleCount, nextStart);
-  for (const event of allEvents.slice(appendStart, nextEligibleCount)) {
-    list.append(renderWarRoomEvent(event, callbacks));
-  }
-
-  const earlierRow = list.querySelector<HTMLElement>(
-    ".broadcast-war-room-earlier",
+  patchDomWindowForward(
+    list,
+    ".broadcast-war-room-item",
+    allEvents,
+    prevEligibleCount,
+    nextEligibleCount,
+    windowSize,
+    (event) => renderWarRoomEvent(event, callbacks),
+    (hiddenCount) =>
+      syncDomWindowEarlierRow(
+        list,
+        ".broadcast-war-room-earlier",
+        hiddenCount,
+        () => buildWarRoomEarlierRow(hiddenCount, callbacks.onShowEarlier),
+        (count) =>
+          translateText("broadcast.war_room_show_earlier", { count }),
+      ),
   );
-  if (nextStart > 0) {
-    if (earlierRow === null) {
-      list.prepend(buildWarRoomEarlierRow(nextStart, callbacks.onShowEarlier));
-    } else {
-      const button = earlierRow.querySelector("button");
-      if (button !== null) {
-        button.textContent = translateText(
-          "broadcast.war_room_show_earlier",
-          { count: nextStart },
-        );
-      }
-    }
-  } else {
-    earlierRow?.remove();
-  }
+}
 
-  if (wasAtTail) {
-    list.scrollTop = list.scrollHeight;
-  } else if (removedHeight > 0) {
-    list.scrollTop = Math.max(0, list.scrollTop - removedHeight);
+// ---------------------------------------------------------------------------
+// Analyst tab (spec item 5 follow-up, P2 review): lazy-mounted (its heavy
+// decisions table / event log are only ever constructed while the tab is
+// actually visible — desktop analyst-mode toggle on, or the mobile
+// "Analysis" drawer tab active) and windowed exactly like the War Room
+// ticker above (same AI_LEAGUE_TICKER_DOM_WINDOW, same "show earlier",
+// same incremental patch discipline via patchDomWindowForward). See
+// `aiLeagueAnalystPanelData`'s own doc for the playhead-filtering
+// supersession this follow-up also applied.
+// ---------------------------------------------------------------------------
+
+/** Matches renderAnalystDecisionRow's own column count (turn/player/brain/action/latency/audit/reason — see renderAnalystDecisions's header loop in BroadcastComposition.ts). */
+const AI_LEAGUE_ANALYST_DECISIONS_COLUMN_COUNT = 7;
+
+function buildAnalystDecisionsEarlierRow(
+  hiddenCount: number,
+  onShowEarlier: () => void,
+): HTMLTableRowElement {
+  const tr = document.createElement("tr");
+  tr.className = "broadcast-analyst-decisions-earlier";
+  const td = document.createElement("td");
+  td.colSpan = AI_LEAGUE_ANALYST_DECISIONS_COLUMN_COUNT;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "ai-league-badge";
+  button.textContent = translateText("broadcast.analyst_show_earlier", {
+    count: hiddenCount,
+  });
+  button.addEventListener("click", onShowEarlier);
+  td.append(button);
+  tr.append(td);
+  return tr;
+}
+
+function buildAnalystEventsEarlierRow(
+  hiddenCount: number,
+  onShowEarlier: () => void,
+): HTMLLIElement {
+  const li = document.createElement("li");
+  li.className = "broadcast-analyst-events-earlier";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "ai-league-badge";
+  button.textContent = translateText("broadcast.analyst_show_earlier", {
+    count: hiddenCount,
+  });
+  button.addEventListener("click", onShowEarlier);
+  li.append(button);
+  return li;
+}
+
+/**
+ * Empty lazy-mount placeholder for the Analyst tab — same root shape/class
+ * `renderAnalystPanel` returns (so every existing
+ * `.broadcast-drawer-panel[data-tab-id="analysis"].broadcast-analyst`
+ * selector still resolves), but with no children at all: the chart/
+ * decisions table/event log are only ever constructed once the tab is
+ * actually visible.
+ */
+function buildAnalystPanelPlaceholder(): HTMLElement {
+  const section = document.createElement("section");
+  section.className = "broadcast-analyst";
+  section.setAttribute(
+    "aria-label",
+    translateText("broadcast.analyst_heading"),
+  );
+  return section;
+}
+
+/**
+ * Cold-builds JUST the Analyst decisions table region (`.broadcast-analyst-
+ * decisions`) for the current window — used for the whole-panel first-
+ * visible build below, AND independently whenever ONLY the decisions
+ * sub-list needs a cold rebuild (a decisions-only window-size change via
+ * onShowEarlier, or a backward seek) while the events sub-list next to it
+ * is left completely untouched.
+ */
+function buildAnalystDecisionsSection(
+  allDecisions: readonly AnalystDecisionRow[],
+  decisionsUnavailableReason: AnalystModeUnavailableReason | null,
+  eligibleCount: number,
+  windowSize: number,
+  onShowEarlier: () => void,
+): HTMLElement {
+  const start = domWindowStart(eligibleCount, windowSize);
+  const wrap = renderAnalystDecisions({
+    decisions:
+      decisionsUnavailableReason !== null
+        ? null
+        : allDecisions.slice(start, eligibleCount),
+    decisionsUnavailableReason,
+  });
+  if (start > 0) {
+    const body = wrap.querySelector<HTMLElement>(
+      ".broadcast-analyst-decisions-table tbody",
+    );
+    body?.prepend(buildAnalystDecisionsEarlierRow(start, onShowEarlier));
   }
+  return wrap;
+}
+
+/** Cold-builds JUST the Analyst event log region (`.broadcast-analyst-events`) — see `buildAnalystDecisionsSection`'s own doc for the full rationale. */
+function buildAnalystEventsSection(
+  allEvents: readonly AnalystEventRow[],
+  eligibleCount: number,
+  windowSize: number,
+  onShowEarlier: () => void,
+): HTMLElement {
+  const start = domWindowStart(eligibleCount, windowSize);
+  const wrap = renderAnalystEventLog(allEvents.slice(start, eligibleCount));
+  if (start > 0) {
+    const list = wrap.querySelector<HTMLElement>(
+      ".broadcast-analyst-events-list",
+    );
+    list?.prepend(buildAnalystEventsEarlierRow(start, onShowEarlier));
+  }
+  return wrap;
+}
+
+/**
+ * Builds the full Analyst tab content for the CURRENT window sizes — used
+ * whenever visibility just turned on, or first mount while already
+ * visible. Composes the SAME `renderAnalystActionChart`-bearing
+ * `renderAnalystPanel` shell every caller already expects, then swaps in
+ * the windowed decisions/events sub-sections built above (chart aside,
+ * this is the only place that ever rebuilds BOTH sub-lists together —
+ * `patchVolatile` below patches/rebuilds each one independently once the
+ * panel is already mounted).
+ */
+function buildAnalystPanelWindow(
+  chartCounts: readonly AnalystActionKindCount[],
+  decisionsUnavailableReason: AnalystModeUnavailableReason | null,
+  allDecisions: readonly AnalystDecisionRow[],
+  allEvents: readonly AnalystEventRow[],
+  eligibleDecisionsCount: number,
+  eligibleEventsCount: number,
+  decisionsWindowSize: number,
+  eventsWindowSize: number,
+  onShowEarlierDecisions: () => void,
+  onShowEarlierEvents: () => void,
+): HTMLElement {
+  const section = renderAnalystPanel({
+    decisions: [],
+    decisionsUnavailableReason,
+    events: [],
+    actionKindCounts: chartCounts,
+  });
+  section
+    .querySelector(".broadcast-analyst-decisions")
+    ?.replaceWith(
+      buildAnalystDecisionsSection(
+        allDecisions,
+        decisionsUnavailableReason,
+        eligibleDecisionsCount,
+        decisionsWindowSize,
+        onShowEarlierDecisions,
+      ),
+    );
+  section
+    .querySelector(".broadcast-analyst-events")
+    ?.replaceWith(
+      buildAnalystEventsSection(
+        allEvents,
+        eligibleEventsCount,
+        eventsWindowSize,
+        onShowEarlierEvents,
+      ),
+    );
+  return section;
+}
+
+/** Thin `patchDomWindowForward` adapter for the Analyst decisions table (see that function's own doc). `null` when the section has no table yet (unavailable/empty state) — the caller falls back to a cold `buildAnalystPanelWindow` rebuild for that transition, exactly like the War Room ticker's own empty-state handling. */
+function patchAnalystDecisionsWindowForward(
+  section: HTMLElement,
+  allDecisions: readonly AnalystDecisionRow[],
+  prevEligibleCount: number,
+  nextEligibleCount: number,
+  windowSize: number,
+  onShowEarlier: () => void,
+): void {
+  const body = section.querySelector<HTMLElement>(
+    ".broadcast-analyst-decisions-table tbody",
+  );
+  if (body === null) return;
+  patchDomWindowForward(
+    body,
+    ".broadcast-analyst-decisions-row",
+    allDecisions,
+    prevEligibleCount,
+    nextEligibleCount,
+    windowSize,
+    renderAnalystDecisionRow,
+    (hiddenCount) =>
+      syncDomWindowEarlierRow(
+        body,
+        ".broadcast-analyst-decisions-earlier",
+        hiddenCount,
+        () => buildAnalystDecisionsEarlierRow(hiddenCount, onShowEarlier),
+        (count) =>
+          translateText("broadcast.analyst_show_earlier", { count }),
+      ),
+  );
+}
+
+/** Thin `patchDomWindowForward` adapter for the Analyst event log (see that function's own doc). */
+function patchAnalystEventsWindowForward(
+  section: HTMLElement,
+  allEvents: readonly AnalystEventRow[],
+  prevEligibleCount: number,
+  nextEligibleCount: number,
+  windowSize: number,
+  onShowEarlier: () => void,
+): void {
+  const list = section.querySelector<HTMLElement>(
+    ".broadcast-analyst-events-list",
+  );
+  if (list === null) return;
+  patchDomWindowForward(
+    list,
+    ".broadcast-analyst-events-row",
+    allEvents,
+    prevEligibleCount,
+    nextEligibleCount,
+    windowSize,
+    renderAnalystEventRow,
+    (hiddenCount) =>
+      syncDomWindowEarlierRow(
+        list,
+        ".broadcast-analyst-events-earlier",
+        hiddenCount,
+        () => buildAnalystEventsEarlierRow(hiddenCount, onShowEarlier),
+        (count) =>
+          translateText("broadcast.analyst_show_earlier", { count }),
+      ),
+  );
 }
 
 function mountAiLeagueBroadcastDrawer(
@@ -3988,7 +4332,7 @@ function mountAiLeagueBroadcastDrawer(
   // Full, unwindowed curated set — NEVER rendered directly (spec item 2: a
   // viewer at turn N must never see an event from turn > N). Both render
   // paths below window this down to the viewer's own playhead AND (spec
-  // item 1, AI_LEAGUE_WAR_ROOM_DOM_WINDOW above) to a bounded DOM count.
+  // item 1, AI_LEAGUE_TICKER_DOM_WINDOW above) to a bounded DOM count.
   const allWarRoomEvents = curatedWarRoomEvents(telemetry, decisions);
   const timelineMarkers: TimelineMarker[] = [
     ...matchTimelineEventMarkers(telemetry),
@@ -4000,6 +4344,13 @@ function mountAiLeagueBroadcastDrawer(
     },
   ];
   const analystData = aiLeagueAnalystPanelData(input, telemetry);
+  // Full, unwindowed sets (sorted ascending by turn — see
+  // aiLeagueAnalystPanelData's own doc) — NEVER rendered directly. Exactly
+  // like allWarRoomEvents above: both the playhead boundary (spec item 2)
+  // and the DOM window (spec item 1, AI_LEAGUE_TICKER_DOM_WINDOW) apply
+  // before either ever reaches the DOM.
+  const allAnalystDecisions = analystData.decisions ?? [];
+  const allAnalystEvents = analystData.events;
   // Parsed once per mount (like everything else above), not per frame — the
   // artifact itself never changes within one mount's lifetime, only which
   // sample is windowed into view does.
@@ -4031,13 +4382,31 @@ function mountAiLeagueBroadcastDrawer(
   }
 
   // War Room DOM window (spec item 1) — grows via onShowEarlier below.
-  let warRoomWindowSize = AI_LEAGUE_WAR_ROOM_DOM_WINDOW;
+  let warRoomWindowSize = AI_LEAGUE_TICKER_DOM_WINDOW;
   // Eligible-count/window-size the DOM currently reflects, as of the last
   // structural OR incremental render. -1 (and 0, the structural "no events
   // yet" placeholder) both force the next tick through a structural rebuild
   // rather than the incremental fast path — see patchVolatile below.
   let mountedWarRoomCount = -1;
   let mountedWarRoomWindowSize = warRoomWindowSize;
+  // Analyst DOM windows (spec item 1 follow-up, P2 review) — independent
+  // per sub-list, same shape as the War Room window above.
+  let analystDecisionsWindowSize = AI_LEAGUE_TICKER_DOM_WINDOW;
+  let analystEventsWindowSize = AI_LEAGUE_TICKER_DOM_WINDOW;
+  let mountedAnalystDecisionsCount = -1;
+  let mountedAnalystEventsCount = -1;
+  let mountedAnalystDecisionsWindowSize = analystDecisionsWindowSize;
+  let mountedAnalystEventsWindowSize = analystEventsWindowSize;
+  // Lazy-mount (spec item 1 follow-up): the Analyst tab's heavy children
+  // (chart/table/list) are only ever constructed while the tab is actually
+  // visible — desktop analyst-mode toggle on, OR the mobile "Analysis"
+  // drawer tab active (see mountAiLeagueAnalystToggle's own doc for why
+  // those are two independent entry points to the SAME content). `null`
+  // means "never structurally rendered yet".
+  let mountedAnalystVisible: boolean | null = null;
+  const isAnalystVisible = (): boolean =>
+    document.body.classList.contains("ai-league-analyst-mode") ||
+    AI_LEAGUE_DRAWER_ACTIVE_TAB.get(container) === "analysis";
   // Match-state strip key (spec item 3): the strip is a single small,
   // display-only element, but it can appear/disappear (null <-> non-null)
   // as match-state samples arrive, so it still needs its own change gate
@@ -4090,7 +4459,7 @@ function mountAiLeagueBroadcastDrawer(
       rerenderWithLastFrame();
     },
     onShowEarlier: () => {
-      warRoomWindowSize += AI_LEAGUE_WAR_ROOM_DOM_WINDOW;
+      warRoomWindowSize += AI_LEAGUE_TICKER_DOM_WINDOW;
       // patchVolatile (not renderStructural): its own per-region key checks
       // no-op the rail/timeline/strip (nothing about them changed) and take
       // the war-room "else" branch below (window size changed), so this
@@ -4101,6 +4470,25 @@ function mountAiLeagueBroadcastDrawer(
       );
     },
   });
+
+  // Same "grow the window, re-run patchVolatile" shape as the War Room's
+  // own onShowEarlier above — each ends up rebuilding ONLY its own list
+  // (never the whole drawer), since patchVolatile's per-region key checks
+  // no-op everything whose window size didn't just change.
+  const onShowEarlierAnalystDecisions = (): void => {
+    analystDecisionsWindowSize += AI_LEAGUE_TICKER_DOM_WINDOW;
+    patchVolatile(
+      AI_LEAGUE_BROADCAST_DRAWER_LAST_FRAME.get(container) ?? [],
+      AI_LEAGUE_BROADCAST_DRAWER_LAST_TURN.get(container) ?? 0,
+    );
+  };
+  const onShowEarlierAnalystEvents = (): void => {
+    analystEventsWindowSize += AI_LEAGUE_TICKER_DOM_WINDOW;
+    patchVolatile(
+      AI_LEAGUE_BROADCAST_DRAWER_LAST_FRAME.get(container) ?? [],
+      AI_LEAGUE_BROADCAST_DRAWER_LAST_TURN.get(container) ?? 0,
+    );
+  };
 
   // Full structural rebuild of all four tabs — used only for genuinely
   // structural changes: first mount, active-tab switch, and a collapse
@@ -4123,10 +4511,22 @@ function mountAiLeagueBroadcastDrawer(
       ...entry,
       followed: entry.playerName === followedPlayerName,
     }));
-    const eligibleWarRoomCount = warRoomEligibleCount(
+    const eligibleWarRoomCount = domEligibleCount(
       allWarRoomEvents,
+      (event) => event.turn,
       turnNumber,
     );
+    const eligibleAnalystDecisionsCount = domEligibleCount(
+      allAnalystDecisions,
+      (row) => row.turnNumber,
+      turnNumber,
+    );
+    const eligibleAnalystEventsCount = domEligibleCount(
+      allAnalystEvents,
+      (row) => row.turnNumber,
+      turnNumber,
+    );
+    const analystVisible = isAnalystVisible();
     // Director Cut segment (when that mode is on) takes priority over the
     // sample's own phase — spec item 3. `segmentForTurn` is a cheap binary
     // search, safe to call every frame exactly like the rest of this
@@ -4171,6 +4571,25 @@ function mountAiLeagueBroadcastDrawer(
       warRoomWindowSize,
       warRoomCallbacks(),
     );
+    // Lazy-mount (spec item 1 follow-up): only construct the Analyst tab's
+    // heavy children while it's actually visible — an empty placeholder
+    // otherwise, same root shape/class so the tab machinery (aria wiring,
+    // relocation, existing selectors/tests) never has to know the
+    // difference.
+    const analystRegion = analystVisible
+      ? buildAnalystPanelWindow(
+          analystData.actionKindCounts,
+          analystData.decisionsUnavailableReason,
+          allAnalystDecisions,
+          allAnalystEvents,
+          eligibleAnalystDecisionsCount,
+          eligibleAnalystEventsCount,
+          analystDecisionsWindowSize,
+          analystEventsWindowSize,
+          onShowEarlierAnalystDecisions,
+          onShowEarlierAnalystEvents,
+        )
+      : buildAnalystPanelPlaceholder();
     const timeline = renderMatchTimeline(timelineMarkers, {
       totalTurns,
       // Full Replay is unrestricted (unlike a live Premiere, which must
@@ -4188,7 +4607,7 @@ function mountAiLeagueBroadcastDrawer(
       { id: "agents", content: rail },
       { id: "events", content: warRoomRegion },
       { id: "timeline", content: timeline },
-      { id: "analysis", content: renderAnalystPanel(analystData) },
+      { id: "analysis", content: analystRegion },
     ];
     container.replaceChildren(
       ...(stripInput !== null ? [renderMatchStateStrip(stripInput)] : []),
@@ -4202,6 +4621,13 @@ function mountAiLeagueBroadcastDrawer(
     );
     mountedWarRoomCount = eligibleWarRoomCount;
     mountedWarRoomWindowSize = warRoomWindowSize;
+    mountedAnalystVisible = analystVisible;
+    mountedAnalystDecisionsCount = analystVisible
+      ? eligibleAnalystDecisionsCount
+      : -1;
+    mountedAnalystEventsCount = analystVisible ? eligibleAnalystEventsCount : -1;
+    mountedAnalystDecisionsWindowSize = analystDecisionsWindowSize;
+    mountedAnalystEventsWindowSize = analystEventsWindowSize;
     lastStripKey = JSON.stringify(stripInput);
     const nextPanelsHost = container.querySelector<HTMLElement>(
       ".broadcast-drawer-panels",
@@ -4218,8 +4644,11 @@ function mountAiLeagueBroadcastDrawer(
   // `applyVolatileModelUpdates`/structural-key split. `activeTab` and the
   // collapse flags never change on this path (only user clicks change
   // them, always via renderStructural above), so only rail/war-room/
-  // timeline/strip need a key check here; the analyst panel is static per
-  // mount (built once, above) and is never touched again.
+  // timeline/strip/analyst need a key check here — the Analyst tab is
+  // ALSO lazy-mounted/windowed on this path now (spec item 1 follow-up,
+  // P2 review): patched exactly like the War Room ticker while visible,
+  // and torn down to the empty placeholder the moment it stops being
+  // visible, so its own DOM cost is zero while closed.
   const patchVolatile = (
     framePlayers: readonly AiLeagueReplayFramePlayer[],
     turnNumber: number,
@@ -4260,8 +4689,9 @@ function mountAiLeagueBroadcastDrawer(
       ".broadcast-war-room",
     );
     if (warRoomSection !== null) {
-      const eligibleWarRoomCount = warRoomEligibleCount(
+      const eligibleWarRoomCount = domEligibleCount(
         allWarRoomEvents,
+        (event) => event.turn,
         turnNumber,
       );
       if (
@@ -4295,6 +4725,119 @@ function mountAiLeagueBroadcastDrawer(
       }
       mountedWarRoomCount = eligibleWarRoomCount;
       mountedWarRoomWindowSize = warRoomWindowSize;
+    }
+
+    // Analyst tab (spec item 1 follow-up, P2 review): lazy-mounted, and —
+    // while visible — windowed exactly like the War Room ticker above,
+    // with its two sub-lists (decisions table, event log) patched fully
+    // independently of each other.
+    const analystSection = document.querySelector<HTMLElement>(
+      ".broadcast-analyst",
+    );
+    if (analystSection !== null) {
+      const analystVisible = isAnalystVisible();
+      if (!analystVisible) {
+        // Reclaim the DOM the instant it's no longer visible — never keep
+        // patching content nobody can see.
+        if (mountedAnalystVisible !== false) {
+          analystSection.replaceWith(buildAnalystPanelPlaceholder());
+        }
+        mountedAnalystVisible = false;
+        mountedAnalystDecisionsCount = -1;
+        mountedAnalystEventsCount = -1;
+      } else {
+        const eligibleAnalystDecisionsCount = domEligibleCount(
+          allAnalystDecisions,
+          (row) => row.turnNumber,
+          turnNumber,
+        );
+        const eligibleAnalystEventsCount = domEligibleCount(
+          allAnalystEvents,
+          (row) => row.turnNumber,
+          turnNumber,
+        );
+        if (mountedAnalystVisible !== true) {
+          // Just turned visible (or the very first tick with it already
+          // on) — cold build the whole panel, the same way the War Room
+          // ticker handles its own "was empty" transition.
+          const nextAnalyst = buildAnalystPanelWindow(
+            analystData.actionKindCounts,
+            analystData.decisionsUnavailableReason,
+            allAnalystDecisions,
+            allAnalystEvents,
+            eligibleAnalystDecisionsCount,
+            eligibleAnalystEventsCount,
+            analystDecisionsWindowSize,
+            analystEventsWindowSize,
+            onShowEarlierAnalystDecisions,
+            onShowEarlierAnalystEvents,
+          );
+          analystSection.replaceWith(nextAnalyst);
+        } else {
+          if (
+            mountedAnalystDecisionsCount > 0 &&
+            eligibleAnalystDecisionsCount >= mountedAnalystDecisionsCount &&
+            analystDecisionsWindowSize === mountedAnalystDecisionsWindowSize
+          ) {
+            if (
+              eligibleAnalystDecisionsCount !== mountedAnalystDecisionsCount
+            ) {
+              patchAnalystDecisionsWindowForward(
+                analystSection,
+                allAnalystDecisions,
+                mountedAnalystDecisionsCount,
+                eligibleAnalystDecisionsCount,
+                analystDecisionsWindowSize,
+                onShowEarlierAnalystDecisions,
+              );
+            }
+          } else {
+            analystSection
+              .querySelector(".broadcast-analyst-decisions")
+              ?.replaceWith(
+                buildAnalystDecisionsSection(
+                  allAnalystDecisions,
+                  analystData.decisionsUnavailableReason,
+                  eligibleAnalystDecisionsCount,
+                  analystDecisionsWindowSize,
+                  onShowEarlierAnalystDecisions,
+                ),
+              );
+          }
+          if (
+            mountedAnalystEventsCount > 0 &&
+            eligibleAnalystEventsCount >= mountedAnalystEventsCount &&
+            analystEventsWindowSize === mountedAnalystEventsWindowSize
+          ) {
+            if (eligibleAnalystEventsCount !== mountedAnalystEventsCount) {
+              patchAnalystEventsWindowForward(
+                analystSection,
+                allAnalystEvents,
+                mountedAnalystEventsCount,
+                eligibleAnalystEventsCount,
+                analystEventsWindowSize,
+                onShowEarlierAnalystEvents,
+              );
+            }
+          } else {
+            analystSection
+              .querySelector(".broadcast-analyst-events")
+              ?.replaceWith(
+                buildAnalystEventsSection(
+                  allAnalystEvents,
+                  eligibleAnalystEventsCount,
+                  analystEventsWindowSize,
+                  onShowEarlierAnalystEvents,
+                ),
+              );
+          }
+        }
+        mountedAnalystVisible = true;
+        mountedAnalystDecisionsCount = eligibleAnalystDecisionsCount;
+        mountedAnalystEventsCount = eligibleAnalystEventsCount;
+        mountedAnalystDecisionsWindowSize = analystDecisionsWindowSize;
+        mountedAnalystEventsWindowSize = analystEventsWindowSize;
+      }
     }
 
     const timeline = document.querySelector<HTMLElement>(
@@ -4383,11 +4926,31 @@ function mountAiLeagueBroadcastDrawer(
       relocateAiLeagueBroadcastDrawerPanels(drawerPortal, panelsHost);
     }
   };
+  // Desktop analyst-mode toggle (spec item 1 follow-up): its own
+  // `document.body` class flip has no render cycle of its own (see
+  // AI_LEAGUE_ANALYST_MODE_CHANGE_EVENT's own doc), so patch immediately
+  // on the SAME "last known frame/turn" basis every other manual trigger
+  // in this closure (collapse toggles, show-earlier) already uses, rather
+  // than waiting for the next automatic tick.
+  const onAnalystModeChange = (): void => {
+    patchVolatile(
+      AI_LEAGUE_BROADCAST_DRAWER_LAST_FRAME.get(container) ?? [],
+      AI_LEAGUE_BROADCAST_DRAWER_LAST_TURN.get(container) ?? 0,
+    );
+  };
   document.addEventListener("ai-league-replay-frame", onFrame);
   window.addEventListener("resize", onResize);
+  document.addEventListener(
+    AI_LEAGUE_ANALYST_MODE_CHANGE_EVENT,
+    onAnalystModeChange,
+  );
   win.__aiLeagueBroadcastDrawerCleanup = () => {
     document.removeEventListener("ai-league-replay-frame", onFrame);
     window.removeEventListener("resize", onResize);
+    document.removeEventListener(
+      AI_LEAGUE_ANALYST_MODE_CHANGE_EVENT,
+      onAnalystModeChange,
+    );
   };
 }
 

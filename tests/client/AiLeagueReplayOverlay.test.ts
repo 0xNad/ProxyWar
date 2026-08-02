@@ -2727,6 +2727,437 @@ describe("AiLeagueReplayOverlay", () => {
       expect(firstItem?.getAttribute("data-kind")).toBe("alliance");
     });
 
+    it("lazy-mounts the Analyst tab — empty while closed (no chart/table/list DOM at all), builds windowed content only once opened, and unmounts it again on close (spec item 1 follow-up, P2 review)", () => {
+      const runID = "broadcast-analyst-lazy-mount-1";
+      const decisions = Array.from({ length: 10 }, (_, index) => ({
+        ...decisionFixture(index + 1),
+        turnNumber: index + 1,
+      }));
+      const events = Array.from({ length: 10 }, (_, index) =>
+        event(
+          index + 1,
+          index + 1,
+          "elimination",
+          "war",
+          `a${index + 1}`,
+          `Agent ${index + 1}`,
+          null,
+          null,
+          `Agent ${index + 1} is eliminated.`,
+        ),
+      );
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions,
+        currentTurn: 10,
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events,
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+
+      const analystSection = document.querySelector(".broadcast-analyst");
+      expect(analystSection).not.toBeNull();
+      // Closed by default: the section root stays mounted (existing
+      // tab/aria wiring, and every `.broadcast-drawer-panel[data-tab-id=
+      // "analysis"].broadcast-analyst` selector, never has to know the
+      // difference) — but NOTHING inside it is constructed.
+      expect(analystSection?.children.length).toBe(0);
+      expect(
+        document.querySelector(".broadcast-analyst-decisions-table"),
+      ).toBeNull();
+      expect(
+        document.querySelector(".broadcast-analyst-events-list"),
+      ).toBeNull();
+
+      const toggle = document.querySelector<HTMLButtonElement>(
+        "[data-ai-league-analyst-toggle]",
+      );
+      toggle?.click();
+
+      expect(
+        document.querySelector(".broadcast-analyst")?.children.length,
+      ).toBeGreaterThan(0);
+      expect(
+        document.querySelectorAll(".broadcast-analyst-decisions-row"),
+      ).toHaveLength(10);
+      expect(
+        document.querySelectorAll(".broadcast-analyst-events-row"),
+      ).toHaveLength(10);
+
+      toggle?.click();
+      expect(
+        document.querySelector(".broadcast-analyst")?.children.length,
+      ).toBe(0);
+    });
+
+    it("caps both Analyst sub-lists' DOM node count under a large fixture, backfills each independently via show-earlier, and never renders past the playhead (spec items 1-3 follow-up, P2 review)", () => {
+      const runID = "broadcast-analyst-window-cap-1";
+      const decisions = Array.from(
+        { length: 200 },
+        (_, index) => ({
+          ...decisionFixture(index + 1),
+          turnNumber: index + 1,
+        }),
+      );
+      decisions.push({
+        ...decisionFixture(9999),
+        turnNumber: 2500,
+        reason: "Secret future decision",
+      });
+      const events = Array.from({ length: 200 }, (_, index) =>
+        event(
+          index + 1,
+          index + 1,
+          "elimination",
+          "war",
+          `a${index + 1}`,
+          `Agent ${index + 1}`,
+          null,
+          null,
+          `Agent ${index + 1} is eliminated.`,
+        ),
+      );
+      events.push(
+        event(
+          9999,
+          2500,
+          "elimination",
+          "war",
+          "a9999",
+          "Secret future agent",
+          null,
+          null,
+          "Secret future agent is eliminated.",
+        ),
+      );
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions,
+        currentTurn: 200,
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events,
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+      document
+        .querySelector<HTMLButtonElement>("[data-ai-league-analyst-toggle]")
+        ?.click();
+
+      const analyst = document.querySelector(".broadcast-analyst");
+      expect(
+        analyst?.querySelectorAll(".broadcast-analyst-decisions-row"),
+      ).toHaveLength(60);
+      expect(
+        analyst?.querySelectorAll(".broadcast-analyst-events-row"),
+      ).toHaveLength(60);
+      expect(analyst?.textContent).not.toContain("Secret future decision");
+      expect(analyst?.textContent).not.toContain("Secret future agent");
+
+      const decisionsEarlier = analyst?.querySelector<HTMLButtonElement>(
+        ".broadcast-analyst-decisions-earlier button",
+      );
+      const eventsEarlier = analyst?.querySelector<HTMLButtonElement>(
+        ".broadcast-analyst-events-earlier button",
+      );
+      expect(decisionsEarlier).not.toBeNull();
+      expect(eventsEarlier).not.toBeNull();
+
+      // Each sub-list's own "show earlier" only ever grows THAT sub-list —
+      // independent windows, independent affordances.
+      decisionsEarlier?.click();
+      expect(
+        document.querySelectorAll(".broadcast-analyst-decisions-row"),
+      ).toHaveLength(120);
+      expect(
+        document.querySelectorAll(".broadcast-analyst-events-row"),
+      ).toHaveLength(60);
+
+      eventsEarlier?.click();
+      expect(
+        document.querySelectorAll(".broadcast-analyst-events-row"),
+      ).toHaveLength(120);
+      expect(
+        document.querySelectorAll(".broadcast-analyst-decisions-row"),
+      ).toHaveLength(120);
+      expect(
+        document.querySelector(".broadcast-analyst")?.textContent,
+      ).not.toContain("Secret future decision");
+      expect(
+        document.querySelector(".broadcast-analyst")?.textContent,
+      ).not.toContain("Secret future agent");
+    });
+
+    it("caps mounted Analyst rows at the window size on a large forward seek within a SINGLE tick, in both sub-lists (regression: a jump bigger than the window used to defeat the DOM cap entirely)", () => {
+      const runID = "broadcast-analyst-large-seek-1";
+      const decisions = Array.from({ length: 200 }, (_, index) => {
+        const sequence = index + 1;
+        if (index === 139) {
+          return {
+            ...decisionFixture(sequence),
+            turnNumber: sequence,
+            reason: "BOUNDARY_BEFORE_DECISION",
+          };
+        }
+        if (index === 140) {
+          return {
+            ...decisionFixture(sequence),
+            turnNumber: sequence,
+            reason: "BOUNDARY_AT_DECISION",
+          };
+        }
+        return { ...decisionFixture(sequence), turnNumber: sequence };
+      });
+      const events = Array.from({ length: 200 }, (_, index) => {
+        const sequence = index + 1;
+        const kind =
+          index === 139
+            ? "boundary-before"
+            : index === 140
+              ? "boundary-at"
+              : "elimination";
+        return event(
+          sequence,
+          sequence,
+          kind,
+          "war",
+          `a${sequence}`,
+          `Agent ${sequence}`,
+          null,
+          null,
+          `Agent ${sequence} note.`,
+        );
+      });
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions,
+        currentTurn: 10,
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events,
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+      document
+        .querySelector<HTMLButtonElement>("[data-ai-league-analyst-toggle]")
+        ?.click();
+      expect(
+        document.querySelectorAll(".broadcast-analyst-decisions-row"),
+      ).toHaveLength(10);
+
+      // ONE tick jumps the playhead from turn 10 straight to turn 300 (all
+      // 200 decisions/events become eligible at once).
+      document.dispatchEvent(
+        new CustomEvent("ai-league-replay-frame", {
+          detail: { tick: 300, turnNumber: 300, players: [] },
+        }),
+      );
+
+      expect(
+        document.querySelectorAll(".broadcast-analyst-decisions-row"),
+      ).toHaveLength(60);
+      expect(
+        document.querySelectorAll(".broadcast-analyst-events-row"),
+      ).toHaveLength(60);
+      const analyst = document.querySelector(".broadcast-analyst");
+      expect(analyst?.textContent).not.toContain("BOUNDARY_BEFORE_DECISION");
+      expect(analyst?.textContent).toContain("BOUNDARY_AT_DECISION");
+      expect(
+        document.querySelector(
+          '.broadcast-analyst-events-row[data-kind="boundary-before"]',
+        ),
+      ).toBeNull();
+      expect(
+        document.querySelector(
+          '.broadcast-analyst-events-row[data-kind="boundary-at"]',
+        ),
+      ).not.toBeNull();
+    });
+
+    it("preserves incremental append (node identity) in both Analyst sub-lists for a multi-item forward seek that stays UNDER the window size", () => {
+      const runID = "broadcast-analyst-medium-seek-1";
+      const decisions = Array.from({ length: 100 }, (_, index) => ({
+        ...decisionFixture(index + 1),
+        turnNumber: index + 1,
+      }));
+      const events = Array.from({ length: 100 }, (_, index) =>
+        event(
+          index + 1,
+          index + 1,
+          "elimination",
+          "war",
+          `a${index + 1}`,
+          `Agent ${index + 1}`,
+          null,
+          null,
+          `Agent ${index + 1} note.`,
+        ),
+      );
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions,
+        currentTurn: 5,
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events,
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+      document
+        .querySelector<HTMLButtonElement>("[data-ai-league-analyst-toggle]")
+        ?.click();
+
+      const firstDecisionRowBefore = document.querySelector(
+        ".broadcast-analyst-decisions-row",
+      );
+      const firstEventRowBefore = document.querySelector(
+        ".broadcast-analyst-events-row",
+      );
+      expect(firstDecisionRowBefore).not.toBeNull();
+      expect(firstEventRowBefore).not.toBeNull();
+      expect(
+        document.querySelectorAll(".broadcast-analyst-decisions-row"),
+      ).toHaveLength(5);
+
+      document.dispatchEvent(
+        new CustomEvent("ai-league-replay-frame", {
+          detail: { tick: 25, turnNumber: 25, players: [] },
+        }),
+      );
+
+      expect(
+        document.querySelectorAll(".broadcast-analyst-decisions-row"),
+      ).toHaveLength(25);
+      expect(
+        document.querySelectorAll(".broadcast-analyst-events-row"),
+      ).toHaveLength(25);
+      expect(document.querySelector(".broadcast-analyst-decisions-row")).toBe(
+        firstDecisionRowBefore,
+      );
+      expect(document.querySelector(".broadcast-analyst-events-row")).toBe(
+        firstEventRowBefore,
+      );
+    });
+
+    it("recovers correctly in both Analyst sub-lists from a backward seek followed by another large forward seek", () => {
+      const runID = "broadcast-analyst-backward-then-forward-seek-1";
+      const decisions = Array.from({ length: 200 }, (_, index) => {
+        const sequence = index + 1;
+        if (index === 139) {
+          return {
+            ...decisionFixture(sequence),
+            turnNumber: sequence,
+            reason: "BOUNDARY_BEFORE_DECISION",
+          };
+        }
+        if (index === 140) {
+          return {
+            ...decisionFixture(sequence),
+            turnNumber: sequence,
+            reason: "BOUNDARY_AT_DECISION",
+          };
+        }
+        return { ...decisionFixture(sequence), turnNumber: sequence };
+      });
+      const events = Array.from({ length: 200 }, (_, index) => {
+        const sequence = index + 1;
+        const kind =
+          index === 139
+            ? "boundary-before"
+            : index === 140
+              ? "boundary-at"
+              : "elimination";
+        return event(
+          sequence,
+          sequence,
+          kind,
+          "war",
+          `a${sequence}`,
+          `Agent ${sequence}`,
+          null,
+          null,
+          `Agent ${sequence} note.`,
+        );
+      });
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions,
+        currentTurn: 300,
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events,
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+      document
+        .querySelector<HTMLButtonElement>("[data-ai-league-analyst-toggle]")
+        ?.click();
+      expect(
+        document.querySelectorAll(".broadcast-analyst-decisions-row"),
+      ).toHaveLength(60);
+
+      // Backward seek: 200 -> 50 eligible, fewer than the window.
+      document.dispatchEvent(
+        new CustomEvent("ai-league-replay-frame", {
+          detail: { tick: 50, turnNumber: 50, players: [] },
+        }),
+      );
+      expect(
+        document.querySelectorAll(".broadcast-analyst-decisions-row"),
+      ).toHaveLength(50);
+      expect(
+        document.querySelectorAll(".broadcast-analyst-events-row"),
+      ).toHaveLength(50);
+      expect(
+        document.querySelector(".broadcast-analyst-decisions-earlier"),
+      ).toBeNull();
+
+      // Then a large forward seek again, right back to all 200 eligible —
+      // the SAME bounded-append fix must still hold after the backward
+      // rebuild reset its own bookkeeping.
+      document.dispatchEvent(
+        new CustomEvent("ai-league-replay-frame", {
+          detail: { tick: 300, turnNumber: 300, players: [] },
+        }),
+      );
+      expect(
+        document.querySelectorAll(".broadcast-analyst-decisions-row"),
+      ).toHaveLength(60);
+      expect(
+        document.querySelectorAll(".broadcast-analyst-events-row"),
+      ).toHaveLength(60);
+      const analyst = document.querySelector(".broadcast-analyst");
+      expect(analyst?.textContent).not.toContain("BOUNDARY_BEFORE_DECISION");
+      expect(analyst?.textContent).toContain("BOUNDARY_AT_DECISION");
+    });
+
     it("redacts a future timeline marker's kind and label until the playhead reaches it, then reveals the real content (spec item 2)", () => {
       const runID = "broadcast-marker-redaction-1";
       mountAiLeagueReplayOverlay({

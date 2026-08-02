@@ -916,7 +916,9 @@ function renderAnalystActionChart(
   return wrap;
 }
 
-function renderAnalystDecisions(data: AnalystPanelData): HTMLElement {
+export function renderAnalystDecisions(
+  data: Pick<AnalystPanelData, "decisions" | "decisionsUnavailableReason">,
+): HTMLElement {
   const wrap = element("div", "broadcast-analyst-decisions");
   wrap.append(
     element(
@@ -968,38 +970,51 @@ function renderAnalystDecisions(data: AnalystPanelData): HTMLElement {
   table.append(head);
   const body = element("tbody");
   for (const row of decisions) {
-    const tr = element("tr", "broadcast-analyst-decisions-row");
-    tr.dataset.fallbackUsed = String(row.fallbackUsed);
-    tr.dataset.accepted = String(row.accepted);
-    tr.append(
-      element(
-        "td",
-        "",
-        translateText("broadcast.war_room_turn", { turn: row.turnNumber }),
-      ),
-      element("td", "", row.playerName),
-      element("td", "", row.brainType ?? "\u2014"),
-      element("td", "", row.selectedActionKind),
-      element(
-        "td",
-        "",
-        row.decisionLatencyMs === null
-          ? "\u2014"
-          : translateText("broadcast.analyst_latency_ms", {
-              ms: row.decisionLatencyMs,
-            }),
-      ),
-      element("td", "", row.auditStatus ?? "\u2014"),
-      element("td", "", row.reason ?? "\u2014"),
-    );
-    body.append(tr);
+    body.append(renderAnalystDecisionRow(row));
   }
   table.append(body);
   wrap.append(table);
   return wrap;
 }
 
-function renderAnalystEventLog(events: readonly AnalystEventRow[]): HTMLElement {
+/**
+ * One `<tr>` for the Analyst decisions table — extracted out of
+ * `renderAnalystDecisions`'s own loop (and exported) so a windowed caller
+ * (see `AiLeagueReplayOverlay.ts`'s DOM-window callers) can incrementally
+ * append a single new row without rebuilding the whole table, the same way
+ * `renderWarRoomEvent` already lets the War Room ticker do.
+ */
+export function renderAnalystDecisionRow(
+  row: AnalystDecisionRow,
+): HTMLTableRowElement {
+  const tr = element("tr", "broadcast-analyst-decisions-row") as HTMLTableRowElement;
+  tr.dataset.fallbackUsed = String(row.fallbackUsed);
+  tr.dataset.accepted = String(row.accepted);
+  tr.append(
+    element(
+      "td",
+      "",
+      translateText("broadcast.war_room_turn", { turn: row.turnNumber }),
+    ),
+    element("td", "", row.playerName),
+    element("td", "", row.brainType ?? "\u2014"),
+    element("td", "", row.selectedActionKind),
+    element(
+      "td",
+      "",
+      row.decisionLatencyMs === null
+        ? "\u2014"
+        : translateText("broadcast.analyst_latency_ms", {
+            ms: row.decisionLatencyMs,
+          }),
+    ),
+    element("td", "", row.auditStatus ?? "\u2014"),
+    element("td", "", row.reason ?? "\u2014"),
+  );
+  return tr;
+}
+
+export function renderAnalystEventLog(events: readonly AnalystEventRow[]): HTMLElement {
   const wrap = element("div", "broadcast-analyst-events");
   wrap.append(
     element(
@@ -1021,22 +1036,31 @@ function renderAnalystEventLog(events: readonly AnalystEventRow[]): HTMLElement 
   const list = element("ol", "broadcast-analyst-events-list");
   list.setAttribute("role", "list");
   for (const event of events) {
-    const item = element("li", "broadcast-analyst-events-row");
-    item.dataset.kind = event.kind;
-    item.dataset.tone = event.tone;
-    const parts = [
-      translateText("broadcast.war_room_turn", { turn: event.turnNumber }),
-      event.kind,
-      event.actorName,
-      event.targetName ?? "",
-      event.secondaryName ?? "",
-      event.message,
-    ].filter((part) => part !== "");
-    item.textContent = parts.join(" \u2022 ");
-    list.append(item);
+    list.append(renderAnalystEventRow(event));
   }
   wrap.append(list);
   return wrap;
+}
+
+/**
+ * One `<li>` for the Analyst event log — extracted out of
+ * `renderAnalystEventLog`'s own loop (and exported) for the same
+ * incremental-append reason as `renderAnalystDecisionRow` above.
+ */
+export function renderAnalystEventRow(event: AnalystEventRow): HTMLLIElement {
+  const item = element("li", "broadcast-analyst-events-row") as HTMLLIElement;
+  item.dataset.kind = event.kind;
+  item.dataset.tone = event.tone;
+  const parts = [
+    translateText("broadcast.war_room_turn", { turn: event.turnNumber }),
+    event.kind,
+    event.actorName,
+    event.targetName ?? "",
+    event.secondaryName ?? "",
+    event.message,
+  ].filter((part) => part !== "");
+  item.textContent = parts.join(" \u2022 ");
+  return item;
 }
 
 // ---------------------------------------------------------------------------
