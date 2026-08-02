@@ -2371,7 +2371,13 @@ if (leagueWrapperOnly) {
         sendThemedNotFoundPage(res, 404, "AI league replay record not found.");
         return;
       }
-      res.redirect("/league");
+      // P0 fix (found live 2026-08-02): this used to silently
+      // `res.redirect("/league")` for ANY unrecognized path, with no
+      // acknowledgment a visitor's URL was actually wrong — a typo'd or
+      // stale link looked indistinguishable from a normal league visit.
+      // Same themed page the replay route above uses (status 404, real
+      // nav) rather than a silent bounce.
+      sendThemedNotFoundPage(res, 404, "This page doesn't exist.");
       return;
     }
     if (req.method === "POST") {

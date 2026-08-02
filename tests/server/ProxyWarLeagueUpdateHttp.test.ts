@@ -514,6 +514,27 @@ describe("league update HTTP contract", () => {
     expect(body).toContain('href="/build"');
   });
 
+  test("a genuinely unrecognized path gets a themed 404, not a silent redirect to /league (live P0, 2026-08-02)", async () => {
+    // Before this fix, ANY unmatched GET/HEAD path in league-wrapper mode
+    // silently 302'd to /league — a typo'd or stale link looked
+    // indistinguishable from a normal league visit, with no
+    // acknowledgment anything was wrong.
+    for (const method of ["GET", "HEAD"] as const) {
+      const response = await rawRequest(
+        origin,
+        "/totally-unrecognized-path-9f3c1a",
+        { method },
+      );
+      expect(response.status, method).toBe(404);
+      expect(response.headers.location, method).toBeUndefined();
+    }
+    const body = (
+      await rawRequest(origin, "/totally-unrecognized-path-9f3c1a")
+    ).body.toString("utf8");
+    expect(body).toContain("<!doctype html>");
+    expect(body).toContain('href="/league"');
+  });
+
   test("the /proxywar-replay and /openfront-replay aliases redirect only for a run that actually exists, and never echo an unknown run id", async () => {
     // Exercised against the open (non-wrapper) server: in
     // PROXYWAR_LEAGUE_WRAPPER_ONLY mode this alias never even reaches its
