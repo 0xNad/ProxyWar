@@ -38,7 +38,10 @@ import { GameModeSelector } from "./GameModeSelector";
 import { GameStartingModal } from "./GameStartingModal";
 import "./GoogleAdElement";
 import { HelpModal } from "./HelpModal";
-import { isReplayOrGamePathShape } from "./HistoryGuard";
+import {
+  isReplayOrGamePathShape,
+  shouldPushAiLeagueReplayHistoryEntry,
+} from "./HistoryGuard";
 import "./HomepagePromos";
 import { HostLobbyModal as HostPrivateLobbyModal } from "./HostLobbyModal";
 import { ReplayJumpToTurnEvent, ReplaySpeedChangeEvent } from "./InputHandler";
@@ -1924,11 +1927,36 @@ class Client {
         }
       } else if (lobby.gameRecord !== undefined && lobby.aiLeagueRunID) {
         if (!preserveCoworldReplayUrl) {
-          history.pushState(
-            null,
-            "",
-            `/ai-league-replay/${encodeURIComponent(lobby.aiLeagueRunID)}`,
-          );
+          // P0 REOPEN fix (pass-3 repro, 2026-08-02): this used to push
+          // UNCONDITIONALLY, unlike the premiere branch just above (which
+          // already guards on `pathname !== premierePath`). On a fresh
+          // hard navigation straight to `/ai-league-replay/<runID>` (the
+          // exact repro: home -> click a Director Cut link -> the anchor
+          // is a plain, un-intercepted <a> causing a REAL page load), this
+          // join flow's `pushState` fired again for the SAME url the
+          // browser had already registered its own real navigation entry
+          // for, 2.5-5s after `onload` — Chrome's "no session-history
+          // entry created for a pushState this far past onload without
+          // fresh user activation" heuristic (Chromium issue 330744614)
+          // then silently dropped that push, desyncing the page's
+          // believed history depth from the browser's real stack. Native
+          // Back (lands on the real, pre-existing entry) followed by
+          // Forward then failed with "History entry not found" — the
+          // browser trying to resolve a stack slot that was never
+          // actually created. Guarding on path equality, same as the
+          // premiere branch, means a fresh direct/hard load never pushes
+          // a redundant entry; a genuine in-app join (arriving from a
+          // DIFFERENT path, e.g. a modal-driven join with no prior URL
+          // change) still gets its first real pushState here, unaffected.
+          const replayPath = `/ai-league-replay/${encodeURIComponent(lobby.aiLeagueRunID)}`;
+          if (
+            shouldPushAiLeagueReplayHistoryEntry(
+              window.location.pathname,
+              replayPath,
+            )
+          ) {
+            history.pushState(null, "", replayPath);
+          }
         } else if (lobby.coworldReplayPath !== undefined) {
           history.replaceState(null, "", lobby.coworldReplayPath);
         }

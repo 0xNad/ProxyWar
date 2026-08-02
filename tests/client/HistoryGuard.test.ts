@@ -13,7 +13,10 @@
  * doc) so it's testable without pulling in `Main.ts`'s module-load
  * bootstrap (`new Client().initialize()`, which requires a real browser).
  */
-import { isReplayOrGamePathShape } from "../../src/client/HistoryGuard";
+import {
+  isReplayOrGamePathShape,
+  shouldPushAiLeagueReplayHistoryEntry,
+} from "../../src/client/HistoryGuard";
 
 describe("isReplayOrGamePathShape", () => {
   it("recognizes every one of handleJoinLobby's own target history-entry shapes", () => {
@@ -41,5 +44,39 @@ describe("isReplayOrGamePathShape", () => {
     expect(isReplayOrGamePathShape("/premiere")).toBe(false);
     expect(isReplayOrGamePathShape("/bets/x")).toBe(false);
     expect(isReplayOrGamePathShape("/premieres/x")).toBe(false);
+  });
+});
+
+/**
+ * P0 REOPEN fix (pass-3 repro, 2026-08-02): the ai-league-replay join
+ * branch's `history.pushState` used to fire unconditionally, unlike the
+ * premiere branch immediately above it (already guarded on path
+ * equality). Real-browser verification (genuine click navigation + a
+ * delayed `pushState` to the SAME url, then native `history.back()`/
+ * `forward()`) confirmed the un-guarded call desyncs the browser's
+ * actual session-history stack from the page's own belief: Back lands
+ * back on the SAME url (a phantom duplicate entry) instead of the true
+ * previous page. `shouldPushAiLeagueReplayHistoryEntry` is the extracted
+ * guard now gating that call.
+ */
+describe("shouldPushAiLeagueReplayHistoryEntry", () => {
+  it("returns false when already on the exact target replay path — a fresh/hard navigation straight to the replay URL, the exact repro shape", () => {
+    const target = "/ai-league-replay/league-coworld-x";
+    expect(shouldPushAiLeagueReplayHistoryEntry(target, target)).toBe(false);
+  });
+
+  it("returns true when arriving from a different path — a genuine in-app join (e.g. a modal-driven join with no prior URL change) still gets its first real pushState", () => {
+    expect(
+      shouldPushAiLeagueReplayHistoryEntry(
+        "/watch",
+        "/ai-league-replay/league-coworld-x",
+      ),
+    ).toBe(true);
+    expect(
+      shouldPushAiLeagueReplayHistoryEntry(
+        "/",
+        "/ai-league-replay/league-coworld-x",
+      ),
+    ).toBe(true);
   });
 });
