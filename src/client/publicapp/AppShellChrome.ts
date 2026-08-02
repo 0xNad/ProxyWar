@@ -185,6 +185,15 @@ export const APP_SHELL_ROOT_CLASSES = [
  */
 export async function waitForTranslationsReady(): Promise<void> {
   for (let attempt = 0; attempt < 20; attempt++) {
+    // Defensive-only (2026-08-02): a caller's own bounded retry (the
+    // `setTimeout` branch below) can still have a pending tick when a
+    // test's jsdom environment is torn down/recycled between test files
+    // — confirmed live as an intermittent "Unhandled Rejection:
+    // ReferenceError: document is not defined" in the full suite, never
+    // a real-browser issue (a live tab always has `document` for its own
+    // lifetime). Resolving instead of throwing here is a pure test-
+    // environment safety net; it changes nothing for a real caller.
+    if (typeof document === "undefined") return;
     const langSelector = document.querySelector("lang-selector") as
       | { translations?: unknown; updateComplete?: Promise<unknown> }
       | null;

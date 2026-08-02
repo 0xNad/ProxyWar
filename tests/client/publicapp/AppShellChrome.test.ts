@@ -166,4 +166,13 @@ describe("waitForTranslationsReady", () => {
     await vi.advanceTimersByTimeAsync(20 * 20);
     await expect(pending).resolves.toBeUndefined();
   });
+
+  it("resolves immediately (never throws) when document is unavailable — the exact test-teardown race that produced an intermittent 'Unhandled Rejection: document is not defined' in the full suite (2026-08-02)", async () => {
+    vi.stubGlobal("document", undefined);
+    try {
+      await expect(waitForTranslationsReady()).resolves.toBeUndefined();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
