@@ -1745,7 +1745,24 @@ async function sendMatchDetailPageShell(
 // this file (`platformEnabled` -> platform root page;
 // `betaAccess.enabled` -> `/public`; else -> the internal demo hub) —
 // unchanged, untouched, never intercepted.
+//
+// The `pointsRoutesEnabled` check MUST run FIRST, ahead of the
+// `leagueWrapperOnly && !platformEnabled` branch immediately below (P0
+// fix, live 2026-08-02): production bet-origin sets BOTH flags true
+// (cycle-premiere.sh's `start_origin()`: `PROXYWAR_WAGERING_ENABLED=1` AND
+// `PROXYWAR_LEAGUE_WRAPPER_ONLY=true`, with `PROXYWAR_PLATFORM_ENABLED`
+// never set), so the demo-hub branch below would otherwise ALWAYS win —
+// a cache-busted GET of bet.proxywar.xyz/ served the legacy internal demo
+// shell ("Proxy War (ALPHA)") instead of the live market, even though
+// `/bet` on the exact same origin already correctly resolved to it. The
+// betting origin's homepage must BE the market: redirect to `/bet` (the
+// existing, unchanged redirect below) rather than duplicating its
+// premiere-resolution/503 logic here.
 app.get("/", async (_req, res, next) => {
+  if (pointsRoutesEnabled) {
+    res.redirect(302, "/bet");
+    return;
+  }
   if (leagueWrapperOnly && !platformEnabled) {
     await sendPublicAppShellPage(res, "the event lobby");
     return;
