@@ -187,11 +187,14 @@ child.stderr.on("data", (chunk) => {
     if (stderrTail.length > 200) {
       stderrTail = stderrTail.slice(-100);
     }
-    const m = line.match(/\[MEM\] \S+ turn=(\d+) rssMB=(\d+)/);
+    const m = line.match(
+      /\[MEM\] \S+ turn=(\d+) rssMB=(\d+) heapUsedMB=(\d+)/,
+    );
     if (m !== null) {
       const turn = Number(m[1]);
       const rssMB = Number(m[2]);
-      memSamples.push({ turn, rssMB });
+      const heapUsedMB = Number(m[3]);
+      memSamples.push({ turn, rssMB, heapUsedMB });
       if (rssMB > maxRss) {
         maxRss = rssMB;
         maxRssTurn = turn;
@@ -280,18 +283,27 @@ child.on("close", (code) => {
     return den === 0 ? 0 : (num / den) * 1000;
   };
   const lastTurn = memSamples[memSamples.length - 1].turn;
-  // Asserted: the FINAL window only (see SLOPE_WINDOW_TURNS). Reported for
-  // context: the full-run fit, which includes legitimate expansion growth.
-  const slope = fitSlope(
-    memSamples.filter((s) => s.turn >= lastTurn - SLOPE_WINDOW_TURNS),
+  // Asserted: post-GC heapUsed over the FINAL window. With FORCE_GC each
+  // sample is the true live set; RSS additionally swings +-40 MB with the
+  // game's war-economy cycles even when nothing is retained (committed-page
+  // noise), so an RSS window fit is phase-sensitive — one run fit +17.6
+  // MB/1k on a bounded 292-376 oscillation with a 378 peak. Heap does not
+  // oscillate like that: a positive late heap slope is retention. The RSS
+  // ceiling above stays as the absolute guard.
+  const lateWindow = memSamples.filter(
+    (s) => s.turn >= lastTurn - SLOPE_WINDOW_TURNS,
   );
+  const slope = fitSlope(
+    lateWindow.map((s) => ({ turn: s.turn, rssMB: s.heapUsedMB })),
+  );
+  const lateRssSlope = fitSlope(lateWindow);
   const fullRunSlope = fitSlope(memSamples);
 
   const turnCount = results?.turn_count ?? "?";
   console.error(
     `[memory-gate] episode complete: turns=${turnCount} samples=${memSamples.length} ` +
-      `maxRss=${maxRss}MB@turn=${maxRssTurn} lateSlope=${slope.toFixed(2)}MB/1k ` +
-      `(full-run ${fullRunSlope.toFixed(2)})`,
+      `maxRss=${maxRss}MB@turn=${maxRssTurn} lateHeapSlope=${slope.toFixed(2)}MB/1k ` +
+      `(lateRss ${lateRssSlope.toFixed(2)}, full-run ${fullRunSlope.toFixed(2)})`,
   );
 
   const evidence = {
@@ -302,6 +314,8 @@ child.on("close", (code) => {
     maxRssMB: maxRss,
     maxRssTurn,
     slopeMBPer1k: Number(slope.toFixed(3)),
+    slopeMetric: "heapUsedMB",
+    lateRssSlopeMBPer1k: Number(lateRssSlope.toFixed(3)),
     slopeWindowTurns: SLOPE_WINDOW_TURNS,
     fullRunSlopeMBPer1k: Number(fullRunSlope.toFixed(3)),
     ceilingMB: MAX_RSS_MB,
@@ -316,7 +330,7 @@ child.on("close", (code) => {
   }
   if (slope > MAX_SLOPE) {
     fail(
-      `RSS slope ${slope.toFixed(2)}MB/1k turns exceeds ${MAX_SLOPE}MB/1k — ` +
+      `post-GC heap slope ${slope.toFixed(2)}MB/1k turns exceeds ${MAX_SLOPE}MB/1k — ` +
         `turn-linear retention is back; find the new per-turn allocation ` +
         `before shipping`,
       evidence,
