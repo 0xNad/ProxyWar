@@ -1867,3 +1867,153 @@ trading UI (live territory map, "LIVE" badge, "Your bankroll: 1,000 cr",
 exact scenario that previously livelocked for 12+ minutes across three
 attempts never reaching this state. Fresh-market join stayed comfortably
 under 1s, matching the pre-existing fast path.
+
+## 20. The fifth live-join livelock root cause: a generic modal-close clobbering the URL after a real navigation, not an in-app state leak (SPA-transition session, 2026-08-02)
+
+### 20.1 The bug (pass-6 QA)
+
+Four prior fixes shipped for this defect family: transport (§18.2,
+`d56a52881`), session-reuse (§18.5, `0b70e71df`), themed ended-page
+(`73cb5317c`/`216e84e3b`), dishonest watchdog (§19, `e61efc7d5`). Fresh
+pass-6 QA found a FIFTH, distinct livelock: clicking "Go to the live
+market" on the themed `PremiereEndedPage` (reached after a just-ended
+premiere's own bootstrap 404s `premiere_not_found`) started an HONEST join
+that climbed 3%→93% over 12+ CONTINUOUS minutes and never completed —
+while a fresh tab and a mobile cold join to the SAME live premiere, at the
+SAME real time, converged in <2s / ~7.5s. QA's own working hypothesis
+("in-app client-side route change, not a full navigation — stale
+socket/session/coordinator survives it") was a reasonable read of the
+*symptom* but turned out to be wrong about the *mechanism* once
+instrumented.
+
+### 20.2 Investigation — the SPA-state hypothesis was disproven, the actual defect found
+
+Built a real local fixture repro (`ai-agent-demo-server.ts` on
+`127.0.0.1:8812`, two controlled-exhibition premieres, one deliberately
+force-unregistered so its bootstrap genuinely 404s) and drove it with a
+real headless CDP browser tab, instrumented three independent ways rather
+than trusting any single signal:
+
+- `page.on('framenavigated')`/`page.on('request')` — a real click on the
+  themed CTA (a plain, un-intercepted `<a href="/bet">`; confirmed by
+  exhaustive grep — no anchor-click interceptor exists anywhere in the
+  client) DID fire the browser's native navigation through `/bet`'s
+  server-side 302 to `/bet/<id>`.
+- `performance.timeOrigin` on the landed document matched the click
+  timestamp to within tens of ms, and the console emitted a FRESH
+  CSP-nonce violation set for third-party scripts — both are only possible
+  on a genuinely new document, not an in-app route swap. This is
+  conclusive: **the CTA click is a real top-level navigation**, exactly
+  like a direct `tab.goto`. QA's "not a full navigation" framing does not
+  hold up under instrumentation.
+- Yet `window.location.pathname` reliably drifted from the just-landed
+  `/bet/<id>` to `/` within ~100ms of boot, with the join veil still
+  climbing underneath, and the DOM showed a broken mix of the plain
+  multiplayer lobby chrome (`mobile-nav-bar`, `chat-modal`, etc.) alongside
+  the premiere overlay. A `History.prototype.replaceState` patch injected
+  via `page.evaluateOnNewDocument` (before any app script runs) captured
+  the exact call site for the `url === "/"` write: `HostLobbyModal.close()`
+  → `HostLobbyModal.onClose()` → `updateHistory("/")`.
+
+Root cause, read directly from `HostLobbyModal.ts`/`Main.ts`, not guessed
+further: `Main.ts`'s `handleJoinLobby` fires on EVERY successful
+`"join-lobby"` event — including a betting-premiere join, which
+`openBettingPremiere`'s `onJoinReady` dispatches with
+`source: "replay-premiere"`, `isBettingPremiere: true` to drive the SAME
+local-simulation engine (`LocalServer`/`joinLobby()`) a regular
+multiplayer game uses (this reuse is intentional, not itself the bug). Its
+`.prestart.then()` cleanup generically iterates a fixed list of modal tags
+and calls `.close()` on each — including `<host-lobby-modal>`, even though
+that modal was never opened for a premiere join at all (`this.lobbyId` is
+still its untouched `""`). `BaseModal.close()` calls `onClose()`
+unconditionally, with no open/closed guard. `HostLobbyModal.onClose()`
+then ran:
+
+```ts
+if (this.leaveLobbyOnClose) {   // untouched default: true
+  this.leaveLobby();            // no-ops correctly on empty lobbyId
+  this.updateHistory("/");      // did NOT no-op — always reset the URL
+}
+```
+
+`leaveLobby()` already guards on `lobbyId` being non-empty; `updateHistory
+("/")` sat in the SAME conditional block but was never gated the same way.
+So **every** premiere join — not just ones reached via the CTA redirect —
+silently clobbered the URL from `/bet/<id>` back to `/` within ~100ms of
+landing. The only reason this was invisible on a fast/small-backlog join
+is that catch-up finished before anything durably depended on the correct
+pathname; on a genuinely aged/backlogged join (QA's 40+ min-old target),
+the drifted URL permanently starved completion — the exact same bug CLASS
+already documented elsewhere in this file for `ai-league-replay` ("a
+drifted URL silently starves the replay of its own events — the loading
+veil never lifts"), now confirmed to also exist on the betting-premiere
+join path via `<host-lobby-modal>`.
+
+### 20.3 The fix
+
+`src/client/HostLobbyModal.ts`: gated the leave+URL-reset block in
+`onClose()` on `this.lobbyId` being non-empty — the exact guard
+`leaveLobby()` one line above it already used. Closing a host-lobby-modal
+that never hosted anything is now a true no-op, matching
+`JoinLobbyModal`'s existing (correctly caller-guarded via
+`closeWithoutLeaving()`) pattern. No teardown/route-change semantics were
+added or changed elsewhere — the fix is the minimal correction to an
+already-inconsistent guard, not a new architecture.
+
+Tests: `tests/client/HostLobbyModal.test.ts` (new, 3 cases) — no-op when
+`lobbyId` is empty (the premiere-join case, both the URL-reset AND the
+`leave-lobby` dispatch assertions); still leaves+resets when a lobby WAS
+genuinely hosted; the pre-existing `leaveLobbyOnClose = false` opt-out path
+is unaffected. Full client suite: 84 files / 1228 tests green; `tsc
+--noEmit` clean; `eslint` (scoped to changed files) clean.
+
+Local before/after fixture proof (same repro harness as §20.2): before the
+fix, the real CTA click reliably jumped `window.location` to `/` ~100ms
+after the real navigation landed and the join stayed on "Joining live…
+Syncing to turn N (X%)" indefinitely, climbing honestly but never
+completing, with the broken mixed DOM described above. After the fix
+(rebuilt client, identical fixture, identical click), the URL stayed on
+`/bet/<premiereId>` throughout and the join converged to the full trading
+UI once the match's own turns were exhausted.
+
+### 20.4 Deploy + live verification
+
+Committed `513627266994a5fd6195181d1522abd8fbd5cfdb` on
+`claude/product-overhaul`, pushed to `origin`. Deployed per §17.3: `cd
+~/.proxywar-deploy/bet-origin && git fetch origin claude/product-overhaul`
+(by name — `git ls-remote` cross-checked the true tip), `git checkout
+--detach 513627266994a5fd6195181d1522abd8fbd5cfdb`, `npm run build-prod`
+clean (`tsc --noEmit` + `vite build`, both exit 0, `static/asset-manifest
+.json` populated with 1309 entries — not the hollow-manifest dev-mode trap
+§0.2 warns about). New bundle `main-C_YWIzlh.js`, byte-hash-identical to
+the local build (confirmed against the from-scratch worktree build, not
+just self-consistent). Picked up by the autocycler's own natural restart
+(never forced mid-market) — confirmed served `main-C_YWIzlh.js` on the
+very next premiere after deploying.
+
+**Real production verification** (headless CDP against `bet.proxywar.xyz`,
+the exact QA repro — a real settlement, the real themed ended page, the
+real "Go to the live market" anchor, no client-side faking):
+
+| Scenario | pathname throughout | Result |
+| --- | --- | --- |
+| Cold join sanity check (fresh tab, `/bet` root redirect, pre-open market) | `/bet/<id>` | usable page rendered instantly (<1s) |
+| CTA click #1 — same tab that had been live-watching the premiere through its real settlement (rode a real ~24-minute cycle, `prem_3010a9667f2d4e6f4190` → `prem_bc2674d0fd498c4a5845`), landed on the real ended page, clicked the real CTA | stayed on `/bet/prem_bc2674d0fd498c4a5845` the entire time (sampled) | usable trading UI (title, "World · 16-seat FFA", bankroll loading→1,000 cr, live standings), **351 ms** |
+| CTA click #2 — independent fresh tab straight to the same real ended page, same real CTA | stayed on `/bet/prem_bc2674d0fd498c4a5845` | usable trading UI, **332 ms** |
+
+Both real click-throughs converged in low hundreds of milliseconds with the
+URL never drifting — the exact scenario that previously livelocked
+honestly climbing for 12+ minutes now completes essentially instantly.
+Screenshots: `/tmp/proxywar-spa-fix/` (`cold-join-sanity-check.png`,
+`settled-live-overlay.png`, `live-verify1-ended-page.png`,
+`live-verify1-post-click.png`, `live-verify1-final.png`,
+`live-verify2-ended-page.png`, `live-verify2-post-click.png`).
+
+Not reached this session: riding a SECOND independent full settlement
+cycle for the CTA click (each real-league cycle runs ~20-45 minutes; two
+independent real click-throughs against the same real ended page — one
+from the tab that organically rode the real settlement, one from a fresh
+tab — were judged sufficient live evidence for this fix's narrow,
+mechanism-level change). A third click-through against a freshly-ended
+premiere would only be additional confirmation of the identical code path,
+not new information.
