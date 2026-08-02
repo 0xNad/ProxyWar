@@ -1035,3 +1035,31 @@ path references in tracked docs/examples are acceptable for the public
 default branch as-is, or should be trimmed before the next promotion
 attempt. No rollback tag was created (there is nothing to roll back from —
 `origin/main` was never touched).
+
+### Hygiene fixes resolved same session (2026-08-02, follow-up)
+
+Per operator instruction, folded the mechanical parts of both findings
+above into this branch directly:
+
+- **Tracked `docs/project-state/` files**: `git rm --cached` on all 5
+  (history preserved — old commits still carry the blobs; only future
+  commits stop tracking them, matching `.gitignore`'s existing
+  `docs/project-state/` rule and origin/main's existing zero-file state
+  under that path).
+- **`/Users/claude` path generalization**: fixed
+  `deploy/mac/com.proxywar.platform.plist.example` (4 occurrences) to
+  `/Users/YOUR_USER`, matching every sibling `.plist.example` in
+  `deploy/mac/` (`beta`, `beta-backup`, `cloudflared`, `premiere-loop` all
+  already used that placeholder — `platform.plist.example` was the sole
+  outlier). Fixed `docs/BETTING_HANDOFF.md`'s "canonical checkout lives
+  at" sentence to `~/Documents/proxywar_main`.
+- **Deliberately NOT changed**: the remaining `/Users/claude` references
+  in `RUNBOOK.md` (a literal quoted real boot-log block, "Real boot log
+  observed:") and in this doc's own "Deployed state" / verification
+  sections above (real cwd of the live deployed process, the real
+  `PROXYWAR_ARTIFACTS_ROOT` path used in a real verification run, the real
+  platform-origin deploy path found live) — these are factual records of
+  what was actually run/observed, not generic path documentation;
+  rewriting them to a placeholder would misrepresent the verification
+  evidence itself. Flagging this distinction rather than silently leaving
+  them — reversing this call is the operator's to make, not a default.

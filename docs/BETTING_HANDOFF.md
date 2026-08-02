@@ -89,7 +89,7 @@ overlay model's `sourceKind` is `controlled_exhibition | rated_coworld`.
   whether betting identity stays off.
 - Project-state docs (`docs/project-state/decision-log.md`,
   `known-problems.md`) are **gitignored** — they exist only in the canonical
-  checkout `/Users/claude/Documents/proxywar_main`, not in worktrees or
+  checkout `~/Documents/proxywar_main`, not in worktrees or
   clones. If you cannot read them, say so rather than assuming.
 
 ## 6. Verify before claiming
