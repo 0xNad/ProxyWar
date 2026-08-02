@@ -12,6 +12,7 @@
  * captured straight off the HTTP response body) obeys the same clock
  * bound at the instant of that specific request.
  */
+import compression from "compression";
 import express from "express";
 import { promises as fs } from "node:fs";
 import http from "node:http";
@@ -32,7 +33,10 @@ import {
   createReplayPremiereRouter,
   ReplayPremiereHttpRegistry,
 } from "../../src/server/replay-premiere/ReplayPremiereHttp";
-import { ReplayPremiereRuntimeRegistry } from "../../src/server/replay-premiere/ReplayPremiereRuntimeCoordinator";
+import {
+  MAX_LIVE_PROJECTION_RECORDS,
+  ReplayPremiereRuntimeRegistry,
+} from "../../src/server/replay-premiere/ReplayPremiereRuntimeCoordinator";
 import {
   startReplayPremiereProduction,
   type ReplayPremiereProductionService,
@@ -93,6 +97,90 @@ function startupContext() {
     publicOrigin: ORIGIN,
     clock: { now },
   };
+}
+
+/**
+ * Shared boot for the two tests below: an admitted realtime-long fixture
+ * behind a REAL HTTP server running the exact same
+ * `createReplayPremiereRouter` wiring as `ai-agent-demo-server.ts`, with
+ * `compression()` mounted the same way the production script mounts it —
+ * so a test hitting this server observes the real on-the-wire behavior a
+ * browser would, not a compression-less stand-in.
+ */
+async function bootTapServer(root: string): Promise<{
+  baseUrl: string;
+  server: http.Server;
+  service: ReplayPremiereProductionService;
+}> {
+  const fixture = await verifiedRealtimeLongPublicationFixture(root);
+  const catalog = await ReplayPremiereAdmissionCatalog.open({
+    privateStateRoot: path.join(root, "private"),
+    servedRoots: [path.join(root, "served")],
+  });
+  try {
+    await catalog.writeVerifiedAdmission({
+      gate: fixture.gate,
+      verification: fixture.verificationOptions,
+      chunkBuildLimits: fixture.chunkBuildLimits,
+      collectorLimits: COLLECTOR_LIMITS,
+    });
+  } finally {
+    await catalog.close();
+  }
+
+  const context = startupContext();
+  const started = await startReplayPremiereProduction({
+    ...context,
+    privateStateRoot: path.join(root, "private"),
+    servedRoots: [path.join(root, "served")],
+    wageringEnabled: true,
+  });
+
+  const app = express();
+  app.use(compression());
+  app.use(
+    createReplayPremiereRouter({
+      registry: context.httpRegistry,
+      security: context.security,
+      resolveClientAddress: () => "127.0.0.1",
+    }),
+  );
+  const server = http.createServer(app);
+  // `new Promise(executor)`, not `Promise.withResolvers` — this project
+  // targets an ES2022 lib (see tsconfig.json).
+  await new Promise<void>((resolve) =>
+    server.listen(0, "127.0.0.1", resolve),
+  );
+  const address = server.address();
+  if (address === null || typeof address === "string") {
+    throw new Error("test server did not bind an address");
+  }
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    server,
+    service: started.service,
+  };
+}
+
+/** Raw (non-`fetch`-decompressed) GET — measures actual on-the-wire bytes. */
+function rawGet(
+  url: string,
+  headers: Record<string, string>,
+): Promise<{ headers: http.IncomingHttpHeaders; bytes: number }> {
+  // `new Promise(executor)`, not `Promise.withResolvers` — this project
+  // targets an ES2022 lib (see tsconfig.json).
+  return new Promise((resolve, reject) => {
+    const req = http.request(url, { headers }, (res) => {
+      let bytes = 0;
+      res.on("data", (chunk: Buffer) => {
+        bytes += chunk.length;
+      });
+      res.on("end", () => resolve({ headers: res.headers, bytes }));
+      res.on("error", reject);
+    });
+    req.on("error", reject);
+    req.end();
+  });
 }
 
 describe("ReplayPremiereNetworkController content-source=tap", () => {
@@ -375,6 +463,143 @@ describe("ReplayPremiereNetworkController content-source=tap", () => {
         45_000 / PREMIERE_REAL_TURN_INTERVAL_MS,
       );
       expect(released - target).toBeLessThanOrEqual(oneTrailRecords);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) =>
+          error === undefined ? resolve() : reject(error),
+        ),
+      );
+    }
+  }, 60_000);
+
+  it("gzip-compresses a real catch-up response — the client's actual on-the-wire download shrinks, not just the in-memory JSON", async () => {
+    // Regression coverage for the P0: a live QA trace on a real ~20 min-old
+    // match found a single `after=-1` catch-up response alone reaching
+    // ~4.7 MB and never completing within the client's per-request budget.
+    // `ai-agent-demo-server.ts` now mounts `compression()` in front of the
+    // exact same router this test boots — proves the wiring actually
+    // shrinks the bytes a real browser would have to download, not just
+    // that the route still returns 200.
+    const { baseUrl, server, service } = await bootTapServer(root);
+    services.push(service);
+    try {
+      // Five minutes in: several thousand records exist — comfortably past
+      // one MAX_LIVE_PROJECTION_RECORDS-capped response, same order of
+      // magnitude as the live QA trace's ~20 min mark.
+      vi.setSystemTime(NOW.getTime() + 300_000);
+      const url = `${baseUrl}/api/premieres/${PREMIERE_ID}/live-projection?after=-1`;
+      const uncompressed = await rawGet(url, { "accept-encoding": "identity" });
+      const compressed = await rawGet(url, { "accept-encoding": "gzip" });
+      expect(uncompressed.headers["content-encoding"]).toBeUndefined();
+      expect(compressed.headers["content-encoding"]).toBe("gzip");
+      expect(uncompressed.bytes).toBeGreaterThan(1_000);
+      // Real Turn-JSON is repetitive (same keys, small numeric deltas) —
+      // gzip should meaningfully shrink it, not merely avoid expanding it.
+      expect(compressed.bytes).toBeLessThan(uncompressed.bytes * 0.5);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) =>
+          error === undefined ? resolve() : reject(error),
+        ),
+      );
+    }
+  }, 60_000);
+
+  it("a failed catch-up poll resumes from its own cursor on retry — never re-requests from -1 — and the anti-read-ahead boundary still holds across the retry", async () => {
+    // Regression coverage for the other half of the P0: the old 2 s
+    // per-request ceiling aborted a real catch-up response before it could
+    // land, and every retry re-requested the SAME oversized response —
+    // structurally unable to ever converge. This proves the actual
+    // mechanism a real retry depends on: a failed poll's PRIOR successful
+    // polls already committed to playback (never unwound), so the very
+    // next attempt resumes from that cursor instead of restarting cold.
+    const { baseUrl, server, service } = await bootTapServer(root);
+    services.push(service);
+    try {
+      vi.setSystemTime(NOW.getTime() + 300_000);
+      let liveProjectionCalls = 0;
+      const FAIL_ON_CALL = 3;
+      const requestedAfterValues: number[] = [];
+      const transmitted: Array<{
+        elapsedMsAtRequest: number;
+        records: readonly { sequence: number; presentationOffsetMs: number }[];
+      }> = [];
+      const fetchImpl: typeof fetch = async (input, init) => {
+        const relative = typeof input === "string" ? input : input.toString();
+        const absolute = relative.startsWith("http")
+          ? relative
+          : `${baseUrl}${relative}`;
+        if (!relative.includes("/live-projection")) {
+          return fetch(absolute, init);
+        }
+        liveProjectionCalls += 1;
+        requestedAfterValues.push(
+          Number(new URL(absolute).searchParams.get("after")),
+        );
+        if (liveProjectionCalls === FAIL_ON_CALL) {
+          throw new Error("simulated transient network failure");
+        }
+        const elapsedMsAtRequest = Date.now() - NOW.getTime();
+        const response = await fetch(absolute, init);
+        const body = (await response.clone().json()) as {
+          records: readonly {
+            sequence: number;
+            presentationOffsetMs: number;
+          }[];
+        };
+        transmitted.push({ elapsedMsAtRequest, records: body.records });
+        return response;
+      };
+
+      const playback = new ReplayPremierePlaybackController(PREMIERE_ID);
+      const callbacks: ReplayPremiereNetworkCallbacks = { onReady: () => {} };
+      const network = new ReplayPremiereNetworkController({
+        premiereId: PREMIERE_ID,
+        playback,
+        callbacks,
+        fetchImpl,
+        contentSource: "tap",
+      });
+
+      // First tick: two polls succeed (MAX_LIVE_PROJECTION_RECORDS each),
+      // the injected third fails — the whole sync tick must surface that
+      // failure, never silently swallow it.
+      await expect(network.syncOnce()).rejects.toMatchObject({
+        code: "request_failed",
+        recoverable: true,
+      });
+      expect(liveProjectionCalls).toBe(FAIL_ON_CALL);
+
+      // The progress from the two successful polls before the failure
+      // survives it — each poll commits straight to playback, so a later
+      // failure cannot unwind already-accepted content.
+      const cursorAfterFailure = playback.state().releasedThroughSequence;
+      expect(cursorAfterFailure).not.toBeNull();
+      expect(cursorAfterFailure).toBe(2 * MAX_LIVE_PROJECTION_RECORDS - 1);
+      // The failed request itself already asked to resume, not restart —
+      // it targeted the post-second-poll cursor, never -1.
+      expect(requestedAfterValues.at(-1)).toBe(cursorAfterFailure);
+
+      // Retry (what runLoop's own recoverable-error handling does in
+      // production): the very next live-projection request must resume
+      // from that exact cursor.
+      const requestsBeforeRetry = requestedAfterValues.length;
+      await network.syncOnce();
+      expect(requestedAfterValues[requestsBeforeRetry]).toBe(cursorAfterFailure);
+
+      // The boundary invariant survives the retry too: nothing actually
+      // transmitted, on either tick, ever carried a presentation time
+      // ahead of the authoritative clock at the moment of that request.
+      for (const { elapsedMsAtRequest, records } of transmitted) {
+        for (const record of records) {
+          expect(record.presentationOffsetMs).toBeLessThanOrEqual(
+            elapsedMsAtRequest,
+          );
+        }
+      }
+      expect(playback.state().releasedThroughSequence!).toBeGreaterThan(
+        cursorAfterFailure!,
+      );
     } finally {
       await new Promise<void>((resolve, reject) =>
         server.close((error) =>

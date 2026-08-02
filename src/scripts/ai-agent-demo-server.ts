@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "child_process";
+import compression from "compression";
 import { randomBytes, randomUUID, timingSafeEqual } from "crypto";
 import express, { type Request, type Response } from "express";
 import fs from "fs/promises";
@@ -265,6 +266,15 @@ import { DeterministicSyntheticCrowdTerritoryProjector } from "../server/replay-
 import { applyStaticAssetCacheControl } from "../server/StaticAssetCache";
 
 const app = express();
+// Gzip/brotli-compresses every response this app sends, including the
+// premiere replay/live-projection JSON API (`ReplayPremiereHttp.ts`'s
+// `sendJson`), which is otherwise sent uncompressed. Real Turn-payload JSON
+// (repetitive keys, small numeric deltas) compresses well; this is a pure
+// transport-layer change — the exact same bytes are hashed/verified after
+// `fetch()` transparently decompresses, so it does not touch integrity,
+// embargo, or ledger logic. See `compression()` in `src/server/Worker.ts`
+// for the same pattern already in use elsewhere in this codebase.
+app.use(compression());
 const networkConfig = loadProxyWarDemoServerNetworkConfig();
 const serverUrls = buildProxyWarDemoServerUrls(networkConfig);
 const port = networkConfig.port;
