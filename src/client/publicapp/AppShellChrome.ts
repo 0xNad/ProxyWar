@@ -164,3 +164,37 @@ export const APP_SHELL_ROOT_CLASSES = [
   "bg-surface",
   "text-ink",
 ] as const;
+
+/**
+ * P0 fix (found live 2026-08-02, under 3G throttle): `translateText()`
+ * reads `<lang-selector>`'s `translations`/`defaultTranslations` state
+ * directly at call time — it has no subscription of its own, so a caller
+ * only ever sees a real translation once SOMETHING re-renders after
+ * `LangSelector.initializeLanguage()`'s async load resolves (see
+ * `Utils.ts`'s `translateText`). This shell's own nav (`app_shell.nav_*`)
+ * renders on EVERY public page's first paint, before that load can
+ * possibly finish on a slow connection — so a page whose own first render
+ * has no other async trigger (no read-model fetch, no route param lookup)
+ * shows raw `app_shell.nav_watch`-shaped keys for as long as the
+ * connection takes, not just for an instant. Extracted from `BuildPage.ts`
+ * (the first page this was fixed on) so every public page can call
+ * `void waitForTranslationsReady().then(() => this.requestUpdate())` from
+ * its own `connectedCallback` — bounded and cheap: a handful of short
+ * polls, never an indefinite loop, and a no-op the moment translations are
+ * already loaded (the common case on a normal connection).
+ */
+export async function waitForTranslationsReady(): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const langSelector = document.querySelector("lang-selector") as
+      | { translations?: unknown; updateComplete?: Promise<unknown> }
+      | null;
+    if (langSelector?.translations !== undefined) {
+      return;
+    }
+    if (langSelector?.updateComplete !== undefined) {
+      await langSelector.updateComplete;
+    } else {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
+}

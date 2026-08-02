@@ -7,6 +7,7 @@ import {
   appShellFooter,
   appShellHeader,
   APP_SHELL_ROOT_CLASSES,
+  waitForTranslationsReady,
 } from "./AppShellChrome";
 import {
   fetchReadModel,
@@ -98,6 +99,14 @@ export class LobbyPage extends LitElement {
   connectedCallback(): void {
     super.connectedCallback();
     void this.load();
+    // P0 fix (found live 2026-08-02, under 3G throttle): the nav
+    // (`app_shell.nav_*`) rendered raw translation keys for as long as
+    // the connection took. `load()`'s own read-model fetch gives a "free"
+    // re-render, but that resolves independently of <lang-selector>'s own
+    // translations load — a fast read-model response racing ahead of a
+    // slow translations load still left the nav flashing keys. See
+    // `waitForTranslationsReady`'s own doc.
+    void waitForTranslationsReady().then(() => this.requestUpdate());
     this.tickHandle = window.setInterval(() => {
       this.nowMs = Date.now();
       const event = this.promotableEvent;

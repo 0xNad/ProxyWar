@@ -4,6 +4,7 @@ import {
   APP_SHELL_ROOT_CLASSES,
   appShellFooter,
   appShellHeader,
+  waitForTranslationsReady,
 } from "./AppShellChrome";
 import { translateText } from "../Utils";
 import { analytics } from "../analytics/AnalyticsClient";
@@ -100,35 +101,7 @@ export class BuildPage extends LitElement {
   connectedCallback(): void {
     super.connectedCallback();
     this.reportStep(this.step);
-    void this.rerenderOnceTranslationsReady();
-  }
-
-  /**
-   * `translateText()` reads `<lang-selector>`'s `translations`/
-   * `defaultTranslations` state directly at call time — it has no
-   * subscription of its own, so a caller only ever sees a translation once
-   * SOMETHING re-renders after `LangSelector.initializeLanguage()`'s async
-   * load resolves (see `Utils.ts`'s `translateText`). Every other public
-   * page happens to get a free second render from its own async read-model
-   * fetch; `/build` has no such fetch on first paint, so without this it
-   * would render raw `build_page.*` keys forever on a cold load. Bounded
-   * and cheap: a handful of short polls, never an indefinite loop.
-   */
-  private async rerenderOnceTranslationsReady(): Promise<void> {
-    for (let attempt = 0; attempt < 20; attempt++) {
-      const langSelector = document.querySelector("lang-selector") as
-        | { translations?: unknown; updateComplete?: Promise<unknown> }
-        | null;
-      if (langSelector?.translations !== undefined) {
-        this.requestUpdate();
-        return;
-      }
-      if (langSelector?.updateComplete !== undefined) {
-        await langSelector.updateComplete;
-      } else {
-        await new Promise((resolve) => setTimeout(resolve, 20));
-      }
-    }
+    void waitForTranslationsReady().then(() => this.requestUpdate());
   }
 
   disconnectedCallback(): void {
