@@ -2300,6 +2300,43 @@ describe("Stage 4 second-half wiring: camera-follow, drawer, analyst mode, lower
     expect(panelFor("analysis")?.dataset.tabActive).toBe("true");
   });
 
+  it("P0 fix (live 2026-08-02): the mobile drawer's tab row stays reachable (sticky), and Collapse actually shrinks the panel's footprint", () => {
+    // Before this fix a viewer who opened a tall Events/War Room panel
+    // could scroll the tab row (Agents/Events/Timeline/Analysis) out of
+    // reach entirely, with no way back except "Leave match" — sticky
+    // positioning is what pins it in place regardless of which ancestor
+    // actually scrolls (jsdom doesn't compute real scroll geometry, so
+    // this pins the fix at the CSS-rule level, the same convention the
+    // mobile-controls-overlap fix above uses).
+    const handle = mount(makeModel({ state: "playing" }));
+    const css = handle.element.querySelector("style")?.textContent ?? "";
+    // Scoped to the mobile media query — the desktop
+    // `.broadcast-drawer-tabs { display: none; }` rule appears earlier
+    // in the stylesheet and would otherwise match first.
+    const mobileBlockStart = css.indexOf(
+      "@media (max-width: 700px), (max-height: 430px)",
+    );
+    expect(mobileBlockStart).toBeGreaterThan(-1);
+    const tabsRuleStart = css.indexOf(
+      ".broadcast-drawer-tabs {",
+      mobileBlockStart,
+    );
+    expect(tabsRuleStart).toBeGreaterThan(-1);
+    const tabsRule = css.slice(tabsRuleStart, css.indexOf("}", tabsRuleStart));
+    expect(tabsRule).toContain("position: sticky");
+    expect(tabsRule).toContain("top: 0");
+
+    // "Collapse" used to only hide the War Room's list rows, leaving the
+    // surrounding drawer panel at its full 240px max-height — no extra
+    // space toward the tab row. The active panel's own box now shrinks
+    // when its War Room is collapsed. Whitespace-normalized comparison so
+    // this doesn't depend on the exact source formatting.
+    const normalizedCss = css.replace(/\s+/g, " ");
+    expect(normalizedCss).toContain(
+      '.broadcast-drawer-panels:has( .broadcast-drawer-panel[data-tab-active="true"] .broadcast-war-room[data-collapsed="true"] ) { max-height: 56px;',
+    );
+  });
+
   it("toggles analyst mode from the desktop header control (aria-pressed conveys state), independent of the drawer's active tab", () => {
     const handle = mount(makeModel({ state: "playing" }));
     expect(handle.element.dataset.analystMode).toBe("false");

@@ -4847,12 +4847,23 @@ const OVERLAY_CSS = `
       background: var(--rp-surface);
       overflow: hidden;
     }
+    /* P0 fix (found live 2026-08-02): this tab row used to be a plain
+       flow sibling above .broadcast-drawer-panels, so once a viewer
+       opened a tall panel (Events/War Room especially) the row could
+       scroll out of reach with no way back except "Leave match" -- Agents/
+       Events/Timeline/Analysis all became unreachable. position: sticky
+       pins it to the top of whichever ancestor actually scrolls (the
+       drawer itself here), a reserved lane that is ALWAYS visible
+       regardless of panel content height. */
     #${OVERLAY_ID} .broadcast-drawer-tabs {
       display: flex;
       gap: 2px;
       padding: 4px;
       background: var(--rp-surface-2);
       border-bottom: 1px solid var(--rp-line);
+      position: sticky;
+      top: 0;
+      z-index: 1;
     }
     #${OVERLAY_ID} .broadcast-drawer-tab {
       flex: 1 1 0;
@@ -4882,6 +4893,18 @@ const OVERLAY_CSS = `
       font-weight: 800;
     }
     #${OVERLAY_ID} .broadcast-drawer-panels { max-height: 240px; overflow: auto; }
+    /* P0 fix (found live 2026-08-02): collapsing the War Room list used to
+       only hide the list itself ([data-collapsed="true"]
+       .broadcast-war-room-list { display: none }, shared rule above) --
+       the drawer panel stayed at its full 240px max-height regardless, so
+       "Collapse" freed no screen space toward reaching the tab row above.
+       The active panel's own box now actually shrinks when its War Room
+       is collapsed, leaving only the heading row's height. */
+    #${OVERLAY_ID} .broadcast-drawer-panels:has(
+        .broadcast-drawer-panel[data-tab-active="true"] .broadcast-war-room[data-collapsed="true"]
+      ) {
+      max-height: 56px;
+    }
     #${OVERLAY_ID} .broadcast-drawer-panel {
       display: none;
       padding: 10px;
