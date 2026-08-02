@@ -342,16 +342,27 @@ export class AgentProfilePage extends LitElement {
           : participant.isAlive
             ? { label: translateText("agent_profile.outcome_survived"), cls: "text-ink-muted" }
             : { label: translateText("agent_profile.outcome_eliminated"), cls: "text-ink-muted" };
+    // P2 fix (2026-08-02): rows with the same map, date, and outcome were
+    // visually indistinguishable — added the round number (parity with
+    // LobbyPage's `renderBroadcastCard`, same `lobby.round_suffix`-shaped
+    // key) and switched from a bare date to a full date+time so two
+    // matches completed on the same calendar day are told apart too.
     const when =
       match.completedAt !== null
-        ? new Date(match.completedAt).toLocaleDateString()
+        ? new Date(match.completedAt).toLocaleString()
         : "—";
     const href = match.fullRenderHref ?? match.watchHref;
     return html`
       <li
         class="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-line bg-surface-2 px-3 py-2 text-xs"
       >
-        <span class="text-ink-muted">${match.map}</span>
+        <span class="text-ink-muted"
+          >${match.map}${match.roundNumber !== null
+            ? translateText("agent_profile.round_suffix", {
+                round: match.roundNumber,
+              })
+            : ""}</span
+        >
         <span class="text-ink-muted">${when}</span>
         <span class="font-semibold ${outcome.cls}">${outcome.label}</span>
         <a

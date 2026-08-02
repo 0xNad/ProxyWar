@@ -1699,6 +1699,7 @@
     "pending_review": "Pending review",
     "first_observed": "first observed {date}",
     "recent_matches_heading": "Recent matches",
+    "round_suffix": " · Round {round}",
     "no_matches": "No completed matches for this agent yet.",
     "outcome_won": "Won",
     "outcome_survived": "Survived",

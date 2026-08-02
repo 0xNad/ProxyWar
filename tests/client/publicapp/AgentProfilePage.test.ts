@@ -93,11 +93,12 @@ function minimalMatch(overrides: {
   }>;
   watchHref?: string | null;
   fullRenderHref?: string | null;
+  roundNumber?: number | null;
 }) {
   return {
     matchId: overrides.matchId,
     shortId: overrides.matchId,
-    roundNumber: null,
+    roundNumber: overrides.roundNumber ?? null,
     completedAt: overrides.completedAt,
     map: overrides.map,
     mapSize: "medium",
@@ -579,6 +580,68 @@ describe("agent-profile-page", () => {
     expect(rows[1].textContent).toContain("Old Map");
     expect(rows[1].textContent).toContain("agent_profile.outcome_eliminated");
     expect(rows[1].querySelector('a[href="/watch/m-old"]')).not.toBeNull();
+  });
+
+  it("shows a round number and full date+time so two same-map, same-day matches are distinguishable (P2 2026-08-02, parity with the homepage's Recent Broadcasts cards)", async () => {
+    const matches = [
+      minimalMatch({
+        matchId: "m-morning",
+        completedAt: "2026-07-15T09:00:00.000Z",
+        map: "Black Sea",
+        roundNumber: 1130,
+        participants: [
+          { agentSlug: "odin-free", displayName: "Odin", isAlive: true, isWinner: true },
+        ],
+      }),
+      minimalMatch({
+        matchId: "m-evening",
+        completedAt: "2026-07-15T21:00:00.000Z",
+        map: "Black Sea",
+        roundNumber: 1133,
+        participants: [
+          { agentSlug: "odin-free", displayName: "Odin", isAlive: true, isWinner: true },
+        ],
+      }),
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json(
+          readModelBody(
+            [
+              minimalAgent({
+                slug: "odin-free",
+                playerName: "odin-free",
+                displayName: "Odin",
+                shortCode: "ODN",
+                status: "verified",
+                builderDisplayName: "Ada",
+                rank: 1,
+              }),
+            ],
+            matches,
+          ),
+        ),
+      ),
+    );
+    const el = mount("odin-free");
+    await flushMicrotasks();
+    const rows = [...el.querySelectorAll("li")].filter((li) =>
+      li.textContent?.includes("Black Sea"),
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows[0].textContent).toContain("agent_profile.round_suffix");
+    expect(rows[1].textContent).toContain("agent_profile.round_suffix");
+    // Two same-map, same-day, same-outcome rows are no longer identical
+    // text: distinct round numbers...
+    expect(rows[0].textContent).not.toBe(rows[1].textContent);
+    // ...and each row's own timestamp now carries a time-of-day component
+    // (toLocaleString, not toLocaleDateString), not just a bare date.
+    const morningRow = rows.find((row) => row.textContent?.includes("1130"));
+    const eveningRow = rows.find((row) => row.textContent?.includes("1133"));
+    expect(morningRow).toBeDefined();
+    expect(eveningRow).toBeDefined();
+    expect(morningRow!.textContent).not.toBe(eveningRow!.textContent);
   });
 
   it("includes the app-shell header (active agents) and footer", async () => {
