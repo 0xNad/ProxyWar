@@ -38,6 +38,7 @@ import { GameModeSelector } from "./GameModeSelector";
 import { GameStartingModal } from "./GameStartingModal";
 import "./GoogleAdElement";
 import { HelpModal } from "./HelpModal";
+import { isReplayOrGamePathShape } from "./HistoryGuard";
 import "./HomepagePromos";
 import { HostLobbyModal as HostPrivateLobbyModal } from "./HostLobbyModal";
 import { ReplayJumpToTurnEvent, ReplaySpeedChangeEvent } from "./InputHandler";
@@ -1880,9 +1881,25 @@ class Client {
       document.body.classList.add("in-game");
 
       const preserveCoworldReplayUrl = lobby.source === "coworld-replay";
-      // Ensure there's a homepage entry in history before adding the lobby entry.
+      // Ensure there's a homepage entry in history before adding the lobby
+      // entry. P0 fix (found live 2026-08-02): the hash-only guard below
+      // fired on ANY page with no hash, including a replay/premiere/bet
+      // page the user re-joined via Back/Forward (none of those carry a
+      // hash either) — `replaceState`ing the CURRENT entry there silently
+      // rewrote an already-legitimate history entry to `#refresh`,
+      // orphaning whatever the browser's session history expected to sit
+      // there. Clicking Forward afterward tried to resolve that now-
+      // mutated entry and failed ("History entry not found"). Only mark
+      // the homepage entry when we are actually ON a plain content page
+      // (never one of this same function's own target shapes below), so
+      // a re-join from an existing replay/game/premiere entry leaves that
+      // entry's identity untouched.
+      const alreadyOnOwnTargetShape = isReplayOrGamePathShape(
+        window.location.pathname,
+      );
       if (
         !preserveCoworldReplayUrl &&
+        !alreadyOnOwnTargetShape &&
         (window.location.hash === "" || window.location.hash === "#")
       ) {
         history.replaceState(null, "", window.location.origin + "#refresh");
@@ -1921,9 +1938,12 @@ class Client {
         if (runtimeWindow.__openFrontPromoCaptureLock === true) {
           this.eventBus.emit(new PauseGameIntentEvent(true));
         } else if (clipPreviewTarget === null) {
+          console.log("[DEBUG] Main.ts emitting ReplaySpeedChangeEvent(fastest)");
           this.eventBus.emit(
             new ReplaySpeedChangeEvent(ReplaySpeedMultiplier.fastest),
           );
+        } else {
+          console.log("[DEBUG] Main.ts NOT emitting fastest, clipPreviewTarget=", clipPreviewTarget);
         }
       } else {
         history.pushState(
