@@ -41,6 +41,11 @@ export interface LoadTerrainMapOptions {
    * suffices — cache master, spawn-scan clone, and game clone. The default
    * (true) preserves client/worker behavior: cache the parse, hand out
    * isolated clones.
+   *
+   * Precondition: the GameMapLoader must hand out FRESH bytes per call (all
+   * current loaders re-read). genTerrainFromBin aliases the byte buffer into
+   * the mutable GameMapImpl terrain, so a hypothetical byte-caching loader
+   * combined with cache:false would alias mutable terrain across instances.
    */
   cache?: boolean;
 }
