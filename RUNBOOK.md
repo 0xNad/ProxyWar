@@ -1332,3 +1332,154 @@ depends on (now pruned to the newest three after each successful admission); and
 `chmod +x *.sh` flips the exec bit on files git tracks as non-executable, which
 dirties the tree — and the generator refuses to run from a dirty checkout, so
 the blanket chmod was itself blocking every cycle.
+
+
+## 17. Betting-surface pickup: consolidation, deploy refresh, and the real-fixture readiness answer (Reconciliation session, 2026-08-02)
+
+### 17.1 Live-state reconciliation at pickup
+
+`~/.proxywar-deploy/bet-origin` was a detached clone at `359ba1130` (the
+`claude/betting-corrections` tip) — i.e. the disclosure-copy fix from §16's
+era was already deployed live but **not yet merged back** into
+`claude/product-overhaul`. `git merge-base --is-ancestor
+claude/betting-corrections claude/product-overhaul` was false at pickup,
+confirming the gap the handoff brief (`docs/BETTING_HANDOFF.md`) predicted.
+`autocycle-premiere.sh`'s own log showed **146 consecutive exhibition
+fallback cycles** at pickup (up from the brief's "135+"), confirming the
+real-league queue is still stuck — `~/.proxywar-deploy/premiere-queue/cost-
+ledger.jsonl`'s last successful entry is still `2026-07-28T15:52:45Z`; no
+entries were added between the brief being written and this session.
+
+### 17.2 Consolidation
+
+`git cherry-pick 359ba1130 ff0f8eda4` onto `claude/product-overhaul` — clean,
+no conflicts (`87d060ee7`, `17ffd5ada`). Both wagering test suites (34 files
+/ 260 tests), `tsc --noEmit`, and `npm run lint` (0 errors, 113 warnings —
+the same deliberate nullish-coalescing count SEASON_ZERO_BASELINE.md
+recorded) stayed green after the merge.
+
+### 17.3 Bet-origin redeploy
+
+Per §4's documented shape — fetch, detach to the SHA, `npm run build-prod`,
+never restart mid-market:
+
+```sh
+cd ~/.proxywar-deploy/bet-origin
+git fetch origin claude/product-overhaul   # NOTE: bare `git fetch origin`
+                                            # left origin/claude/product-overhaul
+                                            # stale in this session (an older
+                                            # commit, `ce0105de7`) even though
+                                            # `git ls-remote` showed the true
+                                            # tip correctly — fetch the branch
+                                            # BY NAME explicitly, or detach to
+                                            # an explicit SHA (as below) rather
+                                            # than trusting the bare refspec.
+git checkout --detach 17ffd5adac969f37eb01badb50b8701b8f092655
+npm run build-prod                          # tsc --noEmit + vite build, both clean
+# let the autocycler's next natural restart pick it up (~25-30 min observed
+# this session: 00:19:27 up -> 00:42:59 settled -> 00:46:02 up on the new build)
+```
+
+Verified live post-cycle: served `assets/main-BxFB02td.js` matches the new
+build byte-for-byte (same hash as a from-scratch build of the identical
+source); `grep` of the deployed bundle confirms the disclosure strings
+("House exhibition — not a league round", "Play money only", "simulated
+house crowd trades") are present; `/api/premieres/points/leaderboard`
+returned an **identical** snapshot before and after the ridden cycle
+(`lifetimePoints`/`premieresTraded`/`updatedAt` all unchanged) — real proof
+the points ledger survives `cycle-premiere.sh`'s state-root wipe exactly as
+`ReplayPremierePointsLedger.ts`'s module doc claims; and the synthetic crowd
+resumed trading on the fresh premiere (`q` non-zero, prices diverged from
+25/25/25/25) within ~2 minutes of the new premiere coming up.
+
+### 17.4 The real-fixture readiness question — a live-verified NO, not a gap
+
+The candidate reuse (admit the already-generated **Aug-3 Season Zero
+Featured Event**, `feat_4d20f6550c6c8d8e83bc` / episode
+`ereq_253e5a33-...`, as a bet premiere with zero new billing) **does not
+exist as a legitimate path, by deliberate design** — this was proven live,
+not just read from code:
+
+`feature:promote`/`premiere:package`'s own candidates come from
+`CoworldLeagueEpisodeRow[]`, populated by `coworld-league-mirror.ts`
+downloading **hosted, public** Coworld replays into
+`artifacts/ai-league-runs/league-coworld-<id>/` (`feature-candidates.ts`'s
+own module doc). `PremiereWageringProvenance.ts`'s
+`classifyPremiereWageringProvenance` refuses to seal ANY bundle whose
+directory matches that `league-coworld-*` pattern — **not overridable by a
+`--source` declaration** (`seal-episode.ts`'s own `--help`: "this
+classification cannot be overridden by declaration — the pattern is the
+ground truth the mirror/demo-server themselves use") — because Softmax's
+Observatory already publishes the round's outcome the instant it completes,
+independent of anything this repo does; there is no embargo left to protect.
+Live dry-run proof this session (scratch bundle dir literally named
+`league-coworld-feat4d20-dryrun-proof`, scratch `--private-state-root`,
+never the live queue root):
+
+```
+$ npx tsx src/scripts/premiere-wagering/seal-episode.ts \
+    --bundle-dir=.../league-coworld-feat4d20-dryrun-proof \
+    --private-state-root=<scratch> --skip-already-premiered-check
+PREMIERE_WAGERING_SEAL_REFUSED [PremiereWageringSealingError] refusing to
+mark league-coworld-feat4d20-dryrun-proof sealed: bundle directory name
+matches the public-league mirror's managed run key pattern
+(league-coworld-*); Observatory already publishes this round's outcome
+independently of anything this repo does, and the mirror's own static-file
+route serves it by path regardless of any suppression hold
+```
+
+`--source=xp-request` declared explicitly still refuses (pattern wins over
+declaration, confirmed live). `--force-unsafe-seal` DOES seal it, but the
+manifest still honestly records `"source": "public_league_mirror"` — it
+never launders the provenance, exactly as documented; this flag is a
+dev/test escape hatch, not an admission path, and using it in production
+would violate the Honest UI hard rule (embargo copy over a match that was
+never actually embargoed). **Do not build a bypass for this** — it is a
+deliberate safety refusal, not a missing feature.
+
+**What DOES work, verified live end-to-end this session at zero cost:**
+`replay-premiere-controlled-exhibition.ts` (§4, free/local/deterministic,
+no Coworld dependency) → admit (§6, wagering + crowd env from §13.5) →
+restart → real synthetic-crowd trading with zero human input (`q` non-zero,
+prices diverged from 25/25/25/25 within ~60s of `scheduledAt`) — the exact
+free/synthetic proof of the wagering pipeline the task asked for. One
+environment note for whoever repeats this in a **fresh, isolated clone**
+(not the shared dev checkout): the leak-audit collector (`replay-premiere-
+admit.ts`) fetches `/league` and `/ai-league-runs/league/data.json` from
+the deployment origin as part of its safety check, and refuses admission
+(`premiere_leak_collected_leak_audit_failed`) if those routes 404 — a
+hollow scratch checkout has no league-mirror output on disk. Point
+`PROXYWAR_ARTIFACTS_ROOT` at any real, already-generated league-mirror
+artifacts directory (e.g. the canonical checkout's `artifacts/`) to satisfy
+it; this is a real safety check (confirms the served roots don't leak the
+spoiler-sensitive episode), not a bug, and costs nothing to satisfy since
+it only reads pre-existing artifacts.
+
+**The actual "fund it" lever** is unrelated to the Featured Event: resume
+the already-built, already-throttled real-episode generator, currently
+registered but not bootstrapped:
+
+```sh
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.proxywar.betqueue.plist
+```
+
+This runs `generate-premiere-queue.sh` from whatever is checked out in
+`~/.proxywar-deploy/bet-origin` (now the consolidated `17ffd5ada` tip),
+self-throttled to `PW_QUEUE_MAX_PER_HOUR=4` / `PW_QUEUE_MAX_PER_DAY=80`,
+issuing real, **billed** `xp-request` episodes (private — 404 to any
+non-requester per `softmax-platform-feedback.md` item 26, hence genuinely
+embargo-safe unlike the league-mirror path above) against the live 14-16
+agent roster. Cost expectation, sourced from repo evidence, not invented:
+the cost ledger itself only records `wallClockSeconds`/`turnCount` (its own
+comment: "the platform does not surface cost_usd through this API surface
+today" — cross-reference Softmax billing separately to true up), but
+`softmax-platform-feedback.md`'s directly-measured `cost_usd` for a
+comparable hosted episode was **$0.09 (20-step 12p) / $0.19 (completed full
+12p) / $0.10-0.21 (a failed attempt)** — our 14-16p roster will run
+somewhat higher per the seat-count difference but is the same order of
+magnitude ("trivial and platform-tracked" in the operator's own words).
+Historical throughput from the 52-attempt ledger: 47/52 (90%) succeeded,
+avg wall-clock ~1047s (~17.5 min), avg turnCount ~24,970. Once the queue has
+one ready item, `cycle-premiere.sh` picks it up automatically on its next
+cycle — no separate admission step, and no further action beyond the one
+`launchctl bootstrap` command.
