@@ -817,9 +817,9 @@ function parseCouncilPlan(value: unknown, sourcePath: string): CouncilPlan {
     councilPlanTopLevelKeys,
     `${sourcePath} council plan`,
   );
-  if (record.schemaVersion !== 3 || record.coworldVersion !== "0.1.30") {
+  if (record.schemaVersion !== 3 || record.coworldVersion !== "0.1.32") {
     throw new Error(
-      `${sourcePath} is not a schemaVersion 3 Coworld 0.1.30 plan`,
+      `${sourcePath} is not a schemaVersion 3 Coworld 0.1.32 plan`,
     );
   }
   const normalizedSourcePath = path.resolve(sourcePath);
@@ -1379,7 +1379,7 @@ function validateCouncilCompletionProvenance(
     context,
   );
   if (
-    record.coworldVersion !== "0.1.30" ||
+    record.coworldVersion !== "0.1.32" ||
     (record.episodeRunner !== "pinned-coworld-cli" &&
       record.episodeRunner !== "injected") ||
     (record.resultsValidator !== "pinned-coworld-results-schema" &&

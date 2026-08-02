@@ -187,7 +187,7 @@ describe("Coworld paired matrix planner", () => {
 
     expect(validationObserved).toBe(true);
     expect(plan.schemaVersion).toBe(3);
-    expect(plan.coworldVersion).toBe("0.1.30");
+    expect(plan.coworldVersion).toBe("0.1.32");
     expect(plan.matrixID).toMatch(/^matrix-[0-9a-f]{32}$/);
     expect(plan.matrixID).toBe(
       `matrix-${coworldCanonicalSha256(plan.matrixIdentity).slice(7, 39)}`,
@@ -1124,7 +1124,7 @@ describe("Coworld paired matrix planner", () => {
     }
   });
 
-  test("validates the real 48-request N-arm example with pinned Coworld 0.1.30", async () => {
+  test("validates the real 48-request N-arm example with pinned Coworld 0.1.32", async () => {
     const specPath = path.resolve(
       "coworld-adapter/coworld/paired-matrix.example.json",
     );

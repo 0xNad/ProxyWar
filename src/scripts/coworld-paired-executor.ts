@@ -19,7 +19,7 @@ import {
   type CoworldRosterSeatIdentity,
 } from "./coworld-paired-matrix";
 
-const COWORLD_VERSION = "0.1.30";
+const COWORLD_VERSION = "0.1.32";
 const IMAGE_ID_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const ARTIFACT_HASH_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const MATRIX_ID_PATTERN = /^matrix-[0-9a-f]{32}$/;
@@ -229,7 +229,7 @@ function validatePlan(plan: CoworldPairedPlan, planPath: string): void {
     "plan",
   );
   if (plan.schemaVersion !== 3 || plan.coworldVersion !== COWORLD_VERSION) {
-    throw new Error("Executor requires a schemaVersion 3 Coworld 0.1.30 plan");
+    throw new Error("Executor requires a schemaVersion 3 Coworld 0.1.32 plan");
   }
   if (
     !MATRIX_ID_PATTERN.test(plan.matrixID) ||
@@ -1244,7 +1244,7 @@ from importlib.metadata import version
 from coworld.schema_validation import validate_json_schema
 
 payload = json.load(sys.stdin)
-if version("coworld") != "0.1.30":
+if version("coworld") != "${COWORLD_VERSION}":
     raise SystemExit(2)
 validate_json_schema(payload["results"], payload["manifest"]["game"]["results_schema"])
 print(json.dumps({"ok": True}))

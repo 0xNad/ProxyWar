@@ -40,7 +40,7 @@ const ARM_OWNED_ENV_KEYS = new Set([
   BALANCE_OF_POWER_ENV,
   EXPERT_MASK_ENV,
 ]);
-const COWORLD_VERSION = "0.1.30";
+const COWORLD_VERSION = "0.1.32";
 const IMAGE_ID_PATTERN = /^sha256:[0-9a-f]{64}$/i;
 const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const SECRET_ENV_TOKEN_PATTERN =
@@ -257,7 +257,7 @@ def fail(kind, location, message):
 
 
 try:
-    if version("coworld") != "0.1.30":
+    if version("coworld") != "${COWORLD_VERSION}":
         fail("version", "coworld", "unexpected Coworld validator version")
 
     payload = json.load(sys.stdin)

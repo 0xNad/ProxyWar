@@ -522,13 +522,13 @@ async function writeCouncilPlanFixture(
           validation:
             completionStatus === "non-production"
               ? {
-                  coworldVersion: "0.1.30",
+                  coworldVersion: "0.1.32",
                   episodeRunner: "injected",
                   resultsValidator: "injected",
                   replayValidator: "injected-unverified",
                 }
               : {
-                  coworldVersion: "0.1.30",
+                  coworldVersion: "0.1.32",
                   episodeRunner: "pinned-coworld-cli",
                   resultsValidator: "pinned-coworld-results-schema",
                   replayValidator: "pinned-coworld-verify-replay",
@@ -541,7 +541,7 @@ async function writeCouncilPlanFixture(
     planPath,
     JSON.stringify({
       schemaVersion: 3,
-      coworldVersion: "0.1.30",
+      coworldVersion: "0.1.32",
       generatedAt: "2026-07-14T12:00:00.000Z",
       matrixID,
       matrixIdentity,

@@ -1,6 +1,6 @@
 # Keystone N-arm local evaluation
 
-The schema-version 3 paired-matrix planner creates inspectable Coworld 0.1.30
+The schema-version 3 paired-matrix planner creates inspectable Coworld 0.1.32
 episode blocks without launching containers. Every block fixes the manifest,
 resolved image IDs, map, seed, seat, roster, and opponents, then varies only the
 candidate arm. Arm order rotates by block index, so each arm occupies every
@@ -41,7 +41,7 @@ npm run league:paired-matrix -- \
 ```
 
 The planner validates the complete materialized manifest and every request in
-memory with pinned Coworld 0.1.30. It records both each authored image reference
+memory with pinned Coworld 0.1.32. It records both each authored image reference
 and its resolved local `sha256:` image ID, rechecks those identities before
 publication, and never replaces an existing output. `plan.json` is published
 last as the atomic planner-completion marker. Invalid images, seats, seeds,
@@ -74,7 +74,7 @@ npm run league:paired-execute -- --plan /absolute/path/to/plan.json
 
 The executor validates the entire plan and every request before launching the
 first episode. It requires the exact flattened balanced order, re-resolves all
-image IDs at startup and before and after every job, runs pinned Coworld 0.1.30
+image IDs at startup and before and after every job, runs pinned Coworld 0.1.32
 with replay verification, validates `results.json`, and hashes both results and
 replay artifacts. A job becomes resumable only after `completion.json` is
 written with the full matrix/block/pair/arm/seed/map/seat/roster/image identity

@@ -170,7 +170,7 @@ describe("Coworld paired sequential executor", () => {
         gameImage: job.gameImage,
         opponentImages: job.opponentImages,
         validation: {
-          coworldVersion: "0.1.30",
+          coworldVersion: "0.1.32",
           episodeRunner: "injected",
           resultsValidator: "injected",
           replayValidator: "injected-unverified",
