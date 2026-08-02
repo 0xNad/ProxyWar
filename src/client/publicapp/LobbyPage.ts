@@ -902,6 +902,19 @@ export class LobbyPage extends LitElement {
     `;
   }
 
+  /**
+   * P0 fix (live 2026-08-02): "View match" and "Watch replay" used to sit
+   * OUTSIDE the `<details>` reveal gate, so a visitor who never expanded
+   * "Reveal result" could still click straight through to the full
+   * `/match/:matchId` archive page (winner + full placements, ungated) or
+   * to the replay itself (which also shows the winner near the end) — the
+   * card's own spoiler guard was cosmetic. Both links now live INSIDE the
+   * `<details>`, so reaching either one first requires the same explicit
+   * "Reveal result" click that shows the winner text. `/match/:matchId`
+   * itself stays an honest, ungated archive page for DIRECT navigation
+   * (a bookmarked/shared link, search result) — this only changes what
+   * this ONE card exposes before a visitor opts in.
+   */
   private renderBroadcastCard(
     match: PublicMatch,
     agents: readonly PublicAgent[],
@@ -965,19 +978,19 @@ export class LobbyPage extends LitElement {
               ? translateText("lobby.no_winner")
               : translateText("lobby.winner_announcement", { winner: winnerName })}
           </p>
+          <a
+            href="/match/${encodeURIComponent(match.matchId)}"
+            class="mt-2 inline-block text-sm font-bold text-accent no-underline outline-none hover:text-accent-strong focus-visible:ring-2 focus-visible:ring-accent"
+            >${translateText("lobby.view_match")}</a
+          >
+          ${watchHref !== null
+            ? html`<a
+                href=${watchHref}
+                class="ml-3 mt-2 inline-block text-sm text-ink-muted no-underline outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
+                >${translateText("lobby.watch_replay")}</a
+              >`
+            : nothing}
         </details>
-        <a
-          href="/match/${encodeURIComponent(match.matchId)}"
-          class="mt-2 inline-block text-sm font-bold text-accent no-underline outline-none hover:text-accent-strong focus-visible:ring-2 focus-visible:ring-accent"
-          >${translateText("lobby.view_match")}</a
-        >
-        ${watchHref !== null
-          ? html`<a
-              href=${watchHref}
-              class="ml-3 mt-2 inline-block text-sm text-ink-muted no-underline outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
-              >${translateText("lobby.watch_replay")}</a
-            >`
-          : nothing}
       </div>
     `;
   }

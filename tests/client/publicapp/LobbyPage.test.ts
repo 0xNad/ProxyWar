@@ -667,6 +667,51 @@ describe("lobby-page recent Director Cuts module", () => {
     expect(el.textContent).toContain("lobby.recent_broadcasts_heading");
     expect(el.textContent).toContain("Agent One");
   });
+
+  it("gates View match / Watch replay links behind the same reveal disclosure as the winner text (P0 fix, live 2026-08-02)", async () => {
+    stubReadModelFetch(
+      readModel({
+        matches: [
+          match({
+            matchId: "m_recent",
+            completedAt: "2026-07-05T00:00:00.000Z",
+            winnerAgentSlug: "agent-one",
+            // Deliberately no fullRenderHref: the hero's own Director-Cut
+            // fallback (`renderHeroDirectorCutFallback`) only considers
+            // matches with a fullRenderHref, and its own CTA is a separate,
+            // already spoiler-safe design (no winner text at all) that this
+            // test must not accidentally also exercise — watchHref alone
+            // keeps this match OUT of the hero and IN "Recent Broadcasts"
+            // only, so there is exactly one <details> and one pair of
+            // links to assert on.
+            watchHref: "/ai-league-runs/coworld-run/spectator.html",
+            participants: [
+              { slot: 0, agentSlug: "agent-one", displayName: "Agent One", tilesOwned: 5, isAlive: true, isWinner: true, color: "#111" },
+            ],
+          }),
+        ],
+        agents: [agent({ slug: "agent-one", displayName: "Agent One" })],
+      }),
+    );
+    const el = mount();
+    await flushMicrotasks();
+    const details = el.querySelector("details");
+    expect(details).not.toBeNull();
+    const matchLink = el.querySelector('a[href="/match/m_recent"]');
+    const replayLink = el.querySelector(
+      'a[href="/ai-league-runs/coworld-run/spectator.html"]',
+    );
+    expect(matchLink).not.toBeNull();
+    expect(replayLink).not.toBeNull();
+    // The live bug: both links sat as siblings AFTER </details>, so a
+    // visitor who never expanded "Reveal result" could still click
+    // straight through to the ungated /match/:matchId archive page (full
+    // placements) or the replay. Both must now be DESCENDANTS of the same
+    // <details> the winner text is gated behind.
+    expect(matchLink!.closest("details")).toBe(details);
+    expect(replayLink!.closest("details")).toBe(details);
+    expect(details!.textContent).toContain("lobby.winner_announcement");
+  });
 });
 
 describe("lobby-page loads no game bundle", () => {

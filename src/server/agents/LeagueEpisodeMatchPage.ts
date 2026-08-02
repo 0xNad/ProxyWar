@@ -470,9 +470,19 @@ export async function readLeagueEpisodeDecisiveMoments(
  * editorial metadata for an operator, for an outcome that was already
  * public well before being curated; this one is the canonical share card
  * for the raw episode page, always spoiler-neutral regardless of lane.
+ *
+ * Roster order is BY SLOT (assignment order), never `row.players`'
+ * own incoming order or `placementOrderedPlayers`' winner-first order:
+ * a link preview is read before any click, so ranking the roster by who
+ * won is a spoiler leak through the title/description alone — live P0
+ * (2026-08-02): "Captain Underpants... vs PeePee7 +10 more" told a viewer
+ * who won before they ever opened the page. Slot order carries no outcome
+ * information by construction.
  */
 export function leagueEpisodeSpoilerSafeTitle(row: CoworldLeagueEpisodeRow): string {
-  const names = row.players.map((player) => player.name);
+  const names = [...row.players]
+    .sort((left, right) => left.slot - right.slot)
+    .map((player) => player.name);
   const roster =
     names.length === 0
       ? "Unknown participants"
@@ -487,7 +497,10 @@ export function leagueEpisodeSpoilerSafeTitle(row: CoworldLeagueEpisodeRow): str
 export function leagueEpisodeSpoilerSafeDescription(
   row: CoworldLeagueEpisodeRow,
 ): string {
-  const names = row.players.map((player) => player.name);
+  // Slot order, same reasoning as `leagueEpisodeSpoilerSafeTitle` above.
+  const names = [...row.players]
+    .sort((left, right) => left.slot - right.slot)
+    .map((player) => player.name);
   const roster = names.length === 0 ? "Unknown participants" : names.join(", ");
   const roundLabel =
     row.roundNumber !== null ? `Round ${row.roundNumber}` : "an unnumbered round";
