@@ -1777,6 +1777,22 @@ class Client {
 
   private async handleJoinLobby(event: CustomEvent<JoinLobbyEvent>) {
     const lobby = event.detail;
+    // P0 REOPEN fix (pass-4 repro, 2026-08-02): captured immediately, before
+    // any of this method's `await`s (`getRuntimeClientServerConfig()`,
+    // `userAuth()`, `getPlayerCosmeticsRefs()`, `getTurnstileToken()`, then
+    // `joinLobby()`/`LocalServer.start()`'s own synchronous cascade back
+    // into this same event loop turn). A live re-read of
+    // `window.location.pathname` after that chain observably does NOT
+    // reliably reflect the real hard-navigation URL by the time
+    // `lobbyHandle.join.then()` below runs — a live-browser repro confirmed
+    // it can transiently read back as `/` right at that point even on a
+    // direct hard navigation straight to `/ai-league-replay/:runID` (root
+    // cause not fully isolated; downstream of one of those awaits, not this
+    // file). Snapshotting here, closest to the real navigation commit and
+    // before anything async can interfere, is what "did the browser already
+    // land on this path" should actually mean.
+    const pathnameAtJoinStart = window.location.pathname;
+    const hashAtJoinStart = window.location.hash;
     if (
       lobby.source !== "replay-premiere" &&
       this.replayPremiereRuntime !== null
@@ -1936,13 +1952,17 @@ class Client {
       // (never one of this same function's own target shapes below), so
       // a re-join from an existing replay/game/premiere entry leaves that
       // entry's identity untouched.
+      // Snapshotted at `handleJoinLobby`'s own start (see
+      // `pathnameAtJoinStart`'s doc) rather than re-read live here — by
+      // this point several `await`s deep, `window.location.pathname` can
+      // no longer be trusted to still reflect the real navigation.
       const alreadyOnOwnTargetShape = isReplayOrGamePathShape(
-        window.location.pathname,
+        pathnameAtJoinStart,
       );
       if (
         !preserveCoworldReplayUrl &&
         !alreadyOnOwnTargetShape &&
-        (window.location.hash === "" || window.location.hash === "#")
+        (hashAtJoinStart === "" || hashAtJoinStart === "#")
       ) {
         history.replaceState(null, "", window.location.origin + "#refresh");
       }
@@ -1957,7 +1977,7 @@ class Client {
         const premierePath = lobby.isBettingPremiere === true
           ? `/bet/${encodeURIComponent(lobby.premiereId)}`
           : `/premiere/${encodeURIComponent(lobby.premiereId)}`;
-        if (window.location.pathname !== premierePath) {
+        if (pathnameAtJoinStart !== premierePath) {
           history.replaceState(
             null,
             "",
@@ -1988,13 +2008,34 @@ class Client {
           // DIFFERENT path, e.g. a modal-driven join with no prior URL
           // change) still gets its first real pushState here, unaffected.
           const replayPath = `/ai-league-replay/${encodeURIComponent(lobby.aiLeagueRunID)}`;
-          if (
-            shouldPushAiLeagueReplayHistoryEntry(
-              window.location.pathname,
-              replayPath,
-            )
-          ) {
-            history.pushState(null, "", replayPath);
+          if (pathnameAtJoinStart !== replayPath) {
+            // We did NOT start on this exact path (a genuine in-app join
+            // arriving from a different page, e.g. a modal-driven join)
+            // -- this is the first real history entry for it, as close to
+            // the triggering user gesture as this async chain gets, so
+            // `pushState` (adds a new entry) is correct and safe here.
+            if (shouldPushAiLeagueReplayHistoryEntry(pathnameAtJoinStart, replayPath)) {
+              history.pushState(null, "", replayPath);
+            }
+          } else if (window.location.pathname !== replayPath) {
+            // We DID start on this exact path (the real hard-navigation
+            // entry `pathnameAtJoinStart` already captured) -- the browser
+            // already owns a valid, real session-history entry for it. If
+            // `window.location.pathname` no longer matches by now, some
+            // other in-page mutation moved the live URL out from under us
+            // during this method's own `await`s (observed live, root cause
+            // not fully isolated -- see `pathnameAtJoinStart`'s doc).
+            // `replaceState` corrects the CURRENT entry in place rather
+            // than adding a new one, so it can never produce the orphaned/
+            // dropped-pushState desync above -- and it matters beyond the
+            // URL bar: `isAiLeagueReplayRoute()` (used live by
+            // `ClientGameRunner.dispatchAiLeagueReplayFrame` and others)
+            // reads `window.location.pathname` fresh on every call, so a
+            // drifted URL silently starves the replay of its own
+            // `ai-league-replay-frame` events -- confirmed live: the
+            // loading veil never lifts, stuck on "Loading replay…"
+            // indefinitely.
+            history.replaceState(null, "", replayPath);
           }
         } else if (lobby.coworldReplayPath !== undefined) {
           history.replaceState(null, "", lobby.coworldReplayPath);
