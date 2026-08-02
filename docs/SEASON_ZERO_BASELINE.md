@@ -1063,3 +1063,53 @@ above into this branch directly:
   rewriting them to a placeholder would misrepresent the verification
   evidence itself. Flagging this distinction rather than silently leaving
   them — reversing this call is the operator's to make, not a default.
+
+### Promotion EXECUTED 2026-08-02 — `origin/main` fast-forwarded, GO received
+
+**Operator GO, quoted verbatim**: "GO for the main push. Promote exactly
+756562c53 (your validated merge tip — do NOT chase the moving branch tip;
+siblings have landed newer commits that will ride the next promotion
+cycle)." This confirms and executes the "Promote as is" decision recorded
+above — the topology blocker from Addendum 4's Step 1 was independently
+resolved earlier the same day (`origin/main`'s 11-then-12 stray commits
+were merged into `claude/product-overhaul`, not rebased away; see the
+merge/forward-merge/hygiene commits between this addendum's original text
+and this entry).
+
+**Rollback tag**: `pre-promotion-2026-08-02`, pointing at `origin/main`'s
+pre-promotion tip `30c86d38023fd4a7dcf68a7889d3d56af6d65c6c` (the
+"players(coworld): bounded post-final linger for platform reconciliation"
+commit — the same SHA re-verified as unmoved immediately before the
+push). Created and pushed to `origin` before touching `main`.
+
+**Fast-forward push**: re-verified `git merge-base --is-ancestor
+origin/main 756562c53018b6467c7400c728a958381962fd08` was true immediately
+before pushing (both right after cutting the rollback tag and again in the
+same breath as the push itself — `origin/main` never moved from
+`30c86d380` across either check). `git push origin
+756562c53018b6467c7400c728a958381962fd08:main` — fast-forward,
+`30c86d380..756562c53`, **no force used and none required**. The exact
+validated merge tip was promoted, not the shared worktree's later-moving
+tip (siblings' post-`756562c53` commits stay on `claude/product-overhaul`
+for the next promotion cycle).
+
+**Public verification** (live GitHub, not just local fetch): repo page
+renders correctly (README, LICENSE, LICENSE-ASSETS, correct AGPL-3.0
+license badge, file tree). `git ls-tree -r --name-only origin/main --
+docs/project-state` → **0 files** (this promotion's own untracking commit,
+`756562c53`, is included, so the leak this doc flagged never reaches a
+public reader). `git ls-tree -r --name-only origin/main -- .omp` → **0
+files** (the earlier `.omp/` untrack from the 2026-08-01 review holds).
+`git ls-tree -r --name-only origin/main -- src/client/prediction/wagering
+src/server/replay-premiere/wagering` → **35 files present** — the
+wagering surface is genuinely live on the public default branch now,
+confirming "promote as is" was executed in full, not partially.
+
+**Superseded standing decision**: the 2026-07-27 "zero wagering code on
+`main`" rule (quoted and cited throughout this doc's "Main reconciliation"
+section above) is superseded by the operator's 2026-08-02 decision, quoted
+at the top of Addendum 4. `main` now carries the full wagering surface
+under its existing `PROXYWAR_WAGERING_ENABLED`-gated structure (default
+off; see the Step 3 inventory above for the gating detail).
+
+`origin/main` final state: `756562c53018b6467c7400c728a958381962fd08`.
