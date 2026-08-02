@@ -1765,3 +1765,105 @@ Deploy + live re-verification: see the next commit's report for the
 production before/after (deployed via the §17.3 procedure — fetch
 `claude/product-overhaul` by name, detach to the exact SHA, `npm run
 build-prod`, natural autocycler pickup, never a forced restart mid-market).
+
+## 19. The fourth live-join livelock root cause: a dishonest fixed-deadline watchdog, not a drain-scheduling defect (join-livelock session, 2026-08-02)
+
+### 19.1 The bug (pass-5b QA)
+
+Three prior fixes shipped for this defect family: transport (§18.2,
+`d56a52881`), session-reuse (§18.5, `0b70e71df`), themed ended-page
+(`73cb5317c`/`216e84e3b`). Fresh QA on a ~10-min-old backlogged real-league
+market found a FOURTH, distinct livelock: three independent join attempts
+(root redirect, direct URL, second tab) all failed for 12+ minutes. Observed
+state machine: "Joining live… Syncing to turn N" -> "Replay unavailable."
+(rendered WHILE the turn counter kept climbing behind it) -> Retry ->
+"Loading premiere…" -> "Replay is taking longer than expected…" (no Retry,
+indefinite).
+
+### 19.2 Investigation — the working hypothesis was disproven, the actual defect found
+
+The working hypothesis going in was that the tap catch-up drain
+(`ReplayPremiereNetworkController.applyLiveProjection`) was effectively
+scheduled at the chunk-release cadence instead of free-running. Verified
+against code and two synthetic-fixture reproductions, not assumed:
+
+- A cold `syncOnce()` against a STATIC 27 000-record backlog (well beyond
+  QA's ~11-24k range) drains fully in a single sync tick — 29 `live-
+  projection` polls, sub-millisecond wall time on localhost. The 256-poll/
+  1 000-record-per-poll cap (`LIVE_PROJECTION_MAX_POLLS_PER_TICK` x
+  `MAX_LIVE_PROJECTION_RECORDS`) is nowhere close to binding.
+- A REAL-timer reproduction against an actively-releasing 1 ms/turn fixture
+  (join started 3s late, ~3 000-turn backlog, releases continuing the whole
+  time): `releasedThroughSequence` reaches the live edge within the first
+  ~200 ms tick and then tracks it with a small, stable, steady-state lag —
+  never gets stuck re-chasing a fixed release cadence.
+- `LocalServer`'s progressive catch-up (`runPendingProgressiveCatchUp`,
+  `MAX_PROGRESSIVE_CATCH_UP_IN_FLIGHT_TURNS=4096`) and the worker's drain
+  loop (`ReplayPremiereWorker.worker.ts`, `MessageChannel`-scheduled, no
+  `setTimeout` clamping) both already bypass real-time pacing during
+  catch-up and coalesce/skip intermediate rendering, per their own doc
+  comments — confirmed by reading, not just trusting the comments.
+
+The real, confirmed defect was `Main.ts`'s `JOIN_SYNC_TIMEOUT_MS` watchdog —
+the same "INDEPENDENT... gave up" mechanism §18.1 already flagged as
+adjacent to (not part of) the transport fix. It was a FIXED one-shot 60s
+timer armed once at `onProjectionReady` that fired regardless of whether
+`onJoinSync` was still reporting forward progress, AND — the part that
+produces the exact "error rendered while the counter keeps climbing"
+symptom — it never set `veilFinished`, so `onJoinSync`'s progress callback
+kept updating the subline text UNDER the now-showing "Replay unavailable"
+screen. Combined with Retry always doing a full `window.location.reload()`
+(discarding all client-side join progress), any market whose genuine
+catch-up needs more than 60s of continuous wall time was UNJOINABLE
+forever, no matter how many retries: every attempt raced the same fixed
+deadline from zero and lost.
+
+### 19.3 The fix
+
+`ReplayLoadingScreen.ts` gains `createJoinSyncWatchdog`: an INACTIVITY
+timer, not a fixed deadline. Rearmed on every strictly-increasing
+`currentTurn` `onJoinSync` reports; only fires `onStalled` after a genuine
+silence of the full window; calls `onRecovered` (clearing any latched
+stall and reverting to the honest "joining_live" veil) the instant progress
+resumes. Wired into both `openReplayPremiere` and `openBettingPremiere`
+(`Main.ts`), replacing the duplicated fixed-timer logic in both.
+`showReplayLoadingScreen` also now offers Retry on the `loading_slow`
+("taking longer than expected") state, not just the terminal
+`loading_failed` state — it previously had no escape but "Back to league".
+Investigated the secondary DOM/listener-leak-on-retry ask: Retry's only
+handler is a full `window.location.reload()`, which the browser itself
+tears down cleanly — no broken client-side teardown path found to fix.
+
+Tests: 5 new `createJoinSyncWatchdog` unit tests plus a `loading_slow`-
+offers-Retry regression test (`tests/client/ReplayLoadingScreen.test.ts`).
+Full client+server suite: 324 files / 4057 tests green; `tsc --noEmit` and
+`eslint` both clean.
+
+### 19.4 Deploy + live verification
+
+Committed `e61efc7d5` on `claude/product-overhaul` (fast-forward onto a
+sibling session's `8f315f339`), pushed to `origin`. Deployed per §17.3:
+`git fetch origin claude/product-overhaul` (by name), `git checkout
+--detach e61efc7d5...` (`git ls-remote` confirmed the true tip — the
+documented stale bare-refspec trap did not reproduce this time, detached to
+the SHA anyway per procedure), `npm run build-prod` clean (`tsc --noEmit` +
+`vite build`, both exit 0, new bundle `main-BnvTby5Y.js`). Picked up by the
+autocycler's own natural restart at the next premiere cycle (never forced
+mid-market) — confirmed served `main-BnvTby5Y.js` is byte-hash-identical to
+the local build.
+
+**Real-browser proof against production** (headless CDP, `bet.proxywar.xyz`):
+
+| Scenario | Result |
+| --- | --- |
+| Fresh market (small backlog), cold join | veil cleared, trading board mounted, **824 ms** |
+| Cold join #1 (root `/bet` redirect), market ~11.1 min old, 11 686-record backlog at test time | veil cleared, trading board mounted, **3.88 s** |
+| Cold join #2 (direct `/bet/<id>` URL), same market | veil cleared, trading board mounted, **4.07 s** |
+| Cold join #3 (second tab, alongside #2), same market | veil cleared, trading board mounted, **4.22 s** |
+
+3/3 backlogged-market attempts converged to a fully usable, interactive
+trading UI (live territory map, "LIVE" badge, "Your bankroll: 1,000 cr",
+16 seats with live-diverging prices) in low single-digit seconds — the
+exact scenario that previously livelocked for 12+ minutes across three
+attempts never reaching this state. Fresh-market join stayed comfortably
+under 1s, matching the pre-existing fast path.
