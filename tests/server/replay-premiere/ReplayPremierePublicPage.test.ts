@@ -392,6 +392,65 @@ describe("ReplayPremiere public page and card", () => {
     });
   });
 
+  test("serves the themed app shell (never raw JSON) to a real browser navigating to an unavailable premiere, while API clients keep the JSON contract", async () => {
+    const harness = await createHarness(root);
+    await harness.run(async (baseUrl) => {
+      const unknown = "prem_ffffffffffffffff";
+      const browserAccept =
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8";
+
+      // Real browser navigation (both the league `/premiere/<id>` and the
+      // dedicated betting `/bet/<id>` surface share this exact router — see
+      // ProxyWarPublicArtifacts.ts's `matchProxyWarPublicPremiereReadPath`)
+      // must NEVER render the raw {"error":{"code":"..."}} body — the P0
+      // fix for QA screenshot pass-4/m-20 (Chrome's own JSON viewer, zero
+      // site chrome, for a plain page load).
+      for (const route of [`/premiere/${unknown}`, `/bet/${unknown}`]) {
+        const response = await fetch(`${baseUrl}${route}`, {
+          headers: { Accept: browserAccept },
+        });
+        expect(response.status).toBe(404);
+        assertNoStore(response);
+        expect(response.headers.get("content-type")).toContain("text/html");
+        const body = await response.text();
+        expect(body).not.toContain("PREMIERE_UNAVAILABLE");
+        expect(body.toLowerCase()).toContain("<!doctype html>");
+        // Same CSP-nonce discipline as an ordinary premiere page — no
+        // unsafe-inline/unsafe-eval hole opened for this branch.
+        const policy = response.headers.get("content-security-policy");
+        expect(policy).toContain("script-src 'self' 'nonce-");
+      }
+
+      // A bare/wildcard Accept (curl, plain `fetch()`, health checks, any
+      // non-browser API client) is NOT a browser navigation and must keep
+      // the exact pre-existing JSON contract this same file's other test
+      // already pins for `/premiere/<id>` — proven here for `/bet/<id>`
+      // too, and again with an EXPLICIT `Accept: application/json`.
+      for (const accept of [undefined, "application/json"]) {
+        const response = await fetch(`${baseUrl}/bet/${unknown}`, {
+          headers: accept === undefined ? {} : { Accept: accept },
+        });
+        expect(response.status).toBe(404);
+        assertNoStore(response);
+        expect(await response.json()).toEqual({
+          error: { code: "PREMIERE_UNAVAILABLE" },
+        });
+      }
+
+      // Card (SVG social-card embed) requests are never a top-level
+      // browser document — the JSON contract stays even with a browser
+      // Accept header.
+      const cardResponse = await fetch(
+        `${baseUrl}/premiere/${unknown}/card-v1.svg`,
+        { headers: { Accept: browserAccept } },
+      );
+      expect(cardResponse.status).toBe(404);
+      expect(await cardResponse.json()).toEqual({
+        error: { code: "PREMIERE_UNAVAILABLE" },
+      });
+    });
+  });
+
   test("escapes metadata and SVG fields without creating executable markup", async () => {
     const harness = await createHarness(root);
     const bootstrap = structuredClone(harness.bootstrap);

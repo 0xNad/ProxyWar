@@ -1584,13 +1584,17 @@ function sendThemedNotFoundPage(
   res: Response,
   status: number,
   message: string,
+  overrides: { title?: string; ctaLabel?: string; ctaHref?: string } = {},
 ): void {
+  const title = overrides.title ?? "Not found";
+  const ctaLabel = overrides.ctaLabel ?? "Go to the league";
+  const ctaHref = overrides.ctaHref ?? "/league";
   res.status(status).type("html").send(`<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Not found | Proxy War</title>
+<title>${escapeHtml(title)} | Proxy War</title>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -1649,9 +1653,9 @@ function sendThemedNotFoundPage(
     <a href="/build">Build</a>
   </nav>
   <main>
-    <h1>Not found</h1>
+    <h1>${escapeHtml(title)}</h1>
     <p>${escapeHtml(message)}</p>
-    <a class="cta" href="/league">Go to the league</a>
+    <a class="cta" href="${escapeHtml(ctaHref)}">${escapeHtml(ctaLabel)}</a>
   </main>
 </body>
 </html>`);
@@ -2326,10 +2330,19 @@ app.get("/bet", (request, response) => {
   const ids = replayPremiereHttpRegistry.premiereIds();
   const current = ids.at(-1);
   if (current === undefined) {
-    response
-      .status(503)
-      .type("text/plain")
-      .send("No premiere is currently running.");
+    // Between cycles (a settled premiere replacing, or the queue briefly
+    // empty) — genuinely temporary, not a broken link, so this is neither
+    // `sendThemedNotFoundPage`'s default "Not found" framing nor a raw
+    // plain-text 503 (the previous behavior here — no branding, no nav,
+    // indistinguishable from a real outage to a visitor who just wants to
+    // trade). Same themed shell, honest copy, and a retry-shortly nudge
+    // instead of a dead end.
+    sendThemedNotFoundPage(
+      response,
+      503,
+      "No premiere is currently running. The next one comes up automatically within a few minutes.",
+      { title: "Between markets", ctaLabel: "Go to the league", ctaHref: "/league" },
+    );
     return;
   }
   // The GitHub callback lands on /bet?github=… and this is a second hop, so

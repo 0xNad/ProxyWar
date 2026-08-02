@@ -80,6 +80,7 @@ import {
   parseReplayPremiereRoute,
   ReplayPremiereRuntimeController,
 } from "./ReplayPremiereRuntime";
+import { ReplayPremiereNetworkError } from "./ReplayPremiereNetwork";
 import {
   loadResumableReplayTurn,
   watchReplayPositionForResume,
@@ -91,6 +92,7 @@ import {
 import "./platform/PlayerProfilePage";
 import "./platform/TraderProfilePage";
 import "./prediction/wagering/page/AccountPage";
+import "./prediction/wagering/page/PremiereEndedPage";
 import "./SinglePlayerModal";
 import { StoreModal } from "./Store";
 import "./TerritoryPatternsModal";
@@ -1009,6 +1011,34 @@ class Client {
   }
 
   /**
+   * Mounts the themed "this premiere has ended" page in place of the
+   * ordinary game/replay engine — the honest destination for a
+   * `premiere_not_found` bootstrap failure (see `openReplayPremiere`'s
+   * and `openBettingPremiere`'s catch blocks below), replacing what used
+   * to be a raw JSON document Chrome's own viewer rendered before the
+   * server ever got the chance to serve this app shell at all (see
+   * `ReplayPremierePublicPage.ts`'s content-negotiated 404 branch). Same
+   * "standalone data page, no lobby/replay concept" shape as
+   * `openAccountPage` just above, but reached via the SAME cleanup path
+   * a genuine `failReplayLoading` would take (releasing the loading veil
+   * and the in-flight runtime attempt) rather than that method's own
+   * generic "Replay unavailable" failure screen.
+   */
+  private openPremiereEndedPage(
+    premiereId: string,
+    surface: "bet" | "premiere",
+  ): void {
+    this.replayLoadingCleanup?.();
+    this.replayLoadingCleanup = null;
+    this.replayAttemptCleanup?.();
+    ensureHeadLangSelector();
+    const page = document.createElement("premiere-ended-page");
+    page.setAttribute("premiere-id", premiereId);
+    page.setAttribute("surface", surface);
+    document.body.replaceChildren(page);
+  }
+
+  /**
    * Renders an archived premiere's durable results-summary page: the polished
    * results overlay from the persisted summary, plus a best-effort render of the
    * ordinary league replay behind it. The overlay renders immediately and stands
@@ -1221,6 +1251,13 @@ class Client {
         console.error("Replay Premiere runtime stopped", error);
         return;
       }
+      if (
+        error instanceof ReplayPremiereNetworkError &&
+        error.code === "premiere_not_found"
+      ) {
+        this.openPremiereEndedPage(premiereId, "premiere");
+        return;
+      }
       this.failReplayLoading(
         premiereId,
         "replay-premiere",
@@ -1410,6 +1447,13 @@ class Client {
       if (!active || this.replayPremiereRuntime !== handle.runtime) return;
       if (projectionMounted) {
         console.error("Betting premiere runtime stopped", error);
+        return;
+      }
+      if (
+        error instanceof ReplayPremiereNetworkError &&
+        error.code === "premiere_not_found"
+      ) {
+        this.openPremiereEndedPage(premiereId, "bet");
         return;
       }
       this.failReplayLoading(

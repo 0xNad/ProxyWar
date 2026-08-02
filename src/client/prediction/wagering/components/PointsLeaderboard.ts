@@ -213,7 +213,13 @@ export class PremierePointsLeaderboard extends LitElement {
             <th scope="col" class="py-1.5 pr-2 font-semibold">Rank</th>
             <th scope="col" class="py-1.5 pr-2 font-semibold">Player</th>
             <th scope="col" class="py-1.5 pr-2 text-right font-semibold">Points</th>
-            <th scope="col" class="py-1.5 text-right font-semibold">Matches</th>
+            <th
+              scope="col"
+              class="py-1.5 text-right font-semibold"
+              title="Premieres won out of premieres traded"
+            >
+              Won / Traded
+            </th>
           </tr>
         </thead>
         <tbody>
@@ -290,7 +296,10 @@ export class PremierePointsLeaderboard extends LitElement {
         >
           ${formatSignedCredits(entry.lifetimePoints)}
         </td>
-        <td class="py-1.5 text-right font-mono tabular-nums text-ink-muted">
+        <td
+          class="py-1.5 text-right font-mono tabular-nums text-ink-muted"
+          title="${entry.premieresWon} won of ${entry.premieresTraded} traded"
+        >
           ${entry.premieresWon}/${entry.premieresTraded}
         </td>
       </tr>

@@ -126,6 +126,16 @@ export type ReplayPremiereNetworkErrorCode =
   | "invalid_configuration"
   | "request_failed"
   | "response_unavailable"
+  // A 404 from ANY premiere-scoped API route (bootstrap/manifest/chunk/
+  // reveal/live-projection) — the server's `target === null` registry
+  // miss (`ReplayPremiereHttp.ts`). Distinct from the generic
+  // `response_unavailable` bucket so the UI can render an honest "this
+  // premiere has ended" page instead of a scary transient-looking
+  // failure: whether hit on the very first bootstrap call (a stale/
+  // expired link) or mid-session (the premiere was reclaimed by the
+  // autocycler while this viewer was on the page), a 404 here always
+  // means the same thing — this premiere is no longer being served.
+  | "premiere_not_found"
   | "invalid_cache_policy"
   | "invalid_content_type"
   | "response_too_large"
@@ -1995,6 +2005,9 @@ export class ReplayPremiereNetworkController {
         throw networkError("request_failed", true);
       }
       if (!response.ok) {
+        if (response.status === 404) {
+          throw networkError("premiere_not_found", false);
+        }
         throw networkError(
           "response_unavailable",
           response.status === 408 ||

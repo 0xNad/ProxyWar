@@ -194,6 +194,39 @@ async function handlePublicDocumentRequest(options: {
   }
   const target = options.options.registry.get(route.premiereId);
   if (target === null) {
+    // A stale/bookmarked link, or a premiere the autocycler has already
+    // reclaimed (`cycle-premiere.sh` wipes the whole registry on every
+    // cycle — see `ReplayPremiereArchiveIndex.ts`'s own doc on why
+    // nothing about a past premiere survives that but the durable points
+    // ledger). This used to unconditionally send the raw JSON error body
+    // as the top-level document — Chrome's own JSON viewer, zero site
+    // chrome, for a PLAIN BROWSER NAVIGATION (found live, QA screenshot
+    // pass-4/m-20). Only `card` requests (SVG social-card embeds, never
+    // a top-level document a person navigates to) and explicit
+    // `Accept: application/json` callers keep that contract — an
+    // ordinary browser `GET` now gets the same app shell a real premiere
+    // page would, at the correct 404 status, so `PremiereEndedPage.ts`
+    // (mounted client-side on the resulting `premiere_not_found` bootstrap
+    // failure — see `ReplayPremiereNetwork.ts`) gets the chance to render
+    // an honest, themed answer instead.
+    if (route.kind === "page" && prefersHtmlDocument(request)) {
+      const appShell = await options.options.loadAppShell();
+      const scriptNonce = randomBytes(24).toString("base64");
+      sendDocument(
+        response,
+        request.method,
+        404,
+        nonceInlineScripts(appShell, scriptNonce),
+        {
+          contentType: "text/html; charset=utf-8",
+          contentSecurityPolicy: pageContentSecurityPolicyWithNonce(
+            options.options.pageContentSecurityPolicy,
+            scriptNonce,
+          ),
+        },
+      );
+      return;
+    }
     sendFailure(response, 404, "PREMIERE_UNAVAILABLE");
     return;
   }
@@ -234,6 +267,23 @@ async function handlePublicDocumentRequest(options: {
       ),
     },
   );
+}
+
+/**
+ * True only when the request explicitly names `text/html` in `Accept` —
+ * a real browser navigation always does (Chrome's default document
+ * `Accept` starts `text/html,application/xhtml+xml,...`). Deliberately
+ * NOT `request.accepts(["html","json"])`: that resolves an absent or
+ * bare wildcard `Accept` header (curl, plain `fetch()`, this module's own
+ * tests, any other non-browser API client) to `"html"` too, since it is
+ * first in the preference list — which would silently break every
+ * existing consumer of the `{"error":{"code":"PREMIERE_UNAVAILABLE"}}`
+ * JSON contract for an unknown id. A bare/wildcard Accept keeps that
+ * contract; only an EXPLICIT `text/html` preference gets the app shell.
+ */
+function prefersHtmlDocument(request: Request): boolean {
+  const accept = request.headers.accept;
+  return typeof accept === "string" && accept.toLowerCase().includes("text/html");
 }
 
 export function nonceInlineScripts(

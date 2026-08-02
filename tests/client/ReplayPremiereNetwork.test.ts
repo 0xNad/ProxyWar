@@ -580,6 +580,38 @@ describe("ReplayPremiereNetwork", () => {
     expect(ready).not.toHaveBeenCalled();
   });
 
+  it("classifies a 404 bootstrap response as premiere_not_found, not the generic response_unavailable bucket, and never retries it", async () => {
+    // The server sends this for ANY unregistered/reclaimed premiereId
+    // (ReplayPremiereHttp.ts's `target === null` check) — the exact
+    // signal PremiereEndedPage.ts's mount decision in Main.ts keys off.
+    // Distinct from every OTHER non-2xx status, which stays the generic
+    // (transient-looking) `response_unavailable` classification.
+    const ready = vi.fn();
+    const { network } = controller(
+      queuedFetch(
+        new Response(JSON.stringify({ error: { code: "PREMIERE_UNAVAILABLE" } }), {
+          status: 404,
+          headers: { "content-type": "application/json", "cache-control": "no-store" },
+        }),
+      ) as unknown as typeof fetch,
+      { onReady: ready },
+    );
+    await expectNetworkError(network.syncOnce(), "premiere_not_found");
+    expect(ready).not.toHaveBeenCalled();
+
+    // Non-recoverable: a genuinely gone premiere must never retry against
+    // the identical 404 forever the way a transient 5xx would.
+    const { network: second } = controller(
+      queuedFetch(jsonResponse({ error: { code: "X" } }, { status: 404 })) as unknown as typeof fetch,
+    );
+    try {
+      await second.syncOnce();
+      throw new Error("expected request to fail");
+    } catch (error) {
+      expect((error as ReplayPremiereNetworkError).recoverable).toBe(false);
+    }
+  });
+
   it("rejects any full publication preimage leaked through bootstrap", async () => {
     const leaked = {
       ...(await bootstrap()),
