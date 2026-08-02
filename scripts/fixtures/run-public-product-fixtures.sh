@@ -85,6 +85,51 @@ wait_for_origin() {
   return 1
 }
 
+# AI League Full Replay boot inside a real browser requires a PRODUCTION-mode
+# build (`npm run build-prod`, i.e. plain `vite build`), never `build-dev`/
+# `--mode development`. Root cause: `vite.config.ts` only registers the
+# `syncHashedPublicAssets` plugin (the one that writes
+# `static/asset-manifest.json` with hashed entries for every `resources/`
+# file, including every `maps/<name>/manifest.json`) when `isProduction` is
+# true — a deliberate dev-build-speed tradeoff, not a bug to route around
+# here. Without that manifest, `AssetUrls.ts`'s `buildAssetUrl()` falls back
+# to a bare root-relative path (e.g. `/maps/asia/manifest.json`) and never
+# applies the CDN/origin base even when one is configured. That's invisible
+# almost everywhere (root-relative paths resolve fine against a real page
+# URL) EXCEPT inside the game engine's `?worker&inline` blob-URL Web Worker:
+# `blob:` is not a "special" URL scheme per the WHATWG URL spec, so a
+# root-relative reference fails to resolve against it at all, throwing
+# `TypeError: Failed to execute 'fetch' on 'WorkerGlobalScope': Failed to
+# parse URL from /maps/<map>/manifest.json` and permanently stalling the
+# replay at "Loading replay…" / "Replay is taking longer than expected…".
+# This is a genuine `src/core/AssetUrls.ts` product-code gap (reported
+# separately, not fixed here — `src/core/**` changes need review per
+# AGENTS.md) that a production-mode build's populated manifest happens to
+# route around. Fail fast with an actionable message instead of a silent
+# multi-minute stall discovered only once a browser is pointed at this.
+assert_production_build_for_full_replay() {
+  local manifest_path="$HERE/static/asset-manifest.json"
+  if [ ! -f "$manifest_path" ] || ! grep -q '"maps/' "$manifest_path" 2>/dev/null; then
+    cat >&2 <<'EOF'
+Full Replay build-manifest gate: static/asset-manifest.json is missing (or
+has no maps/ entries) -- Full Replay pages will boot to a permanent
+"Loading replay..." stall inside the game engine's Web Worker (root cause:
+dev-mode builds intentionally skip asset-manifest generation, and
+AssetUrls.ts's buildAssetUrl() fallback path does not apply the CDN/origin
+base for un-manifested assets -- fails to resolve at all from inside a
+blob: URL worker).
+commit or run `npm run build-prod` (NOT build-dev) before this script boots
+the origin, or set PROXYWAR_FIXTURE_SKIP_BUILD_MANIFEST_GATE=1 if you only
+need the identity/league-mirror/analytics surfaces this script also
+generates, not a real Full Replay browser boot.
+EOF
+    return 1
+  fi
+}
+if [ "${PROXYWAR_FIXTURE_SKIP_BUILD_MANIFEST_GATE:-0}" != "1" ]; then
+  assert_production_build_for_full_replay
+fi
+
 log "==> generating drama match (real local simulation, no Softmax)"
 # league- prefixed: isProxyWarPublicLeaguePath's allowlist (the
 # leagueWrapperOnly public-artifact gate in ai-agent-demo-server.ts, the
