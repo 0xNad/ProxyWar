@@ -86,7 +86,7 @@ export function renderPlatformRootHtml(links: PlatformRootLinks): string {
           href: "/account",
           external: false,
           title: "Account",
-          body: "Create your account with GitHub sign-in to manage your profile and claims.",
+          body: "Sign in with GitHub once, and your points and history follow you to the market from any browser.",
           cta: "Make an account",
           variant: "default" as const,
         }
