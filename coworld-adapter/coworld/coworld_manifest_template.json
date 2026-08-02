@@ -286,7 +286,9 @@
         "node",
         "/app/integration/src/starter-player.mjs"
       ],
-      "env": {},
+      "env": {
+        "PROXYWAR_PLAYER_POST_FINAL_LINGER_MS": "120000"
+      },
       "id": "proxywar-starter-websocket",
       "name": "Proxy War Starter Websocket Player",
       "description": "Minimal websocket player that chooses one offered LegalAction.id."

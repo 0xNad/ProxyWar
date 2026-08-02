@@ -264,5 +264,23 @@ socket.on("message", (data) => {
   }));
 });
 
-socket.on("close", () => process.exit(0));
+// Post-final linger (hosted only, via pod env): keeps the finished player
+// pod discoverable through the platform's terminal reconciliation, which
+// otherwise intermittently fails whole episodes with "pod ... not found"
+// (league rounds 1127/1128/1130, 2026-08-02). SIGTERM always exits at once.
+const postFinalLingerMs = Number(
+  process.env.PROXYWAR_PLAYER_POST_FINAL_LINGER_MS ?? "0",
+);
+process.on("SIGTERM", () => process.exit(0));
+process.on("SIGINT", () => process.exit(0));
+socket.on("close", () => {
+  if (Number.isFinite(postFinalLingerMs) && postFinalLingerMs > 0) {
+    console.log(
+      `lingering ${postFinalLingerMs}ms after close for platform reconciliation`,
+    );
+    setTimeout(() => process.exit(0), postFinalLingerMs);
+    return;
+  }
+  process.exit(0);
+});
 socket.on("error", (error) => { console.error(error); process.exit(1); });

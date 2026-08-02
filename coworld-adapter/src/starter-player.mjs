@@ -40,8 +40,31 @@ socket.on("message", (data) => {
   );
 });
 
+// Post-final linger (hosted only, via pod env): the platform's terminal
+// reconciliation fails whole episodes with "pod ... not found" when player
+// job pods self-exit on `final` and get cleaned up before the reconciler
+// looks (league rounds 1127/1128/1130, 2026-08-02; round-1038 precedent
+// where a player log reached final yet the platform reported the pod
+// absent). Holding the finished process briefly keeps the pod discoverable.
+// SIGTERM always wins immediately, so platform teardown is never delayed.
+const postFinalLingerMs = Number(
+  process.env.PROXYWAR_PLAYER_POST_FINAL_LINGER_MS ?? "0",
+);
+process.on("SIGTERM", () => process.exit(0));
+process.on("SIGINT", () => process.exit(0));
+function exitAfterClose(code) {
+  if (Number.isFinite(postFinalLingerMs) && postFinalLingerMs > 0) {
+    console.log(
+      `lingering ${postFinalLingerMs}ms after close for platform reconciliation`,
+    );
+    setTimeout(() => process.exit(code), postFinalLingerMs);
+    return;
+  }
+  process.exit(code);
+}
+
 socket.on("close", () => {
-  process.exit(0);
+  exitAfterClose(0);
 });
 
 socket.on("error", (error) => {
