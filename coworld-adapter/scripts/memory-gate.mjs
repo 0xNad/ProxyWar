@@ -53,7 +53,16 @@ const MAX_SLOPE = Number(process.env.PROXYWAR_MEMORY_GATE_MAX_SLOPE ?? 4);
 const TIMEOUT_MS = Number(
   process.env.PROXYWAR_MEMORY_GATE_TIMEOUT_MS ?? 1_800_000,
 );
-const SLOPE_WARMUP_TURNS = 2_000;
+// The asserted slope fits ONLY the final window of the episode. Territorial
+// expansion legitimately grows the live set for as long as it runs, and how
+// long it runs scales with the map (World saturates ~turn 5k; Britannia's
+// islands push past 6k) — a full-run fit flags big maps for being big. A
+// leak, by definition, is still growing at the END; the 2026-07 leak class
+// (+8.6 MB/1k) fails a late-window fit just as loudly. Qualification data,
+// all maps, forced-GC series: late-3k slopes -9.9..+3.4 for healthy runs.
+const SLOPE_WINDOW_TURNS = Number(
+  process.env.PROXYWAR_MEMORY_GATE_SLOPE_WINDOW ?? 3_000,
+);
 
 const reportDir = path.join(adapterRoot, "artifacts", "memory-gate");
 mkdirSync(reportDir, { recursive: true });
@@ -254,26 +263,35 @@ child.on("close", (code) => {
     );
   }
 
-  // Least-squares slope over the post-warmup samples, in MB per 1k turns.
-  const post = memSamples.filter((s) => s.turn >= SLOPE_WARMUP_TURNS);
-  let slope = 0;
-  if (post.length >= 3) {
-    const n = post.length;
-    const meanTurn = post.reduce((a, s) => a + s.turn, 0) / n;
-    const meanRss = post.reduce((a, s) => a + s.rssMB, 0) / n;
+  // Least-squares slope in MB per 1k turns over a sample window.
+  const fitSlope = (samples) => {
+    if (samples.length < 3) {
+      return 0;
+    }
+    const n = samples.length;
+    const meanTurn = samples.reduce((a, s) => a + s.turn, 0) / n;
+    const meanRss = samples.reduce((a, s) => a + s.rssMB, 0) / n;
     let num = 0;
     let den = 0;
-    for (const s of post) {
+    for (const s of samples) {
       num += (s.turn - meanTurn) * (s.rssMB - meanRss);
       den += (s.turn - meanTurn) * (s.turn - meanTurn);
     }
-    slope = den === 0 ? 0 : (num / den) * 1000;
-  }
+    return den === 0 ? 0 : (num / den) * 1000;
+  };
+  const lastTurn = memSamples[memSamples.length - 1].turn;
+  // Asserted: the FINAL window only (see SLOPE_WINDOW_TURNS). Reported for
+  // context: the full-run fit, which includes legitimate expansion growth.
+  const slope = fitSlope(
+    memSamples.filter((s) => s.turn >= lastTurn - SLOPE_WINDOW_TURNS),
+  );
+  const fullRunSlope = fitSlope(memSamples);
 
   const turnCount = results?.turn_count ?? "?";
   console.error(
     `[memory-gate] episode complete: turns=${turnCount} samples=${memSamples.length} ` +
-      `maxRss=${maxRss}MB@turn=${maxRssTurn} slope=${slope.toFixed(2)}MB/1k`,
+      `maxRss=${maxRss}MB@turn=${maxRssTurn} lateSlope=${slope.toFixed(2)}MB/1k ` +
+      `(full-run ${fullRunSlope.toFixed(2)})`,
   );
 
   const evidence = {
@@ -284,6 +302,8 @@ child.on("close", (code) => {
     maxRssMB: maxRss,
     maxRssTurn,
     slopeMBPer1k: Number(slope.toFixed(3)),
+    slopeWindowTurns: SLOPE_WINDOW_TURNS,
+    fullRunSlopeMBPer1k: Number(fullRunSlope.toFixed(3)),
     ceilingMB: MAX_RSS_MB,
     maxSlopeMBPer1k: MAX_SLOPE,
   };

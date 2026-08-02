@@ -7,7 +7,7 @@
   ],
   "game": {
     "name": "proxywar",
-    "version": "0.1.16",
+    "version": "0.1.17",
     "description": "Hosted Proxy War Coworld adapter that preserves the LegalAction.id decision path.",
     "owner": "proxywar",
     "config_schema": {
