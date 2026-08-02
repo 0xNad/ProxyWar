@@ -56,6 +56,16 @@ GITHUB_CLIENT_ID_FILE="${PW_BET_GITHUB_CLIENT_ID_FILE:-$HOME/.proxywar-deploy/gi
 GITHUB_CLIENT_SECRET_FILE="${PW_BET_GITHUB_CLIENT_SECRET_FILE:-$HOME/.proxywar-deploy/github-oauth-client-secret}"
 # The live league's own public standings feed. Not the deploy's copy.
 LEAGUE_DATA_URL="${PW_BET_LEAGUE_DATA_URL:-https://beta.proxywar.xyz/ai-league-runs/league/data.json}"
+# The account authority this origin hands off to for "Sign in" (RUNBOOK
+# §15-§16: platform->bet one-time-code identity handoff). Setting this is
+# what MOUNTS the three /api/premieres/auth/handoff/* routes server-side
+# (ai-agent-demo-server.ts's `else if (configuredPlatformOrigin !== undefined)`
+# branch) - unset means the routes are genuinely absent, not broken. The
+# platform's own PROXYWAR_PLATFORM_RETURN_ORIGINS must list "betting" ->
+# this origin (already configured: start-proxywar-platform.zsh) or the
+# platform refuses to issue a code for it. Operator decision 2026-08-02:
+# enabled (RUNBOOK §16.1 superseded; see §17.5).
+PLATFORM_ORIGIN="${PROXYWAR_PLATFORM_ORIGIN:-https://proxywar.xyz}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE"
 # shellcheck source=./premiere-queue-lib.sh
@@ -194,6 +204,7 @@ start_origin() {
   PROXYWAR_REPLAY_PREMIERE_STATE_ROOT="$STATE_ROOT" \
   PROXYWAR_LEAGUE_WRAPPER_ONLY=true \
   PROXYWAR_ARTIFACTS_ROOT="$ARTIFACTS_ROOT" \
+  PROXYWAR_PLATFORM_ORIGIN="$PLATFORM_ORIGIN" \
   nohup python3 -c 'import os,sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
     npx tsx src/scripts/ai-agent-demo-server.ts >>"$LOGFILE" 2>&1 &
   echo $! >"$PIDFILE"
