@@ -881,7 +881,7 @@ export function renderAnalystPanel(data: AnalystPanelData): HTMLElement {
 }
 
 /** A cheap, real bar chart — plain divs with a CSS custom property driving width, no charting library (D3 is the repo's only precedent and costs ~500+ LOC per new visualization; this needs none of that for a simple count distribution). */
-function renderAnalystActionChart(
+export function renderAnalystActionChart(
   counts: readonly AnalystActionKindCount[],
 ): HTMLElement {
   const wrap = element("div", "broadcast-analyst-chart");

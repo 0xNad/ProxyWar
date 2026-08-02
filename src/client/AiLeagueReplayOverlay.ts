@@ -6,6 +6,7 @@ import {
 import {
   LowerThirdController,
   renderAnalystPanel,
+  renderAnalystActionChart,
   renderAnalystDecisions,
   renderAnalystDecisionRow,
   renderAnalystEventLog,
@@ -3758,12 +3759,36 @@ function aiLeagueAnalystPanelData(
     decisions: hasDecisions ? decisions : null,
     decisionsUnavailableReason: hasDecisions ? null : "no_data",
     events,
-    actionKindCounts: aiLeagueAnalystActionKindCounts(input.decisions),
+    // NEVER the full-match distribution (P2 follow-up review, playhead
+    // boundary #2): analystActionKindCounts below re-derives this from
+    // the eligible slice on every render, exactly like the decisions/
+    // events sub-lists — an aggregate is still a spoiler surface even
+    // though no individual future ROW is ever rendered, so this field is
+    // a structurally-required placeholder only; every real caller
+    // (buildAnalystPanelWindow) always overrides it.
+    actionKindCounts: [],
   };
 }
 
-function aiLeagueAnalystActionKindCounts(
-  decisions: readonly AiLeagueDecisionLogEntry[],
+/**
+ * Action-kind distribution for the Analyst chart, derived from an ALREADY
+ * playhead-filtered slice (the caller passes
+ * `allAnalystDecisions.slice(0, eligibleAnalystDecisionsCount)` — see
+ * mountAiLeagueBroadcastDrawer's own doc). Always a full recompute over
+ * that slice, never an incremental accumulator: the slice can shrink on a
+ * backward seek exactly like the decisions/events sub-lists do, and a
+ * stateful running total would either need its own separate
+ * forward/backward-aware bookkeeping (duplicating the exact
+ * eligible-count logic this function's caller already computes) or drift
+ * wrong on rewind — the same class of bug the ticker's own append-bound
+ * fix exists to prevent. A plain array scan over at most a few thousand
+ * rows costs a fraction of a millisecond, is trivially correct in both
+ * directions, and only ever runs while the Analyst tab is actually
+ * visible (lazy-mounted) — the DOM patch that consumes this result is
+ * what stays key-gated, never this computation.
+ */
+function analystActionKindCounts(
+  decisions: readonly AnalystDecisionRow[],
 ): AnalystActionKindCount[] {
   const counts = new Map<string, number>();
   for (const decision of decisions) {
@@ -4191,10 +4216,14 @@ function buildAnalystEventsSection(
  * the windowed decisions/events sub-sections built above (chart aside,
  * this is the only place that ever rebuilds BOTH sub-lists together —
  * `patchVolatile` below patches/rebuilds each one independently once the
- * panel is already mounted).
+ * panel is already mounted). The chart itself is derived HERE, internally,
+ * from the SAME eligible decisions slice the decisions table windows off
+ * of — never a caller-supplied aggregate — so there is exactly one place
+ * that can get the playhead boundary wrong for the chart, not one per
+ * caller (see `analystActionKindCounts`'s own doc for why this is always
+ * a full recompute, never an incremental accumulator).
  */
 function buildAnalystPanelWindow(
-  chartCounts: readonly AnalystActionKindCount[],
   decisionsUnavailableReason: AnalystModeUnavailableReason | null,
   allDecisions: readonly AnalystDecisionRow[],
   allEvents: readonly AnalystEventRow[],
@@ -4209,7 +4238,9 @@ function buildAnalystPanelWindow(
     decisions: [],
     decisionsUnavailableReason,
     events: [],
-    actionKindCounts: chartCounts,
+    actionKindCounts: analystActionKindCounts(
+      allDecisions.slice(0, eligibleDecisionsCount),
+    ),
   });
   section
     .querySelector(".broadcast-analyst-decisions")
@@ -4397,6 +4428,14 @@ function mountAiLeagueBroadcastDrawer(
   let mountedAnalystEventsCount = -1;
   let mountedAnalystDecisionsWindowSize = analystDecisionsWindowSize;
   let mountedAnalystEventsWindowSize = analystEventsWindowSize;
+  // Action-kind chart key (P2 follow-up, playhead boundary #2): the
+  // chart is an AGGREGATE over the eligible decisions, not a windowed
+  // list, so it has no "window size" of its own — only a change gate,
+  // exactly like the match-state strip's own lastStripKey below. `null`
+  // means "never structurally rendered yet" (matches the strip's own
+  // convention rather than mountedWarRoomCount's -1/count sentinel,
+  // since the chart's key is a JSON string, not a count).
+  let mountedAnalystChartKey: string | null = null;
   // Lazy-mount (spec item 1 follow-up): the Analyst tab's heavy children
   // (chart/table/list) are only ever constructed while the tab is actually
   // visible — desktop analyst-mode toggle on, OR the mobile "Analysis"
@@ -4578,7 +4617,6 @@ function mountAiLeagueBroadcastDrawer(
     // difference.
     const analystRegion = analystVisible
       ? buildAnalystPanelWindow(
-          analystData.actionKindCounts,
           analystData.decisionsUnavailableReason,
           allAnalystDecisions,
           allAnalystEvents,
@@ -4626,6 +4664,13 @@ function mountAiLeagueBroadcastDrawer(
       ? eligibleAnalystDecisionsCount
       : -1;
     mountedAnalystEventsCount = analystVisible ? eligibleAnalystEventsCount : -1;
+    mountedAnalystChartKey = analystVisible
+      ? JSON.stringify(
+          analystActionKindCounts(
+            allAnalystDecisions.slice(0, eligibleAnalystDecisionsCount),
+          ),
+        )
+      : null;
     mountedAnalystDecisionsWindowSize = analystDecisionsWindowSize;
     mountedAnalystEventsWindowSize = analystEventsWindowSize;
     lastStripKey = JSON.stringify(stripInput);
@@ -4745,6 +4790,7 @@ function mountAiLeagueBroadcastDrawer(
         mountedAnalystVisible = false;
         mountedAnalystDecisionsCount = -1;
         mountedAnalystEventsCount = -1;
+        mountedAnalystChartKey = null;
       } else {
         const eligibleAnalystDecisionsCount = domEligibleCount(
           allAnalystDecisions,
@@ -4756,12 +4802,20 @@ function mountAiLeagueBroadcastDrawer(
           (row) => row.turnNumber,
           turnNumber,
         );
+        // Aggregate, not a windowed list — see analystActionKindCounts's
+        // own doc for why this is always a full recompute over the
+        // eligible slice, keyed exactly like the match-state strip below
+        // so the tiny chart region only ever gets touched when the
+        // computed distribution actually changed.
+        const nextAnalystChartCounts = analystActionKindCounts(
+          allAnalystDecisions.slice(0, eligibleAnalystDecisionsCount),
+        );
+        const nextAnalystChartKey = JSON.stringify(nextAnalystChartCounts);
         if (mountedAnalystVisible !== true) {
           // Just turned visible (or the very first tick with it already
           // on) — cold build the whole panel, the same way the War Room
           // ticker handles its own "was empty" transition.
           const nextAnalyst = buildAnalystPanelWindow(
-            analystData.actionKindCounts,
             analystData.decisionsUnavailableReason,
             allAnalystDecisions,
             allAnalystEvents,
@@ -4831,12 +4885,29 @@ function mountAiLeagueBroadcastDrawer(
                 ),
               );
           }
+          if (nextAnalystChartKey !== mountedAnalystChartKey) {
+            const existingChart = analystSection.querySelector<HTMLElement>(
+              ".broadcast-analyst-chart",
+            );
+            if (nextAnalystChartCounts.length === 0) {
+              existingChart?.remove();
+            } else if (existingChart !== null) {
+              existingChart.replaceWith(
+                renderAnalystActionChart(nextAnalystChartCounts),
+              );
+            } else {
+              analystSection.prepend(
+                renderAnalystActionChart(nextAnalystChartCounts),
+              );
+            }
+          }
         }
         mountedAnalystVisible = true;
         mountedAnalystDecisionsCount = eligibleAnalystDecisionsCount;
         mountedAnalystEventsCount = eligibleAnalystEventsCount;
         mountedAnalystDecisionsWindowSize = analystDecisionsWindowSize;
         mountedAnalystEventsWindowSize = analystEventsWindowSize;
+        mountedAnalystChartKey = nextAnalystChartKey;
       }
     }
 

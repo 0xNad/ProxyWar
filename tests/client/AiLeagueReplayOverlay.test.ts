@@ -3158,6 +3158,135 @@ describe("AiLeagueReplayOverlay", () => {
       expect(analyst?.textContent).toContain("BOUNDARY_AT_DECISION");
     });
 
+    it("derives the Analyst action-kind chart from the eligible slice only — a kind occurring ONLY beyond the playhead is absent from the chart until the playhead reaches its first occurrence, and every count exactly matches a hand-computed slice (P2 follow-up review: the chart is an aggregate, not a windowed list, but is STILL a spoiler surface)", () => {
+      const runID = "broadcast-analyst-chart-boundary-1";
+      // Turns 1-50: kind "build". Turns 51-100: kind "expand". ONE decision
+      // at turn 200 with a THIRD kind, "nuke", that never occurs any
+      // earlier -- the exact shape a leaked full-match aggregate would
+      // expose immediately (the chart used to derive from
+      // `input.decisions` unfiltered, so "nuke" would have been visible
+      // at turn 0 even though the match hadn't reached it yet).
+      function chartRowCount(label: string): string | null {
+        const rows = document.querySelectorAll(
+          ".broadcast-analyst-chart-row",
+        );
+        for (const row of rows) {
+          if (
+            row.querySelector(".broadcast-analyst-chart-label")
+              ?.textContent === label
+          ) {
+            return (
+              row.querySelector(".broadcast-analyst-chart-count")
+                ?.textContent ?? null
+            );
+          }
+        }
+        return null;
+      }
+      const decisions = [
+        ...Array.from({ length: 50 }, (_, index) => ({
+          ...decisionFixture(index + 1),
+          turnNumber: index + 1,
+          selectedActionKind: "build",
+        })),
+        ...Array.from({ length: 50 }, (_, index) => ({
+          ...decisionFixture(51 + index),
+          turnNumber: 51 + index,
+          selectedActionKind: "expand",
+        })),
+        {
+          ...decisionFixture(9999),
+          turnNumber: 200,
+          selectedActionKind: "nuke",
+        },
+      ];
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions,
+        currentTurn: 100,
+      });
+      document
+        .querySelector<HTMLButtonElement>("[data-ai-league-analyst-toggle]")
+        ?.click();
+
+      // At turn 100: exactly 100 eligible decisions (50 build + 50
+      // expand) -- "nuke" (turn 200) has not happened yet.
+      expect(
+        document.querySelectorAll(".broadcast-analyst-chart-row"),
+      ).toHaveLength(2);
+      expect(chartRowCount("build")).toBe("50");
+      expect(chartRowCount("expand")).toBe("50");
+      expect(chartRowCount("nuke")).toBeNull();
+      expect(
+        document.querySelector(".broadcast-analyst-chart")?.textContent,
+      ).not.toContain("nuke");
+
+      // Seeking past turn 200 reveals it, with its own exact count (1),
+      // while the earlier counts stay exactly what they always were.
+      document.dispatchEvent(
+        new CustomEvent("ai-league-replay-frame", {
+          detail: { tick: 200, turnNumber: 200, players: [] },
+        }),
+      );
+      expect(
+        document.querySelectorAll(".broadcast-analyst-chart-row"),
+      ).toHaveLength(3);
+      expect(chartRowCount("build")).toBe("50");
+      expect(chartRowCount("expand")).toBe("50");
+      expect(chartRowCount("nuke")).toBe("1");
+    });
+
+    it("re-shrinks the Analyst action-kind chart on a backward seek — a full recompute over the (now smaller) eligible slice every tick, never a stateful accumulator that could drift on rewind", () => {
+      const runID = "broadcast-analyst-chart-backward-seek-1";
+      const decisions = [
+        ...Array.from({ length: 50 }, (_, index) => ({
+          ...decisionFixture(index + 1),
+          turnNumber: index + 1,
+          selectedActionKind: "build",
+        })),
+        ...Array.from({ length: 50 }, (_, index) => ({
+          ...decisionFixture(51 + index),
+          turnNumber: 51 + index,
+          selectedActionKind: "expand",
+        })),
+      ];
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions,
+        currentTurn: 100,
+      });
+      document
+        .querySelector<HTMLButtonElement>("[data-ai-league-analyst-toggle]")
+        ?.click();
+      expect(
+        document.querySelectorAll(".broadcast-analyst-chart-row"),
+      ).toHaveLength(2);
+
+      // Backward seek to turn 30: only "build" (turns 1-30) is eligible —
+      // "expand" (turns 51-100) never happened yet from this rewound
+      // playhead's point of view, so its row must disappear entirely, not
+      // just stop growing.
+      document.dispatchEvent(
+        new CustomEvent("ai-league-replay-frame", {
+          detail: { tick: 30, turnNumber: 30, players: [] },
+        }),
+      );
+      const rows = document.querySelectorAll<HTMLElement>(
+        ".broadcast-analyst-chart-row",
+      );
+      expect(rows).toHaveLength(1);
+      expect(
+        rows[0]?.querySelector(".broadcast-analyst-chart-label")
+          ?.textContent,
+      ).toBe("build");
+      expect(
+        rows[0]?.querySelector(".broadcast-analyst-chart-count")
+          ?.textContent,
+      ).toBe("30");
+    });
+
     it("redacts a future timeline marker's kind and label until the playhead reaches it, then reveals the real content (spec item 2)", () => {
       const runID = "broadcast-marker-redaction-1";
       mountAiLeagueReplayOverlay({
