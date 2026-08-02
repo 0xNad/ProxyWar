@@ -32,14 +32,36 @@ export interface Nation {
   name: string;
 }
 
+export interface LoadTerrainMapOptions {
+  /**
+   * When false, skip the module-level map cache: parse fresh and return the
+   * parsed instance directly, without retaining a master copy or paying the
+   * defensive deep clone. A one-shot process (a hosted Coworld episode runs
+   * exactly one game) otherwise keeps three full map datasets alive where one
+   * suffices — cache master, spawn-scan clone, and game clone. The default
+   * (true) preserves client/worker behavior: cache the parse, hand out
+   * isolated clones.
+   *
+   * Precondition: the GameMapLoader must hand out FRESH bytes per call (all
+   * current loaders re-read). genTerrainFromBin aliases the byte buffer into
+   * the mutable GameMapImpl terrain, so a hypothetical byte-caching loader
+   * combined with cache:false would alias mutable terrain across instances.
+   */
+  cache?: boolean;
+}
+
 export async function loadTerrainMap(
   map: GameMapType,
   mapSize: GameMapSize,
   terrainMapFileLoader: GameMapLoader,
+  options?: LoadTerrainMapOptions,
 ): Promise<TerrainMapData> {
+  const useCache = options?.cache !== false;
   const cacheKey = `${map}:${mapSize}`;
-  const cached = loadedMaps.get(cacheKey);
-  if (cached !== undefined) return cloneTerrainMapData(cached);
+  if (useCache) {
+    const cached = loadedMaps.get(cacheKey);
+    if (cached !== undefined) return cloneTerrainMapData(cached);
+  }
   const mapFiles = terrainMapFileLoader.getMapData(map);
   const manifest = await mapFiles.manifest();
 
@@ -86,6 +108,9 @@ export async function loadTerrainMap(
     miniGameMap: miniMap,
     teamGameSpawnAreas,
   };
+  if (!useCache) {
+    return result;
+  }
   loadedMaps.set(cacheKey, result);
   return cloneTerrainMapData(result);
 }

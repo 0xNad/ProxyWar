@@ -43,7 +43,23 @@ socket.on("message", (data) => {
   );
 });
 
-socket.on("close", () => process.exit(0));
+// Post-final linger (hosted only, via pod env) — see llm-player.mjs; keeps
+// finished pods discoverable through platform terminal reconciliation.
+const postFinalLingerMs = Number(
+  process.env.PROXYWAR_PLAYER_POST_FINAL_LINGER_MS ?? "0",
+);
+process.on("SIGTERM", () => process.exit(0));
+process.on("SIGINT", () => process.exit(0));
+socket.on("close", () => {
+  if (Number.isFinite(postFinalLingerMs) && postFinalLingerMs > 0) {
+    console.log(
+      `lingering ${postFinalLingerMs}ms after close for platform reconciliation`,
+    );
+    setTimeout(() => process.exit(0), postFinalLingerMs);
+    return;
+  }
+  process.exit(0);
+});
 socket.on("error", (error) => {
   console.error(error);
   process.exit(1);

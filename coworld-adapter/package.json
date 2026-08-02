@@ -7,10 +7,11 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "prepare:docker-context": "node scripts/prepare-docker-context.mjs",
-    "build:image": "npm run prepare:docker-context && docker build --platform linux/amd64 -f Dockerfile.coworld -t proxywar-coworld-local:latest .docker-context",
+    "build:image": "npm run gate:memory && npm run prepare:docker-context && docker build --platform linux/amd64 -f Dockerfile.coworld -t proxywar-coworld-local:latest .docker-context",
     "certify": "mkdir -p tmp && TMPDIR=\"$PWD/tmp\" uvx --from coworld coworld certify coworld/coworld_manifest.json --timeout-seconds 180",
     "certify:ffa": "mkdir -p tmp && TMPDIR=\"$PWD/tmp\" uvx --from coworld coworld certify coworld/coworld_manifest_ffa4p.json --timeout-seconds 240",
-    "run:episode": "mkdir -p tmp && TMPDIR=\"$PWD/tmp\" uvx --from coworld coworld run-episode coworld/coworld_manifest.json --verify-replay --timeout-seconds 3600"
+    "run:episode": "mkdir -p tmp && TMPDIR=\"$PWD/tmp\" uvx --from coworld coworld run-episode coworld/coworld_manifest.json --verify-replay --timeout-seconds 3600",
+    "gate:memory": "node scripts/memory-gate.mjs"
   },
   "dependencies": {
     "@anthropic-ai/bedrock-sdk": "^0.29.2",

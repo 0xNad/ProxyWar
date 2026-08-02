@@ -32,8 +32,16 @@ const MODELS = [
   "anthropic.claude-sonnet-4-5-20250929-v1:0",
 ].filter(Boolean);
 
+// Hosted pods front Bedrock with a per-pod sidecar (since ~2026-07-30): calls
+// must go to AWS_ENDPOINT_URL_BEDROCK_RUNTIME or they 403 on placeholder creds.
+// Locally the env var is absent and the client talks to AWS directly as before.
+const SIDECAR = (process.env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME || "").trim();
 let bedrock = null;
-try { bedrock = new AnthropicBedrock({ awsRegion: REGION }); } catch (e) { bedrock = null; }
+try {
+  bedrock = new AnthropicBedrock(
+    SIDECAR ? { awsRegion: REGION, baseURL: SIDECAR } : { awsRegion: REGION },
+  );
+} catch (e) { bedrock = null; }
 let lockedModel = null;
 
 // -- YOUR STRATEGY -- edit this to change how your agent thinks ---------------
@@ -256,5 +264,23 @@ socket.on("message", (data) => {
   }));
 });
 
-socket.on("close", () => process.exit(0));
+// Post-final linger (hosted only, via pod env): keeps the finished player
+// pod discoverable through the platform's terminal reconciliation, which
+// otherwise intermittently fails whole episodes with "pod ... not found"
+// (league rounds 1127/1128/1130, 2026-08-02). SIGTERM always exits at once.
+const postFinalLingerMs = Number(
+  process.env.PROXYWAR_PLAYER_POST_FINAL_LINGER_MS ?? "0",
+);
+process.on("SIGTERM", () => process.exit(0));
+process.on("SIGINT", () => process.exit(0));
+socket.on("close", () => {
+  if (Number.isFinite(postFinalLingerMs) && postFinalLingerMs > 0) {
+    console.log(
+      `lingering ${postFinalLingerMs}ms after close for platform reconciliation`,
+    );
+    setTimeout(() => process.exit(0), postFinalLingerMs);
+    return;
+  }
+  process.exit(0);
+});
 socket.on("error", (error) => { console.error(error); process.exit(1); });

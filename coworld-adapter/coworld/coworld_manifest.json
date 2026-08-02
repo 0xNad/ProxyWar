@@ -1,9 +1,13 @@
 {
   "$schema": "https://raw.githubusercontent.com/Metta-AI/coworld/main/src/coworld/coworld_manifest_schema.json",
-  "tags": ["strategy", "multiplayer", "ai-agents"],
+  "tags": [
+    "strategy",
+    "multiplayer",
+    "ai-agents"
+  ],
   "game": {
     "name": "proxywar",
-    "version": "0.1.7",
+    "version": "0.1.17",
     "description": "Hosted Proxy War Coworld adapter that preserves the LegalAction.id decision path.",
     "owner": "proxywar",
     "config_schema": {
@@ -72,7 +76,10 @@
             "NorthAmerica",
             "Africa",
             "Mena",
-            "Britannia"
+            "Britannia",
+            "EastAsia",
+            "Oceania",
+            "BlackSea"
           ]
         },
         "map_size": {
@@ -82,6 +89,12 @@
         "difficulty": {
           "type": "string",
           "enum": ["Easy", "Medium"]
+        },
+        "seed": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 308915775,
+          "description": "Optional deterministic episode seed. Encoded as six base-26 A-Z letters so OpenFront simpleHash remains injective over the supported range."
         },
         "replay_tail_turns": {
           "type": "integer",
@@ -114,6 +127,8 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "seed",
+        "game_id",
         "scores",
         "winner_slot",
         "turn_count",
@@ -124,6 +139,18 @@
         "players"
       ],
       "properties": {
+        "seed": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 308915775
+        },
+        "game_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9]{8}$"
+        },
         "scores": {
           "type": "array",
           "minItems": 2,
@@ -195,7 +222,7 @@
     },
     "runnable": {
       "type": "game",
-      "image": "proxywar-coworld-local:coworld-3e7e218fc73f",
+      "image": "proxywar-coworld-local:coworld-bfc17fcd56f2",
       "run": [
         "node",
         "--max-old-space-size=640",
@@ -208,7 +235,7 @@
     "protocols": {
       "player": {
         "type": "text",
-        "value": "Proxy War Coworld player protocol: connect to COWORLD_PLAYER_WS_URL. The game sends {type:'decision_request', requestID, request:{protocolVersion:'proxywar-agent-v1', observation, legalActions, responseContract}}. The player replies {type:'decision_response', requestID, selectedLegalActionId, reason, confidence?}. selectedLegalActionId must be one offered LegalAction.id from legalActions[].id. The game still validates through Proxy War AgentDecisionValidator."
+        "value": "Proxy War Coworld player protocol: connect to COWORLD_PLAYER_WS_URL. The game sends {type:'decision_request', requestID, request:{protocolVersion:'proxywar-agent-v1', observation, legalActions, responseContract}}. The player replies {type:'decision_response', requestID, selectedLegalActionId, reason, confidence?}. selectedLegalActionId must be one offered LegalAction.id from legalActions[].id. At episode end the game sends {type:'final', slot}; the player must finish any optional COWORLD_PLAYER_ARTIFACT_UPLOAD_URL upload before closing because websocket close acknowledges terminal work is complete. The game still validates decisions through Proxy War AgentDecisionValidator."
       },
       "global": {
         "type": "text",
@@ -226,8 +253,11 @@
   "player": [
     {
       "type": "player",
-      "image": "proxywar-coworld-local:coworld-3e7e218fc73f",
-      "run": ["node", "/app/integration/src/starter-player.mjs"],
+      "image": "proxywar-coworld-local:coworld-bfc17fcd56f2",
+      "run": [
+        "node",
+        "/app/integration/src/starter-player.mjs"
+      ],
       "env": {},
       "id": "proxywar-starter-websocket",
       "name": "Proxy War Starter Websocket Player",
@@ -238,7 +268,7 @@
   "commissioner": [
     {
       "type": "commissioner",
-      "image": "proxywar-commissioner-local:coworld-712f3ec10f3b",
+      "image": "proxywar-commissioner-local:coworld-7f562b4a49c6",
       "run": [],
       "env": {},
       "id": "proxywar-ladder-commissioner",
@@ -251,8 +281,11 @@
   "optimizer": [
     {
       "type": "optimizer",
-      "image": "proxywar-coworld-local:coworld-3e7e218fc73f",
-      "run": ["node", "/app/integration/src/proxywar-optimizer-plan.mjs"],
+      "image": "proxywar-coworld-local:coworld-bfc17fcd56f2",
+      "run": [
+        "node",
+        "/app/integration/src/proxywar-optimizer-plan.mjs"
+      ],
       "env": {},
       "id": "proxywar-optimizer-plan",
       "name": "Proxy War Optimizer Plan",
@@ -666,6 +699,336 @@
         "episode_timeout_seconds": 3600
       },
       "description": "DRAFT, unvalidated by the game author: a 12-policy free-for-all -- the seat count the author expects the game to 'shine' at. Extrapolated, not playtested; verify real wall-clock via `coworld run-episode --variant tournament-12p` before this rung ever seats a real league round."
+    },
+    {
+      "id": "tournament-12p-asia",
+      "name": "Tournament 12P - Asia",
+      "game_config": {
+        "players": [
+          {
+            "name": "Coworld Starter 1"
+          },
+          {
+            "name": "Coworld Starter 2"
+          },
+          {
+            "name": "Coworld Starter 3"
+          },
+          {
+            "name": "Coworld Starter 4"
+          },
+          {
+            "name": "Coworld Starter 5"
+          },
+          {
+            "name": "Coworld Starter 6"
+          },
+          {
+            "name": "Coworld Starter 7"
+          },
+          {
+            "name": "Coworld Starter 8"
+          },
+          {
+            "name": "Coworld Starter 9"
+          },
+          {
+            "name": "Coworld Starter 10"
+          },
+          {
+            "name": "Coworld Starter 11"
+          },
+          {
+            "name": "Coworld Starter 12"
+          }
+        ],
+        "num_agents": 12,
+        "max_decision_steps": 500,
+        "turns_per_decision_step": 100,
+        "max_decision_ms": 15000,
+        "map": "Asia",
+        "map_size": "Normal",
+        "difficulty": "Easy",
+        "replay_tail_turns": 500,
+        "player_connect_timeout_seconds": 120,
+        "episode_timeout_seconds": 3600
+      },
+      "description": "Twelve-policy free-for-all on Asia (Normal): same seat count, step caps, clock, and scoring as the other Tournament 12P variants \u2014 only the map differs. Qualified for the rotation via the memory-regression gate (80-step native 12P episode under the hosted heap posture) before shipping."
+    },
+    {
+      "id": "tournament-12p-eastasia",
+      "name": "Tournament 12P - East Asia",
+      "game_config": {
+        "players": [
+          {
+            "name": "Coworld Starter 1"
+          },
+          {
+            "name": "Coworld Starter 2"
+          },
+          {
+            "name": "Coworld Starter 3"
+          },
+          {
+            "name": "Coworld Starter 4"
+          },
+          {
+            "name": "Coworld Starter 5"
+          },
+          {
+            "name": "Coworld Starter 6"
+          },
+          {
+            "name": "Coworld Starter 7"
+          },
+          {
+            "name": "Coworld Starter 8"
+          },
+          {
+            "name": "Coworld Starter 9"
+          },
+          {
+            "name": "Coworld Starter 10"
+          },
+          {
+            "name": "Coworld Starter 11"
+          },
+          {
+            "name": "Coworld Starter 12"
+          }
+        ],
+        "num_agents": 12,
+        "max_decision_steps": 500,
+        "turns_per_decision_step": 100,
+        "max_decision_ms": 15000,
+        "map": "EastAsia",
+        "map_size": "Normal",
+        "difficulty": "Easy",
+        "replay_tail_turns": 500,
+        "player_connect_timeout_seconds": 120,
+        "episode_timeout_seconds": 3600
+      },
+      "description": "Twelve-policy free-for-all on East Asia (Normal): same seat count, step caps, clock, and scoring as the other Tournament 12P variants \u2014 only the map differs. Qualified for the rotation via the memory-regression gate (80-step native 12P episode under the hosted heap posture) before shipping."
+    },
+    {
+      "id": "tournament-12p-oceania",
+      "name": "Tournament 12P - Oceania",
+      "game_config": {
+        "players": [
+          {
+            "name": "Coworld Starter 1"
+          },
+          {
+            "name": "Coworld Starter 2"
+          },
+          {
+            "name": "Coworld Starter 3"
+          },
+          {
+            "name": "Coworld Starter 4"
+          },
+          {
+            "name": "Coworld Starter 5"
+          },
+          {
+            "name": "Coworld Starter 6"
+          },
+          {
+            "name": "Coworld Starter 7"
+          },
+          {
+            "name": "Coworld Starter 8"
+          },
+          {
+            "name": "Coworld Starter 9"
+          },
+          {
+            "name": "Coworld Starter 10"
+          },
+          {
+            "name": "Coworld Starter 11"
+          },
+          {
+            "name": "Coworld Starter 12"
+          }
+        ],
+        "num_agents": 12,
+        "max_decision_steps": 500,
+        "turns_per_decision_step": 100,
+        "max_decision_ms": 15000,
+        "map": "Oceania",
+        "map_size": "Normal",
+        "difficulty": "Easy",
+        "replay_tail_turns": 500,
+        "player_connect_timeout_seconds": 120,
+        "episode_timeout_seconds": 3600
+      },
+      "description": "Twelve-policy free-for-all on Oceania (Normal): same seat count, step caps, clock, and scoring as the other Tournament 12P variants \u2014 only the map differs. Qualified for the rotation via the memory-regression gate (80-step native 12P episode under the hosted heap posture) before shipping."
+    },
+    {
+      "id": "tournament-12p-blacksea",
+      "name": "Tournament 12P - Black Sea",
+      "game_config": {
+        "players": [
+          {
+            "name": "Coworld Starter 1"
+          },
+          {
+            "name": "Coworld Starter 2"
+          },
+          {
+            "name": "Coworld Starter 3"
+          },
+          {
+            "name": "Coworld Starter 4"
+          },
+          {
+            "name": "Coworld Starter 5"
+          },
+          {
+            "name": "Coworld Starter 6"
+          },
+          {
+            "name": "Coworld Starter 7"
+          },
+          {
+            "name": "Coworld Starter 8"
+          },
+          {
+            "name": "Coworld Starter 9"
+          },
+          {
+            "name": "Coworld Starter 10"
+          },
+          {
+            "name": "Coworld Starter 11"
+          },
+          {
+            "name": "Coworld Starter 12"
+          }
+        ],
+        "num_agents": 12,
+        "max_decision_steps": 500,
+        "turns_per_decision_step": 100,
+        "max_decision_ms": 15000,
+        "map": "BlackSea",
+        "map_size": "Normal",
+        "difficulty": "Easy",
+        "replay_tail_turns": 500,
+        "player_connect_timeout_seconds": 120,
+        "episode_timeout_seconds": 3600
+      },
+      "description": "Twelve-policy free-for-all on Black Sea (Normal): same seat count, step caps, clock, and scoring as the other Tournament 12P variants \u2014 only the map differs. Qualified for the rotation via the memory-regression gate (80-step native 12P episode under the hosted heap posture) before shipping."
+    },
+    {
+      "id": "tournament-12p-britannia",
+      "name": "Tournament 12P - Britannia",
+      "game_config": {
+        "players": [
+          {
+            "name": "Coworld Starter 1"
+          },
+          {
+            "name": "Coworld Starter 2"
+          },
+          {
+            "name": "Coworld Starter 3"
+          },
+          {
+            "name": "Coworld Starter 4"
+          },
+          {
+            "name": "Coworld Starter 5"
+          },
+          {
+            "name": "Coworld Starter 6"
+          },
+          {
+            "name": "Coworld Starter 7"
+          },
+          {
+            "name": "Coworld Starter 8"
+          },
+          {
+            "name": "Coworld Starter 9"
+          },
+          {
+            "name": "Coworld Starter 10"
+          },
+          {
+            "name": "Coworld Starter 11"
+          },
+          {
+            "name": "Coworld Starter 12"
+          }
+        ],
+        "num_agents": 12,
+        "max_decision_steps": 500,
+        "turns_per_decision_step": 100,
+        "max_decision_ms": 15000,
+        "map": "Britannia",
+        "map_size": "Normal",
+        "difficulty": "Easy",
+        "replay_tail_turns": 500,
+        "player_connect_timeout_seconds": 120,
+        "episode_timeout_seconds": 3600
+      },
+      "description": "Twelve-policy free-for-all on Britannia (Normal): same seat count, step caps, clock, and scoring as the other Tournament 12P variants \u2014 only the map differs. Qualified for the rotation via the memory-regression gate (80-step native 12P episode under the hosted heap posture) before shipping."
+    },
+    {
+      "id": "tournament-12p-northamerica",
+      "name": "Tournament 12P - North America",
+      "game_config": {
+        "players": [
+          {
+            "name": "Coworld Starter 1"
+          },
+          {
+            "name": "Coworld Starter 2"
+          },
+          {
+            "name": "Coworld Starter 3"
+          },
+          {
+            "name": "Coworld Starter 4"
+          },
+          {
+            "name": "Coworld Starter 5"
+          },
+          {
+            "name": "Coworld Starter 6"
+          },
+          {
+            "name": "Coworld Starter 7"
+          },
+          {
+            "name": "Coworld Starter 8"
+          },
+          {
+            "name": "Coworld Starter 9"
+          },
+          {
+            "name": "Coworld Starter 10"
+          },
+          {
+            "name": "Coworld Starter 11"
+          },
+          {
+            "name": "Coworld Starter 12"
+          }
+        ],
+        "num_agents": 12,
+        "max_decision_steps": 500,
+        "turns_per_decision_step": 100,
+        "max_decision_ms": 15000,
+        "map": "NorthAmerica",
+        "map_size": "Normal",
+        "difficulty": "Easy",
+        "replay_tail_turns": 500,
+        "player_connect_timeout_seconds": 120,
+        "episode_timeout_seconds": 3600
+      },
+      "description": "Twelve-policy free-for-all on North America (Normal): same seat count, step caps, clock, and scoring as the other Tournament 12P variants \u2014 only the map differs. Qualified for the rotation via the memory-regression gate (80-step native 12P episode under the hosted heap posture) before shipping."
     }
   ],
   "certification": {

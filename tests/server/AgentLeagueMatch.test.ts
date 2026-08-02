@@ -614,6 +614,156 @@ describe("AgentLeagueMatchRunner", () => {
     }
   }, 600_000);
 
+  it("runs the mirror's game on the episode's own map dataset (preloadedTerrain)", async () => {
+    const log = makeLogger();
+    const mapLoader = new StaticMapLoader();
+    const config = { ...gameConfig, gameMapSize: GameMapSize.Compact };
+    // cache:false + preloadedTerrain is the coworld episode wiring: one parsed
+    // map dataset serves the spawn scan and the game itself.
+    const terrain = await loadTerrainMap(
+      config.gameMap,
+      config.gameMapSize,
+      mapLoader,
+      { cache: false },
+    );
+    const specs = createDefaultAgentSpecs(2);
+    const participants = createAgentParticipants(specs, log, {
+      brainFactory: () => ({
+        brainType: "mock-llm",
+        decide: async () => ({ actionID: "hold", reason: "unused in spawn" }),
+      }),
+    });
+    const game = new GameServer(
+      "AGENT013",
+      log,
+      Date.now(),
+      steppedServerConfig,
+      config,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: buildSpawnCandidates(terrain.gameMap, {
+        maxCandidates: 200,
+        stride: 2,
+      }),
+      log,
+    });
+    const mirror = new AgentLocalGameMirror(mapLoader, log, terrain);
+
+    try {
+      match.attachAgents();
+      match.startGame();
+      const spawnRecords = await match.runSpawnPhase({
+        mirror,
+        messages: () => participants[0]?.runner.serverMessages() ?? [],
+        turnsPerSpawnTick: 25,
+      });
+      expect(spawnRecords.length).toBeGreaterThan(0);
+      const mirrorGame = mirror.gameState();
+      if (mirrorGame === null) {
+        throw new Error("expected mirror game state after the spawn phase");
+      }
+      // The proof of single-copy sharing: the game's map IS the instance the
+      // spawn scan ran on, not a second load.
+      expect(mirrorGame.map()).toBe(terrain.gameMap);
+    } finally {
+      await game.end({ archive: false });
+    }
+  }, 600_000);
+
+  it("returns isolated datasets when the terrain cache is bypassed", async () => {
+    const mapLoader = new StaticMapLoader();
+    const config = { ...gameConfig, gameMapSize: GameMapSize.Compact };
+    const a = await loadTerrainMap(config.gameMap, config.gameMapSize, mapLoader, {
+      cache: false,
+    });
+    const b = await loadTerrainMap(config.gameMap, config.gameMapSize, mapLoader, {
+      cache: false,
+    });
+    expect(a.gameMap).not.toBe(b.gameMap);
+    // Mutating one uncached dataset must not leak into the other, and must not
+    // poison the cached path either.
+    const tile = a.gameMap.ref(1, 1);
+    a.gameMap.setOwnerID(tile, 9);
+    expect(b.gameMap.hasOwner(tile)).toBe(false);
+    const cached = await loadTerrainMap(
+      config.gameMap,
+      config.gameMapSize,
+      mapLoader,
+    );
+    expect(cached.gameMap.hasOwner(tile)).toBe(false);
+  });
+
+  it("retains the turn stream on the primary seat only when asked", async () => {
+    const log = makeLogger();
+    const mapLoader = new StaticMapLoader();
+    const config = { ...gameConfig, gameMapSize: GameMapSize.Compact };
+    const terrain = await loadTerrainMap(
+      config.gameMap,
+      config.gameMapSize,
+      mapLoader,
+      { cache: false },
+    );
+    const specs = createDefaultAgentSpecs(3);
+    const participants = createAgentParticipants(specs, log, {
+      brainFactory: () => ({
+        brainType: "mock-llm",
+        decide: async () => ({ actionID: "hold", reason: "unused in spawn" }),
+      }),
+      retainTurnMessagesPrimaryOnly: true,
+    });
+    const game = new GameServer(
+      "AGENT014",
+      log,
+      Date.now(),
+      steppedServerConfig,
+      config,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: buildSpawnCandidates(terrain.gameMap, {
+        maxCandidates: 200,
+        stride: 2,
+      }),
+      log,
+    });
+    const mirror = new AgentLocalGameMirror(mapLoader, log, terrain);
+
+    try {
+      match.attachAgents();
+      match.startGame();
+      const spawnRecords = await match.runSpawnPhase({
+        mirror,
+        messages: () => participants[0]?.runner.serverMessages() ?? [],
+        turnsPerSpawnTick: 25,
+      });
+      // The mirror-driven flow works end to end off the primary stream...
+      expect(spawnRecords.length).toBeGreaterThan(0);
+      const primaryTurns = participants[0].runner
+        .serverMessages()
+        .filter((message) => message.type === "turn");
+      expect(primaryTurns.length).toBeGreaterThan(0);
+      // ...while non-primary seats retain the handshake but zero turn bulk,
+      // and their intent submissions were still acknowledged (spawn records
+      // exist for every seat, which requires the error-scan path to work).
+      for (const participant of participants.slice(1)) {
+        const messages = participant.runner.serverMessages();
+        expect(messages.length).toBeGreaterThan(0);
+        expect(
+          messages.filter((message) => message.type === "turn"),
+        ).toHaveLength(0);
+      }
+      const seatsWithRecords = new Set(
+        spawnRecords.map((record) => record.agentID),
+      );
+      expect(seatsWithRecords.size).toBe(3);
+    } finally {
+      await game.end({ archive: false });
+    }
+  }, 600_000);
+
   it("stops spawn submissions at the phase boundary so the final record is the real spawn", async () => {
     const log = makeLogger();
     const mapLoader = new StaticMapLoader();

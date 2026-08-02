@@ -24,7 +24,10 @@ import { TileRef } from "./game/GameMap";
 import { GameMapLoader } from "./game/GameMapLoader";
 import { ErrorUpdate, GameUpdateViewData } from "./game/GameUpdates";
 import { createNationsForGame } from "./game/NationCreation";
-import { loadTerrainMap as loadGameMap } from "./game/TerrainMapLoader";
+import {
+  loadTerrainMap as loadGameMap,
+  TerrainMapData,
+} from "./game/TerrainMapLoader";
 import { PseudoRandom } from "./PseudoRandom";
 import { ClientID, GameStartInfo, Turn } from "./Schemas";
 import { simpleHash } from "./Util";
@@ -34,13 +37,22 @@ export async function createGameRunner(
   clientID: ClientID | undefined,
   mapLoader: GameMapLoader,
   callBack: (gu: GameUpdateViewData | ErrorUpdate) => void,
+  preloadedTerrain?: TerrainMapData,
 ): Promise<GameRunner> {
   const config = await getGameLogicConfig(gameStart.config, null);
-  const gameMap = await loadGameMap(
-    gameStart.config.gameMap,
-    gameStart.config.gameMapSize,
-    mapLoader,
-  );
+  // Contract for preloadedTerrain: it must have been loaded for
+  // gameStart.config's gameMap + gameMapSize, and the caller hands over
+  // ownership — the game mutates tile state in place, so the same instance
+  // must never seed a second game. Server-side episode processes use this to
+  // run spawn-candidate scanning and the game itself on ONE map dataset
+  // instead of two full copies.
+  const gameMap =
+    preloadedTerrain ??
+    (await loadGameMap(
+      gameStart.config.gameMap,
+      gameStart.config.gameMapSize,
+      mapLoader,
+    ));
   const random = new PseudoRandom(simpleHash(gameStart.gameID));
 
   const humans = gameStart.players.map((p) => {

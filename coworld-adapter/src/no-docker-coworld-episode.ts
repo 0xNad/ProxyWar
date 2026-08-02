@@ -30,6 +30,33 @@ const { WebSocket, WebSocketServer } = require(
 };
 const winston = require(`${proxyWarRepo}/node_modules/winston`);
 const proxyWarStaticRoot = path.join(proxyWarRepo, "static");
+
+// --- Coworld episode memory bound (World 12P mid-game OOM fix) -------------
+// Root cause (local repro, hosted memory posture --max-old-space-size=640): on
+// the World map (651,609 land tiles, 12 seats) the runner retained the full
+// per-decision record set AND every spectator snapshot for the whole episode;
+// that turn-linear heap growth on top of World's high fixed baseline pushed the
+// hosted pod past its memory cap mid-game (turn ~5-8k). Two levers fix it
+// WITHOUT changing the simulation, scores, winner, rendered replay, or decision
+// telemetry:
+//   1. Skip the ~8 KB/record `tacticalAffordances` field on the Coworld path
+//      (retainTacticalAffordances: false below). That cuts each record ~60-77%
+//      at EVERY depth, so the FULL decision log stays affordable and is NEVER
+//      truncated — fallback/degradation counts and decisions.jsonl remain
+//      complete (honest-degradation invariant preserved).
+//   2. Reservoir-cap the spectator snapshots (this constant). Snapshots feed
+//      only the downsampled spectator replay, never the result counts, so
+//      bounding them is telemetry-safe. Even-stride decimation keeps them
+//      evenly spaced. 48 engages before the observed crash window (~turn 4.8k
+//      at 100 turns/step), so snapshot heap is flat through the mid-game depths
+//      where the pod OOMs. The spectator replay then carries up to ~48
+//      evenly-spaced snapshots (a watchability trade the operator can raise via
+//      the env override); the rendered replay (message-derived game-record) is
+//      unaffected. Env-overridable.
+const COWORLD_MAX_RETAINED_SNAPSHOTS = Math.max(
+  16,
+  Number(process.env.PROXYWAR_MAX_RETAINED_SNAPSHOTS ?? "48"),
+);
 const proxyWarPublicRunArtifacts = new Set([
   "game-record.json",
   "decisions.jsonl",
@@ -825,10 +852,16 @@ async function runProxyWarEpisode(
   );
   const startedAt = Date.now();
   const mapLoader = new StaticMapLoader();
+  // cache:false — this process runs exactly one game, so the module-level map
+  // cache would only retain a dead master copy. The single parsed dataset
+  // below serves BOTH the spawn-candidate scan and (via the mirror's
+  // preloadedTerrain) the game itself; on World that removes two of the three
+  // full map copies the episode used to hold.
   const terrain = await modules.loadTerrainMap(
     selectedGameConfig.gameMap,
     selectedGameConfig.gameMapSize,
     mapLoader,
+    { cache: false },
   );
   const spawnCandidates = modules.buildSpawnCandidates(terrain.gameMap, {
     maxCandidates: 1000,
@@ -853,20 +886,42 @@ async function runProxyWarEpisode(
         index,
         modules.buildExternalAgentRequestPayload,
       ),
+    // Only participants[0] feeds the mirror/spawn driver; the other seats'
+    // copies of the full turn stream were seats x turns of dead retention.
+    retainTurnMessagesPrimaryOnly: true,
   });
   const roster = agentRunRoster(participants);
   const spectatorSnapshots: unknown[] = [];
   let memTelemetrySnapshots = 0;
   // stderr, NOT the winston logger: the episode logger is level "warn", and pod
   // log retrieval is the whole point — this is the hosted OOM/crash forensics line.
+  // PROXYWAR_MEM_TELEMETRY_FORCE_GC=1 (+ --expose-gc): collect a full GC
+  // before each sample so the series is the true live set, not the allocator
+  // sawtooth. A least-squares slope over raw samples flips sign with GC phase
+  // between otherwise-identical runs (measured: same code, fits of 2.1 vs
+  // 13.4 MB/1k) — the memory gate needs the clean series to assert growth.
+  // Never enable on hosted episodes: full GCs stall the world.
+  const memTelemetryForceGc =
+    process.env.PROXYWAR_MEM_TELEMETRY_FORCE_GC === "1" &&
+    typeof globalThis.gc === "function";
   const logMemTelemetry = (label: string, turnNumber: number) => {
     const mb = (bytes: number) => Math.round(bytes / (1024 * 1024));
+    if (memTelemetryForceGc) {
+      globalThis.gc?.();
+    }
     const usage = process.memoryUsage();
+    // Split the heap pools so a hosted OOM/crash tail says WHICH pool grew:
+    // old-space (heapUsed/heapTotal, bounded by --max-old-space-size) vs
+    // off-heap (external/arrayBuffers, NOT bounded by that flag). The whole
+    // point of this line is post-mortem forensics on truncated hosted logs.
     console.error(
-      `[MEM] ${label} turn=${turnNumber} rssMB=${mb(usage.rss)} heapUsedMB=${mb(usage.heapUsed)} externalMB=${mb(usage.external)}`,
+      `[MEM] ${label} turn=${turnNumber} rssMB=${mb(usage.rss)} heapUsedMB=${mb(usage.heapUsed)} heapTotalMB=${mb(usage.heapTotal)} externalMB=${mb(usage.external)} arrayBuffersMB=${mb(usage.arrayBuffers)}`,
     );
   };
-  const mirror = new modules.AgentLocalGameMirror(mapLoader, log);
+  // Hand the episode's map dataset to the mirror's game (ownership transfer:
+  // the game mutates tile state in place; the spawn scan above already ran on
+  // the pristine pre-game state, exactly like its former private copy).
+  const mirror = new modules.AgentLocalGameMirror(mapLoader, log, terrain);
   // Time-based curve too (snapshots can be sparse); unref'd so it never holds
   // the process open, cleared on completion.
   const memTelemetryTimer = setInterval(
@@ -880,6 +935,11 @@ async function runProxyWarEpisode(
     participants,
     spawnCandidates,
     log,
+    // World 12P OOM fix: skip the ~8 KB/record tacticalAffordances summary (not
+    // part of the hosted result contract) so the FULL decision log stays small
+    // and complete. Simulation, decisions, and decision telemetry are
+    // unaffected.
+    retainTacticalAffordances: false,
   });
 
   try {
@@ -908,6 +968,23 @@ async function runProxyWarEpisode(
           roster,
         });
         spectatorSnapshots.push(spectatorSnapshot);
+        if (spectatorSnapshots.length > COWORLD_MAX_RETAINED_SNAPSHOTS) {
+          // Even-stride decimation: keep every other snapshot (indices
+          // 0,2,4,...), halving the array in place while preserving the first
+          // snapshot and an even temporal spread. Retained snapshot heap stays
+          // O(1) in episode length. A full-length episode DOES hit this cap
+          // (that is the point — it flattens snapshot heap through the mid-game
+          // crash window); the resulting spectator replay carries up to
+          // COWORLD_MAX_RETAINED_SNAPSHOTS evenly-spaced snapshots instead of
+          // one per decision step. The rendered replay (message-derived
+          // game-record) and the result scores are unaffected.
+          let write = 0;
+          for (let read = 0; read < spectatorSnapshots.length; read += 2) {
+            spectatorSnapshots[write] = spectatorSnapshots[read];
+            write += 1;
+          }
+          spectatorSnapshots.length = write;
+        }
         protocolServer.recordSnapshot(spectatorSnapshot, {
           width: snapshot.gameState.width(),
           height: snapshot.gameState.height(),
@@ -917,7 +994,10 @@ async function runProxyWarEpisode(
           ),
         });
         memTelemetrySnapshots += 1;
-        if (memTelemetrySnapshots % 10 === 1) {
+        // Hosted default stays every-10 (lean log tail); local repro can set
+        // PROXYWAR_MEM_TELEMETRY_EVERY=1 for per-decision-step heap resolution.
+        const memEvery = Number(process.env.PROXYWAR_MEM_TELEMETRY_EVERY ?? "10");
+        if (memEvery <= 1 || memTelemetrySnapshots % memEvery === 1) {
           logMemTelemetry("snapshot", snapshot.turnNumber);
         }
       },
