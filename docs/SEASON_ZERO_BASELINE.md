@@ -911,3 +911,127 @@ and deployed in the checkout) and the production featured-match state
 (resolved via the sourced `PROXYWAR_*` env vars). The reported state is
 internally consistent — a slot that has aired and is promotable cannot
 also be aged-out, and `computeSlotHealth` enforces exactly that.
+
+## Addendum 4 — Main promotion attempt 2026-08-02: operator decision recorded, execution blocked on topology
+
+**Operator decision (2026-08-02), quoted verbatim**: "Betting is back on the
+menu. Promote as is." This is option (a) from the pending-decision list
+above: it explicitly lifts the 2026-07-27 "zero wagering code on `main`"
+constraint recorded in this section, and authorizes promoting
+`claude/product-overhaul` to `origin/main` **including** the full wagering
+surface inventoried in "Promotion review completed 2026-08-01" above (the
+86 tracked files / 19,279 LOC, structurally flag-gated, `PROXYWAR_WAGERING_ENABLED`
+off by default). This decision is recorded and stands regardless of the
+topology finding below — nothing below is a wagering objection.
+
+**Promotion target**: `2a8f201ca4504716d1224794ef6c053e5e5cf643` (the
+`origin/claude/product-overhaul` tip at task dispatch; the shared worktree's
+live HEAD had moved 2 commits further, `7bc8bc7541d5`, by execution time —
+two sibling QA sessions committing concurrently — this task pinned and
+evaluated only the fixed target SHA, never the moving tip, per instruction).
+
+### Step 1 — topology check: FAILED, not a fast-forward
+
+Re-verifying the ancestor relationship this doc's earlier "Main
+reconciliation" section assumed found it **no longer holds**:
+`git merge-base --is-ancestor origin/main 2a8f201ca` is **false**.
+`git rev-list --left-right --count origin/main...2a8f201ca` = **11 ahead,
+379 behind** (`origin/main` at `913347b07d010741f814fa385e596fc1499e0d6f` —
+confirmed live on `github.com/0xNad/ProxyWar/commits/main`, not just a local
+fetch artifact; merge-base with the target is `6f366d8ed3cb814b61a0c73ac4be6ca1e60ef961`,
+the exact SHA this doc's 2026-08-01 review recorded as `origin/main`'s
+then-current tip). A live `git push --dry-run origin 2a8f201ca:main` was
+rejected: `! [rejected] ... (non-fast-forward)`.
+
+Root cause: 11 commits landed directly on `origin/main` between
+2026-08-01T23:19 and 2026-08-02T03:24 (all authored and committed by a
+separate, concurrent `Claude <claude@Mini-di-Claude.home>` session), none
+of which exist anywhere in `claude/product-overhaul`'s history (checked by
+commit-message search across the full branch log; confirmed by the dry-run
+rejection). They are core/coworld/agent performance and release-gate work —
+`perf(core): compute tile coordinates arithmetically, drop the LUT triple`,
+`perf(agents): columnar spawn-candidate scan, allocation-free spawn-site
+check`, `perf(coworld): run the episode on ONE map dataset, not three`,
+`build(coworld): memory-regression gate in front of every image build`,
+`docs(core): fix stale equivalence-test path...`, `perf(agents):
+primary-only turn retention...`, `feat(league): expand the 12P rotation to
+eight maps`, `gate(coworld): assert the late-window slope; ship as 0.1.17`,
+`coworld: hydrate 0.1.17 release manifest...`, plus `fix(coworld): bound
+World 12P episode memory...` and `starter(llm): route hosted Bedrock via
+the platform sidecar endpoint` — a separate, apparently legitimate
+workstream operating directly against `main`, unrelated to and unaware of
+this promotion task.
+
+Per the documented procedure ("if it cannot fast-forward, STOP and report,
+do not merge/rebase on your own"): **execution stopped here.** No tag was
+cut, `origin/main` was not touched, and `claude/product-overhaul` was not
+pushed to `main`. Steps 3-5 (rollback tag, fast-forward push, public-state
+verification) were **not executed**.
+
+### Step 2 — review posture and hygiene: completed (informational; no push occurred)
+
+Waves since the 2026-08-01 full public-surface review (reviewed tip
+`c66f1d754`): **28 commits** to `2a8f201ca`, each validated and deployed per
+this doc's own trail — the two post-review hygiene fixes (`681b54e81`,
+`bb6280483`), the consolidated validation matrix at `c9a224eea` (0
+tsc/lint errors, 4883 tests, e2e 27/27), Addendum 1 (`66e9403db`, Season
+Zero activation, no `src/` changes), Addendum 2 (`cb53c3e6d`, 4962+2769
+tests, e2e 27/27), Addendum 3 (`ab606af88`, 5020+2787 tests across 418+236
+files, e2e 27/27 — the exact source of this task's cited "654 files /
+7,800+ tests" figure), and 10 further commits beyond Addendum 3 recorded in
+`RUNBOOK.md` §17 (bet-origin reconciliation/redeploy) and
+`docs/BETTING_HANDOFF.md`, plus four self-verified replay-perf follow-ups
+(`673440670`, `3bb128138`, `86e9f33ea`, and `2a8f201ca` itself — each
+commit message carries its own full-suite count, tsc/lint-clean
+confirmation, and real-browser verification; the suite grew to 5036+2787
+passing by the final commit). No new full-matrix run was executed by this
+task, since no promotion happened; the cited counts are the branch's own
+most recent self-reported figures, not independently re-run here.
+
+Hygiene greps across the full merge-base-to-target diff (707 files
+changed, +256,160/-3,804): **no credentials, API keys, tokens, private-key
+material, or real (non-fixture) email addresses found** — checked
+`ghp_`/`gho_`/`AKIA`/`sk-`/`xox*`/`AIza`/PEM-header patterns and email
+addresses; only `nope@example.com` and pre-existing test-fixture addresses
+matched. No `.env*` files touched.
+
+Two real hygiene findings, neither new to this wave (both predate
+2026-08-01) and neither a secret/credential leak, but worth recording since
+this task's own acceptance bar named them directly:
+
+1. `.gitignore` line 21 (`docs/project-state/`) marks that whole directory
+   ignored, yet **5 files under `docs/project-state/` are tracked** at the
+   target SHA (`2026-07-20-proxywar-premiere-loop-product-spec.md`,
+   `-replay-premiere-admission-command.md`,
+   `-replay-premiere-implementation-evidence.md`,
+   `-replay-premiere-secret-recovery.md`,
+   `2026-07-24-clips-release-evidence.md` — added before the 2026-08-01
+   review in `44b97834e`/`82cc1bd67`, not flagged by that review's hygiene
+   pass, which covered `.omp/` and one hardcoded path but not this). Read
+   all 5 directly: no secrets or credentials in their content (the
+   "secret-recovery" one is a fail-closed HMAC-key-file incident procedure
+   that explicitly never records key bytes) — but they would be the first
+   `docs/project-state/*` files ever to reach `origin/main` (`origin/main`
+   currently tracks zero files under that path), which conflicts with this
+   task's own acceptance bar ("no gitignored local files leaked — the
+   project-state ledgers must NOT appear") and the directory's own
+   `.gitignore` intent.
+2. `deploy/mac/com.proxywar.platform.plist.example` and several docs
+   (`RUNBOOK.md`, `docs/BETTING_HANDOFF.md`, this file) contain literal
+   `/Users/claude/...` operator home-path references — not credentials,
+   but real machine-path/username disclosure that `origin/main` currently
+   has none of (0 occurrences today, confirmed via `git grep`).
+
+### Disposition
+
+**Not promoted this attempt.** The operator's wagering decision is
+accepted and recorded; the blocker is purely topological. Recommended next
+step for whoever holds push authority: reconcile `origin/main`'s 11 stray
+commits with `claude/product-overhaul` (rebase the promotion tip onto the
+current `main` tip, or coordinate with the session that pushed them to
+pause first) before re-attempting a clean fast-forward. Separately, decide
+whether the 5 tracked `docs/project-state/` files and the `/Users/claude/...`
+path references in tracked docs/examples are acceptable for the public
+default branch as-is, or should be trimmed before the next promotion
+attempt. No rollback tag was created (there is nothing to roll back from —
+`origin/main` was never touched).
