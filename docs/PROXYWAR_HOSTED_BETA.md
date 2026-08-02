@@ -75,6 +75,45 @@ Edit both copied files with the real subdomain, tunnel credentials path, backup
 path, and invite code. Then install the launchd examples from `deploy/mac/` into
 `~/Library/LaunchAgents/`.
 
+Install `start-proxywar-beta.zsh` under
+`~/Library/Application Support/ProxyWar/bin/`, matching the plist. The direct
+Node launch is a safety invariant: launchd must own the process holding the
+Replay Premiere writer lock. Never restart this service with
+`launchctl kickstart -k`; use `deploy/mac/proxywar-beta-launchd-restart.mjs`
+after its dry run passes. When `AI_LEAGUE_DEMO_PORT` differs from the 8787
+default, pass `--ready-url=http://127.0.0.1:<port>/league` to both the dry run
+and the real run; the helper refuses to signal a server that fails that
+readiness preflight unless `--allow-unready-current` is explicitly given for
+hang recovery. For the one-time migration from the older npm-parent
+shape, follow the exact-hash activation and rollback transaction in
+`deploy/README.md`. Matching restored hashes alone is not rollback success; the
+restored managed group, writer ownership, and loopback HTTP 200 must also pass.
+
+The controlled Replay Premiere outage drill is a separate, one-shot evidence
+operation. Substitute the exact active premiere ID and run the dry run before
+the real invocation:
+
+```bash
+node deploy/mac/proxywar-beta-launchd-restart.mjs \
+  --premiere-controlled-outage-drill \
+  --ready-url=http://127.0.0.1:8787/api/premieres/prem_0123456789abcdef/manifest \
+  --dry-run
+node deploy/mac/proxywar-beta-launchd-restart.mjs \
+  --premiere-controlled-outage-drill \
+  --ready-url=http://127.0.0.1:8787/api/premieres/prem_0123456789abcdef/manifest
+```
+
+This deliberately causes about 46 seconds of public downtime after the
+drill-labelled outage start is durable. The drill flag selects its bounded
+grace and replacement timeouts automatically; `/league` readiness is
+deliberately rejected because it can be healthy while Premiere recovery is
+disabled. Ordinary helper restarts remain SIGTERM planned restarts with no
+artificial dwell. A successful helper result proves only owned-process dwell
+and two-sample manifest readiness. Final evidence still requires an external
+availability sampler plus inspection of the hash-chained event store for the
+matching `:controlled_outage_drill` outage-start and subsequent outage-recovered
+events.
+
 ### Safety Defaults
 
 For hosted testers:

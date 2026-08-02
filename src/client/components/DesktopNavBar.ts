@@ -1,5 +1,6 @@
-import { LitElement, html } from "lit";
+import { LitElement, PropertyValues, html } from "lit";
 import { customElement } from "lit/decorators.js";
+import { isReplaySpectatorView } from "../graphics/TransformHandler";
 import { NavNotificationsController } from "./NavNotificationsController";
 
 @customElement("desktop-nav-bar")
@@ -8,6 +9,18 @@ export class DesktopNavBar extends LitElement {
 
   createRenderRoot() {
     return this;
+  }
+
+  // The desktop nav bar (Play/News/Store/Settings/Leaderboard/Clans/Help/
+  // Account) only ever opens lobby/account pages that are themselves
+  // unreachable on a spectator/replay route (showPage() is a no-op there —
+  // see Navigation.ts) and is CSS-hidden the moment a game/replay is
+  // active. Skipping its render avoids building that unusable menu DOM on
+  // every replay page load (P2-F11); nothing here is queried unconditionally
+  // elsewhere (every id it renders is null-checked at its call sites).
+  protected shouldUpdate(changedProperties: PropertyValues): boolean {
+    if (isReplaySpectatorView()) return false;
+    return super.shouldUpdate(changedProperties);
   }
 
   connectedCallback() {

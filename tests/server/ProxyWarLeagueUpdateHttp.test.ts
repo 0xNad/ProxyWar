@@ -1,8 +1,11 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
+  chmod,
   copyFile,
   mkdir,
   mkdtemp,
+  realpath,
   rm,
   stat,
   writeFile,
@@ -13,13 +16,37 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { AI_LEAGUE_CLIP_CANARY_FILE } from "../../src/server/agents/AiLeagueClipCanary";
 import {
   writeCoworldLeagueSite,
   type CoworldLeagueMirrorData,
 } from "../../src/server/agents/CoworldLeagueSiteWriter";
+import { controlledSourceBytes } from "./replay-premiere/ReplayPremiereFixtures";
 
 const projectRoot = process.cwd();
 const require = createRequire(import.meta.url);
+const canaryRunKey = "league-coworld-canary-wrapper";
+const canaryBucket = 60;
+const controlledSource = JSON.parse(
+  controlledSourceBytes().toString("utf8"),
+) as {
+  gameRecord: Record<string, unknown> & { info: Record<string, unknown> };
+};
+const canaryRecordBytes = Buffer.from(
+  JSON.stringify({
+    ...controlledSource.gameRecord,
+    info: {
+      ...controlledSource.gameRecord.info,
+      num_turns: 1_000,
+      winner: undefined,
+    },
+    turns: [],
+  }),
+);
+const canarySourceSha256 = createHash("sha256")
+  .update(canaryRecordBytes)
+  .digest("hex");
+const canaryClipBytes = Buffer.alloc(96, 7);
 
 interface RawResponse {
   status: number;
@@ -31,21 +58,45 @@ describe("league update HTTP contract", () => {
   let fixtureRoot = "";
   let server: ChildProcess | null = null;
   let openServer: ChildProcess | null = null;
+  let degradedServer: ChildProcess | null = null;
   let origin = "";
   let openOrigin = "";
+  let degradedOrigin = "";
   let serverOutput = "";
   let openServerOutput = "";
+  let degradedServerOutput = "";
   let caseInsensitiveFixturePaths = false;
   let validReplayRecordPath = "";
+  let privateStateRoot = "";
+  let openPrivateStateRoot = "";
+  let degradedPrivateStateRoot = "";
 
   beforeAll(async () => {
-    fixtureRoot = await mkdtemp(path.join(tmpdir(), "proxywar-league-http-"));
+    fixtureRoot = await realpath(
+      await mkdtemp(path.join(tmpdir(), "proxywar-league-http-")),
+    );
+    privateStateRoot = path.join(
+      path.dirname(fixtureRoot),
+      `${path.basename(fixtureRoot)}-premiere-gated`,
+    );
+    openPrivateStateRoot = path.join(
+      path.dirname(fixtureRoot),
+      `${path.basename(fixtureRoot)}-premiere-open`,
+    );
+    degradedPrivateStateRoot = path.join(
+      path.dirname(fixtureRoot),
+      `${path.basename(fixtureRoot)}-premiere-degraded`,
+    );
     const artifactsRoot = path.join(fixtureRoot, "artifacts");
     const leagueRoot = path.join(artifactsRoot, "ai-league-runs", "league");
     const homeRoot = path.join(fixtureRoot, "home-gated");
     const openHomeRoot = path.join(fixtureRoot, "home-open");
     const nationsRoot = path.join(fixtureRoot, "nations-gated");
     const openNationsRoot = path.join(fixtureRoot, "nations-open");
+    const degradedRoot = path.join(fixtureRoot, "degraded-fixture");
+    const degradedHomeRoot = path.join(degradedRoot, "home");
+    const degradedNationsRoot = path.join(degradedRoot, "nations");
+    const degradedStaticRoot = path.join(degradedRoot, "static");
     const staticRoot = path.join(fixtureRoot, "static");
     const validReplayRoot = path.join(
       artifactsRoot,
@@ -57,6 +108,16 @@ describe("league update HTTP contract", () => {
       "ai-league-runs",
       "league-compacted",
     );
+    const canaryReplayRoot = path.join(
+      artifactsRoot,
+      "ai-league-runs",
+      canaryRunKey,
+    );
+    const canaryClipRoot = path.join(
+      privateStateRoot,
+      "league-clips-v1",
+      canaryRunKey,
+    );
     validReplayRecordPath = path.join(validReplayRoot, "game-record.json");
     await Promise.all([
       mkdir(leagueRoot, { recursive: true }),
@@ -64,31 +125,87 @@ describe("league update HTTP contract", () => {
       mkdir(openHomeRoot, { recursive: true }),
       mkdir(nationsRoot, { recursive: true }),
       mkdir(openNationsRoot, { recursive: true }),
+      mkdir(degradedHomeRoot, { recursive: true }),
+      mkdir(degradedNationsRoot, { recursive: true }),
+      mkdir(degradedStaticRoot, { recursive: true }),
+      mkdir(degradedPrivateStateRoot, { recursive: true }),
       mkdir(staticRoot, { recursive: true }),
       mkdir(validReplayRoot, { recursive: true }),
       mkdir(compactedReplayRoot, { recursive: true }),
+      mkdir(canaryReplayRoot, { recursive: true }),
+      mkdir(canaryClipRoot, { recursive: true }),
+      mkdir(path.join(fixtureRoot, "resources", "lang"), { recursive: true }),
     ]);
+    await chmod(privateStateRoot, 0o700);
+    await chmod(degradedPrivateStateRoot, 0o700);
+    const now = Date.now();
     await Promise.all([
       writeCoworldLeagueSite(leagueRoot, fixtureLeagueData()),
       copyFile(
         path.join(projectRoot, "index.html"),
         path.join(staticRoot, "index.html"),
       ),
-      writeFile(
-        validReplayRecordPath,
-        JSON.stringify({ turns: [] }),
-        "utf8",
+      copyFile(
+        path.join(projectRoot, "index.html"),
+        path.join(degradedStaticRoot, "index.html"),
       ),
+      copyFile(
+        path.join(projectRoot, "resources", "lang", "en.json"),
+        path.join(fixtureRoot, "resources", "lang", "en.json"),
+      ),
+      writeFile(validReplayRecordPath, JSON.stringify({ turns: [] }), "utf8"),
       writeFile(
         path.join(compactedReplayRoot, "game-record.json"),
         JSON.stringify({ compacted: true }),
         "utf8",
       ),
+      writeFile(
+        path.join(canaryReplayRoot, "game-record.json"),
+        canaryRecordBytes,
+      ),
+      writeFile(
+        path.join(canaryClipRoot, `clip-v1-${canaryBucket}.mp4`),
+        canaryClipBytes,
+      ),
+      writeFile(
+        path.join(
+          canaryClipRoot,
+          `clip-v1-${canaryBucket}.render-manifest.json`,
+        ),
+        JSON.stringify({
+          premiereId: canaryRunKey,
+          sourceReplaySha256: canarySourceSha256,
+          anchorTurn: canaryBucket * 10 + 5,
+          clipVersion: 1,
+          frameShape: "square",
+          frameWidth: 1080,
+          frameHeight: 1080,
+          outSha256: createHash("sha256").update(canaryClipBytes).digest("hex"),
+          outBytes: canaryClipBytes.byteLength,
+          generatedAt: new Date(now).toISOString(),
+        }),
+      ),
+      writeFile(
+        path.join(privateStateRoot, AI_LEAGUE_CLIP_CANARY_FILE),
+        JSON.stringify({
+          schemaVersion: 4,
+          lifecycle: "claimed",
+          runKey: canaryRunKey,
+          premiereId: "prem_0123456789abcdef",
+          bucket: canaryBucket,
+          sourceReplaySha256: canarySourceSha256,
+          priorStateSha256: "f".repeat(64),
+          rootPredecessorStateSha256: "e".repeat(64),
+          armedAt: new Date(now - 60_000).toISOString(),
+          expiresAt: new Date(now + 10 * 60_000).toISOString(),
+          claimedAt: new Date(now - 30_000).toISOString(),
+          disarmedAt: null,
+        }),
+        { mode: 0o600 },
+      ),
     ]);
     try {
-      await stat(
-        path.join(artifactsRoot, "ai-league-runs", "League"),
-      );
+      await stat(path.join(artifactsRoot, "ai-league-runs", "League"));
       caseInsensitiveFixturePaths = true;
     } catch {
       caseInsensitiveFixturePaths = false;
@@ -96,28 +213,52 @@ describe("league update HTTP contract", () => {
 
     const port = await reservePort();
     const openPort = await reservePort();
+    const degradedPort = await reservePort();
     origin = `http://127.0.0.1:${port}`;
     openOrigin = `http://127.0.0.1:${openPort}`;
+    degradedOrigin = `http://127.0.0.1:${degradedPort}`;
     const child = spawnLeagueServer({
       artifactsRoot,
       fixtureRoot,
       homeRoot,
       nationsRoot,
+      privateStateRoot,
       port,
       betaEnabled: true,
       wrapperOnly: true,
+      clipsMasterEnabled: true,
+      premiereClipsEnabled: false,
+      leagueClipsEnabled: false,
     });
     const openChild = spawnLeagueServer({
       artifactsRoot,
       fixtureRoot,
       homeRoot: openHomeRoot,
       nationsRoot: openNationsRoot,
+      privateStateRoot: openPrivateStateRoot,
       port: openPort,
       betaEnabled: false,
       wrapperOnly: false,
+      clipsMasterEnabled: true,
+      premiereClipsEnabled: false,
+      leagueClipsEnabled: true,
+    });
+    const degradedChild = spawnLeagueServer({
+      artifactsRoot,
+      fixtureRoot: degradedRoot,
+      homeRoot: degradedHomeRoot,
+      nationsRoot: degradedNationsRoot,
+      privateStateRoot: degradedPrivateStateRoot,
+      port: degradedPort,
+      betaEnabled: false,
+      wrapperOnly: true,
+      clipsMasterEnabled: true,
+      premiereClipsEnabled: false,
+      leagueClipsEnabled: true,
     });
     server = child;
     openServer = openChild;
+    degradedServer = degradedChild;
     child.stdout?.on("data", (chunk: Buffer) => {
       serverOutput += chunk.toString();
     });
@@ -130,17 +271,33 @@ describe("league update HTTP contract", () => {
     openChild.stderr?.on("data", (chunk: Buffer) => {
       openServerOutput += chunk.toString();
     });
+    degradedChild.stdout?.on("data", (chunk: Buffer) => {
+      degradedServerOutput += chunk.toString();
+    });
+    degradedChild.stderr?.on("data", (chunk: Buffer) => {
+      degradedServerOutput += chunk.toString();
+    });
     await Promise.all([
       waitForServer(origin, () => serverOutput, child),
       waitForServer(openOrigin, () => openServerOutput, openChild),
+      waitForServer(degradedOrigin, () => degradedServerOutput, degradedChild),
     ]);
   }, 30_000);
 
   afterAll(async () => {
-    await Promise.all([stopServer(server), stopServer(openServer)]);
+    await Promise.all([
+      stopServer(server),
+      stopServer(openServer),
+      stopServer(degradedServer),
+    ]);
     if (fixtureRoot !== "") {
       await rm(fixtureRoot, { recursive: true, force: true });
     }
+    await Promise.all(
+      [privateStateRoot, openPrivateStateRoot, degradedPrivateStateRoot]
+        .filter((root) => root !== "")
+        .map((root) => rm(root, { recursive: true, force: true })),
+    );
   });
 
   test("serves the league page with a CSP that permits only same-origin scripts", async () => {
@@ -182,6 +339,60 @@ describe("league update HTTP contract", () => {
     expect(scriptDirective).not.toContain("unsafe-inline");
     expect(scriptDirective).not.toContain("unsafe-eval");
     expect(policy).toContain("connect-src 'self'");
+  });
+
+  test("constructs the replay-scoped Clip service with live Premiere generation off", async () => {
+    const response = await rawRequest(openOrigin, "/api/clip-capabilities");
+    expect(response.status).toBe(200);
+    expect(response.headers["cache-control"]).toBe("no-store, max-age=0");
+    expect(JSON.parse(response.body.toString())).toEqual({
+      schemaVersion: 1,
+      premiereGenerationEnabled: false,
+      leagueGenerationEnabled: true,
+    });
+  });
+
+  test("fails unavailable Clip routes no-store when requested service construction degrades", async () => {
+    const capabilities = await rawRequest(
+      degradedOrigin,
+      "/api/clip-capabilities",
+    );
+    expect(JSON.parse(capabilities.body.toString())).toEqual({
+      schemaVersion: 1,
+      premiereGenerationEnabled: false,
+      leagueGenerationEnabled: false,
+    });
+    expect(degradedServerOutput).toContain("League run clips disabled: ENOENT");
+
+    for (const requestPath of [
+      "/api/league-runs/league-coworld-degraded/clips/60",
+      "/ai-league-runs/league-coworld-degraded/clip-v1-60.mp4",
+    ]) {
+      for (const method of ["GET", "HEAD"] as const) {
+        const response = await rawRequest(degradedOrigin, requestPath, {
+          method,
+        });
+        expect(response.status).toBe(404);
+        expect(response.headers.location).toBeUndefined();
+        expect(response.headers["cache-control"]).toBe("no-store, max-age=0");
+      }
+    }
+
+    const malformedWrite = await rawRequest(
+      degradedOrigin,
+      "/api/league-runs/league-coworld-degraded/clips",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: Buffer.from("{malformed"),
+      },
+    );
+    expect(malformedWrite.status).toBe(404);
+    expect(malformedWrite.headers.location).toBeUndefined();
+    expect(malformedWrite.headers["cache-control"]).toBe("no-store, max-age=0");
+    expect(JSON.parse(malformedWrite.body.toString())).toEqual({
+      error: { code: "LEAGUE_CLIP_UNAVAILABLE" },
+    });
   });
 
   test("applies the league CSP to every open-mode document alias", async () => {
@@ -229,10 +440,7 @@ describe("league update HTTP contract", () => {
   });
 
   test("serves and revalidates only the allowlisted update artifacts", async () => {
-    const client = await rawRequest(
-      origin,
-      "/ai-league-runs/league/client.js",
-    );
+    const client = await rawRequest(origin, "/ai-league-runs/league/client.js");
     expect(client.status).toBe(200);
     expect(client.headers["content-type"]).toMatch(/javascript/);
     expect(client.headers["x-content-type-options"]).toBe("nosniff");
@@ -246,10 +454,7 @@ describe("league update HTTP contract", () => {
     expect(clientHead.status).toBe(200);
     expect(clientHead.body).toHaveLength(0);
 
-    const data = await rawRequest(
-      origin,
-      "/ai-league-runs/league/data.json",
-    );
+    const data = await rawRequest(origin, "/ai-league-runs/league/data.json");
     expect(data.status).toBe(200);
     expect(data.headers.etag).toBeDefined();
     expect(data.headers["cache-control"]).toContain("max-age=0");
@@ -270,9 +475,155 @@ describe("league update HTTP contract", () => {
         "/ai-league-runs/league/untrusted.js",
         { method },
       );
-      expect(blocked.status).toBe(302);
-      expect(blocked.headers.location).toBe("/league");
+      expect(blocked.status).toBe(404);
+      expect(blocked.headers.location).toBeUndefined();
     }
+
+    for (const route of [
+      "/ai-league-replay/controlled-source-1",
+      "/ai-league-runs/controlled-source-1/game-record.json",
+      "/proxywar-replay/controlled-source-1",
+    ]) {
+      for (const method of ["GET", "HEAD"] as const) {
+        const blocked = await rawRequest(origin, route, { method });
+        expect(blocked.status, `${method} ${route}`).toBe(404);
+        expect(blocked.headers.location).toBeUndefined();
+      }
+    }
+  });
+
+  test("the /proxywar-replay and /openfront-replay aliases redirect only for a run that actually exists, and never echo an unknown run id", async () => {
+    // Exercised against the open (non-wrapper) server: in
+    // PROXYWAR_LEAGUE_WRAPPER_ONLY mode this alias never even reaches its
+    // own handler (an earlier, unconditional wrapper gate 404s every
+    // isProxyWarReplayOrRunPath request regardless of existence — see the
+    // "serves and revalidates..." test above for that surface). The open
+    // server is where /proxywar-replay/:runID's own existence check is
+    // the thing actually deciding the response, which is what this fix
+    // changed.
+    //
+    // The positive case: a run that genuinely exists (has a real
+    // game-record.json under runsRootDir, shared across all three fixture
+    // servers) still redirects through the legacy alias exactly as
+    // before — this fix only tightens the negative case, it never breaks
+    // the real one.
+    for (const route of ["/proxywar-replay", "/openfront-replay"]) {
+      for (const method of ["GET", "HEAD"] as const) {
+        const redirected = await rawRequest(
+          openOrigin,
+          `${route}/league-valid`,
+          { method },
+        );
+        expect(redirected.status, `${method} ${route}/league-valid`).toBe(
+          302,
+        );
+        expect(redirected.headers.location).toBe(
+          "/ai-league-replay/league-valid",
+        );
+      }
+    }
+
+    // The negative case this fix exists for: a run id that has no
+    // game-record.json anywhere on disk must 404 directly — never a
+    // redirect a `redirect: "error"` fetch (like the Replay Premiere leak
+    // audit's alternate-source-url check) would have to throw on — and
+    // the 404 body must never echo the requested run id back (no leak of
+    // the very identifier the audit exists to protect).
+    const unknownRunID = "definitely-nonexistent-run-9f3c1a";
+    for (const route of ["/proxywar-replay", "/openfront-replay"]) {
+      for (const method of ["GET", "HEAD"] as const) {
+        const missing = await rawRequest(
+          openOrigin,
+          `${route}/${unknownRunID}`,
+          { method },
+        );
+        expect(missing.status, `${method} ${route}/${unknownRunID}`).toBe(
+          404,
+        );
+        expect(missing.headers.location).toBeUndefined();
+        expect(missing.body.toString()).not.toContain(unknownRunID);
+      }
+    }
+
+    // Also confirms a real `fetch(..., { redirect: "error" })` call — the
+    // exact mechanism the leak audit uses — no longer throws for the
+    // unknown run: it now resolves to a clean Response instead of
+    // rejecting on an unexpected redirect.
+    const auditStyleFetch = await fetch(
+      `${openOrigin}/proxywar-replay/${unknownRunID}`,
+      { redirect: "error" },
+    );
+    expect(auditStyleFetch.status).toBe(404);
+    const auditStyleBody = await auditStyleFetch.text();
+    expect(auditStyleBody).not.toContain(unknownRunID);
+  });
+
+  test("serves only the exact claimed Clip canary target without wrapper redirects", async () => {
+    const exactStatusPath = `/api/league-runs/${canaryRunKey}/clips/${canaryBucket}`;
+    const exactFilePath = `/ai-league-runs/${canaryRunKey}/clip-v1-${canaryBucket}.mp4`;
+    const exactStatus = await rawRequest(origin, exactStatusPath);
+    const progressStatus = await rawRequest(
+      origin,
+      `${exactStatusPath}?progress=1`,
+    );
+    const ambiguousProgressStatus = await rawRequest(
+      origin,
+      `${exactStatusPath}?progress=1&progress=0`,
+    );
+    const exactFile = await rawRequest(origin, exactFilePath);
+
+    expect(exactStatus.status).toBe(200);
+    const legacyStatusBody = JSON.parse(exactStatus.body.toString()) as Record<
+      string,
+      unknown
+    >;
+    expect(legacyStatusBody).toMatchObject({
+      state: "ready",
+      bucket: canaryBucket,
+      ready: {
+        clipUrl: exactFilePath,
+      },
+    });
+    expect(legacyStatusBody).not.toHaveProperty("pending");
+    expect(progressStatus.status).toBe(200);
+    expect(JSON.parse(progressStatus.body.toString())).toMatchObject({
+      state: "ready",
+      bucket: canaryBucket,
+      pending: null,
+    });
+    expect(
+      JSON.parse(ambiguousProgressStatus.body.toString()),
+    ).not.toHaveProperty("pending");
+    expect(exactFile.status).toBe(200);
+    expect(exactFile.body).toEqual(canaryClipBytes);
+
+    for (const requestPath of [
+      `/api/league-runs/${canaryRunKey}/clips/${canaryBucket + 1}`,
+      `/ai-league-runs/${canaryRunKey}/clip-v1-${canaryBucket + 1}.mp4`,
+      `/api/league-runs/league-coworld-other-wrapper/clips/${canaryBucket}`,
+      `/ai-league-runs/league-coworld-other-wrapper/clip-v1-${canaryBucket}.mp4`,
+    ]) {
+      for (const method of ["GET", "HEAD"] as const) {
+        const response = await rawRequest(origin, requestPath, { method });
+        expect(response.status, `${method} ${requestPath}`).toBe(404);
+        expect(
+          response.headers.location,
+          `${method} ${requestPath}`,
+        ).toBeUndefined();
+        expect(
+          response.headers["cache-control"],
+          `${method} ${requestPath}`,
+        ).toBe("no-store, max-age=0");
+      }
+    }
+
+    const refusedWrite = await rawRequest(
+      origin,
+      `/api/league-runs/${canaryRunKey}/clips`,
+      { method: "POST" },
+    );
+    expect(refusedWrite.status).toBe(404);
+    expect(refusedWrite.headers.location).toBeUndefined();
   });
 
   test("serves the replay shell only for a renderable public league record", async () => {
@@ -358,14 +709,20 @@ function spawnLeagueServer(options: {
   fixtureRoot: string;
   homeRoot: string;
   nationsRoot: string;
+  privateStateRoot: string;
   port: number;
   betaEnabled: boolean;
   wrapperOnly: boolean;
+  clipsMasterEnabled: boolean;
+  premiereClipsEnabled: boolean;
+  leagueClipsEnabled: boolean;
 }): ChildProcess {
   return spawn(
     process.execPath,
     [
       require.resolve("tsx/cli"),
+      "--tsconfig",
+      path.join(projectRoot, "tsconfig.json"),
       path.join(projectRoot, "src", "scripts", "ai-agent-demo-server.ts"),
     ],
     {
@@ -381,8 +738,12 @@ function spawnLeagueServer(options: {
         PROXYWAR_BETA_ENABLED: String(options.betaEnabled),
         PROXYWAR_BETA_CODE: "fixture-invite-code",
         PROXYWAR_LEAGUE_WRAPPER_ONLY: String(options.wrapperOnly),
+        PROXYWAR_CLIPS_ENABLED: String(options.clipsMasterEnabled),
+        PROXYWAR_PREMIERE_CLIPS_ENABLED: String(options.premiereClipsEnabled),
+        PROXYWAR_LEAGUE_CLIPS_ENABLED: String(options.leagueClipsEnabled),
         PROXYWAR_ARTIFACTS_ROOT: options.artifactsRoot,
         PROXYWAR_NATIONS_DIR: options.nationsRoot,
+        PROXYWAR_REPLAY_PREMIERE_STATE_ROOT: options.privateStateRoot,
       },
       stdio: ["ignore", "pipe", "pipe"],
     },
@@ -451,6 +812,7 @@ async function rawRequest(
   options: {
     method?: string;
     headers?: http.OutgoingHttpHeaders;
+    body?: Buffer;
   } = {},
 ): Promise<RawResponse> {
   const url = new URL(baseUrl);
@@ -476,6 +838,6 @@ async function rawRequest(
       },
     );
     request.once("error", reject);
-    request.end();
+    request.end(options.body);
   });
 }

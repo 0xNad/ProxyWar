@@ -514,7 +514,13 @@ describe("AgentDecisionLogWriter", () => {
       attackActionIDs: [],
       chosenActionID: "hold",
       chosenActionKind: "hold",
-      reason: "LLM decision rejected; fallback: hold.",
+      // P0 fix (see docs/project-state/known-problems.md, LlmAgentBrain.ts's
+      // fallback()): the LLM produced no stated reason here — a provider/
+      // parse failure forced this fallback — so `reason` is `null`, never a
+      // synthesized "LLM decision rejected (...); fallback: ..." string.
+      // The failure text and the substituted rule brain's own genuine
+      // reason each get their own distinct field below.
+      reason: null,
       decisionMetadata: {
         brain: "llm",
         brainType: "mock-llm",
@@ -523,6 +529,7 @@ describe("AgentDecisionLogWriter", () => {
         llmParseFailureReason: "unknown selectedLegalActionId: missing",
         fallbackUsed: true,
         fallbackActionID: "hold",
+        fallbackReason: "no safe non-hold action was available",
       },
       intent: null,
       result: {
@@ -545,24 +552,40 @@ describe("AgentDecisionLogWriter", () => {
         roster: [],
       });
 
-      const decision = JSON.parse(
-        (await fs.readFile(paths.decisionsPath, "utf8")).trim(),
-      );
+      const decisionsRaw = (
+        await fs.readFile(paths.decisionsPath, "utf8")
+      ).trim();
+      const decision = JSON.parse(decisionsRaw);
       expect(decision).toMatchObject({
+        reason: null,
         parseSuccess: false,
         parseFailureReason: "unknown selectedLegalActionId: missing",
         fallbackUsed: true,
         fallbackActionID: "hold",
+        fallbackReason: "no safe non-hold action was available",
         auditStatus: "not_applicable",
       });
+      // Additive-only schema check: `reason` is a real JSON key holding
+      // `null` (present in the raw line), never an omitted/undefined key —
+      // an old reader doing `typeof x.reason === "string"` degrades this
+      // decision to "no stated reason" instead of crashing.
+      expect(decisionsRaw).toContain('"reason":null');
       const summary = JSON.parse(await fs.readFile(paths.summaryPath, "utf8"));
       expect(summary).toMatchObject({
         fallbackCount: 1,
         parseFailureCount: 1,
       });
+      const report = await fs.readFile(paths.reportPath, "utf8");
+      expect(report).toContain("Fallback Agent");
+      // The Markdown/HTML reports never render the raw string "null" where a
+      // reason was expected — an honest, explicit label instead.
+      expect(report).not.toContain("| null |");
+      expect(report).toContain("(no stated reason — fallback decision)");
       const visual = await fs.readFile(paths.visualReportPath, "utf8");
       expect(visual).toContain("Fallback Agent");
       expect(visual).toContain("failed");
+      expect(visual).not.toContain('class="reason">null<');
+      expect(visual).toContain("(no stated reason — fallback decision)");
     } finally {
       await fs.rm(rootDir, { recursive: true, force: true });
     }

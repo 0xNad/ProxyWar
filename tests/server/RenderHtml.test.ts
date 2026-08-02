@@ -1,4 +1,5 @@
 import fs from "fs/promises";
+import vm from "node:vm";
 import os from "os";
 import path from "path";
 import { afterEach, describe, expect, test } from "vitest";
@@ -78,5 +79,85 @@ describe("RenderHtml", () => {
 
     expect(html).toContain('src="../assets/index.js"');
     expect(html).toContain('window.CDN_BASE = ""');
+  });
+
+  test("classifies Premiere pages as replay routes before client bootstrap", async () => {
+    const html = await renderHtmlContent(path.resolve("index.html"));
+    const bootstrapScript = [
+      ...html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi),
+    ]
+      .map((match) => match[1])
+      .find((script) => script.includes("window.BOOTSTRAP_CONFIG"));
+    expect(bootstrapScript).toBeDefined();
+
+    const evaluateRoute = (pathname: string) => {
+      const classNames = new Set<string>();
+      const windowObject: Record<string, unknown> = {};
+      vm.runInNewContext(bootstrapScript!, {
+        window: windowObject,
+        location: { origin: "https://beta.proxywar.xyz", pathname },
+        document: {
+          documentElement: {
+            classList: {
+              add: (...names: string[]) =>
+                names.forEach((name) => classNames.add(name)),
+            },
+            style: { setProperty: () => undefined },
+          },
+        },
+      });
+      return { classNames, windowObject };
+    };
+
+    const premiere = evaluateRoute("/premiere/prem_0123456789abcdef");
+    expect(premiere.windowObject.__PROXYWAR_AI_REPLAY__).toBe(true);
+    expect(premiere.classNames).toContain("proxywar-replay-route");
+    expect(premiere.windowObject.BOOTSTRAP_CONFIG).toEqual({ gameEnv: "dev" });
+
+    const ordinaryPage = evaluateRoute("/");
+    expect(ordinaryPage.windowObject.__PROXYWAR_AI_REPLAY__).toBe(false);
+    expect(ordinaryPage.classNames).not.toContain("proxywar-replay-route");
+  });
+
+  test("suppresses the main-menu DOM for the whole lifetime of replay routes", async () => {
+    // The boot veil drops when the premiere overlay is ready — before the
+    // game canvas has necessarily rendered — so the landing page must be
+    // display:none'd under the route class or it flashes in that gap.
+    const html = await renderHtmlContent(path.resolve("index.html"));
+    const headStyle = html.slice(0, html.indexOf("</head>"));
+    for (const surface of [
+      "#main-menu-area",
+      "#hex-grid",
+      "#mobile-menu-backdrop",
+      "#sidebar-menu",
+    ]) {
+      expect(headStyle).toContain(
+        `html.proxywar-replay-route ${surface}`.trim(),
+      );
+    }
+    expect(html).toContain('id="main-menu-area"');
+  });
+
+  test("public.html injects window.ASSET_MANIFEST/CDN_BASE, same as index.html's game shell", async () => {
+    // Regression coverage for the 2026-08-01 P0 fix: public.html's inline
+    // script previously set ONLY window.GIT_COMMIT, so every assetUrl() call
+    // made by a component mounted under PublicApp.ts (e.g. LangSelector's
+    // flag icon) read AssetUrls.ts's getAssetManifest() `{}` fallback and
+    // requested the raw unhashed source path -- 404 in production, which
+    // only serves flags/icons/images/etc. hashed under `_assets/` (see
+    // PublicAssetManifest.ts's HASHED_PUBLIC_ASSET_GLOBS).
+    const html = await renderHtmlContent(path.resolve("public.html"));
+    const bootstrapScript = [
+      ...html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi),
+    ]
+      .map((match) => match[1])
+      .find((script) => script.includes("window.ASSET_MANIFEST"));
+    expect(bootstrapScript).toBeDefined();
+
+    const windowObject: Record<string, unknown> = {};
+    vm.runInNewContext(bootstrapScript!, { window: windowObject });
+    expect(windowObject.ASSET_MANIFEST).toEqual(expect.any(Object));
+    expect(windowObject.CDN_BASE).toBe("");
+    expect(windowObject.GIT_COMMIT).toBeDefined();
   });
 });

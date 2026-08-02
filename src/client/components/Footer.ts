@@ -36,19 +36,7 @@ export class Footer extends LitElement {
         <div
           class="text-xs mt-1 lg:mt-2 flex items-center justify-center gap-4 px-4"
         >
-          <a
-            href="/terms-of-service.html"
-            data-i18n="main.terms_of_service"
-            target="_blank"
-            class="hover:text-white transition-colors"
-          ></a>
           <span data-i18n="main.copyright"></span>
-          <a
-            href="/privacy-policy.html"
-            data-i18n="main.privacy_policy"
-            target="_blank"
-            class="hover:text-white transition-colors"
-          ></a>
         </div>
       </footer>
     `;

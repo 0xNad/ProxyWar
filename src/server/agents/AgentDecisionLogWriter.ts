@@ -13,6 +13,10 @@ import {
   writeAgentDramaReportArtifacts,
 } from "./AgentDramaReport";
 import {
+  buildDirectorCutPlan,
+  type DirectorCutPlan,
+} from "./DirectorCutPlan";
+import {
   AgentMatchStory,
   AgentMatchStoryPaths,
   buildAgentMatchStory,
@@ -150,6 +154,7 @@ export interface AgentLeagueRunArtifactPaths {
   matchPackageMarkdownPath: string;
   matchPackageHtmlPath: string;
   spectatorTelemetryPath: string;
+  directorCutPlanPath: string;
   spectatorPath: string | null;
   spectatorReplayPath: string | null;
   gameRecordPath: string | null;
@@ -204,7 +209,8 @@ interface DecisionLogEntry {
   selectedActionKind: LegalActionKind;
   selectedActionMetadata?: Record<string, string | number | boolean | null>;
   tacticalAffordances?: AgentTacticalAffordances;
-  reason: string;
+  /** `null` for a fallback/failure decision with no stated reason — see `AgentDecision.reason`'s doc. */
+  reason: string | null;
   confidence?: number;
   rawLlmPrompt?: string;
   rawLlmOutput?: string;
@@ -212,6 +218,8 @@ interface DecisionLogEntry {
   parseFailureReason?: string;
   fallbackUsed: boolean;
   fallbackActionID?: string;
+  /** The substituted fallback brain's OWN genuine reason for its pick — distinct from `reason` (which is `null` on this path). Present only when `fallbackUsed`. */
+  fallbackReason?: string;
   generatedIntent: AgentDecisionRecord["intent"];
   result: AgentDecisionRecord["result"];
   auditStatus: AgentActionAudit["auditStatus"];
@@ -393,6 +401,19 @@ export async function writeAgentLeagueRunArtifacts(
     directory,
     "spectator-telemetry.json",
   );
+  // Product overhaul spec Stage 5: generated alongside the other per-match
+  // artifacts, reusing the SAME `spectatorTelemetry` this function just
+  // built (never recomputed) so the plan's segments stay consistent with
+  // every other artifact derived from that exact event stream.
+  const directorCutPlan: DirectorCutPlan = buildDirectorCutPlan({
+    runID: input.runID,
+    matchID: input.matchID,
+    records: input.records,
+    roster: input.roster,
+    finalState: input.finalState,
+    spectatorTelemetry,
+  });
+  const directorCutPlanPath = path.join(directory, "director-cut-plan.json");
   const summary = matchSummary(
     input,
     entries,
@@ -415,6 +436,10 @@ export async function writeAgentLeagueRunArtifacts(
   await fs.writeFile(
     spectatorTelemetryPath,
     `${JSON.stringify(spectatorTelemetry, null, 2)}\n`,
+  );
+  await fs.writeFile(
+    directorCutPlanPath,
+    `${JSON.stringify(directorCutPlan, null, 2)}\n`,
   );
   await fs.writeFile(summaryPath, `${JSON.stringify(summary, null, 2)}\n`);
   await fs.writeFile(
@@ -475,6 +500,7 @@ export async function writeAgentLeagueRunArtifacts(
     matchPackageMarkdownPath: matchPackagePaths.markdownPath,
     matchPackageHtmlPath: matchPackagePaths.htmlPath,
     spectatorTelemetryPath,
+    directorCutPlanPath,
     spectatorPath: spectatorPaths?.spectatorPath ?? null,
     spectatorReplayPath: spectatorPaths?.replayDataPath ?? null,
     gameRecordPath: spectatorPaths?.gameRecordPath ?? null,
@@ -692,6 +718,9 @@ function decisionLogEntry(
     fallbackUsed: booleanMetadata(metadata, "fallbackUsed") ?? false,
     ...(stringMetadata(metadata, "fallbackActionID") !== undefined
       ? { fallbackActionID: stringMetadata(metadata, "fallbackActionID") }
+      : {}),
+    ...(stringMetadata(metadata, "fallbackReason") !== undefined
+      ? { fallbackReason: stringMetadata(metadata, "fallbackReason") }
       : {}),
     generatedIntent: record.intent,
     result: record.result,
@@ -1751,7 +1780,7 @@ function matchReport(
         String(entry.decisionLatencyMs),
         entry.result.accepted ? "yes" : "no",
         `${entry.auditStatus}: ${entry.auditReason}`,
-        entry.reason,
+        reasonLabel(entry),
       ]),
     ),
     "",
@@ -1875,7 +1904,7 @@ function visualReport(
                       ${auditBadge(entry.auditStatus)}
                     </div>
                   </div>
-                  <p class="reason">${escapeHtml(entry.reason)}</p>
+                  <p class="reason">${escapeHtml(reasonLabel(entry))}</p>
                   <div class="decision-meta">
                     <div><span>LegalAction.id</span><code>${escapeHtml(entry.selectedLegalActionId)}</code></div>
                     <div><span>Strategy</span><b>${escapeHtml(strategyLabel(entry))}</b></div>
@@ -1916,7 +1945,7 @@ function visualReport(
           <td>${entry.planFollowed === undefined ? "n/a" : entry.planFollowed ? statusBadge("aligned") : statusBadge("off-objective")}</td>
           <td>${escapeHtml(skillLabel(entry))}</td>
           <td><code>${escapeHtml(entry.selectedLegalActionId)}</code></td>
-          <td>${escapeHtml(entry.reason)}</td>
+          <td>${escapeHtml(reasonLabel(entry))}</td>
           <td><code>${escapeHtml(intentSummary(entry.generatedIntent))}</code></td>
           <td>${statusBadge(entry.result.accepted ? "accepted" : "rejected")}<span>${escapeHtml(entry.result.reason)}</span></td>
           <td>${entry.fallbackUsed ? statusBadge("fallback") : "no"}</td>
@@ -2255,7 +2284,7 @@ function visualReport(
           : `<ul>${notable
               .map(
                 (entry) =>
-                  `<li><b>${escapeHtml(entry.username)}</b> selected <code>${escapeHtml(entry.selectedLegalActionId)}</code>: ${escapeHtml(entry.reason)}</li>`,
+                  `<li><b>${escapeHtml(entry.username)}</b> selected <code>${escapeHtml(entry.selectedLegalActionId)}</code>: ${escapeHtml(reasonLabel(entry))}</li>`,
               )
               .join("")}</ul>`
       }
@@ -2376,6 +2405,19 @@ function strategyLabel(entry: DecisionLogEntry): string {
     return "unknown";
   }
   return `${entry.strategicPriority}/${entry.strategicUrgency ?? "unknown"}`;
+}
+
+/**
+ * Display-only rendering of `entry.reason` for the internal match report/
+ * visual-report artifacts. `null` means the decision had no stated reason
+ * (a fallback/failure path — see `AgentDecision.reason`'s doc); shown here
+ * as an explicit, honest label instead of the string `"null"` or a blank
+ * cell, and never the raw provider/parse failure text those artifacts
+ * would otherwise be tempted to backfill it with (that text already has
+ * its own `parseFailureReason`/`fallbackReason` columns via `entry`).
+ */
+function reasonLabel(entry: DecisionLogEntry): string {
+  return entry.reason ?? "(no stated reason — fallback decision)";
 }
 
 function objectiveLabel(entry: DecisionLogEntry): string {

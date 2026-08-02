@@ -61,7 +61,7 @@ export interface AgentTacticOpportunityExample {
   activeTransportTroops: number;
   largestAvailableBoatLaunchTroops: number;
   effectiveFutureTroopRatio: number | null;
-  reason: string;
+  reason: string | null;
 }
 
 export interface AgentOpeningTempoOpportunityExample {
@@ -78,7 +78,7 @@ export interface AgentOpeningTempoOpportunityExample {
   neutralLandExpansionActionCount: number;
   neutralBoatExpansionActionCount: number;
   homeDanger: string;
-  reason: string;
+  reason: string | null;
 }
 
 export interface AgentFrontierConversionOpportunityExample {
@@ -99,7 +99,7 @@ export interface AgentFrontierConversionOpportunityExample {
   bestExecutorReadyTargetName: string | null;
   bestExecutorReadyRelativeTroopRatio: number | null;
   homeDanger: string;
-  reason: string;
+  reason: string | null;
 }
 
 export interface AgentFrontierFinishPressureOpportunityExample {
@@ -121,7 +121,7 @@ export interface AgentFrontierFinishPressureOpportunityExample {
   bestTargetTileShare: number | null;
   bestAttackTroopPercent: number | null;
   homeDanger: string;
-  reason: string;
+  reason: string | null;
 }
 
 export interface AgentEconomyCadenceOpportunityExample {
@@ -142,7 +142,7 @@ export interface AgentEconomyCadenceOpportunityExample {
   bestBuildID: string | null;
   bestBuildUnit: string | null;
   homeDanger: string;
-  reason: string;
+  reason: string | null;
 }
 
 export interface AgentNavalControlOpportunityExample {
@@ -163,7 +163,7 @@ export interface AgentNavalControlOpportunityExample {
   bestNavalActionID: string | null;
   bestNavalActionKind: string | null;
   homeDanger: string;
-  reason: string;
+  reason: string | null;
 }
 
 export interface AgentLateGameStrikeTargetingOpportunityExample {
@@ -186,7 +186,7 @@ export interface AgentLateGameStrikeTargetingOpportunityExample {
   bestStrikeTargetStructureUnit: string | null;
   bestStrikeScore: number | null;
   homeDanger: string;
-  reason: string;
+  reason: string | null;
 }
 
 export interface AgentPersonalityDiplomacyPressureOpportunityExample {
@@ -210,7 +210,7 @@ export interface AgentPersonalityDiplomacyPressureOpportunityExample {
   bestSocialScore: number | null;
   personalityMode: string | null;
   homeDanger: string;
-  reason: string;
+  reason: string | null;
 }
 
 export type AgentProfileRepairIssueType =

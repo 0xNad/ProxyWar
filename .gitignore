@@ -13,6 +13,9 @@ resources/.DS_Store
 NOTES.md
 .claude/
 .codex/
+.omp/
+WATCHDOG.md
+WATCHDOG.yml
 .idea/
 AGENTS.md
 docs/project-state/

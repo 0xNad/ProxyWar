@@ -4,7 +4,6 @@ import { UnitType } from "../../../core/game/Game";
 import { TileRef } from "../../../core/game/GameMap";
 import { ConquestUpdate, GameUpdateType } from "../../../core/game/GameUpdates";
 import { GameView, UnitView } from "../../../core/game/GameView";
-import { PlaySoundEffectEvent } from "../../sound/Sounds";
 import { AnimatedSpriteLoader } from "../AnimatedSpriteLoader";
 import { conquestFxFactory } from "../fx/ConquestFx";
 import { Fx, FxType } from "../fx/Fx";
@@ -60,11 +59,6 @@ export class FxLayer implements Layer {
   }
 
   onUnitEvent(unit: UnitView) {
-    // Detect unit creation (launches, warship built)
-    if (unit.isActive() && unit.createdAt() === this.game.ticks()) {
-      this.onUnitCreated(unit);
-    }
-
     switch (unit.type()) {
       case UnitType.AtomBomb: {
         this.onNukeEvent(unit, 70);
@@ -93,45 +87,6 @@ export class FxLayer implements Layer {
       case UnitType.SAMLauncher:
       case UnitType.Factory:
         this.onStructureEvent(unit);
-        break;
-    }
-  }
-
-  onUnitCreated(unit: UnitView) {
-    switch (unit.type()) {
-      case UnitType.AtomBomb:
-        this.eventBus.emit(new PlaySoundEffectEvent("atom-launch"));
-        break;
-      case UnitType.HydrogenBomb:
-        this.eventBus.emit(new PlaySoundEffectEvent("hydrogen-launch"));
-        break;
-      case UnitType.MIRV:
-        this.eventBus.emit(new PlaySoundEffectEvent("mirv-launch"));
-        break;
-      case UnitType.Warship:
-        if (unit.owner() === this.game.myPlayer()) {
-          this.eventBus.emit(new PlaySoundEffectEvent("build-warship"));
-        }
-        break;
-      case UnitType.City:
-        if (unit.owner() === this.game.myPlayer()) {
-          this.eventBus.emit(new PlaySoundEffectEvent("build-city"));
-        }
-        break;
-      case UnitType.Port:
-        if (unit.owner() === this.game.myPlayer()) {
-          this.eventBus.emit(new PlaySoundEffectEvent("build-port"));
-        }
-        break;
-      case UnitType.DefensePost:
-        if (unit.owner() === this.game.myPlayer()) {
-          this.eventBus.emit(new PlaySoundEffectEvent("build-defense-post"));
-        }
-        break;
-      case UnitType.SAMLauncher:
-        if (unit.owner() === this.game.myPlayer()) {
-          this.eventBus.emit(new PlaySoundEffectEvent("sam-built"));
-        }
         break;
     }
   }
@@ -191,8 +146,6 @@ export class FxLayer implements Layer {
     if (conqueror !== this.game.myPlayer()) {
       return;
     }
-
-    this.eventBus.emit(new PlaySoundEffectEvent("ka-ching"));
 
     if (this.fxEnabled()) {
       this.allFx.push(
@@ -263,9 +216,6 @@ export class FxLayer implements Layer {
       );
       this.allFx = this.allFx.concat(nukeFx);
     }
-    const sound =
-      unit.type() === UnitType.HydrogenBomb ? "hydrogen-hit" : "atom-hit";
-    this.eventBus.emit(new PlaySoundEffectEvent(sound));
   }
 
   handleSAMInterception(unit: UnitView) {

@@ -325,7 +325,7 @@ describe("LLM agent decision contract", () => {
     }
   });
 
-  it("falls back safely when mock LLM output is invalid", async () => {
+  it("falls back safely when mock LLM output is invalid, recording no stated reason", async () => {
     const brain = new LlmAgentBrain({
       provider: new MockLlmProvider({ mode: "unknown" }),
       profile: "opportunistic",
@@ -334,15 +334,26 @@ describe("LLM agent decision contract", () => {
     const decision = await brain.decide({ observation, legalActions });
 
     expect(decision.actionID).toBe("hold");
+    // P0 fix: a fallback decision has no stated reason — the LLM never
+    // produced a usable one, so `reason` is null rather than a synthesized
+    // "LLM decision rejected (...); fallback: ..." string.
+    expect(decision.reason).toBeNull();
     expect(decision.metadata).toMatchObject({
       brain: "llm",
       llmParseOk: false,
       fallbackUsed: true,
       fallbackActionID: "hold",
     });
+    // The distinct fields carry what `reason` used to conflate: the parse
+    // failure text, and the substituted rule brain's own genuine reason.
+    expect(typeof decision.metadata?.llmParseFailureReason).toBe("string");
+    expect(typeof decision.metadata?.fallbackReason).toBe("string");
+    expect(decision.metadata?.fallbackReason).not.toContain(
+      "LLM decision rejected",
+    );
   });
 
-  it("falls back when a provider throws", async () => {
+  it("falls back when a provider throws, recording no stated reason", async () => {
     const provider: LlmProvider = {
       providerType: "custom",
       complete: async () => {
@@ -354,6 +365,7 @@ describe("LLM agent decision contract", () => {
     const decision = await brain.decide({ observation, legalActions });
 
     expect(decision.actionID).toBe("alliance:PLAYER02");
+    expect(decision.reason).toBeNull();
     expect(decision.metadata).toMatchObject({
       brain: "llm",
       brainType: "real-llm",
@@ -365,12 +377,19 @@ describe("LLM agent decision contract", () => {
       fallbackUsed: true,
       fallbackActionID: "alliance:PLAYER02",
     });
+    // The raw provider-failure text (the exact shape a real HTTP 403 auth
+    // error produces) lives ONLY in the distinct failure field now, never
+    // folded into the public "stated reason" field above.
     expect(decision.metadata?.llmParseFailureReason).toContain(
+      "provider unavailable",
+    );
+    expect(typeof decision.metadata?.fallbackReason).toBe("string");
+    expect(decision.metadata?.fallbackReason).not.toContain(
       "provider unavailable",
     );
   });
 
-  it("falls back when a provider exceeds the brain timeout", async () => {
+  it("falls back when a provider exceeds the brain timeout, recording no stated reason", async () => {
     const provider: LlmProvider = {
       providerType: "custom",
       complete: async () => new Promise<string>(() => {}),
@@ -384,6 +403,7 @@ describe("LLM agent decision contract", () => {
     const decision = await brain.decide({ observation, legalActions });
 
     expect(decision.actionID).toBe("alliance:PLAYER02");
+    expect(decision.reason).toBeNull();
     expect(decision.metadata).toMatchObject({
       brain: "llm",
       brainType: "real-llm",
@@ -392,6 +412,7 @@ describe("LLM agent decision contract", () => {
       fallbackActionID: "alliance:PLAYER02",
     });
     expect(decision.metadata?.llmParseFailureReason).toContain("timed out");
+    expect(typeof decision.metadata?.fallbackReason).toBe("string");
   });
 
   it("selects a valid legal action by id with the mock LLM provider", async () => {
@@ -404,6 +425,10 @@ describe("LLM agent decision contract", () => {
     const decision = await brain.decide({ observation, legalActions });
 
     expect(provider.prompts[0]).toContain("LEGAL_ACTIONS_JSON");
+    // A genuine (non-fallback) decision keeps its real stated reason —
+    // unaffected by the fallback-path P0 fix above.
+    expect(typeof decision.reason).toBe("string");
+    expect((decision.reason as string).length).toBeGreaterThan(0);
     expect(decision).toMatchObject({
       actionID: "alliance:PLAYER02",
       metadata: {

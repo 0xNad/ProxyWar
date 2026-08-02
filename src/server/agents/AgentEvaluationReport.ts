@@ -68,7 +68,8 @@ interface DecisionEntry {
   username: string;
   selectedLegalActionId: string;
   selectedActionKind: LegalActionKind;
-  reason: string;
+  /** `null` for a fallback/failure decision with no stated reason — see server `AgentDecision.reason`'s doc. */
+  reason: string | null;
   fallbackUsed: boolean;
   parseSuccess?: boolean;
   parseFailureReason?: string;
@@ -329,7 +330,7 @@ function evaluationReport(
             decision.kind,
             decision.selectedLegalActionId,
             decision.accepted ? "yes" : "no",
-            decision.reason,
+            decision.reason ?? "(no stated reason — fallback decision)",
           ]),
         ),
     "",

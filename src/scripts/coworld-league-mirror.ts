@@ -19,20 +19,52 @@ import {
   retentionReferencesFromEpisodes,
 } from "../server/agents/CoworldLeagueArtifactRetention";
 import {
+  buildCoworldReplayUiArtifact,
   buildEpisodeRow,
   buildRoundRows,
   buildStandingRows,
   mergeEpisodeRows,
   parseCompletedEpisodeMetaList,
+  parseDirectorCutPlanSummary,
   parseHostedReplayPayload,
   parseLeagueSummary,
+  parseCuratedDramaScore,
+  parseMatchNarrativeSummary,
   pickCompetitionDivision,
+  premiereHrefForEpisode,
+  resolveLatestRevealedPremiere,
   roundNumberByRoundId,
   scoreLabelFromStandings,
+  selectServingLatestPremiere,
+  summarizePremiereArchiveIndex,
   type HostedEpisodeMeta,
   type ParsedHostedReplay,
+  type PremiereArchiveIndexSummary,
 } from "../server/agents/CoworldLeagueMirrorCore";
+import {
+  backfillDirectorCutPlans,
+  generateDirectorCutPlanForRunDir,
+  type DirectorCutGenerationResult,
+} from "../server/agents/CoworldLeagueDirectorCutBackfill";
+import {
+  backfillMatchStateSeries,
+  generateMatchStateSeriesForRunDir,
+  type MatchStateSeriesGenerationResult,
+} from "../server/agents/CoworldLeagueMatchStateSeriesBackfill";
+import {
+  backfillMatchNarrativeArtifacts,
+  generateMatchNarrativeArtifactsForRunDir,
+  type MatchNarrativeGenerationResult,
+} from "../server/agents/CoworldLeagueMatchNarrativeBackfill";
 import { withCoworldLeagueMirrorOperationLock } from "../server/agents/CoworldLeagueMirrorOperationLock";
+import {
+  buildPremiereSiteBlock,
+  classifyEpisodeSuppression,
+  filterSuppressedEpisodeRows,
+  loadLatestPremierePointer,
+  loadPremiereSuppressionContract,
+  type PremiereSuppressionState,
+} from "../server/agents/CoworldLeaguePremiereSuppression";
 import {
   markCoworldLeagueSiteStale,
   writeCoworldLeagueSite,
@@ -53,6 +85,29 @@ import {
  * This script never mutates hosted state: no upload, submit, publish, or
  * experience-request creation. Keep it that way — hosted mutations are
  * operator-gated.
+ *
+ * Premiere links (`--premiere-archive-index <absolute path>`): when pointed at
+ * the replay-premiere archive index (production:
+ * `$PROXYWAR_STORAGE_STATE_DIR/replay-premiere/archive-v1/archive-index.jsonl`,
+ * wired in `start-proxywar-league-mirror.zsh` exactly like
+ * `--suppression-contract`), each battle card whose episode has a REVEALED
+ * premiere gains a `/premiere/<premiereId>` link. The index is READ-ONLY here,
+ * only reveal-public facts are extracted, and every failure mode fails open to
+ * "no links". Default off: without the flag the mirror output is unchanged.
+ *
+ * Latest-premiere card (`--latest-premiere <absolute path>`): when pointed at
+ * the loop-written latest-revealed pointer (production:
+ * `$PROXYWAR_STORAGE_STATE_DIR/premiere-suppression/latest-premiere.json`,
+ * next to the suppression contract), the league page's premiere slot becomes
+ * persistent: whenever no LIVE premiere card is showing it renders the most
+ * recent REVEALED premiere as a watchable card, replaced only when the next
+ * premiere activates — so once any premiere has revealed, the slot is never
+ * empty. The pointer is the freshness source (written at reveal, before the
+ * ~30-minute terminal reclamation), READ-ONLY here, carries reveal-public
+ * facts only, and is cross-checked against the archive index when that is
+ * also wired (with the index's newest revealed entry as the fallback). Every
+ * failure mode fails open to "no card". Default off: without the flag the
+ * mirror output is unchanged.
  */
 
 const execFileAsync = promisify(execFile);
@@ -76,6 +131,73 @@ interface MirrorOptions {
   recoverPinnedArtifacts: boolean;
   watch: boolean;
   intervalSeconds: number;
+  /**
+   * Absolute path to the premiere-suppression contract, or null (default) to
+   * run with suppression disabled — the mirror then behaves exactly as before.
+   */
+  suppressionContractPath: string | null;
+  /**
+   * Absolute path to the replay-premiere archive index
+   * (`archive-v1/archive-index.jsonl`), or null (default) to publish battle
+   * cards without premiere links — the mirror then behaves exactly as before.
+   */
+  premiereArchiveIndexPath: string | null;
+  /**
+   * Absolute path to the loop-written latest-revealed-premiere pointer
+   * (`premiere-suppression/latest-premiere.json`), or null (default) to
+   * publish without the "Latest premiere" card — the mirror then behaves
+   * exactly as before.
+   */
+  latestPremierePointerPath: string | null;
+  /**
+   * Origin to probe (`--premiere-probe-origin`, e.g. `http://127.0.0.1:8788`)
+   * before linking a "Latest premiere" card: a candidate whose
+   * `/premiere/<id>` page does not return 200 is dropped in favor of the
+   * archive-index fallback (or no card). Null (default) skips probing —
+   * candidates are trusted as before. 2026-07-22 orphan incident: a pointer
+   * can name a revealed premiere that is neither live-registered nor archived
+   * after restart churn; without the probe the card links a 404.
+   */
+  premiereProbeOrigin: string | null;
+  /**
+   * Max number of `director-cut-plan.json` generation attempts per sync
+   * cycle (`--director-cut-budget`, env `PROXYWAR_LEAGUE_DIRECTOR_CUT_BUDGET`,
+   * default 1). Shared across BOTH freshly-unpacked episodes (checked first,
+   * so a live match gets its cut as soon as budget allows) and the gradual
+   * backfill scan over older retained run dirs still missing one — keeps
+   * every cycle's extra parse/CPU work bounded and never risks delaying the
+   * league publish for a thundering herd of history. 0 disables generation
+   * entirely.
+   */
+  directorCutPlanBudget: number;
+  /**
+   * Max number of drama-report/match-story/match-recap generation attempts
+   * per sync cycle (`--match-narrative-budget`, env
+   * `PROXYWAR_LEAGUE_MATCH_NARRATIVE_BUDGET`, default 1) — same
+   * fresh-episodes-first-then-gradual-backfill budget shape as
+   * `directorCutPlanBudget` above, a SEPARATE counter so drama/story
+   * generation never competes with Director Cut for the same slots. 0
+   * disables generation entirely.
+   */
+  matchNarrativeBudget: number;
+  /**
+   * Season Zero Phase 2: max number of `match-state-series.json`
+   * generation attempts per sync cycle (`--match-state-series-budget`, env
+   * `PROXYWAR_LEAGUE_MATCH_STATE_SERIES_BUDGET`, default 3) — same
+   * fresh-episodes-first-then-gradual-backfill budget shape as
+   * `directorCutPlanBudget`/`matchNarrativeBudget`, a SEPARATE counter.
+   * Defaults HIGHER than the other two: this generation is a pure
+   * re-projection of already-written artifacts (no telemetry curation, no
+   * importance scoring — see `AgentMatchStateSeries.ts`'s own doc), so it
+   * is strictly cheaper, and staying ahead of the historical backlog gives
+   * `director-cut-plan.json`/`match-recap.json` generation the best chance
+   * of seeing a real series on THEIR first pass rather than a later cycle
+   * (see `CoworldLeagueMatchStateSeriesBackfill.ts`'s own ordering-dependency
+   * doc — this is why it also runs strictly BEFORE the other two below,
+   * both for freshly-unpacked episodes and the backfill scan). 0 disables
+   * generation entirely.
+   */
+  matchStateSeriesBudget: number;
 }
 
 function parseOptions(argv: string[]): MirrorOptions {
@@ -113,6 +235,19 @@ function parseOptions(argv: string[]): MirrorOptions {
     recoverPinnedArtifacts: false,
     watch: false,
     intervalSeconds: 300,
+    suppressionContractPath: null,
+    premiereArchiveIndexPath: null,
+    latestPremierePointerPath: null,
+    premiereProbeOrigin: null,
+    directorCutPlanBudget: Number(
+      process.env.PROXYWAR_LEAGUE_DIRECTOR_CUT_BUDGET ?? "1",
+    ),
+    matchNarrativeBudget: Number(
+      process.env.PROXYWAR_LEAGUE_MATCH_NARRATIVE_BUDGET ?? "1",
+    ),
+    matchStateSeriesBudget: Number(
+      process.env.PROXYWAR_LEAGUE_MATCH_STATE_SERIES_BUDGET ?? "3",
+    ),
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -170,6 +305,55 @@ function parseOptions(argv: string[]): MirrorOptions {
       case "--interval-seconds":
         options.intervalSeconds = Math.max(60, Number(next()));
         break;
+      case "--suppression-contract": {
+        const value = next();
+        if (!path.isAbsolute(value)) {
+          throw new Error(
+            `--suppression-contract must be an absolute path: ${value}`,
+          );
+        }
+        options.suppressionContractPath = value;
+        break;
+      }
+      case "--premiere-archive-index": {
+        const value = next();
+        if (!path.isAbsolute(value)) {
+          throw new Error(
+            `--premiere-archive-index must be an absolute path: ${value}`,
+          );
+        }
+        options.premiereArchiveIndexPath = value;
+        break;
+      }
+      case "--latest-premiere": {
+        const value = next();
+        if (!path.isAbsolute(value)) {
+          throw new Error(
+            `--latest-premiere must be an absolute path: ${value}`,
+          );
+        }
+        options.latestPremierePointerPath = value;
+        break;
+      }
+      case "--premiere-probe-origin": {
+        const value = next();
+        if (!/^https?:\/\/[^/\s]+$/.test(value)) {
+          throw new Error(
+            `--premiere-probe-origin must be a bare http(s) origin: ${value}`,
+          );
+        }
+        options.premiereProbeOrigin = value;
+        break;
+      }
+      case "--director-cut-budget":
+        options.directorCutPlanBudget = Number(next());
+        break;
+      case "--match-narrative-budget":
+        options.matchNarrativeBudget = Number(next());
+        break;
+      case "--match-state-series-budget":
+        options.matchStateSeriesBudget = Number(next());
+        break;
       default:
         throw new Error(`Unknown flag: ${arg}`);
     }
@@ -185,6 +369,12 @@ function parseOptions(argv: string[]): MirrorOptions {
     options.maxRetainedRunDirectories < options.maxRenderedEpisodes ||
     !Number.isFinite(options.minimumFreeBytes) ||
     options.minimumFreeBytes < 10 * 1024 * 1024 * 1024 ||
+    !Number.isInteger(options.directorCutPlanBudget) ||
+    options.directorCutPlanBudget < 0 ||
+    !Number.isInteger(options.matchNarrativeBudget) ||
+    options.matchNarrativeBudget < 0 ||
+    !Number.isInteger(options.matchStateSeriesBudget) ||
+    options.matchStateSeriesBudget < 0 ||
     !Number.isFinite(options.intervalSeconds)
   ) {
     throw new Error(
@@ -335,13 +525,13 @@ async function ensureEpisodeReplayCached(
 
 // Bump when bundle contents change shape so existing directories regenerate
 // in place on the next sync (files are overwritten, never deleted).
-const bundleVersion = "2";
+const bundleVersion = "3";
 
 async function unpackEpisodeRunDir(
   replay: ParsedHostedReplay,
   runsRootDir: string,
   minimumFreeBytes: number,
-): Promise<{ watchHref: string; fullRenderHref: string } | null> {
+): Promise<{ watchHref: string; fullRenderHref: string; runDir: string } | null> {
   if (replay.spectatorReplay === null) {
     return null;
   }
@@ -367,6 +557,10 @@ async function unpackEpisodeRunDir(
     const generatedFiles = [
       ...Object.entries(replay.inlineRunArtifacts),
       [
+        "replay-ui.json",
+        `${JSON.stringify(buildCoworldReplayUiArtifact(replay.inlineRunArtifacts))}\n`,
+      ],
+      [
         "spectator-replay.json",
         `${JSON.stringify(publicSpectatorReplay, null, 2)}\n`,
       ],
@@ -390,11 +584,314 @@ async function unpackEpisodeRunDir(
   return {
     watchHref: `/ai-league-runs/${encodedRunKey}/spectator.html`,
     fullRenderHref: `/ai-league-replay/${encodedRunKey}`,
+    runDir,
   };
+}
+
+/**
+ * Product overhaul spec Stage 5: reads `director-cut-plan.json` from an
+ * episode's unpacked run directory, when one exists. Tolerant of absence —
+ * a missing file (not yet generated this cycle, or generation was skipped
+ * for lack of usable input — see `generateDirectorCutPlanForRunDir` below)
+ * or any other read failure resolves to `null`, exactly like every other
+ * optional-artifact path in this mirror. Parsing itself is delegated to the
+ * pure, unit-tested `parseDirectorCutPlanSummary`.
+ */
+async function readDirectorCutSummaryFromRunDir(
+  runDir: string,
+): Promise<{ durationEstimateSeconds: number; segmentCount: number } | null> {
+  try {
+    const raw = await fs.readFile(
+      path.join(runDir, "director-cut-plan.json"),
+      "utf8",
+    );
+    return parseDirectorCutPlanSummary(raw);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * "Drama recaps" gap closure: reads `drama-report.json` + `match-story.json`
+ * from an episode's unpacked run directory, when BOTH exist (they're
+ * written atomically together — see `generateMatchNarrativeArtifactsForRunDir`'s
+ * own doc). Tolerant of absence, exactly like {@link readDirectorCutSummaryFromRunDir}
+ * above. Legacy-pair parsing is delegated to the pure, unit-tested
+ * `parseMatchNarrativeSummary`; `curatedDramaScore` — the PUBLIC ranking
+ * input, see `AgentMatchRecap.ts`'s doc — is resolved INDEPENDENTLY from
+ * `match-recap.json` (`parseCuratedDramaScore`) so it degrades on its own
+ * (missing/stale recap -> `null`) without requiring the legacy pair to be
+ * absent too.
+ */
+async function readMatchNarrativeSummaryFromRunDir(
+  runDir: string,
+): Promise<{ dramaScore: number; entertainmentGrade: string; curatedDramaScore: number | null } | null> {
+  let legacy: { dramaScore: number; entertainmentGrade: string } | null;
+  try {
+    const [dramaReportRaw, matchStoryRaw] = await Promise.all([
+      fs.readFile(path.join(runDir, "drama-report.json"), "utf8"),
+      fs.readFile(path.join(runDir, "match-story.json"), "utf8"),
+    ]);
+    legacy = parseMatchNarrativeSummary(dramaReportRaw, matchStoryRaw);
+  } catch {
+    legacy = null;
+  }
+  if (legacy === null) {
+    return null;
+  }
+  let curatedDramaScore: number | null;
+  try {
+    const matchRecapRaw = await fs.readFile(
+      path.join(runDir, "match-recap.json"),
+      "utf8",
+    );
+    curatedDramaScore = parseCuratedDramaScore(matchRecapRaw);
+  } catch {
+    curatedDramaScore = null;
+  }
+  return { ...legacy, curatedDramaScore };
 }
 
 function log(message: string): void {
   console.log(`[league-mirror ${new Date().toISOString()}] ${message}`);
+}
+
+/**
+ * Logs a `director-cut-plan.json` generation attempt's outcome. Silent on
+ * the two free, expected-common skips (`already-exists`, `no-input`) — those
+ * would otherwise spam every cycle for the vast majority of run dirs that
+ * simply already have a plan or haven't been unpacked with telemetry yet.
+ */
+function logDirectorCutGenerationResult(result: DirectorCutGenerationResult): void {
+  const { runKey, outcome } = result;
+  switch (outcome.status) {
+    case "already-exists":
+    case "no-input":
+      return;
+    case "skipped-no-usable-telemetry":
+      log(`director cut plan skipped for ${runKey}: no usable telemetry`);
+      return;
+    case "generated":
+      log(
+        `director cut plan generated for ${runKey} (${outcome.source}, ${outcome.segmentCount} segment(s))`,
+      );
+      return;
+    case "failed":
+      log(`director cut plan generation failed for ${runKey}: ${outcome.error}`);
+      return;
+  }
+}
+
+/**
+ * Logs a drama-report/match-story/match-recap generation attempt's outcome
+ * — same silent-on-free-skips convention as {@link logDirectorCutGenerationResult}.
+ */
+function logMatchNarrativeGenerationResult(
+  result: MatchNarrativeGenerationResult,
+): void {
+  const { runKey, outcome } = result;
+  switch (outcome.status) {
+    case "already-exists":
+    case "no-input":
+      return;
+    case "skipped-no-usable-evidence":
+      log(`match narrative generation skipped for ${runKey}: no usable evidence`);
+      return;
+    case "generated":
+      log(
+        `match narrative generated for ${runKey} (${outcome.source}, drama ${outcome.dramaScore}, curated ${outcome.curatedDramaScore ?? "n/a"}, ${outcome.entertainmentGrade}, ${outcome.recapBeatCount} recap beat(s))`,
+      );
+      return;
+    case "generated-recap-only":
+      log(
+        `match narrative generated recap-only for ${runKey} (${outcome.source}, curated ${outcome.curatedDramaScore ?? "n/a"}, ${outcome.recapBeatCount} recap beat(s); no decisions.jsonl records for drama/story)`,
+      );
+      return;
+    case "recap-upgraded":
+      log(
+        `match recap re-curated for ${runKey} (${outcome.source}, curated ${outcome.curatedDramaScore ?? "n/a"}, ${outcome.recapBeatCount} recap beat(s); drama-report/match-story untouched)`,
+      );
+      return;
+    case "failed":
+      log(`match narrative generation failed for ${runKey}: ${outcome.error}`);
+      return;
+    default:
+      // Exhaustiveness guard: a compile error here means a new
+      // `MatchNarrativeGenerationOutcome` status was added without a
+      // logging case above (this is exactly how the `recap-upgraded`
+      // case went silently unlogged the first time).
+      outcome satisfies never;
+      return;
+  }
+}
+
+/**
+ * Logs a `match-state-series.json` generation attempt's outcome — same
+ * silent-on-free-skips convention as {@link logDirectorCutGenerationResult}.
+ */
+function logMatchStateSeriesGenerationResult(
+  result: MatchStateSeriesGenerationResult,
+): void {
+  const { runKey, outcome } = result;
+  switch (outcome.status) {
+    case "already-exists":
+    case "no-input":
+      return;
+    case "skipped-no-usable-replay":
+      log(`match state series skipped for ${runKey}: no usable replay`);
+      return;
+    case "generated":
+      log(
+        `match state series generated for ${runKey} (${outcome.sampleCount} sample(s))`,
+      );
+      return;
+    case "failed":
+      log(`match state series generation failed for ${runKey}: ${outcome.error}`);
+      return;
+  }
+}
+
+/**
+ * Read the premiere-suppression contract, or resolve to a stale (non-
+ * suppressing) state when no contract path is configured. Fail-open: any
+ * unreadable/corrupt/stale contract also resolves to a stale state inside
+ * {@link loadPremiereSuppressionContract}, so this never throws and never
+ * blocks publication.
+ */
+async function readSuppressionState(
+  options: MirrorOptions,
+  now: Date = new Date(),
+): Promise<PremiereSuppressionState> {
+  if (options.suppressionContractPath === null) {
+    return { status: "stale", reason: "not_configured" };
+  }
+  return loadPremiereSuppressionContract(options.suppressionContractPath, now);
+}
+
+const maximumPremiereArchiveIndexBytes = 64 * 1024 * 1024;
+
+/**
+ * Read the replay-premiere archive index into its mirror projection: REVEALED
+ * premiere ids for battle-card links plus the known-id/newest-revealed view
+ * the latest-premiere card cross-checks against. Fail-open on every failure
+ * mode — not configured, missing (the normal pre-first-premiere state),
+ * unreadable, not a regular file, or oversized — the mirror then publishes
+ * without premiere links rather than degrading the feed. A link appears on
+ * the first mirror cycle after the premiere's terminal reclamation (≤ ~30
+ * minutes after reveal); revealed-but-not-yet-reclaimed premieres are
+ * intentionally not linked, so this reader never has to touch the live
+ * premiere catalog.
+ */
+async function readPremiereArchiveIndex(
+  options: MirrorOptions,
+): Promise<PremiereArchiveIndexSummary | null> {
+  if (options.premiereArchiveIndexPath === null) {
+    return null;
+  }
+  try {
+    const indexStat = await fs.stat(options.premiereArchiveIndexPath);
+    if (
+      !indexStat.isFile() ||
+      indexStat.size > maximumPremiereArchiveIndexBytes
+    ) {
+      log(
+        "premiere archive index skipped (not a regular file or over the byte ceiling); publishing without premiere links",
+      );
+      return null;
+    }
+    const summary = summarizePremiereArchiveIndex(
+      await fs.readFile(options.premiereArchiveIndexPath, "utf8"),
+    );
+    log(
+      `premiere archive index: ${summary.revealedIds.size} revealed premiere(s)`,
+    );
+    return summary;
+  } catch (error) {
+    const code =
+      error !== null && typeof error === "object" && "code" in error
+        ? (error as { code?: unknown }).code
+        : null;
+    if (code !== "ENOENT") {
+      log(
+        `premiere archive index unreadable; publishing without premiere links: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    return null;
+  }
+}
+
+/**
+ * Resolve the "Latest premiere" card for this cycle, or null when the feature
+ * is off (`--latest-premiere` not passed) or nothing revealed is known.
+ * Fail-open end to end: the pointer read tolerates missing/unreadable/
+ * malformed/oversized files, the resolver drops a pointer the archive index
+ * contradicts and falls back to the index's newest revealed entry, and any
+ * failure here only costs the card — never the cycle.
+ */
+async function readLatestPremiereCard(
+  options: MirrorOptions,
+  archiveIndex: PremiereArchiveIndexSummary | null,
+): Promise<ReturnType<typeof resolveLatestRevealedPremiere>> {
+  if (options.latestPremierePointerPath === null) {
+    return null;
+  }
+  const pointer = await loadLatestPremierePointer(
+    options.latestPremierePointerPath,
+  );
+  const latest = await selectServingLatestPremiere(
+    pointer,
+    archiveIndex,
+    latestPremiereProbe(options),
+  );
+  if (latest !== null) {
+    log(
+      `latest premiere card: ${latest.premiereId} (${
+        pointer !== null && pointer.premiereId === latest.premiereId
+          ? "pointer"
+          : "archive-index fallback"
+      })`,
+    );
+  } else if (pointer !== null) {
+    log(
+      `latest premiere card omitted: no candidate page is serving (pointer ${pointer.premiereId})`,
+    );
+  }
+  return latest;
+}
+
+/**
+ * Bounded page probe for latest-premiere candidates. With no
+ * `--premiere-probe-origin` the probe trusts every candidate (legacy
+ * behavior). With an origin, a candidate must answer 200 on its
+ * `/premiere/<id>` page within 2.5 s; any error, timeout, or non-200 drops
+ * it. Probe failures never fail the cycle — worst case the card is omitted
+ * for this cycle and returns when the page serves.
+ */
+function latestPremiereProbe(
+  options: MirrorOptions,
+): (premiereId: string) => Promise<boolean> {
+  const origin = options.premiereProbeOrigin;
+  if (origin === null) {
+    return async () => true;
+  }
+  return async (premiereId: string) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2_500);
+    try {
+      const response = await fetch(
+        `${origin}/premiere/${encodeURIComponent(premiereId)}`,
+        { method: "GET", redirect: "manual", signal: controller.signal },
+      );
+      await response.body?.cancel().catch(() => undefined);
+      return response.status === 200;
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
 }
 
 async function pruneMirrorArtifacts(
@@ -510,18 +1007,97 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
   const recoveryReferences = options.recoverPinnedArtifacts
     ? await readCoworldLeagueRetentionPins(options.retentionPinManifestPath)
     : null;
-  const episodeMetasToProcess =
+  // Revealed premieres, for spoiler-safe battle-card links and the latest-
+  // premiere card's cross-check/fallback. Read once per cycle; fail-open to an
+  // absent summary (cards simply carry no premiere link, no latest card
+  // fallback).
+  const premiereArchiveIndex = await readPremiereArchiveIndex(options);
+  const revealedPremiereIds =
+    premiereArchiveIndex?.revealedIds ?? new Set<string>();
+  // Read the contract at cycle start to log/observe suppression status. Only
+  // the cycle-start OBSERVATION is skipped during operator-driven pinned-artifact
+  // recovery; the final-defense filter below still runs unconditionally, so a
+  // held/quarantined episode is spoiler-shielded even on the recovery path.
+  const suppressionAtCycleStart =
+    recoveryReferences === null ? await readSuppressionState(options) : null;
+  if (
+    options.suppressionContractPath !== null &&
+    suppressionAtCycleStart !== null
+  ) {
+    log(
+      suppressionAtCycleStart.status === "active"
+        ? `premiere suppression active (${suppressionAtCycleStart.contract.holds.length} hold(s))`
+        : `premiere suppression inactive (contract ${suppressionAtCycleStart.reason})`,
+    );
+  }
+  const episodeMetasToProcess = (
     recoveryReferences === null
       ? episodeMetas.slice(0, options.maxRenderedEpisodes)
       : episodeMetas.filter((meta) =>
           recoveryReferences.episodeRequestIds.has(meta.episodeRequestId),
-        );
+        )
+  ).filter((meta) => {
+    if (suppressionAtCycleStart === null) {
+      return true;
+    }
+    const decision = classifyEpisodeSuppression(
+      suppressionAtCycleStart,
+      meta,
+      new Date(),
+    );
+    if (decision !== "publish") {
+      log(
+        `episode ${meta.episodeRequestId} ${
+          decision === "held"
+            ? "held for premiere — excluded"
+            : "deferred this cycle (premiere quarantine)"
+        }`,
+      );
+    }
+    return decision === "publish";
+  });
 
   const freshEpisodes: CoworldLeagueEpisodeRow[] = [];
+  // Season Zero Phase 2: `match-state-series.json` generation runs FIRST
+  // (spent first, both here and in the backfill scan below) so that
+  // director-cut/match-narrative generation for the SAME run, in the SAME
+  // cycle, has the best chance of seeing a real series on their own first
+  // pass — see `CoworldLeagueMatchStateSeriesBackfill.ts`'s ordering-
+  // dependency doc.
+  let matchStateSeriesBudget = options.matchStateSeriesBudget;
+  const matchStateSeriesAttemptedRunKeys = new Set<string>();
+  // Shared per-cycle budget for `director-cut-plan.json` generation — spent
+  // first on freshly-unpacked episodes below (so a live match gets its cut
+  // as soon as budget allows), then on the backfill scan after the loop.
+  let directorCutBudget = options.directorCutPlanBudget;
+  const directorCutAttemptedRunKeys = new Set<string>();
+  // Same shape, separate counter, for drama-report/match-story/match-recap
+  // generation — a distinct budget so the two generators never compete for
+  // the same slots.
+  let matchNarrativeBudget = options.matchNarrativeBudget;
+  const matchNarrativeAttemptedRunKeys = new Set<string>();
   const recoveredEpisodeRequestIds = new Set<string>();
   let replayEpisodeFailures = 0;
   for (const meta of episodeMetasToProcess) {
     try {
+      // Re-read the contract immediately before unpack/card build so a claim
+      // that lands mid-cycle still suppresses this episode (shrinks the
+      // in-flight race). Stale/absent contract keeps this a no-op.
+      if (recoveryReferences === null) {
+        const decision = classifyEpisodeSuppression(
+          await readSuppressionState(options),
+          meta,
+          new Date(),
+        );
+        if (decision !== "publish") {
+          log(
+            `episode ${meta.episodeRequestId} suppressed before unpack (${
+              decision === "held" ? "premiere hold" : "premiere quarantine"
+            })`,
+          );
+          continue;
+        }
+      }
       if (
         (await minimumAvailableDiskBytes([
           options.cacheDir,
@@ -571,6 +1147,50 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
           `Pinned replay ${meta.episodeRequestId} did not produce its declared run bundle`,
         );
       }
+      if (unpacked !== null && matchStateSeriesBudget > 0) {
+        const runKey = path.basename(unpacked.runDir);
+        matchStateSeriesAttemptedRunKeys.add(runKey);
+        const result = await generateMatchStateSeriesForRunDir(
+          unpacked.runDir,
+          runKey,
+        );
+        logMatchStateSeriesGenerationResult(result);
+        if (result.attempted) {
+          matchStateSeriesBudget -= 1;
+        }
+      }
+      if (unpacked !== null && directorCutBudget > 0) {
+        const runKey = path.basename(unpacked.runDir);
+        directorCutAttemptedRunKeys.add(runKey);
+        const result = await generateDirectorCutPlanForRunDir(
+          unpacked.runDir,
+          runKey,
+        );
+        logDirectorCutGenerationResult(result);
+        if (result.attempted) {
+          directorCutBudget -= 1;
+        }
+      }
+      if (unpacked !== null && matchNarrativeBudget > 0) {
+        const runKey = path.basename(unpacked.runDir);
+        matchNarrativeAttemptedRunKeys.add(runKey);
+        const result = await generateMatchNarrativeArtifactsForRunDir(
+          unpacked.runDir,
+          runKey,
+        );
+        logMatchNarrativeGenerationResult(result);
+        if (result.attempted) {
+          matchNarrativeBudget -= 1;
+        }
+      }
+      const directorCut =
+        unpacked !== null
+          ? await readDirectorCutSummaryFromRunDir(unpacked.runDir)
+          : null;
+      const dramaEvidence =
+        unpacked !== null
+          ? await readMatchNarrativeSummaryFromRunDir(unpacked.runDir)
+          : null;
       freshEpisodes.push(
         buildEpisodeRow({
           meta,
@@ -581,6 +1201,12 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
               : (roundNumbers.get(meta.roundId) ?? null),
           watchHref: unpacked?.watchHref ?? null,
           fullRenderHref: unpacked?.fullRenderHref ?? null,
+          premiereHref: premiereHrefForEpisode(
+            meta.episodeRequestId,
+            revealedPremiereIds,
+          ),
+          directorCut,
+          dramaEvidence,
         }),
       );
       recoveredEpisodeRequestIds.add(meta.episodeRequestId);
@@ -612,6 +1238,57 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
     return;
   }
 
+  if (options.unpackRunDirs) {
+    try {
+      const results = await backfillMatchStateSeries(
+        options.runsRootDir,
+        matchStateSeriesBudget,
+        matchStateSeriesAttemptedRunKeys,
+      );
+      for (const result of results) {
+        logMatchStateSeriesGenerationResult(result);
+      }
+    } catch (error) {
+      log(
+        `match state series backfill failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    try {
+      const results = await backfillDirectorCutPlans(
+        options.runsRootDir,
+        directorCutBudget,
+        directorCutAttemptedRunKeys,
+      );
+      for (const result of results) {
+        logDirectorCutGenerationResult(result);
+      }
+    } catch (error) {
+      log(
+        `director cut plan backfill failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    try {
+      const results = await backfillMatchNarrativeArtifacts(
+        options.runsRootDir,
+        matchNarrativeBudget,
+        matchNarrativeAttemptedRunKeys,
+      );
+      for (const result of results) {
+        logMatchNarrativeGenerationResult(result);
+      }
+    } catch (error) {
+      log(
+        `match narrative backfill failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
   const replayFeedStale =
     !replayRead.ok || !replayStorageAvailable || replayEpisodeFailures > 0;
   const episodes =
@@ -629,6 +1306,34 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
       `${replayEpisodeFailures} replay episode(s) failed; retaining available previous battle cards`,
     );
   }
+
+  // Final defense: mergeEpisodeRows retains previously-published cards, so a
+  // card published before a premiere claim can still be in `episodes`. Re-read
+  // the contract and filter held/quarantined episodes out of the MERGED list
+  // before it reaches data.json. Stale/absent contract returns the list
+  // unchanged, so the mirror output stays byte-identical to today.
+  const finalSuppression = await readSuppressionState(options);
+  const publishedEpisodes = filterSuppressedEpisodeRows(
+    finalSuppression,
+    episodes,
+    new Date(),
+  );
+  if (publishedEpisodes.length !== episodes.length) {
+    log(
+      `premiere suppression removed ${
+        episodes.length - publishedEpisodes.length
+      } card(s) from the merged episode list`,
+    );
+  }
+  const premiere = buildPremiereSiteBlock(finalSuppression, new Date());
+  // Latest REVEALED premiere for the between-premieres card. Read late (after
+  // the final suppression read) so a reveal that lands mid-cycle is already
+  // visible. Feature-gated on --latest-premiere; the site writer gives the
+  // live card precedence, so data.json may carry both while only one renders.
+  const latestPremiere = await readLatestPremiereCard(
+    options,
+    premiereArchiveIndex,
+  );
 
   const now = new Date().toISOString();
   const data: CoworldLeagueMirrorData = {
@@ -655,7 +1360,13 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
     },
     standings,
     rounds,
-    episodes,
+    episodes: publishedEpisodes,
+    // Only present when a premiere is currently claimed; omitting the key keeps
+    // stale/absent-contract output byte-identical to pre-premiere behavior.
+    ...(premiere !== null ? { premiere } : {}),
+    // Additive: only present when --latest-premiere resolved a revealed
+    // premiere; omitted otherwise so existing consumers see identical output.
+    ...(latestPremiere !== null ? { latestPremiere } : {}),
     links: {
       enterTheLeagueUrl: options.starterUrl,
       platformLabel: "Softmax Coworld",
@@ -663,7 +1374,7 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
   };
   const paths = await writeCoworldLeagueSite(options.siteDir, data);
   log(
-    `site updated: ${paths.indexPath} (${standings.length} standings, ${episodes.length} battles)`,
+    `site updated: ${paths.indexPath} (${standings.length} standings, ${publishedEpisodes.length} battles)`,
   );
   await pruneMirrorArtifacts(options, data.episodes);
 }

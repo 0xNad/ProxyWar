@@ -10,6 +10,7 @@ import {
   buildAssetUrl,
   rewriteAssetsForCdn,
 } from "./src/core/AssetUrls";
+import { DEFAULT_PLATFORM_ORIGIN } from "./src/core/PlatformOrigin";
 import {
   buildPublicAssetManifest,
   copyRootPublicFiles,
@@ -122,6 +123,27 @@ export default defineConfig(({ mode }) => {
       cdnBase,
     ),
     mobileLogoImageUrl: buildAssetUrl("images/OF.png", assetManifest, cdnBase),
+    // index.html's social block is rendered by THREE callers, not two: the two
+    // runtime EJS renderers (RenderHtml.ts and the clip worker's capture host)
+    // and this build/dev-time vite-plugin-html pass. Omitting these here does
+    // not affect production — it serves prebuilt HTML — but it makes every dev
+    // server page a 500, which is how it went unnoticed. Dev has no public
+    // origin, so relative values are correct rather than merely a placeholder
+    // — EXCEPT the bare root "/" specifically: `<link rel="canonical" href="/">`
+    // reads as a real asset URL to Vite's OWN (not vite-plugin-html's) html
+    // transform, which resolves "/" to the project root and tries to
+    // `readFile()` it, throwing `EISDIR` and failing `vite build --mode
+    // development` outright (`npm run build-dev`) — never surfaced via `npm
+    // run dev`, which only ever runs the dev SERVER, not a build. An absolute
+    // URL short-circuits Vite's asset resolution (`isAbsoluteUrl` in
+    // `AssetUrls.ts`'s `buildAssetUrl` — same guard Vite's own html plugin
+    // uses) before it ever touches the filesystem.
+    socialPageUrl: "http://localhost/",
+    socialImageUrl: buildAssetUrl(
+      "images/GameplayScreenshot.png",
+      assetManifest,
+      cdnBase,
+    ),
   };
 
   // Vite's HTML transform replaces the source <script src="/src/client/Main.ts">
@@ -190,9 +212,11 @@ export default defineConfig(({ mode }) => {
       // vitest REPLACES its default `exclude` when this is set, so the
       // defaults (node_modules, dist, …) are restated here, plus artifacts/
       // and outputs/ so archived test copies under artifacts/ (pre-rename
-      // cleanup snapshots) are not scanned as live tests, and .claude/ so test
-      // copies inside sibling-session git worktrees (.claude/worktrees/<id>/)
-      // are not scanned as live tests of this checkout.
+      // cleanup snapshots) are not scanned as live tests, and .claude/ plus
+      // .codex/ so test copies inside sibling-session git worktrees are not
+      // scanned as live tests of this checkout. deploy/ holds node:test
+      // (`.test.mjs`) launchd suites run via `node --test`, not vitest; scanning
+      // them as vitest suites reports a spurious failure.
       exclude: [
         "**/node_modules/**",
         "**/dist/**",
@@ -202,6 +226,8 @@ export default defineConfig(({ mode }) => {
         "**/artifacts/**",
         "**/outputs/**",
         "**/.claude/**",
+        "**/.codex/**",
+        "**/deploy/**",
       ],
     },
     root: "./",
@@ -229,14 +255,30 @@ export default defineConfig(({ mode }) => {
         : [
             createHtmlPlugin({
               minify: false,
-              entry: "/src/client/Main.ts",
-              template: "index.html",
-              inject: {
-                data: {
-                  gitCommit: JSON.stringify("DEV"),
-                  ...htmlAssetData,
+              pages: [
+                {
+                  filename: "index.html",
+                  template: "index.html",
+                  entry: "/src/client/Main.ts",
+                  injectOptions: {
+                    data: {
+                      gitCommit: JSON.stringify("DEV"),
+                      ...htmlAssetData,
+                    },
+                  },
                 },
-              },
+                {
+                  filename: "public.html",
+                  template: "public.html",
+                  entry: "/src/client/PublicApp.ts",
+                  injectOptions: {
+                    data: {
+                      gitCommit: JSON.stringify("DEV"),
+                      ...htmlAssetData,
+                    },
+                  },
+                },
+              ],
             }),
           ]),
       ...(isProduction
@@ -255,6 +297,13 @@ export default defineConfig(({ mode }) => {
         env.STRIPE_PUBLISHABLE_KEY,
       ),
       "process.env.API_DOMAIN": JSON.stringify(env.API_DOMAIN),
+      // The platform/account origin the client links profiles at, and fetches
+      // PoV claims from. Injected rather than hardcoded because it moves; the
+      // fallback is the ONE shared default, so a build that forgets the env
+      // still agrees with the CSP the serving process emits.
+      "process.env.PROXYWAR_PLATFORM_ORIGIN": JSON.stringify(
+        env.PROXYWAR_PLATFORM_ORIGIN ?? DEFAULT_PLATFORM_ORIGIN,
+      ),
       // Add other process.env variables if needed, OR migrate code to import.meta.env
     },
 
@@ -263,12 +312,21 @@ export default defineConfig(({ mode }) => {
       emptyOutDir: true,
       assetsDir: "assets", // Sub-directory for assets
       rollupOptions: {
+        input: {
+          main: path.resolve(__dirname, "index.html"),
+          public: path.resolve(__dirname, "public.html"),
+        },
         output: {
+          // Split, not one shared "vendor": the public entry (PublicApp.ts)
+          // never imports pixi.js, only zod (ReadModelSchema.ts). A single
+          // combined chunk keyed on either module would put pixi.js in the
+          // one chunk BOTH entries depend on merely because they both need
+          // zod — silently reintroducing the game bundle on public routes
+          // this split exists to remove. Keeping them apart means each
+          // entry's own chunk graph only pulls what it actually imports.
           manualChunks: (id) => {
-            const vendorModules = ["pixi.js", "howler", "zod"];
-            if (vendorModules.some((module) => id.includes(module))) {
-              return "vendor";
-            }
+            if (id.includes("pixi.js")) return "vendor-game";
+            if (id.includes("zod")) return "vendor-shared";
           },
         },
       },

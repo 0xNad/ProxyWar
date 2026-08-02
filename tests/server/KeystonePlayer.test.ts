@@ -247,6 +247,25 @@ describe("Coworld keystone player", () => {
     expect((response.reason as string).length).toBe(500);
   });
 
+  it("decisionToResponse wires an honest empty base for a fallback decision (reason: null)", () => {
+    // P0 fix: an LlmAgentBrain fallback decision (the exact `brain.decide()`
+    // return value this function's real caller feeds it) now carries
+    // `reason: null` — the LLM had no stated reason. The wire must never
+    // stringify that to the literal text "null"; it degrades to an honest
+    // empty base while `llmPlannerDegraded`/`fallbackUsed` still carry the
+    // degradation loudly.
+    const response = decisionToResponse("req_null_reason", {
+      actionID: "hold:wait",
+      reason: null,
+      metadata: { llmPlannerDegraded: true, plannerFallbackUsed: true },
+    });
+
+    expect(response.reason).toBe("");
+    expect(response.reason).not.toContain("null");
+    expect(response.llmPlannerDegraded).toBe(true);
+    expect(response.fallbackUsed).toBe(true);
+  });
+
   it("keystoneModeFromEnv defaults to the LLM Commander; no deterministic mode exists", () => {
     // Local default: Claude CLI subscription. Hosted --use-bedrock pods:
     // Bedrock. There is deliberately no executor/deterministic mode ("the

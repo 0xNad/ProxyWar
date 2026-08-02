@@ -1,0 +1,442 @@
+{
+  "schemaVersion": 1,
+  "agents": [
+    {
+      "id": "agt_k1z-mickey-mouse",
+      "slug": "k1z-mickey-mouse",
+      "displayName": "K1Z Mickey Mouse",
+      "shortCode": "K1Z",
+      "builderId": null,
+      "tagline": null,
+      "description": null,
+      "emblem": {
+        "style": "geometric-svg-v1",
+        "seed": "agt_k1z-mickey-mouse",
+        "assetPath": "resources/identity/emblems/agt_k1z-mickey-mouse.svg"
+      },
+      "primaryColor": "#c62f39",
+      "secondaryColor": "#689e2e",
+      "debutDate": null,
+      "policyMatchRule": {
+        "playerName": "K1Z Mickey Mouse",
+        "policyFamily": "mickey-mouse-intent"
+      },
+      "status": "unclaimed",
+      "publicStrategyDescription": null
+    },
+    {
+      "id": "agt_daveey",
+      "slug": "daveey",
+      "displayName": "daveey",
+      "shortCode": "DAV",
+      "builderId": null,
+      "tagline": null,
+      "description": null,
+      "emblem": {
+        "style": "geometric-svg-v1",
+        "seed": "agt_daveey",
+        "assetPath": "resources/identity/emblems/agt_daveey.svg"
+      },
+      "primaryColor": "#8fc62f",
+      "secondaryColor": "#2e9e9e",
+      "debutDate": null,
+      "policyMatchRule": {
+        "playerName": "daveey",
+        "policyFamily": "daveey-proxywar"
+      },
+      "status": "unclaimed",
+      "publicStrategyDescription": null
+    },
+    {
+      "id": "agt_captain-underpants-maximum-aura",
+      "slug": "captain-underpants-maximum-aura",
+      "displayName": "Captain Underpants Maximum Aura",
+      "shortCode": "CUA",
+      "builderId": null,
+      "tagline": null,
+      "description": null,
+      "emblem": {
+        "style": "geometric-svg-v1",
+        "seed": "agt_captain-underpants-maximum-aura",
+        "assetPath": "resources/identity/emblems/agt_captain-underpants-maximum-aura.svg"
+      },
+      "primaryColor": "#87c62f",
+      "secondaryColor": "#2e9e51",
+      "debutDate": null,
+      "policyMatchRule": {
+        "playerName": "Captain Underpants Maximum Aura",
+        "policyFamily": "captain-underpants-max-aura"
+      },
+      "status": "unclaimed",
+      "publicStrategyDescription": null
+    },
+    {
+      "id": "agt_auri",
+      "slug": "auri",
+      "displayName": "Auri",
+      "shortCode": "AUR",
+      "builderId": null,
+      "tagline": null,
+      "description": null,
+      "emblem": {
+        "style": "geometric-svg-v1",
+        "seed": "agt_auri",
+        "assetPath": "resources/identity/emblems/agt_auri.svg"
+      },
+      "primaryColor": "#c6c42f",
+      "secondaryColor": "#3f9e2e",
+      "debutDate": null,
+      "policyMatchRule": {
+        "playerName": "Auri",
+        "policyFamily": "proxywar-keystone"
+      },
+      "status": "house",
+      "publicStrategyDescription": null
+    },
+    {
+      "id": "agt_relh",
+      "slug": "relh",
+      "displayName": "relh",
+      "shortCode": "REL",
+      "builderId": null,
+      "tagline": null,
+      "description": null,
+      "emblem": {
+        "style": "geometric-svg-v1",
+        "seed": "agt_relh",
+        "assetPath": "resources/identity/emblems/agt_relh.svg"
+      },
+      "primaryColor": "#c66b2f",
+      "secondaryColor": "#489e2e",
+      "debutDate": null,
+      "policyMatchRule": {
+        "playerName": "relh",
+        "policyFamily": "co-gas-proxywar-relhalpha"
+      },
+      "status": "unclaimed",
+      "publicStrategyDescription": null
+    },
+    {
+      "id": "agt_calc",
+      "slug": "calc",
+      "displayName": "Calc",
+      "shortCode": "CALC",
+      "builderId": null,
+      "tagline": null,
+      "description": null,
+      "emblem": {
+        "style": "geometric-svg-v1",
+        "seed": "agt_calc",
+        "assetPath": "resources/identity/emblems/agt_calc.svg"
+      },
+      "primaryColor": "#c1c62f",
+      "secondaryColor": "#3d9e2e",
+      "debutDate": null,
+      "policyMatchRule": {
+        "playerName": "Calc",
+        "policyFamily": "my-proxywar-agent"
+      },
+      "status": "unclaimed",
+      "publicStrategyDescription": null
+    },
+    {
+      "id": "agt_cyan-hellstar",
+      "slug": "cyan-hellstar",
+      "displayName": "CYAN HELLSTAR",
+      "shortCode": "CYH",
+      "builderId": null,
+      "tagline": null,
+      "description": null,
+      "emblem": {
+        "style": "geometric-svg-v1",
+        "seed": "agt_cyan-hellstar",
+        "assetPath": "resources/identity/emblems/agt_cyan-hellstar.svg"
+      },
+      "primaryColor": "#c62fc4",
+      "secondaryColor": "#9e352e",
+      "debutDate": null,
+      "policyMatchRule": {
+        "playerName": "CYAN HELLSTAR",
+        "policyFamily": "sian-cyan7-gravity"
+      },
+      "status": "unclaimed",
+      "publicStrategyDescription": null
+    },
+    {
+      "id": "agt_sefirot",
+      "slug": "sefirot",
+      "displayName": "Sefirot",
+      "shortCode": "SEF",
+      "builderId": null,
+      "tagline": null,
+      "description": null,
+      "emblem": {
+        "style": "geometric-svg-v1",
+        "seed": "agt_sefirot",
+        "assetPath": "resources/identity/emblems/agt_sefirot.svg"
+      },
+      "primaryColor": "#5fc62f",
+      "secondaryColor": "#2e9e9c",
+      "debutDate": null,
+      "policyMatchRule": {
+        "playerName": "Sefirot",
+        "policyFamily": "Eva-00-C5-v9"
+      },
+      "status": "unclaimed",
+      "publicStrategyDescription": null
+    },
+    {
+      "id": "agt_salomon-shdow",
+      "slug": "salomon-shdow",
+      "displayName": "salomon-shdow",
+      "shortCode": "SAL",
+      "builderId": null,
+      "tagline": null,
+      "description": null,
+      "emblem": {
+        "style": "geometric-svg-v1",
+        "seed": "agt_salomon-shdow",
+        "assetPath": "resources/identity/emblems/agt_salomon-shdow.svg"
+      },
+      "primaryColor": "#2f82c6",
+      "secondaryColor": "#9e2e9e",
+      "debutDate": null,
+      "policyMatchRule": {
+        "playerName": "salomon-shdow",
+        "policyFamily": "fortress-empire-ohf"
+      },
+      "status": "unclaimed",
+      "publicStrategyDescription": null
+    },
+    {
+      "id": "agt_softmaxwell",
+      "slug": "softmaxwell",
+      "displayName": "softmaxwell",
+      "shortCode": "SMX",
+      "builderId": null,
+      "tagline": null,
+      "description": null,
+      "emblem": {
+        "style": "geometric-svg-v1",
+        "seed": "agt_softmaxwell",
+        "assetPath": "resources/identity/emblems/agt_softmaxwell.svg"
+      },
+      "primaryColor": "#8cc62f",
+      "secondaryColor": "#2e9e97",
+      "debutDate": null,
+      "policyMatchRule": {
+        "playerName": "softmaxwell",
+        "policyFamily": "Sun Tzu"
+      },
+      "status": "unclaimed",
+      "publicStrategyDescription": null
+    },
+    {
+      "id": "agt_peepee7",
+      "slug": "peepee7",
+      "displayName": "PeePee7",
+      "shortCode": "PP7",
+      "builderId": null,
+      "tagline": null,
+      "description": null,
+      "emblem": {
+        "style": "geometric-svg-v1",
+        "seed": "agt_peepee7",
+        "assetPath": "resources/identity/emblems/agt_peepee7.svg"
+      },
+      "primaryColor": "#c6c42f",
+      "secondaryColor": "#2e9e4a",
+      "debutDate": null,
+      "policyMatchRule": {
+        "playerName": "PeePee7",
+        "policyFamily": "xX_UwU_Senpai_420_Xx"
+      },
+      "status": "unclaimed",
+      "publicStrategyDescription": null
+    },
+    {
+      "id": "agt_richard",
+      "slug": "richard",
+      "displayName": "richard",
+      "shortCode": "RIC",
+      "builderId": null,
+      "tagline": null,
+      "description": null,
+      "emblem": {
+        "style": "geometric-svg-v1",
+        "seed": "agt_richard",
+        "assetPath": "resources/identity/emblems/agt_richard.svg"
+      },
+      "primaryColor": "#4d2fc6",
+      "secondaryColor": "#9e2e86",
+      "debutDate": null,
+      "policyMatchRule": {
+        "playerName": "richard",
+        "policyFamily": "co-gas-proxywar-richard"
+      },
+      "status": "unclaimed",
+      "publicStrategyDescription": null
+    },
+    {
+      "id": "agt_djizus",
+      "slug": "djizus",
+      "displayName": "djizus",
+      "shortCode": "DJZ",
+      "builderId": null,
+      "tagline": null,
+      "description": null,
+      "emblem": {
+        "style": "geometric-svg-v1",
+        "seed": "agt_djizus",
+        "assetPath": "resources/identity/emblems/agt_djizus.svg"
+      },
+      "primaryColor": "#2fc66e",
+      "secondaryColor": "#2e669e",
+      "debutDate": null,
+      "policyMatchRule": {
+        "playerName": "djizus",
+        "policyFamily": "gandhi"
+      },
+      "status": "unclaimed",
+      "publicStrategyDescription": null
+    },
+    {
+      "id": "agt_ron-swgy",
+      "slug": "ron-swgy",
+      "displayName": "Ron @ SWGY",
+      "shortCode": "RSW",
+      "builderId": null,
+      "tagline": null,
+      "description": null,
+      "emblem": {
+        "style": "geometric-svg-v1",
+        "seed": "agt_ron-swgy",
+        "assetPath": "resources/identity/emblems/agt_ron-swgy.svg"
+      },
+      "primaryColor": "#2f54c6",
+      "secondaryColor": "#9e2e86",
+      "debutDate": null,
+      "policyMatchRule": {
+        "playerName": "Ron @ SWGY",
+        "policyFamily": "ron-frontier-ranker"
+      },
+      "status": "unclaimed",
+      "publicStrategyDescription": null
+    },
+    {
+      "id": "agt_sian-voidcrown",
+      "slug": "sian-voidcrown",
+      "displayName": "SIAN VOIDCROWN",
+      "shortCode": "SVC",
+      "builderId": null,
+      "tagline": null,
+      "description": null,
+      "emblem": {
+        "style": "geometric-svg-v1",
+        "seed": "agt_sian-voidcrown",
+        "assetPath": "resources/identity/emblems/agt_sian-voidcrown.svg"
+      },
+      "primaryColor": "#2fc666",
+      "secondaryColor": "#2e9a9e",
+      "debutDate": null,
+      "policyMatchRule": {
+        "playerName": "SIAN VOIDCROWN",
+        "policyFamily": "sian-cyan7-katana"
+      },
+      "status": "unclaimed",
+      "publicStrategyDescription": null
+    },
+    {
+      "id": "agt_james-boggs",
+      "slug": "james-boggs",
+      "displayName": "James Boggs",
+      "shortCode": "JAB",
+      "builderId": null,
+      "tagline": null,
+      "description": null,
+      "emblem": {
+        "style": "geometric-svg-v1",
+        "seed": "agt_james-boggs",
+        "assetPath": "resources/identity/emblems/agt_james-boggs.svg"
+      },
+      "primaryColor": "#52c62f",
+      "secondaryColor": "#2e779e",
+      "debutDate": null,
+      "policyMatchRule": {
+        "playerName": "James Boggs",
+        "policyFamily": "jamesboggs-warlord"
+      },
+      "status": "unclaimed",
+      "publicStrategyDescription": null
+    },
+    {
+      "id": "agt_docxology",
+      "slug": "docxology",
+      "displayName": "docxology",
+      "shortCode": "DOX",
+      "builderId": null,
+      "tagline": null,
+      "description": null,
+      "emblem": {
+        "style": "geometric-svg-v1",
+        "seed": "agt_docxology",
+        "assetPath": "resources/identity/emblems/agt_docxology.svg"
+      },
+      "primaryColor": "#c6942f",
+      "secondaryColor": "#539e2e",
+      "debutDate": null,
+      "policyMatchRule": {
+        "playerName": "docxology",
+        "policyFamily": "daf-proxywar-v2"
+      },
+      "status": "unclaimed",
+      "publicStrategyDescription": null
+    },
+    {
+      "id": "agt_james-botts",
+      "slug": "james-botts",
+      "displayName": "James Botts",
+      "shortCode": "JBT",
+      "builderId": null,
+      "tagline": null,
+      "description": null,
+      "emblem": {
+        "style": "geometric-svg-v1",
+        "seed": "agt_james-botts",
+        "assetPath": "resources/identity/emblems/agt_james-botts.svg"
+      },
+      "primaryColor": "#2fc670",
+      "secondaryColor": "#2e539e",
+      "debutDate": null,
+      "policyMatchRule": {
+        "playerName": "James Botts",
+        "policyFamily": "jamesboggs-warlord"
+      },
+      "status": "unclaimed",
+      "publicStrategyDescription": null
+    },
+    {
+      "id": "agt_jordan",
+      "slug": "jordan",
+      "displayName": "Jordan",
+      "shortCode": "JOR",
+      "builderId": null,
+      "tagline": null,
+      "description": null,
+      "emblem": {
+        "style": "geometric-svg-v1",
+        "seed": "agt_jordan",
+        "assetPath": "resources/identity/emblems/agt_jordan.svg"
+      },
+      "primaryColor": "#75c62f",
+      "secondaryColor": "#2e9e79",
+      "debutDate": null,
+      "policyMatchRule": {
+        "playerName": "Jordan",
+        "policyFamily": "jordan-proxywar-auto"
+      },
+      "status": "unclaimed",
+      "publicStrategyDescription": null
+    }
+  ]
+}

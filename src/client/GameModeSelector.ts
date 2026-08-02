@@ -1,6 +1,13 @@
-import { html, LitElement, nothing, type TemplateResult } from "lit";
+import {
+  html,
+  LitElement,
+  nothing,
+  PropertyValues,
+  type TemplateResult,
+} from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { getRuntimeClientServerConfig } from "src/core/configuration/ConfigLoader";
+import { isReplaySpectatorView } from "./graphics/TransformHandler";
 import {
   Duos,
   GameMapType,
@@ -43,6 +50,17 @@ export class GameModeSelector extends LitElement {
 
   createRenderRoot() {
     return this;
+  }
+
+  // The public-lobby-list/mode-select cards render here are never reachable
+  // on a spectator/replay route (nested inside play-page, itself hidden and
+  // unopenable there — see PlayPage.ts/BaseModal.ts). `<game-mode-selector>`
+  // stays mounted (Main.ts's shared join/lobby plumbing calls `.stop()` on
+  // it unconditionally, including during replay startup), but this skips
+  // building its actual card/lobby-list DOM tree there (P2-F11).
+  protected shouldUpdate(changedProperties: PropertyValues): boolean {
+    if (isReplaySpectatorView()) return false;
+    return super.shouldUpdate(changedProperties);
   }
 
   /**

@@ -1,11 +1,14 @@
 import { EventBus } from "../../core/EventBus";
 import { GameView } from "../../core/game/GameView";
 import { UserSettings } from "../../core/game/UserSettings";
-import { isAiLeagueNativeSpectatorUiEnabled } from "../AiLeagueReplayMode";
+import {
+  isAiLeagueNativeSpectatorUiEnabled,
+  isBettingPremiereRoute,
+} from "../AiLeagueReplayMode";
 import { GameStartingModal } from "../GameStartingModal";
 import { RefreshGraphicsEvent as RedrawGraphicsEvent } from "../InputHandler";
 import { FrameProfiler } from "./FrameProfiler";
-import { TransformHandler } from "./TransformHandler";
+import { isReplaySpectatorView, TransformHandler } from "./TransformHandler";
 import { UIState } from "./UIState";
 import { AlertFrame } from "./layers/AlertFrame";
 import { AttackingTroopsOverlay } from "./layers/AttackingTroopsOverlay";
@@ -33,6 +36,7 @@ import { NukeTrajectoryPreviewLayer } from "./layers/NukeTrajectoryPreviewLayer"
 import { PerformanceOverlay } from "./layers/PerformanceOverlay";
 import { PlayerInfoOverlay } from "./layers/PlayerInfoOverlay";
 import { PlayerPanel } from "./layers/PlayerPanel";
+import { PointOfViewSelector } from "./layers/PointOfViewSelector";
 import { RailroadLayer } from "./layers/RailroadLayer";
 import { ReplayPanel } from "./layers/ReplayPanel";
 import { SAMRadiusLayer } from "./layers/SAMRadiusLayer";
@@ -57,9 +61,23 @@ export function createRenderer(
   const transformHandler = new TransformHandler(game, eventBus, canvas);
   const userSettings = new UserSettings();
   const nativeSpectatorUiEnabled = isAiLeagueNativeSpectatorUiEnabled();
+  // The betting page (`/bet/<id>`) wants the SAME standalone, detached
+  // `<leader-board>` this promo flag already builds below — live match
+  // standings rendered outside `game-left-sidebar` (which
+  // `BettingPremierePage.ts` hides unconditionally for every /bet
+  // visitor, spectator chrome included). Kept as its own condition
+  // rather than folding into `nativeSpectatorUiEnabled`: that flag also
+  // drives the AI-league promo/clip-capture declutter
+  // (`AiLeagueReplayOverlay.ts`), which /bet never mounts and has no
+  // reason to couple to.
+  const bettingStandingsEnabled = isBettingPremiereRoute();
   document.body.classList.toggle(
     "ai-league-native-spectator-ui",
     nativeSpectatorUiEnabled,
+  );
+  document.body.classList.toggle(
+    "betting-standings-enabled",
+    bettingStandingsEnabled,
   );
   mountAiLeagueNativeSpectatorStyles();
 
@@ -102,23 +120,92 @@ export function createRenderer(
   leaderboard.eventBus = eventBus;
   leaderboard.game = game;
 
-  const nativeSpectatorLeaderboard = nativeSpectatorUiEnabled
+  const standaloneStandingsEnabled =
+    nativeSpectatorUiEnabled || bettingStandingsEnabled;
+  const nativeSpectatorLeaderboard = standaloneStandingsEnabled
     ? (document.createElement("leader-board") as Leaderboard)
     : null;
   if (nativeSpectatorLeaderboard !== null) {
     nativeSpectatorLeaderboard.eventBus = eventBus;
     nativeSpectatorLeaderboard.game = game;
     nativeSpectatorLeaderboard.visible = true;
-    nativeSpectatorLeaderboard.classList.add("ai-league-native-leaderboard");
     Object.assign(nativeSpectatorLeaderboard.style, {
       position: "fixed",
       top: "16px",
       left: "16px",
       zIndex: "50002",
       width: "min(360px, calc(100vw - 32px))",
-      pointerEvents: "none",
     });
-    document.body.appendChild(nativeSpectatorLeaderboard);
+    if (bettingStandingsEnabled) {
+      // A bettor needs a reachable, readable panel — never the
+      // decorative/click-through treatment the promo overlay uses below.
+      nativeSpectatorLeaderboard.classList.add(
+        "betting-standings-leaderboard",
+      );
+      nativeSpectatorLeaderboard.compact = true;
+      // Bridges the market's live prices in from `BettingPremierePage.ts`
+      // without this shared rendering module importing anything from the
+      // wagering feature — same cross-module-flag shape as
+      // `window.__openFrontPromoNativeUi` above, just read-only and
+      // per-tick instead of a one-shot boolean. `readBettingSeatPrice`
+      // returns `null` on every route but /bet (nothing ever sets the
+      // global), so this is a no-op everywhere else.
+      nativeSpectatorLeaderboard.priceLookup = (clientID) =>
+        readBettingSeatPrice(clientID);
+      nativeSpectatorLeaderboard.setAttribute("role", "region");
+      nativeSpectatorLeaderboard.setAttribute(
+        "aria-label",
+        "Live match standings",
+      );
+      Object.assign(nativeSpectatorLeaderboard.style, {
+        width: "min(260px, calc(100vw - 32px))",
+      });
+    } else {
+      // Promo/clip-capture only: decorative, non-interactive, never
+      // focusable — the opposite of what a bettor needs, so /bet never
+      // takes this branch.
+      nativeSpectatorLeaderboard.classList.add("ai-league-native-leaderboard");
+      nativeSpectatorLeaderboard.style.pointerEvents = "none";
+    }
+    // Tab order should follow reading order: the standings panel sits
+    // visually top-left, ahead of the trading sheet the overlay already
+    // appended to `body` — a plain `appendChild` here would instead land
+    // it AFTER every trading control in the tab sequence (last on the
+    // page, despite being first on screen). `prepend` fixes that for the
+    // one variant that's actually focusable; the promo/clip-capture
+    // variant is `pointerEvents: none` and never in the tab order to
+    // begin with, so its position doesn't matter and stays untouched.
+    if (bettingStandingsEnabled) {
+      document.body.prepend(nativeSpectatorLeaderboard);
+    } else {
+      document.body.appendChild(nativeSpectatorLeaderboard);
+    }
+  }
+
+  // Platform PoV-follow picker — every spectator/replay route
+  // (`isReplaySpectatorView()`: bet, premiere, ai-league-replay,
+  // proxywar-replay, legacy openfront-replay, Coworld routes), not just
+  // betting or the AI-league promo UI. Live play never mounts this.
+  // Dynamically created the same way `nativeSpectatorLeaderboard` above
+  // is: `pov-selector` isn't in `index.html`, so there's nothing to
+  // `document.querySelector` for it.
+  const povSelector = isReplaySpectatorView()
+    ? (document.createElement("pov-selector") as PointOfViewSelector)
+    : null;
+  if (povSelector !== null) {
+    // A bare type-only usage of `PointOfViewSelector` (just the `as` cast
+    // above) gets elided by esbuild's dev transform — it never runs the
+    // `@customElement("pov-selector")` side effect, so the tag never
+    // registers. This `instanceof` check is a genuine value usage (same
+    // guard shape `leaderboard`/`replayPanel` already use above) and is
+    // what actually keeps the import, and therefore the registration,
+    // alive.
+    if (!(povSelector instanceof PointOfViewSelector)) {
+      console.error("pov-selector element failed to register");
+    }
+    povSelector.game = game;
+    povSelector.eventBus = eventBus;
+    document.body.appendChild(povSelector);
   }
 
   const gameLeftSidebar = document.querySelector(
@@ -344,9 +431,7 @@ export function createRenderer(
     settingsModal,
     teamStats,
     playerPanel,
-    headsUpMessage,
-    multiTabModal,
-    inGamePromo,
+    ...(povSelector !== null ? [povSelector] : []),
     alertFrame,
     performanceOverlay,
   ];
@@ -375,8 +460,29 @@ function mountAiLeagueNativeSpectatorStyles() {
     body.ai-league-native-spectator-ui leader-board.ai-league-native-leaderboard {
       filter: drop-shadow(0 14px 32px rgba(2, 6, 23, 0.32));
     }
+    body.betting-standings-enabled leader-board.betting-standings-leaderboard {
+      filter: drop-shadow(0 14px 32px rgba(2, 6, 23, 0.32));
+    }
   `;
   document.head.appendChild(style);
+}
+
+/**
+ * The market's live per-seat prices, as last written by
+ * `BettingPremiereMarketController` (`BettingPremierePage.ts`) — read here
+ * so the standalone betting standings leaderboard can show each row's
+ * price without this shared rendering module statically importing
+ * anything from the wagering feature. Set only on `/bet/<id>`; `undefined`
+ * (and therefore `null` from every lookup) on every other route, since
+ * nothing else ever assigns it.
+ */
+function readBettingSeatPrice(clientID: string): number | null {
+  const prices = (
+    window as typeof window & {
+      __bettingSeatPrices?: Readonly<Record<string, number>>;
+    }
+  ).__bettingSeatPrices;
+  return prices?.[clientID] ?? null;
 }
 
 export class GameRenderer {
@@ -397,6 +503,14 @@ export class GameRenderer {
     const context = canvas.getContext("2d", { alpha: false });
     if (context === null) throw new Error("2d context not supported");
     this.context = context;
+  }
+
+  /**
+   * The surface the game is drawn on. Exposed read-only so share-image capture
+   * can read the current frame without reaching into the DOM for it.
+   */
+  get gameCanvas(): HTMLCanvasElement {
+    return this.canvas;
   }
 
   initialize() {

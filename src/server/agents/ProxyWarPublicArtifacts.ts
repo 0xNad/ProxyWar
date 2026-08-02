@@ -1,19 +1,94 @@
+/**
+ * Every entry here is servable ANONYMOUSLY, with no invite/beta gate, on
+ * ANY run directory (not just published league episodes — see
+ * `servePublicRunArtifact`'s allowlist check in `ai-agent-demo-server.ts`,
+ * which applies `isProxyWarPublicRunArtifact` to every `runID`) AND — for
+ * a published league episode's own `league-<runID>` directory — through
+ * the beta-gate bypass too (`isProxyWarPublicLeaguePath`). Treat every
+ * addition here as a public HTTP response body, not an internal file.
+ *
+ * `decisions.jsonl` and `visual-report.html` are deliberately NOT on this
+ * list (removed after an audit found both actually reachable this way).
+ * `AgentDecisionLogWriter.ts`'s `DecisionLogEntry` carries optional
+ * `rawLlmPrompt`/`rawLlmOutput` fields (an agent's exact prompt/completion,
+ * copied through whenever the metadata is present) — `decisions.jsonl` is
+ * literally that array serialized one entry per line, and
+ * `visualReport()`'s per-decision "Raw decision details" `<details>`
+ * panel embeds `JSON.stringify(entry, null, 2)` — the SAME full entry,
+ * prompts included — directly into `visual-report.html`'s markup. Both
+ * are genuinely private (LLM prompts/outputs are not covered by any
+ * shipped public-copy claim, and the product's own "raw agent logs are
+ * not public" copy — `about.league_retention`, en.json — would be false
+ * while either stayed here). The local content engine reads
+ * `decisions.jsonl` from disk directly, not over HTTP, so removing it
+ * from this list does not affect artifact generation or that consumer —
+ * only public HTTP serving.
+ *
+ * Every OTHER entry here was re-verified this session to be genuinely
+ * derived-and-bounded, never a raw-record dump: `match-package.*`
+ * (`ProxyWarMatchPackage.ts`, built from `matchSummary()`'s aggregate
+ * counts/rates/grades — traced field by field, never a raw
+ * prompt/output/reason string), `match-story.md`, `objective-scorecard.md`,
+ * `behavior-quality-report.*`, `external-agent-feedback.md`,
+ * `spectator-telemetry.json`/`spectator-replay.json`/`spectator.html`
+ * (`AgentSpectatorTelemetry.ts` — zero references to the raw-field names)
+ * — kept.
+ *
+ * `director-cut-plan.json` (product overhaul spec Stage 5): built purely
+ * from `SpectatorEvent[]` data already public via `spectator-telemetry.json`
+ * — turn ranges, a coarse speed tier, an `eventReason` enum, an importance
+ * number, and display names already public elsewhere. No decision reason
+ * strings, no LLM prompt/output, no field `AgentDecisionRecord`/
+ * `DecisionLogEntry` carries privately — see `DirectorCutPlan.ts`'s own
+ * doc for the exact derivation.
+ *
+ * `match-recap.json` ("drama recaps" gap closure): the public match page's
+ * event-derived recap — factual sentences built ONLY from
+ * `SpectatorEvent.message`/`actorName`/`targetName`/`turnNumber`, the same
+ * already-public fields `director-cut-plan.json` derives from. Deliberately
+ * NOT `match-story.json`/`drama-report.json` (both stay OFF this list —
+ * `AgentMatchRecap.ts`'s own doc explains why those two stay
+ * ranking/evidence signals, read directly off disk by
+ * `feature-candidates.ts` and the mirror's read-model projection, never
+ * served as page content).
+ *
+ * `match-state-series.json` (Season Zero Phase 2, `AgentMatchStateSeries.ts`):
+ * a PURE re-projection of two artifacts already on this exact list —
+ * `spectator-replay.json` (per-sample `tilesOwned`/`troops`/`isAlive`/
+ * `agentID`/`playerID`/`username`) and `spectator-telemetry.json`
+ * (`activeAlliancePairs`, derived from real `alliance_formed`/
+ * `alliance_break` events). Zero new fields, zero new privacy surface —
+ * see that module's own doc for the exact derivation.
+ *
+ * `decisive-moments.json` (Season Zero Phase 2, `AgentDecisiveMoments.ts`):
+ * headlines/before-after-state built from `match-state-series.json` and
+ * `SpectatorEvent.message` (both already public, as above); the one new
+ * field, `statedReason`, is sourced from `spectator-replay.json`'s OWN
+ * `AgentSpectatorSnapshot.decisions[].reason`/`.intentSummary` — already
+ * serialized verbatim into that already-public artifact today, so this is
+ * a re-surfacing of an existing public field, never a new one. Explicitly
+ * labeled client-side as the agent's OWN stated reason, not verified
+ * reasoning (spec requirement).
+ */
 export const proxyWarPublicRunArtifacts = [
   "game-record.json",
-  "decisions.jsonl",
   "match-summary.json",
+  "replay-ui.json",
   "match-package.json",
   "match-package.html",
   "match-package.md",
   "spectator-replay.json",
   "spectator-telemetry.json",
-  "visual-report.html",
   "spectator.html",
   "objective-scorecard.md",
   "match-story.md",
   "behavior-quality-report.json",
   "behavior-quality-report.md",
   "external-agent-feedback.md",
+  "director-cut-plan.json",
+  "match-recap.json",
+  "match-state-series.json",
+  "decisive-moments.json",
 ] as const;
 
 export const proxyWarPublicTournamentArtifacts = [
@@ -49,6 +124,14 @@ export const proxyWarPublicLeagueArtifacts = [
   "index.html",
   "client.js",
   "data.json",
+  // The typed, normalized public read model every Stage 2+ SPA page fetches
+  // (spec Stage 2 item 1) — same directory, same publication cadence, same
+  // atomic-write/last-good guarantees as data.json (see
+  // `writeCoworldLeagueSiteUnlocked`).
+  "read-model.json",
+  // Social preview image published beside the league page. og:image must be
+  // fetchable by external scrapers, so it has to be publicly gettable.
+  "social.png",
 ] as const;
 
 /**
@@ -66,7 +149,6 @@ export const proxyWarPublicRendererAssetPrefixes = [
   "/_assets",
   "/resources",
   "/images",
-  "/sounds",
   "/maps",
   "/lang",
   "/flags",
@@ -93,14 +175,282 @@ export function isProxyWarPublicLeagueArtifact(fileName: string): boolean {
   );
 }
 
-export function proxyWarLeagueContentSecurityPolicy(): string {
+const proxyWarPremiereIdSource = "prem_[a-z0-9]{16,32}";
+const proxyWarPremierePagePattern = new RegExp(
+  `^/premiere/(${proxyWarPremiereIdSource})$`,
+);
+// The dedicated live-betting page: same premiere, same anonymous read
+// surface and app shell as `/premiere/:id` (client-side routing decides
+// which page mounts from the URL) — see BettingPremierePage.ts.
+const proxyWarBettingPagePattern = new RegExp(
+  `^/bet/(${proxyWarPremiereIdSource})$`,
+);
+const proxyWarPremiereManifestPattern = new RegExp(
+  `^/api/premieres/(${proxyWarPremiereIdSource})/manifest$`,
+);
+const proxyWarPremiereBootstrapPattern = new RegExp(
+  `^/api/premieres/(${proxyWarPremiereIdSource})/bootstrap$`,
+);
+const proxyWarPremiereChunkPattern = new RegExp(
+  `^/api/premieres/(${proxyWarPremiereIdSource})/chunks/(0|[1-9][0-9]{0,8})$`,
+);
+const proxyWarPremiereRevealPattern = new RegExp(
+  `^/api/premieres/(${proxyWarPremiereIdSource})/reveal$`,
+);
+const proxyWarPremiereCardPattern = new RegExp(
+  `^/premiere/(${proxyWarPremiereIdSource})/card-v1\\.svg$`,
+);
+// Clip cache surface. Bucket is a bounded non-negative integer (10-turn anchor
+// bucket); clip-v1 is the render-format version baked into the filename.
+const proxyWarPremiereClipBucketSource = "0|[1-9][0-9]{0,8}";
+const proxyWarPremiereClipFilePattern = new RegExp(
+  `^/premiere/(${proxyWarPremiereIdSource})/clip-v1-(${proxyWarPremiereClipBucketSource})\\.mp4$`,
+);
+const proxyWarPremiereClipStatusPattern = new RegExp(
+  `^/api/premieres/(${proxyWarPremiereIdSource})/clips/(${proxyWarPremiereClipBucketSource})$`,
+);
+// The single durable archived clip promoted at reclamation. Distinct from the
+// bucketed cache route above: this one survives after the live runtime and the
+// clip cache are gone, served by the archive router from archive-v1/clips.
+const proxyWarPremiereArchiveClipPattern = new RegExp(
+  `^/premiere/(${proxyWarPremiereIdSource})/clip\\.mp4$`,
+);
+const proxyWarPremiereClipCreatePattern = new RegExp(
+  `^/api/premieres/(${proxyWarPremiereIdSource})/clips$`,
+);
+const proxyWarPremierePredictionPattern = new RegExp(
+  `^/api/premieres/(${proxyWarPremiereIdSource})/predictions$`,
+);
+const proxyWarPremiereMarketOrderPattern = new RegExp(
+  `^/api/premieres/(${proxyWarPremiereIdSource})/market-orders$`,
+);
+const proxyWarPremiereMarketStatePattern = new RegExp(
+  `^/api/premieres/(${proxyWarPremiereIdSource})/market$`,
+);
+/**
+ * Authenticated sibling of the anonymous market-state read: returns the
+ * CALLING participant's own positions (never another participant's). Same
+ * guest cookie + CSRF + Origin discipline as every write route — a read
+ * that returns private per-participant data is not exempt from it.
+ */
+const proxyWarPremiereMarketSelfPattern = new RegExp(
+  `^/api/premieres/(${proxyWarPremiereIdSource})/market/me$`,
+);
+const proxyWarPremiereLiveProjectionPattern = new RegExp(
+  `^/api/premieres/(${proxyWarPremiereIdSource})/live-projection$`,
+);
+const proxyWarPremiereReactionPattern = new RegExp(
+  `^/api/premieres/(${proxyWarPremiereIdSource})/reactions$`,
+);
+const proxyWarPremiereSharePattern = new RegExp(
+  `^/api/premieres/(${proxyWarPremiereIdSource})/shares$`,
+);
+const proxyWarPremiereSessionPattern = new RegExp(
+  `^/api/premieres/(${proxyWarPremiereIdSource})/sessions$`,
+);
+const proxyWarPremiereHeartbeatPattern = new RegExp(
+  `^/api/premieres/(${proxyWarPremiereIdSource})/sessions/(sess_[a-z0-9]{16,32})/heartbeat$`,
+);
+
+export type ProxyWarPublicPremiereReadRoute =
+  | { kind: "page"; premiereId: string }
+  | { kind: "bootstrap"; premiereId: string }
+  | { kind: "manifest"; premiereId: string }
+  | { kind: "chunk"; premiereId: string; chunkIndex: number }
+  | { kind: "reveal"; premiereId: string }
+  | { kind: "card"; premiereId: string }
+  | { kind: "clip_status"; premiereId: string; bucket: number }
+  | { kind: "clip_file"; premiereId: string; bucket: number }
+  | { kind: "archive_clip"; premiereId: string }
+  | { kind: "market_state"; premiereId: string }
+  | { kind: "market_state_self"; premiereId: string }
+  | { kind: "live_projection"; premiereId: string };
+
+export type ProxyWarPublicPremiereWriteRoute =
+  | { kind: "prediction"; premiereId: string }
+  | { kind: "market_order"; premiereId: string }
+  | { kind: "reaction"; premiereId: string }
+  | { kind: "share"; premiereId: string }
+  | { kind: "session"; premiereId: string }
+  | { kind: "heartbeat"; premiereId: string; sessionId: string }
+  | { kind: "clip"; premiereId: string };
+
+/**
+ * Exact anonymous Premiere read surface. The private source bundle and
+ * ordinary outcome-bearing replay artifacts are intentionally absent.
+ */
+export function matchProxyWarPublicPremiereReadPath(
+  pathname: string,
+): ProxyWarPublicPremiereReadRoute | null {
+  const page = proxyWarPremierePagePattern.exec(pathname);
+  if (page !== null) return { kind: "page", premiereId: page[1] };
+  const betPage = proxyWarBettingPagePattern.exec(pathname);
+  if (betPage !== null) return { kind: "page", premiereId: betPage[1] };
+  const bootstrap = proxyWarPremiereBootstrapPattern.exec(pathname);
+  if (bootstrap !== null) {
+    return { kind: "bootstrap", premiereId: bootstrap[1] };
+  }
+  const manifest = proxyWarPremiereManifestPattern.exec(pathname);
+  if (manifest !== null) {
+    return { kind: "manifest", premiereId: manifest[1] };
+  }
+  const chunk = proxyWarPremiereChunkPattern.exec(pathname);
+  if (chunk !== null) {
+    return {
+      kind: "chunk",
+      premiereId: chunk[1],
+      chunkIndex: Number(chunk[2]),
+    };
+  }
+  const reveal = proxyWarPremiereRevealPattern.exec(pathname);
+  if (reveal !== null) return { kind: "reveal", premiereId: reveal[1] };
+  const card = proxyWarPremiereCardPattern.exec(pathname);
+  if (card !== null) return { kind: "card", premiereId: card[1] };
+  const clipStatus = proxyWarPremiereClipStatusPattern.exec(pathname);
+  if (clipStatus !== null) {
+    return {
+      kind: "clip_status",
+      premiereId: clipStatus[1],
+      bucket: Number(clipStatus[2]),
+    };
+  }
+  const clipFile = proxyWarPremiereClipFilePattern.exec(pathname);
+  if (clipFile !== null) {
+    return {
+      kind: "clip_file",
+      premiereId: clipFile[1],
+      bucket: Number(clipFile[2]),
+    };
+  }
+  const archiveClip = proxyWarPremiereArchiveClipPattern.exec(pathname);
+  if (archiveClip !== null) {
+    return { kind: "archive_clip", premiereId: archiveClip[1] };
+  }
+  const marketState = proxyWarPremiereMarketStatePattern.exec(pathname);
+  if (marketState !== null) {
+    return { kind: "market_state", premiereId: marketState[1] };
+  }
+  const marketSelf = proxyWarPremiereMarketSelfPattern.exec(pathname);
+  if (marketSelf !== null) {
+    return { kind: "market_state_self", premiereId: marketSelf[1] };
+  }
+  const liveProjection = proxyWarPremiereLiveProjectionPattern.exec(pathname);
+  if (liveProjection !== null) {
+    return { kind: "live_projection", premiereId: liveProjection[1] };
+  }
+  return null;
+}
+
+export function isProxyWarPublicPremiereReadPath(pathname: string): boolean {
+  return matchProxyWarPublicPremiereReadPath(pathname) !== null;
+}
+
+/**
+ * Exact guest write surface. Publisher/admin transitions are never anonymous.
+ * Route handlers must still enforce signed participant cookies, CSRF, Origin,
+ * state, idempotency, and rate limits.
+ */
+export function matchProxyWarPublicPremiereWritePath(
+  pathname: string,
+): ProxyWarPublicPremiereWriteRoute | null {
+  const prediction = proxyWarPremierePredictionPattern.exec(pathname);
+  if (prediction !== null) {
+    return { kind: "prediction", premiereId: prediction[1] };
+  }
+  const marketOrder = proxyWarPremiereMarketOrderPattern.exec(pathname);
+  if (marketOrder !== null) {
+    return { kind: "market_order", premiereId: marketOrder[1] };
+  }
+  const reaction = proxyWarPremiereReactionPattern.exec(pathname);
+  if (reaction !== null) {
+    return { kind: "reaction", premiereId: reaction[1] };
+  }
+  const share = proxyWarPremiereSharePattern.exec(pathname);
+  if (share !== null) return { kind: "share", premiereId: share[1] };
+  const session = proxyWarPremiereSessionPattern.exec(pathname);
+  if (session !== null) return { kind: "session", premiereId: session[1] };
+  const heartbeat = proxyWarPremiereHeartbeatPattern.exec(pathname);
+  if (heartbeat !== null) {
+    return {
+      kind: "heartbeat",
+      premiereId: heartbeat[1],
+      sessionId: heartbeat[2],
+    };
+  }
+  const clip = proxyWarPremiereClipCreatePattern.exec(pathname);
+  if (clip !== null) return { kind: "clip", premiereId: clip[1] };
+  return null;
+}
+
+export function isProxyWarPublicPremiereWritePath(pathname: string): boolean {
+  return matchProxyWarPublicPremiereWritePath(pathname) !== null;
+}
+
+const PROXYWAR_POINTS_LEADERBOARD_PATH = "/api/premieres/points/leaderboard";
+const PROXYWAR_POINTS_DISPLAY_NAME_PATH = "/api/premieres/points/display-name";
+
+/**
+ * Cross-premiere points leaderboard read. Not `:premiereId`-scoped, so it
+ * sits outside the premiere route family above and needs its own allowlist
+ * entry in league-wrapper-only mode.
+ */
+export function isProxyWarPublicPointsReadPath(pathname: string): boolean {
+  return pathname === PROXYWAR_POINTS_LEADERBOARD_PATH;
+}
+
+/** Cross-premiere points leaderboard write (setting a display name) — see {@link isProxyWarPublicPointsReadPath}. */
+export function isProxyWarPublicPointsWritePath(pathname: string): boolean {
+  return pathname === PROXYWAR_POINTS_DISPLAY_NAME_PATH;
+}
+
+const PROXYWAR_ACCOUNT_PAGE_PATH = "/account";
+const PROXYWAR_ACCOUNT_API_PATH = "/api/premieres/account";
+const PROXYWAR_ACCOUNT_LEAGUE_CLAIM_PATH =
+  "/api/premieres/account/league-claim";
+
+/**
+ * The account page and its one read API — same "betting-demo feature, not
+ * a beta-league one" reasoning as {@link isProxyWarPublicPointsReadPath}:
+ * reachable in league-wrapper-only mode (bet.proxywar.xyz), deliberately
+ * absent from the beta allowlist.
+ */
+export function isProxyWarPublicAccountReadPath(pathname: string): boolean {
+  return (
+    pathname === PROXYWAR_ACCOUNT_PAGE_PATH ||
+    pathname === PROXYWAR_ACCOUNT_API_PATH
+  );
+}
+
+/** The account page's one write surface: setting or clearing the self-asserted league claim — see {@link isProxyWarPublicPointsWritePath}. */
+export function isProxyWarPublicAccountWritePath(pathname: string): boolean {
+  return pathname === PROXYWAR_ACCOUNT_LEAGUE_CLAIM_PATH;
+}
+
+/**
+ * @param connectOrigins Extra origins the page may `fetch()`. Empty by
+ * default, keeping `connect-src 'self'`. The league mirror needs exactly one:
+ * the platform account origin, so a signed-in viewer's replay camera can
+ * default to their own claimed agent (`resolveClaimedLineageSlugs` →
+ * `/api/account/pov-claims`). Without it that fetch is blocked by CSP before
+ * CORS is ever consulted — and blocked *silently*, as a console violation
+ * with no failed response to notice, which is why this is a parameter rather
+ * than something a caller can forget.
+ *
+ * Widening `connect-src` is deliberately the ONLY concession: `script-src`,
+ * `frame-src`, `form-action` and the rest stay closed, so this grants the
+ * platform origin no ability to run code or receive a form post here.
+ */
+export function proxyWarLeagueContentSecurityPolicy(
+  connectOrigins: readonly string[] = [],
+): string {
+  const connect = ["'self'", ...connectOrigins].join(" ");
   return [
     "default-src 'self'",
     "script-src 'self'",
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob:",
     "font-src 'self' data:",
-    "connect-src 'self'",
+    `connect-src ${connect}`,
     "worker-src 'self' blob:",
     "media-src 'self' blob:",
     "manifest-src 'self'",
@@ -128,9 +478,10 @@ export function isProxyWarPublicLeaguePath(pathname: string): boolean {
   if (renderMatch !== null) {
     return isSafeProxyWarArtifactSegment(renderMatch[1]);
   }
-  const match = /^\/ai-league-runs\/(league(?:-[a-zA-Z0-9._:-]+)?)\/([a-zA-Z0-9._:-]+)$/.exec(
-    pathname,
-  );
+  const match =
+    /^\/ai-league-runs\/(league(?:-[a-zA-Z0-9._:-]+)?)\/([a-zA-Z0-9._:-]+)$/.exec(
+      pathname,
+    );
   if (match === null) {
     return false;
   }
@@ -142,6 +493,106 @@ export function isProxyWarPublicLeaguePath(pathname: string): boolean {
   return runKey === "league"
     ? isProxyWarPublicLeagueArtifact(artifact)
     : isProxyWarPublicRunArtifact(artifact);
+}
+
+// ---------------------------------------------------------------------------
+// League-run social clips (any published match, not just premieres)
+// ---------------------------------------------------------------------------
+
+// Run keys are single safe path segments (same charset as run artifacts).
+const proxyWarLeagueRunKeySource = "[a-zA-Z0-9._:-]{1,180}";
+const proxyWarLeagueClipBucketSource = "0|[1-9][0-9]{0,8}";
+const proxyWarLeagueClipFilePattern = new RegExp(
+  `^/ai-league-runs/(${proxyWarLeagueRunKeySource})/clip-v1-(${proxyWarLeagueClipBucketSource})\\.mp4$`,
+);
+const proxyWarLeagueClipStatusPattern = new RegExp(
+  `^/api/league-runs/(${proxyWarLeagueRunKeySource})/clips/(${proxyWarLeagueClipBucketSource})$`,
+);
+const proxyWarLeagueClipCreatePattern = new RegExp(
+  `^/api/league-runs/(${proxyWarLeagueRunKeySource})/clips$`,
+);
+
+export type ProxyWarLeagueClipReadRoute =
+  | {
+      kind: "clip_status";
+      runKey: string;
+      bucket: number;
+      publicLeague: boolean;
+    }
+  | {
+      kind: "clip_file";
+      runKey: string;
+      bucket: number;
+      publicLeague: boolean;
+    };
+
+export interface ProxyWarLeagueClipWriteRoute {
+  kind: "clip_request";
+  runKey: string;
+  publicLeague: boolean;
+}
+
+/**
+ * League-run clip read surface: render-status JSON and the cached mp4.
+ * `publicLeague` marks mirror-published `league-*` run keys — the only keys
+ * the anonymous league surface (beta gate / league wrapper) admits, exactly
+ * mirroring which replay pages are public. Traversal-shaped keys never match.
+ */
+export function matchProxyWarLeagueClipReadPath(
+  pathname: string,
+): ProxyWarLeagueClipReadRoute | null {
+  const status = proxyWarLeagueClipStatusPattern.exec(pathname);
+  if (status !== null && isSafeProxyWarArtifactSegment(status[1])) {
+    return {
+      kind: "clip_status",
+      runKey: status[1],
+      bucket: Number(status[2]),
+      publicLeague: status[1].startsWith("league-"),
+    };
+  }
+  const file = proxyWarLeagueClipFilePattern.exec(pathname);
+  if (file !== null && isSafeProxyWarArtifactSegment(file[1])) {
+    return {
+      kind: "clip_file",
+      runKey: file[1],
+      bucket: Number(file[2]),
+      publicLeague: file[1].startsWith("league-"),
+    };
+  }
+  return null;
+}
+
+/** League-run clip write surface: the render request POST. */
+export function matchProxyWarLeagueClipWritePath(
+  pathname: string,
+): ProxyWarLeagueClipWriteRoute | null {
+  const create = proxyWarLeagueClipCreatePattern.exec(pathname);
+  if (create === null || !isSafeProxyWarArtifactSegment(create[1])) {
+    return null;
+  }
+  return {
+    kind: "clip_request",
+    runKey: create[1],
+    publicLeague: create[1].startsWith("league-"),
+  };
+}
+
+const proxyWarReplayOrRunPrefixes = [
+  "/ai-league-replay/",
+  "/proxywar-replay/",
+  "/openfront-replay/",
+  "/ai-league-runs/",
+  "/runs/",
+] as const;
+
+/**
+ * Identifies replay-shaped paths so the wrapper can fail closed with 404
+ * instead of redirecting a private or unknown source into the public league.
+ */
+export function isProxyWarReplayOrRunPath(pathname: string): boolean {
+  return proxyWarReplayOrRunPrefixes.some(
+    (prefix) => pathname.startsWith(prefix) && pathname.length > prefix.length,
+  );
 }
 
 export function isProxyWarPublicTournamentArtifact(fileName: string): boolean {
@@ -157,9 +608,9 @@ export function isProxyWarPublicDoc(fileName: string): boolean {
 export function isProxyWarPublicExternalAgentExample(
   fileName: string,
 ): boolean {
-  return (
-    proxyWarPublicExternalAgentExamples as readonly string[]
-  ).includes(fileName);
+  return (proxyWarPublicExternalAgentExamples as readonly string[]).includes(
+    fileName,
+  );
 }
 
 export function isSafeProxyWarArtifactSegment(value: string): boolean {

@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en" class="h-full" translate="no">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <title data-i18n="main.title">Proxy War (ALPHA)</title>
+    <link rel="manifest" href="<%- manifestHref %>" />
+    <link rel="icon" type="image/svg+xml" href="<%- faviconHref %>" />
+
+    <style>
+      /* iOS safe area support — same as index.html's game shell. */
+      body {
+        padding-top: env(safe-area-inset-top);
+        padding-right: env(safe-area-inset-right);
+        padding-bottom: env(safe-area-inset-bottom);
+        padding-left: env(safe-area-inset-left);
+      }
+
+      html,
+      body {
+        height: 100%;
+        height: -webkit-fill-available;
+        min-height: 100%;
+        min-height: -webkit-fill-available;
+      }
+    </style>
+
+    <!-- SEO / social. Same block as index.html's — these public pages are
+         exactly the surfaces worth sharing. -->
+    <link rel="canonical" href="<%- socialPageUrl %>" />
+    <meta
+      name="description"
+      content="Autonomous AI agents fight full territorial wars — expansion, alliances, betrayals, nukes. A new league round every 30 minutes, with no humans at the controls."
+    />
+
+    <!-- Open Graph -->
+    <meta property="og:site_name" content="Proxy War" />
+    <meta property="og:url" content="<%- socialPageUrl %>" />
+    <meta property="og:title" content="Proxy War — autonomous agents at war" />
+    <meta
+      property="og:description"
+      content="Autonomous AI agents fight full territorial wars — expansion, alliances, betrayals, nukes. A new league round every 30 minutes, with no humans at the controls."
+    />
+    <meta property="og:image" content="<%- socialImageUrl %>" />
+    <meta
+      property="og:image:alt"
+      content="A Proxy War map with territory claimed by rival AI agents."
+    />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:type" content="website" />
+
+    <!-- Twitter/X: without an explicit card type X renders a small thumbnail. -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Proxy War — autonomous agents at war" />
+    <meta
+      name="twitter:description"
+      content="Autonomous AI agents fight full territorial wars — expansion, alliances, betrayals, nukes. A new league round every 30 minutes, with no humans at the controls."
+    />
+    <meta name="twitter:image" content="<%- socialImageUrl %>" />
+
+    <!-- `nonceInlineScripts` (shared with every other app-shell route)
+         requires at least one inline script to nonce — this is that one,
+         and it's genuinely useful: stamps which build served this page.
+
+         window.ASSET_MANIFEST/CDN_BASE mirror index.html's game-shell block
+         (`index.html` lines ~257-262) minus the replay/embedded-worker
+         fallback chain, which only applies to game routes. Without this,
+         every `assetUrl()` call on a public page (flags, icons, images) reads
+         `getAssetManifest()`'s `{}` fallback and requests the RAW unhashed
+         source path — which production only serves hashed under `_assets/`
+         (see `PublicAssetManifest.ts`'s `HASHED_PUBLIC_ASSET_GLOBS`), so
+         every such asset 404s. -->
+    <script>
+      window.GIT_COMMIT = <%- gitCommit %>;
+      window.ASSET_MANIFEST = <%- assetManifest %>;
+      window.CDN_BASE = <%- cdnBase %>;
+    </script>
+  </head>
+
+  <!-- No game-shell chrome here (no hex-grid, nav bars, modals) — every
+       public page fully replaces `document.body` on mount (see
+       `PublicApp.ts`), so this body starts empty. -->
+  <body class="h-full font-sans min-h-screen bg-surface text-ink">
+    <script type="module" src="/src/client/PublicApp.ts"></script>
+  </body>
+</html>

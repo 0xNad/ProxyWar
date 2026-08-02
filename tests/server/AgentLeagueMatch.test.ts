@@ -166,7 +166,9 @@ describe("AgentLeagueMatchRunner", () => {
         ...agentStrategyProfiles,
       ]);
       expect(records.every((record) => record.result.accepted)).toBe(true);
-      expect(records.every((record) => record.reason.length > 0)).toBe(true);
+      expect(
+        records.every((record) => (record.reason?.length ?? 0) > 0),
+      ).toBe(true);
       expect(records.every((record) => record.legalActionIDs.length > 0)).toBe(
         true,
       );
@@ -1787,6 +1789,44 @@ describe("AgentLeagueMatchRunner", () => {
       ).toBe(true);
       expect(
         result.postSpawnRecords.every((record) => record.result.accepted),
+      ).toBe(true);
+      // P0 fix: `decideWithSafetyFallback`'s own catch (a brain timing out,
+      // not LlmAgentBrain's internal fallback) must ALSO record no stated
+      // reason rather than folding "Agent brain failed (...); fallback: ..."
+      // into the public reason field — the failure text lives only in the
+      // distinct `brainErrorReason` field, and the substituted rule brain's
+      // own genuine reason lives only in `fallbackReason`. `reason` is
+      // either null (the common case) or the canonical Validator's own
+      // honest substitution message (when the rule brain's proposed action
+      // also lost a same-turn conflict and the Validator itself swapped in
+      // hold) — NEVER the old "Agent brain failed (...)" contamination.
+      expect(
+        result.postSpawnRecords.every(
+          (record) =>
+            record.reason === null ||
+            record.reason.startsWith("decision selected unknown action id:"),
+        ),
+      ).toBe(true);
+      expect(
+        result.postSpawnRecords.every(
+          (record) =>
+            !record.reason?.includes("Agent brain failed") &&
+            !record.reason?.includes("timed out after"),
+        ),
+      ).toBe(true);
+      expect(
+        result.postSpawnRecords.every(
+          (record) =>
+            typeof record.decisionMetadata?.brainErrorReason === "string" &&
+            (record.decisionMetadata!.brainErrorReason as string).includes(
+              "timed out",
+            ),
+        ),
+      ).toBe(true);
+      expect(
+        result.postSpawnRecords.every(
+          (record) => typeof record.decisionMetadata?.fallbackReason === "string",
+        ),
       ).toBe(true);
     } finally {
       await game.end({ archive: false });

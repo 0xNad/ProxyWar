@@ -1,10 +1,30 @@
+import { PREMIERE_ID_PATTERN } from "../replay-premiere/ReplayPremiereContracts";
+import { derivePremiereId } from "../replay-premiere/ReplayPremiereLoopCore";
 import type { AgentSpectatorReplay } from "./AgentSpectatorReplay";
+import type { LatestPremierePointer } from "./CoworldLeaguePremiereSuppression";
 import type {
   CoworldLeagueEpisodePlayerRow,
   CoworldLeagueEpisodeRow,
+  CoworldLeagueLatestPremiereCard,
   CoworldLeagueRoundRow,
   CoworldLeagueStandingRow,
 } from "./CoworldLeagueSiteWriter";
+import {
+  buildAgentSpectatorTelemetry,
+  type SpectatorTelemetry,
+} from "./AgentSpectatorTelemetry";
+import type {
+  AgentRunFinalState,
+  AgentRunRosterEntry,
+} from "./AgentDecisionLogWriter";
+import type { AgentDecisionRecord, LegalActionKind } from "./AgentTypes";
+import { buildDirectorCutPlan, type DirectorCutPlan } from "./DirectorCutPlan";
+import { AGENT_MATCH_RECAP_SCHEMA_VERSION } from "./AgentMatchRecap";
+import {
+  buildAgentMatchStateSeries,
+  MATCH_STATE_SERIES_SCHEMA_VERSION,
+  type MatchStateSeries,
+} from "./AgentMatchStateSeries";
 
 /**
  * Pure transforms from Coworld Observatory read-API JSON (as emitted by the
@@ -13,6 +33,8 @@ import type {
  */
 
 const housePolicyName = "proxywar-keystone";
+const replayUiRecentDecisionLimit = 60;
+const replayUiTextLimit = 1_000;
 
 const fallbackPlayerColors = [
   "#ef4444",
@@ -49,6 +71,18 @@ function asString(value: unknown): string | null {
 
 function asNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function asBoolean(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+function boundedString(
+  value: unknown,
+  limit = replayUiTextLimit,
+): string | null {
+  const text = asString(value);
+  return text === null ? null : text.slice(0, limit);
 }
 
 export interface CoworldLeagueSummary {
@@ -189,7 +223,11 @@ export function buildStandingRows(
     if (!row) {
       continue;
     }
-    const ratingPolicyLabel = asString(row.policy_label) ?? "unknown policy";
+    // Null, not a jargon placeholder. The site writer decides how an unknown
+    // rating policy is presented ("Not yet rated"); stamping "unknown policy"
+    // here leaked an internal string straight onto the public standings and
+    // made the writer's own fallback unreachable.
+    const ratingPolicyLabel = asString(row.policy_label);
     const playerId = asString(row.player_id);
     const activeChampionPolicyLabel =
       playerId === null ? null : (activeChampionLabels.get(playerId) ?? null);
@@ -385,6 +423,242 @@ export interface ParsedHostedReplay {
   }>;
 }
 
+export interface CoworldReplayUiDecision {
+  sequence: number;
+  turnNumber: number;
+  username: string;
+  profile: string;
+  brainType: string;
+  selectedActionKind: string;
+  selectedLegalActionId: string;
+  selectedActionMetadata?: Record<string, unknown>;
+  socialText?: string;
+  socialTargetName?: string;
+  reason: string;
+  planObjective?: string;
+  decisionLatencyMs: number;
+  fallbackUsed: boolean;
+  parseSuccess?: boolean;
+  result: {
+    accepted: boolean;
+    reason: string;
+  };
+  auditStatus?: string;
+}
+
+export interface CoworldReplayUiArtifact {
+  version: 1;
+  decisionCount: number;
+  rejectedCount: number;
+  fallbackCount: number;
+  actionCounts: Record<string, number>;
+  recentDecisions: CoworldReplayUiDecision[];
+  artifacts: {
+    visualReport: boolean;
+    spectatorTelemetry: boolean;
+    decisions: boolean;
+    summary: boolean;
+  };
+}
+
+/**
+ * Builds the bounded payload consumed by the rendered replay overlay. Hosted
+ * decision logs can be tens of megabytes; the frontend needs totals and a
+ * short recent window, not raw provider output or every historical card.
+ */
+/**
+ * Choose which decisions the replay UI receives, within a fixed budget.
+ *
+ * This used to be `decisions.slice(-limit)` — the LAST N of the match. Two
+ * consequences: agents eliminated early never appeared at all (their decisions
+ * are never in the tail), and the panel's playhead window had nothing to show
+ * until playback reached the final minutes of a 50,000-turn match.
+ *
+ * Keep the same payload budget but spread it across the whole match: every
+ * notable decision (engine fallback or rejected action) is kept first, then the
+ * remainder is filled by an even stride so early, middle and late play are all
+ * represented. Chronological order is preserved.
+ */
+export function sampleDecisionsAcrossMatch<T extends CoworldReplayUiDecision>(
+  decisions: readonly T[],
+  limit: number,
+): T[] {
+  if (limit <= 0) return [];
+  if (decisions.length <= limit) return [...decisions];
+  const chosen = new Set<number>();
+  // 1. Every notable decision first (engine fallback or rejected action).
+  for (let index = 0; index < decisions.length && chosen.size < limit; index++) {
+    const decision = decisions[index];
+    if (decision.fallbackUsed === true || decision.result?.accepted === false) {
+      chosen.add(index);
+    }
+  }
+  // 2. Even stride across the whole match for temporal coverage.
+  const strideSlots = limit - chosen.size;
+  if (strideSlots > 0) {
+    const stride = decisions.length / strideSlots;
+    for (let step = 0; step < strideSlots && chosen.size < limit; step += 1) {
+      chosen.add(
+        Math.min(decisions.length - 1, Math.floor(step * stride + stride / 2)),
+      );
+    }
+  }
+  // 3. Stride picks can collide with step 1, leaving the budget under-filled.
+  // Top up so the payload size stays exactly as before.
+  for (let index = 0; index < decisions.length && chosen.size < limit; index++) {
+    chosen.add(index);
+  }
+  return [...chosen]
+    .sort((left, right) => left - right)
+    .map((index) => decisions[index]);
+}
+
+export function buildCoworldReplayUiArtifact(
+  inlineRunArtifacts: Record<string, string>,
+): CoworldReplayUiArtifact {
+  const decisions: CoworldReplayUiDecision[] = [];
+  const actionCounts: Record<string, number> = {};
+  let rejectedCount = 0;
+  let fallbackCount = 0;
+  const rawDecisions = inlineRunArtifacts["decisions.jsonl"];
+  if (typeof rawDecisions === "string") {
+    for (const rawLine of rawDecisions.split("\n")) {
+      const line = rawLine.trim();
+      if (line.length === 0) continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const decision = projectCoworldReplayUiDecision(parsed);
+      if (decision === null) continue;
+      decisions.push(decision);
+      actionCounts[decision.selectedActionKind] =
+        (actionCounts[decision.selectedActionKind] ?? 0) + 1;
+      if (!decision.result.accepted) rejectedCount += 1;
+      if (decision.fallbackUsed) fallbackCount += 1;
+    }
+  }
+  return {
+    version: 1,
+    decisionCount: decisions.length,
+    rejectedCount,
+    fallbackCount,
+    actionCounts,
+    recentDecisions: sampleDecisionsAcrossMatch(
+      decisions,
+      replayUiRecentDecisionLimit,
+    ),
+    artifacts: {
+      // `visual-report.html`/`decisions.jsonl` were removed from the public
+      // artifact allowlist (`proxyWarPublicRunArtifacts`,
+      // `ProxyWarPublicArtifacts.ts`) — both carry raw LLM prompts/output
+      // and are never publicly servable regardless of whether the raw
+      // hosted payload happens to include the file. `Object.hasOwn` here
+      // would answer "does the file exist", which is a different, now-
+      // irrelevant question from "is it available to a client" — reporting
+      // `true` from file presence would be a stale/misleading signal (a
+      // client acting on it would build a link that always 404s). No
+      // consumer reads either field today (the UI row that once used them
+      // was removed on operator request — see `AiLeagueReplayOverlay.ts`'s
+      // history), so this is the honest value rather than dead plumbing
+      // pretending otherwise.
+      visualReport: false,
+      spectatorTelemetry: Object.hasOwn(
+        inlineRunArtifacts,
+        "spectator-telemetry.json",
+      ),
+      decisions: false,
+      summary: Object.hasOwn(inlineRunArtifacts, "match-summary.json"),
+    },
+  };
+}
+
+function projectCoworldReplayUiDecision(
+  value: unknown,
+): CoworldReplayUiDecision | null {
+  const decision = asRecord(value);
+  const result = asRecord(decision?.result);
+  const sequence = asNumber(decision?.sequence);
+  const turnNumber = asNumber(decision?.turnNumber);
+  const username = boundedString(decision?.username, 160);
+  const selectedActionKind = boundedString(decision?.selectedActionKind, 120);
+  const selectedLegalActionId = boundedString(
+    decision?.selectedLegalActionId,
+    500,
+  );
+  if (
+    decision === null ||
+    result === null ||
+    sequence === null ||
+    turnNumber === null ||
+    username === null ||
+    selectedActionKind === null ||
+    selectedLegalActionId === null
+  ) {
+    return null;
+  }
+  const projected: CoworldReplayUiDecision = {
+    sequence,
+    turnNumber,
+    username,
+    profile: boundedString(decision.profile, 120) ?? "unknown",
+    brainType: boundedString(decision.brainType, 120) ?? "unknown",
+    selectedActionKind,
+    selectedLegalActionId,
+    reason: boundedString(decision.reason) ?? "",
+    decisionLatencyMs: asNumber(decision.decisionLatencyMs) ?? 0,
+    fallbackUsed: decision.fallbackUsed === true,
+    result: {
+      accepted: result.accepted === true,
+      reason: boundedString(result.reason) ?? "",
+    },
+  };
+  const metadata = projectCoworldReplayUiMetadata(
+    asRecord(decision.selectedActionMetadata),
+  );
+  if (metadata !== undefined) projected.selectedActionMetadata = metadata;
+  const socialText = boundedString(decision.socialText);
+  if (socialText !== null) projected.socialText = socialText;
+  const socialTargetName = boundedString(decision.socialTargetName, 160);
+  if (socialTargetName !== null) {
+    projected.socialTargetName = socialTargetName;
+  }
+  const planObjective = boundedString(decision.planObjective, 500);
+  if (planObjective !== null) projected.planObjective = planObjective;
+  const parseSuccess = asBoolean(decision.parseSuccess);
+  if (parseSuccess !== null) projected.parseSuccess = parseSuccess;
+  const auditStatus = boundedString(decision.auditStatus, 120);
+  if (auditStatus !== null) projected.auditStatus = auditStatus;
+  return projected;
+}
+
+function projectCoworldReplayUiMetadata(
+  metadata: Record<string, unknown> | null,
+): Record<string, unknown> | undefined {
+  if (metadata === null) return undefined;
+  const projected: Record<string, unknown> = {};
+  for (const key of [
+    "message",
+    "quickChatKey",
+    "emojiText",
+    "recipientName",
+    "targetName",
+    "emojiContext",
+  ]) {
+    const value = boundedString(metadata[key], 500);
+    if (value !== null) projected[key] = value;
+  }
+  if (typeof metadata.emoji === "number" && Number.isFinite(metadata.emoji)) {
+    projected.emoji = metadata.emoji;
+  }
+  if (typeof metadata.expansion === "boolean") {
+    projected.expansion = metadata.expansion;
+  }
+  return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
 export function parseHostedReplayPayload(
   value: unknown,
 ): ParsedHostedReplay | null {
@@ -471,6 +745,50 @@ export function buildEpisodeRow(input: {
   roundNumber: number | null;
   watchHref: string | null;
   fullRenderHref: string | null;
+  /**
+   * `/premiere/<premiereId>` when this episode's premiere has REVEALED (see
+   * {@link premiereHrefForEpisode}); null/omitted otherwise. Optional so the
+   * field stays entirely absent from data.json rows without one — additive
+   * for every existing consumer.
+   */
+  premiereHref?: string | null;
+  /**
+   * Product overhaul spec Stage 5. Summary of the run's
+   * `director-cut-plan.json` (durationEstimateSeconds, segmentCount) when
+   * one exists on disk for this run's unpacked directory; null/omitted
+   * otherwise (the artifact simply isn't there yet — a hosted-mirror-only
+   * episode, or a bundle unpacked before Director Cut plans existed). The
+   * caller (`coworld-league-mirror.ts`) resolves this from the local
+   * filesystem before calling — this function stays pure/IO-free like
+   * every other field here.
+   */
+  directorCut?: {
+    durationEstimateSeconds: number;
+    segmentCount: number;
+  } | null;
+  /**
+   * Product overhaul spec Stage "drama recaps" gap closure — the mirror-side
+   * sibling of `directorCut` above, SAME optional/additive/disk-resolved-by-
+   * the-caller shape: a compact evidence summary of `drama-report.json`/
+   * `match-story.json`/`match-recap.json` when at least one exists on disk
+   * for this run (`CoworldLeagueMatchNarrativeBackfill.ts`), null/omitted
+   * otherwise. Ranking/evidence signal only — never recap prose (the recap
+   * itself is the separate, event-derived `match-recap.json` /
+   * `LeagueEpisodeRecap`, unrelated to these scalars).
+   *
+   * `dramaScore`/`entertainmentGrade` are the legacy `AgentDramaReport`/
+   * `AgentMatchStory` pair, requiring BOTH those reports (unchanged).
+   * `curatedDramaScore` is the PUBLIC ranking input (see
+   * `AgentMatchRecap.ts`'s doc) resolved independently from
+   * `match-recap.json` — `null` when that artifact is missing, stale, or
+   * (a genuinely quiet match) never written, distinct from `dramaScore`
+   * being present without it during the upgrade transition window.
+   */
+  dramaEvidence?: {
+    dramaScore: number;
+    entertainmentGrade: string;
+    curatedDramaScore: number | null;
+  } | null;
 }): CoworldLeagueEpisodeRow {
   const { meta, replay } = input;
   const colors = playerColorsFromSpectatorReplay(replay.spectatorReplay);
@@ -513,6 +831,15 @@ export function buildEpisodeRow(input: {
     players,
     watchHref: input.watchHref,
     fullRenderHref: input.fullRenderHref,
+    ...(typeof input.premiereHref === "string" && input.premiereHref.length > 0
+      ? { premiereHref: input.premiereHref }
+      : {}),
+    ...(input.directorCut !== null && input.directorCut !== undefined
+      ? { directorCut: input.directorCut }
+      : {}),
+    ...(input.dramaEvidence !== null && input.dramaEvidence !== undefined
+      ? { dramaEvidence: input.dramaEvidence }
+      : {}),
   };
 }
 
@@ -520,4 +847,828 @@ export function shortEpisodeId(episodeRequestId: string): string {
   const cleaned = episodeRequestId.replace(/^ereq_/, "").toLowerCase();
   const safe = cleaned.replace(/[^a-z0-9-]/g, "");
   return safe.slice(0, 8) === "" ? "episode" : safe.slice(0, 8);
+}
+
+/**
+ * Parse the replay-premiere archive index (JSONL of terminal premiere
+ * pointers, `archive-v1/archive-index.jsonl` under the premiere private state
+ * root) into the set of premiere ids whose OUTCOME IS PUBLIC: terminal state
+ * exactly "revealed" with a reveal timestamp.
+ *
+ * Spoiler-safe by construction: a pre-reveal premiere never appears in the
+ * archive index at all (pointers are written only at post-terminal
+ * reclamation, ~30 minutes after reveal), and failed/cancelled/pre-reveal
+ * terminal pointers are filtered here — so no id this returns can name a
+ * premiere whose outcome is still sealed. Tolerant + fail-open: torn or
+ * invalid lines are skipped, a repeated premiere id keeps the LAST record
+ * (append-only index semantics), and any unreadable input simply yields fewer
+ * links — never a wrong one and never a publication stall.
+ */
+export function revealedPremiereIdsFromArchiveIndex(raw: string): Set<string> {
+  return summarizePremiereArchiveIndex(raw).revealedIds;
+}
+
+/**
+ * Tolerant projection of the replay-premiere archive index for the mirror's
+ * two premiere consumers: battle-card links ({@link revealedIds}) and the
+ * latest-premiere card's cross-check + fallback ({@link knownIds},
+ * {@link newestRevealed}). Same parse semantics as
+ * {@link revealedPremiereIdsFromArchiveIndex} (which is now built on top of
+ * this): torn/invalid lines are skipped and a repeated premiere id keeps the
+ * LAST record (append-only index semantics).
+ */
+export interface PremiereArchiveIndexSummary {
+  /** Ids whose OUTCOME IS PUBLIC: terminal "revealed" with a reveal time. */
+  revealedIds: Set<string>;
+  /** Every premiere id present in the index, whatever its terminal state. */
+  knownIds: Set<string>;
+  /** The revealed entry with the newest parseable revealedAt, if any. */
+  newestRevealed: { premiereId: string; revealedAt: string } | null;
+}
+
+export function summarizePremiereArchiveIndex(
+  raw: string,
+): PremiereArchiveIndexSummary {
+  const lastById = new Map<
+    string,
+    { revealed: boolean; revealedAt: string | null }
+  >();
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) {
+      continue;
+    }
+    let value: unknown;
+    try {
+      value = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    const record = asRecord(value);
+    if (record === null) {
+      continue;
+    }
+    const premiereId = asString(record.premiereId);
+    if (premiereId === null || !PREMIERE_ID_PATTERN.test(premiereId)) {
+      continue;
+    }
+    const revealedAt = asString(record.revealedAt);
+    lastById.set(premiereId, {
+      revealed: record.terminalState === "revealed" && revealedAt !== null,
+      revealedAt,
+    });
+  }
+  const revealedIds = new Set<string>();
+  let newestRevealed: PremiereArchiveIndexSummary["newestRevealed"] = null;
+  let newestRevealedMs = Number.NEGATIVE_INFINITY;
+  for (const [premiereId, record] of lastById) {
+    if (!record.revealed) {
+      continue;
+    }
+    revealedIds.add(premiereId);
+    const revealedAtMs = Date.parse(record.revealedAt ?? "");
+    if (!Number.isFinite(revealedAtMs) || record.revealedAt === null) {
+      continue;
+    }
+    if (
+      revealedAtMs > newestRevealedMs ||
+      (revealedAtMs === newestRevealedMs &&
+        (newestRevealed === null ||
+          premiereId.localeCompare(newestRevealed.premiereId) > 0))
+    ) {
+      newestRevealedMs = revealedAtMs;
+      newestRevealed = { premiereId, revealedAt: record.revealedAt };
+    }
+  }
+  return { revealedIds, knownIds: new Set(lastById.keys()), newestRevealed };
+}
+
+/**
+ * Resolve the "Latest premiere" card shown between live premieres.
+ *
+ * The loop-written pointer is the primary source (it carries round + map and
+ * appears at reveal time, before the ~30-minute terminal reclamation adds the
+ * premiere to the archive index). It is cross-checked against the archive
+ * index when one is available: a pointer whose premiere the index knows as
+ * anything OTHER than revealed is dropped — never render a card for a
+ * premiere whose outcome is not public. A pointer the index does not know yet
+ * is fine (the index lags reveal by design). When the pointer is absent,
+ * invalid, or dropped, fall back to the index's newest revealed entry (round
+ * and map are unknown there, so the card renders without those pills). Pure
+ * and fail-open: null in, null out — the card is simply absent.
+ */
+export function resolveLatestRevealedPremiere(
+  pointer: LatestPremierePointer | null,
+  archiveIndex: PremiereArchiveIndexSummary | null,
+): CoworldLeagueLatestPremiereCard | null {
+  if (pointer !== null) {
+    const contradictedByIndex =
+      archiveIndex !== null &&
+      archiveIndex.knownIds.has(pointer.premiereId) &&
+      !archiveIndex.revealedIds.has(pointer.premiereId);
+    if (!contradictedByIndex) {
+      return {
+        premiereId: pointer.premiereId,
+        roundNumber: pointer.roundNumber,
+        mapLabel: pointer.mapLabel,
+        revealedAt: pointer.revealedAt,
+        href: `/premiere/${encodeURIComponent(pointer.premiereId)}`,
+      };
+    }
+  }
+  const fallback = archiveIndex?.newestRevealed ?? null;
+  if (fallback === null) {
+    return null;
+  }
+  return {
+    premiereId: fallback.premiereId,
+    roundNumber: null,
+    mapLabel: "",
+    revealedAt: fallback.revealedAt,
+    href: `/premiere/${encodeURIComponent(fallback.premiereId)}`,
+  };
+}
+
+/**
+ * Probe-checked variant of {@link resolveLatestRevealedPremiere}: never hand
+ * the site writer a card whose target page does not actually serve.
+ *
+ * 2026-07-22 orphan incident: a premiere that reveals but whose ~30-minute
+ * reclamation grace spans a beta restart can end up neither live-registered
+ * nor archived — its /premiere page 404s — while the loop-written pointer
+ * still names it, so the "Watch now" card linked a dead page. The pointer's
+ * freshness-over-index design is correct (the index lags reveal by design),
+ * so the only honest check is asking the serving origin. `probe` returns
+ * true when the candidate's page serves; candidates that fail are dropped:
+ * pointer candidate first, then the archive-index fallback, then no card.
+ * Fail-open on the probe itself is the CALLER's choice: pass an
+ * always-true probe to keep the unprobed behavior (flag off / origin down
+ * should not blank the card for a page that may well be fine).
+ */
+export async function selectServingLatestPremiere(
+  pointer: LatestPremierePointer | null,
+  archiveIndex: PremiereArchiveIndexSummary | null,
+  probe: (premiereId: string) => Promise<boolean>,
+): Promise<CoworldLeagueLatestPremiereCard | null> {
+  const primary = resolveLatestRevealedPremiere(pointer, archiveIndex);
+  if (primary === null) {
+    return null;
+  }
+  if (await probe(primary.premiereId)) {
+    return primary;
+  }
+  const pointerSourced =
+    pointer !== null && primary.premiereId === pointer.premiereId;
+  if (!pointerSourced) {
+    return null;
+  }
+  const fallback = resolveLatestRevealedPremiere(null, archiveIndex);
+  if (fallback === null || fallback.premiereId === primary.premiereId) {
+    return null;
+  }
+  return (await probe(fallback.premiereId)) ? fallback : null;
+}
+
+/**
+ * The battle-card premiere link for an episode, or null when the episode has
+ * no REVEALED premiere. The join is the premiere loop's own deterministic id
+ * derivation (premiereId = derivePremiereId(episodeRequestId)), so no mapping
+ * state is needed and — because {@link revealedPremiereIdsFromArchiveIndex}
+ * only ever returns post-reveal ids — a link can never point at a sealed
+ * premiere.
+ */
+export function premiereHrefForEpisode(
+  episodeRequestId: string,
+  revealedPremiereIds: ReadonlySet<string>,
+): string | null {
+  const premiereId = derivePremiereId(episodeRequestId);
+  return revealedPremiereIds.has(premiereId)
+    ? `/premiere/${encodeURIComponent(premiereId)}`
+    : null;
+}
+
+/**
+ * Parses `director-cut-plan.json` raw file contents into the small summary
+ * `buildEpisodeRow`'s `directorCut` field carries — never the full plan
+ * (segments/notes/participatingAgents stay a per-match artifact fetched
+ * directly by the client player, never duplicated into data.json). Pure:
+ * the caller (`coworld-league-mirror.ts`) owns the actual file read and
+ * its own existence/ENOENT handling; this only has to handle "the file
+ * exists but isn't a well-formed DirectorCutPlan" — malformed JSON, wrong
+ * shape, or a non-finite/negative duration or segment count all resolve
+ * to `null` rather than a garbage row.
+ */
+export function parseDirectorCutPlanSummary(
+  raw: string,
+): { durationEstimateSeconds: number; segmentCount: number } | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const record = asRecord(value);
+  if (record === null || record.reportKind !== "director-cut-plan") {
+    return null;
+  }
+  const durationEstimateSeconds = asNumber(record.estimatedDurationSeconds);
+  const segments = asArray(record.segments);
+  if (
+    durationEstimateSeconds === null ||
+    durationEstimateSeconds < 0 ||
+    segments.length === 0
+  ) {
+    return null;
+  }
+  return { durationEstimateSeconds, segmentCount: segments.length };
+}
+
+/**
+ * Parses `drama-report.json` + `match-story.json` raw file contents into the
+ * small `{dramaScore, entertainmentGrade}` summary `buildEpisodeRow`'s
+ * `dramaEvidence` field carries — same "small, additive, provenance-marked"
+ * projection `directorCut` established above, never the full reports
+ * (neither `drama-report.json`/`.md` nor `match-story.json` is on
+ * `ProxyWarPublicArtifacts.ts`'s public allowlist; only the derived scalar
+ * pair here and the separate `match-recap.json` artifact are ever public).
+ * Pure: callers own the actual file reads and ENOENT handling; this only
+ * handles "the files exist but aren't well-formed" — malformed JSON, wrong
+ * `reportKind`, or a non-finite score resolves to `null`. Requires BOTH
+ * reports (they're written atomically together by
+ * `CoworldLeagueMatchNarrativeBackfill.ts` — one existing without the other
+ * means a torn write, never a valid partial evidence pair).
+ */
+export function parseMatchNarrativeSummary(
+  dramaReportRaw: string,
+  matchStoryRaw: string,
+): { dramaScore: number; entertainmentGrade: string } | null {
+  let dramaValue: unknown;
+  let storyValue: unknown;
+  try {
+    dramaValue = JSON.parse(dramaReportRaw);
+    storyValue = JSON.parse(matchStoryRaw);
+  } catch {
+    return null;
+  }
+  const dramaRecord = asRecord(dramaValue);
+  const storyRecord = asRecord(storyValue);
+  if (
+    dramaRecord === null ||
+    dramaRecord.reportKind !== "drama-and-tom-scorer" ||
+    storyRecord === null
+  ) {
+    return null;
+  }
+  const dramaScore = asNumber(dramaRecord.dramaScore);
+  const entertainmentGrade = asString(storyRecord.grade);
+  if (dramaScore === null || dramaScore < 0 || entertainmentGrade === null) {
+    return null;
+  }
+  return { dramaScore, entertainmentGrade };
+}
+
+/**
+ * Parses `match-recap.json` raw content into just `curatedDramaScore` —
+ * the PUBLIC "best battles" ranking input (see `AgentMatchRecap.ts`'s own
+ * doc for the formula) — independent of `parseMatchNarrativeSummary`
+ * above, so a run can carry a curated score even in the
+ * `generated-recap-only` case (no `drama-report.json`/`match-story.json`
+ * at all — see `CoworldLeagueMatchNarrativeBackfill.ts`'s doc for when
+ * that happens). `null` whenever the recap is missing, unparseable, or
+ * stamped with a `schemaVersion` older than
+ * `AGENT_MATCH_RECAP_SCHEMA_VERSION` (a pre-curated-score artifact
+ * awaiting `upgradeStaleRecap` — the SAME staleness rule
+ * `recapNeedsRegeneration` already applies elsewhere) — never a
+ * fabricated 0. A genuinely quiet match (curated pass found zero beats)
+ * has no `match-recap.json` at all and also resolves to `null` here —
+ * the caller cannot distinguish "quiet" from "not generated yet" from
+ * this function alone, which is correct: only
+ * `MatchNarrativeGenerationOutcome` (in-memory, same generation cycle)
+ * knows which one actually happened.
+ */
+export function parseCuratedDramaScore(matchRecapRaw: string): number | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(matchRecapRaw);
+  } catch {
+    return null;
+  }
+  const record = asRecord(value);
+  if (record === null || record.schemaVersion !== AGENT_MATCH_RECAP_SCHEMA_VERSION) {
+    return null;
+  }
+  const curatedDramaScore = asNumber(record.curatedDramaScore);
+  if (curatedDramaScore === null || curatedDramaScore < 0) {
+    return null;
+  }
+  return curatedDramaScore;
+}
+
+// ---------------------------------------------------------------------------
+// Product overhaul spec Stage 5 gap closure: Director Cut plan generation for
+// mirrored (hosted-league) runs.
+//
+// Empirically verified against real retained mirror run directories (see
+// `artifacts/ai-league-runs/league-coworld-*/` in the canonical checkout): the
+// hosted Coworld replay payload's `inlineRunArtifacts` carries
+// `spectator-telemetry.json` — the FULL `SpectatorTelemetry` the origin's own
+// `writeAgentLeagueRunArtifacts` built, verbatim — for every currently
+// observed production episode, alongside `decisions.jsonl`/`game-record.json`/
+// `match-summary.json`. `unpackEpisodeRunDir` already writes every
+// `inlineRunArtifacts` entry into the run dir unmodified, so
+// `spectator-telemetry.json` is normally sitting right there once an episode
+// is unpacked — a strictly more faithful signal than re-deriving events from
+// raw decisions, and it needs zero new parsing: it's the EXACT SAME
+// `SpectatorTelemetry` a local match hands `buildDirectorCutPlan`.
+//
+// `decisions.jsonl` (the `DecisionLogEntry[]` JSONL `writeAgentLeagueRunArtifacts`
+// itself produces — see `AgentDecisionLogWriter.ts`'s `decisionLogEntry`) is
+// kept as a second-tier fallback for the rarer case where telemetry is
+// missing or fails validation. Every field `buildAgentSpectatorTelemetry`
+// actually reads off `AgentDecisionRecord` (`chosenActionID/Kind/Metadata`,
+// `intent`, `sequence`, `turnNumber`, `agentID`, `audit.after.playerID`)
+// survives that projection intact, so decisions.jsonl alone is enough to
+// rebuild an equivalent event stream without a new game-record/replay parser.
+// ---------------------------------------------------------------------------
+
+export interface DirectorCutPlanGenerationOutcome {
+  plan: DirectorCutPlan;
+  /** Which artifact the plan was actually built from — for logging/observability only, never published. */
+  source: "spectator-telemetry" | "decisions-log";
+}
+
+/**
+ * Tolerant parse + minimal shape validation of a mirrored run's
+ * `spectator-telemetry.json` contents into the exact `SpectatorTelemetry`
+ * `buildDirectorCutPlan` expects. Deliberately light-touch — this is the SAME
+ * producer's own trusted output, not third-party input — but still guards
+ * against a torn/partial download or a future schema break: requires
+ * `version === 1`, at least one agent, and every event carrying the handful
+ * of fields the plan generator and roster derivation actually read.
+ * Malformed or unparseable input resolves to `null`, never a throw.
+ */
+export function parseMirroredSpectatorTelemetry(
+  raw: string,
+): SpectatorTelemetry | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const record = asRecord(value);
+  if (record === null || record.version !== 1) {
+    return null;
+  }
+  const agents = asArray(record.agents);
+  if (agents.length === 0) {
+    return null;
+  }
+  const agentsValid = agents.every((agent) => {
+    const entry = asRecord(agent);
+    return (
+      entry !== null &&
+      typeof entry.agentID === "string" &&
+      typeof entry.username === "string"
+    );
+  });
+  const events = asArray(record.events);
+  const eventsValid = events.every((event) => {
+    const entry = asRecord(event);
+    return (
+      entry !== null &&
+      typeof entry.turnNumber === "number" &&
+      typeof entry.sequence === "number" &&
+      typeof entry.importance === "number" &&
+      typeof entry.kind === "string" &&
+      typeof entry.actorAgentID === "string"
+    );
+  });
+  if (!agentsValid || !eventsValid) {
+    return null;
+  }
+  return record as unknown as SpectatorTelemetry;
+}
+
+function metadataRecord(
+  value: unknown,
+): Record<string, string | number | boolean | null> | undefined {
+  const record = asRecord(value);
+  if (record === null) {
+    return undefined;
+  }
+  const projected: Record<string, string | number | boolean | null> = {};
+  for (const [key, entry] of Object.entries(record)) {
+    if (
+      typeof entry === "string" ||
+      typeof entry === "number" ||
+      typeof entry === "boolean" ||
+      entry === null
+    ) {
+      projected[key] = entry;
+    }
+  }
+  return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
+/**
+ * Tolerant projection of one `decisions.jsonl` line (a `DecisionLogEntry` —
+ * see `AgentDecisionLogWriter.ts`'s `decisionLogEntry`) back into the minimal
+ * `AgentDecisionRecord` shape `buildAgentSpectatorTelemetry` reads. Every
+ * field it actually consumes round-trips exactly; fields it never reads
+ * (`observationSummary`, `decidedAt`, …) get inert placeholders since they
+ * don't affect the derived event stream. Malformed/incomplete lines resolve
+ * to `null` and are skipped by the caller — one torn line never fails the
+ * whole derivation.
+ */
+function decisionRecordFromMirroredLogLine(
+  value: unknown,
+): AgentDecisionRecord | null {
+  const record = asRecord(value);
+  if (record === null) {
+    return null;
+  }
+  const sequence = asNumber(record.sequence);
+  const turnNumber = asNumber(record.turnNumber);
+  const agentID = asString(record.agentID);
+  const username = asString(record.username);
+  const profile = asString(record.profile);
+  const brainType = asString(record.brainType);
+  const chosenActionID = asString(record.selectedLegalActionId);
+  const chosenActionKind = asString(record.selectedActionKind);
+  const result = asRecord(record.result);
+  if (
+    sequence === null ||
+    turnNumber === null ||
+    agentID === null ||
+    username === null ||
+    profile === null ||
+    brainType === null ||
+    chosenActionID === null ||
+    chosenActionKind === null ||
+    result === null
+  ) {
+    return null;
+  }
+  const auditAfter = asRecord(record.auditAfter);
+  const playerID = auditAfter === null ? null : asString(auditAfter.playerID);
+  return {
+    sequence,
+    gameID: "",
+    agentID,
+    clientID: null,
+    username,
+    profile: profile as AgentDecisionRecord["profile"],
+    brainType: brainType as AgentDecisionRecord["brainType"],
+    turnNumber,
+    decidedAt: 0,
+    decisionLatencyMs: 0,
+    observationSummary: "",
+    legalActionIDs: [],
+    legalActionIDsByKind: {},
+    attackActionIDs: [],
+    chosenActionID,
+    chosenActionKind: chosenActionKind as LegalActionKind,
+    reason: "",
+    chosenActionMetadata: metadataRecord(record.selectedActionMetadata),
+    intent: (record.generatedIntent ?? null) as AgentDecisionRecord["intent"],
+    result: {
+      accepted: result.accepted === true,
+      reason: asString(result.reason) ?? "",
+      submittedIntent: null,
+    },
+    audit:
+      playerID === null
+        ? undefined
+        : {
+            auditStatus: "unknown",
+            auditReason: "",
+            after: {
+              tick: null,
+              playerID,
+              isAlive: null,
+              hasSpawned: null,
+              tilesOwned: null,
+              troops: null,
+              gold: null,
+              unitCounts: {},
+              outgoingAttackTargetIDs: [],
+              outgoingAllianceRequestRecipientIDs: [],
+              outgoingEmbargoTargetIDs: [],
+            },
+          },
+  };
+}
+
+export interface MirroredDecisionRecords {
+  records: AgentDecisionRecord[];
+  roster: AgentRunRosterEntry[];
+}
+
+/**
+ * Tolerant per-line parse of a mirrored run's raw `decisions.jsonl` into the
+ * minimal `AgentDecisionRecord[]`/roster `buildAgentSpectatorTelemetry` (and,
+ * downstream, `buildAgentDramaReport`/`buildAgentMatchStory`, which require
+ * `records` verbatim — neither accepts a pre-built `SpectatorTelemetry`)
+ * reads. Roster is derived by first-seen dedup on `agentID` — the mirror has
+ * no separate roster document for a hosted episode, but every field these
+ * generators actually read off a roster entry (`username`, and — inertly,
+ * never read by any of them — `profile`/`brainType`) already round-trips off
+ * every decision line. Torn/malformed lines are skipped, never fatal; an
+ * empty `records` array signals "nothing usable", handled by callers.
+ */
+export function agentDecisionRecordsFromMirroredDecisionsLog(
+  raw: string,
+): MirroredDecisionRecords {
+  const records: AgentDecisionRecord[] = [];
+  const rosterByAgentID = new Map<string, AgentRunRosterEntry>();
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) {
+      continue;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    const record = decisionRecordFromMirroredLogLine(parsed);
+    if (record === null) {
+      continue;
+    }
+    records.push(record);
+    if (!rosterByAgentID.has(record.agentID)) {
+      rosterByAgentID.set(record.agentID, {
+        agentID: record.agentID,
+        username: record.username,
+        profile: record.profile,
+        clientID: null,
+        brainType: record.brainType,
+      });
+    }
+  }
+  return { records, roster: [...rosterByAgentID.values()] };
+}
+
+/**
+ * Fallback tier: rebuilds an equivalent `SpectatorTelemetry` straight from a
+ * mirrored run's raw `decisions.jsonl`, for the rarer case where
+ * `spectator-telemetry.json` is missing or fails
+ * {@link parseMirroredSpectatorTelemetry}'s validation. `null` only when NO
+ * line parsed into a usable record.
+ */
+export function deriveSpectatorTelemetryFromDecisionsLog(
+  raw: string,
+  runID: string,
+): SpectatorTelemetry | null {
+  const { records, roster } = agentDecisionRecordsFromMirroredDecisionsLog(raw);
+  if (records.length === 0) {
+    return null;
+  }
+  return buildAgentSpectatorTelemetry({ runID, records, roster });
+}
+
+export interface ResolvedMirroredMatchEvidence {
+  /** Which artifact the telemetry was actually built from — for logging/observability only, never published. */
+  source: "spectator-telemetry" | "decisions-log";
+  telemetry: SpectatorTelemetry;
+  /**
+   * Raw records reconstructed from `decisions.jsonl` — the REQUIRED,
+   * unmodified-signature input `buildAgentDramaReport`/`buildAgentMatchStory`
+   * need (unlike `buildDirectorCutPlan`, neither accepts a pre-built
+   * `SpectatorTelemetry`). Empty only when `decisionsJsonlRaw` was absent,
+   * oversize, or unparseable while `spectatorTelemetryRaw` still resolved —
+   * a real, distinct evidence gap (not an error): a caller needing records
+   * degrades honestly (e.g. recap-only) rather than fabricating them.
+   */
+  records: AgentDecisionRecord[];
+  roster: AgentRunRosterEntry[];
+  finalState: AgentRunFinalState | undefined;
+}
+
+/**
+ * Shared two-tier telemetry/record resolution for every mirror-side,
+ * post-hoc match-narrative generator (Director Cut, drama report, match
+ * story, match recap): prefers the faithful `spectator-telemetry.json` tier
+ * and falls back to `decisions.jsonl` derivation, exactly like
+ * {@link resolveMirroredDirectorCutPlan} always did — this IS that logic,
+ * factored out so a second generator never re-implements it. Always ALSO
+ * resolves the raw `decisions.jsonl` records (independent of which
+ * telemetry tier wins) since `buildAgentDramaReport`/`buildAgentMatchStory`
+ * need them directly. `null` only when NEITHER input is usable at all.
+ */
+export function resolveMirroredMatchEvidence(input: {
+  runID: string;
+  spectatorTelemetryRaw: string | null;
+  decisionsJsonlRaw: string | null;
+  /** Authoritative turn count when known (from `match-summary.json`'s own `finalState`), else `null` to fall back to the telemetry's own max event turn (honest `degraded: true`). */
+  finalTurnCount: number | null;
+}): ResolvedMirroredMatchEvidence | null {
+  const finalState: AgentRunFinalState | undefined =
+    input.finalTurnCount !== null && input.finalTurnCount > 0
+      ? {
+          phase: "final",
+          tick: null,
+          turnCount: input.finalTurnCount,
+          players: [],
+        }
+      : undefined;
+
+  const fromDecisionsLog =
+    input.decisionsJsonlRaw !== null
+      ? agentDecisionRecordsFromMirroredDecisionsLog(input.decisionsJsonlRaw)
+      : { records: [], roster: [] };
+
+  if (input.spectatorTelemetryRaw !== null) {
+    const telemetry = parseMirroredSpectatorTelemetry(
+      input.spectatorTelemetryRaw,
+    );
+    if (telemetry !== null) {
+      return {
+        source: "spectator-telemetry",
+        telemetry,
+        records: fromDecisionsLog.records,
+        roster: telemetry.agents.map((agent) => ({
+          agentID: agent.agentID,
+          username: agent.username,
+          profile: agent.profile as AgentRunRosterEntry["profile"],
+          clientID: null,
+          brainType: "external-http" as AgentRunRosterEntry["brainType"],
+        })),
+        finalState,
+      };
+    }
+  }
+  if (fromDecisionsLog.records.length > 0) {
+    const telemetry = buildAgentSpectatorTelemetry({
+      runID: input.runID,
+      records: fromDecisionsLog.records,
+      roster: fromDecisionsLog.roster,
+    });
+    return {
+      source: "decisions-log",
+      telemetry,
+      records: fromDecisionsLog.records,
+      roster: fromDecisionsLog.roster,
+      finalState,
+    };
+  }
+  return null;
+}
+
+/**
+ * Resolves the Director Cut plan for one mirrored run dir from whatever
+ * telemetry artifact is already sitting next to it — thin wrapper over
+ * {@link resolveMirroredMatchEvidence}. `null` when neither input is usable
+ * — the caller (the mirror script) logs and skips; this function itself
+ * never throws.
+ */
+export function resolveMirroredDirectorCutPlan(input: {
+  runID: string;
+  matchID: string;
+  spectatorTelemetryRaw: string | null;
+  decisionsJsonlRaw: string | null;
+  finalTurnCount: number | null;
+  /** Season Zero Phase 2: when a `match-state-series.json` was already generated for this run (`CoworldLeagueMatchStateSeriesBackfill.ts` runs strictly before this one in the mirror cycle), threading it through adds honest `lead_change`/`reversal` segments (`DirectorCutPlan.ts`). `null` (not yet generated, or the source replay had zero snapshots) degrades exactly as before this fix — no such segments, never fabricated. */
+  matchStateSeries?: MatchStateSeries | null;
+}): DirectorCutPlanGenerationOutcome | null {
+  const evidence = resolveMirroredMatchEvidence(input);
+  if (evidence === null) {
+    return null;
+  }
+  return {
+    source: evidence.source,
+    plan: buildDirectorCutPlan({
+      runID: input.runID,
+      matchID: input.matchID,
+      records: [],
+      roster: evidence.roster,
+      finalState: evidence.finalState,
+      spectatorTelemetry: evidence.telemetry,
+      matchStateSeries: input.matchStateSeries ?? null,
+    }),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Season Zero Phase 2: the sampled match-state series (`AgentMatchStateSeries.ts`).
+// ---------------------------------------------------------------------------
+
+/**
+ * Tolerant parse + minimal shape validation of a mirrored run's
+ * `spectator-replay.json` into the exact shape `buildAgentMatchStateSeries`
+ * reads (`snapshots[].turnNumber`/`players[]`) — same light-touch trust
+ * level as {@link parseMirroredSpectatorTelemetry} (this producer's own
+ * trusted output, guarded only against a torn download or future schema
+ * break). Malformed/unparseable input resolves to `null`, never a throw.
+ */
+export function parseMirroredSpectatorReplay(
+  raw: string,
+): Pick<AgentSpectatorReplay, "snapshots"> | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const record = asRecord(value);
+  if (record === null) {
+    return null;
+  }
+  const snapshots = asArray(record.snapshots);
+  const snapshotsValid = snapshots.every((snapshot) => {
+    const entry = asRecord(snapshot);
+    if (entry === null || typeof entry.turnNumber !== "number") return false;
+    const players = asArray(entry.players);
+    return players.every((player) => {
+      const playerEntry = asRecord(player);
+      return (
+        playerEntry !== null &&
+        typeof playerEntry.playerID === "string" &&
+        typeof playerEntry.tilesOwned === "number" &&
+        typeof playerEntry.troops === "number" &&
+        typeof playerEntry.isAlive === "boolean"
+      );
+    });
+  });
+  if (!snapshotsValid) {
+    return null;
+  }
+  return record as unknown as Pick<AgentSpectatorReplay, "snapshots">;
+}
+
+/**
+ * Tolerant parse + minimal shape validation of an already-generated
+ * `match-state-series.json` — used by every downstream consumer (recap,
+ * Director Cut) that reads the series back rather than rebuilding it.
+ * Requires the current `MATCH_STATE_SERIES_SCHEMA_VERSION`; a stale or
+ * malformed artifact resolves to `null` (read as "no series yet"), never a
+ * throw and never silently trusted past a schema change.
+ */
+export function parseMirroredMatchStateSeries(raw: string): MatchStateSeries | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const record = asRecord(value);
+  if (
+    record === null ||
+    record.schemaVersion !== MATCH_STATE_SERIES_SCHEMA_VERSION ||
+    record.source !== "spectator-replay-snapshots"
+  ) {
+    return null;
+  }
+  const samples = asArray(record.samples);
+  const samplesValid = samples.every((sample) => {
+    const entry = asRecord(sample);
+    return entry !== null && typeof entry.turn === "number" && Array.isArray(entry.agents);
+  });
+  if (!samplesValid) {
+    return null;
+  }
+  return record as unknown as MatchStateSeries;
+}
+
+/**
+ * Resolves (generates fresh, never reads an existing file) the match-state
+ * series for one mirrored run dir from its `spectator-replay.json` +
+ * whichever telemetry tier resolves — thin wrapper over
+ * `buildAgentMatchStateSeries`, used by
+ * `CoworldLeagueMatchStateSeriesBackfill.ts`. `null` when the replay is
+ * absent/unusable (never a fabricated series) — telemetry alone, unlike
+ * every other mirror-side generator in this file, is NOT sufficient input
+ * here (see `AgentMatchStateSeries.ts`'s "source decision": this artifact
+ * is a re-projection of `spectator-replay.json` specifically, not derivable
+ * from `decisions.jsonl` the way `SpectatorTelemetry` is).
+ */
+export function resolveMirroredMatchStateSeries(input: {
+  runID: string;
+  matchID: string;
+  spectatorReplayRaw: string | null;
+  spectatorTelemetryRaw: string | null;
+  decisionsJsonlRaw: string | null;
+  finalTurnCount: number | null;
+}): MatchStateSeries | null {
+  if (input.spectatorReplayRaw === null) {
+    return null;
+  }
+  const replay = parseMirroredSpectatorReplay(input.spectatorReplayRaw);
+  if (replay === null) {
+    return null;
+  }
+  const evidence = resolveMirroredMatchEvidence({
+    runID: input.runID,
+    spectatorTelemetryRaw: input.spectatorTelemetryRaw,
+    decisionsJsonlRaw: input.decisionsJsonlRaw,
+    finalTurnCount: input.finalTurnCount,
+  });
+  return buildAgentMatchStateSeries({
+    runID: input.runID,
+    matchID: input.matchID,
+    replay,
+    telemetry: evidence?.telemetry ?? null,
+  });
 }

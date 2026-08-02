@@ -606,7 +606,8 @@ export interface RecentAgentDecision {
   sequence: number;
   actionID: string;
   actionKind: LegalActionKind;
-  reason: string;
+  /** See `AgentDecision.reason` — `null` for a past fallback/failure decision with no stated reason. */
+  reason: string | null;
   accepted: boolean;
   ownTiles?: number;
   ownTroops?: number;
@@ -800,7 +801,17 @@ export interface LegalAction {
 export interface AgentDecision {
   actionID: string;
   actionIDs?: string[];
-  reason: string;
+  /**
+   * The acting brain's OWN stated rationale for this pick — genuinely a
+   * self-report, never inferred or reconstructed. `null` when there is no
+   * stated reason to report: a provider failure, a malformed/unparseable
+   * response, or any other failure that forced a fallback decision. A
+   * fallback substitution is not itself a "reason" the original brain
+   * gave — recording provider/parser failure text here (as opposed to a
+   * distinct `metadata` field) is the exact bug this contract exists to
+   * prevent; see `LlmAgentBrain.ts`'s `fallback()`.
+   */
+  reason: string | null;
   metadata?: Record<string, string | number | boolean | null>;
 }
 
@@ -880,7 +891,8 @@ export interface AgentDecisionRecord {
   attackActionIDs: string[];
   chosenActionID: string;
   chosenActionKind: LegalActionKind;
-  reason: string;
+  /** See `AgentDecision.reason` — `null` means this decision had no stated reason (fallback/failure path). */
+  reason: string | null;
   decisionMetadata?: Record<string, string | number | boolean | null>;
   chosenActionMetadata?: Record<string, string | number | boolean | null>;
   tacticalAffordances?: AgentTacticalAffordances;

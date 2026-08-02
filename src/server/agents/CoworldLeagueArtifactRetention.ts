@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { gzipSync } from "node:zlib";
 import { isSafeCoworldEpisodeRequestId } from "./CoworldLeagueMirrorCore";
+import { withFileMutex } from "./FileMutex";
 import type { CoworldLeagueEpisodeRow } from "./CoworldLeagueSiteWriter";
 
 const managedRunPattern = /^league-coworld-[A-Za-z0-9-]+$/;
@@ -246,6 +247,223 @@ export async function readCoworldLeagueRetentionPins(
     );
   }
   return parseCoworldLeagueRetentionPins(value, pinManifestPath);
+}
+
+/**
+ * Raw manifest read (preserves the `pins[]` array with its `reason` field,
+ * unlike {@link readCoworldLeagueRetentionPins}'s Set-based projection) for
+ * a read-modify-write cycle. ENOENT-tolerant — a pin manifest that has
+ * never been written yet is a normal cold start, not an error. Same
+ * behavior `replay-premiere-loop.ts`'s own (private, unexported)
+ * `readPinManifest` has always had; exported here so a second writer
+ * (`FeaturedMatchRetentionPin.ts`) can share the exact same manifest
+ * format/file without a parallel pinning system, per the product-overhaul
+ * Stage 3 item 7 retention-pins requirement. `replay-premiere-loop.ts`
+ * itself is deliberately left using its own local copy rather than
+ * refactored to call this — it is a live, continuously-running critical
+ * loop, and swapping its internals for a decoupling-only refactor carries
+ * real risk for zero behavior change.
+ */
+export async function readCoworldLeagueRetentionPinManifest(
+  pinManifestPath: string,
+): Promise<CoworldLeagueRetentionPinManifest> {
+  try {
+    const raw: unknown = JSON.parse(
+      await fs.readFile(pinManifestPath, "utf8"),
+    );
+    if (isJsonObject(raw) && raw.schemaVersion === 1 && Array.isArray(raw.pins)) {
+      // Full validation (safe ids, no cross-pin duplicates, exact keys) —
+      // matches writePinManifest's own "fail closed" discipline: a manifest
+      // this reader can't validate is a loud failure, not a silent partial
+      // read, since a malformed pin list breaks the mirror's own read on
+      // the next sync tick regardless of who wrote it.
+      parseCoworldLeagueRetentionPins(raw, pinManifestPath);
+      return raw as unknown as CoworldLeagueRetentionPinManifest;
+    }
+    throw new Error(`retention pin manifest is malformed: ${pinManifestPath}`);
+  } catch (error) {
+    if (
+      error !== null &&
+      typeof error === "object" &&
+      "code" in error &&
+      (error as NodeJS.ErrnoException).code === "ENOENT"
+    ) {
+      return { schemaVersion: 1, pins: [] };
+    }
+    throw error;
+  }
+}
+
+/** Atomic temp+rename write, validated before write — same discipline as `replay-premiere-loop.ts`'s own local `writePinManifest`. */
+export async function writeCoworldLeagueRetentionPinManifest(
+  pinManifestPath: string,
+  manifest: CoworldLeagueRetentionPinManifest,
+): Promise<void> {
+  parseCoworldLeagueRetentionPins(manifest, pinManifestPath);
+  await fs.mkdir(path.dirname(pinManifestPath), { recursive: true });
+  const temporaryPath = `${pinManifestPath}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await fs.writeFile(
+      temporaryPath,
+      `${JSON.stringify(manifest, null, 2)}\n`,
+      "utf8",
+    );
+    await fs.rename(temporaryPath, pinManifestPath);
+  } catch (error) {
+    await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+type PinOwnerOperation =
+  | { type: "add"; episodeRequestId: string; publicRunKey: string; ownerTag: string }
+  | { type: "remove"; episodeRequestId: string; ownerTag: string };
+
+/** Pure: applies ONE add/remove operation to an in-memory pins array. No I/O — the caller owns locking/read/write around a whole batch. */
+function applyPinOwnerOperation(
+  pins: readonly CoworldLeagueRetentionPin[],
+  operation: PinOwnerOperation,
+): { pins: CoworldLeagueRetentionPin[]; changed: boolean } {
+  const existingIndex = pins.findIndex(
+    (pin) => pin.episodeRequestId === operation.episodeRequestId,
+  );
+  if (operation.type === "add") {
+    if (existingIndex === -1) {
+      return {
+        pins: [
+          ...pins,
+          {
+            episodeRequestId: operation.episodeRequestId,
+            publicRunKey: operation.publicRunKey,
+            reason: operation.ownerTag,
+          },
+        ],
+        changed: true,
+      };
+    }
+    const existing = pins[existingIndex];
+    const owners = existing.reason.split(";").map((tag) => tag.trim());
+    if (owners.includes(operation.ownerTag)) {
+      return { pins: pins.slice(), changed: false };
+    }
+    const nextPins = pins.slice();
+    nextPins[existingIndex] = {
+      ...existing,
+      reason: [...owners, operation.ownerTag].join(";"),
+    };
+    return { pins: nextPins, changed: true };
+  }
+  // remove
+  if (existingIndex === -1) return { pins: pins.slice(), changed: false };
+  const existing = pins[existingIndex];
+  const owners = existing.reason
+    .split(";")
+    .map((tag) => tag.trim())
+    .filter((tag) => tag.length > 0);
+  if (!owners.includes(operation.ownerTag)) {
+    return { pins: pins.slice(), changed: false };
+  }
+  const remainingOwners = owners.filter((tag) => tag !== operation.ownerTag);
+  const nextPins = pins.slice();
+  if (remainingOwners.length === 0) {
+    nextPins.splice(existingIndex, 1);
+  } else {
+    nextPins[existingIndex] = { ...existing, reason: remainingOwners.join(";") };
+  }
+  return { pins: nextPins, changed: true };
+}
+
+/**
+ * Applies MULTIPLE owner-tag operations to the manifest in ONE locked
+ * read-modify-write — the fix for a real bug this session's own review
+ * caught: a reconcile pass touching several `FeaturedMatch` records used
+ * to fire one independent `addRetentionPinOwner` call per record via
+ * `Promise.all`, each doing its OWN read+write against the SAME manifest
+ * file — concurrent callers could each read the pre-mutation state and the
+ * LATER write would silently discard the EARLIER one's change (a lost
+ * update), even though each individual write was itself atomic. Locked via
+ * `withFileMutex` (`FileMutex.ts`) keyed on the manifest path — this also
+ * closes the same race for the single-operation functions below, and for
+ * the OTHER writer (`replay-premiere-loop.ts`'s `pinHoldArtifacts`/
+ * `unpinHoldArtifacts`) if it runs concurrently with either.
+ */
+export async function applyRetentionPinOwnerBatch(
+  pinManifestPath: string,
+  operations: readonly PinOwnerOperation[],
+): Promise<boolean> {
+  if (operations.length === 0) return false;
+  return withFileMutex(pinManifestPath, async () => {
+    const manifest = await readCoworldLeagueRetentionPinManifest(
+      pinManifestPath,
+    );
+    let pins = manifest.pins;
+    let changed = false;
+    for (const operation of operations) {
+      const applied = applyPinOwnerOperation(pins, operation);
+      pins = applied.pins;
+      changed = changed || applied.changed;
+    }
+    if (!changed) return false;
+    await writeCoworldLeagueRetentionPinManifest(pinManifestPath, {
+      schemaVersion: 1,
+      pins,
+    });
+    return true;
+  });
+}
+
+/**
+ * Two independent writers share one retention-pin manifest per artifact:
+ * `replay-premiere-loop.ts`'s own premiere-hold claim (alive only for an
+ * admission's own duration) and a Featured Match's claim
+ * (`FeaturedMatchRetentionPin.ts`, alive for as long as the operator keeps
+ * a record featured, independent of the hold's own release timing). The
+ * schema allows only ONE pin entry per `episodeRequestId` — never two
+ * competing entries — so multi-owner protection has to live inside that
+ * one entry's `reason` field, as an EXACT-MATCH set of owner tags
+ * (`;`-joined). These two functions are the ONLY correct way to mutate
+ * that set for a SINGLE operation: idempotent add/remove of exactly ONE
+ * tag, atomically (locked via `withFileMutex`), leaving every other
+ * owner's tag completely untouched. An artifact stays protected as long
+ * as ANY tag remains; the pin entry itself is removed only once the LAST
+ * tag is gone. A caller applying SEVERAL operations at once (e.g. a
+ * reconcile pass touching multiple records) MUST use
+ * `applyRetentionPinOwnerBatch` instead — calling these single-operation
+ * functions concurrently (e.g. via `Promise.all`) reopens the same lost-
+ * update race the lock exists to close, since each call's lock is held
+ * only for ITS OWN read-modify-write, not across multiple calls.
+ *
+ * An earlier version of this file had each owner run its own bespoke
+ * read-modify-write (a "return early if ANY pin already claims this key"
+ * short-circuit in the premiere-hold writer, a prefix-`startsWith` removal
+ * check that only recognized its own reason format, and a separate
+ * prepend-vs-append tag-string convention in the Featured Match writer).
+ * That produced two real, opposite-direction bugs depending on write
+ * order: (a) a Featured Match pin written FIRST made the premiere-hold
+ * writer's dedup check see "already pinned" and skip recording its own
+ * ownership entirely — so a later Featured Match cancellation could strip
+ * the ONLY pin while a live hold still depended on it; (b) a premiere-hold
+ * pin written first, once a Featured Match tag was combined into the same
+ * reason, could never again be recognized/removed by the hold's own
+ * release path — an orphaned tag that nothing would ever clean up. Both
+ * writers MUST go through these two functions, not their own logic.
+ */
+export async function addRetentionPinOwner(
+  pinManifestPath: string,
+  entry: { episodeRequestId: string; publicRunKey: string; ownerTag: string },
+): Promise<boolean> {
+  return applyRetentionPinOwnerBatch(pinManifestPath, [
+    { type: "add", ...entry },
+  ]);
+}
+
+export async function removeRetentionPinOwner(
+  pinManifestPath: string,
+  entry: { episodeRequestId: string; ownerTag: string },
+): Promise<boolean> {
+  return applyRetentionPinOwnerBatch(pinManifestPath, [
+    { type: "remove", ...entry },
+  ]);
 }
 
 function isJsonObject(value: unknown): value is JsonObject {

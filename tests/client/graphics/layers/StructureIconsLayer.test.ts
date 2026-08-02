@@ -1,6 +1,49 @@
+import {
+  AbstractRenderer,
+  GlShaderSystem,
+  GlUboSystem,
+  GlUniformGroupSystem,
+  GpuUboSystem,
+  ParticleBuffer,
+  UboSystem,
+} from "pixi.js";
 import { describe, expect, test } from "vitest";
 import { shouldPreserveGhostAfterBuild } from "../../../../src/client/graphics/layers/StructureIconsLayer";
 import { UnitType } from "../../../../src/core/game/Game";
+
+type RuntimePrototype = Record<string, (...args: never[]) => unknown>;
+
+function runtimePrototype(value: object): RuntimePrototype {
+  return value as RuntimePrototype;
+}
+
+describe("StructureIconsLayer Pixi CSP support", () => {
+  test("installs Pixi's static sync polyfills before renderer setup", () => {
+    const abstractRenderer = runtimePrototype(AbstractRenderer.prototype);
+    const ubo = runtimePrototype(UboSystem.prototype);
+    const glUniformGroup = runtimePrototype(GlUniformGroupSystem.prototype);
+    const glUbo = runtimePrototype(GlUboSystem.prototype);
+    const gpuUbo = runtimePrototype(GpuUboSystem.prototype);
+    const glShader = runtimePrototype(GlShaderSystem.prototype);
+    const particleBuffer = runtimePrototype(ParticleBuffer.prototype);
+
+    expect(abstractRenderer._unsafeEvalCheck.toString()).not.toContain(
+      "unsafeEvalSupported",
+    );
+    expect(ubo._systemCheck.toString()).not.toContain("unsafeEvalSupported");
+    expect(glUniformGroup._generateUniformsSync.name).toBe(
+      "generateUniformsSyncPolyfill",
+    );
+    expect(glUbo._generateUboSync.name).toBe("generateUboSyncPolyfillSTD40");
+    expect(gpuUbo._generateUboSync.name).toBe("generateUboSyncPolyfillWGSL");
+    expect(glShader._generateShaderSync.name).toBe(
+      "generateShaderSyncPolyfill",
+    );
+    expect(particleBuffer.generateParticleUpdate.name).toBe(
+      "generateParticleUpdatePolyfill",
+    );
+  });
+});
 
 /**
  * Tests for StructureIconsLayer edge cases mentioned in comments:

@@ -145,6 +145,23 @@ export class ExternalRelayAgentBrain implements AgentBrain {
     return headers;
   }
 
+  /**
+   * 2026-08-01 P0 fix (same anti-pattern as `LlmAgentBrain.ts`'s `fallback()`,
+   * `AgentLeagueMatch.ts`'s `decideWithSafetyFallback()`, and
+   * `ExternalHttpAgentBrain.ts`'s `fallback()` — see
+   * `docs/project-state/known-problems.md`): this used to fold the managed-
+   * relay failure text into `reason` — `"Managed relay fallback:
+   * ${failureReason}; ${fallback.reason}"` — the SAME field a genuine
+   * stated reason uses, with no distinction recorded at write time. The
+   * relay-managed agent produced no stated reason here — either the relay
+   * request failed or its response didn't parse — so `reason` is `null`
+   * (see `AgentDecision.reason`'s doc). The failure text (`failureReason`)
+   * already has a distinct home in `metadata.externalFailureReason`
+   * (unchanged); the substituted fallback brain's own genuine reason gets
+   * its own distinct field, `metadata.fallbackReason`, alongside the
+   * existing `fallbackUsed` degradation flag — matching the exact
+   * convention `LlmAgentBrain.ts`/`ExternalHttpAgentBrain.ts` use.
+   */
   private async fallback(
     input: AgentBrainInput,
     failureReason: string,
@@ -153,7 +170,7 @@ export class ExternalRelayAgentBrain implements AgentBrain {
     const fallback = await Promise.resolve(this.fallbackBrain.decide(input));
     return {
       ...fallback,
-      reason: `Managed relay fallback: ${failureReason}; ${fallback.reason}`,
+      reason: null,
       metadata: {
         ...fallback.metadata,
         brain: "external-relay",
@@ -162,6 +179,7 @@ export class ExternalRelayAgentBrain implements AgentBrain {
         parseSuccess: false,
         fallbackUsed: true,
         externalFailureReason: truncate(failureReason, 240),
+        fallbackReason: fallback.reason,
         rawProviderOutputPresent: raw.trim().length > 0,
         ...(raw.trim().length > 0
           ? { externalRawOutput: truncate(raw, 1_000) }

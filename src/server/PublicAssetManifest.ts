@@ -18,16 +18,13 @@ const HASHED_PUBLIC_ASSET_GLOBS = [
   "images/**/*",
   "lang/**/*",
   "maps/**/*",
-  "sounds/**/*",
   "sprites/**/*",
 ] as const;
 
 const ROOT_PUBLIC_FILES = new Set([
   "LICENSE",
   "ads.txt",
-  "privacy-policy.html",
   "robots.txt",
-  "terms-of-service.html",
   "version.txt",
 ]);
 

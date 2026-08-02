@@ -25,7 +25,8 @@ export interface AgentMatchStoryBeat {
   kind: string;
   actionID: string;
   headline: string;
-  reason: string;
+  /** See `AgentDecision.reason` — `null` for a fallback/failure decision with no stated reason. */
+  reason: string | null;
   accepted: boolean;
   fallbackUsed: boolean;
   auditStatus: AgentActionAuditStatus;
@@ -1252,7 +1253,7 @@ function isTransportWaitHold(record: AgentDecisionRecord): boolean {
   if (record.chosenActionKind !== "hold") {
     return false;
   }
-  const text = `${record.reason} ${record.observationSummary}`;
+  const text = `${record.reason ?? ""} ${record.observationSummary}`;
   return (
     /waiting for active transport|transport to land|active transport/i.test(text) ||
     (/attackable=0/.test(text) && /boats=[1-9]/.test(text))

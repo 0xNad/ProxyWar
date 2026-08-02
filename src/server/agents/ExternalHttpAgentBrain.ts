@@ -192,6 +192,22 @@ export class ExternalHttpAgentBrain implements AgentBrain {
     return headers;
   }
 
+  /**
+   * 2026-08-01 P0 fix (same anti-pattern as `LlmAgentBrain.ts`'s `fallback()`
+   * and `AgentLeagueMatch.ts`'s `decideWithSafetyFallback()` — see
+   * `docs/project-state/known-problems.md`): this used to fold the external-
+   * endpoint failure text into `reason` — `"External agent fallback:
+   * ${failureReason}; ${fallback.reason}"` — the SAME field a genuine
+   * stated reason uses, with no distinction recorded at write time. The
+   * external agent produced no stated reason here — either the HTTP request
+   * failed or its response didn't parse — so `reason` is `null` (see
+   * `AgentDecision.reason`'s doc). The failure text (`failureReason`)
+   * already has a distinct home in `metadata.externalFailureReason`
+   * (unchanged); the substituted fallback brain's own genuine reason (not
+   * an error — a real rule-brain rationale) gets its own distinct field,
+   * `metadata.fallbackReason`, alongside the existing `fallbackUsed`
+   * degradation flag, matching the same convention `LlmAgentBrain.ts` uses.
+   */
   private async fallback(
     input: AgentBrainInput,
     failureReason: string,
@@ -200,7 +216,7 @@ export class ExternalHttpAgentBrain implements AgentBrain {
     const fallback = await Promise.resolve(this.fallbackBrain.decide(input));
     return {
       ...fallback,
-      reason: `External agent fallback: ${failureReason}; ${fallback.reason}`,
+      reason: null,
       metadata: {
         ...fallback.metadata,
         brain: "external-http",
@@ -209,6 +225,7 @@ export class ExternalHttpAgentBrain implements AgentBrain {
         parseSuccess: false,
         fallbackUsed: true,
         externalFailureReason: truncate(failureReason, 240),
+        fallbackReason: fallback.reason,
         rawProviderOutputPresent: raw.trim().length > 0,
         ...(raw.trim().length > 0
           ? { externalRawOutput: truncate(raw, 1_000) }

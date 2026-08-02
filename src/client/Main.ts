@@ -19,6 +19,7 @@ import {
   UserSettings,
 } from "../core/game/UserSettings";
 import "./AccountModal";
+import { loadAiLeagueReplayDetails } from "./AiLeagueReplayArtifacts";
 import { mountAiLeagueReplayOverlay } from "./AiLeagueReplayOverlay";
 import { getUserMe } from "./Api";
 import { userAuth } from "./Auth";
@@ -51,12 +52,37 @@ import { initNavigation } from "./Navigation";
 import "./NewsModal";
 import "./PatternInput";
 import {
+  initialReplayClipRenderableThroughTurn,
+  replayClipPreviewTarget,
+} from "./ReplayClipControl";
+import {
+  finishReplayLoadingScreen,
   holdReplayLoadingScreenUntilFirstFrame,
+  JOIN_SYNC_TIMEOUT_MS,
   REPLAY_LOADING_SLOW_TIMEOUT_MS,
   runReplayStartup,
+  setReplayLoadingProgress,
   showReplayLoadingFailure,
   showReplayLoadingScreen,
 } from "./ReplayLoadingScreen";
+import {
+  mountArchivedReplayPremiereOverlay,
+  readReplayPremiereArchivePayload,
+  type ReplayPremiereArchivePayload,
+} from "./ReplayPremiereArchiveView";
+import type { ReplayPremiereOverlayHandle } from "./ReplayPremiereOverlay";
+import type { ReplayPremiereProgressiveReplayConfig } from "./ReplayPremierePlayback";
+import {
+  parseReplayPremiereRoute,
+  ReplayPremiereRuntimeController,
+} from "./ReplayPremiereRuntime";
+import {
+  openBettingPremierePage,
+  parseBettingPremiereRoute,
+} from "./prediction/wagering/page/BettingPremierePage";
+import "./platform/PlayerProfilePage";
+import "./platform/TraderProfilePage";
+import "./prediction/wagering/page/AccountPage";
 import "./SinglePlayerModal";
 import { StoreModal } from "./Store";
 import "./TerritoryPatternsModal";
@@ -98,6 +124,33 @@ import "./styles/core/variables.css";
 import "./styles/layout/container.css";
 import "./styles/layout/header.css";
 import "./styles/modal/chat.css";
+// Game-shell-only viewport lock (`body{overflow:hidden}`) — split out of the
+// shared `styles.css` so it never leaks into the public app's pages
+// (`PublicApp.ts` imports `styles.css` too, but NOT this file). See the
+// stylesheet's own header comment for why.
+import "./styles/game-shell-scroll-lock.css";
+
+/**
+ * `translateText()` (`Utils.ts`) requires a connected `<lang-selector>`
+ * element to resolve keys. In the running game shell that element lives
+ * inside `Footer.ts`, nested under the header/nav chrome — but the
+ * standalone data pages this module mounts via `document.body.
+ * replaceChildren(...)` (`openAccountPage`, `openPlayerProfilePage`,
+ * `openTraderProfilePage`) wipe that body-nested element out, silently
+ * breaking every `translateText()` call on those pages (same failure
+ * mode `PublicApp.ts` already solved for the public app entry point).
+ * Call this before any such replace so a `<lang-selector>` always
+ * survives in `<head>`, which body swaps never touch.
+ */
+function ensureHeadLangSelector(): void {
+  // Checked against `document.head` specifically, never `document`: a
+  // body-nested `<lang-selector>` from `Footer.ts` may still be present
+  // at this exact call site, an instant before the `replaceChildren`
+  // call right after this one destroys it. Only a head-nested element
+  // survives that, so only a head-nested element satisfies the guard.
+  if (document.head.querySelector("lang-selector")) return;
+  document.head.appendChild(document.createElement("lang-selector"));
+}
 
 function updateAccountNavButton(userMeResponse: UserMeResponse | false) {
   const button = document.getElementById("nav-account-button");
@@ -257,7 +310,13 @@ export interface JoinLobbyEvent {
   gameStartInfo?: GameStartInfo;
   // GameRecord exists when replaying an archived game.
   gameRecord?: GameRecord;
+  // A Premiere receives only released, hash-verified turns.
+  progressiveReplay?: ReplayPremiereProgressiveReplayConfig;
+  // Validated fresh-document Clip Preview target for a plain archived replay.
+  // LocalServer consumes this before replay pacing begins.
+  replayClipPreviewTarget?: number;
   aiLeagueRunID?: string;
+  premiereId?: string;
   source?:
     | "public"
     | "private"
@@ -265,7 +324,19 @@ export interface JoinLobbyEvent {
     | "matchmaking"
     | "singleplayer"
     | "ai-league-replay"
-    | "coworld-replay";
+    | "coworld-replay"
+    | "replay-premiere";
+  /**
+   * Set when the join originated from the dedicated `/bet/<id>` betting
+   * page rather than `/premiere/<id>` — both share `source: "replay-premiere"`
+   * and the same join-lobby/runtime machinery, so this is the only signal
+   * `handleJoinLobby`'s URL canonicalization has to pick the right path
+   * (see its `premierePath` branch) instead of always rewriting the URL
+   * bar to `/premiere/<id>`, which would silently strand the betting page
+   * on a route with no trade ticket/bankroll/positions after the join
+   * completes.
+   */
+  isBettingPremiere?: boolean;
   coworldReplayPath?: string;
   publicLobbyInfo?: GameInfo | PublicGameInfo;
 }
@@ -274,6 +345,10 @@ class Client {
   private lobbyHandle: JoinLobbyResult | null = null;
   private eventBus: EventBus = new EventBus();
   private replayLoadingCleanup: (() => void) | null = null;
+  private replayAttemptCleanup: (() => void) | null = null;
+  private replayPremiereRuntime: ReplayPremiereRuntimeController | null = null;
+  private replayPremiereArchiveOverlay: ReplayPremiereOverlayHandle | null =
+    null;
 
   private currentUrl: string | null = null;
 
@@ -318,10 +393,17 @@ class Client {
       console.warn("Game version element not found");
     } else {
       const trimmed = version.trim();
+      // version.txt ships as a placeholder ("x.xx.xx") that release tooling is
+      // meant to overwrite. Until it carries a real (digit-bearing) version,
+      // hide the subtitle rather than render the placeholder — in the pixel
+      // display font "vx.xx.xx" reads as garbled "VH.HH.HH".
+      const hasRealVersion = /\d/.test(trimmed);
       const displayVersion = trimmed.startsWith("v") ? trimmed : `v${trimmed}`;
       versionElements.forEach((el) => {
-        (el as HTMLElement).style.fontFamily = '"OpenFront", Inter, sans-serif';
-        el.textContent = displayVersion;
+        const host = el as HTMLElement;
+        host.style.fontFamily = '"OpenFront", Inter, sans-serif';
+        host.style.display = hasRealVersion ? "" : "none";
+        host.textContent = hasRealVersion ? displayVersion : "";
       });
     }
 
@@ -350,6 +432,7 @@ class Client {
 
     window.addEventListener("beforeunload", async () => {
       console.log("Browser is closing");
+      this.replayAttemptCleanup?.();
       if (this.lobbyHandle !== null) {
         this.lobbyHandle.stop(true);
         await crazyGamesSDK.gameplayStop();
@@ -357,7 +440,10 @@ class Client {
     });
 
     document.addEventListener("join-lobby", (event) => {
-      if (event.detail.gameRecord === undefined || !isAiLeagueReplayRoute()) {
+      const isReplayJoin =
+        event.detail.gameRecord !== undefined ||
+        event.detail.progressiveReplay !== undefined;
+      if (!isReplayJoin || !isAiLeagueReplayRoute()) {
         void this.handleJoinLobby(event);
         return;
       }
@@ -369,7 +455,9 @@ class Client {
             event.detail.aiLeagueRunID ?? event.detail.gameID,
             event.detail.source === "coworld-replay"
               ? "coworld-replay"
-              : "ai-league-replay",
+              : event.detail.source === "replay-premiere"
+                ? "replay-premiere"
+                : "ai-league-replay",
             "Replay failed to start",
             error,
           );
@@ -642,6 +730,40 @@ class Client {
   }
 
   private async handleUrl() {
+    // The account page is a standalone route with no lobby/game/replay
+    // concept behind it — mount it and return before any of the
+    // modal-definition waits or lobby-join logic below, none of which it
+    // needs. `replaceChildren` is safe here: every link the account page
+    // renders is a plain `<a href>` (real navigation, not client-side
+    // routing), so nothing downstream ever needs the DOM nodes this
+    // clears, and a real navigation away reloads the document anyway.
+    if (window.location.pathname === "/account") {
+      await this.openAccountPage();
+      return;
+    }
+    // The player profile page is likewise standalone — same reasoning as
+    // the account-page branch just above.
+    const playerProfileMatch = window.location.pathname.match(
+      /^\/player\/([^/]+)$/,
+    );
+    if (playerProfileMatch !== null) {
+      await this.openPlayerProfilePage(
+        decodeURIComponent(playerProfileMatch[1]),
+      );
+      return;
+    }
+    // The trader profile page is likewise standalone — same reasoning as
+    // the account-page branch above, but keyed by the platform's opaque
+    // accountId, never a display name (see `TraderProfilePage.ts`'s doc).
+    const traderProfileMatch = window.location.pathname.match(
+      /^\/trader\/([^/]+)$/,
+    );
+    if (traderProfileMatch !== null) {
+      await this.openTraderProfilePage(
+        decodeURIComponent(traderProfileMatch[1]),
+      );
+      return;
+    }
     // Wait for modal custom elements to be defined
     await Promise.all([
       customElements.whenDefined("join-lobby-modal"),
@@ -650,6 +772,23 @@ class Client {
 
     // Coworld surfaces (Observatory replays / browser player) go straight
     // into the match — never run landing-page hash/SDK logic for them.
+    const premiereId = parseReplayPremiereRoute(window.location.pathname);
+    if (premiereId !== null) {
+      const archived = readReplayPremiereArchivePayload();
+      if (archived !== null && archived.premiereId === premiereId) {
+        await this.openArchivedReplayPremiere(archived);
+      } else {
+        await this.openReplayPremiere(premiereId);
+      }
+      return;
+    }
+    const bettingPremiereId = parseBettingPremiereRoute(
+      window.location.pathname,
+    );
+    if (bettingPremiereId !== null) {
+      await this.openBettingPremiere(bettingPremiereId);
+      return;
+    }
     if (isCoworldPlayerRoute()) {
       await this.openCoworldPlayer();
       return;
@@ -819,6 +958,461 @@ class Client {
     }
   }
 
+  /**
+   * Mounts the standalone `/account` page. Deliberately NOT routed through
+   * any of `ReplayPremiereRuntimeController`/`openBettingPremiere`'s
+   * machinery — there is no replay, session, or WASM engine behind this
+   * route, only a data page over `/api/premieres/account`. The custom
+   * element is registered by the static `AccountPage` import above.
+   */
+  private async openAccountPage(): Promise<void> {
+    ensureHeadLangSelector();
+    document.body.replaceChildren(
+      document.createElement("premiere-account-page"),
+    );
+  }
+
+  /**
+   * Mounts the standalone `/player/:name` league profile page — the
+   * destination the public league standings link to. Same reasoning as
+   * `openAccountPage` just above: no lobby/game/replay concept behind
+   * it, only a data page over `/api/players/:name`. The custom element
+   * is registered by the static `PlayerProfilePage` import above.
+   */
+  private async openPlayerProfilePage(name: string): Promise<void> {
+    ensureHeadLangSelector();
+    const page = document.createElement("player-profile-page");
+    page.setAttribute("name", name);
+    document.body.replaceChildren(page);
+  }
+
+  /**
+   * Mounts the standalone `/trader/:accountId` betting profile page —
+   * the destination the points leaderboard links a genuinely LINKED row
+   * to. Same reasoning as `openPlayerProfilePage` just above, keyed by
+   * account id instead of a league player name. The custom element is
+   * registered by the static `TraderProfilePage` import above.
+   */
+  private async openTraderProfilePage(accountId: string): Promise<void> {
+    ensureHeadLangSelector();
+    const page = document.createElement("trader-profile-page");
+    page.setAttribute("account-id", accountId);
+    document.body.replaceChildren(page);
+  }
+
+  /**
+   * Renders an archived premiere's durable results-summary page: the polished
+   * results overlay from the persisted summary, plus a best-effort render of the
+   * ordinary league replay behind it. The overlay renders immediately and stands
+   * alone if the underlying replay has aged off the mirror.
+   */
+  private async openArchivedReplayPremiere(
+    payload: ReplayPremiereArchivePayload,
+  ): Promise<void> {
+    this.replayPremiereArchiveOverlay?.dispose();
+    this.replayPremiereArchiveOverlay =
+      mountArchivedReplayPremiereOverlay(payload);
+    finishReplayLoadingScreen();
+    if (payload.replayRunKey !== null) {
+      try {
+        await this.openAiLeagueReplay(payload.replayRunKey, {
+          source: "ai-league-replay",
+        });
+      } catch (error) {
+        console.warn("Archived premiere replay unavailable", error);
+        finishReplayLoadingScreen();
+      }
+      // The ordinary replay path mounts its own overlays; re-assert the durable
+      // results overlay so it floats on top of the rendered replay.
+      this.replayPremiereArchiveOverlay?.dispose();
+      this.replayPremiereArchiveOverlay =
+        mountArchivedReplayPremiereOverlay(payload);
+    }
+  }
+
+  private async openReplayPremiere(premiereId: string): Promise<void> {
+    this.replayAttemptCleanup?.();
+    this.replayLoadingCleanup?.();
+
+    // Premiere-specific veil hold. Unlike ordinary replays this must NOT lift
+    // on the first rendered frame: a live join first renders turn 0 and then
+    // free-runs to the entry position — the veil covers that entire sync so
+    // the viewer never sees the turn-0 map, the catch-up blur, or the
+    // teleport. It lifts per lifecycle state below.
+    showReplayLoadingScreen("replay_premiere.loading_premiere");
+    let veilFinished = false;
+    let veilSlowTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+      if (!veilFinished) {
+        showReplayLoadingScreen("ai_league_replay.loading_slow");
+      }
+    }, REPLAY_LOADING_SLOW_TIMEOUT_MS);
+    const clearVeilSlowTimer = () => {
+      if (veilSlowTimer !== null) {
+        clearTimeout(veilSlowTimer);
+        veilSlowTimer = null;
+      }
+    };
+    let joinSyncTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
+    const clearJoinSyncTimeout = () => {
+      if (joinSyncTimeoutTimer !== null) {
+        clearTimeout(joinSyncTimeoutTimer);
+        joinSyncTimeoutTimer = null;
+      }
+    };
+    const onVeilReplayError = () => {
+      if (veilFinished) return;
+      veilFinished = true;
+      clearVeilSlowTimer();
+      showReplayLoadingFailure();
+    };
+    document.addEventListener(
+      "ai-league-replay-load-error",
+      onVeilReplayError,
+      {
+        once: true,
+      },
+    );
+    const releaseVeilHold = () => {
+      clearVeilSlowTimer();
+      document.removeEventListener(
+        "ai-league-replay-load-error",
+        onVeilReplayError,
+      );
+    };
+    const finishVeil = () => {
+      if (veilFinished) return;
+      veilFinished = true;
+      clearJoinSyncTimeout();
+      releaseVeilHold();
+      setReplayLoadingProgress(null);
+      finishReplayLoadingScreen();
+      if (this.replayLoadingCleanup === releaseVeilHold) {
+        this.replayLoadingCleanup = null;
+      }
+    };
+    this.replayLoadingCleanup = releaseVeilHold;
+
+    let active = true;
+    let projectionMounted = false;
+    const runtime = new ReplayPremiereRuntimeController({
+      premiereId,
+      onProjectionReady: (projection) => {
+        if (!active || this.replayPremiereRuntime !== runtime) return;
+        projectionMounted = true;
+        if (
+          projection.state === "playing" ||
+          projection.state === "checkpoint"
+        ) {
+          // Live join: keep the veil up with join-sync messaging until the
+          // runtime reports the trail-buffered entry position is reached
+          // (onJoinSync "complete" below).
+          if (!veilFinished) {
+            clearVeilSlowTimer();
+            showReplayLoadingScreen("replay_premiere.joining_live");
+            // Independent of the (now-cleared) slow-load timer above: a
+            // join that never converges must still surface Retry/Back
+            // rather than hang indefinitely with nothing reachable. Left
+            // running (not `veilFinished`-gated) so a join that genuinely
+            // finishes late still lifts the veil normally afterward.
+            clearJoinSyncTimeout();
+            joinSyncTimeoutTimer = setTimeout(() => {
+              joinSyncTimeoutTimer = null;
+              if (!veilFinished) showReplayLoadingFailure();
+            }, JOIN_SYNC_TIMEOUT_MS);
+          }
+          return;
+        }
+        if (
+          projection.state === "revealed" ||
+          projection.state === "archived"
+        ) {
+          // Post-reveal pages intentionally replay from the start; lift on
+          // the first rendered frame like an ordinary replay.
+          const onFirstFrame = () => finishVeil();
+          document.addEventListener("ai-league-replay-frame", onFirstFrame, {
+            once: true,
+          });
+          return;
+        }
+        // Scheduled countdown and terminal failure/cancel pages have no game
+        // playback to wait for.
+        finishVeil();
+      },
+      onJoinSync: (update) => {
+        if (!active || this.replayPremiereRuntime !== runtime) return;
+        if (update.state === "complete") {
+          finishVeil();
+          return;
+        }
+        if (veilFinished) return;
+        setReplayLoadingProgress(
+          update.currentTurn === null
+            ? translateText("replay_premiere.join_sync_target", {
+                target: update.targetTurn,
+              })
+            : translateText("replay_premiere.join_sync_progress", {
+                current: update.currentTurn,
+                target: update.targetTurn,
+                percent: Math.min(
+                  100,
+                  Math.max(
+                    0,
+                    Math.floor((update.currentTurn / update.targetTurn) * 100),
+                  ),
+                ),
+              }),
+        );
+      },
+      onJoinReady: (request) => {
+        if (
+          !active ||
+          this.replayPremiereRuntime !== runtime ||
+          request.premiereId !== premiereId
+        ) {
+          return;
+        }
+        document.dispatchEvent(
+          new CustomEvent("join-lobby", {
+            detail: {
+              gameID: request.gameID,
+              gameStartInfo: request.gameStartInfo,
+              progressiveReplay: request.progressiveReplay,
+              source: "replay-premiere",
+              premiereId,
+            } satisfies JoinLobbyEvent,
+            bubbles: true,
+            composed: true,
+          }),
+        );
+      },
+      onRevealSeek: (turn) => {
+        if (!active || this.replayPremiereRuntime !== runtime) return;
+        this.eventBus.emit(new ReplayJumpToTurnEvent(turn));
+      },
+    });
+    const cleanupAttempt = () => {
+      if (!active) return;
+      active = false;
+      clearJoinSyncTimeout();
+      runtime.dispose();
+      if (this.replayPremiereRuntime === runtime) {
+        this.replayPremiereRuntime = null;
+      }
+      if (this.replayAttemptCleanup === cleanupAttempt) {
+        this.replayAttemptCleanup = null;
+      }
+    };
+    this.replayPremiereRuntime = runtime;
+    this.replayAttemptCleanup = cleanupAttempt;
+
+    try {
+      await runtime.start();
+    } catch (error) {
+      if (!active || this.replayPremiereRuntime !== runtime) return;
+      if (projectionMounted) {
+        console.error("Replay Premiere runtime stopped", error);
+        return;
+      }
+      this.failReplayLoading(
+        premiereId,
+        "replay-premiere",
+        "Replay Premiere failed to start",
+        error,
+      );
+    }
+  }
+
+  /**
+   * The dedicated betting page's own bootstrap — mirrors
+   * `openReplayPremiere` exactly for the veil/join dance (same runtime
+   * class, same game engine mounting), delegating the trading-specific
+   * wiring (continuous market poll, bankroll, buy/sell) to
+   * `openBettingPremierePage`. Deliberately reuses `replayPremiereRuntime`/
+   * `replayAttemptCleanup`/`replayLoadingCleanup` rather than dedicated
+   * fields and the `"replay-premiere"` join source rather than a new one:
+   * the two surfaces are mutually exclusive routes over the SAME runtime
+   * shape, so every existing interruption/cleanup path
+   * (`handleJoinLobby`'s guard, `beforeunload`, `failReplayLoading`)
+   * already does the right thing without new branches.
+   */
+  private async openBettingPremiere(premiereId: string): Promise<void> {
+    this.replayAttemptCleanup?.();
+    this.replayLoadingCleanup?.();
+
+    showReplayLoadingScreen("replay_premiere.loading_premiere");
+    let veilFinished = false;
+    let veilSlowTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+      if (!veilFinished) {
+        showReplayLoadingScreen("ai_league_replay.loading_slow");
+      }
+    }, REPLAY_LOADING_SLOW_TIMEOUT_MS);
+    const clearVeilSlowTimer = () => {
+      if (veilSlowTimer !== null) {
+        clearTimeout(veilSlowTimer);
+        veilSlowTimer = null;
+      }
+    };
+    let joinSyncTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
+    const clearJoinSyncTimeout = () => {
+      if (joinSyncTimeoutTimer !== null) {
+        clearTimeout(joinSyncTimeoutTimer);
+        joinSyncTimeoutTimer = null;
+      }
+    };
+    const onVeilReplayError = () => {
+      if (veilFinished) return;
+      veilFinished = true;
+      clearVeilSlowTimer();
+      showReplayLoadingFailure();
+    };
+    document.addEventListener(
+      "ai-league-replay-load-error",
+      onVeilReplayError,
+      {
+        once: true,
+      },
+    );
+    const releaseVeilHold = () => {
+      clearVeilSlowTimer();
+      document.removeEventListener(
+        "ai-league-replay-load-error",
+        onVeilReplayError,
+      );
+    };
+    const finishVeil = () => {
+      if (veilFinished) return;
+      veilFinished = true;
+      clearJoinSyncTimeout();
+      releaseVeilHold();
+      setReplayLoadingProgress(null);
+      finishReplayLoadingScreen();
+      if (this.replayLoadingCleanup === releaseVeilHold) {
+        this.replayLoadingCleanup = null;
+      }
+    };
+    this.replayLoadingCleanup = releaseVeilHold;
+
+    let active = true;
+    let projectionMounted = false;
+    const handle = openBettingPremierePage(premiereId, {
+      onProjectionReady: (projection) => {
+        if (!active || this.replayPremiereRuntime !== handle.runtime) return;
+        projectionMounted = true;
+        if (
+          projection.state === "playing" ||
+          projection.state === "checkpoint"
+        ) {
+          if (!veilFinished) {
+            clearVeilSlowTimer();
+            showReplayLoadingScreen("replay_premiere.joining_live");
+            // See openReplayPremiere's identical wiring: independent of
+            // the (now-cleared) slow-load timer, and left running so a
+            // join that genuinely finishes late still lifts normally.
+            clearJoinSyncTimeout();
+            joinSyncTimeoutTimer = setTimeout(() => {
+              joinSyncTimeoutTimer = null;
+              if (!veilFinished) showReplayLoadingFailure();
+            }, JOIN_SYNC_TIMEOUT_MS);
+          }
+          return;
+        }
+        if (
+          projection.state === "revealed" ||
+          projection.state === "archived"
+        ) {
+          const onFirstFrame = () => finishVeil();
+          document.addEventListener("ai-league-replay-frame", onFirstFrame, {
+            once: true,
+          });
+          return;
+        }
+        finishVeil();
+      },
+      onJoinSync: (update) => {
+        if (!active || this.replayPremiereRuntime !== handle.runtime) return;
+        if (update.state === "complete") {
+          finishVeil();
+          return;
+        }
+        if (veilFinished) return;
+        setReplayLoadingProgress(
+          update.currentTurn === null
+            ? translateText("replay_premiere.join_sync_target", {
+                target: update.targetTurn,
+              })
+            : translateText("replay_premiere.join_sync_progress", {
+                current: update.currentTurn,
+                target: update.targetTurn,
+                percent: Math.min(
+                  100,
+                  Math.max(
+                    0,
+                    Math.floor((update.currentTurn / update.targetTurn) * 100),
+                  ),
+                ),
+              }),
+        );
+      },
+      onJoinReady: (request) => {
+        if (
+          !active ||
+          this.replayPremiereRuntime !== handle.runtime ||
+          request.premiereId !== premiereId
+        ) {
+          return;
+        }
+        document.dispatchEvent(
+          new CustomEvent("join-lobby", {
+            detail: {
+              gameID: request.gameID,
+              gameStartInfo: request.gameStartInfo,
+              progressiveReplay: request.progressiveReplay,
+              source: "replay-premiere",
+              premiereId,
+              isBettingPremiere: true,
+            } satisfies JoinLobbyEvent,
+            bubbles: true,
+            composed: true,
+          }),
+        );
+      },
+      onRevealSeek: (turn) => {
+        if (!active || this.replayPremiereRuntime !== handle.runtime) return;
+        this.eventBus.emit(new ReplayJumpToTurnEvent(turn));
+      },
+    });
+    const cleanupAttempt = () => {
+      if (!active) return;
+      active = false;
+      clearJoinSyncTimeout();
+      handle.dispose();
+      if (this.replayPremiereRuntime === handle.runtime) {
+        this.replayPremiereRuntime = null;
+      }
+      if (this.replayAttemptCleanup === cleanupAttempt) {
+        this.replayAttemptCleanup = null;
+      }
+    };
+    this.replayPremiereRuntime = handle.runtime;
+    this.replayAttemptCleanup = cleanupAttempt;
+
+    try {
+      await handle.runtime.start();
+    } catch (error) {
+      if (!active || this.replayPremiereRuntime !== handle.runtime) return;
+      if (projectionMounted) {
+        console.error("Betting premiere runtime stopped", error);
+        return;
+      }
+      this.failReplayLoading(
+        premiereId,
+        "replay-premiere",
+        "Betting premiere failed to start",
+        error,
+      );
+    }
+  }
+
   private async openAiLeagueReplay(
     runID: string,
     options: {
@@ -830,53 +1424,59 @@ class Client {
       artifactBasePath?: string;
     } = {},
   ) {
+    this.replayAttemptCleanup?.();
     this.replayLoadingCleanup?.();
-    this.replayLoadingCleanup = holdReplayLoadingScreenUntilFirstFrame();
+    this.replayLoadingCleanup = holdReplayLoadingScreenUntilFirstFrame(
+      undefined,
+      undefined,
+      runID,
+    );
 
     const artifactBasePath =
       options.artifactBasePath ??
       `/ai-league-runs/${encodeURIComponent(runID)}`;
-    const [
-      recordResult,
-      decisionsResult,
-      summaryResult,
-      spectatorTelemetryResult,
-    ] = await Promise.allSettled([
-      fetch(`${artifactBasePath}/game-record.json`),
-      fetch(`${artifactBasePath}/decisions.jsonl`),
-      fetch(`${artifactBasePath}/match-summary.json`),
-      fetch(`${artifactBasePath}/spectator-telemetry.json`),
-    ]);
+    const attemptController = new AbortController();
+    const attemptCleanups: Array<() => void> = [];
+    const cleanupAttempt = () => {
+      attemptController.abort();
+      for (const cleanup of attemptCleanups.splice(0)) cleanup();
+      if (this.replayAttemptCleanup === cleanupAttempt) {
+        this.replayAttemptCleanup = null;
+      }
+    };
+    this.replayAttemptCleanup = cleanupAttempt;
+    const recordTimeout = setTimeout(
+      () => attemptController.abort("Replay record request timed out"),
+      REPLAY_LOADING_SLOW_TIMEOUT_MS,
+    );
+    attemptCleanups.push(() => clearTimeout(recordTimeout));
 
-    if (recordResult.status === "rejected") {
+    let recordResponse: Response;
+    try {
+      recordResponse = await fetch(`${artifactBasePath}/game-record.json`, {
+        signal: attemptController.signal,
+      });
+    } catch (error) {
+      if (this.replayAttemptCleanup !== cleanupAttempt) return;
       this.failReplayLoading(
         runID,
         options.source,
         "Replay record request failed",
-        recordResult.reason,
+        error,
       );
       return;
     }
-
-    const recordResponse = recordResult.value;
-    const decisionsResponse =
-      decisionsResult.status === "fulfilled" ? decisionsResult.value : null;
-    const summaryResponse =
-      summaryResult.status === "fulfilled" ? summaryResult.value : null;
-    const spectatorTelemetryResponse =
-      spectatorTelemetryResult.status === "fulfilled"
-        ? spectatorTelemetryResult.value
-        : null;
-
     if (!recordResponse.ok) {
       try {
         const spectatorResponse = await fetch(
           `${artifactBasePath}/spectator.html`,
           {
             method: "HEAD",
+            signal: attemptController.signal,
           },
         );
         if (spectatorResponse.ok) {
+          cleanupAttempt();
           window.location.replace(`${artifactBasePath}/spectator.html`);
           return;
         }
@@ -915,49 +1515,24 @@ class Client {
       );
       return;
     }
+    clearTimeout(recordTimeout);
 
-    let decisionsText = "";
-    if (decisionsResponse?.ok) {
-      try {
-        decisionsText = await decisionsResponse.text();
-      } catch (error) {
-        console.warn("Failed to read AI league decisions", error);
-      }
-    }
-    const decisions = decisionsText
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .flatMap((line) => {
-        try {
-          return [JSON.parse(line)];
-        } catch (error) {
-          console.warn("Ignoring invalid AI league decision", error);
-          return [];
-        }
-      });
-    const summary = summaryResponse?.ok
-      ? await summaryResponse.json().catch((error) => {
-          console.warn("Invalid AI league match summary", error);
-          return null;
-        })
-      : null;
-    let spectatorTelemetry: unknown = null;
-    if (spectatorTelemetryResponse?.ok) {
-      try {
-        spectatorTelemetry = await spectatorTelemetryResponse.json();
-      } catch (error) {
-        console.warn("Invalid AI league spectator telemetry", error);
-      }
-    }
-
+    let replayOverlay: ReturnType<typeof mountAiLeagueReplayOverlay>;
     try {
-      mountAiLeagueReplayOverlay({
+      replayOverlay = mountAiLeagueReplayOverlay({
         runID,
-        decisions,
-        summary,
-        spectatorTelemetry,
+        decisions: [],
+        summary: null,
+        spectatorTelemetry: null,
         artifactBasePath,
+        replayMaxTurn: initialReplayClipRenderableThroughTurn(parsed.data.info),
+        detailsLoading: true,
+        artifactAvailability: {
+          visualReport: false,
+          spectatorTelemetry: false,
+          decisions: false,
+          summary: false,
+        },
         onReplaySpeedChange: (speed) => {
           this.eventBus.emit(new ReplaySpeedChangeEvent(speed));
         },
@@ -971,22 +1546,35 @@ class Client {
       );
       return;
     }
-    document.addEventListener("ai-league-replay-jump-turn", (event) => {
+    attemptCleanups.push(() => replayOverlay.dispose());
+
+    const onReplayJump = (event: Event) => {
       const turnNumber = (event as CustomEvent<{ turnNumber?: number }>).detail
         ?.turnNumber;
       if (typeof turnNumber === "number" && Number.isFinite(turnNumber)) {
         this.eventBus.emit(new ReplayJumpToTurnEvent(turnNumber));
       }
-    });
-    document.addEventListener("ai-league-replay-pause", (event) => {
+    };
+    const onReplayPause = (event: Event) => {
       const paused = (event as CustomEvent<{ paused?: boolean }>).detail
         ?.paused;
       this.eventBus.emit(new PauseGameIntentEvent(paused !== false));
+    };
+    document.addEventListener("ai-league-replay-jump-turn", onReplayJump);
+    document.addEventListener("ai-league-replay-pause", onReplayPause);
+    attemptCleanups.push(() => {
+      document.removeEventListener("ai-league-replay-jump-turn", onReplayJump);
+      document.removeEventListener("ai-league-replay-pause", onReplayPause);
     });
-    const requestedTurn = Number(
-      new URLSearchParams(window.location.search).get("turn"),
-    );
-    if (Number.isFinite(requestedTurn) && requestedTurn > 0) {
+
+    const replaySearchParams = new URLSearchParams(window.location.search);
+    const requestedTurn = Number(replaySearchParams.get("turn"));
+    const previewTarget = replayClipPreviewTarget(window.location.search);
+    if (
+      previewTarget === null &&
+      Number.isFinite(requestedTurn) &&
+      requestedTurn > 0
+    ) {
       const jumpAfterFirstFrame = () => {
         this.eventBus.emit(new ReplayJumpToTurnEvent(requestedTurn));
         document.removeEventListener(
@@ -995,7 +1583,81 @@ class Client {
         );
       };
       document.addEventListener("ai-league-replay-frame", jumpAfterFirstFrame);
+      attemptCleanups.push(() =>
+        document.removeEventListener(
+          "ai-league-replay-frame",
+          jumpAfterFirstFrame,
+        ),
+      );
     }
+
+    const hydrateAfterFirstFrame = () => {
+      document.removeEventListener(
+        "ai-league-replay-frame",
+        hydrateAfterFirstFrame,
+      );
+      if (this.replayAttemptCleanup !== cleanupAttempt) return;
+      const detailsController = new AbortController();
+      const abortDetails = () => detailsController.abort();
+      attemptController.signal.addEventListener("abort", abortDetails, {
+        once: true,
+      });
+      const detailsTimeout = setTimeout(
+        () => detailsController.abort("Replay details request timed out"),
+        15_000,
+      );
+      void loadAiLeagueReplayDetails(artifactBasePath, {
+        signal: detailsController.signal,
+        onPartial: (details) => {
+          if (this.replayAttemptCleanup !== cleanupAttempt) {
+            return;
+          }
+          replayOverlay.hydrate({
+            decisions: details.recentDecisions,
+            summary: details.summary,
+            spectatorTelemetry: details.spectatorTelemetry,
+            directorCutPlan: details.directorCutPlan,
+            matchStateSeries: details.matchStateSeries,
+            detailsLoading: false,
+            artifactAvailability: details.artifactAvailability,
+          });
+        },
+      })
+        .then((details) => {
+          if (this.replayAttemptCleanup !== cleanupAttempt) {
+            return;
+          }
+          replayOverlay.hydrate({
+            decisions: details.recentDecisions,
+            summary: details.summary,
+            spectatorTelemetry: details.spectatorTelemetry,
+            directorCutPlan: details.directorCutPlan,
+            matchStateSeries: details.matchStateSeries,
+            detailsLoading: false,
+            artifactAvailability: details.artifactAvailability,
+          });
+        })
+        .catch((error) => {
+          if (!detailsController.signal.aborted) {
+            console.warn("Replay details unavailable", error);
+          }
+        })
+        .finally(() => {
+          clearTimeout(detailsTimeout);
+          attemptController.signal.removeEventListener("abort", abortDetails);
+        });
+    };
+    document.addEventListener(
+      "ai-league-replay-frame",
+      hydrateAfterFirstFrame,
+      { once: true },
+    );
+    attemptCleanups.push(() =>
+      document.removeEventListener(
+        "ai-league-replay-frame",
+        hydrateAfterFirstFrame,
+      ),
+    );
 
     document.dispatchEvent(
       new CustomEvent("join-lobby", {
@@ -1005,6 +1667,7 @@ class Client {
           source: options.source ?? "ai-league-replay",
           aiLeagueRunID: runID,
           coworldReplayPath: options.coworldReplayPath,
+          replayClipPreviewTarget: previewTarget ?? undefined,
         } satisfies JoinLobbyEvent,
         bubbles: true,
         composed: true,
@@ -1049,17 +1712,19 @@ class Client {
 
   private failReplayLoading(
     runID: string,
-    source: "ai-league-replay" | "coworld-replay" | undefined,
+    _source:
+      | "ai-league-replay"
+      | "coworld-replay"
+      | "replay-premiere"
+      | undefined,
     message: string,
     error?: unknown,
   ): void {
     this.replayLoadingCleanup?.();
     this.replayLoadingCleanup = null;
+    this.replayAttemptCleanup?.();
     showReplayLoadingFailure();
     console.error(`${message} for run ${runID}`, error);
-    if (source !== "coworld-replay") {
-      window.location.replace("/league");
-    }
   }
 
   private async openCoworldPlayer() {
@@ -1069,9 +1734,16 @@ class Client {
 
   private async handleJoinLobby(event: CustomEvent<JoinLobbyEvent>) {
     const lobby = event.detail;
+    if (
+      lobby.source !== "replay-premiere" &&
+      this.replayPremiereRuntime !== null
+    ) {
+      this.replayAttemptCleanup?.();
+    }
     this.mostRecentJoinEvent = event.timeStamp;
     if (
       lobby.gameRecord === undefined &&
+      lobby.progressiveReplay === undefined &&
       this.usernameInput &&
       !this.usernameInput.validateOrShowError()
     ) {
@@ -1089,11 +1761,23 @@ class Client {
     }
     const config = await getRuntimeClientServerConfig();
     // Only update URL immediately for private lobbies, not public ones
-    if (lobby.source !== "public" && lobby.gameRecord === undefined) {
+    if (
+      lobby.source !== "public" &&
+      lobby.gameRecord === undefined &&
+      lobby.progressiveReplay === undefined
+    ) {
       this.updateJoinUrlForShare(lobby.gameID, config);
     }
     const auth = await userAuth();
     const playerRole = auth !== false ? (auth.claims.role ?? null) : null;
+    const clipPreviewTarget =
+      lobby.gameRecord !== undefined &&
+      lobby.progressiveReplay === undefined &&
+      lobby.aiLeagueRunID !== undefined &&
+      Number.isSafeInteger(lobby.replayClipPreviewTarget) &&
+      (lobby.replayClipPreviewTarget ?? 0) > 0
+        ? lobby.replayClipPreviewTarget!
+        : null;
     const newLobbyHandle = joinLobby(this.eventBus, {
       gameID: lobby.gameID,
       serverConfig: config,
@@ -1104,6 +1788,8 @@ class Client {
       playerRole,
       gameStartInfo: lobby.gameStartInfo ?? lobby.gameRecord?.info,
       gameRecord: lobby.gameRecord,
+      progressiveReplay: lobby.progressiveReplay,
+      replayClipPreviewTarget: clipPreviewTarget ?? undefined,
     });
 
     if (this.mostRecentJoinEvent !== event.timeStamp) {
@@ -1184,6 +1870,7 @@ class Client {
       if (
         lobby.source !== "ai-league-replay" &&
         lobby.source !== "coworld-replay" &&
+        lobby.source !== "replay-premiere" &&
         window.PageOS?.session?.newPageView
       ) {
         window.PageOS.session.newPageView();
@@ -1201,7 +1888,24 @@ class Client {
         history.replaceState(null, "", window.location.origin + "#refresh");
       }
       const lobbyIdHidden = !this.userSettings.lobbyIdVisibility();
-      if (lobby.gameRecord !== undefined && lobby.aiLeagueRunID) {
+      if (lobby.progressiveReplay !== undefined && lobby.premiereId) {
+        // Betting joins share this exact same branch (same `source`, same
+        // `progressiveReplay`/`premiereId` shape) — without checking
+        // `isBettingPremiere` this always canonicalized to `/premiere/<id>`,
+        // silently stranding a `/bet/<id>` viewer on the wrong route (no
+        // trade ticket/bankroll/positions there) the instant the join
+        // completed, and breaking reload/second-tab for the betting page.
+        const premierePath = lobby.isBettingPremiere === true
+          ? `/bet/${encodeURIComponent(lobby.premiereId)}`
+          : `/premiere/${encodeURIComponent(lobby.premiereId)}`;
+        if (window.location.pathname !== premierePath) {
+          history.replaceState(
+            null,
+            "",
+            `${premierePath}${window.location.search}`,
+          );
+        }
+      } else if (lobby.gameRecord !== undefined && lobby.aiLeagueRunID) {
         if (!preserveCoworldReplayUrl) {
           history.pushState(
             null,
@@ -1216,7 +1920,7 @@ class Client {
         };
         if (runtimeWindow.__openFrontPromoCaptureLock === true) {
           this.eventBus.emit(new PauseGameIntentEvent(true));
-        } else {
+        } else if (clipPreviewTarget === null) {
           this.eventBus.emit(
             new ReplaySpeedChangeEvent(ReplaySpeedMultiplier.fastest),
           );
@@ -1252,6 +1956,8 @@ class Client {
   }
 
   private async handleLeaveLobby(event?: CustomEvent) {
+    this.replayAttemptCleanup?.();
+    this.replayAttemptCleanup = null;
     if (this.lobbyHandle === null) {
       return;
     }
@@ -1320,6 +2026,7 @@ class Client {
     const config = await getRuntimeClientServerConfig();
     if (
       lobby.gameRecord !== undefined ||
+      lobby.progressiveReplay !== undefined ||
       config.env() === GameEnv.Dev ||
       lobby.gameStartInfo?.config.gameType === GameType.Singleplayer
     ) {

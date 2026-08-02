@@ -247,9 +247,13 @@ export function decisionToResponse(
     droppedBatchActions > 0
       ? ` [wire carries primary only; ${droppedBatchActions} batched follow-up(s) not executed]`
       : "";
-  // Truncate the base reason, never the truth note.
+  // Truncate the base reason, never the truth note. `decision.reason` is
+  // `null` on a fallback/failure decision (no stated reason — see
+  // `AgentDecision.reason`'s doc in src/server/agents/AgentTypes.ts); the
+  // wire carries an honest empty base rather than fabricating text, while
+  // `llmPlannerDegraded`/`fallbackUsed` below still flag the degradation.
   const wireReason =
-    decision.reason.slice(
+    (decision.reason ?? "").slice(
       0,
       Math.max(0, RESPONSE_REASON_MAX_LENGTH - wireNote.length),
     ) + wireNote;

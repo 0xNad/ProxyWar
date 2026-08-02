@@ -547,6 +547,9 @@ describe("ExternalRelayAgentBrain", () => {
       "proxywar-agent-v1",
     );
     expect(decision.actionID).toBe("expand:terra-nullius:10");
+    // A genuine (non-fallback) decision keeps its real stated reason —
+    // unaffected by the fallback-path P0 fix below.
+    expect(decision.reason).toBe("Safe expansion through relay.");
     expect(decision.metadata).toMatchObject({
       brain: "external-relay",
       parseSuccess: true,
@@ -555,7 +558,7 @@ describe("ExternalRelayAgentBrain", () => {
     });
   });
 
-  it("falls back visibly when the relay returns invalid decision text", async () => {
+  it("falls back visibly when the relay returns invalid decision text, recording no stated reason", async () => {
     const brain = new ExternalRelayAgentBrain({
       relayBaseUrl: "https://beta.proxywar.xyz",
       sessionID: "relay_1234567890abcdef12345678",
@@ -578,11 +581,24 @@ describe("ExternalRelayAgentBrain", () => {
     const decision = await brain.decide({ observation, legalActions });
 
     expect(decision.actionID).toBe("expand:terra-nullius:10");
-    expect(decision.reason).toContain("Managed relay fallback");
+    // P0 fix: a fallback decision has no stated reason — the relay-managed
+    // agent never produced a usable one, so `reason` is null rather than a
+    // synthesized "Managed relay fallback (...); ..." string.
+    expect(decision.reason).toBeNull();
     expect(decision.metadata).toMatchObject({
       brain: "external-relay",
       parseSuccess: false,
       fallbackUsed: true,
     });
+    // The distinct fields carry what `reason` used to conflate: the relay
+    // failure text (unchanged field), and the substituted rule brain's own
+    // genuine reason (new field).
+    expect(decision.metadata?.externalFailureReason).toContain(
+      "unknown selectedLegalActionId",
+    );
+    expect(typeof decision.metadata?.fallbackReason).toBe("string");
+    expect(decision.metadata?.fallbackReason).not.toContain(
+      "Managed relay fallback",
+    );
   });
 });

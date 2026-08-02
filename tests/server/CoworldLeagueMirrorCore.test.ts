@@ -1,19 +1,37 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { describe, expect, test } from "vitest";
+import { AGENT_MATCH_RECAP_SCHEMA_VERSION } from "../../src/server/agents/AgentMatchRecap";
 import {
   activeChampionPolicyLabelsByPlayerId,
+  buildCoworldReplayUiArtifact,
   buildEpisodeRow,
   buildRoundRows,
   buildStandingRows,
+  deriveSpectatorTelemetryFromDecisionsLog,
   mapNameFromVariant,
   mergeEpisodeRows,
   parseCompletedEpisodeMetaList,
+  parseDirectorCutPlanSummary,
   parseHostedReplayPayload,
   parseLeagueSummary,
+  parseCuratedDramaScore,
+  parseMatchNarrativeSummary,
+  parseMirroredSpectatorTelemetry,
   pickCompetitionDivision,
+  premiereHrefForEpisode,
+  resolveLatestRevealedPremiere,
+  resolveMirroredDirectorCutPlan,
+  resolveMirroredMatchEvidence,
+  revealedPremiereIdsFromArchiveIndex,
   roundNumberByRoundId,
   scoreLabelFromStandings,
+  selectServingLatestPremiere,
   shortEpisodeId,
+  summarizePremiereArchiveIndex,
 } from "../../src/server/agents/CoworldLeagueMirrorCore";
+import type { LatestPremierePointer } from "../../src/server/agents/CoworldLeaguePremiereSuppression";
+import { derivePremiereId } from "../../src/server/replay-premiere/ReplayPremiereLoopCore";
 
 const leagueFixture = {
   id: "league_test",
@@ -248,6 +266,20 @@ describe("CoworldLeagueMirrorCore", () => {
     expect(rows.filter((row) => row.isHouse)).toHaveLength(1);
   });
 
+  test("buildStandingRows reports an absent rating policy as null, not jargon", () => {
+    // A missing policy_label used to become the literal "unknown policy",
+    // which shipped that internal string onto the public standings and made
+    // the site writer's own "Not yet rated" fallback unreachable.
+    const rows = buildStandingRows(
+      [{ rank: 1, player_name: "newcomer", player_id: "p-new" }],
+      [],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].ratingPolicyLabel).toBeNull();
+    expect(rows[0].policyLabel).toBeNull();
+    expect(JSON.stringify(rows)).not.toContain("unknown policy");
+  });
+
   test("keeps publishing rating provenance when champion memberships are unavailable", () => {
     const rows = buildStandingRows(standingsFixture);
     const ratingRow = rows.find((row) => row.playerName === "Auri");
@@ -330,6 +362,73 @@ describe("CoworldLeagueMirrorCore", () => {
       "decisions.jsonl",
     ]);
     expect(replay?.spectatorReplay).not.toBeNull();
+  });
+
+  test("buildCoworldReplayUiArtifact keeps bounded recent decisions and artifact truth", () => {
+    const decisions = Array.from({ length: 65 }, (_, index) =>
+      JSON.stringify({
+        sequence: index + 1,
+        turnNumber: (index + 1) * 100,
+        username: `Agent ${index % 3}`,
+        profile: "opportunistic",
+        brainType: "external-http",
+        selectedActionKind: index % 2 === 0 ? "attack" : "hold",
+        selectedLegalActionId: `action:${index + 1}`,
+        selectedActionMetadata: {
+          targetName: "Rival",
+          expansion: index % 2 === 0,
+          ignoredLargeField: "x".repeat(5_000),
+        },
+        reason: `reason ${index + 1}`,
+        decisionLatencyMs: 10,
+        fallbackUsed: index % 10 === 0,
+        parseSuccess: true,
+        result: {
+          accepted: index % 7 !== 0,
+          reason: "accepted",
+        },
+        rawProviderOutput: `private-debug-${index}`,
+      }),
+    ).join("\n");
+
+    const artifact = buildCoworldReplayUiArtifact({
+      "decisions.jsonl": `${decisions}\nnot-json\n`,
+      "match-summary.json": "{}",
+      "spectator-telemetry.json": "{}",
+    });
+
+    expect(artifact.version).toBe(1);
+    expect(artifact.decisionCount).toBe(65);
+    // The window spans the whole match, not just its tail. It used to be
+    // decisions.slice(-60), so agents eliminated early never appeared and the
+    // replay panel had nothing to show until playback reached the final
+    // minutes. Same payload budget, but coverage from the first decision on.
+    expect(artifact.recentDecisions).toHaveLength(60);
+    expect(artifact.recentDecisions[0]?.sequence).toBe(1);
+    expect(artifact.recentDecisions.at(-1)?.sequence).toBe(65);
+    const sequences = artifact.recentDecisions.map((d) => d.sequence);
+    expect(sequences).toEqual([...sequences].sort((a, b) => a - b));
+    // Every notable decision is retained. The fixture marks fallbackUsed on
+    // every 10th index and rejects every 7th, so the notable sequences are
+    // fully determined (sequence = index + 1).
+    const notable = Array.from({ length: 65 }, (_, index) => index)
+      .filter((index) => index % 10 === 0 || index % 7 === 0)
+      .map((index) => index + 1);
+    expect(notable.filter((seq) => !sequences.includes(seq))).toEqual([]);
+    expect(artifact.fallbackCount).toBe(7);
+    expect(artifact.rejectedCount).toBe(10);
+    expect(artifact.actionCounts).toEqual({ attack: 33, hold: 32 });
+    expect(artifact.artifacts).toEqual({
+      visualReport: false,
+      spectatorTelemetry: true,
+      decisions: false,
+      summary: true,
+    });
+    expect(JSON.stringify(artifact)).not.toContain("rawProviderOutput");
+    expect(JSON.stringify(artifact)).not.toContain("private-debug");
+    expect(
+      artifact.recentDecisions[0]?.selectedActionMetadata,
+    ).not.toHaveProperty("ignoredLargeField");
   });
 
   test.each([
@@ -586,5 +685,885 @@ describe("CoworldLeagueMirrorCore", () => {
     // Recovered from the authoritative replay config.
     expect(row.map).toBe("Britannia");
     expect(row.mapSize).toBe("Normal");
+  });
+});
+
+describe("revealed-premiere battle-card links (every round premieres, 2026-07-22)", () => {
+  const revealedEpisodeId = "ereq_00000000-0000-0000-0000-0000000000aa";
+  const revealedPremiereId = derivePremiereId(revealedEpisodeId);
+  // A production-shaped archive pointer line (see ReplayPremiereArchiveIndex).
+  const pointerLine = (overrides: Record<string, unknown> = {}): string =>
+    JSON.stringify({
+      schemaVersion: 1,
+      premiereId: revealedPremiereId,
+      sourceRunId: "coworld-2026-07-22T04-44-01-038Z-55ad38ae",
+      sourceKind: "rated_coworld",
+      terminalState: "revealed",
+      revealedAt: "2026-07-22T04:51:41.304Z",
+      publicationCommitmentHash: "a".repeat(64),
+      sourceReplaySha256: "b".repeat(64),
+      summaryHash: "c".repeat(64),
+      summaryRelPath: `summaries/${revealedPremiereId}.summary.json`,
+      reclaimedAt: "2026-07-22T05:22:20.478Z",
+      ...overrides,
+    });
+
+  test("collects revealed pointers and filters failed/cancelled/reveal-less ones", () => {
+    const raw = [
+      pointerLine(),
+      pointerLine({
+        premiereId: "prem_failedfailedfailed1",
+        terminalState: "failed",
+        revealedAt: null,
+      }),
+      pointerLine({
+        premiereId: "prem_cancelledcancelled1",
+        terminalState: "cancelled",
+        revealedAt: null,
+      }),
+      // Defensive: a "revealed" pointer without a reveal timestamp is not
+      // linkable — reveal time is what proves the outcome went public.
+      pointerLine({
+        premiereId: "prem_norevealtimestamp1",
+        revealedAt: null,
+      }),
+      // Defensive: "archived" is a distinct terminal state; the directive
+      // links terminalState === "revealed" only.
+      pointerLine({
+        premiereId: "prem_archivedarchived11",
+        terminalState: "archived",
+      }),
+    ].join("\n");
+    expect(revealedPremiereIdsFromArchiveIndex(raw)).toEqual(
+      new Set([revealedPremiereId]),
+    );
+  });
+
+  test("tolerates torn lines, junk, blank lines, and invalid premiere ids", () => {
+    const raw = [
+      "",
+      "not json at all",
+      '["an", "array"]',
+      '{"premiereId": 42}',
+      '{"premiereId": "prem_UPPERCASE-invalid", "terminalState": "revealed", "revealedAt": "2026-07-22T04:51:41.304Z"}',
+      pointerLine(),
+      '{"premiereId": "prem_short", "terminalState": "revealed", "revealedAt": "2026-07-22T04:51:41.304Z"}',
+      pointerLine().slice(0, 40), // torn final line (crash mid-append)
+    ].join("\n");
+    expect(revealedPremiereIdsFromArchiveIndex(raw)).toEqual(
+      new Set([revealedPremiereId]),
+    );
+    expect(revealedPremiereIdsFromArchiveIndex("")).toEqual(new Set());
+  });
+
+  test("a repeated premiere id keeps the LAST record (append-only semantics)", () => {
+    const flippedOff = [
+      pointerLine(),
+      pointerLine({ terminalState: "failed", revealedAt: null }),
+    ].join("\n");
+    expect(revealedPremiereIdsFromArchiveIndex(flippedOff)).toEqual(new Set());
+    const flippedOn = [
+      pointerLine({ terminalState: "failed", revealedAt: null }),
+      pointerLine(),
+    ].join("\n");
+    expect(revealedPremiereIdsFromArchiveIndex(flippedOn)).toEqual(
+      new Set([revealedPremiereId]),
+    );
+  });
+
+  test("premiereHrefForEpisode joins by the loop's own derived premiere id", () => {
+    const revealed = new Set([revealedPremiereId]);
+    expect(premiereHrefForEpisode(revealedEpisodeId, revealed)).toBe(
+      `/premiere/${revealedPremiereId}`,
+    );
+    // A different episode derives a different id: no link.
+    expect(
+      premiereHrefForEpisode(
+        "ereq_ffffffff-0000-0000-0000-000000000000",
+        revealed,
+      ),
+    ).toBeNull();
+    expect(premiereHrefForEpisode(revealedEpisodeId, new Set())).toBeNull();
+  });
+
+  test("buildEpisodeRow carries premiereHref only when one is attached (additive data.json)", () => {
+    const replay = parseHostedReplayPayload(replayPayloadFixture);
+    expect(replay).not.toBeNull();
+    if (replay === null) {
+      return;
+    }
+    const meta = parseCompletedEpisodeMetaList(replayMetaFixture)[1];
+    const base = {
+      meta,
+      replay,
+      roundNumber: 267,
+      watchHref: null,
+      fullRenderHref: "/ai-league-replay/coworld-run",
+    };
+    const linked = buildEpisodeRow({
+      ...base,
+      premiereHref: `/premiere/${revealedPremiereId}`,
+    });
+    expect(linked.premiereHref).toBe(`/premiere/${revealedPremiereId}`);
+    // Absent, null, or empty input leaves the field entirely OFF the row, so
+    // rows without a revealed premiere serialize byte-identically to before.
+    for (const row of [
+      buildEpisodeRow(base),
+      buildEpisodeRow({ ...base, premiereHref: null }),
+      buildEpisodeRow({ ...base, premiereHref: "" }),
+    ]) {
+      expect(row).not.toHaveProperty("premiereHref");
+      expect(JSON.stringify(row)).not.toContain("premiere");
+    }
+  });
+
+  test("buildEpisodeRow carries directorCut only when one is resolved (additive data.json)", () => {
+    const replay = parseHostedReplayPayload(replayPayloadFixture);
+    expect(replay).not.toBeNull();
+    if (replay === null) {
+      return;
+    }
+    const meta = parseCompletedEpisodeMetaList(replayMetaFixture)[1];
+    const base = {
+      meta,
+      replay,
+      roundNumber: 267,
+      watchHref: null,
+      fullRenderHref: "/ai-league-replay/coworld-run",
+    };
+    const withPlan = buildEpisodeRow({
+      ...base,
+      directorCut: { durationEstimateSeconds: 420, segmentCount: 9 },
+    });
+    expect(withPlan.directorCut).toEqual({
+      durationEstimateSeconds: 420,
+      segmentCount: 9,
+    });
+    // Absent or null input leaves the field entirely OFF the row — the
+    // common case today, since the hosted mirror has no
+    // director-cut-plan.json for most episodes yet (see
+    // parseDirectorCutPlanSummary's own doc).
+    for (const row of [
+      buildEpisodeRow(base),
+      buildEpisodeRow({ ...base, directorCut: null }),
+    ]) {
+      expect(row).not.toHaveProperty("directorCut");
+      expect(JSON.stringify(row)).not.toContain("directorCut");
+    }
+  });
+
+  test("buildEpisodeRow carries dramaEvidence only when it's resolved (additive data.json)", () => {
+    const replay = parseHostedReplayPayload(replayPayloadFixture);
+    expect(replay).not.toBeNull();
+    if (replay === null) {
+      return;
+    }
+    const meta = parseCompletedEpisodeMetaList(replayMetaFixture)[1];
+    const base = {
+      meta,
+      replay,
+      roundNumber: 267,
+      watchHref: null,
+      fullRenderHref: "/ai-league-replay/coworld-run",
+    };
+    const withEvidence = buildEpisodeRow({
+      ...base,
+      dramaEvidence: { dramaScore: 62, entertainmentGrade: "lively", curatedDramaScore: 40 },
+    });
+    expect(withEvidence.dramaEvidence).toEqual({
+      dramaScore: 62,
+      entertainmentGrade: "lively",
+      curatedDramaScore: 40,
+    });
+    // Absent or null input leaves the field entirely OFF the row — the
+    // common case until the budgeted backfill has reached a given run.
+    for (const row of [
+      buildEpisodeRow(base),
+      buildEpisodeRow({ ...base, dramaEvidence: null }),
+    ]) {
+      expect(row).not.toHaveProperty("dramaEvidence");
+      expect(JSON.stringify(row)).not.toContain("dramaEvidence");
+    }
+  });
+});
+
+describe("parseDirectorCutPlanSummary (product overhaul spec Stage 5)", () => {
+  const validPlan = () =>
+    JSON.stringify({
+      schemaVersion: 1,
+      reportKind: "director-cut-plan",
+      runID: "run-1",
+      matchID: "match-1",
+      generatedAt: "2026-07-31T00:00:00.000Z",
+      totalTurns: 50_400,
+      segments: [
+        { startTurn: 0, endTurn: 250, speed: "normal" },
+        { startTurn: 251, endTurn: 50_400, speed: "fast" },
+      ],
+      importantTurnCount: 251,
+      estimatedDurationSeconds: 724,
+      degraded: true,
+      notes: [],
+    });
+
+  test("extracts durationEstimateSeconds and segmentCount from a well-formed plan", () => {
+    expect(parseDirectorCutPlanSummary(validPlan())).toEqual({
+      durationEstimateSeconds: 724,
+      segmentCount: 2,
+    });
+  });
+
+  test("rejects malformed JSON, wrong reportKind, missing segments, and a negative duration", () => {
+    expect(parseDirectorCutPlanSummary("not json")).toBeNull();
+    expect(
+      parseDirectorCutPlanSummary(
+        JSON.stringify({ reportKind: "something-else" }),
+      ),
+    ).toBeNull();
+    expect(
+      parseDirectorCutPlanSummary(
+        JSON.stringify({
+          reportKind: "director-cut-plan",
+          estimatedDurationSeconds: 300,
+          segments: [],
+        }),
+      ),
+    ).toBeNull();
+    expect(
+      parseDirectorCutPlanSummary(
+        JSON.stringify({
+          reportKind: "director-cut-plan",
+          estimatedDurationSeconds: -5,
+          segments: [{ startTurn: 0, endTurn: 10 }],
+        }),
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("parseMatchNarrativeSummary (drama recaps gap closure)", () => {
+  const validDramaReport = () =>
+    JSON.stringify({
+      schemaVersion: 1,
+      reportKind: "drama-and-tom-scorer",
+      runID: "run-1",
+      dramaScore: 62,
+    });
+  const validMatchStory = () =>
+    JSON.stringify({
+      schemaVersion: 1,
+      runID: "run-1",
+      entertainmentScore: 81,
+      grade: "lively",
+    });
+
+  test("extracts dramaScore and entertainmentGrade from a well-formed pair", () => {
+    expect(
+      parseMatchNarrativeSummary(validDramaReport(), validMatchStory()),
+    ).toEqual({ dramaScore: 62, entertainmentGrade: "lively" });
+  });
+
+  test("rejects malformed JSON on either side", () => {
+    expect(
+      parseMatchNarrativeSummary("not json", validMatchStory()),
+    ).toBeNull();
+    expect(
+      parseMatchNarrativeSummary(validDramaReport(), "not json"),
+    ).toBeNull();
+  });
+
+  test("rejects the wrong drama-report reportKind", () => {
+    expect(
+      parseMatchNarrativeSummary(
+        JSON.stringify({ reportKind: "something-else", dramaScore: 10 }),
+        validMatchStory(),
+      ),
+    ).toBeNull();
+  });
+
+  test("rejects a missing/negative dramaScore or a missing grade", () => {
+    expect(
+      parseMatchNarrativeSummary(
+        JSON.stringify({ reportKind: "drama-and-tom-scorer" }),
+        validMatchStory(),
+      ),
+    ).toBeNull();
+    expect(
+      parseMatchNarrativeSummary(
+        JSON.stringify({ reportKind: "drama-and-tom-scorer", dramaScore: -1 }),
+        validMatchStory(),
+      ),
+    ).toBeNull();
+    expect(
+      parseMatchNarrativeSummary(
+        validDramaReport(),
+        JSON.stringify({ entertainmentScore: 40 }),
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("parseCuratedDramaScore (best-battles ranking fix)", () => {
+  const validRecap = (overrides: Record<string, unknown> = {}) =>
+    JSON.stringify({
+      schemaVersion: AGENT_MATCH_RECAP_SCHEMA_VERSION,
+      runID: "run-1",
+      generatedAt: "2026-08-01T00:00:00.000Z",
+      summary: "This match featured 1 betrayal.",
+      beats: [{ turnNumber: 5, kind: "betrayal", message: "x betrays y." }],
+      curatedDramaScore: 42,
+      curatedDramaScoreMethodology: "betrayal beats x20 ...",
+      ...overrides,
+    });
+
+  test("extracts curatedDramaScore from a current-schema recap", () => {
+    expect(parseCuratedDramaScore(validRecap())).toBe(42);
+  });
+
+  test("rejects malformed JSON", () => {
+    expect(parseCuratedDramaScore("not json")).toBeNull();
+  });
+
+  test("rejects a stale schemaVersion — the exact upgrade-transition case", () => {
+    expect(
+      parseCuratedDramaScore(
+        validRecap({ schemaVersion: AGENT_MATCH_RECAP_SCHEMA_VERSION - 1 }),
+      ),
+    ).toBeNull();
+  });
+
+  test("rejects a missing or negative curatedDramaScore", () => {
+    expect(
+      parseCuratedDramaScore(validRecap({ curatedDramaScore: undefined })),
+    ).toBeNull();
+    expect(
+      parseCuratedDramaScore(validRecap({ curatedDramaScore: -1 })),
+    ).toBeNull();
+  });
+});
+
+/**
+ * Product overhaul spec Stage 5 mirror gap closure. Fixtures are REAL data
+ * excerpted from an actual retained mirrored run in production
+ * (`artifacts/ai-league-runs/league-coworld-2026-07-31T19-22-21-473Z-9243b6cf/`
+ * on the deployed beta host) — every field present is a genuine value from
+ * that match, not fabricated. Trimmed for fixture size: the telemetry sample
+ * keeps all 12 real agents and a representative real-event subset (every
+ * elimination/nuke/alliance_formed plus an even stride across the match);
+ * the decisions sample keeps every agent's first spawn, up to two of each
+ * rarer action kind, and an even stride for the rest, with each real line
+ * projected down to only the fields `deriveSpectatorTelemetryFromDecisionsLog`
+ * actually reads (dropping the large `legalActionIDs`/observation-text
+ * fields it never touches).
+ */
+const realTelemetryFixtureRaw = readFileSync(
+  path.join(
+    __dirname,
+    "fixtures",
+    "coworld-mirror-director-cut-telemetry.sample.json",
+  ),
+  "utf8",
+);
+const realDecisionsFixtureRaw = readFileSync(
+  path.join(
+    __dirname,
+    "fixtures",
+    "coworld-mirror-director-cut-decisions.sample.jsonl",
+  ),
+  "utf8",
+);
+
+describe("parseMirroredSpectatorTelemetry (product overhaul spec Stage 5 mirror gap closure)", () => {
+  test("accepts a real retained mirrored run's spectator-telemetry.json", () => {
+    const telemetry = parseMirroredSpectatorTelemetry(realTelemetryFixtureRaw);
+    expect(telemetry).not.toBeNull();
+    expect(telemetry?.agents.length).toBe(12);
+    expect(telemetry?.events.length).toBeGreaterThan(0);
+    expect(telemetry?.agents.map((agent) => agent.username)).toContain(
+      "richard",
+    );
+  });
+
+  test("rejects malformed JSON, wrong version, no agents, and a malshaped event", () => {
+    expect(parseMirroredSpectatorTelemetry("not json")).toBeNull();
+    expect(
+      parseMirroredSpectatorTelemetry(
+        JSON.stringify({ version: 2, agents: [], events: [] }),
+      ),
+    ).toBeNull();
+    expect(
+      parseMirroredSpectatorTelemetry(
+        JSON.stringify({ version: 1, agents: [], events: [] }),
+      ),
+    ).toBeNull();
+    expect(
+      parseMirroredSpectatorTelemetry(
+        JSON.stringify({
+          version: 1,
+          agents: [{ agentID: "a1", username: "Alice" }],
+          events: [{ turnNumber: "not a number" }],
+        }),
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("deriveSpectatorTelemetryFromDecisionsLog (product overhaul spec Stage 5 mirror gap closure)", () => {
+  test("rebuilds an equivalent telemetry from a real retained mirrored run's decisions.jsonl", () => {
+    const telemetry = deriveSpectatorTelemetryFromDecisionsLog(
+      realDecisionsFixtureRaw,
+      "coworld-derived-run",
+    );
+    expect(telemetry).not.toBeNull();
+    expect(telemetry?.agents.length).toBe(12);
+    expect(telemetry?.events.length).toBeGreaterThan(0);
+    // Every event's actor traces back to a real roster agent — no
+    // fabricated participant.
+    const agentIDs = new Set(telemetry?.agents.map((agent) => agent.agentID));
+    for (const event of telemetry?.events ?? []) {
+      expect(agentIDs.has(event.actorAgentID)).toBe(true);
+    }
+  });
+
+  test("skips torn/malformed lines instead of failing the whole derivation", () => {
+    const withGarbage = `not json\n${realDecisionsFixtureRaw}\n{"agentID":"only-partial"}\n`;
+    const telemetry = deriveSpectatorTelemetryFromDecisionsLog(
+      withGarbage,
+      "coworld-derived-run",
+    );
+    expect(telemetry).not.toBeNull();
+    expect(telemetry?.events.length).toBeGreaterThan(0);
+  });
+
+  test("resolves null when every line is unusable", () => {
+    expect(
+      deriveSpectatorTelemetryFromDecisionsLog("not json\n\n", "run-1"),
+    ).toBeNull();
+    expect(deriveSpectatorTelemetryFromDecisionsLog("", "run-1")).toBeNull();
+  });
+});
+
+describe("resolveMirroredDirectorCutPlan (product overhaul spec Stage 5 mirror gap closure)", () => {
+  test("tier 1: builds a real, gapless plan straight from spectator-telemetry.json", () => {
+    const outcome = resolveMirroredDirectorCutPlan({
+      runID: "league-coworld-real-run",
+      matchID: "league-coworld-real-run",
+      spectatorTelemetryRaw: realTelemetryFixtureRaw,
+      decisionsJsonlRaw: null,
+      finalTurnCount: null,
+    });
+    expect(outcome).not.toBeNull();
+    expect(outcome?.source).toBe("spectator-telemetry");
+    const plan = outcome?.plan;
+    expect(plan?.runID).toBe("league-coworld-real-run");
+    expect(plan?.totalTurns).toBeGreaterThan(0);
+    expect(plan?.segments.length).toBeGreaterThan(0);
+    // Segments fully and gaplessly partition [0, totalTurns].
+    const segments = plan?.segments ?? [];
+    expect(segments[0].startTurn).toBe(0);
+    expect(segments.at(-1)?.endTurn).toBe(plan?.totalTurns);
+    for (let i = 1; i < segments.length; i++) {
+      expect(segments[i].startTurn).toBe(segments[i - 1].endTurn + 1);
+    }
+  });
+
+  test("tier 1 stays non-degraded when match-summary.json supplies the authoritative turn count", () => {
+    const outcome = resolveMirroredDirectorCutPlan({
+      runID: "league-coworld-real-run",
+      matchID: "league-coworld-real-run",
+      spectatorTelemetryRaw: realTelemetryFixtureRaw,
+      decisionsJsonlRaw: null,
+      finalTurnCount: 6300,
+    });
+    expect(outcome?.plan.degraded).toBe(false);
+    expect(outcome?.plan.totalTurns).toBe(6300);
+  });
+
+  test("tier 2 fallback: builds a plan from decisions.jsonl when telemetry is absent", () => {
+    const outcome = resolveMirroredDirectorCutPlan({
+      runID: "league-coworld-fallback-run",
+      matchID: "league-coworld-fallback-run",
+      spectatorTelemetryRaw: null,
+      decisionsJsonlRaw: realDecisionsFixtureRaw,
+      finalTurnCount: null,
+    });
+    expect(outcome).not.toBeNull();
+    expect(outcome?.source).toBe("decisions-log");
+    expect(outcome?.plan.segments.length).toBeGreaterThan(0);
+  });
+
+  test("tier 2 fallback: falls through to decisions.jsonl when telemetry fails validation", () => {
+    const outcome = resolveMirroredDirectorCutPlan({
+      runID: "league-coworld-fallback-run",
+      matchID: "league-coworld-fallback-run",
+      spectatorTelemetryRaw: "not json",
+      decisionsJsonlRaw: realDecisionsFixtureRaw,
+      finalTurnCount: null,
+    });
+    expect(outcome?.source).toBe("decisions-log");
+  });
+
+  test("prefers spectator-telemetry.json over decisions.jsonl when both are present", () => {
+    const outcome = resolveMirroredDirectorCutPlan({
+      runID: "league-coworld-real-run",
+      matchID: "league-coworld-real-run",
+      spectatorTelemetryRaw: realTelemetryFixtureRaw,
+      decisionsJsonlRaw: realDecisionsFixtureRaw,
+      finalTurnCount: null,
+    });
+    expect(outcome?.source).toBe("spectator-telemetry");
+  });
+
+  test("resolves null (never throws) when neither input is usable", () => {
+    expect(
+      resolveMirroredDirectorCutPlan({
+        runID: "run-1",
+        matchID: "run-1",
+        spectatorTelemetryRaw: "not json",
+        decisionsJsonlRaw: "also not json",
+        finalTurnCount: null,
+      }),
+    ).toBeNull();
+    expect(
+      resolveMirroredDirectorCutPlan({
+        runID: "run-1",
+        matchID: "run-1",
+        spectatorTelemetryRaw: null,
+        decisionsJsonlRaw: null,
+        finalTurnCount: null,
+      }),
+    ).toBeNull();
+  });
+
+  test("is deterministic — identical mirrored input produces an identical plan", () => {
+    const build = () =>
+      resolveMirroredDirectorCutPlan({
+        runID: "league-coworld-real-run",
+        matchID: "league-coworld-real-run",
+        spectatorTelemetryRaw: realTelemetryFixtureRaw,
+        decisionsJsonlRaw: null,
+        finalTurnCount: 6300,
+      });
+    const first = build();
+    const second = build();
+    // generatedAt is a real timestamp and legitimately differs — compare
+    // everything else.
+    const { generatedAt: _g1, ...restFirst } = first?.plan ?? ({} as never);
+    const { generatedAt: _g2, ...restSecond } = second?.plan ?? ({} as never);
+    expect(restFirst).toEqual(restSecond);
+  });
+});
+
+describe("resolveMirroredMatchEvidence (shared two-tier resolver, drama recaps gap closure)", () => {
+  test("tier 1 + records: telemetry from spectator-telemetry.json, records reconstructed from decisions.jsonl independently", () => {
+    const evidence = resolveMirroredMatchEvidence({
+      runID: "league-coworld-real-run",
+      spectatorTelemetryRaw: realTelemetryFixtureRaw,
+      decisionsJsonlRaw: realDecisionsFixtureRaw,
+      finalTurnCount: null,
+    });
+    expect(evidence).not.toBeNull();
+    expect(evidence?.source).toBe("spectator-telemetry");
+    expect(evidence?.telemetry.agents.length).toBe(12);
+    // Records are reconstructed from decisions.jsonl regardless of which
+    // telemetry tier won — buildAgentDramaReport/buildAgentMatchStory need
+    // them verbatim.
+    expect(evidence?.records.length).toBeGreaterThan(0);
+  });
+
+  test("tier 1 only: telemetry resolves but records stay empty when decisions.jsonl is absent — a real, distinct evidence gap", () => {
+    const evidence = resolveMirroredMatchEvidence({
+      runID: "league-coworld-real-run",
+      spectatorTelemetryRaw: realTelemetryFixtureRaw,
+      decisionsJsonlRaw: null,
+      finalTurnCount: null,
+    });
+    expect(evidence).not.toBeNull();
+    expect(evidence?.source).toBe("spectator-telemetry");
+    expect(evidence?.records).toEqual([]);
+  });
+
+  test("tier 2 fallback: telemetry AND records both derive from decisions.jsonl when spectator-telemetry.json is absent/unusable", () => {
+    const evidence = resolveMirroredMatchEvidence({
+      runID: "league-coworld-fallback-run",
+      spectatorTelemetryRaw: "not json",
+      decisionsJsonlRaw: realDecisionsFixtureRaw,
+      finalTurnCount: null,
+    });
+    expect(evidence).not.toBeNull();
+    expect(evidence?.source).toBe("decisions-log");
+    expect(evidence?.records.length).toBeGreaterThan(0);
+    expect(evidence?.telemetry.agents.length).toBeGreaterThan(0);
+  });
+
+  test("resolves null (never throws) when neither input is usable", () => {
+    expect(
+      resolveMirroredMatchEvidence({
+        runID: "run-1",
+        spectatorTelemetryRaw: "not json",
+        decisionsJsonlRaw: "also not json",
+        finalTurnCount: null,
+      }),
+    ).toBeNull();
+  });
+
+  test("finalState is built from finalTurnCount and passed through unconditionally", () => {
+    const evidence = resolveMirroredMatchEvidence({
+      runID: "league-coworld-real-run",
+      spectatorTelemetryRaw: realTelemetryFixtureRaw,
+      decisionsJsonlRaw: null,
+      finalTurnCount: 6300,
+    });
+    expect(evidence?.finalState).toEqual({
+      phase: "final",
+      tick: null,
+      turnCount: 6300,
+      players: [],
+    });
+  });
+});
+
+describe("latest-premiere resolution (the persistent premiere slot's revealed state)", () => {
+  const revealedEpisodeId = "ereq_00000000-0000-0000-0000-0000000000aa";
+  const revealedPremiereId = derivePremiereId(revealedEpisodeId);
+  const indexLine = (overrides: Record<string, unknown> = {}): string =>
+    JSON.stringify({
+      schemaVersion: 1,
+      premiereId: revealedPremiereId,
+      sourceRunId: "coworld-2026-07-22T04-44-01-038Z-55ad38ae",
+      sourceKind: "rated_coworld",
+      terminalState: "revealed",
+      revealedAt: "2026-07-22T04:51:41.304Z",
+      publicationCommitmentHash: "a".repeat(64),
+      sourceReplaySha256: "b".repeat(64),
+      summaryHash: "c".repeat(64),
+      summaryRelPath: `summaries/${revealedPremiereId}.summary.json`,
+      reclaimedAt: "2026-07-22T05:22:20.478Z",
+      ...overrides,
+    });
+
+  function pointer(
+    overrides: Partial<LatestPremierePointer> = {},
+  ): LatestPremierePointer {
+    return {
+      schemaVersion: 1,
+      premiereId: "prem_54d299b874f0adc7654fd1cc",
+      roundNumber: 651,
+      mapLabel: "Pangaea",
+      revealedAt: "2026-07-22T08:45:13.000Z",
+      ...overrides,
+    };
+  }
+
+  test("summarizePremiereArchiveIndex projects revealed/known ids and the newest revealed entry", () => {
+    const raw = [
+      indexLine({
+        premiereId: "prem_older00000000older",
+        revealedAt: "2026-07-21T10:00:00.000Z",
+      }),
+      indexLine(),
+      indexLine({
+        premiereId: "prem_failed0000000failed",
+        terminalState: "failed",
+        revealedAt: null,
+      }),
+      "torn { line",
+    ].join("\n");
+    const summary = summarizePremiereArchiveIndex(raw);
+    expect(summary.revealedIds).toEqual(
+      new Set([revealedPremiereId, "prem_older00000000older"]),
+    );
+    expect(summary.knownIds).toEqual(
+      new Set([
+        revealedPremiereId,
+        "prem_older00000000older",
+        "prem_failed0000000failed",
+      ]),
+    );
+    expect(summary.newestRevealed).toEqual({
+      premiereId: revealedPremiereId,
+      revealedAt: "2026-07-22T04:51:41.304Z",
+    });
+  });
+
+  test("summarize keeps the LAST record per id and matches the legacy revealed-id set", () => {
+    const flippedOff = [
+      indexLine(),
+      indexLine({ terminalState: "failed", revealedAt: null }),
+    ].join("\n");
+    const summary = summarizePremiereArchiveIndex(flippedOff);
+    expect(summary.revealedIds).toEqual(new Set());
+    expect(summary.knownIds).toEqual(new Set([revealedPremiereId]));
+    expect(summary.newestRevealed).toBeNull();
+    expect(revealedPremiereIdsFromArchiveIndex(flippedOff)).toEqual(
+      summary.revealedIds,
+    );
+  });
+
+  test("an unparseable revealedAt keeps the id linkable but never elects it newest", () => {
+    const raw = indexLine({ revealedAt: "not a timestamp" });
+    const summary = summarizePremiereArchiveIndex(raw);
+    expect(summary.revealedIds).toEqual(new Set([revealedPremiereId]));
+    expect(summary.newestRevealed).toBeNull();
+  });
+
+  test("the pointer wins outright when no archive index is wired", () => {
+    expect(resolveLatestRevealedPremiere(pointer(), null)).toEqual({
+      premiereId: "prem_54d299b874f0adc7654fd1cc",
+      roundNumber: 651,
+      mapLabel: "Pangaea",
+      revealedAt: "2026-07-22T08:45:13.000Z",
+      href: "/premiere/prem_54d299b874f0adc7654fd1cc",
+    });
+  });
+
+  test("a pointer the index does not know yet is kept (the index lags reveal by design)", () => {
+    const summary = summarizePremiereArchiveIndex(indexLine());
+    const resolved = resolveLatestRevealedPremiere(pointer(), summary);
+    expect(resolved?.premiereId).toBe("prem_54d299b874f0adc7654fd1cc");
+    expect(resolved?.roundNumber).toBe(651);
+  });
+
+  test("a pointer the index knows as revealed is kept with its richer fields", () => {
+    const summary = summarizePremiereArchiveIndex(indexLine());
+    const resolved = resolveLatestRevealedPremiere(
+      pointer({ premiereId: revealedPremiereId }),
+      summary,
+    );
+    expect(resolved).toEqual({
+      premiereId: revealedPremiereId,
+      roundNumber: 651,
+      mapLabel: "Pangaea",
+      revealedAt: "2026-07-22T08:45:13.000Z",
+      href: `/premiere/${revealedPremiereId}`,
+    });
+  });
+
+  test("a pointer the index contradicts (non-revealed) is dropped, falling back to newest revealed", () => {
+    const raw = [
+      indexLine({
+        premiereId: "prem_contradicted0000001",
+        terminalState: "failed",
+        revealedAt: null,
+      }),
+      indexLine(),
+    ].join("\n");
+    const summary = summarizePremiereArchiveIndex(raw);
+    const resolved = resolveLatestRevealedPremiere(
+      pointer({ premiereId: "prem_contradicted0000001" }),
+      summary,
+    );
+    // Fallback carries no round/map (the index does not know them).
+    expect(resolved).toEqual({
+      premiereId: revealedPremiereId,
+      roundNumber: null,
+      mapLabel: "",
+      revealedAt: "2026-07-22T04:51:41.304Z",
+      href: `/premiere/${revealedPremiereId}`,
+    });
+  });
+
+  test("slot never empty once anything revealed exists: pointer OR archive entry resolves a card", () => {
+    const summary = summarizePremiereArchiveIndex(indexLine());
+    // Pointer alone.
+    expect(resolveLatestRevealedPremiere(pointer(), null)).not.toBeNull();
+    // Archive alone (pointer missing or invalid).
+    expect(resolveLatestRevealedPremiere(null, summary)).toEqual({
+      premiereId: revealedPremiereId,
+      roundNumber: null,
+      mapLabel: "",
+      revealedAt: "2026-07-22T04:51:41.304Z",
+      href: `/premiere/${revealedPremiereId}`,
+    });
+    // Nothing revealed anywhere: the only case the slot may be empty.
+    expect(resolveLatestRevealedPremiere(null, null)).toBeNull();
+    expect(
+      resolveLatestRevealedPremiere(
+        null,
+        summarizePremiereArchiveIndex(
+          indexLine({ terminalState: "failed", revealedAt: null }),
+        ),
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("selectServingLatestPremiere (probe belt — never link a dead page)", () => {
+  const pointerId = "prem_54d299b874f0adc7654fd1cc";
+  const indexEpisode = "ereq_00000000-0000-0000-0000-0000000000aa";
+  const indexId = derivePremiereId(indexEpisode);
+  const ptr: LatestPremierePointer = {
+    schemaVersion: 1,
+    premiereId: pointerId,
+    roundNumber: 651,
+    mapLabel: "Pangaea",
+    revealedAt: "2026-07-22T08:45:13.000Z",
+  };
+  const index = summarizePremiereArchiveIndex(
+    JSON.stringify({
+      schemaVersion: 1,
+      premiereId: indexId,
+      sourceRunId: "coworld-2026-07-22T04-44-01-038Z-55ad38ae",
+      sourceKind: "rated_coworld",
+      terminalState: "revealed",
+      revealedAt: "2026-07-22T04:51:41.304Z",
+      publicationCommitmentHash: "a".repeat(64),
+      sourceReplaySha256: "b".repeat(64),
+      summaryHash: "c".repeat(64),
+      summaryRelPath: `summaries/${indexId}.summary.json`,
+      reclaimedAt: "2026-07-22T05:22:20.478Z",
+    }),
+  );
+  const probeAllowing =
+    (...serving: string[]) =>
+    async (id: string) =>
+      serving.includes(id);
+
+  test("pointer candidate serves -> pointer card", async () => {
+    const card = await selectServingLatestPremiere(
+      ptr,
+      index,
+      probeAllowing(pointerId),
+    );
+    expect(card?.premiereId).toBe(pointerId);
+    expect(card?.roundNumber).toBe(651);
+  });
+
+  test("pointer 404s -> falls back to the archive-index newest revealed", async () => {
+    const card = await selectServingLatestPremiere(
+      ptr,
+      index,
+      probeAllowing(indexId),
+    );
+    expect(card?.premiereId).toBe(indexId);
+    expect(card?.roundNumber).toBeNull();
+  });
+
+  test("pointer and fallback both dead -> no card (2026-07-22 orphan incident)", async () => {
+    const card = await selectServingLatestPremiere(
+      ptr,
+      index,
+      async () => false,
+    );
+    expect(card).toBeNull();
+  });
+
+  test("index-sourced candidate that 404s -> no card, no re-probe loop", async () => {
+    let calls = 0;
+    const card = await selectServingLatestPremiere(null, index, async () => {
+      calls += 1;
+      return false;
+    });
+    expect(card).toBeNull();
+    expect(calls).toBe(1);
+  });
+
+  test("always-true probe preserves legacy behavior exactly", async () => {
+    const card = await selectServingLatestPremiere(
+      ptr,
+      index,
+      async () => true,
+    );
+    expect(card).toEqual(resolveLatestRevealedPremiere(ptr, index));
   });
 });

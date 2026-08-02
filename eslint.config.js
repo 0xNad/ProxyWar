@@ -31,6 +31,7 @@ export default [
             "examples/external-agent/starter-framework.mjs",
             "eslint.config.js",
             "scripts/sync-assets.mjs",
+            ".omp/hooks/pre/proxywar-guard.ts",
           ],
         },
         tsconfigRootDir: import.meta.dirname,
