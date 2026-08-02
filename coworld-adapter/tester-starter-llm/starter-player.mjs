@@ -12,7 +12,9 @@ import { WebSocket } from "ws";
 
 const url = process.env.COWORLD_PLAYER_WS_URL;
 if (!url) {
-  throw new Error("COWORLD_PLAYER_WS_URL is required (the match provides it at runtime)");
+  throw new Error(
+    "COWORLD_PLAYER_WS_URL is required (the match provides it at runtime)",
+  );
 }
 
 const socket = new WebSocket(url);
@@ -48,10 +50,21 @@ socket.on("message", (data) => {
 const postFinalLingerMs = Number(
   process.env.PROXYWAR_PLAYER_POST_FINAL_LINGER_MS ?? "0",
 );
+// Armed only inside a Kubernetes pod (KUBERNETES_SERVICE_HOST is injected
+// into every pod) or under PROXYWAR_PLAYER_FORCE_LINGER=1: local Docker runs
+// (coworld certify) wait for the container to exit, so an unconditional
+// linger times out certification.
+const lingerArmed =
+  process.env.KUBERNETES_SERVICE_HOST !== undefined ||
+  process.env.PROXYWAR_PLAYER_FORCE_LINGER === "1";
 process.on("SIGTERM", () => process.exit(0));
 process.on("SIGINT", () => process.exit(0));
 socket.on("close", () => {
-  if (Number.isFinite(postFinalLingerMs) && postFinalLingerMs > 0) {
+  if (
+    lingerArmed &&
+    Number.isFinite(postFinalLingerMs) &&
+    postFinalLingerMs > 0
+  ) {
     console.log(
       `lingering ${postFinalLingerMs}ms after close for platform reconciliation`,
     );
