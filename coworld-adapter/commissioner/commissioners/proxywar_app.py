@@ -19,7 +19,23 @@ COMPETITION_LADDER: list[tuple[int, list[str]]] = [
     (2, ["tournament-2p-pangaea", "tournament-2p-asia"]),
     (4, ["tournament-4p-pangaea", "tournament-4p-asia", "tournament-4p-europe"]),
     (8, ["tournament-8p-pangaea", "tournament-8p-world", "tournament-8p-asia"]),
-    (12, ["tournament-12p-pangaea", "tournament-12p-world"]),
+    (
+        12,
+        [
+            # Battle-tested first (fresh-league round 1 lands on index 0); the
+            # 2026-08-02 additions are ordered by hosted confidence and were
+            # each qualified through the memory-regression gate (80-step native
+            # 12P episode under the hosted heap posture) before shipping.
+            "tournament-12p-pangaea",
+            "tournament-12p-world",
+            "tournament-12p-asia",
+            "tournament-12p-britannia",
+            "tournament-12p-blacksea",
+            "tournament-12p-eastasia",
+            "tournament-12p-northamerica",
+            "tournament-12p-oceania",
+        ],
+    ),
 ]
 
 

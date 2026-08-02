@@ -147,3 +147,58 @@ def test_every_supported_ladder_shape_schedules_every_entrant(
         membership.policy_version_id for membership in round_start.memberships
     }
     assert scheduled_policy_ids == champion_policy_ids
+
+
+def test_competition_ladder_ids_all_exist_in_the_manifest() -> None:
+    # The ladder is declared "once here and in the manifest's variants[]";
+    # this is the check that keeps a ladder edit and a manifest edit honest
+    # with each other (a pool id missing from the manifest would surface as a
+    # hosted round failure, not a local error, without it).
+    import json
+
+    from commissioners.proxywar_app import COMPETITION_LADDER
+
+    manifest_path = (
+        Path(__file__).parents[2] / "coworld" / "coworld_manifest.json"
+    )
+    manifest = json.loads(manifest_path.read_text())
+    manifest_ids = {variant["id"] for variant in manifest["variants"]}
+    for seat_count, pool in COMPETITION_LADDER:
+        for variant_id in pool:
+            assert variant_id in manifest_ids, (
+                f"ladder rung {seat_count}p references {variant_id!r} "
+                f"which is not in the manifest"
+            )
+            variant = next(
+                v for v in manifest["variants"] if v["id"] == variant_id
+            )
+            assert variant["game_config"]["num_agents"] == seat_count
+
+
+def test_twelve_seat_rotation_sweeps_every_map_in_the_pool() -> None:
+    from commissioners.proxywar_app import COMPETITION_LADDER
+
+    pool = dict(COMPETITION_LADDER)[12]
+    assert len(pool) >= 7, "the 2026-08-02 rotation expansion should be present"
+
+    round_start = competition_round_start(12)
+    round_start.variants = [
+        VariantInfo(
+            id=variant_id,
+            name=variant_id,
+            game_config={"num_agents": 12},
+        )
+        for variant_id in pool
+    ]
+
+    seen: list[str] = []
+    for offset in range(len(pool)):
+        round_start.round_number = 2000 + offset
+        scheduled = commissioner().schedule_episodes_for_round_start(round_start)
+        variant_ids = {episode.variant_id for episode in scheduled.episodes}
+        assert len(variant_ids) == 1, "a round runs exactly one map"
+        seen.append(variant_ids.pop())
+
+    assert set(seen) == set(pool), (
+        f"consecutive rounds should sweep the whole pool; saw {seen}"
+    )
