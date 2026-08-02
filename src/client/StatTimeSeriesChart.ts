@@ -1,4 +1,4 @@
-import { html, nothing, TemplateResult } from "lit";
+import { html, nothing, svg, TemplateResult } from "lit";
 import { translateText } from "./Utils";
 
 /**
@@ -129,6 +129,23 @@ export function computeChartGeometry(
  * value+date readout hover gives a mouse user. The existing accessible
  * `<table>` fallback is untouched — this is a visual/touch affordance on
  * top of it, not a replacement.
+ *
+ * P4 fix (2026-08-02): the marker `<line>`, last-date `<text>`, and
+ * per-point `<circle>`/tooltip `<text>` sub-templates below are each their
+ * own nested `.map()`/ternary `TemplateResult` and MUST use lit's `svg`
+ * tag, never `html`. Lit builds one `<template>` per distinct
+ * tagged-template-literal call site and parses it via `innerHTML`; the
+ * "we're inside `<svg>`" HTML5 foreign-content context from the outer
+ * `html` template just below does NOT carry into a separately-parsed
+ * nested template. Tagging a nested one with `html` silently created
+ * `<circle>`/`<line>` as plain `HTMLUnknownElement` in the XHTML
+ * namespace instead of `SVGCircleElement`/`SVGLineElement` (confirmed
+ * live: `getBBox` undefined, `getBoundingClientRect()` always 0×0) — the
+ * hover hit-target was unreachable and the adjacent-sibling CSS tooltip
+ * below never got a real `:hover` to key off of. The native `<title>`
+ * fallback still "worked" regardless (browsers tolerate a `<title>` on
+ * any element), which is exactly why this stayed invisible to anything
+ * short of a real pointer hover on a real element.
  */
 export function renderTimeSeriesChart(
   props: TimeSeriesChartProps,
@@ -175,7 +192,7 @@ export function renderTimeSeriesChart(
           ${props.formatX(firstPoint.at)}
         </text>
         ${plotted.length > 1
-          ? html`<text
+          ? svg`<text
               class="stat-chart-axis-label"
               x=${CHART_WIDTH - CHART_PADDING.right}
               y=${CHART_HEIGHT - 4}
@@ -187,7 +204,7 @@ export function renderTimeSeriesChart(
         ${plotted
           .filter((point) => point.marker !== null && point.marker !== undefined)
           .map(
-            (point) => html`
+            (point) => svg`
               <line
                 class="stat-chart-marker"
                 x1=${point.x}
@@ -201,7 +218,7 @@ export function renderTimeSeriesChart(
           )}
         <path class="stat-chart-line" d=${path} style=${`stroke: ${props.color}`}></path>
         ${plotted.map(
-          (point) => html`
+          (point) => svg`
             <circle
               class="stat-chart-point"
               cx=${point.x}
@@ -226,20 +243,20 @@ export function renderTimeSeriesChart(
       <p class="stat-chart-caption">${props.captionText}</p>
       <details class="stat-chart-table">
         <summary>${translateText("stat_chart.data_table_toggle")}</summary>
-        <table>
+        <table class="w-full">
           <caption class="stat-chart-table-caption">${props.tableCaption}</caption>
           <thead>
             <tr>
-              <th scope="col">${translateText("stat_chart.column_date")}</th>
-              <th scope="col">${props.columnValueLabel}</th>
+              <th scope="col" class="px-3 py-1 text-left">${translateText("stat_chart.column_date")}</th>
+              <th scope="col" class="px-3 py-1 text-left">${props.columnValueLabel}</th>
             </tr>
           </thead>
           <tbody>
             ${props.points.map(
               (point) => html`
                 <tr>
-                  <td>${props.formatX(point.at)}</td>
-                  <td>
+                  <td class="px-3 py-1">${props.formatX(point.at)}</td>
+                  <td class="px-3 py-1">
                     ${props.formatValue(point.value)}
                     ${point.marker
                       ? html`<span class="stat-chart-table-marker"

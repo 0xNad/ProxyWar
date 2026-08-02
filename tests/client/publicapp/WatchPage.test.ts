@@ -470,6 +470,15 @@ describe("watch-page replay archive", () => {
     expect(drawer?.querySelector("select")).not.toBeNull();
   });
 
+  it("never renders a Match size filter control (P4 fix, 2026-08-02: dropped -- mapSize only ever carried one real value in production, so the dropdown offered a choice with no second option)", async () => {
+    stubReadModelAndParticipantsFetch(
+      readModel({ matches: [match({ completedAt: "2026-06-15T00:00:00.000Z" })] }),
+    );
+    const el = mount();
+    await flushMicrotasks();
+    expect(el.textContent).not.toContain("watch.filter_match_size");
+  });
+
   it("shows a Director Cut duration badge when the match carries one, and omits it otherwise", async () => {
     stubReadModelAndParticipantsFetch(
       readModel({
@@ -786,7 +795,6 @@ describe("filterArchiveMatches", () => {
   const noFilter = {
     agentSlug: "all",
     map: "all",
-    mapSize: "all",
     featured: "all" as const,
     cleanliness: "all" as const,
     dateFrom: null,
@@ -805,15 +813,12 @@ describe("filterArchiveMatches", () => {
     expect(result.map((m) => m.matchId)).toEqual(["a"]);
   });
 
-  it("filters by map and mapSize independently", () => {
-    const m1 = completedMatch({ matchId: "1", map: "Frost", mapSize: "Normal" });
-    const m2 = completedMatch({ matchId: "2", map: "Sand", mapSize: "Compact" });
+  it("filters by map", () => {
+    const m1 = completedMatch({ matchId: "1", map: "Frost" });
+    const m2 = completedMatch({ matchId: "2", map: "Sand" });
     expect(
       filterArchiveMatches([m1, m2], new Set(), { ...noFilter, map: "Frost" }).map((m) => m.matchId),
     ).toEqual(["1"]);
-    expect(
-      filterArchiveMatches([m1, m2], new Set(), { ...noFilter, mapSize: "Compact" }).map((m) => m.matchId),
-    ).toEqual(["2"]);
   });
 
   it("filters to featured-only via the matchId set, leaving 'all' unaffected", () => {
@@ -853,11 +858,15 @@ describe("filterArchiveMatches", () => {
 
   it("combines multiple filters with AND semantics, never OR", () => {
     const matches = [
-      completedMatch({ matchId: "wrong-map", map: "Frost", mapSize: "Normal" }),
-      completedMatch({ matchId: "wrong-size", map: "Sand", mapSize: "Compact" }),
-      completedMatch({ matchId: "both-match", map: "Sand", mapSize: "Normal" }),
+      completedMatch({ matchId: "wrong-map", map: "Frost", degradedCount: 20, decisionCount: 100 }),
+      completedMatch({ matchId: "wrong-cleanliness", map: "Sand", degradedCount: 20, decisionCount: 100 }),
+      completedMatch({ matchId: "both-match", map: "Sand", degradedCount: 0, decisionCount: 100 }),
     ];
-    const result = filterArchiveMatches(matches, new Set(), { ...noFilter, map: "Sand", mapSize: "Normal" });
+    const result = filterArchiveMatches(matches, new Set(), {
+      ...noFilter,
+      map: "Sand",
+      cleanliness: "clean",
+    });
     expect(result.map((m) => m.matchId)).toEqual(["both-match"]);
   });
 });

@@ -58,7 +58,6 @@ export class WatchPage extends LitElement {
   // change. "all" is every filter's neutral/no-op value throughout.
   @state() private filterAgentSlug = "all";
   @state() private filterMap = "all";
-  @state() private filterMapSize = "all";
   @state() private filterFeatured: "all" | "featured" = "all";
   @state() private filterCleanliness: "all" | "clean" | "degraded" = "all";
   /** `<input type=date>` values, `""` when unset -- inclusive on both ends, compared against `completedAt`'s own date portion (UTC, matching the ISO string's own date segment, never locale-shifted). */
@@ -448,7 +447,6 @@ export class WatchPage extends LitElement {
     const filtered = filterArchiveMatches(completed, featuredMatchIds, {
       agentSlug: this.filterAgentSlug,
       map: this.filterMap,
-      mapSize: this.filterMapSize,
       featured: this.filterFeatured,
       cleanliness: this.filterCleanliness,
       dateFrom: this.filterDateFrom === "" ? null : this.filterDateFrom,
@@ -522,15 +520,11 @@ export class WatchPage extends LitElement {
     const mapOptions = [...new Set(completed.map((match) => match.map))].sort(
       (a, b) => a.localeCompare(b),
     );
-    const mapSizeOptions = [
-      ...new Set(completed.map((match) => match.mapSize)),
-    ].sort((a, b) => a.localeCompare(b));
     const onChange =
       (
         prop:
           | "filterAgentSlug"
           | "filterMap"
-          | "filterMapSize"
           | "filterDateFrom"
           | "filterDateTo",
       ) =>
@@ -567,19 +561,6 @@ export class WatchPage extends LitElement {
             <option value="all">${translateText("watch.filter_all")}</option>
             ${mapOptions.map(
               (map) => html`<option value=${map}>${map}</option>`,
-            )}
-          </select>
-        </label>
-        <label class="flex flex-col gap-1 text-xs text-ink-muted">
-          ${translateText("watch.filter_match_size")}
-          <select
-            class="rounded border border-line bg-surface px-2 py-1 text-sm text-ink"
-            .value=${this.filterMapSize}
-            @change=${onChange("filterMapSize")}
-          >
-            <option value="all">${translateText("watch.filter_all")}</option>
-            ${mapSizeOptions.map(
-              (size) => html`<option value=${size}>${size}</option>`,
             )}
           </select>
         </label>
@@ -906,11 +887,18 @@ export function computeDegradedShare(
 }
 
 /**
- * Spec Stage 6 item 4: Agent / map / match-size / Featured-or-All /
- * data-quality / date-range filters, applied together (AND, never OR)
- * over the already-fetched archive. Every filter's neutral value is the
- * literal string `"all"` (or `null` for the two date bounds) — never
- * hidden by a default filter the viewer didn't choose.
+ * Spec Stage 6 item 4: Agent / map / Featured-or-All / data-quality /
+ * date-range filters, applied together (AND, never OR) over the
+ * already-fetched archive. Every filter's neutral value is the literal
+ * string `"all"` (or `null` for the two date bounds) — never hidden by
+ * a default filter the viewer didn't choose.
+ *
+ * A match-size filter dimension was dropped here (P4, 2026-08-02):
+ * `PublicMatch.mapSize` only ever carried one real value ("Normal") in
+ * production, so the UI control offered a choice with no second option
+ * — dead affordance, not a real filter. Re-add cleanly (this same AND
+ * shape, one more `filters.mapSize !== "all"` line) once a second real
+ * `mapSize` value actually exists in the data.
  */
 export function filterArchiveMatches(
   matches: readonly (PublicMatch & { completedAt: string })[],
@@ -918,7 +906,6 @@ export function filterArchiveMatches(
   filters: {
     agentSlug: string;
     map: string;
-    mapSize: string;
     featured: "all" | "featured";
     cleanliness: "all" | "clean" | "degraded";
     dateFrom: string | null;
@@ -933,7 +920,6 @@ export function filterArchiveMatches(
       return false;
     }
     if (filters.map !== "all" && match.map !== filters.map) return false;
-    if (filters.mapSize !== "all" && match.mapSize !== filters.mapSize) return false;
     if (filters.featured === "featured" && !featuredMatchIds.has(match.matchId)) {
       return false;
     }
