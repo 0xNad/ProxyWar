@@ -2113,6 +2113,145 @@ describe("AiLeagueReplayOverlay", () => {
         expect(locationMock.href).toContain("turn=20");
       });
     });
+    it("classifies War Room events into visual-weight tiers (content curation spec item 1, deploy 3.3): eliminations/alliances/betrayals are always tier 1; a first strike touching an agent who later becomes consequential (eliminated, or party to an alliance/betrayal) is tier 2; a first strike between two agents who never become consequential is tier 3", () => {
+      const runID = "broadcast-war-room-tiers-1";
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        currentTurn: 999,
+        decisions: [],
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events: [
+            // Blitz (a2) later gets eliminated below -- its first strike
+            // against Atlas (a1) is tier 2 ("notable") even though the
+            // strike's own importance (70, set by the `event()` fixture
+            // helper) carries no magnitude signal on its own.
+            event(1, 50, "attack", "war", "a2", "Blitz", "a1", "Atlas", "Blitz attacks Atlas."),
+            // Neither Rook (a5) nor Pawn (a6) ever appears in another
+            // event -- their one skirmish never becomes consequential.
+            event(2, 60, "attack", "war", "a5", "Rook", "a6", "Pawn", "Rook attacks Pawn."),
+            event(3, 100, "alliance_formed", "pact", "a3", "Civic", "a4", "Diplo", "Civic and Diplo form an alliance."),
+            event(4, 150, "alliance_break", "betrayal", "a3", "Civic", "a4", "Diplo", "Civic breaks the pact."),
+            event(5, 999, "elimination", "war", "a2", "Blitz", null, null, "Blitz is eliminated."),
+          ],
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+
+      const warRoom = document.querySelector(".broadcast-war-room");
+      expect(warRoom).not.toBeNull();
+      expect(
+        warRoom
+          ?.querySelector('[data-kind="alliance"]')
+          ?.getAttribute("data-tier"),
+      ).toBe("1");
+      expect(
+        warRoom
+          ?.querySelector('[data-kind="betrayal"]')
+          ?.getAttribute("data-tier"),
+      ).toBe("1");
+      expect(
+        warRoom
+          ?.querySelector('[data-kind="elimination"]')
+          ?.getAttribute("data-tier"),
+      ).toBe("1");
+      const firstStrikeItems = warRoom?.querySelectorAll(
+        '[data-kind="first_strike"]',
+      );
+      expect(firstStrikeItems).toHaveLength(2);
+      const tiers = [...(firstStrikeItems ?? [])]
+        .map((item) => item.getAttribute("data-tier"))
+        .sort();
+      // The Blitz-vs-Atlas strike (tier 2, notable) and the never-again-
+      // seen Rook-vs-Pawn strike (tier 3, routine) — a lone tier-3 event
+      // has no adjacent tier-3 neighbor to group with, so it renders as
+      // its own (compact) row rather than a group summary.
+      expect(tiers).toEqual(["2", "3"]);
+    });
+
+    it("collapses a consecutive run of routine (tier 3) first strikes into ONE grouped summary row, expandable to reveal each collapsed skirmish (content curation spec item 1's 'highest-leverage change')", () => {
+      const runID = "broadcast-war-room-grouping-1";
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        currentTurn: 999,
+        decisions: [],
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events: [
+            // Three distinct pairs, none of which ever appears in an
+            // alliance/betrayal/elimination -- all three land as
+            // consecutive tier-3 rows and must collapse into one group.
+            event(1, 100, "attack", "war", "r1", "Rook1", "p1", "Pawn1", "Rook1 attacks Pawn1."),
+            event(2, 110, "attack", "war", "r2", "Rook2", "p2", "Pawn2", "Rook2 attacks Pawn2."),
+            event(3, 120, "attack", "war", "r3", "Rook3", "p3", "Pawn3", "Rook3 attacks Pawn3."),
+            // A real elimination afterward stays its own, ungrouped tier-1
+            // row -- grouping never crosses a tier-1/2 boundary.
+            event(4, 200, "elimination", "war", "e1", "Eliminated One", null, null, "Eliminated One is eliminated."),
+          ],
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+
+      const warRoom = document.querySelector(".broadcast-war-room");
+      const items = warRoom?.querySelectorAll(".broadcast-war-room-item") ?? [];
+      // ONE grouped summary row (replacing all 3 routine strikes) + the
+      // elimination -- not 4 individual rows. This is the acceptance
+      // criterion itself: routine noise is genuinely collapsed, not
+      // re-skinned.
+      expect(items).toHaveLength(2);
+
+      const groupRow = warRoom?.querySelector('[data-tier="3"]');
+      expect(groupRow).not.toBeNull();
+      expect(groupRow?.getAttribute("data-kind")).toBe("first_strike");
+      expect(groupRow?.textContent).toContain(
+        "ai_league_replay.war_room_grouped_skirmishes",
+      );
+
+      // Expand the group and confirm all 3 collapsed skirmishes are
+      // individually visible in the detail (never silently dropped).
+      groupRow
+        ?.querySelector<HTMLButtonElement>(".broadcast-war-room-summary")
+        ?.click();
+      const extra = groupRow?.querySelector(".broadcast-war-room-extra")
+        ?.textContent;
+      expect(extra?.split("\n")).toHaveLength(3);
+
+      // The elimination is untouched -- a real tier-1 event never gets
+      // folded into a routine-noise summary.
+      expect(
+        warRoom?.querySelector('[data-kind="elimination"]'),
+      ).not.toBeNull();
+    });
+
+    it("wraps long agent names in the War Room feed instead of truncating them with no way to see the rest (content curation spec item 3)", () => {
+      const runID = "broadcast-war-room-namewrap-1";
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+      });
+      const styles =
+        document.querySelector("#ai-league-replay-overlay style")
+          ?.textContent ?? "";
+      const headlineRule = styles.match(
+        /\n\s*\.broadcast-war-room-headline\s*\{[^}]*\}/,
+      )?.[0];
+      expect(headlineRule).toBeDefined();
+      expect(headlineRule).toContain("overflow-wrap: break-word");
+      expect(headlineRule).toContain("white-space: normal");
+      expect(headlineRule).not.toContain("text-overflow: ellipsis");
+      expect(headlineRule).not.toContain("white-space: nowrap");
+    });
 
     it("renders an unrestricted bottom timeline for Full Replay and dispatches jump-to-turn on seek", () => {
       const runID = "broadcast-timeline-1";

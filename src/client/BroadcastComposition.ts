@@ -356,6 +356,21 @@ export interface CuratedWarRoomEvent {
   participants: readonly string[];
   /** Extra detail shown only once the row is expanded. Null when there is nothing beyond the headline. */
   expandedDetail: string | null;
+  /**
+   * Visual weight tier (War Room content curation spec, deploy 3.3):
+   * 1 = major (elimination/alliance/betrayal — always full-width, bold,
+   * distinct accent), 2 = notable (current default row style), 3 = routine
+   * (compact, muted — a producer that groups consecutive tier-3 runs into
+   * one collapsed summary row, e.g. groupRoutineWarRoomEvents in
+   * AiLeagueReplayOverlay.ts, is what actually keeps the rendered list from
+   * flooding; this component only ever renders the tier it's given).
+   * Optional and defaults to 2: only Full Replay's curatedWarRoomEvents
+   * currently classifies impact — every other/older producer (Premiere's
+   * live pushWarRoomEvent, every existing test fixture) is left at the
+   * unclassified default rather than forced to pick a tier it has no basis
+   * for computing.
+   */
+  tier?: 1 | 2 | 3;
 }
 
 export interface WarRoomFeedCallbacks {
@@ -429,6 +444,7 @@ export function renderWarRoomEvent(
   // on this key to avoid tearing the scrolled list down each time.
   item.dataset.warRoomEventId = event.id;
   item.dataset.kind = event.kind;
+  item.dataset.tier = String(event.tier ?? 2);
   const summary = element("button", "broadcast-war-room-summary");
   summary.type = "button";
   const expanded =

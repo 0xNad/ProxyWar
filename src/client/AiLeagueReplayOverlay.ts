@@ -2614,6 +2614,48 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         border-radius: 8px;
         background: var(--pw-surface-2, #18202b);
       }
+      /*
+       * Tier 3 "routine" rows (War Room curation spec, deploy 3.3): compact
+       * single-line treatment so a viewer can visually tell "a lot just
+       * happened" from "routine skirmish" by row weight alone, without
+       * reading text (spec acceptance criterion). Consecutive tier-3 runs
+       * are pre-collapsed into one grouped summary row by
+       * groupRoutineWarRoomEvents() before this ever renders, so this only
+       * ever needs to shrink a genuinely routine singleton or a group
+       * summary — never hide content outright.
+       */
+      .broadcast-war-room-item[data-tier="3"] {
+        background: transparent;
+        border-color: transparent;
+      }
+      .broadcast-war-room-item[data-tier="3"] .broadcast-war-room-summary {
+        padding: 3px 9px;
+        opacity: 0.62;
+        font-size: 11px;
+      }
+      .broadcast-war-room-item[data-tier="3"] .broadcast-war-room-glyph,
+      .broadcast-war-room-item[data-tier="3"] .broadcast-war-room-kind {
+        display: none;
+      }
+      /*
+       * Tier 1 "major" rows: full-width, bold, distinct accent border — the
+       * handful of moments (elimination/alliance/betrayal) that actually
+       * matter, weighted to stand out from the tier-2 default style around
+       * them.
+       */
+      .broadcast-war-room-item[data-tier="1"] {
+        border-color: var(--pw-line-strong, #3a4656);
+        background: var(--pw-surface-3, #202b3a);
+      }
+      .broadcast-war-room-item[data-tier="1"] .broadcast-war-room-summary {
+        padding: 9px 11px;
+      }
+      .broadcast-war-room-item[data-tier="1"] .broadcast-war-room-headline {
+        font-weight: 800;
+      }
+      .broadcast-war-room-item[data-tier="1"] .broadcast-war-room-glyph {
+        font-size: 15px;
+      }
       .broadcast-war-room-summary {
         display: flex;
         align-items: center;
@@ -2640,12 +2682,20 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         letter-spacing: 0.04em;
         color: var(--pw-info, #56c7f5);
       }
+      /*
+       * Name truncation fix (War Room curation spec item 3, deploy 3.3):
+       * a fixed nowrap+ellipsis silently cut off long agent names
+       * ("Captain Underpants Maximum strike…", "K1Z Mickey Mouse strikes
+       * SIAN VOID…") with no way to see the rest. The row already lives in
+       * its own repositioned column with room to grow, so this now wraps
+       * onto a second line instead of truncating — nothing is ever
+       * silently cut off.
+       */
       .broadcast-war-room-headline {
         flex: 1 1 auto;
         min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+        overflow-wrap: break-word;
+        white-space: normal;
       }
       .broadcast-war-room-turn {
         flex: 0 0 auto;
@@ -2674,9 +2724,20 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       .broadcast-war-room-detail[hidden] {
         display: none;
       }
-      .broadcast-war-room-reason,
+      .broadcast-war-room-reason {
+        margin: 0;
+      }
+      /*
+       * white-space: pre-line (not the plain margin: 0 every other War
+       * Room detail paragraph gets): a grouped tier-3 summary row
+       * (groupRoutineWarRoomEvents, spec item 1) packs each collapsed
+       * skirmish's headline into this field newline-separated, so a
+       * viewer who expands "+N more skirmishes" sees one line per
+       * skirmish instead of one run-on sentence.
+       */
       .broadcast-war-room-extra {
         margin: 0;
+        white-space: pre-line;
       }
       .broadcast-war-room-jump {
         justify-self: start;
@@ -4308,7 +4369,9 @@ function buildWarRoomSection(
  * forward tick — a thin `patchDomWindowForward` adapter wiring the War
  * Room's own list selector, row builder, and "show earlier" affordance
  * into the shared primitive (see that function's own doc for the full
- * correctness rationale).
+ * correctness rationale — including the auto-follow-at-tail /
+ * height-compensated-when-scrolled-up scroll preservation spec item 2
+ * needs; already implemented there, not duplicated here).
  */
 function patchWarRoomWindowForward(
   section: HTMLElement,
@@ -5388,9 +5451,104 @@ function planChangeWarRoomEvents(
         decision.planRationale.trim().length > 0
           ? decision.planRationale.trim()
           : null,
+      tier: 2,
     });
   }
   return curated;
+}
+
+/**
+ * Impact proxy for War Room tiering (content curation spec item 1, deploy
+ * 3.3): the raw telemetry carries no per-strike magnitude field at all —
+ * every "attack" event is emitted at a flat importance=70 regardless of how
+ * much territory changed hands (verified against production
+ * spectator-telemetry.json: every attack across a full match sampled at
+ * exactly importance 70, elimination at exactly 90 — there is no variance
+ * to read a "was this the biggest hit of the match" signal from). So a
+ * first strike's own importance can never distinguish "routine" from
+ * "notable". The closest signal actually present in the data: did either
+ * participant go on to matter to the match's outcome (get eliminated, or
+ * enter/break an alliance) at some point? A first strike touching one of
+ * those agents is "notable" (tier 2); one between two agents who never
+ * appear in a major moment for the rest of the match is "routine" (tier
+ * 3) and gets collapsed by groupRoutineWarRoomEvents below.
+ */
+function consequentialAgentIDs(
+  events: readonly AiLeagueSpectatorEvent[],
+): Set<string> {
+  const ids = new Set<string>();
+  for (const event of events) {
+    const isMajor =
+      event.kind === "elimination" ||
+      event.kind === "alliance_formed" ||
+      (event.kind === "alliance_break" && event.tone === "betrayal");
+    if (!isMajor) continue;
+    ids.add(event.actorAgentID);
+    if (event.targetAgentID !== null) ids.add(event.targetAgentID);
+  }
+  return ids;
+}
+
+/**
+ * Collapses consecutive runs of tier-3 "routine" War Room events (length
+ * >= 2) into ONE synthetic tier-3 summary event per run — spec item 1's
+ * "this is the single highest-leverage change": on a large match, routine
+ * first-strike noise between agents that never become consequential is
+ * exactly what floods the list. A lone tier-3 event with no adjacent
+ * tier-3 neighbor is left as-is (nothing to group). A run never crosses a
+ * tier-1/2 event, so grouping only ever merges rows that were already
+ * sitting next to each other in the curated order.
+ *
+ * Applied ONCE to the full ordered array `curatedWarRoomEvents` returns
+ * (never per-tick or per-window-slice), so the same underlying events
+ * always collapse into the same group across ticks — required for
+ * `patchWarRoomWindowForward`'s position-indexed incremental patching over
+ * this array to stay correct.
+ */
+function groupRoutineWarRoomEvents(
+  events: readonly CuratedWarRoomEvent[],
+): CuratedWarRoomEvent[] {
+  const grouped: CuratedWarRoomEvent[] = [];
+  let run: CuratedWarRoomEvent[] = [];
+  const flushRun = () => {
+    if (run.length === 0) return;
+    if (run.length === 1) {
+      grouped.push(run[0]);
+    } else {
+      const first = run[0];
+      const last = run[run.length - 1];
+      const participants = [...new Set(run.flatMap((e) => e.participants))];
+      grouped.push({
+        id: `war-room-group:${first.id}:${last.id}`,
+        kind: last.kind,
+        turn: last.turn,
+        sequence: last.sequence,
+        headline: translateText("ai_league_replay.war_room_grouped_skirmishes", {
+          count: run.length,
+        }),
+        publicReason: null,
+        participants,
+        expandedDetail: run
+          .map(
+            (e) =>
+              `${translateText("broadcast.war_room_turn", { turn: e.turn })} — ${e.headline}`,
+          )
+          .join("\n"),
+        tier: 3,
+      });
+    }
+    run = [];
+  };
+  for (const event of events) {
+    if (event.tier === 3) {
+      run.push(event);
+    } else {
+      flushRun();
+      grouped.push(event);
+    }
+  }
+  flushRun();
+  return grouped;
 }
 
 /**
@@ -5411,6 +5569,13 @@ function planChangeWarRoomEvents(
  * this overlay only ever sees a live, forward-only frame stream (no stored
  * turn-by-turn territory series), so neither is derivable without
  * fabricating a value.
+ *
+ * Content curation (spec item 1, deploy 3.3): every event is classified
+ * into a tier (see CuratedWarRoomEvent.tier's own doc and
+ * consequentialAgentIDs above), then consecutive tier-3 runs are collapsed
+ * via groupRoutineWarRoomEvents before returning — the RETURNED array is
+ * already the one every caller (War Room ticker, lower thirds, timeline
+ * pulse dedup) should render directly.
  */
 function curatedWarRoomEvents(
   telemetry: AiLeagueSpectatorTelemetry | null,
@@ -5418,6 +5583,7 @@ function curatedWarRoomEvents(
 ): CuratedWarRoomEvent[] {
   const curated: CuratedWarRoomEvent[] = [];
   const firstStrikeSeen = new Set<string>();
+  const consequential = consequentialAgentIDs(telemetry?.events ?? []);
   const ordered = [...(telemetry?.events ?? [])].sort(
     (a, b) => a.turnNumber - b.turnNumber || a.sequence - b.sequence,
   );
@@ -5433,6 +5599,10 @@ function curatedWarRoomEvents(
       const pairKey = `${event.actorAgentID}|${event.targetAgentID ?? target}`;
       if (!firstStrikeSeen.has(pairKey)) {
         firstStrikeSeen.add(pairKey);
+        const isConsequential =
+          consequential.has(event.actorAgentID) ||
+          (event.targetAgentID !== null &&
+            consequential.has(event.targetAgentID));
         curated.push({
           id: event.id,
           kind: "first_strike",
@@ -5445,6 +5615,7 @@ function curatedWarRoomEvents(
           publicReason,
           participants: [actor, target],
           expandedDetail: null,
+          tier: isConsequential ? 2 : 3,
         });
       }
       continue;
@@ -5463,6 +5634,7 @@ function curatedWarRoomEvents(
         publicReason,
         participants: [actor, target],
         expandedDetail: null,
+        tier: 1,
       });
       continue;
     }
@@ -5479,6 +5651,7 @@ function curatedWarRoomEvents(
         publicReason,
         participants: [actor, target],
         expandedDetail: null,
+        tier: 1,
       });
       continue;
     }
@@ -5494,11 +5667,15 @@ function curatedWarRoomEvents(
         publicReason,
         participants: [actor],
         expandedDetail: null,
+        tier: 1,
       });
     }
   }
   curated.push(...planChangeWarRoomEvents(decisions));
-  return curated.sort((a, b) => a.turn - b.turn || a.sequence - b.sequence);
+  const sorted = curated.sort(
+    (a, b) => a.turn - b.turn || a.sequence - b.sequence,
+  );
+  return groupRoutineWarRoomEvents(sorted);
 }
 
 /**

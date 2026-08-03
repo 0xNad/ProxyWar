@@ -1342,6 +1342,7 @@
     "event_nuke": "{actor} escalates nuclear pressure",
     "event_nuke_target": "{actor} escalates nuclear pressure against {target}",
     "event_plan_change": "{actor} shifts plan to {plan}",
+    "war_room_grouped_skirmishes": "{count, plural, one {+# more skirmish} other {+# more skirmishes}}",
     "timeline_finish": "Match ends"
   },
   "error_modal": {
