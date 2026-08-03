@@ -1,10 +1,15 @@
 import { html, LitElement, TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
+import { aiLeagueSpectatorDisplayName } from "../../../client/AiLeagueReplayMode";
 import { translateText } from "../../../client/Utils";
 import { EventBus } from "../../../core/EventBus";
 import { RankedType } from "../../../core/game/Game";
 import { GameUpdateType } from "../../../core/game/GameUpdates";
 import { GameView } from "../../../core/game/GameView";
+import {
+  ANONYMOUS_NAMES_KEY,
+  USER_SETTINGS_CHANGED_EVENT,
+} from "../../../core/game/UserSettings";
 import { getUserMe } from "../../Api";
 import "../../components/CosmeticButton";
 import {
@@ -42,14 +47,46 @@ export class WinModal extends LitElement implements Layer {
 
   private _title: string;
 
+  /**
+   * P0 fix (2026-08-03): the "other player won" title used to bake in
+   * `winner.displayName()` (a real AI League agent's identity — see
+   * `AiLeagueReplayMode.ts`'s own doc for why `PlayerView.displayName()`
+   * is NOT the safe-by-default value it is in a normal multiplayer game)
+   * once, inside `tick()`, and never revisited it. A viewer who toggled
+   * "Anonymous Names" ON only AFTER the match had already ended still saw
+   * the real winner's name — this modal is a top-level `<win-modal>`
+   * element (index.html), entirely outside `AiLeagueReplayOverlay.ts`'s
+   * `renderDetails()` rebuild path that every OTHER surface's retoggle fix
+   * relies on, so that fix never reached it. Kept so
+   * `onAnonymousNamesChange` can re-derive `_title` without needing the
+   * original `PlayerView` again. `null` whenever `_title` was set by any
+   * OTHER branch (own win, own death, team win, nation win) — none of
+   * those carry a real agent identity to anonymize.
+   */
+  private otherPlayerWinnerRawName: string | null = null;
 
-  // Override to prevent shadow DOM creation
-  createRenderRoot() {
-    return this;
+  private readonly onAnonymousNamesChange = (): void => {
+    if (this.otherPlayerWinnerRawName === null) return;
+    this._title = translateText("win_modal.other_won", {
+      player: aiLeagueSpectatorDisplayName(this.otherPlayerWinnerRawName),
+    });
+    this.requestUpdate();
+  };
+
+  connectedCallback() {
+    super.connectedCallback();
+    window.addEventListener(
+      `${USER_SETTINGS_CHANGED_EVENT}:${ANONYMOUS_NAMES_KEY}`,
+      this.onAnonymousNamesChange,
+    );
   }
 
-  constructor() {
-    super();
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    window.removeEventListener(
+      `${USER_SETTINGS_CHANGED_EVENT}:${ANONYMOUS_NAMES_KEY}`,
+      this.onAnonymousNamesChange,
+    );
   }
 
   render() {
@@ -212,6 +249,7 @@ export class WinModal extends LitElement implements Layer {
     ) {
       this.hasShownDeathModal = true;
       this._title = translateText("win_modal.died");
+      this.otherPlayerWinnerRawName = null;
       this.show();
     }
     const updates = this.game.updatesSinceLastTick();
@@ -221,6 +259,7 @@ export class WinModal extends LitElement implements Layer {
         // ...
       } else if (wu.winner[0] === "team") {
         this.eventBus.emit(new SendWinnerEvent(wu.winner, wu.allPlayersStats));
+        this.otherPlayerWinnerRawName = null;
         if (wu.winner[1] === this.game.myPlayer()?.team()) {
           this._title = translateText("win_modal.your_team");
           this.isWin = true;
@@ -245,6 +284,7 @@ export class WinModal extends LitElement implements Layer {
           nation: wu.winner[1],
         });
         this.isWin = false;
+        this.otherPlayerWinnerRawName = null;
         this.eventBus.emit(new FitWholeMapEvent());
         this.show();
       } else {
@@ -262,10 +302,14 @@ export class WinModal extends LitElement implements Layer {
         ) {
           this._title = translateText("win_modal.you_won");
           this.isWin = true;
+          this.otherPlayerWinnerRawName = null;
           crazyGamesSDK.happytime();
         } else {
+          this.otherPlayerWinnerRawName = winner.displayName();
           this._title = translateText("win_modal.other_won", {
-            player: winner.displayName(),
+            player: aiLeagueSpectatorDisplayName(
+              this.otherPlayerWinnerRawName,
+            ),
           });
           this.isWin = false;
         }

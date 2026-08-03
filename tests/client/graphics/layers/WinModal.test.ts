@@ -4,15 +4,24 @@ import { GameUpdateType } from "../../../../src/core/game/GameUpdates";
 import { RankedType } from "../../../../src/core/game/Game";
 
 vi.mock("../../../../src/client/Utils", () => ({
-  translateText: vi.fn((key: string) => {
-    const translations: Record<string, string> = {
-      "win_modal.exit": "Exit",
-      "win_modal.requeue": "Play Again",
-      "win_modal.keep": "Keep Playing",
-      "win_modal.spectate": "Spectate",
-    };
-    return translations[key] || key;
-  }),
+  translateText: vi.fn(
+    (key: string, params?: Record<string, string | number>) => {
+      const translations: Record<string, string> = {
+        "win_modal.exit": "Exit",
+        "win_modal.requeue": "Play Again",
+        "win_modal.keep": "Keep Playing",
+        "win_modal.spectate": "Spectate",
+        "win_modal.other_won": "{player} won",
+        "win_modal.nation_won": "{nation} nation won",
+      };
+      const message = translations[key] || key;
+      if (params === undefined) return message;
+      return Object.entries(params).reduce(
+        (text, [name, value]) => text.replaceAll(`{${name}}`, String(value)),
+        message,
+      );
+    },
+  ),
   getGamesPlayed: vi.fn(() => 10),
   isInIframe: vi.fn(() => false),
   TUTORIAL_VIDEO_URL: "https://example.com/tutorial",
@@ -95,6 +104,7 @@ describe("WinModal Requeue", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    localStorage.clear();
   });
 
   describe("isRankedGame detection", () => {
@@ -267,6 +277,132 @@ describe("WinModal Requeue", () => {
       const url = new URL("http://localhost:9000/");
       const hasRequeue = url.searchParams.has("requeue");
       expect(hasRequeue).toBe(false);
+    });
+  });
+
+  // P0 fix (2026-08-03): WinModal is a top-level `<win-modal>` element
+  // (index.html), entirely outside AiLeagueReplayOverlay.ts's
+  // renderDetails() rebuild path -- the "Anonymous Names" setting never
+  // reached the winner's name here, both at first display (the raw
+  // PlayerView.displayName() was never routed through
+  // aiLeagueSpectatorDisplayName at all) and on a mid-session toggle
+  // (nothing ever re-derived the already-baked title).
+  describe("Anonymous Names (deploy 3.9, item 2)", () => {
+    interface WinModalAnonymizeHooks {
+      _title: string;
+      eventBus: unknown;
+      game: unknown;
+      tick: () => void;
+      connectedCallback: () => void;
+      disconnectedCallback: () => void;
+    }
+
+    function winGame(displayName: string): MinimalGame {
+      const winner: MinimalWinnerPlayer = {
+        isPlayer: () => true,
+        clientID: () => "WINNER_CLIENT",
+        displayName: () => displayName,
+      };
+      return {
+        myPlayer: () => null,
+        updatesSinceLastTick: () => ({
+          [GameUpdateType.Win]: [
+            { winner: ["player", "WINNER_CLIENT"], allPlayersStats: {} },
+          ],
+        }),
+        playerByClientID: () => winner,
+        inSpawnPhase: () => false,
+        config: () => ({ gameConfig: () => ({ rankedType: undefined }) }),
+      };
+    }
+
+    // UserSettings keeps a private static in-memory cache alongside
+    // localStorage -- clearing localStorage in afterEach does NOT reset
+    // it, so a prior test's toggleRandomName() call leaks into the next
+    // test's starting state. Checking-then-toggling (same idiom
+    // AiLeagueReplayMode.test.ts already uses) is robust regardless of
+    // what an earlier test in this file left behind.
+    async function setAnonymousNames(enabled: boolean): Promise<void> {
+      const { UserSettings } = await import(
+        "../../../../src/core/game/UserSettings"
+      );
+      const settings = new UserSettings();
+      if (settings.anonymousNames() !== enabled) {
+        settings.toggleRandomName();
+      }
+    }
+
+    it("anonymizes the winner's name in the title when Anonymous Names is already on", async () => {
+      await setAnonymousNames(true);
+      const { WinModal } = await import(
+        "../../../../src/client/graphics/layers/WinModal"
+      );
+      const modal = new WinModal() as unknown as WinModalAnonymizeHooks;
+      modal.eventBus = { emit: () => {} };
+      modal.game = winGame("Real Agent Name");
+
+      modal.tick();
+
+      expect(modal._title).not.toContain("Real Agent Name");
+      expect(modal._title).toMatch(/Agent \d+/);
+    });
+
+    it("re-anonymizes the already-displayed winner name the instant Anonymous Names toggles mid-session, both directions", async () => {
+      await setAnonymousNames(false);
+      const { UserSettings } = await import(
+        "../../../../src/core/game/UserSettings"
+      );
+      const { WinModal } = await import(
+        "../../../../src/client/graphics/layers/WinModal"
+      );
+      const modal = new WinModal() as unknown as WinModalAnonymizeHooks;
+      modal.eventBus = { emit: () => {} };
+      modal.game = winGame("Real Agent Name");
+      modal.connectedCallback();
+
+      modal.tick();
+      expect(modal._title).toContain("Real Agent Name");
+
+      new UserSettings().toggleRandomName();
+      expect(modal._title).not.toContain("Real Agent Name");
+      expect(modal._title).toMatch(/Agent \d+/);
+
+      new UserSettings().toggleRandomName();
+      expect(modal._title).toContain("Real Agent Name");
+
+      modal.disconnectedCallback();
+    });
+
+    it("never touches the title for the local player's own win, team win, or nation win (nothing to anonymize)", async () => {
+      await setAnonymousNames(true);
+      const { UserSettings } = await import(
+        "../../../../src/core/game/UserSettings"
+      );
+      const { WinModal } = await import(
+        "../../../../src/client/graphics/layers/WinModal"
+      );
+      const modal = new WinModal() as unknown as WinModalAnonymizeHooks;
+      modal.eventBus = { emit: () => {} };
+      modal.connectedCallback();
+      modal.game = {
+        myPlayer: () => null,
+        updatesSinceLastTick: () => ({
+          [GameUpdateType.Win]: [
+            { winner: ["nation", "Real Nation Name"], allPlayersStats: {} },
+          ],
+        }),
+        inSpawnPhase: () => false,
+        config: () => ({ gameConfig: () => ({ rankedType: undefined }) }),
+      };
+
+      modal.tick();
+      expect(modal._title).toContain("Real Nation Name");
+
+      // A settings toggle after a nation win must never crash or fabricate
+      // a player-title recompute — there is no otherPlayerWinnerRawName to
+      // re-derive from.
+      new UserSettings().toggleRandomName();
+      expect(modal._title).toContain("Real Nation Name");
     });
   });
 });
