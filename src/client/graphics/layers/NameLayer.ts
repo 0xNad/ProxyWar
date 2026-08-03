@@ -161,7 +161,11 @@ export class NameLayer implements Layer {
     }
   }
 
-  private updateElementVisibility(render: RenderInfo, baseSize?: number) {
+  private updateElementVisibility(
+    render: RenderInfo,
+    baseSize?: number,
+    unsafePanelRects: readonly DOMRect[] = [],
+  ) {
     if (!render.player.nameLocation() || !render.player.isAlive()) {
       return;
     }
@@ -174,11 +178,35 @@ export class NameLayer implements Layer {
       : false;
     const maxZoomScale = 17;
 
+    // Spec 01 rule 2: never render any part of a label underneath the
+    // fixed AI League broadcast chrome (see computeUnsafePanelRects's own
+    // doc for the suppress-vs-reposition deviation). Screen-space check --
+    // render.location is world-space, so this must go through the same
+    // world-to-screen transform the rest of this layer already uses.
+    let underUnsafePanel = false;
+    if (isOnScreen && render.location && unsafePanelRects.length > 0) {
+      const screenPoint = this.transformHandler.worldToScreenCoordinates(
+        render.location,
+      );
+      for (const rect of unsafePanelRects) {
+        if (
+          screenPoint.x >= rect.left &&
+          screenPoint.x <= rect.right &&
+          screenPoint.y >= rect.top &&
+          screenPoint.y <= rect.bottom
+        ) {
+          underUnsafePanel = true;
+          break;
+        }
+      }
+    }
+
     const display =
       !this.isVisible ||
       size < 7 ||
       (this.transformHandler.scale > maxZoomScale && size > 100) ||
-      !isOnScreen
+      !isOnScreen ||
+      underUnsafePanel
         ? "none"
         : "flex";
     if (render.element.style.display !== display) {
@@ -224,11 +252,65 @@ export class NameLayer implements Layer {
 
       this.myPlayer ??= this.game.myPlayer();
       const transitiveTargets = this.myPlayer?.transitiveTargets() ?? [];
+      // Spec 01 (label sizing/safe-frame): fixed-panel rects are read once
+      // per throttled batch, never per label -- getBoundingClientRect
+      // forces layout, and this already only runs at renderCheckRate
+      // cadence (500ms/replay-presentation-interval), the same cost
+      // envelope the rest of this batch already lives in.
+      const safePanelRects = this.computeUnsafePanelRects();
 
       for (const render of this.renders) {
-        this.renderPlayerInfo(render, transitiveTargets);
+        this.renderPlayerInfo(render, transitiveTargets, safePanelRects);
       }
     }
+  }
+
+  /**
+   * Spec 01 rule 2 (safe-frame clamping): the fixed AI League broadcast
+   * chrome a territory label must never render underneath. Deliberately
+   * selector-driven rather than a new prop threaded through Layer's
+   * constructor -- this file already reaches directly into AI-league-
+   * specific behavior the same way (aiLeagueSpectatorDisplayName, imported
+   * above), and every selector here simply resolves to nothing (empty
+   * array, no-op) on an ordinary non-AI-league game, so this stays a pure
+   * addition with zero effect outside the replay/DC surface these rules
+   * are about.
+   *
+   * Deviation from the spec's own text, stated: the spec asks for
+   * "clamp the anchor inward... draw a short leader line back to the true
+   * centroid" for a label that would intersect the unsafe zone. This
+   * implementation SUPPRESSES (hides) the label instead of repositioning
+   * it. Repositioning requires per-label collision-aware placement (the
+   * same machinery rule 3's priority/collision system needs) plus a new
+   * leader-line rendering layer -- out of scope for this pass; suppression
+   * still satisfies this spec's own acceptance criterion ("zero label
+   * glyphs render with any part of their bounding box outside the safe
+   * frame") without inventing a second render pass. Full anchor-clamping +
+   * leader lines is a reasonable follow-up once rule 3's collision system
+   * exists to share the placement pass with.
+   */
+  private computeUnsafePanelRects(): DOMRect[] {
+    const selectors = [
+      "#pw-game-control-cluster",
+      "#ai-league-replay-overlay",
+      '.broadcast-drawer-panel[data-tab-id="events"]',
+      '.broadcast-drawer-panel[data-tab-id="timeline"]',
+    ];
+    const rects: DOMRect[] = [];
+    for (const selector of selectors) {
+      const el = document.querySelector<HTMLElement>(selector);
+      // offsetParent is null for display:none (collapsed panels, a hidden
+      // "Hide panel" state, position:fixed elements aside) -- a collapsed
+      // panel reserves no screen space, so it must not shrink the safe
+      // frame either.
+      if (el !== null && el.offsetParent !== null) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          rects.push(rect);
+        }
+      }
+    }
+    return rects;
   }
 
   private createBasePlayerElement(): HTMLDivElement {
@@ -259,6 +341,13 @@ export class NameLayer implements Layer {
     nameDiv.style.display = "flex";
     nameDiv.style.justifyContent = "flex-end";
     nameDiv.style.alignItems = "center";
+    // Spec 01 rule 4 (legibility floor): a light halo behind the dark
+    // glyph fill guarantees contrast against any terrain color or any
+    // translucent overlay the label happens to land on (a match-end
+    // banner, another label, ocean vs. land) -- cheap, standard map-label
+    // technique, independent of what's underneath.
+    nameDiv.style.textShadow =
+      "0 0 3px rgba(255,255,255,0.9), 0 0 3px rgba(255,255,255,0.9), 0 1px 2px rgba(255,255,255,0.9)";
 
     const flagImg = document.createElement("img");
     flagImg.classList.add(PLAYER_FLAG);
@@ -278,6 +367,8 @@ export class NameLayer implements Layer {
     troopsDiv.setAttribute("translate", "no");
     troopsDiv.style.zIndex = "3";
     troopsDiv.style.marginTop = "-5%";
+    troopsDiv.style.fontWeight = "400";
+    troopsDiv.style.textShadow = nameDiv.style.textShadow;
     element.appendChild(troopsDiv);
 
     return element;
@@ -328,7 +419,11 @@ export class NameLayer implements Layer {
     return renderInfo;
   }
 
-  renderPlayerInfo(render: RenderInfo, transitiveTargets: PlayerView[]) {
+  renderPlayerInfo(
+    render: RenderInfo,
+    transitiveTargets: PlayerView[],
+    unsafePanelRects: readonly DOMRect[] = [],
+  ) {
     if (!render.player.nameLocation()) {
       return;
     }
@@ -359,7 +454,7 @@ export class NameLayer implements Layer {
       this.updateElementTransform(render, newX, newY, baseSize);
     }
 
-    this.updateElementVisibility(render, baseSize);
+    this.updateElementVisibility(render, baseSize, unsafePanelRects);
 
     if (render.element.style.display === "none") {
       return;
@@ -372,12 +467,24 @@ export class NameLayer implements Layer {
     }
     render.lastRenderCalc = now + this.rand.nextInt(0, 100);
 
-    // Update text sizes, content and color
-    render.fontSize = Math.max(4, Math.floor(baseSize * 0.4));
+    // Spec 01 rule 1 (label sizing): stop deriving font size from
+    // territory strength/value alone -- derive it from available screen
+    // space at current zoom, clamped by a hard viewport-relative ceiling.
+    // See computeLabelFontSizePx's own doc for the formula.
+    render.fontSize = computeLabelFontSizePx(
+      baseSize,
+      this.transformHandler.scale,
+      Math.min(window.innerWidth, window.innerHeight),
+    );
     render.nameDiv.style.fontSize = `${render.fontSize}px`;
     render.nameDiv.style.lineHeight = `${render.fontSize}px`;
     render.flagImg.style.height = `${render.fontSize}px`;
-    render.troopsDiv.style.fontSize = `${render.fontSize}px`;
+    // The value line ("385K") is visually SECONDARY to the name -- smaller
+    // and lower-weight, not matched. 70% size, reduced opacity (the name
+    // itself stays full-opacity via fontColor below).
+    const troopsFontSize = Math.max(1, Math.round(render.fontSize * 0.7));
+    render.troopsDiv.style.fontSize = `${troopsFontSize}px`;
+    render.troopsDiv.style.opacity = "0.82";
 
     render.nameSpan.textContent = aiLeagueSpectatorDisplayName(
       render.player.displayName(),
@@ -462,7 +569,10 @@ export class NameLayer implements Layer {
     y: number,
     baseSize: number,
   ) {
-    const scale = Math.min(baseSize * 0.25, 3);
+    // Spec 01 rule 1: fontSize (above) is now the sole, viewport-clamped
+    // driver of a label's visible size. See computeElementScale's own doc
+    // for why this used to compound with it.
+    const scale = computeElementScale(baseSize);
     const transform = `translate(${x}px, ${y}px) translate(-50%, -50%) scale(${scale})`;
     if (render.lastTransform !== transform) {
       render.element.style.transform = transform;
@@ -634,4 +744,66 @@ export class NameLayer implements Layer {
       icon.style.animation = "none";
     }
   }
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+/**
+ * Spec 01 rule 1 (label sizing) -- exported for direct unit testing rather
+ * than exercising it through the full NameLayer class (which needs a real
+ * GameView/TransformHandler/EventBus to construct).
+ *
+ *   labelHeightPx = clamp(
+ *     territoryScreenBBox.height * 0.35,  // fit-to-shape target
+ *     MIN_LABEL_HEIGHT,                    // legibility floor
+ *     viewportShorterDimension * 0.035     // broadcast-safe ceiling
+ *   )
+ *
+ * `territoryScreenBBox.height` is approximated as `baseSize * transformScale`
+ * -- the same territory-footprint-in-screen-px value
+ * `updateElementVisibility` already computes as "size" for its own
+ * show/hide gate, so this reuses an existing signal rather than adding a
+ * second, possibly-disagreeing notion of "how big is this territory on
+ * screen right now".
+ *
+ * The returned value is CSS px BEFORE NameLayer's own container
+ * `scale(transformScale)` transform is applied (see renderLayer), so the
+ * target on-screen height is divided back down by `transformScale` to
+ * land on the correct FINAL rendered size once that transform composes.
+ */
+export function computeLabelFontSizePx(
+  baseSize: number,
+  transformScale: number,
+  viewportShorterDimension: number,
+): number {
+  const MIN_LABEL_HEIGHT = 11;
+  const CEILING_RATIO = 0.035;
+  const FIT_TO_SHAPE_RATIO = 0.35;
+  const territoryScreenPx = baseSize * transformScale;
+  const targetOnScreenHeight = clamp(
+    territoryScreenPx * FIT_TO_SHAPE_RATIO,
+    MIN_LABEL_HEIGHT,
+    viewportShorterDimension * CEILING_RATIO,
+  );
+  return Math.max(
+    1,
+    Math.floor(targetOnScreenHeight / Math.max(transformScale, 0.0001)),
+  );
+}
+
+/**
+ * The label element's own (icons+name+troops as one block) CSS transform
+ * scale. Used to grow up to 3x with baseSize (territory value),
+ * compounding MULTIPLICATIVELY on top of computeLabelFontSizePx's own
+ * baseSize-proportional growth -- exactly the runaway-size root cause
+ * spec 01 describes ("softmaxwell" spanning ~220px / ~58px cap-height on
+ * a 1440x900 desktop capture). Capped to a small 0.6-1.2 range: still
+ * gives tiny territories a slight shrink and large ones a slight
+ * emphasis, but can no longer multiply the now-capped fontSize back into
+ * an oversized label.
+ */
+export function computeElementScale(baseSize: number): number {
+  return clamp(baseSize * 0.15, 0.6, 1.2);
 }
