@@ -74,6 +74,10 @@ import {
   watchReplayPositionForResume,
 } from "./ReplayPositionPersistence";
 import {
+  loadPersistedReplaySpeed,
+  watchReplaySpeedForResume,
+} from "./ReplaySpeedPersistence";
+import {
   mountArchivedReplayPremiereOverlay,
   readReplayPremiereArchivePayload,
   type ReplayPremiereArchivePayload,
@@ -1765,6 +1769,43 @@ class Client {
     }
     if (options.source !== "coworld-replay") {
       attemptCleanups.push(watchReplayPositionForResume(runID));
+    }
+
+    // P0 fix (2026-08-03): restore the viewer's own last manually-picked
+    // speed across the `?turn=` backward-seek reload path -- see
+    // ReplaySpeedPersistence.ts's own doc for why the in-memory
+    // userOverrodeReplaySpeed latch alone can't survive a real page
+    // reload. Excluded the same way position-resume/clip-preview are:
+    // `coworld-replay` has no equivalent session, and a clip preview's
+    // target speed is an explicit render parameter, never a viewer pick
+    // to restore. Re-applied through the SAME `ReplaySpeedChangeEvent`
+    // `source: "user"` path a live in-session speed change already uses
+    // (not a separate bypass), so `onReplaySpeedChangeForLatch` above
+    // re-arms `userOverrodeReplaySpeed` exactly as it would for a fresh
+    // manual pick -- automatic pacing (Director Cut, the archived-replay
+    // fastest-default) stays locked out for the rest of this reload too.
+    if (options.source !== "coworld-replay" && previewTarget === null) {
+      const persistedSpeed = loadPersistedReplaySpeed(runID);
+      if (persistedSpeed !== null) {
+        const restoreSpeedAfterFirstFrame = () => {
+          this.eventBus.emit(new ReplaySpeedChangeEvent(persistedSpeed, "user"));
+          document.removeEventListener(
+            "ai-league-replay-frame",
+            restoreSpeedAfterFirstFrame,
+          );
+        };
+        document.addEventListener(
+          "ai-league-replay-frame",
+          restoreSpeedAfterFirstFrame,
+        );
+        attemptCleanups.push(() =>
+          document.removeEventListener(
+            "ai-league-replay-frame",
+            restoreSpeedAfterFirstFrame,
+          ),
+        );
+      }
+      attemptCleanups.push(watchReplaySpeedForResume(runID, this.eventBus));
     }
 
     const hydrateAfterFirstFrame = () => {
