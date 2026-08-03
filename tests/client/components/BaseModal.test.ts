@@ -15,8 +15,14 @@ import { BaseModal } from "../../../src/client/components/BaseModal";
 @customElement("base-modal-fixture")
 class BaseModalFixture extends BaseModal {
   render() {
+    // `hideCloseButton`: `<o-modal>`'s own close "X" is now a real,
+    // keyboard-focusable button (modal-chrome accessibility fix), so it
+    // would otherwise be the first element this focus trap lands on.
+    // That behavior is covered directly by `GameInfoModal.test.ts`
+    // ("close button is keyboard-focusable"); this fixture stays scoped
+    // to the trap's own content-ordering mechanics.
     return html`
-      <o-modal title="Fixture">
+      <o-modal title="Fixture" hideCloseButton>
         <button id="fixture-first">first</button>
         <input id="fixture-middle" />
         <button id="fixture-last">last</button>

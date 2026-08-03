@@ -17,6 +17,7 @@ import {
   renderMatchTimeline,
   renderWarRoomFeed,
   renderWarRoomEvent,
+  patchKeyedRegion,
   type AnalystActionKindCount,
   type AnalystDecisionRow,
   type AnalystEventRow,
@@ -3184,8 +3185,14 @@ function mountAiLeagueDiplomacyStrip(
   win.__aiLeagueDiplomacyCleanup?.();
   const directiveByName = latestDirectiveByPlayer(decisions);
   // Frames fire every game tick; standings only change on ownership/diplomacy
-  // events. Skipping identical re-renders avoids per-tick innerHTML churn
-  // (layout + listener teardown) on the hottest spectator surface.
+  // events. Skipping identical re-renders avoids per-tick DOM churn (layout
+  // + listener teardown) on the hottest spectator surface. When content DOES
+  // change, patch the scrolled container's rows in place, keyed by player
+  // identity (`patchKeyedRegion`) — this region is independently scrollable
+  // (`[data-ai-league-diplomacy-rows] { overflow-y: auto }`, spec: standings
+  // panel), and a wholesale `container.innerHTML =` reset its `scrollTop` to
+  // 0 on every ownership/diplomacy change during active play — the "teleports
+  // me back when I try to scroll in director cut" class.
   let lastRowsHtml = "";
   const onFrame = (event: Event) => {
     const detail = (event as CustomEvent<AiLeagueReplayFrameEventDetail>)
@@ -3206,7 +3213,9 @@ function mountAiLeagueDiplomacyStrip(
       return;
     }
     lastRowsHtml = rowsHtml;
-    container.innerHTML = rowsHtml;
+    const fresh = document.createElement("div");
+    fresh.innerHTML = rowsHtml;
+    patchKeyedRegion(container, fresh, "data-diplo-key");
   };
   document.addEventListener("ai-league-replay-frame", onFrame);
   win.__aiLeagueDiplomacyCleanup = () => {
@@ -3253,14 +3262,18 @@ function diplomacyRowsHtml(
   const STANDINGS_MAX_ROWS = 12;
   const ranked = rankedAll.slice(0, STANDINGS_MAX_ROWS);
   const hiddenCount = rankedAll.length - ranked.length;
+  // Each player's block is wrapped in one keyed wrapper element so
+  // `patchKeyedRegion` (mountAiLeagueDiplomacyStrip's onFrame) can diff and
+  // move it as a single unit — `playerID` is a stable per-agent identity,
+  // matching the `bySmallID`/`byPlayerID` maps built above.
   const moreLine =
     hiddenCount > 0
-      ? `<p class="ai-league-diplo-more">${escapeHtml(
+      ? `<div class="ai-league-diplo-entry" data-diplo-key="__more__"><p class="ai-league-diplo-more">${escapeHtml(
           translateText("ai_league_replay.standings_more").replace(
             "{count}",
             String(hiddenCount),
           ),
-        )}</p>`
+        )}</p></div>`
       : "";
   return (
     ranked
@@ -3277,6 +3290,7 @@ function diplomacyRowsHtml(
         );
         const directive = directiveByName.get(normalizeName(player.username));
         return `
+        <div class="ai-league-diplo-entry" data-diplo-key="${escapeHtml(player.playerID)}">
         <div class="ai-league-diplo-row">
           <span class="ai-league-diplo-rank">${index + 1}</span>
           <span class="ai-league-color-dot" style="background:${escapeHtml(aiLeagueDisplayColor(player))}"></span>
@@ -3288,7 +3302,8 @@ function diplomacyRowsHtml(
           directive
             ? `<p class="ai-league-directive"><b>${escapeHtml(translateText("ai_league_replay.directive_label"))}</b> ${escapeHtml(directive)}</p>`
             : ""
-        }`;
+        }
+        </div>`;
       })
       .join("") + moreLine
   );
@@ -4733,9 +4748,25 @@ function mountAiLeagueBroadcastDrawer(
     if (rail !== null) {
       const nextRailKey = JSON.stringify(railEntries);
       if (rail.dataset.railKey !== nextRailKey) {
+        rail.dataset.railKey = nextRailKey;
+        // Territory/rank/allies/wars change on nearly every tick during
+        // active play, so a `rail.replaceWith(nextRail)` full teardown here
+        // reset the rail's own scrolled `.broadcast-rail-list`'s
+        // `scrollTop` to 0 on almost every frame — the same
+        // "teleports me back" class the diplomacy strip had. Patch the
+        // list's rows in place, keyed by agent identity, and leave the
+        // rest of `.broadcast-rail` (heading, collapse toggle — static
+        // across ticks, only user clicks change them) untouched.
         const nextRail = renderCompetitorRail(railEntries, railCallbacks());
-        nextRail.dataset.railKey = nextRailKey;
-        rail.replaceWith(nextRail);
+        const liveList = rail.querySelector<HTMLElement>(
+          ".broadcast-rail-list",
+        );
+        const freshList = nextRail.querySelector<HTMLElement>(
+          ".broadcast-rail-list",
+        );
+        if (liveList !== null && freshList !== null) {
+          patchKeyedRegion(liveList, freshList, "data-rail-entry-key");
+        }
       }
     }
 

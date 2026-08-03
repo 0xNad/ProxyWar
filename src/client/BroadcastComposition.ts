@@ -172,6 +172,11 @@ function renderCompetitorRailEntry(
   callbacks: CompetitorRailCallbacks,
 ): HTMLElement {
   const item = element("li", "broadcast-rail-entry");
+  // Stable per-agent identity key (P1 scroll-teleport fix): lets
+  // `patchKeyedRegion` reconcile this list in place across a per-tick
+  // rebuild instead of the caller replacing the whole `.broadcast-rail`
+  // subtree — see that function's own doc.
+  item.dataset.railEntryKey = entry.playerName;
   item.dataset.alive =
     entry.alive === null ? "unknown" : entry.alive ? "true" : "false";
   item.dataset.followed = String(entry.followed);
@@ -415,6 +420,14 @@ export function renderWarRoomEvent(
   callbacks: WarRoomFeedCallbacks,
 ): HTMLElement {
   const item = element("li", "broadcast-war-room-item");
+  // Stable per-event identity key (P1 scroll-teleport fix, same
+  // convention as `renderCompetitorRailEntry`'s `railEntryKey`): lets
+  // `patchKeyedRegion` reconcile a caller's list in place. Full Replay's
+  // own ticker never needs this (it patches via `patchDomWindowForward`'s
+  // position-based append/prune instead), but ReplayPremiereOverlay.ts's
+  // War Room feed re-renders its whole list per volatile frame and relies
+  // on this key to avoid tearing the scrolled list down each time.
+  item.dataset.warRoomEventId = event.id;
   item.dataset.kind = event.kind;
   const summary = element("button", "broadcast-war-room-summary");
   summary.type = "button";
@@ -1049,6 +1062,10 @@ export function renderAnalystEventLog(events: readonly AnalystEventRow[]): HTMLE
  */
 export function renderAnalystEventRow(event: AnalystEventRow): HTMLLIElement {
   const item = element("li", "broadcast-analyst-events-row") as HTMLLIElement;
+  // Stable per-event identity key (P1 scroll-teleport fix) — see
+  // `renderWarRoomEvent`'s matching `warRoomEventId` doc; `sequence` is
+  // this row's own globally-unique ordinal (`AnalystEventRow.sequence`).
+  item.dataset.analystEventKey = String(event.sequence);
   item.dataset.kind = event.kind;
   item.dataset.tone = event.tone;
   const parts = [
@@ -1179,4 +1196,96 @@ export function renderMatchStateStrip(input: MatchStateStripInput): HTMLElement 
     );
   }
   return strip;
+}
+
+// ---------------------------------------------------------------------------
+// Content-keyed list patching (P1 scroll-teleport fix, found live: "some
+// parts of the panel are not scrollable, they teleport me back when I try
+// to scroll in director cut")
+// ---------------------------------------------------------------------------
+
+/**
+ * Content-keyed DOM patch for a small list that gets fully recomputed every
+ * tick — membership is a stable identity set, but per-item content AND
+ * order can both change (a re-ranked competitor rail, a re-sorted
+ * standings/diplomacy strip, a live feed that only ever grows). This is the
+ * sibling primitive to `AiLeagueReplayOverlay.ts`'s own
+ * `patchDomWindowForward` for callers whose shape ISN'T that function's
+ * append-only/windowed log (which reorders never, and prunes only from the
+ * front) — a rail/standings row can move anywhere in the list from one tick
+ * to the next.
+ *
+ * Migrates `freshContainer`'s already-built children into `liveContainer`
+ * by `keyAttr`: an existing keyed child is reused as-is when its markup is
+ * unchanged (`outerHTML` compare), replaced in place only when it actually
+ * differs, and moved to its new position with `insertBefore` — a DOM move,
+ * never a remove-then-recreate, so per-row local UI state (an expanded
+ * `<details>`, a hovered/focused element) survives a reorder untouched.
+ * Any existing child with no key at all (a stale "empty"/"loading"
+ * placeholder from before the list had real content) is dropped
+ * unconditionally; any survivor whose key no longer appears in the fresh
+ * set is removed.
+ *
+ * `liveContainer`'s own childList is NEVER wholesale reassigned — no
+ * `innerHTML =`, no `replaceChildren()`, and the caller must never
+ * `container.replaceWith(freshContainer)` either — so `liveContainer`'s own
+ * `scrollTop` is never touched. This is the exact fix for the "replaceChildren
+ * /full subtree swap resets scrollTop" mechanism class: a per-tick volatile
+ * re-render that tore down a scrolled container wholesale, teleporting the
+ * viewer back to the top on the very next content change.
+ */
+export function patchKeyedRegion(
+  liveContainer: HTMLElement,
+  freshContainer: HTMLElement,
+  keyAttr: string,
+): void {
+  const existingByKey = new Map<string, HTMLElement>();
+  for (const child of Array.from(liveContainer.children) as HTMLElement[]) {
+    const key = child.getAttribute(keyAttr);
+    if (key !== null) {
+      existingByKey.set(key, child);
+    } else {
+      // Stale unkeyed content (e.g. an initial "waiting for data"
+      // placeholder) never survives the first real patch.
+      child.remove();
+    }
+  }
+
+  const keepKeys = new Set<string>();
+  let cursor: Element | null = liveContainer.firstElementChild;
+  for (const freshChild of Array.from(freshContainer.children)) {
+    const key = freshChild.getAttribute(keyAttr);
+    if (key === null) {
+      // Unkeyed fresh content (e.g. a fresh "no data" placeholder) has
+      // nothing to reconcile against — just position it.
+      if (cursor !== freshChild) liveContainer.insertBefore(freshChild, cursor);
+      cursor = freshChild.nextElementSibling;
+      continue;
+    }
+    keepKeys.add(key);
+    const existing = existingByKey.get(key);
+    let node: Element;
+    if (existing !== undefined && existing.outerHTML === freshChild.outerHTML) {
+      node = existing;
+    } else if (existing !== undefined) {
+      // `cursor` may currently BE `existing` (the common "patch this
+      // item's content in place, don't reorder it" case — e.g. a rail
+      // row's territory ticking every frame). `replaceWith` detaches
+      // `existing` from the live tree, so leaving `cursor` pointing at it
+      // would make the `insertBefore` below throw `NotFoundError` against
+      // a reference node that's no longer anyone's child. `freshChild`
+      // lands in that exact same slot, so retarget `cursor` to it first.
+      if (cursor === existing) cursor = freshChild;
+      existing.replaceWith(freshChild);
+      node = freshChild;
+    } else {
+      node = freshChild;
+    }
+    if (cursor !== node) liveContainer.insertBefore(node, cursor);
+    cursor = node.nextElementSibling;
+  }
+
+  for (const [key, el] of existingByKey) {
+    if (!keepKeys.has(key)) el.remove();
+  }
 }

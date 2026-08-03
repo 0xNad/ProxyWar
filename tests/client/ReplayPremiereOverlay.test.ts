@@ -2048,6 +2048,213 @@ describe("broadcast composition regions (Stage 4 item 1)", () => {
     );
   });
 
+  it("keeps the competitor rail list's own scroll position untouched, and an unrelated entry's node identity intact, across a volatile-only update that changes another seat's territory (P1 scroll-teleport regression)", () => {
+    // Same bug class already fixed in AiLeagueReplayOverlay.ts: replacing
+    // `.broadcast-rail` wholesale on every content-changing tick reset
+    // `.broadcast-rail-list`'s own `scrollTop` to 0 in a real browser (a
+    // fresh element always starts scrolled to the top), yanking a viewer
+    // who had scrolled the rail down to read a lower seat back to the top
+    // on the very next tick.
+    const model = makeModel({
+      state: "playing",
+      releasedSequence: 100,
+      currentTurn: 100,
+      competitorRailSeats: [
+        {
+          seatId: "seat-a",
+          playerName: "Atlas Prime",
+          territoryPercent: 50,
+          inMatchRank: 1,
+          alive: true,
+          allies: [],
+          wars: [],
+        },
+        {
+          seatId: "seat-b",
+          playerName: "Borealis",
+          territoryPercent: 30,
+          inMatchRank: 2,
+          alive: true,
+          allies: [],
+          wars: [],
+        },
+      ],
+    });
+    const handle = mount(model);
+
+    const list = handle.element.querySelector<HTMLElement>(
+      ".broadcast-rail-list",
+    );
+    expect(list).not.toBeNull();
+    const unchangedEntryBefore = handle.element.querySelector(
+      '.broadcast-rail-entry[data-rail-entry-key="Borealis"]',
+    );
+    expect(unchangedEntryBefore).not.toBeNull();
+
+    // jsdom never runs real layout, so native `scrollTop` is always a
+    // no-op 0; fake it with a backing variable (same technique
+    // AiLeagueReplayOverlay.test.ts's own scroll-preservation test uses)
+    // to stand in for "the viewer has scrolled this list down".
+    let scrollTopValue = 240;
+    Object.defineProperty(list, "scrollTop", {
+      configurable: true,
+      get: () => scrollTopValue,
+      set: (value: number) => {
+        scrollTopValue = value;
+      },
+    });
+
+    // Volatile-only update: only Atlas Prime's territory moves; Borealis's
+    // row content is byte-for-byte unchanged.
+    handle.hydrate({
+      ...model,
+      releasedSequence: 101,
+      currentTurn: 101,
+      competitorRailSeats: [
+        {
+          seatId: "seat-a",
+          playerName: "Atlas Prime",
+          territoryPercent: 55,
+          inMatchRank: 1,
+          alive: true,
+          allies: [],
+          wars: [],
+        },
+        {
+          seatId: "seat-b",
+          playerName: "Borealis",
+          territoryPercent: 30,
+          inMatchRank: 2,
+          alive: true,
+          allies: [],
+          wars: [],
+        },
+      ],
+    });
+
+    // The list container itself was never replaced (the fix: reconcile
+    // children in place via `patchKeyedRegion` instead of
+    // `rail.replaceWith(nextRail)`), so it's the exact same node — proof
+    // its real-browser `scrollTop` would likewise never have been reset.
+    expect(
+      handle.element.querySelector(".broadcast-rail-list"),
+    ).toBe(list);
+    expect(scrollTopValue).toBe(240);
+
+    // The untouched Borealis row is the exact same `<li>`, not a rebuild
+    // that merely renders identically.
+    expect(
+      handle.element.querySelector(
+        '.broadcast-rail-entry[data-rail-entry-key="Borealis"]',
+      ),
+    ).toBe(unchangedEntryBefore);
+    // The rail did keep updating (patch, not "stop updating").
+    expect(
+      handle.element.querySelector(".broadcast-rail")?.textContent,
+    ).toContain("percent=55");
+  });
+
+  it("keeps the war room list's own scroll position untouched, and an already-expanded row's local state and node identity intact, across a volatile-only update that appends a new event (P1 scroll-teleport regression)", () => {
+    const model = makeModel({
+      state: "playing",
+      releasedSequence: 100,
+      currentTurn: 100,
+      warRoomEvents: [
+        {
+          id: "wr-1",
+          kind: "alliance",
+          turn: 50,
+          sequence: 100,
+          headline: "Atlas Prime formed an alliance",
+          publicReason: "Mutual defense",
+          participants: ["Atlas Prime", "Borealis"],
+          expandedDetail: null,
+        },
+      ],
+    });
+    const handle = mount(model);
+
+    const list = handle.element.querySelector<HTMLElement>(
+      ".broadcast-war-room-list",
+    );
+    expect(list).not.toBeNull();
+    const rowBefore = handle.element.querySelector<HTMLElement>(
+      '.broadcast-war-room-item[data-war-room-event-id="wr-1"]',
+    );
+    expect(rowBefore).not.toBeNull();
+
+    // Expand the row's own local UI state (a fresh rebuild always starts
+    // collapsed, so this state only survives if the node itself survives).
+    const summary = rowBefore!.querySelector<HTMLButtonElement>(
+      ".broadcast-war-room-summary",
+    );
+    summary?.click();
+    const detail = rowBefore!.querySelector<HTMLElement>(
+      ".broadcast-war-room-detail",
+    );
+    expect(detail?.hidden).toBe(false);
+
+    // Fake `scrollTop` the same way as the rail test above.
+    let scrollTopValue = 180;
+    Object.defineProperty(list, "scrollTop", {
+      configurable: true,
+      get: () => scrollTopValue,
+      set: (value: number) => {
+        scrollTopValue = value;
+      },
+    });
+
+    // Volatile-only update: a new event is appended; the existing event's
+    // own content never mutates.
+    handle.hydrate({
+      ...model,
+      releasedSequence: 101,
+      currentTurn: 101,
+      warRoomEvents: [
+        ...model.warRoomEvents,
+        {
+          id: "wr-2",
+          kind: "first_strike",
+          turn: 60,
+          sequence: 110,
+          headline: "Atlas Prime strikes first",
+          publicReason: null,
+          participants: ["Atlas Prime"],
+          expandedDetail: null,
+        },
+      ],
+    });
+
+    // The list container was never replaced (the fix: reconcile rows in
+    // place via `patchKeyedRegion` instead of
+    // `warRoom.replaceWith(nextWarRoom)`), so its real-browser `scrollTop`
+    // would likewise never have been reset.
+    expect(
+      handle.element.querySelector(".broadcast-war-room-list"),
+    ).toBe(list);
+    expect(scrollTopValue).toBe(180);
+
+    // The pre-existing row is the exact same node, still expanded.
+    const rowAfter = handle.element.querySelector<HTMLElement>(
+      '.broadcast-war-room-item[data-war-room-event-id="wr-1"]',
+    );
+    expect(rowAfter).toBe(rowBefore);
+    expect(
+      rowAfter?.querySelector<HTMLElement>(".broadcast-war-room-detail")
+        ?.hidden,
+    ).toBe(false);
+
+    // The new event was actually inserted (patch, not "stop updating").
+    expect(
+      handle.element.querySelectorAll(".broadcast-war-room-item"),
+    ).toHaveLength(2);
+    expect(
+      handle.element.querySelector(
+        '.broadcast-war-room-item[data-war-room-event-id="wr-2"]',
+      ),
+    ).not.toBeNull();
+  });
+
   it("renders no match-state strip at all for a sealed live premiere (playing/checkpoint) — matchStateStrip stays null by design", () => {
     for (const state of ["playing", "checkpoint"] as const) {
       const handle = mount(

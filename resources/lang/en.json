@@ -405,7 +405,9 @@
     "pirate": "Pirate",
     "conquered": "Conquered",
     "loading_game_info": "Loading game stats",
-    "no_winner": "This game ended with no winner (or a Nation won)"
+    "no_winner": "This game ended with no winner (or a Nation won)",
+    "no_data": "No game data to show yet",
+    "load_failed": "Couldn't load this game's stats"
   },
   "map": {
     "map": "Map",

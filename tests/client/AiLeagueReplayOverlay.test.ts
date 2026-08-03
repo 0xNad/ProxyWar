@@ -1780,6 +1780,122 @@ describe("AiLeagueReplayOverlay", () => {
       }
     });
 
+    it("preserves scroll position in the diplomacy strip and competitor rail when their content changes mid-tick (P1 scroll-teleport fix: content-keyed patch, never a full container rebuild)", () => {
+      const runID = "scroll-preserve-1";
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response(null, { status: 404 })),
+      );
+      try {
+        mountAiLeagueReplayOverlay({
+          runID,
+          artifactBasePath: `/ai-league-runs/${runID}`,
+          decisions: [],
+        });
+
+        // Rook absorbs the tile delta below so Atlas's own rank/share stay
+        // pixel-identical across the tick — isolates "an untouched entry's
+        // own DOM node survives a sibling's content change" (the property
+        // under test) from "did the derived numbers recompute correctly",
+        // which the rail/diplomacy tests above already cover.
+        frame(500, [
+          { playerID: "p1", smallID: 1, username: "Atlas", tilesOwned: 60 },
+          { playerID: "p2", smallID: 2, username: "Blitz", tilesOwned: 40 },
+          { playerID: "p3", smallID: 3, username: "Rook", tilesOwned: 100 },
+        ]);
+
+        const diploContainer = document.querySelector<HTMLElement>(
+          "[data-ai-league-diplomacy-rows]",
+        );
+        expect(diploContainer).not.toBeNull();
+        const atlasDiploBefore = [
+          ...diploContainer!.querySelectorAll(".ai-league-diplo-entry"),
+        ].find((el) => el.textContent?.includes("Atlas"));
+        expect(atlasDiploBefore).toBeDefined();
+        expect(atlasDiploBefore?.textContent).toContain("30%");
+        const blitzDiploBefore = [
+          ...diploContainer!.querySelectorAll(".ai-league-diplo-entry"),
+        ].find((el) => el.textContent?.includes("Blitz"));
+
+        const railList = document.querySelector<HTMLElement>(
+          ".broadcast-rail-list",
+        );
+        expect(railList).not.toBeNull();
+        const atlasRailBefore = [
+          ...railList!.querySelectorAll(".broadcast-rail-entry"),
+        ].find((el) => el.textContent?.includes("Atlas"));
+        expect(atlasRailBefore).toBeDefined();
+
+        // jsdom has no real layout, so scrollTop is faked exactly like this
+        // file's own War Room ticker scroll-preservation test above does.
+        let diploScrollTop = 42;
+        Object.defineProperty(diploContainer, "scrollTop", {
+          configurable: true,
+          get: () => diploScrollTop,
+          set: (value: number) => {
+            diploScrollTop = value;
+          },
+        });
+        let railScrollTop = 77;
+        Object.defineProperty(railList, "scrollTop", {
+          configurable: true,
+          get: () => railScrollTop,
+          set: (value: number) => {
+            railScrollTop = value;
+          },
+        });
+
+        // Blitz gains 15 tiles from Rook: a pure content-changing tick for
+        // both panels (total tiles, and therefore Atlas's own share/rank,
+        // are unaffected). This is the exact shape that used to call
+        // `container.innerHTML = rowsHtml` / `rail.replaceWith(nextRail)`
+        // on the whole scrolled container, resetting `scrollTop` to 0 —
+        // "some parts of the panel ... teleport me back when I try to
+        // scroll in director cut".
+        frame(501, [
+          { playerID: "p1", smallID: 1, username: "Atlas", tilesOwned: 60 },
+          { playerID: "p2", smallID: 2, username: "Blitz", tilesOwned: 55 },
+          { playerID: "p3", smallID: 3, username: "Rook", tilesOwned: 85 },
+        ]);
+
+        // Scroll position held for both panels.
+        expect(diploScrollTop).toBe(42);
+        expect(railScrollTop).toBe(77);
+
+        // The patch actually landed: Blitz's own diplomacy row changed
+        // (its rail counterpart's untranslated-in-this-test-env label text
+        // is identical either way, so it isn't a useful "did it change"
+        // signal here — the scrollTop/same-node assertions below already
+        // cover the rail).
+        expect(
+          [...diploContainer!.querySelectorAll(".ai-league-diplo-entry")].find(
+            (el) => el.textContent?.includes("Blitz"),
+          )?.textContent,
+        ).toContain("28%");
+        expect(
+          [...diploContainer!.querySelectorAll(".ai-league-diplo-entry")].find(
+            (el) => el.textContent?.includes("Blitz"),
+          ),
+        ).not.toBe(blitzDiploBefore);
+
+        // ...while Atlas's own row — untouched by the patch — is the SAME
+        // DOM node: proof this is a content-keyed patch, never a full
+        // teardown/rebuild of the container.
+        expect(
+          [...diploContainer!.querySelectorAll(".ai-league-diplo-entry")].find(
+            (el) => el.textContent?.includes("Atlas"),
+          ),
+        ).toBe(atlasDiploBefore);
+        expect(
+          [...railList!.querySelectorAll(".broadcast-rail-entry")].find((el) =>
+            el.textContent?.includes("Atlas"),
+          ),
+        ).toBe(atlasRailBefore);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
     it("curates a selective War Room feed and jumps to turn from an expanded event", () => {
       const runID = "broadcast-war-room-1";
       const jumps: number[] = [];

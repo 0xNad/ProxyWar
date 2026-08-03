@@ -7,6 +7,7 @@ import {
   renderMatchTimeline,
   renderWarRoomFeed,
   LowerThirdController,
+  patchKeyedRegion,
   type AnalystActionKindCount,
   type AnalystEventRow,
   type CompetitorRailCallbacks,
@@ -992,8 +993,26 @@ function applyVolatileModelUpdates(
           onToggleCollapsed: broadcastState.toggleRailCollapsed,
         },
       );
-      nextRail.dataset.seatsKey = nextRailKey;
-      rail.replaceWith(nextRail);
+      rail.dataset.seatsKey = nextRailKey;
+      // `.broadcast-rail-list` (the inner `<ol>`) is independently
+      // scrollable (`overflow-y: auto`, shared rule with
+      // `.broadcast-war-room-list` in this file's own CSS) — a
+      // `rail.replaceWith(nextRail)` full teardown here reset the list's
+      // own `scrollTop` to 0 on every seat change during active play (the
+      // "teleports me back" class this whole keyed-patch scheme exists to
+      // prevent). Patch the list's rows in place, keyed by player
+      // identity, and leave the rest of `.broadcast-rail` (heading,
+      // collapse toggle — only user clicks change those, via a full
+      // `render()` triggered by `toggleRailCollapsed`) untouched.
+      const liveList = rail.querySelector<HTMLElement>(
+        ".broadcast-rail-list",
+      );
+      const freshList = nextRail.querySelector<HTMLElement>(
+        ".broadcast-rail-list",
+      );
+      if (liveList !== null && freshList !== null) {
+        patchKeyedRegion(liveList, freshList, "data-rail-entry-key");
+      }
     }
   }
   const timeline = overlay.querySelector<HTMLElement>(".broadcast-timeline");
@@ -1050,29 +1069,119 @@ function applyVolatileModelUpdates(
         collapsed: broadcastState.warRoomCollapsed,
         onToggleCollapsed: broadcastState.toggleWarRoomCollapsed,
       });
-      nextWarRoom.dataset.eventsKey = nextKey;
-      warRoom.replaceWith(nextWarRoom);
+      warRoom.dataset.eventsKey = nextKey;
+      // `.broadcast-war-room-list` shares the same `overflow-y: auto`
+      // rule as `.broadcast-rail-list` — a `warRoom.replaceWith(...)`
+      // full teardown here reset that scrolled list's `scrollTop` to 0
+      // on every new event during active play. This list only ever
+      // grows (new events appended as `model.currentTurn` advances;
+      // existing rows' content never mutates), so `patchKeyedRegion`'s
+      // outerHTML fast-path would normally leave every already-mounted
+      // row completely untouched, inserting only brand-new events.
+      const liveList = warRoom.querySelector<HTMLElement>(
+        ".broadcast-war-room-list",
+      );
+      const freshList = nextWarRoom.querySelector<HTMLElement>(
+        ".broadcast-war-room-list",
+      );
+      if (liveList !== null && freshList !== null) {
+        // `renderWarRoomEvent` always builds a fresh row collapsed
+        // (`detail.hidden = true`), but a viewer may have expanded an
+        // existing row before this patch runs. `patchKeyedRegion` decides
+        // "did this key's content change" via a straight `outerHTML`
+        // compare, so a freshly-collapsed row would look different from
+        // an actually-unchanged-but-expanded live row and get needlessly
+        // replaced — silently re-collapsing it out from under the
+        // viewer. Mirror each live row's own expand state onto its fresh
+        // counterpart first so the compare sees genuinely unchanged
+        // events as equal and keeps the ORIGINAL (still-expanded) node.
+        const liveRowsById = new Map<string, HTMLElement>();
+        for (const row of Array.from(liveList.children) as HTMLElement[]) {
+          const id = row.dataset.warRoomEventId;
+          if (id !== undefined) liveRowsById.set(id, row);
+        }
+        for (const freshRow of Array.from(
+          freshList.children,
+        ) as HTMLElement[]) {
+          const id = freshRow.dataset.warRoomEventId;
+          const liveRow = id === undefined ? undefined : liveRowsById.get(id);
+          const liveDetail =
+            liveRow?.querySelector<HTMLElement>(".broadcast-war-room-detail") ??
+            null;
+          const freshDetail = freshRow.querySelector<HTMLElement>(
+            ".broadcast-war-room-detail",
+          );
+          const freshSummary = freshRow.querySelector<HTMLElement>(
+            ".broadcast-war-room-summary",
+          );
+          if (liveDetail === null || freshDetail === null || freshSummary === null) {
+            continue;
+          }
+          freshDetail.hidden = liveDetail.hidden;
+          freshSummary.setAttribute("aria-expanded", String(!liveDetail.hidden));
+        }
+        patchKeyedRegion(liveList, freshList, "data-war-room-event-id");
+      }
     }
   }
   // The analyst panel draws from the same bounded War Room source; nothing
-  // in it is interactive, but it is still keyed like the regions above so a
-  // viewer scrolled into its event log doesn't get their scroll position
-  // reset on every progressive frame when the log itself hasn't grown.
+  // in it is interactive, but its event log is independently scrollable
+  // (`.broadcast-analyst-events-list`, `overflow-y: auto`, max-height
+  // ~220px, this file's own CSS) so it is keyed the same way the rail/war
+  // room are above — but split into two independent keys, since the chart
+  // and decisions-unavailable-reason portions above the list are NOT
+  // independently scrollable and can keep using a full replace, while the
+  // event list itself must be patched in place to avoid resetting a
+  // viewer's scroll position on every progressive frame when only new
+  // events (not the chart/decisions) have arrived.
   const analyst = overlay.querySelector<HTMLElement>(".broadcast-analyst");
   if (analyst !== null) {
-    const nextAnalystKey = JSON.stringify([
-      model.analystEvents,
+    const nextEventsKey = JSON.stringify(model.analystEvents);
+    const nextOtherKey = JSON.stringify([
       model.analystActionKindCounts,
+      model.analystDecisionsUnavailableReason,
     ]);
-    if (analyst.dataset.analystKey !== nextAnalystKey) {
+    const eventsChanged = analyst.dataset.analystEventsKey !== nextEventsKey;
+    const otherChanged = analyst.dataset.analystOtherKey !== nextOtherKey;
+    if (eventsChanged || otherChanged) {
+      const liveEventsList = analyst.querySelector<HTMLElement>(
+        ".broadcast-analyst-events-list",
+      );
       const nextAnalyst = renderAnalystPanel({
         decisions: null,
         decisionsUnavailableReason: model.analystDecisionsUnavailableReason,
         events: model.analystEvents,
         actionKindCounts: model.analystActionKindCounts,
       });
-      nextAnalyst.dataset.analystKey = nextAnalystKey;
-      analyst.replaceWith(nextAnalyst);
+      const freshEventsList = nextAnalyst.querySelector<HTMLElement>(
+        ".broadcast-analyst-events-list",
+      );
+      if (
+        eventsChanged &&
+        !otherChanged &&
+        liveEventsList !== null &&
+        freshEventsList !== null
+      ) {
+        // Only the events sub-list changed, and a scrolled list already
+        // exists on both sides: reconcile its rows in place instead of
+        // replacing the section, so `.broadcast-analyst-events-list`'s
+        // `scrollTop` is never touched. The chart/decisions markup above
+        // it is left as-is (its own key didn't change).
+        patchKeyedRegion(
+          liveEventsList,
+          freshEventsList,
+          "data-analyst-event-key",
+        );
+        analyst.dataset.analystEventsKey = nextEventsKey;
+      } else {
+        // The chart or decisions-unavailable-reason changed (neither is
+        // independently scrollable, so a full replace is safe), or the
+        // events sub-list is transitioning to/from its "no events yet"
+        // placeholder (no existing scrolled list to preserve either way).
+        nextAnalyst.dataset.analystEventsKey = nextEventsKey;
+        nextAnalyst.dataset.analystOtherKey = nextOtherKey;
+        analyst.replaceWith(nextAnalyst);
+      }
     }
   }
   // Always `null` in production for THIS overlay — see the model field's
@@ -1214,9 +1323,10 @@ function renderBroadcastRegions(
     events: model.analystEvents,
     actionKindCounts: model.analystActionKindCounts,
   });
-  analyst.dataset.analystKey = JSON.stringify([
-    model.analystEvents,
+  analyst.dataset.analystEventsKey = JSON.stringify(model.analystEvents);
+  analyst.dataset.analystOtherKey = JSON.stringify([
     model.analystActionKindCounts,
+    model.analystDecisionsUnavailableReason,
   ]);
   const agentsPanel = element("div", "rp-drawer-panel");
   agentsPanel.append(rail);
