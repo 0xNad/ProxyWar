@@ -2081,10 +2081,18 @@ describe("AiLeagueReplayOverlay", () => {
         planChangeItem?.querySelector(".broadcast-war-room-detail")
           ?.textContent,
       ).toContain("broadcast.war_room_stated_reason");
-      planChangeItem
-        ?.querySelector<HTMLButtonElement>(".broadcast-war-room-jump")
-        ?.click();
-      expect(jumps).toEqual([20]);
+      // Turn 2 of the pass-10 CHECK item: the jump target (turn 20) sits
+      // well behind the current playhead (turn 999), so this now
+      // navigates with `?turn=` instead of dispatching the forward-only
+      // event — same fix, same shared `dispatchJumpToTurn`, as the
+      // Timeline scrubber's own jump-to-turn.
+      withMockedLocation(runID, (locationMock) => {
+        planChangeItem
+          ?.querySelector<HTMLButtonElement>(".broadcast-war-room-jump")
+          ?.click();
+        expect(jumps).toEqual([]);
+        expect(locationMock.href).toContain("turn=20");
+      });
     });
 
     it("renders an unrestricted bottom timeline for Full Replay and dispatches jump-to-turn on seek", () => {
@@ -2166,48 +2174,36 @@ describe("AiLeagueReplayOverlay", () => {
       });
       // jsdom logs (never throws on) an unimplemented "navigation to
       // another Document" when `href` is set on the real Location object,
-      // same as `window.location.reload()` — same convention as the Reset
-      // test above, mocking the whole object so this pins the fix at "a
-      // navigation to the right URL was attempted" without depending on
-      // jsdom's own unimplemented-navigation behavior.
-      const locationMock = {
-        href: "https://beta.proxywar.xyz/ai-league-replay/broadcast-timeline-backward-seek-1",
-        pathname: "/ai-league-replay/broadcast-timeline-backward-seek-1",
-      };
-      const originalLocation = window.location;
-      Object.defineProperty(window, "location", {
-        value: locationMock,
-        writable: true,
-        configurable: true,
+      // same as `window.location.reload()` — same convention
+      // `withMockedLocation` (shared below) and the Reset test both use.
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+        replayMaxTurn: 1_000,
+        // Past the "spawn" marker below (turn 5) — a viewer who let the
+        // match play (or catch up) past turn 5 and then clicks that
+        // marker to rewatch the opening is exactly QA's repro.
+        currentTurn: 999,
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events: [
+            event(1, 5, "spawn", "info", "a1", "Atlas", null, null, "Atlas enters the match."),
+          ],
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
       });
 
-      try {
-        mountAiLeagueReplayOverlay({
-          runID,
-          artifactBasePath: `/ai-league-runs/${runID}`,
-          decisions: [],
-          replayMaxTurn: 1_000,
-          // Past the "spawn" marker below (turn 5) — a viewer who let the
-          // match play (or catch up) past turn 5 and then clicks that
-          // marker to rewatch the opening is exactly QA's repro.
-          currentTurn: 999,
-          spectatorTelemetry: {
-            version: 1,
-            runID,
-            agents: [],
-            relationships: [],
-            events: [
-              event(1, 5, "spawn", "info", "a1", "Atlas", null, null, "Atlas enters the match."),
-            ],
-            communicationThreads: [],
-            timelineBuckets: [],
-          },
-        });
+      const spawnMarker = document.querySelector<HTMLButtonElement>(
+        '.broadcast-timeline [data-kind="spawn"]',
+      );
+      expect(spawnMarker).not.toBeNull();
 
-        const spawnMarker = document.querySelector<HTMLButtonElement>(
-          '.broadcast-timeline [data-kind="spawn"]',
-        );
-        expect(spawnMarker).not.toBeNull();
+      withMockedLocation(runID, (locationMock) => {
         spawnMarker?.click();
 
         // Never the dead-end forward-only dispatch a viewer would read as
@@ -2217,13 +2213,7 @@ describe("AiLeagueReplayOverlay", () => {
         expect(trackMock).toHaveBeenCalledWith("timeline_jump", {
           matchId: runID,
         });
-      } finally {
-        Object.defineProperty(window, "location", {
-          value: originalLocation,
-          writable: true,
-          configurable: true,
-        });
-      }
+      });
     });
 
     it("preserves the timeline panel's drawer-tab wrapper identity across a per-tick patch (P1 sweep fix: the desktop position:fixed placement rule is keyed off data-tab-id=\"timeline\", which a raw renderMatchTimeline() rebuild doesn't carry on its own)", () => {
@@ -2708,13 +2698,19 @@ describe("AiLeagueReplayOverlay", () => {
       // The retained row's own interactive chrome is still live — expand it
       // and jump, exactly like a freshly-built row would (spec item 2:
       // windowing/incrementality must never strip per-row functionality).
+      // Turn 2 of the pass-10 CHECK item: turn 1 is well behind the
+      // current playhead (turn 40) — navigates with `?turn=` instead of
+      // dispatching the forward-only event.
       firstRowBefore
         ?.querySelector<HTMLButtonElement>(".broadcast-war-room-summary")
         ?.click();
-      firstRowBefore
-        ?.querySelector<HTMLButtonElement>(".broadcast-war-room-jump")
-        ?.click();
-      expect(jumps).toEqual([1]);
+      withMockedLocation(runID, (locationMock) => {
+        firstRowBefore
+          ?.querySelector<HTMLButtonElement>(".broadcast-war-room-jump")
+          ?.click();
+        expect(jumps).toEqual([]);
+        expect(locationMock.href).toContain("turn=1");
+      });
     });
 
     it("auto-follows the newest ticker entry when the viewer is at the tail, and preserves (height-compensates) scroll position when they've scrolled up to read older entries, across the window's incremental prune (spec item 3)", () => {
@@ -4416,6 +4412,42 @@ function readModelResponse(agents: PublicAgent[]): Response {
   );
 }
 
+/**
+ * Shared mock for the backward-jump-to-turn navigation fix (turn 2 of the
+ * pass-10 CHECK item): jsdom has no real navigation, so — same convention
+ * `WinModal.test.ts` already uses for its own `location.href` assertions —
+ * this swaps in a plain mock object for the duration of `fn`, then always
+ * restores the real `window.location` afterward (even on a thrown
+ * assertion), so a failure in one test can never leak a broken `location`
+ * into every test that runs after it in this shared file. `href`'s origin/
+ * pathname stays a real, parseable URL so `new URL(window.location.href)`
+ * inside `dispatchJumpToTurn`/`mountReplayJumpControls` never throws.
+ */
+function withMockedLocation<T>(
+  runID: string,
+  fn: (locationMock: { href: string }) => T,
+): T {
+  const locationMock = {
+    href: `https://beta.proxywar.xyz/ai-league-replay/${runID}`,
+    pathname: `/ai-league-replay/${runID}`,
+  };
+  const originalLocation = window.location;
+  Object.defineProperty(window, "location", {
+    value: locationMock,
+    writable: true,
+    configurable: true,
+  });
+  try {
+    return fn(locationMock);
+  } finally {
+    Object.defineProperty(window, "location", {
+      value: originalLocation,
+      writable: true,
+      configurable: true,
+    });
+  }
+}
+
 describe("Phase 7 analytics: Director Cut, timeline jump, watch-progress milestones", () => {
   beforeEach(() => {
     Object.defineProperty(window, "innerWidth", {
@@ -4542,11 +4574,91 @@ describe("Phase 7 analytics: Director Cut, timeline jump, watch-progress milesto
       ?.querySelector<HTMLButtonElement>(".broadcast-war-room-summary")
       ?.click();
     trackMock.mockClear();
-    planChangeItem
-      ?.querySelector<HTMLButtonElement>(".broadcast-war-room-jump")
-      ?.click();
-    expect(jumps).toEqual([20]);
-    expect(trackMock).toHaveBeenCalledWith("timeline_jump", { matchId: runID });
+    // Turn 2 of the pass-10 CHECK item: turn 20 is well behind the
+    // current playhead (turn 999) — navigates with `?turn=` instead of
+    // dispatching the forward-only event. `analytics.track` still fires
+    // first, before the branch decides navigate vs dispatch.
+    withMockedLocation(runID, (locationMock) => {
+      planChangeItem
+        ?.querySelector<HTMLButtonElement>(".broadcast-war-room-jump")
+        ?.click();
+      expect(jumps).toEqual([]);
+      expect(locationMock.href).toContain("turn=20");
+      expect(trackMock).toHaveBeenCalledWith("timeline_jump", { matchId: runID });
+    });
+  });
+
+  it("keeps a War Room jump at (or barely behind) the current playhead as an in-session dispatch — never a navigation (turn 2 of the pass-10 CHECK item)", () => {
+    // War Room only ever reveals items with turnNumber <= the current
+    // playhead (spec item 2: never spoil the future), so the freshest
+    // possible jump target a War Room item can point at is the CURRENT
+    // turn itself — this is that boundary case, standing in for "forward
+    // jump" in a feed that can never show one ahead of the playhead by
+    // construction. Guards against a future edit accidentally widening
+    // the backward-seek check (e.g. `turn <= knownTurn`) and turning
+    // every ordinary same-position jump into an unwanted reload.
+    const runID = "analytics-timeline-jump-forward-1";
+    const jumps: number[] = [];
+    document.addEventListener("ai-league-replay-jump-turn", (domEvent) => {
+      jumps.push(
+        (domEvent as CustomEvent<{ turnNumber: number }>).detail.turnNumber,
+      );
+    });
+    const reloadMock = vi.fn();
+    const originalLocation = window.location;
+    Object.defineProperty(window, "location", {
+      value: { reload: reloadMock, pathname: window.location.pathname },
+      writable: true,
+      configurable: true,
+    });
+    try {
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        currentTurn: 20,
+        decisions: [
+          {
+            ...decisionFixture(1),
+            username: "Atlas",
+            turnNumber: 10,
+            planObjective: "expand",
+          },
+          {
+            ...decisionFixture(2),
+            username: "Atlas",
+            turnNumber: 20,
+            planObjective: "consolidate",
+            reason: "Defend the core.",
+            planRationale: "Blitz is massing troops nearby.",
+          },
+        ],
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events: [],
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+      const planChangeItem = document.querySelector('[data-kind="plan_change"]');
+      expect(planChangeItem).not.toBeNull();
+      planChangeItem
+        ?.querySelector<HTMLButtonElement>(".broadcast-war-room-summary")
+        ?.click();
+      planChangeItem
+        ?.querySelector<HTMLButtonElement>(".broadcast-war-room-jump")
+        ?.click();
+      expect(jumps).toEqual([20]);
+      expect(reloadMock).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(window, "location", {
+        value: originalLocation,
+        writable: true,
+        configurable: true,
+      });
+    }
   });
 
   it("tracks watched_30s and watched_2m from ACCUMULATED ACTIVE playback seconds across steady frames, not wall-clock elapsed time", () => {

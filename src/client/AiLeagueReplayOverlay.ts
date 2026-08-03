@@ -4546,50 +4546,47 @@ function mountAiLeagueBroadcastDrawer(
   // sample is windowed into view does.
   const matchStateSeries = normalizeMatchStateSeries(input.matchStateSeries);
   const directorCutPlan = normalizeDirectorCutPlan(input.directorCutPlan);
+  /**
+   * Turn 2 of the pass-10 CHECK item: audited every consumer of this
+   * shared dispatch (War Room feed's "jump to turn" action via
+   * `onJumpToTurn`, and the Match Timeline's `onSeek`, both wired below)
+   * — a decision/event row in the Analyst tab (`renderAnalystDecisionRow`/
+   * `renderAnalystEventRow`, `BroadcastComposition.ts`) carries NO
+   * turn-jump affordance at all (plain table/list cells, no button), so
+   * there is nothing there to fix. The ONE other jump-to-turn consumer in
+   * this file, the political-radio/comms "turn N" link
+   * (`data-ai-league-jump-turn`, `communicationMessageHtml`), is handled
+   * by the SEPARATE `mountReplayJumpControls` below — which ALREADY
+   * implements this exact backward-seek-via-navigation (missed as prior
+   * art in the first pass of this fix). Moved the fix HERE, into the one
+   * function every OTHER jump-to-turn consumer shares, rather than
+   * keeping the previous per-consumer `dispatchTimelineSeek` wrapper: all
+   * of War Room/Timeline/(any future consumer of this function) want the
+   * identical contract — "take the viewer to turn N" — so a per-consumer
+   * split only risked the exact inconsistency this turn's review caught
+   * (Timeline fixed, War Room silently left broken). Matches
+   * `mountReplayJumpControls`'s own tolerance/params exactly (a same-
+   * session forward-only clamp within 10 turns is an imperceptible no-op,
+   * not worth a full reload; `replay=`/`turn=` are the same two params
+   * that function already sets) so both code paths read as one
+   * intentional policy, not two independently-invented ones.
+   */
   const dispatchJumpToTurn = (turn: number): void => {
     analytics.track("timeline_jump", { matchId: input.runID });
+    const knownTurn = AI_LEAGUE_BROADCAST_DRAWER_LAST_TURN.get(container) ?? 0;
+    if (turn + 10 < knownTurn) {
+      const url = new URL(window.location.href);
+      url.searchParams.set("replay", "");
+      url.searchParams.set("turn", String(Math.max(0, Math.floor(turn))));
+      window.location.href = url.toString();
+      return;
+    }
     document.dispatchEvent(
       new CustomEvent("ai-league-replay-jump-turn", {
         detail: { turnNumber: turn },
         bubbles: true,
       }),
     );
-  };
-  /**
-   * CHECK item (pass-10): the bottom Match Timeline scrubber's click-to-
-   * seek is confirmed genuinely broken for BACKWARD seeks specifically —
-   * `LocalServer.ts`'s `jumpReplayForward()` (the engine behind
-   * `ReplayJumpToTurnEvent`, which `dispatchJumpToTurn` above triggers)
-   * is deliberately forward-only (`Math.max(this.turns.length, …)`), so
-   * a click on a marker at or behind the current playhead — the common
-   * case once the fast "catch up to now" phase has run, and the ONLY
-   * case once the match has ended — silently clamps to the current
-   * turn: a real no-op a viewer reads as "the marker doesn't work" (QA's
-   * own repro: "several click attempts … did not visibly move the
-   * elapsed timer"). Reuses the SAME `?turn=` deep-link param `Main.ts`
-   * already wires up for share links (a fresh session restarts at turn
-   * 0 and fast-forwards to the target — always a forward seek from
-   * there) rather than teaching the forward-only engine a real backward
-   * seek. Deliberately a SEPARATE wrapper from `dispatchJumpToTurn`
-   * above (used only as the Match Timeline's own `onSeek`, never by the
-   * War Room feed's "jump to turn" action) — the War Room's own jump
-   * links point at a SPECIFIC decision/event a viewer just read, where
-   * an unannounced full-page navigation would be a much more jarring
-   * interruption than the always-in-view Timeline scrubber; narrowing
-   * the fix to the one control this CHECK item actually covers keeps it
-   * a small, targeted change instead of an app-wide navigation policy.
-   */
-  const dispatchTimelineSeek = (turn: number): void => {
-    const knownTurn =
-      AI_LEAGUE_BROADCAST_DRAWER_LAST_TURN.get(container) ?? 0;
-    if (turn < knownTurn) {
-      analytics.track("timeline_jump", { matchId: input.runID });
-      const url = new URL(window.location.href);
-      url.searchParams.set("turn", String(Math.max(0, Math.floor(turn))));
-      window.location.href = url.toString();
-      return;
-    }
-    dispatchJumpToTurn(turn);
   };
 
   // Collapse/expand (spec item 1): read once per mount, same "caller-owned,
@@ -4833,7 +4830,7 @@ function mountAiLeagueBroadcastDrawer(
       // item 2): a marker's own tooltip is itself a spoiler surface,
       // independent of `maxSeekableTurn` above.
       currentTurn: turnNumber,
-      onSeek: dispatchTimelineSeek,
+      onSeek: dispatchJumpToTurn,
     });
     timeline.dataset.timelineKey = String(turnNumber);
     const tabs: BroadcastDrawerTab[] = [
@@ -5136,7 +5133,7 @@ function mountAiLeagueBroadcastDrawer(
           totalTurns,
           maxSeekableTurn: null,
           currentTurn: turnNumber,
-          onSeek: dispatchTimelineSeek,
+          onSeek: dispatchJumpToTurn,
         });
         // `renderMatchTimeline()` only ever returns a bare `.broadcast-
         // timeline` section — see `preserveDrawerPanelWrapperIdentity`'s
