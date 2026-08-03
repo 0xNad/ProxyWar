@@ -1,6 +1,7 @@
 import {
   computeElementScale,
   computeLabelFontSizePx,
+  computeUnsafePanelRects,
 } from "../src/client/graphics/layers/NameLayer";
 
 import { computeAllianceClipPath } from "../src/client/graphics/PlayerIcons";
@@ -94,6 +95,119 @@ describe("NameLayer label sizing (spec 01: territory-strength label sizing & col
 
     test("scales linearly with baseSize inside the clamp range", () => {
       expect(computeElementScale(6)).toBeCloseTo(0.9, 5); // 6 * 0.15
+    });
+  });
+
+  // P0 fix (2026-08-03, item 4): the floating Follow/Fit toolbar
+  // (PointOfViewSelector.ts) was missing from the safe-frame exclusion set
+  // entirely -- reproduced live: a territory-strength label rendered
+  // directly underneath it. Also fixes the underlying `offsetParent`
+  // check the whole selector list relied on: `offsetParent` is `null` for
+  // ANY `position: fixed` element whose containing block is the
+  // viewport -- confirmed live in Chrome for `#pw-game-control-cluster`
+  // (fully visible, `offsetParent === null`) -- and EVERY selector in
+  // this list targets a fixed-positioned element, so that guard was
+  // silently excluding all of them regardless of visibility. jsdom's own
+  // default `offsetParent` (null, since it does no real layout) mirrors
+  // that exact bug shape, so these tests would fail against the old
+  // offsetParent-gated implementation too.
+  describe("computeUnsafePanelRects (spec 01 rule 2: safe-frame exclusion rects)", () => {
+    afterEach(() => {
+      document.body.innerHTML = "";
+    });
+
+    function mountRect(
+      html: string,
+      selector: string,
+      rect: Partial<DOMRect>,
+    ): HTMLElement {
+      document.body.insertAdjacentHTML("beforeend", html);
+      const el = document.querySelector<HTMLElement>(selector)!;
+      vi.spyOn(el, "getBoundingClientRect").mockReturnValue({
+        x: 0,
+        y: 0,
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        width: 0,
+        height: 0,
+        toJSON: () => ({}),
+        ...rect,
+      } as DOMRect);
+      return el;
+    }
+
+    test("returns an empty array when none of the tracked panels are present", () => {
+      expect(computeUnsafePanelRects()).toEqual([]);
+    });
+
+    test("includes the floating Follow toolbar's rect via [data-pov-toolbar], not the pov-selector host", () => {
+      document.body.insertAdjacentHTML(
+        "beforeend",
+        "<pov-selector><div data-pov-toolbar></div></pov-selector>",
+      );
+      const toolbarDiv = document.querySelector<HTMLElement>(
+        "[data-pov-toolbar]",
+      )!;
+      vi.spyOn(toolbarDiv, "getBoundingClientRect").mockReturnValue({
+        x: 8,
+        y: 56,
+        top: 56,
+        left: 8,
+        right: 259,
+        bottom: 95,
+        width: 251,
+        height: 39,
+        toJSON: () => ({}),
+      } as DOMRect);
+
+      const rects = computeUnsafePanelRects();
+      expect(rects).toHaveLength(1);
+      expect(rects[0]).toMatchObject({ width: 251, height: 39, top: 56, left: 8 });
+    });
+
+    test("still includes the pre-existing panels (e.g. the control cluster), proving the offsetParent removal didn't break them", () => {
+      mountRect(
+        '<div id="pw-game-control-cluster"></div>',
+        "#pw-game-control-cluster",
+        { width: 325, height: 58, top: 16, left: 1024 },
+      );
+      const rects = computeUnsafePanelRects();
+      expect(rects).toHaveLength(1);
+      expect(rects[0]).toMatchObject({ width: 325, height: 58 });
+    });
+
+    test("excludes a collapsed/zero-size panel (e.g. a hidden 'Hide panel' state)", () => {
+      mountRect(
+        '<div id="ai-league-replay-overlay"></div>',
+        "#ai-league-replay-overlay",
+        { width: 0, height: 0 },
+      );
+      expect(computeUnsafePanelRects()).toEqual([]);
+    });
+
+    test("collects rects from multiple simultaneously-present panels", () => {
+      document.body.insertAdjacentHTML(
+        "beforeend",
+        '<div id="pw-game-control-cluster"></div><pov-selector><div data-pov-toolbar></div></pov-selector>',
+      );
+      vi.spyOn(
+        document.getElementById("pw-game-control-cluster")!,
+        "getBoundingClientRect",
+      ).mockReturnValue({
+        x: 0, y: 0, top: 16, left: 1024, right: 1349, bottom: 74,
+        width: 325, height: 58, toJSON: () => ({}),
+      } as DOMRect);
+      vi.spyOn(
+        document.querySelector("[data-pov-toolbar]")!,
+        "getBoundingClientRect",
+      ).mockReturnValue({
+        x: 0, y: 0, top: 56, left: 8, right: 259, bottom: 95,
+        width: 251, height: 39, toJSON: () => ({}),
+      } as DOMRect);
+
+      expect(computeUnsafePanelRects()).toHaveLength(2);
     });
   });
 });

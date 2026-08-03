@@ -330,10 +330,21 @@ export class PointOfViewSelector extends LitElement implements Layer {
    * The "from your league claim" caption below (rendered only when
    * `source === "claim"`) follows the SAME reflow, offset to sit under
    * wherever the main pill actually landed at each breakpoint.
+   *
+   * `data-pov-toolbar` (spec 01 rule 2, safe-frame): `NameLayer.ts`'s
+   * `computeUnsafePanelRects()` targets THIS div, not the `pov-selector`
+   * custom element itself — `createRenderRoot()` returns `this` (light
+   * DOM), so this fixed-positioned div is a CHILD of the element, and a
+   * `position: fixed` child contributes nothing to its non-fixed parent's
+   * own layout box; `document.querySelector("pov-selector").getBoundingClientRect()`
+   * measures a degenerate box (confirmed live: `{x:0, y:0, width:0,
+   * height: <viewport height>}`, matching neither this widget's size nor
+   * position) that would silently make that exclusion a no-op.
    */
   render() {
     return html`
       <div
+        data-pov-toolbar
         class="fixed top-14 left-2 z-[50003] flex items-center gap-1.5 rounded-lg bg-gray-800/85 text-white text-[11px] md:text-xs px-2 py-1.5 shadow-lg max-w-[calc(100vw-1rem)] min-[1200px]:top-4 min-[1200px]:left-1/2 min-[1200px]:max-w-none min-[1200px]:-translate-x-1/2"
       >
         <label for="pov-select" class="font-semibold whitespace-nowrap"

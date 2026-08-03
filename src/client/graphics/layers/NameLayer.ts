@@ -257,60 +257,12 @@ export class NameLayer implements Layer {
       // forces layout, and this already only runs at renderCheckRate
       // cadence (500ms/replay-presentation-interval), the same cost
       // envelope the rest of this batch already lives in.
-      const safePanelRects = this.computeUnsafePanelRects();
+      const safePanelRects = computeUnsafePanelRects();
 
       for (const render of this.renders) {
         this.renderPlayerInfo(render, transitiveTargets, safePanelRects);
       }
     }
-  }
-
-  /**
-   * Spec 01 rule 2 (safe-frame clamping): the fixed AI League broadcast
-   * chrome a territory label must never render underneath. Deliberately
-   * selector-driven rather than a new prop threaded through Layer's
-   * constructor -- this file already reaches directly into AI-league-
-   * specific behavior the same way (aiLeagueSpectatorDisplayName, imported
-   * above), and every selector here simply resolves to nothing (empty
-   * array, no-op) on an ordinary non-AI-league game, so this stays a pure
-   * addition with zero effect outside the replay/DC surface these rules
-   * are about.
-   *
-   * Deviation from the spec's own text, stated: the spec asks for
-   * "clamp the anchor inward... draw a short leader line back to the true
-   * centroid" for a label that would intersect the unsafe zone. This
-   * implementation SUPPRESSES (hides) the label instead of repositioning
-   * it. Repositioning requires per-label collision-aware placement (the
-   * same machinery rule 3's priority/collision system needs) plus a new
-   * leader-line rendering layer -- out of scope for this pass; suppression
-   * still satisfies this spec's own acceptance criterion ("zero label
-   * glyphs render with any part of their bounding box outside the safe
-   * frame") without inventing a second render pass. Full anchor-clamping +
-   * leader lines is a reasonable follow-up once rule 3's collision system
-   * exists to share the placement pass with.
-   */
-  private computeUnsafePanelRects(): DOMRect[] {
-    const selectors = [
-      "#pw-game-control-cluster",
-      "#ai-league-replay-overlay",
-      '.broadcast-drawer-panel[data-tab-id="events"]',
-      '.broadcast-drawer-panel[data-tab-id="timeline"]',
-    ];
-    const rects: DOMRect[] = [];
-    for (const selector of selectors) {
-      const el = document.querySelector<HTMLElement>(selector);
-      // offsetParent is null for display:none (collapsed panels, a hidden
-      // "Hide panel" state, position:fixed elements aside) -- a collapsed
-      // panel reserves no screen space, so it must not shrink the safe
-      // frame either.
-      if (el !== null && el.offsetParent !== null) {
-        const rect = el.getBoundingClientRect();
-        if (rect.width > 0 && rect.height > 0) {
-          rects.push(rect);
-        }
-      }
-    }
-    return rects;
   }
 
   private createBasePlayerElement(): HTMLDivElement {
@@ -806,4 +758,72 @@ export function computeLabelFontSizePx(
  */
 export function computeElementScale(baseSize: number): number {
   return clamp(baseSize * 0.15, 0.6, 1.2);
+}
+
+/**
+ * Spec 01 rule 2 (safe-frame clamping): the fixed AI League broadcast
+ * chrome a territory label must never render underneath. Deliberately
+ * selector-driven rather than a new prop threaded through Layer's
+ * constructor -- this file already reaches directly into AI-league-
+ * specific behavior the same way (aiLeagueSpectatorDisplayName, imported
+ * above), and every selector here simply resolves to nothing (empty
+ * array, no-op) on an ordinary non-AI-league game, so this stays a pure
+ * addition with zero effect outside the replay/DC surface these rules
+ * are about.
+ *
+ * Deviation from the spec's own text, stated: the spec asks for
+ * "clamp the anchor inward... draw a short leader line back to the true
+ * centroid" for a label that would intersect the unsafe zone. This
+ * implementation SUPPRESSES (hides) the label instead of repositioning
+ * it. Repositioning requires per-label collision-aware placement (the
+ * same machinery rule 3's priority/collision system needs) plus a new
+ * leader-line rendering layer -- out of scope for this pass; suppression
+ * still satisfies this spec's own acceptance criterion ("zero label
+ * glyphs render with any part of their bounding box outside the safe
+ * frame") without inventing a second render pass. Full anchor-clamping +
+ * leader lines is a reasonable follow-up once rule 3's collision system
+ * exists to share the placement pass with.
+ *
+ * Exported as a free function (was a private method) -- it touches no
+ * instance state, and this file already exports `computeElementScale`/
+ * `computeLabelFontSizePx` the same way for unit testing.
+ */
+export function computeUnsafePanelRects(): DOMRect[] {
+  const selectors = [
+    "#pw-game-control-cluster",
+    "#ai-league-replay-overlay",
+    '.broadcast-drawer-panel[data-tab-id="events"]',
+    '.broadcast-drawer-panel[data-tab-id="timeline"]',
+    // P0 fix (2026-08-03, item 4): the floating Follow/Fit toolbar
+    // (PointOfViewSelector.ts) was missing from this list entirely --
+    // reproduced live: a territory-strength label rendered directly
+    // underneath it. Targets `[data-pov-toolbar]` (the toolbar's own
+    // fixed-positioned div), NOT the `pov-selector` custom element host
+    // itself -- see that attribute's own doc in PointOfViewSelector.ts
+    // for why the host's bounding rect is degenerate.
+    "[data-pov-toolbar]",
+  ];
+  const rects: DOMRect[] = [];
+  for (const selector of selectors) {
+    const el = document.querySelector<HTMLElement>(selector);
+    if (el === null) continue;
+    // P0 fix (2026-08-03, item 4): `offsetParent` was used here as an
+    // "is this actually visible?" proxy, but per the CSSOM View spec
+    // `offsetParent` is ALSO `null` for any `position: fixed` element
+    // whose containing block is the viewport (confirmed live in
+    // Chrome: `#pw-game-control-cluster` -- itself `position: fixed` --
+    // already reported `offsetParent === null` despite being fully
+    // visible) -- EVERY selector in this list targets a fixed-positioned
+    // element, so this guard was silently excluding all of them
+    // regardless of visibility, making this whole safe-frame system a
+    // no-op. The `rect.width > 0 && rect.height > 0` check below is
+    // already sufficient on its own: a collapsed/`display:none` panel's
+    // `getBoundingClientRect()` is a zero-size rect by spec, with no
+    // need for the offsetParent proxy at all.
+    const rect = el.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) {
+      rects.push(rect);
+    }
+  }
+  return rects;
 }
