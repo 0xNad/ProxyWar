@@ -2829,7 +2829,25 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
           padding: 6px 4px;
           font-size: 11px;
         }
-        .broadcast-drawer-panel {
+        /*
+         * The plain .broadcast-drawer-panel reset below is (class-only)
+         * specificity 0,1,0 -- LOWER than the desktop .broadcast-drawer-
+         * panel[data-tab-id="events"]/[data-tab-id="timeline"] rules
+         * (class + attribute = 0,2,0), so CSS specificity -- not source
+         * order, not the media query -- decided the winner: the desktop
+         * position:fixed rules kept winning here regardless. Timeline
+         * kept its desktop-only left:404px; right:388px; at a 390px
+         * viewport (an already-negative computed width), rendering
+         * entirely off-screen and permanently unreachable on mobile
+         * (found live during the P1 mobile sweep). Repeating the same
+         * [data-tab-id] attribute selectors here matches that
+         * specificity exactly; being later in source order then wins the
+         * cascade tie the way every other selector in this block already
+         * (correctly) relies on.
+         */
+        .broadcast-drawer-panel,
+        .broadcast-drawer-panel[data-tab-id="events"],
+        .broadcast-drawer-panel[data-tab-id="timeline"] {
           position: static;
           top: auto;
           left: auto;
@@ -2895,7 +2913,9 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
           padding: 4px;
           font-size: 10px;
         }
-        .broadcast-drawer-panel {
+        .broadcast-drawer-panel,
+        .broadcast-drawer-panel[data-tab-id="events"],
+        .broadcast-drawer-panel[data-tab-id="timeline"] {
           position: static;
           top: auto;
           left: auto;
