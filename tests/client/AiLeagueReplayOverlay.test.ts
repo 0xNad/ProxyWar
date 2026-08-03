@@ -1720,6 +1720,7 @@ describe("AiLeagueReplayOverlay", () => {
         smallID: number;
         username: string;
         tilesOwned: number;
+        clientID?: string | null;
         allies?: number[];
         targets?: number[];
       }>,
@@ -1732,7 +1733,7 @@ describe("AiLeagueReplayOverlay", () => {
             players: players.map((player) => ({
               playerID: player.playerID,
               smallID: player.smallID,
-              clientID: null,
+              clientID: player.clientID ?? null,
               username: player.username,
               displayName: player.username,
               x: 0,
@@ -2507,8 +2508,8 @@ describe("AiLeagueReplayOverlay", () => {
         },
       });
       frame(600, [
-        { playerID: "p1", smallID: 1, username: "Atlas", tilesOwned: 60 },
-        { playerID: "p2", smallID: 2, username: "Blitz", tilesOwned: 40 },
+        { playerID: "p1", smallID: 1, username: "Atlas", tilesOwned: 60, clientID: "client-atlas" },
+        { playerID: "p2", smallID: 2, username: "Blitz", tilesOwned: 40, clientID: "client-blitz" },
       ]);
       const entriesBefore = document.querySelectorAll(".broadcast-rail-entry");
       expect(
@@ -2517,9 +2518,15 @@ describe("AiLeagueReplayOverlay", () => {
         ),
       ).toBe(true);
 
+      // P0 fix (follow-controls sync, deploy 3.4): the rail correlates the
+      // followed-change event's clientID against each frame player's own
+      // clientID -- playerName alone can never resolve a real PlayerView
+      // (see PointOfViewSelector.ts's onFollowPlayerRequest doc), so
+      // PointOfViewSelector always dispatches clientID alongside
+      // playerName now.
       document.dispatchEvent(
         new CustomEvent(BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT, {
-          detail: { playerName: "Blitz" },
+          detail: { playerName: "Blitz", clientID: "client-blitz" },
         }),
       );
 

@@ -326,7 +326,7 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
   // the rail's `followed` seat always reflects PointOfViewSelector's own
   // current pick, however it was set (rail click, dropdown, crosshair,
   // initial resolution).
-  let followedPlayerName: string | null = null;
+  let followedClientID: string | null = null;
   void resolveAiLeagueIdentities().then((resolved) => {
     identityByPlayerName = resolved;
     if (!overlay.isConnected) return;
@@ -334,7 +334,7 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
       overlay,
       currentInput,
       identityByPlayerName,
-      followedPlayerName,
+      followedClientID,
       directorCutHandle,
     );
   });
@@ -368,7 +368,7 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
     overlay,
     currentInput,
     identityByPlayerName,
-    followedPlayerName,
+    followedClientID,
     directorCutHandle,
     () => currentInput.currentTurn ?? 0,
   );
@@ -489,18 +489,19 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
   };
   followedPlayerWin.__aiLeagueFollowedPlayerCleanup?.();
   const onFollowedPlayerChange = (event: Event): void => {
-    const detail = (event as CustomEvent<{ playerName: string | null }>)
-      .detail;
-    if (detail === undefined || detail.playerName === followedPlayerName) {
+    const detail = (
+      event as CustomEvent<{ playerName: string | null; clientID?: string | null }>
+    ).detail;
+    if (detail === undefined || (detail.clientID ?? null) === followedClientID) {
       return;
     }
-    followedPlayerName = detail.playerName;
+    followedClientID = detail.clientID ?? null;
     if (!overlay.isConnected) return;
     mountAiLeagueBroadcastDrawer(
       overlay,
       currentInput,
       identityByPlayerName,
-      followedPlayerName,
+      followedClientID,
       directorCutHandle,
     );
   };
@@ -538,7 +539,7 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
       overlay,
       currentInput,
       identityByPlayerName,
-      followedPlayerName,
+      followedClientID,
       directorCutHandle,
       () => currentInput.currentTurn ?? 0,
     );
@@ -668,7 +669,7 @@ function mountReplayDetailsBindings(
   overlay: HTMLElement,
   input: AiLeagueReplayOverlayInput,
   identityByPlayerName: ReadonlyMap<string, PublicAgent>,
-  followedPlayerName: string | null,
+  followedClientID: string | null,
   directorCutHandle: DirectorCutControllerHandle | null,
   getCurrentTurn: () => number,
 ): ReplayScopedLeagueClipControlHandle | null {
@@ -693,7 +694,7 @@ function mountReplayDetailsBindings(
     overlay,
     input,
     identityByPlayerName,
-    followedPlayerName,
+    followedClientID,
     directorCutHandle,
   );
   const clipContainer = overlay.querySelector<HTMLElement>(
@@ -3905,6 +3906,21 @@ function competitorRailEntries(
         : { allies: [], wars: [] };
     return {
       playerName: username,
+      // Camera-follow discoverability (spec item 6/item 4 P0 fix):
+      // PointOfViewSelector's actual PlayerView identity has NO
+      // relationship to the AI League roster's `username` -- GameView's
+      // own name()/displayName() are procedurally-generated in-game
+      // nation names ("Somali Host", "Almohad Regime", ...), a totally
+      // disjoint namespace (confirmed live: neither the toolbar dropdown
+      // (already keyed by GameView's own player.id(), self-consistent)
+      // nor the per-agent rail button (dispatched the roster username,
+      // which PointOfViewSelector's name-based lookup can never resolve
+      // to a real PlayerView) could establish a shared identity before
+      // this fix). `clientID` is the one identifier BOTH sides already
+      // expose in the SAME value space (AiLeagueReplayFramePlayer.clientID
+      // / PlayerView.clientID()) -- this is what BROADCAST_RAIL_FOLLOW_EVENT
+      // and BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT now correlate on instead.
+      clientID: framePlayer?.clientID ?? null,
       displayName,
       agentSlug: identity?.slug ?? null,
       emblemSvg: identity?.emblemSvg ?? null,
@@ -4078,7 +4094,7 @@ function analystActionKindCounts(
  * Every tab's DERIVATION stays exactly what it always was —
  * competitorRailEntries()/curatedWarRoomEvents()/matchTimelineEventMarkers()
  * are reused verbatim, only WHERE their output mounts changed.
- * `followedPlayerName` (spec item 6) is threaded in from the outer mount
+ * `followedClientID` (spec item 6) is threaded in from the outer mount
  * closure so the rail's `followed` seat always reflects
  * PointOfViewSelector's current pick.
  *
@@ -4650,7 +4666,7 @@ function mountAiLeagueBroadcastDrawer(
   overlay: HTMLElement,
   input: AiLeagueReplayOverlayInput,
   identityByPlayerName: ReadonlyMap<string, PublicAgent>,
-  followedPlayerName: string | null,
+  followedClientID: string | null,
   directorCutHandle: DirectorCutControllerHandle | null,
 ): void {
   const container = overlay.querySelector<HTMLElement>(
@@ -4807,10 +4823,10 @@ function mountAiLeagueBroadcastDrawer(
   };
 
   const railCallbacks = () => ({
-    onSelect: (playerName: string) => {
+    onSelect: (playerName: string, clientID: string | null) => {
       document.dispatchEvent(
         new CustomEvent(BROADCAST_RAIL_FOLLOW_EVENT, {
-          detail: { playerName },
+          detail: { playerName, clientID },
         }),
       );
     },
@@ -4895,7 +4911,7 @@ function mountAiLeagueBroadcastDrawer(
       identityByPlayerName,
     ).map((entry) => ({
       ...entry,
-      followed: entry.playerName === followedPlayerName,
+      followed: entry.clientID !== null && entry.clientID === followedClientID,
     }));
     const eligibleWarRoomCount = domEligibleCount(
       allWarRoomEvents,
@@ -5060,7 +5076,7 @@ function mountAiLeagueBroadcastDrawer(
       identityByPlayerName,
     ).map((entry) => ({
       ...entry,
-      followed: entry.playerName === followedPlayerName,
+      followed: entry.clientID !== null && entry.clientID === followedClientID,
     }));
     const rail = container.querySelector<HTMLElement>(".broadcast-rail");
     if (rail !== null) {

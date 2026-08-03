@@ -20,17 +20,21 @@ const WHOLE_BOARD_VALUE = "";
 
 /**
  * Dispatched by the Stage 4 broadcast composition's competitor rail (either
- * overlay) with `detail: { playerName: string }` when a viewer clicks a
- * rail seat. This class is the ONLY listener — see `onFollowPlayerRequest`.
+ * overlay) with `detail: { playerName: string; clientID: string | null }`
+ * when a viewer clicks a rail seat. `clientID` (P0 fix, deploy 3.4) is what
+ * this class actually resolves the click to a real PlayerView with — see
+ * `onFollowPlayerRequest`'s own doc. This class is the ONLY listener.
  */
 export const BROADCAST_RAIL_FOLLOW_EVENT = "broadcast-rail-follow-player";
 
 /**
  * Dispatched BY this class whenever the followed player changes (from a
  * rail click, the dropdown, the crosshair button, or the silent initial
- * claim/manual resolution) with `detail: { playerName: string | null }` —
- * `null` for "whole board". Both overlays listen for this to keep the
- * competitor rail's `followed`/`data-followed` state truthful.
+ * claim/manual resolution) with `detail: { playerName: string | null;
+ * clientID: string | null }` — both `null` for "whole board". Both
+ * overlays listen for this to keep the competitor rail's
+ * `followed`/`data-followed` state truthful, correlating on `clientID`
+ * (see `onFollowPlayerRequest`'s own doc for why `playerName` alone can't).
  */
 export const BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT =
   "broadcast-rail-followed-change";
@@ -107,18 +111,39 @@ export class PointOfViewSelector extends LitElement implements Layer {
    * `GoToPlayerEvent`/`PointOfViewChangeEvent` emissions all in perfect
    * sync with a rail click, rather than a second, parallel follow
    * mechanism that could drift from this one.
+   *
+   * P0 fix (follow-controls sync, deploy 3.4): `detail.playerName` is a
+   * rail's human-readable roster/seat name — NEVER the same value as this
+   * class's own `PlayerView.name()`/`.displayName()`, which are
+   * procedurally-generated in-game identifiers (confirmed live: an AI
+   * League match's rail seat reads "PeePee7"; the SAME player's own
+   * `PlayerView.displayName()` reads "👤 Somali Host" — a completely
+   * disjoint namespace). Matching on `playerName` therefore NEVER
+   * resolved a real player, so the per-agent rail button silently did
+   * nothing at all — not merely "didn't sync the toolbar", the camera
+   * never moved either. `detail.clientID` is the identifier both sides
+   * actually share (`AiLeagueReplayFramePlayer.clientID` /
+   * `ReplayPremiereRailSeatView.seatId`, both === `PlayerView.clientID()`)
+   * — resolved first when present; the old name-based match survives only
+   * as a fallback for a caller that hasn't been updated to supply it.
    */
   private readonly onFollowPlayerRequest = (event: Event): void => {
-    const detail = (event as CustomEvent<{ playerName?: string }>).detail;
-    if (typeof detail?.playerName !== "string") return;
-    const player =
-      this.game
-        ?.playerViews()
-        .find(
+    const detail = (
+      event as CustomEvent<{ playerName?: string; clientID?: string | null }>
+    ).detail;
+    const players = this.game?.playerViews() ?? [];
+    let player: PlayerView | null = null;
+    if (typeof detail?.clientID === "string") {
+      player = players.find((p) => p.clientID() === detail.clientID) ?? null;
+    }
+    if (player === null && typeof detail?.playerName === "string") {
+      player =
+        players.find(
           (p) =>
             p.displayName() === detail.playerName ||
             p.name() === detail.playerName,
         ) ?? null;
+    }
     if (player === null) return;
     this.applyPov(player, "manual", { persist: true, pan: true });
   };
@@ -206,10 +231,17 @@ export class PointOfViewSelector extends LitElement implements Layer {
     // to highlight whichever rail seat is currently followed, keeping the
     // rail's `data-followed` state truthful regardless of whether the PoV
     // changed via a rail click, the dropdown, or the initial claim/manual
-    // resolution above.
+    // resolution above. `clientID` (P0 fix, deploy 3.4) is what a rail
+    // consumer actually compares its own seat identity against — see
+    // `onFollowPlayerRequest`'s own doc for why `playerName` alone can
+    // never correlate to a rail seat; `playerName` is kept dispatched too
+    // for a caller that only wants the human-readable name.
     document.dispatchEvent(
       new CustomEvent(BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT, {
-        detail: { playerName: player?.displayName() ?? null },
+        detail: {
+          playerName: player?.displayName() ?? null,
+          clientID: player?.clientID() ?? null,
+        },
       }),
     );
     // A manual pan request always resolves to a camera move: a followed

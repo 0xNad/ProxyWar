@@ -84,6 +84,21 @@ function renderCollapseToggle(
  */
 export interface CompetitorRailEntry {
   playerName: string;
+  /**
+   * The GameView/PlayerView identity this seat correlates to (P0 fix,
+   * follow-controls sync, deploy 3.4) — `playerName` alone is NOT enough:
+   * `PointOfViewSelector`'s own PlayerView identity lives in a completely
+   * disjoint namespace from a roster's `playerName` (confirmed live: the
+   * GameView's own `name()`/`displayName()` are procedurally-generated
+   * in-game nation names, never the roster's real agent/seat name), so a
+   * rail click dispatched by playerName alone could never resolve to a
+   * real followed player. `clientID` is the identifier both sides
+   * actually share. Optional and defaults to null (no correlation
+   * available — the rail seat renders normally but can never actually
+   * resolve to/highlight a real follow target) so a caller that hasn't
+   * been updated to supply it keeps compiling, at today's behavior.
+   */
+  clientID?: string | null;
   displayName: string;
   agentSlug: string | null;
   emblemSvg: string | null;
@@ -107,10 +122,14 @@ export interface CompetitorRailCallbacks {
   /**
    * Camera-follow discoverability (spec item 6): clicking a rail seat pans
    * to that Agent — the SAME opt-in-only pan `PointOfViewSelector`'s
-   * crosshair button already triggers, never automatic. Omit to render a
-   * non-interactive rail (e.g. a context with no game view attached).
+   * crosshair button already triggers, never automatic. `clientID` is the
+   * identifier `PointOfViewSelector` can actually resolve to a PlayerView
+   * (see `CompetitorRailEntry.clientID`'s own doc) — `playerName` alone is
+   * kept for callers/analytics that still want the human-readable name.
+   * Omit `onSelect` entirely to render a non-interactive rail (e.g. a
+   * context with no game view attached).
    */
-  onSelect?: (playerName: string) => void;
+  onSelect?: (playerName: string, clientID: string | null) => void;
   /** Collapse/expand (spec item 1). Omit `onToggleCollapsed` to render a rail with no toggle at all (always expanded) — see `renderCollapseToggle`'s own doc for the caller-owned-state contract. */
   collapsed?: boolean;
   onToggleCollapsed?: () => void;
@@ -202,7 +221,7 @@ function renderCompetitorRailEntry(
       }),
     );
     surface.addEventListener("click", () => {
-      callbacks.onSelect?.(entry.playerName);
+      callbacks.onSelect?.(entry.playerName, entry.clientID ?? null);
     });
   }
 

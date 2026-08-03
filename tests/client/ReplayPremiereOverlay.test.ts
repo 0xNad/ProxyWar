@@ -2417,10 +2417,10 @@ describe("Stage 4 second-half wiring: camera-follow, drawer, analyst mode, lower
         ],
       }),
     );
-    const followEvents: Array<{ playerName: string }> = [];
+    const followEvents: Array<{ playerName: string; clientID?: string | null }> = [];
     document.addEventListener(BROADCAST_RAIL_FOLLOW_EVENT, (event) => {
       followEvents.push(
-        (event as CustomEvent<{ playerName: string }>).detail,
+        (event as CustomEvent<{ playerName: string; clientID?: string | null }>).detail,
       );
     });
     const seatButton = handle.element.querySelector<HTMLButtonElement>(
@@ -2429,7 +2429,14 @@ describe("Stage 4 second-half wiring: camera-follow, drawer, analyst mode, lower
     expect(seatButton).not.toBeNull();
     expect(followEvents).toHaveLength(0);
     seatButton?.click();
-    expect(followEvents).toEqual([{ playerName: "Atlas Prime" }]);
+    // P0 fix (follow-controls sync, deploy 3.4): the dispatched detail now
+    // also carries clientID -- the seat's own seatId, the ONLY identifier
+    // PointOfViewSelector can actually resolve to a real PlayerView (see
+    // PointOfViewSelector.ts's onFollowPlayerRequest doc for why playerName
+    // alone can never do this).
+    expect(followEvents).toEqual([
+      { playerName: "Atlas Prime", clientID: "seat-a" },
+    ]);
   });
 
   it("highlights whichever rail seat PointOfViewSelector reports as followed, via the followed-change event, without owning follow state itself", () => {
@@ -2463,9 +2470,14 @@ describe("Stage 4 second-half wiring: camera-follow, drawer, analyst mode, lower
     expect(entries()[0].dataset.followed).toBe("false");
     expect(entries()[1].dataset.followed).toBe("false");
 
+    // P0 fix (follow-controls sync, deploy 3.4): the rail correlates the
+    // followed-change event's clientID against each seat's own seatId --
+    // playerName alone can never resolve a real PlayerView (see
+    // PointOfViewSelector.ts's onFollowPlayerRequest doc), so PointOfView-
+    // Selector always dispatches clientID alongside playerName now.
     document.dispatchEvent(
       new CustomEvent(BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT, {
-        detail: { playerName: "Borealis" },
+        detail: { playerName: "Borealis", clientID: "seat-b" },
       }),
     );
     expect(entries()[0].dataset.followed).toBe("false");
@@ -2473,7 +2485,7 @@ describe("Stage 4 second-half wiring: camera-follow, drawer, analyst mode, lower
 
     document.dispatchEvent(
       new CustomEvent(BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT, {
-        detail: { playerName: null },
+        detail: { playerName: null, clientID: null },
       }),
     );
     expect(entries()[1].dataset.followed).toBe("false");

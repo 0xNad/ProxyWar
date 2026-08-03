@@ -554,7 +554,7 @@ export function mountReplayPremiereOverlay(
   // `followed` highlight stays truthful — the click that CAUSES a follow is
   // a fire-and-forget dispatch (`RAIL_CALLBACKS`), never a state change this
   // overlay owns itself.
-  let followedPlayerName: string | null = null;
+  let followedClientID: string | null = null;
   // Mobile drawer (spec item 7) / analyst mode (spec item 5): caller-owned
   // UI state, same pattern as the caption draft below — read on render,
   // mutated by a setter that re-renders.
@@ -585,7 +585,7 @@ export function mountReplayPremiereOverlay(
   const latestModel = () => model;
 
   const currentBroadcastState = (): BroadcastState => ({
-    followedPlayerName,
+    followedClientID,
     activeDrawerTab,
     setActiveDrawerTab(tab: BroadcastDrawerTabId) {
       if (activeDrawerTab === tab) return;
@@ -626,9 +626,10 @@ export function mountReplayPremiereOverlay(
   });
 
   const onFollowedChange = (event: Event): void => {
-    const detail = (event as CustomEvent<{ playerName: string | null }>)
-      .detail;
-    followedPlayerName = detail?.playerName ?? null;
+    const detail = (
+      event as CustomEvent<{ playerName: string | null; clientID?: string | null }>
+    ).detail;
+    followedClientID = detail?.clientID ?? null;
     render();
   };
   document.addEventListener(
@@ -871,7 +872,7 @@ interface CaptionDraftState {
  */
 interface BroadcastState {
   /** Whichever player `PointOfViewSelector` currently follows (spec item 6) — used only to render the rail's `followed` highlight truthfully. */
-  followedPlayerName: string | null;
+  followedClientID: string | null;
   /** Mobile drawer (spec item 7): active tab at narrow/short viewports; irrelevant at desktop width, where CSS shows every non-Analysis panel regardless. */
   activeDrawerTab: BroadcastDrawerTabId;
   setActiveDrawerTab(tab: BroadcastDrawerTabId): void;
@@ -985,7 +986,7 @@ function applyVolatileModelUpdates(
         buildCompetitorRailEntries(
           model.competitorRailSeats,
           identityByPlayerName,
-          broadcastState.followedPlayerName,
+          broadcastState.followedClientID,
         ),
         {
           ...RAIL_CALLBACKS,
@@ -1219,12 +1220,19 @@ function applyVolatileModelUpdates(
 function buildCompetitorRailEntries(
   seats: readonly ReplayPremiereRailSeatView[],
   identityByPlayerName: ReadonlyMap<string, PublicAgent> | null,
-  followedPlayerName: string | null,
+  followedClientID: string | null,
 ): CompetitorRailEntry[] {
   return seats.map((seat): CompetitorRailEntry => {
     const agent = identityByPlayerName?.get(seat.playerName) ?? null;
     return {
       playerName: seat.playerName,
+      // P0 fix (follow-controls sync, deploy 3.4): `seat.seatId` IS the
+      // identifier PointOfViewSelector's own PlayerView.clientID()
+      // correlates to (see ReplayPremiereRuntime.ts's own
+      // framePlayerBySeatId doc) — `playerName` alone can never resolve
+      // to a real PlayerView, the same mismatch AiLeagueReplayOverlay.ts
+      // had (see PointOfViewSelector.ts's onFollowPlayerRequest doc).
+      clientID: seat.seatId,
       displayName: agent !== null ? agent.displayName : seat.playerName,
       agentSlug: agent?.slug ?? null,
       emblemSvg: agent?.emblemSvg ?? null,
@@ -1241,16 +1249,18 @@ function buildCompetitorRailEntries(
       // `AgentEvaluationReport.ts`) — no bounded signal for it exists while a
       // Premiere is sealed/live, live or archived.
       degradedDecisionCount: null,
-      followed: seat.playerName === followedPlayerName,
+      followed: seat.seatId === followedClientID,
     };
   });
 }
 
 /** Opt-in-only camera-follow bridge (spec item 6): the SAME cross-overlay CustomEvent `PointOfViewSelector` is the only listener for — clicking a rail seat pans, exactly like the crosshair button, never automatic. A module-level constant since it captures no per-mount state. */
 const RAIL_CALLBACKS: CompetitorRailCallbacks = {
-  onSelect: (playerName: string) => {
+  onSelect: (playerName: string, clientID: string | null) => {
     document.dispatchEvent(
-      new CustomEvent(BROADCAST_RAIL_FOLLOW_EVENT, { detail: { playerName } }),
+      new CustomEvent(BROADCAST_RAIL_FOLLOW_EVENT, {
+        detail: { playerName, clientID },
+      }),
     );
   },
 };
@@ -1279,7 +1289,7 @@ function renderBroadcastRegions(
     buildCompetitorRailEntries(
       model.competitorRailSeats,
       identityByPlayerName,
-      broadcastState.followedPlayerName,
+      broadcastState.followedClientID,
     ),
     {
       ...RAIL_CALLBACKS,
