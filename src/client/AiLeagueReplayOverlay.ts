@@ -1123,6 +1123,25 @@ function mountReplayPanelControls(overlay: HTMLElement) {
     ?.addEventListener("click", () => {
       localStorage.removeItem(storageKey);
       overlay.removeAttribute("style");
+      // P2 fix (pass-10 t4-03): this was ONLY a panel-position reset, but
+      // it is the ONE control this header labels "Reset" — right next to
+      // Play/Pause, exactly where a viewer expects "restart the match"
+      // to live, and it visibly did nothing once the DC reached its end
+      // screen. `LocalServer.ts`'s `jumpReplayForward()` (the engine
+      // behind `ReplayJumpToTurnEvent`) is deliberately forward-only —
+      // its own `Math.max(this.turns.length, …)` clamp means a turn-0
+      // request after every turn has already played is a genuine no-op,
+      // not a bug in that function; this app has no backward-seek path
+      // through an already-replayed simulation, in ANY playback state.
+      // A full reload is the one path already proven (QA's own repro) to
+      // restart cleanly from turn 0 — safe specifically on this
+      // coworld/DC replay route because `ReplayPositionPersistence.ts`'s
+      // refresh-resume feature explicitly excludes `source ===
+      // "coworld-replay"` (see `Main.ts`), so there is no saved position
+      // to resume into. Same reload-to-restart convention this codebase
+      // already uses elsewhere (`AccountModal.ts`, `Cosmetics.ts`,
+      // `ReplayLoadingScreen.ts`'s own retry button).
+      window.location.reload();
     });
 }
 
@@ -2942,6 +2961,37 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         .broadcast-rail-list {
           max-height: 30vh;
         }
+        /*
+         * P2 fix (pass-10, small item): the tab bar (Agents/Events/
+         * Timeline/Analysis) lives INSIDE [data-ai-league-broadcast-
+         * drawer], but that container renders AFTER .ai-league-
+         * standings in DOM order — fine at every other breakpoint
+         * (plenty of vertical room), but at this viewport's ~277px
+         * visible body height, Standings' own (unbounded, up to 12
+         * agents) rows plus the match-state strip above the tabs pushed
+         * the tab bar to ~y:419 in a 390px-tall viewport — reachable by
+         * scrolling the panel, but not visible on open (QA pass-10 t2-02:
+         * "tabs container was measured OFF the visible viewport on
+         * initial open"). Standings' own ranked-agent content is already
+         * duplicated by the drawer's own "Agents" tab, so reordering
+         * (never hiding — still one scroll away, same as every other
+         * off-fold section) the drawer ahead of it is a pure visual
+         * reorder: Standings' DOM position/tab order/scroll-anchoring
+         * are untouched, only where it PAINTS relative to the drawer.
+         */
+        .ai-league-body {
+          display: flex;
+          flex-direction: column;
+        }
+        [data-ai-league-broadcast-drawer] {
+          order: 1;
+        }
+        .ai-league-standings {
+          order: 2;
+        }
+        [data-ai-league-details] {
+          order: 3;
+        }
       }
     </style>
     <header data-ai-league-drag>
@@ -4505,6 +4555,42 @@ function mountAiLeagueBroadcastDrawer(
       }),
     );
   };
+  /**
+   * CHECK item (pass-10): the bottom Match Timeline scrubber's click-to-
+   * seek is confirmed genuinely broken for BACKWARD seeks specifically —
+   * `LocalServer.ts`'s `jumpReplayForward()` (the engine behind
+   * `ReplayJumpToTurnEvent`, which `dispatchJumpToTurn` above triggers)
+   * is deliberately forward-only (`Math.max(this.turns.length, …)`), so
+   * a click on a marker at or behind the current playhead — the common
+   * case once the fast "catch up to now" phase has run, and the ONLY
+   * case once the match has ended — silently clamps to the current
+   * turn: a real no-op a viewer reads as "the marker doesn't work" (QA's
+   * own repro: "several click attempts … did not visibly move the
+   * elapsed timer"). Reuses the SAME `?turn=` deep-link param `Main.ts`
+   * already wires up for share links (a fresh session restarts at turn
+   * 0 and fast-forwards to the target — always a forward seek from
+   * there) rather than teaching the forward-only engine a real backward
+   * seek. Deliberately a SEPARATE wrapper from `dispatchJumpToTurn`
+   * above (used only as the Match Timeline's own `onSeek`, never by the
+   * War Room feed's "jump to turn" action) — the War Room's own jump
+   * links point at a SPECIFIC decision/event a viewer just read, where
+   * an unannounced full-page navigation would be a much more jarring
+   * interruption than the always-in-view Timeline scrubber; narrowing
+   * the fix to the one control this CHECK item actually covers keeps it
+   * a small, targeted change instead of an app-wide navigation policy.
+   */
+  const dispatchTimelineSeek = (turn: number): void => {
+    const knownTurn =
+      AI_LEAGUE_BROADCAST_DRAWER_LAST_TURN.get(container) ?? 0;
+    if (turn < knownTurn) {
+      analytics.track("timeline_jump", { matchId: input.runID });
+      const url = new URL(window.location.href);
+      url.searchParams.set("turn", String(Math.max(0, Math.floor(turn))));
+      window.location.href = url.toString();
+      return;
+    }
+    dispatchJumpToTurn(turn);
+  };
 
   // Collapse/expand (spec item 1): read once per mount, same "caller-owned,
   // localStorage-persisted" pattern as mountReplayPanelControls's own layout
@@ -4747,7 +4833,7 @@ function mountAiLeagueBroadcastDrawer(
       // item 2): a marker's own tooltip is itself a spoiler surface,
       // independent of `maxSeekableTurn` above.
       currentTurn: turnNumber,
-      onSeek: dispatchJumpToTurn,
+      onSeek: dispatchTimelineSeek,
     });
     timeline.dataset.timelineKey = String(turnNumber);
     const tabs: BroadcastDrawerTab[] = [
@@ -5050,7 +5136,7 @@ function mountAiLeagueBroadcastDrawer(
           totalTurns,
           maxSeekableTurn: null,
           currentTurn: turnNumber,
-          onSeek: dispatchJumpToTurn,
+          onSeek: dispatchTimelineSeek,
         });
         // `renderMatchTimeline()` only ever returns a bare `.broadcast-
         // timeline` section — see `preserveDrawerPanelWrapperIdentity`'s
@@ -5949,23 +6035,55 @@ export function deriveMatchStateStripFields(
   }
   if (sample === null) return null;
   const leaderAgent = sample.agents.find((agent) => agent.rank === 1) ?? null;
+  // The leader identity/percent PREFER the SAME live per-tick frame data
+  // the Standings/Competitors rail renders from (identical formula to
+  // `competitorRailEntries`'s own `totalTiles`/`territoryPercent`: tiles
+  // owned over the sum of every current frame player's tiles owned, and
+  // "leader" = the frame player ranked #1 by that same sort) — never the
+  // coarse match-state-series sample, which is captured at most every
+  // ~200 turns (`MATCH_STATE_SERIES_MAX_SAMPLES` over a whole match) and
+  // can lag well behind the live tick. That lag is exactly what produced
+  // pass-10's P1 finding (t4-01/t4-02): "Leader relh · 64%" against the
+  // Standings/Competitors' live "89%" for the SAME agent at the SAME
+  // instant — the strip was reading a stale sample instead of the tick
+  // the rest of the panel was already rendering. Only fall back to the
+  // series sample when no live frame data has arrived yet (defensive:
+  // both real call sites always pass a live frame by the time this runs).
+  const totalTiles = framePlayers.reduce(
+    (sum, player) => sum + Math.max(0, player.tilesOwned),
+    0,
+  );
+  const topFramePlayer =
+    totalTiles > 0
+      ? [...framePlayers].sort((a, b) => b.tilesOwned - a.tilesOwned)[0]
+      : null;
   const leader =
-    leaderAgent === null
-      ? null
-      : {
+    topFramePlayer !== null
+      ? {
           displayName:
-            identityByPlayerName.get(leaderAgent.username)?.displayName ??
-            aiLeagueSpectatorDisplayName(leaderAgent.username),
-          territoryPercent: leaderAgent.territoryShare * 100,
-        };
+            identityByPlayerName.get(topFramePlayer.username)?.displayName ??
+            aiLeagueSpectatorDisplayName(
+              (topFramePlayer.displayName ?? "") || topFramePlayer.username,
+            ),
+          territoryPercent: (topFramePlayer.tilesOwned / totalTiles) * 100,
+        }
+      : leaderAgent === null
+        ? null
+        : {
+            displayName:
+              identityByPlayerName.get(leaderAgent.username)?.displayName ??
+              aiLeagueSpectatorDisplayName(leaderAgent.username),
+            territoryPercent: leaderAgent.territoryShare * 100,
+          };
   let territoryShareDeltaPercent: number | null = null;
-  if (leaderAgent !== null && previousSample !== null) {
+  const deltaPlayerID = topFramePlayer?.playerID ?? leaderAgent?.playerID ?? null;
+  if (deltaPlayerID !== null && previousSample !== null && leader !== null) {
     const previousAgent = previousSample.agents.find(
-      (agent) => agent.playerID === leaderAgent.playerID,
+      (agent) => agent.playerID === deltaPlayerID,
     );
     if (previousAgent !== undefined) {
       territoryShareDeltaPercent =
-        (leaderAgent.territoryShare - previousAgent.territoryShare) * 100;
+        leader.territoryPercent - previousAgent.territoryShare * 100;
     }
   }
   return {

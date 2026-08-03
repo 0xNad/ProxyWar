@@ -209,9 +209,24 @@ export class SettingsModal extends LitElement implements Layer {
       return null;
     }
 
+    // P1 ghost-modal fix (pass-10 t1-03): this used to be `z-2000`, which
+    // sat BELOW every high-z feature overlay this app has grown since
+    // (`AiLeagueReplayOverlay.ts`'s Director Cut/broadcast panels top out
+    // at z-[50010] for the Analyst-mode centered panel; betting/points/
+    // sign-in surfaces reach z-[52000]-z-[54000]). With Analyst mode on,
+    // that promoted panel renders fixed and CENTERED — the exact same
+    // screen region this modal opens into — so this modal's own
+    // computed styles looked correct (z-index 2000, opacity 1, display
+    // block) while being fully painted over AND non-blocking
+    // (`elementFromPoint` over it returned a `<span>` from the replay
+    // overlay's standings rail instead). A modal is meant to be the
+    // single topmost layer regardless of whatever feature overlay is
+    // active underneath it, so this now sits above every z-index band
+    // in the app rather than trying to out-guess each new overlay's own
+    // ceiling.
     return html`
       <div
-        class="modal-overlay fixed inset-0 bg-black/60 backdrop-blur-xs z-2000 flex items-center justify-center p-4"
+        class="modal-overlay fixed inset-0 bg-black/60 backdrop-blur-xs z-[60000] flex items-center justify-center p-4"
         @contextmenu=${(e: Event) => e.preventDefault()}
       >
         <div

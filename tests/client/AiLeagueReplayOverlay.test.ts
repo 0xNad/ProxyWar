@@ -504,6 +504,54 @@ describe("AiLeagueReplayOverlay", () => {
     expect(overlay.getAttribute("style")).toBeNull();
   });
 
+  it("restarts playback from turn 0 when Reset is clicked in ANY state, including the ended end screen (P2 pass-10 t4-03)", () => {
+    // Same window.location mocking convention `WinModal.test.ts` already
+    // uses — jsdom has no real navigation, so this pins the fix at the
+    // "reload was actually invoked" level rather than asserting turn 0
+    // renders (which would just be re-testing jsdom's own navigation,
+    // not this app's code).
+    const reloadMock = vi.fn();
+    const originalLocation = window.location;
+    Object.defineProperty(window, "location", {
+      value: { reload: reloadMock, pathname: window.location.pathname },
+      writable: true,
+      configurable: true,
+    });
+
+    try {
+      mountAiLeagueReplayOverlay({
+        runID: "reset-restarts-ended",
+        artifactBasePath: "/ai-league-runs/reset-restarts-ended",
+        decisions: [],
+      });
+      const overlay = document.getElementById("ai-league-replay-overlay")!;
+
+      // Simulate the match having reached its end screen: the frame
+      // stream has stopped advancing and the DC is showing "X has won!"
+      // — none of which the Reset handler may consult before acting
+      // (spec: "restarts playback from turn 0 from ANY state including
+      // ended", i.e. no ended-state guard is allowed to swallow the
+      // click).
+      document.dispatchEvent(
+        new CustomEvent("ai-league-replay-frame", {
+          detail: { tick: 16234, turnNumber: 16234, players: [] },
+        }),
+      );
+
+      overlay
+        .querySelector<HTMLButtonElement>("[data-ai-league-reset-layout]")
+        ?.click();
+
+      expect(reloadMock).toHaveBeenCalledTimes(1);
+    } finally {
+      Object.defineProperty(window, "location", {
+        value: originalLocation,
+        writable: true,
+        configurable: true,
+      });
+    }
+  });
+
   it("starts as an accessible compact bottom sheet on narrow screens", () => {
     Object.defineProperty(window, "innerWidth", {
       configurable: true,
@@ -558,6 +606,63 @@ describe("AiLeagueReplayOverlay", () => {
     expect(styles).toContain("min-height: 44px");
     expect(styles).toContain(".ai-league-headline-text");
     expect(styles).toContain("white-space: nowrap");
+  });
+
+  it("puts the drawer tab bar ahead of Standings at the landscape-phone breakpoint, so it's in the fold on open (P2 pass-10, 844x390)", () => {
+    // jsdom does not evaluate media queries or run real layout, so (same
+    // convention as `ReplayPremiereOverlay.test.ts`'s own sticky-tabs fix)
+    // this pins the fix at the CSS-rule level: extract the landscape-only
+    // media block and assert it reorders the drawer ahead of Standings,
+    // rather than asserting actual pixel positions no jsdom test can see.
+    mountAiLeagueReplayOverlay({
+      runID: "landscape-tabs-in-fold",
+      artifactBasePath: "/ai-league-runs/landscape-tabs-in-fold",
+      decisions: [],
+    });
+    const css =
+      document.querySelector("#ai-league-replay-overlay style")
+        ?.textContent ?? "";
+    const landscapeBlockStart = css.indexOf(
+      "@media (max-height: 430px) and (orientation: landscape)",
+    );
+    expect(landscapeBlockStart).toBeGreaterThan(-1);
+    // Bound the search to this block only — the desktop stylesheet has
+    // its own unrelated `.ai-league-standings`/`[data-ai-league-broadcast-
+    // drawer]` rules earlier that must NOT satisfy this assertion.
+    const landscapeBlockEnd = css.indexOf(
+      "</style>",
+      landscapeBlockStart,
+    );
+    const landscapeBlock = css.slice(landscapeBlockStart, landscapeBlockEnd);
+
+    const bodyRuleStart = landscapeBlock.indexOf(".ai-league-body {");
+    expect(bodyRuleStart).toBeGreaterThan(-1);
+    const bodyRule = landscapeBlock.slice(
+      bodyRuleStart,
+      landscapeBlock.indexOf("}", bodyRuleStart),
+    );
+    expect(bodyRule).toContain("display: flex");
+    expect(bodyRule).toContain("flex-direction: column");
+
+    const drawerRuleStart = landscapeBlock.indexOf(
+      "[data-ai-league-broadcast-drawer] {",
+    );
+    expect(drawerRuleStart).toBeGreaterThan(-1);
+    const drawerOrder = landscapeBlock.slice(
+      drawerRuleStart,
+      landscapeBlock.indexOf("}", drawerRuleStart),
+    );
+    expect(drawerOrder).toContain("order: 1");
+
+    const standingsRuleStart = landscapeBlock.indexOf(
+      ".ai-league-standings {",
+    );
+    expect(standingsRuleStart).toBeGreaterThan(drawerRuleStart);
+    const standingsOrder = landscapeBlock.slice(
+      standingsRuleStart,
+      landscapeBlock.indexOf("}", standingsRuleStart),
+    );
+    expect(standingsOrder).toContain("order: 2");
   });
 
   it("no longer renders raw artifact download links in the panel", () => {
@@ -2049,6 +2154,76 @@ describe("AiLeagueReplayOverlay", () => {
       );
       finishMarker?.click();
       expect(jumps).toEqual([1_000]);
+    });
+
+    it("CHECK item fix (pass-10): a Timeline marker BEHIND the current playhead navigates with ?turn= instead of silently no-op'ing through the forward-only seek engine", () => {
+      const runID = "broadcast-timeline-backward-seek-1";
+      const jumps: number[] = [];
+      document.addEventListener("ai-league-replay-jump-turn", (domEvent) => {
+        jumps.push(
+          (domEvent as CustomEvent<{ turnNumber: number }>).detail.turnNumber,
+        );
+      });
+      // jsdom logs (never throws on) an unimplemented "navigation to
+      // another Document" when `href` is set on the real Location object,
+      // same as `window.location.reload()` — same convention as the Reset
+      // test above, mocking the whole object so this pins the fix at "a
+      // navigation to the right URL was attempted" without depending on
+      // jsdom's own unimplemented-navigation behavior.
+      const locationMock = {
+        href: "https://beta.proxywar.xyz/ai-league-replay/broadcast-timeline-backward-seek-1",
+        pathname: "/ai-league-replay/broadcast-timeline-backward-seek-1",
+      };
+      const originalLocation = window.location;
+      Object.defineProperty(window, "location", {
+        value: locationMock,
+        writable: true,
+        configurable: true,
+      });
+
+      try {
+        mountAiLeagueReplayOverlay({
+          runID,
+          artifactBasePath: `/ai-league-runs/${runID}`,
+          decisions: [],
+          replayMaxTurn: 1_000,
+          // Past the "spawn" marker below (turn 5) — a viewer who let the
+          // match play (or catch up) past turn 5 and then clicks that
+          // marker to rewatch the opening is exactly QA's repro.
+          currentTurn: 999,
+          spectatorTelemetry: {
+            version: 1,
+            runID,
+            agents: [],
+            relationships: [],
+            events: [
+              event(1, 5, "spawn", "info", "a1", "Atlas", null, null, "Atlas enters the match."),
+            ],
+            communicationThreads: [],
+            timelineBuckets: [],
+          },
+        });
+
+        const spawnMarker = document.querySelector<HTMLButtonElement>(
+          '.broadcast-timeline [data-kind="spawn"]',
+        );
+        expect(spawnMarker).not.toBeNull();
+        spawnMarker?.click();
+
+        // Never the dead-end forward-only dispatch a viewer would read as
+        // "the marker doesn't work".
+        expect(jumps).toEqual([]);
+        expect(locationMock.href).toContain("turn=5");
+        expect(trackMock).toHaveBeenCalledWith("timeline_jump", {
+          matchId: runID,
+        });
+      } finally {
+        Object.defineProperty(window, "location", {
+          value: originalLocation,
+          writable: true,
+          configurable: true,
+        });
+      }
     });
 
     it("preserves the timeline panel's drawer-tab wrapper identity across a per-tick patch (P1 sweep fix: the desktop position:fixed placement rule is keyed off data-tab-id=\"timeline\", which a raw renderMatchTimeline() rebuild doesn't carry on its own)", () => {

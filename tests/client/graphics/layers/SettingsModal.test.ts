@@ -7,6 +7,8 @@
  * restoring focus to the invoker on close — without regressing that.
  * Real `KeyboardEvent` dispatches throughout.
  */
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   SettingsModal,
@@ -127,5 +129,61 @@ describe("SettingsModal focus trap and focus restore", () => {
     await Promise.resolve();
 
     expect(document.activeElement).toBe(invoker);
+  });
+});
+
+/**
+ * P1 ghost-modal fix (pass-10 t1-03): with Analyst mode on, this modal's
+ * overlay div (`z-2000`) rendered with plausible-looking computed styles
+ * (z-index 2000, opacity 1, display block) but was fully painted over by
+ * `AiLeagueReplayOverlay.ts`'s Analyst-mode-promoted panel, which sits
+ * `position: fixed`, CENTERED (the same screen region this modal opens
+ * into), at `z-index: 50010` — well above this modal's old 2000. It was
+ * both invisible (buried under that panel) and non-blocking
+ * (`elementFromPoint` over it returned a `<span>` from the replay
+ * overlay's standings rail instead of the modal). jsdom does not run the
+ * real CSS cascade/paint for these Tailwind/inline styles (same
+ * limitation `PointOfViewSelector.test.ts`'s own z-index regression and
+ * `PublicAppScroll.test.ts`'s stylesheet-split regression both document),
+ * so this pins the fix two ways: the literal rendered class carries a
+ * z-index above every current overlay band, AND a source-level scan
+ * confirms no `z-index` declared anywhere in the league replay overlay
+ * (Analyst mode's own highest band) exceeds it — so a future overlay
+ * bump can't silently reintroduce the ghost modal.
+ */
+describe("SettingsModal z-index (Analyst-mode ghost-modal regression)", () => {
+  const repoRoot = path.resolve(__dirname, "../../../..");
+  const SETTINGS_MODAL_Z_INDEX = 60000;
+
+  it("renders its overlay above every z-index this app's other feature overlays declare", async () => {
+    if (!customElements.get("settings-modal")) {
+      customElements.define("settings-modal", SettingsModal);
+    }
+    const modal = document.createElement("settings-modal") as SettingsModal;
+    modal.eventBus = new EventBus();
+    modal.userSettings = new UserSettings();
+    document.body.appendChild(modal);
+    modal.init();
+    modal.eventBus.emit(new ShowSettingsModalEvent(true, false, false));
+    await modal.updateComplete;
+
+    const overlay = modal.querySelector<HTMLElement>(".modal-overlay");
+    expect(overlay).not.toBeNull();
+    expect(overlay?.className).toContain(`z-[${SETTINGS_MODAL_Z_INDEX}]`);
+
+    const overlaySource = readFileSync(
+      path.join(repoRoot, "src/client/AiLeagueReplayOverlay.ts"),
+      "utf8",
+    );
+    const declaredZIndexes = [...overlaySource.matchAll(/z-index:\s*(\d+)/g)].map(
+      (match) => Number(match[1]),
+    );
+    expect(declaredZIndexes.length).toBeGreaterThan(0);
+    // The Analyst-mode-promoted centered panel is the specific overlap
+    // this bug came from — assert it explicitly, not just the max.
+    expect(overlaySource).toContain("z-index: 50010");
+    expect(Math.max(...declaredZIndexes)).toBeLessThan(SETTINGS_MODAL_Z_INDEX);
+
+    modal.remove();
   });
 });

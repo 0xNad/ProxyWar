@@ -1268,7 +1268,7 @@
     "panel_show": "Show panel",
     "panel_hide": "Hide",
     "reset_layout": "Reset",
-    "reset_layout_title": "Reset panel position",
+    "reset_layout_title": "Restart playback from the beginning and reset panel layout",
     "standings_title": "Standings",
     "standings_waiting": "Waiting for the first replay frame…",
     "metric_moves": "Moves",
