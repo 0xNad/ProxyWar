@@ -1113,3 +1113,80 @@ under its existing `PROXYWAR_WAGERING_ENABLED`-gated structure (default
 off; see the Step 3 inventory above for the gating detail).
 
 `origin/main` final state: `756562c53018b6467c7400c728a958381962fd08`.
+
+## Addendum 5 — DC/replay QA pass-10 fix wave, 2026-08-03
+
+Five findings from live QA pass 10 against `beta.proxywar.xyz` (serving
+`main-CAybGPBG.js` at `7609befe6` going in): a P1 Leader-vs-Standings
+percentage mismatch, a P1 ghost Settings modal under Analyst mode, a P2
+dead end-screen Reset control, a small landscape-drawer fold issue, and
+one CHECK item (desktop timeline click-to-seek) confirmed genuinely
+broken and fixed as trivially co-located. Full writeup in the commit
+message of `664184ac5`; summary:
+
+1. **Leader-vs-Standings mismatch**: `deriveMatchStateStripFields`
+   (`AiLeagueReplayOverlay.ts`) now derives the leader identity/percent
+   from the same live per-tick frame data `competitorRailEntries` uses,
+   instead of the coarse `match-state-series.json` sample (captured at
+   most every ~200 turns) — the two can no longer disagree at the same
+   tick.
+2. **Ghost Settings modal in Analyst mode**: `settings-modal`'s overlay
+   z-index raised from `z-2000` to `z-[60000]` — was sitting below the
+   league replay overlay's panels (up to `z-index: 50010` for Analyst
+   mode's own centered panel, which occupies the exact screen region
+   Settings opens into).
+3. **Reset dead at the end screen**: the header's "Reset" control now
+   also calls `window.location.reload()` — the forward-only seek engine
+   (`LocalServer.ts`'s `jumpReplayForward`) can never rewind to turn 0
+   once every turn has played; a reload is the one path already proven
+   to restart cleanly.
+4. **Landscape drawer tab bar below the fold**: the `@media (max-height:
+   430px) and (orientation: landscape)` breakpoint now reorders (flex
+   `order`) the drawer ahead of the Standings section, landing the tab
+   bar inside the initial visible viewport instead of requiring a scroll.
+5. **CHECK — timeline backward-seek**: confirmed genuinely broken (same
+   forward-only engine as #3); the Match Timeline's own `onSeek` now
+   detects a backward target and navigates with the `?turn=` deep-link
+   param `Main.ts` already serves for share links. Scoped to the
+   Timeline only — the War Room feed's own "jump to turn" action (same
+   underlying event, different UI surface, extensive pre-existing test
+   coverage) is untouched, left as a follow-up.
+
+**Validation**: `tests/client/AiLeagueReplayOverlay.test.ts` +
+`tests/client/graphics/layers/SettingsModal.test.ts` 88/88 (new coverage
+for all five items); full `npx vitest run --exclude "tests/e2e/**"`
+441 files / 5215 tests green, 3 todo; `npx vitest run tests/server` 241
+files / 2834 tests green; `tsc --noEmit` 0 errors; `eslint` clean on
+changed files; `npm run build-prod` clean (new bundle `main-Dfet9Wlr.js`).
+
+**Deploy**: pushed `13a394b52..664184ac5` to `origin/claude/product-overhaul`
+(fast-forward, no force). Rollback point: the release-candidate
+worktree's pre-redeploy HEAD was `7609befe6` (PID 48443, healthy — the
+exact SHA this pass's QA evidence was captured against). Sequence in
+`/Users/claude/Documents/proxywar_worktrees/replay-premiere-release-candidate`:
+fetch → `git checkout --detach 664184ac5` → `npm ci` (697 packages) →
+`tsc --noEmit` (0 errors) → `npm run build-prod` (clean) →
+`deploy/mac/proxywar-beta-launchd-restart.mjs
+--ready-url=http://127.0.0.1:8788/league` (dry-run passed, then real: PID
+48443 → 76322, ready). To roll back: `git checkout --detach 7609befe6`,
+`npm ci && npm run build-prod`, then `launchctl kickstart -k
+gui/$UID/com.proxywar.beta` again.
+
+**Live verification** (production `beta.proxywar.xyz`, screenshots in
+`/tmp/proxywar-dc-polish/`): confirmed serving `main-Dfet9Wlr.js`
+externally. Ran the SAME DC episode QA pass-10 used
+(`league-coworld-2026-08-02T23-04-43-935Z-02ea7079`) through to its real
+"relh has won!" end screen (26:24, 89% territory) — Leader line and
+Standings' top row both read "relh · 89%" (item 1, at the exact
+end-screen instant the original bug was reported). Toggled Analyst mode
+and opened Settings: overlay computed `z-index: 60000`, and
+`document.elementFromPoint()` at viewport center now resolves inside
+`settings-modal` (was the replay overlay's standings rail pre-fix) —
+item 2. Clicked Reset at the real end screen: DC re-entered its
+"Catching up" fresh-load state (turn count climbing from 0 again) —
+item 3. Clicked an early "spawn" timeline marker well behind the current
+playhead: URL navigated to `...&turn=0` and the DC restarted fresh and
+seeked forward — the CHECK item. Opened the same episode at 844×390:
+the drawer's tab bar (`.broadcast-drawer-tabs`) measured `y:73` inside
+the 390px viewport on open, `scrollTop: 0` — no scroll needed (was
+`y:419`, off-screen, pre-fix) — item 4.
