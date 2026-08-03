@@ -4072,6 +4072,49 @@ function buildWarRoomEarlierRow(
 }
 
 /**
+ * Copies the drawer-panel wrapper identity (renderBroadcastDrawer()'s own
+ * .broadcast-drawer-panel class, data-tab-id, data-tab-active, id,
+ * role="tabpanel", aria-labelledby) from an outgoing top-level drawer panel
+ * onto its replacement — for every patchVolatile rebuild path that swaps a
+ * WHOLE panel (War Room/Timeline/Analysis) via element.replaceWith(fresh).
+ * buildWarRoomSection()/renderMatchTimeline()/buildAnalystPanelWindow()/
+ * buildAnalystPanelPlaceholder() only ever build the bare panel content;
+ * renderBroadcastDrawer() applies this wrapper identity ONLY on the
+ * first-mount structural path (renderStructural), never re-applies it on a
+ * later patchVolatile rebuild. Losing it silently strips data-tab-id,
+ * which this file's own CSS keys the desktop position:fixed / centered
+ * placement of these body-portal-relocated panels off of — the panel then
+ * falls back to normal document flow inside its zero-size portal and
+ * becomes permanently invisible/unusable (found live in production, P1
+ * interaction sweep: Timeline on virtually every tick, since its own key
+ * changes almost every frame; War Room on the very first tick any event
+ * becomes eligible for a replay that starts with none, since
+ * mountedWarRoomCount > 0 is false until then and the rebuild — not the
+ * in-place patch — path fires; Analyst the same way the first time it's
+ * toggled visible or hidden after any such rebuild already happened).
+ * `activeTab`/collapse flags never change on this path (only user clicks
+ * change them, always via renderStructural instead) — copying the
+ * outgoing element's dataset verbatim is exactly correct here, never
+ * stale.
+ */
+function preserveDrawerPanelWrapperIdentity(
+  outgoing: HTMLElement,
+  incoming: HTMLElement,
+): void {
+  incoming.className = outgoing.className;
+  incoming.id = outgoing.id;
+  for (const [key, value] of Object.entries(outgoing.dataset)) {
+    incoming.dataset[key] = value;
+  }
+  const role = outgoing.getAttribute("role");
+  if (role !== null) incoming.setAttribute("role", role);
+  const labelledBy = outgoing.getAttribute("aria-labelledby");
+  if (labelledBy !== null) {
+    incoming.setAttribute("aria-labelledby", labelledBy);
+  }
+}
+
+/**
  * Builds the whole War Room region for the current window — used whenever
  * the window can't be reached by a pure incremental append: first mount, a
  * backward seek/jump that drops trailing events out of the window, or
@@ -4828,6 +4871,7 @@ function mountAiLeagueBroadcastDrawer(
           warRoomWindowSize,
           warRoomCallbacks(),
         );
+        preserveDrawerPanelWrapperIdentity(warRoomSection, nextWarRoom);
         warRoomSection.replaceWith(nextWarRoom);
       }
       mountedWarRoomCount = eligibleWarRoomCount;
@@ -4847,7 +4891,9 @@ function mountAiLeagueBroadcastDrawer(
         // Reclaim the DOM the instant it's no longer visible — never keep
         // patching content nobody can see.
         if (mountedAnalystVisible !== false) {
-          analystSection.replaceWith(buildAnalystPanelPlaceholder());
+          const placeholder = buildAnalystPanelPlaceholder();
+          preserveDrawerPanelWrapperIdentity(analystSection, placeholder);
+          analystSection.replaceWith(placeholder);
         }
         mountedAnalystVisible = false;
         mountedAnalystDecisionsCount = -1;
@@ -4888,6 +4934,7 @@ function mountAiLeagueBroadcastDrawer(
             onShowEarlierAnalystDecisions,
             onShowEarlierAnalystEvents,
           );
+          preserveDrawerPanelWrapperIdentity(analystSection, nextAnalyst);
           analystSection.replaceWith(nextAnalyst);
         } else {
           if (
@@ -4986,34 +5033,15 @@ function mountAiLeagueBroadcastDrawer(
           onSeek: dispatchJumpToTurn,
         });
         // `renderMatchTimeline()` only ever returns a bare `.broadcast-
-        // timeline` section — `renderBroadcastDrawer()`'s own wrapping
-        // (the `.broadcast-drawer-panel` class, `data-tab-id="timeline"`,
-        // `data-tab-active`, `id`, `role="tabpanel"`, `aria-labelledby`)
-        // is applied only on the structural render path (renderStructural
-        // above) — never re-applied here. `data-tab-id="timeline"` is
-        // exactly what this file's own CSS keys the desktop `position:
-        // fixed` placement off of (the panel lives inside a body-level,
-        // zero-width portal — AI_LEAGUE_BROADCAST_DRAWER_PORTAL_ID's own
-        // doc): losing it collapsed the whole timeline to 0×0 and made it
+        // timeline` section — see `preserveDrawerPanelWrapperIdentity`'s
+        // own doc for why the wrapper identity has to be copied back on:
+        // losing it collapsed the whole timeline to 0×0 and made it
         // permanently unusable starting on the SECOND tick after mount
         // (found live in production during the P1 interaction sweep — the
         // timeline key changes on virtually every frame, unlike War
         // Room/Analyst, which patch their list in place on the common
-        // forward-tick path and only ever replaceWith() on a rare
-        // non-monotonic jump). Copy the wrapper identity straight off the
-        // outgoing element instead of re-deriving renderBroadcastDrawer's
-        // own logic here.
-        nextTimeline.className = timeline.className;
-        nextTimeline.id = timeline.id;
-        for (const [key, value] of Object.entries(timeline.dataset)) {
-          nextTimeline.dataset[key] = value;
-        }
-        const role = timeline.getAttribute("role");
-        if (role !== null) nextTimeline.setAttribute("role", role);
-        const labelledBy = timeline.getAttribute("aria-labelledby");
-        if (labelledBy !== null) {
-          nextTimeline.setAttribute("aria-labelledby", labelledBy);
-        }
+        // forward-tick path and only ever replaceWith() on a rarer jump).
+        preserveDrawerPanelWrapperIdentity(timeline, nextTimeline);
         nextTimeline.dataset.timelineKey = nextTimelineKey;
         timeline.replaceWith(nextTimeline);
       }
