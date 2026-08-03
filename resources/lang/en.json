@@ -1352,6 +1352,7 @@
     "copy_clipboard": "Copy to clipboard",
     "copied": "Copied!",
     "failed_copy": "Failed to copy",
+    "reload": "Reload",
     "spawn_failed": {
       "title": "Spawn failed",
       "description": "Automatic spawn selection failed. You can't play this game."

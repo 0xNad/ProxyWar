@@ -465,10 +465,24 @@
   }
 }
 
+/*
+ * P0 contrast fix (2026-08-03): this modal never set its own `color`, so
+ * its text inherited the app's global light/near-white text color (meant
+ * for the rest of the app's dark surfaces) against this modal's own hard-
+ * coded white background -- effectively white-text-on-white-background,
+ * genuinely illegible (confirmed live: computed background rgb(255,255,255),
+ * computed text rgb(248,250,252)). This is exactly the card a viewer sees
+ * on the silent game-crash path (see StructureIconsLayer.ts's tick() P0
+ * fix for the crash this most commonly surfaced), so its own "Copy to
+ * clipboard"/"Reload replay" recovery actions were unreadable and easy to
+ * miss entirely -- explicit dark text closes the gap regardless of
+ * whatever the app's own ambient/inherited color happens to be.
+ */
 #error-modal {
   position: fixed;
   padding: 20px;
   background: white;
+  color: #1f2937;
   border: 1px solid black;
   top: 50%;
   left: 50%;
@@ -489,7 +503,25 @@
 #error-modal button.copy-btn {
   padding: 8px 16px;
   margin-top: 10px;
+  margin-right: 8px;
   background: #4caf50;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+/*
+ * P0 fix (2026-08-03): the crash this modal most commonly reports (see
+ * StructureIconsLayer.ts's tick() fix) leaves the tick loop permanently
+ * dead with no auto-recovery -- a full page reload of the same URL was
+ * previously the only fix, and the viewer had no way to know that short
+ * of a bug report round-trip. In-place recovery action, same row as Copy.
+ */
+#error-modal button.reload-btn {
+  padding: 8px 16px;
+  margin-top: 10px;
+  background: #2563eb;
   color: white;
   border: none;
   border-radius: 4px;
