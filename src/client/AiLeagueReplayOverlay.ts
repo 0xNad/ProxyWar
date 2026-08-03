@@ -57,6 +57,10 @@ import {
 } from "./ReplayShareImageBinding";
 import { ReplaySpeedMultiplier } from "./utilities/ReplaySpeedMultiplier";
 import { translateText } from "./Utils";
+import {
+  ANONYMOUS_NAMES_KEY,
+  USER_SETTINGS_CHANGED_EVENT,
+} from "../core/game/UserSettings";
 
 interface AiLeagueDecisionLogEntry {
   sequence: number;
@@ -546,6 +550,44 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
     previousClipControl?.dispose();
     syncLowerThirds();
   };
+
+  // P0 fix (2026-08-03): the "Anonymous Names" setting toggling mid-session
+  // used to leave every already-rendered agent name frozen at whatever it
+  // was when the details/drawer last painted -- `aiLeagueSpectatorDisplayName`/
+  // `aiLeagueSpectatorText` read the live setting on every call, but nothing
+  // ever re-invoked them after the toggle, so the War Room feed, rail,
+  // timeline, Analyst panel, decision log, diplomacy strip and social
+  // transcript all kept showing real names (or vice versa) until the next
+  // unrelated re-render happened to occur. `renderDetails()` already
+  // rebuilds every one of those regions in one call (via
+  // `mountReplayDetailsBindings` -> `mountAiLeagueBroadcastDrawer`), so
+  // reusing it here is sufficient -- same window-cleanup idiom as
+  // `onFollowedPlayerChange` above, since this listener must also survive
+  // every renderDetails()/hydrate() call and be torn down by the NEXT
+  // mount if `dispose()` was never called. Listens on `window` (not
+  // `document`): `UserSettings.emitChange` dispatches on `globalThis`
+  // (== `window`), which every other `USER_SETTINGS_CHANGED_EVENT`
+  // consumer in the codebase (Main.ts, FlagInput.ts, PatternInput.ts)
+  // already listens on for exactly that reason -- a non-bubbling custom
+  // event fired on `window` never reaches a `document`-level listener.
+  const anonymousNamesWin = window as Window & {
+    __aiLeagueAnonymousNamesCleanup?: () => void;
+  };
+  anonymousNamesWin.__aiLeagueAnonymousNamesCleanup?.();
+  const onAnonymousNamesChange = (): void => {
+    if (!overlay.isConnected) return;
+    renderDetails();
+  };
+  window.addEventListener(
+    `${USER_SETTINGS_CHANGED_EVENT}:${ANONYMOUS_NAMES_KEY}`,
+    onAnonymousNamesChange,
+  );
+  anonymousNamesWin.__aiLeagueAnonymousNamesCleanup = () => {
+    window.removeEventListener(
+      `${USER_SETTINGS_CHANGED_EVENT}:${ANONYMOUS_NAMES_KEY}`,
+      onAnonymousNamesChange,
+    );
+  };
   const disposePlayheadSync = mountAiLeaguePlayheadSync(
     overlay,
     (turn) => {
@@ -636,6 +678,7 @@ function disposeReplayOverlay(overlay: HTMLElement) {
     __aiLeagueSocialBubblesCleanup?: () => void;
     __aiLeagueBroadcastDrawerCleanup?: () => void;
     __aiLeagueFollowedPlayerCleanup?: () => void;
+    __aiLeagueAnonymousNamesCleanup?: () => void;
   };
   win.__aiLeaguePanelDisclosureCleanup?.();
   win.__aiLeaguePanelControlsCleanup?.();
@@ -645,6 +688,7 @@ function disposeReplayOverlay(overlay: HTMLElement) {
   win.__aiLeagueSocialBubblesCleanup?.();
   win.__aiLeagueBroadcastDrawerCleanup?.();
   win.__aiLeagueFollowedPlayerCleanup?.();
+  win.__aiLeagueAnonymousNamesCleanup?.();
   delete win.__aiLeaguePanelDisclosureCleanup;
   delete win.__aiLeaguePanelControlsCleanup;
   delete win.__aiLeagueReplayJumpCleanup;
@@ -653,6 +697,7 @@ function disposeReplayOverlay(overlay: HTMLElement) {
   delete win.__aiLeagueSocialBubblesCleanup;
   delete win.__aiLeagueBroadcastDrawerCleanup;
   delete win.__aiLeagueFollowedPlayerCleanup;
+  delete win.__aiLeagueAnonymousNamesCleanup;
   overlay.remove();
   document.getElementById("ai-league-social-transcript")?.remove();
   document.getElementById("ai-league-headline-event")?.remove();
@@ -4012,11 +4057,19 @@ function aiLeagueAnalystPanelData(
   telemetry: AiLeagueSpectatorTelemetry | null,
 ): AnalystPanelData {
   const hasDecisions = input.decisions.length > 0;
+  // P0 fix (2026-08-03): both sub-lists below used to pass real agent
+  // identity straight through -- every other consumer of this same raw
+  // `AiLeagueDecisionLogEntry`/`AiLeagueSpectatorEvent` data
+  // (curatedWarRoomEvents, matchTimelineEventMarkers,
+  // communicationThreadHtml) already resolves names through
+  // `aiLeagueSpectatorDisplayName`/`aiLeagueSpectatorText`, so the
+  // Analyst decisions table's Agent column and the Analyst event log
+  // leaked real names even with Anonymous Names on.
   const decisions: AnalystDecisionRow[] = input.decisions
     .map((decision) => ({
       sequence: decision.sequence,
       turnNumber: decision.turnNumber,
-      playerName: decision.username,
+      playerName: aiLeagueSpectatorDisplayName(decision.username),
       brainType: decision.brainType,
       selectedActionKind: decision.selectedActionKind,
       selectedLegalActionId: decision.selectedLegalActionId,
@@ -4034,10 +4087,13 @@ function aiLeagueAnalystPanelData(
       turnNumber: event.turnNumber,
       kind: event.kind,
       tone: event.tone,
-      actorName: event.actorName,
-      targetName: event.targetName,
+      actorName: aiLeagueSpectatorDisplayName(event.actorName),
+      targetName:
+        event.targetName !== null
+          ? aiLeagueSpectatorDisplayName(event.targetName)
+          : null,
       secondaryName: null,
-      message: event.publicText ?? event.message,
+      message: aiLeagueSpectatorText(event.publicText ?? event.message),
     }))
     .sort((a, b) => a.turnNumber - b.turnNumber || a.sequence - b.sequence);
   return {
@@ -5609,7 +5665,11 @@ function curatedWarRoomEvents(
       event.targetName !== null
         ? aiLeagueSpectatorDisplayName(event.targetName)
         : null;
-    const publicReason = event.publicText ?? event.message;
+    // P0 fix (2026-08-03): the expanded row's "stated reason" text (raw
+    // `publicText`/`message`) leaked a real agent's name straight through
+    // even with Anonymous Names on -- `headline`/`participants` above were
+    // already anonymized, but this field was passed through verbatim.
+    const publicReason = aiLeagueSpectatorText(event.publicText ?? event.message);
 
     if (event.kind === "attack" && target !== null) {
       const pairKey = `${event.actorAgentID}|${event.targetAgentID ?? target}`;

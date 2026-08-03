@@ -15,6 +15,7 @@ import {
   BROADCAST_RAIL_FOLLOW_EVENT,
 } from "../../src/client/graphics/layers/PointOfViewSelector";
 import type { PublicAgent } from "../../src/client/publicapp/ReadModelSchema";
+import { UserSettings } from "../../src/core/game/UserSettings";
 import {
   initialReplayClipRenderableThroughTurn,
   replayClipPreviewTarget,
@@ -2696,6 +2697,70 @@ describe("AiLeagueReplayOverlay", () => {
       expect(document.querySelectorAll(".broadcast-war-room-item")).toHaveLength(2);
     });
 
+    // P0 fix (2026-08-03): the "Anonymous Names" setting used to only ever
+    // apply to content rendered AFTER the toggle -- everything already
+    // painted (the political-radio talks transcript included) stayed
+    // frozen with real names until some unrelated re-render happened to
+    // occur. Toggling mid-session must re-render already-displayed content
+    // immediately. Uses the talks transcript (not the War Room feed)
+    // because its author/thread-name text is raw HTML
+    // (`aiLeagueSpectatorDisplayName` / `agentName`), never routed through
+    // `translateText` -- `translateText` echoes the untranslated key in
+    // this test environment (see the very first test in this file), which
+    // would swallow the interpolated {actor} name the War Room headline
+    // carries and make this assertion meaningless either way.
+    it("re-renders the already-displayed talks transcript the instant Anonymous Names toggles mid-session", () => {
+      const runID = "broadcast-anonymous-names-live-toggle-1";
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [
+            {
+              agentID: "a1",
+              playerID: "p1",
+              username: "Atlas",
+              profile: "diplomatic",
+              colorIndex: 0,
+            },
+          ],
+          relationships: [],
+          events: [],
+          communicationThreads: [
+            {
+              id: "thread-1",
+              agentIDs: ["a1"],
+              title: "Border talk",
+              latestTurn: 5,
+              tone: "chat",
+              messages: [
+                event(1, 5, "chat", "chat", "a1", "Atlas", null, null, "Hold the line."),
+              ],
+            },
+          ],
+          timelineBuckets: [],
+        },
+      });
+
+      const talksBefore = document.querySelector("[data-spectator-comms]");
+      expect(talksBefore?.textContent).toContain("Atlas");
+
+      new UserSettings().toggleRandomName();
+
+      const talksAfter = document.querySelector("[data-spectator-comms]");
+      expect(talksAfter?.textContent).not.toContain("Atlas");
+      expect(talksAfter?.textContent).toMatch(/Agent \d+/);
+
+      // Toggling back OFF must restore the real name just as immediately.
+      new UserSettings().toggleRandomName();
+      expect(
+        document.querySelector("[data-spectator-comms]")?.textContent,
+      ).toContain("Atlas");
+    });
+
     // Raised timeout (matches package.json's own test:coverage/test:e2e
     // precedent of a longer testTimeout for heavier suites): fast in
     // isolation (well under 1s for the whole 2,000-event fixture), but a
@@ -3304,6 +3369,56 @@ describe("AiLeagueReplayOverlay", () => {
       expect(
         document.querySelector(".broadcast-analyst")?.children.length,
       ).toBe(0);
+    });
+
+    // P0 fix (2026-08-03): the Analyst decisions table's Agent column
+    // (`AnalystDecisionRow.playerName`) and the Analyst event log
+    // (`AnalystEventRow.actorName`/`targetName`/`message`) passed real
+    // agent identity straight through from `AiLeagueDecisionLogEntry`/
+    // `AiLeagueSpectatorEvent` -- every other consumer of this same raw
+    // data (curatedWarRoomEvents, matchTimelineEventMarkers,
+    // communicationThreadHtml) already resolves names through
+    // `aiLeagueSpectatorDisplayName`/`aiLeagueSpectatorText`, so this was
+    // a leak even with Anonymous Names on.
+    it("anonymizes the Analyst decisions table's Agent column and the Analyst event log when Anonymous Names is on", () => {
+      const runID = "broadcast-analyst-anonymize-1";
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [
+          { ...decisionFixture(1), username: "Atlas", turnNumber: 5 },
+        ],
+        currentTurn: 5,
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events: [
+            event(1, 5, "elimination", "war", "a1", "Atlas", null, null, "Atlas fell to overwhelming force."),
+          ],
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+
+      new UserSettings().toggleRandomName();
+
+      document
+        .querySelector<HTMLButtonElement>("[data-ai-league-analyst-toggle]")
+        ?.click();
+
+      const decisionsRow = document.querySelector(
+        ".broadcast-analyst-decisions-row",
+      );
+      expect(decisionsRow?.textContent).not.toContain("Atlas");
+      expect(decisionsRow?.textContent).toMatch(/Agent \d+/);
+
+      const eventsRow = document.querySelector(
+        ".broadcast-analyst-events-row",
+      );
+      expect(eventsRow?.textContent).not.toContain("Atlas");
+      expect(eventsRow?.textContent).toMatch(/Agent \d+/);
     });
 
     it("caps both Analyst sub-lists' DOM node count under a large fixture, backfills each independently via show-earlier, and never renders past the playhead (spec items 1-3 follow-up, P2 review)", () => {
