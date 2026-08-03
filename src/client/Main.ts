@@ -1642,7 +1642,7 @@ class Client {
           summary: false,
         },
         onReplaySpeedChange: (speed) => {
-          this.eventBus.emit(new ReplaySpeedChangeEvent(speed));
+          this.eventBus.emit(new ReplaySpeedChangeEvent(speed, "auto"));
         },
       });
     } catch (error) {
@@ -2159,7 +2159,7 @@ class Client {
             "[DEBUG] Main.ts emitting ReplaySpeedChangeEvent(fastest)",
           );
           this.eventBus.emit(
-            new ReplaySpeedChangeEvent(ReplaySpeedMultiplier.fastest),
+            new ReplaySpeedChangeEvent(ReplaySpeedMultiplier.fastest, "auto"),
           );
         } else {
           console.log(

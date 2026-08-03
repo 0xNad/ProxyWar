@@ -2402,3 +2402,148 @@ correct end-to-end at both the discard AND publish branches, not enough to
 be a statistically tight rate estimate). The two OPERATOR-PENDING cures in
 §22.6 remain unimplemented and are the actual long-term fix; this stopgap
 is confirmed live and working as designed in the meantime.
+
+## 23. The second disk-floor incident (live, 2026-08-03) — root-caused, recovery attempt made it worse, external-volume relocation ASSESSED but NOT executed
+
+### 23.1 Diagnosis (confirmed, not assumed)
+
+`prem_63452e316062dfbd04ef` (up 02:06:16 UTC) froze `lastReleasedChunkIndex` at
+28 while `authoritativeElapsedMs` climbed past 72 minutes — independently
+re-confirmed via `GET /api/premieres/<id>/manifest` (`state:"playing"`),
+matching QA pass-12's `t4-01` finding exactly. `/tmp/pw-bet-origin.log` was
+actively flooding `durable_write_free_space_floor_not_met` (413,
+`PREMIERE_CAPACITY_EXCEEDED`) at diagnosis time, including one line naming
+this exact premiere's runtime recovery. `df -k /` read 13.78 GiB free —
+already below `PREMIERE_BOUNDED_WRITE_FLOOR_BYTES` (15 GiB,
+`ReplayPremierePrivateStaging.ts:283`), which every durable-write path in the
+replay-premiere module gates on via `assertPremiereDurableWriteAdmission`
+(catalog, checkpoints, event-store journal+snapshots, staging, clip
+rendering — all traced by grep to the same `privateStateRoot`). The origin
+process was alive and burning real CPU (9-14%) throughout, ruling out a
+crashed/hung worker; `autocycle-premiere.sh`'s own poll loop (read in full)
+only ever cycles on `status ∈ {settled, void}`, so a `"playing"`-but-frozen
+market can never self-heal through it — this is the §9-class manual
+`cycle-premiere.sh` scenario.
+
+### 23.2 Recovery attempt — FAILED, converted a partial stall into a full outage
+
+`cycle-premiere.sh` does not check free space before it acts. It ran
+`stop_origin` + `rm -rf "$STATE_PARENT"` (destroying the stuck premiere)
+successfully, then failed during admission of the replacement
+(`prem_c4ae154e59cc1942b6fa`) — because the 15 GiB floor is unconditional
+(`Math.max(PREMIERE_BOUNDED_WRITE_FLOOR_BYTES, ...)`) and free space never
+crossed it. Net result: the origin came back up with **zero** premieres
+registered — worse than the original single-stuck-market state.
+`autocycle-premiere.sh` correctly detected `origin up but no premiere
+registered` and tried to self-heal via its own `cycle` call, but that failed
+identically, repeatedly (`03:22:13`, `03:25:14`, `03:28:15`, `03:31:17`, all
+logged `!! cycle FAILED`). `df` never recovered (14.44 -> 13.78 -> ~12.8-13.6
+GiB over the session). The automated worktree-lifecycle GC
+(`storage-maintenance`, every 900s) was checked live and had `eligibleCount:
+1` of 32 registered worktrees — and that one eligible item was already on
+the *external* volume, so it could not have helped the internal shortfall
+either. **There is no known lever left that restores service without an
+operator freeing internal disk or approving §23.4 below.** Do not re-run
+`cycle-premiere.sh` manually while `df` free is under 15 GiB — it cannot
+succeed and only adds another destructive wipe on top. Leave
+`autocycle-premiere.sh`'s own retry loop running; it will pick the moment
+free space crosses 15 GiB entirely on its own.
+
+### 23.3 Position/refund forensics — inconclusive, and a real gap found
+
+`cycle-premiere.sh` invoked against a **non-terminal** ("playing") premiere
+bypasses settlement entirely — confirmed by grepping the durable
+`settlement-ledger-v1.json` (24 records) for `prem_63452e316062dfbd04ef`:
+absent. Unlike `autocycle-premiere.sh`'s normal path (which only cycles
+after `settled`/`void` **and** `settlement_confirmed` — i.e. after a real
+ledger record, including `outcome:"refunded"`, already exists), the manual
+path has no such gate and the script's own header says so plainly
+("destroyed", not "refunded"). Per `ReplayPremierePointsLedger.ts`'s design,
+points are only ever recorded at settlement, so no guest's *persistent*
+lifetime score was debited or credited either way — the durable-leaderboard
+effect is the same "neutral" outcome a real refund produces — but there is
+no settlement record, no ended-page confirmation, and no audit trail.
+Whether any real (`guest_*`) participant held an open position at the moment
+of the wipe could **not** be determined: the event store was destroyed
+before anyone thought to snapshot it first, and the origin's text log
+carries no per-guest trade/position data. QA pass-12 only covers the final
+~15 minutes of this premiere's life (all joins failed honestly in that
+window); the first ~20 minutes, before the chunk pipeline froze, is an
+unverifiable gap in which real joins/trades could plausibly have succeeded.
+This is a genuinely new gap, not a re-verification of an existing precedent
+— **the manual `cycle-premiere.sh` path had never previously been exercised
+against a still-"playing" market**. See `known-problems.md` for the
+full writeup; this needs an explicit product decision (should the script
+refuse, or force a void+refund first, against a non-terminal premiere?),
+out of scope to resolve unilaterally here.
+
+### 23.4 ASSESSED, NOT EXECUTED — relocating the premiere state root to the external volume
+
+Evaluated per an explicit operator request; no config was changed.
+
+**(a) Does one config move everything?** Yes. Every
+`assertPremiereDurableWriteAdmission` call site
+(`ReplayPremiereCatalog.ts:471`, `ReplayPremiereCheckpointProjectionStore.ts:211`,
+`ReplayPremiereEventStore.ts:495,584` — journal *and* snapshots,
+`ReplayPremierePrivateStaging.ts:182,220` — staging) resolves its
+`destinationPath` from the single `privateStateRoot`, itself derived from
+`PROXYWAR_REPLAY_PREMIERE_STATE_ROOT` (`ReplayPremiereSecrets.ts:7-8`) and
+threaded through `cycle-premiere.sh`'s `STATE_ROOT` var into
+`--private-state-root`. Clip rendering (`ReplayPremiereClips.ts`, its own
+*separate* 16 GiB `minFreeBytes` floor — note: different constant from the
+15 GiB premiere floor) is **not** a separate root either:
+`ai-agent-demo-server.ts:638` sets `clipsRoot:
+replayPremiereClipCacheDir(replayPremierePrivateStateRoot)`, nested under
+the same tree. One env var change moves all of it; no write path is left
+pointed internally.
+
+**(b) Reliability tradeoff.** The project's own written policy
+(`docs/project-state/2026-07-30-apfs-storage-split.md`) explicitly assigns
+"live runtime state" to stay on the **internal** disk and scopes
+`/Volumes/ProxyWar Workspace` to "development workspaces" — lifecycle-leased,
+TTL'd, disposable-and-recreatable-from-git worktrees. The doc's own worktree
+config marks that volume `optionalWhenOffline: true` specifically because
+losing a worktree is a non-event (recreate from git). A live betting market
+has no equivalent recovery: it is not recreatable from git. An external
+volume disconnect mid-cycle (sleep/wake unmount, cable/port fault, forced
+eject) would very plausibly surface as an unhandled `ENOENT`/`EIO`/`EBUSY`
+from `fs.statfs`/the write calls themselves, or a `private_state_root_not_private`
+ownership mismatch on remount — not the clean, typed
+`durable_write_free_space_floor_not_met` rejection the current code and this
+incident's recovery path are built around. That is plausibly a **worse**
+failure mode than today's (today's is at least legible and has a script),
+and it is untested in this codebase. This is a real policy exception being
+proposed, not a config detail.
+
+**(c) Does the floor check even measure the right volume?**
+`assertPremiereDurableWriteAdmission` calls `fs.statfs(options.destinationPath)`
+directly (`ReplayPremierePrivateStaging.ts:294`) — it measures whatever
+volume the target path actually lives on, not a hardcoded boot volume. So
+yes: pointing `privateStateRoot` at `/Volumes/ProxyWar Workspace` (~909 GiB
+free against its 1 TB lifecycle quota, per the live worktree-lifecycle audit)
+would make a 15/16 GiB floor breach from *ordinary* per-cycle premiere
+growth (measured this session: ~3 MB per cycle in steady state) structurally
+implausible.
+
+**Recommendation (for operator approval, not applied):** the technical
+floor-breach risk genuinely goes away with this move, but it trades a
+well-understood, scripted failure mode for an unhandled one, against the
+project's own explicit storage policy. If pursued, the exact change is:
+
+```sh
+# in cycle-premiere.sh, or via env before every start_origin/autocycle boot:
+STATE_PARENT="/Volumes/ProxyWar Workspace/proxywar-bet-live"
+# (equivalently: export PROXYWAR_REPLAY_PREMIERE_STATE_ROOT accordingly
+#  and pass the same --private-state-root to replay-premiere-admit.ts)
+```
+
+A lower-risk alternative that avoids the policy exception entirely: raise
+the *internal* floor's margin by having the operator either add physical
+capacity, or explicitly approve reclaiming currently-protected/pinned
+worktree data (the automated GC found zero eligible internal targets this
+session — every internal worktree is pinned, active, or
+evidence-protected) — i.e. the disk trajectory described in §16.4 has now
+concluded exactly as predicted, and recurrence is guaranteed either way
+without one of these three operator-level actions.
+
+**ADMISSION DISARMED 2026-08-03T03:39:08Z:** `com.proxywar.betautocycle` and `com.proxywar.betqueue` bootout (disabled) pending operator capacity action. Bet origin process remains live; retry loop will NOT auto-admit market when free space crosses 15 GiB threshold. Re-enable AFTER durable internal headroom confirmed (≥25 GiB target): `launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.proxywar.betautocycle.plist && launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.proxywar.betqueue.plist`

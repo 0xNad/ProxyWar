@@ -80,6 +80,37 @@ describe("directorCutSpeedForSegment", () => {
       ReplaySpeedMultiplier.fast,
     );
   });
+
+  it("P0 fix: forces the opening (spawn) segment to catch-up speed regardless of its own authored speed", () => {
+    // The plan's own `speed: "normal"` on the opening segment is a
+    // deliberate establishing-shot pace, but spawn has zero strategic
+    // content -- a real viewer just watched a frozen-looking page for
+    // ~25-30s. `eventReason: "opening"` overrides straight to `fastest`,
+    // client-side, regardless of what the (already-baked) plan authored.
+    expect(
+      directorCutSpeedForSegment(
+        segment({ speed: "normal", eventReason: "opening" }),
+      ),
+    ).toBe(ReplaySpeedMultiplier.fastest);
+    expect(
+      directorCutSpeedForSegment(
+        segment({ speed: "slow", eventReason: "opening" }),
+      ),
+    ).toBe(ReplaySpeedMultiplier.fastest);
+  });
+
+  it("never overrides a non-opening segment merely because its speed happens to be normal/slow", () => {
+    expect(
+      directorCutSpeedForSegment(
+        segment({ speed: "normal", eventReason: "war_declaration" }),
+      ),
+    ).toBe(ReplaySpeedMultiplier.normal);
+    expect(
+      directorCutSpeedForSegment(
+        segment({ speed: "slow", eventReason: "reversal" }),
+      ),
+    ).toBe(ReplaySpeedMultiplier.slow);
+  });
 });
 
 describe("normalizeDirectorCutPlan", () => {
@@ -257,6 +288,37 @@ describe("mountDirectorCutController", () => {
     // reads the passed turn instead of always resyncing to the opening
     // segment.
     handle.setEnabled(true, 230);
+    expect(onSpeedChange).toHaveBeenCalledExactlyOnceWith(
+      ReplaySpeedMultiplier.slow,
+    );
+    handle.dispose();
+  });
+
+  it("P0 fix: auto-skips the SPAWN phase at mount by forcing the real opening segment to catch-up speed, even though the plan itself authored it as normal", () => {
+    const openingPlan = plan([
+      segment({ startTurn: 0, endTurn: 249, speed: "normal", eventReason: "opening" }),
+      segment({ startTurn: 250, endTurn: 999, speed: "slow", eventReason: "reversal" }),
+    ]);
+    const onSpeedChange = vi.fn();
+    const handle = mountDirectorCutController({
+      plan: openingPlan,
+      enabledByDefault: true,
+      onSpeedChange,
+      documentRef: document,
+    });
+    // The plan itself says "normal" (1x) for the opening segment -- a real
+    // ~250-turn spawn at that pace is the ~25-30s "frozen page" incident.
+    // mountDirectorCutController must apply the catch-up override, never
+    // the plan's own authored value, the instant it mounts.
+    expect(onSpeedChange).toHaveBeenCalledExactlyOnceWith(
+      ReplaySpeedMultiplier.fastest,
+    );
+    onSpeedChange.mockClear();
+
+    // Crossing spawn's end must drop to the plan's own real (distinct)
+    // pacing for the next segment -- proves the override is scoped to the
+    // opening segment alone, never pinned at catch-up speed forever.
+    dispatchFrame(document, 250);
     expect(onSpeedChange).toHaveBeenCalledExactlyOnceWith(
       ReplaySpeedMultiplier.slow,
     );

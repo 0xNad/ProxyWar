@@ -236,6 +236,57 @@ interface AiLeagueReplayOverlayHandle {
   dispose(): void;
 }
 
+/**
+ * Structural fix (P0 incident, 2026-08-03): the War Room drawer panel used
+ * to clear the top-right playback control cluster (game-right-sidebar +
+ * replay-panel, index.html's `#pw-game-control-cluster`) via a single
+ * hardcoded `top: 76px`, tuned for the cluster's DESKTOP button size
+ * (`CONTROL_BUTTON_CLASS`'s 34px targets, >=1200px viewport width). Below
+ * 1200px the SAME buttons switch to 44px touch targets (still nowhere near
+ * "mobile" -- the drawer's own `max-width: 740px` breakpoint is far
+ * narrower), so at any viewport in that 741-1199px band the cluster is
+ * taller than the 76px budget assumed, and the panel silently overlapped
+ * the controls again -- found live at 1178px. No fixed pixel constant can
+ * be correct at every window size, so this measures the cluster's actual
+ * rendered footprint (`getBoundingClientRect().bottom`, which already
+ * folds in its own top offset AND height, at any breakpoint) and republishes
+ * it as `--pw-control-cluster-bottom` on the root element; the War Room
+ * panel's `top` (createStyle's own CSS, `.broadcast-drawer-panel
+ * [data-tab-id="events"]`) reads that custom property instead of a
+ * constant. `#pw-game-control-cluster` also carries a guaranteed-topmost
+ * z-index (index.html) as defense in depth: even a stale/pre-first-
+ * measurement value can never make the controls unclickable, only
+ * cosmetically crowd them for one frame.
+ */
+function mountControlClusterGeometrySync(): () => void {
+  const cluster = document.getElementById("pw-game-control-cluster");
+  if (cluster === null) {
+    return () => {};
+  }
+  const sync = () => {
+    document.documentElement.style.setProperty(
+      "--pw-control-cluster-bottom",
+      `${Math.ceil(cluster.getBoundingClientRect().bottom)}px`,
+    );
+  };
+  sync();
+  const resizeObserver = new ResizeObserver(sync);
+  resizeObserver.observe(cluster);
+  // Belt-and-suspenders: a viewport resize that crosses the `top-4`
+  // breakpoint (position-only, no size change) wouldn't otherwise fire the
+  // ResizeObserver above on its own -- in practice it always co-occurs
+  // with the button-size breakpoint at the same 1200px threshold, but this
+  // costs nothing and removes the dependency on that coincidence.
+  window.addEventListener("resize", sync);
+  return () => {
+    resizeObserver.disconnect();
+    window.removeEventListener("resize", sync);
+    document.documentElement.style.removeProperty(
+      "--pw-control-cluster-bottom",
+    );
+  };
+}
+
 export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
   document.getElementById("ai-league-replay-overlay")?.remove();
   document.getElementById("ai-league-social-transcript")?.remove();
@@ -261,6 +312,7 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
   document.body.appendChild(overlay);
   mountReplayPanelDisclosure(overlay);
   mountReplayPanelControls(overlay);
+  const disposeControlClusterGeometrySync = mountControlClusterGeometrySync();
   // Identity (emblem/version/builder) is always public — never spoiler-
   // sensitive on its own — so it fetches once per mount and degrades to
   // "nothing resolved yet" (never blocks or fails the mount) on any error.
@@ -553,6 +605,7 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
       }
       disposed = true;
       disposePlayheadSync();
+      disposeControlClusterGeometrySync();
       document.removeEventListener(
         "ai-league-replay-frame",
         onWatchProgressFrame,
@@ -2449,27 +2502,28 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       .broadcast-drawer-panel[data-tab-id="events"] {
         position: fixed;
         /*
-         * top: 76px, not 12px: the playback control cluster (game-right-
-         * sidebar: time/speed/pause/settings/fullscreen/exit —
-         * index.html's ".fixed.top-0.right-0...z-1000" wrapper around it,
-         * "top-4 right-4" i.e. 16px at >=1200px, flush 0px below that) sits
-         * in this exact top-right corner too, at z-index 1000 — far below
-         * this panel's own 50000, so this panel's "top: 12px" used to
-         * render directly over it, geometrically and in the stacking
-         * order, making Pause/Settings/Fullscreen/the speed control/Leave
-         * match completely unclickable for as long as the War Room panel
-         * had any content (found live during the P1 interaction sweep:
-         * elementFromPoint at every one of those buttons' own centers
-         * resolved to .broadcast-war-room-heading-row instead). The
-         * cluster's own tallest measured footprint is ~66px (top 16 +
-         * height ~50); 76px clears it with margin in both of ITS own
-         * breakpoints without needing a matching media query here.
+         * Structural fix (P0 incident, 2026-08-03), see
+         * mountControlClusterGeometrySync's own doc: a fixed "top: 76px"
+         * assumed the playback control cluster (game-right-sidebar +
+         * replay-panel, index.html's "#pw-game-control-cluster") never
+         * exceeds ~66px, true only at >=1200px viewport width. Below that
+         * (but still well above the drawer's own 740px mobile breakpoint)
+         * the SAME buttons grow to 44px touch targets and the cluster gets
+         * taller than the budget, so this panel silently overlapped the
+         * controls again in that band -- found live at 1178px. "top" now
+         * reads the cluster's ACTUAL measured bottom edge (kept live by a
+         * ResizeObserver + resize listener), correct at every viewport
+         * width, not just the two breakpoints this constant was tuned for.
+         * "76px" stays only as the pre-first-measurement fallback, and
+         * "#pw-game-control-cluster"'s own z-index (index.html, above
+         * every band used here) is the belt-and-suspenders guarantee that
+         * even a stale fallback can never make the controls unclickable.
          */
-        top: 76px;
+        top: calc(var(--pw-control-cluster-bottom, 76px) + 10px);
         right: 12px;
         z-index: 50000;
         width: min(360px, calc(100vw - 24px));
-        max-height: calc(100vh - 88px);
+        max-height: calc(100vh - var(--pw-control-cluster-bottom, 76px) - 22px);
         overflow: hidden;
         border: 1px solid var(--pw-line-strong, #3a4656);
         border-radius: var(--pw-r-xl, 18px);

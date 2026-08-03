@@ -84,6 +84,14 @@ export class LocalServer {
     parseReplayRenderSpeed(
       typeof window === "undefined" ? "" : window.location.search,
     ) ?? defaultReplaySpeedMultiplier;
+  // House rule (P0 incident, 2026-08-03): set the first time a "user"-
+  // sourced ReplaySpeedChangeEvent arrives (see that event's own doc) --
+  // once true, automatic pacing (Director Cut per-segment reassertion,
+  // the archived-replay fastest-default) stops applying for the rest of
+  // this instance's life. Never reset mid-session; a fresh page load
+  // (Reset button, a backward jump-to-turn navigation) makes a new
+  // LocalServer instance and starts this at false again.
+  private userOverrodeReplaySpeed = false;
 
   private progressiveReplayTurns: Readonly<ReplayPremiereReleasedTurn>[] = [];
   private progressiveReplayTurnsByTurnNumber = new Map<number, Turn>();
@@ -209,6 +217,18 @@ export class LocalServer {
       ) {
         return;
       }
+      if (event.source === "user") {
+        // House rule (P0 incident, 2026-08-03): once a viewer has
+        // manually picked a speed, automatic pacing (Director Cut's own
+        // per-segment reassertion, the archived-replay fastest-default)
+        // must never silently revert it -- a default, never a lock. This
+        // stays set for the rest of the session; a fresh page load (Reset,
+        // a backward jump-to-turn navigation) starts a new LocalServer
+        // instance and clears it naturally.
+        this.userOverrodeReplaySpeed = true;
+      } else if (this.userOverrodeReplaySpeed) {
+        return;
+      }
       this.replaySpeedMultiplier = event.replaySpeedMultiplier;
     });
     this.eventBus.on(ReplayJumpToTurnEvent, (event) => {
@@ -221,7 +241,7 @@ export class LocalServer {
         if (idx < 0 || idx >= SPEED_ORDER.length - 1) return;
         this.replaySpeedMultiplier = SPEED_ORDER[idx + 1];
         this.eventBus.emit(
-          new ReplaySpeedChangeEvent(this.replaySpeedMultiplier),
+          new ReplaySpeedChangeEvent(this.replaySpeedMultiplier, "user"),
         );
       });
 
@@ -230,7 +250,7 @@ export class LocalServer {
         if (idx <= 0) return;
         this.replaySpeedMultiplier = SPEED_ORDER[idx - 1];
         this.eventBus.emit(
-          new ReplaySpeedChangeEvent(this.replaySpeedMultiplier),
+          new ReplaySpeedChangeEvent(this.replaySpeedMultiplier, "user"),
         );
       });
     }
