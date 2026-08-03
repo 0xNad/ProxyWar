@@ -2,7 +2,12 @@ import { EventBus } from "../../../core/EventBus";
 import { GameView, PlayerView } from "../../../core/game/GameView";
 import { SendQuickChatEvent } from "../../Transport";
 import { translateText } from "../../Utils";
-import { ChatModal, QuickChatPhrase, quickChatPhrases } from "./ChatModal";
+import {
+  ChatModal,
+  englishChatFallback,
+  QuickChatPhrase,
+  quickChatPhrases,
+} from "./ChatModal";
 import { COLORS, MenuElement, MenuElementParams } from "./RadialMenuElements";
 
 export class ChatIntegration {
@@ -37,7 +42,12 @@ export class ChatIntegration {
     }
 
     return this.ctModal.categories.map((category) => {
-      const categoryTranslation = translateText(`chat.cat.${category.id}`);
+      const categoryKey = `chat.cat.${category.id}`;
+      const categoryTranslation = translateText(
+        categoryKey,
+        undefined,
+        englishChatFallback(categoryKey),
+      );
 
       const categoryColor =
         COLORS.chat[category.id as keyof typeof COLORS.chat] ||
@@ -46,7 +56,12 @@ export class ChatIntegration {
 
       const phraseItems: MenuElement[] = phrases.map(
         (phrase: QuickChatPhrase) => {
-          const phraseText = translateText(`chat.${category.id}.${phrase.key}`);
+          const phraseKey = `chat.${category.id}.${phrase.key}`;
+          const phraseText = translateText(
+            phraseKey,
+            undefined,
+            englishChatFallback(phraseKey),
+          );
 
           return {
             id: `phrase-${category.id}-${phrase.key}`,
