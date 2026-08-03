@@ -2376,20 +2376,26 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         display: none;
       }
       /*
-       * P0 fix (2026-08-03, deploy 2A): collapsing the War Room list only
-       * hid the list itself (rule above) -- the drawer panel's OWN box
-       * (".broadcast-drawer-panel[data-tab-id="events"]", fixed max-height
-       * below) kept its full height regardless, so "Collapse" freed no
-       * screen space and the panel still occupied the same footprint with
-       * an empty body (the "impossible to minimize" report). Same fix
-       * shape ReplayPremiereOverlay.ts's own broadcast-drawer-panels rule
-       * already uses for this exact problem: shrink the PANEL itself,
-       * keyed off its collapsed child, via :has().
+       * P0 fix (2026-08-03, deploy 2A -- corrected): collapsing the War
+       * Room list only hid the list itself (rule above) -- the drawer
+       * panel's OWN box (".broadcast-drawer-panel[data-tab-id="events"]",
+       * fixed max-height above) kept its full height regardless, so
+       * "Collapse" freed no screen space (the "impossible to minimize"
+       * report). FIRST attempt here used a :has(.broadcast-war-room
+       * [data-collapsed="true"]) ancestor selector, matching
+       * ReplayPremiereOverlay.ts's own analogous fix -- but in THIS file
+       * renderWarRoomFeed's own section carries "broadcast-war-room"
+       * AND preserveDrawerPanelWrapperIdentity copies "broadcast-drawer-
+       * panel"/data-tab-id onto that SAME element (never a wrapper), so
+       * ".broadcast-drawer-panel[data-tab-id="events"]" and
+       * ".broadcast-war-room[data-collapsed="true"]" are literally the
+       * SAME node -- there is no ancestor/descendant relationship for
+       * :has() to match, so the rule silently never applied (confirmed
+       * live: computed max-height stayed at the full uncollapsed value).
+       * A plain compound selector on that one element is correct here.
        */
-      .broadcast-drawer-panel[data-tab-id="events"]:has(
-          .broadcast-war-room[data-collapsed="true"]
-        ) {
-        max-height: 56px;
+      .broadcast-drawer-panel[data-tab-id="events"][data-collapsed="true"] {
+        max-height: 58px;
       }
       .broadcast-rail-list {
         display: grid;
