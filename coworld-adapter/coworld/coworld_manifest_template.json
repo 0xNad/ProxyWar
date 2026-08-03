@@ -219,6 +219,9 @@
         }
       }
     },
+    "replay_viewer": {
+      "bundle": "build/static-replay-viewer"
+    },
     "runnable": {
       "type": "game",
       "image": "{{GAME_IMAGE}}",
