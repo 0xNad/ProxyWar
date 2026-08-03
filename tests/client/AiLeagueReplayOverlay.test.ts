@@ -507,13 +507,30 @@ describe("AiLeagueReplayOverlay", () => {
   it("restarts playback from turn 0 when Reset is clicked in ANY state, including the ended end screen (P2 pass-10 t4-03)", () => {
     // Same window.location mocking convention `WinModal.test.ts` already
     // uses — jsdom has no real navigation, so this pins the fix at the
-    // "reload was actually invoked" level rather than asserting turn 0
-    // renders (which would just be re-testing jsdom's own navigation,
-    // not this app's code).
-    const reloadMock = vi.fn();
+    // "navigated to the canonical replay URL" level rather than asserting
+    // turn 0 renders (which would just be re-testing jsdom's own
+    // navigation, not this app's code).
+    //
+    // P0 fix (2026-08-03, deploy 2B): this used to assert a plain
+    // `location.reload()` call. QA caught that reloading trusts whatever
+    // the LIVE address bar holds, and reproduced Reset ejecting to the
+    // site homepage — matching Main.ts's own documented, live-confirmed
+    // case where `window.location.pathname` can transiently read back
+    // wrong mid-navigation. Reset now sets `location.href` to the
+    // canonical `/ai-league-replay/:runID` path explicitly, regardless of
+    // whatever the address bar currently holds.
+    let assignedHref: string | null = null;
     const originalLocation = window.location;
     Object.defineProperty(window, "location", {
-      value: { reload: reloadMock, pathname: window.location.pathname },
+      value: {
+        pathname: window.location.pathname,
+        get href() {
+          return assignedHref ?? window.location.href;
+        },
+        set href(value: string) {
+          assignedHref = value;
+        },
+      },
       writable: true,
       configurable: true,
     });
@@ -542,7 +559,9 @@ describe("AiLeagueReplayOverlay", () => {
         .querySelector<HTMLButtonElement>("[data-ai-league-reset-layout]")
         ?.click();
 
-      expect(reloadMock).toHaveBeenCalledTimes(1);
+      expect(assignedHref).toBe(
+        "/ai-league-replay/reset-restarts-ended",
+      );
     } finally {
       Object.defineProperty(window, "location", {
         value: originalLocation,
