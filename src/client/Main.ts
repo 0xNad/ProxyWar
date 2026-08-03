@@ -1626,6 +1626,34 @@ class Client {
     clearTimeout(recordTimeout);
 
     let replayOverlay: ReturnType<typeof mountAiLeagueReplayOverlay>;
+    // P0 fix (2026-08-03, deploy 2B): LocalServer's own userOverrodeReplaySpeed
+    // gate (see that file's doc) stops an "auto" ReplaySpeedChangeEvent from
+    // changing the ENGINE's pacing once the viewer has picked a speed, but
+    // ReplayPanel.ts/GameRightSidebar.ts both still listen to the RAW event
+    // and blindly repaint their own displayed speed label from it regardless
+    // of source or whether LocalServer actually applied it -- so a viewer
+    // who picked "1x" during the (now auto-accelerated, see
+    // directorCutSpeedForSegment's "opening" override) spawn segment saw the
+    // label silently flip back to "Max" ~5-6s later, the instant playback
+    // crossed into the next Director Cut segment and its own onSpeedChange
+    // fired -- even though the engine itself may have still honored the
+    // user's pick. A one-way latch here stops the "auto" event from EVER
+    // reaching the bus again once the user has spoken, so nothing downstream
+    // (engine OR display) can ever see a contradicting value: "any user pick
+    // sticks until the user changes it again, no auto path may ever win
+    // afterwards" -- not just for the current Director Cut segment, for the
+    // rest of this replay-viewing session. Scoped to this one
+    // openAiLeagueReplay call (a fresh page load/Reset starts a new one).
+    let userOverrodeReplaySpeed = false;
+    const onReplaySpeedChangeForLatch = (event: ReplaySpeedChangeEvent) => {
+      if (event.source === "user") {
+        userOverrodeReplaySpeed = true;
+      }
+    };
+    this.eventBus.on(ReplaySpeedChangeEvent, onReplaySpeedChangeForLatch);
+    attemptCleanups.push(() =>
+      this.eventBus.off(ReplaySpeedChangeEvent, onReplaySpeedChangeForLatch),
+    );
     try {
       replayOverlay = mountAiLeagueReplayOverlay({
         runID,
@@ -1642,6 +1670,7 @@ class Client {
           summary: false,
         },
         onReplaySpeedChange: (speed) => {
+          if (userOverrodeReplaySpeed) return;
           this.eventBus.emit(new ReplaySpeedChangeEvent(speed, "auto"));
         },
       });

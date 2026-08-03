@@ -311,7 +311,7 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
   overlay.innerHTML = overlayHtml(currentInput);
   document.body.appendChild(overlay);
   mountReplayPanelDisclosure(overlay);
-  mountReplayPanelControls(overlay);
+  mountReplayPanelControls(overlay, currentInput.runID);
   const disposeControlClusterGeometrySync = mountControlClusterGeometrySync();
   // Identity (emblem/version/builder) is always public — never spoiler-
   // sensitive on its own — so it fetches once per mount and degrades to
@@ -1042,7 +1042,7 @@ function mountReplayPanelDisclosure(overlay: HTMLElement) {
   };
 }
 
-function mountReplayPanelControls(overlay: HTMLElement) {
+function mountReplayPanelControls(overlay: HTMLElement, runID: string) {
   const storageKey = "ai-league-spectator-layout-v1";
   let narrow = isNarrowReplayViewport();
   if (!narrow) {
@@ -1194,7 +1194,20 @@ function mountReplayPanelControls(overlay: HTMLElement) {
       // to resume into. Same reload-to-restart convention this codebase
       // already uses elsewhere (`AccountModal.ts`, `Cosmetics.ts`,
       // `ReplayLoadingScreen.ts`'s own retry button).
-      window.location.reload();
+      //
+      // P0 fix (2026-08-03, deploy 2B): `window.location.reload()` trusts
+      // whatever the LIVE address bar currently holds. `handleJoinLobby`'s
+      // own `pathnameAtJoinStart` doc (Main.ts) already documents a real,
+      // live-confirmed, not-fully-isolated case where `window.location.
+      // pathname` transiently reads back wrong mid-navigation; QA caught
+      // Reset itself landing on the site homepage instead of restarting
+      // this replay, matching that exact class of URL-state drift. Reset
+      // must always restart THIS replay regardless of whatever the
+      // address bar happens to hold at click time, so it navigates to the
+      // canonical `/ai-league-replay/:runID` path explicitly — the SAME
+      // path shape `handleJoinLobby` itself pushes for this exact route —
+      // instead of reloading in place.
+      window.location.href = `/ai-league-replay/${encodeURIComponent(runID)}`;
     });
 }
 
