@@ -15,6 +15,7 @@ import {
 import { crazyGamesSDK } from "../../CrazyGamesSDK";
 import { Platform } from "../../Platform";
 import { SendWinnerEvent } from "../../Transport";
+import { FitWholeMapEvent } from "../TransformHandler";
 import { Layer } from "./Layer";
 
 @customElement("win-modal")
@@ -55,7 +56,7 @@ export class WinModal extends LitElement implements Layer {
     return html`
       <div
         class="${this.isVisible
-          ? "fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-gray-800/70 p-6 shrink-0 rounded-lg z-[10010] shadow-2xl backdrop-blur-xs text-white w-87.5 max-w-[90%] md:w-175"
+          ? "fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-gray-800/95 p-6 shrink-0 rounded-lg z-[10010] shadow-2xl backdrop-blur-xs text-white w-87.5 max-w-[90%] md:w-175"
           : "hidden"}"
       >
         <h2 class="m-0 mb-4 text-[26px] text-center text-white">
@@ -231,12 +232,20 @@ export class WinModal extends LitElement implements Layer {
           this.isWin = false;
         }
         history.replaceState(null, "", `${window.location.pathname}?replay`);
+        // Spec 02 non-negotiable #2: camera must resolve to a full-board
+        // framing at match end, full stop -- a random mid-zoom crop is the
+        // last thing a viewer should see after a whole match. Reuses the
+        // exact existing "Whole board" camera machinery (PointOfViewSelector
+        // dispatches the same event today; this is simply the first
+        // AUTOMATIC trigger for it, at the one moment it should always fire).
+        this.eventBus.emit(new FitWholeMapEvent());
         this.show();
       } else if (wu.winner[0] === "nation") {
         this._title = translateText("win_modal.nation_won", {
           nation: wu.winner[1],
         });
         this.isWin = false;
+        this.eventBus.emit(new FitWholeMapEvent());
         this.show();
       } else {
         const winner = this.game.playerByClientID(wu.winner[1]);
@@ -261,6 +270,7 @@ export class WinModal extends LitElement implements Layer {
           this.isWin = false;
         }
         history.replaceState(null, "", `${window.location.pathname}?replay`);
+        this.eventBus.emit(new FitWholeMapEvent());
         this.show();
       }
     });

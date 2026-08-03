@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { FitWholeMapEvent } from "../../../../src/client/graphics/TransformHandler";
+import { GameUpdateType } from "../../../../src/core/game/GameUpdates";
 import { RankedType } from "../../../../src/core/game/Game";
 
 vi.mock("../../../../src/client/Utils", () => ({
@@ -37,6 +39,30 @@ vi.mock("../../../../src/client/CrazyGamesSDK", () => ({
     gameplayStop: vi.fn(),
   },
 }));
+
+interface WinModalTestHooks {
+  isVisible: boolean;
+  _handleExit: () => void;
+}
+
+interface MinimalPlayer {
+  isAlive: () => boolean;
+  hasSpawned: () => boolean;
+}
+
+interface MinimalWinnerPlayer {
+  isPlayer: () => boolean;
+  clientID: () => string | null;
+  displayName: () => string;
+}
+
+interface MinimalGame {
+  myPlayer: () => MinimalPlayer | null;
+  updatesSinceLastTick: () => Record<number, unknown[]> | null;
+  inSpawnPhase: () => boolean;
+  playerByClientID?: (id: string) => MinimalWinnerPlayer | undefined;
+  config?: () => { gameConfig: () => { rankedType: unknown } };
+}
 
 describe("WinModal Requeue", () => {
   let mockLocationHref = "";
@@ -118,14 +144,14 @@ describe("WinModal Requeue", () => {
       const { WinModal } = await import(
         "../../../../src/client/graphics/layers/WinModal"
       );
-      const modal = new WinModal();
+      const modal = new WinModal() as unknown as WinModalTestHooks;
 
       window.location.pathname = "/ai-league-replay/league-coworld-x";
-      (modal as unknown as { _handleExit: () => void })._handleExit();
+      modal._handleExit();
       expect(window.location.href).toBe("/league");
 
       window.location.pathname = "/";
-      (modal as unknown as { _handleExit: () => void })._handleExit();
+      modal._handleExit();
       expect(window.location.href).toBe("/");
     });
 
@@ -145,6 +171,88 @@ describe("WinModal Requeue", () => {
         normalInner.strings.join(" ") + normalInner.values.join(" ");
       expect(rendered).toContain("win_modal.support_openfront");
       expect(rendered).not.toContain("iframe");
+    });
+  });
+
+  describe("spec 02 non-negotiables (deploy 3.2, 2026-08-03)", () => {
+    it("banner is opaque (95%), never the old translucent 70% that let map labels bleed through", async () => {
+      const { WinModal } = await import(
+        "../../../../src/client/graphics/layers/WinModal"
+      );
+      const modal = new WinModal() as unknown as WinModalTestHooks;
+      modal.isVisible = true;
+      const rendered = (
+        modal as unknown as {
+          render: () => { strings: readonly string[]; values: readonly unknown[] };
+        }
+      ).render();
+      const html =
+        rendered.strings.join(" ") + rendered.values.join(" ");
+      expect(html).toContain("bg-gray-800/95");
+      expect(html).not.toContain("bg-gray-800/70");
+    });
+
+    it("emits FitWholeMapEvent when a match-ending winner is determined (player)", async () => {
+      const { WinModal } = await import(
+        "../../../../src/client/graphics/layers/WinModal"
+      );
+      const modal = new WinModal();
+      const emitted: unknown[] = [];
+      const winner: MinimalWinnerPlayer = {
+        isPlayer: () => true,
+        clientID: () => "WINNER_CLIENT",
+        displayName: () => "Winner",
+      };
+      const game: MinimalGame = {
+        myPlayer: () => null,
+        updatesSinceLastTick: () => ({
+          [GameUpdateType.Win]: [
+            {
+              winner: ["player", "OTHER_CLIENT"],
+              allPlayersStats: {},
+            },
+          ],
+        }),
+        playerByClientID: () => winner,
+        inSpawnPhase: () => false,
+        // WinModal.show() reads game.config().gameConfig().rankedType --
+        // real, needed so the async show() this test's tick() triggers
+        // doesn't reject with an unhandled rejection this test never awaits.
+        config: () => ({ gameConfig: () => ({ rankedType: undefined }) }),
+      };
+      modal.eventBus = { emit: (event: unknown) => emitted.push(event) } as unknown as typeof modal.eventBus;
+      modal.game = game as unknown as typeof modal.game;
+
+      modal.tick();
+
+      expect(emitted.some((event) => event instanceof FitWholeMapEvent)).toBe(
+        true,
+      );
+    });
+
+    it("does NOT emit FitWholeMapEvent for an individual death mid-match (not match end)", async () => {
+      const { WinModal } = await import(
+        "../../../../src/client/graphics/layers/WinModal"
+      );
+      const modal = new WinModal();
+      const emitted: unknown[] = [];
+      const game: MinimalGame = {
+        myPlayer: () => ({
+          isAlive: () => false,
+          hasSpawned: () => true,
+        }),
+        updatesSinceLastTick: () => ({ [GameUpdateType.Win]: [] }),
+        inSpawnPhase: () => false,
+        config: () => ({ gameConfig: () => ({ rankedType: undefined }) }),
+      };
+      modal.eventBus = { emit: (event: unknown) => emitted.push(event) } as unknown as typeof modal.eventBus;
+      modal.game = game as unknown as typeof modal.game;
+
+      modal.tick();
+
+      expect(emitted.some((event) => event instanceof FitWholeMapEvent)).toBe(
+        false,
+      );
     });
   });
 
