@@ -2051,6 +2051,41 @@ describe("AiLeagueReplayOverlay", () => {
       expect(jumps).toEqual([1_000]);
     });
 
+    it("preserves the timeline panel's drawer-tab wrapper identity across a per-tick patch (P1 sweep fix: the desktop position:fixed placement rule is keyed off data-tab-id=\"timeline\", which a raw renderMatchTimeline() rebuild doesn't carry on its own)", () => {
+      const runID = "broadcast-timeline-patch-1";
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+      });
+
+      const timelineBefore = document.querySelector(".broadcast-timeline");
+      expect(timelineBefore).not.toBeNull();
+      expect(
+        timelineBefore?.classList.contains("broadcast-drawer-panel"),
+      ).toBe(true);
+      expect(timelineBefore?.getAttribute("data-tab-id")).toBe("timeline");
+
+      // `patchVolatile`'s own `nextTimelineKey = String(turnNumber)`
+      // rebuilds the timeline on virtually every tick (unlike War Room/
+      // Analyst, which patch their list in place on the common forward
+      // path) — this is never the same node afterward, so what must
+      // survive is its wrapper IDENTITY, not its node reference.
+      frame(50, [
+        { playerID: "p1", smallID: 1, username: "Atlas", tilesOwned: 10 },
+      ]);
+
+      const timelineAfter = document.querySelector(".broadcast-timeline");
+      expect(timelineAfter).not.toBeNull();
+      expect(timelineAfter).not.toBe(timelineBefore);
+      expect(
+        timelineAfter?.classList.contains("broadcast-drawer-panel"),
+      ).toBe(true);
+      expect(timelineAfter?.getAttribute("data-tab-id")).toBe("timeline");
+      expect(timelineAfter?.getAttribute("role")).toBe("tabpanel");
+      expect(timelineAfter?.id).toBe("broadcast-drawer-panel-timeline");
+    });
+
     it("removes the broadcast drawer and lower-third host on dispose", () => {
       const runID = "broadcast-dispose-1";
       const overlay = mountAiLeagueReplayOverlay({

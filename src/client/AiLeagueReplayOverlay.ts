@@ -2429,11 +2429,28 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       }
       .broadcast-drawer-panel[data-tab-id="events"] {
         position: fixed;
-        top: 12px;
+        /*
+         * top: 76px, not 12px: the playback control cluster (game-right-
+         * sidebar: time/speed/pause/settings/fullscreen/exit —
+         * index.html's ".fixed.top-0.right-0...z-1000" wrapper around it,
+         * "top-4 right-4" i.e. 16px at >=1200px, flush 0px below that) sits
+         * in this exact top-right corner too, at z-index 1000 — far below
+         * this panel's own 50000, so this panel's "top: 12px" used to
+         * render directly over it, geometrically and in the stacking
+         * order, making Pause/Settings/Fullscreen/the speed control/Leave
+         * match completely unclickable for as long as the War Room panel
+         * had any content (found live during the P1 interaction sweep:
+         * elementFromPoint at every one of those buttons' own centers
+         * resolved to .broadcast-war-room-heading-row instead). The
+         * cluster's own tallest measured footprint is ~66px (top 16 +
+         * height ~50); 76px clears it with margin in both of ITS own
+         * breakpoints without needing a matching media query here.
+         */
+        top: 76px;
         right: 12px;
         z-index: 50000;
         width: min(360px, calc(100vw - 24px));
-        max-height: calc(100vh - 24px);
+        max-height: calc(100vh - 88px);
         overflow: hidden;
         border: 1px solid var(--pw-line-strong, #3a4656);
         border-radius: var(--pw-r-xl, 18px);
@@ -4968,6 +4985,35 @@ function mountAiLeagueBroadcastDrawer(
           currentTurn: turnNumber,
           onSeek: dispatchJumpToTurn,
         });
+        // `renderMatchTimeline()` only ever returns a bare `.broadcast-
+        // timeline` section — `renderBroadcastDrawer()`'s own wrapping
+        // (the `.broadcast-drawer-panel` class, `data-tab-id="timeline"`,
+        // `data-tab-active`, `id`, `role="tabpanel"`, `aria-labelledby`)
+        // is applied only on the structural render path (renderStructural
+        // above) — never re-applied here. `data-tab-id="timeline"` is
+        // exactly what this file's own CSS keys the desktop `position:
+        // fixed` placement off of (the panel lives inside a body-level,
+        // zero-width portal — AI_LEAGUE_BROADCAST_DRAWER_PORTAL_ID's own
+        // doc): losing it collapsed the whole timeline to 0×0 and made it
+        // permanently unusable starting on the SECOND tick after mount
+        // (found live in production during the P1 interaction sweep — the
+        // timeline key changes on virtually every frame, unlike War
+        // Room/Analyst, which patch their list in place on the common
+        // forward-tick path and only ever replaceWith() on a rare
+        // non-monotonic jump). Copy the wrapper identity straight off the
+        // outgoing element instead of re-deriving renderBroadcastDrawer's
+        // own logic here.
+        nextTimeline.className = timeline.className;
+        nextTimeline.id = timeline.id;
+        for (const [key, value] of Object.entries(timeline.dataset)) {
+          nextTimeline.dataset[key] = value;
+        }
+        const role = timeline.getAttribute("role");
+        if (role !== null) nextTimeline.setAttribute("role", role);
+        const labelledBy = timeline.getAttribute("aria-labelledby");
+        if (labelledBy !== null) {
+          nextTimeline.setAttribute("aria-labelledby", labelledBy);
+        }
         nextTimeline.dataset.timelineKey = nextTimelineKey;
         timeline.replaceWith(nextTimeline);
       }
