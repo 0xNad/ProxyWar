@@ -5625,7 +5625,7 @@ function groupRoutineWarRoomEvents(
 
 /**
  * Curated War Room feed. Selective by kind:
- *  - alliance/betrayal/elimination gate on
+ *  - alliance/betrayal/nuke/elimination gate on
  *    AI_LEAGUE_WAR_ROOM_IMPORTANCE_THRESHOLD (matching AgentDramaReport.ts's
  *    own HIGH_IMPORTANCE_THRESHOLD) — a no-op in practice today (these kinds
  *    are always emitted at 90+ importance server-side) but an honest,
@@ -5726,6 +5726,34 @@ function curatedWarRoomEvents(
         }),
         publicReason,
         participants: [actor, target],
+        expandedDetail: null,
+        tier: 1,
+      });
+      continue;
+    }
+    // P0 fix (2026-08-03): nuke launches (importance 95 server-side, the
+    // single highest-importance event kind this pipeline emits) never
+    // surfaced in the curated War Room feed at all -- CuratedWarRoomEventKind
+    // had no "nuke" member and this function had no branch for it, so a
+    // nuke only ever showed up in the much less prominent bottom timeline
+    // strip (matchTimelineEventMarkers below already handles it there).
+    // Tier 1: a WMD strike is exactly the kind of event this feed's own
+    // "major" tier exists for.
+    if (event.kind === "nuke") {
+      curated.push({
+        id: event.id,
+        kind: "nuke",
+        turn: event.turnNumber,
+        sequence: event.sequence,
+        headline:
+          target !== null
+            ? translateText("ai_league_replay.event_nuke_target", {
+                actor,
+                target,
+              })
+            : translateText("ai_league_replay.event_nuke", { actor }),
+        publicReason,
+        participants: target !== null ? [actor, target] : [actor],
         expandedDetail: null,
         tier: 1,
       });

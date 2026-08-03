@@ -342,6 +342,7 @@ export type CuratedWarRoomEventKind =
   | "first_strike"
   | "betrayal"
   | "elimination"
+  | "nuke"
   | "plan_change";
 
 /**
@@ -355,6 +356,7 @@ const WAR_ROOM_GLYPHS: Record<CuratedWarRoomEventKind, string> = {
   first_strike: "\u2192", // → arrow
   betrayal: "\u2020", // † dagger
   elimination: "\u2715", // ✕ multiplication x
+  nuke: "\u2622", // ☢ radioactive sign — matches ReplayPremiereOverlay.ts's own WAR_EVENT_GLYPHS
   plan_change: "\u21BB", // ↻ clockwise open arrow
 };
 

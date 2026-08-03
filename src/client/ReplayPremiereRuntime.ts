@@ -5266,12 +5266,13 @@ const MAX_WAR_FEED_ENTRIES = 8;
 /** Alliance/betrayal/first-strike/elimination are rare relative to attacks/chat, so a generous cap is never actually reached in practice; it exists only as a hard ceiling. */
 const MAX_WAR_ROOM_EVENTS = 64;
 const MAX_TIMELINE_MARKERS = 128;
-/** Maps the curated War Room kind vocabulary onto the repo's existing `SpectatorEvent.tone` vocabulary (see `AgentSpectatorTelemetry.ts`) so `AnalystEventRow.tone` reads consistently with the Full Replay track's own analyst rows. `plan_change` is unreachable here (a sealed Premiere never curates it — see `pushWarRoomEvent`'s doc) but is mapped for type completeness. */
+/** Maps the curated War Room kind vocabulary onto the repo's existing `SpectatorEvent.tone` vocabulary (see `AgentSpectatorTelemetry.ts`) so `AnalystEventRow.tone` reads consistently with the Full Replay track's own analyst rows. `plan_change`/`nuke` are unreachable here (a sealed Premiere never curates either — see `pushWarRoomEvent`'s doc) but are mapped for type completeness. */
 const ANALYST_TONE_BY_WAR_ROOM_KIND: Record<CuratedWarRoomEventKind, string> = {
   alliance: "pact",
   first_strike: "war",
   betrayal: "betrayal",
   elimination: "war",
+  nuke: "threat",
   plan_change: "info",
 };
 

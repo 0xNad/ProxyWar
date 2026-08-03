@@ -2697,6 +2697,36 @@ describe("AiLeagueReplayOverlay", () => {
       expect(document.querySelectorAll(".broadcast-war-room-item")).toHaveLength(2);
     });
 
+    // P0 fix (2026-08-03): a nuke launch (importance 95 server-side, the
+    // single highest-importance event kind this pipeline emits) never
+    // surfaced in the curated War Room feed at all -- only in the much
+    // less prominent bottom timeline strip.
+    it("includes a nuke launch in the curated War Room feed, tagged with the nuke kind (spec: no Tier-1 event category ever missing)", () => {
+      const runID = "broadcast-nuke-inclusion-1";
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+        currentTurn: 900,
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events: [
+            event(1, 900, "nuke", "threat", "a1", "Atlas", "a2", "Blitz", "Atlas escalates nuclear pressure against Blitz."),
+          ],
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+
+      const warRoom = document.querySelector(".broadcast-war-room");
+      const items = warRoom?.querySelectorAll(".broadcast-war-room-item");
+      expect(items).toHaveLength(1);
+      expect(items?.[0]?.getAttribute("data-kind")).toBe("nuke");
+    });
+
     // P0 fix (2026-08-03): the "Anonymous Names" setting used to only ever
     // apply to content rendered AFTER the toggle -- everything already
     // painted (the political-radio talks transcript included) stayed

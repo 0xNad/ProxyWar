@@ -2071,6 +2071,7 @@
     "war_room_kind_first_strike": "First strike",
     "war_room_kind_betrayal": "Betrayal",
     "war_room_kind_elimination": "Elimination",
+    "war_room_kind_nuke": "Nuke",
     "war_room_kind_plan_change": "Plan change",
     "war_room_turn": "Turn {turn}",
     "war_room_stated_reason": "Stated reason: {reason}",
