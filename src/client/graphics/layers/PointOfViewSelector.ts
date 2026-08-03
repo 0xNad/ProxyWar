@@ -89,6 +89,20 @@ export class PointOfViewSelector extends LitElement implements Layer {
       BROADCAST_RAIL_FOLLOW_EVENT,
       this.onFollowPlayerRequest,
     );
+    // P0 fix (2026-08-03, item 3b): WinModal emits FitWholeMapEvent at
+    // match end (the camera already auto-pulls back to a full-board fit —
+    // see WinModal.ts's own doc for why), but this dropdown never followed
+    // suit -- it stayed showing whoever was last followed even though the
+    // camera had visibly moved to "Whole board", making the label lie
+    // about what the viewer was actually looking at. Also fires for THIS
+    // component's own "whole board" pick/crosshair click (the only other
+    // emitter), where selectedId is already null -- a harmless no-op
+    // there. `pan: false` is essential: TransformHandler already reacts to
+    // the SAME FitWholeMapEvent that triggered this, so re-emitting one
+    // from inside this handler would be a redundant/reentrant fit.
+    // `persist: false`: an automatic reset must never overwrite the
+    // viewer's own manual pick preference for a future session.
+    this.eventBus?.on(FitWholeMapEvent, this.onFitWholeMap);
   }
 
   disconnectedCallback(): void {
@@ -97,7 +111,12 @@ export class PointOfViewSelector extends LitElement implements Layer {
       BROADCAST_RAIL_FOLLOW_EVENT,
       this.onFollowPlayerRequest,
     );
+    this.eventBus?.off(FitWholeMapEvent, this.onFitWholeMap);
   }
+
+  private readonly onFitWholeMap = (): void => {
+    this.applyPov(null, "neutral", { persist: false, pan: false });
+  };
 
   /**
    * Bridge for the Stage 4 broadcast composition's competitor rail (spec
