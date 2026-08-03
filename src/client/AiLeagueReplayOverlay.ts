@@ -3820,11 +3820,14 @@ function competitorRailEntries(
       telemetryByName.get(normalizeName(username)) ??
       null;
     const identity = identityByPlayerName.get(username) ?? null;
-    const displayName =
-      identity?.displayName ??
-      aiLeagueSpectatorDisplayName(
-        (framePlayer?.displayName ?? "") || username,
-      );
+    // P0 fix (2026-08-03, deploy 2B): a resolved public identity's own
+    // displayName used to bypass aiLeagueSpectatorDisplayName entirely --
+    // the ONE Competitors-rail path that kept leaking a real agent name
+    // with "Anonymous Names" on, since every other name in this rail
+    // (and everywhere else in this file) already funnels through it.
+    const displayName = aiLeagueSpectatorDisplayName(
+      identity?.displayName ?? ((framePlayer?.displayName ?? "") || username),
+    );
     const territoryPercent =
       framePlayer !== undefined && totalTiles > 0
         ? (framePlayer.tilesOwned / totalTiles) * 100
