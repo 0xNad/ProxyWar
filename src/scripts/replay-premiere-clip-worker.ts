@@ -467,6 +467,7 @@ async function renderIndexHtml(staticDir: string): Promise<string> {
     // No manifest -> un-fingerprinted asset paths.
   }
   return ejs.render(htmlTemplate, {
+    staticReplay: false,
     gitCommit: JSON.stringify("premiere-clip-render"),
     assetManifest: JSON.stringify(assetManifest),
     cdnBase: JSON.stringify(""),

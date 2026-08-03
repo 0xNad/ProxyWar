@@ -53,6 +53,7 @@ export async function renderHtmlContent(
     buildAssetUrl("images/GameplayScreenshot.png", assetManifest, htmlAssetBase),
   );
   return ejs.render(htmlContent, {
+    staticReplay: false,
     socialImageUrl,
     socialPageUrl: socialOrigin === "" ? "/" : `${socialOrigin}/`,
     gitCommit: JSON.stringify(process.env.GIT_COMMIT ?? "undefined"),

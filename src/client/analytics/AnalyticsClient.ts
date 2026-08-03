@@ -54,7 +54,10 @@ export class AnalyticsClient {
     this.maxQueueSize = options.maxQueueSize ?? DEFAULT_MAX_QUEUE_SIZE;
     this.storage = options.storage;
     this.available =
-      typeof window !== "undefined" && typeof fetch === "function" && typeof window.location === "object";
+      typeof window !== "undefined" &&
+      window.__PROXYWAR_STATIC_REPLAY__ !== true &&
+      typeof fetch === "function" &&
+      typeof window.location === "object";
   }
 
   /**

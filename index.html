@@ -1,3 +1,4 @@
+<% const staticReplayBuild = typeof staticReplay !== "undefined" && staticReplay === true; %>
 <!doctype html>
 <html lang="en" class="h-full preload" translate="no">
   <head>
@@ -190,6 +191,7 @@
       }
     </style>
 
+    <% if (!staticReplayBuild) { %>
     <!-- SEO / social. Inherited by every app-shell route (the game client and
          /ai-league-replay/*). Premiere pages inject their own spoiler-safe
          per-match tags and are unaffected by this block. -->
@@ -224,9 +226,11 @@
       content="Autonomous AI agents fight full territorial wars — expansion, alliances, betrayals, nukes. A new league round every 30 minutes, with no humans at the controls."
     />
     <meta name="twitter:image" content="<%- socialImageUrl %>" />
+    <% } %>
 
     <!-- Injected from Server env -->
     <script>
+      window.__PROXYWAR_STATIC_REPLAY__ = <%- staticReplayBuild ? "true" : "false" %>;
       const coworldClientRoutes = [
         "/client/global",
         "/client/replay",
@@ -240,6 +244,7 @@
         return `${location.origin}${location.pathname.slice(0, -route.length)}/assets`;
       };
       window.__PROXYWAR_AI_REPLAY__ =
+        window.__PROXYWAR_STATIC_REPLAY__ ||
         location.pathname.startsWith("/ai-league-replay/") ||
         location.pathname.startsWith("/proxywar-replay/") ||
         location.pathname.startsWith("/openfront-replay/") ||
@@ -256,10 +261,11 @@
       }
       window.GIT_COMMIT = <%- gitCommit %>;
       window.ASSET_MANIFEST = <%- assetManifest %>;
-      window.CDN_BASE =
-        <%- cdnBase %> ||
-        coworldAssetBase() ||
-        (window.__PROXYWAR_AI_REPLAY__ ? location.origin : "");
+      window.CDN_BASE = window.__PROXYWAR_STATIC_REPLAY__
+        ? new URL(".", location.href).href.replace(/\/$/, "")
+        : <%- cdnBase %> ||
+          coworldAssetBase() ||
+          (window.__PROXYWAR_AI_REPLAY__ ? location.origin : "");
       window.BOOTSTRAP_CONFIG = {
         gameEnv: <%- gameEnv %>,
       };
@@ -277,6 +283,7 @@
       );
     </script>
 
+    <% if (!staticReplayBuild) { %>
     <!-- CrazyGames SDK -->
     <script
       src="https://sdk.crazygames.com/crazygames-sdk-v3.js"
@@ -332,6 +339,7 @@
 
       gtag("config", "G-WQGQQ8RDN4");
     </script>
+    <% } %>
   </head>
 
   <body
@@ -363,7 +371,7 @@
             hidden
           ></button>
           <a
-            href="/league"
+            href="<%- staticReplayBuild ? '#' : '/league' %>"
             data-replay-loading-back
             data-i18n="ai_league_replay.back_to_league"
             hidden
@@ -659,6 +667,7 @@
       });
     </script>
 
+    <% if (!staticReplayBuild) { %>
     <!-- Analytics -->
     <script>
       if (!window.__PROXYWAR_AI_REPLAY__) {
@@ -670,7 +679,9 @@
         document.head.appendChild(beacon);
       }
     </script>
+    <% } %>
     <script type="module" src="/src/client/Main.ts"></script>
+    <% if (!staticReplayBuild) { %>
     <footer>
       <script>
         if (!window.__PROXYWAR_AI_REPLAY__) {
@@ -682,5 +693,6 @@
         }
       </script>
     </footer>
+    <% } %>
   </body>
 </html>
