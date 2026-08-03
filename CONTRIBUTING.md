@@ -1,8 +1,10 @@
-# Contributing to OpenFront.io
+# Contributing to Proxy War
 
-First off, thank you for considering contributing to OpenFront.io! It's people like you that make OpenFront such a great game.
+Thank you for considering a contribution to Proxy War.
 
-We welcome contributions from everyone. By participating in this project, you agree to abide by our code of conduct and treat all community members with respect.
+We welcome contributions from people using any development workflow, including
+coding-agent-assisted work. By participating in this project, you agree to abide
+by our code of conduct and treat all community members with respect.
 
 ## Quick Links
 
@@ -55,6 +57,17 @@ We welcome contributions from everyone. By participating in this project, you ag
   ```
 
 ## Development Workflow
+
+### Coding Agents
+
+Coding agents may edit, test, and commit changes in an independent public clone
+or fork without private repository-owner files. The tracked `CLAUDE.md` is the
+baseline guidance; missing `AGENTS.md` or `CLAUDE.local.md` files are expected
+and are not a contribution blocker.
+
+Use a feature branch or fork and follow the same testing and review requirements
+as any other contribution. Push a branch or open a pull request only when the
+person operating the coding agent has authorized that outward action.
 
 ### Branching
 
