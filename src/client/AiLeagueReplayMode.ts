@@ -4,6 +4,8 @@ export function isAiLeagueReplayRoute(
   pathname = window.location.pathname,
 ): boolean {
   return (
+    (typeof window !== "undefined" &&
+      window.__PROXYWAR_STATIC_REPLAY__ === true) ||
     isReplayPremiereRoute(pathname) ||
     isBettingPremiereRoute(pathname) ||
     pathname.startsWith("/ai-league-replay/") ||

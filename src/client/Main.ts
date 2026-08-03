@@ -27,6 +27,10 @@ import "./ClanModal";
 import { joinLobby, type JoinLobbyResult } from "./ClientGameRunner";
 import { getPlayerCosmeticsRefs } from "./Cosmetics";
 import { mountCoworldPlayerOverlay } from "./CoworldPlayerOverlay";
+import {
+  isCoworldStaticReplayViewer,
+  loadCoworldStaticReplay,
+} from "./CoworldStaticReplay";
 import { crazyGamesSDK } from "./CrazyGamesSDK";
 import "./FlagInput";
 import { FlagInput } from "./FlagInput";
@@ -388,7 +392,9 @@ class Client {
     crazyGamesSDK.maybeInit();
     // Prefetch turnstile token so it is available when
     // the user joins a lobby.
-    this.turnstileTokenPromise = getTurnstileToken();
+    if (!isCoworldStaticReplayViewer()) {
+      this.turnstileTokenPromise = getTurnstileToken();
+    }
 
     // Wait for components to render before setting version
     await customElements.whenDefined("mobile-nav-bar");
@@ -745,6 +751,11 @@ class Client {
   }
 
   private async handleUrl() {
+    if (isCoworldStaticReplayViewer()) {
+      await this.openCoworldStaticReplay();
+      return;
+    }
+
     // The account page is a standalone route with no lobby/game/replay
     // concept behind it — mount it and return before any of the
     // modal-definition waits or lobby-join logic below, none of which it
@@ -1534,6 +1545,8 @@ class Client {
       >;
       coworldReplayPath?: string;
       artifactBasePath?: string;
+      gameRecord?: GameRecord;
+      loadArtifactDetails?: boolean;
     } = {},
   ) {
     this.replayAttemptCleanup?.();
@@ -1557,77 +1570,81 @@ class Client {
       }
     };
     this.replayAttemptCleanup = cleanupAttempt;
-    const recordTimeout = setTimeout(
-      () => attemptController.abort("Replay record request timed out"),
-      REPLAY_LOADING_SLOW_TIMEOUT_MS,
-    );
-    attemptCleanups.push(() => clearTimeout(recordTimeout));
-
-    let recordResponse: Response;
-    try {
-      recordResponse = await fetch(`${artifactBasePath}/game-record.json`, {
-        signal: attemptController.signal,
-      });
-    } catch (error) {
-      if (this.replayAttemptCleanup !== cleanupAttempt) return;
-      this.failReplayLoading(
-        runID,
-        options.source,
-        "Replay record request failed",
-        error,
+    let gameRecord = options.gameRecord;
+    if (gameRecord === undefined) {
+      const recordTimeout = setTimeout(
+        () => attemptController.abort("Replay record request timed out"),
+        REPLAY_LOADING_SLOW_TIMEOUT_MS,
       );
-      return;
-    }
-    if (!recordResponse.ok) {
+      attemptCleanups.push(() => clearTimeout(recordTimeout));
+
+      let recordResponse: Response;
       try {
-        const spectatorResponse = await fetch(
-          `${artifactBasePath}/spectator.html`,
-          {
-            method: "HEAD",
-            signal: attemptController.signal,
-          },
-        );
-        if (spectatorResponse.ok) {
-          cleanupAttempt();
-          window.location.replace(`${artifactBasePath}/spectator.html`);
-          return;
-        }
+        recordResponse = await fetch(`${artifactBasePath}/game-record.json`, {
+          signal: attemptController.signal,
+        });
       } catch (error) {
-        console.warn("Replay timeline fallback request failed", error);
+        if (this.replayAttemptCleanup !== cleanupAttempt) return;
+        this.failReplayLoading(
+          runID,
+          options.source,
+          "Replay record request failed",
+          error,
+        );
+        return;
+      }
+      if (!recordResponse.ok) {
+        try {
+          const spectatorResponse = await fetch(
+            `${artifactBasePath}/spectator.html`,
+            {
+              method: "HEAD",
+              signal: attemptController.signal,
+            },
+          );
+          if (spectatorResponse.ok) {
+            cleanupAttempt();
+            window.location.replace(`${artifactBasePath}/spectator.html`);
+            return;
+          }
+        } catch (error) {
+          console.warn("Replay timeline fallback request failed", error);
+        }
+
+        this.failReplayLoading(
+          runID,
+          options.source,
+          `Replay record returned HTTP ${recordResponse.status}`,
+        );
+        return;
       }
 
-      this.failReplayLoading(
-        runID,
-        options.source,
-        `Replay record returned HTTP ${recordResponse.status}`,
-      );
-      return;
-    }
+      let recordJson: unknown;
+      try {
+        recordJson = await recordResponse.json();
+      } catch (error) {
+        this.failReplayLoading(
+          runID,
+          options.source,
+          "Replay record is not valid JSON",
+          error,
+        );
+        return;
+      }
 
-    let recordJson: unknown;
-    try {
-      recordJson = await recordResponse.json();
-    } catch (error) {
-      this.failReplayLoading(
-        runID,
-        options.source,
-        "Replay record is not valid JSON",
-        error,
-      );
-      return;
+      const parsed = GameRecordSchema.safeParse(recordJson);
+      if (!parsed.success) {
+        this.failReplayLoading(
+          runID,
+          options.source,
+          "Replay record failed schema validation",
+          parsed.error,
+        );
+        return;
+      }
+      gameRecord = parsed.data;
+      clearTimeout(recordTimeout);
     }
-
-    const parsed = GameRecordSchema.safeParse(recordJson);
-    if (!parsed.success) {
-      this.failReplayLoading(
-        runID,
-        options.source,
-        "Replay record failed schema validation",
-        parsed.error,
-      );
-      return;
-    }
-    clearTimeout(recordTimeout);
 
     let replayOverlay: ReturnType<typeof mountAiLeagueReplayOverlay>;
     try {
@@ -1637,8 +1654,8 @@ class Client {
         summary: null,
         spectatorTelemetry: null,
         artifactBasePath,
-        replayMaxTurn: initialReplayClipRenderableThroughTurn(parsed.data.info),
-        detailsLoading: true,
+        replayMaxTurn: initialReplayClipRenderableThroughTurn(gameRecord.info),
+        detailsLoading: options.loadArtifactDetails !== false,
         artifactAvailability: {
           visualReport: false,
           spectatorTelemetry: false,
@@ -1829,23 +1846,25 @@ class Client {
           attemptController.signal.removeEventListener("abort", abortDetails);
         });
     };
-    document.addEventListener(
-      "ai-league-replay-frame",
-      hydrateAfterFirstFrame,
-      { once: true },
-    );
-    attemptCleanups.push(() =>
-      document.removeEventListener(
+    if (options.loadArtifactDetails !== false) {
+      document.addEventListener(
         "ai-league-replay-frame",
         hydrateAfterFirstFrame,
-      ),
-    );
+        { once: true },
+      );
+      attemptCleanups.push(() =>
+        document.removeEventListener(
+          "ai-league-replay-frame",
+          hydrateAfterFirstFrame,
+        ),
+      );
+    }
 
     document.dispatchEvent(
       new CustomEvent("join-lobby", {
         detail: {
-          gameID: parsed.data.info.gameID,
-          gameRecord: parsed.data,
+          gameID: gameRecord.info.gameID,
+          gameRecord,
           source: options.source ?? "ai-league-replay",
           aiLeagueRunID: runID,
           coworldReplayPath: options.coworldReplayPath,
@@ -1855,6 +1874,27 @@ class Client {
         composed: true,
       }),
     );
+  }
+
+  private async openCoworldStaticReplay(): Promise<void> {
+    showReplayLoadingScreen("ai_league_replay.loading_replay");
+    try {
+      const replay = await loadCoworldStaticReplay();
+      await this.openAiLeagueReplay(replay.runID, {
+        source: "coworld-replay",
+        coworldReplayPath: window.location.pathname + window.location.search,
+        artifactBasePath: ".",
+        gameRecord: replay.gameRecord,
+        loadArtifactDetails: false,
+      });
+    } catch (error) {
+      this.failReplayLoading(
+        "static-coworld-replay",
+        "coworld-replay",
+        "Static Coworld replay failed to load",
+        error,
+      );
+    }
   }
 
   private async openCoworldReplay() {

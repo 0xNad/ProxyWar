@@ -5,11 +5,13 @@ import type { AnalyticsBatch } from "../../../src/client/analytics/AnalyticsEven
 let client: AnalyticsClient | undefined;
 
 beforeEach(() => {
+  delete window.__PROXYWAR_STATIC_REPLAY__;
   window.localStorage.clear();
   vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
 });
 
 afterEach(() => {
+  delete window.__PROXYWAR_STATIC_REPLAY__;
   client?.stop();
   client = undefined;
   vi.unstubAllGlobals();
@@ -22,6 +24,14 @@ function lastRequestBatch(fetchMock: ReturnType<typeof vi.fn>): AnalyticsBatch {
 }
 
 describe("AnalyticsClient", () => {
+  test("stays inert in the standalone static replay viewer", () => {
+    window.__PROXYWAR_STATIC_REPLAY__ = true;
+    client = new AnalyticsClient({ flushIntervalMs: 1_000_000 });
+    client.track("replay_load_started");
+    client.flush();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   test("track() queues an event with the current pathname and no-ops until flushed", async () => {
     window.history.pushState({}, "", "/watch/abc123");
     client = new AnalyticsClient({ flushIntervalMs: 1_000_000 });
