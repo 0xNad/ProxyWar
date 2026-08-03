@@ -73,6 +73,18 @@ export class WinModal extends LitElement implements Layer {
     this.requestUpdate();
   };
 
+  // Override to prevent shadow DOM creation (Tailwind's global stylesheet
+  // only reaches light DOM; without this, every class on this modal --
+  // fixed positioning, z-[10010], centering, background -- is inert and
+  // the "won" banner renders as an unstyled, invisible sliver at 0,0 in
+  // an isolated shadow root while `isVisible`/`_title` are still correct.
+  // P0 regression (2026-08-03): lost in the anonymize-winner-name edit
+  // above when connectedCallback/disconnectedCallback were added in the
+  // same spot -- restore alongside those, never remove again.
+  createRenderRoot() {
+    return this;
+  }
+
   connectedCallback() {
     super.connectedCallback();
     window.addEventListener(

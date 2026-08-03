@@ -202,6 +202,29 @@ describe("WinModal Requeue", () => {
       expect(html).not.toContain("bg-gray-800/70");
     });
 
+    // P0 regression (2026-08-03, deploy 3.10): the Anonymous Names edit
+    // above (deploy 3.9, item 2) replaced this class's `createRenderRoot()`
+    // override + empty `constructor()` with the new connectedCallback/
+    // disconnectedCallback pair, accidentally deleting the override in the
+    // process. Without it, WinModal falls back to LitElement's default
+    // shadow DOM, which isolates it from the global Tailwind stylesheet
+    // (index.html light DOM only) -- every class above (`fixed`, `z-[10010]`,
+    // centering, the 95% background just asserted) silently stops applying.
+    // `isVisible`/`_title` still flip correctly and `tick()`/`show()` still
+    // run clean, so nothing throws and nothing else here catches it: the
+    // banner just renders as an unstyled, invisible sliver. This is the
+    // exact contract a real DOM instantiation (not just render()'s
+    // TemplateResult) can check directly.
+    it("renders into light DOM, not an isolated shadow root (Tailwind must reach the banner)", async () => {
+      const { WinModal } = await import(
+        "../../../../src/client/graphics/layers/WinModal"
+      );
+      const modal = new WinModal() as unknown as {
+        createRenderRoot: () => Node;
+      };
+      expect(modal.createRenderRoot()).toBe(modal);
+    });
+
     it("emits FitWholeMapEvent when a match-ending winner is determined (player)", async () => {
       const { WinModal } = await import(
         "../../../../src/client/graphics/layers/WinModal"
