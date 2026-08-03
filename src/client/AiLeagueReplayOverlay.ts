@@ -2375,6 +2375,22 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       .broadcast-war-room[data-collapsed="true"] .broadcast-war-room-list {
         display: none;
       }
+      /*
+       * P0 fix (2026-08-03, deploy 2A): collapsing the War Room list only
+       * hid the list itself (rule above) -- the drawer panel's OWN box
+       * (".broadcast-drawer-panel[data-tab-id="events"]", fixed max-height
+       * below) kept its full height regardless, so "Collapse" freed no
+       * screen space and the panel still occupied the same footprint with
+       * an empty body (the "impossible to minimize" report). Same fix
+       * shape ReplayPremiereOverlay.ts's own broadcast-drawer-panels rule
+       * already uses for this exact problem: shrink the PANEL itself,
+       * keyed off its collapsed child, via :has().
+       */
+      .broadcast-drawer-panel[data-tab-id="events"]:has(
+          .broadcast-war-room[data-collapsed="true"]
+        ) {
+        max-height: 56px;
+      }
       .broadcast-rail-list {
         display: grid;
         gap: 8px;
