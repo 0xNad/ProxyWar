@@ -1190,3 +1190,46 @@ seeked forward — the CHECK item. Opened the same episode at 844×390:
 the drawer's tab bar (`.broadcast-drawer-tabs`) measured `y:73` inside
 the 390px viewport on open, `scrollTop: 0` — no scroll needed (was
 `y:419`, off-screen, pre-fix) — item 4.
+
+### Addendum 5b — CHECK item follow-up: unified backward-seek across every dispatchJumpToTurn consumer, 2026-08-03
+
+Turn 2 of the CHECK item: Addendum 5's fix wrapped only the Match
+Timeline's own `onSeek`, leaving the shared `dispatchJumpToTurn` — the War
+Room feed's own "jump to turn" action — still silently no-op'ing for
+backward targets. Audited every consumer: War Room feed jump-to-turn and
+the Match Timeline's `onSeek` (both call sites) are the only two; the
+Analyst tab's decision/event rows carry no turn-jump affordance at all
+(plain cells, no button), so there was nothing to fix there. Separately
+found genuine prior art missed the first time: `mountReplayJumpControls`
+(the political-radio/comms "turn N" link) already implements this exact
+backward-seek-via-navigation. Moved the fix into the shared
+`dispatchJumpToTurn` itself (removing the separate `dispatchTimelineSeek`
+wrapper), matching `mountReplayJumpControls`'s own tolerance/params
+exactly.
+
+**Validation**: 84/84 in `AiLeagueReplayOverlay.test.ts` (existing War
+Room/windowing tests updated to assert the navigation where their fixture
+data happens to jump backward; new test proves a jump AT the current
+playhead — the freshest a War Room item can point to by construction —
+stays an in-session dispatch); full suite 441 files / 5216 tests green;
+`tsc --noEmit` and `eslint` clean; `build-prod` clean (bundle
+`main-8b8xTUXT.js`).
+
+**Deploy**: pushed `87746f161..1b1da8a13` (fast-forward, no force).
+Rollback point: release-candidate worktree pre-redeploy HEAD `664184ac5`
+(PID 76322, healthy — Addendum 5's own deployed tip). Same sequence as
+Addendum 5: fetch → `git checkout --detach 1b1da8a13` → `npm ci` → `tsc
+--noEmit` (0 errors) → `npm run build-prod` (clean) →
+`deploy/mac/proxywar-beta-launchd-restart.mjs
+--ready-url=http://127.0.0.1:8788/league` (dry-run then real: PID 76322 →
+86671, ready). To roll back: `git checkout --detach 664184ac5`, `npm ci
+&& npm run build-prod`, then `launchctl kickstart -k
+gui/$UID/com.proxywar.beta` again.
+
+**Live verification**: confirmed `beta.proxywar.xyz` serving
+`main-8b8xTUXT.js`. On the same DC episode near its end, clicked the
+OLDEST War Room item's jump-to-turn button (well behind the ~16,000-turn
+playhead): URL navigated to `...&turn=2100`, and the DC restarted fresh
+and began catching up forward again — the exact behavior the CHECK item's
+own repro described, now fixed for the War Room surface too. Screenshot:
+`/tmp/proxywar-dc-polish/turn2-warroom-backward-jump-navigates.webp`.
