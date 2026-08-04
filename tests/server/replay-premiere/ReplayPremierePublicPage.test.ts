@@ -28,6 +28,24 @@ import {
 } from "./ReplayPremiereFixtures";
 
 const PUBLIC_ORIGIN = "https://beta.proxywar.xyz";
+
+// Same fallback shape as `GamePreviewRoute.ts`'s app-shell resolution:
+// prefer the built `static/index.html` when present, fall back to the
+// tracked source `index.html` when it isn't (e.g. no `vite build` has run
+// yet, as in a Test CI job that only does `npm ci`). The tracked root
+// `index.html` already carries the same `<head>` shape this test needs —
+// OG/Twitter meta tags to be replaced, plus the inline
+// `window.BOOTSTRAP_CONFIG = {...}` script `createPremierePublicBootstrap`
+// looks for — so this test has no real build dependency.
+async function resolveAppShellPath(): Promise<string> {
+  const staticHtml = path.resolve("static/index.html");
+  try {
+    await fs.access(staticHtml);
+    return staticHtml;
+  } catch {
+    return path.resolve("index.html");
+  }
+}
 const PAGE_CSP =
   "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'";
 const TEST_SCRIPT_NONCE = "A".repeat(32);
@@ -240,7 +258,7 @@ describe("ReplayPremiere public page and card", () => {
     const { gate } = await verifiedPublicationFixture(root);
     const bootstrap = createPremierePublicBootstrap({ gate });
     const productionShell = await fs.readFile(
-      path.resolve("static/index.html"),
+      await resolveAppShellPath(),
       "utf8",
     );
     const page = renderReplayPremierePageHtml({

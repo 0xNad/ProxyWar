@@ -41,17 +41,39 @@
  *    a direct `SIGKILL`, not the graceful WS-close path `close()` uses.
  */
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import WebSocket from "ws";
 
+// Env override first (CHROME_PATH/CHROME_BIN — both common conventions,
+// e.g. Puppeteer/Playwright and various CI Chrome setup actions use one or
+// the other), then per-platform install paths, Linux last since this repo
+// only develops on macOS but CI runs on Linux (confirmed live: PR #16's
+// GH Actions shard 1/4 failed with "Chrome DevTools page target never
+// became reachable" because CHROME_CANDIDATES[0] was unconditionally the
+// macOS app-bundle path — it was never filtered for existence, only for
+// being a defined string, so the Linux runner always tried to spawn a
+// binary that was never there). Every candidate is now filtered by
+// `existsSync` — only a path actually present on this machine is ever
+// tried, and no candidate implies a clear "not found" error instead of a
+// silent bad spawn.
 const CHROME_CANDIDATES = [
+  process.env.CHROME_PATH,
+  process.env.CHROME_BIN,
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
   "/Applications/Chromium.app/Contents/MacOS/Chromium",
-  process.env.CHROME_PATH,
-].filter((value): value is string => typeof value === "string");
+  "/usr/bin/google-chrome-stable",
+  "/usr/bin/google-chrome",
+  "/usr/bin/chromium-browser",
+  "/usr/bin/chromium",
+]
+  .filter(
+    (value): value is string => typeof value === "string" && value.length > 0,
+  )
+  .filter((value) => existsSync(value));
 
 // Harness-specific `--user-data-dir` prefix. This is the ONLY signal every
 // kill/sweep function below trusts to prove a process is ours — see the
@@ -95,7 +117,10 @@ async function reserveDebugPort(): Promise<number> {
  * on process name or `--remote-debugging-port` alone. `-ww` disables BSD
  * `ps`'s default command-line truncation, so a long Chrome helper argv
  * still exposes the flag this needs. */
-function findOwnedChromeProcesses(): Array<{ pid: number; userDataDir: string }> {
+function findOwnedChromeProcesses(): Array<{
+  pid: number;
+  userDataDir: string;
+}> {
   let output: string;
   try {
     output = execFileSync("ps", ["-axww", "-o", "pid=,command="], {
@@ -190,7 +215,7 @@ export class CdpBrowser {
     const chromePath = CHROME_CANDIDATES[0];
     if (chromePath === undefined) {
       throw new Error(
-        "no Chrome binary found — set CHROME_PATH or install Google Chrome",
+        "no Chrome binary found — set CHROME_PATH/CHROME_BIN or install Google Chrome/Chromium",
       );
     }
     this.userDataDir = await mkdtemp(USER_DATA_DIR_PREFIX);
@@ -208,7 +233,37 @@ export class CdpBrowser {
       ],
       { stdio: "ignore" },
     );
-    const wsUrl = await this.discoverWebSocketUrl(port);
+    const chromeProcess = this.process;
+    // Fail-fast diagnostic: `spawn()` never throws synchronously for a bad
+    // binary — it emits an async `error` event instead (e.g.
+    // `ENOENT`). Without racing that here, a bad spawn silently does
+    // nothing and `discoverWebSocketUrl` below just times out after its
+    // own generic 15s wait with an unhelpful "page target never became
+    // reachable" message — confirmed live as the exact failure PR #16's
+    // GH Actions shard 1/4 hit. The listener is scoped to this race and
+    // removed once it settles either way, so it never leaks past startup.
+    let onSpawnError: ((error: Error) => void) | null = null;
+    const spawnFailure = new Promise<never>((_, reject) => {
+      onSpawnError = (error: Error): void => {
+        reject(
+          new Error(
+            `Chrome process failed to start (${chromePath}): ${error.message}`,
+          ),
+        );
+      };
+      chromeProcess.once("error", onSpawnError);
+    });
+    let wsUrl: string;
+    try {
+      wsUrl = await Promise.race([
+        this.discoverWebSocketUrl(port),
+        spawnFailure,
+      ]);
+    } finally {
+      if (onSpawnError !== null) {
+        chromeProcess.removeListener("error", onSpawnError);
+      }
+    }
     this.ws = new WebSocket(wsUrl);
     await new Promise<void>((resolve, reject) => {
       this.ws?.once("open", () => resolve());
@@ -407,10 +462,7 @@ export class CdpBrowser {
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
 
-  async waitFor(
-    predicateExpression: string,
-    timeoutMs = 8000,
-  ): Promise<void> {
+  async waitFor(predicateExpression: string, timeoutMs = 8000): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const ok = await this.evaluate<boolean>(predicateExpression);
@@ -444,18 +496,18 @@ export class CdpBrowser {
     const exited =
       this.process === null
         ? Promise.resolve()
-        : new Promise<void>((resolve) => this.process?.once("exit", () => resolve()));
+        : new Promise<void>((resolve) =>
+            this.process?.once("exit", () => resolve()),
+          );
     this.killSync();
     await Promise.race([
       exited,
       new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
     ]);
     if (this.userDataDir !== null) {
-      await rm(this.userDataDir, { recursive: true, force: true }).catch(
-        () => {
-          // best-effort cleanup
-        },
-      );
+      await rm(this.userDataDir, { recursive: true, force: true }).catch(() => {
+        // best-effort cleanup
+      });
     }
     liveInstances.delete(this);
   }

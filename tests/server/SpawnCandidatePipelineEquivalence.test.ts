@@ -166,6 +166,25 @@ function refDeterministicFraction(value: number): number {
   return x - Math.floor(x);
 }
 
+function buildRowLandPrefix(gameMap: GameMap): Int32Array {
+  const width = gameMap.width();
+  const height = gameMap.height();
+  const stride = width + 1;
+  const prefix = new Int32Array(height * stride);
+  for (let y = 0; y < height; y += 1) {
+    let running = 0;
+    const base = y * stride;
+    prefix[base] = 0;
+    for (let x = 0; x < width; x += 1) {
+      if (gameMap.isLand(gameMap.ref(x, y))) {
+        running += 1;
+      }
+      prefix[base + x + 1] = running;
+    }
+  }
+  return prefix;
+}
+
 function refBuildSpawnCandidates(
   gameMap: GameMap,
   options: { maxCandidates?: number; stride?: number } = {},
@@ -183,6 +202,7 @@ function refBuildSpawnCandidates(
     1,
     Math.min(gameMap.width(), gameMap.height()) / 2,
   );
+  const rowLandPrefix = buildRowLandPrefix(gameMap);
   const candidates: SpawnCandidate[] = [];
   gameMap.forEachTile((tile) => {
     if (tile % stride !== 0) {
@@ -216,6 +236,7 @@ function refBuildSpawnCandidates(
         16,
         Math.round(Math.min(gameMap.width(), gameMap.height()) * 0.096),
       ),
+      rowLandPrefix,
     );
     const opportunityScore =
       edgeDistance / maxEdgeDistance + refDeterministicFraction(tile);
@@ -233,7 +254,78 @@ function refBuildSpawnCandidates(
   return refSelectPool(candidates, maxCandidates);
 }
 
+// Provably exact "largest integer r with r*r <= n" — the O(r) row-prefix
+// rewrite below needs this to solve the disk-membership boundary
+// analytically instead of the naive version's per-cell dx*dx+dy*dy<=r*r
+// scan. `Math.floor(Math.sqrt(n))` alone cannot be trusted at the exact
+// boundary (float rounding can be off by one for large n); the correction
+// loop verifies/adjusts with pure integer multiplication, so this is
+// exact, not approximate.
+function exactIntegerSqrtFloor(n: number): number {
+  if (n <= 0) {
+    return 0;
+  }
+  let r = Math.floor(Math.sqrt(n));
+  while (r * r > n) {
+    r -= 1;
+  }
+  while ((r + 1) * (r + 1) <= n) {
+    r += 1;
+  }
+  return r;
+}
+
+// Row-prefix rewrite of `localLandRatioRefNaive` below: for each row of
+// the disk, the naive per-cell dx*dx+dy*dy<=r*r test is solved
+// analytically for that row's exact [xStart,xEnd] land-tile span (dxMax
+// via `exactIntegerSqrtFloor`), then that span's land count is read in
+// O(1) from `rowLandPrefix` (a horizontal running land-count per row,
+// built once per `refBuildSpawnCandidates` call via `buildRowLandPrefix`).
+// land/total are sums of the exact same 0/1 indicator terms as the naive
+// version, just reassociated by row instead of accumulated cell-by-cell —
+// integer sums are exactly reorderable, so this returns the bit-identical
+// land/total (and thus bit-identical IEEE-754 quotient) as
+// `localLandRatioRefNaive`, O(r) per call instead of O(r^2). This was the
+// dominant cost of the isolated 875s (measured) / ~2713s (projected GH)
+// runtime that motivated the 3,000,000ms timeout below — see the
+// `localLandRatioRef===localLandRatioRefNaive` contract test for the
+// regression proof this rewrite is exact, not just fast.
 function localLandRatioRef(
+  gameMap: GameMap,
+  tile: TileRef,
+  radius: number,
+  rowLandPrefix: Int32Array,
+): number {
+  const width = gameMap.width();
+  const height = gameMap.height();
+  const stride = width + 1;
+  const centerX = gameMap.x(tile);
+  const centerY = gameMap.y(tile);
+  const radiusSquared = radius * radius;
+  let land = 0;
+  let total = 0;
+  const yStart = Math.max(0, centerY - radius);
+  const yEnd = Math.min(height - 1, centerY + radius);
+  for (let y = yStart; y <= yEnd; y += 1) {
+    const dy = y - centerY;
+    const dxMax = exactIntegerSqrtFloor(radiusSquared - dy * dy);
+    const xStart = Math.max(0, centerX - dxMax);
+    const xEnd = Math.min(width - 1, centerX + dxMax);
+    if (xEnd < xStart) {
+      continue;
+    }
+    total += xEnd - xStart + 1;
+    const base = y * stride;
+    land += rowLandPrefix[base + xEnd + 1] - rowLandPrefix[base + xStart];
+  }
+  return total === 0 ? 0 : land / total;
+}
+
+// Original O(r^2) per-cell scan, kept verbatim (only renamed) as a
+// private oracle for the contract test below — no longer called from
+// `refBuildSpawnCandidates`, which is the entire point of the rewrite
+// above.
+function localLandRatioRefNaive(
   gameMap: GameMap,
   tile: TileRef,
   radius: number,
@@ -289,6 +381,39 @@ describe("spawn candidate pipeline equivalence", () => {
     halfAndHalf = await loadFixtureMap("half_land_half_ocean");
   });
 
+  // Cheap, synchronous, decoupled from the full columnar-pipeline
+  // equivalence checks below: proves the O(r) `localLandRatioRef` rewrite
+  // is bit-identical to the original O(r^2) `localLandRatioRefNaive` scan
+  // it replaced, across small maps and radii deliberately chosen to force
+  // heavy edge/corner clamping (including radius far larger than the map
+  // extent) — the exact boundary conditions the row-prefix analytic
+  // rewrite (`exactIntegerSqrtFloor`) has to get exactly right, not just
+  // approximately right.
+  it("localLandRatioRef's O(r) row-prefix rewrite matches the naive O(r^2) scan exactly", () => {
+    const mixedTerrain = new Uint8Array(9 * 7);
+    for (let i = 0; i < mixedTerrain.length; i += 1) {
+      mixedTerrain[i] = i % 3 === 0 ? 0 : 1 << 7; // ~2/3 land, 1/3 water
+    }
+    const allLandTerrain = new Uint8Array(4 * 4).fill(1 << 7);
+    const maps = [
+      new GameMapImpl(9, 7, mixedTerrain, mixedTerrain.length),
+      new GameMapImpl(4, 4, allLandTerrain, allLandTerrain.length),
+    ];
+    for (const map of maps) {
+      for (const radius of [1, 2, 5, 16, 100]) {
+        const rowLandPrefix = buildRowLandPrefix(map);
+        map.forEachTile((tile) => {
+          if (!map.isLand(tile)) {
+            return;
+          }
+          expect(localLandRatioRef(map, tile, radius, rowLandPrefix)).toBe(
+            localLandRatioRefNaive(map, tile, radius),
+          );
+        });
+      }
+    }
+  });
+
   // Synchronous, CPU-bound equivalence check over the full production
   // `world` map at production 12P settings (maxCandidates: 1000). Isolated
   // local measurement under the repo's required `npm run test:coverage`
@@ -320,9 +445,19 @@ describe("spawn candidate pipeline equivalence", () => {
     },
   );
 
+  // Previously assumed "far below" its 300_000ms budget and left
+  // untouched when the sibling 12P case's timeout was set (86e707f19) —
+  // GH Actions actually measured this case at 623639ms in that same PR's
+  // CI run (job 92113985755, PR #16), a real failure against the old
+  // budget. Raised to 900_000ms (real measurement + ~44% headroom) rather
+  // than left at the disproven "never observed" assumption. Not
+  // reprofiled against the row-prefix optimization above yet — this
+  // budget stays until a fresh isolated `npm run test:coverage`
+  // measurement justifies changing it again, per this file's own
+  // evidence-based timeout discipline.
   it(
     "matches on world when scouts dominate a tiny pool",
-    { timeout: 300_000 },
+    { timeout: 900_000 },
     () => {
       const expected = refBuildSpawnCandidates(world, {
         maxCandidates: 24,

@@ -2,15 +2,20 @@
  * Stage 8 item 2's Security suite: "private routes unreachable
  * anonymously; mutating endpoints blocked; operator-billed routes
  * blocked; public JSON audited." Boots a REAL demo server (same binary
- * production runs) against a minimal fixture root on the external volume,
- * in `PROXYWAR_LEAGUE_WRAPPER_ONLY=true` mode — the actual security
- * posture the showcase deployment runs under (confirmed live against
+ * production runs) against a minimal fixture root under a portable
+ * `os.tmpdir()` scratch directory (same `fs.realpath(os.tmpdir())` +
+ * `mkdtemp()` pattern used throughout this repo's other fixture-scratch
+ * tests — previously hardcoded to a fixed external-volume path that
+ * doesn't exist on Linux CI, EACCES'd there — in
+ * `PROXYWAR_LEAGUE_WRAPPER_ONLY=true` mode — the actual security posture
+ * the showcase deployment runs under (confirmed live against
  * `beta.proxywar.xyz` during Stage 7: `/tester-dashboard` redirects
  * anonymously). Every assertion here is a real HTTP round-trip against a
  * live process, not a unit test of the gating function in isolation.
  */
-import { spawn, execFile, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
@@ -18,8 +23,6 @@ import { ORDINARY_EPISODE } from "../../../src/server/fixtures/PublicProductFixt
 
 const execFileAsync = promisify(execFile);
 const REPO_ROOT = path.resolve(__dirname, "../../..");
-const EXTERNAL_SCRATCH_ROOT =
-  "/Volumes/ProxyWar Workspace/ProxyWar/e2e-security-scratch";
 const PORT = 18787;
 const ORIGIN = `http://127.0.0.1:${PORT}`;
 
@@ -41,9 +44,8 @@ async function waitForOrigin(timeoutMs: number): Promise<void> {
 }
 
 beforeAll(async () => {
-  await fs.mkdir(EXTERNAL_SCRATCH_ROOT, { recursive: true });
   fixtureRoot = await fs.mkdtemp(
-    path.join(EXTERNAL_SCRATCH_ROOT, "security-"),
+    path.join(await fs.realpath(os.tmpdir()), "security-"),
   );
   const identityDir = path.join(fixtureRoot, "identity");
   const artifactsRoot = path.join(fixtureRoot, "artifacts");
@@ -91,38 +93,31 @@ beforeAll(async () => {
     "<html>should never be public</html>",
   );
 
-  serverProcess = spawn(
-    "npx",
-    ["tsx", "src/scripts/ai-agent-demo-server.ts"],
-    {
-      cwd: REPO_ROOT,
-      env: {
-        ...process.env,
-        PROXYWAR_LEAGUE_WRAPPER_ONLY: "true",
-        PROXYWAR_ARTIFACTS_ROOT: artifactsRoot,
-        PROXYWAR_IDENTITY_REGISTRY_DIR: identityDir,
-        PROXYWAR_NATIONS_DIR: path.join(fixtureRoot, "nations"),
-        PROXYWAR_FEATURED_MATCH_STATE_ROOT: path.join(
-          fixtureRoot,
-          "featured-match-state",
-        ),
-        PROXYWAR_REPLAY_PREMIERE_STATE_ROOT: path.join(
-          fixtureRoot,
-          "premiere-state",
-        ),
-        PROXYWAR_PLATFORM_STATE_ROOT: path.join(
-          fixtureRoot,
-          "platform-state",
-        ),
-        AI_LEAGUE_RENDERER_PORT: "18700",
-        GAME_ENV: "dev",
-        PORT: String(PORT),
-        AI_LEAGUE_DEMO_PORT: String(PORT),
-      },
-      stdio: "ignore",
-      detached: true,
+  serverProcess = spawn("npx", ["tsx", "src/scripts/ai-agent-demo-server.ts"], {
+    cwd: REPO_ROOT,
+    env: {
+      ...process.env,
+      PROXYWAR_LEAGUE_WRAPPER_ONLY: "true",
+      PROXYWAR_ARTIFACTS_ROOT: artifactsRoot,
+      PROXYWAR_IDENTITY_REGISTRY_DIR: identityDir,
+      PROXYWAR_NATIONS_DIR: path.join(fixtureRoot, "nations"),
+      PROXYWAR_FEATURED_MATCH_STATE_ROOT: path.join(
+        fixtureRoot,
+        "featured-match-state",
+      ),
+      PROXYWAR_REPLAY_PREMIERE_STATE_ROOT: path.join(
+        fixtureRoot,
+        "premiere-state",
+      ),
+      PROXYWAR_PLATFORM_STATE_ROOT: path.join(fixtureRoot, "platform-state"),
+      AI_LEAGUE_RENDERER_PORT: "18700",
+      GAME_ENV: "dev",
+      PORT: String(PORT),
+      AI_LEAGUE_DEMO_PORT: String(PORT),
     },
-  );
+    stdio: "ignore",
+    detached: true,
+  });
   await waitForOrigin(45_000);
 }, 60_000);
 
@@ -154,9 +149,7 @@ describe("private/tester routes are unreachable anonymously", () => {
     });
     // Either an outright block (404/401) or a redirect away — never a 200.
     expect(response.status).not.toBe(200);
-    expect([301, 302, 303, 307, 308, 401, 403, 404]).toContain(
-      response.status,
-    );
+    expect([301, 302, 303, 307, 308, 401, 403, 404]).toContain(response.status);
   });
 });
 
@@ -170,15 +163,18 @@ describe("mutating and operator-billed endpoints are blocked", () => {
     "/api/agent-cards/import",
     "/api/agent-cards/import-and-run",
     "/api/external-agents/check",
-  ])("POST %s never starts a match or writes state anonymously", async (route) => {
-    const response = await fetch(`${ORIGIN}${route}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "{}",
-    });
-    // In league-wrapper-only mode every one of these is unreachable outright.
-    expect(response.status).toBe(404);
-  });
+  ])(
+    "POST %s never starts a match or writes state anonymously",
+    async (route) => {
+      const response = await fetch(`${ORIGIN}${route}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      // In league-wrapper-only mode every one of these is unreachable outright.
+      expect(response.status).toBe(404);
+    },
+  );
 
   test("DELETE /api/nations/:id never deletes state anonymously", async () => {
     const response = await fetch(`${ORIGIN}/api/nations/anything`, {
@@ -257,9 +253,7 @@ describe("public JSON (read-model.json) never carries a private field", () => {
     const body = await response.json();
     const keyNames = new Set<string>();
     collectKeyNames(body, keyNames);
-    const offenders = [...keyNames].filter((key) =>
-      forbiddenKeyNames.has(key),
-    );
+    const offenders = [...keyNames].filter((key) => forbiddenKeyNames.has(key));
     expect(offenders).toEqual([]);
   });
 
@@ -269,9 +263,7 @@ describe("public JSON (read-model.json) never carries a private field", () => {
     const body = await response.json();
     const keyNames = new Set<string>();
     collectKeyNames(body, keyNames);
-    const offenders = [...keyNames].filter((key) =>
-      forbiddenKeyNames.has(key),
-    );
+    const offenders = [...keyNames].filter((key) => forbiddenKeyNames.has(key));
     expect(offenders).toEqual([]);
   });
 });
@@ -317,7 +309,9 @@ describe("GET /api/matches/:episodeId (league-episode match page) never carries 
   });
 
   test("an unknown episode id 404s rather than leaking a stack trace or path echo", async () => {
-    const response = await fetch(`${ORIGIN}/api/matches/ereq_totally-unknown-id`);
+    const response = await fetch(
+      `${ORIGIN}/api/matches/ereq_totally-unknown-id`,
+    );
     expect(response.status).toBe(404);
     const body = await response.text();
     expect(body).not.toContain("Cannot GET");
