@@ -1152,10 +1152,10 @@ had to change together, and each is a trap on its own:
   only ever "worked" because the redirect rule fired first. Deleting the rule
   without fixing this would have served 5xx from the apex. There IS an API path
   here, contrary to what this section used to imply:
-  `cloudflared tunnel route dns --overwrite-dns open-frontier-beta proxywar.xyz`
+  `cloudflared tunnel route dns --overwrite-dns proxywar-beta proxywar.xyz`
   replaces it with a tunnel CNAME using the same `cert.pem`.
 - **`cloudflared` had to reload.** The apex ingress line had been staged in
-  `~/.cloudflared/open-frontier-beta.yml` for days, but the running process
+  `~/.cloudflared/proxywar-beta.yml` for days, but the running process
   predated it, so the apex hit the config's `http_status:404` catch-all. `kill
   -HUP <pid>` reloads ingress without dropping the tunnel — no restart, no
   downtime for `beta`/`bet`/`app`.
