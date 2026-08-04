@@ -41,7 +41,6 @@ const execFileAsync = promisify(execFile);
 const require = createRequire(import.meta.url);
 const REPO_ROOT = path.resolve(__dirname, "../../..");
 
-
 export interface FixtureServerHandle {
   origin: string;
   fixtureRoot: string;
@@ -79,6 +78,16 @@ async function stopServer(child: ChildProcess | null): Promise<void> {
   if (child.exitCode === null) child.kill("SIGKILL");
 }
 
+// `resources/season/` (tracked, real, committed operational data — see
+// `SeasonRegistry.ts`'s doc) has no per-fixture override here without
+// `seasonRegistryDir`/`PROXYWAR_SEASON_REGISTRY_DIR` below: every OTHER
+// stateful subsystem (identity/artifacts/nations/featured-match/premiere/
+// platform) already gets one, but Season shipped after this file did and
+// was never wired in — so a fixture-booted server silently fell through
+// to the real tracked `resources/season/seasons.json`, rendering a
+// `/watch` card for whatever real match is currently featured in
+// production with none of that match's real artifacts present in the
+// isolated fixture root, producing a live 404 on the card's own link.
 function fixtureEnv(fixtureRoot: string): Record<string, string> {
   return {
     identityDir: path.join(fixtureRoot, "identity"),
@@ -87,6 +96,7 @@ function fixtureEnv(fixtureRoot: string): Record<string, string> {
     featuredMatchStateRoot: path.join(fixtureRoot, "featured-match-state"),
     premiereStateRoot: path.join(fixtureRoot, "premiere-state"),
     platformStateRoot: path.join(fixtureRoot, "platform-state"),
+    seasonRegistryDir: path.join(fixtureRoot, "season"),
   };
 }
 
@@ -130,6 +140,7 @@ export async function startFixtureServer(
         env: {
           ...process.env,
           PROXYWAR_IDENTITY_REGISTRY_DIR: paths.identityDir,
+          PROXYWAR_SEASON_REGISTRY_DIR: paths.seasonRegistryDir,
         },
       },
     );
@@ -154,6 +165,7 @@ export async function startFixtureServer(
           PROXYWAR_FEATURED_MATCH_STATE_ROOT: paths.featuredMatchStateRoot,
           PROXYWAR_REPLAY_PREMIERE_STATE_ROOT: paths.premiereStateRoot,
           PROXYWAR_PLATFORM_STATE_ROOT: paths.platformStateRoot,
+          PROXYWAR_SEASON_REGISTRY_DIR: paths.seasonRegistryDir,
           AI_LEAGUE_RENDERER_PORT: String(port + 10_000),
           GAME_ENV: "dev",
           PORT: String(port),
