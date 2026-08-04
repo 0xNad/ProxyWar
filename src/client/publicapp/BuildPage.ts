@@ -82,6 +82,10 @@ export class BuildPage extends LitElement {
   @state() private submitError: string | null = null;
   /** Field-level, shown inline under the GitHub-username input — distinct from `submitError`'s generic banner (2026-08-01 P1 fix). Set by client-side validation on input/submit, or by the server's `{field: "claimedGithub", reason}` 400 payload if it somehow gets past that. */
   @state() private githubUsernameError: string | null = null;
+  /** Field-level, shown inline under the Builder Links textarea — same pattern as `githubUsernameError` above, for the server's `{field: "builderLinks", reason}` 400 payload. The client deliberately does not pre-validate URL format for this field (see `submitRegistration`'s "Defense in depth" comment) — duplicating `BuildRegistrationSubmission.ts`'s `z.string().url()` check here would risk drifting from the server's real rule. Cleared on input and at the start of every submit attempt. */
+  @state() private builderLinksError: string | null = null;
+  /** Field-level, shown inline under the Source Repository input — same pattern as `builderLinksError` above, for the server's `{field: "sourceRepositoryRef", reason}` 400 payload. */
+  @state() private sourceRepositoryRefError: string | null = null;
   @state() private submissionResult: {
     profileFileJson: string;
     githubIssueUrl: string;
@@ -204,6 +208,8 @@ export class BuildPage extends LitElement {
   private async submitRegistration(): Promise<void> {
     this.submitting = true;
     this.submitError = null;
+    this.builderLinksError = null;
+    this.sourceRepositoryRefError = null;
     // Client-side gate: catches the exact failure the server would 400 on
     // (2026-08-01 P1 fix) WITHOUT a network round-trip, and shows it inline
     // under the field rather than as a generic banner.
@@ -260,13 +266,23 @@ export class BuildPage extends LitElement {
         body.profileFileJson === undefined ||
         body.githubIssueUrl === undefined
       ) {
-        // Defense in depth: if the server still rejects `claimedGithub`
-        // despite the client-side gate above (e.g. a future server-only
-        // rule), show it inline on that field instead of falling through
-        // to the generic banner.
+        // Defense in depth: if the server rejects a field the client either
+        // didn't pre-validate (`builderLinks`/`sourceRepositoryRef`, see the
+        // doc comment above `validateClaimedGithub`) or still somehow let
+        // through (`claimedGithub`), show it inline on that field instead
+        // of falling through to the generic banner.
         if (body.field === "claimedGithub") {
           this.githubUsernameError = translateText(
             "build_page.step3.github_error_format",
+          );
+        } else if (body.field === "builderLinks") {
+          this.builderLinksError =
+            body.reason === "too_long"
+              ? translateText("build_page.step3.links_error_too_many")
+              : translateText("build_page.step3.links_error_format");
+        } else if (body.field === "sourceRepositoryRef") {
+          this.sourceRepositoryRefError = translateText(
+            "build_page.step3.repo_error_format",
           );
         } else {
           this.submitError = translateText("build_page.step3.submit_error");
@@ -664,25 +680,61 @@ export class BuildPage extends LitElement {
           <textarea
             rows="2"
             .value=${this.builderLinksText}
-            @input=${(event: Event) =>
-              (this.builderLinksText = (
+            aria-invalid=${this.builderLinksError !== null ? "true" : "false"}
+            aria-describedby=${this.builderLinksError !== null
+              ? "build-step3-links-error"
+              : nothing}
+            @input=${(event: Event) => {
+              this.builderLinksText = (
                 event.target as HTMLTextAreaElement
-              ).value)}
+              ).value;
+              this.builderLinksError = null;
+            }}
             placeholder="https://..."
-            class="mt-1 w-full resize-none rounded-md border border-line bg-surface-2 px-3 py-2 text-sm text-ink outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            class="mt-1 w-full resize-none rounded-md border ${this
+              .builderLinksError !== null
+              ? "border-danger"
+              : "border-line"} bg-surface-2 px-3 py-2 text-sm text-ink outline-none focus-visible:ring-2 focus-visible:ring-accent"
           ></textarea>
+          ${this.builderLinksError !== null
+            ? html`<span
+                id="build-step3-links-error"
+                role="alert"
+                class="mt-1 block text-xs font-normal normal-case tracking-normal text-danger"
+                >${this.builderLinksError}</span
+              >`
+            : nothing}
         </label>
         <label class="block text-xs font-bold uppercase tracking-wide text-ink-muted">
           ${translateText("build_page.step3.repo_label")}
           <input
             .value=${this.sourceRepositoryRef}
-            @input=${(event: Event) =>
-              (this.sourceRepositoryRef = (
+            aria-invalid=${this.sourceRepositoryRefError !== null
+              ? "true"
+              : "false"}
+            aria-describedby=${this.sourceRepositoryRefError !== null
+              ? "build-step3-repo-error"
+              : nothing}
+            @input=${(event: Event) => {
+              this.sourceRepositoryRef = (
                 event.target as HTMLInputElement
-              ).value)}
+              ).value;
+              this.sourceRepositoryRefError = null;
+            }}
             placeholder="https://github.com/..."
-            class="mt-1 w-full rounded-md border border-line bg-surface-2 px-3 py-2 text-sm text-ink outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            class="mt-1 w-full rounded-md border ${this
+              .sourceRepositoryRefError !== null
+              ? "border-danger"
+              : "border-line"} bg-surface-2 px-3 py-2 text-sm text-ink outline-none focus-visible:ring-2 focus-visible:ring-accent"
           />
+          ${this.sourceRepositoryRefError !== null
+            ? html`<span
+                id="build-step3-repo-error"
+                role="alert"
+                class="mt-1 block text-xs font-normal normal-case tracking-normal text-danger"
+                >${this.sourceRepositoryRefError}</span
+              >`
+            : nothing}
         </label>
         ${this.submitError !== null
           ? html`<div
