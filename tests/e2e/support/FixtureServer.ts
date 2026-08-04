@@ -1,9 +1,21 @@
 /**
  * Boots a real `ai-agent-demo-server.ts` process against the Stage 8
- * public-product fixture data, on the external volume (never `os.tmpdir()`
- * — internal disk stays under the 25 GiB floor for the lifetime of this
- * overhaul). Shared by the E2E suite and (in spirit — that suite inlines
- * its own minimal variant for speed) the security suite.
+ * public-product fixture data, under a fresh `os.tmpdir()`-rooted
+ * `mkdtemp()` directory per boot (same portable pattern every other
+ * fixture-scratch test in this repo already uses, e.g.
+ * `PremiereWageringBundle.test.ts`). Previously hardcoded to a fixed
+ * external-volume path (`/Volumes/ProxyWar Workspace/...`) to keep a
+ * since-retired local 25 GiB internal-disk floor policy satisfied during
+ * one prior development session — that path doesn't exist on Linux CI
+ * runners (no `/Volumes` mount point at all) or on any other operator's
+ * machine, so every test that boots through this file always failed with
+ * `EACCES: permission denied, mkdir '/Volumes'` there. The CI job simply
+ * never ran long enough, before this repo's Test job was sharded, to
+ * surface that as a visible failure instead of a timeout cancellation.
+ * `os.tmpdir()` scratch dirs are tiny and always cleaned up via `stop()`
+ * below, so the original disk-floor concern doesn't apply here anyway.
+ * Shared by the E2E suite and (in spirit — that suite inlines its own
+ * minimal variant for speed) the security suite.
  *
  * Fixture DATA GENERATION runs in a SEPARATE spawned process
  * (`proxywar-fixture-league-data.ts`), never in-process here — confirmed
@@ -21,14 +33,14 @@
 import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { createRequire } from "node:module";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const require = createRequire(import.meta.url);
 const REPO_ROOT = path.resolve(__dirname, "../../..");
-export const EXTERNAL_SCRATCH_ROOT =
-  "/Volumes/ProxyWar Workspace/ProxyWar/e2e-fixture-scratch";
+
 
 export interface FixtureServerHandle {
   origin: string;
@@ -82,9 +94,8 @@ function fixtureEnv(fixtureRoot: string): Record<string, string> {
 export async function startFixtureServer(
   port: number,
 ): Promise<FixtureServerHandle> {
-  await fs.mkdir(EXTERNAL_SCRATCH_ROOT, { recursive: true });
   const fixtureRoot = await fs.mkdtemp(
-    path.join(EXTERNAL_SCRATCH_ROOT, `e2e-${port}-`),
+    path.join(await fs.realpath(os.tmpdir()), `e2e-${port}-`),
   );
   let serverProcess: ChildProcess | null = null;
   try {
@@ -260,9 +271,8 @@ export async function startFixtureServerWithLivePremiere(
   port: number,
 ): Promise<FixtureServerHandle> {
   await assertCleanCheckoutForLivePremiereGate();
-  await fs.mkdir(EXTERNAL_SCRATCH_ROOT, { recursive: true });
   const fixtureRoot = await fs.mkdtemp(
-    path.join(EXTERNAL_SCRATCH_ROOT, `e2e-live-${port}-`),
+    path.join(await fs.realpath(os.tmpdir()), `e2e-live-${port}-`),
   );
   const origin = `http://127.0.0.1:${port}`;
   const pidFile = `/tmp/pw-fixture-origin-${port}.pid`;

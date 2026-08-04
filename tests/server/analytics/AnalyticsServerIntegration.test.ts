@@ -16,6 +16,7 @@ import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { createRequire } from "node:module";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
@@ -24,8 +25,11 @@ import { createProxyWarBetaSessionToken } from "../../../src/server/agents/Proxy
 const execFileAsync = promisify(execFile);
 const REPO_ROOT = path.resolve(__dirname, "../../..");
 const require = createRequire(import.meta.url);
-const EXTERNAL_SCRATCH_ROOT =
-  "/Volumes/ProxyWar Workspace/ProxyWar/analytics-integration-scratch";
+// Portable os.tmpdir()-rooted scratch dir — same pattern every other
+// fixture-scratch test in this repo already uses (e.g.
+// `PremiereWageringBundle.test.ts`). Previously hardcoded to a fixed
+// external-volume path that doesn't exist on Linux CI runners; see
+// `tests/e2e/support/FixtureServer.ts`'s doc comment for the full history.
 const BETA_CODE = "analytics-report-test-invite-code";
 const BETA_COOKIE_NAME = "proxywar_beta";
 
@@ -99,9 +103,8 @@ interface FixtureDirs {
 }
 
 async function prepareFixture(label: string): Promise<FixtureDirs> {
-  await fs.mkdir(EXTERNAL_SCRATCH_ROOT, { recursive: true });
   const fixtureRoot = await fs.mkdtemp(
-    path.join(EXTERNAL_SCRATCH_ROOT, `${label}-`),
+    path.join(await fs.realpath(os.tmpdir()), `${label}-`),
   );
   const identityDir = path.join(fixtureRoot, "identity");
   const artifactsRoot = path.join(fixtureRoot, "artifacts");
