@@ -89,6 +89,7 @@ export async function loadCoworldStaticReplay(
   const sourceUrl = coworldStaticReplayUrl(options.search);
   const response = await (options.fetchImpl ?? fetch)(sourceUrl, {
     cache: "no-store",
+    credentials: "omit",
     signal: options.signal,
   });
   if (!response.ok) {

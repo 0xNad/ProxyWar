@@ -81,7 +81,7 @@ describe("CoworldStaticReplay", () => {
 
     expect(fetchImpl).toHaveBeenCalledWith(
       "https://replays.example/match.replay",
-      expect.objectContaining({ cache: "no-store" }),
+      expect.objectContaining({ cache: "no-store", credentials: "omit" }),
     );
     expect(replay.gameRecord).toEqual(ratedCoworldGameRecordValue());
   });
