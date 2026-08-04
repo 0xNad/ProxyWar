@@ -32,12 +32,26 @@ jobs:
           path: out/index.html
           retention-days: 1
   test:
-    name: 🔬 Test
+    name: 🔬 Test (${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
-    # 45 min: the suite under coverage ran 25.1 min on 2026-07-10 and tripped
-    # the old 30-min cap at 30.2 min on 2026-07-11 after the release merge
-    # added test files. Raising the cap is the agreed remedy (known-problems),
-    # not per-test timeout surgery.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    # Sharded 2026-08-04: the single-job coverage run has cancelled at the
+    # 45-min cap on EVERY main/PR run since 2026-08-02T00:14Z (verified via
+    # GH Actions run history — independent of any one PR's content; a prior
+    # cap raise from 30 to 45 min on 2026-07-11 already exhausted that same
+    # remedy). Local reproduction of the exact `npm run test:coverage`
+    # command showed steady, non-hanging progress, but individual CPU-bound
+    # simulation tests (AgentLeagueMatch, SimRollout*, ReplayPremiere
+    # long-runtime/production-cadence) take 15-75s each under coverage
+    # instrumentation, projecting a full single-job run to ~80-160 min. A
+    # deterministic 4-way Vitest --shard split (verified: the union of all
+    # four shards' `vitest list --shard=N/4` file sets exactly equals the
+    # unsharded `vitest list` file set — 113+112+112+112=449 files, zero
+    # duplicates/omissions) restores bounded per-job completion while every
+    # test file still runs under coverage.
     timeout-minutes: 45
     steps:
       - name: Checkout repository
@@ -49,7 +63,7 @@ jobs:
         with:
           node-version: 24
       - run: npm ci
-      - run: npm run test:coverage
+      - run: npm run test:coverage -- --shard=${{ matrix.shard }}/4
 
   eslint:
     name: 🔍 ESLint
