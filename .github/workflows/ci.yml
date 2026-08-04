@@ -31,9 +31,40 @@ jobs:
         with:
           path: out/index.html
           retention-days: 1
+      # PR #16's shard 1/4 and 4/4 both failed on real GH runners once
+      # every other blocker (rename-guard, /Volumes scratch roots, Chrome
+      # discovery, the Spawn-candidate timeout) was fixed: static/index.html
+      # never exists on a Test job runner, because Test only ever runs
+      # `npm ci`, never a build (confirmed live -- PublicSurfaceSecurity's
+      # app-shell routes returned 503, PublicProductJourneys.e2e.test.ts
+      # served a "not built for this server" placeholder instead of the
+      # real shell). The Build job above already runs `npm run build-prod`
+      # for its own out/index.html artifact, so it produces the exact same
+      # static/ output the Test jobs need -- share it instead of building
+      # twice. `if-no-files-found: error` fails this step loudly if the
+      # build ever stops producing one of these paths, rather than
+      # silently uploading a partial artifact the Test job would then
+      # fail against with a confusing downstream error.
+      - name: Upload static app shell
+        uses: actions/upload-artifact@v7
+        with:
+          name: static-app-shell
+          path: |
+            static/index.html
+            static/public.html
+            static/asset-manifest.json
+            static/assets/
+            static/robots.txt
+            static/version.txt
+            static/ads.txt
+            static/LICENSE
+          retention-days: 1
+          if-no-files-found: error
+
   test:
     name: 🔬 Test (${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
+    needs: build
     strategy:
       fail-fast: false
       matrix:
@@ -55,6 +86,11 @@ jobs:
     # skipped. Verified: `vitest list` with both files excluded, sharded 4
     # ways, unions to exactly 447 files with zero duplicates/omissions;
     # combined with the 2 dedicated files that's the full unsharded 449.
+    #
+    # `needs: build` + the `static-app-shell` download below: this job's
+    # own app-shell-dependent files (PublicSurfaceSecurity.test.ts,
+    # PublicProductJourneys.e2e.test.ts, etc.) need static/index.html —
+    # see the Build job's matching comment for the live-failure evidence.
     timeout-minutes: 45
     steps:
       - name: Checkout repository
@@ -66,6 +102,11 @@ jobs:
         with:
           node-version: 24
       - run: npm ci
+      - name: Download static app shell
+        uses: actions/download-artifact@v7
+        with:
+          name: static-app-shell
+          path: static
       - run: npm run test:coverage -- --shard=${{ matrix.shard }}/4 --exclude=tests/server/AgentLeagueMatch.test.ts --exclude=tests/server/SpawnCandidatePipelineEquivalence.test.ts
 
   test-heavy:
