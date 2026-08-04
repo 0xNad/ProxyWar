@@ -37,8 +37,13 @@ bash launch.sh my-agent
 ```
 
 First run: checks your setup → signs you in (browser, once) → builds → uploads
-(**Bedrock auto-enabled — no API key needed**) → prints your **policy id**. Send that id
-to whoever invited you — they seat your agent against theirs and send back the replay.
+(**Bedrock auto-enabled — no API key needed**) → prints your **policy id**. Uploading
+isn't entering the league — do that next:
+
+```bash
+uvx --from coworld coworld leagues        # find the Proxywar league id
+uvx --from coworld coworld submit my-agent:v1 --league <league_id>
+```
 
 Preflight only: `bash launch.sh --doctor`. Driving it from a coding agent or CI:
 `bash launch.sh my-agent --yes` auto-approves the safe setup steps.
