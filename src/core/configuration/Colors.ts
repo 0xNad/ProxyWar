@@ -5,6 +5,42 @@ import lchPlugin from "colord/plugins/lch";
 extend([lchPlugin]);
 extend([labPlugin]);
 
+/**
+ * Root cause of the "player colours look transparent/washed-out" bug
+ * (measured live example: rgb(251,235,245), the "Rose Powder" entry a few
+ * lines down): alpha was never involved. The palette GENERATOR itself can
+ * emit near-white pastels — very high HSL lightness, sometimes paired with
+ * only moderate saturation — that lose contrast against both the map's own
+ * light terrain (sandy shore, pale plains/highland, near-white mountain
+ * snowcaps — see PastelTheme.terrainColor) and the app's near-white/light
+ * UI chrome (chips, standings cards, etc. — e.g. #ffffff / #f8fafc /
+ * #eff6ff surfaces).
+ *
+ * These bounds are the single output-range clamp for every colour this
+ * module hands to `ColorAllocator`/`territoryColor()`: no caller can ever
+ * receive an unclamped colour from `humanColors`, `fallbackColors`, or
+ * `generateTeamColors`. Verified against the game's actual terrain and UI
+ * backgrounds in Colors.contrastFloor.test.ts.
+ *
+ * Deliberately NOT applied to `botColors`/`nationColors`: those are
+ * intentionally muted/earthy palettes (max lightness 67 / 80, mean
+ * saturation ~17% / ~39%) that were never implicated by this defect —
+ * forcing them through the same floor would repaint an unrelated,
+ * already-working, by-design "muted bot/nation" look.
+ */
+export const MIN_VISIBLE_SATURATION = 35;
+export const MAX_VISIBLE_LIGHTNESS = 72;
+
+export function clampPlayerColorVisibility(c: Colord): Colord {
+  const { h, s, l, a } = c.toHsl();
+  return colord({
+    h,
+    s: Math.max(s, MIN_VISIBLE_SATURATION),
+    l: Math.min(l, MAX_VISIBLE_LIGHTNESS),
+    a,
+  });
+}
+
 export const red = colord("rgb(235,51,51)");
 export const blue = colord("rgb(41,98,255)");
 export const teal = colord("rgb(43,212,189)");
@@ -29,7 +65,7 @@ function generateTeamColors(baseColor: Colord): Colord[] {
   const goldenAngle = 137.508;
 
   return Array.from({ length: colorCount }, (_, index) => {
-    if (index === 0) return baseColor;
+    if (index === 0) return clampPlayerColorVisibility(baseColor);
 
     // Spread hues evenly across ±6° band using golden angle within that range
     const hueShift = ((index * goldenAngle) % 12) - 6;
@@ -44,7 +80,7 @@ function generateTeamColors(baseColor: Colord): Colord[] {
     const lightOffset = 18 * Math.sin(index * goldenAngle * (Math.PI / 180));
     const l = Math.max(25, Math.min(80, lch.l + lightOffset));
 
-    return colord({ l, c, h });
+    return clampPlayerColorVisibility(colord({ l, c, h }));
   });
 }
 
@@ -165,7 +201,7 @@ export const humanColors: Colord[] = [
   colord("rgb(249,115,22)"), // Tangerine
   colord("rgb(234,88,12)"), // Burnt Orange
   colord("rgb(133,77,14)"), // Chocolate
-];
+].map(clampPlayerColorVisibility);
 
 export const botColors: Colord[] = [
   colord("rgb(150,160,140)"), // Muted Dark Olive Green
@@ -526,4 +562,4 @@ export const fallbackColors: Colord[] = [
   colord("rgb(255,235,200)"), // Cream Peach
   colord("rgb(255,245,210)"), // Soft Banana
   colord("rgb(255,240,220)"), // Pastel Sand
-];
+].map(clampPlayerColorVisibility);

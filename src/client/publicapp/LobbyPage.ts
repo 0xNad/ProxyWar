@@ -7,6 +7,7 @@ import {
   appShellFooter,
   appShellHeader,
   APP_SHELL_ROOT_CLASSES,
+  waitForTranslationsReady,
 } from "./AppShellChrome";
 import {
   fetchReadModel,
@@ -89,6 +90,8 @@ export class LobbyPage extends LitElement {
   @state() private nowMs = Date.now();
   private tickHandle: number | null = null;
   private trackedImpressions = new Set<string>();
+  /** P2 defense-in-depth (pass-3, 2026-08-02): `<details>` only hides its content via `display:none` — the collapsed spoiler links stayed in the DOM/HTML source, readable by devtools inspection without ever clicking "Reveal result". Populated by `renderBroadcastCard`'s own `@toggle` handler; a matchId's presence here is what actually gates whether its View-match/Watch-replay anchors render at all (see that method's own doc). */
+  @state() private revealedMatchIds = new Set<string>();
 
   createRenderRoot() {
     this.classList.add(...APP_SHELL_ROOT_CLASSES);
@@ -98,6 +101,14 @@ export class LobbyPage extends LitElement {
   connectedCallback(): void {
     super.connectedCallback();
     void this.load();
+    // P0 fix (found live 2026-08-02, under 3G throttle): the nav
+    // (`app_shell.nav_*`) rendered raw translation keys for as long as
+    // the connection took. `load()`'s own read-model fetch gives a "free"
+    // re-render, but that resolves independently of <lang-selector>'s own
+    // translations load — a fast read-model response racing ahead of a
+    // slow translations load still left the nav flashing keys. See
+    // `waitForTranslationsReady`'s own doc.
+    void waitForTranslationsReady().then(() => this.requestUpdate());
     this.tickHandle = window.setInterval(() => {
       this.nowMs = Date.now();
       const event = this.promotableEvent;
@@ -914,6 +925,16 @@ export class LobbyPage extends LitElement {
    * itself stays an honest, ungated archive page for DIRECT navigation
    * (a bookmarked/shared link, search result) — this only changes what
    * this ONE card exposes before a visitor opts in.
+   *
+   * P2 defense-in-depth (pass-3, 2026-08-02): `<details>` alone only
+   * hides its collapsed content via the browser's `display: none` UA
+   * rule — the anchors (and the matchId/watchHref they carry) stayed
+   * fully present in the DOM/HTML source pre-reveal, readable via
+   * devtools without ever clicking "Reveal result". `@toggle` records
+   * this card's matchId in `revealedMatchIds` the first time it opens;
+   * both anchors below now render `nothing` at all until that matchId is
+   * in the set — no anchor element exists pre-reveal, not just a hidden
+   * one.
    */
   private renderBroadcastCard(
     match: PublicMatch,
@@ -967,7 +988,15 @@ export class LobbyPage extends LitElement {
               </p>`
             : nothing;
         })()}
-        <details class="mt-2">
+        <details
+          class="mt-2"
+          @toggle=${(event: Event) => {
+            if ((event.target as HTMLDetailsElement).open) {
+              this.revealedMatchIds.add(match.matchId);
+              this.requestUpdate();
+            }
+          }}
+        >
           <summary
             class="cursor-pointer text-sm font-bold text-accent outline-none focus-visible:ring-2 focus-visible:ring-accent"
           >
@@ -978,17 +1007,21 @@ export class LobbyPage extends LitElement {
               ? translateText("lobby.no_winner")
               : translateText("lobby.winner_announcement", { winner: winnerName })}
           </p>
-          <a
-            href="/match/${encodeURIComponent(match.matchId)}"
-            class="mt-2 inline-block text-sm font-bold text-accent no-underline outline-none hover:text-accent-strong focus-visible:ring-2 focus-visible:ring-accent"
-            >${translateText("lobby.view_match")}</a
-          >
-          ${watchHref !== null
-            ? html`<a
-                href=${watchHref}
-                class="ml-3 mt-2 inline-block text-sm text-ink-muted no-underline outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
-                >${translateText("lobby.watch_replay")}</a
-              >`
+          ${this.revealedMatchIds.has(match.matchId)
+            ? html`
+                <a
+                  href="/match/${encodeURIComponent(match.matchId)}"
+                  class="mt-2 inline-block text-sm font-bold text-accent no-underline outline-none hover:text-accent-strong focus-visible:ring-2 focus-visible:ring-accent"
+                  >${translateText("lobby.view_match")}</a
+                >
+                ${watchHref !== null
+                  ? html`<a
+                      href=${watchHref}
+                      class="ml-3 mt-2 inline-block text-sm text-ink-muted no-underline outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
+                      >${translateText("lobby.watch_replay")}</a
+                    >`
+                  : nothing}
+              `
             : nothing}
         </details>
       </div>

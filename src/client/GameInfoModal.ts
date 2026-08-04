@@ -1,8 +1,9 @@
-import { html, LitElement } from "lit";
-import { customElement, property, query, state } from "lit/decorators.js";
+import { html } from "lit";
+import { customElement, property, state } from "lit/decorators.js";
 import { GameEndInfo } from "../core/Schemas";
 import { GameMapType } from "../core/game/Game";
 import { fetchGameById } from "./Api";
+import { BaseModal } from "./components/BaseModal";
 import { terrainMapFileLoader } from "./TerrainMapFileLoader";
 import { renderDuration, translateText } from "./Utils";
 import {
@@ -13,14 +14,10 @@ import {
 import "./components/baseComponents/ranking/PlayerRow";
 import "./components/baseComponents/ranking/RankingControls";
 import "./components/baseComponents/ranking/RankingHeader";
+import { waitForTranslationsReady } from "./publicapp/AppShellChrome";
 
 @customElement("game-info-modal")
-export class GameInfoModal extends LitElement {
-  @query("o-modal") private modalEl!: HTMLElement & {
-    open: () => void;
-    close: () => void;
-  };
-
+export class GameInfoModal extends BaseModal {
   @state() private mapImage: string | null = null;
   @state() private gameInfo: GameEndInfo | null = null;
   @state() private rankedPlayers: Array<PlayerInfo> = [];
@@ -28,17 +25,35 @@ export class GameInfoModal extends LitElement {
   @property({ type: String }) rankType = RankType.Lifetime;
 
   @state() private currentClientID: string | null = null;
-  @state() private isLoadingGame: boolean = true;
+  /**
+   * Replaces the old `isLoadingGame: boolean` (defaulted `true`, only
+   * ever cleared by `loadGame()`'s `finally`): a bare `.open()` call with
+   * no preceding/concurrent `loadGame(id)` — exactly QA's repro — used to
+   * spin forever with no honest fallback. `"idle"` is the new honest
+   * default; `loadGame()` walks idle -> loading -> loaded|failed.
+   */
+  @state() private loadState: "idle" | "loading" | "loaded" | "failed" =
+    "idle";
 
   private ranking: Ranking | null = null;
 
+  /**
+   * Third instance of the raw-i18n-key leak class QA has now reported
+   * (`chat.cat.help` pass-5b, nav pass-2, `game_info_modal.title` here,
+   * pass-8): `translateText()` reads `<lang-selector>`'s own translation
+   * state at call time with no subscription of its own (see
+   * `waitForTranslationsReady`'s doc), so this modal's title — evaluated
+   * every `render()` — shows the raw key verbatim until SOMETHING
+   * re-renders after translations finish loading. The 11 `publicapp/`
+   * pages already fixed this by re-requesting an update once translations
+   * are ready; this modal lives outside `publicapp/` and never got that
+   * fix applied. Same root, same fix, reused verbatim rather than
+   * reimplemented.
+   */
   connectedCallback() {
     super.connectedCallback();
     this.updateRanking();
-  }
-
-  createRenderRoot() {
-    return this;
+    void waitForTranslationsReady().then(() => this.requestUpdate());
   }
 
   render() {
@@ -51,14 +66,24 @@ export class GameInfoModal extends LitElement {
         <div
           class="h-full flex flex-col items-center px-25 text-center mb-4 scrollbar-thin scrollbar-thumb-white/20 scrollbar-track-transparent"
         >
-          <div class="w-75 sm:w-125">
-            ${this.isLoadingGame
-              ? this.renderLoadingAnimation()
-              : this.renderRanking()}
-          </div>
+          <div class="w-75 sm:w-125">${this.renderContent()}</div>
         </div>
       </o-modal>
     `;
+  }
+
+  private renderContent() {
+    switch (this.loadState) {
+      case "loading":
+        return this.renderLoadingAnimation();
+      case "failed":
+        return this.renderFailedState();
+      case "loaded":
+        return this.renderRanking();
+      case "idle":
+      default:
+        return this.renderIdleState();
+    }
   }
 
   private renderRanking() {
@@ -88,6 +113,22 @@ export class GameInfoModal extends LitElement {
         class="w-6 h-6 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"
       ></div>
     </div>`;
+  }
+
+  private renderIdleState() {
+    return html`
+      <div class="flex flex-col items-center justify-center p-6 text-white">
+        <p class="mb-2">${translateText("game_info_modal.no_data")}</p>
+      </div>
+    `;
+  }
+
+  private renderFailedState() {
+    return html`
+      <div class="flex flex-col items-center justify-center p-6 text-white">
+        <p class="mb-2">❌ ${translateText("game_info_modal.load_failed")}</p>
+      </div>
+    `;
   }
 
   private sort(e: CustomEvent<RankType>) {
@@ -159,14 +200,6 @@ export class GameInfoModal extends LitElement {
     `;
   }
 
-  public open() {
-    this.modalEl?.open();
-  }
-
-  public close() {
-    this.modalEl?.close();
-  }
-
   private score(player: PlayerInfo): number {
     if (!this.ranking) return 0;
     return this.ranking.score(player, this.rankType);
@@ -183,20 +216,23 @@ export class GameInfoModal extends LitElement {
   }
 
   public async loadGame(gameId: string, currentClientID: string | null = null) {
+    this.loadState = "loading";
+    this.currentClientID = currentClientID;
     try {
-      this.isLoadingGame = true;
-      this.currentClientID = currentClientID;
       const session = await fetchGameById(gameId);
-      if (!session) return;
+      if (!session) {
+        this.loadState = "failed";
+        return;
+      }
 
       this.gameInfo = session.info;
       this.ranking = new Ranking(session);
       this.updateRanking();
       await this.loadMapImage(session.info.config.gameMap);
+      this.loadState = "loaded";
     } catch (err) {
       console.error("Failed to load game:", err);
-    } finally {
-      this.isLoadingGame = false;
+      this.loadState = "failed";
     }
   }
 }

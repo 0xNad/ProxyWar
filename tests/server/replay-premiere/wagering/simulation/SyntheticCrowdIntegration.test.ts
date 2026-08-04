@@ -136,7 +136,7 @@ describe("SyntheticCrowdSimulator against the real ReplayPremiereInteractions", 
     }
 
     // A real guest participant trades through the identical path.
-    const session = await h.interactions.createViewerSession({
+    const { session } = await h.interactions.createViewerSession({
       participantId: guestReal,
       idempotencyKey: "idem_0000000000000001",
       requesterBucketId: `ip_${"1".repeat(32)}`,

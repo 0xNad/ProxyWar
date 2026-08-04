@@ -803,6 +803,19 @@ on screen before any click.
   within one working session (only §9's full-directory-delete applies
   between genuinely separate sessions/branches).
 
+### 13.7 Durability pattern reused for settlement data (see §19)
+
+`ReplayPremierePointsLedger.ts`'s storage pattern documented above (rooted
+OUTSIDE the wiped `PROXYWAR_REPLAY_PREMIERE_STATE_ROOT`, flat JSON,
+atomic write-temp-then-rename, no event-sourcing) is exactly what §19's
+new `ReplayPremiereSettlementLedger.ts` mirrors — same root
+(`resolveReplayPremierePointsLedgerRoot()`), its own file
+(`settlement-ledger-v1.json`), same precedent
+`BettingPlatformAccountLinkStore` already set for a second store sharing
+that root. It closes the gap this section's bankroll/points work left
+open: the points ledger only ever recorded a viewer's own net P&L, never
+the market's winner — see §19 for the full account.
+
 ## 14. The false "could not continue" fix, and what's still open (EndRace session)
 
 ### 14.1 Root-caused and fixed: `applyServiceProjection` was the real trigger
@@ -1570,3 +1583,967 @@ root, but the live end-to-end click-through on the newly-deployed build
 was not completed before this session's budget ran out. Whoever picks
 this up next: the deploy is already live (or about to go live on the next
 natural cycle) — just click through it.
+
+## 18. The live-join sync collapse on aged matches — root-caused, fixed, and live-verified (LiveSync session, 2026-08-02)
+
+### 18.1 The bug
+
+QA CDP trace (`/tmp/proxywar-qa/pass-3/v-16..v-19`) on a real ~20+ min-old
+match: a fresh page load's `GET .../live-projection?after=-1` catch-up poll
+streamed ~4.7 MB over 26 data events and never completed — the client stuck
+at "Joining live… Syncing to turn X", eventually falling over to permanent
+"Replay unavailable." / "Replay is taking longer than expected…". Root
+cause, confirmed by reading the actual client code (`ReplayPremiereNetwork.ts`),
+not guessed: `DEFAULT_REQUEST_TIMEOUT_MS`/`MAX_REQUEST_TIMEOUT_MS` were BOTH
+hard-capped at **2 000 ms** for every premiere network request — a budget
+sized for small steady-state polls (manifest, empty tap deltas), not a real
+catch-up payload. `MAX_LIVE_PROJECTION_RECORDS` (server) already capped a
+single response at 4 000 records, but 4 000 real Turn records is still
+hundreds of KB to multiple MB uncompressed — structurally unable to
+download+parse inside 2 s on anything but a fast connection. Every poll got
+aborted mid-download, classified `request_failed`/`recoverable: true`, and
+retried — against the IDENTICAL still-too-large response (the cursor never
+advances because nothing was ever appended) — forever, until the INDEPENDENT
+outer `JOIN_SYNC_TIMEOUT_MS` (60 s, `ReplayLoadingScreen.ts`) watchdog gave
+up. This is a pure network-transport defect: the server-authoritative
+`liveVisibleSequence` boundary and its elapsed-clock gate in
+`readLiveProjection` were never touched or at risk.
+
+### 18.2 The fix (transport-level only)
+
+1. `ai-agent-demo-server.ts` mounts `compression()` (gzip/brotli) — the same
+   `compression` package already used in `src/server/Worker.ts`. Real
+   Turn-JSON is highly repetitive; live-measured **8.1x** reduction (see
+   §18.3). Pure transport change: the client's hash/integrity checks run on
+   the transparently-decompressed bytes exactly as before.
+2. `MAX_LIVE_PROJECTION_RECORDS` (`ReplayPremiereRuntimeCoordinator.ts`)
+   4 000 → **1 000** — bounds a single response's worst-case size/latency
+   regardless of compression ratio, trading more round trips for each one
+   being small/fast/reliable (and more frequent honest "Syncing to turn X"
+   progress ticks for a cold join on an aged match).
+3. `ReplayPremiereNetwork.ts`: `DEFAULT_REQUEST_TIMEOUT_MS`/
+   `MAX_REQUEST_TIMEOUT_MS` 2 000 → **10 000 ms** — a realistic budget for a
+   genuine catch-up response, still well inside the 60 s outer join-sync
+   watchdog. `LIVE_PROJECTION_MAX_POLLS_PER_TICK` 64→256,
+   `LIVE_PROJECTION_MAX_DRAIN_POLLS` 4 096→16 384 — raised 4x in lockstep
+   with the smaller per-call cap, so one sync tick's total catch-up capacity
+   is UNCHANGED (256×1 000 = 64×4 000).
+
+Retry-resumes-not-restarts was already correct (each successful poll commits
+straight to `playback` before any later failure can unwind it) — proven by a
+new test with an injected mid-catch-up failure
+(`tests/client/ReplayPremiereNetworkLiveProjectionTap.test.ts`).
+
+### 18.3 Deploy + live before/after proof
+
+Committed `d56a52881` on `claude/product-overhaul`, pushed to `origin`.
+Deploy hit the EXACT §17.3-documented stale-ref trap again — `bet-origin`'s
+`origin` remote is a local `file://` pointer at the canonical checkout, and
+`git fetch origin claude/product-overhaul` reported "up to date" at a stale
+SHA even though `git ls-remote origin claude/product-overhaul` correctly
+showed the true tip; the fetch DID download the object (`git cat-file -t
+<sha>` confirmed), so `git checkout --detach <exact SHA>` (not the branch
+ref) worked as documented. `npm run build-prod` clean (`tsc --noEmit` +
+`vite build`, both exit 0). Picked up by the autocycler's own natural
+restart at 05:48 UTC (never forced mid-market) — served
+`main-huTOBRi5.js`, byte-hash-identical to the local build.
+
+**Real production measurement, same live service, before vs. after**, both
+on real ~15-19 min-old real-league matches (curl, no client-side faking):
+
+| | before (`prem_5db38…`, ~14-19 min in) | after (`prem_b34a1c…`, ~16 min in, `liveVisibleSequence` 22 653) |
+| --- | --- | --- |
+| records/response cap | 4 000 | 1 000 |
+| compression | none | gzip (`content-encoding: gzip`) |
+| bytes/poll | 445 858-9 | 109 008 → **13 494** (8.1x) |
+
+**Real-browser proof against production** (headless CDP session, cold load
+of `/bet/prem_b34a1c0913b87a8fad1a` while it was live and ~16 min in — the
+exact failing repro): "Joining live…" progress climbed HONESTLY the whole
+way (target turn advanced live as the match kept playing during the join:
+11 999→22 647→…→22 753), veil cleared, and a fully usable trading UI (live
+territory map rendering, per-seat market prices, standings, "Your bankroll:
+1,000 cr") was interactive at **7.16 s** — screenshot-confirmed. Before this
+fix, the identical scenario would never have converged (permanent "Replay
+unavailable." after the 60 s watchdog).
+
+Tests: two new tests in `ReplayPremiereNetworkLiveProjectionTap.test.ts`
+(compression wiring measured against a real server + `compression()`
+middleware; retry-resumes-and-boundary-holds with an injected mid-catch-up
+failure); two pre-existing tests in `ReplayPremiereNetwork.test.ts` that
+pinned the OLD 2 s/2 001 ms production ceiling recomputed for the new 10 s/
+10 001 ms one (exact convergence-timing math redone, not just bumped).
+Full replay-premiere suite (900 tests) green; `tsc --noEmit`/`npm run lint`
+clean (0 errors, same warning baseline).
+
+### 18.4 P2, investigated, NOT confirmed: the "Signed in" header
+
+Checked whether `bet.proxywar.xyz`'s header binds `signedIn` to "a session/
+intent cookie exists" (would false-positive for a guest who merely visited
+the sign-in page) rather than "a completed platform link" (correct).
+`BettingIdentityHandoff.ts`'s own class doc and code confirm the latter:
+`GET /api/identity/status`'s `signedIn` reads `BettingPlatformAccountLinkStore
+.getStatus().linked`, which only becomes `true` inside `linkOrMerge` —
+called EXCLUSIVELY from the `/handoff/callback` handler after a real code
+redemption succeeds. `/handoff/start` (clicking "Sign in", reaching the
+platform's consent page) mints only a short-lived, never-linking intent
+cookie. Added a new real two-server end-to-end test
+(`tests/server/PlatformBettingHandoff.test.ts`) that reproduces the EXACT
+reported scenario — reach the platform's `/handoff/start` (a real one-time
+code IS minted, proving the surface was genuinely reached), then abandon
+without ever hitting betting's own `/handoff/callback` — and both
+`/api/identity/status` (`signedIn`) and `/api/premieres/account`
+(`identity.platformLinked`) correctly read `false` throughout. **Not
+confirmed against current code; no fix made.** The new test guards this
+contract going forward. If a future live trace reproduces the symptom with
+an actual CDP network capture (not just a screenshot), re-open with that
+evidence.
+
+### 18.5 REOPENED and re-root-caused: the transport fix was necessary but not
+sufficient — a client-side session-reuse assertion bug (LiveSync-2 session,
+2026-08-02)
+
+**The §18.1-18.3 transport fix was real and stayed** (compression,
+smaller/more-frequent catch-up batches, realistic timeouts) but did not fully
+close the bug: production re-verification against a genuinely aged
+(~30-45 min) live match showed the first join attempt still failing to
+converge, with a same-URL retry then succeeding. That is a signature of a
+race, not of catch-up volume — so the P0 was reopened rather than treated as
+closed.
+
+**Real root cause** (found by instrumenting a headless CDP session against
+the live production origin and capturing the actual abort/error chain, not
+by re-guessing): a genuinely-benign server behavior — returning an EXISTING
+live session instead of minting a new one when `POST /api/premieres/{id}/
+sessions` finds the participant already has one (new tab, cold reload,
+concurrent identity-mint race on first click, a retried request) — was being
+treated by the CLIENT as an integrity violation. `ReplayPremiereServiceClient
+.assertSessionResponseBound` unconditionally asserted
+`session.idempotencyKey === (the key THIS request just sent)`. A reused
+session's `idempotencyKey` is necessarily the key from whatever EARLIER
+request first created it — never this one's — so every reused-session join
+threw `invalid_response`/`integrity_failure` client-side and latched a
+terminal failure with no retry path. This is exactly the "stuck at Joining
+live…" / "Replay unavailable." symptom on aged matches: the older a match,
+the more likely a participant's session already exists (prior tab, earlier
+abandoned attempt, a concurrent identity-mint retry during bootstrap), so
+the failure rate climbs with match age even though nothing about catch-up
+volume changed.
+
+**The fix**: the server's session-creation response now carries an explicit
+`created: boolean` alongside the session
+(`ReplayPremiereInteractions.createViewerSession` returns
+`{ session, created }`; `created` is `false` for both the exact-idempotency-
+replay branch and the reused-live-session convergence branch, `true` only
+for a genuinely new record; `ReplayPremiereHttp.ts` surfaces it on the wire;
+the client's `sessionResponseV1Schema` — inherited by v2-v4 — gained the
+field). `assertSessionResponseBound` now only enforces the idempotency-key
+and `firstReleasedSequenceObserved` equality checks when `created === true`;
+a reused/replayed session is asserted against instead on what actually must
+hold for it (bound to the same premiere, records not gapped/backward). This
+closes the client-side hole without weakening the server-authoritative
+`liveVisibleSequence` boundary — the assertion narrowed to when it is
+actually meaningful, not removed.
+
+Fixing the return shape (`{ id: string }` → `{ session: { id: string } }`,
+etc.) rippled mechanically through every `createViewerSession` caller: the
+production `SyntheticCrowdSimulator`, its `SyntheticCrowdMarketTarget`
+interface, and ~15 existing test files/fakes across
+`tests/server/replay-premiere/**` that destructured or asserted on the old
+flat return. All updated to the new `{ session, created }` shape with no
+behavior change beyond the new field. New regression test
+(`tests/client/ReplayPremiereRuntime.test.ts`, "joins cleanly when the
+server hands back a REUSED live session…") constructs a real
+`ReplayPremiereServiceClient` + `ReplayPremiereRuntimeController` against a
+mocked `fetch` returning `created: false` with a session `idempotencyKey`
+deliberately different from the request's own — verified BOTH ways: fails
+with the exact production `integrity_failure`/`callback_failure` error
+before the fix, passes after. Full replay-premiere suite green (909 tests,
+65 files); `tsc --noEmit` clean.
+
+Deploy + live re-verification: see the next commit's report for the
+production before/after (deployed via the §17.3 procedure — fetch
+`claude/product-overhaul` by name, detach to the exact SHA, `npm run
+build-prod`, natural autocycler pickup, never a forced restart mid-market).
+
+## 19. The fourth live-join livelock root cause: a dishonest fixed-deadline watchdog, not a drain-scheduling defect (join-livelock session, 2026-08-02)
+
+### 19.1 The bug (pass-5b QA)
+
+Three prior fixes shipped for this defect family: transport (§18.2,
+`d56a52881`), session-reuse (§18.5, `0b70e71df`), themed ended-page
+(`73cb5317c`/`216e84e3b`). Fresh QA on a ~10-min-old backlogged real-league
+market found a FOURTH, distinct livelock: three independent join attempts
+(root redirect, direct URL, second tab) all failed for 12+ minutes. Observed
+state machine: "Joining live… Syncing to turn N" -> "Replay unavailable."
+(rendered WHILE the turn counter kept climbing behind it) -> Retry ->
+"Loading premiere…" -> "Replay is taking longer than expected…" (no Retry,
+indefinite).
+
+### 19.2 Investigation — the working hypothesis was disproven, the actual defect found
+
+The working hypothesis going in was that the tap catch-up drain
+(`ReplayPremiereNetworkController.applyLiveProjection`) was effectively
+scheduled at the chunk-release cadence instead of free-running. Verified
+against code and two synthetic-fixture reproductions, not assumed:
+
+- A cold `syncOnce()` against a STATIC 27 000-record backlog (well beyond
+  QA's ~11-24k range) drains fully in a single sync tick — 29 `live-
+  projection` polls, sub-millisecond wall time on localhost. The 256-poll/
+  1 000-record-per-poll cap (`LIVE_PROJECTION_MAX_POLLS_PER_TICK` x
+  `MAX_LIVE_PROJECTION_RECORDS`) is nowhere close to binding.
+- A REAL-timer reproduction against an actively-releasing 1 ms/turn fixture
+  (join started 3s late, ~3 000-turn backlog, releases continuing the whole
+  time): `releasedThroughSequence` reaches the live edge within the first
+  ~200 ms tick and then tracks it with a small, stable, steady-state lag —
+  never gets stuck re-chasing a fixed release cadence.
+- `LocalServer`'s progressive catch-up (`runPendingProgressiveCatchUp`,
+  `MAX_PROGRESSIVE_CATCH_UP_IN_FLIGHT_TURNS=4096`) and the worker's drain
+  loop (`ReplayPremiereWorker.worker.ts`, `MessageChannel`-scheduled, no
+  `setTimeout` clamping) both already bypass real-time pacing during
+  catch-up and coalesce/skip intermediate rendering, per their own doc
+  comments — confirmed by reading, not just trusting the comments.
+
+The real, confirmed defect was `Main.ts`'s `JOIN_SYNC_TIMEOUT_MS` watchdog —
+the same "INDEPENDENT... gave up" mechanism §18.1 already flagged as
+adjacent to (not part of) the transport fix. It was a FIXED one-shot 60s
+timer armed once at `onProjectionReady` that fired regardless of whether
+`onJoinSync` was still reporting forward progress, AND — the part that
+produces the exact "error rendered while the counter keeps climbing"
+symptom — it never set `veilFinished`, so `onJoinSync`'s progress callback
+kept updating the subline text UNDER the now-showing "Replay unavailable"
+screen. Combined with Retry always doing a full `window.location.reload()`
+(discarding all client-side join progress), any market whose genuine
+catch-up needs more than 60s of continuous wall time was UNJOINABLE
+forever, no matter how many retries: every attempt raced the same fixed
+deadline from zero and lost.
+
+### 19.3 The fix
+
+`ReplayLoadingScreen.ts` gains `createJoinSyncWatchdog`: an INACTIVITY
+timer, not a fixed deadline. Rearmed on every strictly-increasing
+`currentTurn` `onJoinSync` reports; only fires `onStalled` after a genuine
+silence of the full window; calls `onRecovered` (clearing any latched
+stall and reverting to the honest "joining_live" veil) the instant progress
+resumes. Wired into both `openReplayPremiere` and `openBettingPremiere`
+(`Main.ts`), replacing the duplicated fixed-timer logic in both.
+`showReplayLoadingScreen` also now offers Retry on the `loading_slow`
+("taking longer than expected") state, not just the terminal
+`loading_failed` state — it previously had no escape but "Back to league".
+Investigated the secondary DOM/listener-leak-on-retry ask: Retry's only
+handler is a full `window.location.reload()`, which the browser itself
+tears down cleanly — no broken client-side teardown path found to fix.
+
+Tests: 5 new `createJoinSyncWatchdog` unit tests plus a `loading_slow`-
+offers-Retry regression test (`tests/client/ReplayLoadingScreen.test.ts`).
+Full client+server suite: 324 files / 4057 tests green; `tsc --noEmit` and
+`eslint` both clean.
+
+### 19.4 Deploy + live verification
+
+Committed `e61efc7d5` on `claude/product-overhaul` (fast-forward onto a
+sibling session's `8f315f339`), pushed to `origin`. Deployed per §17.3:
+`git fetch origin claude/product-overhaul` (by name), `git checkout
+--detach e61efc7d5...` (`git ls-remote` confirmed the true tip — the
+documented stale bare-refspec trap did not reproduce this time, detached to
+the SHA anyway per procedure), `npm run build-prod` clean (`tsc --noEmit` +
+`vite build`, both exit 0, new bundle `main-BnvTby5Y.js`). Picked up by the
+autocycler's own natural restart at the next premiere cycle (never forced
+mid-market) — confirmed served `main-BnvTby5Y.js` is byte-hash-identical to
+the local build.
+
+**Real-browser proof against production** (headless CDP, `bet.proxywar.xyz`):
+
+| Scenario | Result |
+| --- | --- |
+| Fresh market (small backlog), cold join | veil cleared, trading board mounted, **824 ms** |
+| Cold join #1 (root `/bet` redirect), market ~11.1 min old, 11 686-record backlog at test time | veil cleared, trading board mounted, **3.88 s** |
+| Cold join #2 (direct `/bet/<id>` URL), same market | veil cleared, trading board mounted, **4.07 s** |
+| Cold join #3 (second tab, alongside #2), same market | veil cleared, trading board mounted, **4.22 s** |
+
+3/3 backlogged-market attempts converged to a fully usable, interactive
+trading UI (live territory map, "LIVE" badge, "Your bankroll: 1,000 cr",
+16 seats with live-diverging prices) in low single-digit seconds — the
+exact scenario that previously livelocked for 12+ minutes across three
+attempts never reaching this state. Fresh-market join stayed comfortably
+under 1s, matching the pre-existing fast path.
+
+## 20. The fifth live-join livelock root cause: a generic modal-close clobbering the URL after a real navigation, not an in-app state leak (SPA-transition session, 2026-08-02)
+
+### 20.1 The bug (pass-6 QA)
+
+Four prior fixes shipped for this defect family: transport (§18.2,
+`d56a52881`), session-reuse (§18.5, `0b70e71df`), themed ended-page
+(`73cb5317c`/`216e84e3b`), dishonest watchdog (§19, `e61efc7d5`). Fresh
+pass-6 QA found a FIFTH, distinct livelock: clicking "Go to the live
+market" on the themed `PremiereEndedPage` (reached after a just-ended
+premiere's own bootstrap 404s `premiere_not_found`) started an HONEST join
+that climbed 3%→93% over 12+ CONTINUOUS minutes and never completed —
+while a fresh tab and a mobile cold join to the SAME live premiere, at the
+SAME real time, converged in <2s / ~7.5s. QA's own working hypothesis
+("in-app client-side route change, not a full navigation — stale
+socket/session/coordinator survives it") was a reasonable read of the
+*symptom* but turned out to be wrong about the *mechanism* once
+instrumented.
+
+### 20.2 Investigation — the SPA-state hypothesis was disproven, the actual defect found
+
+Built a real local fixture repro (`ai-agent-demo-server.ts` on
+`127.0.0.1:8812`, two controlled-exhibition premieres, one deliberately
+force-unregistered so its bootstrap genuinely 404s) and drove it with a
+real headless CDP browser tab, instrumented three independent ways rather
+than trusting any single signal:
+
+- `page.on('framenavigated')`/`page.on('request')` — a real click on the
+  themed CTA (a plain, un-intercepted `<a href="/bet">`; confirmed by
+  exhaustive grep — no anchor-click interceptor exists anywhere in the
+  client) DID fire the browser's native navigation through `/bet`'s
+  server-side 302 to `/bet/<id>`.
+- `performance.timeOrigin` on the landed document matched the click
+  timestamp to within tens of ms, and the console emitted a FRESH
+  CSP-nonce violation set for third-party scripts — both are only possible
+  on a genuinely new document, not an in-app route swap. This is
+  conclusive: **the CTA click is a real top-level navigation**, exactly
+  like a direct `tab.goto`. QA's "not a full navigation" framing does not
+  hold up under instrumentation.
+- Yet `window.location.pathname` reliably drifted from the just-landed
+  `/bet/<id>` to `/` within ~100ms of boot, with the join veil still
+  climbing underneath, and the DOM showed a broken mix of the plain
+  multiplayer lobby chrome (`mobile-nav-bar`, `chat-modal`, etc.) alongside
+  the premiere overlay. A `History.prototype.replaceState` patch injected
+  via `page.evaluateOnNewDocument` (before any app script runs) captured
+  the exact call site for the `url === "/"` write: `HostLobbyModal.close()`
+  → `HostLobbyModal.onClose()` → `updateHistory("/")`.
+
+Root cause, read directly from `HostLobbyModal.ts`/`Main.ts`, not guessed
+further: `Main.ts`'s `handleJoinLobby` fires on EVERY successful
+`"join-lobby"` event — including a betting-premiere join, which
+`openBettingPremiere`'s `onJoinReady` dispatches with
+`source: "replay-premiere"`, `isBettingPremiere: true` to drive the SAME
+local-simulation engine (`LocalServer`/`joinLobby()`) a regular
+multiplayer game uses (this reuse is intentional, not itself the bug). Its
+`.prestart.then()` cleanup generically iterates a fixed list of modal tags
+and calls `.close()` on each — including `<host-lobby-modal>`, even though
+that modal was never opened for a premiere join at all (`this.lobbyId` is
+still its untouched `""`). `BaseModal.close()` calls `onClose()`
+unconditionally, with no open/closed guard. `HostLobbyModal.onClose()`
+then ran:
+
+```ts
+if (this.leaveLobbyOnClose) {   // untouched default: true
+  this.leaveLobby();            // no-ops correctly on empty lobbyId
+  this.updateHistory("/");      // did NOT no-op — always reset the URL
+}
+```
+
+`leaveLobby()` already guards on `lobbyId` being non-empty; `updateHistory
+("/")` sat in the SAME conditional block but was never gated the same way.
+So **every** premiere join — not just ones reached via the CTA redirect —
+silently clobbered the URL from `/bet/<id>` back to `/` within ~100ms of
+landing. The only reason this was invisible on a fast/small-backlog join
+is that catch-up finished before anything durably depended on the correct
+pathname; on a genuinely aged/backlogged join (QA's 40+ min-old target),
+the drifted URL permanently starved completion — the exact same bug CLASS
+already documented elsewhere in this file for `ai-league-replay` ("a
+drifted URL silently starves the replay of its own events — the loading
+veil never lifts"), now confirmed to also exist on the betting-premiere
+join path via `<host-lobby-modal>`.
+
+### 20.3 The fix
+
+`src/client/HostLobbyModal.ts`: gated the leave+URL-reset block in
+`onClose()` on `this.lobbyId` being non-empty — the exact guard
+`leaveLobby()` one line above it already used. Closing a host-lobby-modal
+that never hosted anything is now a true no-op, matching
+`JoinLobbyModal`'s existing (correctly caller-guarded via
+`closeWithoutLeaving()`) pattern. No teardown/route-change semantics were
+added or changed elsewhere — the fix is the minimal correction to an
+already-inconsistent guard, not a new architecture.
+
+Tests: `tests/client/HostLobbyModal.test.ts` (new, 3 cases) — no-op when
+`lobbyId` is empty (the premiere-join case, both the URL-reset AND the
+`leave-lobby` dispatch assertions); still leaves+resets when a lobby WAS
+genuinely hosted; the pre-existing `leaveLobbyOnClose = false` opt-out path
+is unaffected. Full client suite: 84 files / 1228 tests green; `tsc
+--noEmit` clean; `eslint` (scoped to changed files) clean.
+
+Local before/after fixture proof (same repro harness as §20.2): before the
+fix, the real CTA click reliably jumped `window.location` to `/` ~100ms
+after the real navigation landed and the join stayed on "Joining live…
+Syncing to turn N (X%)" indefinitely, climbing honestly but never
+completing, with the broken mixed DOM described above. After the fix
+(rebuilt client, identical fixture, identical click), the URL stayed on
+`/bet/<premiereId>` throughout and the join converged to the full trading
+UI once the match's own turns were exhausted.
+
+### 20.4 Deploy + live verification
+
+Committed `513627266994a5fd6195181d1522abd8fbd5cfdb` on
+`claude/product-overhaul`, pushed to `origin`. Deployed per §17.3: `cd
+~/.proxywar-deploy/bet-origin && git fetch origin claude/product-overhaul`
+(by name — `git ls-remote` cross-checked the true tip), `git checkout
+--detach 513627266994a5fd6195181d1522abd8fbd5cfdb`, `npm run build-prod`
+clean (`tsc --noEmit` + `vite build`, both exit 0, `static/asset-manifest
+.json` populated with 1309 entries — not the hollow-manifest dev-mode trap
+§0.2 warns about). New bundle `main-C_YWIzlh.js`, byte-hash-identical to
+the local build (confirmed against the from-scratch worktree build, not
+just self-consistent). Picked up by the autocycler's own natural restart
+(never forced mid-market) — confirmed served `main-C_YWIzlh.js` on the
+very next premiere after deploying.
+
+**Real production verification** (headless CDP against `bet.proxywar.xyz`,
+the exact QA repro — a real settlement, the real themed ended page, the
+real "Go to the live market" anchor, no client-side faking):
+
+| Scenario | pathname throughout | Result |
+| --- | --- | --- |
+| Cold join sanity check (fresh tab, `/bet` root redirect, pre-open market) | `/bet/<id>` | usable page rendered instantly (<1s) |
+| CTA click #1 — same tab that had been live-watching the premiere through its real settlement (rode a real ~24-minute cycle, `prem_3010a9667f2d4e6f4190` → `prem_bc2674d0fd498c4a5845`), landed on the real ended page, clicked the real CTA | stayed on `/bet/prem_bc2674d0fd498c4a5845` the entire time (sampled) | usable trading UI (title, "World · 16-seat FFA", bankroll loading→1,000 cr, live standings), **351 ms** |
+| CTA click #2 — independent fresh tab straight to the same real ended page, same real CTA | stayed on `/bet/prem_bc2674d0fd498c4a5845` | usable trading UI, **332 ms** |
+
+Both real click-throughs converged in low hundreds of milliseconds with the
+URL never drifting — the exact scenario that previously livelocked
+honestly climbing for 12+ minutes now completes essentially instantly.
+Screenshots: `/tmp/proxywar-spa-fix/` (`cold-join-sanity-check.png`,
+`settled-live-overlay.png`, `live-verify1-ended-page.png`,
+`live-verify1-post-click.png`, `live-verify1-final.png`,
+`live-verify2-ended-page.png`, `live-verify2-post-click.png`).
+
+Not reached this session: riding a SECOND independent full settlement
+cycle for the CTA click (each real-league cycle runs ~20-45 minutes; two
+independent real click-throughs against the same real ended page — one
+from the tab that organically rode the real settlement, one from a fresh
+tab — were judged sufficient live evidence for this fix's narrow,
+mechanism-level change). A third click-through against a freshly-ended
+premiere would only be additional confirmation of the identical code path,
+not new information.
+
+## 21. Sixth investigation: the "SPA-transition slow-crawl" was never a product
+defect — a leftover CDP network throttle from the immediately-preceding
+adversarial test, never cleared (crawl-investigation session, 2026-08-02)
+
+### 21.1 The contradiction this session was asked to resolve
+
+Two solid-looking observation sets disagreed. Session A (`RUNBOOK.md` §20,
+`history://spa-transition`) instrumented production + a local fixture, proved
+the ended page's "Go to the live market" anchor performs a REAL top-level
+navigation (fresh `performance.timeOrigin`, fresh CSP nonces — not an in-app
+route swap), fixed a real URL-clobber bug (§20, `513627266`), then live-
+verified the real CTA twice at **351 ms** and **332 ms**. QA (pass-6 +
+pass-7, `/tmp/proxywar-qa/pass-6/` and `pass-7/`) twice observed the SAME
+flow crawl for 5-12+ minutes at an honest climbing percentage, while a plain
+reload of the identical URL issued mid-crawl completed in ~10s. Both sides
+had real evidence; neither was lying or careless in an obvious way. The
+brief was to find the discriminating variable before touching any code.
+
+### 21.2 Every join-mechanism hypothesis was built, tested, and disproven
+
+Reproduced conditions directly rather than guessing, varying one axis at a
+time against BOTH live production (`bet.proxywar.xyz`, real cycles, real
+Cloudflare tunnel) and a local two-premiere fixture (port 8813, built via
+`premiere:controlled-exhibition` + `replay-premiere-admit.ts`, following
+§3-6's documented incantation):
+
+- **Backlog size at click time.** Cold `tab.goto()` joins were timed against
+  live production premieres aged from 0 to 15+ minutes (turn backlogs from
+  ~300 to **9,318 turns**) — every one converged to a full trading UI in
+  **0.6-4.2 s**. Directly contradicts "large backlog causes the crawl":
+  QA's own pass-7 crawl target had a comparable (~7,000-7,900 turn) backlog
+  at click time.
+- **Cold-URL nav vs. same-origin anchor click vs. the REAL ended-page CTA.**
+  All three mechanisms — `tab.goto()`, a synthetic same-origin `<a>` click
+  with a real `document.referrer`/`Sec-Fetch-Site: same-origin`, and a
+  literal click on `PremiereEndedPage`'s real "Go to the live market"
+  anchor reached via a genuine bootstrap 404 — converged in 0.6-4.1 s at
+  backlogs up to ~9,300 turns, on both production and the local fixture.
+  No code path distinguishes CTA-arrival from direct-URL-arrival
+  (`Main.ts`'s `openBettingPremiere` has no `document.referrer`/
+  `sessionStorage` branch — confirmed by grep, not assumed).
+- **Server-side cold-start / cycle-transition contention.** Read
+  `cycle-premiere.sh`/`autocycle-premiere.sh` in full: the origin process
+  IS fully killed and restarted on every cycle (`stop_origin`/
+  `start_origin` twice per cycle), and `generate-premiere-queue.sh` (a
+  REAL, billed Coworld episode generator, confirmed actively running on
+  this host via `ps`) reactively starts a new ~11-16 min local generation
+  the moment each cycle consumes the queue's one spare item — a real,
+  concurrent, same-host CPU/IO consumer. Directly probed this: a background
+  script fired paired `curl` requests to `bet.proxywar.xyz` (through the
+  tunnel) and `127.0.0.1:8792` (direct) every 2s for 8 minutes starting
+  within 1 minute of a real cycle transition, spanning the exact window
+  a fresh `generate-premiere-queue.sh` attempt was concurrently running
+  (cross-referenced against `~/.proxywar-deploy/premiere-queue/cost-
+  ledger.jsonl`'s timestamps). Tunnel latency stayed 40-110 ms, direct
+  stayed 9-36 ms, the ENTIRE window, records-per-response climbing exactly
+  as expected (capped at `MAX_LIVE_PROJECTION_RECORDS`=1,000) — zero
+  degradation. Cross-referenced Session A's own screenshot timestamps
+  against the autocycle log: their 351/332 ms CTA clicks ALSO landed inside
+  an active concurrent-generation window, ruling out "generation
+  contention" as the discriminator either way.
+- **Local worker/simulation catch-up cost.** Read `LocalServer.ts`'s
+  progressive catch-up (`runPendingProgressiveCatchUp`,
+  `MAX_PROGRESSIVE_CATCH_UP_IN_FLIGHT_TURNS`=4,096) and
+  `ReplayPremiereWorker.worker.ts`'s drain loop — both dispatch/execute as
+  fast as the worker can go, no `setTimeout` real-time pacing anywhere in
+  the catch-up path. Measured directly (not trusted from comments): joins
+  at ~6,800-9,300 turn backlogs converged in 0.6-4.2 s, meaning real
+  per-turn simulation cost for this 16-seat FFA game is sub-millisecond —
+  nowhere near enough to explain a multi-minute crawl at this scale.
+- **Synthetic crowd traffic.** `PROXYWAR_SYNTHETIC_CROWD_ENABLED=true` (as
+  production's `cycle-premiere.sh` always sets) makes no measurable
+  difference — repeated the exact ended-page-CTA repro with the crowd
+  driver active against a ~7,800-turn-backlog target: **1.7 s**.
+- **Server registration model.** Learned along the way (not previously
+  documented): `ReplayPremiereStartup.ts`'s `selectCriticalStartupPlans`
+  registers AT MOST one premiere with the HTTP layer at boot — any
+  "playing"/"checkpoint" plan wins outright over everything else, matching
+  production's real one-premiere-at-a-time behavior exactly (the "old"
+  premiere is never simultaneously reachable — its bootstrap always 404s
+  by the time its ended page is showing, which is WHY `PremiereEndedPage`
+  exists at all). This makes the CTA-click repro path structurally
+  identical to a same-origin-referrer click to whatever's currently
+  registered, which was already covered by the anchor-click tests above.
+
+Every one of these came back clean. Nothing in the join mechanism — network,
+worker, server registration, cold-start timing, referrer/navigation type —
+reproduces a crawl under any condition a real user's browser could encounter.
+
+### 21.3 The actual discriminating variable, found in QA's own evidence
+
+Re-read `/tmp/proxywar-qa/pass-6/timing-notes.txt` line by line instead of
+re-testing further. Its own TASK 1 section runs, in this exact order, in
+what the evidence shows is the same browser tab: three fast cold joins,
+then a deliberate "Throttled-network adversarial test" — `CDP
+Network.emulateNetworkConditions` at 30 kbps/20 kbps/400 ms, then EASED to
+**200 kbps down / 100 kbps up / 200 ms latency**, clicking Retry, watching
+it "climb smoothly ... and complete successfully" — then, with ZERO
+intervening mention of resetting or disabling the network emulation, the
+very next paragraph is "NEW P1 FOUND — SPA-transition join ... can crawl
+indefinitely." `browser-harness` tabs persist across calls/subagents by
+design (`skill://browser-harness`), so the same CDP target plausibly
+carried the still-active 200/100/200 throttle from the adversarial test
+straight into the SPA-transition repro, and — because pass-7 is a later,
+separate agent invocation against the SAME persistent browser-harness
+daemon — straight into pass-7's repro too, hours later, never cleared
+either time.
+
+### 21.4 Confirmation: reproduced the exact symptom by applying ONLY the throttle
+
+Applied the identical `Network.emulateNetworkConditions` values
+(`downloadThroughput: 200*1024/8, uploadThroughput: 100*1024/8, latency:
+200`) via a fresh `CDPSession` to the SAME local-fixture repro that was
+otherwise fast (1.7-4.1 s at comparable backlogs). Result: an honest,
+continuously-climbing, never-erroring crawl — 0%→1%→2%→3%→4%... over
+22+ seconds on a small 4-agent exhibition bundle (which has far smaller
+per-turn payloads than a real 16-seat league match), matching pass-6/
+pass-7's documented shape (percentage climbs smoothly, target turn count
+also drifts upward since it's tracking the live edge, never shows "Replay
+unavailable") exactly. This is the honest-veil behavior §19 built
+deliberately — a genuinely bandwidth-constrained catch-up is SUPPOSED to
+look like this. Independently, QA (`qa-user-2`) reproduced this
+conclusion from their side in parallel: two brand-new tabs never touched
+by any CDP override completed the real ended-page CTA click in **3.2 s**
+and **5.5 s** against ~9.7k/10.2k-turn backlogs — matching this session's
+numbers — and confirmed they had applied and never reset the exact same
+200/100/200 throttle during pass-6's adversarial test. They filed
+`/tmp/proxywar-qa/pass-7/CORRECTION.txt` retracting the "still broken"
+finding.
+
+### 21.5 Conclusion: no code change — the join mechanism is correct
+
+This is NOT a product defect. Every prior fix in this family (§18 transport,
+§18.5 session-reuse, §19 dishonest watchdog, §20 URL-clobber) addressed a
+real, reproducible defect in shipped code; this sixth investigation instead
+disproves the existence of a seventh one. Shipping a "fix" here — e.g.
+inventing server-side throughput work or client-side bandwidth-detection
+logic against a symptom that only ever existed inside one leftover test
+harness setting — would be solving a problem that does not exist in
+production. `HostLobbyModal`'s URL-clobber fix (§20) already gets a real
+user from ended-page CTA to usable trading UI in bounded sub-5-second time
+regardless of backlog, navigation mechanism, cycle-transition timing, or
+synthetic-crowd load, as directly measured above. The only actionable
+finding is a testing-hygiene one: `browser-harness` tabs persist state
+(including CDP network emulation) across calls and even across separate
+agent invocations sharing the same daemon — any adversarial-network test
+MUST explicitly reset it (`Network.emulateNetworkConditions` with
+`downloadThroughput`/`uploadThroughput: -1, latency: 0`, or
+`Network.disable`) before the tab is reused for anything else, or open a
+fresh tab instead of reusing the throttled one.
+
+### 21.6 Live verification (confirms current behavior; no deploy needed)
+
+No commit was made — nothing in `src/` changed. Live-verified anyway,
+against real production, exactly per the brief: real ended-page CTA click,
+timed against the autocycle log, in the riskiest possible window (seconds
+after a natural cycle transition) twice, plus one steady-state click:
+
+| Scenario | Timing vs. autocycle log | Result |
+| --- | --- | --- |
+| Risky-window CTA click #1 | `prem_dd7f1dbda363ae6c4de9` up at 20:21:51 UTC; clicked ~20:21:56 (≈5 s after cycle) | usable trading UI, **639 ms** |
+| Risky-window CTA click #2 (independent fresh tab, same real ended page) | same target, clicked ~20:22:02 (≈11 s after cycle) | usable trading UI, **625 ms** |
+| Steady-state CTA click | same target, ~5,500-turn backlog, clicked at 20:27:33 (≈5.5 min after cycle) | usable trading UI, **2,192 ms** |
+
+All three converged in low-single-digit seconds with an honest,
+monotonically-climbing (or instant) veil and no throttle applied — the
+exact scenario pass-6/pass-7 reported as broken for 5-12+ minutes.
+
+## 22. Real-league markets voiding 40-57% of the time — root-caused as a generation-budget/variant-design mismatch, stopgap shipped, two cures gated on the operator (void-investigation session, 2026-08-02)
+
+### 22.1 The symptom
+
+QA (pass-7/pass-8, `/tmp/proxywar-qa/`) reported real-league premieres
+freezing at ~65-71% territorial dominance for one leading agent for an
+extended stretch, then resolving `"Voided — no winner declared"` (full
+refund) instead of a winner — 3-of-last-4 recent cycles by QA's count.
+Independently reproduced here at 4-of-7 in the current autocycle window:
+`prem_b9d3b0b31dcb05052273`, `prem_bc2674d0fd498c4a5845`,
+`prem_dd7f1dbda363ae6c4de9`, `prem_174e82b378c1b4ac8f83` all cross-checked
+live via `GET /api/premieres/<id>/settlement` — all `outcome:"refunded"`,
+`winnerSeatId:null`; the interleaved `prem_596522f6fa4d5b08f22e`/
+`prem_492566ce1baabe9a9572`/`prem_1e2a5a64113a68a65fc4` all settled with
+real winners in the same window. A void refunds every bettor's cost basis
+in full and is honestly labeled throughout (no dishonest copy anywhere in
+this investigation) — but a market that refunds nearly half the time is
+still a real product defect, independent of how honestly it's disclosed.
+
+### 22.2 Settlement code is innocent — traced the void trigger to its exact source
+
+`deriveReplayPremierePredictionOutcome` (`ReplayPremiereInteractions.ts`)
+voids with reason `no_winner` iff `result.winner === null` — one condition,
+no other void path was ever observed for these four cycles (the other two
+void reasons, `ambiguous_winner`/`invalid_result`, require a malformed
+*non-null* winner tuple, a different and much rarer failure class). That
+`winner` field is a verbatim passthrough, not independently computed or
+validated by our runtime: `parseHostedReplayPayload`
+(`src/server/agents/CoworldLeagueMirrorCore.ts`) reads `winner_slot`
+straight off the raw Coworld replay payload's own `results` object;
+`PremiereWageringSourceBundle.ts` maps `rosterFile.winnerSlot` (itself
+`replay.winnerSlot` from that same parse, written verbatim into
+`xp-request-roster.json` by `generate-xp-request-episode.ts`) into
+`winnerClientID`, then into the `authoritativeResult.winner` value that
+`ReplayPremierePublication.ts`'s checkpoint/reveal machinery and
+`ReplayPremiereSettlementLedger.ts` all treat as ground truth. Settlement
+is doing exactly what it should with the data generation handed it.
+
+### 22.3 The freeze is real — it's the engine's own win condition, not a playback artifact
+
+The `sixteen-player-ffa-world` Coworld package variant's own manifest
+description (`coworld-adapter/coworld/coworld_manifest_ffa16p.json:410`)
+states the win condition explicitly: *"ending when a player controls 80%
+of the map or the decision-step cap is reached."* `percentageTilesOwnedToWin()`
+confirms 80 for FFA mode (`src/core/configuration/DefaultConfig.ts:597-601`).
+`WinCheckExecution.checkWinnerFFA` (`src/core/execution/WinCheckExecution.ts:80-89`)
+only calls `setWinner` when `ownedPercentage > 80` OR a `maxTimerValue` OR
+its own `HARD_TIME_LIMIT_SECONDS = 170*60` (170 simulated minutes, line 24)
+is reached — the engine's built-in "always eventually pick someone"
+failsafe. `max_decision_steps=300 × turns_per_decision_step=100 = 30,000`
+turns (+ a fixed spawn-phase allotment) caps simulated time at
+`timeElapsed=(ticks-numSpawnPhaseTurns)/10` ≈ **50 simulated minutes** —
+roughly **3.4x short** of the 170-minute failsafe. So when a 16-agent FFA
+stalls below 80% (QA's observed 65-71% plateau — a real, common outcome in
+a large free-for-all where the trailing agents gang up on the leader
+instead of getting eliminated), the episode simply runs out of decision
+budget before either win condition can fire, and `getWinner()` is still
+`null` when Coworld stops. Nothing truncates mid-computation incorrectly;
+nothing in the premiere/checkpoint/staged-release pipeline mishandles a
+completed result — this is the SOURCE match genuinely ending without a
+winner.
+
+### 22.4 Generation side, not runtime — and not a Coworld/engine platform bug either
+
+`~/.proxywar-deploy/premiere-queue/cost-ledger.jsonl` (93 rows) proves the
+cap is hit constantly, not as rare noise: **38/88 (43%)** of successful
+generation runs land on the exact same `turnCount=30400` ceiling (the
+deterministic `max_decision_steps × turns_per_decision_step` + fixed
+spawn-phase turns), with `turnCount` never once exceeding it across all 88
+rows (`min=7700, max=30400`). `PW_QUEUE_MAX_DECISION_STEPS`
+(`generate-premiere-queue.sh`, default `300`) already requests exactly the
+package's own certified ceiling (`"maximum": 300` in
+`coworld_manifest_ffa16p.json`'s JSON Schema) — we are not under-requesting
+budget from Coworld. This is a **self-inflicted mismatch in our own
+certified package config**: the variant's decision-step ceiling (which we
+authored and control) is simply too low for the engine's own 16-agent-FFA
+dynamics (which we also authored and control) to reliably converge to 80%
+within it. Coworld itself ran exactly the budget we asked for and correctly
+reported no winner existed within it — **no evidence supports an operator
+escalation to Softmax on this finding; do not file one.**
+
+### 22.5 Fix shipped: discard no-winner episodes at generation, before they can ever be admitted
+
+Committed `b61d97969` on `claude/product-overhaul`, pushed to `origin`.
+`generate-premiere-queue.sh`'s `attempt_generate()` now reads `winnerSlot`
+out of `xp-request-roster.json` immediately after generation (right after
+the existing `map`/`episode_id`/`xreq_id`/`turn_count` parse) and, if
+`null`, discards the bundle and returns failure through the *existing*
+failure/backoff/`MAX_PER_HOUR`/`MAX_PER_DAY`-bounded retry path
+(`ledger_append failure "no_winner_within_decision_budget" ...`) instead of
+sealing/publishing/admitting a real-money betting market for an episode
+already known, at generation time, to be doomed to void. This moves the
+failure out of the user-facing product entirely — a bettor can no longer
+be offered a market that's going to refund everyone — without touching
+settlement/checkpoint semantics or the definition of a win anywhere.
+`bash -n` clean; the exact `winnerSlot`-discrimination logic (the
+`"null" if d.get("winnerSlot") is None else d.get("winnerSlot")` /
+`[ "$winner_slot" = "null" ]` pairing) was smoke-tested standalone against
+both a null-winner and a real-winner mock roster JSON before shipping.
+
+**Cost tradeoff, explicit and cap-bounded, not unbounded:** since ~43% of
+attempts will now be discarded and retried rather than published, this
+roughly doubles the average number of billed generation attempts needed
+per successfully published bundle. Bounded by the pre-existing
+`PW_QUEUE_MAX_PER_HOUR=4`/`PW_QUEUE_MAX_PER_DAY=80` caps (`generate-
+premiere-queue.sh`) — worst case the ready queue simply lags further
+behind consumption (more exhibition-fallback cycles until it catches up),
+never runaway spend.
+
+### 22.6 Two real cures exist — deliberately NOT implemented here, OPERATOR-PENDING
+
+Both were considered and rejected as out of scope for a unilateral code
+change in this session — they are product/operator decisions, not bugs:
+
+1. **Raise `max_decision_steps` above 300.** This is the Coworld PACKAGE's
+   own certified JSON-Schema ceiling
+   (`coworld_manifest_ffa16p.json`'s `"maximum": 300`), not an env var —
+   raising it means re-certifying the `sixteen-player-ffa-world` package
+   with Coworld/Softmax, an external platform action with its own review
+   process and turnaround, not something shippable from this repo alone.
+   This is the cleaner cure (matches typical episode length to what the
+   engine actually needs to resolve a 16-agent FFA) but needs the operator
+   to actually run that certification.
+2. **Settle a decision-budget stalemate as "leader wins" instead of void.**
+   Mechanically this is exactly the SAME rule `WinCheckExecution`'s own
+   time-limit tiebreak would eventually apply (most tiles owned wins),
+   just applied earlier using tile-ownership data already present in the
+   sealed, hash-verified `GameRecord` — not a fabricated or dishonest
+   outcome in the data-integrity sense. But it is a genuine **product/
+   economics decision**, not a bug fix: it changes who wins money whenever
+   a stalemate occurs (someone holding the leader's shares at the
+   decision-step cap would go from "refunded" to "paid out"), and needs
+   new, honest disclosure copy explaining that a real-league round can
+   settle on a plurality/tiebreak basis rather than an outright 80%
+   conquest — the market's rules, as currently disclosed anywhere in the
+   product, only describe an outright win. Do not implement without that
+   copy and explicit operator sign-off; this was correctly identified and
+   left alone this session.
+
+Until one of these ships, the §22.5 stopgap is the full mitigation: voids
+should become rare (limited to genuine `ambiguous_winner`/`invalid_result`
+data anomalies) rather than a near-majority outcome, but a 16-agent FFA
+that stalemates below 80% within budget will still, correctly, never
+reach a betting market at all under the stopgap — it's silently discarded
+and retried, not fixed at the source.
+
+### 22.7 Deploy + live verification
+
+Deployed per §17.3's model, but for the queue GENERATOR, not the origin
+server — this change never touches the live market. `com.proxywar.betqueue`
+(`launchctl print gui/$UID/com.proxywar.betqueue`) is the launchd job
+running `generate-premiere-queue.sh` as a long-lived, polling bash
+process (`start-proxywar-betqueue.zsh` → `exec /bin/bash
+"$DEPLOY_DIR/generate-premiere-queue.sh"`); like any long-running
+interpreter, it had the OLD script body already parsed into memory and
+would not see the fix until restarted — updating the checked-out file
+alone is not enough. Procedure: `cd ~/.proxywar-deploy/bet-origin && git
+fetch origin claude/product-overhaul` (`git ls-remote` confirmed the true
+tip `b61d97969`, no stale-ref trap this time), `git checkout --detach
+b61d97969bcaa727e97870206e72477a84cb35a6` (confirmed via `git show
+HEAD:generate-premiere-queue.sh` that the `winnerSlot` check landed on
+disk). No `npm run build-prod` needed (raw bash script, no client/server
+TS build in its path) and the live origin/autocycle process was never
+touched. Waited for the in-flight generation attempt that was already
+running under the OLD script (started 21:38:48, a real billed episode
+already submitted to Coworld before the deploy) to finish naturally
+(published 21:53:35) rather than killing a paid-for attempt mid-flight,
+then `launchctl kickstart -k gui/$UID/com.proxywar.betqueue` — confirmed a
+fresh PID and a fresh `starting (...)` banner in `/tmp/pw-bet-queue.log` at
+21:53:55, proving the new script body was actually loaded.
+
+**Live-observed discard/publish ratio, the four real generation attempts
+run after the restart** (`/tmp/pw-bet-queue.log` + cross-checked against
+`cost-ledger.jsonl`, exact rows below):
+
+| Time (UTC) | Result | turnCount | Ledger reason |
+| --- | --- | --- | --- |
+| 22:16:37 | DISCARDED | 30400 (cap) | `no_winner_within_decision_budget` |
+| 22:32:17 | DISCARDED | 30400 (cap) | `no_winner_within_decision_budget` |
+| 22:54:45 | DISCARDED | 30400 (cap) | `no_winner_within_decision_budget` |
+| 23:06:23 | **PUBLISHED** | 14900 (real winner, well under cap) | `success` |
+
+3 of 4 (75%) discarded in this small live sample — directionally consistent
+with (and, on this sample, even higher than) the 43% historical null-rate
+from §22.4's ledger analysis; small-n variance plus this window's roster
+being 18 active policies (vs the historical 14-16) is the likely reason
+it ran hot. The mechanism worked exactly as designed on every single
+attempt: all three `turnCount=30400` (decision-step-cap, `winnerSlot=null`)
+episodes were caught immediately after generation and never sealed,
+published, or admitted; the one real-winner episode (`turnCount=14900`,
+far short of the cap) published through the completely unchanged
+seal/build-source/`pq_publish` path and is now sitting in
+`~/.proxywar-deploy/premiere-queue/ready/` waiting for the next autocycle
+to claim it — end-to-end pipeline health confirmed, not just the discard
+branch in isolation.
+
+**Cost tradeoff observed live, not just predicted:** the real-world
+autocycle log (`/tmp/pw-bet-autocycle.log`) shows the ready queue actually
+ran dry once during this window — `22:32:49 up: prem_09416c8d5c3ef0e075a8`
+/ `match kind: exhibition (fallback - real-league queue was empty, depth
+now 0)` — a direct, visible consequence of discarding 3 doomed episodes in
+a row before the 4th finally produced a winner. This is the exact,
+pre-disclosed tradeoff (§22.5): more exhibition-fallback cycles while the
+queue catches up, in exchange for a real-league market never opening on an
+episode already known to be doomed to void. `cycle-premiere.sh`'s
+pre-existing (unmodified) exhibition-fallback logic absorbed this
+correctly and automatically — no crash, no manual intervention, and the
+live market was never touched or disrupted by this deploy.
+
+Not reached this session: a second full days-long observation window to
+converge the live discard rate closer to the historical 43% baseline (this
+was 4 real, ~13-22-minute, billed attempts — enough to prove the mechanism
+correct end-to-end at both the discard AND publish branches, not enough to
+be a statistically tight rate estimate). The two OPERATOR-PENDING cures in
+§22.6 remain unimplemented and are the actual long-term fix; this stopgap
+is confirmed live and working as designed in the meantime.
+
+## 23. The second disk-floor incident (live, 2026-08-03) — root-caused, recovery attempt made it worse, external-volume relocation ASSESSED but NOT executed
+
+### 23.1 Diagnosis (confirmed, not assumed)
+
+`prem_63452e316062dfbd04ef` (up 02:06:16 UTC) froze `lastReleasedChunkIndex` at
+28 while `authoritativeElapsedMs` climbed past 72 minutes — independently
+re-confirmed via `GET /api/premieres/<id>/manifest` (`state:"playing"`),
+matching QA pass-12's `t4-01` finding exactly. `/tmp/pw-bet-origin.log` was
+actively flooding `durable_write_free_space_floor_not_met` (413,
+`PREMIERE_CAPACITY_EXCEEDED`) at diagnosis time, including one line naming
+this exact premiere's runtime recovery. `df -k /` read 13.78 GiB free —
+already below `PREMIERE_BOUNDED_WRITE_FLOOR_BYTES` (15 GiB,
+`ReplayPremierePrivateStaging.ts:283`), which every durable-write path in the
+replay-premiere module gates on via `assertPremiereDurableWriteAdmission`
+(catalog, checkpoints, event-store journal+snapshots, staging, clip
+rendering — all traced by grep to the same `privateStateRoot`). The origin
+process was alive and burning real CPU (9-14%) throughout, ruling out a
+crashed/hung worker; `autocycle-premiere.sh`'s own poll loop (read in full)
+only ever cycles on `status ∈ {settled, void}`, so a `"playing"`-but-frozen
+market can never self-heal through it — this is the §9-class manual
+`cycle-premiere.sh` scenario.
+
+### 23.2 Recovery attempt — FAILED, converted a partial stall into a full outage
+
+`cycle-premiere.sh` does not check free space before it acts. It ran
+`stop_origin` + `rm -rf "$STATE_PARENT"` (destroying the stuck premiere)
+successfully, then failed during admission of the replacement
+(`prem_c4ae154e59cc1942b6fa`) — because the 15 GiB floor is unconditional
+(`Math.max(PREMIERE_BOUNDED_WRITE_FLOOR_BYTES, ...)`) and free space never
+crossed it. Net result: the origin came back up with **zero** premieres
+registered — worse than the original single-stuck-market state.
+`autocycle-premiere.sh` correctly detected `origin up but no premiere
+registered` and tried to self-heal via its own `cycle` call, but that failed
+identically, repeatedly (`03:22:13`, `03:25:14`, `03:28:15`, `03:31:17`, all
+logged `!! cycle FAILED`). `df` never recovered (14.44 -> 13.78 -> ~12.8-13.6
+GiB over the session). The automated worktree-lifecycle GC
+(`storage-maintenance`, every 900s) was checked live and had `eligibleCount:
+1` of 32 registered worktrees — and that one eligible item was already on
+the *external* volume, so it could not have helped the internal shortfall
+either. **There is no known lever left that restores service without an
+operator freeing internal disk or approving §23.4 below.** Do not re-run
+`cycle-premiere.sh` manually while `df` free is under 15 GiB — it cannot
+succeed and only adds another destructive wipe on top. Leave
+`autocycle-premiere.sh`'s own retry loop running; it will pick the moment
+free space crosses 15 GiB entirely on its own.
+
+### 23.3 Position/refund forensics — inconclusive, and a real gap found
+
+`cycle-premiere.sh` invoked against a **non-terminal** ("playing") premiere
+bypasses settlement entirely — confirmed by grepping the durable
+`settlement-ledger-v1.json` (24 records) for `prem_63452e316062dfbd04ef`:
+absent. Unlike `autocycle-premiere.sh`'s normal path (which only cycles
+after `settled`/`void` **and** `settlement_confirmed` — i.e. after a real
+ledger record, including `outcome:"refunded"`, already exists), the manual
+path has no such gate and the script's own header says so plainly
+("destroyed", not "refunded"). Per `ReplayPremierePointsLedger.ts`'s design,
+points are only ever recorded at settlement, so no guest's *persistent*
+lifetime score was debited or credited either way — the durable-leaderboard
+effect is the same "neutral" outcome a real refund produces — but there is
+no settlement record, no ended-page confirmation, and no audit trail.
+Whether any real (`guest_*`) participant held an open position at the moment
+of the wipe could **not** be determined: the event store was destroyed
+before anyone thought to snapshot it first, and the origin's text log
+carries no per-guest trade/position data. QA pass-12 only covers the final
+~15 minutes of this premiere's life (all joins failed honestly in that
+window); the first ~20 minutes, before the chunk pipeline froze, is an
+unverifiable gap in which real joins/trades could plausibly have succeeded.
+This is a genuinely new gap, not a re-verification of an existing precedent
+— **the manual `cycle-premiere.sh` path had never previously been exercised
+against a still-"playing" market**. See `known-problems.md` for the
+full writeup; this needs an explicit product decision (should the script
+refuse, or force a void+refund first, against a non-terminal premiere?),
+out of scope to resolve unilaterally here.
+
+### 23.4 ASSESSED, NOT EXECUTED — relocating the premiere state root to the external volume
+
+Evaluated per an explicit operator request; no config was changed.
+
+**(a) Does one config move everything?** Yes. Every
+`assertPremiereDurableWriteAdmission` call site
+(`ReplayPremiereCatalog.ts:471`, `ReplayPremiereCheckpointProjectionStore.ts:211`,
+`ReplayPremiereEventStore.ts:495,584` — journal *and* snapshots,
+`ReplayPremierePrivateStaging.ts:182,220` — staging) resolves its
+`destinationPath` from the single `privateStateRoot`, itself derived from
+`PROXYWAR_REPLAY_PREMIERE_STATE_ROOT` (`ReplayPremiereSecrets.ts:7-8`) and
+threaded through `cycle-premiere.sh`'s `STATE_ROOT` var into
+`--private-state-root`. Clip rendering (`ReplayPremiereClips.ts`, its own
+*separate* 16 GiB `minFreeBytes` floor — note: different constant from the
+15 GiB premiere floor) is **not** a separate root either:
+`ai-agent-demo-server.ts:638` sets `clipsRoot:
+replayPremiereClipCacheDir(replayPremierePrivateStateRoot)`, nested under
+the same tree. One env var change moves all of it; no write path is left
+pointed internally.
+
+**(b) Reliability tradeoff.** The project's own written policy
+(`docs/project-state/2026-07-30-apfs-storage-split.md`) explicitly assigns
+"live runtime state" to stay on the **internal** disk and scopes
+`/Volumes/ProxyWar Workspace` to "development workspaces" — lifecycle-leased,
+TTL'd, disposable-and-recreatable-from-git worktrees. The doc's own worktree
+config marks that volume `optionalWhenOffline: true` specifically because
+losing a worktree is a non-event (recreate from git). A live betting market
+has no equivalent recovery: it is not recreatable from git. An external
+volume disconnect mid-cycle (sleep/wake unmount, cable/port fault, forced
+eject) would very plausibly surface as an unhandled `ENOENT`/`EIO`/`EBUSY`
+from `fs.statfs`/the write calls themselves, or a `private_state_root_not_private`
+ownership mismatch on remount — not the clean, typed
+`durable_write_free_space_floor_not_met` rejection the current code and this
+incident's recovery path are built around. That is plausibly a **worse**
+failure mode than today's (today's is at least legible and has a script),
+and it is untested in this codebase. This is a real policy exception being
+proposed, not a config detail.
+
+**(c) Does the floor check even measure the right volume?**
+`assertPremiereDurableWriteAdmission` calls `fs.statfs(options.destinationPath)`
+directly (`ReplayPremierePrivateStaging.ts:294`) — it measures whatever
+volume the target path actually lives on, not a hardcoded boot volume. So
+yes: pointing `privateStateRoot` at `/Volumes/ProxyWar Workspace` (~909 GiB
+free against its 1 TB lifecycle quota, per the live worktree-lifecycle audit)
+would make a 15/16 GiB floor breach from *ordinary* per-cycle premiere
+growth (measured this session: ~3 MB per cycle in steady state) structurally
+implausible.
+
+**Recommendation (for operator approval, not applied):** the technical
+floor-breach risk genuinely goes away with this move, but it trades a
+well-understood, scripted failure mode for an unhandled one, against the
+project's own explicit storage policy. If pursued, the exact change is:
+
+```sh
+# in cycle-premiere.sh, or via env before every start_origin/autocycle boot:
+STATE_PARENT="/Volumes/ProxyWar Workspace/proxywar-bet-live"
+# (equivalently: export PROXYWAR_REPLAY_PREMIERE_STATE_ROOT accordingly
+#  and pass the same --private-state-root to replay-premiere-admit.ts)
+```
+
+A lower-risk alternative that avoids the policy exception entirely: raise
+the *internal* floor's margin by having the operator either add physical
+capacity, or explicitly approve reclaiming currently-protected/pinned
+worktree data (the automated GC found zero eligible internal targets this
+session — every internal worktree is pinned, active, or
+evidence-protected) — i.e. the disk trajectory described in §16.4 has now
+concluded exactly as predicted, and recurrence is guaranteed either way
+without one of these three operator-level actions.
+
+**ADMISSION DISARMED 2026-08-03T03:39:08Z:** `com.proxywar.betautocycle` and `com.proxywar.betqueue` bootout (disabled) pending operator capacity action. Bet origin process remains live; retry loop will NOT auto-admit market when free space crosses 15 GiB threshold. Re-enable AFTER durable internal headroom confirmed (≥25 GiB target): `launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.proxywar.betautocycle.plist && launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.proxywar.betqueue.plist`

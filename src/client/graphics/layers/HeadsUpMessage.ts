@@ -30,6 +30,15 @@ export class HeadsUpMessage extends LitElement implements Layer {
   @state()
   private toastColor: "green" | "red" = "green";
   private toastTimeout: number | null = null;
+  // P0 fix (2026-08-03, item 3a): combat toasts (build/attack/etc.
+  // "show-message" events) kept firing and stacking up over the win
+  // banner once a match ended -- the toast (z-[800], top-6) and WinModal's
+  // centered banner (z-[10010], top-1/2) don't overlap, so a toast was
+  // fully VISIBLE alongside the banner regardless of z-index, reading as a
+  // frozen HUD rather than a finished match. Cleared once and suppressed
+  // thereafter (`show-message` is a global window event fired by anything
+  // still resolving post-match cleanup ticks).
+  private matchEnded = false;
 
   createRenderRoot() {
     return this;
@@ -55,6 +64,7 @@ export class HeadsUpMessage extends LitElement implements Layer {
   }
 
   private handleShowMessage = (event: CustomEvent) => {
+    if (this.matchEnded) return;
     const { message, duration, color } = event.detail ?? {};
     if (
       typeof message === "string" ||
@@ -86,6 +96,12 @@ export class HeadsUpMessage extends LitElement implements Layer {
     if (updates && updates[GameUpdateType.GamePaused].length > 0) {
       const pauseUpdate = updates[GameUpdateType.GamePaused][0];
       this.isPaused = pauseUpdate.paused;
+    }
+    if (updates && updates[GameUpdateType.Win].length > 0) {
+      this.matchEnded = true;
+      this.toastMessage = null;
+      clearTimeout(this.toastTimeout ?? undefined);
+      this.toastTimeout = null;
     }
 
     const showImmunityHudDuration = 10 * 10;

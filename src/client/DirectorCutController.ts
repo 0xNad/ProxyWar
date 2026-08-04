@@ -117,6 +117,28 @@ const SEGMENT_SPEED_TO_CLIENT_SPEED: Record<
 export function directorCutSpeedForSegment(
   segment: DirectorCutSegment,
 ): ReplaySpeedMultiplier {
+  // Quick fix (P0 incident, 2026-08-03): the SPAWN phase (the "opening"
+  // segment, plan-authored as "normal" for an establishing-shot feel) has
+  // zero strategic content -- nothing to actually watch, just territory
+  // assignment. At "normal" (1x) a typical several-hundred-turn opening
+  // took ~25-30s of real time to clear, reading as a frozen/broken page on
+  // first load (the big homepage button was the first thing a new visitor
+  // hit). Client-side override, keyed on `eventReason` alone -- never
+  // `segment.speed` -- so every ALREADY-BAKED director-cut-plan.json
+  // benefits immediately, with no server-side regeneration pass required.
+  // The opening segment now always plays at the same catch-up ("fastest"/
+  // 0-delay) pace archived replays already default to before Director
+  // Cut's own plan even loads (see LocalServer.ts's
+  // applyArchivedReplayDefaultSpeed) -- a viewer reaches the plan's own
+  // real pacing the instant spawn ends (the next segment's own
+  // `applySegmentAt` boundary crossing below), never slower than they'd
+  // have gotten with Director Cut disabled entirely. Follow-up (not done
+  // here): teach the server-side generator (`DirectorCutPlan.ts`) to bake
+  // this directly into new plans' `speed` field instead of overriding it
+  // client-side forever.
+  if (segment.eventReason === "opening") {
+    return ReplaySpeedMultiplier.fastest;
+  }
   return SEGMENT_SPEED_TO_CLIENT_SPEED[segment.speed];
 }
 

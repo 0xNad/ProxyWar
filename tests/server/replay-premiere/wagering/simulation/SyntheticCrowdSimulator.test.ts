@@ -133,7 +133,9 @@ describe("SyntheticCrowdSimulator", () => {
       participantId: realParticipantId,
       idempotencyKey: "idem_real_session_001",
     });
-    const { id: sessionId } = await market.createViewerSession({
+    const {
+      session: { id: sessionId },
+    } = await market.createViewerSession({
       participantId: realParticipantId,
       idempotencyKey: "idem_real_session_001",
     });

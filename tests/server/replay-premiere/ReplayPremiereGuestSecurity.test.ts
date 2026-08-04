@@ -35,7 +35,11 @@ describe("ReplayPremiereGuestSecurity", () => {
     expect(bootstrap.setCookie).toContain("Secure");
     expect(bootstrap.setCookie).toContain("HttpOnly");
     expect(bootstrap.setCookie).toContain("SameSite=Lax");
-    expect(bootstrap.setCookie).toContain("Path=/api/premieres");
+    expect(bootstrap.setCookie).toContain("Path=/api");
+    // NOT the narrower /api/premieres -- see serializeGuestCookie's doc:
+    // /api/identity/status lives outside /api/premieres and needs to see
+    // this same cookie, or it silently re-mints on every call.
+    expect(bootstrap.setCookie).not.toContain("Path=/api/premieres");
     const cookie = bootstrap.setCookie?.split(";", 1)[0];
     expect(cookie).toBeDefined();
 

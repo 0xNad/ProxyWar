@@ -4,6 +4,10 @@ import { EventBus } from "../../../core/EventBus";
 import { GameView, PlayerView } from "../../../core/game/GameView";
 import { within } from "../../../core/Util";
 import {
+  activateFocusTrap,
+  type FocusTrapHandle,
+} from "../../components/FocusTrap";
+import {
   SendDonateGoldIntentEvent,
   SendDonateTroopsIntentEvent,
 } from "../../Transport";
@@ -31,6 +35,7 @@ export class SendResourceModal extends LitElement {
   @state() private selectedPercent: number | null = null;
 
   private PRESETS = [10, 25, 50, 75, 100] as const;
+  private focusTrapHandle: FocusTrapHandle | null = null;
 
   createRenderRoot() {
     return this;
@@ -50,16 +55,31 @@ export class SendResourceModal extends LitElement {
     );
   }
 
+  disconnectedCallback() {
+    window.removeEventListener("keydown", this.handleWindowEscape);
+    this.focusTrapHandle?.deactivate();
+    this.focusTrapHandle = null;
+    super.disconnectedCallback();
+  }
+
   updated(changed: Map<string, unknown>) {
-    if (changed.has("open") && this.open) {
-      // If either side is dead, just close and do nothing
-      if (!this.isSenderAlive() || !this.isTargetAlive()) {
-        this.closeModal();
-        return;
+    if (changed.has("open")) {
+      if (this.open) {
+        // If either side is dead, just close and do nothing
+        if (!this.isSenderAlive() || !this.isTargetAlive()) {
+          this.closeModal();
+          return;
+        }
+        window.addEventListener("keydown", this.handleWindowEscape);
+        queueMicrotask(() => {
+          if (!this.open) return;
+          this.focusTrapHandle = activateFocusTrap(this);
+        });
+      } else {
+        window.removeEventListener("keydown", this.handleWindowEscape);
+        this.focusTrapHandle?.deactivate();
+        this.focusTrapHandle = null;
       }
-      queueMicrotask(() =>
-        (this.querySelector('[role="dialog"]') as HTMLElement | null)?.focus(),
-      );
     }
 
     if (
@@ -113,11 +133,22 @@ export class SendResourceModal extends LitElement {
     this.closeModal();
   }
 
-  private handleKeydown = (e: KeyboardEvent) => {
-    if (e.key === "Escape") {
+  /**
+   * Window-level so Escape keeps closing the modal even after focus has
+   * escaped it (P1 t1-02 family — same anti-pattern as the Points modal
+   * QA reproduced: a `@keydown` bound to the dialog's own DOM subtree
+   * stops firing the instant focus leaves it). Enter-to-confirm stays on
+   * the dialog's own `@keydown` below since it was never reported broken
+   * and the trap now guarantees focus can't leave the dialog anyway.
+   */
+  private readonly handleWindowEscape = (e: KeyboardEvent) => {
+    if (e.key === "Escape" && this.open) {
       e.preventDefault();
       this.closeModal();
     }
+  };
+
+  private handleKeydown = (e: KeyboardEvent) => {
     if (e.key === "Enter") {
       e.preventDefault();
       this.confirm();

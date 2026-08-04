@@ -407,9 +407,23 @@ function getCachedLangSelector(): LangSelector | null {
   return found;
 }
 
+/**
+ * `key` resolves against `<lang-selector>`'s loaded translations. `params`
+ * feeds ICU interpolation. `defaultText` is an optional English fallback
+ * returned instead of the raw `key` whenever a real translation can't be
+ * resolved — no `<lang-selector>` in the DOM at all (e.g. the `/bet` SPA
+ * shell, which ships without the translation bootstrap by design, see
+ * `docs/BETTING_HANDOFF.md` §3), translations not loaded yet, or the key
+ * missing from both the active and default translation sets. Callers in a
+ * shared component (used by both a translations-bootstrapped shell and an
+ * unbootstrapped one) should pass `defaultText`; a bootstrapped shell with
+ * translations loaded is unaffected — `message` still wins over
+ * `defaultText` whenever it resolves.
+ */
 export const translateText = (
   key: string,
   params?: Record<string, string | number>,
+  defaultText?: string,
 ): string => {
   const self = translateText as any;
   self.formatterCache ??= new Map();
@@ -418,7 +432,7 @@ export const translateText = (
   const langSelector = getCachedLangSelector();
   if (!langSelector) {
     console.warn("LangSelector not found in DOM");
-    return key;
+    return defaultText ?? key;
   }
 
   const resolvedParams = params ?? EMPTY_TRANSLATION_PARAMS;
@@ -429,7 +443,7 @@ export const translateText = (
 
   const translations = langSelector.translations;
   const defaultTranslations = langSelector.defaultTranslations;
-  if (!translations && !defaultTranslations) return key;
+  if (!translations && !defaultTranslations) return defaultText ?? key;
 
   if (self.lastLang !== langSelector.currentLang) {
     self.formatterCache.clear();
@@ -441,7 +455,7 @@ export const translateText = (
 
   message ??= defaultTranslations?.[key];
 
-  if (message === undefined) return key;
+  if (message === undefined) return defaultText ?? key;
 
   // Fast path: no params and no ICU placeholders.
   if (

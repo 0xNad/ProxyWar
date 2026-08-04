@@ -343,3 +343,48 @@ describe("/match/:matchId page shell (OG/social metadata) is spoiler-safe for a 
     expect(html.toLowerCase()).not.toContain("winner:");
   });
 });
+
+describe("status-code parity: a not-found /match|/agent|/builder page returns a real 404, not a 200 for content whose only body is 'not found' (P2, 2026-08-02)", () => {
+  test("GET /match/:matchId returns 200 for a real fixture episode, 404 for an unknown id — same HTML app-shell body either way", async () => {
+    const found = await fetch(
+      `${ORIGIN}/match/${encodeURIComponent(ORDINARY_EPISODE.episodeRequestId)}`,
+    );
+    expect(found.status).toBe(200);
+    const notFound = await fetch(
+      `${ORIGIN}/match/${encodeURIComponent("ereq_totally-unknown-id")}`,
+    );
+    expect(notFound.status).toBe(404);
+    // The client-rendered not-found UX is unchanged — same app shell body,
+    // only the transport-level status code differs.
+    const notFoundBody = await notFound.text();
+    expect(notFoundBody).toContain("<!doctype html>");
+    expect(notFoundBody).toContain("window.ASSET_MANIFEST");
+    expect(notFoundBody).not.toContain("Cannot GET");
+  });
+
+  test("GET /agent/:slug returns 200 for a real fixture agent, 404 for an unknown slug", async () => {
+    const found = await fetch(`${ORIGIN}/agent/fixture-cyan-hellstar`);
+    expect(found.status).toBe(200);
+    const notFound = await fetch(
+      `${ORIGIN}/agent/totally-unknown-agent-slug-9f3c1a`,
+    );
+    expect(notFound.status).toBe(404);
+    const notFoundBody = await notFound.text();
+    expect(notFoundBody).toContain("<!doctype html>");
+    expect(notFoundBody).toContain("window.ASSET_MANIFEST");
+    expect(notFoundBody).not.toContain("Cannot GET");
+  });
+
+  test("GET /builder/:slug returns 200 for a real fixture builder, 404 for an unknown slug", async () => {
+    const found = await fetch(`${ORIGIN}/builder/fixture-ada`);
+    expect(found.status).toBe(200);
+    const notFound = await fetch(
+      `${ORIGIN}/builder/totally-unknown-builder-slug-9f3c1a`,
+    );
+    expect(notFound.status).toBe(404);
+    const notFoundBody = await notFound.text();
+    expect(notFoundBody).toContain("<!doctype html>");
+    expect(notFoundBody).toContain("window.ASSET_MANIFEST");
+    expect(notFoundBody).not.toContain("Cannot GET");
+  });
+});

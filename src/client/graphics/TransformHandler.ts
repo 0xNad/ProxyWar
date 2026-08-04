@@ -37,8 +37,8 @@ export class GoToPositionEvent implements GameEvent {
 
 /**
  * Explicit "show the whole map" request — the one-gesture way back to a full
- * board view from the portrait spectator default (see
- * PORTRAIT_TARGET_VERTICAL_FILL) or from any deliberate zoom-in. Dispatched
+ * board view from the portrait/landscape spectator overzoom default (see
+ * SPECTATOR_OVERZOOM_TARGET_FILL) or from any deliberate zoom-in. Dispatched
  * by the PoV selector's "Whole board" pick/crosshair (PointOfViewSelector),
  * never by anything automatic. Handled by forcing centerAll()'s literal
  * whole-map "contain" landing regardless of viewport aspect.
@@ -58,17 +58,113 @@ export const CAMERA_SMOOTHING = 0.03;
 // deliberate zoom-out is allowed to land: <1 leaves a small margin around
 // the board instead of stopping exactly at its edge.
 const SPECTATOR_ZOOM_OUT_MARGIN = 0.85;
-// Portrait spectator viewports (phone/tablet held upright) land outside the
-// `cover` aspect-ratio band in centerAll(): a portrait viewport's aspect
-// (~0.4-0.6) is far from virtually every OpenFront map's aspect (roughly
-// square to 2:1 landscape), so plain "contain" there fits the map to the
-// viewport's narrower dimension (width) and wastes the rest of the taller
-// dimension as letterbox bands (P2-F10). PORTRAIT_TARGET_VERTICAL_FILL is
-// the fraction of the portrait viewport's HEIGHT the map should occupy
-// instead: enough to read as "filling the screen", short of a true `cover`
-// landing (which would crop most maps down to a narrow vertical sliver and
-// lose spectator context). See centerAll() for the full derivation.
-const PORTRAIT_TARGET_VERTICAL_FILL = 0.75;
+// Portrait OR landscape spectator viewports far from square (phone/tablet
+// either orientation) land outside the `cover` aspect-ratio band in
+// computeSpectatorFitScale(): e.g. a portrait viewport's aspect (~0.4-0.6)
+// or a landscape phone's (~2.0-2.2) is far from virtually every OpenFront
+// map's aspect (roughly square to 2:1 landscape), so plain "contain" there
+// fits the map to the viewport's narrower dimension and wastes the rest of
+// the longer dimension as letterbox bands (P2-F10 portrait; the landscape
+// counterpart found live 2026-08-02 on an 844x390 viewport — the map
+// landed in barely half the available width). SPECTATOR_OVERZOOM_TARGET_FILL
+// is the fraction of the viewport's LIMITING dimension (height in
+// portrait, width in landscape) the map should occupy instead: enough to
+// read as "filling the screen", short of a true `cover` landing (which
+// would crop most maps down to a narrow sliver and lose spectator
+// context). See computeSpectatorFitScale() for the full derivation.
+const SPECTATOR_OVERZOOM_TARGET_FILL = 0.75;
+
+export interface SpectatorFitInput {
+  readonly vpWidth: number;
+  readonly vpHeight: number;
+  readonly mapWidth: number;
+  readonly mapHeight: number;
+  /** Extra margin factor applied on top of the landing scale (e.g. 0.95 leaves a touch of breathing room; `Math.max(fit, 1)` for `cover` so this never shrinks a crop-to-fill landing back into letterboxing). */
+  readonly fit: number;
+  /** `!options.forceWholeMap && isReplaySpectatorView()` at the call site — `false` collapses straight to whole-map "contain", matching live play and `FitWholeMapEvent`. */
+  readonly spectator: boolean;
+}
+
+export interface SpectatorFitResult {
+  readonly scale: number;
+  readonly fillScale: number;
+  readonly zoomFloor: number;
+}
+
+/**
+ * Pure landing-scale computation for `centerAll()`, split out (same
+ * pure-computation/thin-caller split as `StatTimeSeriesChart.ts`'s
+ * `computeChartGeometry`) so this orientation-branching logic is
+ * unit-testable without constructing a `TransformHandler` (which needs a
+ * real `GameView`/`HTMLCanvasElement`).
+ *
+ * Three landing shapes, checked in order:
+ * 1. `cover` — spectator AND the viewport/map aspect ratios are close
+ *    enough (`aspectRatioDeviation` in `(0.5, 2)`) that filling the frame
+ *    with zero letterboxing only crops a plausible amount off the far
+ *    edges.
+ * 2. Portrait/landscape overzoom — spectator AND `cover` was rejected AND
+ *    the viewport is meaningfully non-square in EITHER orientation: land
+ *    at whichever scale renders the map at `SPECTATOR_OVERZOOM_TARGET_FILL`
+ *    of the viewport's limiting dimension (height in portrait, width in
+ *    landscape) — `rawScVer * FILL` (or `rawScHor * FILL`) always yields
+ *    exactly that fraction, independent of the map's own aspect ratio.
+ *    Clamped so this never zooms in LESS than a whole-map contain fit
+ *    (rare near-square maps already exceed the target) or MORE than a
+ *    true cover fit (never crop tighter than cover would).
+ * 3. Plain "contain" — live play, `forceWholeMap`, or a spectator
+ *    viewport close enough to square that neither overzoom branch is
+ *    needed.
+ */
+export function computeSpectatorFitScale(
+  input: SpectatorFitInput,
+): SpectatorFitResult {
+  const { vpWidth, vpHeight, mapWidth, mapHeight, fit, spectator } = input;
+  const aspectRatioDeviation = vpWidth / vpHeight / (mapWidth / mapHeight);
+  const cover =
+    spectator && aspectRatioDeviation > 0.5 && aspectRatioDeviation < 2;
+
+  const rawScHor = vpWidth / mapWidth;
+  const rawScVer = vpHeight / mapHeight;
+  const containScale = Math.min(rawScHor, rawScVer);
+  const coverScale = Math.max(rawScHor, rawScVer);
+
+  let scale: number;
+  if (cover) {
+    scale = coverScale * Math.max(fit, 1);
+  } else if (spectator && vpHeight > vpWidth) {
+    const portraitTarget = rawScVer * SPECTATOR_OVERZOOM_TARGET_FILL;
+    scale = Math.min(
+      Math.max(containScale * fit, portraitTarget),
+      coverScale,
+    );
+  } else if (spectator && vpWidth > vpHeight) {
+    // P2 fix (found live 2026-08-02): a landscape phone viewport (e.g.
+    // 844x390, aspect ~2.16) against a map NOT wide enough to fall inside
+    // the `cover` band (e.g. a roughly square map, aspect ~1.0 ->
+    // deviation ~2.16, just outside the 2.0 cutoff) fell all the way
+    // through to plain "contain" below — no orientation-aware handling
+    // existed for landscape at all, only portrait. "Contain" there fits
+    // to the viewport's HEIGHT (the binding constraint) and wastes most
+    // of its WIDTH as side letterbox bands — confirmed live at roughly
+    // half the available width wasted. Symmetric fix to the portrait
+    // branch above: overzoom to fill SPECTATOR_OVERZOOM_TARGET_FILL of
+    // the viewport's WIDTH instead.
+    const landscapeTarget = rawScHor * SPECTATOR_OVERZOOM_TARGET_FILL;
+    scale = Math.min(
+      Math.max(containScale * fit, landscapeTarget),
+      coverScale,
+    );
+  } else {
+    scale = containScale * fit;
+  }
+
+  return {
+    scale,
+    fillScale: coverScale,
+    zoomFloor: containScale * SPECTATOR_ZOOM_OUT_MARGIN,
+  };
+}
 
 export class TransformHandler {
   public scale: number = 1.8;
@@ -498,75 +594,37 @@ export class TransformHandler {
     //true, and even when this fires during its own transient startup call,
     //it's immediately superseded by the real spawn/goToPlayer zoom.
     //
-    //Cropping is skipped back to "contain" outside a plausible desktop
-    //aspect-ratio band (mirrors GameModeSelector's object-contain fallback
-    //for extreme map aspect ratios) so a landscape/tablet viewport doesn't
-    //get most of the map cropped away.
-    //
     //`options.forceWholeMap` (FitWholeMapEvent, the PoV selector's "Whole
-    //board" pick/crosshair) bypasses `cover` AND the portrait branch below
-    //entirely, landing the literal whole-map "contain" fit no matter the
-    //viewport shape — the one-gesture way back to the full board.
+    //board" pick/crosshair) bypasses `cover` AND the portrait/landscape
+    //overzoom branches entirely, landing the literal whole-map "contain"
+    //fit no matter the viewport shape — the one-gesture way back to the
+    //full board. See computeSpectatorFitScale() for the full landing-scale
+    //derivation (all three shapes: cover, portrait/landscape overzoom,
+    //plain contain).
     const vpWidth = this.boundingRect().width;
     const vpHeight = this.boundingRect().height;
     const mapWidth = this.game.width();
     const mapHeight = this.game.height();
-
-    const aspectRatioDeviation = vpWidth / vpHeight / (mapWidth / mapHeight);
     const spectator = !options.forceWholeMap && isReplaySpectatorView();
-    const cover =
-      spectator && aspectRatioDeviation > 0.5 && aspectRatioDeviation < 2;
 
-    const rawScHor = vpWidth / mapWidth;
-    const rawScVer = vpHeight / mapHeight;
-    const containScale = Math.min(rawScHor, rawScVer);
-    const coverScale = Math.max(rawScHor, rawScVer);
-
-    let tScale: number;
-    if (cover) {
-      tScale = coverScale * Math.max(fit, 1);
-    } else if (spectator && vpHeight > vpWidth) {
-      // Portrait spectator viewport (P2-F10): `cover` above excludes it for
-      // virtually every real map (portrait's ~0.4-0.6 aspect vs. maps
-      // running roughly square to 2:1 landscape), so plain "contain" would
-      // fit the map to the viewport's WIDTH and waste most of its HEIGHT as
-      // letterbox bands. Overzoom instead: land at whichever scale renders
-      // the map at PORTRAIT_TARGET_VERTICAL_FILL of the viewport's height —
-      // `rawScVer * FILL` always yields exactly that fraction, independent
-      // of the map's own aspect ratio (rendered height = mapHeight * scale
-      // = mapHeight * rawScVer * FILL = vpHeight * FILL). Clamped so this
-      // never zooms in LESS than a whole-map contain fit (rare near-square
-      // maps already exceed the target) or MORE than a true cover fit
-      // (never crop tighter than cover would). Horizontal panning reaches
-      // whatever this overzoom crops off the sides; the PoV selector's
-      // "Whole board" control (FitWholeMapEvent, forceWholeMap above) and
-      // pinch-zoom-out (spectatorZoomFloor below) both reach the true
-      // whole-map fit in one gesture.
-      const portraitTarget = rawScVer * PORTRAIT_TARGET_VERTICAL_FILL;
-      tScale = Math.min(
-        Math.max(containScale * fit, portraitTarget),
-        coverScale,
-      );
-    } else {
-      tScale = containScale * fit;
-    }
+    const { scale: tScale, fillScale, zoomFloor } = computeSpectatorFitScale({
+      vpWidth,
+      vpHeight,
+      mapWidth,
+      mapHeight,
+      fit,
+      spectator,
+    });
 
     const oHor = (mapWidth - vpWidth) / 2 / tScale;
     const oVer = (mapHeight - vpHeight) / 2 / tScale;
 
-    // fillScale: the scale at which the map exactly fills the viewport on
-    // both axes — clampOffsets()'s zero-slack threshold. zoomFloor: the
-    // "whole map visible" (plain contain) scale, backed off by
-    // SPECTATOR_ZOOM_OUT_MARGIN so a deliberate scroll-out lands a touch
-    // past a snug fit rather than exactly on its edge. Both are independent
-    // of `cover`/the landing-framing branches above (which only pick the
-    // *landing* scale) — onZoom()/clampOffsets() gate their use on
+    // See computeSpectatorFitScale()'s own doc for fillScale/zoomFloor's
+    // meaning. onZoom()/clampOffsets() gate their use on
     // isReplaySpectatorView() at each call site, so live play (which never
     // sets that) is unaffected by these being set unconditionally here.
-    // Reuses the raw containScale/coverScale computed above (identical
-    // formulas — recomputing under new names here would just shadow them).
-    this.spectatorFillScale = coverScale;
-    this.spectatorZoomFloor = containScale * SPECTATOR_ZOOM_OUT_MARGIN;
+    this.spectatorFillScale = fillScale;
+    this.spectatorZoomFloor = zoomFloor;
 
     this.override(oHor, oVer, tScale);
   }

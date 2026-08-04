@@ -102,13 +102,13 @@ export class FakeSyntheticCrowdMarket {
   async createViewerSession(options: {
     participantId: string;
     idempotencyKey: string;
-  }): Promise<{ id: string }> {
+  }): Promise<{ session: { id: string } }> {
     const existing = this.sessionsByParticipant.get(options.participantId);
-    if (existing !== undefined) return { id: existing };
+    if (existing !== undefined) return { session: { id: existing } };
     this.sessionCounter += 1;
     const id = `sess_${String(this.sessionCounter).padStart(4, "0")}${"0".repeat(28)}`;
     this.sessionsByParticipant.set(options.participantId, id);
-    return { id };
+    return { session: { id } };
   }
 
   async submitMarketOrder(options: {

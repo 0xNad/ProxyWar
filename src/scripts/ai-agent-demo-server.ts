@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "child_process";
+import compression from "compression";
 import { randomBytes, randomUUID, timingSafeEqual } from "crypto";
 import express, { type Request, type Response } from "express";
 import fs from "fs/promises";
@@ -218,6 +219,7 @@ import {
   ReplayPremierePointsLedger,
   resolveReplayPremierePointsLedgerRoot,
 } from "../server/replay-premiere/points/ReplayPremierePointsLedger";
+import { ReplayPremiereSettlementLedger } from "../server/replay-premiere/points/ReplayPremiereSettlementLedger";
 import { ReplayPremiereAnonymousWriteLimiter } from "../server/replay-premiere/ReplayPremiereAnonymousWriteLimiter";
 import { ReplayPremiereArchivedClipPromoter } from "../server/replay-premiere/ReplayPremiereArchivedClipPromoter";
 import { ReplayPremiereArchiveStore } from "../server/replay-premiere/ReplayPremiereArchiveIndex";
@@ -233,7 +235,10 @@ import {
   ReplayPremiereClips,
   ReplayPremiereRevealAutoClip,
 } from "../server/replay-premiere/ReplayPremiereClips";
-import { premiereClipRepresentativeAnchorTurn } from "../server/replay-premiere/ReplayPremiereContracts";
+import {
+  PREMIERE_ID_PATTERN,
+  premiereClipRepresentativeAnchorTurn,
+} from "../server/replay-premiere/ReplayPremiereContracts";
 import {
   ReplayPremiereError,
   toPublicReplayPremiereFailure,
@@ -265,6 +270,15 @@ import { DeterministicSyntheticCrowdTerritoryProjector } from "../server/replay-
 import { applyStaticAssetCacheControl } from "../server/StaticAssetCache";
 
 const app = express();
+// Gzip/brotli-compresses every response this app sends, including the
+// premiere replay/live-projection JSON API (`ReplayPremiereHttp.ts`'s
+// `sendJson`), which is otherwise sent uncompressed. Real Turn-payload JSON
+// (repetitive keys, small numeric deltas) compresses well; this is a pure
+// transport-layer change — the exact same bytes are hashed/verified after
+// `fetch()` transparently decompresses, so it does not touch integrity,
+// embargo, or ledger logic. See `compression()` in `src/server/Worker.ts`
+// for the same pattern already in use elsewhere in this codebase.
+app.use(compression());
 const networkConfig = loadProxyWarDemoServerNetworkConfig();
 const serverUrls = buildProxyWarDemoServerUrls(networkConfig);
 const port = networkConfig.port;
@@ -415,6 +429,14 @@ const replayPremierePointsLedgerRoot = resolveReplayPremierePointsLedgerRoot();
 export const replayPremierePointsLedger = await ReplayPremierePointsLedger.open(
   replayPremierePointsLedgerRoot,
 );
+// Durable "who won" settlement ledger — beside the points ledger, same
+// root, same atomic write-temp-then-rename convention, its own file (the
+// exact precedent `BettingPlatformAccountLinkStore` already set for a
+// second store sharing this root). Survives `cycle-premiere.sh`'s state-
+// root wipe for the same reason the points ledger does: this root is
+// outside it. See `ReplayPremiereSettlementLedger`'s doc comment.
+export const replayPremiereSettlementLedger =
+  await ReplayPremiereSettlementLedger.open(replayPremierePointsLedgerRoot);
 // Betting's link to the platform account authority — proxywar.xyz is
 // the sole account/session authority now (see the platform build's
 // contract), so betting never talks to GitHub directly and never writes a
@@ -554,6 +576,7 @@ const replayPremiereProduction = await startReplayPremiereProduction({
   // checkpoint-gated) for local/dev testing.
   wageringEnabled: envFlag("PROXYWAR_WAGERING_ENABLED"),
   pointsLedger: replayPremierePointsRecorder,
+  settlementLedger: replayPremiereSettlementLedger,
   // Deterministic, seeded synthetic bettors that keep a thin local/dev
   // market legible for demos/tester sessions. Requires PROXYWAR_WAGERING_ENABLED=1
   // too. Off by default, never for production.
@@ -1194,6 +1217,38 @@ app.get("/api/premieres/account", async (req, res) => {
   }
 });
 
+// Narrow, public "who won" read for a premiere whose market has already
+// settled — see `ReplayPremiereSettlementLedger`'s class doc for the
+// durability/scope reasoning and `PremiereEndedPage.ts` for the one
+// caller. Public data, deliberately no guest bootstrap/cookie: the winner
+// was always public the instant the market settled, and this route never
+// exposes anything narrower than that (no episode payloads, no turn
+// data, no per-viewer position). 404 for an id with no recorded
+// settlement — a pre-feature premiere, an unsettled/void-without-refund
+// premiere state that never reaches this ledger, or simply a bad id; the
+// three are indistinguishable on purpose (nothing here should hint at
+// whether an id is real).
+app.get("/api/premieres/:id/settlement", async (req, res) => {
+  if (!pointsRoutesEnabled) {
+    res.status(404).json({ error: { code: "PREMIERE_UNAVAILABLE" } });
+    return;
+  }
+  res.setHeader("Cache-Control", "no-store, max-age=0");
+  try {
+    const premiereId = req.params.id;
+    const record = PREMIERE_ID_PATTERN.test(premiereId)
+      ? await replayPremiereSettlementLedger.readSettlement(premiereId)
+      : null;
+    if (record === null) {
+      res.status(404).json({ error: { code: "SETTLEMENT_NOT_FOUND" } });
+      return;
+    }
+    res.status(200).json({ schemaVersion: 1, settlement: record });
+  } catch (error) {
+    sendReplayPremiereFailure(res, error);
+  }
+});
+
 // Narrow, per-record FeaturedMatch detail + participant identity routes
 // (product overhaul spec Stage 3 item 6 / hero states A/B). Deliberately
 // separate from the bulk `read-model.json` mirror artifact and from the
@@ -1530,6 +1585,7 @@ app.get("/trader/:accountId", async (_req, res) => {
 async function sendPublicAppShellPage(
   res: Response,
   failureLabel: string,
+  status = 200,
 ): Promise<void> {
   try {
     const appShell = await getAppShellContent(
@@ -1544,7 +1600,7 @@ async function sendPublicAppShellPage(
       ),
     );
     setHtmlNoCacheHeaders(res);
-    res.send(nonceInlineScripts(appShell, scriptNonce));
+    res.status(status).send(nonceInlineScripts(appShell, scriptNonce));
   } catch (error) {
     console.error(
       `Failed to serve ${failureLabel}: ${
@@ -1553,6 +1609,101 @@ async function sendPublicAppShellPage(
     );
     res.status(503).send(`Proxy War ${failureLabel} is not built for this server.`);
   }
+}
+/**
+ * P0 fix (found live 2026-08-02): `/ai-league-replay/<bad-id>` rendered a
+ * raw, unstyled plain-text response — no branding, no nav — while
+ * `/match`/`/agent`/`/builder` bad-ids stay inside the app shell (a
+ * themed page, client-rendered not-found state). The replay route can't
+ * follow that exact pattern: `assessPremiereLeakAudit`'s `statusHidden`
+ * check (`ReplayPremiereEligibility.ts`) requires EXACTLY 403/404 for
+ * this precise path when the run id isn't publicly allowlisted — proof a
+ * private artifact isn't exposed — so a 200 app-shell response (or a
+ * redirect) is not an option here without breaking that safety check
+ * every premiere admission depends on. This keeps the required status
+ * code and replaces only the body: a small, self-contained branded page
+ * (matching the site's dark theme) with working nav links, instead of a
+ * bare string.
+ */
+function sendThemedNotFoundPage(
+  res: Response,
+  status: number,
+  message: string,
+  overrides: { title?: string; ctaLabel?: string; ctaHref?: string } = {},
+): void {
+  const title = overrides.title ?? "Not found";
+  const ctaLabel = overrides.ctaLabel ?? "Go to the league";
+  const ctaHref = overrides.ctaHref ?? "/league";
+  res.status(status).type("html").send(`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(title)} | Proxy War</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background: #07090d;
+    color: #e7ebf2;
+    font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+  }
+  nav {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    padding: 16px 24px;
+    border-bottom: 1px solid #232a3a;
+  }
+  nav a, .brand {
+    color: #8b93a6;
+    text-decoration: none;
+    font-weight: 700;
+    font-size: 13px;
+  }
+  .brand { color: #e7ebf2; font-size: 15px; margin-right: auto; }
+  nav a:hover { color: #e7ebf2; }
+  main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 48px 20px;
+  }
+  h1 { font-size: 28px; margin: 0 0 12px; }
+  p { color: #9fb0c3; max-width: 32em; margin: 0 0 24px; }
+  a.cta {
+    color: #04121e;
+    background: #56c7f5;
+    text-decoration: none;
+    font-weight: 800;
+    padding: 10px 20px;
+    border-radius: 8px;
+  }
+</style>
+</head>
+<body>
+  <nav>
+    <span class="brand">Proxy War</span>
+    <a href="/league">League</a>
+    <a href="/watch">Watch</a>
+    <a href="/agents">Agents</a>
+    <a href="/builders">Builders</a>
+    <a href="/build">Build</a>
+  </nav>
+  <main>
+    <h1>${escapeHtml(title)}</h1>
+    <p>${escapeHtml(message)}</p>
+    <a class="cta" href="${escapeHtml(ctaHref)}">${escapeHtml(ctaLabel)}</a>
+  </main>
+</body>
+</html>`);
 }
 // Resolves the spoiler-safe `{title, description}` pair `/match/:matchId`'s
 // OG/social card and `<title>` use, from the SAME two sources
@@ -1654,6 +1805,54 @@ async function resolveMatchDetailPageMetadata(
   };
 }
 
+/**
+ * Best-effort agent/builder slug existence check for the /agent/:slug and
+ * /builder/:slug status-code-parity fix (P2, 2026-08-02): reads the SAME
+ * `read-model.json` `AgentProfilePage.ts`/`BuilderProfilePage.ts` already
+ * fetch client-side, replicating each page's own `load()` match rule
+ * exactly — a registered agent's `slug`, OR (agents only) any
+ * UNREGISTERED agent's `provisionalSlug` (see `AgentProfilePage.ts`'s own
+ * doc for why a live provisional identity must resolve too, same as
+ * `loadAnalyticsMatchLabels` above reads this file). Never throws and a
+ * read/parse failure returns `null` rather than empty sets — the route
+ * handlers below treat that as "can't tell", degrading to 200 (serve
+ * normally) rather than falsely 404ing a page that might be real.
+ */
+async function loadReadModelSlugSets(): Promise<{
+  agentSlugs: Set<string>;
+  builderSlugs: Set<string>;
+} | null> {
+  try {
+    const raw = await fs.readFile(
+      path.join(runsRootDir, "league", "read-model.json"),
+      "utf8",
+    );
+    const parsed = JSON.parse(raw) as { agents?: unknown; builders?: unknown };
+    const agentSlugs = new Set<string>();
+    for (const entry of Array.isArray(parsed.agents) ? parsed.agents : []) {
+      const agent = entry as {
+        slug?: unknown;
+        registered?: unknown;
+        provisionalSlug?: unknown;
+      };
+      if (typeof agent.slug === "string") agentSlugs.add(agent.slug);
+      if (
+        agent.registered === false &&
+        typeof agent.provisionalSlug === "string"
+      ) {
+        agentSlugs.add(agent.provisionalSlug);
+      }
+    }
+    const builderSlugs = new Set<string>();
+    for (const entry of Array.isArray(parsed.builders) ? parsed.builders : []) {
+      const builder = entry as { slug?: unknown };
+      if (typeof builder.slug === "string") builderSlugs.add(builder.slug);
+    }
+    return { agentSlugs, builderSlugs };
+  } catch {
+    return null;
+  }
+}
 // Serves `/match/:matchId` — same `public.html` shell as every other
 // `sendPublicAppShellPage` route, but with per-match OG/social metadata
 // spliced into `<head>` (title, description, canonical, `og:*`,
@@ -1690,8 +1889,14 @@ async function sendMatchDetailPageShell(
       ),
     );
     setHtmlNoCacheHeaders(res);
+    // P2 status-code-parity fix (2026-08-02): `metadata === null` means
+    // `resolveMatchDetailPageMetadata` couldn't resolve this id to a real,
+    // revealed record — the SAME condition `MatchDetailPage.ts`'s client
+    // renders its own honest not-found state for. A crawler or health
+    // check must see a genuine 404, not a 200 for a page whose only
+    // content is "not found" (see item 2 of the 2026-08-02 P2 batch).
     if (metadata === null) {
-      res.send(nonceInlineScripts(appShell, scriptNonce));
+      res.status(404).send(nonceInlineScripts(appShell, scriptNonce));
       return;
     }
     const canonicalUrl = new URL(
@@ -1775,14 +1980,24 @@ app.get("/watch", async (_req, res) => {
 app.get("/agents", async (_req, res) => {
   await sendPublicAppShellPage(res, "the agents directory");
 });
-app.get("/agent/:slug", async (_req, res) => {
-  await sendPublicAppShellPage(res, "the agent profile page");
+app.get("/agent/:slug", async (req, res) => {
+  // P2 status-code-parity fix (2026-08-02): see `loadReadModelSlugSets`'s
+  // own doc — `null` means "can't tell", never a false 404.
+  const slugs = await loadReadModelSlugSets();
+  const status =
+    slugs !== null && !slugs.agentSlugs.has(req.params.slug) ? 404 : 200;
+  await sendPublicAppShellPage(res, "the agent profile page", status);
 });
 app.get("/builders", async (_req, res) => {
   await sendPublicAppShellPage(res, "the builders directory");
 });
-app.get("/builder/:slug", async (_req, res) => {
-  await sendPublicAppShellPage(res, "the builder profile page");
+app.get("/builder/:slug", async (req, res) => {
+  // P2 status-code-parity fix (2026-08-02): see `loadReadModelSlugSets`'s
+  // own doc — `null` means "can't tell", never a false 404.
+  const slugs = await loadReadModelSlugSets();
+  const status =
+    slugs !== null && !slugs.builderSlugs.has(req.params.slug) ? 404 : 200;
+  await sendPublicAppShellPage(res, "the builder profile page", status);
 });
 app.get("/match/:matchId", async (req, res) => {
   await sendMatchDetailPageShell(req, res);
@@ -2160,10 +2375,19 @@ app.get("/bet", (request, response) => {
   const ids = replayPremiereHttpRegistry.premiereIds();
   const current = ids.at(-1);
   if (current === undefined) {
-    response
-      .status(503)
-      .type("text/plain")
-      .send("No premiere is currently running.");
+    // Between cycles (a settled premiere replacing, or the queue briefly
+    // empty) — genuinely temporary, not a broken link, so this is neither
+    // `sendThemedNotFoundPage`'s default "Not found" framing nor a raw
+    // plain-text 503 (the previous behavior here — no branding, no nav,
+    // indistinguishable from a real outage to a visitor who just wants to
+    // trade). Same themed shell, honest copy, and a retry-shortly nudge
+    // instead of a dead end.
+    sendThemedNotFoundPage(
+      response,
+      503,
+      "No premiere is currently running. The next one comes up automatically within a few minutes.",
+      { title: "Between markets", ctaLabel: "Go to the league", ctaHref: "/league" },
+    );
     return;
   }
   // The GitHub callback lands on /bet?github=… and this is a second hop, so
@@ -2277,10 +2501,16 @@ if (leagueWrapperOnly) {
         return;
       }
       if (isProxyWarReplayOrRunPath(req.path)) {
-        res.status(404).send("AI league replay record not found.");
+        sendThemedNotFoundPage(res, 404, "AI league replay record not found.");
         return;
       }
-      res.redirect("/league");
+      // P0 fix (found live 2026-08-02): this used to silently
+      // `res.redirect("/league")` for ANY unrecognized path, with no
+      // acknowledgment a visitor's URL was actually wrong — a typo'd or
+      // stale link looked indistinguishable from a normal league visit.
+      // Same themed page the replay route above uses (status 404, real
+      // nav) rather than a silent bounce.
+      sendThemedNotFoundPage(res, 404, "This page doesn't exist.");
       return;
     }
     if (req.method === "POST") {
@@ -2929,7 +3159,7 @@ if (betaAccess.enabled) {
 if (leagueWrapperOnly) {
   app.get("/ai-league-replay/:runID", async (req, res) => {
     if (!isProxyWarPublicLeaguePath(req.path)) {
-      res.status(404).send("AI league replay record not found.");
+      sendThemedNotFoundPage(res, 404, "AI league replay record not found.");
       return;
     }
     const runID = stringParam(req.params.runID);
@@ -4182,7 +4412,7 @@ for (const replayRoute of [
   app.get(replayRoute, async (req, res) => {
     const runID = String(req.params.runID);
     if (!isSafeProxyWarArtifactSegment(runID)) {
-      res.status(404).send("AI league replay record not found.");
+      sendThemedNotFoundPage(res, 404, "AI league replay record not found.");
       return;
     }
     // This is a bare redirect to the canonical /ai-league-replay/<runID>
@@ -4199,7 +4429,7 @@ for (const replayRoute of [
       !isInsideRoot(gameRecordPath, runsRootDir) ||
       !(await publicReplayRecordIsRenderable(gameRecordPath))
     ) {
-      res.status(404).send("AI league replay record not found.");
+      sendThemedNotFoundPage(res, 404, "AI league replay record not found.");
       return;
     }
     res.redirect(`/ai-league-replay/${encodeURIComponent(runID)}`);

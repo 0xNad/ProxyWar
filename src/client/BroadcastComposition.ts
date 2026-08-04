@@ -84,6 +84,21 @@ function renderCollapseToggle(
  */
 export interface CompetitorRailEntry {
   playerName: string;
+  /**
+   * The GameView/PlayerView identity this seat correlates to (P0 fix,
+   * follow-controls sync, deploy 3.4) — `playerName` alone is NOT enough:
+   * `PointOfViewSelector`'s own PlayerView identity lives in a completely
+   * disjoint namespace from a roster's `playerName` (confirmed live: the
+   * GameView's own `name()`/`displayName()` are procedurally-generated
+   * in-game nation names, never the roster's real agent/seat name), so a
+   * rail click dispatched by playerName alone could never resolve to a
+   * real followed player. `clientID` is the identifier both sides
+   * actually share. Optional and defaults to null (no correlation
+   * available — the rail seat renders normally but can never actually
+   * resolve to/highlight a real follow target) so a caller that hasn't
+   * been updated to supply it keeps compiling, at today's behavior.
+   */
+  clientID?: string | null;
   displayName: string;
   agentSlug: string | null;
   emblemSvg: string | null;
@@ -107,10 +122,14 @@ export interface CompetitorRailCallbacks {
   /**
    * Camera-follow discoverability (spec item 6): clicking a rail seat pans
    * to that Agent — the SAME opt-in-only pan `PointOfViewSelector`'s
-   * crosshair button already triggers, never automatic. Omit to render a
-   * non-interactive rail (e.g. a context with no game view attached).
+   * crosshair button already triggers, never automatic. `clientID` is the
+   * identifier `PointOfViewSelector` can actually resolve to a PlayerView
+   * (see `CompetitorRailEntry.clientID`'s own doc) — `playerName` alone is
+   * kept for callers/analytics that still want the human-readable name.
+   * Omit `onSelect` entirely to render a non-interactive rail (e.g. a
+   * context with no game view attached).
    */
-  onSelect?: (playerName: string) => void;
+  onSelect?: (playerName: string, clientID: string | null) => void;
   /** Collapse/expand (spec item 1). Omit `onToggleCollapsed` to render a rail with no toggle at all (always expanded) — see `renderCollapseToggle`'s own doc for the caller-owned-state contract. */
   collapsed?: boolean;
   onToggleCollapsed?: () => void;
@@ -172,6 +191,11 @@ function renderCompetitorRailEntry(
   callbacks: CompetitorRailCallbacks,
 ): HTMLElement {
   const item = element("li", "broadcast-rail-entry");
+  // Stable per-agent identity key (P1 scroll-teleport fix): lets
+  // `patchKeyedRegion` reconcile this list in place across a per-tick
+  // rebuild instead of the caller replacing the whole `.broadcast-rail`
+  // subtree — see that function's own doc.
+  item.dataset.railEntryKey = entry.playerName;
   item.dataset.alive =
     entry.alive === null ? "unknown" : entry.alive ? "true" : "false";
   item.dataset.followed = String(entry.followed);
@@ -197,7 +221,7 @@ function renderCompetitorRailEntry(
       }),
     );
     surface.addEventListener("click", () => {
-      callbacks.onSelect?.(entry.playerName);
+      callbacks.onSelect?.(entry.playerName, entry.clientID ?? null);
     });
   }
 
@@ -318,6 +342,7 @@ export type CuratedWarRoomEventKind =
   | "first_strike"
   | "betrayal"
   | "elimination"
+  | "nuke"
   | "plan_change";
 
 /**
@@ -331,6 +356,7 @@ const WAR_ROOM_GLYPHS: Record<CuratedWarRoomEventKind, string> = {
   first_strike: "\u2192", // → arrow
   betrayal: "\u2020", // † dagger
   elimination: "\u2715", // ✕ multiplication x
+  nuke: "\u2622", // ☢ radioactive sign — matches ReplayPremiereOverlay.ts's own WAR_EVENT_GLYPHS
   plan_change: "\u21BB", // ↻ clockwise open arrow
 };
 
@@ -351,6 +377,21 @@ export interface CuratedWarRoomEvent {
   participants: readonly string[];
   /** Extra detail shown only once the row is expanded. Null when there is nothing beyond the headline. */
   expandedDetail: string | null;
+  /**
+   * Visual weight tier (War Room content curation spec, deploy 3.3):
+   * 1 = major (elimination/alliance/betrayal — always full-width, bold,
+   * distinct accent), 2 = notable (current default row style), 3 = routine
+   * (compact, muted — a producer that groups consecutive tier-3 runs into
+   * one collapsed summary row, e.g. groupRoutineWarRoomEvents in
+   * AiLeagueReplayOverlay.ts, is what actually keeps the rendered list from
+   * flooding; this component only ever renders the tier it's given).
+   * Optional and defaults to 2: only Full Replay's curatedWarRoomEvents
+   * currently classifies impact — every other/older producer (Premiere's
+   * live pushWarRoomEvent, every existing test fixture) is left at the
+   * unclassified default rather than forced to pick a tier it has no basis
+   * for computing.
+   */
+  tier?: 1 | 2 | 3;
 }
 
 export interface WarRoomFeedCallbacks {
@@ -415,7 +456,16 @@ export function renderWarRoomEvent(
   callbacks: WarRoomFeedCallbacks,
 ): HTMLElement {
   const item = element("li", "broadcast-war-room-item");
+  // Stable per-event identity key (P1 scroll-teleport fix, same
+  // convention as `renderCompetitorRailEntry`'s `railEntryKey`): lets
+  // `patchKeyedRegion` reconcile a caller's list in place. Full Replay's
+  // own ticker never needs this (it patches via `patchDomWindowForward`'s
+  // position-based append/prune instead), but ReplayPremiereOverlay.ts's
+  // War Room feed re-renders its whole list per volatile frame and relies
+  // on this key to avoid tearing the scrolled list down each time.
+  item.dataset.warRoomEventId = event.id;
   item.dataset.kind = event.kind;
+  item.dataset.tier = String(event.tier ?? 2);
   const summary = element("button", "broadcast-war-room-summary");
   summary.type = "button";
   const expanded =
@@ -1049,6 +1099,10 @@ export function renderAnalystEventLog(events: readonly AnalystEventRow[]): HTMLE
  */
 export function renderAnalystEventRow(event: AnalystEventRow): HTMLLIElement {
   const item = element("li", "broadcast-analyst-events-row") as HTMLLIElement;
+  // Stable per-event identity key (P1 scroll-teleport fix) — see
+  // `renderWarRoomEvent`'s matching `warRoomEventId` doc; `sequence` is
+  // this row's own globally-unique ordinal (`AnalystEventRow.sequence`).
+  item.dataset.analystEventKey = String(event.sequence);
   item.dataset.kind = event.kind;
   item.dataset.tone = event.tone;
   const parts = [
@@ -1179,4 +1233,96 @@ export function renderMatchStateStrip(input: MatchStateStripInput): HTMLElement 
     );
   }
   return strip;
+}
+
+// ---------------------------------------------------------------------------
+// Content-keyed list patching (P1 scroll-teleport fix, found live: "some
+// parts of the panel are not scrollable, they teleport me back when I try
+// to scroll in director cut")
+// ---------------------------------------------------------------------------
+
+/**
+ * Content-keyed DOM patch for a small list that gets fully recomputed every
+ * tick — membership is a stable identity set, but per-item content AND
+ * order can both change (a re-ranked competitor rail, a re-sorted
+ * standings/diplomacy strip, a live feed that only ever grows). This is the
+ * sibling primitive to `AiLeagueReplayOverlay.ts`'s own
+ * `patchDomWindowForward` for callers whose shape ISN'T that function's
+ * append-only/windowed log (which reorders never, and prunes only from the
+ * front) — a rail/standings row can move anywhere in the list from one tick
+ * to the next.
+ *
+ * Migrates `freshContainer`'s already-built children into `liveContainer`
+ * by `keyAttr`: an existing keyed child is reused as-is when its markup is
+ * unchanged (`outerHTML` compare), replaced in place only when it actually
+ * differs, and moved to its new position with `insertBefore` — a DOM move,
+ * never a remove-then-recreate, so per-row local UI state (an expanded
+ * `<details>`, a hovered/focused element) survives a reorder untouched.
+ * Any existing child with no key at all (a stale "empty"/"loading"
+ * placeholder from before the list had real content) is dropped
+ * unconditionally; any survivor whose key no longer appears in the fresh
+ * set is removed.
+ *
+ * `liveContainer`'s own childList is NEVER wholesale reassigned — no
+ * `innerHTML =`, no `replaceChildren()`, and the caller must never
+ * `container.replaceWith(freshContainer)` either — so `liveContainer`'s own
+ * `scrollTop` is never touched. This is the exact fix for the "replaceChildren
+ * /full subtree swap resets scrollTop" mechanism class: a per-tick volatile
+ * re-render that tore down a scrolled container wholesale, teleporting the
+ * viewer back to the top on the very next content change.
+ */
+export function patchKeyedRegion(
+  liveContainer: HTMLElement,
+  freshContainer: HTMLElement,
+  keyAttr: string,
+): void {
+  const existingByKey = new Map<string, HTMLElement>();
+  for (const child of Array.from(liveContainer.children) as HTMLElement[]) {
+    const key = child.getAttribute(keyAttr);
+    if (key !== null) {
+      existingByKey.set(key, child);
+    } else {
+      // Stale unkeyed content (e.g. an initial "waiting for data"
+      // placeholder) never survives the first real patch.
+      child.remove();
+    }
+  }
+
+  const keepKeys = new Set<string>();
+  let cursor: Element | null = liveContainer.firstElementChild;
+  for (const freshChild of Array.from(freshContainer.children)) {
+    const key = freshChild.getAttribute(keyAttr);
+    if (key === null) {
+      // Unkeyed fresh content (e.g. a fresh "no data" placeholder) has
+      // nothing to reconcile against — just position it.
+      if (cursor !== freshChild) liveContainer.insertBefore(freshChild, cursor);
+      cursor = freshChild.nextElementSibling;
+      continue;
+    }
+    keepKeys.add(key);
+    const existing = existingByKey.get(key);
+    let node: Element;
+    if (existing !== undefined && existing.outerHTML === freshChild.outerHTML) {
+      node = existing;
+    } else if (existing !== undefined) {
+      // `cursor` may currently BE `existing` (the common "patch this
+      // item's content in place, don't reorder it" case — e.g. a rail
+      // row's territory ticking every frame). `replaceWith` detaches
+      // `existing` from the live tree, so leaving `cursor` pointing at it
+      // would make the `insertBefore` below throw `NotFoundError` against
+      // a reference node that's no longer anyone's child. `freshChild`
+      // lands in that exact same slot, so retarget `cursor` to it first.
+      if (cursor === existing) cursor = freshChild;
+      existing.replaceWith(freshChild);
+      node = freshChild;
+    } else {
+      node = freshChild;
+    }
+    if (cursor !== node) liveContainer.insertBefore(node, cursor);
+    cursor = node.nextElementSibling;
+  }
+
+  for (const [key, el] of existingByKey) {
+    if (!keepKeys.has(key)) el.remove();
+  }
 }

@@ -4,6 +4,7 @@ import {
   APP_SHELL_ROOT_CLASSES,
   appShellFooter,
   appShellHeader,
+  waitForTranslationsReady,
 } from "./AppShellChrome";
 import { translateText } from "../Utils";
 import { analytics } from "../analytics/AnalyticsClient";
@@ -43,7 +44,9 @@ function validateClaimedGithub(raw: string): string | null {
  * 4. Run locally — exact `coworld run-episode --verify-replay` +
  *    STRATEGY/buildState/choose editing, verified against the starter's
  *    actual source (`llm-player.mjs`/`starter-player.mjs`) and
- *    `coworld-adapter/ENTER_THE_LEAGUE.md`.
+ *    `coworld-adapter/ENTER_THE_LEAGUE.md`; also links the full
+ *    `player-protocol.md` decision-contract reference that Step 2's
+ *    bring-your-own-policy option promises.
  * 5. Upload and enter — the real `launch.sh` + `coworld upload-policy` /
  *    `coworld leagues` / `coworld submit` sequence.
  * 6. Verify — a checklist an entrant can actually act on; the backstage
@@ -51,10 +54,11 @@ function validateClaimedGithub(raw: string): string | null {
  *    CI script, not something a builder without repo access can run).
  * 7. Improve — where results/feedback live, next-version workflow.
  *
- * Step 2's "exhibition/beta" callout deliberately points at the SEPARATE
- * `/agent-start` relay/Agent-Card path rather than duplicating it — spec
- * item 2: "reference, don't duplicate... present both honestly, clearly
- * separated."
+ * Step 2 used to also point at a SEPARATE `/agent-start` relay/Agent-Card
+ * exhibition path; that route now 404s on the live app router (it only still
+ * exists under the historical `ai-agent-demo-server.ts`, marked
+ * maintenance-only in AGENTS.md), so the callout was removed rather than
+ * left pointing at a dead link (2026-08-02).
  */
 @customElement("build-page")
 export class BuildPage extends LitElement {
@@ -104,35 +108,7 @@ export class BuildPage extends LitElement {
   connectedCallback(): void {
     super.connectedCallback();
     this.reportStep(this.step);
-    void this.rerenderOnceTranslationsReady();
-  }
-
-  /**
-   * `translateText()` reads `<lang-selector>`'s `translations`/
-   * `defaultTranslations` state directly at call time — it has no
-   * subscription of its own, so a caller only ever sees a translation once
-   * SOMETHING re-renders after `LangSelector.initializeLanguage()`'s async
-   * load resolves (see `Utils.ts`'s `translateText`). Every other public
-   * page happens to get a free second render from its own async read-model
-   * fetch; `/build` has no such fetch on first paint, so without this it
-   * would render raw `build_page.*` keys forever on a cold load. Bounded
-   * and cheap: a handful of short polls, never an indefinite loop.
-   */
-  private async rerenderOnceTranslationsReady(): Promise<void> {
-    for (let attempt = 0; attempt < 20; attempt++) {
-      const langSelector = document.querySelector("lang-selector") as
-        | { translations?: unknown; updateComplete?: Promise<unknown> }
-        | null;
-      if (langSelector?.translations !== undefined) {
-        this.requestUpdate();
-        return;
-      }
-      if (langSelector?.updateComplete !== undefined) {
-        await langSelector.updateComplete;
-      } else {
-        await new Promise((resolve) => setTimeout(resolve, 20));
-      }
-    }
+    void waitForTranslationsReady().then(() => this.requestUpdate());
   }
 
   disconnectedCallback(): void {
@@ -515,14 +491,6 @@ export class BuildPage extends LitElement {
           </p>
         </div>
       </div>
-      <p class="mt-4 text-xs text-ink-muted">
-        ${translateText("build_page.step2.exhibition_note")}
-        <a
-          href="/agent-start"
-          class="text-cyan-400 underline outline-none hover:text-cyan-300 focus-visible:ring-2 focus-visible:ring-accent"
-          >${translateText("build_page.step2.exhibition_link")}</a
-        >.
-      </p>
     `;
   }
 
@@ -792,6 +760,18 @@ export class BuildPage extends LitElement {
     `;
   }
 
+  /**
+   * P0 fix (found live 2026-08-02): this step used to introduce the
+   * coworld CLI (list/run-episode) with no explanation of how it relates
+   * to Step 5's launch.sh — two parallel toolchains, no cross-reference.
+   * `toolchain_note` names the relationship explicitly (this is Softmax's
+   * own coworld CLI, a lower-level/advanced tool launch.sh wraps
+   * internally — confirmed against `coworld-adapter/ENTER_THE_LEAGUE.md`
+   * and `tester-starter-llm/launch.sh`'s own `coworld upload-policy`
+   * call). The sign-in command also moved here from Step 5: `coworld
+   * list`/`run-episode` need it directly, while launch.sh signs itself in
+   * and never did.
+   */
   private renderStep4(): TemplateResult {
     return html`
       <h2 class="text-lg font-bold text-ink">
@@ -800,6 +780,16 @@ export class BuildPage extends LitElement {
       <p class="mt-2 text-sm text-ink-muted">
         ${translateText("build_page.step4.prereqs")}
       </p>
+      <p class="mt-2 text-sm text-ink-muted">
+        ${translateText("build_page.step4.toolchain_note")}
+      </p>
+      <p class="mt-4 text-sm text-ink-muted">
+        ${translateText("build_page.step4.sign_in")}
+      </p>
+      ${this.renderCopyBlock(
+        "uvx --from softmax-cli softmax login",
+        "step4-login",
+      )}
       <p class="mt-4 text-sm font-bold text-ink">
         ${translateText("build_page.step4.find_coworld_id")}
       </p>
@@ -833,6 +823,16 @@ export class BuildPage extends LitElement {
         <li>${translateText("build_page.step4.contract_timeout")}</li>
         <li>${translateText("build_page.step4.contract_degradation")}</li>
       </ul>
+      <p class="mt-4 text-xs text-ink-muted">
+        ${translateText("build_page.step4.protocol_reference_prefix")}
+        <a
+          href="https://github.com/0xNad/ProxyWar/blob/main/coworld-adapter/docs/player-protocol.md"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="text-cyan-400 underline outline-none hover:text-cyan-300 focus-visible:ring-2 focus-visible:ring-accent"
+          >${translateText("build_page.step4.protocol_reference_link")}</a
+        >.
+      </p>
     `;
   }
 
@@ -842,10 +842,6 @@ export class BuildPage extends LitElement {
         ${translateText("build_page.step5.heading")}
       </h2>
       <p class="mt-2 text-sm text-ink-muted">
-        ${translateText("build_page.step5.sign_in")}
-      </p>
-      ${this.renderCopyBlock("uv run softmax login", "step5-login")}
-      <p class="mt-4 text-sm text-ink-muted">
         ${translateText("build_page.step5.launch_intro")}
       </p>
       ${this.renderCopyBlock(
@@ -857,6 +853,9 @@ export class BuildPage extends LitElement {
       </p>
       <p class="mt-4 text-sm font-bold text-ink">
         ${translateText("build_page.step5.enter_title")}
+      </p>
+      <p class="mt-1 text-xs text-ink-muted">
+        ${translateText("build_page.step5.enter_toolchain_note")}
       </p>
       ${this.renderCopyBlock(
         "uvx --from coworld coworld leagues        # find the Proxywar row",
@@ -873,12 +872,7 @@ export class BuildPage extends LitElement {
   }
 
   private renderStep6(): TemplateResult {
-    const items = [
-      "build_page.step6.image_uploaded",
-      "build_page.step6.policy_connects",
-      "build_page.step6.legal_decision",
-      "build_page.step6.no_crash",
-      "build_page.step6.replay_produced",
+    const remainingItems = [
       "build_page.step6.result_valid",
       "build_page.step6.qualifier_passed",
       "build_page.step6.profile_mapped",
@@ -888,7 +882,36 @@ export class BuildPage extends LitElement {
         ${translateText("build_page.step6.heading")}
       </h2>
       <ul class="mt-3 space-y-2 text-sm text-ink-muted">
-        ${items.map(
+        <li class="flex items-start gap-2">
+          <span class="mt-0.5 text-accent">&#9633;</span>
+          <span>${translateText("build_page.step6.image_uploaded")}</span>
+        </li>
+        <li class="flex items-start gap-2">
+          <span class="mt-0.5 text-accent">&#9633;</span>
+          <span>${translateText("build_page.step6.policy_connects")}</span>
+        </li>
+        <li class="flex items-start gap-2">
+          <span class="mt-0.5 text-accent">&#9633;</span>
+          <span>${translateText("build_page.step6.legal_decision")}</span>
+        </li>
+        <li class="flex items-start gap-2">
+          <span class="mt-0.5 text-accent">&#9633;</span>
+          <span>${translateText("build_page.step6.no_crash")}</span>
+        </li>
+        <li class="flex items-start gap-2">
+          <span class="mt-0.5 text-accent">&#9633;</span>
+          <span
+            >${translateText("build_page.step6.replay_produced_prefix")}
+            <a
+              href="https://softmax.com/observatory"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="text-cyan-400 underline outline-none hover:text-cyan-300 focus-visible:ring-2 focus-visible:ring-accent"
+              >softmax.com/observatory</a
+            >.</span
+          >
+        </li>
+        ${remainingItems.map(
           (key) => html`
             <li class="flex items-start gap-2">
               <span class="mt-0.5 text-accent">&#9633;</span>
@@ -903,13 +926,31 @@ export class BuildPage extends LitElement {
     `;
   }
 
+  /**
+   * P0 fix (found live 2026-08-02): "softmax.com/observatory" used to
+   * appear as bare unlinked text on both this step and Step 6, with no
+   * explanation of what it is or how it relates to ProxyWar. Now a real
+   * link, plus one sentence naming the relationship: Observatory is
+   * Softmax's own hosting console (raw per-decision logs/scores);
+   * ProxyWar surfaces the public league identity built on top of it.
+   */
   private renderStep7(): TemplateResult {
     return html`
       <h2 class="text-lg font-bold text-ink">
         ${translateText("build_page.step7.heading")}
       </h2>
       <p class="mt-2 text-sm text-ink-muted">
-        ${translateText("build_page.step7.replays")}
+        ${translateText("build_page.step7.replays_prefix")}
+        <a
+          href="https://softmax.com/observatory"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="text-cyan-400 underline outline-none hover:text-cyan-300 focus-visible:ring-2 focus-visible:ring-accent"
+          >softmax.com/observatory</a
+        >.
+      </p>
+      <p class="mt-2 text-xs text-ink-muted">
+        ${translateText("build_page.step7.observatory_explainer")}
       </p>
       <p class="mt-2 text-sm text-ink-muted">
         ${translateText("build_page.step7.results")}

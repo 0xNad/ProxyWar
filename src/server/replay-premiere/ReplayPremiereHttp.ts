@@ -692,7 +692,7 @@ async function handleSessionWrite(options: {
   if (attribution !== null && incomingMoment === null) {
     throw invalidRequest("share_attribution_not_found", 400);
   }
-  const session = await withTimeout(
+  const { session, created } = await withTimeout(
     options.target.interactions.createViewerSession({
       participantId,
       idempotencyKey: options.idempotencyKey,
@@ -711,6 +711,7 @@ async function handleSessionWrite(options: {
     schemaVersion: options.interactionContractVersion,
     csrfToken: guest.csrfToken,
     session,
+    created,
     premiereState: options.target.runtime.readLifecycleState(),
     checkpoints: options.target.interactions.readCheckpoints(participantId),
     incomingMoment,

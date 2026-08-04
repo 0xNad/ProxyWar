@@ -711,6 +711,27 @@ function finalizeRelationship(
   };
 }
 
+/**
+ * P0 fix (2026-08-03): every eliminated agent's synthetic event used to be
+ * stamped at the match's own FINAL turn (`lastTurn` below), regardless of
+ * when that agent actually died -- see `AgentMatchRecap.ts`'s
+ * `compressTerminalEliminations` doc, which already documented this exact
+ * gap. The client windows the War Room feed to the viewer's own playhead
+ * (`event.turn <= currentTurn`), so a viewer watching anywhere before the
+ * literal last turn saw ZERO eliminations, no matter how many agents had
+ * already died -- reported live on a 12-player match already down to 7
+ * alive with none shown.
+ *
+ * This pipeline has no sampled turn-by-turn state series to consult (that
+ * is `AgentMatchStateDerivations.ts`'s `computeEliminationTimings`, the
+ * only genuinely turn-accurate signal, used by `AgentDecisiveMoments.ts` —
+ * not available here), so the best available proxy is each agent's own
+ * LAST decision record: an eliminated agent stops being asked to decide,
+ * so its last record's turn is at most a few turns before its real death —
+ * far closer than the match's final turn for anyone eliminated mid-match.
+ * Falls back to `lastTurn` only when an agent has no records at all (e.g.
+ * failed to ever spawn), preserving today's behavior for that edge case.
+ */
 function addEliminationEvents(input: {
   input: BuildAgentSpectatorTelemetryInput;
   agents: SpectatorAgent[];
@@ -722,12 +743,14 @@ function addEliminationEvents(input: {
       (max, record) => Math.max(max, record.turnNumber),
       0,
     );
+  const lastRecordTurnByAgent = lastRecordTurnPerAgent(input.input.records);
   for (const agent of input.agents) {
     if (agent.isAlive === false) {
+      const turnNumber = lastRecordTurnByAgent.get(agent.agentID) ?? lastTurn;
       input.events.push({
-        id: `${lastTurn}:elimination:${agent.agentID}`,
+        id: `${turnNumber}:elimination:${agent.agentID}`,
         sequence: Number.MAX_SAFE_INTEGER - agent.colorIndex,
-        turnNumber: lastTurn,
+        turnNumber,
         kind: "elimination",
         tone: "war",
         actorAgentID: agent.agentID,
@@ -741,6 +764,19 @@ function addEliminationEvents(input: {
       });
     }
   }
+}
+
+function lastRecordTurnPerAgent(
+  records: readonly AgentDecisionRecord[],
+): Map<string, number> {
+  const result = new Map<string, number>();
+  for (const record of records) {
+    const current = result.get(record.agentID);
+    if (current === undefined || record.turnNumber > current) {
+      result.set(record.agentID, record.turnNumber);
+    }
+  }
+  return result;
 }
 
 function buildCommunicationThreads(

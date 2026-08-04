@@ -10,7 +10,10 @@
  * uses for its own mobile-breakpoint regression) rather than an
  * elementFromPoint measurement.
  */
+import { EventBus } from "../../../../src/core/EventBus";
 import { PointOfViewSelector } from "../../../../src/client/graphics/layers/PointOfViewSelector";
+import { FitWholeMapEvent } from "../../../../src/client/graphics/TransformHandler";
+import { writeManualPovSelection } from "../../../../src/client/graphics/PointOfView";
 
 interface LitLikeTemplateResult {
   strings: TemplateStringsArray;
@@ -85,5 +88,68 @@ describe("PointOfViewSelector mobile layout", () => {
     expect(html).toContain("min-[1200px]:top-[52px]");
     expect(html).toContain("min-[1200px]:left-1/2");
     expect(html).toContain("min-[1200px]:-translate-x-1/2");
+  });
+});
+
+interface MinimalPlayerView {
+  id: () => string;
+  displayName: () => string;
+  clientID: () => string;
+}
+
+interface PointOfViewSelectorTestHooks {
+  eventBus: EventBus | null;
+  game: unknown;
+  selectedId: string | null;
+  init: () => void;
+  applyPov: (
+    player: MinimalPlayerView | null,
+    source: string,
+    opts: { persist: boolean; pan: boolean },
+  ) => void;
+}
+
+describe("PointOfViewSelector match-end reset (deploy 3.9, item 3b)", () => {
+  afterEach(() => {
+    sessionStorage.clear();
+  });
+
+  it("resets the dropdown to 'Whole board' when FitWholeMapEvent fires (e.g. WinModal's match-end camera pullback)", () => {
+    // Synchronous "explicit whole board" manual pick short-circuits
+    // applyInitialSelection()'s async claim-fetch branch entirely, so
+    // init() settles before this test's own assertions run.
+    writeManualPovSelection(null);
+    const selector = new PointOfViewSelector() as unknown as PointOfViewSelectorTestHooks;
+    const eventBus = new EventBus();
+    selector.eventBus = eventBus;
+    selector.game = null;
+    selector.init();
+
+    // Simulate a viewer already following an agent (a manual dropdown pick
+    // or rail click) before the match ends.
+    const player: MinimalPlayerView = {
+      id: () => "p1",
+      displayName: () => "Somali Host",
+      clientID: () => "c1",
+    };
+    selector.applyPov(player, "manual", { persist: false, pan: false });
+    expect(selector.selectedId).toBe("p1");
+
+    eventBus.emit(new FitWholeMapEvent());
+
+    expect(selector.selectedId).toBeNull();
+  });
+
+  it("is a harmless no-op when FitWholeMapEvent fires with nothing followed", () => {
+    writeManualPovSelection(null);
+    const selector = new PointOfViewSelector() as unknown as PointOfViewSelectorTestHooks;
+    const eventBus = new EventBus();
+    selector.eventBus = eventBus;
+    selector.game = null;
+    selector.init();
+
+    expect(selector.selectedId).toBeNull();
+    eventBus.emit(new FitWholeMapEvent());
+    expect(selector.selectedId).toBeNull();
   });
 });

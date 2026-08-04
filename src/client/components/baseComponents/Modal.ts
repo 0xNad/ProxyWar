@@ -1,5 +1,6 @@
 import { LitElement, html, unsafeCSS } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import { translateText } from "../../Utils";
 import tailwindStyles from "../../styles.css?inline";
 
 export type OModalTab = { key: string; label: string };
@@ -141,12 +142,14 @@ export class OModal extends LitElement {
         >
           ${this.inline || this.hideCloseButton
             ? html``
-            : html`<div
-                class="absolute top-5 right-5 z-10 text-white cursor-pointer"
+            : html`<button
+                type="button"
+                class="absolute top-5 right-5 z-10 text-white cursor-pointer bg-transparent border-0 p-0"
+                aria-label="${translateText("common.close")}"
                 @click=${() => this.close()}
               >
-                ✕
-              </div>`}
+                <span aria-hidden="true">✕</span>
+              </button>`}
           ${!this.hideHeader && this.title
             ? html`<div
                 class="px-[1.4rem] py-[1rem] text-2xl font-bold text-white"

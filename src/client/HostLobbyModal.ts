@@ -501,7 +501,21 @@ export class HostLobbyModal extends BaseModal {
   protected onClose(): void {
     console.log("Closing host lobby modal");
     this.stopLobbyUpdates();
-    if (this.leaveLobbyOnClose) {
+    // Only leave/reset the URL if this modal actually hosted something.
+    // `handleJoinLobby`'s post-join cleanup (Main.ts) generically calls
+    // `.close()` on every modal tag, INCLUDING this one, after a
+    // successful join to a totally unrelated lobby/premiere/game (this
+    // modal was never opened for that flow at all — `this.lobbyId` is
+    // still its initial ""). `leaveLobby()` below already no-ops on an
+    // empty `lobbyId`, but `updateHistory("/")` used to run unconditionally
+    // alongside it, clobbering the URL the OTHER flow had just set (e.g.
+    // `/bet/<premiereId>`) back to "/" moments after a live premiere join
+    // started — with nothing to undo it, since this modal was never
+    // actually the thing the viewer navigated through. Root cause of the
+    // "Go to the live market" SPA-transition join that crawls forever:
+    // several route-scoped checks key off `window.location.pathname`, so
+    // once it silently drifted to "/" the join could never signal complete.
+    if (this.leaveLobbyOnClose && this.lobbyId) {
       this.leaveLobby();
       this.updateHistory("/"); // Reset URL to base
     }

@@ -21,6 +21,91 @@ export const REPLAY_LOADING_SLOW_TIMEOUT_MS = 45_000;
  */
 export const JOIN_SYNC_TIMEOUT_MS = 60_000;
 
+export interface JoinSyncWatchdogCallbacks {
+  /** Fires once the join has gone `timeoutMs` with no forward progress. */
+  onStalled: () => void;
+  /**
+   * Fires when forward progress resumes after `onStalled` already fired --
+   * the caller should clear whatever it rendered from `onStalled` and
+   * resume the honest in-progress veil.
+   */
+  onRecovered: () => void;
+}
+
+export interface JoinSyncWatchdog {
+  /** (Re)starts the join from a clean slate: no prior turn, not stalled. */
+  arm: () => void;
+  /**
+   * Reports the latest `onJoinSync` "syncing" turn. Only a STRICTLY
+   * greater turn than the last one observed counts as progress -- `null`
+   * (target known, nothing dispatched yet) or a repeat of the same turn
+   * never rearms the timer and never clears a latched stall.
+   */
+  recordProgress: (currentTurn: number | null) => void;
+  /** Cancels the pending timer without touching `stalled`. */
+  clear: () => void;
+  readonly stalled: boolean;
+}
+
+/**
+ * An honest, INACTIVITY-based join-sync watchdog -- never a fixed deadline
+ * from first sync. `JOIN_SYNC_TIMEOUT_MS` bounds SILENCE, not total join
+ * time: a catch-up on a backlogged market can legitimately keep advancing
+ * well past that window (network ingest and worker dispatch both free-run
+ * far beyond it), so a one-shot timer fired regardless of whether the join
+ * was still alive -- latching a terminal-looking failure OVER a sync that
+ * was still climbing behind it. `recordProgress` rearms on every distinct
+ * forward step and clears any already-latched stall the moment progress
+ * resumes; `onStalled` only ever fires after a genuine silence of the
+ * full window.
+ */
+export function createJoinSyncWatchdog(
+  callbacks: JoinSyncWatchdogCallbacks,
+  timeoutMs = JOIN_SYNC_TIMEOUT_MS,
+): JoinSyncWatchdog {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let lastTurn: number | null = null;
+  let stalled = false;
+
+  const clear = () => {
+    if (timer !== null) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  };
+  const rearm = () => {
+    clear();
+    timer = setTimeout(() => {
+      timer = null;
+      stalled = true;
+      callbacks.onStalled();
+    }, timeoutMs);
+  };
+
+  return {
+    arm() {
+      lastTurn = null;
+      stalled = false;
+      rearm();
+    },
+    recordProgress(currentTurn) {
+      const advanced =
+        currentTurn !== null && (lastTurn === null || currentTurn > lastTurn);
+      if (!advanced) return;
+      lastTurn = currentTurn;
+      rearm();
+      if (stalled) {
+        stalled = false;
+        callbacks.onRecovered();
+      }
+    },
+    clear,
+    get stalled() {
+      return stalled;
+    },
+  };
+}
+
 export type ReplayLoadingMessageKey =
   | "ai_league_replay.loading_replay"
   | "ai_league_replay.waiting_for_replay"
@@ -43,17 +128,32 @@ export function showReplayLoadingScreen(
   screen.setAttribute("aria-busy", String(busy));
   updateReplayLoadingMessage(screen, messageKey);
 
+  // A stalled/failed load is the ONLY point Retry is real: `loading_slow`
+  // ("this is taking longer than expected…") and `loading_failed`
+  // ("Replay unavailable") both leave the viewer stuck with nothing
+  // actionable but a status region unless Retry is reachable here too --
+  // not just on the terminal failure screen. Every other in-progress
+  // message key keeps it hidden until there is something real to retry.
   const retry = screen.querySelector<HTMLButtonElement>(
     "[data-replay-loading-retry]",
   );
   if (retry !== null) {
-    retry.hidden = true;
+    const retryEligible =
+      messageKey === "ai_league_replay.loading_slow" ||
+      messageKey === "ai_league_replay.loading_failed";
+    retry.hidden = !retryEligible;
+    if (retryEligible) {
+      retry.dataset.i18n = "ai_league_replay.retry";
+      const translated = translateText("ai_league_replay.retry");
+      retry.textContent =
+        translated === "ai_league_replay.retry" ? "" : translated;
+    }
   }
   // The back-to-league escape stays reachable for the ENTIRE loading
   // sequence, not just after a confirmed failure — an indefinite wait
   // with nothing focusable but a status region is a dead end for keyboard
   // users regardless of what eventually goes wrong (or doesn't resolve at
-  // all). Retry stays hidden until there is something real to retry.
+  // all).
   ensureBackLinkVisible(screen);
   setReplayLoadingProgress(null);
 
@@ -154,19 +254,10 @@ export function showReplayLoadingFailure(): HTMLElement {
     "ai_league_replay.loading_failed",
     false,
   );
-  const retry = screen.querySelector<HTMLButtonElement>(
-    "[data-replay-loading-retry]",
-  );
   screen.setAttribute("role", "alert");
-  if (retry !== null) {
-    retry.hidden = false;
-    retry.dataset.i18n = "ai_league_replay.retry";
-    const translated = translateText("ai_league_replay.retry");
-    retry.textContent =
-      translated === "ai_league_replay.retry" ? "" : translated;
-    retry.focus();
-  }
-  ensureBackLinkVisible(screen);
+  screen
+    .querySelector<HTMLButtonElement>("[data-replay-loading-retry]")
+    ?.focus();
   return screen;
 }
 

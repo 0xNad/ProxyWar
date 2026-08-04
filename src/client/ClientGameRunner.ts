@@ -1331,9 +1331,22 @@ function showErrorModal(
     }
   });
 
+  // P0 fix (2026-08-03): most of this modal's callers represent a
+  // permanently dead tick loop (worker crash, game-update processing
+  // error, desync) with no auto-recovery -- a manual reload of the same
+  // URL was previously the only fix, undiscoverable from this card alone.
+  // In-place recovery action, same row as Copy.
+  const reloadButton = document.createElement("button");
+  reloadButton.textContent = translateText("error_modal.reload");
+  reloadButton.className = "reload-btn";
+  reloadButton.addEventListener("click", () => {
+    window.location.reload();
+  });
+
   // Add to modal
   modal.appendChild(pre);
   modal.appendChild(button);
+  modal.appendChild(reloadButton);
   if (closable) {
     const closeButton = document.createElement("button");
     closeButton.textContent = "X";

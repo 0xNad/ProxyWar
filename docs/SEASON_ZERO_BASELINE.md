@@ -1063,3 +1063,173 @@ above into this branch directly:
   rewriting them to a placeholder would misrepresent the verification
   evidence itself. Flagging this distinction rather than silently leaving
   them — reversing this call is the operator's to make, not a default.
+
+### Promotion EXECUTED 2026-08-02 — `origin/main` fast-forwarded, GO received
+
+**Operator GO, quoted verbatim**: "GO for the main push. Promote exactly
+756562c53 (your validated merge tip — do NOT chase the moving branch tip;
+siblings have landed newer commits that will ride the next promotion
+cycle)." This confirms and executes the "Promote as is" decision recorded
+above — the topology blocker from Addendum 4's Step 1 was independently
+resolved earlier the same day (`origin/main`'s 11-then-12 stray commits
+were merged into `claude/product-overhaul`, not rebased away; see the
+merge/forward-merge/hygiene commits between this addendum's original text
+and this entry).
+
+**Rollback tag**: `pre-promotion-2026-08-02`, pointing at `origin/main`'s
+pre-promotion tip `30c86d38023fd4a7dcf68a7889d3d56af6d65c6c` (the
+"players(coworld): bounded post-final linger for platform reconciliation"
+commit — the same SHA re-verified as unmoved immediately before the
+push). Created and pushed to `origin` before touching `main`.
+
+**Fast-forward push**: re-verified `git merge-base --is-ancestor
+origin/main 756562c53018b6467c7400c728a958381962fd08` was true immediately
+before pushing (both right after cutting the rollback tag and again in the
+same breath as the push itself — `origin/main` never moved from
+`30c86d380` across either check). `git push origin
+756562c53018b6467c7400c728a958381962fd08:main` — fast-forward,
+`30c86d380..756562c53`, **no force used and none required**. The exact
+validated merge tip was promoted, not the shared worktree's later-moving
+tip (siblings' post-`756562c53` commits stay on `claude/product-overhaul`
+for the next promotion cycle).
+
+**Public verification** (live GitHub, not just local fetch): repo page
+renders correctly (README, LICENSE, LICENSE-ASSETS, correct AGPL-3.0
+license badge, file tree). `git ls-tree -r --name-only origin/main --
+docs/project-state` → **0 files** (this promotion's own untracking commit,
+`756562c53`, is included, so the leak this doc flagged never reaches a
+public reader). `git ls-tree -r --name-only origin/main -- .omp` → **0
+files** (the earlier `.omp/` untrack from the 2026-08-01 review holds).
+`git ls-tree -r --name-only origin/main -- src/client/prediction/wagering
+src/server/replay-premiere/wagering` → **35 files present** — the
+wagering surface is genuinely live on the public default branch now,
+confirming "promote as is" was executed in full, not partially.
+
+**Superseded standing decision**: the 2026-07-27 "zero wagering code on
+`main`" rule (quoted and cited throughout this doc's "Main reconciliation"
+section above) is superseded by the operator's 2026-08-02 decision, quoted
+at the top of Addendum 4. `main` now carries the full wagering surface
+under its existing `PROXYWAR_WAGERING_ENABLED`-gated structure (default
+off; see the Step 3 inventory above for the gating detail).
+
+`origin/main` final state: `756562c53018b6467c7400c728a958381962fd08`.
+
+## Addendum 5 — DC/replay QA pass-10 fix wave, 2026-08-03
+
+Five findings from live QA pass 10 against `beta.proxywar.xyz` (serving
+`main-CAybGPBG.js` at `7609befe6` going in): a P1 Leader-vs-Standings
+percentage mismatch, a P1 ghost Settings modal under Analyst mode, a P2
+dead end-screen Reset control, a small landscape-drawer fold issue, and
+one CHECK item (desktop timeline click-to-seek) confirmed genuinely
+broken and fixed as trivially co-located. Full writeup in the commit
+message of `664184ac5`; summary:
+
+1. **Leader-vs-Standings mismatch**: `deriveMatchStateStripFields`
+   (`AiLeagueReplayOverlay.ts`) now derives the leader identity/percent
+   from the same live per-tick frame data `competitorRailEntries` uses,
+   instead of the coarse `match-state-series.json` sample (captured at
+   most every ~200 turns) — the two can no longer disagree at the same
+   tick.
+2. **Ghost Settings modal in Analyst mode**: `settings-modal`'s overlay
+   z-index raised from `z-2000` to `z-[60000]` — was sitting below the
+   league replay overlay's panels (up to `z-index: 50010` for Analyst
+   mode's own centered panel, which occupies the exact screen region
+   Settings opens into).
+3. **Reset dead at the end screen**: the header's "Reset" control now
+   also calls `window.location.reload()` — the forward-only seek engine
+   (`LocalServer.ts`'s `jumpReplayForward`) can never rewind to turn 0
+   once every turn has played; a reload is the one path already proven
+   to restart cleanly.
+4. **Landscape drawer tab bar below the fold**: the `@media (max-height:
+   430px) and (orientation: landscape)` breakpoint now reorders (flex
+   `order`) the drawer ahead of the Standings section, landing the tab
+   bar inside the initial visible viewport instead of requiring a scroll.
+5. **CHECK — timeline backward-seek**: confirmed genuinely broken (same
+   forward-only engine as #3); the Match Timeline's own `onSeek` now
+   detects a backward target and navigates with the `?turn=` deep-link
+   param `Main.ts` already serves for share links. Scoped to the
+   Timeline only — the War Room feed's own "jump to turn" action (same
+   underlying event, different UI surface, extensive pre-existing test
+   coverage) is untouched, left as a follow-up.
+
+**Validation**: `tests/client/AiLeagueReplayOverlay.test.ts` +
+`tests/client/graphics/layers/SettingsModal.test.ts` 88/88 (new coverage
+for all five items); full `npx vitest run --exclude "tests/e2e/**"`
+441 files / 5215 tests green, 3 todo; `npx vitest run tests/server` 241
+files / 2834 tests green; `tsc --noEmit` 0 errors; `eslint` clean on
+changed files; `npm run build-prod` clean (new bundle `main-Dfet9Wlr.js`).
+
+**Deploy**: pushed `13a394b52..664184ac5` to `origin/claude/product-overhaul`
+(fast-forward, no force). Rollback point: the release-candidate
+worktree's pre-redeploy HEAD was `7609befe6` (PID 48443, healthy — the
+exact SHA this pass's QA evidence was captured against). Sequence in
+`/Users/claude/Documents/proxywar_worktrees/replay-premiere-release-candidate`:
+fetch → `git checkout --detach 664184ac5` → `npm ci` (697 packages) →
+`tsc --noEmit` (0 errors) → `npm run build-prod` (clean) →
+`deploy/mac/proxywar-beta-launchd-restart.mjs
+--ready-url=http://127.0.0.1:8788/league` (dry-run passed, then real: PID
+48443 → 76322, ready). To roll back: `git checkout --detach 7609befe6`,
+`npm ci && npm run build-prod`, then `launchctl kickstart -k
+gui/$UID/com.proxywar.beta` again.
+
+**Live verification** (production `beta.proxywar.xyz`, screenshots in
+`/tmp/proxywar-dc-polish/`): confirmed serving `main-Dfet9Wlr.js`
+externally. Ran the SAME DC episode QA pass-10 used
+(`league-coworld-2026-08-02T23-04-43-935Z-02ea7079`) through to its real
+"relh has won!" end screen (26:24, 89% territory) — Leader line and
+Standings' top row both read "relh · 89%" (item 1, at the exact
+end-screen instant the original bug was reported). Toggled Analyst mode
+and opened Settings: overlay computed `z-index: 60000`, and
+`document.elementFromPoint()` at viewport center now resolves inside
+`settings-modal` (was the replay overlay's standings rail pre-fix) —
+item 2. Clicked Reset at the real end screen: DC re-entered its
+"Catching up" fresh-load state (turn count climbing from 0 again) —
+item 3. Clicked an early "spawn" timeline marker well behind the current
+playhead: URL navigated to `...&turn=0` and the DC restarted fresh and
+seeked forward — the CHECK item. Opened the same episode at 844×390:
+the drawer's tab bar (`.broadcast-drawer-tabs`) measured `y:73` inside
+the 390px viewport on open, `scrollTop: 0` — no scroll needed (was
+`y:419`, off-screen, pre-fix) — item 4.
+
+### Addendum 5b — CHECK item follow-up: unified backward-seek across every dispatchJumpToTurn consumer, 2026-08-03
+
+Turn 2 of the CHECK item: Addendum 5's fix wrapped only the Match
+Timeline's own `onSeek`, leaving the shared `dispatchJumpToTurn` — the War
+Room feed's own "jump to turn" action — still silently no-op'ing for
+backward targets. Audited every consumer: War Room feed jump-to-turn and
+the Match Timeline's `onSeek` (both call sites) are the only two; the
+Analyst tab's decision/event rows carry no turn-jump affordance at all
+(plain cells, no button), so there was nothing to fix there. Separately
+found genuine prior art missed the first time: `mountReplayJumpControls`
+(the political-radio/comms "turn N" link) already implements this exact
+backward-seek-via-navigation. Moved the fix into the shared
+`dispatchJumpToTurn` itself (removing the separate `dispatchTimelineSeek`
+wrapper), matching `mountReplayJumpControls`'s own tolerance/params
+exactly.
+
+**Validation**: 84/84 in `AiLeagueReplayOverlay.test.ts` (existing War
+Room/windowing tests updated to assert the navigation where their fixture
+data happens to jump backward; new test proves a jump AT the current
+playhead — the freshest a War Room item can point to by construction —
+stays an in-session dispatch); full suite 441 files / 5216 tests green;
+`tsc --noEmit` and `eslint` clean; `build-prod` clean (bundle
+`main-8b8xTUXT.js`).
+
+**Deploy**: pushed `87746f161..1b1da8a13` (fast-forward, no force).
+Rollback point: release-candidate worktree pre-redeploy HEAD `664184ac5`
+(PID 76322, healthy — Addendum 5's own deployed tip). Same sequence as
+Addendum 5: fetch → `git checkout --detach 1b1da8a13` → `npm ci` → `tsc
+--noEmit` (0 errors) → `npm run build-prod` (clean) →
+`deploy/mac/proxywar-beta-launchd-restart.mjs
+--ready-url=http://127.0.0.1:8788/league` (dry-run then real: PID 76322 →
+86671, ready). To roll back: `git checkout --detach 664184ac5`, `npm ci
+&& npm run build-prod`, then `launchctl kickstart -k
+gui/$UID/com.proxywar.beta` again.
+
+**Live verification**: confirmed `beta.proxywar.xyz` serving
+`main-8b8xTUXT.js`. On the same DC episode near its end, clicked the
+OLDEST War Room item's jump-to-turn button (well behind the ~16,000-turn
+playhead): URL navigated to `...&turn=2100`, and the DC restarted fresh
+and began catching up forward again — the exact behavior the CHECK item's
+own repro described, now fixed for the War Room surface too. Screenshot:
+`/tmp/proxywar-dc-polish/turn2-warroom-backward-jump-navigates.webp`.

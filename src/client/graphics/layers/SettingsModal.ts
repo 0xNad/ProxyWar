@@ -7,6 +7,10 @@ import { EventBus } from "../../../core/EventBus";
 import { UserSettings } from "../../../core/game/UserSettings";
 import { AlternateViewEvent, RefreshGraphicsEvent } from "../../InputHandler";
 import { translateText } from "../../Utils";
+import {
+  activateFocusTrap,
+  type FocusTrapHandle,
+} from "../../components/FocusTrap";
 import { Layer } from "./Layer";
 const structureIcon = assetUrl("images/CityIconWhite.svg");
 const cursorPriceIcon = assetUrl("images/CursorPriceIconWhite.svg");
@@ -43,6 +47,8 @@ export class SettingsModal extends LitElement implements Layer {
   @query(".modal-overlay")
   private modalOverlay!: HTMLElement;
 
+  private focusTrapHandle: FocusTrapHandle | null = null;
+
   @property({ type: Boolean })
   shouldPause = false;
 
@@ -71,7 +77,31 @@ export class SettingsModal extends LitElement implements Layer {
   disconnectedCallback() {
     window.removeEventListener("click", this.handleOutsideClick, true);
     window.removeEventListener("keydown", this.handleKeyDown);
+    this.focusTrapHandle?.deactivate();
+    this.focusTrapHandle = null;
     super.disconnectedCallback();
+  }
+
+  /**
+   * Traps Tab/Shift+Tab within the modal and restores focus to whatever
+   * invoked it on close (P1 t1-02, pass-8 QA: tabbed through all 12
+   * toggle rows, then focus landed on "Sign in" in the page header while
+   * the modal stayed visually open). Covers BOTH ways `isVisible` can
+   * flip true — `openModal()` and the `ShowSettingsModalEvent` listener
+   * in `init()` — from one place rather than duplicating the hookup in
+   * each.
+   */
+  protected updated(changedProperties: Map<string, unknown>): void {
+    if (!changedProperties.has("isVisible")) return;
+    if (this.isVisible) {
+      queueMicrotask(() => {
+        if (!this.isVisible) return;
+        this.focusTrapHandle = activateFocusTrap(this);
+      });
+    } else {
+      this.focusTrapHandle?.deactivate();
+      this.focusTrapHandle = null;
+    }
   }
 
   private handleOutsideClick = (event: MouseEvent) => {
@@ -179,9 +209,24 @@ export class SettingsModal extends LitElement implements Layer {
       return null;
     }
 
+    // P1 ghost-modal fix (pass-10 t1-03): this used to be `z-2000`, which
+    // sat BELOW every high-z feature overlay this app has grown since
+    // (`AiLeagueReplayOverlay.ts`'s Director Cut/broadcast panels top out
+    // at z-[50010] for the Analyst-mode centered panel; betting/points/
+    // sign-in surfaces reach z-[52000]-z-[54000]). With Analyst mode on,
+    // that promoted panel renders fixed and CENTERED — the exact same
+    // screen region this modal opens into — so this modal's own
+    // computed styles looked correct (z-index 2000, opacity 1, display
+    // block) while being fully painted over AND non-blocking
+    // (`elementFromPoint` over it returned a `<span>` from the replay
+    // overlay's standings rail instead). A modal is meant to be the
+    // single topmost layer regardless of whatever feature overlay is
+    // active underneath it, so this now sits above every z-index band
+    // in the app rather than trying to out-guess each new overlay's own
+    // ceiling.
     return html`
       <div
-        class="modal-overlay fixed inset-0 bg-black/60 backdrop-blur-xs z-2000 flex items-center justify-center p-4"
+        class="modal-overlay fixed inset-0 bg-black/60 backdrop-blur-xs z-[60000] flex items-center justify-center p-4"
         @contextmenu=${(e: Event) => e.preventDefault()}
       >
         <div
