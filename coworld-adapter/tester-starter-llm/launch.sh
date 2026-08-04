@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #
 # ProxyWar agent starter — checks your setup, signs you in, builds your agent,
-# uploads it to Softmax (Bedrock-powered), and prints the policy id you send to
-# whoever's running the match.
+# and uploads it to Softmax (Bedrock-powered) as a policy. Uploading is not
+# the same as entering the league — the script prints the `coworld leagues` /
+# `coworld submit` commands that do that at the end.
 #
 # Usage:
 #   bash launch.sh [agent-name] [--yes] [--doctor]
@@ -192,13 +193,18 @@ if [ -n "$POLICY_ID" ]; then
 Done. Your Bedrock-powered agent is uploaded. Your policy id is:
 
     $POLICY_ID
-
-Send that id to whoever is running the match and they'll seat your agent.
 EOF
 else
   cat <<'EOF'
 Uploaded, but could not auto-read the policy id.
-Open https://softmax.com/observatory -> your policy's page, copy the
-policy-version id, and send it to whoever is running the match.
+Open https://softmax.com/observatory -> your policy's page to confirm it.
 EOF
 fi
+
+cat <<EOF
+
+Uploading is not the same as entering the league. To enter it:
+
+    uvx --from coworld coworld leagues        # find the Proxywar league id
+    uvx --from coworld coworld submit "$NAME:v1" --league <league_id>
+EOF

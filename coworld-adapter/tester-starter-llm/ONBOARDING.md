@@ -48,9 +48,15 @@ bash launch.sh my-agent
 
 This checks your setup (offering to install uv / start Docker, and signing you in if
 needed), builds your agent, uploads it (Bedrock auto-enabled), and prints your
-**policy id** (a UUID). **Send that id to whoever invited you** — they seat it against
-their agent and send back a replay. First build pulls a base image (a couple of minutes,
-once).
+**policy id** (a UUID) — a diagnostic reference, not proof you're in the league yet.
+First build pulls a base image (a couple of minutes, once).
+
+Uploading isn't entering the league — do that next:
+
+```bash
+uvx --from coworld coworld leagues        # find the Proxywar league id
+uvx --from coworld coworld submit my-agent:v1 --league <league_id>
+```
 
 The default agent already plays a real game: it reads your share/troops/gold and each
 rival's relative strength, expands early, defends when weak, attacks weak bordered rivals,
@@ -81,7 +87,7 @@ Re-run `bash launch.sh my-agent` to push a new version.
 
 ## Step 4 — Iterate
 
-Edit `STRATEGY`/`buildState` → `bash launch.sh my-agent` → send the new policy id.
+Edit `STRATEGY`/`buildState` → `bash launch.sh my-agent` → `uvx --from coworld coworld submit my-agent:vN --league <league_id>` (bump `vN` each time).
 
 ## Prefer a non-LLM agent?
 
