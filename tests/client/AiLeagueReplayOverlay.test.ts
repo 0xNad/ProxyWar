@@ -51,6 +51,25 @@ describe("AiLeagueReplayOverlay", () => {
     ).toBeNull();
   });
 
+  it("keeps static replays independent of replay-only server APIs", async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      mountAiLeagueReplayOverlay({
+        runID: "static-coworld-replay",
+        artifactBasePath: ".",
+        decisions: [],
+        remoteFeaturesEnabled: false,
+      });
+      await Promise.resolve();
+
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(document.querySelector("[data-ai-league-clip]")).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("renders a read-only decision panel for the real ProxyWar replay route", () => {
     mountAiLeagueReplayOverlay({
       runID: "run-render-1",

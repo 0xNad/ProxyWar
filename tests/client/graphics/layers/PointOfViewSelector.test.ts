@@ -10,7 +10,13 @@
  * uses for its own mobile-breakpoint regression) rather than an
  * elementFromPoint measurement.
  */
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { PointOfViewSelector } from "../../../../src/client/graphics/layers/PointOfViewSelector";
+
+afterEach(() => {
+  delete window.__PROXYWAR_STATIC_REPLAY__;
+  vi.unstubAllGlobals();
+});
 
 interface LitLikeTemplateResult {
   strings: TemplateStringsArray;
@@ -48,6 +54,19 @@ function renderedHtml(selector: PointOfViewSelector): string {
 }
 
 describe("PointOfViewSelector mobile layout", () => {
+  it("uses the neutral view without an account lookup in the static viewer", async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", fetchMock);
+    window.__PROXYWAR_STATIC_REPLAY__ = true;
+    const selector = new PointOfViewSelector();
+
+    selector.init();
+    await Promise.resolve();
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    selector.disconnectedCallback();
+  });
+
   it("reflows away from game-right-sidebar's top-0/right-0 row below the 1200px breakpoint", () => {
     const selector = new PointOfViewSelector();
     const html = renderedHtml(selector);

@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   coworldStaticReplayUrl,
@@ -15,6 +17,23 @@ function replayBytes(value: unknown): Uint8Array {
 }
 
 describe("CoworldStaticReplay", () => {
+  it.each([
+    "coworld_manifest.json",
+    "coworld_manifest_template.json",
+    "coworld_manifest_ffa16p.json",
+  ])("declares the viewer bundle in canonical manifest %s", (filename) => {
+    const manifest = JSON.parse(
+      readFileSync(
+        path.join(process.cwd(), "coworld-adapter", "coworld", filename),
+        "utf8",
+      ),
+    ) as { game: { replay_viewer?: unknown } };
+
+    expect(manifest.game.replay_viewer).toEqual({
+      bundle: "build/static-replay-viewer",
+    });
+  });
+
   it("parses the Coworld envelope and validates its embedded game record", () => {
     const replay = parseCoworldStaticReplay(
       replayBytes(ratedCoworldRawReplayValue()),

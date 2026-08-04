@@ -199,6 +199,8 @@ interface AiLeagueReplayOverlayInput {
   artifactAvailability?: AiLeagueReplayArtifactAvailability;
   detailsLoading?: boolean;
   onReplaySpeedChange?: (speed: ReplaySpeedMultiplier) => void;
+  /** Whether replay-only server features may fetch their supporting APIs. */
+  remoteFeaturesEnabled?: boolean;
   /**
    * Product overhaul spec Stage 5. Raw, unvalidated JSON from
    * `director-cut-plan.json` — this overlay owns runtime shape-checking via
@@ -274,17 +276,19 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
   // current pick, however it was set (rail click, dropdown, crosshair,
   // initial resolution).
   let followedPlayerName: string | null = null;
-  void resolveAiLeagueIdentities().then((resolved) => {
-    identityByPlayerName = resolved;
-    if (!overlay.isConnected) return;
-    mountAiLeagueBroadcastDrawer(
-      overlay,
-      currentInput,
-      identityByPlayerName,
-      followedPlayerName,
-      directorCutHandle,
-    );
-  });
+  if (input.remoteFeaturesEnabled !== false) {
+    void resolveAiLeagueIdentities().then((resolved) => {
+      identityByPlayerName = resolved;
+      if (!overlay.isConnected) return;
+      mountAiLeagueBroadcastDrawer(
+        overlay,
+        currentInput,
+        identityByPlayerName,
+        followedPlayerName,
+        directorCutHandle,
+      );
+    });
+  }
   // Director Cut (spec Stage 5): one controller per overlay mount, mounted
   // the first time a valid `director-cut-plan.json` arrives via hydrate()
   // (it loads asynchronously, same timing as spectatorTelemetry) and never
@@ -645,7 +649,7 @@ function mountReplayDetailsBindings(
   const clipContainer = overlay.querySelector<HTMLElement>(
     "[data-ai-league-clip]",
   );
-  return clipContainer === null
+  return clipContainer === null || input.remoteFeaturesEnabled === false
     ? null
     : mountReplayScopedLeagueClipControl({
         container: clipContainer,
@@ -2968,7 +2972,7 @@ function overlayDetailsHtml(input: AiLeagueReplayOverlayInput): string {
       </button>
       <span class="ai-league-share-status" data-ai-league-share-status role="status" aria-live="polite"></span>
     </section>
-    <section class="ai-league-clip" data-ai-league-clip></section>
+    ${input.remoteFeaturesEnabled === false ? "" : '<section class="ai-league-clip" data-ai-league-clip></section>'}
     ${decisionLogHtml(input.decisions, currentTurn)}`;
 }
 

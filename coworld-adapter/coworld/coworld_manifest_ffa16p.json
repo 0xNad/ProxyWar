@@ -238,6 +238,9 @@
         }
       }
     },
+    "replay_viewer": {
+      "bundle": "build/static-replay-viewer"
+    },
     "protocols": {
       "player": {
         "type": "text",

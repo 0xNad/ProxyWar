@@ -3,6 +3,7 @@ import { customElement, state } from "lit/decorators.js";
 import { EventBus } from "../../../core/EventBus";
 import { GameView, PlayerView } from "../../../core/game/GameView";
 import { aiLeagueSpectatorDisplayName } from "../../AiLeagueReplayMode";
+import { isCoworldStaticReplayViewer } from "../../CoworldStaticReplay";
 import { fetchLeagueData } from "../../prediction/wagering/leagueData";
 import {
   findPlayerForClaimedLineages,
@@ -170,6 +171,11 @@ export class PointOfViewSelector extends LitElement implements Layer {
               ?.playerViews()
               .find((p) => p.displayName() === manual) ?? null);
       this.applyPov(player, "manual", { persist: false, pan: false });
+      return;
+    }
+
+    if (isCoworldStaticReplayViewer()) {
+      this.applyPov(null, "neutral", { persist: false, pan: false });
       return;
     }
 

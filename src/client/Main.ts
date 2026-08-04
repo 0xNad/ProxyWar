@@ -1544,6 +1544,7 @@ class Client {
         artifactBasePath,
         replayMaxTurn: initialReplayClipRenderableThroughTurn(gameRecord.info),
         detailsLoading: options.loadArtifactDetails !== false,
+        remoteFeaturesEnabled: options.loadArtifactDetails !== false,
         artifactAvailability: {
           visualReport: false,
           spectatorTelemetry: false,
