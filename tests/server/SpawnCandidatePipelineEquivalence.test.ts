@@ -289,9 +289,23 @@ describe("spawn candidate pipeline equivalence", () => {
     halfAndHalf = await loadFixtureMap("half_land_half_ocean");
   });
 
+  // Synchronous, CPU-bound equivalence check over the full production
+  // `world` map at production 12P settings (maxCandidates: 1000). Isolated
+  // local measurement under the repo's required `npm run test:coverage`
+  // (V8 coverage instrumentation, no sibling files, no shard contention)
+  // put this case at 875s; the same GitHub Actions runner independently
+  // showed ~3.1x its local CPU speed on another CPU-bound coverage case
+  // (AgentLeagueMatch's runSpawnPhase: ~74s local vs ~253s on GH — see
+  // PR #16 CI history). 875s * 3.1 ~= 2713s, so 3_000_000ms (50 min) is a
+  // real expected-runtime budget with headroom, not an arbitrary raise —
+  // the workload/assertions are unchanged; only this one case's declared
+  // budget moved to match its actual, measured cost under coverage. The
+  // sibling "scouts dominate a tiny pool" case below stays at 300_000ms —
+  // its own maxCandidates:24/stride:9 workload is far smaller and was
+  // never observed to approach that budget.
   it(
     "matches the object pipeline on world at production 12P settings",
-    { timeout: 300_000 },
+    { timeout: 3_000_000 },
     () => {
       const expected = refBuildSpawnCandidates(world, {
         maxCandidates: 1000,
