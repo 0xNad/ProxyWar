@@ -193,6 +193,8 @@ interface AiLeagueReplayOverlayInput {
   replayMaxTurn?: number | null;
   artifactAvailability?: AiLeagueReplayArtifactAvailability;
   detailsLoading?: boolean;
+  /** Whether replay-only server features may fetch their supporting APIs. */
+  remoteFeaturesEnabled?: boolean;
   /**
    * Season Zero broadcast match-state strip (spec Phase 5). Raw,
    * unvalidated JSON from `match-state-series.json` — this overlay owns
@@ -304,11 +306,17 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
   // re-renders (not the whole details block) so disclosure/toggle state is
   // untouched.
   let identityByPlayerName: ReadonlyMap<string, PublicAgent> = new Map();
-  void resolveAiLeagueIdentities().then((resolved) => {
-    identityByPlayerName = resolved;
-    if (!overlay.isConnected) return;
-    mountAiLeagueBroadcastDrawer(overlay, currentInput, identityByPlayerName);
-  });
+  if (input.remoteFeaturesEnabled !== false) {
+    void resolveAiLeagueIdentities().then((resolved) => {
+      identityByPlayerName = resolved;
+      if (!overlay.isConnected) return;
+      mountAiLeagueBroadcastDrawer(
+        overlay,
+        currentInput,
+        identityByPlayerName,
+      );
+    });
+  }
   let clipControl = mountReplayDetailsBindings(
     overlay,
     currentInput,
@@ -622,7 +630,7 @@ function mountReplayDetailsBindings(
   const clipContainer = overlay.querySelector<HTMLElement>(
     "[data-ai-league-clip]",
   );
-  return clipContainer === null
+  return clipContainer === null || input.remoteFeaturesEnabled === false
     ? null
     : mountReplayScopedLeagueClipControl({
         container: clipContainer,
@@ -3067,7 +3075,7 @@ function overlayDetailsHtml(input: AiLeagueReplayOverlayInput): string {
       </button>
       <span class="ai-league-share-status" data-ai-league-share-status role="status" aria-live="polite"></span>
     </section>
-    <section class="ai-league-clip" data-ai-league-clip></section>
+    ${input.remoteFeaturesEnabled === false ? "" : '<section class="ai-league-clip" data-ai-league-clip></section>'}
     ${decisionLogHtml(input.decisions, currentTurn)}`;
 }
 
