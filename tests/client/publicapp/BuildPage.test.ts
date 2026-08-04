@@ -351,6 +351,198 @@ describe("build-page", () => {
     expect(normalizedText(el)).not.toContain("build_page.step3.submit_error");
   });
 
+  it("Step 3: a server 400 naming builderLinks renders an actionable field-level error, wired for accessibility, never the generic banner", async () => {
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/build/registration-submission")) {
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            error: "invalid_submission",
+            field: "builderLinks",
+            reason: "format",
+          }),
+          { status: 400 },
+        );
+      }
+      return new Response(null, { status: 404 });
+    });
+    const el = mount();
+    await flushMicrotasks();
+    el.querySelectorAll<HTMLButtonElement>('button[aria-current]')[2].click();
+    await flushMicrotasks();
+    const form = el.querySelector("form")!;
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+    await flushMicrotasks();
+    expect(normalizedText(el)).toContain("build_page.step3.links_error_format");
+    expect(normalizedText(el)).not.toContain("build_page.step3.submit_error");
+    expect(normalizedText(el)).not.toContain(
+      "build_page.step3.links_error_too_many",
+    );
+    const linksField = form.querySelector<HTMLTextAreaElement>(
+      'textarea[placeholder="https://..."]',
+    )!;
+    expect(linksField.getAttribute("aria-invalid")).toBe("true");
+    expect(linksField.getAttribute("aria-describedby")).toBe(
+      "build-step3-links-error",
+    );
+    expect(
+      el.querySelector("#build-step3-links-error")?.textContent?.trim(),
+    ).toBe("build_page.step3.links_error_format");
+  });
+
+  it("Step 3: a server 400 naming builderLinks with reason too_long shows the 'at most 10 links' message, not the generic format message", async () => {
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/build/registration-submission")) {
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            error: "invalid_submission",
+            field: "builderLinks",
+            reason: "too_long",
+          }),
+          { status: 400 },
+        );
+      }
+      return new Response(null, { status: 404 });
+    });
+    const el = mount();
+    await flushMicrotasks();
+    el.querySelectorAll<HTMLButtonElement>('button[aria-current]')[2].click();
+    await flushMicrotasks();
+    const form = el.querySelector("form")!;
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+    await flushMicrotasks();
+    expect(normalizedText(el)).toContain(
+      "build_page.step3.links_error_too_many",
+    );
+    expect(normalizedText(el)).not.toContain(
+      "build_page.step3.links_error_format",
+    );
+    expect(normalizedText(el)).not.toContain("build_page.step3.submit_error");
+  });
+
+  it("Step 3: a server 400 naming sourceRepositoryRef renders an actionable field-level error, wired for accessibility, never the generic banner", async () => {
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/build/registration-submission")) {
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            error: "invalid_submission",
+            field: "sourceRepositoryRef",
+            reason: "format",
+          }),
+          { status: 400 },
+        );
+      }
+      return new Response(null, { status: 404 });
+    });
+    const el = mount();
+    await flushMicrotasks();
+    el.querySelectorAll<HTMLButtonElement>('button[aria-current]')[2].click();
+    await flushMicrotasks();
+    const form = el.querySelector("form")!;
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+    await flushMicrotasks();
+    expect(normalizedText(el)).toContain("build_page.step3.repo_error_format");
+    expect(normalizedText(el)).not.toContain("build_page.step3.submit_error");
+    const repoField = form.querySelector<HTMLInputElement>(
+      'input[placeholder="https://github.com/..."]',
+    )!;
+    expect(repoField.getAttribute("aria-invalid")).toBe("true");
+    expect(repoField.getAttribute("aria-describedby")).toBe(
+      "build-step3-repo-error",
+    );
+    expect(
+      el.querySelector("#build-step3-repo-error")?.textContent?.trim(),
+    ).toBe("build_page.step3.repo_error_format");
+  });
+
+  it("Step 3: editing sourceRepositoryRef after a field error clears that field's stale error without a resubmit", async () => {
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/build/registration-submission")) {
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            error: "invalid_submission",
+            field: "sourceRepositoryRef",
+            reason: "format",
+          }),
+          { status: 400 },
+        );
+      }
+      return new Response(null, { status: 404 });
+    });
+    const el = mount();
+    await flushMicrotasks();
+    el.querySelectorAll<HTMLButtonElement>('button[aria-current]')[2].click();
+    await flushMicrotasks();
+    const form = el.querySelector("form")!;
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+    await flushMicrotasks();
+    expect(normalizedText(el)).toContain("build_page.step3.repo_error_format");
+
+    const repoField = form.querySelector<HTMLInputElement>(
+      'input[placeholder="https://github.com/..."]',
+    )!;
+    repoField.value = "https://github.com/example/policy";
+    repoField.dispatchEvent(new Event("input"));
+    await flushMicrotasks();
+    expect(normalizedText(el)).not.toContain(
+      "build_page.step3.repo_error_format",
+    );
+    expect(repoField.getAttribute("aria-invalid")).toBe("false");
+  });
+
+  it("Step 3: a fresh submit attempt clears a stale builderLinks field error even before the new response resolves it differently", async () => {
+    let callCount = 0;
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/build/registration-submission")) {
+        callCount++;
+        if (callCount === 1) {
+          return new Response(
+            JSON.stringify({
+              ok: false,
+              error: "invalid_submission",
+              field: "builderLinks",
+              reason: "format",
+            }),
+            { status: 400 },
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            profileFileJson: "{}",
+            githubIssueUrl:
+              "https://github.com/0xNad/ProxyWar/issues/new?title=x",
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(null, { status: 404 });
+    });
+    const el = mount();
+    await flushMicrotasks();
+    el.querySelectorAll<HTMLButtonElement>('button[aria-current]')[2].click();
+    await flushMicrotasks();
+    const form = el.querySelector("form")!;
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+    await flushMicrotasks();
+    expect(normalizedText(el)).toContain("build_page.step3.links_error_format");
+
+    form.dispatchEvent(new Event("submit", { cancelable: true }));
+    await flushMicrotasks();
+    expect(normalizedText(el)).not.toContain(
+      "build_page.step3.links_error_format",
+    );
+    expect(normalizedText(el)).toContain("build_page.step3.result_heading");
+  });
+
   it("Step 6 renders the verify checklist without any dead/fabricated command", async () => {
     const el = mount();
     await flushMicrotasks();
