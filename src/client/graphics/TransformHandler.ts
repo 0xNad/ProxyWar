@@ -166,6 +166,76 @@ export function computeSpectatorFitScale(
   };
 }
 
+/**
+ * Spectator/replay-only clamp continuity — see clampOffsets(). Below
+ * spectatorZoomFloor the pan bound is the generic half-viewport-slack
+ * formula (background may show); at/above spectatorFillScale it's the
+ * zero-slack "never reveal background" formula (see centerAll()'s and
+ * clampOffsets()'s own docs for what each of those means). Those two
+ * formulas are NOT the same function of scale, so switching between them
+ * with a hard `scale >= fillScale` boolean produced a one-frame
+ * discontinuity: an offset reached via the generous formula (e.g. the
+ * "zoom out, pan to a corner" flow centerAll()'s own zoom-out-to-whole-
+ * board feature exists to support) can land outside the tight formula's
+ * range, so clampOffsets() slams it back to the tight formula's own
+ * value the instant a zoom crosses the threshold — visually, the camera
+ * re-centering on the map instead of continuing to track the cursor/
+ * pinch point mid-gesture. Reproduced on both off-center wheel zoom
+ * (zoom-out-then-pan-then-zoom-in) and mobile pinch (any portrait/
+ * landscape spectator viewport lands below fillScale on load by design,
+ * so the very first pinch-in crosses the threshold).
+ *
+ * spectatorZoomBlendT() turns `scale` into a 0..1 weight — exactly 0 at
+ * or below spectatorZoomFloor, exactly 1 at or above spectatorFillScale,
+ * linear in between — and spectatorAxisMinOffset()/spectatorAxisMaxOffset()
+ * use it to blend the two per-axis bound formulas continuously. At the
+ * clamped endpoints (t<=0 / t>=1) they return the original formula's
+ * value directly with no interpolation arithmetic, so the bounds used
+ * today at/below the floor and at/above fill scale are byte-for-byte
+ * unchanged; only scales strictly between the two now transition
+ * smoothly instead of jumping.
+ *
+ * Scalar in, scalar out, by design: clampOffsets() runs on every
+ * wheel/pinch/drag tick, so these avoid allocating an intermediate
+ * {min, max} object per axis per call.
+ */
+export function spectatorZoomBlendT(
+  scale: number,
+  zoomFloor: number,
+  fillScale: number,
+): number {
+  if (fillScale <= zoomFloor) return 1;
+  if (scale <= zoomFloor) return 0;
+  if (scale >= fillScale) return 1;
+  return (scale - zoomFloor) / (fillScale - zoomFloor);
+}
+
+export function spectatorAxisMinOffset(
+  dim: number,
+  viewport: number,
+  scale: number,
+  t: number,
+): number {
+  if (t <= 0) return -dim / 2 + (dim - viewport) / (2 * scale);
+  const tight = dim / (2 * scale) - dim / 2;
+  if (t >= 1) return tight;
+  const generic = -dim / 2 + (dim - viewport) / (2 * scale);
+  return generic + (tight - generic) * t;
+}
+
+export function spectatorAxisMaxOffset(
+  dim: number,
+  viewport: number,
+  scale: number,
+  t: number,
+): number {
+  if (t <= 0) return dim / 2 + (dim - viewport) / (2 * scale);
+  const tight = dim / 2 - (viewport - dim / 2) / scale;
+  if (t >= 1) return tight;
+  const generic = dim / 2 + (dim - viewport) / (2 * scale);
+  return generic + (tight - generic) * t;
+}
+
 export class TransformHandler {
   public scale: number = 1.8;
   private _boundingRect: DOMRect;
@@ -508,25 +578,27 @@ export class TransformHandler {
     let maxOffsetX: number;
     let minOffsetY: number;
     let maxOffsetY: number;
-    const spectatorFilling =
-      isReplaySpectatorView() && scale >= this.spectatorFillScale;
-    if (spectatorFilling) {
+    if (isReplaySpectatorView()) {
       // Spectator/replay routes land cover-fit, or get zoomed back in to
       // spectatorFillScale (see centerAll): at that scale or above, the map
-      // can fill the viewport with zero background, so pin it there with
-      // zero-or-thin slack on one axis. Any pan at this zoom — a drag, the
-      // initial spectator auto-focus, a leaderboard/event "go to" click —
-      // must stay within whatever slack exists, or it drags the map's edge
-      // past the canvas and reveals background.
-      minOffsetX = gameWidth / (2 * scale) - gameWidth / 2;
-      maxOffsetX = gameWidth / 2 - (canvasWidth - gameWidth / 2) / scale;
-      minOffsetY = gameH / (2 * scale) - gameH / 2;
-      maxOffsetY = gameH / 2 - (canvasHeight - gameH / 2) / scale;
+      // can fill the viewport with zero background. Below spectatorZoomFloor,
+      // background is visible on purpose — the spectator scrolled out past
+      // the fill point deliberately to see the whole board. See
+      // spectatorZoomBlendT()/spectatorAxis*Offset() above: this blends
+      // continuously between those two bounds instead of switching between
+      // them at a hard scale threshold, which used to snap the camera to
+      // the tight bound's position the instant a zoom crossed it.
+      const t = spectatorZoomBlendT(
+        scale,
+        this.spectatorZoomFloor,
+        this.spectatorFillScale,
+      );
+      minOffsetX = spectatorAxisMinOffset(gameWidth, canvasWidth, scale, t);
+      maxOffsetX = spectatorAxisMaxOffset(gameWidth, canvasWidth, scale, t);
+      minOffsetY = spectatorAxisMinOffset(gameH, canvasHeight, scale, t);
+      maxOffsetY = spectatorAxisMaxOffset(gameH, canvasHeight, scale, t);
     } else {
-      // Below spectatorFillScale, background is visible on purpose — either
-      // this is live play, or a spectator scrolled out past the fill point
-      // deliberately (floored at spectatorZoomFloor in onZoom) to see the
-      // whole board. Same generous bound either way:
+      // Live play: unchanged.
       // Allow panning so that up to half of the viewport can be outside the map on each side.
       // This lets a map corner be placed at the screen center, but no further.
       // Derivation (X axis):
