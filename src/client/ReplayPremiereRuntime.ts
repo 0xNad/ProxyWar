@@ -318,6 +318,14 @@ const sessionResponseV1Schema = z
     schemaVersion: z.literal(1),
     csrfToken: z.string().min(1).max(512).regex(CSRF_PATTERN),
     session: viewerSessionSchema,
+    // False whenever `session` was NOT created by THIS request — a
+    // reused-live-session (new tab / cold reload for an existing
+    // participant) or an exact idempotent replay both hand back a session
+    // an EARLIER request created, whose `idempotencyKey` therefore never
+    // matches this request's own. `assertSessionResponseBound` only
+    // enforces `session.idempotencyKey === idempotencyKey` when `created`
+    // is true — see `ReplayPremiereInteractions.ts#createViewerSession`.
+    created: z.boolean(),
     premiereState: premiereLifecycleStateSchema,
     checkpoints: checkpointPairSchema,
     incomingMoment: incomingMomentSchema.nullable(),
@@ -1653,8 +1661,18 @@ export class ReplayPremiereServiceClient {
     const { session } = response;
     if (
       session.premiereId !== binding.premiereId ||
-      session.idempotencyKey !== idempotencyKey ||
-      session.firstReleasedSequenceObserved !== input.observedSequence ||
+      // Only a genuinely-fresh creation guarantees the returned session's
+      // idempotencyKey is the one THIS request sent. A reused-live-session
+      // (new tab / cold reload for an existing participant — see
+      // `ReplayPremiereInteractions.ts#createViewerSession`'s
+      // participant-scoped convergence branch) or an exact idempotent
+      // replay both correctly hand back an EARLIER request's session,
+      // carrying THAT request's own key — comparing it against this
+      // request's freshly-randomized key would reject a legitimate,
+      // intentional resumption path as an integrity violation.
+      (response.created && session.idempotencyKey !== idempotencyKey) ||
+      (response.created &&
+        session.firstReleasedSequenceObserved !== input.observedSequence) ||
       session.lastReleasedSequenceObserved < input.observedSequence ||
       session.visibleDurationMs > session.connectedDurationMs ||
       Date.parse(session.lastHeartbeatAt) < Date.parse(session.startedAt) ||
@@ -5248,12 +5266,13 @@ const MAX_WAR_FEED_ENTRIES = 8;
 /** Alliance/betrayal/first-strike/elimination are rare relative to attacks/chat, so a generous cap is never actually reached in practice; it exists only as a hard ceiling. */
 const MAX_WAR_ROOM_EVENTS = 64;
 const MAX_TIMELINE_MARKERS = 128;
-/** Maps the curated War Room kind vocabulary onto the repo's existing `SpectatorEvent.tone` vocabulary (see `AgentSpectatorTelemetry.ts`) so `AnalystEventRow.tone` reads consistently with the Full Replay track's own analyst rows. `plan_change` is unreachable here (a sealed Premiere never curates it — see `pushWarRoomEvent`'s doc) but is mapped for type completeness. */
+/** Maps the curated War Room kind vocabulary onto the repo's existing `SpectatorEvent.tone` vocabulary (see `AgentSpectatorTelemetry.ts`) so `AnalystEventRow.tone` reads consistently with the Full Replay track's own analyst rows. `plan_change`/`nuke` are unreachable here (a sealed Premiere never curates either — see `pushWarRoomEvent`'s doc) but are mapped for type completeness. */
 const ANALYST_TONE_BY_WAR_ROOM_KIND: Record<CuratedWarRoomEventKind, string> = {
   alliance: "pact",
   first_strike: "war",
   betrayal: "betrayal",
   elimination: "war",
+  nuke: "threat",
   plan_change: "info",
 };
 

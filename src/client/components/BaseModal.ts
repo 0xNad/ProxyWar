@@ -1,6 +1,7 @@
 import { html, LitElement, PropertyValues, TemplateResult } from "lit";
 import { property, query, state } from "lit/decorators.js";
 import { isReplaySpectatorView } from "../graphics/TransformHandler";
+import { activateFocusTrap, type FocusTrapHandle } from "./FocusTrap";
 
 /**
  * Base class for modal components that provides unified Escape key handling and common modal patterns.
@@ -30,7 +31,11 @@ export abstract class BaseModal extends LitElement {
     open: () => void;
     close: () => void;
     onClose?: () => void;
+    updateComplete: Promise<unknown>;
   };
+
+  /** See `FocusTrap.ts`'s own doc. Set on `open()`, cleared (restoring focus to the invoker) on `close()`. */
+  private focusTrapHandle: FocusTrapHandle | null = null;
 
   createRenderRoot() {
     return this;
@@ -155,6 +160,23 @@ export abstract class BaseModal extends LitElement {
     } else {
       this.modalEl?.open();
     }
+    void this.activateFocusTrapWhenReady();
+  }
+
+  /**
+   * Waits for this element's own render AND (for the non-inline,
+   * `<o-modal>`-gated case) `<o-modal>`'s own independent update cycle to
+   * settle before trapping focus — `<o-modal>` only builds its visible
+   * `<aside>` wrapper once `isModalOpen` flips, on ITS OWN Lit update,
+   * not this element's. Bails if the modal was closed again before
+   * either settled (a fast open/close, or a `confirmBeforeClose` guard
+   * re-opening `o-modal` mid-flight).
+   */
+  private async activateFocusTrapWhenReady(): Promise<void> {
+    await this.updateComplete;
+    await this.modalEl?.updateComplete;
+    if (!this.isModalOpen) return;
+    this.focusTrapHandle = activateFocusTrap(this);
   }
 
   /**
@@ -163,6 +185,8 @@ export abstract class BaseModal extends LitElement {
    */
   public close(): void {
     this.unregisterEscapeHandler();
+    this.focusTrapHandle?.deactivate();
+    this.focusTrapHandle = null;
     this.onClose();
 
     if (this.inline) {

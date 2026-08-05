@@ -31,13 +31,66 @@ jobs:
         with:
           path: out/index.html
           retention-days: 1
+      # PR #16's shard 1/4 and 4/4 both failed on real GH runners once
+      # every other blocker (rename-guard, /Volumes scratch roots, Chrome
+      # discovery, the Spawn-candidate timeout) was fixed: static/index.html
+      # never exists on a Test job runner, because Test only ever runs
+      # `npm ci`, never a build (confirmed live -- PublicSurfaceSecurity's
+      # app-shell routes returned 503, PublicProductJourneys.e2e.test.ts
+      # served a "not built for this server" placeholder instead of the
+      # real shell). The Build job above already runs `npm run build-prod`
+      # for its own out/index.html artifact, so it produces the exact same
+      # static/ output the Test jobs need -- share it instead of building
+      # twice. `if-no-files-found: error` fails this step loudly if the
+      # build ever stops producing one of these paths, rather than
+      # silently uploading a partial artifact the Test job would then
+      # fail against with a confusing downstream error.
+      - name: Upload static app shell
+        uses: actions/upload-artifact@v7
+        with:
+          name: static-app-shell
+          path: |
+            static/index.html
+            static/public.html
+            static/asset-manifest.json
+            static/assets/
+            static/robots.txt
+            static/version.txt
+            static/ads.txt
+            static/LICENSE
+          retention-days: 1
+          if-no-files-found: error
+
   test:
-    name: 🔬 Test
+    name: 🔬 Test (${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
-    # 45 min: the suite under coverage ran 25.1 min on 2026-07-10 and tripped
-    # the old 30-min cap at 30.2 min on 2026-07-11 after the release merge
-    # added test files. Raising the cap is the agreed remedy (known-problems),
-    # not per-test timeout surgery.
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    # Sharded 2026-08-04, comment updated same day: the single-job coverage
+    # run had cancelled at the 45-min cap on every main/PR run since
+    # 2026-08-02T00:14Z (GH Actions history), and the first 4-way split
+    # still intermittently failed on real GH runners because two specific
+    # files are individually pathological under coverage, not fixable by
+    # matrix shape or worker count: `tests/server/AgentLeagueMatch.test.ts`
+    # measured 2673514ms (44m33s) as the FIRST file executed in a real
+    # shard (GH Actions job 92052160802, PR #16), and
+    # `tests/server/SpawnCandidatePipelineEquivalence.test.ts` measured
+    # 875-1073s against its own 300s budget whenever run alongside other
+    # coverage-instrumented files — reproduced identically across 4-way and
+    # 8-way shards and maxWorkers 1 and 2 alike — despite passing in 67s
+    # standalone. Both are excluded here and run as their own dedicated
+    # `test-heavy` job below instead, still under full coverage, never
+    # skipped. Verified: `vitest list` with both files excluded, sharded 4
+    # ways, unions to exactly 447 files with zero duplicates/omissions;
+    # combined with the 2 dedicated files that's the full unsharded 449.
+    #
+    # `needs: build` + the `static-app-shell` download below: this job's
+    # own app-shell-dependent files (PublicSurfaceSecurity.test.ts,
+    # PublicProductJourneys.e2e.test.ts, etc.) need static/index.html —
+    # see the Build job's matching comment for the live-failure evidence.
     timeout-minutes: 45
     steps:
       - name: Checkout repository
@@ -49,7 +102,48 @@ jobs:
         with:
           node-version: 24
       - run: npm ci
-      - run: npm run test:coverage
+      - name: Download static app shell
+        uses: actions/download-artifact@v7
+        with:
+          name: static-app-shell
+          path: static
+      - run: npm run test:coverage -- --shard=${{ matrix.shard }}/4 --exclude=tests/server/AgentLeagueMatch.test.ts --exclude=tests/server/SpawnCandidatePipelineEquivalence.test.ts
+
+  test-heavy:
+    name: "🔬 Test (heavy: ${{ matrix.label }})"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: agent-league-match
+            file: tests/server/AgentLeagueMatch.test.ts
+          - label: spawn-candidate-pipeline-equivalence
+            file: tests/server/SpawnCandidatePipelineEquivalence.test.ts
+    # Dedicated single-file coverage job for each file excluded from the
+    # sharded `test` matrix above — see that job's comment for the measured
+    # evidence. Each runs the exact same `npm run test:coverage` contract,
+    # alone, so it gets a runner with no coverage-instrumented sibling file
+    # competing for the same worker/process. Never skipped, never
+    # test-weakened — same command, same coverage, just isolated.
+    # 60-min JOB timeout is outer headroom around the per-case budgets each
+    # file's own tests declare (SpawnCandidatePipelineEquivalence's
+    # production-12P case now carries an explicit, evidence-based 50-min
+    # `it()` timeout — see that test file's own comment); this job-level
+    # cap is slack for process startup/npm ci/coverage report generation
+    # around that inner budget, not an independent timeout raise.
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: false
+      - name: Setup node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: npm run test:coverage -- ${{ matrix.file }}
 
   eslint:
     name: 🔍 ESLint

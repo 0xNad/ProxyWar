@@ -15,6 +15,7 @@ import {
   BROADCAST_RAIL_FOLLOW_EVENT,
 } from "../../src/client/graphics/layers/PointOfViewSelector";
 import type { PublicAgent } from "../../src/client/publicapp/ReadModelSchema";
+import { UserSettings } from "../../src/core/game/UserSettings";
 import {
   initialReplayClipRenderableThroughTurn,
   replayClipPreviewTarget,
@@ -504,6 +505,73 @@ describe("AiLeagueReplayOverlay", () => {
     expect(overlay.getAttribute("style")).toBeNull();
   });
 
+  it("restarts playback from turn 0 when Reset is clicked in ANY state, including the ended end screen (P2 pass-10 t4-03)", () => {
+    // Same window.location mocking convention `WinModal.test.ts` already
+    // uses — jsdom has no real navigation, so this pins the fix at the
+    // "navigated to the canonical replay URL" level rather than asserting
+    // turn 0 renders (which would just be re-testing jsdom's own
+    // navigation, not this app's code).
+    //
+    // P0 fix (2026-08-03, deploy 2B): this used to assert a plain
+    // `location.reload()` call. QA caught that reloading trusts whatever
+    // the LIVE address bar holds, and reproduced Reset ejecting to the
+    // site homepage — matching Main.ts's own documented, live-confirmed
+    // case where `window.location.pathname` can transiently read back
+    // wrong mid-navigation. Reset now sets `location.href` to the
+    // canonical `/ai-league-replay/:runID` path explicitly, regardless of
+    // whatever the address bar currently holds.
+    let assignedHref: string | null = null;
+    const originalLocation = window.location;
+    Object.defineProperty(window, "location", {
+      value: {
+        pathname: window.location.pathname,
+        get href() {
+          return assignedHref ?? window.location.href;
+        },
+        set href(value: string) {
+          assignedHref = value;
+        },
+      },
+      writable: true,
+      configurable: true,
+    });
+
+    try {
+      mountAiLeagueReplayOverlay({
+        runID: "reset-restarts-ended",
+        artifactBasePath: "/ai-league-runs/reset-restarts-ended",
+        decisions: [],
+      });
+      const overlay = document.getElementById("ai-league-replay-overlay")!;
+
+      // Simulate the match having reached its end screen: the frame
+      // stream has stopped advancing and the DC is showing "X has won!"
+      // — none of which the Reset handler may consult before acting
+      // (spec: "restarts playback from turn 0 from ANY state including
+      // ended", i.e. no ended-state guard is allowed to swallow the
+      // click).
+      document.dispatchEvent(
+        new CustomEvent("ai-league-replay-frame", {
+          detail: { tick: 16234, turnNumber: 16234, players: [] },
+        }),
+      );
+
+      overlay
+        .querySelector<HTMLButtonElement>("[data-ai-league-reset-layout]")
+        ?.click();
+
+      expect(assignedHref).toBe(
+        "/ai-league-replay/reset-restarts-ended",
+      );
+    } finally {
+      Object.defineProperty(window, "location", {
+        value: originalLocation,
+        writable: true,
+        configurable: true,
+      });
+    }
+  });
+
   it("starts as an accessible compact bottom sheet on narrow screens", () => {
     Object.defineProperty(window, "innerWidth", {
       configurable: true,
@@ -558,6 +626,63 @@ describe("AiLeagueReplayOverlay", () => {
     expect(styles).toContain("min-height: 44px");
     expect(styles).toContain(".ai-league-headline-text");
     expect(styles).toContain("white-space: nowrap");
+  });
+
+  it("puts the drawer tab bar ahead of Standings at the landscape-phone breakpoint, so it's in the fold on open (P2 pass-10, 844x390)", () => {
+    // jsdom does not evaluate media queries or run real layout, so (same
+    // convention as `ReplayPremiereOverlay.test.ts`'s own sticky-tabs fix)
+    // this pins the fix at the CSS-rule level: extract the landscape-only
+    // media block and assert it reorders the drawer ahead of Standings,
+    // rather than asserting actual pixel positions no jsdom test can see.
+    mountAiLeagueReplayOverlay({
+      runID: "landscape-tabs-in-fold",
+      artifactBasePath: "/ai-league-runs/landscape-tabs-in-fold",
+      decisions: [],
+    });
+    const css =
+      document.querySelector("#ai-league-replay-overlay style")
+        ?.textContent ?? "";
+    const landscapeBlockStart = css.indexOf(
+      "@media (max-height: 430px) and (orientation: landscape)",
+    );
+    expect(landscapeBlockStart).toBeGreaterThan(-1);
+    // Bound the search to this block only — the desktop stylesheet has
+    // its own unrelated `.ai-league-standings`/`[data-ai-league-broadcast-
+    // drawer]` rules earlier that must NOT satisfy this assertion.
+    const landscapeBlockEnd = css.indexOf(
+      "</style>",
+      landscapeBlockStart,
+    );
+    const landscapeBlock = css.slice(landscapeBlockStart, landscapeBlockEnd);
+
+    const bodyRuleStart = landscapeBlock.indexOf(".ai-league-body {");
+    expect(bodyRuleStart).toBeGreaterThan(-1);
+    const bodyRule = landscapeBlock.slice(
+      bodyRuleStart,
+      landscapeBlock.indexOf("}", bodyRuleStart),
+    );
+    expect(bodyRule).toContain("display: flex");
+    expect(bodyRule).toContain("flex-direction: column");
+
+    const drawerRuleStart = landscapeBlock.indexOf(
+      "[data-ai-league-broadcast-drawer] {",
+    );
+    expect(drawerRuleStart).toBeGreaterThan(-1);
+    const drawerOrder = landscapeBlock.slice(
+      drawerRuleStart,
+      landscapeBlock.indexOf("}", drawerRuleStart),
+    );
+    expect(drawerOrder).toContain("order: 1");
+
+    const standingsRuleStart = landscapeBlock.indexOf(
+      ".ai-league-standings {",
+    );
+    expect(standingsRuleStart).toBeGreaterThan(drawerRuleStart);
+    const standingsOrder = landscapeBlock.slice(
+      standingsRuleStart,
+      landscapeBlock.indexOf("}", standingsRuleStart),
+    );
+    expect(standingsOrder).toContain("order: 2");
   });
 
   it("no longer renders raw artifact download links in the panel", () => {
@@ -630,6 +755,28 @@ describe("AiLeagueReplayOverlay", () => {
     // the pinned column actually resolve to a usable header.
     expect(style).toMatch(/\.ai-league-header-actions \{[^}]*flex: 0 0 auto/);
     expect(style).toMatch(/#ai-league-replay-overlay header \{[^}]*min-width: 0/);
+  });
+
+  it("sizes the Analyst chart count column to its content instead of clipping a 3+ digit tally mid-digit (P2 pass-1 p1-05/p1-06, 2026-08-02)", () => {
+    mountAiLeagueReplayOverlay({
+      runID: "analyst-chart-count-width",
+      artifactBasePath: "/ai-league-runs/x",
+      decisions: [],
+    });
+    const style = document.querySelector("#ai-league-replay-overlay style")
+      ?.textContent;
+    expect(style).toMatch(
+      /\.broadcast-analyst-chart-row \{[^}]*grid-template-columns: 90px 1fr auto/,
+    );
+    expect(style).not.toMatch(
+      /\.broadcast-analyst-chart-row \{[^}]*grid-template-columns: 90px 1fr 32px/,
+    );
+    expect(style).toMatch(
+      /\.broadcast-analyst-chart-count \{[^}]*white-space: nowrap/,
+    );
+    expect(style).toMatch(
+      /\.broadcast-analyst-chart-count \{[^}]*font-variant-numeric: tabular-nums/,
+    );
   });
 
   it("omits the built-in-opponent clause and difficulty for agent-vs-agent matches", () => {
@@ -1574,6 +1721,7 @@ describe("AiLeagueReplayOverlay", () => {
         smallID: number;
         username: string;
         tilesOwned: number;
+        clientID?: string | null;
         allies?: number[];
         targets?: number[];
       }>,
@@ -1586,7 +1734,7 @@ describe("AiLeagueReplayOverlay", () => {
             players: players.map((player) => ({
               playerID: player.playerID,
               smallID: player.smallID,
-              clientID: null,
+              clientID: player.clientID ?? null,
               username: player.username,
               displayName: player.username,
               x: 0,
@@ -1758,6 +1906,122 @@ describe("AiLeagueReplayOverlay", () => {
       }
     });
 
+    it("preserves scroll position in the diplomacy strip and competitor rail when their content changes mid-tick (P1 scroll-teleport fix: content-keyed patch, never a full container rebuild)", () => {
+      const runID = "scroll-preserve-1";
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response(null, { status: 404 })),
+      );
+      try {
+        mountAiLeagueReplayOverlay({
+          runID,
+          artifactBasePath: `/ai-league-runs/${runID}`,
+          decisions: [],
+        });
+
+        // Rook absorbs the tile delta below so Atlas's own rank/share stay
+        // pixel-identical across the tick — isolates "an untouched entry's
+        // own DOM node survives a sibling's content change" (the property
+        // under test) from "did the derived numbers recompute correctly",
+        // which the rail/diplomacy tests above already cover.
+        frame(500, [
+          { playerID: "p1", smallID: 1, username: "Atlas", tilesOwned: 60 },
+          { playerID: "p2", smallID: 2, username: "Blitz", tilesOwned: 40 },
+          { playerID: "p3", smallID: 3, username: "Rook", tilesOwned: 100 },
+        ]);
+
+        const diploContainer = document.querySelector<HTMLElement>(
+          "[data-ai-league-diplomacy-rows]",
+        );
+        expect(diploContainer).not.toBeNull();
+        const atlasDiploBefore = [
+          ...diploContainer!.querySelectorAll(".ai-league-diplo-entry"),
+        ].find((el) => el.textContent?.includes("Atlas"));
+        expect(atlasDiploBefore).toBeDefined();
+        expect(atlasDiploBefore?.textContent).toContain("30%");
+        const blitzDiploBefore = [
+          ...diploContainer!.querySelectorAll(".ai-league-diplo-entry"),
+        ].find((el) => el.textContent?.includes("Blitz"));
+
+        const railList = document.querySelector<HTMLElement>(
+          ".broadcast-rail-list",
+        );
+        expect(railList).not.toBeNull();
+        const atlasRailBefore = [
+          ...railList!.querySelectorAll(".broadcast-rail-entry"),
+        ].find((el) => el.textContent?.includes("Atlas"));
+        expect(atlasRailBefore).toBeDefined();
+
+        // jsdom has no real layout, so scrollTop is faked exactly like this
+        // file's own War Room ticker scroll-preservation test above does.
+        let diploScrollTop = 42;
+        Object.defineProperty(diploContainer, "scrollTop", {
+          configurable: true,
+          get: () => diploScrollTop,
+          set: (value: number) => {
+            diploScrollTop = value;
+          },
+        });
+        let railScrollTop = 77;
+        Object.defineProperty(railList, "scrollTop", {
+          configurable: true,
+          get: () => railScrollTop,
+          set: (value: number) => {
+            railScrollTop = value;
+          },
+        });
+
+        // Blitz gains 15 tiles from Rook: a pure content-changing tick for
+        // both panels (total tiles, and therefore Atlas's own share/rank,
+        // are unaffected). This is the exact shape that used to call
+        // `container.innerHTML = rowsHtml` / `rail.replaceWith(nextRail)`
+        // on the whole scrolled container, resetting `scrollTop` to 0 —
+        // "some parts of the panel ... teleport me back when I try to
+        // scroll in director cut".
+        frame(501, [
+          { playerID: "p1", smallID: 1, username: "Atlas", tilesOwned: 60 },
+          { playerID: "p2", smallID: 2, username: "Blitz", tilesOwned: 55 },
+          { playerID: "p3", smallID: 3, username: "Rook", tilesOwned: 85 },
+        ]);
+
+        // Scroll position held for both panels.
+        expect(diploScrollTop).toBe(42);
+        expect(railScrollTop).toBe(77);
+
+        // The patch actually landed: Blitz's own diplomacy row changed
+        // (its rail counterpart's untranslated-in-this-test-env label text
+        // is identical either way, so it isn't a useful "did it change"
+        // signal here — the scrollTop/same-node assertions below already
+        // cover the rail).
+        expect(
+          [...diploContainer!.querySelectorAll(".ai-league-diplo-entry")].find(
+            (el) => el.textContent?.includes("Blitz"),
+          )?.textContent,
+        ).toContain("28%");
+        expect(
+          [...diploContainer!.querySelectorAll(".ai-league-diplo-entry")].find(
+            (el) => el.textContent?.includes("Blitz"),
+          ),
+        ).not.toBe(blitzDiploBefore);
+
+        // ...while Atlas's own row — untouched by the patch — is the SAME
+        // DOM node: proof this is a content-keyed patch, never a full
+        // teardown/rebuild of the container.
+        expect(
+          [...diploContainer!.querySelectorAll(".ai-league-diplo-entry")].find(
+            (el) => el.textContent?.includes("Atlas"),
+          ),
+        ).toBe(atlasDiploBefore);
+        expect(
+          [...railList!.querySelectorAll(".broadcast-rail-entry")].find((el) =>
+            el.textContent?.includes("Atlas"),
+          ),
+        ).toBe(atlasRailBefore);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
     it("curates a selective War Room feed and jumps to turn from an expanded event", () => {
       const runID = "broadcast-war-room-1";
       const jumps: number[] = [];
@@ -1838,10 +2102,157 @@ describe("AiLeagueReplayOverlay", () => {
         planChangeItem?.querySelector(".broadcast-war-room-detail")
           ?.textContent,
       ).toContain("broadcast.war_room_stated_reason");
-      planChangeItem
-        ?.querySelector<HTMLButtonElement>(".broadcast-war-room-jump")
+      // Turn 2 of the pass-10 CHECK item: the jump target (turn 20) sits
+      // well behind the current playhead (turn 999), so this now
+      // navigates with `?turn=` instead of dispatching the forward-only
+      // event — same fix, same shared `dispatchJumpToTurn`, as the
+      // Timeline scrubber's own jump-to-turn.
+      withMockedLocation(runID, (locationMock) => {
+        planChangeItem
+          ?.querySelector<HTMLButtonElement>(".broadcast-war-room-jump")
+          ?.click();
+        expect(jumps).toEqual([]);
+        expect(locationMock.href).toContain("turn=20");
+      });
+    });
+    it("classifies War Room events into visual-weight tiers (content curation spec item 1, deploy 3.3): eliminations/alliances/betrayals are always tier 1; a first strike touching an agent who later becomes consequential (eliminated, or party to an alliance/betrayal) is tier 2; a first strike between two agents who never become consequential is tier 3", () => {
+      const runID = "broadcast-war-room-tiers-1";
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        currentTurn: 999,
+        decisions: [],
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events: [
+            // Blitz (a2) later gets eliminated below -- its first strike
+            // against Atlas (a1) is tier 2 ("notable") even though the
+            // strike's own importance (70, set by the `event()` fixture
+            // helper) carries no magnitude signal on its own.
+            event(1, 50, "attack", "war", "a2", "Blitz", "a1", "Atlas", "Blitz attacks Atlas."),
+            // Neither Rook (a5) nor Pawn (a6) ever appears in another
+            // event -- their one skirmish never becomes consequential.
+            event(2, 60, "attack", "war", "a5", "Rook", "a6", "Pawn", "Rook attacks Pawn."),
+            event(3, 100, "alliance_formed", "pact", "a3", "Civic", "a4", "Diplo", "Civic and Diplo form an alliance."),
+            event(4, 150, "alliance_break", "betrayal", "a3", "Civic", "a4", "Diplo", "Civic breaks the pact."),
+            event(5, 999, "elimination", "war", "a2", "Blitz", null, null, "Blitz is eliminated."),
+          ],
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+
+      const warRoom = document.querySelector(".broadcast-war-room");
+      expect(warRoom).not.toBeNull();
+      expect(
+        warRoom
+          ?.querySelector('[data-kind="alliance"]')
+          ?.getAttribute("data-tier"),
+      ).toBe("1");
+      expect(
+        warRoom
+          ?.querySelector('[data-kind="betrayal"]')
+          ?.getAttribute("data-tier"),
+      ).toBe("1");
+      expect(
+        warRoom
+          ?.querySelector('[data-kind="elimination"]')
+          ?.getAttribute("data-tier"),
+      ).toBe("1");
+      const firstStrikeItems = warRoom?.querySelectorAll(
+        '[data-kind="first_strike"]',
+      );
+      expect(firstStrikeItems).toHaveLength(2);
+      const tiers = [...(firstStrikeItems ?? [])]
+        .map((item) => item.getAttribute("data-tier"))
+        .sort();
+      // The Blitz-vs-Atlas strike (tier 2, notable) and the never-again-
+      // seen Rook-vs-Pawn strike (tier 3, routine) — a lone tier-3 event
+      // has no adjacent tier-3 neighbor to group with, so it renders as
+      // its own (compact) row rather than a group summary.
+      expect(tiers).toEqual(["2", "3"]);
+    });
+
+    it("collapses a consecutive run of routine (tier 3) first strikes into ONE grouped summary row, expandable to reveal each collapsed skirmish (content curation spec item 1's 'highest-leverage change')", () => {
+      const runID = "broadcast-war-room-grouping-1";
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        currentTurn: 999,
+        decisions: [],
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events: [
+            // Three distinct pairs, none of which ever appears in an
+            // alliance/betrayal/elimination -- all three land as
+            // consecutive tier-3 rows and must collapse into one group.
+            event(1, 100, "attack", "war", "r1", "Rook1", "p1", "Pawn1", "Rook1 attacks Pawn1."),
+            event(2, 110, "attack", "war", "r2", "Rook2", "p2", "Pawn2", "Rook2 attacks Pawn2."),
+            event(3, 120, "attack", "war", "r3", "Rook3", "p3", "Pawn3", "Rook3 attacks Pawn3."),
+            // A real elimination afterward stays its own, ungrouped tier-1
+            // row -- grouping never crosses a tier-1/2 boundary.
+            event(4, 200, "elimination", "war", "e1", "Eliminated One", null, null, "Eliminated One is eliminated."),
+          ],
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+
+      const warRoom = document.querySelector(".broadcast-war-room");
+      const items = warRoom?.querySelectorAll(".broadcast-war-room-item") ?? [];
+      // ONE grouped summary row (replacing all 3 routine strikes) + the
+      // elimination -- not 4 individual rows. This is the acceptance
+      // criterion itself: routine noise is genuinely collapsed, not
+      // re-skinned.
+      expect(items).toHaveLength(2);
+
+      const groupRow = warRoom?.querySelector('[data-tier="3"]');
+      expect(groupRow).not.toBeNull();
+      expect(groupRow?.getAttribute("data-kind")).toBe("first_strike");
+      expect(groupRow?.textContent).toContain(
+        "ai_league_replay.war_room_grouped_skirmishes",
+      );
+
+      // Expand the group and confirm all 3 collapsed skirmishes are
+      // individually visible in the detail (never silently dropped).
+      groupRow
+        ?.querySelector<HTMLButtonElement>(".broadcast-war-room-summary")
         ?.click();
-      expect(jumps).toEqual([20]);
+      const extra = groupRow?.querySelector(".broadcast-war-room-extra")
+        ?.textContent;
+      expect(extra?.split("\n")).toHaveLength(3);
+
+      // The elimination is untouched -- a real tier-1 event never gets
+      // folded into a routine-noise summary.
+      expect(
+        warRoom?.querySelector('[data-kind="elimination"]'),
+      ).not.toBeNull();
+    });
+
+    it("wraps long agent names in the War Room feed instead of truncating them with no way to see the rest (content curation spec item 3)", () => {
+      const runID = "broadcast-war-room-namewrap-1";
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+      });
+      const styles =
+        document.querySelector("#ai-league-replay-overlay style")
+          ?.textContent ?? "";
+      const headlineRule = styles.match(
+        /\n\s*\.broadcast-war-room-headline\s*\{[^}]*\}/,
+      )?.[0];
+      expect(headlineRule).toBeDefined();
+      expect(headlineRule).toContain("overflow-wrap: break-word");
+      expect(headlineRule).toContain("white-space: normal");
+      expect(headlineRule).not.toContain("text-overflow: ellipsis");
+      expect(headlineRule).not.toContain("white-space: nowrap");
     });
 
     it("renders an unrestricted bottom timeline for Full Replay and dispatches jump-to-turn on seek", () => {
@@ -1911,6 +2322,93 @@ describe("AiLeagueReplayOverlay", () => {
       );
       finishMarker?.click();
       expect(jumps).toEqual([1_000]);
+    });
+
+    it("CHECK item fix (pass-10): a Timeline marker BEHIND the current playhead navigates with ?turn= instead of silently no-op'ing through the forward-only seek engine", () => {
+      const runID = "broadcast-timeline-backward-seek-1";
+      const jumps: number[] = [];
+      document.addEventListener("ai-league-replay-jump-turn", (domEvent) => {
+        jumps.push(
+          (domEvent as CustomEvent<{ turnNumber: number }>).detail.turnNumber,
+        );
+      });
+      // jsdom logs (never throws on) an unimplemented "navigation to
+      // another Document" when `href` is set on the real Location object,
+      // same as `window.location.reload()` — same convention
+      // `withMockedLocation` (shared below) and the Reset test both use.
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+        replayMaxTurn: 1_000,
+        // Past the "spawn" marker below (turn 5) — a viewer who let the
+        // match play (or catch up) past turn 5 and then clicks that
+        // marker to rewatch the opening is exactly QA's repro.
+        currentTurn: 999,
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events: [
+            event(1, 5, "spawn", "info", "a1", "Atlas", null, null, "Atlas enters the match."),
+          ],
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+
+      const spawnMarker = document.querySelector<HTMLButtonElement>(
+        '.broadcast-timeline [data-kind="spawn"]',
+      );
+      expect(spawnMarker).not.toBeNull();
+
+      withMockedLocation(runID, (locationMock) => {
+        spawnMarker?.click();
+
+        // Never the dead-end forward-only dispatch a viewer would read as
+        // "the marker doesn't work".
+        expect(jumps).toEqual([]);
+        expect(locationMock.href).toContain("turn=5");
+        expect(trackMock).toHaveBeenCalledWith("timeline_jump", {
+          matchId: runID,
+        });
+      });
+    });
+
+    it("preserves the timeline panel's drawer-tab wrapper identity across a per-tick patch (P1 sweep fix: the desktop position:fixed placement rule is keyed off data-tab-id=\"timeline\", which a raw renderMatchTimeline() rebuild doesn't carry on its own)", () => {
+      const runID = "broadcast-timeline-patch-1";
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+      });
+
+      const timelineBefore = document.querySelector(".broadcast-timeline");
+      expect(timelineBefore).not.toBeNull();
+      expect(
+        timelineBefore?.classList.contains("broadcast-drawer-panel"),
+      ).toBe(true);
+      expect(timelineBefore?.getAttribute("data-tab-id")).toBe("timeline");
+
+      // `patchVolatile`'s own `nextTimelineKey = String(turnNumber)`
+      // rebuilds the timeline on virtually every tick (unlike War Room/
+      // Analyst, which patch their list in place on the common forward
+      // path) — this is never the same node afterward, so what must
+      // survive is its wrapper IDENTITY, not its node reference.
+      frame(50, [
+        { playerID: "p1", smallID: 1, username: "Atlas", tilesOwned: 10 },
+      ]);
+
+      const timelineAfter = document.querySelector(".broadcast-timeline");
+      expect(timelineAfter).not.toBeNull();
+      expect(timelineAfter).not.toBe(timelineBefore);
+      expect(
+        timelineAfter?.classList.contains("broadcast-drawer-panel"),
+      ).toBe(true);
+      expect(timelineAfter?.getAttribute("data-tab-id")).toBe("timeline");
+      expect(timelineAfter?.getAttribute("role")).toBe("tabpanel");
+      expect(timelineAfter?.id).toBe("broadcast-drawer-panel-timeline");
     });
 
     it("removes the broadcast drawer and lower-third host on dispose", () => {
@@ -2011,8 +2509,8 @@ describe("AiLeagueReplayOverlay", () => {
         },
       });
       frame(600, [
-        { playerID: "p1", smallID: 1, username: "Atlas", tilesOwned: 60 },
-        { playerID: "p2", smallID: 2, username: "Blitz", tilesOwned: 40 },
+        { playerID: "p1", smallID: 1, username: "Atlas", tilesOwned: 60, clientID: "client-atlas" },
+        { playerID: "p2", smallID: 2, username: "Blitz", tilesOwned: 40, clientID: "client-blitz" },
       ]);
       const entriesBefore = document.querySelectorAll(".broadcast-rail-entry");
       expect(
@@ -2021,9 +2519,15 @@ describe("AiLeagueReplayOverlay", () => {
         ),
       ).toBe(true);
 
+      // P0 fix (follow-controls sync, deploy 3.4): the rail correlates the
+      // followed-change event's clientID against each frame player's own
+      // clientID -- playerName alone can never resolve a real PlayerView
+      // (see PointOfViewSelector.ts's onFollowPlayerRequest doc), so
+      // PointOfViewSelector always dispatches clientID alongside
+      // playerName now.
       document.dispatchEvent(
         new CustomEvent(BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT, {
-          detail: { playerName: "Blitz" },
+          detail: { playerName: "Blitz", clientID: "client-blitz" },
         }),
       );
 
@@ -2193,6 +2697,100 @@ describe("AiLeagueReplayOverlay", () => {
       expect(document.querySelectorAll(".broadcast-war-room-item")).toHaveLength(2);
     });
 
+    // P0 fix (2026-08-03): a nuke launch (importance 95 server-side, the
+    // single highest-importance event kind this pipeline emits) never
+    // surfaced in the curated War Room feed at all -- only in the much
+    // less prominent bottom timeline strip.
+    it("includes a nuke launch in the curated War Room feed, tagged with the nuke kind (spec: no Tier-1 event category ever missing)", () => {
+      const runID = "broadcast-nuke-inclusion-1";
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+        currentTurn: 900,
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events: [
+            event(1, 900, "nuke", "threat", "a1", "Atlas", "a2", "Blitz", "Atlas escalates nuclear pressure against Blitz."),
+          ],
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+
+      const warRoom = document.querySelector(".broadcast-war-room");
+      const items = warRoom?.querySelectorAll(".broadcast-war-room-item");
+      expect(items).toHaveLength(1);
+      expect(items?.[0]?.getAttribute("data-kind")).toBe("nuke");
+    });
+
+    // P0 fix (2026-08-03): the "Anonymous Names" setting used to only ever
+    // apply to content rendered AFTER the toggle -- everything already
+    // painted (the political-radio talks transcript included) stayed
+    // frozen with real names until some unrelated re-render happened to
+    // occur. Toggling mid-session must re-render already-displayed content
+    // immediately. Uses the talks transcript (not the War Room feed)
+    // because its author/thread-name text is raw HTML
+    // (`aiLeagueSpectatorDisplayName` / `agentName`), never routed through
+    // `translateText` -- `translateText` echoes the untranslated key in
+    // this test environment (see the very first test in this file), which
+    // would swallow the interpolated {actor} name the War Room headline
+    // carries and make this assertion meaningless either way.
+    it("re-renders the already-displayed talks transcript the instant Anonymous Names toggles mid-session", () => {
+      const runID = "broadcast-anonymous-names-live-toggle-1";
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [
+            {
+              agentID: "a1",
+              playerID: "p1",
+              username: "Atlas",
+              profile: "diplomatic",
+              colorIndex: 0,
+            },
+          ],
+          relationships: [],
+          events: [],
+          communicationThreads: [
+            {
+              id: "thread-1",
+              agentIDs: ["a1"],
+              title: "Border talk",
+              latestTurn: 5,
+              tone: "chat",
+              messages: [
+                event(1, 5, "chat", "chat", "a1", "Atlas", null, null, "Hold the line."),
+              ],
+            },
+          ],
+          timelineBuckets: [],
+        },
+      });
+
+      const talksBefore = document.querySelector("[data-spectator-comms]");
+      expect(talksBefore?.textContent).toContain("Atlas");
+
+      new UserSettings().toggleRandomName();
+
+      const talksAfter = document.querySelector("[data-spectator-comms]");
+      expect(talksAfter?.textContent).not.toContain("Atlas");
+      expect(talksAfter?.textContent).toMatch(/Agent \d+/);
+
+      // Toggling back OFF must restore the real name just as immediately.
+      new UserSettings().toggleRandomName();
+      expect(
+        document.querySelector("[data-spectator-comms]")?.textContent,
+      ).toContain("Atlas");
+    });
+
     // Raised timeout (matches package.json's own test:coverage/test:e2e
     // precedent of a longer testTimeout for heavier suites): fast in
     // isolation (well under 1s for the whole 2,000-event fixture), but a
@@ -2360,13 +2958,19 @@ describe("AiLeagueReplayOverlay", () => {
       // The retained row's own interactive chrome is still live — expand it
       // and jump, exactly like a freshly-built row would (spec item 2:
       // windowing/incrementality must never strip per-row functionality).
+      // Turn 2 of the pass-10 CHECK item: turn 1 is well behind the
+      // current playhead (turn 40) — navigates with `?turn=` instead of
+      // dispatching the forward-only event.
       firstRowBefore
         ?.querySelector<HTMLButtonElement>(".broadcast-war-room-summary")
         ?.click();
-      firstRowBefore
-        ?.querySelector<HTMLButtonElement>(".broadcast-war-room-jump")
-        ?.click();
-      expect(jumps).toEqual([1]);
+      withMockedLocation(runID, (locationMock) => {
+        firstRowBefore
+          ?.querySelector<HTMLButtonElement>(".broadcast-war-room-jump")
+          ?.click();
+        expect(jumps).toEqual([]);
+        expect(locationMock.href).toContain("turn=1");
+      });
     });
 
     it("auto-follows the newest ticker entry when the viewer is at the tail, and preserves (height-compensates) scroll position when they've scrolled up to read older entries, across the window's incremental prune (spec item 3)", () => {
@@ -2795,6 +3399,56 @@ describe("AiLeagueReplayOverlay", () => {
       expect(
         document.querySelector(".broadcast-analyst")?.children.length,
       ).toBe(0);
+    });
+
+    // P0 fix (2026-08-03): the Analyst decisions table's Agent column
+    // (`AnalystDecisionRow.playerName`) and the Analyst event log
+    // (`AnalystEventRow.actorName`/`targetName`/`message`) passed real
+    // agent identity straight through from `AiLeagueDecisionLogEntry`/
+    // `AiLeagueSpectatorEvent` -- every other consumer of this same raw
+    // data (curatedWarRoomEvents, matchTimelineEventMarkers,
+    // communicationThreadHtml) already resolves names through
+    // `aiLeagueSpectatorDisplayName`/`aiLeagueSpectatorText`, so this was
+    // a leak even with Anonymous Names on.
+    it("anonymizes the Analyst decisions table's Agent column and the Analyst event log when Anonymous Names is on", () => {
+      const runID = "broadcast-analyst-anonymize-1";
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [
+          { ...decisionFixture(1), username: "Atlas", turnNumber: 5 },
+        ],
+        currentTurn: 5,
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events: [
+            event(1, 5, "elimination", "war", "a1", "Atlas", null, null, "Atlas fell to overwhelming force."),
+          ],
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+
+      new UserSettings().toggleRandomName();
+
+      document
+        .querySelector<HTMLButtonElement>("[data-ai-league-analyst-toggle]")
+        ?.click();
+
+      const decisionsRow = document.querySelector(
+        ".broadcast-analyst-decisions-row",
+      );
+      expect(decisionsRow?.textContent).not.toContain("Atlas");
+      expect(decisionsRow?.textContent).toMatch(/Agent \d+/);
+
+      const eventsRow = document.querySelector(
+        ".broadcast-analyst-events-row",
+      );
+      expect(eventsRow?.textContent).not.toContain("Atlas");
+      expect(eventsRow?.textContent).toMatch(/Agent \d+/);
     });
 
     it("caps both Analyst sub-lists' DOM node count under a large fixture, backfills each independently via show-earlier, and never renders past the playhead (spec items 1-3 follow-up, P2 review)", () => {
@@ -4068,6 +4722,42 @@ function readModelResponse(agents: PublicAgent[]): Response {
   );
 }
 
+/**
+ * Shared mock for the backward-jump-to-turn navigation fix (turn 2 of the
+ * pass-10 CHECK item): jsdom has no real navigation, so — same convention
+ * `WinModal.test.ts` already uses for its own `location.href` assertions —
+ * this swaps in a plain mock object for the duration of `fn`, then always
+ * restores the real `window.location` afterward (even on a thrown
+ * assertion), so a failure in one test can never leak a broken `location`
+ * into every test that runs after it in this shared file. `href`'s origin/
+ * pathname stays a real, parseable URL so `new URL(window.location.href)`
+ * inside `dispatchJumpToTurn`/`mountReplayJumpControls` never throws.
+ */
+function withMockedLocation<T>(
+  runID: string,
+  fn: (locationMock: { href: string }) => T,
+): T {
+  const locationMock = {
+    href: `https://beta.proxywar.xyz/ai-league-replay/${runID}`,
+    pathname: `/ai-league-replay/${runID}`,
+  };
+  const originalLocation = window.location;
+  Object.defineProperty(window, "location", {
+    value: locationMock,
+    writable: true,
+    configurable: true,
+  });
+  try {
+    return fn(locationMock);
+  } finally {
+    Object.defineProperty(window, "location", {
+      value: originalLocation,
+      writable: true,
+      configurable: true,
+    });
+  }
+}
+
 describe("Phase 7 analytics: Director Cut, timeline jump, watch-progress milestones", () => {
   beforeEach(() => {
     Object.defineProperty(window, "innerWidth", {
@@ -4194,11 +4884,91 @@ describe("Phase 7 analytics: Director Cut, timeline jump, watch-progress milesto
       ?.querySelector<HTMLButtonElement>(".broadcast-war-room-summary")
       ?.click();
     trackMock.mockClear();
-    planChangeItem
-      ?.querySelector<HTMLButtonElement>(".broadcast-war-room-jump")
-      ?.click();
-    expect(jumps).toEqual([20]);
-    expect(trackMock).toHaveBeenCalledWith("timeline_jump", { matchId: runID });
+    // Turn 2 of the pass-10 CHECK item: turn 20 is well behind the
+    // current playhead (turn 999) — navigates with `?turn=` instead of
+    // dispatching the forward-only event. `analytics.track` still fires
+    // first, before the branch decides navigate vs dispatch.
+    withMockedLocation(runID, (locationMock) => {
+      planChangeItem
+        ?.querySelector<HTMLButtonElement>(".broadcast-war-room-jump")
+        ?.click();
+      expect(jumps).toEqual([]);
+      expect(locationMock.href).toContain("turn=20");
+      expect(trackMock).toHaveBeenCalledWith("timeline_jump", { matchId: runID });
+    });
+  });
+
+  it("keeps a War Room jump at (or barely behind) the current playhead as an in-session dispatch — never a navigation (turn 2 of the pass-10 CHECK item)", () => {
+    // War Room only ever reveals items with turnNumber <= the current
+    // playhead (spec item 2: never spoil the future), so the freshest
+    // possible jump target a War Room item can point at is the CURRENT
+    // turn itself — this is that boundary case, standing in for "forward
+    // jump" in a feed that can never show one ahead of the playhead by
+    // construction. Guards against a future edit accidentally widening
+    // the backward-seek check (e.g. `turn <= knownTurn`) and turning
+    // every ordinary same-position jump into an unwanted reload.
+    const runID = "analytics-timeline-jump-forward-1";
+    const jumps: number[] = [];
+    document.addEventListener("ai-league-replay-jump-turn", (domEvent) => {
+      jumps.push(
+        (domEvent as CustomEvent<{ turnNumber: number }>).detail.turnNumber,
+      );
+    });
+    const reloadMock = vi.fn();
+    const originalLocation = window.location;
+    Object.defineProperty(window, "location", {
+      value: { reload: reloadMock, pathname: window.location.pathname },
+      writable: true,
+      configurable: true,
+    });
+    try {
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        currentTurn: 20,
+        decisions: [
+          {
+            ...decisionFixture(1),
+            username: "Atlas",
+            turnNumber: 10,
+            planObjective: "expand",
+          },
+          {
+            ...decisionFixture(2),
+            username: "Atlas",
+            turnNumber: 20,
+            planObjective: "consolidate",
+            reason: "Defend the core.",
+            planRationale: "Blitz is massing troops nearby.",
+          },
+        ],
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events: [],
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+      const planChangeItem = document.querySelector('[data-kind="plan_change"]');
+      expect(planChangeItem).not.toBeNull();
+      planChangeItem
+        ?.querySelector<HTMLButtonElement>(".broadcast-war-room-summary")
+        ?.click();
+      planChangeItem
+        ?.querySelector<HTMLButtonElement>(".broadcast-war-room-jump")
+        ?.click();
+      expect(jumps).toEqual([20]);
+      expect(reloadMock).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(window, "location", {
+        value: originalLocation,
+        writable: true,
+        configurable: true,
+      });
+    }
   });
 
   it("tracks watched_30s and watched_2m from ACCUMULATED ACTIVE playback seconds across steady frames, not wall-clock elapsed time", () => {

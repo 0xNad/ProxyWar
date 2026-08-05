@@ -372,14 +372,29 @@ describe.skipIf(SKIP_PROVENANCE_BLOCK)(
   // windows before reveal) and requires a CLEAN git checkout (the
   // exhibition's build-provenance check), so it must not slow down or
   // gate every other case in this file.
+  //
+  // LIVE_PREMIERE_BOOT_TIMEOUT_MS below covers this beforeAll ONLY — the
+  // test/assertion timeouts and afterAll's cleanup timeout are unchanged.
+  // Evidence for raising it from the prior 90_000ms: PR #16 shard 1/4 (a
+  // genuinely clean GH Actions checkout, 2026-08-04) failed with "Hook
+  // timed out in 90000ms" on this exact beforeAll, while the other
+  // 1223/1227 tests in that same shard passed. This session independently
+  // measured the GH Actions coverage runner running ~3x local CPU/IO on
+  // other tests (SpawnCandidatePipelineEquivalence.test.ts's
+  // production-12P case: 67s standalone locally vs 875-1073s on GH;
+  // AgentLeagueMatch.test.ts: ~44m on GH), so a ~1-minute-local boot
+  // plausibly exceeds a 90s budget on the real runner despite fitting
+  // comfortably locally. 5 minutes gives >3x headroom over the
+  // ~1-minute local estimate without masking a genuine hang.
   const LIVE_PORT = 18789;
+  const LIVE_PREMIERE_BOOT_TIMEOUT_MS = 5 * 60_000;
   let live: FixtureServerHandle;
   let liveBrowser: CdpBrowser;
 
   beforeAll(async () => {
     live = await startFixtureServerWithLivePremiere(LIVE_PORT);
     liveBrowser = await CdpBrowser.launch();
-  }, 90_000);
+  }, LIVE_PREMIERE_BOOT_TIMEOUT_MS);
 
   afterAll(async () => {
     await liveBrowser?.close();

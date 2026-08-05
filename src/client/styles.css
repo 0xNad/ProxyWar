@@ -132,12 +132,78 @@
 .stat-chart-point {
   transition: r 120ms ease;
 }
-.stat-chart-point:hover {
+.stat-chart-point:hover,
+.stat-chart-point:focus-visible {
   r: 5;
+}
+.stat-chart-point:focus-visible {
+  outline: none;
+}
+/* P3-04 fix (2026-08-02): a per-point value+date readout, visible on
+   hover (mouse) AND focus (keyboard, and touch — tapping an SVG element
+   with `tabindex` focuses it, unlike the existing native `<title>`
+   tooltip below it, which most mobile browsers never surface on tap).
+   The `+` sibling selector relies on `renderTimeSeriesChart` always
+   emitting this `<text>` immediately after its point's own `<circle>`. */
+.stat-chart-point-tooltip {
+  opacity: 0;
+  pointer-events: none;
+  font-size: 9px;
+  font-weight: 700;
+  fill: var(--pw-text, #edf1f7);
+  paint-order: stroke;
+  stroke: var(--pw-surface-2, #18202b);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+  transition: opacity 120ms ease;
+}
+.stat-chart-point:hover + .stat-chart-point-tooltip,
+.stat-chart-point:focus-visible + .stat-chart-point-tooltip {
+  opacity: 1;
+}
+/* Y-axis min/max + x-axis first/last-date labels — see
+   `CHART_PADDING`'s own doc for why there's margin to draw these in
+   without ever overlapping the plotted line/points. */
+.stat-chart-axis-label {
+  font-size: 10px;
+  fill: var(--pw-muted, #a4afbf);
 }
 @media (prefers-reduced-motion: reduce) {
   .stat-chart-point {
     transition: none;
+  }
+}
+/*
+ * P2 mobile-nav fix (2026-08-02): AppShellChrome.ts's public-page nav
+ * (5 items: Watch/League/Agents/Builders/Build) scrolls horizontally on
+ * narrow viewports rather than wrapping or collapsing to a hamburger —
+ * cheap, matches the house style of every other public page, and never
+ * breaks layout. But with no visual cue, "Build" was simply cut off at
+ * the right edge with nothing suggesting more content sits offscreen.
+ * A right-edge-only fade (never a left fade — the strip always starts
+ * at scrollLeft 0, so a left fade there would misleadingly suggest
+ * content the visitor cannot actually scroll BACK to) is the standard
+ * low-cost affordance for a horizontally-scrollable strip -- `mask-
+ * image` costs no JS and degrades harmlessly (a plain edge, same as
+ * before) on the rare engine without support. Cleared entirely at the
+ * `sm:` breakpoint, where the nav stops scrolling at all (`sm:w-auto`).
+ */
+.app-shell-nav {
+  -webkit-mask-image: linear-gradient(
+    to right,
+    black calc(100% - 20px),
+    transparent
+  );
+  mask-image: linear-gradient(
+    to right,
+    black calc(100% - 20px),
+    transparent
+  );
+}
+@media (min-width: 640px) {
+  .app-shell-nav {
+    -webkit-mask-image: none;
+    mask-image: none;
   }
 }
 
@@ -399,10 +465,24 @@
   }
 }
 
+/*
+ * P0 contrast fix (2026-08-03): this modal never set its own `color`, so
+ * its text inherited the app's global light/near-white text color (meant
+ * for the rest of the app's dark surfaces) against this modal's own hard-
+ * coded white background -- effectively white-text-on-white-background,
+ * genuinely illegible (confirmed live: computed background rgb(255,255,255),
+ * computed text rgb(248,250,252)). This is exactly the card a viewer sees
+ * on the silent game-crash path (see StructureIconsLayer.ts's tick() P0
+ * fix for the crash this most commonly surfaced), so its own "Copy to
+ * clipboard"/"Reload replay" recovery actions were unreadable and easy to
+ * miss entirely -- explicit dark text closes the gap regardless of
+ * whatever the app's own ambient/inherited color happens to be.
+ */
 #error-modal {
   position: fixed;
   padding: 20px;
   background: white;
+  color: #1f2937;
   border: 1px solid black;
   top: 50%;
   left: 50%;
@@ -423,7 +503,25 @@
 #error-modal button.copy-btn {
   padding: 8px 16px;
   margin-top: 10px;
+  margin-right: 8px;
   background: #4caf50;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+/*
+ * P0 fix (2026-08-03): the crash this modal most commonly reports (see
+ * StructureIconsLayer.ts's tick() fix) leaves the tick loop permanently
+ * dead with no auto-recovery -- a full page reload of the same URL was
+ * previously the only fix, and the viewer had no way to know that short
+ * of a bug report round-trip. In-place recovery action, same row as Copy.
+ */
+#error-modal button.reload-btn {
+  padding: 8px 16px;
+  margin-top: 10px;
+  background: #2563eb;
   color: white;
   border: none;
   border-radius: 4px;

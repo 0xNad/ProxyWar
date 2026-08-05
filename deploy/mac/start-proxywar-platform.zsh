@@ -47,7 +47,7 @@ export PROXYWAR_PUBLIC_URL="https://proxywar.xyz"
 export PROXYWAR_PLATFORM_ENABLED=1
 # The apex, as of the 2026-07-30 cutover: the zone's "apex and www to league"
 # redirect rule now matches www only, and the apex DNS record is a tunnel route
-# (cloudflared tunnel route dns open-frontier-beta proxywar.xyz) landing here.
+# (cloudflared tunnel route dns proxywar-beta proxywar.xyz) landing here.
 # app.proxywar.xyz stays in the tunnel ingress ONLY so the canonical-host 302
 # is reachable there - it is not a second account surface: this value is the
 # single expectedOrigin PlatformAccountSecurity accepts for writes, and the

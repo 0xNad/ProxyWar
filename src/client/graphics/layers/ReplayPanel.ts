@@ -62,7 +62,7 @@ export class ReplayPanel extends LitElement implements Layer {
 
   onReplaySpeedChange(value: ReplaySpeedMultiplier) {
     this._replaySpeedMultiplier = value;
-    this.eventBus?.emit(new ReplaySpeedChangeEvent(value));
+    this.eventBus?.emit(new ReplaySpeedChangeEvent(value, "user"));
   }
 
   renderLayer(_ctx: CanvasRenderingContext2D) {}

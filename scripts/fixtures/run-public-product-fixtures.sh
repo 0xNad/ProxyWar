@@ -38,6 +38,13 @@ PREMIERE_STATE_ROOT="$FIXTURE_ROOT/premiere-state"
 NATIONS_DIR="$FIXTURE_ROOT/nations"
 FEATURED_MATCH_STATE_ROOT="$FIXTURE_ROOT/featured-match-state"
 PLATFORM_STATE_ROOT="$FIXTURE_ROOT/platform-state"
+# Isolates the real tracked `resources/season/seasons.json` the same way
+# every sibling root above already isolates its own subsystem — see
+# `tests/e2e/support/FixtureServer.ts`'s doc comment for the bug this
+# fixes (a fixture server otherwise leaks the real, committed, currently-
+# featured production match onto /watch with none of its artifacts
+# present in this isolated fixture root).
+SEASON_REGISTRY_DIR="$FIXTURE_ROOT/season"
 ADMIT_STAGING="$FIXTURE_ROOT/admit-staging"
 
 export AI_LEAGUE_DEMO_PORT="$PORT"
@@ -48,6 +55,7 @@ export PROXYWAR_NATIONS_DIR="$NATIONS_DIR"
 export PROXYWAR_FEATURED_MATCH_STATE_ROOT="$FEATURED_MATCH_STATE_ROOT"
 export PROXYWAR_REPLAY_PREMIERE_STATE_ROOT="$PREMIERE_STATE_ROOT"
 export PROXYWAR_PLATFORM_STATE_ROOT="$PLATFORM_STATE_ROOT"
+export PROXYWAR_SEASON_REGISTRY_DIR="$SEASON_REGISTRY_DIR"
 export GAME_ENV=dev
 
 log() { printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*"; }

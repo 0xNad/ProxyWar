@@ -4,6 +4,7 @@ import { customElement, query } from "lit/decorators.js";
 import { PlayerType } from "../../../core/game/Game";
 import { GameView, PlayerView } from "../../../core/game/GameView";
 
+import enTranslations from "resources/lang/en.json";
 import quickChatData from "resources/QuickChat.json";
 import { EventBus } from "../../../core/EventBus";
 import { CloseViewEvent } from "../../InputHandler";
@@ -18,6 +19,31 @@ export type QuickChatPhrase = {
 export type QuickChatPhrases = Record<string, QuickChatPhrase[]>;
 
 export const quickChatPhrases: QuickChatPhrases = quickChatData;
+
+/**
+ * Best-effort English fallback for a dotted `chat.*` translation key, read
+ * directly from `resources/lang/en.json` — the single source of truth for
+ * these strings — instead of hand-duplicating ~50 quick-chat phrase
+ * strings here where they'd drift. Passed as `translateText`'s
+ * `defaultText` argument so this SHARED component (used by both the
+ * league origin, which bootstraps `<lang-selector>`, and the `/bet` SPA
+ * shell, which deliberately ships without it — see
+ * `docs/BETTING_HANDOFF.md` §3) renders real English instead of a raw
+ * `chat.*` key when no translation can be resolved. Returns `key` itself
+ * if the path doesn't resolve to a string (keeps `translateText`'s own
+ * no-default behavior as the worst case, never throws).
+ */
+export function englishChatFallback(key: string): string {
+  let node: unknown = enTranslations;
+  for (const segment of key.split(".")) {
+    if (node !== null && typeof node === "object" && segment in node) {
+      node = (node as Record<string, unknown>)[segment];
+    } else {
+      return key;
+    }
+  }
+  return typeof node === "string" ? node : key;
+}
 
 @customElement("chat-modal")
 export class ChatModal extends LitElement {
@@ -73,10 +99,18 @@ export class ChatModal extends LitElement {
 
   render() {
     return html`
-      <o-modal title="${translateText("chat.title")}">
+      <o-modal
+        title="${translateText("chat.title", undefined, englishChatFallback("chat.title"))}"
+      >
         <div class="chat-columns">
           <div class="chat-column">
-            <div class="column-title">${translateText("chat.category")}</div>
+            <div class="column-title">
+              ${translateText(
+                "chat.category",
+                undefined,
+                englishChatFallback("chat.category"),
+              )}
+            </div>
             ${this.categories.map(
               (category) => html`
                 <button
@@ -86,7 +120,11 @@ export class ChatModal extends LitElement {
                     : ""}"
                   @click=${() => this.selectCategory(category.id)}
                 >
-                  ${translateText(`chat.cat.${category.id}`)}
+                  ${translateText(
+                    `chat.cat.${category.id}`,
+                    undefined,
+                    englishChatFallback(`chat.cat.${category.id}`),
+                  )}
                 </button>
               `,
             )}
@@ -96,7 +134,11 @@ export class ChatModal extends LitElement {
             ? html`
                 <div class="chat-column">
                   <div class="column-title">
-                    ${translateText("chat.phrase")}
+                    ${translateText(
+                      "chat.phrase",
+                      undefined,
+                      englishChatFallback("chat.phrase"),
+                    )}
                   </div>
                   <div class="phrase-scroll-area">
                     ${this.getPhrasesForCategory(this.selectedCategory).map(
@@ -106,6 +148,10 @@ export class ChatModal extends LitElement {
                             .selectedPhraseText ===
                           translateText(
                             `chat.${this.selectedCategory}.${phrase.key}`,
+                            undefined,
+                            englishChatFallback(
+                              `chat.${this.selectedCategory}.${phrase.key}`,
+                            ),
                           )
                             ? "selected"
                             : ""}"
@@ -123,13 +169,21 @@ export class ChatModal extends LitElement {
             ? html`
                 <div class="chat-column">
                   <div class="column-title">
-                    ${translateText("chat.player")}
+                    ${translateText(
+                      "chat.player",
+                      undefined,
+                      englishChatFallback("chat.player"),
+                    )}
                   </div>
 
                   <input
                     class="player-search-input"
                     type="text"
-                    placeholder="${translateText("chat.search")}"
+                    placeholder="${translateText(
+                      "chat.search",
+                      undefined,
+                      englishChatFallback("chat.search"),
+                    )}"
                     .value=${this.playerSearchQuery}
                     @input=${this.onPlayerSearchInput}
                   />
@@ -159,8 +213,16 @@ export class ChatModal extends LitElement {
 
         <div class="chat-preview">
           ${this.previewText
-            ? translateText(this.previewText)
-            : translateText("chat.build")}
+            ? translateText(
+                this.previewText,
+                undefined,
+                englishChatFallback(this.previewText),
+              )
+            : translateText(
+                "chat.build",
+                undefined,
+                englishChatFallback("chat.build"),
+              )}
         </div>
         <div class="chat-send">
           <button
@@ -169,7 +231,11 @@ export class ChatModal extends LitElement {
             ?disabled=${!this.previewText ||
             (this.requiresPlayerSelection && !this.selectedPlayer)}
           >
-            ${translateText("chat.send")}
+            ${translateText(
+              "chat.send",
+              undefined,
+              englishChatFallback("chat.send"),
+            )}
           </button>
         </div>
       </o-modal>
@@ -198,19 +264,25 @@ export class ChatModal extends LitElement {
       this.selectedCategory!,
       phrase.key,
     );
+    const phraseKey = `chat.${this.selectedCategory}.${phrase.key}`;
     this.selectedPhraseTemplate = translateText(
-      `chat.${this.selectedCategory}.${phrase.key}`,
+      phraseKey,
+      undefined,
+      englishChatFallback(phraseKey),
     );
     this.selectedPhraseText = translateText(
-      `chat.${this.selectedCategory}.${phrase.key}`,
+      phraseKey,
+      undefined,
+      englishChatFallback(phraseKey),
     );
-    this.previewText = `chat.${this.selectedCategory}.${phrase.key}`;
+    this.previewText = phraseKey;
     this.requiresPlayerSelection = phrase.requiresPlayer;
     this.requestUpdate();
   }
 
   private renderPhrasePreview(phrase: { key: string }) {
-    return translateText(`chat.${this.selectedCategory}.${phrase.key}`);
+    const phraseKey = `chat.${this.selectedCategory}.${phrase.key}`;
+    return translateText(phraseKey, undefined, englishChatFallback(phraseKey));
   }
 
   private selectPlayer(player: PlayerView) {

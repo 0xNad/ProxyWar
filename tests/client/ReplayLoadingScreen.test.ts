@@ -20,6 +20,7 @@ vi.mock("../../src/client/Utils", () => ({
 }));
 
 import {
+  createJoinSyncWatchdog,
   holdReplayLoadingScreenUntilFirstFrame,
   runReplayStartup,
   setReplayLoadingProgress,
@@ -122,6 +123,19 @@ describe("ReplayLoadingScreen", () => {
     expect(
       document.querySelector("[data-replay-loading-message]")?.textContent,
     ).toBe("Replay is taking longer than expected…");
+  });
+
+  it("offers Retry once loading is taking longer than expected, not just on terminal failure", () => {
+    holdReplayLoadingScreenUntilFirstFrame(1_000);
+
+    vi.advanceTimersByTime(1_000);
+
+    const screen = document.getElementById("proxywar-replay-loading");
+    const retry = screen?.querySelector<HTMLButtonElement>(
+      "[data-replay-loading-retry]",
+    );
+    expect(retry?.hidden).toBe(false);
+    expect(retry?.textContent).toBe("Retry");
   });
 
   it("uncovers the game only after the first rendered replay frame", () => {
@@ -282,5 +296,96 @@ describe("ReplayLoadingScreen analytics", () => {
     // Success can never land after a reported failure ({once:true} cleanup).
     document.dispatchEvent(new CustomEvent("ai-league-replay-frame"));
     expect(trackMock).toHaveBeenCalledOnce();
+  });
+});
+
+describe("createJoinSyncWatchdog", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+  });
+
+  it("never fires while forward progress keeps arriving faster than the timeout", () => {
+    const onStalled = vi.fn();
+    const onRecovered = vi.fn();
+    const watchdog = createJoinSyncWatchdog({ onStalled, onRecovered }, 1_000);
+    watchdog.arm();
+
+    // Ten steps of progress, each inside the window, spanning far more
+    // real time in total than the timeout alone would tolerate -- the
+    // regression this pins: a fixed one-shot deadline used to fire here
+    // regardless of this ongoing progress.
+    for (let turn = 1; turn <= 10; turn += 1) {
+      vi.advanceTimersByTime(900);
+      watchdog.recordProgress(turn);
+    }
+
+    expect(onStalled).not.toHaveBeenCalled();
+    expect(watchdog.stalled).toBe(false);
+  });
+
+  it("fires after a genuine stall -- no progress at all for the full window", () => {
+    const onStalled = vi.fn();
+    const onRecovered = vi.fn();
+    const watchdog = createJoinSyncWatchdog({ onStalled, onRecovered }, 1_000);
+    watchdog.arm();
+
+    vi.advanceTimersByTime(1_000);
+
+    expect(onStalled).toHaveBeenCalledOnce();
+    expect(watchdog.stalled).toBe(true);
+  });
+
+  it("clears a latched stall and notifies recovery the moment progress resumes", () => {
+    const onStalled = vi.fn();
+    const onRecovered = vi.fn();
+    const watchdog = createJoinSyncWatchdog({ onStalled, onRecovered }, 1_000);
+    watchdog.arm();
+
+    vi.advanceTimersByTime(1_000);
+    expect(watchdog.stalled).toBe(true);
+
+    watchdog.recordProgress(5);
+
+    expect(onRecovered).toHaveBeenCalledOnce();
+    expect(watchdog.stalled).toBe(false);
+  });
+
+  it("ignores a null or non-advancing turn -- never rearms, never clears a latched stall", () => {
+    const onStalled = vi.fn();
+    const onRecovered = vi.fn();
+    const watchdog = createJoinSyncWatchdog({ onStalled, onRecovered }, 1_000);
+    watchdog.arm();
+    // Establish a baseline turn so subsequent null/repeat calls are
+    // genuinely non-advancing rather than a first sighting.
+    watchdog.recordProgress(3);
+
+    vi.advanceTimersByTime(500);
+    watchdog.recordProgress(null);
+    watchdog.recordProgress(3);
+    vi.advanceTimersByTime(500);
+
+    expect(onStalled).toHaveBeenCalledOnce();
+    expect(watchdog.stalled).toBe(true);
+
+    watchdog.recordProgress(null);
+    expect(onRecovered).not.toHaveBeenCalled();
+    expect(watchdog.stalled).toBe(true);
+  });
+
+  it("clear() cancels the pending timer so it never fires after disposal", () => {
+    const onStalled = vi.fn();
+    const onRecovered = vi.fn();
+    const watchdog = createJoinSyncWatchdog({ onStalled, onRecovered }, 1_000);
+    watchdog.arm();
+
+    watchdog.clear();
+    vi.advanceTimersByTime(5_000);
+
+    expect(onStalled).not.toHaveBeenCalled();
   });
 });

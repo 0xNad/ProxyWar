@@ -107,7 +107,7 @@ describe("ReplayPremiereInteractionRecovery", () => {
       first.interactions.readState().checkpoints,
       "runtime:init:recovery-test",
     );
-    const session = await first.interactions.createViewerSession({
+    const { session } = await first.interactions.createViewerSession({
       participantId: PARTICIPANT_ID,
       idempotencyKey: "idem_before_runtime_crash_1",
       requesterBucketId: `ip_${"2".repeat(32)}`,
@@ -167,7 +167,7 @@ describe("ReplayPremiereInteractionRecovery", () => {
       eventStore: store,
       interactions: interactionOptions(),
     });
-    const session = await live.interactions.createViewerSession({
+    const { session } = await live.interactions.createViewerSession({
       participantId: PARTICIPANT_ID,
       idempotencyKey: "idem_terminal_session_001",
       requesterBucketId: `ip_${"3".repeat(32)}`,
@@ -315,7 +315,7 @@ describe("ReplayPremiereInteractionRecovery", () => {
       eventStore: store,
       interactions: interactionOptions({ fixedRandom: true }),
     });
-    const session = await loaded.interactions.createViewerSession({
+    const { session } = await loaded.interactions.createViewerSession({
       participantId: PARTICIPANT_ID,
       idempotencyKey: "idem_unresolved_terminal_001",
       requesterBucketId: `ip_${"7".repeat(32)}`,
@@ -412,7 +412,7 @@ describe("ReplayPremiereInteractionRecovery", () => {
       "runtime:checkpoint-open:post-runtime-write",
     );
     prepared.commit();
-    const session = await first.interactions.createViewerSession({
+    const { session } = await first.interactions.createViewerSession({
       participantId: PARTICIPANT_ID,
       idempotencyKey: "idem_after_runtime_event_001",
       requesterBucketId: `ip_${"3".repeat(32)}`,
@@ -486,7 +486,7 @@ describe("ReplayPremiereInteractionRecovery", () => {
 
     await expect(
       loaded.interactions.createViewerSession(request),
-    ).resolves.toMatchObject({ participantId: PARTICIPANT_ID });
+    ).resolves.toMatchObject({ session: { participantId: PARTICIPANT_ID } });
     expect(loaded.persistence.recoveryAnchor().eventCursor).toBe(1);
 
     await store.close();

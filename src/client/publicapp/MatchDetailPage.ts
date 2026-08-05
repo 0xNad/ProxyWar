@@ -8,6 +8,7 @@ import {
   APP_SHELL_ROOT_CLASSES,
   appShellFooter,
   appShellHeader,
+  waitForTranslationsReady,
 } from "./AppShellChrome";
 import {
   fetchReadModel,
@@ -247,6 +248,7 @@ export class MatchDetailPage extends LitElement {
   connectedCallback(): void {
     super.connectedCallback();
     void this.load();
+    void waitForTranslationsReady().then(() => this.requestUpdate());
     this.tickHandle = window.setInterval(() => {
       this.nowMs = Date.now();
       if (
@@ -408,9 +410,15 @@ export class MatchDetailPage extends LitElement {
       <h1 class="mb-2 text-xl font-bold text-ink">
         ${translateText("match_detail.not_found_title")}
       </h1>
-      <p class="text-sm text-ink-muted">
+      <p class="mb-4 text-sm text-ink-muted">
         ${translateText("match_detail.not_found_body")}
       </p>
+      <a
+        href="/watch"
+        class="inline-flex min-h-11 items-center justify-center rounded-md border border-line bg-surface-2 px-4 text-sm font-bold text-ink no-underline outline-none hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-accent"
+      >
+        ${translateText("match_detail.not_found_cta")}
+      </a>
     `;
   }
 

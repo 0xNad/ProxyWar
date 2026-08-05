@@ -431,6 +431,17 @@ export function createRenderer(
     settingsModal,
     teamStats,
     playerPanel,
+    // P0 fix (2026-08-03): dropped from this array by f75969b56 ("platform:
+    // accounts are not a betting feature") as pure collateral -- that
+    // commit's own diff shows this line removed in the SAME hunk as adding
+    // povSelector below, alongside multiTabModal/inGamePromo (also still
+    // dead; both flagged separately, not restored here -- see deploy
+    // notes). Nothing in that 319-file identity/accounts refactor's intent
+    // ever mentions HeadsUpMessage; the removal is an oversight, not a
+    // decision. Without this, tick()/init() never ran for it at all --
+    // spawn/pause/immunity/catching-up status messages, AND item 3a's
+    // (deploy 3.9) match-end combat-toast suppression, were silently inert.
+    headsUpMessage,
     ...(povSelector !== null ? [povSelector] : []),
     alertFrame,
     performanceOverlay,

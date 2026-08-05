@@ -4,6 +4,10 @@ import { assetUrl } from "../../../core/AssetUrls";
 import { EventBus } from "../../../core/EventBus";
 import { PlayerType } from "../../../core/game/Game";
 import { PlayerView } from "../../../core/game/GameView";
+import {
+  activateFocusTrap,
+  type FocusTrapHandle,
+} from "../../components/FocusTrap";
 import { actionButton } from "../../components/ui/ActionButton";
 import { SendKickPlayerIntentEvent } from "../../Transport";
 import { translateText } from "../../Utils";
@@ -20,15 +24,31 @@ export class PlayerModerationModal extends LitElement {
   @property({ type: Boolean }) alreadyKicked: boolean = false;
   @property({ type: Boolean }) isAdmin: boolean = false;
 
+  private focusTrapHandle: FocusTrapHandle | null = null;
+
   createRenderRoot() {
     return this;
   }
 
+  disconnectedCallback() {
+    window.removeEventListener("keydown", this.handleWindowEscape);
+    this.focusTrapHandle?.deactivate();
+    this.focusTrapHandle = null;
+    super.disconnectedCallback();
+  }
+
   updated(changed: Map<string, unknown>) {
-    if (changed.has("open") && this.open) {
-      queueMicrotask(() =>
-        (this.querySelector('[role="dialog"]') as HTMLElement | null)?.focus(),
-      );
+    if (!changed.has("open")) return;
+    if (this.open) {
+      window.addEventListener("keydown", this.handleWindowEscape);
+      queueMicrotask(() => {
+        if (!this.open) return;
+        this.focusTrapHandle = activateFocusTrap(this);
+      });
+    } else {
+      window.removeEventListener("keydown", this.handleWindowEscape);
+      this.focusTrapHandle?.deactivate();
+      this.focusTrapHandle = null;
     }
   }
 
@@ -36,8 +56,14 @@ export class PlayerModerationModal extends LitElement {
     this.dispatchEvent(new CustomEvent("close"));
   }
 
-  private handleKeydown = (e: KeyboardEvent) => {
-    if (e.key === "Escape") {
+  /**
+   * Window-level so Escape keeps closing the modal even after focus has
+   * escaped it (P1 t1-02 family — same anti-pattern as the Points modal
+   * QA reproduced: a `@keydown` bound to the dialog's own DOM subtree
+   * stops firing the instant focus leaves it).
+   */
+  private readonly handleWindowEscape = (e: KeyboardEvent) => {
+    if (e.key === "Escape" && this.open) {
       e.preventDefault();
       this.closeModal();
     }
@@ -106,7 +132,6 @@ export class PlayerModerationModal extends LitElement {
           aria-labelledby="moderation-title"
           class="relative z-10 w-full max-w-120 focus:outline-hidden"
           tabindex="0"
-          @keydown=${this.handleKeydown}
         >
           <div
             class="rounded-2xl bg-zinc-900 p-5 shadow-2xl ring-1 ring-zinc-800 max-h-[90vh] text-zinc-200"

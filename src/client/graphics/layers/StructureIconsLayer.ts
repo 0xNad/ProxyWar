@@ -278,6 +278,17 @@ export class StructureIconsLayer implements Layer {
     window.addEventListener("resize", () => this.resizeCanvas());
     await this.setupRenderer();
     this.resizeCanvas();
+    // P0 fix (2026-08-03): catch up on every currently-active unit now
+    // that the stages/renderer actually exist -- see tick()'s own doc for
+    // why a bare guard alone isn't enough. handleActiveUnit is idempotent
+    // for a unit it's already tracking (checked via seenUnitIds), so this
+    // is safe even if some of these were already picked up by a tick()
+    // call that landed after setupRenderer() resolved.
+    for (const unitView of this.game.units()) {
+      if (unitView.isActive()) {
+        this.handleActiveUnit(unitView);
+      }
+    }
   }
 
   private rendererOrGLContextLost(): boolean {
@@ -300,7 +311,39 @@ export class StructureIconsLayer implements Layer {
     this.renderer?.resize(innerWidth, innerHeight, 1);
   }
 
+  /**
+   * P0 fix (2026-08-03): `iconsStage`/`levelsStage`/`dotsStage` (and
+   * `pixicanvas`) are declared non-nullable but only actually ASSIGNED
+   * inside the async `setupRenderer()` (bitmap-font load + WebGL/WebGPU
+   * renderer creation, both genuinely asynchronous), awaited from
+   * `init()` — never in the constructor. `renderLayer()` already guards
+   * against this window via `rendererOrGLContextLost()`; this method
+   * didn't, so a unit-creation update arriving before `setupRenderer()`
+   * resolved called `handleActiveUnit` -> `addNewStructure` ->
+   * `createIconSprite` -> `SpriteFactory.createUnitContainer`, which
+   * calls `stage.addChild(...)` on the still-undefined `iconsStage` and
+   * threw "Cannot read properties of undefined (reading 'addChild')" —
+   * silently killing the whole game tick loop from inside the WebWorker
+   * message handler (no auto-recovery, turn counter frozen forever).
+   * Under normal real-time pacing this window is a few tens of
+   * milliseconds and no structure exists yet, so it was never hit in
+   * practice; a max-speed catch-up burst (every replay's opening/spawn
+   * segment, since the deploy-3.2 spawn-phase auto-skip) can reach the
+   * match's first structure-build event almost immediately, well inside
+   * this window — live-reproduced at ~40-50% of fresh loads, always
+   * within the first ~400-500 turns (see
+   * /tmp/proxywar-qa/matrix-2/CRITICAL-ROOT-CAUSE-crash-and-stall.md).
+   * Skipping ticks here (rather than a bare null-check inside
+   * `createUnitContainer`) is deliberately paired with the catch-up pass
+   * `init()` now runs the moment `setupRenderer()` resolves — a plain
+   * guard alone would silently and permanently drop any structure whose
+   * ONE creation update happened to land during the skipped window,
+   * since `updatesSinceLastTick()` is a per-call delta, not a replayable
+   * log; a structure missed here would simply never render for the rest
+   * of the match.
+   */
   tick() {
+    if (!this.rendererInitialized) return;
     const unitUpdates = this.game.updatesSinceLastTick()?.[GameUpdateType.Unit];
     if (unitUpdates) {
       for (let i = 0, len = unitUpdates.length; i < len; i++) {

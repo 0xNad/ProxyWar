@@ -316,11 +316,14 @@ afterEach(() => {
 });
 
 describe("match-detail-page", () => {
-  it("renders an honest not-found state on a 404", async () => {
+  it("renders an honest not-found state on a 404, with a Browse matches recovery CTA to /watch (P2 2026-08-02)", async () => {
     stubFetch({ readModel: readModelBody({}), detail: { status: 404 } });
     const el = mount("feat_missing");
     await flushMicrotasks();
     expect(el.textContent).toContain("match_detail.not_found_title");
+    const cta = el.querySelector<HTMLAnchorElement>('main a[href="/watch"]');
+    expect(cta).not.toBeNull();
+    expect(cta!.textContent).toContain("match_detail.not_found_cta");
   });
 
   it("renders an error state (with retry) on a network/schema failure, never throwing", async () => {

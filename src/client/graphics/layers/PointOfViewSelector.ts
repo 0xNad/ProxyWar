@@ -20,17 +20,21 @@ const WHOLE_BOARD_VALUE = "";
 
 /**
  * Dispatched by the Stage 4 broadcast composition's competitor rail (either
- * overlay) with `detail: { playerName: string }` when a viewer clicks a
- * rail seat. This class is the ONLY listener — see `onFollowPlayerRequest`.
+ * overlay) with `detail: { playerName: string; clientID: string | null }`
+ * when a viewer clicks a rail seat. `clientID` (P0 fix, deploy 3.4) is what
+ * this class actually resolves the click to a real PlayerView with — see
+ * `onFollowPlayerRequest`'s own doc. This class is the ONLY listener.
  */
 export const BROADCAST_RAIL_FOLLOW_EVENT = "broadcast-rail-follow-player";
 
 /**
  * Dispatched BY this class whenever the followed player changes (from a
  * rail click, the dropdown, the crosshair button, or the silent initial
- * claim/manual resolution) with `detail: { playerName: string | null }` —
- * `null` for "whole board". Both overlays listen for this to keep the
- * competitor rail's `followed`/`data-followed` state truthful.
+ * claim/manual resolution) with `detail: { playerName: string | null;
+ * clientID: string | null }` — both `null` for "whole board". Both
+ * overlays listen for this to keep the competitor rail's
+ * `followed`/`data-followed` state truthful, correlating on `clientID`
+ * (see `onFollowPlayerRequest`'s own doc for why `playerName` alone can't).
  */
 export const BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT =
   "broadcast-rail-followed-change";
@@ -85,6 +89,20 @@ export class PointOfViewSelector extends LitElement implements Layer {
       BROADCAST_RAIL_FOLLOW_EVENT,
       this.onFollowPlayerRequest,
     );
+    // P0 fix (2026-08-03, item 3b): WinModal emits FitWholeMapEvent at
+    // match end (the camera already auto-pulls back to a full-board fit —
+    // see WinModal.ts's own doc for why), but this dropdown never followed
+    // suit -- it stayed showing whoever was last followed even though the
+    // camera had visibly moved to "Whole board", making the label lie
+    // about what the viewer was actually looking at. Also fires for THIS
+    // component's own "whole board" pick/crosshair click (the only other
+    // emitter), where selectedId is already null -- a harmless no-op
+    // there. `pan: false` is essential: TransformHandler already reacts to
+    // the SAME FitWholeMapEvent that triggered this, so re-emitting one
+    // from inside this handler would be a redundant/reentrant fit.
+    // `persist: false`: an automatic reset must never overwrite the
+    // viewer's own manual pick preference for a future session.
+    this.eventBus?.on(FitWholeMapEvent, this.onFitWholeMap);
   }
 
   disconnectedCallback(): void {
@@ -93,7 +111,12 @@ export class PointOfViewSelector extends LitElement implements Layer {
       BROADCAST_RAIL_FOLLOW_EVENT,
       this.onFollowPlayerRequest,
     );
+    this.eventBus?.off(FitWholeMapEvent, this.onFitWholeMap);
   }
+
+  private readonly onFitWholeMap = (): void => {
+    this.applyPov(null, "neutral", { persist: false, pan: false });
+  };
 
   /**
    * Bridge for the Stage 4 broadcast composition's competitor rail (spec
@@ -107,18 +130,39 @@ export class PointOfViewSelector extends LitElement implements Layer {
    * `GoToPlayerEvent`/`PointOfViewChangeEvent` emissions all in perfect
    * sync with a rail click, rather than a second, parallel follow
    * mechanism that could drift from this one.
+   *
+   * P0 fix (follow-controls sync, deploy 3.4): `detail.playerName` is a
+   * rail's human-readable roster/seat name — NEVER the same value as this
+   * class's own `PlayerView.name()`/`.displayName()`, which are
+   * procedurally-generated in-game identifiers (confirmed live: an AI
+   * League match's rail seat reads "PeePee7"; the SAME player's own
+   * `PlayerView.displayName()` reads "👤 Somali Host" — a completely
+   * disjoint namespace). Matching on `playerName` therefore NEVER
+   * resolved a real player, so the per-agent rail button silently did
+   * nothing at all — not merely "didn't sync the toolbar", the camera
+   * never moved either. `detail.clientID` is the identifier both sides
+   * actually share (`AiLeagueReplayFramePlayer.clientID` /
+   * `ReplayPremiereRailSeatView.seatId`, both === `PlayerView.clientID()`)
+   * — resolved first when present; the old name-based match survives only
+   * as a fallback for a caller that hasn't been updated to supply it.
    */
   private readonly onFollowPlayerRequest = (event: Event): void => {
-    const detail = (event as CustomEvent<{ playerName?: string }>).detail;
-    if (typeof detail?.playerName !== "string") return;
-    const player =
-      this.game
-        ?.playerViews()
-        .find(
+    const detail = (
+      event as CustomEvent<{ playerName?: string; clientID?: string | null }>
+    ).detail;
+    const players = this.game?.playerViews() ?? [];
+    let player: PlayerView | null = null;
+    if (typeof detail?.clientID === "string") {
+      player = players.find((p) => p.clientID() === detail.clientID) ?? null;
+    }
+    if (player === null && typeof detail?.playerName === "string") {
+      player =
+        players.find(
           (p) =>
             p.displayName() === detail.playerName ||
             p.name() === detail.playerName,
         ) ?? null;
+    }
     if (player === null) return;
     this.applyPov(player, "manual", { persist: true, pan: true });
   };
@@ -206,18 +250,25 @@ export class PointOfViewSelector extends LitElement implements Layer {
     // to highlight whichever rail seat is currently followed, keeping the
     // rail's `data-followed` state truthful regardless of whether the PoV
     // changed via a rail click, the dropdown, or the initial claim/manual
-    // resolution above.
+    // resolution above. `clientID` (P0 fix, deploy 3.4) is what a rail
+    // consumer actually compares its own seat identity against — see
+    // `onFollowPlayerRequest`'s own doc for why `playerName` alone can
+    // never correlate to a rail seat; `playerName` is kept dispatched too
+    // for a caller that only wants the human-readable name.
     document.dispatchEvent(
       new CustomEvent(BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT, {
-        detail: { playerName: player?.displayName() ?? null },
+        detail: {
+          playerName: player?.displayName() ?? null,
+          clientID: player?.clientID() ?? null,
+        },
       }),
     );
     // A manual pan request always resolves to a camera move: a followed
     // player pans/tracks to them (GoToPlayerEvent, unchanged); "Whole
     // board" instead recentres to the literal whole-map fit
-    // (FitWholeMapEvent) — the one-gesture way back out of the portrait
-    // spectator overzoom default (see TransformHandler.centerAll's
-    // PORTRAIT_TARGET_VERTICAL_FILL). The initial silent resolution in
+    // (FitWholeMapEvent) — the one-gesture way back out of the portrait/
+    // landscape spectator overzoom default (see TransformHandler's
+    // SPECTATOR_OVERZOOM_TARGET_FILL).
     // applyInitialSelection() always passes `pan: false`, so this never
     // fires on load — only in direct response to the viewer's own dropdown
     // pick, rail click, or crosshair tap.
@@ -279,10 +330,21 @@ export class PointOfViewSelector extends LitElement implements Layer {
    * The "from your league claim" caption below (rendered only when
    * `source === "claim"`) follows the SAME reflow, offset to sit under
    * wherever the main pill actually landed at each breakpoint.
+   *
+   * `data-pov-toolbar` (spec 01 rule 2, safe-frame): `NameLayer.ts`'s
+   * `computeUnsafePanelRects()` targets THIS div, not the `pov-selector`
+   * custom element itself — `createRenderRoot()` returns `this` (light
+   * DOM), so this fixed-positioned div is a CHILD of the element, and a
+   * `position: fixed` child contributes nothing to its non-fixed parent's
+   * own layout box; `document.querySelector("pov-selector").getBoundingClientRect()`
+   * measures a degenerate box (confirmed live: `{x:0, y:0, width:0,
+   * height: <viewport height>}`, matching neither this widget's size nor
+   * position) that would silently make that exclusion a no-op.
    */
   render() {
     return html`
       <div
+        data-pov-toolbar
         class="fixed top-14 left-2 z-[50003] flex items-center gap-1.5 rounded-lg bg-gray-800/85 text-white text-[11px] md:text-xs px-2 py-1.5 shadow-lg max-w-[calc(100vw-1rem)] min-[1200px]:top-4 min-[1200px]:left-1/2 min-[1200px]:max-w-none min-[1200px]:-translate-x-1/2"
       >
         <label for="pov-select" class="font-semibold whitespace-nowrap"

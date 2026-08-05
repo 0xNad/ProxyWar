@@ -522,17 +522,18 @@ export interface CompressedEliminations {
 
 /**
  * Compresses simultaneous MATCH-END eliminations into one summary beat.
- * `AgentSpectatorTelemetry.ts`'s `addEliminationEvents` stamps EVERY
- * eliminated agent's synthetic elimination event at the match's actual
- * final turn, regardless of when that agent really died (the ONLY
- * genuinely turn-accurate elimination-timing signal this pipeline has is
- * the sampled match-state series — see `AgentMatchStateDerivations.ts`'s
- * `computeEliminationTimings` doc) — so today, every elimination beat
- * this recap sees already carries `turnNumber === totalTurns`. A real
- * production match showed 8 individual "X is eliminated." beats, all at
- * the same final turn: that is the match ENDING, not eight separate
- * narrative beats, and was eating 8 of the 16-beat public cap's
- * never-trimmed slots for one fact.
+ * `AgentSpectatorTelemetry.ts`'s `addEliminationEvents` (P0 fix,
+ * 2026-08-03) now stamps each eliminated agent's synthetic event at that
+ * agent's own approximate death turn (its last decision record's turn) —
+ * not always the match's final turn, as it did before that fix, when
+ * every single elimination beat this recap saw carried
+ * `turnNumber === totalTurns` (a real production match once showed 8
+ * individual "X is eliminated." beats, all at the same final turn: that
+ * is the match ENDING, not eight separate narrative beats, and was eating
+ * 8 of the 16-beat public cap's never-trimmed slots for one fact). Two or
+ * more agents GENUINELY eliminated together right at the match's end
+ * still need this compression; a lone terminal death, or any mid-match
+ * death now correctly timed by the upstream fix, does not.
  *
  * Groups elimination beats by whether `turnNumber >= totalTurns` (never
  * `>` — a beat is never generated past the resolved total turn count, so
@@ -541,11 +542,14 @@ export interface CompressedEliminations {
  * ends" beat, anchored at `totalTurns`. A SINGLE terminal elimination
  * (a lone survivor's final kill) is left as its own individual beat —
  * compression only buys anything when there is real redundancy to
- * reduce. Any elimination beat with `turnNumber < totalTurns` — honestly
- * supported the moment this pipeline's timing signal improves — always
- * stays individual: it is a genuinely mid-match death, real narrative
- * evidence the outcome was still contested, never swept into the
- * end-of-match summary.
+ * reduce. Any elimination beat with `turnNumber < totalTurns` is a
+ * genuinely mid-match death, real narrative evidence the outcome was
+ * still contested, and always stays individual — never swept into the
+ * end-of-match summary. (The upstream timing is still an approximation,
+ * not the sampled match-state series's exact per-turn signal — see
+ * `AgentMatchStateDerivations.ts`'s `computeEliminationTimings` doc for
+ * the one genuinely turn-accurate source this pipeline has, which this
+ * recap does not consult.)
  */
 export function compressTerminalEliminations(
   eliminationBeats: readonly AgentMatchRecapBeat[],

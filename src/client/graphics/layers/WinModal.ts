@@ -1,10 +1,15 @@
 import { html, LitElement, TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
+import { aiLeagueSpectatorDisplayName } from "../../../client/AiLeagueReplayMode";
 import { translateText } from "../../../client/Utils";
 import { EventBus } from "../../../core/EventBus";
 import { RankedType } from "../../../core/game/Game";
 import { GameUpdateType } from "../../../core/game/GameUpdates";
 import { GameView } from "../../../core/game/GameView";
+import {
+  ANONYMOUS_NAMES_KEY,
+  USER_SETTINGS_CHANGED_EVENT,
+} from "../../../core/game/UserSettings";
 import { getUserMe } from "../../Api";
 import "../../components/CosmeticButton";
 import {
@@ -15,6 +20,7 @@ import {
 import { crazyGamesSDK } from "../../CrazyGamesSDK";
 import { Platform } from "../../Platform";
 import { SendWinnerEvent } from "../../Transport";
+import { FitWholeMapEvent } from "../TransformHandler";
 import { Layer } from "./Layer";
 
 @customElement("win-modal")
@@ -41,21 +47,65 @@ export class WinModal extends LitElement implements Layer {
 
   private _title: string;
 
+  /**
+   * P0 fix (2026-08-03): the "other player won" title used to bake in
+   * `winner.displayName()` (a real AI League agent's identity — see
+   * `AiLeagueReplayMode.ts`'s own doc for why `PlayerView.displayName()`
+   * is NOT the safe-by-default value it is in a normal multiplayer game)
+   * once, inside `tick()`, and never revisited it. A viewer who toggled
+   * "Anonymous Names" ON only AFTER the match had already ended still saw
+   * the real winner's name — this modal is a top-level `<win-modal>`
+   * element (index.html), entirely outside `AiLeagueReplayOverlay.ts`'s
+   * `renderDetails()` rebuild path that every OTHER surface's retoggle fix
+   * relies on, so that fix never reached it. Kept so
+   * `onAnonymousNamesChange` can re-derive `_title` without needing the
+   * original `PlayerView` again. `null` whenever `_title` was set by any
+   * OTHER branch (own win, own death, team win, nation win) — none of
+   * those carry a real agent identity to anonymize.
+   */
+  private otherPlayerWinnerRawName: string | null = null;
 
-  // Override to prevent shadow DOM creation
+  private readonly onAnonymousNamesChange = (): void => {
+    if (this.otherPlayerWinnerRawName === null) return;
+    this._title = translateText("win_modal.other_won", {
+      player: aiLeagueSpectatorDisplayName(this.otherPlayerWinnerRawName),
+    });
+    this.requestUpdate();
+  };
+
+  // Override to prevent shadow DOM creation (Tailwind's global stylesheet
+  // only reaches light DOM; without this, every class on this modal --
+  // fixed positioning, z-[10010], centering, background -- is inert and
+  // the "won" banner renders as an unstyled, invisible sliver at 0,0 in
+  // an isolated shadow root while `isVisible`/`_title` are still correct.
+  // P0 regression (2026-08-03): lost in the anonymize-winner-name edit
+  // above when connectedCallback/disconnectedCallback were added in the
+  // same spot -- restore alongside those, never remove again.
   createRenderRoot() {
     return this;
   }
 
-  constructor() {
-    super();
+  connectedCallback() {
+    super.connectedCallback();
+    window.addEventListener(
+      `${USER_SETTINGS_CHANGED_EVENT}:${ANONYMOUS_NAMES_KEY}`,
+      this.onAnonymousNamesChange,
+    );
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    window.removeEventListener(
+      `${USER_SETTINGS_CHANGED_EVENT}:${ANONYMOUS_NAMES_KEY}`,
+      this.onAnonymousNamesChange,
+    );
   }
 
   render() {
     return html`
       <div
         class="${this.isVisible
-          ? "fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-gray-800/70 p-6 shrink-0 rounded-lg z-[10010] shadow-2xl backdrop-blur-xs text-white w-87.5 max-w-[90%] md:w-175"
+          ? "fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-gray-800/95 p-6 shrink-0 rounded-lg z-[10010] shadow-2xl backdrop-blur-xs text-white w-87.5 max-w-[90%] md:w-175"
           : "hidden"}"
       >
         <h2 class="m-0 mb-4 text-[26px] text-center text-white">
@@ -211,6 +261,7 @@ export class WinModal extends LitElement implements Layer {
     ) {
       this.hasShownDeathModal = true;
       this._title = translateText("win_modal.died");
+      this.otherPlayerWinnerRawName = null;
       this.show();
     }
     const updates = this.game.updatesSinceLastTick();
@@ -220,6 +271,7 @@ export class WinModal extends LitElement implements Layer {
         // ...
       } else if (wu.winner[0] === "team") {
         this.eventBus.emit(new SendWinnerEvent(wu.winner, wu.allPlayersStats));
+        this.otherPlayerWinnerRawName = null;
         if (wu.winner[1] === this.game.myPlayer()?.team()) {
           this._title = translateText("win_modal.your_team");
           this.isWin = true;
@@ -231,12 +283,21 @@ export class WinModal extends LitElement implements Layer {
           this.isWin = false;
         }
         history.replaceState(null, "", `${window.location.pathname}?replay`);
+        // Spec 02 non-negotiable #2: camera must resolve to a full-board
+        // framing at match end, full stop -- a random mid-zoom crop is the
+        // last thing a viewer should see after a whole match. Reuses the
+        // exact existing "Whole board" camera machinery (PointOfViewSelector
+        // dispatches the same event today; this is simply the first
+        // AUTOMATIC trigger for it, at the one moment it should always fire).
+        this.eventBus.emit(new FitWholeMapEvent());
         this.show();
       } else if (wu.winner[0] === "nation") {
         this._title = translateText("win_modal.nation_won", {
           nation: wu.winner[1],
         });
         this.isWin = false;
+        this.otherPlayerWinnerRawName = null;
+        this.eventBus.emit(new FitWholeMapEvent());
         this.show();
       } else {
         const winner = this.game.playerByClientID(wu.winner[1]);
@@ -253,14 +314,19 @@ export class WinModal extends LitElement implements Layer {
         ) {
           this._title = translateText("win_modal.you_won");
           this.isWin = true;
+          this.otherPlayerWinnerRawName = null;
           crazyGamesSDK.happytime();
         } else {
+          this.otherPlayerWinnerRawName = winner.displayName();
           this._title = translateText("win_modal.other_won", {
-            player: winner.displayName(),
+            player: aiLeagueSpectatorDisplayName(
+              this.otherPlayerWinnerRawName,
+            ),
           });
           this.isWin = false;
         }
         history.replaceState(null, "", `${window.location.pathname}?replay`);
+        this.eventBus.emit(new FitWholeMapEvent());
         this.show();
       }
     });

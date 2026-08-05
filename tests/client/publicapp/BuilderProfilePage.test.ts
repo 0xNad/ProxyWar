@@ -126,7 +126,7 @@ afterEach(() => {
 });
 
 describe("builder-profile-page", () => {
-  it("renders an honest not-found state when 0 builders are seeded", async () => {
+  it("renders an honest not-found state when 0 builders are seeded, with a Browse builders recovery CTA to /builders (P2 2026-08-02)", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => Response.json(readModelBody([], []))),
@@ -136,6 +136,9 @@ describe("builder-profile-page", () => {
 
     expect(el.querySelector("h1")?.textContent).toBe("daveey");
     expect(el.textContent).toContain("builder_profile.not_found_body");
+    const cta = el.querySelector<HTMLAnchorElement>('main a[href="/builders"]');
+    expect(cta).not.toBeNull();
+    expect(cta!.textContent).toContain("builder_profile.not_found_cta");
   });
 
   it("renders not-found when the slug matches no builder", async () => {

@@ -116,6 +116,98 @@ describe("AgentSpectatorTelemetry", () => {
     expect(telemetry.timelineBuckets.length).toBeGreaterThan(0);
   });
 
+  // P0 fix (2026-08-03): addEliminationEvents used to stamp EVERY eliminated
+  // agent's synthetic event at the match's own final turn (finalState.turnCount),
+  // regardless of when that agent actually died -- a viewer watching anywhere
+  // before the literal last turn saw zero eliminations in the client's
+  // playhead-windowed War Room feed, no matter how many agents had already
+  // died. This pipeline has no sampled turn-by-turn state series to consult
+  // (see AgentMatchStateDerivations.ts's computeEliminationTimings for the
+  // one genuinely turn-accurate signal, used elsewhere but not available
+  // here), so the fix uses each agent's own LAST decision record's turn as
+  // the best available approximation.
+  it("stamps a mid-match elimination near the eliminated agent's own last decision turn, not the match's final turn", () => {
+    const telemetry = buildAgentSpectatorTelemetry({
+      runID: "elimination-timing-run",
+      roster: [
+        {
+          agentID: "a1",
+          username: "Atlas",
+          profile: "diplomatic",
+          clientID: "c1",
+          brainType: "planner-executor",
+        },
+        {
+          agentID: "a2",
+          username: "Blitz",
+          profile: "aggressive",
+          clientID: "c2",
+          brainType: "planner-executor",
+        },
+      ],
+      records: [
+        // Atlas's last record lands at turn 300 (sequence 3) -- eliminated
+        // shortly after, nowhere near the match's real final turn of 7300.
+        record(1, "a1", "Atlas", "p1", "attack", {
+          targetID: "p2",
+          targetName: "Blitz",
+        }),
+        record(2, "a2", "Blitz", "p2", "attack", {
+          targetID: "p1",
+          targetName: "Atlas",
+        }),
+        record(3, "a1", "Atlas", "p1", "attack", {
+          targetID: "p2",
+          targetName: "Blitz",
+        }),
+        // Blitz keeps playing long after Atlas's last decision.
+        record(4, "a2", "Blitz", "p2", "attack", {
+          targetID: "p1",
+          targetName: "Atlas",
+        }),
+      ],
+      finalState: {
+        phase: "finished",
+        tick: 7300,
+        turnCount: 7300,
+        players: [
+          {
+            agentID: "a1",
+            username: "Atlas",
+            profile: "diplomatic",
+            playerID: "p1",
+            isAlive: false,
+            tilesOwned: 0,
+            troops: 0,
+            gold: "0",
+          },
+          {
+            agentID: "a2",
+            username: "Blitz",
+            profile: "aggressive",
+            playerID: "p2",
+            isAlive: true,
+            tilesOwned: 100,
+            troops: 2000,
+            gold: "500",
+          },
+        ],
+      },
+    });
+
+    const elimination = telemetry.events.find(
+      (event) => event.kind === "elimination",
+    );
+    expect(elimination).toBeDefined();
+    expect(elimination!.actorName).toBe("Atlas");
+    // Atlas's own last record (sequence 3) is at turnNumber 300 (sequence * 100,
+    // per the record() fixture below) -- the elimination must land there, NOT
+    // at the match's final turn (7300), which would make it invisible to any
+    // viewer whose playhead hasn't reached the literal last turn yet.
+    expect(elimination!.turnNumber).toBe(300);
+    expect(elimination!.turnNumber).not.toBe(7300);
+  });
+
   it("groups chat into readable threads and infers pressure tone", () => {
     const telemetry = buildAgentSpectatorTelemetry({
       runID: "chat-run",
