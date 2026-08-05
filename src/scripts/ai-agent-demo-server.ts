@@ -25,7 +25,10 @@ import {
   type AgentDemoJobRequest,
 } from "../server/agents/AgentDemoServerJobs";
 import { AgentRelayRateGuard } from "../server/agents/AgentRelayRateGuard";
-import { resolveFeaturedMatchStateRoot } from "../server/agents/FeaturedMatch";
+import {
+  resolveFeaturedMatchStateRoot,
+  type FeaturedMatch,
+} from "../server/agents/FeaturedMatch";
 import { reconcileFeaturedMatchStore } from "../server/agents/FeaturedMatchReconcile";
 import { resolveFeaturedMatchParticipantCards } from "../server/agents/FeaturedMatchParticipants";
 import {
@@ -99,6 +102,7 @@ import { resolveExternalAgentToken } from "../server/agents/ExternalAgentSecrets
 import type { ExternalAgentRequest } from "../server/agents/ExternalHttpAgentBrain";
 import {
   buildLeaguePlayerSection,
+  findLeagueEpisodeReplayInfo,
   readLeagueMirrorData,
 } from "../server/agents/LeaguePlayerProfile";
 import { readAgentStatsArtifact } from "../server/agents/AgentStatsArtifact";
@@ -1262,7 +1266,7 @@ app.get("/api/premieres/:id/settlement", async (req, res) => {
 // safe, since either requires the caller to already know which specific
 // record they're asking about.
 async function loadFeaturedMatchDetail(
-  match: import("../server/agents/FeaturedMatch").FeaturedMatch | undefined,
+  match: FeaturedMatch | undefined,
 ) {
   if (match === undefined) return null;
   const identity = await loadIdentityRegistrySnapshot();
@@ -1278,8 +1282,38 @@ async function loadFeaturedMatchDetail(
     resolveEventPackageStateRoot(),
   );
   const eventPackage = findEventPackage(eventPackageStore, match.matchId);
+  // Full-replay-access bugfix (2026-08-05): resolves the SAME live mirror
+  // episode row `publicFeaturedMatches` (the bulk read model) already
+  // resolves `completedAt`/`watchHref`/`fullRenderHref` from — this narrow
+  // per-record route previously never loaded the mirror at all, so every
+  // record served through it silently fell back to `publicFeaturedMatch`'s
+  // "not looked up" defaults (`completedAt: null`, no replay link),
+  // leaving `/match/:matchId` (a FeaturedMatch's own canonical page, and
+  // the ONLY page a visitor reaches for a revealed/archived Featured
+  // Event via the homepage/`/watch` Season schedule) unable to ever show
+  // a way to watch the match it was reporting a result for. `null`
+  // `episodeRequestId` skips the read entirely (no episode to resolve).
+  const episodeRequestId = match.episodeRequestId;
+  const mirrorData =
+    episodeRequestId === null
+      ? null
+      : await readLeagueMirrorData(leagueDataJsonPath);
+  const episodeReplayInfo =
+    mirrorData === null || episodeRequestId === null
+      ? null
+      : findLeagueEpisodeReplayInfo(mirrorData, episodeRequestId);
   return {
-    match: publicFeaturedMatch(match, eventPackage),
+    match: publicFeaturedMatch(
+      match,
+      eventPackage,
+      episodeReplayInfo?.completedAt ?? null,
+      episodeReplayInfo === null
+        ? null
+        : {
+            watchHref: episodeReplayInfo.watchHref,
+            fullRenderHref: episodeReplayInfo.fullRenderHref,
+          },
+    ),
     // Lets the client detect "is this record the CURRENTLY LIVE premiere"
     // via a plain string comparison against the already-fetched read
     // model's `premieres.live.premiereId`, without doing any hashing

@@ -89,6 +89,8 @@ function featuredMatch(overrides: Partial<PublicFeaturedMatch> = {}): PublicFeat
     scheduledAt: new Date(Date.now() + 600_000).toISOString(),
     revealAt: null,
     completedAt: null,
+    watchHref: null,
+    fullRenderHref: null,
     postMatchSummary: null,
     result: null,
     isPubliclyPromotable: true,

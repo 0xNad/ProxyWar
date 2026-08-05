@@ -159,6 +159,9 @@ function featuredMatchDetailBody(overrides: {
   participants?: unknown[];
   derivedPremiereId?: string | null;
   title?: string;
+  watchHref?: string | null;
+  fullRenderHref?: string | null;
+  directorCutEstimateSeconds?: number | null;
 }) {
   return {
     schemaVersion: 1,
@@ -174,12 +177,15 @@ function featuredMatchDetailBody(overrides: {
       scheduledAt: overrides.scheduledAt ?? null,
       revealAt: null,
       completedAt: null,
+      watchHref: "watchHref" in overrides ? overrides.watchHref : null,
+      fullRenderHref:
+        "fullRenderHref" in overrides ? overrides.fullRenderHref : null,
       postMatchSummary: null,
       result: overrides.result ?? null,
       isPubliclyPromotable: false,
       subtitle: null,
       reasonToWatch: null,
-      directorCutEstimateSeconds: null,
+      directorCutEstimateSeconds: overrides.directorCutEstimateSeconds ?? null,
       canonicalMatchUrl: null,
       canonicalPremiereUrl: null,
     },
@@ -554,6 +560,100 @@ describe("match-detail-page", () => {
     expect(el.textContent).not.toContain("match_detail.winner_unknown");
     const winnerLink = el.querySelector('a[href="/agent/auri"]');
     expect(winnerLink).not.toBeNull();
+  });
+
+  it("full-replay-access bugfix (2026-08-05): post-match state renders the primary Director Cut/Full Replay CTA pointing at fullRenderHref — realistic, non-colliding feat_/ereq_ ids (the archive row this featured match spotlights is keyed by its OWN real ereq_ episodeRequestId, never the feat_ id itself)", async () => {
+    stubFetch({
+      readModel: readModelBody({
+        // The real underlying episode this FeaturedMatch spotlights — kept
+        // under its own real ereq_ id, exactly like `publicMatch()`
+        // (ProxyWarPublicReadModel.ts) produces in production. The
+        // FeaturedMatch's `watchHref`/`fullRenderHref` below come from the
+        // server's OWN episodeRequestId resolution, never from a client-side
+        // lookup against this array — so this row deliberately does NOT
+        // share the FeaturedMatch's matchId.
+        matches: [
+          minimalMatch({
+            matchId: "ereq_real_episode_42",
+            completedAt: "2026-07-29T00:00:00.000Z",
+            winnerAgentSlug: null,
+            agentSlugs: [],
+          }),
+        ],
+      }),
+      detail: {
+        status: 200,
+        body: featuredMatchDetailBody({
+          matchId: "feat_0000000000000000cafe",
+          state: "archived",
+          result: { winnerAgentId: null, placements: [] },
+          watchHref: "/ai-league-runs/league-real-episode-42/spectator.html",
+          fullRenderHref: "/ai-league-replay/league-real-episode-42",
+          directorCutEstimateSeconds: 300,
+        }),
+      },
+    });
+    const el = mount("feat_0000000000000000cafe");
+    await flushMicrotasks();
+    const primaryLink = el.querySelector(
+      'a[href="/ai-league-replay/league-real-episode-42"]',
+    );
+    expect(primaryLink).not.toBeNull();
+    expect(primaryLink?.textContent).toContain("watch.director_cut_duration");
+    // The lightweight spectator schematic is a SEPARATE, secondary link —
+    // never the only replay affordance on the page.
+    const secondaryLink = el.querySelector(
+      'a[href="/ai-league-runs/league-real-episode-42/spectator.html"]',
+    );
+    expect(secondaryLink).not.toBeNull();
+    expect(secondaryLink?.textContent).toContain(
+      "match_detail.quick_replay_link",
+    );
+  });
+
+  it("post-match: plain 'Watch Replay' label (no Director Cut wording) when directorCutEstimateSeconds is absent, and no secondary link when watchHref equals fullRenderHref", async () => {
+    stubFetch({
+      readModel: readModelBody({}),
+      detail: {
+        status: 200,
+        body: featuredMatchDetailBody({
+          matchId: "feat_00000000000000001eaf",
+          state: "revealed",
+          result: { winnerAgentId: null, placements: [] },
+          watchHref: "/ai-league-replay/league-same-link",
+          fullRenderHref: "/ai-league-replay/league-same-link",
+          directorCutEstimateSeconds: null,
+        }),
+      },
+    });
+    const el = mount("feat_00000000000000001eaf");
+    await flushMicrotasks();
+    expect(el.textContent).toContain("watch.watch_replay");
+    expect(el.textContent).not.toContain("watch.director_cut_duration");
+    // Only ONE anchor to the shared href — no redundant secondary link.
+    expect(
+      el.querySelectorAll('a[href="/ai-league-replay/league-same-link"]'),
+    ).toHaveLength(1);
+  });
+
+  it("post-match: renders an honest 'replay pending' note, never a broken link, when fullRenderHref hasn't reached the mirror yet", async () => {
+    stubFetch({
+      readModel: readModelBody({}),
+      detail: {
+        status: 200,
+        body: featuredMatchDetailBody({
+          matchId: "feat_00000000000000002eaf",
+          state: "archived",
+          result: { winnerAgentId: null, placements: [] },
+          watchHref: null,
+          fullRenderHref: null,
+        }),
+      },
+    });
+    const el = mount("feat_00000000000000002eaf");
+    await flushMicrotasks();
+    expect(el.textContent).toContain("watch.replay_pending");
+    expect(el.querySelector('a[href*="/ai-league-replay/"]')).toBeNull();
   });
 
   it("shows the Analysis section with turn/decision/degraded composition and last-updated, when the FeaturedMatch's matchId resolves to an archive record", async () => {

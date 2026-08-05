@@ -368,6 +368,8 @@ describe("buildProxyWarPublicReadModel", () => {
       scheduledAt: "2026-07-31T00:10:00.000Z",
       revealAt: "2026-07-31T01:00:00.000Z",
       completedAt: null,
+      watchHref: null,
+      fullRenderHref: null,
       postMatchSummary: null,
       result: null,
       isPubliclyPromotable: false,
@@ -492,6 +494,52 @@ describe("buildProxyWarPublicReadModel", () => {
     );
     expect(model.featuredMatches[0]?.completedAt).toBeNull();
     expect(model.featuredMatches[1]?.completedAt).toBeNull();
+  });
+
+  test("full-replay-access bugfix (2026-08-05): watchHref/fullRenderHref resolve from the SAME live-mirror episode row as completedAt, by episodeRequestId, for either lane", () => {
+    const record = featuredMatch({
+      lane: "archive",
+      episodeRequestId: "ereq_1",
+      queueItemName: null,
+      scheduledAt: null,
+      provenance: { source: "league-archive", sourceRef: "ereq_1", capturedAt: "2026-07-31T00:00:00.000Z" },
+    });
+    const model = buildProxyWarPublicReadModel(baseMirror(), identitySnapshot(), featuredMatchStoreOf(record));
+    // baseMirror()'s ereq_1 episode has watchHref "/watch-href" and fullRenderHref "/ai-league-replay/ereq_1".
+    expect(model.featuredMatches[0]?.watchHref).toBe("/watch-href");
+    expect(model.featuredMatches[0]?.fullRenderHref).toBe("/ai-league-replay/ereq_1");
+  });
+
+  test("watchHref/fullRenderHref resolve independently of isPubliclyPromotable — an ungated archive-lane record with a real result still gets a working replay link", () => {
+    const record = featuredMatch({
+      lane: "archive",
+      episodeRequestId: "ereq_1",
+      queueItemName: null,
+      scheduledAt: null,
+      state: "archived",
+      result: { winnerAgentId: "agt_daveey", placements: [{ agentId: "agt_daveey", placement: 1 }] },
+    });
+    const model = buildProxyWarPublicReadModel(baseMirror(), identitySnapshot(), featuredMatchStoreOf(record));
+    expect(model.featuredMatches[0]?.isPubliclyPromotable).toBe(false);
+    expect(model.featuredMatches[0]?.result).not.toBeNull();
+    expect(model.featuredMatches[0]?.fullRenderHref).toBe("/ai-league-replay/ereq_1");
+  });
+
+  test("watchHref/fullRenderHref are null (never fabricated) when episodeRequestId is null or hasn't reached the mirror yet", () => {
+    const noEpisodeId = featuredMatch({ episodeRequestId: null });
+    const notYetMirrored = featuredMatch({
+      matchId: "feat_1111111111111111bbbb",
+      episodeRequestId: "ereq_not_mirrored_yet",
+    });
+    const model = buildProxyWarPublicReadModel(
+      baseMirror(),
+      identitySnapshot(),
+      featuredMatchStoreOf(noEpisodeId, notYetMirrored),
+    );
+    expect(model.featuredMatches[0]?.watchHref).toBeNull();
+    expect(model.featuredMatches[0]?.fullRenderHref).toBeNull();
+    expect(model.featuredMatches[1]?.watchHref).toBeNull();
+    expect(model.featuredMatches[1]?.fullRenderHref).toBeNull();
   });
 
   describe("isPubliclyPromotable (Season Zero Phase 4 gate wiring)", () => {
