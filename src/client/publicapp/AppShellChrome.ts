@@ -132,9 +132,7 @@ export function appShellHeader(
 
 export function appShellFooter(): TemplateResult {
   return html`
-    <footer
-      class="mt-10 border-t border-line px-4 py-6 text-xs text-ink-muted"
-    >
+    <footer class="mt-10 border-t border-line px-4 py-6 text-xs text-ink-muted">
       <div
         class="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3"
       >
@@ -149,6 +147,14 @@ export function appShellFooter(): TemplateResult {
             href="/about"
             class="font-semibold text-ink-muted underline decoration-line outline-none hover:text-ink focus-visible:ring-2 focus-visible:ring-accent"
             >${translateText("app_shell.footer_about")}</a
+          >
+          <a
+            href="https://t.me/+TeaDXnPwbxk1Mjk8"
+            class="font-semibold text-ink-muted underline decoration-line outline-none hover:text-ink focus-visible:ring-2 focus-visible:ring-accent"
+            rel="noopener noreferrer"
+            target="_blank"
+            aria-label="Telegram community group"
+            >${translateText("app_shell.footer_telegram")}</a
           >
         </div>
       </div>
@@ -194,9 +200,10 @@ export async function waitForTranslationsReady(): Promise<void> {
     // lifetime). Resolving instead of throwing here is a pure test-
     // environment safety net; it changes nothing for a real caller.
     if (typeof document === "undefined") return;
-    const langSelector = document.querySelector("lang-selector") as
-      | { translations?: unknown; updateComplete?: Promise<unknown> }
-      | null;
+    const langSelector = document.querySelector("lang-selector") as {
+      translations?: unknown;
+      updateComplete?: Promise<unknown>;
+    } | null;
     if (langSelector?.translations !== undefined) {
       return;
     }

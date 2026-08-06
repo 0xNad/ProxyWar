@@ -1,14 +1,14 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "lit";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  appShellFooter,
+  appShellHeader,
+  waitForTranslationsReady,
+} from "../../../src/client/publicapp/AppShellChrome";
 
 vi.mock("../../../src/client/Utils", () => ({
   translateText: (key: string) => key,
 }));
-
-import {
-  appShellHeader,
-  waitForTranslationsReady,
-} from "../../../src/client/publicapp/AppShellChrome";
 
 /**
  * Coverage for `appShellHeader`'s account chip/link — the shared public
@@ -28,9 +28,7 @@ describe("appShellHeader account chip", () => {
     container = null;
   });
 
-  function renderHeader(
-    accountUrl: string | undefined,
-  ): HTMLElement {
+  function renderHeader(accountUrl: string | undefined): HTMLElement {
     container = document.createElement("div");
     document.body.appendChild(container);
     render(appShellHeader("/", undefined, accountUrl), container);
@@ -78,6 +76,53 @@ describe("appShellHeader account chip", () => {
     // A real navigation target, not a button/click-handler wrapping a fetch.
     expect(link?.tagName).toBe("A");
     expect(link?.hasAttribute("href")).toBe(true);
+  });
+});
+
+/**
+ * Footer community link: the shared shell includes a Telegram community
+ * link in the footer, alongside the GitHub repository and About links.
+ * The link is accessible with an aria-label, opens in a new tab with
+ * security attributes, and uses the correct Telegram group URL.
+ */
+describe("appShellFooter community link", () => {
+  let container: HTMLElement | null = null;
+
+  afterEach(() => {
+    container?.remove();
+    container = null;
+  });
+
+  function renderFooter(): HTMLElement {
+    const el = document.createElement("div");
+    document.body.appendChild(el);
+    container = el;
+    render(appShellFooter(), el);
+    return el;
+  }
+
+  it("includes the Telegram community link with correct href and security attributes", () => {
+    const root = renderFooter();
+    const telegramLink = root.querySelector<HTMLAnchorElement>(
+      'a[href="https://t.me/+TeaDXnPwbxk1Mjk8"]',
+    );
+    expect(telegramLink).toBeTruthy();
+    // Mock translateText (lines 4-6) returns the key directly, so visible text is the translation key itself
+    expect(telegramLink?.textContent).toBe("app_shell.footer_telegram");
+    expect(telegramLink?.getAttribute("rel")).toBe("noopener noreferrer");
+    expect(telegramLink?.getAttribute("target")).toBe("_blank");
+    expect(telegramLink?.getAttribute("aria-label")).toBe(
+      "Telegram community group",
+    );
+  });
+
+  it("is a real link with href, not a button or JavaScript handler", () => {
+    const root = renderFooter();
+    const telegramLink = root.querySelector<HTMLAnchorElement>(
+      'a[href="https://t.me/+TeaDXnPwbxk1Mjk8"]',
+    );
+    expect(telegramLink?.tagName).toBe("A");
+    expect(telegramLink?.hasAttribute("href")).toBe(true);
   });
 });
 
