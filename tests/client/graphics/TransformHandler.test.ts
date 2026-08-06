@@ -438,3 +438,92 @@ describe("TransformHandler onZoom/clampOffsets — spectator zoom no longer re-c
     expect(Math.abs(topLeft.y - expectedGameTopY)).toBeLessThanOrEqual(1);
   });
 });
+
+/**
+ * Regression coverage for the deferred post-resize correction: `resizeCanvas()`
+ * (GameRenderer.ts) calls `TransformHandler.updateCanvasBoundingRect()` on
+ * every window resize/orientation-change, but that method used to only
+ * refresh `_boundingRect` — it never re-clamped the (possibly now stale,
+ * out-of-bounds) offset against the new viewport. The stale offset rendered
+ * as-is until the NEXT unrelated zoom/pan/goTo tick happened to call
+ * clampOffsets(), bundling a resize-caused correction into that gesture and
+ * reading as a camera jump caused by the zoom/pan itself. The fix makes
+ * updateCanvasBoundingRect() clamp immediately, using the exact same bound
+ * math clampOffsets() always used — no recentering, no pointer/anchor logic.
+ */
+describe("TransformHandler.updateCanvasBoundingRect — resize immediately re-clamps stale offsets", () => {
+  afterEach(() => {
+    delete (window as unknown as Record<string, unknown>)
+      .__PROXYWAR_AI_REPLAY__;
+  });
+
+  it("REGRESSION: a portrait->landscape resize (orientation change) re-clamps the offset immediately, with no subsequent zoom/pan/goTo call", () => {
+    (window as unknown as Record<string, unknown>).__PROXYWAR_AI_REPLAY__ =
+      true;
+    // Same 1000x1000 map as the existing 844x390 landscape fixtures above;
+    // starting orientation is portrait (390x844) — fillScale=0.844 either
+    // way (a square map), but the BINDING axis flips: Y in portrait, X in
+    // landscape. This is exactly the live orientation-change scenario.
+    const mapWidth = 1000;
+    const mapHeight = 1000;
+    const canvas = makeCanvas(390, 844); // portrait
+    const transform = new TransformHandler(
+      makeGameView(mapWidth, mapHeight),
+      new EventBus(),
+      canvas,
+    );
+
+    // Establish a valid, off-center portrait camera: zoom in off-center so
+    // the offset lands pinned against the portrait Y-axis tight bound
+    // (verified: scale ≈0.8257, well inside the [zoomFloor,fillScale] band).
+    transform.onZoom(new ZoomEvent(195, 700, -140));
+    const scaleAfterZoom = transform.scale;
+
+    // Switch the mocked canvas rect to landscape — the only thing a real
+    // orientation change does to the DOM — then call ONLY the public method
+    // GameRenderer.resizeCanvas() calls. No subsequent zoom/pan/goTo.
+    canvas.getBoundingClientRect = () =>
+      ({
+        width: 844,
+        height: 390,
+        left: 0,
+        top: 0,
+        right: 844,
+        bottom: 390,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }) as DOMRect;
+    transform.updateCanvasBoundingRect();
+
+    // Immediately after resize, the offset must already satisfy the NEW
+    // (landscape) clamp bounds — derived from the same exported pure
+    // formulas clampOffsets() itself uses, not hardcoded literals.
+    const fillScale = 0.844; // coverScale: max(844/1000, 390/1000)
+    const zoomFloor = 0.3315; // containScale(0.39) * 0.85
+    const t = spectatorZoomBlendT(scaleAfterZoom, zoomFloor, fillScale);
+    const expectedMinOffsetX = spectatorAxisMinOffset(
+      mapWidth,
+      844,
+      scaleAfterZoom,
+      t,
+    );
+    const expectedMaxOffsetX = spectatorAxisMaxOffset(
+      mapWidth,
+      844,
+      scaleAfterZoom,
+      t,
+    );
+
+    // screenBoundingRect() exposes the world-space left edge derived
+    // directly from the (private) internal offset at the current
+    // scale/boundingRect — invert to recover the effective offsetX (same
+    // technique the existing live-play test above uses for offsetY).
+    const [topLeft] = transform.screenBoundingRect();
+    const impliedOffsetX =
+      topLeft.x + mapWidth / (2 * scaleAfterZoom) - mapWidth / 2;
+
+    expect(impliedOffsetX).toBeLessThanOrEqual(expectedMaxOffsetX + 1);
+    expect(impliedOffsetX).toBeGreaterThanOrEqual(expectedMinOffsetX - 1);
+  });
+});
