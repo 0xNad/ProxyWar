@@ -210,7 +210,24 @@ artifact instead of scanning for the newest artifact after start time.
 
 ## Current Legal Actions
 
-- `spawn`: generated before spawn from real map spawn candidates.
+- `spawn`: generated before spawn from real map spawn candidates. Every
+  unspawned agent brain also gets a normal, validated decision opportunity
+  (not opt-in) - resolved concurrently with every other still-unspawned
+  agent's decision, then committed in fixed roster order, exactly once per
+  spawn phase - to request ANY currently-legal tile via an off-menu
+  `spawn:<tile>` id, independently revalidated server-side against the
+  LATEST game state at the moment it commits
+  (`AgentSpawnLegality.evaluateSpawnTileLegality`), never a precomputed/
+  stale snapshot, against the same bounds/land/unowned/border/footprint/
+  min-distance rules the offered candidates already satisfy, plus distance
+  from every other agent's current spawn reservation - so two agents
+  choosing the same offered or off-menu tile in the same batch resolve
+  deterministically (first-in-roster-order wins). An illegal, invalid, or
+  now-stale request is rejected with a specific reason and deterministically
+  falls back to the algorithmic spawn explorer - an agent can never miss
+  spawning because it chose its own tile. See
+  `coworld-adapter/docs/player-protocol.md` for the wire contract
+  (`decisionSupport.spawnFreeform`).
 - `hold`: a no-op wrapper with no game intent, used as a safe fallback
   because the core intent schema has no explicit no-op.
 - `attack`: generated only when a post-spawn observation exposes a target that
@@ -251,7 +268,7 @@ observation JSON and still may only select one offered `LegalAction.id`.
 
 | Action family | Status | Proof source |
 | --- | --- | --- |
-| Spawn | Working | Spawn candidates become normal `spawn` intents. |
+| Spawn | Working (candidate menu + agent-chosen off-menu tile) | Spawn candidates become normal `spawn` intents; off-menu `spawn:<tile>` requests are revalidated via `AgentSpawnLegality` before becoming the same intent. |
 | Hold | Working | Safe no-intent fallback. |
 | Alliance | Working | `player.canSendAllianceRequest(other)`. |
 | Attack | Working | `sharesBorderWith` plus `canAttackPlayer`. |

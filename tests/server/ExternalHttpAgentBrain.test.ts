@@ -4,7 +4,10 @@ import type {
   AgentObservation,
   LegalAction,
 } from "../../src/server/agents/AgentTypes";
-import { ExternalHttpAgentBrain } from "../../src/server/agents/ExternalHttpAgentBrain";
+import {
+  buildExternalAgentRequestPayload,
+  ExternalHttpAgentBrain,
+} from "../../src/server/agents/ExternalHttpAgentBrain";
 
 const observation: AgentObservation = {
   agentID: "agent-1",
@@ -276,5 +279,52 @@ describe("ExternalHttpAgentBrain", () => {
     expect(decision.reason).toBeNull();
     expect(decision.metadata?.externalFailureReason).toContain("timed out");
     expect(typeof decision.metadata?.fallbackReason).toBe("string");
+  });
+});
+
+describe("buildExternalAgentRequestPayload spawn-phase wire metadata", () => {
+  const spawnObservation: AgentObservation = {
+    ...observation,
+    phase: "spawn",
+    mapInfo: { name: "Pangaea", width: 3000, height: 2000 },
+    spawnReservedTiles: [841205, 1029871],
+    spawnMinDistance: 30,
+  };
+  const spawnLegalActions: LegalAction[] = [
+    {
+      id: "spawn:12345",
+      kind: "spawn",
+      label: "Spawn at tile 12345",
+      intent: { type: "spawn", tile: 12345 },
+      risk: { level: "medium", score: 0.4 },
+      metadata: { tile: 12345, x: 100, y: 200 },
+    },
+    { id: "hold", kind: "hold", label: "Hold", intent: null, risk: { level: "none", score: 0 } },
+  ];
+
+  it("exposes bounded map identity/dimensions and spawnFreeform only during the spawn phase", () => {
+    const spawnPayload = buildExternalAgentRequestPayload({
+      observation: spawnObservation,
+      legalActions: spawnLegalActions,
+    });
+    expect(spawnPayload.match.map).toEqual({
+      name: "Pangaea",
+      width: 3000,
+      height: 2000,
+    });
+    expect(spawnPayload.decisionSupport.spawnFreeform).toEqual({
+      available: true,
+      idFormat: "spawn:<tile>",
+      tileFormula: "tile = y * map.width + x",
+      reservedTiles: [841205, 1029871],
+      minDistanceFromReserved: 30,
+    });
+
+    const activePayload = buildExternalAgentRequestPayload({
+      observation,
+      legalActions,
+    });
+    expect(activePayload.match.map).toBeNull();
+    expect(activePayload.decisionSupport.spawnFreeform).toBeUndefined();
   });
 });

@@ -744,6 +744,18 @@ export interface AgentObservation {
   objective: AgentObjectiveState | null;
   recentDecisions: RecentAgentDecision[];
   recentCommunications?: AgentCommunicationSignal[];
+  /**
+   * Bounded, spawn-phase-only geometry so an agent can construct an off-menu
+   * `spawn:<tile>` request for any coordinate it prefers, without the wire
+   * ever carrying a terrain dump or the full SpawnCandidate pool: the map's
+   * own identity/dimensions (tile = y*width + x), the small set of tiles
+   * other agents currently have reserved this spawn phase, and the minimum
+   * distance a requested tile must keep from every reserved one. Undefined
+   * outside the spawn phase or before a core game snapshot exists.
+   */
+  mapInfo?: { name: string; width: number; height: number };
+  spawnReservedTiles?: number[];
+  spawnMinDistance?: number;
   /** Persistent per-rival belief state (theory of mind). Populated by the brain. */
   opponentModel?: AgentOpponentModelEntry[];
   endgame?: {

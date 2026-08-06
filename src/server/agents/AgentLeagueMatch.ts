@@ -3,9 +3,10 @@ import { Logger } from "winston";
 import { Game } from "../../core/game/Game";
 import { ServerMessage } from "../../core/Schemas";
 import { GameServer } from "../GameServer";
-import { validateAgentDecision } from "./AgentDecisionValidator";
+import { validateAgentDecision, validateSpawnDecision } from "./AgentDecisionValidator";
 import { AgentLocalGameMirror } from "./AgentLocalGameMirror";
 import { selectSpawnTile } from "./AgentSpawnExplorer";
+import { SpawnLegalityContext } from "./AgentSpawnLegality";
 import {
   actionAlignsWithObjective,
   AgentObjectiveManager,
@@ -222,6 +223,7 @@ export class AgentLeagueMatchRunner {
     messages: () => ServerMessage[];
     turnsPerSpawnTick?: number;
     maxSpawnTicks?: number;
+    maxDecisionMs?: number;
   }): Promise<AgentDecisionRecord[]> {
     const startingRecordCount = this.records.length;
     const turnsPerSpawnTick = Math.max(1, options.turnsPerSpawnTick ?? 10);
@@ -239,6 +241,21 @@ export class AgentLeagueMatchRunner {
     // (4 agents, run ab-ffa4p-spawnwatch-r1): relocation froze mid-phase and the
     // converge-to-anchor settle never ran on a live pool.
     const spawnStakes = new Map<string, SpawnCandidate>();
+    // Agents whose CURRENT stake is a genuine, validated brain decision (an
+    // offered candidate or an off-menu spawn:<tile> request) - as opposed to
+    // a stake produced by the algorithmic explorer, either as the default
+    // path or as this participant's OWN fallback after an invalid/non-spawn
+    // brain decision. Once an agent is in this set its chosen tile is FINAL
+    // for the rest of the spawn phase: it is never asked again and the
+    // algorithmic EXPLORE/SETTLE loop below never submits another spawn
+    // intent for it. Without this lock, the next tick's unconditional
+    // algorithmic relocation would submit a DIFFERENT tile for the same
+    // agent - and since SpawnExecution's explicit-tile path allows
+    // re-spawning (randomSpawn:false), the last submitted intent wins,
+    // silently overriding the agent's own chosen coordinate. The stake
+    // itself stays in spawnStakes (untouched) so rival pool exclusion keeps
+    // treating the committed tile as reserved through phase end.
+    const brainCommittedAgentIDs = new Set<string>();
 
     for (let tick = 0; tick <= maxSpawnTicks; tick += 1) {
       await options.mirror.ingest(options.messages());
@@ -264,34 +281,180 @@ export class AgentLeagueMatchRunner {
         gameState.ticks() < gameState.config().numSpawnPhaseTurns();
 
       if (spawnIntentCanStillExecute) {
-        for (const participant of this.options.participants) {
-          const observation = this.observationBuilder.build({
-            agentID: participant.runner.agentID,
-            clientID: participant.runner.clientID(),
-            username: participant.spec.username,
-            profile: participant.spec.profile,
-            gameID: this.options.game.id,
-            turnNumber: gameState?.ticks() ?? 0,
-            gameState: gameState ?? undefined,
-            phaseOverride: "spawn",
-            objective: this.objectiveManager.currentObjective(
-              participant.runner.agentID,
-            ),
-            recentDecisions: this.recentDecisionsFor(participant),
+        type SpawnTickInput = {
+          participant: AgentParticipant;
+          observation: AgentObservation;
+          needsBrainDecision: boolean;
+        };
+        type SpawnTickCommit =
+          | {
+              participant: AgentParticipant;
+              observation: AgentObservation;
+              decision: AgentDecision;
+              legalActions: LegalAction[];
+              decisionLatencyMs: number;
+            }
+          | {
+              participant: AgentParticipant;
+              observation: AgentObservation;
+              decision: null;
+            };
+
+        // PASS 1 (sync, no I/O): build every not-yet-locked participant's
+        // observation from the SAME tick-start spawnStakes snapshot. Locked
+        // agents (brainCommittedAgentIDs) are filtered out here and touched
+        // nowhere else this tick or any later tick this phase.
+        const tickInputs: SpawnTickInput[] = this.options.participants
+          .filter(
+            (participant) =>
+              !brainCommittedAgentIDs.has(participant.runner.agentID),
+          )
+          .map((participant) => {
+            const rawObservation = this.observationBuilder.build({
+              agentID: participant.runner.agentID,
+              clientID: participant.runner.clientID(),
+              username: participant.spec.username,
+              profile: participant.spec.profile,
+              gameID: this.options.game.id,
+              turnNumber: gameState?.ticks() ?? 0,
+              gameState: gameState ?? undefined,
+              phaseOverride: "spawn",
+              objective: this.objectiveManager.currentObjective(
+                participant.runner.agentID,
+              ),
+              recentDecisions: this.recentDecisionsFor(participant),
+            });
+            const rivalStakes = [...spawnStakes.entries()]
+              .filter(([agentID]) => agentID !== participant.runner.agentID)
+              .map(([, stake]) => stake);
+            // Bounded, spawn-phase-only geometry (map identity + the small
+            // reserved-tile set already computed above) so downstream wire
+            // builders (ExternalHttpAgentBrain/ExternalRelayAgentBrain) can
+            // expose enough for an agent to construct an off-menu
+            // `spawn:<tile>` request - never a terrain dump or the full pool.
+            const observation: AgentObservation =
+              gameState === null
+                ? rawObservation
+                : {
+                    ...rawObservation,
+                    mapInfo: {
+                      name: String(gameState.config().gameConfig().gameMap),
+                      width: gameState.width(),
+                      height: gameState.height(),
+                    },
+                    spawnReservedTiles: rivalStakes.map((stake) => stake.tile),
+                    spawnMinDistance: this.minSpawnDistance,
+                  };
+            return {
+              participant,
+              observation,
+              // Every unspawned, not-yet-locked agent brain gets exactly ONE
+              // normal, validated decision opportunity for the WHOLE spawn
+              // phase (not per tick, not opt-in): this is that opportunity,
+              // offered on the first tick this agent has no stake at all. A
+              // genuine accepted spawn permanently locks the agent (see
+              // brainCommittedAgentIDs above) so it is never asked again.
+              needsBrainDecision:
+                gameState !== null &&
+                !spawnStakes.has(participant.runner.agentID),
+            };
           });
-          const availableCandidates = this.spawnCandidatesAvailableTo(
-            participant.runner.agentID,
+
+        // PASS 2: resolve every needed brain decision CONCURRENTLY via
+        // Promise.all - bounded by the SLOWEST decision this tick, not the
+        // sum of all of them. A serial `await` per participant here would
+        // make worst-case wall time N x maxDecisionMs (e.g. Coworld's
+        // default 120s x N agents); concurrently it is one maxDecisionMs
+        // wait shared by every eligible agent this tick.
+        const decisions: SpawnTickCommit[] = await Promise.all(
+          tickInputs.map(async (input): Promise<SpawnTickCommit> => {
+            if (!input.needsBrainDecision || gameState === null) {
+              return {
+                participant: input.participant,
+                observation: input.observation,
+                decision: null,
+              };
+            }
+            const availableCandidates = this.spawnCandidatesAvailableTo(
+              input.participant.runner.agentID,
+              spawnStakes,
+            );
+            const legalActions = this.legalActionBuilder.build({
+              observation: input.observation,
+              spawnCandidates: availableCandidates,
+            });
+            const decisionStartedAt = Date.now();
+            const decision = await decideWithSafetyFallback({
+              brain: input.participant.brain,
+              fallbackProfile: input.participant.spec.profile,
+              observation: input.observation,
+              legalActions,
+              maxDecisionMs: options.maxDecisionMs,
+            });
+            return {
+              participant: input.participant,
+              observation: input.observation,
+              decision,
+              legalActions,
+              decisionLatencyMs: Date.now() - decisionStartedAt,
+            };
+          }),
+        );
+
+        // PASS 3: commit SERIALLY in original roster order (Promise.all
+        // preserves the input array's order) so conflict resolution stays
+        // deterministic. Every commit re-derives legality/candidates fresh
+        // from the LATEST spawnStakes, reflecting every earlier commit this
+        // same tick - a decision computed concurrently against a snapshot is
+        // NEVER trusted at face value here, whether it targets an offered
+        // candidate or an off-menu tile: a tile an earlier-committed
+        // participant just claimed is rejected even though it looked legal
+        // (or was on the offered menu) when the request was built.
+        for (const resolved of decisions) {
+          if (resolved.decision !== null) {
+            const rivalStakes = [...spawnStakes.entries()]
+              .filter(
+                ([agentID]) =>
+                  agentID !== resolved.participant.runner.agentID,
+              )
+              .map(([, stake]) => stake);
+            const spawnLegality: SpawnLegalityContext = {
+              gameState: gameState as Game,
+              minSpawnDistance: this.minSpawnDistance,
+              rivalStakes,
+            };
+            this.submitAndRecordSpawnDecision({
+              participant: resolved.participant,
+              observation: resolved.observation,
+              legalActions: resolved.legalActions,
+              decision: resolved.decision,
+              decisionLatencyMs: resolved.decisionLatencyMs,
+              spawnLegality,
+              spawnStakes,
+              brainCommittedAgentIDs,
+              tick,
+              spawnProgress,
+            });
+            continue;
+          }
+
+          // Algorithmic-only participant (already staked from a prior tick's
+          // fallback, never locked): rebuild its candidate pool fresh so it
+          // reflects every earlier commit THIS tick, exactly as the
+          // original single-pass serial loop always did.
+          const freshCandidates = this.spawnCandidatesAvailableTo(
+            resolved.participant.runner.agentID,
             spawnStakes,
           );
-          const legalActions = this.legalActionBuilder.build({
-            observation,
-            spawnCandidates: availableCandidates,
+          const freshLegalActions = this.legalActionBuilder.build({
+            observation: resolved.observation,
+            spawnCandidates: freshCandidates,
           });
           const spawnAction = selectSpawnTile({
-            spawnActions: legalActions,
-            profile: participant.spec.profile,
+            spawnActions: freshLegalActions,
+            profile: resolved.participant.spec.profile,
             gameID: this.options.game.id,
-            agentID: participant.runner.agentID,
+            agentID: resolved.participant.runner.agentID,
             tick,
             spawnProgress,
           });
@@ -299,9 +462,9 @@ export class AgentLeagueMatchRunner {
             continue;
           }
           this.submitAndRecordSpawn({
-            participant,
-            observation,
-            legalActions,
+            participant: resolved.participant,
+            observation: resolved.observation,
+            legalActions: freshLegalActions,
             spawnAction,
             spawnStakes,
           });
@@ -850,6 +1013,13 @@ export class AgentLeagueMatchRunner {
     legalActions: LegalAction[];
     spawnAction: LegalAction;
     spawnStakes: Map<string, SpawnCandidate>;
+    /**
+     * Set only when this algorithmic pick is standing in for a brain
+     * decision this tick (invalid/off-menu-illegal/non-spawn/timed-out) -
+     * audited onto the record without changing any of the existing
+     * synthetic-decision metadata a bare algorithmic tick already produces.
+     */
+    brainAttempt?: { actionID: string; rejectionReason: string | null };
   }): void {
     // A synthetic, deterministic (non-LLM) spawn decision. The metadata flags keep it OUT
     // of the LLM-aliveness count (rawProviderOutputPresent:false) and the external-brain-
@@ -866,6 +1036,18 @@ export class AgentLeagueMatchRunner {
         externalActionCall: false,
         rawProviderOutputPresent: false,
         spawnExploration: true,
+        ...(input.brainAttempt
+          ? {
+              spawnBrainAttempted: true,
+              spawnBrainDecisionActionID: input.brainAttempt.actionID,
+              ...(input.brainAttempt.rejectionReason !== null
+                ? {
+                    spawnBrainRejectionReason:
+                      input.brainAttempt.rejectionReason,
+                  }
+                : {}),
+            }
+          : {}),
       },
     };
     const result = this.submitLegalAction(
@@ -898,6 +1080,134 @@ export class AgentLeagueMatchRunner {
         input.spawnStakes.set(input.participant.runner.agentID, staked);
       }
     }
+  }
+
+  /**
+   * The brain-driven half of the spawn-phase decision loop (paired with the
+   * algorithmic-only `submitAndRecordSpawn` above, used for every tick after
+   * an agent's first accepted spawn). Honors any genuine, currently-legal
+   * spawn choice the brain produces - an offered candidate id OR an
+   * off-menu `spawn:<tile>` request - through the SAME validated path as
+   * every other decision kind. Whenever the validated result is not itself
+   * a spawn (invalid id, an illegal off-menu tile, a deliberate non-spawn
+   * choice, or a brain failure already absorbed by `decideWithSafetyFallback`
+   * into a non-spawn decision), it records/audits exactly what was attempted
+   * and deterministically falls back to the identical algorithmic choice
+   * every non-brain-driven tick already uses - an agent can never miss
+   * spawning because it was given a choice.
+   */
+  private submitAndRecordSpawnDecision(input: {
+    participant: AgentParticipant;
+    observation: AgentObservation;
+    legalActions: LegalAction[];
+    decision: AgentDecision;
+    decisionLatencyMs: number;
+    spawnLegality: SpawnLegalityContext;
+    spawnStakes: Map<string, SpawnCandidate>;
+    brainCommittedAgentIDs: Set<string>;
+    tick: number;
+    spawnProgress: number;
+  }): void {
+    const validation = validateSpawnDecision(
+      input.decision,
+      input.legalActions,
+      input.spawnLegality,
+    );
+
+    if (validation.ok && validation.action.kind === "spawn") {
+      const result = this.submitLegalAction(
+        input.participant.runner,
+        validation.action,
+      );
+      this.recordDecision({
+        participant: input.participant,
+        turnNumber: input.observation.turnNumber,
+        observationSummary: this.observationBuilder.summarize(
+          input.observation,
+        ),
+        observation: input.observation,
+        legalActions: input.legalActions,
+        chosenAction: validation.action,
+        decision: input.decision,
+        decisionLatencyMs: input.decisionLatencyMs,
+        reason: input.decision.reason,
+        result,
+      });
+      const tile = validation.action.metadata?.tile;
+      if (result.accepted && typeof tile === "number") {
+        const poolMatch = this.options.spawnCandidates.find(
+          (candidate) => candidate.tile === tile,
+        );
+        const x = validation.action.metadata?.x;
+        const y = validation.action.metadata?.y;
+        input.spawnStakes.set(
+          input.participant.runner.agentID,
+          poolMatch ?? {
+            tile,
+            x: typeof x === "number" ? x : undefined,
+            y: typeof y === "number" ? y : undefined,
+            pressureScore: 0,
+            safetyScore: 0,
+            diplomacyScore: 0,
+            opportunityScore: 0,
+            localLandScore: 0,
+          },
+        );
+        // LOCK IN: this was a genuine, validated brain decision (not the
+        // algorithmic fallback below) - never submit another spawn intent
+        // for this agent this phase, so a later tick's algorithmic
+        // relocation can never silently overwrite the tile it chose. The
+        // stake above stays untouched for rival-exclusion purposes.
+        input.brainCommittedAgentIDs.add(input.participant.runner.agentID);
+      }
+      return;
+    }
+
+    // The genuine decision was rejected (or wasn't a spawn) - fall back to
+    // the deterministic algorithmic pick. `input.legalActions` was built in
+    // the concurrent decide pass (PASS 2) and can be STALE relative to any
+    // earlier participant's commit THIS SAME tick (PASS 3 runs serially
+    // after all decisions resolve) - rebuild the candidate pool and legal
+    // actions fresh from the LATEST spawnStakes right here, exactly like the
+    // pure-algorithmic path does, so this fallback pick can never collide
+    // with a tile an earlier-committed-this-tick participant just claimed.
+    const rejectionReason = validation.ok ? null : validation.reason;
+    const freshCandidates = this.spawnCandidatesAvailableTo(
+      input.participant.runner.agentID,
+      input.spawnStakes,
+    );
+    const freshLegalActions = this.legalActionBuilder.build({
+      observation: input.observation,
+      spawnCandidates: freshCandidates,
+    });
+    const spawnAction = selectSpawnTile({
+      spawnActions: freshLegalActions,
+      profile: input.participant.spec.profile,
+      gameID: this.options.game.id,
+      agentID: input.participant.runner.agentID,
+      tick: input.tick,
+      spawnProgress: input.spawnProgress,
+    });
+    if (spawnAction === undefined) {
+      // Pool momentarily empty for this agent (fully boxed in by rivals this
+      // tick) - nothing legal to submit either way; retried next tick.
+      this.log.warn(
+        "league agent spawn decision and algorithmic fallback both unavailable this tick",
+        { agentID: input.participant.runner.agentID, rejectionReason },
+      );
+      return;
+    }
+    this.submitAndRecordSpawn({
+      participant: input.participant,
+      observation: input.observation,
+      legalActions: freshLegalActions,
+      spawnAction,
+      spawnStakes: input.spawnStakes,
+      brainAttempt: {
+        actionID: input.decision.actionID,
+        rejectionReason,
+      },
+    });
   }
 
   private recordDecision(input: {

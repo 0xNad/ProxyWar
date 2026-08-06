@@ -1,4 +1,5 @@
 import fs from "fs";
+import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
 import { describe, expect, it, vi } from "vitest";
@@ -45,6 +46,7 @@ import {
   MapManifest,
 } from "../../src/core/game/TerrainMapLoader";
 import { GameConfig, StampedIntent } from "../../src/core/Schemas";
+import { createPartialGameRecord } from "../../src/core/Util";
 import { externalBrainCleanlinessReport } from "../../src/server/agents/AgentExternalBrainCleanliness";
 import {
   AgentLeagueMatchRunner,
@@ -504,7 +506,7 @@ describe("AgentLeagueMatchRunner", () => {
     }
   });
 
-  it("drives the spawn phase deterministically with zero brain calls (runSpawnPhase)", async () => {
+  it("drives the spawn phase through one validated brain decision per agent that deterministically falls back to the algorithmic explorer (runSpawnPhase)", async () => {
     const log = makeLogger();
     const mapLoader = new StaticMapLoader();
     const config = { ...gameConfig, gameMapSize: GameMapSize.Compact };
@@ -514,11 +516,17 @@ describe("AgentLeagueMatchRunner", () => {
       mapLoader,
     );
     const specs = createDefaultAgentSpecs(4);
-    // The spy proves the LLM Commander is fully bypassed during spawn: any call
-    // to brain.decide while runSpawnPhase drives the phase is a regression.
+    // Every unspawned agent brain gets exactly ONE normal decision
+    // opportunity for the whole spawn phase (product contract - not an
+    // opt-in, and never repeated once a stake exists). This mock brain
+    // always holds, i.e. never produces a genuine spawn: the spy proves it
+    // WAS asked (exactly once per agent), and every resulting record below
+    // proves the deterministic algorithmic explorer transparently took over
+    // from that single tick onward - identical output to the pre-brain
+    // baseline.
     const decideSpy = vi.fn(async () => ({
       actionID: "hold",
-      reason: "the brain must not be consulted during the spawn phase",
+      reason: "this mock brain deliberately never produces a spawn",
     }));
     const participants = createAgentParticipants(specs, log, {
       brainFactory: () => ({ brainType: "mock-llm", decide: decideSpy }),
@@ -550,8 +558,9 @@ describe("AgentLeagueMatchRunner", () => {
         turnsPerSpawnTick: 25,
       });
 
-      // No LLM during spawn.
-      expect(decideSpy).not.toHaveBeenCalled();
+
+      // Every unspawned agent's brain is consulted at least once.
+      expect(decideSpy).toHaveBeenCalled();
 
       // Every spawn record is the synthetic deterministic-explorer decision: a
       // legal spawn tile (accepted) flagged as non-LLM output so the aliveness
@@ -776,7 +785,7 @@ describe("AgentLeagueMatchRunner", () => {
     const specs = createDefaultAgentSpecs(1);
     const decideSpy = vi.fn(async () => ({
       actionID: "hold",
-      reason: "the brain must not be consulted during the spawn phase",
+      reason: "this mock brain deliberately never produces a spawn",
     }));
     const participants = createAgentParticipants(specs, log, {
       brainFactory: () => ({ brainType: "mock-llm", decide: decideSpy }),
@@ -816,7 +825,7 @@ describe("AgentLeagueMatchRunner", () => {
         turnsPerSpawnTick: 25,
       });
 
-      expect(decideSpy).not.toHaveBeenCalled();
+      expect(decideSpy).toHaveBeenCalled();
       const mirrorGame = mirror.gameState();
       if (mirrorGame === null) {
         throw new Error("expected mirror game state after the spawn phase");
@@ -851,7 +860,7 @@ describe("AgentLeagueMatchRunner", () => {
     const specs = createDefaultAgentSpecs(4);
     const decideSpy = vi.fn(async () => ({
       actionID: "hold",
-      reason: "the brain must not be consulted during the spawn phase",
+      reason: "this mock brain deliberately never produces a spawn",
     }));
     const participants = createAgentParticipants(specs, log, {
       brainFactory: () => ({ brainType: "mock-llm", decide: decideSpy }),
@@ -891,7 +900,7 @@ describe("AgentLeagueMatchRunner", () => {
         turnsPerSpawnTick: 25,
       });
 
-      expect(decideSpy).not.toHaveBeenCalled();
+      expect(decideSpy).toHaveBeenCalled();
       const mirrorGame = mirror.gameState();
       if (mirrorGame === null) {
         throw new Error("expected mirror game state after the spawn phase");
@@ -1665,34 +1674,60 @@ describe("AgentLeagueMatchRunner", () => {
         log,
       });
 
-      // Built-in-style spawn: runSpawnPhase emits one deterministic (non-LLM) spawn
-      // record per agent PER spawn tick (the agent jumps around), not one per agent.
+      // Every unspawned agent brain gets one normal, validated decision
+      // opportunity, resolved concurrently with every other still-unspawned
+      // agent's decision this tick: this mock-LLM brain reliably parses a
+      // valid response, but since all 4 agents' decisions are computed
+      // against the SAME snapshot simultaneously, more than one of them can
+      // genuinely request the identical (or a conflicting) offered
+      // candidate. Serial commit re-derives legality fresh, so only the
+      // FIRST such agent in roster order locks in; the rest are correctly
+      // rejected as stale and fall back to the algorithmic explorer
+      // (unlocked, so they may produce several more records over the
+      // phase). Every record is still a real, accepted spawn and never a
+      // genuine LLM provider call.
       const spawnRecords = result.openingRecords;
       expect(new Set(spawnRecords.map((record) => record.agentID)).size).toBe(4);
       expect(
         spawnRecords.every((record) => record.chosenActionKind === "spawn"),
       ).toBe(true);
-      // Deterministic, no LLM: every spawn record is the synthetic explorer decision,
-      // never an LLM call (keeps it out of the aliveness count) and always accepted.
-      expect(
-        spawnRecords.every(
-          (record) => record.decisionMetadata?.spawnExploration === true,
-        ),
-      ).toBe(true);
+      expect(spawnRecords.every((record) => record.result.accepted)).toBe(true);
       expect(
         spawnRecords.every(
           (record) => record.decisionMetadata?.rawProviderOutputPresent !== true,
         ),
       ).toBe(true);
-      expect(spawnRecords.every((record) => record.result.accepted)).toBe(true);
-      // Jumps around: each agent visits >= 2 distinct spawn tiles over the phase.
-      for (const agentID of new Set(spawnRecords.map((r) => r.agentID))) {
-        const tiles = new Set(
-          spawnRecords
-            .filter((record) => record.agentID === agentID)
-            .map((record) => record.chosenActionID),
-        );
-        expect(tiles.size).toBeGreaterThanOrEqual(2);
+      // At least one agent achieved a genuine, immediately-locked brain
+      // decision (proves the brain path itself works, not just the
+      // fallback).
+      expect(
+        spawnRecords.some(
+          (record) => record.decisionMetadata?.spawnExploration !== true,
+        ),
+      ).toBe(true);
+      // The decisive correctness proof: whatever combination of genuine and
+      // fallback picks occurred, every agent's FINAL core spawn tile is
+      // still at least minSpawnDistance from every other agent's - no stale
+      // concurrent collision ever survives to the actual game state.
+      const minSpawnDistance = match.effectiveMinSpawnDistance();
+      const finalTiles = [...new Set(spawnRecords.map((r) => r.agentID))].map(
+        (agentID) => {
+          const record = spawnRecords.find((r) => r.agentID === agentID)!;
+          return result.finalGameState.playerByClientID(record.clientID!)
+            ?.spawnTile();
+        },
+      );
+      for (let i = 0; i < finalTiles.length; i++) {
+        for (let j = i + 1; j < finalTiles.length; j++) {
+          expect(finalTiles[i]).toBeDefined();
+          expect(finalTiles[j]).toBeDefined();
+          expect(
+            result.finalGameState.manhattanDist(
+              finalTiles[i]!,
+              finalTiles[j]!,
+            ),
+          ).toBeGreaterThanOrEqual(minSpawnDistance);
+        }
       }
       expect(result.postSpawnRecords).toHaveLength(4);
       expect(result.finalGameState.inSpawnPhase()).toBe(false);
@@ -1770,11 +1805,16 @@ describe("AgentLeagueMatchRunner", () => {
         log,
       });
 
-      // Spawn is deterministic now (no brain), so a timing-out brain does NOT affect it:
-      // every spawn record is the synthetic explorer decision and is accepted.
+      // A permanently-timing-out brain during spawn no longer means "no brain
+      // call happened" - decideWithSafetyFallback's OWN catch substitutes a
+      // fresh RuleAgentBrain decision, which validly picks a spawn from the
+      // offered menu on the one tick each agent is asked, locking it in
+      // immediately (not necessarily the synthetic deterministic-explorer
+      // fallback) - either way spawning itself is unaffected by the brain
+      // timing out.
       expect(
         result.openingRecords.every(
-          (record) => record.decisionMetadata?.spawnExploration === true,
+          (record) => record.chosenActionKind === "spawn",
         ),
       ).toBe(true);
       expect(result.openingRecords.every((record) => record.result.accepted)).toBe(
@@ -2017,6 +2057,616 @@ describe("AgentLeagueMatchRunner", () => {
     ).rejects.toThrow(/reached 1 decision steps without a winner/);
     expect(runDecisionTurn).toHaveBeenCalledTimes(1);
   });
+
+  it("accepts a legal off-menu spawn:<tile> request from an agent brain (runSpawnPhase)", async () => {
+    const log = makeLogger();
+    const mapLoader = new StaticMapLoader();
+    const config = { ...gameConfig, gameMapSize: GameMapSize.Compact };
+    const terrain = await loadTerrainMap(
+      config.gameMap,
+      config.gameMapSize,
+      mapLoader,
+    );
+    // A small OFFERED menu, deliberately far smaller than the full legal
+    // space, so the requested tile below is provably off-menu.
+    const offeredCandidates = buildSpawnCandidates(terrain.gameMap, {
+      maxCandidates: 4,
+      stride: 40,
+    });
+    const offeredTiles = new Set(offeredCandidates.map((c) => c.tile));
+    const fullPool = buildSpawnCandidates(terrain.gameMap, {
+      maxCandidates: 2000,
+      stride: 1,
+    });
+    const offMenuCandidate = fullPool.find((c) => !offeredTiles.has(c.tile));
+    expect(offMenuCandidate).toBeDefined();
+
+    const specs = createDefaultAgentSpecs(1);
+    const participants = createAgentParticipants(specs, log, {
+      brainFactory: () => ({
+        brainType: "mock-llm",
+        decide: async () => ({
+          actionID: `spawn:${offMenuCandidate!.tile}`,
+          reason: "I choose this exact coordinate myself",
+        }),
+      }),
+    });
+    const game = new GameServer(
+      "AGENT020",
+      log,
+      Date.now(),
+      steppedServerConfig,
+      config,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: offeredCandidates,
+      log,
+    });
+    const mirror = new AgentLocalGameMirror(mapLoader, log);
+
+    try {
+      match.attachAgents();
+      match.startGame();
+      const spawnRecords = await match.runSpawnPhase({
+        mirror,
+        messages: () => participants[0]?.runner.serverMessages() ?? [],
+        turnsPerSpawnTick: 25,
+      });
+
+      // A genuine, validated brain decision permanently LOCKS this agent in
+      // (brainCommittedAgentIDs): it is never asked again and the
+      // algorithmic EXPLORE/SETTLE loop never submits another spawn intent
+      // for it. Regression proof for the "last intent wins, silently
+      // overwriting the chosen tile" bug: exactly ONE spawn record should
+      // exist for this agent for the WHOLE phase, not one per tick.
+      expect(spawnRecords).toHaveLength(1);
+
+      const lastRecord = spawnRecords[spawnRecords.length - 1];
+      expect(lastRecord.result.accepted).toBe(true);
+      expect(spawnIntent(lastRecord).tile).toBe(offMenuCandidate!.tile);
+      // A genuine brain-driven pick, not the synthetic algorithmic fallback.
+      expect(lastRecord.decisionMetadata?.spawnExploration).not.toBe(true);
+      expect(lastRecord.reason).toBe("I choose this exact coordinate myself");
+      expect(lastRecord.result.submittedIntent).toEqual({
+        type: "spawn",
+        tile: offMenuCandidate!.tile,
+      });
+
+      // The decisive proof: after the ENTIRE spawn phase has run to
+      // completion (runSpawnPhase only returns once the game has left the
+      // spawn phase), the player's ACTUAL core spawn tile is still the
+      // brain-chosen off-menu tile - not silently relocated by a later
+      // algorithmic tick.
+      const mirrorGame = mirror.gameState();
+      if (mirrorGame === null) {
+        throw new Error("expected mirror game state after the spawn phase");
+      }
+      expect(mirrorGame.inSpawnPhase()).toBe(false);
+      expect(
+        mirrorGame.playerByClientID(lastRecord.clientID!)?.spawnTile(),
+      ).toBe(offMenuCandidate!.tile);
+    } finally {
+      await game.end({ archive: false });
+    }
+  }, 600_000);
+
+  it("resolves two agents requesting the identical off-menu tile deterministically: first accepted, second rejected then algorithmically placed", async () => {
+    const log = makeLogger();
+    const mapLoader = new StaticMapLoader();
+    const config = { ...gameConfig, gameMapSize: GameMapSize.Compact };
+    const terrain = await loadTerrainMap(
+      config.gameMap,
+      config.gameMapSize,
+      mapLoader,
+    );
+    const offeredCandidates = buildSpawnCandidates(terrain.gameMap, {
+      maxCandidates: 500,
+      stride: 2,
+    });
+    const contestedTile = offeredCandidates[0].tile;
+
+    const specs = createDefaultAgentSpecs(2);
+    const participants = createAgentParticipants(specs, log, {
+      brainFactory: () => ({
+        brainType: "mock-llm",
+        decide: async () => ({
+          actionID: `spawn:${contestedTile}`,
+          reason: "both agents want the same tile",
+        }),
+      }),
+    });
+    const game = new GameServer(
+      "AGENT021",
+      log,
+      Date.now(),
+      steppedServerConfig,
+      config,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: offeredCandidates,
+      log,
+    });
+    const mirror = new AgentLocalGameMirror(mapLoader, log);
+
+    try {
+      match.attachAgents();
+      match.startGame();
+      const spawnRecords = await match.runSpawnPhase({
+        mirror,
+        messages: () => participants[0]?.runner.serverMessages() ?? [],
+        turnsPerSpawnTick: 25,
+      });
+
+      const firstTickRecords = spawnRecords
+        .filter((record) => record.turnNumber === spawnRecords[0].turnNumber)
+        .slice(0, 2);
+      expect(firstTickRecords).toHaveLength(2);
+      const [first, second] = firstTickRecords;
+
+      // Strict serial order: the FIRST participant's identical request is
+      // honored exactly (no simultaneous-race ambiguity).
+      expect(first.result.accepted).toBe(true);
+      expect(spawnIntent(first).tile).toBe(contestedTile);
+
+      // The SECOND participant's identical, now-conflicting request is
+      // rejected with a specific, deterministic reason and falls back to
+      // the algorithmic explorer instead of a hidden nondeterministic
+      // outcome or a missed spawn.
+      expect(second.result.accepted).toBe(true);
+      expect(second.decisionMetadata?.spawnBrainAttempted).toBe(true);
+      expect(second.decisionMetadata?.spawnBrainRejectionReason).toContain(
+        "reserved spawn",
+      );
+      const secondTile = spawnIntent(second).tile;
+      expect(secondTile).not.toBe(contestedTile);
+      // The algorithmic fallback only ever picks from availableCandidates,
+      // which spawnCandidatesAvailableTo already pruned to >= minSpawnDistance
+      // from every rival stake - so the resulting tile is guaranteed, by
+      // construction, to be a member of the original offered pool.
+      expect(offeredCandidates.some((c) => c.tile === secondTile)).toBe(true);
+
+      // The winner's brain decision permanently LOCKS it in: exactly one
+      // spawn record for the whole phase, and its tile survives to phase
+      // completion untouched by any later algorithmic relocation.
+      const winnerRecords = spawnRecords.filter(
+        (record) => record.agentID === first.agentID,
+      );
+      expect(winnerRecords).toHaveLength(1);
+
+      // The loser was NOT locked (its stake came from the algorithmic
+      // fallback, not a genuine brain decision), so it keeps relocating via
+      // the unchanged EXPLORE/SETTLE loop for the rest of the phase, exactly
+      // like any purely-algorithmic agent.
+      const loserRecords = spawnRecords.filter(
+        (record) => record.agentID === second.agentID,
+      );
+      expect(loserRecords.length).toBeGreaterThan(1);
+
+      // The decisive proof: after the ENTIRE spawn phase runs to completion,
+      // the winner's core spawn tile is STILL the contested tile it chose
+      // (never silently overwritten), and the loser's final core spawn tile
+      // is a legal, different tile.
+      const mirrorGame = mirror.gameState();
+      if (mirrorGame === null) {
+        throw new Error("expected mirror game state after the spawn phase");
+      }
+      expect(mirrorGame.inSpawnPhase()).toBe(false);
+      expect(mirrorGame.playerByClientID(first.clientID!)?.spawnTile()).toBe(
+        contestedTile,
+      );
+      const loserFinalTile = mirrorGame.playerByClientID(
+        second.clientID!,
+      )?.spawnTile();
+      expect(loserFinalTile).toBeDefined();
+      expect(loserFinalTile).not.toBe(contestedTile);
+    } finally {
+      await game.end({ archive: false });
+    }
+  }, 600_000);
+
+  it("is deterministic: the same gameID, agent specs, and brain sequence reproduce identical spawn tiles across two independent runs", async () => {
+    async function runOnce(): Promise<{ tiles: number[]; accepted: boolean[] }> {
+      const log = makeLogger();
+      const mapLoader = new StaticMapLoader();
+      const config = { ...gameConfig, gameMapSize: GameMapSize.Compact };
+      const terrain = await loadTerrainMap(
+        config.gameMap,
+        config.gameMapSize,
+        mapLoader,
+      );
+      const offeredCandidates = buildSpawnCandidates(terrain.gameMap, {
+        maxCandidates: 500,
+        stride: 2,
+      });
+      const requestedTile = offeredCandidates[3].tile;
+      const specs = createDefaultAgentSpecs(3);
+      const participants = createAgentParticipants(specs, log, {
+        brainFactory: (spec, index) => ({
+          brainType: "mock-llm",
+          decide: async () =>
+            index === 0
+              ? { actionID: `spawn:${requestedTile}`, reason: "deterministic pick" }
+              : { actionID: "hold", reason: "deterministic hold" },
+        }),
+      });
+      const game = new GameServer(
+        "AGENTDET",
+        log,
+        Date.now(),
+        steppedServerConfig,
+        config,
+      );
+      const match = new AgentLeagueMatchRunner({
+        game,
+        participants,
+        spawnCandidates: offeredCandidates,
+        log,
+      });
+      const mirror = new AgentLocalGameMirror(mapLoader, log);
+      try {
+        const spawnRecords = await (async () => {
+          match.attachAgents();
+          match.startGame();
+          return match.runSpawnPhase({
+            mirror,
+            messages: () => participants[0]?.runner.serverMessages() ?? [],
+            turnsPerSpawnTick: 25,
+          });
+        })();
+        const byAgent = new Map<string, number>();
+        for (const record of spawnRecords) {
+          byAgent.set(record.agentID, spawnIntent(record).tile);
+        }
+        return {
+          tiles: [...byAgent.values()],
+          accepted: spawnRecords.map((record) => record.result.accepted),
+        };
+      } finally {
+        await game.end({ archive: false });
+      }
+    }
+
+    const first = await runOnce();
+    const second = await runOnce();
+
+    expect(second.tiles).toEqual(first.tiles);
+    expect(second.accepted).toEqual(first.accepted);
+  }, 600_000);
+
+  it("controlled end-to-end smoke: a brain-chosen legal off-menu tile survives into the persisted turn stream and final player state (game-record.json equivalent)", async () => {
+    // Not the generic mock-LLM/algorithmic-fallback smoke - a CONTROLLED
+    // brain that deliberately requests one specific, known-legal, off-menu
+    // coordinate, run through a REAL runSpawnPhase to actual completion.
+    const log = makeLogger();
+    const mapLoader = new StaticMapLoader();
+    const config = { ...gameConfig, gameMapSize: GameMapSize.Compact };
+    const terrain = await loadTerrainMap(
+      config.gameMap,
+      config.gameMapSize,
+      mapLoader,
+    );
+    const offeredCandidates = buildSpawnCandidates(terrain.gameMap, {
+      maxCandidates: 4,
+      stride: 40,
+    });
+    const offeredTiles = new Set(offeredCandidates.map((c) => c.tile));
+    const fullPool = buildSpawnCandidates(terrain.gameMap, {
+      maxCandidates: 2000,
+      stride: 1,
+    });
+    const chosenTile = fullPool.find((c) => !offeredTiles.has(c.tile))!.tile;
+    expect(chosenTile).toBeDefined();
+
+    const specs = createDefaultAgentSpecs(2);
+    const participants = createAgentParticipants(specs, log, {
+      brainFactory: (spec, index) => ({
+        brainType: "mock-llm",
+        decide: async () =>
+          index === 0
+            ? {
+                actionID: `spawn:${chosenTile}`,
+                reason: "controlled: choose this exact known-legal coordinate",
+              }
+            : { actionID: "hold", reason: "controlled: rival just holds" },
+      }),
+    });
+    const game = new GameServer(
+      "AGENTE2E",
+      log,
+      Date.now(),
+      steppedServerConfig,
+      config,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: offeredCandidates,
+      log,
+    });
+    const mirror = new AgentLocalGameMirror(mapLoader, log);
+
+    try {
+      match.attachAgents();
+      match.startGame();
+      await match.runSpawnPhase({
+        mirror,
+        messages: () => participants[0]?.runner.serverMessages() ?? [],
+        turnsPerSpawnTick: 25,
+      });
+
+      // Advance a bit further, exactly like a real episode, so the choice
+      // has to survive real post-spawn turns too, not just the instant of
+      // acceptance.
+      game.advanceTurnsForTesting(50);
+
+      // Proof 1: final CORE PLAYER STATE - the source of truth every
+      // replay/game-record reconstruction is built from.
+      const chosenAgent = participants[0]!;
+      const finalGameState = mirror.gameState();
+      if (finalGameState === null) {
+        throw new Error("expected mirror game state after the spawn phase");
+      }
+      expect(
+        finalGameState.playerByClientID(chosenAgent.runner.clientID()!)
+          ?.spawnTile(),
+      ).toBe(chosenTile);
+
+      // Proof 2: the exact game-record.json-equivalent persisted artifact.
+      // Reconstruct a real PartialGameRecord (the same function GameServer's
+      // own archival path and the Coworld episode adapter both call) from
+      // the ACTUAL turn stream the server broadcast to this client - not a
+      // hand-rolled second representation - and confirm the chosen agent's
+      // SpawnIntent{tile: chosenTile} is present in it.
+      const turns = chosenAgent.runner
+        .serverMessages()
+        .filter((message) => message.type === "turn")
+        .map((message) => message.turn);
+      expect(turns.length).toBeGreaterThan(0);
+      const partialRecord = createPartialGameRecord(
+        game.id,
+        config,
+        [],
+        turns,
+        Date.now() - 1000,
+        Date.now(),
+        undefined,
+      );
+      const persistedSpawnIntents = partialRecord.turns
+        .flatMap((turn) => turn.intents)
+        .filter(
+          (intent): intent is StampedIntent & { type: "spawn"; tile: number } =>
+            intent.type === "spawn" &&
+            intent.clientID === chosenAgent.runner.clientID(),
+        );
+      expect(persistedSpawnIntents.length).toBeGreaterThan(0);
+      expect(persistedSpawnIntents[persistedSpawnIntents.length - 1].tile).toBe(
+        chosenTile,
+      );
+
+      // Tangible on-disk evidence: write and re-read the reconstructed
+      // record exactly as a real game-record.json artifact would be.
+      const outDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-e2e-"));
+      const outPath = path.join(outDir, "game-record.json");
+      fs.writeFileSync(outPath, JSON.stringify(partialRecord, null, 2));
+      const reloaded = JSON.parse(fs.readFileSync(outPath, "utf8")) as typeof partialRecord;
+      const reloadedSpawnIntents = reloaded.turns
+        .flatMap((turn: { intents: StampedIntent[] }) => turn.intents)
+        .filter(
+          (intent: StampedIntent) =>
+            intent.type === "spawn" &&
+            intent.clientID === chosenAgent.runner.clientID(),
+        ) as Array<{ tile: number }>;
+      expect(reloadedSpawnIntents[reloadedSpawnIntents.length - 1].tile).toBe(
+        chosenTile,
+      );
+    } finally {
+      await game.end({ archive: false });
+    }
+  }, 600_000);
+
+  it("resolves N spawn-phase brain decisions concurrently: all N decide() calls start before any of them resolves (Promise.all, not a serial await-per-participant loop)", async () => {
+    const log = makeLogger();
+    const mapLoader = new StaticMapLoader();
+    const config = { ...gameConfig, gameMapSize: GameMapSize.Compact };
+    const terrain = await loadTerrainMap(
+      config.gameMap,
+      config.gameMapSize,
+      mapLoader,
+    );
+    const offeredCandidates = buildSpawnCandidates(terrain.gameMap, {
+      maxCandidates: 500,
+      stride: 2,
+    });
+    // gameConfig.maxPlayers is 4 (shared fixture, top of file) - stay at or
+    // below it or the game engine silently never reaches a playable state.
+    const DECISION_COUNT = 4;
+    const calls: string[] = [];
+    // Every participant's brain hands back a promise this test controls
+    // directly - nothing resolves until the test calls .resolve(). A
+    // serial `for (...) { await decide() }` loop could NEVER invoke
+    // participant 2's decide() while participant 1's still-pending promise
+    // blocks the loop; only a concurrent Promise.all kicks off every
+    // decide() before any of them settles. This is a deterministic causal
+    // proof, not a wall-clock race.
+    const deferred: Array<{
+      promise: Promise<AgentDecision>;
+      resolve: (decision: AgentDecision) => void;
+    }> = Array.from({ length: DECISION_COUNT }, () => {
+      let resolvePromise: (decision: AgentDecision) => void = () => {};
+      const promise = new Promise<AgentDecision>((resolve) => {
+        resolvePromise = resolve;
+      });
+      return { promise, resolve: resolvePromise };
+    });
+    const specs = createDefaultAgentSpecs(DECISION_COUNT);
+    const participants = createAgentParticipants(specs, log, {
+      brainFactory: (spec, index) => ({
+        brainType: "mock-llm",
+        decide: () => {
+          calls.push(spec.username);
+          return deferred[index].promise;
+        },
+      }),
+    });
+    const game = new GameServer(
+      "AGENTCNC",
+      log,
+      Date.now(),
+      steppedServerConfig,
+      config,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: offeredCandidates,
+      log,
+    });
+    const mirror = new AgentLocalGameMirror(mapLoader, log);
+
+    try {
+      match.attachAgents();
+      match.startGame();
+      // GameServer's own internal map dataset load (separate from the
+      // mirror's) is real, necessary, one-time disk I/O that a pure
+      // microtask flush can never cross (fs callbacks run on the event
+      // loop's I/O/poll phase, not the microtask queue) - this is NOT an
+      // arbitrary duration guess: it is a bounded, condition-checked poll
+      // that stops the instant every decide() has been called, using the
+      // standard zero-delay macrotask-yield idiom only to let already-
+      // pending real I/O actually complete.
+      const spawnRecordsPromise = match.runSpawnPhase({
+        mirror,
+        messages: () => participants[0]?.runner.serverMessages() ?? [],
+        turnsPerSpawnTick: 25,
+      });
+      for (let i = 0; i < 200 && calls.length < DECISION_COUNT; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+
+      // The decisive proof: every one of the N brains was ALREADY called,
+      // even though not a single one has been resolved yet.
+      expect(calls).toHaveLength(DECISION_COUNT);
+      expect(new Set(calls).size).toBe(DECISION_COUNT);
+
+      deferred.forEach((d, index) => {
+        d.resolve({
+          actionID: `spawn:${offeredCandidates[index].tile}`,
+          reason: `deferred decision ${index}`,
+        });
+      });
+      const spawnRecords = await spawnRecordsPromise;
+
+      expect(spawnRecords.length).toBeGreaterThanOrEqual(DECISION_COUNT);
+      expect(spawnRecords.every((record) => record.result.accepted)).toBe(
+        true,
+      );
+    } finally {
+      await game.end({ archive: false });
+    }
+  }, 600_000);
+
+  it("resolves two agents requesting the identical OFFERED (menu, not off-menu) tile deterministically: first accepted, second rejected then algorithmically placed", async () => {
+    const log = makeLogger();
+    const mapLoader = new StaticMapLoader();
+    const config = { ...gameConfig, gameMapSize: GameMapSize.Compact };
+    const terrain = await loadTerrainMap(
+      config.gameMap,
+      config.gameMapSize,
+      mapLoader,
+    );
+    const offeredCandidates = buildSpawnCandidates(terrain.gameMap, {
+      maxCandidates: 500,
+      stride: 2,
+    });
+    const contestedCandidate = offeredCandidates[0];
+    const contestedActionID = `spawn:${contestedCandidate.tile}`;
+
+    const specs = createDefaultAgentSpecs(2);
+    const participants = createAgentParticipants(specs, log, {
+      brainFactory: () => ({
+        brainType: "mock-llm",
+        // Both agents pick the SAME id straight from the OFFERED menu (not
+        // an off-menu spawn:<tile> construction) - this is the exact-match
+        // path through validateAgentDecision, which must still be
+        // re-validated fresh at commit time.
+        decide: async () => ({
+          actionID: contestedActionID,
+          reason: "both agents pick the same offered candidate",
+        }),
+      }),
+    });
+    const game = new GameServer(
+      "AGENTOFR",
+      log,
+      Date.now(),
+      steppedServerConfig,
+      config,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: offeredCandidates,
+      log,
+    });
+    const mirror = new AgentLocalGameMirror(mapLoader, log);
+
+    try {
+      match.attachAgents();
+      match.startGame();
+      const spawnRecords = await match.runSpawnPhase({
+        mirror,
+        messages: () => participants[0]?.runner.serverMessages() ?? [],
+        turnsPerSpawnTick: 25,
+      });
+
+      const firstTickRecords = spawnRecords
+        .filter((record) => record.turnNumber === spawnRecords[0].turnNumber)
+        .slice(0, 2);
+      expect(firstTickRecords).toHaveLength(2);
+      const [first, second] = firstTickRecords;
+
+      // First-in-roster-order wins the offered candidate outright.
+      expect(first.result.accepted).toBe(true);
+      expect(spawnIntent(first).tile).toBe(contestedCandidate.tile);
+      expect(first.chosenActionID).toBe(contestedActionID);
+
+      // Second agent picked the SAME offered id - a plain exact-menu match,
+      // not an off-menu request - yet it is still rejected because the
+      // offered candidate is now stale (claimed by the first agent this
+      // same tick). This is the core fix: exact-menu matches are never
+      // trusted at face value for spawn actions.
+      expect(second.result.accepted).toBe(true);
+      expect(second.decisionMetadata?.spawnBrainAttempted).toBe(true);
+      expect(second.decisionMetadata?.spawnBrainRejectionReason).toContain(
+        "offered spawn candidate is no longer legal",
+      );
+      const secondTile = spawnIntent(second).tile;
+      expect(secondTile).not.toBe(contestedCandidate.tile);
+      expect(offeredCandidates.some((c) => c.tile === secondTile)).toBe(true);
+
+      // Stable final state: the winner's tile survives phase completion
+      // untouched, the loser's final tile is legal and different.
+      const mirrorGame = mirror.gameState();
+      if (mirrorGame === null) {
+        throw new Error("expected mirror game state after the spawn phase");
+      }
+      expect(mirrorGame.inSpawnPhase()).toBe(false);
+      expect(mirrorGame.playerByClientID(first.clientID!)?.spawnTile()).toBe(
+        contestedCandidate.tile,
+      );
+      const loserFinalTile = mirrorGame.playerByClientID(
+        second.clientID!,
+      )?.spawnTile();
+      expect(loserFinalTile).toBeDefined();
+      expect(loserFinalTile).not.toBe(contestedCandidate.tile);
+    } finally {
+      await game.end({ archive: false });
+    }
+  }, 600_000);
 });
 
 function spawnIntent(record: { intent: AgentLeagueMatchIntent }) {

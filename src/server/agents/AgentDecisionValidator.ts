@@ -1,4 +1,10 @@
+import {
+  evaluateSpawnTileLegality,
+  parseSpawnTileFromActionID,
+  SpawnLegalityContext,
+} from "./AgentSpawnLegality";
 import { AgentDecision, LegalAction } from "./AgentTypes";
+import { buildSpawnLegalAction } from "./LegalActionBuilder";
 
 export type AgentDecisionValidation =
   | { ok: true; action: LegalAction }
@@ -30,6 +36,82 @@ export function validateAgentDecision(
     reason: `decision selected unknown action id: ${decision.actionID}`,
     fallback,
   };
+}
+
+/**
+ * Spawn-phase decision validation. Tries the existing exact-menu match FIRST
+ * (`validateAgentDecision`, unchanged, identical semantics for every offered
+ * candidate including "hold"). For a well-formed `spawn:<tile>` id that
+ * missed the exact-menu match, falls through to a live legality check
+ * against the same predicates core enforces
+ * (`AgentSpawnLegality.evaluateSpawnTileLegality`), so an agent may request
+ * any currently-legal tile even when it was never offered in the curated
+ * menu.
+ *
+ * CRITICAL: because spawn-phase decisions are computed CONCURRENTLY against
+ * a snapshot (see `AgentLeagueMatch.runSpawnPhase`'s build-then-Promise.all
+ * pass) and only committed serially afterward, an offered candidate that was
+ * legal when the menu was built can be STALE by the time this function runs
+ * - an earlier-committed-this-tick participant may have just claimed that
+ * same tile or moved within its exclusion radius. An exact-menu match is
+ * therefore NEVER trusted at face value for a spawn action: its tile is
+ * re-validated against `spawnContext` (built from the LATEST spawnStakes at
+ * commit time) exactly like an off-menu request, before being accepted. A
+ * tile that is no longer legal is rejected here even though it was legal -
+ * or even the offered id itself - when the request was built. The ORIGINAL
+ * matched `LegalAction` (with its real candidate scores/metadata) is
+ * returned on success, not a re-synthesized one, so downstream telemetry
+ * keeps real quality scores for menu picks.
+ *
+ * Every other decision (non-spawn kinds, malformed ids, spawn ids when no
+ * spawn action is on offer) falls through to `validateAgentDecision`'s
+ * unchanged behavior - non-spawn validation is never touched by this
+ * function.
+ */
+export function validateSpawnDecision(
+  decision: AgentDecision,
+  legalActions: LegalAction[],
+  spawnContext: SpawnLegalityContext,
+): AgentDecisionValidation {
+  const exact = validateAgentDecision(decision, legalActions);
+
+  if (exact.ok && exact.action.kind === "spawn") {
+    const tile = exact.action.metadata?.tile;
+    if (typeof tile === "number") {
+      const legality = evaluateSpawnTileLegality(tile, spawnContext);
+      if (!legality.legal) {
+        return {
+          ok: false,
+          reason: `offered spawn candidate is no longer legal: ${legality.reason}`,
+          fallback:
+            legalActions.find((candidate) => candidate.kind === "hold") ??
+            null,
+        };
+      }
+    }
+    return exact;
+  }
+  if (exact.ok) {
+    return exact;
+  }
+
+  if (!legalActions.some((action) => action.kind === "spawn")) {
+    return exact;
+  }
+  const tile = parseSpawnTileFromActionID(decision.actionID);
+  if (tile === null) {
+    return exact;
+  }
+  const legality = evaluateSpawnTileLegality(tile, spawnContext);
+  if (!legality.legal) {
+    return {
+      ok: false,
+      reason: `off-menu spawn request rejected: ${legality.reason}`,
+      fallback:
+        legalActions.find((candidate) => candidate.kind === "hold") ?? null,
+    };
+  }
+  return { ok: true, action: buildSpawnLegalAction(legality.candidate) };
 }
 
 export function validateAgentDecisionBatch(

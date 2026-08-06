@@ -34,6 +34,39 @@ export interface BuildLegalActionsInput {
   maxPostSpawnActions?: number;
 }
 
+/**
+ * The single canonical constructor for a spawn `LegalAction`, shared by the
+ * curated candidate menu (`LegalActionBuilder.build`, below) AND
+ * `AgentDecisionValidator`'s off-menu `spawn:<tile>` path
+ * (`AgentSpawnLegality.evaluateSpawnTileLegality`) - one convention, never a
+ * duplicated one.
+ */
+export function buildSpawnLegalAction(candidate: SpawnCandidate): LegalAction {
+  return {
+    id: `spawn:${candidate.tile}`,
+    kind: "spawn",
+    label: `Spawn at tile ${candidate.tile}`,
+    intent: {
+      type: "spawn",
+      tile: candidate.tile,
+    },
+    risk: {
+      level: "medium",
+      score: 1 - candidate.safetyScore,
+    },
+    metadata: {
+      tile: candidate.tile,
+      x: candidate.x ?? null,
+      y: candidate.y ?? null,
+      pressureScore: candidate.pressureScore,
+      safetyScore: candidate.safetyScore,
+      diplomacyScore: candidate.diplomacyScore,
+      opportunityScore: candidate.opportunityScore,
+      localLandScore: candidate.localLandScore ?? null,
+    },
+  };
+}
+
 export class LegalActionBuilder {
   build(input: BuildLegalActionsInput): LegalAction[] {
     const actions: LegalAction[] = [];
@@ -44,7 +77,7 @@ export class LegalActionBuilder {
         input.spawnCandidates ?? [],
         maxSpawnActions,
       )) {
-        actions.push(this.spawnAction(candidate));
+        actions.push(buildSpawnLegalAction(candidate));
       }
     }
 
@@ -64,32 +97,6 @@ export class LegalActionBuilder {
     });
 
     return actions;
-  }
-
-  private spawnAction(candidate: SpawnCandidate): LegalAction {
-    return {
-      id: `spawn:${candidate.tile}`,
-      kind: "spawn",
-      label: `Spawn at tile ${candidate.tile}`,
-      intent: {
-        type: "spawn",
-        tile: candidate.tile,
-      },
-      risk: {
-        level: "medium",
-        score: 1 - candidate.safetyScore,
-      },
-      metadata: {
-        tile: candidate.tile,
-        x: candidate.x ?? null,
-        y: candidate.y ?? null,
-        pressureScore: candidate.pressureScore,
-        safetyScore: candidate.safetyScore,
-        diplomacyScore: candidate.diplomacyScore,
-        opportunityScore: candidate.opportunityScore,
-        localLandScore: candidate.localLandScore ?? null,
-      },
-    };
   }
 
   private postSpawnActions(input: BuildLegalActionsInput): LegalAction[] {
