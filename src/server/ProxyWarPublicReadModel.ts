@@ -276,6 +276,23 @@ export interface PublicFeaturedMatch {
    * bug) or the mirror itself failed to load this cycle.
    */
   completedAt: string | null;
+  /**
+   * Full-replay-access bugfix (2026-08-05): the SAME episode this
+   * record's `completedAt` above resolves from — `episode.watchHref`
+   * (lightweight spectator schematic) / `episode.fullRenderHref` (the
+   * real Pixi-rendered Director-Cut/full replay), looked up against the
+   * live mirror by `episodeRequestId`, exactly like `completedAt`.
+   * Deliberately NOT gated behind `isPubliclyPromotable`/the operator
+   * `EventPackage` below (unlike `subtitle`/`reasonToWatch`/etc.) —
+   * `MatchDetailPage.ts`'s post-match/revealed state renders whenever
+   * `result !== null`, independent of promotion, so these must resolve
+   * on that same independent floor or a promoted-but-ungated archive
+   * record would show a result with no way to actually watch it. `null`
+   * under the identical honest conditions `completedAt` documents above
+   * — never fabricated.
+   */
+  watchHref: string | null;
+  fullRenderHref: string | null;
   postMatchSummary: string | null;
   result: PublicFeaturedMatchResult | null;
   /**
@@ -667,6 +684,8 @@ export function publicFeaturedMatch(
   pkg: EventPackage | null = null,
   /** 2026-08-01 P0 — see `PublicFeaturedMatch.completedAt`'s own doc. Defaults to `null` for a caller (existing tests, any future one) that doesn't resolve the live mirror — an honest "not looked up" default, matching `pkg`'s own contract just above. */
   episodeCompletedAt: string | null = null,
+  /** Full-replay-access bugfix (2026-08-05) — see `PublicFeaturedMatch.watchHref`/`.fullRenderHref`'s own doc. Same "not looked up" default as `episodeCompletedAt` just above. */
+  episodeReplayHrefs: { watchHref: string | null; fullRenderHref: string | null } | null = null,
 ): PublicFeaturedMatch {
   const revealed = isFeaturedMatchRevealed(match);
   const promotion = isPubliclyPromotable(match, pkg);
@@ -702,6 +721,8 @@ export function publicFeaturedMatch(
     scheduledAt: match.scheduledAt,
     revealAt: match.revealAt,
     completedAt: episodeCompletedAt,
+    watchHref: episodeReplayHrefs?.watchHref ?? null,
+    fullRenderHref: episodeReplayHrefs?.fullRenderHref ?? null,
     // EMBARGO: never copy prose that could describe an unrevealed outcome —
     // see `isFeaturedMatchRevealed`'s doc for why this can't trust the
     // store's own validation alone.
@@ -719,29 +740,36 @@ export function publicFeaturedMatch(
  * so they're filtered out entirely, not just embargoed. `packageStore`
  * resolves each match's `EventPackage` (Season Zero Phase 4) for the
  * `isPubliclyPromotable` gate — see that field's own doc. `mirror`
- * resolves each match's ACTUAL completion date (Season Zero P0 — see
- * `PublicFeaturedMatch.completedAt`'s own doc) — `null` when
- * `episodeRequestId` is itself `null` or hasn't reached the mirror yet.
+ * resolves each match's ACTUAL completion date plus its replay hrefs
+ * (Season Zero P0 / full-replay-access bugfix — see
+ * `PublicFeaturedMatch.completedAt`/`.watchHref`/`.fullRenderHref`'s own
+ * doc) — all `null` when `episodeRequestId` is itself `null` or hasn't
+ * reached the mirror yet.
  */
 function publicFeaturedMatches(
   store: FeaturedMatchStoreFile,
   packageStore: EventPackageStoreFile,
   mirror: CoworldLeagueMirrorData,
 ): PublicFeaturedMatch[] {
-  const completedAtByEpisodeRequestId = new Map(
-    mirror.episodes.map((episode) => [episode.episodeRequestId, episode.completedAt]),
+  const episodeByRequestId = new Map(
+    mirror.episodes.map((episode) => [episode.episodeRequestId, episode]),
   );
   return store.matches
     .filter((match) => match.state !== "candidate")
-    .map((match) =>
-      publicFeaturedMatch(
+    .map((match) => {
+      const episode =
+        match.episodeRequestId === null
+          ? undefined
+          : episodeByRequestId.get(match.episodeRequestId);
+      return publicFeaturedMatch(
         match,
         findEventPackage(packageStore, match.matchId),
-        match.episodeRequestId === null
+        episode?.completedAt ?? null,
+        episode === undefined
           ? null
-          : (completedAtByEpisodeRequestId.get(match.episodeRequestId) ?? null),
-      ),
-    );
+          : { watchHref: episode.watchHref, fullRenderHref: episode.fullRenderHref },
+      );
+    });
 }
 
 /**

@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import {
   buildLeaguePlayerSection,
+  findLeagueEpisodeReplayInfo,
   readLeagueMirrorData,
 } from "../../../src/server/agents/LeaguePlayerProfile";
 
@@ -34,34 +35,36 @@ function sampleMirrorFile() {
         isHouse: true,
       },
     ],
-    episodes: [
-      {
-        roundNumber: 268,
-        completedAt: "2026-07-27T02:00:00.000Z",
-        map: "Pangaea",
-        turnCount: 900,
-        winnerName: "daveey-proxywar",
-        watchHref: "/ai-league-runs/league-x/watch.html",
-        fullRenderHref: "/ai-league-replay/league-x",
-        players: [
-          { name: "daveey-proxywar", tilesOwned: 5000, isAlive: true, isWinner: true },
-          { name: "house-warlord", tilesOwned: 100, isAlive: false, isWinner: false },
-        ],
-      },
-      {
-        roundNumber: 267,
-        completedAt: "2026-07-26T02:00:00.000Z",
-        map: "Britannia",
-        turnCount: 700,
-        winnerName: "house-warlord",
-        watchHref: null,
-        fullRenderHref: "/ai-league-replay/league-y",
-        players: [
-          { name: "daveey-proxywar", tilesOwned: 800, isAlive: false, isWinner: false },
-          { name: "house-warlord", tilesOwned: 6000, isAlive: true, isWinner: true },
-        ],
-      },
-    ],
+  episodes: [
+    {
+      episodeRequestId: "ereq_268",
+      roundNumber: 268,
+      completedAt: "2026-07-27T02:00:00.000Z",
+      map: "Pangaea",
+      turnCount: 900,
+      winnerName: "daveey-proxywar",
+      watchHref: "/ai-league-runs/league-x/watch.html",
+      fullRenderHref: "/ai-league-replay/league-x",
+      players: [
+        { name: "daveey-proxywar", tilesOwned: 5000, isAlive: true, isWinner: true },
+        { name: "house-warlord", tilesOwned: 100, isAlive: false, isWinner: false },
+      ],
+    },
+    {
+      episodeRequestId: "ereq_267",
+      roundNumber: 267,
+      completedAt: "2026-07-26T02:00:00.000Z",
+      map: "Britannia",
+      turnCount: 700,
+      winnerName: "house-warlord",
+      watchHref: null,
+      fullRenderHref: "/ai-league-replay/league-y",
+      players: [
+        { name: "daveey-proxywar", tilesOwned: 800, isAlive: false, isWinner: false },
+        { name: "house-warlord", tilesOwned: 6000, isAlive: true, isWinner: true },
+      ],
+    },
+  ],
   };
 }
 
@@ -107,6 +110,31 @@ describe("readLeagueMirrorData", () => {
     await writeFile(filePath, JSON.stringify(file), "utf8");
     const parsed = await readLeagueMirrorData(filePath);
     expect(parsed?.standings).toHaveLength(2);
+  });
+});
+
+describe("findLeagueEpisodeReplayInfo", () => {
+  test("resolves completedAt/watchHref/fullRenderHref for a matching episodeRequestId", async () => {
+    const data = await readLeagueMirrorDataFromObject(sampleMirrorFile());
+    expect(findLeagueEpisodeReplayInfo(data, "ereq_268")).toEqual({
+      completedAt: "2026-07-27T02:00:00.000Z",
+      watchHref: "/ai-league-runs/league-x/watch.html",
+      fullRenderHref: "/ai-league-replay/league-x",
+    });
+  });
+
+  test("resolves an episode whose watchHref is null (only fullRenderHref exists) without fabricating one", async () => {
+    const data = await readLeagueMirrorDataFromObject(sampleMirrorFile());
+    expect(findLeagueEpisodeReplayInfo(data, "ereq_267")).toEqual({
+      completedAt: "2026-07-26T02:00:00.000Z",
+      watchHref: null,
+      fullRenderHref: "/ai-league-replay/league-y",
+    });
+  });
+
+  test("returns null (never fabricated) when no episode in this mirror snapshot carries the given episodeRequestId", async () => {
+    const data = await readLeagueMirrorDataFromObject(sampleMirrorFile());
+    expect(findLeagueEpisodeReplayInfo(data, "ereq_not_mirrored_yet")).toBeNull();
   });
 });
 

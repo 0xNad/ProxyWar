@@ -215,15 +215,16 @@ const HEAD_TO_HEAD_LIMIT = 5;
  * removed/never-registered id) renders an honest "unknown" label —
  * never a fabricated name.
  *
- * DIRECTOR CUT / FULL REPLAY LINK: deliberately omitted. `PublicMatch`
- * (the league archive entry with `watchHref`/`fullRenderHref`) is keyed
- * by `episode.episodeRequestId`; `PublicFeaturedMatch` carries no such
- * field client-side (see `PublicFeaturedMatchSchema` — `matchId` is the
- * `feat_...` editorial id, a different namespace), so there is no wired,
- * non-fabricated way to resolve this record to a `PublicMatch` row from
- * here. Stage 5/6's Director Cut is what's actually specced to carry
- * that link (same gap `LobbyPage`'s state C documents) — not invented
- * here ahead of that work.
+ * DIRECTOR CUT / FULL REPLAY LINK (post-match state): `match.watchHref`/
+ * `.fullRenderHref` — resolved server-side against the live mirror by
+ * `episodeRequestId`, the SAME way `match.completedAt` already is (see
+ * `ProxyWarPublicReadModel.ts`'s `PublicFeaturedMatch.watchHref`/
+ * `.fullRenderHref` doc; full-replay-access bugfix, 2026-08-05). `null`
+ * whenever the episode hasn't reached the mirror yet, exactly like
+ * `completedAt` — never fabricated. `renderPostMatch` renders this with
+ * `renderReplayActions`, reusing `renderLeagueEpisodeActions`'s exact
+ * primary/secondary CTA pattern (fullRenderHref primary, watchHref
+ * secondary only when it differs).
  */
 @customElement("match-detail-page")
 export class MatchDetailPage extends LitElement {
@@ -571,6 +572,13 @@ export class MatchDetailPage extends LitElement {
             </div>
           `
         : nothing}
+      ${this.renderReplayActions(
+        match.fullRenderHref,
+        match.watchHref,
+        match.directorCutEstimateSeconds !== null
+          ? Math.round(match.directorCutEstimateSeconds / 60)
+          : null,
+      )}
       ${match.postMatchSummary !== null
         ? html`<p class="mt-4 text-sm text-ink-dim">
             ${match.postMatchSummary}
@@ -1111,30 +1119,33 @@ export class MatchDetailPage extends LitElement {
   }
 
   /**
-   * Primary action: Director Cut (when the mirror generated one for this
-   * run) or plain Full Replay, both pointing at `fullRenderHref` — Director
-   * Cut is a PLAYBACK MODE inside that same real-client renderer
-   * (`AiLeagueReplayOverlay.ts`'s `mountDirectorCutController`, enabled by
-   * default for archived matches), never a separate URL. Secondary action:
-   * the lightweight `watchHref` spectator page, shown only when it's a
-   * genuinely different link (a fixture/test row can point both hrefs at
-   * the same URL).
+   * Primary action: Director Cut (when a Director Cut runtime is known
+   * for this run) or plain Full Replay, both pointing at `fullRenderHref`
+   * — Director Cut is a PLAYBACK MODE inside that same real-client
+   * renderer (`AiLeagueReplayOverlay.ts`'s `mountDirectorCutController`,
+   * enabled by default for archived matches), never a separate URL.
+   * Secondary action: the lightweight `watchHref` spectator page, shown
+   * only when it's a genuinely different link (a fixture/test row can
+   * point both hrefs at the same URL). Shared by `renderLeagueEpisodeActions`
+   * (`LeagueEpisodeMatch`, `ereq_...`) and `renderPostMatch` (`FeaturedMatch`,
+   * `feat_...`) — full-replay-access bugfix (2026-08-05) — so both id
+   * namespaces render the identical primary/secondary CTA rather than a
+   * second near-duplicate template.
    */
-  private renderLeagueEpisodeActions(match: LeagueEpisodeMatch): TemplateResult {
-    const primaryHref = match.fullRenderHref;
+  private renderReplayActions(
+    fullRenderHref: string | null,
+    watchHref: string | null,
+    directorCutMinutes: number | null,
+  ): TemplateResult {
+    const primaryHref = fullRenderHref;
     const primaryLabel =
-      match.directorCut !== null
+      directorCutMinutes !== null
         ? translateText("watch.director_cut_duration", {
-            minutes: Math.max(
-              1,
-              Math.round(match.directorCut.durationEstimateSeconds / 60),
-            ),
+            minutes: Math.max(1, directorCutMinutes),
           })
         : translateText("watch.watch_replay");
     const secondaryHref =
-      match.watchHref !== null && match.watchHref !== primaryHref
-        ? match.watchHref
-        : null;
+      watchHref !== null && watchHref !== primaryHref ? watchHref : null;
     return html`
       <div class="mt-6 flex flex-wrap items-center gap-3">
         ${primaryHref !== null
@@ -1155,6 +1166,16 @@ export class MatchDetailPage extends LitElement {
           : nothing}
       </div>
     `;
+  }
+
+  private renderLeagueEpisodeActions(match: LeagueEpisodeMatch): TemplateResult {
+    return this.renderReplayActions(
+      match.fullRenderHref,
+      match.watchHref,
+      match.directorCut !== null
+        ? Math.round(match.directorCut.durationEstimateSeconds / 60)
+        : null,
+    );
   }
 
   /**

@@ -184,6 +184,9 @@ export const PublicFeaturedMatchSchema = z.object({
   revealAt: z.string().nullable(),
   /** 2026-08-01 P0 — see `ProxyWarPublicReadModel.ts`'s `PublicFeaturedMatch.completedAt` for the full contract (the ACTUAL match completion date, distinct from `scheduledAt`). */
   completedAt: z.string().nullable(),
+  /** Full-replay-access bugfix (2026-08-05) — see `ProxyWarPublicReadModel.ts`'s `PublicFeaturedMatch.watchHref`/`.fullRenderHref` for the full contract. Resolved the SAME way as `completedAt` just above (independent of `isPubliclyPromotable`/the package fields below) — `null` under the identical honest "not mirrored yet" conditions. */
+  watchHref: z.string().nullable(),
+  fullRenderHref: z.string().nullable(),
   postMatchSummary: z.string().nullable(),
   result: PublicFeaturedMatchResultSchema.nullable(),
   /**
