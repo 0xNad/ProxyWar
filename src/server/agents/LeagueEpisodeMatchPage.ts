@@ -1,15 +1,5 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import {
-  publicRunKeyFromFullRenderHref,
-  publicRunKeyFromWatchHref,
-} from "./CoworldLeagueArtifactRetention";
-import { AGENT_MATCH_RECAP_SCHEMA_VERSION } from "./AgentMatchRecap";
-import type { FeaturedMatchParticipantCard } from "./FeaturedMatchParticipants";
-import type {
-  CoworldLeagueEpisodePlayerRow,
-  CoworldLeagueEpisodeRow,
-} from "./CoworldLeagueSiteWriter";
 import { generateEmblemSvg } from "../identity/IdentityEmblems";
 import { resolveAgentIdentityView } from "../identity/IdentityMatching";
 import type { IdentityRegistrySnapshot } from "../identity/IdentityRegistry";
@@ -17,6 +7,16 @@ import {
   computeProvisionalIdentities,
   type ProvisionalIdentity,
 } from "../identity/ProvisionalIdentity";
+import { AGENT_MATCH_RECAP_SCHEMA_VERSION } from "./AgentMatchRecap";
+import {
+  publicRunKeyFromFullRenderHref,
+  publicRunKeyFromWatchHref,
+} from "./CoworldLeagueArtifactRetention";
+import type {
+  CoworldLeagueEpisodePlayerRow,
+  CoworldLeagueEpisodeRow,
+} from "./CoworldLeagueSiteWriter";
+import type { FeaturedMatchParticipantCard } from "./FeaturedMatchParticipants";
 
 /**
  * Product overhaul: canonical match pages for ORDINARY league episodes
@@ -32,7 +32,7 @@ import {
  *
  * Every field below is either already public on `data.json`/
  * `read-model.json` (participants, placements, map, turn/decision/
- * degraded counts, hrefs, Director Cut summary) or derived from
+ * degraded counts, hrefs) or derived from
  * `match-recap.json` — the event-derived recap artifact on the public
  * run-artifact allowlist (`ProxyWarPublicArtifacts.ts`; `match-story.md`
  * is ALSO public but deliberately never read here — its "Spectator
@@ -105,7 +105,6 @@ export interface LeagueEpisodeMatchPageModel {
   watchHref: string | null;
   fullRenderHref: string | null;
   premiereHref: string | null;
-  directorCut: { durationEstimateSeconds: number; segmentCount: number } | null;
   recap: LeagueEpisodeRecap | null;
   /** `null` when no `decisive-moments.json` exists for this episode yet (not backfilled, or a genuinely quiet match with fewer than `MIN_DECISIVE_MOMENTS` real candidates — see `AgentDecisiveMoments.ts`'s "never padded" doc) — the page renders no section, never a placeholder. */
   decisiveMoments: LeagueEpisodeDecisiveMoment[] | null;
@@ -144,14 +143,15 @@ export function findLeagueEpisodeByRequestId(
   episodeRequestId: string,
 ): CoworldLeagueEpisodeRow | null {
   return (
-    episodes.find(
-      (episode) => episode.episodeRequestId === episodeRequestId,
-    ) ?? null
+    episodes.find((episode) => episode.episodeRequestId === episodeRequestId) ??
+    null
   );
 }
 
 /** Same derivation `feature-candidates.ts`'s `findArtifactDirectory` already uses: the mirror's own managed run key, recovered from whichever href is present. `null` when neither href is a well-formed managed run link (replay never downloaded). */
-export function leagueEpisodeRunKey(row: CoworldLeagueEpisodeRow): string | null {
+export function leagueEpisodeRunKey(
+  row: CoworldLeagueEpisodeRow,
+): string | null {
   return (
     publicRunKeyFromFullRenderHref(row.fullRenderHref) ??
     publicRunKeyFromWatchHref(row.watchHref)
@@ -182,7 +182,9 @@ function episodeParticipantCard(
     identity.versions,
   );
   const provisional =
-    view.agent === null ? (provisionalIdentities.get(player.name) ?? null) : null;
+    view.agent === null
+      ? (provisionalIdentities.get(player.name) ?? null)
+      : null;
   return {
     playerName: player.name,
     displayName: view.agent?.displayName ?? player.name,
@@ -260,7 +262,6 @@ export function buildLeagueEpisodeMatchPageModel(
     watchHref: row.watchHref,
     fullRenderHref: row.fullRenderHref,
     premiereHref: row.premiereHref ?? null,
-    directorCut: row.directorCut ?? null,
     recap,
     decisiveMoments,
   };
@@ -285,7 +286,9 @@ const maximumMatchRecapBytes = 2 * 1024 * 1024;
  * when the curated pass finds zero beats, but this reader stays defensive
  * regardless of the writer's own guarantee).
  */
-export function parseMatchRecapArtifact(raw: string): LeagueEpisodeRecap | null {
+export function parseMatchRecapArtifact(
+  raw: string,
+): LeagueEpisodeRecap | null {
   let value: unknown;
   try {
     value = JSON.parse(raw);
@@ -377,7 +380,10 @@ function parseDecisiveMomentState(
         alive: agent.alive,
       };
     })
-    .filter((agent): agent is LeagueEpisodeDecisiveMomentState["agents"][number] => agent !== null);
+    .filter(
+      (agent): agent is LeagueEpisodeDecisiveMomentState["agents"][number] =>
+        agent !== null,
+    );
   return { turn, agents };
 }
 
@@ -479,7 +485,9 @@ export async function readLeagueEpisodeDecisiveMoments(
  * who won before they ever opened the page. Slot order carries no outcome
  * information by construction.
  */
-export function leagueEpisodeSpoilerSafeTitle(row: CoworldLeagueEpisodeRow): string {
+export function leagueEpisodeSpoilerSafeTitle(
+  row: CoworldLeagueEpisodeRow,
+): string {
   const names = [...row.players]
     .sort((left, right) => left.slot - right.slot)
     .map((player) => player.name);
@@ -503,6 +511,8 @@ export function leagueEpisodeSpoilerSafeDescription(
     .map((player) => player.name);
   const roster = names.length === 0 ? "Unknown participants" : names.join(", ");
   const roundLabel =
-    row.roundNumber !== null ? `Round ${row.roundNumber}` : "an unnumbered round";
+    row.roundNumber !== null
+      ? `Round ${row.roundNumber}`
+      : "an unnumbered round";
   return `Watch this Proxy War league battle: ${roster} on ${row.map}, ${roundLabel}.`;
 }

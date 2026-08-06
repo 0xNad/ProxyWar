@@ -1,12 +1,20 @@
 /**
  * Coverage for `/watch`'s content-programme order (Season Zero activation
- * prompt Phase 5): featured event (isPubliclyPromotable-gated) / latest
- * Director Cuts / Season schedule / full replay archive with filters
- * behind a drawer — plus the pure helpers backing degraded-turns,
- * archive filtering/sorting, and winner-name resolution.
+ * prompt Phase 5): featured event (isPubliclyPromotable-gated) / Season
+ * schedule / full replay archive with filters behind a drawer — plus the
+ * pure helpers backing degraded-turns, archive filtering/sorting, and
+ * winner-name resolution.
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "lit";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { analytics } from "../../../src/client/analytics/AnalyticsClient";
+import type {
+  PublicAgent,
+  PublicFeaturedMatch,
+  PublicMatch,
+  PublicSeason,
+  ReadModel,
+} from "../../../src/client/publicapp/ReadModelSchema";
 import "../../../src/client/publicapp/WatchPage";
 import type { WatchPage } from "../../../src/client/publicapp/WatchPage";
 import {
@@ -19,15 +27,7 @@ import {
   resolveWinnerName,
   sortArchiveMatches,
 } from "../../../src/client/publicapp/WatchPage";
-import type {
-  PublicAgent,
-  PublicFeaturedMatch,
-  PublicMatch,
-  PublicSeason,
-  ReadModel,
-} from "../../../src/client/publicapp/ReadModelSchema";
 import type * as UtilsModule from "../../../src/client/Utils";
-import { analytics } from "../../../src/client/analytics/AnalyticsClient";
 
 vi.mock("../../../src/client/Utils", async (importOriginal) => ({
   ...(await importOriginal<typeof UtilsModule>()),
@@ -78,13 +78,14 @@ function match(overrides: Partial<PublicMatch>): PublicMatch {
     watchHref: null,
     fullRenderHref: null,
     premiereHref: null,
-    directorCut: null,
     dramaEvidence: null,
     ...overrides,
   };
 }
 
-function featuredMatch(overrides: Partial<PublicFeaturedMatch> = {}): PublicFeaturedMatch {
+function featuredMatch(
+  overrides: Partial<PublicFeaturedMatch> = {},
+): PublicFeaturedMatch {
   return {
     matchId: "feat_11111111111111111111",
     lane: "premiere",
@@ -104,7 +105,6 @@ function featuredMatch(overrides: Partial<PublicFeaturedMatch> = {}): PublicFeat
     isPubliclyPromotable: true,
     subtitle: "A duel worth watching",
     reasonToWatch: ["Auri debuts v43 after a strong run."],
-    directorCutEstimateSeconds: 360,
     canonicalMatchUrl: "/match/feat_11111111111111111111",
     canonicalPremiereUrl: "/premiere/prem_abc",
     ...overrides,
@@ -169,7 +169,10 @@ function stubReadModelAndParticipantsFetch(
     vi.fn(async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();
       if (url.includes("/api/featured-matches/")) {
-        return { ok: true, json: async () => ({ schemaVersion: 1, participants }) } as Response;
+        return {
+          ok: true,
+          json: async () => ({ schemaVersion: 1, participants }),
+        } as Response;
       }
       return { ok: true, json: async () => model } as Response;
     }),
@@ -195,14 +198,18 @@ afterEach(() => {
 
 describe("watch-page featured event section", () => {
   it("shows the real title/subtitle/reason-to-watch for a promotable upcoming event, never a bare map+round card", async () => {
-    stubReadModelAndParticipantsFetch(readModel({ featuredMatches: [featuredMatch()] }));
+    stubReadModelAndParticipantsFetch(
+      readModel({ featuredMatches: [featuredMatch()] }),
+    );
     const el = mount();
     await flushMicrotasks();
     expect(el.textContent).toContain("Auri vs Sefirot");
     expect(el.textContent).toContain("A duel worth watching");
     expect(el.textContent).toContain("Auri debuts v43 after a strong run.");
     expect(el.textContent).toContain("watch.upcoming_premiere_badge");
-    const link = el.querySelector<HTMLAnchorElement>("a[href='/premiere/prem_abc']");
+    const link = el.querySelector<HTMLAnchorElement>(
+      "a[href='/premiere/prem_abc']",
+    );
     expect(link).not.toBeNull();
   });
 
@@ -210,7 +217,9 @@ describe("watch-page featured event section", () => {
     stubReadModelAndParticipantsFetch(
       readModel({
         featuredMatches: [
-          featuredMatch({ scheduledAt: new Date(Date.now() - 60_000).toISOString() }),
+          featuredMatch({
+            scheduledAt: new Date(Date.now() - 60_000).toISOString(),
+          }),
         ],
       }),
     );
@@ -243,7 +252,9 @@ describe("watch-page featured event section", () => {
 
   it("ignores a non-promotable featured match", async () => {
     stubReadModelAndParticipantsFetch(
-      readModel({ featuredMatches: [featuredMatch({ isPubliclyPromotable: false })] }),
+      readModel({
+        featuredMatches: [featuredMatch({ isPubliclyPromotable: false })],
+      }),
     );
     const el = mount();
     await flushMicrotasks();
@@ -251,19 +262,22 @@ describe("watch-page featured event section", () => {
   });
 
   it("renders participant chips once the narrow route resolves a roster", async () => {
-    stubReadModelAndParticipantsFetch(readModel({ featuredMatches: [featuredMatch()] }), [
-      {
-        playerName: "auri",
-        displayName: "Auri",
-        agentSlug: "auri",
-        emblemSvg: null,
-        primaryColor: null,
-        secondaryColor: null,
-        versionLabel: "v43",
-        builderId: null,
-        builderDisplayName: null,
-      },
-    ]);
+    stubReadModelAndParticipantsFetch(
+      readModel({ featuredMatches: [featuredMatch()] }),
+      [
+        {
+          playerName: "auri",
+          displayName: "Auri",
+          agentSlug: "auri",
+          emblemSvg: null,
+          primaryColor: null,
+          secondaryColor: null,
+          versionLabel: "v43",
+          builderId: null,
+          builderDisplayName: null,
+        },
+      ],
+    );
     const el = mount();
     await flushMicrotasks();
     expect(el.textContent).toContain("Auri");
@@ -275,15 +289,27 @@ describe("findPromotableEvent / isEventLive", () => {
   it("selects the earliest-scheduled published+promotable premiere-lane record", () => {
     const model = readModel({
       featuredMatches: [
-        featuredMatch({ matchId: "feat_later", scheduledAt: "2026-08-20T00:00:00.000Z" }),
-        featuredMatch({ matchId: "feat_earlier", scheduledAt: "2026-08-01T00:00:00.000Z" }),
+        featuredMatch({
+          matchId: "feat_later",
+          scheduledAt: "2026-08-20T00:00:00.000Z",
+        }),
+        featuredMatch({
+          matchId: "feat_earlier",
+          scheduledAt: "2026-08-01T00:00:00.000Z",
+        }),
       ],
     });
     expect(findPromotableEvent(model)?.matchId).toBe("feat_earlier");
   });
 
   it("excludes candidate/scheduled/revealed/archived states — only published is eligible", () => {
-    for (const state of ["candidate", "scheduled", "revealed", "archived", "cancelled"] as const) {
+    for (const state of [
+      "candidate",
+      "scheduled",
+      "revealed",
+      "archived",
+      "cancelled",
+    ] as const) {
       const model = readModel({ featuredMatches: [featuredMatch({ state })] });
       expect(findPromotableEvent(model)).toBeNull();
     }
@@ -298,42 +324,15 @@ describe("findPromotableEvent / isEventLive", () => {
 
   it("isEventLive is false for a null scheduledAt and true once the clock passes it", () => {
     const event = featuredMatch({ scheduledAt: "2026-08-01T00:00:00.000Z" });
-    expect(isEventLive(event, Date.parse("2026-07-31T00:00:00.000Z"))).toBe(false);
-    expect(isEventLive(event, Date.parse("2026-08-01T00:00:01.000Z"))).toBe(true);
-    expect(isEventLive(featuredMatch({ scheduledAt: null }), Date.now())).toBe(false);
-  });
-});
-
-describe("watch-page latest Director Cuts section", () => {
-  it("ranks by curatedDramaScore desc within a bounded recency window, showing lineups/runtime/reason", async () => {
-    stubReadModelAndParticipantsFetch(
-      readModel({
-        matches: [
-          match({
-            matchId: "m_high",
-            completedAt: "2026-07-05T00:00:00.000Z",
-            directorCut: { durationEstimateSeconds: 360, segmentCount: 4 },
-            dramaEvidence: { curatedDramaScore: 90, entertainmentGrade: "dramatic" },
-            participants: [
-              { slot: 0, agentSlug: "agent-one", displayName: "Agent One", tilesOwned: 5, isAlive: true, isWinner: true, color: "#111" },
-            ],
-          }),
-        ],
-        agents: [agent({ slug: "agent-one", displayName: "Agent One" })],
-      }),
+    expect(isEventLive(event, Date.parse("2026-07-31T00:00:00.000Z"))).toBe(
+      false,
     );
-    const el = mount();
-    await flushMicrotasks();
-    expect(el.textContent).toContain("watch.latest_director_cuts_heading");
-    expect(el.textContent).toContain("Agent One");
-    expect(el.textContent).toContain("watch.director_cut_duration:{\"minutes\":6}");
-  });
-
-  it("omits the section entirely when no match has a Director Cut", async () => {
-    stubReadModelAndParticipantsFetch(readModel({ matches: [match({ directorCut: null })] }));
-    const el = mount();
-    await flushMicrotasks();
-    expect(el.textContent).not.toContain("watch.latest_director_cuts_heading");
+    expect(isEventLive(event, Date.parse("2026-08-01T00:00:01.000Z"))).toBe(
+      true,
+    );
+    expect(isEventLive(featuredMatch({ scheduledAt: null }), Date.now())).toBe(
+      false,
+    );
   });
 });
 
@@ -345,7 +344,10 @@ describe("watch-page season schedule section", () => {
         seasons: [
           season({
             eventSlots: [
-              { featuredMatchId: "feat_slot", scheduledAt: "2026-08-08T18:00:00.000Z" },
+              {
+                featuredMatchId: "feat_slot",
+                scheduledAt: "2026-08-08T18:00:00.000Z",
+              },
             ],
           }),
         ],
@@ -360,11 +362,16 @@ describe("watch-page season schedule section", () => {
   it("2026-08-01 P0: a premiere-lane slot shows a 'Premieres' label", async () => {
     stubReadModelAndParticipantsFetch(
       readModel({
-        featuredMatches: [featuredMatch({ matchId: "feat_slot", lane: "premiere" })],
+        featuredMatches: [
+          featuredMatch({ matchId: "feat_slot", lane: "premiere" }),
+        ],
         seasons: [
           season({
             eventSlots: [
-              { featuredMatchId: "feat_slot", scheduledAt: "2026-08-08T18:00:00.000Z" },
+              {
+                featuredMatchId: "feat_slot",
+                scheduledAt: "2026-08-08T18:00:00.000Z",
+              },
             ],
           }),
         ],
@@ -373,7 +380,9 @@ describe("watch-page season schedule section", () => {
     const el = mount();
     await flushMicrotasks();
     expect(el.textContent).toContain("watch.season_schedule_premiere_label");
-    expect(el.textContent).not.toContain("watch.season_schedule_spotlight_label");
+    expect(el.textContent).not.toContain(
+      "watch.season_schedule_spotlight_label",
+    );
     expect(el.textContent).not.toContain("watch.season_schedule_played_note");
   });
 
@@ -395,7 +404,10 @@ describe("watch-page season schedule section", () => {
               // FUTURE date relative to the match's real completedAt, the
               // exact real-world scenario the P0 review flagged (a schedule
               // strip showing "8/3/2026" on an already-decided match).
-              { featuredMatchId: "feat_slot", scheduledAt: "2026-08-03T18:00:00.000Z" },
+              {
+                featuredMatchId: "feat_slot",
+                scheduledAt: "2026-08-03T18:00:00.000Z",
+              },
             ],
           }),
         ],
@@ -405,7 +417,9 @@ describe("watch-page season schedule section", () => {
     await flushMicrotasks();
     expect(el.textContent).toContain("watch.season_schedule_spotlight_label");
     expect(el.textContent).toContain("watch.season_schedule_played_note");
-    expect(el.textContent).not.toContain("watch.season_schedule_premiere_label");
+    expect(el.textContent).not.toContain(
+      "watch.season_schedule_premiere_label",
+    );
   });
 
   it("renders nothing when no season is active", async () => {
@@ -447,20 +461,28 @@ describe("watch-page replay archive", () => {
     expect(el.textContent).not.toContain("Should Not Appear");
     const archiveCards = Array.from(el.querySelectorAll("li"));
     expect(archiveCards).toHaveLength(2);
-    const newerCard = archiveCards.find((card) => card.textContent?.includes("Newer Map"));
-    const olderCard = archiveCards.find((card) => card.textContent?.includes("Older Map"));
+    const newerCard = archiveCards.find((card) =>
+      card.textContent?.includes("Newer Map"),
+    );
+    const olderCard = archiveCards.find((card) =>
+      card.textContent?.includes("Older Map"),
+    );
     expect(newerCard).toBeDefined();
     expect(olderCard).toBeDefined();
 
     const details = newerCard?.querySelector("details");
     expect(details?.hasAttribute("open")).toBe(false);
-    expect(details?.querySelector("summary")?.textContent?.trim()).toBe("watch.reveal_result");
+    expect(details?.querySelector("summary")?.textContent?.trim()).toBe(
+      "watch.reveal_result",
+    );
     expect(details?.textContent).toContain("Winner Co");
   });
 
   it("puts the filter controls behind a collapsed <details> drawer, never shown before the heading", async () => {
     stubReadModelAndParticipantsFetch(
-      readModel({ matches: [match({ completedAt: "2026-06-15T00:00:00.000Z" })] }),
+      readModel({
+        matches: [match({ completedAt: "2026-06-15T00:00:00.000Z" })],
+      }),
     );
     const el = mount();
     await flushMicrotasks();
@@ -474,43 +496,13 @@ describe("watch-page replay archive", () => {
 
   it("never renders a Match size filter control (P4 fix, 2026-08-02: dropped -- mapSize only ever carried one real value in production, so the dropdown offered a choice with no second option)", async () => {
     stubReadModelAndParticipantsFetch(
-      readModel({ matches: [match({ completedAt: "2026-06-15T00:00:00.000Z" })] }),
-    );
-    const el = mount();
-    await flushMicrotasks();
-    expect(el.textContent).not.toContain("watch.filter_match_size");
-  });
-
-  it("shows a Director Cut duration badge when the match carries one, and omits it otherwise", async () => {
-    stubReadModelAndParticipantsFetch(
       readModel({
-        matches: [
-          match({
-            matchId: "with-cut",
-            completedAt: "2026-06-15T00:00:00.000Z",
-            map: "Cut Map",
-            directorCut: { durationEstimateSeconds: 700, segmentCount: 9 },
-          }),
-          match({
-            matchId: "without-cut",
-            completedAt: "2026-06-14T00:00:00.000Z",
-            map: "No Cut Map",
-            directorCut: null,
-          }),
-        ],
+        matches: [match({ completedAt: "2026-06-15T00:00:00.000Z" })],
       }),
     );
     const el = mount();
     await flushMicrotasks();
-
-    const cutMapCard = Array.from(el.querySelectorAll("li")).find((li) =>
-      li.textContent?.includes("Cut Map"),
-    );
-    const noCutMapCard = Array.from(el.querySelectorAll("li")).find((li) =>
-      li.textContent?.includes("No Cut Map"),
-    );
-    expect(cutMapCard?.textContent).toContain("watch.director_cut_duration");
-    expect(noCutMapCard?.textContent).not.toContain("watch.director_cut_duration");
+    expect(el.textContent).not.toContain("watch.filter_match_size");
   });
 
   it("resolves the winner via the participant's own displayName when the slug isn't a known agent", () => {
@@ -539,8 +531,16 @@ describe("watch-page replay archive", () => {
     stubReadModelAndParticipantsFetch(
       readModel({
         matches: [
-          match({ matchId: "feat", completedAt: "2026-06-15T00:00:00.000Z", map: "Feat Map" }),
-          match({ matchId: "plain", completedAt: "2026-06-14T00:00:00.000Z", map: "Plain Map" }),
+          match({
+            matchId: "feat",
+            completedAt: "2026-06-15T00:00:00.000Z",
+            map: "Feat Map",
+          }),
+          match({
+            matchId: "plain",
+            completedAt: "2026-06-14T00:00:00.000Z",
+            map: "Plain Map",
+          }),
         ],
         featuredMatches: [
           featuredMatch({
@@ -558,8 +558,12 @@ describe("watch-page replay archive", () => {
     const el = mount();
     await flushMicrotasks();
 
-    const featCard = Array.from(el.querySelectorAll("li")).find((li) => li.textContent?.includes("Feat Map"));
-    const plainCard = Array.from(el.querySelectorAll("li")).find((li) => li.textContent?.includes("Plain Map"));
+    const featCard = Array.from(el.querySelectorAll("li")).find((li) =>
+      li.textContent?.includes("Feat Map"),
+    );
+    const plainCard = Array.from(el.querySelectorAll("li")).find((li) =>
+      li.textContent?.includes("Plain Map"),
+    );
     expect(featCard?.textContent).toContain("watch.featured_badge");
     expect(plainCard?.textContent).not.toContain("watch.featured_badge");
   });
@@ -577,7 +581,15 @@ describe("watch-page replay archive", () => {
             completedAt: "2026-06-15T00:00:00.000Z",
             map: "Alpha Map",
             participants: [
-              { slot: 0, agentSlug: "alpha", displayName: "Alpha", tilesOwned: 10, isAlive: true, isWinner: true, color: "#fff" },
+              {
+                slot: 0,
+                agentSlug: "alpha",
+                displayName: "Alpha",
+                tilesOwned: 10,
+                isAlive: true,
+                isWinner: true,
+                color: "#fff",
+              },
             ],
           }),
           match({
@@ -585,7 +597,15 @@ describe("watch-page replay archive", () => {
             completedAt: "2026-06-14T00:00:00.000Z",
             map: "Beta Map",
             participants: [
-              { slot: 0, agentSlug: "beta", displayName: "Beta", tilesOwned: 10, isAlive: true, isWinner: true, color: "#fff" },
+              {
+                slot: 0,
+                agentSlug: "beta",
+                displayName: "Beta",
+                tilesOwned: 10,
+                isAlive: true,
+                isWinner: true,
+                color: "#fff",
+              },
             ],
           }),
         ],
@@ -595,7 +615,9 @@ describe("watch-page replay archive", () => {
     await flushMicrotasks();
     const countArchiveCards = () =>
       Array.from(el.querySelectorAll("li")).filter(
-        (li) => li.textContent?.includes("Alpha Map") || li.textContent?.includes("Beta Map"),
+        (li) =>
+          li.textContent?.includes("Alpha Map") ||
+          li.textContent?.includes("Beta Map"),
       ).length;
     expect(countArchiveCards()).toBe(2);
 
@@ -610,7 +632,9 @@ describe("watch-page replay archive", () => {
 
     expect(countArchiveCards()).toBe(1);
     expect(
-      Array.from(el.querySelectorAll("li")).some((li) => li.textContent?.includes("Alpha Map")),
+      Array.from(el.querySelectorAll("li")).some((li) =>
+        li.textContent?.includes("Alpha Map"),
+      ),
     ).toBe(true);
 
     filterAgentSelect!.value = "all";
@@ -623,7 +647,12 @@ describe("watch-page replay archive", () => {
     stubReadModelAndParticipantsFetch(
       readModel({
         matches: [
-          match({ matchId: "m-1", completedAt: "2026-06-15T00:00:00.000Z", map: "Only Map", mapSize: "Normal" }),
+          match({
+            matchId: "m-1",
+            completedAt: "2026-06-15T00:00:00.000Z",
+            map: "Only Map",
+            mapSize: "Normal",
+          }),
         ],
       }),
     );
@@ -651,13 +680,19 @@ describe("watch-page replay archive", () => {
             matchId: "low-drama",
             completedAt: "2026-06-20T00:00:00.000Z",
             map: "Low Drama Map",
-            dramaEvidence: { curatedDramaScore: 20, entertainmentGrade: "flat" },
+            dramaEvidence: {
+              curatedDramaScore: 20,
+              entertainmentGrade: "flat",
+            },
           }),
           match({
             matchId: "high-drama",
             completedAt: "2026-06-01T00:00:00.000Z",
             map: "High Drama Map",
-            dramaEvidence: { curatedDramaScore: 95, entertainmentGrade: "lively" },
+            dramaEvidence: {
+              curatedDramaScore: 95,
+              entertainmentGrade: "lively",
+            },
           }),
         ],
       }),
@@ -673,7 +708,9 @@ describe("watch-page replay archive", () => {
     sortSelect!.dispatchEvent(new Event("change"));
     await flushMicrotasks();
     const cards = Array.from(el.querySelectorAll("li")).filter(
-      (li) => li.textContent?.includes("Low Drama Map") || li.textContent?.includes("High Drama Map"),
+      (li) =>
+        li.textContent?.includes("Low Drama Map") ||
+        li.textContent?.includes("High Drama Map"),
     );
     expect(cards[0]?.textContent).toContain("High Drama Map");
   });
@@ -698,17 +735,29 @@ describe("watch-page replay archive", () => {
       li.textContent?.includes("Click Map"),
     );
     const links = Array.from(card!.querySelectorAll("a"));
-    const viewMatchLink = links.find((a) => a.textContent === "watch.view_match");
-    const watchReplayLink = links.find((a) => a.textContent === "watch.watch_replay");
+    const viewMatchLink = links.find(
+      (a) => a.textContent === "watch.view_match",
+    );
+    const watchReplayLink = links.find(
+      (a) => a.textContent === "watch.watch_replay",
+    );
     expect(viewMatchLink).toBeDefined();
     expect(watchReplayLink).toBeDefined();
 
-    viewMatchLink!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-    expect(analytics.track).toHaveBeenCalledWith("event_cta_clicked", { matchId: "clickable-match" });
+    viewMatchLink!.dispatchEvent(
+      new MouseEvent("click", { bubbles: true, cancelable: true }),
+    );
+    expect(analytics.track).toHaveBeenCalledWith("event_cta_clicked", {
+      matchId: "clickable-match",
+    });
 
-    watchReplayLink!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    watchReplayLink!.dispatchEvent(
+      new MouseEvent("click", { bubbles: true, cancelable: true }),
+    );
     expect(
-      vi.mocked(analytics.track).mock.calls.filter((call) => call[0] === "event_cta_clicked"),
+      vi
+        .mocked(analytics.track)
+        .mock.calls.filter((call) => call[0] === "event_cta_clicked"),
     ).toHaveLength(2);
   });
 
@@ -737,9 +786,9 @@ describe("watch-page replay archive", () => {
       matchId: "featured-in-archive",
     });
     expect(
-      vi.mocked(analytics.track).mock.calls.filter(
-        (call) => call[0] === "featured_event_impression",
-      ),
+      vi
+        .mocked(analytics.track)
+        .mock.calls.filter((call) => call[0] === "featured_event_impression"),
     ).toHaveLength(1);
 
     // Re-render (e.g. via a sort-order change) must not refire the same impression.
@@ -747,9 +796,9 @@ describe("watch-page replay archive", () => {
     await el.updateComplete;
     await flushMicrotasks();
     expect(
-      vi.mocked(analytics.track).mock.calls.filter(
-        (call) => call[0] === "featured_event_impression",
-      ),
+      vi
+        .mocked(analytics.track)
+        .mock.calls.filter((call) => call[0] === "featured_event_impression"),
     ).toHaveLength(1);
   });
 
@@ -757,9 +806,21 @@ describe("watch-page replay archive", () => {
     stubReadModelAndParticipantsFetch(
       readModel({
         matches: [
-          match({ matchId: "m1", completedAt: "2026-06-15T00:00:00.000Z", map: "Alpha" }),
-          match({ matchId: "m2", completedAt: "2026-06-16T00:00:00.000Z", map: "Beta" }),
-          match({ matchId: "m3", completedAt: "2026-06-17T00:00:00.000Z", map: "Gamma" }),
+          match({
+            matchId: "m1",
+            completedAt: "2026-06-15T00:00:00.000Z",
+            map: "Alpha",
+          }),
+          match({
+            matchId: "m2",
+            completedAt: "2026-06-16T00:00:00.000Z",
+            map: "Beta",
+          }),
+          match({
+            matchId: "m3",
+            completedAt: "2026-06-17T00:00:00.000Z",
+            map: "Gamma",
+          }),
         ],
       }),
     );
@@ -794,16 +855,28 @@ describe("watch-page replay archive", () => {
 
 describe("computeDegradedShare", () => {
   it("stays unelevated below the 15% threshold", () => {
-    expect(computeDegradedShare(10, 100)).toEqual({ share: 10, elevated: false });
+    expect(computeDegradedShare(10, 100)).toEqual({
+      share: 10,
+      elevated: false,
+    });
   });
 
   it("elevates at and above the 15% threshold", () => {
-    expect(computeDegradedShare(15, 100)).toEqual({ share: 15, elevated: true });
-    expect(computeDegradedShare(30, 100)).toEqual({ share: 30, elevated: true });
+    expect(computeDegradedShare(15, 100)).toEqual({
+      share: 15,
+      elevated: true,
+    });
+    expect(computeDegradedShare(30, 100)).toEqual({
+      share: 30,
+      elevated: true,
+    });
   });
 
   it("has no percentage when decisionCount is unknown", () => {
-    expect(computeDegradedShare(5, null)).toEqual({ share: null, elevated: false });
+    expect(computeDegradedShare(5, null)).toEqual({
+      share: null,
+      elevated: false,
+    });
   });
 });
 
@@ -845,11 +918,22 @@ describe("filterArchiveMatches", () => {
     const alpha = completedMatch({
       matchId: "a",
       participants: [
-        { slot: 0, agentSlug: "alpha", displayName: "Alpha", tilesOwned: 0, isAlive: true, isWinner: false, color: "#000" },
+        {
+          slot: 0,
+          agentSlug: "alpha",
+          displayName: "Alpha",
+          tilesOwned: 0,
+          isAlive: true,
+          isWinner: false,
+          color: "#000",
+        },
       ],
     });
     const beta = completedMatch({ matchId: "b", participants: [] });
-    const result = filterArchiveMatches([alpha, beta], new Set(), { ...noFilter, agentSlug: "alpha" });
+    const result = filterArchiveMatches([alpha, beta], new Set(), {
+      ...noFilter,
+      agentSlug: "alpha",
+    });
     expect(result.map((m) => m.matchId)).toEqual(["a"]);
   });
 
@@ -857,7 +941,10 @@ describe("filterArchiveMatches", () => {
     const m1 = completedMatch({ matchId: "1", map: "Frost" });
     const m2 = completedMatch({ matchId: "2", map: "Sand" });
     expect(
-      filterArchiveMatches([m1, m2], new Set(), { ...noFilter, map: "Frost" }).map((m) => m.matchId),
+      filterArchiveMatches([m1, m2], new Set(), {
+        ...noFilter,
+        map: "Frost",
+      }).map((m) => m.matchId),
     ).toEqual(["1"]);
   });
 
@@ -866,28 +953,56 @@ describe("filterArchiveMatches", () => {
     const plain = completedMatch({ matchId: "p" });
     const featuredIds = new Set(["f"]);
     expect(
-      filterArchiveMatches([featured, plain], featuredIds, { ...noFilter, featured: "featured" }).map((m) => m.matchId),
+      filterArchiveMatches([featured, plain], featuredIds, {
+        ...noFilter,
+        featured: "featured",
+      }).map((m) => m.matchId),
     ).toEqual(["f"]);
     expect(
-      filterArchiveMatches([featured, plain], featuredIds, noFilter).map((m) => m.matchId),
+      filterArchiveMatches([featured, plain], featuredIds, noFilter).map(
+        (m) => m.matchId,
+      ),
     ).toEqual(["f", "p"]);
   });
 
   it("filters clean/degraded using the SAME elevated threshold renderDegradedNote uses (>= 15%)", () => {
-    const clean = completedMatch({ matchId: "clean", degradedCount: 10, decisionCount: 100 });
-    const degraded = completedMatch({ matchId: "degraded", degradedCount: 20, decisionCount: 100 });
+    const clean = completedMatch({
+      matchId: "clean",
+      degradedCount: 10,
+      decisionCount: 100,
+    });
+    const degraded = completedMatch({
+      matchId: "degraded",
+      degradedCount: 20,
+      decisionCount: 100,
+    });
     expect(
-      filterArchiveMatches([clean, degraded], new Set(), { ...noFilter, cleanliness: "clean" }).map((m) => m.matchId),
+      filterArchiveMatches([clean, degraded], new Set(), {
+        ...noFilter,
+        cleanliness: "clean",
+      }).map((m) => m.matchId),
     ).toEqual(["clean"]);
     expect(
-      filterArchiveMatches([clean, degraded], new Set(), { ...noFilter, cleanliness: "degraded" }).map((m) => m.matchId),
+      filterArchiveMatches([clean, degraded], new Set(), {
+        ...noFilter,
+        cleanliness: "degraded",
+      }).map((m) => m.matchId),
     ).toEqual(["degraded"]);
   });
 
   it("filters by inclusive date range against completedAt's UTC date segment", () => {
-    const early = completedMatch({ matchId: "early", completedAt: "2026-06-01T23:00:00.000Z" });
-    const mid = completedMatch({ matchId: "mid", completedAt: "2026-06-15T00:00:00.000Z" });
-    const late = completedMatch({ matchId: "late", completedAt: "2026-06-30T00:00:00.000Z" });
+    const early = completedMatch({
+      matchId: "early",
+      completedAt: "2026-06-01T23:00:00.000Z",
+    });
+    const mid = completedMatch({
+      matchId: "mid",
+      completedAt: "2026-06-15T00:00:00.000Z",
+    });
+    const late = completedMatch({
+      matchId: "late",
+      completedAt: "2026-06-30T00:00:00.000Z",
+    });
     const result = filterArchiveMatches([early, mid, late], new Set(), {
       ...noFilter,
       dateFrom: "2026-06-10",
@@ -898,9 +1013,24 @@ describe("filterArchiveMatches", () => {
 
   it("combines multiple filters with AND semantics, never OR", () => {
     const matches = [
-      completedMatch({ matchId: "wrong-map", map: "Frost", degradedCount: 20, decisionCount: 100 }),
-      completedMatch({ matchId: "wrong-cleanliness", map: "Sand", degradedCount: 20, decisionCount: 100 }),
-      completedMatch({ matchId: "both-match", map: "Sand", degradedCount: 0, decisionCount: 100 }),
+      completedMatch({
+        matchId: "wrong-map",
+        map: "Frost",
+        degradedCount: 20,
+        decisionCount: 100,
+      }),
+      completedMatch({
+        matchId: "wrong-cleanliness",
+        map: "Sand",
+        degradedCount: 20,
+        decisionCount: 100,
+      }),
+      completedMatch({
+        matchId: "both-match",
+        map: "Sand",
+        degradedCount: 0,
+        decisionCount: 100,
+      }),
     ];
     const result = filterArchiveMatches(matches, new Set(), {
       ...noFilter,
@@ -920,11 +1050,26 @@ describe("sortArchiveMatches", () => {
   }
 
   it("'dramatic' orders by curatedDramaScore descending, with null-evidence matches sorted after every scored match", () => {
-    const highest = completedMatch({ matchId: "highest", dramaEvidence: { curatedDramaScore: 91, entertainmentGrade: "lively" } });
-    const middle = completedMatch({ matchId: "middle", dramaEvidence: { curatedDramaScore: 40, entertainmentGrade: "flat" } });
-    const lowestScored = completedMatch({ matchId: "lowest-scored", dramaEvidence: { curatedDramaScore: 0, entertainmentGrade: "stalled" } });
-    const noEvidenceFirst = completedMatch({ matchId: "no-evidence-first", dramaEvidence: null });
-    const noEvidenceSecond = completedMatch({ matchId: "no-evidence-second", dramaEvidence: null });
+    const highest = completedMatch({
+      matchId: "highest",
+      dramaEvidence: { curatedDramaScore: 91, entertainmentGrade: "lively" },
+    });
+    const middle = completedMatch({
+      matchId: "middle",
+      dramaEvidence: { curatedDramaScore: 40, entertainmentGrade: "flat" },
+    });
+    const lowestScored = completedMatch({
+      matchId: "lowest-scored",
+      dramaEvidence: { curatedDramaScore: 0, entertainmentGrade: "stalled" },
+    });
+    const noEvidenceFirst = completedMatch({
+      matchId: "no-evidence-first",
+      dramaEvidence: null,
+    });
+    const noEvidenceSecond = completedMatch({
+      matchId: "no-evidence-second",
+      dramaEvidence: null,
+    });
     const result = sortArchiveMatches(
       [middle, noEvidenceFirst, highest, noEvidenceSecond, lowestScored],
       "dramatic",
@@ -939,24 +1084,59 @@ describe("sortArchiveMatches", () => {
   });
 
   it("'dramatic' treats a mid-upgrade recap (dramaEvidence present but curatedDramaScore still null) as unscored", () => {
-    const scored = completedMatch({ matchId: "scored", dramaEvidence: { curatedDramaScore: 55, entertainmentGrade: "lively" } });
-    const transitioning = completedMatch({ matchId: "transitioning", dramaEvidence: { curatedDramaScore: null, entertainmentGrade: "lively" } });
-    const noEvidence = completedMatch({ matchId: "no-evidence", dramaEvidence: null });
-    const result = sortArchiveMatches([transitioning, noEvidence, scored], "dramatic");
-    expect(result.map((m) => m.matchId)).toEqual(["scored", "transitioning", "no-evidence"]);
+    const scored = completedMatch({
+      matchId: "scored",
+      dramaEvidence: { curatedDramaScore: 55, entertainmentGrade: "lively" },
+    });
+    const transitioning = completedMatch({
+      matchId: "transitioning",
+      dramaEvidence: { curatedDramaScore: null, entertainmentGrade: "lively" },
+    });
+    const noEvidence = completedMatch({
+      matchId: "no-evidence",
+      dramaEvidence: null,
+    });
+    const result = sortArchiveMatches(
+      [transitioning, noEvidence, scored],
+      "dramatic",
+    );
+    expect(result.map((m) => m.matchId)).toEqual([
+      "scored",
+      "transitioning",
+      "no-evidence",
+    ]);
   });
 
   it("'recent' produces completedAt-descending order regardless of input order", () => {
-    const oldest = completedMatch({ matchId: "oldest", completedAt: "2026-06-01T00:00:00.000Z" });
-    const middle = completedMatch({ matchId: "middle", completedAt: "2026-06-15T00:00:00.000Z" });
-    const newest = completedMatch({ matchId: "newest", completedAt: "2026-06-30T00:00:00.000Z" });
+    const oldest = completedMatch({
+      matchId: "oldest",
+      completedAt: "2026-06-01T00:00:00.000Z",
+    });
+    const middle = completedMatch({
+      matchId: "middle",
+      completedAt: "2026-06-15T00:00:00.000Z",
+    });
+    const newest = completedMatch({
+      matchId: "newest",
+      completedAt: "2026-06-30T00:00:00.000Z",
+    });
     const result = sortArchiveMatches([middle, oldest, newest], "recent");
-    expect(result.map((m) => m.matchId)).toEqual(["newest", "middle", "oldest"]);
+    expect(result.map((m) => m.matchId)).toEqual([
+      "newest",
+      "middle",
+      "oldest",
+    ]);
   });
 
   it("never drops a match -- 'dramatic' is a sort, not a filter", () => {
-    const scored = completedMatch({ matchId: "scored", dramaEvidence: { curatedDramaScore: 50, entertainmentGrade: "promising" } });
-    const unscored = completedMatch({ matchId: "unscored", dramaEvidence: null });
+    const scored = completedMatch({
+      matchId: "scored",
+      dramaEvidence: { curatedDramaScore: 50, entertainmentGrade: "promising" },
+    });
+    const unscored = completedMatch({
+      matchId: "unscored",
+      dramaEvidence: null,
+    });
     const result = sortArchiveMatches([scored, unscored], "dramatic");
     expect(result).toHaveLength(2);
     expect(result.map((m) => m.matchId).sort()).toEqual(["scored", "unscored"]);
@@ -966,7 +1146,10 @@ describe("sortArchiveMatches", () => {
 describe("renderDegradedNote", () => {
   it("carries an explanatory tooltip (F7) -- shared by WatchPage's archive cards and MatchDetailPage, so both surfaces get it in one fix", () => {
     const container = document.createElement("div");
-    render(renderDegradedNote({ degradedCount: 20, decisionCount: 100 }), container);
+    render(
+      renderDegradedNote({ degradedCount: 20, decisionCount: 100 }),
+      container,
+    );
     const span = container.querySelector("span");
     expect(span).not.toBeNull();
     expect(span!.getAttribute("title")).toBe("watch.degraded_turns_tooltip");
@@ -975,7 +1158,10 @@ describe("renderDegradedNote", () => {
   it("renders nothing (no empty tooltip span either) when degradedCount is null or zero", () => {
     for (const degradedCount of [null, 0]) {
       const container = document.createElement("div");
-      render(renderDegradedNote({ degradedCount, decisionCount: 100 }), container);
+      render(
+        renderDegradedNote({ degradedCount, decisionCount: 100 }),
+        container,
+      );
       expect(container.querySelector("span")).toBeNull();
     }
   });

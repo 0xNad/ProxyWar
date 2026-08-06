@@ -3,10 +3,9 @@
 Date: 2026-07-31. Written at the close of the public product overhaul (spec:
 `proxy-war-product-overhaul-final.md`, v2.3). Describes what shipped, not an
 aspiration — see the sibling docs (`PROXYWAR_PUBLIC_APP_ARCHITECTURE.md`,
-`PROXYWAR_IDENTITY_MODEL.md`, `PROXYWAR_PREMIERE_RUNBOOK.md`,
-`PROXYWAR_DIRECTOR_CUT.md`) for the implementation, and
-`docs/project-state/STANDING-POSITION.md` (gitignored, local) for the current
-operator-facing phase and priority.
+`PROXYWAR_IDENTITY_MODEL.md`, `PROXYWAR_PREMIERE_RUNBOOK.md`) for the
+implementation, and `docs/project-state/STANDING-POSITION.md` (gitignored,
+local) for the current operator-facing phase and priority.
 
 ## What Proxy War is
 
@@ -44,9 +43,7 @@ following.
    `PROXYWAR_PREMIERE_RUNBOOK.md`.
 4. **A legible broadcast experience.** The replay viewer explains decisive
    events causally (lower-thirds, diplomacy strip, social bubbles) rather
-   than requiring the viewer to read raw game state; long matches (10k-50k
-   turns) get a Director Cut — a deterministic 5-12 minute edit built from
-   public telemetry, not a rendered video. See `PROXYWAR_DIRECTOR_CUT.md`.
+   than requiring the viewer to read raw game state.
 5. **A first-class builder acquisition flow.** `/build` is a guided,
    multi-step registration flow ending in a real GitHub-issue submission and
    a validated draft — not a form that silently vanishes into a queue.
@@ -62,8 +59,7 @@ actual acceptance bar this overhaul was held to:
 - Watching a match needs no prior Softmax/OpenFront knowledge.
 - The league stays credible and visible; Builder/Agent/Version are distinct
   everywhere they appear.
-- Long matches have Director Cuts; Premieres are synchronized, scheduled,
-  and spoiler-safe.
+- Premieres are synchronized, scheduled, and spoiler-safe.
 - Coworld remains the sole authoritative source for league state, standings,
   and official scores — Proxy War adds product/identity/editorial/broadcast
   layers around it, never a second scoring or match-execution path.

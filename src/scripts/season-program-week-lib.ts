@@ -1,38 +1,40 @@
 import {
-  rankPremiereCandidates,
-  resolveDefaultArtifactsRoot,
-  resolveDefaultQueueReadyDir,
-  resolveSealedBundleTurnStats,
-  type PremiereQueueCandidate,
-} from "./premiere-candidates";
-import { rankFeatureCandidates, type RankedFeatureCandidate } from "./feature-candidates";
-import {
-  ensurePremiereParticipants,
-  resolveScheduleTarget,
-  upsertRecord,
-  validateSchedule,
-} from "./premiere-schedule-lib";
-import { buildEventPackageDraft, readLiveMirrorData } from "./premiere-package";
+  readFeaturedMatchStore,
+  resolveFeaturedMatchStateRoot,
+  type FeaturedMatch,
+} from "../server/agents/FeaturedMatch";
 import {
   resolveEventPackageStateRoot,
   upsertEventPackage,
 } from "../server/agents/season/EventPackage";
 import { isPubliclyPromotable } from "../server/agents/season/EventPackageGate";
 import {
-  readFeaturedMatchStore,
-  resolveFeaturedMatchStateRoot,
-  type FeaturedMatch,
-} from "../server/agents/FeaturedMatch";
-import {
   defaultSeasonRegistryPath,
   loadSeasonRegistry,
 } from "../server/agents/season/SeasonRegistry";
 import type { SeasonEventSlot } from "../server/agents/season/SeasonSchemas";
-import { runSeasonAddEvent } from "./season-lib";
 import {
   loadIdentityRegistrySnapshot,
   type IdentityRegistrySnapshot,
 } from "../server/identity/IdentityRegistry";
+import {
+  rankFeatureCandidates,
+  type RankedFeatureCandidate,
+} from "./feature-candidates";
+import {
+  rankPremiereCandidates,
+  resolveDefaultArtifactsRoot,
+  resolveDefaultQueueReadyDir,
+  type PremiereQueueCandidate,
+} from "./premiere-candidates";
+import { buildEventPackageDraft, readLiveMirrorData } from "./premiere-package";
+import {
+  ensurePremiereParticipants,
+  resolveScheduleTarget,
+  upsertRecord,
+  validateSchedule,
+} from "./premiere-schedule-lib";
+import { runSeasonAddEvent } from "./season-lib";
 
 /**
  * `season:program-week` — closes the operational-tax gap the Season Zero
@@ -52,8 +54,8 @@ import {
  * `EventPackageGate.isPubliclyPromotable`, and only then fold the event
  * into the active Season's programme at the next weekly cadence slot.
  *
- * DRY-RUN BY DEFAULT: every read (ranking, sealed-bundle participant/turn-
- * stat resolution, the live mirror, the identity registry, the current
+ * DRY-RUN BY DEFAULT: every read (ranking, sealed-bundle participant
+ * resolution, the live mirror, the identity registry, the current
  * `FeaturedMatch`/`EventPackage`/season-registry state) always happens —
  * a dry run's summary and gate result are computed from the SAME real
  * evidence an execute run would use, simulating the post-`premiere:publish`
@@ -137,9 +139,12 @@ function resolveRoots(options: ProgramWeekOptions) {
   return {
     artifactsRoot: options.artifactsRoot ?? resolveDefaultArtifactsRoot(),
     queueReadyDir: options.queueReadyDir ?? resolveDefaultQueueReadyDir(),
-    featuredMatchStateRoot: options.featuredMatchStateRoot ?? resolveFeaturedMatchStateRoot(),
-    eventPackageStateRoot: options.eventPackageStateRoot ?? resolveEventPackageStateRoot(),
-    seasonRegistryPath: options.seasonRegistryPath ?? defaultSeasonRegistryPath(),
+    featuredMatchStateRoot:
+      options.featuredMatchStateRoot ?? resolveFeaturedMatchStateRoot(),
+    eventPackageStateRoot:
+      options.eventPackageStateRoot ?? resolveEventPackageStateRoot(),
+    seasonRegistryPath:
+      options.seasonRegistryPath ?? defaultSeasonRegistryPath(),
   };
 }
 
@@ -173,20 +178,28 @@ function pickTopCandidate(
   // identity during ranking, so it can never populate a real claim —
   // see that module's own doc) — always `[]` in practice, so there is
   // nothing to map.
-  const asPremiereSelection = (candidate: PremiereQueueCandidate): Selection => ({
+  const asPremiereSelection = (
+    candidate: PremiereQueueCandidate,
+  ): Selection => ({
     lane: "premiere",
     episodeRef: candidate.queueItemName,
     severelyDegraded: candidate.severelyDegraded,
     reasonToWatchLines: [],
   });
-  const asArchiveSelection = (candidate: RankedFeatureCandidate): Selection => ({
+  const asArchiveSelection = (
+    candidate: RankedFeatureCandidate,
+  ): Selection => ({
     lane: "archive",
     episodeRef: candidate.match.episodeRequestId ?? candidate.match.matchId,
     severelyDegraded: candidate.severelyDegraded,
-    reasonToWatchLines: candidate.reasonToWatchClaims.map((claim) => claim.text),
+    reasonToWatchLines: candidate.reasonToWatchClaims.map(
+      (claim) => claim.text,
+    ),
   });
-  if (premiereTop !== null && !premiereTop.severelyDegraded) return asPremiereSelection(premiereTop);
-  if (archiveTop !== null && !archiveTop.severelyDegraded) return asArchiveSelection(archiveTop);
+  if (premiereTop !== null && !premiereTop.severelyDegraded)
+    return asPremiereSelection(premiereTop);
+  if (archiveTop !== null && !archiveTop.severelyDegraded)
+    return asArchiveSelection(archiveTop);
   if (premiereTop !== null) return asPremiereSelection(premiereTop);
   if (archiveTop !== null) return asArchiveSelection(archiveTop);
   return null;
@@ -209,7 +222,8 @@ function findOverride(
       candidate.match.episodeRequestId === episodeOverride ||
       candidate.match.matchId === episodeOverride,
   );
-  if (premiereMatch !== undefined && archiveMatch !== undefined) return { ambiguous: true };
+  if (premiereMatch !== undefined && archiveMatch !== undefined)
+    return { ambiguous: true };
   if (premiereMatch !== undefined) {
     return {
       lane: "premiere",
@@ -222,15 +236,22 @@ function findOverride(
   if (archiveMatch !== undefined) {
     return {
       lane: "archive",
-      episodeRef: archiveMatch.match.episodeRequestId ?? archiveMatch.match.matchId,
+      episodeRef:
+        archiveMatch.match.episodeRequestId ?? archiveMatch.match.matchId,
       severelyDegraded: archiveMatch.severelyDegraded,
-      reasonToWatchLines: archiveMatch.reasonToWatchClaims.map((claim) => claim.text),
+      reasonToWatchLines: archiveMatch.reasonToWatchClaims.map(
+        (claim) => claim.text,
+      ),
     };
   }
   return null;
 }
 
-function hardFail(reason: string, executed: boolean, summary: string[]): ProgramWeekOutcome {
+function hardFail(
+  reason: string,
+  executed: boolean,
+  summary: string[],
+): ProgramWeekOutcome {
   return {
     ok: false,
     executed,
@@ -246,11 +267,15 @@ function hardFail(reason: string, executed: boolean, summary: string[]): Program
   };
 }
 
-export async function runProgramWeek(options: ProgramWeekOptions = {}): Promise<ProgramWeekOutcome> {
+export async function runProgramWeek(
+  options: ProgramWeekOptions = {},
+): Promise<ProgramWeekOutcome> {
   const execute = options.execute ?? false;
   const now = (options.now ?? (() => new Date()))();
   const roots = resolveRoots(options);
-  const summary: string[] = [`mode: ${execute ? "EXECUTE" : "DRY RUN (pass --execute to commit)"}`];
+  const summary: string[] = [
+    `mode: ${execute ? "EXECUTE" : "DRY RUN (pass --execute to commit)"}`,
+  ];
 
   const registry = await loadSeasonRegistry(roots.seasonRegistryPath);
   const season =
@@ -259,22 +284,35 @@ export async function runProgramWeek(options: ProgramWeekOptions = {}): Promise<
       : registry.seasons.find((entry) => entry.id === options.seasonId);
   if (season === undefined) {
     return hardFail(
-      options.seasonId === undefined ? "no_active_season" : `season_not_found: ${options.seasonId}`,
+      options.seasonId === undefined
+        ? "no_active_season"
+        : `season_not_found: ${options.seasonId}`,
       execute,
       summary,
     );
   }
   if (season.state !== "active") {
-    return hardFail(`season_not_active: ${season.id} is "${season.state}"`, execute, summary);
+    return hardFail(
+      `season_not_active: ${season.id} is "${season.state}"`,
+      execute,
+      summary,
+    );
   }
   summary.push(`season: ${season.id} — "${season.title}" [${season.state}]`);
 
   const identity = await loadIdentityRegistrySnapshot().catch(
-    (): IdentityRegistrySnapshot => ({ builders: [], agents: [], versions: [] }),
+    (): IdentityRegistrySnapshot => ({
+      builders: [],
+      agents: [],
+      versions: [],
+    }),
   );
 
   const [premiereRanked, featureRanked] = await Promise.all([
-    rankPremiereCandidates({ queueReadyDir: roots.queueReadyDir, artifactsRoot: roots.artifactsRoot }),
+    rankPremiereCandidates({
+      queueReadyDir: roots.queueReadyDir,
+      artifactsRoot: roots.artifactsRoot,
+    }),
     rankFeatureCandidates({ artifactsRoot: roots.artifactsRoot }),
   ]);
   summary.push(
@@ -284,7 +322,11 @@ export async function runProgramWeek(options: ProgramWeekOptions = {}): Promise<
   const selection =
     options.episodeOverride === undefined
       ? pickTopCandidate(premiereRanked.candidates, featureRanked.candidates)
-      : findOverride(options.episodeOverride, premiereRanked.candidates, featureRanked.candidates);
+      : findOverride(
+          options.episodeOverride,
+          premiereRanked.candidates,
+          featureRanked.candidates,
+        );
   if (selection === null) {
     return hardFail(
       options.episodeOverride === undefined
@@ -304,11 +346,17 @@ export async function runProgramWeek(options: ProgramWeekOptions = {}): Promise<
   summary.push(
     `selected: ${selection.lane} lane, ${selection.episodeRef}${selection.severelyDegraded ? " (severely degraded — no clean candidate was available)" : ""}`,
   );
-  for (const line of selection.reasonToWatchLines) summary.push(`  reason to watch: ${line}`);
+  for (const line of selection.reasonToWatchLines)
+    summary.push(`  reason to watch: ${line}`);
 
-  const scheduledAt = options.atOverride ?? computeNextWeeklyCadence(season.eventSlots, now);
+  const scheduledAt =
+    options.atOverride ?? computeNextWeeklyCadence(season.eventSlots, now);
   if (Number.isNaN(Date.parse(scheduledAt))) {
-    return hardFail(`invalid_at: "${scheduledAt}" does not parse as an ISO-8601 date`, execute, summary);
+    return hardFail(
+      `invalid_at: "${scheduledAt}" does not parse as an ISO-8601 date`,
+      execute,
+      summary,
+    );
   }
   summary.push(`season slot time: ${scheduledAt}`);
 
@@ -320,13 +368,30 @@ export async function runProgramWeek(options: ProgramWeekOptions = {}): Promise<
       stateRoot: roots.featuredMatchStateRoot,
       now: () => now,
     };
-    const target = await resolveScheduleTarget(selection.episodeRef, scheduleRoots);
-    if (!target.found) return hardFail(`cannot_schedule: ${target.reason}`, execute, summary);
+    const target = await resolveScheduleTarget(
+      selection.episodeRef,
+      scheduleRoots,
+    );
+    if (!target.found)
+      return hardFail(`cannot_schedule: ${target.reason}`, execute, summary);
     if (target.record.state === "cancelled") {
-      return hardFail(`cannot_schedule: ${target.record.matchId} was previously cancelled`, execute, summary);
+      return hardFail(
+        `cannot_schedule: ${target.record.matchId} was previously cancelled`,
+        execute,
+        summary,
+      );
     }
-    const participants = await ensurePremiereParticipants(target.record, identity, scheduleRoots);
-    if (!participants.ok) return hardFail(`cannot_schedule: ${participants.reason}`, execute, summary);
+    const participants = await ensurePremiereParticipants(
+      target.record,
+      identity,
+      scheduleRoots,
+    );
+    if (!participants.ok)
+      return hardFail(
+        `cannot_schedule: ${participants.reason}`,
+        execute,
+        summary,
+      );
 
     const scheduled: FeaturedMatch = {
       ...target.record,
@@ -335,13 +400,19 @@ export async function runProgramWeek(options: ProgramWeekOptions = {}): Promise<
       state: "scheduled",
       updatedAt: now.toISOString(),
     };
-    const currentStore = await readFeaturedMatchStore(roots.featuredMatchStateRoot);
+    const currentStore = await readFeaturedMatchStore(
+      roots.featuredMatchStateRoot,
+    );
     const proposedMatches = [
-      ...currentStore.matches.filter((entry) => entry.matchId !== scheduled.matchId),
+      ...currentStore.matches.filter(
+        (entry) => entry.matchId !== scheduled.matchId,
+      ),
       scheduled,
     ];
     const issues = await validateSchedule(proposedMatches, scheduleRoots);
-    const ownIssues = issues.filter((issue) => issue.matchId === scheduled.matchId);
+    const ownIssues = issues.filter(
+      (issue) => issue.matchId === scheduled.matchId,
+    );
     if (ownIssues.length > 0) {
       return hardFail(
         `schedule_invalid: ${ownIssues.map((issue) => issue.reason).join("; ")}`,
@@ -351,7 +422,11 @@ export async function runProgramWeek(options: ProgramWeekOptions = {}): Promise<
     }
     summary.push(`premiere:schedule -> ${scheduled.matchId} at ${scheduledAt}`);
 
-    const published: FeaturedMatch = { ...scheduled, state: "published", updatedAt: now.toISOString() };
+    const published: FeaturedMatch = {
+      ...scheduled,
+      state: "published",
+      updatedAt: now.toISOString(),
+    };
     summary.push(`premiere:publish -> ${published.matchId} (state: published)`);
     if (execute) {
       await upsertRecord(roots.featuredMatchStateRoot, scheduled);
@@ -360,20 +435,36 @@ export async function runProgramWeek(options: ProgramWeekOptions = {}): Promise<
     matchForPackage = published;
   } else {
     const candidate = featureRanked.candidates.find(
-      (entry) => (entry.match.episodeRequestId ?? entry.match.matchId) === selection.episodeRef,
+      (entry) =>
+        (entry.match.episodeRequestId ?? entry.match.matchId) ===
+        selection.episodeRef,
     );
     if (candidate === undefined) {
-      return hardFail(`cannot_promote: ${selection.episodeRef} vanished from the archive ranking between selection and promotion`, execute, summary);
+      return hardFail(
+        `cannot_promote: ${selection.episodeRef} vanished from the archive ranking between selection and promotion`,
+        execute,
+        summary,
+      );
     }
-    const currentStore = await readFeaturedMatchStore(roots.featuredMatchStateRoot);
+    const currentStore = await readFeaturedMatchStore(
+      roots.featuredMatchStateRoot,
+    );
     const existing = currentStore.matches.find(
-      (entry) => entry.lane === "archive" && entry.episodeRequestId === candidate.match.episodeRequestId,
+      (entry) =>
+        entry.lane === "archive" &&
+        entry.episodeRequestId === candidate.match.episodeRequestId,
     );
     const record: FeaturedMatch =
       existing === undefined
         ? candidate.match
-        : { ...candidate.match, matchId: existing.matchId, createdAt: existing.createdAt };
-    summary.push(`feature:promote -> ${record.matchId} (${existing === undefined ? "new" : "re-promoted"})`);
+        : {
+            ...candidate.match,
+            matchId: existing.matchId,
+            createdAt: existing.createdAt,
+          };
+    summary.push(
+      `feature:promote -> ${record.matchId} (${existing === undefined ? "new" : "re-promoted"})`,
+    );
     if (execute) {
       await upsertRecord(roots.featuredMatchStateRoot, record);
     }
@@ -381,19 +472,17 @@ export async function runProgramWeek(options: ProgramWeekOptions = {}): Promise<
   }
 
   const mirror = await readLiveMirrorData(roots.artifactsRoot);
-  const sealedBundleTurnStats =
-    matchForPackage.lane === "premiere" && matchForPackage.queueItemName !== null
-      ? await resolveSealedBundleTurnStats(roots.queueReadyDir, matchForPackage.queueItemName).then((result) =>
-          result.ok ? { turnCount: result.turnCount, checkpointTurns: result.checkpointTurns } : null,
-        )
-      : null;
   // `existing: null` + no prose overrides, unconditionally — "spoiler-
   // neutral defaults" means every program-week package is generated
   // fresh from `defaultTitle`/`defaultSubtitle` (spoiler-neutral by
   // construction), never carrying forward a prior run's operator prose.
-  const draft = buildEventPackageDraft(matchForPackage, null, identity, mirror, now.toISOString(), {
-    sealedBundleTurnStats,
-  });
+  const draft = buildEventPackageDraft(
+    matchForPackage,
+    null,
+    identity,
+    mirror,
+    now.toISOString(),
+  );
   summary.push(`premiere:package -> "${draft.title}" / "${draft.subtitle}"`);
   if (execute) {
     await upsertEventPackage(roots.eventPackageStateRoot, draft);
@@ -413,7 +502,10 @@ export async function runProgramWeek(options: ProgramWeekOptions = {}): Promise<
       episodeRef: selection.episodeRef,
       seasonId: season.id,
       scheduledAt,
-      summary: [...summary, "HARD STOP: gate_failed — season:add-event withheld"],
+      summary: [
+        ...summary,
+        "HARD STOP: gate_failed — season:add-event withheld",
+      ],
       undoCommands: [],
     };
   }
@@ -421,14 +513,25 @@ export async function runProgramWeek(options: ProgramWeekOptions = {}): Promise<
 
   if (execute) {
     const added = await runSeasonAddEvent(
-      { seasonId: season.id, featuredMatchId: matchForPackage.matchId, scheduledAt },
+      {
+        seasonId: season.id,
+        featuredMatchId: matchForPackage.matchId,
+        scheduledAt,
+      },
       roots.seasonRegistryPath,
       () => now,
     );
-    if (!added.ok) return hardFail(`season_add_event_failed: ${added.message}`, execute, summary);
+    if (!added.ok)
+      return hardFail(
+        `season_add_event_failed: ${added.message}`,
+        execute,
+        summary,
+      );
     summary.push(`season:add-event -> ${added.message}`);
   } else {
-    summary.push(`season:add-event -> would add ${matchForPackage.matchId} @ ${scheduledAt} (dry run)`);
+    summary.push(
+      `season:add-event -> would add ${matchForPackage.matchId} @ ${scheduledAt} (dry run)`,
+    );
   }
 
   const undoCommands = [

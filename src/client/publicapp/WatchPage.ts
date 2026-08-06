@@ -2,6 +2,14 @@ import { html, LitElement, nothing, PropertyValues, TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { unsafeSVG } from "lit/directives/unsafe-svg.js";
 import { z } from "zod";
+import { translateText } from "../Utils";
+import { analytics } from "../analytics/AnalyticsClient";
+import {
+  APP_SHELL_ROOT_CLASSES,
+  appShellFooter,
+  appShellHeader,
+  requestUpdateWhenTranslationsReady,
+} from "./AppShellChrome";
 import {
   fetchReadModel,
   PublicAgent,
@@ -9,14 +17,6 @@ import {
   PublicMatch,
   ReadModel,
 } from "./ReadModelSchema";
-import {
-  appShellFooter,
-  appShellHeader,
-  APP_SHELL_ROOT_CLASSES,
-  requestUpdateWhenTranslationsReady,
-} from "./AppShellChrome";
-import { translateText } from "../Utils";
-import { analytics } from "../analytics/AnalyticsClient";
 
 /**
  * `/watch` — Season Zero activation prompt Phase 5 ("Watch page"): a
@@ -25,9 +25,8 @@ import { analytics } from "../analytics/AnalyticsClient";
  *   1. live/upcoming Featured Event (`isPubliclyPromotable`-gated — see
  *      `findPromotableEvent`'s own doc for why this is NEVER the raw,
  *      anonymous `ReadModel.premieres.live`/`latest` pointer);
- *   2. latest Director Cuts (evidence-ranked, full card completeness);
- *   3. Season Zero schedule (from `ReadModel.seasons`);
- *   4. the full replay archive, filters collapsed behind a `<details>`
+ *   2. Season Zero schedule (from `ReadModel.seasons`);
+ *   3. the full replay archive, filters collapsed behind a `<details>`
  *      drawer AFTER the archive's own heading — never shown before the
  *      viewer has seen something worth watching.
  *
@@ -176,7 +175,6 @@ export class WatchPage extends LitElement {
     return html`
       <div class="flex flex-col gap-8">
         ${this.renderFeaturedEventSection(readModel)}
-        ${this.renderLatestDirectorCuts(readModel)}
         ${this.renderSeasonSchedule(readModel)}
         ${this.renderReplayArchive(readModel)}
       </div>
@@ -190,8 +188,8 @@ export class WatchPage extends LitElement {
    * `findPromotableEvent`'s own doc) — NEVER the raw
    * `ReadModel.premieres.live`/`latest` anonymous pointer. Renders
    * nothing (not even an empty section) when no promotable event exists
-   * — the page simply starts at "Latest Director Cuts" instead, which is
-   * the honest, non-fabricated state.
+   * — the page simply starts at the Season Zero schedule instead, which
+   * is the honest, non-fabricated state.
    */
   private renderFeaturedEventSection(readModel: ReadModel) {
     const event = this.promotableEvent;
@@ -202,26 +200,36 @@ export class WatchPage extends LitElement {
         ? describeSchedule(event.scheduledAt, this.clientNowMs)
         : null;
     const watchHref =
-      event.canonicalPremiereUrl ?? `/match/${encodeURIComponent(event.matchId)}`;
+      event.canonicalPremiereUrl ??
+      `/match/${encodeURIComponent(event.matchId)}`;
     return html`
       <section
         aria-labelledby="watch-featured-event-heading"
-        class="rounded-lg border-2 ${live ? "border-live/50 bg-live/10" : "border-info/50 bg-info/10"} p-5"
+        class="rounded-lg border-2 ${live
+          ? "border-live/50 bg-live/10"
+          : "border-info/50 bg-info/10"} p-5"
       >
         <span
-          class="inline-block rounded-full border ${live ? "border-live/60 text-live-text" : "border-info/60 text-info"} px-2 py-0.5 text-[11px] font-extrabold uppercase tracking-wide"
+          class="inline-block rounded-full border ${live
+            ? "border-live/60 text-live-text"
+            : "border-info/60 text-info"} px-2 py-0.5 text-[11px] font-extrabold uppercase tracking-wide"
           >${live
             ? translateText("watch.live_premiere_badge")
             : translateText("watch.upcoming_premiere_badge")}</span
         >
-        <h2 id="watch-featured-event-heading" class="mt-2 text-lg font-bold text-ink">
+        <h2
+          id="watch-featured-event-heading"
+          class="mt-2 text-lg font-bold text-ink"
+        >
           ${event.title}
         </h2>
         ${event.subtitle !== null
           ? html`<p class="mt-1 text-sm text-ink-muted">${event.subtitle}</p>`
           : nothing}
         ${event.reasonToWatch !== null && event.reasonToWatch.length > 0
-          ? html`<p class="mt-1 text-sm text-ink-dim">${event.reasonToWatch.join(" ")}</p>`
+          ? html`<p class="mt-1 text-sm text-ink-dim">
+              ${event.reasonToWatch.join(" ")}
+            </p>`
           : nothing}
         ${scheduleNote !== null
           ? html`<p class="mt-1 text-sm text-ink-muted">${scheduleNote}</p>`
@@ -232,124 +240,18 @@ export class WatchPage extends LitElement {
         <a
           href=${watchHref}
           class="mt-3 inline-block rounded-md bg-accent px-4 py-2 text-sm font-bold text-on-accent no-underline outline-none hover:bg-accent-strong focus-visible:ring-2 focus-visible:ring-accent"
-          >${live ? translateText("watch.watch_now") : translateText("watch.watch_link")}</a
+          >${live
+            ? translateText("watch.watch_now")
+            : translateText("watch.watch_link")}</a
         >
       </section>
     `;
   }
 
-  // -- 2. Latest Director Cuts -----------------------------------------------
+  // -- 2. Season Zero schedule ------------------------------------------------
 
   /**
-   * Doc order item 2. Full card completeness per the doc's own list:
-   * title, participants, emblems, exact versions where useful, map,
-   * runtime, date, one-sentence reason to watch, integrity status,
-   * Director Cut CTA, Full Replay secondary action, spoiler reveal.
-   * Ranked exactly like `LobbyPage`'s "Recent Director Cuts" (evidence
-   * within a bounded recency window), independently rendered here with
-   * the fuller per-card detail this page's own completeness bar calls
-   * for.
-   */
-  private renderLatestDirectorCuts(readModel: ReadModel) {
-    const recencyWindow = [...readModel.matches]
-      .filter((match) => match.completedAt !== null && match.directorCut !== null)
-      .sort((a, b) => (b.completedAt ?? "").localeCompare(a.completedAt ?? ""))
-      .slice(0, LATEST_DIRECTOR_CUT_RECENCY_WINDOW);
-    if (recencyWindow.length === 0) return nothing;
-    const scored = recencyWindow
-      .filter((match) => curatedDramaScoreOf(match) !== null)
-      .sort((a, b) => (curatedDramaScoreOf(b) ?? -1) - (curatedDramaScoreOf(a) ?? -1));
-    const unscored = recencyWindow.filter((match) => curatedDramaScoreOf(match) === null);
-    const featured = [...scored, ...unscored]
-      .slice(0, LATEST_DIRECTOR_CUT_DISPLAY_COUNT)
-      .sort((a, b) => (b.completedAt ?? "").localeCompare(a.completedAt ?? ""));
-    const featuredMatchIds = new Set(readModel.featuredMatches.map((match) => match.matchId));
-    return html`
-      <section aria-labelledby="watch-director-cuts-heading">
-        <h2 id="watch-director-cuts-heading" class="mb-3 text-lg font-bold text-ink">
-          ${translateText("watch.latest_director_cuts_heading")}
-        </h2>
-        <ul class="flex flex-col gap-3" role="list">
-          ${featured.map((match) =>
-            this.renderDirectorCutCard(match, readModel.agents, featuredMatchIds.has(match.matchId)),
-          )}
-        </ul>
-      </section>
-    `;
-  }
-
-  private renderDirectorCutCard(
-    match: PublicMatch,
-    agents: readonly PublicAgent[],
-    isFeatured: boolean,
-  ) {
-    const winnerName = resolveWinnerName(match, agents);
-    const watchHref = match.fullRenderHref ?? match.watchHref;
-    const runtimeMinutes =
-      match.directorCut !== null
-        ? Math.max(1, Math.round(match.directorCut.durationEstimateSeconds / 60))
-        : null;
-    const dramaScore = curatedDramaScoreOf(match);
-    return html`
-      <li class="rounded-lg border border-line bg-surface-2 p-4 text-sm">
-        <div class="flex flex-wrap items-baseline justify-between gap-2">
-          <span class="font-semibold text-ink"
-            >${match.map}
-            ${isFeatured
-              ? html`<span
-                  class="ml-1 rounded-full border border-accent/50 px-1.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wide text-accent"
-                  >${translateText("watch.featured_badge")}</span
-                >`
-              : nothing}</span
-          >
-          ${match.completedAt !== null
-            ? html`<span class="text-xs text-ink-muted">${formatAbsoluteTime(match.completedAt)}</span>`
-            : nothing}
-        </div>
-        ${renderParticipantChipsFromMatch(match, agents)}
-        <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-ink-muted">
-          ${runtimeMinutes !== null
-            ? html`<span>${translateText("watch.director_cut_duration", { minutes: runtimeMinutes })}</span>`
-            : nothing}
-          ${dramaScore !== null
-            ? html`<span>${translateText("watch.drama_score", { score: dramaScore })}</span>`
-            : nothing}
-          ${renderDegradedNote(match)}
-        </div>
-        <details class="mt-2">
-          <summary
-            class="cursor-pointer text-xs font-semibold text-accent outline-none focus-visible:ring-2 focus-visible:ring-accent"
-          >
-            ${translateText("watch.reveal_result")}
-          </summary>
-          <p class="mt-1 text-xs text-ink-muted">
-            ${winnerName !== null
-              ? translateText("watch.winner_label", { name: winnerName })
-              : translateText("watch.no_winner")}
-          </p>
-        </details>
-        <a
-          href="/match/${encodeURIComponent(match.matchId)}"
-          class="mt-2 inline-block text-xs font-semibold text-accent outline-none hover:text-accent-strong focus-visible:ring-2 focus-visible:ring-accent"
-          >${translateText("watch.view_match")}</a
-        >
-        ${watchHref !== null
-          ? html`<a
-              href=${watchHref}
-              class="ml-3 mt-2 inline-block text-xs text-ink-muted outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
-              >${translateText("watch.watch_replay")}</a
-            >`
-          : html`<span class="ml-3 mt-2 inline-block text-xs text-ink-muted"
-              >${translateText("watch.replay_pending")}</span
-            >`}
-      </li>
-    `;
-  }
-
-  // -- 3. Season Zero schedule ------------------------------------------------
-
-  /**
-   * Doc order item 3. Full active-season programme (unlike `LobbyPage`'s
+   * Doc order item 2. Full active-season programme (unlike `LobbyPage`'s
    * compact below-hero teaser) — every event slot, chronological,
    * resolved against `featuredMatches` for title/state where possible.
    *
@@ -366,43 +268,71 @@ export class WatchPage extends LitElement {
    * happened yet.
    */
   private renderSeasonSchedule(readModel: ReadModel) {
-    const active = readModel.seasons.find((season) => season.state === "active");
+    const active = readModel.seasons.find(
+      (season) => season.state === "active",
+    );
     if (active === undefined) return nothing;
-    const featuredMatchById = new Map(readModel.featuredMatches.map((match) => [match.matchId, match]));
-    const slots = [...active.eventSlots].sort((a, b) => (a.scheduledAt ?? "").localeCompare(b.scheduledAt ?? ""));
+    const featuredMatchById = new Map(
+      readModel.featuredMatches.map((match) => [match.matchId, match]),
+    );
+    const slots = [...active.eventSlots].sort((a, b) =>
+      (a.scheduledAt ?? "").localeCompare(b.scheduledAt ?? ""),
+    );
     return html`
       <section aria-labelledby="watch-season-schedule-heading">
         <div class="mb-3 flex flex-wrap items-baseline justify-between gap-2">
-          <h2 id="watch-season-schedule-heading" class="text-lg font-bold text-ink">
-            ${translateText("watch.season_schedule_heading", { title: active.title })}
+          <h2
+            id="watch-season-schedule-heading"
+            class="text-lg font-bold text-ink"
+          >
+            ${translateText("watch.season_schedule_heading", {
+              title: active.title,
+            })}
           </h2>
           <span class="text-xs text-ink-muted">
-            ${new Date(active.startDate).toLocaleDateString()} – ${new Date(active.endDate).toLocaleDateString()}
+            ${new Date(active.startDate).toLocaleDateString()} –
+            ${new Date(active.endDate).toLocaleDateString()}
           </span>
         </div>
         ${active.description !== ""
-          ? html`<p class="mb-3 text-sm text-ink-muted">${active.description}</p>`
+          ? html`<p class="mb-3 text-sm text-ink-muted">
+              ${active.description}
+            </p>`
           : nothing}
         ${slots.length === 0
-          ? html`<p class="text-sm text-ink-muted">${translateText("watch.season_schedule_empty")}</p>`
+          ? html`<p class="text-sm text-ink-muted">
+              ${translateText("watch.season_schedule_empty")}
+            </p>`
           : html`<ol class="flex flex-col gap-2" role="list">
               ${slots.map((slot) => {
                 const resolved = featuredMatchById.get(slot.featuredMatchId);
-                const isArchiveSpotlight = resolved !== undefined && resolved.lane === "archive";
+                const isArchiveSpotlight =
+                  resolved !== undefined && resolved.lane === "archive";
                 const dateLabel =
                   resolved === undefined
                     ? null
                     : isArchiveSpotlight
                       ? translateText("watch.season_schedule_spotlight_label", {
-                          date: slot.scheduledAt !== null ? formatAbsoluteTime(slot.scheduledAt) : "—",
+                          date:
+                            slot.scheduledAt !== null
+                              ? formatAbsoluteTime(slot.scheduledAt)
+                              : "—",
                         })
                       : translateText("watch.season_schedule_premiere_label", {
-                          date: slot.scheduledAt !== null ? formatAbsoluteTime(slot.scheduledAt) : "—",
+                          date:
+                            slot.scheduledAt !== null
+                              ? formatAbsoluteTime(slot.scheduledAt)
+                              : "—",
                         });
                 return html`
-                  <li class="flex flex-col gap-1 rounded-md border border-line bg-surface-2 px-3 py-2 text-sm sm:flex-row sm:items-center sm:gap-3">
+                  <li
+                    class="flex flex-col gap-1 rounded-md border border-line bg-surface-2 px-3 py-2 text-sm sm:flex-row sm:items-center sm:gap-3"
+                  >
                     <span class="font-mono text-xs text-ink-muted">
-                      ${dateLabel ?? (slot.scheduledAt !== null ? formatAbsoluteTime(slot.scheduledAt) : "—")}
+                      ${dateLabel ??
+                      (slot.scheduledAt !== null
+                        ? formatAbsoluteTime(slot.scheduledAt)
+                        : "—")}
                     </span>
                     ${resolved !== undefined
                       ? html`<a
@@ -410,14 +340,18 @@ export class WatchPage extends LitElement {
                           class="min-w-0 flex-1 truncate font-semibold text-ink no-underline outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
                           >${resolved.title}</a
                         >`
-                      : html`<span class="min-w-0 flex-1 truncate text-ink-muted"
+                      : html`<span
+                          class="min-w-0 flex-1 truncate text-ink-muted"
                           >${translateText("watch.season_schedule_tbd")}</span
                         >`}
                     ${isArchiveSpotlight && resolved.completedAt !== null
                       ? html`<span class="text-xs text-ink-muted"
-                          >${translateText("watch.season_schedule_played_note", {
-                            date: formatAbsoluteTime(resolved.completedAt),
-                          })}</span
+                          >${translateText(
+                            "watch.season_schedule_played_note",
+                            {
+                              date: formatAbsoluteTime(resolved.completedAt),
+                            },
+                          )}</span
                         >`
                       : nothing}
                   </li>
@@ -428,7 +362,7 @@ export class WatchPage extends LitElement {
     `;
   }
 
-  // -- 4. Full replay archive --------------------------------------------------
+  // -- 3. Full replay archive --------------------------------------------------
 
   private renderReplayArchive(readModel: ReadModel) {
     const completed = readModel.matches
@@ -455,10 +389,7 @@ export class WatchPage extends LitElement {
     const sorted = sortArchiveMatches(filtered, this.sortOrder);
     return html`
       <section aria-labelledby="watch-archive-heading">
-        <h2
-          id="watch-archive-heading"
-          class="mb-3 text-lg font-bold text-ink"
-        >
+        <h2 id="watch-archive-heading" class="mb-3 text-lg font-bold text-ink">
           ${translateText("watch.replay_archive_heading")}
         </h2>
         ${completed.length === 0
@@ -476,10 +407,14 @@ export class WatchPage extends LitElement {
                 })}
               </p>
               <details class="mb-4 rounded-md border border-line bg-surface-2">
-                <summary class="cursor-pointer px-3 py-2 text-sm font-semibold text-ink outline-none focus-visible:ring-2 focus-visible:ring-accent">
+                <summary
+                  class="cursor-pointer px-3 py-2 text-sm font-semibold text-ink outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                >
                   ${translateText("watch.filters_heading")}
                 </summary>
-                <div class="px-3 pb-3">${this.renderArchiveFilters(completed, readModel.agents)}</div>
+                <div class="px-3 pb-3">
+                  ${this.renderArchiveFilters(completed, readModel.agents)}
+                </div>
               </details>
               ${sorted.length === 0
                 ? html`<p class="text-sm text-ink-muted" role="status">
@@ -538,14 +473,15 @@ export class WatchPage extends LitElement {
           | "filterDateTo",
       ) =>
       (event: Event) => {
-        this[prop] = (event.target as HTMLSelectElement | HTMLInputElement)
-          .value;
+        this[prop] = (
+          event.target as HTMLSelectElement | HTMLInputElement
+        ).value;
       };
     return html`
-      <fieldset
-        class="flex flex-wrap items-end gap-3"
-      >
-        <legend class="sr-only">${translateText("watch.filters_heading")}</legend>
+      <fieldset class="flex flex-wrap items-end gap-3">
+        <legend class="sr-only">
+          ${translateText("watch.filters_heading")}
+        </legend>
         <label class="flex flex-col gap-1 text-xs text-ink-muted">
           ${translateText("watch.filter_agent")}
           <select
@@ -600,7 +536,9 @@ export class WatchPage extends LitElement {
             }}
           >
             <option value="all">${translateText("watch.filter_all")}</option>
-            <option value="clean">${translateText("watch.filter_clean_only")}</option>
+            <option value="clean">
+              ${translateText("watch.filter_clean_only")}
+            </option>
             <option value="degraded">
               ${translateText("watch.filter_degraded_only")}
             </option>
@@ -630,11 +568,14 @@ export class WatchPage extends LitElement {
             class="rounded border border-line bg-surface px-2 py-1 text-sm text-ink"
             .value=${this.sortOrder}
             @change=${(event: Event) => {
-              this.sortOrder = (event.target as HTMLSelectElement)
-                .value as "recent" | "dramatic";
+              this.sortOrder = (event.target as HTMLSelectElement).value as
+                | "recent"
+                | "dramatic";
             }}
           >
-            <option value="recent">${translateText("watch.sort_recent")}</option>
+            <option value="recent">
+              ${translateText("watch.sort_recent")}
+            </option>
             <option value="dramatic">
               ${translateText("watch.sort_dramatic")}
             </option>
@@ -658,15 +599,6 @@ export class WatchPage extends LitElement {
           count: match.decisionCount,
         }),
       );
-    if (match.directorCut !== null)
-      meta.push(
-        translateText("watch.director_cut_duration", {
-          minutes: Math.max(
-            1,
-            Math.round(match.directorCut.durationEstimateSeconds / 60),
-          ),
-        }),
-      );
     const dramaScore = curatedDramaScoreOf(match);
     if (dramaScore !== null)
       meta.push(
@@ -681,9 +613,7 @@ export class WatchPage extends LitElement {
     const watchHref = match.fullRenderHref ?? match.watchHref;
     const winnerName = resolveWinnerName(match, agents);
     return html`
-      <li
-        class="rounded-lg border border-line bg-surface-2 p-4 text-sm"
-      >
+      <li class="rounded-lg border border-line bg-surface-2 p-4 text-sm">
         <div class="flex flex-wrap items-baseline justify-between gap-2">
           <span class="font-semibold text-ink"
             >${match.map}
@@ -698,7 +628,9 @@ export class WatchPage extends LitElement {
             >${formatAbsoluteTime(match.completedAt)}</span
           >
         </div>
-        <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-ink-muted">
+        <div
+          class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-ink-muted"
+        >
           <span>${roundLabel}</span>
           ${meta.length > 0 ? html`<span>${meta.join(" · ")}</span>` : nothing}
           ${renderDegradedNote(match)}
@@ -717,14 +649,18 @@ export class WatchPage extends LitElement {
         </details>
         <a
           href="/match/${encodeURIComponent(match.matchId)}"
-          @click=${() => analytics.track("event_cta_clicked", { matchId: match.matchId })}
+          @click=${() =>
+            analytics.track("event_cta_clicked", { matchId: match.matchId })}
           class="mt-2 inline-block text-xs font-semibold text-accent outline-none hover:text-accent-strong focus-visible:ring-2 focus-visible:ring-accent"
           >${translateText("watch.view_match")}</a
         >
         ${watchHref !== null
           ? html`<a
               href=${watchHref}
-              @click=${() => analytics.track("event_cta_clicked", { matchId: match.matchId })}
+              @click=${() =>
+                analytics.track("event_cta_clicked", {
+                  matchId: match.matchId,
+                })}
               class="ml-3 mt-2 inline-block text-xs text-ink-muted outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
               >${translateText("watch.watch_replay")}</a
             >`
@@ -753,12 +689,14 @@ declare global {
  * `EventPackageGate.isPubliclyPromotable` (a complete `EventPackage`,
  * `state: "published"` or later — see that gate's own doc) is eligible.
  * `state === "published"` specifically (not `"revealed"`/`"archived"`):
- * once a record reveals it belongs in the Director Cut / archive
- * sections instead, not the live/upcoming spotlight. Picks the
+ * once a record reveals it belongs in the archive section instead, not
+ * the live/upcoming spotlight. Picks the
  * EARLIEST-scheduled eligible record when more than one exists (the
  * cadence is one flagship event at a time, but this stays defensive).
  */
-export function findPromotableEvent(model: ReadModel): PublicFeaturedMatch | null {
+export function findPromotableEvent(
+  model: ReadModel,
+): PublicFeaturedMatch | null {
   const candidates = model.featuredMatches
     .filter(
       (match) =>
@@ -771,7 +709,10 @@ export function findPromotableEvent(model: ReadModel): PublicFeaturedMatch | nul
 }
 
 /** A promotable event's `scheduledAt` has arrived (by the client's own clock) — live vs. upcoming for both `WatchPage` and `LobbyPage`. */
-export function isEventLive(event: PublicFeaturedMatch, nowMs: number): boolean {
+export function isEventLive(
+  event: PublicFeaturedMatch,
+  nowMs: number,
+): boolean {
   if (event.scheduledAt === null) return false;
   const startMs = Date.parse(event.scheduledAt);
   return !Number.isNaN(startMs) && startMs <= nowMs;
@@ -788,7 +729,9 @@ const featuredEventParticipantSchema = z.object({
   builderId: z.string().nullable(),
   builderDisplayName: z.string().nullable(),
 });
-export type FeaturedEventParticipant = z.infer<typeof featuredEventParticipantSchema>;
+export type FeaturedEventParticipant = z.infer<
+  typeof featuredEventParticipantSchema
+>;
 
 const featuredMatchDetailResponseSchema = z.object({
   schemaVersion: z.literal(1),
@@ -810,7 +753,9 @@ export async function fetchFeaturedEventParticipants(
     },
   );
   if (!response.ok) {
-    throw new Error(`featured_event_participants_fetch_failed_${response.status}`);
+    throw new Error(
+      `featured_event_participants_fetch_failed_${response.status}`,
+    );
   }
   const body: unknown = await response.json();
   return featuredMatchDetailResponseSchema.parse(body).participants;
@@ -824,15 +769,23 @@ export function renderParticipantChips(
     <ul class="mt-2 flex flex-wrap gap-2" role="list">
       ${participants.map(
         (participant) => html`
-          <li class="flex items-center gap-2 rounded-md border border-line bg-surface px-2.5 py-1.5">
+          <li
+            class="flex items-center gap-2 rounded-md border border-line bg-surface px-2.5 py-1.5"
+          >
             ${participant.emblemSvg !== null
-              ? html`<span class="inline-flex h-5 w-5 shrink-0 overflow-hidden" aria-hidden="true"
+              ? html`<span
+                  class="inline-flex h-5 w-5 shrink-0 overflow-hidden"
+                  aria-hidden="true"
                   >${unsafeSVG(participant.emblemSvg)}</span
                 >`
               : nothing}
-            <span class="text-xs font-semibold text-ink">${participant.displayName}</span>
+            <span class="text-xs font-semibold text-ink"
+              >${participant.displayName}</span
+            >
             ${participant.versionLabel !== null
-              ? html`<span class="font-mono text-[11px] text-ink-muted">${participant.versionLabel}</span>`
+              ? html`<span class="font-mono text-[11px] text-ink-muted"
+                  >${participant.versionLabel}</span
+                >`
               : nothing}
           </li>
         `,
@@ -856,30 +809,37 @@ export function renderParticipantChipsFromMatch(
 ): TemplateResult | typeof nothing {
   if (match.participants.length === 0) return nothing;
   const agentBySlug = new Map(
-    agents.filter((agent) => agent.slug !== null).map((agent) => [agent.slug, agent]),
+    agents
+      .filter((agent) => agent.slug !== null)
+      .map((agent) => [agent.slug, agent]),
   );
   return html`
     <ul class="mt-2 flex flex-wrap gap-2" role="list">
       ${match.participants.map((participant) => {
         const agent =
-          participant.agentSlug === null ? undefined : agentBySlug.get(participant.agentSlug);
+          participant.agentSlug === null
+            ? undefined
+            : agentBySlug.get(participant.agentSlug);
         return html`
-          <li class="flex items-center gap-2 rounded-md border border-line bg-surface px-2.5 py-1.5">
+          <li
+            class="flex items-center gap-2 rounded-md border border-line bg-surface px-2.5 py-1.5"
+          >
             ${agent?.emblemSvg !== null && agent?.emblemSvg !== undefined
-              ? html`<span class="inline-flex h-5 w-5 shrink-0 overflow-hidden" aria-hidden="true"
+              ? html`<span
+                  class="inline-flex h-5 w-5 shrink-0 overflow-hidden"
+                  aria-hidden="true"
                   >${unsafeSVG(agent.emblemSvg)}</span
                 >`
               : nothing}
-            <span class="text-xs font-semibold text-ink">${participant.displayName}</span>
+            <span class="text-xs font-semibold text-ink"
+              >${participant.displayName}</span
+            >
           </li>
         `;
       })}
     </ul>
   `;
 }
-
-const LATEST_DIRECTOR_CUT_RECENCY_WINDOW = 8;
-const LATEST_DIRECTOR_CUT_DISPLAY_COUNT = 5;
 
 /** Mirrors `CoworldLeagueSiteWriter.ts`'s `.degraded`/`.degraded.elevated` threshold naming — `>= 15%` degraded turns is "elevated", surfaced with a warning tone; below that, a plain neutral note. `decisionCount === null` (no data at all) or `0` decisions renders no share at all — never a fabricated `0%`. */
 export const DEGRADED_WARNING_PERCENT = 15;
@@ -929,16 +889,23 @@ export function filterArchiveMatches(
       return false;
     }
     if (filters.map !== "all" && match.map !== filters.map) return false;
-    if (filters.featured === "featured" && !featuredMatchIds.has(match.matchId)) {
+    if (
+      filters.featured === "featured" &&
+      !featuredMatchIds.has(match.matchId)
+    ) {
       return false;
     }
     if (filters.cleanliness !== "all") {
-      const { elevated } = computeDegradedShare(match.degradedCount ?? 0, match.decisionCount);
+      const { elevated } = computeDegradedShare(
+        match.degradedCount ?? 0,
+        match.decisionCount,
+      );
       if (filters.cleanliness === "clean" && elevated) return false;
       if (filters.cleanliness === "degraded" && !elevated) return false;
     }
     const completedDate = match.completedAt.slice(0, 10);
-    if (filters.dateFrom !== null && completedDate < filters.dateFrom) return false;
+    if (filters.dateFrom !== null && completedDate < filters.dateFrom)
+      return false;
     if (filters.dateTo !== null && completedDate > filters.dateTo) return false;
     return true;
   });
@@ -970,12 +937,15 @@ export function sortArchiveMatches(
   sortOrder: "recent" | "dramatic",
 ): (PublicMatch & { completedAt: string })[] {
   if (sortOrder === "recent") {
-    return [...matches].sort((a, b) => b.completedAt.localeCompare(a.completedAt));
+    return [...matches].sort((a, b) =>
+      b.completedAt.localeCompare(a.completedAt),
+    );
   }
   return [...matches].sort((a, b) => {
     const scoreA = curatedDramaScoreOf(a);
     const scoreB = curatedDramaScoreOf(b);
-    if (scoreA === null && scoreB === null) return b.completedAt.localeCompare(a.completedAt);
+    if (scoreA === null && scoreB === null)
+      return b.completedAt.localeCompare(a.completedAt);
     if (scoreA === null) return 1;
     if (scoreB === null) return -1;
     return scoreB - scoreA || b.completedAt.localeCompare(a.completedAt);
@@ -993,7 +963,10 @@ export function renderDegradedNote(match: {
   decisionCount: number | null;
 }): TemplateResult | typeof nothing {
   if (match.degradedCount === null || match.degradedCount === 0) return nothing;
-  const { share } = computeDegradedShare(match.degradedCount, match.decisionCount);
+  const { share } = computeDegradedShare(
+    match.degradedCount,
+    match.decisionCount,
+  );
   return html`<span title=${translateText("watch.degraded_turns_tooltip")}
     >${share === null
       ? translateText("watch.recovered_plain", { count: match.degradedCount })
@@ -1016,7 +989,9 @@ export function resolveWinnerName(
   agents: readonly PublicAgent[],
 ): string | null {
   if (match.winnerAgentSlug === null) return null;
-  const registered = agents.find((agent) => agent.slug === match.winnerAgentSlug);
+  const registered = agents.find(
+    (agent) => agent.slug === match.winnerAgentSlug,
+  );
   if (registered !== undefined) return registered.displayName;
   const participant = match.participants.find(
     (p) => p.agentSlug === match.winnerAgentSlug,
@@ -1036,14 +1011,22 @@ export function formatAbsoluteTime(iso: string): string {
  * simplification as this file's own `clientNowMs` doc (no server-skew
  * correction).
  */
-export function describeSchedule(scheduledAtIso: string, nowMs: number): string {
+export function describeSchedule(
+  scheduledAtIso: string,
+  nowMs: number,
+): string {
   const scheduledMs = Date.parse(scheduledAtIso);
-  if (Number.isNaN(scheduledMs)) return translateText("watch.schedule_unavailable");
+  if (Number.isNaN(scheduledMs))
+    return translateText("watch.schedule_unavailable");
   const deltaMs = scheduledMs - nowMs;
   if (deltaMs > 0) {
-    return translateText("watch.starts_in", { duration: formatDuration(deltaMs) });
+    return translateText("watch.starts_in", {
+      duration: formatDuration(deltaMs),
+    });
   }
-  return translateText("watch.started_ago", { duration: formatDuration(-deltaMs) });
+  return translateText("watch.started_ago", {
+    duration: formatDuration(-deltaMs),
+  });
 }
 
 /**

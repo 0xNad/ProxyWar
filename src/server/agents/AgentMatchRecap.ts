@@ -1,16 +1,17 @@
 import fs from "fs/promises";
 import path from "path";
 import {
-  FINAL_CONFLICT_TURN_CAP,
-  FINAL_CONFLICT_TURN_FRACTION,
-} from "./DirectorCutPlan";
-import {
   computeLeadChanges,
   computeMajorReversals,
+  FINAL_CONFLICT_TURN_CAP,
+  FINAL_CONFLICT_TURN_FRACTION,
   ordinalLabel,
 } from "./AgentMatchStateDerivations";
 import type { MatchStateSeries } from "./AgentMatchStateSeries";
-import type { SpectatorEvent, SpectatorTelemetry } from "./AgentSpectatorTelemetry";
+import type {
+  SpectatorEvent,
+  SpectatorTelemetry,
+} from "./AgentSpectatorTelemetry";
 
 /**
  * Event-derived match recap: the public match page's "what actually
@@ -30,10 +31,11 @@ import type { SpectatorEvent, SpectatorTelemetry } from "./AgentSpectatorTelemet
  * betrayal (an active alliance break), and elimination — plus one
  * addition only meaningful post-hoc (a live/streaming overlay can't see
  * ahead): a "final confrontation" beat when the endgame window contains a
- * genuine attack/nuke event, using the SAME endgame window
- * `DirectorCutPlan.ts`'s own `final_conflict` segment uses
- * (`FINAL_CONFLICT_TURN_FRACTION`/`FINAL_CONFLICT_TURN_CAP`, imported, not
- * duplicated). Season Zero Phase 2 gap closure: `lead_change`/`reversal`
+ * genuine attack/nuke event, using the SAME endgame window fraction/cap
+ * `AgentDecisiveMoments.ts`'s own beat of the same name uses
+ * (`FINAL_CONFLICT_TURN_FRACTION`/`FINAL_CONFLICT_TURN_CAP`, imported from
+ * `AgentMatchStateDerivations.ts`, never duplicated). Season Zero Phase 2
+ * gap closure: `lead_change`/`reversal`
  * beats ARE now produced, but ONLY when the caller passes a real
  * `MatchStateSeries` (`AgentMatchStateSeries.ts`) — the sampled
  * territory/rank series that used to be genuinely unavailable from
@@ -144,7 +146,7 @@ export interface AgentMatchRecapPaths {
 export interface AgentMatchRecapInput {
   runID: string;
   telemetry: SpectatorTelemetry;
-  /** Authoritative turn count when known (`match-summary.json`'s `finalState.turnCount`), else `null` to fall back to the telemetry's own max event turn — same fallback `DirectorCutPlan.ts`'s `resolveTotalTurns` uses. */
+  /** Authoritative turn count when known (`match-summary.json`'s `finalState.turnCount`), else `null` to fall back to the telemetry's own max event turn. */
   finalTurnCount: number | null;
   /** `null` when no `match-state-series.json` was available for this run yet (e.g. before the mirror's series backfill reached it, or the source replay had zero snapshots) — `lead_change`/`reversal` beats are simply omitted, never fabricated. See `AgentMatchStateSeries.ts`. */
   series: MatchStateSeries | null;
@@ -239,7 +241,12 @@ export interface CuratedWarRoomBeats {
   /** Every elimination individually — never dropped by the cap. Simultaneous match-end eliminations are compressed separately, in `buildAgentMatchRecap` (needs `totalTurns`, not available at this layer) — see `compressTerminalEliminations`. */
   eliminationBeats: AgentMatchRecapBeat[];
   /** Raw per-category counts for the summary line — BEFORE aggregation/capping, so the summary always reports the full picture even when the beat list is trimmed. */
-  rawCounts: { alliance: number; betrayal: number; firstStrike: number; elimination: number };
+  rawCounts: {
+    alliance: number;
+    betrayal: number;
+    firstStrike: number;
+    elimination: number;
+  };
   /** Every source `SpectatorEvent.id` this pass consumed, so `finalConfrontationBeat` never double-reports an attack already covered as a first strike. */
   includedEventIds: Set<string>;
 }
@@ -256,7 +263,9 @@ export interface CuratedWarRoomBeats {
  * a pair is always its own beat; every later betrayal of that SAME pair
  * folds into one aggregated beat instead of one beat each.
  */
-function curateWarRoomBeats(events: readonly SpectatorEvent[]): CuratedWarRoomBeats {
+function curateWarRoomBeats(
+  events: readonly SpectatorEvent[],
+): CuratedWarRoomBeats {
   const firstStrikeBeats: AgentMatchRecapBeat[] = [];
   const betrayalBeats: AgentMatchRecapBeat[] = [];
   const eliminationBeats: AgentMatchRecapBeat[] = [];
@@ -266,7 +275,12 @@ function curateWarRoomBeats(events: readonly SpectatorEvent[]): CuratedWarRoomBe
   const openBetrayalRuns = new Map<string, BetrayalRun>();
   const includedEventIds = new Set<string>();
   const firstStrikeSeen = new Set<string>();
-  const rawCounts = { alliance: 0, betrayal: 0, firstStrike: 0, elimination: 0 };
+  const rawCounts = {
+    alliance: 0,
+    betrayal: 0,
+    firstStrike: 0,
+    elimination: 0,
+  };
 
   for (const event of events) {
     if (event.kind === "attack" && event.targetAgentID !== null) {
@@ -470,17 +484,26 @@ function computeCuratedDramaScore(
   const raw =
     Math.min(curated.betrayalBeats.length, CURATED_DRAMA_WEIGHTS.betrayalCap) *
       CURATED_DRAMA_WEIGHTS.betrayal +
-    Math.min(nonTerminalEliminationCount, CURATED_DRAMA_WEIGHTS.eliminationCap) *
+    Math.min(
+      nonTerminalEliminationCount,
+      CURATED_DRAMA_WEIGHTS.eliminationCap,
+    ) *
       CURATED_DRAMA_WEIGHTS.elimination +
-    Math.min(curated.allianceBeats.length, CURATED_DRAMA_WEIGHTS.alliancePairCap) *
+    Math.min(
+      curated.allianceBeats.length,
+      CURATED_DRAMA_WEIGHTS.alliancePairCap,
+    ) *
       CURATED_DRAMA_WEIGHTS.alliancePair +
-    Math.min(curated.firstStrikeBeats.length, CURATED_DRAMA_WEIGHTS.firstStrikePairCap) *
+    Math.min(
+      curated.firstStrikeBeats.length,
+      CURATED_DRAMA_WEIGHTS.firstStrikePairCap,
+    ) *
       CURATED_DRAMA_WEIGHTS.firstStrikePair +
     (hasFinalConfrontation ? CURATED_DRAMA_WEIGHTS.finalConfrontation : 0);
   return Math.min(100, Math.round(raw));
 }
 
-/** One beat for the highest-importance attack/nuke event inside the SAME endgame window `DirectorCutPlan.ts`'s `final_conflict` segment covers — omitted (never fabricated) when no such event exists in that window, e.g. a match that ends on a turn cap with no late fighting. */
+/** One beat for the highest-importance attack/nuke event inside the SAME endgame window (`FINAL_CONFLICT_TURN_FRACTION`/`FINAL_CONFLICT_TURN_CAP`, imported above) — omitted (never fabricated) when no such event exists in that window, e.g. a match that ends on a turn cap with no late fighting. */
 function finalConfrontationBeat(
   events: readonly SpectatorEvent[],
   totalTurns: number,
@@ -555,17 +578,27 @@ export function compressTerminalEliminations(
   eliminationBeats: readonly AgentMatchRecapBeat[],
   totalTurns: number,
 ): CompressedEliminations {
-  const terminal = eliminationBeats.filter((beat) => beat.turnNumber >= totalTurns);
-  const midMatch = eliminationBeats.filter((beat) => beat.turnNumber < totalTurns);
+  const terminal = eliminationBeats.filter(
+    (beat) => beat.turnNumber >= totalTurns,
+  );
+  const midMatch = eliminationBeats.filter(
+    (beat) => beat.turnNumber < totalTurns,
+  );
   if (terminal.length < 2) {
-    return { beats: eliminationBeats.slice(), nonTerminalCount: midMatch.length };
+    return {
+      beats: eliminationBeats.slice(),
+      nonTerminalCount: midMatch.length,
+    };
   }
   const compressed: AgentMatchRecapBeat = {
     turnNumber: totalTurns,
     kind: "elimination",
     message: `Final turn: ${terminal.length} agents eliminated as the match ends.`,
   };
-  return { beats: [...midMatch, compressed], nonTerminalCount: midMatch.length };
+  return {
+    beats: [...midMatch, compressed],
+    nonTerminalCount: midMatch.length,
+  };
 }
 
 /**
@@ -575,7 +608,9 @@ export function compressTerminalEliminations(
  * Thresholds/methodology live in `AgentMatchStateDerivations.ts`, reused
  * here verbatim rather than re-implemented.
  */
-function leadChangeBeats(series: MatchStateSeries | null): AgentMatchRecapBeat[] {
+function leadChangeBeats(
+  series: MatchStateSeries | null,
+): AgentMatchRecapBeat[] {
   if (series === null) return [];
   return computeLeadChanges(series).map((change) => ({
     turnNumber: change.turn,
@@ -610,7 +645,10 @@ function applyImportanceCap(
   neverTrimmed: readonly AgentMatchRecapBeat[],
   trimmable: readonly AgentMatchRecapBeat[],
 ): AgentMatchRecapBeat[] {
-  const remainingBudget = Math.max(0, MAX_PUBLIC_RECAP_BEATS - neverTrimmed.length);
+  const remainingBudget = Math.max(
+    0,
+    MAX_PUBLIC_RECAP_BEATS - neverTrimmed.length,
+  );
   const orderedTrimmable = [...trimmable].sort(
     (a, b) =>
       TRIMMABLE_KIND_PRIORITY[
@@ -618,8 +656,7 @@ function applyImportanceCap(
       ] -
         TRIMMABLE_KIND_PRIORITY[
           b.kind as "alliance" | "first_strike" | "lead_change" | "reversal"
-        ] ||
-      a.turnNumber - b.turnNumber,
+        ] || a.turnNumber - b.turnNumber,
   );
   const kept = [...neverTrimmed, ...orderedTrimmable.slice(0, remainingBudget)];
   return kept.sort((a, b) => a.turnNumber - b.turnNumber);
@@ -664,7 +701,10 @@ export function buildAgentMatchRecap(
   const totalTurns =
     input.finalTurnCount !== null && input.finalTurnCount > 0
       ? input.finalTurnCount
-      : orderedEvents.reduce((max, event) => Math.max(max, event.turnNumber), 0);
+      : orderedEvents.reduce(
+          (max, event) => Math.max(max, event.turnNumber),
+          0,
+        );
   const finalBeat = finalConfrontationBeat(
     orderedEvents,
     totalTurns,

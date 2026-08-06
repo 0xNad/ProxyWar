@@ -1,18 +1,16 @@
-import { readFileSync } from "node:fs";
-import { promises as fs } from "node:fs";
+import { promises as fs, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { MATCH_STATE_SERIES_SCHEMA_VERSION } from "../../src/server/agents/AgentMatchStateSeries";
 import {
   backfillMatchStateSeries,
   generateMatchStateSeriesForRunDir,
 } from "../../src/server/agents/CoworldLeagueMatchStateSeriesBackfill";
-import { MATCH_STATE_SERIES_SCHEMA_VERSION } from "../../src/server/agents/AgentMatchStateSeries";
 
 /**
  * IO/budget/skip/idempotency/failure-isolation coverage for the mirror-side
- * `match-state-series.json` gap closure — same shape as
- * `CoworldLeagueDirectorCutBackfill.test.ts`. Fixtures are a REAL retained
+ * `match-state-series.json` gap closure. Fixtures are a REAL retained
  * hosted-league run's `spectator-replay.json`/`spectator-telemetry.json`
  * (`league-coworld-2026-08-01T13-58-25-067Z-962f5eac`, 12 agents, 37
  * snapshots, real alliance/elimination events), trimmed of fields this
@@ -25,11 +23,19 @@ import { MATCH_STATE_SERIES_SCHEMA_VERSION } from "../../src/server/agents/Agent
  */
 
 const realReplayFixtureRaw = readFileSync(
-  path.join(__dirname, "fixtures", "coworld-mirror-match-state-series-replay.sample.json"),
+  path.join(
+    __dirname,
+    "fixtures",
+    "coworld-mirror-match-state-series-replay.sample.json",
+  ),
   "utf8",
 );
 const realTelemetryFixtureRaw = readFileSync(
-  path.join(__dirname, "fixtures", "coworld-mirror-match-state-series-telemetry.sample.json"),
+  path.join(
+    __dirname,
+    "fixtures",
+    "coworld-mirror-match-state-series-telemetry.sample.json",
+  ),
   "utf8",
 );
 
@@ -74,13 +80,19 @@ async function writeRealRunDir(
 describe("generateMatchStateSeriesForRunDir", () => {
   test("generates a real series from a real retained run's spectator-replay.json + telemetry", async () => {
     const runDir = await writeRealRunDir("league-coworld-fresh-1");
-    const result = await generateMatchStateSeriesForRunDir(runDir, "league-coworld-fresh-1");
+    const result = await generateMatchStateSeriesForRunDir(
+      runDir,
+      "league-coworld-fresh-1",
+    );
     expect(result.attempted).toBe(true);
     expect(result.outcome.status).toBe("generated");
     if (result.outcome.status === "generated") {
       expect(result.outcome.sampleCount).toBe(37);
     }
-    const raw = await fs.readFile(path.join(runDir, "match-state-series.json"), "utf8");
+    const raw = await fs.readFile(
+      path.join(runDir, "match-state-series.json"),
+      "utf8",
+    );
     const series = JSON.parse(raw) as {
       schemaVersion: number;
       runID: string;
@@ -110,7 +122,9 @@ describe("generateMatchStateSeriesForRunDir", () => {
       samples: { activeAlliancePairs: unknown[] }[];
       notes: string[];
     };
-    expect(series.samples.every((s) => s.activeAlliancePairs.length === 0)).toBe(true);
+    expect(
+      series.samples.every((s) => s.activeAlliancePairs.length === 0),
+    ).toBe(true);
     expect(series.notes.some((n) => n.includes("unavailable"))).toBe(true);
   });
 
@@ -138,7 +152,10 @@ describe("generateMatchStateSeriesForRunDir", () => {
       replay: false,
       telemetry: false,
     });
-    const result = await generateMatchStateSeriesForRunDir(runDir, "league-coworld-empty-1");
+    const result = await generateMatchStateSeriesForRunDir(
+      runDir,
+      "league-coworld-empty-1",
+    );
     expect(result.attempted).toBe(false);
     expect(result.outcome).toEqual({ status: "no-input" });
     await expect(
@@ -193,13 +210,31 @@ describe("backfillMatchStateSeries", () => {
     ]);
     expect(
       await fs
-        .stat(path.join(runsRootDir, "league-coworld-a1", "match-state-series.json"))
-        .then(() => true, () => false),
+        .stat(
+          path.join(
+            runsRootDir,
+            "league-coworld-a1",
+            "match-state-series.json",
+          ),
+        )
+        .then(
+          () => true,
+          () => false,
+        ),
     ).toBe(true);
     expect(
       await fs
-        .stat(path.join(runsRootDir, "league-coworld-a3", "match-state-series.json"))
-        .then(() => true, () => false),
+        .stat(
+          path.join(
+            runsRootDir,
+            "league-coworld-a3",
+            "match-state-series.json",
+          ),
+        )
+        .then(
+          () => true,
+          () => false,
+        ),
     ).toBe(false);
   });
 
@@ -209,7 +244,8 @@ describe("backfillMatchStateSeries", () => {
     await writeRealRunDir("league-coworld-b2");
     const results = await backfillMatchStateSeries(runsRootDir, 1);
     expect(
-      results.find((result) => result.runKey === "league-coworld-b2")?.outcome.status,
+      results.find((result) => result.runKey === "league-coworld-b2")?.outcome
+        .status,
     ).toBe("generated");
   });
 
@@ -221,7 +257,9 @@ describe("backfillMatchStateSeries", () => {
       5,
       new Set(["league-coworld-c1"]),
     );
-    expect(results.map((result) => result.runKey)).toEqual(["league-coworld-c2"]);
+    expect(results.map((result) => result.runKey)).toEqual([
+      "league-coworld-c2",
+    ]);
   });
 
   test("budget 0 does no work at all", async () => {
@@ -230,8 +268,17 @@ describe("backfillMatchStateSeries", () => {
     expect(results).toEqual([]);
     expect(
       await fs
-        .stat(path.join(runsRootDir, "league-coworld-d1", "match-state-series.json"))
-        .then(() => true, () => false),
+        .stat(
+          path.join(
+            runsRootDir,
+            "league-coworld-d1",
+            "match-state-series.json",
+          ),
+        )
+        .then(
+          () => true,
+          () => false,
+        ),
     ).toBe(false);
   });
 
@@ -242,9 +289,13 @@ describe("backfillMatchStateSeries", () => {
 
   test("non-league-prefixed directories are never scanned", async () => {
     await fs.mkdir(path.join(runsRootDir, "league"), { recursive: true });
-    await fs.mkdir(path.join(runsRootDir, "some-other-dir"), { recursive: true });
+    await fs.mkdir(path.join(runsRootDir, "some-other-dir"), {
+      recursive: true,
+    });
     await writeRealRunDir("league-coworld-e1");
     const results = await backfillMatchStateSeries(runsRootDir, 10);
-    expect(results.map((result) => result.runKey)).toEqual(["league-coworld-e1"]);
+    expect(results.map((result) => result.runKey)).toEqual([
+      "league-coworld-e1",
+    ]);
   });
 });

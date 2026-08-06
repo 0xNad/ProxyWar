@@ -3,11 +3,23 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { computeNextWeeklyCadence, runProgramWeek } from "../../src/scripts/season-program-week-lib";
+import {
+  computeNextWeeklyCadence,
+  runProgramWeek,
+} from "../../src/scripts/season-program-week-lib";
 import { readFeaturedMatchStore } from "../../src/server/agents/FeaturedMatch";
-import { findEventPackage, readEventPackageStore } from "../../src/server/agents/season/EventPackage";
-import { loadSeasonRegistry, saveSeasonRegistry } from "../../src/server/agents/season/SeasonRegistry";
-import type { Season, SeasonEventSlot } from "../../src/server/agents/season/SeasonSchemas";
+import {
+  findEventPackage,
+  readEventPackageStore,
+} from "../../src/server/agents/season/EventPackage";
+import {
+  loadSeasonRegistry,
+  saveSeasonRegistry,
+} from "../../src/server/agents/season/SeasonRegistry";
+import type {
+  Season,
+  SeasonEventSlot,
+} from "../../src/server/agents/season/SeasonSchemas";
 
 /**
  * `season:program-week` — full pipeline coverage. Identity-dependent
@@ -47,14 +59,32 @@ function baseSeason(overrides: Partial<Season> = {}): Season {
   };
 }
 
-async function writeSeasonRegistry(seasonRegistryPath: string, seasons: readonly Season[]): Promise<void> {
-  await saveSeasonRegistry({ schemaVersion: 1, seasons: [...seasons] }, seasonRegistryPath);
+async function writeSeasonRegistry(
+  seasonRegistryPath: string,
+  seasons: readonly Season[],
+): Promise<void> {
+  await saveSeasonRegistry(
+    { schemaVersion: 1, seasons: [...seasons] },
+    seasonRegistryPath,
+  );
 }
 
 async function writeEmptyIdentity(artifactsRoot: string): Promise<void> {
-  await writeFile(path.join(artifactsRoot, "builders.json"), JSON.stringify({ schemaVersion: 1, builders: [] }), "utf8");
-  await writeFile(path.join(artifactsRoot, "agents.json"), JSON.stringify({ schemaVersion: 1, agents: [] }), "utf8");
-  await writeFile(path.join(artifactsRoot, "versions.json"), JSON.stringify({ schemaVersion: 1, versions: [] }), "utf8");
+  await writeFile(
+    path.join(artifactsRoot, "builders.json"),
+    JSON.stringify({ schemaVersion: 1, builders: [] }),
+    "utf8",
+  );
+  await writeFile(
+    path.join(artifactsRoot, "agents.json"),
+    JSON.stringify({ schemaVersion: 1, agents: [] }),
+    "utf8",
+  );
+  await writeFile(
+    path.join(artifactsRoot, "versions.json"),
+    JSON.stringify({ schemaVersion: 1, versions: [] }),
+    "utf8",
+  );
 }
 
 /**
@@ -72,8 +102,17 @@ async function writeEmptyIdentity(artifactsRoot: string): Promise<void> {
  * is the same sidestep at test scale, not a new gap this suite covers.
  */
 async function writeRealIdentity(artifactsRoot: string): Promise<void> {
-  await writeFile(path.join(artifactsRoot, "builders.json"), JSON.stringify({ schemaVersion: 1, builders: [] }), "utf8");
-  const agent = (id: string, name: string, shortCode: string, family: string) => ({
+  await writeFile(
+    path.join(artifactsRoot, "builders.json"),
+    JSON.stringify({ schemaVersion: 1, builders: [] }),
+    "utf8",
+  );
+  const agent = (
+    id: string,
+    name: string,
+    shortCode: string,
+    family: string,
+  ) => ({
     id,
     slug: name.toLowerCase(),
     displayName: name,
@@ -81,7 +120,11 @@ async function writeRealIdentity(artifactsRoot: string): Promise<void> {
     builderId: null,
     tagline: null,
     description: null,
-    emblem: { style: "geometric-svg-v1", seed: id, assetPath: `resources/identity/emblems/${id}.svg` },
+    emblem: {
+      style: "geometric-svg-v1",
+      seed: id,
+      assetPath: `resources/identity/emblems/${id}.svg`,
+    },
     primaryColor: "#112233",
     secondaryColor: "#445566",
     debutDate: null,
@@ -104,7 +147,12 @@ async function writeRealIdentity(artifactsRoot: string): Promise<void> {
     }),
     "utf8",
   );
-  const version = (id: string, agentId: string, label: string, policyLabel: string) => ({
+  const version = (
+    id: string,
+    agentId: string,
+    label: string,
+    policyLabel: string,
+  ) => ({
     id,
     agentId,
     publicVersionLabel: label,
@@ -138,7 +186,11 @@ async function writeRealIdentity(artifactsRoot: string): Promise<void> {
   );
 }
 
-async function writePremiereQueueItem(queueReadyDir: string, name: string, experienceRequestId: string): Promise<void> {
+async function writePremiereQueueItem(
+  queueReadyDir: string,
+  name: string,
+  experienceRequestId: string,
+): Promise<void> {
   const dir = path.join(queueReadyDir, name);
   await mkdir(dir, { recursive: true });
   await writeFile(
@@ -169,15 +221,36 @@ async function writePremiereQueueItem(queueReadyDir: string, name: string, exper
       bundleKind: "proxywar_rated_coworld_source",
       sourceRunId: name,
       seats: [
-        { seatId: "c1", displayName: "Auri", policyIdentity: { namespace: "softmax_policy_version", policyVersionId: "pv_c1", policyName: "auri-intent:v43", serverAssignedVersion: "v1" } },
-        { seatId: "c2", displayName: "Sefirot", policyIdentity: { namespace: "softmax_policy_version", policyVersionId: "pv_c2", policyName: "sefirot-intent:v10", serverAssignedVersion: "v1" } },
+        {
+          seatId: "c1",
+          displayName: "Auri",
+          policyIdentity: {
+            namespace: "softmax_policy_version",
+            policyVersionId: "pv_c1",
+            policyName: "auri-intent:v43",
+            serverAssignedVersion: "v1",
+          },
+        },
+        {
+          seatId: "c2",
+          displayName: "Sefirot",
+          policyIdentity: {
+            namespace: "softmax_policy_version",
+            policyVersionId: "pv_c2",
+            policyName: "sefirot-intent:v10",
+            serverAssignedVersion: "v1",
+          },
+        },
       ],
     }),
     "utf8",
   );
 }
 
-async function writeArchiveMirror(artifactsRoot: string, episodeRequestId: string): Promise<void> {
+async function writeArchiveMirror(
+  artifactsRoot: string,
+  episodeRequestId: string,
+): Promise<void> {
   const siteDir = path.join(artifactsRoot, "ai-league-runs", "league");
   await mkdir(siteDir, { recursive: true });
   await writeFile(
@@ -186,12 +259,58 @@ async function writeArchiveMirror(artifactsRoot: string, episodeRequestId: strin
       generatedAt: NOW.toISOString(),
       lastGoodSyncAt: NOW.toISOString(),
       stale: false,
-      league: { id: "league_test", name: "Test League", description: null, divisionName: "Open", roundIntervalMinutes: null, episodesPerRound: null, currentRoundNumber: null, currentRoundStatus: null, scoreLabel: "Score" },
+      league: {
+        id: "league_test",
+        name: "Test League",
+        description: null,
+        divisionName: "Open",
+        roundIntervalMinutes: null,
+        episodesPerRound: null,
+        currentRoundNumber: null,
+        currentRoundStatus: null,
+        scoreLabel: "Score",
+      },
       standings: [
-        { rank: 1, playerName: "Solo", ratingPolicyLabel: "solo-intent:v1", activeChampionPolicyLabel: null, policyLabel: "solo-intent:v1", score: 100, roundsPlayed: 5, isHouse: false },
-        { rank: 2, playerName: "Rival", ratingPolicyLabel: "rival-intent:v1", activeChampionPolicyLabel: null, policyLabel: "rival-intent:v1", score: 80, roundsPlayed: 5, isHouse: false },
-        { rank: 3, playerName: "Third", ratingPolicyLabel: "third-intent:v1", activeChampionPolicyLabel: null, policyLabel: "third-intent:v1", score: 60, roundsPlayed: 5, isHouse: false },
-        { rank: 4, playerName: "Fourth", ratingPolicyLabel: "fourth-intent:v1", activeChampionPolicyLabel: null, policyLabel: "fourth-intent:v1", score: 40, roundsPlayed: 5, isHouse: false },
+        {
+          rank: 1,
+          playerName: "Solo",
+          ratingPolicyLabel: "solo-intent:v1",
+          activeChampionPolicyLabel: null,
+          policyLabel: "solo-intent:v1",
+          score: 100,
+          roundsPlayed: 5,
+          isHouse: false,
+        },
+        {
+          rank: 2,
+          playerName: "Rival",
+          ratingPolicyLabel: "rival-intent:v1",
+          activeChampionPolicyLabel: null,
+          policyLabel: "rival-intent:v1",
+          score: 80,
+          roundsPlayed: 5,
+          isHouse: false,
+        },
+        {
+          rank: 3,
+          playerName: "Third",
+          ratingPolicyLabel: "third-intent:v1",
+          activeChampionPolicyLabel: null,
+          policyLabel: "third-intent:v1",
+          score: 60,
+          roundsPlayed: 5,
+          isHouse: false,
+        },
+        {
+          rank: 4,
+          playerName: "Fourth",
+          ratingPolicyLabel: "fourth-intent:v1",
+          activeChampionPolicyLabel: null,
+          policyLabel: "fourth-intent:v1",
+          score: 40,
+          roundsPlayed: 5,
+          isHouse: false,
+        },
       ],
       rounds: [],
       episodes: [
@@ -207,17 +326,47 @@ async function writeArchiveMirror(artifactsRoot: string, episodeRequestId: strin
           degradedCount: 0,
           winnerName: "Solo",
           players: [
-            { slot: 0, name: "Solo", tilesOwned: 100, isAlive: true, isWinner: true, color: "#112233" },
-            { slot: 1, name: "Rival", tilesOwned: 40, isAlive: false, isWinner: false, color: "#445566" },
-            { slot: 2, name: "Third", tilesOwned: 30, isAlive: false, isWinner: false, color: "#556677" },
-            { slot: 3, name: "Fourth", tilesOwned: 20, isAlive: false, isWinner: false, color: "#667788" },
+            {
+              slot: 0,
+              name: "Solo",
+              tilesOwned: 100,
+              isAlive: true,
+              isWinner: true,
+              color: "#112233",
+            },
+            {
+              slot: 1,
+              name: "Rival",
+              tilesOwned: 40,
+              isAlive: false,
+              isWinner: false,
+              color: "#445566",
+            },
+            {
+              slot: 2,
+              name: "Third",
+              tilesOwned: 30,
+              isAlive: false,
+              isWinner: false,
+              color: "#556677",
+            },
+            {
+              slot: 3,
+              name: "Fourth",
+              tilesOwned: 20,
+              isAlive: false,
+              isWinner: false,
+              color: "#667788",
+            },
           ],
           watchHref: "https://example.test/replay",
           fullRenderHref: null,
-          directorCut: { durationEstimateSeconds: 250, segmentCount: 5 },
         },
       ],
-      links: { enterTheLeagueUrl: "https://example.test", platformLabel: "Coworld" },
+      links: {
+        enterTheLeagueUrl: "https://example.test",
+        platformLabel: "Coworld",
+      },
     }),
     "utf8",
   );
@@ -232,17 +381,25 @@ describe("runProgramWeek — identity-independent behavior (in-process)", () => 
   beforeEach(async () => {
     seasonDir = await mkdtemp(path.join(os.tmpdir(), "pw-programweek-season-"));
     stateDir = await mkdtemp(path.join(os.tmpdir(), "pw-programweek-state-"));
-    artifactsRoot = await mkdtemp(path.join(os.tmpdir(), "pw-programweek-artifacts-"));
+    artifactsRoot = await mkdtemp(
+      path.join(os.tmpdir(), "pw-programweek-artifacts-"),
+    );
     queueRoot = await mkdtemp(path.join(os.tmpdir(), "pw-programweek-queue-"));
     await writeEmptyIdentity(artifactsRoot);
   });
 
   afterEach(async () => {
-    await Promise.all([seasonDir, stateDir, artifactsRoot, queueRoot].map((dir) => rm(dir, { recursive: true, force: true })));
+    await Promise.all(
+      [seasonDir, stateDir, artifactsRoot, queueRoot].map((dir) =>
+        rm(dir, { recursive: true, force: true }),
+      ),
+    );
   });
 
   it("hard-fails cleanly when no season is active", async () => {
-    await writeSeasonRegistry(path.join(seasonDir, "seasons.json"), [baseSeason({ state: "draft" })]);
+    await writeSeasonRegistry(path.join(seasonDir, "seasons.json"), [
+      baseSeason({ state: "draft" }),
+    ]);
     const outcome = await runProgramWeek({
       seasonRegistryPath: path.join(seasonDir, "seasons.json"),
       featuredMatchStateRoot: stateDir,
@@ -257,7 +414,9 @@ describe("runProgramWeek — identity-independent behavior (in-process)", () => 
   });
 
   it("hard-fails clearly for an --episode override that matches neither lane", async () => {
-    await writeSeasonRegistry(path.join(seasonDir, "seasons.json"), [baseSeason()]);
+    await writeSeasonRegistry(path.join(seasonDir, "seasons.json"), [
+      baseSeason(),
+    ]);
     const outcome = await runProgramWeek({
       seasonRegistryPath: path.join(seasonDir, "seasons.json"),
       featuredMatchStateRoot: stateDir,
@@ -272,7 +431,9 @@ describe("runProgramWeek — identity-independent behavior (in-process)", () => 
   });
 
   it("hard-fails cleanly when both lanes are empty and no override is given", async () => {
-    await writeSeasonRegistry(path.join(seasonDir, "seasons.json"), [baseSeason()]);
+    await writeSeasonRegistry(path.join(seasonDir, "seasons.json"), [
+      baseSeason(),
+    ]);
     const outcome = await runProgramWeek({
       seasonRegistryPath: path.join(seasonDir, "seasons.json"),
       featuredMatchStateRoot: stateDir,
@@ -282,25 +443,41 @@ describe("runProgramWeek — identity-independent behavior (in-process)", () => 
       now: () => NOW,
     });
     expect(outcome.ok).toBe(false);
-    expect(outcome.reason).toBe("no_gate_eligible_candidate: both lanes are empty");
+    expect(outcome.reason).toBe(
+      "no_gate_eligible_candidate: both lanes are empty",
+    );
   });
 });
 
 describe("computeNextWeeklyCadence", () => {
   it("defaults to one week from now, rounded up to the top of the hour, when the season has no prior slot", () => {
-    const result = computeNextWeeklyCadence([], new Date("2026-08-01T00:00:00.000Z"));
+    const result = computeNextWeeklyCadence(
+      [],
+      new Date("2026-08-01T00:00:00.000Z"),
+    );
     expect(result).toBe("2026-08-08T00:00:00.000Z");
   });
 
   it("rounds up a non-hour-aligned 'now' to the next full hour", () => {
-    const result = computeNextWeeklyCadence([], new Date("2026-08-01T00:17:00.000Z"));
+    const result = computeNextWeeklyCadence(
+      [],
+      new Date("2026-08-01T00:17:00.000Z"),
+    );
     expect(result).toBe("2026-08-08T01:00:00.000Z");
   });
 
   it("adds one week to the latest existing slot's own scheduledAt", () => {
     const slots: SeasonEventSlot[] = [
-      { featuredMatchId: "feat_a", scheduledAt: "2026-08-01T18:00:00.000Z", addedAt: NOW.toISOString() },
-      { featuredMatchId: "feat_b", scheduledAt: "2026-08-08T18:00:00.000Z", addedAt: NOW.toISOString() },
+      {
+        featuredMatchId: "feat_a",
+        scheduledAt: "2026-08-01T18:00:00.000Z",
+        addedAt: NOW.toISOString(),
+      },
+      {
+        featuredMatchId: "feat_b",
+        scheduledAt: "2026-08-08T18:00:00.000Z",
+        addedAt: NOW.toISOString(),
+      },
     ];
     const result = computeNextWeeklyCadence(slots, NOW);
     expect(result).toBe("2026-08-15T18:00:00.000Z");
@@ -308,10 +485,20 @@ describe("computeNextWeeklyCadence", () => {
 
   it("ignores unscheduled (null) slots when finding the latest anchor", () => {
     const slots: SeasonEventSlot[] = [
-      { featuredMatchId: "feat_a", scheduledAt: null, addedAt: NOW.toISOString() },
-      { featuredMatchId: "feat_b", scheduledAt: "2026-08-08T18:00:00.000Z", addedAt: NOW.toISOString() },
+      {
+        featuredMatchId: "feat_a",
+        scheduledAt: null,
+        addedAt: NOW.toISOString(),
+      },
+      {
+        featuredMatchId: "feat_b",
+        scheduledAt: "2026-08-08T18:00:00.000Z",
+        addedAt: NOW.toISOString(),
+      },
     ];
-    expect(computeNextWeeklyCadence(slots, NOW)).toBe("2026-08-15T18:00:00.000Z");
+    expect(computeNextWeeklyCadence(slots, NOW)).toBe(
+      "2026-08-15T18:00:00.000Z",
+    );
   });
 });
 
@@ -322,14 +509,23 @@ describe("computeNextWeeklyCadence", () => {
  */
 describe("season:program-week CLI — real subprocess end to end", () => {
   const repoRoot = path.resolve(__dirname, "../..");
-  const scriptPath = path.join(repoRoot, "src", "scripts", "season-program-week.ts");
+  const scriptPath = path.join(
+    repoRoot,
+    "src",
+    "scripts",
+    "season-program-week.ts",
+  );
 
   let seasonDir: string;
   let stateDir: string;
   let artifactsRoot: string;
   let queueRoot: string;
 
-  function runCli(args: string[]): { code: number; stdout: string; stderr: string } {
+  function runCli(args: string[]): {
+    code: number;
+    stdout: string;
+    stderr: string;
+  } {
     try {
       const stdout = execFileSync("npx", ["tsx", scriptPath, ...args], {
         cwd: repoRoot,
@@ -348,20 +544,36 @@ describe("season:program-week CLI — real subprocess end to end", () => {
       return { code: 0, stdout, stderr: "" };
     } catch (error) {
       const err = error as { status: number; stdout: Buffer; stderr: Buffer };
-      return { code: err.status, stdout: err.stdout?.toString("utf8") ?? "", stderr: err.stderr?.toString("utf8") ?? "" };
+      return {
+        code: err.status,
+        stdout: err.stdout?.toString("utf8") ?? "",
+        stderr: err.stderr?.toString("utf8") ?? "",
+      };
     }
   }
 
   beforeEach(async () => {
-    seasonDir = await mkdtemp(path.join(os.tmpdir(), "pw-programweek-cli-season-"));
-    stateDir = await mkdtemp(path.join(os.tmpdir(), "pw-programweek-cli-state-"));
-    artifactsRoot = await mkdtemp(path.join(os.tmpdir(), "pw-programweek-cli-artifacts-"));
-    queueRoot = await mkdtemp(path.join(os.tmpdir(), "pw-programweek-cli-queue-"));
+    seasonDir = await mkdtemp(
+      path.join(os.tmpdir(), "pw-programweek-cli-season-"),
+    );
+    stateDir = await mkdtemp(
+      path.join(os.tmpdir(), "pw-programweek-cli-state-"),
+    );
+    artifactsRoot = await mkdtemp(
+      path.join(os.tmpdir(), "pw-programweek-cli-artifacts-"),
+    );
+    queueRoot = await mkdtemp(
+      path.join(os.tmpdir(), "pw-programweek-cli-queue-"),
+    );
     await writeEmptyIdentity(artifactsRoot);
   });
 
   afterEach(async () => {
-    await Promise.all([seasonDir, stateDir, artifactsRoot, queueRoot].map((dir) => rm(dir, { recursive: true, force: true })));
+    await Promise.all(
+      [seasonDir, stateDir, artifactsRoot, queueRoot].map((dir) =>
+        rm(dir, { recursive: true, force: true }),
+      ),
+    );
   });
 
   it("defaults to dry run and reports no_active_season on a cold start", () => {
@@ -375,7 +587,9 @@ describe("season:program-week CLI — real subprocess end to end", () => {
     beforeEach(async () => {
       await writeRealIdentity(artifactsRoot);
       await writeArchiveMirror(artifactsRoot, "ereq_archive1");
-      await writeSeasonRegistry(path.join(seasonDir, "seasons.json"), [baseSeason()]);
+      await writeSeasonRegistry(path.join(seasonDir, "seasons.json"), [
+        baseSeason(),
+      ]);
     });
 
     it("dry run: picks the archive candidate, computes a passing gate, and writes NOTHING to any store", async () => {
@@ -392,12 +606,18 @@ describe("season:program-week CLI — real subprocess end to end", () => {
       expect(matches.matches).toEqual([]);
       const packages = await readEventPackageStore(stateDir);
       expect(packages.packages).toEqual([]);
-      const registry = await loadSeasonRegistry(path.join(seasonDir, "seasons.json"));
+      const registry = await loadSeasonRegistry(
+        path.join(seasonDir, "seasons.json"),
+      );
       expect(registry.seasons[0]!.eventSlots).toEqual([]);
     });
 
     it("--execute commits promotion, package, and the season slot", async () => {
-      const result = runCli(["--at=2026-08-08T18:00:00.000Z", "--execute", "--json"]);
+      const result = runCli([
+        "--at=2026-08-08T18:00:00.000Z",
+        "--execute",
+        "--json",
+      ]);
       expect(result.code).toBe(0);
       const outcome = JSON.parse(result.stdout);
       expect(outcome.ok).toBe(true);
@@ -412,9 +632,10 @@ describe("season:program-week CLI — real subprocess end to end", () => {
       const packages = await readEventPackageStore(stateDir);
       const savedPackage = findEventPackage(packages, outcome.matchId);
       expect(savedPackage).not.toBeNull();
-      expect(savedPackage!.directorCutEstimateSeconds).toBe(250);
 
-      const registry = await loadSeasonRegistry(path.join(seasonDir, "seasons.json"));
+      const registry = await loadSeasonRegistry(
+        path.join(seasonDir, "seasons.json"),
+      );
       const slots: SeasonEventSlot[] = registry.seasons[0]!.eventSlots;
       expect(slots).toHaveLength(1);
       expect(slots[0]!.featuredMatchId).toBe(outcome.matchId);
@@ -426,9 +647,13 @@ describe("season:program-week CLI — real subprocess end to end", () => {
     }, 30000);
 
     it("is idempotent-safe: running --execute twice re-promotes the SAME matchId, not a duplicate", async () => {
-      const first = JSON.parse(runCli(["--at=2026-08-08T18:00:00.000Z", "--execute", "--json"]).stdout);
+      const first = JSON.parse(
+        runCli(["--at=2026-08-08T18:00:00.000Z", "--execute", "--json"]).stdout,
+      );
       expect(first.ok).toBe(true);
-      const second = JSON.parse(runCli(["--at=2026-08-15T18:00:00.000Z", "--execute", "--json"]).stdout);
+      const second = JSON.parse(
+        runCli(["--at=2026-08-15T18:00:00.000Z", "--execute", "--json"]).stdout,
+      );
       expect(second.ok).toBe(true);
       expect(second.matchId).toBe(first.matchId);
 
@@ -440,8 +665,14 @@ describe("season:program-week CLI — real subprocess end to end", () => {
   describe("premiere lane", () => {
     beforeEach(async () => {
       await writeRealIdentity(artifactsRoot);
-      await writePremiereQueueItem(path.join(queueRoot, "ready"), "20260801T000000Z-run1", "ereq_premiere1");
-      await writeSeasonRegistry(path.join(seasonDir, "seasons.json"), [baseSeason()]);
+      await writePremiereQueueItem(
+        path.join(queueRoot, "ready"),
+        "20260801T000000Z-run1",
+        "ereq_premiere1",
+      );
+      await writeSeasonRegistry(path.join(seasonDir, "seasons.json"), [
+        baseSeason(),
+      ]);
     });
 
     it("dry run: schedules+publishes+packages in-memory only, gate passes, nothing written", async () => {
@@ -455,12 +686,18 @@ describe("season:program-week CLI — real subprocess end to end", () => {
 
       const matches = await readFeaturedMatchStore(stateDir);
       expect(matches.matches).toEqual([]);
-      const registry = await loadSeasonRegistry(path.join(seasonDir, "seasons.json"));
+      const registry = await loadSeasonRegistry(
+        path.join(seasonDir, "seasons.json"),
+      );
       expect(registry.seasons[0]!.eventSlots).toEqual([]);
     });
 
-    it("--execute commits schedule -> publish -> package -> season:add-event, deriving the pre-reveal Director Cut estimate (Gap B) with zero mirror data", async () => {
-      const result = runCli(["--at=2026-08-08T18:00:00.000Z", "--execute", "--json"]);
+    it("--execute commits schedule -> publish -> package -> season:add-event for the premiere lane", async () => {
+      const result = runCli([
+        "--at=2026-08-08T18:00:00.000Z",
+        "--execute",
+        "--json",
+      ]);
       expect(result.code).toBe(0);
       const outcome = JSON.parse(result.stdout);
       expect(outcome.ok).toBe(true);
@@ -470,19 +707,27 @@ describe("season:program-week CLI — real subprocess end to end", () => {
       expect(matches.matches).toHaveLength(1);
       expect(matches.matches[0]!.state).toBe("published");
       expect(matches.matches[0]!.participants).toEqual([
-        { playerName: "Auri", agentId: "agt_auri", agentVersionId: "agtv_auri_v43", builderId: null },
-        { playerName: "Sefirot", agentId: "agt_sefirot", agentVersionId: "agtv_sefirot_v10", builderId: null },
+        {
+          playerName: "Auri",
+          agentId: "agt_auri",
+          agentVersionId: "agtv_auri_v43",
+          builderId: null,
+        },
+        {
+          playerName: "Sefirot",
+          agentId: "agt_sefirot",
+          agentVersionId: "agtv_sefirot_v10",
+          builderId: null,
+        },
       ]);
 
       const packages = await readEventPackageStore(stateDir);
       const savedPackage = findEventPackage(packages, outcome.matchId);
       expect(savedPackage).not.toBeNull();
-      // No live mirror data.json was ever written for this fixture — the
-      // estimate can ONLY have come from the pre-reveal sealed-bundle
-      // fallback (Gap B), never a mirror episode row.
-      expect(savedPackage!.directorCutEstimateSeconds).toBeGreaterThan(0);
 
-      const registry = await loadSeasonRegistry(path.join(seasonDir, "seasons.json"));
+      const registry = await loadSeasonRegistry(
+        path.join(seasonDir, "seasons.json"),
+      );
       expect(registry.seasons[0]!.eventSlots).toHaveLength(1);
 
       expect(outcome.undoCommands).toEqual([
@@ -492,8 +737,16 @@ describe("season:program-week CLI — real subprocess end to end", () => {
     }, 30000);
 
     it("--episode overrides auto-selection to a specific candidate", async () => {
-      await writePremiereQueueItem(path.join(queueRoot, "ready"), "20260801T000000Z-run2", "ereq_premiere2");
-      const result = runCli(["--episode=20260801T000000Z-run2", "--at=2026-08-08T18:00:00.000Z", "--json"]);
+      await writePremiereQueueItem(
+        path.join(queueRoot, "ready"),
+        "20260801T000000Z-run2",
+        "ereq_premiere2",
+      );
+      const result = runCli([
+        "--episode=20260801T000000Z-run2",
+        "--at=2026-08-08T18:00:00.000Z",
+        "--json",
+      ]);
       expect(result.code).toBe(0);
       const outcome = JSON.parse(result.stdout);
       expect(outcome.ok).toBe(true);
@@ -505,20 +758,34 @@ describe("season:program-week CLI — real subprocess end to end", () => {
     it("never writes a season slot when the gate fails, and reports the exact missing[] list", async () => {
       // No identity registered -> participants can never resolve -> the
       // gate must fail on participant_identity_unresolved.
-      await writePremiereQueueItem(path.join(queueRoot, "ready"), "20260801T000000Z-run1", "ereq_premiere1");
-      await writeSeasonRegistry(path.join(seasonDir, "seasons.json"), [baseSeason()]);
+      await writePremiereQueueItem(
+        path.join(queueRoot, "ready"),
+        "20260801T000000Z-run1",
+        "ereq_premiere1",
+      );
+      await writeSeasonRegistry(path.join(seasonDir, "seasons.json"), [
+        baseSeason(),
+      ]);
 
-      const dryRun = JSON.parse(runCli(["--at=2026-08-08T18:00:00.000Z", "--json"]).stdout);
+      const dryRun = JSON.parse(
+        runCli(["--at=2026-08-08T18:00:00.000Z", "--json"]).stdout,
+      );
       expect(dryRun.ok).toBe(false);
       expect(dryRun.reason).toBe("gate_failed");
       expect(dryRun.missing.length).toBeGreaterThan(0);
-      expect(dryRun.missing.some((m: string) => m.startsWith("participant_identity_unresolved"))).toBe(true);
+      expect(
+        dryRun.missing.some((m: string) =>
+          m.startsWith("participant_identity_unresolved"),
+        ),
+      ).toBe(true);
 
       // Dry run must still write nothing.
       const matchesAfterDryRun = await readFeaturedMatchStore(stateDir);
       expect(matchesAfterDryRun.matches).toEqual([]);
 
-      const executed = JSON.parse(runCli(["--at=2026-08-08T18:00:00.000Z", "--execute", "--json"]).stdout);
+      const executed = JSON.parse(
+        runCli(["--at=2026-08-08T18:00:00.000Z", "--execute", "--json"]).stdout,
+      );
       expect(executed.ok).toBe(false);
       expect(executed.reason).toBe("gate_failed");
       expect(executed.missing.length).toBeGreaterThan(0);
@@ -532,7 +799,9 @@ describe("season:program-week CLI — real subprocess end to end", () => {
       expect(packagesAfterExecute.packages).toHaveLength(1);
 
       // ... but NEVER folds the event into the season programme.
-      const registry = await loadSeasonRegistry(path.join(seasonDir, "seasons.json"));
+      const registry = await loadSeasonRegistry(
+        path.join(seasonDir, "seasons.json"),
+      );
       expect(registry.seasons[0]!.eventSlots).toEqual([]);
       expect(executed.undoCommands).toEqual([]);
     }, 30000);

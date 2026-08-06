@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
+import type { CoworldLeagueMirrorData } from "../server/agents/CoworldLeagueSiteWriter";
 import {
   FeaturedMatchSchema,
   newFeaturedMatchId,
@@ -10,7 +11,6 @@ import {
   type FeaturedMatchEvidence,
   type FeaturedMatchParticipant,
 } from "../server/agents/FeaturedMatch";
-import type { CoworldLeagueMirrorData } from "../server/agents/CoworldLeagueSiteWriter";
 import { resolveAgentIdentityView } from "../server/identity/IdentityMatching";
 import type { IdentityRegistrySnapshot } from "../server/identity/IdentityRegistry";
 
@@ -355,7 +355,9 @@ const SealedBundleSeatsOnlySchema = z.object({
     }),
   ),
 });
-type SealedBundleSeat = z.infer<typeof SealedBundleSeatsOnlySchema>["seats"][number];
+type SealedBundleSeat = z.infer<
+  typeof SealedBundleSeatsOnlySchema
+>["seats"][number];
 
 /** Same bound `PremiereWageringSourceBundle.ts`'s `MAX_GAME_RECORD_BYTES` uses for the same file family (`bundle.source.json` embeds a full game record). */
 const MAX_SEALED_BUNDLE_BYTES = 512 * 1024 * 1024;
@@ -387,7 +389,11 @@ function resolveSealedBundleParticipant(
       ? seat.policyIdentity.policyName
       : null;
   const view = resolveAgentIdentityView(
-    { playerName: seat.displayName, ratingPolicyLabel, activeChampionPolicyLabel: null },
+    {
+      playerName: seat.displayName,
+      ratingPolicyLabel,
+      activeChampionPolicyLabel: null,
+    },
     identity.agents,
     identity.builders,
     identity.versions,
@@ -409,7 +415,11 @@ export async function resolveSealedBundleParticipants(
   queueItemName: string,
   identity: IdentityRegistrySnapshot,
 ): Promise<ResolveSealedBundleParticipantsResult> {
-  const bundlePath = path.join(queueReadyDir, queueItemName, "bundle.source.json");
+  const bundlePath = path.join(
+    queueReadyDir,
+    queueItemName,
+    "bundle.source.json",
+  );
   let stat;
   try {
     stat = await fs.stat(bundlePath);
@@ -440,72 +450,9 @@ export async function resolveSealedBundleParticipants(
   }
   return {
     ok: true,
-    participants: parsed.data.seats.map((seat) => resolveSealedBundleParticipant(seat, identity)),
-  };
-}
-
-/**
- * DirectorCutPlan.ts's own "Known gaps" fix: reads ONLY `turnCount`/
- * `checkpointTurns` off a sealed queue item's `meta.json` —
- * `SealedBundleSeatsOnlySchema` above already established the narrow,
- * non-passthrough-schema discipline for `bundle.source.json`; the same
- * discipline applies here even though `meta.json` (unlike
- * `bundle.source.json`) carries no result-bearing field today
- * (`MetaJsonSchema` above has none) — a narrow schema still strips
- * anything a future or poisoned `meta.json` might add that this call has
- * no business reading, rather than relying on "the producer never writes
- * that field" holding forever. Used ONLY by `premiere:package`'s
- * pre-reveal Director Cut estimate fallback
- * (`DirectorCutPlan.estimatePreRevealDirectorCutSeconds`) — never by
- * `rankPremiereCandidates` above, which keeps reading the full (trusted,
- * own-producer) `MetaJsonSchema` for ranking.
- */
-const SealedBundleTurnStatsSchema = z.object({
-  turnCount: z.number().int().nonnegative(),
-  checkpointTurns: z.array(z.number()),
-});
-
-/** `meta.json` is a small hand-written manifest, not a game record — bounded generously so a corrupt/oversized file fails fast rather than blocking a read. */
-const MAX_SEALED_BUNDLE_META_BYTES = 4 * 1024 * 1024;
-
-export type ResolveSealedBundleTurnStatsResult =
-  | { ok: true; turnCount: number; checkpointTurns: number[] }
-  | { ok: false; reason: string };
-
-export async function resolveSealedBundleTurnStats(
-  queueReadyDir: string,
-  queueItemName: string,
-): Promise<ResolveSealedBundleTurnStatsResult> {
-  const metaPath = path.join(queueReadyDir, queueItemName, "meta.json");
-  let stat;
-  try {
-    stat = await fs.stat(metaPath);
-  } catch {
-    return { ok: false, reason: `sealed bundle meta not found at ${metaPath}` };
-  }
-  if (!stat.isFile() || stat.size > MAX_SEALED_BUNDLE_META_BYTES) {
-    return {
-      ok: false,
-      reason: `${metaPath} is not a regular file within the ${MAX_SEALED_BUNDLE_META_BYTES}-byte bound`,
-    };
-  }
-  let raw: unknown;
-  try {
-    raw = JSON.parse(await fs.readFile(metaPath, "utf8"));
-  } catch {
-    return { ok: false, reason: `${metaPath} is not valid JSON` };
-  }
-  const parsed = SealedBundleTurnStatsSchema.safeParse(raw);
-  if (!parsed.success) {
-    return {
-      ok: false,
-      reason: `${metaPath} does not carry a valid turnCount/checkpointTurns (${parsed.error.issues[0]?.message ?? "schema mismatch"})`,
-    };
-  }
-  return {
-    ok: true,
-    turnCount: parsed.data.turnCount,
-    checkpointTurns: parsed.data.checkpointTurns,
+    participants: parsed.data.seats.map((seat) =>
+      resolveSealedBundleParticipant(seat, identity),
+    ),
   };
 }
 
@@ -524,7 +471,11 @@ export async function rankPremiereCandidates(options: {
   const rejected: PremiereQueueRejection[] = [];
 
   for (const queueItemName of itemNames) {
-    const metaPath = path.join(options.queueReadyDir, queueItemName, "meta.json");
+    const metaPath = path.join(
+      options.queueReadyDir,
+      queueItemName,
+      "meta.json",
+    );
     let metaRaw: unknown;
     try {
       metaRaw = JSON.parse(await fs.readFile(metaPath, "utf8"));
@@ -680,7 +631,8 @@ async function main(): Promise<void> {
 
 const isMainModule =
   process.argv[1] !== undefined &&
-  path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
+  path.resolve(process.argv[1]) ===
+    path.resolve(fileURLToPath(import.meta.url));
 if (isMainModule) {
   main().catch((error: unknown) => {
     console.error(error);

@@ -19,16 +19,25 @@ import {
   retentionReferencesFromEpisodes,
 } from "../server/agents/CoworldLeagueArtifactRetention";
 import {
+  backfillMatchNarrativeArtifacts,
+  generateMatchNarrativeArtifactsForRunDir,
+  type MatchNarrativeGenerationResult,
+} from "../server/agents/CoworldLeagueMatchNarrativeBackfill";
+import {
+  backfillMatchStateSeries,
+  generateMatchStateSeriesForRunDir,
+  type MatchStateSeriesGenerationResult,
+} from "../server/agents/CoworldLeagueMatchStateSeriesBackfill";
+import {
   buildCoworldReplayUiArtifact,
   buildEpisodeRow,
   buildRoundRows,
   buildStandingRows,
   mergeEpisodeRows,
   parseCompletedEpisodeMetaList,
-  parseDirectorCutPlanSummary,
+  parseCuratedDramaScore,
   parseHostedReplayPayload,
   parseLeagueSummary,
-  parseCuratedDramaScore,
   parseMatchNarrativeSummary,
   pickCompetitionDivision,
   premiereHrefForEpisode,
@@ -41,21 +50,6 @@ import {
   type ParsedHostedReplay,
   type PremiereArchiveIndexSummary,
 } from "../server/agents/CoworldLeagueMirrorCore";
-import {
-  backfillDirectorCutPlans,
-  generateDirectorCutPlanForRunDir,
-  type DirectorCutGenerationResult,
-} from "../server/agents/CoworldLeagueDirectorCutBackfill";
-import {
-  backfillMatchStateSeries,
-  generateMatchStateSeriesForRunDir,
-  type MatchStateSeriesGenerationResult,
-} from "../server/agents/CoworldLeagueMatchStateSeriesBackfill";
-import {
-  backfillMatchNarrativeArtifacts,
-  generateMatchNarrativeArtifactsForRunDir,
-  type MatchNarrativeGenerationResult,
-} from "../server/agents/CoworldLeagueMatchNarrativeBackfill";
 import { withCoworldLeagueMirrorOperationLock } from "../server/agents/CoworldLeagueMirrorOperationLock";
 import {
   buildPremiereSiteBlock,
@@ -160,24 +154,16 @@ interface MirrorOptions {
    */
   premiereProbeOrigin: string | null;
   /**
-   * Max number of `director-cut-plan.json` generation attempts per sync
-   * cycle (`--director-cut-budget`, env `PROXYWAR_LEAGUE_DIRECTOR_CUT_BUDGET`,
-   * default 1). Shared across BOTH freshly-unpacked episodes (checked first,
-   * so a live match gets its cut as soon as budget allows) and the gradual
-   * backfill scan over older retained run dirs still missing one — keeps
-   * every cycle's extra parse/CPU work bounded and never risks delaying the
-   * league publish for a thundering herd of history. 0 disables generation
-   * entirely.
-   */
-  directorCutPlanBudget: number;
-  /**
    * Max number of drama-report/match-story/match-recap generation attempts
    * per sync cycle (`--match-narrative-budget`, env
-   * `PROXYWAR_LEAGUE_MATCH_NARRATIVE_BUDGET`, default 1) — same
-   * fresh-episodes-first-then-gradual-backfill budget shape as
-   * `directorCutPlanBudget` above, a SEPARATE counter so drama/story
-   * generation never competes with Director Cut for the same slots. 0
-   * disables generation entirely.
+   * `PROXYWAR_LEAGUE_MATCH_NARRATIVE_BUDGET`, default 1). Shared across BOTH
+   * freshly-unpacked episodes (checked first, so a live match gets its
+   * narrative as soon as budget allows) and the gradual backfill scan over
+   * older retained run dirs still missing one — keeps every cycle's extra
+   * parse/CPU work bounded and never risks delaying the league publish for
+   * a thundering herd of history. A SEPARATE counter from
+   * `matchStateSeriesBudget` below, so the two generators never compete for
+   * the same slots. 0 disables generation entirely.
    */
   matchNarrativeBudget: number;
   /**
@@ -185,17 +171,17 @@ interface MirrorOptions {
    * generation attempts per sync cycle (`--match-state-series-budget`, env
    * `PROXYWAR_LEAGUE_MATCH_STATE_SERIES_BUDGET`, default 3) — same
    * fresh-episodes-first-then-gradual-backfill budget shape as
-   * `directorCutPlanBudget`/`matchNarrativeBudget`, a SEPARATE counter.
-   * Defaults HIGHER than the other two: this generation is a pure
+   * `matchNarrativeBudget` above, a SEPARATE counter.
+   * Defaults HIGHER: this generation is a pure
    * re-projection of already-written artifacts (no telemetry curation, no
    * importance scoring — see `AgentMatchStateSeries.ts`'s own doc), so it
    * is strictly cheaper, and staying ahead of the historical backlog gives
-   * `director-cut-plan.json`/`match-recap.json` generation the best chance
+   * `match-recap.json` generation the best chance
    * of seeing a real series on THEIR first pass rather than a later cycle
    * (see `CoworldLeagueMatchStateSeriesBackfill.ts`'s own ordering-dependency
-   * doc — this is why it also runs strictly BEFORE the other two below,
-   * both for freshly-unpacked episodes and the backfill scan). 0 disables
-   * generation entirely.
+   * doc — this is why it also runs strictly BEFORE match-narrative
+   * generation, both for freshly-unpacked episodes and the backfill scan).
+   * 0 disables generation entirely.
    */
   matchStateSeriesBudget: number;
 }
@@ -239,9 +225,6 @@ function parseOptions(argv: string[]): MirrorOptions {
     premiereArchiveIndexPath: null,
     latestPremierePointerPath: null,
     premiereProbeOrigin: null,
-    directorCutPlanBudget: Number(
-      process.env.PROXYWAR_LEAGUE_DIRECTOR_CUT_BUDGET ?? "1",
-    ),
     matchNarrativeBudget: Number(
       process.env.PROXYWAR_LEAGUE_MATCH_NARRATIVE_BUDGET ?? "1",
     ),
@@ -345,9 +328,6 @@ function parseOptions(argv: string[]): MirrorOptions {
         options.premiereProbeOrigin = value;
         break;
       }
-      case "--director-cut-budget":
-        options.directorCutPlanBudget = Number(next());
-        break;
       case "--match-narrative-budget":
         options.matchNarrativeBudget = Number(next());
         break;
@@ -369,8 +349,6 @@ function parseOptions(argv: string[]): MirrorOptions {
     options.maxRetainedRunDirectories < options.maxRenderedEpisodes ||
     !Number.isFinite(options.minimumFreeBytes) ||
     options.minimumFreeBytes < 10 * 1024 * 1024 * 1024 ||
-    !Number.isInteger(options.directorCutPlanBudget) ||
-    options.directorCutPlanBudget < 0 ||
     !Number.isInteger(options.matchNarrativeBudget) ||
     options.matchNarrativeBudget < 0 ||
     !Number.isInteger(options.matchStateSeriesBudget) ||
@@ -531,7 +509,11 @@ async function unpackEpisodeRunDir(
   replay: ParsedHostedReplay,
   runsRootDir: string,
   minimumFreeBytes: number,
-): Promise<{ watchHref: string; fullRenderHref: string; runDir: string } | null> {
+): Promise<{
+  watchHref: string;
+  fullRenderHref: string;
+  runDir: string;
+} | null> {
   if (replay.spectatorReplay === null) {
     return null;
   }
@@ -589,34 +571,12 @@ async function unpackEpisodeRunDir(
 }
 
 /**
- * Product overhaul spec Stage 5: reads `director-cut-plan.json` from an
- * episode's unpacked run directory, when one exists. Tolerant of absence —
- * a missing file (not yet generated this cycle, or generation was skipped
- * for lack of usable input — see `generateDirectorCutPlanForRunDir` below)
- * or any other read failure resolves to `null`, exactly like every other
- * optional-artifact path in this mirror. Parsing itself is delegated to the
- * pure, unit-tested `parseDirectorCutPlanSummary`.
- */
-async function readDirectorCutSummaryFromRunDir(
-  runDir: string,
-): Promise<{ durationEstimateSeconds: number; segmentCount: number } | null> {
-  try {
-    const raw = await fs.readFile(
-      path.join(runDir, "director-cut-plan.json"),
-      "utf8",
-    );
-    return parseDirectorCutPlanSummary(raw);
-  } catch {
-    return null;
-  }
-}
-
-/**
  * "Drama recaps" gap closure: reads `drama-report.json` + `match-story.json`
  * from an episode's unpacked run directory, when BOTH exist (they're
  * written atomically together — see `generateMatchNarrativeArtifactsForRunDir`'s
- * own doc). Tolerant of absence, exactly like {@link readDirectorCutSummaryFromRunDir}
- * above. Legacy-pair parsing is delegated to the pure, unit-tested
+ * own doc). Tolerant of absence, exactly like every other optional-artifact
+ * path in this mirror. Legacy-pair parsing is delegated to the pure,
+ * unit-tested
  * `parseMatchNarrativeSummary`; `curatedDramaScore` — the PUBLIC ranking
  * input, see `AgentMatchRecap.ts`'s doc — is resolved INDEPENDENTLY from
  * `match-recap.json` (`parseCuratedDramaScore`) so it degrades on its own
@@ -625,7 +585,11 @@ async function readDirectorCutSummaryFromRunDir(
  */
 async function readMatchNarrativeSummaryFromRunDir(
   runDir: string,
-): Promise<{ dramaScore: number; entertainmentGrade: string; curatedDramaScore: number | null } | null> {
+): Promise<{
+  dramaScore: number;
+  entertainmentGrade: string;
+  curatedDramaScore: number | null;
+} | null> {
   let legacy: { dramaScore: number; entertainmentGrade: string } | null;
   try {
     const [dramaReportRaw, matchStoryRaw] = await Promise.all([
@@ -657,34 +621,11 @@ function log(message: string): void {
 }
 
 /**
- * Logs a `director-cut-plan.json` generation attempt's outcome. Silent on
- * the two free, expected-common skips (`already-exists`, `no-input`) — those
- * would otherwise spam every cycle for the vast majority of run dirs that
- * simply already have a plan or haven't been unpacked with telemetry yet.
- */
-function logDirectorCutGenerationResult(result: DirectorCutGenerationResult): void {
-  const { runKey, outcome } = result;
-  switch (outcome.status) {
-    case "already-exists":
-    case "no-input":
-      return;
-    case "skipped-no-usable-telemetry":
-      log(`director cut plan skipped for ${runKey}: no usable telemetry`);
-      return;
-    case "generated":
-      log(
-        `director cut plan generated for ${runKey} (${outcome.source}, ${outcome.segmentCount} segment(s))`,
-      );
-      return;
-    case "failed":
-      log(`director cut plan generation failed for ${runKey}: ${outcome.error}`);
-      return;
-  }
-}
-
-/**
- * Logs a drama-report/match-story/match-recap generation attempt's outcome
- * — same silent-on-free-skips convention as {@link logDirectorCutGenerationResult}.
+ * Logs a drama-report/match-story/match-recap generation attempt's outcome.
+ * Silent on the two free, expected-common skips (`already-exists`,
+ * `no-input`) — those would otherwise spam every cycle for the vast
+ * majority of run dirs that simply already have narrative artifacts or
+ * haven't been unpacked with telemetry yet.
  */
 function logMatchNarrativeGenerationResult(
   result: MatchNarrativeGenerationResult,
@@ -695,7 +636,9 @@ function logMatchNarrativeGenerationResult(
     case "no-input":
       return;
     case "skipped-no-usable-evidence":
-      log(`match narrative generation skipped for ${runKey}: no usable evidence`);
+      log(
+        `match narrative generation skipped for ${runKey}: no usable evidence`,
+      );
       return;
     case "generated":
       log(
@@ -727,7 +670,7 @@ function logMatchNarrativeGenerationResult(
 
 /**
  * Logs a `match-state-series.json` generation attempt's outcome — same
- * silent-on-free-skips convention as {@link logDirectorCutGenerationResult}.
+ * silent-on-free-skips convention as {@link logMatchNarrativeGenerationResult}.
  */
 function logMatchStateSeriesGenerationResult(
   result: MatchStateSeriesGenerationResult,
@@ -746,7 +689,9 @@ function logMatchStateSeriesGenerationResult(
       );
       return;
     case "failed":
-      log(`match state series generation failed for ${runKey}: ${outcome.error}`);
+      log(
+        `match state series generation failed for ${runKey}: ${outcome.error}`,
+      );
       return;
   }
 }
@@ -1060,17 +1005,12 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
   const freshEpisodes: CoworldLeagueEpisodeRow[] = [];
   // Season Zero Phase 2: `match-state-series.json` generation runs FIRST
   // (spent first, both here and in the backfill scan below) so that
-  // director-cut/match-narrative generation for the SAME run, in the SAME
+  // match-narrative generation for the SAME run, in the SAME
   // cycle, has the best chance of seeing a real series on their own first
   // pass — see `CoworldLeagueMatchStateSeriesBackfill.ts`'s ordering-
   // dependency doc.
   let matchStateSeriesBudget = options.matchStateSeriesBudget;
   const matchStateSeriesAttemptedRunKeys = new Set<string>();
-  // Shared per-cycle budget for `director-cut-plan.json` generation — spent
-  // first on freshly-unpacked episodes below (so a live match gets its cut
-  // as soon as budget allows), then on the backfill scan after the loop.
-  let directorCutBudget = options.directorCutPlanBudget;
-  const directorCutAttemptedRunKeys = new Set<string>();
   // Same shape, separate counter, for drama-report/match-story/match-recap
   // generation — a distinct budget so the two generators never compete for
   // the same slots.
@@ -1159,18 +1099,6 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
           matchStateSeriesBudget -= 1;
         }
       }
-      if (unpacked !== null && directorCutBudget > 0) {
-        const runKey = path.basename(unpacked.runDir);
-        directorCutAttemptedRunKeys.add(runKey);
-        const result = await generateDirectorCutPlanForRunDir(
-          unpacked.runDir,
-          runKey,
-        );
-        logDirectorCutGenerationResult(result);
-        if (result.attempted) {
-          directorCutBudget -= 1;
-        }
-      }
       if (unpacked !== null && matchNarrativeBudget > 0) {
         const runKey = path.basename(unpacked.runDir);
         matchNarrativeAttemptedRunKeys.add(runKey);
@@ -1183,10 +1111,6 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
           matchNarrativeBudget -= 1;
         }
       }
-      const directorCut =
-        unpacked !== null
-          ? await readDirectorCutSummaryFromRunDir(unpacked.runDir)
-          : null;
       const dramaEvidence =
         unpacked !== null
           ? await readMatchNarrativeSummaryFromRunDir(unpacked.runDir)
@@ -1205,7 +1129,6 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
             meta.episodeRequestId,
             revealedPremiereIds,
           ),
-          directorCut,
           dramaEvidence,
         }),
       );
@@ -1251,22 +1174,6 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
     } catch (error) {
       log(
         `match state series backfill failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-    }
-    try {
-      const results = await backfillDirectorCutPlans(
-        options.runsRootDir,
-        directorCutBudget,
-        directorCutAttemptedRunKeys,
-      );
-      for (const result of results) {
-        logDirectorCutGenerationResult(result);
-      }
-    } catch (error) {
-      log(
-        `director cut plan backfill failed: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );

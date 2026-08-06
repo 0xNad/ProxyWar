@@ -13,8 +13,7 @@ import type { SpectatorEvent } from "./AgentSpectatorTelemetry";
  * section: lead changes, major reversals, elimination timing, alliance
  * durations, and decisive territorial swings. Every threshold below is a
  * documented, exported constant — never a bare magic number — so a future
- * tune has a reasoned starting point, matching `DirectorCutPlan.ts`'s own
- * convention for its tunables.
+ * tune has a reasoned starting point.
  *
  * All functions here are pure and operate only on a `MatchStateSeries`
  * (plus, for alliance durations, the same telemetry events the series
@@ -30,6 +29,10 @@ export function ordinalLabel(rank: number): string {
   if (remainder10 === 3 && remainder100 !== 13) return `${rank}rd`;
   return `${rank}th`;
 }
+
+/** Fraction/cap defining the "final stretch" window a `final_confrontation` beat looks for a genuine attack/nuke event within — shared by `AgentMatchRecap.ts` and `AgentDecisiveMoments.ts` so both agree on one tuned definition of "the final stretch of the match", never two that could silently drift apart. */
+export const FINAL_CONFLICT_TURN_FRACTION = 0.05;
+export const FINAL_CONFLICT_TURN_CAP = 400;
 
 // ---------------------------------------------------------------------------
 // Lead changes
@@ -52,8 +55,7 @@ export interface LeadChange {
 /** New leader must hold at least this much MORE total-map territory share than the outgoing leader for the swap to count as a genuine overtake rather than noise between two agents with near-equal territory. 0.03 = 3 percentage points of the whole map. */
 export const LEAD_CHANGE_MARGIN_SHARE = 0.03;
 
-export const LEAD_CHANGE_METHODOLOGY =
-  `A lead change is recorded when the territory-share leader among alive agents switches to a different agent by at least ${Math.round(LEAD_CHANGE_MARGIN_SHARE * 100)} percentage points of total map territory, AND the new leader is still leading at the NEXT sampled point (filters a single-sample flicker between two near-equal territories from being reported as a real change of lead). Samples before anyone has claimed territory (pre-spawn) are excluded from leader tracking.`;
+export const LEAD_CHANGE_METHODOLOGY = `A lead change is recorded when the territory-share leader among alive agents switches to a different agent by at least ${Math.round(LEAD_CHANGE_MARGIN_SHARE * 100)} percentage points of total map territory, AND the new leader is still leading at the NEXT sampled point (filters a single-sample flicker between two near-equal territories from being reported as a real change of lead). Samples before anyone has claimed territory (pre-spawn) are excluded from leader tracking.`;
 
 function leaderOf(sample: MatchStateSeriesSample): MatchStateSeriesAgentSample {
   const alive = sample.agents.filter((agent) => agent.alive);
@@ -90,7 +92,10 @@ export function computeLeadChanges(series: MatchStateSeries): LeadChange[] {
       continue;
     }
     const nextSample = samples[index + 1];
-    if (nextSample !== undefined && leaderOf(nextSample).playerID !== candidate.playerID) {
+    if (
+      nextSample !== undefined &&
+      leaderOf(nextSample).playerID !== candidate.playerID
+    ) {
       // Single-sample flicker — the "lead" reverted at the very next point.
       continue;
     }
@@ -132,15 +137,18 @@ export const REVERSAL_MIN_PLACES = 3;
 /** Maximum number of SAMPLED points a qualifying swing may span — bounds "major reversal" to a rapid rise/collapse, not a slow multi-hour drift that happens to cross the place threshold eventually. */
 export const REVERSAL_MAX_SAMPLE_GAP = 4;
 
-export const REVERSAL_METHODOLOGY =
-  `A major reversal is recorded for an agent whose rank (by tilesOwned among every agent, ties broken by troops then playerID) changes by at least ${REVERSAL_MIN_PLACES} places within ${REVERSAL_MAX_SAMPLE_GAP} or fewer sampled points — a rapid rise or collapse, not a slow drift. Per agent, the detector scans left to right and reports the single largest qualifying swing starting at each unclaimed sample, then skips ahead past it, so overlapping windows never produce duplicate reversals for the same climb or collapse.`;
+export const REVERSAL_METHODOLOGY = `A major reversal is recorded for an agent whose rank (by tilesOwned among every agent, ties broken by troops then playerID) changes by at least ${REVERSAL_MIN_PLACES} places within ${REVERSAL_MAX_SAMPLE_GAP} or fewer sampled points — a rapid rise or collapse, not a slow drift. Per agent, the detector scans left to right and reports the single largest qualifying swing starting at each unclaimed sample, then skips ahead past it, so overlapping windows never produce duplicate reversals for the same climb or collapse.`;
 
-export function computeMajorReversals(series: MatchStateSeries): MajorReversal[] {
+export function computeMajorReversals(
+  series: MatchStateSeries,
+): MajorReversal[] {
   const samples = series.samples;
   if (samples.length < 2) {
     return [];
   }
-  const playerIDs = [...new Set(samples[0].agents.map((agent) => agent.playerID))];
+  const playerIDs = [
+    ...new Set(samples[0].agents.map((agent) => agent.playerID)),
+  ];
   const results: MajorReversal[] = [];
 
   for (const playerID of playerIDs) {
@@ -159,7 +167,11 @@ export function computeMajorReversals(series: MatchStateSeries): MajorReversal[]
         index + REVERSAL_MAX_SAMPLE_GAP,
         samples.length - 1,
       );
-      for (let endIndex = index + 1; endIndex <= lastCandidateIndex; endIndex += 1) {
+      for (
+        let endIndex = index + 1;
+        endIndex <= lastCandidateIndex;
+        endIndex += 1
+      ) {
         const rankAtEnd = samples[endIndex].agents.find(
           (agent) => agent.playerID === playerID,
         )?.rank;
@@ -174,7 +186,9 @@ export function computeMajorReversals(series: MatchStateSeries): MajorReversal[]
         index += 1;
         continue;
       }
-      const startAgent = samples[index].agents.find((agent) => agent.playerID === playerID)!;
+      const startAgent = samples[index].agents.find(
+        (agent) => agent.playerID === playerID,
+      )!;
       const endAgent = samples[bestEndIndex].agents.find(
         (agent) => agent.playerID === playerID,
       )!;
@@ -193,7 +207,9 @@ export function computeMajorReversals(series: MatchStateSeries): MajorReversal[]
   }
 
   return results.sort(
-    (a, b) => Math.abs(b.placesChanged) - Math.abs(a.placesChanged) || a.fromTurn - b.fromTurn,
+    (a, b) =>
+      Math.abs(b.placesChanged) - Math.abs(a.placesChanged) ||
+      a.fromTurn - b.fromTurn,
   );
 }
 
@@ -228,7 +244,9 @@ export function computeEliminationTimings(
   if (samples.length === 0) {
     return [];
   }
-  const playerIDs = [...new Set(samples[0].agents.map((agent) => agent.playerID))];
+  const playerIDs = [
+    ...new Set(samples[0].agents.map((agent) => agent.playerID)),
+  ];
   const results: EliminationTiming[] = [];
   for (const playerID of playerIDs) {
     let lastAliveTurn: number | null = null;
@@ -270,10 +288,7 @@ export interface AllianceDuration extends AllianceInterval {
   ongoing: boolean;
 }
 
-function usernameForAgentID(
-  series: MatchStateSeries,
-  agentID: string,
-): string {
+function usernameForAgentID(series: MatchStateSeries, agentID: string): string {
   for (const sample of series.samples) {
     const match = sample.agents.find((agent) => agent.agentID === agentID);
     if (match !== undefined) return match.username;
@@ -302,7 +317,10 @@ export function computeAllianceDurations(
         (interval.brokenTurn ?? series.totalTurns) - interval.formedTurn,
       ongoing: interval.brokenTurn === null,
     }))
-    .sort((a, b) => b.durationTurns - a.durationTurns || a.formedTurn - b.formedTurn);
+    .sort(
+      (a, b) =>
+        b.durationTurns - a.durationTurns || a.formedTurn - b.formedTurn,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -324,16 +342,19 @@ export interface TerritorialSwing {
 /** Minimum territory-share change between two CONSECUTIVE sampled points, for one agent, to count as a "decisive" swing (a conquest wave or a collapse) rather than gradual attrition. 0.10 = 10 percentage points of the whole map moving in one sampled interval. */
 export const TERRITORIAL_SWING_MIN_DELTA_SHARE = 0.1;
 
-export const TERRITORIAL_SWING_METHODOLOGY =
-  `A decisive territorial swing is recorded when one agent's territory share changes by at least ${Math.round(TERRITORIAL_SWING_MIN_DELTA_SHARE * 100)} percentage points of total map territory between two CONSECUTIVE sampled points — a sudden conquest wave or collapse, never gradual attrition spread across many samples.`;
+export const TERRITORIAL_SWING_METHODOLOGY = `A decisive territorial swing is recorded when one agent's territory share changes by at least ${Math.round(TERRITORIAL_SWING_MIN_DELTA_SHARE * 100)} percentage points of total map territory between two CONSECUTIVE sampled points — a sudden conquest wave or collapse, never gradual attrition spread across many samples.`;
 
-export function computeTerritorialSwings(series: MatchStateSeries): TerritorialSwing[] {
+export function computeTerritorialSwings(
+  series: MatchStateSeries,
+): TerritorialSwing[] {
   const swings: TerritorialSwing[] = [];
   for (let index = 1; index < series.samples.length; index += 1) {
     const previous = series.samples[index - 1];
     const current = series.samples[index];
     for (const agent of current.agents) {
-      const previousAgent = previous.agents.find((entry) => entry.playerID === agent.playerID);
+      const previousAgent = previous.agents.find(
+        (entry) => entry.playerID === agent.playerID,
+      );
       if (previousAgent === undefined) continue;
       const deltaShare = agent.territoryShare - previousAgent.territoryShare;
       if (Math.abs(deltaShare) < TERRITORIAL_SWING_MIN_DELTA_SHARE) continue;
@@ -349,5 +370,9 @@ export function computeTerritorialSwings(series: MatchStateSeries): TerritorialS
       });
     }
   }
-  return swings.sort((a, b) => Math.abs(b.deltaShare) - Math.abs(a.deltaShare) || a.fromTurn - b.fromTurn);
+  return swings.sort(
+    (a, b) =>
+      Math.abs(b.deltaShare) - Math.abs(a.deltaShare) ||
+      a.fromTurn - b.fromTurn,
+  );
 }

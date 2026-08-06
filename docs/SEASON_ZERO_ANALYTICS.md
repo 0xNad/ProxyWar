@@ -11,7 +11,7 @@ methodology reference the report itself links back to.
 - **Event catalog**: `src/server/analytics/AnalyticsEventSchema.ts` is the
   source of truth — `page_viewed`, `featured_event_impression`,
   `event_cta_clicked`, `replay_load_started/succeeded/failed`,
-  `director_cut_started`, `watched_30s/2m/50pct`, `completed`,
+  `watched_30s/2m/50pct`, `completed`,
   `switched_to_full_replay`, `decisive_moment_opened`, `timeline_jump`,
   `agent_profile_opened_from_match`, `builder_profile_opened`,
   `follow_bookmark`, `returning_anonymous_visitor`,
@@ -52,7 +52,7 @@ methodology reference the report itself links back to.
   happening now" tail — route template + event name + failure reason only,
   never a visitor id.
 - **Ingestion never gates or delays the product.** `POST
-  /api/analytics/events` is schema-validated, batch-capped (25 events),
+/api/analytics/events` is schema-validated, batch-capped (25 events),
   rate-limited per IP and per visitor id, and always answers `204` — an
   invalid or rate-limited batch is silently dropped, never surfaced as an
   error a visitor's experience depends on. It is deliberately reachable in
@@ -81,14 +81,10 @@ Wired into the product surfaces as of this pass:
 - **Replay surfaces**: `ReplayLoadingScreen.ts`
   (`replay_load_started`/`succeeded`/`failed`, threaded with the match id
   from `Main.ts`'s `openAiLeagueReplay`), `AiLeagueReplayOverlay.ts`
-  (`director_cut_started` on default-on mount and on explicit toggle-on,
-  carrying both `matchId` and `replayMode`; `timeline_jump` on every
-  War-Room/timeline jump; `watched_30s`/`watched_2m`/`watched_50pct`/
-  `completed` — each carrying `replayMode` ("director_cut" or
-  "full_replay", whichever mode the viewer was actually in) since BOTH
-  modes emit the SAME event names and the report divides them apart by
-  this dimension (see "Report metrics" below). `watched_30s`/`watched_2m`
-  fire from ACCUMULATED ACTIVE PLAYBACK seconds — each consecutive frame's
+  (`timeline_jump` on every War-Room/timeline jump;
+  `watched_30s`/`watched_2m`/`watched_50pct`/`completed`, each carrying
+  `matchId`. `watched_30s`/`watched_2m` fire from ACCUMULATED ACTIVE
+  PLAYBACK seconds — each consecutive frame's
   real delta, capped at ~2s so a pause/buffer/stall gap can never
   masquerade as watched time, with accumulation halted entirely while
   `document.hidden` (a backgrounded tab contributes zero) — never
@@ -175,21 +171,20 @@ Every report metric still carries one of three honest states:
 
 ## Report metrics and their methodology
 
-| Metric | Formula | Window |
-| --- | --- | --- |
-| Homepage → watch CTR | `event_cta_clicked` ÷ `page_viewed`, both on route `/` | all-time |
-| Replay load success rate | `replay_load_succeeded` ÷ `replay_load_started` | all-time |
-| Director Cut 30s/2m/50%/completion | `watched_30s`/`watched_2m`/`watched_50pct`/`completed` WITH `context.replayMode="director_cut"` ÷ `director_cut_started` | all-time |
-| Full Replay 30s/2m/50%/completion | `watched_30s`/`watched_2m`/`watched_50pct`/`completed` WITH `context.replayMode="full_replay"` — raw counts, no rate (no "started" baseline event exists for Full Replay) | all-time |
-| Most-watched matches | `director_cut_started` grouped by `matchId`, ranked descending, labeled via a read-model lookup at report-serve time (falls back to the raw match id) | all-time |
-| Agent/Builder profile CTR | (`agent_profile_opened_from_match` + `builder_profile_opened`) ÷ `director_cut_started` | all-time |
-| Returning-visitor-day share (anonymous) | `returning_anonymous_visitor` (capped at ONE emission per visitor id per UTC day) ÷ `page_viewed` — the share of page views from an already-established ANONYMOUS visitor identity. Deliberately excludes `returning_authenticated_visitor`: every visitor (signed in or not) gets an auto-minted guest account cookie, so blending the two would double-count the same visit | trailing 7 UTC days |
-| Returning authenticated visits | raw count of `returning_authenticated_visitor` (emitted server-side ONLY for a genuinely GitHub-linked account, never a plain returning guest) — NOT divided by `page_viewed` and NOT added into the anonymous share above, to avoid reintroducing the same double-count | trailing 7 UTC days, raw count |
-| Seven-day cohort return rate | **NOT IMPLEMENTED** — hardcoded `not_yet_instrumented`. A true cohort ("of visitors first seen on day N, the share seen again within 7 days") needs durable per-visitor last-seen retention, which this store deliberately never keeps (`AnalyticsAggregateStore.ts`'s "no visitor id is ever written to this file" contract; the bounded 300-key/day dimension cap is sized for route/event/agent dimensions, not one slot per unique visitor). The day-share metric above is the closest available honest proxy and is never silently substituted here | n/a |
-| Build flow funnel | raw stage counts: `build_flow_started`, `build_step_reached` at the final (7th) step, `registration_draft_submitted` | all-time, raw counts (see below) |
-| Claims and version releases | raw counts of `claim_started`, `claim_verified`, `version_release_created`, `version_observed` | all-time |
-| Failures by route | `replay_load_failed` grouped by normalized route template | all-time |
-| Failure reasons | `replay_load_failed` grouped by bounded `reason` code | all-time |
+| Metric                                  | Formula                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Window                           |
+| --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
+| Homepage → watch CTR                    | `event_cta_clicked` ÷ `page_viewed`, both on route `/`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | all-time                         |
+| Replay load success rate                | `replay_load_succeeded` ÷ `replay_load_started`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | all-time                         |
+| Full Replay 30s/2m/50%/completion       | `watched_30s`/`watched_2m`/`watched_50pct`/`completed` — raw counts, no rate (no "started" baseline event exists for replay viewing to divide by)                                                                                                                                                                                                                                                                                                                                                                                                        | all-time                         |
+| Most-watched matches                    | `replay_load_started` grouped by `matchId`, ranked descending, labeled via a read-model lookup at report-serve time (falls back to the raw match id)                                                                                                                                                                                                                                                                                                                                                                                                     | all-time                         |
+| Agent/Builder profile CTR               | (`agent_profile_opened_from_match` + `builder_profile_opened`) ÷ `replay_load_started`                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | all-time                         |
+| Returning-visitor-day share (anonymous) | `returning_anonymous_visitor` (capped at ONE emission per visitor id per UTC day) ÷ `page_viewed` — the share of page views from an already-established ANONYMOUS visitor identity. Deliberately excludes `returning_authenticated_visitor`: every visitor (signed in or not) gets an auto-minted guest account cookie, so blending the two would double-count the same visit                                                                                                                                                                            | trailing 7 UTC days              |
+| Returning authenticated visits          | raw count of `returning_authenticated_visitor` (emitted server-side ONLY for a genuinely GitHub-linked account, never a plain returning guest) — NOT divided by `page_viewed` and NOT added into the anonymous share above, to avoid reintroducing the same double-count                                                                                                                                                                                                                                                                                 | trailing 7 UTC days, raw count   |
+| Seven-day cohort return rate            | **NOT IMPLEMENTED** — hardcoded `not_yet_instrumented`. A true cohort ("of visitors first seen on day N, the share seen again within 7 days") needs durable per-visitor last-seen retention, which this store deliberately never keeps (`AnalyticsAggregateStore.ts`'s "no visitor id is ever written to this file" contract; the bounded 300-key/day dimension cap is sized for route/event/agent dimensions, not one slot per unique visitor). The day-share metric above is the closest available honest proxy and is never silently substituted here | n/a                              |
+| Build flow funnel                       | raw stage counts: `build_flow_started`, `build_step_reached` at the final (7th) step, `registration_draft_submitted`                                                                                                                                                                                                                                                                                                                                                                                                                                     | all-time, raw counts (see below) |
+| Claims and version releases             | raw counts of `claim_started`, `claim_verified`, `version_release_created`, `version_observed`                                                                                                                                                                                                                                                                                                                                                                                                                                                           | all-time                         |
+| Failures by route                       | `replay_load_failed` grouped by normalized route template                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | all-time                         |
+| Failure reasons                         | `replay_load_failed` grouped by bounded `reason` code                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | all-time                         |
 
 **Data validity note — the `returning_*_visitor` double-count fix**: the
 `returning_authenticated_visitor` double-count described above was fixed in
@@ -207,17 +202,6 @@ carries the known double-count** (`returning_authenticated_visitor` firing
 on a plain returning guest, inflating the numerator) and should be read with
 that caveat, not treated as a clean baseline.
 
-**Why the Director Cut rates are filtered by `replayMode`**: both Director
-Cut and Full Replay viewers emit the identical `watched_30s`/`watched_2m`/
-`watched_50pct`/`completed` event names — only the `replayMode` context
-field distinguishes which mode a given milestone happened in. Dividing the
-TOTAL across both modes by `director_cut_started` could report over 100%
-whenever Full Replay viewers also crossed a milestone; filtering each
-numerator to `context.replayMode="director_cut"` keeps the rate bounded to
-what actually happened in Director Cut sessions. Full Replay's own
-milestone counts are reported separately, as raw counts, since there is no
-"started watching without Director Cut" event to divide by.
-
 ## Season Zero decision thresholds
 
 These are **explicit initial thresholds for this specific effort**, not
@@ -228,8 +212,6 @@ universal truths, and not something to hardcode as permanent product law.
 - 99%+ replay-load success across supported browsers;
 - 100% of public Featured Events have identities, versions, and working
   watch links;
-- 100% of revealed Featured Events have Director Cut or an explicit,
-  documented Full-Replay-only exception;
 - zero critical route dead ends;
 - zero public betting surfaces;
 - zero lint errors;
@@ -237,8 +219,8 @@ universal truths, and not something to hardcode as permanent product law.
 
 **Product** (evaluated only once real traffic exists):
 
-- at least 35% of homepage Featured Event visitors start the Director Cut;
-- at least 50% of Director Cut starters reach 30 seconds;
+- at least 35% of homepage Featured Event visitors start a replay;
+- at least 50% of replay starters reach 30 seconds;
 - at least 25% reach 50%;
 - at least 10% click an Agent or Builder profile;
 - measure seven-day return (the returning-visitor-day share proxy — see

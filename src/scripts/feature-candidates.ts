@@ -3,6 +3,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { AGENT_MATCH_RECAP_SCHEMA_VERSION } from "../server/agents/AgentMatchRecap";
 import {
   publicRunKeyFromFullRenderHref,
   publicRunKeyFromWatchHref,
@@ -20,14 +21,13 @@ import {
   type FeaturedMatchParticipant,
   type FeaturedMatchResult,
 } from "../server/agents/FeaturedMatch";
-import { AGENT_MATCH_RECAP_SCHEMA_VERSION } from "../server/agents/AgentMatchRecap";
+import { buildReasonToWatchClaims } from "../server/agents/season/CandidateReasonToWatch";
+import type { EventPackageClaim } from "../server/agents/season/EventPackage";
 import { resolveAgentIdentityView } from "../server/identity/IdentityMatching";
 import {
   loadIdentityRegistrySnapshot,
   type IdentityRegistrySnapshot,
 } from "../server/identity/IdentityRegistry";
-import { buildReasonToWatchClaims } from "../server/agents/season/CandidateReasonToWatch";
-import type { EventPackageClaim } from "../server/agents/season/EventPackage";
 
 /**
  * `feature:candidates` — Stage 3 item 2/3, ARCHIVE lane. Scans COMPLETED,
@@ -44,7 +44,7 @@ import type { EventPackageClaim } from "../server/agents/season/EventPackage";
  * replays and unpacking them via that script's `unpackEpisodeRunDir` into
  * `<artifactsRoot>/ai-league-runs/<runKey>/`. That mirror now ALSO runs
  * `CoworldLeagueMatchNarrativeBackfill.ts` (budgeted, gradual — same
- * fresh-episodes-first-then-backfill shape `director-cut-plan.json`
+ * fresh-episodes-first-then-backfill shape `CoworldLeagueMatchStateSeriesBackfill.ts`'s
  * generation already used) to call `buildAgentDramaReport`/
  * `buildAgentMatchStory`/`buildAgentMatchRecap` for a mirrored run and
  * write `drama-report.json`/`match-story.json`/`match-recap.json` next to
@@ -56,7 +56,7 @@ import type { EventPackageClaim } from "../server/agents/season/EventPackage";
  * Net result: `drama-report.json`/`match-story.json` now exist on disk for
  * any hosted episode the backfill has already reached — budgeted, so a
  * given candidate may still show `null` evidence for a cycle or two after
- * it first appears, exactly like `directorCut` does; that's expected, not
+ * it first appears, exactly like every other budgeted-backfill field does; that's expected, not
  * a defect. This CLI already derived each candidate's expected artifact
  * directory from its `watchHref`/`fullRenderHref` (the same
  * `league-coworld-<runID>` key `CoworldLeagueArtifactRetention.ts` already
@@ -584,7 +584,8 @@ async function buildCandidate(
     artifactDirectory: directory,
     dramaArtifactFound: drama !== null,
     matchStoryArtifactFound: story !== null,
-    dramaScoreSource: curated !== null ? "curated" : drama !== null ? "legacy" : null,
+    dramaScoreSource:
+      curated !== null ? "curated" : drama !== null ? "legacy" : null,
     reasonToWatchClaims: buildReasonToWatchClaims(
       match.participants,
       row.map,
@@ -705,29 +706,45 @@ export async function rankFeatureCandidates(
   const siteDir = path.join(artifactsRoot, "ai-league-runs", "league");
   const runsRootDir = path.join(artifactsRoot, "ai-league-runs");
   const mirrorData = await readLiveMirrorData(siteDir);
-  const identity = await loadIdentityRegistrySnapshot().catch((error: unknown) => {
-    io.stderr(
-      `feature:candidates — identity registry failed to load, participants will show as unmapped: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
-    return {
-      builders: [],
-      agents: [],
-      versions: [],
-    } satisfies IdentityRegistrySnapshot;
-  });
+  const identity = await loadIdentityRegistrySnapshot().catch(
+    (error: unknown) => {
+      io.stderr(
+        `feature:candidates — identity registry failed to load, participants will show as unmapped: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return {
+        builders: [],
+        agents: [],
+        versions: [],
+      } satisfies IdentityRegistrySnapshot;
+    },
+  );
   const episodes = (mirrorData?.episodes ?? []).filter(
     (episode) => episode.completedAt !== null,
   );
   const now = new Date();
   const built = await Promise.all(
-    episodes.map((row) => buildCandidate(row, runsRootDir, identity, mirrorData?.standings ?? [], episodes, now)),
+    episodes.map((row) =>
+      buildCandidate(
+        row,
+        runsRootDir,
+        identity,
+        mirrorData?.standings ?? [],
+        episodes,
+        now,
+      ),
+    ),
   );
   const candidates: RankedFeatureCandidate[] = [...built]
     .sort(compareCandidates)
     .map((candidate, index) => ({ ...candidate, rank: index + 1 }));
-  return { generatedAt: now, artifactsRoot, totalEpisodes: episodes.length, candidates };
+  return {
+    generatedAt: now,
+    artifactsRoot,
+    totalEpisodes: episodes.length,
+    candidates,
+  };
 }
 
 export async function runFeatureCandidatesCli(
@@ -736,7 +753,10 @@ export async function runFeatureCandidatesCli(
 ): Promise<number> {
   try {
     const options = parseArgs(argv);
-    const result = await rankFeatureCandidates({ artifactsRoot: options.artifactsRoot }, io);
+    const result = await rankFeatureCandidates(
+      { artifactsRoot: options.artifactsRoot },
+      io,
+    );
 
     if (options.json) {
       io.stdout(
