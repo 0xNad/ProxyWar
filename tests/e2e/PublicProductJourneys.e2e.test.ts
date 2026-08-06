@@ -539,7 +539,42 @@ describe.skipIf(SKIP_PROVENANCE_BLOCK)(
       expect(revealBody!.authoritativeResult.sha256).toMatch(/^[0-9a-f]{64}$/);
       // The live-projection tap and the reveal agree on the same final
       // sequence: nothing is fabricated or diverges between the two.
-      const final = await liveProjection(0);
+      //
+      // They are published via genuinely independent code paths inside the
+      // runtime coordinator, though: `commitTerminalReveal()` in
+      // `ReplayPremiereRuntimeCoordinator.ts` awaits
+      // `this.publication.commitReveal(...)`, whose own implementation
+      // (`ReplayPremiereRevealCommit.ts`) flips `this.published.reveal` to
+      // the terminal result (what `GET /reveal` above just observed as 200)
+      // *inside* that awaited call, synchronously with its persistence
+      // write. `this.recoveredReveal` — the field
+      // `readLiveVisibleSequence()`/`readLiveProjection()` gate on to
+      // short-circuit past the coarser elapsed-time-gated draft cursor — is
+      // only assigned a few lines later, after that `await` resolves back
+      // into `commitTerminalReveal()`. That is a genuine, if narrow, gap
+      // between two await continuations on the Node event loop: a
+      // `live-projection` request landing in that gap still observes the
+      // previous 600-turn draft's cursor (20799) instead of the terminal
+      // 21399, exactly one draft behind. Root-caused 2026-08-06 against
+      // this same fixture; not a runtime defect (nothing in production
+      // pacing or wagering depends on this ordering — see
+      // `readLiveVisibleSequence`'s own doc comment) and not something a
+      // bigger reveal-poll deadline above can fix, since the reveal
+      // endpoint is the side that flips *first*. Poll the live-projection
+      // tap itself, the same bounded condition-based way as the reveal poll
+      // above, until it reports the true terminal sequence or the deadline
+      // elapses — this still fails (showing the actual stuck value) if
+      // convergence genuinely never happens, and never accepts anything
+      // other than the real terminal 21399.
+      const liveProjectionDeadline = Date.now() + 5_000;
+      let final = await liveProjection(0);
+      while (
+        final.liveVisibleSequence !== 21_399 &&
+        Date.now() < liveProjectionDeadline
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        final = await liveProjection(0);
+      }
       expect(final.liveVisibleSequence).toBe(21_399);
       // bootstrap()'s pre-reveal field is unaffected by the real reveal —
       // this is the deliberate spoiler-neutral contract, not a stale-read
