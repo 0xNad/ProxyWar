@@ -286,6 +286,16 @@ export class TransformHandler {
 
   public updateCanvasBoundingRect() {
     this._boundingRect = this.canvas.getBoundingClientRect();
+    // A resize/orientation-change can invalidate the CURRENT offset against
+    // the NEW viewport (e.g. spectator "filling" mode's tight pan bound
+    // moves to a different axis on a portrait<->landscape flip) — without
+    // this, the stale, now out-of-bounds offset renders as-is and is only
+    // corrected the next time an unrelated onZoom()/onMove()/goTo() tick
+    // happens to call clampOffsets(), producing a jump that reads as
+    // caused by that gesture instead of the resize that actually invalidated
+    // it. Re-clamping here fixes the timing only — same bound math
+    // clampOffsets() always used, no recentering, no pointer/anchor logic.
+    this.clampOffsets();
   }
 
   boundingRect(): DOMRect {
