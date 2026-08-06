@@ -35,6 +35,7 @@ import type {
   CoworldLeagueRoundRow,
   CoworldLeagueStandingRow,
 } from "./agents/CoworldLeagueSiteWriter";
+import type { CoworldLeagueArchivedReplayHrefs } from "./agents/CoworldLeagueArtifactRetention";
 import type {
   FeaturedMatch,
   FeaturedMatchCategory,
@@ -743,13 +744,31 @@ export function publicFeaturedMatch(
  * resolves each match's ACTUAL completion date plus its replay hrefs
  * (Season Zero P0 / full-replay-access bugfix — see
  * `PublicFeaturedMatch.completedAt`/`.watchHref`/`.fullRenderHref`'s own
- * doc) — all `null` when `episodeRequestId` is itself `null` or hasn't
- * reached the mirror yet.
+ * doc) — `completedAt` is `null` when `episodeRequestId` is itself `null`
+ * or hasn't reached the mirror yet.
+ *
+ * `archivedReplayHrefsByEpisodeRequestId` (full-replay-retention fix,
+ * 2026-08-06) is the durable fallback for `watchHref`/`fullRenderHref`
+ * ONLY: a bounded map the caller resolves ONCE, per-publish, via
+ * `CoworldLeagueArtifactRetention.ts`'s `resolveArchivedEpisodeReplayHrefs`
+ * — see that function's own doc for why the live mirror window is too
+ * narrow to be the only source. This function stays pure/no-I/O (the
+ * caller does the async archive reads); the live `mirror` episode always
+ * wins when present, exactly like `completedAt` — the archive is
+ * consulted ONLY for a match whose episode is not (or no longer) in
+ * `mirror.episodes`. Defaults to an empty map for every existing caller
+ * (including every existing test) that doesn't resolve one — an honest
+ * "not looked up" default, identical in spirit to `pkg`'s own contract on
+ * `publicFeaturedMatch` above.
  */
 function publicFeaturedMatches(
   store: FeaturedMatchStoreFile,
   packageStore: EventPackageStoreFile,
   mirror: CoworldLeagueMirrorData,
+  archivedReplayHrefsByEpisodeRequestId: ReadonlyMap<
+    string,
+    CoworldLeagueArchivedReplayHrefs
+  > = new Map(),
 ): PublicFeaturedMatch[] {
   const episodeByRequestId = new Map(
     mirror.episodes.map((episode) => [episode.episodeRequestId, episode]),
@@ -761,13 +780,17 @@ function publicFeaturedMatches(
         match.episodeRequestId === null
           ? undefined
           : episodeByRequestId.get(match.episodeRequestId);
+      const archivedReplayHrefs =
+        episode !== undefined || match.episodeRequestId === null
+          ? undefined
+          : archivedReplayHrefsByEpisodeRequestId.get(match.episodeRequestId);
       return publicFeaturedMatch(
         match,
         findEventPackage(packageStore, match.matchId),
         episode?.completedAt ?? null,
-        episode === undefined
-          ? null
-          : { watchHref: episode.watchHref, fullRenderHref: episode.fullRenderHref },
+        episode !== undefined
+          ? { watchHref: episode.watchHref, fullRenderHref: episode.fullRenderHref }
+          : (archivedReplayHrefs ?? null),
       );
     });
 }
@@ -837,6 +860,16 @@ export function buildProxyWarPublicReadModel(
    * default" contract as `standingsHistory`/`eventPackageStore` above.
    */
   seasonRegistry: SeasonRegistryFile = { schemaVersion: 1, seasons: [] },
+  /**
+   * Full-replay-retention fix (2026-08-06): the SAME bounded, once-per-
+   * publish-resolved fallback map `publicFeaturedMatches` documents on its
+   * own `archivedReplayHrefsByEpisodeRequestId` parameter. Defaults to an
+   * empty map — every existing caller/test keeps today's exact behavior.
+   */
+  archivedFeaturedMatchReplayHrefs: ReadonlyMap<
+    string,
+    CoworldLeagueArchivedReplayHrefs
+  > = new Map(),
 ): ProxyWarPublicReadModel {
   const agentSlugByPlayerName = new Map(
     identity.agents.map((agent) => [
@@ -867,7 +900,12 @@ export function buildProxyWarPublicReadModel(
     matches: mirror.episodes.map((episode) =>
       publicMatch(episode, agentSlugByPlayerName),
     ),
-    featuredMatches: publicFeaturedMatches(featuredMatchStore, eventPackageStore, mirror),
+    featuredMatches: publicFeaturedMatches(
+      featuredMatchStore,
+      eventPackageStore,
+      mirror,
+      archivedFeaturedMatchReplayHrefs,
+    ),
     seasons: publicSeasons(seasonRegistry),
     premieres: {
       live: mirror.premiere ?? null,

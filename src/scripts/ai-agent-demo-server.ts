@@ -26,6 +26,11 @@ import {
 } from "../server/agents/AgentDemoServerJobs";
 import { AgentRelayRateGuard } from "../server/agents/AgentRelayRateGuard";
 import {
+  resolveArchivedEpisodeReplayHrefs,
+  resolveCoworldLeagueSummaryArchiveDir,
+  restoreArchivedGameRecord,
+} from "../server/agents/CoworldLeagueArtifactRetention";
+import {
   resolveFeaturedMatchStateRoot,
   type FeaturedMatch,
 } from "../server/agents/FeaturedMatch";
@@ -310,6 +315,11 @@ const artifactsRootDir =
     ? path.join(process.cwd(), "artifacts")
     : path.resolve(configuredArtifactsRootDir);
 const runsRootDir = path.join(artifactsRootDir, "ai-league-runs");
+// Full-replay-retention fix (2026-08-06) — see
+// `CoworldLeagueArtifactRetention.ts`'s `resolveArchivedEpisodeReplayHrefs`/
+// `restoreArchivedGameRecord` for what this durable, indefinitely-retained
+// directory backs.
+const summaryArchiveDir = resolveCoworldLeagueSummaryArchiveDir(artifactsRootDir);
 const publicReplayRenderabilityCache = new Map<
   string,
   { fingerprint: string; verdict: Promise<boolean> }
@@ -1302,17 +1312,30 @@ async function loadFeaturedMatchDetail(
     mirrorData === null || episodeRequestId === null
       ? null
       : findLeagueEpisodeReplayInfo(mirrorData, episodeRequestId);
+  // Full-replay-retention fix (2026-08-06): the live mirror lookup above
+  // permanently misses once `episodeRequestId` has rotated out of the
+  // mirror's own narrow `episodes[]` window (see
+  // `CoworldLeagueArtifactRetention.ts`'s `resolveArchivedEpisodeReplayHrefs`
+  // own doc) — only consulted on that miss, never overrides a real live
+  // lookup, and never throws.
+  const archivedReplayHrefs =
+    episodeReplayInfo === null && episodeRequestId !== null
+      ? await resolveArchivedEpisodeReplayHrefs(
+          summaryArchiveDir,
+          episodeRequestId,
+        )
+      : null;
   return {
     match: publicFeaturedMatch(
       match,
       eventPackage,
       episodeReplayInfo?.completedAt ?? null,
-      episodeReplayInfo === null
-        ? null
-        : {
+      episodeReplayInfo !== null
+        ? {
             watchHref: episodeReplayInfo.watchHref,
             fullRenderHref: episodeReplayInfo.fullRenderHref,
-          },
+          }
+        : archivedReplayHrefs,
     ),
     // Lets the client detect "is this record the CURRENTLY LIVE premiere"
     // via a plain string comparison against the already-fetched read
@@ -3200,7 +3223,7 @@ if (leagueWrapperOnly) {
     const gameRecordPath = path.resolve(runsRootDir, runID, "game-record.json");
     if (
       !isInsideRoot(gameRecordPath, runsRootDir) ||
-      !(await publicReplayRecordIsRenderable(gameRecordPath))
+      !(await ensureRenderableGameRecordPath(runID, gameRecordPath))
     ) {
       res.redirect("/league");
       return;
@@ -4461,7 +4484,7 @@ for (const replayRoute of [
     const gameRecordPath = path.resolve(runsRootDir, runID, "game-record.json");
     if (
       !isInsideRoot(gameRecordPath, runsRootDir) ||
-      !(await publicReplayRecordIsRenderable(gameRecordPath))
+      !(await ensureRenderableGameRecordPath(runID, gameRecordPath))
     ) {
       sendThemedNotFoundPage(res, 404, "AI league replay record not found.");
       return;
@@ -5664,6 +5687,46 @@ async function publicReplayRecordIsRenderable(
     }
     return false;
   }
+}
+
+/**
+ * Full-replay-retention fix (2026-08-06): `runID` here is always the
+ * route's own `publicRunKey` path segment. Fast path: if the live
+ * `game-record.json` is already renderable, this never touches the
+ * archive — zero added cost for the overwhelming common case. Only when
+ * it's missing/invalid does this attempt ONE bounded, race-safe
+ * restoration of the exact archived copy (see
+ * `CoworldLeagueArtifactRetention.ts`'s `restoreArchivedGameRecord` for
+ * the validated-path/atomic-rename contract) before re-checking
+ * renderability. A restore failure (no archive, corrupt/oversized gzip,
+ * or a genuine disk I/O error) is caught and treated exactly like "not
+ * renderable" — never crashes the request, never fabricates a link.
+ */
+async function ensureRenderableGameRecordPath(
+  runID: string,
+  gameRecordPath: string,
+): Promise<boolean> {
+  if (await publicReplayRecordIsRenderable(gameRecordPath)) {
+    return true;
+  }
+  try {
+    const restoredPath = await restoreArchivedGameRecord({
+      runsRootDir,
+      summaryArchiveDir,
+      publicRunKey: runID,
+    });
+    if (restoredPath === null) {
+      return false;
+    }
+  } catch (error) {
+    console.error(
+      `Archived game-record restoration failed for ${runID}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return false;
+  }
+  return publicReplayRecordIsRenderable(gameRecordPath);
 }
 
 function isJobRecord(value: unknown): value is AgentDemoJobRecord {

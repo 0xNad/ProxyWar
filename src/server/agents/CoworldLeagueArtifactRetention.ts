@@ -1,13 +1,36 @@
 import { createHash, randomUUID } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { createReadStream, createWriteStream, promises as fs } from "node:fs";
 import path from "node:path";
-import { gzipSync } from "node:zlib";
+import { Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { createGunzip, gunzipSync, gzipSync } from "node:zlib";
 import { isSafeCoworldEpisodeRequestId } from "./CoworldLeagueMirrorCore";
 import { withFileMutex } from "./FileMutex";
 import type { CoworldLeagueEpisodeRow } from "./CoworldLeagueSiteWriter";
 
 const managedRunPattern = /^league-coworld-[A-Za-z0-9-]+$/;
 const managedReplayPattern = /^ereq_[A-Za-z0-9_-]+\.replay$/;
+
+/**
+ * Resolves the durable, indefinitely-retained compact-evidence archive
+ * directory (`docs/COWORLD_LEAGUE_MIRROR.md`'s "indefinite compact
+ * evidence") from the SAME `artifactsRoot` every other league-mirror
+ * consumer already resolves from (`ai-agent-demo-server.ts`'s
+ * `artifactsRootDir`, `FeaturedMatchRetentionPin.ts`'s own
+ * `options.artifactsRoot`) — one canonical derivation, reused everywhere a
+ * fallback lookup needs it, instead of re-deriving
+ * `.../coworld-league-mirror/summaries` inline at each call site. Mirrors
+ * `coworld-league-mirror.ts`'s own `--summary-archive`/env default exactly.
+ */
+export function resolveCoworldLeagueSummaryArchiveDir(
+  artifactsRoot: string,
+  environment: Record<string, string | undefined> = process.env,
+): string {
+  const configured = environment.PROXYWAR_LEAGUE_SUMMARY_ARCHIVE_DIR?.trim();
+  return configured !== undefined && configured.length > 0
+    ? configured
+    : path.join(artifactsRoot, "coworld-league-mirror", "summaries");
+}
 
 export interface CoworldLeagueRetentionReferences {
   episodeRequestIds: Set<string>;
@@ -162,6 +185,147 @@ export function retentionReferencesFromEpisodes(
     episodeRequestIds,
     publicRunKeys,
     publicRunKeyByEpisodeRequestId,
+  };
+}
+
+const MAX_ARCHIVED_REPLAY_SUMMARY_BYTES = 1024 * 1024; // compact JSON, generously bounded (compressed, pre-decompression stat check)
+// Decompressed-size guard for the SAME read — a small compressed file can
+// still gzip-bomb-expand to something huge, so the compressed-size check
+// above alone is not a real bound on memory. `gunzipSync`'s own native
+// `maxOutputLength` (Node's built-in zlib option, not a new abstraction)
+// makes the decompress call itself throw once output would exceed this —
+// caught by the existing try/catch below exactly like any other corrupt
+// archive, and returns the same honest `null`.
+const MAX_ARCHIVED_REPLAY_SUMMARY_DECOMPRESSED_BYTES = 4 * 1024 * 1024;
+
+function archivedReplaySummaryPath(
+  summaryArchiveDir: string,
+  episodeRequestId: string,
+): string | null {
+  if (!isSafeCoworldEpisodeRequestId(episodeRequestId)) return null;
+  const resolvedDir = path.resolve(summaryArchiveDir);
+  const archivePath = path.resolve(
+    resolvedDir,
+    `${episodeRequestId}.replay-summary.json.gz`,
+  );
+  return path.dirname(archivePath) === resolvedDir ? archivePath : null;
+}
+
+/**
+ * Full-replay-retention fix (2026-08-06): `publicFeaturedMatches()`/
+ * `findLeagueEpisodeReplayInfo()` (and, transitively,
+ * `FeaturedMatchRetentionPin.ts`'s own `computeFeaturedMatchPinAddOperation`)
+ * only ever look an episode up in the LIVE mirror's `episodes[]` — a
+ * rolling window bounded by the mirror sync's own `--meta-limit`
+ * (observed in production: as narrow as ~30 minutes), far tighter than
+ * the 24-raw/96-bundle on-disk retention `pruneCoworldLeagueMirrorArtifacts`
+ * actually enforces, and narrower still once the raw `.replay` cache file
+ * itself has been pruned. Once an episode rotates out of that live
+ * window, every one of those callers permanently treats it as "not
+ * mirrored" even while the pruner's own byte-faithful archive (written
+ * BEFORE deletion — see `archivePlans`/`writeArchivePlans` above) still
+ * durably, indefinitely proves which run it was.
+ *
+ * This is the ONE bounded, O(1), directly-addressable lookup every such
+ * caller shares: `<episodeRequestId>.replay-summary.json.gz` is named
+ * EXACTLY by the known `episodeRequestId` (no directory scan, ever), and
+ * its `runID` field — preserved verbatim by `compactReplayArchive` above —
+ * deterministically reproduces the SAME `publicRunKey = "league-" +
+ * runID` `coworld-league-mirror.ts`'s own `unpackEpisodeRunDir` derives
+ * live. `null` for absolutely any reason short of "a well-formed archived
+ * record naming a syntactically valid run key" — no archive, an
+ * oversized/corrupt/malformed gzip, or a `runID` that doesn't survive
+ * `managedRunPattern` — is treated identically: honest "no durable
+ * evidence", never a fabricated or partially-trusted key. Never throws.
+ */
+export async function resolveArchivedPublicRunKey(
+  summaryArchiveDir: string,
+  episodeRequestId: string,
+): Promise<string | null> {
+  const archivePath = archivedReplaySummaryPath(
+    summaryArchiveDir,
+    episodeRequestId,
+  );
+  if (archivePath === null) return null;
+  let stat;
+  try {
+    stat = await fs.lstat(archivePath);
+  } catch {
+    return null;
+  }
+  if (!stat.isFile() || stat.size > MAX_ARCHIVED_REPLAY_SUMMARY_BYTES) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(
+      gunzipSync(await fs.readFile(archivePath), {
+        maxOutputLength: MAX_ARCHIVED_REPLAY_SUMMARY_DECOMPRESSED_BYTES,
+      }).toString("utf8"),
+    );
+  } catch {
+    return null;
+  }
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    Array.isArray(parsed) ||
+    !("runID" in parsed) ||
+    typeof parsed.runID !== "string"
+  ) {
+    return null;
+  }
+  const publicRunKey = `league-${parsed.runID}`;
+  return managedRunPattern.test(publicRunKey) ? publicRunKey : null;
+}
+
+/**
+ * The archive-backed counterpart of `PublicFeaturedMatch.watchHref`/
+ * `.fullRenderHref` (see that field's own doc) — same honest-null
+ * contract, sourced from durable evidence instead of the live mirror
+ * window. `watchHref` is ALWAYS `null` here: the lightweight spectator
+ * bundle (`spectator.html`/`spectator-replay.json`/`decisions.jsonl`,
+ * `docs/COWORLD_LEAGUE_MIRROR.md`'s own list) is never archived — only
+ * `match-summary.json`/`game-record.json`/`spectator-telemetry.json` are
+ * (`archivePlans` above) — reconstructing it would mean REGENERATING
+ * spectator artifacts, not restoring them, which this fix does not do.
+ * `fullRenderHref` is populated ONLY when the exact
+ * `<publicRunKey>.game-record.json.gz` archive exists — the one file
+ * `/ai-league-replay/:runID`'s own renderability gate actually needs (see
+ * `restoreArchivedGameRecord` below) — never a link the server can't
+ * back.
+ */
+export interface CoworldLeagueArchivedReplayHrefs {
+  readonly watchHref: null;
+  readonly fullRenderHref: string | null;
+}
+
+export async function resolveArchivedEpisodeReplayHrefs(
+  summaryArchiveDir: string,
+  episodeRequestId: string,
+): Promise<CoworldLeagueArchivedReplayHrefs | null> {
+  const publicRunKey = await resolveArchivedPublicRunKey(
+    summaryArchiveDir,
+    episodeRequestId,
+  );
+  if (publicRunKey === null) return null;
+  const gameRecordArchivePath = archivedGameRecordArchivePath(
+    summaryArchiveDir,
+    publicRunKey,
+  );
+  let hasGameRecordArchive = false;
+  if (gameRecordArchivePath !== null) {
+    try {
+      hasGameRecordArchive = (await fs.lstat(gameRecordArchivePath)).isFile();
+    } catch {
+      hasGameRecordArchive = false;
+    }
+  }
+  return {
+    watchHref: null,
+    fullRenderHref: hasGameRecordArchive
+      ? `/ai-league-replay/${encodeURIComponent(publicRunKey)}`
+      : null,
   };
 }
 
@@ -967,6 +1131,146 @@ export async function ensureSafeCoworldLeagueRunDirectory(
     }
   }
   return runDir;
+}
+
+const DEFAULT_MAX_ARCHIVED_GAME_RECORD_COMPRESSED_BYTES = 16 * 1024 * 1024;
+const DEFAULT_MAX_ARCHIVED_GAME_RECORD_DECOMPRESSED_BYTES = 256 * 1024 * 1024;
+
+/**
+ * Safe join + validation twin of `coworldLeagueReplayCachePath` above, for
+ * the byte-faithful `<publicRunKey>.game-record.json.gz` archive instead
+ * of the raw `.replay` cache file.
+ */
+export function archivedGameRecordArchivePath(
+  summaryArchiveDir: string,
+  publicRunKey: string,
+): string | null {
+  if (!managedRunPattern.test(publicRunKey)) return null;
+  const resolvedDir = path.resolve(summaryArchiveDir);
+  const archivePath = path.resolve(
+    resolvedDir,
+    `${publicRunKey}.game-record.json.gz`,
+  );
+  return path.dirname(archivePath) === resolvedDir ? archivePath : null;
+}
+
+/**
+ * Streams the archived gzip through a byte-counting `Transform` that
+ * aborts once `maxBytes` is exceeded (a bounded decompression-bomb
+ * guard), into a uniquely-named temp file in the SAME directory as
+ * `destinationPath` so the final `fs.rename` in `restoreArchivedGameRecord`
+ * is same-filesystem atomic. `wx` refuses to silently overwrite a
+ * colliding temp name.
+ */
+async function decompressBoundedGzipToFile(
+  sourceGzipPath: string,
+  destinationPath: string,
+  maxBytes: number,
+): Promise<void> {
+  let total = 0;
+  const limiter = new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      total += chunk.byteLength;
+      if (total > maxBytes) {
+        callback(
+          new Error(
+            `Archived artifact exceeds the ${maxBytes}-byte decompression limit: ${sourceGzipPath}`,
+          ),
+        );
+        return;
+      }
+      callback(null, chunk);
+    },
+  });
+  await pipeline(
+    createReadStream(sourceGzipPath),
+    createGunzip(),
+    limiter,
+    createWriteStream(destinationPath, { flags: "wx", mode: 0o644 }),
+  );
+}
+
+/**
+ * Lazily rehydrates JUST `game-record.json` (never the spectator/light
+ * files — see `CoworldLeagueArchivedReplayHrefs`'s own doc for why) for
+ * one `publicRunKey` from its durable archive, when the live copy under
+ * `runsRootDir` is missing. Never mutates or deletes anything under
+ * `summaryArchiveDir` — read-only there. Never creates a run directory
+ * for an unknown/bogus `publicRunKey`: the archive's own existence is
+ * checked FIRST, before `ensureSafeCoworldLeagueRunDirectory` is ever
+ * called, so a request for a key with no archive evidence litters
+ * nothing. Race-safe: concurrent requests for the SAME run each write to
+ * their own unique temp name and `fs.rename` into the same final path,
+ * which is atomic and idempotent (identical source bytes either way).
+ * Deliberately does NOT validate the restored bytes as a real game
+ * record — the caller's own existing renderability re-check after this
+ * call already owns that validation, and duplicating it here would
+ * duplicate archive/record parsing across two modules. Returns the
+ * absolute `game-record.json` path once it exists (already live, or
+ * freshly restored) — `null` when nothing durable backs this
+ * `publicRunKey` or it's malformed/oversized. Never throws for an
+ * ordinary "no evidence" outcome; a genuine I/O failure during the
+ * restore itself (disk full, permission error) DOES throw, so the caller
+ * can log it distinctly from an honest miss.
+ */
+export async function restoreArchivedGameRecord(options: {
+  runsRootDir: string;
+  summaryArchiveDir: string;
+  publicRunKey: string;
+  maxCompressedBytes?: number;
+  maxDecompressedBytes?: number;
+}): Promise<string | null> {
+  const archivePath = archivedGameRecordArchivePath(
+    options.summaryArchiveDir,
+    options.publicRunKey,
+  );
+  if (archivePath === null) return null;
+  const maxCompressedBytes =
+    options.maxCompressedBytes ??
+    DEFAULT_MAX_ARCHIVED_GAME_RECORD_COMPRESSED_BYTES;
+  const maxDecompressedBytes =
+    options.maxDecompressedBytes ??
+    DEFAULT_MAX_ARCHIVED_GAME_RECORD_DECOMPRESSED_BYTES;
+
+  let archiveStat;
+  try {
+    archiveStat = await fs.lstat(archivePath);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return null;
+    throw error;
+  }
+  if (!archiveStat.isFile() || archiveStat.size > maxCompressedBytes) {
+    return null;
+  }
+
+  const runDir = await ensureSafeCoworldLeagueRunDirectory(
+    options.runsRootDir,
+    options.publicRunKey,
+  );
+  const finalPath = path.join(runDir, "game-record.json");
+  try {
+    const existing = await fs.lstat(finalPath);
+    if (existing.isFile()) return finalPath;
+  } catch (error) {
+    if (errorCode(error) !== "ENOENT") throw error;
+  }
+
+  const temporaryPath = path.join(
+    runDir,
+    `.game-record.json.${process.pid}.${randomUUID()}.tmp`,
+  );
+  try {
+    await decompressBoundedGzipToFile(
+      archivePath,
+      temporaryPath,
+      maxDecompressedBytes,
+    );
+    await fs.rename(temporaryPath, finalPath);
+  } catch (error) {
+    await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
+  return finalPath;
 }
 
 export async function availableDiskBytes(

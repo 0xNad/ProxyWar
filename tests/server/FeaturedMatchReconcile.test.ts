@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { gzipSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { reconcileFeaturedMatchStore } from "../../src/server/agents/FeaturedMatchReconcile";
 import {
@@ -395,6 +396,92 @@ describe("reconcileFeaturedMatchStore", () => {
 
     const plain = await readFeaturedMatchStore(featuredMatchRoot);
     expect(plain.matches[0].state).toBe("revealed");
+  });
+
+  it("full-replay-retention fix (2026-08-06): an ARCHIVE-lane record self-heals its missing retention pin through reconcile via the durable archive fallback — never through the state-transition machine, which stays premiere-only", async () => {
+    const episodeRequestId = "ereq_archive_self_heal";
+    const matchId = `feat_${"c".repeat(20)}`;
+    await seedStore([
+      baseMatch({
+        matchId,
+        lane: "archive",
+        episodeRequestId,
+        state: "published",
+        scheduledAt: null,
+        queueItemName: null,
+      }),
+    ]);
+    // No live mirror episode at all — this record's episode has either
+    // never reached the live window or has already rotated out of it;
+    // reconcileFeaturedMatchStore cannot and needn't distinguish the two,
+    // only the durable archive is seeded here.
+    const summariesDir = path.join(
+      artifactsRoot,
+      "coworld-league-mirror",
+      "summaries",
+    );
+    await fs.mkdir(summariesDir, { recursive: true });
+    await fs.writeFile(
+      path.join(summariesDir, `${episodeRequestId}.replay-summary.json.gz`),
+      gzipSync(
+        JSON.stringify({
+          episodeRequestId,
+          runID: "coworld-archive-self-heal",
+        }),
+      ),
+    );
+
+    const result = await reconcileFeaturedMatchStore(featuredMatchRoot, options());
+    // Archive-lane records never transition state through this pass (the
+    // refactor's premiere-only state machine is unaffected).
+    expect(result.matches[0].state).toBe("published");
+    expect(result.matches[0].lane).toBe("archive");
+
+    const manifest = await readCoworldLeagueRetentionPinManifest(pinManifestPath);
+    expect(manifest.pins).toContainEqual({
+      episodeRequestId,
+      publicRunKey: "league-coworld-archive-self-heal",
+      reason: `featured-match:${matchId}`,
+    });
+  });
+
+  it("full-replay-retention fix: candidate and cancelled records are excluded from pin reconciliation even with durable archive evidence available", async () => {
+    const candidateEpisode = "ereq_pin_excluded_candidate";
+    const cancelledEpisode = "ereq_pin_excluded_cancelled";
+    await seedStore([
+      baseMatch({
+        matchId: `feat_${"d".repeat(20)}`,
+        lane: "archive",
+        episodeRequestId: candidateEpisode,
+        state: "candidate",
+        scheduledAt: null,
+        queueItemName: null,
+      }),
+      baseMatch({
+        matchId: `feat_${"e".repeat(20)}`,
+        episodeRequestId: cancelledEpisode,
+        state: "cancelled",
+      }),
+    ]);
+    const summariesDir = path.join(
+      artifactsRoot,
+      "coworld-league-mirror",
+      "summaries",
+    );
+    await fs.mkdir(summariesDir, { recursive: true });
+    for (const [episodeRequestId, runID] of [
+      [candidateEpisode, "coworld-excluded-candidate"],
+      [cancelledEpisode, "coworld-excluded-cancelled"],
+    ] as const) {
+      await fs.writeFile(
+        path.join(summariesDir, `${episodeRequestId}.replay-summary.json.gz`),
+        gzipSync(JSON.stringify({ episodeRequestId, runID })),
+      );
+    }
+
+    await reconcileFeaturedMatchStore(featuredMatchRoot, options());
+    const manifest = await readCoworldLeagueRetentionPinManifest(pinManifestPath);
+    expect(manifest.pins).toEqual([]);
   });
 });
 

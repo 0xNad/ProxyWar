@@ -5,6 +5,7 @@ import {
   resolveFeaturedMatchStateRoot,
   type FeaturedMatch,
 } from "../server/agents/FeaturedMatch";
+import { syncFeaturedMatchRetentionPin } from "../server/agents/FeaturedMatchRetentionPin";
 import { upsertRecord } from "./premiere-schedule-lib";
 import { rankFeatureCandidates } from "./feature-candidates";
 
@@ -85,9 +86,11 @@ export async function runFeaturePromoteCli(
   const artifactsRootArg = parseValueArg(argv, "--artifacts-root=");
   const stateRootArg = parseValueArg(argv, "--state-root=");
   const json = argv.includes("--json");
+  const resolvedArtifactsRoot =
+    artifactsRootArg === undefined ? undefined : path.resolve(artifactsRootArg);
 
   const ranked = await rankFeatureCandidates(
-    { artifactsRoot: artifactsRootArg === undefined ? undefined : path.resolve(artifactsRootArg) },
+    { artifactsRoot: resolvedArtifactsRoot },
     io,
   );
   const candidate = ranked.candidates.find(
@@ -112,6 +115,15 @@ export async function runFeaturePromoteCli(
       : { ...candidate.match, matchId: existing.matchId, createdAt: existing.createdAt };
 
   await upsertRecord(stateRoot, record);
+  // Best-effort — see FeaturedMatchRetentionPin.ts's own doc for why this
+  // may legitimately no-op today (the episode may not have reached the
+  // live league mirror OR its durable archive yet) and self-heals via the
+  // next reconcile-on-read pass (FeaturedMatchReconcile.ts's pin
+  // reconciliation is lane-agnostic — archive-lane records like this one
+  // are covered there too, not just premiere-lane).
+  await syncFeaturedMatchRetentionPin(record, {
+    artifactsRoot: resolvedArtifactsRoot,
+  });
 
   if (json) {
     io.stdout(JSON.stringify({ promoted: record, wasAlreadyPromoted: existing !== undefined }, null, 2));

@@ -4,6 +4,8 @@ import {
   addRetentionPinOwner,
   readCoworldLeagueRetentionPinManifest,
   removeRetentionPinOwner,
+  resolveArchivedPublicRunKey,
+  resolveCoworldLeagueSummaryArchiveDir,
   retentionReferencesFromEpisodes,
 } from "./CoworldLeagueArtifactRetention";
 import type { CoworldLeagueEpisodeRow } from "./CoworldLeagueSiteWriter";
@@ -104,9 +106,21 @@ async function readLiveMirrorEpisodes(
  * why: `Promise.all`-ing several single-entry applies each still races
  * every OTHER call in the same batch for lock acquisition order, and nothing
  * guarantees they observe a consistent snapshot of each other's changes).
- * Returns `null` when nothing is derivable yet (no episodeRequestId, no
- * live mirror data, or no matching episode) — never a fabricated
- * `publicRunKey`.
+ *
+ * Full-replay-retention fix (2026-08-06): the live mirror lookup above is
+ * a narrow, rolling window (see `CoworldLeagueArtifactRetention.ts`'s
+ * `resolveArchivedPublicRunKey`'s own doc) — an episode that hasn't
+ * reached it YET and one that has already ROTATED OUT of it look
+ * identical from here, so a miss now also falls back to the SAME durable,
+ * indefinitely-retained compact-evidence archive
+ * `resolveArchivedEpisodeReplayHrefs` already uses. A Featured Match can
+ * therefore still be pinned retroactively after the live window has moved
+ * on — the one case this used to permanently, silently fail. Live-mirror
+ * precedence is preserved: the archive is consulted ONLY on a live miss.
+ *
+ * Returns `null` when nothing is derivable from EITHER source (no
+ * episodeRequestId, or no matching episode in the live mirror OR the
+ * archive) — never a fabricated `publicRunKey`.
  */
 export async function computeFeaturedMatchPinAddOperation(
   match: Pick<FeaturedMatch, "matchId" | "episodeRequestId">,
@@ -116,25 +130,34 @@ export async function computeFeaturedMatchPinAddOperation(
   | null
 > {
   if (match.episodeRequestId === null) return null;
+  const artifactsRoot =
+    options.artifactsRoot ?? path.join(process.cwd(), "artifacts");
+  let publicRunKey: string | undefined;
   try {
-    const artifactsRoot =
-      options.artifactsRoot ?? path.join(process.cwd(), "artifacts");
     const episodes = await readLiveMirrorEpisodes(artifactsRoot);
-    if (episodes === null) return null;
-    const references = retentionReferencesFromEpisodes([...episodes]);
-    const publicRunKey = references.publicRunKeyByEpisodeRequestId.get(
+    publicRunKey =
+      episodes === null
+        ? undefined
+        : retentionReferencesFromEpisodes([
+            ...episodes,
+          ]).publicRunKeyByEpisodeRequestId.get(match.episodeRequestId);
+  } catch {
+    publicRunKey = undefined;
+  }
+  if (publicRunKey === undefined) {
+    const archivedPublicRunKey = await resolveArchivedPublicRunKey(
+      resolveCoworldLeagueSummaryArchiveDir(artifactsRoot),
       match.episodeRequestId,
     );
-    if (publicRunKey === undefined) return null;
-    return {
-      type: "add",
-      episodeRequestId: match.episodeRequestId,
-      publicRunKey,
-      ownerTag: featuredMatchOwnerTag(match.matchId),
-    };
-  } catch {
-    return null;
+    publicRunKey = archivedPublicRunKey ?? undefined;
   }
+  if (publicRunKey === undefined) return null;
+  return {
+    type: "add",
+    episodeRequestId: match.episodeRequestId,
+    publicRunKey,
+    ownerTag: featuredMatchOwnerTag(match.matchId),
+  };
 }
 
 /**

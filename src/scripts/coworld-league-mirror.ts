@@ -1372,7 +1372,11 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
       platformLabel: "Softmax Coworld",
     },
   };
-  const paths = await writeCoworldLeagueSite(options.siteDir, data);
+  const paths = await writeCoworldLeagueSite(
+    options.siteDir,
+    data,
+    options.summaryArchiveDir,
+  );
   log(
     `site updated: ${paths.indexPath} (${standings.length} standings, ${publishedEpisodes.length} battles)`,
   );
@@ -1381,7 +1385,11 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
 
 async function regenerateStaleSite(options: MirrorOptions): Promise<boolean> {
   try {
-    await markCoworldLeagueSiteStale(options.siteDir);
+    await markCoworldLeagueSiteStale(
+      options.siteDir,
+      undefined,
+      options.summaryArchiveDir,
+    );
     log("sync failed — regenerated site from last good data (stale banner)");
     return true;
   } catch {
