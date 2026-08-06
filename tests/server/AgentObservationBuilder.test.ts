@@ -1,8 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { AttackExecution } from "../../src/core/execution/AttackExecution";
+import { SpawnExecution } from "../../src/core/execution/SpawnExecution";
 import { AllianceRequestExecution } from "../../src/core/execution/alliance/AllianceRequestExecution";
-import { PlayerInfo, PlayerType } from "../../src/core/game/Game";
+import {
+  Game,
+  PlayerInfo,
+  PlayerType,
+  UnitType,
+} from "../../src/core/game/Game";
 import { AgentObservationBuilder } from "../../src/server/agents/AgentObservationBuilder";
+import { LegalActionBuilder } from "../../src/server/agents/LegalActionBuilder";
+import {
+  createGame as createPathfindingGame,
+  L,
+  W,
+} from "../core/pathfinding/_fixtures";
 import { setup } from "../util/Setup";
 
 async function threePlayerGame() {
@@ -23,7 +35,7 @@ async function threePlayerGame() {
   return game;
 }
 
-function observe(game: Awaited<ReturnType<typeof threePlayerGame>>) {
+function observe(game: Game) {
   return new AgentObservationBuilder().build({
     agentID: "agent-1",
     clientID: "CLNT_AGENT",
@@ -33,6 +45,59 @@ function observe(game: Awaited<ReturnType<typeof threePlayerGame>>) {
     turnNumber: 10,
     gameState: game,
   });
+}
+
+function spawnPlayers(
+  game: Game,
+  players: Array<{ info: PlayerInfo; x: number; y: number }>,
+): void {
+  for (const { info, x, y } of players) {
+    game.addPlayer(info);
+    game.addExecution(new SpawnExecution("BOAT_TARGETS", info, game.ref(x, y)));
+  }
+  while (game.inSpawnPhase()) {
+    game.executeNextTick();
+  }
+}
+
+function disconnectedSeasGame(): {
+  game: Game;
+  agent: PlayerInfo;
+  rival: PlayerInfo;
+  unreachableShore: number;
+  reachableShore: number;
+} {
+  const width = 20;
+  const height = 20;
+  const row = [W, W, ...Array<string>(16).fill(L), W, W];
+  const game = createPathfindingGame({
+    width,
+    height,
+    grid: Array.from({ length: height }, () => [...row]).flat(),
+  });
+  const agent = new PlayerInfo(
+    "Agent",
+    PlayerType.Human,
+    "CLNT_AGENT",
+    "P_AGENT",
+  );
+  const rival = new PlayerInfo(
+    "Rival",
+    PlayerType.Human,
+    "CLNT_RIVAL",
+    "P_RIVAL",
+  );
+  spawnPlayers(game, [
+    { info: agent, x: 4, y: 1 },
+    { info: rival, x: 15, y: 1 },
+  ]);
+
+  const unreachableShore = game.ref(17, 1);
+  const reachableShore = game.ref(2, 19);
+  game.player(rival.id).conquer(unreachableShore);
+  game.player(rival.id).conquer(reachableShore);
+
+  return { game, agent, rival, unreachableShore, reachableShore };
 }
 
 function ally(
@@ -126,5 +191,189 @@ describe("AgentObservationBuilder quick-chat wire identities", () => {
         }),
       ]),
     );
+  });
+});
+
+describe("AgentObservationBuilder boat targets", () => {
+  it("offers a reachable later coastline when an enemy's first coastline is disconnected", () => {
+    const { game, rival, unreachableShore, reachableShore } =
+      disconnectedSeasGame();
+    const player = game.player("P_AGENT");
+    const enemyShores = Array.from(game.player(rival.id).borderTiles()).filter(
+      (tile) => game.isShore(tile),
+    );
+
+    expect(enemyShores.indexOf(unreachableShore)).toBeLessThan(
+      enemyShores.indexOf(reachableShore),
+    );
+    expect(player.canBuild(UnitType.TransportShip, unreachableShore)).toBe(
+      false,
+    );
+    expect(player.canBuild(UnitType.TransportShip, reachableShore)).not.toBe(
+      false,
+    );
+
+    const boatOptions = observe(game).nonCombat.boatOptions ?? [];
+    expect(boatOptions).toHaveLength(6);
+    expect(boatOptions.some((option) => option.targetID === null)).toBe(true);
+    expect(boatOptions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          targetID: rival.id,
+          targetTile: reachableShore,
+        }),
+      ]),
+    );
+    const legalBoatActions = new LegalActionBuilder()
+      .build({ observation: observe(game) })
+      .filter((action) => action.kind === "boat");
+    expect(
+      legalBoatActions.some(
+        (action) => action.metadata?.targetID === rival.id,
+      ),
+    ).toBe(true);
+    expect(
+      legalBoatActions.some(
+        (action) => action.metadata?.targetName === "Terra Nullius",
+      ),
+    ).toBe(true);
+
+    const repeatedBoatOptions = observe(game).nonCombat.boatOptions ?? [];
+    expect(JSON.stringify(repeatedBoatOptions)).toBe(
+      JSON.stringify(boatOptions),
+    );
+  });
+
+  it("does not offer an enemy whose coastlines are genuinely disconnected", () => {
+    const { game, rival, reachableShore } = disconnectedSeasGame();
+    game.player(rival.id).relinquish(reachableShore);
+
+    const player = game.player("P_AGENT");
+    const rivalShores = Array.from(game.player(rival.id).borderTiles()).filter(
+      (tile) => game.isShore(tile),
+    );
+    expect(rivalShores.length).toBeGreaterThan(0);
+    expect(
+      rivalShores.every(
+        (tile) => player.canBuild(UnitType.TransportShip, tile) === false,
+      ),
+    ).toBe(true);
+
+    const boatOptions = observe(game).nonCombat.boatOptions ?? [];
+    expect(boatOptions.some((option) => option.targetID === rival.id)).toBe(
+      false,
+    );
+  });
+
+  it("does not hide a reachable naval target merely because it is stronger and shares a land border", () => {
+    const { game, rival, reachableShore } = disconnectedSeasGame();
+    const player = game.player("P_AGENT");
+    const enemy = game.player(rival.id);
+    const adjacentNeutral = Array.from(player.borderTiles())
+      .flatMap((tile) => Array.from(game.neighbors(tile)))
+      .find(
+        (tile) =>
+          game.isLand(tile) &&
+          game.owner(tile) !== player &&
+          game.owner(tile) !== enemy,
+      );
+    expect(adjacentNeutral).toBeDefined();
+    enemy.conquer(adjacentNeutral!);
+    enemy.setTroops(player.troops() + 100_000);
+
+    expect(player.sharesBorderWith(enemy)).toBe(true);
+    expect(player.canBuild(UnitType.TransportShip, reachableShore)).not.toBe(
+      false,
+    );
+    expect(
+      (observe(game).nonCombat.boatOptions ?? []).some(
+        (option) => option.targetID === rival.id,
+      ),
+    ).toBe(true);
+  });
+
+  it("reports no launch options when all transport slots are occupied", () => {
+    const { game } = disconnectedSeasGame();
+    const player = game.player("P_AGENT");
+    for (let index = 0; index < game.config().boatMaxNumber(); index += 1) {
+      const tile = game.ref(1, index + 1);
+      player.buildUnit(UnitType.TransportShip, tile, { targetTile: tile });
+    }
+
+    expect(player.unitCount(UnitType.TransportShip)).toBe(
+      game.config().boatMaxNumber(),
+    );
+    expect(observe(game).nonCombat.boatOptions).toEqual([]);
+  });
+
+  it("surfaces transport progress and does not offer manual recall for a healthy voyage", () => {
+    const { game, rival, reachableShore } = disconnectedSeasGame();
+    const player = game.player("P_AGENT");
+    const boatTile = game.ref(1, 4);
+    const transport = player.buildUnit(UnitType.TransportShip, boatTile, {
+      targetTile: reachableShore,
+    });
+
+    const observation = observe(game);
+    expect(observation.nonCombat.transportLaunch).toEqual({
+      activeTransportCount: 1,
+      maximumTransportCount: game.config().boatMaxNumber(),
+      launchSlotsRemaining: game.config().boatMaxNumber() - 1,
+      blocker: null,
+    });
+    expect(observation.nonCombat.transportStates).toEqual([
+      expect.objectContaining({
+        unitID: transport.id(),
+        status: "en_route",
+        tile: boatTile,
+        targetTile: reachableShore,
+        targetID: rival.id,
+        targetName: rival.name,
+        remainingManhattanDistance: game.manhattanDist(
+          boatTile,
+          reachableShore,
+        ),
+      }),
+    ]);
+
+    const legalActions = new LegalActionBuilder().build({ observation });
+    expect(legalActions.some((action) => action.kind === "boat_retreat")).toBe(
+      false,
+    );
+  });
+
+  it("shows returning transports as occupying launch slots", () => {
+    const { game } = disconnectedSeasGame();
+    const player = game.player("P_AGENT");
+    const boatTile = game.ref(1, 4);
+    const ownShore = Array.from(player.borderTiles()).find((tile) =>
+      game.isShore(tile),
+    );
+    expect(ownShore).toBeDefined();
+    const transport = player.buildUnit(UnitType.TransportShip, boatTile, {
+      targetTile: ownShore!,
+    });
+    transport.updateTransportShipState({ isRetreating: true });
+
+    const observation = observe(game);
+    expect(observation.nonCombat.boatRetreatOptions).toBeUndefined();
+    expect(observation.nonCombat.transportStates).toEqual([
+      expect.objectContaining({
+        unitID: transport.id(),
+        status: "returning",
+        targetTile: ownShore,
+      }),
+    ]);
+    expect(observation.nonCombat.transportLaunch?.activeTransportCount).toBe(1);
+    expect(observation.nonCombat.transportLaunch?.launchSlotsRemaining).toBe(
+      game.config().boatMaxNumber() - 1,
+    );
+    expect(
+      observation.tacticalAffordances?.transportTroopBanking
+        .activeTransportCount,
+    ).toBe(1);
+    expect(
+      observation.tacticalAffordances?.navalControl?.activeTransportCount,
+    ).toBe(1);
   });
 });

@@ -212,6 +212,29 @@ export interface AgentBoatRetreatOption {
   legalReason: string;
 }
 
+export interface AgentTransportState {
+  unitID: number;
+  status: "en_route" | "returning";
+  tile: TileRef;
+  targetTile: TileRef | null;
+  targetID: string | null;
+  targetName: string | null;
+  troops: number;
+  /** Manhattan distance only: a deterministic progress hint, not route length or ETA. */
+  remainingManhattanDistance: number | null;
+}
+
+export interface AgentTransportLaunchState {
+  activeTransportCount: number;
+  maximumTransportCount: number;
+  launchSlotsRemaining: number;
+  blocker:
+    | "transport_disabled"
+    | "transport_cap_reached"
+    | "no_reachable_target"
+    | null;
+}
+
 export interface AgentWarshipMoveOption {
   unitIDs: number[];
   targetTile: TileRef;
@@ -273,6 +296,10 @@ export interface AgentNonCombatState {
   upgradeOptions?: AgentUpgradeOption[];
   deleteUnitOptions?: AgentDeleteUnitOption[];
   boatOptions?: AgentBoatOption[];
+  transportStates?: AgentTransportState[];
+  transportLaunch?: AgentTransportLaunchState;
+  /** @deprecated Transport recall is no longer offered to agents. Retained for
+   * compatibility with older observations and internal policy fixtures. */
   boatRetreatOptions?: AgentBoatRetreatOption[];
   warshipMoveOptions?: AgentWarshipMoveOption[];
   allianceOptions?: AgentAllianceOption[];
@@ -727,6 +754,21 @@ export interface AgentObservation {
     turnsToTimer: number | null;
   };
   notes: string[];
+}
+
+/**
+ * Current observations use `transportStates`. The fallback keeps retained
+ * observations and older policy fixtures readable without emitting the
+ * obsolete recall-option field in new observations.
+ */
+export function observedTransportStates(
+  observation: AgentObservation,
+): readonly (AgentTransportState | AgentBoatRetreatOption)[] {
+  return (
+    observation.nonCombat.boatRetreatOptions ??
+    observation.nonCombat.transportStates ??
+    []
+  );
 }
 
 export type LegalActionKind =

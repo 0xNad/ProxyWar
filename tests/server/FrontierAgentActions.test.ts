@@ -25,7 +25,7 @@ import { LegalActionBuilder } from "../../src/server/agents/LegalActionBuilder";
 import { LlmPromptBuilder } from "../../src/server/agents/LlmPromptBuilder";
 
 const autonomousGameplayKinds = legalActionKinds.filter(
-  (kind) => kind !== "hold",
+  (kind) => kind !== "hold" && kind !== "boat_retreat",
 );
 
 describe("FrontierAgent expanded legal action surface", () => {
@@ -68,6 +68,17 @@ describe("FrontierAgent expanded legal action surface", () => {
         ).not.toThrow();
       }
     }
+  });
+
+  it("does not expose manual transport recall even for legacy observations", () => {
+    const actions = new LegalActionBuilder().build({
+      observation: expandedObservation(),
+      maxPostSpawnActions: 120,
+    });
+
+    expect(actions.some((action) => action.kind === "boat_retreat")).toBe(
+      false,
+    );
   });
 
   it("keeps map-wide spawn scouts in the legal action list", () => {

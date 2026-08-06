@@ -140,29 +140,6 @@ export class LegalActionBuilder {
       });
     }
 
-    for (const boat of input.observation.nonCombat.boatRetreatOptions ?? []) {
-      if (actions.length >= maxActions) {
-        break;
-      }
-      actions.push({
-        id: `boat_retreat:${boat.unitID}`,
-        kind: "boat_retreat",
-        label: `Retreat transport ${boat.unitID}`,
-        intent: {
-          type: "cancel_boat",
-          unitID: boat.unitID,
-        },
-        risk: { level: "low", score: 0.15 },
-        metadata: {
-          unitID: boat.unitID,
-          tile: boat.tile,
-          targetTile: boat.targetTile,
-          troops: boat.troops,
-          legalReason: boat.legalReason,
-        },
-      });
-    }
-
     for (const other of input.observation.visiblePlayers) {
       if (actions.length >= maxActions) {
         break;
