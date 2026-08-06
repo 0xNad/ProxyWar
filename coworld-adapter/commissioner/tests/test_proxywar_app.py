@@ -2,25 +2,26 @@ import os
 from pathlib import Path
 from uuid import UUID
 
-import yaml
 import pytest
+import yaml
 
 # Importing commissioners.proxywar_app also constructs the shared FastAPI app,
 # whose default config name is not bundled in this game-specific image.
 os.environ.setdefault("RULESET_STRATEGY_CONFIG_NAME", "proxywar")
 
+from commissioners.common.adapters import schedule_rounds_for_request
 from commissioners.common.protocol import (
     DivisionInfo,
     LeagueInfo,
     MembershipInfo,
     RoundStart,
+    ScheduleRoundsRequest,
     VariantInfo,
 )
 from commissioners.common.ruleset_strategy.config import (
     RulesetStrategyCommissionerConfig,
 )
 from commissioners.proxywar_app import ProxyWarCommissioner
-
 
 CONFIG_PATH = (
     Path(__file__).parents[1]
@@ -31,6 +32,7 @@ CONFIG_PATH = (
 )
 LEAGUE_ID = UUID("00000000-0000-0000-0000-000000000001")
 DIVISION_ID = UUID("00000000-0000-0000-0000-000000000002")
+QUALIFIER_POLICY_ID = UUID("00000000-0000-0000-0003-000000000001")
 
 
 def competition_round_start(champion_count: int) -> RoundStart:
@@ -90,6 +92,61 @@ def commissioner() -> ProxyWarCommissioner:
         yaml.safe_load(CONFIG_PATH.read_text())
     )
     return ProxyWarCommissioner(config)
+
+
+def test_qualifier_self_play_survives_scheduling_protocol_round_trip() -> None:
+    qualifier = DivisionInfo(
+        id=DIVISION_ID,
+        name="Qualifiers",
+        level=-99,
+        type="staging",
+    )
+    membership = MembershipInfo(
+        id=UUID("00000000-0000-0000-0004-000000000001"),
+        league_id=LEAGUE_ID,
+        division_id=DIVISION_ID,
+        policy_version_id=QUALIFIER_POLICY_ID,
+        player_id="qualifying-player",
+        status="qualifying",
+    )
+    scheduled = schedule_rounds_for_request(
+        commissioner(),
+        ScheduleRoundsRequest(
+            league=LeagueInfo(id=LEAGUE_ID, commissioner_key="container"),
+            divisions=[qualifier],
+            active_memberships=[membership],
+            recent_rounds=[],
+        ),
+    )
+
+    assert len(scheduled.rounds) == 1
+    round_config = scheduled.to_json()["rounds"][0]["round_config"]
+    assert round_config["stages"][0]["self_play"] is True
+
+    episodes = commissioner().schedule_episodes_for_round_start(
+        RoundStart(
+            round_id=UUID("00000000-0000-0000-0005-000000000001"),
+            round_number=1,
+            league=LeagueInfo(id=LEAGUE_ID, commissioner_key="container"),
+            divisions=[qualifier],
+            memberships=[membership],
+            recent_results=[],
+            variants=[
+                VariantInfo(
+                    id="tournament-2p-pangaea",
+                    name="2-player Pangaea",
+                    game_config={"num_agents": 2},
+                )
+            ],
+            state={"round_config": round_config},
+        )
+    )
+
+    assert len(episodes.episodes) == 2
+    assert all(
+        episode.policy_version_ids == [QUALIFIER_POLICY_ID, QUALIFIER_POLICY_ID]
+        for episode in episodes.episodes
+    )
 
 
 def test_live_17_champion_field_schedules_every_entrant() -> None:
