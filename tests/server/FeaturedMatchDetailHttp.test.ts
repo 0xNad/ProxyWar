@@ -34,6 +34,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { readCoworldLeagueRetentionPinManifest } from "../../src/server/agents/CoworldLeagueArtifactRetention";
 
 const projectRoot = process.cwd();
 const require = createRequire(import.meta.url);
@@ -67,6 +68,7 @@ describe("GET /api/featured-matches/:matchId resolves the live mirror's watchHre
   let featuredMatchStateRoot = "";
   let artifactsRoot = "";
   let summariesRoot = "";
+  let pinManifestPath = "";
   let server: ChildProcess | null = null;
   let origin = "";
   let serverOutput = "";
@@ -75,11 +77,20 @@ describe("GET /api/featured-matches/:matchId resolves the live mirror's watchHre
     fixtureRoot = await realpath(
       await mkdtemp(path.join(tmpdir(), "proxywar-featured-match-http-")),
     );
+    // A SEPARATE root, never nested under fixtureRoot — the server's own
+    // cwd carries no `artifacts/` directory at all, matching production
+    // (PROXYWAR_ARTIFACTS_ROOT points elsewhere entirely from the deploy
+    // worktree's own cwd; see FeaturedMatchRetentionPin.ts's own doc for
+    // why this distinction matters for retention-pin resolution).
+    artifactsRoot = await realpath(
+      await mkdtemp(
+        path.join(tmpdir(), "proxywar-featured-match-http-artifacts-"),
+      ),
+    );
     const homeRoot = path.join(fixtureRoot, "home");
     const nationsRoot = path.join(fixtureRoot, "nations");
     const staticRoot = path.join(fixtureRoot, "static");
     const identityDir = path.join(fixtureRoot, "identity");
-    artifactsRoot = path.join(fixtureRoot, "artifacts");
     summariesRoot = path.join(artifactsRoot, "coworld-league-mirror", "summaries");
     const leagueRoot = path.join(artifactsRoot, "ai-league-runs", "league");
     privateStateRoot = path.join(
@@ -89,6 +100,10 @@ describe("GET /api/featured-matches/:matchId resolves the live mirror's watchHre
     featuredMatchStateRoot = path.join(
       path.dirname(fixtureRoot),
       `${path.basename(fixtureRoot)}-featured-matches`,
+    );
+    pinManifestPath = path.join(
+      path.dirname(fixtureRoot),
+      `${path.basename(fixtureRoot)}-retention-pins.json`,
     );
 
     await Promise.all([
@@ -356,6 +371,7 @@ describe("GET /api/featured-matches/:matchId resolves the live mirror's watchHre
           PROXYWAR_REPLAY_PREMIERE_STATE_ROOT: privateStateRoot,
           PROXYWAR_FEATURED_MATCH_STATE_ROOT: featuredMatchStateRoot,
           PROXYWAR_IDENTITY_REGISTRY_DIR: identityDir,
+          PROXYWAR_LEAGUE_RETENTION_PINS: pinManifestPath,
         },
         stdio: ["ignore", "pipe", "pipe"],
       },
@@ -373,10 +389,13 @@ describe("GET /api/featured-matches/:matchId resolves the live mirror's watchHre
     await stopServer(server);
     if (fixtureRoot !== "")
       await rm(fixtureRoot, { recursive: true, force: true });
+    if (artifactsRoot !== "")
+      await rm(artifactsRoot, { recursive: true, force: true });
     if (privateStateRoot !== "")
       await rm(privateStateRoot, { recursive: true, force: true });
     if (featuredMatchStateRoot !== "")
       await rm(featuredMatchStateRoot, { recursive: true, force: true });
+    await rm(pinManifestPath, { force: true });
   });
 
   test("carries the mirror episode's exact watchHref/fullRenderHref for a matched episodeRequestId", async () => {
@@ -404,7 +423,7 @@ describe("GET /api/featured-matches/:matchId resolves the live mirror's watchHre
     );
   });
 
-  test("reports null (never fabricated) watchHref/fullRenderHref when the record's episodeRequestId never reached the mirror", async () => {
+  test("reports null (never fabricated) watchHref/fullRenderHref when the record's episodeRequestId never reached the mirror; no retention pin is fabricated for it either (manifest file need not even exist yet)", async () => {
     const response = await rawRequest(
       origin,
       `/api/featured-matches/${encodeURIComponent(UNMIRRORED_MATCH_ID)}`,
@@ -416,9 +435,19 @@ describe("GET /api/featured-matches/:matchId resolves the live mirror's watchHre
     expect(body.match.matchId).toBe(UNMIRRORED_MATCH_ID);
     expect(body.match.watchHref).toBeNull();
     expect(body.match.fullRenderHref).toBeNull();
+
+    // readCoworldLeagueRetentionPinManifest is ENOENT-tolerant (returns an
+    // empty manifest) so this assertion holds regardless of whether an
+    // earlier test in this file has already created the pin file.
+    const manifest = await readCoworldLeagueRetentionPinManifest(pinManifestPath);
+    expect(
+      manifest.pins.some(
+        (pin) => pin.episodeRequestId === UNMIRRORED_EPISODE_REQUEST_ID,
+      ),
+    ).toBe(false);
   });
 
-  test("full-replay-retention fix: falls back to the durable archive for a matchId whose episode rotated OUT of the live mirror window — fullRenderHref resolves, watchHref stays null (never fabricated)", async () => {
+  test("full-replay-retention fix (2026-08-06): falls back to the durable archive for a matchId whose episode rotated OUT of the live mirror window — fullRenderHref resolves, watchHref stays null, AND the exact retention pin is added even though the server's own cwd has no artifacts/ (production incident regression: options.artifactsRoot must reach computeFeaturedMatchPinAddOperation)", async () => {
     const response = await rawRequest(
       origin,
       `/api/featured-matches/${encodeURIComponent(ROTATED_MATCH_ID)}`,
@@ -432,6 +461,17 @@ describe("GET /api/featured-matches/:matchId resolves the live mirror's watchHre
     expect(body.match.fullRenderHref).toBe(
       `/ai-league-replay/${ROTATED_PUBLIC_RUN_KEY}`,
     );
+
+    // The pin manifest must carry the exact owner entry — before the fix,
+    // this file stayed byte-identical (0 pins added) even though the href
+    // above resolved correctly, exactly as the production incident
+    // reported (archive-href writer/app gates passed, pin gate failed).
+    const manifest = await readCoworldLeagueRetentionPinManifest(pinManifestPath);
+    expect(manifest.pins).toContainEqual({
+      episodeRequestId: ROTATED_EPISODE_REQUEST_ID,
+      publicRunKey: ROTATED_PUBLIC_RUN_KEY,
+      reason: `featured-match:${ROTATED_MATCH_ID}`,
+    });
   });
 
   test("full-replay-retention fix: GET /ai-league-replay/:runID lazily restores a missing live game-record.json from its durable archive and serves 200", async () => {

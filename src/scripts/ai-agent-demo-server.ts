@@ -1356,7 +1356,9 @@ app.get("/api/featured-matches/:matchId", async (req, res) => {
   try {
     res.setHeader("Cache-Control", "no-store, max-age=0");
     const stateRoot = resolveFeaturedMatchStateRoot();
-    const store = await reconcileFeaturedMatchStore(stateRoot);
+    const store = await reconcileFeaturedMatchStore(stateRoot, {
+      artifactsRoot: artifactsRootDir,
+    });
     const match = store.matches.find(
       (candidate) =>
         candidate.matchId === req.params.matchId &&
@@ -1386,7 +1388,9 @@ app.get("/api/premieres/:premiereId/featured-match", async (req, res) => {
   try {
     res.setHeader("Cache-Control", "no-store, max-age=0");
     const stateRoot = resolveFeaturedMatchStateRoot();
-    const store = await reconcileFeaturedMatchStore(stateRoot);
+    const store = await reconcileFeaturedMatchStore(stateRoot, {
+      artifactsRoot: artifactsRootDir,
+    });
     const match = store.matches.find(
       (candidate) =>
         candidate.lane === "premiere" &&
@@ -1782,7 +1786,9 @@ async function resolveMatchDetailPageMetadata(
 > {
   if (matchId.startsWith("feat_")) {
     const stateRoot = resolveFeaturedMatchStateRoot();
-    const store = await reconcileFeaturedMatchStore(stateRoot);
+    const store = await reconcileFeaturedMatchStore(stateRoot, {
+      artifactsRoot: artifactsRootDir,
+    });
     const match = store.matches.find(
       (candidate) =>
         candidate.matchId === matchId && candidate.state !== "candidate",
