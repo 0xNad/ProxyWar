@@ -18,10 +18,7 @@ import {
   type MatchStateStripInput,
   type TimelineMarker,
 } from "./BroadcastComposition";
-import {
-  BROADCAST_RAIL_FOLLOW_EVENT,
-  BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT,
-} from "./graphics/layers/PointOfViewSelector";
+import { BROADCAST_RAIL_LOCATE_EVENT } from "./graphics/CompetitorLocateBridge";
 import { fetchReadModel, type PublicAgent } from "./publicapp/ReadModelSchema";
 
 export type ReplayPremierePublicState =
@@ -549,12 +546,6 @@ export function mountReplayPremiereOverlay(
   // blocker — it degrades to the same "unregistered" fallback the rail
   // already renders gracefully for a genuinely unmatched player.
   let identityByPlayerName: ReadonlyMap<string, PublicAgent> | null = null;
-  // Camera-follow discoverability (spec item 6): tracks whichever player the
-  // shared `PointOfViewSelector` currently follows, purely so the rail's
-  // `followed` highlight stays truthful — the click that CAUSES a follow is
-  // a fire-and-forget dispatch (`RAIL_CALLBACKS`), never a state change this
-  // overlay owns itself.
-  let followedClientID: string | null = null;
   // Mobile drawer (spec item 7) / analyst mode (spec item 5): caller-owned
   // UI state, same pattern as the caption draft below — read on render,
   // mutated by a setter that re-renders.
@@ -585,7 +576,6 @@ export function mountReplayPremiereOverlay(
   const latestModel = () => model;
 
   const currentBroadcastState = (): BroadcastState => ({
-    followedClientID,
     activeDrawerTab,
     setActiveDrawerTab(tab: BroadcastDrawerTabId) {
       if (activeDrawerTab === tab) return;
@@ -624,18 +614,6 @@ export function mountReplayPremiereOverlay(
       render();
     },
   });
-
-  const onFollowedChange = (event: Event): void => {
-    const detail = (
-      event as CustomEvent<{ playerName: string | null; clientID?: string | null }>
-    ).detail;
-    followedClientID = detail?.clientID ?? null;
-    render();
-  };
-  document.addEventListener(
-    BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT,
-    onFollowedChange,
-  );
 
   /**
    * Every curated War Room event becomes a lower-third trigger, plus one
@@ -825,10 +803,6 @@ export function mountReplayPremiereOverlay(
       }
       disposed = true;
       clearInterval(clockTimer ?? undefined);
-      document.removeEventListener(
-        BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT,
-        onFollowedChange,
-      );
       lowerThirds.dispose();
       lowerThirdHost.remove();
       overlay.remove();
@@ -865,14 +839,12 @@ interface CaptionDraftState {
 
 /**
  * Bundles the Stage 4 broadcast composition's caller-owned UI state
- * (camera-follow highlight, drawer active tab, analyst-mode toggle) the same
+ * (drawer active tab, analyst-mode toggle, rail/War Room collapse) the same
  * way {@link CaptionDraftState} bundles the caption draft — a read-only
  * snapshot plus setters that trigger a re-render, threaded through the
  * render closure rather than living on the model.
  */
 interface BroadcastState {
-  /** Whichever player `PointOfViewSelector` currently follows (spec item 6) — used only to render the rail's `followed` highlight truthfully. */
-  followedClientID: string | null;
   /** Mobile drawer (spec item 7): active tab at narrow/short viewports; irrelevant at desktop width, where CSS shows every non-Analysis panel regardless. */
   activeDrawerTab: BroadcastDrawerTabId;
   setActiveDrawerTab(tab: BroadcastDrawerTabId): void;
@@ -986,7 +958,6 @@ function applyVolatileModelUpdates(
         buildCompetitorRailEntries(
           model.competitorRailSeats,
           identityByPlayerName,
-          broadcastState.followedClientID,
         ),
         {
           ...RAIL_CALLBACKS,
@@ -1220,18 +1191,15 @@ function applyVolatileModelUpdates(
 function buildCompetitorRailEntries(
   seats: readonly ReplayPremiereRailSeatView[],
   identityByPlayerName: ReadonlyMap<string, PublicAgent> | null,
-  followedClientID: string | null,
 ): CompetitorRailEntry[] {
   return seats.map((seat): CompetitorRailEntry => {
     const agent = identityByPlayerName?.get(seat.playerName) ?? null;
     return {
       playerName: seat.playerName,
-      // P0 fix (follow-controls sync, deploy 3.4): `seat.seatId` IS the
-      // identifier PointOfViewSelector's own PlayerView.clientID()
-      // correlates to (see ReplayPremiereRuntime.ts's own
-      // framePlayerBySeatId doc) — `playerName` alone can never resolve
-      // to a real PlayerView, the same mismatch AiLeagueReplayOverlay.ts
-      // had (see PointOfViewSelector.ts's onFollowPlayerRequest doc).
+      // `seat.seatId` IS the identifier a rail-click's `clientID` detail
+      // resolves to (see ReplayPremiereRuntime.ts's own framePlayerBySeatId
+      // doc) — `playerName` alone can never resolve to a real PlayerView,
+      // the same mismatch AiLeagueReplayOverlay.ts had.
       clientID: seat.seatId,
       displayName: agent !== null ? agent.displayName : seat.playerName,
       agentSlug: agent?.slug ?? null,
@@ -1249,16 +1217,15 @@ function buildCompetitorRailEntries(
       // `AgentEvaluationReport.ts`) — no bounded signal for it exists while a
       // Premiere is sealed/live, live or archived.
       degradedDecisionCount: null,
-      followed: seat.seatId === followedClientID,
     };
   });
 }
 
-/** Opt-in-only camera-follow bridge (spec item 6): the SAME cross-overlay CustomEvent `PointOfViewSelector` is the only listener for — clicking a rail seat pans, exactly like the crosshair button, never automatic. A module-level constant since it captures no per-mount state. */
+/** One-shot camera-locate bridge: the SAME cross-overlay CustomEvent the competitor locate bridge (`CompetitorLocateBridge.ts`) is the only listener for — clicking a rail seat centers the camera once, never persisted, never automatic. A module-level constant since it captures no per-mount state. */
 const RAIL_CALLBACKS: CompetitorRailCallbacks = {
   onSelect: (playerName: string, clientID: string | null) => {
     document.dispatchEvent(
-      new CustomEvent(BROADCAST_RAIL_FOLLOW_EVENT, {
+      new CustomEvent(BROADCAST_RAIL_LOCATE_EVENT, {
         detail: { playerName, clientID },
       }),
     );
@@ -1289,7 +1256,6 @@ function renderBroadcastRegions(
     buildCompetitorRailEntries(
       model.competitorRailSeats,
       identityByPlayerName,
-      broadcastState.followedClientID,
     ),
     {
       ...RAIL_CALLBACKS,

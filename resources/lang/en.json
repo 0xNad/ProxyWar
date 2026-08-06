@@ -2062,7 +2062,7 @@
     "rail_degraded": "{count, plural, one {# degraded decision} other {# degraded decisions}}",
     "rail_allies": "Allied: {names}",
     "rail_wars": "At war: {names}",
-    "rail_follow_label": "Follow {name} in the camera",
+    "rail_locate_label": "Find {name} on the map",
     "rail_collapse": "Collapse competitors panel",
     "rail_expand": "Expand competitors panel",
     "war_room_heading": "War Room",

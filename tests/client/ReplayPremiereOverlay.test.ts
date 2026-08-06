@@ -20,10 +20,7 @@ import {
   ReplayPremiereOverlayHandle,
   ReplayPremiereOverlayModel,
 } from "../../src/client/ReplayPremiereOverlay";
-import {
-  BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT,
-  BROADCAST_RAIL_FOLLOW_EVENT,
-} from "../../src/client/graphics/layers/PointOfViewSelector";
+import { BROADCAST_RAIL_LOCATE_EVENT } from "../../src/client/graphics/CompetitorLocateBridge";
 
 const handles: ReplayPremiereOverlayHandle[] = [];
 
@@ -2418,7 +2415,7 @@ describe("Stage 4 second-half wiring: camera-follow, drawer, analyst mode, lower
       }),
     );
     const followEvents: Array<{ playerName: string; clientID?: string | null }> = [];
-    document.addEventListener(BROADCAST_RAIL_FOLLOW_EVENT, (event) => {
+    document.addEventListener(BROADCAST_RAIL_LOCATE_EVENT, (event) => {
       followEvents.push(
         (event as CustomEvent<{ playerName: string; clientID?: string | null }>).detail,
       );
@@ -2429,17 +2426,15 @@ describe("Stage 4 second-half wiring: camera-follow, drawer, analyst mode, lower
     expect(seatButton).not.toBeNull();
     expect(followEvents).toHaveLength(0);
     seatButton?.click();
-    // P0 fix (follow-controls sync, deploy 3.4): the dispatched detail now
-    // also carries clientID -- the seat's own seatId, the ONLY identifier
-    // PointOfViewSelector can actually resolve to a real PlayerView (see
-    // PointOfViewSelector.ts's onFollowPlayerRequest doc for why playerName
-    // alone can never do this).
+    // The dispatched detail carries clientID -- the seat's own seatId, the
+    // ONLY identifier the receiving locate bridge can actually resolve to
+    // a real PlayerView with (playerName alone never can).
     expect(followEvents).toEqual([
       { playerName: "Atlas Prime", clientID: "seat-a" },
     ]);
   });
 
-  it("highlights whichever rail seat PointOfViewSelector reports as followed, via the followed-change event, without owning follow state itself", () => {
+  it("never renders a followed/pressed-highlight state on the rail — camera-locate is one-shot, never persisted", () => {
     const handle = mount(
       makeModel({
         state: "playing",
@@ -2467,28 +2462,30 @@ describe("Stage 4 second-half wiring: camera-follow, drawer, analyst mode, lower
     );
     const entries = () =>
       handle.element.querySelectorAll<HTMLElement>(".broadcast-rail-entry");
-    expect(entries()[0].dataset.followed).toBe("false");
-    expect(entries()[1].dataset.followed).toBe("false");
+    for (const entry of entries()) {
+      expect(entry.hasAttribute("data-followed")).toBe(false);
+      expect(
+        entry
+          .querySelector(".broadcast-rail-select")
+          ?.hasAttribute("aria-pressed"),
+      ).toBe(false);
+    }
 
-    // P0 fix (follow-controls sync, deploy 3.4): the rail correlates the
-    // followed-change event's clientID against each seat's own seatId --
-    // playerName alone can never resolve a real PlayerView (see
-    // PointOfViewSelector.ts's onFollowPlayerRequest doc), so PointOfView-
-    // Selector always dispatches clientID alongside playerName now.
-    document.dispatchEvent(
-      new CustomEvent(BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT, {
-        detail: { playerName: "Borealis", clientID: "seat-b" },
-      }),
+    const seatButton = entries()[1].querySelector<HTMLButtonElement>(
+      ".broadcast-rail-select",
     );
-    expect(entries()[0].dataset.followed).toBe("false");
-    expect(entries()[1].dataset.followed).toBe("true");
+    seatButton?.click();
 
-    document.dispatchEvent(
-      new CustomEvent(BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT, {
-        detail: { playerName: null, clientID: null },
-      }),
-    );
-    expect(entries()[1].dataset.followed).toBe("false");
+    // Still no persisted highlight of any kind after a click — a one-shot
+    // locate dispatch, no rail DOM trace of "who was clicked" left behind.
+    for (const entry of entries()) {
+      expect(entry.hasAttribute("data-followed")).toBe(false);
+      expect(
+        entry
+          .querySelector(".broadcast-rail-select")
+          ?.hasAttribute("aria-pressed"),
+      ).toBe(false);
+    }
   });
 
   it("switches the drawer's active tab on a tab click; every panel (including analysis) is always mounted in the DOM", () => {

@@ -5,7 +5,6 @@ import express, { type Request, type Response } from "express";
 import fs from "fs/promises";
 import http from "http";
 import path from "path";
-import { DEFAULT_PLATFORM_ORIGIN } from "../core/PlatformOrigin";
 import {
   loadAgentDemoHubModel,
   proxyWarAgentProtocolSchema,
@@ -202,7 +201,6 @@ import { createPlatformGithubAuthRouter } from "../server/platform/PlatformGithu
 import { PlatformGithubIdentityLinkStore } from "../server/platform/PlatformGithubIdentityLinkStore";
 import { PlatformHandoffStore } from "../server/platform/PlatformHandoffStore";
 import { PlatformPolicyClaimStore } from "../server/platform/PlatformPolicyClaimStore";
-import { resolvePlatformPovClaimOrigins } from "../server/platform/PlatformPovClaimOrigins";
 import { resolvePlatformReturnOrigins } from "../server/platform/PlatformReturnOrigins";
 import { renderPlatformRootHtml } from "../server/platform/PlatformRootPage";
 import {
@@ -346,23 +344,17 @@ const platformEnabled = envFlag("PROXYWAR_PLATFORM_ENABLED");
 // public URL, never a peer's: a child app never gets an
 // `expectedOrigin`-satisfying platform cookie, and vice versa.
 const configuredPlatformOrigin = firstConfiguredEnv("PROXYWAR_PLATFORM_ORIGIN");
-// The platform account origin every league/replay page must be allowed to
-// `fetch()` for the PoV default (`/api/account/pov-claims`). Same env as
-// above, and the fallback is `DEFAULT_PLATFORM_ORIGIN` — shared, not copied.
-// This line is why that matters: the BETTING process sets no
-// `PROXYWAR_PLATFORM_ORIGIN`, so the fallback is what lands in the CSP it
-// serves, and a stale one there is a silent console violation rather than an
-// error anyone sees (see `core/PlatformOrigin.ts`).
-const platformAccountOrigin =
-  configuredPlatformOrigin ?? DEFAULT_PLATFORM_ORIGIN;
 /**
- * The league/replay CSP, in ONE place. Every document this process serves on
- * a league surface must allow the platform origin in `connect-src` or the PoV
- * fetch dies as a silent console violation; routing all call sites through a
- * single helper is what stops the next page from omitting it.
+ * The league/replay CSP, in ONE place — `connect-src 'self'`, no per-page
+ * override. Previously widened to also allow the platform account origin
+ * (so a signed-in viewer's replay camera could default to their own
+ * claimed agent via a cross-origin `/api/account/pov-claims` fetch); that
+ * feature was removed, so every league surface is back to a closed CSP.
+ * Routing every call site through one helper is what would stop a future
+ * page from omitting a real widening need, if one is ever added again.
  */
 const leagueContentSecurityPolicy = (): string =>
-  proxyWarLeagueContentSecurityPolicy([platformAccountOrigin]);
+  proxyWarLeagueContentSecurityPolicy();
 // The account authority answers on exactly ONE hostname. After the apex
 // cutover `app.proxywar.xyz` still reaches this process through the tunnel,
 // and simply serving it would hand the visitor a second host-only session
@@ -2165,8 +2157,6 @@ if (platformEnabled) {
     production: replayPremierePublicOrigin.startsWith("https://"),
   });
   const platformReturnOrigins = resolvePlatformReturnOrigins();
-  // Separate from the handoff map on purpose — see `PlatformPovClaimOrigins`.
-  const platformPovClaimOrigins = resolvePlatformPovClaimOrigins();
   if (githubOAuthClient !== null) {
     app.use(
       createPlatformGithubAuthRouter({
@@ -2192,7 +2182,6 @@ if (platformEnabled) {
       identityLinkStore: platformGithubIdentityLinkStore,
       handoffs: platformHandoffStore,
       returnOrigins: platformReturnOrigins,
-      povClaimOrigins: platformPovClaimOrigins,
       githubSignInAvailable: githubOAuthClient !== null,
       artifactsRootDir,
       onOperatorError: (operatorCode, error) => {

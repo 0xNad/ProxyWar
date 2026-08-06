@@ -33,10 +33,7 @@ import {
   type TimelineMarkerKind,
   type WarRoomFeedCallbacks,
 } from "./BroadcastComposition";
-import {
-  BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT,
-  BROADCAST_RAIL_FOLLOW_EVENT,
-} from "./graphics/layers/PointOfViewSelector";
+import { BROADCAST_RAIL_LOCATE_EVENT } from "./graphics/CompetitorLocateBridge";
 import { analytics } from "./analytics/AnalyticsClient";
 import {
   mountDirectorCutController,
@@ -324,13 +321,6 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
   // re-renders (not the whole details block) so disclosure/toggle state is
   // untouched.
   let identityByPlayerName: ReadonlyMap<string, PublicAgent> = new Map();
-  // Camera-follow discoverability (spec item 6): mirrors identityByPlayerName
-  // above — closure state updated by a document-level listener registered
-  // once at mount (below), passed down into every broadcast-drawer render so
-  // the rail's `followed` seat always reflects PointOfViewSelector's own
-  // current pick, however it was set (rail click, dropdown, crosshair,
-  // initial resolution).
-  let followedClientID: string | null = null;
   void resolveAiLeagueIdentities().then((resolved) => {
     identityByPlayerName = resolved;
     if (!overlay.isConnected) return;
@@ -338,7 +328,6 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
       overlay,
       currentInput,
       identityByPlayerName,
-      followedClientID,
       directorCutHandle,
     );
   });
@@ -372,7 +361,6 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
     overlay,
     currentInput,
     identityByPlayerName,
-    followedClientID,
     directorCutHandle,
     () => currentInput.currentTurn ?? 0,
   );
@@ -483,43 +471,6 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
   };
   syncLowerThirds();
 
-  // Camera-follow discoverability (spec item 6): registered once here (not
-  // per-hydrate) since it must survive every renderDetails()/hydrate() call
-  // and only ever needs one live listener per overlay mount — same
-  // window-cleanup idiom as every other document-level listener in this
-  // file (e.g. __aiLeagueCompetitorRailCleanup's successor below).
-  const followedPlayerWin = window as Window & {
-    __aiLeagueFollowedPlayerCleanup?: () => void;
-  };
-  followedPlayerWin.__aiLeagueFollowedPlayerCleanup?.();
-  const onFollowedPlayerChange = (event: Event): void => {
-    const detail = (
-      event as CustomEvent<{ playerName: string | null; clientID?: string | null }>
-    ).detail;
-    if (detail === undefined || (detail.clientID ?? null) === followedClientID) {
-      return;
-    }
-    followedClientID = detail.clientID ?? null;
-    if (!overlay.isConnected) return;
-    mountAiLeagueBroadcastDrawer(
-      overlay,
-      currentInput,
-      identityByPlayerName,
-      followedClientID,
-      directorCutHandle,
-    );
-  };
-  document.addEventListener(
-    BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT,
-    onFollowedPlayerChange,
-  );
-  followedPlayerWin.__aiLeagueFollowedPlayerCleanup = () => {
-    document.removeEventListener(
-      BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT,
-      onFollowedPlayerChange,
-    );
-  };
-
   let disposed = false;
 
   // Single re-render path for the details block, shared by hydrate() and the
@@ -543,7 +494,6 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
       overlay,
       currentInput,
       identityByPlayerName,
-      followedClientID,
       directorCutHandle,
       () => currentInput.currentTurn ?? 0,
     );
@@ -562,7 +512,8 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
   // rebuilds every one of those regions in one call (via
   // `mountReplayDetailsBindings` -> `mountAiLeagueBroadcastDrawer`), so
   // reusing it here is sufficient -- same window-cleanup idiom as
-  // `onFollowedPlayerChange` above, since this listener must also survive
+  // every other document/window-level listener in this file, since this
+  // listener must also survive
   // every renderDetails()/hydrate() call and be torn down by the NEXT
   // mount if `dispose()` was never called. Listens on `window` (not
   // `document`): `UserSettings.emitChange` dispatches on `globalThis`
@@ -677,7 +628,6 @@ function disposeReplayOverlay(overlay: HTMLElement) {
     __aiLeagueDiplomacyCleanup?: () => void;
     __aiLeagueSocialBubblesCleanup?: () => void;
     __aiLeagueBroadcastDrawerCleanup?: () => void;
-    __aiLeagueFollowedPlayerCleanup?: () => void;
     __aiLeagueAnonymousNamesCleanup?: () => void;
   };
   win.__aiLeaguePanelDisclosureCleanup?.();
@@ -687,7 +637,6 @@ function disposeReplayOverlay(overlay: HTMLElement) {
   win.__aiLeagueDiplomacyCleanup?.();
   win.__aiLeagueSocialBubblesCleanup?.();
   win.__aiLeagueBroadcastDrawerCleanup?.();
-  win.__aiLeagueFollowedPlayerCleanup?.();
   win.__aiLeagueAnonymousNamesCleanup?.();
   delete win.__aiLeaguePanelDisclosureCleanup;
   delete win.__aiLeaguePanelControlsCleanup;
@@ -696,7 +645,6 @@ function disposeReplayOverlay(overlay: HTMLElement) {
   delete win.__aiLeagueDiplomacyCleanup;
   delete win.__aiLeagueSocialBubblesCleanup;
   delete win.__aiLeagueBroadcastDrawerCleanup;
-  delete win.__aiLeagueFollowedPlayerCleanup;
   delete win.__aiLeagueAnonymousNamesCleanup;
   overlay.remove();
   document.getElementById("ai-league-social-transcript")?.remove();
@@ -714,7 +662,6 @@ function mountReplayDetailsBindings(
   overlay: HTMLElement,
   input: AiLeagueReplayOverlayInput,
   identityByPlayerName: ReadonlyMap<string, PublicAgent>,
-  followedClientID: string | null,
   directorCutHandle: DirectorCutControllerHandle | null,
   getCurrentTurn: () => number,
 ): ReplayScopedLeagueClipControlHandle | null {
@@ -739,7 +686,6 @@ function mountReplayDetailsBindings(
     overlay,
     input,
     identityByPlayerName,
-    followedClientID,
     directorCutHandle,
   );
   const clipContainer = overlay.querySelector<HTMLElement>(
@@ -2484,10 +2430,6 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       .broadcast-rail-entry[data-alive="false"] {
         opacity: 0.55;
       }
-      .broadcast-rail-entry[data-followed="true"] {
-        border-color: var(--pw-accent, #f4a64a);
-        box-shadow: 0 0 0 1px var(--pw-accent, #f4a64a) inset;
-      }
       .broadcast-rail-select {
         display: grid;
         gap: 5px;
@@ -2960,11 +2902,9 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
        * opacity fade, never the scale pulse.
        *
        * Bottom-anchored, above the desktop-fixed timeline bar (spec item 3
-       * fix: this previously sat at top:16px, the EXACT lane
-       * pov-selector's "Follow:" control also occupies — see
-       * PointOfViewSelector.ts's fixed top-4 left-1/2 -translate-x-1/2
-       * root — so every pulse visually buried the follow control behind
-       * it. Reserving a distinct bottom lane, clear of the timeline bar
+       * fix: this previously sat at top:16px, overlapping the old
+       * floating "Follow:" toolbar's own lane). Reserving a distinct
+       * bottom lane, clear of the timeline bar
        * (.broadcast-drawer-panel[data-tab-id="timeline"]'s bottom:12px
        * + ~38px height) and of the older #ai-league-headline-event
        * banner's own bottom:9% lane, removes the overlap without
@@ -3951,20 +3891,16 @@ function competitorRailEntries(
         : { allies: [], wars: [] };
     return {
       playerName: username,
-      // Camera-follow discoverability (spec item 6/item 4 P0 fix):
-      // PointOfViewSelector's actual PlayerView identity has NO
-      // relationship to the AI League roster's `username` -- GameView's
-      // own name()/displayName() are procedurally-generated in-game
-      // nation names ("Somali Host", "Almohad Regime", ...), a totally
-      // disjoint namespace (confirmed live: neither the toolbar dropdown
-      // (already keyed by GameView's own player.id(), self-consistent)
-      // nor the per-agent rail button (dispatched the roster username,
-      // which PointOfViewSelector's name-based lookup can never resolve
-      // to a real PlayerView) could establish a shared identity before
-      // this fix). `clientID` is the one identifier BOTH sides already
-      // expose in the SAME value space (AiLeagueReplayFramePlayer.clientID
-      // / PlayerView.clientID()) -- this is what BROADCAST_RAIL_FOLLOW_EVENT
-      // and BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT now correlate on instead.
+      // Camera-locate discoverability: a rail seat's PlayerView identity
+      // has NO relationship to the AI League roster's `username` --
+      // GameView's own name()/displayName() are procedurally-generated
+      // in-game nation names ("Somali Host", "Almohad Regime", ...), a
+      // totally disjoint namespace from a rail button's roster username,
+      // so a click dispatched by username alone could never resolve to a
+      // real PlayerView. `clientID` is the one identifier BOTH sides
+      // actually share (AiLeagueReplayFramePlayer.clientID /
+      // PlayerView.clientID()) -- this is what `BROADCAST_RAIL_LOCATE_EVENT`
+      // correlates on instead.
       clientID: framePlayer?.clientID ?? null,
       displayName,
       agentSlug: identity?.slug ?? null,
@@ -3981,7 +3917,6 @@ function competitorRailEntries(
       allies: relations.allies,
       wars: relations.wars,
       degradedDecisionCount: degradedByName.get(normalizeName(username)) ?? null,
-      followed: false,
     } satisfies CompetitorRailEntry;
   });
 
@@ -4150,9 +4085,6 @@ function analystActionKindCounts(
  * Every tab's DERIVATION stays exactly what it always was —
  * competitorRailEntries()/curatedWarRoomEvents()/matchTimelineEventMarkers()
  * are reused verbatim, only WHERE their output mounts changed.
- * `followedClientID` (spec item 6) is threaded in from the outer mount
- * closure so the rail's `followed` seat always reflects
- * PointOfViewSelector's current pick.
  *
  * Desktop "escape to a floating panel" quirk: #ai-league-replay-overlay
  * itself uses backdrop-filter for its frosted-glass chrome, and per the CSS
@@ -4722,7 +4654,6 @@ function mountAiLeagueBroadcastDrawer(
   overlay: HTMLElement,
   input: AiLeagueReplayOverlayInput,
   identityByPlayerName: ReadonlyMap<string, PublicAgent>,
-  followedClientID: string | null,
   directorCutHandle: DirectorCutControllerHandle | null,
 ): void {
   const container = overlay.querySelector<HTMLElement>(
@@ -4881,7 +4812,7 @@ function mountAiLeagueBroadcastDrawer(
   const railCallbacks = () => ({
     onSelect: (playerName: string, clientID: string | null) => {
       document.dispatchEvent(
-        new CustomEvent(BROADCAST_RAIL_FOLLOW_EVENT, {
+        new CustomEvent(BROADCAST_RAIL_LOCATE_EVENT, {
           detail: { playerName, clientID },
         }),
       );
@@ -4965,10 +4896,7 @@ function mountAiLeagueBroadcastDrawer(
       decisions,
       framePlayers,
       identityByPlayerName,
-    ).map((entry) => ({
-      ...entry,
-      followed: entry.clientID !== null && entry.clientID === followedClientID,
-    }));
+    );
     const eligibleWarRoomCount = domEligibleCount(
       allWarRoomEvents,
       (event) => event.turn,
@@ -5130,10 +5058,7 @@ function mountAiLeagueBroadcastDrawer(
       decisions,
       framePlayers,
       identityByPlayerName,
-    ).map((entry) => ({
-      ...entry,
-      followed: entry.clientID !== null && entry.clientID === followedClientID,
-    }));
+    );
     const rail = container.querySelector<HTMLElement>(".broadcast-rail");
     if (rail !== null) {
       const nextRailKey = JSON.stringify(railEntries);

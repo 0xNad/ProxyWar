@@ -38,10 +38,10 @@ export class GoToPositionEvent implements GameEvent {
 /**
  * Explicit "show the whole map" request — the one-gesture way back to a full
  * board view from the portrait/landscape spectator overzoom default (see
- * SPECTATOR_OVERZOOM_TARGET_FILL) or from any deliberate zoom-in. Dispatched
- * by the PoV selector's "Whole board" pick/crosshair (PointOfViewSelector),
- * never by anything automatic. Handled by forcing centerAll()'s literal
- * whole-map "contain" landing regardless of viewport aspect.
+ * SPECTATOR_OVERZOOM_TARGET_FILL) or from any deliberate zoom-in. Currently
+ * dispatched automatically by `WinModal` at match end. Handled by forcing
+ * centerAll()'s literal whole-map "contain" landing regardless of viewport
+ * aspect.
  */
 export class FitWholeMapEvent implements GameEvent {
   constructor() {}
@@ -163,6 +163,49 @@ export function computeSpectatorFitScale(
     scale,
     fillScale: coverScale,
     zoomFloor: containScale * SPECTATOR_ZOOM_OUT_MARGIN,
+  };
+}
+
+export interface CenterOnCellInput {
+  targetX: number;
+  targetY: number;
+  scale: number;
+  gameWidth: number;
+  gameHeight: number;
+  canvasWidth: number;
+  canvasHeight: number;
+}
+
+/**
+ * Pure destination-offset math for a spectator/replay ONE-SHOT camera
+ * locate (see `TransformHandler.onGoToPlayer`'s spectator branch): the
+ * offset that puts `(targetX, targetY)` under the exact geometric center of
+ * the canvas at the CURRENT scale — no scale change, no iteration, no
+ * possibility of stalling. Same derivation as `centerAll()`'s `oHor`/`oVer`
+ * (inverting `screenToWorldCoordinates` at the canvas's own center point),
+ * generalized from "center of the whole map" to "center on any world
+ * point". The caller still runs the result through `clampOffsets()` once —
+ * a target near a map edge/corner legitimately can't be centered exactly
+ * without panning past the viewport, same as any other pan/zoom.
+ */
+export function computeCenterOnCellOffset(input: CenterOnCellInput): {
+  offsetX: number;
+  offsetY: number;
+} {
+  const {
+    targetX,
+    targetY,
+    scale,
+    gameWidth,
+    gameHeight,
+    canvasWidth,
+    canvasHeight,
+  } = input;
+  return {
+    offsetX:
+      targetX - gameWidth / 2 + (gameWidth / 2 - canvasWidth / 2) / scale,
+    offsetY:
+      targetY - gameHeight / 2 + (gameHeight / 2 - canvasHeight / 2) / scale,
   };
 }
 
@@ -439,15 +482,44 @@ export class TransformHandler {
     if (!nameLocation) {
       return;
     }
+    if (isReplaySpectatorView()) {
+      // Replay/spectator: a competitor rail click (or any other
+      // GoToPlayerEvent — leaderboard row, event feed) is a ONE-SHOT,
+      // clamp-bounded camera locate, never a multi-tick eased chase. The
+      // old eased `goTo()` chase (still used below for live play) had no
+      // reachability check: whenever the target's exact-center placement
+      // needed panning past clampOffsets()'s tight spectator "filling"
+      // bound — true for essentially any agent not already dead-center,
+      // e.g. one near a map edge/corner — `positionClose` could never be
+      // satisfied and the interval ran forever, fighting the clamp every
+      // 16ms tick with zero net progress until the viewer's own zoom/pan
+      // happened to cancel it (`clearTarget()` above). Computing the
+      // destination directly and clamping once can't stall: it either
+      // reaches the target exactly or lands at the same legitimate
+      // clamp-bounded position `clampOffsets()` would already impose on a
+      // manual pan there, and then genuinely stops.
+      const { width: canvasWidth, height: canvasHeight } = this.boundingRect();
+      const { offsetX, offsetY } = computeCenterOnCellOffset({
+        targetX: nameLocation.x,
+        targetY: nameLocation.y,
+        scale: this.scale,
+        gameWidth: this.game.width(),
+        gameHeight: this.game.height(),
+        canvasWidth,
+        canvasHeight,
+      });
+      this.offsetX = offsetX;
+      this.offsetY = offsetY;
+      this.clampOffsets();
+      this.changed = true;
+      return;
+    }
+    // Live play: unchanged eased multi-tick chase, own targets always stay
+    // reachable under live play's generous, always-satisfiable clamp bound
+    // (see clampOffsets()'s non-spectator branch), so the stall above
+    // cannot happen here.
     this.target = new Cell(nameLocation.x, nameLocation.y);
-    // In replay/spectator mode keep the full-map fit (set by
-    // GameRenderer.initialize -> centerAll) and never auto-zoom onto a single
-    // player. The replay spectator-focus path (ClientGameRunner) and any
-    // leaderboard/event "go to player" click would otherwise slam the camera to
-    // a high zoom on one nation and hide the rest of the board. We still PAN to
-    // the player so click-to-focus works; we just drop the zoom component.
-    // Guarded so live play is unchanged.
-    this.targetScale = isReplaySpectatorView() ? null : (event.zoom ?? null);
+    this.targetScale = event.zoom ?? null;
     this.intervalID = setInterval(() => this.goTo(), GOTO_INTERVAL_MS);
   }
 
@@ -676,8 +748,9 @@ export class TransformHandler {
     //true, and even when this fires during its own transient startup call,
     //it's immediately superseded by the real spawn/goToPlayer zoom.
     //
-    //`options.forceWholeMap` (FitWholeMapEvent, the PoV selector's "Whole
-    //board" pick/crosshair) bypasses `cover` AND the portrait/landscape
+    //`options.forceWholeMap` (FitWholeMapEvent, currently dispatched
+    //automatically by WinModal at match end) bypasses `cover` AND the
+    //portrait/landscape
     //overzoom branches entirely, landing the literal whole-map "contain"
     //fit no matter the viewport shape — the one-gesture way back to the
     //full board. See computeSpectatorFitScale() for the full landing-scale

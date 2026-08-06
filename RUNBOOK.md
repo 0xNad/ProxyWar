@@ -1196,6 +1196,11 @@ curl -sS -D - -o /dev/null https://bet.proxywar.xyz/league | grep -i content-sec
 betting launcher (§16.1, §17.5) — the operator lifted the 2026-07-30 hold.
 This also fixes the CSP/PoV gap this subsection originally described.
 
+**Superseded 2026-08-06**: the PoV camera-default feature itself (the
+client-side picker, `/api/account/pov-claims`, and its CORS allowlist) was
+removed entirely. This entire incident and its bet-origin redeploy fix are
+now moot — there is no PoV fetch left for a stale `connect-src` to block.
+
 **2. GitHub sign-in is live (2026-07-30).** App `3760561` (client id
 `Ov23likxrRLTNNoQd5Dy`) is named "Proxy War", homepage `https://proxywar.xyz`,
 callback `https://proxywar.xyz/api/auth/github/callback`, device flow off, no
@@ -1268,6 +1273,12 @@ open yet, so this browser is your identity for now."
   cherry-picked here, so a future merge in this direction regresses nothing.
   Those paths were never actually exposed on `app.`/`bet.` (league-wrapper mode
   redirects them to `/league`), but the files were still in the tree.
+
+  **Superseded 2026-08-06**: this whole gap analysis is now moot — the PoV
+  camera-default feature (`PointOfView.ts`, `PointOfViewSelector.ts`,
+  `/api/account/pov-claims` and its allowlist) was removed entirely from
+  `claude/product-overhaul` too, so there is no consumer left to bring over
+  and no "manual PoV picker" left on any live surface.
 - **A lineage claim is self-asserted and private, and no GitHub join is exposed
   by anything we have inspected.** Measured 2026-07-30, including an
   AUTHENTICATED read of Softmax's own dashboard API: `GET

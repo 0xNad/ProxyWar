@@ -47,7 +47,6 @@ function railEntry(overrides: Partial<CompetitorRailEntry> = {}): CompetitorRail
     allies: [],
     wars: [],
     degradedDecisionCount: null,
-    followed: false,
     ...overrides,
   };
 }
@@ -151,7 +150,7 @@ describe("renderCompetitorRail", () => {
     expect(onSelect).toHaveBeenCalledWith("auri-internal", null);
   });
 
-  it("forwards a seat's clientID verbatim to onSelect when one is set — P0 fix (follow-controls sync, deploy 3.4): PointOfViewSelector resolves a follow request by clientID, never by playerName alone (see PointOfViewSelector.ts's onFollowPlayerRequest doc for why)", () => {
+  it("forwards a seat's clientID verbatim to onSelect when one is set — the receiving locate bridge resolves a click by clientID, never by playerName alone", () => {
     const onSelect = vi.fn();
     const rail = renderCompetitorRail(
       [
@@ -171,23 +170,19 @@ describe("renderCompetitorRail", () => {
     expect(onSelect).toHaveBeenCalledWith("auri-internal", "client-abc123");
   });
 
-  it("marks the followed seat via data-followed and aria-pressed, distinct from every other seat", () => {
+  it("never renders a data-followed/aria-pressed highlight state — a rail click is a one-shot locate, never a persisted toggle", () => {
     const onSelect = vi.fn();
     const rail = renderCompetitorRail(
-      [
-        railEntry({ playerName: "Auri", followed: true }),
-        railEntry({ playerName: "Beta", followed: false }),
-      ],
+      [railEntry({ playerName: "Auri" }), railEntry({ playerName: "Beta" })],
       { onSelect },
     );
     document.body.append(rail);
     const entries = rail.querySelectorAll(".broadcast-rail-entry");
-    expect((entries[0] as HTMLElement).dataset.followed).toBe("true");
-    expect((entries[1] as HTMLElement).dataset.followed).toBe("false");
-    const followedButton = entries[0].querySelector(
-      "button.broadcast-rail-select",
-    ) as HTMLButtonElement;
-    expect(followedButton.getAttribute("aria-pressed")).toBe("true");
+    for (const entry of entries) {
+      expect((entry as HTMLElement).dataset.followed).toBeUndefined();
+      const button = entry.querySelector("button.broadcast-rail-select");
+      expect(button?.hasAttribute("aria-pressed")).toBe(false);
+    }
   });
   it("renders no collapse toggle when onToggleCollapsed is omitted, and sets no dataset.collapsed attribute", () => {
     const rail = renderCompetitorRail([railEntry()]);

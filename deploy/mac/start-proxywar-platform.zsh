@@ -60,13 +60,6 @@ export PROXYWAR_PLATFORM_ORIGIN="https://proxywar.xyz"
 # The platform logs "PROXYWAR_PLATFORM_RETURN_ORIGINS is not valid JSON" when
 # that happens; grep /tmp/pw-platform.log after changing this.
 export PROXYWAR_PLATFORM_RETURN_ORIGINS='{"betting":"https://bet.proxywar.xyz","league":"https://beta.proxywar.xyz"}'
-# Origins allowed an AMBIENT credentialed read of /api/account/pov-claims (the
-# replay camera default). Deliberately NOT the same list as the handoff return
-# origins above: a handoff child receives a redirect the user started, whereas
-# an origin here can read a viewer's claims silently on any page load. The
-# league needs it because league replays are served from beta; betting does not,
-# because it reads its own same-origin snapshot. JSON array; empty denies all.
-export PROXYWAR_PLATFORM_POV_CLAIM_ORIGINS='["https://beta.proxywar.xyz"]'
 export PROXYWAR_PLATFORM_STATE_ROOT="$STATE_ROOT"
 export PROXYWAR_LEAGUE_WRAPPER_ONLY=true
 export PROXYWAR_ARTIFACTS_ROOT="$DEPLOY_DIR/artifacts"

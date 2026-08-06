@@ -98,18 +98,15 @@ describe("NameLayer label sizing (spec 01: territory-strength label sizing & col
     });
   });
 
-  // P0 fix (2026-08-03, item 4): the floating Follow/Fit toolbar
-  // (PointOfViewSelector.ts) was missing from the safe-frame exclusion set
-  // entirely -- reproduced live: a territory-strength label rendered
-  // directly underneath it. Also fixes the underlying `offsetParent`
-  // check the whole selector list relied on: `offsetParent` is `null` for
-  // ANY `position: fixed` element whose containing block is the
-  // viewport -- confirmed live in Chrome for `#pw-game-control-cluster`
-  // (fully visible, `offsetParent === null`) -- and EVERY selector in
-  // this list targets a fixed-positioned element, so that guard was
-  // silently excluding all of them regardless of visibility. jsdom's own
-  // default `offsetParent` (null, since it does no real layout) mirrors
-  // that exact bug shape, so these tests would fail against the old
+  // P0 fix (2026-08-03, item 4): fixes the underlying `offsetParent` check
+  // the whole selector list relied on: `offsetParent` is `null` for ANY
+  // `position: fixed` element whose containing block is the viewport --
+  // confirmed live in Chrome for `#pw-game-control-cluster` (fully
+  // visible, `offsetParent === null`) -- and EVERY selector in this list
+  // targets a fixed-positioned element, so that guard was silently
+  // excluding all of them regardless of visibility. jsdom's own default
+  // `offsetParent` (null, since it does no real layout) mirrors that
+  // exact bug shape, so these tests would fail against the old
   // offsetParent-gated implementation too.
   describe("computeUnsafePanelRects (spec 01 rule 2: safe-frame exclusion rects)", () => {
     afterEach(() => {
@@ -142,31 +139,6 @@ describe("NameLayer label sizing (spec 01: territory-strength label sizing & col
       expect(computeUnsafePanelRects()).toEqual([]);
     });
 
-    test("includes the floating Follow toolbar's rect via [data-pov-toolbar], not the pov-selector host", () => {
-      document.body.insertAdjacentHTML(
-        "beforeend",
-        "<pov-selector><div data-pov-toolbar></div></pov-selector>",
-      );
-      const toolbarDiv = document.querySelector<HTMLElement>(
-        "[data-pov-toolbar]",
-      )!;
-      vi.spyOn(toolbarDiv, "getBoundingClientRect").mockReturnValue({
-        x: 8,
-        y: 56,
-        top: 56,
-        left: 8,
-        right: 259,
-        bottom: 95,
-        width: 251,
-        height: 39,
-        toJSON: () => ({}),
-      } as DOMRect);
-
-      const rects = computeUnsafePanelRects();
-      expect(rects).toHaveLength(1);
-      expect(rects[0]).toMatchObject({ width: 251, height: 39, top: 56, left: 8 });
-    });
-
     test("still includes the pre-existing panels (e.g. the control cluster), proving the offsetParent removal didn't break them", () => {
       mountRect(
         '<div id="pw-game-control-cluster"></div>',
@@ -190,7 +162,7 @@ describe("NameLayer label sizing (spec 01: territory-strength label sizing & col
     test("collects rects from multiple simultaneously-present panels", () => {
       document.body.insertAdjacentHTML(
         "beforeend",
-        '<div id="pw-game-control-cluster"></div><pov-selector><div data-pov-toolbar></div></pov-selector>',
+        '<div id="pw-game-control-cluster"></div><div id="ai-league-replay-overlay"></div>',
       );
       vi.spyOn(
         document.getElementById("pw-game-control-cluster")!,
@@ -200,11 +172,11 @@ describe("NameLayer label sizing (spec 01: territory-strength label sizing & col
         width: 325, height: 58, toJSON: () => ({}),
       } as DOMRect);
       vi.spyOn(
-        document.querySelector("[data-pov-toolbar]")!,
+        document.getElementById("ai-league-replay-overlay")!,
         "getBoundingClientRect",
       ).mockReturnValue({
-        x: 0, y: 0, top: 56, left: 8, right: 259, bottom: 95,
-        width: 251, height: 39, toJSON: () => ({}),
+        x: 0, y: 0, top: 8, left: 8, right: 400, bottom: 700,
+        width: 392, height: 692, toJSON: () => ({}),
       } as DOMRect);
 
       expect(computeUnsafePanelRects()).toHaveLength(2);

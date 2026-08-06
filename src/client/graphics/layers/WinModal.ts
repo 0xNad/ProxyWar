@@ -286,9 +286,9 @@ export class WinModal extends LitElement implements Layer {
         // Spec 02 non-negotiable #2: camera must resolve to a full-board
         // framing at match end, full stop -- a random mid-zoom crop is the
         // last thing a viewer should see after a whole match. Reuses the
-        // exact existing "Whole board" camera machinery (PointOfViewSelector
-        // dispatches the same event today; this is simply the first
-        // AUTOMATIC trigger for it, at the one moment it should always fire).
+        // existing FitWholeMapEvent "whole board" camera machinery (see
+        // TransformHandler.centerAll's forceWholeMap branch) -- this is the
+        // sole automatic trigger for it.
         this.eventBus.emit(new FitWholeMapEvent());
         this.show();
       } else if (wu.winner[0] === "nation") {
@@ -319,9 +319,7 @@ export class WinModal extends LitElement implements Layer {
         } else {
           this.otherPlayerWinnerRawName = winner.displayName();
           this._title = translateText("win_modal.other_won", {
-            player: aiLeagueSpectatorDisplayName(
-              this.otherPlayerWinnerRawName,
-            ),
+            player: aiLeagueSpectatorDisplayName(this.otherPlayerWinnerRawName),
           });
           this.isWin = false;
         }

@@ -10,9 +10,9 @@
  * `Main.ts`).
  *
  * Session-scoped (not `localStorage`) deliberately — the same convention
- * `PointOfView.ts`'s POV selection and `ReplayPremiereRuntime.ts`'s
- * session persistence already use for viewer-local, per-tab playback
- * state: a genuinely NEW visit (new tab, or the tab closed) should start
+ * `ReplayPremiereRuntime.ts`'s own session persistence already uses for
+ * viewer-local, per-tab playback state: a genuinely NEW visit (new tab, or
+ * the tab closed) should start
  * from turn 0, not silently resume a stale position from a different
  * session. Keyed by the run id, same flat-namespace convention
  * `PremiereReminder.ts`'s reminder keys already use (that file's own doc
@@ -51,10 +51,7 @@ export function loadResumableReplayTurn(runId: string): number | null {
 
 function saveReplayPosition(runId: string, turnNumber: number): void {
   try {
-    sessionStorage.setItem(
-      replayPositionStorageKey(runId),
-      String(turnNumber),
-    );
+    sessionStorage.setItem(replayPositionStorageKey(runId), String(turnNumber));
   } catch {
     // Storage unavailable (private browsing, quota) — no-op this session, never a crash.
   }
