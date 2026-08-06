@@ -14,6 +14,10 @@ import {
 } from "./CoworldLeagueStandingsHistory";
 import { buildProxyWarPublicReadModel } from "../ProxyWarPublicReadModel";
 import {
+  resolveArchivedEpisodeReplayHrefs,
+  type CoworldLeagueArchivedReplayHrefs,
+} from "./CoworldLeagueArtifactRetention";
+import {
   readFeaturedMatchStore,
   resolveFeaturedMatchStateRoot,
 } from "./FeaturedMatch";
@@ -556,6 +560,16 @@ async function copySocialImage(siteDir: string): Promise<void> {
 async function writeCoworldLeagueSiteUnlocked(
   siteDir: string,
   data: CoworldLeagueMirrorData,
+  /**
+   * Full-replay-retention fix (2026-08-06): the durable compact-evidence
+   * archive directory (`docs/COWORLD_LEAGUE_MIRROR.md`'s "indefinite
+   * compact evidence") — see `resolveArchivedEpisodeReplayHrefs`'s own
+   * doc. Optional so every existing caller (fixture scripts, tests) that
+   * doesn't pass one keeps today's exact behavior: no archive fallback is
+   * attempted, `watchHref`/`fullRenderHref` stay `null` for anything not
+   * in the live mirror window, precisely as before this fix.
+   */
+  summaryArchiveDir?: string,
 ): Promise<CoworldLeagueSitePaths> {
   await fs.mkdir(siteDir, { recursive: true });
   const indexPath = path.join(siteDir, "index.html");
@@ -588,6 +602,50 @@ async function writeCoworldLeagueSiteUnlocked(
   const featuredMatchStore = await readFeaturedMatchStore(
     resolveFeaturedMatchStateRoot(),
   );
+  // Full-replay-retention fix (2026-08-06): resolve the durable archive
+  // fallback ONLY for featured matches whose episode has already rotated
+  // out of `data.episodes` (the live mirror window) — bounded by the
+  // number of currently published/revealed/archived featured records (a
+  // handful), never a directory scan. `resolveArchivedEpisodeReplayHrefs`
+  // never throws (see its own doc); `summaryArchiveDir` being `undefined`
+  // (a caller that hasn't opted in) simply resolves an empty map, an
+  // honest "not looked up" default identical to every other optional
+  // input this writer already tolerates.
+  const liveMirrorEpisodeRequestIds = new Set(
+    data.episodes.map((episode) => episode.episodeRequestId),
+  );
+  const unresolvedFeaturedEpisodeRequestIds =
+    summaryArchiveDir === undefined
+      ? []
+      : [
+          ...new Set(
+            featuredMatchStore.matches
+              .filter((match) => match.state !== "candidate")
+              .map((match) => match.episodeRequestId)
+              .filter(
+                (episodeRequestId): episodeRequestId is string =>
+                  episodeRequestId !== null &&
+                  !liveMirrorEpisodeRequestIds.has(episodeRequestId),
+              ),
+          ),
+        ];
+  const archivedFeaturedMatchReplayHrefs = new Map<
+    string,
+    CoworldLeagueArchivedReplayHrefs
+  >();
+  if (summaryArchiveDir !== undefined) {
+    await Promise.all(
+      unresolvedFeaturedEpisodeRequestIds.map(async (episodeRequestId) => {
+        const archived = await resolveArchivedEpisodeReplayHrefs(
+          summaryArchiveDir,
+          episodeRequestId,
+        );
+        if (archived !== null) {
+          archivedFeaturedMatchReplayHrefs.set(episodeRequestId, archived);
+        }
+      }),
+    );
+  }
   // Season Zero activation prompt Phase 4: event packages are operator-
   // authored per-`FeaturedMatch` completeness records (`premiere:package`
   // CLI) — same "operator-maintained, out-of-band, missing store means
@@ -680,6 +738,7 @@ async function writeCoworldLeagueSiteUnlocked(
     standingsHistory,
     eventPackageStore,
     seasonRegistry,
+    archivedFeaturedMatchReplayHrefs,
   );
   await writeFileAtomic(clientPath, coworldLeagueClientJavaScript());
   await writeFileAtomic(indexPath, coworldLeagueIndexHtml(data, identity));
@@ -700,26 +759,43 @@ async function writeCoworldLeagueSiteUnlocked(
 export async function writeCoworldLeagueSite(
   siteDir: string,
   data: CoworldLeagueMirrorData,
+  summaryArchiveDir?: string,
 ): Promise<CoworldLeagueSitePaths> {
   return withCoworldLeagueSiteWriteLock(siteDir, () =>
-    writeCoworldLeagueSiteUnlocked(siteDir, data),
+    writeCoworldLeagueSiteUnlocked(siteDir, data, summaryArchiveDir),
   );
 }
 
 export async function markCoworldLeagueSiteStale(
   siteDir: string,
   generatedAt = new Date().toISOString(),
+  /**
+   * Full-replay-retention fix (2026-08-06): without this, the FIRST
+   * transient mirror-sync failure would rebuild the read model (via
+   * `writeCoworldLeagueSiteUnlocked` below) with an EMPTY archive-fallback
+   * map, silently stripping `fullRenderHref` off every featured match that
+   * was only resolving it through the archive fallback (i.e. anything
+   * already rotated out of the live mirror window) — a previously-working
+   * link would regress to `null` purely because the mirror hiccuped, not
+   * because the evidence went anywhere. Same optional/best-effort contract
+   * as `writeCoworldLeagueSiteUnlocked`'s own parameter.
+   */
+  summaryArchiveDir?: string,
 ): Promise<CoworldLeagueSitePaths> {
   return withCoworldLeagueSiteWriteLock(siteDir, async () => {
     const dataPath = path.join(siteDir, "data.json");
     const previous = JSON.parse(
       await fs.readFile(dataPath, "utf8"),
     ) as CoworldLeagueMirrorData;
-    return writeCoworldLeagueSiteUnlocked(siteDir, {
-      ...previous,
-      generatedAt: previous.stale ? previous.generatedAt : generatedAt,
-      stale: true,
-    });
+    return writeCoworldLeagueSiteUnlocked(
+      siteDir,
+      {
+        ...previous,
+        generatedAt: previous.stale ? previous.generatedAt : generatedAt,
+        stale: true,
+      },
+      summaryArchiveDir,
+    );
   });
 }
 

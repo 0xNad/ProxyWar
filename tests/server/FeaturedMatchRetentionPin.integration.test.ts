@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   pruneCoworldLeagueMirrorArtifacts,
   readCoworldLeagueRetentionPins,
+  resolveCoworldLeagueSummaryArchiveDir,
 } from "../../src/server/agents/CoworldLeagueArtifactRetention";
 import {
   removeFeaturedMatchRetentionPin,
@@ -282,5 +283,94 @@ describe("FeaturedMatch retention pins — real reclamation pass", () => {
     await expect(
       fs.access(path.join(runsRootDir, featuredRunKey)),
     ).rejects.toThrow();
+  });
+
+  it("full-replay-retention fix (2026-08-06): a Featured Match can be pinned RETROACTIVELY via the durable archive after its episode has already rotated out of the live mirror window and its artifacts were genuinely pruned — the pin then protects a re-materialized run bundle at the SAME publicRunKey from a later reclamation pass", async () => {
+    const rotatedEpisode = "ereq_rotated_real01";
+    // Must equal "league-" + the replay's own embedded runID (this file's
+    // `replayBytes` always emits `coworld-run-<marker>`) — the SAME
+    // invariant production's `unpackEpisodeRunDir` enforces
+    // (`publicRunKey = "league-" + replay.runID`, always) — so the
+    // archive-derived key below actually names this exact bundle.
+    const rotatedRunKey = "league-coworld-run-rotated-real01";
+    const fillerEpisode = "ereq_filler_real01";
+    const fillerRunKey = "league-coworld-run-filler-real01";
+    const baseMtime = Date.parse("2026-07-18T00:00:00Z");
+    // computeFeaturedMatchPinAddOperation's archive fallback derives its
+    // summaries dir from `artifactsRoot` (`resolveCoworldLeagueSummaryArchiveDir`,
+    // the SAME canonical layout production enforces) — this test's shared
+    // `summaryArchiveDir` fixture var is a flat sibling, unrelated to
+    // `artifactsRoot`, so THIS test uses the aligned path directly.
+    const archiveDir = resolveCoworldLeagueSummaryArchiveDir(artifactsRoot, {});
+
+    // The episode's artifacts exist on disk but its mirror row is
+    // deliberately absent from `seedMirror` below — exactly what "rotated
+    // out of the live window" looks like from the mirror's own data.json.
+    await writeRunBundle(runsRootDir, rotatedRunKey, new Date(baseMtime));
+    await writeReplay(cacheDir, rotatedEpisode, "rotated-real01", new Date(baseMtime));
+    await writeRunBundle(runsRootDir, fillerRunKey, new Date(baseMtime + 1_000));
+    await writeReplay(cacheDir, fillerEpisode, "filler-real01", new Date(baseMtime + 1_000));
+    await seedMirror([episode(fillerEpisode, fillerRunKey)]);
+
+    // First reclamation pass: nothing protects the rotated episode yet, so
+    // a real prune genuinely archives-then-deletes it (proving this is a
+    // real rotation, not a contrived absence).
+    const beforePin = await loadProtectedSets();
+    const firstPass = await pruneCoworldLeagueMirrorArtifacts({
+      cacheDir,
+      runsRootDir,
+      summaryArchiveDir: archiveDir,
+      protectedEpisodeRequestIds: beforePin.episodeRequestIds,
+      protectedPublicRunKeys: beforePin.publicRunKeys,
+      maxRetainedCacheFiles: 1,
+      maxRetainedRunDirectories: 1,
+    });
+    expect(firstPass.runDirectoryCandidates).toContain(rotatedRunKey);
+    await expect(
+      fs.access(path.join(runsRootDir, rotatedRunKey)),
+    ).rejects.toThrow();
+    await expect(
+      fs.access(
+        path.join(archiveDir, `${rotatedRunKey}.game-record.json.gz`),
+      ),
+    ).resolves.toBeUndefined();
+
+    // The mirror STILL has no row for the rotated episode (it never came
+    // back into the live window) — yet the pin can now be established
+    // purely from the durable archive left behind by the pass above.
+    const pinned = await syncFeaturedMatchRetentionPin(
+      { matchId: "feat_rotated_real", episodeRequestId: rotatedEpisode },
+      { artifactsRoot, pinManifestPath },
+    );
+    expect(pinned).toBe(true);
+    const afterPin = await loadProtectedSets();
+    expect(afterPin.publicRunKeyByEpisodeRequestId.get(rotatedEpisode)).toBe(
+      rotatedRunKey,
+    );
+
+    // A later operator/backfill action re-materializes the SAME run key
+    // (e.g. restoring `game-record.json` from the archive and rebuilding
+    // the bundle marker) — a fresh, newer bundle at the identical path the
+    // pin already names.
+    await writeRunBundle(runsRootDir, rotatedRunKey, new Date(baseMtime + 2_000));
+    const newestRunKey = "league-coworld-newest-real01";
+    await writeRunBundle(runsRootDir, newestRunKey, new Date(baseMtime + 3_000));
+
+    const secondPass = await pruneCoworldLeagueMirrorArtifacts({
+      cacheDir,
+      runsRootDir,
+      summaryArchiveDir: archiveDir,
+      protectedEpisodeRequestIds: afterPin.episodeRequestIds,
+      protectedPublicRunKeys: afterPin.publicRunKeys,
+      maxRetainedCacheFiles: 1,
+      maxRetainedRunDirectories: 1,
+    });
+    // Without the retroactive pin, "rotated" (older than "newest") would be
+    // the ONLY remaining reclaim candidate under maxRetained=1 — the pin is
+    // the sole reason it survives this time.
+    expect(secondPass.runDirectoryCandidates).not.toContain(rotatedRunKey);
+    await expect(
+      fs.access(path.join(runsRootDir, rotatedRunKey)),
+    ).resolves.toBeUndefined();
   });
 });

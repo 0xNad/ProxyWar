@@ -9,6 +9,7 @@ import {
   type FeaturedMatchStoreFile,
 } from "../../src/server/agents/FeaturedMatch";
 import type { EventPackage, EventPackageStoreFile } from "../../src/server/agents/season/EventPackage";
+import type { CoworldLeagueArchivedReplayHrefs } from "../../src/server/agents/CoworldLeagueArtifactRetention";
 
 function agent(overrides: Partial<AgentProfile> = {}): AgentProfile {
   return {
@@ -540,6 +541,60 @@ describe("buildProxyWarPublicReadModel", () => {
     expect(model.featuredMatches[0]?.fullRenderHref).toBeNull();
     expect(model.featuredMatches[1]?.watchHref).toBeNull();
     expect(model.featuredMatches[1]?.fullRenderHref).toBeNull();
+  });
+
+  test("full-replay-retention fix (2026-08-06): resolves watchHref: null / fullRenderHref from the caller-provided durable archive fallback once the episode has ROTATED OUT of the live mirror window (distinct from 'hasn't reached it yet')", () => {
+    const record = featuredMatch({
+      lane: "archive",
+      episodeRequestId: "ereq_rotated_out",
+      queueItemName: null,
+      scheduledAt: null,
+    });
+    const archivedReplayHrefs = new Map<string, CoworldLeagueArchivedReplayHrefs>([
+      ["ereq_rotated_out", { watchHref: null, fullRenderHref: "/ai-league-replay/league-coworld-archived-run" }],
+    ]);
+    const model = buildProxyWarPublicReadModel(
+      baseMirror(),
+      identitySnapshot(),
+      featuredMatchStoreOf(record),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      archivedReplayHrefs,
+    );
+    // The archive never carries completedAt (see CoworldLeagueArtifactRetention.ts's
+    // compactReplayArchive doc) — only the live mirror can resolve that.
+    expect(model.featuredMatches[0]?.completedAt).toBeNull();
+    expect(model.featuredMatches[0]?.watchHref).toBeNull();
+    expect(model.featuredMatches[0]?.fullRenderHref).toBe(
+      "/ai-league-replay/league-coworld-archived-run",
+    );
+  });
+
+  test("full-replay-retention fix: the live mirror always wins over the archive fallback, even when both resolve the SAME episodeRequestId", () => {
+    const record = featuredMatch({
+      lane: "archive",
+      episodeRequestId: "ereq_1", // present in baseMirror()'s episodes[]
+      queueItemName: null,
+      scheduledAt: null,
+    });
+    const archivedReplayHrefs = new Map<string, CoworldLeagueArchivedReplayHrefs>([
+      ["ereq_1", { watchHref: null, fullRenderHref: "/ai-league-replay/should-never-be-used" }],
+    ]);
+    const model = buildProxyWarPublicReadModel(
+      baseMirror(),
+      identitySnapshot(),
+      featuredMatchStoreOf(record),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      archivedReplayHrefs,
+    );
+    // baseMirror()'s ereq_1 episode's own hrefs — live precedence, never the archive's.
+    expect(model.featuredMatches[0]?.watchHref).toBe("/watch-href");
+    expect(model.featuredMatches[0]?.fullRenderHref).toBe("/ai-league-replay/ereq_1");
   });
 
   describe("isPubliclyPromotable (Season Zero Phase 4 gate wiring)", () => {

@@ -148,11 +148,31 @@ async function reconcileFeaturedMatchStoreLocked(
   options: ReconcileFeaturedMatchStoreOptions,
 ): Promise<FeaturedMatchStoreFile> {
   const store = await readFeaturedMatchStore(stateRoot);
+  // State-transition eligibility stays premiere-lane only — see the module
+  // doc above: only a premiere-lane record ever walks
+  // published/revealed via the reveal-pointer/archive-store signals below.
+  // An archive-lane record is already public at creation and never
+  // transitions through this pass.
   const reconcilable = store.matches.filter(
     (match) =>
       match.lane === "premiere" &&
       match.episodeRequestId !== null &&
       (match.state === "published" || match.state === "revealed"),
+  );
+  // Pin-reconciliation eligibility is WIDER and lane-agnostic (2026-08-06
+  // correction): every public/live `FeaturedMatch` with a resolvable
+  // episode needs its retention pin kept fresh, not just the premiere-lane
+  // subset the state machine above walks — an archive-lane record (e.g.
+  // one `feature:promote` just wrote) is exactly as public, and exactly as
+  // exposed to the SAME live-mirror-rotation gap `computeFeaturedMatchPinAddOperation`'s
+  // own archive fallback closes, as any premiere-lane one. `candidate`
+  // (operator-only draft, never public) and `cancelled` (terminal, no
+  // longer a live public page) are the only exclusions.
+  const pinEligible = store.matches.filter(
+    (match) =>
+      match.episodeRequestId !== null &&
+      match.state !== "candidate" &&
+      match.state !== "cancelled",
   );
   // Opportunistic retention-pin "extend" pass — independent of the state
   // flip below (a pin claim doesn't need the record's state to change to
@@ -162,16 +182,16 @@ async function reconcileFeaturedMatchStoreLocked(
   // able to trust the pin write already landed once this call resolves).
   //
   // `computeFeaturedMatchPinAddOperation` is READ-ONLY (only reads the live
-  // league mirror, a DIFFERENT file from the pin manifest) so running it in
-  // parallel across records is safe; the RESULTING operations are then
-  // applied in exactly ONE locked `applyRetentionPinOwnerBatch` call — see
-  // that function's own doc for why N separate `Promise.all`-ed
-  // single-entry applies (the previous version of this function) reopens a
-  // lost-update race against the pin manifest even though each individual
-  // write is itself atomic.
+  // league mirror and the durable archive, never the pin manifest) so
+  // running it in parallel across records is safe; the RESULTING
+  // operations are then applied in exactly ONE locked
+  // `applyRetentionPinOwnerBatch` call — see that function's own doc for
+  // why N separate `Promise.all`-ed single-entry applies (the previous
+  // version of this function) reopens a lost-update race against the pin
+  // manifest even though each individual write is itself atomic.
   const pinOperations = (
     await Promise.all(
-      reconcilable.map((match) =>
+      pinEligible.map((match) =>
         computeFeaturedMatchPinAddOperation(match, {
           artifactsRoot: options.artifactsRoot,
         }),
