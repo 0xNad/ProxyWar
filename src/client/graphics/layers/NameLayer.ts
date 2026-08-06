@@ -794,14 +794,6 @@ export function computeUnsafePanelRects(): DOMRect[] {
     "#ai-league-replay-overlay",
     '.broadcast-drawer-panel[data-tab-id="events"]',
     '.broadcast-drawer-panel[data-tab-id="timeline"]',
-    // P0 fix (2026-08-03, item 4): the floating Follow/Fit toolbar
-    // (PointOfViewSelector.ts) was missing from this list entirely --
-    // reproduced live: a territory-strength label rendered directly
-    // underneath it. Targets `[data-pov-toolbar]` (the toolbar's own
-    // fixed-positioned div), NOT the `pov-selector` custom element host
-    // itself -- see that attribute's own doc in PointOfViewSelector.ts
-    // for why the host's bounding rect is degenerate.
-    "[data-pov-toolbar]",
   ];
   const rects: DOMRect[] = [];
   for (const selector of selectors) {

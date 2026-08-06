@@ -143,8 +143,8 @@ describe("SettingsModal focus trap and focus restore", () => {
  * (`elementFromPoint` over it returned a `<span>` from the replay
  * overlay's standings rail instead of the modal). jsdom does not run the
  * real CSS cascade/paint for these Tailwind/inline styles (same
- * limitation `PointOfViewSelector.test.ts`'s own z-index regression and
- * `PublicAppScroll.test.ts`'s stylesheet-split regression both document),
+ * limitation `PublicAppScroll.test.ts`'s own stylesheet-split regression
+ * documents),
  * so this pins the fix two ways: the literal rendered class carries a
  * z-index above every current overlay band, AND a source-level scan
  * confirms no `z-index` declared anywhere in the league replay overlay
@@ -175,9 +175,9 @@ describe("SettingsModal z-index (Analyst-mode ghost-modal regression)", () => {
       path.join(repoRoot, "src/client/AiLeagueReplayOverlay.ts"),
       "utf8",
     );
-    const declaredZIndexes = [...overlaySource.matchAll(/z-index:\s*(\d+)/g)].map(
-      (match) => Number(match[1]),
-    );
+    const declaredZIndexes = [
+      ...overlaySource.matchAll(/z-index:\s*(\d+)/g),
+    ].map((match) => Number(match[1]));
     expect(declaredZIndexes.length).toBeGreaterThan(0);
     // The Analyst-mode-promoted centered panel is the specific overlap
     // this bug came from — assert it explicitly, not just the max.

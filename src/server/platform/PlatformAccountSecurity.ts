@@ -179,35 +179,6 @@ export class PlatformAccountSecurity {
     return this.bootstrap(headers.cookie);
   }
 
-  /**
-   * Parses an ALREADY-ESTABLISHED account cookie and nothing else: no
-   * Origin/Sec-Fetch-Site/Referer check, no CSRF check, and — unlike
-   * `bootstrap`/`bootstrapRead` — no minting of a new account when the
-   * cookie is absent or expired (`null` instead).
-   *
-   * The long name is the warning. Every other entry point on this class
-   * enforces an origin; this one delegates that duty to its caller, so a
-   * caller MUST have already established that the request is permitted —
-   * see `/api/account/pov-claims`, which matches an exact CORS allowlist
-   * first and is the only intended caller. Do not reach for this to make a
-   * route "work cross-origin"; it grants nothing on its own precisely
-   * because it returns no CSRF token, so it must never gate a write.
-   *
-   * Not minting matters as much as not checking: a cross-origin reader is
-   * typically a league visitor who has never touched the platform, and
-   * silently issuing them an account would create an empty account per
-   * visitor and set a cookie from a surface they never visited.
-   */
-  readEstablishedAccountWithoutOriginCheck(
-    cookieHeader: string | string[] | undefined,
-  ): { readonly accountId: string } | null {
-    const account = this.parseAccountCookieHeader(
-      cookieHeader,
-      this.now().getTime(),
-    );
-    return account === null ? null : { accountId: account.accountId };
-  }
-
   private assertReadOrigin(headers: PlatformRequestHeaders): void {
     const origin = singleHeader(headers.origin);
     if (origin !== null) {

@@ -428,17 +428,18 @@ export function isProxyWarPublicAccountWritePath(pathname: string): boolean {
 
 /**
  * @param connectOrigins Extra origins the page may `fetch()`. Empty by
- * default, keeping `connect-src 'self'`. The league mirror needs exactly one:
- * the platform account origin, so a signed-in viewer's replay camera can
- * default to their own claimed agent (`resolveClaimedLineageSlugs` →
- * `/api/account/pov-claims`). Without it that fetch is blocked by CSP before
- * CORS is ever consulted — and blocked *silently*, as a console violation
- * with no failed response to notice, which is why this is a parameter rather
- * than something a caller can forget.
+ * default, keeping `connect-src 'self'` — every current league/replay
+ * caller passes no origins, so this stays closed in production today.
+ * (Previously the league mirror widened it by one, the platform account
+ * origin, for a viewer's replay camera to default to their own claimed
+ * agent; that feature was removed and the widening call site with it —
+ * the parameter itself stays generic in case a real cross-origin fetch
+ * need returns.)
  *
  * Widening `connect-src` is deliberately the ONLY concession: `script-src`,
- * `frame-src`, `form-action` and the rest stay closed, so this grants the
- * platform origin no ability to run code or receive a form post here.
+ * `frame-src`, `form-action` and the rest stay closed, so a caller that
+ * does pass an origin grants it no ability to run code or receive a form
+ * post here.
  */
 export function proxyWarLeagueContentSecurityPolicy(
   connectOrigins: readonly string[] = [],

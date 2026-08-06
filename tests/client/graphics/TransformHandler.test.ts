@@ -16,7 +16,9 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  computeCenterOnCellOffset,
   computeSpectatorFitScale,
+  GoToPlayerEvent,
   spectatorAxisMaxOffset,
   spectatorAxisMinOffset,
   spectatorZoomBlendT,
@@ -24,7 +26,7 @@ import {
 } from "../../../src/client/graphics/TransformHandler";
 import { ZoomEvent } from "../../../src/client/InputHandler";
 import { EventBus } from "../../../src/core/EventBus";
-import type { GameView } from "../../../src/core/game/GameView";
+import type { GameView, PlayerView } from "../../../src/core/game/GameView";
 
 describe("computeSpectatorFitScale", () => {
   it("lands 'cover' (fills the viewport, no letterboxing) when the viewport and map aspect ratios are close — a typical desktop/tablet spectator viewport", () => {
@@ -525,5 +527,120 @@ describe("TransformHandler.updateCanvasBoundingRect — resize immediately re-cl
 
     expect(impliedOffsetX).toBeLessThanOrEqual(expectedMaxOffsetX + 1);
     expect(impliedOffsetX).toBeGreaterThanOrEqual(expectedMinOffsetX - 1);
+  });
+});
+
+/** Minimal PlayerView mock: `onGoToPlayer` only ever reads `nameLocation()`. */
+function makePlayer(x: number, y: number): PlayerView {
+  return { nameLocation: () => ({ x, y }) } as unknown as PlayerView;
+}
+
+describe("computeCenterOnCellOffset", () => {
+  it("matches centerAll()'s own oHor/oVer derivation when the target is the exact map center", () => {
+    const mapWidth = 2000;
+    const mapHeight = 1000;
+    const canvasWidth = 1600;
+    const canvasHeight = 900;
+    const scale = 0.8;
+    const { offsetX, offsetY } = computeCenterOnCellOffset({
+      targetX: mapWidth / 2,
+      targetY: mapHeight / 2,
+      scale,
+      gameWidth: mapWidth,
+      gameHeight: mapHeight,
+      canvasWidth,
+      canvasHeight,
+    });
+    expect(offsetX).toBeCloseTo((mapWidth - canvasWidth) / 2 / scale, 6);
+    expect(offsetY).toBeCloseTo((mapHeight - canvasHeight) / 2 / scale, 6);
+  });
+});
+
+describe("TransformHandler.onGoToPlayer — replay/spectator camera-locate is a synchronous one-shot, never a continuous chase", () => {
+  afterEach(() => {
+    delete (window as unknown as Record<string, unknown>)
+      .__PROXYWAR_AI_REPLAY__;
+  });
+
+  it("REGRESSION: a spectator target whose exact centering would require panning past the tight fillScale clamp bound leaves no interval/target alive — the old eased chase ran forever here", () => {
+    (window as unknown as Record<string, unknown>).__PROXYWAR_AI_REPLAY__ =
+      true;
+    // Cover-fit desktop viewport landing exactly at spectatorFillScale on
+    // load (near-zero pan slack by design) — a target near a map corner,
+    // same shape as the live repro (djizus near a map edge/corner).
+    const transform = new TransformHandler(
+      makeGameView(2000, 1000),
+      new EventBus(),
+      makeCanvas(1600, 900),
+    );
+    const cornerPlayer = makePlayer(1950, 950);
+    const scaleBefore = transform.scale;
+    transform.onGoToPlayer(new GoToPlayerEvent(cornerPlayer));
+
+    const hooks = transform as unknown as {
+      intervalID: NodeJS.Timeout | null;
+      target: unknown;
+      targetScale: unknown;
+    };
+    expect(hooks.intervalID).toBeNull();
+    expect(hooks.target).toBeNull();
+    expect(hooks.targetScale).toBeNull();
+    // Scale never changes for a spectator locate (matches the old
+    // targetScale=null gate) — only offset moves.
+    expect(transform.scale).toBe(scaleBefore);
+  });
+
+  it("locates a reachable (near-center) spectator target exactly, at the current scale, in one synchronous call", () => {
+    (window as unknown as Record<string, unknown>).__PROXYWAR_AI_REPLAY__ =
+      true;
+    const transform = new TransformHandler(
+      makeGameView(2000, 1000),
+      new EventBus(),
+      makeCanvas(1600, 900),
+    );
+    const centerish = makePlayer(1000, 500); // exact map center: always reachable regardless of clamp
+    transform.onGoToPlayer(new GoToPlayerEvent(centerish));
+    const world = worldUnderCursor(transform, 800, 450); // canvas center
+    expect(world.x).toBeCloseTo(1000, 0);
+    expect(world.y).toBeCloseTo(500, 0);
+  });
+
+  it("a zoom immediately after a spectator locate stays pointer-anchored — no leftover interval to fight it", () => {
+    (window as unknown as Record<string, unknown>).__PROXYWAR_AI_REPLAY__ =
+      true;
+    const transform = new TransformHandler(
+      makeGameView(2000, 1000),
+      new EventBus(),
+      makeCanvas(1600, 900),
+    );
+    transform.onGoToPlayer(new GoToPlayerEvent(makePlayer(1200, 600)));
+    const px = 1000;
+    const py = 550;
+    const before = worldUnderCursor(transform, px, py);
+    transform.onZoom(new ZoomEvent(px, py, -100));
+    const after = worldUnderCursor(transform, px, py);
+    expect(Math.hypot(after.x - before.x, after.y - before.y)).toBeLessThan(1);
+  });
+
+  it("live play (non-spectator) GoToPlayerEvent is byte-for-byte unchanged: still the eased multi-tick chase, still uses event.zoom", () => {
+    // __PROXYWAR_AI_REPLAY__ deliberately left unset.
+    const transform = new TransformHandler(
+      makeGameView(2000, 1000),
+      new EventBus(),
+      makeCanvas(1600, 900),
+    );
+    transform.onGoToPlayer(new GoToPlayerEvent(makePlayer(900, 400), 3));
+    const hooks = transform as unknown as {
+      intervalID: NodeJS.Timeout | null;
+      target: { x: number; y: number } | null;
+      targetScale: number | null;
+    };
+    // A live-play locate schedules the eased chase (still running right
+    // after the call, unlike the spectator one-shot above) targeting the
+    // requested zoom.
+    expect(hooks.intervalID).not.toBeNull();
+    expect(hooks.target).toMatchObject({ x: 900, y: 400 });
+    expect(hooks.targetScale).toBe(3);
+    clearInterval(hooks.intervalID ?? undefined);
   });
 });

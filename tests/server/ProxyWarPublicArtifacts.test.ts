@@ -128,8 +128,9 @@ describe("ProxyWarPublicArtifacts", () => {
     const policy = proxyWarLeagueContentSecurityPolicy([
       "https://app.proxywar.xyz",
     ]);
-    // Without this the PoV claim fetch dies as a silent console violation —
-    // no failed response, nothing to notice. See `resolveClaimedLineageSlugs`.
+    // Historically motivated by the now-removed PoV camera-default's
+    // cross-origin claim fetch; the parameterized widening capability
+    // itself stays generic and real, tested here with an example origin.
     expect(policy).toContain("connect-src 'self' https://app.proxywar.xyz");
     // Granting a fetch target must not grant anything else: the platform
     // origin still cannot run script here, be framed, or receive a form post.

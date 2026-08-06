@@ -85,18 +85,16 @@ function renderCollapseToggle(
 export interface CompetitorRailEntry {
   playerName: string;
   /**
-   * The GameView/PlayerView identity this seat correlates to (P0 fix,
-   * follow-controls sync, deploy 3.4) — `playerName` alone is NOT enough:
-   * `PointOfViewSelector`'s own PlayerView identity lives in a completely
-   * disjoint namespace from a roster's `playerName` (confirmed live: the
-   * GameView's own `name()`/`displayName()` are procedurally-generated
-   * in-game nation names, never the roster's real agent/seat name), so a
-   * rail click dispatched by playerName alone could never resolve to a
-   * real followed player. `clientID` is the identifier both sides
+   * The GameView/PlayerView identity this seat correlates to — a roster
+   * seat's human-readable `playerName` lives in a completely disjoint
+   * namespace from `PlayerView.name()`/`.displayName()` (procedurally-
+   * generated in-game nation names, never the roster's real agent/seat
+   * name), so a rail click dispatched by `playerName` alone could never
+   * resolve to a real player. `clientID` is the identifier both sides
    * actually share. Optional and defaults to null (no correlation
-   * available — the rail seat renders normally but can never actually
-   * resolve to/highlight a real follow target) so a caller that hasn't
-   * been updated to supply it keeps compiling, at today's behavior.
+   * available — the rail seat renders normally but a click can never
+   * resolve to/locate a real player) so a caller that hasn't been updated
+   * to supply it keeps compiling, at today's behavior.
    */
   clientID?: string | null;
   displayName: string;
@@ -114,20 +112,17 @@ export interface CompetitorRailEntry {
   wars: readonly string[];
   /** Count of fallback/degraded decisions so far, or null when not tracked for this context. */
   degradedDecisionCount: number | null;
-  /** True when this is the viewer's current camera-follow target (spec item 6: rail-driven follow discoverability). */
-  followed: boolean;
 }
 
 export interface CompetitorRailCallbacks {
   /**
-   * Camera-follow discoverability (spec item 6): clicking a rail seat pans
-   * to that Agent — the SAME opt-in-only pan `PointOfViewSelector`'s
-   * crosshair button already triggers, never automatic. `clientID` is the
-   * identifier `PointOfViewSelector` can actually resolve to a PlayerView
-   * (see `CompetitorRailEntry.clientID`'s own doc) — `playerName` alone is
-   * kept for callers/analytics that still want the human-readable name.
-   * Omit `onSelect` entirely to render a non-interactive rail (e.g. a
-   * context with no game view attached).
+   * Camera-locate discoverability: clicking a rail seat centers the camera
+   * on that agent ONCE — a plain one-shot pan, never persisted, never a
+   * toggle. `clientID` is the identifier the receiving bridge can actually
+   * resolve to a PlayerView with (see `CompetitorRailEntry.clientID`'s own
+   * doc) — `playerName` alone is kept for callers/analytics that still
+   * want the human-readable name. Omit `onSelect` entirely to render a
+   * non-interactive rail (e.g. a context with no game view attached).
    */
   onSelect?: (playerName: string, clientID: string | null) => void;
   /** Collapse/expand (spec item 1). Omit `onToggleCollapsed` to render a rail with no toggle at all (always expanded) — see `renderCollapseToggle`'s own doc for the caller-owned-state contract. */
@@ -198,13 +193,12 @@ function renderCompetitorRailEntry(
   item.dataset.railEntryKey = entry.playerName;
   item.dataset.alive =
     entry.alive === null ? "unknown" : entry.alive ? "true" : "false";
-  item.dataset.followed = String(entry.followed);
   if (entry.primaryColor !== null) {
     item.style.setProperty("--broadcast-agent-color", entry.primaryColor);
   }
 
   // The whole identity+stats surface is one button when selection is wired
-  // (camera-follow discoverability) — a plain non-interactive wrapper
+  // (camera-locate discoverability) — a plain non-interactive wrapper
   // otherwise, matching every other optional-interactivity pattern already
   // in this file (e.g. War Room's expand button).
   const interactive = callbacks.onSelect !== undefined;
@@ -213,10 +207,9 @@ function renderCompetitorRailEntry(
     : element("div", "broadcast-rail-select");
   if (interactive && surface instanceof HTMLButtonElement) {
     surface.type = "button";
-    surface.setAttribute("aria-pressed", String(entry.followed));
     surface.setAttribute(
       "aria-label",
-      translateText("broadcast.rail_follow_label", {
+      translateText("broadcast.rail_locate_label", {
         name: entry.displayName,
       }),
     );

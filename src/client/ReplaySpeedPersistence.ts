@@ -23,7 +23,7 @@ import { ReplaySpeedMultiplier } from "./utilities/ReplaySpeedMultiplier";
  * session. Deliberately a SEPARATE file/key from position resume — the two
  * are independent concerns that can be cleared/inspected independently,
  * matching this codebase's existing one-concern-per-persistence-module
- * convention (`PointOfView.ts`, `PremiereReminder.ts`).
+ * convention (`ReplayPositionPersistence.ts`, `PremiereReminder.ts`).
  */
 const REPLAY_SPEED_KEY_PREFIX = "proxywar:replay-speed:";
 

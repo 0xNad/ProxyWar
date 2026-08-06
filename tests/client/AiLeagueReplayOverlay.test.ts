@@ -10,10 +10,7 @@ import {
   mountAiLeagueReplayOverlay,
   normalizeMatchStateSeries,
 } from "../../src/client/AiLeagueReplayOverlay";
-import {
-  BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT,
-  BROADCAST_RAIL_FOLLOW_EVENT,
-} from "../../src/client/graphics/layers/PointOfViewSelector";
+import { BROADCAST_RAIL_LOCATE_EVENT } from "../../src/client/graphics/CompetitorLocateBridge";
 import type { PublicAgent } from "../../src/client/publicapp/ReadModelSchema";
 import { UserSettings } from "../../src/core/game/UserSettings";
 import {
@@ -2427,10 +2424,10 @@ describe("AiLeagueReplayOverlay", () => {
       expect(document.querySelector(".broadcast-timeline")).toBeNull();
     });
 
-    it("dispatches BROADCAST_RAIL_FOLLOW_EVENT with the clicked seat's player name", () => {
+    it("dispatches BROADCAST_RAIL_LOCATE_EVENT with the clicked seat's player name", () => {
       const runID = "broadcast-follow-1";
       const follows: Array<string | null> = [];
-      document.addEventListener(BROADCAST_RAIL_FOLLOW_EVENT, (domEvent) => {
+      document.addEventListener(BROADCAST_RAIL_LOCATE_EVENT, (domEvent) => {
         follows.push(
           (domEvent as CustomEvent<{ playerName: string }>).detail.playerName,
         );
@@ -2471,7 +2468,7 @@ describe("AiLeagueReplayOverlay", () => {
       expect(follows).toEqual(["Atlas"]);
     });
 
-    it("reflects BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT as the rail's followed-seat highlight", () => {
+    it("never renders a followed/pressed-highlight state on the rail — camera-locate is one-shot, never persisted", () => {
       const runID = "broadcast-followed-state-1";
       mountAiLeagueReplayOverlay({
         runID,
@@ -2512,38 +2509,34 @@ describe("AiLeagueReplayOverlay", () => {
         { playerID: "p1", smallID: 1, username: "Atlas", tilesOwned: 60, clientID: "client-atlas" },
         { playerID: "p2", smallID: 2, username: "Blitz", tilesOwned: 40, clientID: "client-blitz" },
       ]);
-      const entriesBefore = document.querySelectorAll(".broadcast-rail-entry");
-      expect(
-        [...entriesBefore].every(
-          (entry) => entry.getAttribute("data-followed") === "false",
-        ),
-      ).toBe(true);
-
-      // P0 fix (follow-controls sync, deploy 3.4): the rail correlates the
-      // followed-change event's clientID against each frame player's own
-      // clientID -- playerName alone can never resolve a real PlayerView
-      // (see PointOfViewSelector.ts's onFollowPlayerRequest doc), so
-      // PointOfViewSelector always dispatches clientID alongside
-      // playerName now.
-      document.dispatchEvent(
-        new CustomEvent(BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT, {
-          detail: { playerName: "Blitz", clientID: "client-blitz" },
-        }),
-      );
-
-      const atlasEntry = [
-        ...document.querySelectorAll(".broadcast-rail-entry"),
-      ].find((entry) => entry.textContent?.includes("Atlas"));
       const blitzEntry = [
         ...document.querySelectorAll(".broadcast-rail-entry"),
       ].find((entry) => entry.textContent?.includes("Blitz"));
-      expect(atlasEntry?.getAttribute("data-followed")).toBe("false");
-      expect(blitzEntry?.getAttribute("data-followed")).toBe("true");
+      // No persisted "followed" concept at all: no data-followed attribute,
+      // no aria-pressed toggle state on the locate button.
+      expect(blitzEntry?.hasAttribute("data-followed")).toBe(false);
       expect(
         blitzEntry
           ?.querySelector(".broadcast-rail-select")
-          ?.getAttribute("aria-pressed"),
-      ).toBe("true");
+          ?.hasAttribute("aria-pressed"),
+      ).toBe(false);
+
+      const seat = blitzEntry?.querySelector<HTMLButtonElement>(
+        ".broadcast-rail-select",
+      );
+      seat?.click();
+
+      // Clicking dispatched a one-shot locate event, but left no rail DOM
+      // trace of "who was clicked" behind — still no data-followed/
+      // aria-pressed anywhere, on either entry, after the click.
+      for (const entry of document.querySelectorAll(".broadcast-rail-entry")) {
+        expect(entry.hasAttribute("data-followed")).toBe(false);
+        expect(
+          entry
+            .querySelector(".broadcast-rail-select")
+            ?.hasAttribute("aria-pressed"),
+        ).toBe(false);
+      }
     });
 
     it("switches the active drawer tab and marks only that panel data-tab-active", () => {
