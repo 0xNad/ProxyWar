@@ -12,6 +12,7 @@ import {
   personalityDiplomacyKindGroup,
   personalityDiplomacyModeForAction,
 } from "./AgentPersonalityDiplomacyPolicy";
+import { observedTransportStates } from "./AgentTypes";
 import type {
   AgentEconomyCadenceAffordance,
   AgentFrontierConversionTimingAffordance,
@@ -512,11 +513,10 @@ function navalControlAffordance(input: {
   });
   const portCount = unitCount(observation, UnitType.Port);
   const warshipCount = unitCount(observation, UnitType.Warship);
-  const activeTransportCount =
-    observation.nonCombat.boatRetreatOptions?.length ?? 0;
+  const transports = observedTransportStates(observation);
+  const activeTransportCount = transports.length;
   const activeTransportTroops = sumNumbers(
-    observation.nonCombat.boatRetreatOptions?.map((option) => option.troops) ??
-      [],
+    transports.map((transport) => transport.troops),
   );
   const navalActions = navalControlActions(input);
   const safeNavalActions = navalActions.filter(
@@ -1100,13 +1100,12 @@ function transportTroopBankingAffordance(input: {
     observation.ownState?.troopRatio ??
     observation.combat.troopRatio ??
     ratioOrNull(ownTroops, maxTroops);
+  const transports = observedTransportStates(observation);
   const activeTransportTroops = sumNumbers(
-    observation.nonCombat.boatRetreatOptions?.map((option) => option.troops) ??
-      [],
+    transports.map((transport) => transport.troops),
   );
   const largestActiveTransportTroops = maxNumber(
-    observation.nonCombat.boatRetreatOptions?.map((option) => option.troops) ??
-      [],
+    transports.map((transport) => transport.troops),
   );
   const incomingThreatTroops = sumNumbers(
     observation.combat.incomingAttacks
@@ -1126,7 +1125,7 @@ function transportTroopBankingAffordance(input: {
     maxTroops === null ? 1_000 : Math.max(1_000, Math.floor(maxTroops * 0.04));
   const activeBankRatio = ratioOrNull(activeTransportTroops, maxTroops) ?? 0;
   const continuationReady =
-    (observation.nonCombat.boatRetreatOptions?.length ?? 0) > 0 &&
+    transports.length > 0 &&
     activeBankRatio < TROOP_BANKING_MAX_ACTIVE_BANK_RATIO;
   const recommended =
     nearCap &&
@@ -1148,7 +1147,7 @@ function transportTroopBankingAffordance(input: {
     ownTroops,
     maxTroops,
     troopRatio: roundRatioOrNull(troopRatio),
-    activeTransportCount: observation.nonCombat.boatRetreatOptions?.length ?? 0,
+    activeTransportCount: transports.length,
     activeTransportTroops,
     largestActiveTransportTroops,
     activeBankRatio: roundRatioOrNull(activeBankRatio),
@@ -1635,8 +1634,7 @@ function navalControlPriority(
   action: LegalAction,
   observation: AgentObservation,
 ): number {
-  const activeTransportCount =
-    observation.nonCombat.boatRetreatOptions?.length ?? 0;
+  const activeTransportCount = observedTransportStates(observation).length;
   const portCount = unitCount(observation, UnitType.Port);
   const warshipCount = unitCount(observation, UnitType.Warship);
   let priority = 20;
