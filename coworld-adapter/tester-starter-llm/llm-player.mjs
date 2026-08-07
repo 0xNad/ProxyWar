@@ -74,6 +74,11 @@ const PLAN_KINDS = [
   "nuke",
   "quick_chat",
   "emoji",
+  // Structured-deal meta-actions (server flag; absent on most matches today).
+  "deal_propose",
+  "deal_accept",
+  "deal_reject",
+  "deal_withdraw",
   "hold",
 ];
 const SECURITY =
@@ -142,7 +147,10 @@ function buildState(obs, actions) {
   // Optional economy block (server flag; absent on most matches today). When
   // present, surface idle factories + top trade dependency + bottleneck in ONE
   // compact line (<=300 chars). When absent, the state is byte-identical to
-  // the shape above.
+  // the shape above. NOTE: tests/coworld/StarterEconomyState.test.ts and
+  // tests/coworld/StarterDealPosture.test.ts eval clean() / buildState() /
+  // choose() and its deal helpers extracted from this file's source text —
+  // keep them self-contained.
   let econ;
   if (obs.economy) {
     const f = obs.economy.factoryStatusCounts || {};
@@ -167,6 +175,43 @@ function buildState(obs, actions) {
     if (b && b.kind && b.kind !== "none") parts.push(`bottleneck: ${b.kind}`);
     if (parts.length) econ = parts.join("; ").slice(0, 300);
   }
+  // Optional deals block (server flag; absent on most matches today). ONE
+  // compact line (<=300 chars); absent => the state is byte-identical.
+  let deals;
+  if (obs.deals) {
+    const short = {
+      non_aggression_pact: "nap",
+      trade_security_pact: "tsp",
+      joint_attack: "joint",
+      support_request: "support",
+    };
+    const ownName = clean(obs.ownState?.name);
+    const parts = [];
+    const inc = obs.deals.incomingProposals || [];
+    if (inc.length) {
+      const first = inc[0];
+      parts.push(
+        `${inc.length} offer${inc.length === 1 ? "" : "s"} in (${short[first.terms?.template] || "?"} from ${clean(first.proposerName)})`,
+      );
+    }
+    const act = obs.deals.activeDeals || [];
+    if (act.length) {
+      const brief = act
+        .slice(0, 2)
+        .map((d) => {
+          const other =
+            clean(d.proposerName) === ownName
+              ? clean(d.recipientName)
+              : clean(d.proposerName);
+          return `${short[d.template] || "?"} w/ ${other}, ${d.stepsRemaining} left`;
+        })
+        .join("; ");
+      parts.push(`${act.length} active (${brief})`);
+    }
+    const out = obs.deals.outgoingProposals || [];
+    if (out.length) parts.push(`${out.length} out`);
+    if (parts.length) deals = parts.join(" | ").slice(0, 300);
+  }
   return {
     phase: obs.phase,
     self,
@@ -174,6 +219,7 @@ function buildState(obs, actions) {
     avoid: avoidActionIDs(),
     legalActions: legal,
     ...(econ ? { econ } : {}),
+    ...(deals ? { deals } : {}),
   };
 }
 
@@ -222,6 +268,7 @@ async function askBedrock(state) {
     PLAN_KINDS.join("|") +
     '>"],' +
     '"target":"<exact rival name to pressure, or null>","avoidTargets":["<rival names not to attack>"],' +
+    '"deal":"<accept|decline|null — standing posture for incoming pact offers>",' +
     '"reason":"<one short sentence>"}\n' +
     "GAME:\n" +
     JSON.stringify(state);
@@ -244,7 +291,7 @@ async function askBedrock(state) {
 }
 
 // -- the PLAN: written by the model in the background, executed instantly -----
-let plan = null; // { focus, preferKinds, target, avoidTargets, reason, model }
+let plan = null; // { focus, preferKinds, target, avoidTargets, deal, reason, model }
 let planDecisionAge = 0; // decisions answered since the last successful refresh
 let planRefreshInFlight = false;
 let lastPlanError = null; // set when the most recent refresh failed (loud degradation)
@@ -267,6 +314,11 @@ function refreshPlanInBackground(state) {
         avoidTargets: Array.isArray(parsed.avoidTargets)
           ? parsed.avoidTargets.map(clean)
           : [],
+        // Standing posture for incoming pact offers; sanitized like the rest.
+        deal:
+          parsed.deal === "accept" || parsed.deal === "decline"
+            ? parsed.deal
+            : null,
         reason: clean(parsed.reason).slice(0, 120),
         model,
       };
@@ -293,7 +345,116 @@ const DEFAULT_ORDER = [
   "quick_chat",
   "emoji",
 ];
-function choose(actions) {
+// Deals the agent ACCEPTED bind it: while a non-aggression / trade-security
+// pact partner's obligation is pending, hostile actions against that partner
+// are filtered out of the executor's candidates — UNLESS the LLM plan
+// explicitly names the partner as `target` (betrayal stays possible and
+// intentional, never accidental).
+function dealConstraints(obs) {
+  const res = { noAttack: new Set(), noEmbargo: new Set(), names: new Map() };
+  const own = obs?.ownState || {};
+  for (const d of obs?.deals?.activeDeals || []) {
+    if (
+      d.template !== "non_aggression_pact" &&
+      d.template !== "trade_security_pact"
+    )
+      continue;
+    const mine = (d.obligations || []).find(
+      (o) => o.obligorPlayerID === own.playerID,
+    );
+    if (!mine || mine.status !== "pending") continue;
+    const otherID =
+      d.proposerPlayerID === own.playerID
+        ? d.recipientPlayerID
+        : d.proposerPlayerID;
+    const otherName =
+      d.proposerPlayerID === own.playerID ? d.recipientName : d.proposerName;
+    res.noAttack.add(otherID);
+    res.names.set(otherID, clean(otherName));
+    if (d.template === "trade_security_pact") res.noEmbargo.add(otherID);
+  }
+  return res;
+}
+// Deterministic deal responses, before the normal kind loop:
+// (a) auto-REJECT proposals from the plan's current target;
+// (b) auto-ACCEPT non-aggression/trade-security offers from avoidTargets or
+//     when the plan's standing posture is "accept";
+// (c) propose exactly one non_aggression_pact when focus === "ally", to the
+//     strongest non-target bordered rival with no open proposal already out.
+function chooseDealMove(actions, obs) {
+  if (!obs?.deals) return null;
+  const target = (plan?.target || "").toLowerCase();
+  const avoidT = (plan?.avoidTargets || [])
+    .filter(Boolean)
+    .map((t) => String(t).toLowerCase());
+  const incoming = obs.deals.incomingProposals || [];
+  for (const p of incoming) {
+    if (target && clean(p.proposerName).toLowerCase() === target) {
+      const a = actions.find(
+        (c) => c.kind === "deal_reject" && c.metadata?.dealID === p.dealID,
+      );
+      if (a) return a;
+    }
+  }
+  for (const p of incoming) {
+    const t = p.terms?.template;
+    if (t !== "non_aggression_pact" && t !== "trade_security_pact") continue;
+    const from = clean(p.proposerName).toLowerCase();
+    if (target && from === target) continue;
+    if (plan?.deal === "accept" || avoidT.includes(from)) {
+      const a = actions.find(
+        (c) => c.kind === "deal_accept" && c.metadata?.dealID === p.dealID,
+      );
+      if (a) return a;
+    }
+  }
+  if (plan?.focus === "ally") {
+    const openTo = new Set(
+      (obs.deals.outgoingProposals || []).map((p) => p.recipientPlayerID),
+    );
+    const cand = (obs.visiblePlayers || [])
+      .filter(
+        (p) => p && p.isAlive && p.sharesBorder && !openTo.has(p.playerID),
+      )
+      .filter((p) => !target || clean(p.name).toLowerCase() !== target)
+      .sort((a, b) => (b.tileShare ?? 0) - (a.tileShare ?? 0))[0];
+    if (cand) {
+      const a = actions.find(
+        (c) =>
+          c.kind === "deal_propose" &&
+          c.metadata?.template === "non_aggression_pact" &&
+          c.metadata?.recipientID === cand.playerID,
+      );
+      if (a) return a;
+    }
+  }
+  return null;
+}
+function choose(actions, obs) {
+  const dealMove = chooseDealMove(actions, obs);
+  if (dealMove) return dealMove;
+  const cons = dealConstraints(obs);
+  const target = (plan?.target || "").toLowerCase();
+  const partnerNamed = (id) =>
+    Boolean(target) && (cons.names.get(id) || "").toLowerCase() === target;
+  const violatesPact = (a) => {
+    const hostile =
+      a.kind === "attack" ||
+      a.kind === "nuke" ||
+      (a.kind === "boat" && a.metadata?.targetID);
+    if (hostile && cons.noAttack.has(a.metadata?.targetID))
+      return !partnerNamed(a.metadata.targetID);
+    if (
+      a.kind === "embargo" &&
+      a.metadata?.action === "start" &&
+      cons.noEmbargo.has(a.metadata?.targetID)
+    )
+      return !partnerNamed(a.metadata.targetID);
+    if (a.kind === "embargo_all") {
+      for (const id of cons.noEmbargo) if (!partnerNamed(id)) return true;
+    }
+    return false;
+  };
   const avoid = new Set(avoidActionIDs());
   const planned = plan?.preferKinds?.length ? plan.preferKinds : [];
   const order = [
@@ -319,7 +480,8 @@ function choose(actions) {
         c.kind === kind &&
         (authorized || c.risk?.level !== "high") &&
         !avoid.has(c.id) &&
-        !matchesAvoidedTarget(c),
+        !matchesAvoidedTarget(c) &&
+        !violatesPact(c),
     );
     if (candidates.length === 0) continue;
     // Within the kind, prefer the plan's named target when one is offered.
@@ -372,7 +534,7 @@ socket.on("message", (data) => {
   if (plan === null || planDecisionAge >= PLAN_EVERY)
     refreshPlanInBackground(state);
 
-  const chosen = choose(actions);
+  const chosen = choose(actions, obs);
   const degraded = lastPlanError !== null;
   let reason;
   if (plan !== null) {

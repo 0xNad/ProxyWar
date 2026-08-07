@@ -2,10 +2,13 @@ import { isValidSpawnSite } from "../../core/execution/Util";
 import {
   diplomacyReservedSlots,
   diplomacySlotsEnabled,
+  structuredDealsEnabled,
 } from "./AgentTunables";
 import { UnitType } from "../../core/game/Game";
 import { GameMap, TileRef } from "../../core/game/GameMap";
+import { DEAL_TEMPLATE_LABELS } from "./AgentDealCompliance";
 import {
+  AgentDealTermsView,
   AgentObservation,
   AgentStrategyProfile,
   LegalAction,
@@ -558,6 +561,13 @@ export class LegalActionBuilder {
           },
         });
       }
+    }
+
+    for (const action of dealMetaActions(
+      input.observation,
+      maxActions - actions.length,
+    )) {
+      actions.push(action);
     }
 
     for (const target of input.observation.nonCombat.targetOptions ?? []) {
@@ -1204,7 +1214,133 @@ const DIPLOMACY_KINDS = new Set([
   "embargo_all",
   "donate_gold",
   "donate_troops",
+  // Structured-deal meta-actions (PROXYWAR_TUNE_STRUCTURED_DEALS): reserved
+  // alongside the other diplomacy kinds so crowded menus cannot silently
+  // drop every deal response.
+  "deal_propose",
+  "deal_accept",
+  "deal_reject",
+  "deal_withdraw",
 ]);
+
+/**
+ * Structured-deal meta-actions (PROXYWAR_TUNE_STRUCTURED_DEALS, default OFF).
+ * Emitted only when the flag is on AND the league runner injected the
+ * bilateral `deals` block — every offer listed there already passed the
+ * AgentDealManager's capacity and template-precondition gates. All
+ * `intent: null` (the `hold` precedent) with fully deterministic IDs:
+ * `deal_propose:<recipientSeat>:<template>`, `deal_accept:<dealID>`,
+ * `deal_reject:<dealID>`, `deal_withdraw:<dealID>`. Flag OFF (or no deals
+ * block) emits nothing, keeping menus byte-identical to shipped behavior.
+ */
+function dealMetaActions(
+  observation: AgentObservation,
+  budget: number,
+): LegalAction[] {
+  if (!structuredDealsEnabled() || observation.deals === undefined) {
+    return [];
+  }
+  const deals = observation.deals;
+  const actions: LegalAction[] = [];
+  const push = (action: LegalAction): boolean => {
+    if (actions.length >= budget) {
+      return false;
+    }
+    actions.push(action);
+    return true;
+  };
+  const termsMetadata = (terms: AgentDealTermsView) => ({
+    template: terms.template,
+    durationSteps: terms.durationSteps,
+    ...(terms.targetPlayerID !== undefined
+      ? {
+          targetID: terms.targetPlayerID,
+          targetName: terms.targetName ?? terms.targetPlayerID,
+        }
+      : {}),
+    ...(terms.goldAmount !== undefined
+      ? {
+          goldAmount: terms.goldAmount,
+          troopAmount: terms.troopAmount ?? 0,
+        }
+      : {}),
+  });
+
+  for (const proposal of deals.incomingProposals) {
+    const label = DEAL_TEMPLATE_LABELS[proposal.terms.template];
+    const shared = {
+      dealID: proposal.dealID,
+      recipientID: proposal.proposerPlayerID,
+      recipientName: proposal.proposerName,
+      ...termsMetadata(proposal.terms),
+      legalReason: "open proposal addressed to this agent",
+    };
+    const accepted = push({
+      id: `deal_accept:${proposal.dealID}`,
+      kind: "deal_accept",
+      label: `Accept ${proposal.proposerName}'s ${label}`,
+      intent: null,
+      risk: { level: "medium", score: 0.35 },
+      metadata: shared,
+    });
+    const rejected =
+      accepted &&
+      push({
+        id: `deal_reject:${proposal.dealID}`,
+        kind: "deal_reject",
+        label: `Reject ${proposal.proposerName}'s ${label}`,
+        intent: null,
+        risk: { level: "none", score: 0 },
+        metadata: shared,
+      });
+    if (!accepted || !rejected) {
+      return actions;
+    }
+  }
+  for (const proposal of deals.outgoingProposals) {
+    const kept = push({
+      id: `deal_withdraw:${proposal.dealID}`,
+      kind: "deal_withdraw",
+      label: `Withdraw ${DEAL_TEMPLATE_LABELS[proposal.terms.template]} offer to ${proposal.recipientName}`,
+      intent: null,
+      risk: { level: "none", score: 0 },
+      metadata: {
+        dealID: proposal.dealID,
+        recipientID: proposal.recipientPlayerID,
+        recipientName: proposal.recipientName,
+        ...termsMetadata(proposal.terms),
+        legalReason: "own open proposal may be withdrawn",
+      },
+    });
+    if (!kept) {
+      return actions;
+    }
+  }
+  for (const option of deals.proposalOptions) {
+    const label = DEAL_TEMPLATE_LABELS[option.terms.template];
+    const suffix =
+      option.terms.template === "joint_attack"
+        ? ` against ${option.terms.targetName ?? option.terms.targetPlayerID}`
+        : "";
+    const kept = push({
+      id: `deal_propose:${option.recipientPlayerID}:${option.terms.template}`,
+      kind: "deal_propose",
+      label: `Propose ${label} to ${option.recipientName}${suffix}`,
+      intent: null,
+      risk: { level: "low", score: 0.15 },
+      metadata: {
+        recipientID: option.recipientPlayerID,
+        recipientName: option.recipientName,
+        ...termsMetadata(option.terms),
+        legalReason: "deal manager has capacity for this pair and template",
+      },
+    });
+    if (!kept) {
+      return actions;
+    }
+  }
+  return actions;
+}
 
 /**
  * Truncate to `cap` total entries while guaranteeing diplomacy actions up to

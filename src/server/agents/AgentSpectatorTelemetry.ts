@@ -1,9 +1,10 @@
+import type { AgentDealLedgerEvent } from "./AgentDealCompliance";
 import type {
   AgentRunFinalState,
   AgentRunRosterEntry,
 } from "./AgentDecisionLogWriter";
 import { economyFactsFromAffordance } from "./AgentEconomyNetwork";
-import { economyEventsEnabled } from "./AgentTunables";
+import { economyEventsEnabled, structuredDealsEnabled } from "./AgentTunables";
 import type {
   AgentDecisionRecord,
   AgentEconomyRecordFacts,
@@ -49,7 +50,18 @@ export type SpectatorEventKind =
   | "factory_idle"
   | "trade_link_established"
   | "trade_severed"
-  | "economy_dependency";
+  | "economy_dependency"
+  // Structured-deal events (PROXYWAR_TUNE_STRUCTURED_DEALS, default OFF):
+  // derived from the deal-ledger stamps on decision records
+  // (dealAction/dealID/dealPublicText and the dealComplianceEvent JSON),
+  // bounded per agent. publicText is server-authored by AgentDealCompliance —
+  // the referee narrates follow-through, it never punishes.
+  | "deal_proposed"
+  | "deal_accepted"
+  | "deal_rejected"
+  | "deal_expired"
+  | "deal_fulfilled"
+  | "deal_violated";
 
 export interface SpectatorAgent {
   agentID: string;
@@ -96,7 +108,9 @@ export interface SpectatorEvent {
   /**
    * The RAW submitted action behind this event (see AgentStatsPipeline's
    * actionKind-vs-kind note). `"none"` marks events DERIVED from state rather
-   * than from any submitted action (economy transition events). Synthetic
+   * than from any submitted action (economy transition events, and
+   * structured-deal events, which derive from the deal LEDGER's transitions
+   * even when a deal meta-action caused the transition). Synthetic
    * elimination events predate the marker and keep their legacy "hold"
    * placeholder so flag-off telemetry bytes stay identical.
    */
@@ -186,6 +200,12 @@ export function buildAgentSpectatorTelemetry(
   }
 
   addEconomyEvents({
+    records: input.records,
+    agentByID,
+    agentByPlayerID,
+    events,
+  });
+  addDealEvents({
     records: input.records,
     agentByID,
     agentByPlayerID,
@@ -993,6 +1013,204 @@ function tradeSeveredText(
     return `${counterpartyName}'s embargo on ${actorName} cut ${actorName}'s eligible rail destinations owned by ${counterpartyName} to zero.`;
   }
   return `${actorName} no longer has any eligible rail destination owned by ${counterpartyName}; the connecting stations were destroyed or changed owners.`;
+}
+
+/**
+ * Structured-deal events (PROXYWAR_TUNE_STRUCTURED_DEALS, default OFF — with
+ * the flag off this function emits nothing and telemetry is byte-identical to
+ * shipped behavior). Derived from records alone (the mirror-backfill path
+ * rebuilds telemetry from decisions.jsonl), following the Phase A economy
+ * pattern: flag-gated, transition-derived, actionKind "none", bounded per
+ * agent per match. Two record surfaces feed it:
+ *
+ * 1. Deal ACTION stamps (dealAction/dealID/dealPublicText, stamped by the
+ *    deal manager on accepted propose/accept/reject records) become
+ *    deal_proposed / deal_accepted (tone pact) / deal_rejected. Withdrawn
+ *    proposals are silent by design.
+ * 2. The dealComplianceEvent stamp (a JSON array of compact referee/lifecycle
+ *    events authored by AgentDealCompliance) becomes deal_expired /
+ *    deal_fulfilled / deal_violated (tone betrayal, high importance), with
+ *    tone/importance/publicText carried in the stamp.
+ *
+ * Force-resolution events emitted after the final record are ledger-only by
+ * construction (no record exists to carry them) — the full ledger remains
+ * available through AgentLeagueMatchRunner.dealLedger().
+ */
+const DEAL_EVENT_LIMIT_PER_AGENT = 24;
+
+const DEAL_ACTION_EVENTS: Record<
+  string,
+  {
+    kind: SpectatorEventKind;
+    tone: SpectatorEvent["tone"];
+    importance: number;
+  }
+> = {
+  propose: { kind: "deal_proposed", tone: "info", importance: 55 },
+  accept: { kind: "deal_accepted", tone: "pact", importance: 78 },
+  reject: { kind: "deal_rejected", tone: "info", importance: 45 },
+};
+
+const DEAL_LEDGER_EVENT_KINDS: ReadonlySet<string> = new Set([
+  "deal_proposed",
+  "deal_accepted",
+  "deal_rejected",
+  "deal_expired",
+  "deal_fulfilled",
+  "deal_violated",
+]);
+
+const DEAL_EVENT_TONES: ReadonlySet<string> = new Set([
+  "info",
+  "pact",
+  "trade",
+  "threat",
+  "betrayal",
+  "war",
+]);
+
+function parseDealComplianceEvents(value: unknown): AgentDealLedgerEvent[] {
+  if (typeof value !== "string" || value.length === 0) {
+    return [];
+  }
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.filter((item): item is AgentDealLedgerEvent => {
+      if (item === null || typeof item !== "object") {
+        return false;
+      }
+      const candidate = item as Record<string, unknown>;
+      return (
+        typeof candidate.event === "string" &&
+        DEAL_LEDGER_EVENT_KINDS.has(candidate.event) &&
+        typeof candidate.dealID === "string" &&
+        typeof candidate.actorPlayerID === "string" &&
+        typeof candidate.actorName === "string" &&
+        typeof candidate.publicText === "string" &&
+        typeof candidate.tone === "string" &&
+        DEAL_EVENT_TONES.has(candidate.tone) &&
+        typeof candidate.importance === "number"
+      );
+    });
+  } catch {
+    return [];
+  }
+}
+
+function addDealEvents(input: {
+  records: readonly AgentDecisionRecord[];
+  agentByID: Map<string, SpectatorAgent>;
+  agentByPlayerID: Map<string, SpectatorAgent>;
+  events: SpectatorEvent[];
+}) {
+  if (!structuredDealsEnabled()) {
+    return;
+  }
+  const emittedByAgent = new Map<string, number>();
+  const emit = (
+    record: AgentDecisionRecord,
+    actor: SpectatorAgent,
+    target: SpectatorAgent | null,
+    kind: SpectatorEventKind,
+    tone: SpectatorEvent["tone"],
+    importance: number,
+    publicText: string,
+    targetNameFallback: string | null,
+    dedupeKey: string,
+  ) => {
+    const emitted = emittedByAgent.get(actor.agentID) ?? 0;
+    if (emitted >= DEAL_EVENT_LIMIT_PER_AGENT) {
+      return;
+    }
+    emittedByAgent.set(actor.agentID, emitted + 1);
+    input.events.push({
+      id: `${record.turnNumber}:${record.sequence}:${dedupeKey}`,
+      sequence: record.sequence,
+      turnNumber: record.turnNumber,
+      kind,
+      tone,
+      actorAgentID: actor.agentID,
+      actorName: actor.username,
+      targetAgentID: target?.agentID ?? null,
+      targetName: target?.username ?? targetNameFallback,
+      message: publicText,
+      publicText,
+      // Derived from the deal ledger's transitions, not from any submitted
+      // game intent (deal meta-actions carry intent: null).
+      actionKind: "none",
+      actionID: dedupeKey,
+      importance,
+    });
+  };
+
+  for (const record of [...input.records].sort(recordSort)) {
+    const actor = input.agentByID.get(record.agentID);
+    if (actor === undefined) {
+      continue;
+    }
+    const metadata = record.decisionMetadata ?? {};
+    const dealAction =
+      typeof metadata.dealAction === "string" ? metadata.dealAction : null;
+    const dealID = typeof metadata.dealID === "string" ? metadata.dealID : null;
+    if (
+      dealAction !== null &&
+      dealID !== null &&
+      metadata.dealApplyAccepted === true &&
+      record.result.accepted
+    ) {
+      const mapping = DEAL_ACTION_EVENTS[dealAction];
+      if (mapping !== undefined) {
+        const counterpartyID =
+          typeof metadata.dealCounterpartyID === "string"
+            ? metadata.dealCounterpartyID
+            : null;
+        const target =
+          counterpartyID === null
+            ? null
+            : (input.agentByPlayerID.get(counterpartyID) ?? null);
+        const publicText =
+          typeof metadata.dealPublicText === "string"
+            ? metadata.dealPublicText
+            : `${actor.username} ${dealAction}s a deal.`;
+        emit(
+          record,
+          actor,
+          target,
+          mapping.kind,
+          mapping.tone,
+          mapping.importance,
+          publicText,
+          typeof metadata.dealCounterpartyName === "string"
+            ? metadata.dealCounterpartyName
+            : null,
+          `deal:${mapping.kind}:${dealID}`,
+        );
+      }
+    }
+    for (const item of parseDealComplianceEvents(
+      metadata.dealComplianceEvent,
+    )) {
+      const eventActor = input.agentByPlayerID.get(item.actorPlayerID) ?? actor;
+      const target =
+        item.targetPlayerID === null
+          ? null
+          : (input.agentByPlayerID.get(item.targetPlayerID) ?? null);
+      emit(
+        record,
+        eventActor,
+        target,
+        item.event,
+        item.tone,
+        item.importance,
+        item.publicText,
+        item.targetName,
+        `deal:${item.event}:${item.dealID}:${item.actorPlayerID}`,
+      );
+    }
+  }
 }
 
 function buildCommunicationThreads(

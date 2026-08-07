@@ -3,6 +3,11 @@ import { Logger } from "winston";
 import { Game } from "../../core/game/Game";
 import { ServerMessage } from "../../core/Schemas";
 import { GameServer } from "../GameServer";
+import {
+  AgentDealManager,
+  isDealActionKind,
+  type AgentDealLedgerSnapshot,
+} from "./AgentDealManager";
 import { validateAgentDecision } from "./AgentDecisionValidator";
 import { economyRecordFacts } from "./AgentEconomyNetwork";
 import { AgentLocalGameMirror } from "./AgentLocalGameMirror";
@@ -17,7 +22,7 @@ import {
 } from "./AgentObservationBuilder";
 import { AgentRunner } from "./AgentRunner";
 import { buildAgentTacticalAffordances } from "./AgentTacticalAffordances";
-import { economyEventsEnabled } from "./AgentTunables";
+import { economyEventsEnabled, structuredDealsEnabled } from "./AgentTunables";
 import {
   AgentActionResult,
   AgentBrain,
@@ -151,6 +156,13 @@ export class AgentLeagueMatchRunner {
   private readonly decisionValidator: typeof validateAgentDecision;
   private readonly disabledActionKinds: Set<LegalActionKind>;
   private readonly retainTacticalAffordances: boolean;
+  /**
+   * Structured-deal ledger (PROXYWAR_TUNE_STRUCTURED_DEALS, default OFF —
+   * null when the flag is off, leaving observations, menus, records, and
+   * results byte-identical to shipped behavior). Runner-scoped meta-state
+   * beside the communication-signal machinery; never touches core.
+   */
+  private readonly dealManager: AgentDealManager | null;
   // Log-once bookkeeping for seatEliminated. Liveness itself is recomputed
   // from the game snapshot every decision turn — never latched here.
   private readonly eliminatedSeatsAnnounced = new Set<string>();
@@ -170,6 +182,7 @@ export class AgentLeagueMatchRunner {
     this.decisionValidator = options.decisionValidator ?? validateAgentDecision;
     this.disabledActionKinds = new Set(options.disabledActionKinds ?? []);
     this.retainTacticalAffordances = options.retainTacticalAffordances ?? true;
+    this.dealManager = structuredDealsEnabled() ? new AgentDealManager() : null;
   }
 
   attachAgents(): void {
@@ -336,6 +349,16 @@ export class AgentLeagueMatchRunner {
     const activeParticipants = this.options.participants.filter(
       (participant) => !this.seatEliminated(participant, options.gameState),
     );
+    // Deal clock: advances the decision step, expires lapsed proposals, and
+    // judges the previous step's audited records BEFORE observations are
+    // built, so proposals made at step N become visible at N+1 and
+    // acceptances at N+1 are judged from N+2 (same-step actions can never
+    // retroactively fulfill or violate).
+    this.dealManager?.beginDecisionStep({
+      turnNumber: options.turnNumber ?? 0,
+      gameState: options.gameState,
+      records: this.records,
+    });
     const decisionInputs = activeParticipants.map((participant) => {
       const observationInput: BuildAgentObservationInput = {
         agentID: participant.runner.agentID,
@@ -363,21 +386,32 @@ export class AgentLeagueMatchRunner {
               ...observationInput,
               recentCommunications,
             });
+      // Bilateral deals block (flag-gated; undefined leaves the observation
+      // object untouched, byte-identical to shipped behavior). Privacy: the
+      // manager returns only this seat's own proposals and deals.
+      const dealsView = this.dealManager?.observationFor({
+        agentID: participant.runner.agentID,
+        observation: baseObservation,
+      });
+      const dealAwareObservation: AgentObservation =
+        dealsView === undefined
+          ? baseObservation
+          : { ...baseObservation, deals: dealsView };
       const legalActions = this.filterDisabledActionKinds(
         this.legalActionBuilder.build({
-          observation: baseObservation,
+          observation: dealAwareObservation,
           spawnCandidates: turnSpawnCandidates,
         }),
       );
       const objective = this.objectiveManager.objectiveFor({
         agentID: participant.runner.agentID,
         profile: participant.spec.profile,
-        observation: baseObservation,
+        observation: dealAwareObservation,
         legalActions,
-        turnNumber: baseObservation.turnNumber,
+        turnNumber: dealAwareObservation.turnNumber,
       });
       const observation: AgentObservation = {
-        ...baseObservation,
+        ...dealAwareObservation,
         objective,
       };
       return {
@@ -541,13 +575,53 @@ export class AgentLeagueMatchRunner {
               : {}),
           }),
         };
-        const result = selected.action
-          ? this.submitLegalAction(participant.runner, selected.action)
-          : {
-              accepted: false,
-              reason: "no legal fallback action available",
-              submittedIntent: null,
-            };
+        // Structured-deal meta-actions are processed by the runner-scoped
+        // deal manager during this same sequential submission pass
+        // (participant order — earlier submissions win conflicts); they
+        // submit no game intent. Pending referee/lifecycle events drain onto
+        // this agent's next record as the dealComplianceEvent stamp. Flag
+        // OFF: dealManager is null and this whole block is inert, leaving
+        // records byte-identical.
+        const dealOutcome =
+          this.dealManager !== null &&
+          selected.action !== null &&
+          isDealActionKind(selected.action.kind)
+            ? this.dealManager.applyDealAction({
+                agentID: participant.runner.agentID,
+                playerID: observation.ownState?.playerID ?? null,
+                playerName:
+                  observation.ownState?.name ?? participant.spec.username,
+                action: selected.action,
+                turnNumber: observation.turnNumber,
+              })
+            : null;
+        const complianceStamp =
+          this.dealManager?.takePendingComplianceStamp(
+            participant.runner.agentID,
+          ) ?? null;
+        const dealMetadata: AgentDecision["metadata"] = {
+          ...(dealOutcome?.stamps ?? {}),
+          ...(complianceStamp !== null
+            ? { dealComplianceEvent: complianceStamp }
+            : {}),
+        };
+        const recordedDecision =
+          Object.keys(dealMetadata).length === 0
+            ? batchDecision
+            : {
+                ...batchDecision,
+                metadata: { ...batchDecision.metadata, ...dealMetadata },
+              };
+        const result =
+          dealOutcome !== null
+            ? dealOutcome.result
+            : selected.action
+              ? this.submitLegalAction(participant.runner, selected.action)
+              : {
+                  accepted: false,
+                  reason: "no legal fallback action available",
+                  submittedIntent: null,
+                };
         const record = this.recordDecision({
           participant,
           turnNumber: observation.turnNumber,
@@ -565,7 +639,7 @@ export class AgentLeagueMatchRunner {
               }
             : {}),
           chosenAction: selected.action,
-          decision: batchDecision,
+          decision: recordedDecision,
           decisionLatencyMs,
           reason: selected.reason,
           result,
@@ -903,9 +977,15 @@ export class AgentLeagueMatchRunner {
     action: LegalAction,
   ): AgentActionResult {
     if (action.intent === null) {
+      // Meta-actions submit no game intent; the reason derives from the
+      // action kind so any intent:null kind reports itself accurately. For
+      // `hold` this is the exact historical string "hold action selected; no
+      // game intent submitted" — byte-identical for existing consumers.
+      // (Deal meta-actions never reach here: the submission pass routes them
+      // through the deal manager, whose outcome reason names the deal.)
       return {
         accepted: true,
-        reason: "hold action selected; no game intent submitted",
+        reason: `${action.kind} action selected; no game intent submitted`,
         submittedIntent: null,
       };
     }
@@ -916,6 +996,24 @@ export class AgentLeagueMatchRunner {
       reason: result.reason,
       submittedIntent: result.intent,
     };
+  }
+
+  /**
+   * Force-resolve the structured-deal ledger at match end: judges the final
+   * step's audited records, then drives every open proposal and pending
+   * obligation to a terminal state (spec: every accepted obligation reaches a
+   * terminal state by match end). No-op when the flag is off. Idempotent.
+   */
+  finalizeDeals(input: { gameState?: Game } = {}): void {
+    this.dealManager?.finalize({
+      gameState: input.gameState,
+      records: this.records,
+    });
+  }
+
+  /** Full deal-ledger snapshot (operator/test surface); empty when flag off. */
+  dealLedger(): AgentDealLedgerSnapshot {
+    return this.dealManager?.ledgerSnapshot() ?? { deals: [], events: [] };
   }
 
   private submitAndRecordSpawn(input: {
