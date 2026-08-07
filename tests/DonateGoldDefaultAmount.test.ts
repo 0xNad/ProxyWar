@@ -2,6 +2,17 @@ import { DonateGoldExecution } from "../src/core/execution/DonateGoldExecution";
 import { Game, Player, PlayerType } from "../src/core/game/Game";
 import { playerInfo, setup } from "./util/Setup";
 
+// Regression suite for the gold-donation amount path in DonateGoldExecution,
+// added with the fix that made a null amount default to a third of the
+// sender's gold (the constructor used to coerce null to 0n, leaving the
+// `this.gold ??= this.sender.gold() / 3n` fallback in init() unreachable).
+// Pins all four amount cases: the null default, an explicit amount, explicit
+// 0 (still refused by PlayerImpl.donateGold), and the clamp in
+// PlayerImpl.removeGold that caps any transfer at the sender's balance.
+//
+// Donation legality edges (friendly-only, disconnected recipient, cooldown)
+// live in tests/DonationRules.test.ts - cite, don't duplicate.
+
 let game: Game;
 let donor: Player;
 let recipient: Player;
@@ -78,5 +89,26 @@ describe("DonateGoldExecution amount handling", () => {
 
     expect(recipient.gold()).toBe(recipientBefore);
     expect(donor.gold()).toBe(donorBefore);
+  });
+
+  test("an amount above the sender's balance is clamped to the balance", () => {
+    // PlayerImpl.removeGold returns minInt(this._gold, toRemove), so an
+    // over-large explicit amount empties the sender rather than transferring
+    // gold that does not exist. The null default cannot reach this path
+    // (gold/3 is always <= gold); it guards explicit amounts, which is what
+    // agents and the UI send.
+    const donorBefore = donor.gold();
+    const recipientBefore = recipient.gold();
+    const requested = donorBefore * 5n;
+    expect(requested).toBeGreaterThan(donorBefore);
+
+    game.addExecution(
+      new DonateGoldExecution(donor, recipient.id(), Number(requested)),
+    );
+    game.executeNextTick();
+    game.executeNextTick();
+
+    expect(donor.gold()).toBe(0n);
+    expect(recipient.gold()).toBe(recipientBefore + donorBefore);
   });
 });
