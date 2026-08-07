@@ -247,11 +247,14 @@ function economyNetworkAffordance(input: {
   if (economy === undefined) {
     return undefined;
   }
+  // Top counterparty by dependency share; a 0% share is no dependency, so it
+  // is never surfaced (topCounterparty* stays null — same gate as reasons[]).
   const topCounterparty = economy.counterparties.reduce<
     (typeof economy.counterparties)[number] | null
   >(
     (top, candidate) =>
       candidate.eligibleDestinationSharePct !== null &&
+      candidate.eligibleDestinationSharePct > 0 &&
       (top === null ||
         candidate.eligibleDestinationSharePct >
           (top.eligibleDestinationSharePct ?? 0))
@@ -309,6 +312,7 @@ function economyNetworkAffordance(input: {
       embargoOursOnThem: counterparty.embargoOursOnThem,
       embargoTheirsOnUs: counterparty.embargoTheirsOnUs,
     })),
+    pairLinks: economy.pairLinks,
     bottleneckKind: economy.bottleneck.kind,
     bottleneckEvidence: economy.bottleneck.evidence,
     reasons,

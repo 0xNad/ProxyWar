@@ -663,6 +663,24 @@ export interface AgentEconomyBottleneck {
   evidence: string;
 }
 
+/**
+ * Compact UNCAPPED per-counterparty trade-link entry. One entry for every
+ * counterparty that either owns >=1 eligible destination for this agent
+ * (`links` > 0) or has an embargo edge with it (so severed-link attribution
+ * stays exact). Bounded by alive seats, not by the counterparty reporting cap
+ * — spectator pair-transition detection reads ONLY this list, so cap-driven
+ * churn in the rich `counterparties` list can never fabricate
+ * trade_severed / trade_link_established events.
+ */
+export interface AgentEconomyRecordPairLink {
+  playerID: string;
+  name: string;
+  /** Their eligible City/Port stations on clusters touching this agent. */
+  links: number;
+  embargoOursOnThem: boolean;
+  embargoTheirsOnUs: boolean;
+}
+
 export interface AgentEconomyObservation {
   incomeBySource: AgentEconomyIncomeBySource;
   /** Total rail clusters touching the agent (before the reporting cap). */
@@ -684,6 +702,8 @@ export interface AgentEconomyObservation {
   counterpartyCount: number;
   /** Capped at 8, sorted by playerID ascending. */
   counterparties: AgentEconomyCounterpartySummary[];
+  /** Uncapped trade-link list (bounded by seats), sorted by playerID. */
+  pairLinks: AgentEconomyRecordPairLink[];
   bottleneck: AgentEconomyBottleneck;
 }
 
@@ -711,6 +731,13 @@ export interface AgentEconomyRecordFacts {
   eligibleDestinationCount: number;
   embargoBlockedDestinationCount: number;
   counterparties: AgentEconomyRecordCounterpartyFacts[];
+  /**
+   * Uncapped trade-link list — the ONLY source for pair-transition spectator
+   * events (trade_link_established / trade_severed). Optional solely for
+   * tolerance of records stamped before this field existed; those records
+   * produce no pair events rather than cap-eviction false positives.
+   */
+  pairLinks?: AgentEconomyRecordPairLink[];
   bottleneckKind: AgentEconomyBottleneckKind;
 }
 
@@ -733,6 +760,8 @@ export interface AgentEconomyNetworkAffordance {
   topCounterpartyDependencyPct: number | null;
   topCounterpartyAllied: boolean | null;
   counterparties: AgentEconomyRecordCounterpartyFacts[];
+  /** Uncapped trade-link list (see AgentEconomyRecordPairLink). */
+  pairLinks: AgentEconomyRecordPairLink[];
   bottleneckKind: AgentEconomyBottleneckKind;
   bottleneckEvidence: string;
   reasons: string[];

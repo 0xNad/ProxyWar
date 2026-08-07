@@ -58,7 +58,7 @@ function counterparty(
 function facts(
   overrides: Partial<AgentEconomyRecordFacts> = {},
 ): AgentEconomyRecordFacts {
-  return {
+  const base: AgentEconomyRecordFacts = {
     factoryCount: 0,
     operationalFactoryCount: 0,
     idleFactoryCount: 0,
@@ -69,6 +69,24 @@ function facts(
     bottleneckKind: "none",
     ...overrides,
   };
+  // Mirror production derivation: unless a fixture provides pairLinks
+  // explicitly (the cap-eviction cases), treat its counterparties as the
+  // full list and derive the uncapped pair-link entries from it.
+  base.pairLinks ??= base.counterparties
+    .filter(
+      (pair) =>
+        pair.myEligibleDestinationsTheyOwn > 0 ||
+        pair.embargoOursOnThem ||
+        pair.embargoTheirsOnUs,
+    )
+    .map((pair) => ({
+      playerID: pair.playerID,
+      name: pair.name,
+      links: pair.myEligibleDestinationsTheyOwn,
+      embargoOursOnThem: pair.embargoOursOnThem,
+      embargoTheirsOnUs: pair.embargoTheirsOnUs,
+    }));
+  return base;
 }
 
 function record(
@@ -219,8 +237,11 @@ describe("AgentSpectatorTelemetry economy events (PROXYWAR_TUNE_ECONOMY_EVENTS)"
     const idleEvent = events[0];
     expect(idleEvent.turnNumber).toBe(100);
     expect(idleEvent.publicText).toBe(
-      "1 of Auri's 1 factories have no City or Port on their rail network, so no trains can run from them.",
+      "1 of Auri's 1 factories has no City or Port on its rail network, so no trains can run from it.",
     );
+    // Derived-from-state events carry the non-action marker, never a fake
+    // submitted-action kind.
+    expect(events.every((event) => event.actionKind === "none")).toBe(true);
 
     const operationalEvent = events[1];
     expect(operationalEvent.turnNumber).toBe(300);
@@ -335,6 +356,7 @@ describe("AgentSpectatorTelemetry economy events (PROXYWAR_TUNE_ECONOMY_EVENTS)"
           topCounterpartyDependencyPct: null,
           topCounterpartyAllied: null,
           counterparties: [],
+          pairLinks: [],
           bottleneckKind: "none",
           bottleneckEvidence: "1 factories operational",
           reasons: [],
@@ -374,5 +396,159 @@ describe("AgentSpectatorTelemetry economy events (PROXYWAR_TUNE_ECONOMY_EVENTS)"
       }),
     ]);
     expect(telemetry.events.map((event) => event.kind)).toEqual(["attack"]);
+  });
+
+  it("M1: capped-list eviction churn with stable uncapped links emits no severed/established events", () => {
+    process.env[FLAG] = "1";
+    // Nine linked counterparties: the rich list is capped at 8 and its
+    // membership churns between records (structural rank), but the UNCAPPED
+    // pairLinks are identical — no pair transition actually happened.
+    const allPairs = Array.from({ length: 9 }, (_, index) =>
+      counterparty({
+        playerID: `p${index + 10}`,
+        name: `N${index + 10}`,
+        myEligibleDestinationsTheyOwn: 1,
+        eligibleDestinationSharePct: 11,
+      }),
+    );
+    const pairLinks = allPairs.map((pair) => ({
+      playerID: pair.playerID,
+      name: pair.name,
+      links: 1,
+      embargoOursOnThem: false,
+      embargoTheirsOnUs: false,
+    }));
+    const first = facts({
+      factoryCount: 1,
+      operationalFactoryCount: 1,
+      eligibleDestinationCount: 9,
+      counterparties: allPairs.slice(0, 8), // cap drops p18
+      pairLinks,
+    });
+    const churned = facts({
+      factoryCount: 1,
+      operationalFactoryCount: 1,
+      eligibleDestinationCount: 9,
+      counterparties: allPairs.slice(1, 9), // churn: drops p10, admits p18
+      pairLinks,
+    });
+    const events = economyEvents([
+      record(1, first),
+      record(2, churned),
+      record(3, churned),
+    ]);
+
+    // All nine real links establish once from the zero baseline (turn 100);
+    // cap churn afterwards produces NOTHING — no severed events, no
+    // re-established events, and no false "stations destroyed" claims.
+    expect(
+      events.filter((event) => event.kind === "trade_severed"),
+    ).toHaveLength(0);
+    const established = events.filter(
+      (event) => event.kind === "trade_link_established",
+    );
+    expect(established).toHaveLength(9);
+    expect(established.every((event) => event.turnNumber === 100)).toBe(true);
+    expect(
+      events.some((event) =>
+        (event.publicText ?? "").includes("destroyed or changed owners"),
+      ),
+    ).toBe(false);
+  });
+
+  it("M1: a real embargo still severs with exact attribution even when the cap evicts the pair from the rich list", () => {
+    process.env[FLAG] = "1";
+    const others = Array.from({ length: 8 }, (_, index) =>
+      counterparty({
+        playerID: `p${index + 10}`,
+        name: `N${index + 10}`,
+        myEligibleDestinationsTheyOwn: 1,
+        eligibleDestinationSharePct: 11,
+      }),
+    );
+    const sefirot = counterparty({
+      myEligibleDestinationsTheyOwn: 1,
+      eligibleDestinationSharePct: 11,
+    }); // playerID p2, resolves to agent a2 ("Sefirot")
+    const linkedPairLinks = [sefirot, ...others].map((pair) => ({
+      playerID: pair.playerID,
+      name: pair.name,
+      links: 1,
+      embargoOursOnThem: false,
+      embargoTheirsOnUs: false,
+    }));
+    const linked = facts({
+      factoryCount: 1,
+      operationalFactoryCount: 1,
+      eligibleDestinationCount: 9,
+      counterparties: [sefirot, ...others.slice(0, 7)],
+      pairLinks: linkedPairLinks,
+    });
+    // Sefirot embargoes Auri: links drop to zero AND the pair falls out of
+    // the capped rich list at the same decision. The pairLinks entry (kept
+    // because of the embargo edge) still carries the exact attribution.
+    const severed = facts({
+      factoryCount: 1,
+      blockedFactoryCount: 1,
+      eligibleDestinationCount: 8,
+      embargoBlockedDestinationCount: 1,
+      counterparties: others, // Sefirot evicted by rank churn
+      pairLinks: [
+        {
+          playerID: "p2",
+          name: "Sefirot",
+          links: 0,
+          embargoOursOnThem: false,
+          embargoTheirsOnUs: true,
+        },
+        ...linkedPairLinks.slice(1),
+      ],
+    });
+    const events = economyEvents([record(1, linked), record(2, severed)]);
+
+    const severedEvents = events.filter(
+      (event) => event.kind === "trade_severed",
+    );
+    expect(severedEvents).toHaveLength(1);
+    expect(severedEvents[0].turnNumber).toBe(200);
+    expect(severedEvents[0].targetAgentID).toBe("a2");
+    expect(severedEvents[0].publicText).toBe(
+      "Sefirot's embargo on Auri cut Auri's eligible rail destinations owned by Sefirot to zero.",
+    );
+  });
+
+  it("m4: flag OFF telemetry is byte-identical with vs without economyFacts on the records (whole object, generatedAt normalized)", () => {
+    delete process.env[FLAG];
+    const richFacts = facts({
+      factoryCount: 2,
+      operationalFactoryCount: 1,
+      idleFactoryCount: 1,
+      eligibleDestinationCount: 2,
+      counterparties: [
+        counterparty({
+          myEligibleDestinationsTheyOwn: 2,
+          eligibleDestinationSharePct: 100,
+        }),
+      ],
+    });
+    const build = (economyFacts: AgentEconomyRecordFacts | undefined) =>
+      telemetryFor([
+        record(1, economyFacts, {
+          chosenActionKind: "attack",
+          chosenActionID: "attack:p2",
+          chosenActionMetadata: { targetID: "p2", targetName: "Sefirot" },
+        }),
+        record(2, economyFacts, {
+          chosenActionKind: "alliance_request",
+          chosenActionID: "alliance_request:p2",
+          chosenActionMetadata: { recipientID: "p2", recipientName: "Sefirot" },
+        }),
+      ]);
+    const normalize = (telemetry: unknown) =>
+      JSON.stringify({
+        ...(telemetry as Record<string, unknown>),
+        generatedAt: "NORMALIZED",
+      });
+    expect(normalize(build(richFacts))).toBe(normalize(build(undefined)));
   });
 });

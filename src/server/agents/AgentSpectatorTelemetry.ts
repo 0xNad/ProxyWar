@@ -6,8 +6,8 @@ import { economyFactsFromAffordance } from "./AgentEconomyNetwork";
 import { economyEventsEnabled } from "./AgentTunables";
 import type {
   AgentDecisionRecord,
-  AgentEconomyRecordCounterpartyFacts,
   AgentEconomyRecordFacts,
+  AgentEconomyRecordPairLink,
   LegalActionKind,
 } from "./AgentTypes";
 
@@ -93,7 +93,14 @@ export interface SpectatorEvent {
   secondaryName?: string | null;
   message: string;
   publicText?: string;
-  actionKind: LegalActionKind;
+  /**
+   * The RAW submitted action behind this event (see AgentStatsPipeline's
+   * actionKind-vs-kind note). `"none"` marks events DERIVED from state rather
+   * than from any submitted action (economy transition events). Synthetic
+   * elimination events predate the marker and keep their legacy "hold"
+   * placeholder so flag-off telemetry bytes stay identical.
+   */
+  actionKind: LegalActionKind | "none";
   actionID: string;
   importance: number;
 }
@@ -800,7 +807,11 @@ function addEliminationEvents(input: {
  * the current ones and an event fires only when a tracked state flips
  * (network gains its first operational factory, factories become idle or
  * embargo-blocked, a counterparty trade link appears or drops to zero, a
- * dependency share crosses the threshold). Bounded: at most
+ * dependency share crosses the threshold). Pair transitions
+ * (trade_link_established / trade_severed) read ONLY the uncapped
+ * `pairLinks` list — never the capped rich counterparty list, whose
+ * rank-eviction churn on >=9-counterparty matches would otherwise fabricate
+ * severed/established events. Bounded: at most
  * ECONOMY_EVENT_LIMIT_PER_AGENT economy events per agent per match.
  * publicText is server-authored, one sentence, and keeps physical rail
  * connection, trade eligibility (embargo-only), relationship, and income as
@@ -817,6 +828,7 @@ const EMPTY_ECONOMY_FACTS: AgentEconomyRecordFacts = {
   eligibleDestinationCount: 0,
   embargoBlockedDestinationCount: 0,
   counterparties: [],
+  pairLinks: [],
   bottleneckKind: "none",
 };
 
@@ -873,7 +885,8 @@ function addEconomyEvents(input: {
         targetName: target?.username ?? null,
         message: publicText,
         publicText,
-        actionKind: "hold",
+        // Derived from state transitions, not from any submitted action.
+        actionKind: "none",
         actionID: dedupeKey,
         importance,
       });
@@ -902,17 +915,23 @@ function addEconomyEvents(input: {
         44,
         facts.blockedFactoryCount > 0
           ? `All City/Port destinations on the rail network of ${facts.blockedFactoryCount} of ${actor.username}'s ${facts.factoryCount} factories are embargo-blocked.`
-          : `${facts.idleFactoryCount} of ${actor.username}'s ${facts.factoryCount} factories have no City or Port on their rail network, so no trains can run from them.`,
+          : `${facts.idleFactoryCount} of ${actor.username}'s ${facts.factoryCount} factories ${facts.idleFactoryCount === 1 ? "has" : "have"} no City or Port on ${facts.idleFactoryCount === 1 ? "its" : "their"} rail network, so no trains can run from ${facts.idleFactoryCount === 1 ? "it" : "them"}.`,
         null,
         "economy:factory_idle",
       );
     }
 
+    // Pair transitions read ONLY the uncapped pairLinks list. The capped rich
+    // counterparty list churns with structural rank under the reporting cap,
+    // and treating absence-from-it as links=0 fabricated severed/established
+    // events; absence from pairLinks genuinely means zero links and no
+    // embargo edge. Records stamped before pairLinks existed produce no pair
+    // events at all rather than false ones.
     const previousPairs = new Map(
-      previous.counterparties.map((pair) => [pair.playerID, pair] as const),
+      (previous.pairLinks ?? []).map((pair) => [pair.playerID, pair] as const),
     );
     const currentPairs = new Map(
-      facts.counterparties.map((pair) => [pair.playerID, pair] as const),
+      (facts.pairLinks ?? []).map((pair) => [pair.playerID, pair] as const),
     );
     const pairIDs = [
       ...new Set([...previousPairs.keys(), ...currentPairs.keys()]),
@@ -920,13 +939,13 @@ function addEconomyEvents(input: {
     for (const playerID of pairIDs) {
       const before = previousPairs.get(playerID);
       const after = currentPairs.get(playerID);
-      const beforeLinks = before?.myEligibleDestinationsTheyOwn ?? 0;
-      const afterLinks = after?.myEligibleDestinationsTheyOwn ?? 0;
+      const beforeLinks = before?.links ?? 0;
+      const afterLinks = after?.links ?? 0;
       const target = input.agentByPlayerID.get(playerID) ?? null;
       const displayName =
         target?.username ?? after?.name ?? before?.name ?? "another player";
 
-      if (beforeLinks === 0 && afterLinks > 0 && after !== undefined) {
+      if (beforeLinks === 0 && afterLinks > 0) {
         emit(
           "trade_link_established",
           "trade",
@@ -946,20 +965,31 @@ function addEconomyEvents(input: {
           `economy:trade_severed:${playerID}`,
         );
       }
+    }
+
+    // Dependency-share crossings stay on the capped rich list: a counterparty
+    // at or above the threshold holds the most links and therefore the top
+    // structural rank, so the cap can never evict it while it matters.
+    const previousShares = new Map(
+      previous.counterparties.map((pair) => [pair.playerID, pair] as const),
+    );
+    for (const after of facts.counterparties) {
+      const before = previousShares.get(after.playerID);
       const beforePct = before?.eligibleDestinationSharePct ?? 0;
-      const afterPct = after?.eligibleDestinationSharePct ?? 0;
+      const afterPct = after.eligibleDestinationSharePct ?? 0;
       if (
         beforePct < ECONOMY_DEPENDENCY_EVENT_PCT &&
-        afterPct >= ECONOMY_DEPENDENCY_EVENT_PCT &&
-        after !== undefined
+        afterPct >= ECONOMY_DEPENDENCY_EVENT_PCT
       ) {
+        const target = input.agentByPlayerID.get(after.playerID) ?? null;
+        const displayName = target?.username ?? after.name;
         emit(
           "economy_dependency",
           "trade",
           64,
           `${displayName} owns ${afterPct}% of the eligible City/Port destinations on ${actor.username}'s rail network (${after.isAllied ? "allied; allied train stops pay more" : "not allied"}).`,
           target,
-          `economy:economy_dependency:${playerID}`,
+          `economy:economy_dependency:${after.playerID}`,
         );
       }
     }
@@ -969,8 +999,8 @@ function addEconomyEvents(input: {
 function tradeSeveredText(
   actorName: string,
   counterpartyName: string,
-  before: AgentEconomyRecordCounterpartyFacts | undefined,
-  after: AgentEconomyRecordCounterpartyFacts | undefined,
+  before: AgentEconomyRecordPairLink | undefined,
+  after: AgentEconomyRecordPairLink | undefined,
 ): string {
   const oursNew =
     (after?.embargoOursOnThem ?? false) &&
