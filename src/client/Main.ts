@@ -111,6 +111,12 @@ import {
 } from "./Utils";
 import "./platform/PlayerProfilePage";
 import "./platform/TraderProfilePage";
+// LEAGUE builds (PROXYWAR_LEAGUE_CLIENT=1, the coworld package image)
+// resolve these three wagering imports to inert stubs instead — betting
+// routes classify identically but render nothing and redirect to /league,
+// and no module under prediction/wagering/** reaches that bundle. See
+// src/client/prediction/leagueStubs/stubMap.ts and vite.config.ts. Normal
+// builds (beta/bet) are untouched and get the real pages below.
 import "./prediction/wagering/page/AccountPage";
 import {
   openBettingPremierePage,

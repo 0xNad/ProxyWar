@@ -2,6 +2,10 @@ import { html, LitElement, nothing } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { z } from "zod";
 import { afterFirstIdentityBootstrap } from "../../../identity/GuestBootstrapGate";
+// Build-provenance sentinel (side-effect import; see its own doc): if this
+// module ever leaks into a league client bundle, the sentinel leaks with it
+// and `scripts/scan-wagering-sentinel.mjs` fails that build.
+import "../buildSentinel";
 import "../components/GithubSignIn";
 import {
   fetchLeagueData,
@@ -284,8 +288,8 @@ export class PremiereAccountPage extends LitElement {
               class="flex flex-wrap items-center gap-2 border-t border-line pt-3 text-xs text-ink-muted"
             >
               <span
-                >Linking GitHub carries your identity to any betting or
-                league browser you sign into.</span
+                >Linking GitHub carries your identity to any betting or league
+                browser you sign into.</span
               >
               <premiere-github-sign-in></premiere-github-sign-in>
             </div>`
@@ -352,11 +356,11 @@ export class PremiereAccountPage extends LitElement {
           League models
         </h2>
         <p class="text-sm text-ink-muted">
-          Do you own one (or more) of the models competing in the league?
-          A person owns a whole lineage of models and policies — claiming
-          any one version claims the whole line, past and future — and can
-          own several lineages. Most visitors don't own one — if that's
-          you, no need to do anything here.
+          Do you own one (or more) of the models competing in the league? A
+          person owns a whole lineage of models and policies — claiming any one
+          version claims the whole line, past and future — and can own several
+          lineages. Most visitors don't own one — if that's you, no need to do
+          anything here.
         </p>
         <div class="flex flex-wrap items-center gap-2">
           <button
@@ -424,7 +428,9 @@ export class PremiereAccountPage extends LitElement {
     standings: readonly LeagueStandingRow[],
     existingClaims: readonly AccountClaim[],
   ) {
-    const alreadyClaimedSlugs = new Set(existingClaims.map((c) => c.lineageSlug));
+    const alreadyClaimedSlugs = new Set(
+      existingClaims.map((c) => c.lineageSlug),
+    );
     // One entry per lineage — a lineage typically has only its latest
     // version live in current standings anyway, but de-dupe defensively
     // (first one wins, standings are already rank-sorted) — and skip
@@ -441,12 +447,13 @@ export class PremiereAccountPage extends LitElement {
     const lineages = [...byLineage.entries()];
     if (lineages.length === 0) {
       return html`<p class="text-sm text-ink-muted">
-        You've already claimed every lineage currently in the league
-        standings.
+        You've already claimed every lineage currently in the league standings.
       </p>`;
     }
     const draftSlug =
-      this.claimDraft.length > 0 ? deriveLineageSlug(this.claimDraft) : lineages[0][0];
+      this.claimDraft.length > 0
+        ? deriveLineageSlug(this.claimDraft)
+        : lineages[0][0];
     return html`
       <div class="flex flex-col gap-2">
         <label
@@ -463,11 +470,11 @@ export class PremiereAccountPage extends LitElement {
             @change=${(event: Event) => {
               const slug = (event.target as HTMLSelectElement).value;
               const standing = byLineage.get(slug);
-              this.claimDraft =
-                (standing?.policyLabel ?? standing?.playerName ?? slug).slice(
-                  0,
-                  MAX_CLAIM_LABEL_LENGTH,
-                );
+              this.claimDraft = (
+                standing?.policyLabel ??
+                standing?.playerName ??
+                slug
+              ).slice(0, MAX_CLAIM_LABEL_LENGTH);
             }}
           >
             ${lineages.map(
@@ -533,8 +540,8 @@ export class PremiereAccountPage extends LitElement {
           There is currently no way to prove GitHub-account ownership of a
           league model, so these claims are private to you and never shown
           anywhere another player can see them — not on a public profile, a
-          leaderboard, or in any premiere. A verified path arrives with
-          Softmax sign-in.
+          leaderboard, or in any premiere. A verified path arrives with Softmax
+          sign-in.
         </p>
         ${this.renderLeagueStaleness()}
         <ul class="flex flex-col gap-3">
@@ -570,7 +577,9 @@ export class PremiereAccountPage extends LitElement {
     const data = this.leagueData;
     const standing =
       data?.standings.find(
-        (s) => deriveLineageSlug(s.policyLabel ?? s.playerName) === claim.lineageSlug,
+        (s) =>
+          deriveLineageSlug(s.policyLabel ?? s.playerName) ===
+          claim.lineageSlug,
       ) ?? null;
     const removing = this.removingLineageSlug === claim.lineageSlug;
     const removeButton = html`
@@ -587,11 +596,10 @@ export class PremiereAccountPage extends LitElement {
       return html`
         <div class="flex items-start justify-between gap-3">
           <p class="text-sm text-ink">
-            You claimed <strong>${claim.label}</strong>
-            (lineage <strong>${claim.lineageSlug}</strong>), but it's not
-            in the current league standings mirror — dropped from
-            rotation, renamed, or the mirror is between updates. Your
-            claim is preserved either way.
+            You claimed <strong>${claim.label}</strong> (lineage
+            <strong>${claim.lineageSlug}</strong>), but it's not in the current
+            league standings mirror — dropped from rotation, renamed, or the
+            mirror is between updates. Your claim is preserved either way.
           </p>
           ${removeButton}
         </div>
@@ -601,9 +609,9 @@ export class PremiereAccountPage extends LitElement {
       return html`
         <div class="flex items-start justify-between gap-3">
           <p class="text-sm text-ink">
-            <strong>${standing.playerName}</strong> is the house agent —
-            the platform's own bot, not a player-owned entry. Its stats
-            aren't shown here.
+            <strong>${standing.playerName}</strong> is the house agent — the
+            platform's own bot, not a player-owned entry. Its stats aren't shown
+            here.
           </p>
           ${removeButton}
         </div>
@@ -613,7 +621,9 @@ export class PremiereAccountPage extends LitElement {
       <div class="flex items-start justify-between gap-3">
         <div class="flex flex-1 flex-col gap-2">
           <div class="flex flex-wrap items-baseline justify-between gap-2">
-            <span class="text-base font-bold text-ink">${standing.playerName}</span>
+            <span class="text-base font-bold text-ink"
+              >${standing.playerName}</span
+            >
             <span class="font-mono text-xs tabular-nums text-ink-muted"
               >Rank #${standing.rank} · Rating
               ${standing.score !== null ? standing.score.toFixed(1) : "—"}</span
@@ -645,8 +655,8 @@ export class PremiereAccountPage extends LitElement {
         class="rounded-md border border-caution/40 bg-caution/10 px-2 py-1 text-[11px] font-semibold text-caution"
         role="status"
       >
-        League data is stale — last confirmed ${asOf}. Standings below may
-        be dated.
+        League data is stale — last confirmed ${asOf}. Standings below may be
+        dated.
       </p>
     `;
   }
