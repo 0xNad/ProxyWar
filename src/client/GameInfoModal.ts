@@ -5,7 +5,6 @@ import { GameMapType, UnitType } from "../core/game/Game";
 import { fetchGameById } from "./Api";
 import { terrainMapFileLoader } from "./TerrainMapFileLoader";
 import { renderDuration, translateText } from "./Utils";
-import { BaseModal } from "./components/BaseModal";
 import {
   PlayerInfo,
   Ranking,
