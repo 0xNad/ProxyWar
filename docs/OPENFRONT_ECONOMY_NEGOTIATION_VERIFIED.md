@@ -102,8 +102,13 @@ distinct from realized income.
 
 No test coverage existed at audit time for `TrainExecution`, `TrainStationExecution`,
 `FactoryExecution`, `RecomputeRailClusterExecution`, attack-created embargoes, or
-donation legality edges. The Phase 0 suite (see the V1 plan document, §6) adds:
-spawn-precondition tests, factory-only-cluster, in-flight-train death on embargo and
-station destruction, capture tier-recompute, multi-hop payout accumulation, temporary
-embargo creation/expiry/non-downgrade, alliance-break effects, betrayal traitor rules,
-donation legality + explicit-amount rule, trade-ship embargo kill + capture payout.
+donation legality edges. **Status: closed 2026-08-07** — the Phase 0 suite (28 tests,
+all mechanics re-verified against base `3b9a178d4` with zero divergences) lives in:
+`tests/core/executions/TrainSpawn.test.ts`, `tests/core/executions/TrainInFlight.test.ts`,
+`tests/core/executions/AttackEmbargo.test.ts`,
+`tests/core/executions/TradeShipInterrupt.test.ts`, `tests/AllianceBreak.test.ts`,
+`tests/DonationRules.test.ts`. Notes: warship retirement (PR #35) touched no core
+files, so the capture-payout path is tested for real; the null-gold donation
+dead-default is pinned as current behavior (fix tracked separately); the
+"victim disconnected → breaking is free" sub-case was already pinned by
+`tests/core/game/GameImpl.test.ts` and is cited, not duplicated.
