@@ -1259,11 +1259,27 @@ export function reservedQuotaTruncate(
   // the menu always fills to cap when enough actions exist (reviewer finding:
   // without the top-up, 85 others + 20 diplomacy at cap 96/reserve 8 wasted
   // 3 slots while dropping diplomacy).
-  const keepDiplomacy = Math.min(
+  let keepDiplomacy = Math.min(
     diplomacy.length,
     Math.max(reserve, cap - othersCount),
     cap,
   );
+  // Never split a deal_accept from its deal_reject: dealMetaActions always
+  // emits them as an adjacent pair for the same proposal. If the cutoff
+  // lands right between them, drop the accept too; the freed slot returns
+  // to the non-diplomacy budget below.
+  const lastKept = diplomacy[keepDiplomacy - 1];
+  const firstCut = diplomacy[keepDiplomacy];
+  if (
+    keepDiplomacy > 0 &&
+    keepDiplomacy < diplomacy.length &&
+    lastKept.kind === "deal_accept" &&
+    firstCut.kind === "deal_reject" &&
+    lastKept.id.slice("deal_accept:".length) ===
+      firstCut.id.slice("deal_reject:".length)
+  ) {
+    keepDiplomacy -= 1;
+  }
   const keepOthers = Math.min(othersCount, cap - keepDiplomacy);
   const keptDiplomacyIds = new Set(
     diplomacy.slice(0, keepDiplomacy).map((action) => action.id),

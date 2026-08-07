@@ -123,6 +123,74 @@ describe("diplomacy reserved slots (PROXYWAR_TUNE_DIPLOMACY_SLOTS)", () => {
     expect(menu.filter((a) => a.kind.startsWith("deal_"))).toHaveLength(0);
     expect(menu.length).toBeLessThanOrEqual(97);
   });
+
+  describe("reservedQuotaTruncate: deal_accept/deal_reject pair atomicity under pressure", () => {
+    function dealPair(dealID: string): LegalAction[] {
+      return [
+        action(`deal_accept:${dealID}`, "deal_accept"),
+        action(`deal_reject:${dealID}`, "deal_reject"),
+      ];
+    }
+    // 5 alliance_request + 3 incoming deal pairs = 11 diplomacy entries,
+    // over the default reserve of 8 — plus 200 non-diplomacy filler, in the
+    // SAME relative order LegalActionBuilder assembles them (attacks, then
+    // alliances, then deal pairs).
+    const alliances = Array.from({ length: 5 }, (_, i) =>
+      action(`alliance:${i}`, "alliance_request"),
+    );
+    const pair1 = dealPair("deal:P1:P_A:non_aggression_pact:1");
+    const pair2 = dealPair("deal:P2:P_A:non_aggression_pact:1");
+    const pair3 = dealPair("deal:P3:P_A:non_aggression_pact:1");
+    const others = Array.from({ length: 200 }, (_, i) =>
+      action(`attack:${i}`, "attack"),
+    );
+    const menu = [...others, ...alliances, ...pair1, ...pair2, ...pair3];
+
+    it("a cutoff mid-pair (reserve=8) drops the whole pair, fills the cap from freed others, never splits accept from reject", () => {
+      const result = reservedQuotaTruncate(menu, 96, 8);
+      expect(result).toHaveLength(96);
+      const ids = result.map((a) => a.id);
+      // Only pair1 survives — the fix reduces the reserve's raw cutoff (8,
+      // landing on accept2) to 7 rather than keep an unanswerable accept2.
+      expect(ids.filter((id) => id.startsWith("deal_"))).toEqual([
+        "deal_accept:deal:P1:P_A:non_aggression_pact:1",
+        "deal_reject:deal:P1:P_A:non_aggression_pact:1",
+      ]);
+      expect(ids.filter((id) => id.startsWith("alliance:"))).toHaveLength(5);
+      // Every kept accept has its matching reject and vice versa.
+      for (const id of ids) {
+        if (id.startsWith("deal_accept:")) {
+          expect(ids).toContain(id.replace("deal_accept:", "deal_reject:"));
+        }
+        if (id.startsWith("deal_reject:")) {
+          expect(ids).toContain(id.replace("deal_reject:", "deal_accept:"));
+        }
+      }
+      // Order preserved: 89 freed-up attacks, then all 5 alliances, then pair1.
+      expect(ids.slice(0, 89)).toEqual(others.slice(0, 89).map((a) => a.id));
+      expect(ids.slice(89, 94)).toEqual(alliances.map((a) => a.id));
+      expect(ids.slice(94)).toEqual(pair1.map((a) => a.id));
+    });
+
+    it("a cutoff landing after a complete pair (reserve=9) needs no adjustment", () => {
+      const result = reservedQuotaTruncate(menu, 96, 9);
+      expect(result).toHaveLength(96);
+      const ids = result.map((a) => a.id);
+      expect(ids.filter((id) => id.startsWith("deal_"))).toEqual([
+        ...pair1.map((a) => a.id),
+        ...pair2.map((a) => a.id),
+      ]);
+      expect(ids.filter((id) => id.startsWith("alliance:"))).toHaveLength(5);
+    });
+
+    it("flags OFF: this same deals block never reaches the menu, byte-identical to no deals at all", () => {
+      delete process.env.PROXYWAR_TUNE_STRUCTURED_DEALS;
+      delete process.env.PROXYWAR_TUNE_DIPLOMACY_SLOTS;
+      const withoutDeals = JSON.stringify(buildCrowdedMenu(false));
+      const withDeals = JSON.stringify(buildCrowdedMenu(true));
+      expect(withDeals).toBe(withoutDeals);
+    });
+  });
 });
 
 function buildCrowdedMenu(withDeals = false): LegalAction[] {

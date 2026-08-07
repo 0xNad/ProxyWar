@@ -103,12 +103,13 @@ function chooseAction(actions, obs) {
 // inert unless the match actually offers deal_* actions (server flag
 // PROXYWAR_TUNE_STRUCTURED_DEALS is off by default), so a starter that never
 // customizes this still behaves exactly as before. Deterministic, bounded
-// priority: answer an open offer before making one, prefer accepting over
-// rejecting, and only withdraw a stale offer of your own last.
+// priority: answer an open offer before making one, and prefer a definite
+// answer over silence — accept, then reject, then propose one of our own,
+// and only withdraw a stale offer of our own last.
 const DEAL_ACTION_KINDS = [
   "deal_accept",
-  "deal_propose",
   "deal_reject",
+  "deal_propose",
   "deal_withdraw",
 ];
 

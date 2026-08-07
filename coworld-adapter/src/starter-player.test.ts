@@ -177,7 +177,7 @@ describe.each(STARTER_AGENTS)(
       );
     }, 15000);
 
-    it("prioritizes deal_accept over deal_propose/deal_reject/deal_withdraw when several are offered", async () => {
+    it("prioritizes deal_accept over deal_reject/deal_propose/deal_withdraw when several are offered", async () => {
       const response = await decisionResponseFor(agent, [
         HOLD,
         SPAWN,
@@ -191,28 +191,28 @@ describe.each(STARTER_AGENTS)(
       );
     }, 15000);
 
-    it("falls back to deal_propose when no deal_accept is offered", async () => {
+    it("falls back to deal_reject when no deal_accept is offered", async () => {
       const response = await decisionResponseFor(agent, [
         HOLD,
         SPAWN,
-        action("deal_reject:deal:P_Z:P_A:trade_security_pact:1", "deal_reject"),
-        action("deal_withdraw:deal:P_A:P_W:support_request:1", "deal_withdraw"),
         action("deal_propose:P_Y:non_aggression_pact", "deal_propose"),
-      ]);
-      expect(response.selectedDealActionId).toBe(
-        "deal_propose:P_Y:non_aggression_pact",
-      );
-    }, 15000);
-
-    it("falls back to deal_reject over deal_withdraw when neither accept nor propose is offered", async () => {
-      const response = await decisionResponseFor(agent, [
-        HOLD,
-        SPAWN,
         action("deal_withdraw:deal:P_A:P_W:support_request:1", "deal_withdraw"),
         action("deal_reject:deal:P_Z:P_A:trade_security_pact:1", "deal_reject"),
       ]);
       expect(response.selectedDealActionId).toBe(
         "deal_reject:deal:P_Z:P_A:trade_security_pact:1",
+      );
+    }, 15000);
+
+    it("falls back to deal_propose over deal_withdraw when neither accept nor reject is offered", async () => {
+      const response = await decisionResponseFor(agent, [
+        HOLD,
+        SPAWN,
+        action("deal_withdraw:deal:P_A:P_W:support_request:1", "deal_withdraw"),
+        action("deal_propose:P_Y:non_aggression_pact", "deal_propose"),
+      ]);
+      expect(response.selectedDealActionId).toBe(
+        "deal_propose:P_Y:non_aggression_pact",
       );
     }, 15000);
 
