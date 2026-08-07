@@ -4,6 +4,7 @@ import { describe, expect, test } from "vitest";
 import { AGENT_MATCH_RECAP_SCHEMA_VERSION } from "../../src/server/agents/AgentMatchRecap";
 import {
   activeChampionPolicyLabelsByPlayerId,
+  agentDecisionRecordsFromMirroredDecisionsLog,
   buildCoworldReplayUiArtifact,
   buildEpisodeRow,
   buildRoundRows,
@@ -1053,6 +1054,168 @@ describe("deriveSpectatorTelemetryFromDecisionsLog (product overhaul spec Stage 
       deriveSpectatorTelemetryFromDecisionsLog("not json\n\n", "run-1"),
     ).toBeNull();
     expect(deriveSpectatorTelemetryFromDecisionsLog("", "run-1")).toBeNull();
+  });
+});
+
+describe("mirrored decisions.jsonl economy/deal stamp projection (economy-negotiation parity)", () => {
+  // Minimal line shaped like `decisionLogEntry` output before economy/deals
+  // existed — exactly the keys the projection reads. Serves as the pinned
+  // "today" baseline AND the base for the stamped variant.
+  const bareLine = {
+    sequence: 7,
+    turnNumber: 42,
+    agentID: "opportunistic-agent-1",
+    username: "Ext One",
+    profile: "opportunistic",
+    brainType: "external-http",
+    selectedLegalActionId: "attack:P_B",
+    selectedActionKind: "attack",
+    selectedActionMetadata: { targetID: "P_B", troops: 100 },
+    generatedIntent: { type: "attack", targetID: "P_B", troops: 100 },
+    result: { accepted: true, reason: "accepted", submittedIntent: null },
+    auditAfter: { playerID: "P_A" },
+  };
+
+  // Mirrors the writer-side parity fixture in AgentDecisionLogWriter.test.ts
+  // ("decisions.jsonl external-seat stamps") — same stamp values the real
+  // deal manager produces, hoisted onto top-level entry keys by
+  // `decisionLogEntry`.
+  const dealStamps = {
+    dealAction: "propose",
+    dealID: "deal:P_A:P_B:non_aggression_pact:0",
+    dealTemplate: "non_aggression_pact",
+    dealCounterpartyID: "P_B",
+    dealCounterpartyName: "Ext Two",
+    dealPublicText:
+      "Ext One proposed a non-aggression pact to Ext Two (12 decisions).",
+    dealApplyAccepted: true,
+    dealComplianceEvent: JSON.stringify([
+      {
+        event: "deal_expired",
+        dealID: "deal:P_A:P_B:non_aggression_pact:0",
+        template: "non_aggression_pact",
+        actorPlayerID: "P_B",
+        actorName: "Ext Two",
+        targetPlayerID: "P_A",
+        targetName: "Ext One",
+        tone: "info",
+        importance: 38,
+        publicText:
+          "Ext Two let Ext One's non-aggression pact offer expire unanswered.",
+        step: 5,
+      },
+    ]),
+  };
+
+  const economyFacts = {
+    factoryCount: 2,
+    operationalFactoryCount: 1,
+    idleFactoryCount: 1,
+    blockedFactoryCount: 0,
+    eligibleDestinationCount: 3,
+    embargoBlockedDestinationCount: 1,
+    counterparties: [
+      {
+        playerID: "P_B",
+        name: "Ext Two",
+        isAllied: true,
+        myEligibleDestinationsTheyOwn: 2,
+        eligibleDestinationSharePct: 67,
+        embargoOursOnThem: false,
+        embargoTheirsOnUs: false,
+      },
+    ],
+    pairLinks: [
+      {
+        playerID: "P_B",
+        name: "Ext Two",
+        links: 2,
+        embargoOursOnThem: false,
+        embargoTheirsOnUs: false,
+      },
+    ],
+    bottleneckKind: "missing_trade_destination",
+  };
+
+  test("a line carrying economyFacts and all eight deal stamps round-trips them onto the record", () => {
+    const { records } = agentDecisionRecordsFromMirroredDecisionsLog(
+      `${JSON.stringify({ ...bareLine, economyFacts, ...dealStamps })}\n`,
+    );
+    expect(records).toHaveLength(1);
+    // economyFacts rides back verbatim, nested arrays included — the exact
+    // object addEconomyEvents reads off record.economyFacts.
+    expect(records[0].economyFacts).toEqual(economyFacts);
+    // The eight top-level entry stamps re-nest under decisionMetadata — the
+    // exact keys addDealEvents reads.
+    expect(records[0].decisionMetadata).toEqual(dealStamps);
+  });
+
+  test("a line without the stamps still projects byte-identically to the pre-economy shape", () => {
+    const { records } = agentDecisionRecordsFromMirroredDecisionsLog(
+      `${JSON.stringify(bareLine)}\n`,
+    );
+    expect(records).toHaveLength(1);
+    expect(records[0].economyFacts).toBeUndefined();
+    expect(records[0].decisionMetadata).toBeUndefined();
+    // Full serialized pin of the pre-economy projection, in the exact key
+    // order the parser emits — any accidental new key, dropped key, or
+    // changed placeholder on unstamped lines fails here.
+    expect(JSON.stringify(records[0])).toBe(
+      JSON.stringify({
+        sequence: 7,
+        gameID: "",
+        agentID: "opportunistic-agent-1",
+        clientID: null,
+        username: "Ext One",
+        profile: "opportunistic",
+        brainType: "external-http",
+        turnNumber: 42,
+        decidedAt: 0,
+        decisionLatencyMs: 0,
+        observationSummary: "",
+        legalActionIDs: [],
+        legalActionIDsByKind: {},
+        attackActionIDs: [],
+        chosenActionID: "attack:P_B",
+        chosenActionKind: "attack",
+        reason: "",
+        chosenActionMetadata: { targetID: "P_B", troops: 100 },
+        intent: { type: "attack", targetID: "P_B", troops: 100 },
+        result: { accepted: true, reason: "accepted", submittedIntent: null },
+        audit: {
+          auditStatus: "unknown",
+          auditReason: "",
+          after: {
+            tick: null,
+            playerID: "P_A",
+            isAlive: null,
+            hasSpawned: null,
+            tilesOwned: null,
+            troops: null,
+            gold: null,
+            unitCounts: {},
+            outgoingAttackTargetIDs: [],
+            outgoingAllianceRequestRecipientIDs: [],
+            outgoingEmbargoTargetIDs: [],
+          },
+        },
+      }),
+    );
+  });
+
+  test("wrong-typed stamps are dropped, never mis-projected", () => {
+    const { records } = agentDecisionRecordsFromMirroredDecisionsLog(
+      `${JSON.stringify({
+        ...bareLine,
+        economyFacts: "torn",
+        dealAction: "propose",
+        dealID: 7,
+        dealApplyAccepted: "yes",
+      })}\n`,
+    );
+    expect(records).toHaveLength(1);
+    expect(records[0].economyFacts).toBeUndefined();
+    expect(records[0].decisionMetadata).toEqual({ dealAction: "propose" });
   });
 });
 
