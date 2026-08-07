@@ -150,7 +150,12 @@ describe("tester-starter-llm buildState economy line", () => {
         ],
         avoid: [],
         legalActions: [
-          { id: "attack:1", kind: "attack", label: "Attack Sefirot", risk: "medium" },
+          {
+            id: "attack:1",
+            kind: "attack",
+            label: "Attack Sefirot",
+            risk: "medium",
+          },
           { id: "hold", kind: "hold", label: "Hold", risk: "none" },
           {
             id: "nuke:1",
