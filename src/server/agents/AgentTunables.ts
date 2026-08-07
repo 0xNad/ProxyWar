@@ -466,6 +466,13 @@ export function economyObservationEnabled(): boolean {
  * game permission and emit no core intent — the referee narrates
  * follow-through, it never punishes. When OFF, observations, menus, decision
  * records, and telemetry are byte-identical to shipped behavior.
+ *
+ * ARM TOGETHER WITH `PROXYWAR_TUNE_DIPLOMACY_SLOTS`: the deal kinds are in
+ * LegalActionBuilder's reserved diplomacy set, but that reservation only
+ * exists while DIPLOMACY_SLOTS is on. With it off, a full 96-action menu is
+ * truncated in plain assembly order and the late-emitted deal actions are
+ * silently dropped — exactly on the crowded 10-12 player maps where deals
+ * matter most.
  */
 export function structuredDealsEnabled(): boolean {
   return tunedNumber("STRUCTURED_DEALS", 0) >= 1;

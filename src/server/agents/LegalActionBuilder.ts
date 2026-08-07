@@ -1267,6 +1267,12 @@ function dealMetaActions(
   });
 
   for (const proposal of deals.incomingProposals) {
+    // Emit the accept/reject pair atomically: under budget pressure a menu
+    // that can accept but not reject (or vice versa) would bias the answer,
+    // so a proposal gets both entries or neither.
+    if (actions.length + 2 > budget) {
+      return actions;
+    }
     const label = DEAL_TEMPLATE_LABELS[proposal.terms.template];
     const shared = {
       dealID: proposal.dealID,
@@ -1275,7 +1281,7 @@ function dealMetaActions(
       ...termsMetadata(proposal.terms),
       legalReason: "open proposal addressed to this agent",
     };
-    const accepted = push({
+    push({
       id: `deal_accept:${proposal.dealID}`,
       kind: "deal_accept",
       label: `Accept ${proposal.proposerName}'s ${label}`,
@@ -1283,19 +1289,14 @@ function dealMetaActions(
       risk: { level: "medium", score: 0.35 },
       metadata: shared,
     });
-    const rejected =
-      accepted &&
-      push({
-        id: `deal_reject:${proposal.dealID}`,
-        kind: "deal_reject",
-        label: `Reject ${proposal.proposerName}'s ${label}`,
-        intent: null,
-        risk: { level: "none", score: 0 },
-        metadata: shared,
-      });
-    if (!accepted || !rejected) {
-      return actions;
-    }
+    push({
+      id: `deal_reject:${proposal.dealID}`,
+      kind: "deal_reject",
+      label: `Reject ${proposal.proposerName}'s ${label}`,
+      intent: null,
+      risk: { level: "none", score: 0 },
+      metadata: shared,
+    });
   }
   for (const proposal of deals.outgoingProposals) {
     const kept = push({

@@ -509,6 +509,79 @@ describe("AgentDealManager caps and clamps (direct)", () => {
     ).toBe(false);
   });
 
+  it("resolves the withdraw-vs-accept same-step race deterministically by pass order", () => {
+    // Order 1: the proposer's withdraw lands first in the submission pass —
+    // the recipient's accept fails loudly.
+    const first = registeredManager([A, B]);
+    const dealID = "deal:P_A:P_B:non_aggression_pact:0";
+    expect(
+      first.manager.applyDealAction({
+        agentID: A.agentID,
+        playerID: A.playerID,
+        playerName: A.username,
+        action: proposeAction(B, "non_aggression_pact"),
+        turnNumber: 0,
+      }).result.accepted,
+    ).toBe(true);
+    first.beginStep(25);
+    const withdrawFirst = first.manager.applyDealAction({
+      agentID: A.agentID,
+      playerID: A.playerID,
+      playerName: A.username,
+      action: responseAction("deal_withdraw", dealID),
+      turnNumber: 25,
+    });
+    expect(withdrawFirst.result.accepted).toBe(true);
+    const lateAccept = first.manager.applyDealAction({
+      agentID: B.agentID,
+      playerID: B.playerID,
+      playerName: B.username,
+      action: responseAction("deal_accept", dealID),
+      turnNumber: 25,
+    });
+    expect(lateAccept.result.accepted).toBe(false);
+    expect(lateAccept.result.reason).toBe(
+      "deal is not open (status: withdrawn)",
+    );
+    expect(lateAccept.stamps.dealApplyAccepted).toBe(false);
+    expect(first.manager.ledgerSnapshot().deals[0].status).toBe("withdrawn");
+
+    // Order 2: the recipient accepts first — the proposer's withdraw fails
+    // loudly and the pact stands.
+    const second = registeredManager([A, B]);
+    expect(
+      second.manager.applyDealAction({
+        agentID: A.agentID,
+        playerID: A.playerID,
+        playerName: A.username,
+        action: proposeAction(B, "non_aggression_pact"),
+        turnNumber: 0,
+      }).result.accepted,
+    ).toBe(true);
+    second.beginStep(25);
+    expect(
+      second.manager.applyDealAction({
+        agentID: B.agentID,
+        playerID: B.playerID,
+        playerName: B.username,
+        action: responseAction("deal_accept", dealID),
+        turnNumber: 25,
+      }).result.accepted,
+    ).toBe(true);
+    const lateWithdraw = second.manager.applyDealAction({
+      agentID: A.agentID,
+      playerID: A.playerID,
+      playerName: A.username,
+      action: responseAction("deal_withdraw", dealID),
+      turnNumber: 25,
+    });
+    expect(lateWithdraw.result.accepted).toBe(false);
+    expect(lateWithdraw.result.reason).toBe(
+      "deal is not open (status: accepted)",
+    );
+    expect(second.manager.ledgerSnapshot().deals[0].status).toBe("accepted");
+  });
+
   it("returns no deals block for spawn-phase or dead observations", () => {
     const { manager } = registeredManager([A, B]);
     const spawnObservation = stubObservation({
