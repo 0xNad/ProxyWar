@@ -1,10 +1,21 @@
 import fs from "fs/promises";
 import os from "os";
 import path from "path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { UnitType } from "../../src/core/game/Game";
 import { writeAgentLeagueRunArtifacts } from "../../src/server/agents/AgentDecisionLogWriter";
-import { AgentDecisionRecord } from "../../src/server/agents/AgentTypes";
+import { economyRecordFacts } from "../../src/server/agents/AgentEconomyNetwork";
+import {
+  AgentDecisionRecord,
+  AgentEconomyObservation,
+} from "../../src/server/agents/AgentTypes";
+import {
+  DEALS_FLAG,
+  dealLeagueHarness,
+  fabricatedRecord,
+  pickByID,
+  type StubSeat,
+} from "./DealTestHarness";
 
 describe("AgentDecisionLogWriter", () => {
   it("writes JSONL decisions, match summary, Markdown report, and visual report", async () => {
@@ -987,3 +998,228 @@ function finishPressureRecord(
     },
   };
 }
+
+// Hosted (external-http) seats write their per-decision truth through the
+// SAME decisions.jsonl entry mapper as every other seat. The 2026-08-07
+// flags-ON no-docker smoke proved the mapper silently dropped the
+// flag-gated stamps: records carried economyFacts and the structured-deal
+// keys in memory, but decisions.jsonl — the surface hosted episodes and the
+// mirror backfill read — never did. These suites pin the mapping.
+
+const EXT_A: StubSeat = { agentID: "x1", playerID: "P_A", username: "Ext One" };
+const EXT_B: StubSeat = { agentID: "x2", playerID: "P_B", username: "Ext Two" };
+
+const ECONOMY_SNAPSHOT: AgentEconomyObservation = {
+  incomeBySource: {
+    work: "1000",
+    war: "0",
+    tradeShips: "0",
+    capturedTradeShips: "0",
+    trainSelf: "0",
+    trainExternal: "0",
+  },
+  clusterCount: 1,
+  clusters: [],
+  factoryCount: 1,
+  factories: [],
+  factoryStatusCounts: {
+    operational: 0,
+    idleNoDestination: 1,
+    blockedByEmbargo: 0,
+  },
+  eligibleDestinationCount: 0,
+  embargoBlockedDestinationCount: 0,
+  counterpartyCount: 0,
+  counterparties: [],
+  pairLinks: [],
+  bottleneck: {
+    kind: "missing_trade_destination",
+    evidence: "1 idle factory with no City/Port in rail range",
+  },
+};
+
+const STAMP_KEYS = [
+  "economyFacts",
+  "dealAction",
+  "dealID",
+  "dealTemplate",
+  "dealCounterpartyID",
+  "dealCounterpartyName",
+  "dealPublicText",
+  "dealApplyAccepted",
+  "dealComplianceEvent",
+] as const;
+
+async function writeAndParseEntries(
+  records: AgentDecisionRecord[],
+): Promise<Array<Record<string, unknown>>> {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-league-deals-"));
+  try {
+    const paths = await writeAgentLeagueRunArtifacts({
+      rootDir,
+      runID: "external-stamps-run",
+      matchID: "DEALEXT1",
+      scenario: "coworld",
+      brainMode: "external-http",
+      startedAt: Date.UTC(2026, 0, 1),
+      completedAt: Date.UTC(2026, 0, 1, 0, 0, 1),
+      records,
+      roster: [],
+    });
+    const decisionsJsonl = await fs.readFile(paths.decisionsPath, "utf8");
+    return decisionsJsonl
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+  } finally {
+    await fs.rm(rootDir, { recursive: true, force: true });
+  }
+}
+
+describe("decisions.jsonl external-seat stamps (economyFacts + structured deals)", () => {
+  afterEach(() => {
+    delete process.env[DEALS_FLAG];
+    delete process.env.PROXYWAR_TUNE_ECONOMY_EVENTS;
+  });
+
+  it("maps record.economyFacts and every deal stamp onto entries, and omits them all when absent", async () => {
+    const facts = economyRecordFacts(ECONOMY_SNAPSHOT);
+    const complianceStamp = JSON.stringify([
+      {
+        event: "deal_expired",
+        dealID: "deal:P_A:P_B:non_aggression_pact:0",
+        template: "non_aggression_pact",
+        actorPlayerID: "P_B",
+        actorName: "Ext Two",
+        targetPlayerID: "P_A",
+        targetName: "Ext One",
+        tone: "info",
+        importance: 38,
+        publicText:
+          "Ext Two let Ext One's non-aggression pact offer expire unanswered.",
+        step: 5,
+      },
+    ]);
+    const stamped: AgentDecisionRecord = {
+      ...fabricatedRecord({
+        sequence: 1,
+        agentID: EXT_A.agentID,
+        playerID: EXT_A.playerID,
+        username: EXT_A.username,
+        turnNumber: 10,
+        kind: "deal_propose",
+        actionID: "deal_propose:P_B:non_aggression_pact",
+      }),
+      brainType: "external-http",
+      economyFacts: facts,
+      decisionMetadata: {
+        dealAction: "propose",
+        dealID: "deal:P_A:P_B:non_aggression_pact:0",
+        dealTemplate: "non_aggression_pact",
+        dealCounterpartyID: "P_B",
+        dealCounterpartyName: "Ext Two",
+        dealPublicText:
+          "Ext One proposed a non-aggression pact to Ext Two (12 decisions).",
+        dealApplyAccepted: true,
+        dealComplianceEvent: complianceStamp,
+      },
+    };
+    const bare: AgentDecisionRecord = {
+      ...fabricatedRecord({
+        sequence: 2,
+        agentID: EXT_B.agentID,
+        playerID: EXT_B.playerID,
+        username: EXT_B.username,
+        turnNumber: 10,
+      }),
+      brainType: "external-http",
+    };
+
+    const [stampedEntry, bareEntry] = await writeAndParseEntries([
+      stamped,
+      bare,
+    ]);
+    expect(stampedEntry.brainType).toBe("external-http");
+    expect(stampedEntry.economyFacts).toEqual(facts);
+    expect(stampedEntry).toMatchObject({
+      dealAction: "propose",
+      dealID: "deal:P_A:P_B:non_aggression_pact:0",
+      dealTemplate: "non_aggression_pact",
+      dealCounterpartyID: "P_B",
+      dealCounterpartyName: "Ext Two",
+      dealPublicText:
+        "Ext One proposed a non-aggression pact to Ext Two (12 decisions).",
+      dealApplyAccepted: true,
+      dealComplianceEvent: complianceStamp,
+    });
+    for (const key of STAMP_KEYS) {
+      expect(key in bareEntry, `${key} must be absent`).toBe(false);
+    }
+  });
+
+  it("carries external-http league stamps end to end (flags ON) and stays byte-clean when OFF", async () => {
+    const runArm = async (flagsOn: boolean) => {
+      if (flagsOn) {
+        process.env[DEALS_FLAG] = "1";
+        process.env.PROXYWAR_TUNE_ECONOMY_EVENTS = "1";
+      } else {
+        delete process.env[DEALS_FLAG];
+        delete process.env.PROXYWAR_TUNE_ECONOMY_EVENTS;
+      }
+      const harness = dealLeagueHarness({
+        seats: [EXT_A, EXT_B],
+        scripts: [[pickByID("deal_propose:P_B:non_aggression_pact")], []],
+        gameID: "DEALEXT1",
+        brainType: "external-http",
+        // Present on BOTH arms: with the events flag off the block alone
+        // must produce no stamp (flag-OFF byte-identity for this path).
+        economy: ECONOMY_SNAPSHOT,
+      });
+      await harness.league.runDecisionTurn({ turnNumber: 0 });
+      const records = harness.records();
+      return { records, entries: await writeAndParseEntries(records) };
+    };
+
+    const on = await runArm(true);
+    const expectedFacts = economyRecordFacts(ECONOMY_SNAPSHOT);
+    // In-memory records: the league stamped external-http seats like any
+    // other seat (deal processing parity needed no fix).
+    for (const record of on.records) {
+      expect(record.brainType).toBe("external-http");
+      expect(record.economyFacts).toEqual(expectedFacts);
+    }
+    const proposeRecord = on.records.find(
+      (record) => record.chosenActionKind === "deal_propose",
+    );
+    expect(proposeRecord).toBeDefined();
+    expect(proposeRecord!.decisionMetadata).toMatchObject({
+      dealAction: "propose",
+      dealID: "deal:P_A:P_B:non_aggression_pact:0",
+      dealApplyAccepted: true,
+    });
+    // decisions.jsonl entries carry the same truth.
+    const proposeEntry = on.entries.find(
+      (entry) => entry.dealAction === "propose",
+    );
+    expect(proposeEntry).toBeDefined();
+    expect(proposeEntry!.brainType).toBe("external-http");
+    expect(proposeEntry!.dealID).toBe("deal:P_A:P_B:non_aggression_pact:0");
+    expect(proposeEntry!.dealApplyAccepted).toBe(true);
+    for (const entry of on.entries) {
+      expect(entry.economyFacts).toEqual(expectedFacts);
+    }
+
+    const off = await runArm(false);
+    for (const entry of off.entries) {
+      for (const key of STAMP_KEYS) {
+        expect(key in entry, `${key} must be absent when flags are off`).toBe(
+          false,
+        );
+      }
+      expect(
+        "deal_propose" in
+          (entry.legalActionIDsByKind as Record<string, unknown>),
+      ).toBe(false);
+    }
+  });
+});

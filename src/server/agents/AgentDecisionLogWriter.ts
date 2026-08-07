@@ -38,6 +38,7 @@ import {
   AgentBrainType,
   AgentDecisionRecord,
   AgentEconomyCadenceAffordance,
+  AgentEconomyRecordFacts,
   AgentFrontierConversionTimingAffordance,
   AgentFrontierFinishPressureAffordance,
   AgentLateGameStrikeTargetingAffordance,
@@ -264,6 +265,31 @@ interface DecisionLogEntry {
   selectedLegalActionId: string;
   selectedActionKind: LegalActionKind;
   selectedActionMetadata?: Record<string, string | number | boolean | null>;
+  /**
+   * Compact economy facts stamped on the record at the decision boundary
+   * (PROXYWAR_TUNE_ECONOMY_EVENTS; absent when the flag was off). Copied
+   * VERBATIM from `record.economyFacts` — the shared `economyRecordFacts`
+   * helper already produced it at record time and the source observation no
+   * longer exists here, so copying (never recomputing) is the single-source
+   * rule. Required so the decisions.jsonl artifact — the surface hosted
+   * (external-http) league episodes and the mirror backfill read — carries
+   * the same facts the in-memory telemetry build walks.
+   */
+  economyFacts?: AgentEconomyRecordFacts;
+  /**
+   * Structured-deal stamps (PROXYWAR_TUNE_STRUCTURED_DEALS; all absent when
+   * the flag was off): the exact decisionMetadata keys spectator telemetry's
+   * addDealEvents reads, carried onto the permissive decisions.jsonl surface
+   * so deal events survive artifact-side rebuilds for external-http seats.
+   */
+  dealAction?: string;
+  dealID?: string;
+  dealTemplate?: string;
+  dealCounterpartyID?: string;
+  dealCounterpartyName?: string;
+  dealPublicText?: string;
+  dealApplyAccepted?: boolean;
+  dealComplianceEvent?: string;
   tacticalAffordances?: AgentTacticalAffordances;
   reason: string;
   confidence?: number;
@@ -867,6 +893,40 @@ function decisionLogEntry(
     selectedActionKind: record.chosenActionKind,
     ...(record.chosenActionMetadata
       ? { selectedActionMetadata: record.chosenActionMetadata }
+      : {}),
+    // Economy facts + structured-deal stamps ride the entry verbatim (flag
+    // OFF => the record never carried them => keys absent, bytes identical).
+    ...(record.economyFacts !== undefined
+      ? { economyFacts: record.economyFacts }
+      : {}),
+    ...(stringMetadata(metadata, "dealAction") !== undefined
+      ? { dealAction: stringMetadata(metadata, "dealAction") }
+      : {}),
+    ...(stringMetadata(metadata, "dealID") !== undefined
+      ? { dealID: stringMetadata(metadata, "dealID") }
+      : {}),
+    ...(stringMetadata(metadata, "dealTemplate") !== undefined
+      ? { dealTemplate: stringMetadata(metadata, "dealTemplate") }
+      : {}),
+    ...(stringMetadata(metadata, "dealCounterpartyID") !== undefined
+      ? { dealCounterpartyID: stringMetadata(metadata, "dealCounterpartyID") }
+      : {}),
+    ...(stringMetadata(metadata, "dealCounterpartyName") !== undefined
+      ? {
+          dealCounterpartyName: stringMetadata(
+            metadata,
+            "dealCounterpartyName",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "dealPublicText") !== undefined
+      ? { dealPublicText: stringMetadata(metadata, "dealPublicText") }
+      : {}),
+    ...(booleanMetadata(metadata, "dealApplyAccepted") !== undefined
+      ? { dealApplyAccepted: booleanMetadata(metadata, "dealApplyAccepted") }
+      : {}),
+    ...(stringMetadata(metadata, "dealComplianceEvent") !== undefined
+      ? { dealComplianceEvent: stringMetadata(metadata, "dealComplianceEvent") }
       : {}),
     ...(record.tacticalAffordances
       ? { tacticalAffordances: record.tacticalAffordances }
