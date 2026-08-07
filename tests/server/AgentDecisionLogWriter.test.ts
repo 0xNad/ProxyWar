@@ -14,6 +14,7 @@ import {
   dealLeagueHarness,
   fabricatedRecord,
   pickByID,
+  pickWithDeal,
   type StubSeat,
 } from "./DealTestHarness";
 
@@ -978,6 +979,9 @@ function finishPressureRecord(
 const EXT_A: StubSeat = { agentID: "x1", playerID: "P_A", username: "Ext One" };
 const EXT_B: StubSeat = { agentID: "x2", playerID: "P_B", username: "Ext Two" };
 
+/** Agent-authored claim; survives `sanitizeDealStatedReason` unchanged. */
+const DEAL_CLAIM = "Pact buys me the western flank for twelve decisions";
+
 const ECONOMY_SNAPSHOT: AgentEconomyObservation = {
   incomeBySource: {
     work: "1000",
@@ -1015,7 +1019,9 @@ const STAMP_KEYS = [
   "dealCounterpartyID",
   "dealCounterpartyName",
   "dealPublicText",
+  "dealStatedReason",
   "dealApplyAccepted",
+  "dealSeparateSlot",
   "dealComplianceEvent",
 ] as const;
 
@@ -1089,7 +1095,9 @@ describe("decisions.jsonl external-seat stamps (economyFacts + structured deals)
         dealCounterpartyName: "Ext Two",
         dealPublicText:
           "Ext One proposed a non-aggression pact to Ext Two (12 decisions).",
+        dealStatedReason: DEAL_CLAIM,
         dealApplyAccepted: true,
+        dealSeparateSlot: true,
         dealComplianceEvent: complianceStamp,
       },
     };
@@ -1118,7 +1126,12 @@ describe("decisions.jsonl external-seat stamps (economyFacts + structured deals)
       dealCounterpartyName: "Ext Two",
       dealPublicText:
         "Ext One proposed a non-aggression pact to Ext Two (12 decisions).",
+      // The agent's OWN claim and the diplomacy-slot marker: dropped by the
+      // mapper until this fix, which cost the rebuilt replay every stated
+      // reason and every separate-slot beat whose game action was rejected.
+      dealStatedReason: DEAL_CLAIM,
       dealApplyAccepted: true,
+      dealSeparateSlot: true,
       dealComplianceEvent: complianceStamp,
     });
     for (const key of STAMP_KEYS) {
@@ -1190,5 +1203,46 @@ describe("decisions.jsonl external-seat stamps (economyFacts + structured deals)
           (entry.legalActionIDsByKind as Record<string, unknown>),
       ).toBe(false);
     }
+  });
+
+  it("carries a real diplomacy-slot decision's stated reason and slot marker into decisions.jsonl", async () => {
+    process.env[DEALS_FLAG] = "1";
+    // The deal rides the DIPLOMACY slot (game action stays a hold), which is
+    // the only path that stamps dealSeparateSlot, and carries the agent's own
+    // stated reason. Both stamps existed in memory from the day the slot
+    // landed; neither reached the artifact until this fix.
+    const harness = dealLeagueHarness({
+      seats: [EXT_A, EXT_B],
+      scripts: [
+        [
+          pickWithDeal(
+            null,
+            "deal_propose:P_B:non_aggression_pact",
+            DEAL_CLAIM,
+          ),
+        ],
+        [],
+      ],
+      gameID: "DEALEXT1",
+      brainType: "external-http",
+    });
+    await harness.league.runDecisionTurn({ turnNumber: 0 });
+    const records = harness.records();
+    const proposeRecord = records.find(
+      (record) => record.decisionMetadata?.dealAction === "propose",
+    );
+    expect(proposeRecord).toBeDefined();
+    expect(proposeRecord!.decisionMetadata).toMatchObject({
+      dealStatedReason: DEAL_CLAIM,
+      dealSeparateSlot: true,
+    });
+
+    const entries = await writeAndParseEntries(records);
+    const proposeEntry = entries.find(
+      (entry) => entry.dealAction === "propose",
+    );
+    expect(proposeEntry).toBeDefined();
+    expect(proposeEntry!.dealStatedReason).toBe(DEAL_CLAIM);
+    expect(proposeEntry!.dealSeparateSlot).toBe(true);
   });
 });
