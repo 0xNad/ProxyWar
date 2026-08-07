@@ -2,7 +2,14 @@ import type {
   AgentRunFinalState,
   AgentRunRosterEntry,
 } from "./AgentDecisionLogWriter";
-import type { AgentDecisionRecord, LegalActionKind } from "./AgentTypes";
+import { economyFactsFromAffordance } from "./AgentEconomyNetwork";
+import { economyEventsEnabled } from "./AgentTunables";
+import type {
+  AgentDecisionRecord,
+  AgentEconomyRecordCounterpartyFacts,
+  AgentEconomyRecordFacts,
+  LegalActionKind,
+} from "./AgentTypes";
 
 export type SpectatorRelationshipLabel =
   | "ally"
@@ -32,7 +39,17 @@ export type SpectatorEventKind =
   | "chat"
   | "emoji"
   | "elimination"
-  | "hold";
+  | "hold"
+  // Economy events (PROXYWAR_TUNE_ECONOMY_EVENTS, default OFF): derived from
+  // per-decision economy facts, emitted on state TRANSITIONS only, bounded per
+  // match. publicText keeps physical connection / trade eligibility /
+  // relationship / projected value / realized income distinct and never claims
+  // an agent routed or stopped a train or ship.
+  | "factory_operational"
+  | "factory_idle"
+  | "trade_link_established"
+  | "trade_severed"
+  | "economy_dependency";
 
 export interface SpectatorAgent {
   agentID: string;
@@ -161,6 +178,12 @@ export function buildAgentSpectatorTelemetry(
     }
   }
 
+  addEconomyEvents({
+    records: input.records,
+    agentByID,
+    agentByPlayerID,
+    events,
+  });
   addEliminationEvents({ input, agents, events });
 
   const sortedEvents = events.sort(
@@ -739,6 +762,207 @@ function addEliminationEvents(input: {
       });
     }
   }
+}
+
+/**
+ * Economy events (PROXYWAR_TUNE_ECONOMY_EVENTS, default OFF — with the flag
+ * off this function emits nothing and telemetry is byte-identical to shipped
+ * behavior). Derived from the compact economy facts stamped on decision
+ * records at decision boundaries (`record.economyFacts`; falls back to the
+ * facts embedded in a retained `tacticalAffordances.economyNetwork` block).
+ *
+ * Emission is TRANSITION-ONLY: per agent the previous facts are compared to
+ * the current ones and an event fires only when a tracked state flips
+ * (network gains its first operational factory, factories become idle or
+ * embargo-blocked, a counterparty trade link appears or drops to zero, a
+ * dependency share crosses the threshold). Bounded: at most
+ * ECONOMY_EVENT_LIMIT_PER_AGENT economy events per agent per match.
+ * publicText is server-authored, one sentence, and keeps physical rail
+ * connection, trade eligibility (embargo-only), relationship, and income as
+ * distinct facts; trains/ships are never described as agent-controlled.
+ */
+const ECONOMY_EVENT_LIMIT_PER_AGENT = 12;
+const ECONOMY_DEPENDENCY_EVENT_PCT = 50;
+
+const EMPTY_ECONOMY_FACTS: AgentEconomyRecordFacts = {
+  factoryCount: 0,
+  operationalFactoryCount: 0,
+  idleFactoryCount: 0,
+  blockedFactoryCount: 0,
+  eligibleDestinationCount: 0,
+  embargoBlockedDestinationCount: 0,
+  counterparties: [],
+  bottleneckKind: "none",
+};
+
+function addEconomyEvents(input: {
+  records: readonly AgentDecisionRecord[];
+  agentByID: Map<string, SpectatorAgent>;
+  agentByPlayerID: Map<string, SpectatorAgent>;
+  events: SpectatorEvent[];
+}) {
+  if (!economyEventsEnabled()) {
+    return;
+  }
+  const previousByAgent = new Map<string, AgentEconomyRecordFacts>();
+  const emittedByAgent = new Map<string, number>();
+
+  for (const record of [...input.records].sort(recordSort)) {
+    const actor = input.agentByID.get(record.agentID);
+    if (actor === undefined) {
+      continue;
+    }
+    const facts =
+      record.economyFacts ??
+      (record.tacticalAffordances?.economyNetwork !== undefined
+        ? economyFactsFromAffordance(record.tacticalAffordances.economyNetwork)
+        : undefined);
+    if (facts === undefined) {
+      continue;
+    }
+    const previous = previousByAgent.get(record.agentID) ?? EMPTY_ECONOMY_FACTS;
+    previousByAgent.set(record.agentID, facts);
+
+    const emit = (
+      kind: SpectatorEventKind,
+      tone: SpectatorEvent["tone"],
+      importance: number,
+      publicText: string,
+      target: SpectatorAgent | null,
+      dedupeKey: string,
+    ) => {
+      const emitted = emittedByAgent.get(record.agentID) ?? 0;
+      if (emitted >= ECONOMY_EVENT_LIMIT_PER_AGENT) {
+        return;
+      }
+      emittedByAgent.set(record.agentID, emitted + 1);
+      input.events.push({
+        id: `${record.turnNumber}:${record.sequence}:${dedupeKey}`,
+        sequence: record.sequence,
+        turnNumber: record.turnNumber,
+        kind,
+        tone,
+        actorAgentID: actor.agentID,
+        actorName: actor.username,
+        targetAgentID: target?.agentID ?? null,
+        targetName: target?.username ?? null,
+        message: publicText,
+        publicText,
+        actionKind: "hold",
+        actionID: dedupeKey,
+        importance,
+      });
+    };
+
+    if (
+      previous.operationalFactoryCount === 0 &&
+      facts.operationalFactoryCount > 0
+    ) {
+      emit(
+        "factory_operational",
+        "trade",
+        56,
+        `${actor.username}'s rail network has an eligible City or Port destination; ${facts.operationalFactoryCount} of ${facts.factoryCount} factories are operational.`,
+        null,
+        "economy:factory_operational",
+      );
+    }
+    const previousStalled =
+      previous.idleFactoryCount + previous.blockedFactoryCount;
+    const stalled = facts.idleFactoryCount + facts.blockedFactoryCount;
+    if (previousStalled === 0 && stalled > 0) {
+      emit(
+        "factory_idle",
+        "info",
+        44,
+        facts.blockedFactoryCount > 0
+          ? `All City/Port destinations on the rail network of ${facts.blockedFactoryCount} of ${actor.username}'s ${facts.factoryCount} factories are embargo-blocked.`
+          : `${facts.idleFactoryCount} of ${actor.username}'s ${facts.factoryCount} factories have no City or Port on their rail network, so no trains can run from them.`,
+        null,
+        "economy:factory_idle",
+      );
+    }
+
+    const previousPairs = new Map(
+      previous.counterparties.map((pair) => [pair.playerID, pair] as const),
+    );
+    const currentPairs = new Map(
+      facts.counterparties.map((pair) => [pair.playerID, pair] as const),
+    );
+    const pairIDs = [
+      ...new Set([...previousPairs.keys(), ...currentPairs.keys()]),
+    ].sort();
+    for (const playerID of pairIDs) {
+      const before = previousPairs.get(playerID);
+      const after = currentPairs.get(playerID);
+      const beforeLinks = before?.myEligibleDestinationsTheyOwn ?? 0;
+      const afterLinks = after?.myEligibleDestinationsTheyOwn ?? 0;
+      const target = input.agentByPlayerID.get(playerID) ?? null;
+      const displayName =
+        target?.username ?? after?.name ?? before?.name ?? "another player";
+
+      if (beforeLinks === 0 && afterLinks > 0 && after !== undefined) {
+        emit(
+          "trade_link_established",
+          "trade",
+          62,
+          `${actor.username}'s rail network reaches ${afterLinks} eligible destination${afterLinks === 1 ? "" : "s"} owned by ${displayName}; trade between them is not embargoed.`,
+          target,
+          `economy:trade_link_established:${playerID}`,
+        );
+      }
+      if (beforeLinks > 0 && afterLinks === 0) {
+        emit(
+          "trade_severed",
+          "threat",
+          72,
+          tradeSeveredText(actor.username, displayName, before, after),
+          target,
+          `economy:trade_severed:${playerID}`,
+        );
+      }
+      const beforePct = before?.eligibleDestinationSharePct ?? 0;
+      const afterPct = after?.eligibleDestinationSharePct ?? 0;
+      if (
+        beforePct < ECONOMY_DEPENDENCY_EVENT_PCT &&
+        afterPct >= ECONOMY_DEPENDENCY_EVENT_PCT &&
+        after !== undefined
+      ) {
+        emit(
+          "economy_dependency",
+          "trade",
+          64,
+          `${displayName} owns ${afterPct}% of the eligible City/Port destinations on ${actor.username}'s rail network (${after.isAllied ? "allied; allied train stops pay more" : "not allied"}).`,
+          target,
+          `economy:economy_dependency:${playerID}`,
+        );
+      }
+    }
+  }
+}
+
+function tradeSeveredText(
+  actorName: string,
+  counterpartyName: string,
+  before: AgentEconomyRecordCounterpartyFacts | undefined,
+  after: AgentEconomyRecordCounterpartyFacts | undefined,
+): string {
+  const oursNew =
+    (after?.embargoOursOnThem ?? false) &&
+    !(before?.embargoOursOnThem ?? false);
+  const theirsNew =
+    (after?.embargoTheirsOnUs ?? false) &&
+    !(before?.embargoTheirsOnUs ?? false);
+  if (oursNew && theirsNew) {
+    return `Mutual embargoes between ${actorName} and ${counterpartyName} cut ${actorName}'s eligible rail destinations owned by ${counterpartyName} to zero.`;
+  }
+  if (oursNew) {
+    return `${actorName}'s embargo on ${counterpartyName} cut ${actorName}'s eligible rail destinations owned by ${counterpartyName} to zero.`;
+  }
+  if (theirsNew) {
+    return `${counterpartyName}'s embargo on ${actorName} cut ${actorName}'s eligible rail destinations owned by ${counterpartyName} to zero.`;
+  }
+  return `${actorName} no longer has any eligible rail destination owned by ${counterpartyName}; the connecting stations were destroyed or changed owners.`;
 }
 
 function buildCommunicationThreads(

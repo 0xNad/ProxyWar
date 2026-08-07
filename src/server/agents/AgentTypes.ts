@@ -117,6 +117,13 @@ export interface AgentVisiblePlayer {
   team?: string | null;
   /** True if this player is on the agent's own team (never betray/attack a teammate). */
   isTeammate?: boolean;
+  /**
+   * City/Factory/Port counts for this rival (PROXYWAR_TUNE_ECONOMY_OBSERVATION;
+   * absent when the flag is off — additive, wire-compatible).
+   */
+  unitCounts?: Partial<Record<UnitType, number>>;
+  /** Rival traitor state (PROXYWAR_TUNE_ECONOMY_OBSERVATION; absent when off). */
+  isTraitor?: boolean;
 }
 
 export interface AgentAttackOption {
@@ -550,6 +557,187 @@ export interface AgentBackstabAllyAffordance {
   reason: string;
 }
 
+/**
+ * Economy snapshot types (PROXYWAR_TUNE_ECONOMY_OBSERVATION, default OFF).
+ * Computed by `AgentEconomyNetwork.ts` from live core state (RailNetwork /
+ * StationManager / Cluster / Player.canTrade / stats gold indices) — pure
+ * reads, integer/bigint math, no pathfinding, deterministic for a given
+ * snapshot. Vocabulary discipline: physical rail connection, trade
+ * eligibility (embargo-only), relationship, and realized income are separate
+ * facts and are never merged.
+ */
+export type AgentEconomyFactoryStatus =
+  | "operational"
+  | "idle_no_destination"
+  | "blocked_by_embargo";
+
+export type AgentEconomyBottleneckKind =
+  | "none"
+  | "missing_trade_destination"
+  | "insufficient_factory_capacity"
+  | "population_capacity"
+  | "foreign_dependency"
+  | "embargo_disruption"
+  | "insufficient_gold"
+  | "unsafe_investment_window"
+  | "unknown";
+
+/**
+ * Cumulative gold earned per verified stats source (the six GOLD_INDEX_*
+ * buckets that already exist — deliberately never merged into one number).
+ * Serialized bigints, matching the observation's existing gold fields.
+ */
+export interface AgentEconomyIncomeBySource {
+  work: string;
+  war: string;
+  tradeShips: string;
+  capturedTradeShips: string;
+  trainSelf: string;
+  trainExternal: string;
+}
+
+export interface AgentEconomyEmbargoBlock {
+  playerID: string;
+  name: string;
+  /** Whose embargo blocks trade: ours on them, theirs on us, or both. */
+  direction: "ours" | "theirs" | "mutual";
+  blockedDestinationCount: number;
+}
+
+export interface AgentEconomyClusterSummary {
+  /**
+   * Derived stable key: min TrainStation.id over the cluster's stations
+   * (clusters themselves carry no stable identity in core; station ids are
+   * stable monotonic ints). Recomputed fresh each decision step.
+   */
+  clusterKey: number;
+  stationCount: number;
+  ownStations: { city: number; factory: number; port: number };
+  foreignStations: { city: number; factory: number; port: number };
+  /** City/Port stations this agent's trains may stop at (embargo-only gate). */
+  eligibleDestinationCount: number;
+  embargoBlockedDestinationCount: number;
+  blockedBy: AgentEconomyEmbargoBlock[];
+}
+
+export interface AgentEconomyFactorySummary {
+  unitID: number;
+  tile: TileRef;
+  level: number;
+  /** Null when the factory is not part of any rail cluster. */
+  clusterKey: number | null;
+  status: AgentEconomyFactoryStatus;
+}
+
+export interface AgentEconomyCounterpartySummary {
+  playerID: string;
+  name: string;
+  isAllied: boolean;
+  sharedClusterKeys: number[];
+  /** Their eligible City/Port stations on clusters touching this agent. */
+  myEligibleDestinationsTheyOwn: number;
+  /** This agent's eligible City/Port stations on shared clusters. */
+  theirEligibleDestinationsIOwn: number;
+  /**
+   * Integer percent (0-100) of ALL this agent's eligible destinations owned
+   * by this counterparty — the structural dependency. Null when the agent has
+   * no eligible destinations at all.
+   */
+  eligibleDestinationSharePct: number | null;
+  /**
+   * Both sides own >=1 Port and trade is not embargoed. Eligibility only —
+   * says nothing about ocean reachability (no pathfinding in this analyzer).
+   */
+  portTradeEligible: boolean;
+  embargoOursOnThem: boolean;
+  embargoTheirsOnUs: boolean;
+  /** Verified payout implication: per-stop train gold at the current relation. */
+  trainStopGoldCurrent: string;
+  /** Per-stop train gold if allied (verified: ally 35k > neutral 25k). */
+  trainStopGoldIfAllied: string;
+}
+
+export interface AgentEconomyBottleneck {
+  kind: AgentEconomyBottleneckKind;
+  /** Server-authored one-sentence evidence with concrete numbers. */
+  evidence: string;
+}
+
+export interface AgentEconomyObservation {
+  incomeBySource: AgentEconomyIncomeBySource;
+  /** Total rail clusters touching the agent (before the reporting cap). */
+  clusterCount: number;
+  /** Capped at 6, sorted by clusterKey ascending. */
+  clusters: AgentEconomyClusterSummary[];
+  factoryCount: number;
+  /** Capped at 12, sorted by unitID ascending; counts below stay exact. */
+  factories: AgentEconomyFactorySummary[];
+  factoryStatusCounts: {
+    operational: number;
+    idleNoDestination: number;
+    blockedByEmbargo: number;
+  };
+  /** Deduped across touching clusters (clusters are disjoint by construction). */
+  eligibleDestinationCount: number;
+  embargoBlockedDestinationCount: number;
+  /** Total structural counterparties (before the reporting cap). */
+  counterpartyCount: number;
+  /** Capped at 8, sorted by playerID ascending. */
+  counterparties: AgentEconomyCounterpartySummary[];
+  bottleneck: AgentEconomyBottleneck;
+}
+
+/**
+ * Compact per-decision economy facts stamped onto decision records when
+ * PROXYWAR_TUNE_ECONOMY_EVENTS is on (the permissive decisions.jsonl surface,
+ * never results.json). Spectator telemetry derives transition-only economy
+ * events from consecutive records' facts.
+ */
+export interface AgentEconomyRecordCounterpartyFacts {
+  playerID: string;
+  name: string;
+  isAllied: boolean;
+  myEligibleDestinationsTheyOwn: number;
+  eligibleDestinationSharePct: number | null;
+  embargoOursOnThem: boolean;
+  embargoTheirsOnUs: boolean;
+}
+
+export interface AgentEconomyRecordFacts {
+  factoryCount: number;
+  operationalFactoryCount: number;
+  idleFactoryCount: number;
+  blockedFactoryCount: number;
+  eligibleDestinationCount: number;
+  embargoBlockedDestinationCount: number;
+  counterparties: AgentEconomyRecordCounterpartyFacts[];
+  bottleneckKind: AgentEconomyBottleneckKind;
+}
+
+export interface AgentEconomyNetworkAffordance {
+  tacticID: "economy_network";
+  recommended: boolean;
+  turnNumber: number;
+  factoryCount: number;
+  operationalFactoryCount: number;
+  idleFactoryCount: number;
+  blockedFactoryCount: number;
+  clusterCount: number;
+  eligibleDestinationCount: number;
+  embargoBlockedDestinationCount: number;
+  trainSelfIncome: string;
+  trainExternalIncome: string;
+  tradeShipIncome: string;
+  topCounterpartyID: string | null;
+  topCounterpartyName: string | null;
+  topCounterpartyDependencyPct: number | null;
+  topCounterpartyAllied: boolean | null;
+  counterparties: AgentEconomyRecordCounterpartyFacts[];
+  bottleneckKind: AgentEconomyBottleneckKind;
+  bottleneckEvidence: string;
+  reasons: string[];
+}
+
 export interface AgentTacticalAffordances {
   transportTroopBanking: AgentTransportTroopBankingAffordance;
   openingExpansionTempo?: AgentOpeningExpansionTempoAffordance;
@@ -561,6 +749,8 @@ export interface AgentTacticalAffordances {
   personalityDiplomacyPressure?: AgentPersonalityDiplomacyPressureAffordance;
   survivalAlliance?: AgentSurvivalAllianceAffordance;
   backstabAlly?: AgentBackstabAllyAffordance;
+  /** Present only when the observation carries the flag-gated economy block. */
+  economyNetwork?: AgentEconomyNetworkAffordance;
   notes: string[];
 }
 
@@ -745,6 +935,12 @@ export interface AgentObservation {
   recentCommunications?: AgentCommunicationSignal[];
   /** Persistent per-rival belief state (theory of mind). Populated by the brain. */
   opponentModel?: AgentOpponentModelEntry[];
+  /**
+   * Economy snapshot (PROXYWAR_TUNE_ECONOMY_OBSERVATION, default OFF; absent
+   * when the flag is off — observations are then byte-identical to shipped
+   * behavior). Built by `AgentEconomyNetwork.ts`.
+   */
+  economy?: AgentEconomyObservation;
   endgame?: {
     winner: string | null;
     leaderID: string | null;
@@ -942,6 +1138,12 @@ export interface AgentDecisionRecord {
   decisionMetadata?: Record<string, string | number | boolean | null>;
   chosenActionMetadata?: Record<string, string | number | boolean | null>;
   tacticalAffordances?: AgentTacticalAffordances;
+  /**
+   * Compact economy facts at this decision boundary
+   * (PROXYWAR_TUNE_ECONOMY_EVENTS; absent when the flag is off). Rides the
+   * permissive decision-record surface, never results.json.
+   */
+  economyFacts?: AgentEconomyRecordFacts;
   intent: Intent | null;
   result: AgentActionResult;
   audit?: AgentActionAudit;

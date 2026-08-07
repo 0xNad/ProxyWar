@@ -8,6 +8,7 @@ import {
   UnitType,
 } from "../../core/game/Game";
 import { flattenedEmojiTable } from "../../core/Util";
+import { buildEconomyObservationExtension } from "./AgentEconomyNetwork";
 import { AgentMemoryBuilder } from "./AgentMemoryBuilder";
 import { nuclearTargetStructurePriority } from "./AgentNuclearPolicy";
 import { AgentStrategicStateBuilder } from "./AgentStrategicStateBuilder";
@@ -146,6 +147,13 @@ export class AgentObservationBuilder {
     const memory = new AgentMemoryBuilder().build({
       recentDecisions: input.recentDecisions,
     });
+    // Flag-gated economy block (PROXYWAR_TUNE_ECONOMY_OBSERVATION): undefined
+    // — and no observation change at all — when the flag is off.
+    const economy = buildEconomyObservationExtension({
+      gameState: input.gameState,
+      player,
+      visiblePlayers,
+    });
     const tacticalAffordances = buildAgentTacticalAffordances({
       observation: {
         agentID: input.agentID,
@@ -165,6 +173,7 @@ export class AgentObservationBuilder {
         objective: input.objective ?? null,
         recentDecisions: input.recentDecisions ?? [],
         recentCommunications: input.recentCommunications ?? [],
+        ...(economy !== undefined ? { economy } : {}),
         endgame: this.endgameState(input.gameState, player),
         notes,
       },
@@ -194,6 +203,7 @@ export class AgentObservationBuilder {
       objective: input.objective ?? null,
       recentDecisions: input.recentDecisions ?? [],
       recentCommunications: input.recentCommunications ?? [],
+      ...(economy !== undefined ? { economy } : {}),
       endgame: this.endgameState(input.gameState, player),
       notes,
     };

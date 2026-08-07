@@ -139,12 +139,41 @@ function buildState(obs, actions) {
     risk: a.risk?.level,
     ...(a.metadata?.cost !== undefined ? { cost: a.metadata.cost } : {}),
   }));
+  // Optional economy block (server flag; absent on most matches today). When
+  // present, surface idle factories + top trade dependency + bottleneck in ONE
+  // compact line (<=300 chars). When absent, the state is byte-identical to
+  // the shape above.
+  let econ;
+  if (obs.economy) {
+    const f = obs.economy.factoryStatusCounts || {};
+    const idle = (f.idleNoDestination || 0) + (f.blockedByEmbargo || 0);
+    const parts = [];
+    if (idle > 0)
+      parts.push(
+        `${idle} idle factories (${(f.blockedByEmbargo || 0) > 0 ? "embargo" : "no City/Port in rail range"})`,
+      );
+    const top = (obs.economy.counterparties || [])
+      .filter((c) => (c.eligibleDestinationSharePct ?? 0) > 0)
+      .sort(
+        (a, b) =>
+          (b.eligibleDestinationSharePct ?? 0) -
+          (a.eligibleDestinationSharePct ?? 0),
+      )[0];
+    if (top)
+      parts.push(
+        `${top.eligibleDestinationSharePct}% of trade destinations owned by ${clean(top.name)}${top.isAllied ? " (allied)" : ""}`,
+      );
+    const b = obs.economy.bottleneck;
+    if (b && b.kind && b.kind !== "none") parts.push(`bottleneck: ${b.kind}`);
+    if (parts.length) econ = parts.join("; ").slice(0, 300);
+  }
   return {
     phase: obs.phase,
     self,
     rivals,
     avoid: avoidActionIDs(),
     legalActions: legal,
+    ...(econ ? { econ } : {}),
   };
 }
 

@@ -15,6 +15,7 @@ import {
 import { observedTransportStates } from "./AgentTypes";
 import type {
   AgentEconomyCadenceAffordance,
+  AgentEconomyNetworkAffordance,
   AgentFrontierConversionTimingAffordance,
   AgentFrontierFinishPressureAffordance,
   AgentHomeDangerLevel,
@@ -158,6 +159,7 @@ export function buildAgentTacticalAffordances(input: {
     personalityDiplomacyPressureAffordance(input);
   const survivalAlliance = survivalAllianceAffordance(input);
   const backstabAlly = backstabAllyAffordance(input);
+  const economyNetwork = economyNetworkAffordance(input);
   const notes: string[] = [];
   if (openingExpansionTempo.recommended) {
     notes.push(
@@ -209,6 +211,11 @@ export function buildAgentTacticalAffordances(input: {
       "backstab_ally is available; evaluator should watch whether the agent breaks an alliance it now overmatches and takes the ally's land (the betray-late payoff)",
     );
   }
+  if (economyNetwork?.recommended) {
+    notes.push(
+      "economy_network flags an economy bottleneck; evaluator should watch whether the agent fixes idle/blocked factories, embargo exposure, or one-counterparty trade dependency",
+    );
+  }
   return {
     transportTroopBanking,
     openingExpansionTempo,
@@ -220,7 +227,91 @@ export function buildAgentTacticalAffordances(input: {
     personalityDiplomacyPressure,
     survivalAlliance,
     backstabAlly,
+    ...(economyNetwork !== undefined ? { economyNetwork } : {}),
     notes,
+  };
+}
+
+/**
+ * Economy network affordance (11th block). Present ONLY when the observation
+ * carries the flag-gated `economy` snapshot (PROXYWAR_TUNE_ECONOMY_OBSERVATION)
+ * — when the flag is off the affordances object is byte-identical to shipped
+ * behavior. Pure function of the snapshot: headline facts, a recommended bit
+ * keyed on the snapshot's evidenced bottleneck, and reasons[].
+ */
+function economyNetworkAffordance(input: {
+  observation: AgentObservation;
+  legalActions?: LegalAction[];
+}): AgentEconomyNetworkAffordance | undefined {
+  const economy = input.observation.economy;
+  if (economy === undefined) {
+    return undefined;
+  }
+  const topCounterparty = economy.counterparties.reduce<
+    (typeof economy.counterparties)[number] | null
+  >(
+    (top, candidate) =>
+      candidate.eligibleDestinationSharePct !== null &&
+      (top === null ||
+        candidate.eligibleDestinationSharePct >
+          (top.eligibleDestinationSharePct ?? 0))
+        ? candidate
+        : top,
+    null,
+  );
+  const recommended =
+    economy.bottleneck.kind !== "none" && economy.bottleneck.kind !== "unknown";
+  const reasons: string[] = [];
+  if (economy.factoryStatusCounts.idleNoDestination > 0) {
+    reasons.push(
+      `${economy.factoryStatusCounts.idleNoDestination} factories have no City/Port destination on their rail network`,
+    );
+  }
+  if (economy.factoryStatusCounts.blockedByEmbargo > 0) {
+    reasons.push(
+      `${economy.factoryStatusCounts.blockedByEmbargo} factories are embargo-blocked (destinations exist but none are tradable)`,
+    );
+  }
+  if (
+    topCounterparty !== null &&
+    (topCounterparty.eligibleDestinationSharePct ?? 0) > 0
+  ) {
+    reasons.push(
+      `${topCounterparty.name} owns ${topCounterparty.eligibleDestinationSharePct}% of eligible destinations (${topCounterparty.isAllied ? "allied — allied train stops pay more" : "not allied"})`,
+    );
+  }
+  reasons.push(economy.bottleneck.evidence);
+  return {
+    tacticID: "economy_network",
+    recommended,
+    turnNumber: input.observation.turnNumber,
+    factoryCount: economy.factoryCount,
+    operationalFactoryCount: economy.factoryStatusCounts.operational,
+    idleFactoryCount: economy.factoryStatusCounts.idleNoDestination,
+    blockedFactoryCount: economy.factoryStatusCounts.blockedByEmbargo,
+    clusterCount: economy.clusterCount,
+    eligibleDestinationCount: economy.eligibleDestinationCount,
+    embargoBlockedDestinationCount: economy.embargoBlockedDestinationCount,
+    trainSelfIncome: economy.incomeBySource.trainSelf,
+    trainExternalIncome: economy.incomeBySource.trainExternal,
+    tradeShipIncome: economy.incomeBySource.tradeShips,
+    topCounterpartyID: topCounterparty?.playerID ?? null,
+    topCounterpartyName: topCounterparty?.name ?? null,
+    topCounterpartyDependencyPct:
+      topCounterparty?.eligibleDestinationSharePct ?? null,
+    topCounterpartyAllied: topCounterparty?.isAllied ?? null,
+    counterparties: economy.counterparties.map((counterparty) => ({
+      playerID: counterparty.playerID,
+      name: counterparty.name,
+      isAllied: counterparty.isAllied,
+      myEligibleDestinationsTheyOwn: counterparty.myEligibleDestinationsTheyOwn,
+      eligibleDestinationSharePct: counterparty.eligibleDestinationSharePct,
+      embargoOursOnThem: counterparty.embargoOursOnThem,
+      embargoTheirsOnUs: counterparty.embargoTheirsOnUs,
+    })),
+    bottleneckKind: economy.bottleneck.kind,
+    bottleneckEvidence: economy.bottleneck.evidence,
+    reasons,
   };
 }
 

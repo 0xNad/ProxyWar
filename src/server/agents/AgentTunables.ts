@@ -427,3 +427,42 @@ export function attackLadderEnabled(): boolean {
 export function economyBootstrapMinTiles(): number {
   return Math.max(0, tunedNumber("ECONOMY_BOOTSTRAP_MIN_TILES", 0));
 }
+
+/**
+ * Economy observation flag (economy+negotiation V1 Phase A). Reads the EXACT
+ * env var `PROXYWAR_TUNE_ECONOMY_OBSERVATION` (A/B arms set "0"/"1"). DEFAULT
+ * OFF — ships inert and is measured on a paired eval-policy A/B arm before any
+ * default flip. Fixes the verified observation gap (2026-08-07 economy audit):
+ * the observation carries NO income-by-source, rail/trade-network, rival
+ * structure-count, or rival-traitor facts at all, so agents cannot see idle
+ * factories, embargo-blocked trade, or structural dependency on a counterparty,
+ * and replay captions have no true economic sentences to say. When ON, the
+ * observation gains the optional `economy` block (income by the six
+ * GOLD_INDEX_* sources, rail clusters, factory classification, per-counterparty
+ * structural dependency, one evidenced bottleneck), visible players gain
+ * City/Factory/Port `unitCounts` + `isTraitor`, and the tactical affordances
+ * gain the `economyNetwork` block. When OFF, observations and affordances are
+ * byte-identical to shipped behavior.
+ */
+export function economyObservationEnabled(): boolean {
+  return tunedNumber("ECONOMY_OBSERVATION", 0) >= 1;
+}
+
+/**
+ * Economy spectator-events flag (economy+negotiation V1 Phase A). Reads the
+ * EXACT env var `PROXYWAR_TUNE_ECONOMY_EVENTS` (A/B arms set "0"/"1"). DEFAULT
+ * OFF — ships inert. Fixes the verified spectator gap (2026-08-07 economy
+ * audit): spectator telemetry has zero economy vocabulary, so premieres and the
+ * Director Cut cannot narrate factories going idle, trade links forming or
+ * being severed by embargo, or one seat's income depending on another seat's
+ * ports. When ON, decision records stamp compact `economyFacts` derived from
+ * the economy snapshot at decision boundaries, and spectator telemetry emits
+ * bounded transition-only events (factory_operational, factory_idle,
+ * trade_link_established, trade_severed, economy_dependency) with
+ * server-authored publicText. When OFF, decision records and telemetry are
+ * byte-identical to shipped behavior. Needs `PROXYWAR_TUNE_ECONOMY_OBSERVATION`
+ * ON in the same process to have snapshot inputs to derive from.
+ */
+export function economyEventsEnabled(): boolean {
+  return tunedNumber("ECONOMY_EVENTS", 0) >= 1;
+}
