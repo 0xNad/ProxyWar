@@ -4,6 +4,7 @@ import { Game } from "../../core/game/Game";
 import { ServerMessage } from "../../core/Schemas";
 import { GameServer } from "../GameServer";
 import { validateAgentDecision } from "./AgentDecisionValidator";
+import { economyRecordFacts } from "./AgentEconomyNetwork";
 import { AgentLocalGameMirror } from "./AgentLocalGameMirror";
 import {
   assignSpawnSlots,
@@ -20,6 +21,7 @@ import {
 } from "./AgentObservationBuilder";
 import { AgentRunner } from "./AgentRunner";
 import { buildAgentTacticalAffordances } from "./AgentTacticalAffordances";
+import { economyEventsEnabled } from "./AgentTunables";
 import {
   AgentActionResult,
   AgentBrain,
@@ -746,6 +748,15 @@ export class AgentLeagueMatchRunner {
             legalActions: input.legalActions,
           })
         : undefined,
+      // Compact economy facts at this decision boundary
+      // (PROXYWAR_TUNE_ECONOMY_EVENTS, default OFF): the transition source for
+      // spectator economy events. Tiny (counts + <=8 counterparties) so it
+      // stays affordable even where tacticalAffordances is skipped; absent —
+      // records byte-identical — when the flag is off or the observation
+      // carries no economy snapshot.
+      ...(economyEventsEnabled() && input.observation.economy !== undefined
+        ? { economyFacts: economyRecordFacts(input.observation.economy) }
+        : {}),
       intent: input.chosenAction?.intent ?? null,
       result: input.result,
     };
