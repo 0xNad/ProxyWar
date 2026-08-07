@@ -7,7 +7,9 @@ import { AgentRunner } from "../../src/server/agents/AgentRunner";
 import type {
   AgentBrain,
   AgentBrainInput,
+  AgentBrainType,
   AgentDecisionRecord,
+  AgentEconomyObservation,
   AgentObservation,
   AgentVisiblePlayer,
 } from "../../src/server/agents/AgentTypes";
@@ -79,6 +81,8 @@ export function stubObservation(input: {
   others: AgentVisiblePlayer[];
   turnNumber: number;
   gameID?: string;
+  /** Optional flag-gated economy block (external-seat integration tests). */
+  economy?: AgentEconomyObservation;
 }): AgentObservation {
   return {
     agentID: input.seat.agentID,
@@ -160,6 +164,7 @@ export function stubObservation(input: {
     },
     objective: null,
     recentDecisions: [],
+    ...(input.economy !== undefined ? { economy: input.economy } : {}),
     notes: [],
   };
 }
@@ -172,13 +177,16 @@ export interface ScriptedBrainHandle {
   inputs: AgentBrainInput[];
 }
 
-export function scriptedBrain(pickers: ScriptedPicker[]): ScriptedBrainHandle {
+export function scriptedBrain(
+  pickers: ScriptedPicker[],
+  brainType: AgentBrainType = "rule",
+): ScriptedBrainHandle {
   const inputs: AgentBrainInput[] = [];
   let index = 0;
   return {
     inputs,
     brain: {
-      brainType: "rule",
+      brainType,
       decide: (input: AgentBrainInput) => {
         inputs.push(input);
         const picker = pickers[index];
@@ -221,9 +229,16 @@ export function dealLeagueHarness(input: {
   seats: StubSeat[];
   scripts: ScriptedPicker[][];
   gameID?: string;
+  /** Brain type stamped on every scripted seat (default "rule"); use
+   *  "external-http" to exercise the hosted external-seat record path. */
+  brainType?: AgentBrainType;
+  /** Optional economy block injected into every seat's stub observation. */
+  economy?: AgentEconomyObservation;
 }): DealLeagueHarness {
   const log = makeStubLogger();
-  const handles = input.scripts.map((pickers) => scriptedBrain(pickers));
+  const handles = input.scripts.map((pickers) =>
+    scriptedBrain(pickers, input.brainType ?? "rule"),
+  );
   const participants: AgentParticipant[] = input.seats.map((seat, index) => ({
     spec: { username: seat.username, profile: "diplomatic" },
     brain: handles[index].brain,
@@ -248,6 +263,7 @@ export function dealLeagueHarness(input: {
           .map((candidate) => stubVisiblePlayer(candidate)),
         turnNumber: builderInput.turnNumber,
         gameID: input.gameID,
+        economy: input.economy,
       });
     },
     summarize: () => "stub observation",
