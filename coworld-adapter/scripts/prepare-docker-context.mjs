@@ -11,7 +11,6 @@ const contextRoot = path.join(localRoot, ".docker-context");
 
 const proxyWarEntries = [
   "index.html",
-  "public.html",
   "package.json",
   "package-lock.json",
   "tsconfig.json",
