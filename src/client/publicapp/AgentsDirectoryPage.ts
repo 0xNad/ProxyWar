@@ -5,7 +5,7 @@ import {
   APP_SHELL_ROOT_CLASSES,
   appShellFooter,
   appShellHeader,
-  waitForTranslationsReady,
+  requestUpdateWhenTranslationsReady,
 } from "./AppShellChrome";
 import { fetchReadModel, PublicAgent, ReadModel } from "./ReadModelSchema";
 import { translateText } from "../Utils";
@@ -49,7 +49,7 @@ export class AgentsDirectoryPage extends LitElement {
   connectedCallback(): void {
     super.connectedCallback();
     void this.load();
-    void waitForTranslationsReady().then(() => this.requestUpdate());
+    requestUpdateWhenTranslationsReady(this);
   }
 
   private async load(): Promise<void> {

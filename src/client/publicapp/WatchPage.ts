@@ -13,7 +13,7 @@ import {
   appShellFooter,
   appShellHeader,
   APP_SHELL_ROOT_CLASSES,
-  waitForTranslationsReady,
+  requestUpdateWhenTranslationsReady,
 } from "./AppShellChrome";
 import { translateText } from "../Utils";
 import { analytics } from "../analytics/AnalyticsClient";
@@ -82,7 +82,7 @@ export class WatchPage extends LitElement {
   connectedCallback(): void {
     super.connectedCallback();
     void this.load();
-    void waitForTranslationsReady().then(() => this.requestUpdate());
+    requestUpdateWhenTranslationsReady(this);
   }
 
   updated(changedProperties: PropertyValues): void {
