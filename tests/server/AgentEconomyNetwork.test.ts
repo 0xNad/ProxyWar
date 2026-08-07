@@ -1,3 +1,4 @@
+import { AttackExecution } from "../../src/core/execution/AttackExecution";
 import { CityExecution } from "../../src/core/execution/CityExecution";
 import { FactoryExecution } from "../../src/core/execution/FactoryExecution";
 import { RecomputeRailClusterExecution } from "../../src/core/execution/RecomputeRailClusterExecution";
@@ -363,6 +364,20 @@ describe("AgentEconomyNetwork snapshot", () => {
     expect(reportedIDs).toEqual([...reportedIDs].sort());
     // Equal structural rank: the deterministic tie-break drops the highest id.
     expect(reportedIDs).not.toContain(rivals[rivals.length - 1].id());
+    // The pair-link list is UNCAPPED (M1): every linked counterparty appears
+    // even when the rich list is capped, id-sorted, with exact link counts —
+    // spectator pair-transition events read only this list.
+    expect(snapshot.pairLinks).toHaveLength(9);
+    const pairIDs = snapshot.pairLinks.map((pair) => pair.playerID);
+    expect(pairIDs).toEqual(rivals.map((rival) => rival.id()).sort());
+    expect(
+      snapshot.pairLinks.every(
+        (pair) =>
+          pair.links === 1 &&
+          !pair.embargoOursOnThem &&
+          !pair.embargoTheirsOnUs,
+      ),
+    ).toBe(true);
     expect(snapshot.clusters.length).toBeLessThanOrEqual(ECONOMY_CLUSTER_CAP);
     expect(snapshot.eligibleDestinationCount).toBe(9);
     const shares = new Set(
@@ -467,5 +482,42 @@ describe("AgentEconomyNetwork snapshot", () => {
     const broke = buildAgentEconomySnapshot(game, playerA);
     expect(broke.bottleneck.kind).toBe("insufficient_gold");
     expect(broke.bottleneck.evidence).toMatch(/Gold \d+ is below the \d+ cost/);
+  });
+
+  test("no factories + affordable Factory + live incoming attack: unsafe_investment_window with evidence", async () => {
+    const { game, players } = await railGame(2);
+    const [playerA, playerB] = players;
+    // Give B tiles adjacent to A so a land attack is live against A.
+    playerB.conquer(game.ref(11, 90));
+    playerB.conquer(game.ref(12, 90));
+    game.addExecution(new AttackExecution(100, playerB, playerA.id()));
+    game.executeNextTick();
+    expect(playerA.incomingAttacks().length).toBeGreaterThan(0);
+
+    const snapshot = buildAgentEconomySnapshot(game, playerA);
+    expect(snapshot.factoryCount).toBe(0);
+    expect(snapshot.bottleneck.kind).toBe("unsafe_investment_window");
+    expect(snapshot.bottleneck.evidence).toMatch(/incoming attack/);
+    expect(snapshot.bottleneck.evidence).toContain("affordable");
+  });
+
+  test("troops at >=95% of capacity with an operational rail economy: population_capacity with evidence", async () => {
+    const { game, players } = await railGame(2);
+    const [playerA] = players;
+    const factory = playerA.buildUnit(UnitType.Factory, game.ref(10, 50), {});
+    game.addExecution(new FactoryExecution(factory));
+    ticksUntil(game, () => factory.hasTrainStation(), 10);
+    const city = playerA.buildUnit(UnitType.City, game.ref(30, 50), {});
+    game.addExecution(new CityExecution(city));
+    ticksUntil(game, () => station(game, city) !== null, 10);
+
+    const maxTroops = game.config().maxTroops(playerA);
+    playerA.setTroops(Math.ceil(maxTroops * 0.96));
+
+    const snapshot = buildAgentEconomySnapshot(game, playerA);
+    expect(snapshot.factoryStatusCounts.operational).toBe(1);
+    expect(snapshot.bottleneck.kind).toBe("population_capacity");
+    expect(snapshot.bottleneck.evidence).toContain("capacity");
+    expect(snapshot.bottleneck.evidence).toMatch(/\b(9[5-9]|100)%/);
   });
 });

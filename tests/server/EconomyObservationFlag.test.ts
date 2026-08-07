@@ -157,6 +157,9 @@ describe("economy observation flag (PROXYWAR_TUNE_ECONOMY_OBSERVATION)", () => {
       myEligibleDestinationsTheyOwn: 1,
       eligibleDestinationSharePct: 50,
     });
+    expect(economy!.pairLinks).toEqual([
+      expect.objectContaining({ playerID: "P_A", links: 1 }),
+    ]);
     expect(economy!.bottleneck.kind).toBe("foreign_dependency");
 
     const affordance = observation.tacticalAffordances?.economyNetwork;

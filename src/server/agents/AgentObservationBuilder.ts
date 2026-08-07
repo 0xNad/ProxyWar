@@ -147,8 +147,11 @@ export class AgentObservationBuilder {
     const memory = new AgentMemoryBuilder().build({
       recentDecisions: input.recentDecisions,
     });
-    // Flag-gated economy block (PROXYWAR_TUNE_ECONOMY_OBSERVATION): undefined
-    // — and no observation change at all — when the flag is off.
+    // Flag-gated economy block (PROXYWAR_TUNE_ECONOMY_OBSERVATION). NOT a
+    // pure call: when the flag is on it also decorates the visiblePlayers
+    // entries in place (rival unitCounts + isTraitor) before returning the
+    // block. When the flag is off it returns undefined, mutates nothing, and
+    // the observation is byte-identical to shipped behavior.
     const economy = buildEconomyObservationExtension({
       gameState: input.gameState,
       player,

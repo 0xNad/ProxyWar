@@ -1,5 +1,5 @@
 /**
- * AgentEconomyNetwork — pure, deterministic economy snapshot for observations
+ * AgentEconomyNetwork — deterministic economy snapshot for observations
  * (economy+negotiation V1 Phase A, PROXYWAR_TUNE_ECONOMY_OBSERVATION).
  *
  * Given the core Game and one player, computes:
@@ -12,6 +12,12 @@
  * - per-counterparty structural dependency (incl. the verified
  *   ally-pays-more train payout implication),
  * - one primary bottleneck with server-authored evidence.
+ *
+ * Purity: `buildAgentEconomySnapshot` is a pure read of game state. The
+ * observation-builder entry point `buildEconomyObservationExtension` is NOT
+ * pure — when the flag is on it also decorates its `visiblePlayers` argument
+ * in place (rival `unitCounts` / `isTraitor`); with the flag off it touches
+ * nothing and returns undefined. Neither ever mutates GAME state.
  *
  * Discipline (mirrors the scoring idea of core's
  * NationStructureBehavior.buildReachableStations without calling its private
@@ -154,6 +160,25 @@ export function buildAgentEconomySnapshot(
     touching,
     eligibleDestinationCount,
   });
+  // UNCAPPED pair-link list, computed from the FULL counterparty list before
+  // the reporting cap: pair-transition spectator events read only this, so
+  // cap-driven eviction churn can never fabricate severed/established links.
+  // Membership: links > 0 OR an embargo edge (so severed-link attribution
+  // keeps exact embargo evidence). Bounded by alive seats.
+  const pairLinks = counterparties
+    .filter(
+      (counterparty) =>
+        counterparty.myEligibleDestinationsTheyOwn > 0 ||
+        counterparty.embargoOursOnThem ||
+        counterparty.embargoTheirsOnUs,
+    )
+    .map((counterparty) => ({
+      playerID: counterparty.playerID,
+      name: counterparty.name,
+      links: counterparty.myEligibleDestinationsTheyOwn,
+      embargoOursOnThem: counterparty.embargoOursOnThem,
+      embargoTheirsOnUs: counterparty.embargoTheirsOnUs,
+    }));
 
   const bottleneck = selectBottleneck({
     game,
@@ -179,6 +204,7 @@ export function buildAgentEconomySnapshot(
     embargoBlockedDestinationCount,
     counterpartyCount: counterparties.length,
     counterparties: selectCounterparties(counterparties),
+    pairLinks,
     bottleneck,
   };
 }
@@ -203,6 +229,7 @@ export function economyRecordFacts(
       embargoOursOnThem: counterparty.embargoOursOnThem,
       embargoTheirsOnUs: counterparty.embargoTheirsOnUs,
     })),
+    pairLinks: snapshot.pairLinks,
     bottleneckKind: snapshot.bottleneck.kind,
   };
 }
@@ -222,6 +249,7 @@ export function economyFactsFromAffordance(
     eligibleDestinationCount: affordance.eligibleDestinationCount,
     embargoBlockedDestinationCount: affordance.embargoBlockedDestinationCount,
     counterparties: affordance.counterparties,
+    pairLinks: affordance.pairLinks,
     bottleneckKind: affordance.bottleneckKind,
   };
 }
@@ -520,16 +548,18 @@ function selectBottleneck(input: {
   const { game, player, factoryCount, factoryStatusCounts } = input;
 
   if (factoryStatusCounts.blockedByEmbargo > 0) {
+    const blocked = factoryStatusCounts.blockedByEmbargo;
     return {
       kind: "embargo_disruption",
-      evidence: `${factoryStatusCounts.blockedByEmbargo} of ${factoryCount} factories are embargo-blocked: every City/Port on their rail network belongs to an embargoed counterparty (${blockerNames(input.clusterAnalyses)}).`,
+      evidence: `${blocked} of ${factoryCount} factories ${blocked === 1 ? "is" : "are"} embargo-blocked: every City/Port on ${blocked === 1 ? "its" : "their"} rail network belongs to an embargoed counterparty (${blockerNames(input.clusterAnalyses)}).`,
     };
   }
 
   if (factoryStatusCounts.idleNoDestination > 0) {
+    const idle = factoryStatusCounts.idleNoDestination;
     return {
       kind: "missing_trade_destination",
-      evidence: `${factoryStatusCounts.idleNoDestination} of ${factoryCount} factories have no City or Port on their rail network, so no trains can run from them.`,
+      evidence: `${idle} of ${factoryCount} factories ${idle === 1 ? "has" : "have"} no City or Port on ${idle === 1 ? "its" : "their"} rail network, so no trains can run from ${idle === 1 ? "it" : "them"}.`,
     };
   }
 
