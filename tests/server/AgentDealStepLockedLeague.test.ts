@@ -151,6 +151,33 @@ function proposerBrain(): AgentBrain {
   };
 }
 
+/**
+ * Plays the SAME game action an ignorer plays, and additionally proposes a
+ * non-aggression pact through the diplomacy slot when one is offered. With
+ * the flag off no deal action exists, so the field is never set and the seat
+ * is indistinguishable from an ignorer.
+ */
+function slotProposerBrain(): AgentBrain {
+  return {
+    brainType: "rule",
+    decide: (input: AgentBrainInput) => {
+      const expand = input.legalActions.find(
+        (action) => action.id === "expand:terra-nullius:10",
+      );
+      const propose = input.legalActions.find(
+        (action) =>
+          action.kind === "deal_propose" &&
+          action.metadata?.template === "non_aggression_pact",
+      );
+      return {
+        actionID: expand?.id ?? "hold",
+        reason: "expand now, pact on the side",
+        ...(propose !== undefined ? { dealActionID: propose.id } : {}),
+      };
+    },
+  };
+}
+
 /** Ignores deals entirely: expands when offered, otherwise holds. */
 function ignorerBrain(): AgentBrain {
   return {
@@ -167,7 +194,7 @@ function ignorerBrain(): AgentBrain {
   };
 }
 
-async function runArm(flagOn: boolean) {
+async function runArm(flagOn: boolean, dealerUsesSlot = false) {
   if (flagOn) {
     process.env[DEALS_FLAG] = "1";
   } else {
@@ -190,7 +217,11 @@ async function runArm(flagOn: boolean) {
     log,
     {
       brainFactory: (_spec, index) =>
-        index === 0 ? proposerBrain() : ignorerBrain(),
+        index === 0
+          ? dealerUsesSlot
+            ? slotProposerBrain()
+            : proposerBrain()
+          : ignorerBrain(),
     },
   );
   const game = new GameServer(
@@ -323,5 +354,57 @@ describe("structured deals — step-locked league end to end", () => {
         record.chosenActionKind.startsWith("deal_"),
       ),
     ).toBe(false);
+  }, 600_000);
+
+  it("plays a game action AND a deal action in the same step, with zero effect on the simulation", async () => {
+    // Both arms run the SAME game actions; the ON arm additionally fills the
+    // diplomacy slot. If deals cost nothing and change nothing, the two
+    // simulations must be identical down to the final territory.
+    const on = await runArm(true, true);
+    const off = await runArm(false, true);
+
+    const dealerRecords = on.result.postSpawnRecords.filter(
+      (record) => record.username === "Dealer",
+    );
+    const slotRecords = dealerRecords.filter(
+      (record) => record.decisionMetadata?.dealSeparateSlot === true,
+    );
+    expect(slotRecords.length).toBeGreaterThan(0);
+    for (const record of slotRecords) {
+      // The decision's ACTION is a real map move, not the deal.
+      expect(record.chosenActionKind).not.toMatch(/^deal_/);
+      expect(record.chosenActionID).toBe("expand:terra-nullius:10");
+      expect(record.decisionMetadata?.dealAction).toBe("propose");
+      expect(record.decisionMetadata?.dealApplyAccepted).toBe(true);
+      expect(record.decisionMetadata?.dealStatedReason).toBe(
+        "expand now, pact on the side",
+      );
+      expect(record.decisionMetadata?.dealSlotResult).toMatch(
+        /^deal proposed: deal:/,
+      );
+    }
+    // Proposals are paced: the dealer never opens two in consecutive steps.
+    expect(slotRecords.length).toBeLessThan(dealerRecords.length);
+    expect(on.ledger.deals.length).toBeGreaterThan(0);
+
+    // Nothing about the match changed: same chosen actions for every seat
+    // (including the dealer's), and the same final territory.
+    for (const username of [
+      "Dealer",
+      "Ignorer One",
+      "Ignorer Two",
+      "Ignorer Three",
+    ]) {
+      expect(on.chosenByUsername(username)).toEqual(
+        off.chosenByUsername(username),
+      );
+      expect(
+        on
+          .chosenByUsername(username)
+          .some((actionID) => actionID.startsWith("deal_")),
+      ).toBe(false);
+    }
+    expect(on.tilesByUsername).toEqual(off.tilesByUsername);
+    expect(off.ledger.deals).toEqual([]);
   }, 600_000);
 });

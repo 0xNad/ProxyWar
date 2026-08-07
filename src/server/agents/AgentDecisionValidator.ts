@@ -1,8 +1,72 @@
+import { isDealActionKind } from "./AgentDealManager";
 import { AgentDecision, LegalAction } from "./AgentTypes";
 
 export type AgentDecisionValidation =
   | { ok: true; action: LegalAction }
   | { ok: false; reason: string; fallback: LegalAction | null };
+
+export type AgentDealDecisionValidation =
+  | { ok: true; action: LegalAction }
+  | { ok: false; reason: string };
+
+/**
+ * Validates the OPTIONAL second selection, `AgentDecision.dealActionID` (the
+ * diplomacy slot). Returns null when the field is absent/blank — the shipped
+ * single-action path is then completely untouched.
+ *
+ * Two gates, both mandatory:
+ * 1. exact-id match against the SAME offered menu as `actionID` (no off-menu
+ *    ids, exactly like every other selection);
+ * 2. the action's kind must be one of the four deal meta-action kinds.
+ *
+ * Gate 2 is the raw-intent-bypass boundary: without it a policy could name an
+ * attack/nuke/build id here and get a second game action per decision. There
+ * is NO fallback — an invalid deal selection is reported and dropped, never
+ * substituted, so a rejected deal selection can never change what reaches the
+ * game.
+ */
+export function validateAgentDealDecision(
+  decision: AgentDecision,
+  legalActions: LegalAction[],
+): AgentDealDecisionValidation | null {
+  if (typeof decision.dealActionID !== "string") {
+    return null;
+  }
+  // Trim ONCE and use the trimmed value for the lookup too — the websocket
+  // adapter and the response parser both trim before this point, so the
+  // untrimmed value was only ever reachable in-process.
+  const requestedID = decision.dealActionID.trim();
+  if (requestedID.length === 0) {
+    return null;
+  }
+  const action = legalActions.find((candidate) => candidate.id === requestedID);
+  if (action === undefined) {
+    return {
+      ok: false,
+      reason: `deal selection named unknown action id: ${loggableActionID(requestedID)}`,
+    };
+  }
+  if (!isDealActionKind(action.kind)) {
+    return {
+      ok: false,
+      reason: `deal selection named a non-deal action kind (${action.kind}): ${loggableActionID(requestedID)}`,
+    };
+  }
+  return { ok: true, action };
+}
+
+/**
+ * The rejection reason is stamped into decisions.jsonl by the league runner,
+ * so the agent-controlled id it quotes is bounded here (the lookup above
+ * still uses the full id, so a long-but-legal id can never be mismatched).
+ */
+const MAX_QUOTED_DEAL_ACTION_ID = 120;
+
+function loggableActionID(requestedID: string): string {
+  return requestedID.length <= MAX_QUOTED_DEAL_ACTION_ID
+    ? requestedID
+    : `${requestedID.slice(0, MAX_QUOTED_DEAL_ACTION_ID)}... (${requestedID.length} chars)`;
+}
 
 export interface AgentDecisionBatchValidation {
   ok: boolean;

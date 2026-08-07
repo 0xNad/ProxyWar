@@ -10,6 +10,7 @@ import {
   proposalLapsedEvent,
   resolveElapsedObligations,
   resolveMootObligations,
+  sanitizeDealStatedReason,
   type AgentDealLedgerEvent,
   type AgentDealObligationState,
   type AgentDealState,
@@ -48,7 +49,15 @@ import {
  *
  * Privacy: a bilateral proposal/deal appears only in the two parties'
  * observations (`observationFor` filters by seat); the per-rival reliability
- * aggregate is public referee output and carries no bilateral terms.
+ * aggregate is public referee output and carries no bilateral terms. Agents'
+ * OWN stated reasons are captured for the ledger and viewer artifacts and are
+ * never surfaced to any agent (`AgentDealState.proposerStatedReason`).
+ *
+ * Slot: a deal action may be selected either as the decision's single game
+ * action (the original shape) or through `AgentDecision.dealActionID`, the
+ * optional second selection applied alongside the game action so negotiating
+ * costs no move. Proposals are paced by DEAL_ACTION_COOLDOWN_STEPS;
+ * responses never are.
  */
 
 export const DEAL_ACTION_KINDS = [
@@ -64,8 +73,41 @@ export function isDealActionKind(kind: string): boolean {
   return DEAL_ACTION_KIND_SET.has(kind);
 }
 
+/**
+ * Minimum decision steps between two PROPOSALS by the same agent.
+ *
+ * Deals no longer compete with the game action for the decision's single
+ * action slot (`AgentDecision.dealActionID`), so nothing else paces
+ * negotiation: without this an agent could open a new offer every single
+ * step, filling every rival's menu with noise and making a pact worth
+ * nothing. The limit is enforced BOTH in `applyPropose` (a proposal inside
+ * the window fails loudly) and in `proposalOptionsFor` (no propose option is
+ * offered at all while the agent is on cooldown — a model should never be
+ * shown a move it cannot make).
+ *
+ * It applies to `deal_propose` ONLY. Accept / reject / withdraw stay
+ * available every step: a response can only exist while an offer addressed to
+ * this agent is open, and every proposer is itself paced by this cooldown and
+ * by DEAL_PROPOSAL_TTL_STEPS, so answers cannot be spammed either. A cooldown
+ * on answers would instead let offers die unanswered purely because the
+ * recipient recently spoke — the opposite of the drama this system exists to
+ * produce. Withdrawing is de-escalation and is likewise never blocked.
+ */
+export const DEAL_ACTION_COOLDOWN_STEPS = 3;
+
 /** Open proposals expire silently after this many unanswered steps. */
 export const DEAL_PROPOSAL_TTL_STEPS = 4;
+/**
+ * DEFENSE IN DEPTH — UNREACHABLE under the current constants. A proposer may
+ * open an offer only every DEAL_ACTION_COOLDOWN_STEPS (3) steps and an open
+ * offer lapses DEAL_PROPOSAL_TTL_STEPS (4) steps after it was made, so
+ * proposals at steps N and N+3 are the most that can be open at once (the
+ * step-N one expires at N+5, before a third is even legal at N+6). Both
+ * guards below therefore never fire today and have no direct test. They stay
+ * because they are the STATE invariant, not a restatement of the pacing: any
+ * future change to the cooldown, the TTL, or a bulk/backfilled proposal path
+ * would make them load-bearing again, and the failure they produce is loud.
+ */
 export const MAX_OPEN_PROPOSALS_PER_ORDERED_PAIR = 2;
 export const MAX_ACTIVE_DEALS_PER_AGENT = 6;
 export const MIN_DEAL_DURATION_STEPS = 3;
@@ -125,6 +167,8 @@ export class AgentDealManager {
     string,
     AgentDealLedgerEvent[]
   >();
+  /** Decision step of each player's last ACCEPTED proposal (cooldown clock). */
+  private readonly lastProposalStepByPlayerID = new Map<string, number>();
   private currentStep = -1;
   private currentTurnNumber = 0;
   private readonly stepStartSequence: number[] = [];
@@ -132,6 +176,19 @@ export class AgentDealManager {
 
   currentDecisionStep(): number {
     return this.currentStep;
+  }
+
+  /**
+   * Decision steps this player must still wait before it may propose again
+   * (0 = may propose now). Proposal cooldown only — responses are never
+   * gated. See `DEAL_ACTION_COOLDOWN_STEPS`.
+   */
+  proposalCooldownRemainingSteps(playerID: string): number {
+    const last = this.lastProposalStepByPlayerID.get(playerID);
+    if (last === undefined) {
+      return 0;
+    }
+    return Math.max(0, DEAL_ACTION_COOLDOWN_STEPS - (this.currentStep - last));
   }
 
   /**
@@ -274,11 +331,23 @@ export class AgentDealManager {
     playerName: string;
     action: LegalAction;
     turnNumber: number;
+    /**
+     * The acting decision's OWN stated reason (`AgentDecision.reason`), or
+     * null when there is none. VIEWER-ONLY: sanitized and stored for the
+     * ledger/telemetry story beat, never surfaced to any agent.
+     */
+    statedReason?: string | null;
   }): AgentDealActionOutcome {
     const kind = input.action.kind;
     const dealAction = kind.replace("deal_", "");
     if (input.playerID === null || input.playerID.length === 0) {
       return this.failure(dealAction, "deal actor has no player id");
+    }
+    // Belt-and-braces guard: the callers (runner action slot and the deal
+    // slot's validator) already reject non-deal kinds. A deal action carries
+    // `intent: null`, so nothing here can ever reach the game.
+    if (!isDealActionKind(kind)) {
+      return this.failure(dealAction, `not a deal action kind: ${kind}`);
     }
     this.registerSeat(input.agentID, input.playerID);
     switch (kind) {
@@ -402,9 +471,19 @@ export class AgentDealManager {
       playerName: string;
       action: LegalAction;
       turnNumber: number;
+      statedReason?: string | null;
     },
     proposerPlayerID: string,
   ): AgentDealActionOutcome {
+    const cooldown = this.proposalCooldownRemainingSteps(proposerPlayerID);
+    if (cooldown > 0) {
+      return this.failure(
+        "propose",
+        `proposal cooldown active (${cooldown} more decision step${
+          cooldown === 1 ? "" : "s"
+        }; one proposal per ${DEAL_ACTION_COOLDOWN_STEPS} steps)`,
+      );
+    }
     const metadata = input.action.metadata ?? {};
     const recipientPlayerID =
       typeof metadata.recipientID === "string" ? metadata.recipientID : null;
@@ -428,6 +507,8 @@ export class AgentDealManager {
         deal.proposerPlayerID === proposerPlayerID &&
         deal.recipientPlayerID === recipientPlayerID,
     );
+    // Unreachable under the current cooldown/TTL pair — see the constant's
+    // own doc. Kept as the state invariant, not as live pacing.
     if (openFromMe.length >= MAX_OPEN_PROPOSALS_PER_ORDERED_PAIR) {
       return this.failure(
         "propose",
@@ -502,7 +583,15 @@ export class AgentDealManager {
       deal.goldAmount = DEAL_SUPPORT_GOLD_AMOUNT;
       deal.troopAmount = DEAL_SUPPORT_TROOP_AMOUNT;
     }
+    // VIEWER-ONLY: the proposer's own one-line rationale for this offer. No
+    // extra model call — the decision already produced it. Sanitized here,
+    // omitted entirely when the brain stated none (never substituted).
+    const statedReason = sanitizeDealStatedReason(input.statedReason);
+    if (statedReason !== null) {
+      deal.proposerStatedReason = statedReason;
+    }
     this.deals.push(deal);
+    this.lastProposalStepByPlayerID.set(proposerPlayerID, this.currentStep);
     const publicText = dealProposedPublicText(deal);
     this.events.push({
       event: "deal_proposed",
@@ -515,6 +604,7 @@ export class AgentDealManager {
       tone: "info",
       importance: 55,
       publicText,
+      ...(statedReason !== null ? { statedReason } : {}),
       step: this.currentStep,
     });
     return {
@@ -544,6 +634,7 @@ export class AgentDealManager {
           : {}),
         dealApplyAccepted: true,
         dealPublicText: publicText,
+        ...(statedReason !== null ? { dealStatedReason: statedReason } : {}),
       },
     };
   }
@@ -555,6 +646,7 @@ export class AgentDealManager {
       playerName: string;
       action: LegalAction;
       turnNumber: number;
+      statedReason?: string | null;
     },
     actorPlayerID: string,
   ): AgentDealActionOutcome {
@@ -696,6 +788,11 @@ export class AgentDealManager {
     deal.activeFromStep = this.currentStep + 1;
     deal.expiresAfterStep = this.currentStep + deal.durationSteps;
     deal.obligations = buildDealObligations(deal);
+    // VIEWER-ONLY acceptor rationale — same contract as the proposer's.
+    const statedReason = sanitizeDealStatedReason(input.statedReason);
+    if (statedReason !== null) {
+      deal.acceptorStatedReason = statedReason;
+    }
     const publicText = dealAcceptedPublicText(deal);
     this.events.push({
       event: "deal_accepted",
@@ -708,6 +805,7 @@ export class AgentDealManager {
       tone: "pact",
       importance: 78,
       publicText,
+      ...(statedReason !== null ? { statedReason } : {}),
       step: this.currentStep,
     });
     return {
@@ -725,6 +823,7 @@ export class AgentDealManager {
         dealDurationSteps: deal.durationSteps,
         dealApplyAccepted: true,
         dealPublicText: publicText,
+        ...(statedReason !== null ? { dealStatedReason: statedReason } : {}),
       },
     };
   }
@@ -806,6 +905,13 @@ export class AgentDealManager {
     );
   }
 
+  /**
+   * PRIVACY: structured terms ONLY. The stated reasons stored on the deal
+   * (proposer/acceptor/obligor) are VIEWER-ONLY and must never be added to
+   * this view or any other observation view — agent-authored text entering
+   * another agent's prompt is an instruction-injection channel, and the deal
+   * templates are deliberately zero-free-text for exactly that reason.
+   */
   private proposalView(deal: AgentDealState): AgentDealProposalView {
     return {
       dealID: deal.dealID,
@@ -838,6 +944,7 @@ export class AgentDealManager {
     };
   }
 
+  /** PRIVACY: structured terms only — see `proposalView`. */
   private activeDealView(deal: AgentDealState): AgentActiveDealView {
     return {
       dealID: deal.dealID,
@@ -885,11 +992,19 @@ export class AgentDealManager {
    * when donation is currently legal (isFriendly), always with explicit
    * amounts. Stable order: recipients by playerID, templates in declaration
    * order; capped.
+   *
+   * Nothing is offered at all while the agent is inside the proposal cooldown
+   * (DEAL_ACTION_COOLDOWN_STEPS): a model must never be shown a move it
+   * cannot make, and suppressing the option here also keeps the crowded
+   * post-spawn menu free of dead entries.
    */
   private proposalOptionsFor(
     playerID: string,
     observation: AgentObservation,
   ): AgentDealProposalOptionView[] {
+    if (this.proposalCooldownRemainingSteps(playerID) > 0) {
+      return [];
+    }
     if (this.activeDealCount(playerID) >= MAX_ACTIVE_DEALS_PER_AGENT) {
       return [];
     }
@@ -910,6 +1025,8 @@ export class AgentDealManager {
           deal.proposerPlayerID === playerID &&
           deal.recipientPlayerID === other.playerID,
       );
+      // Same defense-in-depth invariant as `applyPropose`'s copy: unreachable
+      // while the proposal cooldown outpaces the proposal TTL.
       if (openFromMe.length >= MAX_OPEN_PROPOSALS_PER_ORDERED_PAIR) {
         continue;
       }

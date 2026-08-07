@@ -192,6 +192,76 @@ describe("AgentDealCompliance — violations (confirmed effects only)", () => {
     );
   });
 
+  it("attaches the BETRAYING decision's own stated reason to the verdict, sanitized and separate from publicText", () => {
+    const harness = complianceHarness([A, B, C]);
+    const dealID = activatePact(harness, "non_aggression_pact");
+    harness.push(
+      fabricatedRecord({
+        sequence: 0,
+        agentID: A.agentID,
+        playerID: A.playerID,
+        username: A.username,
+        turnNumber: 50,
+        kind: "attack",
+        actionID: `attack:${B.playerID}:25`,
+        metadata: { targetID: B.playerID, targetName: B.username },
+        auditStatus: "confirmed",
+        // Control characters and non-ASCII are stripped before storage.
+        reason: "Sefirot\tleft its\nsouth border naked — taking it now",
+      }),
+    );
+    harness.beginStep(); // step 3 judges step 2
+
+    const claim = "Sefirot left its south border naked taking it now";
+    const violator = obligationsOf(harness, dealID).find(
+      (obligation) => obligation.obligorPlayerID === A.playerID,
+    )!;
+    expect(violator.status).toBe("violated");
+    expect(violator.obligorStatedReason).toBe(claim);
+
+    const verdict = harness.manager
+      .ledgerSnapshot()
+      .events.find((event) => event.event === "deal_violated")!;
+    expect(verdict.statedReason).toBe(claim);
+    // The referee's FACT and the agent's CLAIM stay separable.
+    expect(verdict.publicText).toBe(
+      "VERDICT: Auri violated the pact — land attack on Sefirot at step 2.",
+    );
+    expect(verdict.publicText).not.toContain(claim);
+  });
+
+  it("omits the verdict's stated reason when the betraying decision stated none", () => {
+    const harness = complianceHarness([A, B, C]);
+    const dealID = activatePact(harness, "non_aggression_pact");
+    harness.push(
+      fabricatedRecord({
+        sequence: 0,
+        agentID: A.agentID,
+        playerID: A.playerID,
+        username: A.username,
+        turnNumber: 50,
+        kind: "attack",
+        actionID: `attack:${B.playerID}:25`,
+        metadata: { targetID: B.playerID },
+        auditStatus: "confirmed",
+        // Provider failure / fallback decision: no stated reason exists.
+        reason: null,
+      }),
+    );
+    harness.beginStep();
+
+    const violator = obligationsOf(harness, dealID).find(
+      (obligation) => obligation.obligorPlayerID === A.playerID,
+    )!;
+    expect(violator.status).toBe("violated");
+    expect(violator).not.toHaveProperty("obligorStatedReason");
+    expect(
+      harness.manager
+        .ledgerSnapshot()
+        .events.find((event) => event.event === "deal_violated"),
+    ).not.toHaveProperty("statedReason");
+  });
+
   it("never lets same-step actions retroactively violate (accepted at N ⇒ judged from N+1)", () => {
     const harness = complianceHarness([A, B]);
     const dealID = harness.propose(A, B, "non_aggression_pact");
@@ -485,12 +555,15 @@ describe("AgentDealCompliance — fulfillment, expiry, moot, force-resolve", () 
   it("resolves commitments whose window ends exactly on the final step as expired_unfulfilled at finalize", () => {
     const harness = complianceHarness([A, B, C]);
     // Both positive templates, window 2..4 (durationSteps 3, accepted at 1).
+    // Different proposers: one agent may open only one proposal per
+    // DEAL_ACTION_COOLDOWN_STEPS, and the obligor here is the accepting side
+    // for support_request either way.
     const jointID = harness.propose(A, B, "joint_attack", {
       targetID: C.playerID,
       targetName: C.username,
       durationSteps: 3,
     });
-    const supportID = harness.propose(A, B, "support_request", {
+    const supportID = harness.propose(C, B, "support_request", {
       durationSteps: 3,
     });
     harness.beginStep(); // 1
@@ -730,11 +803,13 @@ describe("AgentDealCompliance — fulfillment, expiry, moot, force-resolve", () 
     // Mid-window NAP (negative → forced fulfilled).
     const napID = activatePact(harness, "non_aggression_pact");
     // Mid-window support pledge (positive, window cut short → forced moot).
-    const supportID = harness.propose(A, B, "support_request");
+    // Proposed by C: A already proposed this match and is inside the
+    // per-agent proposal cooldown (DEAL_ACTION_COOLDOWN_STEPS).
+    const supportID = harness.propose(C, B, "support_request");
     harness.beginStep();
     expect(harness.respond("deal_accept", B, supportID).accepted).toBe(true);
-    // An open, unanswered proposal (→ expired).
-    const openID = harness.propose(A, C, "non_aggression_pact");
+    // An open, unanswered proposal (→ expired), from a proposer off cooldown.
+    const openID = harness.propose(B, C, "non_aggression_pact");
 
     harness.manager.finalize({ records: harness.records });
     const ledger = harness.manager.ledgerSnapshot();
