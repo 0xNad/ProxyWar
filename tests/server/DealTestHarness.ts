@@ -169,8 +169,33 @@ export function stubObservation(input: {
   };
 }
 
-/** Picks the next action id per decision; null (or exhaustion) selects hold. */
-export type ScriptedPicker = (input: AgentBrainInput) => string | null;
+/**
+ * A scripted decision. A bare string (or null) is the original shape — the
+ * game action id, null selecting hold. The object form additionally scripts
+ * the optional diplomacy slot (`dealActionID`) and an explicit stated reason
+ * (`null` = the brain stated none).
+ *
+ * LINEAGE NOTE: upstream widens `AgentDecision.reason` /
+ * `AgentDecisionRecord.reason` to `string | null` (the separate
+ * provider-failure/null-reason work). That widening is NOT on this
+ * betting-free release lineage, and porting it here would force a rendering
+ * decision at 19 unrelated call sites (artifact writers, match story,
+ * spectator replay). The deal code is already null-safe by construction —
+ * `sanitizeDealStatedReason(value: unknown)` returns null for any non-string —
+ * so the "brain stated none" path is exercised through a cast confined to
+ * this harness, leaving every production type byte-identical. Drop the casts
+ * when the null-reason widening lands on this lineage.
+ */
+export interface ScriptedPick {
+  actionID?: string | null;
+  dealActionID?: string | null;
+  reason?: string | null;
+}
+
+/** Picks the next decision; null (or exhaustion) selects hold. */
+export type ScriptedPicker = (
+  input: AgentBrainInput,
+) => string | ScriptedPick | null;
 
 export interface ScriptedBrainHandle {
   brain: AgentBrain;
@@ -191,10 +216,23 @@ export function scriptedBrain(
         inputs.push(input);
         const picker = pickers[index];
         index += 1;
-        const actionID = picker?.(input) ?? null;
+        const picked = picker?.(input) ?? null;
+        const pick: ScriptedPick =
+          typeof picked === "string" ? { actionID: picked } : (picked ?? {});
+        const actionID = pick.actionID ?? null;
         return {
           actionID: actionID ?? "hold",
-          reason: actionID === null ? "scripted hold" : `scripted ${actionID}`,
+          // See ScriptedPick's LINEAGE NOTE: a scripted null reason is passed
+          // through unfabricated, which this lineage's `reason: string` cannot
+          // express in the type.
+          reason: (pick.reason !== undefined
+            ? pick.reason
+            : actionID === null
+              ? "scripted hold"
+              : `scripted ${actionID}`) as string,
+          ...(pick.dealActionID !== undefined
+            ? { dealActionID: pick.dealActionID }
+            : {}),
         };
       },
     },
@@ -211,6 +249,19 @@ export function pickByID(actionID: string): ScriptedPicker {
     input.legalActions.some((action) => action.id === actionID)
       ? actionID
       : null;
+}
+
+/** Scripts the game action AND the optional diplomacy slot in one decision. */
+export function pickWithDeal(
+  actionID: string | null,
+  dealActionID: string | null,
+  reason?: string | null,
+): ScriptedPicker {
+  return () => ({
+    actionID,
+    dealActionID,
+    ...(reason !== undefined ? { reason } : {}),
+  });
 }
 
 export interface DealLeagueHarness {
@@ -293,6 +344,8 @@ export function fabricatedRecord(input: {
   kind?: AgentDecisionRecord["chosenActionKind"];
   actionID?: string;
   accepted?: boolean;
+  /** The deciding brain's own stated reason; null = none stated. */
+  reason?: string | null;
   metadata?: Record<string, string | number | boolean | null>;
   auditStatus?: NonNullable<AgentDecisionRecord["audit"]>["auditStatus"];
   attackTargetsBefore?: string[];
@@ -331,7 +384,11 @@ export function fabricatedRecord(input: {
     attackActionIDs: [],
     chosenActionID: input.actionID ?? kind,
     chosenActionKind: kind,
-    reason: "fabricated",
+    // See ScriptedPick's LINEAGE NOTE: an explicit null models a
+    // provider-failure decision that stated no reason.
+    reason: (input.reason === undefined
+      ? "fabricated"
+      : input.reason) as string,
     chosenActionMetadata: input.metadata ?? {},
     intent: null,
     result: {

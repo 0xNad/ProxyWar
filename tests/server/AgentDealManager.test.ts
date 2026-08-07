@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   AgentDealManager,
+  DEAL_ACTION_COOLDOWN_STEPS,
   DEAL_PROPOSAL_TTL_STEPS,
   MAX_ACTIVE_DEALS_PER_AGENT,
   MAX_OPEN_PROPOSALS_PER_ORDERED_PAIR,
@@ -207,27 +208,31 @@ describe("AgentDealManager (league-driven timing, visibility, privacy)", () => {
 
   it("rejects, withdraws, and silently expires proposals (TTL) with ledger evidence", async () => {
     const napID = "deal:P_A:P_B:non_aggression_pact:0";
-    const tspID = "deal:P_A:P_B:trade_security_pact:2";
-    const secondNapID = "deal:P_A:P_B:non_aggression_pact:4";
+    const tspID = "deal:P_A:P_B:trade_security_pact:3";
+    const secondNapID = "deal:P_A:P_B:non_aggression_pact:6";
     const holdSteps = (count: number) =>
       Array.from({ length: count }, () => () => null);
+    // A's proposals are spaced by DEAL_ACTION_COOLDOWN_STEPS (0, 3, 6);
+    // responses (reject at step 1, withdraw at step 4) are never gated.
     const harness = dealLeagueHarness({
       seats: [A, B, C],
       scripts: [
         [
           pickByID("deal_propose:P_B:non_aggression_pact"),
           () => null,
+          () => null,
           pickByID("deal_propose:P_B:trade_security_pact"),
           pickByID(`deal_withdraw:${tspID}`),
+          () => null,
           pickByID("deal_propose:P_B:non_aggression_pact"),
           ...holdSteps(5),
         ],
-        [() => null, pickByID(`deal_reject:${napID}`), ...holdSteps(8)],
+        [() => null, pickByID(`deal_reject:${napID}`), ...holdSteps(10)],
         [],
       ],
     });
     const stepRecords: AgentDecisionRecord[][] = [];
-    for (let step = 0; step < 10; step += 1) {
+    for (let step = 0; step < 12; step += 1) {
       stepRecords.push(
         await harness.league.runDecisionTurn({ turnNumber: step * 25 }),
       );
@@ -241,13 +246,13 @@ describe("AgentDealManager (league-driven timing, visibility, privacy)", () => {
     });
     expect(byID.get(tspID)).toMatchObject({
       status: "withdrawn",
-      respondedAtStep: 3,
+      respondedAtStep: 4,
     });
     // The second NAP was never answered: silently expired after the TTL.
     expect(byID.get(secondNapID)).toMatchObject({
       status: "expired",
-      proposedAtStep: 4,
-      answerableThroughStep: 4 + DEAL_PROPOSAL_TTL_STEPS,
+      proposedAtStep: 6,
+      answerableThroughStep: 6 + DEAL_PROPOSAL_TTL_STEPS,
     });
 
     // Reject stamps ride the recipient's record.
@@ -260,7 +265,7 @@ describe("AgentDealManager (league-driven timing, visibility, privacy)", () => {
       dealApplyAccepted: true,
     });
     // Withdraw is silent: stamps only, no ledger event.
-    const withdrawRecord = stepRecords[3].find(
+    const withdrawRecord = stepRecords[4].find(
       (record) => record.agentID === A.agentID,
     )!;
     expect(withdrawRecord.decisionMetadata).toMatchObject({
@@ -273,13 +278,13 @@ describe("AgentDealManager (league-driven timing, visibility, privacy)", () => {
     ]);
 
     // Proposal lapse produced a deal_expired ledger event AND a
-    // dealComplianceEvent stamp on a record at the expiry step (step 9).
+    // dealComplianceEvent stamp on a record at the expiry step (step 11).
     const lapse = ledger.events.find(
       (event) => event.event === "deal_expired" && event.dealID === secondNapID,
     );
     expect(lapse).toBeDefined();
     expect(lapse!.publicText).toContain("expire unanswered");
-    const stamped = stepRecords[9].find(
+    const stamped = stepRecords[11].find(
       (record) =>
         typeof record.decisionMetadata?.dealComplianceEvent === "string" &&
         record.decisionMetadata.dealComplianceEvent.includes(secondNapID),
@@ -307,8 +312,27 @@ describe("AgentDealManager (league-driven timing, visibility, privacy)", () => {
 });
 
 describe("AgentDealManager caps and clamps (direct)", () => {
-  it("enforces the per-pair open-proposal cap and duration clamps", () => {
-    const { manager } = registeredManager([A, B, C]);
+  it("paces proposals by the per-agent cooldown, refuses duplicate templates, and clamps durations", () => {
+    const { manager, beginStep } = registeredManager([A, B, C]);
+    const optionsFor = (seat: StubSeat, others: StubSeat[]) =>
+      manager.observationFor({
+        agentID: seat.agentID,
+        observation: stubObservation({
+          seat,
+          others: others.map((other) => stubVisiblePlayer(other)),
+          turnNumber: 0,
+        }),
+      })!.proposalOptions;
+    const openFromAToB = () =>
+      manager
+        .ledgerSnapshot()
+        .deals.filter(
+          (deal) =>
+            deal.status === "open" &&
+            deal.proposerPlayerID === A.playerID &&
+            deal.recipientPlayerID === B.playerID,
+        );
+
     const first = manager.applyDealAction({
       agentID: A.agentID,
       playerID: A.playerID,
@@ -317,67 +341,90 @@ describe("AgentDealManager caps and clamps (direct)", () => {
       turnNumber: 0,
     });
     expect(first.result.accepted).toBe(true);
+
+    // A second proposal inside the cooldown window fails LOUDLY, and the
+    // proposer is offered no propose option at all while it waits (a model
+    // must never see a move it cannot make).
+    const tooSoon = manager.applyDealAction({
+      agentID: A.agentID,
+      playerID: A.playerID,
+      playerName: A.username,
+      action: proposeAction(C, "non_aggression_pact"),
+      turnNumber: 0,
+    });
+    expect(tooSoon.result.accepted).toBe(false);
+    expect(tooSoon.result.reason).toContain("proposal cooldown active");
+    expect(tooSoon.stamps.dealApplyAccepted).toBe(false);
+    expect(manager.proposalCooldownRemainingSteps(A.playerID)).toBe(
+      DEAL_ACTION_COOLDOWN_STEPS,
+    );
+    expect(optionsFor(A, [B, C])).toEqual([]);
+
+    beginStep(25); // step 1
+    beginStep(50); // step 2 — still inside the window
+    expect(manager.proposalCooldownRemainingSteps(A.playerID)).toBe(1);
+    expect(optionsFor(A, [B, C])).toEqual([]);
+    beginStep(75); // step 3 — cooldown cleared
+    expect(manager.proposalCooldownRemainingSteps(A.playerID)).toBe(0);
+
     const second = manager.applyDealAction({
       agentID: A.agentID,
       playerID: A.playerID,
       playerName: A.username,
       action: proposeAction(B, "trade_security_pact", { durationSteps: 1 }),
-      turnNumber: 0,
+      turnNumber: 75,
     });
     expect(second.result.accepted).toBe(true);
 
     // Durations clamp into [3, 20].
-    const ledger = manager.ledgerSnapshot();
-    expect(ledger.deals.map((deal) => deal.durationSteps)).toEqual([20, 3]);
-
-    // Third open proposal to the same recipient: pair cap.
-    const third = manager.applyDealAction({
-      agentID: A.agentID,
-      playerID: A.playerID,
-      playerName: A.username,
-      action: proposeAction(B, "joint_attack", {
-        targetID: C.playerID,
-        targetName: C.username,
-      }),
-      turnNumber: 0,
-    });
-    expect(third.result.accepted).toBe(false);
-    expect(third.result.reason).toContain(
-      `open-proposal cap reached for this pair (${MAX_OPEN_PROPOSALS_PER_ORDERED_PAIR})`,
+    expect(
+      manager.ledgerSnapshot().deals.map((deal) => deal.durationSteps),
+    ).toEqual([20, 3]);
+    // The cooldown is what now bounds concurrent offers: the pair never gets
+    // past MAX_OPEN_PROPOSALS_PER_ORDERED_PAIR open proposals (the cap itself
+    // stays as defense in depth for any future path that outpaces the TTL).
+    expect(openFromAToB().length).toBeLessThanOrEqual(
+      MAX_OPEN_PROPOSALS_PER_ORDERED_PAIR,
     );
-    expect(third.stamps.dealApplyAccepted).toBe(false);
+    expect(openFromAToB()).toHaveLength(2);
 
-    // Duplicate template to the same recipient is also refused (fresh pair).
+    // Duplicate template to the same recipient is refused even off cooldown:
+    // B proposes a NAP to A at step 3 and again at step 6.
     const duplicate = manager.applyDealAction({
       agentID: B.agentID,
       playerID: B.playerID,
       playerName: B.username,
       action: proposeAction(A, "non_aggression_pact"),
-      turnNumber: 0,
+      turnNumber: 75,
     });
     expect(duplicate.result.accepted).toBe(true);
+    beginStep(100); // 4
+    beginStep(125); // 5
+    beginStep(150); // 6 — B off cooldown, its step-3 proposal still open
+    expect(manager.proposalCooldownRemainingSteps(B.playerID)).toBe(0);
     const duplicateAgain = manager.applyDealAction({
       agentID: B.agentID,
       playerID: B.playerID,
       playerName: B.username,
       action: proposeAction(A, "non_aggression_pact"),
-      turnNumber: 0,
+      turnNumber: 150,
     });
     expect(duplicateAgain.result.accepted).toBe(false);
     expect(duplicateAgain.result.reason).toContain("already exists");
 
-    // The pair at its cap disappears from the proposer's proposalOptions.
-    const observation = manager.observationFor({
-      agentID: A.agentID,
-      observation: stubObservation({
-        seat: A,
-        others: [stubVisiblePlayer(B), stubVisiblePlayer(C)],
-        turnNumber: 0,
-      }),
-    });
+    // A's own open trade-security proposal to B removes exactly that template
+    // from its offers; the pair is still otherwise proposable.
+    const aOptions = optionsFor(A, [B, C]).filter(
+      (option) => option.recipientPlayerID === B.playerID,
+    );
     expect(
-      observation!.proposalOptions.every(
-        (option) => option.recipientPlayerID !== B.playerID,
+      aOptions.some(
+        (option) => option.terms.template === "trade_security_pact",
+      ),
+    ).toBe(false);
+    expect(
+      aOptions.some(
+        (option) => option.terms.template === "non_aggression_pact",
       ),
     ).toBe(true);
   });
@@ -392,27 +439,29 @@ describe("AgentDealManager caps and clamps (direct)", () => {
       })),
     ];
     const { manager, beginStep } = registeredManager(seats);
-    // Step 0: A proposes a NAP to all 7 rivals.
+    // Step 0: all 7 rivals propose a NAP to A (one proposal each — the
+    // per-agent proposal cooldown is per PROPOSER, so seven different
+    // proposers in one step is legal, one agent proposing seven times is not).
     for (const seat of seats.slice(1)) {
-      const outcome = manager.applyDealAction({
-        agentID: A.agentID,
-        playerID: A.playerID,
-        playerName: A.username,
-        action: proposeAction(seat, "non_aggression_pact"),
-        turnNumber: 0,
-      });
-      expect(outcome.result.accepted).toBe(true);
-    }
-    // Step 1: the first six accept; the seventh hits A's active-deal cap.
-    beginStep(25);
-    for (const seat of seats.slice(1, 7)) {
       const outcome = manager.applyDealAction({
         agentID: seat.agentID,
         playerID: seat.playerID,
         playerName: seat.username,
+        action: proposeAction(A, "non_aggression_pact"),
+        turnNumber: 0,
+      });
+      expect(outcome.result.accepted).toBe(true);
+    }
+    // Step 1: A accepts six; the seventh hits A's active-deal cap.
+    beginStep(25);
+    for (const seat of seats.slice(1, 7)) {
+      const outcome = manager.applyDealAction({
+        agentID: A.agentID,
+        playerID: A.playerID,
+        playerName: A.username,
         action: responseAction(
           "deal_accept",
-          `deal:P_A:${seat.playerID}:non_aggression_pact:0`,
+          `deal:${seat.playerID}:P_A:non_aggression_pact:0`,
         ),
         turnNumber: 25,
       });
@@ -420,12 +469,12 @@ describe("AgentDealManager caps and clamps (direct)", () => {
     }
     const seventh = seats[7];
     const blocked = manager.applyDealAction({
-      agentID: seventh.agentID,
-      playerID: seventh.playerID,
-      playerName: seventh.username,
+      agentID: A.agentID,
+      playerID: A.playerID,
+      playerName: A.username,
       action: responseAction(
         "deal_accept",
-        `deal:P_A:${seventh.playerID}:non_aggression_pact:0`,
+        `deal:${seventh.playerID}:P_A:non_aggression_pact:0`,
       ),
       turnNumber: 25,
     });

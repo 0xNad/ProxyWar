@@ -1,4 +1,7 @@
-import type { AgentDealLedgerEvent } from "./AgentDealCompliance";
+import {
+  sanitizeDealStatedReason,
+  type AgentDealLedgerEvent,
+} from "./AgentDealCompliance";
 import type {
   AgentRunFinalState,
   AgentRunRosterEntry,
@@ -105,6 +108,17 @@ export interface SpectatorEvent {
   secondaryName?: string | null;
   message: string;
   publicText?: string;
+  /**
+   * The acting agent's OWN one-line rationale (structured-deal events only,
+   * PROXYWAR_TUNE_STRUCTURED_DEALS): sanitized, <= 160 chars, absent when the
+   * agent stated none. Deliberately a SEPARATE field, never concatenated into
+   * `publicText`/`message`: server narration is a FACT, an agent's stated
+   * reason is a CLAIM, and a replay must keep the two distinguishable.
+   *
+   * VIEWER-ONLY. It is agent-authored text and never re-enters any agent's
+   * observation — that would be an instruction-injection channel.
+   */
+  statedReason?: string;
   /**
    * The RAW submitted action behind this event (see AgentStatsPipeline's
    * actionKind-vs-kind note). `"none"` marks events DERIVED from state rather
@@ -1035,6 +1049,12 @@ function tradeSeveredText(
  * Force-resolution events emitted after the final record are ledger-only by
  * construction (no record exists to carry them) — the full ledger remains
  * available through AgentLeagueMatchRunner.dealLedger().
+ *
+ * Both surfaces may carry the acting agent's OWN stated reason (the
+ * `dealStatedReason` stamp / the ledger event's `statedReason`). It lands in
+ * the event's separate `statedReason` field — never merged into the
+ * server-authored publicText — and is re-sanitized here because this path
+ * also rebuilds telemetry from an on-disk decisions.jsonl.
  */
 const DEAL_EVENT_LIMIT_PER_AGENT = 24;
 
@@ -1120,12 +1140,15 @@ function addDealEvents(input: {
     publicText: string,
     targetNameFallback: string | null,
     dedupeKey: string,
+    /** VIEWER-ONLY agent claim, kept out of publicText. */
+    statedReason: string | null = null,
   ) => {
     const emitted = emittedByAgent.get(actor.agentID) ?? 0;
     if (emitted >= DEAL_EVENT_LIMIT_PER_AGENT) {
       return;
     }
     emittedByAgent.set(actor.agentID, emitted + 1);
+    const claim = sanitizeDealStatedReason(statedReason);
     input.events.push({
       id: `${record.turnNumber}:${record.sequence}:${dedupeKey}`,
       sequence: record.sequence,
@@ -1138,6 +1161,9 @@ function addDealEvents(input: {
       targetName: target?.username ?? targetNameFallback,
       message: publicText,
       publicText,
+      // Re-sanitized at the boundary: this path also rebuilds telemetry from
+      // an on-disk decisions.jsonl, so the stamp is untrusted input here.
+      ...(claim !== null ? { statedReason: claim } : {}),
       // Derived from the deal ledger's transitions, not from any submitted
       // game intent (deal meta-actions carry intent: null).
       actionKind: "none",
@@ -1159,7 +1185,11 @@ function addDealEvents(input: {
       dealAction !== null &&
       dealID !== null &&
       metadata.dealApplyAccepted === true &&
-      record.result.accepted
+      // The record's `result` belongs to the deal only when the deal WAS the
+      // decision's action. A deal applied through the diplomacy slot rides a
+      // record whose result belongs to the game action, so a rejected game
+      // action must not silently swallow the deal's story beat.
+      (record.result.accepted || metadata.dealSeparateSlot === true)
     ) {
       const mapping = DEAL_ACTION_EVENTS[dealAction];
       if (mapping !== undefined) {
@@ -1187,6 +1217,9 @@ function addDealEvents(input: {
             ? metadata.dealCounterpartyName
             : null,
           `deal:${mapping.kind}:${dealID}`,
+          typeof metadata.dealStatedReason === "string"
+            ? metadata.dealStatedReason
+            : null,
         );
       }
     }
@@ -1208,6 +1241,7 @@ function addDealEvents(input: {
         item.publicText,
         item.targetName,
         `deal:${item.event}:${item.dealID}:${item.actorPlayerID}`,
+        typeof item.statedReason === "string" ? item.statedReason : null,
       );
     }
   }

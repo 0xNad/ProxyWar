@@ -52,6 +52,42 @@ The player replies:
 websocket adapter returns an `AgentDecision`, but the existing
 `AgentDecisionValidator`, `AgentRunner`, and `GameServer` remain the authority.
 
+## `selectedDealActionId` (optional)
+
+`selectedDealActionId` is an OPTIONAL second selection - the diplomacy slot. **It is inert on
+every match today**: it does something only where the server has structured deals switched on,
+which is why the reply example above does not include it. Leave it out unless a match is actually
+offering `deal_*` actions in `legalActions`, and nothing changes - a player that never sends it
+behaves exactly as before.
+
+Where deals ARE on, the field is applied ALONGSIDE `selectedLegalActionId` in the same decision,
+so proposing or answering a pact does not cost the player its move:
+
+```json
+{
+  "type": "decision_response",
+  "requestID": "req_...",
+  "selectedLegalActionId": "expand:terra-nullius:10",
+  "selectedDealActionId": "deal_accept:deal:P_A:P_B:non_aggression_pact:4",
+  "reason": "Grow west while the pact holds my east border.",
+  "confidence": 0.6
+}
+```
+
+Rules:
+
+- It must be one exact offered `legalActions[].id` whose `kind` is one of `deal_propose`,
+  `deal_accept`, `deal_reject`, `deal_withdraw`.
+- Any other id is rejected and dropped - including any id that carries a game action. There is no
+  fallback and no second game action: a game action can never be played through this field.
+- One deal action per decision. If `selectedLegalActionId` is itself a `deal_*` action, the deal
+  slot is rejected outright (the game action stands) - so send the deal in one place, not both.
+- Proposals are additionally rate-limited to one every few decision steps; while a player is
+  inside that window no `deal_propose` action is offered at all, so selecting only from the
+  offered menu is always enough.
+- The reply's `reason` doubles as the stated rationale attached to the pact or betrayal in
+  replays. It is shown to VIEWERS only - it is never sent to any other player.
+
 ## Terminal lifecycle
 
 At episode end, the game sends one terminal frame to every player websocket
