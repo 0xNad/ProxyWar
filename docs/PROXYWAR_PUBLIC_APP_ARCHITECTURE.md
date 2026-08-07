@@ -39,23 +39,23 @@ the game bundle — see "No game bundle on public routes" below.
 
 ## Route map
 
-| Route | Shell | Notes |
-|---|---|---|
-| `/` | `public.html` (wrapper-only) or platform root HTML (platform-enabled) | See "Root route branching" below. |
-| `/league` | static mirror `league/index.html` | Resilience fallback; regenerated every ~30s independent of the SPA. |
-| `/watch` | `public.html` | Event lobby / upcoming+active Premiere hub. |
-| `/agents` | `public.html` | Agents directory. |
-| `/agent/:slug` | `public.html` | Agent profile (identity + stats + Analysis tab). |
-| `/builders` | `public.html` | Builders directory. |
-| `/builder/:slug` | `public.html` | Builder profile. |
-| `/match/:matchId` | `public.html` | Canonical `FeaturedMatch` detail page. |
-| `/about` | `public.html` | Static about page. |
-| `/build` | `public.html` | Guided Builder registration flow (Stage 7). |
-| `/premiere/:premiereId` | `index.html` (game shell) | Sealed Premiere viewer — not a `public.html` page; it needs the full replay/canvas runtime. |
-| `/ai-league-replay/:runID` | `index.html` (game shell) | Full Replay viewer. |
-| `/openfront-replay/:runID` | redirect | Legacy alias — 301/302s to the canonical `/ai-league-replay/:runID` route, kept for old external links. |
-| `/account` | platform origin only | 404/soft-redirect on a league-only deployment when the platform origin isn't configured; see `PROXYWAR_PLATFORM_ORIGIN` below. |
-| `/player/:name` | `index.html` shell, own page component | Platform-side player profile; identical stats to the Agent side (spec requirement — see `PROXYWAR_IDENTITY_MODEL.md`). |
+| Route                      | Shell                                                                 | Notes                                                                                                                          |
+| -------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `/`                        | `public.html` (wrapper-only) or platform root HTML (platform-enabled) | See "Root route branching" below.                                                                                              |
+| `/league`                  | static mirror `league/index.html`                                     | Resilience fallback; regenerated every ~30s independent of the SPA.                                                            |
+| `/watch`                   | `public.html`                                                         | Event lobby / upcoming+active Premiere hub.                                                                                    |
+| `/agents`                  | `public.html`                                                         | Agents directory.                                                                                                              |
+| `/agent/:slug`             | `public.html`                                                         | Agent profile (identity + stats + Analysis tab).                                                                               |
+| `/builders`                | `public.html`                                                         | Builders directory.                                                                                                            |
+| `/builder/:slug`           | `public.html`                                                         | Builder profile.                                                                                                               |
+| `/match/:matchId`          | `public.html`                                                         | Canonical `FeaturedMatch` detail page.                                                                                         |
+| `/about`                   | `public.html`                                                         | Static about page.                                                                                                             |
+| `/build`                   | `public.html`                                                         | Guided Builder registration flow (Stage 7).                                                                                    |
+| `/premiere/:premiereId`    | `index.html` (game shell)                                             | Sealed Premiere viewer — not a `public.html` page; it needs the full replay/canvas runtime.                                    |
+| `/ai-league-replay/:runID` | `index.html` (game shell)                                             | Full Replay viewer.                                                                                                            |
+| `/openfront-replay/:runID` | redirect                                                              | Legacy alias — 301/302s to the canonical `/ai-league-replay/:runID` route, kept for old external links.                        |
+| `/account`                 | platform origin only                                                  | 404/soft-redirect on a league-only deployment when the platform origin isn't configured; see `PROXYWAR_PLATFORM_ORIGIN` below. |
+| `/player/:name`            | `index.html` shell, own page component                                | Platform-side player profile; identical stats to the Agent side (spec requirement — see `PROXYWAR_IDENTITY_MODEL.md`).         |
 
 `sendPublicAppShellPage()` (`src/scripts/ai-agent-demo-server.ts`) is the one
 function every `public.html` route above calls — it renders the shared app
@@ -110,13 +110,14 @@ render a stale banner from this flag.
 served via `express.static` in the sanctioned `PROXYWAR_LEAGUE_WRAPPER_ONLY`
 deployment shape (`ai-agent-demo-server.ts`, the `else` branch around line
 2276-2298). `express.static`'s default behavior already emits a weak `ETag`
-+ `Last-Modified`, and a matching `If-None-Match` already gets a real `304`
-— confirmed live against a running instance. The narrow `/api/*` routes
-(`/api/featured-matches/:matchId`, `/api/premieres/:premiereId/featured-match`,
-`/api/players/:name`, `/api/premieres/account`) deliberately set
-`Cache-Control: no-store` instead — these carry premiere/spoiler-sensitive or
-account-scoped state that must never be served stale even for one
-conditional-GET round trip, so `no-store` there is correct, not an oversight.
+
+- `Last-Modified`, and a matching `If-None-Match` already gets a real `304`
+  — confirmed live against a running instance. The narrow `/api/*` routes
+  (`/api/featured-matches/:matchId`, `/api/premieres/:premiereId/featured-match`,
+  `/api/players/:name`, `/api/premieres/account`) deliberately set
+  `Cache-Control: no-store` instead — these carry premiere/spoiler-sensitive or
+  account-scoped state that must never be served stale even for one
+  conditional-GET round trip, so `no-store` there is correct, not an oversight.
 
 ## Security boundaries
 
@@ -188,10 +189,10 @@ the public Builder identity + `/build` flow and document the exact missing
 dependency, with no misleading dashboard shell. That investigation happened
 and the decision was **not built, this overhaul**:
 
-- The cross-origin auth *mechanism* is buildable and precedented (the
+- The cross-origin auth _mechanism_ is buildable and precedented (the
   betting handoff pattern above could be reused as-is for a new
   `builder-dashboard` audience).
-- The actual blocker is the ownership *mapping*, not the auth: nothing in
+- The actual blocker is the ownership _mapping_, not the auth: nothing in
   this codebase has ever written to `BuilderProfileSchema.verifiedGithub` —
   every registry entry has it `null` today. Platform accounts do carry an
   authenticated GitHub login (`PlatformGithubIdentityLinkStore.ts`), but no
@@ -247,10 +248,3 @@ independently re-verify every existing Builder out of band.
   integrity-critical premiere code. See
   `tests/e2e/PublicProductJourneys.e2e.test.ts`'s own doc on that test for
   the full investigation trail.
-- Premiere re-watch Director Cut: works (verified live) for a revealed
-  `rated_coworld`-sourced premiere with a `director-cut-plan.json` on its
-  run — it shares the exact Full Replay mounting path. It never applies to
-  `controlled_exhibition`-sourced premieres (no underlying replay renders
-  for those at all) and, like Full Replay generally, is absent for
-  hosted-mirror-only episodes with no local run directory. See
-  `PROXYWAR_DIRECTOR_CUT.md`'s "Premiere re-watch integration" section.

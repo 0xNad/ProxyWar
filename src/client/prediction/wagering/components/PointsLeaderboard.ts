@@ -1,9 +1,13 @@
 import { html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { z } from "zod";
-import { formatSignedCredits } from "./pnlDisplay";
+import {
+  activateFocusTrap,
+  type FocusTrapHandle,
+} from "../../../components/FocusTrap";
 import { afterFirstIdentityBootstrap } from "../../../identity/GuestBootstrapGate";
 import { accountProfileUrl } from "../../../platform/playerProfileLink";
+import { formatSignedCredits } from "./pnlDisplay";
 
 /** Octicon "mark-github" path data — same mark used by `GithubSignIn.ts`. */
 const GITHUB_MARK_PATH =
@@ -67,30 +71,36 @@ export class PremierePointsLeaderboard extends LitElement {
   @state() private viewer: LeaderboardViewer | null = null;
   @state() private csrfToken: string | null = null;
 
-  private previouslyFocused: HTMLElement | null = null;
+  private focusTrapHandle: FocusTrapHandle | null = null;
   private loadedOnce = false;
 
   createRenderRoot() {
     return this;
   }
 
+  disconnectedCallback(): void {
+    window.removeEventListener("keydown", this.handleWindowKeydown);
+    this.focusTrapHandle?.deactivate();
+    this.focusTrapHandle = null;
+    super.disconnectedCallback();
+  }
+
   updated(changed: Map<string, unknown>): void {
     if (!changed.has("open")) return;
     if (this.open) {
-      this.previouslyFocused =
-        document.activeElement instanceof HTMLElement
-          ? document.activeElement
-          : null;
-      queueMicrotask(() =>
-        (this.querySelector('[role="dialog"]') as HTMLElement | null)?.focus(),
-      );
+      window.addEventListener("keydown", this.handleWindowKeydown);
+      queueMicrotask(() => {
+        if (!this.open) return;
+        this.focusTrapHandle = activateFocusTrap(this);
+      });
       if (!this.loadedOnce) {
         this.loadedOnce = true;
         void this.load();
       }
     } else {
-      this.previouslyFocused?.focus();
-      this.previouslyFocused = null;
+      window.removeEventListener("keydown", this.handleWindowKeydown);
+      this.focusTrapHandle?.deactivate();
+      this.focusTrapHandle = null;
     }
   }
 
@@ -98,8 +108,17 @@ export class PremierePointsLeaderboard extends LitElement {
     this.dispatchEvent(new CustomEvent("close"));
   }
 
-  private handleKeydown = (event: KeyboardEvent): void => {
-    if (event.key === "Escape") {
+  /**
+   * Window-level (not scoped to this dialog's own DOM subtree) so Escape
+   * keeps closing the modal even after focus has escaped it (P1 t1-02,
+   * reproduced twice) — the bug this replaces was a `@keydown` bound
+   * directly to the dialog `<div>`, which stops firing the instant focus
+   * leaves that subtree: exactly the keyboard dead-end QA hit (no Tab
+   * path back, no Escape, mouse-only recovery). Mirrors
+   * `BaseModal.handleKeyDown`'s identical window-level pattern.
+   */
+  private readonly handleWindowKeydown = (event: KeyboardEvent): void => {
+    if (event.key === "Escape" && this.open) {
       event.preventDefault();
       this.closeModal();
     }
@@ -147,7 +166,6 @@ export class PremierePointsLeaderboard extends LitElement {
           aria-labelledby="points-leaderboard-title"
           class="relative z-10 flex max-h-[85vh] w-full max-w-md flex-col gap-4 overflow-y-auto rounded-lg border border-line bg-surface p-4 shadow-2xl outline-none focus-visible:ring-2 focus-visible:ring-accent"
           tabindex="0"
-          @keydown=${this.handleKeydown}
         >
           <div class="flex items-center justify-between gap-2">
             <h2
@@ -201,7 +219,9 @@ export class PremierePointsLeaderboard extends LitElement {
     }
     const viewerRanked =
       this.viewer !== null &&
-      this.entries.some((entry) => entry.participantId === this.viewer?.participantId);
+      this.entries.some(
+        (entry) => entry.participantId === this.viewer?.participantId,
+      );
     return html`
       <table class="w-full border-collapse text-sm">
         <caption class="sr-only">
@@ -209,11 +229,21 @@ export class PremierePointsLeaderboard extends LitElement {
           lifetime realized profit and loss across settled premieres
         </caption>
         <thead>
-          <tr class="border-b border-line text-left text-xs uppercase tracking-wide text-ink-muted">
+          <tr
+            class="border-b border-line text-left text-xs uppercase tracking-wide text-ink-muted"
+          >
             <th scope="col" class="py-1.5 pr-2 font-semibold">Rank</th>
             <th scope="col" class="py-1.5 pr-2 font-semibold">Player</th>
-            <th scope="col" class="py-1.5 pr-2 text-right font-semibold">Points</th>
-            <th scope="col" class="py-1.5 text-right font-semibold">Matches</th>
+            <th scope="col" class="py-1.5 pr-2 text-right font-semibold">
+              Points
+            </th>
+            <th
+              scope="col"
+              class="py-1.5 text-right font-semibold"
+              title="Premieres won out of premieres traded"
+            >
+              Won / Traded
+            </th>
           </tr>
         </thead>
         <tbody>
@@ -221,7 +251,10 @@ export class PremierePointsLeaderboard extends LitElement {
           ${this.viewer !== null && !viewerRanked
             ? html`
                 <tr aria-hidden="true">
-                  <td colspan="4" class="pt-2 pb-1 text-center text-xs text-ink-muted">
+                  <td
+                    colspan="4"
+                    class="pt-2 pb-1 text-center text-xs text-ink-muted"
+                  >
                     ⋯
                   </td>
                 </tr>
@@ -279,8 +312,8 @@ export class PremierePointsLeaderboard extends LitElement {
                   class="truncate text-accent outline-none hover:text-accent-strong hover:underline focus-visible:ring-2 focus-visible:ring-accent font-semibold"
                   >${labelFor(entry)}</a
                 >`
-              : html`<span class="truncate">${labelFor(entry)}</span>`}
-          </span>${isViewer ? " (you)" : ""}
+              : html`<span class="truncate">${labelFor(entry)}</span>`} </span
+          >${isViewer ? " (you)" : ""}
         </td>
         <td
           class="py-1.5 pr-2 text-right font-mono font-semibold tabular-nums ${entry.lifetimePoints >=
@@ -290,7 +323,10 @@ export class PremierePointsLeaderboard extends LitElement {
         >
           ${formatSignedCredits(entry.lifetimePoints)}
         </td>
-        <td class="py-1.5 text-right font-mono tabular-nums text-ink-muted">
+        <td
+          class="py-1.5 text-right font-mono tabular-nums text-ink-muted"
+          title="${entry.premieresWon} won of ${entry.premieresTraded} traded"
+        >
           ${entry.premieresWon}/${entry.premieresTraded}
         </td>
       </tr>

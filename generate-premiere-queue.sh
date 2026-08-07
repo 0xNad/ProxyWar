@@ -215,12 +215,31 @@ attempt_generate() {
     rm -rf "$work_tmp" "$bundle_dir"
     return 1
   fi
-  local map episode_id xreq_id turn_count
-  read -r map episode_id xreq_id turn_count < <(python3 -c '
+  local map episode_id xreq_id turn_count winner_slot
+  read -r map episode_id xreq_id turn_count winner_slot < <(python3 -c '
 import json, sys
 d = json.load(open(sys.argv[1]))
-print(d.get("map") or "unknown", d.get("episodeId") or "", d.get("experienceRequestId") or "", d.get("turnCount") or 0)
+print(d.get("map") or "unknown", d.get("episodeId") or "", d.get("experienceRequestId") or "", d.get("turnCount") or 0, "null" if d.get("winnerSlot") is None else d.get("winnerSlot"))
 ' "$roster_json")
+
+  # The variant's own win condition ("ending when a player controls 80% of
+  # the map or the decision-step cap is reached" - coworld_manifest_ffa16p.json)
+  # means Coworld can legitimately hand back winnerSlot=null: a 16-agent FFA
+  # simply didn't converge to 80% control within this package's certified
+  # max-decision-steps budget. Left unfiltered, every such episode still got
+  # sealed, admitted, and opened for real-money trading, then had to void/
+  # refund everyone at settlement once the authoritative result surfaced
+  # winner:null - a QA-confirmed majority of real-league cycles (see
+  # RUNBOOK/known-problems.md "real-league voids"). Reject it HERE instead,
+  # before any bettor ever sees this episode: treat exactly like any other
+  # generation failure (existing backoff/retry/MAX_PER_HOUR/MAX_PER_DAY caps
+  # already bound the extra cost of the retry this triggers).
+  if [ "$winner_slot" = "null" ]; then
+    warn "generation FAILED: episode ended with no winner (winnerSlot=null, turns=${turn_count}) - discarding, not publishing a doomed-to-void market"
+    ledger_append failure "no_winner_within_decision_budget" "" "$episode_id" "$xreq_id" "$wall" "$turn_count" ""
+    rm -rf "$work_tmp" "$bundle_dir"
+    return 1
+  fi
 
   log "sealing: bundle-dir=$bundle_dir"
   local seal_log="$work_tmp/seal.log"

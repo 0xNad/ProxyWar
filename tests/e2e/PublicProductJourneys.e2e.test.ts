@@ -372,14 +372,29 @@ describe.skipIf(SKIP_PROVENANCE_BLOCK)(
   // windows before reveal) and requires a CLEAN git checkout (the
   // exhibition's build-provenance check), so it must not slow down or
   // gate every other case in this file.
+  //
+  // LIVE_PREMIERE_BOOT_TIMEOUT_MS below covers this beforeAll ONLY — the
+  // test/assertion timeouts and afterAll's cleanup timeout are unchanged.
+  // Evidence for raising it from the prior 90_000ms: PR #16 shard 1/4 (a
+  // genuinely clean GH Actions checkout, 2026-08-04) failed with "Hook
+  // timed out in 90000ms" on this exact beforeAll, while the other
+  // 1223/1227 tests in that same shard passed. This session independently
+  // measured the GH Actions coverage runner running ~3x local CPU/IO on
+  // other tests (SpawnCandidatePipelineEquivalence.test.ts's
+  // production-12P case: 67s standalone locally vs 875-1073s on GH;
+  // AgentLeagueMatch.test.ts: ~44m on GH), so a ~1-minute-local boot
+  // plausibly exceeds a 90s budget on the real runner despite fitting
+  // comfortably locally. 5 minutes gives >3x headroom over the
+  // ~1-minute local estimate without masking a genuine hang.
   const LIVE_PORT = 18789;
+  const LIVE_PREMIERE_BOOT_TIMEOUT_MS = 5 * 60_000;
   let live: FixtureServerHandle;
   let liveBrowser: CdpBrowser;
 
   beforeAll(async () => {
     live = await startFixtureServerWithLivePremiere(LIVE_PORT);
     liveBrowser = await CdpBrowser.launch();
-  }, 90_000);
+  }, LIVE_PREMIERE_BOOT_TIMEOUT_MS);
 
   afterAll(async () => {
     await liveBrowser?.close();
@@ -457,46 +472,21 @@ describe.skipIf(SKIP_PROVENANCE_BLOCK)(
     expect(beyondEdge.liveVisibleSequence).toBeGreaterThan(0);
   });
 
-  // Root-caused 2026-08-01. NOT a runtime bug — `bootstrap()`'s
-  // `integrityScope.authoritativeResult` can never observe a reveal: it is
-  // a hardcoded `z.literal("not_revealed")` in
-  // `ReplayPremiereWire.ts`'s `createPremierePublicBootstrap` (enforced by
-  // `ReplayPremierePublicPage.ts`'s `spoilerNeutralModel`, which THROWS if
-  // that field is ever anything else — the bootstrap payload is
-  // deliberately spoiler-neutral so it is safe to cache/embed pre-reveal).
-  // The three earlier cases' `bootstrap()` polling was only ever exercising
-  // the pre-reveal payload shape, never the actual reveal signal.
-  //
-  // Direct reproduction against a real admitted premiere (isolated clean
-  // clone at HEAD `09aeba224`, `FIXTURE_ADMIT_LIVE_PREMIERE=1`, temporary
-  // instrumentation in `synchronizeUnlocked()`, reverted after use) proved
-  // the release/reveal pipeline itself is correct: `nextDraftIndex`
-  // advanced through all 24 drafts, the terminal draft's
-  // `presentationOffsetMs` (21399) cleared the elapsed-time gate the moment
-  // real playback caught up, and `commitTerminalReveal()` committed on the
-  // first attempt with no retry/error. `GET
-  // /api/premieres/:id/reveal` (the same endpoint
-  // `ReplayPremiereNetwork.ts`'s real client polls via its own
-  // `revealPath()`, never `bootstrap()`) returned HTTP 200 with the full
-  // authoritative result (Fixture aggressive won, turnCount 21400)
-  // immediately once real elapsed time cleared the two checkpoint pauses
-  // plus 1ms/turn playback. Production pacing is unaffected either way —
-  // this was a test-only assertion-target mistake, not a fixture-pacing
-  // artifact and not a runtime defect.
+  // bootstrap()'s integrityScope.authoritativeResult is spoiler-neutral by
+  // design (createPremierePublicBootstrap hardcodes "not_revealed") — it
+  // never reflects a reveal. GET .../reveal below is the real signal.
   test(
     "the premiere page shows the real result once revealed",
     async () => {
       // Checkpoints pause the release clock for
-      // REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS (60s) each and this fixture has
-      // two (10%/20% of the 21,400-turn match), so real wall-clock
-      // time-to-reveal is roughly 2*60s of pause plus ~21s of 1ms/turn
-      // playback — comfortably inside this generous deadline with margin
-      // for whatever real time the earlier cases in this block already
-      // consumed.
+      // REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS (60s) each, twice — real
+      // wall-clock time-to-reveal is roughly 2*60s of pause plus a few
+      // seconds of 1ms/turn playback, comfortably inside this deadline.
       const deadline = Date.now() + 240_000;
       let revealStatus = 0;
       let revealBody: {
         authoritativeResult: { bytes: string; sha256: string };
+        finalSequence: number;
       } | null = null;
       while (Date.now() < deadline) {
         const response = await fetch(
@@ -522,10 +512,22 @@ describe.skipIf(SKIP_PROVENANCE_BLOCK)(
       expect(revealBody).not.toBeNull();
       expect(revealBody!.authoritativeResult.bytes.length).toBeGreaterThan(0);
       expect(revealBody!.authoritativeResult.sha256).toMatch(/^[0-9a-f]{64}$/);
-      // The live-projection tap and the reveal agree on the same final
-      // sequence: nothing is fabricated or diverges between the two.
-      const final = await liveProjection(0);
-      expect(final.liveVisibleSequence).toBe(21_399);
+      // Fixture match length is a deterministic but not fixed function of
+      // agent/spawn logic, so the terminal sequence is derived from this
+      // reveal (finalSequence) rather than hardcoded. Bounded poll (not a
+      // single read): live-projection and reveal are independent read
+      // paths in the runtime coordinator; wait for them to agree or fail
+      // on the deadline — never accept anything but finalSequence.
+      const liveProjectionDeadline = Date.now() + 5_000;
+      let final = await liveProjection(0);
+      while (
+        final.liveVisibleSequence !== revealBody!.finalSequence &&
+        Date.now() < liveProjectionDeadline
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        final = await liveProjection(0);
+      }
+      expect(final.liveVisibleSequence).toBe(revealBody!.finalSequence);
       // bootstrap()'s pre-reveal field is unaffected by the real reveal —
       // this is the deliberate spoiler-neutral contract, not a stale-read
       // bug. Documented here so a future reader doesn't reintroduce the

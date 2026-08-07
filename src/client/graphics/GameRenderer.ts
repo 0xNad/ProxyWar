@@ -7,6 +7,7 @@ import {
 } from "../AiLeagueReplayMode";
 import { GameStartingModal } from "../GameStartingModal";
 import { RefreshGraphicsEvent as RedrawGraphicsEvent } from "../InputHandler";
+import { installCompetitorLocateBridge } from "./CompetitorLocateBridge";
 import { FrameProfiler } from "./FrameProfiler";
 import { isReplaySpectatorView, TransformHandler } from "./TransformHandler";
 import { UIState } from "./UIState";
@@ -36,7 +37,6 @@ import { NukeTrajectoryPreviewLayer } from "./layers/NukeTrajectoryPreviewLayer"
 import { PerformanceOverlay } from "./layers/PerformanceOverlay";
 import { PlayerInfoOverlay } from "./layers/PlayerInfoOverlay";
 import { PlayerPanel } from "./layers/PlayerPanel";
-import { PointOfViewSelector } from "./layers/PointOfViewSelector";
 import { RailroadLayer } from "./layers/RailroadLayer";
 import { ReplayPanel } from "./layers/ReplayPanel";
 import { SAMRadiusLayer } from "./layers/SAMRadiusLayer";
@@ -139,9 +139,7 @@ export function createRenderer(
     if (bettingStandingsEnabled) {
       // A bettor needs a reachable, readable panel — never the
       // decorative/click-through treatment the promo overlay uses below.
-      nativeSpectatorLeaderboard.classList.add(
-        "betting-standings-leaderboard",
-      );
+      nativeSpectatorLeaderboard.classList.add("betting-standings-leaderboard");
       nativeSpectatorLeaderboard.compact = true;
       // Bridges the market's live prices in from `BettingPremierePage.ts`
       // without this shared rendering module importing anything from the
@@ -182,30 +180,15 @@ export function createRenderer(
     }
   }
 
-  // Platform PoV-follow picker — every spectator/replay route
+  // Competitor rail one-shot camera locate — every spectator/replay route
   // (`isReplaySpectatorView()`: bet, premiere, ai-league-replay,
   // proxywar-replay, legacy openfront-replay, Coworld routes), not just
   // betting or the AI-league promo UI. Live play never mounts this.
-  // Dynamically created the same way `nativeSpectatorLeaderboard` above
-  // is: `pov-selector` isn't in `index.html`, so there's nothing to
-  // `document.querySelector` for it.
-  const povSelector = isReplaySpectatorView()
-    ? (document.createElement("pov-selector") as PointOfViewSelector)
-    : null;
-  if (povSelector !== null) {
-    // A bare type-only usage of `PointOfViewSelector` (just the `as` cast
-    // above) gets elided by esbuild's dev transform — it never runs the
-    // `@customElement("pov-selector")` side effect, so the tag never
-    // registers. This `instanceof` check is a genuine value usage (same
-    // guard shape `leaderboard`/`replayPanel` already use above) and is
-    // what actually keeps the import, and therefore the registration,
-    // alive.
-    if (!(povSelector instanceof PointOfViewSelector)) {
-      console.error("pov-selector element failed to register");
-    }
-    povSelector.game = game;
-    povSelector.eventBus = eventBus;
-    document.body.appendChild(povSelector);
+  // Renders no UI of its own (a Competitors panel click resolves and
+  // recenters once; no persisted "followed" selection, no dimming, no
+  // leaderboard pin), so there is nothing to append to the DOM here.
+  if (isReplaySpectatorView()) {
+    installCompetitorLocateBridge(game, eventBus);
   }
 
   const gameLeftSidebar = document.querySelector(
@@ -431,7 +414,17 @@ export function createRenderer(
     settingsModal,
     teamStats,
     playerPanel,
-    ...(povSelector !== null ? [povSelector] : []),
+    // P0 fix (2026-08-03): dropped from this array by f75969b56 ("platform:
+    // accounts are not a betting feature") as pure collateral -- that
+    // commit's own diff shows this line removed in the SAME hunk as adding
+    // povSelector below, alongside multiTabModal/inGamePromo (also still
+    // dead; both flagged separately, not restored here -- see deploy
+    // notes). Nothing in that 319-file identity/accounts refactor's intent
+    // ever mentions HeadsUpMessage; the removal is an oversight, not a
+    // decision. Without this, tick()/init() never ran for it at all --
+    // spawn/pause/immunity/catching-up status messages, AND item 3a's
+    // (deploy 3.9) match-end combat-toast suppression, were silently inert.
+    headsUpMessage,
     alertFrame,
     performanceOverlay,
   ];

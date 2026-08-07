@@ -18,7 +18,6 @@ export const ANALYTICS_EVENT_NAMES = [
   "replay_load_started",
   "replay_load_succeeded",
   "replay_load_failed",
-  "director_cut_started",
   "watched_30s",
   "watched_2m",
   "watched_50pct",
@@ -50,7 +49,6 @@ export interface AnalyticsEventContext {
   builderSlug?: string;
   claimId?: string;
   versionLabel?: string;
-  replayMode?: "director_cut" | "full_replay";
   step?: number;
   reason?: string;
 }

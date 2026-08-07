@@ -112,6 +112,11 @@
           "maximum": 5000,
           "default": 0
         },
+        "episodeIndex": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Zero-based ordinal for this episode among repeated episodes reusing the same map/roster; rotates which deterministic fairness-assigned spawn slot each seat lands on (AgentSpawnAssignment.ts). Stamped by the commissioner via game_config_overrides; defaults to 0 (first/only episode) when omitted."
+        },
         "player_connect_timeout_seconds": {
           "type": "number",
           "minimum": 0,

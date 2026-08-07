@@ -1,6 +1,7 @@
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { gzipSync } from "node:zlib";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { DEFAULT_PLATFORM_ORIGIN } from "../../src/core/PlatformOrigin";
 import {
@@ -704,6 +705,127 @@ describe("writeCoworldLeagueSite", () => {
       "social.png",
       "standings-history.json",
     ]);
+  });
+
+  test("full-replay-retention fix (2026-08-06): a stale republish (transient mirror-sync failure) preserves a previously-archive-enriched featured match's fullRenderHref, instead of silently stripping it to null", async () => {
+    siteDir = await mkdtemp(path.join(tmpdir(), "league-site-"));
+    const summaryArchiveDir = await mkdtemp(
+      path.join(tmpdir(), "league-site-summaries-"),
+    );
+    const featuredMatchStateRoot = await mkdtemp(
+      path.join(tmpdir(), "league-site-featured-"),
+    );
+    const previousFeaturedMatchRoot =
+      process.env.PROXYWAR_FEATURED_MATCH_STATE_ROOT;
+    process.env.PROXYWAR_FEATURED_MATCH_STATE_ROOT = featuredMatchStateRoot;
+    try {
+      const episodeRequestId = "ereq_rotated_stale_test";
+      const matchId = "feat_5ca1ed00000000000000";
+      const publicRunKey = "league-coworld-rotated-stale-test";
+      await writeFile(
+        path.join(featuredMatchStateRoot, "featured-matches.json"),
+        JSON.stringify({
+          schemaVersion: 1,
+          matches: [
+            {
+              schemaVersion: 1,
+              matchId,
+              lane: "archive",
+              episodeRequestId,
+              queueItemName: null,
+              title: "Rotated Stale Test",
+              description: "",
+              participants: [],
+              map: "Pangaea",
+              format: "1v1",
+              provenance: {
+                source: "league-archive",
+                sourceRef: episodeRequestId,
+                capturedAt: "2026-07-13T00:00:00.000Z",
+              },
+              state: "published",
+              category: null,
+              scheduledAt: null,
+              revealAt: null,
+              evidence: {
+                dramaScore: null,
+                dramaGrade: null,
+                entertainmentScore: null,
+                storyGrade: null,
+                turnCount: null,
+                decisionCount: null,
+                degradedCount: null,
+                seatCount: null,
+                replayComplete: true,
+                notes: [],
+              },
+              postMatchSummary: null,
+              result: { winnerAgentId: null, placements: [] },
+              createdAt: "2026-07-13T00:00:00.000Z",
+              updatedAt: "2026-07-13T00:00:00.000Z",
+            },
+          ],
+        }),
+        "utf8",
+      );
+      // `ereq_rotated_stale_test` is deliberately absent from sampleData()'s
+      // own episodes[] — it only resolves via the durable archive.
+      await writeFile(
+        path.join(summaryArchiveDir, `${episodeRequestId}.replay-summary.json.gz`),
+        gzipSync(
+          JSON.stringify({
+            episodeRequestId,
+            runID: "coworld-rotated-stale-test",
+          }),
+        ),
+      );
+      // fullRenderHref is gated on the exact <publicRunKey>.game-record.json.gz
+      // archive existing (CoworldLeagueArchivedReplayHrefs's own contract) —
+      // without this, resolveArchivedEpisodeReplayHrefs would honestly
+      // return null even though the compact summary above resolves.
+      await writeFile(
+        path.join(summaryArchiveDir, `${publicRunKey}.game-record.json.gz`),
+        gzipSync(JSON.stringify({ turns: [{ tick: 1 }] })),
+      );
+
+      const data = sampleData();
+      const paths = await writeCoworldLeagueSite(siteDir, data, summaryArchiveDir);
+      const firstReadModel = JSON.parse(
+        await readFile(paths.readModelPath, "utf8"),
+      );
+      const firstMatch = firstReadModel.featuredMatches.find(
+        (m: { matchId: string }) => m.matchId === matchId,
+      );
+      expect(firstMatch.fullRenderHref).toBe(`/ai-league-replay/${publicRunKey}`);
+      expect(firstMatch.watchHref).toBeNull();
+
+      // Simulates a transient mirror-sync failure: the SAME last-good
+      // data.json is republished under the stale banner.
+      await markCoworldLeagueSiteStale(
+        siteDir,
+        "2026-07-13T12:05:00.000Z",
+        summaryArchiveDir,
+      );
+      const staleReadModel = JSON.parse(
+        await readFile(paths.readModelPath, "utf8"),
+      );
+      expect(staleReadModel.stale).toBe(true);
+      const staleMatch = staleReadModel.featuredMatches.find(
+        (m: { matchId: string }) => m.matchId === matchId,
+      );
+      expect(staleMatch.fullRenderHref).toBe(`/ai-league-replay/${publicRunKey}`);
+      expect(staleMatch.watchHref).toBeNull();
+    } finally {
+      if (previousFeaturedMatchRoot === undefined) {
+        delete process.env.PROXYWAR_FEATURED_MATCH_STATE_ROOT;
+      } else {
+        process.env.PROXYWAR_FEATURED_MATCH_STATE_ROOT = previousFeaturedMatchRoot;
+      }
+      await Promise.all([
+        rm(summaryArchiveDir, { recursive: true, force: true }),
+        rm(featuredMatchStateRoot, { recursive: true, force: true }),
+      ]);
+    }
   });
 
   test("serializes complete publications through a filesystem lock", async () => {

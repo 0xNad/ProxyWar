@@ -14,6 +14,7 @@ import {
   type CoworldAppShellRoute,
 } from "./coworld-appshell.ts";
 import { resolveWinnerSlot, type WinnerRef } from "./coworld-results.ts";
+import { episodeIndexFromConfig } from "./coworld-episode-index.ts";
 import { competitiveSeatSpecs } from "./coworld-seat-specs.ts";
 
 const localRoot = path.resolve(
@@ -96,7 +97,7 @@ type PendingDecision = {
   legalActions: LegalActionView[];
 };
 
-type CoworldConfig = {
+export type CoworldConfig = {
   tokens: string[];
   players: Array<{ name: string }>;
   max_decision_steps: number;
@@ -107,6 +108,19 @@ type CoworldConfig = {
   difficulty: string;
   replay_tail_turns?: number;
   player_connect_timeout_seconds?: number;
+  /**
+   * Zero-based ordinal for this episode among repeated episodes reusing the
+   * SAME map + roster (AgentLeagueMatchOptions.episodeIndex): rotates which
+   * fairness-assigned spawn slot each seat lands on so N same-map/roster
+   * episodes cycle every agent through every slot exactly once
+   * (AgentSpawnAssignment.ts). No in-repo orchestrator currently launches a
+   * sequence of Coworld containers for the same map/roster yet - this field
+   * is the hook for the external scheduler that eventually does (e.g. a
+   * season programming the same map/agents on a recurring slot): pass the
+   * scheduler's own zero-based repeat-occurrence number here. Defaults to 0
+   * (single/first episode) when omitted.
+   */
+  episodeIndex?: number;
 };
 
 type CoworldResults = {
@@ -436,8 +450,25 @@ class CoworldProtocolServer {
     clearTimeout(pending.timeout);
     this.pending.delete(requestID);
     const selectedLegalActionId = String(message.selectedLegalActionId ?? "");
+    // Optional second selection (the diplomacy slot). Forwarded only when the
+    // player actually sent a non-empty string, so a player that never sends
+    // it produces the exact same AgentDecision as before. The league runner's
+    // AgentDecisionValidator is the sole authority on whether it is a legal
+    // deal action id; a game action id here is rejected there, never applied.
+    // Length-capped like `reason` above: an inbound frame may be up to the
+    // socket's maxPayload, and this value is stamped into decisions.jsonl on
+    // rejection — unbounded per-decision text is the long-episode memory
+    // class the 0.1.19 work closed. A real deal action id is ~60 chars.
+    const selectedDealActionId =
+      typeof message.selectedDealActionId === "string" &&
+      message.selectedDealActionId.trim().length > 0
+        ? message.selectedDealActionId.trim().slice(0, 200)
+        : null;
     pending.resolve({
       actionID: selectedLegalActionId,
+      ...(selectedDealActionId !== null
+        ? { dealActionID: selectedDealActionId }
+        : {}),
       reason:
         typeof message.reason === "string"
           ? message.reason.slice(0, 500)
@@ -830,7 +861,12 @@ async function runProxyWarEpisode(
     infiniteTroops: false,
     instantBuild: false,
     randomSpawn: false,
-    disabledUnits: [],
+    disabledUnits: [modules.UnitType.Warship],
+    // A bounded territorial tiebreak prevents genuine late-game deadlocks
+    // without forcing agents to abandon diplomacy or manufacture an attack.
+    // 60 simulated minutes is 36,000 turns, below the 50,000-turn budget used
+    // by current 12-seat league variants, so those matches always adjudicate.
+    maxTimerValue: 60,
     startingGold: 200000,
     maxPlayers: config.tokens.length,
   };
@@ -935,6 +971,7 @@ async function runProxyWarEpisode(
     participants,
     spawnCandidates,
     log,
+    episodeIndex: episodeIndexFromConfig(config),
     // World 12P OOM fix: skip the ~8 KB/record tacticalAffordances summary (not
     // part of the hosted result contract) so the FULL decision log stays small
     // and complete. Simulation, decisions, and decision telemetry are

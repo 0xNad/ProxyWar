@@ -7,6 +7,7 @@ import {
   renderMatchTimeline,
   renderWarRoomFeed,
   LowerThirdController,
+  patchKeyedRegion,
   type AnalystActionKindCount,
   type AnalystEventRow,
   type CompetitorRailCallbacks,
@@ -17,10 +18,7 @@ import {
   type MatchStateStripInput,
   type TimelineMarker,
 } from "./BroadcastComposition";
-import {
-  BROADCAST_RAIL_FOLLOW_EVENT,
-  BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT,
-} from "./graphics/layers/PointOfViewSelector";
+import { BROADCAST_RAIL_LOCATE_EVENT } from "./graphics/CompetitorLocateBridge";
 import { fetchReadModel, type PublicAgent } from "./publicapp/ReadModelSchema";
 
 export type ReplayPremierePublicState =
@@ -548,12 +546,6 @@ export function mountReplayPremiereOverlay(
   // blocker — it degrades to the same "unregistered" fallback the rail
   // already renders gracefully for a genuinely unmatched player.
   let identityByPlayerName: ReadonlyMap<string, PublicAgent> | null = null;
-  // Camera-follow discoverability (spec item 6): tracks whichever player the
-  // shared `PointOfViewSelector` currently follows, purely so the rail's
-  // `followed` highlight stays truthful — the click that CAUSES a follow is
-  // a fire-and-forget dispatch (`RAIL_CALLBACKS`), never a state change this
-  // overlay owns itself.
-  let followedPlayerName: string | null = null;
   // Mobile drawer (spec item 7) / analyst mode (spec item 5): caller-owned
   // UI state, same pattern as the caption draft below — read on render,
   // mutated by a setter that re-renders.
@@ -584,7 +576,6 @@ export function mountReplayPremiereOverlay(
   const latestModel = () => model;
 
   const currentBroadcastState = (): BroadcastState => ({
-    followedPlayerName,
     activeDrawerTab,
     setActiveDrawerTab(tab: BroadcastDrawerTabId) {
       if (activeDrawerTab === tab) return;
@@ -623,17 +614,6 @@ export function mountReplayPremiereOverlay(
       render();
     },
   });
-
-  const onFollowedChange = (event: Event): void => {
-    const detail = (event as CustomEvent<{ playerName: string | null }>)
-      .detail;
-    followedPlayerName = detail?.playerName ?? null;
-    render();
-  };
-  document.addEventListener(
-    BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT,
-    onFollowedChange,
-  );
 
   /**
    * Every curated War Room event becomes a lower-third trigger, plus one
@@ -823,10 +803,6 @@ export function mountReplayPremiereOverlay(
       }
       disposed = true;
       clearInterval(clockTimer ?? undefined);
-      document.removeEventListener(
-        BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT,
-        onFollowedChange,
-      );
       lowerThirds.dispose();
       lowerThirdHost.remove();
       overlay.remove();
@@ -863,14 +839,12 @@ interface CaptionDraftState {
 
 /**
  * Bundles the Stage 4 broadcast composition's caller-owned UI state
- * (camera-follow highlight, drawer active tab, analyst-mode toggle) the same
+ * (drawer active tab, analyst-mode toggle, rail/War Room collapse) the same
  * way {@link CaptionDraftState} bundles the caption draft — a read-only
  * snapshot plus setters that trigger a re-render, threaded through the
  * render closure rather than living on the model.
  */
 interface BroadcastState {
-  /** Whichever player `PointOfViewSelector` currently follows (spec item 6) — used only to render the rail's `followed` highlight truthfully. */
-  followedPlayerName: string | null;
   /** Mobile drawer (spec item 7): active tab at narrow/short viewports; irrelevant at desktop width, where CSS shows every non-Analysis panel regardless. */
   activeDrawerTab: BroadcastDrawerTabId;
   setActiveDrawerTab(tab: BroadcastDrawerTabId): void;
@@ -984,7 +958,6 @@ function applyVolatileModelUpdates(
         buildCompetitorRailEntries(
           model.competitorRailSeats,
           identityByPlayerName,
-          broadcastState.followedPlayerName,
         ),
         {
           ...RAIL_CALLBACKS,
@@ -992,8 +965,26 @@ function applyVolatileModelUpdates(
           onToggleCollapsed: broadcastState.toggleRailCollapsed,
         },
       );
-      nextRail.dataset.seatsKey = nextRailKey;
-      rail.replaceWith(nextRail);
+      rail.dataset.seatsKey = nextRailKey;
+      // `.broadcast-rail-list` (the inner `<ol>`) is independently
+      // scrollable (`overflow-y: auto`, shared rule with
+      // `.broadcast-war-room-list` in this file's own CSS) — a
+      // `rail.replaceWith(nextRail)` full teardown here reset the list's
+      // own `scrollTop` to 0 on every seat change during active play (the
+      // "teleports me back" class this whole keyed-patch scheme exists to
+      // prevent). Patch the list's rows in place, keyed by player
+      // identity, and leave the rest of `.broadcast-rail` (heading,
+      // collapse toggle — only user clicks change those, via a full
+      // `render()` triggered by `toggleRailCollapsed`) untouched.
+      const liveList = rail.querySelector<HTMLElement>(
+        ".broadcast-rail-list",
+      );
+      const freshList = nextRail.querySelector<HTMLElement>(
+        ".broadcast-rail-list",
+      );
+      if (liveList !== null && freshList !== null) {
+        patchKeyedRegion(liveList, freshList, "data-rail-entry-key");
+      }
     }
   }
   const timeline = overlay.querySelector<HTMLElement>(".broadcast-timeline");
@@ -1050,29 +1041,119 @@ function applyVolatileModelUpdates(
         collapsed: broadcastState.warRoomCollapsed,
         onToggleCollapsed: broadcastState.toggleWarRoomCollapsed,
       });
-      nextWarRoom.dataset.eventsKey = nextKey;
-      warRoom.replaceWith(nextWarRoom);
+      warRoom.dataset.eventsKey = nextKey;
+      // `.broadcast-war-room-list` shares the same `overflow-y: auto`
+      // rule as `.broadcast-rail-list` — a `warRoom.replaceWith(...)`
+      // full teardown here reset that scrolled list's `scrollTop` to 0
+      // on every new event during active play. This list only ever
+      // grows (new events appended as `model.currentTurn` advances;
+      // existing rows' content never mutates), so `patchKeyedRegion`'s
+      // outerHTML fast-path would normally leave every already-mounted
+      // row completely untouched, inserting only brand-new events.
+      const liveList = warRoom.querySelector<HTMLElement>(
+        ".broadcast-war-room-list",
+      );
+      const freshList = nextWarRoom.querySelector<HTMLElement>(
+        ".broadcast-war-room-list",
+      );
+      if (liveList !== null && freshList !== null) {
+        // `renderWarRoomEvent` always builds a fresh row collapsed
+        // (`detail.hidden = true`), but a viewer may have expanded an
+        // existing row before this patch runs. `patchKeyedRegion` decides
+        // "did this key's content change" via a straight `outerHTML`
+        // compare, so a freshly-collapsed row would look different from
+        // an actually-unchanged-but-expanded live row and get needlessly
+        // replaced — silently re-collapsing it out from under the
+        // viewer. Mirror each live row's own expand state onto its fresh
+        // counterpart first so the compare sees genuinely unchanged
+        // events as equal and keeps the ORIGINAL (still-expanded) node.
+        const liveRowsById = new Map<string, HTMLElement>();
+        for (const row of Array.from(liveList.children) as HTMLElement[]) {
+          const id = row.dataset.warRoomEventId;
+          if (id !== undefined) liveRowsById.set(id, row);
+        }
+        for (const freshRow of Array.from(
+          freshList.children,
+        ) as HTMLElement[]) {
+          const id = freshRow.dataset.warRoomEventId;
+          const liveRow = id === undefined ? undefined : liveRowsById.get(id);
+          const liveDetail =
+            liveRow?.querySelector<HTMLElement>(".broadcast-war-room-detail") ??
+            null;
+          const freshDetail = freshRow.querySelector<HTMLElement>(
+            ".broadcast-war-room-detail",
+          );
+          const freshSummary = freshRow.querySelector<HTMLElement>(
+            ".broadcast-war-room-summary",
+          );
+          if (liveDetail === null || freshDetail === null || freshSummary === null) {
+            continue;
+          }
+          freshDetail.hidden = liveDetail.hidden;
+          freshSummary.setAttribute("aria-expanded", String(!liveDetail.hidden));
+        }
+        patchKeyedRegion(liveList, freshList, "data-war-room-event-id");
+      }
     }
   }
   // The analyst panel draws from the same bounded War Room source; nothing
-  // in it is interactive, but it is still keyed like the regions above so a
-  // viewer scrolled into its event log doesn't get their scroll position
-  // reset on every progressive frame when the log itself hasn't grown.
+  // in it is interactive, but its event log is independently scrollable
+  // (`.broadcast-analyst-events-list`, `overflow-y: auto`, max-height
+  // ~220px, this file's own CSS) so it is keyed the same way the rail/war
+  // room are above — but split into two independent keys, since the chart
+  // and decisions-unavailable-reason portions above the list are NOT
+  // independently scrollable and can keep using a full replace, while the
+  // event list itself must be patched in place to avoid resetting a
+  // viewer's scroll position on every progressive frame when only new
+  // events (not the chart/decisions) have arrived.
   const analyst = overlay.querySelector<HTMLElement>(".broadcast-analyst");
   if (analyst !== null) {
-    const nextAnalystKey = JSON.stringify([
-      model.analystEvents,
+    const nextEventsKey = JSON.stringify(model.analystEvents);
+    const nextOtherKey = JSON.stringify([
       model.analystActionKindCounts,
+      model.analystDecisionsUnavailableReason,
     ]);
-    if (analyst.dataset.analystKey !== nextAnalystKey) {
+    const eventsChanged = analyst.dataset.analystEventsKey !== nextEventsKey;
+    const otherChanged = analyst.dataset.analystOtherKey !== nextOtherKey;
+    if (eventsChanged || otherChanged) {
+      const liveEventsList = analyst.querySelector<HTMLElement>(
+        ".broadcast-analyst-events-list",
+      );
       const nextAnalyst = renderAnalystPanel({
         decisions: null,
         decisionsUnavailableReason: model.analystDecisionsUnavailableReason,
         events: model.analystEvents,
         actionKindCounts: model.analystActionKindCounts,
       });
-      nextAnalyst.dataset.analystKey = nextAnalystKey;
-      analyst.replaceWith(nextAnalyst);
+      const freshEventsList = nextAnalyst.querySelector<HTMLElement>(
+        ".broadcast-analyst-events-list",
+      );
+      if (
+        eventsChanged &&
+        !otherChanged &&
+        liveEventsList !== null &&
+        freshEventsList !== null
+      ) {
+        // Only the events sub-list changed, and a scrolled list already
+        // exists on both sides: reconcile its rows in place instead of
+        // replacing the section, so `.broadcast-analyst-events-list`'s
+        // `scrollTop` is never touched. The chart/decisions markup above
+        // it is left as-is (its own key didn't change).
+        patchKeyedRegion(
+          liveEventsList,
+          freshEventsList,
+          "data-analyst-event-key",
+        );
+        analyst.dataset.analystEventsKey = nextEventsKey;
+      } else {
+        // The chart or decisions-unavailable-reason changed (neither is
+        // independently scrollable, so a full replace is safe), or the
+        // events sub-list is transitioning to/from its "no events yet"
+        // placeholder (no existing scrolled list to preserve either way).
+        nextAnalyst.dataset.analystEventsKey = nextEventsKey;
+        nextAnalyst.dataset.analystOtherKey = nextOtherKey;
+        analyst.replaceWith(nextAnalyst);
+      }
     }
   }
   // Always `null` in production for THIS overlay — see the model field's
@@ -1110,12 +1191,16 @@ function applyVolatileModelUpdates(
 function buildCompetitorRailEntries(
   seats: readonly ReplayPremiereRailSeatView[],
   identityByPlayerName: ReadonlyMap<string, PublicAgent> | null,
-  followedPlayerName: string | null,
 ): CompetitorRailEntry[] {
   return seats.map((seat): CompetitorRailEntry => {
     const agent = identityByPlayerName?.get(seat.playerName) ?? null;
     return {
       playerName: seat.playerName,
+      // `seat.seatId` IS the identifier a rail-click's `clientID` detail
+      // resolves to (see ReplayPremiereRuntime.ts's own framePlayerBySeatId
+      // doc) — `playerName` alone can never resolve to a real PlayerView,
+      // the same mismatch AiLeagueReplayOverlay.ts had.
+      clientID: seat.seatId,
       displayName: agent !== null ? agent.displayName : seat.playerName,
       agentSlug: agent?.slug ?? null,
       emblemSvg: agent?.emblemSvg ?? null,
@@ -1132,16 +1217,17 @@ function buildCompetitorRailEntries(
       // `AgentEvaluationReport.ts`) — no bounded signal for it exists while a
       // Premiere is sealed/live, live or archived.
       degradedDecisionCount: null,
-      followed: seat.playerName === followedPlayerName,
     };
   });
 }
 
-/** Opt-in-only camera-follow bridge (spec item 6): the SAME cross-overlay CustomEvent `PointOfViewSelector` is the only listener for — clicking a rail seat pans, exactly like the crosshair button, never automatic. A module-level constant since it captures no per-mount state. */
+/** One-shot camera-locate bridge: the SAME cross-overlay CustomEvent the competitor locate bridge (`CompetitorLocateBridge.ts`) is the only listener for — clicking a rail seat centers the camera once, never persisted, never automatic. A module-level constant since it captures no per-mount state. */
 const RAIL_CALLBACKS: CompetitorRailCallbacks = {
-  onSelect: (playerName: string) => {
+  onSelect: (playerName: string, clientID: string | null) => {
     document.dispatchEvent(
-      new CustomEvent(BROADCAST_RAIL_FOLLOW_EVENT, { detail: { playerName } }),
+      new CustomEvent(BROADCAST_RAIL_LOCATE_EVENT, {
+        detail: { playerName, clientID },
+      }),
     );
   },
 };
@@ -1170,7 +1256,6 @@ function renderBroadcastRegions(
     buildCompetitorRailEntries(
       model.competitorRailSeats,
       identityByPlayerName,
-      broadcastState.followedPlayerName,
     ),
     {
       ...RAIL_CALLBACKS,
@@ -1214,9 +1299,10 @@ function renderBroadcastRegions(
     events: model.analystEvents,
     actionKindCounts: model.analystActionKindCounts,
   });
-  analyst.dataset.analystKey = JSON.stringify([
-    model.analystEvents,
+  analyst.dataset.analystEventsKey = JSON.stringify(model.analystEvents);
+  analyst.dataset.analystOtherKey = JSON.stringify([
     model.analystActionKindCounts,
+    model.analystDecisionsUnavailableReason,
   ]);
   const agentsPanel = element("div", "rp-drawer-panel");
   agentsPanel.append(rail);
@@ -4847,12 +4933,23 @@ const OVERLAY_CSS = `
       background: var(--rp-surface);
       overflow: hidden;
     }
+    /* P0 fix (found live 2026-08-02): this tab row used to be a plain
+       flow sibling above .broadcast-drawer-panels, so once a viewer
+       opened a tall panel (Events/War Room especially) the row could
+       scroll out of reach with no way back except "Leave match" -- Agents/
+       Events/Timeline/Analysis all became unreachable. position: sticky
+       pins it to the top of whichever ancestor actually scrolls (the
+       drawer itself here), a reserved lane that is ALWAYS visible
+       regardless of panel content height. */
     #${OVERLAY_ID} .broadcast-drawer-tabs {
       display: flex;
       gap: 2px;
       padding: 4px;
       background: var(--rp-surface-2);
       border-bottom: 1px solid var(--rp-line);
+      position: sticky;
+      top: 0;
+      z-index: 1;
     }
     #${OVERLAY_ID} .broadcast-drawer-tab {
       flex: 1 1 0;
@@ -4882,6 +4979,18 @@ const OVERLAY_CSS = `
       font-weight: 800;
     }
     #${OVERLAY_ID} .broadcast-drawer-panels { max-height: 240px; overflow: auto; }
+    /* P0 fix (found live 2026-08-02): collapsing the War Room list used to
+       only hide the list itself ([data-collapsed="true"]
+       .broadcast-war-room-list { display: none }, shared rule above) --
+       the drawer panel stayed at its full 240px max-height regardless, so
+       "Collapse" freed no screen space toward reaching the tab row above.
+       The active panel's own box now actually shrinks when its War Room
+       is collapsed, leaving only the heading row's height. */
+    #${OVERLAY_ID} .broadcast-drawer-panels:has(
+        .broadcast-drawer-panel[data-tab-active="true"] .broadcast-war-room[data-collapsed="true"]
+      ) {
+      max-height: 56px;
+    }
     #${OVERLAY_ID} .broadcast-drawer-panel {
       display: none;
       padding: 10px;

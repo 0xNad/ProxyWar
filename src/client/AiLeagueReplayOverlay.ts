@@ -1,22 +1,28 @@
 import {
+  ANONYMOUS_NAMES_KEY,
+  USER_SETTINGS_CHANGED_EVENT,
+} from "../core/game/UserSettings";
+import {
   aiLeagueSpectatorDisplayName,
   aiLeagueSpectatorText,
   isAiLeagueNativeSpectatorUiEnabled,
 } from "./AiLeagueReplayMode";
+import { analytics } from "./analytics/AnalyticsClient";
 import {
   LowerThirdController,
-  renderAnalystPanel,
+  patchKeyedRegion,
   renderAnalystActionChart,
-  renderAnalystDecisions,
   renderAnalystDecisionRow,
+  renderAnalystDecisions,
   renderAnalystEventLog,
   renderAnalystEventRow,
+  renderAnalystPanel,
   renderBroadcastDrawer,
   renderCompetitorRail,
   renderMatchStateStrip,
   renderMatchTimeline,
-  renderWarRoomFeed,
   renderWarRoomEvent,
+  renderWarRoomFeed,
   type AnalystActionKindCount,
   type AnalystDecisionRow,
   type AnalystEventRow,
@@ -32,17 +38,7 @@ import {
   type TimelineMarkerKind,
   type WarRoomFeedCallbacks,
 } from "./BroadcastComposition";
-import {
-  BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT,
-  BROADCAST_RAIL_FOLLOW_EVENT,
-} from "./graphics/layers/PointOfViewSelector";
-import { analytics } from "./analytics/AnalyticsClient";
-import {
-  mountDirectorCutController,
-  normalizeDirectorCutPlan,
-  segmentForTurn,
-  type DirectorCutControllerHandle,
-} from "./DirectorCutController";
+import { BROADCAST_RAIL_LOCATE_EVENT } from "./graphics/CompetitorLocateBridge";
 import { fetchReadModel, type PublicAgent } from "./publicapp/ReadModelSchema";
 import {
   mountReplayScopedLeagueClipControl,
@@ -54,7 +50,6 @@ import {
   REPLAY_SHARE_IMAGE_RESULT_EVENT,
   type ReplayShareImageResultDetail,
 } from "./ReplayShareImageBinding";
-import { ReplaySpeedMultiplier } from "./utilities/ReplaySpeedMultiplier";
 import { translateText } from "./Utils";
 
 interface AiLeagueDecisionLogEntry {
@@ -198,24 +193,14 @@ interface AiLeagueReplayOverlayInput {
   replayMaxTurn?: number | null;
   artifactAvailability?: AiLeagueReplayArtifactAvailability;
   detailsLoading?: boolean;
-  onReplaySpeedChange?: (speed: ReplaySpeedMultiplier) => void;
   /** Whether replay-only server features may fetch their supporting APIs. */
   remoteFeaturesEnabled?: boolean;
-  /**
-   * Product overhaul spec Stage 5. Raw, unvalidated JSON from
-   * `director-cut-plan.json` — this overlay owns runtime shape-checking via
-   * `normalizeDirectorCutPlan` (same split `spectatorTelemetry` already
-   * uses). Arrives asynchronously via `hydrate()`, same timing as
-   * `spectatorTelemetry`; the controller mounts (enabled by default — spec
-   * item 3) the first time a valid plan shows up and never re-mounts.
-   */
-  directorCutPlan?: unknown;
   /**
    * Season Zero broadcast match-state strip (spec Phase 5). Raw,
    * unvalidated JSON from `match-state-series.json` — this overlay owns
    * runtime shape-checking via `normalizeMatchStateSeries`, the same split
-   * `directorCutPlan` above already uses. Arrives asynchronously via
-   * `hydrate()`, same timing as `directorCutPlan`. This overlay only ever
+   * `spectatorTelemetry` above already uses. Arrives asynchronously via
+   * `hydrate()`, same timing as `spectatorTelemetry`. This overlay only ever
    * mounts for Full Replay / archived re-watch (never a sealed live
    * Premiere — see `ReplayPremiereOverlay.ts`'s `matchStateStrip` doc for
    * why a sealed Premiere must never fetch this whole-match artifact at
@@ -235,6 +220,57 @@ export interface AiLeagueReplayArtifactAvailability {
 interface AiLeagueReplayOverlayHandle {
   hydrate(nextInput: Partial<AiLeagueReplayOverlayInput>): void;
   dispose(): void;
+}
+
+/**
+ * Structural fix (P0 incident, 2026-08-03): the War Room drawer panel used
+ * to clear the top-right playback control cluster (game-right-sidebar +
+ * replay-panel, index.html's `#pw-game-control-cluster`) via a single
+ * hardcoded `top: 76px`, tuned for the cluster's DESKTOP button size
+ * (`CONTROL_BUTTON_CLASS`'s 34px targets, >=1200px viewport width). Below
+ * 1200px the SAME buttons switch to 44px touch targets (still nowhere near
+ * "mobile" -- the drawer's own `max-width: 740px` breakpoint is far
+ * narrower), so at any viewport in that 741-1199px band the cluster is
+ * taller than the 76px budget assumed, and the panel silently overlapped
+ * the controls again -- found live at 1178px. No fixed pixel constant can
+ * be correct at every window size, so this measures the cluster's actual
+ * rendered footprint (`getBoundingClientRect().bottom`, which already
+ * folds in its own top offset AND height, at any breakpoint) and republishes
+ * it as `--pw-control-cluster-bottom` on the root element; the War Room
+ * panel's `top` (createStyle's own CSS, `.broadcast-drawer-panel
+ * [data-tab-id="events"]`) reads that custom property instead of a
+ * constant. `#pw-game-control-cluster` also carries a guaranteed-topmost
+ * z-index (index.html) as defense in depth: even a stale/pre-first-
+ * measurement value can never make the controls unclickable, only
+ * cosmetically crowd them for one frame.
+ */
+function mountControlClusterGeometrySync(): () => void {
+  const cluster = document.getElementById("pw-game-control-cluster");
+  if (cluster === null) {
+    return () => {};
+  }
+  const sync = () => {
+    document.documentElement.style.setProperty(
+      "--pw-control-cluster-bottom",
+      `${Math.ceil(cluster.getBoundingClientRect().bottom)}px`,
+    );
+  };
+  sync();
+  const resizeObserver = new ResizeObserver(sync);
+  resizeObserver.observe(cluster);
+  // Belt-and-suspenders: a viewport resize that crosses the `top-4`
+  // breakpoint (position-only, no size change) wouldn't otherwise fire the
+  // ResizeObserver above on its own -- in practice it always co-occurs
+  // with the button-size breakpoint at the same 1200px threshold, but this
+  // costs nothing and removes the dependency on that coincidence.
+  window.addEventListener("resize", sync);
+  return () => {
+    resizeObserver.disconnect();
+    window.removeEventListener("resize", sync);
+    document.documentElement.style.removeProperty(
+      "--pw-control-cluster-bottom",
+    );
+  };
 }
 
 export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
@@ -261,7 +297,8 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
   overlay.innerHTML = overlayHtml(currentInput);
   document.body.appendChild(overlay);
   mountReplayPanelDisclosure(overlay);
-  mountReplayPanelControls(overlay);
+  mountReplayPanelControls(overlay, currentInput.runID);
+  const disposeControlClusterGeometrySync = mountControlClusterGeometrySync();
   // Identity (emblem/version/builder) is always public — never spoiler-
   // sensitive on its own — so it fetches once per mount and degrades to
   // "nothing resolved yet" (never blocks or fails the mount) on any error.
@@ -269,13 +306,6 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
   // re-renders (not the whole details block) so disclosure/toggle state is
   // untouched.
   let identityByPlayerName: ReadonlyMap<string, PublicAgent> = new Map();
-  // Camera-follow discoverability (spec item 6): mirrors identityByPlayerName
-  // above — closure state updated by a document-level listener registered
-  // once at mount (below), passed down into every broadcast-drawer render so
-  // the rail's `followed` seat always reflects PointOfViewSelector's own
-  // current pick, however it was set (rail click, dropdown, crosshair,
-  // initial resolution).
-  let followedPlayerName: string | null = null;
   if (input.remoteFeaturesEnabled !== false) {
     void resolveAiLeagueIdentities().then((resolved) => {
       identityByPlayerName = resolved;
@@ -284,50 +314,19 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
         overlay,
         currentInput,
         identityByPlayerName,
-        followedPlayerName,
-        directorCutHandle,
       );
     });
   }
-  // Director Cut (spec Stage 5): one controller per overlay mount, mounted
-  // the first time a valid `director-cut-plan.json` arrives via hydrate()
-  // (it loads asynchronously, same timing as spectatorTelemetry) and never
-  // re-mounted afterward — `mountDirectorCutController` owns its own
-  // enabled/disabled state from then on, the toggle button only reads it.
-  let directorCutHandle: DirectorCutControllerHandle | null = null;
-  const syncDirectorCutController = (): void => {
-    if (directorCutHandle !== null) return;
-    const plan = normalizeDirectorCutPlan(currentInput.directorCutPlan);
-    if (plan === null) return;
-    directorCutHandle = mountDirectorCutController({
-      plan,
-      // Spec item 3: "Director Cut is the default for archived matches".
-      // This overlay only ever mounts for Full Replay (archived matches) —
-      // live/re-watched premieres run through ReplayPremiereRuntime.ts's
-      // own sealed real-time timeline instead, which never wires a
-      // director-cut-plan.json into this input at all.
-      enabledByDefault: true,
-      onSpeedChange: (speed) => currentInput.onReplaySpeedChange?.(speed),
-      // Late hydration: the plan can resolve well after playback started
-      // (see comment above), so mounting enabled must apply the segment
-      // covering the CURRENT turn, never unconditionally the opening one.
-      currentTurn: currentInput.currentTurn ?? 0,
-    });
-  };
-  syncDirectorCutController();
   let clipControl = mountReplayDetailsBindings(
     overlay,
     currentInput,
     identityByPlayerName,
-    followedPlayerName,
-    directorCutHandle,
-    () => currentInput.currentTurn ?? 0,
   );
   mountReplayJumpControls(document);
 
   // Phase 7 watch-progress milestones. Hooks the SAME `ai-league-replay-frame`
   // event every other per-frame subsystem here already listens to (playhead
-  // sync, Director Cut, lower thirds) — never a new timer or RAF loop.
+  // sync, lower thirds) — never a new timer or RAF loop.
   // `activePlaybackMs` — NOT wall-clock `Date.now() - firstFrameAt` — drives
   // the 30s/2m milestones: a paused, backgrounded, or buffering viewer must
   // never inflate the retention funnel Season Zero actually measures. Each
@@ -353,7 +352,6 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
     watchMilestonesSent.add(name);
     analytics.track(name, {
       matchId: currentInput.runID,
-      replayMode: directorCutHandle !== null ? "director_cut" : "full_replay",
     });
   };
   const onWatchProgressFrame = (event: Event): void => {
@@ -430,42 +428,6 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
   };
   syncLowerThirds();
 
-  // Camera-follow discoverability (spec item 6): registered once here (not
-  // per-hydrate) since it must survive every renderDetails()/hydrate() call
-  // and only ever needs one live listener per overlay mount — same
-  // window-cleanup idiom as every other document-level listener in this
-  // file (e.g. __aiLeagueCompetitorRailCleanup's successor below).
-  const followedPlayerWin = window as Window & {
-    __aiLeagueFollowedPlayerCleanup?: () => void;
-  };
-  followedPlayerWin.__aiLeagueFollowedPlayerCleanup?.();
-  const onFollowedPlayerChange = (event: Event): void => {
-    const detail = (event as CustomEvent<{ playerName: string | null }>)
-      .detail;
-    if (detail === undefined || detail.playerName === followedPlayerName) {
-      return;
-    }
-    followedPlayerName = detail.playerName;
-    if (!overlay.isConnected) return;
-    mountAiLeagueBroadcastDrawer(
-      overlay,
-      currentInput,
-      identityByPlayerName,
-      followedPlayerName,
-      directorCutHandle,
-    );
-  };
-  document.addEventListener(
-    BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT,
-    onFollowedPlayerChange,
-  );
-  followedPlayerWin.__aiLeagueFollowedPlayerCleanup = () => {
-    document.removeEventListener(
-      BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT,
-      onFollowedPlayerChange,
-    );
-  };
-
   let disposed = false;
 
   // Single re-render path for the details block, shared by hydrate() and the
@@ -484,17 +446,52 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
       subtitle.textContent = subtitleText;
     }
     const previousClipControl = clipControl;
-    syncDirectorCutController();
     clipControl = mountReplayDetailsBindings(
       overlay,
       currentInput,
       identityByPlayerName,
-      followedPlayerName,
-      directorCutHandle,
-      () => currentInput.currentTurn ?? 0,
     );
     previousClipControl?.dispose();
     syncLowerThirds();
+  };
+
+  // P0 fix (2026-08-03): the "Anonymous Names" setting toggling mid-session
+  // used to leave every already-rendered agent name frozen at whatever it
+  // was when the details/drawer last painted -- `aiLeagueSpectatorDisplayName`/
+  // `aiLeagueSpectatorText` read the live setting on every call, but nothing
+  // ever re-invoked them after the toggle, so the War Room feed, rail,
+  // timeline, Analyst panel, decision log, diplomacy strip and social
+  // transcript all kept showing real names (or vice versa) until the next
+  // unrelated re-render happened to occur. `renderDetails()` already
+  // rebuilds every one of those regions in one call (via
+  // `mountReplayDetailsBindings` -> `mountAiLeagueBroadcastDrawer`), so
+  // reusing it here is sufficient -- same window-cleanup idiom as
+  // every other document/window-level listener in this file, since this
+  // listener must also survive
+  // every renderDetails()/hydrate() call and be torn down by the NEXT
+  // mount if `dispose()` was never called. Listens on `window` (not
+  // `document`): `UserSettings.emitChange` dispatches on `globalThis`
+  // (== `window`), which every other `USER_SETTINGS_CHANGED_EVENT`
+  // consumer in the codebase (Main.ts, FlagInput.ts, PatternInput.ts)
+  // already listens on for exactly that reason -- a non-bubbling custom
+  // event fired on `window` never reaches a `document`-level listener.
+  const anonymousNamesWin = window as Window & {
+    __aiLeagueAnonymousNamesCleanup?: () => void;
+  };
+  anonymousNamesWin.__aiLeagueAnonymousNamesCleanup?.();
+  const onAnonymousNamesChange = (): void => {
+    if (!overlay.isConnected) return;
+    renderDetails();
+  };
+  window.addEventListener(
+    `${USER_SETTINGS_CHANGED_EVENT}:${ANONYMOUS_NAMES_KEY}`,
+    onAnonymousNamesChange,
+  );
+  anonymousNamesWin.__aiLeagueAnonymousNamesCleanup = () => {
+    window.removeEventListener(
+      `${USER_SETTINGS_CHANGED_EVENT}:${ANONYMOUS_NAMES_KEY}`,
+      onAnonymousNamesChange,
+    );
   };
   const disposePlayheadSync = mountAiLeaguePlayheadSync(
     overlay,
@@ -556,6 +553,7 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
       }
       disposed = true;
       disposePlayheadSync();
+      disposeControlClusterGeometrySync();
       document.removeEventListener(
         "ai-league-replay-frame",
         onWatchProgressFrame,
@@ -563,8 +561,6 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
       lowerThird.dispose();
       clipControl?.dispose();
       clipControl = null;
-      directorCutHandle?.dispose();
-      directorCutHandle = null;
       disposeReplayOverlay(overlay);
     },
   } satisfies AiLeagueReplayOverlayHandle;
@@ -584,7 +580,7 @@ function disposeReplayOverlay(overlay: HTMLElement) {
     __aiLeagueDiplomacyCleanup?: () => void;
     __aiLeagueSocialBubblesCleanup?: () => void;
     __aiLeagueBroadcastDrawerCleanup?: () => void;
-    __aiLeagueFollowedPlayerCleanup?: () => void;
+    __aiLeagueAnonymousNamesCleanup?: () => void;
   };
   win.__aiLeaguePanelDisclosureCleanup?.();
   win.__aiLeaguePanelControlsCleanup?.();
@@ -593,7 +589,7 @@ function disposeReplayOverlay(overlay: HTMLElement) {
   win.__aiLeagueDiplomacyCleanup?.();
   win.__aiLeagueSocialBubblesCleanup?.();
   win.__aiLeagueBroadcastDrawerCleanup?.();
-  win.__aiLeagueFollowedPlayerCleanup?.();
+  win.__aiLeagueAnonymousNamesCleanup?.();
   delete win.__aiLeaguePanelDisclosureCleanup;
   delete win.__aiLeaguePanelControlsCleanup;
   delete win.__aiLeagueReplayJumpCleanup;
@@ -601,7 +597,7 @@ function disposeReplayOverlay(overlay: HTMLElement) {
   delete win.__aiLeagueDiplomacyCleanup;
   delete win.__aiLeagueSocialBubblesCleanup;
   delete win.__aiLeagueBroadcastDrawerCleanup;
-  delete win.__aiLeagueFollowedPlayerCleanup;
+  delete win.__aiLeagueAnonymousNamesCleanup;
   overlay.remove();
   document.getElementById("ai-league-social-transcript")?.remove();
   document.getElementById("ai-league-headline-event")?.remove();
@@ -618,9 +614,6 @@ function mountReplayDetailsBindings(
   overlay: HTMLElement,
   input: AiLeagueReplayOverlayInput,
   identityByPlayerName: ReadonlyMap<string, PublicAgent>,
-  followedPlayerName: string | null,
-  directorCutHandle: DirectorCutControllerHandle | null,
-  getCurrentTurn: () => number,
 ): ReplayScopedLeagueClipControlHandle | null {
   const telemetry =
     input.spectatorTelemetry as AiLeagueSpectatorTelemetry | null;
@@ -632,20 +625,8 @@ function mountReplayDetailsBindings(
   mountAiLeagueDecisionsDisclosure(overlay);
   mountAiLeagueRadioToggle(overlay);
   mountAiLeagueAnalystToggle(overlay);
-  mountAiLeagueDirectorCutToggle(
-    overlay,
-    directorCutHandle,
-    getCurrentTurn,
-    input.runID,
-  );
   mountAiLeagueShareImageButton(overlay);
-  mountAiLeagueBroadcastDrawer(
-    overlay,
-    input,
-    identityByPlayerName,
-    followedPlayerName,
-    directorCutHandle,
-  );
+  mountAiLeagueBroadcastDrawer(overlay, input, identityByPlayerName);
   const clipContainer = overlay.querySelector<HTMLElement>(
     "[data-ai-league-clip]",
   );
@@ -824,76 +805,6 @@ function mountAiLeagueAnalystToggle(overlay: HTMLElement): void {
 }
 
 /**
- * Director Cut / Full Replay (spec Stage 5 item 3). Absent entirely until a
- * valid plan has actually mounted a controller (no button for a match with
- * no plan yet, or a legacy bundle with none at all — never a disabled
- * button that does nothing). Self-guards against a duplicate on re-hydrate,
- * same as `mountAiLeagueAnalystToggle`. State lives on the controller
- * itself (mounted once, enabled by default per spec item 3), not on a DOM
- * class: `directorCutHandle.isEnabled()` is the single source of truth this
- * button reads and writes, so a re-hydrate that calls this again (button
- * already exists, so it no-ops) never fights the controller's own state.
- */
-function mountAiLeagueDirectorCutToggle(
-  overlay: HTMLElement,
-  directorCutHandle: DirectorCutControllerHandle | null,
-  getCurrentTurn: () => number,
-  runID: string,
-): void {
-  if (directorCutHandle === null) return;
-  const actions = overlay.querySelector<HTMLElement>(
-    ".ai-league-header-actions",
-  );
-  if (actions === null) return;
-  if (
-    actions.querySelector("[data-ai-league-director-cut-toggle]") !== null
-  ) {
-    return;
-  }
-  const toggle = document.createElement("button");
-  toggle.type = "button";
-  toggle.dataset.aiLeagueDirectorCutToggle = "";
-  const apply = (on: boolean) => {
-    toggle.setAttribute("aria-pressed", String(on));
-    toggle.classList.toggle("is-on", on);
-    toggle.textContent = translateText(
-      on
-        ? "ai_league_replay.director_cut_on"
-        : "ai_league_replay.director_cut_off",
-    );
-  };
-  const initiallyEnabled = directorCutHandle.isEnabled();
-  apply(initiallyEnabled);
-  // First-ever creation of this button (guarded above) IS the one-shot
-  // "Director Cut mounted" point — fires once for the spec's "enabled by
-  // default" case, exactly like `analytics.track("director_cut_started")`
-  // fires again below only on an explicit user toggle-ON (never on toggle-
-  // OFF, and never twice for the same mount since the button only mounts
-  // once).
-  if (initiallyEnabled) {
-    analytics.track("director_cut_started", {
-      matchId: runID,
-      replayMode: "director_cut",
-    });
-  }
-  toggle.addEventListener("click", () => {
-    const next = !directorCutHandle.isEnabled();
-    // Re-enabling mid-match must resync to the segment covering the
-    // CURRENT turn, never the opening one (see DirectorCutController.ts's
-    // `setEnabled` doc) — irrelevant when turning off.
-    directorCutHandle.setEnabled(next, getCurrentTurn());
-    apply(next);
-    if (next) {
-      analytics.track("director_cut_started", {
-        matchId: runID,
-        replayMode: "director_cut",
-      });
-    }
-  });
-  actions.prepend(toggle);
-}
-
-/**
  * Advance the playhead-windowed panels as the replay runs. Re-renders the whole
  * details block on a throttle (not every frame — that block is expensive), and
  * only when the visible decision count actually changes, so an idle or paused
@@ -992,7 +903,7 @@ function mountReplayPanelDisclosure(overlay: HTMLElement) {
   };
 }
 
-function mountReplayPanelControls(overlay: HTMLElement) {
+function mountReplayPanelControls(overlay: HTMLElement, runID: string) {
   const storageKey = "ai-league-spectator-layout-v1";
   let narrow = isNarrowReplayViewport();
   if (!narrow) {
@@ -1126,6 +1037,38 @@ function mountReplayPanelControls(overlay: HTMLElement) {
     ?.addEventListener("click", () => {
       localStorage.removeItem(storageKey);
       overlay.removeAttribute("style");
+      // P2 fix (pass-10 t4-03): this was ONLY a panel-position reset, but
+      // it is the ONE control this header labels "Reset" — right next to
+      // Play/Pause, exactly where a viewer expects "restart the match"
+      // to live, and it visibly did nothing once the DC reached its end
+      // screen. `LocalServer.ts`'s `jumpReplayForward()` (the engine
+      // behind `ReplayJumpToTurnEvent`) is deliberately forward-only —
+      // its own `Math.max(this.turns.length, …)` clamp means a turn-0
+      // request after every turn has already played is a genuine no-op,
+      // not a bug in that function; this app has no backward-seek path
+      // through an already-replayed simulation, in ANY playback state.
+      // A full reload is the one path already proven (QA's own repro) to
+      // restart cleanly from turn 0 — safe specifically on this
+      // coworld/DC replay route because `ReplayPositionPersistence.ts`'s
+      // refresh-resume feature explicitly excludes `source ===
+      // "coworld-replay"` (see `Main.ts`), so there is no saved position
+      // to resume into. Same reload-to-restart convention this codebase
+      // already uses elsewhere (`AccountModal.ts`, `Cosmetics.ts`,
+      // `ReplayLoadingScreen.ts`'s own retry button).
+      //
+      // P0 fix (2026-08-03, deploy 2B): `window.location.reload()` trusts
+      // whatever the LIVE address bar currently holds. `handleJoinLobby`'s
+      // own `pathnameAtJoinStart` doc (Main.ts) already documents a real,
+      // live-confirmed, not-fully-isolated case where `window.location.
+      // pathname` transiently reads back wrong mid-navigation; QA caught
+      // Reset itself landing on the site homepage instead of restarting
+      // this replay, matching that exact class of URL-state drift. Reset
+      // must always restart THIS replay regardless of whatever the
+      // address bar happens to hold at click time, so it navigates to the
+      // canonical `/ai-league-replay/:runID` path explicitly — the SAME
+      // path shape `handleJoinLobby` itself pushes for this exact route —
+      // instead of reloading in place.
+      window.location.href = `/ai-league-replay/${encodeURIComponent(runID)}`;
     });
 }
 
@@ -2306,6 +2249,28 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       .broadcast-war-room[data-collapsed="true"] .broadcast-war-room-list {
         display: none;
       }
+      /*
+       * P0 fix (2026-08-03, deploy 2A -- corrected): collapsing the War
+       * Room list only hid the list itself (rule above) -- the drawer
+       * panel's OWN box (".broadcast-drawer-panel[data-tab-id="events"]",
+       * fixed max-height above) kept its full height regardless, so
+       * "Collapse" freed no screen space (the "impossible to minimize"
+       * report). FIRST attempt here used a :has(.broadcast-war-room
+       * [data-collapsed="true"]) ancestor selector, matching
+       * ReplayPremiereOverlay.ts's own analogous fix -- but in THIS file
+       * renderWarRoomFeed's own section carries "broadcast-war-room"
+       * AND preserveDrawerPanelWrapperIdentity copies "broadcast-drawer-
+       * panel"/data-tab-id onto that SAME element (never a wrapper), so
+       * ".broadcast-drawer-panel[data-tab-id="events"]" and
+       * ".broadcast-war-room[data-collapsed="true"]" are literally the
+       * SAME node -- there is no ancestor/descendant relationship for
+       * :has() to match, so the rule silently never applied (confirmed
+       * live: computed max-height stayed at the full uncollapsed value).
+       * A plain compound selector on that one element is correct here.
+       */
+      .broadcast-drawer-panel[data-tab-id="events"][data-collapsed="true"] {
+        max-height: 58px;
+      }
       .broadcast-rail-list {
         display: grid;
         gap: 8px;
@@ -2333,10 +2298,6 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       }
       .broadcast-rail-entry[data-alive="false"] {
         opacity: 0.55;
-      }
-      .broadcast-rail-entry[data-followed="true"] {
-        border-color: var(--pw-accent, #f4a64a);
-        box-shadow: 0 0 0 1px var(--pw-accent, #f4a64a) inset;
       }
       .broadcast-rail-select {
         display: grid;
@@ -2432,11 +2393,29 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       }
       .broadcast-drawer-panel[data-tab-id="events"] {
         position: fixed;
-        top: 12px;
+        /*
+         * Structural fix (P0 incident, 2026-08-03), see
+         * mountControlClusterGeometrySync's own doc: a fixed "top: 76px"
+         * assumed the playback control cluster (game-right-sidebar +
+         * replay-panel, index.html's "#pw-game-control-cluster") never
+         * exceeds ~66px, true only at >=1200px viewport width. Below that
+         * (but still well above the drawer's own 740px mobile breakpoint)
+         * the SAME buttons grow to 44px touch targets and the cluster gets
+         * taller than the budget, so this panel silently overlapped the
+         * controls again in that band -- found live at 1178px. "top" now
+         * reads the cluster's ACTUAL measured bottom edge (kept live by a
+         * ResizeObserver + resize listener), correct at every viewport
+         * width, not just the two breakpoints this constant was tuned for.
+         * "76px" stays only as the pre-first-measurement fallback, and
+         * "#pw-game-control-cluster"'s own z-index (index.html, above
+         * every band used here) is the belt-and-suspenders guarantee that
+         * even a stale fallback can never make the controls unclickable.
+         */
+        top: calc(var(--pw-control-cluster-bottom, 76px) + 10px);
         right: 12px;
         z-index: 50000;
         width: min(360px, calc(100vw - 24px));
-        max-height: calc(100vh - 24px);
+        max-height: calc(100vh - var(--pw-control-cluster-bottom, 76px) - 22px);
         overflow: hidden;
         border: 1px solid var(--pw-line-strong, #3a4656);
         border-radius: var(--pw-r-xl, 18px);
@@ -2492,6 +2471,48 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         border-radius: 8px;
         background: var(--pw-surface-2, #18202b);
       }
+      /*
+       * Tier 3 "routine" rows (War Room curation spec, deploy 3.3): compact
+       * single-line treatment so a viewer can visually tell "a lot just
+       * happened" from "routine skirmish" by row weight alone, without
+       * reading text (spec acceptance criterion). Consecutive tier-3 runs
+       * are pre-collapsed into one grouped summary row by
+       * groupRoutineWarRoomEvents() before this ever renders, so this only
+       * ever needs to shrink a genuinely routine singleton or a group
+       * summary — never hide content outright.
+       */
+      .broadcast-war-room-item[data-tier="3"] {
+        background: transparent;
+        border-color: transparent;
+      }
+      .broadcast-war-room-item[data-tier="3"] .broadcast-war-room-summary {
+        padding: 3px 9px;
+        opacity: 0.62;
+        font-size: 11px;
+      }
+      .broadcast-war-room-item[data-tier="3"] .broadcast-war-room-glyph,
+      .broadcast-war-room-item[data-tier="3"] .broadcast-war-room-kind {
+        display: none;
+      }
+      /*
+       * Tier 1 "major" rows: full-width, bold, distinct accent border — the
+       * handful of moments (elimination/alliance/betrayal) that actually
+       * matter, weighted to stand out from the tier-2 default style around
+       * them.
+       */
+      .broadcast-war-room-item[data-tier="1"] {
+        border-color: var(--pw-line-strong, #3a4656);
+        background: var(--pw-surface-3, #202b3a);
+      }
+      .broadcast-war-room-item[data-tier="1"] .broadcast-war-room-summary {
+        padding: 9px 11px;
+      }
+      .broadcast-war-room-item[data-tier="1"] .broadcast-war-room-headline {
+        font-weight: 800;
+      }
+      .broadcast-war-room-item[data-tier="1"] .broadcast-war-room-glyph {
+        font-size: 15px;
+      }
       .broadcast-war-room-summary {
         display: flex;
         align-items: center;
@@ -2518,12 +2539,20 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         letter-spacing: 0.04em;
         color: var(--pw-info, #56c7f5);
       }
+      /*
+       * Name truncation fix (War Room curation spec item 3, deploy 3.3):
+       * a fixed nowrap+ellipsis silently cut off long agent names
+       * ("Captain Underpants Maximum strike…", "K1Z Mickey Mouse strikes
+       * SIAN VOID…") with no way to see the rest. The row already lives in
+       * its own repositioned column with room to grow, so this now wraps
+       * onto a second line instead of truncating — nothing is ever
+       * silently cut off.
+       */
       .broadcast-war-room-headline {
         flex: 1 1 auto;
         min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+        overflow-wrap: break-word;
+        white-space: normal;
       }
       .broadcast-war-room-turn {
         flex: 0 0 auto;
@@ -2552,9 +2581,20 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       .broadcast-war-room-detail[hidden] {
         display: none;
       }
-      .broadcast-war-room-reason,
+      .broadcast-war-room-reason {
+        margin: 0;
+      }
+      /*
+       * white-space: pre-line (not the plain margin: 0 every other War
+       * Room detail paragraph gets): a grouped tier-3 summary row
+       * (groupRoutineWarRoomEvents, spec item 1) packs each collapsed
+       * skirmish's headline into this field newline-separated, so a
+       * viewer who expands "+N more skirmishes" sees one line per
+       * skirmish instead of one run-on sentence.
+       */
       .broadcast-war-room-extra {
         margin: 0;
+        white-space: pre-line;
       }
       .broadcast-war-room-jump {
         justify-self: start;
@@ -2672,9 +2712,23 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       }
       .broadcast-analyst-chart-row {
         display: grid;
-        grid-template-columns: 90px 1fr 32px;
+        grid-template-columns: 90px 1fr auto;
         align-items: center;
         gap: 8px;
+      }
+      /*
+       * P2 fix (pass-1 p1-05/p1-06, 2026-08-02): the count column was a
+       * fixed 32px — plenty for a single/double-digit count but silently
+       * clipping mid-digit once a match's action-kind tally passed 999
+       * (CSS Grid clips overflowing content with no ellipsis by
+       * default). "auto" above sizes the column to its real content;
+       * tabular-nums (same fix .broadcast-war-room-turn already
+       * uses) keeps digits from jittering in width as they tick up live.
+       */
+      .broadcast-analyst-chart-count {
+        white-space: nowrap;
+        font-variant-numeric: tabular-nums;
+        text-align: right;
       }
       .broadcast-analyst-chart-bar {
         height: 8px;
@@ -2717,11 +2771,9 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
        * opacity fade, never the scale pulse.
        *
        * Bottom-anchored, above the desktop-fixed timeline bar (spec item 3
-       * fix: this previously sat at top:16px, the EXACT lane
-       * pov-selector's "Follow:" control also occupies — see
-       * PointOfViewSelector.ts's fixed top-4 left-1/2 -translate-x-1/2
-       * root — so every pulse visually buried the follow control behind
-       * it. Reserving a distinct bottom lane, clear of the timeline bar
+       * fix: this previously sat at top:16px, overlapping the old
+       * floating "Follow:" toolbar's own lane). Reserving a distinct
+       * bottom lane, clear of the timeline bar
        * (.broadcast-drawer-panel[data-tab-id="timeline"]'s bottom:12px
        * + ~38px height) and of the older #ai-league-headline-event
        * banner's own bottom:9% lane, removes the overlap without
@@ -2801,7 +2853,25 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
           padding: 6px 4px;
           font-size: 11px;
         }
-        .broadcast-drawer-panel {
+        /*
+         * The plain .broadcast-drawer-panel reset below is (class-only)
+         * specificity 0,1,0 -- LOWER than the desktop .broadcast-drawer-
+         * panel[data-tab-id="events"]/[data-tab-id="timeline"] rules
+         * (class + attribute = 0,2,0), so CSS specificity -- not source
+         * order, not the media query -- decided the winner: the desktop
+         * position:fixed rules kept winning here regardless. Timeline
+         * kept its desktop-only left:404px; right:388px; at a 390px
+         * viewport (an already-negative computed width), rendering
+         * entirely off-screen and permanently unreachable on mobile
+         * (found live during the P1 mobile sweep). Repeating the same
+         * [data-tab-id] attribute selectors here matches that
+         * specificity exactly; being later in source order then wins the
+         * cascade tie the way every other selector in this block already
+         * (correctly) relies on.
+         */
+        .broadcast-drawer-panel,
+        .broadcast-drawer-panel[data-tab-id="events"],
+        .broadcast-drawer-panel[data-tab-id="timeline"] {
           position: static;
           top: auto;
           left: auto;
@@ -2867,7 +2937,9 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
           padding: 4px;
           font-size: 10px;
         }
-        .broadcast-drawer-panel {
+        .broadcast-drawer-panel,
+        .broadcast-drawer-panel[data-tab-id="events"],
+        .broadcast-drawer-panel[data-tab-id="timeline"] {
           position: static;
           top: auto;
           left: auto;
@@ -2893,6 +2965,37 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         }
         .broadcast-rail-list {
           max-height: 30vh;
+        }
+        /*
+         * P2 fix (pass-10, small item): the tab bar (Agents/Events/
+         * Timeline/Analysis) lives INSIDE [data-ai-league-broadcast-
+         * drawer], but that container renders AFTER .ai-league-
+         * standings in DOM order — fine at every other breakpoint
+         * (plenty of vertical room), but at this viewport's ~277px
+         * visible body height, Standings' own (unbounded, up to 12
+         * agents) rows plus the match-state strip above the tabs pushed
+         * the tab bar to ~y:419 in a 390px-tall viewport — reachable by
+         * scrolling the panel, but not visible on open (QA pass-10 t2-02:
+         * "tabs container was measured OFF the visible viewport on
+         * initial open"). Standings' own ranked-agent content is already
+         * duplicated by the drawer's own "Agents" tab, so reordering
+         * (never hiding — still one scroll away, same as every other
+         * off-fold section) the drawer ahead of it is a pure visual
+         * reorder: Standings' DOM position/tab order/scroll-anchoring
+         * are untouched, only where it PAINTS relative to the drawer.
+         */
+        .ai-league-body {
+          display: flex;
+          flex-direction: column;
+        }
+        [data-ai-league-broadcast-drawer] {
+          order: 1;
+        }
+        .ai-league-standings {
+          order: 2;
+        }
+        [data-ai-league-details] {
+          order: 3;
         }
       }
     </style>
@@ -3174,8 +3277,14 @@ function mountAiLeagueDiplomacyStrip(
   win.__aiLeagueDiplomacyCleanup?.();
   const directiveByName = latestDirectiveByPlayer(decisions);
   // Frames fire every game tick; standings only change on ownership/diplomacy
-  // events. Skipping identical re-renders avoids per-tick innerHTML churn
-  // (layout + listener teardown) on the hottest spectator surface.
+  // events. Skipping identical re-renders avoids per-tick DOM churn (layout
+  // + listener teardown) on the hottest spectator surface. When content DOES
+  // change, patch the scrolled container's rows in place, keyed by player
+  // identity (`patchKeyedRegion`) — this region is independently scrollable
+  // (`[data-ai-league-diplomacy-rows] { overflow-y: auto }`, spec: standings
+  // panel), and a wholesale `container.innerHTML =` reset its `scrollTop` to
+  // 0 on every ownership/diplomacy change during active play — the "teleports
+  // me back when I try to scroll mid-playback" class.
   let lastRowsHtml = "";
   const onFrame = (event: Event) => {
     const detail = (event as CustomEvent<AiLeagueReplayFrameEventDetail>)
@@ -3196,7 +3305,9 @@ function mountAiLeagueDiplomacyStrip(
       return;
     }
     lastRowsHtml = rowsHtml;
-    container.innerHTML = rowsHtml;
+    const fresh = document.createElement("div");
+    fresh.innerHTML = rowsHtml;
+    patchKeyedRegion(container, fresh, "data-diplo-key");
   };
   document.addEventListener("ai-league-replay-frame", onFrame);
   win.__aiLeagueDiplomacyCleanup = () => {
@@ -3243,14 +3354,18 @@ function diplomacyRowsHtml(
   const STANDINGS_MAX_ROWS = 12;
   const ranked = rankedAll.slice(0, STANDINGS_MAX_ROWS);
   const hiddenCount = rankedAll.length - ranked.length;
+  // Each player's block is wrapped in one keyed wrapper element so
+  // `patchKeyedRegion` (mountAiLeagueDiplomacyStrip's onFrame) can diff and
+  // move it as a single unit — `playerID` is a stable per-agent identity,
+  // matching the `bySmallID`/`byPlayerID` maps built above.
   const moreLine =
     hiddenCount > 0
-      ? `<p class="ai-league-diplo-more">${escapeHtml(
+      ? `<div class="ai-league-diplo-entry" data-diplo-key="__more__"><p class="ai-league-diplo-more">${escapeHtml(
           translateText("ai_league_replay.standings_more").replace(
             "{count}",
             String(hiddenCount),
           ),
-        )}</p>`
+        )}</p></div>`
       : "";
   return (
     ranked
@@ -3267,6 +3382,7 @@ function diplomacyRowsHtml(
         );
         const directive = directiveByName.get(normalizeName(player.username));
         return `
+        <div class="ai-league-diplo-entry" data-diplo-key="${escapeHtml(player.playerID)}">
         <div class="ai-league-diplo-row">
           <span class="ai-league-diplo-rank">${index + 1}</span>
           <span class="ai-league-color-dot" style="background:${escapeHtml(aiLeagueDisplayColor(player))}"></span>
@@ -3278,7 +3394,8 @@ function diplomacyRowsHtml(
           directive
             ? `<p class="ai-league-directive"><b>${escapeHtml(translateText("ai_league_replay.directive_label"))}</b> ${escapeHtml(directive)}</p>`
             : ""
-        }`;
+        }
+        </div>`;
       })
       .join("") + moreLine
   );
@@ -3619,11 +3736,14 @@ function competitorRailEntries(
       telemetryByName.get(normalizeName(username)) ??
       null;
     const identity = identityByPlayerName.get(username) ?? null;
-    const displayName =
-      identity?.displayName ??
-      aiLeagueSpectatorDisplayName(
-        (framePlayer?.displayName ?? "") || username,
-      );
+    // P0 fix (2026-08-03, deploy 2B): a resolved public identity's own
+    // displayName used to bypass aiLeagueSpectatorDisplayName entirely --
+    // the ONE Competitors-rail path that kept leaking a real agent name
+    // with "Anonymous Names" on, since every other name in this rail
+    // (and everywhere else in this file) already funnels through it.
+    const displayName = aiLeagueSpectatorDisplayName(
+      identity?.displayName ?? ((framePlayer?.displayName ?? "") || username),
+    );
     const territoryPercent =
       framePlayer !== undefined && totalTiles > 0
         ? (framePlayer.tilesOwned / totalTiles) * 100
@@ -3640,6 +3760,17 @@ function competitorRailEntries(
         : { allies: [], wars: [] };
     return {
       playerName: username,
+      // Camera-locate discoverability: a rail seat's PlayerView identity
+      // has NO relationship to the AI League roster's `username` --
+      // GameView's own name()/displayName() are procedurally-generated
+      // in-game nation names ("Somali Host", "Almohad Regime", ...), a
+      // totally disjoint namespace from a rail button's roster username,
+      // so a click dispatched by username alone could never resolve to a
+      // real PlayerView. `clientID` is the one identifier BOTH sides
+      // actually share (AiLeagueReplayFramePlayer.clientID /
+      // PlayerView.clientID()) -- this is what `BROADCAST_RAIL_LOCATE_EVENT`
+      // correlates on instead.
+      clientID: framePlayer?.clientID ?? null,
       displayName,
       agentSlug: identity?.slug ?? null,
       emblemSvg: identity?.emblemSvg ?? null,
@@ -3654,8 +3785,8 @@ function competitorRailEntries(
       alive,
       allies: relations.allies,
       wars: relations.wars,
-      degradedDecisionCount: degradedByName.get(normalizeName(username)) ?? null,
-      followed: false,
+      degradedDecisionCount:
+        degradedByName.get(normalizeName(username)) ?? null,
     } satisfies CompetitorRailEntry;
   });
 
@@ -3731,11 +3862,19 @@ function aiLeagueAnalystPanelData(
   telemetry: AiLeagueSpectatorTelemetry | null,
 ): AnalystPanelData {
   const hasDecisions = input.decisions.length > 0;
+  // P0 fix (2026-08-03): both sub-lists below used to pass real agent
+  // identity straight through -- every other consumer of this same raw
+  // `AiLeagueDecisionLogEntry`/`AiLeagueSpectatorEvent` data
+  // (curatedWarRoomEvents, matchTimelineEventMarkers,
+  // communicationThreadHtml) already resolves names through
+  // `aiLeagueSpectatorDisplayName`/`aiLeagueSpectatorText`, so the
+  // Analyst decisions table's Agent column and the Analyst event log
+  // leaked real names even with Anonymous Names on.
   const decisions: AnalystDecisionRow[] = input.decisions
     .map((decision) => ({
       sequence: decision.sequence,
       turnNumber: decision.turnNumber,
-      playerName: decision.username,
+      playerName: aiLeagueSpectatorDisplayName(decision.username),
       brainType: decision.brainType,
       selectedActionKind: decision.selectedActionKind,
       selectedLegalActionId: decision.selectedLegalActionId,
@@ -3753,10 +3892,13 @@ function aiLeagueAnalystPanelData(
       turnNumber: event.turnNumber,
       kind: event.kind,
       tone: event.tone,
-      actorName: event.actorName,
-      targetName: event.targetName,
+      actorName: aiLeagueSpectatorDisplayName(event.actorName),
+      targetName:
+        event.targetName !== null
+          ? aiLeagueSpectatorDisplayName(event.targetName)
+          : null,
       secondaryName: null,
-      message: event.publicText ?? event.message,
+      message: aiLeagueSpectatorText(event.publicText ?? event.message),
     }))
     .sort((a, b) => a.turnNumber - b.turnNumber || a.sequence - b.sequence);
   return {
@@ -3813,9 +3955,6 @@ function analystActionKindCounts(
  * Every tab's DERIVATION stays exactly what it always was —
  * competitorRailEntries()/curatedWarRoomEvents()/matchTimelineEventMarkers()
  * are reused verbatim, only WHERE their output mounts changed.
- * `followedPlayerName` (spec item 6) is threaded in from the outer mount
- * closure so the rail's `followed` seat always reflects
- * PointOfViewSelector's current pick.
  *
  * Desktop "escape to a floating panel" quirk: #ai-league-replay-overlay
  * itself uses backdrop-filter for its frosted-glass chrome, and per the CSS
@@ -3833,7 +3972,8 @@ function analystActionKindCounts(
  * naturally inside this panel's own body, alongside the diplomacy strip,
  * exactly like the rail did before this restructuring.
  */
-const AI_LEAGUE_BROADCAST_DRAWER_PORTAL_ID = "ai-league-broadcast-drawer-portal";
+const AI_LEAGUE_BROADCAST_DRAWER_PORTAL_ID =
+  "ai-league-broadcast-drawer-portal";
 
 function relocateAiLeagueBroadcastDrawerPanels(
   portal: HTMLElement,
@@ -4030,6 +4170,49 @@ function buildWarRoomEarlierRow(
 }
 
 /**
+ * Copies the drawer-panel wrapper identity (renderBroadcastDrawer()'s own
+ * .broadcast-drawer-panel class, data-tab-id, data-tab-active, id,
+ * role="tabpanel", aria-labelledby) from an outgoing top-level drawer panel
+ * onto its replacement — for every patchVolatile rebuild path that swaps a
+ * WHOLE panel (War Room/Timeline/Analysis) via element.replaceWith(fresh).
+ * buildWarRoomSection()/renderMatchTimeline()/buildAnalystPanelWindow()/
+ * buildAnalystPanelPlaceholder() only ever build the bare panel content;
+ * renderBroadcastDrawer() applies this wrapper identity ONLY on the
+ * first-mount structural path (renderStructural), never re-applies it on a
+ * later patchVolatile rebuild. Losing it silently strips data-tab-id,
+ * which this file's own CSS keys the desktop position:fixed / centered
+ * placement of these body-portal-relocated panels off of — the panel then
+ * falls back to normal document flow inside its zero-size portal and
+ * becomes permanently invisible/unusable (found live in production, P1
+ * interaction sweep: Timeline on virtually every tick, since its own key
+ * changes almost every frame; War Room on the very first tick any event
+ * becomes eligible for a replay that starts with none, since
+ * mountedWarRoomCount > 0 is false until then and the rebuild — not the
+ * in-place patch — path fires; Analyst the same way the first time it's
+ * toggled visible or hidden after any such rebuild already happened).
+ * `activeTab`/collapse flags never change on this path (only user clicks
+ * change them, always via renderStructural instead) — copying the
+ * outgoing element's dataset verbatim is exactly correct here, never
+ * stale.
+ */
+function preserveDrawerPanelWrapperIdentity(
+  outgoing: HTMLElement,
+  incoming: HTMLElement,
+): void {
+  incoming.className = outgoing.className;
+  incoming.id = outgoing.id;
+  for (const [key, value] of Object.entries(outgoing.dataset)) {
+    incoming.dataset[key] = value;
+  }
+  const role = outgoing.getAttribute("role");
+  if (role !== null) incoming.setAttribute("role", role);
+  const labelledBy = outgoing.getAttribute("aria-labelledby");
+  if (labelledBy !== null) {
+    incoming.setAttribute("aria-labelledby", labelledBy);
+  }
+}
+
+/**
  * Builds the whole War Room region for the current window — used whenever
  * the window can't be reached by a pure incremental append: first mount, a
  * backward seek/jump that drops trailing events out of the window, or
@@ -4048,9 +4231,7 @@ function buildWarRoomSection(
     callbacks,
   );
   if (start > 0) {
-    const list = section.querySelector<HTMLElement>(
-      ".broadcast-war-room-list",
-    );
+    const list = section.querySelector<HTMLElement>(".broadcast-war-room-list");
     list?.prepend(buildWarRoomEarlierRow(start, callbacks.onShowEarlier));
   }
   return section;
@@ -4061,7 +4242,9 @@ function buildWarRoomSection(
  * forward tick — a thin `patchDomWindowForward` adapter wiring the War
  * Room's own list selector, row builder, and "show earlier" affordance
  * into the shared primitive (see that function's own doc for the full
- * correctness rationale).
+ * correctness rationale — including the auto-follow-at-tail /
+ * height-compensated-when-scrolled-up scroll preservation spec item 2
+ * needs; already implemented there, not duplicated here).
  */
 function patchWarRoomWindowForward(
   section: HTMLElement,
@@ -4087,8 +4270,7 @@ function patchWarRoomWindowForward(
         ".broadcast-war-room-earlier",
         hiddenCount,
         () => buildWarRoomEarlierRow(hiddenCount, callbacks.onShowEarlier),
-        (count) =>
-          translateText("broadcast.war_room_show_earlier", { count }),
+        (count) => translateText("broadcast.war_room_show_earlier", { count }),
       ),
   );
 }
@@ -4297,8 +4479,7 @@ function patchAnalystDecisionsWindowForward(
         ".broadcast-analyst-decisions-earlier",
         hiddenCount,
         () => buildAnalystDecisionsEarlierRow(hiddenCount, onShowEarlier),
-        (count) =>
-          translateText("broadcast.analyst_show_earlier", { count }),
+        (count) => translateText("broadcast.analyst_show_earlier", { count }),
       ),
   );
 }
@@ -4330,8 +4511,7 @@ function patchAnalystEventsWindowForward(
         ".broadcast-analyst-events-earlier",
         hiddenCount,
         () => buildAnalystEventsEarlierRow(hiddenCount, onShowEarlier),
-        (count) =>
-          translateText("broadcast.analyst_show_earlier", { count }),
+        (count) => translateText("broadcast.analyst_show_earlier", { count }),
       ),
   );
 }
@@ -4340,8 +4520,6 @@ function mountAiLeagueBroadcastDrawer(
   overlay: HTMLElement,
   input: AiLeagueReplayOverlayInput,
   identityByPlayerName: ReadonlyMap<string, PublicAgent>,
-  followedPlayerName: string | null,
-  directorCutHandle: DirectorCutControllerHandle | null,
 ): void {
   const container = overlay.querySelector<HTMLElement>(
     "[data-ai-league-broadcast-drawer]",
@@ -4390,9 +4568,41 @@ function mountAiLeagueBroadcastDrawer(
   // artifact itself never changes within one mount's lifetime, only which
   // sample is windowed into view does.
   const matchStateSeries = normalizeMatchStateSeries(input.matchStateSeries);
-  const directorCutPlan = normalizeDirectorCutPlan(input.directorCutPlan);
+  /**
+   * Turn 2 of the pass-10 CHECK item: audited every consumer of this
+   * shared dispatch (War Room feed's "jump to turn" action via
+   * `onJumpToTurn`, and the Match Timeline's `onSeek`, both wired below)
+   * — a decision/event row in the Analyst tab (`renderAnalystDecisionRow`/
+   * `renderAnalystEventRow`, `BroadcastComposition.ts`) carries NO
+   * turn-jump affordance at all (plain table/list cells, no button), so
+   * there is nothing there to fix. The ONE other jump-to-turn consumer in
+   * this file, the political-radio/comms "turn N" link
+   * (`data-ai-league-jump-turn`, `communicationMessageHtml`), is handled
+   * by the SEPARATE `mountReplayJumpControls` below — which ALREADY
+   * implements this exact backward-seek-via-navigation (missed as prior
+   * art in the first pass of this fix). Moved the fix HERE, into the one
+   * function every OTHER jump-to-turn consumer shares, rather than
+   * keeping the previous per-consumer `dispatchTimelineSeek` wrapper: all
+   * of War Room/Timeline/(any future consumer of this function) want the
+   * identical contract — "take the viewer to turn N" — so a per-consumer
+   * split only risked the exact inconsistency this turn's review caught
+   * (Timeline fixed, War Room silently left broken). Matches
+   * `mountReplayJumpControls`'s own tolerance/params exactly (a same-
+   * session forward-only clamp within 10 turns is an imperceptible no-op,
+   * not worth a full reload; `replay=`/`turn=` are the same two params
+   * that function already sets) so both code paths read as one
+   * intentional policy, not two independently-invented ones.
+   */
   const dispatchJumpToTurn = (turn: number): void => {
     analytics.track("timeline_jump", { matchId: input.runID });
+    const knownTurn = AI_LEAGUE_BROADCAST_DRAWER_LAST_TURN.get(container) ?? 0;
+    if (turn + 10 < knownTurn) {
+      const url = new URL(window.location.href);
+      url.searchParams.set("replay", "");
+      url.searchParams.set("turn", String(Math.max(0, Math.floor(turn))));
+      window.location.href = url.toString();
+      return;
+    }
     document.dispatchEvent(
       new CustomEvent("ai-league-replay-jump-turn", {
         detail: { turnNumber: turn },
@@ -4464,10 +4674,10 @@ function mountAiLeagueBroadcastDrawer(
   };
 
   const railCallbacks = () => ({
-    onSelect: (playerName: string) => {
+    onSelect: (playerName: string, clientID: string | null) => {
       document.dispatchEvent(
-        new CustomEvent(BROADCAST_RAIL_FOLLOW_EVENT, {
-          detail: { playerName },
+        new CustomEvent(BROADCAST_RAIL_LOCATE_EVENT, {
+          detail: { playerName, clientID },
         }),
       );
     },
@@ -4550,10 +4760,7 @@ function mountAiLeagueBroadcastDrawer(
       decisions,
       framePlayers,
       identityByPlayerName,
-    ).map((entry) => ({
-      ...entry,
-      followed: entry.playerName === followedPlayerName,
-    }));
+    );
     const eligibleWarRoomCount = domEligibleCount(
       allWarRoomEvents,
       (event) => event.turn,
@@ -4570,14 +4777,6 @@ function mountAiLeagueBroadcastDrawer(
       turnNumber,
     );
     const analystVisible = isAnalystVisible();
-    // Director Cut segment (when that mode is on) takes priority over the
-    // sample's own phase — spec item 3. `segmentForTurn` is a cheap binary
-    // search, safe to call every frame exactly like the rest of this
-    // closure already does.
-    const activeSegment =
-      directorCutHandle?.isEnabled() === true && directorCutPlan !== null
-        ? (segmentForTurn(directorCutPlan, turnNumber)?.segment ?? null)
-        : null;
     const stripFields = deriveMatchStateStripFields(
       matchStateSeries,
       turnNumber,
@@ -4594,12 +4793,9 @@ function mountAiLeagueBroadcastDrawer(
             totalCount: stripFields.totalCount,
             activeAllianceCount: stripFields.activeAllianceCount,
             activeWarCount: stripFields.activeWarCount,
-            currentPhaseLabel:
-              activeSegment !== null
-                ? activeSegment.eventReason
-                : translateText(
-                    MATCH_STATE_PHASE_LABEL_KEYS[stripFields.samplePhase],
-                  ),
+            currentPhaseLabel: translateText(
+              MATCH_STATE_PHASE_LABEL_KEYS[stripFields.samplePhase],
+            ),
           };
     // A previous render generation may have relocated panels into the
     // portal; those are now-orphaned nodes container.replaceChildren()
@@ -4667,7 +4863,9 @@ function mountAiLeagueBroadcastDrawer(
     mountedAnalystDecisionsCount = analystVisible
       ? eligibleAnalystDecisionsCount
       : -1;
-    mountedAnalystEventsCount = analystVisible ? eligibleAnalystEventsCount : -1;
+    mountedAnalystEventsCount = analystVisible
+      ? eligibleAnalystEventsCount
+      : -1;
     mountedAnalystChartKey = analystVisible
       ? JSON.stringify(
           analystActionKindCounts(
@@ -4715,17 +4913,30 @@ function mountAiLeagueBroadcastDrawer(
       decisions,
       framePlayers,
       identityByPlayerName,
-    ).map((entry) => ({
-      ...entry,
-      followed: entry.playerName === followedPlayerName,
-    }));
+    );
     const rail = container.querySelector<HTMLElement>(".broadcast-rail");
     if (rail !== null) {
       const nextRailKey = JSON.stringify(railEntries);
       if (rail.dataset.railKey !== nextRailKey) {
+        rail.dataset.railKey = nextRailKey;
+        // Territory/rank/allies/wars change on nearly every tick during
+        // active play, so a `rail.replaceWith(nextRail)` full teardown here
+        // reset the rail's own scrolled `.broadcast-rail-list`'s
+        // `scrollTop` to 0 on almost every frame — the same
+        // "teleports me back" class the diplomacy strip had. Patch the
+        // list's rows in place, keyed by agent identity, and leave the
+        // rest of `.broadcast-rail` (heading, collapse toggle — static
+        // across ticks, only user clicks change them) untouched.
         const nextRail = renderCompetitorRail(railEntries, railCallbacks());
-        nextRail.dataset.railKey = nextRailKey;
-        rail.replaceWith(nextRail);
+        const liveList = rail.querySelector<HTMLElement>(
+          ".broadcast-rail-list",
+        );
+        const freshList = nextRail.querySelector<HTMLElement>(
+          ".broadcast-rail-list",
+        );
+        if (liveList !== null && freshList !== null) {
+          patchKeyedRegion(liveList, freshList, "data-rail-entry-key");
+        }
       }
     }
 
@@ -4770,6 +4981,7 @@ function mountAiLeagueBroadcastDrawer(
           warRoomWindowSize,
           warRoomCallbacks(),
         );
+        preserveDrawerPanelWrapperIdentity(warRoomSection, nextWarRoom);
         warRoomSection.replaceWith(nextWarRoom);
       }
       mountedWarRoomCount = eligibleWarRoomCount;
@@ -4780,16 +4992,17 @@ function mountAiLeagueBroadcastDrawer(
     // while visible — windowed exactly like the War Room ticker above,
     // with its two sub-lists (decisions table, event log) patched fully
     // independently of each other.
-    const analystSection = document.querySelector<HTMLElement>(
-      ".broadcast-analyst",
-    );
+    const analystSection =
+      document.querySelector<HTMLElement>(".broadcast-analyst");
     if (analystSection !== null) {
       const analystVisible = isAnalystVisible();
       if (!analystVisible) {
         // Reclaim the DOM the instant it's no longer visible — never keep
         // patching content nobody can see.
         if (mountedAnalystVisible !== false) {
-          analystSection.replaceWith(buildAnalystPanelPlaceholder());
+          const placeholder = buildAnalystPanelPlaceholder();
+          preserveDrawerPanelWrapperIdentity(analystSection, placeholder);
+          analystSection.replaceWith(placeholder);
         }
         mountedAnalystVisible = false;
         mountedAnalystDecisionsCount = -1;
@@ -4830,6 +5043,7 @@ function mountAiLeagueBroadcastDrawer(
             onShowEarlierAnalystDecisions,
             onShowEarlierAnalystEvents,
           );
+          preserveDrawerPanelWrapperIdentity(analystSection, nextAnalyst);
           analystSection.replaceWith(nextAnalyst);
         } else {
           if (
@@ -4915,9 +5129,7 @@ function mountAiLeagueBroadcastDrawer(
       }
     }
 
-    const timeline = document.querySelector<HTMLElement>(
-      ".broadcast-timeline",
-    );
+    const timeline = document.querySelector<HTMLElement>(".broadcast-timeline");
     if (timeline !== null) {
       const nextTimelineKey = String(turnNumber);
       if (timeline.dataset.timelineKey !== nextTimelineKey) {
@@ -4927,15 +5139,21 @@ function mountAiLeagueBroadcastDrawer(
           currentTurn: turnNumber,
           onSeek: dispatchJumpToTurn,
         });
+        // `renderMatchTimeline()` only ever returns a bare `.broadcast-
+        // timeline` section — see `preserveDrawerPanelWrapperIdentity`'s
+        // own doc for why the wrapper identity has to be copied back on:
+        // losing it collapsed the whole timeline to 0×0 and made it
+        // permanently unusable starting on the SECOND tick after mount
+        // (found live in production during the P1 interaction sweep — the
+        // timeline key changes on virtually every frame, unlike War
+        // Room/Analyst, which patch their list in place on the common
+        // forward-tick path and only ever replaceWith() on a rarer jump).
+        preserveDrawerPanelWrapperIdentity(timeline, nextTimeline);
         nextTimeline.dataset.timelineKey = nextTimelineKey;
         timeline.replaceWith(nextTimeline);
       }
     }
 
-    const activeSegment =
-      directorCutHandle?.isEnabled() === true && directorCutPlan !== null
-        ? (segmentForTurn(directorCutPlan, turnNumber)?.segment ?? null)
-        : null;
     const stripFields = deriveMatchStateStripFields(
       matchStateSeries,
       turnNumber,
@@ -4952,12 +5170,9 @@ function mountAiLeagueBroadcastDrawer(
             totalCount: stripFields.totalCount,
             activeAllianceCount: stripFields.activeAllianceCount,
             activeWarCount: stripFields.activeWarCount,
-            currentPhaseLabel:
-              activeSegment !== null
-                ? activeSegment.eventReason
-                : translateText(
-                    MATCH_STATE_PHASE_LABEL_KEYS[stripFields.samplePhase],
-                  ),
+            currentPhaseLabel: translateText(
+              MATCH_STATE_PHASE_LABEL_KEYS[stripFields.samplePhase],
+            ),
           };
     const nextStripKey = JSON.stringify(stripInput);
     if (nextStripKey !== lastStripKey) {
@@ -4980,7 +5195,9 @@ function mountAiLeagueBroadcastDrawer(
 
   renderStructural(
     AI_LEAGUE_BROADCAST_DRAWER_LAST_FRAME.get(container) ?? [],
-    AI_LEAGUE_BROADCAST_DRAWER_LAST_TURN.get(container) ?? input.currentTurn ?? 0,
+    AI_LEAGUE_BROADCAST_DRAWER_LAST_TURN.get(container) ??
+      input.currentTurn ??
+      0,
   );
   const onFrame = (event: Event) => {
     const detail = (event as CustomEvent<AiLeagueReplayFrameEventDetail>)
@@ -5078,14 +5295,112 @@ function planChangeWarRoomEvents(
         decision.planRationale.trim().length > 0
           ? decision.planRationale.trim()
           : null,
+      tier: 2,
     });
   }
   return curated;
 }
 
 /**
+ * Impact proxy for War Room tiering (content curation spec item 1, deploy
+ * 3.3): the raw telemetry carries no per-strike magnitude field at all —
+ * every "attack" event is emitted at a flat importance=70 regardless of how
+ * much territory changed hands (verified against production
+ * spectator-telemetry.json: every attack across a full match sampled at
+ * exactly importance 70, elimination at exactly 90 — there is no variance
+ * to read a "was this the biggest hit of the match" signal from). So a
+ * first strike's own importance can never distinguish "routine" from
+ * "notable". The closest signal actually present in the data: did either
+ * participant go on to matter to the match's outcome (get eliminated, or
+ * enter/break an alliance) at some point? A first strike touching one of
+ * those agents is "notable" (tier 2); one between two agents who never
+ * appear in a major moment for the rest of the match is "routine" (tier
+ * 3) and gets collapsed by groupRoutineWarRoomEvents below.
+ */
+function consequentialAgentIDs(
+  events: readonly AiLeagueSpectatorEvent[],
+): Set<string> {
+  const ids = new Set<string>();
+  for (const event of events) {
+    const isMajor =
+      event.kind === "elimination" ||
+      event.kind === "alliance_formed" ||
+      (event.kind === "alliance_break" && event.tone === "betrayal");
+    if (!isMajor) continue;
+    ids.add(event.actorAgentID);
+    if (event.targetAgentID !== null) ids.add(event.targetAgentID);
+  }
+  return ids;
+}
+
+/**
+ * Collapses consecutive runs of tier-3 "routine" War Room events (length
+ * >= 2) into ONE synthetic tier-3 summary event per run — spec item 1's
+ * "this is the single highest-leverage change": on a large match, routine
+ * first-strike noise between agents that never become consequential is
+ * exactly what floods the list. A lone tier-3 event with no adjacent
+ * tier-3 neighbor is left as-is (nothing to group). A run never crosses a
+ * tier-1/2 event, so grouping only ever merges rows that were already
+ * sitting next to each other in the curated order.
+ *
+ * Applied ONCE to the full ordered array `curatedWarRoomEvents` returns
+ * (never per-tick or per-window-slice), so the same underlying events
+ * always collapse into the same group across ticks — required for
+ * `patchWarRoomWindowForward`'s position-indexed incremental patching over
+ * this array to stay correct.
+ */
+function groupRoutineWarRoomEvents(
+  events: readonly CuratedWarRoomEvent[],
+): CuratedWarRoomEvent[] {
+  const grouped: CuratedWarRoomEvent[] = [];
+  let run: CuratedWarRoomEvent[] = [];
+  const flushRun = () => {
+    if (run.length === 0) return;
+    if (run.length === 1) {
+      grouped.push(run[0]);
+    } else {
+      const first = run[0];
+      const last = run[run.length - 1];
+      const participants = [...new Set(run.flatMap((e) => e.participants))];
+      grouped.push({
+        id: `war-room-group:${first.id}:${last.id}`,
+        kind: last.kind,
+        turn: last.turn,
+        sequence: last.sequence,
+        headline: translateText(
+          "ai_league_replay.war_room_grouped_skirmishes",
+          {
+            count: run.length,
+          },
+        ),
+        publicReason: null,
+        participants,
+        expandedDetail: run
+          .map(
+            (e) =>
+              `${translateText("broadcast.war_room_turn", { turn: e.turn })} — ${e.headline}`,
+          )
+          .join("\n"),
+        tier: 3,
+      });
+    }
+    run = [];
+  };
+  for (const event of events) {
+    if (event.tier === 3) {
+      run.push(event);
+    } else {
+      flushRun();
+      grouped.push(event);
+    }
+  }
+  flushRun();
+  return grouped;
+}
+
+/**
  * Curated War Room feed. Selective by kind:
- *  - alliance/betrayal/elimination gate on
+ *  - alliance/betrayal/nuke/elimination gate on
  *    AI_LEAGUE_WAR_ROOM_IMPORTANCE_THRESHOLD (matching AgentDramaReport.ts's
  *    own HIGH_IMPORTANCE_THRESHOLD) — a no-op in practice today (these kinds
  *    are always emitted at 90+ importance server-side) but an honest,
@@ -5101,6 +5416,13 @@ function planChangeWarRoomEvents(
  * this overlay only ever sees a live, forward-only frame stream (no stored
  * turn-by-turn territory series), so neither is derivable without
  * fabricating a value.
+ *
+ * Content curation (spec item 1, deploy 3.3): every event is classified
+ * into a tier (see CuratedWarRoomEvent.tier's own doc and
+ * consequentialAgentIDs above), then consecutive tier-3 runs are collapsed
+ * via groupRoutineWarRoomEvents before returning — the RETURNED array is
+ * already the one every caller (War Room ticker, lower thirds, timeline
+ * pulse dedup) should render directly.
  */
 function curatedWarRoomEvents(
   telemetry: AiLeagueSpectatorTelemetry | null,
@@ -5108,6 +5430,7 @@ function curatedWarRoomEvents(
 ): CuratedWarRoomEvent[] {
   const curated: CuratedWarRoomEvent[] = [];
   const firstStrikeSeen = new Set<string>();
+  const consequential = consequentialAgentIDs(telemetry?.events ?? []);
   const ordered = [...(telemetry?.events ?? [])].sort(
     (a, b) => a.turnNumber - b.turnNumber || a.sequence - b.sequence,
   );
@@ -5117,12 +5440,22 @@ function curatedWarRoomEvents(
       event.targetName !== null
         ? aiLeagueSpectatorDisplayName(event.targetName)
         : null;
-    const publicReason = event.publicText ?? event.message;
+    // P0 fix (2026-08-03): the expanded row's "stated reason" text (raw
+    // `publicText`/`message`) leaked a real agent's name straight through
+    // even with Anonymous Names on -- `headline`/`participants` above were
+    // already anonymized, but this field was passed through verbatim.
+    const publicReason = aiLeagueSpectatorText(
+      event.publicText ?? event.message,
+    );
 
     if (event.kind === "attack" && target !== null) {
       const pairKey = `${event.actorAgentID}|${event.targetAgentID ?? target}`;
       if (!firstStrikeSeen.has(pairKey)) {
         firstStrikeSeen.add(pairKey);
+        const isConsequential =
+          consequential.has(event.actorAgentID) ||
+          (event.targetAgentID !== null &&
+            consequential.has(event.targetAgentID));
         curated.push({
           id: event.id,
           kind: "first_strike",
@@ -5135,6 +5468,7 @@ function curatedWarRoomEvents(
           publicReason,
           participants: [actor, target],
           expandedDetail: null,
+          tier: isConsequential ? 2 : 3,
         });
       }
       continue;
@@ -5153,10 +5487,15 @@ function curatedWarRoomEvents(
         publicReason,
         participants: [actor, target],
         expandedDetail: null,
+        tier: 1,
       });
       continue;
     }
-    if (event.kind === "alliance_break" && event.tone === "betrayal" && target !== null) {
+    if (
+      event.kind === "alliance_break" &&
+      event.tone === "betrayal" &&
+      target !== null
+    ) {
       curated.push({
         id: event.id,
         kind: "betrayal",
@@ -5169,6 +5508,35 @@ function curatedWarRoomEvents(
         publicReason,
         participants: [actor, target],
         expandedDetail: null,
+        tier: 1,
+      });
+      continue;
+    }
+    // P0 fix (2026-08-03): nuke launches (importance 95 server-side, the
+    // single highest-importance event kind this pipeline emits) never
+    // surfaced in the curated War Room feed at all -- CuratedWarRoomEventKind
+    // had no "nuke" member and this function had no branch for it, so a
+    // nuke only ever showed up in the much less prominent bottom timeline
+    // strip (matchTimelineEventMarkers below already handles it there).
+    // Tier 1: a WMD strike is exactly the kind of event this feed's own
+    // "major" tier exists for.
+    if (event.kind === "nuke") {
+      curated.push({
+        id: event.id,
+        kind: "nuke",
+        turn: event.turnNumber,
+        sequence: event.sequence,
+        headline:
+          target !== null
+            ? translateText("ai_league_replay.event_nuke_target", {
+                actor,
+                target,
+              })
+            : translateText("ai_league_replay.event_nuke", { actor }),
+        publicReason,
+        participants: target !== null ? [actor, target] : [actor],
+        expandedDetail: null,
+        tier: 1,
       });
       continue;
     }
@@ -5184,11 +5552,15 @@ function curatedWarRoomEvents(
         publicReason,
         participants: [actor],
         expandedDetail: null,
+        tier: 1,
       });
     }
   }
   curated.push(...planChangeWarRoomEvents(decisions));
-  return curated.sort((a, b) => a.turn - b.turn || a.sequence - b.sequence);
+  const sorted = curated.sort(
+    (a, b) => a.turn - b.turn || a.sequence - b.sequence,
+  );
+  return groupRoutineWarRoomEvents(sorted);
 }
 
 /**
@@ -5209,8 +5581,17 @@ function matchTimelineEventMarkers(
   const ordered = [...(telemetry?.events ?? [])].sort(
     (a, b) => a.turnNumber - b.turnNumber || a.sequence - b.sequence,
   );
-  const push = (kind: TimelineMarkerKind, event: AiLeagueSpectatorEvent, label: string) => {
-    markers.push({ kind, turn: event.turnNumber, sequence: event.sequence, label });
+  const push = (
+    kind: TimelineMarkerKind,
+    event: AiLeagueSpectatorEvent,
+    label: string,
+  ) => {
+    markers.push({
+      kind,
+      turn: event.turnNumber,
+      sequence: event.sequence,
+      label,
+    });
   };
   for (const event of ordered) {
     const actor = aiLeagueSpectatorDisplayName(event.actorName);
@@ -5220,16 +5601,34 @@ function matchTimelineEventMarkers(
         : null;
     switch (event.kind) {
       case "spawn":
-        push("spawn", event, translateText("ai_league_replay.event_spawn", { actor }));
+        push(
+          "spawn",
+          event,
+          translateText("ai_league_replay.event_spawn", { actor }),
+        );
         break;
       case "alliance_formed":
         if (target !== null) {
-          push("alliance", event, translateText("ai_league_replay.event_alliance_formed", { actor, target }));
+          push(
+            "alliance",
+            event,
+            translateText("ai_league_replay.event_alliance_formed", {
+              actor,
+              target,
+            }),
+          );
         }
         break;
       case "alliance_break":
         if (event.tone === "betrayal" && target !== null) {
-          push("betrayal", event, translateText("ai_league_replay.headline_betrayal", { actor, target }));
+          push(
+            "betrayal",
+            event,
+            translateText("ai_league_replay.headline_betrayal", {
+              actor,
+              target,
+            }),
+          );
         }
         break;
       case "attack":
@@ -5237,7 +5636,14 @@ function matchTimelineEventMarkers(
           const pairKey = `${event.actorAgentID}|${event.targetAgentID ?? target}`;
           if (!firstStrikeSeen.has(pairKey)) {
             firstStrikeSeen.add(pairKey);
-            push("first_strike", event, translateText("ai_league_replay.headline_first_strike", { actor, target }));
+            push(
+              "first_strike",
+              event,
+              translateText("ai_league_replay.headline_first_strike", {
+                actor,
+                target,
+              }),
+            );
           }
         }
         break;
@@ -5246,12 +5652,19 @@ function matchTimelineEventMarkers(
           "nuke",
           event,
           target !== null
-            ? translateText("ai_league_replay.event_nuke_target", { actor, target })
+            ? translateText("ai_league_replay.event_nuke_target", {
+                actor,
+                target,
+              })
             : translateText("ai_league_replay.event_nuke", { actor }),
         );
         break;
       case "elimination":
-        push("elimination", event, translateText("ai_league_replay.event_eliminated", { actor }));
+        push(
+          "elimination",
+          event,
+          translateText("ai_league_replay.event_eliminated", { actor }),
+        );
         break;
       default:
         break;
@@ -5700,8 +6113,8 @@ function normalizeSpectatorTelemetry(
 /**
  * Client-local mirror of `AgentMatchStateSeries.ts`'s public shape (product
  * overhaul Season Zero broadcast Phase 5). Client code never imports server
- * modules — same pattern `DirectorCutController.ts`'s own top-of-file doc
- * already establishes for `director-cut-plan.json`.
+ * modules, so this overlay owns its own runtime shape-checking of
+ * `match-state-series.json` instead.
  */
 export type AiLeagueMatchStatePhase = "spawn" | "active" | "finished";
 
@@ -5723,7 +6136,9 @@ export interface AiLeagueMatchStateSeries {
   samples: readonly AiLeagueMatchStateSample[];
 }
 
-export function normalizeMatchStateSeries(value: unknown): AiLeagueMatchStateSeries | null {
+export function normalizeMatchStateSeries(
+  value: unknown,
+): AiLeagueMatchStateSeries | null {
   if (value === null || typeof value !== "object") {
     return null;
   }
@@ -5792,18 +6207,19 @@ const MATCH_STATE_PHASE_LABEL_KEYS: Record<AiLeagueMatchStatePhase, string> = {
  * arrays `aiLeagueRailRelations` already trusts for the identical "wars"
  * concept on the competitor rail, aggregated into unique pairs.
  *
- * `currentPhaseLabel` is resolved by the caller (Director Cut's active
- * segment when that mode is on; this sample's own `phase` — translated —
- * otherwise), so it is not part of this function's return.
+ * `currentPhaseLabel` is resolved by the caller, which translates this
+ * sample's own `phase`, so it is not part of this function's return.
  */
 export function deriveMatchStateStripFields(
   series: AiLeagueMatchStateSeries | null,
   currentTurn: number,
   framePlayers: readonly AiLeagueReplayFramePlayer[],
   identityByPlayerName: ReadonlyMap<string, PublicAgent>,
-): (Omit<MatchStateStripInput, "currentPhaseLabel"> & {
-  samplePhase: AiLeagueMatchStatePhase;
-}) | null {
+):
+  | (Omit<MatchStateStripInput, "currentPhaseLabel"> & {
+      samplePhase: AiLeagueMatchStatePhase;
+    })
+  | null {
   if (series === null) return null;
   let sample: AiLeagueMatchStateSample | null = null;
   let previousSample: AiLeagueMatchStateSample | null = null;
@@ -5814,23 +6230,56 @@ export function deriveMatchStateStripFields(
   }
   if (sample === null) return null;
   const leaderAgent = sample.agents.find((agent) => agent.rank === 1) ?? null;
+  // The leader identity/percent PREFER the SAME live per-tick frame data
+  // the Standings/Competitors rail renders from (identical formula to
+  // `competitorRailEntries`'s own `totalTiles`/`territoryPercent`: tiles
+  // owned over the sum of every current frame player's tiles owned, and
+  // "leader" = the frame player ranked #1 by that same sort) — never the
+  // coarse match-state-series sample, which is captured at most every
+  // ~200 turns (`MATCH_STATE_SERIES_MAX_SAMPLES` over a whole match) and
+  // can lag well behind the live tick. That lag is exactly what produced
+  // pass-10's P1 finding (t4-01/t4-02): "Leader relh · 64%" against the
+  // Standings/Competitors' live "89%" for the SAME agent at the SAME
+  // instant — the strip was reading a stale sample instead of the tick
+  // the rest of the panel was already rendering. Only fall back to the
+  // series sample when no live frame data has arrived yet (defensive:
+  // both real call sites always pass a live frame by the time this runs).
+  const totalTiles = framePlayers.reduce(
+    (sum, player) => sum + Math.max(0, player.tilesOwned),
+    0,
+  );
+  const topFramePlayer =
+    totalTiles > 0
+      ? [...framePlayers].sort((a, b) => b.tilesOwned - a.tilesOwned)[0]
+      : null;
   const leader =
-    leaderAgent === null
-      ? null
-      : {
+    topFramePlayer !== null
+      ? {
           displayName:
-            identityByPlayerName.get(leaderAgent.username)?.displayName ??
-            aiLeagueSpectatorDisplayName(leaderAgent.username),
-          territoryPercent: leaderAgent.territoryShare * 100,
-        };
+            identityByPlayerName.get(topFramePlayer.username)?.displayName ??
+            aiLeagueSpectatorDisplayName(
+              (topFramePlayer.displayName ?? "") || topFramePlayer.username,
+            ),
+          territoryPercent: (topFramePlayer.tilesOwned / totalTiles) * 100,
+        }
+      : leaderAgent === null
+        ? null
+        : {
+            displayName:
+              identityByPlayerName.get(leaderAgent.username)?.displayName ??
+              aiLeagueSpectatorDisplayName(leaderAgent.username),
+            territoryPercent: leaderAgent.territoryShare * 100,
+          };
   let territoryShareDeltaPercent: number | null = null;
-  if (leaderAgent !== null && previousSample !== null) {
+  const deltaPlayerID =
+    topFramePlayer?.playerID ?? leaderAgent?.playerID ?? null;
+  if (deltaPlayerID !== null && previousSample !== null && leader !== null) {
     const previousAgent = previousSample.agents.find(
-      (agent) => agent.playerID === leaderAgent.playerID,
+      (agent) => agent.playerID === deltaPlayerID,
     );
     if (previousAgent !== undefined) {
       territoryShareDeltaPercent =
-        (leaderAgent.territoryShare - previousAgent.territoryShare) * 100;
+        leader.territoryPercent - previousAgent.territoryShare * 100;
     }
   }
   return {
@@ -5850,7 +6299,9 @@ export function deriveMatchStateStripFields(
 export function activeWarPairCount(
   framePlayers: readonly AiLeagueReplayFramePlayer[],
 ): number {
-  const bySmallID = new Map(framePlayers.map((player) => [player.smallID, player]));
+  const bySmallID = new Map(
+    framePlayers.map((player) => [player.smallID, player]),
+  );
   const counted = new Set<string>();
   for (const player of framePlayers) {
     const allied = new Set(Array.isArray(player.allies) ? player.allies : []);

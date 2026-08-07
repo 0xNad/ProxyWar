@@ -483,13 +483,35 @@ export class ReplayPremiereGuestSecurity {
     });
   }
 
+  /**
+   * `Path=/api` — NOT `/api/premieres`. A real, live-reproduced bug (P0,
+   * 2026-08-02): `/api/identity/status` (`BettingIdentityHandoff.ts`'s
+   * `createBettingIdentityStatusRouter`) is a TOP-LEVEL route, outside
+   * `/api/premieres`, but it calls this same `bootstrap()`/mint path to
+   * answer "who am I, am I signed in". A `Path=/api/premieres` cookie is,
+   * per RFC 6265's path-matching, NEVER sent by the browser to a request
+   * under `/api/identity/*` — confirmed live via CDP
+   * (`Network.requestWillBeSentExtraInfo`'s `blockedReasons: ["NotOnPath"]`
+   * on every `/api/identity/status` request, even with a valid guest cookie
+   * already set). The route therefore NEVER saw its own previously-issued
+   * cookie and re-minted a brand-new guest identity on every single call —
+   * i.e. every page load that mounts `GithubSignIn` (which is every
+   * `/bet/<id>` reload) silently overwrote whatever identity was trading,
+   * discarding its bankroll/positions from the visitor's own perspective.
+   * `/api` is the narrowest common prefix covering both
+   * `/api/premieres/*` and `/api/identity/*` — parsing itself
+   * (`parseGuestCookieHeader`) is Path-independent (it only reads whatever
+   * `Cookie` header the browser decided to send), so this is the only
+   * server-side change the fix needs. Still excludes the cookie from
+   * every non-API request (static assets, the SPA shell itself).
+   */
   private serializeGuestCookie(guest: ParsedGuestCookie): string {
     const issuedAt = guest.issuedAtMs.toString(36);
     const unsigned = `v1.${guest.participantId}.${issuedAt}.${guest.nonce}`;
     const value = `${unsigned}.${this.sign(`guest|${unsigned}`)}`;
     const attributes = [
       `${this.guestCookieName}=${value}`,
-      "Path=/api/premieres",
+      "Path=/api",
       `Max-Age=${Math.floor(this.guestTtlMs / 1_000)}`,
       "HttpOnly",
       "SameSite=Lax",

@@ -1,3 +1,4 @@
+import { structuredDealsEnabled } from "./AgentTunables";
 import {
   AgentBrain,
   AgentBrainInput,
@@ -37,6 +38,8 @@ export interface ExternalAgentRequest {
     phase: string;
     turnNumber: number;
     tick: number | null;
+    /** Episode-level map identity, only ever a few scalars - never a terrain dump. */
+    map: { name: string; width: number; height: number } | null;
   };
   observation: AgentBrainInput["observation"];
   legalActions: Array<{
@@ -59,6 +62,14 @@ export interface ExternalAgentRequest {
     selectedLegalActionId: "must exactly match one offered legalActions[].id";
     reason: "short human-readable string";
     confidence: "optional number from 0 to 1";
+    /**
+     * Present only while PROXYWAR_TUNE_STRUCTURED_DEALS is on (the payload is
+     * byte-identical to shipped behavior when it is off). Optional second
+     * selection: an offered deal_* action id applied ALONGSIDE
+     * selectedLegalActionId, so negotiating costs no move. Ignoring it is
+     * always safe.
+     */
+    selectedDealActionId?: "optional; must exactly match one offered deal_* legalActions[].id";
   };
 }
 
@@ -113,6 +124,12 @@ export class ExternalHttpAgentBrain implements AgentBrain {
 
     return {
       actionID: parsed.selectedLegalActionId,
+      // Optional diplomacy slot; absent unless the endpoint sent one, so an
+      // agent that never uses it is byte-for-byte unaffected. The runner's
+      // validator, not this brain, decides whether it is a legal deal id.
+      ...(parsed.selectedDealActionId !== undefined
+        ? { dealActionID: parsed.selectedDealActionId }
+        : {}),
       reason: parsed.reason,
       metadata: {
         brain: "external-http",
@@ -251,6 +268,7 @@ export function buildExternalAgentRequestPayload(
       phase: observation.phase,
       turnNumber: observation.turnNumber,
       tick: observation.tick,
+      map: observation.mapInfo ?? null,
     },
     observation,
     legalActions: legalActions.map((action) => ({
@@ -266,6 +284,14 @@ export function buildExternalAgentRequestPayload(
         "must exactly match one offered legalActions[].id",
       reason: "short human-readable string",
       confidence: "optional number from 0 to 1",
+      // Advertised only while the structured-deal flag is on, so the request
+      // payload stays byte-identical to shipped behavior when it is off.
+      ...(structuredDealsEnabled()
+        ? {
+            selectedDealActionId:
+              "optional; must exactly match one offered deal_* legalActions[].id",
+          }
+        : {}),
     },
   };
 }

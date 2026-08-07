@@ -125,7 +125,6 @@ interface FrontierBenchmarkConfig {
   brainMode: FrontierBrainMode;
   runtimeMode: AgentRuntimeMode;
   profile: FrontierBenchmarkProfile;
-  forceSpawnTile: number | null;
   externalAgentEndpointUrl: string | null;
   externalAgentTimeoutMs: number;
 }
@@ -331,11 +330,7 @@ async function runSingleMatch(input: {
   const league = new AgentLeagueMatchRunner({
     game,
     participants,
-    spawnCandidates: spawnCandidatesForRun(
-      input.spawnCandidates,
-      input.index,
-      input.config.forceSpawnTile,
-    ),
+    spawnCandidates: spawnCandidatesForRun(input.spawnCandidates, input.index),
     log,
   });
 
@@ -532,7 +527,6 @@ function disableIntentRateLimitForBenchmark(game: GameServer): void {
 function spawnCandidatesForRun(
   candidates: SpawnCandidate[],
   runIndex: number,
-  forceSpawnTile: number | null = null,
 ): SpawnCandidate[] {
   if (candidates.length === 0) {
     return candidates;
@@ -540,14 +534,7 @@ function spawnCandidatesForRun(
   const windowSize = Math.min(96, candidates.length);
   const offset = ((runIndex - 1) * 73) % candidates.length;
   const rotated = [...candidates.slice(offset), ...candidates.slice(0, offset)];
-  const window = rotated.slice(0, windowSize);
-  if (forceSpawnTile === null) {
-    return window;
-  }
-  const forced =
-    candidates.find((candidate) => candidate.tile === forceSpawnTile) ??
-    window.find((candidate) => candidate.tile === forceSpawnTile);
-  return forced === undefined ? window : [forced];
+  return rotated.slice(0, windowSize);
 }
 
 function profileForRun(
@@ -876,7 +863,6 @@ async function runTargetedCoverageScenarios(profile: AgentSpec["profile"]) {
   return scenarios.map((scenario) => {
     const legalActions = builder.build({
       observation: scenario.observation,
-      spawnCandidates: scenario.spawnCandidates,
       maxPostSpawnActions: 80,
     });
     const wantedAction = legalActions.find(
@@ -925,11 +911,9 @@ function targetedScenarioObservations(): Array<{
   expectedKind: LegalActionKind;
   objective: AgentObjectiveKind;
   targetPlayerId?: string;
-  spawnCandidates?: SpawnCandidate[];
   useAllLegalActions?: boolean;
   observation: AgentObservation;
 }> {
-  const base = baseObservation();
   const rival = visiblePlayer("rival-1", {
     name: "Rival",
     troops: 4_000,
@@ -955,23 +939,11 @@ function targetedScenarioObservations(): Array<{
     hasIncomingAllianceRequest: true,
   });
   return [
-    {
-      name: "spawn opening",
-      expectedKind: "spawn",
-      objective: "choose_spawn",
-      spawnCandidates: [
-        {
-          tile: 10,
-          x: 5,
-          y: 5,
-          pressureScore: 0.2,
-          safetyScore: 0.9,
-          diplomacyScore: 0.6,
-          opportunityScore: 0.8,
-        },
-      ],
-      observation: { ...base, phase: "spawn" },
-    },
+    // "spawn opening" scenario removed: LegalActionBuilder.build() never
+    // offers a spawn action anymore - spawn placement is a deterministic
+    // fairness assignment (AgentSpawnAssignment.ts), never a brain/executor
+    // choice, so there is nothing left for FrontierPolicyExecutor to be
+    // scored against here.
     scenario("retreat bad attack", "retreat", "survive", {
       visiblePlayers: [rival],
       combat: {
@@ -1611,7 +1583,6 @@ function configFromArgs(args: string[]): FrontierBenchmarkConfig {
     brainMode,
     runtimeMode,
     profile: profileArg(args),
-    forceSpawnTile: optionalPositiveIntegerArg(args, "--force-spawn-tile="),
     externalAgentEndpointUrl:
       stringArg(args, "--external-agent-endpoint-url=", "").trim() || null,
     externalAgentTimeoutMs: positiveIntegerArg(
@@ -2850,21 +2821,6 @@ function positiveIntegerArg(
   const raw = lastArg(args, prefix)?.slice(prefix.length);
   if (raw === undefined || raw === "") {
     return defaultValue;
-  }
-  const value = Number(raw);
-  if (!Number.isInteger(value) || value <= 0) {
-    throw new Error(`${prefix}${raw} must be a positive integer`);
-  }
-  return value;
-}
-
-function optionalPositiveIntegerArg(
-  args: string[],
-  prefix: string,
-): number | null {
-  const raw = lastArg(args, prefix)?.slice(prefix.length);
-  if (raw === undefined || raw === "") {
-    return null;
   }
   const value = Number(raw);
   if (!Number.isInteger(value) || value <= 0) {

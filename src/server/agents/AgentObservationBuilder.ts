@@ -8,6 +8,7 @@ import {
   UnitType,
 } from "../../core/game/Game";
 import { flattenedEmojiTable } from "../../core/Util";
+import { buildEconomyObservationExtension } from "./AgentEconomyNetwork";
 import { AgentMemoryBuilder } from "./AgentMemoryBuilder";
 import { nuclearTargetStructurePriority } from "./AgentNuclearPolicy";
 import { AgentStrategicStateBuilder } from "./AgentStrategicStateBuilder";
@@ -15,7 +16,6 @@ import { buildAgentTacticalAffordances } from "./AgentTacticalAffordances";
 import {
   AgentAllianceOption,
   AgentBoatOption,
-  AgentBoatRetreatOption,
   AgentBuildOption,
   AgentCombatState,
   AgentCommunicationSignal,
@@ -30,9 +30,9 @@ import {
   AgentQuickChatOption,
   AgentStrategyProfile,
   AgentTargetOption,
+  AgentTransportState,
   AgentUpgradeOption,
   AgentVisiblePlayer,
-  AgentWarshipMoveOption,
   RecentAgentDecision,
 } from "./AgentTypes";
 
@@ -147,6 +147,16 @@ export class AgentObservationBuilder {
     const memory = new AgentMemoryBuilder().build({
       recentDecisions: input.recentDecisions,
     });
+    // Flag-gated economy block (PROXYWAR_TUNE_ECONOMY_OBSERVATION). NOT a
+    // pure call: when the flag is on it also decorates the visiblePlayers
+    // entries in place (rival unitCounts + isTraitor) before returning the
+    // block. When the flag is off it returns undefined, mutates nothing, and
+    // the observation is byte-identical to shipped behavior.
+    const economy = buildEconomyObservationExtension({
+      gameState: input.gameState,
+      player,
+      visiblePlayers,
+    });
     const tacticalAffordances = buildAgentTacticalAffordances({
       observation: {
         agentID: input.agentID,
@@ -166,6 +176,7 @@ export class AgentObservationBuilder {
         objective: input.objective ?? null,
         recentDecisions: input.recentDecisions ?? [],
         recentCommunications: input.recentCommunications ?? [],
+        ...(economy !== undefined ? { economy } : {}),
         endgame: this.endgameState(input.gameState, player),
         notes,
       },
@@ -195,6 +206,7 @@ export class AgentObservationBuilder {
       objective: input.objective ?? null,
       recentDecisions: input.recentDecisions ?? [],
       recentCommunications: input.recentCommunications ?? [],
+      ...(economy !== undefined ? { economy } : {}),
       endgame: this.endgameState(input.gameState, player),
       notes,
     };
@@ -495,9 +507,30 @@ export class AgentObservationBuilder {
       gameState && player ? this.deleteUnitOptions(player) : [];
     const boatOptions =
       gameState && player ? this.boatOptions(gameState, player) : [];
-    const boatRetreatOptions = player ? this.boatRetreatOptions(player) : [];
-    const warshipMoveOptions =
-      gameState && player ? this.warshipMoveOptions(gameState, player) : [];
+    const transportStates =
+      gameState && player ? this.transportStates(gameState, player) : [];
+    const maximumTransportCount = gameState?.config().boatMaxNumber() ?? 0;
+    const launchSlotsRemaining = Math.max(
+      0,
+      maximumTransportCount - transportStates.length,
+    );
+    const transportLaunch =
+      gameState && player
+        ? {
+            activeTransportCount: transportStates.length,
+            maximumTransportCount,
+            launchSlotsRemaining,
+            blocker: gameState
+              .config()
+              .isUnitDisabled(UnitType.TransportShip)
+              ? ("transport_disabled" as const)
+              : launchSlotsRemaining === 0
+                ? ("transport_cap_reached" as const)
+                : boatOptions.length === 0
+                  ? ("no_reachable_target" as const)
+                  : null,
+          }
+        : undefined;
     const allianceOptions = this.allianceOptions(visiblePlayers);
     const targetOptions = this.targetOptions(visiblePlayers);
     const emojiOptions = this.emojiOptions(visiblePlayers);
@@ -558,14 +591,23 @@ export class AgentObservationBuilder {
         "no non-friendly player without an existing embargo is available",
       );
     }
+    if (transportLaunch?.blocker === "transport_cap_reached") {
+      blockerNotes.push(
+        `${transportStates.length} active or returning transports occupy all ${maximumTransportCount} launch slots`,
+      );
+    } else if (transportLaunch?.blocker === "no_reachable_target") {
+      blockerNotes.push(
+        "no neutral or hostile coastline is currently reachable by transport",
+      );
+    }
 
     return {
       buildOptions,
       upgradeOptions,
       deleteUnitOptions,
       boatOptions,
-      boatRetreatOptions,
-      warshipMoveOptions,
+      transportStates,
+      transportLaunch,
       allianceOptions,
       targetOptions,
       emojiOptions,
@@ -605,10 +647,6 @@ export class AgentObservationBuilder {
       {
         unit: UnitType.MissileSilo,
         role: "infrastructure",
-      },
-      {
-        unit: UnitType.Warship,
-        role: "defensive",
       },
       {
         unit: UnitType.AtomBomb,
@@ -959,7 +997,11 @@ export class AgentObservationBuilder {
   }
 
   private boatOptions(gameState: Game, player: Player): AgentBoatOption[] {
-    if (gameState.config().isUnitDisabled(UnitType.TransportShip)) {
+    if (
+      gameState.config().isUnitDisabled(UnitType.TransportShip) ||
+      player.unitCount(UnitType.TransportShip) >=
+        gameState.config().boatMaxNumber()
+    ) {
       return [];
     }
     const troops = Math.max(1, Math.floor(player.troops() * 0.08));
@@ -986,43 +1028,33 @@ export class AgentObservationBuilder {
     return options;
   }
 
-  private boatRetreatOptions(player: Player): AgentBoatRetreatOption[] {
-    return player
-      .units(UnitType.TransportShip)
-      .filter((unit) => !unit.transportShipState().isRetreating)
-      .slice(0, 4)
-      .map((unit) => ({
-        unitID: unit.id(),
-        tile: unit.tile(),
-        targetTile: unit.targetTile() ?? null,
-        troops: unit.troops(),
-        legalReason:
-          "owned transport ship is active and not already retreating",
-      }));
-  }
-
-  private warshipMoveOptions(
+  private transportStates(
     gameState: Game,
     player: Player,
-  ): AgentWarshipMoveOption[] {
-    const warships = player
-      .units(UnitType.Warship)
-      .filter((unit) => unit.isActive());
-    if (warships.length === 0) {
-      return [];
-    }
-    const targets = gameState
-      .units(UnitType.TransportShip, UnitType.Warship, UnitType.TradeShip)
-      .filter(
-        (unit) => unit.owner() !== player && !player.isFriendly(unit.owner()),
-      )
-      .filter((unit) => gameState.isWater(unit.tile()))
-      .slice(0, 4);
-    return targets.map((target) => ({
-      unitIDs: warships.slice(0, 3).map((unit) => unit.id()),
-      targetTile: target.tile(),
-      legalReason: `enemy ${target.type()} is on reachable water tile ${target.tile()}`,
-    }));
+  ): AgentTransportState[] {
+    return player
+      .units(UnitType.TransportShip)
+      .sort((a, b) => a.id() - b.id())
+      .map((unit) => {
+        const targetTile = unit.targetTile() ?? null;
+        const target =
+          targetTile === null ? null : gameState.owner(targetTile);
+        return {
+          unitID: unit.id(),
+          status: unit.transportShipState().isRetreating
+            ? ("returning" as const)
+            : ("en_route" as const),
+          tile: unit.tile(),
+          targetTile,
+          targetID: target?.isPlayer() ? target.id() : null,
+          targetName: target === null ? null : targetName(target),
+          troops: unit.troops(),
+          remainingManhattanDistance:
+            targetTile === null
+              ? null
+              : gameState.manhattanDist(unit.tile(), targetTile),
+        };
+      });
   }
 
   private allianceOptions(
@@ -1261,27 +1293,59 @@ export class AgentObservationBuilder {
       player,
     );
     const enemyTiles: number[] = [];
+    const reachableWaterComponents = new Set<number>();
+    for (const tile of player.borderTiles()) {
+      if (!gameState.isShore(tile)) {
+        continue;
+      }
+      const component = gameState.getWaterComponent(tile);
+      if (component !== null) {
+        reachableWaterComponents.add(component);
+      }
+    }
     const enemies = gameState
       .players()
       .filter(
         (other) =>
           other !== player &&
           other.isAlive() &&
-          !player.isFriendly(other) &&
-          (!player.sharesBorderWith(other) || other.troops() < player.troops()),
+          player.canAttackPlayer(other),
       )
-      .sort((a, b) => a.troops() - b.troops());
+      .sort(
+        (a, b) =>
+          a.troops() - b.troops() || a.id().localeCompare(b.id()),
+    );
 
     for (const enemy of enemies) {
+      let reachableShore: number | undefined;
       for (const tile of enemy.borderTiles()) {
-        if (gameState.isShore(tile)) {
-          enemyTiles.push(tile);
+        if (!gameState.isShore(tile)) {
+          continue;
+        }
+        const component = gameState.getWaterComponent(tile);
+        if (component !== null && reachableWaterComponents.has(component)) {
+          reachableShore = tile;
           break;
         }
       }
+      if (reachableShore !== undefined) {
+        enemyTiles.push(reachableShore);
+      }
     }
 
-    return [...new Set([...neutralIslandTiles, ...enemyTiles])].slice(0, 16);
+    const interleavedTargets: number[] = [];
+    const targetCount = Math.max(neutralIslandTiles.length, enemyTiles.length);
+    for (let index = 0; index < targetCount; index += 1) {
+      const enemyTile = enemyTiles[index];
+      if (enemyTile !== undefined) {
+        interleavedTargets.push(enemyTile);
+      }
+      const neutralTile = neutralIslandTiles[index];
+      if (neutralTile !== undefined) {
+        interleavedTargets.push(neutralTile);
+      }
+    }
+    return [...new Set(interleavedTargets)].slice(0, 16);
   }
 
   private neutralIslandTransportTiles(

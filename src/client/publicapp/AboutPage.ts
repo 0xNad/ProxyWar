@@ -4,6 +4,7 @@ import {
   APP_SHELL_ROOT_CLASSES,
   appShellFooter,
   appShellHeader,
+  requestUpdateWhenTranslationsReady,
 } from "./AppShellChrome";
 import { fetchReadModel, type ReadModel } from "./ReadModelSchema";
 import { translateText } from "../Utils";
@@ -46,6 +47,7 @@ export class AboutPage extends LitElement {
   connectedCallback(): void {
     super.connectedCallback();
     void this.load();
+    requestUpdateWhenTranslationsReady(this);
   }
 
   private async load(): Promise<void> {

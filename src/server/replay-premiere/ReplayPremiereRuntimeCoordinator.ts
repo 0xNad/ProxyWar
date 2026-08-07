@@ -75,10 +75,23 @@ export const REPLAY_PREMIERE_MAX_OUTAGE_EVENTS_PER_LIFECYCLE_VERSION = 2;
 /**
  * Cap on records a single readLiveProjection() call returns. A near-real-time
  * tap client polls incrementally (passing its own last-seen sequence back
- * in), so this only bounds pathological far-behind catch-up requests — not
- * normal steady-state polling.
+ * in), so in steady state this only bounds pathological far-behind catch-up
+ * requests — not normal steady-state polling. It ALSO bounds a fresh join's
+ * FIRST catch-up request on an aged match: a live QA trace on a ~20 min-old
+ * real match found a single `after=-1` response alone reaching ~4.7 MB and
+ * never completing within the client's per-request timeout — a client
+ * cannot make progress on a request that structurally cannot finish before
+ * it is aborted and retried (against the identical, still-too-large,
+ * response) forever. 1 000 records keeps a single response small enough
+ * (with the server's gzip/brotli response compression — see `compression()`
+ * in `ai-agent-demo-server.ts` — smaller still) to reliably complete inside
+ * a realistic per-request budget even on a slow connection, at the cost of
+ * more, smaller round trips to cover the same total catch-up distance —
+ * see `LIVE_PROJECTION_MAX_POLLS_PER_TICK` / `LIVE_PROJECTION_MAX_DRAIN_POLLS`
+ * in `ReplayPremiereNetwork.ts`, raised in lockstep to preserve the same
+ * total per-tick catch-up capacity.
  */
-export const MAX_LIVE_PROJECTION_RECORDS = 4_000;
+export const MAX_LIVE_PROJECTION_RECORDS = 1_000;
 
 export type ReplayPremiereOutageReason =
   | "planned_restart"
@@ -1004,10 +1017,9 @@ export class ReplayPremiereRuntimeCoordinator {
         previousChunk: previous,
         authoritativeElapsedMs: elapsed,
       });
-    const result = await this.publication.commitReveal(this.persistence, {
-      lockedLifecycle: this.state.lifecycle,
-      terminal,
-    });
+    // Validate the prefix before commitReveal: that durable transition
+    // rejects reuse of the pre-reveal lifecycle, so any later failure would
+    // expose the reveal and make retries unrecoverable.
     const chunks = new Map<number, PremierePublicChunkResponse>();
     for (const descriptor of this.state.releasedChunks) {
       const chunk = this.publication.readChunk(descriptor.index);
@@ -1016,6 +1028,10 @@ export class ReplayPremiereRuntimeCoordinator {
       }
       chunks.set(chunk.index, chunk);
     }
+    const result = await this.publication.commitReveal(this.persistence, {
+      lockedLifecycle: this.state.lifecycle,
+      terminal,
+    });
     chunks.set(result.terminalChunk.index, result.terminalChunk);
     this.recoveredReveal = {
       lifecycle: result.lifecycle,

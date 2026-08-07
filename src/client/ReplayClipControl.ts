@@ -707,8 +707,10 @@ async function pollLeagueClipStatus(state: LeagueClipState): Promise<void> {
     return;
   }
   if (!response.ok) {
-    notifyLeagueClipState(state);
-    scheduleLeagueClipPoll(state);
+    applyLeagueClipFailure(
+      state,
+      response.status === 429 || response.status === 503 ? "busy" : "failed",
+    );
     return;
   }
   try {

@@ -1,19 +1,4 @@
 import { DEFAULT_PLATFORM_ORIGIN } from "../core/PlatformOrigin";
-import {
-  AgentIdentityView,
-  resolveAgentIdentityView,
-} from "./identity/IdentityMatching";
-import { IdentityRegistrySnapshot } from "./identity/IdentityRegistry";
-import type {
-  AgentProfile,
-  AgentVersion,
-  BuilderProfile,
-} from "./identity/IdentitySchemas";
-import { generateEmblemSvg } from "./identity/IdentityEmblems";
-import {
-  computeProvisionalIdentities,
-  type ProvisionalIdentity,
-} from "./identity/ProvisionalIdentity";
 import type {
   AgentStatsArtifact,
   PlayerAgentStats,
@@ -23,10 +8,7 @@ import {
   computeAgentTimeSeries,
   type AgentTimeSeries,
 } from "./agents/AgentTimeSeries";
-import {
-  EMPTY_STANDINGS_HISTORY_STORE,
-  type StandingsHistoryStore,
-} from "./agents/CoworldLeagueStandingsHistory";
+import type { CoworldLeagueArchivedReplayHrefs } from "./agents/CoworldLeagueArtifactRetention";
 import type {
   CoworldLeagueEpisodeRow,
   CoworldLeagueLatestPremiereCard,
@@ -35,6 +17,10 @@ import type {
   CoworldLeagueRoundRow,
   CoworldLeagueStandingRow,
 } from "./agents/CoworldLeagueSiteWriter";
+import {
+  EMPTY_STANDINGS_HISTORY_STORE,
+  type StandingsHistoryStore,
+} from "./agents/CoworldLeagueStandingsHistory";
 import type {
   FeaturedMatch,
   FeaturedMatchCategory,
@@ -50,6 +36,21 @@ import {
 } from "./agents/season/EventPackage";
 import { isPubliclyPromotable } from "./agents/season/EventPackageGate";
 import type { SeasonRegistryFile } from "./agents/season/SeasonSchemas";
+import { generateEmblemSvg } from "./identity/IdentityEmblems";
+import {
+  AgentIdentityView,
+  resolveAgentIdentityView,
+} from "./identity/IdentityMatching";
+import { IdentityRegistrySnapshot } from "./identity/IdentityRegistry";
+import type {
+  AgentProfile,
+  AgentVersion,
+  BuilderProfile,
+} from "./identity/IdentitySchemas";
+import {
+  computeProvisionalIdentities,
+  type ProvisionalIdentity,
+} from "./identity/ProvisionalIdentity";
 
 /**
  * The typed, already-normalized public data model every Stage 2+ page
@@ -188,11 +189,6 @@ export interface PublicMatchParticipant {
   color: string;
 }
 
-export interface PublicDirectorCutSummary {
-  durationEstimateSeconds: number;
-  segmentCount: number;
-}
-
 /**
  * "Drama recaps" gap closure, then the 2026-08-01 "best battles" ranking
  * fix — a compact ranking/evidence signal, never recap prose (the recap
@@ -229,9 +225,7 @@ export interface PublicMatch {
   watchHref: string | null;
   fullRenderHref: string | null;
   premiereHref: string | null;
-  /** Product overhaul spec Stage 5. `null` when no `director-cut-plan.json` artifact exists for this match yet (e.g. an older match generated before this feature shipped) — never fabricated. */
-  directorCut: PublicDirectorCutSummary | null;
-  /** `null` until `CoworldLeagueMatchNarrativeBackfill.ts` has generated evidence for this run (budgeted, gradual — same convergence characteristic as `directorCut`) — never fabricated. */
+  /** `null` until `CoworldLeagueMatchNarrativeBackfill.ts` has generated evidence for this run (budgeted, gradual) — never fabricated. */
   dramaEvidence: PublicDramaEvidence | null;
 }
 
@@ -276,6 +270,23 @@ export interface PublicFeaturedMatch {
    * bug) or the mirror itself failed to load this cycle.
    */
   completedAt: string | null;
+  /**
+   * Full-replay-access bugfix (2026-08-05): the SAME episode this
+   * record's `completedAt` above resolves from — `episode.watchHref`
+   * (lightweight spectator schematic) / `episode.fullRenderHref` (the
+   * real Pixi-rendered full replay), looked up against the
+   * live mirror by `episodeRequestId`, exactly like `completedAt`.
+   * Deliberately NOT gated behind `isPubliclyPromotable`/the operator
+   * `EventPackage` below (unlike `subtitle`/`reasonToWatch`/etc.) —
+   * `MatchDetailPage.ts`'s post-match/revealed state renders whenever
+   * `result !== null`, independent of promotion, so these must resolve
+   * on that same independent floor or a promoted-but-ungated archive
+   * record would show a result with no way to actually watch it. `null`
+   * under the identical honest conditions `completedAt` documents above
+   * — never fabricated.
+   */
+  watchHref: string | null;
+  fullRenderHref: string | null;
   postMatchSummary: string | null;
   result: PublicFeaturedMatchResult | null;
   /**
@@ -296,7 +307,7 @@ export interface PublicFeaturedMatch {
   /**
    * Season Zero activation prompt Phase 5 — the operator-authored
    * `EventPackage` fields the hero/watch/schedule surfaces render once
-   * `isPubliclyPromotable` is `true`. ALL five fields are `null` together
+   * `isPubliclyPromotable` is `true`. ALL four fields are `null` together
    * whenever `isPubliclyPromotable` is `false` — never a half-populated
    * package peeking through before the gate says the record is complete.
    * Safe to fold into the BULK model (unlike `participants` above):
@@ -311,7 +322,6 @@ export interface PublicFeaturedMatch {
    */
   subtitle: string | null;
   reasonToWatch: string[] | null;
-  directorCutEstimateSeconds: number | null;
   canonicalMatchUrl: string | null;
   canonicalPremiereUrl: string | null;
 }
@@ -403,12 +413,16 @@ function publicAgentFromView(
   standing: CoworldLeagueStandingRow | null,
   view: AgentIdentityView,
   statsArtifact: AgentStatsArtifact | null,
-  episodesForPlayer: readonly { completedAt: string | null; isWinner: boolean }[],
+  episodesForPlayer: readonly {
+    completedAt: string | null;
+    isWinner: boolean;
+  }[],
   standingsHistory: StandingsHistoryStore,
   provisionalIdentity: ProvisionalIdentity | null,
 ): PublicAgent {
   const provenance = {
-    ratingPolicyLabel: standing?.ratingPolicyLabel ?? standing?.policyLabel ?? null,
+    ratingPolicyLabel:
+      standing?.ratingPolicyLabel ?? standing?.policyLabel ?? null,
     activeChampionPolicyLabel: standing?.activeChampionPolicyLabel ?? null,
   };
   const stats = publicAgentStats(playerName, statsArtifact);
@@ -508,7 +522,10 @@ function publicAgents(
   for (const episode of episodes) {
     for (const player of episode.players) {
       const list = episodesByPlayer.get(player.name) ?? [];
-      list.push({ completedAt: episode.completedAt, isWinner: player.isWinner });
+      list.push({
+        completedAt: episode.completedAt,
+        isWinner: player.isWinner,
+      });
       episodesByPlayer.set(player.name, list);
     }
   }
@@ -543,9 +560,7 @@ function publicAgents(
       provisionalIdentities.get(row.playerName) ?? null,
     );
   });
-  const standingsPlayerNames = new Set(
-    standings.map((row) => row.playerName),
-  );
+  const standingsPlayerNames = new Set(standings.map((row) => row.playerName));
   const registeredNotInStandings = identity.agents
     .filter(
       (agent) => !standingsPlayerNames.has(agent.policyMatchRule.playerName),
@@ -605,12 +620,6 @@ function publicMatch(
     watchHref: episode.watchHref,
     fullRenderHref: episode.fullRenderHref,
     premiereHref: episode.premiereHref ?? null,
-    directorCut: episode.directorCut
-      ? {
-          durationEstimateSeconds: episode.directorCut.durationEstimateSeconds,
-          segmentCount: episode.directorCut.segmentCount,
-        }
-      : null,
     dramaEvidence: episode.dramaEvidence
       ? {
           curatedDramaScore: episode.dramaEvidence.curatedDramaScore,
@@ -667,6 +676,11 @@ export function publicFeaturedMatch(
   pkg: EventPackage | null = null,
   /** 2026-08-01 P0 — see `PublicFeaturedMatch.completedAt`'s own doc. Defaults to `null` for a caller (existing tests, any future one) that doesn't resolve the live mirror — an honest "not looked up" default, matching `pkg`'s own contract just above. */
   episodeCompletedAt: string | null = null,
+  /** Full-replay-access bugfix (2026-08-05) — see `PublicFeaturedMatch.watchHref`/`.fullRenderHref`'s own doc. Same "not looked up" default as `episodeCompletedAt` just above. */
+  episodeReplayHrefs: {
+    watchHref: string | null;
+    fullRenderHref: string | null;
+  } | null = null,
 ): PublicFeaturedMatch {
   const revealed = isFeaturedMatchRevealed(match);
   const promotion = isPubliclyPromotable(match, pkg);
@@ -679,14 +693,12 @@ export function publicFeaturedMatch(
       ? {
           subtitle: pkg.subtitle,
           reasonToWatch: pkg.reasonToWatch.claims.map((claim) => claim.text),
-          directorCutEstimateSeconds: pkg.directorCutEstimateSeconds,
           canonicalMatchUrl: pkg.canonicalMatchUrl,
           canonicalPremiereUrl: pkg.canonicalPremiereUrl,
         }
       : {
           subtitle: null,
           reasonToWatch: null,
-          directorCutEstimateSeconds: null,
           canonicalMatchUrl: null,
           canonicalPremiereUrl: null,
         };
@@ -702,6 +714,8 @@ export function publicFeaturedMatch(
     scheduledAt: match.scheduledAt,
     revealAt: match.revealAt,
     completedAt: episodeCompletedAt,
+    watchHref: episodeReplayHrefs?.watchHref ?? null,
+    fullRenderHref: episodeReplayHrefs?.fullRenderHref ?? null,
     // EMBARGO: never copy prose that could describe an unrevealed outcome —
     // see `isFeaturedMatchRevealed`'s doc for why this can't trust the
     // store's own validation alone.
@@ -719,29 +733,61 @@ export function publicFeaturedMatch(
  * so they're filtered out entirely, not just embargoed. `packageStore`
  * resolves each match's `EventPackage` (Season Zero Phase 4) for the
  * `isPubliclyPromotable` gate — see that field's own doc. `mirror`
- * resolves each match's ACTUAL completion date (Season Zero P0 — see
- * `PublicFeaturedMatch.completedAt`'s own doc) — `null` when
- * `episodeRequestId` is itself `null` or hasn't reached the mirror yet.
+ * resolves each match's ACTUAL completion date plus its replay hrefs
+ * (Season Zero P0 / full-replay-access bugfix — see
+ * `PublicFeaturedMatch.completedAt`/`.watchHref`/`.fullRenderHref`'s own
+ * doc) — `completedAt` is `null` when `episodeRequestId` is itself `null`
+ * or hasn't reached the mirror yet.
+ *
+ * `archivedReplayHrefsByEpisodeRequestId` (full-replay-retention fix,
+ * 2026-08-06) is the durable fallback for `watchHref`/`fullRenderHref`
+ * ONLY: a bounded map the caller resolves ONCE, per-publish, via
+ * `CoworldLeagueArtifactRetention.ts`'s `resolveArchivedEpisodeReplayHrefs`
+ * — see that function's own doc for why the live mirror window is too
+ * narrow to be the only source. This function stays pure/no-I/O (the
+ * caller does the async archive reads); the live `mirror` episode always
+ * wins when present, exactly like `completedAt` — the archive is
+ * consulted ONLY for a match whose episode is not (or no longer) in
+ * `mirror.episodes`. Defaults to an empty map for every existing caller
+ * (including every existing test) that doesn't resolve one — an honest
+ * "not looked up" default, identical in spirit to `pkg`'s own contract on
+ * `publicFeaturedMatch` above.
  */
 function publicFeaturedMatches(
   store: FeaturedMatchStoreFile,
   packageStore: EventPackageStoreFile,
   mirror: CoworldLeagueMirrorData,
+  archivedReplayHrefsByEpisodeRequestId: ReadonlyMap<
+    string,
+    CoworldLeagueArchivedReplayHrefs
+  > = new Map(),
 ): PublicFeaturedMatch[] {
-  const completedAtByEpisodeRequestId = new Map(
-    mirror.episodes.map((episode) => [episode.episodeRequestId, episode.completedAt]),
+  const episodeByRequestId = new Map(
+    mirror.episodes.map((episode) => [episode.episodeRequestId, episode]),
   );
   return store.matches
     .filter((match) => match.state !== "candidate")
-    .map((match) =>
-      publicFeaturedMatch(
+    .map((match) => {
+      const episode =
+        match.episodeRequestId === null
+          ? undefined
+          : episodeByRequestId.get(match.episodeRequestId);
+      const archivedReplayHrefs =
+        episode !== undefined || match.episodeRequestId === null
+          ? undefined
+          : archivedReplayHrefsByEpisodeRequestId.get(match.episodeRequestId);
+      return publicFeaturedMatch(
         match,
         findEventPackage(packageStore, match.matchId),
-        match.episodeRequestId === null
-          ? null
-          : (completedAtByEpisodeRequestId.get(match.episodeRequestId) ?? null),
-      ),
-    );
+        episode?.completedAt ?? null,
+        episode !== undefined
+          ? {
+              watchHref: episode.watchHref,
+              fullRenderHref: episode.fullRenderHref,
+            }
+          : (archivedReplayHrefs ?? null),
+      );
+    });
 }
 
 /**
@@ -771,7 +817,6 @@ function publicSeasons(registry: SeasonRegistryFile): PublicSeason[] {
       })),
     }));
 }
-
 
 export function buildProxyWarPublicReadModel(
   mirror: CoworldLeagueMirrorData,
@@ -809,6 +854,16 @@ export function buildProxyWarPublicReadModel(
    * default" contract as `standingsHistory`/`eventPackageStore` above.
    */
   seasonRegistry: SeasonRegistryFile = { schemaVersion: 1, seasons: [] },
+  /**
+   * Full-replay-retention fix (2026-08-06): the SAME bounded, once-per-
+   * publish-resolved fallback map `publicFeaturedMatches` documents on its
+   * own `archivedReplayHrefsByEpisodeRequestId` parameter. Defaults to an
+   * empty map — every existing caller/test keeps today's exact behavior.
+   */
+  archivedFeaturedMatchReplayHrefs: ReadonlyMap<
+    string,
+    CoworldLeagueArchivedReplayHrefs
+  > = new Map(),
 ): ProxyWarPublicReadModel {
   const agentSlugByPlayerName = new Map(
     identity.agents.map((agent) => [
@@ -839,11 +894,17 @@ export function buildProxyWarPublicReadModel(
     matches: mirror.episodes.map((episode) =>
       publicMatch(episode, agentSlugByPlayerName),
     ),
-    featuredMatches: publicFeaturedMatches(featuredMatchStore, eventPackageStore, mirror),
+    featuredMatches: publicFeaturedMatches(
+      featuredMatchStore,
+      eventPackageStore,
+      mirror,
+      archivedFeaturedMatchReplayHrefs,
+    ),
     seasons: publicSeasons(seasonRegistry),
     premieres: {
       live: mirror.premiere ?? null,
-      latest: mirror.premiere === undefined ? (mirror.latestPremiere ?? null) : null,
+      latest:
+        mirror.premiere === undefined ? (mirror.latestPremiere ?? null) : null,
     },
     links: {
       enterTheLeagueUrl: mirror.links.enterTheLeagueUrl,

@@ -12,16 +12,14 @@ import {
   mapNameFromVariant,
   mergeEpisodeRows,
   parseCompletedEpisodeMetaList,
-  parseDirectorCutPlanSummary,
+  parseCuratedDramaScore,
   parseHostedReplayPayload,
   parseLeagueSummary,
-  parseCuratedDramaScore,
   parseMatchNarrativeSummary,
   parseMirroredSpectatorTelemetry,
   pickCompetitionDivision,
   premiereHrefForEpisode,
   resolveLatestRevealedPremiere,
-  resolveMirroredDirectorCutPlan,
   resolveMirroredMatchEvidence,
   revealedPremiereIdsFromArchiveIndex,
   roundNumberByRoundId,
@@ -817,41 +815,6 @@ describe("revealed-premiere battle-card links (every round premieres, 2026-07-22
     }
   });
 
-  test("buildEpisodeRow carries directorCut only when one is resolved (additive data.json)", () => {
-    const replay = parseHostedReplayPayload(replayPayloadFixture);
-    expect(replay).not.toBeNull();
-    if (replay === null) {
-      return;
-    }
-    const meta = parseCompletedEpisodeMetaList(replayMetaFixture)[1];
-    const base = {
-      meta,
-      replay,
-      roundNumber: 267,
-      watchHref: null,
-      fullRenderHref: "/ai-league-replay/coworld-run",
-    };
-    const withPlan = buildEpisodeRow({
-      ...base,
-      directorCut: { durationEstimateSeconds: 420, segmentCount: 9 },
-    });
-    expect(withPlan.directorCut).toEqual({
-      durationEstimateSeconds: 420,
-      segmentCount: 9,
-    });
-    // Absent or null input leaves the field entirely OFF the row — the
-    // common case today, since the hosted mirror has no
-    // director-cut-plan.json for most episodes yet (see
-    // parseDirectorCutPlanSummary's own doc).
-    for (const row of [
-      buildEpisodeRow(base),
-      buildEpisodeRow({ ...base, directorCut: null }),
-    ]) {
-      expect(row).not.toHaveProperty("directorCut");
-      expect(JSON.stringify(row)).not.toContain("directorCut");
-    }
-  });
-
   test("buildEpisodeRow carries dramaEvidence only when it's resolved (additive data.json)", () => {
     const replay = parseHostedReplayPayload(replayPayloadFixture);
     expect(replay).not.toBeNull();
@@ -868,7 +831,11 @@ describe("revealed-premiere battle-card links (every round premieres, 2026-07-22
     };
     const withEvidence = buildEpisodeRow({
       ...base,
-      dramaEvidence: { dramaScore: 62, entertainmentGrade: "lively", curatedDramaScore: 40 },
+      dramaEvidence: {
+        dramaScore: 62,
+        entertainmentGrade: "lively",
+        curatedDramaScore: 40,
+      },
     });
     expect(withEvidence.dramaEvidence).toEqual({
       dramaScore: 62,
@@ -884,60 +851,6 @@ describe("revealed-premiere battle-card links (every round premieres, 2026-07-22
       expect(row).not.toHaveProperty("dramaEvidence");
       expect(JSON.stringify(row)).not.toContain("dramaEvidence");
     }
-  });
-});
-
-describe("parseDirectorCutPlanSummary (product overhaul spec Stage 5)", () => {
-  const validPlan = () =>
-    JSON.stringify({
-      schemaVersion: 1,
-      reportKind: "director-cut-plan",
-      runID: "run-1",
-      matchID: "match-1",
-      generatedAt: "2026-07-31T00:00:00.000Z",
-      totalTurns: 50_400,
-      segments: [
-        { startTurn: 0, endTurn: 250, speed: "normal" },
-        { startTurn: 251, endTurn: 50_400, speed: "fast" },
-      ],
-      importantTurnCount: 251,
-      estimatedDurationSeconds: 724,
-      degraded: true,
-      notes: [],
-    });
-
-  test("extracts durationEstimateSeconds and segmentCount from a well-formed plan", () => {
-    expect(parseDirectorCutPlanSummary(validPlan())).toEqual({
-      durationEstimateSeconds: 724,
-      segmentCount: 2,
-    });
-  });
-
-  test("rejects malformed JSON, wrong reportKind, missing segments, and a negative duration", () => {
-    expect(parseDirectorCutPlanSummary("not json")).toBeNull();
-    expect(
-      parseDirectorCutPlanSummary(
-        JSON.stringify({ reportKind: "something-else" }),
-      ),
-    ).toBeNull();
-    expect(
-      parseDirectorCutPlanSummary(
-        JSON.stringify({
-          reportKind: "director-cut-plan",
-          estimatedDurationSeconds: 300,
-          segments: [],
-        }),
-      ),
-    ).toBeNull();
-    expect(
-      parseDirectorCutPlanSummary(
-        JSON.stringify({
-          reportKind: "director-cut-plan",
-          estimatedDurationSeconds: -5,
-          segments: [{ startTurn: 0, endTurn: 10 }],
-        }),
-      ),
-    ).toBeNull();
   });
 });
 
@@ -1140,117 +1053,6 @@ describe("deriveSpectatorTelemetryFromDecisionsLog (product overhaul spec Stage 
       deriveSpectatorTelemetryFromDecisionsLog("not json\n\n", "run-1"),
     ).toBeNull();
     expect(deriveSpectatorTelemetryFromDecisionsLog("", "run-1")).toBeNull();
-  });
-});
-
-describe("resolveMirroredDirectorCutPlan (product overhaul spec Stage 5 mirror gap closure)", () => {
-  test("tier 1: builds a real, gapless plan straight from spectator-telemetry.json", () => {
-    const outcome = resolveMirroredDirectorCutPlan({
-      runID: "league-coworld-real-run",
-      matchID: "league-coworld-real-run",
-      spectatorTelemetryRaw: realTelemetryFixtureRaw,
-      decisionsJsonlRaw: null,
-      finalTurnCount: null,
-    });
-    expect(outcome).not.toBeNull();
-    expect(outcome?.source).toBe("spectator-telemetry");
-    const plan = outcome?.plan;
-    expect(plan?.runID).toBe("league-coworld-real-run");
-    expect(plan?.totalTurns).toBeGreaterThan(0);
-    expect(plan?.segments.length).toBeGreaterThan(0);
-    // Segments fully and gaplessly partition [0, totalTurns].
-    const segments = plan?.segments ?? [];
-    expect(segments[0].startTurn).toBe(0);
-    expect(segments.at(-1)?.endTurn).toBe(plan?.totalTurns);
-    for (let i = 1; i < segments.length; i++) {
-      expect(segments[i].startTurn).toBe(segments[i - 1].endTurn + 1);
-    }
-  });
-
-  test("tier 1 stays non-degraded when match-summary.json supplies the authoritative turn count", () => {
-    const outcome = resolveMirroredDirectorCutPlan({
-      runID: "league-coworld-real-run",
-      matchID: "league-coworld-real-run",
-      spectatorTelemetryRaw: realTelemetryFixtureRaw,
-      decisionsJsonlRaw: null,
-      finalTurnCount: 6300,
-    });
-    expect(outcome?.plan.degraded).toBe(false);
-    expect(outcome?.plan.totalTurns).toBe(6300);
-  });
-
-  test("tier 2 fallback: builds a plan from decisions.jsonl when telemetry is absent", () => {
-    const outcome = resolveMirroredDirectorCutPlan({
-      runID: "league-coworld-fallback-run",
-      matchID: "league-coworld-fallback-run",
-      spectatorTelemetryRaw: null,
-      decisionsJsonlRaw: realDecisionsFixtureRaw,
-      finalTurnCount: null,
-    });
-    expect(outcome).not.toBeNull();
-    expect(outcome?.source).toBe("decisions-log");
-    expect(outcome?.plan.segments.length).toBeGreaterThan(0);
-  });
-
-  test("tier 2 fallback: falls through to decisions.jsonl when telemetry fails validation", () => {
-    const outcome = resolveMirroredDirectorCutPlan({
-      runID: "league-coworld-fallback-run",
-      matchID: "league-coworld-fallback-run",
-      spectatorTelemetryRaw: "not json",
-      decisionsJsonlRaw: realDecisionsFixtureRaw,
-      finalTurnCount: null,
-    });
-    expect(outcome?.source).toBe("decisions-log");
-  });
-
-  test("prefers spectator-telemetry.json over decisions.jsonl when both are present", () => {
-    const outcome = resolveMirroredDirectorCutPlan({
-      runID: "league-coworld-real-run",
-      matchID: "league-coworld-real-run",
-      spectatorTelemetryRaw: realTelemetryFixtureRaw,
-      decisionsJsonlRaw: realDecisionsFixtureRaw,
-      finalTurnCount: null,
-    });
-    expect(outcome?.source).toBe("spectator-telemetry");
-  });
-
-  test("resolves null (never throws) when neither input is usable", () => {
-    expect(
-      resolveMirroredDirectorCutPlan({
-        runID: "run-1",
-        matchID: "run-1",
-        spectatorTelemetryRaw: "not json",
-        decisionsJsonlRaw: "also not json",
-        finalTurnCount: null,
-      }),
-    ).toBeNull();
-    expect(
-      resolveMirroredDirectorCutPlan({
-        runID: "run-1",
-        matchID: "run-1",
-        spectatorTelemetryRaw: null,
-        decisionsJsonlRaw: null,
-        finalTurnCount: null,
-      }),
-    ).toBeNull();
-  });
-
-  test("is deterministic — identical mirrored input produces an identical plan", () => {
-    const build = () =>
-      resolveMirroredDirectorCutPlan({
-        runID: "league-coworld-real-run",
-        matchID: "league-coworld-real-run",
-        spectatorTelemetryRaw: realTelemetryFixtureRaw,
-        decisionsJsonlRaw: null,
-        finalTurnCount: 6300,
-      });
-    const first = build();
-    const second = build();
-    // generatedAt is a real timestamp and legitimately differs — compare
-    // everything else.
-    const { generatedAt: _g1, ...restFirst } = first?.plan ?? ({} as never);
-    const { generatedAt: _g2, ...restSecond } = second?.plan ?? ({} as never);
-    expect(restFirst).toEqual(restSecond);
   });
 });
 

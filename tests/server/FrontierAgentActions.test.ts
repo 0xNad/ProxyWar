@@ -24,34 +24,42 @@ import {
 import { LegalActionBuilder } from "../../src/server/agents/LegalActionBuilder";
 import { LlmPromptBuilder } from "../../src/server/agents/LlmPromptBuilder";
 
+// "spawn" is deliberately excluded: spawn placement is a deterministic
+// fairness assignment (AgentSpawnAssignment.ts), never offered as a
+// LegalAction for a brain/executor to choose - LegalActionBuilder.build()
+// never emits kind:"spawn" anymore. The structured-deal meta-actions are
+// excluded like "hold": they are intent:null and flag-gated
+// (PROXYWAR_TUNE_STRUCTURED_DEALS, default OFF; emitted only when the runner
+// injects the observation `deals` block), so they are not part of the
+// autonomous gameplay (intent-emitting) surface this suite pins.
 const autonomousGameplayKinds = legalActionKinds.filter(
-  (kind) => kind !== "hold",
+  (kind) =>
+    kind !== "hold" &&
+    kind !== "boat_retreat" &&
+    kind !== "spawn" &&
+    !kind.startsWith("deal_"),
 );
 
 describe("FrontierAgent expanded legal action surface", () => {
-  it("discovers every autonomous gameplay action kind and emits schema-valid intents", () => {
+  it("discovers every autonomous gameplay action kind and emits schema-valid intents (never spawn)", () => {
     const activeActions = new LegalActionBuilder().build({
       observation: expandedObservation(),
       maxPostSpawnActions: 120,
     });
-    const spawnActions = new LegalActionBuilder().build({
+    // Spawn-phase observation: never offers a spawn action either - there is
+    // no agent-facing spawn menu anymore, spawn placement is a deterministic
+    // fairness assignment.
+    const spawnPhaseActions = new LegalActionBuilder().build({
       observation: {
         ...expandedObservation(),
         phase: "spawn",
       },
-      spawnCandidates: [
-        {
-          tile: 10,
-          x: 5,
-          y: 5,
-          pressureScore: 0.2,
-          safetyScore: 0.9,
-          diplomacyScore: 0.7,
-          opportunityScore: 0.8,
-        },
-      ],
     });
-    const actions = [...activeActions, ...spawnActions];
+    expect(
+      spawnPhaseActions.some((action) => action.kind === "spawn"),
+    ).toBe(false);
+
+    const actions = [...activeActions, ...spawnPhaseActions];
     const kinds = new Set(actions.map((action) => action.kind));
 
     for (const kind of autonomousGameplayKinds) {
@@ -70,38 +78,15 @@ describe("FrontierAgent expanded legal action surface", () => {
     }
   });
 
-  it("keeps map-wide spawn scouts in the legal action list", () => {
-    const clusteredCandidates = Array.from({ length: 24 }, (_, index) => ({
-      tile: 1_000 + index,
-      x: 100 + (index % 4),
-      y: 100 + Math.floor(index / 4),
-      pressureScore: 0.64,
-      safetyScore: 0.34,
-      diplomacyScore: 0.82,
-      opportunityScore: 0.92 - index * 0.002,
-      localLandScore: 0.99,
-    }));
-    const distantScout = {
-      tile: 9_001,
-      x: 15,
-      y: 270,
-      pressureScore: 0.56,
-      safetyScore: 0.38,
-      diplomacyScore: 0.74,
-      opportunityScore: 0.84,
-      localLandScore: 0.97,
-    };
-
+  it("does not expose manual transport recall even for legacy observations", () => {
     const actions = new LegalActionBuilder().build({
-      observation: {
-        ...expandedObservation(),
-        phase: "spawn",
-      },
-      spawnCandidates: [...clusteredCandidates, distantScout],
-      maxSpawnActions: 8,
+      observation: expandedObservation(),
+      maxPostSpawnActions: 120,
     });
 
-    expect(actions.map((action) => action.id)).toContain("spawn:9001");
+    expect(actions.some((action) => action.kind === "boat_retreat")).toBe(
+      false,
+    );
   });
 
   it("offers only hold after an agent has been eliminated", () => {
@@ -118,6 +103,57 @@ describe("FrontierAgent expanded legal action surface", () => {
     });
 
     expect(actions.map((action) => action.kind)).toEqual(["hold"]);
+  });
+
+  it("retains a fairness-assigned spawn's pressure/local-land metadata to drive the post-spawn force-expansion menu (regression: shouldOfferNationOpeningForceExpansion)", () => {
+    const highPressureLowLandSpawn = {
+      sequence: 1,
+      actionID: "spawn:12",
+      actionKind: "spawn" as const,
+      reason: "deterministic fairness-assigned spawn slot",
+      accepted: true,
+      spawnPressureScore: 0.9,
+      spawnLocalLandScore: 0.5,
+    };
+    const calmSpawn = {
+      ...highPressureLowLandSpawn,
+      spawnPressureScore: 0.1,
+      spawnLocalLandScore: 0.99,
+    };
+
+    const withHighPressure = expandedObservation();
+    withHighPressure.memory = {
+      ...withHighPressure.memory,
+      recentActions: [highPressureLowLandSpawn],
+    };
+    const withCalmSpawn = expandedObservation();
+    withCalmSpawn.memory = {
+      ...withCalmSpawn.memory,
+      recentActions: [calmSpawn],
+    };
+
+    const highPressureActions = new LegalActionBuilder()
+      .build({ observation: withHighPressure, maxPostSpawnActions: 120 })
+      .filter((action) => action.id.startsWith("expand:terra-nullius:"));
+    const calmActions = new LegalActionBuilder()
+      .build({ observation: withCalmSpawn, maxPostSpawnActions: 120 })
+      .filter((action) => action.id.startsWith("expand:terra-nullius:"));
+
+    // A high-pressure, low-local-land spawn (as a real AgentSpawnAssignment
+    // slot can legitimately be) unlocks the extra 50%-troops neutral-
+    // expansion option; a calm spawn does not. This only works if the
+    // fairness-assigned spawn's LegalAction metadata (buildSpawnLegalAction)
+    // still carries pressureScore/localLandScore through to the
+    // AgentDecisionRecord and AgentLeagueMatch.recentDecisionsFor's
+    // spawnPressureScore/spawnLocalLandScore summary - a live, non-agent-
+    // choice consumer, not a menu/ranking concern.
+    expect(highPressureActions.map((a) => a.id)).toContain(
+      "expand:terra-nullius:50",
+    );
+    expect(calmActions.map((a) => a.id)).not.toContain(
+      "expand:terra-nullius:50",
+    );
+    expect(highPressureActions.length).toBe(calmActions.length + 1);
   });
 
   it("submits land structure builds at the proven build tile", () => {
@@ -828,21 +864,7 @@ function visiblePlayer(
 
 function actionForKind(kind: LegalActionKind): LegalAction {
   const actions = new LegalActionBuilder().build({
-    observation:
-      kind === "spawn"
-        ? { ...expandedObservation(), phase: "spawn" }
-        : expandedObservation(),
-    spawnCandidates: [
-      {
-        tile: 10,
-        x: 5,
-        y: 5,
-        pressureScore: 0.2,
-        safetyScore: 0.9,
-        diplomacyScore: 0.7,
-        opportunityScore: 0.8,
-      },
-    ],
+    observation: expandedObservation(),
     maxPostSpawnActions: 120,
   });
   const action = actions.find((candidate) => candidate.kind === kind);
@@ -883,6 +905,13 @@ function objectiveForKind(kind: LegalActionKind): StrategicPlan["objective"] {
     case "embargo":
     case "embargo_all":
       return "pressure_rival";
+    // Type-exhaustiveness only: deal meta-actions are excluded from
+    // autonomousGameplayKinds above and never reach this helper at runtime.
+    case "deal_propose":
+    case "deal_accept":
+    case "deal_reject":
+    case "deal_withdraw":
+      return "build_alliance";
     case "delete_unit":
     case "hold":
       return "survive";

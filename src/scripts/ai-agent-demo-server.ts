@@ -1,10 +1,10 @@
 import { spawn, type ChildProcess } from "child_process";
+import compression from "compression";
 import { randomBytes, randomUUID, timingSafeEqual } from "crypto";
 import express, { type Request, type Response } from "express";
 import fs from "fs/promises";
 import http from "http";
 import path from "path";
-import { DEFAULT_PLATFORM_ORIGIN } from "../core/PlatformOrigin";
 import {
   loadAgentDemoHubModel,
   proxyWarAgentProtocolSchema,
@@ -24,47 +24,8 @@ import {
   type AgentDemoJobRequest,
 } from "../server/agents/AgentDemoServerJobs";
 import { AgentRelayRateGuard } from "../server/agents/AgentRelayRateGuard";
-import { resolveFeaturedMatchStateRoot } from "../server/agents/FeaturedMatch";
-import { reconcileFeaturedMatchStore } from "../server/agents/FeaturedMatchReconcile";
-import { resolveFeaturedMatchParticipantCards } from "../server/agents/FeaturedMatchParticipants";
-import {
-  findEventPackage,
-  readEventPackageStore,
-  resolveEventPackageStateRoot,
-} from "../server/agents/season/EventPackage";
-import {
-  buildLeagueEpisodeMatchPageModel,
-  buildLeagueEpisodeParticipantCards,
-  findLeagueEpisodeByRequestId,
-  findLeagueEpisodeRunDir,
-  leagueEpisodeSpoilerSafeDescription,
-  leagueEpisodeSpoilerSafeTitle,
-  readCoworldLeagueEpisodesFromDataJson,
-  readLeagueEpisodeDecisiveMoments,
-  readLeagueEpisodeRecap,
-} from "../server/agents/LeagueEpisodeMatchPage";
-import {
-  renderMatchShareCardSvg,
-  type MatchShareCardInput,
-} from "../server/agents/MatchShareCard";
-import { loadIdentityRegistrySnapshot } from "../server/identity/IdentityRegistry";
-import {
-  buildRegistrationDraft,
-  buildRegistrationIssueUrl,
-  BuildRegistrationSubmissionInputSchema,
-  firstFieldError,
-} from "../server/identity/BuildRegistrationSubmission";
-import { BuildFunnelCounters } from "../server/agents/BuildFunnelCounters";
-import { AnalyticsAggregateStore } from "../server/analytics/AnalyticsAggregateStore";
-import { AnalyticsIngestService } from "../server/analytics/AnalyticsIngestService";
-import { AnalyticsRecentRing } from "../server/analytics/AnalyticsRecentRing";
-import { applyMatchLabels, buildAnalyticsReport } from "../server/analytics/AnalyticsReport";
-import { renderAnalyticsReportHtml } from "../server/analytics/AnalyticsReportPage";
-import { generateEmblemSvg, deriveEmblemPalette } from "../server/identity/IdentityEmblems";
-import { SlugSchema } from "../server/identity/IdentitySchemas";
-import { publicFeaturedMatch } from "../server/ProxyWarPublicReadModel";
-import { derivePremiereId } from "../server/replay-premiere/ReplayPremiereLoopCore";
 import { gameRecordFileIsRenderable } from "../server/agents/AgentSpectatorReplay";
+import { readAgentStatsArtifact } from "../server/agents/AgentStatsArtifact";
 import {
   agentStrategyProfiles,
   type AgentStrategyProfile,
@@ -81,6 +42,13 @@ import {
   AiLeagueRunClips,
   createAiLeagueRunClipDocumentRouter,
 } from "../server/agents/AiLeagueRunClips";
+import { BuildFunnelCounters } from "../server/agents/BuildFunnelCounters";
+import {
+  resolveArchivedEpisodeReplayHrefs,
+  resolveCoworldLeagueSummaryArchiveDir,
+  restoreArchivedGameRecord,
+} from "../server/agents/CoworldLeagueArtifactRetention";
+import { readStandingsHistoryStore } from "../server/agents/CoworldLeagueStandingsHistory";
 import {
   checkExternalAgentEndpoint,
   normalizeExternalAgentHealthCheckInput,
@@ -97,11 +65,31 @@ import {
 import { resolveExternalAgentToken } from "../server/agents/ExternalAgentSecrets";
 import type { ExternalAgentRequest } from "../server/agents/ExternalHttpAgentBrain";
 import {
+  resolveFeaturedMatchStateRoot,
+  type FeaturedMatch,
+} from "../server/agents/FeaturedMatch";
+import { resolveFeaturedMatchParticipantCards } from "../server/agents/FeaturedMatchParticipants";
+import { reconcileFeaturedMatchStore } from "../server/agents/FeaturedMatchReconcile";
+import {
+  buildLeagueEpisodeMatchPageModel,
+  buildLeagueEpisodeParticipantCards,
+  findLeagueEpisodeByRequestId,
+  findLeagueEpisodeRunDir,
+  leagueEpisodeSpoilerSafeDescription,
+  leagueEpisodeSpoilerSafeTitle,
+  readCoworldLeagueEpisodesFromDataJson,
+  readLeagueEpisodeDecisiveMoments,
+  readLeagueEpisodeRecap,
+} from "../server/agents/LeagueEpisodeMatchPage";
+import {
   buildLeaguePlayerSection,
+  findLeagueEpisodeReplayInfo,
   readLeagueMirrorData,
 } from "../server/agents/LeaguePlayerProfile";
-import { readAgentStatsArtifact } from "../server/agents/AgentStatsArtifact";
-import { readStandingsHistoryStore } from "../server/agents/CoworldLeagueStandingsHistory";
+import {
+  renderMatchShareCardSvg,
+  type MatchShareCardInput,
+} from "../server/agents/MatchShareCard";
 import {
   parsePlayerStrategySpec,
   PlayerStrategySpec,
@@ -172,27 +160,50 @@ import {
   type ProxyWarRateLimitSnapshot,
 } from "../server/agents/ProxyWarRateLimit";
 import { renderQuickStartPlayHtml } from "../server/agents/QuickStartPlayPage";
+import {
+  findEventPackage,
+  readEventPackageStore,
+  resolveEventPackageStateRoot,
+} from "../server/agents/season/EventPackage";
+import { AnalyticsAggregateStore } from "../server/analytics/AnalyticsAggregateStore";
+import { AnalyticsIngestService } from "../server/analytics/AnalyticsIngestService";
+import { AnalyticsRecentRing } from "../server/analytics/AnalyticsRecentRing";
+import {
+  applyMatchLabels,
+  buildAnalyticsReport,
+} from "../server/analytics/AnalyticsReport";
+import { renderAnalyticsReportHtml } from "../server/analytics/AnalyticsReportPage";
 import { resolveBettingProfileServiceToken } from "../server/BettingProfileServiceAuth";
 import {
   createGithubOAuthClient,
   resolveGithubOAuthConfig,
 } from "../server/GithubOAuthClient";
+import {
+  buildRegistrationDraft,
+  buildRegistrationIssueUrl,
+  BuildRegistrationSubmissionInputSchema,
+  firstFieldError,
+} from "../server/identity/BuildRegistrationSubmission";
+import {
+  deriveEmblemPalette,
+  generateEmblemSvg,
+} from "../server/identity/IdentityEmblems";
+import { loadIdentityRegistrySnapshot } from "../server/identity/IdentityRegistry";
+import { SlugSchema } from "../server/identity/IdentitySchemas";
 import { createPlatformAccountRouter } from "../server/platform/PlatformAccountHttp";
+import { PlatformAccountSecurity } from "../server/platform/PlatformAccountSecurity";
+import { PlatformAccountStore } from "../server/platform/PlatformAccountStore";
 import { createPlatformBuilderClaimRouter } from "../server/platform/PlatformBuilderClaimHttp";
 import { resolveBuilderClaimStateRoot } from "../server/platform/PlatformBuilderClaimStore";
 import { createPlatformBuilderDashboardRouter } from "../server/platform/PlatformBuilderDashboardHttp";
 import { createPlatformBuilderEditRouter } from "../server/platform/PlatformBuilderEditHttp";
 import { resolveBuilderEditStateRoot } from "../server/platform/PlatformBuilderEditStore";
 import { createPlatformBuilderVersionRouter } from "../server/platform/PlatformBuilderVersionHttp";
-import { resolveVersionReleaseStateRoot } from "../server/platform/PlatformVersionReleaseStore";
-import { PlatformAccountSecurity } from "../server/platform/PlatformAccountSecurity";
-import { PlatformAccountStore } from "../server/platform/PlatformAccountStore";
 import { resolveCanonicalHostRedirect } from "../server/platform/PlatformCanonicalHost";
 import { createPlatformGithubAuthRouter } from "../server/platform/PlatformGithubAuth";
 import { PlatformGithubIdentityLinkStore } from "../server/platform/PlatformGithubIdentityLinkStore";
 import { PlatformHandoffStore } from "../server/platform/PlatformHandoffStore";
 import { PlatformPolicyClaimStore } from "../server/platform/PlatformPolicyClaimStore";
-import { resolvePlatformPovClaimOrigins } from "../server/platform/PlatformPovClaimOrigins";
 import { resolvePlatformReturnOrigins } from "../server/platform/PlatformReturnOrigins";
 import { renderPlatformRootHtml } from "../server/platform/PlatformRootPage";
 import {
@@ -200,6 +211,8 @@ import {
   PLATFORM_HMAC_HEX_ENV,
   resolvePlatformPrivateStateRoot,
 } from "../server/platform/PlatformSecrets";
+import { resolveVersionReleaseStateRoot } from "../server/platform/PlatformVersionReleaseStore";
+import { publicFeaturedMatch } from "../server/ProxyWarPublicReadModel";
 import {
   getAppShellContent,
   setHtmlNoCacheHeaders,
@@ -218,6 +231,7 @@ import {
   ReplayPremierePointsLedger,
   resolveReplayPremierePointsLedgerRoot,
 } from "../server/replay-premiere/points/ReplayPremierePointsLedger";
+import { ReplayPremiereSettlementLedger } from "../server/replay-premiere/points/ReplayPremiereSettlementLedger";
 import { ReplayPremiereAnonymousWriteLimiter } from "../server/replay-premiere/ReplayPremiereAnonymousWriteLimiter";
 import { ReplayPremiereArchivedClipPromoter } from "../server/replay-premiere/ReplayPremiereArchivedClipPromoter";
 import { ReplayPremiereArchiveStore } from "../server/replay-premiere/ReplayPremiereArchiveIndex";
@@ -233,7 +247,10 @@ import {
   ReplayPremiereClips,
   ReplayPremiereRevealAutoClip,
 } from "../server/replay-premiere/ReplayPremiereClips";
-import { premiereClipRepresentativeAnchorTurn } from "../server/replay-premiere/ReplayPremiereContracts";
+import {
+  PREMIERE_ID_PATTERN,
+  premiereClipRepresentativeAnchorTurn,
+} from "../server/replay-premiere/ReplayPremiereContracts";
 import {
   ReplayPremiereError,
   toPublicReplayPremiereFailure,
@@ -246,6 +263,7 @@ import {
   requestSecurityHeaders,
 } from "../server/replay-premiere/ReplayPremiereHttp";
 import type { ReplayPremiereSettlementPointsRecorder } from "../server/replay-premiere/ReplayPremiereInteractions";
+import { derivePremiereId } from "../server/replay-premiere/ReplayPremiereLoopCore";
 import {
   createReplayPremierePublicPageRouter,
   escapeHtml,
@@ -265,6 +283,15 @@ import { DeterministicSyntheticCrowdTerritoryProjector } from "../server/replay-
 import { applyStaticAssetCacheControl } from "../server/StaticAssetCache";
 
 const app = express();
+// Gzip/brotli-compresses every response this app sends, including the
+// premiere replay/live-projection JSON API (`ReplayPremiereHttp.ts`'s
+// `sendJson`), which is otherwise sent uncompressed. Real Turn-payload JSON
+// (repetitive keys, small numeric deltas) compresses well; this is a pure
+// transport-layer change — the exact same bytes are hashed/verified after
+// `fetch()` transparently decompresses, so it does not touch integrity,
+// embargo, or ledger logic. See `compression()` in `src/server/Worker.ts`
+// for the same pattern already in use elsewhere in this codebase.
+app.use(compression());
 const networkConfig = loadProxyWarDemoServerNetworkConfig();
 const serverUrls = buildProxyWarDemoServerUrls(networkConfig);
 const port = networkConfig.port;
@@ -292,6 +319,12 @@ const artifactsRootDir =
     ? path.join(process.cwd(), "artifacts")
     : path.resolve(configuredArtifactsRootDir);
 const runsRootDir = path.join(artifactsRootDir, "ai-league-runs");
+// Full-replay-retention fix (2026-08-06) — see
+// `CoworldLeagueArtifactRetention.ts`'s `resolveArchivedEpisodeReplayHrefs`/
+// `restoreArchivedGameRecord` for what this durable, indefinitely-retained
+// directory backs.
+const summaryArchiveDir =
+  resolveCoworldLeagueSummaryArchiveDir(artifactsRootDir);
 const publicReplayRenderabilityCache = new Map<
   string,
   { fingerprint: string; verdict: Promise<boolean> }
@@ -318,23 +351,17 @@ const platformEnabled = envFlag("PROXYWAR_PLATFORM_ENABLED");
 // public URL, never a peer's: a child app never gets an
 // `expectedOrigin`-satisfying platform cookie, and vice versa.
 const configuredPlatformOrigin = firstConfiguredEnv("PROXYWAR_PLATFORM_ORIGIN");
-// The platform account origin every league/replay page must be allowed to
-// `fetch()` for the PoV default (`/api/account/pov-claims`). Same env as
-// above, and the fallback is `DEFAULT_PLATFORM_ORIGIN` — shared, not copied.
-// This line is why that matters: the BETTING process sets no
-// `PROXYWAR_PLATFORM_ORIGIN`, so the fallback is what lands in the CSP it
-// serves, and a stale one there is a silent console violation rather than an
-// error anyone sees (see `core/PlatformOrigin.ts`).
-const platformAccountOrigin =
-  configuredPlatformOrigin ?? DEFAULT_PLATFORM_ORIGIN;
 /**
- * The league/replay CSP, in ONE place. Every document this process serves on
- * a league surface must allow the platform origin in `connect-src` or the PoV
- * fetch dies as a silent console violation; routing all call sites through a
- * single helper is what stops the next page from omitting it.
+ * The league/replay CSP, in ONE place — `connect-src 'self'`, no per-page
+ * override. Previously widened to also allow the platform account origin
+ * (so a signed-in viewer's replay camera could default to their own
+ * claimed agent via a cross-origin `/api/account/pov-claims` fetch); that
+ * feature was removed, so every league surface is back to a closed CSP.
+ * Routing every call site through one helper is what would stop a future
+ * page from omitting a real widening need, if one is ever added again.
  */
 const leagueContentSecurityPolicy = (): string =>
-  proxyWarLeagueContentSecurityPolicy([platformAccountOrigin]);
+  proxyWarLeagueContentSecurityPolicy();
 // The account authority answers on exactly ONE hostname. After the apex
 // cutover `app.proxywar.xyz` still reaches this process through the tunnel,
 // and simply serving it would hand the visitor a second host-only session
@@ -388,7 +415,8 @@ const platformLeagueHomeUrl =
 const platformMarketHomeUrl =
   firstConfiguredEnv("PROXYWAR_MARKET_HOME_URL") ?? `${bettingOrigin}/bet`;
 const platformReplaysHomeUrl =
-  firstConfiguredEnv("PROXYWAR_REPLAYS_HOME_URL") ?? "https://beta.proxywar.xyz/watch";
+  firstConfiguredEnv("PROXYWAR_REPLAYS_HOME_URL") ??
+  "https://beta.proxywar.xyz/watch";
 const replayPremiereGuestSecurity = new ReplayPremiereGuestSecurity({
   hmacKey: await loadOrCreateReplayPremiereGuestHmacKey({
     privateStateRoot: replayPremierePrivateStateRoot,
@@ -415,6 +443,14 @@ const replayPremierePointsLedgerRoot = resolveReplayPremierePointsLedgerRoot();
 export const replayPremierePointsLedger = await ReplayPremierePointsLedger.open(
   replayPremierePointsLedgerRoot,
 );
+// Durable "who won" settlement ledger — beside the points ledger, same
+// root, same atomic write-temp-then-rename convention, its own file (the
+// exact precedent `BettingPlatformAccountLinkStore` already set for a
+// second store sharing this root). Survives `cycle-premiere.sh`'s state-
+// root wipe for the same reason the points ledger does: this root is
+// outside it. See `ReplayPremiereSettlementLedger`'s doc comment.
+export const replayPremiereSettlementLedger =
+  await ReplayPremiereSettlementLedger.open(replayPremierePointsLedgerRoot);
 // Betting's link to the platform account authority — proxywar.xyz is
 // the sole account/session authority now (see the platform build's
 // contract), so betting never talks to GitHub directly and never writes a
@@ -554,6 +590,7 @@ const replayPremiereProduction = await startReplayPremiereProduction({
   // checkpoint-gated) for local/dev testing.
   wageringEnabled: envFlag("PROXYWAR_WAGERING_ENABLED"),
   pointsLedger: replayPremierePointsRecorder,
+  settlementLedger: replayPremiereSettlementLedger,
   // Deterministic, seeded synthetic bettors that keep a thin local/dev
   // market legible for demos/tester sessions. Requires PROXYWAR_WAGERING_ENABLED=1
   // too. Off by default, never for production.
@@ -840,7 +877,10 @@ const rateLimits = {
   // client flush (interval + pagehide), each carrying a small batch; this
   // caps request spam per IP, independent of the ingest service's own
   // per-visitor-id limiter (see AnalyticsIngestService.ts).
-  analytics: positiveInt(firstConfiguredEnv("PROXYWAR_RATE_LIMIT_ANALYTICS"), 120),
+  analytics: positiveInt(
+    firstConfiguredEnv("PROXYWAR_RATE_LIMIT_ANALYTICS"),
+    120,
+  ),
 };
 const buildFunnelCounters = new BuildFunnelCounters(artifactsRootDir);
 const analyticsAggregateStore = new AnalyticsAggregateStore(artifactsRootDir);
@@ -1194,6 +1234,38 @@ app.get("/api/premieres/account", async (req, res) => {
   }
 });
 
+// Narrow, public "who won" read for a premiere whose market has already
+// settled — see `ReplayPremiereSettlementLedger`'s class doc for the
+// durability/scope reasoning and `PremiereEndedPage.ts` for the one
+// caller. Public data, deliberately no guest bootstrap/cookie: the winner
+// was always public the instant the market settled, and this route never
+// exposes anything narrower than that (no episode payloads, no turn
+// data, no per-viewer position). 404 for an id with no recorded
+// settlement — a pre-feature premiere, an unsettled/void-without-refund
+// premiere state that never reaches this ledger, or simply a bad id; the
+// three are indistinguishable on purpose (nothing here should hint at
+// whether an id is real).
+app.get("/api/premieres/:id/settlement", async (req, res) => {
+  if (!pointsRoutesEnabled) {
+    res.status(404).json({ error: { code: "PREMIERE_UNAVAILABLE" } });
+    return;
+  }
+  res.setHeader("Cache-Control", "no-store, max-age=0");
+  try {
+    const premiereId = req.params.id;
+    const record = PREMIERE_ID_PATTERN.test(premiereId)
+      ? await replayPremiereSettlementLedger.readSettlement(premiereId)
+      : null;
+    if (record === null) {
+      res.status(404).json({ error: { code: "SETTLEMENT_NOT_FOUND" } });
+      return;
+    }
+    res.status(200).json({ schemaVersion: 1, settlement: record });
+  } catch (error) {
+    sendReplayPremiereFailure(res, error);
+  }
+});
+
 // Narrow, per-record FeaturedMatch detail + participant identity routes
 // (product overhaul spec Stage 3 item 6 / hero states A/B). Deliberately
 // separate from the bulk `read-model.json` mirror artifact and from the
@@ -1206,14 +1278,12 @@ app.get("/api/premieres/account", async (req, res) => {
 // ONE match id (this route) or ONE live premiere id (the route below) is
 // safe, since either requires the caller to already know which specific
 // record they're asking about.
-async function loadFeaturedMatchDetail(
-  match: import("../server/agents/FeaturedMatch").FeaturedMatch | undefined,
-) {
+async function loadFeaturedMatchDetail(match: FeaturedMatch | undefined) {
   if (match === undefined) return null;
   const identity = await loadIdentityRegistrySnapshot();
   // Season Zero activation prompt Phase 5: resolves this match's
   // `EventPackage` (if any) so `publicFeaturedMatch`'s
-  // `isPubliclyPromotable`/`subtitle`/`reasonToWatch`/`directorCutEstimateSeconds`/
+  // `isPubliclyPromotable`/`subtitle`/`reasonToWatch`/
   // canonical-URL fields report real values through this narrow route —
   // without this lookup every record would fall back to `publicFeaturedMatch`'s
   // own safe "no package passed" default (`isPubliclyPromotable: false`),
@@ -1223,8 +1293,51 @@ async function loadFeaturedMatchDetail(
     resolveEventPackageStateRoot(),
   );
   const eventPackage = findEventPackage(eventPackageStore, match.matchId);
+  // Full-replay-access bugfix (2026-08-05): resolves the SAME live mirror
+  // episode row `publicFeaturedMatches` (the bulk read model) already
+  // resolves `completedAt`/`watchHref`/`fullRenderHref` from — this narrow
+  // per-record route previously never loaded the mirror at all, so every
+  // record served through it silently fell back to `publicFeaturedMatch`'s
+  // "not looked up" defaults (`completedAt: null`, no replay link),
+  // leaving `/match/:matchId` (a FeaturedMatch's own canonical page, and
+  // the ONLY page a visitor reaches for a revealed/archived Featured
+  // Event via the homepage/`/watch` Season schedule) unable to ever show
+  // a way to watch the match it was reporting a result for. `null`
+  // `episodeRequestId` skips the read entirely (no episode to resolve).
+  const episodeRequestId = match.episodeRequestId;
+  const mirrorData =
+    episodeRequestId === null
+      ? null
+      : await readLeagueMirrorData(leagueDataJsonPath);
+  const episodeReplayInfo =
+    mirrorData === null || episodeRequestId === null
+      ? null
+      : findLeagueEpisodeReplayInfo(mirrorData, episodeRequestId);
+  // Full-replay-retention fix (2026-08-06): the live mirror lookup above
+  // permanently misses once `episodeRequestId` has rotated out of the
+  // mirror's own narrow `episodes[]` window (see
+  // `CoworldLeagueArtifactRetention.ts`'s `resolveArchivedEpisodeReplayHrefs`
+  // own doc) — only consulted on that miss, never overrides a real live
+  // lookup, and never throws.
+  const archivedReplayHrefs =
+    episodeReplayInfo === null && episodeRequestId !== null
+      ? await resolveArchivedEpisodeReplayHrefs(
+          summaryArchiveDir,
+          episodeRequestId,
+        )
+      : null;
   return {
-    match: publicFeaturedMatch(match, eventPackage),
+    match: publicFeaturedMatch(
+      match,
+      eventPackage,
+      episodeReplayInfo?.completedAt ?? null,
+      episodeReplayInfo !== null
+        ? {
+            watchHref: episodeReplayInfo.watchHref,
+            fullRenderHref: episodeReplayInfo.fullRenderHref,
+          }
+        : archivedReplayHrefs,
+    ),
     // Lets the client detect "is this record the CURRENTLY LIVE premiere"
     // via a plain string comparison against the already-fetched read
     // model's `premieres.live.premiereId`, without doing any hashing
@@ -1244,7 +1357,9 @@ app.get("/api/featured-matches/:matchId", async (req, res) => {
   try {
     res.setHeader("Cache-Control", "no-store, max-age=0");
     const stateRoot = resolveFeaturedMatchStateRoot();
-    const store = await reconcileFeaturedMatchStore(stateRoot);
+    const store = await reconcileFeaturedMatchStore(stateRoot, {
+      artifactsRoot: artifactsRootDir,
+    });
     const match = store.matches.find(
       (candidate) =>
         candidate.matchId === req.params.matchId &&
@@ -1274,7 +1389,9 @@ app.get("/api/premieres/:premiereId/featured-match", async (req, res) => {
   try {
     res.setHeader("Cache-Control", "no-store, max-age=0");
     const stateRoot = resolveFeaturedMatchStateRoot();
-    const store = await reconcileFeaturedMatchStore(stateRoot);
+    const store = await reconcileFeaturedMatchStore(stateRoot, {
+      artifactsRoot: artifactsRootDir,
+    });
     const match = store.matches.find(
       (candidate) =>
         candidate.lane === "premiere" &&
@@ -1315,9 +1432,8 @@ app.get("/api/matches/:episodeId", async (req, res) => {
       res.status(404).json({ error: { code: "LEAGUE_EPISODE_NOT_FOUND" } });
       return;
     }
-    const episodes = await readCoworldLeagueEpisodesFromDataJson(
-      leagueDataJsonPath,
-    );
+    const episodes =
+      await readCoworldLeagueEpisodesFromDataJson(leagueDataJsonPath);
     const row =
       episodes === null
         ? null
@@ -1530,6 +1646,7 @@ app.get("/trader/:accountId", async (_req, res) => {
 async function sendPublicAppShellPage(
   res: Response,
   failureLabel: string,
+  status = 200,
 ): Promise<void> {
   try {
     const appShell = await getAppShellContent(
@@ -1544,15 +1661,112 @@ async function sendPublicAppShellPage(
       ),
     );
     setHtmlNoCacheHeaders(res);
-    res.send(nonceInlineScripts(appShell, scriptNonce));
+    res.status(status).send(nonceInlineScripts(appShell, scriptNonce));
   } catch (error) {
     console.error(
       `Failed to serve ${failureLabel}: ${
         error instanceof Error ? error.message : String(error)
       }`,
     );
-    res.status(503).send(`Proxy War ${failureLabel} is not built for this server.`);
+    res
+      .status(503)
+      .send(`Proxy War ${failureLabel} is not built for this server.`);
   }
+}
+/**
+ * P0 fix (found live 2026-08-02): `/ai-league-replay/<bad-id>` rendered a
+ * raw, unstyled plain-text response — no branding, no nav — while
+ * `/match`/`/agent`/`/builder` bad-ids stay inside the app shell (a
+ * themed page, client-rendered not-found state). The replay route can't
+ * follow that exact pattern: `assessPremiereLeakAudit`'s `statusHidden`
+ * check (`ReplayPremiereEligibility.ts`) requires EXACTLY 403/404 for
+ * this precise path when the run id isn't publicly allowlisted — proof a
+ * private artifact isn't exposed — so a 200 app-shell response (or a
+ * redirect) is not an option here without breaking that safety check
+ * every premiere admission depends on. This keeps the required status
+ * code and replaces only the body: a small, self-contained branded page
+ * (matching the site's dark theme) with working nav links, instead of a
+ * bare string.
+ */
+function sendThemedNotFoundPage(
+  res: Response,
+  status: number,
+  message: string,
+  overrides: { title?: string; ctaLabel?: string; ctaHref?: string } = {},
+): void {
+  const title = overrides.title ?? "Not found";
+  const ctaLabel = overrides.ctaLabel ?? "Go to the league";
+  const ctaHref = overrides.ctaHref ?? "/league";
+  res.status(status).type("html").send(`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(title)} | Proxy War</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background: #07090d;
+    color: #e7ebf2;
+    font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+  }
+  nav {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    padding: 16px 24px;
+    border-bottom: 1px solid #232a3a;
+  }
+  nav a, .brand {
+    color: #8b93a6;
+    text-decoration: none;
+    font-weight: 700;
+    font-size: 13px;
+  }
+  .brand { color: #e7ebf2; font-size: 15px; margin-right: auto; }
+  nav a:hover { color: #e7ebf2; }
+  main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 48px 20px;
+  }
+  h1 { font-size: 28px; margin: 0 0 12px; }
+  p { color: #9fb0c3; max-width: 32em; margin: 0 0 24px; }
+  a.cta {
+    color: #04121e;
+    background: #56c7f5;
+    text-decoration: none;
+    font-weight: 800;
+    padding: 10px 20px;
+    border-radius: 8px;
+  }
+</style>
+</head>
+<body>
+  <nav>
+    <span class="brand">Proxy War</span>
+    <a href="/league">League</a>
+    <a href="/watch">Watch</a>
+    <a href="/agents">Agents</a>
+    <a href="/builders">Builders</a>
+    <a href="/build">Build</a>
+  </nav>
+  <main>
+    <h1>${escapeHtml(title)}</h1>
+    <p>${escapeHtml(message)}</p>
+    <a class="cta" href="${escapeHtml(ctaHref)}">${escapeHtml(ctaLabel)}</a>
+  </main>
+</body>
+</html>`);
 }
 // Resolves the spoiler-safe `{title, description}` pair `/match/:matchId`'s
 // OG/social card and `<title>` use, from the SAME two sources
@@ -1568,13 +1782,16 @@ async function sendPublicAppShellPage(
 // explains that to a visitor, not the social card.
 async function resolveMatchDetailPageMetadata(
   matchId: string,
-): Promise<
-  | { title: string; description: string; card: MatchShareCardInput }
-  | null
-> {
+): Promise<{
+  title: string;
+  description: string;
+  card: MatchShareCardInput;
+} | null> {
   if (matchId.startsWith("feat_")) {
     const stateRoot = resolveFeaturedMatchStateRoot();
-    const store = await reconcileFeaturedMatchStore(stateRoot);
+    const store = await reconcileFeaturedMatchStore(stateRoot, {
+      artifactsRoot: artifactsRootDir,
+    });
     const match = store.matches.find(
       (candidate) =>
         candidate.matchId === matchId && candidate.state !== "candidate",
@@ -1607,7 +1824,10 @@ async function resolveMatchDetailPageMetadata(
                   : (nameByAgentId.get(match.result.winnerAgentId) ?? null),
               placements: match.result.placements
                 .map((entry) => ({
-                  name: entry.agentId === null ? null : nameByAgentId.get(entry.agentId),
+                  name:
+                    entry.agentId === null
+                      ? null
+                      : nameByAgentId.get(entry.agentId),
                   placement: entry.placement,
                 }))
                 .filter(
@@ -1622,9 +1842,8 @@ async function resolveMatchDetailPageMetadata(
       card,
     };
   }
-  const episodes = await readCoworldLeagueEpisodesFromDataJson(
-    leagueDataJsonPath,
-  );
+  const episodes =
+    await readCoworldLeagueEpisodesFromDataJson(leagueDataJsonPath);
   const row =
     episodes === null ? null : findLeagueEpisodeByRequestId(episodes, matchId);
   if (row === null) return null;
@@ -1654,6 +1873,54 @@ async function resolveMatchDetailPageMetadata(
   };
 }
 
+/**
+ * Best-effort agent/builder slug existence check for the /agent/:slug and
+ * /builder/:slug status-code-parity fix (P2, 2026-08-02): reads the SAME
+ * `read-model.json` `AgentProfilePage.ts`/`BuilderProfilePage.ts` already
+ * fetch client-side, replicating each page's own `load()` match rule
+ * exactly — a registered agent's `slug`, OR (agents only) any
+ * UNREGISTERED agent's `provisionalSlug` (see `AgentProfilePage.ts`'s own
+ * doc for why a live provisional identity must resolve too, same as
+ * `loadAnalyticsMatchLabels` above reads this file). Never throws and a
+ * read/parse failure returns `null` rather than empty sets — the route
+ * handlers below treat that as "can't tell", degrading to 200 (serve
+ * normally) rather than falsely 404ing a page that might be real.
+ */
+async function loadReadModelSlugSets(): Promise<{
+  agentSlugs: Set<string>;
+  builderSlugs: Set<string>;
+} | null> {
+  try {
+    const raw = await fs.readFile(
+      path.join(runsRootDir, "league", "read-model.json"),
+      "utf8",
+    );
+    const parsed = JSON.parse(raw) as { agents?: unknown; builders?: unknown };
+    const agentSlugs = new Set<string>();
+    for (const entry of Array.isArray(parsed.agents) ? parsed.agents : []) {
+      const agent = entry as {
+        slug?: unknown;
+        registered?: unknown;
+        provisionalSlug?: unknown;
+      };
+      if (typeof agent.slug === "string") agentSlugs.add(agent.slug);
+      if (
+        agent.registered === false &&
+        typeof agent.provisionalSlug === "string"
+      ) {
+        agentSlugs.add(agent.provisionalSlug);
+      }
+    }
+    const builderSlugs = new Set<string>();
+    for (const entry of Array.isArray(parsed.builders) ? parsed.builders : []) {
+      const builder = entry as { slug?: unknown };
+      if (typeof builder.slug === "string") builderSlugs.add(builder.slug);
+    }
+    return { agentSlugs, builderSlugs };
+  } catch {
+    return null;
+  }
+}
 // Serves `/match/:matchId` — same `public.html` shell as every other
 // `sendPublicAppShellPage` route, but with per-match OG/social metadata
 // spliced into `<head>` (title, description, canonical, `og:*`,
@@ -1690,8 +1957,14 @@ async function sendMatchDetailPageShell(
       ),
     );
     setHtmlNoCacheHeaders(res);
+    // P2 status-code-parity fix (2026-08-02): `metadata === null` means
+    // `resolveMatchDetailPageMetadata` couldn't resolve this id to a real,
+    // revealed record — the SAME condition `MatchDetailPage.ts`'s client
+    // renders its own honest not-found state for. A crawler or health
+    // check must see a genuine 404, not a 200 for a page whose only
+    // content is "not found" (see item 2 of the 2026-08-02 P2 batch).
     if (metadata === null) {
-      res.send(nonceInlineScripts(appShell, scriptNonce));
+      res.status(404).send(nonceInlineScripts(appShell, scriptNonce));
       return;
     }
     const canonicalUrl = new URL(
@@ -1775,14 +2048,24 @@ app.get("/watch", async (_req, res) => {
 app.get("/agents", async (_req, res) => {
   await sendPublicAppShellPage(res, "the agents directory");
 });
-app.get("/agent/:slug", async (_req, res) => {
-  await sendPublicAppShellPage(res, "the agent profile page");
+app.get("/agent/:slug", async (req, res) => {
+  // P2 status-code-parity fix (2026-08-02): see `loadReadModelSlugSets`'s
+  // own doc — `null` means "can't tell", never a false 404.
+  const slugs = await loadReadModelSlugSets();
+  const status =
+    slugs !== null && !slugs.agentSlugs.has(req.params.slug) ? 404 : 200;
+  await sendPublicAppShellPage(res, "the agent profile page", status);
 });
 app.get("/builders", async (_req, res) => {
   await sendPublicAppShellPage(res, "the builders directory");
 });
-app.get("/builder/:slug", async (_req, res) => {
-  await sendPublicAppShellPage(res, "the builder profile page");
+app.get("/builder/:slug", async (req, res) => {
+  // P2 status-code-parity fix (2026-08-02): see `loadReadModelSlugSets`'s
+  // own doc — `null` means "can't tell", never a false 404.
+  const slugs = await loadReadModelSlugSets();
+  const status =
+    slugs !== null && !slugs.builderSlugs.has(req.params.slug) ? 404 : 200;
+  await sendPublicAppShellPage(res, "the builder profile page", status);
 });
 app.get("/match/:matchId", async (req, res) => {
   await sendMatchDetailPageShell(req, res);
@@ -1887,8 +2170,6 @@ if (platformEnabled) {
     production: replayPremierePublicOrigin.startsWith("https://"),
   });
   const platformReturnOrigins = resolvePlatformReturnOrigins();
-  // Separate from the handoff map on purpose — see `PlatformPovClaimOrigins`.
-  const platformPovClaimOrigins = resolvePlatformPovClaimOrigins();
   if (githubOAuthClient !== null) {
     app.use(
       createPlatformGithubAuthRouter({
@@ -1914,7 +2195,6 @@ if (platformEnabled) {
       identityLinkStore: platformGithubIdentityLinkStore,
       handoffs: platformHandoffStore,
       returnOrigins: platformReturnOrigins,
-      povClaimOrigins: platformPovClaimOrigins,
       githubSignInAvailable: githubOAuthClient !== null,
       artifactsRootDir,
       onOperatorError: (operatorCode, error) => {
@@ -2160,10 +2440,23 @@ app.get("/bet", (request, response) => {
   const ids = replayPremiereHttpRegistry.premiereIds();
   const current = ids.at(-1);
   if (current === undefined) {
-    response
-      .status(503)
-      .type("text/plain")
-      .send("No premiere is currently running.");
+    // Between cycles (a settled premiere replacing, or the queue briefly
+    // empty) — genuinely temporary, not a broken link, so this is neither
+    // `sendThemedNotFoundPage`'s default "Not found" framing nor a raw
+    // plain-text 503 (the previous behavior here — no branding, no nav,
+    // indistinguishable from a real outage to a visitor who just wants to
+    // trade). Same themed shell, honest copy, and a retry-shortly nudge
+    // instead of a dead end.
+    sendThemedNotFoundPage(
+      response,
+      503,
+      "No premiere is currently running. The next one comes up automatically within a few minutes.",
+      {
+        title: "Between markets",
+        ctaLabel: "Go to the league",
+        ctaHref: "/league",
+      },
+    );
     return;
   }
   // The GitHub callback lands on /bet?github=… and this is a second hop, so
@@ -2277,10 +2570,16 @@ if (leagueWrapperOnly) {
         return;
       }
       if (isProxyWarReplayOrRunPath(req.path)) {
-        res.status(404).send("AI league replay record not found.");
+        sendThemedNotFoundPage(res, 404, "AI league replay record not found.");
         return;
       }
-      res.redirect("/league");
+      // P0 fix (found live 2026-08-02): this used to silently
+      // `res.redirect("/league")` for ANY unrecognized path, with no
+      // acknowledgment a visitor's URL was actually wrong — a typo'd or
+      // stale link looked indistinguishable from a normal league visit.
+      // Same themed page the replay route above uses (status 404, real
+      // nav) rather than a silent bounce.
+      sendThemedNotFoundPage(res, 404, "This page doesn't exist.");
       return;
     }
     if (req.method === "POST") {
@@ -2436,8 +2735,9 @@ app.get("/analytics-report", async (req, res) => {
     renderAnalyticsReportHtml({
       report: {
         ...report,
-        mostWatchedEvents: applyMatchLabels(report.mostWatchedEvents, (matchId) =>
-          matchLabels.get(matchId) ?? null,
+        mostWatchedEvents: applyMatchLabels(
+          report.mostWatchedEvents,
+          (matchId) => matchLabels.get(matchId) ?? null,
         ),
       },
       recentEvents,
@@ -2456,8 +2756,9 @@ app.get("/api/analytics-report", async (req, res) => {
   const report = buildAnalyticsReport(aggregates);
   res.json({
     ...report,
-    mostWatchedEvents: applyMatchLabels(report.mostWatchedEvents, (matchId) =>
-      matchLabels.get(matchId) ?? null,
+    mostWatchedEvents: applyMatchLabels(
+      report.mostWatchedEvents,
+      (matchId) => matchLabels.get(matchId) ?? null,
     ),
   });
 });
@@ -2466,7 +2767,7 @@ app.get("/api/analytics-report", async (req, res) => {
  * ranking (`AnalyticsReport.ts`'s `applyMatchLabels`) — reads the SAME
  * league read-model JSON `PlatformBuilderDashboardHttp`'s `readModelFilePath`
  * already points at. `PublicMatch.matchId` is the actual league run id
- * `director_cut_started`'s context carries (checked first); a
+ * `replay_load_started`'s context carries (checked first); a
  * `PublicFeaturedMatch.matchId` — a distinct `feat_...` editorial
  * namespace — is included too in case a future emission point ever uses
  * that id space. Never throws: a missing/malformed/absent read-model file
@@ -2485,7 +2786,11 @@ async function loadAnalyticsMatchLabels(): Promise<Map<string, string>> {
       featuredMatches?: unknown;
     };
     for (const entry of Array.isArray(parsed.matches) ? parsed.matches : []) {
-      const match = entry as { matchId?: unknown; map?: unknown; roundNumber?: unknown };
+      const match = entry as {
+        matchId?: unknown;
+        map?: unknown;
+        roundNumber?: unknown;
+      };
       if (typeof match.matchId === "string" && typeof match.map === "string") {
         labels.set(
           match.matchId,
@@ -2495,7 +2800,9 @@ async function loadAnalyticsMatchLabels(): Promise<Map<string, string>> {
         );
       }
     }
-    for (const entry of Array.isArray(parsed.featuredMatches) ? parsed.featuredMatches : []) {
+    for (const entry of Array.isArray(parsed.featuredMatches)
+      ? parsed.featuredMatches
+      : []) {
       const match = entry as { matchId?: unknown; title?: unknown };
       if (
         typeof match.matchId === "string" &&
@@ -2929,14 +3236,14 @@ if (betaAccess.enabled) {
 if (leagueWrapperOnly) {
   app.get("/ai-league-replay/:runID", async (req, res) => {
     if (!isProxyWarPublicLeaguePath(req.path)) {
-      res.status(404).send("AI league replay record not found.");
+      sendThemedNotFoundPage(res, 404, "AI league replay record not found.");
       return;
     }
     const runID = stringParam(req.params.runID);
     const gameRecordPath = path.resolve(runsRootDir, runID, "game-record.json");
     if (
       !isInsideRoot(gameRecordPath, runsRootDir) ||
-      !(await publicReplayRecordIsRenderable(gameRecordPath))
+      !(await ensureRenderableGameRecordPath(runID, gameRecordPath))
     ) {
       res.redirect("/league");
       return;
@@ -4182,7 +4489,7 @@ for (const replayRoute of [
   app.get(replayRoute, async (req, res) => {
     const runID = String(req.params.runID);
     if (!isSafeProxyWarArtifactSegment(runID)) {
-      res.status(404).send("AI league replay record not found.");
+      sendThemedNotFoundPage(res, 404, "AI league replay record not found.");
       return;
     }
     // This is a bare redirect to the canonical /ai-league-replay/<runID>
@@ -4197,9 +4504,9 @@ for (const replayRoute of [
     const gameRecordPath = path.resolve(runsRootDir, runID, "game-record.json");
     if (
       !isInsideRoot(gameRecordPath, runsRootDir) ||
-      !(await publicReplayRecordIsRenderable(gameRecordPath))
+      !(await ensureRenderableGameRecordPath(runID, gameRecordPath))
     ) {
-      res.status(404).send("AI league replay record not found.");
+      sendThemedNotFoundPage(res, 404, "AI league replay record not found.");
       return;
     }
     res.redirect(`/ai-league-replay/${encodeURIComponent(runID)}`);
@@ -5400,6 +5707,46 @@ async function publicReplayRecordIsRenderable(
     }
     return false;
   }
+}
+
+/**
+ * Full-replay-retention fix (2026-08-06): `runID` here is always the
+ * route's own `publicRunKey` path segment. Fast path: if the live
+ * `game-record.json` is already renderable, this never touches the
+ * archive — zero added cost for the overwhelming common case. Only when
+ * it's missing/invalid does this attempt ONE bounded, race-safe
+ * restoration of the exact archived copy (see
+ * `CoworldLeagueArtifactRetention.ts`'s `restoreArchivedGameRecord` for
+ * the validated-path/atomic-rename contract) before re-checking
+ * renderability. A restore failure (no archive, corrupt/oversized gzip,
+ * or a genuine disk I/O error) is caught and treated exactly like "not
+ * renderable" — never crashes the request, never fabricates a link.
+ */
+async function ensureRenderableGameRecordPath(
+  runID: string,
+  gameRecordPath: string,
+): Promise<boolean> {
+  if (await publicReplayRecordIsRenderable(gameRecordPath)) {
+    return true;
+  }
+  try {
+    const restoredPath = await restoreArchivedGameRecord({
+      runsRootDir,
+      summaryArchiveDir,
+      publicRunKey: runID,
+    });
+    if (restoredPath === null) {
+      return false;
+    }
+  } catch (error) {
+    console.error(
+      `Archived game-record restoration failed for ${runID}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return false;
+  }
+  return publicReplayRecordIsRenderable(gameRecordPath);
 }
 
 function isJobRecord(value: unknown): value is AgentDemoJobRecord {

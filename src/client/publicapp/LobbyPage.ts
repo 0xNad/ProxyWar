@@ -4,10 +4,18 @@ import { unsafeSVG } from "lit/directives/unsafe-svg.js";
 import { translateText } from "../Utils";
 import { analytics } from "../analytics/AnalyticsClient";
 import {
+  APP_SHELL_ROOT_CLASSES,
   appShellFooter,
   appShellHeader,
-  APP_SHELL_ROOT_CLASSES,
+  requestUpdateWhenTranslationsReady,
 } from "./AppShellChrome";
+import {
+  armReminder,
+  downloadIcsFile,
+  fireReminderIfDue,
+  readReminderState,
+  type ReminderState,
+} from "./PremiereReminder";
 import {
   fetchReadModel,
   PublicAgent,
@@ -27,20 +35,13 @@ import {
   resolveWinnerName,
   type FeaturedEventParticipant,
 } from "./WatchPage";
-import {
-  armReminder,
-  downloadIcsFile,
-  fireReminderIfDue,
-  readReminderState,
-  type ReminderState,
-} from "./PremiereReminder";
 
 /**
  * `/` — the event lobby (Season Zero activation prompt Phase 5,
  * "Homepage"). The first viewport is EVENT-FIRST: a single visual event
  * stage, never the old generic eyebrow/mission-headline/plain-bordered-
  * event-box/map+round/CTA pattern this file used to render — see
- * `renderHero`'s own doc for the three states this now dispatches on.
+ * `renderHero`'s own doc for the two states this now dispatches on.
  *
  * The load-bearing change from the prior design: hero selection now keys
  * off `ReadModel.featuredMatches[].isPubliclyPromotable` via
@@ -63,12 +64,12 @@ import {
  */
 
 /**
- * Bounded recency window (most-recent-N by `completedAt`) that the
- * Director-Cut fallback hero state and Recent Director Cuts both rank by
- * `dramaEvidence.curatedDramaScore` within — matches the scale of this
- * file's other bounded lists (e.g. the league pulse's top 5). Bounding
- * the window means a high-scoring match that has already aged off the
- * front page is never dredged back up on score alone.
+ * Bounded recency window (most-recent-N by `completedAt`) that Recent
+ * Broadcasts ranks by `dramaEvidence.curatedDramaScore` within — matches
+ * the scale of this file's other bounded lists (e.g. the league pulse's
+ * top 5). Bounding the window means a high-scoring match that has
+ * already aged off the front page is never dredged back up on score
+ * alone.
  */
 const DRAMA_RECENCY_WINDOW_SIZE = 8;
 
@@ -89,6 +90,8 @@ export class LobbyPage extends LitElement {
   @state() private nowMs = Date.now();
   private tickHandle: number | null = null;
   private trackedImpressions = new Set<string>();
+  /** P2 defense-in-depth (pass-3, 2026-08-02): `<details>` only hides its content via `display:none` — the collapsed spoiler links stayed in the DOM/HTML source, readable by devtools inspection without ever clicking "Reveal result". Populated by `renderBroadcastCard`'s own `@toggle` handler; a matchId's presence here is what actually gates whether its View-match/Watch-replay anchors render at all (see that method's own doc). */
+  @state() private revealedMatchIds = new Set<string>();
 
   createRenderRoot() {
     this.classList.add(...APP_SHELL_ROOT_CLASSES);
@@ -98,6 +101,14 @@ export class LobbyPage extends LitElement {
   connectedCallback(): void {
     super.connectedCallback();
     void this.load();
+    // P0 fix (found live 2026-08-02, under 3G throttle): the nav
+    // (`app_shell.nav_*`) rendered raw translation keys for as long as
+    // the connection took. `load()`'s own read-model fetch gives a "free"
+    // re-render, but that resolves independently of <lang-selector>'s own
+    // translations load — a fast read-model response racing ahead of a
+    // slow translations load still left the nav flashing keys. See
+    // `waitForTranslationsReady`'s own doc.
+    requestUpdateWhenTranslationsReady(this);
     this.tickHandle = window.setInterval(() => {
       this.nowMs = Date.now();
       const event = this.promotableEvent;
@@ -122,7 +133,9 @@ export class LobbyPage extends LitElement {
     const event = this.promotableEvent;
     if (event !== null && !this.trackedImpressions.has(event.matchId)) {
       this.trackedImpressions.add(event.matchId);
-      analytics.track("featured_event_impression", { eventSlug: event.matchId });
+      analytics.track("featured_event_impression", {
+        eventSlug: event.matchId,
+      });
     }
   }
 
@@ -188,7 +201,10 @@ export class LobbyPage extends LitElement {
   }
 
   private isCurrentEventLive(): boolean {
-    return this.promotableEvent !== null && isEventLive(this.promotableEvent, this.nowMs);
+    return (
+      this.promotableEvent !== null &&
+      isEventLive(this.promotableEvent, this.nowMs)
+    );
   }
 
   /**
@@ -214,7 +230,9 @@ export class LobbyPage extends LitElement {
         <div class="mt-3">${block("h-9 w-2/3 max-w-xl")}</div>
         <div class="mt-3">${block("h-4 w-full max-w-2xl")}</div>
         <div class="mt-5 flex gap-2">
-          ${block("h-9 w-9 rounded-full")}${block("h-9 w-9 rounded-full")}${block("h-9 w-9 rounded-full")}
+          ${block("h-9 w-9 rounded-full")}${block(
+            "h-9 w-9 rounded-full",
+          )}${block("h-9 w-9 rounded-full")}
         </div>
         <div class="mt-5">${block("h-11 w-56")}</div>
       </section>
@@ -261,41 +279,38 @@ export class LobbyPage extends LitElement {
             })}
           </div>`
         : nothing}
-      ${this.renderHero(model)}
-      ${this.renderSeasonSchedule(model)}
+      ${this.renderHero(model)} ${this.renderSeasonSchedule(model)}
       <div class="mt-8 grid grid-cols-1 gap-8 lg:grid-cols-3">
         <div class="lg:col-span-2">${this.renderLeagueMovement(model)}</div>
         <div>${this.renderAgentsToKnow(model)}</div>
       </div>
-      ${this.renderRecentDirectorCuts(model)} ${this.renderBuilderBand(model)}
+      ${this.renderRecentBroadcasts(model)} ${this.renderBuilderBand(model)}
     `;
   }
 
   // ---- Hero / event stage -------------------------------------------------
 
   /**
-   * Three states, checked in order:
+   * Two states, checked in order:
    *   A. A complete, `isPubliclyPromotable` premiere-lane event exists
    *      (`state: "published"`) — the visual event stage: title, reason
-   *      to watch, status, full lineup, Director Cut runtime once known,
-   *      one primary CTA. Live vs. upcoming is a pure `scheduledAt <=
-   *      now` comparison against the client clock (`isEventLive`).
-   *   B. No promotable event — falls back to the single best recent
-   *      Director Cut within a bounded recency window (evidence-ranked by
-   *      `dramaEvidence.curatedDramaScore`, ties/absence falling back to
-   *      recency), shown with its own competitors/reason/runtime — NEVER
-   *      a bare map+round card.
-   *   C. Neither exists yet (a fresh league with no retained history) —
-   *      an honest empty note.
+   *      to watch, status, full lineup, one primary CTA. Live vs.
+   *      upcoming is a pure `scheduledAt <= now` comparison against the
+   *      client clock (`isEventLive`).
+   *   B. No promotable event (including a fresh league with no retained
+   *      history) — an honest empty note, never a fabricated substitute.
    */
   private renderHero(model: ReadModel): TemplateResult {
     if (this.promotableEvent !== null) {
       return this.renderHeroPromotableEvent(this.promotableEvent);
     }
-    return this.renderHeroDirectorCutFallback(model);
+    return this.renderHeroEmptyState();
   }
 
-  private heroShell(inner: TemplateResult, accentClass: string): TemplateResult {
+  private heroShell(
+    inner: TemplateResult,
+    accentClass: string,
+  ): TemplateResult {
     return html`
       <section
         class="rounded-xl border ${accentClass} bg-surface p-6 sm:p-8"
@@ -306,11 +321,14 @@ export class LobbyPage extends LitElement {
     `;
   }
 
-  private renderHeroPromotableEvent(event: PublicFeaturedMatch): TemplateResult {
+  private renderHeroPromotableEvent(
+    event: PublicFeaturedMatch,
+  ): TemplateResult {
     const live = this.isCurrentEventLive();
     const scheduled =
       event.scheduledAt !== null ? new Date(event.scheduledAt) : null;
-    const scheduledValid = scheduled !== null && !Number.isNaN(scheduled.getTime());
+    const scheduledValid =
+      scheduled !== null && !Number.isNaN(scheduled.getTime());
     const elapsedOrCountdown =
       live && scheduledValid
         ? formatDuration(Math.max(0, this.nowMs - scheduled!.getTime()))
@@ -318,7 +336,9 @@ export class LobbyPage extends LitElement {
           ? formatDuration(Math.max(0, scheduled!.getTime() - this.nowMs))
           : null;
     const reminder = readReminderState(event.matchId);
-    const watchHref = event.canonicalPremiereUrl ?? `/match/${encodeURIComponent(event.matchId)}`;
+    const watchHref =
+      event.canonicalPremiereUrl ??
+      `/match/${encodeURIComponent(event.matchId)}`;
     return this.heroShell(
       html`
         <span
@@ -327,7 +347,10 @@ export class LobbyPage extends LitElement {
             : "border-info/50 bg-info/10 text-info"} px-3 py-1 font-mono text-xs font-extrabold uppercase tracking-wide"
         >
           ${live
-            ? html`<span class="h-2 w-2 rounded-full bg-live" aria-hidden="true"></span>`
+            ? html`<span
+                class="h-2 w-2 rounded-full bg-live"
+                aria-hidden="true"
+              ></span>`
             : nothing}
           ${live
             ? translateText("lobby.live_premiere_badge")
@@ -347,25 +370,25 @@ export class LobbyPage extends LitElement {
         ${scheduledValid
           ? html`<p class="mt-3 text-sm text-ink-muted">
               ${live
-                ? translateText("lobby.live_elapsed", { duration: elapsedOrCountdown! })
+                ? translateText("lobby.live_elapsed", {
+                    duration: elapsedOrCountdown!,
+                  })
                 : html`${translateText("lobby.scheduled_for")}
                     <time datetime=${event.scheduledAt!}
                       >${scheduled!.toLocaleString()}
                       ${translateText("lobby.local_time_suffix")}</time
                     >
-                    · ${translateText("lobby.countdown_value", { duration: elapsedOrCountdown! })}`}
-            </p>`
-          : nothing}
-        ${event.directorCutEstimateSeconds !== null
-          ? html`<p class="mt-1 text-xs font-semibold text-ink-muted">
-              ${translateText("lobby.event_stage_director_cut_runtime", {
-                minutes: Math.max(1, Math.round(event.directorCutEstimateSeconds / 60)),
-              })}
+                    ·
+                    ${translateText("lobby.countdown_value", {
+                      duration: elapsedOrCountdown!,
+                    })}`}
             </p>`
           : nothing}
         ${this.heroParticipants.length > 0
           ? html`<div class="mt-4 border-t border-line pt-4">
-              <p class="text-sm font-black uppercase tracking-wide text-ink-muted">
+              <p
+                class="text-sm font-black uppercase tracking-wide text-ink-muted"
+              >
                 ${translateText("lobby.hero_participants_heading")}
               </p>
               ${renderParticipantChips(this.heroParticipants)}
@@ -374,7 +397,10 @@ export class LobbyPage extends LitElement {
         <div class="mt-5 flex flex-wrap items-center gap-3">
           <a
             href=${watchHref}
-            @click=${() => analytics.track("event_cta_clicked", { eventSlug: event.matchId })}
+            @click=${() =>
+              analytics.track("event_cta_clicked", {
+                eventSlug: event.matchId,
+              })}
             class="inline-flex min-h-11 items-center justify-center rounded-md bg-accent px-5 font-black text-on-accent no-underline outline-none hover:bg-accent-strong focus-visible:ring-2 focus-visible:ring-accent"
             >${live
               ? translateText("lobby.event_stage_watch_live_cta")
@@ -385,7 +411,9 @@ export class LobbyPage extends LitElement {
                 : translateText("lobby.watch_now")}</a
           >
           ${!live && scheduledValid ? this.renderAddToCalendar(event) : nothing}
-          ${!live && scheduledValid ? this.renderRemindMe(event, reminder) : nothing}
+          ${!live && scheduledValid
+            ? this.renderRemindMe(event, reminder)
+            : nothing}
         </div>
         ${reminder === "fired"
           ? html`<p
@@ -407,14 +435,18 @@ export class LobbyPage extends LitElement {
       <a
         href="#"
         class="inline-flex min-h-11 items-center justify-center rounded-md border border-line bg-surface-2 px-4 text-sm font-bold text-ink no-underline outline-none hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-accent"
-        @click=${(clickEvent: MouseEvent) => this.downloadIcs(clickEvent, event)}
+        @click=${(clickEvent: MouseEvent) =>
+          this.downloadIcs(clickEvent, event)}
         >${translateText("lobby.add_to_calendar")}</a
       >
     `;
   }
 
   /** Client-side only, no server round-trip — see `PremiereReminder.ts`'s `downloadIcsFile`. Uses the event's own real title/subtitle: safe at this point because `isPubliclyPromotable` already requires `state: "published"` or later, the same floor participant identity itself goes public at. */
-  private downloadIcs(clickEvent: MouseEvent, event: PublicFeaturedMatch): void {
+  private downloadIcs(
+    clickEvent: MouseEvent,
+    event: PublicFeaturedMatch,
+  ): void {
     clickEvent.preventDefault();
     if (event.scheduledAt === null) return;
     const url =
@@ -455,124 +487,30 @@ export class LobbyPage extends LitElement {
     `;
   }
 
-  // ---- Hero fallback: best recent Director Cut ---------------------------
+  // ---- Hero fallback: no promotable event --------------------------------
 
   /**
-   * No promotable Featured Event exists right now — the doc's own
-   * fallback: "lead with the best recent Director Cut; show its
-   * competitors; show why it is worth watching; show its runtime; show
-   * the next expected schedule window." Ranked exactly like `renderHero`'s
-   * OLD state-C fallback (evidence-aware within a bounded recency
-   * window), but now with competitors + Director Cut runtime rendered
-   * inline, never just a bare map+round label.
+   * No promotable Featured Event exists right now — the honest empty
+   * state (`renderHero`'s own doc, state B): a plain note plus a link to
+   * the full match archive, never a fabricated substitute event.
    */
-  private renderHeroDirectorCutFallback(model: ReadModel): TemplateResult {
-    const recencyWindow = [...model.matches]
-      .filter(
-        (match) => match.completedAt !== null && match.fullRenderHref !== null,
-      )
-      .sort((a, b) => (b.completedAt ?? "").localeCompare(a.completedAt ?? ""))
-      .slice(0, DRAMA_RECENCY_WINDOW_SIZE);
-    const scoredInWindow = recencyWindow.filter(
-      (match) => curatedDramaScoreOf(match) !== null,
-    );
-    const fallback =
-      scoredInWindow.length > 0
-        ? [...scoredInWindow].sort(
-            (a, b) =>
-              (curatedDramaScoreOf(b) ?? -1) - (curatedDramaScoreOf(a) ?? -1) ||
-              (b.completedAt ?? "").localeCompare(a.completedAt ?? ""),
-          )[0]
-        : recencyWindow.at(0);
-    if (fallback === undefined) {
-      return this.heroShell(
-        html`<h1 class="text-2xl font-extrabold text-ink">
-            ${translateText("lobby.no_premiere_title")}
-          </h1>
-          <p class="mt-1 text-sm text-ink-muted">
-            ${translateText("lobby.no_premiere_note")}
-          </p>
-          <div class="mt-4">
-            <a
-              href="/league"
-              class="inline-flex min-h-11 items-center justify-center rounded-md border border-line bg-surface-2 px-5 font-black text-ink no-underline outline-none hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-accent"
-              >${translateText("lobby.browse_all_matches")}</a
-            >
-          </div>`,
-        "border-line",
-      );
-    }
-    const dramaScore = curatedDramaScoreOf(fallback);
-    const roundLabel =
-      fallback.roundNumber !== null
-        ? translateText("lobby.round_suffix", { round: fallback.roundNumber })
-        : "";
-    const runtimeMinutes =
-      fallback.directorCut !== null
-        ? Math.max(1, Math.round(fallback.directorCut.durationEstimateSeconds / 60))
-        : null;
+  private renderHeroEmptyState(): TemplateResult {
     return this.heroShell(
-      html`
-        <span
-          class="inline-flex items-center gap-2 rounded-full border border-line bg-surface-2 px-3 py-1 font-mono text-xs font-extrabold uppercase tracking-wide text-ink-muted"
-        >
-          ${translateText("lobby.recent_battle_badge")}
-        </span>
-        ${dramaScore !== null
-          ? html`<span
-              class="ml-2 inline-flex items-center gap-2 rounded-full border border-line bg-surface-2 px-3 py-1 font-mono text-xs font-extrabold uppercase tracking-wide text-ink-muted"
-            >
-              ${translateText("lobby.high_drama_badge", { score: dramaScore })}
-            </span>`
-          : nothing}
-        <h1 class="mt-3 text-2xl font-extrabold text-ink sm:text-3xl">
-          ${fallback.map}${roundLabel}
+      html`<h1 class="text-2xl font-extrabold text-ink">
+          ${translateText("lobby.no_premiere_title")}
         </h1>
         <p class="mt-1 text-sm text-ink-muted">
-          ${translateText("lobby.recent_battle_note")}
+          ${translateText("lobby.no_premiere_note")}
         </p>
-        ${runtimeMinutes !== null
-          ? html`<p class="mt-1 text-xs font-semibold text-ink-muted">
-              ${translateText("lobby.event_stage_director_cut_runtime", {
-                minutes: runtimeMinutes,
-              })}
-            </p>`
-          : nothing}
-        ${renderParticipantChipsFromMatch(fallback, model.agents)}
-        ${this.renderNextExpectedWindow(model)}
-        <div class="mt-5">
+        <div class="mt-4">
           <a
-            href=${fallback.fullRenderHref!}
-            class="inline-flex min-h-11 items-center justify-center rounded-md bg-accent px-5 font-black text-on-accent no-underline outline-none hover:bg-accent-strong focus-visible:ring-2 focus-visible:ring-accent"
-            >${runtimeMinutes !== null
-              ? translateText("lobby.event_stage_director_cut_cta", {
-                  minutes: runtimeMinutes,
-                })
-              : translateText("lobby.browse_all_matches")}</a
+            href="/league"
+            class="inline-flex min-h-11 items-center justify-center rounded-md border border-line bg-surface-2 px-5 font-black text-ink no-underline outline-none hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-accent"
+            >${translateText("lobby.browse_all_matches")}</a
           >
-        </div>
-      `,
+        </div>`,
       "border-line",
     );
-  }
-
-  /** Season Zero activation prompt Phase 5: "show the next expected schedule window" — the earliest FUTURE event slot across every active season, regardless of whether it already has a complete package. Omitted entirely when none exists (never a fabricated date). */
-  private renderNextExpectedWindow(model: ReadModel): TemplateResult | typeof nothing {
-    const nowIso = new Date(this.nowMs).toISOString();
-    const nextSlot = model.seasons
-      .filter((season) => season.state === "active")
-      .flatMap((season) => season.eventSlots)
-      .filter((slot) => slot.scheduledAt !== null && slot.scheduledAt > nowIso)
-      .sort((a, b) => (a.scheduledAt ?? "").localeCompare(b.scheduledAt ?? ""))
-      .at(0);
-    if (nextSlot === undefined || nextSlot.scheduledAt === null) return nothing;
-    return html`
-      <p class="mt-3 text-xs font-semibold text-ink-muted">
-        ${translateText("lobby.next_expected_window", {
-          date: new Date(nextSlot.scheduledAt).toLocaleString(),
-        })}
-      </p>
-    `;
   }
 
   // ---- Season Zero schedule -----------------------------------------------
@@ -589,7 +527,9 @@ export class LobbyPage extends LitElement {
    * an upcoming contest, regardless of which list a season operator
    * filed the reference under.
    */
-  private renderSeasonSchedule(model: ReadModel): TemplateResult | typeof nothing {
+  private renderSeasonSchedule(
+    model: ReadModel,
+  ): TemplateResult | typeof nothing {
     const active = model.seasons.find((season) => season.state === "active");
     if (active === undefined) return nothing;
     const featuredMatchById = new Map(
@@ -599,13 +539,22 @@ export class LobbyPage extends LitElement {
       .sort((a, b) => (a.scheduledAt ?? "").localeCompare(b.scheduledAt ?? ""))
       .slice(0, SEASON_SCHEDULE_PREVIEW_LIMIT);
     return html`
-      <section class="mt-8 rounded-xl border border-line bg-surface-2 p-5" aria-labelledby="season-schedule-heading">
+      <section
+        class="mt-8 rounded-xl border border-line bg-surface-2 p-5"
+        aria-labelledby="season-schedule-heading"
+      >
         <div class="flex flex-wrap items-baseline justify-between gap-2">
-          <h2 id="season-schedule-heading" class="text-sm font-black uppercase tracking-wide text-ink-muted">
-            ${translateText("lobby.season_schedule_heading", { title: active.title })}
+          <h2
+            id="season-schedule-heading"
+            class="text-sm font-black uppercase tracking-wide text-ink-muted"
+          >
+            ${translateText("lobby.season_schedule_heading", {
+              title: active.title,
+            })}
           </h2>
           <span class="font-mono text-xs text-ink-muted">
-            ${new Date(active.startDate).toLocaleDateString()} – ${new Date(active.endDate).toLocaleDateString()}
+            ${new Date(active.startDate).toLocaleDateString()} –
+            ${new Date(active.endDate).toLocaleDateString()}
           </span>
         </div>
         ${upcomingSlots.length === 0
@@ -615,33 +564,53 @@ export class LobbyPage extends LitElement {
           : html`<ol class="mt-3 flex flex-col gap-2" role="list">
               ${upcomingSlots.map((slot) => {
                 const resolved = featuredMatchById.get(slot.featuredMatchId);
-                const isArchiveSpotlight = resolved !== undefined && resolved.lane === "archive";
-                const slotDate = slot.scheduledAt !== null ? new Date(slot.scheduledAt).toLocaleDateString() : "—";
+                const isArchiveSpotlight =
+                  resolved !== undefined && resolved.lane === "archive";
+                const slotDate =
+                  slot.scheduledAt !== null
+                    ? new Date(slot.scheduledAt).toLocaleDateString()
+                    : "—";
                 return html`
-                  <li class="flex flex-col gap-0.5 rounded-md border border-line bg-surface px-3 py-2">
+                  <li
+                    class="flex flex-col gap-0.5 rounded-md border border-line bg-surface px-3 py-2"
+                  >
                     <div class="flex items-center gap-3">
                       <span class="font-mono text-xs text-ink-muted">
                         ${resolved === undefined
                           ? slotDate
                           : isArchiveSpotlight
-                            ? translateText("lobby.season_schedule_spotlight_label", { date: slotDate })
-                            : translateText("lobby.season_schedule_premiere_label", { date: slotDate })}
+                            ? translateText(
+                                "lobby.season_schedule_spotlight_label",
+                                { date: slotDate },
+                              )
+                            : translateText(
+                                "lobby.season_schedule_premiere_label",
+                                { date: slotDate },
+                              )}
                       </span>
                       ${resolved !== undefined
                         ? html`<a
-                            href="/match/${encodeURIComponent(resolved.matchId)}"
+                            href="/match/${encodeURIComponent(
+                              resolved.matchId,
+                            )}"
                             class="min-w-0 flex-1 truncate text-sm font-semibold text-ink no-underline outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
                             >${resolved.title}</a
                           >`
-                        : html`<span class="min-w-0 flex-1 truncate text-sm text-ink-muted"
+                        : html`<span
+                            class="min-w-0 flex-1 truncate text-sm text-ink-muted"
                             >${translateText("lobby.season_schedule_tbd")}</span
                           >`}
                     </div>
                     ${isArchiveSpotlight && resolved.completedAt !== null
                       ? html`<span class="pl-0 text-[11px] text-ink-muted"
-                          >${translateText("lobby.season_schedule_played_note", {
-                            date: new Date(resolved.completedAt).toLocaleDateString(),
-                          })}</span
+                          >${translateText(
+                            "lobby.season_schedule_played_note",
+                            {
+                              date: new Date(
+                                resolved.completedAt,
+                              ).toLocaleDateString(),
+                            },
+                          )}</span
                         >`
                       : nothing}
                   </li>
@@ -680,7 +649,9 @@ export class LobbyPage extends LitElement {
           isDebut: latest?.versionFirstObserved === true,
         };
       })
-      .sort((a, b) => (a.agent.standing?.rank ?? 0) - (b.agent.standing?.rank ?? 0))
+      .sort(
+        (a, b) => (a.agent.standing?.rank ?? 0) - (b.agent.standing?.rank ?? 0),
+      )
       .slice(0, LEAGUE_MOVEMENT_LIMIT);
     return html`
       <section aria-labelledby="league-movement-heading">
@@ -730,11 +701,12 @@ export class LobbyPage extends LitElement {
     // movement widget never renders as an anonymous, unclickable row
     // (2026-08-01 P0 fix).
     const provisionalSlug = agent.provisionalSlug ?? null;
-    const href = agent.registered && agent.slug !== null
-      ? `/agent/${encodeURIComponent(agent.slug)}`
-      : provisionalSlug !== null
-        ? `/agent/${encodeURIComponent(provisionalSlug)}`
-        : "/league";
+    const href =
+      agent.registered && agent.slug !== null
+        ? `/agent/${encodeURIComponent(agent.slug)}`
+        : provisionalSlug !== null
+          ? `/agent/${encodeURIComponent(provisionalSlug)}`
+          : "/league";
     const emblemSvg = agent.registered
       ? agent.emblemSvg
       : (agent.provisionalEmblemSvg ?? null);
@@ -765,10 +737,14 @@ export class LobbyPage extends LitElement {
           : nothing}
         ${rankDelta !== null && rankDelta !== 0
           ? html`<span
-              class="font-mono text-xs font-bold ${rankDelta > 0 ? "text-live-text" : "text-danger"}"
+              class="font-mono text-xs font-bold ${rankDelta > 0
+                ? "text-live-text"
+                : "text-danger"}"
               >${rankDelta > 0
                 ? translateText("lobby.rank_change_up", { delta: rankDelta })
-                : translateText("lobby.rank_change_down", { delta: Math.abs(rankDelta) })}</span
+                : translateText("lobby.rank_change_down", {
+                    delta: Math.abs(rankDelta),
+                  })}</span
             >`
           : nothing}
         <span class="font-mono text-xs font-bold text-ink-muted"
@@ -795,7 +771,10 @@ export class LobbyPage extends LitElement {
     const winsBySlug = new Map<string, number>();
     for (const match of model.matches) {
       if (match.winnerAgentSlug === null) continue;
-      winsBySlug.set(match.winnerAgentSlug, (winsBySlug.get(match.winnerAgentSlug) ?? 0) + 1);
+      winsBySlug.set(
+        match.winnerAgentSlug,
+        (winsBySlug.get(match.winnerAgentSlug) ?? 0) + 1,
+      );
     }
     const withTagline = model.agents
       .filter((agent) => agent.registered && agent.tagline !== null)
@@ -807,8 +786,15 @@ export class LobbyPage extends LitElement {
           agent.slug !== null &&
           (winsBySlug.get(agent.slug) ?? 0) >= 2,
       )
-      .sort((a, b) => (winsBySlug.get(b.slug ?? "") ?? 0) - (winsBySlug.get(a.slug ?? "") ?? 0));
-    const notable = [...withTagline, ...withoutTagline].slice(0, AGENTS_TO_KNOW_LIMIT);
+      .sort(
+        (a, b) =>
+          (winsBySlug.get(b.slug ?? "") ?? 0) -
+          (winsBySlug.get(a.slug ?? "") ?? 0),
+      );
+    const notable = [...withTagline, ...withoutTagline].slice(
+      0,
+      AGENTS_TO_KNOW_LIMIT,
+    );
     return html`
       <section aria-labelledby="agents-to-watch-heading">
         <h2
@@ -822,7 +808,9 @@ export class LobbyPage extends LitElement {
               ${translateText("lobby.no_notable_agents")}
             </p>`
           : html`<ul class="flex flex-col gap-2" role="list">
-              ${notable.map((agent) => this.renderAgentToKnowRow(agent, winsBySlug))}
+              ${notable.map((agent) =>
+                this.renderAgentToKnowRow(agent, winsBySlug),
+              )}
             </ul>`}
       </section>
     `;
@@ -833,20 +821,28 @@ export class LobbyPage extends LitElement {
     winsBySlug: ReadonlyMap<string, number>,
   ): TemplateResult {
     return html`
-      <li class="flex items-start gap-2 rounded-md border border-line bg-surface-2 px-3 py-2">
+      <li
+        class="flex items-start gap-2 rounded-md border border-line bg-surface-2 px-3 py-2"
+      >
         ${agent.registered && agent.emblemSvg !== null
-          ? html`<span class="mt-0.5 inline-flex h-6 w-6 shrink-0 overflow-hidden" aria-hidden="true"
+          ? html`<span
+              class="mt-0.5 inline-flex h-6 w-6 shrink-0 overflow-hidden"
+              aria-hidden="true"
               >${unsafeSVG(agent.emblemSvg)}</span
             >`
           : nothing}
         <div class="min-w-0 flex-1">
           <a
-            href=${agent.slug !== null ? `/agent/${encodeURIComponent(agent.slug)}` : "/league"}
+            href=${agent.slug !== null
+              ? `/agent/${encodeURIComponent(agent.slug)}`
+              : "/league"}
             class="truncate text-sm font-semibold text-ink no-underline outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
             >${agent.displayName}</a
           >
           ${agent.tagline !== null
-            ? html`<p class="truncate text-xs text-ink-muted">${agent.tagline}</p>`
+            ? html`<p class="truncate text-xs text-ink-muted">
+                ${agent.tagline}
+              </p>`
             : html`<p class="text-xs text-ink-muted">
                 ${translateText("lobby.recent_wins", {
                   count: winsBySlug.get(agent.slug ?? "") ?? 0,
@@ -857,7 +853,7 @@ export class LobbyPage extends LitElement {
     `;
   }
 
-  // ---- Recent Director Cuts ------------------------------------------------
+  // ---- Recent broadcasts --------------------------------------------------
 
   /**
    * Doc: "visible lineups; title; reason to watch; runtime; spoiler-safe
@@ -868,7 +864,7 @@ export class LobbyPage extends LitElement {
    * back to newest-first for display — selection and display order are
    * separate concerns.
    */
-  private renderRecentDirectorCuts(model: ReadModel): TemplateResult {
+  private renderRecentBroadcasts(model: ReadModel): TemplateResult {
     const recencyWindow = [...model.matches]
       .filter((match) => match.completedAt !== null)
       .sort((a, b) => (b.completedAt ?? "").localeCompare(a.completedAt ?? ""))
@@ -876,7 +872,8 @@ export class LobbyPage extends LitElement {
     const scored = recencyWindow
       .filter((match) => curatedDramaScoreOf(match) !== null)
       .sort(
-        (a, b) => (curatedDramaScoreOf(b) ?? -1) - (curatedDramaScoreOf(a) ?? -1),
+        (a, b) =>
+          (curatedDramaScoreOf(b) ?? -1) - (curatedDramaScoreOf(a) ?? -1),
       );
     const unscored = recencyWindow.filter(
       (match) => curatedDramaScoreOf(match) === null,
@@ -896,7 +893,9 @@ export class LobbyPage extends LitElement {
           ${translateText("lobby.recent_broadcasts_heading")}
         </h2>
         <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
-          ${recent.map((match) => this.renderBroadcastCard(match, model.agents))}
+          ${recent.map((match) =>
+            this.renderBroadcastCard(match, model.agents),
+          )}
         </div>
       </section>
     `;
@@ -914,6 +913,16 @@ export class LobbyPage extends LitElement {
    * itself stays an honest, ungated archive page for DIRECT navigation
    * (a bookmarked/shared link, search result) — this only changes what
    * this ONE card exposes before a visitor opts in.
+   *
+   * P2 defense-in-depth (pass-3, 2026-08-02): `<details>` alone only
+   * hides its collapsed content via the browser's `display: none` UA
+   * rule — the anchors (and the matchId/watchHref they carry) stayed
+   * fully present in the DOM/HTML source pre-reveal, readable via
+   * devtools without ever clicking "Reveal result". `@toggle` records
+   * this card's matchId in `revealedMatchIds` the first time it opens;
+   * both anchors below now render `nothing` at all until that matchId is
+   * in the set — no anchor element exists pre-reveal, not just a hidden
+   * one.
    */
   private renderBroadcastCard(
     match: PublicMatch,
@@ -933,13 +942,6 @@ export class LobbyPage extends LitElement {
             : ""}
         </p>
         ${renderParticipantChipsFromMatch(match, agents)}
-        ${match.directorCut !== null
-          ? html`<p class="mt-2 inline-block rounded border border-line px-1.5 py-0.5 font-mono text-[11px] text-ink-muted">
-              ${translateText("lobby.event_stage_director_cut_runtime", {
-                minutes: Math.max(1, Math.round(match.directorCut.durationEstimateSeconds / 60)),
-              })}
-            </p>`
-          : nothing}
         ${match.degradedCount !== null && match.degradedCount > 0
           ? html`<p
               class="mt-1 inline-block rounded border px-1.5 py-0.5 font-mono text-[11px] ${elevated
@@ -963,11 +965,21 @@ export class LobbyPage extends LitElement {
             ? html`<p
                 class="mt-1 inline-block rounded border border-accent/50 px-1.5 py-0.5 font-mono text-[11px] text-accent"
               >
-                ${translateText("lobby.drama_score_badge", { score: dramaScore })}
+                ${translateText("lobby.drama_score_badge", {
+                  score: dramaScore,
+                })}
               </p>`
             : nothing;
         })()}
-        <details class="mt-2">
+        <details
+          class="mt-2"
+          @toggle=${(event: Event) => {
+            if ((event.target as HTMLDetailsElement).open) {
+              this.revealedMatchIds.add(match.matchId);
+              this.requestUpdate();
+            }
+          }}
+        >
           <summary
             class="cursor-pointer text-sm font-bold text-accent outline-none focus-visible:ring-2 focus-visible:ring-accent"
           >
@@ -976,19 +988,25 @@ export class LobbyPage extends LitElement {
           <p class="mt-1 text-sm text-ink">
             ${winnerName === null
               ? translateText("lobby.no_winner")
-              : translateText("lobby.winner_announcement", { winner: winnerName })}
+              : translateText("lobby.winner_announcement", {
+                  winner: winnerName,
+                })}
           </p>
-          <a
-            href="/match/${encodeURIComponent(match.matchId)}"
-            class="mt-2 inline-block text-sm font-bold text-accent no-underline outline-none hover:text-accent-strong focus-visible:ring-2 focus-visible:ring-accent"
-            >${translateText("lobby.view_match")}</a
-          >
-          ${watchHref !== null
-            ? html`<a
-                href=${watchHref}
-                class="ml-3 mt-2 inline-block text-sm text-ink-muted no-underline outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
-                >${translateText("lobby.watch_replay")}</a
-              >`
+          ${this.revealedMatchIds.has(match.matchId)
+            ? html`
+                <a
+                  href="/match/${encodeURIComponent(match.matchId)}"
+                  class="mt-2 inline-block text-sm font-bold text-accent no-underline outline-none hover:text-accent-strong focus-visible:ring-2 focus-visible:ring-accent"
+                  >${translateText("lobby.view_match")}</a
+                >
+                ${watchHref !== null
+                  ? html`<a
+                      href=${watchHref}
+                      class="ml-3 mt-2 inline-block text-sm text-ink-muted no-underline outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
+                      >${translateText("lobby.watch_replay")}</a
+                    >`
+                  : nothing}
+              `
             : nothing}
         </details>
       </div>

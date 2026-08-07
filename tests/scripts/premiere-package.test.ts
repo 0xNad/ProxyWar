@@ -1,16 +1,13 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildEventPackageDraft } from "../../src/scripts/premiere-package";
-import { estimatePreRevealDirectorCutSeconds } from "../../src/server/agents/DirectorCutPlan";
-import { isPubliclyPromotable } from "../../src/server/agents/season/EventPackageGate";
 import type { FeaturedMatch } from "../../src/server/agents/FeaturedMatch";
 import type { EventPackage } from "../../src/server/agents/season/EventPackage";
+import { isPubliclyPromotable } from "../../src/server/agents/season/EventPackageGate";
 import type { IdentityRegistrySnapshot } from "../../src/server/identity/IdentityRegistry";
-import type { CoworldLeagueMirrorData } from "../../src/server/agents/CoworldLeagueSiteWriter";
 
 const FEAT_ID = `feat_${"c".repeat(20)}`;
 const NOW = "2026-08-01T00:00:00.000Z";
@@ -27,7 +24,11 @@ function baseMatch(overrides: Partial<FeaturedMatch> = {}): FeaturedMatch {
     participants: [],
     map: "Pangaea",
     format: "2p duel",
-    provenance: { source: "premiere-queue", sourceRef: "20260801T000000Z-run1", capturedAt: NOW },
+    provenance: {
+      source: "premiere-queue",
+      sourceRef: "20260801T000000Z-run1",
+      capturedAt: NOW,
+    },
     state: "published",
     category: null,
     scheduledAt: "2026-08-08T18:00:00.000Z",
@@ -58,7 +59,13 @@ function identity(): IdentityRegistrySnapshot {
 
 describe("buildEventPackageDraft", () => {
   it("generates a fresh draft with structural fields derived from the match", () => {
-    const draft = buildEventPackageDraft(baseMatch(), null, identity(), null, NOW);
+    const draft = buildEventPackageDraft(
+      baseMatch(),
+      null,
+      identity(),
+      null,
+      NOW,
+    );
     expect(draft.featuredMatchId).toBe(FEAT_ID);
     // baseMatch() has zero participants (see this file's other "zero
     // participants" comment) — the spoiler-neutral title generator
@@ -77,8 +84,18 @@ describe("buildEventPackageDraft", () => {
     const match = baseMatch({
       title: "Auri wins — Pangaea duel", // a spoiler-laden match.title must NEVER leak through
       participants: [
-        { playerName: "Auri", agentId: "agt_auri", agentVersionId: null, builderId: null },
-        { playerName: "Sefirot", agentId: "agt_sefirot", agentVersionId: null, builderId: null },
+        {
+          playerName: "Auri",
+          agentId: "agt_auri",
+          agentVersionId: null,
+          builderId: null,
+        },
+        {
+          playerName: "Sefirot",
+          agentId: "agt_sefirot",
+          agentVersionId: null,
+          builderId: null,
+        },
       ],
     });
     const draft = buildEventPackageDraft(match, null, identity(), null, NOW);
@@ -105,14 +122,24 @@ describe("buildEventPackageDraft", () => {
       state: "published",
       scheduledAt: null,
       queueItemName: null,
-      provenance: { source: "league-archive", sourceRef: "ereq_x", capturedAt: NOW },
+      provenance: {
+        source: "league-archive",
+        sourceRef: "ereq_x",
+        capturedAt: NOW,
+      },
     });
     const draft = buildEventPackageDraft(match, null, identity(), null, NOW);
     expect(draft.canonicalPremiereUrl).toBeNull();
   });
 
   it("marks embargoState revealed once the match has actually revealed", () => {
-    const draft = buildEventPackageDraft(baseMatch({ state: "revealed" }), null, identity(), null, NOW);
+    const draft = buildEventPackageDraft(
+      baseMatch({ state: "revealed" }),
+      null,
+      identity(),
+      null,
+      NOW,
+    );
     expect(draft.embargoState).toBe("revealed");
   });
 
@@ -126,7 +153,6 @@ describe("buildEventPackageDraft", () => {
       mapLabel: "Pangaea",
       format: "2p duel",
       scheduledAt: "2026-08-08T18:00:00.000Z",
-      directorCutEstimateSeconds: null,
       canonicalMatchUrl: `/match/${FEAT_ID}`,
       canonicalPremiereUrl: "/premiere/xyz",
       embargoState: "embargoed",
@@ -134,7 +160,13 @@ describe("buildEventPackageDraft", () => {
       createdAt: "2026-07-30T00:00:00.000Z",
       updatedAt: "2026-07-30T00:00:00.000Z",
     };
-    const draft = buildEventPackageDraft(baseMatch(), existing, identity(), null, NOW);
+    const draft = buildEventPackageDraft(
+      baseMatch(),
+      existing,
+      identity(),
+      null,
+      NOW,
+    );
     expect(draft.title).toBe("Operator's own title");
     expect(draft.subtitle).toBe("Operator's own subtitle");
     expect(draft.editorialNotes).toBe("hand-written note");
@@ -143,48 +175,17 @@ describe("buildEventPackageDraft", () => {
   });
 
   it("an explicit override wins over both the existing package and the match default", () => {
-    const draft = buildEventPackageDraft(baseMatch(), null, identity(), null, NOW, {
-      titleOverride: "New Operator Title",
-    });
+    const draft = buildEventPackageDraft(
+      baseMatch(),
+      null,
+      identity(),
+      null,
+      NOW,
+      {
+        titleOverride: "New Operator Title",
+      },
+    );
     expect(draft.title).toBe("New Operator Title");
-  });
-
-  it("reads the Director Cut estimate from the mirror's matching episode row", () => {
-    const mirror = {
-      episodes: [
-        { episodeRequestId: "ereq_x", directorCut: { durationEstimateSeconds: 420, segmentCount: 6 } },
-      ],
-    } as unknown as CoworldLeagueMirrorData;
-    const draft = buildEventPackageDraft(baseMatch(), null, identity(), mirror, NOW);
-    expect(draft.directorCutEstimateSeconds).toBe(420);
-  });
-
-  it("leaves the Director Cut estimate null when no matching episode/plan exists yet", () => {
-    const draft = buildEventPackageDraft(baseMatch(), null, identity(), null, NOW);
-    expect(draft.directorCutEstimateSeconds).toBeNull();
-  });
-
-  it("falls back to the pre-reveal estimate (from sealedBundleTurnStats) when the mirror can't resolve it yet", () => {
-    const sealedBundleTurnStats = { turnCount: 10_000, checkpointTurns: [3000, 6000] };
-    const draft = buildEventPackageDraft(baseMatch(), null, identity(), null, NOW, { sealedBundleTurnStats });
-    expect(draft.directorCutEstimateSeconds).toBe(estimatePreRevealDirectorCutSeconds({ totalTurns: 10_000, checkpointTurns: [3000, 6000] }));
-    expect(draft.directorCutEstimateSeconds).toBe(300);
-  });
-
-  it("prefers the mirror's real post-reveal estimate over the pre-reveal fallback when both are available", () => {
-    const mirror = {
-      episodes: [{ episodeRequestId: "ereq_x", directorCut: { durationEstimateSeconds: 420, segmentCount: 6 } }],
-    } as unknown as CoworldLeagueMirrorData;
-    const sealedBundleTurnStats = { turnCount: 10_000, checkpointTurns: [3000, 6000] };
-    const draft = buildEventPackageDraft(baseMatch(), null, identity(), mirror, NOW, { sealedBundleTurnStats });
-    expect(draft.directorCutEstimateSeconds).toBe(420);
-  });
-
-  it("never applies the pre-reveal fallback to an archive-lane match", () => {
-    const match = baseMatch({ lane: "archive", queueItemName: null, scheduledAt: null, episodeRequestId: "ereq_x" });
-    const sealedBundleTurnStats = { turnCount: 10_000, checkpointTurns: [3000, 6000] };
-    const draft = buildEventPackageDraft(match, null, identity(), null, NOW, { sealedBundleTurnStats });
-    expect(draft.directorCutEstimateSeconds).toBeNull();
   });
 
   it("rejects a package whose title/subtitle names the winner once the match carries a result", () => {
@@ -192,15 +193,30 @@ describe("buildEventPackageDraft", () => {
       lane: "archive",
       title: "Auri wins — Pangaea duel",
       participants: [
-        { playerName: "Auri", agentId: "agt_auri", agentVersionId: null, builderId: null },
-        { playerName: "Sefirot", agentId: "agt_sefirot", agentVersionId: null, builderId: null },
+        {
+          playerName: "Auri",
+          agentId: "agt_auri",
+          agentVersionId: null,
+          builderId: null,
+        },
+        {
+          playerName: "Sefirot",
+          agentId: "agt_sefirot",
+          agentVersionId: null,
+          builderId: null,
+        },
       ],
-      result: { winnerAgentId: "agt_auri", placements: [{ agentId: "agt_auri", placement: 1 }] },
+      result: {
+        winnerAgentId: "agt_auri",
+        placements: [{ agentId: "agt_auri", placement: 1 }],
+      },
     });
     const draft = buildEventPackageDraft(match, null, identity(), null, NOW, {
       titleOverride: "Auri wins — Pangaea duel",
     });
-    expect(isPubliclyPromotable(match, draft).missing).toContain("title_spoils_result");
+    expect(isPubliclyPromotable(match, draft).missing).toContain(
+      "title_spoils_result",
+    );
   });
 });
 
@@ -212,12 +228,21 @@ describe("buildEventPackageDraft", () => {
  */
 describe("premiere:package CLI — real subprocess end to end", () => {
   const repoRoot = path.resolve(__dirname, "../..");
-  const scriptPath = path.join(repoRoot, "src", "scripts", "premiere-package.ts");
+  const scriptPath = path.join(
+    repoRoot,
+    "src",
+    "scripts",
+    "premiere-package.ts",
+  );
 
   let featuredMatchStateRoot: string;
   let artifactsRoot: string;
 
-  function runCli(args: string[]): { code: number; stdout: string; stderr: string } {
+  function runCli(args: string[]): {
+    code: number;
+    stdout: string;
+    stderr: string;
+  } {
     try {
       const stdout = execFileSync("npx", ["tsx", scriptPath, ...args], {
         cwd: repoRoot,
@@ -234,18 +259,38 @@ describe("premiere:package CLI — real subprocess end to end", () => {
       return { code: 0, stdout, stderr: "" };
     } catch (error) {
       const err = error as { status: number; stdout: Buffer; stderr: Buffer };
-      return { code: err.status, stdout: err.stdout?.toString("utf8") ?? "", stderr: err.stderr?.toString("utf8") ?? "" };
+      return {
+        code: err.status,
+        stdout: err.stdout?.toString("utf8") ?? "",
+        stderr: err.stderr?.toString("utf8") ?? "",
+      };
     }
   }
 
   beforeEach(async () => {
-    featuredMatchStateRoot = await mkdtemp(path.join(os.tmpdir(), "pw-package-state-"));
-    artifactsRoot = await mkdtemp(path.join(os.tmpdir(), "pw-package-artifacts-"));
+    featuredMatchStateRoot = await mkdtemp(
+      path.join(os.tmpdir(), "pw-package-state-"),
+    );
+    artifactsRoot = await mkdtemp(
+      path.join(os.tmpdir(), "pw-package-artifacts-"),
+    );
     // Minimal empty tracked-identity-shaped registry so loadIdentityRegistrySnapshot
     // succeeds against this throwaway directory rather than the real repo one.
-    await writeFile(path.join(artifactsRoot, "builders.json"), JSON.stringify({ schemaVersion: 1, builders: [] }), "utf8");
-    await writeFile(path.join(artifactsRoot, "agents.json"), JSON.stringify({ schemaVersion: 1, agents: [] }), "utf8");
-    await writeFile(path.join(artifactsRoot, "versions.json"), JSON.stringify({ schemaVersion: 1, versions: [] }), "utf8");
+    await writeFile(
+      path.join(artifactsRoot, "builders.json"),
+      JSON.stringify({ schemaVersion: 1, builders: [] }),
+      "utf8",
+    );
+    await writeFile(
+      path.join(artifactsRoot, "agents.json"),
+      JSON.stringify({ schemaVersion: 1, agents: [] }),
+      "utf8",
+    );
+    await writeFile(
+      path.join(artifactsRoot, "versions.json"),
+      JSON.stringify({ schemaVersion: 1, versions: [] }),
+      "utf8",
+    );
     await writeFile(
       path.join(featuredMatchStateRoot, "featured-matches.json"),
       JSON.stringify({ schemaVersion: 1, matches: [baseMatch()] }),
@@ -254,7 +299,11 @@ describe("premiere:package CLI — real subprocess end to end", () => {
   });
 
   afterEach(async () => {
-    await Promise.all([featuredMatchStateRoot, artifactsRoot].map((dir) => rm(dir, { recursive: true, force: true })));
+    await Promise.all(
+      [featuredMatchStateRoot, artifactsRoot].map((dir) =>
+        rm(dir, { recursive: true, force: true }),
+      ),
+    );
   });
 
   it("generates and saves a package, then reports completeness", () => {
@@ -293,55 +342,35 @@ describe("premiere:package CLI — real subprocess end to end", () => {
             lane: "archive",
             scheduledAt: null,
             queueItemName: null,
-            provenance: { source: "league-archive", sourceRef: "ereq_x", capturedAt: NOW },
+            provenance: {
+              source: "league-archive",
+              sourceRef: "ereq_x",
+              capturedAt: NOW,
+            },
             participants: [
-              { playerName: "Auri", agentId: "agt_auri", agentVersionId: null, builderId: null },
+              {
+                playerName: "Auri",
+                agentId: "agt_auri",
+                agentVersionId: null,
+                builderId: null,
+              },
             ],
-            result: { winnerAgentId: "agt_auri", placements: [{ agentId: "agt_auri", placement: 1 }] },
+            result: {
+              winnerAgentId: "agt_auri",
+              placements: [{ agentId: "agt_auri", placement: 1 }],
+            },
           }),
         ],
       }),
       "utf8",
     );
-    const result = runCli([`--featured=${FEAT_ID}`, `--title=Auri wins the Pangaea duel`]);
+    const result = runCli([
+      `--featured=${FEAT_ID}`,
+      `--title=Auri wins the Pangaea duel`,
+    ]);
     expect(result.code).toBe(0); // never blocking at the CLI-warning level
     expect(result.stdout).toContain("event package saved");
     expect(result.stdout).toContain("prose warnings (not blocking):");
     expect(result.stdout).toContain("title names the winner");
-  });
-
-  it("resolves the pre-reveal Director Cut estimate from a real sealed bundle via --queue-root, end to end", () => {
-    const queueRoot = mkdtempSync(path.join(os.tmpdir(), "pw-package-queue-"));
-    const itemDir = path.join(queueRoot, "ready", "20260801T000000Z-run1");
-    mkdirSync(itemDir, { recursive: true });
-    writeFileSync(
-      path.join(itemDir, "meta.json"),
-      JSON.stringify({
-        schemaVersion: 1,
-        kind: "real-league",
-        runId: "run1",
-        sourceFile: "bundle.source.json",
-        sha256: "abc",
-        turnCount: 10000,
-        seatCount: 2,
-        map: "world",
-        checkpointTurns: [3000, 6000],
-        turnIntervalMs: 120,
-        coworldId: "cow_x",
-        variantId: "v1",
-        episodeId: null,
-        experienceRequestId: "ereq_x",
-        generatedAt: NOW,
-      }),
-      "utf8",
-    );
-    const result = runCli([`--featured=${FEAT_ID}`, `--queue-root=${queueRoot}`, "--json"]);
-    expect(result.code).toBe(0);
-    // main() always appends printCompleteness's own lines after the JSON
-    // in --json mode too — same behavior premiere-package.ts's own doc
-    // describes ("After every save ... it prints isPubliclyPromotable").
-    const draft = JSON.parse(result.stdout.slice(0, result.stdout.indexOf("\nisPubliclyPromotable")));
-    expect(draft.directorCutEstimateSeconds).toBe(300);
-    rmSync(queueRoot, { recursive: true, force: true });
   });
 });

@@ -1318,7 +1318,7 @@ function promotionMilestone(
     case "frontier-finish-pressure":
       return "Promote frontier finish pressure into the wider 10-run Hard-nation gate, then inspect whether weak-rival eliminations create momentum without survival regression.";
     case "naval-control":
-      return "Promote naval control into the wider 10-run Hard-nation gate, then inspect whether boats, warships, and patrol moves create invasion, defense, or trade-lane story beats without transport loops.";
+      return "Promote naval control into the wider 10-run Hard-nation gate, then inspect whether Transport boats create invasion and trade-lane story beats without transport loops.";
     case "late-game-strike-targeting":
       return "Promote late-game strike targeting into the wider 10-run Hard-nation gate, then inspect whether nukes hit silos, SAMs, cities, factories, ports, or leader concentrations without survival regression.";
     case "personality-diplomacy-pressure":
@@ -1341,7 +1341,7 @@ function reviseMilestone(tactic: AgentLearningComparisonFocusTactic): string {
     case "frontier-finish-pressure":
       return "Inspect missed finish-pressure examples and tighten decisive weak-rival attack thresholds before a larger gate.";
     case "naval-control":
-      return "Inspect missed naval-control examples and tighten when Port, Warship, boat, and patrol actions should outrank land loops before a larger gate.";
+      return "Inspect missed naval-control examples and tighten when Ports and Transport boats should outrank land loops before a larger gate.";
     case "late-game-strike-targeting":
       return "Inspect missed strike examples and tighten when high-value nuke targets should outrank growth, pressure, or hold before a larger gate.";
     case "personality-diplomacy-pressure":

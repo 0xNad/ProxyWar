@@ -74,6 +74,63 @@ describe("ClientGameRunner replay startup errors", () => {
     expect(transport.leaveGame).toHaveBeenCalledOnce();
   });
 
+  it("renders an in-place Reload action alongside Copy on the error modal (P0 fix: the modal previously had no recovery path -- a manual reload of the same URL was the only fix)", () => {
+    let updateCallback: (update: never) => void = () => {
+      throw new Error("Replay worker callback was not registered");
+    };
+    const eventBus = { on: vi.fn(), emit: vi.fn() };
+    const renderer = { initialize: vi.fn() };
+    const input = { initialize: vi.fn() };
+    const transport = {
+      updateCallback: vi.fn(),
+      rejoinGame: vi.fn(),
+      leaveGame: vi.fn(),
+    };
+    const worker = {
+      start: vi.fn((callback: (update: never) => void) => {
+        updateCallback = callback;
+      }),
+      cleanup: vi.fn(),
+    };
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const reload = vi.fn();
+    const originalLocation = window.location;
+    Object.defineProperty(window, "location", {
+      value: { ...originalLocation, reload },
+      writable: true,
+      configurable: true,
+    });
+
+    try {
+      const runner = new ClientGameRunner(
+        { gameID: "REPLAY01" } as never,
+        undefined,
+        eventBus as never,
+        renderer as never,
+        input as never,
+        transport as never,
+        worker as never,
+        {} as never,
+      );
+      runner.start();
+      updateCallback?.({} as never);
+
+      const reloadButton = document.querySelector<HTMLButtonElement>(
+        "#error-modal button.reload-btn",
+      );
+      expect(reloadButton).not.toBeNull();
+      expect(reloadButton?.textContent).toBe("error_modal.reload");
+      reloadButton?.click();
+      expect(reload).toHaveBeenCalledOnce();
+    } finally {
+      Object.defineProperty(window, "location", {
+        value: originalLocation,
+        writable: true,
+        configurable: true,
+      });
+    }
+  });
+
   it("skips spawned players whose replay name location is not ready", () => {
     const replayFrame = vi.fn();
     document.addEventListener("ai-league-replay-frame", replayFrame, {

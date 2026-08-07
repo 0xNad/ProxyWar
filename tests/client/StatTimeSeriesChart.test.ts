@@ -141,6 +141,97 @@ describe("renderTimeSeriesChart", () => {
     expect(circles[0].querySelector("title")?.textContent).toContain("50%");
   });
 
+  it("makes each point focusable and pairs it with a visible tooltip text sibling — a tap-accessible readout, since native SVG <title> alone never fires on touch (P3-04, 2026-08-02)", () => {
+    const container = mountedContainer();
+    render(
+      renderTimeSeriesChart({
+        ...baseProps,
+        points: [
+          { at: "2026-07-01", value: 0.5 },
+          { at: "2026-07-02", value: 0.6 },
+        ],
+      }),
+      container,
+    );
+    const circles = container.querySelectorAll("circle");
+    for (const circle of circles) {
+      expect(circle.getAttribute("tabindex")).toBe("0");
+      const tooltip = circle.nextElementSibling;
+      expect(tooltip?.tagName.toLowerCase()).toBe("text");
+      expect(tooltip?.classList.contains("stat-chart-point-tooltip")).toBe(
+        true,
+      );
+    }
+    expect(circles[0].nextElementSibling?.textContent).toContain("50%");
+    expect(circles[1].nextElementSibling?.textContent).toContain("60%");
+  });
+
+  it("renders every per-point element (circle, marker line, tooltip text, last-date label) in the real SVG namespace, not as a plain HTMLUnknownElement — a real pointer hover only lands on a proper SVGCircleElement (P4 fix, 2026-08-02: lit's `html` tag on a NESTED per-point sub-template silently created HTMLUnknownElement instead, giving every point a 0×0 hover hit-box live)", () => {
+    const container = mountedContainer();
+    const SVG_NS = "http://www.w3.org/2000/svg";
+    render(
+      renderTimeSeriesChart({
+        ...baseProps,
+        points: [
+          { at: "2026-07-01", value: 0.5, marker: "v24 first observed" },
+          { at: "2026-07-02", value: 0.6 },
+        ],
+      }),
+      container,
+    );
+    const circle = container.querySelector("circle")!;
+    const tooltip = container.querySelector(".stat-chart-point-tooltip")!;
+    const markerLine = container.querySelector("line.stat-chart-marker")!;
+    const lastDateLabel = Array.from(
+      container.querySelectorAll(".stat-chart-axis-label"),
+    ).find((el) => el.textContent?.trim() === "2026-07-02")!;
+    for (const el of [circle, tooltip, markerLine, lastDateLabel]) {
+      expect(el.namespaceURI).toBe(SVG_NS);
+    }
+  });
+
+  it("draws y-axis min/max value labels and x-axis first/last-date labels — a sparkline otherwise has no visible scale (P3-04, 2026-08-02)", () => {
+    const container = mountedContainer();
+    render(
+      renderTimeSeriesChart({
+        ...baseProps,
+        points: [
+          { at: "2026-07-01", value: 0.2 },
+          { at: "2026-07-15", value: 0.5 },
+          { at: "2026-07-30", value: 0.9 },
+        ],
+      }),
+      container,
+    );
+    const labels = Array.from(
+      container.querySelectorAll(".stat-chart-axis-label"),
+      (el) => el.textContent?.trim(),
+    );
+    // yDomain is fixed [0, 1] in baseProps, so min/max are the domain
+    // bounds, not the data's own min/max.
+    expect(labels).toContain("100%");
+    expect(labels).toContain("0%");
+    // formatX is the identity function in baseProps.
+    expect(labels).toContain("2026-07-01");
+    expect(labels).toContain("2026-07-30");
+  });
+
+  it("draws only one x-axis date label for a single-point series — never a duplicate", () => {
+    const container = mountedContainer();
+    render(
+      renderTimeSeriesChart({
+        ...baseProps,
+        points: [{ at: "2026-07-01", value: 0.5 }],
+      }),
+      container,
+    );
+    const dateLabels = Array.from(
+      container.querySelectorAll(".stat-chart-axis-label"),
+      (el) => el.textContent?.trim(),
+    ).filter((text) => text === "2026-07-01");
+    expect(dateLabels).toHaveLength(1);
+  });
+
   it("renders a version-marker line only for points that carry one", () => {
     const container = mountedContainer();
     render(
@@ -174,6 +265,24 @@ describe("renderTimeSeriesChart", () => {
     expect(details?.querySelector("thead th")?.textContent).toBe(
       "stat_chart.column_date",
     );
+  });
+
+  it("gives every date/value table cell its own padding class so adjacent cells never visually or textually run together (P4 fix, 2026-08-02: unstyled <td>s rendered/read as '8/2/20260%', date and value touching with no separator)", () => {
+    const container = mountedContainer();
+    render(
+      renderTimeSeriesChart({
+        ...baseProps,
+        points: [{ at: "2026-07-01", value: 0.5 }],
+      }),
+      container,
+    );
+    const cells = container.querySelectorAll(
+      "details.stat-chart-table td, details.stat-chart-table th",
+    );
+    expect(cells.length).toBeGreaterThan(0);
+    for (const cell of cells) {
+      expect(cell.className).not.toBe("");
+    }
   });
 
   it("shows the caption text and the version-marker label in the table row", () => {

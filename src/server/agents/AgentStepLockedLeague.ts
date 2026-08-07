@@ -184,6 +184,12 @@ export async function runAgentStepLockedLeague(
     });
   }
 
+  // Structured-deal ledger force-resolution (PROXYWAR_TUNE_STRUCTURED_DEALS;
+  // no-op when the flag is off): every accepted obligation reaches a terminal
+  // state at match end, judged against the final audited records. Optional
+  // call: test harnesses stub partial league mocks without this method.
+  options.league.finalizeDeals?.({ gameState: currentGame });
+
   if (config.requireWinner && currentGame.getWinner() === null) {
     throw new Error(
       `step-locked full match reached ${config.maxSteps + autopilotExtraSteps} decision steps without a winner` +

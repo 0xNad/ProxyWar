@@ -2034,7 +2034,7 @@ describe("ReplayPremiere production startup", () => {
     const runtime = context.runtimeRegistry.get(PREMIERE_ID)!;
     const target = context.httpRegistry.get(PREMIERE_ID)!;
     const participantId = `guest_${"9".repeat(32)}`;
-    const session = await target.interactions.createViewerSession({
+    const { session } = await target.interactions.createViewerSession({
       participantId,
       idempotencyKey: "startup_reveal_resolution_session_0001",
       requesterBucketId: `ip_${"8".repeat(32)}`,
@@ -2158,7 +2158,7 @@ describe("ReplayPremiere production startup", () => {
     const firstTarget = firstContext.httpRegistry.get(PREMIERE_ID)!;
     const participantId = `guest_${"7".repeat(32)}`;
     const requesterBucketId = `ip_${"6".repeat(32)}`;
-    const session = await firstTarget.interactions.createViewerSession({
+    const { session } = await firstTarget.interactions.createViewerSession({
       participantId,
       idempotencyKey: "startup_pending_resolution_session_0001",
       requesterBucketId,
@@ -2869,7 +2869,7 @@ describe("ReplayPremiere production startup", () => {
         const participantId = `guest_${"e".repeat(32)}`;
         const reactionSequence =
           target.interactions.readCheckpoints(null)[1].sequence;
-        const session = await target.interactions.createViewerSession({
+        const { session } = await target.interactions.createViewerSession({
           participantId,
           idempotencyKey: "post_pointer_session001",
           requesterBucketId: `ip_${"5".repeat(32)}`,
@@ -2965,7 +2965,7 @@ describe("ReplayPremiere production startup", () => {
     const runtime = context.runtimeRegistry.get(PREMIERE_ID)!;
     const target = context.httpRegistry.get(PREMIERE_ID)!;
     const participantId = `guest_${"d".repeat(32)}`;
-    const session = await target.interactions.createViewerSession({
+    const { session } = await target.interactions.createViewerSession({
       participantId,
       idempotencyKey: "orphan_session_000001",
       requesterBucketId: `ip_${"4".repeat(32)}`,
@@ -3033,7 +3033,7 @@ describe("ReplayPremiere production startup", () => {
     const target = context.httpRegistry.get(PREMIERE_ID)!;
     const participantId = `guest_${"3".repeat(32)}`;
     const requesterBucketId = `ip_${"2".repeat(32)}`;
-    const session = await target.interactions.createViewerSession({
+    const { session } = await target.interactions.createViewerSession({
       participantId,
       idempotencyKey: "orphan_pending_session_0001",
       requesterBucketId,
@@ -3344,7 +3344,7 @@ describe("ReplayPremiere production startup", () => {
     expect(target).not.toBeNull();
     const marketBefore = target!.interactions.readMarketState(null);
     expect(marketBefore?.status).toBe("open");
-    const session = await target!.interactions.createViewerSession({
+    const { session } = await target!.interactions.createViewerSession({
       participantId: `guest_${"a".repeat(32)}`,
       idempotencyKey: "idem_0000000000000001",
       requesterBucketId: `ip_${"1".repeat(32)}`,

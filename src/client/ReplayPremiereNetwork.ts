@@ -56,11 +56,37 @@ const DEFAULT_CATCH_UP_THRESHOLD_MS = 2 * PREMIERE_PRESENTATION_TRAIL_MS;
 // healthy viewer's smooth playback into a catch-up loop.
 const CHECKPOINT_MIN_USABLE_VOTE_WINDOW_MS = 15_000;
 const CHECKPOINT_CATCH_UP_JITTER_ALLOWANCE_MS = 2_000;
-const DEFAULT_REQUEST_TIMEOUT_MS = 2_000;
-const MAX_REQUEST_TIMEOUT_MS = 2_000;
+/**
+ * A fresh join's catch-up poll (`live-projection?after=-1` on an aged
+ * match, or an early advertised-chunk fetch) can legitimately carry up to
+ * `MAX_LIVE_PROJECTION_RECORDS`/one chunk's worth of real Turn payloads —
+ * hundreds of KB even after the server's gzip/brotli response compression
+ * (`compression()` on `ai-agent-demo-server.ts`). The old 2 s ceiling was
+ * sized for small steady-state polls only; against a real catch-up payload
+ * it aborted before the response could land, and because the SAME
+ * (unmoved) cursor gets re-requested on every retry, the join spun
+ * forever — "Joining live…" never converging — instead of failing once or
+ * succeeding. 10 s gives a genuine catch-up response, even on a slow
+ * connection, an honest chance to complete; it is still well inside the
+ * 60 s outer `JOIN_SYNC_TIMEOUT_MS` join-sync watchdog
+ * (`ReplayLoadingScreen.ts`), so a connection too slow even for this
+ * budget still surfaces a real error rather than hanging silently.
+ */
+const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+const MAX_REQUEST_TIMEOUT_MS = 10_000;
 const MAX_AUTHORITATIVE_RESULT_BYTES = 1_000_000;
-const LIVE_PROJECTION_MAX_POLLS_PER_TICK = 64;
-const LIVE_PROJECTION_MAX_DRAIN_POLLS = 4_096;
+/**
+ * Bounds on one sync tick's tap catch-up / reveal-time drain, expressed as
+ * a poll count. Kept in lockstep with the server's
+ * `MAX_LIVE_PROJECTION_RECORDS` (`ReplayPremiereRuntimeCoordinator.ts`):
+ * poll-count x per-poll record cap is the same total per-tick catch-up
+ * capacity as before that cap was lowered from 4 000 to 1 000 records —
+ * this only trades a few large, slow, timeout-prone round trips for many
+ * small, fast, reliably-completing ones (and correspondingly more frequent
+ * "Syncing to turn X" progress ticks for a cold join on an aged match).
+ */
+const LIVE_PROJECTION_MAX_POLLS_PER_TICK = 256;
+const LIVE_PROJECTION_MAX_DRAIN_POLLS = 16_384;
 export const REPLAY_PREMIERE_REVEAL_FETCH_CONCURRENCY = 8;
 // Admission collects at most 1 MiB of UTF-8 response body per leak target.
 // Reveal must carry the exact nonce-committed eligibility preimage, so the
@@ -100,6 +126,16 @@ export type ReplayPremiereNetworkErrorCode =
   | "invalid_configuration"
   | "request_failed"
   | "response_unavailable"
+  // A 404 from ANY premiere-scoped API route (bootstrap/manifest/chunk/
+  // reveal/live-projection) — the server's `target === null` registry
+  // miss (`ReplayPremiereHttp.ts`). Distinct from the generic
+  // `response_unavailable` bucket so the UI can render an honest "this
+  // premiere has ended" page instead of a scary transient-looking
+  // failure: whether hit on the very first bootstrap call (a stale/
+  // expired link) or mid-session (the premiere was reclaimed by the
+  // autocycler while this viewer was on the page), a 404 here always
+  // means the same thing — this premiere is no longer being served.
+  | "premiere_not_found"
   | "invalid_cache_policy"
   | "invalid_content_type"
   | "response_too_large"
@@ -1969,6 +2005,9 @@ export class ReplayPremiereNetworkController {
         throw networkError("request_failed", true);
       }
       if (!response.ok) {
+        if (response.status === 404) {
+          throw networkError("premiere_not_found", false);
+        }
         throw networkError(
           "response_unavailable",
           response.status === 408 ||

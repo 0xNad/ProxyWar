@@ -110,7 +110,7 @@ async function session(
   participantId: string,
   idempotencyKey: string,
 ) {
-  return h.interactions.createViewerSession({
+  const { session } = await h.interactions.createViewerSession({
     participantId,
     idempotencyKey,
     requesterBucketId: `ip_${"1".repeat(32)}`,
@@ -119,6 +119,7 @@ async function session(
     excludedAsOperator: false,
     excludedAsBot: false,
   });
+  return session;
 }
 
 // Checkpoints are content beats only, unrelated to the continuous LMSR

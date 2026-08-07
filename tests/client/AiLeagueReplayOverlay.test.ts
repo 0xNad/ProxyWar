@@ -1,24 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
-const { trackMock } = vi.hoisted(() => ({ trackMock: vi.fn() }));
-vi.mock("../../src/client/analytics/AnalyticsClient", () => ({
-  analytics: { track: trackMock, trackVisitStart: vi.fn() },
-}));
 import {
   activeWarPairCount,
   deriveMatchStateStripFields,
   mountAiLeagueReplayOverlay,
   normalizeMatchStateSeries,
 } from "../../src/client/AiLeagueReplayOverlay";
-import {
-  BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT,
-  BROADCAST_RAIL_FOLLOW_EVENT,
-} from "../../src/client/graphics/layers/PointOfViewSelector";
+import { BROADCAST_RAIL_LOCATE_EVENT } from "../../src/client/graphics/CompetitorLocateBridge";
 import type { PublicAgent } from "../../src/client/publicapp/ReadModelSchema";
 import {
   initialReplayClipRenderableThroughTurn,
   replayClipPreviewTarget,
 } from "../../src/client/ReplayClipControl";
+import { UserSettings } from "../../src/core/game/UserSettings";
+
+const { trackMock } = vi.hoisted(() => ({ trackMock: vi.fn() }));
+vi.mock("../../src/client/analytics/AnalyticsClient", () => ({
+  analytics: { track: trackMock, trackVisitStart: vi.fn() },
+}));
 
 describe("AiLeagueReplayOverlay", () => {
   beforeEach(() => {
@@ -523,6 +521,71 @@ describe("AiLeagueReplayOverlay", () => {
     expect(overlay.getAttribute("style")).toBeNull();
   });
 
+  it("restarts playback from turn 0 when Reset is clicked in ANY state, including the ended end screen (P2 pass-10 t4-03)", () => {
+    // Same window.location mocking convention `WinModal.test.ts` already
+    // uses — jsdom has no real navigation, so this pins the fix at the
+    // "navigated to the canonical replay URL" level rather than asserting
+    // turn 0 renders (which would just be re-testing jsdom's own
+    // navigation, not this app's code).
+    //
+    // P0 fix (2026-08-03, deploy 2B): this used to assert a plain
+    // `location.reload()` call. QA caught that reloading trusts whatever
+    // the LIVE address bar holds, and reproduced Reset ejecting to the
+    // site homepage — matching Main.ts's own documented, live-confirmed
+    // case where `window.location.pathname` can transiently read back
+    // wrong mid-navigation. Reset now sets `location.href` to the
+    // canonical `/ai-league-replay/:runID` path explicitly, regardless of
+    // whatever the address bar currently holds.
+    let assignedHref: string | null = null;
+    const originalLocation = window.location;
+    Object.defineProperty(window, "location", {
+      value: {
+        pathname: window.location.pathname,
+        get href() {
+          return assignedHref ?? window.location.href;
+        },
+        set href(value: string) {
+          assignedHref = value;
+        },
+      },
+      writable: true,
+      configurable: true,
+    });
+
+    try {
+      mountAiLeagueReplayOverlay({
+        runID: "reset-restarts-ended",
+        artifactBasePath: "/ai-league-runs/reset-restarts-ended",
+        decisions: [],
+      });
+      const overlay = document.getElementById("ai-league-replay-overlay")!;
+
+      // Simulate the match having reached its end screen: the frame
+      // stream has stopped advancing and the DC is showing "X has won!"
+      // — none of which the Reset handler may consult before acting
+      // (spec: "restarts playback from turn 0 from ANY state including
+      // ended", i.e. no ended-state guard is allowed to swallow the
+      // click).
+      document.dispatchEvent(
+        new CustomEvent("ai-league-replay-frame", {
+          detail: { tick: 16234, turnNumber: 16234, players: [] },
+        }),
+      );
+
+      overlay
+        .querySelector<HTMLButtonElement>("[data-ai-league-reset-layout]")
+        ?.click();
+
+      expect(assignedHref).toBe("/ai-league-replay/reset-restarts-ended");
+    } finally {
+      Object.defineProperty(window, "location", {
+        value: originalLocation,
+        writable: true,
+        configurable: true,
+      });
+    }
+  });
+
   it("starts as an accessible compact bottom sheet on narrow screens", () => {
     Object.defineProperty(window, "innerWidth", {
       configurable: true,
@@ -577,6 +640,58 @@ describe("AiLeagueReplayOverlay", () => {
     expect(styles).toContain("min-height: 44px");
     expect(styles).toContain(".ai-league-headline-text");
     expect(styles).toContain("white-space: nowrap");
+  });
+
+  it("puts the drawer tab bar ahead of Standings at the landscape-phone breakpoint, so it's in the fold on open (P2 pass-10, 844x390)", () => {
+    // jsdom does not evaluate media queries or run real layout, so (same
+    // convention as `ReplayPremiereOverlay.test.ts`'s own sticky-tabs fix)
+    // this pins the fix at the CSS-rule level: extract the landscape-only
+    // media block and assert it reorders the drawer ahead of Standings,
+    // rather than asserting actual pixel positions no jsdom test can see.
+    mountAiLeagueReplayOverlay({
+      runID: "landscape-tabs-in-fold",
+      artifactBasePath: "/ai-league-runs/landscape-tabs-in-fold",
+      decisions: [],
+    });
+    const css =
+      document.querySelector("#ai-league-replay-overlay style")?.textContent ??
+      "";
+    const landscapeBlockStart = css.indexOf(
+      "@media (max-height: 430px) and (orientation: landscape)",
+    );
+    expect(landscapeBlockStart).toBeGreaterThan(-1);
+    // Bound the search to this block only — the desktop stylesheet has
+    // its own unrelated `.ai-league-standings`/`[data-ai-league-broadcast-
+    // drawer]` rules earlier that must NOT satisfy this assertion.
+    const landscapeBlockEnd = css.indexOf("</style>", landscapeBlockStart);
+    const landscapeBlock = css.slice(landscapeBlockStart, landscapeBlockEnd);
+
+    const bodyRuleStart = landscapeBlock.indexOf(".ai-league-body {");
+    expect(bodyRuleStart).toBeGreaterThan(-1);
+    const bodyRule = landscapeBlock.slice(
+      bodyRuleStart,
+      landscapeBlock.indexOf("}", bodyRuleStart),
+    );
+    expect(bodyRule).toContain("display: flex");
+    expect(bodyRule).toContain("flex-direction: column");
+
+    const drawerRuleStart = landscapeBlock.indexOf(
+      "[data-ai-league-broadcast-drawer] {",
+    );
+    expect(drawerRuleStart).toBeGreaterThan(-1);
+    const drawerOrder = landscapeBlock.slice(
+      drawerRuleStart,
+      landscapeBlock.indexOf("}", drawerRuleStart),
+    );
+    expect(drawerOrder).toContain("order: 1");
+
+    const standingsRuleStart = landscapeBlock.indexOf(".ai-league-standings {");
+    expect(standingsRuleStart).toBeGreaterThan(drawerRuleStart);
+    const standingsOrder = landscapeBlock.slice(
+      standingsRuleStart,
+      landscapeBlock.indexOf("}", standingsRuleStart),
+    );
+    expect(standingsOrder).toContain("order: 2");
   });
 
   it("no longer renders raw artifact download links in the panel", () => {
@@ -642,13 +757,39 @@ describe("AiLeagueReplayOverlay", () => {
       artifactBasePath: "/ai-league-runs/x",
       decisions: [],
     });
-    const style = document.querySelector("#ai-league-replay-overlay style")
-      ?.textContent;
+    const style = document.querySelector(
+      "#ai-league-replay-overlay style",
+    )?.textContent;
     expect(style).toContain("grid-template-columns: minmax(0, 1fr)");
     // The shrinkable title block and the fixed action cluster are what make
     // the pinned column actually resolve to a usable header.
     expect(style).toMatch(/\.ai-league-header-actions \{[^}]*flex: 0 0 auto/);
-    expect(style).toMatch(/#ai-league-replay-overlay header \{[^}]*min-width: 0/);
+    expect(style).toMatch(
+      /#ai-league-replay-overlay header \{[^}]*min-width: 0/,
+    );
+  });
+
+  it("sizes the Analyst chart count column to its content instead of clipping a 3+ digit tally mid-digit (P2 pass-1 p1-05/p1-06, 2026-08-02)", () => {
+    mountAiLeagueReplayOverlay({
+      runID: "analyst-chart-count-width",
+      artifactBasePath: "/ai-league-runs/x",
+      decisions: [],
+    });
+    const style = document.querySelector(
+      "#ai-league-replay-overlay style",
+    )?.textContent;
+    expect(style).toMatch(
+      /\.broadcast-analyst-chart-row \{[^}]*grid-template-columns: 90px 1fr auto/,
+    );
+    expect(style).not.toMatch(
+      /\.broadcast-analyst-chart-row \{[^}]*grid-template-columns: 90px 1fr 32px/,
+    );
+    expect(style).toMatch(
+      /\.broadcast-analyst-chart-count \{[^}]*white-space: nowrap/,
+    );
+    expect(style).toMatch(
+      /\.broadcast-analyst-chart-count \{[^}]*font-variant-numeric: tabular-nums/,
+    );
   });
 
   it("omits the built-in-opponent clause and difficulty for agent-vs-agent matches", () => {
@@ -671,8 +812,9 @@ describe("AiLeagueReplayOverlay", () => {
       decisions: [],
     });
 
-    const setup = document.querySelector("[data-ai-league-subtitle]")
-      ?.textContent;
+    const setup = document.querySelector(
+      "[data-ai-league-subtitle]",
+    )?.textContent;
     expect(setup).toContain("ai_league_replay.setup_agents_only");
     expect(setup).not.toContain("setup_agents_vs_builtin");
     expect(setup).not.toContain("Easy");
@@ -1593,6 +1735,7 @@ describe("AiLeagueReplayOverlay", () => {
         smallID: number;
         username: string;
         tilesOwned: number;
+        clientID?: string | null;
         allies?: number[];
         targets?: number[];
       }>,
@@ -1605,7 +1748,7 @@ describe("AiLeagueReplayOverlay", () => {
             players: players.map((player) => ({
               playerID: player.playerID,
               smallID: player.smallID,
-              clientID: null,
+              clientID: player.clientID ?? null,
               username: player.username,
               displayName: player.username,
               x: 0,
@@ -1632,7 +1775,7 @@ describe("AiLeagueReplayOverlay", () => {
                 playerName: "Atlas",
                 displayName: "Atlas Prime",
                 slug: "atlas-prime",
-                emblemSvg: "<svg data-testid=\"atlas-emblem\"></svg>",
+                emblemSvg: '<svg data-testid="atlas-emblem"></svg>',
                 versionLabel: "v2.3",
                 builderDisplayName: "Builder Bob",
               }),
@@ -1705,11 +1848,19 @@ describe("AiLeagueReplayOverlay", () => {
         });
 
         frame(600, [
-          { playerID: "p1", smallID: 1, username: "Atlas", tilesOwned: 60, targets: [2] },
+          {
+            playerID: "p1",
+            smallID: 1,
+            username: "Atlas",
+            tilesOwned: 60,
+            targets: [2],
+          },
           { playerID: "p2", smallID: 2, username: "Blitz", tilesOwned: 40 },
         ]);
 
-        const rail = document.querySelector("[data-ai-league-broadcast-drawer]");
+        const rail = document.querySelector(
+          "[data-ai-league-broadcast-drawer]",
+        );
         expect(rail?.querySelectorAll(".broadcast-rail-entry")).toHaveLength(3);
 
         // Ghost never appears in a frame (eliminated before this replay's
@@ -1754,9 +1905,9 @@ describe("AiLeagueReplayOverlay", () => {
         const atlasEntry = [
           ...document.querySelectorAll(".broadcast-rail-entry"),
         ].find((entry) => entry.textContent?.includes("Atlas Prime"));
-        expect(atlasEntry?.querySelector(".broadcast-rail-version")?.textContent).toBe(
-          "v2.3",
-        );
+        expect(
+          atlasEntry?.querySelector(".broadcast-rail-version")?.textContent,
+        ).toBe("v2.3");
         expect(
           atlasEntry?.querySelector(".broadcast-rail-emblem")?.innerHTML,
         ).toContain("atlas-emblem");
@@ -1772,6 +1923,122 @@ describe("AiLeagueReplayOverlay", () => {
         expect(
           atlasEntry?.querySelector(".broadcast-rail-wars"),
         ).not.toBeNull();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it("preserves scroll position in the diplomacy strip and competitor rail when their content changes mid-tick (P1 scroll-teleport fix: content-keyed patch, never a full container rebuild)", () => {
+      const runID = "scroll-preserve-1";
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response(null, { status: 404 })),
+      );
+      try {
+        mountAiLeagueReplayOverlay({
+          runID,
+          artifactBasePath: `/ai-league-runs/${runID}`,
+          decisions: [],
+        });
+
+        // Rook absorbs the tile delta below so Atlas's own rank/share stay
+        // pixel-identical across the tick — isolates "an untouched entry's
+        // own DOM node survives a sibling's content change" (the property
+        // under test) from "did the derived numbers recompute correctly",
+        // which the rail/diplomacy tests above already cover.
+        frame(500, [
+          { playerID: "p1", smallID: 1, username: "Atlas", tilesOwned: 60 },
+          { playerID: "p2", smallID: 2, username: "Blitz", tilesOwned: 40 },
+          { playerID: "p3", smallID: 3, username: "Rook", tilesOwned: 100 },
+        ]);
+
+        const diploContainer = document.querySelector<HTMLElement>(
+          "[data-ai-league-diplomacy-rows]",
+        );
+        expect(diploContainer).not.toBeNull();
+        const atlasDiploBefore = [
+          ...diploContainer!.querySelectorAll(".ai-league-diplo-entry"),
+        ].find((el) => el.textContent?.includes("Atlas"));
+        expect(atlasDiploBefore).toBeDefined();
+        expect(atlasDiploBefore?.textContent).toContain("30%");
+        const blitzDiploBefore = [
+          ...diploContainer!.querySelectorAll(".ai-league-diplo-entry"),
+        ].find((el) => el.textContent?.includes("Blitz"));
+
+        const railList = document.querySelector<HTMLElement>(
+          ".broadcast-rail-list",
+        );
+        expect(railList).not.toBeNull();
+        const atlasRailBefore = [
+          ...railList!.querySelectorAll(".broadcast-rail-entry"),
+        ].find((el) => el.textContent?.includes("Atlas"));
+        expect(atlasRailBefore).toBeDefined();
+
+        // jsdom has no real layout, so scrollTop is faked exactly like this
+        // file's own War Room ticker scroll-preservation test above does.
+        let diploScrollTop = 42;
+        Object.defineProperty(diploContainer, "scrollTop", {
+          configurable: true,
+          get: () => diploScrollTop,
+          set: (value: number) => {
+            diploScrollTop = value;
+          },
+        });
+        let railScrollTop = 77;
+        Object.defineProperty(railList, "scrollTop", {
+          configurable: true,
+          get: () => railScrollTop,
+          set: (value: number) => {
+            railScrollTop = value;
+          },
+        });
+
+        // Blitz gains 15 tiles from Rook: a pure content-changing tick for
+        // both panels (total tiles, and therefore Atlas's own share/rank,
+        // are unaffected). This is the exact shape that used to call
+        // `container.innerHTML = rowsHtml` / `rail.replaceWith(nextRail)`
+        // on the whole scrolled container, resetting `scrollTop` to 0 —
+        // "some parts of the panel ... teleport me back when I try to
+        // scroll mid-playback".
+        frame(501, [
+          { playerID: "p1", smallID: 1, username: "Atlas", tilesOwned: 60 },
+          { playerID: "p2", smallID: 2, username: "Blitz", tilesOwned: 55 },
+          { playerID: "p3", smallID: 3, username: "Rook", tilesOwned: 85 },
+        ]);
+
+        // Scroll position held for both panels.
+        expect(diploScrollTop).toBe(42);
+        expect(railScrollTop).toBe(77);
+
+        // The patch actually landed: Blitz's own diplomacy row changed
+        // (its rail counterpart's untranslated-in-this-test-env label text
+        // is identical either way, so it isn't a useful "did it change"
+        // signal here — the scrollTop/same-node assertions below already
+        // cover the rail).
+        expect(
+          [...diploContainer!.querySelectorAll(".ai-league-diplo-entry")].find(
+            (el) => el.textContent?.includes("Blitz"),
+          )?.textContent,
+        ).toContain("28%");
+        expect(
+          [...diploContainer!.querySelectorAll(".ai-league-diplo-entry")].find(
+            (el) => el.textContent?.includes("Blitz"),
+          ),
+        ).not.toBe(blitzDiploBefore);
+
+        // ...while Atlas's own row — untouched by the patch — is the SAME
+        // DOM node: proof this is a content-keyed patch, never a full
+        // teardown/rebuild of the container.
+        expect(
+          [...diploContainer!.querySelectorAll(".ai-league-diplo-entry")].find(
+            (el) => el.textContent?.includes("Atlas"),
+          ),
+        ).toBe(atlasDiploBefore);
+        expect(
+          [...railList!.querySelectorAll(".broadcast-rail-entry")].find((el) =>
+            el.textContent?.includes("Atlas"),
+          ),
+        ).toBe(atlasRailBefore);
       } finally {
         vi.unstubAllGlobals();
       }
@@ -1815,13 +2082,63 @@ describe("AiLeagueReplayOverlay", () => {
           agents: [],
           relationships: [],
           events: [
-            event(1, 50, "alliance_formed", "pact", "a1", "Atlas", "a3", "Civic", "Atlas and Civic form an alliance."),
-            event(2, 100, "attack", "war", "a2", "Blitz", "a1", "Atlas", "Blitz attacks Atlas."),
+            event(
+              1,
+              50,
+              "alliance_formed",
+              "pact",
+              "a1",
+              "Atlas",
+              "a3",
+              "Civic",
+              "Atlas and Civic form an alliance.",
+            ),
+            event(
+              2,
+              100,
+              "attack",
+              "war",
+              "a2",
+              "Blitz",
+              "a1",
+              "Atlas",
+              "Blitz attacks Atlas.",
+            ),
             // Same ordered pair attacking again must NOT curate a second
             // first_strike — only the first attack between a pair counts.
-            event(3, 150, "attack", "war", "a2", "Blitz", "a1", "Atlas", "Blitz attacks Atlas again."),
-            event(4, 200, "alliance_break", "betrayal", "a3", "Civic", "a1", "Atlas", "Civic breaks the pact."),
-            event(5, 999, "elimination", "war", "a2", "Blitz", null, null, "Blitz is eliminated."),
+            event(
+              3,
+              150,
+              "attack",
+              "war",
+              "a2",
+              "Blitz",
+              "a1",
+              "Atlas",
+              "Blitz attacks Atlas again.",
+            ),
+            event(
+              4,
+              200,
+              "alliance_break",
+              "betrayal",
+              "a3",
+              "Civic",
+              "a1",
+              "Atlas",
+              "Civic breaks the pact.",
+            ),
+            event(
+              5,
+              999,
+              "elimination",
+              "war",
+              "a2",
+              "Blitz",
+              null,
+              null,
+              "Blitz is eliminated.",
+            ),
           ],
           communicationThreads: [],
           timelineBuckets: [],
@@ -1840,7 +2157,9 @@ describe("AiLeagueReplayOverlay", () => {
       expect(
         warRoom?.querySelector('[data-kind="elimination"]'),
       ).not.toBeNull();
-      const planChangeItem = warRoom?.querySelector('[data-kind="plan_change"]');
+      const planChangeItem = warRoom?.querySelector(
+        '[data-kind="plan_change"]',
+      );
       expect(planChangeItem).not.toBeNull();
 
       // Expand the plan-change row and confirm the raw planRationale text
@@ -1850,17 +2169,254 @@ describe("AiLeagueReplayOverlay", () => {
         ?.querySelector<HTMLButtonElement>(".broadcast-war-room-summary")
         ?.click();
       expect(
-        planChangeItem?.querySelector(".broadcast-war-room-extra")
-          ?.textContent,
+        planChangeItem?.querySelector(".broadcast-war-room-extra")?.textContent,
       ).toBe("Blitz is massing troops nearby.");
       expect(
         planChangeItem?.querySelector(".broadcast-war-room-detail")
           ?.textContent,
       ).toContain("broadcast.war_room_stated_reason");
-      planChangeItem
-        ?.querySelector<HTMLButtonElement>(".broadcast-war-room-jump")
+      // Turn 2 of the pass-10 CHECK item: the jump target (turn 20) sits
+      // well behind the current playhead (turn 999), so this now
+      // navigates with `?turn=` instead of dispatching the forward-only
+      // event — same fix, same shared `dispatchJumpToTurn`, as the
+      // Timeline scrubber's own jump-to-turn.
+      withMockedLocation(runID, (locationMock) => {
+        planChangeItem
+          ?.querySelector<HTMLButtonElement>(".broadcast-war-room-jump")
+          ?.click();
+        expect(jumps).toEqual([]);
+        expect(locationMock.href).toContain("turn=20");
+      });
+    });
+    it("classifies War Room events into visual-weight tiers (content curation spec item 1, deploy 3.3): eliminations/alliances/betrayals are always tier 1; a first strike touching an agent who later becomes consequential (eliminated, or party to an alliance/betrayal) is tier 2; a first strike between two agents who never become consequential is tier 3", () => {
+      const runID = "broadcast-war-room-tiers-1";
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        currentTurn: 999,
+        decisions: [],
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events: [
+            // Blitz (a2) later gets eliminated below -- its first strike
+            // against Atlas (a1) is tier 2 ("notable") even though the
+            // strike's own importance (70, set by the `event()` fixture
+            // helper) carries no magnitude signal on its own.
+            event(
+              1,
+              50,
+              "attack",
+              "war",
+              "a2",
+              "Blitz",
+              "a1",
+              "Atlas",
+              "Blitz attacks Atlas.",
+            ),
+            // Neither Rook (a5) nor Pawn (a6) ever appears in another
+            // event -- their one skirmish never becomes consequential.
+            event(
+              2,
+              60,
+              "attack",
+              "war",
+              "a5",
+              "Rook",
+              "a6",
+              "Pawn",
+              "Rook attacks Pawn.",
+            ),
+            event(
+              3,
+              100,
+              "alliance_formed",
+              "pact",
+              "a3",
+              "Civic",
+              "a4",
+              "Diplo",
+              "Civic and Diplo form an alliance.",
+            ),
+            event(
+              4,
+              150,
+              "alliance_break",
+              "betrayal",
+              "a3",
+              "Civic",
+              "a4",
+              "Diplo",
+              "Civic breaks the pact.",
+            ),
+            event(
+              5,
+              999,
+              "elimination",
+              "war",
+              "a2",
+              "Blitz",
+              null,
+              null,
+              "Blitz is eliminated.",
+            ),
+          ],
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+
+      const warRoom = document.querySelector(".broadcast-war-room");
+      expect(warRoom).not.toBeNull();
+      expect(
+        warRoom
+          ?.querySelector('[data-kind="alliance"]')
+          ?.getAttribute("data-tier"),
+      ).toBe("1");
+      expect(
+        warRoom
+          ?.querySelector('[data-kind="betrayal"]')
+          ?.getAttribute("data-tier"),
+      ).toBe("1");
+      expect(
+        warRoom
+          ?.querySelector('[data-kind="elimination"]')
+          ?.getAttribute("data-tier"),
+      ).toBe("1");
+      const firstStrikeItems = warRoom?.querySelectorAll(
+        '[data-kind="first_strike"]',
+      );
+      expect(firstStrikeItems).toHaveLength(2);
+      const tiers = [...(firstStrikeItems ?? [])]
+        .map((item) => item.getAttribute("data-tier"))
+        .sort();
+      // The Blitz-vs-Atlas strike (tier 2, notable) and the never-again-
+      // seen Rook-vs-Pawn strike (tier 3, routine) — a lone tier-3 event
+      // has no adjacent tier-3 neighbor to group with, so it renders as
+      // its own (compact) row rather than a group summary.
+      expect(tiers).toEqual(["2", "3"]);
+    });
+
+    it("collapses a consecutive run of routine (tier 3) first strikes into ONE grouped summary row, expandable to reveal each collapsed skirmish (content curation spec item 1's 'highest-leverage change')", () => {
+      const runID = "broadcast-war-room-grouping-1";
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        currentTurn: 999,
+        decisions: [],
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events: [
+            // Three distinct pairs, none of which ever appears in an
+            // alliance/betrayal/elimination -- all three land as
+            // consecutive tier-3 rows and must collapse into one group.
+            event(
+              1,
+              100,
+              "attack",
+              "war",
+              "r1",
+              "Rook1",
+              "p1",
+              "Pawn1",
+              "Rook1 attacks Pawn1.",
+            ),
+            event(
+              2,
+              110,
+              "attack",
+              "war",
+              "r2",
+              "Rook2",
+              "p2",
+              "Pawn2",
+              "Rook2 attacks Pawn2.",
+            ),
+            event(
+              3,
+              120,
+              "attack",
+              "war",
+              "r3",
+              "Rook3",
+              "p3",
+              "Pawn3",
+              "Rook3 attacks Pawn3.",
+            ),
+            // A real elimination afterward stays its own, ungrouped tier-1
+            // row -- grouping never crosses a tier-1/2 boundary.
+            event(
+              4,
+              200,
+              "elimination",
+              "war",
+              "e1",
+              "Eliminated One",
+              null,
+              null,
+              "Eliminated One is eliminated.",
+            ),
+          ],
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+
+      const warRoom = document.querySelector(".broadcast-war-room");
+      const items = warRoom?.querySelectorAll(".broadcast-war-room-item") ?? [];
+      // ONE grouped summary row (replacing all 3 routine strikes) + the
+      // elimination -- not 4 individual rows. This is the acceptance
+      // criterion itself: routine noise is genuinely collapsed, not
+      // re-skinned.
+      expect(items).toHaveLength(2);
+
+      const groupRow = warRoom?.querySelector('[data-tier="3"]');
+      expect(groupRow).not.toBeNull();
+      expect(groupRow?.getAttribute("data-kind")).toBe("first_strike");
+      expect(groupRow?.textContent).toContain(
+        "ai_league_replay.war_room_grouped_skirmishes",
+      );
+
+      // Expand the group and confirm all 3 collapsed skirmishes are
+      // individually visible in the detail (never silently dropped).
+      groupRow
+        ?.querySelector<HTMLButtonElement>(".broadcast-war-room-summary")
         ?.click();
-      expect(jumps).toEqual([20]);
+      const extra = groupRow?.querySelector(
+        ".broadcast-war-room-extra",
+      )?.textContent;
+      expect(extra?.split("\n")).toHaveLength(3);
+
+      // The elimination is untouched -- a real tier-1 event never gets
+      // folded into a routine-noise summary.
+      expect(
+        warRoom?.querySelector('[data-kind="elimination"]'),
+      ).not.toBeNull();
+    });
+
+    it("wraps long agent names in the War Room feed instead of truncating them with no way to see the rest (content curation spec item 3)", () => {
+      const runID = "broadcast-war-room-namewrap-1";
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+      });
+      const styles =
+        document.querySelector("#ai-league-replay-overlay style")
+          ?.textContent ?? "";
+      const headlineRule = styles.match(
+        /\n\s*\.broadcast-war-room-headline\s*\{[^}]*\}/,
+      )?.[0];
+      expect(headlineRule).toBeDefined();
+      expect(headlineRule).toContain("overflow-wrap: break-word");
+      expect(headlineRule).toContain("white-space: normal");
+      expect(headlineRule).not.toContain("text-overflow: ellipsis");
+      expect(headlineRule).not.toContain("white-space: nowrap");
     });
 
     it("renders an unrestricted bottom timeline for Full Replay and dispatches jump-to-turn on seek", () => {
@@ -1886,12 +2442,72 @@ describe("AiLeagueReplayOverlay", () => {
           agents: [],
           relationships: [],
           events: [
-            event(1, 5, "spawn", "info", "a1", "Atlas", null, null, "Atlas enters the match."),
-            event(2, 50, "alliance_formed", "pact", "a1", "Atlas", "a3", "Civic", "Atlas and Civic form an alliance."),
-            event(3, 100, "attack", "war", "a2", "Blitz", "a1", "Atlas", "Blitz attacks Atlas."),
-            event(4, 200, "alliance_break", "betrayal", "a3", "Civic", "a1", "Atlas", "Civic breaks the pact."),
-            event(5, 300, "nuke", "threat", "a2", "Blitz", "a3", "Civic", "Blitz escalates nuclear pressure against Civic."),
-            event(6, 999, "elimination", "war", "a2", "Blitz", null, null, "Blitz is eliminated."),
+            event(
+              1,
+              5,
+              "spawn",
+              "info",
+              "a1",
+              "Atlas",
+              null,
+              null,
+              "Atlas enters the match.",
+            ),
+            event(
+              2,
+              50,
+              "alliance_formed",
+              "pact",
+              "a1",
+              "Atlas",
+              "a3",
+              "Civic",
+              "Atlas and Civic form an alliance.",
+            ),
+            event(
+              3,
+              100,
+              "attack",
+              "war",
+              "a2",
+              "Blitz",
+              "a1",
+              "Atlas",
+              "Blitz attacks Atlas.",
+            ),
+            event(
+              4,
+              200,
+              "alliance_break",
+              "betrayal",
+              "a3",
+              "Civic",
+              "a1",
+              "Atlas",
+              "Civic breaks the pact.",
+            ),
+            event(
+              5,
+              300,
+              "nuke",
+              "threat",
+              "a2",
+              "Blitz",
+              "a3",
+              "Civic",
+              "Blitz escalates nuclear pressure against Civic.",
+            ),
+            event(
+              6,
+              999,
+              "elimination",
+              "war",
+              "a2",
+              "Blitz",
+              null,
+              null,
+              "Blitz is eliminated.",
+            ),
           ],
           communicationThreads: [],
           timelineBuckets: [],
@@ -1900,7 +2516,8 @@ describe("AiLeagueReplayOverlay", () => {
 
       const timeline = document.querySelector(".broadcast-timeline");
       expect(timeline).not.toBeNull();
-      const markers = timeline?.querySelectorAll(".broadcast-timeline-marker") ?? [];
+      const markers =
+        timeline?.querySelectorAll(".broadcast-timeline-marker") ?? [];
       // spawn, alliance, first_strike, betrayal, nuke, elimination, finish.
       expect(markers).toHaveLength(7);
       for (const kind of [
@@ -1922,7 +2539,9 @@ describe("AiLeagueReplayOverlay", () => {
       expect(timeline?.querySelector('[data-kind="lead_change"]')).toBeNull();
       // Full Replay is unrestricted — every marker stays clickable.
       expect(
-        [...markers].every((marker) => marker.getAttribute("data-seekable") === "true"),
+        [...markers].every(
+          (marker) => marker.getAttribute("data-seekable") === "true",
+        ),
       ).toBe(true);
 
       const finishMarker = timeline?.querySelector<HTMLButtonElement>(
@@ -1930,6 +2549,103 @@ describe("AiLeagueReplayOverlay", () => {
       );
       finishMarker?.click();
       expect(jumps).toEqual([1_000]);
+    });
+
+    it("CHECK item fix (pass-10): a Timeline marker BEHIND the current playhead navigates with ?turn= instead of silently no-op'ing through the forward-only seek engine", () => {
+      const runID = "broadcast-timeline-backward-seek-1";
+      const jumps: number[] = [];
+      document.addEventListener("ai-league-replay-jump-turn", (domEvent) => {
+        jumps.push(
+          (domEvent as CustomEvent<{ turnNumber: number }>).detail.turnNumber,
+        );
+      });
+      // jsdom logs (never throws on) an unimplemented "navigation to
+      // another Document" when `href` is set on the real Location object,
+      // same as `window.location.reload()` — same convention
+      // `withMockedLocation` (shared below) and the Reset test both use.
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+        replayMaxTurn: 1_000,
+        // Past the "spawn" marker below (turn 5) — a viewer who let the
+        // match play (or catch up) past turn 5 and then clicks that
+        // marker to rewatch the opening is exactly QA's repro.
+        currentTurn: 999,
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events: [
+            event(
+              1,
+              5,
+              "spawn",
+              "info",
+              "a1",
+              "Atlas",
+              null,
+              null,
+              "Atlas enters the match.",
+            ),
+          ],
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+
+      const spawnMarker = document.querySelector<HTMLButtonElement>(
+        '.broadcast-timeline [data-kind="spawn"]',
+      );
+      expect(spawnMarker).not.toBeNull();
+
+      withMockedLocation(runID, (locationMock) => {
+        spawnMarker?.click();
+
+        // Never the dead-end forward-only dispatch a viewer would read as
+        // "the marker doesn't work".
+        expect(jumps).toEqual([]);
+        expect(locationMock.href).toContain("turn=5");
+        expect(trackMock).toHaveBeenCalledWith("timeline_jump", {
+          matchId: runID,
+        });
+      });
+    });
+
+    it("preserves the timeline panel's drawer-tab wrapper identity across a per-tick patch (P1 sweep fix: the desktop position:fixed placement rule is keyed off data-tab-id=\"timeline\", which a raw renderMatchTimeline() rebuild doesn't carry on its own)", () => {
+      const runID = "broadcast-timeline-patch-1";
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+      });
+
+      const timelineBefore = document.querySelector(".broadcast-timeline");
+      expect(timelineBefore).not.toBeNull();
+      expect(timelineBefore?.classList.contains("broadcast-drawer-panel")).toBe(
+        true,
+      );
+      expect(timelineBefore?.getAttribute("data-tab-id")).toBe("timeline");
+
+      // `patchVolatile`'s own `nextTimelineKey = String(turnNumber)`
+      // rebuilds the timeline on virtually every tick (unlike War Room/
+      // Analyst, which patch their list in place on the common forward
+      // path) — this is never the same node afterward, so what must
+      // survive is its wrapper IDENTITY, not its node reference.
+      frame(50, [
+        { playerID: "p1", smallID: 1, username: "Atlas", tilesOwned: 10 },
+      ]);
+
+      const timelineAfter = document.querySelector(".broadcast-timeline");
+      expect(timelineAfter).not.toBeNull();
+      expect(timelineAfter).not.toBe(timelineBefore);
+      expect(timelineAfter?.classList.contains("broadcast-drawer-panel")).toBe(
+        true,
+      );
+      expect(timelineAfter?.getAttribute("data-tab-id")).toBe("timeline");
+      expect(timelineAfter?.getAttribute("role")).toBe("tabpanel");
+      expect(timelineAfter?.id).toBe("broadcast-drawer-panel-timeline");
     });
 
     it("removes the broadcast drawer and lower-third host on dispose", () => {
@@ -1941,17 +2657,21 @@ describe("AiLeagueReplayOverlay", () => {
       });
       expect(document.querySelector(".broadcast-war-room")).not.toBeNull();
       expect(document.querySelector(".broadcast-timeline")).not.toBeNull();
-      expect(document.getElementById("ai-league-lower-third-host")).not.toBeNull();
+      expect(
+        document.getElementById("ai-league-lower-third-host"),
+      ).not.toBeNull();
       overlay.dispose();
-      expect(document.querySelector("[data-ai-league-broadcast-drawer]")).toBeNull();
+      expect(
+        document.querySelector("[data-ai-league-broadcast-drawer]"),
+      ).toBeNull();
       expect(document.querySelector(".broadcast-war-room")).toBeNull();
       expect(document.querySelector(".broadcast-timeline")).toBeNull();
     });
 
-    it("dispatches BROADCAST_RAIL_FOLLOW_EVENT with the clicked seat's player name", () => {
+    it("dispatches BROADCAST_RAIL_LOCATE_EVENT with the clicked seat's player name", () => {
       const runID = "broadcast-follow-1";
       const follows: Array<string | null> = [];
-      document.addEventListener(BROADCAST_RAIL_FOLLOW_EVENT, (domEvent) => {
+      document.addEventListener(BROADCAST_RAIL_LOCATE_EVENT, (domEvent) => {
         follows.push(
           (domEvent as CustomEvent<{ playerName: string }>).detail.playerName,
         );
@@ -1992,7 +2712,7 @@ describe("AiLeagueReplayOverlay", () => {
       expect(follows).toEqual(["Atlas"]);
     });
 
-    it("reflects BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT as the rail's followed-seat highlight", () => {
+    it("never renders a followed/pressed-highlight state on the rail — camera-locate is one-shot, never persisted", () => {
       const runID = "broadcast-followed-state-1";
       mountAiLeagueReplayOverlay({
         runID,
@@ -2030,35 +2750,49 @@ describe("AiLeagueReplayOverlay", () => {
         },
       });
       frame(600, [
-        { playerID: "p1", smallID: 1, username: "Atlas", tilesOwned: 60 },
-        { playerID: "p2", smallID: 2, username: "Blitz", tilesOwned: 40 },
+        {
+          playerID: "p1",
+          smallID: 1,
+          username: "Atlas",
+          tilesOwned: 60,
+          clientID: "client-atlas",
+        },
+        {
+          playerID: "p2",
+          smallID: 2,
+          username: "Blitz",
+          tilesOwned: 40,
+          clientID: "client-blitz",
+        },
       ]);
-      const entriesBefore = document.querySelectorAll(".broadcast-rail-entry");
-      expect(
-        [...entriesBefore].every(
-          (entry) => entry.getAttribute("data-followed") === "false",
-        ),
-      ).toBe(true);
-
-      document.dispatchEvent(
-        new CustomEvent(BROADCAST_RAIL_FOLLOWED_CHANGE_EVENT, {
-          detail: { playerName: "Blitz" },
-        }),
-      );
-
-      const atlasEntry = [
-        ...document.querySelectorAll(".broadcast-rail-entry"),
-      ].find((entry) => entry.textContent?.includes("Atlas"));
       const blitzEntry = [
         ...document.querySelectorAll(".broadcast-rail-entry"),
       ].find((entry) => entry.textContent?.includes("Blitz"));
-      expect(atlasEntry?.getAttribute("data-followed")).toBe("false");
-      expect(blitzEntry?.getAttribute("data-followed")).toBe("true");
+      // No persisted "followed" concept at all: no data-followed attribute,
+      // no aria-pressed toggle state on the locate button.
+      expect(blitzEntry?.hasAttribute("data-followed")).toBe(false);
       expect(
         blitzEntry
           ?.querySelector(".broadcast-rail-select")
-          ?.getAttribute("aria-pressed"),
-      ).toBe("true");
+          ?.hasAttribute("aria-pressed"),
+      ).toBe(false);
+
+      const seat = blitzEntry?.querySelector<HTMLButtonElement>(
+        ".broadcast-rail-select",
+      );
+      seat?.click();
+
+      // Clicking dispatched a one-shot locate event, but left no rail DOM
+      // trace of "who was clicked" behind — still no data-followed/
+      // aria-pressed anywhere, on either entry, after the click.
+      for (const entry of document.querySelectorAll(".broadcast-rail-entry")) {
+        expect(entry.hasAttribute("data-followed")).toBe(false);
+        expect(
+          entry
+            .querySelector(".broadcast-rail-select")
+            ?.hasAttribute("aria-pressed"),
+        ).toBe(false);
+      }
     });
 
     it("switches the active drawer tab and marks only that panel data-tab-active", () => {
@@ -2068,9 +2802,12 @@ describe("AiLeagueReplayOverlay", () => {
         artifactBasePath: `/ai-league-runs/${runID}`,
         decisions: [],
       });
-      const drawer = document.querySelector("[data-ai-league-broadcast-drawer]");
+      const drawer = document.querySelector(
+        "[data-ai-league-broadcast-drawer]",
+      );
       expect(
-        drawer?.querySelector('.broadcast-drawer-panel[data-tab-id="agents"]')
+        drawer
+          ?.querySelector('.broadcast-drawer-panel[data-tab-id="agents"]')
           ?.getAttribute("data-tab-active"),
       ).toBe("true");
       // "events" relocates to the document.body-level portal at a desktop
@@ -2083,11 +2820,14 @@ describe("AiLeagueReplayOverlay", () => {
       ).toBe("false");
 
       drawer
-        ?.querySelector<HTMLButtonElement>('.broadcast-drawer-tab[data-tab-id="events"]')
+        ?.querySelector<HTMLButtonElement>(
+          '.broadcast-drawer-tab[data-tab-id="events"]',
+        )
         ?.click();
 
       expect(
-        drawer?.querySelector('.broadcast-drawer-panel[data-tab-id="agents"]')
+        drawer
+          ?.querySelector('.broadcast-drawer-panel[data-tab-id="agents"]')
           ?.getAttribute("data-tab-active"),
       ).toBe("false");
       expect(
@@ -2113,18 +2853,26 @@ describe("AiLeagueReplayOverlay", () => {
         "[data-ai-league-analyst-toggle]",
       );
       expect(toggle).not.toBeNull();
-      expect(document.body.classList.contains("ai-league-analyst-mode")).toBe(false);
+      expect(document.body.classList.contains("ai-league-analyst-mode")).toBe(
+        false,
+      );
       expect(toggle?.getAttribute("aria-pressed")).toBe("false");
       expect(
-        document.querySelector('.broadcast-drawer-panel[data-tab-id="analysis"].broadcast-analyst'),
+        document.querySelector(
+          '.broadcast-drawer-panel[data-tab-id="analysis"].broadcast-analyst',
+        ),
       ).not.toBeNull();
 
       toggle?.click();
-      expect(document.body.classList.contains("ai-league-analyst-mode")).toBe(true);
+      expect(document.body.classList.contains("ai-league-analyst-mode")).toBe(
+        true,
+      );
       expect(toggle?.getAttribute("aria-pressed")).toBe("true");
 
       toggle?.click();
-      expect(document.body.classList.contains("ai-league-analyst-mode")).toBe(false);
+      expect(document.body.classList.contains("ai-league-analyst-mode")).toBe(
+        false,
+      );
       expect(toggle?.getAttribute("aria-pressed")).toBe("false");
     });
 
@@ -2159,7 +2907,17 @@ describe("AiLeagueReplayOverlay", () => {
           agents: [],
           relationships: [],
           events: [
-            event(1, 999, "elimination", "war", "a2", "Blitz", null, null, "Blitz is eliminated."),
+            event(
+              1,
+              999,
+              "elimination",
+              "war",
+              "a2",
+              "Blitz",
+              null,
+              null,
+              "Blitz is eliminated.",
+            ),
           ],
           communicationThreads: [],
           timelineBuckets: [],
@@ -2171,7 +2929,6 @@ describe("AiLeagueReplayOverlay", () => {
       expect(pulse?.getAttribute("data-kind")).toBe("elimination");
       expect(pulse?.getAttribute("role")).toBe("status");
     });
-
 
     it("windows the War Room feed to the viewer's own playhead — a future event never renders until playback reaches its turn (spec item 2)", () => {
       const runID = "broadcast-windowing-1";
@@ -2187,8 +2944,28 @@ describe("AiLeagueReplayOverlay", () => {
           agents: [],
           relationships: [],
           events: [
-            event(1, 10, "elimination", "war", "a1", "Atlas", null, null, "Atlas is eliminated."),
-            event(2, 500, "elimination", "war", "a2", "Blitz", null, null, "Blitz is eliminated."),
+            event(
+              1,
+              10,
+              "elimination",
+              "war",
+              "a1",
+              "Atlas",
+              null,
+              null,
+              "Atlas is eliminated.",
+            ),
+            event(
+              2,
+              500,
+              "elimination",
+              "war",
+              "a2",
+              "Blitz",
+              null,
+              null,
+              "Blitz is eliminated.",
+            ),
           ],
           communicationThreads: [],
           timelineBuckets: [],
@@ -2197,19 +2974,141 @@ describe("AiLeagueReplayOverlay", () => {
 
       const warRoom = document.querySelector(".broadcast-war-room");
       // At turn 0, NEITHER curated event (turn 10, turn 500) has happened yet.
-      expect(warRoom?.querySelectorAll(".broadcast-war-room-item")).toHaveLength(0);
+      expect(
+        warRoom?.querySelectorAll(".broadcast-war-room-item"),
+      ).toHaveLength(0);
       expect(warRoom?.textContent).toContain("broadcast.war_room_empty");
 
       // Advancing to turn 10 must reveal exactly the turn-10 event — never
       // the turn-500 one, which the viewer has not reached yet.
       frame(10, []);
-      expect(document.querySelectorAll(".broadcast-war-room-item")).toHaveLength(1);
+      expect(
+        document.querySelectorAll(".broadcast-war-room-item"),
+      ).toHaveLength(1);
 
       // Only once the playhead reaches turn 500 does the second event appear.
       frame(499, []);
-      expect(document.querySelectorAll(".broadcast-war-room-item")).toHaveLength(1);
+      expect(
+        document.querySelectorAll(".broadcast-war-room-item"),
+      ).toHaveLength(1);
       frame(500, []);
-      expect(document.querySelectorAll(".broadcast-war-room-item")).toHaveLength(2);
+      expect(
+        document.querySelectorAll(".broadcast-war-room-item"),
+      ).toHaveLength(2);
+    });
+
+    // P0 fix (2026-08-03): a nuke launch (importance 95 server-side, the
+    // single highest-importance event kind this pipeline emits) never
+    // surfaced in the curated War Room feed at all -- only in the much
+    // less prominent bottom timeline strip.
+    it("includes a nuke launch in the curated War Room feed, tagged with the nuke kind (spec: no Tier-1 event category ever missing)", () => {
+      const runID = "broadcast-nuke-inclusion-1";
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+        currentTurn: 900,
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events: [
+            event(
+              1,
+              900,
+              "nuke",
+              "threat",
+              "a1",
+              "Atlas",
+              "a2",
+              "Blitz",
+              "Atlas escalates nuclear pressure against Blitz.",
+            ),
+          ],
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+
+      const warRoom = document.querySelector(".broadcast-war-room");
+      const items = warRoom?.querySelectorAll(".broadcast-war-room-item");
+      expect(items).toHaveLength(1);
+      expect(items?.[0]?.getAttribute("data-kind")).toBe("nuke");
+    });
+
+    // P0 fix (2026-08-03): the "Anonymous Names" setting used to only ever
+    // apply to content rendered AFTER the toggle -- everything already
+    // painted (the political-radio talks transcript included) stayed
+    // frozen with real names until some unrelated re-render happened to
+    // occur. Toggling mid-session must re-render already-displayed content
+    // immediately. Uses the talks transcript (not the War Room feed)
+    // because its author/thread-name text is raw HTML
+    // (`aiLeagueSpectatorDisplayName` / `agentName`), never routed through
+    // `translateText` -- `translateText` echoes the untranslated key in
+    // this test environment (see the very first test in this file), which
+    // would swallow the interpolated {actor} name the War Room headline
+    // carries and make this assertion meaningless either way.
+    it("re-renders the already-displayed talks transcript the instant Anonymous Names toggles mid-session", () => {
+      const runID = "broadcast-anonymous-names-live-toggle-1";
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [],
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [
+            {
+              agentID: "a1",
+              playerID: "p1",
+              username: "Atlas",
+              profile: "diplomatic",
+              colorIndex: 0,
+            },
+          ],
+          relationships: [],
+          events: [],
+          communicationThreads: [
+            {
+              id: "thread-1",
+              agentIDs: ["a1"],
+              title: "Border talk",
+              latestTurn: 5,
+              tone: "chat",
+              messages: [
+                event(
+                  1,
+                  5,
+                  "chat",
+                  "chat",
+                  "a1",
+                  "Atlas",
+                  null,
+                  null,
+                  "Hold the line.",
+                ),
+              ],
+            },
+          ],
+          timelineBuckets: [],
+        },
+      });
+
+      const talksBefore = document.querySelector("[data-spectator-comms]");
+      expect(talksBefore?.textContent).toContain("Atlas");
+
+      new UserSettings().toggleRandomName();
+
+      const talksAfter = document.querySelector("[data-spectator-comms]");
+      expect(talksAfter?.textContent).not.toContain("Atlas");
+      expect(talksAfter?.textContent).toMatch(/Agent \d+/);
+
+      // Toggling back OFF must restore the real name just as immediately.
+      new UserSettings().toggleRandomName();
+      expect(
+        document.querySelector("[data-spectator-comms]")?.textContent,
+      ).toContain("Atlas");
     });
 
     // Raised timeout (matches package.json's own test:coverage/test:e2e
@@ -2351,9 +3250,7 @@ describe("AiLeagueReplayOverlay", () => {
         );
 
       frame(1);
-      const firstRowBefore = document.querySelector(
-        ".broadcast-war-room-item",
-      );
+      const firstRowBefore = document.querySelector(".broadcast-war-room-item");
       expect(firstRowBefore).not.toBeNull();
       const listBefore = document.querySelector(".broadcast-war-room-list");
 
@@ -2379,13 +3276,19 @@ describe("AiLeagueReplayOverlay", () => {
       // The retained row's own interactive chrome is still live — expand it
       // and jump, exactly like a freshly-built row would (spec item 2:
       // windowing/incrementality must never strip per-row functionality).
+      // Turn 2 of the pass-10 CHECK item: turn 1 is well behind the
+      // current playhead (turn 40) — navigates with `?turn=` instead of
+      // dispatching the forward-only event.
       firstRowBefore
         ?.querySelector<HTMLButtonElement>(".broadcast-war-room-summary")
         ?.click();
-      firstRowBefore
-        ?.querySelector<HTMLButtonElement>(".broadcast-war-room-jump")
-        ?.click();
-      expect(jumps).toEqual([1]);
+      withMockedLocation(runID, (locationMock) => {
+        firstRowBefore
+          ?.querySelector<HTMLButtonElement>(".broadcast-war-room-jump")
+          ?.click();
+        expect(jumps).toEqual([]);
+        expect(locationMock.href).toContain("turn=1");
+      });
     });
 
     it("auto-follows the newest ticker entry when the viewer is at the tail, and preserves (height-compensates) scroll position when they've scrolled up to read older entries, across the window's incremental prune (spec item 3)", () => {
@@ -2580,7 +3483,9 @@ describe("AiLeagueReplayOverlay", () => {
       // The row exactly one index before the window start (139) must never
       // have been mounted at all.
       expect(
-        document.querySelector('.broadcast-war-room-item[data-kind="betrayal"]'),
+        document.querySelector(
+          '.broadcast-war-room-item[data-kind="betrayal"]',
+        ),
       ).toBeNull();
       // The row exactly at the window start (140, i.e. eligibleCount(200) -
       // windowSize(60)) is the OLDEST mounted row — first in DOM order
@@ -2721,9 +3626,7 @@ describe("AiLeagueReplayOverlay", () => {
       expect(
         document.querySelectorAll(".broadcast-war-room-item"),
       ).toHaveLength(50);
-      expect(
-        document.querySelector(".broadcast-war-room-earlier"),
-      ).toBeNull();
+      expect(document.querySelector(".broadcast-war-room-earlier")).toBeNull();
 
       // Then a large forward seek again, right back to all 200 eligible —
       // the SAME bounded-append fix must still hold after the backward
@@ -2739,7 +3642,9 @@ describe("AiLeagueReplayOverlay", () => {
       );
       expect(items).toHaveLength(60);
       expect(
-        document.querySelector('.broadcast-war-room-item[data-kind="betrayal"]'),
+        document.querySelector(
+          '.broadcast-war-room-item[data-kind="betrayal"]',
+        ),
       ).toBeNull();
       const list = document.querySelector(".broadcast-war-room-list");
       const firstItem = list?.querySelector(".broadcast-war-room-item");
@@ -2816,15 +3721,70 @@ describe("AiLeagueReplayOverlay", () => {
       ).toBe(0);
     });
 
+    // P0 fix (2026-08-03): the Analyst decisions table's Agent column
+    // (`AnalystDecisionRow.playerName`) and the Analyst event log
+    // (`AnalystEventRow.actorName`/`targetName`/`message`) passed real
+    // agent identity straight through from `AiLeagueDecisionLogEntry`/
+    // `AiLeagueSpectatorEvent` -- every other consumer of this same raw
+    // data (curatedWarRoomEvents, matchTimelineEventMarkers,
+    // communicationThreadHtml) already resolves names through
+    // `aiLeagueSpectatorDisplayName`/`aiLeagueSpectatorText`, so this was
+    // a leak even with Anonymous Names on.
+    it("anonymizes the Analyst decisions table's Agent column and the Analyst event log when Anonymous Names is on", () => {
+      const runID = "broadcast-analyst-anonymize-1";
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        decisions: [
+          { ...decisionFixture(1), username: "Atlas", turnNumber: 5 },
+        ],
+        currentTurn: 5,
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events: [
+            event(
+              1,
+              5,
+              "elimination",
+              "war",
+              "a1",
+              "Atlas",
+              null,
+              null,
+              "Atlas fell to overwhelming force.",
+            ),
+          ],
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+
+      new UserSettings().toggleRandomName();
+
+      document
+        .querySelector<HTMLButtonElement>("[data-ai-league-analyst-toggle]")
+        ?.click();
+
+      const decisionsRow = document.querySelector(
+        ".broadcast-analyst-decisions-row",
+      );
+      expect(decisionsRow?.textContent).not.toContain("Atlas");
+      expect(decisionsRow?.textContent).toMatch(/Agent \d+/);
+
+      const eventsRow = document.querySelector(".broadcast-analyst-events-row");
+      expect(eventsRow?.textContent).not.toContain("Atlas");
+      expect(eventsRow?.textContent).toMatch(/Agent \d+/);
+    });
+
     it("caps both Analyst sub-lists' DOM node count under a large fixture, backfills each independently via show-earlier, and never renders past the playhead (spec items 1-3 follow-up, P2 review)", () => {
       const runID = "broadcast-analyst-window-cap-1";
-      const decisions = Array.from(
-        { length: 200 },
-        (_, index) => ({
-          ...decisionFixture(index + 1),
-          turnNumber: index + 1,
-        }),
-      );
+      const decisions = Array.from({ length: 200 }, (_, index) => ({
+        ...decisionFixture(index + 1),
+        turnNumber: index + 1,
+      }));
       decisions.push({
         ...decisionFixture(9999),
         turnNumber: 2500,
@@ -3186,13 +4146,11 @@ describe("AiLeagueReplayOverlay", () => {
       // `input.decisions` unfiltered, so "nuke" would have been visible
       // at turn 0 even though the match hadn't reached it yet).
       function chartRowCount(label: string): string | null {
-        const rows = document.querySelectorAll(
-          ".broadcast-analyst-chart-row",
-        );
+        const rows = document.querySelectorAll(".broadcast-analyst-chart-row");
         for (const row of rows) {
           if (
-            row.querySelector(".broadcast-analyst-chart-label")
-              ?.textContent === label
+            row.querySelector(".broadcast-analyst-chart-label")?.textContent ===
+            label
           ) {
             return (
               row.querySelector(".broadcast-analyst-chart-count")
@@ -3297,12 +4255,10 @@ describe("AiLeagueReplayOverlay", () => {
       );
       expect(rows).toHaveLength(1);
       expect(
-        rows[0]?.querySelector(".broadcast-analyst-chart-label")
-          ?.textContent,
+        rows[0]?.querySelector(".broadcast-analyst-chart-label")?.textContent,
       ).toBe("build");
       expect(
-        rows[0]?.querySelector(".broadcast-analyst-chart-count")
-          ?.textContent,
+        rows[0]?.querySelector(".broadcast-analyst-chart-count")?.textContent,
       ).toBe("30");
     });
 
@@ -3319,7 +4275,17 @@ describe("AiLeagueReplayOverlay", () => {
           agents: [],
           relationships: [],
           events: [
-            event(1, 300, "alliance_break", "betrayal", "a2", "Blitz", "a1", "Atlas", "Blitz says the pact is over."),
+            event(
+              1,
+              300,
+              "alliance_break",
+              "betrayal",
+              "a2",
+              "Blitz",
+              "a1",
+              "Atlas",
+              "Blitz says the pact is over.",
+            ),
           ],
           communicationThreads: [],
           timelineBuckets: [],
@@ -3334,7 +4300,9 @@ describe("AiLeagueReplayOverlay", () => {
       // Content-free tick: neither the real kind nor its label reach the DOM
       // at all while the marker's own turn is still ahead of the playhead.
       expect(m?.dataset.kind).toBe("upcoming");
-      expect(m?.getAttribute("title")).toBe("broadcast.timeline_marker_upcoming");
+      expect(m?.getAttribute("title")).toBe(
+        "broadcast.timeline_marker_upcoming",
+      );
 
       frame(300, []);
       m = betrayalOrUpcoming();
@@ -3347,164 +4315,6 @@ describe("AiLeagueReplayOverlay", () => {
     });
   });
 
-  describe("Director Cut (Stage 5 player integration)", () => {
-    function directorCutPlanFixture(runID: string) {
-      return {
-        schemaVersion: 1,
-        reportKind: "director-cut-plan",
-        runID,
-        matchID: runID,
-        generatedAt: "2026-07-31T00:00:00.000Z",
-        totalTurns: 999,
-        segments: [
-          {
-            startTurn: 0,
-            endTurn: 199,
-            speed: "fast",
-            eventReason: "quiet_interval",
-            importance: 0,
-            participatingAgents: [],
-          },
-          {
-            startTurn: 200,
-            endTurn: 999,
-            speed: "slow",
-            eventReason: "nuke",
-            importance: 95,
-            participatingAgents: ["Auri"],
-          },
-        ],
-        importantTurnCount: 800,
-        estimatedDurationSeconds: 300,
-        degraded: false,
-        notes: [],
-      };
-    }
-
-    function frame(tick: number): void {
-      document.dispatchEvent(
-        new CustomEvent("ai-league-replay-frame", {
-          detail: { tick, turnNumber: tick, players: [] },
-        }),
-      );
-    }
-
-    it("renders no toggle at all when no valid Director Cut plan is present", () => {
-      const runID = "director-cut-none-1";
-      mountAiLeagueReplayOverlay({
-        runID,
-        artifactBasePath: `/ai-league-runs/${runID}`,
-        decisions: [],
-      });
-      expect(
-        document.querySelector("[data-ai-league-director-cut-toggle]"),
-      ).toBeNull();
-    });
-
-    it("mounts enabled by default once a valid plan arrives via hydrate, and drives replay speed as the turn crosses segments", () => {
-      const runID = "director-cut-toggle-1";
-      const onReplaySpeedChange = vi.fn();
-      const overlay = mountAiLeagueReplayOverlay({
-        runID,
-        artifactBasePath: `/ai-league-runs/${runID}`,
-        decisions: [],
-        onReplaySpeedChange,
-      });
-      overlay.hydrate({
-        directorCutPlan: directorCutPlanFixture(runID),
-      });
-
-      const toggle = document.querySelector<HTMLButtonElement>(
-        "[data-ai-league-director-cut-toggle]",
-      );
-      expect(toggle).not.toBeNull();
-      expect(toggle?.getAttribute("aria-pressed")).toBe("true");
-      // Mounting applies the opening segment's speed immediately.
-      expect(onReplaySpeedChange).toHaveBeenCalledWith(0); // fastest
-      onReplaySpeedChange.mockClear();
-
-      frame(200);
-      expect(onReplaySpeedChange).toHaveBeenCalledWith(2); // slow
-    });
-
-    it("hands control back to Full Replay when toggled off, and never emits another speed change from the plan", () => {
-      const runID = "director-cut-toggle-2";
-      const onReplaySpeedChange = vi.fn();
-      const overlay = mountAiLeagueReplayOverlay({
-        runID,
-        artifactBasePath: `/ai-league-runs/${runID}`,
-        decisions: [],
-        onReplaySpeedChange,
-      });
-      overlay.hydrate({
-        directorCutPlan: directorCutPlanFixture(runID),
-      });
-      const toggle = document.querySelector<HTMLButtonElement>(
-        "[data-ai-league-director-cut-toggle]",
-      );
-      onReplaySpeedChange.mockClear();
-
-      toggle?.click();
-      expect(toggle?.getAttribute("aria-pressed")).toBe("false");
-      expect(onReplaySpeedChange).toHaveBeenCalledWith(1); // normal
-
-      onReplaySpeedChange.mockClear();
-      frame(200);
-      expect(onReplaySpeedChange).not.toHaveBeenCalled();
-    });
-
-    it("applies the segment covering the current turn — not the opening one — when the plan hydrates after playback already advanced", () => {
-      // Late plan hydration: `director-cut-plan.json` loads asynchronously,
-      // same timing as spectator telemetry, so playback can already be
-      // well past turn 0 by the time it resolves.
-      const runID = "director-cut-late-hydrate";
-      const onReplaySpeedChange = vi.fn();
-      const overlay = mountAiLeagueReplayOverlay({
-        runID,
-        artifactBasePath: `/ai-league-runs/${runID}`,
-        decisions: [],
-        onReplaySpeedChange,
-      });
-      frame(200);
-      onReplaySpeedChange.mockClear();
-      overlay.hydrate({
-        directorCutPlan: directorCutPlanFixture(runID),
-      });
-
-      // Turn 200 is the plan's "slow" segment; a hardcoded-to-0 bug would
-      // apply "fast" (turn 0's segment) instead.
-      expect(onReplaySpeedChange).toHaveBeenCalledExactlyOnceWith(2); // slow
-    });
-
-    it("resyncs to the CURRENT turn's segment when toggled back on mid-match, not the opening segment", () => {
-      const runID = "director-cut-toggle-resync";
-      const onReplaySpeedChange = vi.fn();
-      const overlay = mountAiLeagueReplayOverlay({
-        runID,
-        artifactBasePath: `/ai-league-runs/${runID}`,
-        decisions: [],
-        onReplaySpeedChange,
-      });
-      overlay.hydrate({
-        directorCutPlan: directorCutPlanFixture(runID),
-      });
-      frame(200);
-      expect(onReplaySpeedChange).toHaveBeenCalledWith(2); // slow
-
-      const toggle = document.querySelector<HTMLButtonElement>(
-        "[data-ai-league-director-cut-toggle]",
-      );
-      toggle?.click(); // off
-      expect(onReplaySpeedChange).toHaveBeenCalledWith(1); // normal
-      onReplaySpeedChange.mockClear();
-
-      toggle?.click(); // back on, still at turn 200
-      // The masking bug: re-enabling always reapplied the opening ("fast")
-      // segment, self-correcting only at the next frame tick boundary.
-      expect(onReplaySpeedChange).toHaveBeenCalledExactlyOnceWith(2); // slow
-    });
-  });
-
   describe("Match-state strip (Season Zero broadcast Phase 5)", () => {
     function agentSample(
       username: string,
@@ -3513,7 +4323,16 @@ describe("AiLeagueReplayOverlay", () => {
       rank: number,
       alive = true,
     ) {
-      return { agentID: playerID, playerID, username, alive, tilesOwned: Math.round(territoryShare * 1000), troops: 10, territoryShare, rank };
+      return {
+        agentID: playerID,
+        playerID,
+        username,
+        alive,
+        tilesOwned: Math.round(territoryShare * 1000),
+        troops: 10,
+        territoryShare,
+        rank,
+      };
     }
 
     function matchStateSeriesFixture(runID: string) {
@@ -3706,46 +4525,7 @@ describe("AiLeagueReplayOverlay", () => {
       ).toBeNull();
     });
 
-    it("prefers the Director Cut active segment label over the sample's own phase when Director Cut mode is on", () => {
-      const runID = "state-strip-phase-director-cut";
-      const overlay = mountAiLeagueReplayOverlay({
-        runID,
-        artifactBasePath: `/ai-league-runs/${runID}`,
-        decisions: [],
-      });
-      overlay.hydrate({
-        matchStateSeries: matchStateSeriesFixture(runID),
-        directorCutPlan: {
-          schemaVersion: 1,
-          reportKind: "director-cut-plan",
-          runID,
-          matchID: runID,
-          generatedAt: "2026-08-01T00:00:00.000Z",
-          totalTurns: 1000,
-          segments: [
-            {
-              startTurn: 0,
-              endTurn: 999,
-              speed: "normal",
-              eventReason: "First strike",
-              importance: 50,
-              participatingAgents: [],
-            },
-          ],
-          importantTurnCount: 1,
-          estimatedDurationSeconds: 60,
-          degraded: false,
-          notes: [],
-        },
-      });
-      // Enabled by default for Full Replay (spec item 3).
-      frame(200);
-      expect(
-        document.querySelector(".broadcast-state-strip")?.textContent,
-      ).toContain("First strike");
-    });
-
-    it("falls back to the sample's own translated phase when Director Cut mode is off", () => {
+    it("uses the sample's own translated phase as the strip's currentPhaseLabel", () => {
       const runID = "state-strip-phase-fallback";
       const overlay = mountAiLeagueReplayOverlay({
         runID,
@@ -3753,7 +4533,7 @@ describe("AiLeagueReplayOverlay", () => {
         decisions: [],
       });
       overlay.hydrate({ matchStateSeries: matchStateSeriesFixture(runID) });
-      frame(200); // sample at turn 200 has phase "active"; no Director Cut plan hydrated
+      frame(200); // sample at turn 200 has phase "active"
       expect(
         document.querySelector(".broadcast-state-strip")?.textContent,
       ).toContain("broadcast.phase_active");
@@ -4087,7 +4867,43 @@ function readModelResponse(agents: PublicAgent[]): Response {
   );
 }
 
-describe("Phase 7 analytics: Director Cut, timeline jump, watch-progress milestones", () => {
+/**
+ * Shared mock for the backward-jump-to-turn navigation fix (turn 2 of the
+ * pass-10 CHECK item): jsdom has no real navigation, so — same convention
+ * `WinModal.test.ts` already uses for its own `location.href` assertions —
+ * this swaps in a plain mock object for the duration of `fn`, then always
+ * restores the real `window.location` afterward (even on a thrown
+ * assertion), so a failure in one test can never leak a broken `location`
+ * into every test that runs after it in this shared file. `href`'s origin/
+ * pathname stays a real, parseable URL so `new URL(window.location.href)`
+ * inside `dispatchJumpToTurn`/`mountReplayJumpControls` never throws.
+ */
+function withMockedLocation<T>(
+  runID: string,
+  fn: (locationMock: { href: string }) => T,
+): T {
+  const locationMock = {
+    href: `https://beta.proxywar.xyz/ai-league-replay/${runID}`,
+    pathname: `/ai-league-replay/${runID}`,
+  };
+  const originalLocation = window.location;
+  Object.defineProperty(window, "location", {
+    value: locationMock,
+    writable: true,
+    configurable: true,
+  });
+  try {
+    return fn(locationMock);
+  } finally {
+    Object.defineProperty(window, "location", {
+      value: originalLocation,
+      writable: true,
+      configurable: true,
+    });
+  }
+}
+
+describe("Phase 7 analytics: timeline jump, watch-progress milestones", () => {
   beforeEach(() => {
     Object.defineProperty(window, "innerWidth", {
       configurable: true,
@@ -4106,74 +4922,6 @@ describe("Phase 7 analytics: Director Cut, timeline jump, watch-progress milesto
     vi.useRealTimers();
   });
 
-  function directorCutPlanFixture(runID: string) {
-    return {
-      schemaVersion: 1,
-      reportKind: "director-cut-plan",
-      runID,
-      matchID: runID,
-      generatedAt: "2026-07-31T00:00:00.000Z",
-      totalTurns: 999,
-      segments: [
-        {
-          startTurn: 0,
-          endTurn: 999,
-          speed: "fast",
-          eventReason: "quiet_interval",
-          importance: 0,
-          participatingAgents: [],
-        },
-      ],
-      importantTurnCount: 800,
-      estimatedDurationSeconds: 300,
-      degraded: false,
-      notes: [],
-    };
-  }
-
-  it("tracks director_cut_started once when the plan mounts enabled by default", () => {
-    const runID = "analytics-dc-mount-1";
-    const overlay = mountAiLeagueReplayOverlay({
-      runID,
-      artifactBasePath: `/ai-league-runs/${runID}`,
-      decisions: [],
-    });
-    expect(trackMock).not.toHaveBeenCalledWith(
-      "director_cut_started",
-      expect.anything(),
-    );
-    overlay.hydrate({ directorCutPlan: directorCutPlanFixture(runID) });
-    expect(trackMock).toHaveBeenCalledExactlyOnceWith("director_cut_started", {
-      matchId: runID,
-      replayMode: "director_cut",
-    });
-  });
-
-  it("tracks director_cut_started again on an explicit toggle-on, never on toggle-off", () => {
-    const runID = "analytics-dc-toggle-1";
-    const overlay = mountAiLeagueReplayOverlay({
-      runID,
-      artifactBasePath: `/ai-league-runs/${runID}`,
-      decisions: [],
-    });
-    overlay.hydrate({ directorCutPlan: directorCutPlanFixture(runID) });
-    trackMock.mockClear();
-
-    const toggle = document.querySelector<HTMLButtonElement>(
-      "[data-ai-league-director-cut-toggle]",
-    );
-    toggle?.click(); // off
-    expect(trackMock).not.toHaveBeenCalledWith(
-      "director_cut_started",
-      expect.anything(),
-    );
-    toggle?.click(); // back on
-    expect(trackMock).toHaveBeenCalledExactlyOnceWith("director_cut_started", {
-      matchId: runID,
-      replayMode: "director_cut",
-    });
-  });
-
   it("tracks timeline_jump when the War Room feed's jump-to-turn action fires", () => {
     const runID = "analytics-timeline-jump-1";
     const jumps: number[] = [];
@@ -4187,7 +4935,12 @@ describe("Phase 7 analytics: Director Cut, timeline jump, watch-progress milesto
       artifactBasePath: `/ai-league-runs/${runID}`,
       currentTurn: 999,
       decisions: [
-        { ...decisionFixture(1), username: "Atlas", turnNumber: 10, planObjective: "expand" },
+        {
+          ...decisionFixture(1),
+          username: "Atlas",
+          turnNumber: 10,
+          planObjective: "expand",
+        },
         {
           ...decisionFixture(2),
           username: "Atlas",
@@ -4213,11 +4966,95 @@ describe("Phase 7 analytics: Director Cut, timeline jump, watch-progress milesto
       ?.querySelector<HTMLButtonElement>(".broadcast-war-room-summary")
       ?.click();
     trackMock.mockClear();
-    planChangeItem
-      ?.querySelector<HTMLButtonElement>(".broadcast-war-room-jump")
-      ?.click();
-    expect(jumps).toEqual([20]);
-    expect(trackMock).toHaveBeenCalledWith("timeline_jump", { matchId: runID });
+    // Turn 2 of the pass-10 CHECK item: turn 20 is well behind the
+    // current playhead (turn 999) — navigates with `?turn=` instead of
+    // dispatching the forward-only event. `analytics.track` still fires
+    // first, before the branch decides navigate vs dispatch.
+    withMockedLocation(runID, (locationMock) => {
+      planChangeItem
+        ?.querySelector<HTMLButtonElement>(".broadcast-war-room-jump")
+        ?.click();
+      expect(jumps).toEqual([]);
+      expect(locationMock.href).toContain("turn=20");
+      expect(trackMock).toHaveBeenCalledWith("timeline_jump", {
+        matchId: runID,
+      });
+    });
+  });
+
+  it("keeps a War Room jump at (or barely behind) the current playhead as an in-session dispatch — never a navigation (turn 2 of the pass-10 CHECK item)", () => {
+    // War Room only ever reveals items with turnNumber <= the current
+    // playhead (spec item 2: never spoil the future), so the freshest
+    // possible jump target a War Room item can point at is the CURRENT
+    // turn itself — this is that boundary case, standing in for "forward
+    // jump" in a feed that can never show one ahead of the playhead by
+    // construction. Guards against a future edit accidentally widening
+    // the backward-seek check (e.g. `turn <= knownTurn`) and turning
+    // every ordinary same-position jump into an unwanted reload.
+    const runID = "analytics-timeline-jump-forward-1";
+    const jumps: number[] = [];
+    document.addEventListener("ai-league-replay-jump-turn", (domEvent) => {
+      jumps.push(
+        (domEvent as CustomEvent<{ turnNumber: number }>).detail.turnNumber,
+      );
+    });
+    const reloadMock = vi.fn();
+    const originalLocation = window.location;
+    Object.defineProperty(window, "location", {
+      value: { reload: reloadMock, pathname: window.location.pathname },
+      writable: true,
+      configurable: true,
+    });
+    try {
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        currentTurn: 20,
+        decisions: [
+          {
+            ...decisionFixture(1),
+            username: "Atlas",
+            turnNumber: 10,
+            planObjective: "expand",
+          },
+          {
+            ...decisionFixture(2),
+            username: "Atlas",
+            turnNumber: 20,
+            planObjective: "consolidate",
+            reason: "Defend the core.",
+            planRationale: "Blitz is massing troops nearby.",
+          },
+        ],
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events: [],
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+      const planChangeItem = document.querySelector(
+        '[data-kind="plan_change"]',
+      );
+      expect(planChangeItem).not.toBeNull();
+      planChangeItem
+        ?.querySelector<HTMLButtonElement>(".broadcast-war-room-summary")
+        ?.click();
+      planChangeItem
+        ?.querySelector<HTMLButtonElement>(".broadcast-war-room-jump")
+        ?.click();
+      expect(jumps).toEqual([20]);
+      expect(reloadMock).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(window, "location", {
+        value: originalLocation,
+        writable: true,
+        configurable: true,
+      });
+    }
   });
 
   it("tracks watched_30s and watched_2m from ACCUMULATED ACTIVE playback seconds across steady frames, not wall-clock elapsed time", () => {
@@ -4263,7 +5100,7 @@ describe("Phase 7 analytics: Director Cut, timeline jump, watch-progress milesto
       frame(20 + i);
     }
     expect(callsFor("watched_2m")).toEqual([
-      ["watched_2m", { matchId: runID, replayMode: "full_replay" }],
+      ["watched_2m", { matchId: runID }],
     ]);
   });
 
@@ -4385,21 +5222,20 @@ describe("Phase 7 analytics: Director Cut, timeline jump, watch-progress milesto
     expect(callsFor("watched_50pct")).toHaveLength(0);
     frame(500);
     expect(callsFor("watched_50pct")).toEqual([
-      ["watched_50pct", { matchId: runID, replayMode: "full_replay" }],
+      ["watched_50pct", { matchId: runID }],
     ]);
     frame(501);
     expect(callsFor("watched_50pct")).toHaveLength(1);
   });
 
-  it("tracks completed exactly once when a terminal frame arrives, tagged with the active replay mode", () => {
+  it("tracks completed exactly once when a terminal frame arrives", () => {
     const runID = "analytics-watch-completed-1";
-    const overlay = mountAiLeagueReplayOverlay({
+    mountAiLeagueReplayOverlay({
       runID,
       artifactBasePath: `/ai-league-runs/${runID}`,
       decisions: [],
       replayMaxTurn: 1000,
     });
-    overlay.hydrate({ directorCutPlan: directorCutPlanFixture(runID) });
     trackMock.mockClear();
     document.dispatchEvent(
       new CustomEvent("ai-league-replay-frame", {
@@ -4408,7 +5244,6 @@ describe("Phase 7 analytics: Director Cut, timeline jump, watch-progress milesto
     );
     expect(trackMock).toHaveBeenCalledWith("completed", {
       matchId: runID,
-      replayMode: "director_cut",
     });
     const completedCallsForThisRun = trackMock.mock.calls.filter(
       ([name, context]) =>

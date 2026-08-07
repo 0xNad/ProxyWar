@@ -650,7 +650,7 @@ export function buildAgentLearningReport(
         "Find where the agent had repeated low-commitment probes against a weak bordered rival but failed to finish the target.",
         "Find where the agent had early legal expansion but spent the turn elsewhere.",
         "Find where the agent had safe City, Factory, or Port timing after stable expansion but kept expanding, pressuring, or holding.",
-        "Find where the agent had transport, warship, or patrol options but stalled in land loops or held.",
+        "Find where the agent had a safe Transport boat option but stalled in land loops or held.",
         "Find where the agent had legal high-value nuke targets but held, expanded, or picked lower-impact actions.",
         "Find where the agent had profile-specific social pressure, alliance, support, or communication available but looked personality-flat or stayed in a bland loop.",
         "Find where aggressive, defensive, diplomatic, and opportunistic profiles collapse into the same action mix or neutral-expansion loop.",
@@ -1672,7 +1672,7 @@ function navalControlHypotheses(input: {
   }
   if (input.recommendedCount === 0) {
     hypotheses.push(
-      "The benchmark did not expose safe transport, warship, or patrol windows, or naval legal actions are too sparse.",
+      "The benchmark did not expose safe Transport boat windows, or naval legal actions are too sparse.",
     );
   }
   if (input.missedCount > 0) {
@@ -1682,7 +1682,7 @@ function navalControlHypotheses(input: {
   }
   if (input.actedOnCount > 0 && input.missedCount > 0) {
     hypotheses.push(
-      "Naval control needs clearer stop conditions so boats and warships fire without creating transport loops.",
+      "Transport control needs clearer stop conditions so boats launch without creating transport loops.",
     );
   }
   if (hypotheses.length === 0) {
@@ -1700,13 +1700,13 @@ function navalControlExperiments(input: {
 }): string[] {
   if (input.recommendedCount === 0) {
     return [
-      "Run a targeted benchmark with a Port, legal Warship or patrol action, and at least one legal boat action.",
+      "Run a targeted benchmark with a Port and at least one legal Transport boat action.",
       "Confirm navalControl recommendedDecisionCount becomes non-zero before loosening thresholds.",
     ];
   }
   if (input.missedCount > 0) {
     return [
-      "A/B test a naval-control executor bias that prefers the best safe boat, warship, or move_warship LegalAction.id.",
+      "A/B test a naval-control executor bias that prefers the best safe Transport boat LegalAction.id.",
       "Reject the change if survival, average tile share, or finish-pressure act rate drops.",
     ];
   }

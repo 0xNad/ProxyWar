@@ -1,19 +1,21 @@
 import { describe, expect, it } from "vitest";
+import type { AgentRunFinalState } from "../../src/server/agents/AgentDecisionLogWriter";
+import { buildAgentDramaReport } from "../../src/server/agents/AgentDramaReport";
 import {
   buildAgentMatchRecap,
   compressTerminalEliminations,
   type AgentMatchRecapBeat,
 } from "../../src/server/agents/AgentMatchRecap";
 import { buildAgentSpectatorTelemetry } from "../../src/server/agents/AgentSpectatorTelemetry";
-import { buildAgentDramaReport } from "../../src/server/agents/AgentDramaReport";
-import type { AgentDecisionRecord, LegalActionKind } from "../../src/server/agents/AgentTypes";
-import type { AgentRunFinalState } from "../../src/server/agents/AgentDecisionLogWriter";
+import type {
+  AgentDecisionRecord,
+  LegalActionKind,
+} from "../../src/server/agents/AgentTypes";
 
-// Same synthetic-record/finalState convention `DirectorCutPlan.test.ts`
-// already established — `buildAgentSpectatorTelemetry` is the real,
-// unmocked producer of the `SpectatorEvent[]` `buildAgentMatchRecap`
-// consumes, so these fixtures exercise the actual event-derivation pipeline,
-// not a hand-rolled telemetry stub.
+// `buildAgentSpectatorTelemetry` is the real, unmocked producer of the
+// `SpectatorEvent[]` `buildAgentMatchRecap` consumes, so these synthetic
+// record/finalState fixtures exercise the actual event-derivation
+// pipeline, not a hand-rolled telemetry stub.
 
 function record(
   sequence: number,
@@ -50,9 +52,27 @@ function record(
 }
 
 const ROSTER = [
-  { agentID: "a1", username: "Atlas", profile: "diplomatic" as const, clientID: "c1", brainType: "planner-executor" as const },
-  { agentID: "a2", username: "Blitz", profile: "aggressive" as const, clientID: "c2", brainType: "planner-executor" as const },
-  { agentID: "a3", username: "Cinder", profile: "opportunistic" as const, clientID: "c3", brainType: "planner-executor" as const },
+  {
+    agentID: "a1",
+    username: "Atlas",
+    profile: "diplomatic" as const,
+    clientID: "c1",
+    brainType: "planner-executor" as const,
+  },
+  {
+    agentID: "a2",
+    username: "Blitz",
+    profile: "aggressive" as const,
+    clientID: "c2",
+    brainType: "planner-executor" as const,
+  },
+  {
+    agentID: "a3",
+    username: "Cinder",
+    profile: "opportunistic" as const,
+    clientID: "c3",
+    brainType: "planner-executor" as const,
+  },
 ];
 
 function finalState(
@@ -187,7 +207,12 @@ describe("buildAgentMatchRecap", () => {
         { agentID: "a3", username: "Cinder", isAlive: false },
       ]),
     });
-    const input = { runID: "run-det", telemetry, finalTurnCount: totalTurns, series: null };
+    const input = {
+      runID: "run-det",
+      telemetry,
+      finalTurnCount: totalTurns,
+      series: null,
+    };
     const first = buildAgentMatchRecap(input);
     const second = buildAgentMatchRecap(input);
     expect(first?.beats).toEqual(second?.beats);
@@ -279,10 +304,18 @@ describe("buildAgentMatchRecap", () => {
       );
       sequence += 1;
       records.push(
-        record(sequence, formTurn + 1, bID, bName, `p-${bID}`, "alliance_request", {
-          recipientID: `p-${aID}`,
-          recipientName: aName,
-        }),
+        record(
+          sequence,
+          formTurn + 1,
+          bID,
+          bName,
+          `p-${bID}`,
+          "alliance_request",
+          {
+            recipientID: `p-${aID}`,
+            recipientName: aName,
+          },
+        ),
       );
       sequence += 1;
       records.push(
@@ -303,21 +336,71 @@ describe("buildAgentMatchRecap", () => {
       attackerIDs.push(attackerID);
       sequence += 1;
       records.push(
-        record(sequence, 1000 + (i - 1) * 10, attackerID, `Bandit${i}`, `p-${attackerID}`, "attack", {
-          targetID: "p-victim",
-          targetName: "Victim",
-        }),
+        record(
+          sequence,
+          1000 + (i - 1) * 10,
+          attackerID,
+          `Bandit${i}`,
+          `p-${attackerID}`,
+          "attack",
+          {
+            targetID: "p-victim",
+            targetName: "Victim",
+          },
+        ),
       );
     }
 
     const roster = [
-      { agentID: "c1", username: "Cobalt", profile: "diplomatic" as const, clientID: "cc1", brainType: "planner-executor" as const },
-      { agentID: "c2", username: "Copper", profile: "diplomatic" as const, clientID: "cc2", brainType: "planner-executor" as const },
-      { agentID: "d1", username: "Delta", profile: "diplomatic" as const, clientID: "cd1", brainType: "planner-executor" as const },
-      { agentID: "d2", username: "Echo", profile: "diplomatic" as const, clientID: "cd2", brainType: "planner-executor" as const },
-      { agentID: "e1", username: "Foxtrot", profile: "diplomatic" as const, clientID: "ce1", brainType: "planner-executor" as const },
-      { agentID: "e2", username: "Golf", profile: "diplomatic" as const, clientID: "ce2", brainType: "planner-executor" as const },
-      { agentID: "victim", username: "Victim", profile: "defensive" as const, clientID: "cv", brainType: "planner-executor" as const },
+      {
+        agentID: "c1",
+        username: "Cobalt",
+        profile: "diplomatic" as const,
+        clientID: "cc1",
+        brainType: "planner-executor" as const,
+      },
+      {
+        agentID: "c2",
+        username: "Copper",
+        profile: "diplomatic" as const,
+        clientID: "cc2",
+        brainType: "planner-executor" as const,
+      },
+      {
+        agentID: "d1",
+        username: "Delta",
+        profile: "diplomatic" as const,
+        clientID: "cd1",
+        brainType: "planner-executor" as const,
+      },
+      {
+        agentID: "d2",
+        username: "Echo",
+        profile: "diplomatic" as const,
+        clientID: "cd2",
+        brainType: "planner-executor" as const,
+      },
+      {
+        agentID: "e1",
+        username: "Foxtrot",
+        profile: "diplomatic" as const,
+        clientID: "ce1",
+        brainType: "planner-executor" as const,
+      },
+      {
+        agentID: "e2",
+        username: "Golf",
+        profile: "diplomatic" as const,
+        clientID: "ce2",
+        brainType: "planner-executor" as const,
+      },
+      {
+        agentID: "victim",
+        username: "Victim",
+        profile: "defensive" as const,
+        clientID: "cv",
+        brainType: "planner-executor" as const,
+      },
       ...attackerIDs.map((id, i) => ({
         agentID: id,
         username: `Bandit${i + 1}`,
@@ -339,7 +422,12 @@ describe("buildAgentMatchRecap", () => {
       finalState: finalState(totalTurns, players),
     });
     const build = () =>
-      buildAgentMatchRecap({ runID: "run-churn", telemetry, finalTurnCount: totalTurns, series: null });
+      buildAgentMatchRecap({
+        runID: "run-churn",
+        telemetry,
+        finalTurnCount: totalTurns,
+        series: null,
+      });
     const recap = build();
     expect(recap).not.toBeNull();
     if (recap === null) return;
@@ -348,16 +436,22 @@ describe("buildAgentMatchRecap", () => {
     expect(recap.beats.length).toBe(16);
 
     // Betrayals never dropped, and never aggregated away.
-    const betrayalBeats = recap.beats.filter((beat) => beat.kind === "betrayal");
+    const betrayalBeats = recap.beats.filter(
+      (beat) => beat.kind === "betrayal",
+    );
     expect(betrayalBeats.length).toBe(2);
     expect(betrayalBeats.map((beat) => beat.turnNumber)).toEqual([250, 350]);
 
     // Alliance churn aggregated into one beat with a "renewed" count; the
     // two form-then-break pairs stay unaggregated (count 1, no "renewed"
     // suffix) since each only formed once before its betrayal.
-    const allianceBeats = recap.beats.filter((beat) => beat.kind === "alliance");
+    const allianceBeats = recap.beats.filter(
+      (beat) => beat.kind === "alliance",
+    );
     expect(allianceBeats.length).toBe(3);
-    expect(allianceBeats.map((beat) => beat.turnNumber)).toEqual([101, 201, 301]);
+    expect(allianceBeats.map((beat) => beat.turnNumber)).toEqual([
+      101, 201, 301,
+    ]);
     expect(allianceBeats[0].message).toBe(
       "Copper and Cobalt form an alliance (renewed 8 times through turn 121).",
     );
@@ -366,7 +460,9 @@ describe("buildAgentMatchRecap", () => {
 
     // First strikes trimmed to fit the remaining budget (16 - 2 betrayals
     // - 3 alliances = 11), earliest-turn-first, never re-ordered.
-    const firstStrikeBeats = recap.beats.filter((beat) => beat.kind === "first_strike");
+    const firstStrikeBeats = recap.beats.filter(
+      (beat) => beat.kind === "first_strike",
+    );
     expect(firstStrikeBeats.length).toBe(11);
     expect(firstStrikeBeats.map((beat) => beat.turnNumber)).toEqual([
       1000, 1010, 1020, 1030, 1040, 1050, 1060, 1070, 1080, 1090, 1100,
@@ -397,9 +493,21 @@ describe("compressTerminalEliminations", () => {
   it("compresses 2+ eliminations that all land at the match's final turn into one summary beat", () => {
     const totalTurns = 5000;
     const beats: AgentMatchRecapBeat[] = [
-      { turnNumber: totalTurns, kind: "elimination", message: "Alpha is eliminated." },
-      { turnNumber: totalTurns, kind: "elimination", message: "Bravo is eliminated." },
-      { turnNumber: totalTurns, kind: "elimination", message: "Charlie is eliminated." },
+      {
+        turnNumber: totalTurns,
+        kind: "elimination",
+        message: "Alpha is eliminated.",
+      },
+      {
+        turnNumber: totalTurns,
+        kind: "elimination",
+        message: "Bravo is eliminated.",
+      },
+      {
+        turnNumber: totalTurns,
+        kind: "elimination",
+        message: "Charlie is eliminated.",
+      },
     ];
     const result = compressTerminalEliminations(beats, totalTurns);
     expect(result.beats).toEqual([
@@ -415,7 +523,11 @@ describe("compressTerminalEliminations", () => {
   it("leaves a SINGLE final-turn elimination as its own individual beat — no compression needed for one", () => {
     const totalTurns = 5000;
     const beats: AgentMatchRecapBeat[] = [
-      { turnNumber: totalTurns, kind: "elimination", message: "Alpha is eliminated." },
+      {
+        turnNumber: totalTurns,
+        kind: "elimination",
+        message: "Alpha is eliminated.",
+      },
     ];
     const result = compressTerminalEliminations(beats, totalTurns);
     expect(result.beats).toEqual(beats);
@@ -425,13 +537,29 @@ describe("compressTerminalEliminations", () => {
   it("keeps a genuinely mid-match elimination (turnNumber < totalTurns) individual, never swept into the terminal group", () => {
     const totalTurns = 5000;
     const beats: AgentMatchRecapBeat[] = [
-      { turnNumber: 2000, kind: "elimination", message: "Alpha is eliminated." },
-      { turnNumber: totalTurns, kind: "elimination", message: "Bravo is eliminated." },
-      { turnNumber: totalTurns, kind: "elimination", message: "Charlie is eliminated." },
+      {
+        turnNumber: 2000,
+        kind: "elimination",
+        message: "Alpha is eliminated.",
+      },
+      {
+        turnNumber: totalTurns,
+        kind: "elimination",
+        message: "Bravo is eliminated.",
+      },
+      {
+        turnNumber: totalTurns,
+        kind: "elimination",
+        message: "Charlie is eliminated.",
+      },
     ];
     const result = compressTerminalEliminations(beats, totalTurns);
     expect(result.beats).toEqual([
-      { turnNumber: 2000, kind: "elimination", message: "Alpha is eliminated." },
+      {
+        turnNumber: 2000,
+        kind: "elimination",
+        message: "Alpha is eliminated.",
+      },
       {
         turnNumber: totalTurns,
         kind: "elimination",
@@ -444,8 +572,16 @@ describe("compressTerminalEliminations", () => {
   it("mid-match eliminations that never reach 2 at any single turn are all left individual, unmodified", () => {
     const totalTurns = 5000;
     const beats: AgentMatchRecapBeat[] = [
-      { turnNumber: 1000, kind: "elimination", message: "Alpha is eliminated." },
-      { turnNumber: 2000, kind: "elimination", message: "Bravo is eliminated." },
+      {
+        turnNumber: 1000,
+        kind: "elimination",
+        message: "Alpha is eliminated.",
+      },
+      {
+        turnNumber: 2000,
+        kind: "elimination",
+        message: "Bravo is eliminated.",
+      },
     ];
     const result = compressTerminalEliminations(beats, totalTurns);
     expect(result.beats).toEqual(beats);
@@ -467,8 +603,20 @@ describe("buildAgentMatchRecap — terminal elimination compression (real produc
       }),
     ];
     const roster = [
-      { agentID: "s1", username: "Survivor1", profile: "diplomatic" as const, clientID: "cs1", brainType: "planner-executor" as const },
-      { agentID: "s2", username: "Survivor2", profile: "diplomatic" as const, clientID: "cs2", brainType: "planner-executor" as const },
+      {
+        agentID: "s1",
+        username: "Survivor1",
+        profile: "diplomatic" as const,
+        clientID: "cs1",
+        brainType: "planner-executor" as const,
+      },
+      {
+        agentID: "s2",
+        username: "Survivor2",
+        profile: "diplomatic" as const,
+        clientID: "cs2",
+        brainType: "planner-executor" as const,
+      },
       ...Array.from({ length: 8 }, (_, i) => ({
         agentID: `x${i + 1}`,
         username: `Fallen${i + 1}`,
@@ -496,7 +644,9 @@ describe("buildAgentMatchRecap — terminal elimination compression (real produc
     });
     expect(recap).not.toBeNull();
     if (recap === null) return;
-    const eliminationBeats = recap.beats.filter((beat) => beat.kind === "elimination");
+    const eliminationBeats = recap.beats.filter(
+      (beat) => beat.kind === "elimination",
+    );
     expect(eliminationBeats).toHaveLength(1);
     expect(eliminationBeats[0].message).toBe(
       "Final turn: 8 agents eliminated as the match ends.",
@@ -522,29 +672,65 @@ describe("buildAgentMatchRecap — repeat betrayal aggregation", () => {
     for (const [formTurn, breakTurn] of cycles) {
       sequence += 1;
       records.push(
-        record(sequence, formTurn, "daveey", "daveey", "p-daveey", "alliance_request", {
-          recipientID: "p-cyan",
-          recipientName: "CYAN",
-        }),
+        record(
+          sequence,
+          formTurn,
+          "daveey",
+          "daveey",
+          "p-daveey",
+          "alliance_request",
+          {
+            recipientID: "p-cyan",
+            recipientName: "CYAN",
+          },
+        ),
       );
       sequence += 1;
       records.push(
-        record(sequence, formTurn + 1, "cyan", "CYAN", "p-cyan", "alliance_request", {
-          recipientID: "p-daveey",
-          recipientName: "daveey",
-        }),
+        record(
+          sequence,
+          formTurn + 1,
+          "cyan",
+          "CYAN",
+          "p-cyan",
+          "alliance_request",
+          {
+            recipientID: "p-daveey",
+            recipientName: "daveey",
+          },
+        ),
       );
       sequence += 1;
       records.push(
-        record(sequence, breakTurn, "daveey", "daveey", "p-daveey", "break_alliance", {
-          recipientID: "p-cyan",
-          recipientName: "CYAN",
-        }),
+        record(
+          sequence,
+          breakTurn,
+          "daveey",
+          "daveey",
+          "p-daveey",
+          "break_alliance",
+          {
+            recipientID: "p-cyan",
+            recipientName: "CYAN",
+          },
+        ),
       );
     }
     const roster = [
-      { agentID: "daveey", username: "daveey", profile: "diplomatic" as const, clientID: "cd", brainType: "planner-executor" as const },
-      { agentID: "cyan", username: "CYAN", profile: "diplomatic" as const, clientID: "cc", brainType: "planner-executor" as const },
+      {
+        agentID: "daveey",
+        username: "daveey",
+        profile: "diplomatic" as const,
+        clientID: "cd",
+        brainType: "planner-executor" as const,
+      },
+      {
+        agentID: "cyan",
+        username: "CYAN",
+        profile: "diplomatic" as const,
+        clientID: "cc",
+        brainType: "planner-executor" as const,
+      },
     ];
     const telemetry = buildAgentSpectatorTelemetry({
       runID: "run-repeat-betrayal",
@@ -563,7 +749,9 @@ describe("buildAgentMatchRecap — repeat betrayal aggregation", () => {
     });
     expect(recap).not.toBeNull();
     if (recap === null) return;
-    const betrayalBeats = recap.beats.filter((beat) => beat.kind === "betrayal");
+    const betrayalBeats = recap.beats.filter(
+      (beat) => beat.kind === "betrayal",
+    );
     // 3 real betrayals -> exactly 2 beats: the first individual, the
     // 2nd+3rd aggregated into one "again" beat — not 3 near-identical beats.
     expect(betrayalBeats).toHaveLength(2);
@@ -596,7 +784,9 @@ describe("buildAgentMatchRecap — repeat betrayal aggregation", () => {
     });
     expect(recap).not.toBeNull();
     if (recap === null) return;
-    const betrayalBeats = recap.beats.filter((beat) => beat.kind === "betrayal");
+    const betrayalBeats = recap.beats.filter(
+      (beat) => beat.kind === "betrayal",
+    );
     expect(betrayalBeats).toHaveLength(1);
     expect(betrayalBeats[0].message).not.toContain("again");
   });
@@ -638,10 +828,26 @@ describe("curatedDramaScore", () => {
       );
     }
     const roster = [
-      { agentID: "p1", username: "Pact1", profile: "diplomatic" as const, clientID: "cp1", brainType: "planner-executor" as const },
-      { agentID: "p2", username: "Pact2", profile: "diplomatic" as const, clientID: "cp2", brainType: "planner-executor" as const },
+      {
+        agentID: "p1",
+        username: "Pact1",
+        profile: "diplomatic" as const,
+        clientID: "cp1",
+        brainType: "planner-executor" as const,
+      },
+      {
+        agentID: "p2",
+        username: "Pact2",
+        profile: "diplomatic" as const,
+        clientID: "cp2",
+        brainType: "planner-executor" as const,
+      },
     ];
-    const players = roster.map((entry) => ({ agentID: entry.agentID, username: entry.username, isAlive: true }));
+    const players = roster.map((entry) => ({
+      agentID: entry.agentID,
+      username: entry.username,
+      isAlive: true,
+    }));
     const telemetry = buildAgentSpectatorTelemetry({
       runID: "run-pure-churn",
       records,
@@ -662,7 +868,12 @@ describe("curatedDramaScore", () => {
     expect(dramaReport.dramaScore).toBe(100);
     expect(dramaReport.dramaGrade).toBe("dramatic");
 
-    const recap = buildAgentMatchRecap({ runID: "run-pure-churn", telemetry, finalTurnCount: totalTurns, series: null });
+    const recap = buildAgentMatchRecap({
+      runID: "run-pure-churn",
+      telemetry,
+      finalTurnCount: totalTurns,
+      series: null,
+    });
     expect(recap).not.toBeNull();
     if (recap === null) return;
     // One aggregated alliance pair, nothing else — the curated score must
@@ -688,11 +899,36 @@ describe("curatedDramaScore", () => {
     let arcTurn = 1000;
     for (const [aID, aName, bID, bName] of betrayalPairs) {
       sequence += 1;
-      records.push(record(sequence, arcTurn, aID, aName, `p-${aID}`, "alliance_request", { recipientID: `p-${bID}`, recipientName: bName }));
+      records.push(
+        record(sequence, arcTurn, aID, aName, `p-${aID}`, "alliance_request", {
+          recipientID: `p-${bID}`,
+          recipientName: bName,
+        }),
+      );
       sequence += 1;
-      records.push(record(sequence, arcTurn + 1, bID, bName, `p-${bID}`, "alliance_request", { recipientID: `p-${aID}`, recipientName: aName }));
+      records.push(
+        record(
+          sequence,
+          arcTurn + 1,
+          bID,
+          bName,
+          `p-${bID}`,
+          "alliance_request",
+          { recipientID: `p-${aID}`, recipientName: aName },
+        ),
+      );
       sequence += 1;
-      records.push(record(sequence, arcTurn + 50, aID, aName, `p-${aID}`, "break_alliance", { recipientID: `p-${bID}`, recipientName: bName }));
+      records.push(
+        record(
+          sequence,
+          arcTurn + 50,
+          aID,
+          aName,
+          `p-${aID}`,
+          "break_alliance",
+          { recipientID: `p-${bID}`, recipientName: bName },
+        ),
+      );
       arcTurn += 100;
     }
 
@@ -702,21 +938,78 @@ describe("curatedDramaScore", () => {
     const attackerIDs = ["f1", "f2", "f3", "f4", "f5", "f6"];
     attackerIDs.forEach((attackerID, i) => {
       sequence += 1;
-      records.push(record(sequence, 2000 + i * 10, attackerID, `Foe${i + 1}`, `p-${attackerID}`, "attack", { targetID: "p-victim", targetName: "Victim" }));
+      records.push(
+        record(
+          sequence,
+          2000 + i * 10,
+          attackerID,
+          `Foe${i + 1}`,
+          `p-${attackerID}`,
+          "attack",
+          { targetID: "p-victim", targetName: "Victim" },
+        ),
+      );
     });
     sequence += 1;
-    records.push(record(sequence, totalTurns - 300, "f1", "Foe1", "p-f1", "attack", { targetID: "p-victim", targetName: "Victim" }));
+    records.push(
+      record(sequence, totalTurns - 300, "f1", "Foe1", "p-f1", "attack", {
+        targetID: "p-victim",
+        targetName: "Victim",
+      }),
+    );
 
     const roster = [
       ...betrayalPairs.flatMap(([aID, aName, bID, bName]) => [
-        { agentID: aID, username: aName, profile: "diplomatic" as const, clientID: `c${aID}`, brainType: "planner-executor" as const },
-        { agentID: bID, username: bName, profile: "diplomatic" as const, clientID: `c${bID}`, brainType: "planner-executor" as const },
+        {
+          agentID: aID,
+          username: aName,
+          profile: "diplomatic" as const,
+          clientID: `c${aID}`,
+          brainType: "planner-executor" as const,
+        },
+        {
+          agentID: bID,
+          username: bName,
+          profile: "diplomatic" as const,
+          clientID: `c${bID}`,
+          brainType: "planner-executor" as const,
+        },
       ]),
-      { agentID: "victim", username: "Victim", profile: "defensive" as const, clientID: "cv", brainType: "planner-executor" as const },
-      ...attackerIDs.map((id, i) => ({ agentID: id, username: `Foe${i + 1}`, profile: "aggressive" as const, clientID: `c${id}`, brainType: "planner-executor" as const })),
-      { agentID: "e1", username: "Elim1", profile: "defensive" as const, clientID: "ce1", brainType: "planner-executor" as const },
-      { agentID: "e2", username: "Elim2", profile: "defensive" as const, clientID: "ce2", brainType: "planner-executor" as const },
-      { agentID: "e3", username: "Elim3", profile: "defensive" as const, clientID: "ce3", brainType: "planner-executor" as const },
+      {
+        agentID: "victim",
+        username: "Victim",
+        profile: "defensive" as const,
+        clientID: "cv",
+        brainType: "planner-executor" as const,
+      },
+      ...attackerIDs.map((id, i) => ({
+        agentID: id,
+        username: `Foe${i + 1}`,
+        profile: "aggressive" as const,
+        clientID: `c${id}`,
+        brainType: "planner-executor" as const,
+      })),
+      {
+        agentID: "e1",
+        username: "Elim1",
+        profile: "defensive" as const,
+        clientID: "ce1",
+        brainType: "planner-executor" as const,
+      },
+      {
+        agentID: "e2",
+        username: "Elim2",
+        profile: "defensive" as const,
+        clientID: "ce2",
+        brainType: "planner-executor" as const,
+      },
+      {
+        agentID: "e3",
+        username: "Elim3",
+        profile: "defensive" as const,
+        clientID: "ce3",
+        brainType: "planner-executor" as const,
+      },
     ];
     const players = roster.map((entry) => ({
       agentID: entry.agentID,
@@ -729,7 +1022,12 @@ describe("curatedDramaScore", () => {
       roster,
       finalState: finalState(totalTurns, players),
     });
-    const recap = buildAgentMatchRecap({ runID: "run-betrayal-heavy", telemetry, finalTurnCount: totalTurns, series: null });
+    const recap = buildAgentMatchRecap({
+      runID: "run-betrayal-heavy",
+      telemetry,
+      finalTurnCount: totalTurns,
+      series: null,
+    });
     expect(recap).not.toBeNull();
     if (recap === null) return;
     expect(recap.beats.filter((b) => b.kind === "betrayal").length).toBe(4);
@@ -737,7 +1035,9 @@ describe("curatedDramaScore", () => {
     // `AgentSpectatorTelemetry.ts`'s `addEliminationEvents`) — compressed
     // into ONE "Final turn: N agents eliminated" beat, not three.
     expect(recap.beats.filter((b) => b.kind === "elimination").length).toBe(1);
-    expect(recap.beats.some((b) => b.kind === "final_confrontation")).toBe(true);
+    expect(recap.beats.some((b) => b.kind === "final_confrontation")).toBe(
+      true,
+    );
     expect(recap.curatedDramaScore).toBeGreaterThanOrEqual(90);
     expect(recap.curatedDramaScore).toBeLessThanOrEqual(100);
   });
@@ -754,7 +1054,12 @@ describe("curatedDramaScore", () => {
         { agentID: "a3", username: "Cinder", isAlive: false },
       ]),
     });
-    const recap = buildAgentMatchRecap({ runID: "run-methodology", telemetry, finalTurnCount: totalTurns, series: null });
+    const recap = buildAgentMatchRecap({
+      runID: "run-methodology",
+      telemetry,
+      finalTurnCount: totalTurns,
+      series: null,
+    });
     expect(recap).not.toBeNull();
     if (recap === null) return;
     expect(recap.curatedDramaScoreMethodology.length).toBeGreaterThan(20);

@@ -2,17 +2,17 @@ import { z } from "zod";
 import { PublicAgentStatsSchema } from "../AgentStatsSchema";
 import { AgentTimeSeriesSchema } from "../AgentTimeSeriesSchema";
 export {
+  PublicAgentStatsSchema,
   type AgentMetric,
   type AgentStatsSlice,
   type NamedCount,
   type PublicAgentStats,
-  PublicAgentStatsSchema,
 } from "../AgentStatsSchema";
 export {
+  AgentTimeSeriesSchema,
   type AgentTimeSeries,
   type ScoreSeries,
   type WinrateSeries,
-  AgentTimeSeriesSchema,
 } from "../AgentTimeSeriesSchema";
 
 /**
@@ -107,12 +107,6 @@ export const PublicMatchSchema = z.object({
   watchHref: z.string().nullable(),
   fullRenderHref: z.string().nullable(),
   premiereHref: z.string().nullable(),
-  directorCut: z
-    .object({
-      durationEstimateSeconds: z.number(),
-      segmentCount: z.number(),
-    })
-    .nullable(),
   dramaEvidence: z
     .object({
       curatedDramaScore: z.number().nullable(),
@@ -184,6 +178,9 @@ export const PublicFeaturedMatchSchema = z.object({
   revealAt: z.string().nullable(),
   /** 2026-08-01 P0 — see `ProxyWarPublicReadModel.ts`'s `PublicFeaturedMatch.completedAt` for the full contract (the ACTUAL match completion date, distinct from `scheduledAt`). */
   completedAt: z.string().nullable(),
+  /** Full-replay-access bugfix (2026-08-05) — see `ProxyWarPublicReadModel.ts`'s `PublicFeaturedMatch.watchHref`/`.fullRenderHref` for the full contract. Resolved the SAME way as `completedAt` just above (independent of `isPubliclyPromotable`/the package fields below) — `null` under the identical honest "not mirrored yet" conditions. */
+  watchHref: z.string().nullable(),
+  fullRenderHref: z.string().nullable(),
   postMatchSummary: z.string().nullable(),
   result: PublicFeaturedMatchResultSchema.nullable(),
   /**
@@ -197,7 +194,6 @@ export const PublicFeaturedMatchSchema = z.object({
   /** `EventPackage`-derived fields — all `null` together whenever `isPubliclyPromotable` is `false` (see the server type's own doc). `reasonToWatch` is claim TEXT only. */
   subtitle: z.string().nullable(),
   reasonToWatch: z.array(z.string()).nullable(),
-  directorCutEstimateSeconds: z.number().nullable(),
   canonicalMatchUrl: z.string().nullable(),
   canonicalPremiereUrl: z.string().nullable(),
 });

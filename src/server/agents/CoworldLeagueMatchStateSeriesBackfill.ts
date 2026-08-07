@@ -15,7 +15,7 @@ import { resolveMirroredMatchStateSeries } from "./CoworldLeagueMirrorCore";
 /**
  * Season Zero Phase 2: IO orchestration for the mirror-side "sampled
  * match-state series" gap closure — the SAME pattern
- * `CoworldLeagueDirectorCutBackfill.ts`/`CoworldLeagueMatchNarrativeBackfill.ts`
+ * `CoworldLeagueMatchNarrativeBackfill.ts`
  * established: per-run, idempotent, fail-open generation with a structured
  * non-throwing outcome, plus a budgeted gradual backfill scan.
  *
@@ -27,17 +27,17 @@ import { resolveMirroredMatchStateSeries } from "./CoworldLeagueMirrorCore";
  *
  * ORDERING DEPENDENCY (documented, not enforced by a lock — see
  * `AgentMatchStateSeries.ts`'s module doc for the accepted race): this
- * backfill MUST run strictly before `backfillDirectorCutPlans`/
+ * backfill MUST run strictly before
  * `backfillMatchNarrativeArtifacts` in the SAME mirror cycle
  * (`coworld-league-mirror.ts`'s `syncOnce`), for both the freshly-unpacked
- * per-episode path and the historical backlog scan, so a run's `director-
- * cut-plan.json`/`match-recap.json` generation has the best chance of
+ * per-episode path and the historical backlog scan, so a run's
+ * `match-recap.json` generation has the best chance of
  * seeing a real series on its FIRST pass rather than waiting for a later
- * mirror cycle to retroactively upgrade them. Because series generation is
- * strictly cheaper than either downstream consumer (no telemetry curation,
+ * mirror cycle to retroactively upgrade it. Because series generation is
+ * strictly cheaper than its downstream consumer (no telemetry curation,
  * no importance scoring — a pure re-projection), its default budget is
- * intentionally larger, so it stays ahead of the historical backlog those
- * two chase.
+ * intentionally larger, so it stays ahead of the historical backlog that
+ * consumer chases.
  */
 
 const matchStateSeriesFileName = "match-state-series.json";
@@ -91,7 +91,11 @@ export async function generateMatchStateSeriesForRunDir(
     try {
       const existing = JSON.parse(existingRaw) as { schemaVersion?: unknown };
       if (existing.schemaVersion === MATCH_STATE_SERIES_SCHEMA_VERSION) {
-        return { runKey, attempted: false, outcome: { status: "already-exists" } };
+        return {
+          runKey,
+          attempted: false,
+          outcome: { status: "already-exists" },
+        };
       }
     } catch {
       // Falls through to regeneration — a torn/malformed existing file is
@@ -99,20 +103,21 @@ export async function generateMatchStateSeriesForRunDir(
     }
   }
 
-  const [spectatorReplayRaw, spectatorTelemetryRaw, decisionsJsonlRaw] = await Promise.all([
-    readBoundedRunDirArtifact(
-      path.join(runDir, "spectator-replay.json"),
-      maximumSpectatorReplayBytes,
-    ),
-    readBoundedRunDirArtifact(
-      path.join(runDir, "spectator-telemetry.json"),
-      maximumSpectatorTelemetryBytes,
-    ),
-    readBoundedRunDirArtifact(
-      path.join(runDir, "decisions.jsonl"),
-      maximumDecisionsJsonlBytes,
-    ),
-  ]);
+  const [spectatorReplayRaw, spectatorTelemetryRaw, decisionsJsonlRaw] =
+    await Promise.all([
+      readBoundedRunDirArtifact(
+        path.join(runDir, "spectator-replay.json"),
+        maximumSpectatorReplayBytes,
+      ),
+      readBoundedRunDirArtifact(
+        path.join(runDir, "spectator-telemetry.json"),
+        maximumSpectatorTelemetryBytes,
+      ),
+      readBoundedRunDirArtifact(
+        path.join(runDir, "decisions.jsonl"),
+        maximumDecisionsJsonlBytes,
+      ),
+    ]);
   if (spectatorReplayRaw === null) {
     return { runKey, attempted: false, outcome: { status: "no-input" } };
   }
@@ -160,7 +165,7 @@ export async function generateMatchStateSeriesForRunDir(
  * dirs still missing one, spending up to `budget` generation attempts — same
  * deterministic ascending directory-name order, fail-open listing, and
  * budget-decrements-only-on-attempt semantics as
- * `backfillDirectorCutPlans`/`backfillMatchNarrativeArtifacts`.
+ * `backfillMatchNarrativeArtifacts`.
  */
 export async function backfillMatchStateSeries(
   runsRootDir: string,

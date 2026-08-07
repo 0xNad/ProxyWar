@@ -7,20 +7,23 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ReplayPremiereServiceError } from "../../../../src/client/ReplayPremiereRuntime";
 import "../../../../src/client/prediction/wagering/components/MarketBankrollBadge";
-import "../../../../src/client/prediction/wagering/components/MarketPriceBoard";
-import "../../../../src/client/prediction/wagering/components/MarketPositionSummary";
-import "../../../../src/client/prediction/wagering/components/TradeTicket";
-import "../../../../src/client/prediction/wagering/components/PositionsPanel";
-import "../../../../src/client/prediction/wagering/components/MarketSettlementPanel";
-import "../../../../src/client/prediction/wagering/components/PriceAnnouncer";
 import type { PremiereMarketBankrollBadge } from "../../../../src/client/prediction/wagering/components/MarketBankrollBadge";
-import type { PremiereMarketPriceBoard } from "../../../../src/client/prediction/wagering/components/MarketPriceBoard";
+import "../../../../src/client/prediction/wagering/components/MarketPositionSummary";
 import type { PremiereMarketPositionSummary } from "../../../../src/client/prediction/wagering/components/MarketPositionSummary";
-import type { PremiereTradeTicket } from "../../../../src/client/prediction/wagering/components/TradeTicket";
-import type { PremierePositionsPanel } from "../../../../src/client/prediction/wagering/components/PositionsPanel";
+import "../../../../src/client/prediction/wagering/components/MarketPriceBoard";
+import type { PremiereMarketPriceBoard } from "../../../../src/client/prediction/wagering/components/MarketPriceBoard";
+import "../../../../src/client/prediction/wagering/components/MarketSettlementPanel";
 import type { PremiereMarketSettlement } from "../../../../src/client/prediction/wagering/components/MarketSettlementPanel";
+import "../../../../src/client/prediction/wagering/components/PositionsPanel";
+import type { PremierePositionsPanel } from "../../../../src/client/prediction/wagering/components/PositionsPanel";
+import "../../../../src/client/prediction/wagering/components/PriceAnnouncer";
 import type { PremiereMarketPriceAnnouncer } from "../../../../src/client/prediction/wagering/components/PriceAnnouncer";
-import type { MarketSeatOption, MarketState } from "../../../../src/client/prediction/wagering/types";
+import "../../../../src/client/prediction/wagering/components/TradeTicket";
+import type { PremiereTradeTicket } from "../../../../src/client/prediction/wagering/components/TradeTicket";
+import type {
+  MarketSeatOption,
+  MarketState,
+} from "../../../../src/client/prediction/wagering/types";
 
 function mount<T extends HTMLElement>(tag: string): T {
   const el = document.createElement(tag) as T;
@@ -55,8 +58,8 @@ async function flushMicrotasks(times = 10): Promise<void> {
 
 /** Clicks the seat option button matching a display name — the trade ticket's seat picker is buttons, not a `<select>`. */
 function clickSeat(el: HTMLElement, displayName: string): void {
-  const button = [...el.querySelectorAll("button")].find(
-    (b) => b.textContent?.includes(displayName),
+  const button = [...el.querySelectorAll("button")].find((b) =>
+    b.textContent?.includes(displayName),
   );
   if (!button) throw new Error(`seat button "${displayName}" not rendered`);
   button.click();
@@ -112,18 +115,34 @@ describe("premiere-market-bankroll-badge", () => {
 
 describe("premiere-position-summary", () => {
   it("renders nothing when the viewer holds no position", async () => {
-    const el = mount<PremiereMarketPositionSummary>("premiere-position-summary");
+    const el = mount<PremiereMarketPositionSummary>(
+      "premiere-position-summary",
+    );
     el.market = market({ positions: [] });
     await el.updateComplete;
     expect(el.textContent?.trim()).toBe("");
   });
 
   it("shows the total unrealized P&L across every held seat, magnitude-toned", async () => {
-    const el = mount<PremiereMarketPositionSummary>("premiere-position-summary");
+    const el = mount<PremiereMarketPositionSummary>(
+      "premiere-position-summary",
+    );
     el.market = market({
       positions: [
-        { seatId: "seat-a", shares: 4, costBasis: 180, currentValue: 220, unrealizedPnl: 40 },
-        { seatId: "seat-b", shares: 2, costBasis: 90, currentValue: 80, unrealizedPnl: -10 },
+        {
+          seatId: "seat-a",
+          shares: 4,
+          costBasis: 180,
+          currentValue: 220,
+          unrealizedPnl: 40,
+        },
+        {
+          seatId: "seat-b",
+          shares: 2,
+          costBasis: 90,
+          currentValue: 80,
+          unrealizedPnl: -10,
+        },
       ],
     });
     await el.updateComplete;
@@ -133,10 +152,18 @@ describe("premiere-position-summary", () => {
   });
 
   it("colors a net-negative total distinctly", async () => {
-    const el = mount<PremiereMarketPositionSummary>("premiere-position-summary");
+    const el = mount<PremiereMarketPositionSummary>(
+      "premiere-position-summary",
+    );
     el.market = market({
       positions: [
-        { seatId: "seat-a", shares: 4, costBasis: 180, currentValue: 100, unrealizedPnl: -80 },
+        {
+          seatId: "seat-a",
+          shares: 4,
+          costBasis: 180,
+          currentValue: 100,
+          unrealizedPnl: -80,
+        },
       ],
     });
     await el.updateComplete;
@@ -213,7 +240,13 @@ describe("premiere-positions-panel", () => {
     el.seats = SEATS;
     el.market = market({
       positions: [
-        { seatId: "seat-a", shares: 4, costBasis: 180, currentValue: 220, unrealizedPnl: 40 },
+        {
+          seatId: "seat-a",
+          shares: 4,
+          costBasis: 180,
+          currentValue: 220,
+          unrealizedPnl: 40,
+        },
       ],
     });
     await el.updateComplete;
@@ -229,7 +262,13 @@ describe("premiere-positions-panel", () => {
     el.seats = SEATS;
     el.market = market({
       positions: [
-        { seatId: "seat-a", shares: 4, costBasis: 180, currentValue: 100, unrealizedPnl: -80 },
+        {
+          seatId: "seat-a",
+          shares: 4,
+          costBasis: 180,
+          currentValue: 100,
+          unrealizedPnl: -80,
+        },
       ],
     });
     await el.updateComplete;
@@ -380,7 +419,9 @@ describe("premiere-trade-ticket", () => {
     );
     expect(quickPickButtons.length).toBeGreaterThan(0);
     const minPreset = quickPickButtons[0];
-    expect(Number(minPreset.textContent?.trim().replace(/,/g, ""))).toBeGreaterThan(10);
+    expect(
+      Number(minPreset.textContent?.trim().replace(/,/g, "")),
+    ).toBeGreaterThan(10);
     minPreset.click();
     await el.updateComplete;
 
@@ -394,10 +435,50 @@ describe("premiere-trade-ticket", () => {
     expect(onTrade).toHaveBeenCalledTimes(1);
   });
 
+  it("exposes aria-pressed on the quick-budget chips (10/50/100/N), reflecting which one is currently selected", async () => {
+    // A11y gap from pass-8 QA's aria snapshot: the chips were plain
+    // buttons with no pressed/selected state, so a screen-reader user
+    // could not tell which one was active from the accessible tree alone
+    // (sighted users see it via the orange chip styling).
+    const el = mountTicket();
+    el.seats = SEATS;
+    el.market = market();
+    el.windowOpen = true;
+    el.bankroll = 1000;
+    await el.updateComplete;
+
+    clickSeat(el, "Nation A");
+    await el.updateComplete;
+
+    const quickPickButtons = [...el.querySelectorAll("button")].filter((b) =>
+      /^[\d,]+$/.test(b.textContent?.trim() ?? ""),
+    );
+    expect(quickPickButtons.length).toBeGreaterThan(1);
+    // None selected yet — every chip starts unpressed.
+    for (const button of quickPickButtons) {
+      expect(button.getAttribute("aria-pressed")).toBe("false");
+    }
+
+    quickPickButtons[0].click();
+    await el.updateComplete;
+
+    const stillQuickPickButtons = [...el.querySelectorAll("button")].filter(
+      (b) => /^[\d,]+$/.test(b.textContent?.trim() ?? ""),
+    );
+    expect(stillQuickPickButtons[0].getAttribute("aria-pressed")).toBe("true");
+    for (const button of stillQuickPickButtons.slice(1)) {
+      expect(button.getAttribute("aria-pressed")).toBe("false");
+    }
+  });
+
   it("shows a live buy quote that recomputes as the draft amount changes, and prices it into the submit label", async () => {
     const el = mountTicket();
     el.seats = SEATS;
-    el.market = market({ q: [0, 0], b: 100, prices: { "seat-a": 50, "seat-b": 50 } });
+    el.market = market({
+      q: [0, 0],
+      b: 100,
+      prices: { "seat-a": 50, "seat-b": 50 },
+    });
     el.windowOpen = true;
     el.bankroll = 1000;
     await el.updateComplete;
@@ -428,7 +509,13 @@ describe("premiere-trade-ticket", () => {
     el.seats = SEATS;
     el.market = market({
       positions: [
-        { seatId: "seat-a", shares: 2, costBasis: 100, currentValue: 110, unrealizedPnl: 10 },
+        {
+          seatId: "seat-a",
+          shares: 2,
+          costBasis: 100,
+          currentValue: 110,
+          unrealizedPnl: 10,
+        },
       ],
     });
     el.windowOpen = true;
@@ -451,8 +538,10 @@ describe("premiere-trade-ticket", () => {
     input.dispatchEvent(new Event("input"));
     await el.updateComplete;
 
-    const submit = [...el.querySelectorAll("button")].find((b) =>
-      b.textContent?.includes("Sell shares") || b.textContent?.includes("Sell 5"),
+    const submit = [...el.querySelectorAll("button")].find(
+      (b) =>
+        b.textContent?.includes("Sell shares") ||
+        b.textContent?.includes("Sell 5"),
     );
     submit?.click();
     await el.updateComplete;
@@ -464,7 +553,11 @@ describe("premiere-trade-ticket", () => {
   it("rapid double-clicking submit only applies one order", async () => {
     const el = mountTicket();
     el.seats = SEATS;
-    el.market = market({ q: [0, 0], b: 100, prices: { "seat-a": 50, "seat-b": 50 } });
+    el.market = market({
+      q: [0, 0],
+      b: 100,
+      prices: { "seat-a": 50, "seat-b": 50 },
+    });
     el.windowOpen = true;
     el.bankroll = 1000;
     let resolveTrade: (() => void) | undefined;
@@ -526,7 +619,11 @@ describe("premiere-trade-ticket", () => {
   it("restores focus to the submit button after a successful trade, instead of leaving it at <body>", async () => {
     const el = mountTicket();
     el.seats = SEATS;
-    el.market = market({ q: [0, 0], b: 100, prices: { "seat-a": 50, "seat-b": 50 } });
+    el.market = market({
+      q: [0, 0],
+      b: 100,
+      prices: { "seat-a": 50, "seat-b": 50 },
+    });
     el.windowOpen = true;
     el.bankroll = 1000;
     const onTrade = vi.fn().mockResolvedValue(undefined);
@@ -557,13 +654,21 @@ describe("premiere-trade-ticket", () => {
   it("restores focus to the submit button after a rejected trade, with a human-readable message (not the raw error)", async () => {
     const el = mountTicket();
     el.seats = SEATS;
-    el.market = market({ q: [0, 0], b: 100, prices: { "seat-a": 50, "seat-b": 50 } });
+    el.market = market({
+      q: [0, 0],
+      b: 100,
+      prices: { "seat-a": 50, "seat-b": 50 },
+    });
     el.windowOpen = true;
     el.bankroll = 1000;
     const onTrade = vi
       .fn()
       .mockRejectedValue(
-        new ReplayPremiereServiceError("request_rejected", 400, "PREMIERE_INVALID_REQUEST"),
+        new ReplayPremiereServiceError(
+          "request_rejected",
+          400,
+          "PREMIERE_INVALID_REQUEST",
+        ),
       );
     el.onTrade = onTrade;
     await el.updateComplete;
@@ -588,25 +693,38 @@ describe("premiere-trade-ticket", () => {
     expect(document.activeElement).toBe(submit);
     const alert = el.querySelector('[role="alert"]');
     expect(alert?.textContent).not.toContain("request_rejected");
-    expect(alert?.textContent).toMatch(/price likely moved|amount wasn't valid/);
+    expect(alert?.textContent).toMatch(
+      /price likely moved|amount wasn't valid/,
+    );
   });
 
   it("maps service-error statuses to actionable sentences instead of the raw coarse code", async () => {
     const el = mountTicket();
     el.seats = SEATS;
-    el.market = market({ q: [0, 0], b: 100, prices: { "seat-a": 50, "seat-b": 50 } });
+    el.market = market({
+      q: [0, 0],
+      b: 100,
+      prices: { "seat-a": 50, "seat-b": 50 },
+    });
     el.windowOpen = true;
     el.bankroll = 1000;
 
-    const cases: Array<[ConstructorParameters<typeof ReplayPremiereServiceError>, RegExp]> = [
-      [["request_rejected", 429, "PREMIERE_INVALID_REQUEST"], /too many requests/i],
+    const cases: Array<
+      [ConstructorParameters<typeof ReplayPremiereServiceError>, RegExp]
+    > = [
+      [
+        ["request_rejected", 429, "PREMIERE_INVALID_REQUEST"],
+        /too many requests/i,
+      ],
       [["request_rejected", 410, "PREMIERE_INVALID_REQUEST"], /moved on/i],
       [["request_rejected", null, "PREMIERE_CAPACITY_EXCEEDED"], /capacity/i],
       [["request_failed", null, null], /reach the market/i],
     ];
 
     for (const [args, expected] of cases) {
-      const onTrade = vi.fn().mockRejectedValue(new ReplayPremiereServiceError(...args));
+      const onTrade = vi
+        .fn()
+        .mockRejectedValue(new ReplayPremiereServiceError(...args));
       el.onTrade = onTrade;
       await el.updateComplete;
 
@@ -626,7 +744,9 @@ describe("premiere-trade-ticket", () => {
       await el.updateComplete;
 
       const alert = el.querySelector('[role="alert"]');
-      expect(alert?.textContent).not.toMatch(/^request_rejected$|^request_failed$/);
+      expect(alert?.textContent).not.toMatch(
+        /^request_rejected$|^request_failed$/,
+      );
       expect(alert?.textContent).toMatch(expected);
     }
   });

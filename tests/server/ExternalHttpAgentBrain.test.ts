@@ -4,7 +4,10 @@ import type {
   AgentObservation,
   LegalAction,
 } from "../../src/server/agents/AgentTypes";
-import { ExternalHttpAgentBrain } from "../../src/server/agents/ExternalHttpAgentBrain";
+import {
+  buildExternalAgentRequestPayload,
+  ExternalHttpAgentBrain,
+} from "../../src/server/agents/ExternalHttpAgentBrain";
 
 const observation: AgentObservation = {
   agentID: "agent-1",
@@ -276,5 +279,49 @@ describe("ExternalHttpAgentBrain", () => {
     expect(decision.reason).toBeNull();
     expect(decision.metadata?.externalFailureReason).toContain("timed out");
     expect(typeof decision.metadata?.fallbackReason).toBe("string");
+  });
+});
+
+describe("buildExternalAgentRequestPayload map identity and spawn-protocol absence", () => {
+  const spawnPhaseObservation: AgentObservation = {
+    ...observation,
+    phase: "spawn",
+    mapInfo: { name: "Pangaea", width: 3000, height: 2000 },
+  };
+  const spawnPhaseLegalActions: LegalAction[] = [
+    { id: "hold", kind: "hold", label: "Hold", intent: null, risk: { level: "none", score: 0 } },
+  ];
+
+  it("echoes bounded map identity/dimensions whenever the observation carries it", () => {
+    const spawnPayload = buildExternalAgentRequestPayload({
+      observation: spawnPhaseObservation,
+      legalActions: spawnPhaseLegalActions,
+    });
+    expect(spawnPayload.match.map).toEqual({
+      name: "Pangaea",
+      width: 3000,
+      height: 2000,
+    });
+
+    const activePayload = buildExternalAgentRequestPayload({
+      observation,
+      legalActions,
+    });
+    expect(activePayload.match.map).toBeNull();
+  });
+
+  it("never exposes an off-menu spawn request protocol - spawn is a deterministic assignment, never a player/brain choice", () => {
+    const spawnPayload = buildExternalAgentRequestPayload({
+      observation: spawnPhaseObservation,
+      legalActions: spawnPhaseLegalActions,
+    });
+    expect(spawnPayload.decisionSupport).not.toHaveProperty("spawnFreeform");
+    expect(JSON.stringify(spawnPayload)).not.toContain("spawn:<tile>");
+
+    const activePayload = buildExternalAgentRequestPayload({
+      observation,
+      legalActions,
+    });
+    expect(activePayload.decisionSupport).not.toHaveProperty("spawnFreeform");
   });
 });

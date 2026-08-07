@@ -47,7 +47,6 @@ function railEntry(overrides: Partial<CompetitorRailEntry> = {}): CompetitorRail
     allies: [],
     wars: [],
     degradedDecisionCount: null,
-    followed: false,
     ...overrides,
   };
 }
@@ -134,7 +133,7 @@ describe("renderCompetitorRail", () => {
     expect(rail.querySelector("div.broadcast-rail-select")).not.toBeNull();
   });
 
-  it("clicking a rail seat invokes onSelect with that seat's playerName — camera-follow discoverability (spec item 6)", () => {
+  it("clicking a rail seat invokes onSelect with that seat's playerName and clientID — camera-follow discoverability (spec item 6)", () => {
     const onSelect = vi.fn();
     const rail = renderCompetitorRail(
       [railEntry({ playerName: "auri-internal", displayName: "Auri" })],
@@ -146,26 +145,44 @@ describe("renderCompetitorRail", () => {
     ) as HTMLButtonElement;
     expect(button).not.toBeNull();
     button.click();
-    expect(onSelect).toHaveBeenCalledWith("auri-internal");
+    // No clientID on this fixture entry -- forwarded as null, not omitted or
+    // undefined, so a listener can always destructure both positionally.
+    expect(onSelect).toHaveBeenCalledWith("auri-internal", null);
   });
 
-  it("marks the followed seat via data-followed and aria-pressed, distinct from every other seat", () => {
+  it("forwards a seat's clientID verbatim to onSelect when one is set — the receiving locate bridge resolves a click by clientID, never by playerName alone", () => {
     const onSelect = vi.fn();
     const rail = renderCompetitorRail(
       [
-        railEntry({ playerName: "Auri", followed: true }),
-        railEntry({ playerName: "Beta", followed: false }),
+        railEntry({
+          playerName: "auri-internal",
+          displayName: "Auri",
+          clientID: "client-abc123",
+        }),
       ],
       { onSelect },
     );
     document.body.append(rail);
-    const entries = rail.querySelectorAll(".broadcast-rail-entry");
-    expect((entries[0] as HTMLElement).dataset.followed).toBe("true");
-    expect((entries[1] as HTMLElement).dataset.followed).toBe("false");
-    const followedButton = entries[0].querySelector(
+    const button = rail.querySelector(
       "button.broadcast-rail-select",
     ) as HTMLButtonElement;
-    expect(followedButton.getAttribute("aria-pressed")).toBe("true");
+    button.click();
+    expect(onSelect).toHaveBeenCalledWith("auri-internal", "client-abc123");
+  });
+
+  it("never renders a data-followed/aria-pressed highlight state — a rail click is a one-shot locate, never a persisted toggle", () => {
+    const onSelect = vi.fn();
+    const rail = renderCompetitorRail(
+      [railEntry({ playerName: "Auri" }), railEntry({ playerName: "Beta" })],
+      { onSelect },
+    );
+    document.body.append(rail);
+    const entries = rail.querySelectorAll(".broadcast-rail-entry");
+    for (const entry of entries) {
+      expect((entry as HTMLElement).dataset.followed).toBeUndefined();
+      const button = entry.querySelector("button.broadcast-rail-select");
+      expect(button?.hasAttribute("aria-pressed")).toBe(false);
+    }
   });
   it("renders no collapse toggle when onToggleCollapsed is omitted, and sets no dataset.collapsed attribute", () => {
     const rail = renderCompetitorRail([railEntry()]);

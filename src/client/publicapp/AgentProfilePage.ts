@@ -11,6 +11,7 @@ import {
   APP_SHELL_ROOT_CLASSES,
   appShellFooter,
   appShellHeader,
+  requestUpdateWhenTranslationsReady,
 } from "./AppShellChrome";
 import {
   fetchReadModel,
@@ -85,6 +86,7 @@ export class AgentProfilePage extends LitElement {
   connectedCallback(): void {
     super.connectedCallback();
     void this.load();
+    requestUpdateWhenTranslationsReady(this);
   }
 
   private async load(): Promise<void> {
@@ -165,9 +167,15 @@ export class AgentProfilePage extends LitElement {
   private renderNotFound() {
     return html`
       <h1 class="mb-2 text-xl font-bold text-ink">${this.slug}</h1>
-      <p class="text-sm text-ink-muted">
+      <p class="mb-4 text-sm text-ink-muted">
         ${translateText("agent_profile.not_found_body")}
       </p>
+      <a
+        href="/agents"
+        class="inline-flex min-h-11 items-center justify-center rounded-md border border-line bg-surface-2 px-4 text-sm font-bold text-ink no-underline outline-none hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-accent"
+      >
+        ${translateText("agent_profile.not_found_cta")}
+      </a>
     `;
   }
 
@@ -334,16 +342,27 @@ export class AgentProfilePage extends LitElement {
           : participant.isAlive
             ? { label: translateText("agent_profile.outcome_survived"), cls: "text-ink-muted" }
             : { label: translateText("agent_profile.outcome_eliminated"), cls: "text-ink-muted" };
+    // P2 fix (2026-08-02): rows with the same map, date, and outcome were
+    // visually indistinguishable — added the round number (parity with
+    // LobbyPage's `renderBroadcastCard`, same `lobby.round_suffix`-shaped
+    // key) and switched from a bare date to a full date+time so two
+    // matches completed on the same calendar day are told apart too.
     const when =
       match.completedAt !== null
-        ? new Date(match.completedAt).toLocaleDateString()
+        ? new Date(match.completedAt).toLocaleString()
         : "—";
     const href = match.fullRenderHref ?? match.watchHref;
     return html`
       <li
         class="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-line bg-surface-2 px-3 py-2 text-xs"
       >
-        <span class="text-ink-muted">${match.map}</span>
+        <span class="text-ink-muted"
+          >${match.map}${match.roundNumber !== null
+            ? translateText("agent_profile.round_suffix", {
+                round: match.roundNumber,
+              })
+            : ""}</span
+        >
         <span class="text-ink-muted">${when}</span>
         <span class="font-semibold ${outcome.cls}">${outcome.label}</span>
         <a

@@ -163,6 +163,7 @@ function parseEpisodePlayerRow(value: unknown): ParsedEpisodePlayerRow | null {
 }
 
 interface ParsedEpisodeRow {
+  episodeRequestId: string | null;
   roundNumber: number | null;
   completedAt: string | null;
   map: string | null;
@@ -179,6 +180,7 @@ function parseEpisodeRow(value: unknown): ParsedEpisodeRow | null {
     .map(parseEpisodePlayerRow)
     .filter((row): row is ParsedEpisodePlayerRow => row !== null);
   return {
+    episodeRequestId: asString(value.episodeRequestId),
     roundNumber: asNumber(value.roundNumber),
     completedAt: asString(value.completedAt),
     map: asString(value.map),
@@ -230,6 +232,29 @@ export async function readLeagueMirrorData(
     stale: asBoolean(raw.stale, false),
     standings,
     episodes,
+  };
+}
+
+/** One episode's completion date + replay hrefs, keyed by its `episodeRequestId` — the SAME shape `ProxyWarPublicReadModel.ts`'s `publicFeaturedMatches` already resolves off its own (separately-typed) mirror read, reused here so the narrow, live per-request `/api/featured-matches/:matchId` route reports the identical values rather than defaulting them to `null`. */
+export interface LeagueEpisodeReplayInfo {
+  readonly completedAt: string | null;
+  readonly watchHref: string | null;
+  readonly fullRenderHref: string | null;
+}
+
+/** `null` when no episode in this mirror snapshot carries the given `episodeRequestId` — an honest "not mirrored yet" (or never will be), never fabricated. */
+export function findLeagueEpisodeReplayInfo(
+  data: ParsedLeagueMirrorData,
+  episodeRequestId: string,
+): LeagueEpisodeReplayInfo | null {
+  const episode = data.episodes.find(
+    (candidate) => candidate.episodeRequestId === episodeRequestId,
+  );
+  if (episode === undefined) return null;
+  return {
+    completedAt: episode.completedAt,
+    watchHref: episode.watchHref,
+    fullRenderHref: episode.fullRenderHref,
   };
 }
 

@@ -6,6 +6,7 @@ import {
   APP_SHELL_ROOT_CLASSES,
   appShellFooter,
   appShellHeader,
+  requestUpdateWhenTranslationsReady,
 } from "./AppShellChrome";
 import { fetchReadModel } from "./ReadModelSchema";
 
@@ -43,7 +44,7 @@ const dashboardMatchSchema = z.object({
   matchId: z.string(),
   completedAt: z.string().nullable(),
   watchHref: z.string().nullable(),
-  directorCutHref: z.string().nullable(),
+  replayHref: z.string().nullable(),
 });
 
 const dashboardNextEventSchema = z.object({
@@ -211,6 +212,7 @@ export class BuilderDashboardPage extends LitElement {
   connectedCallback(): void {
     super.connectedCallback();
     void this.load();
+    requestUpdateWhenTranslationsReady(this);
   }
 
   private async load(): Promise<void> {
@@ -359,7 +361,9 @@ export class BuilderDashboardPage extends LitElement {
         </h1>
         ${this.loadState === "loading" ? this.renderLoading() : nothing}
         ${this.loadState === "error" ? this.renderError() : nothing}
-        ${this.loadState === "auth-required" ? this.renderAuthRequired() : nothing}
+        ${this.loadState === "auth-required"
+          ? this.renderAuthRequired()
+          : nothing}
         ${this.loadState === "ready" && this.dashboard !== null
           ? this.renderDashboard(this.dashboard)
           : nothing}
@@ -518,7 +522,10 @@ export class BuilderDashboardPage extends LitElement {
         : "—";
     return html`
       <p class="mb-1 flex flex-wrap items-center gap-2 text-xs text-ink-muted">
-        <span>${translateText("builder_dashboard.latest_match_label")}: ${when}</span>
+        <span
+          >${translateText("builder_dashboard.latest_match_label")}:
+          ${when}</span
+        >
         <a
           href="/match/${encodeURIComponent(match.matchId)}"
           class="font-semibold text-accent no-underline outline-none hover:text-accent-strong focus-visible:ring-2 focus-visible:ring-accent"
@@ -531,11 +538,11 @@ export class BuilderDashboardPage extends LitElement {
               >${translateText("builder_dashboard.watch_link")}</a
             >`
           : nothing}
-        ${match.directorCutHref !== null
+        ${match.replayHref !== null
           ? html`<a
-              href=${match.directorCutHref}
+              href=${match.replayHref}
               class="font-semibold text-ink-muted no-underline outline-none hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
-              >${translateText("builder_dashboard.director_cut_link")}</a
+              >${translateText("builder_dashboard.replay_link")}</a
             >`
           : nothing}
       </p>
@@ -562,7 +569,10 @@ export class BuilderDashboardPage extends LitElement {
 
   private renderReleasesSection(dashboard: BuilderDashboardResponse) {
     return html`
-      <section class="mb-8" aria-labelledby="builder-dashboard-releases-heading">
+      <section
+        class="mb-8"
+        aria-labelledby="builder-dashboard-releases-heading"
+      >
         <h2
           id="builder-dashboard-releases-heading"
           class="mb-2 text-sm font-bold uppercase tracking-wide text-ink-muted"
@@ -593,8 +603,12 @@ export class BuilderDashboardPage extends LitElement {
       <li
         class="flex flex-wrap items-center gap-2 rounded-md border border-line bg-surface-2 px-3 py-2 text-sm"
       >
-        <span class="font-semibold text-ink">${agent?.displayName ?? release.agentId}</span>
-        <span class="font-mono text-xs text-ink-muted">${release.versionLabel}</span>
+        <span class="font-semibold text-ink"
+          >${agent?.displayName ?? release.agentId}</span
+        >
+        <span class="font-mono text-xs text-ink-muted"
+          >${release.versionLabel}</span
+        >
         <span
           class="rounded-full border px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide ${badge.cls}"
           >${translateText(badge.labelKey)}</span
@@ -632,7 +646,9 @@ export class BuilderDashboardPage extends LitElement {
             </option>
             ${dashboard.agents.map(
               (agent) =>
-                html`<option value=${agent.agentId}>${agent.displayName}</option>`,
+                html`<option value=${agent.agentId}>
+                  ${agent.displayName}
+                </option>`,
             )}
           </select>
         </label>
@@ -669,7 +685,11 @@ export class BuilderDashboardPage extends LitElement {
           </summary>
           <div class="mt-2 flex flex-col gap-2">
             <label class="flex flex-col gap-1">
-              <span>${translateText("builder_dashboard.release_base_model_label")}</span>
+              <span
+                >${translateText(
+                  "builder_dashboard.release_base_model_label",
+                )}</span
+              >
               <input
                 type="text"
                 .value=${this.releaseBaseModel}
@@ -681,7 +701,11 @@ export class BuilderDashboardPage extends LitElement {
               />
             </label>
             <label class="flex flex-col gap-1">
-              <span>${translateText("builder_dashboard.release_scaffold_label")}</span>
+              <span
+                >${translateText(
+                  "builder_dashboard.release_scaffold_label",
+                )}</span
+              >
               <input
                 type="text"
                 .value=${this.releaseScaffoldDescription}
@@ -693,7 +717,11 @@ export class BuilderDashboardPage extends LitElement {
               />
             </label>
             <label class="flex flex-col gap-1">
-              <span>${translateText("builder_dashboard.release_source_label")}</span>
+              <span
+                >${translateText(
+                  "builder_dashboard.release_source_label",
+                )}</span
+              >
               <input
                 type="text"
                 .value=${this.releaseSourceDisclosure}
@@ -705,7 +733,11 @@ export class BuilderDashboardPage extends LitElement {
               />
             </label>
             <label class="flex flex-col gap-1">
-              <span>${translateText("builder_dashboard.release_intended_changes_label")}</span>
+              <span
+                >${translateText(
+                  "builder_dashboard.release_intended_changes_label",
+                )}</span
+              >
               <input
                 type="text"
                 .value=${this.releaseIntendedChanges}
@@ -719,7 +751,9 @@ export class BuilderDashboardPage extends LitElement {
           </div>
         </details>
         ${this.releaseError !== null
-          ? html`<p class="text-xs text-danger" role="alert">${this.releaseError}</p>`
+          ? html`<p class="text-xs text-danger" role="alert">
+              ${this.releaseError}
+            </p>`
           : nothing}
         <button
           type="submit"
@@ -768,7 +802,9 @@ export class BuilderDashboardPage extends LitElement {
       <li
         class="flex flex-wrap items-center gap-2 rounded-md border border-line bg-surface-2 px-3 py-2 text-sm"
       >
-        <span class="font-semibold text-ink">${agent?.displayName ?? claim.agentId}</span>
+        <span class="font-semibold text-ink"
+          >${agent?.displayName ?? claim.agentId}</span
+        >
         <span
           class="rounded-full border px-2 py-0.5 text-[11px] font-bold uppercase tracking-wide ${badge.cls}"
           >${translateText(badge.labelKey)}</span

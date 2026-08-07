@@ -24,7 +24,9 @@ export interface AnalyticsReportPageModel {
   recentEvents: AnalyticsRingEntry[];
 }
 
-export function renderAnalyticsReportHtml(model: AnalyticsReportPageModel): string {
+export function renderAnalyticsReportHtml(
+  model: AnalyticsReportPageModel,
+): string {
   const { report } = model;
   return `<!doctype html>
 <html lang="en">
@@ -81,13 +83,6 @@ export function renderAnalyticsReportHtml(model: AnalyticsReportPageModel): stri
     </section>
 
     <section class="panel">
-      <h2>Director Cut milestones</h2>
-      <div class="grid">
-        ${report.directorCutMilestones.map(rateStatCard).join("\n")}
-      </div>
-    </section>
-
-    <section class="panel">
       <h2>Full Replay milestones (raw counts — no "started" baseline to divide by)</h2>
       <div class="grid">
         ${report.fullReplayMilestones.map(countStatCard).join("\n")}
@@ -132,7 +127,8 @@ export function renderAnalyticsReportHtml(model: AnalyticsReportPageModel): stri
 
 function statusPill(status: MetricStatus): string {
   if (status === "measured") return `<span class="pill good">measured</span>`;
-  if (status === "insufficient_traffic") return `<span class="pill warn">insufficient traffic</span>`;
+  if (status === "insufficient_traffic")
+    return `<span class="pill warn">insufficient traffic</span>`;
   return `<span class="pill muted">not yet instrumented</span>`;
 }
 
@@ -160,7 +156,10 @@ function countStatCard(metric: CountMetric): string {
 
 function funnelStageTable(metric: FunnelStageMetric): string {
   const rows = metric.stages
-    .map((stage) => `<tr><td>${escapeHtml(stage.stage)}</td><td>${stage.count}</td></tr>`)
+    .map(
+      (stage) =>
+        `<tr><td>${escapeHtml(stage.stage)}</td><td>${stage.count}</td></tr>`,
+    )
     .join("\n");
   return `<p class="methodology">${escapeHtml(metric.methodology)} ${statusPill(metric.status)}</p>
   <table><thead><tr><th>Stage</th><th>Count</th></tr></thead><tbody>${rows}</tbody></table>`;
@@ -171,7 +170,10 @@ function rankingTable(metric: RankingMetric, keyLabel: string): string {
     return `<p class="empty">No data yet. ${statusPill(metric.status)}</p><p class="methodology">${escapeHtml(metric.methodology)}</p>`;
   }
   const rows = metric.items
-    .map((item) => `<tr><td>${escapeHtml(item.key)}</td><td>${item.count}</td></tr>`)
+    .map(
+      (item) =>
+        `<tr><td>${escapeHtml(item.key)}</td><td>${item.count}</td></tr>`,
+    )
     .join("\n");
   return `<table><thead><tr><th>${escapeHtml(keyLabel)}</th><th>Count</th></tr></thead><tbody>${rows}</tbody></table>
   <p class="methodology">${escapeHtml(metric.methodology)}</p>`;
@@ -182,7 +184,10 @@ function routeBreakdownTable(metric: RouteBreakdownMetric): string {
     return `<p class="empty">No data yet. ${statusPill(metric.status)}</p><p class="methodology">${escapeHtml(metric.methodology)}</p>`;
   }
   const rows = metric.items
-    .map((item) => `<tr><td><code>${escapeHtml(item.route)}</code></td><td>${item.count}</td></tr>`)
+    .map(
+      (item) =>
+        `<tr><td><code>${escapeHtml(item.route)}</code></td><td>${item.count}</td></tr>`,
+    )
     .join("\n");
   return `<table><thead><tr><th>Route</th><th>Count</th></tr></thead><tbody>${rows}</tbody></table>
   <p class="methodology">${escapeHtml(metric.methodology)}</p>`;

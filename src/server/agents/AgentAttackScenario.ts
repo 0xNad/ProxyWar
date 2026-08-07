@@ -249,5 +249,11 @@ function candidateFromTile(gameMap: GameMap, tile: TileRef): SpawnCandidate {
       Math.abs(y - centerY) /
         Math.max(centerY, gameMap.height() - 1 - centerY, 1),
     opportunityScore: edgeDistance / maxEdgeDistance,
+    // These hand-picked attacker/target/extra candidates are consumed
+    // directly by the controlled attack-scenario test (submitted straight
+    // via AgentRunner.submitLegalAction) - never through
+    // AgentSpawnAssignment's quality-floor filter, so this placeholder
+    // never affects any real selection.
+    localLandScore: 1,
   };
 }

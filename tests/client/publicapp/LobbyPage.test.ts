@@ -1,14 +1,15 @@
 /**
  * Coverage for `/`'s event-first hero (Season Zero activation prompt
- * Phase 5): a promotable Featured Event (live/upcoming), the best-recent-
- * Director-Cut fallback, and the honest empty state — plus the below-hero
- * modules (Season schedule, League movement, Agents to know, Recent
- * Director Cuts, Builder band) and the "no game bundle on the homepage"
- * invariant. Follows the mount-into-jsdom + stubbed global fetch
- * convention already established in `WatchPage.test.ts`.
+ * Phase 5): a promotable Featured Event (live/upcoming) and the honest
+ * empty state when none exists — plus the below-hero modules (Season
+ * schedule, League movement, Agents to know, Recent Broadcasts, Builder
+ * band) and the "no game bundle on the homepage" invariant. Follows the
+ * mount-into-jsdom + stubbed global fetch convention already established
+ * in `WatchPage.test.ts`.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Mock } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { analytics } from "../../../src/client/analytics/AnalyticsClient";
 import "../../../src/client/publicapp/LobbyPage";
 import type { LobbyPage } from "../../../src/client/publicapp/LobbyPage";
 import type {
@@ -19,7 +20,6 @@ import type {
   ReadModel,
 } from "../../../src/client/publicapp/ReadModelSchema";
 import type * as UtilsModule from "../../../src/client/Utils";
-import { analytics } from "../../../src/client/analytics/AnalyticsClient";
 
 vi.mock("../../../src/client/Utils", async (importOriginal) => ({
   ...(await importOriginal<typeof UtilsModule>()),
@@ -70,13 +70,14 @@ function match(overrides: Partial<PublicMatch>): PublicMatch {
     watchHref: null,
     fullRenderHref: null,
     premiereHref: null,
-    directorCut: null,
     dramaEvidence: null,
     ...overrides,
   };
 }
 
-function featuredMatch(overrides: Partial<PublicFeaturedMatch> = {}): PublicFeaturedMatch {
+function featuredMatch(
+  overrides: Partial<PublicFeaturedMatch> = {},
+): PublicFeaturedMatch {
   return {
     matchId: "feat_11111111111111111111",
     lane: "premiere",
@@ -89,12 +90,13 @@ function featuredMatch(overrides: Partial<PublicFeaturedMatch> = {}): PublicFeat
     scheduledAt: new Date(Date.now() + 600_000).toISOString(),
     revealAt: null,
     completedAt: null,
+    watchHref: null,
+    fullRenderHref: null,
     postMatchSummary: null,
     result: null,
     isPubliclyPromotable: true,
     subtitle: "A duel worth watching",
     reasonToWatch: ["Auri debuts v43 after a strong run."],
-    directorCutEstimateSeconds: 360,
     canonicalMatchUrl: "/match/feat_11111111111111111111",
     canonicalPremiereUrl: "/premiere/prem_abc",
     ...overrides,
@@ -180,10 +182,13 @@ function participantCard(
 }
 
 function stubReadModelFetch(model: ReadModel): Mock {
-  const fetchMock = vi.fn(async () => ({
-    ok: true,
-    json: async () => model,
-  }) as Response);
+  const fetchMock = vi.fn(
+    async () =>
+      ({
+        ok: true,
+        json: async () => model,
+      }) as Response,
+  );
   vi.stubGlobal("fetch", fetchMock);
   return fetchMock;
 }
@@ -198,7 +203,10 @@ function stubReadModelFetch(model: ReadModel): Mock {
  */
 function stubReadModelAndFeaturedMatchFetch(
   model: ReadModel,
-  participants: FeaturedEventParticipantFixture[] | "network-error" | "malformed",
+  participants:
+    | FeaturedEventParticipantFixture[]
+    | "network-error"
+    | "malformed",
 ): Mock {
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
@@ -255,7 +263,9 @@ describe("lobby-page hero: promotable event", () => {
     stubReadModelAndFeaturedMatchFetch(
       readModel({
         featuredMatches: [
-          featuredMatch({ scheduledAt: new Date(Date.now() - 60_000).toISOString() }),
+          featuredMatch({
+            scheduledAt: new Date(Date.now() - 60_000).toISOString(),
+          }),
         ],
       }),
       [],
@@ -289,25 +299,17 @@ describe("lobby-page hero: promotable event", () => {
     expect(el.textContent).not.toContain("Auri vs Sefirot");
   });
 
-  it("ignores an archive-lane featured match for the hero spotlight (archive belongs to Recent Director Cuts)", async () => {
+  it("ignores an archive-lane featured match for the hero spotlight (archive belongs to Recent Broadcasts)", async () => {
     stubReadModelFetch(
       readModel({
-        featuredMatches: [featuredMatch({ lane: "archive", scheduledAt: null })],
+        featuredMatches: [
+          featuredMatch({ lane: "archive", scheduledAt: null }),
+        ],
       }),
     );
     const el = mount();
     await flushMicrotasks();
     expect(el.textContent).not.toContain("Auri vs Sefirot");
-  });
-
-  it("renders the Director Cut runtime once known", async () => {
-    stubReadModelAndFeaturedMatchFetch(
-      readModel({ featuredMatches: [featuredMatch({ directorCutEstimateSeconds: 420 })] }),
-      [],
-    );
-    const el = mount();
-    await flushMicrotasks();
-    expect(el.textContent).toContain("lobby.event_stage_director_cut_runtime:{\"minutes\":7}");
   });
 
   it("renders participant lineup once the narrow route resolves a non-empty roster", async () => {
@@ -375,18 +377,18 @@ describe("lobby-page hero analytics", () => {
       eventSlug: "feat_impr",
     });
     expect(
-      vi.mocked(analytics.track).mock.calls.filter(
-        (call) => call[0] === "featured_event_impression",
-      ),
+      vi
+        .mocked(analytics.track)
+        .mock.calls.filter((call) => call[0] === "featured_event_impression"),
     ).toHaveLength(1);
     // The 1s tick re-renders the hero (countdown/elapsed note) without
     // changing the hero's matchId — the impression must not re-fire.
     vi.advanceTimersByTime(3000);
     await flushMicrotasks();
     expect(
-      vi.mocked(analytics.track).mock.calls.filter(
-        (call) => call[0] === "featured_event_impression",
-      ),
+      vi
+        .mocked(analytics.track)
+        .mock.calls.filter((call) => call[0] === "featured_event_impression"),
     ).toHaveLength(1);
   });
 
@@ -397,17 +399,28 @@ describe("lobby-page hero analytics", () => {
     );
     const el = mount();
     await flushMicrotasks();
-    const cta = el.querySelector('a[href="/premiere/prem_abc"]') as HTMLAnchorElement | null;
+    const cta = el.querySelector(
+      'a[href="/premiere/prem_abc"]',
+    ) as HTMLAnchorElement | null;
     expect(cta).not.toBeNull();
-    cta!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    cta!.dispatchEvent(
+      new MouseEvent("click", { bubbles: true, cancelable: true }),
+    );
     expect(analytics.track).toHaveBeenCalledWith("event_cta_clicked", {
       eventSlug: "feat_cta",
     });
   });
 });
 
-describe("lobby-page hero: Director Cut fallback (no promotable event)", () => {
-  it("leads with the best recent Director Cut, showing competitors, runtime, and reason to watch — never a bare map+round card", async () => {
+describe("lobby-page hero: empty state (no promotable event)", () => {
+  it("falls back to the honest empty state when there is no watchable match at all", async () => {
+    stubReadModelFetch(readModel({}));
+    const el = mount();
+    await flushMicrotasks();
+    expect(el.textContent).toContain("lobby.no_premiere_title");
+  });
+
+  it("still falls back to the honest empty state when matches exist but none is promotable — never a fabricated substitute event", async () => {
     stubReadModelFetch(
       readModel({
         matches: [
@@ -416,56 +429,22 @@ describe("lobby-page hero: Director Cut fallback (no promotable event)", () => {
             map: "Ashfields",
             completedAt: "2026-07-01T00:00:00.000Z",
             fullRenderHref: "/render/m_high_drama",
-            directorCut: { durationEstimateSeconds: 300, segmentCount: 5 },
-            dramaEvidence: { curatedDramaScore: 88, entertainmentGrade: "dramatic" },
-            participants: [
-              { slot: 0, agentSlug: "agent-one", displayName: "Agent One", tilesOwned: 10, isAlive: true, isWinner: true, color: "#111" },
-            ],
+            dramaEvidence: {
+              curatedDramaScore: 88,
+              entertainmentGrade: "dramatic",
+            },
           }),
         ],
-        agents: [agent({ slug: "agent-one", displayName: "Agent One", emblemSvg: "<svg data-test-emblem=\"fallback\"></svg>" })],
       }),
     );
-    const el = mount();
-    await flushMicrotasks();
-    expect(el.textContent).toContain("lobby.recent_battle_badge");
-    expect(el.textContent).toContain("lobby.high_drama_badge");
-    expect(el.textContent).toContain("Ashfields");
-    expect(el.textContent).toContain("lobby.event_stage_director_cut_runtime:{\"minutes\":5}");
-    expect(el.textContent).toContain("Agent One");
-    expect(el.innerHTML).toContain('data-test-emblem="fallback"');
-    expect(el.textContent).toContain("lobby.event_stage_director_cut_cta:{\"minutes\":5}");
-  });
-
-  it("shows the next expected schedule window from the active season when one exists", async () => {
-    const future = new Date(Date.now() + 86_400_000).toISOString();
-    stubReadModelFetch(
-      readModel({
-        matches: [match({ fullRenderHref: "/render/m1" })],
-        seasons: [
-          season({ eventSlots: [{ featuredMatchId: "feat_zzz", scheduledAt: future }] }),
-        ],
-      }),
-    );
-    const el = mount();
-    await flushMicrotasks();
-    expect(el.textContent).toContain("lobby.next_expected_window");
-  });
-
-  it("omits the next-expected-window line when no future slot exists", async () => {
-    stubReadModelFetch(
-      readModel({ matches: [match({ fullRenderHref: "/render/m1" })] }),
-    );
-    const el = mount();
-    await flushMicrotasks();
-    expect(el.textContent).not.toContain("lobby.next_expected_window");
-  });
-
-  it("falls back to the honest empty state when there is no watchable match at all", async () => {
-    stubReadModelFetch(readModel({}));
     const el = mount();
     await flushMicrotasks();
     expect(el.textContent).toContain("lobby.no_premiere_title");
+    const hero = el.querySelector('[aria-label="lobby.hero_aria_label"]');
+    expect(hero).not.toBeNull();
+    expect(hero!.textContent).not.toContain("Ashfields");
+    expect(el.textContent).not.toContain("lobby.recent_battle_badge");
+    expect(el.textContent).not.toContain("lobby.high_drama_badge");
   });
 });
 
@@ -477,7 +456,10 @@ describe("lobby-page season schedule module", () => {
         seasons: [
           season({
             eventSlots: [
-              { featuredMatchId: "feat_slot1", scheduledAt: "2026-08-08T18:00:00.000Z" },
+              {
+                featuredMatchId: "feat_slot1",
+                scheduledAt: "2026-08-08T18:00:00.000Z",
+              },
             ],
           }),
         ],
@@ -492,11 +474,16 @@ describe("lobby-page season schedule module", () => {
   it("2026-08-01 P0: a premiere-lane slot shows a 'Premieres' label, never a bare date", async () => {
     stubReadModelFetch(
       readModel({
-        featuredMatches: [featuredMatch({ matchId: "feat_slot1", lane: "premiere" })],
+        featuredMatches: [
+          featuredMatch({ matchId: "feat_slot1", lane: "premiere" }),
+        ],
         seasons: [
           season({
             eventSlots: [
-              { featuredMatchId: "feat_slot1", scheduledAt: "2026-08-08T18:00:00.000Z" },
+              {
+                featuredMatchId: "feat_slot1",
+                scheduledAt: "2026-08-08T18:00:00.000Z",
+              },
             ],
           }),
         ],
@@ -505,7 +492,9 @@ describe("lobby-page season schedule module", () => {
     const el = mount();
     await flushMicrotasks();
     expect(el.textContent).toContain("lobby.season_schedule_premiere_label");
-    expect(el.textContent).not.toContain("lobby.season_schedule_spotlight_label");
+    expect(el.textContent).not.toContain(
+      "lobby.season_schedule_spotlight_label",
+    );
     expect(el.textContent).not.toContain("lobby.season_schedule_played_note");
   });
 
@@ -526,7 +515,10 @@ describe("lobby-page season schedule module", () => {
               // The season programme's own "featuring starting" date — a
               // FUTURE date relative to the match's real completedAt, the
               // exact real-world scenario the P0 review flagged.
-              { featuredMatchId: "feat_slot1", scheduledAt: "2026-08-03T18:00:00.000Z" },
+              {
+                featuredMatchId: "feat_slot1",
+                scheduledAt: "2026-08-03T18:00:00.000Z",
+              },
             ],
           }),
         ],
@@ -536,7 +528,9 @@ describe("lobby-page season schedule module", () => {
     await flushMicrotasks();
     expect(el.textContent).toContain("lobby.season_schedule_spotlight_label");
     expect(el.textContent).toContain("lobby.season_schedule_played_note");
-    expect(el.textContent).not.toContain("lobby.season_schedule_premiere_label");
+    expect(el.textContent).not.toContain(
+      "lobby.season_schedule_premiere_label",
+    );
   });
 
   it("shows a TBD placeholder for a slot whose featuredMatchId doesn't resolve", async () => {
@@ -544,7 +538,12 @@ describe("lobby-page season schedule module", () => {
       readModel({
         seasons: [
           season({
-            eventSlots: [{ featuredMatchId: "feat_unresolved", scheduledAt: "2026-08-08T18:00:00.000Z" }],
+            eventSlots: [
+              {
+                featuredMatchId: "feat_unresolved",
+                scheduledAt: "2026-08-08T18:00:00.000Z",
+              },
+            ],
           }),
         ],
       }),
@@ -555,7 +554,9 @@ describe("lobby-page season schedule module", () => {
   });
 
   it("renders nothing when no season is active", async () => {
-    stubReadModelFetch(readModel({ seasons: [season({ state: "completed" })] }));
+    stubReadModelFetch(
+      readModel({ seasons: [season({ state: "completed" })] }),
+    );
     const el = mount();
     await flushMicrotasks();
     expect(el.textContent).not.toContain("lobby.season_schedule_heading");
@@ -575,8 +576,20 @@ describe("lobby-page league movement module", () => {
               winrate: null,
               score: {
                 points: [
-                  { recordedAt: "t1", score: 5, rank: 3, activeVersionLabel: "v1", versionFirstObserved: false },
-                  { recordedAt: "t2", score: 10, rank: 1, activeVersionLabel: "v2", versionFirstObserved: true },
+                  {
+                    recordedAt: "t1",
+                    score: 5,
+                    rank: 3,
+                    activeVersionLabel: "v1",
+                    versionFirstObserved: false,
+                  },
+                  {
+                    recordedAt: "t2",
+                    score: 10,
+                    rank: 1,
+                    activeVersionLabel: "v2",
+                    versionFirstObserved: true,
+                  },
                 ],
                 recordedSince: "t1",
                 methodology: "x",
@@ -589,7 +602,7 @@ describe("lobby-page league movement module", () => {
     const el = mount();
     await flushMicrotasks();
     expect(el.textContent).toContain("lobby.league_movement_heading");
-    expect(el.textContent).toContain("lobby.rank_change_up:{\"delta\":2}");
+    expect(el.textContent).toContain('lobby.rank_change_up:{"delta":2}');
     expect(el.textContent).toContain("lobby.version_debut_badge");
   });
 
@@ -626,7 +639,9 @@ describe("lobby-page agents-to-know module", () => {
     );
     const el = mount();
     await flushMicrotasks();
-    expect(el.textContent).toContain("Aggressive early-game expansion, ruthless alliances.");
+    expect(el.textContent).toContain(
+      "Aggressive early-game expansion, ruthless alliances.",
+    );
     expect(el.textContent).not.toContain("lobby.recent_wins");
   });
 
@@ -637,16 +652,18 @@ describe("lobby-page agents-to-know module", () => {
           match({ matchId: "m1", winnerAgentSlug: "grinder" }),
           match({ matchId: "m2", winnerAgentSlug: "grinder" }),
         ],
-        agents: [agent({ slug: "grinder", displayName: "Grinder", tagline: null })],
+        agents: [
+          agent({ slug: "grinder", displayName: "Grinder", tagline: null }),
+        ],
       }),
     );
     const el = mount();
     await flushMicrotasks();
-    expect(el.textContent).toContain("lobby.recent_wins:{\"count\":2}");
+    expect(el.textContent).toContain('lobby.recent_wins:{"count":2}');
   });
 });
 
-describe("lobby-page recent Director Cuts module", () => {
+describe("lobby-page recent broadcasts module", () => {
   it("renders participant chips on each card, joined against agents[] for emblems", async () => {
     stubReadModelFetch(
       readModel({
@@ -655,7 +672,15 @@ describe("lobby-page recent Director Cuts module", () => {
             matchId: "m_recent",
             completedAt: "2026-07-05T00:00:00.000Z",
             participants: [
-              { slot: 0, agentSlug: "agent-one", displayName: "Agent One", tilesOwned: 5, isAlive: true, isWinner: true, color: "#111" },
+              {
+                slot: 0,
+                agentSlug: "agent-one",
+                displayName: "Agent One",
+                tilesOwned: 5,
+                isAlive: true,
+                isWinner: true,
+                color: "#111",
+              },
             ],
           }),
         ],
@@ -668,7 +693,7 @@ describe("lobby-page recent Director Cuts module", () => {
     expect(el.textContent).toContain("Agent One");
   });
 
-  it("gates View match / Watch replay links behind the same reveal disclosure as the winner text (P0 fix, live 2026-08-02)", async () => {
+  it("gates View match / Watch replay links behind the same reveal disclosure as the winner text (P0 fix, live 2026-08-02) — no anchor exists in the DOM at all until revealed (P2 defense-in-depth, pass-3 2026-08-02)", async () => {
     stubReadModelFetch(
       readModel({
         matches: [
@@ -676,17 +701,20 @@ describe("lobby-page recent Director Cuts module", () => {
             matchId: "m_recent",
             completedAt: "2026-07-05T00:00:00.000Z",
             winnerAgentSlug: "agent-one",
-            // Deliberately no fullRenderHref: the hero's own Director-Cut
-            // fallback (`renderHeroDirectorCutFallback`) only considers
-            // matches with a fullRenderHref, and its own CTA is a separate,
-            // already spoiler-safe design (no winner text at all) that this
-            // test must not accidentally also exercise — watchHref alone
-            // keeps this match OUT of the hero and IN "Recent Broadcasts"
-            // only, so there is exactly one <details> and one pair of
-            // links to assert on.
+            // Deliberately no fullRenderHref: "Watch replay" resolves to
+            // `fullRenderHref ?? watchHref`, so leaving it unset keeps
+            // watchHref as the one replay link this test asserts on.
             watchHref: "/ai-league-runs/coworld-run/spectator.html",
             participants: [
-              { slot: 0, agentSlug: "agent-one", displayName: "Agent One", tilesOwned: 5, isAlive: true, isWinner: true, color: "#111" },
+              {
+                slot: 0,
+                agentSlug: "agent-one",
+                displayName: "Agent One",
+                tilesOwned: 5,
+                isAlive: true,
+                isWinner: true,
+                color: "#111",
+              },
             ],
           }),
         ],
@@ -697,17 +725,31 @@ describe("lobby-page recent Director Cuts module", () => {
     await flushMicrotasks();
     const details = el.querySelector("details");
     expect(details).not.toBeNull();
+    // Pre-reveal: neither anchor exists ANYWHERE in the DOM, not merely
+    // hidden by <details>'s own display:none — a devtools/source
+    // inspection before ever clicking "Reveal result" finds no href to
+    // the archive page or the replay at all. (The winner text itself
+    // stays inside the collapsed <details> unconditionally, same as
+    // before this fix — this scope is the anchors only.)
+    expect(el.querySelector('a[href="/match/m_recent"]')).toBeNull();
+    expect(
+      el.querySelector('a[href="/ai-league-runs/coworld-run/spectator.html"]'),
+    ).toBeNull();
+
+    // Reveal: opening the <details> (the same state change a real click on
+    // <summary> produces) now renders both anchors as descendants of that
+    // exact <details>. Set `.open` directly + dispatch "toggle" rather than
+    // a synthetic click, since jsdom does not implement the browser's
+    // native <summary>-click-toggles-<details> behavior.
+    (details as HTMLDetailsElement).open = true;
+    details!.dispatchEvent(new Event("toggle"));
+    await flushMicrotasks();
     const matchLink = el.querySelector('a[href="/match/m_recent"]');
     const replayLink = el.querySelector(
       'a[href="/ai-league-runs/coworld-run/spectator.html"]',
     );
     expect(matchLink).not.toBeNull();
     expect(replayLink).not.toBeNull();
-    // The live bug: both links sat as siblings AFTER </details>, so a
-    // visitor who never expanded "Reveal result" could still click
-    // straight through to the ungated /match/:matchId archive page (full
-    // placements) or the replay. Both must now be DESCENDANTS of the same
-    // <details> the winner text is gated behind.
     expect(matchLink!.closest("details")).toBe(details);
     expect(replayLink!.closest("details")).toBe(details);
     expect(details!.textContent).toContain("lobby.winner_announcement");
@@ -772,10 +814,14 @@ describe("lobby-page hero live timers", () => {
     );
     const el = mount();
     await flushMicrotasks();
-    expect(el.textContent).toContain('lobby.countdown_value:{"duration":"1m 0s"}');
+    expect(el.textContent).toContain(
+      'lobby.countdown_value:{"duration":"1m 0s"}',
+    );
     vi.advanceTimersByTime(5000);
     await flushMicrotasks();
-    expect(el.textContent).toContain('lobby.countdown_value:{"duration":"55s"}');
+    expect(el.textContent).toContain(
+      'lobby.countdown_value:{"duration":"55s"}',
+    );
   });
 
   it("upcoming: an armed reminder fires at scheduled time — flashes the tab title, shows the live cue, marks itself fired", async () => {
@@ -785,7 +831,10 @@ describe("lobby-page hero live timers", () => {
     stubReadModelAndFeaturedMatchFetch(
       readModel({
         featuredMatches: [
-          featuredMatch({ matchId: "feat_fire", scheduledAt: "2026-07-31T00:00:05.000Z" }),
+          featuredMatch({
+            matchId: "feat_fire",
+            scheduledAt: "2026-07-31T00:00:05.000Z",
+          }),
         ],
       }),
       [],
@@ -798,7 +847,9 @@ describe("lobby-page hero live timers", () => {
     await flushMicrotasks();
     expect(document.title.startsWith("LIVE:")).toBe(true);
     expect(el.textContent).toContain("lobby.remind_me_live_cue");
-    expect(localStorage.getItem("proxywar:premiere-reminder:feat_fire")).toBe("fired");
+    expect(localStorage.getItem("proxywar:premiere-reminder:feat_fire")).toBe(
+      "fired",
+    );
   });
 });
 
@@ -831,9 +882,15 @@ describe("lobby-page: Add to calendar and Remind me", () => {
         capturedBlob = obj as Blob;
         return "blob:mock-url";
       });
-    const revokeObjectURLSpy = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
-    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
-    link!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    const revokeObjectURLSpy = vi
+      .spyOn(URL, "revokeObjectURL")
+      .mockImplementation(() => {});
+    const clickSpy = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => {});
+    link!.dispatchEvent(
+      new MouseEvent("click", { bubbles: true, cancelable: true }),
+    );
     expect(createObjectURLSpy).toHaveBeenCalledTimes(1);
     expect(capturedBlob).not.toBeNull();
     const text = await capturedBlob!.text();
@@ -854,9 +911,13 @@ describe("lobby-page: Add to calendar and Remind me", () => {
     const button = el.querySelector("button") as HTMLButtonElement;
     button.click();
     await flushMicrotasks();
-    expect(localStorage.getItem("proxywar:premiere-reminder:feat_ics")).toBe("armed");
+    expect(localStorage.getItem("proxywar:premiere-reminder:feat_ics")).toBe(
+      "armed",
+    );
     expect(el.textContent).toContain("lobby.remind_me_armed");
-    expect((el.querySelector("button") as HTMLButtonElement).disabled).toBe(true);
+    expect((el.querySelector("button") as HTMLButtonElement).disabled).toBe(
+      true,
+    );
 
     document.body.innerHTML = "";
     stubReadModelAndFeaturedMatchFetch(upcomingReadModel(), []);

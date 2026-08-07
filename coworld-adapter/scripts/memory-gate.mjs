@@ -8,10 +8,13 @@
 // asserts on the [MEM] stderr telemetry the episode already emits:
 //
 //   1. CEILING  — max observed rssMB must stay under the threshold.
-//   2. SLOPE    — least-squares RSS growth per 1,000 turns (turns >= warmup)
-//                 must stay under the threshold. The 2026-07 World 12P OOM
-//                 class grew +8.6 MB/1k turns; the fixed pipeline measures
-//                 well under 2.
+//   2. SLOPE    — least-squares heapUsedMB growth per 1,000 turns, fit over
+//                 the final window (see SLOPE_WINDOW_TURNS below), must
+//                 stay under the threshold. heapUsedMB (sampled
+//                 post-forced-GC) tracks the live JS heap, not noisy RSS;
+//                 the fixed pipeline measures ~1.8-2.8 MB/1k late-window,
+//                 well under the 4 MB/1k default. The full-run fit is also
+//                 computed and reported for context (see below).
 //   3. OUTCOME  — the episode must complete and write results.json.
 //
 // Certification smokes (2 steps x 25 turns) can never see turn-linear growth;
@@ -24,16 +27,11 @@
 //                                          tournament-12p-world)
 //   PROXYWAR_MEMORY_GATE_STEPS=<n>         decision steps (default 80)
 //   PROXYWAR_MEMORY_GATE_MAX_RSS_MB=<n>    ceiling (default 600)
-//   PROXYWAR_MEMORY_GATE_MAX_SLOPE=<n>     MB per 1k turns (default 4)
+//   PROXYWAR_MEMORY_GATE_MAX_SLOPE=<n>     MB per 1k turns on heapUsedMB (default 4)
 //   PROXYWAR_MEMORY_GATE_TIMEOUT_MS=<n>    hard timeout (default 1,800,000)
 
 import { spawn } from "node:child_process";
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -53,13 +51,19 @@ const MAX_SLOPE = Number(process.env.PROXYWAR_MEMORY_GATE_MAX_SLOPE ?? 4);
 const TIMEOUT_MS = Number(
   process.env.PROXYWAR_MEMORY_GATE_TIMEOUT_MS ?? 1_800_000,
 );
-// The asserted slope fits ONLY the final window of the episode. Territorial
-// expansion legitimately grows the live set for as long as it runs, and how
-// long it runs scales with the map (World saturates ~turn 5k; Britannia's
-// islands push past 6k) — a full-run fit flags big maps for being big. A
-// leak, by definition, is still growing at the END; the 2026-07 leak class
-// (+8.6 MB/1k) fails a late-window fit just as loudly. Qualification data,
-// all maps, forced-GC series: late-3k slopes -9.9..+3.4 for healthy runs.
+// heapUsedMB (post-forced-GC, see PROXYWAR_MEM_TELEMETRY_FORCE_GC below) is
+// the gating series, not RSS: on the SAME shipped SHA, RSS slope swung
+// -11..+34 MB/1k between runs (allocator/OS noise), while the post-GC
+// heapUsedMB slope stayed ~1.84-2.79 MB/1k across those identical runs; RSS
+// alone flipped between pass and fail, falsely asserting a leak.
+// Only the FINAL window is gated, same as the original RSS design. Initial
+// world/colonization setup legitimately grows the live heap for as long as
+// it runs: this pipeline's own qualification run measured heapUsedMB
+// climbing 37->67MB over the first 4,000 turns, then a near-flat 67->76MB
+// over the last 4,400 — a full-run fit of 4.22 MB/1k (which would false-fail
+// at the same threshold) vs a late-window fit of 1.90. A leak, by
+// definition, is still growing at the END; the full-run fit is computed and
+// reported (fullRunSlopeMBPer1k) for context but does not gate.
 const SLOPE_WINDOW_TURNS = Number(
   process.env.PROXYWAR_MEMORY_GATE_SLOPE_WINDOW ?? 3_000,
 );
@@ -96,11 +100,7 @@ if (SKIP) {
   process.exit(0);
 }
 
-const manifestPath = path.join(
-  adapterRoot,
-  "coworld",
-  "coworld_manifest.json",
-);
+const manifestPath = path.join(adapterRoot, "coworld", "coworld_manifest.json");
 const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
 const variant = (manifest.variants ?? []).find((v) => v?.id === VARIANT_ID);
 if (variant === undefined || variant.game_config === undefined) {
@@ -171,7 +171,7 @@ const child = spawn(
 
 let stdout = "";
 let stderrTail = [];
-const memSamples = []; // {turn, rssMB}
+const memSamples = []; // {turn, rssMB, heapUsedMB}
 let maxRss = 0;
 let maxRssTurn = 0;
 
@@ -187,11 +187,12 @@ child.stderr.on("data", (chunk) => {
     if (stderrTail.length > 200) {
       stderrTail = stderrTail.slice(-100);
     }
-    const m = line.match(/\[MEM\] \S+ turn=(\d+) rssMB=(\d+)/);
+    const m = line.match(/\[MEM\] \S+ turn=(\d+) rssMB=(\d+) heapUsedMB=(\d+)/);
     if (m !== null) {
       const turn = Number(m[1]);
       const rssMB = Number(m[2]);
-      memSamples.push({ turn, rssMB });
+      const heapUsedMB = Number(m[3]);
+      memSamples.push({ turn, rssMB, heapUsedMB });
       if (rssMB > maxRss) {
         maxRss = rssMB;
         maxRssTurn = turn;
@@ -263,35 +264,43 @@ child.on("close", (code) => {
     );
   }
 
-  // Least-squares slope in MB per 1k turns over a sample window.
-  const fitSlope = (samples) => {
+  // Least-squares slope in MB per 1k turns over a sample window, for a
+  // given [MEM] field.
+  const fitSlope = (samples, valueOf) => {
     if (samples.length < 3) {
       return 0;
     }
     const n = samples.length;
     const meanTurn = samples.reduce((a, s) => a + s.turn, 0) / n;
-    const meanRss = samples.reduce((a, s) => a + s.rssMB, 0) / n;
+    const meanValue = samples.reduce((a, s) => a + valueOf(s), 0) / n;
     let num = 0;
     let den = 0;
     for (const s of samples) {
-      num += (s.turn - meanTurn) * (s.rssMB - meanRss);
+      num += (s.turn - meanTurn) * (valueOf(s) - meanValue);
       den += (s.turn - meanTurn) * (s.turn - meanTurn);
     }
     return den === 0 ? 0 : (num / den) * 1000;
   };
   const lastTurn = memSamples[memSamples.length - 1].turn;
-  // Asserted: the FINAL window only (see SLOPE_WINDOW_TURNS). Reported for
-  // context: the full-run fit, which includes legitimate expansion growth.
-  const slope = fitSlope(
-    memSamples.filter((s) => s.turn >= lastTurn - SLOPE_WINDOW_TURNS),
+  const lateWindowSamples = memSamples.filter(
+    (s) => s.turn >= lastTurn - SLOPE_WINDOW_TURNS,
   );
-  const fullRunSlope = fitSlope(memSamples);
+  // Gated: the late-window post-forced-GC heapUsedMB fit (see the
+  // SLOPE_WINDOW_TURNS comment above for why the full run and RSS aren't
+  // used for gating).
+  const slope = fitSlope(lateWindowSamples, (s) => s.heapUsedMB);
+  // Context only, not gated — reported so early-game heap growth and RSS
+  // behavior both stay visible in the evidence.
+  const fullRunSlope = fitSlope(memSamples, (s) => s.heapUsedMB);
+  const rssSlope = fitSlope(lateWindowSamples, (s) => s.rssMB);
+  const rssFullRunSlope = fitSlope(memSamples, (s) => s.rssMB);
 
   const turnCount = results?.turn_count ?? "?";
   console.error(
     `[memory-gate] episode complete: turns=${turnCount} samples=${memSamples.length} ` +
-      `maxRss=${maxRss}MB@turn=${maxRssTurn} lateSlope=${slope.toFixed(2)}MB/1k ` +
-      `(full-run ${fullRunSlope.toFixed(2)})`,
+      `maxRss=${maxRss}MB@turn=${maxRssTurn} heapUsed lateSlope=${slope.toFixed(2)}MB/1k ` +
+      `(gated; full-run ${fullRunSlope.toFixed(2)}, context) rss lateSlope=${rssSlope.toFixed(2)}MB/1k ` +
+      `(full-run ${rssFullRunSlope.toFixed(2)}, context)`,
   );
 
   const evidence = {
@@ -301,9 +310,12 @@ child.on("close", (code) => {
     samples: memSamples,
     maxRssMB: maxRss,
     maxRssTurn,
+    slopeMetric: "heapUsedMB",
     slopeMBPer1k: Number(slope.toFixed(3)),
     slopeWindowTurns: SLOPE_WINDOW_TURNS,
     fullRunSlopeMBPer1k: Number(fullRunSlope.toFixed(3)),
+    rssSlopeMBPer1k: Number(rssSlope.toFixed(3)),
+    rssFullRunSlopeMBPer1k: Number(rssFullRunSlope.toFixed(3)),
     ceilingMB: MAX_RSS_MB,
     maxSlopeMBPer1k: MAX_SLOPE,
   };
@@ -316,9 +328,9 @@ child.on("close", (code) => {
   }
   if (slope > MAX_SLOPE) {
     fail(
-      `RSS slope ${slope.toFixed(2)}MB/1k turns exceeds ${MAX_SLOPE}MB/1k — ` +
-        `turn-linear retention is back; find the new per-turn allocation ` +
-        `before shipping`,
+      `heapUsedMB late-window slope ${slope.toFixed(2)}MB/1k turns exceeds ` +
+        `${MAX_SLOPE}MB/1k — turn-linear retention is back; find the new ` +
+        `per-turn allocation before shipping`,
       evidence,
     );
   }

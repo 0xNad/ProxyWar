@@ -30,33 +30,67 @@
  *    processes (GPU/renderer/utility) still carrying this instance's exact
  *    `--user-data-dir`, and waits briefly for real exit before removing the
  *    profile directory.
- *  - A defensive startup sweep runs on every `launch()`: it kills any
- *    process whose command line carries the `pw-e2e-chrome-` prefix and is
- *    still alive from a run that never tore down cleanly (a crashed test
- *    process, a hard `vitest` timeout, `Ctrl-C`, or CI cancellation all
- *    skip a file's `afterAll`).
+ *  - A defensive startup sweep runs on every `launch()`: it inspects every
+ *    process whose command line carries the `pw-e2e-chrome-` prefix, but
+ *    only kills the ones whose OWNING Node PID (encoded into that
+ *    instance's own `--user-data-dir` name) is no longer alive — a crashed
+ *    test process, a hard `vitest` timeout, `Ctrl-C`, or CI cancellation
+ *    that skipped a file's `afterAll`. A still-live owner — the current
+ *    process's own earlier instance, OR a concurrently-running peer
+ *    Vitest worker file — is never touched, even though its Chrome shares
+ *    the same generic prefix (2026-08 hardening: the sweep used to be
+ *    unconditional and could cross-kill a still-in-use sibling instance).
  *  - Process-exit handlers (`exit`/`SIGINT`/`SIGTERM`) reap every live
  *    instance synchronously even when the owning test file's `afterAll`
  *    never runs at all. `exit` handlers cannot await async work, so this is
  *    a direct `SIGKILL`, not the graceful WS-close path `close()` uses.
  */
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import WebSocket from "ws";
 
+// Env override first (CHROME_PATH/CHROME_BIN — both common conventions,
+// e.g. Puppeteer/Playwright and various CI Chrome setup actions use one or
+// the other), then per-platform install paths, Linux last since this repo
+// only develops on macOS but CI runs on Linux (confirmed live: PR #16's
+// GH Actions shard 1/4 failed with "Chrome DevTools page target never
+// became reachable" because CHROME_CANDIDATES[0] was unconditionally the
+// macOS app-bundle path — it was never filtered for existence, only for
+// being a defined string, so the Linux runner always tried to spawn a
+// binary that was never there). Every candidate is now filtered by
+// `existsSync` — only a path actually present on this machine is ever
+// tried, and no candidate implies a clear "not found" error instead of a
+// silent bad spawn.
 const CHROME_CANDIDATES = [
+  process.env.CHROME_PATH,
+  process.env.CHROME_BIN,
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
   "/Applications/Chromium.app/Contents/MacOS/Chromium",
-  process.env.CHROME_PATH,
-].filter((value): value is string => typeof value === "string");
+  "/usr/bin/google-chrome-stable",
+  "/usr/bin/google-chrome",
+  "/usr/bin/chromium-browser",
+  "/usr/bin/chromium",
+]
+  .filter(
+    (value): value is string => typeof value === "string" && value.length > 0,
+  )
+  .filter((value) => existsSync(value));
 
 // Harness-specific `--user-data-dir` prefix. This is the ONLY signal every
 // kill/sweep function below trusts to prove a process is ours — see the
-// leak-proofing doc above.
-const USER_DATA_DIR_PREFIX = path.join(os.tmpdir(), "pw-e2e-chrome-");
+// leak-proofing doc above. `USER_DATA_DIR_MARKER` is the generic,
+// owner-agnostic substring every kill/sweep function greps `ps` output
+// for; the actual prefix THIS process hands to `mkdtemp()` embeds this
+// process's own PID right after it (`OWNED_USER_DATA_DIR_PREFIX`) so a
+// sweep can tell "an orphan from a dead process" apart from "a live
+// sibling's still-in-use instance" — see `findOwnedChromeProcesses`'s and
+// `sweepStaleInstances`'s docs below.
+const USER_DATA_DIR_MARKER = path.join(os.tmpdir(), "pw-e2e-chrome-");
+const OWNED_USER_DATA_DIR_PREFIX = `${USER_DATA_DIR_MARKER}${process.pid}-`;
 
 interface CdpMessage {
   id?: number;
@@ -90,12 +124,13 @@ async function reserveDebugPort(): Promise<number> {
   return address.port;
 }
 
-/** PID + exact `--user-data-dir` value for every live process PROVABLY
- * launched by this harness — matched on the `pw-e2e-chrome-` prefix, never
- * on process name or `--remote-debugging-port` alone. `-ww` disables BSD
- * `ps`'s default command-line truncation, so a long Chrome helper argv
- * still exposes the flag this needs. */
-function findOwnedChromeProcesses(): Array<{ pid: number; userDataDir: string }> {
+/** Single `ps` snapshot of every process on the machine, reused by both
+ * `findOwnedChromeProcesses` (to find `pw-e2e-chrome-` matches) and
+ * `sweepStaleInstances` (to check an owner PID's liveness/command) so a
+ * sweep costs exactly one `ps` call, not two. `-ww` disables BSD `ps`'s
+ * default command-line truncation, so a long Chrome helper argv still
+ * exposes the flag this needs. */
+function listAllProcesses(): Array<{ pid: number; command: string }> {
   let output: string;
   try {
     output = execFileSync("ps", ["-axww", "-o", "pid=,command="], {
@@ -104,21 +139,54 @@ function findOwnedChromeProcesses(): Array<{ pid: number; userDataDir: string }>
   } catch {
     return [];
   }
-  const marker = `--user-data-dir=${USER_DATA_DIR_PREFIX}`;
-  const owned: Array<{ pid: number; userDataDir: string }> = [];
+  const processes: Array<{ pid: number; command: string }> = [];
   for (const line of output.split("\n")) {
     const trimmed = line.trim();
     if (trimmed === "") continue;
     const match = /^(\d+)\s+(.*)$/.exec(trimmed);
     if (match === null) continue;
     const [, pidText, command] = match;
+    processes.push({ pid: Number(pidText), command });
+  }
+  return processes;
+}
+
+/** PID + exact `--user-data-dir` value for every live process PROVABLY
+ * launched by this harness — matched on the `pw-e2e-chrome-` prefix, never
+ * on process name or `--remote-debugging-port` alone — plus the owning
+ * Node PID encoded right after that prefix (`OWNED_USER_DATA_DIR_PREFIX`),
+ * so callers can tell a dead run's orphan apart from a live sibling's
+ * still-in-use instance. `ownerPid` is `null` for a legacy/unowned
+ * profile-dir name (pre-dating owner-PID encoding, or anything otherwise
+ * not matching the `<pid>-` shape) — always safe to treat as sweepable,
+ * matching this function's original always-attributable-to-nobody
+ * behavior for those. Accepts an optional pre-fetched `ps` snapshot so
+ * `sweepStaleInstances` can reuse the same one for its own owner-liveness
+ * check. */
+function findOwnedChromeProcesses(
+  processes: Array<{ pid: number; command: string }> = listAllProcesses(),
+): Array<{ pid: number; userDataDir: string; ownerPid: number | null }> {
+  const marker = `--user-data-dir=${USER_DATA_DIR_MARKER}`;
+  const owned: Array<{
+    pid: number;
+    userDataDir: string;
+    ownerPid: number | null;
+  }> = [];
+  for (const { pid, command } of processes) {
     const markerIndex = command.indexOf(marker);
     if (markerIndex === -1) continue;
     const valueStart = markerIndex + "--user-data-dir=".length;
     const rest = command.slice(valueStart);
     const spaceIndex = rest.indexOf(" ");
     const userDataDir = spaceIndex === -1 ? rest : rest.slice(0, spaceIndex);
-    owned.push({ pid: Number(pidText), userDataDir });
+    const ownerMatch = /^(\d+)-/.exec(
+      userDataDir.slice(USER_DATA_DIR_MARKER.length),
+    );
+    owned.push({
+      pid,
+      userDataDir,
+      ownerPid: ownerMatch === null ? null : Number(ownerMatch[1]),
+    });
   }
   return owned;
 }
@@ -131,13 +199,54 @@ function killPid(pid: number): void {
   }
 }
 
+/** Is `ownerPid` still a live process that could legitimately still be
+ * using its Chrome instance — this process's own earlier launch, or a
+ * concurrently-running peer (another Vitest worker file, another owning
+ * process entirely)? A bare "does the PID exist" check is not enough:
+ * PIDs recycle, so a long-dead owner's PID could coincidentally now
+ * belong to an unrelated process. `process.kill(pid, 0)` is the standard
+ * Node liveness probe (no signal actually delivered); `ESRCH` means
+ * definitively gone (safe to reap), `EPERM` means the PID exists but
+ * isn't ours to signal (never assume that's safe to kill — treat as
+ * alive). A live PID is further cross-checked against the SAME `ps`
+ * snapshot `findOwnedChromeProcesses` already took (zero extra `ps`
+ * calls) so a reused PID that no longer looks like a node process is
+ * still correctly treated as dead. */
+function isOwnerProcessAlive(
+  ownerPid: number,
+  commandByPid: Map<number, string>,
+): boolean {
+  if (ownerPid === process.pid) return true;
+  try {
+    process.kill(ownerPid, 0);
+  } catch (error) {
+    const errnoError = error as NodeJS.ErrnoException;
+    return errnoError.code !== "ESRCH";
+  }
+  const command = commandByPid.get(ownerPid);
+  return command === undefined || /\bnode\b/i.test(command);
+}
+
 /** Defensive startup sweep: kills only Chrome processes PROVABLY ours (see
- * `findOwnedChromeProcesses`'s doc) that are still around from a run that
- * never tore down cleanly — the exact failure mode the 28-instance, 8+
- * hour leak audit found. Cheap and idempotent; harmless if nothing stale is
- * found. */
+ * `findOwnedChromeProcesses`'s doc) whose owning Node process is no longer
+ * alive — the exact failure mode the 28-instance, 8+ hour leak audit
+ * found (a crashed test process, a hard `vitest` timeout, `Ctrl-C`, or CI
+ * cancellation that skipped a file's `afterAll`). A still-live owner is
+ * never touched, even though its Chrome shares the same generic prefix —
+ * this used to be unconditional and could cross-kill a concurrently
+ * running sibling's still-in-use instance (2026-08 hardening). Cheap and
+ * idempotent; harmless if nothing stale is found. */
 function sweepStaleInstances(): void {
-  for (const { pid } of findOwnedChromeProcesses()) killPid(pid);
+  const processes = listAllProcesses();
+  const commandByPid = new Map(
+    processes.map(({ pid, command }) => [pid, command]),
+  );
+  for (const { pid, ownerPid } of findOwnedChromeProcesses(processes)) {
+    if (ownerPid !== null && isOwnerProcessAlive(ownerPid, commandByPid)) {
+      continue;
+    }
+    killPid(pid);
+  }
 }
 
 // Registered once per process: reaps every live instance even when the
@@ -163,6 +272,49 @@ function installExitHandlersOnce(): void {
   });
 }
 
+const STDERR_TAIL_MAX_BYTES = 4096;
+
+/** Captures Chrome's stderr into a small, fixed-size tail — never the full
+ * stream, since headless Chrome can stay alive for an entire e2e suite and
+ * chatter continuously (GPU/ANGLE warnings etc. even on a healthy run) —
+ * so a genuine startup failure's actual reason (sandbox error, crash,
+ * missing shared-memory device, …) is visible in the thrown error instead
+ * of vanishing into the previous blanket `stdio: "ignore"` (confirmed
+ * live: GH Actions run 31131165725, PR26 shard 1/4 — Chrome (pid 2716)
+ * was still an orphan process at job cleanup, meaning it spawned and kept
+ * running; the actual reason its DevTools port never opened was
+ * completely invisible with nothing ever captured from it). */
+function captureStderrTail(child: ChildProcess): { describe: () => string } {
+  let tail = "";
+  child.stderr?.on("data", (chunk: Buffer) => {
+    tail = (tail + chunk.toString("utf8")).slice(-STDERR_TAIL_MAX_BYTES);
+  });
+  return {
+    describe: (): string =>
+      tail.trim().length === 0
+        ? ""
+        : `\n--- chrome stderr (tail) ---\n${tail.trim()}`,
+  };
+}
+
+// The prior fixed 15s deadline was never enough headroom on a real GH
+// Actions runner: two independent failures (run 31131165725, PR26 shard
+// 1/4; and push 10a29b0, PR25's own merge to main — branch-independent)
+// both showed Chrome (pid 2716) still alive and un-crashed at job
+// cleanup, spawned right alongside a coverage-instrumented sibling file
+// under `--maxWorkers=2` on a 2-vCPU runner. The exact reason its
+// DevTools port never opened in time was never directly proven — the
+// prior blanket `stdio: "ignore"` meant Chrome's own stderr was never
+// captured for either failure — but CPU contention with that coverage
+// sibling is the evidence-correlated explanation, consistent with this
+// file's own `FixtureServer.ts` live-premiere boot budget already
+// documenting a ~3x local-vs-GH-Actions-CPU multiplier. 45s gives the
+// same order-of-magnitude headroom; `captureStderrTail` above means a
+// future recurrence will no longer be a blind guess.
+// Overridable via `launch()`'s `discoveryTimeoutMs` option so tests can
+// exercise the exact same timeout codepath without a real 45s wait.
+const DEFAULT_DISCOVERY_TIMEOUT_MS = 45_000;
+
 export class CdpBrowser {
   private process: ChildProcess | null = null;
   private ws: WebSocket | null = null;
@@ -177,58 +329,167 @@ export class CdpBrowser {
     Array<(params: unknown) => void>
   >();
 
-  static async launch(): Promise<CdpBrowser> {
+  /** `discoveryTimeoutMs` overrides the default DevTools-reachability
+   * deadline (see `DEFAULT_DISCOVERY_TIMEOUT_MS`'s doc) — production
+   * callers never pass it; tests use it to exercise the exact same
+   * timeout/cleanup codepath in milliseconds instead of 45 real seconds. */
+  static async launch(options?: {
+    discoveryTimeoutMs?: number;
+  }): Promise<CdpBrowser> {
     sweepStaleInstances();
     const browser = new CdpBrowser();
-    await browser.start();
+    await browser.start(
+      options?.discoveryTimeoutMs ?? DEFAULT_DISCOVERY_TIMEOUT_MS,
+    );
     liveInstances.add(browser);
     installExitHandlersOnce();
     return browser;
   }
 
-  private async start(): Promise<void> {
+  private async start(discoveryTimeoutMs: number): Promise<void> {
     const chromePath = CHROME_CANDIDATES[0];
     if (chromePath === undefined) {
       throw new Error(
-        "no Chrome binary found — set CHROME_PATH or install Google Chrome",
+        "no Chrome binary found — set CHROME_PATH/CHROME_BIN or install Google Chrome/Chromium",
       );
     }
-    this.userDataDir = await mkdtemp(USER_DATA_DIR_PREFIX);
-    const port = await reserveDebugPort();
-    this.process = spawn(
-      chromePath,
-      [
-        `--remote-debugging-port=${port}`,
-        "--headless=new",
-        "--disable-gpu",
-        "--no-first-run",
-        "--no-default-browser-check",
-        `--user-data-dir=${this.userDataDir}`,
-        "about:blank",
-      ],
-      { stdio: "ignore" },
-    );
-    const wsUrl = await this.discoverWebSocketUrl(port);
-    this.ws = new WebSocket(wsUrl);
-    await new Promise<void>((resolve, reject) => {
-      this.ws?.once("open", () => resolve());
-      this.ws?.once("error", reject);
-    });
-    this.ws.on("message", (data) => this.handleMessage(data.toString()));
-    await this.send("Page.enable");
-    await this.send("Runtime.enable");
-    await this.send("Network.enable");
-    // Chrome's HTTP disk cache is not reliably isolated per `--user-data-dir`
-    // in headless mode — confirmed live: a fresh profile still served a
-    // stale `read-model.json` from an earlier debug run on the same port.
-    // Puppeteer/Playwright both disable this by default for exactly this
-    // reason.
-    await this.send("Network.setCacheDisabled", { cacheDisabled: true });
+    try {
+      // Everything from here on is covered by the `catch` below: a
+      // failure can happen at ANY of these steps (disk-full/permission
+      // `mkdtemp`, port exhaustion in `reserveDebugPort`, a bad spawn, a
+      // slow/crashed Chrome, or the final CDP handshake) and each leaves
+      // a different subset of `userDataDir`/`process`/`ws` set — `close()`
+      // already no-ops whichever of those was never reached, so it is the
+      // one idempotent teardown path for every case here, not just a
+      // successful session's.
+      this.userDataDir = await mkdtemp(OWNED_USER_DATA_DIR_PREFIX);
+      const port = await reserveDebugPort();
+      this.process = spawn(
+        chromePath,
+        [
+          `--remote-debugging-port=${port}`,
+          "--headless=new",
+          "--disable-gpu",
+          "--no-first-run",
+          "--no-default-browser-check",
+          `--user-data-dir=${this.userDataDir}`,
+          "about:blank",
+        ],
+        // stdout stays ignored (Chrome puts nothing actionable there);
+        // stderr is now piped into a bounded tail buffer instead of the
+        // prior blanket `stdio: "ignore"` — see `captureStderrTail`'s doc
+        // for the live GH Actions evidence this closes the gap on.
+        { stdio: ["ignore", "ignore", "pipe"] },
+      );
+      const chromeProcess = this.process;
+      const stderrTail = captureStderrTail(chromeProcess);
+      // Fail-fast diagnostics: `spawn()` never throws synchronously for a
+      // bad binary — it emits an async `error` event instead (e.g.
+      // `ENOENT`) — and a Chrome that spawns fine but then crashes before
+      // opening its DevTools port only ever emits `exit`, never `error`.
+      // Without racing BOTH here, either failure mode burns the full
+      // `discoverWebSocketUrl` wait below for the same generic, unhelpful
+      // message — confirmed live: PR #16's GH Actions shard 1/4 hit the
+      // spawn-error case; PR26's shard 1/4 (and push 10a29b0, PR25's own
+      // merge to main) hit the still-alive-but-silent case the stderr tail
+      // above now also captures. Every listener here is scoped to this
+      // race and removed once it settles either way, so nothing leaks
+      // past startup.
+      let onSpawnError: ((error: Error) => void) | null = null;
+      let onExit:
+        | ((code: number | null, signal: NodeJS.Signals | null) => void)
+        | null = null;
+      // Plain mutable flag, not an `AbortController`/listener — polled
+      // once per 200ms loop tick in `discoverWebSocketUrl` below, so the
+      // moment `chromeFailure` wins this race, that loop's NEXT tick sees
+      // it and returns immediately instead of continuing to poll
+      // `/json/list` in the background for up to `discoveryTimeoutMs`
+      // (45s by default) after `start()` has already thrown.
+      const discoveryCancelled = { value: false };
+      // `new Promise(executor)`, not `Promise.withResolvers` — this
+      // project targets ES2022 lib (no ES2024), same constraint as
+      // `reserveDebugPort`'s doc above.
+      const chromeFailure = new Promise<never>((_, reject) => {
+        onSpawnError = (error: Error): void => {
+          discoveryCancelled.value = true;
+          reject(
+            new Error(
+              `Chrome process failed to start (${chromePath}): ${error.message}`,
+            ),
+          );
+        };
+        onExit = (code, signal): void => {
+          discoveryCancelled.value = true;
+          reject(
+            new Error(
+              `Chrome process exited before its DevTools port became ` +
+                `reachable (${chromePath}, code=${code ?? "null"}, ` +
+                `signal=${signal ?? "null"})${stderrTail.describe()}`,
+            ),
+          );
+        };
+        chromeProcess.once("error", onSpawnError);
+        chromeProcess.once("exit", onExit);
+      });
+      let wsUrl: string;
+      try {
+        wsUrl = await Promise.race([
+          this.discoverWebSocketUrl(
+            port,
+            discoveryTimeoutMs,
+            chromeProcess,
+            chromePath,
+            discoveryCancelled,
+            stderrTail,
+          ),
+          chromeFailure,
+        ]);
+      } finally {
+        if (onSpawnError !== null) {
+          chromeProcess.removeListener("error", onSpawnError);
+        }
+        if (onExit !== null) {
+          chromeProcess.removeListener("exit", onExit);
+        }
+      }
+      this.ws = new WebSocket(wsUrl);
+      await new Promise<void>((resolve, reject) => {
+        this.ws?.once("open", () => resolve());
+        this.ws?.once("error", reject);
+      });
+      this.ws.on("message", (data) => this.handleMessage(data.toString()));
+      await this.send("Page.enable");
+      await this.send("Runtime.enable");
+      await this.send("Network.enable");
+      // Chrome's HTTP disk cache is not reliably isolated per `--user-data-dir`
+      // in headless mode — confirmed live: a fresh profile still served a
+      // stale `read-model.json` from an earlier debug run on the same port.
+      // Puppeteer/Playwright both disable this by default for exactly this
+      // reason.
+      await this.send("Network.setCacheDisabled", { cacheDisabled: true });
+    } catch (error) {
+      // A `start()` that throws here never reaches `liveInstances.add()` in
+      // `launch()`, so no exit handler or future `sweepStaleInstances()`
+      // call is tracking this instance yet — without this, a failed start
+      // leaks exactly like GH Actions run 31131165725 showed: the runner's
+      // own generic orphan-process reaper had to terminate the leftover
+      // `chrome` process (pid 2716) plus two `chrome_crashpad_handler`
+      // children this class never touched.
+      await this.close();
+      throw error;
+    }
   }
 
-  private async discoverWebSocketUrl(port: number): Promise<string> {
-    const deadline = Date.now() + 15_000;
-    while (Date.now() < deadline) {
+  private async discoverWebSocketUrl(
+    port: number,
+    discoveryTimeoutMs: number,
+    chromeProcess: ChildProcess,
+    chromePath: string,
+    cancelled: { value: boolean },
+    stderrTail?: { describe: () => string },
+  ): Promise<string> {
+    const deadline = Date.now() + discoveryTimeoutMs;
+    while (Date.now() < deadline && !cancelled.value) {
       try {
         const response = await fetch(`http://127.0.0.1:${port}/json/list`);
         if (response.ok) {
@@ -244,7 +505,27 @@ export class CdpBrowser {
       }
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
-    throw new Error("Chrome DevTools page target never became reachable");
+    if (cancelled.value) {
+      // The race's other branch (spawn error / early exit) already won
+      // and reported the real, more specific error — this settlement is
+      // discarded by `Promise.race`, so stay cheap and skip the full
+      // stderr-tail formatting work below.
+      throw new Error(
+        "Chrome DevTools discovery cancelled — a startup failure already reported the real error",
+      );
+    }
+    // `code`/`signal` are both null while the process is still alive —
+    // exactly the state GH Actions run 31131165725 and push 10a29b0 both
+    // showed (Chrome pid 2716 still an orphan process at job cleanup).
+    const processState =
+      chromeProcess.exitCode !== null || chromeProcess.signalCode !== null
+        ? `exited (code=${chromeProcess.exitCode ?? "null"}, signal=${chromeProcess.signalCode ?? "null"})`
+        : "still running";
+    throw new Error(
+      `Chrome DevTools page target never became reachable ` +
+        `(path=${chromePath}, timeoutMs=${discoveryTimeoutMs}, ` +
+        `process=${processState})${stderrTail?.describe() ?? ""}`,
+    );
   }
 
   private handleMessage(raw: string): void {
@@ -407,10 +688,7 @@ export class CdpBrowser {
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
 
-  async waitFor(
-    predicateExpression: string,
-    timeoutMs = 8000,
-  ): Promise<void> {
+  async waitFor(predicateExpression: string, timeoutMs = 8000): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const ok = await this.evaluate<boolean>(predicateExpression);
@@ -435,27 +713,40 @@ export class CdpBrowser {
     }
   }
 
+  /** Graceful teardown. Also `start()`'s ONE cleanup path on a failed
+   * launch (see `start()`'s `catch` block) — every step here already
+   * no-ops correctly for whichever of `ws`/`process`/`userDataDir` a
+   * given failure never got around to setting, so a failed start needs
+   * no separate bespoke cleanup routine. */
   async close(): Promise<void> {
     try {
       this.ws?.close();
     } catch {
       // ignore
     }
+    // Skip the wait entirely when the process has already exited (e.g. a
+    // `start()` failure whose own race already observed the `exit` event)
+    // — a `once("exit", ...)` registered after the fact would otherwise
+    // never fire, stalling this method for the full 2s fallback below on
+    // every one of those closes for no reason.
+    const alreadyExited =
+      this.process !== null &&
+      (this.process.exitCode !== null || this.process.signalCode !== null);
     const exited =
-      this.process === null
+      this.process === null || alreadyExited
         ? Promise.resolve()
-        : new Promise<void>((resolve) => this.process?.once("exit", () => resolve()));
+        : new Promise<void>((resolve) =>
+            this.process?.once("exit", () => resolve()),
+          );
     this.killSync();
     await Promise.race([
       exited,
       new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
     ]);
     if (this.userDataDir !== null) {
-      await rm(this.userDataDir, { recursive: true, force: true }).catch(
-        () => {
-          // best-effort cleanup
-        },
-      );
+      await rm(this.userDataDir, { recursive: true, force: true }).catch(() => {
+        // best-effort cleanup
+      });
     }
     liveInstances.delete(this);
   }

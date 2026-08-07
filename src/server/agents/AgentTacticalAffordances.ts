@@ -12,8 +12,10 @@ import {
   personalityDiplomacyKindGroup,
   personalityDiplomacyModeForAction,
 } from "./AgentPersonalityDiplomacyPolicy";
+import { observedTransportStates } from "./AgentTypes";
 import type {
   AgentEconomyCadenceAffordance,
+  AgentEconomyNetworkAffordance,
   AgentFrontierConversionTimingAffordance,
   AgentFrontierFinishPressureAffordance,
   AgentHomeDangerLevel,
@@ -157,6 +159,7 @@ export function buildAgentTacticalAffordances(input: {
     personalityDiplomacyPressureAffordance(input);
   const survivalAlliance = survivalAllianceAffordance(input);
   const backstabAlly = backstabAllyAffordance(input);
+  const economyNetwork = economyNetworkAffordance(input);
   const notes: string[] = [];
   if (openingExpansionTempo.recommended) {
     notes.push(
@@ -185,7 +188,7 @@ export function buildAgentTacticalAffordances(input: {
   }
   if (navalControl.recommended) {
     notes.push(
-      "naval_control is available; evaluator should watch whether the agent uses transports, warships, or patrol moves instead of stalling land loops",
+      "naval_control is available; evaluator should watch whether the agent uses Transport boats instead of stalling in land loops",
     );
   }
   if (lateGameStrikeTargeting.recommended) {
@@ -208,6 +211,11 @@ export function buildAgentTacticalAffordances(input: {
       "backstab_ally is available; evaluator should watch whether the agent breaks an alliance it now overmatches and takes the ally's land (the betray-late payoff)",
     );
   }
+  if (economyNetwork?.recommended) {
+    notes.push(
+      "economy_network flags an economy bottleneck; evaluator should watch whether the agent fixes idle/blocked factories, embargo exposure, or one-counterparty trade dependency",
+    );
+  }
   return {
     transportTroopBanking,
     openingExpansionTempo,
@@ -219,7 +227,95 @@ export function buildAgentTacticalAffordances(input: {
     personalityDiplomacyPressure,
     survivalAlliance,
     backstabAlly,
+    ...(economyNetwork !== undefined ? { economyNetwork } : {}),
     notes,
+  };
+}
+
+/**
+ * Economy network affordance (11th block). Present ONLY when the observation
+ * carries the flag-gated `economy` snapshot (PROXYWAR_TUNE_ECONOMY_OBSERVATION)
+ * — when the flag is off the affordances object is byte-identical to shipped
+ * behavior. Pure function of the snapshot: headline facts, a recommended bit
+ * keyed on the snapshot's evidenced bottleneck, and reasons[].
+ */
+function economyNetworkAffordance(input: {
+  observation: AgentObservation;
+  legalActions?: LegalAction[];
+}): AgentEconomyNetworkAffordance | undefined {
+  const economy = input.observation.economy;
+  if (economy === undefined) {
+    return undefined;
+  }
+  // Top counterparty by dependency share; a 0% share is no dependency, so it
+  // is never surfaced (topCounterparty* stays null — same gate as reasons[]).
+  const topCounterparty = economy.counterparties.reduce<
+    (typeof economy.counterparties)[number] | null
+  >(
+    (top, candidate) =>
+      candidate.eligibleDestinationSharePct !== null &&
+      candidate.eligibleDestinationSharePct > 0 &&
+      (top === null ||
+        candidate.eligibleDestinationSharePct >
+          (top.eligibleDestinationSharePct ?? 0))
+        ? candidate
+        : top,
+    null,
+  );
+  const recommended =
+    economy.bottleneck.kind !== "none" && economy.bottleneck.kind !== "unknown";
+  const reasons: string[] = [];
+  if (economy.factoryStatusCounts.idleNoDestination > 0) {
+    reasons.push(
+      `${economy.factoryStatusCounts.idleNoDestination} factories have no City/Port destination on their rail network`,
+    );
+  }
+  if (economy.factoryStatusCounts.blockedByEmbargo > 0) {
+    reasons.push(
+      `${economy.factoryStatusCounts.blockedByEmbargo} factories are embargo-blocked (destinations exist but none are tradable)`,
+    );
+  }
+  if (
+    topCounterparty !== null &&
+    (topCounterparty.eligibleDestinationSharePct ?? 0) > 0
+  ) {
+    reasons.push(
+      `${topCounterparty.name} owns ${topCounterparty.eligibleDestinationSharePct}% of eligible destinations (${topCounterparty.isAllied ? "allied — allied train stops pay more" : "not allied"})`,
+    );
+  }
+  reasons.push(economy.bottleneck.evidence);
+  return {
+    tacticID: "economy_network",
+    recommended,
+    turnNumber: input.observation.turnNumber,
+    factoryCount: economy.factoryCount,
+    operationalFactoryCount: economy.factoryStatusCounts.operational,
+    idleFactoryCount: economy.factoryStatusCounts.idleNoDestination,
+    blockedFactoryCount: economy.factoryStatusCounts.blockedByEmbargo,
+    clusterCount: economy.clusterCount,
+    eligibleDestinationCount: economy.eligibleDestinationCount,
+    embargoBlockedDestinationCount: economy.embargoBlockedDestinationCount,
+    trainSelfIncome: economy.incomeBySource.trainSelf,
+    trainExternalIncome: economy.incomeBySource.trainExternal,
+    tradeShipIncome: economy.incomeBySource.tradeShips,
+    topCounterpartyID: topCounterparty?.playerID ?? null,
+    topCounterpartyName: topCounterparty?.name ?? null,
+    topCounterpartyDependencyPct:
+      topCounterparty?.eligibleDestinationSharePct ?? null,
+    topCounterpartyAllied: topCounterparty?.isAllied ?? null,
+    counterparties: economy.counterparties.map((counterparty) => ({
+      playerID: counterparty.playerID,
+      name: counterparty.name,
+      isAllied: counterparty.isAllied,
+      myEligibleDestinationsTheyOwn: counterparty.myEligibleDestinationsTheyOwn,
+      eligibleDestinationSharePct: counterparty.eligibleDestinationSharePct,
+      embargoOursOnThem: counterparty.embargoOursOnThem,
+      embargoTheirsOnUs: counterparty.embargoTheirsOnUs,
+    })),
+    pairLinks: economy.pairLinks,
+    bottleneckKind: economy.bottleneck.kind,
+    bottleneckEvidence: economy.bottleneck.evidence,
+    reasons,
   };
 }
 
@@ -512,11 +608,10 @@ function navalControlAffordance(input: {
   });
   const portCount = unitCount(observation, UnitType.Port);
   const warshipCount = unitCount(observation, UnitType.Warship);
-  const activeTransportCount =
-    observation.nonCombat.boatRetreatOptions?.length ?? 0;
+  const transports = observedTransportStates(observation);
+  const activeTransportCount = transports.length;
   const activeTransportTroops = sumNumbers(
-    observation.nonCombat.boatRetreatOptions?.map((option) => option.troops) ??
-      [],
+    transports.map((transport) => transport.troops),
   );
   const navalActions = navalControlActions(input);
   const safeNavalActions = navalActions.filter(
@@ -1100,13 +1195,12 @@ function transportTroopBankingAffordance(input: {
     observation.ownState?.troopRatio ??
     observation.combat.troopRatio ??
     ratioOrNull(ownTroops, maxTroops);
+  const transports = observedTransportStates(observation);
   const activeTransportTroops = sumNumbers(
-    observation.nonCombat.boatRetreatOptions?.map((option) => option.troops) ??
-      [],
+    transports.map((transport) => transport.troops),
   );
   const largestActiveTransportTroops = maxNumber(
-    observation.nonCombat.boatRetreatOptions?.map((option) => option.troops) ??
-      [],
+    transports.map((transport) => transport.troops),
   );
   const incomingThreatTroops = sumNumbers(
     observation.combat.incomingAttacks
@@ -1126,7 +1220,7 @@ function transportTroopBankingAffordance(input: {
     maxTroops === null ? 1_000 : Math.max(1_000, Math.floor(maxTroops * 0.04));
   const activeBankRatio = ratioOrNull(activeTransportTroops, maxTroops) ?? 0;
   const continuationReady =
-    (observation.nonCombat.boatRetreatOptions?.length ?? 0) > 0 &&
+    transports.length > 0 &&
     activeBankRatio < TROOP_BANKING_MAX_ACTIVE_BANK_RATIO;
   const recommended =
     nearCap &&
@@ -1148,7 +1242,7 @@ function transportTroopBankingAffordance(input: {
     ownTroops,
     maxTroops,
     troopRatio: roundRatioOrNull(troopRatio),
-    activeTransportCount: observation.nonCombat.boatRetreatOptions?.length ?? 0,
+    activeTransportCount: transports.length,
     activeTransportTroops,
     largestActiveTransportTroops,
     activeBankRatio: roundRatioOrNull(activeBankRatio),
@@ -1635,8 +1729,7 @@ function navalControlPriority(
   action: LegalAction,
   observation: AgentObservation,
 ): number {
-  const activeTransportCount =
-    observation.nonCombat.boatRetreatOptions?.length ?? 0;
+  const activeTransportCount = observedTransportStates(observation).length;
   const portCount = unitCount(observation, UnitType.Port);
   const warshipCount = unitCount(observation, UnitType.Warship);
   let priority = 20;
@@ -2205,14 +2298,12 @@ function navalControlReasons(input: {
   homeDanger: AgentHomeDangerLevel;
 }): string[] {
   const reasons: string[] = [];
-  reasons.push(
-    `naval assets Port/Warship=${input.portCount}/${input.warshipCount}`,
-  );
+  reasons.push(`naval assets Ports=${input.portCount}`);
   reasons.push(
     `active transports=${input.activeTransportCount} carrying ${input.activeTransportTroops} troops`,
   );
   reasons.push(
-    `naval actions boat/neutral/invasion/warship/move=${input.boatLaunchActionCount}/${input.neutralBoatActionCount}/${input.navalInvasionActionCount}/${input.warshipBuildActionCount}/${input.warshipMoveActionCount}`,
+    `naval actions boat/neutral/invasion=${input.boatLaunchActionCount}/${input.neutralBoatActionCount}/${input.navalInvasionActionCount}`,
   );
   reasons.push(
     `${input.safeNavalActionCount} naval action(s) are not high risk`,
@@ -2225,7 +2316,7 @@ function navalControlReasons(input: {
   reasons.push(`home danger is ${input.homeDanger}`);
   if (input.recommended) {
     reasons.push(
-      "recommended: use the best transport, warship, or patrol action before naval options stall",
+      "recommended: use the best safe Transport boat before naval options stall",
     );
   }
   return reasons;

@@ -48,6 +48,15 @@ export const COLOR_KEY = "settings.territoryColor";
 export const DARK_MODE_KEY = "settings.darkMode";
 export const PERFORMANCE_OVERLAY_KEY = "settings.performanceOverlay";
 export const KEYBINDS_KEY = "settings.keybinds";
+/**
+ * P0 fix (2026-08-03): exported (was an inline string literal) so
+ * `AiLeagueReplayOverlay.ts` can listen for
+ * `${USER_SETTINGS_CHANGED_EVENT}:${ANONYMOUS_NAMES_KEY}` and re-render
+ * every already-displayed agent name the instant the setting toggles
+ * mid-session, instead of only ever applying to content rendered AFTER
+ * the toggle -- see that file's own listener for the full rationale.
+ */
+export const ANONYMOUS_NAMES_KEY = "settings.anonymousNames";
 
 export class UserSettings {
   private static cache = new Map<string, string | null>();
@@ -137,7 +146,7 @@ export class UserSettings {
   }
 
   anonymousNames() {
-    return this.getBool("settings.anonymousNames", false);
+    return this.getBool(ANONYMOUS_NAMES_KEY, false);
   }
 
   lobbyIdVisibility() {
@@ -202,7 +211,7 @@ export class UserSettings {
   }
 
   toggleRandomName() {
-    this.setBool("settings.anonymousNames", !this.anonymousNames());
+    this.setBool(ANONYMOUS_NAMES_KEY, !this.anonymousNames());
   }
 
   toggleLobbyIdVisibility() {

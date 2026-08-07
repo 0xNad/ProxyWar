@@ -1,8 +1,10 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { gzipSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  computeFeaturedMatchPinAddOperation,
   removeFeaturedMatchRetentionPin,
   syncFeaturedMatchRetentionPin,
 } from "../../src/server/agents/FeaturedMatchRetentionPin";
@@ -86,6 +88,57 @@ describe("syncFeaturedMatchRetentionPin", () => {
     await seedMirrorEpisodes([episode("ereq_other", "league-coworld-other")]);
     const changed = await syncFeaturedMatchRetentionPin(
       { matchId: "feat_x", episodeRequestId: "ereq_x" },
+      options(),
+    );
+    expect(changed).toBe(false);
+  });
+
+  it("full-replay-retention fix (2026-08-06): falls back to the durable compact-evidence archive to derive the publicRunKey when the episode has already rotated out of the live mirror window", async () => {
+    await seedMirrorEpisodes([episode("ereq_other", "league-coworld-other")]);
+    const summariesDir = path.join(
+      artifactsRoot,
+      "coworld-league-mirror",
+      "summaries",
+    );
+    await fs.mkdir(summariesDir, { recursive: true });
+    await fs.writeFile(
+      path.join(summariesDir, "ereq_rotated_out.replay-summary.json.gz"),
+      gzipSync(
+        JSON.stringify({
+          episodeRequestId: "ereq_rotated_out",
+          runID: "coworld-fallback-run-abc",
+        }),
+      ),
+    );
+
+    const operation = await computeFeaturedMatchPinAddOperation(
+      { matchId: "feat_rotated", episodeRequestId: "ereq_rotated_out" },
+      options(),
+    );
+    expect(operation).toEqual({
+      type: "add",
+      episodeRequestId: "ereq_rotated_out",
+      publicRunKey: "league-coworld-fallback-run-abc",
+      ownerTag: "featured-match:feat_rotated",
+    });
+
+    const changed = await syncFeaturedMatchRetentionPin(
+      { matchId: "feat_rotated", episodeRequestId: "ereq_rotated_out" },
+      options(),
+    );
+    expect(changed).toBe(true);
+    const manifest = await readCoworldLeagueRetentionPinManifest(pinManifestPath);
+    expect(manifest.pins).toContainEqual({
+      episodeRequestId: "ereq_rotated_out",
+      publicRunKey: "league-coworld-fallback-run-abc",
+      reason: "featured-match:feat_rotated",
+    });
+  });
+
+  it("still no-ops when neither the live mirror NOR the durable archive has any evidence for the episode", async () => {
+    await seedMirrorEpisodes([episode("ereq_other", "league-coworld-other")]);
+    const changed = await syncFeaturedMatchRetentionPin(
+      { matchId: "feat_x", episodeRequestId: "ereq_truly_unknown" },
       options(),
     );
     expect(changed).toBe(false);

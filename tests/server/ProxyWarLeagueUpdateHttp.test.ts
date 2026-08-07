@@ -492,6 +492,72 @@ describe("league update HTTP contract", () => {
     }
   });
 
+  test("/ai-league-replay/<bad-id> renders a themed, nav-intact page — never a raw plain-text response (live P0, 2026-08-02)", async () => {
+    // The status code MUST stay exactly 404: `assessPremiereLeakAudit`'s
+    // statusHidden check (ReplayPremiereEligibility.ts) requires 403/404
+    // for this exact path as proof a private artifact isn't publicly
+    // exposed — this fix only replaces the BODY, matching /match, /agent,
+    // and /builder's own themed (nav-intact) treatment of a bad id.
+    const response = await rawRequest(
+      origin,
+      "/ai-league-replay/controlled-source-1",
+    );
+    expect(response.status).toBe(404);
+    const body = response.body.toString("utf8");
+    expect(body).toContain("<!doctype html>");
+    expect(body).not.toBe("AI league replay record not found.");
+    // Nav intact: real links to the other public surfaces, not a dead end.
+    expect(body).toContain('href="/league"');
+    expect(body).toContain('href="/watch"');
+    expect(body).toContain('href="/agents"');
+    expect(body).toContain('href="/builders"');
+    expect(body).toContain('href="/build"');
+  });
+
+  test("a genuinely unrecognized path gets a themed 404, not a silent redirect to /league (live P0, 2026-08-02)", async () => {
+    // Before this fix, ANY unmatched GET/HEAD path in league-wrapper mode
+    // silently 302'd to /league — a typo'd or stale link looked
+    // indistinguishable from a normal league visit, with no
+    // acknowledgment anything was wrong.
+    for (const method of ["GET", "HEAD"] as const) {
+      const response = await rawRequest(
+        origin,
+        "/totally-unrecognized-path-9f3c1a",
+        { method },
+      );
+      expect(response.status, method).toBe(404);
+      expect(response.headers.location, method).toBeUndefined();
+    }
+    const body = (
+      await rawRequest(origin, "/totally-unrecognized-path-9f3c1a")
+    ).body.toString("utf8");
+    expect(body).toContain("<!doctype html>");
+    expect(body).toContain('href="/league"');
+  });
+
+  test("a malformed /bet/:id never falls back to the stale /league copy — same themed 404 as the generic catch-all (wave-4 scope check, 2026-08-02)", async () => {
+    // /bet/:id (BettingPremierePage's page route) only matches the exact
+    // prem_[a-z0-9]{16,32} shape (ProxyWarPublicArtifacts.ts). A malformed
+    // id doesn't match createReplayPremierePublicPageRouter's own route
+    // either, so it falls through that router's `next()` to this same
+    // wrapper-only gate — isProxyWarPublicPremiereReadPath rejects it,
+    // isProxyWarReplayOrRunPath doesn't cover "/bet/" at all, so it must
+    // land on the SAME themed-404 catch-all as any other unrecognized
+    // path, never a stale copy of bet's own frozen /league mirror.
+    for (const malformedId of [
+      "not-a-premiere-id",
+      "prem_short",
+      "PREM_UPPERCASE1234567",
+    ]) {
+      const response = await rawRequest(origin, `/bet/${malformedId}`);
+      expect(response.status, malformedId).toBe(404);
+      expect(response.headers.location, malformedId).toBeUndefined();
+      const body = response.body.toString("utf8");
+      expect(body, malformedId).toContain("<!doctype html>");
+      expect(body, malformedId).toContain('href="/league"');
+    }
+  });
+
   test("the /proxywar-replay and /openfront-replay aliases redirect only for a run that actually exists, and never echo an unknown run id", async () => {
     // Exercised against the open (non-wrapper) server: in
     // PROXYWAR_LEAGUE_WRAPPER_ONLY mode this alias never even reaches its

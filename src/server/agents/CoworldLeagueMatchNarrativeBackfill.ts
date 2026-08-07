@@ -1,23 +1,23 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import {
+  buildAgentDecisiveMoments,
+  DECISIVE_MOMENTS_SCHEMA_VERSION,
+} from "./AgentDecisiveMoments";
+import {
   buildAgentDramaReport,
   writeAgentDramaReportArtifacts,
 } from "./AgentDramaReport";
-import {
-  buildAgentMatchStory,
-  writeAgentMatchStoryArtifacts,
-} from "./AgentMatchStory";
 import {
   AGENT_MATCH_RECAP_SCHEMA_VERSION,
   buildAgentMatchRecap,
   writeAgentMatchRecapArtifacts,
 } from "./AgentMatchRecap";
-import {
-  buildAgentDecisiveMoments,
-  DECISIVE_MOMENTS_SCHEMA_VERSION,
-} from "./AgentDecisiveMoments";
 import type { MatchStateSeries } from "./AgentMatchStateSeries";
+import {
+  buildAgentMatchStory,
+  writeAgentMatchStoryArtifacts,
+} from "./AgentMatchStory";
 import type { SpectatorEvent } from "./AgentSpectatorTelemetry";
 import {
   maximumDecisionsJsonlBytes,
@@ -38,7 +38,7 @@ const maximumDecisiveMomentsBytes = 2 * 1024 * 1024;
 
 /**
  * IO orchestration for the mirror-side "drama recaps" gap closure — the
- * SAME pattern `CoworldLeagueDirectorCutBackfill.ts` established: per-run,
+ * SAME pattern `CoworldLeagueMatchStateSeriesBackfill.ts` established: per-run,
  * idempotent, fail-open generation with a structured non-throwing outcome,
  * plus a budgeted gradual backfill scan. Generates, for a mirrored
  * (hosted-league) run dir that doesn't have them yet:
@@ -59,8 +59,8 @@ const maximumDecisiveMomentsBytes = 2 * 1024 * 1024;
  *
  * Both `buildAgentDramaReport` and `buildAgentMatchStory` require raw
  * `AgentDecisionRecord[]` verbatim (neither accepts a pre-built
- * `SpectatorTelemetry`, unlike `buildDirectorCutPlan`) — `resolveMirroredMatchEvidence`
- * (shared with the Director Cut backfill) always resolves those records from
+ * `SpectatorTelemetry`) — `resolveMirroredMatchEvidence`
+ * always resolves those records from
  * `decisions.jsonl` independent of which telemetry tier won, so the common
  * case (mirrored runs ship `decisions.jsonl` — empirically confirmed
  * alongside `spectator-telemetry.json`/`game-record.json`/`match-summary.json`/
@@ -193,7 +193,9 @@ async function writeDecisiveMomentsArtifact(input: {
   if (input.series === null) {
     return null;
   }
-  const replaySnapshots = await readReplaySnapshotsForDecisiveMoments(input.runDir);
+  const replaySnapshots = await readReplaySnapshotsForDecisiveMoments(
+    input.runDir,
+  );
   const artifact = buildAgentDecisiveMoments({
     runID: input.runKey,
     series: input.series,
@@ -211,7 +213,10 @@ async function writeDecisiveMomentsArtifact(input: {
 
 async function readEvidenceInputs(
   runDir: string,
-): Promise<{ spectatorTelemetryRaw: string | null; decisionsJsonlRaw: string | null }> {
+): Promise<{
+  spectatorTelemetryRaw: string | null;
+  decisionsJsonlRaw: string | null;
+}> {
   const [spectatorTelemetryRaw, decisionsJsonlRaw] = await Promise.all([
     readBoundedRunDirArtifact(
       path.join(runDir, "spectator-telemetry.json"),
@@ -263,7 +268,8 @@ async function upgradeStaleRecap(
   runDir: string,
   runKey: string,
 ): Promise<MatchNarrativeGenerationOutcome | null> {
-  const { spectatorTelemetryRaw, decisionsJsonlRaw } = await readEvidenceInputs(runDir);
+  const { spectatorTelemetryRaw, decisionsJsonlRaw } =
+    await readEvidenceInputs(runDir);
   if (spectatorTelemetryRaw === null && decisionsJsonlRaw === null) {
     return null;
   }
@@ -343,7 +349,11 @@ export async function generateMatchNarrativeArtifactsForRunDir(
     const needsRegeneration = await recapNeedsRegeneration(runDir);
     const decisiveMomentsMissing = await decisiveMomentsNeedGeneration(runDir);
     if (!needsRegeneration && !decisiveMomentsMissing) {
-      return { runKey, attempted: false, outcome: { status: "already-exists" } };
+      return {
+        runKey,
+        attempted: false,
+        outcome: { status: "already-exists" },
+      };
     }
     try {
       const outcome = await upgradeStaleRecap(runDir, runKey);
@@ -367,7 +377,8 @@ export async function generateMatchNarrativeArtifactsForRunDir(
     }
   }
 
-  const { spectatorTelemetryRaw, decisionsJsonlRaw } = await readEvidenceInputs(runDir);
+  const { spectatorTelemetryRaw, decisionsJsonlRaw } =
+    await readEvidenceInputs(runDir);
   if (spectatorTelemetryRaw === null && decisionsJsonlRaw === null) {
     return { runKey, attempted: false, outcome: { status: "no-input" } };
   }
@@ -442,7 +453,10 @@ export async function generateMatchNarrativeArtifactsForRunDir(
       records: evidence.records,
     });
     await Promise.all([
-      writeAgentDramaReportArtifacts({ report: dramaReport, directory: runDir }),
+      writeAgentDramaReportArtifacts({
+        report: dramaReport,
+        directory: runDir,
+      }),
       writeAgentMatchStoryArtifacts({ story: matchStory, directory: runDir }),
     ]);
 
@@ -475,7 +489,7 @@ export async function generateMatchNarrativeArtifactsForRunDir(
  * Gradually backfills drama/story/recap artifacts across already-retained
  * run dirs still missing them, spending up to `budget` generation attempts
  * — same deterministic ascending-name, budget-bounded, fail-open scan
- * `backfillDirectorCutPlans` uses.
+ * `backfillMatchStateSeries` uses.
  */
 export async function backfillMatchNarrativeArtifacts(
   runsRootDir: string,
@@ -515,4 +529,3 @@ export async function backfillMatchNarrativeArtifacts(
   }
   return results;
 }
-

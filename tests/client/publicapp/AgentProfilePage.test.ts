@@ -93,11 +93,12 @@ function minimalMatch(overrides: {
   }>;
   watchHref?: string | null;
   fullRenderHref?: string | null;
+  roundNumber?: number | null;
 }) {
   return {
     matchId: overrides.matchId,
     shortId: overrides.matchId,
-    roundNumber: null,
+    roundNumber: overrides.roundNumber ?? null,
     completedAt: overrides.completedAt,
     map: overrides.map,
     mapSize: "medium",
@@ -118,7 +119,6 @@ function minimalMatch(overrides: {
     watchHref: overrides.watchHref ?? null,
     fullRenderHref: overrides.fullRenderHref ?? null,
     premiereHref: null,
-    directorCut: null,
     dramaEvidence: null,
   };
 }
@@ -170,16 +170,18 @@ afterEach(() => {
 });
 
 describe("agent-profile-page", () => {
-  it("renders an honest not-found state when the slug matches no agent", async () => {
+  it("renders an honest not-found state when the slug matches no agent, with a Browse agents recovery CTA to /agents (P2 2026-08-02)", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => Response.json(readModelBody([]))),
     );
     const el = mount("no-such-agent");
     await flushMicrotasks();
-
     expect(el.querySelector("h1")?.textContent).toBe("no-such-agent");
     expect(el.textContent).toContain("agent_profile.not_found_body");
+    const cta = el.querySelector<HTMLAnchorElement>('main a[href="/agents"]');
+    expect(cta).not.toBeNull();
+    expect(cta!.textContent).toContain("agent_profile.not_found_cta");
   });
 
   it("resolves a provisional identity by provisionalSlug when no registered agent matches — never the anonymous not-found state (2026-08-01 P0 regression: 'James Botts'-style unregistered participant)", async () => {
@@ -199,14 +201,20 @@ describe("agent-profile-page", () => {
               primaryColor: null,
               secondaryColor: null,
               provisionalSlug: "james-botts",
-              provisionalEmblemSvg: '<svg data-testid="provisional-emblem"></svg>',
+              provisionalEmblemSvg:
+                '<svg data-testid="provisional-emblem"></svg>',
               provisionalPrimaryColor: "#112233",
               provisionalSecondaryColor: "#445566",
               tagline: null,
               builderId: null,
               builderDisplayName: null,
               status: "unregistered",
-              standing: { rank: 16, score: 0.01, roundsPlayed: 908, isHouse: false },
+              standing: {
+                rank: 16,
+                score: 0.01,
+                roundsPlayed: 908,
+                isHouse: false,
+              },
               activeVersion: null,
               provenance: {
                 ratingPolicyLabel: "jamesboggs-warlord:v1",
@@ -226,7 +234,9 @@ describe("agent-profile-page", () => {
     expect(el.querySelector("h1")?.textContent).toContain("James Botts");
     // A generated provisional emblem renders, closing the "no emblem
     // anywhere" complaint.
-    expect(el.querySelector('[data-testid="provisional-emblem"]')).not.toBeNull();
+    expect(
+      el.querySelector('[data-testid="provisional-emblem"]'),
+    ).not.toBeNull();
     // Standing (rank/score/rounds) still renders for a provisional agent —
     // it is a real, currently-competing participant, not a placeholder.
     expect(el.textContent).toContain("#16");
@@ -467,9 +477,7 @@ describe("agent-profile-page", () => {
     const el = mount("unclaimed-agent");
     await flushMicrotasks();
     expect(el.textContent).toContain("agent_profile.claim_cta");
-    expect(
-      el.querySelector('a[href="/claim/unclaimed-agent"]'),
-    ).not.toBeNull();
+    expect(el.querySelector('a[href="/claim/unclaimed-agent"]')).not.toBeNull();
 
     document.body.innerHTML = "";
     vi.stubGlobal(
@@ -577,6 +585,78 @@ describe("agent-profile-page", () => {
     expect(rows[1].textContent).toContain("Old Map");
     expect(rows[1].textContent).toContain("agent_profile.outcome_eliminated");
     expect(rows[1].querySelector('a[href="/watch/m-old"]')).not.toBeNull();
+  });
+
+  it("shows a round number and full date+time so two same-map, same-day matches are distinguishable (P2 2026-08-02, parity with the homepage's Recent Broadcasts cards)", async () => {
+    const matches = [
+      minimalMatch({
+        matchId: "m-morning",
+        completedAt: "2026-07-15T09:00:00.000Z",
+        map: "Black Sea",
+        roundNumber: 1130,
+        participants: [
+          {
+            agentSlug: "odin-free",
+            displayName: "Odin",
+            isAlive: true,
+            isWinner: true,
+          },
+        ],
+      }),
+      minimalMatch({
+        matchId: "m-evening",
+        completedAt: "2026-07-15T21:00:00.000Z",
+        map: "Black Sea",
+        roundNumber: 1133,
+        participants: [
+          {
+            agentSlug: "odin-free",
+            displayName: "Odin",
+            isAlive: true,
+            isWinner: true,
+          },
+        ],
+      }),
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json(
+          readModelBody(
+            [
+              minimalAgent({
+                slug: "odin-free",
+                playerName: "odin-free",
+                displayName: "Odin",
+                shortCode: "ODN",
+                status: "verified",
+                builderDisplayName: "Ada",
+                rank: 1,
+              }),
+            ],
+            matches,
+          ),
+        ),
+      ),
+    );
+    const el = mount("odin-free");
+    await flushMicrotasks();
+    const rows = [...el.querySelectorAll("li")].filter((li) =>
+      li.textContent?.includes("Black Sea"),
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows[0].textContent).toContain("agent_profile.round_suffix");
+    expect(rows[1].textContent).toContain("agent_profile.round_suffix");
+    // Two same-map, same-day, same-outcome rows are no longer identical
+    // text: distinct round numbers...
+    expect(rows[0].textContent).not.toBe(rows[1].textContent);
+    // ...and each row's own timestamp now carries a time-of-day component
+    // (toLocaleString, not toLocaleDateString), not just a bare date.
+    const morningRow = rows.find((row) => row.textContent?.includes("1130"));
+    const eveningRow = rows.find((row) => row.textContent?.includes("1133"));
+    expect(morningRow).toBeDefined();
+    expect(eveningRow).toBeDefined();
+    expect(morningRow!.textContent).not.toBe(eveningRow!.textContent);
   });
 
   it("includes the app-shell header (active agents) and footer", async () => {

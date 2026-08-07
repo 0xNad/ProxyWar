@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { resolveSealedBundleParticipants } from "../../src/scripts/premiere-candidates";
 import {
   MINIMUM_SCHEDULE_SPACING_MINUTES,
   ensurePremiereParticipants,
@@ -9,14 +10,16 @@ import {
   upsertRecord,
   validateSchedule,
 } from "../../src/scripts/premiere-schedule-lib";
-import { resolveSealedBundleParticipants, resolveSealedBundleTurnStats } from "../../src/scripts/premiere-candidates";
 import {
   readFeaturedMatchStore,
   writeFeaturedMatchStore,
   type FeaturedMatch,
 } from "../../src/server/agents/FeaturedMatch";
 import type { IdentityRegistrySnapshot } from "../../src/server/identity/IdentityRegistry";
-import type { AgentProfile, AgentVersion } from "../../src/server/identity/IdentitySchemas";
+import type {
+  AgentProfile,
+  AgentVersion,
+} from "../../src/server/identity/IdentitySchemas";
 
 const NOW = new Date("2026-08-01T00:00:00.000Z");
 
@@ -143,7 +146,9 @@ describe("resolveScheduleTarget", () => {
 
   beforeEach(async () => {
     queueRoot = await mkdtemp(path.join(os.tmpdir(), "pw-sched-queue-"));
-    artifactsRoot = await mkdtemp(path.join(os.tmpdir(), "pw-sched-artifacts-"));
+    artifactsRoot = await mkdtemp(
+      path.join(os.tmpdir(), "pw-sched-artifacts-"),
+    );
     stateRoot = await mkdtemp(path.join(os.tmpdir(), "pw-sched-state-"));
   });
 
@@ -163,8 +168,14 @@ describe("resolveScheduleTarget", () => {
   });
 
   it("finds an existing store record by matchId", async () => {
-    const record = baseMatch({ state: "scheduled", scheduledAt: "2026-08-02T00:00:00.000Z" });
-    await writeFeaturedMatchStore(stateRoot, { schemaVersion: 1, matches: [record] });
+    const record = baseMatch({
+      state: "scheduled",
+      scheduledAt: "2026-08-02T00:00:00.000Z",
+    });
+    await writeFeaturedMatchStore(stateRoot, {
+      schemaVersion: 1,
+      matches: [record],
+    });
     const result = await resolveScheduleTarget(record.matchId, roots());
     expect(result.found).toBe(true);
     if (result.found) {
@@ -175,15 +186,28 @@ describe("resolveScheduleTarget", () => {
 
   it("finds an existing store record by queueItemName or episodeRequestId", async () => {
     const record = baseMatch();
-    await writeFeaturedMatchStore(stateRoot, { schemaVersion: 1, matches: [record] });
-    const byQueueItem = await resolveScheduleTarget(record.queueItemName!, roots());
+    await writeFeaturedMatchStore(stateRoot, {
+      schemaVersion: 1,
+      matches: [record],
+    });
+    const byQueueItem = await resolveScheduleTarget(
+      record.queueItemName!,
+      roots(),
+    );
     expect(byQueueItem.found).toBe(true);
-    const byEpisode = await resolveScheduleTarget(record.episodeRequestId!, roots());
+    const byEpisode = await resolveScheduleTarget(
+      record.episodeRequestId!,
+      roots(),
+    );
     expect(byEpisode.found).toBe(true);
   });
 
   it("falls back to a fresh live-queue candidate when not in the store", async () => {
-    await writeQueueItem(queueRoot, "20260801T000000Z-runX", metaFor({ experienceRequestId: "ereq_fresh" }));
+    await writeQueueItem(
+      queueRoot,
+      "20260801T000000Z-runX",
+      metaFor({ experienceRequestId: "ereq_fresh" }),
+    );
     const result = await resolveScheduleTarget("ereq_fresh", roots());
     expect(result.found).toBe(true);
     if (result.found) {
@@ -199,7 +223,9 @@ describe("resolveScheduleTarget", () => {
       "20260801T000000Z-runPub",
       metaFor({ experienceRequestId: "ereq_published" }),
     );
-    await mkdir(path.join(artifactsRoot, "ai-league-runs", "league"), { recursive: true });
+    await mkdir(path.join(artifactsRoot, "ai-league-runs", "league"), {
+      recursive: true,
+    });
     await writeFile(
       path.join(artifactsRoot, "ai-league-runs", "league", "data.json"),
       JSON.stringify({ episodes: [{ episodeRequestId: "ereq_published" }] }),
@@ -232,7 +258,10 @@ describe("validateSchedule", () => {
     await rm(queueRoot, { recursive: true, force: true });
   });
 
-  const roots = () => ({ queueReadyDir: path.join(queueRoot, "ready"), now: () => NOW });
+  const roots = () => ({
+    queueReadyDir: path.join(queueRoot, "ready"),
+    now: () => NOW,
+  });
 
   it("passes for an empty schedule", async () => {
     const issues = await validateSchedule([], roots());
@@ -261,15 +290,24 @@ describe("validateSchedule", () => {
       [baseMatch({ state: "scheduled", scheduledAt: null })],
       roots(),
     );
-    expect(issues.some((i) => i.reason.includes("missing_scheduled_at"))).toBe(true);
+    expect(issues.some((i) => i.reason.includes("missing_scheduled_at"))).toBe(
+      true,
+    );
   });
 
   it("flags a scheduled record whose time is already in the past", async () => {
     const issues = await validateSchedule(
-      [baseMatch({ state: "scheduled", scheduledAt: "2026-07-01T00:00:00.000Z" })],
+      [
+        baseMatch({
+          state: "scheduled",
+          scheduledAt: "2026-07-01T00:00:00.000Z",
+        }),
+      ],
       roots(),
     );
-    expect(issues.some((i) => i.reason.includes("scheduled_at_in_past"))).toBe(true);
+    expect(issues.some((i) => i.reason.includes("scheduled_at_in_past"))).toBe(
+      true,
+    );
   });
 
   it("flags two premieres scheduled too close together (collision)", async () => {
@@ -290,7 +328,9 @@ describe("validateSchedule", () => {
       ],
       roots(),
     );
-    expect(issues.filter((i) => i.reason.includes("schedule_collision"))).toHaveLength(2);
+    expect(
+      issues.filter((i) => i.reason.includes("schedule_collision")),
+    ).toHaveLength(2);
   });
 
   it("does not flag two premieres spaced far enough apart", async () => {
@@ -312,7 +352,9 @@ describe("validateSchedule", () => {
       ],
       roots(),
     );
-    expect(issues.filter((i) => i.reason.includes("schedule_collision"))).toHaveLength(0);
+    expect(
+      issues.filter((i) => i.reason.includes("schedule_collision")),
+    ).toHaveLength(0);
   });
 
   it("flags a scheduled record whose queue item no longer exists in ready/", async () => {
@@ -326,7 +368,9 @@ describe("validateSchedule", () => {
       ],
       roots(),
     );
-    expect(issues.some((i) => i.reason.includes("queue_item_missing"))).toBe(true);
+    expect(issues.some((i) => i.reason.includes("queue_item_missing"))).toBe(
+      true,
+    );
   });
 
   it("does not flag a scheduled record whose queue item still exists", async () => {
@@ -341,7 +385,9 @@ describe("validateSchedule", () => {
       ],
       roots(),
     );
-    expect(issues.some((i) => i.reason.includes("queue_item_missing"))).toBe(false);
+    expect(issues.some((i) => i.reason.includes("queue_item_missing"))).toBe(
+      false,
+    );
   });
 });
 
@@ -366,7 +412,11 @@ describe("upsertRecord", () => {
   it("replaces an existing record by matchId rather than duplicating it", async () => {
     const record = baseMatch();
     await upsertRecord(stateRoot, record);
-    const updated = { ...record, state: "scheduled" as const, scheduledAt: "2026-08-02T00:00:00.000Z" };
+    const updated = {
+      ...record,
+      state: "scheduled" as const,
+      scheduledAt: "2026-08-02T00:00:00.000Z",
+    };
     await upsertRecord(stateRoot, updated);
     const store = await readFeaturedMatchStore(stateRoot);
     expect(store.matches).toHaveLength(1);
@@ -383,7 +433,11 @@ function agentProfile(overrides: Partial<AgentProfile> = {}): AgentProfile {
     builderId: null,
     tagline: null,
     description: null,
-    emblem: { style: "geometric-svg-v1", seed: "agt_auri", assetPath: "resources/identity/emblems/agt_auri.svg" },
+    emblem: {
+      style: "geometric-svg-v1",
+      seed: "agt_auri",
+      assetPath: "resources/identity/emblems/agt_auri.svg",
+    },
     primaryColor: "#112233",
     secondaryColor: "#445566",
     debutDate: null,
@@ -435,12 +489,26 @@ describe("resolveSealedBundleParticipants", () => {
 
   it("resolves registered participants by exact playerName + policy label, never fabricating an unmapped one", async () => {
     await writeQueueItem(queueRoot, "item1", metaFor());
-    const result = await resolveSealedBundleParticipants(readyDir(), "item1", identity());
+    const result = await resolveSealedBundleParticipants(
+      readyDir(),
+      "item1",
+      identity(),
+    );
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.participants).toEqual([
-      { playerName: "Auri", agentId: "agt_auri", agentVersionId: "agtv_auri_v43", builderId: null },
-      { playerName: "Sefirot", agentId: null, agentVersionId: null, builderId: null },
+      {
+        playerName: "Auri",
+        agentId: "agt_auri",
+        agentVersionId: "agtv_auri_v43",
+        builderId: null,
+      },
+      {
+        playerName: "Sefirot",
+        agentId: null,
+        agentVersionId: null,
+        builderId: null,
+      },
     ]);
   });
 
@@ -450,7 +518,11 @@ describe("resolveSealedBundleParticipants", () => {
     ]);
     // Only v43 is registered; the sealed match itself shows v42 — this
     // must resolve to null (no fabricated cross-version match), not v43.
-    const result = await resolveSealedBundleParticipants(readyDir(), "item2", identity());
+    const result = await resolveSealedBundleParticipants(
+      readyDir(),
+      "item2",
+      identity(),
+    );
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.participants[0]).toEqual({
@@ -463,7 +535,11 @@ describe("resolveSealedBundleParticipants", () => {
 
   it("fails cleanly when the sealed bundle is missing", async () => {
     await writeQueueItem(queueRoot, "item3", metaFor(), "missing");
-    const result = await resolveSealedBundleParticipants(readyDir(), "item3", identity());
+    const result = await resolveSealedBundleParticipants(
+      readyDir(),
+      "item3",
+      identity(),
+    );
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.reason).toContain("not found");
@@ -471,7 +547,11 @@ describe("resolveSealedBundleParticipants", () => {
 
   it("fails cleanly when the sealed bundle has no seats array", async () => {
     await writeQueueItem(queueRoot, "item4", metaFor(), "malformed");
-    const result = await resolveSealedBundleParticipants(readyDir(), "item4", identity());
+    const result = await resolveSealedBundleParticipants(
+      readyDir(),
+      "item4",
+      identity(),
+    );
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.reason).toContain("seats");
@@ -479,7 +559,11 @@ describe("resolveSealedBundleParticipants", () => {
 
   it("fails cleanly when the bundle carries zero seats", async () => {
     await writeQueueItem(queueRoot, "item5", metaFor(), []);
-    const result = await resolveSealedBundleParticipants(readyDir(), "item5", identity());
+    const result = await resolveSealedBundleParticipants(
+      readyDir(),
+      "item5",
+      identity(),
+    );
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.reason).toContain("zero seats");
@@ -488,7 +572,11 @@ describe("resolveSealedBundleParticipants", () => {
   it("never reads gameRecord/authoritativeResult — a bundle carrying only seats plus junk elsewhere still resolves", async () => {
     const dir = path.join(queueRoot, "ready", "item6");
     await mkdir(dir, { recursive: true });
-    await writeFile(path.join(dir, "meta.json"), JSON.stringify(metaFor()), "utf8");
+    await writeFile(
+      path.join(dir, "meta.json"),
+      JSON.stringify(metaFor()),
+      "utf8",
+    );
     await writeFile(
       path.join(dir, "bundle.source.json"),
       JSON.stringify({
@@ -509,78 +597,21 @@ describe("resolveSealedBundleParticipants", () => {
       }),
       "utf8",
     );
-    const result = await resolveSealedBundleParticipants(readyDir(), "item6", identity());
+    const result = await resolveSealedBundleParticipants(
+      readyDir(),
+      "item6",
+      identity(),
+    );
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.participants).toEqual([
-      { playerName: "Auri", agentId: "agt_auri", agentVersionId: "agtv_auri_v43", builderId: null },
+      {
+        playerName: "Auri",
+        agentId: "agt_auri",
+        agentVersionId: "agtv_auri_v43",
+        builderId: null,
+      },
     ]);
-  });
-});
-
-describe("resolveSealedBundleTurnStats", () => {
-  let queueRoot: string;
-
-  beforeEach(async () => {
-    queueRoot = await mkdtemp(path.join(os.tmpdir(), "pw-sealed-bundle-turnstats-"));
-  });
-
-  afterEach(async () => {
-    await rm(queueRoot, { recursive: true, force: true });
-  });
-
-  const readyDir = () => path.join(queueRoot, "ready");
-
-  it("reads turnCount/checkpointTurns off meta.json", async () => {
-    await writeQueueItem(queueRoot, "item1", metaFor({ turnCount: 9000, checkpointTurns: [3150, 5850] }));
-    const result = await resolveSealedBundleTurnStats(readyDir(), "item1");
-    expect(result).toEqual({ ok: true, turnCount: 9000, checkpointTurns: [3150, 5850] });
-  });
-
-  /**
-   * Spoiler-safety regression: `DirectorCutPlan.estimatePreRevealDirectorCutSeconds`
-   * (`premiere:package`'s pre-reveal estimate fallback) must never see a
-   * result-bearing field even if a future/poisoned `meta.json` carried
-   * one — same narrow-schema discipline `resolveSealedBundleParticipants`'s
-   * own "never reads gameRecord/authoritativeResult" test proves for
-   * `bundle.source.json`. A non-passthrough zod schema strips unknown
-   * keys by construction; this asserts that end-to-end against a
-   * `meta.json` deliberately poisoned with winner/result fields no real
-   * producer writes today.
-   */
-  it("strips a poisoned meta.json down to ONLY turnCount/checkpointTurns — never leaks a result-bearing field", async () => {
-    await writeQueueItem(
-      queueRoot,
-      "item2",
-      metaFor({
-        turnCount: 9000,
-        checkpointTurns: [3150, 5850],
-        winnerName: "SPOILER_SHOULD_NEVER_LEAK",
-        result: { winnerAgentId: "agt_should_never_leak", placements: [] },
-        spoilerNotes: "the outcome is secret",
-      }),
-    );
-    const result = await resolveSealedBundleTurnStats(readyDir(), "item2");
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result).toEqual({ ok: true, turnCount: 9000, checkpointTurns: [3150, 5850] });
-    expect(Object.keys(result).sort()).toEqual(["checkpointTurns", "ok", "turnCount"]);
-    expect(JSON.stringify(result)).not.toContain("SPOILER");
-  });
-
-  it("fails cleanly when the sealed bundle's meta.json is missing", async () => {
-    const result = await resolveSealedBundleTurnStats(readyDir(), "item-missing");
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.reason).toContain("not found");
-  });
-
-  it("fails cleanly when turnCount/checkpointTurns are the wrong shape", async () => {
-    const dir = path.join(queueRoot, "ready", "item3");
-    await mkdir(dir, { recursive: true });
-    await writeFile(path.join(dir, "meta.json"), JSON.stringify({ turnCount: "not-a-number" }), "utf8");
-    const result = await resolveSealedBundleTurnStats(readyDir(), "item3");
-    expect(result.ok).toBe(false);
   });
 });
 
@@ -588,18 +619,27 @@ describe("ensurePremiereParticipants", () => {
   let queueRoot: string;
 
   beforeEach(async () => {
-    queueRoot = await mkdtemp(path.join(os.tmpdir(), "pw-ensure-participants-"));
+    queueRoot = await mkdtemp(
+      path.join(os.tmpdir(), "pw-ensure-participants-"),
+    );
   });
 
   afterEach(async () => {
     await rm(queueRoot, { recursive: true, force: true });
   });
 
-  const roots = () => ({ queueReadyDir: path.join(queueRoot, "ready"), now: () => NOW });
+  const roots = () => ({
+    queueReadyDir: path.join(queueRoot, "ready"),
+    now: () => NOW,
+  });
 
   it("resolves participants for a premiere-lane record with an empty lineup", async () => {
     await writeQueueItem(queueRoot, "20260801T000000Z-run1", metaFor());
-    const result = await ensurePremiereParticipants(baseMatch(), identity(), roots());
+    const result = await ensurePremiereParticipants(
+      baseMatch(),
+      identity(),
+      roots(),
+    );
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.participants).toHaveLength(2);
@@ -610,9 +650,20 @@ describe("ensurePremiereParticipants", () => {
     // No queue item written at all — if this attempted bundle I/O it
     // would fail; it must short-circuit before ever touching the queue.
     const record = baseMatch({
-      participants: [{ playerName: "Already", agentId: "agt_x", agentVersionId: null, builderId: null }],
+      participants: [
+        {
+          playerName: "Already",
+          agentId: "agt_x",
+          agentVersionId: null,
+          builderId: null,
+        },
+      ],
     });
-    const result = await ensurePremiereParticipants(record, identity(), roots());
+    const result = await ensurePremiereParticipants(
+      record,
+      identity(),
+      roots(),
+    );
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.participants).toEqual(record.participants);
@@ -620,15 +671,28 @@ describe("ensurePremiereParticipants", () => {
 
   it("is a no-op for an archive-lane record regardless of participants", async () => {
     const record = baseMatch({ lane: "archive", participants: [] });
-    const result = await ensurePremiereParticipants(record, identity(), roots());
+    const result = await ensurePremiereParticipants(
+      record,
+      identity(),
+      roots(),
+    );
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.participants).toEqual([]);
   });
 
   it("fails when the sealed bundle cannot be resolved — the no-lineup case must hard-fail, never silently proceed empty", async () => {
-    await writeQueueItem(queueRoot, "20260801T000000Z-run1", metaFor(), "missing");
-    const result = await ensurePremiereParticipants(baseMatch(), identity(), roots());
+    await writeQueueItem(
+      queueRoot,
+      "20260801T000000Z-run1",
+      metaFor(),
+      "missing",
+    );
+    const result = await ensurePremiereParticipants(
+      baseMatch(),
+      identity(),
+      roots(),
+    );
     expect(result.ok).toBe(false);
   });
 });

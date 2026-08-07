@@ -47,7 +47,7 @@ export PROXYWAR_PUBLIC_URL="https://proxywar.xyz"
 export PROXYWAR_PLATFORM_ENABLED=1
 # The apex, as of the 2026-07-30 cutover: the zone's "apex and www to league"
 # redirect rule now matches www only, and the apex DNS record is a tunnel route
-# (cloudflared tunnel route dns open-frontier-beta proxywar.xyz) landing here.
+# (cloudflared tunnel route dns proxywar-beta proxywar.xyz) landing here.
 # app.proxywar.xyz stays in the tunnel ingress ONLY so the canonical-host 302
 # is reachable there - it is not a second account surface: this value is the
 # single expectedOrigin PlatformAccountSecurity accepts for writes, and the
@@ -60,13 +60,6 @@ export PROXYWAR_PLATFORM_ORIGIN="https://proxywar.xyz"
 # The platform logs "PROXYWAR_PLATFORM_RETURN_ORIGINS is not valid JSON" when
 # that happens; grep /tmp/pw-platform.log after changing this.
 export PROXYWAR_PLATFORM_RETURN_ORIGINS='{"betting":"https://bet.proxywar.xyz","league":"https://beta.proxywar.xyz"}'
-# Origins allowed an AMBIENT credentialed read of /api/account/pov-claims (the
-# replay camera default). Deliberately NOT the same list as the handoff return
-# origins above: a handoff child receives a redirect the user started, whereas
-# an origin here can read a viewer's claims silently on any page load. The
-# league needs it because league replays are served from beta; betting does not,
-# because it reads its own same-origin snapshot. JSON array; empty denies all.
-export PROXYWAR_PLATFORM_POV_CLAIM_ORIGINS='["https://beta.proxywar.xyz"]'
 export PROXYWAR_PLATFORM_STATE_ROOT="$STATE_ROOT"
 export PROXYWAR_LEAGUE_WRAPPER_ONLY=true
 export PROXYWAR_ARTIFACTS_ROOT="$DEPLOY_DIR/artifacts"

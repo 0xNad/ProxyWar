@@ -26,7 +26,6 @@ import { renderNumber } from "../../Utils";
 import { TransformHandler } from "../TransformHandler";
 import { UIState } from "../UIState";
 import { Layer } from "./Layer";
-const warshipIcon = assetUrl("images/BattleshipIconWhite.svg");
 const cityIcon = assetUrl("images/CityIconWhite.svg");
 const factoryIcon = assetUrl("images/FactoryIconWhite.svg");
 const goldCoinIcon = assetUrl("images/GoldCoinIcon.svg");
@@ -68,13 +67,6 @@ export const buildTable: BuildItemDisplay[][] = [
       description: "build_menu.desc.hydrogen_bomb",
       key: "unit_type.hydrogen_bomb",
       countable: false,
-    },
-    {
-      unitType: UnitType.Warship,
-      icon: warshipIcon,
-      description: "build_menu.desc.warship",
-      key: "unit_type.warship",
-      countable: true,
     },
     {
       unitType: UnitType.Port,

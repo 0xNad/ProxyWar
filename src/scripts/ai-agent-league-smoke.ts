@@ -475,7 +475,6 @@ export async function runAgentLeagueSmoke(
     participants,
     spawnCandidates,
     log,
-    minSpawnDistance: scenario === "attack" ? 1 : undefined,
     disabledActionKinds,
   });
 

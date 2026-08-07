@@ -3,7 +3,7 @@ import path from "node:path";
 
 /**
  * Shared IO primitives for every mirror-side, post-hoc backfill agent
- * (`CoworldLeagueDirectorCutBackfill.ts`, `CoworldLeagueMatchNarrativeBackfill.ts`,
+ * (`CoworldLeagueMatchNarrativeBackfill.ts`,
  * `CoworldLeagueMatchStateSeriesBackfill.ts`): bounded artifact reads and
  * the authoritative-turn-count lookup every agent needs identically.
  * Factored out rather than duplicated a second time — see each backfill's

@@ -434,28 +434,6 @@ export class HelpModal extends BaseModal {
                       ${translateText("help_modal.action_auto_upgrade")}
                     </td>
                   </tr>
-                  <tr class="hover:bg-white/5 transition-colors">
-                    <td class="py-3 pl-4 border-b border-white/5">
-                      <div class="inline-flex items-center gap-2">
-                        ${this.renderKey(keybinds.shiftKey)}
-                        <span class="text-white/40 font-bold">+</span>
-                        <span class="text-white/50 text-xs"
-                          >${translateText("help_modal.drag")}</span
-                        >
-                      </div>
-                    </td>
-                    <td class="py-3 border-b border-white/5 text-white/70">
-                      ${translateText("help_modal.action_warship_multiselect")}
-                    </td>
-                  </tr>
-                  <tr class="hover:bg-white/5 transition-colors">
-                    <td class="py-3 pl-4 border-b border-white/5">
-                      ${this.renderKey(keybinds.selectAllWarships)}
-                    </td>
-                    <td class="py-3 border-b border-white/5 text-white/70">
-                      ${translateText("help_modal.action_warship_selectall")}
-                    </td>
-                  </tr>
                 </tbody>
               </table>
             </div>
@@ -1002,22 +980,6 @@ export class HelpModal extends BaseModal {
                       class="py-3 border-b border-white/5 text-white/60 text-sm"
                     >
                       ${translateText("help_modal.build_factory_desc")}
-                    </td>
-                  </tr>
-                  <tr class="bg-white/5 hover:bg-white/10 transition-colors">
-                    <td class="py-3 pl-4 border-b border-white/5 font-medium">
-                      ${translateText("help_modal.build_warship")}
-                    </td>
-                    <td class="py-3 border-b border-white/5">
-                      <img
-                        src=${assetUrl("images/BattleshipIconWhite.svg")}
-                        class="w-8 h-8 scale-75 origin-left"
-                      />
-                    </td>
-                    <td
-                      class="py-3 border-b border-white/5 text-white/60 text-sm"
-                    >
-                      ${translateText("help_modal.build_warship_desc")}
                     </td>
                   </tr>
                   <tr class="bg-white/5 hover:bg-white/10 transition-colors">

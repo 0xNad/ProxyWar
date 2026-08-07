@@ -67,6 +67,13 @@ class EpisodeRequest(BaseModel):
     variant_id: str
     policy_version_ids: list[UUID]
     game_config: dict[str, Any] | None = None
+    # Additive, upstream-compatible (Metta-AI/coworld commissioner/protocol.py):
+    # shallow-merged onto the variant's game_config by the platform. Distinct
+    # from `game_config`, which this commissioner's own callers already own -
+    # `game_config_overrides` is reserved for cross-cutting per-episode
+    # stamps like `episodeIndex` (see ProxyWarCommissioner) that must survive
+    # independently of whatever a caller puts in `game_config`.
+    game_config_overrides: dict[str, Any] = Field(default_factory=dict)
     seed: int = Field(default_factory=random_episode_seed)
     tags: dict[str, str] = Field(default_factory=dict)
 
@@ -129,6 +136,7 @@ class StageConfig(BaseModel):
     label: str = "Round"
     num_episodes: int = Field(default=1, gt=0)
     min_episodes_per_entrant: int | None = Field(default=None, gt=0)
+    self_play: bool = False
 
 
 class RoundConfig(BaseModel):

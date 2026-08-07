@@ -1,17 +1,18 @@
 import { html, LitElement } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { assetUrl } from "../../../core/AssetUrls";
-import { isBettingPremiereRoute } from "../../AiLeagueReplayMode";
 import { EventBus } from "../../../core/EventBus";
 import { GameType } from "../../../core/game/Game";
 import { GameView } from "../../../core/game/GameView";
+import { isBettingPremiereRoute } from "../../AiLeagueReplayMode";
 import { crazyGamesSDK } from "../../CrazyGamesSDK";
 import {
   ReplaySpeedChangeEvent,
   TogglePauseIntentEvent,
 } from "../../InputHandler";
-import { defaultReplaySpeedMultiplier } from "../../utilities/ReplaySpeedMultiplier";
+import { AI_LEAGUE_REPLAY_CATCHUP_EVENT } from "../../LocalServer";
 import { PauseGameIntentEvent, SendWinnerEvent } from "../../Transport";
+import { defaultReplaySpeedMultiplier } from "../../utilities/ReplaySpeedMultiplier";
 import { translateText } from "../../Utils";
 import { ImmunityBarVisibleEvent } from "./ImmunityTimer";
 import { Layer } from "./Layer";
@@ -29,6 +30,22 @@ function playbackSpeedLabel(multiplier: number): string {
   if (multiplier <= 0) return translateText("game_controls.speed_max");
   const speed = 1 / multiplier;
   return `${Number.isInteger(speed) ? speed : speed.toFixed(1)}\u00d7`;
+}
+/**
+ * Bare numeral/word for the "Playback speed — now {speed}×" sentence --
+ * that i18n string already supplies its own trailing "×", so passing
+ * `playbackSpeedLabel`'s own ×-suffixed value here doubles it up (harmless
+ * at the rare manual 2×/0.5× picks that were the only way to reach this
+ * template before; this incident's always-show-for-replays fix makes the
+ * far more common 1×-paced case take this same path,
+ * surfacing what was a dormant string bug). `playbackSpeedLabel` itself
+ * stays as-is for the standalone fast-forward badge below, which has no
+ * surrounding sentence and needs its own "×".
+ */
+function playbackSpeedNumeral(multiplier: number): string {
+  if (multiplier <= 0) return translateText("game_controls.speed_max");
+  const speed = 1 / multiplier;
+  return Number.isInteger(speed) ? String(speed) : speed.toFixed(1);
 }
 // Shared affordance for every control in the top-right cluster. These were bare
 // <div class="cursor-pointer"> wrappers: not focusable, no keyboard activation,
@@ -75,6 +92,14 @@ export class GameRightSidebar extends LitElement implements Layer {
   // multiplier without the panel being open.
   @state()
   private _replaySpeedMultiplier: number = defaultReplaySpeedMultiplier;
+
+  // Real turn-count catch-up progress from LocalServer.reportReplayCatchUp()
+  // -- null whenever the replay isn't behind its own dispatched position.
+  @state()
+  private _catchUpProgress: {
+    turnsRendered: number;
+    turnsTotal: number;
+  } | null = null;
 
   private hasWinner = false;
   private isLobbyCreator = false;
@@ -128,13 +153,31 @@ export class GameRightSidebar extends LitElement implements Layer {
   connectedCallback() {
     super.connectedCallback();
     document.addEventListener("fullscreenchange", this.onFullscreenChange);
+    document.addEventListener(
+      AI_LEAGUE_REPLAY_CATCHUP_EVENT,
+      this.onReplayCatchUpEvent,
+    );
     this.onFullscreenChange();
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
     document.removeEventListener("fullscreenchange", this.onFullscreenChange);
+    document.removeEventListener(
+      AI_LEAGUE_REPLAY_CATCHUP_EVENT,
+      this.onReplayCatchUpEvent,
+    );
   }
+
+  private onReplayCatchUpEvent = (e: Event) => {
+    // A DOM CustomEvent LocalServer.ts dispatches itself -- the detail
+    // shape is ours, not external/untrusted input.
+    const catchUpEvent = e as CustomEvent<{
+      turnsRendered: number;
+      turnsTotal: number;
+    } | null>;
+    this._catchUpProgress = catchUpEvent.detail;
+  };
 
   getTickIntervalMs() {
     return 250;
@@ -280,6 +323,26 @@ export class GameRightSidebar extends LitElement implements Layer {
           ${this.secondsToHms(this.timer)}
         </div>
 
+        <!-- Real turn-count catch-up progress (P2 incident follow-up):
+             honest, from LocalServer's own dispatched/rendered counters --
+             never a fake spinner, never shown once the playhead itself has
+             moved past the gap it describes. -->
+        ${this._catchUpProgress !== null
+          ? html`
+              <div
+                class="text-xs text-white/70 whitespace-nowrap"
+                aria-live="polite"
+                title=${translateText("game_controls.replay_catching_up_tip")}
+              >
+                ${translateText("game_controls.replay_catching_up", {
+                  rendered:
+                    this._catchUpProgress.turnsRendered.toLocaleString(),
+                  total: this._catchUpProgress.turnsTotal.toLocaleString(),
+                })}
+              </div>
+            `
+          : ""}
+
         <!-- Playback controls (replay / singleplayer only) -->
         ${this.maybeRenderReplayButtons()}
 
@@ -350,12 +413,18 @@ export class GameRightSidebar extends LitElement implements Layer {
     const showPauseButton = isReplayOrSingleplayer || this.isLobbyCreator;
     // The fast-forward control opens the speed panel; without the current
     // multiplier on its face the only way to know the playback speed was to
-    // open that panel. Surface it inline instead (hidden at 1x to stay quiet).
+    // open that panel. Surface it inline, hidden at 1x for a LIVE game (the
+    // expected/only sensible speed there) -- but ALWAYS shown for a replay
+    // (archived Full Replay or Premiere), where 1x/slow is frequently a
+    // deliberate pacing choice, not the assumed default, and a silent
+    // "Playback speed" label at that pace is exactly what read as a frozen
+    // replay in the P2 incident.
+    const isReplay = this.game?.config()?.isReplay() ?? false;
     const speedLabel =
-      this._replaySpeedMultiplier === 1
+      this._replaySpeedMultiplier === 1 && !isReplay
         ? translateText("game_controls.playback_speed")
         : translateText("game_controls.playback_speed_current", {
-            speed: playbackSpeedLabel(this._replaySpeedMultiplier),
+            speed: playbackSpeedNumeral(this._replaySpeedMultiplier),
           });
 
     return html`
@@ -378,7 +447,7 @@ export class GameRightSidebar extends LitElement implements Layer {
                 width="20"
                 height="20"
               />
-              ${this._replaySpeedMultiplier !== 1
+              ${this._replaySpeedMultiplier !== 1 || isReplay
                 ? html`<span
                     class="text-[11px] font-bold leading-none tabular-nums"
                     aria-hidden="true"

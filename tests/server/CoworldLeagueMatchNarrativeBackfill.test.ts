@@ -1,20 +1,18 @@
-import { readFileSync } from "node:fs";
-import { promises as fs } from "node:fs";
+import { promises as fs, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { AGENT_MATCH_RECAP_SCHEMA_VERSION } from "../../src/server/agents/AgentMatchRecap";
 import {
   backfillMatchNarrativeArtifacts,
   generateMatchNarrativeArtifactsForRunDir,
 } from "../../src/server/agents/CoworldLeagueMatchNarrativeBackfill";
-import { AGENT_MATCH_RECAP_SCHEMA_VERSION } from "../../src/server/agents/AgentMatchRecap";
 
 /**
  * IO/budget/skip/idempotency/failure-isolation coverage for the mirror-side
- * drama-report/match-story/match-recap backfill — same structure and same
- * real fixtures `CoworldLeagueDirectorCutBackfill.test.ts` uses (both draw
- * on the SAME retained mirror run's `spectator-telemetry.json`/
- * `decisions.jsonl`, via the shared `resolveMirroredMatchEvidence`).
+ * drama-report/match-story/match-recap backfill. Fixtures are real,
+ * retained-mirror-run `spectator-telemetry.json`/`decisions.jsonl` data
+ * (via the shared `resolveMirroredMatchEvidence`), not hand-rolled stubs.
  */
 
 const realTelemetryFixtureRaw = readFileSync(
@@ -89,7 +87,12 @@ describe("generateMatchNarrativeArtifactsForRunDir", () => {
     });
     const dramaReport = JSON.parse(
       await fs.readFile(path.join(runDir, "drama-report.json"), "utf8"),
-    ) as { schemaVersion: number; reportKind: string; runID: string; dramaScore: number };
+    ) as {
+      schemaVersion: number;
+      reportKind: string;
+      runID: string;
+      dramaScore: number;
+    };
     expect(dramaReport.schemaVersion).toBe(1);
     expect(dramaReport.reportKind).toBe("drama-and-tom-scorer");
     expect(dramaReport.runID).toBe("league-coworld-fresh-1");
@@ -128,7 +131,10 @@ describe("generateMatchNarrativeArtifactsForRunDir", () => {
       telemetry: true,
       decisions: true,
     });
-    await generateMatchNarrativeArtifactsForRunDir(runDir, "league-coworld-recap-1");
+    await generateMatchNarrativeArtifactsForRunDir(
+      runDir,
+      "league-coworld-recap-1",
+    );
     const recap = JSON.parse(
       await fs.readFile(path.join(runDir, "match-recap.json"), "utf8"),
     ) as { schemaVersion: number; beats: unknown[] };
@@ -318,23 +324,34 @@ describe("backfillMatchNarrativeArtifacts", () => {
     expect(
       await fs
         .stat(path.join(runsRootDir, "league-coworld-a1", "drama-report.json"))
-        .then(() => true, () => false),
+        .then(
+          () => true,
+          () => false,
+        ),
     ).toBe(true);
     expect(
       await fs
         .stat(path.join(runsRootDir, "league-coworld-a3", "drama-report.json"))
-        .then(() => true, () => false),
+        .then(
+          () => true,
+          () => false,
+        ),
     ).toBe(false);
   });
 
   test("skip: a run dir that already has artifacts doesn't consume the budget", async () => {
-    const alreadyDone = await writeRealRunDir("league-coworld-b1", { decisions: true });
-    await generateMatchNarrativeArtifactsForRunDir(alreadyDone, "league-coworld-b1");
+    const alreadyDone = await writeRealRunDir("league-coworld-b1", {
+      decisions: true,
+    });
+    await generateMatchNarrativeArtifactsForRunDir(
+      alreadyDone,
+      "league-coworld-b1",
+    );
     await writeRealRunDir("league-coworld-b2", { decisions: true });
     const results = await backfillMatchNarrativeArtifacts(runsRootDir, 1);
     expect(
-      results.find((result) => result.runKey === "league-coworld-b2")
-        ?.outcome.status,
+      results.find((result) => result.runKey === "league-coworld-b2")?.outcome
+        .status,
     ).toBe("generated");
   });
 

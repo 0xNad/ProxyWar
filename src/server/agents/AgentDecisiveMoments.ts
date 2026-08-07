@@ -1,16 +1,17 @@
 import {
-  FINAL_CONFLICT_TURN_CAP,
-  FINAL_CONFLICT_TURN_FRACTION,
-} from "./DirectorCutPlan";
-import {
   computeAllianceDurations,
   computeEliminationTimings,
   computeLeadChanges,
   computeMajorReversals,
   computeTerritorialSwings,
+  FINAL_CONFLICT_TURN_CAP,
+  FINAL_CONFLICT_TURN_FRACTION,
   ordinalLabel,
 } from "./AgentMatchStateDerivations";
-import type { MatchStateSeries, MatchStateSeriesSample } from "./AgentMatchStateSeries";
+import type {
+  MatchStateSeries,
+  MatchStateSeriesSample,
+} from "./AgentMatchStateSeries";
 import type { AgentSpectatorSnapshot } from "./AgentSpectatorReplay";
 import type { SpectatorEvent } from "./AgentSpectatorTelemetry";
 
@@ -26,7 +27,8 @@ import type { SpectatorEvent } from "./AgentSpectatorTelemetry";
  * betrayed alliance durations, decisive territorial swings) plus one
  * telemetry-only addition (`final_confrontation`, mirroring
  * `AgentMatchRecap.ts`'s own beat of the same name and the SAME endgame
- * window `DirectorCutPlan.ts`'s `final_conflict` segment uses — imported,
+ * window `AgentMatchStateDerivations.ts`'s `FINAL_CONFLICT_TURN_FRACTION`/
+ * `FINAL_CONFLICT_TURN_CAP` define — imported,
  * never duplicated). Every headline is either a `SpectatorEvent.message`
  * the telemetry builder already vetted, or a small factual template built
  * only from real usernames/shares/ranks/turns — never an inferred or
@@ -120,7 +122,7 @@ export interface AgentDecisiveMomentsInput {
   replaySnapshots: readonly AgentSpectatorSnapshot[] | null;
 }
 
-/** A candidate's turn window collapses into an already-selected candidate's window when the two turns fall within this many turns of each other — the SAME "one real swing, one moment" rule `DirectorCutPlan.ts`'s `mergeGapTurns` embodies for its own segments, sized the same way (a fraction of the total match). */
+/** A candidate's turn window collapses into an already-selected candidate's window when the two turns fall within this many turns of each other — "one real swing, one moment", sized as a fraction of the total match. */
 function dedupeWindowTurns(totalTurns: number): number {
   return Math.max(10, Math.round(totalTurns / 100));
 }
@@ -155,7 +157,9 @@ function sampleAtOrAfter(
   return null;
 }
 
-function momentState(sample: MatchStateSeriesSample | null): DecisiveMomentState | null {
+function momentState(
+  sample: MatchStateSeriesSample | null,
+): DecisiveMomentState | null {
   if (sample === null) return null;
   return {
     turn: sample.turn,
@@ -201,7 +205,7 @@ function momentState(sample: MatchStateSeriesSample | null): DecisiveMomentState
  * field degrades to an honestly-absent row either way (see
  * `findStatedReason`), never a placeholder.
  */
-const STATED_REASON_MAX_LENGTH = 400;
+export const STATED_REASON_MAX_LENGTH = 400;
 const STATED_REASON_DENYLIST_PATTERNS: readonly RegExp[] = [
   // HTTP status/error response shapes.
   /\bhttp\/?\s*\d{3}\b/i,
@@ -223,7 +227,8 @@ export function sanitizeStatedReason(raw: string): string | null {
   const text = raw.trim();
   if (text.length === 0 || text.length > STATED_REASON_MAX_LENGTH) return null;
   if (!/^[A-Za-z]/.test(text)) return null;
-  if (STATED_REASON_DENYLIST_PATTERNS.some((pattern) => pattern.test(text))) return null;
+  if (STATED_REASON_DENYLIST_PATTERNS.some((pattern) => pattern.test(text)))
+    return null;
   return text;
 }
 
@@ -239,7 +244,9 @@ function findStatedReason(
   for (const snapshot of snapshots) {
     const distance = Math.abs(snapshot.turnNumber - turn);
     if (distance > windowTurns) continue;
-    for (const decision of Array.isArray(snapshot.decisions) ? snapshot.decisions : []) {
+    for (const decision of Array.isArray(snapshot.decisions)
+      ? snapshot.decisions
+      : []) {
       if (
         decision === null ||
         typeof decision !== "object" ||
@@ -250,7 +257,10 @@ function findStatedReason(
         continue;
       }
       if (!involvedAgentIDs.has(decision.agentID)) continue;
-      const rawText = decision.reason.trim().length > 0 ? decision.reason : decision.intentSummary;
+      const rawText =
+        decision.reason.trim().length > 0
+          ? decision.reason
+          : decision.intentSummary;
       const sanitized = sanitizeStatedReason(rawText);
       if (sanitized === null) continue;
       if (best === null || distance < best.distance) {
@@ -289,7 +299,9 @@ function finalConfrontationCandidate(
     turn: top.turnNumber,
     type: "final_confrontation",
     headline: `Final clash: ${top.message}`,
-    involvedAgents: [top.actorName, top.targetName ?? ""].filter((name) => name.length > 0),
+    involvedAgents: [top.actorName, top.targetName ?? ""].filter(
+      (name) => name.length > 0,
+    ),
     importance: Math.max(top.importance, 80),
   };
 }
@@ -385,7 +397,8 @@ function candidatesFromTelemetry(
 ): Candidate[] {
   const candidates: Candidate[] = [];
   for (const alliance of computeAllianceDurations(series, events)) {
-    if (alliance.brokenByBetrayal !== true || alliance.brokenTurn === null) continue;
+    if (alliance.brokenByBetrayal !== true || alliance.brokenTurn === null)
+      continue;
     candidates.push({
       turn: alliance.brokenTurn,
       type: "alliance_betrayal",
@@ -413,7 +426,12 @@ function selectCandidates(
   const selected: Candidate[] = [];
   for (const candidate of ranked) {
     if (selected.length >= MAX_DECISIVE_MOMENTS) break;
-    if (selected.some((chosen) => Math.abs(chosen.turn - candidate.turn) <= window)) continue;
+    if (
+      selected.some(
+        (chosen) => Math.abs(chosen.turn - candidate.turn) <= window,
+      )
+    )
+      continue;
     selected.push(candidate);
   }
   return selected;
@@ -425,7 +443,11 @@ export function buildAgentDecisiveMoments(
 ): AgentDecisiveMomentsArtifact | null {
   const candidates = [
     ...candidatesFromSeries(input.series),
-    ...candidatesFromTelemetry(input.series, input.telemetryEvents, input.totalTurns),
+    ...candidatesFromTelemetry(
+      input.series,
+      input.telemetryEvents,
+      input.totalTurns,
+    ),
   ];
   const selected = selectCandidates(candidates, input.totalTurns);
   if (selected.length < MIN_DECISIVE_MOMENTS) {
@@ -435,7 +457,8 @@ export function buildAgentDecisiveMoments(
   const agentIDByUsername = new Map<string, string>();
   for (const sample of input.series.samples) {
     for (const agent of sample.agents) {
-      if (agent.agentID !== null) agentIDByUsername.set(agent.username, agent.agentID);
+      if (agent.agentID !== null)
+        agentIDByUsername.set(agent.username, agent.agentID);
     }
   }
   const window = dedupeWindowTurns(input.totalTurns);

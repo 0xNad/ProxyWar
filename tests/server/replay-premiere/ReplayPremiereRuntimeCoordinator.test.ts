@@ -14,6 +14,7 @@ import {
   type ReplayPremiereJsonValue,
 } from "../../../src/server/replay-premiere/ReplayPremiereIntegrity";
 import { ReplayPremiereInteractions } from "../../../src/server/replay-premiere/ReplayPremiereInteractions";
+import { ReplayPremiereAtomicPublication } from "../../../src/server/replay-premiere/ReplayPremiereRevealCommit";
 import {
   ReplayPremiereRuntimeCoordinator as ProductionReplayPremiereRuntimeCoordinator,
   REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS,
@@ -183,6 +184,91 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
         resolvedAt: runtime.readReveal()!.revealedAt,
       },
     ]);
+  });
+
+  test("a prefix read failure before terminal reveal stays retryable", async () => {
+    const { gate, drafts } = await verifiedPublicationFixture(root);
+    const clock = new FakeClock(NOW);
+    const store = await openStore(root);
+    stores.push(store);
+    const interactions = createInteractions(gate, clock);
+    const runtime = await ReplayPremiereRuntimeCoordinator.createOrRecover({
+      gate,
+      drafts,
+      persistence: store,
+      clock,
+      interactions,
+    });
+
+    // Drive to the exact same terminal boundary as the sibling "releases
+    // only by authoritative time..." test above: two non-terminal chunk
+    // releases (index 0, index 1), each opening and closing a checkpoint,
+    // then the clock tick that makes the terminal (index 2) draft eligible.
+    await runtime.synchronize();
+    clock.advance(100);
+    await runtime.synchronize();
+    clock.advance(REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS + 100);
+    await runtime.synchronize();
+    clock.advance(REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS + 49);
+    await runtime.synchronize();
+    expect(runtime.readReveal()).toBeNull();
+    clock.advance(1);
+
+    // Inject a single publication-store miss for the EARLIEST released
+    // prefix chunk (index 0). At this point lastReleasedChunk() only ever
+    // reads the LAST released index (1), so this exclusively exercises
+    // commitTerminalReveal's own prefix-reconstruction loop, not any other
+    // readChunk() call site.
+    const originalReadChunk: ReplayPremiereAtomicPublication["readChunk"] =
+      ReplayPremiereAtomicPublication.prototype.readChunk;
+    let failNextIndexZeroRead = true;
+    const readChunkSpy = vi
+      .spyOn(ReplayPremiereAtomicPublication.prototype, "readChunk")
+      .mockImplementation(function (
+        this: ReplayPremiereAtomicPublication,
+        index: number,
+      ) {
+        if (failNextIndexZeroRead && index === 0) {
+          failNextIndexZeroRead = false;
+          return null;
+        }
+        return originalReadChunk.call(this, index);
+      });
+
+    // First synchronize(): the injected miss aborts commitTerminalReveal.
+    // Atomicity contract: the durable, point-of-no-return commitReveal()
+    // must not have run yet, so nothing is publicly exposed and the
+    // coordinator is left exactly where it was, still retryable.
+    await expect(runtime.synchronize()).rejects.toMatchObject({
+      operatorCode: "premiere_runtime_revealed_publication_prefix_missing",
+    });
+    expect(readChunkSpy).toHaveBeenCalledWith(0);
+    expect(failNextIndexZeroRead).toBe(false);
+    expect(runtime.readReveal()).toBeNull();
+    expect(runtime.readLifecycleState()).toBe("playing");
+    expect(
+      store.recovered.events.filter(
+        (event) => event.eventType === "premiere_reveal_committed",
+      ),
+    ).toHaveLength(0);
+
+    // Retry: the injected failure only fires once, so the exact same
+    // synchronize() call now runs the (unchanged) prefix loop successfully
+    // and reaches the durable commitReveal() for the first time.
+    const retried = await runtime.synchronize();
+    expect(retried.operations).toContain("revealed");
+    expect(runtime.readLifecycleState()).toBe("revealed");
+    expect(runtime.readReveal()).toMatchObject({ state: "revealed" });
+    expect(runtime.readLiveVisibleSequence()).toBe(
+      drafts.at(-1)!.descriptor.endSequence,
+    );
+    expect(
+      store.recovered.events.filter(
+        (event) => event.eventType === "premiere_reveal_committed",
+      ),
+    ).toHaveLength(1);
+
+    readChunkSpy.mockRestore();
   });
 
   test("projects the current authoritative clock without releasing and rejects read-clock rollback", async () => {

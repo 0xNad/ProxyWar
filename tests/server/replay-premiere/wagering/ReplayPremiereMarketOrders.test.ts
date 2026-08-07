@@ -102,7 +102,7 @@ function harness(overrides?: {
 type Harness = ReturnType<typeof harness>;
 
 async function createSession(h: Harness, participantId: string) {
-  return h.interactions.createViewerSession({
+  const { session } = await h.interactions.createViewerSession({
     participantId,
     idempotencyKey: h.nextIdempotencyKey(),
     requesterBucketId: `ip_${"1".repeat(32)}`,
@@ -111,6 +111,7 @@ async function createSession(h: Harness, participantId: string) {
     excludedAsOperator: false,
     excludedAsBot: false,
   });
+  return session;
 }
 
 function order(

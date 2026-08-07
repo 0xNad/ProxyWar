@@ -70,6 +70,7 @@ import {
   LegalAction,
   LegalActionKind,
   legalActionKinds,
+  observedTransportStates,
 } from "./AgentTypes";
 import { LlmProvider } from "./LlmProvider";
 import { RuleAgentBrain } from "./RuleAgentBrain";
@@ -1739,7 +1740,7 @@ function holdContextText(input: {
   }
   if (
     input.input.observation.combat.attackablePlayerIDs.length === 0 &&
-    (input.input.observation.nonCombat.boatRetreatOptions?.length ?? 0) > 0
+    observedTransportStates(input.input.observation).length > 0
   ) {
     return " context=waiting for active transport to land before launching another action";
   }
@@ -1762,7 +1763,7 @@ function holdReasonCategoryForSelected(input: {
   }
   if (
     input.input.observation.combat.attackablePlayerIDs.length === 0 &&
-    (input.input.observation.nonCombat.boatRetreatOptions?.length ?? 0) > 0
+    observedTransportStates(input.input.observation).length > 0
   ) {
     return "transport_wait";
   }
@@ -4022,7 +4023,7 @@ function earlyNeutralIslandRushCandidate(
     return undefined;
   }
   const activeTransportTargets = new Set(
-    (observation.nonCombat.boatRetreatOptions ?? [])
+    observedTransportStates(observation)
       .map((option) => option.targetTile)
       .filter((tile): tile is number => typeof tile === "number"),
   );
@@ -4454,7 +4455,7 @@ function neutralGrowthCompanionCandidate(
   const ownTroops =
     observation.combat.ownTroops ?? observation.ownState?.troops ?? 0;
   const activeTransportTargets = new Set(
-    (observation.nonCombat.boatRetreatOptions ?? [])
+    observedTransportStates(observation)
       .map((option) => option.targetTile)
       .filter((tile): tile is number => typeof tile === "number"),
   );
@@ -13168,7 +13169,7 @@ function hardNationStalemateAllianceBreakCandidate(
     aliveVisibleOpponentCount(observation) > 3 ||
     recentAcceptedActionKind(observation, "break_alliance", 8) ||
     hasMapProgressLegalAction(input.legalActions) ||
-    (observation.nonCombat.boatRetreatOptions?.length ?? 0) > 0
+    observedTransportStates(observation).length > 0
   ) {
     return undefined;
   }
@@ -14307,7 +14308,7 @@ function hardNationSideTransportCandidate(
     leaderID === ownState.playerID ||
     !isHardNationScrum(observation) ||
     (observation.endgame?.leaderTileShare ?? 0) < 0.34 ||
-    (observation.nonCombat.boatRetreatOptions?.length ?? 0) > 0
+    observedTransportStates(observation).length > 0
   ) {
     return undefined;
   }
@@ -14405,7 +14406,7 @@ function hardNationBoxedEscapeTransportCandidate(
     (landExpansionAvailable && !boxedAfterNeutralStall) ||
     (observation.memory.recentHoldCount ?? 0) < minHoldCount ||
     recentAcceptedActionKind(observation, "boat", 4) ||
-    (observation.nonCombat.boatRetreatOptions?.length ?? 0) > 0
+    observedTransportStates(observation).length > 0
   ) {
     return undefined;
   }
@@ -14459,7 +14460,7 @@ function hardNationHighValueTransportCandidate(
       (action) =>
         action.kind === "attack" && action.metadata?.expansion === true,
     ) ||
-    (observation.nonCombat.boatRetreatOptions?.length ?? 0) > 0
+    observedTransportStates(observation).length > 0
   ) {
     return undefined;
   }
@@ -14535,7 +14536,7 @@ function hardNationFlankTransportCandidate(
     ownTroops < 450_000 ||
     ownTileShare >= 0.48 ||
     (observation.endgame?.leaderTileShare ?? 0) < 0.34 ||
-    (observation.nonCombat.boatRetreatOptions?.length ?? 0) > 0 ||
+    observedTransportStates(observation).length > 0 ||
     leader === undefined ||
     leader.troops <= ownTroops * 1.05
   ) {
@@ -14704,7 +14705,7 @@ function hardNationBufferSupportTargetID(
     ownState === null ||
     !isHardNationScrum(observation) ||
     hasMapProgressLegalAction(input.legalActions) ||
-    (observation.nonCombat.boatRetreatOptions?.length ?? 0) > 0
+    observedTransportStates(observation).length > 0
   ) {
     return null;
   }
@@ -16872,6 +16873,13 @@ function moduleForActionKind(kind: LegalActionKind): FrontierPolicyModule {
     case "embargo_stop":
     case "quick_chat":
     case "emoji":
+    case "deal_propose":
+    case "deal_accept":
+    case "deal_reject":
+    case "deal_withdraw":
+      // The deal_* arms (PROXYWAR_TUNE_STRUCTURED_DEALS, default OFF) are
+      // type-exhaustiveness only — the flag-gated meta-action kinds classify
+      // as diplomacy when present. No scoring/ranking/selection change.
       return "diplomacy";
     case "build":
     case "upgrade_structure":
@@ -16904,8 +16912,7 @@ function scoreFrontierAction(input: {
   const incomingCount =
     observation.combat.incomingAttackPlayerIDs.length +
     (observation.combat.incomingAttacks?.length ?? 0);
-  const activeTransportCount =
-    observation.nonCombat.boatRetreatOptions?.length ?? 0;
+  const activeTransportCount = observedTransportStates(observation).length;
   const incomingAttackPlayerIDs = new Set(
     observation.combat.incomingAttackPlayerIDs.filter((id) => id !== null),
   );
@@ -20292,7 +20299,7 @@ function shouldProtectFreshEscapeTransport(
   if (ownState === null || !isHardNationStrategicContext(observation)) {
     return false;
   }
-  const activeRetreatOptions = observation.nonCombat.boatRetreatOptions ?? [];
+  const activeRetreatOptions = observedTransportStates(observation);
   if (activeRetreatOptions.length === 0) {
     return false;
   }
@@ -21075,8 +21082,6 @@ function preferredKinds(objective: AgentObjectiveKind): LegalActionKind[] {
         "retreat",
         "boat_retreat",
         "build",
-        "warship",
-        "move_warship",
         "upgrade_structure",
         "alliance_request",
         "alliance_extend",
@@ -21090,8 +21095,6 @@ function preferredKinds(objective: AgentObjectiveKind): LegalActionKind[] {
         "target_player",
         "alliance_reject",
         "nuke",
-        "warship",
-        "move_warship",
         "boat",
         "break_alliance",
         "build",
@@ -21113,8 +21116,6 @@ function preferredKinds(objective: AgentObjectiveKind): LegalActionKind[] {
         "retreat",
         "boat_retreat",
         "build",
-        "warship",
-        "move_warship",
         "upgrade_structure",
         "delete_unit",
         "alliance_request",

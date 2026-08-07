@@ -424,7 +424,7 @@ describe("ReplayPremiereTerminalReclaimer", () => {
     });
     const participantId = `guest_${"a".repeat(32)}`;
     const requesterBucketId = `ip_${"1".repeat(64)}`;
-    const session = await interactions.createViewerSession({
+    const { session } = await interactions.createViewerSession({
       participantId,
       idempotencyKey: "session_before_fence_0001",
       requesterBucketId,
@@ -626,7 +626,7 @@ describe("ReplayPremiereTerminalReclaimer", () => {
     } as ReplayPremiereHttpTarget;
     const participantId = `guest_${"a".repeat(32)}`;
     const requesterBucketId = `ip_${"1".repeat(64)}`;
-    const session = await interactions.createViewerSession({
+    const { session } = await interactions.createViewerSession({
       participantId,
       idempotencyKey: "divergence_session_0001",
       requesterBucketId,

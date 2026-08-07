@@ -1,3 +1,5 @@
+import { UserSettings } from "../core/game/UserSettings";
+
 export function isAiLeagueReplayRoute(
   pathname = window.location.pathname,
 ): boolean {
@@ -67,14 +69,55 @@ const spectatorNameByAgentName = new Map<string, string>([
   ["Aggressive Agent 5", "Redline"],
 ]);
 
+/**
+ * P0 fix (2026-08-03, deploy 2B): the "Anonymous Names" user setting
+ * (UserSettings.anonymousNames(), Settings modal) already hides player
+ * identities on the ordinary multiplayer lobby/game surfaces
+ * (LobbyPlayerView.ts) but was never wired into the AI League replay
+ * surface at all -- a viewer with the setting ON still saw
+ * every real agent name streaming through the War Room feed, the
+ * headline lower-third toasts, the social/diplomacy transcript, and the
+ * decision log, because every one of those already funnels its display
+ * name through `aiLeagueSpectatorDisplayName`/`aiLeagueSpectatorText`
+ * below for the UNRELATED native-spectator-ui promo rebrand -- this is
+ * the ONE choke point nearly every caller in AiLeagueReplayOverlay.ts
+ * already goes through, so anonymizing here fixes all of them at once.
+ * Deterministic per real name within one page load (same agent always
+ * maps to the same "Agent N" label for the whole viewing session,
+ * assigned in first-seen order) -- never a per-call random pick, which
+ * would make a single event's own actor/target text visibly disagree
+ * with itself.
+ */
+const anonymizedAgentNameByRealName = new Map<string, string>();
+let nextAnonymizedAgentNumber = 1;
+
+function anonymizeAgentName(realName: string): string {
+  let anonymized = anonymizedAgentNameByRealName.get(realName);
+  if (anonymized === undefined) {
+    anonymized = `Agent ${nextAnonymizedAgentNumber}`;
+    nextAnonymizedAgentNumber += 1;
+    anonymizedAgentNameByRealName.set(realName, anonymized);
+  }
+  return anonymized;
+}
+
 export function aiLeagueSpectatorDisplayName(displayName: string): string {
-  return spectatorNameByAgentName.get(displayName) ?? displayName;
+  const rebranded = spectatorNameByAgentName.get(displayName) ?? displayName;
+  if (new UserSettings().anonymousNames()) {
+    return anonymizeAgentName(rebranded);
+  }
+  return rebranded;
 }
 
 export function aiLeagueSpectatorText(text: string): string {
   let result = text;
   for (const [agentName, spectatorName] of spectatorNameByAgentName) {
     result = result.split(agentName).join(spectatorName);
+  }
+  if (new UserSettings().anonymousNames()) {
+    for (const [realName, anonymized] of anonymizedAgentNameByRealName) {
+      result = result.split(realName).join(anonymized);
+    }
   }
   return result;
 }

@@ -2,9 +2,10 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { gunzipSync } from "node:zlib";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { gunzipSync, gzipSync } from "node:zlib";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
+  archivedGameRecordArchivePath,
   CoworldLeagueDiskReserveError,
   coworldLeagueReplayCachePath,
   ensureSafeCoworldLeagueRunDirectory,
@@ -16,6 +17,10 @@ import {
   readCoworldLeagueRetentionPins,
   requireMinimumDiskSpace,
   requireSafeCoworldLeagueRetentionLayout,
+  resolveArchivedEpisodeReplayHrefs,
+  resolveArchivedPublicRunKey,
+  resolveCoworldLeagueSummaryArchiveDir,
+  restoreArchivedGameRecord,
   retentionReferencesFromEpisodes,
 } from "../../src/server/agents/CoworldLeagueArtifactRetention";
 import {
@@ -614,6 +619,299 @@ describe("CoworldLeagueArtifactRetention", () => {
         canonicalCacheDir,
       ),
     ).toThrow("together");
+  });
+});
+
+describe("full-replay-retention fix: durable archive fallback", () => {
+  let temporaryRoot: string;
+  let runsRootDir: string;
+  let cacheDir: string;
+  let summaryArchiveDir: string;
+
+  beforeEach(async () => {
+    temporaryRoot = await fs.mkdtemp(
+      path.join(os.tmpdir(), "proxywar-archive-fallback-"),
+    );
+    runsRootDir = path.join(temporaryRoot, "runs");
+    cacheDir = path.join(temporaryRoot, "cache");
+    summaryArchiveDir = path.join(temporaryRoot, "summaries");
+    await Promise.all([
+      fs.mkdir(runsRootDir, { recursive: true }),
+      fs.mkdir(cacheDir, { recursive: true }),
+    ]);
+  });
+
+  afterEach(async () => {
+    await fs.rm(temporaryRoot, { recursive: true, force: true });
+  });
+
+  /** Prunes a real replay + run bundle into the archive with a real `pruneCoworldLeagueMirrorArtifacts` pass — reuses the REAL archive format, not a hand-crafted stand-in. */
+  async function archiveOneEpisode(options: {
+    episodeRequestId: string;
+    hour: number;
+    suffix: string;
+  }): Promise<{ publicRunKey: string }> {
+    const key = publicRunKey(options.hour, options.suffix);
+    const oldMtime = new Date(Date.parse("2026-07-18T00:00:00Z"));
+    const newMtime = new Date(Date.parse("2026-07-19T00:00:00Z"));
+    await writeRunBundle({ runsRootDir, publicRunKey: key, modifiedAt: oldMtime });
+    await writeReplay({
+      cacheDir,
+      episodeRequestId: options.episodeRequestId,
+      runID: runID(options.hour, options.suffix),
+      marker: options.suffix,
+      modifiedAt: oldMtime,
+    });
+    // A newer, unrelated sibling so maxRetained=1 evicts ONLY the target above.
+    const filler = publicRunKey(options.hour + 100, `${options.suffix}-filler`);
+    await writeRunBundle({ runsRootDir, publicRunKey: filler, modifiedAt: newMtime });
+    await writeReplay({
+      cacheDir,
+      episodeRequestId: `ereq_${options.suffix}_filler`,
+      runID: runID(options.hour + 100, `${options.suffix}-filler`),
+      marker: `${options.suffix}-filler`,
+      modifiedAt: newMtime,
+    });
+    await pruneCoworldLeagueMirrorArtifacts({
+      cacheDir,
+      runsRootDir,
+      summaryArchiveDir,
+      protectedEpisodeRequestIds: new Set(),
+      protectedPublicRunKeys: new Set(),
+      maxRetainedCacheFiles: 1,
+      maxRetainedRunDirectories: 1,
+    });
+    // Confirm the fixture actually rotated out, not just that we asked it to.
+    await expect(fs.stat(path.join(runsRootDir, key))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    return { publicRunKey: key };
+  }
+
+  test("resolveArchivedPublicRunKey resolves the run key from durable evidence once the episode has rotated out of the live mirror window", async () => {
+    const episodeRequestId = "ereq_rotated1";
+    const { publicRunKey: expectedKey } = await archiveOneEpisode({
+      episodeRequestId,
+      hour: 1,
+      suffix: "rot1",
+    });
+    await expect(
+      resolveArchivedPublicRunKey(summaryArchiveDir, episodeRequestId),
+    ).resolves.toBe(expectedKey);
+  });
+
+  test("resolveArchivedPublicRunKey returns null (never fabricated) when no archive exists at all", async () => {
+    await expect(
+      resolveArchivedPublicRunKey(summaryArchiveDir, "ereq_never_archived"),
+    ).resolves.toBeNull();
+  });
+
+  test("resolveArchivedPublicRunKey returns null for a corrupt/malformed archive without throwing", async () => {
+    await fs.mkdir(summaryArchiveDir, { recursive: true });
+    await fs.writeFile(
+      path.join(summaryArchiveDir, "ereq_corrupt.replay-summary.json.gz"),
+      Buffer.from("not actually gzip"),
+    );
+    await expect(
+      resolveArchivedPublicRunKey(summaryArchiveDir, "ereq_corrupt"),
+    ).resolves.toBeNull();
+  });
+
+  test("resolveArchivedPublicRunKey returns null for an oversized archive without reading it", async () => {
+    await fs.mkdir(summaryArchiveDir, { recursive: true });
+    const oversizedPath = path.join(
+      summaryArchiveDir,
+      "ereq_oversized.replay-summary.json.gz",
+    );
+    await fs.writeFile(oversizedPath, gzipSync(JSON.stringify({ runID: "coworld-x" })));
+    await fs.truncate(oversizedPath, 2 * 1024 * 1024);
+    await expect(
+      resolveArchivedPublicRunKey(summaryArchiveDir, "ereq_oversized"),
+    ).resolves.toBeNull();
+  });
+
+  test("resolveArchivedPublicRunKey returns null (never throws) for a SMALL-compressed archive that decompresses past the decompressed-size cap — a real zip-bomb guard via zlib's own maxOutputLength, not just the pre-decompression compressed-size check", async () => {
+    await fs.mkdir(summaryArchiveDir, { recursive: true });
+    const bombPath = path.join(
+      summaryArchiveDir,
+      "ereq_decompress_bomb.replay-summary.json.gz",
+    );
+    // Highly compressible payload: ~6 MiB of a repeated character
+    // decompresses well past the 4 MiB cap, yet gzips down to well under
+    // the 1 MiB COMPRESSED cap — proving the compressed-size stat check
+    // alone is not a real bound on decompressed memory, and that the
+    // decompressed cap actually catches what it misses.
+    const bomb = gzipSync(
+      JSON.stringify({
+        runID: "coworld-bomb",
+        padding: "a".repeat(6 * 1024 * 1024),
+      }),
+    );
+    expect(bomb.byteLength).toBeLessThan(1024 * 1024);
+    await fs.writeFile(bombPath, bomb);
+    await expect(
+      resolveArchivedPublicRunKey(summaryArchiveDir, "ereq_decompress_bomb"),
+    ).resolves.toBeNull();
+  });
+
+  test("resolveArchivedPublicRunKey returns null when the archived runID does not survive the managed run key pattern", async () => {
+    await fs.mkdir(summaryArchiveDir, { recursive: true });
+    await fs.writeFile(
+      path.join(summaryArchiveDir, "ereq_unsafe.replay-summary.json.gz"),
+      gzipSync(JSON.stringify({ runID: "../../etc/passwd" })),
+    );
+    await expect(
+      resolveArchivedPublicRunKey(summaryArchiveDir, "ereq_unsafe"),
+    ).resolves.toBeNull();
+  });
+
+  test("resolveArchivedEpisodeReplayHrefs exposes fullRenderHref only when the exact game-record archive exists; watchHref is always null", async () => {
+    const episodeRequestId = "ereq_rotated2";
+    const { publicRunKey: key } = await archiveOneEpisode({
+      episodeRequestId,
+      hour: 2,
+      suffix: "rot2",
+    });
+    await expect(
+      resolveArchivedEpisodeReplayHrefs(summaryArchiveDir, episodeRequestId),
+    ).resolves.toEqual({
+      watchHref: null,
+      fullRenderHref: `/ai-league-replay/${key}`,
+    });
+
+    // Remove just the game-record archive: the run key still resolves (the
+    // compact replay summary is untouched), but fullRenderHref must now be
+    // honest-null too — nothing durable actually backs a render.
+    await fs.rm(archivedGameRecordArchivePath(summaryArchiveDir, key) as string);
+    await expect(
+      resolveArchivedEpisodeReplayHrefs(summaryArchiveDir, episodeRequestId),
+    ).resolves.toEqual({ watchHref: null, fullRenderHref: null });
+  });
+
+  test("resolveArchivedEpisodeReplayHrefs returns null when nothing is archived for the episode", async () => {
+    await expect(
+      resolveArchivedEpisodeReplayHrefs(summaryArchiveDir, "ereq_absent"),
+    ).resolves.toBeNull();
+  });
+
+  test("neither archive lookup ever scans the archive directory — always a direct, bounded, per-episode/per-key lookup", async () => {
+    const episodeRequestId = "ereq_rotated3";
+    const { publicRunKey: key } = await archiveOneEpisode({
+      episodeRequestId,
+      hour: 3,
+      suffix: "rot3",
+    });
+    const readdirSpy = vi.spyOn(fs, "readdir");
+    try {
+      await expect(
+        resolveArchivedPublicRunKey(summaryArchiveDir, episodeRequestId),
+      ).resolves.toBe(key);
+      await expect(
+        resolveArchivedEpisodeReplayHrefs(summaryArchiveDir, episodeRequestId),
+      ).resolves.not.toBeNull();
+      expect(readdirSpy).not.toHaveBeenCalled();
+    } finally {
+      readdirSpy.mockRestore();
+    }
+  });
+
+  test("restoreArchivedGameRecord lazily rehydrates a missing live game-record.json from its durable archive, byte-identical, without mutating the archive", async () => {
+    const episodeRequestId = "ereq_rotated4";
+    const { publicRunKey: key } = await archiveOneEpisode({
+      episodeRequestId,
+      hour: 4,
+      suffix: "rot4",
+    });
+    const archivePath = archivedGameRecordArchivePath(summaryArchiveDir, key) as string;
+    const archiveBytesBefore = await fs.readFile(archivePath);
+
+    const restoredPath = await restoreArchivedGameRecord({
+      runsRootDir,
+      summaryArchiveDir,
+      publicRunKey: key,
+    });
+    expect(restoredPath).toBe(path.join(runsRootDir, key, "game-record.json"));
+    const restored = await fs.readFile(restoredPath as string);
+    expect(restored).toEqual(gunzipSync(archiveBytesBefore));
+    // Read-only: the archive's own bytes are untouched.
+    await expect(fs.readFile(archivePath)).resolves.toEqual(archiveBytesBefore);
+  });
+
+  test("restoreArchivedGameRecord returns null and creates NOTHING for an unknown publicRunKey", async () => {
+    const bogusKey = "league-coworld-2026-07-01T00-00-00-000Z-bogus";
+    await expect(
+      restoreArchivedGameRecord({ runsRootDir, summaryArchiveDir, publicRunKey: bogusKey }),
+    ).resolves.toBeNull();
+    await expect(fs.stat(path.join(runsRootDir, bogusKey))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  test("restoreArchivedGameRecord is idempotent: an already-live file is returned unchanged, and concurrent restores of the SAME run converge on identical content", async () => {
+    const episodeRequestId = "ereq_rotated5";
+    const { publicRunKey: key } = await archiveOneEpisode({
+      episodeRequestId,
+      hour: 5,
+      suffix: "rot5",
+    });
+    const [first, second] = await Promise.all([
+      restoreArchivedGameRecord({ runsRootDir, summaryArchiveDir, publicRunKey: key }),
+      restoreArchivedGameRecord({ runsRootDir, summaryArchiveDir, publicRunKey: key }),
+    ]);
+    expect(first).toBe(second);
+    const restored = await fs.readFile(first as string, "utf8");
+    expect(restored).toBe(`game:${key}\n`);
+
+    // Re-running once the live file already exists must not touch the archive again.
+    const archivePath = archivedGameRecordArchivePath(summaryArchiveDir, key) as string;
+    const beforeStat = await fs.stat(archivePath);
+    await restoreArchivedGameRecord({ runsRootDir, summaryArchiveDir, publicRunKey: key });
+    const afterStat = await fs.stat(archivePath);
+    expect(afterStat.mtimeMs).toBe(beforeStat.mtimeMs);
+  });
+
+  test("restoreArchivedGameRecord enforces a bounded compressed-size cap (null, never throws) and a bounded decompressed-size cap (throws, never silently truncates)", async () => {
+    const episodeRequestId = "ereq_rotated6";
+    const { publicRunKey: key } = await archiveOneEpisode({
+      episodeRequestId,
+      hour: 6,
+      suffix: "rot6",
+    });
+    await expect(
+      restoreArchivedGameRecord({
+        runsRootDir,
+        summaryArchiveDir,
+        publicRunKey: key,
+        maxCompressedBytes: 1,
+      }),
+    ).resolves.toBeNull();
+    await expect(
+      fs.stat(path.join(runsRootDir, key, "game-record.json")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+
+    await expect(
+      restoreArchivedGameRecord({
+        runsRootDir,
+        summaryArchiveDir,
+        publicRunKey: key,
+        maxDecompressedBytes: 1,
+      }),
+    ).rejects.toThrow("decompression limit");
+    await expect(
+      fs.stat(path.join(runsRootDir, key, "game-record.json")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("resolveCoworldLeagueSummaryArchiveDir mirrors coworld-league-mirror.ts's own default and env override", () => {
+    const artifactsRoot = "/tmp/example-artifacts";
+    expect(resolveCoworldLeagueSummaryArchiveDir(artifactsRoot, {})).toBe(
+      path.join(artifactsRoot, "coworld-league-mirror", "summaries"),
+    );
+    expect(
+      resolveCoworldLeagueSummaryArchiveDir(artifactsRoot, {
+        PROXYWAR_LEAGUE_SUMMARY_ARCHIVE_DIR: "/custom/summaries",
+      }),
+    ).toBe("/custom/summaries");
   });
 });
 

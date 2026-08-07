@@ -580,6 +580,38 @@ describe("ReplayPremiereNetwork", () => {
     expect(ready).not.toHaveBeenCalled();
   });
 
+  it("classifies a 404 bootstrap response as premiere_not_found, not the generic response_unavailable bucket, and never retries it", async () => {
+    // The server sends this for ANY unregistered/reclaimed premiereId
+    // (ReplayPremiereHttp.ts's `target === null` check) — the exact
+    // signal PremiereEndedPage.ts's mount decision in Main.ts keys off.
+    // Distinct from every OTHER non-2xx status, which stays the generic
+    // (transient-looking) `response_unavailable` classification.
+    const ready = vi.fn();
+    const { network } = controller(
+      queuedFetch(
+        new Response(JSON.stringify({ error: { code: "PREMIERE_UNAVAILABLE" } }), {
+          status: 404,
+          headers: { "content-type": "application/json", "cache-control": "no-store" },
+        }),
+      ) as unknown as typeof fetch,
+      { onReady: ready },
+    );
+    await expectNetworkError(network.syncOnce(), "premiere_not_found");
+    expect(ready).not.toHaveBeenCalled();
+
+    // Non-recoverable: a genuinely gone premiere must never retry against
+    // the identical 404 forever the way a transient 5xx would.
+    const { network: second } = controller(
+      queuedFetch(jsonResponse({ error: { code: "X" } }, { status: 404 })) as unknown as typeof fetch,
+    );
+    try {
+      await second.syncOnce();
+      throw new Error("expected request to fail");
+    } catch (error) {
+      expect((error as ReplayPremiereNetworkError).recoverable).toBe(false);
+    }
+  });
+
   it("rejects any full publication preimage leaked through bootstrap", async () => {
     const leaked = {
       ...(await bootstrap()),
@@ -1336,12 +1368,12 @@ describe("ReplayPremiereNetwork", () => {
           playback: new ReplayPremierePlaybackController(PREMIERE_ID),
           callbacks: { onReady: vi.fn() },
           fetchImpl: fetchMock as unknown as typeof fetch,
-          requestTimeoutMs: 2_001,
+          requestTimeoutMs: 10_001,
         }),
     ).toThrowError(ReplayPremiereNetworkError);
   });
 
-  it("catches up within five seconds after restoration at the production timeout and retry ceilings", async () => {
+  it("catches up within twelve seconds after restoration at the production timeout and retry ceilings", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-20T18:00:00.000Z"));
     const cancelled = await manifest([], {
@@ -1360,7 +1392,9 @@ describe("ReplayPremiereNetwork", () => {
       }
       if (requestNumber === 4) {
         // Model an intermediary request that remains hung even after the
-        // origin is restored; the production request timeout must fence it.
+        // origin is restored; the production request timeout (10 s — see
+        // `DEFAULT_REQUEST_TIMEOUT_MS` in `ReplayPremiereNetwork.ts`) must
+        // fence it.
         return new Promise<Response>(() => undefined);
       }
       if (!available) {
@@ -1392,20 +1426,20 @@ describe("ReplayPremiereNetwork", () => {
 
     available = true;
     const restoredAt = Date.now();
-    await vi.advanceTimersByTimeAsync(2_999);
+    await vi.advanceTimersByTimeAsync(10_999);
     expect(readyAt).toEqual([]);
     await vi.advanceTimersByTimeAsync(1);
 
     await expect(started).resolves.toMatchObject({ status: "cancelled" });
     expect(readyAt).toHaveLength(1);
-    expect(readyAt[0] - restoredAt).toBeLessThanOrEqual(5_000);
-    expect(readyAt[0] - restoredAt).toBe(3_000);
+    expect(readyAt[0] - restoredAt).toBeLessThanOrEqual(12_000);
+    expect(readyAt[0] - restoredAt).toBe(11_000);
     expect(recovering).toHaveBeenLastCalledWith({
       code: "request_failed",
       attempt: 4,
       retryInMs: 1_000,
     });
-  });
+  }, 20_000);
 
   it("aborts an in-flight request on dispose", async () => {
     const fetchMock = vi.fn(

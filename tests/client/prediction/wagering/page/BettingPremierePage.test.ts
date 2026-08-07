@@ -14,6 +14,7 @@
  * this extends.
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import type { PremiereBettingOverlay } from "../../../../../src/client/prediction/wagering/page/BettingOverlay";
 import { BettingPremiereMarketController } from "../../../../../src/client/prediction/wagering/page/BettingPremierePage";
 import {
   ReplayPremiereServiceError,
@@ -21,7 +22,6 @@ import {
   type ReplayPremiereServiceMarketState,
   type ReplayPremiereServiceMarketStateResponse,
 } from "../../../../../src/client/ReplayPremiereRuntime";
-import type { PremiereBettingOverlay } from "../../../../../src/client/prediction/wagering/page/BettingOverlay";
 
 function marketState(
   overrides: Partial<ReplayPremiereServiceMarketState> = {},
@@ -66,9 +66,7 @@ function stubOverlay(): PremiereBettingOverlay {
 }
 
 /** Reaches the controller's private `pollOnce` through its public `start()` without duplicating its scheduling logic. */
-function triggerFirstPoll(
-  controller: BettingPremiereMarketController,
-): void {
+function triggerFirstPoll(controller: BettingPremiereMarketController): void {
   controller.start();
 }
 
@@ -84,7 +82,10 @@ describe("BettingPremiereMarketController startup-auth race handling", () => {
   test("a clean first poll never touches marketLoadError", async () => {
     const overlay = stubOverlay();
     const runtime = stubRuntime(async () => marketResponse({ balance: 991 }));
-    const controller = new BettingPremiereMarketController(runtime, "prem_test");
+    const controller = new BettingPremiereMarketController(
+      runtime,
+      "prem_test",
+    );
     controller.attachOverlay(overlay);
     triggerFirstPoll(controller);
     await vi.waitFor(() => expect(overlay.bankroll).toBe(991));
@@ -106,7 +107,10 @@ describe("BettingPremiereMarketController startup-auth race handling", () => {
       }
       return marketResponse({ balance: 1000 });
     });
-    const controller = new BettingPremiereMarketController(runtime, "prem_test");
+    const controller = new BettingPremiereMarketController(
+      runtime,
+      "prem_test",
+    );
     controller.attachOverlay(overlay);
     triggerFirstPoll(controller);
 
@@ -133,7 +137,10 @@ describe("BettingPremiereMarketController startup-auth race handling", () => {
         "response_status",
       );
     });
-    const controller = new BettingPremiereMarketController(runtime, "prem_test");
+    const controller = new BettingPremiereMarketController(
+      runtime,
+      "prem_test",
+    );
     controller.attachOverlay(overlay);
     triggerFirstPoll(controller);
 
@@ -148,7 +155,26 @@ describe("BettingPremiereMarketController startup-auth race handling", () => {
     expect(calls).toBeGreaterThan(1);
   });
 
-  test("a genuinely terminal rejection (not 401/403) is never treated as a startup race", async () => {
+  test("a genuinely terminal rejection (not 401/403, and not the premiere-gone shape) is never treated as a startup race", async () => {
+    const overlay = stubOverlay();
+    const runtime = stubRuntime(async () => {
+      throw new ReplayPremiereServiceError(
+        "request_rejected",
+        409,
+        "PREMIERE_INVALID_REQUEST",
+        "response_status",
+      );
+    });
+    const controller = new BettingPremiereMarketController(
+      runtime,
+      "prem_test",
+    );
+    controller.attachOverlay(overlay);
+    triggerFirstPoll(controller);
+    await vi.waitFor(() => expect(overlay.marketLoadError).not.toBeNull());
+  });
+
+  test("a 404 carrying the catalog's own PREMIERE_UNAVAILABLE code fires onPremiereGone instead of a generic marketLoadError (P1 t3-01/t3-02: this specific shape means the premiere is gone for good, not just a transient failure)", async () => {
     const overlay = stubOverlay();
     const runtime = stubRuntime(async () => {
       throw new ReplayPremiereServiceError(
@@ -158,9 +184,15 @@ describe("BettingPremiereMarketController startup-auth race handling", () => {
         "response_status",
       );
     });
-    const controller = new BettingPremiereMarketController(runtime, "prem_test");
+    const controller = new BettingPremiereMarketController(
+      runtime,
+      "prem_test",
+    );
     controller.attachOverlay(overlay);
+    const onPremiereGone = vi.fn();
+    controller.onPremiereGone = onPremiereGone;
     triggerFirstPoll(controller);
-    await vi.waitFor(() => expect(overlay.marketLoadError).not.toBeNull());
+    await vi.waitFor(() => expect(onPremiereGone).toHaveBeenCalledTimes(1));
+    expect(overlay.marketLoadError).toBeNull();
   });
 });

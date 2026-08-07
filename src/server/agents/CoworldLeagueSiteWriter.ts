@@ -4,24 +4,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import englishTranslations from "../../../resources/lang/en.json";
 import { DEFAULT_PLATFORM_ORIGIN } from "../../core/PlatformOrigin";
-import { readAgentStatsArtifact } from "./AgentStatsArtifact";
-import {
-  appendStandingsHistorySnapshot,
-  EMPTY_STANDINGS_HISTORY_STORE,
-  readStandingsHistoryStore,
-  snapshotFromMirrorData,
-  type StandingsHistoryStore,
-} from "./CoworldLeagueStandingsHistory";
-import { buildProxyWarPublicReadModel } from "../ProxyWarPublicReadModel";
-import {
-  readFeaturedMatchStore,
-  resolveFeaturedMatchStateRoot,
-} from "./FeaturedMatch";
-import {
-  readEventPackageStore,
-  resolveEventPackageStateRoot,
-} from "./season/EventPackage";
-import { loadSeasonRegistry } from "./season/SeasonRegistry";
 import { generateEmblemSvg } from "../identity/IdentityEmblems";
 import {
   AgentIdentityView,
@@ -36,6 +18,28 @@ import {
   computeProvisionalIdentities,
   type ProvisionalIdentity,
 } from "../identity/ProvisionalIdentity";
+import { buildProxyWarPublicReadModel } from "../ProxyWarPublicReadModel";
+import { readAgentStatsArtifact } from "./AgentStatsArtifact";
+import {
+  resolveArchivedEpisodeReplayHrefs,
+  type CoworldLeagueArchivedReplayHrefs,
+} from "./CoworldLeagueArtifactRetention";
+import {
+  appendStandingsHistorySnapshot,
+  EMPTY_STANDINGS_HISTORY_STORE,
+  readStandingsHistoryStore,
+  snapshotFromMirrorData,
+  type StandingsHistoryStore,
+} from "./CoworldLeagueStandingsHistory";
+import {
+  readFeaturedMatchStore,
+  resolveFeaturedMatchStateRoot,
+} from "./FeaturedMatch";
+import {
+  readEventPackageStore,
+  resolveEventPackageStateRoot,
+} from "./season/EventPackage";
+import { loadSeasonRegistry } from "./season/SeasonRegistry";
 
 /**
  * Static league-site writer for the hosted Coworld Proxywar league.
@@ -106,28 +110,13 @@ export interface CoworldLeagueEpisodeRow {
    */
   premiereHref?: string;
   /**
-   * Product overhaul spec Stage 5. Optional/additive, same pattern as
-   * `premiereHref` above. `writeAgentLeagueRunArtifacts` writes
-   * `director-cut-plan.json` for every LOCALLY-produced match; the HOSTED
-   * Coworld mirror (`coworld-league-mirror.ts`) now ALSO generates one for a
-   * mirrored run dir once it has the telemetry to build it from —
-   * `spectator-telemetry.json` when the hosted payload's own
-   * `inlineRunArtifacts` carries it (verified against real retained mirror
-   * runs — it does, for every currently observed production episode),
-   * falling back to deriving it from `decisions.jsonl` otherwise (see
-   * `CoworldLeagueMirrorCore.ts`'s `resolveMirroredDirectorCutPlan`).
-   * Generation is budgeted (one attempt per sync cycle by default,
-   * `--director-cut-budget`) and gradually backfills older retained runs, so
-   * a row can stay `undefined` for a cycle or two after its episode first
-   * appears — that is expected, not a bug, and this field simply omits
-   * itself until a plan exists on disk for that run.
-   */
-  directorCut?: { durationEstimateSeconds: number; segmentCount: number };
-  /**
-   * Same optional/additive/budgeted-backfill shape as `directorCut` above,
-   * one gap-closure phase later: a compact ranking/evidence signal — never
-   * recap prose — from the mirror's `drama-report.json`/`match-story.json`/
-   * `match-recap.json` (`CoworldLeagueMatchNarrativeBackfill.ts`).
+   * Optional/additive, same pattern as `premiereHref` above: a compact
+   * ranking/evidence signal — never recap prose — from the mirror's
+   * `drama-report.json`/`match-story.json`/`match-recap.json`
+   * (`CoworldLeagueMatchNarrativeBackfill.ts`). Generation is budgeted
+   * (one attempt per sync cycle by default) and gradually backfills older
+   * retained runs, so a row can stay `undefined` for a cycle or two after
+   * its episode first appears — that is expected, not a bug.
    * `dramaScore` is `AgentDramaReport`'s 0-100 composite (legacy, requires
    * both `drama-report.json` and `match-story.json`); `entertainmentGrade`
    * is `AgentMatchStory`'s `grade`. `curatedDramaScore` is
@@ -556,6 +545,16 @@ async function copySocialImage(siteDir: string): Promise<void> {
 async function writeCoworldLeagueSiteUnlocked(
   siteDir: string,
   data: CoworldLeagueMirrorData,
+  /**
+   * Full-replay-retention fix (2026-08-06): the durable compact-evidence
+   * archive directory (`docs/COWORLD_LEAGUE_MIRROR.md`'s "indefinite
+   * compact evidence") — see `resolveArchivedEpisodeReplayHrefs`'s own
+   * doc. Optional so every existing caller (fixture scripts, tests) that
+   * doesn't pass one keeps today's exact behavior: no archive fallback is
+   * attempted, `watchHref`/`fullRenderHref` stay `null` for anything not
+   * in the live mirror window, precisely as before this fix.
+   */
+  summaryArchiveDir?: string,
 ): Promise<CoworldLeagueSitePaths> {
   await fs.mkdir(siteDir, { recursive: true });
   const indexPath = path.join(siteDir, "index.html");
@@ -588,6 +587,50 @@ async function writeCoworldLeagueSiteUnlocked(
   const featuredMatchStore = await readFeaturedMatchStore(
     resolveFeaturedMatchStateRoot(),
   );
+  // Full-replay-retention fix (2026-08-06): resolve the durable archive
+  // fallback ONLY for featured matches whose episode has already rotated
+  // out of `data.episodes` (the live mirror window) — bounded by the
+  // number of currently published/revealed/archived featured records (a
+  // handful), never a directory scan. `resolveArchivedEpisodeReplayHrefs`
+  // never throws (see its own doc); `summaryArchiveDir` being `undefined`
+  // (a caller that hasn't opted in) simply resolves an empty map, an
+  // honest "not looked up" default identical to every other optional
+  // input this writer already tolerates.
+  const liveMirrorEpisodeRequestIds = new Set(
+    data.episodes.map((episode) => episode.episodeRequestId),
+  );
+  const unresolvedFeaturedEpisodeRequestIds =
+    summaryArchiveDir === undefined
+      ? []
+      : [
+          ...new Set(
+            featuredMatchStore.matches
+              .filter((match) => match.state !== "candidate")
+              .map((match) => match.episodeRequestId)
+              .filter(
+                (episodeRequestId): episodeRequestId is string =>
+                  episodeRequestId !== null &&
+                  !liveMirrorEpisodeRequestIds.has(episodeRequestId),
+              ),
+          ),
+        ];
+  const archivedFeaturedMatchReplayHrefs = new Map<
+    string,
+    CoworldLeagueArchivedReplayHrefs
+  >();
+  if (summaryArchiveDir !== undefined) {
+    await Promise.all(
+      unresolvedFeaturedEpisodeRequestIds.map(async (episodeRequestId) => {
+        const archived = await resolveArchivedEpisodeReplayHrefs(
+          summaryArchiveDir,
+          episodeRequestId,
+        );
+        if (archived !== null) {
+          archivedFeaturedMatchReplayHrefs.set(episodeRequestId, archived);
+        }
+      }),
+    );
+  }
   // Season Zero activation prompt Phase 4: event packages are operator-
   // authored per-`FeaturedMatch` completeness records (`premiere:package`
   // CLI) — same "operator-maintained, out-of-band, missing store means
@@ -626,9 +669,8 @@ async function writeCoworldLeagueSiteUnlocked(
   // is left untouched on disk (never overwritten) and this cycle publishes
   // with an empty series rather than either failing the league publish or
   // silently discarding real accumulated history.
-  const existingStandingsHistory = await readStandingsHistoryStore(
-    standingsHistoryPath,
-  );
+  const existingStandingsHistory =
+    await readStandingsHistoryStore(standingsHistoryPath);
   const standingsHistoryCorrupt = existingStandingsHistory === "corrupt";
   if (standingsHistoryCorrupt) {
     console.warn(
@@ -640,7 +682,10 @@ async function writeCoworldLeagueSiteUnlocked(
     ? EMPTY_STANDINGS_HISTORY_STORE
     : candidateSnapshot === null
       ? existingStandingsHistory
-      : appendStandingsHistorySnapshot(existingStandingsHistory, candidateSnapshot);
+      : appendStandingsHistorySnapshot(
+          existingStandingsHistory,
+          candidateSnapshot,
+        );
   if (!standingsHistoryCorrupt) {
     await writeFileAtomic(
       standingsHistoryPath,
@@ -680,6 +725,7 @@ async function writeCoworldLeagueSiteUnlocked(
     standingsHistory,
     eventPackageStore,
     seasonRegistry,
+    archivedFeaturedMatchReplayHrefs,
   );
   await writeFileAtomic(clientPath, coworldLeagueClientJavaScript());
   await writeFileAtomic(indexPath, coworldLeagueIndexHtml(data, identity));
@@ -700,26 +746,43 @@ async function writeCoworldLeagueSiteUnlocked(
 export async function writeCoworldLeagueSite(
   siteDir: string,
   data: CoworldLeagueMirrorData,
+  summaryArchiveDir?: string,
 ): Promise<CoworldLeagueSitePaths> {
   return withCoworldLeagueSiteWriteLock(siteDir, () =>
-    writeCoworldLeagueSiteUnlocked(siteDir, data),
+    writeCoworldLeagueSiteUnlocked(siteDir, data, summaryArchiveDir),
   );
 }
 
 export async function markCoworldLeagueSiteStale(
   siteDir: string,
   generatedAt = new Date().toISOString(),
+  /**
+   * Full-replay-retention fix (2026-08-06): without this, the FIRST
+   * transient mirror-sync failure would rebuild the read model (via
+   * `writeCoworldLeagueSiteUnlocked` below) with an EMPTY archive-fallback
+   * map, silently stripping `fullRenderHref` off every featured match that
+   * was only resolving it through the archive fallback (i.e. anything
+   * already rotated out of the live mirror window) — a previously-working
+   * link would regress to `null` purely because the mirror hiccuped, not
+   * because the evidence went anywhere. Same optional/best-effort contract
+   * as `writeCoworldLeagueSiteUnlocked`'s own parameter.
+   */
+  summaryArchiveDir?: string,
 ): Promise<CoworldLeagueSitePaths> {
   return withCoworldLeagueSiteWriteLock(siteDir, async () => {
     const dataPath = path.join(siteDir, "data.json");
     const previous = JSON.parse(
       await fs.readFile(dataPath, "utf8"),
     ) as CoworldLeagueMirrorData;
-    return writeCoworldLeagueSiteUnlocked(siteDir, {
-      ...previous,
-      generatedAt: previous.stale ? previous.generatedAt : generatedAt,
-      stale: true,
-    });
+    return writeCoworldLeagueSiteUnlocked(
+      siteDir,
+      {
+        ...previous,
+        generatedAt: previous.stale ? previous.generatedAt : generatedAt,
+        stale: true,
+      },
+      summaryArchiveDir,
+    );
   });
 }
 
@@ -1302,9 +1365,7 @@ function recentFormForPlayer(
     if (episode.completedAt === null) {
       continue;
     }
-    const entry = episode.players.find(
-      (player) => player.name === playerName,
-    );
+    const entry = episode.players.find((player) => player.name === playerName);
     if (entry === undefined) {
       continue;
     }
@@ -1376,8 +1437,7 @@ function latestMatchMarkup(
     episode.roundNumber === null ? "" : ` · Round ${episode.roundNumber}`
   }`;
   const href =
-    typeof episode.premiereHref === "string" &&
-    episode.premiereHref.length > 0
+    typeof episode.premiereHref === "string" && episode.premiereHref.length > 0
       ? episode.premiereHref
       : episode.fullRenderHref;
   return href === null
@@ -1570,7 +1630,9 @@ function standingsTable(
             </div>
           </details>`;
       const provisional =
-        view.agent === null ? (provisionalIdentities.get(row.playerName) ?? null) : null;
+        view.agent === null
+          ? (provisionalIdentities.get(row.playerName) ?? null)
+          : null;
       return `
         <tr${row.isHouse ? ` class="house"` : ""}>
           <td class="rank">${escapeHtml(String(row.rank))}</td>
@@ -1638,13 +1700,19 @@ function battleCard(
     // version" stays a standings-table-only field until that data exists
     // per-episode.
     const view = resolveAgentIdentityView(
-      { playerName: player.name, ratingPolicyLabel: null, activeChampionPolicyLabel: null },
+      {
+        playerName: player.name,
+        ratingPolicyLabel: null,
+        activeChampionPolicyLabel: null,
+      },
       identity.agents,
       identity.builders,
       identity.versions,
     );
     const provisional =
-      view.agent === null ? (provisionalIdentities.get(player.name) ?? null) : null;
+      view.agent === null
+        ? (provisionalIdentities.get(player.name) ?? null)
+        : null;
     return `
         <div class="combatant" role="listitem">
           <span class="dot" aria-hidden="true" style="background:${escapeHtml(player.color)}"></span>

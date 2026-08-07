@@ -8,7 +8,15 @@ import {
   APP_SHELL_ROOT_CLASSES,
   appShellFooter,
   appShellHeader,
+  requestUpdateWhenTranslationsReady,
 } from "./AppShellChrome";
+import {
+  armReminder,
+  downloadIcsFile,
+  fireReminderIfDue,
+  readReminderState,
+  type ReminderState,
+} from "./PremiereReminder";
 import {
   fetchReadModel,
   PublicAgent,
@@ -22,13 +30,6 @@ import {
   formatDuration,
   renderDegradedNote,
 } from "./WatchPage";
-import {
-  armReminder,
-  downloadIcsFile,
-  fireReminderIfDue,
-  readReminderState,
-  type ReminderState,
-} from "./PremiereReminder";
 
 const featuredMatchParticipantCardSchema = z.object({
   playerName: z.string(),
@@ -118,12 +119,6 @@ const leagueEpisodeMatchSchema = z.object({
   watchHref: z.string().nullable(),
   fullRenderHref: z.string().nullable(),
   premiereHref: z.string().nullable(),
-  directorCut: z
-    .object({
-      durationEstimateSeconds: z.number(),
-      segmentCount: z.number(),
-    })
-    .nullable(),
   recap: z
     .object({ summary: z.string(), beats: z.array(z.string()) })
     .nullable(),
@@ -214,15 +209,16 @@ const HEAD_TO_HEAD_LIMIT = 5;
  * removed/never-registered id) renders an honest "unknown" label —
  * never a fabricated name.
  *
- * DIRECTOR CUT / FULL REPLAY LINK: deliberately omitted. `PublicMatch`
- * (the league archive entry with `watchHref`/`fullRenderHref`) is keyed
- * by `episode.episodeRequestId`; `PublicFeaturedMatch` carries no such
- * field client-side (see `PublicFeaturedMatchSchema` — `matchId` is the
- * `feat_...` editorial id, a different namespace), so there is no wired,
- * non-fabricated way to resolve this record to a `PublicMatch` row from
- * here. Stage 5/6's Director Cut is what's actually specced to carry
- * that link (same gap `LobbyPage`'s state C documents) — not invented
- * here ahead of that work.
+ * FULL REPLAY LINK (post-match state): `match.watchHref`/
+ * `.fullRenderHref` — resolved server-side against the live mirror by
+ * `episodeRequestId`, the SAME way `match.completedAt` already is (see
+ * `ProxyWarPublicReadModel.ts`'s `PublicFeaturedMatch.watchHref`/
+ * `.fullRenderHref` doc; full-replay-access bugfix, 2026-08-05). `null`
+ * whenever the episode hasn't reached the mirror yet, exactly like
+ * `completedAt` — never fabricated. `renderPostMatch` renders this with
+ * `renderReplayActions`, reusing `renderLeagueEpisodeActions`'s exact
+ * primary/secondary CTA pattern (fullRenderHref primary, watchHref
+ * secondary only when it differs).
  */
 @customElement("match-detail-page")
 export class MatchDetailPage extends LitElement {
@@ -247,6 +243,7 @@ export class MatchDetailPage extends LitElement {
   connectedCallback(): void {
     super.connectedCallback();
     void this.load();
+    requestUpdateWhenTranslationsReady(this);
     this.tickHandle = window.setInterval(() => {
       this.nowMs = Date.now();
       if (
@@ -408,9 +405,15 @@ export class MatchDetailPage extends LitElement {
       <h1 class="mb-2 text-xl font-bold text-ink">
         ${translateText("match_detail.not_found_title")}
       </h1>
-      <p class="text-sm text-ink-muted">
+      <p class="mb-4 text-sm text-ink-muted">
         ${translateText("match_detail.not_found_body")}
       </p>
+      <a
+        href="/watch"
+        class="inline-flex min-h-11 items-center justify-center rounded-md border border-line bg-surface-2 px-4 text-sm font-bold text-ink no-underline outline-none hover:border-ink-muted focus-visible:ring-2 focus-visible:ring-accent"
+      >
+        ${translateText("match_detail.not_found_cta")}
+      </a>
     `;
   }
 
@@ -563,6 +566,7 @@ export class MatchDetailPage extends LitElement {
             </div>
           `
         : nothing}
+      ${this.renderReplayActions(match.fullRenderHref, match.watchHref)}
       ${match.postMatchSummary !== null
         ? html`<p class="mt-4 text-sm text-ink-dim">
             ${match.postMatchSummary}
@@ -633,7 +637,11 @@ export class MatchDetailPage extends LitElement {
       );
       rows.push(html`
         <div class="agent-analysis-row">
-          <dt title=${translateText("match_detail.analysis_degraded_count_tooltip")}>
+          <dt
+            title=${translateText(
+              "match_detail.analysis_degraded_count_tooltip",
+            )}
+          >
             ${translateText("match_detail.analysis_degraded_count")}
           </dt>
           <dd>
@@ -681,7 +689,8 @@ export class MatchDetailPage extends LitElement {
     }
     const scheduled =
       match.scheduledAt !== null ? new Date(match.scheduledAt) : null;
-    const scheduledValid = scheduled !== null && !Number.isNaN(scheduled.getTime());
+    const scheduledValid =
+      scheduled !== null && !Number.isNaN(scheduled.getTime());
     const countdown = scheduledValid
       ? formatDuration(Math.max(0, scheduled.getTime() - this.nowMs))
       : null;
@@ -866,7 +875,9 @@ export class MatchDetailPage extends LitElement {
     const readModel = this.readModel;
     if (readModel === null) return nothing;
     const registered = participants.filter(
-      (participant): participant is FeaturedMatchParticipantCard & {
+      (
+        participant,
+      ): participant is FeaturedMatchParticipantCard & {
         agentSlug: string;
       } => participant.agentSlug !== null,
     );
@@ -899,7 +910,9 @@ export class MatchDetailPage extends LitElement {
               participant.agentSlug,
             );
             return html`
-              <li class="rounded-md border border-line bg-surface-2 px-3 py-2 text-sm">
+              <li
+                class="rounded-md border border-line bg-surface-2 px-3 py-2 text-sm"
+              >
                 <span class="font-semibold text-ink"
                   >${participant.displayName}</span
                 >
@@ -967,10 +980,7 @@ export class MatchDetailPage extends LitElement {
       ${this.renderLeagueEpisodeActions(match)}
       ${this.renderLeagueEpisodeRecap(match)}
       ${this.renderLeagueEpisodeDecisiveMoments(match, participants)}
-      <section
-        class="mt-6"
-        aria-labelledby="match-detail-participants-heading"
-      >
+      <section class="mt-6" aria-labelledby="match-detail-participants-heading">
         <h2
           id="match-detail-participants-heading"
           class="mb-2 text-sm font-black uppercase tracking-wide text-ink-muted"
@@ -1022,13 +1032,12 @@ export class MatchDetailPage extends LitElement {
     participants: readonly FeaturedMatchParticipantCard[],
   ): TemplateResult {
     const cardByName = new Map(
-      participants.map((participant) => [
-        participant.playerName,
-        participant,
-      ]),
+      participants.map((participant) => [participant.playerName, participant]),
     );
     const winnerCard =
-      match.winnerName === null ? null : (cardByName.get(match.winnerName) ?? null);
+      match.winnerName === null
+        ? null
+        : (cardByName.get(match.winnerName) ?? null);
     const winnerSlug = winnerCard?.agentSlug ?? null;
     return html`
       <div class="mt-4 rounded-lg border border-line bg-surface-2 p-4">
@@ -1065,8 +1074,7 @@ export class MatchDetailPage extends LitElement {
               <li
                 class="flex items-center gap-2 rounded-md border border-line bg-surface-2 px-3 py-1.5 text-sm"
               >
-                <span
-                  class="w-6 shrink-0 font-mono font-black text-ink-muted"
+                <span class="w-6 shrink-0 font-mono font-black text-ink-muted"
                   >#${player.placement}</span
                 >
                 <span class="flex-1 truncate font-semibold text-ink">
@@ -1085,8 +1093,7 @@ export class MatchDetailPage extends LitElement {
                 </span>
                 ${player.isAlive
                   ? nothing
-                  : html`<span
-                      class="shrink-0 font-mono text-xs text-ink-muted"
+                  : html`<span class="shrink-0 font-mono text-xs text-ink-muted"
                       >${translateText("coworld_league.eliminated")}</span
                     >`}
               </li>
@@ -1103,30 +1110,23 @@ export class MatchDetailPage extends LitElement {
   }
 
   /**
-   * Primary action: Director Cut (when the mirror generated one for this
-   * run) or plain Full Replay, both pointing at `fullRenderHref` — Director
-   * Cut is a PLAYBACK MODE inside that same real-client renderer
-   * (`AiLeagueReplayOverlay.ts`'s `mountDirectorCutController`, enabled by
-   * default for archived matches), never a separate URL. Secondary action:
-   * the lightweight `watchHref` spectator page, shown only when it's a
-   * genuinely different link (a fixture/test row can point both hrefs at
-   * the same URL).
+   * Primary action: plain Full Replay, pointing at `fullRenderHref`.
+   * Secondary action: the lightweight `watchHref` spectator page, shown
+   * only when it's a genuinely different link (a fixture/test row can
+   * point both hrefs at the same URL). Shared by `renderLeagueEpisodeActions`
+   * (`LeagueEpisodeMatch`, `ereq_...`) and `renderPostMatch` (`FeaturedMatch`,
+   * `feat_...`) — full-replay-access bugfix (2026-08-05) — so both id
+   * namespaces render the identical primary/secondary CTA rather than a
+   * second near-duplicate template.
    */
-  private renderLeagueEpisodeActions(match: LeagueEpisodeMatch): TemplateResult {
-    const primaryHref = match.fullRenderHref;
-    const primaryLabel =
-      match.directorCut !== null
-        ? translateText("watch.director_cut_duration", {
-            minutes: Math.max(
-              1,
-              Math.round(match.directorCut.durationEstimateSeconds / 60),
-            ),
-          })
-        : translateText("watch.watch_replay");
+  private renderReplayActions(
+    fullRenderHref: string | null,
+    watchHref: string | null,
+  ): TemplateResult {
+    const primaryHref = fullRenderHref;
+    const primaryLabel = translateText("watch.watch_replay");
     const secondaryHref =
-      match.watchHref !== null && match.watchHref !== primaryHref
-        ? match.watchHref
-        : null;
+      watchHref !== null && watchHref !== primaryHref ? watchHref : null;
     return html`
       <div class="mt-6 flex flex-wrap items-center gap-3">
         ${primaryHref !== null
@@ -1147,6 +1147,12 @@ export class MatchDetailPage extends LitElement {
           : nothing}
       </div>
     `;
+  }
+
+  private renderLeagueEpisodeActions(
+    match: LeagueEpisodeMatch,
+  ): TemplateResult {
+    return this.renderReplayActions(match.fullRenderHref, match.watchHref);
   }
 
   /**
@@ -1176,11 +1182,12 @@ export class MatchDetailPage extends LitElement {
         ${recap.beats.length > 0
           ? html`<ul class="mt-2 flex flex-col gap-1.5" role="list">
               ${recap.beats.map(
-                (beat) => html`<li
-                  class="rounded-md border border-line bg-surface-2 px-3 py-1.5 text-sm text-ink-dim"
-                >
-                  ${beat}
-                </li>`,
+                (beat) =>
+                  html`<li
+                    class="rounded-md border border-line bg-surface-2 px-3 py-1.5 text-sm text-ink-dim"
+                  >
+                    ${beat}
+                  </li>`,
               )}
             </ul>`
           : nothing}
@@ -1250,7 +1257,9 @@ export class MatchDetailPage extends LitElement {
                   >
                 </div>
                 <p class="mt-1 text-ink-dim">${moment.headline}</p>
-                <p class="mt-1 flex flex-wrap gap-x-2 gap-y-1 text-xs text-ink-muted">
+                <p
+                  class="mt-1 flex flex-wrap gap-x-2 gap-y-1 text-xs text-ink-muted"
+                >
                   ${moment.involvedAgents.map((name) => {
                     const card = cardByName.get(name) ?? null;
                     const slug = card?.agentSlug ?? null;
@@ -1273,7 +1282,8 @@ export class MatchDetailPage extends LitElement {
                   ? html`<p class="mt-1 text-xs italic text-ink-muted">
                       ${translateText(
                         "match_detail.decisive_moment_stated_reason_label",
-                      )}: “${moment.statedReason}”
+                      )}:
+                      “${moment.statedReason}”
                     </p>`
                   : nothing}
                 ${href !== null
@@ -1333,7 +1343,11 @@ export class MatchDetailPage extends LitElement {
       );
       rows.push(html`
         <div class="agent-analysis-row">
-          <dt title=${translateText("match_detail.analysis_degraded_count_tooltip")}>
+          <dt
+            title=${translateText(
+              "match_detail.analysis_degraded_count_tooltip",
+            )}
+          >
             ${translateText("match_detail.analysis_degraded_count")}
           </dt>
           <dd>

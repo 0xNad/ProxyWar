@@ -93,7 +93,6 @@ function chooseAction(actions) {
     "attack",
     "build",
     "upgrade",
-    "move_warship",
     "boat",
     "alliance_request",
     "quick_chat",

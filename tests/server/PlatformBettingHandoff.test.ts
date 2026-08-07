@@ -110,6 +110,95 @@ describe("platform account authority <-> betting handoff (real servers)", () => 
     expect(body.identity.displayName).toBeNull();
   });
 
+  test("/api/identity/status sees the SAME guest cookie /api/premieres/account issued -- regression for a live P0: a Path=/api/premieres cookie is invisible to /api/identity/status (outside that path), so it silently re-minted a fresh identity on every call", async () => {
+    const bootstrapResponse = await rawRequest(betting!.origin, "GET", "/api/premieres/account");
+    const guestCookie = firstCookiePair(bootstrapResponse.headers, "proxywar_premiere_guest");
+    expect(guestCookie).not.toBeNull();
+    const bootstrapBody = JSON.parse(bootstrapResponse.body) as {
+      identity: { participantId: string };
+    };
+
+    const statusResponse = await rawRequest(betting!.origin, "GET", "/api/identity/status", {
+      cookie: guestCookie!,
+    });
+    expect(statusResponse.status).toBe(200);
+    // The whole bug: this must NOT set a competing cookie for a
+    // participant the caller never asked to become.
+    expect(firstCookiePair(statusResponse.headers, "proxywar_premiere_guest")).toBeNull();
+
+    // The identity read afterward must still resolve to the SAME
+    // participant /api/premieres/account bootstrapped -- not a fresh one.
+    const afterStatus = await rawRequest(betting!.origin, "GET", "/api/premieres/account", {
+      cookie: guestCookie!,
+    });
+    const afterStatusBody = JSON.parse(afterStatus.body) as {
+      identity: { participantId: string };
+    };
+    expect(afterStatusBody.identity.participantId).toBe(
+      bootstrapBody.identity.participantId,
+    );
+  });
+
+  test("a guest who merely visits the sign-in page and never completes the handoff still reads signedIn:false — the header must bind to a completed link, never a mere session/intent cookie", async () => {
+    // Regression check for a P2 report: does /api/identity/status's
+    // `signedIn` bind to "an authenticated, completed platform link"
+    // (correct) or to something weaker like "a session/intent cookie
+    // exists" (would falsely show "Signed in" for a visit-only guest)?
+    const bootstrapResponse = await rawRequest(betting!.origin, "GET", "/api/premieres/account");
+    const bettingCookie = firstCookiePair(bootstrapResponse.headers, "proxywar_premiere_guest")!;
+
+    const beforeStatus = await rawRequest(betting!.origin, "GET", "/api/identity/status", {
+      cookie: bettingCookie,
+    });
+    const beforeBody = JSON.parse(beforeStatus.body) as {
+      identity: { signedIn: boolean };
+    };
+    expect(beforeBody.identity.signedIn).toBe(false);
+
+    // Click "sign in": betting mints a link-intent cookie and redirects to
+    // the platform's own /handoff/start — the user reaches the OAuth-style
+    // consent surface but goes no further (closes the tab, hits back —
+    // never returns with a code to betting's /callback).
+    const handoffStart = await rawRequest(betting!.origin, "GET", "/api/premieres/auth/handoff/start", {
+      cookie: bettingCookie,
+    });
+    expect(handoffStart.status).toBe(302);
+    const platformStartUrl = new URL(handoffStart.headers.location!);
+    const handoffIssue = await rawRequest(
+      platform!.origin,
+      "GET",
+      `${platformStartUrl.pathname}${platformStartUrl.search}`,
+    );
+    // The platform DID mint a real one-time code (the consent surface was
+    // reached) — this proves the abandonment happens strictly AFTER this
+    // point, not because the platform itself refused.
+    expect(handoffIssue.status).toBe(302);
+    expect(new URL(handoffIssue.headers.location!).searchParams.get("code")).not.toBeNull();
+
+    // The user never follows that redirect back to betting's own
+    // /callback. Betting's own state for this guest must be untouched:
+    // still exactly the same cookie, still signedIn:false.
+    const afterAbandon = await rawRequest(betting!.origin, "GET", "/api/identity/status", {
+      cookie: bettingCookie,
+    });
+    expect(afterAbandon.status).toBe(200);
+    const afterBody = JSON.parse(afterAbandon.body) as {
+      identity: { signedIn: boolean; displayName: string | null };
+    };
+    expect(afterBody.identity.signedIn).toBe(false);
+    expect(afterBody.identity.displayName).toBeNull();
+
+    // Same check via the account route's own `platformLinked` field —
+    // the exact field GithubSignIn.ts's header binds to.
+    const account = await rawRequest(betting!.origin, "GET", "/api/premieres/account", {
+      cookie: bettingCookie,
+    });
+    const accountBody = JSON.parse(account.body) as {
+      identity: { platformLinked: boolean };
+    };
+    expect(accountBody.identity.platformLinked).toBe(false);
+  });
+
   test("the full handoff: betting -> platform -> back to betting, sets a display name AND a private lineage claim SET (two lineages, both survive), both resolve on the betting side without betting ever writing them, and the claims never reach a public route", async () => {
     // 1. Establish a betting guest session.
     const bootstrapResponse = await rawRequest(betting!.origin, "GET", "/api/premieres/account");

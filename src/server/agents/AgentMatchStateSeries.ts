@@ -3,13 +3,15 @@ import type {
   AgentSpectatorReplay,
   AgentSpectatorSnapshot,
 } from "./AgentSpectatorReplay";
-import type { SpectatorEvent, SpectatorTelemetry } from "./AgentSpectatorTelemetry";
+import type {
+  SpectatorEvent,
+  SpectatorTelemetry,
+} from "./AgentSpectatorTelemetry";
 
 /**
  * Season Zero Phase 2 gap closure: the sampled match-state series the
  * recap/cut/broadcast systems have been documenting as infeasible
- * ("no territory series" — see `DirectorCutPlan.ts`'s and
- * `AgentMatchRecap.ts`'s own module docs).
+ * ("no territory series" — see `AgentMatchRecap.ts`'s own module doc).
  *
  * SOURCE DECISION (investigated before writing a single line here): a full
  * headless re-simulation of `game-record.json` was NOT needed.
@@ -33,9 +35,8 @@ import type { SpectatorEvent, SpectatorTelemetry } from "./AgentSpectatorTelemet
  * captures the core `Game` engine's actual war/peace relation (only
  * alliance formation/break and individual attack events survive into the
  * spectator artifacts), so a per-sample "at war" boolean would have to be
- * inferred from attack recency — not a real recorded state, the same class
- * of fabrication `DirectorCutPlan.ts`'s own doc already refuses for
- * "win probability"/lead changes pre-this-fix. Attack-derived conflict
+ * inferred from attack recency — not a real recorded state, and this
+ * module refuses to fabricate one. Attack-derived conflict
  * signal is available to derivations that want it (`AgentMatchStateDerivations.ts`)
  * straight off `SpectatorTelemetry.events`, honestly labeled as "attack
  * events", never relabeled "war".
@@ -149,7 +150,9 @@ export function computeAllianceIntervals(
     open.delete(key);
   }
   return [...closed, ...open.values()].sort(
-    (a, b) => a.formedTurn - b.formedTurn || pairKeyString(a.agentIDs).localeCompare(pairKeyString(b.agentIDs)),
+    (a, b) =>
+      a.formedTurn - b.formedTurn ||
+      pairKeyString(a.agentIDs).localeCompare(pairKeyString(b.agentIDs)),
   );
 }
 
@@ -169,7 +172,10 @@ function activeAlliancePairsAtTurn(
 function rankedAgents(
   players: readonly AgentSpectatorPlayerState[],
 ): MatchStateSeriesAgentSample[] {
-  const totalTiles = players.reduce((sum, player) => sum + player.tilesOwned, 0);
+  const totalTiles = players.reduce(
+    (sum, player) => sum + player.tilesOwned,
+    0,
+  );
   const ordered = [...players].sort(
     (a, b) =>
       b.tilesOwned - a.tilesOwned ||
@@ -177,7 +183,9 @@ function rankedAgents(
       a.playerID.localeCompare(b.playerID),
   );
   const rankByPlayerID = new Map<string, number>();
-  ordered.forEach((player, index) => rankByPlayerID.set(player.playerID, index + 1));
+  ordered.forEach((player, index) =>
+    rankByPlayerID.set(player.playerID, index + 1),
+  );
   return players.map((player) => ({
     agentID: player.agentID,
     playerID: player.playerID,
@@ -213,7 +221,9 @@ export function buildAgentMatchStateSeries(
   }
   const notes: string[] = [];
   const intervals =
-    input.telemetry === null ? [] : computeAllianceIntervals(input.telemetry.events);
+    input.telemetry === null
+      ? []
+      : computeAllianceIntervals(input.telemetry.events);
   if (input.telemetry === null) {
     notes.push(
       "spectator-telemetry.json was unavailable when this series was generated: every sample's activeAlliancePairs is reported empty as a placeholder, not a verified 'no alliances formed' fact.",
@@ -227,10 +237,16 @@ export function buildAgentMatchStateSeries(
       tick: snapshot.tick,
       phase: snapshot.phase,
       agents: rankedAgents(snapshot.players),
-      activeAlliancePairs: activeAlliancePairsAtTurn(intervals, snapshot.turnNumber),
+      activeAlliancePairs: activeAlliancePairsAtTurn(
+        intervals,
+        snapshot.turnNumber,
+      ),
     }));
 
-  const totalTurns = samples.reduce((max, sample) => Math.max(max, sample.turn), 0);
+  const totalTurns = samples.reduce(
+    (max, sample) => Math.max(max, sample.turn),
+    0,
+  );
 
   return {
     schemaVersion: MATCH_STATE_SERIES_SCHEMA_VERSION,
