@@ -147,9 +147,11 @@ jobs:
     # so it gets a runner with no coverage-instrumented sibling file
     # competing for the same worker/process. Never skipped, never
     # test-weakened — same command, same coverage, just isolated.
-    # 60-min JOB timeout is outer headroom around this file's own per-case
-    # budgets, not an independent timeout raise.
-    timeout-minutes: 60
+    # Evidence for raising 60->90: shared-runner attempt 2 (run #146)
+    # completed all 28 tests in 3587.02s but was canceled while printing
+    # the coverage table. 90m stays bounded outer headroom, not weakened
+    # tests/coverage.
+    timeout-minutes: 90
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
