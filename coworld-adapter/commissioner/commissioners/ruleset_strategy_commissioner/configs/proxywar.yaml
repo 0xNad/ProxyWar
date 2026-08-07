@@ -1,5 +1,17 @@
 schedule_interval_minutes: 30
 
+# Competition currently schedules six 12-seat episodes per round. Dispatching
+# all six together asks Coworld to admit 78 Kubernetes pods in one burst; that
+# live shape has coincided with intermittent player_never_started/pod-not-found
+# failures. Keep the schedule unchanged, but reduce the exposure by allowing at
+# most three episodes concurrently. Explicit zero staggering avoids consuming
+# an episode's timeout budget before its request is sent.
+dispatch_throttle:
+  enabled: true
+  min_in_flight: 1
+  max_in_flight: 3
+  stagger_seconds: 0
+
 scoring:
   # Per-episode win rate, not raw score: a conquest game's winner is whoever ends the episode
   # dominant, not whoever racked up the biggest score number. The current-form leaderboard keeps
