@@ -62,6 +62,6 @@ export PROXYWAR_PLATFORM_ORIGIN="https://proxywar.xyz"
 export PROXYWAR_PLATFORM_RETURN_ORIGINS='{"betting":"https://bet.proxywar.xyz","league":"https://beta.proxywar.xyz"}'
 export PROXYWAR_PLATFORM_STATE_ROOT="$STATE_ROOT"
 export PROXYWAR_LEAGUE_WRAPPER_ONLY=true
-export PROXYWAR_ARTIFACTS_ROOT="$DEPLOY_DIR/artifacts"
+export PROXYWAR_ARTIFACTS_ROOT="${PROXYWAR_ARTIFACTS_ROOT:-$DEPLOY_DIR/artifacts}"
 
 exec npx tsx src/scripts/ai-agent-demo-server.ts
