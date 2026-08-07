@@ -139,6 +139,27 @@ then `PROXYWAR_REPO=../ProxyWar npm run build:image`.
 
 A successful `certify` prints `Certified coworld/coworld_manifest.json`.
 
+## Static replay viewer
+
+The Coworld manifest declares `game.replay_viewer.bundle` at
+`build/static-replay-viewer`. During `coworld build`, Coworld runs
+`coworld/tools/build_replay_viewer.sh` and packages the resulting standalone
+viewer. Observatory opens its `index.html` with `?replay=<signed replay URL>`;
+the viewer fetches that Coworld replay, validates its embedded
+`game-record.json`, and plays it through Proxy War's native deterministic
+renderer and replay controls.
+
+Build the viewer directly from the repository root with:
+
+```sh
+coworld-adapter/coworld/tools/build_replay_viewer.sh \
+  "$PWD/coworld-adapter/coworld/build/static-replay-viewer"
+```
+
+The generated bundle is ignored by git. It uses only relative asset URLs and
+does not require the Proxy War server, API, analytics, advertising, or external
+SDK scripts at runtime.
+
 ## Scoring
 
 `results.scores[]` carries one number per policy slot:
