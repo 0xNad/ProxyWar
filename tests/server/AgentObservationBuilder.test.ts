@@ -174,6 +174,69 @@ describe("AgentObservationBuilder rival-rival coalition graph", () => {
 });
 
 describe("AgentObservationBuilder boat targets", () => {
+  it("offers a hostile transatlantic landing on the real World map", async () => {
+    const game = await setup("world", {
+      nations: "disabled",
+      infiniteTroops: true,
+    });
+    const agent = new PlayerInfo(
+      "Agent",
+      PlayerType.Human,
+      "CLNT_AGENT",
+      "P_AGENT",
+    );
+    const rival = new PlayerInfo(
+      "Rival",
+      PlayerType.Human,
+      "CLNT_RIVAL",
+      "P_RIVAL",
+    );
+    const nearestShore = (x: number, y: number): number => {
+      let best: number | null = null;
+      let bestDistance = Number.POSITIVE_INFINITY;
+      game.forEachTile((tile) => {
+        if (!game.isShore(tile)) return;
+        const distance =
+          Math.abs(game.x(tile) - x) + Math.abs(game.y(tile) - y);
+        if (distance < bestDistance) {
+          best = tile;
+          bestDistance = distance;
+        }
+      });
+      expect(best).not.toBeNull();
+      return best!;
+    };
+    const miamiShore = nearestShore(488, 355);
+    const spainShore = nearestShore(926, 283);
+
+    game.addPlayer(agent);
+    game.addPlayer(rival);
+    game.addExecution(
+      new SpawnExecution("WORLD_BOAT_TARGETS", agent, miamiShore),
+    );
+    game.addExecution(
+      new SpawnExecution("WORLD_BOAT_TARGETS", rival, spainShore),
+    );
+    while (game.inSpawnPhase()) {
+      game.executeNextTick();
+    }
+
+    expect(game.getWaterComponent(miamiShore)).toBe(
+      game.getWaterComponent(spainShore),
+    );
+    expect(
+      game.player(agent.id).canBuild(UnitType.TransportShip, spainShore),
+    ).not.toBe(false);
+
+    const observation = observe(game);
+    const boatActions = new LegalActionBuilder()
+      .build({ observation })
+      .filter((action) => action.kind === "boat");
+    expect(
+      boatActions.some((action) => action.metadata?.targetID === rival.id),
+    ).toBe(true);
+  });
+
   it("offers a reachable later coastline when an enemy's first coastline is disconnected", () => {
     const { game, rival, unreachableShore, reachableShore } =
       disconnectedSeasGame();

@@ -25,7 +25,9 @@ import "../../../../src/client/components/baseComponents/Modal";
 import {
   ChatModal,
   englishChatFallback,
+  quickChatPhrases,
 } from "../../../../src/client/graphics/layers/ChatModal";
+import { QuickChatKeySchema } from "../../../../src/core/Schemas";
 
 type FakeTranslations = Record<string, string> | undefined;
 
@@ -60,6 +62,17 @@ describe("englishChatFallback", () => {
       "chat.does_not_exist",
     );
     expect(englishChatFallback("chat.cat")).toBe("chat.cat"); // resolves to an object, not a string
+  });
+});
+
+describe("retired quick-chat compatibility", () => {
+  it("parses the historical Warship key without offering it in new menus", () => {
+    expect(QuickChatKeySchema.safeParse("attack.build_warships").success).toBe(
+      true,
+    );
+    expect(
+      quickChatPhrases.attack.some((phrase) => phrase.key === "build_warships"),
+    ).toBe(false);
   });
 });
 

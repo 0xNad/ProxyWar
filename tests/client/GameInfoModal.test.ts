@@ -16,6 +16,8 @@ import "../../src/client/components/baseComponents/Modal";
 import "../../src/client/GameInfoModal";
 import { fetchGameById } from "../../src/client/Api";
 import { GameInfoModal } from "../../src/client/GameInfoModal";
+import { RankType } from "../../src/client/components/baseComponents/ranking/GameInfoRanking";
+import { GameMode, UnitType } from "../../src/core/game/Game";
 
 /**
  * `fetchGameById` is mocked module-wide so the "stats-absent" test below
@@ -203,5 +205,24 @@ describe("GameInfoModal modal chrome", () => {
 
     expect(modal.querySelector(".animate-spin")).toBeNull();
     expect(modal.textContent).toContain("game_info_modal.load_failed");
+  });
+
+  it("clears a historical Pirate ranking when loading a Warship-disabled game", async () => {
+    modal.rankType = RankType.StolenGold;
+    vi.mocked(fetchGameById).mockResolvedValueOnce({
+      info: {
+        config: {
+          gameMap: "Pangaea",
+          gameMode: GameMode.FFA,
+          disabledUnits: [UnitType.Warship],
+        },
+        duration: 1,
+        players: [],
+      },
+    } as never);
+
+    await modal.loadGame("new-warship-disabled-game");
+
+    expect(modal.rankType).toBe(RankType.TotalGold);
   });
 });

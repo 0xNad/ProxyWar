@@ -109,7 +109,7 @@ describe("agent advanced warfare (directed proof, executed-with-effect)", () => 
     expect(pAgent.numTilesOwned()).toBe(before);
   });
 
-  it("WARSHIP: a Port makes the warship build OFFERED, and the agent's warship captures an enemy trade ship", async () => {
+  it("WARSHIP: legacy simulation remains compatible but agents receive no warship action", async () => {
     const coastX = 7;
     const agent = new PlayerInfo("Agent", PlayerType.Human, "CLNT_AGENT", "P_AGENT");
     const enemy = new PlayerInfo("Enemy", PlayerType.Human, "CLNT_ENEMY", "P_ENEMY");
@@ -129,13 +129,14 @@ describe("agent advanced warfare (directed proof, executed-with-effect)", () => 
     pAgent.buildUnit(UnitType.Port, game.ref(coastX, 10), {});
     expect(pAgent.units(UnitType.Port)).toHaveLength(1);
 
-    // OFFERING PROOF: with a Port the agent is offered a warship build (kind "warship").
+    // PRODUCT CONTRACT: even when a legacy-compatible core game can field one,
+    // agents no longer receive a warship build or movement action.
     const warshipActions = agentLegalActions(game).filter(
-      (a) => a.kind === "warship",
+      (a) => a.kind === "warship" || a.kind === "move_warship",
     );
-    expect(warshipActions.length).toBeGreaterThan(0);
+    expect(warshipActions).toEqual([]);
 
-    // EFFECT PROOF: the agent fields a warship -> it captures an enemy trade ship.
+    // COMPATIBILITY PROOF: historical replay simulation still executes a warship.
     const portTile = game.ref(coastX, 10);
     game.addExecution(
       new WarshipExecution(

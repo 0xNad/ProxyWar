@@ -12,8 +12,8 @@ legal, explainable, resilient choices from the action menu the runner offers.
 OpenFront's official nation behavior is the baseline: spawn promptly, expand
 into Terra Nullius, reserve troops before attacks, punish weak or dangerous
 neighbors, build economy and defenses, use alliances when they reduce risk, use
-embargoes to pressure hostile players, protect sea lanes with ports and
-warships, and escalate to SAMs, silos, nukes, and MIRVs only when the game state
+embargoes to pressure hostile players, use ports for trade and Transport boats
+for coastal expansion, and escalate to SAMs, silos, nukes, and MIRVs when the game state
 justifies the cost.
 
 ## Economy & Deterrence Facts
@@ -143,21 +143,21 @@ actions themselves prove the tactic cannot execute.
 The planner/executor path mirrors official nation automation by running
 compatible behavior modules in one decision pass:
 
-1. `emergency_survival`: retreats, boat retreats, urgent defense.
+1. `emergency_survival`: land retreats and urgent defense.
 2. `spawn_opening`: spawn and early city timing.
 3. `expansion`: neutral land attacks and neutral transports.
-4. `defense`: defensive builds, upgrades, warship protection.
+4. `defense`: defensive builds and upgrades.
 5. `economy`: cities, factories, ports, useful upgrades.
 6. `diplomacy`: alliance requests/extensions, support, embargo stops.
 7. `combat`: target marks, embargo pressure, break/reject, attacks.
-8. `naval`: ports, transports, warships, warship movement.
+8. `naval`: ports and Transport boats.
 9. `nuclear_endgame`: SAM coverage, silos, nukes, MIRV pressure.
 10. `utility_social`: delete only when useful, quick chat/emoji sparingly, hold.
 
 Choose enabled modules that match the current strategic objective. Let survival
 override all other modules. Prefer a small batch of compatible actions over a
 single perfect action when the game state offers independent useful moves, such
-as expand plus build plus alliance, or embargo plus attack plus warship.
+as expand plus build plus alliance, or embargo plus attack plus transport.
 When `build` or `upgrade_structure` is useful, keep both economy and defense
 available; official nations do not stop placing defense posts just because their
 main objective is pressure.
@@ -293,7 +293,7 @@ Good spawn qualities:
 
 - Open land nearby for early Terra Nullius expansion.
 - Enough distance from many players to avoid instant multi-front pressure.
-- Coastline is useful if ports, trade ships, warships, or transports are likely
+- Coastline is useful if ports, trade ships, or transports are likely
   to matter.
 - Interior land is useful when a defensive-builder profile wants safer cities
   and factories.
@@ -545,11 +545,10 @@ Ports:
   partners and no mutual embargo problem.
 - Space ports apart when options exist; official port valuation prefers
   distance from existing ports.
-- Ports unlock trade ships and warship value, so prioritize them on island or
+- Ports unlock trade ships, so prioritize them on island or
   coastal maps.
 - Avoid spending on ports if all likely trade partners are enemies under
-  embargo, if the coastline is exposed, or if warships are dominating the sea
-  and you cannot defend trade.
+  embargo, or if the coastline is exposed and trade cannot be protected.
 
 Factories and cities:
 
@@ -578,37 +577,19 @@ Use transport actions when:
 Avoid transports when:
 
 - The target is stronger and this is FFA.
-- The destination is too close to enemy warships or likely to be intercepted.
+- The destination lacks a useful reachable landing or water path.
 - You already have enough active transports.
 - The action would bypass a better land expansion.
 
-If a transport retreat action is offered and the landing is no longer valuable,
-retreat before losing the whole force.
+Transport state is progress, not a new decision. When `transportStates` marks a
+boat `en_route` or `returning`, do not invent a recall or relaunch action. A
+returning transport still occupies a slot until it reaches friendly shore.
 
-## Warships
+## Retired Warships
 
-Official nations use warships defensively and economically. They spawn a first
-warship from ports when affordable, retaliate when trade or transport ships are
-captured, intercept incoming transports before they land, and on Hard or
-Impossible counter enemy warship infestations if rich enough.
-
-Build or move warships when:
-
-- You own ports and have no warship yet.
-- Incoming transports are targeting your shore and are not too close to stop.
-- An enemy captured or destroyed your trade or transport ships.
-- A rival is using many warships to dominate the ocean and block trade.
-- You are rich enough that naval control will not delay survival builds.
-
-Avoid warship spending when:
-
-- You have no ports or useful water access.
-- You are poor and under land attack.
-- You already have many warships and moving an existing one is enough.
-- The sea is irrelevant to current win conditions.
-
-Warship actions are usually support actions, not a replacement for land
-survival.
+Warships are retired from new ProxyWar games. Never request, build, or move one.
+Historical observations and replays may still contain Warship records; treat
+those records as read-only compatibility data, not available strategy.
 
 ## Upgrades
 
@@ -767,7 +748,7 @@ As the map fills, priorities change:
 - Neutral expansion becomes less important than target quality.
 - Structure upgrades beat unsafe new structure placement.
 - SAM coverage and silo positioning matter more.
-- Embargoes and warships can deny trade to rivals.
+- Embargoes can deny trade to rivals.
 - Alliances should be re-evaluated; a former shield may become the crown.
 - Attack weak links, disconnected players, overextended enemies, and players
   already under heavy incoming attacks.
@@ -821,7 +802,6 @@ Avoid these common bad agent behaviors:
 - Embargoing valuable friends or trade partners for no strategic gain.
 - Building ports with no useful water trade or no way to defend sea lanes.
 - Sending transports into stronger FFA players or defended waters.
-- Buying warships while losing on land and poor.
 - Clustering cities, ports, factories, SAMs, and silos into one nuke target.
 - Building SAMs when nukes are disabled and another structure is clearly needed.
 - Launching nukes at low-value tiles, bots, teammates, or recently struck
@@ -850,7 +830,7 @@ Before answering, run this checklist:
 7. Is a useful donation available? Support only strategically valuable allies.
 8. Is embargo pressure useful against a non-friendly rival? Use it if direct
    combat is worse.
-9. Are ports, transports, or warships the best map-specific play? Use them only
+9. Are ports or transports the best map-specific play? Use them only
    when water matters.
 10. Are upgrades, SAMs, silos, nukes, or MIRVs needed for late-game survival or
     leader denial? Escalate only with a valid target.
