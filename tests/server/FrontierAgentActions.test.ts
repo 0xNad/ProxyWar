@@ -27,9 +27,17 @@ import { LlmPromptBuilder } from "../../src/server/agents/LlmPromptBuilder";
 // "spawn" is deliberately excluded: spawn placement is a deterministic
 // fairness assignment (AgentSpawnAssignment.ts), never offered as a
 // LegalAction for a brain/executor to choose - LegalActionBuilder.build()
-// never emits kind:"spawn" anymore.
+// never emits kind:"spawn" anymore. The structured-deal meta-actions are
+// excluded like "hold": they are intent:null and flag-gated
+// (PROXYWAR_TUNE_STRUCTURED_DEALS, default OFF; emitted only when the runner
+// injects the observation `deals` block), so they are not part of the
+// autonomous gameplay (intent-emitting) surface this suite pins.
 const autonomousGameplayKinds = legalActionKinds.filter(
-  (kind) => kind !== "hold" && kind !== "boat_retreat" && kind !== "spawn",
+  (kind) =>
+    kind !== "hold" &&
+    kind !== "boat_retreat" &&
+    kind !== "spawn" &&
+    !kind.startsWith("deal_"),
 );
 
 describe("FrontierAgent expanded legal action surface", () => {
@@ -897,6 +905,13 @@ function objectiveForKind(kind: LegalActionKind): StrategicPlan["objective"] {
     case "embargo":
     case "embargo_all":
       return "pressure_rival";
+    // Type-exhaustiveness only: deal meta-actions are excluded from
+    // autonomousGameplayKinds above and never reach this helper at runtime.
+    case "deal_propose":
+    case "deal_accept":
+    case "deal_reject":
+    case "deal_withdraw":
+      return "build_alliance";
     case "delete_unit":
     case "hold":
       return "survive";

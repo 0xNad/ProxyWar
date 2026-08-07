@@ -2550,6 +2550,14 @@ function humanAction(entry: DecisionLogEntry): string {
       return `${entry.username} stopped an embargo against ${String(metadata.targetName ?? metadata.targetID ?? "another agent")}.`;
     case "embargo_all":
       return `${entry.username} embargoed all eligible rivals.`;
+    case "deal_propose":
+      return `${entry.username} proposed a ${String(metadata.dealTemplate ?? metadata.template ?? "deal")} to ${String(metadata.recipientName ?? metadata.recipientID ?? "another agent")}.`;
+    case "deal_accept":
+      return `${entry.username} accepted a ${String(metadata.dealTemplate ?? metadata.template ?? "deal")} from ${String(metadata.recipientName ?? metadata.recipientID ?? "another agent")}.`;
+    case "deal_reject":
+      return `${entry.username} rejected a ${String(metadata.dealTemplate ?? metadata.template ?? "deal")} from ${String(metadata.recipientName ?? metadata.recipientID ?? "another agent")}.`;
+    case "deal_withdraw":
+      return `${entry.username} withdrew a ${String(metadata.dealTemplate ?? metadata.template ?? "deal")} offer to ${String(metadata.recipientName ?? metadata.recipientID ?? "another agent")}.`;
     case "hold":
       return `${entry.username} held position.`;
   }

@@ -940,6 +940,136 @@ export interface AgentOpponentModelEntry {
   predictedNextAction: string;
 }
 
+/**
+ * Structured-deal observation types (PROXYWAR_TUNE_STRUCTURED_DEALS, default
+ * OFF). Built by the runner-scoped `AgentDealManager.ts` — deals are
+ * runner-scoped meta-state: core, Schemas.ts, and replay determinism are
+ * untouched, and deals never alter any game permission. Templates are
+ * enumerated with ZERO free text. Privacy: a bilateral proposal/deal appears
+ * only in the two parties' observations (runner-side filtering, the directed
+ * communication-signal pattern); operator artifacts see everything.
+ */
+export type AgentDealTemplate =
+  | "non_aggression_pact"
+  | "trade_security_pact"
+  | "joint_attack"
+  | "support_request";
+
+export const agentDealTemplates = [
+  "non_aggression_pact",
+  "trade_security_pact",
+  "joint_attack",
+  "support_request",
+] as const satisfies readonly AgentDealTemplate[];
+
+export type AgentDealStatus =
+  | "open"
+  | "accepted"
+  | "rejected"
+  | "withdrawn"
+  | "expired";
+
+export type AgentDealObligationStatus =
+  | "pending"
+  | "fulfilled"
+  | "violated"
+  | "expired_unfulfilled"
+  | "moot";
+
+export type AgentDealObligationKind =
+  | "non_aggression"
+  | "trade_security"
+  | "confirmed_attack_on_target"
+  | "send_support";
+
+export interface AgentDealTermsView {
+  template: AgentDealTemplate;
+  /** Clamped to the manager's 3-20 decision-step duration bounds. */
+  durationSteps: number;
+  /** joint_attack only: the named third seat the obligor pledges to attack. */
+  targetPlayerID?: string;
+  targetName?: string;
+  /**
+   * support_request only: EXPLICIT amounts, never null — the core donate-gold
+   * null-amount bug silently sends 0 (verified doc §4), so implicit amounts
+   * are forbidden by design. Gold serialized as an integer string.
+   */
+  goldAmount?: string;
+  troopAmount?: number;
+}
+
+export interface AgentDealProposalView {
+  dealID: string;
+  proposerPlayerID: string;
+  proposerName: string;
+  recipientPlayerID: string;
+  recipientName: string;
+  terms: AgentDealTermsView;
+  proposedAtStep: number;
+  /** Last decision step an answer is accepted; expires silently after it. */
+  answerableThroughStep: number;
+}
+
+export interface AgentDealObligationView {
+  obligorPlayerID: string;
+  obligorName: string;
+  kind: AgentDealObligationKind;
+  status: AgentDealObligationStatus;
+  targetPlayerID?: string;
+  targetName?: string;
+  goldAmount?: string;
+  troopAmount?: number;
+  /** send_support progress: cumulative confirmed donations in the window. */
+  donatedGold?: string;
+  donatedTroops?: number;
+}
+
+export interface AgentActiveDealView {
+  dealID: string;
+  template: AgentDealTemplate;
+  proposerPlayerID: string;
+  proposerName: string;
+  recipientPlayerID: string;
+  recipientName: string;
+  /** Obligations judge confirmed effects from this decision step onward. */
+  activeFromStep: number;
+  /** Last decision step obligations are judged (inclusive). */
+  expiresAfterStep: number;
+  stepsRemaining: number;
+  obligations: AgentDealObligationView[];
+}
+
+export interface AgentDealProposalOptionView {
+  recipientPlayerID: string;
+  recipientName: string;
+  terms: AgentDealTermsView;
+}
+
+export interface AgentDealRivalReliabilityView {
+  playerID: string;
+  name: string;
+  /** Obligations this rival fulfilled as obligor. */
+  fulfilled: number;
+  /** Terminal non-moot obligations as obligor (fulfilled + violated + expired_unfulfilled). */
+  terminalNonMoot: number;
+  /** fulfilled / terminalNonMoot, rounded to 2 decimals; null with no sample. */
+  reliability: number | null;
+}
+
+export interface AgentDealsObservation {
+  decisionStep: number;
+  /** Open proposals addressed to this agent, answerable now. Capped, stable-sorted. */
+  incomingProposals: AgentDealProposalView[];
+  /** This agent's own open proposals (withdrawable). Capped, stable-sorted. */
+  outgoingProposals: AgentDealProposalView[];
+  /** Active deals this agent is party to. Capped, stable-sorted. */
+  activeDeals: AgentActiveDealView[];
+  /** (recipient, template) pairs the manager currently has capacity to offer. */
+  proposalOptions: AgentDealProposalOptionView[];
+  /** Public referee aggregate per rival — no bilateral terms leak here. */
+  rivalReliability: AgentDealRivalReliabilityView[];
+}
+
 export interface AgentObservation {
   agentID: string;
   clientID: string | null;
@@ -979,6 +1109,14 @@ export interface AgentObservation {
    * behavior). Built by `AgentEconomyNetwork.ts`.
    */
   economy?: AgentEconomyObservation;
+  /**
+   * Structured-deal state (PROXYWAR_TUNE_STRUCTURED_DEALS, default OFF;
+   * absent when the flag is off — observations are then byte-identical to
+   * shipped behavior). Injected by the league runner from its
+   * `AgentDealManager`, privacy-filtered to this agent's own bilateral
+   * proposals and deals.
+   */
+  deals?: AgentDealsObservation;
   endgame?: {
     winner: string | null;
     leaderID: string | null;
@@ -1029,7 +1167,15 @@ export type LegalActionKind =
   | "donate_troops"
   | "embargo"
   | "embargo_stop"
-  | "embargo_all";
+  | "embargo_all"
+  // Structured-deal meta-actions (PROXYWAR_TUNE_STRUCTURED_DEALS, default
+  // OFF; offered only when the flag is on and the runner's deal manager has
+  // capacity). All `intent: null` — the `hold` precedent — processed by the
+  // runner-scoped AgentDealManager, never submitted to the game.
+  | "deal_propose"
+  | "deal_accept"
+  | "deal_reject"
+  | "deal_withdraw";
 
 export const legalActionKinds = [
   "spawn",
@@ -1056,6 +1202,10 @@ export const legalActionKinds = [
   "embargo",
   "embargo_stop",
   "embargo_all",
+  "deal_propose",
+  "deal_accept",
+  "deal_reject",
+  "deal_withdraw",
 ] as const satisfies readonly LegalActionKind[];
 
 export interface LegalActionRisk {

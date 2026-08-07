@@ -449,6 +449,29 @@ export function economyObservationEnabled(): boolean {
 }
 
 /**
+ * Structured-deals flag (economy+negotiation V1 Phase B). Reads the EXACT env
+ * var `PROXYWAR_TUNE_STRUCTURED_DEALS` (A/B arms set "0"/"1"). DEFAULT OFF —
+ * ships inert and is measured on a paired eval-policy A/B arm before any
+ * default flip. Fixes the verified negotiation gap (2026-08-07 economy audit):
+ * no deal, proposal, or commitment machinery exists anywhere, so agents cannot
+ * make or break an explicit promise and spectator surfaces have no
+ * proposal → pact → betrayal → verdict story beats to narrate. When ON, the
+ * league runner owns a deterministic per-match deal ledger
+ * (`AgentDealManager`): observations gain the bilateral `deals` block
+ * (privacy-filtered to the two parties), the legal-action menu gains the four
+ * `intent: null` meta-action kinds (deal_propose / deal_accept / deal_reject /
+ * deal_withdraw), decision records gain dealAction/dealID/dealComplianceEvent
+ * metadata stamps, and spectator telemetry derives bounded deal events with a
+ * compliance referee's verdicts (`AgentDealCompliance`). Deals never alter any
+ * game permission and emit no core intent — the referee narrates
+ * follow-through, it never punishes. When OFF, observations, menus, decision
+ * records, and telemetry are byte-identical to shipped behavior.
+ */
+export function structuredDealsEnabled(): boolean {
+  return tunedNumber("STRUCTURED_DEALS", 0) >= 1;
+}
+
+/**
  * Economy spectator-events flag (economy+negotiation V1 Phase A). Reads the
  * EXACT env var `PROXYWAR_TUNE_ECONOMY_EVENTS` (A/B arms set "0"/"1"). DEFAULT
  * OFF — ships inert. Fixes the verified spectator gap (2026-08-07 economy
