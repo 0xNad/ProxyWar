@@ -95,6 +95,8 @@ function serveAiLeagueArtifacts(): Plugin {
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
   const isProduction = mode === "production";
+  const isStaticReplay = mode === "static-replay";
+  const usesHashedAssets = isProduction || isStaticReplay;
   // LEAGUE client build: excludes every betting/wagering surface from the
   // bundle (operator boundary 2026-07-27 — speculation lives only on the
   // separate bet surface, never inside the league package). Read straight
@@ -149,14 +151,15 @@ export default defineConfig(({ mode }) => {
   const resourcesDir = getResourcesDir(__dirname);
   const proprietaryDir = getProprietaryDir(__dirname);
   const sourceDirs = [resourcesDir, proprietaryDir];
-  const assetManifest: AssetManifest = isProduction
+  const assetManifest: AssetManifest = usesHashedAssets
     ? buildPublicAssetManifest(sourceDirs)
     : {};
-  const cdnBase = env.CDN_BASE ?? "";
+  const cdnBase = isStaticReplay ? "." : (env.CDN_BASE ?? "");
   const htmlAssetData = {
+    staticReplay: isStaticReplay,
     assetManifest: JSON.stringify(assetManifest),
     cdnBase: JSON.stringify(cdnBase),
-    gameEnv: JSON.stringify(env.GAME_ENV ?? "dev"),
+    gameEnv: JSON.stringify(isStaticReplay ? "prod" : (env.GAME_ENV ?? "dev")),
     manifestHref: buildAssetUrl("manifest.json", assetManifest, cdnBase),
     faviconHref: buildAssetUrl("images/Favicon.svg", assetManifest, cdnBase),
     gameplayScreenshotUrl: buildAssetUrl(
@@ -211,7 +214,7 @@ export default defineConfig(({ mode }) => {
   });
 
   let viteBundleFiles: string[] = [];
-  const syncHashedPublicAssets = (): Plugin => ({
+  const syncHashedPublicAssets = (includeRootPublicFiles: boolean): Plugin => ({
     name: "sync-hashed-public-assets",
     apply: "build" as const,
     writeBundle(_options, bundle) {
@@ -219,7 +222,9 @@ export default defineConfig(({ mode }) => {
     },
     closeBundle() {
       const outDir = path.join(__dirname, "static");
-      copyRootPublicFiles(resourcesDir, outDir);
+      if (includeRootPublicFiles) {
+        copyRootPublicFiles(resourcesDir, outDir);
+      }
       // Run the source→hashed copy first; createHashedPublicAssetFiles iterates
       // assetManifest and expects every key to resolve to a file in resources/
       // or proprietary/. Vite's bundle output (assets/...) doesn't, so it's
@@ -283,8 +288,8 @@ export default defineConfig(({ mode }) => {
       ],
     },
     root: "./",
-    base: "/",
-    publicDir: isProduction ? false : "resources",
+    base: isStaticReplay ? "./" : "/",
+    publicDir: usesHashedAssets ? false : "resources",
 
     resolve: {
       tsconfigPaths: true,
@@ -303,10 +308,10 @@ export default defineConfig(({ mode }) => {
 
     plugins: [
       ...(leagueClientBuild ? [leagueWageringGuard()] : []),
-      ...(!isProduction
+      ...(!usesHashedAssets
         ? [serveProprietaryDir(proprietaryDir, resourcesDir)]
         : []),
-      ...(!isProduction ? [serveAiLeagueArtifacts()] : []),
+      ...(!usesHashedAssets ? [serveAiLeagueArtifacts()] : []),
       ...(isProduction
         ? []
         : [
@@ -324,32 +329,35 @@ export default defineConfig(({ mode }) => {
                     },
                   },
                 },
-                {
-                  filename: "public.html",
-                  template: "public.html",
-                  entry: "/src/client/PublicApp.ts",
-                  injectOptions: {
-                    data: {
-                      gitCommit: JSON.stringify("DEV"),
-                      ...htmlAssetData,
-                    },
-                  },
-                },
+                ...(!isStaticReplay
+                  ? [
+                      {
+                        filename: "public.html",
+                        template: "public.html",
+                        entry: "/src/client/PublicApp.ts",
+                        injectOptions: {
+                          data: {
+                            gitCommit: JSON.stringify("DEV"),
+                            ...htmlAssetData,
+                          },
+                        },
+                      },
+                    ]
+                  : []),
               ],
             }),
           ]),
-      ...(isProduction
-        ? [injectCdnBaseTemplate(), syncHashedPublicAssets()]
-        : []),
+      ...(isProduction ? [injectCdnBaseTemplate()] : []),
+      ...(usesHashedAssets ? [syncHashedPublicAssets(!isStaticReplay)] : []),
       tailwindcss(),
     ],
 
     define: {
       __ASSET_MANIFEST__: JSON.stringify(assetManifest),
       "process.env.WEBSOCKET_URL": JSON.stringify(
-        isProduction ? "" : "localhost:3000",
+        usesHashedAssets ? "" : "localhost:3000",
       ),
-      "process.env.GAME_ENV": JSON.stringify(isProduction ? "prod" : "dev"),
+      "process.env.GAME_ENV": JSON.stringify(usesHashedAssets ? "prod" : "dev"),
       "process.env.STRIPE_PUBLISHABLE_KEY": JSON.stringify(
         env.STRIPE_PUBLISHABLE_KEY,
       ),
@@ -371,7 +379,9 @@ export default defineConfig(({ mode }) => {
       rollupOptions: {
         input: {
           main: path.resolve(__dirname, "index.html"),
-          public: path.resolve(__dirname, "public.html"),
+          ...(!isStaticReplay
+            ? { public: path.resolve(__dirname, "public.html") }
+            : {}),
         },
         output: {
           // Split, not one shared "vendor": the public entry (PublicApp.ts)
