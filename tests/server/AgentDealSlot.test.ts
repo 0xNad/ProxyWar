@@ -3,6 +3,7 @@ import { MAX_DEAL_STATED_REASON_LENGTH } from "../../src/server/agents/AgentDeal
 import { DEAL_ACTION_COOLDOWN_STEPS } from "../../src/server/agents/AgentDealManager";
 import { validateAgentDealDecision } from "../../src/server/agents/AgentDecisionValidator";
 import { buildAgentSpectatorTelemetry } from "../../src/server/agents/AgentSpectatorTelemetry";
+import { sanitizeStatedReason } from "../../src/server/agents/AgentStatedReasonPolicy";
 import type {
   AgentDealsObservation,
   AgentDecision,
@@ -619,6 +620,150 @@ describe("stated reasons — recorded, sanitized, viewer-only", () => {
     await harness.league.runDecisionTurn({ turnNumber: 0 });
     expect(harness.league.dealLedger().deals[0]).not.toHaveProperty(
       "proposerStatedReason",
+    );
+  });
+});
+
+/**
+ * PROVENANCE, not text. When a brain fails it SUBSTITUTES a synthesized
+ * reason and returns a complete decision, and on this lineage
+ * (`AgentDecision.reason: string`, not upstream's `string | null`) that text
+ * is indistinguishable by content from a genuine one — several real
+ * substitutions are benign enough to clear the denylist outright. Publishing
+ * one as an agent's motive for a pact or a betrayal would be a fabrication,
+ * so every stated-reason stamp gates on `reasonIsBrainAuthored` first.
+ */
+describe("stated reasons — fallback provenance gate", () => {
+  const GENUINE = "Pact buys me the western flank for twelve decisions";
+  // The real LlmAgentBrain no-legal-actions substitution: benign wording that
+  // passes the denylist unchanged, which is exactly why text filtering alone
+  // is not enough.
+  const SUBSTITUTED =
+    "No legal actions were offered; requested safe hold fallback.";
+  const FALLBACK_METADATA = { fallbackUsed: true, llmParseOk: false };
+
+  it("the substituted text would clear the content denylist on its own", () => {
+    // Guards the premise: if this ever starts returning null the gate is still
+    // correct, but this suite would stop proving what it claims to prove.
+    expect(sanitizeStatedReason(SUBSTITUTED)).toBe(SUBSTITUTED);
+  });
+
+  it("omits the stated reason everywhere when the deal decision fell back", async () => {
+    const harness = dealLeagueHarness({
+      seats: [A, B, C],
+      scripts: [
+        [pickWithDeal(null, PROPOSE_B_NAP, SUBSTITUTED, FALLBACK_METADATA)],
+        [],
+        [],
+      ],
+    });
+    const record = recordFor(
+      await harness.league.runDecisionTurn({ turnNumber: 0 }),
+      A,
+    );
+
+    // The decision still carries the substitute text...
+    expect(record.reason).toBe(SUBSTITUTED);
+    expect(record.decisionMetadata?.fallbackUsed).toBe(true);
+    // ...and none of the three published surfaces repeat it.
+    expect(record.decisionMetadata).not.toHaveProperty("dealStatedReason");
+    const ledger = harness.league.dealLedger();
+    expect(ledger.deals[0]).not.toHaveProperty("proposerStatedReason");
+    expect(ledger.events[0]).not.toHaveProperty("statedReason");
+    const telemetry = buildAgentSpectatorTelemetry({
+      runID: "DEAL_SLOT_FALLBACK",
+      records: harness.records(),
+      roster: ROSTER,
+    });
+    expect(
+      telemetry.events.find((event) => event.kind === "deal_proposed"),
+    ).not.toHaveProperty("statedReason");
+    expect(JSON.stringify(telemetry)).not.toContain(SUBSTITUTED);
+  });
+
+  it("omits it on the diplomacy slot too when that decision fell back", async () => {
+    const harness = dealLeagueHarness({
+      seats: [A, B, C],
+      scripts: [
+        [pickWithDeal("hold", PROPOSE_B_NAP, SUBSTITUTED, FALLBACK_METADATA)],
+        [],
+        [],
+      ],
+    });
+    const record = recordFor(
+      await harness.league.runDecisionTurn({ turnNumber: 0 }),
+      A,
+    );
+    // The deal really did go through the separate slot beside a game action.
+    expect(record.decisionMetadata?.dealSeparateSlot).toBe(true);
+    expect(record.decisionMetadata).not.toHaveProperty("dealStatedReason");
+    const ledger = harness.league.dealLedger();
+    expect(ledger.deals[0]).not.toHaveProperty("proposerStatedReason");
+    expect(ledger.events[0]).not.toHaveProperty("statedReason");
+  });
+
+  it("a parser failure alone is enough to suppress it", async () => {
+    const harness = dealLeagueHarness({
+      seats: [A, B, C],
+      scripts: [
+        [
+          pickWithDeal(null, PROPOSE_B_NAP, SUBSTITUTED, {
+            parseSuccess: false,
+          }),
+        ],
+        [],
+        [],
+      ],
+    });
+    await harness.league.runDecisionTurn({ turnNumber: 0 });
+    expect(harness.league.dealLedger().deals[0]).not.toHaveProperty(
+      "proposerStatedReason",
+    );
+  });
+
+  it("still publishes a genuine reason when the brain authored it", async () => {
+    const harness = dealLeagueHarness({
+      seats: [A, B, C],
+      scripts: [
+        [
+          pickWithDeal(null, PROPOSE_B_NAP, GENUINE, {
+            fallbackUsed: false,
+            llmParseOk: true,
+          }),
+        ],
+        [],
+        [],
+      ],
+    });
+    const record = recordFor(
+      await harness.league.runDecisionTurn({ turnNumber: 0 }),
+      A,
+    );
+    expect(record.decisionMetadata!.dealStatedReason).toBe(GENUINE);
+    const ledger = harness.league.dealLedger();
+    expect(ledger.deals[0].proposerStatedReason).toBe(GENUINE);
+    expect(ledger.events[0].statedReason).toBe(GENUINE);
+    const telemetry = buildAgentSpectatorTelemetry({
+      runID: "DEAL_SLOT_GENUINE",
+      records: harness.records(),
+      roster: ROSTER,
+    });
+    expect(
+      telemetry.events.find((event) => event.kind === "deal_proposed")!
+        .statedReason,
+    ).toBe(GENUINE);
+  });
+
+  it("treats a decision with no provenance metadata as brain-authored", async () => {
+    // Deterministic brains (rule/strategy) author reasons without setting any
+    // failure key; the gate must not silently erase them.
+    const harness = dealLeagueHarness({
+      seats: [A, B, C],
+      scripts: [[pickWithDeal(null, PROPOSE_B_NAP, GENUINE)], [], []],
+    });
+    await harness.league.runDecisionTurn({ turnNumber: 0 });
+    expect(harness.league.dealLedger().deals[0].proposerStatedReason).toBe(
+      GENUINE,
     );
   });
 });

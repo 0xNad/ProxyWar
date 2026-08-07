@@ -70,3 +70,53 @@ export function sanitizeStatedReason(raw: string): string | null {
     return null;
   return text;
 }
+
+/** The decision-metadata bag as carried on `AgentDecision.metadata` and, after `compactDecisionMetadata`, on `AgentDecisionRecord.decisionMetadata`. */
+type DecisionMetadata =
+  | Readonly<Record<string, string | number | boolean | null>>
+  | undefined;
+
+/**
+ * PROVENANCE gate for publishing a stated reason: did the acting BRAIN
+ * actually author this text?
+ *
+ * The denylist above filters on CONTENT, which is not enough. When a brain
+ * fails, it does not leave the reason empty — it SUBSTITUTES a synthesized
+ * one and hands back a complete decision. Several of those substitutions are
+ * benign-sounding and sail straight through the denylist:
+ *   - "No legal actions were offered; requested safe hold fallback."
+ *     (`LlmAgentBrain.fallback`)
+ *   - "Relay agent had no legal actions to choose from."
+ *     (`ExternalRelayAgentBrain`)
+ *   - "External agent had no legal actions to choose from."
+ *     (`ExternalHttpAgentBrain`)
+ * Only the parse-failure form ("LLM decision rejected (...)") trips the
+ * denylist, via "rejected". Publishing any of the others as an agent's motive
+ * for a pact or a betrayal in `spectator-telemetry.json` would be a
+ * fabrication — the one thing this feature must never do.
+ *
+ * LINEAGE NOTE: upstream distinguishes these by typing `reason` as
+ * `string | null` and writing null on failure. That widening is not on this
+ * release lineage (`reason: string`), so a failed decision arrives carrying
+ * substitute text and is indistinguishable BY TEXT from a genuine one. The
+ * honest discriminator here is therefore metadata provenance, not the string.
+ *
+ * The predicate is the union of the two failure classes that
+ * `ExternalAgentFeedback`, `AgentMatchStory`, and `AgentObjectiveScorecard`
+ * each already define identically on this lineage — fallback substitution and
+ * parser failure — read from the exact keys the brains themselves set at the
+ * moment they substitute. Unknown/absent metadata is treated as
+ * brain-authored: this gate exists to catch the failure signals a brain
+ * RAISES, and deterministic brains (rule/strategy) legitimately author
+ * reasons without setting any of them.
+ */
+export function reasonIsBrainAuthored(metadata: DecisionMetadata): boolean {
+  if (metadata === undefined) return true;
+  const fellBack =
+    metadata.fallbackUsed === true || metadata.plannerFallbackUsed === true;
+  const parseFailed =
+    metadata.parseSuccess === false ||
+    metadata.llmParseOk === false ||
+    metadata.plannerParseOk === false;
+  return !fellBack && !parseFailed;
+}

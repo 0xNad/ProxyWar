@@ -21,12 +21,15 @@ function act(
   } as unknown as LegalAction;
 }
 
-// Fidelity verified 2026-06-22 against coworld-adapter/src/starter-player.mjs:57-67:
-// identical preferredKinds order (spawn>attack>build>upgrade>move_warship>boat>
-// alliance_request>quick_chat>emoji), identical filter (kind match && risk!=="high" &&
-// !id.includes("avoid")), identical fallback (find hold ?? actions[0]). The port adds
-// "upgrade_structure" adjacent to "upgrade" only — the wire("upgrade")/internal
-// ("upgrade_structure") kind mapping, priority-preserving. So this opponent faithfully
+// Fidelity re-verified 2026-08-07 against coworld-adapter/src/starter-player.mjs
+// (`preferredKinds`): identical order (spawn > attack > build > upgrade_structure >
+// boat > alliance_request > quick_chat > emoji), identical filter (kind match &&
+// risk!=="high" && !id.includes("avoid")), identical fallback (find hold ?? actions[0]).
+// "move_warship" is gone from both — warships were retired on this lineage.
+// The bundled player used to say "upgrade", a kind the builder never emits, so it
+// could never reach an upgrade; that dead string was corrected to the canonical
+// "upgrade_structure". This port keeps BOTH spellings in the same priority slot, so
+// it remains a priority-preserving superset either way. So this opponent faithfully
 // represents the real Coworld starter, and the Keystone-vs-starters eval is representative.
 describe("StarterBotAgentBrain (faithful Coworld starter port)", () => {
   it("follows the starter priority order (spawn > attack > build > boat > ...)", () => {

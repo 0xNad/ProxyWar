@@ -1,5 +1,6 @@
 import type { Game } from "../../core/game/Game";
 import {
+  reasonIsBrainAuthored,
   sanitizeStatedReason,
   STATED_REASON_MAX_LENGTH,
 } from "./AgentStatedReasonPolicy";
@@ -53,9 +54,16 @@ export const MAX_DEAL_STATED_REASON_LENGTH = 160;
 /**
  * Sanitizer for AGENT-AUTHORED deal stated reasons before they are stored on
  * the deal ledger or shipped in an artifact. Returns null for anything that
- * must not be shipped — `AgentDecision.reason` is `string | null` and null
- * means the provider produced no stated reason, so the field is OMITTED
- * rather than filled with substitute text.
+ * must not be shipped, and every caller OMITS the field on null rather than
+ * filling it with substitute text.
+ *
+ * On this release lineage `AgentDecision.reason` is `string` (NOT the
+ * `string | null` of the upstream null-reason work), so a failed decision
+ * arrives carrying synthesized fallback text rather than an absent reason.
+ * The field can therefore still be legitimately absent, but the discriminator
+ * is provenance rather than nullness: callers gate on
+ * `AgentStatedReasonPolicy.reasonIsBrainAuthored` FIRST and only sanitize
+ * text the acting brain actually authored.
  *
  * Three layers, in order:
  * 1. syntactic hygiene — printable ASCII only, collapsed whitespace;
@@ -557,8 +565,13 @@ function judgeRecordForObligation(
   // effect resolves this obligation — the betrayal's (or the kept promise's)
   // stated rationale, beside the referee's server-authored verdict but never
   // merged into it. No extra model call: every decision already carries a
-  // reason. Null (provider failure / no stated reason) omits the field.
-  const statedReason = sanitizeDealStatedReason(record.reason);
+  // reason. Provenance-gated FIRST: a fallback/parse-failure decision carries
+  // synthesized substitute text on this lineage, and attributing that to an
+  // agent as its motive for a betrayal is exactly the fabrication this field
+  // must never produce. Gate or sanitizer returning null omits the field.
+  const statedReason = reasonIsBrainAuthored(record.decisionMetadata)
+    ? sanitizeDealStatedReason(record.reason)
+    : null;
   const attachStatedReason = () => {
     if (statedReason !== null) {
       obligation.obligorStatedReason = statedReason;

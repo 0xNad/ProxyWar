@@ -36,8 +36,11 @@ export class StarterBotAgentBrain implements AgentBrain {
   }
 }
 
-// Priority order copied verbatim from starter-player.mjs, with "upgrade" widened
-// to also match the internal "upgrade_structure" kind.
+// Priority order copied verbatim from starter-player.mjs. Both upgrade spellings
+// sit in the one slot: the bundled player now emits the canonical
+// "upgrade_structure" (its old "upgrade" matched no kind the builder emits), and
+// the dead "upgrade" is kept here only so this stays a superset of any starter
+// copy still carrying it. Priority-preserving either way.
 const PREFERRED_KINDS: ReadonlyArray<string> = [
   "spawn",
   "attack",

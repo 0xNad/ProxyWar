@@ -290,6 +290,34 @@ interface DecisionLogEntry {
   dealPublicText?: string;
   dealApplyAccepted?: boolean;
   dealComplianceEvent?: string;
+  /**
+   * The acting agent's OWN stated reason for this deal beat, already
+   * provenance-gated (`reasonIsBrainAuthored`) and sanitized/capped to
+   * `MAX_DEAL_STATED_REASON_LENGTH` (160) by `sanitizeDealStatedReason`
+   * before it was ever stamped. Absent when the brain stated none or the
+   * decision was a fallback. Carried here because it is the single most
+   * valuable thing in the artifact — the agent's own voice on a pact or a
+   * betrayal — and without it the mirror's narrative/telemetry backfill
+   * rebuilds public league replays with every stated reason missing.
+   */
+  dealStatedReason?: string;
+  /**
+   * Marks a deal applied through the DIPLOMACY SLOT rather than the action
+   * slot. Load-bearing for readers: when true the record's `result` belongs
+   * to the GAME action, so deal success must not be read from it.
+   */
+  dealSeparateSlot?: boolean;
+  /**
+   * Diplomacy-slot diagnostics. Server-authored outcome text
+   * (`dealSlotResult`) plus, on refusal, the agent's requested id and the
+   * refusal reason — both already hard-capped where they are stamped
+   * (`MAX_STAMPED_DEAL_ACTION_ID_LENGTH` 120 / `MAX_STAMPED_DEAL_REJECTION_LENGTH`
+   * 200), so copying them adds no unbounded agent-controlled string to the
+   * log.
+   */
+  dealSlotResult?: string;
+  dealSlotRequestedID?: string;
+  dealSlotRejected?: string;
   tacticalAffordances?: AgentTacticalAffordances;
   reason: string;
   confidence?: number;
@@ -924,6 +952,21 @@ function decisionLogEntry(
       : {}),
     ...(booleanMetadata(metadata, "dealApplyAccepted") !== undefined
       ? { dealApplyAccepted: booleanMetadata(metadata, "dealApplyAccepted") }
+      : {}),
+    ...(stringMetadata(metadata, "dealStatedReason") !== undefined
+      ? { dealStatedReason: stringMetadata(metadata, "dealStatedReason") }
+      : {}),
+    ...(booleanMetadata(metadata, "dealSeparateSlot") !== undefined
+      ? { dealSeparateSlot: booleanMetadata(metadata, "dealSeparateSlot") }
+      : {}),
+    ...(stringMetadata(metadata, "dealSlotResult") !== undefined
+      ? { dealSlotResult: stringMetadata(metadata, "dealSlotResult") }
+      : {}),
+    ...(stringMetadata(metadata, "dealSlotRequestedID") !== undefined
+      ? { dealSlotRequestedID: stringMetadata(metadata, "dealSlotRequestedID") }
+      : {}),
+    ...(stringMetadata(metadata, "dealSlotRejected") !== undefined
+      ? { dealSlotRejected: stringMetadata(metadata, "dealSlotRejected") }
       : {}),
     ...(stringMetadata(metadata, "dealComplianceEvent") !== undefined
       ? { dealComplianceEvent: stringMetadata(metadata, "dealComplianceEvent") }

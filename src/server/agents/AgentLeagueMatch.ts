@@ -24,6 +24,7 @@ import {
   BuildAgentObservationInput,
 } from "./AgentObservationBuilder";
 import { AgentRunner } from "./AgentRunner";
+import { reasonIsBrainAuthored } from "./AgentStatedReasonPolicy";
 import { buildAgentTacticalAffordances } from "./AgentTacticalAffordances";
 import { economyEventsEnabled, structuredDealsEnabled } from "./AgentTunables";
 import {
@@ -621,7 +622,13 @@ export class AgentLeagueMatchRunner {
                   observation.ownState?.name ?? participant.spec.username,
                 action: selected.action,
                 turnNumber: observation.turnNumber,
-                statedReason: decision.reason,
+                // Provenance-gated: a fallback/parse-failure decision carries
+                // SUBSTITUTE reason text on this lineage, which must never be
+                // published as the agent's own words. See
+                // `reasonIsBrainAuthored`.
+                statedReason: reasonIsBrainAuthored(decision.metadata)
+                  ? decision.reason
+                  : null,
               })
             : null;
         const result =
@@ -1112,7 +1119,11 @@ export class AgentLeagueMatchRunner {
         input.observation.ownState?.name ?? input.participant.spec.username,
       action: validation.action,
       turnNumber: input.observation.turnNumber,
-      statedReason: input.decision.reason,
+      // Provenance-gated — see the game-action slot's call and
+      // `reasonIsBrainAuthored`.
+      statedReason: reasonIsBrainAuthored(input.decision.metadata)
+        ? input.decision.reason
+        : null,
     });
     this.log.info("league agent deal slot applied", {
       agentID: input.participant.runner.agentID,

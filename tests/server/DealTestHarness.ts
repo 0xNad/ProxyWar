@@ -190,6 +190,13 @@ export interface ScriptedPick {
   actionID?: string | null;
   dealActionID?: string | null;
   reason?: string | null;
+  /**
+   * `AgentDecision.metadata` for this pick — the provenance bag the runner
+   * compacts onto `AgentDecisionRecord.decisionMetadata`. Set
+   * `fallbackUsed`/`llmParseOk` here to script a decision whose reason text
+   * was SUBSTITUTED by the brain rather than authored by it.
+   */
+  metadata?: Record<string, string | number | boolean | null>;
 }
 
 /** Picks the next decision; null (or exhaustion) selects hold. */
@@ -233,6 +240,7 @@ export function scriptedBrain(
           ...(pick.dealActionID !== undefined
             ? { dealActionID: pick.dealActionID }
             : {}),
+          ...(pick.metadata !== undefined ? { metadata: pick.metadata } : {}),
         };
       },
     },
@@ -256,11 +264,13 @@ export function pickWithDeal(
   actionID: string | null,
   dealActionID: string | null,
   reason?: string | null,
+  metadata?: Record<string, string | number | boolean | null>,
 ): ScriptedPicker {
   return () => ({
     actionID,
     dealActionID,
     ...(reason !== undefined ? { reason } : {}),
+    ...(metadata !== undefined ? { metadata } : {}),
   });
 }
 
@@ -347,6 +357,12 @@ export function fabricatedRecord(input: {
   /** The deciding brain's own stated reason; null = none stated. */
   reason?: string | null;
   metadata?: Record<string, string | number | boolean | null>;
+  /**
+   * `AgentDecisionRecord.decisionMetadata` — the provenance bag the stated-
+   * reason gate reads. Omitted entirely when not supplied, so existing
+   * fabricated records keep their exact shape.
+   */
+  decisionMetadata?: Record<string, string | number | boolean | null>;
   auditStatus?: NonNullable<AgentDecisionRecord["audit"]>["auditStatus"];
   attackTargetsBefore?: string[];
   attackTargetsAfter?: string[];
@@ -390,6 +406,9 @@ export function fabricatedRecord(input: {
       ? "fabricated"
       : input.reason) as string,
     chosenActionMetadata: input.metadata ?? {},
+    ...(input.decisionMetadata !== undefined
+      ? { decisionMetadata: input.decisionMetadata }
+      : {}),
     intent: null,
     result: {
       accepted: input.accepted ?? true,

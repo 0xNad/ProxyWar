@@ -14,6 +14,7 @@ import {
   dealLeagueHarness,
   fabricatedRecord,
   pickByID,
+  pickWithDeal,
   type StubSeat,
 } from "./DealTestHarness";
 
@@ -1048,6 +1049,14 @@ const STAMP_KEYS = [
   "dealPublicText",
   "dealApplyAccepted",
   "dealComplianceEvent",
+  // Added with the diplomacy slot (PR #40): the agent's own stated reason and
+  // the separate-slot beat + diagnostics. Listed here so BOTH the
+  // absent-when-bare and absent-when-flags-off assertions below cover them.
+  "dealStatedReason",
+  "dealSeparateSlot",
+  "dealSlotResult",
+  "dealSlotRequestedID",
+  "dealSlotRejected",
 ] as const;
 
 async function writeAndParseEntries(
@@ -1122,6 +1131,11 @@ describe("decisions.jsonl external-seat stamps (economyFacts + structured deals)
           "Ext One proposed a non-aggression pact to Ext Two (12 decisions).",
         dealApplyAccepted: true,
         dealComplianceEvent: complianceStamp,
+        dealStatedReason: "Pact buys me the western flank",
+        dealSeparateSlot: true,
+        dealSlotResult: "deal proposed: deal:P_A:P_B:non_aggression_pact:0",
+        dealSlotRequestedID: "deal_propose:P_B:non_aggression_pact",
+        dealSlotRejected: "a deal action was already played",
       },
     };
     const bare: AgentDecisionRecord = {
@@ -1151,9 +1165,77 @@ describe("decisions.jsonl external-seat stamps (economyFacts + structured deals)
         "Ext One proposed a non-aggression pact to Ext Two (12 decisions).",
       dealApplyAccepted: true,
       dealComplianceEvent: complianceStamp,
+      dealStatedReason: "Pact buys me the western flank",
+      dealSeparateSlot: true,
+      dealSlotResult: "deal proposed: deal:P_A:P_B:non_aggression_pact:0",
+      dealSlotRequestedID: "deal_propose:P_B:non_aggression_pact",
+      dealSlotRejected: "a deal action was already played",
     });
     for (const key of STAMP_KEYS) {
       expect(key in bareEntry, `${key} must be absent`).toBe(false);
+    }
+  });
+
+  it("carries the diplomacy slot's stated reason and beat onto decisions.jsonl end to end", async () => {
+    // The value this fix protects: an agent proposes a pact through the
+    // SEPARATE slot beside a game action and gives its own reason. Both must
+    // survive onto the artifact, because the mirror's narrative/telemetry
+    // backfill — which feeds public league replays — rebuilds from this file
+    // and cannot recover what the writer dropped.
+    const claim = "Pact buys me the western flank for twelve decisions";
+    process.env[DEALS_FLAG] = "1";
+    try {
+      const harness = dealLeagueHarness({
+        seats: [EXT_A, EXT_B],
+        scripts: [
+          [pickWithDeal("hold", "deal_propose:P_B:non_aggression_pact", claim)],
+          [],
+        ],
+        gameID: "DEALSLOT1",
+        brainType: "external-http",
+      });
+      await harness.league.runDecisionTurn({ turnNumber: 0 });
+      const entries = await writeAndParseEntries(harness.records());
+      const slotEntry = entries.find(
+        (entry) => entry.dealSeparateSlot === true,
+      );
+      expect(slotEntry, "a separate-slot entry must exist").toBeDefined();
+      expect(slotEntry!.dealStatedReason).toBe(claim);
+      expect(slotEntry!.dealAction).toBe("propose");
+      expect(typeof slotEntry!.dealSlotResult).toBe("string");
+      // The game action still owns the record's own result fields.
+      expect(slotEntry!.selectedLegalActionId).toBe("hold");
+    } finally {
+      delete process.env[DEALS_FLAG];
+    }
+  });
+
+  it("stamps the slot diagnostics onto the artifact when a deal selection is refused", async () => {
+    process.env[DEALS_FLAG] = "1";
+    try {
+      const harness = dealLeagueHarness({
+        seats: [EXT_A, EXT_B],
+        scripts: [
+          // An id that is not on the offered menu: refused, and both
+          // diagnostics stamped.
+          [pickWithDeal("hold", "deal_accept:deal:NOPE:0")],
+          [],
+        ],
+        gameID: "DEALSLOT2",
+        brainType: "external-http",
+      });
+      await harness.league.runDecisionTurn({ turnNumber: 0 });
+      const entries = await writeAndParseEntries(harness.records());
+      const refused = entries.find(
+        (entry) => entry.dealSlotRejected !== undefined,
+      );
+      expect(refused, "a refused-slot entry must exist").toBeDefined();
+      expect(refused!.dealSlotRequestedID).toBe("deal_accept:deal:NOPE:0");
+      expect(typeof refused!.dealSlotRejected).toBe("string");
+      // Refusal never substitutes a game action.
+      expect(refused!.selectedLegalActionId).toBe("hold");
+    } finally {
+      delete process.env[DEALS_FLAG];
     }
   });
 

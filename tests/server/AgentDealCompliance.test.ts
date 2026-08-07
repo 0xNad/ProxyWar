@@ -262,6 +262,78 @@ describe("AgentDealCompliance — violations (confirmed effects only)", () => {
     ).not.toHaveProperty("statedReason");
   });
 
+  it("omits the verdict's stated reason when the betraying decision fell back", () => {
+    // On this lineage a failed brain SUBSTITUTES benign-sounding reason text
+    // rather than leaving it null, so the verdict gate must key on provenance.
+    // Attributing a synthesized string to an agent as its motive for a
+    // betrayal is the worst place this feature could lie.
+    const substituted =
+      "No legal actions were offered; requested safe hold fallback.";
+    const harness = complianceHarness([A, B, C]);
+    const dealID = activatePact(harness, "non_aggression_pact");
+    harness.push(
+      fabricatedRecord({
+        sequence: 0,
+        agentID: A.agentID,
+        playerID: A.playerID,
+        username: A.username,
+        turnNumber: 50,
+        kind: "attack",
+        actionID: `attack:${B.playerID}:25`,
+        metadata: { targetID: B.playerID },
+        auditStatus: "confirmed",
+        reason: substituted,
+        decisionMetadata: { fallbackUsed: true, llmParseOk: false },
+      }),
+    );
+    harness.beginStep();
+
+    const violator = obligationsOf(harness, dealID).find(
+      (obligation) => obligation.obligorPlayerID === A.playerID,
+    )!;
+    expect(violator.status).toBe("violated");
+    expect(violator).not.toHaveProperty("obligorStatedReason");
+    const verdict = harness.manager
+      .ledgerSnapshot()
+      .events.find((event) => event.event === "deal_violated")!;
+    expect(verdict).not.toHaveProperty("statedReason");
+    // The server-authored verdict itself is unaffected.
+    expect(verdict.publicText).toContain("violated the pact");
+    expect(verdict.publicText).not.toContain(substituted);
+  });
+
+  it("still attaches a genuine stated reason to the verdict", () => {
+    const genuine = "Breaking it now while their army is committed east";
+    const harness = complianceHarness([A, B, C]);
+    const dealID = activatePact(harness, "non_aggression_pact");
+    harness.push(
+      fabricatedRecord({
+        sequence: 0,
+        agentID: A.agentID,
+        playerID: A.playerID,
+        username: A.username,
+        turnNumber: 50,
+        kind: "attack",
+        actionID: `attack:${B.playerID}:25`,
+        metadata: { targetID: B.playerID },
+        auditStatus: "confirmed",
+        reason: genuine,
+        decisionMetadata: { fallbackUsed: false, llmParseOk: true },
+      }),
+    );
+    harness.beginStep();
+
+    const violator = obligationsOf(harness, dealID).find(
+      (obligation) => obligation.obligorPlayerID === A.playerID,
+    )!;
+    expect(violator.obligorStatedReason).toBe(genuine);
+    expect(
+      harness.manager
+        .ledgerSnapshot()
+        .events.find((event) => event.event === "deal_violated")!.statedReason,
+    ).toBe(genuine);
+  });
+
   it("never lets same-step actions retroactively violate (accepted at N ⇒ judged from N+1)", () => {
     const harness = complianceHarness([A, B]);
     const dealID = harness.propose(A, B, "non_aggression_pact");
