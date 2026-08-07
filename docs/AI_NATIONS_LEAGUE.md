@@ -208,26 +208,35 @@ Demo jobs also receive deterministic artifact ids before child processes start.
 The demo server attaches completed jobs to the exact expected run/tournament/eval
 artifact instead of scanning for the newest artifact after start time.
 
+## Spawn Placement
+
+Spawn is never a brain/agent choice and is never offered as a `LegalAction` -
+`LegalActionBuilder.build()` does not emit a `spawn` kind. Before any brain
+decision runs, the league runner deterministically assigns every roster
+participant a spawn tile via `AgentSpawnAssignment.assignSpawnSlots`:
+
+1. Candidates below a minimum land-quality floor
+   (`DEFAULT_SPAWN_QUALITY_FLOOR`, the same `localLandScore` signal
+   `buildSpawnCandidates` already computes) are dropped.
+2. The remaining candidates are reduced to exactly one well-spaced slot per
+   participant via greedy maximin (farthest-point) sampling, seeded from the
+   single highest-quality qualifying candidate.
+3. Each roster participant is assigned `slots[(rosterIndex + episodeIndex) %
+   slots.length]` - a modular rotation so that `slots.length` consecutive
+   episodes reusing the same map/roster cycle every participant through
+   every slot exactly once.
+4. `validateSpawnSlotUniqueness` guards the selection never repeats a tile;
+   `validateSpawnSlotLegality` re-checks every assigned tile against live
+   game state (bounds/land/unowned/border/footprint) immediately before
+   submission.
+
+Insufficient qualifying candidates for the roster size throws a specific,
+actionable error rather than silently falling back to an unfair or
+lower-quality slot. There is no off-menu `spawn:<tile>` request path and no
+agent-facing spawn menu.
+
 ## Current Legal Actions
 
-- `spawn`: generated before spawn from real map spawn candidates. Every
-  unspawned agent brain also gets a normal, validated decision opportunity
-  (not opt-in) - resolved concurrently with every other still-unspawned
-  agent's decision, then committed in fixed roster order, exactly once per
-  spawn phase - to request ANY currently-legal tile via an off-menu
-  `spawn:<tile>` id, independently revalidated server-side against the
-  LATEST game state at the moment it commits
-  (`AgentSpawnLegality.evaluateSpawnTileLegality`), never a precomputed/
-  stale snapshot, against the same bounds/land/unowned/border/footprint/
-  min-distance rules the offered candidates already satisfy, plus distance
-  from every other agent's current spawn reservation - so two agents
-  choosing the same offered or off-menu tile in the same batch resolve
-  deterministically (first-in-roster-order wins). An illegal, invalid, or
-  now-stale request is rejected with a specific reason and deterministically
-  falls back to the algorithmic spawn explorer - an agent can never miss
-  spawning because it chose its own tile. See
-  `coworld-adapter/docs/player-protocol.md` for the wire contract
-  (`decisionSupport.spawnFreeform`).
 - `hold`: a no-op wrapper with no game intent, used as a safe fallback
   because the core intent schema has no explicit no-op.
 - `attack`: generated only when a post-spawn observation exposes a target that
@@ -268,7 +277,7 @@ observation JSON and still may only select one offered `LegalAction.id`.
 
 | Action family | Status | Proof source |
 | --- | --- | --- |
-| Spawn | Working (candidate menu + agent-chosen off-menu tile) | Spawn candidates become normal `spawn` intents; off-menu `spawn:<tile>` requests are revalidated via `AgentSpawnLegality` before becoming the same intent. |
+| Spawn | Working (deterministic assignment, never a brain choice) | Every roster participant is assigned a quality-floored, well-spaced tile via `AgentSpawnAssignment.assignSpawnSlots`, submitted directly as a normal `spawn` intent before any brain decision runs. |
 | Hold | Working | Safe no-intent fallback. |
 | Alliance | Working | `player.canSendAllianceRequest(other)`. |
 | Attack | Working | `sharesBorderWith` plus `canAttackPlayer`. |
@@ -282,9 +291,9 @@ observation JSON and still may only select one offered `LegalAction.id`.
 
 - One hardcoded agent can join an in-process private game and submit a normal
   `ClientIntentMessage`.
-- Four hardcoded agents can join one in-process private game, choose distinct
-  legal spawn actions, and submit those actions through the same server intent
-  path.
+- Four hardcoded agents can join one in-process private game, each get a
+  distinct deterministically assigned spawn tile, and submit those spawn
+  actions through the same server intent path.
 - The league runner now uses the formal pipeline:
   `AgentObservationBuilder -> LegalActionBuilder -> AgentBrain -> validator`.
 - The league smoke advances a real in-process match past spawn using server

@@ -19,10 +19,7 @@ import type {
   AgentVisiblePlayer,
   LegalAction,
 } from "../../src/server/agents/AgentTypes";
-import {
-  buildSpawnCandidates,
-  LegalActionBuilder,
-} from "../../src/server/agents/LegalActionBuilder";
+import { LegalActionBuilder } from "../../src/server/agents/LegalActionBuilder";
 import { RuleAgentBrain } from "../../src/server/agents/RuleAgentBrain";
 import { setup } from "../util/Setup";
 
@@ -360,67 +357,6 @@ describe("AI Nations League agent interface", () => {
     // so the opening/healthy land-grab drive is preserved.
     const healthy = buildStrategic(600_000);
     expect(healthy.scores.expansion).toBe(0.9);
-  });
-
-  it("offers legal spawn candidates before an agent has spawned", async () => {
-    const game = await setup("big_plains", { nations: "disabled" });
-    const spawnCandidates = buildSpawnCandidates(game.map(), {
-      maxCandidates: 4,
-    });
-    const observation = new AgentObservationBuilder().build({
-      agentID: "agent-1",
-      clientID: null,
-      username: "Agent One",
-      profile: "defensive",
-      gameID: "AGENTOBS",
-      turnNumber: 0,
-      phaseOverride: "spawn",
-    });
-
-    const legalActions = new LegalActionBuilder().build({
-      observation,
-      spawnCandidates,
-      maxSpawnActions: 3,
-    });
-
-    expect(
-      legalActions.filter((action) => action.kind === "spawn"),
-    ).toHaveLength(3);
-    expect(legalActions.some((action) => action.id === "hold")).toBe(true);
-    expect(legalActions[0]).toMatchObject({
-      kind: "spawn",
-      intent: { type: "spawn" },
-    });
-  });
-
-  it("has a rule brain choose one of the offered legal actions", async () => {
-    const game = await setup("big_plains", { nations: "disabled" });
-    const spawnCandidates = buildSpawnCandidates(game.map(), {
-      maxCandidates: 8,
-    });
-    const observation = new AgentObservationBuilder().build({
-      agentID: "agent-1",
-      clientID: null,
-      username: "Agent One",
-      profile: "opportunistic",
-      gameID: "AGENTOBS",
-      turnNumber: 0,
-      phaseOverride: "spawn",
-    });
-    const legalActions = new LegalActionBuilder().build({
-      observation,
-      spawnCandidates,
-    });
-
-    const decision = new RuleAgentBrain("opportunistic").decide({
-      observation,
-      legalActions,
-    });
-
-    expect(legalActions.map((action) => action.id)).toContain(
-      decision.actionID,
-    );
-    expect(validateAgentDecision(decision, legalActions).ok).toBe(true);
   });
 
   it("offers post-spawn attack candidates when observation marks them valid", () => {

@@ -27,15 +27,6 @@ The game sends:
         "risk": { "level": "none", "score": 0 }
       }
     ],
-    "decisionSupport": {
-      "spawnFreeform": {
-        "available": true,
-        "idFormat": "spawn:<tile>",
-        "tileFormula": "tile = y * map.width + x",
-        "reservedTiles": [841205, 1029871],
-        "minDistanceFromReserved": 30
-      }
-    },
     "responseContract": {
       "selectedLegalActionId": "must exactly match one offered legalActions[].id",
       "reason": "short human-readable string",
@@ -57,33 +48,14 @@ The player replies:
 }
 ```
 
-`selectedLegalActionId` must be one exact offered `legalActions[].id` - **with
-one bounded exception**: during the spawn phase (`decisionSupport.spawnFreeform`
-present), a player MAY reply with any well-formed `spawn:<tile>` id for a tile
-it prefers, even when that exact id was not itself offered. `tile` is a
-row-major integer (`tile = y * map.width + x`, using `request.match.map.width`/
-`request.match.map.height`); every unspawned agent gets this decision
-opportunity by default (not opt-in), resolved concurrently with every other
-still-unspawned agent's decision that same spawn-phase tick, then committed
-in fixed roster order - and it is a ONE-SHOT consultation: once an agent's
-spawn choice is accepted it is never asked again for the rest of the phase.
+`selectedLegalActionId` must be one exact offered `legalActions[].id` - no exceptions and no
+off-menu ids, for every action kind: the websocket adapter returns an `AgentDecision`, but the
+existing `AgentDecisionValidator`, `AgentRunner`, and `GameServer` remain the sole authority, and
+`LegalAction.id` selection is still the only way to act - no raw core intent is ever accepted
+from a player.
 
-Because decisions are computed concurrently against a snapshot, EVERY chosen
-spawn tile - including one that came from the offered `legalActions` menu,
-not only an off-menu `spawn:<tile>` id - is independently revalidated
-server-side against the LATEST game state at the moment it actually commits,
-never trusted from the snapshot: bounds/land/unowned/border/footprint/
-min-distance against every already-spawned player, plus distance from every
-other agent's current spawn reservation (`decisionSupport.spawnFreeform.
-reservedTiles`) as of that exact commit, not as of when the request was
-built. This is what makes two agents choosing the identical offered-or-off-
-menu tile resolve deterministically: whichever agent commits first in roster
-order keeps it, and every later agent's now-conflicting choice is rejected
-with a specific reason (never a silent random substitution) and
-deterministically falls back to the same algorithmic spawn placement every
-agent already gets by default - an agent can never miss spawning because it
-chose its own tile. Every non-spawn action kind is unaffected: the websocket
-adapter returns an `AgentDecision`, but the existing `AgentDecisionValidator`,
-`AgentRunner`, and `GameServer` remain the sole authority, and
-`LegalAction.id` selection is still the only way to act - no raw core intent
-is ever accepted from a player.
+Spawn is never a player/brain decision and there is no spawn `decision_request` at all: before
+any player is asked anything, the league runner deterministically assigns every roster
+participant a quality-floored, well-spaced spawn tile
+(`AgentSpawnAssignment.assignSpawnSlots` on the ProxyWar side) and submits it directly. A
+player's first `decision_request` always arrives after it already has territory.

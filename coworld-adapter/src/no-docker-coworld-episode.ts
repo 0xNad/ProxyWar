@@ -14,6 +14,7 @@ import {
   type CoworldAppShellRoute,
 } from "./coworld-appshell.ts";
 import { resolveWinnerSlot, type WinnerRef } from "./coworld-results.ts";
+import { episodeIndexFromConfig } from "./coworld-episode-index.ts";
 import { competitiveSeatSpecs } from "./coworld-seat-specs.ts";
 
 const localRoot = path.resolve(
@@ -96,7 +97,7 @@ type PendingDecision = {
   legalActions: LegalActionView[];
 };
 
-type CoworldConfig = {
+export type CoworldConfig = {
   tokens: string[];
   players: Array<{ name: string }>;
   max_decision_steps: number;
@@ -107,6 +108,19 @@ type CoworldConfig = {
   difficulty: string;
   replay_tail_turns?: number;
   player_connect_timeout_seconds?: number;
+  /**
+   * Zero-based ordinal for this episode among repeated episodes reusing the
+   * SAME map + roster (AgentLeagueMatchOptions.episodeIndex): rotates which
+   * fairness-assigned spawn slot each seat lands on so N same-map/roster
+   * episodes cycle every agent through every slot exactly once
+   * (AgentSpawnAssignment.ts). No in-repo orchestrator currently launches a
+   * sequence of Coworld containers for the same map/roster yet - this field
+   * is the hook for the external scheduler that eventually does (e.g. a
+   * season programming the same map/agents on a recurring slot): pass the
+   * scheduler's own zero-based repeat-occurrence number here. Defaults to 0
+   * (single/first episode) when omitted.
+   */
+  episodeIndex?: number;
 };
 
 type CoworldResults = {
@@ -935,6 +949,7 @@ async function runProxyWarEpisode(
     participants,
     spawnCandidates,
     log,
+    episodeIndex: episodeIndexFromConfig(config),
     // World 12P OOM fix: skip the ~8 KB/record tacticalAffordances summary (not
     // part of the hosted result contract) so the FULL decision log stays small
     // and complete. Simulation, decisions, and decision telemetry are

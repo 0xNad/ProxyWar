@@ -6,7 +6,6 @@ import {
   AgentStrategyProfile,
   LegalAction,
 } from "./AgentTypes";
-import { spawnScoreForProfile } from "./LegalActionBuilder";
 
 /**
  * Clean strategy policy implementing the known-winning human plan DIRECTLY, bypassing the
@@ -37,21 +36,9 @@ export class StrategyAgentBrain implements AgentBrain {
       return v === null || v === undefined ? undefined : String(v);
     };
 
-    // 1. SPAWN: best spawn for the profile.
-    if (
-      observation.phase === "spawn" ||
-      observation.strategic.priority === "spawn"
-    ) {
-      const spawns = legalActions.filter((x) => x.kind === "spawn");
-      if (spawns.length > 0) {
-        return spawns.reduce((best, s) =>
-          spawnScoreForProfile(this.profile, s) >
-          spawnScoreForProfile(this.profile, best)
-            ? s
-            : best,
-        );
-      }
-    }
+    // Spawn placement is a deterministic fairness assignment
+    // (AgentSpawnAssignment.ts), never a brain choice - no LegalAction ever
+    // carries kind:"spawn" here.
 
     // Targets = everyone alive except bots and our own teammates (team modes). Crucially
     // this INCLUDES our allies: we must be able to break alliances and conquer them to

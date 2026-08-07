@@ -5,7 +5,6 @@ import {
   AgentStrategyProfile,
   LegalAction,
 } from "./AgentTypes";
-import { spawnScoreForProfile } from "./LegalActionBuilder";
 
 export class RuleAgentBrain implements AgentBrain {
   readonly brainType = "rule";
@@ -25,11 +24,6 @@ export class RuleAgentBrain implements AgentBrain {
     const hold = legalActions.find((action) => action.kind === "hold");
     if (legalActions.length === 0) {
       throw new Error("RuleAgentBrain requires at least one legal action");
-    }
-
-    const spawn = this.bestSpawnAction(legalActions);
-    if (input.observation.strategic.priority === "spawn" && spawn) {
-      return spawn;
     }
 
     const objective = this.preferredObjectiveAction(input);
@@ -88,8 +82,6 @@ export class RuleAgentBrain implements AgentBrain {
       );
       if (alliance) return alliance;
     }
-
-    if (spawn) return spawn;
 
     return hold ?? legalActions[0];
   }
@@ -197,8 +189,11 @@ export class RuleAgentBrain implements AgentBrain {
     }
 
     switch (objective.kind) {
+      // No LegalAction ever carries kind:"spawn" anymore - spawn placement
+      // is a deterministic fairness assignment (AgentSpawnAssignment.ts),
+      // never a brain choice. Falls through to the rest of selectAction.
       case "choose_spawn":
-        return this.bestSpawnAction(legalActions);
+        return null;
       case "expand_territory":
         if (this.shouldDiversifyExpansion(input)) {
           const build = this.preferredBuild(legalActions);
@@ -327,19 +322,6 @@ export class RuleAgentBrain implements AgentBrain {
         (action) => action.kind === "build" || action.kind === "embargo",
       )
     );
-  }
-
-  private bestSpawnAction(legalActions: LegalAction[]): LegalAction | null {
-    const spawns = legalActions.filter((action) => action.kind === "spawn");
-    if (spawns.length === 0) {
-      return null;
-    }
-    return spawns
-      .map((action) => ({
-        action,
-        score: spawnScoreForProfile(this.profile, action),
-      }))
-      .sort((a, b) => b.score - a.score)[0].action;
   }
 }
 

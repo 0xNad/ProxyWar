@@ -282,42 +282,25 @@ describe("ExternalHttpAgentBrain", () => {
   });
 });
 
-describe("buildExternalAgentRequestPayload spawn-phase wire metadata", () => {
-  const spawnObservation: AgentObservation = {
+describe("buildExternalAgentRequestPayload map identity and spawn-protocol absence", () => {
+  const spawnPhaseObservation: AgentObservation = {
     ...observation,
     phase: "spawn",
     mapInfo: { name: "Pangaea", width: 3000, height: 2000 },
-    spawnReservedTiles: [841205, 1029871],
-    spawnMinDistance: 30,
   };
-  const spawnLegalActions: LegalAction[] = [
-    {
-      id: "spawn:12345",
-      kind: "spawn",
-      label: "Spawn at tile 12345",
-      intent: { type: "spawn", tile: 12345 },
-      risk: { level: "medium", score: 0.4 },
-      metadata: { tile: 12345, x: 100, y: 200 },
-    },
+  const spawnPhaseLegalActions: LegalAction[] = [
     { id: "hold", kind: "hold", label: "Hold", intent: null, risk: { level: "none", score: 0 } },
   ];
 
-  it("exposes bounded map identity/dimensions and spawnFreeform only during the spawn phase", () => {
+  it("echoes bounded map identity/dimensions whenever the observation carries it", () => {
     const spawnPayload = buildExternalAgentRequestPayload({
-      observation: spawnObservation,
-      legalActions: spawnLegalActions,
+      observation: spawnPhaseObservation,
+      legalActions: spawnPhaseLegalActions,
     });
     expect(spawnPayload.match.map).toEqual({
       name: "Pangaea",
       width: 3000,
       height: 2000,
-    });
-    expect(spawnPayload.decisionSupport.spawnFreeform).toEqual({
-      available: true,
-      idFormat: "spawn:<tile>",
-      tileFormula: "tile = y * map.width + x",
-      reservedTiles: [841205, 1029871],
-      minDistanceFromReserved: 30,
     });
 
     const activePayload = buildExternalAgentRequestPayload({
@@ -325,6 +308,20 @@ describe("buildExternalAgentRequestPayload spawn-phase wire metadata", () => {
       legalActions,
     });
     expect(activePayload.match.map).toBeNull();
-    expect(activePayload.decisionSupport.spawnFreeform).toBeUndefined();
+  });
+
+  it("never exposes an off-menu spawn request protocol - spawn is a deterministic assignment, never a player/brain choice", () => {
+    const spawnPayload = buildExternalAgentRequestPayload({
+      observation: spawnPhaseObservation,
+      legalActions: spawnPhaseLegalActions,
+    });
+    expect(spawnPayload.decisionSupport).not.toHaveProperty("spawnFreeform");
+    expect(JSON.stringify(spawnPayload)).not.toContain("spawn:<tile>");
+
+    const activePayload = buildExternalAgentRequestPayload({
+      observation,
+      legalActions,
+    });
+    expect(activePayload.decisionSupport).not.toHaveProperty("spawnFreeform");
   });
 });

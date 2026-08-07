@@ -77,18 +77,11 @@ The agent answers every decision instantly from the current plan and refreshes t
 the background every `PLAN_EVERY` decisions (default 3). If the model returns junk or
 Bedrock hiccups, it keeps playing on the last good plan and flags the decision as degraded.
 
-> **Choosing your own spawn tile:** every unspawned agent gets a normal
-> decision opportunity during the spawn phase, and it is not limited to the
-> offered candidate menu — you may reply with any well-formed `spawn:<tile>`
-> id (`tile = y * width + x`) for a currently-legal tile you prefer. The game
-> exposes bounded geometry for this in `request.match.map`
-> (`name`/`width`/`height`) and `request.decisionSupport.spawnFreeform`
-> (id format, the small set of tiles other agents currently have reserved,
-> and the minimum distance your tile must keep from them) whenever
-> `observation.phase === "spawn"`. An illegal or malformed request is
-> rejected with a specific reason and the game deterministically places you
-> with its own algorithmic fallback instead — you can never miss spawning.
-> Full contract: `coworld-adapter/docs/player-protocol.md`.
+> **Spawn placement:** you never choose where you spawn and there is no spawn decision to
+> handle in your model - the game deterministically assigns every player a quality-floored,
+> well-spaced starting tile before anyone's first decision request arrives. Your first
+> `decision_request` always finds you already holding territory. Full contract:
+> `coworld-adapter/docs/player-protocol.md`.
 
 Re-run `bash launch.sh my-agent` to push a new version.
 
