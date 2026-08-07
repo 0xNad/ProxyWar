@@ -451,7 +451,7 @@ export class InputHandler {
 
       // Shift = warship box selection mode.
       // If a ghost structure is active, discard it first.
-      if (e.code === this.keybinds.shiftKey) {
+      if (e.code === this.keybinds.shiftKey && this.warshipInputsEnabled()) {
         if (this.uiState.ghostStructure !== null) {
           this.setGhostStructure(null);
         }
@@ -526,7 +526,10 @@ export class InputHandler {
         this.eventBus.emit(new CenterCameraEvent());
       }
 
-      if (e.code === this.keybinds.selectAllWarships) {
+      if (
+        e.code === this.keybinds.selectAllWarships &&
+        this.warshipInputsEnabled()
+      ) {
         e.preventDefault();
         this.eventBus.emit(new SelectAllWarshipsEvent());
       }
@@ -616,7 +619,7 @@ export class InputHandler {
       this.eventBus.emit(new MouseDownEvent(event.clientX, event.clientY));
 
       // Start long-press timer for touch devices
-      if (event.pointerType === "touch") {
+      if (event.pointerType === "touch" && this.warshipInputsEnabled()) {
         this.longPressActive = false;
         if (this.longPressTimer !== null) {
           clearTimeout(this.longPressTimer);
@@ -809,9 +812,10 @@ export class InputHandler {
       // If shift is held OR touch long-press is active OR selection box already
       // started, continue emitting selection box updates
       if (
-        this.selectionBoxActive ||
-        this.activeKeys.has(this.keybinds.shiftKey) ||
-        this.longPressActive
+        this.warshipInputsEnabled() &&
+        (this.selectionBoxActive ||
+          this.activeKeys.has(this.keybinds.shiftKey) ||
+          this.longPressActive)
       ) {
         this.selectionBoxActive = true;
         this.eventBus.emit(
@@ -944,7 +948,9 @@ export class InputHandler {
       { key: "buildSamLauncher", type: UnitType.SAMLauncher },
       { key: "buildAtomBomb", type: UnitType.AtomBomb },
       { key: "buildHydrogenBomb", type: UnitType.HydrogenBomb },
-      { key: "buildWarship", type: UnitType.Warship },
+      ...(this.warshipInputsEnabled()
+        ? [{ key: "buildWarship", type: UnitType.Warship } as const]
+        : []),
       { key: "buildMIRV", type: UnitType.MIRV },
     ];
     for (const { key, type } of buildKeybinds) {
@@ -961,6 +967,10 @@ export class InputHandler {
   private canUseBuildKeybinds(): boolean {
     const myPlayer = this.gameView.myPlayer?.();
     return !this.gameView.inSpawnPhase() && myPlayer?.isAlive() === true;
+  }
+
+  private warshipInputsEnabled(): boolean {
+    return !this.gameView.config().isUnitDisabled(UnitType.Warship);
   }
 
   private getPinchDistance(): number {

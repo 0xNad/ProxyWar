@@ -17,7 +17,18 @@ export type QuickChatPhrase = {
 
 export type QuickChatPhrases = Record<string, QuickChatPhrase[]>;
 
-export const quickChatPhrases: QuickChatPhrases = quickChatData;
+// Keep retired keys in the schema for historical replay compatibility, but do
+// not offer them in new chat menus.
+const retiredQuickChatKeys = new Set(["attack.build_warships"]);
+
+export const quickChatPhrases: QuickChatPhrases = Object.fromEntries(
+  Object.entries(quickChatData).map(([category, phrases]) => [
+    category,
+    phrases.filter(
+      (phrase) => !retiredQuickChatKeys.has(`${category}.${phrase.key}`),
+    ),
+  ]),
+);
 
 @customElement("chat-modal")
 export class ChatModal extends LitElement {

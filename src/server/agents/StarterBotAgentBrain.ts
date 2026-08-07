@@ -44,7 +44,6 @@ const PREFERRED_KINDS: ReadonlyArray<string> = [
   "build",
   "upgrade",
   "upgrade_structure",
-  "move_warship",
   "boat",
   "alliance_request",
   "quick_chat",

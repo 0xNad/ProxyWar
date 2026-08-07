@@ -70,12 +70,7 @@ function strategicScores(input: BuildAgentStrategicStateInput) {
   const neutralBoatOptions =
     input.nonCombat.boatOptions?.filter((option) => option.targetID === null)
       .length ?? 0;
-  const navalOptions =
-    playerBoatOptions +
-    neutralBoatOptions +
-    (input.nonCombat.warshipMoveOptions?.length ?? 0) +
-    input.nonCombat.buildOptions.filter((build) => build.unit === "Warship")
-      .length;
+  const navalOptions = playerBoatOptions + neutralBoatOptions;
   const nuclearOptions = input.nonCombat.buildOptions.filter(
     (build) =>
       build.unit === "Atom Bomb" ||
@@ -239,7 +234,7 @@ function actionKindsForPriority(
     case "pressure":
       return ["embargo", "attack", "build", "hold"];
     case "naval":
-      return ["boat", "warship", "move_warship", "attack", "hold"];
+      return ["boat", "attack", "hold"];
     case "nuclear":
       return ["nuke", "upgrade_structure", "build", "target_player", "hold"];
     case "hold":

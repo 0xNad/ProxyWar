@@ -4,7 +4,7 @@ import WebSocket from "ws";
 import { z } from "zod";
 import { isAdminRole } from "../core/ApiSchemas";
 import { GameEnv, ServerConfig } from "../core/configuration/Config";
-import { GameType } from "../core/game/Game";
+import { GameType, UnitType } from "../core/game/Game";
 import {
   ClientID,
   ClientMessageSchema,
@@ -121,9 +121,21 @@ export class GameServer {
     private publicGameType?: PublicGameType,
   ) {
     this.log = log_.child({ gameID: id });
+    this.disableRetiredUnits();
     if (startsAt !== undefined) {
       this.visibleAt = Date.now();
     }
+  }
+
+  /**
+   * Warships are retired from new gameplay. Keep the enum and execution path
+   * for deterministic playback of historical replays, but never allow a new
+   * lobby (or a later lobby update) to enable production again.
+   */
+  private disableRetiredUnits(): void {
+    this.gameConfig.disabledUnits = Array.from(
+      new Set([...(this.gameConfig.disabledUnits ?? []), UnitType.Warship]),
+    );
   }
 
   private get lobbyCreatorID(): ClientID | undefined {
@@ -196,6 +208,7 @@ export class GameServer {
       this.gameConfig.waterNukes = gameConfig.waterNukes ?? undefined;
     }
     this.gameConfig.hostCheats = gameConfig.hostCheats;
+    this.disableRetiredUnits();
   }
 
   private isKicked(clientID: ClientID): boolean {

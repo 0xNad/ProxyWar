@@ -32,7 +32,6 @@ import {
   AgentTransportState,
   AgentUpgradeOption,
   AgentVisiblePlayer,
-  AgentWarshipMoveOption,
   RecentAgentDecision,
 } from "./AgentTypes";
 
@@ -519,8 +518,6 @@ export class AgentObservationBuilder {
                   : null,
           }
         : undefined;
-    const warshipMoveOptions =
-      gameState && player ? this.warshipMoveOptions(gameState, player) : [];
     const allianceOptions = this.allianceOptions(visiblePlayers);
     const targetOptions = this.targetOptions(visiblePlayers);
     const emojiOptions = this.emojiOptions(visiblePlayers);
@@ -598,7 +595,6 @@ export class AgentObservationBuilder {
       boatOptions,
       transportStates,
       transportLaunch,
-      warshipMoveOptions,
       allianceOptions,
       targetOptions,
       emojiOptions,
@@ -638,10 +634,6 @@ export class AgentObservationBuilder {
       {
         unit: UnitType.MissileSilo,
         role: "infrastructure",
-      },
-      {
-        unit: UnitType.Warship,
-        role: "defensive",
       },
       {
         unit: UnitType.AtomBomb,
@@ -1050,30 +1042,6 @@ export class AgentObservationBuilder {
               : gameState.manhattanDist(unit.tile(), targetTile),
         };
       });
-  }
-
-  private warshipMoveOptions(
-    gameState: Game,
-    player: Player,
-  ): AgentWarshipMoveOption[] {
-    const warships = player
-      .units(UnitType.Warship)
-      .filter((unit) => unit.isActive());
-    if (warships.length === 0) {
-      return [];
-    }
-    const targets = gameState
-      .units(UnitType.TransportShip, UnitType.Warship, UnitType.TradeShip)
-      .filter(
-        (unit) => unit.owner() !== player && !player.isFriendly(unit.owner()),
-      )
-      .filter((unit) => gameState.isWater(unit.tile()))
-      .slice(0, 4);
-    return targets.map((target) => ({
-      unitIDs: warships.slice(0, 3).map((unit) => unit.id()),
-      targetTile: target.tile(),
-      legalReason: `enemy ${target.type()} is on reachable water tile ${target.tile()}`,
-    }));
   }
 
   private allianceOptions(
