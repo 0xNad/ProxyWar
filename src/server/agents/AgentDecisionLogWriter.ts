@@ -13,10 +13,6 @@ import {
   writeAgentDramaReportArtifacts,
 } from "./AgentDramaReport";
 import {
-  buildDirectorCutPlan,
-  type DirectorCutPlan,
-} from "./DirectorCutPlan";
-import {
   AgentMatchStory,
   AgentMatchStoryPaths,
   buildAgentMatchStory,
@@ -28,6 +24,7 @@ import {
   buildAgentObjectiveScorecard,
   writeAgentObjectiveScorecardArtifacts,
 } from "./AgentObjectiveScorecard";
+import { isPersonalityDiplomacyActionKind } from "./AgentPersonalityDiplomacyPolicy";
 import {
   AgentSpectatorReplay,
   AgentSpectatorReplayPaths,
@@ -65,7 +62,6 @@ import {
   ProxyWarMatchPackagePaths,
   writeProxyWarMatchPackageArtifacts,
 } from "./ProxyWarMatchPackage";
-import { isPersonalityDiplomacyActionKind } from "./AgentPersonalityDiplomacyPolicy";
 
 export interface AgentRunRosterEntry {
   agentID: string;
@@ -154,7 +150,6 @@ export interface AgentLeagueRunArtifactPaths {
   matchPackageMarkdownPath: string;
   matchPackageHtmlPath: string;
   spectatorTelemetryPath: string;
-  directorCutPlanPath: string;
   spectatorPath: string | null;
   spectatorReplayPath: string | null;
   gameRecordPath: string | null;
@@ -401,19 +396,6 @@ export async function writeAgentLeagueRunArtifacts(
     directory,
     "spectator-telemetry.json",
   );
-  // Product overhaul spec Stage 5: generated alongside the other per-match
-  // artifacts, reusing the SAME `spectatorTelemetry` this function just
-  // built (never recomputed) so the plan's segments stay consistent with
-  // every other artifact derived from that exact event stream.
-  const directorCutPlan: DirectorCutPlan = buildDirectorCutPlan({
-    runID: input.runID,
-    matchID: input.matchID,
-    records: input.records,
-    roster: input.roster,
-    finalState: input.finalState,
-    spectatorTelemetry,
-  });
-  const directorCutPlanPath = path.join(directory, "director-cut-plan.json");
   const summary = matchSummary(
     input,
     entries,
@@ -436,10 +418,6 @@ export async function writeAgentLeagueRunArtifacts(
   await fs.writeFile(
     spectatorTelemetryPath,
     `${JSON.stringify(spectatorTelemetry, null, 2)}\n`,
-  );
-  await fs.writeFile(
-    directorCutPlanPath,
-    `${JSON.stringify(directorCutPlan, null, 2)}\n`,
   );
   await fs.writeFile(summaryPath, `${JSON.stringify(summary, null, 2)}\n`);
   await fs.writeFile(
@@ -500,7 +478,6 @@ export async function writeAgentLeagueRunArtifacts(
     matchPackageMarkdownPath: matchPackagePaths.markdownPath,
     matchPackageHtmlPath: matchPackagePaths.htmlPath,
     spectatorTelemetryPath,
-    directorCutPlanPath,
     spectatorPath: spectatorPaths?.spectatorPath ?? null,
     spectatorReplayPath: spectatorPaths?.replayDataPath ?? null,
     gameRecordPath: spectatorPaths?.gameRecordPath ?? null,

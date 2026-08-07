@@ -39,7 +39,11 @@ export interface PublicPromotionCheck {
  * rather than re-deriving a third copy.
  */
 export function isFeaturedEventRevealed(match: FeaturedMatch): boolean {
-  return match.lane === "archive" || match.state === "revealed" || match.state === "archived";
+  return (
+    match.lane === "archive" ||
+    match.state === "revealed" ||
+    match.state === "archived"
+  );
 }
 
 /**
@@ -52,8 +56,9 @@ function winnerPlayerName(match: FeaturedMatch): string | null {
   if (match.result === null || match.result.winnerAgentId === null) return null;
   const winnerAgentId = match.result.winnerAgentId;
   return (
-    match.participants.find((participant) => participant.agentId === winnerAgentId)
-      ?.playerName ?? null
+    match.participants.find(
+      (participant) => participant.agentId === winnerAgentId,
+    )?.playerName ?? null
   );
 }
 
@@ -71,7 +76,10 @@ function winnerPlayerName(match: FeaturedMatch): string | null {
  * are, and is reused there (via `printCompleteness`) for the SAME
  * non-blocking operator warning, not just this gate's hard block.
  */
-export function containsWinnerName(text: string, match: FeaturedMatch): boolean {
+export function containsWinnerName(
+  text: string,
+  match: FeaturedMatch,
+): boolean {
   const name = winnerPlayerName(match);
   if (name === null || name.trim().length === 0) return false;
   return text.toLowerCase().includes(name.toLowerCase());
@@ -85,7 +93,10 @@ export function isPubliclyPromotable(
     return { ok: false, missing: ["event_package_missing"] };
   }
   if (pkg.featuredMatchId !== match.matchId) {
-    return { ok: false, missing: ["event_package_mismatched_featured_match_id"] };
+    return {
+      ok: false,
+      missing: ["event_package_mismatched_featured_match_id"],
+    };
   }
 
   const missing: string[] = [];
@@ -99,7 +110,10 @@ export function isPubliclyPromotable(
   // is the operator's own "yes, commit to running this" signal, and Phase
   // 5's hero/watch surfaces embed the SAME participant identity + prose
   // this gate guards, so the two embargoes must never disagree.
-  if (match.lane === "premiere" && (match.state === "candidate" || match.state === "scheduled")) {
+  if (
+    match.lane === "premiere" &&
+    (match.state === "candidate" || match.state === "scheduled")
+  ) {
     missing.push("not_yet_published");
   }
 
@@ -114,7 +128,10 @@ export function isPubliclyPromotable(
   // own doc. `match.title` is checked alongside `pkg.title` since
   // `ProxyWarPublicReadModel.ts`'s `publicFeaturedMatch` projects
   // `match.title` directly, not `pkg.title`.
-  if (containsWinnerName(match.title, match) || containsWinnerName(pkg.title, match)) {
+  if (
+    containsWinnerName(match.title, match) ||
+    containsWinnerName(pkg.title, match)
+  ) {
     missing.push("title_spoils_result");
   }
   if (containsWinnerName(pkg.subtitle, match)) {
@@ -143,18 +160,19 @@ export function isPubliclyPromotable(
   if (match.format.trim().length === 0 || pkg.format.trim().length === 0) {
     missing.push("format");
   }
-  if (match.lane === "premiere" && (match.scheduledAt === null || pkg.scheduledAt === null)) {
+  if (
+    match.lane === "premiere" &&
+    (match.scheduledAt === null || pkg.scheduledAt === null)
+  ) {
     missing.push("scheduled_time");
-  }
-  if (pkg.directorCutEstimateSeconds === null) {
-    missing.push("director_cut_estimate");
   }
   if (pkg.canonicalMatchUrl.trim().length === 0) {
     missing.push("canonical_match_url");
   }
   if (
     match.lane === "premiere" &&
-    (pkg.canonicalPremiereUrl === null || pkg.canonicalPremiereUrl.trim().length === 0)
+    (pkg.canonicalPremiereUrl === null ||
+      pkg.canonicalPremiereUrl.trim().length === 0)
   ) {
     missing.push("canonical_premiere_url");
   }

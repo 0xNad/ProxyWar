@@ -74,10 +74,6 @@ import {
   watchReplayPositionForResume,
 } from "./ReplayPositionPersistence";
 import {
-  loadPersistedReplaySpeed,
-  watchReplaySpeedForResume,
-} from "./ReplaySpeedPersistence";
-import {
   mountArchivedReplayPremiereOverlay,
   readReplayPremiereArchivePayload,
   type ReplayPremiereArchivePayload,
@@ -89,6 +85,10 @@ import {
   parseReplayPremiereRoute,
   ReplayPremiereRuntimeController,
 } from "./ReplayPremiereRuntime";
+import {
+  loadPersistedReplaySpeed,
+  watchReplaySpeedForResume,
+} from "./ReplaySpeedPersistence";
 import "./SinglePlayerModal";
 import { StoreModal } from "./Store";
 import "./TerritoryPatternsModal";
@@ -1630,34 +1630,6 @@ class Client {
     clearTimeout(recordTimeout);
 
     let replayOverlay: ReturnType<typeof mountAiLeagueReplayOverlay>;
-    // P0 fix (2026-08-03, deploy 2B): LocalServer's own userOverrodeReplaySpeed
-    // gate (see that file's doc) stops an "auto" ReplaySpeedChangeEvent from
-    // changing the ENGINE's pacing once the viewer has picked a speed, but
-    // ReplayPanel.ts/GameRightSidebar.ts both still listen to the RAW event
-    // and blindly repaint their own displayed speed label from it regardless
-    // of source or whether LocalServer actually applied it -- so a viewer
-    // who picked "1x" during the (now auto-accelerated, see
-    // directorCutSpeedForSegment's "opening" override) spawn segment saw the
-    // label silently flip back to "Max" ~5-6s later, the instant playback
-    // crossed into the next Director Cut segment and its own onSpeedChange
-    // fired -- even though the engine itself may have still honored the
-    // user's pick. A one-way latch here stops the "auto" event from EVER
-    // reaching the bus again once the user has spoken, so nothing downstream
-    // (engine OR display) can ever see a contradicting value: "any user pick
-    // sticks until the user changes it again, no auto path may ever win
-    // afterwards" -- not just for the current Director Cut segment, for the
-    // rest of this replay-viewing session. Scoped to this one
-    // openAiLeagueReplay call (a fresh page load/Reset starts a new one).
-    let userOverrodeReplaySpeed = false;
-    const onReplaySpeedChangeForLatch = (event: ReplaySpeedChangeEvent) => {
-      if (event.source === "user") {
-        userOverrodeReplaySpeed = true;
-      }
-    };
-    this.eventBus.on(ReplaySpeedChangeEvent, onReplaySpeedChangeForLatch);
-    attemptCleanups.push(() =>
-      this.eventBus.off(ReplaySpeedChangeEvent, onReplaySpeedChangeForLatch),
-    );
     try {
       replayOverlay = mountAiLeagueReplayOverlay({
         runID,
@@ -1672,10 +1644,6 @@ class Client {
           spectatorTelemetry: false,
           decisions: false,
           summary: false,
-        },
-        onReplaySpeedChange: (speed) => {
-          if (userOverrodeReplaySpeed) return;
-          this.eventBus.emit(new ReplaySpeedChangeEvent(speed, "auto"));
         },
       });
     } catch (error) {
@@ -1773,22 +1741,21 @@ class Client {
 
     // P0 fix (2026-08-03): restore the viewer's own last manually-picked
     // speed across the `?turn=` backward-seek reload path -- see
-    // ReplaySpeedPersistence.ts's own doc for why the in-memory
-    // userOverrodeReplaySpeed latch alone can't survive a real page
-    // reload. Excluded the same way position-resume/clip-preview are:
-    // `coworld-replay` has no equivalent session, and a clip preview's
-    // target speed is an explicit render parameter, never a viewer pick
-    // to restore. Re-applied through the SAME `ReplaySpeedChangeEvent`
-    // `source: "user"` path a live in-session speed change already uses
-    // (not a separate bypass), so `onReplaySpeedChangeForLatch` above
-    // re-arms `userOverrodeReplaySpeed` exactly as it would for a fresh
-    // manual pick -- automatic pacing (Director Cut, the archived-replay
-    // fastest-default) stays locked out for the rest of this reload too.
+    // ReplaySpeedPersistence.ts's own doc for why an in-memory-only record
+    // of the pick can't survive a real page reload. Excluded the same way
+    // position-resume/clip-preview are: `coworld-replay` has no equivalent
+    // session, and a clip preview's target speed is an explicit render
+    // parameter, never a viewer pick to restore. Re-applied through the
+    // SAME `ReplaySpeedChangeEvent` `source: "user"` path a live
+    // in-session speed change already uses (not a separate bypass), so
+    // downstream consumers see an identical event to a fresh manual pick.
     if (options.source !== "coworld-replay" && previewTarget === null) {
       const persistedSpeed = loadPersistedReplaySpeed(runID);
       if (persistedSpeed !== null) {
         const restoreSpeedAfterFirstFrame = () => {
-          this.eventBus.emit(new ReplaySpeedChangeEvent(persistedSpeed, "user"));
+          this.eventBus.emit(
+            new ReplaySpeedChangeEvent(persistedSpeed, "user"),
+          );
           document.removeEventListener(
             "ai-league-replay-frame",
             restoreSpeedAfterFirstFrame,
@@ -1833,7 +1800,6 @@ class Client {
             decisions: details.recentDecisions,
             summary: details.summary,
             spectatorTelemetry: details.spectatorTelemetry,
-            directorCutPlan: details.directorCutPlan,
             matchStateSeries: details.matchStateSeries,
             detailsLoading: false,
             artifactAvailability: details.artifactAvailability,
@@ -1848,7 +1814,6 @@ class Client {
             decisions: details.recentDecisions,
             summary: details.summary,
             spectatorTelemetry: details.spectatorTelemetry,
-            directorCutPlan: details.directorCutPlan,
             matchStateSeries: details.matchStateSeries,
             detailsLoading: false,
             artifactAvailability: details.artifactAvailability,
@@ -2164,7 +2129,7 @@ class Client {
           // UNCONDITIONALLY, unlike the premiere branch just above (which
           // already guards on `pathname !== premierePath`). On a fresh
           // hard navigation straight to `/ai-league-replay/<runID>` (the
-          // exact repro: home -> click a Director Cut link -> the anchor
+          // exact repro: home -> click a replay link -> the anchor
           // is a plain, un-intercepted <a> causing a REAL page load), this
           // join flow's `pushState` fired again for the SAME url the
           // browser had already registered its own real navigation entry

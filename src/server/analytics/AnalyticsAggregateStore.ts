@@ -2,7 +2,10 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import { withFileMutex } from "../agents/FileMutex";
-import type { AnalyticsEvent, AnalyticsEventName } from "./AnalyticsEventSchema";
+import type {
+  AnalyticsEvent,
+  AnalyticsEventName,
+} from "./AnalyticsEventSchema";
 import { normalizeAnalyticsRoute } from "./AnalyticsEventSchema";
 
 /**
@@ -81,7 +84,6 @@ const DIMENSION_CONTEXT_KEYS = [
   "claimId",
   "versionLabel",
   "reason",
-  "replayMode",
   "step",
 ] as const;
 
@@ -102,20 +104,26 @@ export class AnalyticsAggregateStore {
    * server, so a same-process promise chain alone cannot prevent a lost
    * update between two processes racing the same read-modify-write cycle.
    */
-  async recordEvents(events: readonly AnalyticsEvent[], now: Date = new Date()): Promise<void> {
+  async recordEvents(
+    events: readonly AnalyticsEvent[],
+    now: Date = new Date(),
+  ): Promise<void> {
     if (events.length === 0) {
       return;
     }
-    await withFileMutex(this.filePath, () => this.applyEvents(events, now)).catch(
-      () => undefined,
-    );
+    await withFileMutex(this.filePath, () =>
+      this.applyEvents(events, now),
+    ).catch(() => undefined);
   }
 
   async readAll(): Promise<AnalyticsAggregateFile> {
     return this.read();
   }
 
-  private async applyEvents(events: readonly AnalyticsEvent[], now: Date): Promise<void> {
+  private async applyEvents(
+    events: readonly AnalyticsEvent[],
+    now: Date,
+  ): Promise<void> {
     const file = await this.read();
     const dayKey = utcDayKey(now);
     const day: DayAggregate = {
@@ -150,7 +158,10 @@ export class AnalyticsAggregateStore {
   }
 }
 
-function applyEventToAggregate(aggregate: EventAggregate, event: AnalyticsEvent): EventAggregate {
+function applyEventToAggregate(
+  aggregate: EventAggregate,
+  event: AnalyticsEvent,
+): EventAggregate {
   const next: EventAggregate = {
     count: aggregate.count + 1,
     byRoute: { ...aggregate.byRoute },
@@ -172,8 +183,13 @@ function applyEventToAggregate(aggregate: EventAggregate, event: AnalyticsEvent)
 }
 
 /** Increments `map[key]` in place, redirecting overflow past `cap` distinct keys into `"__other__"` — the overflow decision must land on the SAME key it was computed for, so this mutates rather than returning a bare count for the caller to (mis)assign. */
-function bumpBounded(map: Record<string, number>, key: string, cap: number): void {
-  const targetKey = key in map || Object.keys(map).length < cap ? key : "__other__";
+function bumpBounded(
+  map: Record<string, number>,
+  key: string,
+  cap: number,
+): void {
+  const targetKey =
+    key in map || Object.keys(map).length < cap ? key : "__other__";
   map[targetKey] = (map[targetKey] ?? 0) + 1;
 }
 
@@ -189,7 +205,10 @@ function pruneOldDays(file: AnalyticsAggregateFile, now: Date): void {
 }
 
 /** Total observations of `eventName` across every retained day — used to distinguish "not yet instrumented" from "measured, zero traffic". */
-export function totalEventCount(file: AnalyticsAggregateFile, eventName: AnalyticsEventName): number {
+export function totalEventCount(
+  file: AnalyticsAggregateFile,
+  eventName: AnalyticsEventName,
+): number {
   let total = 0;
   for (const day of Object.values(file.byDay)) {
     total += day.events[eventName]?.count ?? 0;

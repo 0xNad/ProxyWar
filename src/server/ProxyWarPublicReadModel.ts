@@ -1,19 +1,4 @@
 import { DEFAULT_PLATFORM_ORIGIN } from "../core/PlatformOrigin";
-import {
-  AgentIdentityView,
-  resolveAgentIdentityView,
-} from "./identity/IdentityMatching";
-import { IdentityRegistrySnapshot } from "./identity/IdentityRegistry";
-import type {
-  AgentProfile,
-  AgentVersion,
-  BuilderProfile,
-} from "./identity/IdentitySchemas";
-import { generateEmblemSvg } from "./identity/IdentityEmblems";
-import {
-  computeProvisionalIdentities,
-  type ProvisionalIdentity,
-} from "./identity/ProvisionalIdentity";
 import type {
   AgentStatsArtifact,
   PlayerAgentStats,
@@ -23,10 +8,7 @@ import {
   computeAgentTimeSeries,
   type AgentTimeSeries,
 } from "./agents/AgentTimeSeries";
-import {
-  EMPTY_STANDINGS_HISTORY_STORE,
-  type StandingsHistoryStore,
-} from "./agents/CoworldLeagueStandingsHistory";
+import type { CoworldLeagueArchivedReplayHrefs } from "./agents/CoworldLeagueArtifactRetention";
 import type {
   CoworldLeagueEpisodeRow,
   CoworldLeagueLatestPremiereCard,
@@ -35,7 +17,10 @@ import type {
   CoworldLeagueRoundRow,
   CoworldLeagueStandingRow,
 } from "./agents/CoworldLeagueSiteWriter";
-import type { CoworldLeagueArchivedReplayHrefs } from "./agents/CoworldLeagueArtifactRetention";
+import {
+  EMPTY_STANDINGS_HISTORY_STORE,
+  type StandingsHistoryStore,
+} from "./agents/CoworldLeagueStandingsHistory";
 import type {
   FeaturedMatch,
   FeaturedMatchCategory,
@@ -51,6 +36,21 @@ import {
 } from "./agents/season/EventPackage";
 import { isPubliclyPromotable } from "./agents/season/EventPackageGate";
 import type { SeasonRegistryFile } from "./agents/season/SeasonSchemas";
+import { generateEmblemSvg } from "./identity/IdentityEmblems";
+import {
+  AgentIdentityView,
+  resolveAgentIdentityView,
+} from "./identity/IdentityMatching";
+import { IdentityRegistrySnapshot } from "./identity/IdentityRegistry";
+import type {
+  AgentProfile,
+  AgentVersion,
+  BuilderProfile,
+} from "./identity/IdentitySchemas";
+import {
+  computeProvisionalIdentities,
+  type ProvisionalIdentity,
+} from "./identity/ProvisionalIdentity";
 
 /**
  * The typed, already-normalized public data model every Stage 2+ page
@@ -189,11 +189,6 @@ export interface PublicMatchParticipant {
   color: string;
 }
 
-export interface PublicDirectorCutSummary {
-  durationEstimateSeconds: number;
-  segmentCount: number;
-}
-
 /**
  * "Drama recaps" gap closure, then the 2026-08-01 "best battles" ranking
  * fix — a compact ranking/evidence signal, never recap prose (the recap
@@ -230,9 +225,7 @@ export interface PublicMatch {
   watchHref: string | null;
   fullRenderHref: string | null;
   premiereHref: string | null;
-  /** Product overhaul spec Stage 5. `null` when no `director-cut-plan.json` artifact exists for this match yet (e.g. an older match generated before this feature shipped) — never fabricated. */
-  directorCut: PublicDirectorCutSummary | null;
-  /** `null` until `CoworldLeagueMatchNarrativeBackfill.ts` has generated evidence for this run (budgeted, gradual — same convergence characteristic as `directorCut`) — never fabricated. */
+  /** `null` until `CoworldLeagueMatchNarrativeBackfill.ts` has generated evidence for this run (budgeted, gradual) — never fabricated. */
   dramaEvidence: PublicDramaEvidence | null;
 }
 
@@ -281,7 +274,7 @@ export interface PublicFeaturedMatch {
    * Full-replay-access bugfix (2026-08-05): the SAME episode this
    * record's `completedAt` above resolves from — `episode.watchHref`
    * (lightweight spectator schematic) / `episode.fullRenderHref` (the
-   * real Pixi-rendered Director-Cut/full replay), looked up against the
+   * real Pixi-rendered full replay), looked up against the
    * live mirror by `episodeRequestId`, exactly like `completedAt`.
    * Deliberately NOT gated behind `isPubliclyPromotable`/the operator
    * `EventPackage` below (unlike `subtitle`/`reasonToWatch`/etc.) —
@@ -314,7 +307,7 @@ export interface PublicFeaturedMatch {
   /**
    * Season Zero activation prompt Phase 5 — the operator-authored
    * `EventPackage` fields the hero/watch/schedule surfaces render once
-   * `isPubliclyPromotable` is `true`. ALL five fields are `null` together
+   * `isPubliclyPromotable` is `true`. ALL four fields are `null` together
    * whenever `isPubliclyPromotable` is `false` — never a half-populated
    * package peeking through before the gate says the record is complete.
    * Safe to fold into the BULK model (unlike `participants` above):
@@ -329,7 +322,6 @@ export interface PublicFeaturedMatch {
    */
   subtitle: string | null;
   reasonToWatch: string[] | null;
-  directorCutEstimateSeconds: number | null;
   canonicalMatchUrl: string | null;
   canonicalPremiereUrl: string | null;
 }
@@ -421,12 +413,16 @@ function publicAgentFromView(
   standing: CoworldLeagueStandingRow | null,
   view: AgentIdentityView,
   statsArtifact: AgentStatsArtifact | null,
-  episodesForPlayer: readonly { completedAt: string | null; isWinner: boolean }[],
+  episodesForPlayer: readonly {
+    completedAt: string | null;
+    isWinner: boolean;
+  }[],
   standingsHistory: StandingsHistoryStore,
   provisionalIdentity: ProvisionalIdentity | null,
 ): PublicAgent {
   const provenance = {
-    ratingPolicyLabel: standing?.ratingPolicyLabel ?? standing?.policyLabel ?? null,
+    ratingPolicyLabel:
+      standing?.ratingPolicyLabel ?? standing?.policyLabel ?? null,
     activeChampionPolicyLabel: standing?.activeChampionPolicyLabel ?? null,
   };
   const stats = publicAgentStats(playerName, statsArtifact);
@@ -526,7 +522,10 @@ function publicAgents(
   for (const episode of episodes) {
     for (const player of episode.players) {
       const list = episodesByPlayer.get(player.name) ?? [];
-      list.push({ completedAt: episode.completedAt, isWinner: player.isWinner });
+      list.push({
+        completedAt: episode.completedAt,
+        isWinner: player.isWinner,
+      });
       episodesByPlayer.set(player.name, list);
     }
   }
@@ -561,9 +560,7 @@ function publicAgents(
       provisionalIdentities.get(row.playerName) ?? null,
     );
   });
-  const standingsPlayerNames = new Set(
-    standings.map((row) => row.playerName),
-  );
+  const standingsPlayerNames = new Set(standings.map((row) => row.playerName));
   const registeredNotInStandings = identity.agents
     .filter(
       (agent) => !standingsPlayerNames.has(agent.policyMatchRule.playerName),
@@ -623,12 +620,6 @@ function publicMatch(
     watchHref: episode.watchHref,
     fullRenderHref: episode.fullRenderHref,
     premiereHref: episode.premiereHref ?? null,
-    directorCut: episode.directorCut
-      ? {
-          durationEstimateSeconds: episode.directorCut.durationEstimateSeconds,
-          segmentCount: episode.directorCut.segmentCount,
-        }
-      : null,
     dramaEvidence: episode.dramaEvidence
       ? {
           curatedDramaScore: episode.dramaEvidence.curatedDramaScore,
@@ -686,7 +677,10 @@ export function publicFeaturedMatch(
   /** 2026-08-01 P0 — see `PublicFeaturedMatch.completedAt`'s own doc. Defaults to `null` for a caller (existing tests, any future one) that doesn't resolve the live mirror — an honest "not looked up" default, matching `pkg`'s own contract just above. */
   episodeCompletedAt: string | null = null,
   /** Full-replay-access bugfix (2026-08-05) — see `PublicFeaturedMatch.watchHref`/`.fullRenderHref`'s own doc. Same "not looked up" default as `episodeCompletedAt` just above. */
-  episodeReplayHrefs: { watchHref: string | null; fullRenderHref: string | null } | null = null,
+  episodeReplayHrefs: {
+    watchHref: string | null;
+    fullRenderHref: string | null;
+  } | null = null,
 ): PublicFeaturedMatch {
   const revealed = isFeaturedMatchRevealed(match);
   const promotion = isPubliclyPromotable(match, pkg);
@@ -699,14 +693,12 @@ export function publicFeaturedMatch(
       ? {
           subtitle: pkg.subtitle,
           reasonToWatch: pkg.reasonToWatch.claims.map((claim) => claim.text),
-          directorCutEstimateSeconds: pkg.directorCutEstimateSeconds,
           canonicalMatchUrl: pkg.canonicalMatchUrl,
           canonicalPremiereUrl: pkg.canonicalPremiereUrl,
         }
       : {
           subtitle: null,
           reasonToWatch: null,
-          directorCutEstimateSeconds: null,
           canonicalMatchUrl: null,
           canonicalPremiereUrl: null,
         };
@@ -789,7 +781,10 @@ function publicFeaturedMatches(
         findEventPackage(packageStore, match.matchId),
         episode?.completedAt ?? null,
         episode !== undefined
-          ? { watchHref: episode.watchHref, fullRenderHref: episode.fullRenderHref }
+          ? {
+              watchHref: episode.watchHref,
+              fullRenderHref: episode.fullRenderHref,
+            }
           : (archivedReplayHrefs ?? null),
       );
     });
@@ -822,7 +817,6 @@ function publicSeasons(registry: SeasonRegistryFile): PublicSeason[] {
       })),
     }));
 }
-
 
 export function buildProxyWarPublicReadModel(
   mirror: CoworldLeagueMirrorData,
@@ -909,7 +903,8 @@ export function buildProxyWarPublicReadModel(
     seasons: publicSeasons(seasonRegistry),
     premieres: {
       live: mirror.premiere ?? null,
-      latest: mirror.premiere === undefined ? (mirror.latestPremiere ?? null) : null,
+      latest:
+        mirror.premiere === undefined ? (mirror.latestPremiere ?? null) : null,
     },
     links: {
       enterTheLeagueUrl: mirror.links.enterTheLeagueUrl,

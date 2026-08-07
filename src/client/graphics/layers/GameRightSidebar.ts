@@ -1,18 +1,18 @@
 import { html, LitElement } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { assetUrl } from "../../../core/AssetUrls";
-import { isBettingPremiereRoute } from "../../AiLeagueReplayMode";
-import { AI_LEAGUE_REPLAY_CATCHUP_EVENT } from "../../LocalServer";
 import { EventBus } from "../../../core/EventBus";
 import { GameType } from "../../../core/game/Game";
 import { GameView } from "../../../core/game/GameView";
+import { isBettingPremiereRoute } from "../../AiLeagueReplayMode";
 import { crazyGamesSDK } from "../../CrazyGamesSDK";
 import {
   ReplaySpeedChangeEvent,
   TogglePauseIntentEvent,
 } from "../../InputHandler";
-import { defaultReplaySpeedMultiplier } from "../../utilities/ReplaySpeedMultiplier";
+import { AI_LEAGUE_REPLAY_CATCHUP_EVENT } from "../../LocalServer";
 import { PauseGameIntentEvent, SendWinnerEvent } from "../../Transport";
+import { defaultReplaySpeedMultiplier } from "../../utilities/ReplaySpeedMultiplier";
 import { translateText } from "../../Utils";
 import { ImmunityBarVisibleEvent } from "./ImmunityTimer";
 import { Layer } from "./Layer";
@@ -37,7 +37,7 @@ function playbackSpeedLabel(multiplier: number): string {
  * `playbackSpeedLabel`'s own ×-suffixed value here doubles it up (harmless
  * at the rare manual 2×/0.5× picks that were the only way to reach this
  * template before; this incident's always-show-for-replays fix makes the
- * far more common 1×/Director-Cut-paced case take this same path,
+ * far more common 1×-paced case take this same path,
  * surfacing what was a dormant string bug). `playbackSpeedLabel` itself
  * stays as-is for the standalone fast-forward badge below, which has no
  * surrounding sentence and needs its own "×".
@@ -96,8 +96,10 @@ export class GameRightSidebar extends LitElement implements Layer {
   // Real turn-count catch-up progress from LocalServer.reportReplayCatchUp()
   // -- null whenever the replay isn't behind its own dispatched position.
   @state()
-  private _catchUpProgress: { turnsRendered: number; turnsTotal: number } | null =
-    null;
+  private _catchUpProgress: {
+    turnsRendered: number;
+    turnsTotal: number;
+  } | null = null;
 
   private hasWinner = false;
   private isLobbyCreator = false;
@@ -413,11 +415,10 @@ export class GameRightSidebar extends LitElement implements Layer {
     // multiplier on its face the only way to know the playback speed was to
     // open that panel. Surface it inline, hidden at 1x for a LIVE game (the
     // expected/only sensible speed there) -- but ALWAYS shown for a replay
-    // (archived Full Replay or Premiere), where 1x/slow is frequently
-    // Director Cut's own deliberate narrative pacing (see
-    // DirectorCutController's onSpeedChange wiring), not the assumed
-    // default, and a silent "Playback speed" label at that pace is exactly
-    // what read as a frozen replay in the P2 incident.
+    // (archived Full Replay or Premiere), where 1x/slow is frequently a
+    // deliberate pacing choice, not the assumed default, and a silent
+    // "Playback speed" label at that pace is exactly what read as a frozen
+    // replay in the P2 incident.
     const isReplay = this.game?.config()?.isReplay() ?? false;
     const speedLabel =
       this._replaySpeedMultiplier === 1 && !isReplay

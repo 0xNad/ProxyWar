@@ -8,12 +8,12 @@ execute a push, deploy, or restart on its own authority.
 ## 1. Build
 
 ```bash
-npm run inst              # npm ci --ignore-scripts — never npm install
+npm run inst # npm ci --ignore-scripts — never npm install
 npm exec -- tsc --noEmit
 npm run lint
-npm test                  # vitest run && vitest run tests/server
-npm run test:e2e          # opt-in E2E suite (real server + Chrome)
-npx vite build             # production client build → static/
+npm test         # vitest run && vitest run tests/server
+npm run test:e2e # opt-in E2E suite (real server + Chrome)
+npx vite build   # production client build → static/
 ```
 
 `npm run build-prod` (`concurrently --kill-others-on-fail "tsc --noEmit"
@@ -57,14 +57,14 @@ source of truth for that mapping, not this repo.
 
 ## 3. Feature flags / env vars for this cutover
 
-| Var | Purpose | Cutover value |
-|---|---|---|
-| `PROXYWAR_LEAGUE_WRAPPER_ONLY` | Serves the pre-generated static mirror + `public.html` SPA rather than full live-hosting machinery. | `true` on the league-facing process. |
-| `PROXYWAR_PLATFORM_ENABLED` | Enables `/account`, GitHub OAuth, platform root HTML at `/`. | `1` on the apex process only, unset on the league process. |
-| `PROXYWAR_PLATFORM_ORIGIN` | The apex's own HTTPS origin — every league-side consumer (`accountUrl` in the read model, cross-origin fetches) resolves against this. | The real apex HTTPS URL, e.g. `https://proxywar.xyz`. Client build-time value must match — rebuild `static/` (`npx vite build`) whenever this changes. |
-| `PROXYWAR_PLATFORM_RETURN_ORIGINS` | JSON object (audience → origin) allowlisting which audiences may complete a cross-origin handoff. MUST be valid JSON — a comma-separated list silently drops the whole allowlist and 400s every audience. | Whatever audiences are actually wired (currently: betting). |
-| `PROXYWAR_WAGERING_ENABLED` | The entire wagering-surface gate. | UNSET on every league-origin process for this cutover — league surfaces must serve no betting UI or route. See `PROXYWAR_PUBLIC_APP_ARCHITECTURE.md`'s security-boundaries section. |
-| `PROXYWAR_GITHUB_OAUTH_CLIENT_ID` / `_SECRET_FILE` | GitHub sign-in on the platform origin. Secret passed as a FILE PATH, never a value (`ps eww <pid>` dumps env). | Set on the platform process only. Absent = sign-in cleanly does not exist (no button, no routes) — a valid unconfigured state, not a bug. |
+| Var                                                | Purpose                                                                                                                                                                                                   | Cutover value                                                                                                                                                                       |
+| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PROXYWAR_LEAGUE_WRAPPER_ONLY`                     | Serves the pre-generated static mirror + `public.html` SPA rather than full live-hosting machinery.                                                                                                       | `true` on the league-facing process.                                                                                                                                                |
+| `PROXYWAR_PLATFORM_ENABLED`                        | Enables `/account`, GitHub OAuth, platform root HTML at `/`.                                                                                                                                              | `1` on the apex process only, unset on the league process.                                                                                                                          |
+| `PROXYWAR_PLATFORM_ORIGIN`                         | The apex's own HTTPS origin — every league-side consumer (`accountUrl` in the read model, cross-origin fetches) resolves against this.                                                                    | The real apex HTTPS URL, e.g. `https://proxywar.xyz`. Client build-time value must match — rebuild `static/` (`npx vite build`) whenever this changes.                              |
+| `PROXYWAR_PLATFORM_RETURN_ORIGINS`                 | JSON object (audience → origin) allowlisting which audiences may complete a cross-origin handoff. MUST be valid JSON — a comma-separated list silently drops the whole allowlist and 400s every audience. | Whatever audiences are actually wired (currently: betting).                                                                                                                         |
+| `PROXYWAR_WAGERING_ENABLED`                        | The entire wagering-surface gate.                                                                                                                                                                         | UNSET on every league-origin process for this cutover — league surfaces must serve no betting UI or route. See `PROXYWAR_PUBLIC_APP_ARCHITECTURE.md`'s security-boundaries section. |
+| `PROXYWAR_GITHUB_OAUTH_CLIENT_ID` / `_SECRET_FILE` | GitHub sign-in on the platform origin. Secret passed as a FILE PATH, never a value (`ps eww <pid>` dumps env).                                                                                            | Set on the platform process only. Absent = sign-in cleanly does not exist (no button, no routes) — a valid unconfigured state, not a bug.                                           |
 
 ### Cutover switch, verified (not assumed)
 
@@ -171,8 +171,6 @@ Run each of these against the live host after deploy, not before:
       via CDP, or an equivalent header injection for a manual browser
       test.
 - [ ] one completed match page
-- [ ] one Director Cut playback (a match with `director-cut-plan.json`
-      present)
 - [ ] one Full Replay
 - [ ] one old `/openfront-replay/:runID` legacy link (confirms the compat
       redirect still resolves)
@@ -204,7 +202,7 @@ risks, next concrete step.
 - **`beta.proxywar.xyz` (league origin):** the pre-overhaul league-monitor
   line — the last commit this overhaul's `main` ancestor shares with what
   is live is `c35e6be87` (`fix(league): derive battle-card map from
-  variant_name; drop difficulty`). This overhaul (`claude/product-overhaul`)
+variant_name; drop difficulty`). This overhaul (`claude/product-overhaul`)
   branched from `claude/betting` at `6e0d90a7f`, whose own `main` ancestor
   is the same `c35e6be87`. **Not yet re-verified against the current live
   host** — this document records the branch-graph fact, not a live probe;
@@ -239,7 +237,7 @@ turn (`node --check`, `bash -n`) without running them:
 node deploy/mac/proxywar-beta-launchd-restart.mjs --dry-run
 node deploy/mac/proxywar-beta-launchd-restart.mjs
 # If the deployment serves a non-default port:
-node deploy/mac/proxywar-beta-launchd-restart.mjs --ready-url=http://127.0.0.1:<port>/league
+node deploy/mac/proxywar-beta-launchd-restart.mjs --ready-url=http://127.0.0.1: < port > /league
 ```
 
 If the cutover fails post-deploy smoke: `proxywar-beta-launchd-restart.mjs`

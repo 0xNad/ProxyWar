@@ -12,7 +12,7 @@ import { ReplaySpeedMultiplier } from "./utilities/ReplaySpeedMultiplier";
  * point of the original speed-latch fix was "a user speed change should
  * stick, never be silently reverted by automatic pacing". A `?turn=`
  * navigation is exactly that: an automatic-pacing-adjacent mechanic (the
- * SAME reload-based path Director Cut/timeline backward-seeks use), not a
+ * SAME reload-based path timeline backward-seeks use), not a
  * fresh visit where reverting to the default is expected.
  *
  * `sessionStorage`-backed, keyed by run id — same convention (and same
@@ -62,8 +62,8 @@ function saveReplaySpeed(runId: string, speed: ReplaySpeedMultiplier): void {
 }
 
 /**
- * Persists every USER-sourced speed change (never an "auto" one — Director
- * Cut's per-segment pacing or the archived-replay fastest-default must
+ * Persists every USER-sourced speed change (never an "auto" one — the
+ * archived-replay fastest-default must
  * never get written back as if the viewer had picked them). Returns a
  * cleanup function; the caller (`Main.ts`'s `handleJoinLobby`) disposes it
  * the same way it already disposes `watchReplayPositionForResume`.

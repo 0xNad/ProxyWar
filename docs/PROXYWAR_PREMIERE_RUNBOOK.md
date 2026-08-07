@@ -50,8 +50,8 @@ a real ~16-minute CoWorld generation. Reactive, not scheduled: the moment
 depth drops below target (a claim), it starts building the next one.
 
 ```bash
-./generate-premiere-queue.sh          # runs forever, polling
-./generate-premiere-queue.sh --once   # single attempt then exit (cron/manual)
+./generate-premiere-queue.sh        # runs forever, polling
+./generate-premiere-queue.sh --once # single attempt then exit (cron/manual)
 ```
 
 Pipeline per attempt (`attempt_generate`, `generate-premiere-queue.sh:171-331`):
@@ -69,22 +69,22 @@ wedges or spins tight.
 
 Env vars (`generate-premiere-queue.sh:53-81`), all optional:
 
-| Var | Default | Meaning |
-|---|---|---|
-| `PW_QUEUE_GENERATE_ENABLED` | `true` | Kill switch. `false` → queue never tops up; every cycle falls back to exhibition. |
-| `PW_QUEUE_MAX_PER_HOUR` | `4` | Attempt cap/hour (success **or** failure both count — a failed attempt may still have run a real, billed episode before failing downstream). |
-| `PW_QUEUE_MAX_PER_DAY` | `80` | Attempt cap/day. |
-| `PW_QUEUE_TARGET_DEPTH` | `1` | Spare sealed bundles to keep in `ready/`. |
-| `PW_QUEUE_POLL_SECONDS` | `60` | Idle poll interval once topped up. |
-| `PW_QUEUE_FAILURE_BACKOFF_SECONDS` | `180` | Sleep after a failed attempt before retrying. |
-| `PW_QUEUE_GENERATE_TIMEOUT_SECONDS` | `1800` | Hard wall on the generate step. |
-| `PW_QUEUE_STEP_TIMEOUT_SECONDS` | `300` | Hard wall on seal / build-source steps. |
-| `PW_QUEUE_TARGET_MATCH_MS` | `1296000` (21.6 min) | Target playback duration; `turnIntervalMs` is derived from it post-generation, clamped to 20–2000 ms/turn. |
-| `PW_QUEUE_COWORLD_ID` | `cow_6651aca3-2beb-49b9-9b6b-2573b4be5a63` (`proxywar-ffa-16p`) | CoWorld package id. |
-| `PW_QUEUE_VARIANT_ID` | `sixteen-player-ffa-world` | CoWorld variant. |
-| `PW_QUEUE_MAX_DECISION_STEPS` | `300` | Passed to `generate-xp-request-episode.ts`. |
-| `PW_QUEUE_MAX_SEATS` | `16` | Package's own seat ceiling — a safety net, not today's live constraint (roster is 14). |
-| `PW_BET_QUEUE_DIR` | `~/.proxywar-deploy/premiere-queue` | `PW_QUEUE_ROOT` override (`premiere-queue-lib.sh:25`). |
+| Var                                 | Default                                                         | Meaning                                                                                                                                      |
+| ----------------------------------- | --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PW_QUEUE_GENERATE_ENABLED`         | `true`                                                          | Kill switch. `false` → queue never tops up; every cycle falls back to exhibition.                                                            |
+| `PW_QUEUE_MAX_PER_HOUR`             | `4`                                                             | Attempt cap/hour (success **or** failure both count — a failed attempt may still have run a real, billed episode before failing downstream). |
+| `PW_QUEUE_MAX_PER_DAY`              | `80`                                                            | Attempt cap/day.                                                                                                                             |
+| `PW_QUEUE_TARGET_DEPTH`             | `1`                                                             | Spare sealed bundles to keep in `ready/`.                                                                                                    |
+| `PW_QUEUE_POLL_SECONDS`             | `60`                                                            | Idle poll interval once topped up.                                                                                                           |
+| `PW_QUEUE_FAILURE_BACKOFF_SECONDS`  | `180`                                                           | Sleep after a failed attempt before retrying.                                                                                                |
+| `PW_QUEUE_GENERATE_TIMEOUT_SECONDS` | `1800`                                                          | Hard wall on the generate step.                                                                                                              |
+| `PW_QUEUE_STEP_TIMEOUT_SECONDS`     | `300`                                                           | Hard wall on seal / build-source steps.                                                                                                      |
+| `PW_QUEUE_TARGET_MATCH_MS`          | `1296000` (21.6 min)                                            | Target playback duration; `turnIntervalMs` is derived from it post-generation, clamped to 20–2000 ms/turn.                                   |
+| `PW_QUEUE_COWORLD_ID`               | `cow_6651aca3-2beb-49b9-9b6b-2573b4be5a63` (`proxywar-ffa-16p`) | CoWorld package id.                                                                                                                          |
+| `PW_QUEUE_VARIANT_ID`               | `sixteen-player-ffa-world`                                      | CoWorld variant.                                                                                                                             |
+| `PW_QUEUE_MAX_DECISION_STEPS`       | `300`                                                           | Passed to `generate-xp-request-episode.ts`.                                                                                                  |
+| `PW_QUEUE_MAX_SEATS`                | `16`                                                            | Package's own seat ceiling — a safety net, not today's live constraint (roster is 14).                                                       |
+| `PW_BET_QUEUE_DIR`                  | `~/.proxywar-deploy/premiere-queue`                             | `PW_QUEUE_ROOT` override (`premiere-queue-lib.sh:25`).                                                                                       |
 
 A durable, append-only cost ledger lives at `PW_QUEUE_ROOT/cost-ledger.jsonl`
 (`ledger_append`, `generate-premiere-queue.sh:147-166`) — one row per attempt
@@ -97,7 +97,7 @@ figure).
 Sourced by both the producer and the consumer. `PW_QUEUE_ROOT` (default
 `~/.proxywar-deploy/premiere-queue`, override `PW_BET_QUEUE_DIR`) holds
 `ready/` and `work/`. Item directory names are `<UTC timestamp>-<runId>` —
-lexical sort on that prefix *is* chronological order, so a plain FIFO needs
+lexical sort on that prefix _is_ chronological order, so a plain FIFO needs
 no separate sequence counter.
 
 - `pq_init` — `mkdir -p` + `chmod 700` on root/ready/work.
@@ -123,8 +123,8 @@ no separate sequence counter.
 ### 1.3 Consumer — `cycle-premiere.sh [lead-minutes]`
 
 ```bash
-./cycle-premiere.sh        # lead-minutes defaults to 4
-./cycle-premiere.sh 6      # trading opens ~6 minutes after this returns
+./cycle-premiere.sh   # lead-minutes defaults to 4
+./cycle-premiere.sh 6 # trading opens ~6 minutes after this returns
 ```
 
 Replaces whatever premiere is currently live on `bet.proxywar.xyz`. The state
@@ -139,7 +139,7 @@ Match source, in priority order (`cycle-premiere.sh:219-266`):
    due.
 2. `pq_claim` — plain FIFO from `ready/`.
 3. A freshly generated **local exhibition** (`npm run
-   premiere:controlled-exhibition`, no CoWorld, synthetic) — the fallback
+premiere:controlled-exhibition`, no CoWorld, synthetic) — the fallback
    when the queue is empty (generator behind, disabled, or rate-capped). A
    synthetic match is a worse product than real, but no market at all is
    worse than either, so the URL never goes dark.
@@ -161,21 +161,21 @@ Notable env vars / constants (`cycle-premiere.sh:39-79`) — **none of these
 are `PW_BET_LEAD_MINUTES`; lead time is the positional `$1` argument, not an
 env var**:
 
-| Var | Default | Meaning |
-|---|---|---|
-| `$1` (positional) | `4` | Lead minutes before trading opens. |
-| `ORIGIN` | `https://bet.proxywar.xyz` | Hardcoded, not overridable. |
-| `ORIGIN_PORT` | `8792` | Hardcoded, not overridable — keep in sync by hand with `AUTOCYCLE_ORIGIN_PORT` (§1.4). |
-| `PW_BET_TURN_INTERVAL_MS` | `120` | Exhibition-fallback turn pacing (10,800 turns × 120ms ≈ 21.6 min match). |
-| `PW_BET_GUEST_KEY_FILE` | `~/.proxywar-deploy/guest-hmac-key.hex` | Guest-cookie HMAC key — deliberately outside the wiped state root, so returning guests keep identity across cycles. |
-| `PROXYWAR_POINTS_LEDGER_ROOT` | `~/.proxywar-deploy/points-ledger` | Durable across cycles. |
-| `PW_BET_GITHUB_CLIENT_ID_FILE` / `PW_BET_GITHUB_CLIENT_SECRET_FILE` | `~/.proxywar-deploy/github-oauth-client-id` / `-secret` | GitHub OAuth creds — secret file must be `0600`; the server is handed the **path**, never the value, so `ps eww` can't leak it. |
-| `PW_BET_LEAGUE_DATA_URL` | `https://beta.proxywar.xyz/ai-league-runs/league/data.json` | Live standings feed refreshed every cycle. |
-| `PROXYWAR_ARTIFACTS_ROOT` | `<repo>/artifacts` | Served-root for the leak audit's `/league` probe. |
-| `PW_BET_STAGING_DIR` | `/tmp/pw-bet-staging` | Exhibition/queue-claim staging. |
-| `PW_BET_MANIFEST_DIR` | `/tmp/pw-bet-manifests` | Agent manifests staged with a `policyIdentity` the shared docs copies lack. |
-| `PW_BET_ADMIT_DIR` | `/private/tmp/pw-bet-admit` | Admission input files (nonce, eligibility, definition). |
-| `STATE_ROOT` | `~/.proxywar-bet-live/replay-premiere` | Hardcoded, wiped every cycle — **not** env-overridable. |
+| Var                                                                 | Default                                                     | Meaning                                                                                                                         |
+| ------------------------------------------------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `$1` (positional)                                                   | `4`                                                         | Lead minutes before trading opens.                                                                                              |
+| `ORIGIN`                                                            | `https://bet.proxywar.xyz`                                  | Hardcoded, not overridable.                                                                                                     |
+| `ORIGIN_PORT`                                                       | `8792`                                                      | Hardcoded, not overridable — keep in sync by hand with `AUTOCYCLE_ORIGIN_PORT` (§1.4).                                          |
+| `PW_BET_TURN_INTERVAL_MS`                                           | `120`                                                       | Exhibition-fallback turn pacing (10,800 turns × 120ms ≈ 21.6 min match).                                                        |
+| `PW_BET_GUEST_KEY_FILE`                                             | `~/.proxywar-deploy/guest-hmac-key.hex`                     | Guest-cookie HMAC key — deliberately outside the wiped state root, so returning guests keep identity across cycles.             |
+| `PROXYWAR_POINTS_LEDGER_ROOT`                                       | `~/.proxywar-deploy/points-ledger`                          | Durable across cycles.                                                                                                          |
+| `PW_BET_GITHUB_CLIENT_ID_FILE` / `PW_BET_GITHUB_CLIENT_SECRET_FILE` | `~/.proxywar-deploy/github-oauth-client-id` / `-secret`     | GitHub OAuth creds — secret file must be `0600`; the server is handed the **path**, never the value, so `ps eww` can't leak it. |
+| `PW_BET_LEAGUE_DATA_URL`                                            | `https://beta.proxywar.xyz/ai-league-runs/league/data.json` | Live standings feed refreshed every cycle.                                                                                      |
+| `PROXYWAR_ARTIFACTS_ROOT`                                           | `<repo>/artifacts`                                          | Served-root for the leak audit's `/league` probe.                                                                               |
+| `PW_BET_STAGING_DIR`                                                | `/tmp/pw-bet-staging`                                       | Exhibition/queue-claim staging.                                                                                                 |
+| `PW_BET_MANIFEST_DIR`                                               | `/tmp/pw-bet-manifests`                                     | Agent manifests staged with a `policyIdentity` the shared docs copies lack.                                                     |
+| `PW_BET_ADMIT_DIR`                                                  | `/private/tmp/pw-bet-admit`                                 | Admission input files (nonce, eligibility, definition).                                                                         |
+| `STATE_ROOT`                                                        | `~/.proxywar-bet-live/replay-premiere`                      | Hardcoded, wiped every cycle — **not** env-overridable.                                                                         |
 
 Real-league checkpoints come from the queue item's own spawn-aware
 computation done at seal time (`PremiereWageringCheckpoints.ts`); exhibition
@@ -199,27 +199,30 @@ position on it):
    an unrecognized status — a scheduled-but-not-started premiere always
    survives.
 2. Never treats a failed request as "nothing running" — emptiness must be
-   confirmed repeatedly *and* against the local origin.
+   confirmed repeatedly _and_ against the local origin.
 
 Env vars (`autocycle-premiere.sh:34-50`):
 
-| Var | Default | Meaning |
-|---|---|---|
-| `AUTOCYCLE_ORIGIN_PORT` | `8792` | Must match `cycle-premiere.sh`'s hardcoded `ORIGIN_PORT` — not synced automatically. |
-| `AUTOCYCLE_GRACE_SECONDS` | `90` | Wait after settled/void before cycling, so late arrivals can read the settlement card. |
-| `AUTOCYCLE_POLL_SECONDS` | `20` | Poll interval. |
-| `AUTOCYCLE_LEAD_MIN` | `2` | Passed through to `cycle-premiere.sh`. |
-| `AUTOCYCLE_EMPTY_STRIKES` | `3` | Consecutive confirmed-empty (or confirmed-down) polls before cycling from nothing. |
-| `AUTOCYCLE_FALLBACK_STREAK_WARN` | `3` | Consecutive exhibition cycles before loudly warning the real-league queue looks stuck. |
+| Var                              | Default | Meaning                                                                                |
+| -------------------------------- | ------- | -------------------------------------------------------------------------------------- |
+| `AUTOCYCLE_ORIGIN_PORT`          | `8792`  | Must match `cycle-premiere.sh`'s hardcoded `ORIGIN_PORT` — not synced automatically.   |
+| `AUTOCYCLE_GRACE_SECONDS`        | `90`    | Wait after settled/void before cycling, so late arrivals can read the settlement card. |
+| `AUTOCYCLE_POLL_SECONDS`         | `20`    | Poll interval.                                                                         |
+| `AUTOCYCLE_LEAD_MIN`             | `2`     | Passed through to `cycle-premiere.sh`.                                                 |
+| `AUTOCYCLE_EMPTY_STRIKES`        | `3`     | Consecutive confirmed-empty (or confirmed-down) polls before cycling from nothing.     |
+| `AUTOCYCLE_FALLBACK_STREAK_WARN` | `3`     | Consecutive exhibition cycles before loudly warning the real-league queue looks stuck. |
 
 **Diagnosing a starved queue**: the log line to watch for is
+
 ```
 !! <N> consecutive FALLBACK exhibition cycles - real queue looks stuck
    (generator disabled/failing/rate-capped? check
    /tmp/pw-bet-queue-generator.log and $PW_QUEUE_COST_LEDGER)
 ```
+
 (`autocycle-premiere.sh:116`, fires once `fallback_streak >= AUTOCYCLE_FALLBACK_STREAK_WARN`).
 Checklist:
+
 - `pq_depth` (source `premiere-queue-lib.sh`, run `pq_depth` in a shell with
   it sourced) — is `ready/` actually empty?
 - Is `generate-premiere-queue.sh` even running? Check its log
@@ -240,8 +243,8 @@ Checklist:
 ### 1.5 System B — the Phase 2 bounded watcher (`replay-premiere-loop.ts`)
 
 ```bash
-npm run premiere:loop            # one live iteration
-npm run premiere:loop -- --shadow  # read-only observation, no mutation
+npm run premiere:loop             # one live iteration
+npm run premiere:loop -- --shadow # read-only observation, no mutation
 ```
 
 Run by a `launchd StartInterval=60` job — **one iteration per invocation**,
@@ -267,21 +270,21 @@ predecessor is expected, not a failure.
 
 Key constants (`src/server/replay-premiere/ReplayPremiereLoopCore.ts`):
 
-| Constant | Value | Meaning |
-|---|---|---|
-| `PREMIERE_LOOP_SCHEDULE_LEAD_MS` | 5 min | Lead from "now" to the scheduled reveal window (ceil-to-minute). |
-| `PREMIERE_LOOP_HOLD_WINDOW_MS` | 75 min | Playback duration + margin; a held episode auto-publishes at `scheduledAt + this` even if never revealed. |
-| `PREMIERE_LOOP_POST_REVEAL_COOLDOWN_MS` | 35 min | Keeps a just-revealed premiere resident through reclamation grace; rounds completed in this window are explicitly skipped, not premiered. |
-| `PREMIERE_LOOP_SEAL_WINDOW_MS` | 35 min | Cold-start / gap-recovery freshness floor for a completed round to still be worth sealing. |
-| `PREMIERE_LOOP_TURN_STARTUP_BUDGET` | 60,000 turns | Admission projection input cap — longer episodes are skipped. |
-| `PREMIERE_LOOP_ADMISSION_PROJECTION_TIMEOUT_MS` | 90 s | Hard wall-clock ceiling on the GameRunner checkpoint projection at admission. |
-| `PREMIERE_LOOP_MAX_REPLAY_DOWNLOADS` | 3 | Raw replays downloaded while selecting a claim. |
-| `PREMIERE_LOOP_MAX_PIPELINE_ATTEMPTS` | 2 | Full pipeline attempts (claim→activate) per round. |
-| `PREMIERE_LOOP_MAX_RAW_REPLAY_CACHE` | 3 | Raw replays kept in the bounded fetch cache. |
-| `PREMIERE_LOOP_MAX_ACTIVATION_ATTEMPTS` | 3 | Controlled-restart activation attempts across ticks. |
-| `PREMIERE_LOOP_ACTIVATION_VERIFY_MS` | 120 s | Bounded post-activation registration verification window (~2 ticks). |
-| `PREMIERE_LOOP_MAX_REACTIVATION_ATTEMPTS` | 1 | Exactly one fresh re-activation after a failed verification. |
-| `PREMIERE_LOOP_ACTIVATION_BACKOFF_MS` | 120 s | Minimum spacing between activation attempts after a helper refusal. |
+| Constant                                        | Value        | Meaning                                                                                                                                   |
+| ----------------------------------------------- | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `PREMIERE_LOOP_SCHEDULE_LEAD_MS`                | 5 min        | Lead from "now" to the scheduled reveal window (ceil-to-minute).                                                                          |
+| `PREMIERE_LOOP_HOLD_WINDOW_MS`                  | 75 min       | Playback duration + margin; a held episode auto-publishes at `scheduledAt + this` even if never revealed.                                 |
+| `PREMIERE_LOOP_POST_REVEAL_COOLDOWN_MS`         | 35 min       | Keeps a just-revealed premiere resident through reclamation grace; rounds completed in this window are explicitly skipped, not premiered. |
+| `PREMIERE_LOOP_SEAL_WINDOW_MS`                  | 35 min       | Cold-start / gap-recovery freshness floor for a completed round to still be worth sealing.                                                |
+| `PREMIERE_LOOP_TURN_STARTUP_BUDGET`             | 60,000 turns | Admission projection input cap — longer episodes are skipped.                                                                             |
+| `PREMIERE_LOOP_ADMISSION_PROJECTION_TIMEOUT_MS` | 90 s         | Hard wall-clock ceiling on the GameRunner checkpoint projection at admission.                                                             |
+| `PREMIERE_LOOP_MAX_REPLAY_DOWNLOADS`            | 3            | Raw replays downloaded while selecting a claim.                                                                                           |
+| `PREMIERE_LOOP_MAX_PIPELINE_ATTEMPTS`           | 2            | Full pipeline attempts (claim→activate) per round.                                                                                        |
+| `PREMIERE_LOOP_MAX_RAW_REPLAY_CACHE`            | 3            | Raw replays kept in the bounded fetch cache.                                                                                              |
+| `PREMIERE_LOOP_MAX_ACTIVATION_ATTEMPTS`         | 3            | Controlled-restart activation attempts across ticks.                                                                                      |
+| `PREMIERE_LOOP_ACTIVATION_VERIFY_MS`            | 120 s        | Bounded post-activation registration verification window (~2 ticks).                                                                      |
+| `PREMIERE_LOOP_MAX_REACTIVATION_ATTEMPTS`       | 1            | Exactly one fresh re-activation after a failed verification.                                                                              |
+| `PREMIERE_LOOP_ACTIVATION_BACKOFF_MS`           | 120 s        | Minimum spacing between activation attempts after a helper refusal.                                                                       |
 
 `playbackRateForTurnCount(turnCount)`: 1× up to 36,000 turns, 2× beyond.
 `checkpointSequencesForTurnCount(turnCount)`: `[round(0.35·turnCount),
@@ -292,16 +295,16 @@ for `turnIntervalMs` at rate 1.
 Config resolution env vars (`resolveLoopConfig`,
 `src/scripts/replay-premiere-loop.ts:135-201`):
 
-| Var | Default | Meaning |
-|---|---|---|
-| `PROXYWAR_PREMIERE_LOOP_LOOPBACK_URL` | derived from `loadProxyWarDemoServerNetworkConfig` | Loopback base URL for the tracker's own manifest verification. |
-| `PROXYWAR_ARTIFACTS_ROOT` | `<cwd>/artifacts` | Same resolution as the demo server / `premiere-candidates.ts`. |
-| `PROXYWAR_LEAGUE_ID` | `league_cb60d526-ecfd-4836-ab3a-81fc6cf7dc42` | League watched. |
-| `PROXYWAR_LEAGUE_DIVISION_ID` | `div_b54268ee-6b2f-4156-9c2a-8542645e31bc` | Division watched. |
-| `PROXYWAR_LEAGUE_RETENTION_PINS` | `<cwd>/deploy/coworld-league-retention-pins.json` | Retention pin manifest path — **must point outside a byte-frozen release checkout in production**, or pin writes dirty the tree. |
-| `PROXYWAR_LEAGUE_MIN_FREE_GIB` | `10` | Storage floor (`minimumFreeBytes`). |
-| `PROXYWAR_PREMIERE_LOOP_TURN_INTERVAL_MS` | `100` (`PREMIERE_REAL_TURN_INTERVAL_MS`) | Operator override only; default is real-speed pacing. |
-| `PROXYWAR_PREMIERE_LOOP_COWORLD_TIMEOUT_MS` | `120000` | CoWorld read-CLI timeout. |
+| Var                                         | Default                                            | Meaning                                                                                                                          |
+| ------------------------------------------- | -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `PROXYWAR_PREMIERE_LOOP_LOOPBACK_URL`       | derived from `loadProxyWarDemoServerNetworkConfig` | Loopback base URL for the tracker's own manifest verification.                                                                   |
+| `PROXYWAR_ARTIFACTS_ROOT`                   | `<cwd>/artifacts`                                  | Same resolution as the demo server / `premiere-candidates.ts`.                                                                   |
+| `PROXYWAR_LEAGUE_ID`                        | `league_cb60d526-ecfd-4836-ab3a-81fc6cf7dc42`      | League watched.                                                                                                                  |
+| `PROXYWAR_LEAGUE_DIVISION_ID`               | `div_b54268ee-6b2f-4156-9c2a-8542645e31bc`         | Division watched.                                                                                                                |
+| `PROXYWAR_LEAGUE_RETENTION_PINS`            | `<cwd>/deploy/coworld-league-retention-pins.json`  | Retention pin manifest path — **must point outside a byte-frozen release checkout in production**, or pin writes dirty the tree. |
+| `PROXYWAR_LEAGUE_MIN_FREE_GIB`              | `10`                                               | Storage floor (`minimumFreeBytes`).                                                                                              |
+| `PROXYWAR_PREMIERE_LOOP_TURN_INTERVAL_MS`   | `100` (`PREMIERE_REAL_TURN_INTERVAL_MS`)           | Operator override only; default is real-speed pacing.                                                                            |
+| `PROXYWAR_PREMIERE_LOOP_COWORLD_TIMEOUT_MS` | `120000`                                           | CoWorld read-CLI timeout.                                                                                                        |
 
 ## 2. Two-lane candidate selection
 
@@ -309,20 +312,20 @@ Two independent, read-only ranking CLIs feed the **same** `FeaturedMatch`
 store (`featured-matches.json`) but from disjoint sources and with disjoint
 evidence. Neither CLI writes the store.
 
-| | PREMIERE lane | ARCHIVE lane |
-|---|---|---|
-| Script | `src/scripts/premiere-candidates.ts` (`npm run premiere:candidates`) | `src/scripts/feature-candidates.ts` (`npm run feature:candidates`) |
-| Source | Sealed, unpublished items in `PW_QUEUE_ROOT/ready/` | Completed, **published** episodes in the live CoWorld league mirror's `data.json` |
-| Reads | `meta.json` only — never `bundle.source.json` (too large, and none of its fields matter for ranking) | `CoworldLeagueEpisodeRow[]`, plus `drama-report.json`/`match-story.json` when present on disk |
-| Evidence available | `turnCount`, `seatCount`, `replayComplete` (always `true` — an item only reaches `ready/` once fully sealed) | `turnCount`, `decisionCount`, `degradedCount`, `dramaScore`/`dramaGrade`, `entertainmentScore`/`storyGrade` |
-| Evidence **unavailable** | `dramaScore`/`entertainmentScore`/`decisionCount`/`degradedCount` — `generate-premiere-queue.sh` deletes `decisions.jsonl` the moment a bundle seals, and `bundle.source.json` never carried them | Drama/story fields are `null` for **every** hosted candidate today: `buildAgentDramaReport`/`buildAgentMatchStory` are only ever invoked by the *local* match pipeline (`ai-agent-league-smoke.ts` etc.), which never publishes into the hosted league this CLI reads. This CLI still checks per-candidate file existence, so it self-heals for free if that ever changes. |
-| Severely-degraded floor | `turnCount < 50` (`SEVERELY_DEGRADED_MIN_TURN_COUNT`) or `seatCount < 2` (`SEVERELY_DEGRADED_MIN_SEAT_COUNT`) | `degradedCount / decisionCount ≥ 15%` (`SEVERE_DEGRADED_PERCENT`, matches `CoworldLeagueSiteWriter`'s own warning threshold) or `!replayComplete` |
-| Ranking (`rankCandidates` / `compareCandidates`) | severely-degraded last, then `turnCount` desc, then `seatCount` desc, then `queueItemName` asc | severely-degraded last, then composite(drama, story) desc (mean of the non-null scores; `null` sorts last), then `decisionCount` desc, then `turnCount` desc, then `episodeRequestId` asc |
-| Writes draft with | `lane: "premiere"`, `state: "candidate"` | `lane: "archive"`, `state: "candidate"` |
+|                                                  | PREMIERE lane                                                                                                                                                                                     | ARCHIVE lane                                                                                                                                                                                                                                                                                                                                                               |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Script                                           | `src/scripts/premiere-candidates.ts` (`npm run premiere:candidates`)                                                                                                                              | `src/scripts/feature-candidates.ts` (`npm run feature:candidates`)                                                                                                                                                                                                                                                                                                         |
+| Source                                           | Sealed, unpublished items in `PW_QUEUE_ROOT/ready/`                                                                                                                                               | Completed, **published** episodes in the live CoWorld league mirror's `data.json`                                                                                                                                                                                                                                                                                          |
+| Reads                                            | `meta.json` only — never `bundle.source.json` (too large, and none of its fields matter for ranking)                                                                                              | `CoworldLeagueEpisodeRow[]`, plus `drama-report.json`/`match-story.json` when present on disk                                                                                                                                                                                                                                                                              |
+| Evidence available                               | `turnCount`, `seatCount`, `replayComplete` (always `true` — an item only reaches `ready/` once fully sealed)                                                                                      | `turnCount`, `decisionCount`, `degradedCount`, `dramaScore`/`dramaGrade`, `entertainmentScore`/`storyGrade`                                                                                                                                                                                                                                                                |
+| Evidence **unavailable**                         | `dramaScore`/`entertainmentScore`/`decisionCount`/`degradedCount` — `generate-premiere-queue.sh` deletes `decisions.jsonl` the moment a bundle seals, and `bundle.source.json` never carried them | Drama/story fields are `null` for **every** hosted candidate today: `buildAgentDramaReport`/`buildAgentMatchStory` are only ever invoked by the _local_ match pipeline (`ai-agent-league-smoke.ts` etc.), which never publishes into the hosted league this CLI reads. This CLI still checks per-candidate file existence, so it self-heals for free if that ever changes. |
+| Severely-degraded floor                          | `turnCount < 50` (`SEVERELY_DEGRADED_MIN_TURN_COUNT`) or `seatCount < 2` (`SEVERELY_DEGRADED_MIN_SEAT_COUNT`)                                                                                     | `degradedCount / decisionCount ≥ 15%` (`SEVERE_DEGRADED_PERCENT`, matches `CoworldLeagueSiteWriter`'s own warning threshold) or `!replayComplete`                                                                                                                                                                                                                          |
+| Ranking (`rankCandidates` / `compareCandidates`) | severely-degraded last, then `turnCount` desc, then `seatCount` desc, then `queueItemName` asc                                                                                                    | severely-degraded last, then composite(drama, story) desc (mean of the non-null scores; `null` sorts last), then `decisionCount` desc, then `turnCount` desc, then `episodeRequestId` asc                                                                                                                                                                                  |
+| Writes draft with                                | `lane: "premiere"`, `state: "candidate"`                                                                                                                                                          | `lane: "archive"`, `state: "candidate"`                                                                                                                                                                                                                                                                                                                                    |
 
 ```bash
-npm run premiere:candidates              # table
-npm run premiere:candidates -- --json    # full ranked JSON + rejections
+npm run premiere:candidates           # table
+npm run premiere:candidates -- --json # full ranked JSON + rejections
 npm run feature:candidates
 npm run feature:candidates -- --json
 ```
@@ -336,13 +339,13 @@ overrides; `<id>` resolves against `matchId`, `queueItemName`, or
 `--artifacts-root=<dir> --state-root=<dir> --json`; `<id>` there is always
 an `episodeRequestId`.
 
-| CLI | npm script | Effect |
-|---|---|---|
-| `src/scripts/premiere-schedule.ts` | `premiere:schedule --episode=<id> --at=<ISO-8601>` | `candidate`/`scheduled` → `scheduled`, sets `scheduledAt`. Premiere-lane only. **Also this lane's promote step** — a premiere-lane record only enters the store here, and this is where `participants` gets resolved (see below), so there is no separate `premiere:promote`. Refuses to resurrect a `cancelled` record. Re-validates the **whole** resulting schedule before writing. |
-| `src/scripts/premiere-publish.ts` | `premiere:publish --episode=<id>` | `scheduled` → `published` — the explicit "yes, run this one" signal that `pq_claim_scheduled_due` (§1.2) actually keys off. Also best-effort syncs a `FeaturedMatch`-owned retention pin (§6). Refuses (defense in depth) a record with zero `participants`. |
-| `src/scripts/premiere-cancel.ts` | `premiere:cancel --episode=<id>` | `scheduled`/`published` → `cancelled` (terminal, not deleted — stays as an audit trail). Frees the `scheduledAt` slot and removes this record's own retention-pin ownership. |
-| `src/scripts/premiere-validate.ts` | `premiere:validate` | Reports every scheduling problem (past-dated slots, collisions, a scheduled record whose source queue item vanished from `ready/`). Non-zero exit on any issue — safe in cron/CI ahead of `premiere:publish`. **Run this after any manual edit to `featured-matches.json`.** |
-| `src/scripts/feature-promote.ts` | `feature:promote --episode=<episodeRequestId>` | The archive lane's promote step — `feature:candidates` stays read-only by design, so this is the one CLI that upserts a ranked archive-lane candidate's draft into the store (via the same lock-protected `upsertRecord`). Idempotent by `episodeRequestId`: re-running reuses the existing record's `matchId`/`createdAt` rather than minting a duplicate (`feature-candidates.ts`'s `buildCandidate` mints a fresh `matchId` on every ranking pass, harmless there since nothing persists it — this CLI is what makes persistence safe). |
+| CLI                                | npm script                                         | Effect                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| ---------------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `src/scripts/premiere-schedule.ts` | `premiere:schedule --episode=<id> --at=<ISO-8601>` | `candidate`/`scheduled` → `scheduled`, sets `scheduledAt`. Premiere-lane only. **Also this lane's promote step** — a premiere-lane record only enters the store here, and this is where `participants` gets resolved (see below), so there is no separate `premiere:promote`. Refuses to resurrect a `cancelled` record. Re-validates the **whole** resulting schedule before writing.                                                                                                                                                     |
+| `src/scripts/premiere-publish.ts`  | `premiere:publish --episode=<id>`                  | `scheduled` → `published` — the explicit "yes, run this one" signal that `pq_claim_scheduled_due` (§1.2) actually keys off. Also best-effort syncs a `FeaturedMatch`-owned retention pin (§6). Refuses (defense in depth) a record with zero `participants`.                                                                                                                                                                                                                                                                               |
+| `src/scripts/premiere-cancel.ts`   | `premiere:cancel --episode=<id>`                   | `scheduled`/`published` → `cancelled` (terminal, not deleted — stays as an audit trail). Frees the `scheduledAt` slot and removes this record's own retention-pin ownership.                                                                                                                                                                                                                                                                                                                                                               |
+| `src/scripts/premiere-validate.ts` | `premiere:validate`                                | Reports every scheduling problem (past-dated slots, collisions, a scheduled record whose source queue item vanished from `ready/`). Non-zero exit on any issue — safe in cron/CI ahead of `premiere:publish`. **Run this after any manual edit to `featured-matches.json`.**                                                                                                                                                                                                                                                               |
+| `src/scripts/feature-promote.ts`   | `feature:promote --episode=<episodeRequestId>`     | The archive lane's promote step — `feature:candidates` stays read-only by design, so this is the one CLI that upserts a ranked archive-lane candidate's draft into the store (via the same lock-protected `upsertRecord`). Idempotent by `episodeRequestId`: re-running reuses the existing record's `matchId`/`createdAt` rather than minting a duplicate (`feature-candidates.ts`'s `buildCandidate` mints a fresh `matchId` on every ranking pass, harmless there since nothing persists it — this CLI is what makes persistence safe). |
 
 **Participant resolution (fixed 2026-08-01):** a premiere-lane candidate's
 `participants` used to be permanently `[]` — `premiere-candidates.ts`
@@ -428,22 +431,22 @@ Terminal: `revealed`, `failed`, `cancelled`, `archived`.
 > This is a **different** state machine from the `FeaturedMatch` scheduling
 > states in §2 (`candidate`/`scheduled`/`published`/`revealed`/`archived`/`cancelled`).
 > The names overlap but the scopes don't: `FeaturedMatch` state tracks an
-> operator's *plan*; `PremiereState` tracks the *live runtime* once admitted.
+> operator's _plan_; `PremiereState` tracks the _live runtime_ once admitted.
 
 `allowedTransitions` (`ReplayPremiereStateMachine.ts:106-124`):
 
-| From | Action | To | Actor | Guard |
-|---|---|---|---|---|
-| `draft` | `publish` | `scheduled` | operator | `VerifiedPremiereEligibilityGate` |
-| `draft` | `cancel` | `cancelled` | operator | reason `cancelled_by_operator` \| `source_ineligible` |
-| `scheduled` | `start` | `playing` | service | `serviceReady: true` |
-| `scheduled` | `cancel` | `cancelled` | operator | reason as above |
-| `playing` | `open_checkpoint` | `checkpoint` | service | — |
-| `playing` | `reveal` | `revealed` | service | `VerifiedPremiereRevealGate` (terminal-chunk chain) |
-| `playing` | `fail` | `failed` | operator or service | reason `integrity_failure` \| `outage_exceeded` \| `runtime_failure` |
-| `checkpoint` | `resume` | `playing` | service | — |
-| `checkpoint` | `fail` | `failed` | operator or service | reason as above |
-| `revealed` \| `failed` \| `cancelled` | `archive` | `archived` | operator or service | — |
+| From                                  | Action            | To           | Actor               | Guard                                                                |
+| ------------------------------------- | ----------------- | ------------ | ------------------- | -------------------------------------------------------------------- |
+| `draft`                               | `publish`         | `scheduled`  | operator            | `VerifiedPremiereEligibilityGate`                                    |
+| `draft`                               | `cancel`          | `cancelled`  | operator            | reason `cancelled_by_operator` \| `source_ineligible`                |
+| `scheduled`                           | `start`           | `playing`    | service             | `serviceReady: true`                                                 |
+| `scheduled`                           | `cancel`          | `cancelled`  | operator            | reason as above                                                      |
+| `playing`                             | `open_checkpoint` | `checkpoint` | service             | —                                                                    |
+| `playing`                             | `reveal`          | `revealed`   | service             | `VerifiedPremiereRevealGate` (terminal-chunk chain)                  |
+| `playing`                             | `fail`            | `failed`     | operator or service | reason `integrity_failure` \| `outage_exceeded` \| `runtime_failure` |
+| `checkpoint`                          | `resume`          | `playing`    | service             | —                                                                    |
+| `checkpoint`                          | `fail`            | `failed`     | operator or service | reason as above                                                      |
+| `revealed` \| `failed` \| `cancelled` | `archive`         | `archived`   | operator or service | —                                                                    |
 
 Every transition emits a `PremiereTransitionAuditEvent` (action, `fromState`,
 `toState`, actor, `occurredAt`, `lifecycleVersion`,
@@ -464,7 +467,7 @@ not a bare function). It:
 2. Verifies a `VerifiedPremiereRevealGate` (locked lifecycle + publication
    gate + the terminal chunk + the last published chunk).
 3. Calls `transitionPremiereLifecycle(current, { action: "reveal", actor:
-   "service", occurredAt: terminal.revealedAt, gate })` — the state-machine
+"service", occurredAt: terminal.revealedAt, gate })` — the state-machine
    transition from §4.
 4. Builds the `PremiereRevealResponse` (outcome, seeds, checkpoint id,
    signature) and the `PremiereRevealPointerResponse` (indirect manifest
@@ -551,7 +554,7 @@ documented in §4–§5, but lives in its own read-only-to-this-doc subsystem:
   `b = max(20, round(5 × outcomeCount))` (`liquidityForOutcomeCount`).
 - `ReplayPremiereMarketRules.ts` — `STARTING_BANKROLL = 1000`,
   `MIN_STAKE = 10`. Max stake is **not** a fixed constant — `maxStake(bankroll)
-  = floor(bankroll / 2)`, a dynamic 50%-of-bankroll cap enforced by
+= floor(bankroll / 2)`, a dynamic 50%-of-bankroll cap enforced by
   `validateBuyStake`. Sells are never stake-limited (they return money;
   only holdings matter).
 - `ReplayPremiereInteractions.ts` — the coupling point: `mutate(transaction)`
@@ -626,7 +629,7 @@ stale slot is visible without re-deriving it by hand.
 by default) + `EventPackageGate.ts`. An `EventPackage` is the typed,
 operator-generated completeness record layered on top of one
 `FeaturedMatch`: title, subtitle, evidence-backed reason-to-watch
-(`claims[]`), map/format, schedule, Director Cut estimate, canonical
+(`claims[]`), map/format, schedule, canonical
 `/match/:matchId` and `/premiere/:premiereId` URLs, and an embargo
 checklist.
 
@@ -640,7 +643,7 @@ demoted to ordinary archive presentation, never removed) when it is
 missing ANY of: a package at all, title/subtitle, at least one
 reason-to-watch claim, a canonical episode reference (premiere lane),
 full participant identity + exact version resolution for every seat, map
-or format, a scheduled time (premiere lane), a Director Cut estimate, a
+or format, a scheduled time (premiere lane), a
 canonical match URL, a canonical premiere URL (premiere lane), or a
 self-consistent embargo state.
 
@@ -687,7 +690,7 @@ npm run premiere:package -- --featured=<feat_id> --validate            # read-on
 ```
 
 Interactive-free: every run regenerates the structured/evidence fields
-(claims, map/format, canonical URLs, Director Cut estimate, embargo
+(claims, map/format, canonical URLs, embargo
 default) fresh from the current `FeaturedMatch`/mirror/identity state.
 Operator prose (`title`/`subtitle`/`editorialNotes`) is PRESERVED across
 runs unless the matching `--flag=` is passed, so re-running to refresh
@@ -698,27 +701,13 @@ against the prose fields — a conservative, NEVER-blocking check that
 flags (never rejects) a number or known Agent display name mentioned in
 prose with no matching `claims[]` entry backing it.
 
-**Director Cut estimate, pre- and post-reveal (fixed 2026-08-01).** Post-
-reveal, the estimate still comes from the live league mirror's matching
-episode row. Pre-reveal, a premiere-lane record's `episodeRequestId`
-structurally cannot appear in that mirror yet (`premiere:schedule`
-itself refuses a fresh candidate whose id already does), so this now
-falls back to `DirectorCutPlan.estimatePreRevealDirectorCutSeconds` —
-the same rate/anchor math `buildDirectorCutPlan` uses for a real match,
-fed a structural (never narrative) turn-span partition built ONLY from
-the sealed bundle's own `meta.json` (`turnCount`/`checkpointTurns`, read
-via a narrow, non-passthrough schema — `resolveSealedBundleTurnStats` in
-`premiere-candidates.ts` — so a poisoned/future `meta.json` can never
-leak a result-bearing field into this estimate). `--queue-root=`
-resolves the sealed bundle the same way `premiere:schedule` does.
-
 ### 8.5 Weekly programming workflow — `season:program-week`
 
 ```bash
-npm run season:program-week                                    # dry run: preview, no writes
-npm run season:program-week -- --execute                       # commit
-npm run season:program-week -- --episode=<id> --execute         # override auto-pick
-npm run season:program-week -- --at=2026-08-08T18:00:00Z --execute  # override the cadence slot
+npm run season:program-week                                        # dry run: preview, no writes
+npm run season:program-week -- --execute                           # commit
+npm run season:program-week -- --episode= < id > --execute         # override auto-pick
+npm run season:program-week -- --at=2026-08-08T18:00:00Z --execute # override the cadence slot
 ```
 
 Matches the doc's own cadence: **one flagship Featured Event per week**,
@@ -783,4 +772,3 @@ one-off override or to inspect an individual step) is unchanged:
   comments reference it directly, but root cause was never investigated.
   Current workaround is re-admitting with a fresh premiere id and confirming
   via `curl` before opening a browser.
-

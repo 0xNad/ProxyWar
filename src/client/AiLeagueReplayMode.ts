@@ -71,8 +71,8 @@ const spectatorNameByAgentName = new Map<string, string>([
  * P0 fix (2026-08-03, deploy 2B): the "Anonymous Names" user setting
  * (UserSettings.anonymousNames(), Settings modal) already hides player
  * identities on the ordinary multiplayer lobby/game surfaces
- * (LobbyPlayerView.ts) but was never wired into the AI League replay/
- * Director Cut surface at all -- a viewer with the setting ON still saw
+ * (LobbyPlayerView.ts) but was never wired into the AI League replay
+ * surface at all -- a viewer with the setting ON still saw
  * every real agent name streaming through the War Room feed, the
  * headline lower-third toasts, the social/diplomacy transcript, and the
  * decision log, because every one of those already funnels its display

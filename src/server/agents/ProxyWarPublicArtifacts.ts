@@ -34,18 +34,10 @@
  * (`AgentSpectatorTelemetry.ts` — zero references to the raw-field names)
  * — kept.
  *
- * `director-cut-plan.json` (product overhaul spec Stage 5): built purely
- * from `SpectatorEvent[]` data already public via `spectator-telemetry.json`
- * — turn ranges, a coarse speed tier, an `eventReason` enum, an importance
- * number, and display names already public elsewhere. No decision reason
- * strings, no LLM prompt/output, no field `AgentDecisionRecord`/
- * `DecisionLogEntry` carries privately — see `DirectorCutPlan.ts`'s own
- * doc for the exact derivation.
- *
  * `match-recap.json` ("drama recaps" gap closure): the public match page's
  * event-derived recap — factual sentences built ONLY from
  * `SpectatorEvent.message`/`actorName`/`targetName`/`turnNumber`, the same
- * already-public fields `director-cut-plan.json` derives from. Deliberately
+ * already-public fields exposed via `spectator-telemetry.json`. Deliberately
  * NOT `match-story.json`/`drama-report.json` (both stay OFF this list —
  * `AgentMatchRecap.ts`'s own doc explains why those two stay
  * ranking/evidence signals, read directly off disk by
@@ -85,7 +77,6 @@ export const proxyWarPublicRunArtifacts = [
   "behavior-quality-report.json",
   "behavior-quality-report.md",
   "external-agent-feedback.md",
-  "director-cut-plan.json",
   "match-recap.json",
   "match-state-series.json",
   "decisive-moments.json",

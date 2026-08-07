@@ -2,6 +2,8 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
+import { AGENT_MATCH_RECAP_SCHEMA_VERSION } from "../../../src/server/agents/AgentMatchRecap";
+import type { CoworldLeagueEpisodeRow } from "../../../src/server/agents/CoworldLeagueSiteWriter";
 import {
   buildLeagueEpisodeMatchPageModel,
   buildLeagueEpisodeParticipantCards,
@@ -14,8 +16,6 @@ import {
   readCoworldLeagueEpisodesFromDataJson,
   readLeagueEpisodeRecap,
 } from "../../../src/server/agents/LeagueEpisodeMatchPage";
-import { AGENT_MATCH_RECAP_SCHEMA_VERSION } from "../../../src/server/agents/AgentMatchRecap";
-import type { CoworldLeagueEpisodeRow } from "../../../src/server/agents/CoworldLeagueSiteWriter";
 import {
   FIXTURE_AGENTS,
   FIXTURE_BUILDERS,
@@ -29,7 +29,9 @@ const identity: IdentityRegistrySnapshot = {
   versions: FIXTURE_VERSIONS,
 };
 
-function episode(overrides: Partial<CoworldLeagueEpisodeRow> = {}): CoworldLeagueEpisodeRow {
+function episode(
+  overrides: Partial<CoworldLeagueEpisodeRow> = {},
+): CoworldLeagueEpisodeRow {
   return {
     episodeRequestId: "ereq_test-episode-0001",
     shortId: "testepisode1",
@@ -42,10 +44,25 @@ function episode(overrides: Partial<CoworldLeagueEpisodeRow> = {}): CoworldLeagu
     degradedCount: 10,
     winnerName: "FixtureFrostfall",
     players: [
-      { slot: 0, name: "FixtureFrostfall", tilesOwned: 200_000, isAlive: true, isWinner: true, color: "#6fa8dc" },
-      { slot: 1, name: "FixtureGhostRaider", tilesOwned: 20_000, isAlive: false, isWinner: false, color: "#e06666" },
+      {
+        slot: 0,
+        name: "FixtureFrostfall",
+        tilesOwned: 200_000,
+        isAlive: true,
+        isWinner: true,
+        color: "#6fa8dc",
+      },
+      {
+        slot: 1,
+        name: "FixtureGhostRaider",
+        tilesOwned: 20_000,
+        isAlive: false,
+        isWinner: false,
+        color: "#e06666",
+      },
     ],
-    watchHref: "/ai-league-runs/league-coworld-test-episode-0001/spectator.html",
+    watchHref:
+      "/ai-league-runs/league-coworld-test-episode-0001/spectator.html",
     fullRenderHref: "/ai-league-replay/league-coworld-test-episode-0001",
     ...overrides,
   };
@@ -74,7 +91,9 @@ describe("parseMatchRecapArtifact", () => {
   test("extracts the summary and formats each beat as 'Turn N: message' from the real AgentMatchRecap shape", () => {
     const recap = parseMatchRecapArtifact(AGENT_MATCH_RECAP_JSON);
     expect(recap).not.toBeNull();
-    expect(recap?.summary).toBe("This match featured 1 first strike and 1 betrayal.");
+    expect(recap?.summary).toBe(
+      "This match featured 1 first strike and 1 betrayal.",
+    );
     expect(recap?.beats).toEqual([
       "Turn 812: Frostfall strikes first against Ghost Raider.",
       "Turn 1930: Ghost Raider breaks alliance with Frostfall.",
@@ -89,13 +108,19 @@ describe("parseMatchRecapArtifact", () => {
     const wrongVersion = JSON.stringify({
       schemaVersion: AGENT_MATCH_RECAP_SCHEMA_VERSION + 1,
       summary: "x",
-      beats: [{ turnNumber: 1, kind: "elimination", message: "x is eliminated." }],
+      beats: [
+        { turnNumber: 1, kind: "elimination", message: "x is eliminated." },
+      ],
     });
     expect(parseMatchRecapArtifact(wrongVersion)).toBeNull();
   });
 
   test("returns null when both the summary and every beat are absent — never a fabricated placeholder", () => {
-    const empty = JSON.stringify({ schemaVersion: AGENT_MATCH_RECAP_SCHEMA_VERSION, summary: "", beats: [] });
+    const empty = JSON.stringify({
+      schemaVersion: AGENT_MATCH_RECAP_SCHEMA_VERSION,
+      summary: "",
+      beats: [],
+    });
     expect(parseMatchRecapArtifact(empty)).toBeNull();
   });
 
@@ -104,8 +129,16 @@ describe("parseMatchRecapArtifact", () => {
       schemaVersion: AGENT_MATCH_RECAP_SCHEMA_VERSION,
       summary: "",
       beats: [
-        { turnNumber: 5, kind: "elimination", message: "Frostfall is eliminated." },
-        { turnNumber: "not a number", kind: "elimination", message: "bad turn" },
+        {
+          turnNumber: 5,
+          kind: "elimination",
+          message: "Frostfall is eliminated.",
+        },
+        {
+          turnNumber: "not a number",
+          kind: "elimination",
+          message: "bad turn",
+        },
         { turnNumber: 6, kind: "elimination", message: "" },
         { turnNumber: 7 },
       ],
@@ -133,7 +166,10 @@ describe("readLeagueEpisodeRecap", () => {
 
   test("parses a real match-recap.json when present", async () => {
     scratch = await mkdtemp(path.join(tmpdir(), "league-episode-recap-"));
-    await writeFile(path.join(scratch, "match-recap.json"), AGENT_MATCH_RECAP_JSON);
+    await writeFile(
+      path.join(scratch, "match-recap.json"),
+      AGENT_MATCH_RECAP_JSON,
+    );
     const recap = await readLeagueEpisodeRecap(scratch);
     expect(recap).not.toBeNull();
     expect(recap?.beats.length).toBe(2);
@@ -161,7 +197,9 @@ describe("readLeagueEpisodeRecap", () => {
 
 describe("leagueEpisodeRunKey / findLeagueEpisodeRunDir", () => {
   test("derives the managed run key from fullRenderHref first", () => {
-    expect(leagueEpisodeRunKey(episode())).toBe("league-coworld-test-episode-0001");
+    expect(leagueEpisodeRunKey(episode())).toBe(
+      "league-coworld-test-episode-0001",
+    );
   });
 
   test("falls back to watchHref when fullRenderHref is absent", () => {
@@ -199,7 +237,9 @@ describe("readCoworldLeagueEpisodesFromDataJson / findLeagueEpisodeByRequestId",
 
   test("null for a missing file", async () => {
     expect(
-      await readCoworldLeagueEpisodesFromDataJson("/tmp/does-not-exist-data.json"),
+      await readCoworldLeagueEpisodesFromDataJson(
+        "/tmp/does-not-exist-data.json",
+      ),
     ).toBeNull();
   });
 
@@ -224,11 +264,15 @@ describe("readCoworldLeagueEpisodesFromDataJson / findLeagueEpisodeByRequestId",
     await writeFile(file, JSON.stringify({ episodes: [row] }));
     const episodes = await readCoworldLeagueEpisodesFromDataJson(file);
     expect(episodes).not.toBeNull();
-    expect(findLeagueEpisodeByRequestId(episodes!, row.episodeRequestId)).toEqual(row);
+    expect(
+      findLeagueEpisodeByRequestId(episodes!, row.episodeRequestId),
+    ).toEqual(row);
   });
 
   test("lookup for an unknown episodeRequestId returns null (the route's 404 case)", () => {
-    expect(findLeagueEpisodeByRequestId([episode()], "ereq_totally-unknown")).toBeNull();
+    expect(
+      findLeagueEpisodeByRequestId([episode()], "ereq_totally-unknown"),
+    ).toBeNull();
   });
 });
 
@@ -236,8 +280,22 @@ describe("buildLeagueEpisodeMatchPageModel — placement ordering", () => {
   test("winner sorts first regardless of slot order", () => {
     const row = episode({
       players: [
-        { slot: 0, name: "A", tilesOwned: 1000, isAlive: true, isWinner: false, color: "#111111" },
-        { slot: 1, name: "B", tilesOwned: 500, isAlive: true, isWinner: true, color: "#222222" },
+        {
+          slot: 0,
+          name: "A",
+          tilesOwned: 1000,
+          isAlive: true,
+          isWinner: false,
+          color: "#111111",
+        },
+        {
+          slot: 1,
+          name: "B",
+          tilesOwned: 500,
+          isAlive: true,
+          isWinner: true,
+          color: "#222222",
+        },
       ],
     });
     const model = buildLeagueEpisodeMatchPageModel(row, null, null);
@@ -249,9 +307,30 @@ describe("buildLeagueEpisodeMatchPageModel — placement ordering", () => {
   test("ties break by tilesOwned descending among non-winners", () => {
     const row = episode({
       players: [
-        { slot: 0, name: "Low", tilesOwned: 100, isAlive: true, isWinner: false, color: "#111111" },
-        { slot: 1, name: "Winner", tilesOwned: 900, isAlive: true, isWinner: true, color: "#222222" },
-        { slot: 2, name: "High", tilesOwned: 300, isAlive: false, isWinner: false, color: "#333333" },
+        {
+          slot: 0,
+          name: "Low",
+          tilesOwned: 100,
+          isAlive: true,
+          isWinner: false,
+          color: "#111111",
+        },
+        {
+          slot: 1,
+          name: "Winner",
+          tilesOwned: 900,
+          isAlive: true,
+          isWinner: true,
+          color: "#222222",
+        },
+        {
+          slot: 2,
+          name: "High",
+          tilesOwned: 300,
+          isAlive: false,
+          isWinner: false,
+          color: "#333333",
+        },
       ],
     });
     const model = buildLeagueEpisodeMatchPageModel(row, null, null);
@@ -261,8 +340,22 @@ describe("buildLeagueEpisodeMatchPageModel — placement ordering", () => {
   test("a final tilesOwned tie breaks by slot ascending", () => {
     const row = episode({
       players: [
-        { slot: 2, name: "SlotTwo", tilesOwned: 500, isAlive: true, isWinner: false, color: "#111111" },
-        { slot: 0, name: "SlotZero", tilesOwned: 500, isAlive: true, isWinner: false, color: "#222222" },
+        {
+          slot: 2,
+          name: "SlotTwo",
+          tilesOwned: 500,
+          isAlive: true,
+          isWinner: false,
+          color: "#111111",
+        },
+        {
+          slot: 0,
+          name: "SlotZero",
+          tilesOwned: 500,
+          isAlive: true,
+          isWinner: false,
+          color: "#222222",
+        },
       ],
     });
     const model = buildLeagueEpisodeMatchPageModel(row, null, null);
@@ -270,11 +363,14 @@ describe("buildLeagueEpisodeMatchPageModel — placement ordering", () => {
   });
 
   test("carries recap through unchanged and defaults optional fields honestly", () => {
-    const row = episode({ premiereHref: undefined, directorCut: undefined });
-    const model = buildLeagueEpisodeMatchPageModel(row, { summary: "x", beats: ["y"] }, null);
+    const row = episode({ premiereHref: undefined });
+    const model = buildLeagueEpisodeMatchPageModel(
+      row,
+      { summary: "x", beats: ["y"] },
+      null,
+    );
     expect(model.recap).toEqual({ summary: "x", beats: ["y"] });
     expect(model.premiereHref).toBeNull();
-    expect(model.directorCut).toBeNull();
     expect(model.episodeRequestId).toBe(row.episodeRequestId);
     expect(model.runKey).toBe("league-coworld-test-episode-0001");
   });
@@ -308,8 +404,22 @@ describe("leagueEpisodeSpoilerSafeTitle / leagueEpisodeSpoilerSafeDescription", 
     const row = episode({
       winnerName: "PeePee7",
       players: [
-        { slot: 0, name: "Captain Underpants", tilesOwned: 1, isAlive: false, isWinner: false, color: "#111" },
-        { slot: 1, name: "PeePee7", tilesOwned: 999_999, isAlive: true, isWinner: true, color: "#222" },
+        {
+          slot: 0,
+          name: "Captain Underpants",
+          tilesOwned: 1,
+          isAlive: false,
+          isWinner: false,
+          color: "#111",
+        },
+        {
+          slot: 1,
+          name: "PeePee7",
+          tilesOwned: 999_999,
+          isAlive: true,
+          isWinner: true,
+          color: "#222",
+        },
       ],
     });
     const title = leagueEpisodeSpoilerSafeTitle(row);
@@ -323,10 +433,38 @@ describe("leagueEpisodeSpoilerSafeTitle / leagueEpisodeSpoilerSafeDescription", 
   test("caps the roster at two names plus a '+N more' suffix for larger matches", () => {
     const row = episode({
       players: [
-        { slot: 0, name: "A", tilesOwned: 1, isAlive: true, isWinner: false, color: "#111" },
-        { slot: 1, name: "B", tilesOwned: 1, isAlive: true, isWinner: false, color: "#222" },
-        { slot: 2, name: "C", tilesOwned: 1, isAlive: true, isWinner: false, color: "#333" },
-        { slot: 3, name: "D", tilesOwned: 1, isAlive: true, isWinner: false, color: "#444" },
+        {
+          slot: 0,
+          name: "A",
+          tilesOwned: 1,
+          isAlive: true,
+          isWinner: false,
+          color: "#111",
+        },
+        {
+          slot: 1,
+          name: "B",
+          tilesOwned: 1,
+          isAlive: true,
+          isWinner: false,
+          color: "#222",
+        },
+        {
+          slot: 2,
+          name: "C",
+          tilesOwned: 1,
+          isAlive: true,
+          isWinner: false,
+          color: "#333",
+        },
+        {
+          slot: 3,
+          name: "D",
+          tilesOwned: 1,
+          isAlive: true,
+          isWinner: false,
+          color: "#444",
+        },
       ],
     });
     const title = leagueEpisodeSpoilerSafeTitle(row);
@@ -336,14 +474,18 @@ describe("leagueEpisodeSpoilerSafeTitle / leagueEpisodeSpoilerSafeDescription", 
   test("handles a null roundNumber without claiming a round it doesn't have", () => {
     const row = episode({ roundNumber: null });
     expect(leagueEpisodeSpoilerSafeTitle(row)).not.toContain("Round");
-    expect(leagueEpisodeSpoilerSafeDescription(row)).toContain("an unnumbered round");
+    expect(leagueEpisodeSpoilerSafeDescription(row)).toContain(
+      "an unnumbered round",
+    );
   });
 });
 
 describe("buildLeagueEpisodeParticipantCards", () => {
   test("a registered player name resolves full identity (emblem/slug/version/builder)", () => {
     const cards = buildLeagueEpisodeParticipantCards(episode(), identity);
-    const frostfall = cards.find((card) => card.playerName === "FixtureFrostfall");
+    const frostfall = cards.find(
+      (card) => card.playerName === "FixtureFrostfall",
+    );
     expect(frostfall).toBeDefined();
     expect(frostfall?.agentSlug).not.toBeNull();
     expect(frostfall?.emblemSvg).not.toBeNull();

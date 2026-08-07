@@ -9,7 +9,7 @@ import type { AnalyticsEventName } from "./AnalyticsEventSchema";
 
 /**
  * Turns the durable aggregate file into the operator report the phase brief
- * asks for (homepage→watch CTR, replay success, Director Cut milestones,
+ * asks for (homepage→watch CTR, replay success, full-replay milestones,
  * most-watched events, agent-profile CTR, 7-day return, build funnel,
  * claims/releases, failures by route). Every metric is honestly labeled:
  *
@@ -28,7 +28,10 @@ import type { AnalyticsEventName } from "./AnalyticsEventSchema";
 
 export const MIN_SAMPLE_FOR_RATE = 20;
 
-export type MetricStatus = "measured" | "insufficient_traffic" | "not_yet_instrumented";
+export type MetricStatus =
+  | "measured"
+  | "insufficient_traffic"
+  | "not_yet_instrumented";
 
 export interface RateMetric {
   id: string;
@@ -76,8 +79,7 @@ export interface AnalyticsReportModel {
   generatedAt: string;
   homepageToWatchCtr: RateMetric;
   replayLoadSuccessRate: RateMetric;
-  directorCutMilestones: RateMetric[];
-  /** Same milestone events (`watched_30s`/`watched_2m`/`watched_50pct`/`completed`) filtered to `replayMode=full_replay` — reported as raw counts, not rates: unlike Director Cut, Full Replay has no "started" baseline event to divide by. */
+  /** watched_30s/watched_2m/watched_50pct/completed milestone counts, reported as raw counts (not rates) — there is no "started" baseline event scoped to these milestones to divide by. */
   fullReplayMilestones: CountMetric[];
   mostWatchedEvents: RankingMetric;
   agentBuilderProfileCtr: RateMetric;
@@ -107,12 +109,25 @@ function rateMetric(input: {
         ? "insufficient_traffic"
         : "measured";
   const ratePercent =
-    status === "measured" ? Math.round((input.numerator / input.denominator) * 1000) / 10 : null;
+    status === "measured"
+      ? Math.round((input.numerator / input.denominator) * 1000) / 10
+      : null;
   return { ...input, status, ratePercent };
 }
 
-function countMetric(id: string, label: string, count: number, methodology: string): CountMetric {
-  return { id, label, status: count === 0 ? "not_yet_instrumented" : "measured", count, methodology };
+function countMetric(
+  id: string,
+  label: string,
+  count: number,
+  methodology: string,
+): CountMetric {
+  return {
+    id,
+    label,
+    status: count === 0 ? "not_yet_instrumented" : "measured",
+    count,
+    methodology,
+  };
 }
 
 function rankingMetric(
@@ -126,7 +141,13 @@ function rankingMetric(
     .map(([key, count]) => ({ key, count }))
     .sort((a, b) => b.count - a.count)
     .slice(0, limit);
-  return { id, label, status: items.length === 0 ? "not_yet_instrumented" : "measured", items, methodology };
+  return {
+    id,
+    label,
+    status: items.length === 0 ? "not_yet_instrumented" : "measured",
+    items,
+    methodology,
+  };
 }
 
 function routeBreakdownMetric(
@@ -138,10 +159,19 @@ function routeBreakdownMetric(
   const items = Object.entries(counts)
     .map(([route, count]) => ({ route, count }))
     .sort((a, b) => b.count - a.count);
-  return { id, label, status: items.length === 0 ? "not_yet_instrumented" : "measured", items, methodology };
+  return {
+    id,
+    label,
+    status: items.length === 0 ? "not_yet_instrumented" : "measured",
+    items,
+    methodology,
+  };
 }
 
-function totalAll(file: AnalyticsAggregateFile, names: readonly AnalyticsEventName[]): number {
+function totalAll(
+  file: AnalyticsAggregateFile,
+  names: readonly AnalyticsEventName[],
+): number {
   return names.reduce((sum, name) => sum + totalEventCount(file, name), 0);
 }
 
@@ -150,59 +180,36 @@ export function buildAnalyticsReport(
   now: Date = new Date(),
 ): AnalyticsReportModel {
   const homepagePageViews = mergedRouteCounts(file, "page_viewed")["/"] ?? 0;
-  const homepageCtaClicks = mergedRouteCounts(file, "event_cta_clicked")["/"] ?? 0;
+  const homepageCtaClicks =
+    mergedRouteCounts(file, "event_cta_clicked")["/"] ?? 0;
 
   const replayStarted = totalEventCount(file, "replay_load_started");
   const replaySucceeded = totalEventCount(file, "replay_load_succeeded");
 
-  const directorCutStarted = totalEventCount(file, "director_cut_started");
   const WATCH_MILESTONES = [
     { name: "watched_30s" as const, label: "reached 30s" },
     { name: "watched_2m" as const, label: "reached 2 minutes" },
     { name: "watched_50pct" as const, label: "reached 50%" },
     { name: "completed" as const, label: "completed" },
   ];
-  // Both Director Cut and Full Replay viewers emit the SAME watched_*/
-  // completed event names — only `context.replayMode` distinguishes them.
-  // Dividing the TOTAL (both modes combined) by `director_cut_started`
-  // could exceed 100% whenever Full Replay viewers also cross a milestone;
-  // filtering each numerator to `replayMode=director_cut` keeps this rate
-  // bounded to what actually happened in Director Cut sessions.
-  const directorCutMilestones: RateMetric[] = WATCH_MILESTONES.map(
-    ({ name, label }) =>
-      rateMetric({
-        id: `director_cut_${name}`,
-        label: `Director Cut: ${label}`,
-        numerator: mergedDimensionCounts(file, name, "replayMode").director_cut ?? 0,
-        denominator: directorCutStarted,
-        methodology: `${name} events with context.replayMode="director_cut" ÷ director_cut_started events, all-time. Filtered by mode so a Full Replay viewer's milestone never inflates this rate past 100%.`,
-      }),
-  );
-  // Full Replay has no equivalent "started" event to divide by (there is
-  // no director_cut_started-shaped signal for "began watching without
-  // Director Cut"), so these are reported as raw counts — per the
-  // overinterpretation rule, a rate with a fabricated denominator would be
-  // worse than an honest count.
   const fullReplayMilestones: CountMetric[] = WATCH_MILESTONES.map(
     ({ name, label }) =>
       countMetric(
         `full_replay_${name}`,
         `Full Replay: ${label}`,
-        mergedDimensionCounts(file, name, "replayMode").full_replay ?? 0,
-        `${name} events with context.replayMode="full_replay", all-time raw count — no "started" baseline event exists for Full Replay viewing to divide by.`,
+        totalEventCount(file, name),
+        `${name} events, all-time raw count — no "started" baseline event exists for replay viewing to divide by.`,
       ),
   );
 
-  // Grouped by matchId (not eventSlug — director_cut_started never carries
-  // an eventSlug, so that grouping was structurally always empty). Raw
-  // match ids here; `applyMatchLabels` resolves them to a human label at
-  // report-serve time (read-model lookup), falling back to the raw id
-  // when no label is available.
+  // Grouped by matchId. Raw match ids here; `applyMatchLabels` resolves
+  // them to a human label at report-serve time (read-model lookup),
+  // falling back to the raw id when no label is available.
   const mostWatchedEvents = rankingMetric(
     "most_watched_events",
     "Most-watched matches",
-    mergedDimensionCounts(file, "director_cut_started", "matchId"),
-    "director_cut_started events grouped by match id, ranked descending, all-time. Labeled via a read-model lookup at report-serve time where available, otherwise the raw match id.",
+    mergedDimensionCounts(file, "replay_load_started", "matchId"),
+    "replay_load_started events grouped by match id, ranked descending, all-time. Labeled via a read-model lookup at report-serve time where available, otherwise the raw match id.",
   );
 
   const agentBuilderProfileOpens =
@@ -212,9 +219,9 @@ export function buildAnalyticsReport(
     id: "agent_builder_profile_ctr",
     label: "Agent/Builder profile click-through",
     numerator: agentBuilderProfileOpens,
-    denominator: directorCutStarted,
+    denominator: replayStarted,
     methodology:
-      "(agent_profile_opened_from_match + builder_profile_opened) ÷ director_cut_started, all-time.",
+      "(agent_profile_opened_from_match + builder_profile_opened) ÷ replay_load_started, all-time.",
   });
 
   // `returning_anonymous_visitor` is emitted client-side at most ONCE per
@@ -239,7 +246,12 @@ export function buildAnalyticsReport(
   // anonymous signal, but it still describes a DIFFERENT population (
   // signed-in returners) than "share of all page views" answers for —
   // reported as its own raw count below instead.
-  const returningAnonymous7d = trailingEventCount(file, "returning_anonymous_visitor", 7, now);
+  const returningAnonymous7d = trailingEventCount(
+    file,
+    "returning_anonymous_visitor",
+    7,
+    now,
+  );
   const pageViews7d = trailingEventCount(file, "page_viewed", 7, now);
   const sevenDayReturnRate = rateMetric({
     id: "returning_anonymous_visitor_day_share_7d",
@@ -254,7 +266,7 @@ export function buildAnalyticsReport(
     "returning_authenticated_visitor_7d",
     "Returning authenticated visits (trailing 7 days)",
     trailingEventCount(file, "returning_authenticated_visitor", 7, now),
-    "returning_authenticated_visitor events, trailing 7 UTC days — emitted server-side ONLY for a genuinely GitHub-linked account whose session cookie already existed (see PlatformAccountHttp.ts), never for a plain returning guest. A raw count, not folded into sevenDayReturnRate's numerator or divided by page_viewed: a signed-in return is a materially different, much rarer signal than \"any returning visit,\" and blending it back in would reintroduce the same double-count this split exists to avoid.",
+    'returning_authenticated_visitor events, trailing 7 UTC days — emitted server-side ONLY for a genuinely GitHub-linked account whose session cookie already existed (see PlatformAccountHttp.ts), never for a plain returning guest. A raw count, not folded into sevenDayReturnRate\'s numerator or divided by page_viewed: a signed-in return is a materially different, much rarer signal than "any returning visit," and blending it back in would reintroduce the same double-count this split exists to avoid.',
   );
 
   // A true cohort metric ("of visitors seen on day N, what share were
@@ -279,30 +291,42 @@ export function buildAnalyticsReport(
     numerator: 0,
     denominator: 0,
     methodology:
-      "NOT IMPLEMENTED. A true cohort rate (of visitors first seen on day N, the share seen again within 7 days) requires durable per-visitor last-seen retention, which this store deliberately never keeps — see AnalyticsAggregateStore.ts's \"no visitor id is ever written to this file\" contract. sevenDayReturnRate (returning-visitor-day share) is the closest available honest proxy and is reported separately, explicitly labeled as a proxy, never substituted here.",
+      'NOT IMPLEMENTED. A true cohort rate (of visitors first seen on day N, the share seen again within 7 days) requires durable per-visitor last-seen retention, which this store deliberately never keeps — see AnalyticsAggregateStore.ts\'s "no visitor id is ever written to this file" contract. sevenDayReturnRate (returning-visitor-day share) is the closest available honest proxy and is reported separately, explicitly labeled as a proxy, never substituted here.',
   });
 
   const builderFunnel: FunnelStageMetric = {
     id: "builder_funnel",
     label: "Build flow funnel",
     stages: [
-      { stage: "build_flow_started", count: totalEventCount(file, "build_flow_started") },
+      {
+        stage: "build_flow_started",
+        count: totalEventCount(file, "build_flow_started"),
+      },
       {
         stage: "build_step_reached (final step)",
-        count: mergedDimensionCounts(file, "build_step_reached", "step")["7"] ?? 0,
+        count:
+          mergedDimensionCounts(file, "build_step_reached", "step")["7"] ?? 0,
       },
       {
         stage: "registration_draft_submitted",
         count: totalEventCount(file, "registration_draft_submitted"),
       },
     ],
-    status: totalEventCount(file, "build_flow_started") === 0 ? "not_yet_instrumented" : "measured",
+    status:
+      totalEventCount(file, "build_flow_started") === 0
+        ? "not_yet_instrumented"
+        : "measured",
     methodology:
       "Raw counts per stage, all-time: flow started, reached the final (7th) build step, draft submitted. Season Zero traffic is expected to be small — report raw counts, not conversion percentages, per the threshold doc's overinterpretation rule.",
   };
 
   const claimsAndReleases: CountMetric[] = [
-    countMetric("claim_started", "Claims started", totalEventCount(file, "claim_started"), "claim_started events, all-time."),
+    countMetric(
+      "claim_started",
+      "Claims started",
+      totalEventCount(file, "claim_started"),
+      "claim_started events, all-time.",
+    ),
     countMetric(
       "claim_verified",
       "Claims verified",
@@ -343,7 +367,8 @@ export function buildAnalyticsReport(
       label: "Homepage → watch CTR",
       numerator: homepageCtaClicks,
       denominator: homepagePageViews,
-      methodology: "event_cta_clicked ÷ page_viewed, both on route \"/\", all-time.",
+      methodology:
+        'event_cta_clicked ÷ page_viewed, both on route "/", all-time.',
     }),
     replayLoadSuccessRate: rateMetric({
       id: "replay_load_success_rate",
@@ -352,7 +377,6 @@ export function buildAnalyticsReport(
       denominator: replayStarted,
       methodology: "replay_load_succeeded ÷ replay_load_started, all-time.",
     }),
-    directorCutMilestones,
     fullReplayMilestones,
     mostWatchedEvents,
     agentBuilderProfileCtr,
@@ -389,6 +413,9 @@ export function applyMatchLabels(
 }
 
 /** True once at least one of the catalog's events has ever been recorded — lets the report shell distinguish "collector idle" from "collector never received a single event." */
-export function hasAnyAnalyticsData(file: AnalyticsAggregateFile, names: readonly AnalyticsEventName[]): boolean {
+export function hasAnyAnalyticsData(
+  file: AnalyticsAggregateFile,
+  names: readonly AnalyticsEventName[],
+): boolean {
   return totalAll(file, names) > 0;
 }
