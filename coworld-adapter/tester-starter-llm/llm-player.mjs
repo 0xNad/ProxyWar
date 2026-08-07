@@ -138,27 +138,19 @@ function buildState(obs, actions) {
       relation: p.relation,
       canAttack: p.canAttack,
     }));
-  // The model plans in KINDS + rival NAMES (see the reply format), and choose()
-  // re-grounds the plan in the live menu every decision — so the prompt carries
-  // a per-kind COUNT summary instead of all ~60-95 menu entries. That cuts the
-  // prompt ~67% (measured), which is most of the agent's cost. High-risk
-  // options (nukes/MIRV) stay verbatim: the model must see them to authorize
-  // them via preferKinds + target. The anti-loop avoid-list stays local in
-  // choose() — the model never needed the opaque IDs. If you want the model to
-  // see every entry again, rebuild the old field from `actions` here.
-  const legalKinds = {};
-  for (const a of actions) legalKinds[a.kind] = (legalKinds[a.kind] || 0) + 1;
-  const highRisk = actions
-    .filter((a) => a.risk?.level === "high")
-    .map((a) => ({
-      kind: a.kind,
-      label: clean(a.label),
-      ...(a.metadata?.cost !== undefined ? { cost: a.metadata.cost } : {}),
-    }));
+  const legal = actions.map((a) => ({
+    id: a.id,
+    kind: a.kind,
+    label: clean(a.label),
+    risk: a.risk?.level,
+    ...(a.metadata?.cost !== undefined ? { cost: a.metadata.cost } : {}),
+  }));
   // Optional economy block (server flag; absent on most matches today). When
   // present, surface idle factories + top trade dependency + bottleneck in ONE
   // compact line (<=300 chars). When absent, the state is byte-identical to
-  // the shape above.
+  // the shape above. NOTE: tests/coworld/StarterEconomyState.test.ts evals
+  // clean() and buildState() extracted from this file's source text — keep
+  // both functions self-contained.
   let econ;
   if (obs.economy) {
     const f = obs.economy.factoryStatusCounts || {};
@@ -187,8 +179,8 @@ function buildState(obs, actions) {
     phase: obs.phase,
     self,
     rivals,
-    legalKinds,
-    highRisk,
+    avoid: avoidActionIDs(),
+    legalActions: legal,
     ...(econ ? { econ } : {}),
   };
 }

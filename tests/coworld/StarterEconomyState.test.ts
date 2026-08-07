@@ -39,8 +39,11 @@ async function loadBuildState(): Promise<
   const source = await fs.readFile(STARTER_FILE, "utf8");
   const cleanSrc = extractFunction(source, "clean");
   const buildStateSrc = extractFunction(source, "buildState");
+  // buildState references the module-level avoidActionIDs(); stub it with the
+  // empty-history result so the extracted function runs standalone. Both the
+  // legacy and economy paths share the stub, so byte-shape comparisons hold.
   return new Function(
-    `${cleanSrc}\n${buildStateSrc}\nreturn buildState;`,
+    `function avoidActionIDs() { return []; }\n${cleanSrc}\n${buildStateSrc}\nreturn buildState;`,
   )() as (obs: unknown, actions: unknown[]) => Record<string, unknown>;
 }
 
@@ -145,8 +148,18 @@ describe("tester-starter-llm buildState economy line", () => {
             canAttack: true,
           },
         ],
-        legalKinds: { attack: 1, hold: 1, nuke: 1 },
-        highRisk: [{ kind: "nuke", label: "MIRV Sefirot", cost: "25000000" }],
+        avoid: [],
+        legalActions: [
+          { id: "attack:1", kind: "attack", label: "Attack Sefirot", risk: "medium" },
+          { id: "hold", kind: "hold", label: "Hold", risk: "none" },
+          {
+            id: "nuke:1",
+            kind: "nuke",
+            label: "MIRV Sefirot",
+            risk: "high",
+            cost: "25000000",
+          },
+        ],
       }),
     );
     expect("econ" in state).toBe(false);
