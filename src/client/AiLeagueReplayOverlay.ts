@@ -310,11 +310,7 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
     void resolveAiLeagueIdentities().then((resolved) => {
       identityByPlayerName = resolved;
       if (!overlay.isConnected) return;
-      mountAiLeagueBroadcastDrawer(
-        overlay,
-        currentInput,
-        identityByPlayerName,
-      );
+      mountAiLeagueBroadcastDrawer(overlay, currentInput, identityByPlayerName);
     });
   }
   let clipControl = mountReplayDetailsBindings(
