@@ -1143,9 +1143,10 @@ export function parseCuratedDramaScore(matchRecapRaw: string): number | null {
 // kept as a second-tier fallback for the rarer case where telemetry is
 // missing or fails validation. Every field `buildAgentSpectatorTelemetry`
 // actually reads off `AgentDecisionRecord` (`chosenActionID/Kind/Metadata`,
-// `intent`, `sequence`, `turnNumber`, `agentID`, `audit.after.playerID`)
-// survives that projection intact, so decisions.jsonl alone is enough to
-// rebuild an equivalent event stream without a new game-record/replay parser.
+// `intent`, `sequence`, `turnNumber`, `agentID`, `audit.after.playerID`,
+// `economyFacts`, and the deal-stamp `decisionMetadata` keys) survives that
+// projection intact, so decisions.jsonl alone is enough to rebuild an
+// equivalent event stream without a new game-record/replay parser.
 // ---------------------------------------------------------------------------
 
 /**
@@ -1224,14 +1225,49 @@ function metadataRecord(
 }
 
 /**
+ * Re-nests the eight structured-deal stamps `decisionLogEntry` hoists from
+ * `record.decisionMetadata` onto top-level `DecisionLogEntry` keys back into
+ * the `decisionMetadata` shape `addDealEvents` reads. Verbatim copy — the
+ * seven string stamps plus the `dealApplyAccepted` boolean; wrong-typed keys
+ * are dropped rather than mis-projected. `undefined` when the line carries no
+ * deal stamp at all (any pre-deals or flag-OFF line), keeping those lines'
+ * projection unchanged.
+ */
+function dealDecisionMetadata(
+  record: Record<string, unknown>,
+): Record<string, string | number | boolean | null> | undefined {
+  const projected: Record<string, string | number | boolean | null> = {};
+  const copyString = (key: string) => {
+    const value = asString(record[key]);
+    if (value !== null) {
+      projected[key] = value;
+    }
+  };
+  copyString("dealAction");
+  copyString("dealID");
+  copyString("dealTemplate");
+  copyString("dealCounterpartyID");
+  copyString("dealCounterpartyName");
+  copyString("dealPublicText");
+  if (typeof record.dealApplyAccepted === "boolean") {
+    projected.dealApplyAccepted = record.dealApplyAccepted;
+  }
+  copyString("dealComplianceEvent");
+  return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
+/**
  * Tolerant projection of one `decisions.jsonl` line (a `DecisionLogEntry` —
  * see `AgentDecisionLogWriter.ts`'s `decisionLogEntry`) back into the minimal
  * `AgentDecisionRecord` shape `buildAgentSpectatorTelemetry` reads. Every
  * field it actually consumes round-trips exactly; fields it never reads
  * (`observationSummary`, `decidedAt`, …) get inert placeholders since they
- * don't affect the derived event stream. Malformed/incomplete lines resolve
- * to `null` and are skipped by the caller — one torn line never fails the
- * whole derivation.
+ * don't affect the derived event stream. `economyFacts` and the deal stamps
+ * ride back verbatim (the deal keys re-nested under `decisionMetadata`, where
+ * `addDealEvents` reads them) so economy/deal events survive mirror-side
+ * rebuilds; both are optional and absent on lines stamped before they
+ * existed. Malformed/incomplete lines resolve to `null` and are skipped by
+ * the caller — one torn line never fails the whole derivation.
  */
 function decisionRecordFromMirroredLogLine(
   value: unknown,
@@ -1264,6 +1300,7 @@ function decisionRecordFromMirroredLogLine(
   }
   const auditAfter = asRecord(record.auditAfter);
   const playerID = auditAfter === null ? null : asString(auditAfter.playerID);
+  const economyFacts = asRecord(record.economyFacts);
   return {
     sequence,
     gameID: "",
@@ -1282,7 +1319,12 @@ function decisionRecordFromMirroredLogLine(
     chosenActionID,
     chosenActionKind: chosenActionKind as LegalActionKind,
     reason: "",
+    decisionMetadata: dealDecisionMetadata(record),
     chosenActionMetadata: metadataRecord(record.selectedActionMetadata),
+    economyFacts:
+      economyFacts === null
+        ? undefined
+        : (economyFacts as unknown as AgentDecisionRecord["economyFacts"]),
     intent: (record.generatedIntent ?? null) as AgentDecisionRecord["intent"],
     result: {
       accepted: result.accepted === true,

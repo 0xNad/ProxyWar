@@ -15,8 +15,10 @@ import {
   DEALS_FLAG,
   dealLeagueHarness,
   makeStubLogger,
+  pickWithDeal,
   stubObservation,
   stubVisiblePlayer,
+  type ScriptedPicker,
   type StubSeat,
 } from "./DealTestHarness";
 
@@ -234,13 +236,13 @@ function stripDealMenuEntries(
   }));
 }
 
-async function runHoldLeague(): Promise<{
+async function runHoldLeague(scripts?: ScriptedPicker[][]): Promise<{
   records: AgentDecisionRecord[];
   observations: string[][];
 }> {
   const harness = dealLeagueHarness({
     seats: [A, B, C],
-    scripts: [[], [], []],
+    scripts: scripts ?? [[], [], []],
   });
   for (let step = 0; step < 3; step += 1) {
     await harness.league.runDecisionTurn({ turnNumber: step * 25 });
@@ -301,6 +303,29 @@ describe("structured deals flag — league records, observations, telemetry", ()
         expect(JSON.stringify(parsed)).toBe(off.observations[seat][step]);
       }
     }
+  });
+
+  it("flag OFF: a decision that fills the deal slot changes nothing at all", async () => {
+    // Every seat asks for a deal in the diplomacy slot every step. With the
+    // flag off there is no deal manager, no deal menu entry, and no stamp:
+    // records and observations stay byte-identical to the plain hold run.
+    delete process.env[DEALS_FLAG];
+    const dealSlotScript: ScriptedPicker[] = Array.from({ length: 3 }, () =>
+      pickWithDeal(null, "deal_propose:P_B:non_aggression_pact"),
+    );
+    const baseline = await runHoldLeague();
+    const withDealSlot = await runHoldLeague([
+      dealSlotScript,
+      dealSlotScript,
+      dealSlotScript,
+    ]);
+    expect(JSON.stringify(normalizeRecords(withDealSlot.records))).toBe(
+      JSON.stringify(normalizeRecords(baseline.records)),
+    );
+    expect(JSON.stringify(withDealSlot.observations)).toBe(
+      JSON.stringify(baseline.observations),
+    );
+    expect(JSON.stringify(withDealSlot.records)).not.toContain("deal");
   });
 
   it("flag OFF: telemetry bytes ignore the flag and any stale deal stamps", async () => {

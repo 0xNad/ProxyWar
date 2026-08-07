@@ -1,4 +1,8 @@
 import type { Game } from "../../core/game/Game";
+import {
+  sanitizeStatedReason,
+  STATED_REASON_MAX_LENGTH,
+} from "./AgentDecisiveMoments";
 import type {
   AgentDealObligationKind,
   AgentDealObligationStatus,
@@ -40,6 +44,62 @@ import type {
  *   violation) became impossible through events outside the obligor's control.
  */
 
+/**
+ * Hard cap on a stored agent-authored stated reason (see
+ * `sanitizeDealStatedReason`).
+ */
+export const MAX_DEAL_STATED_REASON_LENGTH = 160;
+
+/**
+ * Sanitizer for AGENT-AUTHORED deal stated reasons before they are stored on
+ * the deal ledger or shipped in an artifact. Returns null for anything that
+ * must not be shipped — `AgentDecision.reason` is `string | null` and null
+ * means the provider produced no stated reason, so the field is OMITTED
+ * rather than filled with substitute text.
+ *
+ * Three layers, in order:
+ * 1. syntactic hygiene — printable ASCII only, collapsed whitespace;
+ * 2. the SHARED content policy `AgentDecisiveMoments.sanitizeStatedReason`
+ *    (starts with a letter, no HTTP/exception/provider-failure vocabulary),
+ *    applied to the full cleaned text so denylisted vocabulary sitting past
+ *    our own cap cannot slip through;
+ * 3. the hard `MAX_DEAL_STATED_REASON_LENGTH` cap.
+ *
+ * Layer 2 is deliberately REUSED, not re-implemented: that denylist exists
+ * because a real production incident shipped a raw LLM-provider error as an
+ * agent's public "stated reason", and this field lands in
+ * `spectator-telemetry.json` — the same class of public run artifact. Its
+ * known cost is false positives (a genuine rationale containing "failed",
+ * "rejected", or "invalid" is dropped); that is the right trade here for the
+ * same reason it was there: the field degrades to honestly absent, and an
+ * absent claim beside a betrayal verdict is strictly better than a provider
+ * stack trace presented as an agent's motive.
+ *
+ * Deliberately NOT `PromptSanitizer.sanitizeUntrustedDisplayString`: that one
+ * keeps non-ASCII text (names must stay readable for theory of mind) and
+ * appends a non-ASCII ellipsis when truncating. This surface is narrated
+ * artifact text with an ASCII-only contract, so layer 1 uses the same
+ * `[^\x20-\x7e]` rule the starter's own `clean()` uses.
+ */
+export function sanitizeDealStatedReason(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const cleaned = value
+    .replace(/[^\x20-\x7e]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (cleaned.length === 0) {
+    return null;
+  }
+  if (
+    sanitizeStatedReason(cleaned.slice(0, STATED_REASON_MAX_LENGTH)) === null
+  ) {
+    return null;
+  }
+  return cleaned.slice(0, MAX_DEAL_STATED_REASON_LENGTH);
+}
+
 export interface AgentDealObligationState {
   dealID: string;
   obligorPlayerID: string;
@@ -57,6 +117,14 @@ export interface AgentDealObligationState {
   resolvedAtStep: number | null;
   resolutionEvidence: string | null;
   forcedResolution: boolean;
+  /**
+   * VIEWER-ONLY. The obligor's OWN stated reason on the decision whose
+   * confirmed effect resolved this obligation (the betrayal's or the kept
+   * promise's rationale, already sanitized). Absent when the resolution came
+   * from the clock (elapsed/forced/moot) or the decision had no stated
+   * reason. NEVER enters any agent's observation — see `AgentDealState`.
+   */
+  obligorStatedReason?: string;
 }
 
 export interface AgentDealState {
@@ -81,6 +149,22 @@ export interface AgentDealState {
   targetName?: string;
   goldAmount?: bigint;
   troopAmount?: number;
+  /**
+   * VIEWER-ONLY. The proposer's own one-line rationale for the offer, taken
+   * from the proposing decision's `AgentDecision.reason` and sanitized
+   * (`sanitizeDealStatedReason`). Absent when that decision had no stated
+   * reason.
+   *
+   * PRIVACY (load-bearing): agent-authored text is never surfaced to another
+   * agent. It rides the ledger, the decision-record stamps, and spectator
+   * telemetry — all viewer/operator artifacts — and is deliberately absent
+   * from every `AgentDeals*View` the observation carries: text written by one
+   * policy and read by another policy's prompt is an instruction-injection
+   * channel. Observations carry structured terms only.
+   */
+  proposerStatedReason?: string;
+  /** VIEWER-ONLY acceptor rationale — same contract as `proposerStatedReason`. */
+  acceptorStatedReason?: string;
   obligations: AgentDealObligationState[];
 }
 
@@ -109,6 +193,13 @@ export interface AgentDealLedgerEvent {
   tone: "info" | "pact" | "trade" | "threat" | "betrayal" | "war";
   importance: number;
   publicText: string;
+  /**
+   * VIEWER-ONLY. The acting agent's OWN stated reason, sanitized and capped —
+   * a CLAIM, kept in its own field so it is never confused with the
+   * server-authored `publicText` FACT. Omitted when there is none. Never
+   * surfaced to any agent (see `AgentDealState.proposerStatedReason`).
+   */
+  statedReason?: string;
   step: number;
 }
 
@@ -387,6 +478,8 @@ function verdictEvent(
   importance: number,
   publicText: string,
   step: number,
+  /** VIEWER-ONLY agent claim; omitted entirely when there is none. */
+  statedReason: string | null = null,
 ): AgentDealLedgerEvent {
   return {
     event,
@@ -399,6 +492,7 @@ function verdictEvent(
     tone,
     importance,
     publicText,
+    ...(statedReason !== null ? { statedReason } : {}),
     step,
   };
 }
@@ -459,6 +553,17 @@ function judgeRecordForObligation(
   events: AgentDealLedgerEvent[],
 ): void {
   const label = DEAL_TEMPLATE_LABELS[deal.template];
+  // VIEWER-ONLY: the obligor's own words on the very decision whose CONFIRMED
+  // effect resolves this obligation — the betrayal's (or the kept promise's)
+  // stated rationale, beside the referee's server-authored verdict but never
+  // merged into it. No extra model call: every decision already carries a
+  // reason. Null (provider failure / no stated reason) omits the field.
+  const statedReason = sanitizeDealStatedReason(record.reason);
+  const attachStatedReason = () => {
+    if (statedReason !== null) {
+      obligation.obligorStatedReason = statedReason;
+    }
+  };
   switch (obligation.kind) {
     case "non_aggression":
     case "trade_security": {
@@ -469,6 +574,7 @@ function judgeRecordForObligation(
       if (hostile !== null) {
         const evidence = `${hostile} on ${obligation.counterpartyName} at step ${step}`;
         resolveObligation(obligation, "violated", step, evidence);
+        attachStatedReason();
         events.push(
           verdictEvent(
             deal,
@@ -478,6 +584,7 @@ function judgeRecordForObligation(
             96,
             `VERDICT: ${obligation.obligorName} violated the pact — ${evidence}.`,
             step,
+            statedReason,
           ),
         );
         return;
@@ -490,6 +597,7 @@ function judgeRecordForObligation(
         if (embargo !== null) {
           const evidence = `${embargo} against ${obligation.counterpartyName} at step ${step}`;
           resolveObligation(obligation, "violated", step, evidence);
+          attachStatedReason();
           events.push(
             verdictEvent(
               deal,
@@ -499,6 +607,7 @@ function judgeRecordForObligation(
               96,
               `VERDICT: ${obligation.obligorName} violated the ${label} — ${evidence}.`,
               step,
+              statedReason,
             ),
           );
         }
@@ -516,6 +625,7 @@ function judgeRecordForObligation(
       if (hostile !== null) {
         const evidence = `${hostile} on ${obligation.targetName ?? obligation.targetPlayerID} at step ${step}`;
         resolveObligation(obligation, "fulfilled", step, evidence);
+        attachStatedReason();
         events.push(
           verdictEvent(
             deal,
@@ -525,6 +635,7 @@ function judgeRecordForObligation(
             70,
             `VERDICT: ${obligation.obligorName} fulfilled the ${label} — ${evidence}.`,
             step,
+            statedReason,
           ),
         );
       }
@@ -551,6 +662,7 @@ function judgeRecordForObligation(
       if (goldMet || troopsMet) {
         const evidence = `cumulative confirmed donations to ${obligation.counterpartyName} reached ${obligation.donatedGold} gold / ${obligation.donatedTroops} troops at step ${step}`;
         resolveObligation(obligation, "fulfilled", step, evidence);
+        attachStatedReason();
         events.push(
           verdictEvent(
             deal,
@@ -560,6 +672,7 @@ function judgeRecordForObligation(
             70,
             `VERDICT: ${obligation.obligorName} fulfilled the ${label} — ${evidence}.`,
             step,
+            statedReason,
           ),
         );
       }

@@ -51,7 +51,16 @@ type ChooseFn = (
   obs: unknown,
 ) => { id: string; kind: string } | undefined;
 
-async function loadChoose(): Promise<ChooseFn> {
+/**
+ * `choose` (the GAME move) and `chooseDealMove` (the deal posture) are now
+ * two independent selections: the starter sends the deal in the separate
+ * `selectedDealActionId` slot ALONGSIDE the game action, so a pact never
+ * costs it a turn. Both are extracted here from the shipped source text.
+ */
+async function loadSelectors(): Promise<{
+  choose: ChooseFn;
+  dealMove: ChooseFn;
+}> {
   const source = await fs.readFile(STARTER_FILE, "utf8");
   const orderSrc = source.match(/const DEFAULT_ORDER = \[[\s\S]*?\];/)?.[0];
   expect(orderSrc, "DEFAULT_ORDER not found in llm-player.mjs").toBeDefined();
@@ -59,9 +68,21 @@ async function loadChoose(): Promise<ChooseFn> {
   const constraintsSrc = extractFunction(source, "dealConstraints");
   const moveSrc = extractFunction(source, "chooseDealMove");
   const chooseSrc = extractFunction(source, "choose");
+  const preamble = `${orderSrc}\nfunction avoidActionIDs() { return []; }\nlet plan = null;\n${cleanSrc}\n${constraintsSrc}\n${moveSrc}\n${chooseSrc}\n`;
   return new Function(
-    `${orderSrc}\nfunction avoidActionIDs() { return []; }\nlet plan = null;\n${cleanSrc}\n${constraintsSrc}\n${moveSrc}\n${chooseSrc}\nreturn (p, actions, obs) => { plan = p; return choose(actions, obs); };`,
-  )() as ChooseFn;
+    `${preamble}return {
+       choose: (p, actions, obs) => { plan = p; return choose(actions, obs); },
+       dealMove: (p, actions, obs) => { plan = p; return chooseDealMove(actions, obs); },
+     };`,
+  )() as { choose: ChooseFn; dealMove: ChooseFn };
+}
+
+async function loadChoose(): Promise<ChooseFn> {
+  return (await loadSelectors()).choose;
+}
+
+async function loadDealMove(): Promise<ChooseFn> {
+  return (await loadSelectors()).dealMove;
 }
 
 const BASE_OBS = {
@@ -226,9 +247,52 @@ describe("tester-starter-llm buildState deals line", () => {
   });
 });
 
+describe("tester-starter-llm decision reply shape", () => {
+  it("sends the deal in its own slot alongside the game action, and only when there is one", async () => {
+    const source = await fs.readFile(STARTER_FILE, "utf8");
+    // Both selections are made, independently, on every decision.
+    expect(source).toContain("const chosen = choose(actions, obs);");
+    expect(source).toContain("const dealMove = chooseDealMove(actions, obs);");
+    // The game action is always sent; the deal slot only when one was chosen.
+    expect(source).toContain("selectedLegalActionId: chosen.id,");
+    expect(source).toContain(
+      "...(dealMove ? { selectedDealActionId: dealMove.id } : {}),",
+    );
+    // Deal kinds are not plannable game kinds any more.
+    const planKinds = source.match(/const PLAN_KINDS = \[[\s\S]*?\];/)?.[0];
+    expect(planKinds).toBeDefined();
+    expect(planKinds).not.toContain("deal_");
+  });
+});
+
 describe("tester-starter-llm deterministic deal posture", () => {
+  it("keeps the deal out of the game slot: the deal move and the game move are separate", async () => {
+    const { choose, dealMove } = await loadSelectors();
+    const obs = {
+      ...BASE_OBS,
+      deals: {
+        incomingProposals: [incomingProposal("D1", "Auri")],
+        outgoingProposals: [],
+        activeDeals: [],
+      },
+    };
+    const actions = [...responseActions("D1"), EXPAND, HOLD];
+    const plan = { target: null, avoidTargets: [], deal: "accept" };
+    // The pact is answered AND the expansion still happens in the same step.
+    expect(dealMove(plan, actions, obs)?.id).toBe("deal_accept:D1");
+    expect(choose(plan, actions, obs)?.id).toBe(EXPAND.id);
+    // `choose` never returns a deal action, whatever the plan asks for.
+    expect(
+      choose(
+        { ...plan, preferKinds: ["deal_accept", "deal_reject"] },
+        actions,
+        obs,
+      )?.id,
+    ).toBe(EXPAND.id);
+  });
+
   it("auto-rejects proposals from the plan's current target — even under an accept posture", async () => {
-    const choose = await loadChoose();
+    const dealMove = await loadDealMove();
     const obs = {
       ...BASE_OBS,
       deals: {
@@ -238,7 +302,7 @@ describe("tester-starter-llm deterministic deal posture", () => {
       },
     };
     const actions = [...responseActions("D1"), EXPAND, HOLD];
-    const chosen = choose(
+    const chosen = dealMove(
       { target: "Sefirot", avoidTargets: [], deal: "accept" },
       actions,
       obs,
@@ -247,7 +311,7 @@ describe("tester-starter-llm deterministic deal posture", () => {
   });
 
   it("auto-accepts pact offers from avoidTargets or under the accept posture", async () => {
-    const choose = await loadChoose();
+    const { choose, dealMove } = await loadSelectors();
     const obs = {
       ...BASE_OBS,
       deals: {
@@ -258,20 +322,24 @@ describe("tester-starter-llm deterministic deal posture", () => {
     };
     const actions = [...responseActions("D1"), EXPAND, HOLD];
     expect(
-      choose({ target: null, avoidTargets: ["Auri"] }, actions, obs)?.id,
+      dealMove({ target: null, avoidTargets: ["Auri"] }, actions, obs)?.id,
     ).toBe("deal_accept:D1");
     expect(
-      choose({ target: null, avoidTargets: [], deal: "accept" }, actions, obs)
+      dealMove({ target: null, avoidTargets: [], deal: "accept" }, actions, obs)
         ?.id,
     ).toBe("deal_accept:D1");
-    // No posture and not an avoid-target: the offer is left pending.
+    // No posture and not an avoid-target: the offer is left pending, and the
+    // game move is unaffected either way.
+    expect(
+      dealMove({ target: null, avoidTargets: [] }, actions, obs),
+    ).toBeFalsy();
     expect(choose({ target: null, avoidTargets: [] }, actions, obs)?.id).toBe(
       EXPAND.id,
     );
   });
 
   it("never auto-accepts joint-attack or support pledges", async () => {
-    const choose = await loadChoose();
+    const { choose, dealMove } = await loadSelectors();
     const obs = {
       ...BASE_OBS,
       deals: {
@@ -284,14 +352,13 @@ describe("tester-starter-llm deterministic deal posture", () => {
       },
     };
     const actions = [...responseActions("D1"), ...responseActions("D2"), HOLD];
-    expect(
-      choose({ target: null, avoidTargets: [], deal: "accept" }, actions, obs)
-        ?.id,
-    ).toBe("hold");
+    const plan = { target: null, avoidTargets: [], deal: "accept" };
+    expect(dealMove(plan, actions, obs)).toBeFalsy();
+    expect(choose(plan, actions, obs)?.id).toBe("hold");
   });
 
   it("proposes ONE non-aggression pact to the strongest non-target neighbor when focus is ally", async () => {
-    const choose = await loadChoose();
+    const { choose, dealMove } = await loadSelectors();
     const proposeAuri = {
       id: "deal_propose:P_A:non_aggression_pact",
       kind: "deal_propose",
@@ -313,15 +380,23 @@ describe("tester-starter-llm deterministic deal posture", () => {
     const actions = [proposeAuri, proposeSefirot, EXPAND, HOLD];
     // Sefirot is the strongest neighbor but is the plan's target: Auri wins.
     expect(
-      choose(
+      dealMove(
         { focus: "ally", target: "Sefirot", avoidTargets: [] },
         actions,
         obs,
       )?.id,
     ).toBe(proposeAuri.id);
+    // The offer costs no move: the game action is still the expansion.
+    expect(
+      choose(
+        { focus: "ally", target: "Sefirot", avoidTargets: [] },
+        actions,
+        obs,
+      )?.id,
+    ).toBe(EXPAND.id);
     // Strongest neighbor when no target is named.
     expect(
-      choose({ focus: "ally", target: null, avoidTargets: [] }, actions, obs)
+      dealMove({ focus: "ally", target: null, avoidTargets: [] }, actions, obs)
         ?.id,
     ).toBe(proposeSefirot.id);
     // An open proposal to the strongest neighbor moves to the next candidate.
@@ -345,13 +420,20 @@ describe("tester-starter-llm deterministic deal posture", () => {
       },
     };
     expect(
-      choose(
+      dealMove(
         { focus: "ally", target: null, avoidTargets: [] },
         actions,
         withOpen,
       )?.id,
     ).toBe(proposeAuri.id);
     // Without the ally focus, no proposal is made.
+    expect(
+      dealMove(
+        { focus: "expand", target: null, avoidTargets: [] },
+        actions,
+        obs,
+      ),
+    ).toBeFalsy();
     expect(
       choose({ focus: "expand", target: null, avoidTargets: [] }, actions, obs)
         ?.id,

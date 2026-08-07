@@ -1227,6 +1227,22 @@ export interface AgentDecision {
   actionID: string;
   actionIDs?: string[];
   /**
+   * OPTIONAL SECOND SELECTION — the diplomacy slot
+   * (PROXYWAR_TUNE_STRUCTURED_DEALS, default OFF; ignored entirely when the
+   * flag is off, so an absent field and a flag-off match are byte-identical
+   * to shipped behavior). A deal meta-action chosen here is applied ALONGSIDE
+   * the game action in `actionID`, so negotiating no longer costs the agent
+   * its move.
+   *
+   * SAFETY BOUNDARY: this channel accepts ONLY the four deal meta-action
+   * kinds (deal_propose / deal_accept / deal_reject / deal_withdraw), each
+   * validated by exact id against the SAME offered menu as `actionID`. An id
+   * naming any other kind — above all one carrying a game intent — is
+   * rejected loudly and ignored; no game action can ever reach the game
+   * through this field. See `validateAgentDealDecision`.
+   */
+  dealActionID?: string | null;
+  /**
    * The acting brain's OWN stated rationale for this pick — genuinely a
    * self-report, never inferred or reconstructed. `null` when there is no
    * stated reason to report: a provider failure, a malformed/unparseable
