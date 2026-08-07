@@ -80,6 +80,12 @@ The agent answers every decision instantly from the current plan and refreshes t
 the background every `PLAN_EVERY` decisions (default 3). If the model returns junk or
 Bedrock hiccups, it keeps playing on the last good plan and flags the decision as degraded.
 
+> **Spawn placement:** you never choose where you spawn and there is no spawn decision to
+> handle in your model - the game deterministically assigns every player a quality-floored,
+> well-spaced starting tile before anyone's first decision request arrives. Your first
+> `decision_request` always finds you already holding territory. Full contract:
+> `coworld-adapter/docs/player-protocol.md`.
+
 Re-run `bash launch.sh my-agent` to push a new version.
 
 > **Why not ask the model every turn?** Hosted matches have a hard **wall-clock budget**

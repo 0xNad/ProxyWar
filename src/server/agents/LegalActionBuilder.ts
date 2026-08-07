@@ -7,7 +7,6 @@ import { UnitType } from "../../core/game/Game";
 import { GameMap, TileRef } from "../../core/game/GameMap";
 import {
   AgentObservation,
-  AgentStrategyProfile,
   LegalAction,
 } from "./AgentTypes";
 
@@ -15,11 +14,20 @@ export interface SpawnCandidate {
   tile: TileRef;
   x?: number;
   y?: number;
+  /** Distance-from-map-center scores (buildSpawnCandidates) - informational
+   * metadata for live post-spawn/downstream consumers (e.g.
+   * shouldOfferNationOpeningForceExpansion's neutral-expansion gate,
+   * AgentLeagueMatch.recentDecisionsFor's memory summary). NEVER used to
+   * rank/choose a spawn tile - fairness slot selection is maximin spacing
+   * over `localLandScore` alone (AgentSpawnAssignment.ts); no agent brain
+   * ever ranks or picks a spawn candidate by these scores anymore. */
   pressureScore: number;
   safetyScore: number;
   diplomacyScore: number;
   opportunityScore: number;
-  localLandScore?: number;
+  /** Land ratio in a disk around the tile - the quality-floor signal
+   * AgentSpawnAssignment.selectSpawnSlots filters and seeds on. */
+  localLandScore: number;
 }
 
 export interface SpawnCandidateBuilderOptions {
@@ -29,24 +37,50 @@ export interface SpawnCandidateBuilderOptions {
 
 export interface BuildLegalActionsInput {
   observation: AgentObservation;
-  spawnCandidates?: SpawnCandidate[];
-  maxSpawnActions?: number;
   maxPostSpawnActions?: number;
+}
+
+/**
+ * The single canonical constructor for a spawn `LegalAction`: the truthful,
+ * internal record of a fairness-assigned slot
+ * (`AgentLeagueMatchRunner.runSpawnPhase` / `AgentSpawnAssignment.ts`).
+ * There is no agent-facing spawn menu anymore - spawn placement is never a
+ * brain choice - so this is the ONLY place a spawn `LegalAction` is built.
+ * Metadata carries the FULL candidate score set (not just localLandScore):
+ * live, non-agent-choice downstream readers (shouldOfferNationOpeningForce
+ * Expansion's neutral-expansion gate, AgentLeagueMatch.recentDecisionsFor's
+ * spawn-memory summary) need pressure/safety/diplomacy/opportunity on the
+ * ACCEPTED record - nothing here ranks or chooses BETWEEN candidates.
+ */
+export function buildSpawnLegalAction(candidate: SpawnCandidate): LegalAction {
+  return {
+    id: `spawn:${candidate.tile}`,
+    kind: "spawn",
+    label: `Spawn at tile ${candidate.tile}`,
+    intent: {
+      type: "spawn",
+      tile: candidate.tile,
+    },
+    risk: {
+      level: "medium",
+      score: 1 - candidate.safetyScore,
+    },
+    metadata: {
+      tile: candidate.tile,
+      x: candidate.x ?? null,
+      y: candidate.y ?? null,
+      pressureScore: candidate.pressureScore,
+      safetyScore: candidate.safetyScore,
+      diplomacyScore: candidate.diplomacyScore,
+      opportunityScore: candidate.opportunityScore,
+      localLandScore: candidate.localLandScore,
+    },
+  };
 }
 
 export class LegalActionBuilder {
   build(input: BuildLegalActionsInput): LegalAction[] {
     const actions: LegalAction[] = [];
-    const maxSpawnActions = input.maxSpawnActions ?? 64;
-
-    if (input.observation.phase === "spawn") {
-      for (const candidate of spawnActionCandidates(
-        input.spawnCandidates ?? [],
-        maxSpawnActions,
-      )) {
-        actions.push(this.spawnAction(candidate));
-      }
-    }
 
     if (input.observation.phase === "active") {
       actions.push(...this.postSpawnActions(input));
@@ -64,32 +98,6 @@ export class LegalActionBuilder {
     });
 
     return actions;
-  }
-
-  private spawnAction(candidate: SpawnCandidate): LegalAction {
-    return {
-      id: `spawn:${candidate.tile}`,
-      kind: "spawn",
-      label: `Spawn at tile ${candidate.tile}`,
-      intent: {
-        type: "spawn",
-        tile: candidate.tile,
-      },
-      risk: {
-        level: "medium",
-        score: 1 - candidate.safetyScore,
-      },
-      metadata: {
-        tile: candidate.tile,
-        x: candidate.x ?? null,
-        y: candidate.y ?? null,
-        pressureScore: candidate.pressureScore,
-        safetyScore: candidate.safetyScore,
-        diplomacyScore: candidate.diplomacyScore,
-        opportunityScore: candidate.opportunityScore,
-        localLandScore: candidate.localLandScore ?? null,
-      },
-    };
   }
 
   private postSpawnActions(input: BuildLegalActionsInput): LegalAction[] {
@@ -744,128 +752,12 @@ function buildIntentTile(
   }
 }
 
-function spawnActionCandidates(
-  candidates: SpawnCandidate[],
-  maxActions: number,
-): SpawnCandidate[] {
-  if (maxActions <= 0) {
-    return [];
-  }
-  if (candidates.length <= maxActions) {
-    return candidates;
-  }
-
-  const selected: SpawnCandidate[] = [];
-  const selectedTiles = new Set<TileRef>();
-  const addCandidate = (candidate: SpawnCandidate): void => {
-    if (selected.length >= maxActions || selectedTiles.has(candidate.tile)) {
-      return;
-    }
-    selected.push(candidate);
-    selectedTiles.add(candidate.tile);
-  };
-  const qualitySorted = [...candidates].sort(compareSpawnCandidateQuality);
-  const coreTarget = Math.min(
-    maxActions,
-    Math.max(4, Math.floor(maxActions * 0.35)),
-  );
-
-  for (const candidate of qualitySorted) {
-    if (selected.length >= coreTarget) {
-      break;
-    }
-    addCandidate(candidate);
-  }
-  for (const candidate of spatialSpawnScouts(candidates, 12, 8)) {
-    addCandidate(candidate);
-  }
-  for (const candidate of qualitySorted) {
-    addCandidate(candidate);
-  }
-
-  return selected;
-}
-
-function spawnCandidateQuality(candidate: SpawnCandidate): number {
-  return spawnQualityFromScores(
-    candidate.opportunityScore,
-    candidate.pressureScore,
-    candidate.safetyScore,
-    candidate.diplomacyScore,
-    candidate.localLandScore ?? 0,
-  );
-}
-
-function compareSpawnCandidateQuality(
-  a: SpawnCandidate,
-  b: SpawnCandidate,
-): number {
-  return (
-    spawnCandidateQuality(b) - spawnCandidateQuality(a) ||
-    b.opportunityScore - a.opportunityScore ||
-    (b.localLandScore ?? 0) - (a.localLandScore ?? 0) ||
-    a.tile - b.tile
-  );
-}
-
 /**
- * Object-form spatial scouts for small, already-materialized pools (the
- * per-turn spawn-action cut). Delegates to the index-form implementation;
- * candidates without coordinates are skipped exactly like before.
- */
-function spatialSpawnScouts(
-  candidates: readonly SpawnCandidate[],
-  columns: number,
-  rows: number,
-): SpawnCandidate[] {
-  const positioned: SpawnCandidate[] = [];
-  for (const candidate of candidates) {
-    if (typeof candidate.x === "number" && typeof candidate.y === "number") {
-      positioned.push(candidate);
-    }
-  }
-  const indices = spatialSpawnScoutIndices(
-    positioned.length,
-    (i) => positioned[i].x as number,
-    (i) => positioned[i].y as number,
-    (a, b) => compareSpawnCandidateQuality(positioned[a], positioned[b]),
-    columns,
-    rows,
-  );
-  return indices.map((i) => positioned[i]);
-}
-
-function spawnQualityFromScores(
-  opportunityScore: number,
-  pressureScore: number,
-  safetyScore: number,
-  diplomacyScore: number,
-  localLandScore: number,
-): number {
-  const middleSafetyBand = Math.max(0, 1 - Math.abs(safetyScore - 0.32) / 0.24);
-  const lowSafetyPenalty =
-    safetyScore < 0.18
-      ? (0.18 - safetyScore) * 2.4 + 0.16
-      : safetyScore < 0.23
-        ? (0.23 - safetyScore) * 1.1
-        : 0;
-  return (
-    opportunityScore * 0.32 +
-    pressureScore * 0.18 +
-    middleSafetyBand * 0.03 +
-    localLandScore * 0.5 +
-    safetyScore * 0.25 +
-    diplomacyScore * 0.28 -
-    lowSafetyPenalty
-  );
-}
-
-/**
- * Index-form spatial scouts: one best candidate per grid cell so remote map
- * regions keep representation after the quality-core fill. Operates on the
- * columnar candidate arrays by index; iteration runs in candidate insertion
- * order and the returned indices are sorted by the shared quality comparator,
- * exactly like the former object-based spatialSpawnScouts.
+ * Index-form spatial scouts: one best (by `compareIndexQuality`) candidate
+ * per grid cell, so remote map regions keep representation after
+ * `buildSpawnCandidates`'s land-quality top-up fill. Operates on the
+ * columnar candidate arrays by index; the returned indices are sorted by
+ * the shared quality comparator.
  */
 function spatialSpawnScoutIndices(
   candidateCount: number,
@@ -918,10 +810,52 @@ function spatialSpawnScoutIndices(
   return [...bestByCell.values()].sort(compareIndexQuality);
 }
 
+function spawnQualityFromScores(
+  opportunityScore: number,
+  pressureScore: number,
+  safetyScore: number,
+  diplomacyScore: number,
+  localLandScore: number,
+): number {
+  const middleSafetyBand = Math.max(0, 1 - Math.abs(safetyScore - 0.32) / 0.24);
+  const lowSafetyPenalty =
+    safetyScore < 0.18
+      ? (0.18 - safetyScore) * 2.4 + 0.16
+      : safetyScore < 0.23
+        ? (0.23 - safetyScore) * 1.1
+        : 0;
+  return (
+    opportunityScore * 0.32 +
+    pressureScore * 0.18 +
+    middleSafetyBand * 0.03 +
+    localLandScore * 0.5 +
+    safetyScore * 0.25 +
+    diplomacyScore * 0.28 -
+    lowSafetyPenalty
+  );
+}
+
 function hostileAttackTroopPercentages(): number[] {
   return [0.1, 0.25, 0.4];
 }
 
+/**
+ * The authoritative valid-land spawn candidate pool `AgentSpawnAssignment`'s
+ * maximin selection draws from: every tile passing the SAME core predicates
+ * SpawnExecution/AgentSpawnAssignment re-check (`isLand`, `!isBorder`,
+ * `isValidSpawnSite`). Computes the full score set (pressure/safety/
+ * diplomacy/opportunity/localLandScore) per candidate - these are
+ * INFORMATIONAL metadata for live, non-agent-choice downstream consumers
+ * (shouldOfferNationOpeningForceExpansion, AgentLeagueMatch.
+ * recentDecisionsFor) carried through unchanged onto whichever candidate
+ * AgentSpawnAssignment's maximin selection later picks - NOTHING in this
+ * function, and no agent brain anywhere, ranks or chooses a spawn tile by
+ * them; maximin selects by `localLandScore` (quality floor) and geometric
+ * spacing alone (AgentSpawnAssignment.ts). The composite `spawnQualityFromScores`
+ * ranking below governs only which tiles make it INTO the returned pool
+ * (spatial coverage first, then quality top-up) when the full scan exceeds
+ * `maxCandidates` - a pool-curation/performance concern, not agent choice.
+ */
 export function buildSpawnCandidates(
   gameMap: GameMap,
   options: SpawnCandidateBuilderOptions = {},
@@ -944,8 +878,7 @@ export function buildSpawnCandidates(
   // BFS set behind getSpawnTiles) for every one of them just to keep the top
   // ~1-2k was the dominant episode start-up allocation (~160 MB of committed
   // heap on World 12P). Scores land in parallel number arrays; SpawnCandidate
-  // objects materialize only for the selected pool. Score math, comparator
-  // semantics, and selection order are unchanged from the object pipeline.
+  // objects materialize only for the selected pool.
   const tiles: number[] = [];
   const pressureScores: number[] = [];
   const safetyScores: number[] = [];
@@ -1106,30 +1039,6 @@ function localLandRatio(
     }
   }
   return total === 0 ? 0 : land / total;
-}
-
-export function spawnScoreForProfile(
-  profile: AgentStrategyProfile,
-  action: LegalAction,
-): number {
-  if (action.kind !== "spawn") {
-    return Number.NEGATIVE_INFINITY;
-  }
-  const metadata = action.metadata ?? {};
-  switch (profile) {
-    case "aggressive":
-      return (
-        Number(metadata.pressureScore ?? 0) * 0.45 +
-        Number(metadata.opportunityScore ?? 0) * 0.35 +
-        Number(metadata.safetyScore ?? 0) * 0.2
-      );
-    case "defensive":
-      return Number(metadata.safetyScore ?? 0);
-    case "diplomatic":
-      return Number(metadata.diplomacyScore ?? 0);
-    case "opportunistic":
-      return Number(metadata.opportunityScore ?? 0);
-  }
 }
 
 function boatTroopFractions(

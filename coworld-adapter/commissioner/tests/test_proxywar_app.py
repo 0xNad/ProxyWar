@@ -35,6 +35,53 @@ DIVISION_ID = UUID("00000000-0000-0000-0000-000000000002")
 QUALIFIER_POLICY_ID = UUID("00000000-0000-0000-0003-000000000001")
 
 
+QUALIFIER_DIVISION_ID = UUID("00000000-0000-0000-0000-000000000009")
+
+
+def qualifier_round_start(entrant_count: int = 1) -> RoundStart:
+    policy_ids = [
+        UUID(f"00000000-0000-0000-0003-{index:012d}")
+        for index in range(entrant_count)
+    ]
+    return RoundStart(
+        round_id=UUID("00000000-0000-0000-0000-000000000005"),
+        round_number=1,
+        league=LeagueInfo(id=LEAGUE_ID, commissioner_key="proxywar_scaling"),
+        divisions=[
+            DivisionInfo(
+                id=QUALIFIER_DIVISION_ID,
+                name="Qualifiers",
+                level=-99,
+                type="staging",
+            )
+        ],
+        memberships=[
+            MembershipInfo(
+                id=UUID(f"00000000-0000-0000-0004-{index:012d}"),
+                league_id=LEAGUE_ID,
+                division_id=QUALIFIER_DIVISION_ID,
+                policy_version_id=policy_id,
+                player_id=f"qualifier-{index}",
+                status="qualifying",
+                substatus="active",
+                is_champion=False,
+            )
+            for index, policy_id in enumerate(policy_ids)
+        ],
+        recent_results=[],
+        variants=[
+            VariantInfo(
+                id="qualifier-crash-check",
+                name="Qualifier crash check",
+                game_config={"num_agents": 1},
+            )
+        ],
+        state={
+            "round_config": {"current_division_id": str(QUALIFIER_DIVISION_ID)}
+        },
+    )
+
+
 def competition_round_start(champion_count: int) -> RoundStart:
     policy_ids = [
         UUID(f"00000000-0000-0000-0001-{index:012d}")
@@ -259,3 +306,172 @@ def test_twelve_seat_rotation_sweeps_every_map_in_the_pool() -> None:
     assert set(seen) == set(pool), (
         f"consecutive rounds should sweep the whole pool; saw {seen}"
     )
+
+
+def _with_full_ladder(round_start: RoundStart) -> RoundStart:
+    # `competition_round_start` only declares a single 12p variant by
+    # default (matching the champion-field-heavy fixtures above); these
+    # episodeIndex tests use a small 4-champion field, so the full declared
+    # ladder (2/4/8/12) must be present for `_fit_ladder_rung` to route to
+    # a rung the field can actually fill.
+    round_start.variants = [
+        VariantInfo(
+            id=f"tournament-{seat_count}p-pangaea",
+            name=f"{seat_count}-player Pangaea",
+            game_config={"num_agents": seat_count},
+        )
+        for seat_count in (2, 4, 8, 12)
+    ]
+    return round_start
+
+
+def test_competition_schedule_stamps_episode_index_overrides() -> None:
+    round_start = _with_full_ladder(competition_round_start(4))
+    round_start.round_number = 1
+
+    scheduled = commissioner().schedule_episodes_for_round_start(round_start)
+
+    assert len(scheduled.episodes) > 0
+    for episode in scheduled.episodes:
+        assert "episodeIndex" in episode.game_config_overrides
+        assert isinstance(episode.game_config_overrides["episodeIndex"], int)
+        assert episode.game_config_overrides["episodeIndex"] >= 0
+
+
+def test_qualifier_schedule_stamps_episode_index_overrides() -> None:
+    round_start = qualifier_round_start()
+
+    scheduled = commissioner().schedule_episodes_for_round_start(round_start)
+
+    assert len(scheduled.episodes) > 0
+    for episode in scheduled.episodes:
+        assert "episodeIndex" in episode.game_config_overrides
+        assert isinstance(episode.game_config_overrides["episodeIndex"], int)
+        assert episode.game_config_overrides["episodeIndex"] >= 0
+
+
+@pytest.mark.parametrize("path", ["competition", "qualifier"])
+def test_per_episode_indices_are_consecutive_within_a_round(path: str) -> None:
+    if path == "competition":
+        round_start = _with_full_ladder(competition_round_start(4))
+        round_start.round_number = 1
+    else:
+        round_start = qualifier_round_start()
+
+    scheduled = commissioner().schedule_episodes_for_round_start(round_start)
+
+    indices = [
+        episode.game_config_overrides["episodeIndex"] for episode in scheduled.episodes
+    ]
+    n = len(indices)
+    assert n > 0
+    expected = list(range(indices[0], indices[0] + n))
+    assert indices == expected, (
+        f"episode indices within one round must be consecutive; got {indices}"
+    )
+
+
+def test_episode_index_advances_across_comparable_rounds_never_resets() -> None:
+    # "Comparable" here means the same champion field -> the same ladder rung
+    # -> the same per-round episode count, the documented precondition for
+    # the rotation to stay aligned round over round.
+    round_start = _with_full_ladder(competition_round_start(4))
+
+    round_start.round_number = 5
+    first_round = commissioner().schedule_episodes_for_round_start(round_start)
+    first_indices = [
+        episode.game_config_overrides["episodeIndex"]
+        for episode in first_round.episodes
+    ]
+
+    round_start.round_number = 6
+    second_round = commissioner().schedule_episodes_for_round_start(round_start)
+    second_indices = [
+        episode.game_config_overrides["episodeIndex"]
+        for episode in second_round.episodes
+    ]
+
+    assert len(first_indices) == len(second_indices), (
+        "this test's premise requires two comparable (same-width) rounds"
+    )
+    assert min(second_indices) > max(first_indices), (
+        "the next equivalent round must advance the episode index, never reset it: "
+        f"round 5 -> {first_indices}, round 6 -> {second_indices}"
+    )
+
+
+def test_n_indices_rotate_a_fixed_roster_through_n_slots() -> None:
+    # For any single round of N episodes, `_with_episode_index` assigns N
+    # CONSECUTIVE integers (proven by the consecutiveness test above). N
+    # consecutive integers modulo N are, by construction, a complete
+    # residue system - i.e. exactly {0, 1, ..., N-1} in some order. That
+    # mod-N value is what `AgentSpawnAssignment.spawnSlotForRosterIndex`
+    # uses on the ProxyWar side to pick a roster's fairness slot, so this
+    # proves a fixed N-seat roster rotates through every one of its N
+    # slots across N consecutive occurrences of a same-width round.
+    round_start = _with_full_ladder(competition_round_start(4))
+    round_start.round_number = 3
+
+    scheduled = commissioner().schedule_episodes_for_round_start(round_start)
+    indices = [
+        episode.game_config_overrides["episodeIndex"] for episode in scheduled.episodes
+    ]
+    n = len(indices)
+    assert n > 0
+    residues = {index % n for index in indices}
+    assert residues == set(range(n)), (
+        f"{n} consecutive indices must cover every slot 0..{n - 1} mod {n}; "
+        f"got residues {sorted(residues)} from indices {indices}"
+    )
+
+
+def test_with_episode_index_preserves_existing_overrides() -> None:
+    from commissioners.common.protocol import EpisodeRequest, ScheduleEpisodes
+
+    schedule = ScheduleEpisodes(
+        episodes=[
+            EpisodeRequest(
+                request_id="0",
+                variant_id="v",
+                policy_version_ids=[],
+                game_config_overrides={"existing_flag": "keep-me"},
+            ),
+            EpisodeRequest(
+                request_id="1",
+                variant_id="v",
+                policy_version_ids=[],
+            ),
+        ]
+    )
+
+    stamped = ProxyWarCommissioner._with_episode_index(schedule, round_number=1)
+
+    assert stamped.episodes[0].game_config_overrides == {
+        "existing_flag": "keep-me",
+        "episodeIndex": 0,
+    }
+    assert stamped.episodes[1].game_config_overrides == {"episodeIndex": 1}
+
+
+def test_every_manifest_declares_episode_index_in_config_schema() -> None:
+    import json
+
+    manifest_dir = Path(__file__).parents[2] / "coworld"
+    manifest_paths = sorted(manifest_dir.glob("coworld_manifest*.json"))
+    assert len(manifest_paths) >= 10, (
+        f"expected every shipped manifest under {manifest_dir}, found {manifest_paths}"
+    )
+    for manifest_path in manifest_paths:
+        manifest = json.loads(manifest_path.read_text())
+        schema = manifest["game"]["config_schema"]
+        assert schema["additionalProperties"] is False, manifest_path
+        properties = schema["properties"]
+        assert "episodeIndex" in properties, (
+            f"{manifest_path} config_schema is missing episodeIndex"
+        )
+        episode_index_schema = properties["episodeIndex"]
+        assert episode_index_schema["type"] == "integer", manifest_path
+        assert episode_index_schema["minimum"] == 0, manifest_path
+        assert "episodeIndex" not in schema.get("required", []), (
+            f"{manifest_path}: episodeIndex must stay optional (default 0)"
+        )

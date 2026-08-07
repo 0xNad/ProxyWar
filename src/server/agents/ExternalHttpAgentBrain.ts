@@ -37,6 +37,8 @@ export interface ExternalAgentRequest {
     phase: string;
     turnNumber: number;
     tick: number | null;
+    /** Episode-level map identity, only ever a few scalars - never a terrain dump. */
+    map: { name: string; width: number; height: number } | null;
   };
   observation: AgentBrainInput["observation"];
   legalActions: Array<{
@@ -251,6 +253,7 @@ export function buildExternalAgentRequestPayload(
       phase: observation.phase,
       turnNumber: observation.turnNumber,
       tick: observation.tick,
+      map: observation.mapInfo ?? null,
     },
     observation,
     legalActions: legalActions.map((action) => ({

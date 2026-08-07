@@ -161,10 +161,10 @@ export function getSpawnTiles(
  * materializes the BFS set. The `euclDistFN(tile, 4, true)` filter is
  * distance-only, so the BFS region is exactly the shifted-center Euclidean
  * disk; a bounded box scan enumerates the same membership (equivalence is
- * pinned by tests/server/SpawnCandidatePipelineEquivalence.test.ts).
- * Spawn-candidate scans
- * call this once per land tile of the whole map, so the per-call Set/array
- * allocations of `getSpawnTiles` dominated episode start-up memory churn.
+ * pinned by tests/server/IsValidSpawnSiteEquivalence.test.ts). Spawn-candidate
+ * scans call this once per land tile of the whole map, so the per-call
+ * Set/array allocations of `getSpawnTiles` dominated episode start-up
+ * memory churn.
  */
 export function isValidSpawnSite(gm: GameMap, tile: TileRef): boolean {
   const rootX = gm.x(tile) - 0.5;

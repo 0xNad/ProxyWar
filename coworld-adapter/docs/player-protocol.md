@@ -48,6 +48,14 @@ The player replies:
 }
 ```
 
-`selectedLegalActionId` must be one exact offered `legalActions[].id`. The
-websocket adapter returns an `AgentDecision`, but the existing
-`AgentDecisionValidator`, `AgentRunner`, and `GameServer` remain the authority.
+`selectedLegalActionId` must be one exact offered `legalActions[].id` - no exceptions and no
+off-menu ids, for every action kind: the websocket adapter returns an `AgentDecision`, but the
+existing `AgentDecisionValidator`, `AgentRunner`, and `GameServer` remain the sole authority, and
+`LegalAction.id` selection is still the only way to act - no raw core intent is ever accepted
+from a player.
+
+Spawn is never a player/brain decision and there is no spawn `decision_request` at all: before
+any player is asked anything, the league runner deterministically assigns every roster
+participant a quality-floored, well-spaced spawn tile
+(`AgentSpawnAssignment.assignSpawnSlots` on the ProxyWar side) and submits it directly. A
+player's first `decision_request` always arrives after it already has territory.

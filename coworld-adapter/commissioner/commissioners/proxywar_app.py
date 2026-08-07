@@ -56,17 +56,19 @@ class ProxyWarCommissioner(RulesetStrategyCommissioner):
     ) -> CommissionerScheduleEpisodes:
         config = self._config()
         view = RoundStartView(round_start, config)
+        round_number = getattr(round_start, "round_number", 0) or 0
 
         if view.current_division.type != "competition":
             # Qualifiers (and anything else) keep the stock path: a division-declared
             # game_config.num_agents (the "qualifier" variant, always variants[0]) resolves
             # normally through view.variant().
-            return super().schedule_episodes_for_round_start(round_start)
+            return self._with_episode_index(
+                super().schedule_episodes_for_round_start(round_start), round_number
+            )
 
         rule = select_rule(config, view.current_division, view.memberships)
         entries = view.entries(rule)
         available_variant_ids = {variant.id for variant in round_start.variants}
-        round_number = getattr(round_start, "round_number", 0) or 0
         variant_id, num_agents = self._fit_ladder_rung(
             len(entries), available_variant_ids, round_number
         )
@@ -83,15 +85,68 @@ class ProxyWarCommissioner(RulesetStrategyCommissioner):
         )
         pool = pool.model_copy(update={"config": pool_config})
 
-        return schedule_entries(
-            pool=pool,
-            primary_entries=entries,
-            filler_entries=view.filler_entries(entries),
-            num_agents=num_agents,
-            variant_id=variant_id,
-            game_config=None,
-            config=config,
-            recent_results=round_start.recent_results,
+        return self._with_episode_index(
+            schedule_entries(
+                pool=pool,
+                primary_entries=entries,
+                filler_entries=view.filler_entries(entries),
+                num_agents=num_agents,
+                variant_id=variant_id,
+                game_config=None,
+                config=config,
+                recent_results=round_start.recent_results,
+            ),
+            round_number,
+        )
+
+    @staticmethod
+    def _with_episode_index(
+        schedule: CommissionerScheduleEpisodes, round_number: int
+    ) -> CommissionerScheduleEpisodes:
+        """Stamps a stable, zero-based, round-aware `episodeIndex` onto every
+        scheduled episode's `game_config_overrides`
+        (`AgentLeagueMatchOptions.episodeIndex` on the ProxyWar side - rotates
+        which fairness-assigned spawn slot a roster lands on across repeated
+        same-map/same-roster episodes; see `AgentSpawnAssignment.ts`).
+
+        Deterministic and stateless (no persisted counter, no hash/random,
+        never touches `seed`): `base` is this round's zero-based ordinal
+        (round_number 1 -> base 0, the same anchoring `_fit_ladder_rung`
+        already uses for its own pool rotation) times THIS round's own
+        episode count, so episode `i` within the round gets `base + i` -
+        consecutive integers, which for any `N` in-round episodes form a
+        complete residue system mod `N`. Round over round this strictly
+        advances (never resets to 0) as `round_number` increases, so a
+        roster that keeps landing at the same episode position across
+        comparable rounds still keeps rotating through every fairness slot
+        instead of replaying slot 0 forever.
+
+        Assumption (documented, not enforced here): the modular alignment
+        with a specific prior round's rotation is only guaranteed while
+        comparable rounds (same map/roster) keep the SAME per-round episode
+        count. A ladder/pool change that alters the count between rounds
+        still never repeats an exact (base, position) pair - so it can
+        never silently replay history - it just starts a new local residue
+        cycle at the new width.
+        """
+        episode_count = len(schedule.episodes)
+        if episode_count == 0:
+            return schedule
+        base = (max(round_number, 1) - 1) * episode_count
+        return schedule.model_copy(
+            update={
+                "episodes": [
+                    episode.model_copy(
+                        update={
+                            "game_config_overrides": {
+                                **episode.game_config_overrides,
+                                "episodeIndex": base + position,
+                            }
+                        }
+                    )
+                    for position, episode in enumerate(schedule.episodes)
+                ]
+            }
         )
 
     def _fit_ladder_rung(

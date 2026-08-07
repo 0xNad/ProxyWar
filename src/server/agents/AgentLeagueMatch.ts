@@ -5,7 +5,11 @@ import { ServerMessage } from "../../core/Schemas";
 import { GameServer } from "../GameServer";
 import { validateAgentDecision } from "./AgentDecisionValidator";
 import { AgentLocalGameMirror } from "./AgentLocalGameMirror";
-import { selectSpawnTile } from "./AgentSpawnExplorer";
+import {
+  assignSpawnSlots,
+  validateSpawnSlotLegality,
+  validateSpawnSlotUniqueness,
+} from "./AgentSpawnAssignment";
 import {
   actionAlignsWithObjective,
   AgentObjectiveManager,
@@ -32,6 +36,7 @@ import {
 } from "./AgentTypes";
 import {
   buildSpawnCandidates,
+  buildSpawnLegalAction,
   LegalActionBuilder,
   SpawnCandidate,
 } from "./LegalActionBuilder";
@@ -71,7 +76,25 @@ export interface AgentLeagueMatchOptions {
   participants: AgentParticipant[];
   spawnCandidates: SpawnCandidate[];
   log: Logger;
-  minSpawnDistance?: number;
+  /**
+   * Zero-based ordinal for this episode among repeated episodes reusing the
+   * SAME map/candidate pool, used by `runSpawnPhase` to rotate which
+   * fairness-assigned spawn slot each roster participant lands on
+   * (`slots[(rosterIndex + episodeIndex) % N]`) so N same-map episodes cycle
+   * every agent through every slot exactly once. No single existing
+   * "episode ordinal" field exists elsewhere in this codebase (the closest
+   * is a season's `eventSlots` array position) - callers running a sequence
+   * of episodes on one map should pass their own zero-based position (e.g.
+   * a loop counter, or an `eventSlots` index). Default 0 (single-episode /
+   * non-rotating callers).
+   */
+  episodeIndex?: number;
+  /**
+   * Minimum acceptable `localLandScore` (see AgentSpawnAssignment.ts) a
+   * `runSpawnPhase` slot candidate must clear before it is eligible for
+   * maximin slot selection. Default `DEFAULT_SPAWN_QUALITY_FLOOR`.
+   */
+  spawnQualityFloor?: number;
   observationBuilder?: AgentObservationBuilder;
   legalActionBuilder?: LegalActionBuilder;
   decisionValidator?: typeof validateAgentDecision;
@@ -98,7 +121,6 @@ export interface RunAgentDecisionTurnOptions {
   turnNumber?: number;
   gameState?: Game;
   phaseOverride?: BuildAgentObservationInput["phaseOverride"];
-  spawnCandidates?: SpawnCandidate[];
   maxDecisionMs?: number;
 }
 
@@ -141,7 +163,6 @@ export function createAgentParticipants(
 
 export class AgentLeagueMatchRunner {
   private readonly log: Logger;
-  private readonly minSpawnDistance: number;
   private readonly records: AgentDecisionRecord[] = [];
   private readonly retainTacticalAffordances: boolean;
   private readonly observationBuilder: AgentObservationBuilder;
@@ -155,12 +176,6 @@ export class AgentLeagueMatchRunner {
 
   constructor(private readonly options: AgentLeagueMatchOptions) {
     this.log = options.log.child({ comp: "agent_league_match" });
-    this.minSpawnDistance =
-      options.minSpawnDistance ??
-      defaultMinSpawnDistance(
-        options.spawnCandidates,
-        options.participants.length,
-      );
     this.observationBuilder =
       options.observationBuilder ?? new AgentObservationBuilder();
     this.legalActionBuilder =
@@ -195,27 +210,62 @@ export class AgentLeagueMatchRunner {
     });
   }
 
+  /**
+   * A synchronous, no-tick-loop convenience for tests/scenarios that just
+   * need every participant spawned once with no live game/mirror driving
+   * turns: submits the SAME deterministic fairness assignment `runSpawnPhase`
+   * uses (`assignSpawnSlots`), validated for uniqueness (there is no live
+   * game snapshot available here to also re-check authoritative legality
+   * against - `runSpawnPhase`, which DOES have mirror access, does that
+   * additional check; this trusts the terrain-level validation
+   * `buildSpawnCandidates` already performed at candidate-generation time).
+   * `maxDecisionMs` is accepted only for call-site source compatibility and
+   * is unused: no brain is ever consulted for a spawn decision here or
+   * anywhere else in this runner.
+   */
   async runOpeningTurn(
     turnNumber = 0,
-    options: Pick<RunAgentDecisionTurnOptions, "maxDecisionMs"> = {},
+    _options: Pick<RunAgentDecisionTurnOptions, "maxDecisionMs"> = {},
   ): Promise<AgentDecisionRecord[]> {
-    return this.runDecisionTurn({
-      turnNumber,
-      phaseOverride: "spawn",
-      spawnCandidates: this.options.spawnCandidates,
-      maxDecisionMs: options.maxDecisionMs,
+    const startingRecordCount = this.records.length;
+    const agentIDs = this.options.participants.map(
+      (participant) => participant.runner.agentID,
+    );
+    const assignment = assignSpawnSlots({
+      candidates: this.options.spawnCandidates,
+      participantCount: this.options.participants.length,
+      episodeIndex: this.options.episodeIndex ?? 0,
+      qualityFloor: this.options.spawnQualityFloor,
     });
+    validateSpawnSlotUniqueness(assignment, agentIDs);
+    for (let i = 0; i < this.options.participants.length; i += 1) {
+      this.submitAndRecordAssignedSpawn(
+        this.options.participants[i],
+        assignment[i],
+        turnNumber,
+      );
+    }
+    return this.records.slice(startingRecordCount);
   }
 
   /**
-   * Drive the spawn phase like a built-in nation: deterministically, with NO LLM call.
-   * Built-in nations re-jitter their spawn near a region every spawn-phase tick and
-   * settle (`NationExecution.randomSpawnLand`); this gives the agent the same behavior
-   * by, each spawn tick, selecting an EXPLORING spawn tile (jump) via `selectSpawnTile`,
-   * submitting + recording it (a synthetic non-LLM decision), then advancing the sim —
-   * until the spawn phase ends. The LLM Commander (`brain.decide`) is bypassed here and
-   * engages only in the active phase, so spawn costs zero model latency. Replaces the
-   * single `runOpeningTurn()` at the eval entrypoints. Returns the spawn decision records.
+   * Place every participant at its fairness-assigned spawn slot and advance
+   * turns until the phase ends. NO agent/brain choice is involved: exactly
+   * `participants.length` well-spaced, quality-floored slots are selected
+   * once (via `assignSpawnSlots` - deterministic maximin spacing over the
+   * authoritative `buildSpawnCandidates` pool) and roster index `i` is
+   * assigned `slots[(i + episodeIndex) % N]`, so repeated episodes on the
+   * same map/candidate pool rotate every agent through every slot. The
+   * assignment is computed and validated (`validateSpawnSlotUniqueness` +
+   * `validateSpawnSlotLegality` against the LIVE game state, re-checking the
+   * exact same authoritative predicates `buildSpawnCandidates` used at
+   * generation time - never merely trusted) on the first tick a live game
+   * snapshot is available, then every participant's tile is submitted
+   * exactly once, immediately - there is no negotiation, no relocation, no
+   * retry, and the assignment is final for the life of this match. A
+   * rejected submission is an invariant failure (see
+   * `submitAndRecordAssignedSpawn`) - it throws rather than ever falling
+   * back to a different or engine-default spawn.
    */
   async runSpawnPhase(options: {
     mirror: AgentLocalGameMirror;
@@ -229,85 +279,41 @@ export class AgentLeagueMatchRunner {
     // (maxSpawnAdvanceTurns: 2000): a loud throw on overrun, never a silent hang.
     const maxSpawnTicks =
       options.maxSpawnTicks ?? Math.ceil(2_000 / turnsPerSpawnTick);
-    // Each agent's CURRENT spawn stake: the candidate of its most recent ACCEPTED
-    // spawn submission. Every tick each agent's pool is rebuilt from the full base
-    // pool minus OTHER agents' current stakes (spawnCandidatesAvailableTo), so a
-    // relocating agent RELEASES the neighborhood it vacated. The old cumulative
-    // pruning removed every submission's minSpawnDistance neighborhood from one
-    // shared pool forever — including the submitter's own previous picks — which
-    // exhausted a ~500-candidate pool by ~turn 125-175 of a 300-turn spawn phase
-    // (4 agents, run ab-ffa4p-spawnwatch-r1): relocation froze mid-phase and the
-    // converge-to-anchor settle never ran on a live pool.
-    const spawnStakes = new Map<string, SpawnCandidate>();
+    let submitted = false;
 
     for (let tick = 0; tick <= maxSpawnTicks; tick += 1) {
       await options.mirror.ingest(options.messages());
       const gameState = options.mirror.gameState();
       if (gameState !== null && !gameState.inSpawnPhase()) {
+        if (!submitted) {
+          throw new Error(
+            "runSpawnPhase: left the spawn phase before the fairness " +
+              "assignment could be submitted",
+          );
+        }
         return this.records.slice(startingRecordCount);
       }
-      const spawnProgress =
-        gameState !== null
-          ? gameState.ticks() /
-            Math.max(1, gameState.config().numSpawnPhaseTurns())
-          : 0;
-      // A spawn intent submitted now lands in the NEXT server turn, and its
-      // SpawnExecution only applies while the spawn phase is still running
-      // (execution tick <= numSpawnPhaseTurns). At the boundary tick
-      // (ticks === numSpawnPhaseTurns) a submission would be recorded as
-      // accepted but silently never execute — a dead record whose tile
-      // contradicts the player's actual spawn in the replay. Keep advancing
-      // to the phase end, but stop submitting intents that cannot execute,
-      // so the last recorded spawn per agent IS the tile it spawned on.
-      const spawnIntentCanStillExecute =
-        gameState === null ||
-        gameState.ticks() < gameState.config().numSpawnPhaseTurns();
-
-      if (spawnIntentCanStillExecute) {
-        for (const participant of this.options.participants) {
-          const observation = this.observationBuilder.build({
-            agentID: participant.runner.agentID,
-            clientID: participant.runner.clientID(),
-            username: participant.spec.username,
-            profile: participant.spec.profile,
-            gameID: this.options.game.id,
-            turnNumber: gameState?.ticks() ?? 0,
-            gameState: gameState ?? undefined,
-            phaseOverride: "spawn",
-            objective: this.objectiveManager.currentObjective(
-              participant.runner.agentID,
-            ),
-            recentDecisions: this.recentDecisionsFor(participant),
-          });
-          const availableCandidates = this.spawnCandidatesAvailableTo(
-            participant.runner.agentID,
-            spawnStakes,
+      if (!submitted && gameState !== null) {
+        const agentIDs = this.options.participants.map(
+          (participant) => participant.runner.agentID,
+        );
+        const assignment = assignSpawnSlots({
+          candidates: this.options.spawnCandidates,
+          participantCount: this.options.participants.length,
+          episodeIndex: this.options.episodeIndex ?? 0,
+          qualityFloor: this.options.spawnQualityFloor,
+        });
+        validateSpawnSlotUniqueness(assignment, agentIDs);
+        validateSpawnSlotLegality(assignment, agentIDs, gameState);
+        for (let i = 0; i < this.options.participants.length; i += 1) {
+          this.submitAndRecordAssignedSpawn(
+            this.options.participants[i],
+            assignment[i],
+            gameState.ticks(),
           );
-          const legalActions = this.legalActionBuilder.build({
-            observation,
-            spawnCandidates: availableCandidates,
-          });
-          const spawnAction = selectSpawnTile({
-            spawnActions: legalActions,
-            profile: participant.spec.profile,
-            gameID: this.options.game.id,
-            agentID: participant.runner.agentID,
-            tick,
-            spawnProgress,
-          });
-          if (spawnAction === undefined) {
-            continue;
-          }
-          this.submitAndRecordSpawn({
-            participant,
-            observation,
-            legalActions,
-            spawnAction,
-            spawnStakes,
-          });
         }
+        submitted = true;
       }
-
       this.options.game.advanceTurnsForTesting(turnsPerSpawnTick);
     }
 
@@ -319,13 +325,6 @@ export class AgentLeagueMatchRunner {
   async runDecisionTurn(
     options: RunAgentDecisionTurnOptions = {},
   ): Promise<AgentDecisionRecord[]> {
-    if (options.phaseOverride === "spawn") {
-      return this.runDecisionTurnSerial(options);
-    }
-
-    const turnSpawnCandidates = [
-      ...(options.spawnCandidates ?? this.options.spawnCandidates),
-    ];
     const startingRecordCount = this.records.length;
     // Eliminated seats are not polled at all: no observation build, no brain
     // call, no decision record. Roster-shaped outputs (results.scores,
@@ -364,7 +363,6 @@ export class AgentLeagueMatchRunner {
       const legalActions = this.filterDisabledActionKinds(
         this.legalActionBuilder.build({
           observation: baseObservation,
-          spawnCandidates: turnSpawnCandidates,
         }),
       );
       const objective = this.objectiveManager.objectiveFor({
@@ -404,7 +402,6 @@ export class AgentLeagueMatchRunner {
       }),
     );
 
-    let availableCandidates = [...turnSpawnCandidates];
     const sameTurnDiplomacyParticipants = new Set<string>();
     const sameTurnAllianceRequests = new Set<string>();
     const sameTurnBuildTiles: number[] = [];
@@ -413,10 +410,7 @@ export class AgentLeagueMatchRunner {
       const submissionLegalActions = this.filterDisabledActionKinds(
         this.filterSameTurnBuildActions(
           this.filterSameTurnDiplomacyActions(
-            this.filterSameTurnSpawnActions(
-              input.legalActions,
-              availableCandidates,
-            ),
+            input.legalActions,
             input.observation,
             sameTurnDiplomacyParticipants,
             sameTurnAllianceRequests,
@@ -502,12 +496,6 @@ export class AgentLeagueMatchRunner {
           result,
         });
 
-        if (selected.action?.kind === "spawn") {
-          availableCandidates = this.removeNearbySpawnCandidates(
-            availableCandidates,
-            selected.action,
-          );
-        }
         this.reserveSameTurnDiplomacy(
           selected.action,
           observation,
@@ -548,225 +536,6 @@ export class AgentLeagueMatchRunner {
     }
 
     return this.records.slice(startingRecordCount);
-  }
-
-  private async runDecisionTurnSerial(
-    options: RunAgentDecisionTurnOptions = {},
-  ): Promise<AgentDecisionRecord[]> {
-    let availableCandidates = [
-      ...(options.spawnCandidates ?? this.options.spawnCandidates),
-    ];
-    const startingRecordCount = this.records.length;
-    const sameTurnDiplomacyParticipants = new Set<string>();
-    const sameTurnAllianceRequests = new Set<string>();
-    const sameTurnBuildTiles: number[] = [];
-
-    for (const participant of this.options.participants) {
-      const observationInput: BuildAgentObservationInput = {
-        agentID: participant.runner.agentID,
-        clientID: participant.runner.clientID(),
-        username: participant.spec.username,
-        profile: participant.spec.profile,
-        gameID: this.options.game.id,
-        turnNumber: options.turnNumber ?? 0,
-        gameState: options.gameState,
-        phaseOverride: options.phaseOverride,
-        objective: this.objectiveManager.currentObjective(
-          participant.runner.agentID,
-        ),
-        recentDecisions: this.recentDecisionsFor(participant),
-      };
-      const initialObservation = this.observationBuilder.build(observationInput);
-      const recentCommunications = this.recentCommunicationSignalsFor(
-        participant,
-        initialObservation,
-      );
-      const baseObservation =
-        recentCommunications.length === 0
-          ? initialObservation
-          : this.observationBuilder.build({
-              ...observationInput,
-              recentCommunications,
-            });
-      const legalActions = this.filterDisabledActionKinds(
-        this.filterSameTurnBuildActions(
-          this.filterSameTurnDiplomacyActions(
-            this.legalActionBuilder.build({
-              observation: baseObservation,
-              spawnCandidates: availableCandidates,
-            }),
-            baseObservation,
-            sameTurnDiplomacyParticipants,
-            sameTurnAllianceRequests,
-          ),
-          options.gameState,
-          sameTurnBuildTiles,
-        ),
-      );
-      const objective = this.objectiveManager.objectiveFor({
-        agentID: participant.runner.agentID,
-        profile: participant.spec.profile,
-        observation: baseObservation,
-        legalActions,
-        turnNumber: baseObservation.turnNumber,
-      });
-      const observation: AgentObservation = {
-        ...baseObservation,
-        objective,
-      };
-      const decisionStartedAt = Date.now();
-      const decision = await decideWithSafetyFallback({
-        brain: participant.brain,
-        fallbackProfile: participant.spec.profile,
-        observation,
-        legalActions,
-        maxDecisionMs: options.maxDecisionMs,
-      });
-      const decisionLatencyMs = Date.now() - decisionStartedAt;
-      availableCandidates = this.applyDecision({
-        participant,
-        observation,
-        observationSummary: this.observationBuilder.summarize(observation),
-        legalActions,
-        decision,
-        decisionLatencyMs,
-        availableCandidates,
-        sameTurnDiplomacyParticipants,
-        sameTurnAllianceRequests,
-        sameTurnBuildTiles,
-      });
-    }
-
-    return this.records.slice(startingRecordCount);
-  }
-
-  private applyDecision(input: {
-    participant: AgentParticipant;
-    observation: AgentObservation;
-    observationSummary: string;
-    legalActions: LegalAction[];
-    decision: AgentDecision;
-    decisionLatencyMs: number;
-    availableCandidates: SpawnCandidate[];
-    sameTurnDiplomacyParticipants: Set<string>;
-    sameTurnAllianceRequests: Set<string>;
-    sameTurnBuildTiles: number[];
-  }): SpawnCandidate[] {
-    const requestedActionIDs = requestedDecisionActionIDs(input.decision);
-    const rejectedActionIDs: string[] = [];
-    const selectedActions: Array<{
-      action: LegalAction | null;
-      requestedActionID: string;
-      reason: string | null;
-    }> = [];
-
-    for (const actionID of requestedActionIDs) {
-      const actionDecision: AgentDecision = { ...input.decision, actionID };
-      const validation = this.decisionValidator(actionDecision, input.legalActions);
-      if (validation.ok) {
-        selectedActions.push({
-          action: validation.action,
-          requestedActionID: actionID,
-          reason: input.decision.reason,
-        });
-      } else {
-        rejectedActionIDs.push(actionID);
-      }
-    }
-
-    let validationFallbackUsed = false;
-    if (selectedActions.length === 0) {
-      const validation = this.decisionValidator(input.decision, input.legalActions);
-      const action = actionFromValidation(validation);
-      // The policy's requested action id(s) were all invalid; the validator
-      // substituted a fallback (hold). Record it loudly (below).
-      validationFallbackUsed = !validation.ok;
-      selectedActions.push({
-        action,
-        requestedActionID: input.decision.actionID,
-        reason: decisionReason(input.decision, validation, action),
-      });
-    }
-
-    let availableCandidates = input.availableCandidates;
-    selectedActions.forEach((selected, batchIndex) => {
-      const batchDecision: AgentDecision = {
-        ...input.decision,
-        actionID: selected.requestedActionID,
-        metadata: batchDecisionMetadata({
-          metadata: input.decision.metadata,
-          batchIndex,
-          batchSize: selectedActions.length,
-          requestedActionIDs,
-          rejectedActionIDs,
-          validationFallbackUsed: validationFallbackUsed && batchIndex === 0,
-        }),
-      };
-      const result = selected.action
-        ? this.submitLegalAction(input.participant.runner, selected.action)
-        : {
-            accepted: false,
-            reason: "no legal fallback action available",
-            submittedIntent: null,
-          };
-      const record = this.recordDecision({
-        participant: input.participant,
-        turnNumber: input.observation.turnNumber,
-        observationSummary: input.observationSummary,
-        observation: input.observation,
-        legalActions: input.legalActions,
-        chosenAction: selected.action,
-        decision: batchDecision,
-        decisionLatencyMs: input.decisionLatencyMs,
-        reason: selected.reason,
-        result,
-      });
-
-      if (selected.action?.kind === "spawn") {
-        availableCandidates = this.removeNearbySpawnCandidates(
-          availableCandidates,
-          selected.action,
-        );
-      }
-      this.reserveSameTurnDiplomacy(
-        selected.action,
-        input.observation,
-        input.sameTurnDiplomacyParticipants,
-        input.sameTurnAllianceRequests,
-      );
-      this.reserveSameTurnBuild(selected.action, input.sameTurnBuildTiles);
-
-      this.log.info("league agent decision recorded", {
-        sequence: record.sequence,
-        agentID: record.agentID,
-        profile: record.profile,
-        observationSummary: record.observationSummary,
-        objectiveKind: record.objectiveKind,
-        objectiveAligned: record.objectiveAligned,
-        legalActionIDs: record.legalActionIDs,
-        legalActionIDsByKind: record.legalActionIDsByKind,
-        chosenActionID: record.chosenActionID,
-        chosenActionKind: record.chosenActionKind,
-        chosenActionMetadata: record.chosenActionMetadata,
-        runtimeMode: record.decisionMetadata?.runtimeMode,
-        plannerSource: record.decisionMetadata?.plannerSource,
-        executorSource: record.decisionMetadata?.executorSource,
-        actionSelectionSource: record.decisionMetadata?.actionSelectionSource,
-        externalPlannerCall: record.decisionMetadata?.externalPlannerCall,
-        externalActionCall: record.decisionMetadata?.externalActionCall,
-        rawProviderOutputPresent:
-          record.decisionMetadata?.rawProviderOutputPresent,
-        attackActionIDs: record.attackActionIDs,
-        decisionMetadata: compactDecisionMetadata(record.decisionMetadata),
-        decisionLatencyMs: record.decisionLatencyMs,
-        intent: record.intent,
-        accepted: result.accepted,
-        reason: record.reason,
-        fallbackUsed: record.decisionMetadata?.fallbackUsed ?? false,
-      });
-    });
-
-    return availableCandidates;
   }
 
   decisionRecords(): AgentDecisionRecord[] {
@@ -844,59 +613,72 @@ export class AgentLeagueMatchRunner {
     };
   }
 
-  private submitAndRecordSpawn(input: {
-    participant: AgentParticipant;
-    observation: AgentObservation;
-    legalActions: LegalAction[];
-    spawnAction: LegalAction;
-    spawnStakes: Map<string, SpawnCandidate>;
-  }): void {
-    // A synthetic, deterministic (non-LLM) spawn decision. The metadata flags keep it OUT
-    // of the LLM-aliveness count (rawProviderOutputPresent:false) and the external-brain-
-    // cleanliness external-call count (externalPlannerCall/externalActionCall:false); the
-    // chosen tile is always a legal buildSpawnCandidates tile, so the submit is accepted
-    // and rejectedIntents stays 0.
+  /**
+   * Submits a participant's fairness-assigned spawn slot exactly once. A
+   * synthetic, deterministic (non-LLM, non-brain) decision: the metadata
+   * flags keep it OUT of the LLM-aliveness count (rawProviderOutputPresent:
+   * false) and the external-brain-cleanliness external-call count
+   * (externalPlannerCall/externalActionCall:false). The assigned tile
+   * already passed `validateSpawnSlotUniqueness` + `validateSpawnSlotLegality`
+   * before this is ever called, so the submit is expected to be accepted -
+   * a rejection here is an INVARIANT failure (the fairness assignment
+   * itself is broken, or core state moved out from under an
+   * already-validated tile), never something to paper over: the truthful
+   * (rejected) record is retained first, then this throws immediately
+   * naming the agent/tile/reason, so the engine's own fallback/default
+   * spawn can never silently contradict the assigned slot.
+   */
+  private submitAndRecordAssignedSpawn(
+    participant: AgentParticipant,
+    candidate: SpawnCandidate,
+    turnNumber: number,
+  ): void {
+    const observation = this.observationBuilder.build({
+      agentID: participant.runner.agentID,
+      clientID: participant.runner.clientID(),
+      username: participant.spec.username,
+      profile: participant.spec.profile,
+      gameID: this.options.game.id,
+      turnNumber,
+      phaseOverride: "spawn",
+      objective: this.objectiveManager.currentObjective(
+        participant.runner.agentID,
+      ),
+      recentDecisions: this.recentDecisionsFor(participant),
+    });
+    const spawnAction = buildSpawnLegalAction(candidate);
     const decision: AgentDecision = {
-      actionID: input.spawnAction.id,
-      reason: "deterministic built-in-style spawn exploration",
+      actionID: spawnAction.id,
+      reason: "deterministic fairness-assigned spawn slot",
       metadata: {
         brain: "deterministic-spawn",
         actionSelectionSource: "deterministic-spawn",
         externalPlannerCall: false,
         externalActionCall: false,
         rawProviderOutputPresent: false,
-        spawnExploration: true,
+        spawnAssignment: true,
       },
     };
-    const result = this.submitLegalAction(
-      input.participant.runner,
-      input.spawnAction,
-    );
+    const result = this.submitLegalAction(participant.runner, spawnAction);
     this.recordDecision({
-      participant: input.participant,
-      turnNumber: input.observation.turnNumber,
-      observationSummary: this.observationBuilder.summarize(input.observation),
-      observation: input.observation,
-      legalActions: input.legalActions,
-      chosenAction: input.spawnAction,
+      participant,
+      turnNumber: observation.turnNumber,
+      observationSummary: this.observationBuilder.summarize(observation),
+      observation,
+      legalActions: [spawnAction],
+      chosenAction: spawnAction,
       decision,
       decisionLatencyMs: 0,
       reason: decision.reason,
       result,
     });
-    // Replace (never accumulate) this agent's stake: submitting a new spawn tile
-    // means the agent vacated its previous pick, so that neighborhood is released
-    // for everyone on the next spawnCandidatesAvailableTo rebuild. Only an ACCEPTED
-    // submission moves the stake — a rejected intent leaves the player's actual
-    // pending spawn tile unchanged.
-    const tile = input.spawnAction.metadata?.tile;
-    if (result.accepted && typeof tile === "number") {
-      const staked = this.options.spawnCandidates.find(
-        (candidate) => candidate.tile === tile,
+    if (!result.accepted) {
+      throw new Error(
+        `runSpawnPhase: fairness-assigned spawn was rejected for agent ` +
+          `${participant.runner.agentID} at tile ${candidate.tile}: ` +
+          `${result.reason}. A rejection here means the assignment or the ` +
+          "live game state is broken - never falls back silently.",
       );
-      if (staked !== undefined) {
-        input.spawnStakes.set(input.participant.runner.agentID, staked);
-      }
     }
   }
 
@@ -1069,84 +851,6 @@ export class AgentLeagueMatchRunner {
         );
       })
       .slice(-8);
-  }
-
-  /**
-   * The effective minimum spawn-tile separation enforced between DIFFERENT agents'
-   * current spawn stakes (the constructor override or the density-derived default).
-   * Exposed so harnesses/tests can verify reservation semantics without duplicating
-   * the default-derivation formula.
-   */
-  effectiveMinSpawnDistance(): number {
-    return this.minSpawnDistance;
-  }
-
-  /**
-   * The spawn pool the given agent may pick from THIS tick: the full base pool minus
-   * the minSpawnDistance neighborhood of every OTHER agent's current stake (its most
-   * recent accepted spawn tile). Rebuilt from current stakes on every call instead of
-   * cumulatively pruned, so relocation releases the vacated neighborhood — only tiles
-   * agents currently hold reserve space. The agent's OWN stake is deliberately not
-   * excluded from its own pool: excluding it would re-prune the agent's anchor right
-   * after it settles there, forcing an oscillation away from the anchor on every
-   * converge tick.
-   */
-  private spawnCandidatesAvailableTo(
-    agentID: string,
-    spawnStakes: ReadonlyMap<string, SpawnCandidate>,
-  ): SpawnCandidate[] {
-    const rivalStakes: SpawnCandidate[] = [];
-    for (const [stakeAgentID, stake] of spawnStakes) {
-      if (stakeAgentID !== agentID) {
-        rivalStakes.push(stake);
-      }
-    }
-    if (rivalStakes.length === 0) {
-      return [...this.options.spawnCandidates];
-    }
-    return this.options.spawnCandidates.filter((candidate) =>
-      rivalStakes.every(
-        (stake) =>
-          distanceBetweenCandidates(candidate, stake) >= this.minSpawnDistance,
-      ),
-    );
-  }
-
-  private removeNearbySpawnCandidates(
-    candidates: SpawnCandidate[],
-    action: LegalAction,
-  ): SpawnCandidate[] {
-    const tile = action.metadata?.tile;
-    if (typeof tile !== "number") {
-      return candidates;
-    }
-    const chosen = candidates.find((candidate) => candidate.tile === tile);
-    if (chosen === undefined) {
-      return candidates;
-    }
-    return candidates.filter(
-      (candidate) =>
-        distanceBetweenCandidates(candidate, chosen) >= this.minSpawnDistance,
-    );
-  }
-
-  private filterSameTurnSpawnActions(
-    legalActions: LegalAction[],
-    availableCandidates: SpawnCandidate[],
-  ): LegalAction[] {
-    if (!legalActions.some((action) => action.kind === "spawn")) {
-      return legalActions;
-    }
-    const availableTiles = new Set(
-      availableCandidates.map((candidate) => candidate.tile),
-    );
-    return legalActions.filter((action) => {
-      if (action.kind !== "spawn") {
-        return true;
-      }
-      const tile = action.metadata?.tile;
-      return typeof tile === "number" && availableTiles.has(tile);
-    });
   }
 
   private filterSameTurnDiplomacyActions(
@@ -1622,46 +1326,6 @@ function decisionReason(
   return decision.reason === null
     ? `${validation.reason};${fallbackText}`
     : `${decision.reason}; ${validation.reason};${fallbackText}`;
-}
-
-function distanceBetweenCandidates(
-  a: SpawnCandidate,
-  b: SpawnCandidate,
-): number {
-  if (
-    a.x !== undefined &&
-    a.y !== undefined &&
-    b.x !== undefined &&
-    b.y !== undefined
-  ) {
-    return Math.hypot(a.x - b.x, a.y - b.y);
-  }
-  return a.tile === b.tile ? 0 : Number.POSITIVE_INFINITY;
-}
-
-function defaultMinSpawnDistance(
-  candidates: readonly SpawnCandidate[],
-  participantCount: number,
-): number {
-  const coordinates = candidates.filter(
-    (candidate) =>
-      typeof candidate.x === "number" && typeof candidate.y === "number",
-  );
-  if (coordinates.length < 2) {
-    return 12;
-  }
-
-  const xs = coordinates.map((candidate) => candidate.x!);
-  const ys = coordinates.map((candidate) => candidate.y!);
-  const span = Math.min(
-    Math.max(...xs) - Math.min(...xs) + 1,
-    Math.max(...ys) - Math.min(...ys) + 1,
-  );
-  const densityDivisor = Math.max(
-    5.5,
-    Math.sqrt(Math.max(1, participantCount)) * 2.8,
-  );
-  return Math.max(24, Math.min(72, Math.round(span / densityDivisor)));
 }
 
 function capitalize(value: string): string {

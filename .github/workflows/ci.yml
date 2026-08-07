@@ -71,19 +71,20 @@ jobs:
         shard: [1, 2, 3, 4]
     # Sharded 2026-08-04, comment updated 2026-08-07: the single-job
     # coverage run had cancelled at the 45-min cap on every main/PR run
-    # since 2026-08-02T00:14Z (GH Actions history), and the first 4-way
-    # split still intermittently failed on real GH runners because two
-    # specific files are individually pathological under coverage, not
-    # fixable by matrix shape or worker count: `tests/server/AgentLeagueMatch.test.ts`
+    # since 2026-08-02T00:14Z (GH Actions history). One file remains
+    # individually pathological under coverage, not fixable by matrix
+    # shape or worker count: `tests/server/AgentLeagueMatch.test.ts`
     # measured 2673514ms (44m33s) as the FIRST file executed in a real
-    # shard (GH Actions job 92052160802, PR #16), and
-    # `tests/server/SpawnCandidatePipelineEquivalence.test.ts` measured
-    # 875-1073s against its own 300s budget whenever run alongside other
-    # coverage-instrumented files — reproduced identically across 4-way and
-    # 8-way shards and maxWorkers 1 and 2 alike — despite passing in 67s
-    # standalone. Both are excluded here and run as their own dedicated
-    # `test-heavy` job below instead, still under full coverage, never
-    # skipped.
+    # shard (GH Actions job 92052160802, PR #16) - excluded here and run
+    # as its own dedicated `test-heavy` job below instead, still under
+    # full coverage, never skipped.
+    # `tests/server/SpawnCandidatePipelineEquivalence.test.ts` (its
+    # former dedicated-job sibling, measured 875-1073s against its own
+    # 300s budget) was split on the spawn-fairness-mechanic cutover into
+    # `tests/server/IsValidSpawnSiteEquivalence.test.ts`, dropping the
+    # 50-min-budget production-12P object-pipeline-equivalence case
+    # entirely - the remaining file is a normal-speed unit suite and
+    # rejoined the sharded matrix below.
     #
     # `tests/e2e/**` is ALSO excluded here as of 2026-08-07 and runs in its
     # own dedicated `test-e2e` job instead, via the plain (non-coverage)
@@ -103,11 +104,11 @@ jobs:
     # 2-vCPU runner is the evidence-correlated explanation. See the
     # `test-e2e` job's own comment.
     #
-    # Verified: `vitest list --filesOnly` with the 2 heavy files AND
-    # `tests/e2e/**` excluded reports exactly 449 files (`vitest list`'s
-    # own `--shard` flag is a no-op for listing, so this is the excluded
-    # total, not a verified 4-way shard union); combined with the 2 heavy
-    # files and the 1 e2e file that's the full unsharded 452.
+    # Verified: `vitest list --filesOnly` with `AgentLeagueMatch.test.ts`
+    # and `tests/e2e/**` excluded reports exactly 451 files (`vitest
+    # list`'s own `--shard` flag is a no-op for listing, so this is the
+    # excluded total, not a verified 4-way shard union); combined with the
+    # 1 heavy file and the 1 e2e file that's the full unsharded 453.
     #
     # `needs: build` + the `static-app-shell` download below: this job's
     # own app-shell-dependent files (PublicSurfaceSecurity.test.ts, etc.)
@@ -129,7 +130,7 @@ jobs:
         with:
           name: static-app-shell
           path: static
-      - run: npm run test:coverage -- --shard=${{ matrix.shard }}/4 --exclude=tests/server/AgentLeagueMatch.test.ts --exclude=tests/server/SpawnCandidatePipelineEquivalence.test.ts --exclude=tests/e2e/**
+      - run: npm run test:coverage -- --shard=${{ matrix.shard }}/4 --exclude=tests/server/AgentLeagueMatch.test.ts --exclude=tests/e2e/**
 
   test-heavy:
     name: "🔬 Test (heavy: ${{ matrix.label }})"
@@ -140,21 +141,17 @@ jobs:
         include:
           - label: agent-league-match
             file: tests/server/AgentLeagueMatch.test.ts
-          - label: spawn-candidate-pipeline-equivalence
-            file: tests/server/SpawnCandidatePipelineEquivalence.test.ts
-    # Dedicated single-file coverage job for each file excluded from the
+    # Dedicated single-file coverage job for the file excluded from the
     # sharded `test` matrix above — see that job's comment for the measured
-    # evidence. Each runs the exact same `npm run test:coverage` contract,
-    # alone, so it gets a runner with no coverage-instrumented sibling file
+    # evidence. Runs the exact same `npm run test:coverage` contract, alone,
+    # so it gets a runner with no coverage-instrumented sibling file
     # competing for the same worker/process. Never skipped, never
     # test-weakened — same command, same coverage, just isolated.
-    # 60-min JOB timeout is outer headroom around the per-case budgets each
-    # file's own tests declare (SpawnCandidatePipelineEquivalence's
-    # production-12P case now carries an explicit, evidence-based 50-min
-    # `it()` timeout — see that test file's own comment); this job-level
-    # cap is slack for process startup/npm ci/coverage report generation
-    # around that inner budget, not an independent timeout raise.
-    timeout-minutes: 60
+    # Evidence for raising 60->90: shared-runner attempt 2 (run #146)
+    # completed all 28 tests in 3587.02s but was canceled while printing
+    # the coverage table. 90m stays bounded outer headroom, not weakened
+    # tests/coverage.
+    timeout-minutes: 90
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6

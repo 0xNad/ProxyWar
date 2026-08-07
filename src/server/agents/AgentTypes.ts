@@ -744,6 +744,14 @@ export interface AgentObservation {
   objective: AgentObjectiveState | null;
   recentDecisions: RecentAgentDecision[];
   recentCommunications?: AgentCommunicationSignal[];
+  /**
+   * Bounded episode-level map identity for external providers - the map's
+   * own name/dimensions, never a terrain dump or the SpawnCandidate pool.
+   * Spawn is never a player/brain decision, so this exists purely for
+   * providers that want map identity in their own prompt/context, not to
+   * support any spawn-tile request.
+   */
+  mapInfo?: { name: string; width: number; height: number };
   /** Persistent per-rival belief state (theory of mind). Populated by the brain. */
   opponentModel?: AgentOpponentModelEntry[];
   endgame?: {
