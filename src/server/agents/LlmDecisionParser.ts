@@ -1,3 +1,4 @@
+import { structuredDealsEnabled } from "./AgentTunables";
 import { LegalAction } from "./AgentTypes";
 
 export interface LlmDecisionParserOptions {
@@ -18,6 +19,15 @@ export type LlmDecisionParseResult =
   | {
       ok: true;
       selectedLegalActionId: string;
+      /**
+       * OPTIONAL second selection — the diplomacy slot
+       * (PROXYWAR_TUNE_STRUCTURED_DEALS). Present only when the reply carried
+       * a non-empty `selectedDealActionId`. It is NOT validated here beyond
+       * being a non-empty string: `validateAgentDealDecision` is the sole
+       * authority and rejects anything that is not an offered deal
+       * meta-action id.
+       */
+      selectedDealActionId?: string;
       reason: string;
       confidence?: number;
       raw: string;
@@ -30,11 +40,34 @@ export type LlmDecisionParseResult =
 
 interface LlmDecisionJson {
   selectedLegalActionId?: unknown;
+  selectedDealActionId?: unknown;
   reason?: unknown;
   confidence?: unknown;
 }
 
 const allowedKeys = new Set(["selectedLegalActionId", "reason", "confidence"]);
+
+/**
+ * The optional deal slot is accepted only while the structured-deal flag is
+ * on: with the flag off the strict parser still rejects the key as an unknown
+ * field, exactly as it does today, so flag-off behavior is byte-identical.
+ * A reply that never carries the key behaves identically either way.
+ */
+function dealSlotKeyAllowed(): boolean {
+  return structuredDealsEnabled();
+}
+
+function parsedDealActionId(decision: LlmDecisionJson): string | undefined {
+  if (!dealSlotKeyAllowed()) {
+    return undefined;
+  }
+  const value = decision.selectedDealActionId;
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length === 0 ? undefined : trimmed;
+}
 
 export class LlmDecisionParser {
   constructor(private readonly options: LlmDecisionParserOptions = {}) {}
@@ -80,6 +113,9 @@ export class LlmDecisionParser {
     }
 
     for (const key of Object.keys(parsed)) {
+      if (key === "selectedDealActionId" && dealSlotKeyAllowed()) {
+        continue;
+      }
       if (!allowedKeys.has(key)) {
         if (key === "actionId") {
           return this.fail(
@@ -130,9 +166,11 @@ export class LlmDecisionParser {
       }
     }
 
+    const selectedDealActionId = parsedDealActionId(decision);
     return {
       ok: true,
       selectedLegalActionId,
+      ...(selectedDealActionId !== undefined ? { selectedDealActionId } : {}),
       reason,
       ...(typeof decision.confidence === "number"
         ? { confidence: decision.confidence }
@@ -205,9 +243,11 @@ export class LlmDecisionParser {
         ? decision.confidence
         : undefined;
 
+    const selectedDealActionId = parsedDealActionId(decision);
     return {
       ok: true,
       selectedLegalActionId,
+      ...(selectedDealActionId !== undefined ? { selectedDealActionId } : {}),
       reason,
       ...(confidence !== undefined ? { confidence } : {}),
       raw,
