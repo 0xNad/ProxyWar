@@ -7,6 +7,7 @@ import {
   type ReplayPremiereJoinSyncUpdate,
   type ReplayPremiereServiceTradeResponse,
 } from "src/client/ReplayPremiereRuntime";
+import { WAGERING_BUILD_SENTINEL } from "../buildSentinel";
 import { marketStateFromService } from "../serviceMapping";
 import type { MarketState, TradeSide } from "../types";
 import {
@@ -369,6 +370,11 @@ export function openBettingPremierePage(
 ): BettingPremierePageHandle {
   ensureBettingSpectatorStyleInjected();
   document.body.classList.add(BETTING_SPECTATOR_BODY_CLASS);
+  // Inspectable build-provenance stamp (see `../buildSentinel.ts`): a live
+  // observable USE of the sentinel literal, so no minification pass can
+  // argue the marker is dead. League builds never reach this code — this
+  // whole module is aliased to a stub there.
+  document.body.dataset.proxywarWageringBuild = WAGERING_BUILD_SENTINEL;
   let market: BettingPremiereMarketController | null = null;
   const runtime = new ReplayPremiereRuntimeController({
     premiereId,
@@ -402,6 +408,7 @@ export function openBettingPremierePage(
       market?.dispose();
       runtime.dispose();
       document.body.classList.remove(BETTING_SPECTATOR_BODY_CLASS);
+      delete document.body.dataset.proxywarWageringBuild;
     },
   };
 }

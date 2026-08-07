@@ -1,6 +1,10 @@
 import { html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { z } from "zod";
+// Build-provenance sentinel (side-effect import; see its own doc): if this
+// module ever leaks into a league client bundle, the sentinel leaks with it
+// and `scripts/scan-wagering-sentinel.mjs` fails that build.
+import "../buildSentinel";
 
 /**
  * Themed destination for a premiere id that no longer resolves — a stale
@@ -215,17 +219,16 @@ export class PremiereEndedPage extends LitElement {
       // we have it.
       if (match === null) {
         return html`<p class="text-sm text-ink-muted">
-          This match is no longer live, and this link no longer leads
-          anywhere — nothing more is available for it here.
+          This match is no longer live, and this link no longer leads anywhere —
+          nothing more is available for it here.
         </p>`;
       }
       return html`
         <p class="text-sm text-ink-muted">
-          This match is no longer live, but you traded it. Here's how it
-          settled for you.
+          This match is no longer live, but you traded it. Here's how it settled
+          for you.
         </p>
-        ${this.renderNet(match.net)}
-        ${this.renderLifetime()}
+        ${this.renderNet(match.net)} ${this.renderLifetime()}
       `;
     }
     return html`
@@ -268,9 +271,7 @@ export class PremiereEndedPage extends LitElement {
             ${visibleOthers.map(
               (placement) => html`<li>${placement.displayName}</li>`,
             )}
-            ${hiddenCount > 0
-              ? html`<li>+${hiddenCount} more</li>`
-              : nothing}
+            ${hiddenCount > 0 ? html`<li>+${hiddenCount} more</li>` : nothing}
           </ul>`
         : nothing}
       <p class="text-[11px] text-ink-muted">
@@ -306,7 +307,7 @@ export class PremiereEndedPage extends LitElement {
         Lifetime: ${this.account.betting.lifetimePoints} points
         ${this.account.betting.rank !== null
           ? html` · rank #${this.account.betting.rank} of
-              ${this.account.betting.totalRankedParticipants}`
+            ${this.account.betting.totalRankedParticipants}`
           : nothing}
       </p>
       <a

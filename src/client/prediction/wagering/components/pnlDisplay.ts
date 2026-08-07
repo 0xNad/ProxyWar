@@ -8,6 +8,12 @@
  * "+40 cr" reads very differently on a 20 cr stake than a 2,000 cr one.
  */
 
+// Build-provenance sentinel (side-effect import; see its own doc): if this
+// module ever leaks into a league client bundle, the sentinel leaks with it
+// and `scripts/scan-wagering-sentinel.mjs` fails that build. League builds
+// alias this module to `src/client/prediction/leagueStubs/pnlDisplay.ts`.
+import "../buildSentinel";
+
 export interface PnlTier {
   /** Text colour for the headline number and icon. */
   readonly colorClass: string;
@@ -71,19 +77,29 @@ const NOTABLE_PERCENT = 5;
 const STRONG_PERCENT = 15;
 
 /** Percent change vs. cost basis; `null` when there's no basis to compare against. */
-export function pnlPercent(unrealizedPnl: number, costBasis: number): number | null {
+export function pnlPercent(
+  unrealizedPnl: number,
+  costBasis: number,
+): number | null {
   if (costBasis <= 0) return null;
   return (unrealizedPnl / costBasis) * 100;
 }
 
 /** Magnitude-aware tone for one P&L figure. */
-export function pnlTier(unrealizedPnl: number, percent: number | null): PnlTier {
+export function pnlTier(
+  unrealizedPnl: number,
+  percent: number | null,
+): PnlTier {
   if (unrealizedPnl === 0) return FLAT;
   const magnitude = percent === null ? 0 : Math.abs(percent);
   const strong = magnitude >= STRONG_PERCENT;
   const notable = magnitude >= NOTABLE_PERCENT;
   if (unrealizedPnl > 0) {
-    return strong ? POSITIVE_STRONG : notable ? POSITIVE_NOTABLE : POSITIVE_MILD;
+    return strong
+      ? POSITIVE_STRONG
+      : notable
+        ? POSITIVE_NOTABLE
+        : POSITIVE_MILD;
   }
   return strong ? NEGATIVE_STRONG : notable ? NEGATIVE_NOTABLE : NEGATIVE_MILD;
 }

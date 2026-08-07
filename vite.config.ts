@@ -5,6 +5,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { defineConfig, loadEnv, type Plugin } from "vite";
 import { createHtmlPlugin } from "vite-plugin-html";
+import { LEAGUE_WAGERING_STUB_MAP } from "./src/client/prediction/leagueStubs/stubMap";
 import {
   type AssetManifest,
   buildAssetUrl,
@@ -94,6 +95,57 @@ function serveAiLeagueArtifacts(): Plugin {
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
   const isProduction = mode === "production";
+  // LEAGUE client build: excludes every betting/wagering surface from the
+  // bundle (operator boundary 2026-07-27 — speculation lives only on the
+  // separate bet surface, never inside the league package). Read straight
+  // from process.env, NEVER from loadEnv/.env files, so the switch can only
+  // be thrown explicitly by the invoking build (the coworld league image
+  // sets it via Dockerfile ENV; beta/bet deployments never set it). Same
+  // truthy grammar as the server's envFlag(). End-to-end proof lives in
+  // scripts/scan-wagering-sentinel.mjs (`npm run verify:league-client`).
+  const leagueClientBuild = ["1", "true", "yes", "on"].includes(
+    (process.env.PROXYWAR_LEAGUE_CLIENT ?? "").trim().toLowerCase(),
+  );
+  // Alias every wagering module that non-wagering client code imports to
+  // its inert stub — the map is the single source of truth shared with the
+  // stub-parity test. Keying the regex on the path SUFFIX (everything after
+  // the importer's "./" / "../" / "src/client" prefix) covers every
+  // spelling an import of these modules can take; the `^.*` anchor makes
+  // the regex consume the WHOLE specifier, because the rolldown alias
+  // plugin substitutes only the matched portion (a bare suffix match would
+  // leave the importer's "./" prefix glued onto the absolute stub path).
+  const leagueWageringAliases = leagueClientBuild
+    ? LEAGUE_WAGERING_STUB_MAP.map((entry) => ({
+        find: new RegExp(
+          `^.*${entry.realModule
+            .replace(/^src\/client/, "")
+            .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+        ),
+        replacement: path.resolve(__dirname, `${entry.stubModule}.ts`),
+      }))
+    : [];
+  // Backstop behind the alias map: if ANY module under the wagering tree is
+  // still loaded (a new import appeared that the stub map does not cover,
+  // or an alias regex rotted), fail the league build loudly instead of
+  // shipping betting code. `load` sees only modules that made it through
+  // resolution, so stubs never trip this.
+  const leagueWageringGuard = (): Plugin => ({
+    name: "proxywar-league-wagering-guard",
+    enforce: "pre",
+    load(id) {
+      if (id.includes("/src/client/prediction/wagering/")) {
+        throw new Error(
+          `[PROXYWAR_LEAGUE_CLIENT] wagering module reached the league ` +
+            `client build: ${id}. Every import into ` +
+            `src/client/prediction/wagering/** must resolve to a stub — ` +
+            `add the module to LEAGUE_WAGERING_STUB_MAP ` +
+            `(src/client/prediction/leagueStubs/stubMap.ts) with a stub ` +
+            `of the same exported names, never widen the league bundle.`,
+        );
+      }
+      return null;
+    },
+  });
   const resourcesDir = getResourcesDir(__dirname);
   const proprietaryDir = getProprietaryDir(__dirname);
   const sourceDirs = [resourcesDir, proprietaryDir];
@@ -236,9 +288,13 @@ export default defineConfig(({ mode }) => {
 
     resolve: {
       tsconfigPaths: true,
-      alias: {
-        resources: path.resolve(__dirname, "resources"),
-      },
+      alias: [
+        {
+          find: "resources",
+          replacement: path.resolve(__dirname, "resources"),
+        },
+        ...leagueWageringAliases,
+      ],
     },
 
     optimizeDeps: {
@@ -246,6 +302,7 @@ export default defineConfig(({ mode }) => {
     },
 
     plugins: [
+      ...(leagueClientBuild ? [leagueWageringGuard()] : []),
       ...(!isProduction
         ? [serveProprietaryDir(proprietaryDir, resourcesDir)]
         : []),
