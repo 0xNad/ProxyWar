@@ -117,6 +117,13 @@ export interface AgentVisiblePlayer {
   team?: string | null;
   /** True if this player is on the agent's own team (never betray/attack a teammate). */
   isTeammate?: boolean;
+  /**
+   * City/Factory/Port counts for this rival (PROXYWAR_TUNE_ECONOMY_OBSERVATION;
+   * absent when the flag is off — additive, wire-compatible).
+   */
+  unitCounts?: Partial<Record<UnitType, number>>;
+  /** Rival traitor state (PROXYWAR_TUNE_ECONOMY_OBSERVATION; absent when off). */
+  isTraitor?: boolean;
 }
 
 export interface AgentAttackOption {
@@ -550,6 +557,216 @@ export interface AgentBackstabAllyAffordance {
   reason: string;
 }
 
+/**
+ * Economy snapshot types (PROXYWAR_TUNE_ECONOMY_OBSERVATION, default OFF).
+ * Computed by `AgentEconomyNetwork.ts` from live core state (RailNetwork /
+ * StationManager / Cluster / Player.canTrade / stats gold indices) — pure
+ * reads, integer/bigint math, no pathfinding, deterministic for a given
+ * snapshot. Vocabulary discipline: physical rail connection, trade
+ * eligibility (embargo-only), relationship, and realized income are separate
+ * facts and are never merged.
+ */
+export type AgentEconomyFactoryStatus =
+  | "operational"
+  | "idle_no_destination"
+  | "blocked_by_embargo";
+
+export type AgentEconomyBottleneckKind =
+  | "none"
+  | "missing_trade_destination"
+  | "insufficient_factory_capacity"
+  | "population_capacity"
+  | "foreign_dependency"
+  | "embargo_disruption"
+  | "insufficient_gold"
+  | "unsafe_investment_window"
+  | "unknown";
+
+/**
+ * Cumulative gold earned per verified stats source (the six GOLD_INDEX_*
+ * buckets that already exist — deliberately never merged into one number).
+ * Serialized bigints, matching the observation's existing gold fields.
+ */
+export interface AgentEconomyIncomeBySource {
+  work: string;
+  war: string;
+  tradeShips: string;
+  capturedTradeShips: string;
+  trainSelf: string;
+  trainExternal: string;
+}
+
+export interface AgentEconomyEmbargoBlock {
+  playerID: string;
+  name: string;
+  /** Whose embargo blocks trade: ours on them, theirs on us, or both. */
+  direction: "ours" | "theirs" | "mutual";
+  blockedDestinationCount: number;
+}
+
+export interface AgentEconomyClusterSummary {
+  /**
+   * Derived stable key: min TrainStation.id over the cluster's stations
+   * (clusters themselves carry no stable identity in core; station ids are
+   * stable monotonic ints). Recomputed fresh each decision step.
+   */
+  clusterKey: number;
+  stationCount: number;
+  ownStations: { city: number; factory: number; port: number };
+  foreignStations: { city: number; factory: number; port: number };
+  /** City/Port stations this agent's trains may stop at (embargo-only gate). */
+  eligibleDestinationCount: number;
+  embargoBlockedDestinationCount: number;
+  blockedBy: AgentEconomyEmbargoBlock[];
+}
+
+export interface AgentEconomyFactorySummary {
+  unitID: number;
+  tile: TileRef;
+  level: number;
+  /** Null when the factory is not part of any rail cluster. */
+  clusterKey: number | null;
+  status: AgentEconomyFactoryStatus;
+}
+
+export interface AgentEconomyCounterpartySummary {
+  playerID: string;
+  name: string;
+  isAllied: boolean;
+  sharedClusterKeys: number[];
+  /** Their eligible City/Port stations on clusters touching this agent. */
+  myEligibleDestinationsTheyOwn: number;
+  /** This agent's eligible City/Port stations on shared clusters. */
+  theirEligibleDestinationsIOwn: number;
+  /**
+   * Integer percent (0-100) of ALL this agent's eligible destinations owned
+   * by this counterparty — the structural dependency. Null when the agent has
+   * no eligible destinations at all.
+   */
+  eligibleDestinationSharePct: number | null;
+  /**
+   * Both sides own >=1 Port and trade is not embargoed. Eligibility only —
+   * says nothing about ocean reachability (no pathfinding in this analyzer).
+   */
+  portTradeEligible: boolean;
+  embargoOursOnThem: boolean;
+  embargoTheirsOnUs: boolean;
+  /** Verified payout implication: per-stop train gold at the current relation. */
+  trainStopGoldCurrent: string;
+  /** Per-stop train gold if allied (verified: ally 35k > neutral 25k). */
+  trainStopGoldIfAllied: string;
+}
+
+export interface AgentEconomyBottleneck {
+  kind: AgentEconomyBottleneckKind;
+  /** Server-authored one-sentence evidence with concrete numbers. */
+  evidence: string;
+}
+
+/**
+ * Compact UNCAPPED per-counterparty trade-link entry. One entry for every
+ * counterparty that either owns >=1 eligible destination for this agent
+ * (`links` > 0) or has an embargo edge with it (so severed-link attribution
+ * stays exact). Bounded by alive seats, not by the counterparty reporting cap
+ * — spectator pair-transition detection reads ONLY this list, so cap-driven
+ * churn in the rich `counterparties` list can never fabricate
+ * trade_severed / trade_link_established events.
+ */
+export interface AgentEconomyRecordPairLink {
+  playerID: string;
+  name: string;
+  /** Their eligible City/Port stations on clusters touching this agent. */
+  links: number;
+  embargoOursOnThem: boolean;
+  embargoTheirsOnUs: boolean;
+}
+
+export interface AgentEconomyObservation {
+  incomeBySource: AgentEconomyIncomeBySource;
+  /** Total rail clusters touching the agent (before the reporting cap). */
+  clusterCount: number;
+  /** Capped at 6, sorted by clusterKey ascending. */
+  clusters: AgentEconomyClusterSummary[];
+  factoryCount: number;
+  /** Capped at 12, sorted by unitID ascending; counts below stay exact. */
+  factories: AgentEconomyFactorySummary[];
+  factoryStatusCounts: {
+    operational: number;
+    idleNoDestination: number;
+    blockedByEmbargo: number;
+  };
+  /** Deduped across touching clusters (clusters are disjoint by construction). */
+  eligibleDestinationCount: number;
+  embargoBlockedDestinationCount: number;
+  /** Total structural counterparties (before the reporting cap). */
+  counterpartyCount: number;
+  /** Capped at 8, sorted by playerID ascending. */
+  counterparties: AgentEconomyCounterpartySummary[];
+  /** Uncapped trade-link list (bounded by seats), sorted by playerID. */
+  pairLinks: AgentEconomyRecordPairLink[];
+  bottleneck: AgentEconomyBottleneck;
+}
+
+/**
+ * Compact per-decision economy facts stamped onto decision records when
+ * PROXYWAR_TUNE_ECONOMY_EVENTS is on (the permissive decisions.jsonl surface,
+ * never results.json). Spectator telemetry derives transition-only economy
+ * events from consecutive records' facts.
+ */
+export interface AgentEconomyRecordCounterpartyFacts {
+  playerID: string;
+  name: string;
+  isAllied: boolean;
+  myEligibleDestinationsTheyOwn: number;
+  eligibleDestinationSharePct: number | null;
+  embargoOursOnThem: boolean;
+  embargoTheirsOnUs: boolean;
+}
+
+export interface AgentEconomyRecordFacts {
+  factoryCount: number;
+  operationalFactoryCount: number;
+  idleFactoryCount: number;
+  blockedFactoryCount: number;
+  eligibleDestinationCount: number;
+  embargoBlockedDestinationCount: number;
+  counterparties: AgentEconomyRecordCounterpartyFacts[];
+  /**
+   * Uncapped trade-link list — the ONLY source for pair-transition spectator
+   * events (trade_link_established / trade_severed). Optional solely for
+   * tolerance of records stamped before this field existed; those records
+   * produce no pair events rather than cap-eviction false positives.
+   */
+  pairLinks?: AgentEconomyRecordPairLink[];
+  bottleneckKind: AgentEconomyBottleneckKind;
+}
+
+export interface AgentEconomyNetworkAffordance {
+  tacticID: "economy_network";
+  recommended: boolean;
+  turnNumber: number;
+  factoryCount: number;
+  operationalFactoryCount: number;
+  idleFactoryCount: number;
+  blockedFactoryCount: number;
+  clusterCount: number;
+  eligibleDestinationCount: number;
+  embargoBlockedDestinationCount: number;
+  trainSelfIncome: string;
+  trainExternalIncome: string;
+  tradeShipIncome: string;
+  topCounterpartyID: string | null;
+  topCounterpartyName: string | null;
+  topCounterpartyDependencyPct: number | null;
+  topCounterpartyAllied: boolean | null;
+  counterparties: AgentEconomyRecordCounterpartyFacts[];
+  /** Uncapped trade-link list (see AgentEconomyRecordPairLink). */
+  pairLinks: AgentEconomyRecordPairLink[];
+  bottleneckKind: AgentEconomyBottleneckKind;
+  bottleneckEvidence: string;
+  reasons: string[];
+}
+
 export interface AgentTacticalAffordances {
   transportTroopBanking: AgentTransportTroopBankingAffordance;
   openingExpansionTempo?: AgentOpeningExpansionTempoAffordance;
@@ -561,6 +778,8 @@ export interface AgentTacticalAffordances {
   personalityDiplomacyPressure?: AgentPersonalityDiplomacyPressureAffordance;
   survivalAlliance?: AgentSurvivalAllianceAffordance;
   backstabAlly?: AgentBackstabAllyAffordance;
+  /** Present only when the observation carries the flag-gated economy block. */
+  economyNetwork?: AgentEconomyNetworkAffordance;
   notes: string[];
 }
 
@@ -721,6 +940,136 @@ export interface AgentOpponentModelEntry {
   predictedNextAction: string;
 }
 
+/**
+ * Structured-deal observation types (PROXYWAR_TUNE_STRUCTURED_DEALS, default
+ * OFF). Built by the runner-scoped `AgentDealManager.ts` — deals are
+ * runner-scoped meta-state: core, Schemas.ts, and replay determinism are
+ * untouched, and deals never alter any game permission. Templates are
+ * enumerated with ZERO free text. Privacy: a bilateral proposal/deal appears
+ * only in the two parties' observations (runner-side filtering, the directed
+ * communication-signal pattern); operator artifacts see everything.
+ */
+export type AgentDealTemplate =
+  | "non_aggression_pact"
+  | "trade_security_pact"
+  | "joint_attack"
+  | "support_request";
+
+export const agentDealTemplates = [
+  "non_aggression_pact",
+  "trade_security_pact",
+  "joint_attack",
+  "support_request",
+] as const satisfies readonly AgentDealTemplate[];
+
+export type AgentDealStatus =
+  | "open"
+  | "accepted"
+  | "rejected"
+  | "withdrawn"
+  | "expired";
+
+export type AgentDealObligationStatus =
+  | "pending"
+  | "fulfilled"
+  | "violated"
+  | "expired_unfulfilled"
+  | "moot";
+
+export type AgentDealObligationKind =
+  | "non_aggression"
+  | "trade_security"
+  | "confirmed_attack_on_target"
+  | "send_support";
+
+export interface AgentDealTermsView {
+  template: AgentDealTemplate;
+  /** Clamped to the manager's 3-20 decision-step duration bounds. */
+  durationSteps: number;
+  /** joint_attack only: the named third seat the obligor pledges to attack. */
+  targetPlayerID?: string;
+  targetName?: string;
+  /**
+   * support_request only: EXPLICIT amounts, never null — the core donate-gold
+   * null-amount bug silently sends 0 (verified doc §4), so implicit amounts
+   * are forbidden by design. Gold serialized as an integer string.
+   */
+  goldAmount?: string;
+  troopAmount?: number;
+}
+
+export interface AgentDealProposalView {
+  dealID: string;
+  proposerPlayerID: string;
+  proposerName: string;
+  recipientPlayerID: string;
+  recipientName: string;
+  terms: AgentDealTermsView;
+  proposedAtStep: number;
+  /** Last decision step an answer is accepted; expires silently after it. */
+  answerableThroughStep: number;
+}
+
+export interface AgentDealObligationView {
+  obligorPlayerID: string;
+  obligorName: string;
+  kind: AgentDealObligationKind;
+  status: AgentDealObligationStatus;
+  targetPlayerID?: string;
+  targetName?: string;
+  goldAmount?: string;
+  troopAmount?: number;
+  /** send_support progress: cumulative confirmed donations in the window. */
+  donatedGold?: string;
+  donatedTroops?: number;
+}
+
+export interface AgentActiveDealView {
+  dealID: string;
+  template: AgentDealTemplate;
+  proposerPlayerID: string;
+  proposerName: string;
+  recipientPlayerID: string;
+  recipientName: string;
+  /** Obligations judge confirmed effects from this decision step onward. */
+  activeFromStep: number;
+  /** Last decision step obligations are judged (inclusive). */
+  expiresAfterStep: number;
+  stepsRemaining: number;
+  obligations: AgentDealObligationView[];
+}
+
+export interface AgentDealProposalOptionView {
+  recipientPlayerID: string;
+  recipientName: string;
+  terms: AgentDealTermsView;
+}
+
+export interface AgentDealRivalReliabilityView {
+  playerID: string;
+  name: string;
+  /** Obligations this rival fulfilled as obligor. */
+  fulfilled: number;
+  /** Terminal non-moot obligations as obligor (fulfilled + violated + expired_unfulfilled). */
+  terminalNonMoot: number;
+  /** fulfilled / terminalNonMoot, rounded to 2 decimals; null with no sample. */
+  reliability: number | null;
+}
+
+export interface AgentDealsObservation {
+  decisionStep: number;
+  /** Open proposals addressed to this agent, answerable now. Capped, stable-sorted. */
+  incomingProposals: AgentDealProposalView[];
+  /** This agent's own open proposals (withdrawable). Capped, stable-sorted. */
+  outgoingProposals: AgentDealProposalView[];
+  /** Active deals this agent is party to. Capped, stable-sorted. */
+  activeDeals: AgentActiveDealView[];
+  /** (recipient, template) pairs the manager currently has capacity to offer. */
+  proposalOptions: AgentDealProposalOptionView[];
+  /** Public referee aggregate per rival — no bilateral terms leak here. */
+  rivalReliability: AgentDealRivalReliabilityView[];
+}
+
 export interface AgentObservation {
   agentID: string;
   clientID: string | null;
@@ -754,6 +1103,20 @@ export interface AgentObservation {
   mapInfo?: { name: string; width: number; height: number };
   /** Persistent per-rival belief state (theory of mind). Populated by the brain. */
   opponentModel?: AgentOpponentModelEntry[];
+  /**
+   * Economy snapshot (PROXYWAR_TUNE_ECONOMY_OBSERVATION, default OFF; absent
+   * when the flag is off — observations are then byte-identical to shipped
+   * behavior). Built by `AgentEconomyNetwork.ts`.
+   */
+  economy?: AgentEconomyObservation;
+  /**
+   * Structured-deal state (PROXYWAR_TUNE_STRUCTURED_DEALS, default OFF;
+   * absent when the flag is off — observations are then byte-identical to
+   * shipped behavior). Injected by the league runner from its
+   * `AgentDealManager`, privacy-filtered to this agent's own bilateral
+   * proposals and deals.
+   */
+  deals?: AgentDealsObservation;
   endgame?: {
     winner: string | null;
     leaderID: string | null;
@@ -804,7 +1167,15 @@ export type LegalActionKind =
   | "donate_troops"
   | "embargo"
   | "embargo_stop"
-  | "embargo_all";
+  | "embargo_all"
+  // Structured-deal meta-actions (PROXYWAR_TUNE_STRUCTURED_DEALS, default
+  // OFF; offered only when the flag is on and the runner's deal manager has
+  // capacity). All `intent: null` — the `hold` precedent — processed by the
+  // runner-scoped AgentDealManager, never submitted to the game.
+  | "deal_propose"
+  | "deal_accept"
+  | "deal_reject"
+  | "deal_withdraw";
 
 export const legalActionKinds = [
   "spawn",
@@ -831,6 +1202,10 @@ export const legalActionKinds = [
   "embargo",
   "embargo_stop",
   "embargo_all",
+  "deal_propose",
+  "deal_accept",
+  "deal_reject",
+  "deal_withdraw",
 ] as const satisfies readonly LegalActionKind[];
 
 export interface LegalActionRisk {
@@ -946,6 +1321,12 @@ export interface AgentDecisionRecord {
   decisionMetadata?: Record<string, string | number | boolean | null>;
   chosenActionMetadata?: Record<string, string | number | boolean | null>;
   tacticalAffordances?: AgentTacticalAffordances;
+  /**
+   * Compact economy facts at this decision boundary
+   * (PROXYWAR_TUNE_ECONOMY_EVENTS; absent when the flag is off). Rides the
+   * permissive decision-record surface, never results.json.
+   */
+  economyFacts?: AgentEconomyRecordFacts;
   intent: Intent | null;
   result: AgentActionResult;
   audit?: AgentActionAudit;

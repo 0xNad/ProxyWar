@@ -200,9 +200,14 @@ export class AgentRunner {
     });
 
     if (action.intent === null) {
+      // Meta-actions (hold, and the structured-deal kinds) submit no game
+      // intent. The reason derives from the action kind so every meta-action
+      // reports itself accurately; for `hold` this deliberately reproduces
+      // the exact historical string "hold action selected; no game intent
+      // submitted", preserved for byte-stability of recorded artifacts.
       return {
         accepted: true,
-        reason: "hold action selected; no game intent submitted",
+        reason: `${action.kind} action selected; no game intent submitted`,
         intent: null,
       };
     }

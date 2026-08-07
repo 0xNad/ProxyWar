@@ -99,7 +99,7 @@ function chooseAction(actions, obs) {
     "spawn",
     "attack",
     "build",
-    "upgrade",
+    "upgrade_structure",
     "boat",
     "alliance_request",
     "quick_chat",

@@ -1,8 +1,16 @@
+import type { AgentDealLedgerEvent } from "./AgentDealCompliance";
 import type {
   AgentRunFinalState,
   AgentRunRosterEntry,
 } from "./AgentDecisionLogWriter";
-import type { AgentDecisionRecord, LegalActionKind } from "./AgentTypes";
+import { economyFactsFromAffordance } from "./AgentEconomyNetwork";
+import { economyEventsEnabled, structuredDealsEnabled } from "./AgentTunables";
+import type {
+  AgentDecisionRecord,
+  AgentEconomyRecordFacts,
+  AgentEconomyRecordPairLink,
+  LegalActionKind,
+} from "./AgentTypes";
 
 export type SpectatorRelationshipLabel =
   | "ally"
@@ -32,7 +40,28 @@ export type SpectatorEventKind =
   | "chat"
   | "emoji"
   | "elimination"
-  | "hold";
+  | "hold"
+  // Economy events (PROXYWAR_TUNE_ECONOMY_EVENTS, default OFF): derived from
+  // per-decision economy facts, emitted on state TRANSITIONS only, bounded per
+  // match. publicText keeps physical connection / trade eligibility /
+  // relationship / projected value / realized income distinct and never claims
+  // an agent routed or stopped a train or ship.
+  | "factory_operational"
+  | "factory_idle"
+  | "trade_link_established"
+  | "trade_severed"
+  | "economy_dependency"
+  // Structured-deal events (PROXYWAR_TUNE_STRUCTURED_DEALS, default OFF):
+  // derived from the deal-ledger stamps on decision records
+  // (dealAction/dealID/dealPublicText and the dealComplianceEvent JSON),
+  // bounded per agent. publicText is server-authored by AgentDealCompliance —
+  // the referee narrates follow-through, it never punishes.
+  | "deal_proposed"
+  | "deal_accepted"
+  | "deal_rejected"
+  | "deal_expired"
+  | "deal_fulfilled"
+  | "deal_violated";
 
 export interface SpectatorAgent {
   agentID: string;
@@ -76,7 +105,16 @@ export interface SpectatorEvent {
   secondaryName?: string | null;
   message: string;
   publicText?: string;
-  actionKind: LegalActionKind;
+  /**
+   * The RAW submitted action behind this event (see AgentStatsPipeline's
+   * actionKind-vs-kind note). `"none"` marks events DERIVED from state rather
+   * than from any submitted action (economy transition events, and
+   * structured-deal events, which derive from the deal LEDGER's transitions
+   * even when a deal meta-action caused the transition). Synthetic
+   * elimination events predate the marker and keep their legacy "hold"
+   * placeholder so flag-off telemetry bytes stay identical.
+   */
+  actionKind: LegalActionKind | "none";
   actionID: string;
   importance: number;
 }
@@ -161,6 +199,18 @@ export function buildAgentSpectatorTelemetry(
     }
   }
 
+  addEconomyEvents({
+    records: input.records,
+    agentByID,
+    agentByPlayerID,
+    events,
+  });
+  addDealEvents({
+    records: input.records,
+    agentByID,
+    agentByPlayerID,
+    events,
+  });
   addEliminationEvents({ input, agents, events });
 
   const sortedEvents = events.sort(
@@ -762,6 +812,428 @@ function addEliminationEvents(input: {
         actionID: "elimination",
         importance: 90,
       });
+    }
+  }
+}
+
+/**
+ * Economy events (PROXYWAR_TUNE_ECONOMY_EVENTS, default OFF — with the flag
+ * off this function emits nothing and telemetry is byte-identical to shipped
+ * behavior). Derived from the compact economy facts stamped on decision
+ * records at decision boundaries (`record.economyFacts`; falls back to the
+ * facts embedded in a retained `tacticalAffordances.economyNetwork` block).
+ *
+ * Emission is TRANSITION-ONLY: per agent the previous facts are compared to
+ * the current ones and an event fires only when a tracked state flips
+ * (network gains its first operational factory, factories become idle or
+ * embargo-blocked, a counterparty trade link appears or drops to zero, a
+ * dependency share crosses the threshold). Pair transitions
+ * (trade_link_established / trade_severed) read ONLY the uncapped
+ * `pairLinks` list — never the capped rich counterparty list, whose
+ * rank-eviction churn on >=9-counterparty matches would otherwise fabricate
+ * severed/established events. Bounded: at most
+ * ECONOMY_EVENT_LIMIT_PER_AGENT economy events per agent per match.
+ * publicText is server-authored, one sentence, and keeps physical rail
+ * connection, trade eligibility (embargo-only), relationship, and income as
+ * distinct facts; trains/ships are never described as agent-controlled.
+ */
+const ECONOMY_EVENT_LIMIT_PER_AGENT = 12;
+const ECONOMY_DEPENDENCY_EVENT_PCT = 50;
+
+const EMPTY_ECONOMY_FACTS: AgentEconomyRecordFacts = {
+  factoryCount: 0,
+  operationalFactoryCount: 0,
+  idleFactoryCount: 0,
+  blockedFactoryCount: 0,
+  eligibleDestinationCount: 0,
+  embargoBlockedDestinationCount: 0,
+  counterparties: [],
+  pairLinks: [],
+  bottleneckKind: "none",
+};
+
+function addEconomyEvents(input: {
+  records: readonly AgentDecisionRecord[];
+  agentByID: Map<string, SpectatorAgent>;
+  agentByPlayerID: Map<string, SpectatorAgent>;
+  events: SpectatorEvent[];
+}) {
+  if (!economyEventsEnabled()) {
+    return;
+  }
+  const previousByAgent = new Map<string, AgentEconomyRecordFacts>();
+  const emittedByAgent = new Map<string, number>();
+
+  for (const record of [...input.records].sort(recordSort)) {
+    const actor = input.agentByID.get(record.agentID);
+    if (actor === undefined) {
+      continue;
+    }
+    const facts =
+      record.economyFacts ??
+      (record.tacticalAffordances?.economyNetwork !== undefined
+        ? economyFactsFromAffordance(record.tacticalAffordances.economyNetwork)
+        : undefined);
+    if (facts === undefined) {
+      continue;
+    }
+    const previous = previousByAgent.get(record.agentID) ?? EMPTY_ECONOMY_FACTS;
+    previousByAgent.set(record.agentID, facts);
+
+    const emit = (
+      kind: SpectatorEventKind,
+      tone: SpectatorEvent["tone"],
+      importance: number,
+      publicText: string,
+      target: SpectatorAgent | null,
+      dedupeKey: string,
+    ) => {
+      const emitted = emittedByAgent.get(record.agentID) ?? 0;
+      if (emitted >= ECONOMY_EVENT_LIMIT_PER_AGENT) {
+        return;
+      }
+      emittedByAgent.set(record.agentID, emitted + 1);
+      input.events.push({
+        id: `${record.turnNumber}:${record.sequence}:${dedupeKey}`,
+        sequence: record.sequence,
+        turnNumber: record.turnNumber,
+        kind,
+        tone,
+        actorAgentID: actor.agentID,
+        actorName: actor.username,
+        targetAgentID: target?.agentID ?? null,
+        targetName: target?.username ?? null,
+        message: publicText,
+        publicText,
+        // Derived from state transitions, not from any submitted action.
+        actionKind: "none",
+        actionID: dedupeKey,
+        importance,
+      });
+    };
+
+    if (
+      previous.operationalFactoryCount === 0 &&
+      facts.operationalFactoryCount > 0
+    ) {
+      emit(
+        "factory_operational",
+        "trade",
+        56,
+        `${actor.username}'s rail network has an eligible City or Port destination; ${facts.operationalFactoryCount} of ${facts.factoryCount} factories are operational.`,
+        null,
+        "economy:factory_operational",
+      );
+    }
+    const previousStalled =
+      previous.idleFactoryCount + previous.blockedFactoryCount;
+    const stalled = facts.idleFactoryCount + facts.blockedFactoryCount;
+    if (previousStalled === 0 && stalled > 0) {
+      emit(
+        "factory_idle",
+        "info",
+        44,
+        facts.blockedFactoryCount > 0
+          ? `All City/Port destinations on the rail network of ${facts.blockedFactoryCount} of ${actor.username}'s ${facts.factoryCount} factories are embargo-blocked.`
+          : `${facts.idleFactoryCount} of ${actor.username}'s ${facts.factoryCount} factories ${facts.idleFactoryCount === 1 ? "has" : "have"} no City or Port on ${facts.idleFactoryCount === 1 ? "its" : "their"} rail network, so no trains can run from ${facts.idleFactoryCount === 1 ? "it" : "them"}.`,
+        null,
+        "economy:factory_idle",
+      );
+    }
+
+    // Pair transitions read ONLY the uncapped pairLinks list. The capped rich
+    // counterparty list churns with structural rank under the reporting cap,
+    // and treating absence-from-it as links=0 fabricated severed/established
+    // events; absence from pairLinks genuinely means zero links and no
+    // embargo edge. Records stamped before pairLinks existed produce no pair
+    // events at all rather than false ones.
+    const previousPairs = new Map(
+      (previous.pairLinks ?? []).map((pair) => [pair.playerID, pair] as const),
+    );
+    const currentPairs = new Map(
+      (facts.pairLinks ?? []).map((pair) => [pair.playerID, pair] as const),
+    );
+    const pairIDs = [
+      ...new Set([...previousPairs.keys(), ...currentPairs.keys()]),
+    ].sort();
+    for (const playerID of pairIDs) {
+      const before = previousPairs.get(playerID);
+      const after = currentPairs.get(playerID);
+      const beforeLinks = before?.links ?? 0;
+      const afterLinks = after?.links ?? 0;
+      const target = input.agentByPlayerID.get(playerID) ?? null;
+      const displayName =
+        target?.username ?? after?.name ?? before?.name ?? "another player";
+
+      if (beforeLinks === 0 && afterLinks > 0) {
+        emit(
+          "trade_link_established",
+          "trade",
+          62,
+          `${actor.username}'s rail network reaches ${afterLinks} eligible destination${afterLinks === 1 ? "" : "s"} owned by ${displayName}; trade between them is not embargoed.`,
+          target,
+          `economy:trade_link_established:${playerID}`,
+        );
+      }
+      if (beforeLinks > 0 && afterLinks === 0) {
+        emit(
+          "trade_severed",
+          "threat",
+          72,
+          tradeSeveredText(actor.username, displayName, before, after),
+          target,
+          `economy:trade_severed:${playerID}`,
+        );
+      }
+    }
+
+    // Dependency-share crossings stay on the capped rich list: a counterparty
+    // at or above the threshold holds the most links and therefore the top
+    // structural rank, so the cap can never evict it while it matters.
+    const previousShares = new Map(
+      previous.counterparties.map((pair) => [pair.playerID, pair] as const),
+    );
+    for (const after of facts.counterparties) {
+      const before = previousShares.get(after.playerID);
+      const beforePct = before?.eligibleDestinationSharePct ?? 0;
+      const afterPct = after.eligibleDestinationSharePct ?? 0;
+      if (
+        beforePct < ECONOMY_DEPENDENCY_EVENT_PCT &&
+        afterPct >= ECONOMY_DEPENDENCY_EVENT_PCT
+      ) {
+        const target = input.agentByPlayerID.get(after.playerID) ?? null;
+        const displayName = target?.username ?? after.name;
+        emit(
+          "economy_dependency",
+          "trade",
+          64,
+          `${displayName} owns ${afterPct}% of the eligible City/Port destinations on ${actor.username}'s rail network (${after.isAllied ? "allied; allied train stops pay more" : "not allied"}).`,
+          target,
+          `economy:economy_dependency:${after.playerID}`,
+        );
+      }
+    }
+  }
+}
+
+function tradeSeveredText(
+  actorName: string,
+  counterpartyName: string,
+  before: AgentEconomyRecordPairLink | undefined,
+  after: AgentEconomyRecordPairLink | undefined,
+): string {
+  const oursNew =
+    (after?.embargoOursOnThem ?? false) &&
+    !(before?.embargoOursOnThem ?? false);
+  const theirsNew =
+    (after?.embargoTheirsOnUs ?? false) &&
+    !(before?.embargoTheirsOnUs ?? false);
+  if (oursNew && theirsNew) {
+    return `Mutual embargoes between ${actorName} and ${counterpartyName} cut ${actorName}'s eligible rail destinations owned by ${counterpartyName} to zero.`;
+  }
+  if (oursNew) {
+    return `${actorName}'s embargo on ${counterpartyName} cut ${actorName}'s eligible rail destinations owned by ${counterpartyName} to zero.`;
+  }
+  if (theirsNew) {
+    return `${counterpartyName}'s embargo on ${actorName} cut ${actorName}'s eligible rail destinations owned by ${counterpartyName} to zero.`;
+  }
+  return `${actorName} no longer has any eligible rail destination owned by ${counterpartyName}; the connecting stations were destroyed or changed owners.`;
+}
+
+/**
+ * Structured-deal events (PROXYWAR_TUNE_STRUCTURED_DEALS, default OFF — with
+ * the flag off this function emits nothing and telemetry is byte-identical to
+ * shipped behavior). Derived from records alone (the mirror-backfill path
+ * rebuilds telemetry from decisions.jsonl), following the Phase A economy
+ * pattern: flag-gated, transition-derived, actionKind "none", bounded per
+ * agent per match. Two record surfaces feed it:
+ *
+ * 1. Deal ACTION stamps (dealAction/dealID/dealPublicText, stamped by the
+ *    deal manager on accepted propose/accept/reject records) become
+ *    deal_proposed / deal_accepted (tone pact) / deal_rejected. Withdrawn
+ *    proposals are silent by design.
+ * 2. The dealComplianceEvent stamp (a JSON array of compact referee/lifecycle
+ *    events authored by AgentDealCompliance) becomes deal_expired /
+ *    deal_fulfilled / deal_violated (tone betrayal, high importance), with
+ *    tone/importance/publicText carried in the stamp.
+ *
+ * Force-resolution events emitted after the final record are ledger-only by
+ * construction (no record exists to carry them) — the full ledger remains
+ * available through AgentLeagueMatchRunner.dealLedger().
+ */
+const DEAL_EVENT_LIMIT_PER_AGENT = 24;
+
+const DEAL_ACTION_EVENTS: Record<
+  string,
+  {
+    kind: SpectatorEventKind;
+    tone: SpectatorEvent["tone"];
+    importance: number;
+  }
+> = {
+  propose: { kind: "deal_proposed", tone: "info", importance: 55 },
+  accept: { kind: "deal_accepted", tone: "pact", importance: 78 },
+  reject: { kind: "deal_rejected", tone: "info", importance: 45 },
+};
+
+const DEAL_LEDGER_EVENT_KINDS: ReadonlySet<string> = new Set([
+  "deal_proposed",
+  "deal_accepted",
+  "deal_rejected",
+  "deal_expired",
+  "deal_fulfilled",
+  "deal_violated",
+]);
+
+const DEAL_EVENT_TONES: ReadonlySet<string> = new Set([
+  "info",
+  "pact",
+  "trade",
+  "threat",
+  "betrayal",
+  "war",
+]);
+
+function parseDealComplianceEvents(value: unknown): AgentDealLedgerEvent[] {
+  if (typeof value !== "string" || value.length === 0) {
+    return [];
+  }
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.filter((item): item is AgentDealLedgerEvent => {
+      if (item === null || typeof item !== "object") {
+        return false;
+      }
+      const candidate = item as Record<string, unknown>;
+      return (
+        typeof candidate.event === "string" &&
+        DEAL_LEDGER_EVENT_KINDS.has(candidate.event) &&
+        typeof candidate.dealID === "string" &&
+        typeof candidate.actorPlayerID === "string" &&
+        typeof candidate.actorName === "string" &&
+        typeof candidate.publicText === "string" &&
+        typeof candidate.tone === "string" &&
+        DEAL_EVENT_TONES.has(candidate.tone) &&
+        typeof candidate.importance === "number"
+      );
+    });
+  } catch {
+    return [];
+  }
+}
+
+function addDealEvents(input: {
+  records: readonly AgentDecisionRecord[];
+  agentByID: Map<string, SpectatorAgent>;
+  agentByPlayerID: Map<string, SpectatorAgent>;
+  events: SpectatorEvent[];
+}) {
+  if (!structuredDealsEnabled()) {
+    return;
+  }
+  const emittedByAgent = new Map<string, number>();
+  const emit = (
+    record: AgentDecisionRecord,
+    actor: SpectatorAgent,
+    target: SpectatorAgent | null,
+    kind: SpectatorEventKind,
+    tone: SpectatorEvent["tone"],
+    importance: number,
+    publicText: string,
+    targetNameFallback: string | null,
+    dedupeKey: string,
+  ) => {
+    const emitted = emittedByAgent.get(actor.agentID) ?? 0;
+    if (emitted >= DEAL_EVENT_LIMIT_PER_AGENT) {
+      return;
+    }
+    emittedByAgent.set(actor.agentID, emitted + 1);
+    input.events.push({
+      id: `${record.turnNumber}:${record.sequence}:${dedupeKey}`,
+      sequence: record.sequence,
+      turnNumber: record.turnNumber,
+      kind,
+      tone,
+      actorAgentID: actor.agentID,
+      actorName: actor.username,
+      targetAgentID: target?.agentID ?? null,
+      targetName: target?.username ?? targetNameFallback,
+      message: publicText,
+      publicText,
+      // Derived from the deal ledger's transitions, not from any submitted
+      // game intent (deal meta-actions carry intent: null).
+      actionKind: "none",
+      actionID: dedupeKey,
+      importance,
+    });
+  };
+
+  for (const record of [...input.records].sort(recordSort)) {
+    const actor = input.agentByID.get(record.agentID);
+    if (actor === undefined) {
+      continue;
+    }
+    const metadata = record.decisionMetadata ?? {};
+    const dealAction =
+      typeof metadata.dealAction === "string" ? metadata.dealAction : null;
+    const dealID = typeof metadata.dealID === "string" ? metadata.dealID : null;
+    if (
+      dealAction !== null &&
+      dealID !== null &&
+      metadata.dealApplyAccepted === true &&
+      record.result.accepted
+    ) {
+      const mapping = DEAL_ACTION_EVENTS[dealAction];
+      if (mapping !== undefined) {
+        const counterpartyID =
+          typeof metadata.dealCounterpartyID === "string"
+            ? metadata.dealCounterpartyID
+            : null;
+        const target =
+          counterpartyID === null
+            ? null
+            : (input.agentByPlayerID.get(counterpartyID) ?? null);
+        const publicText =
+          typeof metadata.dealPublicText === "string"
+            ? metadata.dealPublicText
+            : `${actor.username} ${dealAction}s a deal.`;
+        emit(
+          record,
+          actor,
+          target,
+          mapping.kind,
+          mapping.tone,
+          mapping.importance,
+          publicText,
+          typeof metadata.dealCounterpartyName === "string"
+            ? metadata.dealCounterpartyName
+            : null,
+          `deal:${mapping.kind}:${dealID}`,
+        );
+      }
+    }
+    for (const item of parseDealComplianceEvents(
+      metadata.dealComplianceEvent,
+    )) {
+      const eventActor = input.agentByPlayerID.get(item.actorPlayerID) ?? actor;
+      const target =
+        item.targetPlayerID === null
+          ? null
+          : (input.agentByPlayerID.get(item.targetPlayerID) ?? null);
+      emit(
+        record,
+        eventActor,
+        target,
+        item.event,
+        item.tone,
+        item.importance,
+        item.publicText,
+        item.targetName,
+        `deal:${item.event}:${item.dealID}:${item.actorPlayerID}`,
+      );
     }
   }
 }
