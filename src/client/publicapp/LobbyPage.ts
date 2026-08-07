@@ -7,7 +7,7 @@ import {
   appShellFooter,
   appShellHeader,
   APP_SHELL_ROOT_CLASSES,
-  waitForTranslationsReady,
+  requestUpdateWhenTranslationsReady,
 } from "./AppShellChrome";
 import {
   fetchReadModel,
@@ -108,7 +108,7 @@ export class LobbyPage extends LitElement {
     // translations load — a fast read-model response racing ahead of a
     // slow translations load still left the nav flashing keys. See
     // `waitForTranslationsReady`'s own doc.
-    void waitForTranslationsReady().then(() => this.requestUpdate());
+    requestUpdateWhenTranslationsReady(this);
     this.tickHandle = window.setInterval(() => {
       this.nowMs = Date.now();
       const event = this.promotableEvent;

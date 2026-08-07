@@ -8,7 +8,7 @@ import {
   APP_SHELL_ROOT_CLASSES,
   appShellFooter,
   appShellHeader,
-  waitForTranslationsReady,
+  requestUpdateWhenTranslationsReady,
 } from "./AppShellChrome";
 import {
   fetchReadModel,
@@ -249,7 +249,7 @@ export class MatchDetailPage extends LitElement {
   connectedCallback(): void {
     super.connectedCallback();
     void this.load();
-    void waitForTranslationsReady().then(() => this.requestUpdate());
+    requestUpdateWhenTranslationsReady(this);
     this.tickHandle = window.setInterval(() => {
       this.nowMs = Date.now();
       if (

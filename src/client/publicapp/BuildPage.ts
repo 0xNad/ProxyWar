@@ -4,7 +4,7 @@ import {
   APP_SHELL_ROOT_CLASSES,
   appShellFooter,
   appShellHeader,
-  waitForTranslationsReady,
+  requestUpdateWhenTranslationsReady,
 } from "./AppShellChrome";
 import { translateText } from "../Utils";
 import { analytics } from "../analytics/AnalyticsClient";
@@ -108,7 +108,7 @@ export class BuildPage extends LitElement {
   connectedCallback(): void {
     super.connectedCallback();
     this.reportStep(this.step);
-    void waitForTranslationsReady().then(() => this.requestUpdate());
+    requestUpdateWhenTranslationsReady(this);
   }
 
   disconnectedCallback(): void {
