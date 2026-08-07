@@ -57,3 +57,118 @@ export function resolveWinnerSlot(
   );
   return index >= 0 ? index : null;
 }
+
+/**
+ * Structural inputs the results builder needs — never the full episode/config
+ * types, so this module stays decoupled and importable without pulling in
+ * no-docker-coworld-episode.ts (which runs `await main()` at module load and
+ * is therefore unsafe to import from a test).
+ */
+export interface CoworldResultsFinalState {
+  readonly winnerSlot: number | null;
+  readonly turnCount: number | null;
+  readonly tick: number | null;
+  readonly players: ReadonlyArray<{
+    readonly username: string;
+    readonly tilesOwned: number | null;
+    readonly isAlive: boolean | null;
+  }>;
+}
+
+export interface CoworldDecisionRecord {
+  readonly result: { readonly accepted: boolean };
+  readonly decisionMetadata?: {
+    readonly fallbackUsed?: boolean;
+    readonly llmPlannerDegraded?: boolean;
+  };
+}
+
+/** Coworld's game-written results.json contract (coworld_manifest.json's
+ *  results_schema, `required`: seed, game_id, scores, winner_slot,
+ *  turn_count, tick, decision_count, accepted_decision_count,
+ *  fallback_count, players). */
+export interface CoworldResults {
+  /** GameServer match id (e.g. "COWRLD01") — the value that seeds the
+   *  deterministic simulation RNG via simpleHash(gameID). Always 8
+   *  alphanumeric chars, matching results_schema's game_id pattern. */
+  readonly game_id: string;
+  /** No per-episode seed is threaded through src/core today — the fixed
+   *  game_id above is the sole determinism input. results_schema allows
+   *  seed to be null; emitting null here is honest, not a fabricated value. */
+  readonly seed: number | null;
+  readonly scores: number[];
+  readonly winner_slot: number | null;
+  readonly turn_count: number | null;
+  readonly tick: number | null;
+  readonly decision_count: number;
+  readonly accepted_decision_count: number;
+  readonly fallback_count: number;
+  readonly degraded_count: number;
+  readonly players: Array<{
+    slot: number;
+    name: string;
+    score: number;
+    tiles_owned: number | null;
+    is_alive: boolean | null;
+  }>;
+}
+
+/**
+ * Build the Coworld results.json contract for one episode. Pure function of
+ * its inputs — no I/O, no module-load side effects (see file header).
+ */
+export function coworldResults(input: {
+  /** GameServer.id for this episode (e.g. "COWRLD01"); pass game.id from the
+   *  caller — never recompute it here, so this stays the single source of
+   *  the deterministic match identity. */
+  gameId: string;
+  players: ReadonlyArray<{ readonly name: string }>;
+  finalState: CoworldResultsFinalState;
+  records: readonly CoworldDecisionRecord[];
+}): CoworldResults {
+  const totalTiles = input.finalState.players.reduce(
+    (sum, player) => sum + Math.max(0, player.tilesOwned ?? 0),
+    0,
+  );
+  // Winner slot is resolved by identity in finalKnownState (not a name substring).
+  const winner_slot = input.finalState.winnerSlot;
+  const scores = input.finalState.players.map((player, index) => {
+    if (winner_slot !== null) {
+      return index === winner_slot ? 1 : 0;
+    }
+    if (totalTiles <= 0 || player.tilesOwned === null) {
+      return 0;
+    }
+    return player.tilesOwned / totalTiles;
+  });
+  return {
+    game_id: input.gameId,
+    seed: null,
+    scores,
+    winner_slot,
+    turn_count: input.finalState.turnCount,
+    tick: input.finalState.tick,
+    decision_count: input.records.length,
+    accepted_decision_count: input.records.filter(
+      (record) => record.result.accepted,
+    ).length,
+    // A decision is a fallback if it fell back OR the LLM planner degraded —
+    // a degraded-but-not-fallback decision (e.g. the standing directive kept
+    // executing after a Commander failure) must not read as 0 fallbacks.
+    fallback_count: input.records.filter(
+      (record) =>
+        record.decisionMetadata?.fallbackUsed === true ||
+        record.decisionMetadata?.llmPlannerDegraded === true,
+    ).length,
+    degraded_count: input.records.filter(
+      (record) => record.decisionMetadata?.llmPlannerDegraded === true,
+    ).length,
+    players: input.finalState.players.map((player, slot) => ({
+      slot,
+      name: input.players[slot]?.name ?? player.username,
+      score: scores[slot] ?? 0,
+      tiles_owned: player.tilesOwned,
+      is_alive: player.isAlive,
+    })),
+  };
+}

@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  coworldResults,
   resolveWinnerSlot,
+  type CoworldDecisionRecord,
+  type CoworldResultsFinalState,
   type ResolvedPlayerIdentity,
 } from "../../coworld-adapter/src/coworld-results";
 
@@ -97,5 +100,106 @@ describe("resolveWinnerSlot (Coworld result contract, ADAPTER-02)", () => {
       expect(slot).toBeGreaterThanOrEqual(0);
       expect(slot).toBeLessThanOrEqual(3);
     }
+  });
+});
+
+describe("coworldResults (Coworld results.json contract)", () => {
+  // Minimal finalState fixture: two players, second one alive with more tiles.
+  const finalState = (
+    winnerSlot: number | null,
+    tilesOwned: [number | null, number | null] = [4, 6],
+  ): CoworldResultsFinalState => ({
+    winnerSlot,
+    turnCount: 42,
+    tick: 4200,
+    players: [
+      { username: "seat-0", tilesOwned: tilesOwned[0], isAlive: true },
+      { username: "seat-1", tilesOwned: tilesOwned[1], isAlive: true },
+    ],
+  });
+
+  const record = (
+    accepted: boolean,
+    fallbackUsed = false,
+    llmPlannerDegraded = false,
+  ): CoworldDecisionRecord => ({
+    result: { accepted },
+    decisionMetadata: { fallbackUsed, llmPlannerDegraded },
+  });
+
+  it("stamps the authoritative game_id from the caller's game.id, never recomputing it", () => {
+    const result = coworldResults({
+      gameId: "COWRLD01",
+      players: [{ name: "Alice" }, { name: "Bob" }],
+      finalState: finalState(1),
+      records: [],
+    });
+    expect(result.game_id).toBe("COWRLD01");
+    // results_schema.properties.game_id.pattern: ^[A-Za-z0-9]{8}$
+    expect(result.game_id).toMatch(/^[A-Za-z0-9]{8}$/);
+  });
+
+  it("emits seed: null — no per-episode seed is threaded through the deterministic core", () => {
+    const result = coworldResults({
+      gameId: "COWRLD01",
+      players: [{ name: "Alice" }, { name: "Bob" }],
+      finalState: finalState(null),
+      records: [],
+    });
+    // results_schema.properties.seed.type allows ["integer", "null"].
+    expect(result.seed).toBeNull();
+  });
+
+  it("still scores a decisive winner 1/0 by slot (unchanged by the metadata addition)", () => {
+    const result = coworldResults({
+      gameId: "COWRLD01",
+      players: [{ name: "Alice" }, { name: "Bob" }],
+      finalState: finalState(1),
+      records: [],
+    });
+    expect(result.winner_slot).toBe(1);
+    expect(result.scores).toEqual([0, 1]);
+  });
+
+  it("still falls back to tile-share scoring when there is no winner", () => {
+    const result = coworldResults({
+      gameId: "COWRLD01",
+      players: [{ name: "Alice" }, { name: "Bob" }],
+      finalState: finalState(null, [4, 6]),
+      records: [],
+    });
+    expect(result.winner_slot).toBeNull();
+    expect(result.scores).toEqual([0.4, 0.6]);
+  });
+
+  it("still counts decisions, acceptance, fallback (fallbackUsed OR llmPlannerDegraded), and degraded", () => {
+    const result = coworldResults({
+      gameId: "COWRLD01",
+      players: [{ name: "Alice" }, { name: "Bob" }],
+      finalState: finalState(1),
+      records: [
+        record(true, false, false),
+        record(false, true, false),
+        record(true, false, true),
+        record(true, true, true),
+      ],
+    });
+    expect(result.decision_count).toBe(4);
+    expect(result.accepted_decision_count).toBe(3);
+    expect(result.fallback_count).toBe(3);
+    expect(result.degraded_count).toBe(2);
+  });
+
+  it("still carries per-slot name/score/tiles_owned/is_alive, falling back to finalState username", () => {
+    const result = coworldResults({
+      gameId: "COWRLD01",
+      players: [{ name: "Alice" }],
+      finalState: finalState(0),
+      records: [],
+    });
+    expect(result.players).toEqual([
+      { slot: 0, name: "Alice", score: 1, tiles_owned: 4, is_alive: true },
+      { slot: 1, name: "seat-1", score: 0, tiles_owned: 6, is_alive: true },
+    ]);
   });
 });

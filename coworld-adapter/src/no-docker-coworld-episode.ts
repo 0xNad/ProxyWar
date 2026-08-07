@@ -13,8 +13,13 @@ import {
   injectCoworldSplash,
   type CoworldAppShellRoute,
 } from "./coworld-appshell.ts";
-import { resolveWinnerSlot, type WinnerRef } from "./coworld-results.ts";
 import { episodeIndexFromConfig } from "./coworld-episode-index.ts";
+import {
+  coworldResults,
+  resolveWinnerSlot,
+  type CoworldResults,
+  type WinnerRef,
+} from "./coworld-results.ts";
 import { competitiveSeatSpecs } from "./coworld-seat-specs.ts";
 
 const localRoot = path.resolve(
@@ -121,24 +126,6 @@ export type CoworldConfig = {
    * (single/first episode) when omitted.
    */
   episodeIndex?: number;
-};
-
-type CoworldResults = {
-  scores: number[];
-  winner_slot: number | null;
-  turn_count: number | null;
-  tick: number | null;
-  decision_count: number;
-  accepted_decision_count: number;
-  fallback_count: number;
-  degraded_count: number;
-  players: Array<{
-    slot: number;
-    name: string;
-    score: number;
-    tiles_owned: number | null;
-    is_alive: boolean | null;
-  }>;
 };
 
 class CoworldProtocolServer {
@@ -1109,7 +1096,8 @@ async function runProxyWarEpisode(
         ? spectatorReplay
         : JSON.parse(await fs.readFile(artifacts.spectatorReplayPath, "utf8"));
     const results = coworldResults({
-      config,
+      gameId: game.id,
+      players: config.players,
       finalState,
       records: league.decisionRecords(),
     });
@@ -1569,56 +1557,6 @@ function filePathFromUri(uri: string): string | null {
     return uri;
   }
   return null;
-}
-
-function coworldResults(input: {
-  config: CoworldConfig;
-  finalState: ReturnType<typeof finalKnownState>;
-  records: any[];
-}): CoworldResults {
-  const totalTiles = input.finalState.players.reduce(
-    (sum, player) => sum + Math.max(0, player.tilesOwned ?? 0),
-    0,
-  );
-  // Winner slot is resolved by identity in finalKnownState (not a name substring).
-  const winner_slot = input.finalState.winnerSlot;
-  const scores = input.finalState.players.map((player, index) => {
-    if (winner_slot !== null) {
-      return index === winner_slot ? 1 : 0;
-    }
-    if (totalTiles <= 0 || player.tilesOwned === null) {
-      return 0;
-    }
-    return player.tilesOwned / totalTiles;
-  });
-  return {
-    scores,
-    winner_slot,
-    turn_count: input.finalState.turnCount,
-    tick: input.finalState.tick,
-    decision_count: input.records.length,
-    accepted_decision_count: input.records.filter(
-      (record) => record.result.accepted,
-    ).length,
-    // A decision is a fallback if it fell back OR the LLM planner degraded —
-    // a degraded-but-not-fallback decision (e.g. the standing directive kept
-    // executing after a Commander failure) must not read as 0 fallbacks.
-    fallback_count: input.records.filter(
-      (record) =>
-        record.decisionMetadata?.fallbackUsed === true ||
-        record.decisionMetadata?.llmPlannerDegraded === true,
-    ).length,
-    degraded_count: input.records.filter(
-      (record) => record.decisionMetadata?.llmPlannerDegraded === true,
-    ).length,
-    players: input.finalState.players.map((player, slot) => ({
-      slot,
-      name: input.config.players[slot]?.name ?? player.username,
-      score: scores[slot] ?? 0,
-      tiles_owned: player.tilesOwned,
-      is_alive: player.isAlive,
-    })),
-  };
 }
 
 function finalKnownState(input: {

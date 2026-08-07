@@ -22,11 +22,14 @@ import { setup } from "./util/Setup";
 //   (defaultDonationAmount) capped by the recipient's headroom
 //   (maxTroops(recipient) - recipient.troops())
 // - gold donation with an explicit amount transfers exactly that amount
-// - null-gold donation silently no-ops (live bug, see below)
+// - null-gold donation defaults to 1/3 of the sender's gold (see below)
 //
 // Already pinned elsewhere (cite, don't duplicate):
 // - ally can donate / non-ally cannot: tests/Donate.test.ts,
 //   tests/AllianceDonation.test.ts
+// - the null-gold default's other edges (explicit amount still exact, explicit
+//   0 still refused, clamp to the sender's balance):
+//   tests/DonateGoldDefaultAmount.test.ts
 
 let game: Game;
 let donor: Player;
@@ -212,27 +215,29 @@ describe("Donation rules", () => {
     expect(recipient.gold()).toBe(recipientBefore + 7_777n);
   });
 
-  test("null-gold donation silently no-ops (live dead-default bug, do not fix here)", () => {
-    // KNOWN BUG (pinning CURRENT behavior, not the intended one): the
-    // DonateGoldExecution constructor runs `this.gold = toInt(goldNum ?? 0)`,
-    // so a null amount becomes 0n and the `this.gold ??= sender.gold() / 3n`
-    // fallback in init() is dead code. donateGold(recipient, 0n) then returns
-    // false and the donation silently does nothing. See
-    // docs/OPENFRONT_ECONOMY_NEGOTIATION_VERIFIED.md section 4; the fix is
-    // tracked separately - if this test starts failing because null now
-    // donates a third of the sender's gold, the bug was fixed and this test
-    // should be updated to pin the new default.
+  test("null-gold donation defaults to 1/3 of the sender's gold", () => {
+    // This case used to pin a dead-default bug: the DonateGoldExecution
+    // constructor ran `this.gold = toInt(goldNum ?? 0)`, so a null amount
+    // became 0n, the `this.gold ??= sender.gold() / 3n` fallback in init()
+    // was unreachable, donateGold(recipient, 0n) returned false, and the
+    // donation silently did nothing. Fixed by "Default null gold donations to
+    // a third of the sender's gold" (DonateGoldExecution.ts:21, 33 - null is
+    // preserved through construction so the init() fallback fires), which
+    // makes gold mirror DonateTroopsExecution's 1/3 default. The default is
+    // captured at init() from the sender's balance at that moment.
     ally(donor, recipient);
     donor.addGold(90_000n);
     const donorBefore = donor.gold();
     const recipientBefore = recipient.gold();
+    const expected = donorBefore / 3n;
+    expect(expected).toBeGreaterThan(0n);
     expect(donor.canDonateGold(recipient)).toBe(true);
 
     game.addExecution(new DonateGoldExecution(donor, recipient.id(), null));
     game.executeNextTick();
     game.executeNextTick();
 
-    expect(donor.gold()).toBe(donorBefore);
-    expect(recipient.gold()).toBe(recipientBefore);
+    expect(donor.gold()).toBe(donorBefore - expected);
+    expect(recipient.gold()).toBe(recipientBefore + expected);
   });
 });
