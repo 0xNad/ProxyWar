@@ -35,6 +35,9 @@ export function isReplayPremiereRoute(
  * landing page's ambient `PublicLobbySocket` (`LobbySocket.ts`), which
  * otherwise opens a `/w1/lobbies` websocket on every route regardless of
  * whether the route actually needs the ordinary multiplayer lobby list.
+ * LEAGUE builds keep this exact classification too (this module is never
+ * stubbed), but the page behind it is — `/bet/<id>` there warns once and
+ * redirects to /league (see prediction/leagueStubs/BettingPremierePage.ts).
  */
 export function isBettingPremiereRoute(
   pathname = window.location.pathname,

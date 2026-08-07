@@ -21,6 +21,10 @@ const proxyWarEntries = [
   "proprietary",
   // ship the starter SDK (createStarterAgent) so the LLM policy can import it
   "examples",
+  // scan-wagering-sentinel.mjs: Dockerfile.coworld re-verifies in-image that
+  // the league client bundle carries no wagering surface (see that script's
+  // doc; the dir is small — fixture shell scripts plus the scan tooling).
+  "scripts",
 ];
 
 const integrationEntries = [

@@ -123,6 +123,7 @@
     "prepare": "husky",
     "format:generated-maps": "prettier --ignore-unknown --write resources/maps tests/testdata/maps",
     "gen-maps": "cd map-generator && go run . && npm run format:generated-maps",
+    "verify:league-client": "node scripts/verify-league-client.mjs",
     "inst": "npm ci --ignore-scripts"
   },
   "lint-staged": {
