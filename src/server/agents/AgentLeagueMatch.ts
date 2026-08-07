@@ -3,7 +3,16 @@ import { Logger } from "winston";
 import { Game } from "../../core/game/Game";
 import { ServerMessage } from "../../core/Schemas";
 import { GameServer } from "../GameServer";
-import { validateAgentDecision } from "./AgentDecisionValidator";
+import {
+  AgentDealManager,
+  isDealActionKind,
+  type AgentDealLedgerSnapshot,
+} from "./AgentDealManager";
+import {
+  validateAgentDealDecision,
+  validateAgentDecision,
+} from "./AgentDecisionValidator";
+import { economyRecordFacts } from "./AgentEconomyNetwork";
 import { AgentLocalGameMirror } from "./AgentLocalGameMirror";
 import {
   assignSpawnSlots,
@@ -20,6 +29,7 @@ import {
 } from "./AgentObservationBuilder";
 import { AgentRunner } from "./AgentRunner";
 import { buildAgentTacticalAffordances } from "./AgentTacticalAffordances";
+import { economyEventsEnabled, structuredDealsEnabled } from "./AgentTunables";
 import {
   AgentActionResult,
   AgentBrain,
@@ -124,6 +134,18 @@ export interface RunAgentDecisionTurnOptions {
   maxDecisionMs?: number;
 }
 
+/**
+ * Hard caps on the agent-controlled text the diplomacy slot may write into a
+ * decision record. `dealActionID` arrives from an external seat's websocket
+ * frame (the Coworld adapter caps it too, on its own side) and is stamped
+ * twice — as `dealSlotRequestedID` and inside `dealSlotRejected` — so both
+ * are bounded here as well: decisions.jsonl is retained for the whole
+ * episode, and unbounded per-decision text is the long-episode memory class
+ * the 0.1.19 work closed.
+ */
+const MAX_STAMPED_DEAL_ACTION_ID_LENGTH = 120;
+const MAX_STAMPED_DEAL_REJECTION_LENGTH = 200;
+
 export function createDefaultAgentSpecs(count = 4): AgentSpec[] {
   if (count < 1 || count > 8) {
     throw new Error("AI Nations League local matches support 1 to 8 agents");
@@ -170,6 +192,13 @@ export class AgentLeagueMatchRunner {
   private readonly objectiveManager = new AgentObjectiveManager();
   private readonly decisionValidator: typeof validateAgentDecision;
   private readonly disabledActionKinds: Set<LegalActionKind>;
+  /**
+   * Structured-deal ledger (PROXYWAR_TUNE_STRUCTURED_DEALS, default OFF —
+   * null when the flag is off, leaving observations, menus, records, and
+   * results byte-identical to shipped behavior). Runner-scoped meta-state
+   * beside the communication-signal machinery; never touches core.
+   */
+  private readonly dealManager: AgentDealManager | null;
   // Log-once bookkeeping for seatEliminated. Liveness itself is recomputed
   // from the game snapshot every decision turn — never latched here.
   private readonly eliminatedSeatsAnnounced = new Set<string>();
@@ -183,6 +212,7 @@ export class AgentLeagueMatchRunner {
     this.decisionValidator = options.decisionValidator ?? validateAgentDecision;
     this.disabledActionKinds = new Set(options.disabledActionKinds ?? []);
     this.retainTacticalAffordances = options.retainTacticalAffordances ?? true;
+    this.dealManager = structuredDealsEnabled() ? new AgentDealManager() : null;
   }
 
   attachAgents(): void {
@@ -333,6 +363,16 @@ export class AgentLeagueMatchRunner {
     const activeParticipants = this.options.participants.filter(
       (participant) => !this.seatEliminated(participant, options.gameState),
     );
+    // Deal clock: advances the decision step, expires lapsed proposals, and
+    // judges the previous step's audited records BEFORE observations are
+    // built, so proposals made at step N become visible at N+1 and
+    // acceptances at N+1 are judged from N+2 (same-step actions can never
+    // retroactively fulfill or violate).
+    this.dealManager?.beginDecisionStep({
+      turnNumber: options.turnNumber ?? 0,
+      gameState: options.gameState,
+      records: this.records,
+    });
     const decisionInputs = activeParticipants.map((participant) => {
       const observationInput: BuildAgentObservationInput = {
         agentID: participant.runner.agentID,
@@ -360,20 +400,31 @@ export class AgentLeagueMatchRunner {
               ...observationInput,
               recentCommunications,
             });
+      // Bilateral deals block (flag-gated; undefined leaves the observation
+      // object untouched, byte-identical to shipped behavior). Privacy: the
+      // manager returns only this seat's own proposals and deals.
+      const dealsView = this.dealManager?.observationFor({
+        agentID: participant.runner.agentID,
+        observation: baseObservation,
+      });
+      const dealAwareObservation: AgentObservation =
+        dealsView === undefined
+          ? baseObservation
+          : { ...baseObservation, deals: dealsView };
       const legalActions = this.filterDisabledActionKinds(
         this.legalActionBuilder.build({
-          observation: baseObservation,
+          observation: dealAwareObservation,
         }),
       );
       const objective = this.objectiveManager.objectiveFor({
         agentID: participant.runner.agentID,
         profile: participant.spec.profile,
-        observation: baseObservation,
+        observation: dealAwareObservation,
         legalActions,
-        turnNumber: baseObservation.turnNumber,
+        turnNumber: dealAwareObservation.turnNumber,
       });
       const observation: AgentObservation = {
-        ...baseObservation,
+        ...dealAwareObservation,
         objective,
       };
       return {
@@ -463,6 +514,19 @@ export class AgentLeagueMatchRunner {
         });
       }
 
+      // Did the ACTION slot already play a deal meta-action this decision?
+      // If so the deal slot is refused outright — not just for the same id.
+      // Two deal actions in one decision would collide on the SAME record
+      // stamp keys (dealAction/dealID/dealPublicText/dealStatedReason), so
+      // the second silently overwrites the first: the record would name an
+      // action that never happened and the overwritten deal's story beat
+      // (e.g. the pact's deal_accepted, tone pact) would never reach
+      // spectator telemetry while the pact itself was live. One deal action
+      // per decision — the contract the player protocol states.
+      const actionSlotPlayedDeal = selectedActions.some(
+        (entry) => entry.action !== null && isDealActionKind(entry.action.kind),
+      );
+
       selectedActions.forEach((selected, batchIndex) => {
         const batchDecision: AgentDecision = {
           ...decision,
@@ -476,13 +540,73 @@ export class AgentLeagueMatchRunner {
             validationFallbackUsed: validationFallbackUsed && batchIndex === 0,
           }),
         };
-        const result = selected.action
-          ? this.submitLegalAction(participant.runner, selected.action)
-          : {
-              accepted: false,
-              reason: "no legal fallback action available",
-              submittedIntent: null,
-            };
+        // Structured-deal meta-actions are processed by the runner-scoped
+        // deal manager during this same sequential submission pass
+        // (participant order — earlier submissions win conflicts); they
+        // submit no game intent. Pending referee/lifecycle events drain onto
+        // this agent's next record as the dealComplianceEvent stamp. Flag
+        // OFF: dealManager is null and this whole block is inert, leaving
+        // records byte-identical.
+        const dealOutcome =
+          this.dealManager !== null &&
+          selected.action !== null &&
+          isDealActionKind(selected.action.kind)
+            ? this.dealManager.applyDealAction({
+                agentID: participant.runner.agentID,
+                playerID: observation.ownState?.playerID ?? null,
+                playerName:
+                  observation.ownState?.name ?? participant.spec.username,
+                action: selected.action,
+                turnNumber: observation.turnNumber,
+                statedReason: decision.reason,
+              })
+            : null;
+        const result =
+          dealOutcome !== null
+            ? dealOutcome.result
+            : selected.action
+              ? this.submitLegalAction(participant.runner, selected.action)
+              : {
+                  accepted: false,
+                  reason: "no legal fallback action available",
+                  submittedIntent: null,
+                };
+        // Diplomacy slot: the OPTIONAL second selection, applied exactly once
+        // per decision (at batch index 0, i.e. immediately after the FIRST of
+        // this agent's submitted actions — batched `actionIDs` submit their
+        // remaining actions afterwards) and always within this agent's turn in
+        // the participant-ordered pass, so the "earlier submission wins"
+        // conflict rule between agents is unchanged and a deal never costs the
+        // agent its move. Flag OFF (or no dealActionID): null, leaving records
+        // byte-identical.
+        const dealSlotStamps =
+          batchIndex === 0
+            ? this.applyDealSlotSelection({
+                participant,
+                observation,
+                decision,
+                legalActions: submissionLegalActions,
+                actionSlotPlayedDeal,
+              })
+            : null;
+        const complianceStamp =
+          this.dealManager?.takePendingComplianceStamp(
+            participant.runner.agentID,
+          ) ?? null;
+        const dealMetadata: AgentDecision["metadata"] = {
+          ...(dealOutcome?.stamps ?? {}),
+          ...(dealSlotStamps ?? {}),
+          ...(complianceStamp !== null
+            ? { dealComplianceEvent: complianceStamp }
+            : {}),
+        };
+        const recordedDecision =
+          Object.keys(dealMetadata).length === 0
+            ? batchDecision
+            : {
+                ...batchDecision,
+                metadata: { ...batchDecision.metadata, ...dealMetadata },
+              };
         const record = this.recordDecision({
           participant,
           turnNumber: observation.turnNumber,
@@ -490,7 +614,7 @@ export class AgentLeagueMatchRunner {
           observation,
           legalActions: submissionLegalActions,
           chosenAction: selected.action,
-          decision: batchDecision,
+          decision: recordedDecision,
           decisionLatencyMs,
           reason: selected.reason,
           result,
@@ -598,9 +722,15 @@ export class AgentLeagueMatchRunner {
     action: LegalAction,
   ): AgentActionResult {
     if (action.intent === null) {
+      // Meta-actions submit no game intent; the reason derives from the
+      // action kind so any intent:null kind reports itself accurately. For
+      // `hold` this is the exact historical string "hold action selected; no
+      // game intent submitted" — byte-identical for existing consumers.
+      // (Deal meta-actions never reach here: the submission pass routes them
+      // through the deal manager, whose outcome reason names the deal.)
       return {
         accepted: true,
-        reason: "hold action selected; no game intent submitted",
+        reason: `${action.kind} action selected; no game intent submitted`,
         submittedIntent: null,
       };
     }
@@ -611,6 +741,110 @@ export class AgentLeagueMatchRunner {
       reason: result.reason,
       submittedIntent: result.intent,
     };
+  }
+
+  /**
+   * Applies the decision's OPTIONAL second selection — `dealActionID`, the
+   * diplomacy slot (PROXYWAR_TUNE_STRUCTURED_DEALS). Returns the metadata
+   * stamps for this decision's record, or null when there is nothing to apply
+   * (flag off, or no deal selection — the shipped path, byte-identical).
+   *
+   * SAFETY: `validateAgentDealDecision` is the only entry point. It requires
+   * an exact id match against the SAME offered menu and a deal meta-action
+   * kind, so no game intent can ever be submitted through this field, and no
+   * agent gets a second game action per decision. A rejected selection is
+   * logged as a warning AND stamped onto the record (`dealSlotRejected`) —
+   * loud in the operator artifact, dropped everywhere else, with no fallback
+   * substitution.
+   */
+  private applyDealSlotSelection(input: {
+    participant: AgentParticipant;
+    observation: AgentObservation;
+    decision: AgentDecision;
+    legalActions: LegalAction[];
+    actionSlotPlayedDeal: boolean;
+  }): AgentDecision["metadata"] | null {
+    const manager = this.dealManager;
+    if (manager === null) {
+      return null;
+    }
+    const validation = validateAgentDealDecision(
+      input.decision,
+      input.legalActions,
+    );
+    if (validation === null) {
+      return null;
+    }
+    // The requested id is agent-controlled text that lands in decisions.jsonl
+    // (once here, once inside the validator's reason). Both stamps are hard-
+    // capped: an unbounded id from a hostile or buggy seat would otherwise
+    // write up to one websocket frame per decision into the decision log —
+    // the exact long-episode memory class 0.1.19 closed.
+    const requestedID = `${input.decision.dealActionID}`.slice(
+      0,
+      MAX_STAMPED_DEAL_ACTION_ID_LENGTH,
+    );
+    const reject = (reason: string): AgentDecision["metadata"] => {
+      const capped = reason.slice(0, MAX_STAMPED_DEAL_REJECTION_LENGTH);
+      this.log.warn("league agent deal selection rejected", {
+        agentID: input.participant.runner.agentID,
+        username: input.participant.spec.username,
+        dealActionID: requestedID,
+        reason: capped,
+      });
+      return { dealSlotRequestedID: requestedID, dealSlotRejected: capped };
+    };
+    if (!validation.ok) {
+      return reject(validation.reason);
+    }
+    if (input.actionSlotPlayedDeal) {
+      return reject(
+        "a deal action was already played as this decision's game action",
+      );
+    }
+    const outcome = manager.applyDealAction({
+      agentID: input.participant.runner.agentID,
+      playerID: input.observation.ownState?.playerID ?? null,
+      playerName:
+        input.observation.ownState?.name ?? input.participant.spec.username,
+      action: validation.action,
+      turnNumber: input.observation.turnNumber,
+      statedReason: input.decision.reason,
+    });
+    this.log.info("league agent deal slot applied", {
+      agentID: input.participant.runner.agentID,
+      username: input.participant.spec.username,
+      dealActionID: validation.action.id,
+      dealActionKind: validation.action.kind,
+      accepted: outcome.result.accepted,
+      reason: outcome.result.reason,
+    });
+    return {
+      ...outcome.stamps,
+      // Marks a deal applied through the diplomacy slot rather than the
+      // action slot: the record's `result` then belongs to the GAME action,
+      // so consumers must not read deal success from it.
+      dealSeparateSlot: true,
+      dealSlotResult: outcome.result.reason,
+    };
+  }
+
+  /**
+   * Force-resolve the structured-deal ledger at match end: judges the final
+   * step's audited records, then drives every open proposal and pending
+   * obligation to a terminal state (spec: every accepted obligation reaches a
+   * terminal state by match end). No-op when the flag is off. Idempotent.
+   */
+  finalizeDeals(input: { gameState?: Game } = {}): void {
+    this.dealManager?.finalize({
+      gameState: input.gameState,
+      records: this.records,
+    });
+  }
+
+  /** Full deal-ledger snapshot (operator/test surface); empty when flag off. */
+  dealLedger(): AgentDealLedgerSnapshot {
+    return this.dealManager?.ledgerSnapshot() ?? { deals: [], events: [] };
   }
 
   /**
@@ -746,6 +980,15 @@ export class AgentLeagueMatchRunner {
             legalActions: input.legalActions,
           })
         : undefined,
+      // Compact economy facts at this decision boundary
+      // (PROXYWAR_TUNE_ECONOMY_EVENTS, default OFF): the transition source for
+      // spectator economy events. Tiny (counts + <=8 counterparties) so it
+      // stays affordable even where tacticalAffordances is skipped; absent —
+      // records byte-identical — when the flag is off or the observation
+      // carries no economy snapshot.
+      ...(economyEventsEnabled() && input.observation.economy !== undefined
+        ? { economyFacts: economyRecordFacts(input.observation.economy) }
+        : {}),
       intent: input.chosenAction?.intent ?? null,
       result: input.result,
     };

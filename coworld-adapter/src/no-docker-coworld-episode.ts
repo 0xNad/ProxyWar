@@ -437,8 +437,25 @@ class CoworldProtocolServer {
     clearTimeout(pending.timeout);
     this.pending.delete(requestID);
     const selectedLegalActionId = String(message.selectedLegalActionId ?? "");
+    // Optional second selection (the diplomacy slot). Forwarded only when the
+    // player actually sent a non-empty string, so a player that never sends
+    // it produces the exact same AgentDecision as before. The league runner's
+    // AgentDecisionValidator is the sole authority on whether it is a legal
+    // deal action id; a game action id here is rejected there, never applied.
+    // Length-capped like `reason` above: an inbound frame may be up to the
+    // socket's maxPayload, and this value is stamped into decisions.jsonl on
+    // rejection — unbounded per-decision text is the long-episode memory
+    // class the 0.1.19 work closed. A real deal action id is ~60 chars.
+    const selectedDealActionId =
+      typeof message.selectedDealActionId === "string" &&
+      message.selectedDealActionId.trim().length > 0
+        ? message.selectedDealActionId.trim().slice(0, 200)
+        : null;
     pending.resolve({
       actionID: selectedLegalActionId,
+      ...(selectedDealActionId !== null
+        ? { dealActionID: selectedDealActionId }
+        : {}),
       reason:
         typeof message.reason === "string"
           ? message.reason.slice(0, 500)

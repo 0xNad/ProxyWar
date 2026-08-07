@@ -205,7 +205,7 @@ function momentState(
  * field degrades to an honestly-absent row either way (see
  * `findStatedReason`), never a placeholder.
  */
-const STATED_REASON_MAX_LENGTH = 400;
+export const STATED_REASON_MAX_LENGTH = 400;
 const STATED_REASON_DENYLIST_PATTERNS: readonly RegExp[] = [
   // HTTP status/error response shapes.
   /\bhttp\/?\s*\d{3}\b/i,
