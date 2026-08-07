@@ -50,8 +50,8 @@ existing uploaded agents. Rating strength is explicitly not a success criterion.
   `AgentObservationBuilder.ts`, `AgentPlannerExecutor.ts`, `AgentDemoHub.ts`. Review is
   mandatory for the last two. Use the `reviewer` subagent.
 - `src/core` stays deterministic. No LLM/provider/network logic in core. V1 requires
-  **no core changes** except (optionally) the pre-existing `DonateGoldExecution` default
-  bug fix, which is tracked separately.
+  **no core changes**. The pre-existing `DonateGoldExecution` default bug landed
+  separately on `main` (2026-08-07), outside the V1 branch.
 - Preserve the canonical path
   `AgentObservation → LegalAction[] → exact LegalAction.id → AgentDecisionValidator →
   AgentRunner → GameServer`. No raw-intent bypass. Deal actions are meta-actions with
@@ -161,10 +161,12 @@ wrong or unproven:
   does not.
 - Donations: require `isFriendly` (ally or teammate), both alive, recipient not
   disconnected; per-recipient 10s cooldown; troops default to 1/3 of the sender's;
-  **gold has a live bug — a null amount becomes 0 and silently fails** (dead default
-  path in `DonateGoldExecution.ts:33/49`). All V1 support-deal flows must send explicit
-  amounts. There is **no donation-request mechanic** in core (quick-chat "help" keys are
-  cosmetic).
+  **gold now defaults to 1/3 of the sender's gold too — fixed 2026-08-07**. It used to
+  be a dead default (`DonateGoldExecution.ts:33/49` coerced a null amount to 0, so the
+  donation silently failed); null is now preserved through construction and the fallback
+  fires. V1 support-deal flows still send explicit amounts — a deal has to name a
+  checkable quantity — but implicit amounts no longer fail silently. There is **no
+  donation-request mechanic** in core (quick-chat "help" keys are cosmetic).
 - **Emojis and target markers are not inert** (they mutate Nation relations; 🖕 is −100
   and can drive a Nation to a permanent embargo; target markers are −40 and steer AI
   targeting). In league play there are no Nations (see 2.5), so between agents they are
@@ -365,8 +367,10 @@ New module (e.g. `src/server/agents/AgentDealManager.ts`), deterministic, per-ma
     attack path (borders the target or has boat options).
   - `support_request` — obligor sends ≥X gold or ≥Y troops within N steps. Offered only
     when donation is currently legal (`isFriendly` — so in practice between allies) and
-    always with **explicit amounts** (the null-gold core bug makes implicit amounts
-    silently fail).
+    always with **explicit amounts** — the referee needs a checkable quantity to score
+    fulfillment. (Implicit amounts no longer silently fail; the null-gold dead default
+    was fixed 2026-08-07. Explicit amounts are now a compliance requirement, not a
+    core-bug workaround.)
 - Lifecycle: `open → accepted | rejected | withdrawn | expired`; obligations:
   `pending → fulfilled | violated | expired_unfulfilled | moot`. No counteroffers.
 - Deterministic IDs: `deal:<proposerSeat>:<recipientSeat>:<template>:<decisionStep>`.
@@ -458,7 +462,9 @@ regression tests the audit exposed — there is currently **no test coverage at 
    classified before ally (documents the teammates-earn-less quirk).
 7. Station capture: train continues; tier recomputed against new owner.
 8. Donations: friendly-only, disconnected-recipient refusal, 10s cooldown, troop 1/3
-   default; gold explicit amounts (plus the null-gold bug test if that fix lands).
+   default; gold explicit amounts, plus the gold 1/3 default and the sender-balance
+   clamp (the null-gold dead default was fixed 2026-08-07 —
+   `tests/DonateGoldDefaultAmount.test.ts`).
 9. Trade ship: mid-voyage embargo kills; capture pays captor 100%.
 
 (Existing tests already pin: exact `trainGold` tiers, ghost-rail matrix, cluster
