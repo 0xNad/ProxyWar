@@ -1277,6 +1277,46 @@ describe("mirrored decisions.jsonl economy/deal stamp projection (economy-negoti
   });
 });
 
+describe("mirrored decisions.jsonl llmPlannerDegraded stamp (additive-schema tolerance)", () => {
+  // Not a deal/economy stamp, so it is NOT re-nested under decisionMetadata
+  // (that projection exists specifically for addDealEvents/addEconomyEvents,
+  // which never read a fallback/degradation flag). The bar here is the same
+  // one every other additive DecisionLogEntry field must clear: a line that
+  // carries the new key must still parse cleanly (forward-compat), and a
+  // line without it (every pre-existing record) must be unaffected
+  // (backward-compat) — proven directly against the real parser, not
+  // asserted from source reading.
+  const bareLine = {
+    sequence: 3,
+    turnNumber: 12,
+    agentID: "llm-agent-1",
+    username: "Degraded Agent",
+    profile: "opportunistic",
+    brainType: "external-http",
+    selectedLegalActionId: "hold",
+    selectedActionKind: "hold",
+    result: { accepted: true, reason: "accepted", submittedIntent: null },
+    auditAfter: { playerID: "P_A" },
+  };
+
+  test("a line carrying llmPlannerDegraded=true parses cleanly and is not mis-projected into decisionMetadata", () => {
+    const { records } = agentDecisionRecordsFromMirroredDecisionsLog(
+      `${JSON.stringify({ ...bareLine, llmPlannerDegraded: true })}\n`,
+    );
+    expect(records).toHaveLength(1);
+    expect(records[0].chosenActionID).toBe("hold");
+    expect(records[0].decisionMetadata).toBeUndefined();
+  });
+
+  test("a line without llmPlannerDegraded (every pre-existing record) still parses byte-identically", () => {
+    const { records } = agentDecisionRecordsFromMirroredDecisionsLog(
+      `${JSON.stringify(bareLine)}\n`,
+    );
+    expect(records).toHaveLength(1);
+    expect(records[0].decisionMetadata).toBeUndefined();
+  });
+});
+
 describe("resolveMirroredMatchEvidence (shared two-tier resolver, drama recaps gap closure)", () => {
   test("tier 1 + records: telemetry from spectator-telemetry.json, records reconstructed from decisions.jsonl independently", () => {
     const evidence = resolveMirroredMatchEvidence({

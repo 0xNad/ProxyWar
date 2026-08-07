@@ -258,6 +258,23 @@ interface DecisionLogEntry {
   parseSuccess?: boolean;
   parseFailureReason?: string;
   fallbackUsed: boolean;
+  /**
+   * Additive (PROXYWAR_TUNE_* independent — this predates and is orthogonal
+   * to the deal/economy flags): whether the deciding LLM planner/brain was
+   * degraded on THIS decision (provider failure, timeout, parse failure, or
+   * a standing directive kept executing after a Commander failure — see
+   * `LLM_DEGRADABLE_BRAIN_TYPES` in AgentLeagueMatch.ts and
+   * AgentPlannerExecutor.ts's plan-refresh degradation). Absent (not
+   * `false`) on every record that predates this field or never carried the
+   * `decisionMetadata.llmPlannerDegraded` stamp — old decisions.jsonl lines
+   * are unaffected. `coworld-adapter/src/coworld-results.ts`'s
+   * `degraded_count`/`fallback_count` already read this off the live
+   * in-memory `AgentDecisionRecord.decisionMetadata` at episode-run time;
+   * this hoists the SAME signal onto the persisted per-record artifact so
+   * decisions.jsonl (and anything read after the fact) can see WHICH
+   * records were degraded, not just the live aggregate count.
+   */
+  llmPlannerDegraded?: boolean;
   fallbackActionID?: string;
   /** The substituted fallback brain's OWN genuine reason for its pick — distinct from `reason` (which is `null` on this path). Present only when `fallbackUsed`. */
   fallbackReason?: string;
@@ -779,6 +796,11 @@ function decisionLogEntry(
         }
       : {}),
     fallbackUsed: booleanMetadata(metadata, "fallbackUsed") ?? false,
+    // Additive: absent (never `false`) unless the decision's own metadata
+    // carried the stamp — see the DecisionLogEntry field doc above.
+    ...(booleanMetadata(metadata, "llmPlannerDegraded") !== undefined
+      ? { llmPlannerDegraded: booleanMetadata(metadata, "llmPlannerDegraded") }
+      : {}),
     ...(stringMetadata(metadata, "fallbackActionID") !== undefined
       ? { fallbackActionID: stringMetadata(metadata, "fallbackActionID") }
       : {}),
