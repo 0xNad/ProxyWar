@@ -658,7 +658,7 @@ describe("deal menu — budget under pressure", () => {
     };
   }
 
-  it("stops at the budget and never offers an accept without its reject", () => {
+  it("reserved diplomacy slots protect the full deal menu under a tight non-deal budget, accepts/rejects stay balanced", () => {
     const observation = {
       ...stubObservation({
         seat: A,
@@ -684,21 +684,22 @@ describe("deal menu — budget under pressure", () => {
       "deal_accept:deal:P_C:P_A:non_aggression_pact:1",
       "deal_reject:deal:P_C:P_A:non_aggression_pact:1",
     ];
+    const fullMenu = [...pairB, ...pairC, "deal_propose:P_B:trade_security_pact"];
 
     // Uncapped: both incoming pairs plus the one propose option.
-    expect(dealsAt()).toEqual([
-      ...pairB,
-      ...pairC,
-      "deal_propose:P_B:trade_security_pact",
-    ]);
-    // 11 non-deal actions precede the deal block here, so the cap sets the
-    // deal budget directly. One free slot is not enough for a pair, and a
-    // half-pair is never emitted: a menu that can accept but not reject
-    // would bias the answer.
-    expect(dealsAt(12)).toEqual([]);
-    expect(dealsAt(13)).toEqual(pairB);
-    expect(dealsAt(14)).toEqual(pairB);
-    expect(dealsAt(15)).toEqual([...pairB, ...pairC]);
+    expect(dealsAt()).toEqual(fullMenu);
+    // LegalActionBuilder.postSpawnActions() treats structuredDealsEnabled()
+    // as an implicit PROXYWAR_TUNE_DIPLOMACY_SLOTS ON (see the flag's doc
+    // comment in AgentTunables.ts): deal_propose/accept/reject/withdraw are
+    // DIPLOMACY_KINDS members, so a tight non-deal budget no longer starves
+    // them via plain assembly-order truncation the way it used to when
+    // PROXYWAR_TUNE_STRUCTURED_DEALS was armed alone. All 7 diplomacy
+    // entries here (2 alliance_request + 5 deal) sit comfortably under the
+    // default 8-slot reserve, so every one of these tight caps keeps the
+    // FULL deal menu intact — accept/reject pairs never split.
+    for (const cap of [12, 13, 14, 15, 16]) {
+      expect(dealsAt(cap)).toEqual(fullMenu);
+    }
     // Every budget keeps accepts and rejects balanced.
     for (const cap of [12, 13, 14, 15, 16, undefined]) {
       const ids = dealsAt(cap);

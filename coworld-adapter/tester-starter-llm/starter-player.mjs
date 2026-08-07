@@ -29,16 +29,16 @@ socket.on("message", (data) => {
   }
   if (message.type !== "decision_request") return;
 
-  const action = chooseAction(
-    message.request.legalActions ?? [],
-    message.request.observation ?? {},
-  );
+  const legalActions = message.request.legalActions ?? [];
+  const action = chooseAction(legalActions, message.request.observation ?? {});
+  const dealAction = chooseDealAction(legalActions);
 
   socket.send(
     JSON.stringify({
       type: "decision_response",
       requestID: message.requestID,
       selectedLegalActionId: action.id,
+      ...(dealAction !== null ? { selectedDealActionId: dealAction.id } : {}),
       reason: `starter ${action.kind}: ${action.label}`,
       confidence: action.kind === "hold" ? 0.45 : 0.72,
     }),
@@ -116,5 +116,39 @@ function chooseAction(actions, obs) {
     if (action) return action;
   }
 
-  return actions.find((candidate) => candidate.kind === "hold") ?? actions[0];
+  return (
+    actions.find((candidate) => candidate.kind === "hold") ??
+    actions.find((candidate) => !isDealActionKind(candidate.kind)) ??
+    actions[0]
+  );
+}
+
+// Structured-deal meta-actions (deal_propose/deal_accept/deal_reject/
+// deal_withdraw) are never a valid PRIMARY move — chooseAction() above never
+// returns one. This selects the OPTIONAL second action for the diplomacy
+// slot (`selectedDealActionId`, see coworld-adapter/docs/player-protocol.md):
+// inert unless the match actually offers deal_* actions (server flag
+// PROXYWAR_TUNE_STRUCTURED_DEALS is off by default), so a starter that never
+// customizes this still behaves exactly as before. Deterministic, bounded
+// priority: answer an open offer before making one, prefer accepting over
+// rejecting, and only withdraw a stale offer of your own last.
+const DEAL_ACTION_KINDS = [
+  "deal_accept",
+  "deal_propose",
+  "deal_reject",
+  "deal_withdraw",
+];
+
+function isDealActionKind(kind) {
+  return DEAL_ACTION_KINDS.includes(kind);
+}
+
+function chooseDealAction(actions) {
+  for (const kind of DEAL_ACTION_KINDS) {
+    const action = actions.find((candidate) => candidate.kind === kind);
+    if (action) {
+      return action;
+    }
+  }
+  return null;
 }

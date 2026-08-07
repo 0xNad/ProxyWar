@@ -115,7 +115,18 @@ export class LegalActionBuilder {
     // reserved-quota truncation at the end (total stays <= capActions).
     // Flag OFF => maxActions === capActions and the truncation is a no-op:
     // byte-identical menus to the pre-flag behavior.
-    const diplomacySlots = diplomacySlotsEnabled();
+    //
+    // structuredDealsEnabled() ALSO forces this on: deal_propose/accept/
+    // reject/withdraw are DIPLOMACY_KINDS members (below), assembled after
+    // alliance_request but before target_player/quick_chat/emoji, so on a
+    // crowded menu (10-12p, many borders) plain assembly-order truncation
+    // silently drops every deal action before an agent ever sees it -
+    // exactly where deals matter most. An operator arming
+    // PROXYWAR_TUNE_STRUCTURED_DEALS alone (without separately remembering
+    // PROXYWAR_TUNE_DIPLOMACY_SLOTS) must still get a working deal menu;
+    // both flags individually default OFF, so this changes nothing for any
+    // deployment that has not explicitly turned structured deals on.
+    const diplomacySlots = diplomacySlotsEnabled() || structuredDealsEnabled();
     const maxActions = diplomacySlots ? capActions + 32 : capActions;
     const actions: LegalAction[] = [];
 

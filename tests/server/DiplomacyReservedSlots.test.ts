@@ -99,9 +99,33 @@ describe("diplomacy reserved slots (PROXYWAR_TUNE_DIPLOMACY_SLOTS)", () => {
       delete process.env.PROXYWAR_TUNE_DIPLOMACY_SLOTS;
     }
   });
+
+  it("STRUCTURED_DEALS=1 alone (DIPLOMACY_SLOTS unset): crowded menu still retains deal_accept/deal_reject (regression pin of the auto-coupling fix)", () => {
+    delete process.env.PROXYWAR_TUNE_DIPLOMACY_SLOTS;
+    process.env.PROXYWAR_TUNE_STRUCTURED_DEALS = "1";
+    try {
+      const menu = buildCrowdedMenu(true);
+      const dealActions = menu.filter((a) => a.kind.startsWith("deal_"));
+      expect(dealActions.map((a) => a.kind).sort()).toEqual([
+        "deal_accept",
+        "deal_reject",
+      ]);
+      expect(menu.length).toBeLessThanOrEqual(97); // 96 + hold
+    } finally {
+      delete process.env.PROXYWAR_TUNE_STRUCTURED_DEALS;
+    }
+  });
+
+  it("both flags OFF: a live incoming deal proposal never appears on a crowded menu (flag-off invariance)", () => {
+    delete process.env.PROXYWAR_TUNE_STRUCTURED_DEALS;
+    delete process.env.PROXYWAR_TUNE_DIPLOMACY_SLOTS;
+    const menu = buildCrowdedMenu(true);
+    expect(menu.filter((a) => a.kind.startsWith("deal_"))).toHaveLength(0);
+    expect(menu.length).toBeLessThanOrEqual(97);
+  });
 });
 
-function buildCrowdedMenu(): LegalAction[] {
+function buildCrowdedMenu(withDeals = false): LegalAction[] {
   // Synthetic active-phase observation: enough attack variants to blow the
   // 96 cap before the diplomacy section, plus rivals offering alliances.
   const visiblePlayers = [] as Array<Record<string, unknown>>;
@@ -152,6 +176,35 @@ function buildCrowdedMenu(): LegalAction[] {
     recentDecisions: [],
     recentCommunications: [],
     notes: [],
+    // A real, answerable incoming deal proposal — only read by
+    // LegalActionBuilder when PROXYWAR_TUNE_STRUCTURED_DEALS is on
+    // (dealMetaActions() gates on `observation.deals !== undefined` AND
+    // the flag), so `withDeals=false` callers stay byte-identical.
+    ...(withDeals
+      ? {
+          deals: {
+            incomingProposals: [
+              {
+                dealID: "deal:P0:agent-1:non_aggression_pact:90",
+                proposerPlayerID: "P0",
+                proposerName: "Rival 0",
+                recipientPlayerID: "agent-1",
+                recipientName: "Agent",
+                terms: {
+                  template: "non_aggression_pact",
+                  durationSteps: 12,
+                },
+                proposedAtStep: 90,
+                answerableThroughStep: 110,
+              },
+            ],
+            outgoingProposals: [],
+            proposalOptions: [],
+            active: [],
+            obligations: [],
+          },
+        }
+      : {}),
   };
   return new LegalActionBuilder().build({
     observation: observation as never,
