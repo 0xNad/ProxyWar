@@ -51,13 +51,13 @@ const STRATEGY = [
   "(cities, ports, factories) once you have a base; attack only weak or exposed bordered rivals.",
   "Read relativeTroopRatio (your troops / theirs): attack when comfortably above 1, avoid when below 1.",
   "Don't attack allies. Don't start several wars at once. Ally early, betray late and only when it clearly wins.",
-  "UPGRADE, don't sprawl: 'upgrade' actions level up a City/Port/Factory/Silo/SAM IN PLACE — no new",
+  "UPGRADE, don't sprawl: 'upgrade_structure' actions level up a City/Port/Factory/Silo/SAM IN PLACE — no new",
   "land needed, cost capped ~1M — so when land is tight or you have a base, prefer upgrades over new builds.",
   "Keep gold WORKING, not hoarded. gold > 5M means you are under-spending: buy upgrades, Defense Posts,",
   "a Missile Silo (~1M), and SAM Launchers (~1.5M) beside your city cluster — SAMs auto-intercept enemy",
   "nukes in ~70 tiles and are the only thing that saves your economy from one bomb.",
-  "If gold > 30M and a rival dominates the map, MIRV them (~25M, appears as a high-risk build naming the",
-  "target): 350 warheads gut an empire. Atom (~750k) and Hydrogen (~5M) bombs punish mid-size threats.",
+  "If gold > 30M and a rival dominates the map, MIRV them (~25M, appears as a high-risk 'nuke' action naming",
+  "the target): 350 warheads gut an empire. Atom (~750k) and Hydrogen (~5M) bombs punish mid-size threats.",
   "High-risk actions (nukes) are only playable if you include their kind in preferKinds AND name the",
   "victim in target — do both when you mean it.",
 ].join(" ");
@@ -68,8 +68,10 @@ const PLAN_KINDS = [
   "build",
   "boat",
   "alliance_request",
-  "upgrade",
-  "donate",
+  "upgrade_structure",
+  "donate_gold",
+  "donate_troops",
+  "nuke",
   "quick_chat",
   "emoji",
   "hold",
@@ -258,7 +260,7 @@ const DEFAULT_ORDER = [
   "build",
   "boat",
   "alliance_request",
-  "upgrade",
+  "upgrade_structure",
   "quick_chat",
   "emoji",
 ];
@@ -279,7 +281,7 @@ function choose(actions) {
           .includes(t.toLowerCase()),
     );
   for (const kind of order) {
-    // High-risk actions (nukes/MIRV arrive as high-risk builds) are eligible ONLY
+    // High-risk actions (nukes/MIRV arrive as kind "nuke", risk "high") are eligible ONLY
     // when the plan explicitly lists this kind in preferKinds — the model must
     // authorize aggression; otherwise the old always-skip-high-risk rule applies.
     const authorized = planned.includes(kind);
