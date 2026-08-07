@@ -1017,10 +1017,9 @@ export class ReplayPremiereRuntimeCoordinator {
         previousChunk: previous,
         authoritativeElapsedMs: elapsed,
       });
-    const result = await this.publication.commitReveal(this.persistence, {
-      lockedLifecycle: this.state.lifecycle,
-      terminal,
-    });
+    // Validate the prefix before commitReveal: that durable transition
+    // rejects reuse of the pre-reveal lifecycle, so any later failure would
+    // expose the reveal and make retries unrecoverable.
     const chunks = new Map<number, PremierePublicChunkResponse>();
     for (const descriptor of this.state.releasedChunks) {
       const chunk = this.publication.readChunk(descriptor.index);
@@ -1029,6 +1028,10 @@ export class ReplayPremiereRuntimeCoordinator {
       }
       chunks.set(chunk.index, chunk);
     }
+    const result = await this.publication.commitReveal(this.persistence, {
+      lockedLifecycle: this.state.lifecycle,
+      terminal,
+    });
     chunks.set(result.terminalChunk.index, result.terminalChunk);
     this.recoveredReveal = {
       lifecycle: result.lifecycle,
