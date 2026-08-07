@@ -2,24 +2,40 @@
 
 Guidance for Claude Code (claude.ai/code) working in this repository.
 
-The shared engineering rules, repository model, autonomy policy, prioritization,
-and project-state reading list live in local **AGENTS.md**. `AGENTS.md` and
-`CLAUDE.local.md` are intentionally gitignored and absent from public clones.
+This tracked file is the baseline engineering and contribution guidance for
+every checkout. `AGENTS.md` and `CLAUDE.local.md` are gitignored local overlays;
+they are intentionally absent from independent public clones and forks.
 
-## Local-context bootstrap (fail closed)
+## Checkout context
 
-Before any mutation, confirm that both local files exist in the current
-checkout. A linked worktree normally has tracked `CLAUDE.md` but may not have
-the ignored instruction bundle. In that case, resolve the primary checkout from
+### Independent public clone or fork
+
+Missing local overlays are expected and **do not** make the checkout read-only.
+Coding-agent-assisted contributions are welcome. Work on a feature branch or
+fork, follow `CONTRIBUTING.md`, run the relevant checks, and open a pull request.
+Local edits, tests, and commits do not require the private instruction bundle.
+Pushing a branch or opening a pull request still requires the authorization of
+the person operating the coding agent.
+
+### Operator-managed checkout or linked worktree
+
+When the task environment identifies an operator-managed primary checkout or
+provides lifecycle metadata for a managed worktree, its local instruction
+bundle is required. Resolve the primary checkout from
 `git rev-parse --path-format=absolute --git-common-dir` (the parent of its
 terminal `.git` directory), then read its `AGENTS.md`, `CLAUDE.local.md`,
 `docs/project-state/STANDING-POSITION.md`, and
 `docs/project-state/context-for-new-codex-threads.md` explicitly.
 
-Do not assume the relative imports below succeeded. If the canonical local
-instruction bundle cannot be found, keep the worktree read-only and report the
-bootstrap gap.
+Do not assume the relative imports below succeeded. If an operator-managed
+checkout is expected to have that bundle and it cannot be found, keep only that
+managed checkout read-only and report the bootstrap gap. Do not apply this
+fail-closed rule to an independent public clone or fork.
 
+<!--
+Absent by design in independent public clones. Required in an identified
+operator-managed checkout; if missing there, that managed checkout stays read-only.
+-->
 @AGENTS.md
 
 ## Commands
@@ -45,8 +61,8 @@ npx vitest tests/YourTest.test.ts --run
 npx vitest NationAllianceBehavior --run # match by name pattern
 ```
 
-AGENTS.md (local) lists the agent/beta commands (`agent:demo-server`, `agent:closed-beta`,
-`agent:public-readiness:strict`, `agent:external-agent:dry-run`, `agent:benchmark:external-full`, …).
+When present, local `AGENTS.md` lists additional operator commands and identifies
+historical or maintenance-only workflows.
 
 ## Architecture
 
@@ -108,10 +124,18 @@ Tests use a `setup()` helper from `tests/util/Setup.ts` that creates a full game
 
 ## Claude Code
 
-- Use **plan mode** for changes under `src/core/**` and the agent-protocol files: `AgentRunner.ts`, `AgentDecisionValidator.ts`, `LegalActionBuilder.ts`, `AgentObservationBuilder.ts`, `AgentPlannerExecutor.ts`. (A PreToolUse hook also blocks LLM/provider imports into `src/core`.)
+- Use **plan mode** for changes under `src/core/**` and the agent-protocol files: `AgentRunner.ts`, `AgentDecisionValidator.ts`, `LegalActionBuilder.ts`, `AgentObservationBuilder.ts`, `AgentPlannerExecutor.ts`. Operator-managed checkouts may also provide a PreToolUse hook that blocks LLM/provider imports into `src/core`; independent public clones must enforce this rule through review and tests.
 - `src/core` is deterministic **simulation**. The rule is **no LLM/Codex/OpenAI/provider logic in core** — config/map loading over `fetch` (`DefaultConfig.ts`, the map loaders) is the existing, allowed exception, not a violation.
-- Specialist role **subagents** live in `.claude/agents/` (invoked on demand, not as live threads). The **reviewer** subagent checks this project's invariants before risky changes; ask for it on edits to `AgentPlannerExecutor.ts` or `AgentDemoHub.ts`.
-- **Git guardrails:** never force-push, delete branches, or rewrite history. Land changes on a branch off `main` using the `claude/` prefix; commit/push and any deploy/publish are gated outward actions — do them only when the operator asked in-conversation.
+- Operator-managed checkouts may provide specialist role **subagents** under `.claude/agents/`. Independent public clones must not assume those local helpers exist. Changes to `AgentPlannerExecutor.ts` or `AgentDemoHub.ts` require an independent review recorded in the pull request.
+- **Git guardrails:** never force-push, delete branches, or rewrite history.
+  Public contributors should use a feature branch or fork and may open a pull
+  request with the authorization of the person operating the coding agent.
+  Operator-managed checkouts may impose a branch prefix and additional gates in
+  their local overlays. Deploys and package publication always require explicit
+  repository-owner authorization.
 
-<!-- Local-only operating guide. Gitignored; verify the bootstrap above before relying on this import. -->
+<!--
+Absent by design in independent public clones. Required in an identified
+operator-managed checkout; if missing there, that managed checkout stays read-only.
+-->
 @CLAUDE.local.md
