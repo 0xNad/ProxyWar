@@ -23,6 +23,11 @@
     <string>/Users/YOUR_USER/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>HOME</key>
     <string>/Users/YOUR_USER</string>
+    <!-- Platform and league origin must read the SAME generated league
+         mirror; point this at the canonical repo's artifacts dir, not a
+         private per-origin copy. -->
+    <key>PROXYWAR_ARTIFACTS_ROOT</key>
+    <string>/Users/YOUR_USER/Documents/proxywar_main/artifacts</string>
   </dict>
 
   <key>RunAtLoad</key>
