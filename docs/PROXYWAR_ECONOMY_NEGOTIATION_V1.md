@@ -237,13 +237,14 @@ wrong or unproven:
   (`focus/preferKinds/target/avoidTargets/reason`) and a deterministic executor maps the
   current legal-action menu through it, with anti-repeat memory and honest
   fallback/degraded flags.
-- **Prompt-size work is in flight and constrains this project:** the slim prompt
-  (−67% chars) shipped but its v1 regressed reply-format compliance in the hosted A/B
-  (`plan reply had no JSON`); the hardening fix (assistant-`{` prefill, max_tokens 500,
-  JSON repair) lives unmerged on `claude/llm-prompt-slim-harden`. **All starter prompt
-  changes in this project build on the hardened slim variant** and go through the same
-  paired eval-policy A/B (full-vs-slim precedent: twin eval policies seated 6v6
-  alternating slots on identical maps).
+- **Prompt-size work CLOSED 2026-08-07 (supersedes the earlier "hardened slim"
+  direction in this doc):** the hosted A/B proved the full action menu is
+  load-bearing — the slim prompt was reverted upstream (PR #36
+  `claude/restore-full-menu-prompt`) and the full move-list prompt is current.
+  Standing rule from that workstream: **any starter prompt change requires a hosted
+  paired eval-policy A/B before it defaults** (twin eval policies seated 6v6
+  alternating slots on identical maps). The econ line in this project follows that
+  rule; it is inert until the server-side observation flag is on.
 - **Two live starter bugs to fix in Phase A** (they block economy behavior today):
   `PLAN_KINDS`/`DEFAULT_ORDER` contain `"upgrade"` and `"donate"`, but the real kinds
   are `"upgrade_structure"`, `"donate_gold"`, `"donate_troops"` — the starter can
@@ -315,7 +316,8 @@ cautionary precedent).
 
 ## A2. Starter fixes + compact econ doctrine
 
-In `tester-starter-llm` (on top of the hardened slim prompt):
+In `tester-starter-llm` (on the restored full-menu prompt; any prompt change needs a
+hosted A/B before defaulting):
 
 - Fix the dead `"upgrade"`/`"donate"` kind strings (→ `upgrade_structure`,
   `donate_gold`, `donate_troops`); correct the unreachable-nuke STRATEGY sentence.
@@ -506,8 +508,8 @@ build/upload stays operator-gated) plus one local `run:episode` smoke with flags
 - Verified-mechanics doc committed; Phase 0 regression tests green.
 - Economy block + affordance behind default-OFF tunables; factories classified;
   bottleneck with evidence; rival unitCounts/isTraitor added optionally.
-- Starter upgrade/donate kind bug fixed; econ doctrine ≤300 chars on the hardened slim
-  prompt; A/B arms prepared (activation operator-gated).
+- Starter upgrade/donate kind bug fixed; econ line ≤300 chars on the restored
+  full-menu prompt; A/B arms prepared (activation operator-gated).
 - Deal manager + four meta-action kinds + compliance ledger + spectator/Director-Cut
   events behind default-OFF tunable; privacy enforced; every obligation terminal;
   agents that ignore deals provably unaffected.
