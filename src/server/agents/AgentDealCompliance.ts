@@ -261,6 +261,55 @@ function confirmedHostileActionAgainst(
 }
 
 /**
+ * The referee's pressure floor for joint_attack FULFILLMENT: a confirmed
+ * attack must commit at least this fraction of the obligor's troops
+ * (LegalActionBuilder attack actions carry `troopPercentage`, e.g. 0.1 / 0.25
+ * / 0.4) to count as the pledged "confirmed military pressure" — a token
+ * below-floor poke earns no credit. A confirmed nuke always qualifies
+ * (decisive pressure with no troop commitment to measure). Snapshot-only
+ * attack deltas (transport arrivals) carry no troop evidence and therefore
+ * never FULFILL a pledge — they still VIOLATE pacts, where magnitude is
+ * irrelevant.
+ */
+export const MIN_JOINT_ATTACK_TROOP_PERCENT = 0.2;
+
+/**
+ * Confirmed attack pressure by this record's player against `targetPlayerID`
+ * that clears the referee's joint-attack floor: a confirmed non-expansion
+ * attack record naming the target with troop commitment >=
+ * MIN_JOINT_ATTACK_TROOP_PERCENT, or a confirmed nuke record naming the
+ * target. Returns a short description or null.
+ */
+function confirmedJointAttackPressureOn(
+  record: AgentDecisionRecord,
+  targetPlayerID: string,
+): string | null {
+  if (!record.result.accepted || record.audit?.auditStatus !== "confirmed") {
+    return null;
+  }
+  if (
+    record.chosenActionKind === "nuke" &&
+    stringMetadata(record, "targetID") === targetPlayerID
+  ) {
+    return "nuclear strike";
+  }
+  if (
+    record.chosenActionKind !== "attack" ||
+    record.chosenActionMetadata?.expansion === true ||
+    stringMetadata(record, "targetID") !== targetPlayerID
+  ) {
+    return null;
+  }
+  const fraction =
+    numberMetadata(record, "troopPercentage") ??
+    (numberMetadata(record, "troopPercent") ?? 0) / 100;
+  if (fraction < MIN_JOINT_ATTACK_TROOP_PERCENT) {
+    return null;
+  }
+  return `land attack (${Math.round(fraction * 100)}% troops)`;
+}
+
+/**
  * A MANUAL embargo created against `targetPlayerID` by this record: judged
  * exclusively from confirmed `embargo`/`embargo_all` ACTION records, never
  * from embargo-set snapshot diffs — the automatic temporary embargo a victim
@@ -460,7 +509,7 @@ function judgeRecordForObligation(
       if (obligation.targetPlayerID === undefined) {
         return;
       }
-      const hostile = confirmedHostileActionAgainst(
+      const hostile = confirmedJointAttackPressureOn(
         record,
         obligation.targetPlayerID,
       );
@@ -544,9 +593,9 @@ export function resolveMootObligations(input: {
   deals: AgentDealState[];
   gameState: Game | undefined;
   step: number;
-}): AgentDealLedgerEvent[] {
+}): void {
   if (input.gameState === undefined) {
-    return [];
+    return;
   }
   for (const deal of input.deals) {
     if (deal.status !== "accepted") {
@@ -587,7 +636,6 @@ export function resolveMootObligations(input: {
       }
     }
   }
-  return [];
 }
 
 /**
@@ -665,7 +713,10 @@ export function resolveElapsedObligations(input: {
  * violation occurred while active); positive commitments whose window was cut
  * short by match end resolve moot (impossible through an event outside the
  * obligor's control) so reliability never counts a promise the match gave no
- * time to keep.
+ * time to keep — but a window that ends ON the final step has fully run
+ * (finalize judges that step's records first) and resolves
+ * expired_unfulfilled. Open proposals expire with the same lapse narration
+ * mid-match expiry emits.
  */
 export function forceResolveDeals(input: {
   deals: AgentDealState[];
@@ -674,7 +725,10 @@ export function forceResolveDeals(input: {
   const events: AgentDealLedgerEvent[] = [];
   for (const deal of input.deals) {
     if (deal.status === "open") {
+      // Same lapse narration mid-match TTL expiry emits — match end must not
+      // silently swallow an unanswered offer's story beat.
       deal.status = "expired";
+      events.push(proposalLapsedEvent(deal, input.step));
       continue;
     }
     if (deal.status !== "accepted") {
@@ -716,7 +770,11 @@ export function forceResolveDeals(input: {
         );
       } else if (
         deal.expiresAfterStep !== null &&
-        input.step > deal.expiresAfterStep
+        // >= : finalize judges the final step's records FIRST, so a window
+        // ending exactly on the final step has fully run — an unfulfilled
+        // commitment there is a genuinely blown deadline (expired_unfulfilled
+        // in the reliability denominator), never moot.
+        input.step >= deal.expiresAfterStep
       ) {
         resolveObligation(
           obligation,

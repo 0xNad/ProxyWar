@@ -366,7 +366,7 @@ describe("AgentDealCompliance — violations (confirmed effects only)", () => {
 });
 
 describe("AgentDealCompliance — fulfillment, expiry, moot, force-resolve", () => {
-  it("fulfills a joint_attack pledge only on confirmed attack against the named target", () => {
+  it("fulfills a joint_attack pledge only on confirmed at-threshold attack against the named target", () => {
     const harness = complianceHarness([A, B, C]);
     const dealID = harness.propose(A, B, "joint_attack", {
       targetID: C.playerID,
@@ -384,8 +384,8 @@ describe("AgentDealCompliance — fulfillment, expiry, moot, force-resolve", () 
         username: A.username,
         turnNumber: 50,
         kind: "attack",
-        actionID: `attack:${B.playerID}:10`,
-        metadata: { targetID: B.playerID },
+        actionID: `attack:${B.playerID}:25`,
+        metadata: { targetID: B.playerID, troopPercentage: 0.25 },
         auditStatus: "confirmed",
       }),
     );
@@ -400,16 +400,61 @@ describe("AgentDealCompliance — fulfillment, expiry, moot, force-resolve", () 
         turnNumber: 75,
         kind: "attack",
         actionID: `attack:${C.playerID}:25`,
-        metadata: { targetID: C.playerID, targetName: C.username },
+        metadata: {
+          targetID: C.playerID,
+          targetName: C.username,
+          troopPercentage: 0.25,
+        },
         auditStatus: "confirmed",
       }),
     );
     harness.beginStep(); // 4
     const obligation = obligationsOf(harness, dealID)[0];
     expect(obligation.status).toBe("fulfilled");
+    expect(obligation.resolutionEvidence).toContain("25% troops");
     const stamp = harness.manager.takePendingComplianceStamp(A.agentID)!;
     expect(stamp).toContain("deal_fulfilled");
     expect(stamp).toContain("fulfilled the joint-attack pledge");
+  });
+
+  it("ignores below-threshold token attacks for joint_attack fulfillment (pressure floor)", () => {
+    const harness = complianceHarness([A, B, C]);
+    const dealID = harness.propose(A, B, "joint_attack", {
+      targetID: C.playerID,
+      targetName: C.username,
+      durationSteps: 3,
+    });
+    harness.beginStep(); // 1
+    expect(harness.respond("deal_accept", B, dealID).accepted).toBe(true);
+    harness.beginStep(); // 2 — window 2..4
+    // A confirmed 10% poke at the named target: below the referee's
+    // MIN_JOINT_ATTACK_TROOP_PERCENT floor, so it earns no credit.
+    harness.push(
+      fabricatedRecord({
+        sequence: 0,
+        agentID: A.agentID,
+        playerID: A.playerID,
+        username: A.username,
+        turnNumber: 50,
+        kind: "attack",
+        actionID: `attack:${C.playerID}:10`,
+        metadata: {
+          targetID: C.playerID,
+          targetName: C.username,
+          troopPercentage: 0.1,
+        },
+        auditStatus: "confirmed",
+      }),
+    );
+    harness.beginStep(); // 3
+    expect(obligationsOf(harness, dealID)[0].status).toBe("pending");
+    harness.beginStep(); // 4
+    harness.beginStep(); // 5 — window elapsed
+    const obligation = obligationsOf(harness, dealID)[0];
+    expect(obligation.status).toBe("expired_unfulfilled");
+    const stamp = harness.manager.takePendingComplianceStamp(A.agentID)!;
+    expect(stamp).toContain("deal_expired");
+    expect(stamp).toContain("expired unfulfilled");
   });
 
   it("expires an unfulfilled joint_attack pledge after its window (deal_expired)", () => {
@@ -434,6 +479,122 @@ describe("AgentDealCompliance — fulfillment, expiry, moot, force-resolve", () 
     ]);
     expect(events[0].publicText).toContain(
       "pledge to attack Riven expired unfulfilled",
+    );
+  });
+
+  it("resolves commitments whose window ends exactly on the final step as expired_unfulfilled at finalize", () => {
+    const harness = complianceHarness([A, B, C]);
+    // Both positive templates, window 2..4 (durationSteps 3, accepted at 1).
+    const jointID = harness.propose(A, B, "joint_attack", {
+      targetID: C.playerID,
+      targetName: C.username,
+      durationSteps: 3,
+    });
+    const supportID = harness.propose(A, B, "support_request", {
+      durationSteps: 3,
+    });
+    harness.beginStep(); // 1
+    expect(harness.respond("deal_accept", B, jointID).accepted).toBe(true);
+    expect(harness.respond("deal_accept", B, supportID).accepted).toBe(true);
+    harness.beginStep(); // 2
+    harness.beginStep(); // 3
+    harness.beginStep(); // 4 === expiresAfterStep — the window's last step
+    // Finalize judges the final step's records first, so the window has
+    // fully run: a blown deadline resolves expired_unfulfilled (in the
+    // reliability denominator), never moot — and the narration fires.
+    harness.manager.finalize({ records: harness.records });
+    for (const dealID of [jointID, supportID]) {
+      const obligation = obligationsOf(harness, dealID)[0];
+      expect(obligation.status).toBe("expired_unfulfilled");
+      expect(obligation.forcedResolution).toBe(true);
+    }
+    const lapses = harness.manager
+      .ledgerSnapshot()
+      .events.filter((event) => event.event === "deal_expired");
+    expect(lapses).toHaveLength(2);
+    for (const lapse of lapses) {
+      expect(lapse.publicText).toContain("expired unfulfilled");
+    }
+  });
+
+  it("refuses the second acceptance of crossed proposals and emits exactly one verdict", () => {
+    const harness = complianceHarness([A, B]);
+    // Crossed open NAPs: A→B and B→A in the same step.
+    const aToB = harness.propose(A, B, "non_aggression_pact");
+    const bToA = harness.propose(B, A, "non_aggression_pact");
+    harness.beginStep(); // 1 — submission pass order: A answers first.
+    expect(harness.respond("deal_accept", A, bToA).accepted).toBe(true);
+    const second = harness.respond("deal_accept", B, aToB);
+    expect(second.accepted).toBe(false);
+    expect(second.reason).toBe(
+      "an active non_aggression_pact already exists between these players",
+    );
+    const ledger = harness.manager.ledgerSnapshot();
+    expect(
+      ledger.deals.filter((deal) => deal.status === "accepted"),
+    ).toHaveLength(1);
+    expect(ledger.deals.find((deal) => deal.dealID === aToB)!.status).toBe(
+      "open",
+    );
+
+    // A betrayal against the single surviving pact yields exactly ONE verdict.
+    harness.beginStep(); // 2 — active window opens
+    harness.push(
+      fabricatedRecord({
+        sequence: 0,
+        agentID: A.agentID,
+        playerID: A.playerID,
+        username: A.username,
+        turnNumber: 50,
+        kind: "attack",
+        actionID: `attack:${B.playerID}:25`,
+        metadata: { targetID: B.playerID, troopPercentage: 0.25 },
+        auditStatus: "confirmed",
+      }),
+    );
+    harness.beginStep(); // 3
+    expect(
+      harness.manager
+        .ledgerSnapshot()
+        .events.filter((event) => event.event === "deal_violated"),
+    ).toHaveLength(1);
+  });
+
+  it("moots an obligation when the OBLIGOR is eliminated (game-state fact)", async () => {
+    const infos = [A, B, C].map(
+      (seat) =>
+        new PlayerInfo(
+          seat.username,
+          PlayerType.Human,
+          `CLNT_${seat.playerID}`,
+          seat.playerID,
+        ),
+    );
+    const game = await setup("plains", {}, infos);
+    const tile = game.ref(10, 50);
+    game.player(A.playerID).conquer(tile);
+    game.player(A.playerID).setSpawnTile(tile);
+
+    // joint_attack isolates the obligor branch: the counterparty (B) and the
+    // named target (C) both stay alive; only the obligor (A) dies.
+    const harness = complianceHarness([A, B, C]);
+    const dealID = harness.propose(A, B, "joint_attack", {
+      targetID: C.playerID,
+      targetName: C.username,
+    });
+    harness.beginStep(); // 1
+    expect(harness.respond("deal_accept", B, dealID).accepted).toBe(true);
+    game.player(A.playerID).relinquish(tile);
+    expect(game.player(A.playerID).isAlive()).toBe(false);
+    harness.manager.beginDecisionStep({
+      turnNumber: 50,
+      gameState: game,
+      records: harness.records,
+    });
+    const obligation = obligationsOf(harness, dealID)[0];
+    expect(obligation.status).toBe("moot");
+    expect(obligation.resolutionEvidence).toContain(
+      "obligor Auri was eliminated",
     );
   });
 
@@ -579,6 +740,12 @@ describe("AgentDealCompliance — fulfillment, expiry, moot, force-resolve", () 
     const ledger = harness.manager.ledgerSnapshot();
     const byID = new Map(ledger.deals.map((deal) => [deal.dealID, deal]));
     expect(byID.get(openID)!.status).toBe("expired");
+    // Match-end expiry narrates the lapse exactly like mid-match TTL expiry.
+    const lapse = ledger.events.find(
+      (event) => event.event === "deal_expired" && event.dealID === openID,
+    );
+    expect(lapse).toBeDefined();
+    expect(lapse!.publicText).toContain("expire unanswered");
     expect(
       byID
         .get(napID)!

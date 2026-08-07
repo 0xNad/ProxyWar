@@ -183,13 +183,12 @@ export class AgentDealManager {
         }),
       );
     }
-    events.push(
-      ...resolveMootObligations({
-        deals: this.deals,
-        gameState: input.gameState,
-        step: this.currentStep,
-      }),
-    );
+    // Moot resolutions are deliberately event-silent (ledger-only).
+    resolveMootObligations({
+      deals: this.deals,
+      gameState: input.gameState,
+      step: this.currentStep,
+    });
     events.push(
       ...resolveElapsedObligations({
         deals: this.deals,
@@ -343,13 +342,12 @@ export class AgentDealManager {
         }),
       );
     }
-    events.push(
-      ...resolveMootObligations({
-        deals: this.deals,
-        gameState: input.gameState,
-        step: this.currentStep,
-      }),
-    );
+    // Moot resolutions are deliberately event-silent (ledger-only).
+    resolveMootObligations({
+      deals: this.deals,
+      gameState: input.gameState,
+      step: this.currentStep,
+    });
     events.push(
       ...forceResolveDeals({ deals: this.deals, step: this.currentStep }),
     );
@@ -668,6 +666,26 @@ export class AgentDealManager {
       return this.failure(
         "accept",
         `active-deal cap reached (${MAX_ACTIVE_DEALS_PER_AGENT} per agent)`,
+        dealID,
+      );
+    }
+    // Crossed proposals (A→B and B→A open at once) must not both activate:
+    // duplicate-template gating on propose alone cannot see a crossing pair,
+    // and two live copies of one pact would double every verdict and
+    // reliability count. Re-check at accept time; earlier acceptance in the
+    // pass wins, the loser fails loudly.
+    if (
+      this.activeDealBetween(
+        deal.proposerPlayerID,
+        deal.recipientPlayerID,
+        deal.template,
+      )
+    ) {
+      deal.respondedAtStep = null;
+      deal.respondedAtTurn = null;
+      return this.failure(
+        "accept",
+        `an active ${deal.template} already exists between these players`,
         dealID,
       );
     }
