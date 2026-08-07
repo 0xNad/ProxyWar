@@ -84,7 +84,9 @@ socket.on("error", (error) => {
  *    actions — the legal moves this turn. Each is { id, kind, label, risk }.
  *    obs     — the current game state (your territory, troops, neighbours, …).
  *
- *  Return ONE action from `actions`. Its `.id` is what gets played.
+ *  Return ONE PRIMARY game action from `actions`. Its `.id` is what gets
+ *  played. `chooseDealAction()` below independently supplies the OPTIONAL
+ *  separate diplomacy action, if any — this function never returns one.
  *
  *  The default is a simple priority list: grab land, attack, build, …, skipping
  *  high-risk moves, and holding if nothing better is offered. Replace it with

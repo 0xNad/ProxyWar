@@ -684,7 +684,11 @@ describe("deal menu — budget under pressure", () => {
       "deal_accept:deal:P_C:P_A:non_aggression_pact:1",
       "deal_reject:deal:P_C:P_A:non_aggression_pact:1",
     ];
-    const fullMenu = [...pairB, ...pairC, "deal_propose:P_B:trade_security_pact"];
+    const fullMenu = [
+      ...pairB,
+      ...pairC,
+      "deal_propose:P_B:trade_security_pact",
+    ];
 
     // Uncapped: both incoming pairs plus the one propose option.
     expect(dealsAt()).toEqual(fullMenu);

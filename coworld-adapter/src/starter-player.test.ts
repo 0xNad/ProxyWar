@@ -94,31 +94,29 @@ async function decisionResponseFor(
 
   let child: ChildProcess | null = null;
   try {
-    const responsePromise = new Promise<DecisionResponse>(
-      (resolve, reject) => {
-        wss.once("connection", (socket) => {
-          socket.on("message", (data) => {
-            try {
-              const message = JSON.parse(String(data));
-              if (message.type === "decision_response") {
-                resolve(message);
-              }
-            } catch (error) {
-              reject(error);
+    const responsePromise = new Promise<DecisionResponse>((resolve, reject) => {
+      wss.once("connection", (socket) => {
+        socket.on("message", (data) => {
+          try {
+            const message = JSON.parse(String(data));
+            if (message.type === "decision_response") {
+              resolve(message);
             }
-          });
-          socket.send(
-            JSON.stringify({
-              type: "decision_request",
-              requestID: "req_test1",
-              slot: 0,
-              request: { legalActions, observation: {} },
-            }),
-          );
+          } catch (error) {
+            reject(error);
+          }
         });
-        wss.once("error", reject);
-      },
-    );
+        socket.send(
+          JSON.stringify({
+            type: "decision_request",
+            requestID: "req_test1",
+            slot: 0,
+            request: { legalActions, observation: {} },
+          }),
+        );
+      });
+      wss.once("error", reject);
+    });
 
     child = spawn(process.execPath, [agent.scriptPath], {
       env: {
@@ -136,8 +134,9 @@ async function decisionResponseFor(
     // production uses), not a debounce/race being synchronized. There is no
     // in-process promise or event to await instead — a hung/crashed starter
     // process must fail the test loudly rather than hang the suite.
+    let timeoutHandle: NodeJS.Timeout | undefined;
     const timeout = new Promise<never>((_, reject) => {
-      setTimeout(() => {
+      timeoutHandle = setTimeout(() => {
         reject(
           new Error(
             `${agent.label} did not send a decision_response within 5s` +
@@ -148,7 +147,14 @@ async function decisionResponseFor(
         );
       }, 5000);
     });
-    return await Promise.race([responsePromise, timeout]);
+    try {
+      return await Promise.race([responsePromise, timeout]);
+    } finally {
+      // Clear as soon as the race settles either way — a real response
+      // arrives in milliseconds, so leaving this armed would otherwise
+      // stack a live 5s timer per test case for the whole suite run.
+      clearTimeout(timeoutHandle);
+    }
   } finally {
     child?.kill("SIGTERM");
     await new Promise<void>((resolve) => wss.close(() => resolve()));
@@ -158,99 +164,75 @@ async function decisionResponseFor(
 describe.each(STARTER_AGENTS)(
   "shipped Coworld starter agent — diplomacy slot ($label)",
   (agent) => {
-    it(
-      "sends selectedDealActionId=deal_accept alongside the unrelated primary action",
-      async () => {
-        const response = await decisionResponseFor(agent, [
-          HOLD,
-          ATTACK,
-          action("deal_accept:deal:P_B:P_A:non_aggression_pact:1", "deal_accept"),
-          action("deal_reject:deal:P_B:P_A:non_aggression_pact:1", "deal_reject"),
-        ]);
-        expect(response.selectedLegalActionId).toBe(ATTACK.id);
-        expect(response.selectedDealActionId).toBe(
-          "deal_accept:deal:P_B:P_A:non_aggression_pact:1",
-        );
-      },
-      15000,
-    );
+    it("sends selectedDealActionId=deal_accept alongside the unrelated primary action", async () => {
+      const response = await decisionResponseFor(agent, [
+        HOLD,
+        ATTACK,
+        action("deal_accept:deal:P_B:P_A:non_aggression_pact:1", "deal_accept"),
+        action("deal_reject:deal:P_B:P_A:non_aggression_pact:1", "deal_reject"),
+      ]);
+      expect(response.selectedLegalActionId).toBe(ATTACK.id);
+      expect(response.selectedDealActionId).toBe(
+        "deal_accept:deal:P_B:P_A:non_aggression_pact:1",
+      );
+    }, 15000);
 
-    it(
-      "prioritizes deal_accept over deal_propose/deal_reject/deal_withdraw when several are offered",
-      async () => {
-        const response = await decisionResponseFor(agent, [
-          HOLD,
-          SPAWN,
-          action("deal_propose:P_Y:non_aggression_pact", "deal_propose"),
-          action("deal_reject:deal:P_Z:P_A:trade_security_pact:1", "deal_reject"),
-          action("deal_withdraw:deal:P_A:P_W:support_request:1", "deal_withdraw"),
-          action("deal_accept:deal:P_X:P_A:non_aggression_pact:1", "deal_accept"),
-        ]);
-        expect(response.selectedDealActionId).toBe(
-          "deal_accept:deal:P_X:P_A:non_aggression_pact:1",
-        );
-      },
-      15000,
-    );
+    it("prioritizes deal_accept over deal_propose/deal_reject/deal_withdraw when several are offered", async () => {
+      const response = await decisionResponseFor(agent, [
+        HOLD,
+        SPAWN,
+        action("deal_propose:P_Y:non_aggression_pact", "deal_propose"),
+        action("deal_reject:deal:P_Z:P_A:trade_security_pact:1", "deal_reject"),
+        action("deal_withdraw:deal:P_A:P_W:support_request:1", "deal_withdraw"),
+        action("deal_accept:deal:P_X:P_A:non_aggression_pact:1", "deal_accept"),
+      ]);
+      expect(response.selectedDealActionId).toBe(
+        "deal_accept:deal:P_X:P_A:non_aggression_pact:1",
+      );
+    }, 15000);
 
-    it(
-      "falls back to deal_propose when no deal_accept is offered",
-      async () => {
-        const response = await decisionResponseFor(agent, [
-          HOLD,
-          SPAWN,
-          action("deal_reject:deal:P_Z:P_A:trade_security_pact:1", "deal_reject"),
-          action("deal_withdraw:deal:P_A:P_W:support_request:1", "deal_withdraw"),
-          action("deal_propose:P_Y:non_aggression_pact", "deal_propose"),
-        ]);
-        expect(response.selectedDealActionId).toBe(
-          "deal_propose:P_Y:non_aggression_pact",
-        );
-      },
-      15000,
-    );
+    it("falls back to deal_propose when no deal_accept is offered", async () => {
+      const response = await decisionResponseFor(agent, [
+        HOLD,
+        SPAWN,
+        action("deal_reject:deal:P_Z:P_A:trade_security_pact:1", "deal_reject"),
+        action("deal_withdraw:deal:P_A:P_W:support_request:1", "deal_withdraw"),
+        action("deal_propose:P_Y:non_aggression_pact", "deal_propose"),
+      ]);
+      expect(response.selectedDealActionId).toBe(
+        "deal_propose:P_Y:non_aggression_pact",
+      );
+    }, 15000);
 
-    it(
-      "falls back to deal_reject over deal_withdraw when neither accept nor propose is offered",
-      async () => {
-        const response = await decisionResponseFor(agent, [
-          HOLD,
-          SPAWN,
-          action("deal_withdraw:deal:P_A:P_W:support_request:1", "deal_withdraw"),
-          action("deal_reject:deal:P_Z:P_A:trade_security_pact:1", "deal_reject"),
-        ]);
-        expect(response.selectedDealActionId).toBe(
-          "deal_reject:deal:P_Z:P_A:trade_security_pact:1",
-        );
-      },
-      15000,
-    );
+    it("falls back to deal_reject over deal_withdraw when neither accept nor propose is offered", async () => {
+      const response = await decisionResponseFor(agent, [
+        HOLD,
+        SPAWN,
+        action("deal_withdraw:deal:P_A:P_W:support_request:1", "deal_withdraw"),
+        action("deal_reject:deal:P_Z:P_A:trade_security_pact:1", "deal_reject"),
+      ]);
+      expect(response.selectedDealActionId).toBe(
+        "deal_reject:deal:P_Z:P_A:trade_security_pact:1",
+      );
+    }, 15000);
 
-    it(
-      "omits selectedDealActionId entirely when no deal action is offered (flag-off / no-deal invariance)",
-      async () => {
-        const response = await decisionResponseFor(agent, [HOLD, SPAWN, ATTACK]);
-        expect(response.selectedLegalActionId).toBe(SPAWN.id);
-        expect("selectedDealActionId" in response).toBe(false);
-      },
-      15000,
-    );
+    it("omits selectedDealActionId entirely when no deal action is offered (flag-off / no-deal invariance)", async () => {
+      const response = await decisionResponseFor(agent, [HOLD, SPAWN, ATTACK]);
+      expect(response.selectedLegalActionId).toBe(SPAWN.id);
+      expect("selectedDealActionId" in response).toBe(false);
+    }, 15000);
 
-    it(
-      "never selects a deal_* action as the primary game action, even when hold is the only non-deal alternative",
-      async () => {
-        const response = await decisionResponseFor(agent, [
-          HOLD,
-          action("deal_accept:deal:P_B:P_A:non_aggression_pact:1", "deal_accept"),
-          action("deal_reject:deal:P_B:P_A:non_aggression_pact:1", "deal_reject"),
-        ]);
-        expect(response.selectedLegalActionId).toBe("hold");
-        // The diplomacy slot still fires independently of the primary pick.
-        expect(response.selectedDealActionId).toBe(
-          "deal_accept:deal:P_B:P_A:non_aggression_pact:1",
-        );
-      },
-      15000,
-    );
+    it("never selects a deal_* action as the primary game action, even when hold is the only non-deal alternative", async () => {
+      const response = await decisionResponseFor(agent, [
+        HOLD,
+        action("deal_accept:deal:P_B:P_A:non_aggression_pact:1", "deal_accept"),
+        action("deal_reject:deal:P_B:P_A:non_aggression_pact:1", "deal_reject"),
+      ]);
+      expect(response.selectedLegalActionId).toBe("hold");
+      // The diplomacy slot still fires independently of the primary pick.
+      expect(response.selectedDealActionId).toBe(
+        "deal_accept:deal:P_B:P_A:non_aggression_pact:1",
+      );
+    }, 15000);
   },
 );
