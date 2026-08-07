@@ -250,3 +250,26 @@ jobs:
             git --no-pager diff
             exit 1
           fi
+
+  docker-build:
+    name: 🐳 Docker build (root image, build stage)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: false
+      # Every other job here works from a full checkout, which always has
+      # every source file -- it can never catch the root Dockerfile's COPY
+      # list drifting out of sync with vite.config.ts's rollupOptions.input
+      # entries. That drifted silently once already: public.html became a
+      # required build entry (see vite.config.ts) without a matching
+      # `COPY public.html ./` in this Dockerfile's build stage, so
+      # `npm run build-prod` failed inside the image with
+      # `[UNRESOLVED_ENTRY] Error: Cannot resolve entry module public.html`
+      # while the same command passed in every other CI job. Building just
+      # the `build` target (skips the apt-get/nginx final stage) exercises
+      # the actual COPY contract cheaply and would have caught it.
+      - name: Build root image's build stage
+        run: docker build --target build .
+
