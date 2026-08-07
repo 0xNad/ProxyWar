@@ -26,7 +26,7 @@ vi.mock("../../src/core/Schemas", async () => {
 });
 
 import { GameEnv } from "../../src/core/configuration/Config";
-import { GameType } from "../../src/core/game/Game";
+import { GameType, UnitType } from "../../src/core/game/Game";
 import { GameServer } from "../../src/server/GameServer";
 
 describe("GameLifecycle", () => {
@@ -51,6 +51,27 @@ describe("GameLifecycle", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.clearAllTimers();
+  });
+
+  it("retires warships from every new game and cannot re-enable them", () => {
+    const game = new GameServer(
+      "test-game",
+      mockLogger,
+      Date.now(),
+      mockConfig,
+      {
+        gameType: GameType.Private,
+        disabledUnits: [UnitType.AtomBomb],
+      } as any,
+    );
+
+    expect(game.gameConfig.disabledUnits).toEqual([
+      UnitType.AtomBomb,
+      UnitType.Warship,
+    ]);
+
+    game.updateGameConfig({ disabledUnits: [] });
+    expect(game.gameConfig.disabledUnits).toEqual([UnitType.Warship]);
   });
 
   it("should not start turn interval if game has ended", async () => {

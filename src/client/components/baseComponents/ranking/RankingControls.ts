@@ -33,6 +33,7 @@ const isConquestRanking = (t: RankType) => conquestRankings.has(t);
 @customElement("ranking-controls")
 export class RankingControls extends LitElement {
   @property({ type: String }) rankType = RankType.Lifetime;
+  @property({ type: Boolean }) warshipsDisabled = false;
 
   private onSort(type: RankType) {
     this.dispatchEvent(new CustomEvent("sort", { detail: type }));
@@ -96,7 +97,9 @@ export class RankingControls extends LitElement {
     if (!isEconomyRanking(this.rankType)) return "";
 
     const econButtons = [
-      [RankType.StolenGold, "game_info_modal.pirate"],
+      ...(this.warshipsDisabled
+        ? []
+        : [[RankType.StolenGold, "game_info_modal.pirate"]]),
       [RankType.ConqueredGold, "game_info_modal.conquered"],
       [RankType.TotalGold, "game_info_modal.total_gold"],
     ];

@@ -186,7 +186,7 @@ export function buildAgentTacticalAffordances(input: {
   }
   if (navalControl.recommended) {
     notes.push(
-      "naval_control is available; evaluator should watch whether the agent uses transports, warships, or patrol moves instead of stalling land loops",
+      "naval_control is available; evaluator should watch whether the agent uses Transport boats instead of stalling in land loops",
     );
   }
   if (lateGameStrikeTargeting.recommended) {
@@ -2203,14 +2203,12 @@ function navalControlReasons(input: {
   homeDanger: AgentHomeDangerLevel;
 }): string[] {
   const reasons: string[] = [];
-  reasons.push(
-    `naval assets Port/Warship=${input.portCount}/${input.warshipCount}`,
-  );
+  reasons.push(`naval assets Ports=${input.portCount}`);
   reasons.push(
     `active transports=${input.activeTransportCount} carrying ${input.activeTransportTroops} troops`,
   );
   reasons.push(
-    `naval actions boat/neutral/invasion/warship/move=${input.boatLaunchActionCount}/${input.neutralBoatActionCount}/${input.navalInvasionActionCount}/${input.warshipBuildActionCount}/${input.warshipMoveActionCount}`,
+    `naval actions boat/neutral/invasion=${input.boatLaunchActionCount}/${input.neutralBoatActionCount}/${input.navalInvasionActionCount}`,
   );
   reasons.push(
     `${input.safeNavalActionCount} naval action(s) are not high risk`,
@@ -2223,7 +2221,7 @@ function navalControlReasons(input: {
   reasons.push(`home danger is ${input.homeDanger}`);
   if (input.recommended) {
     reasons.push(
-      "recommended: use the best transport, warship, or patrol action before naval options stall",
+      "recommended: use the best safe Transport boat before naval options stall",
     );
   }
   return reasons;

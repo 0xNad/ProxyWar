@@ -1,11 +1,11 @@
 import { html } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { GameEndInfo } from "../core/Schemas";
-import { GameMapType } from "../core/game/Game";
+import { GameMapType, UnitType } from "../core/game/Game";
 import { fetchGameById } from "./Api";
-import { BaseModal } from "./components/BaseModal";
 import { terrainMapFileLoader } from "./TerrainMapFileLoader";
 import { renderDuration, translateText } from "./Utils";
+import { BaseModal } from "./components/BaseModal";
 import {
   PlayerInfo,
   Ranking,
@@ -32,8 +32,7 @@ export class GameInfoModal extends BaseModal {
    * spin forever with no honest fallback. `"idle"` is the new honest
    * default; `loadGame()` walks idle -> loading -> loaded|failed.
    */
-  @state() private loadState: "idle" | "loading" | "loaded" | "failed" =
-    "idle";
+  @state() private loadState: "idle" | "loading" | "loaded" | "failed" = "idle";
 
   private ranking: Ranking | null = null;
 
@@ -98,6 +97,9 @@ export class GameInfoModal extends BaseModal {
       ${this.renderGameInfo()}
       <ranking-controls
         .rankType=${this.rankType}
+        .warshipsDisabled=${this.gameInfo?.config.disabledUnits?.includes(
+          UnitType.Warship,
+        ) ?? false}
         @sort=${this.sort}
       ></ranking-controls>
       ${this.renderSummaryTable()}
@@ -226,6 +228,12 @@ export class GameInfoModal extends BaseModal {
       }
 
       this.gameInfo = session.info;
+      if (
+        session.info.config.disabledUnits?.includes(UnitType.Warship) &&
+        this.rankType === RankType.StolenGold
+      ) {
+        this.rankType = RankType.TotalGold;
+      }
       this.ranking = new Ranking(session);
       this.updateRanking();
       await this.loadMapImage(session.info.config.gameMap);

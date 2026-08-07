@@ -18,7 +18,18 @@ export type QuickChatPhrase = {
 
 export type QuickChatPhrases = Record<string, QuickChatPhrase[]>;
 
-export const quickChatPhrases: QuickChatPhrases = quickChatData;
+// Keep retired keys in the schema for historical replay compatibility, but do
+// not offer them in new chat menus.
+const retiredQuickChatKeys = new Set(["attack.build_warships"]);
+
+export const quickChatPhrases: QuickChatPhrases = Object.fromEntries(
+  Object.entries(quickChatData).map(([category, phrases]) => [
+    category,
+    phrases.filter(
+      (phrase) => !retiredQuickChatKeys.has(`${category}.${phrase.key}`),
+    ),
+  ]),
+);
 
 /**
  * Best-effort English fallback for a dotted `chat.*` translation key, read
@@ -100,7 +111,11 @@ export class ChatModal extends LitElement {
   render() {
     return html`
       <o-modal
-        title="${translateText("chat.title", undefined, englishChatFallback("chat.title"))}"
+        title="${translateText(
+          "chat.title",
+          undefined,
+          englishChatFallback("chat.title"),
+        )}"
       >
         <div class="chat-columns">
           <div class="chat-column">

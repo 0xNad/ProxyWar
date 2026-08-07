@@ -133,6 +133,7 @@ export class TeamStats extends LitElement implements Layer {
 
   render() {
     if (!this.visible) return html``;
+    const showWarships = !this.game.config().isUnitDisabled(UnitType.Warship);
 
     return html`
       <div
@@ -141,7 +142,7 @@ export class TeamStats extends LitElement implements Layer {
       >
         <div
           class="grid w-full grid-cols-[repeat(var(--cols),1fr)]"
-          style="--cols:${this.showUnits ? 5 : 4};"
+          style="--cols:${this.showUnits ? (showWarships ? 5 : 4) : 4};"
         >
           <!-- Header -->
           <div class="contents font-bold bg-slate-700/60">
@@ -160,11 +161,15 @@ export class TeamStats extends LitElement implements Layer {
                   >
                     ${translateText("leaderboard.sams")}
                   </div>
-                  <div
-                    class="p-1.5 md:p-2.5 text-center border-b border-slate-500"
-                  >
-                    ${translateText("leaderboard.warships")}
-                  </div>
+                  ${showWarships
+                    ? html`
+                        <div
+                          class="p-1.5 md:p-2.5 text-center border-b border-slate-500"
+                        >
+                          ${translateText("leaderboard.warships")}
+                        </div>
+                      `
+                    : null}
                   <div
                     class="p-1.5 md:p-2.5 text-center border-b border-slate-500"
                   >
@@ -208,9 +213,13 @@ export class TeamStats extends LitElement implements Layer {
                     <div class="py-1.5 border-b border-slate-500">
                       ${team.totalSAMs}
                     </div>
-                    <div class="py-1.5 border-b border-slate-500">
-                      ${team.totalWarShips}
-                    </div>
+                    ${showWarships
+                      ? html`
+                          <div class="py-1.5 border-b border-slate-500">
+                            ${team.totalWarShips}
+                          </div>
+                        `
+                      : null}
                     <div class="py-1.5 border-b border-slate-500">
                       ${team.totalCities}
                     </div>
