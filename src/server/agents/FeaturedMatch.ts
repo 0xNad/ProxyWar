@@ -21,8 +21,8 @@ import { withFileMutex } from "./FileMutex";
  *   `meta.json` carries one (rated-Coworld sourced items do; a
  *   generated exhibition-only item may not).
  * - `"archive"` lane: a COMPLETED, ALREADY-PUBLISHED league match
- *   selected for Featured Archive placement / future Director Cut
- *   promotion (Stage 5/6). These are NEVER premiered — `state` is
+ *   selected for Featured Archive placement (Stage 5/6). These are
+ *   NEVER premiered — `state` is
  *   always `"published"` from creation (there is no unpublished state
  *   for an archive-lane record: the underlying match was already public
  *   before this record existed), and `scheduledAt`/`revealAt` are
@@ -69,9 +69,7 @@ export const FeaturedMatchCategorySchema = z.enum([
   "open_source_challenge",
   "notable_league_battle",
 ]);
-export type FeaturedMatchCategory = z.infer<
-  typeof FeaturedMatchCategorySchema
->;
+export type FeaturedMatchCategory = z.infer<typeof FeaturedMatchCategorySchema>;
 
 /**
  * A participant reference by STABLE identity — Agent/AgentVersion/Builder
@@ -180,14 +178,16 @@ export const FeaturedMatchSchema = z
     if (record.lane === "archive" && record.queueItemName !== null) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "an archive-lane record must never carry a queue item name — the two lanes are never mixed",
+        message:
+          "an archive-lane record must never carry a queue item name — the two lanes are never mixed",
         path: ["queueItemName"],
       });
     }
     if (record.lane === "archive" && record.episodeRequestId === null) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "an archive-lane record must carry the episode it was published from",
+        message:
+          "an archive-lane record must carry the episode it was published from",
         path: ["episodeRequestId"],
       });
     }
@@ -197,7 +197,8 @@ export const FeaturedMatchSchema = z
     ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "an archive-lane record is never scheduled or embargoed — it was already public before this record existed",
+        message:
+          "an archive-lane record is never scheduled or embargoed — it was already public before this record existed",
         path: ["scheduledAt"],
       });
     }
@@ -208,7 +209,8 @@ export const FeaturedMatchSchema = z
     ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "embargo violation: an unrevealed premiere-lane record must never carry a result",
+        message:
+          "embargo violation: an unrevealed premiere-lane record must never carry a result",
         path: ["result"],
       });
     }
@@ -219,7 +221,9 @@ const FeaturedMatchStoreFileSchema = z.object({
   schemaVersion: z.literal(1),
   matches: z.array(FeaturedMatchSchema),
 });
-export type FeaturedMatchStoreFile = z.infer<typeof FeaturedMatchStoreFileSchema>;
+export type FeaturedMatchStoreFile = z.infer<
+  typeof FeaturedMatchStoreFileSchema
+>;
 
 export function newFeaturedMatchId(): string {
   return `feat_${randomBytes(10).toString("hex")}`;

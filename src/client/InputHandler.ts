@@ -170,7 +170,7 @@ export class ReplaySpeedChangeEvent implements GameEvent {
      * "user" = a viewer explicitly picked this speed (replay panel button,
      * speed up/down keyboard shortcuts) and must never be silently
      * reverted by an automatic pacing decision. "auto" = everything else
-     * (Director Cut's own per-segment pacing, the archived-replay
+     * (the archived-replay
      * fastest-default emitted on join). House rule (P0 incident,
      * 2026-08-03): automatic pacing is a default, never a lock -- see
      * LocalServer.ts's `userOverrodeReplaySpeed` for the enforcement.

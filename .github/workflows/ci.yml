@@ -69,12 +69,12 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4]
-    # Sharded 2026-08-04, comment updated same day: the single-job coverage
-    # run had cancelled at the 45-min cap on every main/PR run since
-    # 2026-08-02T00:14Z (GH Actions history), and the first 4-way split
-    # still intermittently failed on real GH runners because two specific
-    # files are individually pathological under coverage, not fixable by
-    # matrix shape or worker count: `tests/server/AgentLeagueMatch.test.ts`
+    # Sharded 2026-08-04, comment updated 2026-08-07: the single-job
+    # coverage run had cancelled at the 45-min cap on every main/PR run
+    # since 2026-08-02T00:14Z (GH Actions history), and the first 4-way
+    # split still intermittently failed on real GH runners because two
+    # specific files are individually pathological under coverage, not
+    # fixable by matrix shape or worker count: `tests/server/AgentLeagueMatch.test.ts`
     # measured 2673514ms (44m33s) as the FIRST file executed in a real
     # shard (GH Actions job 92052160802, PR #16), and
     # `tests/server/SpawnCandidatePipelineEquivalence.test.ts` measured
@@ -83,14 +83,36 @@ jobs:
     # 8-way shards and maxWorkers 1 and 2 alike — despite passing in 67s
     # standalone. Both are excluded here and run as their own dedicated
     # `test-heavy` job below instead, still under full coverage, never
-    # skipped. Verified: `vitest list` with both files excluded, sharded 4
-    # ways, unions to exactly 447 files with zero duplicates/omissions;
-    # combined with the 2 dedicated files that's the full unsharded 449.
+    # skipped.
+    #
+    # `tests/e2e/**` is ALSO excluded here as of 2026-08-07 and runs in its
+    # own dedicated `test-e2e` job instead, via the plain (non-coverage)
+    # `npm run test:e2e` — NOT the same command as this shard's
+    # `test:coverage` above, but the same E2E assertions every time, never
+    # skipped: this is test isolation, not weakened test execution/
+    # assertions — E2E no longer contributes coverage instrumentation
+    # here, but every case still runs, every time. Evidence: GH
+    # Actions run 31131165725 (PR26 shard 1/4) AND push 10a29b0 (PR25's
+    # own merge to main, so this was never PR-specific) both failed with
+    # "Chrome DevTools page target never became reachable" while Chrome
+    # (pid 2716) was STILL an orphan process at job cleanup — spawned and
+    # kept running, un-crashed. The exact reason its DevTools port never
+    # opened in time was never directly proven (Chrome's own stderr was
+    # discarded before this fix), but CPU contention with a
+    # coverage-instrumented sibling file under `--maxWorkers=2` on a
+    # 2-vCPU runner is the evidence-correlated explanation. See the
+    # `test-e2e` job's own comment.
+    #
+    # Verified: `vitest list --filesOnly` with the 2 heavy files AND
+    # `tests/e2e/**` excluded reports exactly 449 files (`vitest list`'s
+    # own `--shard` flag is a no-op for listing, so this is the excluded
+    # total, not a verified 4-way shard union); combined with the 2 heavy
+    # files and the 1 e2e file that's the full unsharded 452.
     #
     # `needs: build` + the `static-app-shell` download below: this job's
-    # own app-shell-dependent files (PublicSurfaceSecurity.test.ts,
-    # PublicProductJourneys.e2e.test.ts, etc.) need static/index.html —
-    # see the Build job's matching comment for the live-failure evidence.
+    # own app-shell-dependent files (PublicSurfaceSecurity.test.ts, etc.)
+    # need static/index.html — see the Build job's matching comment for
+    # the live-failure evidence.
     timeout-minutes: 45
     steps:
       - name: Checkout repository
@@ -107,7 +129,7 @@ jobs:
         with:
           name: static-app-shell
           path: static
-      - run: npm run test:coverage -- --shard=${{ matrix.shard }}/4 --exclude=tests/server/AgentLeagueMatch.test.ts --exclude=tests/server/SpawnCandidatePipelineEquivalence.test.ts
+      - run: npm run test:coverage -- --shard=${{ matrix.shard }}/4 --exclude=tests/server/AgentLeagueMatch.test.ts --exclude=tests/server/SpawnCandidatePipelineEquivalence.test.ts --exclude=tests/e2e/**
 
   test-heavy:
     name: "🔬 Test (heavy: ${{ matrix.label }})"
@@ -144,6 +166,38 @@ jobs:
           node-version: 24
       - run: npm ci
       - run: npm run test:coverage -- ${{ matrix.file }}
+
+  test-e2e:
+    name: 🔬 Test (e2e)
+    runs-on: ubuntu-latest
+    needs: build
+    # Isolated from the sharded/coverage `test` matrix above (2026-08-07)
+    # — see that job's matching comment for the full evidence. Runs the
+    # plain `npm run test:e2e` a contributor already runs locally — never
+    # `test:coverage`, never sharded — with the same E2E assertions every
+    # time; this is test isolation, not weakened test execution/
+    # assertions — this job just no longer contributes coverage
+    # instrumentation. 15 minutes is headroom over the live-premiere
+    # block's own 5-minute `beforeAll` boot budget (see
+    # `tests/e2e/PublicProductJourneys.e2e.test.ts`'s
+    # `LIVE_PREMIERE_BOOT_TIMEOUT_MS` comment) plus the rest of the suite.
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          submodules: false
+      - name: Setup node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npm ci
+      - name: Download static app shell
+        uses: actions/download-artifact@v7
+        with:
+          name: static-app-shell
+          path: static
+      - run: npm run test:e2e
 
   eslint:
     name: 🔍 ESLint
@@ -196,3 +250,26 @@ jobs:
             git --no-pager diff
             exit 1
           fi
+
+  docker-build:
+    name: 🐳 Docker build (root image, build stage)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: false
+      # Every other job here works from a full checkout, which always has
+      # every source file -- it can never catch the root Dockerfile's COPY
+      # list drifting out of sync with vite.config.ts's rollupOptions.input
+      # entries. That drifted silently once already: public.html became a
+      # required build entry (see vite.config.ts) without a matching
+      # `COPY public.html ./` in this Dockerfile's build stage, so
+      # `npm run build-prod` failed inside the image with
+      # `[UNRESOLVED_ENTRY] Error: Cannot resolve entry module public.html`
+      # while the same command passed in every other CI job. Building just
+      # the `build` target (skips the apt-get/nginx final stage) exercises
+      # the actual COPY contract cheaply and would have caught it.
+      - name: Build root image's build stage
+        run: docker build --target build .
+

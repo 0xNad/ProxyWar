@@ -2,17 +2,17 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { FEATURED_MATCH_STATE_ROOT_ENV } from "../../../../src/server/agents/FeaturedMatch";
 import {
+  EVENT_PACKAGE_STATE_ROOT_ENV,
   EventPackageSchema,
   findEventPackage,
   readEventPackageStore,
   resolveEventPackageStateRoot,
   upsertEventPackage,
   writeEventPackageStore,
-  EVENT_PACKAGE_STATE_ROOT_ENV,
   type EventPackage,
 } from "../../../../src/server/agents/season/EventPackage";
-import { FEATURED_MATCH_STATE_ROOT_ENV } from "../../../../src/server/agents/FeaturedMatch";
 
 function basePackage(overrides: Partial<EventPackage> = {}): EventPackage {
   return {
@@ -24,7 +24,6 @@ function basePackage(overrides: Partial<EventPackage> = {}): EventPackage {
     mapLabel: "Pangaea",
     format: "2p duel",
     scheduledAt: "2026-08-08T18:00:00.000Z",
-    directorCutEstimateSeconds: 480,
     canonicalMatchUrl: `/match/feat_${"a".repeat(20)}`,
     canonicalPremiereUrl: "/premiere/abc123",
     embargoState: "embargoed",
@@ -41,11 +40,30 @@ describe("EventPackageSchema", () => {
   });
 
   it("rejects an unknown featuredMatchId shape", () => {
-    expect(() => EventPackageSchema.parse(basePackage({ featuredMatchId: "not-a-feat-id" }))).toThrow();
+    expect(() =>
+      EventPackageSchema.parse(
+        basePackage({ featuredMatchId: "not-a-feat-id" }),
+      ),
+    ).toThrow();
   });
 
   it("rejects an empty title", () => {
-    expect(() => EventPackageSchema.parse(basePackage({ title: "" }))).toThrow();
+    expect(() =>
+      EventPackageSchema.parse(basePackage({ title: "" })),
+    ).toThrow();
+  });
+
+  it("accepts a legacy directorCutEstimateSeconds field (pre-removal persisted record) and strips it from the parsed output", () => {
+    const legacyRecord = { ...basePackage(), directorCutEstimateSeconds: 300 };
+    const parsed = EventPackageSchema.parse(legacyRecord);
+    expect(parsed).not.toHaveProperty("directorCutEstimateSeconds");
+    expect(parsed.title).toBe(legacyRecord.title);
+  });
+
+  it("rejects an unrelated unknown key — only the retired directorCutEstimateSeconds field is tolerated", () => {
+    expect(() =>
+      EventPackageSchema.parse({ ...basePackage(), someUnknownField: "x" }),
+    ).toThrow();
   });
 });
 
@@ -61,7 +79,9 @@ describe("resolveEventPackageStateRoot", () => {
       [EVENT_PACKAGE_STATE_ROOT_ENV]: "/custom/event-packages",
       [FEATURED_MATCH_STATE_ROOT_ENV]: "/custom/featured-matches",
     };
-    expect(resolveEventPackageStateRoot(environment, "/home/op")).toBe("/custom/event-packages");
+    expect(resolveEventPackageStateRoot(environment, "/home/op")).toBe(
+      "/custom/event-packages",
+    );
   });
 });
 
@@ -69,7 +89,8 @@ describe("EventPackage store (atomic read/write)", () => {
   let stateRoot: string;
 
   afterEach(async () => {
-    if (stateRoot !== undefined) await rm(stateRoot, { recursive: true, force: true });
+    if (stateRoot !== undefined)
+      await rm(stateRoot, { recursive: true, force: true });
   });
 
   it("returns an empty store on a cold start", async () => {
@@ -80,7 +101,10 @@ describe("EventPackage store (atomic read/write)", () => {
 
   it("round-trips a written package", async () => {
     stateRoot = await mkdtemp(path.join(os.tmpdir(), "event-package-store-"));
-    await writeEventPackageStore(stateRoot, { schemaVersion: 1, packages: [basePackage()] });
+    await writeEventPackageStore(stateRoot, {
+      schemaVersion: 1,
+      packages: [basePackage()],
+    });
     const reloaded = await readEventPackageStore(stateRoot);
     expect(reloaded.packages).toHaveLength(1);
   });
@@ -96,7 +120,11 @@ describe("EventPackage store (atomic read/write)", () => {
 
   it("throws loudly on a corrupt store file", async () => {
     stateRoot = await mkdtemp(path.join(os.tmpdir(), "event-package-store-"));
-    await writeFile(path.join(stateRoot, "event-packages.json"), "{not json", "utf8");
+    await writeFile(
+      path.join(stateRoot, "event-packages.json"),
+      "{not json",
+      "utf8",
+    );
     await expect(readEventPackageStore(stateRoot)).rejects.toThrow();
   });
 });

@@ -4,28 +4,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import englishTranslations from "../../../resources/lang/en.json";
 import { DEFAULT_PLATFORM_ORIGIN } from "../../core/PlatformOrigin";
-import { readAgentStatsArtifact } from "./AgentStatsArtifact";
-import {
-  appendStandingsHistorySnapshot,
-  EMPTY_STANDINGS_HISTORY_STORE,
-  readStandingsHistoryStore,
-  snapshotFromMirrorData,
-  type StandingsHistoryStore,
-} from "./CoworldLeagueStandingsHistory";
-import { buildProxyWarPublicReadModel } from "../ProxyWarPublicReadModel";
-import {
-  resolveArchivedEpisodeReplayHrefs,
-  type CoworldLeagueArchivedReplayHrefs,
-} from "./CoworldLeagueArtifactRetention";
-import {
-  readFeaturedMatchStore,
-  resolveFeaturedMatchStateRoot,
-} from "./FeaturedMatch";
-import {
-  readEventPackageStore,
-  resolveEventPackageStateRoot,
-} from "./season/EventPackage";
-import { loadSeasonRegistry } from "./season/SeasonRegistry";
 import { generateEmblemSvg } from "../identity/IdentityEmblems";
 import {
   AgentIdentityView,
@@ -40,6 +18,28 @@ import {
   computeProvisionalIdentities,
   type ProvisionalIdentity,
 } from "../identity/ProvisionalIdentity";
+import { buildProxyWarPublicReadModel } from "../ProxyWarPublicReadModel";
+import { readAgentStatsArtifact } from "./AgentStatsArtifact";
+import {
+  resolveArchivedEpisodeReplayHrefs,
+  type CoworldLeagueArchivedReplayHrefs,
+} from "./CoworldLeagueArtifactRetention";
+import {
+  appendStandingsHistorySnapshot,
+  EMPTY_STANDINGS_HISTORY_STORE,
+  readStandingsHistoryStore,
+  snapshotFromMirrorData,
+  type StandingsHistoryStore,
+} from "./CoworldLeagueStandingsHistory";
+import {
+  readFeaturedMatchStore,
+  resolveFeaturedMatchStateRoot,
+} from "./FeaturedMatch";
+import {
+  readEventPackageStore,
+  resolveEventPackageStateRoot,
+} from "./season/EventPackage";
+import { loadSeasonRegistry } from "./season/SeasonRegistry";
 
 /**
  * Static league-site writer for the hosted Coworld Proxywar league.
@@ -110,28 +110,13 @@ export interface CoworldLeagueEpisodeRow {
    */
   premiereHref?: string;
   /**
-   * Product overhaul spec Stage 5. Optional/additive, same pattern as
-   * `premiereHref` above. `writeAgentLeagueRunArtifacts` writes
-   * `director-cut-plan.json` for every LOCALLY-produced match; the HOSTED
-   * Coworld mirror (`coworld-league-mirror.ts`) now ALSO generates one for a
-   * mirrored run dir once it has the telemetry to build it from —
-   * `spectator-telemetry.json` when the hosted payload's own
-   * `inlineRunArtifacts` carries it (verified against real retained mirror
-   * runs — it does, for every currently observed production episode),
-   * falling back to deriving it from `decisions.jsonl` otherwise (see
-   * `CoworldLeagueMirrorCore.ts`'s `resolveMirroredDirectorCutPlan`).
-   * Generation is budgeted (one attempt per sync cycle by default,
-   * `--director-cut-budget`) and gradually backfills older retained runs, so
-   * a row can stay `undefined` for a cycle or two after its episode first
-   * appears — that is expected, not a bug, and this field simply omits
-   * itself until a plan exists on disk for that run.
-   */
-  directorCut?: { durationEstimateSeconds: number; segmentCount: number };
-  /**
-   * Same optional/additive/budgeted-backfill shape as `directorCut` above,
-   * one gap-closure phase later: a compact ranking/evidence signal — never
-   * recap prose — from the mirror's `drama-report.json`/`match-story.json`/
-   * `match-recap.json` (`CoworldLeagueMatchNarrativeBackfill.ts`).
+   * Optional/additive, same pattern as `premiereHref` above: a compact
+   * ranking/evidence signal — never recap prose — from the mirror's
+   * `drama-report.json`/`match-story.json`/`match-recap.json`
+   * (`CoworldLeagueMatchNarrativeBackfill.ts`). Generation is budgeted
+   * (one attempt per sync cycle by default) and gradually backfills older
+   * retained runs, so a row can stay `undefined` for a cycle or two after
+   * its episode first appears — that is expected, not a bug.
    * `dramaScore` is `AgentDramaReport`'s 0-100 composite (legacy, requires
    * both `drama-report.json` and `match-story.json`); `entertainmentGrade`
    * is `AgentMatchStory`'s `grade`. `curatedDramaScore` is
@@ -684,9 +669,8 @@ async function writeCoworldLeagueSiteUnlocked(
   // is left untouched on disk (never overwritten) and this cycle publishes
   // with an empty series rather than either failing the league publish or
   // silently discarding real accumulated history.
-  const existingStandingsHistory = await readStandingsHistoryStore(
-    standingsHistoryPath,
-  );
+  const existingStandingsHistory =
+    await readStandingsHistoryStore(standingsHistoryPath);
   const standingsHistoryCorrupt = existingStandingsHistory === "corrupt";
   if (standingsHistoryCorrupt) {
     console.warn(
@@ -698,7 +682,10 @@ async function writeCoworldLeagueSiteUnlocked(
     ? EMPTY_STANDINGS_HISTORY_STORE
     : candidateSnapshot === null
       ? existingStandingsHistory
-      : appendStandingsHistorySnapshot(existingStandingsHistory, candidateSnapshot);
+      : appendStandingsHistorySnapshot(
+          existingStandingsHistory,
+          candidateSnapshot,
+        );
   if (!standingsHistoryCorrupt) {
     await writeFileAtomic(
       standingsHistoryPath,
@@ -1378,9 +1365,7 @@ function recentFormForPlayer(
     if (episode.completedAt === null) {
       continue;
     }
-    const entry = episode.players.find(
-      (player) => player.name === playerName,
-    );
+    const entry = episode.players.find((player) => player.name === playerName);
     if (entry === undefined) {
       continue;
     }
@@ -1452,8 +1437,7 @@ function latestMatchMarkup(
     episode.roundNumber === null ? "" : ` · Round ${episode.roundNumber}`
   }`;
   const href =
-    typeof episode.premiereHref === "string" &&
-    episode.premiereHref.length > 0
+    typeof episode.premiereHref === "string" && episode.premiereHref.length > 0
       ? episode.premiereHref
       : episode.fullRenderHref;
   return href === null
@@ -1646,7 +1630,9 @@ function standingsTable(
             </div>
           </details>`;
       const provisional =
-        view.agent === null ? (provisionalIdentities.get(row.playerName) ?? null) : null;
+        view.agent === null
+          ? (provisionalIdentities.get(row.playerName) ?? null)
+          : null;
       return `
         <tr${row.isHouse ? ` class="house"` : ""}>
           <td class="rank">${escapeHtml(String(row.rank))}</td>
@@ -1714,13 +1700,19 @@ function battleCard(
     // version" stays a standings-table-only field until that data exists
     // per-episode.
     const view = resolveAgentIdentityView(
-      { playerName: player.name, ratingPolicyLabel: null, activeChampionPolicyLabel: null },
+      {
+        playerName: player.name,
+        ratingPolicyLabel: null,
+        activeChampionPolicyLabel: null,
+      },
       identity.agents,
       identity.builders,
       identity.versions,
     );
     const provisional =
-      view.agent === null ? (provisionalIdentities.get(player.name) ?? null) : null;
+      view.agent === null
+        ? (provisionalIdentities.get(player.name) ?? null)
+        : null;
     return `
         <div class="combatant" role="listitem">
           <span class="dot" aria-hidden="true" style="background:${escapeHtml(player.color)}"></span>

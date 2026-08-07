@@ -4,7 +4,7 @@ import {
   APP_SHELL_ROOT_CLASSES,
   appShellFooter,
   appShellHeader,
-  waitForTranslationsReady,
+  requestUpdateWhenTranslationsReady,
 } from "./AppShellChrome";
 import {
   fetchReadModel,
@@ -92,7 +92,7 @@ export class BuildersDirectoryPage extends LitElement {
   connectedCallback(): void {
     super.connectedCallback();
     void this.load();
-    void waitForTranslationsReady().then(() => this.requestUpdate());
+    requestUpdateWhenTranslationsReady(this);
   }
 
   private async load(): Promise<void> {

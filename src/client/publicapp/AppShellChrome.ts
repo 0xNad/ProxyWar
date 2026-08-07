@@ -214,3 +214,30 @@ export async function waitForTranslationsReady(): Promise<void> {
     }
   }
 }
+
+/**
+ * Fire-and-forget-safe replacement for the
+ * `void waitForTranslationsReady().then(() => this.requestUpdate())`
+ * pattern every public page's `connectedCallback` used to repeat inline:
+ * `waitForTranslationsReady()`'s own bounded retry (up to 20 real 20ms
+ * ticks) can still be pending when the CALLING element is unmounted — a
+ * real browser routing away from the page, or (the failure actually seen
+ * live) an element torn down between test files while this promise chain
+ * was starved of CPU and only settled much later. Calling `requestUpdate()`
+ * on an already-disconnected element schedules a Lit update whose later
+ * `render()` pass has no guarantee `document` — or any of the element's
+ * own DOM — still exists. Guarding on `isConnected` here, once, fixes it
+ * for every caller instead of repeating the same latent bug at each call
+ * site (confirmed live: an intermittent "Unhandled Rejection:
+ * ReferenceError: document is not defined" from exactly this pattern —
+ * GH Actions run 31137636588, `AgentsDirectoryPage.test.ts`, ~53s after
+ * that file's own tests had already finished and passed).
+ */
+export function requestUpdateWhenTranslationsReady(element: {
+  isConnected: boolean;
+  requestUpdate: () => void;
+}): void {
+  void waitForTranslationsReady().then(() => {
+    if (element.isConnected) element.requestUpdate();
+  });
+}

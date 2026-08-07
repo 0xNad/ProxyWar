@@ -119,7 +119,6 @@ function minimalMatch(overrides: {
     watchHref: overrides.watchHref ?? null,
     fullRenderHref: overrides.fullRenderHref ?? null,
     premiereHref: null,
-    directorCut: null,
     dramaEvidence: null,
   };
 }
@@ -202,14 +201,20 @@ describe("agent-profile-page", () => {
               primaryColor: null,
               secondaryColor: null,
               provisionalSlug: "james-botts",
-              provisionalEmblemSvg: '<svg data-testid="provisional-emblem"></svg>',
+              provisionalEmblemSvg:
+                '<svg data-testid="provisional-emblem"></svg>',
               provisionalPrimaryColor: "#112233",
               provisionalSecondaryColor: "#445566",
               tagline: null,
               builderId: null,
               builderDisplayName: null,
               status: "unregistered",
-              standing: { rank: 16, score: 0.01, roundsPlayed: 908, isHouse: false },
+              standing: {
+                rank: 16,
+                score: 0.01,
+                roundsPlayed: 908,
+                isHouse: false,
+              },
               activeVersion: null,
               provenance: {
                 ratingPolicyLabel: "jamesboggs-warlord:v1",
@@ -229,7 +234,9 @@ describe("agent-profile-page", () => {
     expect(el.querySelector("h1")?.textContent).toContain("James Botts");
     // A generated provisional emblem renders, closing the "no emblem
     // anywhere" complaint.
-    expect(el.querySelector('[data-testid="provisional-emblem"]')).not.toBeNull();
+    expect(
+      el.querySelector('[data-testid="provisional-emblem"]'),
+    ).not.toBeNull();
     // Standing (rank/score/rounds) still renders for a provisional agent —
     // it is a real, currently-competing participant, not a placeholder.
     expect(el.textContent).toContain("#16");
@@ -470,9 +477,7 @@ describe("agent-profile-page", () => {
     const el = mount("unclaimed-agent");
     await flushMicrotasks();
     expect(el.textContent).toContain("agent_profile.claim_cta");
-    expect(
-      el.querySelector('a[href="/claim/unclaimed-agent"]'),
-    ).not.toBeNull();
+    expect(el.querySelector('a[href="/claim/unclaimed-agent"]')).not.toBeNull();
 
     document.body.innerHTML = "";
     vi.stubGlobal(
@@ -590,7 +595,12 @@ describe("agent-profile-page", () => {
         map: "Black Sea",
         roundNumber: 1130,
         participants: [
-          { agentSlug: "odin-free", displayName: "Odin", isAlive: true, isWinner: true },
+          {
+            agentSlug: "odin-free",
+            displayName: "Odin",
+            isAlive: true,
+            isWinner: true,
+          },
         ],
       }),
       minimalMatch({
@@ -599,7 +609,12 @@ describe("agent-profile-page", () => {
         map: "Black Sea",
         roundNumber: 1133,
         participants: [
-          { agentSlug: "odin-free", displayName: "Odin", isAlive: true, isWinner: true },
+          {
+            agentSlug: "odin-free",
+            displayName: "Odin",
+            isAlive: true,
+            isWinner: true,
+          },
         ],
       }),
     ];

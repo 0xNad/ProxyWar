@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { isFeaturedEventRevealed, isPubliclyPromotable } from "../../../../src/server/agents/season/EventPackageGate";
 import type { FeaturedMatch } from "../../../../src/server/agents/FeaturedMatch";
 import type { EventPackage } from "../../../../src/server/agents/season/EventPackage";
+import {
+  isFeaturedEventRevealed,
+  isPubliclyPromotable,
+} from "../../../../src/server/agents/season/EventPackageGate";
 
 const FEAT_ID = `feat_${"a".repeat(20)}`;
 
@@ -15,12 +18,26 @@ function baseMatch(overrides: Partial<FeaturedMatch> = {}): FeaturedMatch {
     title: "Auri vs Sefirot",
     description: "",
     participants: [
-      { playerName: "Auri", agentId: "agt_auri", agentVersionId: "agtv_auri_v43", builderId: null },
-      { playerName: "Sefirot", agentId: "agt_sefirot", agentVersionId: "agtv_sefirot_v10", builderId: null },
+      {
+        playerName: "Auri",
+        agentId: "agt_auri",
+        agentVersionId: "agtv_auri_v43",
+        builderId: null,
+      },
+      {
+        playerName: "Sefirot",
+        agentId: "agt_sefirot",
+        agentVersionId: "agtv_sefirot_v10",
+        builderId: null,
+      },
     ],
     map: "Pangaea",
     format: "2p duel",
-    provenance: { source: "premiere-queue", sourceRef: "20260801T000000Z-run1", capturedAt: "2026-08-01T00:00:00.000Z" },
+    provenance: {
+      source: "premiere-queue",
+      sourceRef: "20260801T000000Z-run1",
+      capturedAt: "2026-08-01T00:00:00.000Z",
+    },
     state: "published",
     category: null,
     scheduledAt: "2026-08-08T18:00:00.000Z",
@@ -53,13 +70,17 @@ function basePackage(overrides: Partial<EventPackage> = {}): EventPackage {
     subtitle: "Pangaea — 2p duel",
     reasonToWatch: {
       claims: [
-        { text: "Auri debuts v43.", source: "version_debut", reference: "version:agtv_auri_v43:firstObservedAt=2026-08-01T00:00:00.000Z" },
+        {
+          text: "Auri debuts v43.",
+          source: "version_debut",
+          reference:
+            "version:agtv_auri_v43:firstObservedAt=2026-08-01T00:00:00.000Z",
+        },
       ],
     },
     mapLabel: "Pangaea",
     format: "2p duel",
     scheduledAt: "2026-08-08T18:00:00.000Z",
-    directorCutEstimateSeconds: 480,
     canonicalMatchUrl: `/match/${FEAT_ID}`,
     canonicalPremiereUrl: "/premiere/abc123",
     embargoState: "embargoed",
@@ -72,16 +93,26 @@ function basePackage(overrides: Partial<EventPackage> = {}): EventPackage {
 
 describe("isFeaturedEventRevealed", () => {
   it("is always true for archive-lane matches", () => {
-    expect(isFeaturedEventRevealed(baseMatch({ lane: "archive", state: "published" }))).toBe(true);
+    expect(
+      isFeaturedEventRevealed(
+        baseMatch({ lane: "archive", state: "published" }),
+      ),
+    ).toBe(true);
   });
 
   it("is false for a published (not yet revealed) premiere-lane match", () => {
-    expect(isFeaturedEventRevealed(baseMatch({ state: "published" }))).toBe(false);
+    expect(isFeaturedEventRevealed(baseMatch({ state: "published" }))).toBe(
+      false,
+    );
   });
 
   it("is true once a premiere-lane match reaches revealed/archived", () => {
-    expect(isFeaturedEventRevealed(baseMatch({ state: "revealed" }))).toBe(true);
-    expect(isFeaturedEventRevealed(baseMatch({ state: "archived" }))).toBe(true);
+    expect(isFeaturedEventRevealed(baseMatch({ state: "revealed" }))).toBe(
+      true,
+    );
+    expect(isFeaturedEventRevealed(baseMatch({ state: "archived" }))).toBe(
+      true,
+    );
   });
 });
 
@@ -98,17 +129,24 @@ describe("isPubliclyPromotable", () => {
   });
 
   it("rejects a package generated for a different match", () => {
-    const result = isPubliclyPromotable(baseMatch(), basePackage({ featuredMatchId: `feat_${"b".repeat(20)}` }));
+    const result = isPubliclyPromotable(
+      baseMatch(),
+      basePackage({ featuredMatchId: `feat_${"b".repeat(20)}` }),
+    );
     expect(result.ok).toBe(false);
-    expect(result.missing).toContain("event_package_mismatched_featured_match_id");
+    expect(result.missing).toContain(
+      "event_package_mismatched_featured_match_id",
+    );
   });
 
   it("flags a premiere-lane record still in candidate/scheduled state — never promotable ahead of premiere:publish", () => {
     expect(
-      isPubliclyPromotable(baseMatch({ state: "candidate" }), basePackage()).missing,
+      isPubliclyPromotable(baseMatch({ state: "candidate" }), basePackage())
+        .missing,
     ).toContain("not_yet_published");
     expect(
-      isPubliclyPromotable(baseMatch({ state: "scheduled" }), basePackage()).missing,
+      isPubliclyPromotable(baseMatch({ state: "scheduled" }), basePackage())
+        .missing,
     ).toContain("not_yet_published");
   });
 
@@ -118,42 +156,74 @@ describe("isPubliclyPromotable", () => {
       state: "published",
       scheduledAt: null,
       queueItemName: null,
-      provenance: { source: "league-archive", sourceRef: "ereq_123", capturedAt: "2026-08-01T00:00:00.000Z" },
+      provenance: {
+        source: "league-archive",
+        sourceRef: "ereq_123",
+        capturedAt: "2026-08-01T00:00:00.000Z",
+      },
     });
-    const pkg = basePackage({ scheduledAt: null, canonicalPremiereUrl: null, embargoState: "revealed" });
-    expect(isPubliclyPromotable(match, pkg).missing).not.toContain("not_yet_published");
+    const pkg = basePackage({
+      scheduledAt: null,
+      canonicalPremiereUrl: null,
+      embargoState: "revealed",
+    });
+    expect(isPubliclyPromotable(match, pkg).missing).not.toContain(
+      "not_yet_published",
+    );
   });
 
   it("flags a missing title", () => {
-    const result = isPubliclyPromotable(baseMatch({ title: "" }), basePackage());
+    const result = isPubliclyPromotable(
+      baseMatch({ title: "" }),
+      basePackage(),
+    );
     expect(result.missing).toContain("title");
   });
 
   it("flags a missing subtitle", () => {
-    expect(isPubliclyPromotable(baseMatch(), basePackage({ subtitle: "" })).missing).toContain("subtitle");
+    expect(
+      isPubliclyPromotable(baseMatch(), basePackage({ subtitle: "" })).missing,
+    ).toContain("subtitle");
   });
 
   it("flags an empty reason-to-watch (no evidence claims)", () => {
     expect(
-      isPubliclyPromotable(baseMatch(), basePackage({ reasonToWatch: { claims: [] } })).missing,
+      isPubliclyPromotable(
+        baseMatch(),
+        basePackage({ reasonToWatch: { claims: [] } }),
+      ).missing,
     ).toContain("reason_to_watch");
   });
 
   it("flags a premiere-lane match with no canonical episode reference", () => {
     expect(
-      isPubliclyPromotable(baseMatch({ episodeRequestId: null }), basePackage()).missing,
+      isPubliclyPromotable(baseMatch({ episodeRequestId: null }), basePackage())
+        .missing,
     ).toContain("canonical_episode_reference");
   });
 
   it("flags zero participants", () => {
-    expect(isPubliclyPromotable(baseMatch({ participants: [] }), basePackage()).missing).toContain("participants");
+    expect(
+      isPubliclyPromotable(baseMatch({ participants: [] }), basePackage())
+        .missing,
+    ).toContain("participants");
   });
 
   it("flags an unresolved participant identity, naming the player", () => {
     const match = baseMatch({
       participants: [
-        { playerName: "Ghost", agentId: null, agentVersionId: null, builderId: null },
-        { playerName: "Sefirot", agentId: "agt_sefirot", agentVersionId: "agtv_sefirot_v10", builderId: null },
+        {
+          playerName: "Ghost",
+          agentId: null,
+          agentVersionId: null,
+          builderId: null,
+        },
+        {
+          playerName: "Sefirot",
+          agentId: "agt_sefirot",
+          agentVersionId: "agtv_sefirot_v10",
+          builderId: null,
+        },
       ],
     });
     const missing = isPubliclyPromotable(match, basePackage()).missing;
@@ -164,39 +234,56 @@ describe("isPubliclyPromotable", () => {
   it("flags an agent resolved but with no exact version", () => {
     const match = baseMatch({
       participants: [
-        { playerName: "Auri", agentId: "agt_auri", agentVersionId: null, builderId: null },
-        { playerName: "Sefirot", agentId: "agt_sefirot", agentVersionId: "agtv_sefirot_v10", builderId: null },
+        {
+          playerName: "Auri",
+          agentId: "agt_auri",
+          agentVersionId: null,
+          builderId: null,
+        },
+        {
+          playerName: "Sefirot",
+          agentId: "agt_sefirot",
+          agentVersionId: "agtv_sefirot_v10",
+          builderId: null,
+        },
       ],
     });
-    expect(isPubliclyPromotable(match, basePackage()).missing).toContain("participant_version_unresolved:Auri");
+    expect(isPubliclyPromotable(match, basePackage()).missing).toContain(
+      "participant_version_unresolved:Auri",
+    );
   });
 
   it("flags a missing map/format", () => {
-    expect(isPubliclyPromotable(baseMatch({ map: "" }), basePackage()).missing).toContain("map");
-    expect(isPubliclyPromotable(baseMatch({ format: "" }), basePackage()).missing).toContain("format");
+    expect(
+      isPubliclyPromotable(baseMatch({ map: "" }), basePackage()).missing,
+    ).toContain("map");
+    expect(
+      isPubliclyPromotable(baseMatch({ format: "" }), basePackage()).missing,
+    ).toContain("format");
   });
 
   it("flags a premiere-lane match with no scheduled time", () => {
     expect(
-      isPubliclyPromotable(baseMatch({ scheduledAt: null }), basePackage({ scheduledAt: null })).missing,
+      isPubliclyPromotable(
+        baseMatch({ scheduledAt: null }),
+        basePackage({ scheduledAt: null }),
+      ).missing,
     ).toContain("scheduled_time");
   });
 
-  it("flags a missing Director Cut estimate", () => {
-    expect(
-      isPubliclyPromotable(baseMatch(), basePackage({ directorCutEstimateSeconds: null })).missing,
-    ).toContain("director_cut_estimate");
-  });
-
   it("flags a missing canonical match URL", () => {
-    expect(isPubliclyPromotable(baseMatch(), basePackage({ canonicalMatchUrl: "" })).missing).toContain(
-      "canonical_match_url",
-    );
+    expect(
+      isPubliclyPromotable(baseMatch(), basePackage({ canonicalMatchUrl: "" }))
+        .missing,
+    ).toContain("canonical_match_url");
   });
 
   it("flags a premiere-lane match with no canonical premiere URL", () => {
     expect(
-      isPubliclyPromotable(baseMatch(), basePackage({ canonicalPremiereUrl: null })).missing,
+      isPubliclyPromotable(
+        baseMatch(),
+        basePackage({ canonicalPremiereUrl: null }),
+      ).missing,
     ).toContain("canonical_premiere_url");
   });
 
@@ -206,20 +293,36 @@ describe("isPubliclyPromotable", () => {
       state: "published",
       scheduledAt: null,
       queueItemName: null,
-      provenance: { source: "league-archive", sourceRef: "ereq_123", capturedAt: "2026-08-01T00:00:00.000Z" },
+      provenance: {
+        source: "league-archive",
+        sourceRef: "ereq_123",
+        capturedAt: "2026-08-01T00:00:00.000Z",
+      },
     });
-    const pkg = basePackage({ scheduledAt: null, canonicalPremiereUrl: null, embargoState: "revealed" });
-    expect(isPubliclyPromotable(match, pkg).missing).not.toContain("canonical_premiere_url");
+    const pkg = basePackage({
+      scheduledAt: null,
+      canonicalPremiereUrl: null,
+      embargoState: "revealed",
+    });
+    expect(isPubliclyPromotable(match, pkg).missing).not.toContain(
+      "canonical_premiere_url",
+    );
   });
 
   it("flags an inconsistent embargo state — revealed on the package but not actually revealed", () => {
     expect(
-      isPubliclyPromotable(baseMatch({ state: "published" }), basePackage({ embargoState: "revealed" })).missing,
+      isPubliclyPromotable(
+        baseMatch({ state: "published" }),
+        basePackage({ embargoState: "revealed" }),
+      ).missing,
     ).toContain("embargo_state_inconsistent");
   });
 
   it("accepts embargoState revealed once the match has actually revealed", () => {
-    const result = isPubliclyPromotable(baseMatch({ state: "revealed" }), basePackage({ embargoState: "revealed" }));
+    const result = isPubliclyPromotable(
+      baseMatch({ state: "revealed" }),
+      basePackage({ embargoState: "revealed" }),
+    );
     expect(result.missing).not.toContain("embargo_state_inconsistent");
   });
 });

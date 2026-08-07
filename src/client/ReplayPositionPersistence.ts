@@ -60,8 +60,8 @@ function saveReplayPosition(runId: string, turnNumber: number): void {
 /**
  * Subscribes to the SAME `ai-league-replay-frame` DOM `CustomEvent` every
  * other per-frame subsystem in this codebase already listens to
- * (`AiLeagueReplayOverlay.ts`, `DirectorCutController.ts`,
- * `ReplayClipControl.ts`) — never a bespoke timer/RAF loop. Saves at most
+ * (`AiLeagueReplayOverlay.ts`, `ReplayClipControl.ts`) — never a bespoke
+ * timer/RAF loop. Saves at most
  * once every `SAVE_INTERVAL_TURNS` turns. Returns a cleanup function; the
  * caller (`Main.ts`'s `handleJoinLobby`) is responsible for calling it
  * when the replay ends or the viewer leaves, same as every other
@@ -86,5 +86,6 @@ export function watchReplayPositionForResume(
     saveReplayPosition(runId, turnNumber);
   };
   documentRef.addEventListener("ai-league-replay-frame", onFrame);
-  return () => documentRef.removeEventListener("ai-league-replay-frame", onFrame);
+  return () =>
+    documentRef.removeEventListener("ai-league-replay-frame", onFrame);
 }

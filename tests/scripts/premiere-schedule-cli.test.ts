@@ -4,7 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { readFeaturedMatchStore } from "../../src/server/agents/FeaturedMatch";
-import { readEventPackageStore, findEventPackage } from "../../src/server/agents/season/EventPackage";
+import {
+  findEventPackage,
+  readEventPackageStore,
+} from "../../src/server/agents/season/EventPackage";
 
 /**
  * Real subprocess (`tsx`) end-to-end coverage of the four
@@ -44,7 +47,10 @@ function runCli(
         // see feature-candidates.test.ts's own doc on that trap). Pointed
         // at artifactsRoot so every test gets an ISOLATED registry rather
         // than silently falling back to the real resources/identity/.
-        env: { ...process.env, PROXYWAR_IDENTITY_REGISTRY_DIR: roots.artifactsRoot },
+        env: {
+          ...process.env,
+          PROXYWAR_IDENTITY_REGISTRY_DIR: roots.artifactsRoot,
+        },
       },
     );
     return { code: 0, stdout, stderr: "" };
@@ -133,9 +139,21 @@ async function writeQueueItem(
 
 /** Minimal empty tracked-identity-shaped registry — same convention `premiere-package.test.ts` established, so `loadIdentityRegistrySnapshot` succeeds against an isolated throwaway directory rather than the real repo one. */
 async function writeEmptyIdentityRegistry(dir: string): Promise<void> {
-  await writeFile(path.join(dir, "builders.json"), JSON.stringify({ schemaVersion: 1, builders: [] }), "utf8");
-  await writeFile(path.join(dir, "agents.json"), JSON.stringify({ schemaVersion: 1, agents: [] }), "utf8");
-  await writeFile(path.join(dir, "versions.json"), JSON.stringify({ schemaVersion: 1, versions: [] }), "utf8");
+  await writeFile(
+    path.join(dir, "builders.json"),
+    JSON.stringify({ schemaVersion: 1, builders: [] }),
+    "utf8",
+  );
+  await writeFile(
+    path.join(dir, "agents.json"),
+    JSON.stringify({ schemaVersion: 1, agents: [] }),
+    "utf8",
+  );
+  await writeFile(
+    path.join(dir, "versions.json"),
+    JSON.stringify({ schemaVersion: 1, versions: [] }),
+    "utf8",
+  );
 }
 
 describe("premiere schedule CLIs — real subprocess end to end", () => {
@@ -175,10 +193,9 @@ describe("premiere schedule CLIs — real subprocess end to end", () => {
     expect(scheduled.scheduledAt).toBe(at);
     // The bug this session fixed: participants used to be permanently [].
     expect(scheduled.participants).toHaveLength(2);
-    expect(scheduled.participants.map((p: { playerName: string }) => p.playerName)).toEqual([
-      "PlayerA",
-      "PlayerB",
-    ]);
+    expect(
+      scheduled.participants.map((p: { playerName: string }) => p.playerName),
+    ).toEqual(["PlayerA", "PlayerB"]);
 
     const store1 = await readFeaturedMatchStore(stateRoot);
     expect(store1.matches).toHaveLength(1);
@@ -210,21 +227,31 @@ describe("premiere schedule CLIs — real subprocess end to end", () => {
   }, 30000);
 
   it("refuses to schedule an already-published episode with the named rejection reason", async () => {
-    await mkdir(path.join(artifactsRoot, "ai-league-runs", "league"), { recursive: true });
+    await mkdir(path.join(artifactsRoot, "ai-league-runs", "league"), {
+      recursive: true,
+    });
     await writeFile(
       path.join(artifactsRoot, "ai-league-runs", "league", "data.json"),
       JSON.stringify({ episodes: [{ episodeRequestId: "ereq_runA" }] }),
       "utf8",
     );
     const at = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-    const result = runCli("premiere-schedule.ts", [`--episode=ereq_runA`, `--at=${at}`], roots());
+    const result = runCli(
+      "premiere-schedule.ts",
+      [`--episode=ereq_runA`, `--at=${at}`],
+      roots(),
+    );
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("already_published_on_league");
   }, 30000);
 
   it("refuses to schedule a past-dated time", async () => {
     const at = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-    const result = runCli("premiere-schedule.ts", [`--episode=ereq_runA`, `--at=${at}`], roots());
+    const result = runCli(
+      "premiere-schedule.ts",
+      [`--episode=ereq_runA`, `--at=${at}`],
+      roots(),
+    );
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("scheduled_at_in_past");
   }, 30000);
@@ -232,11 +259,19 @@ describe("premiere schedule CLIs — real subprocess end to end", () => {
   it("refuses to schedule two premieres too close together", async () => {
     await writeQueueItem(queueRoot, "runB");
     const at1 = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-    const r1 = runCli("premiere-schedule.ts", [`--episode=ereq_runA`, `--at=${at1}`], roots());
+    const r1 = runCli(
+      "premiere-schedule.ts",
+      [`--episode=ereq_runA`, `--at=${at1}`],
+      roots(),
+    );
     expect(r1.code).toBe(0);
 
     const at2 = new Date(Date.parse(at1) + 5 * 60 * 1000).toISOString(); // 5 minutes later
-    const r2 = runCli("premiere-schedule.ts", [`--episode=ereq_runB`, `--at=${at2}`], roots());
+    const r2 = runCli(
+      "premiere-schedule.ts",
+      [`--episode=ereq_runB`, `--at=${at2}`],
+      roots(),
+    );
     expect(r2.code).toBe(1);
     expect(r2.stderr).toContain("schedule_collision");
   }, 30000);
@@ -251,7 +286,10 @@ describe("premiere schedule CLIs — real subprocess end to end", () => {
     expect(scheduleResult.code).toBe(0);
 
     // Simulate cycle-premiere.sh consuming the queue item out from under the schedule.
-    await rm(path.join(queueRoot, "ready", "runA"), { recursive: true, force: true });
+    await rm(path.join(queueRoot, "ready", "runA"), {
+      recursive: true,
+      force: true,
+    });
 
     const validateResult = runCli("premiere-validate.ts", ["--json"], roots());
     expect(validateResult.code).toBe(1);
@@ -261,13 +299,21 @@ describe("premiere schedule CLIs — real subprocess end to end", () => {
   }, 30000);
 
   it("premiere:cancel refuses to cancel a record that was never scheduled", async () => {
-    const result = runCli("premiere-cancel.ts", ["--episode=nonexistent"], roots());
+    const result = runCli(
+      "premiere-cancel.ts",
+      ["--episode=nonexistent"],
+      roots(),
+    );
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("not found");
   }, 30000);
 
   it("premiere:publish refuses to publish before scheduling", async () => {
-    const result = runCli("premiere-publish.ts", ["--episode=ereq_runA"], roots());
+    const result = runCli(
+      "premiere-publish.ts",
+      ["--episode=ereq_runA"],
+      roots(),
+    );
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("not found");
   }, 30000);
@@ -291,19 +337,27 @@ describe("premiere-schedule -> premiere-package: the sealed-lane participants ga
 
   beforeEach(async () => {
     queueRoot = await mkdtemp(path.join(os.tmpdir(), "pw-gatefix-queue-"));
-    artifactsRoot = await mkdtemp(path.join(os.tmpdir(), "pw-gatefix-artifacts-"));
+    artifactsRoot = await mkdtemp(
+      path.join(os.tmpdir(), "pw-gatefix-artifacts-"),
+    );
     stateRoot = await mkdtemp(path.join(os.tmpdir(), "pw-gatefix-state-"));
   });
 
   afterEach(async () => {
     await Promise.all(
-      [queueRoot, artifactsRoot, stateRoot].map((dir) => rm(dir, { recursive: true, force: true })),
+      [queueRoot, artifactsRoot, stateRoot].map((dir) =>
+        rm(dir, { recursive: true, force: true }),
+      ),
     );
   });
 
   const roots = () => ({ queueRoot, artifactsRoot, stateRoot });
 
-  function runPackageCli(args: string[]): { code: number; stdout: string; stderr: string } {
+  function runPackageCli(args: string[]): {
+    code: number;
+    stdout: string;
+    stderr: string;
+  } {
     try {
       const stdout = execFileSync(
         "npx",
@@ -351,11 +405,18 @@ describe("premiere-schedule -> premiere-package: the sealed-lane participants ga
             builderId: null,
             tagline: null,
             description: null,
-            emblem: { style: "geometric-svg-v1", seed: "agt_auri", assetPath: "resources/identity/emblems/agt_auri.svg" },
+            emblem: {
+              style: "geometric-svg-v1",
+              seed: "agt_auri",
+              assetPath: "resources/identity/emblems/agt_auri.svg",
+            },
             primaryColor: "#112233",
             secondaryColor: "#445566",
             debutDate: null,
-            policyMatchRule: { playerName: "Auri", policyFamily: "auri-intent" },
+            policyMatchRule: {
+              playerName: "Auri",
+              policyFamily: "auri-intent",
+            },
             status: "unclaimed",
             publicStrategyDescription: null,
           },
@@ -367,11 +428,18 @@ describe("premiere-schedule -> premiere-package: the sealed-lane participants ga
             builderId: null,
             tagline: null,
             description: null,
-            emblem: { style: "geometric-svg-v1", seed: "agt_sefirot", assetPath: "resources/identity/emblems/agt_sefirot.svg" },
+            emblem: {
+              style: "geometric-svg-v1",
+              seed: "agt_sefirot",
+              assetPath: "resources/identity/emblems/agt_sefirot.svg",
+            },
             primaryColor: "#667788",
             secondaryColor: "#99aabb",
             debutDate: null,
-            policyMatchRule: { playerName: "Sefirot", policyFamily: "sefirot-intent" },
+            policyMatchRule: {
+              playerName: "Sefirot",
+              policyFamily: "sefirot-intent",
+            },
             status: "unclaimed",
             publicStrategyDescription: null,
           },
@@ -426,7 +494,7 @@ describe("premiere-schedule -> premiere-package: the sealed-lane participants ga
     );
   }
 
-  async function writeMirrorWithDirectorCut(episodeRequestId: string): Promise<void> {
+  async function writeMirrorEpisode(episodeRequestId: string): Promise<void> {
     const siteDir = path.join(artifactsRoot, "ai-league-runs", "league");
     await mkdir(siteDir, { recursive: true });
     await writeFile(
@@ -463,10 +531,12 @@ describe("premiere-schedule -> premiere-package: the sealed-lane participants ga
             players: [],
             watchHref: null,
             fullRenderHref: null,
-            directorCut: { durationEstimateSeconds: 480, segmentCount: 6 },
           },
         ],
-        links: { enterTheLeagueUrl: "https://example.test", platformLabel: "Coworld" },
+        links: {
+          enterTheLeagueUrl: "https://example.test",
+          platformLabel: "Coworld",
+        },
       }),
       "utf8",
     );
@@ -476,10 +546,19 @@ describe("premiere-schedule -> premiere-package: the sealed-lane participants ga
     const now = new Date();
     await writeEmptyIdentityRegistry(artifactsRoot); // overwritten below with real data
     await writeRealIdentity(now);
-    await writeQueueItem(queueRoot, "runGate", { experienceRequestId: "ereq_runGate" }, [
-      { seatId: "c1", displayName: "Auri", policyName: "auri-intent:v43" },
-      { seatId: "c2", displayName: "Sefirot", policyName: "sefirot-intent:v10" },
-    ]);
+    await writeQueueItem(
+      queueRoot,
+      "runGate",
+      { experienceRequestId: "ereq_runGate" },
+      [
+        { seatId: "c1", displayName: "Auri", policyName: "auri-intent:v43" },
+        {
+          seatId: "c2",
+          displayName: "Sefirot",
+          policyName: "sefirot-intent:v10",
+        },
+      ],
+    );
 
     const at = new Date(Date.now() + 60 * 60 * 1000).toISOString();
     const scheduleResult = runCli(
@@ -490,8 +569,18 @@ describe("premiere-schedule -> premiere-package: the sealed-lane participants ga
     expect(scheduleResult.code).toBe(0);
     const scheduled = JSON.parse(scheduleResult.stdout).scheduled;
     expect(scheduled.participants).toEqual([
-      { playerName: "Auri", agentId: "agt_auri", agentVersionId: "agtv_auri_v43", builderId: null },
-      { playerName: "Sefirot", agentId: "agt_sefirot", agentVersionId: "agtv_sefirot_v10", builderId: null },
+      {
+        playerName: "Auri",
+        agentId: "agt_auri",
+        agentVersionId: "agtv_auri_v43",
+        builderId: null,
+      },
+      {
+        playerName: "Sefirot",
+        agentId: "agt_sefirot",
+        agentVersionId: "agtv_sefirot_v10",
+        builderId: null,
+      },
     ]);
 
     // Seeded AFTER scheduling, deliberately: `premiere:schedule`'s own
@@ -499,16 +588,16 @@ describe("premiere-schedule -> premiere-package: the sealed-lane participants ga
     // episodeRequestId already appears in the live mirror
     // (`already_published_on_league` — a sealed premiere and an
     // already-public mirror episode are mutually exclusive by
-    // definition). `premiere:package`'s Director Cut estimate lookup is
-    // a separate, later read of that same mirror with no such
-    // exclusivity check — this ordering isolates "does the full
+    // definition). `premiere:package`'s reason-to-watch lookup is a
+    // separate, later read of that same mirror with no such exclusivity
+    // check — this ordering isolates "does the full
     // package/validate/publish chain accept an already-resolved lineup"
-    // without depending on how/when a Director Cut estimate becomes
-    // available for a still-embargoed premiere (a real, separate gap —
+    // without depending on how/when mirror evidence becomes available
+    // for a still-embargoed premiere (a real, separate gap —
     // decisions.jsonl is deleted at seal time, same limitation this
     // module's own drama/story evidence notes already document — out of
     // this fix's scope, which is participants only).
-    await writeMirrorWithDirectorCut("ereq_runGate");
+    await writeMirrorEpisode("ereq_runGate");
 
     // premiere:publish also re-validates the participants guard directly
     // (defense in depth) — must succeed given a real lineup.
@@ -531,7 +620,10 @@ describe("premiere-schedule -> premiere-package: the sealed-lane participants ga
     const validateResult = runCli("premiere-validate.ts", ["--json"], roots());
     expect(validateResult.code).toBe(0);
 
-    const validateOnlyResult = runPackageCli([`--featured=${scheduled.matchId}`, "--validate"]);
+    const validateOnlyResult = runPackageCli([
+      `--featured=${scheduled.matchId}`,
+      "--validate",
+    ]);
     expect(validateOnlyResult.code).toBe(0);
     expect(validateOnlyResult.stdout).toContain("isPubliclyPromotable: true");
 
@@ -548,8 +640,9 @@ describe("premiere-schedule -> premiere-package: the sealed-lane participants ga
     expect(savedPackage).not.toBeNull();
     expect(savedPackage!.reasonToWatch.claims.length).toBeGreaterThan(0);
     expect(savedPackage!.reasonToWatch.claims[0]!.source).toBe("version_debut");
-    expect(savedPackage!.reasonToWatch.claims[0]!.reference).toContain("agtv_auri_v43");
-    expect(savedPackage!.directorCutEstimateSeconds).toBe(480);
+    expect(savedPackage!.reasonToWatch.claims[0]!.reference).toContain(
+      "agtv_auri_v43",
+    );
   }, 30000);
 
   it("hard-fails at schedule time when the sealed bundle carries no resolvable lineup, never silently producing another unpromotable record", async () => {
@@ -567,7 +660,9 @@ describe("premiere-schedule -> premiere-package: the sealed-lane participants ga
       roots(),
     );
     expect(result.code).not.toBe(0);
-    expect(result.stderr).toContain("participant identity could not be resolved");
+    expect(result.stderr).toContain(
+      "participant identity could not be resolved",
+    );
 
     const store = await readFeaturedMatchStore(stateRoot);
     expect(store.matches).toHaveLength(0);
@@ -586,7 +681,11 @@ describe("premiere-schedule -> premiere-package: the sealed-lane participants ga
       participants: [],
       map: "world",
       format: "2p duel",
-      provenance: { source: "premiere-queue" as const, sourceRef: "20260801T000000Z-broken", capturedAt: new Date().toISOString() },
+      provenance: {
+        source: "premiere-queue" as const,
+        sourceRef: "20260801T000000Z-broken",
+        capturedAt: new Date().toISOString(),
+      },
       state: "scheduled" as const,
       category: null,
       scheduledAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
@@ -613,7 +712,11 @@ describe("premiere-schedule -> premiere-package: the sealed-lane participants ga
       JSON.stringify({ schemaVersion: 1, matches: [broken] }),
       "utf8",
     );
-    const result = runCli("premiere-publish.ts", [`--episode=${broken.matchId}`], roots());
+    const result = runCli(
+      "premiere-publish.ts",
+      [`--episode=${broken.matchId}`],
+      roots(),
+    );
     expect(result.code).not.toBe(0);
     expect(result.stderr).toContain("zero participants");
   }, 30000);

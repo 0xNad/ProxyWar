@@ -1,9 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
-const { trackMock } = vi.hoisted(() => ({ trackMock: vi.fn() }));
-vi.mock("../../src/client/analytics/AnalyticsClient", () => ({
-  analytics: { track: trackMock, trackVisitStart: vi.fn() },
-}));
 import {
   activeWarPairCount,
   deriveMatchStateStripFields,
@@ -12,11 +7,16 @@ import {
 } from "../../src/client/AiLeagueReplayOverlay";
 import { BROADCAST_RAIL_LOCATE_EVENT } from "../../src/client/graphics/CompetitorLocateBridge";
 import type { PublicAgent } from "../../src/client/publicapp/ReadModelSchema";
-import { UserSettings } from "../../src/core/game/UserSettings";
 import {
   initialReplayClipRenderableThroughTurn,
   replayClipPreviewTarget,
 } from "../../src/client/ReplayClipControl";
+import { UserSettings } from "../../src/core/game/UserSettings";
+
+const { trackMock } = vi.hoisted(() => ({ trackMock: vi.fn() }));
+vi.mock("../../src/client/analytics/AnalyticsClient", () => ({
+  analytics: { track: trackMock, trackVisitStart: vi.fn() },
+}));
 
 describe("AiLeagueReplayOverlay", () => {
   beforeEach(() => {
@@ -557,9 +557,7 @@ describe("AiLeagueReplayOverlay", () => {
         .querySelector<HTMLButtonElement>("[data-ai-league-reset-layout]")
         ?.click();
 
-      expect(assignedHref).toBe(
-        "/ai-league-replay/reset-restarts-ended",
-      );
+      expect(assignedHref).toBe("/ai-league-replay/reset-restarts-ended");
     } finally {
       Object.defineProperty(window, "location", {
         value: originalLocation,
@@ -637,8 +635,8 @@ describe("AiLeagueReplayOverlay", () => {
       decisions: [],
     });
     const css =
-      document.querySelector("#ai-league-replay-overlay style")
-        ?.textContent ?? "";
+      document.querySelector("#ai-league-replay-overlay style")?.textContent ??
+      "";
     const landscapeBlockStart = css.indexOf(
       "@media (max-height: 430px) and (orientation: landscape)",
     );
@@ -646,10 +644,7 @@ describe("AiLeagueReplayOverlay", () => {
     // Bound the search to this block only — the desktop stylesheet has
     // its own unrelated `.ai-league-standings`/`[data-ai-league-broadcast-
     // drawer]` rules earlier that must NOT satisfy this assertion.
-    const landscapeBlockEnd = css.indexOf(
-      "</style>",
-      landscapeBlockStart,
-    );
+    const landscapeBlockEnd = css.indexOf("</style>", landscapeBlockStart);
     const landscapeBlock = css.slice(landscapeBlockStart, landscapeBlockEnd);
 
     const bodyRuleStart = landscapeBlock.indexOf(".ai-league-body {");
@@ -671,9 +666,7 @@ describe("AiLeagueReplayOverlay", () => {
     );
     expect(drawerOrder).toContain("order: 1");
 
-    const standingsRuleStart = landscapeBlock.indexOf(
-      ".ai-league-standings {",
-    );
+    const standingsRuleStart = landscapeBlock.indexOf(".ai-league-standings {");
     expect(standingsRuleStart).toBeGreaterThan(drawerRuleStart);
     const standingsOrder = landscapeBlock.slice(
       standingsRuleStart,
@@ -745,13 +738,16 @@ describe("AiLeagueReplayOverlay", () => {
       artifactBasePath: "/ai-league-runs/x",
       decisions: [],
     });
-    const style = document.querySelector("#ai-league-replay-overlay style")
-      ?.textContent;
+    const style = document.querySelector(
+      "#ai-league-replay-overlay style",
+    )?.textContent;
     expect(style).toContain("grid-template-columns: minmax(0, 1fr)");
     // The shrinkable title block and the fixed action cluster are what make
     // the pinned column actually resolve to a usable header.
     expect(style).toMatch(/\.ai-league-header-actions \{[^}]*flex: 0 0 auto/);
-    expect(style).toMatch(/#ai-league-replay-overlay header \{[^}]*min-width: 0/);
+    expect(style).toMatch(
+      /#ai-league-replay-overlay header \{[^}]*min-width: 0/,
+    );
   });
 
   it("sizes the Analyst chart count column to its content instead of clipping a 3+ digit tally mid-digit (P2 pass-1 p1-05/p1-06, 2026-08-02)", () => {
@@ -760,8 +756,9 @@ describe("AiLeagueReplayOverlay", () => {
       artifactBasePath: "/ai-league-runs/x",
       decisions: [],
     });
-    const style = document.querySelector("#ai-league-replay-overlay style")
-      ?.textContent;
+    const style = document.querySelector(
+      "#ai-league-replay-overlay style",
+    )?.textContent;
     expect(style).toMatch(
       /\.broadcast-analyst-chart-row \{[^}]*grid-template-columns: 90px 1fr auto/,
     );
@@ -796,8 +793,9 @@ describe("AiLeagueReplayOverlay", () => {
       decisions: [],
     });
 
-    const setup = document.querySelector("[data-ai-league-subtitle]")
-      ?.textContent;
+    const setup = document.querySelector(
+      "[data-ai-league-subtitle]",
+    )?.textContent;
     expect(setup).toContain("ai_league_replay.setup_agents_only");
     expect(setup).not.toContain("setup_agents_vs_builtin");
     expect(setup).not.toContain("Easy");
@@ -1758,7 +1756,7 @@ describe("AiLeagueReplayOverlay", () => {
                 playerName: "Atlas",
                 displayName: "Atlas Prime",
                 slug: "atlas-prime",
-                emblemSvg: "<svg data-testid=\"atlas-emblem\"></svg>",
+                emblemSvg: '<svg data-testid="atlas-emblem"></svg>',
                 versionLabel: "v2.3",
                 builderDisplayName: "Builder Bob",
               }),
@@ -1831,11 +1829,19 @@ describe("AiLeagueReplayOverlay", () => {
         });
 
         frame(600, [
-          { playerID: "p1", smallID: 1, username: "Atlas", tilesOwned: 60, targets: [2] },
+          {
+            playerID: "p1",
+            smallID: 1,
+            username: "Atlas",
+            tilesOwned: 60,
+            targets: [2],
+          },
           { playerID: "p2", smallID: 2, username: "Blitz", tilesOwned: 40 },
         ]);
 
-        const rail = document.querySelector("[data-ai-league-broadcast-drawer]");
+        const rail = document.querySelector(
+          "[data-ai-league-broadcast-drawer]",
+        );
         expect(rail?.querySelectorAll(".broadcast-rail-entry")).toHaveLength(3);
 
         // Ghost never appears in a frame (eliminated before this replay's
@@ -1880,9 +1886,9 @@ describe("AiLeagueReplayOverlay", () => {
         const atlasEntry = [
           ...document.querySelectorAll(".broadcast-rail-entry"),
         ].find((entry) => entry.textContent?.includes("Atlas Prime"));
-        expect(atlasEntry?.querySelector(".broadcast-rail-version")?.textContent).toBe(
-          "v2.3",
-        );
+        expect(
+          atlasEntry?.querySelector(".broadcast-rail-version")?.textContent,
+        ).toBe("v2.3");
         expect(
           atlasEntry?.querySelector(".broadcast-rail-emblem")?.innerHTML,
         ).toContain("atlas-emblem");
@@ -1974,7 +1980,7 @@ describe("AiLeagueReplayOverlay", () => {
         // `container.innerHTML = rowsHtml` / `rail.replaceWith(nextRail)`
         // on the whole scrolled container, resetting `scrollTop` to 0 —
         // "some parts of the panel ... teleport me back when I try to
-        // scroll in director cut".
+        // scroll mid-playback".
         frame(501, [
           { playerID: "p1", smallID: 1, username: "Atlas", tilesOwned: 60 },
           { playerID: "p2", smallID: 2, username: "Blitz", tilesOwned: 55 },
@@ -2057,13 +2063,63 @@ describe("AiLeagueReplayOverlay", () => {
           agents: [],
           relationships: [],
           events: [
-            event(1, 50, "alliance_formed", "pact", "a1", "Atlas", "a3", "Civic", "Atlas and Civic form an alliance."),
-            event(2, 100, "attack", "war", "a2", "Blitz", "a1", "Atlas", "Blitz attacks Atlas."),
+            event(
+              1,
+              50,
+              "alliance_formed",
+              "pact",
+              "a1",
+              "Atlas",
+              "a3",
+              "Civic",
+              "Atlas and Civic form an alliance.",
+            ),
+            event(
+              2,
+              100,
+              "attack",
+              "war",
+              "a2",
+              "Blitz",
+              "a1",
+              "Atlas",
+              "Blitz attacks Atlas.",
+            ),
             // Same ordered pair attacking again must NOT curate a second
             // first_strike — only the first attack between a pair counts.
-            event(3, 150, "attack", "war", "a2", "Blitz", "a1", "Atlas", "Blitz attacks Atlas again."),
-            event(4, 200, "alliance_break", "betrayal", "a3", "Civic", "a1", "Atlas", "Civic breaks the pact."),
-            event(5, 999, "elimination", "war", "a2", "Blitz", null, null, "Blitz is eliminated."),
+            event(
+              3,
+              150,
+              "attack",
+              "war",
+              "a2",
+              "Blitz",
+              "a1",
+              "Atlas",
+              "Blitz attacks Atlas again.",
+            ),
+            event(
+              4,
+              200,
+              "alliance_break",
+              "betrayal",
+              "a3",
+              "Civic",
+              "a1",
+              "Atlas",
+              "Civic breaks the pact.",
+            ),
+            event(
+              5,
+              999,
+              "elimination",
+              "war",
+              "a2",
+              "Blitz",
+              null,
+              null,
+              "Blitz is eliminated.",
+            ),
           ],
           communicationThreads: [],
           timelineBuckets: [],
@@ -2082,7 +2138,9 @@ describe("AiLeagueReplayOverlay", () => {
       expect(
         warRoom?.querySelector('[data-kind="elimination"]'),
       ).not.toBeNull();
-      const planChangeItem = warRoom?.querySelector('[data-kind="plan_change"]');
+      const planChangeItem = warRoom?.querySelector(
+        '[data-kind="plan_change"]',
+      );
       expect(planChangeItem).not.toBeNull();
 
       // Expand the plan-change row and confirm the raw planRationale text
@@ -2092,8 +2150,7 @@ describe("AiLeagueReplayOverlay", () => {
         ?.querySelector<HTMLButtonElement>(".broadcast-war-room-summary")
         ?.click();
       expect(
-        planChangeItem?.querySelector(".broadcast-war-room-extra")
-          ?.textContent,
+        planChangeItem?.querySelector(".broadcast-war-room-extra")?.textContent,
       ).toBe("Blitz is massing troops nearby.");
       expect(
         planChangeItem?.querySelector(".broadcast-war-room-detail")
@@ -2129,13 +2186,63 @@ describe("AiLeagueReplayOverlay", () => {
             // against Atlas (a1) is tier 2 ("notable") even though the
             // strike's own importance (70, set by the `event()` fixture
             // helper) carries no magnitude signal on its own.
-            event(1, 50, "attack", "war", "a2", "Blitz", "a1", "Atlas", "Blitz attacks Atlas."),
+            event(
+              1,
+              50,
+              "attack",
+              "war",
+              "a2",
+              "Blitz",
+              "a1",
+              "Atlas",
+              "Blitz attacks Atlas.",
+            ),
             // Neither Rook (a5) nor Pawn (a6) ever appears in another
             // event -- their one skirmish never becomes consequential.
-            event(2, 60, "attack", "war", "a5", "Rook", "a6", "Pawn", "Rook attacks Pawn."),
-            event(3, 100, "alliance_formed", "pact", "a3", "Civic", "a4", "Diplo", "Civic and Diplo form an alliance."),
-            event(4, 150, "alliance_break", "betrayal", "a3", "Civic", "a4", "Diplo", "Civic breaks the pact."),
-            event(5, 999, "elimination", "war", "a2", "Blitz", null, null, "Blitz is eliminated."),
+            event(
+              2,
+              60,
+              "attack",
+              "war",
+              "a5",
+              "Rook",
+              "a6",
+              "Pawn",
+              "Rook attacks Pawn.",
+            ),
+            event(
+              3,
+              100,
+              "alliance_formed",
+              "pact",
+              "a3",
+              "Civic",
+              "a4",
+              "Diplo",
+              "Civic and Diplo form an alliance.",
+            ),
+            event(
+              4,
+              150,
+              "alliance_break",
+              "betrayal",
+              "a3",
+              "Civic",
+              "a4",
+              "Diplo",
+              "Civic breaks the pact.",
+            ),
+            event(
+              5,
+              999,
+              "elimination",
+              "war",
+              "a2",
+              "Blitz",
+              null,
+              null,
+              "Blitz is eliminated.",
+            ),
           ],
           communicationThreads: [],
           timelineBuckets: [],
@@ -2189,12 +2296,52 @@ describe("AiLeagueReplayOverlay", () => {
             // Three distinct pairs, none of which ever appears in an
             // alliance/betrayal/elimination -- all three land as
             // consecutive tier-3 rows and must collapse into one group.
-            event(1, 100, "attack", "war", "r1", "Rook1", "p1", "Pawn1", "Rook1 attacks Pawn1."),
-            event(2, 110, "attack", "war", "r2", "Rook2", "p2", "Pawn2", "Rook2 attacks Pawn2."),
-            event(3, 120, "attack", "war", "r3", "Rook3", "p3", "Pawn3", "Rook3 attacks Pawn3."),
+            event(
+              1,
+              100,
+              "attack",
+              "war",
+              "r1",
+              "Rook1",
+              "p1",
+              "Pawn1",
+              "Rook1 attacks Pawn1.",
+            ),
+            event(
+              2,
+              110,
+              "attack",
+              "war",
+              "r2",
+              "Rook2",
+              "p2",
+              "Pawn2",
+              "Rook2 attacks Pawn2.",
+            ),
+            event(
+              3,
+              120,
+              "attack",
+              "war",
+              "r3",
+              "Rook3",
+              "p3",
+              "Pawn3",
+              "Rook3 attacks Pawn3.",
+            ),
             // A real elimination afterward stays its own, ungrouped tier-1
             // row -- grouping never crosses a tier-1/2 boundary.
-            event(4, 200, "elimination", "war", "e1", "Eliminated One", null, null, "Eliminated One is eliminated."),
+            event(
+              4,
+              200,
+              "elimination",
+              "war",
+              "e1",
+              "Eliminated One",
+              null,
+              null,
+              "Eliminated One is eliminated.",
+            ),
           ],
           communicationThreads: [],
           timelineBuckets: [],
@@ -2221,8 +2368,9 @@ describe("AiLeagueReplayOverlay", () => {
       groupRow
         ?.querySelector<HTMLButtonElement>(".broadcast-war-room-summary")
         ?.click();
-      const extra = groupRow?.querySelector(".broadcast-war-room-extra")
-        ?.textContent;
+      const extra = groupRow?.querySelector(
+        ".broadcast-war-room-extra",
+      )?.textContent;
       expect(extra?.split("\n")).toHaveLength(3);
 
       // The elimination is untouched -- a real tier-1 event never gets
@@ -2275,12 +2423,72 @@ describe("AiLeagueReplayOverlay", () => {
           agents: [],
           relationships: [],
           events: [
-            event(1, 5, "spawn", "info", "a1", "Atlas", null, null, "Atlas enters the match."),
-            event(2, 50, "alliance_formed", "pact", "a1", "Atlas", "a3", "Civic", "Atlas and Civic form an alliance."),
-            event(3, 100, "attack", "war", "a2", "Blitz", "a1", "Atlas", "Blitz attacks Atlas."),
-            event(4, 200, "alliance_break", "betrayal", "a3", "Civic", "a1", "Atlas", "Civic breaks the pact."),
-            event(5, 300, "nuke", "threat", "a2", "Blitz", "a3", "Civic", "Blitz escalates nuclear pressure against Civic."),
-            event(6, 999, "elimination", "war", "a2", "Blitz", null, null, "Blitz is eliminated."),
+            event(
+              1,
+              5,
+              "spawn",
+              "info",
+              "a1",
+              "Atlas",
+              null,
+              null,
+              "Atlas enters the match.",
+            ),
+            event(
+              2,
+              50,
+              "alliance_formed",
+              "pact",
+              "a1",
+              "Atlas",
+              "a3",
+              "Civic",
+              "Atlas and Civic form an alliance.",
+            ),
+            event(
+              3,
+              100,
+              "attack",
+              "war",
+              "a2",
+              "Blitz",
+              "a1",
+              "Atlas",
+              "Blitz attacks Atlas.",
+            ),
+            event(
+              4,
+              200,
+              "alliance_break",
+              "betrayal",
+              "a3",
+              "Civic",
+              "a1",
+              "Atlas",
+              "Civic breaks the pact.",
+            ),
+            event(
+              5,
+              300,
+              "nuke",
+              "threat",
+              "a2",
+              "Blitz",
+              "a3",
+              "Civic",
+              "Blitz escalates nuclear pressure against Civic.",
+            ),
+            event(
+              6,
+              999,
+              "elimination",
+              "war",
+              "a2",
+              "Blitz",
+              null,
+              null,
+              "Blitz is eliminated.",
+            ),
           ],
           communicationThreads: [],
           timelineBuckets: [],
@@ -2289,7 +2497,8 @@ describe("AiLeagueReplayOverlay", () => {
 
       const timeline = document.querySelector(".broadcast-timeline");
       expect(timeline).not.toBeNull();
-      const markers = timeline?.querySelectorAll(".broadcast-timeline-marker") ?? [];
+      const markers =
+        timeline?.querySelectorAll(".broadcast-timeline-marker") ?? [];
       // spawn, alliance, first_strike, betrayal, nuke, elimination, finish.
       expect(markers).toHaveLength(7);
       for (const kind of [
@@ -2311,7 +2520,9 @@ describe("AiLeagueReplayOverlay", () => {
       expect(timeline?.querySelector('[data-kind="lead_change"]')).toBeNull();
       // Full Replay is unrestricted — every marker stays clickable.
       expect(
-        [...markers].every((marker) => marker.getAttribute("data-seekable") === "true"),
+        [...markers].every(
+          (marker) => marker.getAttribute("data-seekable") === "true",
+        ),
       ).toBe(true);
 
       const finishMarker = timeline?.querySelector<HTMLButtonElement>(
@@ -2348,7 +2559,17 @@ describe("AiLeagueReplayOverlay", () => {
           agents: [],
           relationships: [],
           events: [
-            event(1, 5, "spawn", "info", "a1", "Atlas", null, null, "Atlas enters the match."),
+            event(
+              1,
+              5,
+              "spawn",
+              "info",
+              "a1",
+              "Atlas",
+              null,
+              null,
+              "Atlas enters the match.",
+            ),
           ],
           communicationThreads: [],
           timelineBuckets: [],
@@ -2383,9 +2604,9 @@ describe("AiLeagueReplayOverlay", () => {
 
       const timelineBefore = document.querySelector(".broadcast-timeline");
       expect(timelineBefore).not.toBeNull();
-      expect(
-        timelineBefore?.classList.contains("broadcast-drawer-panel"),
-      ).toBe(true);
+      expect(timelineBefore?.classList.contains("broadcast-drawer-panel")).toBe(
+        true,
+      );
       expect(timelineBefore?.getAttribute("data-tab-id")).toBe("timeline");
 
       // `patchVolatile`'s own `nextTimelineKey = String(turnNumber)`
@@ -2400,9 +2621,9 @@ describe("AiLeagueReplayOverlay", () => {
       const timelineAfter = document.querySelector(".broadcast-timeline");
       expect(timelineAfter).not.toBeNull();
       expect(timelineAfter).not.toBe(timelineBefore);
-      expect(
-        timelineAfter?.classList.contains("broadcast-drawer-panel"),
-      ).toBe(true);
+      expect(timelineAfter?.classList.contains("broadcast-drawer-panel")).toBe(
+        true,
+      );
       expect(timelineAfter?.getAttribute("data-tab-id")).toBe("timeline");
       expect(timelineAfter?.getAttribute("role")).toBe("tabpanel");
       expect(timelineAfter?.id).toBe("broadcast-drawer-panel-timeline");
@@ -2417,9 +2638,13 @@ describe("AiLeagueReplayOverlay", () => {
       });
       expect(document.querySelector(".broadcast-war-room")).not.toBeNull();
       expect(document.querySelector(".broadcast-timeline")).not.toBeNull();
-      expect(document.getElementById("ai-league-lower-third-host")).not.toBeNull();
+      expect(
+        document.getElementById("ai-league-lower-third-host"),
+      ).not.toBeNull();
       overlay.dispose();
-      expect(document.querySelector("[data-ai-league-broadcast-drawer]")).toBeNull();
+      expect(
+        document.querySelector("[data-ai-league-broadcast-drawer]"),
+      ).toBeNull();
       expect(document.querySelector(".broadcast-war-room")).toBeNull();
       expect(document.querySelector(".broadcast-timeline")).toBeNull();
     });
@@ -2506,8 +2731,20 @@ describe("AiLeagueReplayOverlay", () => {
         },
       });
       frame(600, [
-        { playerID: "p1", smallID: 1, username: "Atlas", tilesOwned: 60, clientID: "client-atlas" },
-        { playerID: "p2", smallID: 2, username: "Blitz", tilesOwned: 40, clientID: "client-blitz" },
+        {
+          playerID: "p1",
+          smallID: 1,
+          username: "Atlas",
+          tilesOwned: 60,
+          clientID: "client-atlas",
+        },
+        {
+          playerID: "p2",
+          smallID: 2,
+          username: "Blitz",
+          tilesOwned: 40,
+          clientID: "client-blitz",
+        },
       ]);
       const blitzEntry = [
         ...document.querySelectorAll(".broadcast-rail-entry"),
@@ -2546,9 +2783,12 @@ describe("AiLeagueReplayOverlay", () => {
         artifactBasePath: `/ai-league-runs/${runID}`,
         decisions: [],
       });
-      const drawer = document.querySelector("[data-ai-league-broadcast-drawer]");
+      const drawer = document.querySelector(
+        "[data-ai-league-broadcast-drawer]",
+      );
       expect(
-        drawer?.querySelector('.broadcast-drawer-panel[data-tab-id="agents"]')
+        drawer
+          ?.querySelector('.broadcast-drawer-panel[data-tab-id="agents"]')
           ?.getAttribute("data-tab-active"),
       ).toBe("true");
       // "events" relocates to the document.body-level portal at a desktop
@@ -2561,11 +2801,14 @@ describe("AiLeagueReplayOverlay", () => {
       ).toBe("false");
 
       drawer
-        ?.querySelector<HTMLButtonElement>('.broadcast-drawer-tab[data-tab-id="events"]')
+        ?.querySelector<HTMLButtonElement>(
+          '.broadcast-drawer-tab[data-tab-id="events"]',
+        )
         ?.click();
 
       expect(
-        drawer?.querySelector('.broadcast-drawer-panel[data-tab-id="agents"]')
+        drawer
+          ?.querySelector('.broadcast-drawer-panel[data-tab-id="agents"]')
           ?.getAttribute("data-tab-active"),
       ).toBe("false");
       expect(
@@ -2591,18 +2834,26 @@ describe("AiLeagueReplayOverlay", () => {
         "[data-ai-league-analyst-toggle]",
       );
       expect(toggle).not.toBeNull();
-      expect(document.body.classList.contains("ai-league-analyst-mode")).toBe(false);
+      expect(document.body.classList.contains("ai-league-analyst-mode")).toBe(
+        false,
+      );
       expect(toggle?.getAttribute("aria-pressed")).toBe("false");
       expect(
-        document.querySelector('.broadcast-drawer-panel[data-tab-id="analysis"].broadcast-analyst'),
+        document.querySelector(
+          '.broadcast-drawer-panel[data-tab-id="analysis"].broadcast-analyst',
+        ),
       ).not.toBeNull();
 
       toggle?.click();
-      expect(document.body.classList.contains("ai-league-analyst-mode")).toBe(true);
+      expect(document.body.classList.contains("ai-league-analyst-mode")).toBe(
+        true,
+      );
       expect(toggle?.getAttribute("aria-pressed")).toBe("true");
 
       toggle?.click();
-      expect(document.body.classList.contains("ai-league-analyst-mode")).toBe(false);
+      expect(document.body.classList.contains("ai-league-analyst-mode")).toBe(
+        false,
+      );
       expect(toggle?.getAttribute("aria-pressed")).toBe("false");
     });
 
@@ -2637,7 +2888,17 @@ describe("AiLeagueReplayOverlay", () => {
           agents: [],
           relationships: [],
           events: [
-            event(1, 999, "elimination", "war", "a2", "Blitz", null, null, "Blitz is eliminated."),
+            event(
+              1,
+              999,
+              "elimination",
+              "war",
+              "a2",
+              "Blitz",
+              null,
+              null,
+              "Blitz is eliminated.",
+            ),
           ],
           communicationThreads: [],
           timelineBuckets: [],
@@ -2649,7 +2910,6 @@ describe("AiLeagueReplayOverlay", () => {
       expect(pulse?.getAttribute("data-kind")).toBe("elimination");
       expect(pulse?.getAttribute("role")).toBe("status");
     });
-
 
     it("windows the War Room feed to the viewer's own playhead — a future event never renders until playback reaches its turn (spec item 2)", () => {
       const runID = "broadcast-windowing-1";
@@ -2665,8 +2925,28 @@ describe("AiLeagueReplayOverlay", () => {
           agents: [],
           relationships: [],
           events: [
-            event(1, 10, "elimination", "war", "a1", "Atlas", null, null, "Atlas is eliminated."),
-            event(2, 500, "elimination", "war", "a2", "Blitz", null, null, "Blitz is eliminated."),
+            event(
+              1,
+              10,
+              "elimination",
+              "war",
+              "a1",
+              "Atlas",
+              null,
+              null,
+              "Atlas is eliminated.",
+            ),
+            event(
+              2,
+              500,
+              "elimination",
+              "war",
+              "a2",
+              "Blitz",
+              null,
+              null,
+              "Blitz is eliminated.",
+            ),
           ],
           communicationThreads: [],
           timelineBuckets: [],
@@ -2675,19 +2955,27 @@ describe("AiLeagueReplayOverlay", () => {
 
       const warRoom = document.querySelector(".broadcast-war-room");
       // At turn 0, NEITHER curated event (turn 10, turn 500) has happened yet.
-      expect(warRoom?.querySelectorAll(".broadcast-war-room-item")).toHaveLength(0);
+      expect(
+        warRoom?.querySelectorAll(".broadcast-war-room-item"),
+      ).toHaveLength(0);
       expect(warRoom?.textContent).toContain("broadcast.war_room_empty");
 
       // Advancing to turn 10 must reveal exactly the turn-10 event — never
       // the turn-500 one, which the viewer has not reached yet.
       frame(10, []);
-      expect(document.querySelectorAll(".broadcast-war-room-item")).toHaveLength(1);
+      expect(
+        document.querySelectorAll(".broadcast-war-room-item"),
+      ).toHaveLength(1);
 
       // Only once the playhead reaches turn 500 does the second event appear.
       frame(499, []);
-      expect(document.querySelectorAll(".broadcast-war-room-item")).toHaveLength(1);
+      expect(
+        document.querySelectorAll(".broadcast-war-room-item"),
+      ).toHaveLength(1);
       frame(500, []);
-      expect(document.querySelectorAll(".broadcast-war-room-item")).toHaveLength(2);
+      expect(
+        document.querySelectorAll(".broadcast-war-room-item"),
+      ).toHaveLength(2);
     });
 
     // P0 fix (2026-08-03): a nuke launch (importance 95 server-side, the
@@ -2707,7 +2995,17 @@ describe("AiLeagueReplayOverlay", () => {
           agents: [],
           relationships: [],
           events: [
-            event(1, 900, "nuke", "threat", "a1", "Atlas", "a2", "Blitz", "Atlas escalates nuclear pressure against Blitz."),
+            event(
+              1,
+              900,
+              "nuke",
+              "threat",
+              "a1",
+              "Atlas",
+              "a2",
+              "Blitz",
+              "Atlas escalates nuclear pressure against Blitz.",
+            ),
           ],
           communicationThreads: [],
           timelineBuckets: [],
@@ -2760,7 +3058,17 @@ describe("AiLeagueReplayOverlay", () => {
               latestTurn: 5,
               tone: "chat",
               messages: [
-                event(1, 5, "chat", "chat", "a1", "Atlas", null, null, "Hold the line."),
+                event(
+                  1,
+                  5,
+                  "chat",
+                  "chat",
+                  "a1",
+                  "Atlas",
+                  null,
+                  null,
+                  "Hold the line.",
+                ),
               ],
             },
           ],
@@ -2923,9 +3231,7 @@ describe("AiLeagueReplayOverlay", () => {
         );
 
       frame(1);
-      const firstRowBefore = document.querySelector(
-        ".broadcast-war-room-item",
-      );
+      const firstRowBefore = document.querySelector(".broadcast-war-room-item");
       expect(firstRowBefore).not.toBeNull();
       const listBefore = document.querySelector(".broadcast-war-room-list");
 
@@ -3158,7 +3464,9 @@ describe("AiLeagueReplayOverlay", () => {
       // The row exactly one index before the window start (139) must never
       // have been mounted at all.
       expect(
-        document.querySelector('.broadcast-war-room-item[data-kind="betrayal"]'),
+        document.querySelector(
+          '.broadcast-war-room-item[data-kind="betrayal"]',
+        ),
       ).toBeNull();
       // The row exactly at the window start (140, i.e. eligibleCount(200) -
       // windowSize(60)) is the OLDEST mounted row — first in DOM order
@@ -3299,9 +3607,7 @@ describe("AiLeagueReplayOverlay", () => {
       expect(
         document.querySelectorAll(".broadcast-war-room-item"),
       ).toHaveLength(50);
-      expect(
-        document.querySelector(".broadcast-war-room-earlier"),
-      ).toBeNull();
+      expect(document.querySelector(".broadcast-war-room-earlier")).toBeNull();
 
       // Then a large forward seek again, right back to all 200 eligible —
       // the SAME bounded-append fix must still hold after the backward
@@ -3317,7 +3623,9 @@ describe("AiLeagueReplayOverlay", () => {
       );
       expect(items).toHaveLength(60);
       expect(
-        document.querySelector('.broadcast-war-room-item[data-kind="betrayal"]'),
+        document.querySelector(
+          '.broadcast-war-room-item[data-kind="betrayal"]',
+        ),
       ).toBeNull();
       const list = document.querySelector(".broadcast-war-room-list");
       const firstItem = list?.querySelector(".broadcast-war-room-item");
@@ -3418,7 +3726,17 @@ describe("AiLeagueReplayOverlay", () => {
           agents: [],
           relationships: [],
           events: [
-            event(1, 5, "elimination", "war", "a1", "Atlas", null, null, "Atlas fell to overwhelming force."),
+            event(
+              1,
+              5,
+              "elimination",
+              "war",
+              "a1",
+              "Atlas",
+              null,
+              null,
+              "Atlas fell to overwhelming force.",
+            ),
           ],
           communicationThreads: [],
           timelineBuckets: [],
@@ -3437,22 +3755,17 @@ describe("AiLeagueReplayOverlay", () => {
       expect(decisionsRow?.textContent).not.toContain("Atlas");
       expect(decisionsRow?.textContent).toMatch(/Agent \d+/);
 
-      const eventsRow = document.querySelector(
-        ".broadcast-analyst-events-row",
-      );
+      const eventsRow = document.querySelector(".broadcast-analyst-events-row");
       expect(eventsRow?.textContent).not.toContain("Atlas");
       expect(eventsRow?.textContent).toMatch(/Agent \d+/);
     });
 
     it("caps both Analyst sub-lists' DOM node count under a large fixture, backfills each independently via show-earlier, and never renders past the playhead (spec items 1-3 follow-up, P2 review)", () => {
       const runID = "broadcast-analyst-window-cap-1";
-      const decisions = Array.from(
-        { length: 200 },
-        (_, index) => ({
-          ...decisionFixture(index + 1),
-          turnNumber: index + 1,
-        }),
-      );
+      const decisions = Array.from({ length: 200 }, (_, index) => ({
+        ...decisionFixture(index + 1),
+        turnNumber: index + 1,
+      }));
       decisions.push({
         ...decisionFixture(9999),
         turnNumber: 2500,
@@ -3814,13 +4127,11 @@ describe("AiLeagueReplayOverlay", () => {
       // `input.decisions` unfiltered, so "nuke" would have been visible
       // at turn 0 even though the match hadn't reached it yet).
       function chartRowCount(label: string): string | null {
-        const rows = document.querySelectorAll(
-          ".broadcast-analyst-chart-row",
-        );
+        const rows = document.querySelectorAll(".broadcast-analyst-chart-row");
         for (const row of rows) {
           if (
-            row.querySelector(".broadcast-analyst-chart-label")
-              ?.textContent === label
+            row.querySelector(".broadcast-analyst-chart-label")?.textContent ===
+            label
           ) {
             return (
               row.querySelector(".broadcast-analyst-chart-count")
@@ -3925,12 +4236,10 @@ describe("AiLeagueReplayOverlay", () => {
       );
       expect(rows).toHaveLength(1);
       expect(
-        rows[0]?.querySelector(".broadcast-analyst-chart-label")
-          ?.textContent,
+        rows[0]?.querySelector(".broadcast-analyst-chart-label")?.textContent,
       ).toBe("build");
       expect(
-        rows[0]?.querySelector(".broadcast-analyst-chart-count")
-          ?.textContent,
+        rows[0]?.querySelector(".broadcast-analyst-chart-count")?.textContent,
       ).toBe("30");
     });
 
@@ -3947,7 +4256,17 @@ describe("AiLeagueReplayOverlay", () => {
           agents: [],
           relationships: [],
           events: [
-            event(1, 300, "alliance_break", "betrayal", "a2", "Blitz", "a1", "Atlas", "Blitz says the pact is over."),
+            event(
+              1,
+              300,
+              "alliance_break",
+              "betrayal",
+              "a2",
+              "Blitz",
+              "a1",
+              "Atlas",
+              "Blitz says the pact is over.",
+            ),
           ],
           communicationThreads: [],
           timelineBuckets: [],
@@ -3962,7 +4281,9 @@ describe("AiLeagueReplayOverlay", () => {
       // Content-free tick: neither the real kind nor its label reach the DOM
       // at all while the marker's own turn is still ahead of the playhead.
       expect(m?.dataset.kind).toBe("upcoming");
-      expect(m?.getAttribute("title")).toBe("broadcast.timeline_marker_upcoming");
+      expect(m?.getAttribute("title")).toBe(
+        "broadcast.timeline_marker_upcoming",
+      );
 
       frame(300, []);
       m = betrayalOrUpcoming();
@@ -3975,164 +4296,6 @@ describe("AiLeagueReplayOverlay", () => {
     });
   });
 
-  describe("Director Cut (Stage 5 player integration)", () => {
-    function directorCutPlanFixture(runID: string) {
-      return {
-        schemaVersion: 1,
-        reportKind: "director-cut-plan",
-        runID,
-        matchID: runID,
-        generatedAt: "2026-07-31T00:00:00.000Z",
-        totalTurns: 999,
-        segments: [
-          {
-            startTurn: 0,
-            endTurn: 199,
-            speed: "fast",
-            eventReason: "quiet_interval",
-            importance: 0,
-            participatingAgents: [],
-          },
-          {
-            startTurn: 200,
-            endTurn: 999,
-            speed: "slow",
-            eventReason: "nuke",
-            importance: 95,
-            participatingAgents: ["Auri"],
-          },
-        ],
-        importantTurnCount: 800,
-        estimatedDurationSeconds: 300,
-        degraded: false,
-        notes: [],
-      };
-    }
-
-    function frame(tick: number): void {
-      document.dispatchEvent(
-        new CustomEvent("ai-league-replay-frame", {
-          detail: { tick, turnNumber: tick, players: [] },
-        }),
-      );
-    }
-
-    it("renders no toggle at all when no valid Director Cut plan is present", () => {
-      const runID = "director-cut-none-1";
-      mountAiLeagueReplayOverlay({
-        runID,
-        artifactBasePath: `/ai-league-runs/${runID}`,
-        decisions: [],
-      });
-      expect(
-        document.querySelector("[data-ai-league-director-cut-toggle]"),
-      ).toBeNull();
-    });
-
-    it("mounts enabled by default once a valid plan arrives via hydrate, and drives replay speed as the turn crosses segments", () => {
-      const runID = "director-cut-toggle-1";
-      const onReplaySpeedChange = vi.fn();
-      const overlay = mountAiLeagueReplayOverlay({
-        runID,
-        artifactBasePath: `/ai-league-runs/${runID}`,
-        decisions: [],
-        onReplaySpeedChange,
-      });
-      overlay.hydrate({
-        directorCutPlan: directorCutPlanFixture(runID),
-      });
-
-      const toggle = document.querySelector<HTMLButtonElement>(
-        "[data-ai-league-director-cut-toggle]",
-      );
-      expect(toggle).not.toBeNull();
-      expect(toggle?.getAttribute("aria-pressed")).toBe("true");
-      // Mounting applies the opening segment's speed immediately.
-      expect(onReplaySpeedChange).toHaveBeenCalledWith(0); // fastest
-      onReplaySpeedChange.mockClear();
-
-      frame(200);
-      expect(onReplaySpeedChange).toHaveBeenCalledWith(2); // slow
-    });
-
-    it("hands control back to Full Replay when toggled off, and never emits another speed change from the plan", () => {
-      const runID = "director-cut-toggle-2";
-      const onReplaySpeedChange = vi.fn();
-      const overlay = mountAiLeagueReplayOverlay({
-        runID,
-        artifactBasePath: `/ai-league-runs/${runID}`,
-        decisions: [],
-        onReplaySpeedChange,
-      });
-      overlay.hydrate({
-        directorCutPlan: directorCutPlanFixture(runID),
-      });
-      const toggle = document.querySelector<HTMLButtonElement>(
-        "[data-ai-league-director-cut-toggle]",
-      );
-      onReplaySpeedChange.mockClear();
-
-      toggle?.click();
-      expect(toggle?.getAttribute("aria-pressed")).toBe("false");
-      expect(onReplaySpeedChange).toHaveBeenCalledWith(1); // normal
-
-      onReplaySpeedChange.mockClear();
-      frame(200);
-      expect(onReplaySpeedChange).not.toHaveBeenCalled();
-    });
-
-    it("applies the segment covering the current turn — not the opening one — when the plan hydrates after playback already advanced", () => {
-      // Late plan hydration: `director-cut-plan.json` loads asynchronously,
-      // same timing as spectator telemetry, so playback can already be
-      // well past turn 0 by the time it resolves.
-      const runID = "director-cut-late-hydrate";
-      const onReplaySpeedChange = vi.fn();
-      const overlay = mountAiLeagueReplayOverlay({
-        runID,
-        artifactBasePath: `/ai-league-runs/${runID}`,
-        decisions: [],
-        onReplaySpeedChange,
-      });
-      frame(200);
-      onReplaySpeedChange.mockClear();
-      overlay.hydrate({
-        directorCutPlan: directorCutPlanFixture(runID),
-      });
-
-      // Turn 200 is the plan's "slow" segment; a hardcoded-to-0 bug would
-      // apply "fast" (turn 0's segment) instead.
-      expect(onReplaySpeedChange).toHaveBeenCalledExactlyOnceWith(2); // slow
-    });
-
-    it("resyncs to the CURRENT turn's segment when toggled back on mid-match, not the opening segment", () => {
-      const runID = "director-cut-toggle-resync";
-      const onReplaySpeedChange = vi.fn();
-      const overlay = mountAiLeagueReplayOverlay({
-        runID,
-        artifactBasePath: `/ai-league-runs/${runID}`,
-        decisions: [],
-        onReplaySpeedChange,
-      });
-      overlay.hydrate({
-        directorCutPlan: directorCutPlanFixture(runID),
-      });
-      frame(200);
-      expect(onReplaySpeedChange).toHaveBeenCalledWith(2); // slow
-
-      const toggle = document.querySelector<HTMLButtonElement>(
-        "[data-ai-league-director-cut-toggle]",
-      );
-      toggle?.click(); // off
-      expect(onReplaySpeedChange).toHaveBeenCalledWith(1); // normal
-      onReplaySpeedChange.mockClear();
-
-      toggle?.click(); // back on, still at turn 200
-      // The masking bug: re-enabling always reapplied the opening ("fast")
-      // segment, self-correcting only at the next frame tick boundary.
-      expect(onReplaySpeedChange).toHaveBeenCalledExactlyOnceWith(2); // slow
-    });
-  });
-
   describe("Match-state strip (Season Zero broadcast Phase 5)", () => {
     function agentSample(
       username: string,
@@ -4141,7 +4304,16 @@ describe("AiLeagueReplayOverlay", () => {
       rank: number,
       alive = true,
     ) {
-      return { agentID: playerID, playerID, username, alive, tilesOwned: Math.round(territoryShare * 1000), troops: 10, territoryShare, rank };
+      return {
+        agentID: playerID,
+        playerID,
+        username,
+        alive,
+        tilesOwned: Math.round(territoryShare * 1000),
+        troops: 10,
+        territoryShare,
+        rank,
+      };
     }
 
     function matchStateSeriesFixture(runID: string) {
@@ -4334,46 +4506,7 @@ describe("AiLeagueReplayOverlay", () => {
       ).toBeNull();
     });
 
-    it("prefers the Director Cut active segment label over the sample's own phase when Director Cut mode is on", () => {
-      const runID = "state-strip-phase-director-cut";
-      const overlay = mountAiLeagueReplayOverlay({
-        runID,
-        artifactBasePath: `/ai-league-runs/${runID}`,
-        decisions: [],
-      });
-      overlay.hydrate({
-        matchStateSeries: matchStateSeriesFixture(runID),
-        directorCutPlan: {
-          schemaVersion: 1,
-          reportKind: "director-cut-plan",
-          runID,
-          matchID: runID,
-          generatedAt: "2026-08-01T00:00:00.000Z",
-          totalTurns: 1000,
-          segments: [
-            {
-              startTurn: 0,
-              endTurn: 999,
-              speed: "normal",
-              eventReason: "First strike",
-              importance: 50,
-              participatingAgents: [],
-            },
-          ],
-          importantTurnCount: 1,
-          estimatedDurationSeconds: 60,
-          degraded: false,
-          notes: [],
-        },
-      });
-      // Enabled by default for Full Replay (spec item 3).
-      frame(200);
-      expect(
-        document.querySelector(".broadcast-state-strip")?.textContent,
-      ).toContain("First strike");
-    });
-
-    it("falls back to the sample's own translated phase when Director Cut mode is off", () => {
+    it("uses the sample's own translated phase as the strip's currentPhaseLabel", () => {
       const runID = "state-strip-phase-fallback";
       const overlay = mountAiLeagueReplayOverlay({
         runID,
@@ -4381,7 +4514,7 @@ describe("AiLeagueReplayOverlay", () => {
         decisions: [],
       });
       overlay.hydrate({ matchStateSeries: matchStateSeriesFixture(runID) });
-      frame(200); // sample at turn 200 has phase "active"; no Director Cut plan hydrated
+      frame(200); // sample at turn 200 has phase "active"
       expect(
         document.querySelector(".broadcast-state-strip")?.textContent,
       ).toContain("broadcast.phase_active");
@@ -4751,7 +4884,7 @@ function withMockedLocation<T>(
   }
 }
 
-describe("Phase 7 analytics: Director Cut, timeline jump, watch-progress milestones", () => {
+describe("Phase 7 analytics: timeline jump, watch-progress milestones", () => {
   beforeEach(() => {
     Object.defineProperty(window, "innerWidth", {
       configurable: true,
@@ -4770,74 +4903,6 @@ describe("Phase 7 analytics: Director Cut, timeline jump, watch-progress milesto
     vi.useRealTimers();
   });
 
-  function directorCutPlanFixture(runID: string) {
-    return {
-      schemaVersion: 1,
-      reportKind: "director-cut-plan",
-      runID,
-      matchID: runID,
-      generatedAt: "2026-07-31T00:00:00.000Z",
-      totalTurns: 999,
-      segments: [
-        {
-          startTurn: 0,
-          endTurn: 999,
-          speed: "fast",
-          eventReason: "quiet_interval",
-          importance: 0,
-          participatingAgents: [],
-        },
-      ],
-      importantTurnCount: 800,
-      estimatedDurationSeconds: 300,
-      degraded: false,
-      notes: [],
-    };
-  }
-
-  it("tracks director_cut_started once when the plan mounts enabled by default", () => {
-    const runID = "analytics-dc-mount-1";
-    const overlay = mountAiLeagueReplayOverlay({
-      runID,
-      artifactBasePath: `/ai-league-runs/${runID}`,
-      decisions: [],
-    });
-    expect(trackMock).not.toHaveBeenCalledWith(
-      "director_cut_started",
-      expect.anything(),
-    );
-    overlay.hydrate({ directorCutPlan: directorCutPlanFixture(runID) });
-    expect(trackMock).toHaveBeenCalledExactlyOnceWith("director_cut_started", {
-      matchId: runID,
-      replayMode: "director_cut",
-    });
-  });
-
-  it("tracks director_cut_started again on an explicit toggle-on, never on toggle-off", () => {
-    const runID = "analytics-dc-toggle-1";
-    const overlay = mountAiLeagueReplayOverlay({
-      runID,
-      artifactBasePath: `/ai-league-runs/${runID}`,
-      decisions: [],
-    });
-    overlay.hydrate({ directorCutPlan: directorCutPlanFixture(runID) });
-    trackMock.mockClear();
-
-    const toggle = document.querySelector<HTMLButtonElement>(
-      "[data-ai-league-director-cut-toggle]",
-    );
-    toggle?.click(); // off
-    expect(trackMock).not.toHaveBeenCalledWith(
-      "director_cut_started",
-      expect.anything(),
-    );
-    toggle?.click(); // back on
-    expect(trackMock).toHaveBeenCalledExactlyOnceWith("director_cut_started", {
-      matchId: runID,
-      replayMode: "director_cut",
-    });
-  });
-
   it("tracks timeline_jump when the War Room feed's jump-to-turn action fires", () => {
     const runID = "analytics-timeline-jump-1";
     const jumps: number[] = [];
@@ -4851,7 +4916,12 @@ describe("Phase 7 analytics: Director Cut, timeline jump, watch-progress milesto
       artifactBasePath: `/ai-league-runs/${runID}`,
       currentTurn: 999,
       decisions: [
-        { ...decisionFixture(1), username: "Atlas", turnNumber: 10, planObjective: "expand" },
+        {
+          ...decisionFixture(1),
+          username: "Atlas",
+          turnNumber: 10,
+          planObjective: "expand",
+        },
         {
           ...decisionFixture(2),
           username: "Atlas",
@@ -4887,7 +4957,9 @@ describe("Phase 7 analytics: Director Cut, timeline jump, watch-progress milesto
         ?.click();
       expect(jumps).toEqual([]);
       expect(locationMock.href).toContain("turn=20");
-      expect(trackMock).toHaveBeenCalledWith("timeline_jump", { matchId: runID });
+      expect(trackMock).toHaveBeenCalledWith("timeline_jump", {
+        matchId: runID,
+      });
     });
   });
 
@@ -4945,7 +5017,9 @@ describe("Phase 7 analytics: Director Cut, timeline jump, watch-progress milesto
           timelineBuckets: [],
         },
       });
-      const planChangeItem = document.querySelector('[data-kind="plan_change"]');
+      const planChangeItem = document.querySelector(
+        '[data-kind="plan_change"]',
+      );
       expect(planChangeItem).not.toBeNull();
       planChangeItem
         ?.querySelector<HTMLButtonElement>(".broadcast-war-room-summary")
@@ -5007,7 +5081,7 @@ describe("Phase 7 analytics: Director Cut, timeline jump, watch-progress milesto
       frame(20 + i);
     }
     expect(callsFor("watched_2m")).toEqual([
-      ["watched_2m", { matchId: runID, replayMode: "full_replay" }],
+      ["watched_2m", { matchId: runID }],
     ]);
   });
 
@@ -5129,21 +5203,20 @@ describe("Phase 7 analytics: Director Cut, timeline jump, watch-progress milesto
     expect(callsFor("watched_50pct")).toHaveLength(0);
     frame(500);
     expect(callsFor("watched_50pct")).toEqual([
-      ["watched_50pct", { matchId: runID, replayMode: "full_replay" }],
+      ["watched_50pct", { matchId: runID }],
     ]);
     frame(501);
     expect(callsFor("watched_50pct")).toHaveLength(1);
   });
 
-  it("tracks completed exactly once when a terminal frame arrives, tagged with the active replay mode", () => {
+  it("tracks completed exactly once when a terminal frame arrives", () => {
     const runID = "analytics-watch-completed-1";
-    const overlay = mountAiLeagueReplayOverlay({
+    mountAiLeagueReplayOverlay({
       runID,
       artifactBasePath: `/ai-league-runs/${runID}`,
       decisions: [],
       replayMaxTurn: 1000,
     });
-    overlay.hydrate({ directorCutPlan: directorCutPlanFixture(runID) });
     trackMock.mockClear();
     document.dispatchEvent(
       new CustomEvent("ai-league-replay-frame", {
@@ -5152,7 +5225,6 @@ describe("Phase 7 analytics: Director Cut, timeline jump, watch-progress milesto
     );
     expect(trackMock).toHaveBeenCalledWith("completed", {
       matchId: runID,
-      replayMode: "director_cut",
     });
     const completedCallsForThisRun = trackMock.mock.calls.filter(
       ([name, context]) =>

@@ -1,6 +1,21 @@
 import { PREMIERE_ID_PATTERN } from "../replay-premiere/ReplayPremiereContracts";
 import { derivePremiereId } from "../replay-premiere/ReplayPremiereLoopCore";
+import type {
+  AgentRunFinalState,
+  AgentRunRosterEntry,
+} from "./AgentDecisionLogWriter";
+import { AGENT_MATCH_RECAP_SCHEMA_VERSION } from "./AgentMatchRecap";
+import {
+  buildAgentMatchStateSeries,
+  MATCH_STATE_SERIES_SCHEMA_VERSION,
+  type MatchStateSeries,
+} from "./AgentMatchStateSeries";
 import type { AgentSpectatorReplay } from "./AgentSpectatorReplay";
+import {
+  buildAgentSpectatorTelemetry,
+  type SpectatorTelemetry,
+} from "./AgentSpectatorTelemetry";
+import type { AgentDecisionRecord, LegalActionKind } from "./AgentTypes";
 import type { LatestPremierePointer } from "./CoworldLeaguePremiereSuppression";
 import type {
   CoworldLeagueEpisodePlayerRow,
@@ -9,22 +24,6 @@ import type {
   CoworldLeagueRoundRow,
   CoworldLeagueStandingRow,
 } from "./CoworldLeagueSiteWriter";
-import {
-  buildAgentSpectatorTelemetry,
-  type SpectatorTelemetry,
-} from "./AgentSpectatorTelemetry";
-import type {
-  AgentRunFinalState,
-  AgentRunRosterEntry,
-} from "./AgentDecisionLogWriter";
-import type { AgentDecisionRecord, LegalActionKind } from "./AgentTypes";
-import { buildDirectorCutPlan, type DirectorCutPlan } from "./DirectorCutPlan";
-import { AGENT_MATCH_RECAP_SCHEMA_VERSION } from "./AgentMatchRecap";
-import {
-  buildAgentMatchStateSeries,
-  MATCH_STATE_SERIES_SCHEMA_VERSION,
-  type MatchStateSeries,
-} from "./AgentMatchStateSeries";
 
 /**
  * Pure transforms from Coworld Observatory read-API JSON (as emitted by the
@@ -487,7 +486,11 @@ export function sampleDecisionsAcrossMatch<T extends CoworldReplayUiDecision>(
   if (decisions.length <= limit) return [...decisions];
   const chosen = new Set<number>();
   // 1. Every notable decision first (engine fallback or rejected action).
-  for (let index = 0; index < decisions.length && chosen.size < limit; index++) {
+  for (
+    let index = 0;
+    index < decisions.length && chosen.size < limit;
+    index++
+  ) {
     const decision = decisions[index];
     if (decision.fallbackUsed === true || decision.result?.accepted === false) {
       chosen.add(index);
@@ -505,7 +508,11 @@ export function sampleDecisionsAcrossMatch<T extends CoworldReplayUiDecision>(
   }
   // 3. Stride picks can collide with step 1, leaving the budget under-filled.
   // Top up so the payload size stays exactly as before.
-  for (let index = 0; index < decisions.length && chosen.size < limit; index++) {
+  for (
+    let index = 0;
+    index < decisions.length && chosen.size < limit;
+    index++
+  ) {
     chosen.add(index);
   }
   return [...chosen]
@@ -753,23 +760,9 @@ export function buildEpisodeRow(input: {
    */
   premiereHref?: string | null;
   /**
-   * Product overhaul spec Stage 5. Summary of the run's
-   * `director-cut-plan.json` (durationEstimateSeconds, segmentCount) when
-   * one exists on disk for this run's unpacked directory; null/omitted
-   * otherwise (the artifact simply isn't there yet — a hosted-mirror-only
-   * episode, or a bundle unpacked before Director Cut plans existed). The
-   * caller (`coworld-league-mirror.ts`) resolves this from the local
-   * filesystem before calling — this function stays pure/IO-free like
-   * every other field here.
-   */
-  directorCut?: {
-    durationEstimateSeconds: number;
-    segmentCount: number;
-  } | null;
-  /**
-   * Product overhaul spec Stage "drama recaps" gap closure — the mirror-side
-   * sibling of `directorCut` above, SAME optional/additive/disk-resolved-by-
-   * the-caller shape: a compact evidence summary of `drama-report.json`/
+   * Product overhaul spec Stage "drama recaps" gap closure — additive,
+   * disk-resolved-by-the-caller shape: a compact evidence summary of
+   * `drama-report.json`/
    * `match-story.json`/`match-recap.json` when at least one exists on disk
    * for this run (`CoworldLeagueMatchNarrativeBackfill.ts`), null/omitted
    * otherwise. Ranking/evidence signal only — never recap prose (the recap
@@ -833,9 +826,6 @@ export function buildEpisodeRow(input: {
     fullRenderHref: input.fullRenderHref,
     ...(typeof input.premiereHref === "string" && input.premiereHref.length > 0
       ? { premiereHref: input.premiereHref }
-      : {}),
-    ...(input.directorCut !== null && input.directorCut !== undefined
-      ? { directorCut: input.directorCut }
       : {}),
     ...(input.dramaEvidence !== null && input.dramaEvidence !== undefined
       ? { dramaEvidence: input.dramaEvidence }
@@ -1048,46 +1038,10 @@ export function premiereHrefForEpisode(
 }
 
 /**
- * Parses `director-cut-plan.json` raw file contents into the small summary
- * `buildEpisodeRow`'s `directorCut` field carries — never the full plan
- * (segments/notes/participatingAgents stay a per-match artifact fetched
- * directly by the client player, never duplicated into data.json). Pure:
- * the caller (`coworld-league-mirror.ts`) owns the actual file read and
- * its own existence/ENOENT handling; this only has to handle "the file
- * exists but isn't a well-formed DirectorCutPlan" — malformed JSON, wrong
- * shape, or a non-finite/negative duration or segment count all resolve
- * to `null` rather than a garbage row.
- */
-export function parseDirectorCutPlanSummary(
-  raw: string,
-): { durationEstimateSeconds: number; segmentCount: number } | null {
-  let value: unknown;
-  try {
-    value = JSON.parse(raw);
-  } catch {
-    return null;
-  }
-  const record = asRecord(value);
-  if (record === null || record.reportKind !== "director-cut-plan") {
-    return null;
-  }
-  const durationEstimateSeconds = asNumber(record.estimatedDurationSeconds);
-  const segments = asArray(record.segments);
-  if (
-    durationEstimateSeconds === null ||
-    durationEstimateSeconds < 0 ||
-    segments.length === 0
-  ) {
-    return null;
-  }
-  return { durationEstimateSeconds, segmentCount: segments.length };
-}
-
-/**
  * Parses `drama-report.json` + `match-story.json` raw file contents into the
  * small `{dramaScore, entertainmentGrade}` summary `buildEpisodeRow`'s
- * `dramaEvidence` field carries — same "small, additive, provenance-marked"
- * projection `directorCut` established above, never the full reports
+ * `dramaEvidence` field carries — a small, additive, provenance-marked
+ * projection, never the full reports
  * (neither `drama-report.json`/`.md` nor `match-story.json` is on
  * `ProxyWarPublicArtifacts.ts`'s public allowlist; only the derived scalar
  * pair here and the separate `match-recap.json` artifact are ever public).
@@ -1154,7 +1108,10 @@ export function parseCuratedDramaScore(matchRecapRaw: string): number | null {
     return null;
   }
   const record = asRecord(value);
-  if (record === null || record.schemaVersion !== AGENT_MATCH_RECAP_SCHEMA_VERSION) {
+  if (
+    record === null ||
+    record.schemaVersion !== AGENT_MATCH_RECAP_SCHEMA_VERSION
+  ) {
     return null;
   }
   const curatedDramaScore = asNumber(record.curatedDramaScore);
@@ -1165,8 +1122,9 @@ export function parseCuratedDramaScore(matchRecapRaw: string): number | null {
 }
 
 // ---------------------------------------------------------------------------
-// Product overhaul spec Stage 5 gap closure: Director Cut plan generation for
-// mirrored (hosted-league) runs.
+// Two-tier spectator-telemetry resolution for mirrored (hosted-league) runs,
+// shared by every mirror-side match-narrative generator
+// (`CoworldLeagueMatchNarrativeBackfill.ts`).
 //
 // Empirically verified against real retained mirror run directories (see
 // `artifacts/ai-league-runs/league-coworld-*/` in the canonical checkout): the
@@ -1178,8 +1136,7 @@ export function parseCuratedDramaScore(matchRecapRaw: string): number | null {
 // `inlineRunArtifacts` entry into the run dir unmodified, so
 // `spectator-telemetry.json` is normally sitting right there once an episode
 // is unpacked — a strictly more faithful signal than re-deriving events from
-// raw decisions, and it needs zero new parsing: it's the EXACT SAME
-// `SpectatorTelemetry` a local match hands `buildDirectorCutPlan`.
+// raw decisions, and it needs zero new parsing.
 //
 // `decisions.jsonl` (the `DecisionLogEntry[]` JSONL `writeAgentLeagueRunArtifacts`
 // itself produces — see `AgentDecisionLogWriter.ts`'s `decisionLogEntry`) is
@@ -1191,20 +1148,15 @@ export function parseCuratedDramaScore(matchRecapRaw: string): number | null {
 // rebuild an equivalent event stream without a new game-record/replay parser.
 // ---------------------------------------------------------------------------
 
-export interface DirectorCutPlanGenerationOutcome {
-  plan: DirectorCutPlan;
-  /** Which artifact the plan was actually built from — for logging/observability only, never published. */
-  source: "spectator-telemetry" | "decisions-log";
-}
-
 /**
  * Tolerant parse + minimal shape validation of a mirrored run's
  * `spectator-telemetry.json` contents into the exact `SpectatorTelemetry`
- * `buildDirectorCutPlan` expects. Deliberately light-touch — this is the SAME
- * producer's own trusted output, not third-party input — but still guards
- * against a torn/partial download or a future schema break: requires
- * `version === 1`, at least one agent, and every event carrying the handful
- * of fields the plan generator and roster derivation actually read.
+ * shape a match-narrative generator expects. Deliberately light-touch — this
+ * is the SAME producer's own trusted output, not third-party input — but
+ * still guards against a torn/partial download or a future schema break:
+ * requires `version === 1`, at least one agent, and every event carrying the
+ * handful of fields the narrative generators and roster derivation actually
+ * read.
  * Malformed or unparseable input resolves to `null`, never a throw.
  */
 export function parseMirroredSpectatorTelemetry(
@@ -1436,8 +1388,7 @@ export interface ResolvedMirroredMatchEvidence {
   /**
    * Raw records reconstructed from `decisions.jsonl` — the REQUIRED,
    * unmodified-signature input `buildAgentDramaReport`/`buildAgentMatchStory`
-   * need (unlike `buildDirectorCutPlan`, neither accepts a pre-built
-   * `SpectatorTelemetry`). Empty only when `decisionsJsonlRaw` was absent,
+   * need (neither accepts a pre-built `SpectatorTelemetry`).
    * oversize, or unparseable while `spectatorTelemetryRaw` still resolved —
    * a real, distinct evidence gap (not an error): a caller needing records
    * degrades honestly (e.g. recap-only) rather than fabricating them.
@@ -1449,14 +1400,12 @@ export interface ResolvedMirroredMatchEvidence {
 
 /**
  * Shared two-tier telemetry/record resolution for every mirror-side,
- * post-hoc match-narrative generator (Director Cut, drama report, match
- * story, match recap): prefers the faithful `spectator-telemetry.json` tier
- * and falls back to `decisions.jsonl` derivation, exactly like
- * {@link resolveMirroredDirectorCutPlan} always did — this IS that logic,
- * factored out so a second generator never re-implements it. Always ALSO
- * resolves the raw `decisions.jsonl` records (independent of which
- * telemetry tier wins) since `buildAgentDramaReport`/`buildAgentMatchStory`
- * need them directly. `null` only when NEITHER input is usable at all.
+ * post-hoc match-narrative generator (drama report, match story, match
+ * recap): prefers the faithful `spectator-telemetry.json` tier and falls
+ * back to `decisions.jsonl` derivation. Always ALSO resolves the raw
+ * `decisions.jsonl` records (independent of which telemetry tier wins)
+ * since `buildAgentDramaReport`/`buildAgentMatchStory` need them directly.
+ * `null` only when NEITHER input is usable at all.
  */
 export function resolveMirroredMatchEvidence(input: {
   runID: string;
@@ -1517,40 +1466,6 @@ export function resolveMirroredMatchEvidence(input: {
   return null;
 }
 
-/**
- * Resolves the Director Cut plan for one mirrored run dir from whatever
- * telemetry artifact is already sitting next to it — thin wrapper over
- * {@link resolveMirroredMatchEvidence}. `null` when neither input is usable
- * — the caller (the mirror script) logs and skips; this function itself
- * never throws.
- */
-export function resolveMirroredDirectorCutPlan(input: {
-  runID: string;
-  matchID: string;
-  spectatorTelemetryRaw: string | null;
-  decisionsJsonlRaw: string | null;
-  finalTurnCount: number | null;
-  /** Season Zero Phase 2: when a `match-state-series.json` was already generated for this run (`CoworldLeagueMatchStateSeriesBackfill.ts` runs strictly before this one in the mirror cycle), threading it through adds honest `lead_change`/`reversal` segments (`DirectorCutPlan.ts`). `null` (not yet generated, or the source replay had zero snapshots) degrades exactly as before this fix — no such segments, never fabricated. */
-  matchStateSeries?: MatchStateSeries | null;
-}): DirectorCutPlanGenerationOutcome | null {
-  const evidence = resolveMirroredMatchEvidence(input);
-  if (evidence === null) {
-    return null;
-  }
-  return {
-    source: evidence.source,
-    plan: buildDirectorCutPlan({
-      runID: input.runID,
-      matchID: input.matchID,
-      records: [],
-      roster: evidence.roster,
-      finalState: evidence.finalState,
-      spectatorTelemetry: evidence.telemetry,
-      matchStateSeries: input.matchStateSeries ?? null,
-    }),
-  };
-}
-
 // ---------------------------------------------------------------------------
 // Season Zero Phase 2: the sampled match-state series (`AgentMatchStateSeries.ts`).
 // ---------------------------------------------------------------------------
@@ -1600,13 +1515,15 @@ export function parseMirroredSpectatorReplay(
 
 /**
  * Tolerant parse + minimal shape validation of an already-generated
- * `match-state-series.json` — used by every downstream consumer (recap,
- * Director Cut) that reads the series back rather than rebuilding it.
+ * `match-state-series.json` — used by every downstream consumer (recap)
+ * that reads the series back rather than rebuilding it.
  * Requires the current `MATCH_STATE_SERIES_SCHEMA_VERSION`; a stale or
  * malformed artifact resolves to `null` (read as "no series yet"), never a
  * throw and never silently trusted past a schema change.
  */
-export function parseMirroredMatchStateSeries(raw: string): MatchStateSeries | null {
+export function parseMirroredMatchStateSeries(
+  raw: string,
+): MatchStateSeries | null {
   let value: unknown;
   try {
     value = JSON.parse(raw);
@@ -1624,7 +1541,11 @@ export function parseMirroredMatchStateSeries(raw: string): MatchStateSeries | n
   const samples = asArray(record.samples);
   const samplesValid = samples.every((sample) => {
     const entry = asRecord(sample);
-    return entry !== null && typeof entry.turn === "number" && Array.isArray(entry.agents);
+    return (
+      entry !== null &&
+      typeof entry.turn === "number" &&
+      Array.isArray(entry.agents)
+    );
   });
   if (!samplesValid) {
     return null;

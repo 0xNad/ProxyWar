@@ -225,14 +225,16 @@ function renderCompetitorRailEntry(
     emblem.setAttribute("aria-hidden", "true");
     identityRow.append(emblem);
   } else {
-    const placeholder = element("span", "broadcast-rail-emblem-placeholder", "?");
+    const placeholder = element(
+      "span",
+      "broadcast-rail-emblem-placeholder",
+      "?",
+    );
     placeholder.setAttribute("aria-hidden", "true");
     identityRow.append(placeholder);
   }
   const nameBlock = element("div", "broadcast-rail-name-block");
-  nameBlock.append(
-    element("span", "broadcast-rail-name", entry.displayName),
-  );
+  nameBlock.append(element("span", "broadcast-rail-name", entry.displayName));
   if (entry.versionLabel !== null) {
     nameBlock.append(
       element("span", "broadcast-rail-version", entry.versionLabel),
@@ -461,8 +463,7 @@ export function renderWarRoomEvent(
   item.dataset.tier = String(event.tier ?? 2);
   const summary = element("button", "broadcast-war-room-summary");
   summary.type = "button";
-  const expanded =
-    event.expandedDetail !== null || event.publicReason !== null;
+  const expanded = event.expandedDetail !== null || event.publicReason !== null;
   summary.setAttribute("aria-expanded", "false");
   const glyph = element(
     "span",
@@ -783,7 +784,11 @@ export class LowerThirdController {
 // keep in sync, one tree, two stylesheets' worth of rules over it.
 // ---------------------------------------------------------------------------
 
-export type BroadcastDrawerTabId = "agents" | "events" | "timeline" | "analysis";
+export type BroadcastDrawerTabId =
+  | "agents"
+  | "events"
+  | "timeline"
+  | "analysis";
 
 export interface BroadcastDrawerTab {
   id: BroadcastDrawerTabId;
@@ -823,7 +828,11 @@ export function renderBroadcastDrawer(
     tabButton.setAttribute("aria-controls", panelId);
     tabButton.tabIndex = isActive ? 0 : -1;
     tabButton.dataset.tabId = tab.id;
-    if (tab.badgeCount !== undefined && tab.badgeCount !== null && tab.badgeCount > 0) {
+    if (
+      tab.badgeCount !== undefined &&
+      tab.badgeCount !== null &&
+      tab.badgeCount > 0
+    ) {
       tabButton.append(
         element("span", "broadcast-drawer-tab-badge", String(tab.badgeCount)),
       );
@@ -939,9 +948,7 @@ export function renderAnalystActionChart(
   const list = element("ol", "broadcast-analyst-chart-list");
   for (const entry of counts) {
     const row = element("li", "broadcast-analyst-chart-row");
-    row.append(
-      element("span", "broadcast-analyst-chart-label", entry.kind),
-    );
+    row.append(element("span", "broadcast-analyst-chart-label", entry.kind));
     const track = element("span", "broadcast-analyst-chart-track");
     const bar = element("span", "broadcast-analyst-chart-bar");
     bar.style.setProperty(
@@ -1006,7 +1013,11 @@ export function renderAnalystDecisions(
     "reason",
   ]) {
     headRow.append(
-      element("th", "", translateText(`broadcast.analyst_decisions_col_${key}`)),
+      element(
+        "th",
+        "",
+        translateText(`broadcast.analyst_decisions_col_${key}`),
+      ),
     );
   }
   head.append(headRow);
@@ -1030,7 +1041,10 @@ export function renderAnalystDecisions(
 export function renderAnalystDecisionRow(
   row: AnalystDecisionRow,
 ): HTMLTableRowElement {
-  const tr = element("tr", "broadcast-analyst-decisions-row") as HTMLTableRowElement;
+  const tr = element(
+    "tr",
+    "broadcast-analyst-decisions-row",
+  ) as HTMLTableRowElement;
   tr.dataset.fallbackUsed = String(row.fallbackUsed);
   tr.dataset.accepted = String(row.accepted);
   tr.append(
@@ -1057,7 +1071,9 @@ export function renderAnalystDecisionRow(
   return tr;
 }
 
-export function renderAnalystEventLog(events: readonly AnalystEventRow[]): HTMLElement {
+export function renderAnalystEventLog(
+  events: readonly AnalystEventRow[],
+): HTMLElement {
   const wrap = element("div", "broadcast-analyst-events");
   wrap.append(
     element(
@@ -1118,8 +1134,8 @@ export function renderAnalystEventRow(event: AnalystEventRow): HTMLLIElement {
  * A compact, always-visible summary strip derived from the sampled
  * `match-state-series.json` artifact (`AgentMatchStateSeries.ts` —
  * `MatchStateSeriesSample`): current leader, territory-share change,
- * alive count, active alliances/wars, and the current Director Cut
- * segment or live event phase. Deliberately NO win probability (spec:
+ * alive count, active alliances/wars, and the current live event phase.
+ * Deliberately NO win probability (spec:
  * "Do not add live win probability") — every field here is a plain,
  * already-true fact about the CURRENT sample, never a forward-looking
  * inference.
@@ -1146,7 +1162,7 @@ export interface MatchStateStripInput {
   totalCount: number;
   activeAllianceCount: number;
   activeWarCount: number;
-  /** Current Director Cut segment label (e.g. "Opening", "First strike", "Final conflict") or live event phase — `null` before the caller can resolve one (e.g. pre-connection). */
+  /** Current live event phase label (e.g. "Opening", "First strike", "Final conflict") — `null` before the caller can resolve one (e.g. pre-connection). */
   currentPhaseLabel: string | null;
 }
 
@@ -1156,7 +1172,11 @@ function formatSignedPercent(value: number): string {
   return rounded > 0 ? `+${rounded}` : String(rounded);
 }
 
-function stripItem(className: string, label: string, value: string): HTMLElement {
+function stripItem(
+  className: string,
+  label: string,
+  value: string,
+): HTMLElement {
   const item = element("div", `broadcast-state-strip-item ${className}`);
   item.append(
     element("span", "broadcast-state-strip-label", label),
@@ -1165,10 +1185,15 @@ function stripItem(className: string, label: string, value: string): HTMLElement
   return item;
 }
 
-export function renderMatchStateStrip(input: MatchStateStripInput): HTMLElement {
+export function renderMatchStateStrip(
+  input: MatchStateStripInput,
+): HTMLElement {
   const strip = element("div", "broadcast-state-strip");
   strip.setAttribute("role", "status");
-  strip.setAttribute("aria-label", translateText("broadcast.state_strip_heading"));
+  strip.setAttribute(
+    "aria-label",
+    translateText("broadcast.state_strip_heading"),
+  );
 
   strip.append(
     stripItem(
@@ -1231,7 +1256,7 @@ export function renderMatchStateStrip(input: MatchStateStripInput): HTMLElement 
 // ---------------------------------------------------------------------------
 // Content-keyed list patching (P1 scroll-teleport fix, found live: "some
 // parts of the panel are not scrollable, they teleport me back when I try
-// to scroll in director cut")
+// to scroll mid-playback")
 // ---------------------------------------------------------------------------
 
 /**

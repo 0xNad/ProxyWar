@@ -14,7 +14,7 @@ import {
 import "./components/baseComponents/ranking/PlayerRow";
 import "./components/baseComponents/ranking/RankingControls";
 import "./components/baseComponents/ranking/RankingHeader";
-import { waitForTranslationsReady } from "./publicapp/AppShellChrome";
+import { requestUpdateWhenTranslationsReady } from "./publicapp/AppShellChrome";
 
 @customElement("game-info-modal")
 export class GameInfoModal extends BaseModal {
@@ -52,7 +52,7 @@ export class GameInfoModal extends BaseModal {
   connectedCallback() {
     super.connectedCallback();
     this.updateRanking();
-    void waitForTranslationsReady().then(() => this.requestUpdate());
+    requestUpdateWhenTranslationsReady(this);
   }
 
   render() {

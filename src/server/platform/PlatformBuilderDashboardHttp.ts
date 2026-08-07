@@ -14,18 +14,21 @@
  * own dashboard never disagrees with what a visitor sees on
  * `/agent/:slug`.
  */
-import { promises as fs } from "node:fs";
 import express, { type Request, type Response, type Router } from "express";
+import { promises as fs } from "node:fs";
 import type { PublicAgent, PublicMatch } from "../ProxyWarPublicReadModel";
 import { readFeaturedMatchStore } from "../agents/FeaturedMatch";
 import { requestSecurityHeaders } from "../replay-premiere/ReplayPremiereHttp";
+import type { PlatformAccountSecurity } from "./PlatformAccountSecurity";
 import {
   findClaimsByAccount,
   readBuilderClaimStore,
 } from "./PlatformBuilderClaimStore";
-import type { PlatformAccountSecurity } from "./PlatformAccountSecurity";
 import type { PlatformGithubIdentityLinkStore } from "./PlatformGithubIdentityLinkStore";
-import { findReleasesByAccount, readVersionReleaseStore } from "./PlatformVersionReleaseStore";
+import {
+  findReleasesByAccount,
+  readVersionReleaseStore,
+} from "./PlatformVersionReleaseStore";
 
 export interface PlatformBuilderDashboardHttpOptions {
   readonly security: PlatformAccountSecurity;
@@ -54,7 +57,9 @@ interface MinimalReadModel {
   readonly builders: readonly MinimalReadModelBuilder[];
 }
 
-async function loadReadModel(filePath: string): Promise<MinimalReadModel | null> {
+async function loadReadModel(
+  filePath: string,
+): Promise<MinimalReadModel | null> {
   try {
     const raw = await fs.readFile(filePath, "utf8");
     const parsed: unknown = JSON.parse(raw);
@@ -67,7 +72,11 @@ async function loadReadModel(filePath: string): Promise<MinimalReadModel | null>
     ) {
       return null;
     }
-    const candidate = parsed as { agents: unknown; matches: unknown; builders: unknown };
+    const candidate = parsed as {
+      agents: unknown;
+      matches: unknown;
+      builders: unknown;
+    };
     if (
       !Array.isArray(candidate.agents) ||
       !Array.isArray(candidate.matches) ||
@@ -91,7 +100,9 @@ function latestMatchForAgentSlug(
   agentSlug: string,
 ): PublicMatch | null {
   const relevant = matches.filter((match) =>
-    match.participants.some((participant) => participant.agentSlug === agentSlug),
+    match.participants.some(
+      (participant) => participant.agentSlug === agentSlug,
+    ),
   );
   relevant.sort((a, b) => {
     if (a.completedAt === null) return 1;
@@ -105,7 +116,11 @@ function latestMatchForAgentSlug(
 function ratingMovementAcrossMatch(
   agent: PublicAgent,
   completedAt: string | null,
-): { readonly before: number; readonly after: number; readonly delta: number } | null {
+): {
+  readonly before: number;
+  readonly after: number;
+  readonly delta: number;
+} | null {
   if (completedAt === null) return null;
   const points = agent.timeSeries.score?.points ?? [];
   let before: number | null = null;
@@ -133,7 +148,9 @@ async function findUpcomingFeaturedEvent(
           match.lane === "premiere" &&
           (match.state === "scheduled" || match.state === "published") &&
           match.scheduledAt !== null &&
-          match.participants.some((participant) => participant.agentId === agentId),
+          match.participants.some(
+            (participant) => participant.agentId === agentId,
+          ),
       )
       .sort((a, b) => (a.scheduledAt ?? "").localeCompare(b.scheduledAt ?? ""));
     const next = upcoming[0];
@@ -162,14 +179,19 @@ export function createPlatformBuilderDashboardRouter(
         const bootstrap = options.security.bootstrapRead(
           requestSecurityHeaders(req),
         );
-        if (bootstrap.setCookie !== null) res.setHeader("Set-Cookie", bootstrap.setCookie);
+        if (bootstrap.setCookie !== null)
+          res.setHeader("Set-Cookie", bootstrap.setCookie);
         const canonicalAccountId =
           await options.identityLinkStore.resolveCanonicalAccountId(
             bootstrap.account.accountId,
           );
-        const claimFile = await readBuilderClaimStore(options.claimStore.stateRoot);
+        const claimFile = await readBuilderClaimStore(
+          options.claimStore.stateRoot,
+        );
         const ownClaims = findClaimsByAccount(claimFile, canonicalAccountId);
-        const verifiedClaims = ownClaims.filter((claim) => claim.state === "verified");
+        const verifiedClaims = ownClaims.filter(
+          (claim) => claim.state === "verified",
+        );
         if (verifiedClaims.length === 0) {
           res.status(200).json({
             schemaVersion: 1,
@@ -187,17 +209,24 @@ export function createPlatformBuilderDashboardRouter(
           return;
         }
         const readModel = await loadReadModel(options.readModelFilePath);
-        const releaseFile = await readVersionReleaseStore(options.releaseStore.stateRoot);
+        const releaseFile = await readVersionReleaseStore(
+          options.releaseStore.stateRoot,
+        );
         const releases = findReleasesByAccount(releaseFile, canonicalAccountId);
         const agents = await Promise.all(
           verifiedClaims.map(async (claim) => {
             const publicAgent =
-              readModel?.agents.find((candidate) => candidate.id === claim.agentId) ?? null;
+              readModel?.agents.find(
+                (candidate) => candidate.id === claim.agentId,
+              ) ?? null;
             const latestMatch =
-              publicAgent?.slug === null || publicAgent === null || readModel === null
+              publicAgent?.slug === null ||
+              publicAgent === null ||
+              readModel === null
                 ? null
                 : latestMatchForAgentSlug(readModel.matches, publicAgent.slug);
-            const reliability = publicAgent?.stats?.career.fingerprint.reliability ?? null;
+            const reliability =
+              publicAgent?.stats?.career.fingerprint.reliability ?? null;
             const nextScheduledEvent = await findUpcomingFeaturedEvent(
               options.featuredMatchStateRoot,
               claim.agentId,
@@ -205,10 +234,13 @@ export function createPlatformBuilderDashboardRouter(
             return {
               agentId: claim.agentId,
               slug: publicAgent?.slug ?? null,
-              displayName: publicAgent?.displayName ?? claim.builderProfileDraft.displayName,
+              displayName:
+                publicAgent?.displayName ??
+                claim.builderProfileDraft.displayName,
               rank: publicAgent?.standing?.rank ?? null,
               score: publicAgent?.standing?.score ?? null,
-              activeVersionLabel: publicAgent?.activeVersion?.publicVersionLabel ?? null,
+              activeVersionLabel:
+                publicAgent?.activeVersion?.publicVersionLabel ?? null,
               degradedRate: reliability === null ? null : 1 - reliability.value,
               latestMatch:
                 latestMatch === null
@@ -217,7 +249,7 @@ export function createPlatformBuilderDashboardRouter(
                       matchId: latestMatch.matchId,
                       completedAt: latestMatch.completedAt,
                       watchHref: latestMatch.watchHref,
-                      directorCutHref: latestMatch.fullRenderHref,
+                      replayHref: latestMatch.fullRenderHref,
                     },
               nextScheduledEvent,
             };
@@ -229,8 +261,9 @@ export function createPlatformBuilderDashboardRouter(
         const builder =
           firstAgent?.builderId === null || firstAgent === undefined
             ? null
-            : (readModel?.builders.find((candidate) => candidate.id === firstAgent.builderId) ??
-              null);
+            : (readModel?.builders.find(
+                (candidate) => candidate.id === firstAgent.builderId,
+              ) ?? null);
         res.status(200).json({
           schemaVersion: 1,
           isVerifiedBuilder: true,
@@ -273,12 +306,15 @@ export function createPlatformBuilderDashboardRouter(
         const bootstrap = options.security.bootstrapRead(
           requestSecurityHeaders(req),
         );
-        if (bootstrap.setCookie !== null) res.setHeader("Set-Cookie", bootstrap.setCookie);
+        if (bootstrap.setCookie !== null)
+          res.setHeader("Set-Cookie", bootstrap.setCookie);
         const canonicalAccountId =
           await options.identityLinkStore.resolveCanonicalAccountId(
             bootstrap.account.accountId,
           );
-        const claimFile = await readBuilderClaimStore(options.claimStore.stateRoot);
+        const claimFile = await readBuilderClaimStore(
+          options.claimStore.stateRoot,
+        );
         const verifiedAgentIds = new Set(
           findClaimsByAccount(claimFile, canonicalAccountId)
             .filter((claim) => claim.state === "verified")
@@ -289,7 +325,9 @@ export function createPlatformBuilderDashboardRouter(
           sendFailure(res, 503, "PLATFORM_UNAVAILABLE");
           return;
         }
-        const match = readModel.matches.find((candidate) => candidate.matchId === matchId);
+        const match = readModel.matches.find(
+          (candidate) => candidate.matchId === matchId,
+        );
         if (match === undefined) {
           sendFailure(res, 404, "PLATFORM_MATCH_NOT_FOUND");
           return;
@@ -297,7 +335,9 @@ export function createPlatformBuilderDashboardRouter(
         const ownAgent = readModel.agents.find(
           (agent) =>
             verifiedAgentIds.has(agent.id ?? "") &&
-            match.participants.some((participant) => participant.agentSlug === agent.slug),
+            match.participants.some(
+              (participant) => participant.agentSlug === agent.slug,
+            ),
         );
         if (ownAgent === undefined) {
           sendFailure(res, 404, "PLATFORM_MATCH_NOT_FOUND");
@@ -315,8 +355,14 @@ export function createPlatformBuilderDashboardRouter(
             result:
               participant === undefined
                 ? null
-                : { isWinner: participant.isWinner, isAlive: participant.isAlive },
-            ratingMovement: ratingMovementAcrossMatch(ownAgent, match.completedAt),
+                : {
+                    isWinner: participant.isWinner,
+                    isAlive: participant.isAlive,
+                  },
+            ratingMovement: ratingMovementAcrossMatch(
+              ownAgent,
+              match.completedAt,
+            ),
             matchReliability:
               match.decisionCount === null || match.degradedCount === null
                 ? null
@@ -326,7 +372,7 @@ export function createPlatformBuilderDashboardRouter(
                   },
             links: {
               watchHref: match.watchHref,
-              directorCutHref: match.fullRenderHref,
+              replayHref: match.fullRenderHref,
             },
           },
         });

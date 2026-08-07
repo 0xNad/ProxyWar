@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   appShellFooter,
   appShellHeader,
+  requestUpdateWhenTranslationsReady,
   waitForTranslationsReady,
 } from "../../../src/client/publicapp/AppShellChrome";
 
@@ -219,5 +220,52 @@ describe("waitForTranslationsReady", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+/**
+ * Regression coverage for the `isConnected` guard in
+ * `requestUpdateWhenTranslationsReady` (2026-08-07): every public page's
+ * `connectedCallback` used to call `waitForTranslationsReady().then(() =>
+ * this.requestUpdate())` directly — a fire-and-forget chain with no such
+ * guard. `waitForTranslationsReady`'s own bounded retry can still be
+ * pending when the calling element is unmounted (a real navigation away
+ * in a browser, or — the failure actually seen live — an element torn
+ * down between test files while this promise chain sat starved of CPU
+ * and only settled much later): calling `requestUpdate()` on an
+ * already-disconnected element schedules a Lit update whose later
+ * `render()` has no guarantee `document` still exists (confirmed live:
+ * an intermittent "Unhandled Rejection: ReferenceError: document is not
+ * defined" from exactly this pattern — GH Actions run 31137636588,
+ * `AgentsDirectoryPage.test.ts`, ~53s after that file's own tests had
+ * already finished and passed). `element` is a plain structural fake, not
+ * a real Lit component — this tests the guard itself, deterministically,
+ * without needing to reproduce the cross-file jsdom-teardown timing race.
+ */
+describe("requestUpdateWhenTranslationsReady", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("calls requestUpdate() once translations become ready, while the element is still connected", async () => {
+    vi.useFakeTimers();
+    const requestUpdate = vi.fn();
+    const element = { isConnected: true, requestUpdate };
+    requestUpdateWhenTranslationsReady(element);
+    // No <lang-selector> in the DOM: every attempt falls through to the
+    // bounded 20ms retry branch (see `waitForTranslationsReady`'s own
+    // tests above) — advance past its full 20-attempt budget.
+    await vi.advanceTimersByTimeAsync(20 * 20);
+    expect(requestUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it("never calls requestUpdate() once the element has been disconnected before translations become ready", async () => {
+    vi.useFakeTimers();
+    const requestUpdate = vi.fn();
+    const element = { isConnected: true, requestUpdate };
+    requestUpdateWhenTranslationsReady(element);
+    element.isConnected = false; // simulates unmount/jsdom teardown mid-wait
+    await vi.advanceTimersByTimeAsync(20 * 20);
+    expect(requestUpdate).not.toHaveBeenCalled();
   });
 });

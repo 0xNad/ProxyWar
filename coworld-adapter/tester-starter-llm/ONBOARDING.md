@@ -72,7 +72,10 @@ Open **`llm-player.mjs`** and edit three things — that's your agent:
 
 The model doesn't pick individual moves — it writes a short **PLAN** (`{"focus": ...,
 "preferKinds": [...], "target": ..., "avoidTargets": [...], "reason": ...}`) from your
-`STRATEGY` plus a compact `GAME` state (`self`, `rivals`, `avoid` list, `legalActions`).
+`STRATEGY` plus a compact `GAME` state (`self`, `rivals`, per-kind move counts in
+`legalKinds`, and the rare high-risk options verbatim in `highRisk`). Not sending the
+full move list keeps the prompt ~67% smaller — the model plans in kinds and rival
+names; `choose` grounds the plan in the actual menu every turn.
 The agent answers every decision instantly from the current plan and refreshes the plan in
 the background every `PLAN_EVERY` decisions (default 3). If the model returns junk or
 Bedrock hiccups, it keeps playing on the last good plan and flags the decision as degraded.

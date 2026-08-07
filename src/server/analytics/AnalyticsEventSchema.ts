@@ -34,7 +34,6 @@ export const ANALYTICS_EVENT_NAMES = [
   "replay_load_started",
   "replay_load_succeeded",
   "replay_load_failed",
-  "director_cut_started",
   "watched_30s",
   "watched_2m",
   "watched_50pct",
@@ -95,7 +94,6 @@ export const AnalyticsEventContextSchema = z
     builderSlug: BoundedSlugSchema.optional(),
     claimId: BoundedIdSchema.optional(),
     versionLabel: BoundedSlugSchema.optional(),
-    replayMode: z.enum(["director_cut", "full_replay"]).optional(),
     step: z.number().int().min(1).max(7).optional(),
     reason: BoundedReasonSchema.optional(),
   })
@@ -157,8 +155,14 @@ export function normalizeAnalyticsRoute(rawPath: string): string {
   const idLike = /[0-9]/;
   const normalized = segments.slice(0, 3).map((segment, index) => {
     if (index === 0) return segment.toLowerCase();
-    return idLike.test(segment) || segment.length >= 16 ? ":id" : segment.toLowerCase();
+    return idLike.test(segment) || segment.length >= 16
+      ? ":id"
+      : segment.toLowerCase();
   });
   const result = `/${normalized.join("/")}`;
-  return result.length > 80 ? result.slice(0, 80) : result === "/" ? "/" : result;
+  return result.length > 80
+    ? result.slice(0, 80)
+    : result === "/"
+      ? "/"
+      : result;
 }

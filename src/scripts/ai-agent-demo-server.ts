@@ -24,55 +24,8 @@ import {
   type AgentDemoJobRequest,
 } from "../server/agents/AgentDemoServerJobs";
 import { AgentRelayRateGuard } from "../server/agents/AgentRelayRateGuard";
-import {
-  resolveArchivedEpisodeReplayHrefs,
-  resolveCoworldLeagueSummaryArchiveDir,
-  restoreArchivedGameRecord,
-} from "../server/agents/CoworldLeagueArtifactRetention";
-import {
-  resolveFeaturedMatchStateRoot,
-  type FeaturedMatch,
-} from "../server/agents/FeaturedMatch";
-import { reconcileFeaturedMatchStore } from "../server/agents/FeaturedMatchReconcile";
-import { resolveFeaturedMatchParticipantCards } from "../server/agents/FeaturedMatchParticipants";
-import {
-  findEventPackage,
-  readEventPackageStore,
-  resolveEventPackageStateRoot,
-} from "../server/agents/season/EventPackage";
-import {
-  buildLeagueEpisodeMatchPageModel,
-  buildLeagueEpisodeParticipantCards,
-  findLeagueEpisodeByRequestId,
-  findLeagueEpisodeRunDir,
-  leagueEpisodeSpoilerSafeDescription,
-  leagueEpisodeSpoilerSafeTitle,
-  readCoworldLeagueEpisodesFromDataJson,
-  readLeagueEpisodeDecisiveMoments,
-  readLeagueEpisodeRecap,
-} from "../server/agents/LeagueEpisodeMatchPage";
-import {
-  renderMatchShareCardSvg,
-  type MatchShareCardInput,
-} from "../server/agents/MatchShareCard";
-import { loadIdentityRegistrySnapshot } from "../server/identity/IdentityRegistry";
-import {
-  buildRegistrationDraft,
-  buildRegistrationIssueUrl,
-  BuildRegistrationSubmissionInputSchema,
-  firstFieldError,
-} from "../server/identity/BuildRegistrationSubmission";
-import { BuildFunnelCounters } from "../server/agents/BuildFunnelCounters";
-import { AnalyticsAggregateStore } from "../server/analytics/AnalyticsAggregateStore";
-import { AnalyticsIngestService } from "../server/analytics/AnalyticsIngestService";
-import { AnalyticsRecentRing } from "../server/analytics/AnalyticsRecentRing";
-import { applyMatchLabels, buildAnalyticsReport } from "../server/analytics/AnalyticsReport";
-import { renderAnalyticsReportHtml } from "../server/analytics/AnalyticsReportPage";
-import { generateEmblemSvg, deriveEmblemPalette } from "../server/identity/IdentityEmblems";
-import { SlugSchema } from "../server/identity/IdentitySchemas";
-import { publicFeaturedMatch } from "../server/ProxyWarPublicReadModel";
-import { derivePremiereId } from "../server/replay-premiere/ReplayPremiereLoopCore";
 import { gameRecordFileIsRenderable } from "../server/agents/AgentSpectatorReplay";
+import { readAgentStatsArtifact } from "../server/agents/AgentStatsArtifact";
 import {
   agentStrategyProfiles,
   type AgentStrategyProfile,
@@ -89,6 +42,13 @@ import {
   AiLeagueRunClips,
   createAiLeagueRunClipDocumentRouter,
 } from "../server/agents/AiLeagueRunClips";
+import { BuildFunnelCounters } from "../server/agents/BuildFunnelCounters";
+import {
+  resolveArchivedEpisodeReplayHrefs,
+  resolveCoworldLeagueSummaryArchiveDir,
+  restoreArchivedGameRecord,
+} from "../server/agents/CoworldLeagueArtifactRetention";
+import { readStandingsHistoryStore } from "../server/agents/CoworldLeagueStandingsHistory";
 import {
   checkExternalAgentEndpoint,
   normalizeExternalAgentHealthCheckInput,
@@ -105,12 +65,31 @@ import {
 import { resolveExternalAgentToken } from "../server/agents/ExternalAgentSecrets";
 import type { ExternalAgentRequest } from "../server/agents/ExternalHttpAgentBrain";
 import {
+  resolveFeaturedMatchStateRoot,
+  type FeaturedMatch,
+} from "../server/agents/FeaturedMatch";
+import { resolveFeaturedMatchParticipantCards } from "../server/agents/FeaturedMatchParticipants";
+import { reconcileFeaturedMatchStore } from "../server/agents/FeaturedMatchReconcile";
+import {
+  buildLeagueEpisodeMatchPageModel,
+  buildLeagueEpisodeParticipantCards,
+  findLeagueEpisodeByRequestId,
+  findLeagueEpisodeRunDir,
+  leagueEpisodeSpoilerSafeDescription,
+  leagueEpisodeSpoilerSafeTitle,
+  readCoworldLeagueEpisodesFromDataJson,
+  readLeagueEpisodeDecisiveMoments,
+  readLeagueEpisodeRecap,
+} from "../server/agents/LeagueEpisodeMatchPage";
+import {
   buildLeaguePlayerSection,
   findLeagueEpisodeReplayInfo,
   readLeagueMirrorData,
 } from "../server/agents/LeaguePlayerProfile";
-import { readAgentStatsArtifact } from "../server/agents/AgentStatsArtifact";
-import { readStandingsHistoryStore } from "../server/agents/CoworldLeagueStandingsHistory";
+import {
+  renderMatchShareCardSvg,
+  type MatchShareCardInput,
+} from "../server/agents/MatchShareCard";
 import {
   parsePlayerStrategySpec,
   PlayerStrategySpec,
@@ -181,21 +160,45 @@ import {
   type ProxyWarRateLimitSnapshot,
 } from "../server/agents/ProxyWarRateLimit";
 import { renderQuickStartPlayHtml } from "../server/agents/QuickStartPlayPage";
+import {
+  findEventPackage,
+  readEventPackageStore,
+  resolveEventPackageStateRoot,
+} from "../server/agents/season/EventPackage";
+import { AnalyticsAggregateStore } from "../server/analytics/AnalyticsAggregateStore";
+import { AnalyticsIngestService } from "../server/analytics/AnalyticsIngestService";
+import { AnalyticsRecentRing } from "../server/analytics/AnalyticsRecentRing";
+import {
+  applyMatchLabels,
+  buildAnalyticsReport,
+} from "../server/analytics/AnalyticsReport";
+import { renderAnalyticsReportHtml } from "../server/analytics/AnalyticsReportPage";
 import { resolveBettingProfileServiceToken } from "../server/BettingProfileServiceAuth";
 import {
   createGithubOAuthClient,
   resolveGithubOAuthConfig,
 } from "../server/GithubOAuthClient";
+import {
+  buildRegistrationDraft,
+  buildRegistrationIssueUrl,
+  BuildRegistrationSubmissionInputSchema,
+  firstFieldError,
+} from "../server/identity/BuildRegistrationSubmission";
+import {
+  deriveEmblemPalette,
+  generateEmblemSvg,
+} from "../server/identity/IdentityEmblems";
+import { loadIdentityRegistrySnapshot } from "../server/identity/IdentityRegistry";
+import { SlugSchema } from "../server/identity/IdentitySchemas";
 import { createPlatformAccountRouter } from "../server/platform/PlatformAccountHttp";
+import { PlatformAccountSecurity } from "../server/platform/PlatformAccountSecurity";
+import { PlatformAccountStore } from "../server/platform/PlatformAccountStore";
 import { createPlatformBuilderClaimRouter } from "../server/platform/PlatformBuilderClaimHttp";
 import { resolveBuilderClaimStateRoot } from "../server/platform/PlatformBuilderClaimStore";
 import { createPlatformBuilderDashboardRouter } from "../server/platform/PlatformBuilderDashboardHttp";
 import { createPlatformBuilderEditRouter } from "../server/platform/PlatformBuilderEditHttp";
 import { resolveBuilderEditStateRoot } from "../server/platform/PlatformBuilderEditStore";
 import { createPlatformBuilderVersionRouter } from "../server/platform/PlatformBuilderVersionHttp";
-import { resolveVersionReleaseStateRoot } from "../server/platform/PlatformVersionReleaseStore";
-import { PlatformAccountSecurity } from "../server/platform/PlatformAccountSecurity";
-import { PlatformAccountStore } from "../server/platform/PlatformAccountStore";
 import { resolveCanonicalHostRedirect } from "../server/platform/PlatformCanonicalHost";
 import { createPlatformGithubAuthRouter } from "../server/platform/PlatformGithubAuth";
 import { PlatformGithubIdentityLinkStore } from "../server/platform/PlatformGithubIdentityLinkStore";
@@ -208,6 +211,8 @@ import {
   PLATFORM_HMAC_HEX_ENV,
   resolvePlatformPrivateStateRoot,
 } from "../server/platform/PlatformSecrets";
+import { resolveVersionReleaseStateRoot } from "../server/platform/PlatformVersionReleaseStore";
+import { publicFeaturedMatch } from "../server/ProxyWarPublicReadModel";
 import {
   getAppShellContent,
   setHtmlNoCacheHeaders,
@@ -258,6 +263,7 @@ import {
   requestSecurityHeaders,
 } from "../server/replay-premiere/ReplayPremiereHttp";
 import type { ReplayPremiereSettlementPointsRecorder } from "../server/replay-premiere/ReplayPremiereInteractions";
+import { derivePremiereId } from "../server/replay-premiere/ReplayPremiereLoopCore";
 import {
   createReplayPremierePublicPageRouter,
   escapeHtml,
@@ -317,7 +323,8 @@ const runsRootDir = path.join(artifactsRootDir, "ai-league-runs");
 // `CoworldLeagueArtifactRetention.ts`'s `resolveArchivedEpisodeReplayHrefs`/
 // `restoreArchivedGameRecord` for what this durable, indefinitely-retained
 // directory backs.
-const summaryArchiveDir = resolveCoworldLeagueSummaryArchiveDir(artifactsRootDir);
+const summaryArchiveDir =
+  resolveCoworldLeagueSummaryArchiveDir(artifactsRootDir);
 const publicReplayRenderabilityCache = new Map<
   string,
   { fingerprint: string; verdict: Promise<boolean> }
@@ -408,7 +415,8 @@ const platformLeagueHomeUrl =
 const platformMarketHomeUrl =
   firstConfiguredEnv("PROXYWAR_MARKET_HOME_URL") ?? `${bettingOrigin}/bet`;
 const platformReplaysHomeUrl =
-  firstConfiguredEnv("PROXYWAR_REPLAYS_HOME_URL") ?? "https://beta.proxywar.xyz/watch";
+  firstConfiguredEnv("PROXYWAR_REPLAYS_HOME_URL") ??
+  "https://beta.proxywar.xyz/watch";
 const replayPremiereGuestSecurity = new ReplayPremiereGuestSecurity({
   hmacKey: await loadOrCreateReplayPremiereGuestHmacKey({
     privateStateRoot: replayPremierePrivateStateRoot,
@@ -869,7 +877,10 @@ const rateLimits = {
   // client flush (interval + pagehide), each carrying a small batch; this
   // caps request spam per IP, independent of the ingest service's own
   // per-visitor-id limiter (see AnalyticsIngestService.ts).
-  analytics: positiveInt(firstConfiguredEnv("PROXYWAR_RATE_LIMIT_ANALYTICS"), 120),
+  analytics: positiveInt(
+    firstConfiguredEnv("PROXYWAR_RATE_LIMIT_ANALYTICS"),
+    120,
+  ),
 };
 const buildFunnelCounters = new BuildFunnelCounters(artifactsRootDir);
 const analyticsAggregateStore = new AnalyticsAggregateStore(artifactsRootDir);
@@ -1267,14 +1278,12 @@ app.get("/api/premieres/:id/settlement", async (req, res) => {
 // ONE match id (this route) or ONE live premiere id (the route below) is
 // safe, since either requires the caller to already know which specific
 // record they're asking about.
-async function loadFeaturedMatchDetail(
-  match: FeaturedMatch | undefined,
-) {
+async function loadFeaturedMatchDetail(match: FeaturedMatch | undefined) {
   if (match === undefined) return null;
   const identity = await loadIdentityRegistrySnapshot();
   // Season Zero activation prompt Phase 5: resolves this match's
   // `EventPackage` (if any) so `publicFeaturedMatch`'s
-  // `isPubliclyPromotable`/`subtitle`/`reasonToWatch`/`directorCutEstimateSeconds`/
+  // `isPubliclyPromotable`/`subtitle`/`reasonToWatch`/
   // canonical-URL fields report real values through this narrow route —
   // without this lookup every record would fall back to `publicFeaturedMatch`'s
   // own safe "no package passed" default (`isPubliclyPromotable: false`),
@@ -1423,9 +1432,8 @@ app.get("/api/matches/:episodeId", async (req, res) => {
       res.status(404).json({ error: { code: "LEAGUE_EPISODE_NOT_FOUND" } });
       return;
     }
-    const episodes = await readCoworldLeagueEpisodesFromDataJson(
-      leagueDataJsonPath,
-    );
+    const episodes =
+      await readCoworldLeagueEpisodesFromDataJson(leagueDataJsonPath);
     const row =
       episodes === null
         ? null
@@ -1660,7 +1668,9 @@ async function sendPublicAppShellPage(
         error instanceof Error ? error.message : String(error)
       }`,
     );
-    res.status(503).send(`Proxy War ${failureLabel} is not built for this server.`);
+    res
+      .status(503)
+      .send(`Proxy War ${failureLabel} is not built for this server.`);
   }
 }
 /**
@@ -1772,10 +1782,11 @@ function sendThemedNotFoundPage(
 // explains that to a visitor, not the social card.
 async function resolveMatchDetailPageMetadata(
   matchId: string,
-): Promise<
-  | { title: string; description: string; card: MatchShareCardInput }
-  | null
-> {
+): Promise<{
+  title: string;
+  description: string;
+  card: MatchShareCardInput;
+} | null> {
   if (matchId.startsWith("feat_")) {
     const stateRoot = resolveFeaturedMatchStateRoot();
     const store = await reconcileFeaturedMatchStore(stateRoot, {
@@ -1813,7 +1824,10 @@ async function resolveMatchDetailPageMetadata(
                   : (nameByAgentId.get(match.result.winnerAgentId) ?? null),
               placements: match.result.placements
                 .map((entry) => ({
-                  name: entry.agentId === null ? null : nameByAgentId.get(entry.agentId),
+                  name:
+                    entry.agentId === null
+                      ? null
+                      : nameByAgentId.get(entry.agentId),
                   placement: entry.placement,
                 }))
                 .filter(
@@ -1828,9 +1842,8 @@ async function resolveMatchDetailPageMetadata(
       card,
     };
   }
-  const episodes = await readCoworldLeagueEpisodesFromDataJson(
-    leagueDataJsonPath,
-  );
+  const episodes =
+    await readCoworldLeagueEpisodesFromDataJson(leagueDataJsonPath);
   const row =
     episodes === null ? null : findLeagueEpisodeByRequestId(episodes, matchId);
   if (row === null) return null;
@@ -2438,7 +2451,11 @@ app.get("/bet", (request, response) => {
       response,
       503,
       "No premiere is currently running. The next one comes up automatically within a few minutes.",
-      { title: "Between markets", ctaLabel: "Go to the league", ctaHref: "/league" },
+      {
+        title: "Between markets",
+        ctaLabel: "Go to the league",
+        ctaHref: "/league",
+      },
     );
     return;
   }
@@ -2718,8 +2735,9 @@ app.get("/analytics-report", async (req, res) => {
     renderAnalyticsReportHtml({
       report: {
         ...report,
-        mostWatchedEvents: applyMatchLabels(report.mostWatchedEvents, (matchId) =>
-          matchLabels.get(matchId) ?? null,
+        mostWatchedEvents: applyMatchLabels(
+          report.mostWatchedEvents,
+          (matchId) => matchLabels.get(matchId) ?? null,
         ),
       },
       recentEvents,
@@ -2738,8 +2756,9 @@ app.get("/api/analytics-report", async (req, res) => {
   const report = buildAnalyticsReport(aggregates);
   res.json({
     ...report,
-    mostWatchedEvents: applyMatchLabels(report.mostWatchedEvents, (matchId) =>
-      matchLabels.get(matchId) ?? null,
+    mostWatchedEvents: applyMatchLabels(
+      report.mostWatchedEvents,
+      (matchId) => matchLabels.get(matchId) ?? null,
     ),
   });
 });
@@ -2748,7 +2767,7 @@ app.get("/api/analytics-report", async (req, res) => {
  * ranking (`AnalyticsReport.ts`'s `applyMatchLabels`) — reads the SAME
  * league read-model JSON `PlatformBuilderDashboardHttp`'s `readModelFilePath`
  * already points at. `PublicMatch.matchId` is the actual league run id
- * `director_cut_started`'s context carries (checked first); a
+ * `replay_load_started`'s context carries (checked first); a
  * `PublicFeaturedMatch.matchId` — a distinct `feat_...` editorial
  * namespace — is included too in case a future emission point ever uses
  * that id space. Never throws: a missing/malformed/absent read-model file
@@ -2767,7 +2786,11 @@ async function loadAnalyticsMatchLabels(): Promise<Map<string, string>> {
       featuredMatches?: unknown;
     };
     for (const entry of Array.isArray(parsed.matches) ? parsed.matches : []) {
-      const match = entry as { matchId?: unknown; map?: unknown; roundNumber?: unknown };
+      const match = entry as {
+        matchId?: unknown;
+        map?: unknown;
+        roundNumber?: unknown;
+      };
       if (typeof match.matchId === "string" && typeof match.map === "string") {
         labels.set(
           match.matchId,
@@ -2777,7 +2800,9 @@ async function loadAnalyticsMatchLabels(): Promise<Map<string, string>> {
         );
       }
     }
-    for (const entry of Array.isArray(parsed.featuredMatches) ? parsed.featuredMatches : []) {
+    for (const entry of Array.isArray(parsed.featuredMatches)
+      ? parsed.featuredMatches
+      : []) {
       const match = entry as { matchId?: unknown; title?: unknown };
       if (
         typeof match.matchId === "string" &&
