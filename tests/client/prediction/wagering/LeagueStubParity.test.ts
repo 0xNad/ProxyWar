@@ -64,6 +64,64 @@ function sourceOf(relPath: string): string {
   return fs.readFileSync(path.join(repoRoot, relPath), "utf8");
 }
 
+/** Every .ts/.tsx file under dir, recursively, as repo-rooted posix paths. */
+function walkSourceFiles(dirAbs: string): string[] {
+  const out: string[] = [];
+  const stack = [dirAbs];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (current === undefined) break;
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) stack.push(full);
+      else if (/\.tsx?$/.test(entry.name)) {
+        out.push(path.relative(repoRoot, full).split(path.sep).join("/"));
+      }
+    }
+  }
+  return out.sort();
+}
+
+/**
+ * Every VALUE-import specifier in one source file: side-effect imports,
+ * `import ... from` / `export ... from` clauses (top-level `import type` /
+ * `export type` are erased at build and therefore excluded — a mixed
+ * `import { type A, B }` still counts, correctly, as a value import), and
+ * dynamic `import("...")`.
+ */
+function valueImportSpecifiers(source: string): string[] {
+  const specifiers: string[] = [];
+  // import/export ... from "spec" — group 2 catches TOP-LEVEL `type`
+  // (type-only, erased); the clause may span lines but never contains
+  // quotes or semicolons.
+  const fromRe =
+    /(import|export)\s+(type\s+)?([^;'"]*?)\s*from\s*["']([^"']+)["']/g;
+  for (const match of source.matchAll(fromRe)) {
+    if (match[2] === undefined) specifiers.push(match[4]);
+  }
+  // Side-effect imports: import "spec";
+  for (const match of source.matchAll(/import\s*["']([^"']+)["']/g)) {
+    specifiers.push(match[1]);
+  }
+  // Dynamic imports: import("spec")
+  for (const match of source.matchAll(/import\(\s*["']([^"']+)["']\s*\)/g)) {
+    specifiers.push(match[1]);
+  }
+  return specifiers;
+}
+
+/** Resolve an import specifier to a repo-rooted, extensionless module path. */
+function resolveSpecifier(fileRel: string, specifier: string): string {
+  if (specifier.startsWith(".")) {
+    return path.posix.normalize(
+      path.posix.join(path.posix.dirname(fileRel), specifier),
+    );
+  }
+  // tsconfig-paths style ("src/...") — already repo-rooted. Anything else
+  // is returned verbatim and will fail map membership loudly.
+  return specifier;
+}
+
 /**
  * `new StubElementClass()` only works once the class is registered with the
  * custom-element registry ("Illegal constructor" otherwise). In this test's
@@ -148,6 +206,50 @@ describe("league wagering stub parity", () => {
     expect(source).toContain("PROXYWAR_LEAGUE_CLIENT");
     expect(source).toContain('"/src/client/prediction/wagering/"');
     expect(source).toContain("leagueWageringGuard");
+  });
+
+  it("every value-import of prediction/wagering across src/client is stub-mapped", () => {
+    // Fast-feedback twin of the vite load guard: a NEW wagering import
+    // added anywhere in src/client would otherwise only surface as a
+    // league VITE build failure at build:image time. This turns it into a
+    // red unit test in seconds. Type-only imports are excluded (erased at
+    // build, legitimately unmapped); the wagering tree itself and the
+    // stubs are excluded (internal imports never bundle in league mode —
+    // their importers are what get stubbed).
+    const mappedModules = new Set(
+      LEAGUE_WAGERING_STUB_MAP.map((entry) => entry.realModule),
+    );
+    const found = new Map<string, string[]>();
+    for (const fileRel of walkSourceFiles(path.join(repoRoot, "src/client"))) {
+      if (
+        fileRel.startsWith("src/client/prediction/wagering/") ||
+        fileRel.startsWith("src/client/prediction/leagueStubs/")
+      ) {
+        continue;
+      }
+      for (const specifier of valueImportSpecifiers(sourceOf(fileRel))) {
+        if (!specifier.includes("prediction/wagering")) continue;
+        const resolved = resolveSpecifier(fileRel, specifier);
+        found.set(resolved, [...(found.get(resolved) ?? []), fileRel]);
+      }
+    }
+    // Every discovered value-import must be stub-mapped...
+    const unmapped = [...found.entries()].filter(
+      ([resolved]) => !mappedModules.has(resolved),
+    );
+    expect(
+      unmapped.map(
+        ([resolved, importers]) =>
+          `${resolved} (imported by ${importers.join(", ")}) has no ` +
+          `LEAGUE_WAGERING_STUB_MAP entry — add a stub, never widen the ` +
+          `league bundle`,
+      ),
+    ).toEqual([]);
+    // ...and every mapped module must still have at least one importer, so
+    // this scan can never rot into a vacuous pass (and dead map entries
+    // get pruned instead of lingering).
+    const dead = [...mappedModules].filter((module) => !found.has(module));
+    expect(dead).toEqual([]);
   });
 
   it("stubbed betting premiere page is inert at Main.ts's contact points", async () => {

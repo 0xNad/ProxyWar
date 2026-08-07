@@ -5,21 +5,34 @@
  *
  * Runs two real production `vite build`s over the same tree:
  *
- *   1. NORMAL build (PROXYWAR_LEAGUE_CLIENT stripped from the env) —
- *      the emitted assets MUST contain the wagering build sentinel
- *      (else the sentinel rotted and the league scan would be vacuous);
- *   2. LEAGUE build (PROXYWAR_LEAGUE_CLIENT=1) — the emitted assets MUST
- *      NOT contain it anywhere (else wagering leaked into the league
- *      bundle). The league build additionally hard-fails on its own if
- *      any wagering module is loaded at all (vite.config.ts guard).
+ *   1. LEAGUE build (PROXYWAR_LEAGUE_CLIENT=1) — the emitted assets MUST
+ *      NOT contain the wagering build sentinel anywhere (else wagering
+ *      leaked into the league bundle). The league build additionally
+ *      hard-fails on its own if any wagering module is loaded at all
+ *      (vite.config.ts guard).
+ *   2. NORMAL build (PROXYWAR_LEAGUE_CLIENT stripped from the env), LAST —
+ *      the emitted assets MUST contain the sentinel (else the sentinel
+ *      rotted and the league scan above was vacuous).
+ *
+ * The order is deliberate and load-bearing, not cosmetic: each vite build
+ * empties and rewrites `static/`, and this repo pattern runs in checkouts
+ * that also SERVE (the live beta serves from a worktree). Ending on the
+ * NORMAL build means the script always exits with `static/` holding the
+ * ordinary, servable bundle — its own final check asserts the sentinel is
+ * PRESENT in what it leaves behind — so a serving host that ran this can
+ * never be left serving league assets on a betting origin. Enforcement is
+ * order-independent; the trailing filesystem state is why NORMAL is last.
+ * (Building the league bundle to a separate outDir instead is NOT viable:
+ * syncHashedPublicAssets hardcodes `static/` in vite.config.ts.)
  *
  * Prints both bundles' sizes so the league shrink stays visible. Called
  * from coworld-adapter's `build:image` chain before the docker build; the
  * absent-scan also re-runs INSIDE the image (Dockerfile.coworld) against
- * the exact assets the package ships. Leaves `static/` holding the league
- * build output (each vite build empties and rewrites it).
+ * the exact assets the package ships (the in-image build-prod rebuilds
+ * league-mode static/ there regardless of what this script left behind).
  *
- * Fails fast on the first broken step; exit 0 means both directions held.
+ * Fails fast on the first broken step; exit 0 means both directions held
+ * AND static/ holds a normal bundle with the sentinel present.
  */
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -94,24 +107,8 @@ function formatKiB(bytes) {
 
 const sentinel = readSentinelFromSource(repoRoot);
 
-runViteBuild("NORMAL", false);
-const normal = scanForSentinel(staticDir, sentinel);
-if (normal.hits.length === 0) {
-  console.error(
-    `[verify:league-client] FAIL: the NORMAL build does not contain the ` +
-      `wagering sentinel in any emitted asset. The sentinel rotted out of ` +
-      `the bundled graph (see src/client/prediction/wagering/` +
-      `buildSentinel.ts) — the league absent-scan below would be vacuous, ` +
-      `so this is a hard failure.`,
-  );
-  process.exit(1);
-}
-console.log(
-  `[verify:league-client] NORMAL build OK: sentinel present in ` +
-    `${normal.hits.join(", ")} — ${normal.files} files, ` +
-    `${formatMiB(normal.totalBytes)} total, ${formatKiB(normal.jsBytes)} JS.`,
-);
-
+// LEAGUE first — see the module doc: NORMAL must run LAST so the script
+// always exits with static/ holding the ordinary servable bundle.
 runViteBuild("LEAGUE", true);
 const league = scanForSentinel(staticDir, sentinel);
 if (league.hits.length > 0) {
@@ -129,11 +126,37 @@ console.log(
     `${league.files} files, ${formatMiB(league.totalBytes)} total, ` +
     `${formatKiB(league.jsBytes)} JS.`,
 );
+
+runViteBuild("NORMAL", false);
+// Final check, on the exact assets this script leaves behind in static/:
+// the NORMAL bundle must carry the sentinel. This both proves the sentinel
+// has not rotted (the league absent-scan above was not vacuous) and proves
+// the trailing filesystem state is the ordinary servable bundle, never the
+// league one.
+const normal = scanForSentinel(staticDir, sentinel);
+if (normal.hits.length === 0) {
+  console.error(
+    `[verify:league-client] FAIL: the NORMAL build does not contain the ` +
+      `wagering sentinel in any emitted asset. The sentinel rotted out of ` +
+      `the bundled graph (see src/client/prediction/wagering/` +
+      `buildSentinel.ts) — the league absent-scan above was vacuous, so ` +
+      `this is a hard failure. static/ holds this sentinel-less normal ` +
+      `build; do not serve until the sentinel wiring is fixed and ` +
+      `verified.`,
+  );
+  process.exit(1);
+}
+console.log(
+  `[verify:league-client] NORMAL build OK: sentinel present in ` +
+    `${normal.hits.join(", ")} — ${normal.files} files, ` +
+    `${formatMiB(normal.totalBytes)} total, ${formatKiB(normal.jsBytes)} JS.`,
+);
 console.log(
   `[verify:league-client] PASS. JS bundle: normal ${formatKiB(
     normal.jsBytes,
   )} -> league ${formatKiB(league.jsBytes)} ` +
     `(${formatKiB(normal.jsBytes - league.jsBytes)} smaller); total assets: ` +
     `${formatMiB(normal.totalBytes)} -> ${formatMiB(league.totalBytes)}. ` +
-    `static/ now holds the LEAGUE build.`,
+    `static/ now holds the NORMAL build (sentinel present — safe for ` +
+    `serving checkouts).`,
 );
