@@ -982,7 +982,14 @@ export class InputHandler {
   }
 
   private warshipInputsEnabled(): boolean {
-    return !this.gameView.config().isUnitDisabled(UnitType.Warship);
+    const config =
+      typeof this.gameView.config === "function"
+        ? this.gameView.config()
+        : undefined;
+    return (
+      typeof config?.isUnitDisabled !== "function" ||
+      !config.isUnitDisabled(UnitType.Warship)
+    );
   }
 
   private getPinchDistance(): number {
