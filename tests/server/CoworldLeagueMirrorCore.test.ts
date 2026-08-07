@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { AGENT_MATCH_RECAP_SCHEMA_VERSION } from "../../src/server/agents/AgentMatchRecap";
 import {
   activeChampionPolicyLabelsByPlayerId,
@@ -1088,7 +1088,9 @@ describe("mirrored decisions.jsonl economy/deal stamp projection (economy-negoti
     dealCounterpartyName: "Ext Two",
     dealPublicText:
       "Ext One proposed a non-aggression pact to Ext Two (12 decisions).",
+    dealStatedReason: "Pact buys me the western flank for twelve decisions",
     dealApplyAccepted: true,
+    dealSeparateSlot: true,
     dealComplianceEvent: JSON.stringify([
       {
         event: "deal_expired",
@@ -1137,7 +1139,7 @@ describe("mirrored decisions.jsonl economy/deal stamp projection (economy-negoti
     bottleneckKind: "missing_trade_destination",
   };
 
-  test("a line carrying economyFacts and all eight deal stamps round-trips them onto the record", () => {
+  test("a line carrying economyFacts and all ten deal stamps round-trips them onto the record", () => {
     const { records } = agentDecisionRecordsFromMirroredDecisionsLog(
       `${JSON.stringify({ ...bareLine, economyFacts, ...dealStamps })}\n`,
     );
@@ -1145,8 +1147,9 @@ describe("mirrored decisions.jsonl economy/deal stamp projection (economy-negoti
     // economyFacts rides back verbatim, nested arrays included — the exact
     // object addEconomyEvents reads off record.economyFacts.
     expect(records[0].economyFacts).toEqual(economyFacts);
-    // The eight top-level entry stamps re-nest under decisionMetadata — the
-    // exact keys addDealEvents reads.
+    // The ten top-level entry stamps re-nest under decisionMetadata — the
+    // exact keys addDealEvents reads, dealStatedReason and dealSeparateSlot
+    // included (the writer withheld both until the stamps were hoisted).
     expect(records[0].decisionMetadata).toEqual(dealStamps);
   });
 
@@ -1211,11 +1214,66 @@ describe("mirrored decisions.jsonl economy/deal stamp projection (economy-negoti
         dealAction: "propose",
         dealID: 7,
         dealApplyAccepted: "yes",
+        dealStatedReason: 12,
+        dealSeparateSlot: "true",
       })}\n`,
     );
     expect(records).toHaveLength(1);
     expect(records[0].economyFacts).toBeUndefined();
     expect(records[0].decisionMetadata).toEqual({ dealAction: "propose" });
+  });
+
+  // The whole point of persisting the two stamps: what the REBUILT replay
+  // shows. Both assertions below fail on the pre-fix writer, because the
+  // mirror can only project what the log line carries.
+  describe("rebuilt telemetry (the consequence the stamps exist for)", () => {
+    // addDealEvents is itself gated on PROXYWAR_TUNE_STRUCTURED_DEALS, read
+    // from the REBUILDING process's env — so the mirror host needs the flag
+    // for any deal beat (all ten stamps), not just these two.
+    beforeEach(() => {
+      process.env.PROXYWAR_TUNE_STRUCTURED_DEALS = "1";
+    });
+    afterEach(() => {
+      delete process.env.PROXYWAR_TUNE_STRUCTURED_DEALS;
+    });
+
+    // A deal applied through the diplomacy slot while the decision's GAME
+    // action was rejected — the case addDealEvents gates on dealSeparateSlot.
+    const separateSlotLine = {
+      ...bareLine,
+      result: { accepted: false, reason: "rejected", submittedIntent: null },
+      ...dealStamps,
+    };
+
+    test("a separate-slot deal beat survives a rejected game action and keeps the agent's stated reason", () => {
+      const telemetry = deriveSpectatorTelemetryFromDecisionsLog(
+        `${JSON.stringify(separateSlotLine)}\n`,
+        "run-deal",
+      );
+      const proposed = telemetry?.events.find(
+        (event) => event.kind === "deal_proposed",
+      );
+      expect(proposed).toBeDefined();
+      expect(proposed!.actorName).toBe("Ext One");
+      expect(proposed!.statedReason).toBe(dealStamps.dealStatedReason);
+      // The claim stays OUT of the server-authored publicText.
+      expect(proposed!.publicText).toBe(dealStamps.dealPublicText);
+      expect(proposed!.publicText).not.toContain(dealStamps.dealStatedReason);
+    });
+
+    test("without the two stamps the same line loses the beat entirely — the gap this closes", () => {
+      const { dealStatedReason, dealSeparateSlot, ...legacyStamps } =
+        dealStamps;
+      expect(dealStatedReason).toBeDefined();
+      expect(dealSeparateSlot).toBe(true);
+      const telemetry = deriveSpectatorTelemetryFromDecisionsLog(
+        `${JSON.stringify({ ...separateSlotLine, ...legacyStamps, dealStatedReason: undefined, dealSeparateSlot: undefined })}\n`,
+        "run-deal",
+      );
+      expect(
+        telemetry?.events.some((event) => event.kind === "deal_proposed"),
+      ).toBe(false);
+    });
   });
 });
 

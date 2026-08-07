@@ -1225,11 +1225,12 @@ function metadataRecord(
 }
 
 /**
- * Re-nests the eight structured-deal stamps `decisionLogEntry` hoists from
+ * Re-nests the ten structured-deal stamps `decisionLogEntry` hoists from
  * `record.decisionMetadata` onto top-level `DecisionLogEntry` keys back into
  * the `decisionMetadata` shape `addDealEvents` reads. Verbatim copy — the
- * seven string stamps plus the `dealApplyAccepted` boolean; wrong-typed keys
- * are dropped rather than mis-projected. `undefined` when the line carries no
+ * seven narrative/identity string stamps plus `dealStatedReason`, and the
+ * `dealApplyAccepted` / `dealSeparateSlot` booleans; wrong-typed keys are
+ * dropped rather than mis-projected. `undefined` when the line carries no
  * deal stamp at all (any pre-deals or flag-OFF line), keeping those lines'
  * projection unchanged.
  */
@@ -1249,8 +1250,18 @@ function dealDecisionMetadata(
   copyString("dealCounterpartyID");
   copyString("dealCounterpartyName");
   copyString("dealPublicText");
+  // The acting agent's OWN stated reason: viewer-facing claim text, already
+  // ASCII-cleaned, content-policy filtered and length-capped at its stamp
+  // site, and re-sanitized again by the telemetry emit boundary this feeds.
+  copyString("dealStatedReason");
   if (typeof record.dealApplyAccepted === "boolean") {
     projected.dealApplyAccepted = record.dealApplyAccepted;
+  }
+  // Without this, a deal applied through the diplomacy slot while the game
+  // action was REJECTED loses addDealEvents' gate and its beat disappears
+  // from the rebuilt replay even though the in-pod run showed it.
+  if (typeof record.dealSeparateSlot === "boolean") {
+    projected.dealSeparateSlot = record.dealSeparateSlot;
   }
   copyString("dealComplianceEvent");
   return Object.keys(projected).length > 0 ? projected : undefined;

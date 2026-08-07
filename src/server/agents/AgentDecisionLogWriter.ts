@@ -220,6 +220,24 @@ interface DecisionLogEntry {
    * the flag was off): the exact decisionMetadata keys spectator telemetry's
    * addDealEvents reads, carried onto the permissive decisions.jsonl surface
    * so deal events survive artifact-side rebuilds for external-http seats.
+   *
+   * `dealStatedReason` and `dealSeparateSlot` — both added by the diplomacy
+   * slot + stated-reasons change — were missed when the other eight were
+   * hoisted here. A rebuild from a mirrored
+   * decisions.jsonl therefore lost every agent's OWN stated reason, and
+   * silently dropped the deal beats that survive only because they came
+   * through the diplomacy slot while the game action was rejected — the two
+   * things addDealEvents reads these keys for. The mirror can project only
+   * what the line carries, so the fix belongs here.
+   *
+   * `dealStatedReason` is AGENT-AUTHORED text, and it is already the output
+   * of `sanitizeDealStatedReason` at BOTH stamp sites (the deal manager's
+   * propose and response paths) — printable ASCII, the shared stated-reason
+   * content policy, hard-capped at MAX_DEAL_STATED_REASON_LENGTH — strictly
+   * before any record reaches this writer. It is deliberately NOT re-capped
+   * here, because nothing here can widen it: no brain can inject the key
+   * (each builds a fixed metadata key set), and the server-authored deal
+   * stamps overwrite the decision's own metadata rather than the reverse.
    */
   dealAction?: string;
   dealID?: string;
@@ -227,7 +245,9 @@ interface DecisionLogEntry {
   dealCounterpartyID?: string;
   dealCounterpartyName?: string;
   dealPublicText?: string;
+  dealStatedReason?: string;
   dealApplyAccepted?: boolean;
+  dealSeparateSlot?: boolean;
   dealComplianceEvent?: string;
   tacticalAffordances?: AgentTacticalAffordances;
   /** `null` for a fallback/failure decision with no stated reason — see `AgentDecision.reason`'s doc. */
@@ -707,8 +727,14 @@ function decisionLogEntry(
     ...(stringMetadata(metadata, "dealPublicText") !== undefined
       ? { dealPublicText: stringMetadata(metadata, "dealPublicText") }
       : {}),
+    ...(stringMetadata(metadata, "dealStatedReason") !== undefined
+      ? { dealStatedReason: stringMetadata(metadata, "dealStatedReason") }
+      : {}),
     ...(booleanMetadata(metadata, "dealApplyAccepted") !== undefined
       ? { dealApplyAccepted: booleanMetadata(metadata, "dealApplyAccepted") }
+      : {}),
+    ...(booleanMetadata(metadata, "dealSeparateSlot") !== undefined
+      ? { dealSeparateSlot: booleanMetadata(metadata, "dealSeparateSlot") }
       : {}),
     ...(stringMetadata(metadata, "dealComplianceEvent") !== undefined
       ? { dealComplianceEvent: stringMetadata(metadata, "dealComplianceEvent") }
