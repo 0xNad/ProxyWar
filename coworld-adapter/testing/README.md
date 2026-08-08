@@ -8,10 +8,11 @@ structured-promise treatment; offered combat precedes `hold`.
 
 Profiles:
 
-- `keeper`: accepts offered promises and uses confirmed-effect actions to keep
-  support and attack pledges; it filters accidental pact violations.
-- `defector`: accepts or proposes non-aggression promises, then deliberately
-  selects an offered hostile action against an active partner.
+- `keeper`: accepts offered promises, uses confirmed-effect actions to keep
+  support and attack pledges, and selects audited `hold` actions through an
+  active negative covenant so absence-of-violation has complete coverage.
+- `defector`: pairs with the keeper through a trade-security promise, then
+  deliberately selects an offered voluntary embargo against that partner.
 - `skeptic`: rejects every incoming promise and never proposes one.
 - `deal-blind`: never selects a deal action.
 

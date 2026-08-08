@@ -37,7 +37,11 @@ function result() {
   };
 }
 
-function decision(username: string, dealAction?: string) {
+function decision(
+  username: string,
+  dealAction?: string,
+  applicationAccepted = true,
+) {
   return {
     username,
     turnNumber: 100,
@@ -52,13 +56,26 @@ function decision(username: string, dealAction?: string) {
       deal_accept: ["deal_accept:one"],
       deal_reject: ["deal_reject:one"],
     },
-    ...(dealAction ? { dealAction } : {}),
+    ...(dealAction
+      ? {
+          dealAction,
+          dealSlotEvidence: {
+            requestedActionID: `deal_${dealAction}:one`,
+            validation: { accepted: true },
+            application: {
+              attempted: true,
+              accepted: applicationAccepted,
+            },
+          },
+        }
+      : {}),
   };
 }
 
 describe("social matrix evidence", () => {
   it("keeps opportunity denominators separate from selections and abstention", async () => {
-    const { summarizeSocialRun } = await evidenceModule();
+    const { summarizeSocialRun, aggregateSocialMatrix } =
+      await evidenceModule();
     const summary = summarizeSocialRun({
       arm: "active",
       seed: 424242,
@@ -66,7 +83,8 @@ describe("social matrix evidence", () => {
       episodeIndex: 0,
       decisions: [
         decision("Social keeper", "accept"),
-        decision("Social deal-blind"),
+        decision("Social defector", "accept", false),
+        decision("Social deal blind"),
       ],
       results: result(),
       ledger: {
@@ -74,6 +92,9 @@ describe("social matrix evidence", () => {
         events: [],
         deals: [
           {
+            status: "accepted",
+            proposerName: "Social defector",
+            recipientName: "Social keeper",
             obligations: [
               { obligorName: "Social keeper", status: "fulfilled" },
               { obligorName: "Social defector", status: "violated" },
@@ -89,9 +110,32 @@ describe("social matrix evidence", () => {
       offeredActions: 1,
     });
     expect(summary.byProfile.keeper.dealSelections.deal_accept).toBe(1);
+    expect(summary.byProfile.keeper.dealSlotEvidence).toMatchObject({
+      requested: 1,
+      validationAccepted: 1,
+      applicationAttempted: 1,
+      applicationAccepted: 1,
+      applicationRejected: 0,
+    });
+    expect(summary.byProfile.defector.dealSlotEvidence).toMatchObject({
+      requested: 1,
+      validationAccepted: 1,
+      applicationAttempted: 1,
+      applicationAccepted: 0,
+      applicationRejected: 1,
+    });
+    expect(summary.byProfile.keeper.acceptedDealsWith.defector).toBe(1);
+    expect(summary.byProfile.defector.acceptedDealsWith.keeper).toBe(1);
+    expect(summary.byProfile["deal-blind"].decisions).toBe(1);
     expect(summary.byProfile.keeper.commitmentReliability).toBe(1);
     expect(summary.byProfile.defector.commitmentReliability).toBe(0);
     expect(summary.byProfile["deal-blind"].commitmentReliability).toBeNull();
+    const aggregate = aggregateSocialMatrix([summary]);
+    expect(aggregate.byProfile.keeper.dealSlotEvidence).toMatchObject({
+      requested: 1,
+      applicationAccepted: 1,
+    });
+    expect(aggregate.byProfile.defector.acceptedDealsWith.keeper).toBe(1);
   });
 
   it("requires every matched OFF and ignored cell to have identical normalized play", async () => {

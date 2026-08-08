@@ -28,21 +28,18 @@ const GAME_FILE = path.join(
 );
 
 export async function runSocialMatrix(options = {}) {
-  const seeds = options.seeds ?? integerList("PROXYWAR_SOCIAL_MATRIX_SEEDS", [
-    161803,
-    271828,
-    424242,
-  ]);
-  const maps = options.maps ?? stringList("PROXYWAR_SOCIAL_MATRIX_MAPS", [
-    "Pangaea",
-    "Europe",
-  ]);
+  const seeds =
+    options.seeds ??
+    integerList("PROXYWAR_SOCIAL_MATRIX_SEEDS", [161803, 271828, 424242]);
+  const maps =
+    options.maps ??
+    stringList("PROXYWAR_SOCIAL_MATRIX_MAPS", ["Pangaea", "Europe"]);
   const episodeIndices =
     options.episodeIndices ??
     integerList("PROXYWAR_SOCIAL_MATRIX_EPISODES", [0, 1, 2, 3]);
-  const arms = options.arms ?? stringList("PROXYWAR_SOCIAL_MATRIX_ARMS", [
-    ...SOCIAL_MATRIX_ARMS,
-  ]);
+  const arms =
+    options.arms ??
+    stringList("PROXYWAR_SOCIAL_MATRIX_ARMS", [...SOCIAL_MATRIX_ARMS]);
   const maxDecisionSteps =
     options.maxDecisionSteps ??
     integerValue("PROXYWAR_SOCIAL_MATRIX_STEPS", 30, 1);
@@ -102,7 +99,9 @@ export async function runSocialMatrix(options = {}) {
       `episode-${cell.episodeIndex}`,
       cell.arm,
     );
-    const cached = await readJsonIfPresent(path.join(runDir, "run-summary.json"));
+    const cached = await readJsonIfPresent(
+      path.join(runDir, "run-summary.json"),
+    );
     if (cached !== null) {
       runs.push(cached);
       console.log(
@@ -148,7 +147,8 @@ async function runSocialCell(input) {
   const resultsPath = path.join(input.runDir, "results.json");
   const replayPath = path.join(input.runDir, "replay.json");
   const tokens = SOCIAL_MATRIX_PROFILES.map(
-    (profile, slot) => `social-${profile}-${input.seed}-${input.episodeIndex}-${slot}`,
+    (profile, slot) =>
+      `social-${profile}-${input.seed}-${input.episodeIndex}-${slot}`,
   );
   const config = {
     tokens,
@@ -332,8 +332,8 @@ function matrixMarkdown(report) {
     "",
     "## Active-arm commitment evidence",
     "",
-    "| Profile | Active runs | Proposals selected / windows | Responses selected / windows | Fulfilled | Violated | Expired unfulfilled | Moot | Unverified | Verified reliability | Fallbacks |",
-    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    "| Profile | Active runs | Proposals selected / windows | Responses selected / windows | Deal slot requested / valid / applied | Fulfilled | Violated | Expired unfulfilled | Moot | Unverified | Verified reliability | Fallbacks |",
+    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
   ];
   for (const profile of SOCIAL_MATRIX_PROFILES) {
     const value = report.byProfile[profile];
@@ -344,12 +344,25 @@ function matrixMarkdown(report) {
       value.dealOpportunityWindows.deal_reject,
     );
     lines.push(
-      `| ${profile} | ${value.activeRuns} | ${value.dealSelections.deal_propose}/${value.dealOpportunityWindows.deal_propose} | ${responses}/${responseWindows} | ${value.obligations.fulfilled} | ${value.obligations.violated} | ${value.obligations.expired_unfulfilled} | ${value.obligations.moot} | ${value.obligations.unverified} | ${formatRate(value.commitmentReliability)} | ${value.fallbackDecisions} |`,
+      `| ${profile} | ${value.activeRuns} | ${value.dealSelections.deal_propose}/${value.dealOpportunityWindows.deal_propose} | ${responses}/${responseWindows} | ${value.dealSlotEvidence.requested}/${value.dealSlotEvidence.validationAccepted}/${value.dealSlotEvidence.applicationAccepted} | ${value.obligations.fulfilled} | ${value.obligations.violated} | ${value.obligations.expired_unfulfilled} | ${value.obligations.moot} | ${value.obligations.unverified} | ${formatRate(value.commitmentReliability)} | ${value.fallbackDecisions} |`,
     );
   }
   lines.push(
     "",
     "Reliability is fulfilled / (fulfilled + violated + expired_unfulfilled). Moot and unverified obligations are reported but excluded. A profile with no verified terminal obligations has no reliability estimate; abstention is not perfect trustworthiness.",
+    "",
+    "Accepted deal counterparties:",
+    "",
+    ...SOCIAL_MATRIX_PROFILES.map((profile) => {
+      const entries = Object.entries(
+        report.byProfile[profile].acceptedDealsWith,
+      ).sort(([left], [right]) => left.localeCompare(right));
+      const counterparties =
+        entries.length === 0
+          ? "none"
+          : entries.map(([name, count]) => `${name}=${count}`).join(", ");
+      return `- ${profile}: ${counterparties}`;
+    }),
     "",
     "## Construct gate",
     "",
@@ -535,7 +548,9 @@ function formatRate(value) {
 }
 
 function slug(value) {
-  return String(value).toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  return String(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-");
 }
 
 function timestamp() {

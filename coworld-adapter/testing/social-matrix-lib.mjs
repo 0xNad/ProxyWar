@@ -72,11 +72,42 @@ export function summarizeSocialRun(input) {
         summary.dealSelections[kind] += 1;
       }
     }
+    const dealSlotEvidence = record.dealSlotEvidence;
+    if (typeof dealSlotEvidence?.requestedActionID === "string") {
+      summary.dealSlotEvidence.requested += 1;
+    }
+    if (dealSlotEvidence?.validation?.accepted === true) {
+      summary.dealSlotEvidence.validationAccepted += 1;
+    } else if (dealSlotEvidence?.validation?.accepted === false) {
+      summary.dealSlotEvidence.validationRejected += 1;
+    }
+    if (dealSlotEvidence?.application?.attempted === true) {
+      summary.dealSlotEvidence.applicationAttempted += 1;
+      if (dealSlotEvidence.application.accepted === true) {
+        summary.dealSlotEvidence.applicationAccepted += 1;
+      } else {
+        summary.dealSlotEvidence.applicationRejected += 1;
+      }
+    }
   }
 
   const ledger = input.ledger;
   if (ledger !== null) {
     for (const deal of Array.isArray(ledger.deals) ? ledger.deals : []) {
+      if (deal.status === "accepted") {
+        recordAcceptedCounterparty(
+          byProfile,
+          profilesByName,
+          deal.proposerName,
+          deal.recipientName,
+        );
+        recordAcceptedCounterparty(
+          byProfile,
+          profilesByName,
+          deal.recipientName,
+          deal.proposerName,
+        );
+      }
       for (const obligation of Array.isArray(deal.obligations)
         ? deal.obligations
         : []) {
@@ -181,6 +212,8 @@ export function aggregateSocialMatrix(runs) {
       {
         activeRuns: 0,
         dealSelections: Object.fromEntries(DEAL_KINDS.map((kind) => [kind, 0])),
+        dealSlotEvidence: emptyDealSlotEvidence(),
+        acceptedDealsWith: {},
         dealOpportunityWindows: Object.fromEntries(
           DEAL_KINDS.map((kind) => [kind, 0]),
         ),
@@ -207,6 +240,15 @@ export function aggregateSocialMatrix(runs) {
         target.dealOpportunityWindows[kind] +=
           source.dealOpportunities[kind].decisionWindows;
       }
+      for (const [kind, count] of Object.entries(source.dealSlotEvidence)) {
+        target.dealSlotEvidence[kind] += count;
+      }
+      for (const [counterparty, count] of Object.entries(
+        source.acceptedDealsWith,
+      )) {
+        target.acceptedDealsWith[counterparty] =
+          (target.acceptedDealsWith[counterparty] ?? 0) + count;
+      }
       for (const status of OBLIGATION_STATUSES) {
         target.obligations[status] += source.obligations[status];
       }
@@ -227,7 +269,7 @@ export function aggregateSocialMatrix(runs) {
 
   const nonInterference = matchedOffIgnoredChecks(runs);
   const aggregate = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     runCount: runs.length,
     activeRunCount: runs.filter((run) => run.arm === "active").length,
     seeds: [...new Set(runs.map((run) => run.seed))].sort((a, b) => a - b),
@@ -355,7 +397,7 @@ export function evaluateCommitmentConstruct(runs, aggregate) {
 }
 
 export function socialPlayerName(profile) {
-  return `Social ${profile}`;
+  return `Social ${profile.replaceAll("-", " ")}`;
 }
 
 function emptyProfileSummary() {
@@ -372,6 +414,8 @@ function emptyProfileSummary() {
       ]),
     ),
     dealSelections: Object.fromEntries(DEAL_KINDS.map((kind) => [kind, 0])),
+    dealSlotEvidence: emptyDealSlotEvidence(),
+    acceptedDealsWith: {},
     obligations: Object.fromEntries(
       OBLIGATION_STATUSES.map((status) => [status, 0]),
     ),
@@ -380,6 +424,30 @@ function emptyProfileSummary() {
     proposalSelectionRate: null,
     responseSelectionRate: null,
   };
+}
+
+function emptyDealSlotEvidence() {
+  return {
+    requested: 0,
+    validationAccepted: 0,
+    validationRejected: 0,
+    applicationAttempted: 0,
+    applicationAccepted: 0,
+    applicationRejected: 0,
+  };
+}
+
+function recordAcceptedCounterparty(
+  byProfile,
+  profilesByName,
+  participantName,
+  counterpartyName,
+) {
+  const profile = profilesByName.get(participantName);
+  const counterparty = profilesByName.get(counterpartyName);
+  if (profile === undefined || counterparty === undefined) return;
+  byProfile[profile].acceptedDealsWith[counterparty] =
+    (byProfile[profile].acceptedDealsWith[counterparty] ?? 0) + 1;
 }
 
 function countDealEvents(events) {
