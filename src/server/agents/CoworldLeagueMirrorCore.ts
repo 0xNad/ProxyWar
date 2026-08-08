@@ -453,6 +453,7 @@ export interface CoworldReplayUiDecision {
 
 export interface CoworldReplayUiArtifact {
   version: 1;
+  aggregateSource: "decisions" | "match-summary" | "unavailable";
   decisionCount: number;
   rejectedCount: number;
   fallbackCount: number;
@@ -467,9 +468,11 @@ export interface CoworldReplayUiArtifact {
 }
 
 /**
- * Builds the bounded payload consumed by the rendered replay overlay. Hosted
- * decision logs can be tens of megabytes; the frontend needs totals and a
- * short recent window, not raw provider output or every historical card.
+ * Builds the bounded payload consumed by the rendered replay overlay.
+ * Privacy-safe hosted replays omit raw decisions entirely, so aggregate truth
+ * falls back to the public match summary and the recent-decision window stays
+ * empty. Historical payloads that still contain private server-side decisions
+ * may be projected by trusted mirror tooling without exposing raw fields.
  */
 /**
  * Choose which decisions the replay UI receives, within a fixed budget.
@@ -553,12 +556,33 @@ export function buildCoworldReplayUiArtifact(
       if (decision.fallbackUsed) fallbackCount += 1;
     }
   }
+  const summaryAggregates = replayUiAggregatesFromMatchSummary(
+    inlineRunArtifacts["match-summary.json"],
+  );
+  const aggregateSource =
+    decisions.length > 0
+      ? "decisions"
+      : summaryAggregates === null
+        ? "unavailable"
+        : "match-summary";
+  const aggregates =
+    aggregateSource === "decisions"
+      ? {
+          decisionCount: decisions.length,
+          rejectedCount,
+          fallbackCount,
+          actionCounts,
+        }
+      : (summaryAggregates ?? {
+          decisionCount: 0,
+          rejectedCount: 0,
+          fallbackCount: 0,
+          actionCounts: {},
+        });
   return {
     version: 1,
-    decisionCount: decisions.length,
-    rejectedCount,
-    fallbackCount,
-    actionCounts,
+    aggregateSource,
+    ...aggregates,
     recentDecisions: sampleDecisionsAcrossMatch(
       decisions,
       replayUiRecentDecisionLimit,
@@ -586,6 +610,43 @@ export function buildCoworldReplayUiArtifact(
       summary: Object.hasOwn(inlineRunArtifacts, "match-summary.json"),
     },
   };
+}
+
+function replayUiAggregatesFromMatchSummary(raw: unknown): {
+  decisionCount: number;
+  rejectedCount: number;
+  fallbackCount: number;
+  actionCounts: Record<string, number>;
+} | null {
+  if (typeof raw !== "string") return null;
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const summary = asRecord(value);
+  const decisionCount = asNumber(summary?.decisionCount);
+  const rejectedCount = asNumber(summary?.rejectedCount);
+  const fallbackCount = asNumber(summary?.fallbackCount);
+  const rawActionCounts = asRecord(summary?.actionCounts);
+  if (
+    decisionCount === null ||
+    decisionCount < 0 ||
+    rejectedCount === null ||
+    rejectedCount < 0 ||
+    fallbackCount === null ||
+    fallbackCount < 0 ||
+    rawActionCounts === null
+  ) {
+    return null;
+  }
+  const actionCounts: Record<string, number> = {};
+  for (const [kind, rawCount] of Object.entries(rawActionCounts)) {
+    const count = asNumber(rawCount);
+    if (count !== null && count >= 0) actionCounts[kind] = count;
+  }
+  return { decisionCount, rejectedCount, fallbackCount, actionCounts };
 }
 
 function projectCoworldReplayUiDecision(
@@ -1132,27 +1193,17 @@ export function parseCuratedDramaScore(matchRecapRaw: string): number | null {
 // shared by every mirror-side match-narrative generator
 // (`CoworldLeagueMatchNarrativeBackfill.ts`).
 //
-// Empirically verified against real retained mirror run directories (see
-// `artifacts/ai-league-runs/league-coworld-*/` in the canonical checkout): the
-// hosted Coworld replay payload's `inlineRunArtifacts` carries
-// `spectator-telemetry.json` — the FULL `SpectatorTelemetry` the origin's own
-// `writeAgentLeagueRunArtifacts` built, verbatim — for every currently
-// observed production episode, alongside `decisions.jsonl`/`game-record.json`/
-// `match-summary.json`. `unpackEpisodeRunDir` already writes every
-// `inlineRunArtifacts` entry into the run dir unmodified, so
-// `spectator-telemetry.json` is normally sitting right there once an episode
-// is unpacked — a strictly more faithful signal than re-deriving events from
-// raw decisions, and it needs zero new parsing.
+// The hosted replay payload carries `spectator-telemetry.json` — the FULL
+// `SpectatorTelemetry` the origin's own `writeAgentLeagueRunArtifacts` built,
+// verbatim. Privacy-safe packages omit `decisions.jsonl`; historical retained
+// payloads may still contain it. `unpackEpisodeRunDir` writes every inline
+// entry into the run dir unmodified, so the public telemetry is normally
+// available as the strictly more faithful first-tier signal.
 //
-// `decisions.jsonl` (the `DecisionLogEntry[]` JSONL `writeAgentLeagueRunArtifacts`
-// itself produces — see `AgentDecisionLogWriter.ts`'s `decisionLogEntry`) is
-// kept as a second-tier fallback for the rarer case where telemetry is
-// missing or fails validation. Every field `buildAgentSpectatorTelemetry`
-// actually reads off `AgentDecisionRecord` (`chosenActionID/Kind/Metadata`,
-// `intent`, `sequence`, `turnNumber`, `agentID`, `audit.after.playerID`,
-// `economyFacts`, and the deal-stamp `decisionMetadata` keys) survives that
-// projection intact, so decisions.jsonl alone is enough to rebuild an
-// equivalent event stream without a new game-record/replay parser.
+// For historical private mirror bundles only, `decisions.jsonl` remains a
+// second-tier fallback when telemetry is missing or invalid. New public
+// replays intentionally have no such fallback: missing telemetry is reported
+// as an evidence gap, never repaired by re-exposing raw decision records.
 // ---------------------------------------------------------------------------
 
 /**

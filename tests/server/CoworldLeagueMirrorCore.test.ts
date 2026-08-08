@@ -179,8 +179,18 @@ const replayPayloadFixture = {
   },
   inlineRunArtifacts: {
     "game-record.json": "{}",
-    "decisions.jsonl": "{}",
     "deal-ledger.json": '{"schemaVersion":1,"deals":[],"events":[]}',
+    "match-summary.json": JSON.stringify({
+      decisionCount: 236,
+      rejectedCount: 4,
+      fallbackCount: 33,
+      actionCounts: { attack: 140, hold: 96 },
+    }),
+    "spectator-telemetry.json": JSON.stringify({
+      version: 1,
+      agents: [],
+      events: [],
+    }),
     "../escape.json": "{}",
     "bad/name.json": "{}",
   },
@@ -361,8 +371,9 @@ describe("CoworldLeagueMirrorCore", () => {
     expect(replay?.players).toHaveLength(4);
     expect(Object.keys(replay?.inlineRunArtifacts ?? {})).toEqual([
       "game-record.json",
-      "decisions.jsonl",
       "deal-ledger.json",
+      "match-summary.json",
+      "spectator-telemetry.json",
     ]);
     expect(replay?.spectatorReplay).not.toBeNull();
   });
@@ -401,6 +412,7 @@ describe("CoworldLeagueMirrorCore", () => {
     });
 
     expect(artifact.version).toBe(1);
+    expect(artifact.aggregateSource).toBe("decisions");
     expect(artifact.decisionCount).toBe(65);
     // The window spans the whole match, not just its tail. It used to be
     // decisions.slice(-60), so agents eliminated early never appeared and the
@@ -432,6 +444,45 @@ describe("CoworldLeagueMirrorCore", () => {
     expect(
       artifact.recentDecisions[0]?.selectedActionMetadata,
     ).not.toHaveProperty("ignoredLargeField");
+  });
+
+  test("buildCoworldReplayUiArtifact preserves truthful public summary aggregates when private decisions are absent", () => {
+    const artifact = buildCoworldReplayUiArtifact({
+      "match-summary.json": JSON.stringify({
+        decisionCount: 6,
+        rejectedCount: 1,
+        fallbackCount: 2,
+        actionCounts: { spawn: 2, attack: 4 },
+      }),
+      "spectator-telemetry.json": "{}",
+      "deal-ledger.json": '{"schemaVersion":1,"deals":[],"events":[]}',
+    });
+
+    expect(artifact).toMatchObject({
+      version: 1,
+      aggregateSource: "match-summary",
+      decisionCount: 6,
+      rejectedCount: 1,
+      fallbackCount: 2,
+      actionCounts: { spawn: 2, attack: 4 },
+      recentDecisions: [],
+      artifacts: {
+        decisions: false,
+        summary: true,
+        spectatorTelemetry: true,
+      },
+    });
+  });
+
+  test("buildCoworldReplayUiArtifact marks missing aggregate evidence unavailable instead of claiming observed zeros", () => {
+    expect(buildCoworldReplayUiArtifact({})).toMatchObject({
+      aggregateSource: "unavailable",
+      decisionCount: 0,
+      rejectedCount: 0,
+      fallbackCount: 0,
+      actionCounts: {},
+      recentDecisions: [],
+    });
   });
 
   test.each([

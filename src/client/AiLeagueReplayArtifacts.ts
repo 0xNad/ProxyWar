@@ -47,6 +47,7 @@ export interface AiLeagueReplayDetails {
 
 interface ReplayUiArtifact {
   version: 1;
+  aggregateSource: "decisions" | "match-summary" | "unavailable";
   decisionCount: number;
   rejectedCount: number;
   fallbackCount: number;
@@ -107,7 +108,7 @@ export async function loadAiLeagueReplayDetails(
 
   const summary = {
     ...(summaryValue ?? {}),
-    ...(replayUi === null
+    ...(replayUi === null || replayUi.aggregateSource === "unavailable"
       ? {}
       : {
           decisionCount: replayUi.decisionCount,
@@ -192,8 +193,14 @@ function normalizeReplayUi(value: unknown): ReplayUiArtifact | null {
     if (isFiniteNumber(count) && count >= 0) actionCounts[kind] = count;
   }
   const recentDecisions = value.recentDecisions.filter(isReplayUiDecision);
+  const aggregateSource =
+    value.aggregateSource === "match-summary" ||
+    value.aggregateSource === "unavailable"
+      ? value.aggregateSource
+      : "decisions";
   return {
     version: 1,
+    aggregateSource,
     decisionCount: value.decisionCount,
     rejectedCount: value.rejectedCount,
     fallbackCount: value.fallbackCount,
