@@ -74,7 +74,7 @@ function boundedIntegerEnv(name, fallback, min, max) {
     ? parsed
     : fallback;
 }
-const PLAN_EVERY = boundedIntegerEnv("PLAN_EVERY", 3, 1, 30); // refresh the plan every N decisions
+const PLAN_EVERY = boundedIntegerEnv("PLAN_EVERY", 6, 1, 30); // refresh the plan every N decisions
 const PLAN_KINDS = [
   "spawn",
   "attack",

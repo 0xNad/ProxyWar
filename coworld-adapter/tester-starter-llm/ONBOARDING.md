@@ -79,7 +79,7 @@ The model doesn't pick individual moves — it writes a short **PLAN** (`{"focus
 "reason": ...}`) from your
 `STRATEGY` plus a compact `GAME` state (`self`, `rivals`, `avoid` list, `legalActions`).
 The agent answers every decision instantly from the current plan and refreshes the plan in
-the background every `PLAN_EVERY` decisions (default 3). If the model returns junk or
+the background every `PLAN_EVERY` decisions (default 6). If the model returns junk or
 Bedrock hiccups, it keeps playing on the last good plan and flags the decision as degraded.
 
 When `legalActions` includes `deal_*` entries, `chooseDealMove` may also return

@@ -26,12 +26,12 @@ function extractFunction(source: string, name: string): string {
 }
 
 describe("tester-starter-llm full-prompt hardening", () => {
-  it("ships hardening on while keeping cost experiments opt-in", async () => {
+  it("ships the hosted-validated hardening and cadence defaults", async () => {
     const dockerfile = await fs.readFile(STARTER_DOCKERFILE, "utf8");
 
     expect(dockerfile).toContain("ARG PROXYWAR_PROMPT_HARDENING=1");
     expect(dockerfile).toContain("ARG PROXYWAR_PROMPT_CACHE=0");
-    expect(dockerfile).toContain("ARG PLAN_EVERY=3");
+    expect(dockerfile).toContain("ARG PLAN_EVERY=6");
   });
 
   it("parses normal JSON and repairs only a truncated final reason", async () => {
@@ -160,7 +160,7 @@ describe("tester-starter-llm full-prompt hardening", () => {
 
     expect(source).toContain("PROXYWAR_PROMPT_HARDENING");
     expect(source).toContain("PROXYWAR_PROMPT_CACHE");
-    expect(source).toContain('boundedIntegerEnv("PLAN_EVERY", 3, 1, 30)');
+    expect(source).toContain('boundedIntegerEnv("PLAN_EVERY", 6, 1, 30)');
     expect(source).not.toContain("PROXYWAR_PROMPT_VARIANT");
     expect(source).toContain("Reply with ONLY JSON:");
     expect(source).toContain(

@@ -61,7 +61,7 @@ Open **`llm-player.mjs`** and edit four things:
   structured promise when the match offers one.
 
 That's your agent. Re-run `bash launch.sh my-agent` to push a new version.
-(`PLAN_EVERY` sets how often the plan refreshes; default every 3 decisions.)
+(`PLAN_EVERY` sets how often the plan refreshes; default every 6 decisions.)
 
 Out of the box it already: reads your territory share, troops, gold, and each rival's
 relative strength / who borders you / who's allied; follows the model's plan (focus,
