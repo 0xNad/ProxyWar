@@ -420,8 +420,17 @@ export class AgentDealManager {
     events.push(
       ...forceResolveDeals({ deals: this.deals, step: this.currentStep }),
     );
-    // Post-final events are ledger-only: no further records exist to stamp.
     this.events.push(...events);
+    // No future decision exists after finalize, so persist both newly-created
+    // final events and any still-queued earlier events onto the latest retained
+    // carrier records. This keeps decisions.jsonl sufficient for replay/mirror
+    // reconstruction while each verdict retains its own origin provenance.
+    const unstamped = [
+      ...[...this.pendingStampsByAgentID.values()].flat(),
+      ...events,
+    ];
+    this.pendingStampsByAgentID.clear();
+    this.persistFinalEventStamps(unstamped, input.records);
   }
 
   /** Full serializable ledger (operator/test surface — sees everything). */
@@ -844,6 +853,51 @@ export class AgentDealManager {
       const pending = this.pendingStampsByAgentID.get(carrier) ?? [];
       pending.push(event);
       this.pendingStampsByAgentID.set(carrier, pending);
+    }
+  }
+
+  private persistFinalEventStamps(
+    events: readonly AgentDealLedgerEvent[],
+    records: readonly AgentDecisionRecord[],
+  ): void {
+    if (events.length === 0 || records.length === 0) {
+      return;
+    }
+    const recordsByPlayerID = new Map<string, AgentDecisionRecord[]>();
+    for (const record of records) {
+      const playerID = this.playerIDByAgentID.get(record.agentID);
+      if (playerID === undefined) continue;
+      const list = recordsByPlayerID.get(playerID) ?? [];
+      list.push(record);
+      recordsByPlayerID.set(playerID, list);
+    }
+    const byCarrier = new Map<string, AgentDealLedgerEvent[]>();
+    for (const event of events) {
+      const carrier = this.stampCarrierFor(event, recordsByPlayerID);
+      if (carrier === null) continue;
+      const pending = byCarrier.get(carrier) ?? [];
+      pending.push(event);
+      byCarrier.set(carrier, pending);
+    }
+    for (const [agentID, pending] of byCarrier) {
+      const record = [...records]
+        .reverse()
+        .find((candidate) => candidate.agentID === agentID);
+      if (record === undefined) continue;
+      const current = record.decisionMetadata?.dealComplianceEvent;
+      let existing: unknown[] = [];
+      if (typeof current === "string") {
+        try {
+          const parsed: unknown = JSON.parse(current);
+          if (Array.isArray(parsed)) existing = parsed;
+        } catch {
+          existing = [];
+        }
+      }
+      record.decisionMetadata = {
+        ...(record.decisionMetadata ?? {}),
+        dealComplianceEvent: JSON.stringify([...existing, ...pending]),
+      };
     }
   }
 

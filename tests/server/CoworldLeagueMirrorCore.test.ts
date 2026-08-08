@@ -1153,6 +1153,31 @@ describe("mirrored decisions.jsonl economy/deal stamp projection (economy-negoti
     expect(records[0].decisionMetadata).toEqual(dealStamps);
   });
 
+  test("a mirrored line preserves fallback, degradation, reason, and audit provenance", () => {
+    const { records } = agentDecisionRecordsFromMirroredDecisionsLog(
+      `${JSON.stringify({
+        ...bareLine,
+        reason: "Attack follows the accepted pact.",
+        fallbackUsed: true,
+        llmPlannerDegraded: true,
+        auditStatus: "confirmed",
+        auditReason: "outgoing attack was visible after execution",
+      })}\n`,
+    );
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      reason: "Attack follows the accepted pact.",
+      decisionMetadata: {
+        fallbackUsed: true,
+        llmPlannerDegraded: true,
+      },
+      audit: {
+        auditStatus: "confirmed",
+        auditReason: "outgoing attack was visible after execution",
+      },
+    });
+  });
+
   test("a line without the stamps still projects byte-identically to the pre-economy shape", () => {
     const { records } = agentDecisionRecordsFromMirroredDecisionsLog(
       `${JSON.stringify(bareLine)}\n`,

@@ -15,7 +15,11 @@ import {
   buildAgentSpectatorTelemetry,
   type SpectatorTelemetry,
 } from "./AgentSpectatorTelemetry";
-import type { AgentDecisionRecord, LegalActionKind } from "./AgentTypes";
+import type {
+  AgentActionAuditStatus,
+  AgentDecisionRecord,
+  LegalActionKind,
+} from "./AgentTypes";
 import type { LatestPremierePointer } from "./CoworldLeaguePremiereSuppression";
 import type {
   CoworldLeagueEpisodePlayerRow,
@@ -1312,6 +1316,21 @@ function decisionRecordFromMirroredLogLine(
   const auditAfter = asRecord(record.auditAfter);
   const playerID = auditAfter === null ? null : asString(auditAfter.playerID);
   const economyFacts = asRecord(record.economyFacts);
+  const decisionMetadata = dealDecisionMetadata(record) ?? {};
+  if (record.fallbackUsed === true) {
+    decisionMetadata.fallbackUsed = true;
+  }
+  if (record.llmPlannerDegraded === true) {
+    decisionMetadata.llmPlannerDegraded = true;
+  }
+  const persistedAuditStatus = asString(record.auditStatus);
+  const auditStatus: AgentActionAuditStatus =
+    persistedAuditStatus === "confirmed" ||
+    persistedAuditStatus === "unknown" ||
+    persistedAuditStatus === "failed" ||
+    persistedAuditStatus === "not_applicable"
+      ? persistedAuditStatus
+      : "unknown";
   return {
     sequence,
     gameID: "",
@@ -1329,8 +1348,9 @@ function decisionRecordFromMirroredLogLine(
     attackActionIDs: [],
     chosenActionID,
     chosenActionKind: chosenActionKind as LegalActionKind,
-    reason: "",
-    decisionMetadata: dealDecisionMetadata(record),
+    reason: boundedString(record.reason) ?? "",
+    decisionMetadata:
+      Object.keys(decisionMetadata).length > 0 ? decisionMetadata : undefined,
     chosenActionMetadata: metadataRecord(record.selectedActionMetadata),
     economyFacts:
       economyFacts === null
@@ -1342,12 +1362,12 @@ function decisionRecordFromMirroredLogLine(
       reason: asString(result.reason) ?? "",
       submittedIntent: null,
     },
-    audit:
-      playerID === null
-        ? undefined
+    audit: {
+      auditStatus,
+      auditReason: boundedString(record.auditReason) ?? "",
+      ...(playerID === null
+        ? {}
         : {
-            auditStatus: "unknown",
-            auditReason: "",
             after: {
               tick: null,
               playerID,
@@ -1361,7 +1381,8 @@ function decisionRecordFromMirroredLogLine(
               outgoingAllianceRequestRecipientIDs: [],
               outgoingEmbargoTargetIDs: [],
             },
-          },
+          }),
+    },
   };
 }
 

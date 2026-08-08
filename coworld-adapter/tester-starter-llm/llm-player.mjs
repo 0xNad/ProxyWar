@@ -180,14 +180,16 @@ function buildState(obs, actions) {
     if (b && b.kind && b.kind !== "none") parts.push(`bottleneck: ${b.kind}`);
     if (parts.length) econ = parts.join("; ").slice(0, 300);
   }
-  // Optional deals block (server flag; absent on most matches today). ONE
-  // compact line (<=300 chars); absent => the state is byte-identical.
+  // Optional deals block (present when this match offers structured deals).
+  // ONE compact line (<=300 chars); absent => the state is byte-identical.
   let deals;
   if (obs.deals) {
     const short = {
       non_aggression_pact: "nap",
       trade_security_pact: "tsp",
-      joint_attack: "joint",
+      // Wire identifier stays joint_attack; "attack" is accurate display
+      // wording because only the proposer promises to attack the named target.
+      joint_attack: "attack",
       support_request: "support",
     };
     const ownName = clean(obs.ownState?.name);

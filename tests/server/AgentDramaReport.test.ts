@@ -119,6 +119,70 @@ describe("AgentDramaReport", () => {
     expect(report.dramaGrade).toBe("flat");
     expect(report.notes.join(" ")).toContain("self-play");
   });
+
+  it("does not turn accepted but unconfirmed orders into persistent drama facts", () => {
+    const unconfirmed = (
+      sequence: number,
+      agentID: string,
+      username: string,
+      playerID: string,
+      kind: LegalActionKind,
+      metadata: Record<string, string | number | boolean | null>,
+    ): AgentDecisionRecord => {
+      const value = record(
+        sequence,
+        agentID,
+        username,
+        playerID,
+        kind,
+        metadata,
+      );
+      return { ...value, audit: undefined };
+    };
+    const report = buildAgentDramaReport({
+      runID: "unconfirmed-run",
+      matchID: "m3",
+      scenario: "provenance-gate",
+      brainMode: "planner-executor",
+      roster: ROSTER,
+      records: [
+        unconfirmed(1, "a1", "Atlas", "p1", "alliance_request", {
+          recipientID: "p2",
+          recipientName: "Blitz",
+        }),
+        unconfirmed(2, "a2", "Blitz", "p2", "alliance_request", {
+          recipientID: "p1",
+          recipientName: "Atlas",
+        }),
+        unconfirmed(3, "a2", "Blitz", "p2", "break_alliance", {
+          recipientID: "p1",
+          recipientName: "Atlas",
+        }),
+        unconfirmed(4, "a2", "Blitz", "p2", "attack", {
+          targetID: "p1",
+          targetName: "Atlas",
+        }),
+        unconfirmed(5, "a1", "Atlas", "p1", "nuke", {
+          targetID: "p2",
+          targetName: "Blitz",
+        }),
+      ],
+    });
+
+    expect(report.allianceFormedCount).toBe(0);
+    expect(report.allianceBrokenCount).toBe(0);
+    expect(report.betrayalCount).toBe(0);
+    expect(report.agents.every((agent) => agent.attacksInitiated === 0)).toBe(
+      true,
+    );
+    expect(
+      report.topMoments.some((moment) =>
+        ["alliance_formed", "alliance_break", "attack", "nuke"].includes(
+          moment.kind,
+        ),
+      ),
+    ).toBe(false);
+  });
 });
 
 function record(
@@ -153,6 +217,10 @@ function record(
       accepted: true,
       reason: "ok",
       submittedIntent: null,
+    },
+    audit: {
+      auditStatus: "confirmed",
+      auditReason: "the dramatic-match fixture represents a realized action",
     },
   };
 }

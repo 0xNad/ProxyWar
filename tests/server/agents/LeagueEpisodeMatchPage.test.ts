@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import { AGENT_MATCH_RECAP_SCHEMA_VERSION } from "../../../src/server/agents/AgentMatchRecap";
+import { DECISIVE_MOMENTS_SCHEMA_VERSION } from "../../../src/server/agents/AgentDecisiveMoments";
 import type { CoworldLeagueEpisodeRow } from "../../../src/server/agents/CoworldLeagueSiteWriter";
 import {
   buildLeagueEpisodeMatchPageModel,
@@ -13,8 +14,10 @@ import {
   leagueEpisodeSpoilerSafeDescription,
   leagueEpisodeSpoilerSafeTitle,
   parseMatchRecapArtifact,
+  parseDecisiveMomentsArtifact,
   readCoworldLeagueEpisodesFromDataJson,
   readLeagueEpisodeRecap,
+  readLeagueEpisodeDecisiveMoments,
 } from "../../../src/server/agents/LeagueEpisodeMatchPage";
 import {
   FIXTURE_AGENTS,
@@ -192,6 +195,85 @@ describe("readLeagueEpisodeRecap", () => {
       "x".repeat(2 * 1024 * 1024 + 1),
     );
     await expect(readLeagueEpisodeRecap(scratch)).resolves.toBeNull();
+  });
+});
+
+describe("parseDecisiveMomentsArtifact / readLeagueEpisodeDecisiveMoments", () => {
+  const artifact = JSON.stringify({
+    schemaVersion: DECISIVE_MOMENTS_SCHEMA_VERSION,
+    runID: "league-coworld-test-episode-0001",
+    generatedAt: "2026-08-08T12:00:00.000Z",
+    moments: [
+      {
+        turn: 1400,
+        type: "deal_violated",
+        headline: "VERDICT: Frostfall violated the pact.",
+        involvedAgents: ["FixtureFrostfall", "FixtureGhostRaider"],
+        beforeState: {
+          turn: 1300,
+          agents: [
+            {
+              username: "FixtureFrostfall",
+              tilesOwned: 100,
+              troops: 200,
+              territoryShare: 0.55,
+              rank: 1,
+              alive: true,
+            },
+          ],
+        },
+        afterState: {
+          turn: 1400,
+          agents: [
+            {
+              username: "FixtureFrostfall",
+              tilesOwned: 110,
+              troops: 180,
+              territoryShare: 0.6,
+              rank: 1,
+              alive: true,
+            },
+          ],
+        },
+        jumpToReplayTurn: 1400,
+        statedReason: "The counterparty became too dangerous.",
+      },
+    ],
+  });
+
+  test("accepts the generator's current schema v3 and retains fact, state, and separately-labeled agent claim", () => {
+    const moments = parseDecisiveMomentsArtifact(artifact);
+    expect(moments).toHaveLength(1);
+    expect(moments?.[0]).toMatchObject({
+      type: "deal_violated",
+      headline: "VERDICT: Frostfall violated the pact.",
+      jumpToReplayTurn: 1400,
+      statedReason: "The counterparty became too dangerous.",
+      beforeState: { turn: 1300 },
+      afterState: { turn: 1400 },
+    });
+  });
+
+  test("rejects stale schema v2 instead of retaining moments curated without confirmed-effect evidence", () => {
+    expect(
+      parseDecisiveMomentsArtifact(
+        JSON.stringify({ ...JSON.parse(artifact), schemaVersion: 2 }),
+      ),
+    ).toBeNull();
+  });
+
+  test("reads the current decisive-moments artifact from disk", async () => {
+    const scratch = await mkdtemp(
+      path.join(tmpdir(), "league-episode-decisive-"),
+    );
+    try {
+      await writeFile(path.join(scratch, "decisive-moments.json"), artifact);
+      await expect(readLeagueEpisodeDecisiveMoments(scratch)).resolves.toEqual(
+        parseDecisiveMomentsArtifact(artifact),
+      );
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
   });
 });
 

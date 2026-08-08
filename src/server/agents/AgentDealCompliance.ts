@@ -4,6 +4,7 @@ import {
   STATED_REASON_MAX_LENGTH,
 } from "./AgentDecisiveMoments";
 import type {
+  AgentActionAuditStatus,
   AgentDealObligationKind,
   AgentDealObligationStatus,
   AgentDealStatus,
@@ -201,12 +202,19 @@ export interface AgentDealLedgerEvent {
    */
   statedReason?: string;
   step: number;
+  /** Origin decision for immediate fulfilled/violated verdicts. Absent on passive lifecycle events. */
+  sourceSequence?: number;
+  sourceTurnNumber?: number;
+  sourceFallbackUsed?: boolean;
+  sourceLlmPlannerDegraded?: boolean;
+  sourceAuditStatus?: AgentActionAuditStatus | "missing";
+  sourceAuditReason?: string;
 }
 
 export const DEAL_TEMPLATE_LABELS: Record<AgentDealTemplate, string> = {
   non_aggression_pact: "non-aggression pact",
   trade_security_pact: "trade-security pact",
-  joint_attack: "joint-attack pledge",
+  joint_attack: "attack pledge",
   support_request: "support pledge",
 };
 
@@ -478,6 +486,7 @@ function verdictEvent(
   importance: number,
   publicText: string,
   step: number,
+  sourceRecord: AgentDecisionRecord | null = null,
   /** VIEWER-ONLY agent claim; omitted entirely when there is none. */
   statedReason: string | null = null,
 ): AgentDealLedgerEvent {
@@ -494,6 +503,20 @@ function verdictEvent(
     publicText,
     ...(statedReason !== null ? { statedReason } : {}),
     step,
+    ...(sourceRecord !== null
+      ? {
+          sourceSequence: sourceRecord.sequence,
+          sourceTurnNumber: sourceRecord.turnNumber,
+          sourceFallbackUsed:
+            sourceRecord.decisionMetadata?.fallbackUsed === true,
+          sourceLlmPlannerDegraded:
+            sourceRecord.decisionMetadata?.llmPlannerDegraded === true,
+          sourceAuditStatus: sourceRecord.audit?.auditStatus ?? "missing",
+          ...(sourceRecord.audit?.auditReason !== undefined
+            ? { sourceAuditReason: sourceRecord.audit.auditReason }
+            : {}),
+        }
+      : {}),
   };
 }
 
@@ -584,6 +607,7 @@ function judgeRecordForObligation(
             96,
             `VERDICT: ${obligation.obligorName} violated the pact — ${evidence}.`,
             step,
+            record,
             statedReason,
           ),
         );
@@ -607,6 +631,7 @@ function judgeRecordForObligation(
               96,
               `VERDICT: ${obligation.obligorName} violated the ${label} — ${evidence}.`,
               step,
+              record,
               statedReason,
             ),
           );
@@ -635,6 +660,7 @@ function judgeRecordForObligation(
             70,
             `VERDICT: ${obligation.obligorName} fulfilled the ${label} — ${evidence}.`,
             step,
+            record,
             statedReason,
           ),
         );
@@ -672,6 +698,7 @@ function judgeRecordForObligation(
             70,
             `VERDICT: ${obligation.obligorName} fulfilled the ${label} — ${evidence}.`,
             step,
+            record,
             statedReason,
           ),
         );

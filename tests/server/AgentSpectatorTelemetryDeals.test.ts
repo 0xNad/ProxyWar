@@ -6,8 +6,8 @@ import { DEALS_FLAG, fabricatedRecord, type StubSeat } from "./DealTestHarness";
 
 // Phase B spectator events (PROXYWAR_TUNE_STRUCTURED_DEALS, default OFF):
 // derived from records alone (the mirror-backfill path rebuilds telemetry
-// from decisions.jsonl), actionKind "none", bounded per agent, with
-// server-authored publicText carried in the deal stamps. Tones per spec:
+// from decisions.jsonl), provenance split by action/ledger source, bounded per
+// agent, with server-authored publicText carried in the deal stamps. Tones per spec:
 // deal_accepted = pact, deal_violated = betrayal (high importance).
 
 const A: StubSeat = { agentID: "a1", playerID: "P_A", username: "Auri" };
@@ -58,7 +58,7 @@ function telemetryFor(records: AgentDecisionRecord[]) {
 }
 
 describe("spectator telemetry — structured-deal events", () => {
-  it("maps propose/accept/reject stamps to events with spec tones and actionKind none", () => {
+  it("maps propose/accept/reject stamps to accepted-action events with record provenance", () => {
     const records = [
       stampedRecord(1, A, {
         dealAction: "propose",
@@ -67,6 +67,8 @@ describe("spectator telemetry — structured-deal events", () => {
         dealCounterpartyID: B.playerID,
         dealCounterpartyName: B.username,
         dealApplyAccepted: true,
+        fallbackUsed: true,
+        llmPlannerDegraded: true,
         dealPublicText:
           "Auri proposed a non-aggression pact to Sefirot (12 decisions).",
       }),
@@ -88,7 +90,8 @@ describe("spectator telemetry — structured-deal events", () => {
         dealPublicText: "Sefirot rejected Auri's trade-security pact.",
       }),
     ];
-    const events = telemetryFor(records).events.filter((event) =>
+    const telemetry = telemetryFor(records);
+    const events = telemetry.events.filter((event) =>
       event.kind.startsWith("deal_"),
     );
     expect(events).toHaveLength(3);
@@ -96,7 +99,11 @@ describe("spectator telemetry — structured-deal events", () => {
       kind: "deal_proposed",
       tone: "info",
       importance: 55,
-      actionKind: "none",
+      actionKind: "deal_propose",
+      evidenceLevel: "accepted_action",
+      fallbackUsed: true,
+      llmPlannerDegraded: true,
+      auditStatus: "not_applicable",
       actorAgentID: A.agentID,
       targetAgentID: B.agentID,
       publicText:
@@ -106,7 +113,8 @@ describe("spectator telemetry — structured-deal events", () => {
       kind: "deal_accepted",
       tone: "pact",
       importance: 78,
-      actionKind: "none",
+      actionKind: "deal_accept",
+      evidenceLevel: "accepted_action",
       actorAgentID: B.agentID,
       targetAgentID: A.agentID,
     });
@@ -114,6 +122,8 @@ describe("spectator telemetry — structured-deal events", () => {
       "Sefirot accepted Auri's non-aggression pact (12 decisions).",
     );
     expect(events[2]).toMatchObject({ kind: "deal_rejected", tone: "info" });
+    expect(telemetry.communicationThreads).toHaveLength(1);
+    expect(telemetry.communicationThreads[0]?.messages).toHaveLength(3);
   });
 
   it("emits nothing for withdrawals, failed applies, or rejected results", () => {
@@ -161,6 +171,12 @@ describe("spectator telemetry — structured-deal events", () => {
       publicText:
         "VERDICT: Sefirot violated the pact — land attack on Auri at step 214.",
       step: 214,
+      sourceSequence: 91,
+      sourceTurnNumber: 2140,
+      sourceFallbackUsed: true,
+      sourceLlmPlannerDegraded: true,
+      sourceAuditStatus: "confirmed",
+      sourceAuditReason: "confirmed source attack",
     };
     // The stamp rides A's record (the carrier), but the ACTOR is Sefirot —
     // telemetry maps the actor from the event's own playerID. Every live seat
@@ -185,6 +201,12 @@ describe("spectator telemetry — structured-deal events", () => {
       tone: "betrayal",
       importance: 96,
       actionKind: "none",
+      evidenceLevel: "state_derived",
+      fallbackUsed: true,
+      llmPlannerDegraded: true,
+      auditStatus: "confirmed",
+      sequence: 91,
+      turnNumber: 2140,
       actorAgentID: B.agentID,
       actorName: B.username,
       targetAgentID: A.agentID,

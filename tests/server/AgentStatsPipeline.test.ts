@@ -1,15 +1,15 @@
 import { describe, expect, it } from "vitest";
+import type { AgentRunFinalState } from "../../src/server/agents/AgentDecisionLogWriter";
+import { buildAgentSpectatorTelemetry } from "../../src/server/agents/AgentSpectatorTelemetry";
 import {
   aggregateAgentStats,
   computeMatchAgentMetrics,
   type RawMatchAgentMetrics,
 } from "../../src/server/agents/AgentStatsPipeline";
-import { buildAgentSpectatorTelemetry } from "../../src/server/agents/AgentSpectatorTelemetry";
 import {
   AgentDecisionRecord,
   LegalActionKind,
 } from "../../src/server/agents/AgentTypes";
-import type { AgentRunFinalState } from "../../src/server/agents/AgentDecisionLogWriter";
 
 const ROSTER = [
   {
@@ -65,12 +65,21 @@ function record(
     chosenActionMetadata: metadata,
     intent: null,
     result: { accepted: true, reason: "ok", submittedIntent: null },
+    audit: {
+      auditStatus: "confirmed",
+      auditReason: "the metrics fixture represents a realized effect",
+    },
     fallbackUsed: false,
   } as AgentDecisionRecord;
 }
 
 function finalState(
-  players: { agentID: string; username: string; tilesOwned: number; troops: number }[],
+  players: {
+    agentID: string;
+    username: string;
+    tilesOwned: number;
+    troops: number;
+  }[],
 ): AgentRunFinalState {
   return {
     phase: "finished",
@@ -166,6 +175,22 @@ describe("computeMatchAgentMetrics", () => {
     const atlas = computeMatchAgentMetrics(telemetry, "a1", null);
     // formed at turn 101 (Blitz's reciprocating request), broken at turn 500.
     expect(atlas?.treatyDurationsTurns).toEqual([399]);
+  });
+
+  it("excludes accepted but unconfirmed effect kinds from persistent metrics", () => {
+    const unconfirmedTelemetry = buildAgentSpectatorTelemetry({
+      runID: "stats-unconfirmed",
+      records: scenario().map((value) => ({ ...value, audit: undefined })),
+      roster: ROSTER,
+    });
+    const blitz = computeMatchAgentMetrics(unconfirmedTelemetry, "a2", null);
+
+    expect(blitz?.attackCount).toBe(0);
+    expect(blitz?.offersAcceptedWith).toEqual(new Set());
+    expect(blitz?.betrayalCount).toBe(0);
+    expect(blitz?.treatyDurationsTurns).toEqual([]);
+    // Accepted action/opportunity counts remain distinct from realized effects.
+    expect(blitz?.allianceRequestCount).toBe(1);
   });
 
   it("computes real territory share only when a real land-tile count is supplied", () => {
@@ -367,9 +392,7 @@ describe("aggregateAgentStats — threshold gating (spec item 2: hide below thre
     ]);
     expect(atThreshold.fingerprint.reliability).not.toBeNull();
     expect(atThreshold.fingerprint.reliability?.sampleSize).toBe(55);
-    expect(atThreshold.fingerprint.reliability?.value).toBeCloseTo(
-      1 - 6 / 55,
-    );
+    expect(atThreshold.fingerprint.reliability?.value).toBeCloseTo(1 - 6 / 55);
 
     // An episode with no decisions.jsonl (decisionCount: null, the
     // default from rawMatch()) must be EXCLUDED from both numerator and

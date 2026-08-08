@@ -1,10 +1,17 @@
 import { z } from "zod";
-import { afterFirstIdentityBootstrap } from "./identity/GuestBootstrapGate";
 import type { GameStartInfo } from "../core/Schemas";
+import type {
+  AnalystActionKindCount,
+  AnalystEventRow,
+  CuratedWarRoomEvent,
+  CuratedWarRoomEventKind,
+  TimelineMarker,
+} from "./BroadcastComposition";
 import {
   readProxyWarClipGenerationCapabilities,
   type ProxyWarClipGenerationCapabilities,
 } from "./ClipGenerationCapabilities";
+import { afterFirstIdentityBootstrap } from "./identity/GuestBootstrapGate";
 import {
   PREMIERE_PRESENTATION_TRAIL_MS,
   premiereClipStatusResponseSchema,
@@ -47,13 +54,6 @@ import {
   type ReplayPremiereShareRequest,
   type ReplayPremiereWarEventView,
 } from "./ReplayPremiereOverlay";
-import type {
-  AnalystActionKindCount,
-  AnalystEventRow,
-  CuratedWarRoomEvent,
-  CuratedWarRoomEventKind,
-  TimelineMarker,
-} from "./BroadcastComposition";
 import {
   ReplayPremierePlaybackController,
   type ReplayPremierePlaybackEvent,
@@ -1857,12 +1857,9 @@ export class ReplayPremiereServiceClient {
       market.prices.length !== market.outcomeSeatIds.length ||
       Math.abs(pricesSum - 100) > 0.5 ||
       (market.status === "settled") !== (market.winnerSeatId !== null) ||
-      (market.winnerSeatId !== null &&
-        !uniqueSeats.has(market.winnerSeatId)) ||
+      (market.winnerSeatId !== null && !uniqueSeats.has(market.winnerSeatId)) ||
       (market.positions !== null &&
-        market.positions.some(
-          (position) => !uniqueSeats.has(position.seatId),
-        ))
+        market.positions.some((position) => !uniqueSeats.has(position.seatId)))
     ) {
       throw serviceError("invalid_response");
     }
@@ -2232,7 +2229,7 @@ export class ReplayPremiereServiceClient {
       (crowd !== null &&
         (resolution?.kind !== "winner" ||
           crowd.correctPredictions > crowd.totalPredictions ||
-      (total !== null && crowd.totalPredictions !== total)))
+          (total !== null && crowd.totalPredictions !== total)))
     ) {
       throw serviceError("invalid_response");
     }
@@ -2915,8 +2912,7 @@ export class ReplayPremiereRuntimeController {
     if (!bookkeepingConsistent) {
       this.frameBookkeepingDriftStrikes += 1;
       if (
-        this.frameBookkeepingDriftStrikes >=
-        MAX_FRAME_BOOKKEEPING_DRIFT_STRIKES
+        this.frameBookkeepingDriftStrikes >= MAX_FRAME_BOOKKEEPING_DRIFT_STRIKES
       ) {
         this.latchFailure("integrity_failure");
       }
@@ -3362,7 +3358,9 @@ export class ReplayPremiereRuntimeController {
       // doesn't exist on the resumed shape.
       let freshSession: ReplayPremiereServiceSessionResponse | null = null;
       if (persisted === null) {
-        freshSession = await this.establishFreshSession(this.sessionBootstrapInput);
+        freshSession = await this.establishFreshSession(
+          this.sessionBootstrapInput,
+        );
         response = freshSession;
       } else {
         try {
@@ -3386,7 +3384,9 @@ export class ReplayPremiereRuntimeController {
             this.windowRef.sessionStorage,
             this.options.premiereId,
           );
-          freshSession = await this.establishFreshSession(this.sessionBootstrapInput);
+          freshSession = await this.establishFreshSession(
+            this.sessionBootstrapInput,
+          );
           response = freshSession;
         }
       }
@@ -3448,7 +3448,10 @@ export class ReplayPremiereRuntimeController {
           error instanceof ReplayPremiereServiceError
             ? error.retryAfterMs
             : null;
-        const delayMs = nextRetryDelayMs(this.sessionRetryAttempt, retryAfterMs);
+        const delayMs = nextRetryDelayMs(
+          this.sessionRetryAttempt,
+          retryAfterMs,
+        );
         this.sessionRetryAttempt += 1;
         this.recovery = {
           code: "request_failed",
@@ -3635,7 +3638,10 @@ export class ReplayPremiereRuntimeController {
   }
 
   private clearPersistedSession(): void {
-    removePersistedSession(this.windowRef.sessionStorage, this.options.premiereId);
+    removePersistedSession(
+      this.windowRef.sessionStorage,
+      this.options.premiereId,
+    );
   }
 
   private applyServiceProjection(
@@ -5271,6 +5277,12 @@ const ANALYST_TONE_BY_WAR_ROOM_KIND: Record<CuratedWarRoomEventKind, string> = {
   alliance: "pact",
   first_strike: "war",
   betrayal: "betrayal",
+  deal_proposed: "info",
+  deal_accepted: "pact",
+  deal_rejected: "info",
+  deal_expired: "info",
+  deal_fulfilled: "pact",
+  deal_violated: "betrayal",
   elimination: "war",
   nuke: "threat",
   plan_change: "info",
@@ -5547,7 +5559,10 @@ function isRetryableServiceFailure(error: unknown): boolean {
 // `ReplayPremiereNetworkController.runLoop` already uses. A server-supplied
 // `Retry-After` is honored as a floor, never a ceiling: it tells the client
 // the earliest safe time to retry, not the latest useful one.
-function nextRetryDelayMs(attempt: number, retryAfterMs: number | null): number {
+function nextRetryDelayMs(
+  attempt: number,
+  retryAfterMs: number | null,
+): number {
   const exponential = Math.min(
     INTERACTION_RECOVERY_MAX_RETRY_MS,
     INTERACTION_RECOVERY_RETRY_MS * 2 ** attempt,

@@ -1294,6 +1294,8 @@ export interface AgentActionAuditSnapshot {
   outgoingAttackTargetIDs: string[];
   outgoingAttackIDs?: string[];
   outgoingAllianceRequestRecipientIDs: string[];
+  /** Stable core-alliance state at this audit boundary; optional on legacy artifacts. */
+  alliedPlayerIDs?: string[];
   outgoingEmbargoTargetIDs: string[];
   targetPlayerIDs?: string[];
   transportRetreatingUnitIDs?: number[];

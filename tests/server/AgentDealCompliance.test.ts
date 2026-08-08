@@ -484,7 +484,7 @@ describe("AgentDealCompliance — fulfillment, expiry, moot, force-resolve", () 
     expect(obligation.resolutionEvidence).toContain("25% troops");
     const stamp = harness.manager.takePendingComplianceStamp(A.agentID)!;
     expect(stamp).toContain("deal_fulfilled");
-    expect(stamp).toContain("fulfilled the joint-attack pledge");
+    expect(stamp).toContain("fulfilled the attack pledge");
   });
 
   it("ignores below-threshold token attacks for joint_attack fulfillment (pressure floor)", () => {
@@ -811,6 +811,20 @@ describe("AgentDealCompliance — fulfillment, expiry, moot, force-resolve", () 
     // An open, unanswered proposal (→ expired), from a proposer off cooldown.
     const openID = harness.propose(B, C, "non_aggression_pact");
 
+    for (const seat of [A, B, C]) {
+      harness.push(
+        fabricatedRecord({
+          sequence: 0,
+          agentID: seat.agentID,
+          playerID: seat.playerID,
+          username: seat.username,
+          turnNumber: 75,
+          kind: "hold",
+          auditStatus: "not_applicable",
+        }),
+      );
+    }
+
     harness.manager.finalize({ records: harness.records });
     const ledger = harness.manager.ledgerSnapshot();
     const byID = new Map(ledger.deals.map((deal) => [deal.dealID, deal]));
@@ -841,6 +855,22 @@ describe("AgentDealCompliance — fulfillment, expiry, moot, force-resolve", () 
         expect(obligation.status).not.toBe("pending");
       }
     }
+    const persistedFinalEvents = harness.records.flatMap((record) => {
+      const stamp = record.decisionMetadata?.dealComplianceEvent;
+      return typeof stamp === "string"
+        ? (JSON.parse(stamp) as Array<{ event: string; dealID: string }>)
+        : [];
+    });
+    expect(
+      persistedFinalEvents.some(
+        (event) => event.event === "deal_fulfilled" && event.dealID === napID,
+      ),
+    ).toBe(true);
+    expect(
+      persistedFinalEvents.some(
+        (event) => event.event === "deal_expired" && event.dealID === openID,
+      ),
+    ).toBe(true);
     // Idempotent.
     harness.manager.finalize({ records: harness.records });
     expect(harness.manager.ledgerSnapshot().deals).toEqual(ledger.deals);
