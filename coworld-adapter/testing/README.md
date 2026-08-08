@@ -8,10 +8,11 @@ structured-promise treatment; offered combat precedes `hold`.
 
 Profiles:
 
-- `keeper`: accepts offered promises and uses confirmed-effect actions to keep
-  support and attack pledges; it filters accidental pact violations.
-- `defector`: accepts or proposes non-aggression promises, then deliberately
-  selects an offered hostile action against an active partner.
+- `keeper`: accepts offered promises, uses confirmed-effect actions to keep
+  support and attack pledges, and selects audited `hold` actions through an
+  active negative covenant so absence-of-violation has complete coverage.
+- `defector`: pairs with the keeper through a trade-security promise, then
+  deliberately selects an offered voluntary embargo against that partner.
 - `skeptic`: rejects every incoming promise and never proposes one.
 - `deal-blind`: never selects a deal action.
 
@@ -63,18 +64,17 @@ over argv and environment. A hosted runtime environment override therefore
 cannot silently turn a keeper into a defector or move a policy between arms.
 
 Use the same four image digests, maps, episode counts, and rotated seat orders
-within an arm. The current adapter always seeds the simulation from the fixed
-game identity `COWRLD01`; its optional config `seed` is not applied and
-`results.json` honestly reports `seed: null`. Until that contract is repaired,
-do not describe the numeric experiment id below as a simulation seed or claim a
-multi-seed experiment. Hosted upload/league submission is an outward action and
-must remain a separately authorized experiment; these files only make the
-policies reproducible and uploadable.
+within an arm. The adapter encodes each explicit `game_config.seed` as the
+authoritative eight-character `GameServer.id`; `results.json` records both the
+exact integer seed and derived game identity. A request that omits `seed`
+retains legacy `COWRLD01` and reports `seed: null`. Hosted upload/league
+submission is an outward action and must remain a separately authorized
+experiment; these files only make the policies reproducible and uploadable.
 
 For a bounded, exactly matched local smoke, generate one full Coworld episode
 request per arm. The request freezes the Pangaea variant, roster/seat order,
-fixed runtime game identity, decision-step cap, policy images, and player
-command. The final numeric argument is an audit-only experiment id:
+seed-derived runtime game identity, decision-step cap, policy images, and player
+command. The final numeric argument is the actual simulation seed:
 
 ```sh
 node coworld-adapter/testing/make-social-episode-request.mjs \
@@ -91,3 +91,23 @@ one more explicit output path; the generator writes the matching manifest with
 `PROXYWAR_TUNE_STRUCTURED_DEALS` removed, and that generated manifest must be
 the manifest argument to `coworld run-episode`. Do not label a deal-enabled
 game as a true OFF arm.
+
+For the repeated internal evidence gate, run the host-side matched matrix. It
+uses the same production episode runner and websocket protocol without Docker,
+crosses three explicit seeds, two maps, all four fairness spawn rotations, and
+the OFF / enabled-but-ignored / active arms, and checkpoints every cell so an
+interrupted run can resume from the same output directory:
+
+```sh
+node coworld-adapter/testing/run-social-matrix.mjs
+```
+
+The default is 72 episodes. `matrix-report.json` preserves per-run artifact
+paths and SHA-256 hashes; `matrix-report.md` reports opportunity denominators,
+selected deal actions, finalized obligation outcomes, fallback counts, and the
+matched OFF-versus-ignored non-interference check. `moot` and `unverified`
+obligations never enter the commitment reliability denominator, and a policy
+that never accepts a commitment receives no reliability estimate rather than a
+perfect score. For a bounded smoke, override comma-separated axes with
+`PROXYWAR_SOCIAL_MATRIX_SEEDS`, `PROXYWAR_SOCIAL_MATRIX_MAPS`,
+`PROXYWAR_SOCIAL_MATRIX_EPISODES`, and `PROXYWAR_SOCIAL_MATRIX_ARMS`.

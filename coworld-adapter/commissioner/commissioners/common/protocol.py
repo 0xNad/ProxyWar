@@ -8,7 +8,9 @@ from uuid import UUID
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 _STATE_MAX_BYTES = 10 * 1024 * 1024
-EPISODE_SEED_MAX = 2**31 - 1
+# Keep commissioner-generated seeds inside the uploadable ProxyWar manifest's
+# collision-free PWS + five-base-26-letter game-identity range.
+EPISODE_SEED_MAX = 26**5 - 1
 
 
 def random_episode_seed() -> int:
@@ -74,7 +76,11 @@ class EpisodeRequest(BaseModel):
     # stamps like `episodeIndex` (see ProxyWarCommissioner) that must survive
     # independently of whatever a caller puts in `game_config`.
     game_config_overrides: dict[str, Any] = Field(default_factory=dict)
-    seed: int = Field(default_factory=random_episode_seed)
+    seed: int = Field(
+        default_factory=random_episode_seed,
+        ge=0,
+        le=EPISODE_SEED_MAX,
+    )
     tags: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("seed", mode="before")

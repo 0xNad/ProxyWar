@@ -72,6 +72,22 @@ const PROPOSE_NAP = {
   },
 };
 
+function targetedProposal(
+  recipientName: string,
+  template = "trade_security_pact",
+) {
+  return {
+    ...PROPOSE_NAP,
+    id: `deal_propose:${recipientName}:${template}`,
+    metadata: {
+      ...PROPOSE_NAP.metadata,
+      recipientID: recipientName,
+      recipientName,
+      template,
+    },
+  };
+}
+
 function proposal(template = "non_aggression_pact") {
   return {
     dealID: `deal:P_OTHER:P_ME:${template}:1`,
@@ -169,6 +185,76 @@ describe("deterministic social-control arms", () => {
     );
   });
 
+  it("pairs keeper and defector instead of repeatedly targeting the skeptic", async () => {
+    const keeperTarget = targetedProposal("Social keeper");
+    const defectorTarget = targetedProposal("Social defector");
+    const skepticTarget = targetedProposal("Social skeptic");
+    const actions = [HOLD, skepticTarget, keeperTarget, defectorTarget, EXPAND];
+
+    const keeper = await choose({
+      profile: "keeper",
+      arm: "active",
+      legalActions: actions,
+    });
+    const defector = await choose({
+      profile: "defector",
+      arm: "active",
+      legalActions: actions,
+    });
+    expect(keeper.selectedDealActionId).toBe(defectorTarget.id);
+    expect(defector.selectedDealActionId).toBe(keeperTarget.id);
+  });
+
+  it("does not substitute a non-aggression promise into the trade-security control", async () => {
+    const withdraw = {
+      id: "deal_withdraw:old",
+      kind: "deal_withdraw",
+      label: "Withdraw",
+      risk: { level: "none" },
+      metadata: { dealID: "old" },
+    };
+    for (const profile of ["keeper", "defector"] as const) {
+      const decision = await choose({
+        profile,
+        arm: "active",
+        legalActions: [HOLD, PROPOSE_NAP, withdraw, EXPAND],
+      });
+      expect(decision.selectedDealActionId).toBe(withdraw.id);
+    }
+  });
+
+  it("holds a negative covenant for complete audit coverage while the defector selects a violation", async () => {
+    const deal = activeDeal({
+      template: "trade_security_pact",
+      obligationKind: "trade_security",
+    });
+    const embargo = {
+      id: "embargo:P_OTHER:start",
+      kind: "embargo",
+      label: "Embargo Other",
+      risk: { level: "medium" },
+      metadata: { targetID: "P_OTHER", action: "start" },
+    };
+    const observation = {
+      ownState: { playerID: "P_ME" },
+      deals: { decisionStep: 4, activeDeals: [deal] },
+    };
+    const keeper = await choose({
+      profile: "keeper",
+      arm: "active",
+      legalActions: [EXPAND, embargo, HOLD],
+      observation,
+    });
+    const defector = await choose({
+      profile: "defector",
+      arm: "active",
+      legalActions: [EXPAND, embargo, HOLD],
+      observation,
+    });
+    expect(keeper.selectedLegalActionId).toBe(HOLD.id);
+    expect(defector.selectedLegalActionId).toBe(embargo.id);
+  });
+
   it("keeper filters accidental pact violations and fulfills explicit support", async () => {
     const attackPartner = {
       id: "attack:P_OTHER:40",
@@ -194,7 +280,7 @@ describe("deterministic social-control arms", () => {
         },
       },
     });
-    expect(pactDecision.selectedLegalActionId).toBe(EXPAND.id);
+    expect(pactDecision.selectedLegalActionId).toBe(HOLD.id);
 
     const donate = {
       id: "donate_gold:P_OTHER:150000",
@@ -327,7 +413,7 @@ describe("deterministic social-control arms", () => {
     expect(a).toEqual(b);
     const offered = new Set(actions.map((action) => action.id));
     expect(offered.has(a.selectedLegalActionId)).toBe(true);
-    expect(offered.has(a.selectedDealActionId ?? "")).toBe(true);
+    expect(a.selectedDealActionId).toBeUndefined();
     expect(a.fallbackUsed).toBe(false);
     expect(a.llmPlannerDegraded).toBe(false);
   });

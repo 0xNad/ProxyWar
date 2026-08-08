@@ -6,7 +6,7 @@ const [
   arm,
   outputPath,
   stepsRaw = "30",
-  experimentIDRaw = "424242",
+  seedRaw = "424242",
   offManifestOutput,
 ] = process.argv.slice(2);
 if (
@@ -15,16 +15,16 @@ if (
   !["off", "ignored", "active"].includes(arm)
 ) {
   throw new Error(
-    "usage: node make-social-episode-request.mjs <manifest> <off|ignored|active> <output> [steps] [experiment-id] [off-manifest-output]",
+    "usage: node make-social-episode-request.mjs <manifest> <off|ignored|active> <output> [steps] [seed] [off-manifest-output]",
   );
 }
 const maxDecisionSteps = Number(stepsRaw);
-const experimentID = Number(experimentIDRaw);
+const seed = Number(seedRaw);
 if (!Number.isSafeInteger(maxDecisionSteps) || maxDecisionSteps < 1) {
   throw new Error("steps must be a positive safe integer");
 }
-if (!Number.isSafeInteger(experimentID) || experimentID < 0) {
-  throw new Error("experiment-id must be a non-negative safe integer");
+if (!Number.isSafeInteger(seed) || seed < 0 || seed > 11881375) {
+  throw new Error("seed must be an integer from 0 through 11881375");
 }
 
 const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
@@ -59,13 +59,15 @@ const request = {
     ...variant.game_config,
     max_decision_steps: maxDecisionSteps,
     episodeIndex: 0,
+    seed,
   },
   players,
   episode_tags: {
     purpose: "proxywar-social-control",
     arm,
     roster: profiles.join(","),
-    experiment_id: String(experimentID),
+    experiment_id: `social-seed-${seed}`,
+    seed: String(seed),
     max_decision_steps: String(maxDecisionSteps),
   },
 };

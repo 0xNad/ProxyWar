@@ -1,10 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/Metta-AI/coworld/main/src/coworld/coworld_manifest_schema.json",
-  "tags": [
-    "strategy",
-    "multiplayer",
-    "ai-agents"
-  ],
+  "tags": ["strategy", "multiplayer", "ai-agents"],
   "game": {
     "name": "proxywar",
     "description": "Hosted Proxy War Coworld adapter that preserves the LegalAction.id decision path.",
@@ -92,8 +88,8 @@
         "seed": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 308915775,
-          "description": "Optional deterministic episode seed. Encoded as six base-26 A-Z letters so OpenFront simpleHash remains injective over the supported range."
+          "maximum": 11881375,
+          "description": "Optional deterministic episode seed. Encoded under a fixed PWS prefix as five base-26 A-Z letters so OpenFront Math.abs(simpleHash(...)) remains injective over the supported range."
         },
         "replay_tail_turns": {
           "type": "integer",
@@ -144,12 +140,9 @@
       ],
       "properties": {
         "seed": {
-          "type": [
-            "integer",
-            "null"
-          ],
+          "type": ["integer", "null"],
           "minimum": 0,
-          "maximum": 308915775
+          "maximum": 11881375
         },
         "game_id": {
           "type": "string",
@@ -263,10 +256,7 @@
     {
       "type": "player",
       "image": "{{GAME_IMAGE}}",
-      "run": [
-        "node",
-        "/app/integration/src/starter-player.mjs"
-      ],
+      "run": ["node", "/app/integration/src/starter-player.mjs"],
       "env": {},
       "id": "proxywar-starter-websocket",
       "name": "Proxy War Starter Websocket Player",

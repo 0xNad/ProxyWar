@@ -132,7 +132,9 @@ class ProxyWarCommissioner(RulesetStrategyCommissioner):
         same-map/same-roster episodes; see `AgentSpawnAssignment.ts`).
 
         Deterministic and stateless (no persisted counter, no hash/random,
-        never touches `seed`): `base` is this round's zero-based ordinal
+        and copies the request's bounded `seed` into the game config so the
+        adapter applies and reports the same deterministic identity. `base` is
+        this round's zero-based ordinal
         (round_number 1 -> base 0, the same anchoring `_fit_ladder_rung`
         already uses for its own pool rotation) times THIS round's own
         episode count, so episode `i` within the round gets `base + i` -
@@ -163,6 +165,7 @@ class ProxyWarCommissioner(RulesetStrategyCommissioner):
                             "game_config_overrides": {
                                 **episode.game_config_overrides,
                                 "episodeIndex": base + position,
+                                "seed": episode.seed,
                             }
                         }
                     )

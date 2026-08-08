@@ -108,12 +108,20 @@ function choosePrimaryAction({ profile, arm, actions, observation }) {
   if (arm === "active" && profile === "keeper") {
     const fulfillment = keeperFulfillment(gameActions, observation);
     if (fulfillment) return fulfillment;
+    if (hasOwnNegativeObligation(observation)) {
+      const hold = gameActions.find((action) => action.kind === "hold");
+      if (hold) return hold;
+    }
     return defaultPrimary(gameActions, keeperPromiseFilter(observation));
   }
 
   if (arm === "active" && profile === "defector") {
     const betrayal = deliberateBetrayal(gameActions, observation);
     if (betrayal) return betrayal;
+    if (hasOwnNegativeObligation(observation)) {
+      const hold = gameActions.find((action) => action.kind === "hold");
+      if (hold) return hold;
+    }
   }
 
   return defaultPrimary(gameActions, () => false);
@@ -269,13 +277,30 @@ function chooseDealAction({ profile, actions, observation }) {
     if (decline) return decline;
   }
 
+  // The frozen keeper and defector must actually encounter one another in the
+  // heterogeneous control roster. Stable ID sorting otherwise targets the
+  // skeptic first, producing only rejection/withdrawal loops and no accepted
+  // commitments to measure.
+  const preferredRecipientName =
+    profile === "keeper"
+      ? "Social defector"
+      : profile === "defector"
+        ? "Social keeper"
+        : null;
   const proposal = actions.find(
     (action) =>
       action.kind === "deal_propose" &&
-      action.metadata?.template === "non_aggression_pact",
+      action.metadata?.template === "trade_security_pact" &&
+      (preferredRecipientName === null ||
+        action.metadata?.recipientName === preferredRecipientName),
   );
   if (proposal) return proposal;
 
+  // Do not silently substitute another promise template when the frozen
+  // trade-security control is temporarily unavailable. That would change the
+  // obligation being measured: an embargo violates trade security but can
+  // fulfill a non-aggression pact. Withdrawing an old proposal (or abstaining)
+  // keeps the control policy aligned with its preregistered construct.
   return actions.find((action) => action.kind === "deal_withdraw") ?? null;
 }
 
@@ -323,6 +348,18 @@ function ownPendingObligation(deal, ownID) {
   );
 }
 
+function hasOwnNegativeObligation(observation) {
+  const ownID = observation?.ownState?.playerID;
+  if (!ownID) return false;
+  return activeDeals(observation).some((deal) => {
+    const obligation = ownPendingObligation(deal, ownID);
+    return (
+      obligation?.kind === "non_aggression" ||
+      obligation?.kind === "trade_security"
+    );
+  });
+}
+
 function otherPartyID(deal, ownID) {
   if (deal?.proposerPlayerID === ownID) return deal.recipientPlayerID;
   if (deal?.recipientPlayerID === ownID) return deal.proposerPlayerID;
@@ -343,7 +380,7 @@ function decisionReason({ profile, arm, primary, deal, observation }) {
     return `Control ${profile} declines the offered promise; game action ${primary.kind} continues.`;
   }
   if (deal?.kind === "deal_propose") {
-    return `Control ${profile} offers a non-aggression promise; game action ${primary.kind} continues.`;
+    return `Control ${profile} offers a structured promise; game action ${primary.kind} continues.`;
   }
   return `Control ${profile} active arm: game action ${primary.kind}; no diplomacy selection.`;
 }

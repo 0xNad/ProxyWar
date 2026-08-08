@@ -1,0 +1,593 @@
+import crypto from "node:crypto";
+
+export const SOCIAL_MATRIX_PROFILES = [
+  "keeper",
+  "defector",
+  "skeptic",
+  "deal-blind",
+];
+
+export const SOCIAL_MATRIX_ARMS = ["off", "ignored", "active"];
+export const SOCIAL_MATRIX_SEEDS = [173205, 223607, 424242];
+export const SOCIAL_MATRIX_MAPS = ["Pangaea", "Europe"];
+export const SOCIAL_MATRIX_EPISODES = [0, 1, 2, 3];
+
+const MAX_SOCIAL_SEED = 26 ** 5 - 1;
+
+const DEAL_KINDS = [
+  "deal_propose",
+  "deal_accept",
+  "deal_reject",
+  "deal_withdraw",
+];
+
+const OBLIGATION_STATUSES = [
+  "pending",
+  "fulfilled",
+  "violated",
+  "expired_unfulfilled",
+  "unverified",
+  "moot",
+];
+
+export function parseJsonLines(text) {
+  return String(text)
+    .split(/\r?\n/)
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line));
+}
+
+export function sha256(value) {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+export function expectedSocialGameID(seed) {
+  if (!Number.isSafeInteger(seed) || seed < 0 || seed > MAX_SOCIAL_SEED) {
+    throw new Error(`unsupported social matrix seed: ${seed}`);
+  }
+  let remaining = seed;
+  const encoded = Array.from({ length: 5 }, () => "A");
+  for (let index = encoded.length - 1; index >= 0; index -= 1) {
+    encoded[index] = String.fromCharCode(65 + (remaining % 26));
+    remaining = Math.floor(remaining / 26);
+  }
+  return `PWS${encoded.join("")}`;
+}
+
+export function summarizeSocialRun(input) {
+  const profilesByName = new Map(
+    SOCIAL_MATRIX_PROFILES.map((profile) => [
+      socialPlayerName(profile),
+      profile,
+    ]),
+  );
+  const byProfile = Object.fromEntries(
+    SOCIAL_MATRIX_PROFILES.map((profile) => [profile, emptyProfileSummary()]),
+  );
+
+  for (const record of input.decisions) {
+    const profile = profilesByName.get(record.username);
+    if (profile === undefined) continue;
+    const summary = byProfile[profile];
+    summary.decisions += 1;
+    if (record.result?.accepted === true) summary.acceptedDecisions += 1;
+    if (record.fallbackUsed === true) summary.fallbackDecisions += 1;
+    if (record.llmPlannerDegraded === true) summary.degradedDecisions += 1;
+    const primaryKind = String(record.selectedActionKind ?? "unknown");
+    summary.primarySelections[primaryKind] =
+      (summary.primarySelections[primaryKind] ?? 0) + 1;
+
+    for (const kind of DEAL_KINDS) {
+      const offered = Array.isArray(record.legalActionIDsByKind?.[kind])
+        ? record.legalActionIDsByKind[kind].length
+        : 0;
+      summary.dealOpportunities[kind].offeredActions += offered;
+      if (offered > 0) summary.dealOpportunities[kind].decisionWindows += 1;
+    }
+    if (typeof record.dealAction === "string") {
+      const kind = `deal_${record.dealAction}`;
+      if (summary.dealSelections[kind] !== undefined) {
+        summary.dealSelections[kind] += 1;
+      }
+    }
+    const dealSlotEvidence = record.dealSlotEvidence;
+    if (typeof dealSlotEvidence?.requestedActionID === "string") {
+      summary.dealSlotEvidence.requested += 1;
+    }
+    if (dealSlotEvidence?.validation?.accepted === true) {
+      summary.dealSlotEvidence.validationAccepted += 1;
+    } else if (dealSlotEvidence?.validation?.accepted === false) {
+      summary.dealSlotEvidence.validationRejected += 1;
+    }
+    if (dealSlotEvidence?.application?.attempted === true) {
+      summary.dealSlotEvidence.applicationAttempted += 1;
+      if (dealSlotEvidence.application.accepted === true) {
+        summary.dealSlotEvidence.applicationAccepted += 1;
+      } else {
+        summary.dealSlotEvidence.applicationRejected += 1;
+      }
+    }
+  }
+
+  const ledger = input.ledger;
+  if (ledger !== null) {
+    for (const deal of Array.isArray(ledger.deals) ? ledger.deals : []) {
+      if (deal.status === "accepted") {
+        recordAcceptedCounterparty(
+          byProfile,
+          profilesByName,
+          deal.proposerName,
+          deal.recipientName,
+        );
+        recordAcceptedCounterparty(
+          byProfile,
+          profilesByName,
+          deal.recipientName,
+          deal.proposerName,
+        );
+      }
+      for (const obligation of Array.isArray(deal.obligations)
+        ? deal.obligations
+        : []) {
+        const profile = profilesByName.get(obligation.obligorName);
+        if (profile === undefined) continue;
+        const status = String(obligation.status ?? "unknown");
+        if (byProfile[profile].obligations[status] === undefined) {
+          byProfile[profile].obligations[status] = 0;
+        }
+        byProfile[profile].obligations[status] += 1;
+      }
+    }
+  }
+
+  for (const profile of SOCIAL_MATRIX_PROFILES) {
+    const summary = byProfile[profile];
+    const verifiedTerminal =
+      summary.obligations.fulfilled +
+      summary.obligations.violated +
+      summary.obligations.expired_unfulfilled;
+    summary.verifiedTerminalObligations = verifiedTerminal;
+    summary.commitmentReliability =
+      verifiedTerminal === 0
+        ? null
+        : summary.obligations.fulfilled / verifiedTerminal;
+    const proposalWindows =
+      summary.dealOpportunities.deal_propose.decisionWindows;
+    summary.proposalSelectionRate =
+      proposalWindows === 0
+        ? null
+        : summary.dealSelections.deal_propose / proposalWindows;
+    const responseWindows = new Set();
+    for (let index = 0; index < input.decisions.length; index += 1) {
+      const record = input.decisions[index];
+      if (profilesByName.get(record.username) !== profile) continue;
+      if (
+        (record.legalActionIDsByKind?.deal_accept?.length ?? 0) > 0 ||
+        (record.legalActionIDsByKind?.deal_reject?.length ?? 0) > 0
+      ) {
+        responseWindows.add(index);
+      }
+    }
+    const responses =
+      summary.dealSelections.deal_accept + summary.dealSelections.deal_reject;
+    summary.responseSelectionRate =
+      responseWindows.size === 0 ? null : responses / responseWindows.size;
+  }
+
+  return {
+    arm: input.arm,
+    seed: input.seed,
+    map: input.map,
+    episodeIndex: input.episodeIndex,
+    gameID: input.results.game_id,
+    resultSeed: input.results.seed,
+    winnerSlot: input.results.winner_slot,
+    scores: input.results.scores,
+    decisionCount: input.results.decision_count,
+    acceptedDecisionCount: input.results.accepted_decision_count,
+    fallbackCount: input.results.fallback_count,
+    degradedCount: input.results.degraded_count,
+    ledgerPresent: ledger !== null,
+    ledgerFinalized:
+      ledger !== null && Number.isInteger(ledger.finalizedAtStep),
+    dealEventCounts: countDealEvents(ledger?.events),
+    byProfile,
+    nonInterferenceSignature: nonInterferenceSignature(
+      input.decisions,
+      input.results,
+    ),
+  };
+}
+
+export function matchedOffIgnoredChecks(runs) {
+  const byCell = new Map();
+  for (const run of runs) {
+    if (run.arm !== "off" && run.arm !== "ignored") continue;
+    const key = `${run.seed}|${run.map}|${run.episodeIndex}`;
+    const cell = byCell.get(key) ?? { off: [], ignored: [] };
+    cell[run.arm].push(run);
+    byCell.set(key, cell);
+  }
+  return [...byCell.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([cell, pair]) => ({
+      cell,
+      complete: pair.off.length === 1 && pair.ignored.length === 1,
+      identical:
+        pair.off.length === 1 &&
+        pair.ignored.length === 1 &&
+        pair.off[0].nonInterferenceSignature ===
+          pair.ignored[0].nonInterferenceSignature,
+      offCount: pair.off.length,
+      ignoredCount: pair.ignored.length,
+      offSignature:
+        pair.off.length === 1 ? pair.off[0].nonInterferenceSignature : null,
+      ignoredSignature:
+        pair.ignored.length === 1
+          ? pair.ignored[0].nonInterferenceSignature
+          : null,
+    }));
+}
+
+export function aggregateSocialMatrix(runs) {
+  const byProfile = Object.fromEntries(
+    SOCIAL_MATRIX_PROFILES.map((profile) => [
+      profile,
+      {
+        activeRuns: 0,
+        dealSelections: Object.fromEntries(DEAL_KINDS.map((kind) => [kind, 0])),
+        dealSlotEvidence: emptyDealSlotEvidence(),
+        acceptedDealsWith: {},
+        dealOpportunityWindows: Object.fromEntries(
+          DEAL_KINDS.map((kind) => [kind, 0]),
+        ),
+        obligations: Object.fromEntries(
+          OBLIGATION_STATUSES.map((status) => [status, 0]),
+        ),
+        verifiedTerminalObligations: 0,
+        commitmentReliability: null,
+        fallbackDecisions: 0,
+        degradedDecisions: 0,
+      },
+    ]),
+  );
+
+  for (const run of runs.filter((candidate) => candidate.arm === "active")) {
+    for (const profile of SOCIAL_MATRIX_PROFILES) {
+      const source = run.byProfile[profile];
+      const target = byProfile[profile];
+      target.activeRuns += 1;
+      target.fallbackDecisions += source.fallbackDecisions;
+      target.degradedDecisions += source.degradedDecisions;
+      for (const kind of DEAL_KINDS) {
+        target.dealSelections[kind] += source.dealSelections[kind];
+        target.dealOpportunityWindows[kind] +=
+          source.dealOpportunities[kind].decisionWindows;
+      }
+      for (const [kind, count] of Object.entries(source.dealSlotEvidence)) {
+        target.dealSlotEvidence[kind] += count;
+      }
+      for (const [counterparty, count] of Object.entries(
+        source.acceptedDealsWith,
+      )) {
+        target.acceptedDealsWith[counterparty] =
+          (target.acceptedDealsWith[counterparty] ?? 0) + count;
+      }
+      for (const status of OBLIGATION_STATUSES) {
+        target.obligations[status] += source.obligations[status];
+      }
+    }
+  }
+
+  for (const profile of SOCIAL_MATRIX_PROFILES) {
+    const value = byProfile[profile];
+    value.verifiedTerminalObligations =
+      value.obligations.fulfilled +
+      value.obligations.violated +
+      value.obligations.expired_unfulfilled;
+    value.commitmentReliability =
+      value.verifiedTerminalObligations === 0
+        ? null
+        : value.obligations.fulfilled / value.verifiedTerminalObligations;
+  }
+
+  const nonInterference = matchedOffIgnoredChecks(runs);
+  const aggregate = {
+    schemaVersion: 2,
+    runCount: runs.length,
+    activeRunCount: runs.filter((run) => run.arm === "active").length,
+    seeds: [...new Set(runs.map((run) => run.seed))].sort((a, b) => a - b),
+    maps: [...new Set(runs.map((run) => run.map))].sort(),
+    episodeIndices: [...new Set(runs.map((run) => run.episodeIndex))].sort(
+      (a, b) => a - b,
+    ),
+    arms: [...new Set(runs.map((run) => run.arm))].sort(),
+    nonInterference: {
+      cells: nonInterference,
+      completeCells: nonInterference.filter((cell) => cell.complete).length,
+      identicalCells: nonInterference.filter((cell) => cell.identical).length,
+      passed:
+        nonInterference.length > 0 &&
+        nonInterference.every((cell) => cell.complete && cell.identical),
+    },
+    byProfile,
+  };
+  aggregate.commitmentConstruct = evaluateCommitmentConstruct(runs, aggregate);
+  return aggregate;
+}
+
+export function evaluateCommitmentConstruct(runs, aggregate) {
+  if (aggregate === null || aggregate === undefined) {
+    throw new Error("evaluateCommitmentConstruct requires a matrix aggregate");
+  }
+  const summary = aggregate;
+  const activeRuns = runs.filter((run) => run.arm === "active");
+  const heldOutRuns = activeRuns.filter((run) => run.seed !== 424242);
+  const expectedCells = new Set(
+    SOCIAL_MATRIX_SEEDS.flatMap((seed) =>
+      SOCIAL_MATRIX_MAPS.flatMap((map) =>
+        SOCIAL_MATRIX_EPISODES.flatMap((episodeIndex) =>
+          SOCIAL_MATRIX_ARMS.map(
+            (arm) => `${seed}|${map}|${episodeIndex}|${arm}`,
+          ),
+        ),
+      ),
+    ),
+  );
+  const actualCellCounts = new Map();
+  for (const run of runs) {
+    const key = `${run.seed}|${run.map}|${run.episodeIndex}|${run.arm}`;
+    actualCellCounts.set(key, (actualCellCounts.get(key) ?? 0) + 1);
+  }
+  const expectedRunCount = expectedCells.size;
+  const exactAxes =
+    JSON.stringify(summary.seeds) ===
+      JSON.stringify([...SOCIAL_MATRIX_SEEDS].sort((a, b) => a - b)) &&
+    JSON.stringify(summary.maps) === JSON.stringify(["Europe", "Pangaea"]) &&
+    JSON.stringify(summary.episodeIndices) ===
+      JSON.stringify(SOCIAL_MATRIX_EPISODES) &&
+    JSON.stringify(summary.arms) ===
+      JSON.stringify(["active", "ignored", "off"]);
+  const policies = Object.fromEntries(
+    ["keeper", "defector"].map((profile) => {
+      const overall = constructSlice(activeRuns, profile);
+      const heldOut = constructSlice(heldOutRuns, profile);
+      const byMap = Object.fromEntries(
+        summary.maps.map((map) => [
+          map,
+          constructSlice(
+            heldOutRuns.filter((run) => run.map === map),
+            profile,
+          ),
+        ]),
+      );
+      const byEpisodeIndex = Object.fromEntries(
+        summary.episodeIndices.map((episodeIndex) => [
+          episodeIndex,
+          constructSlice(
+            heldOutRuns.filter((run) => run.episodeIndex === episodeIndex),
+            profile,
+          ),
+        ]),
+      );
+      const threshold = profile === "keeper" ? 0.9 : 0.25;
+      const reliabilityPass = (slice) =>
+        slice.commitmentReliability !== null &&
+        (profile === "keeper"
+          ? slice.commitmentReliability >= threshold
+          : slice.commitmentReliability <= threshold);
+      const coveragePass =
+        heldOut.runCount > 0 && heldOut.verifiedCoverageRate >= 0.75;
+      return [
+        profile,
+        {
+          threshold,
+          overall,
+          heldOut,
+          byMap,
+          byEpisodeIndex,
+          coveragePass,
+          overallReliabilityPass: reliabilityPass(overall),
+          reliabilityPass: reliabilityPass(heldOut),
+          mapBalancePass: Object.values(byMap).every(reliabilityPass),
+          spawnRotationPass:
+            Object.values(byEpisodeIndex).every(reliabilityPass),
+        },
+      ];
+    }),
+  );
+  const completeMatrix =
+    exactAxes &&
+    runs.length === expectedRunCount &&
+    actualCellCounts.size === expectedCells.size &&
+    [...expectedCells].every((key) => actualCellCounts.get(key) === 1) &&
+    [...actualCellCounts].every(
+      ([key, count]) => expectedCells.has(key) && count === 1,
+    );
+  const healthyRuns = runs.every(
+    (run) =>
+      run.fallbackCount === 0 &&
+      run.degradedCount === 0 &&
+      run.acceptedDecisionCount === run.decisionCount,
+  );
+  const provenanceComplete = runs.every(
+    (run) =>
+      run.resultSeed === run.seed &&
+      run.gameID === expectedSocialGameID(run.seed),
+  );
+  const enabledRuns = runs.filter((run) => run.arm !== "off");
+  const enabledLedgersFinalized =
+    enabledRuns.length === 48 &&
+    enabledRuns.every(
+      (run) => run.ledgerPresent === true && run.ledgerFinalized === true,
+    );
+  const noPendingObligations = enabledRuns.every((run) =>
+    SOCIAL_MATRIX_PROFILES.every(
+      (profile) => run.byProfile[profile].obligations.pending === 0,
+    ),
+  );
+  const abstentionNotRewarded = ["skeptic", "deal-blind"].every(
+    (profile) => summary.byProfile[profile].commitmentReliability === null,
+  );
+  const passed =
+    completeMatrix &&
+    healthyRuns &&
+    provenanceComplete &&
+    enabledLedgersFinalized &&
+    noPendingObligations &&
+    summary.nonInterference.passed &&
+    summary.nonInterference.completeCells === 24 &&
+    summary.nonInterference.identicalCells === 24 &&
+    abstentionNotRewarded &&
+    Object.values(policies).every(
+      (policy) =>
+        policy.coveragePass &&
+        policy.overallReliabilityPass &&
+        policy.reliabilityPass &&
+        policy.mapBalancePass &&
+        policy.spawnRotationPass,
+    );
+  return {
+    status: passed ? "internally_validated_control_construct" : "not_validated",
+    passed,
+    developmentSeed: 424242,
+    heldOutSeeds: summary.seeds.filter((seed) => seed !== 424242),
+    expectedRunCount,
+    exactAxes,
+    completeMatrix,
+    healthyRuns,
+    provenanceComplete,
+    enabledLedgersFinalized,
+    noPendingObligations,
+    nonInterferencePass: summary.nonInterference.passed,
+    abstentionNotRewarded,
+    policies,
+    claimBoundary:
+      "Distinguishes frozen commitment-control policies under matched internal conditions only; no general social-skill or LLM-trait claim.",
+  };
+}
+
+export function socialPlayerName(profile) {
+  return `Social ${profile.replaceAll("-", " ")}`;
+}
+
+function emptyProfileSummary() {
+  return {
+    decisions: 0,
+    acceptedDecisions: 0,
+    fallbackDecisions: 0,
+    degradedDecisions: 0,
+    primarySelections: {},
+    dealOpportunities: Object.fromEntries(
+      DEAL_KINDS.map((kind) => [
+        kind,
+        { decisionWindows: 0, offeredActions: 0 },
+      ]),
+    ),
+    dealSelections: Object.fromEntries(DEAL_KINDS.map((kind) => [kind, 0])),
+    dealSlotEvidence: emptyDealSlotEvidence(),
+    acceptedDealsWith: {},
+    obligations: Object.fromEntries(
+      OBLIGATION_STATUSES.map((status) => [status, 0]),
+    ),
+    verifiedTerminalObligations: 0,
+    commitmentReliability: null,
+    proposalSelectionRate: null,
+    responseSelectionRate: null,
+  };
+}
+
+function emptyDealSlotEvidence() {
+  return {
+    requested: 0,
+    validationAccepted: 0,
+    validationRejected: 0,
+    applicationAttempted: 0,
+    applicationAccepted: 0,
+    applicationRejected: 0,
+  };
+}
+
+function recordAcceptedCounterparty(
+  byProfile,
+  profilesByName,
+  participantName,
+  counterpartyName,
+) {
+  const profile = profilesByName.get(participantName);
+  const counterparty = profilesByName.get(counterpartyName);
+  if (profile === undefined || counterparty === undefined) return;
+  byProfile[profile].acceptedDealsWith[counterparty] =
+    (byProfile[profile].acceptedDealsWith[counterparty] ?? 0) + 1;
+}
+
+function countDealEvents(events) {
+  const counts = {};
+  for (const event of Array.isArray(events) ? events : []) {
+    const kind = String(event.event ?? "unknown");
+    counts[kind] = (counts[kind] ?? 0) + 1;
+  }
+  return counts;
+}
+
+function constructSlice(runs, profile) {
+  const totals = {
+    fulfilled: 0,
+    violated: 0,
+    expired_unfulfilled: 0,
+  };
+  let runsWithVerifiedTerminal = 0;
+  for (const run of runs) {
+    const value = run.byProfile[profile];
+    totals.fulfilled += value.obligations.fulfilled;
+    totals.violated += value.obligations.violated;
+    totals.expired_unfulfilled += value.obligations.expired_unfulfilled;
+    if (value.verifiedTerminalObligations > 0) {
+      runsWithVerifiedTerminal += 1;
+    }
+  }
+  const verifiedTerminalObligations =
+    totals.fulfilled + totals.violated + totals.expired_unfulfilled;
+  return {
+    runCount: runs.length,
+    runsWithVerifiedTerminal,
+    verifiedCoverageRate:
+      runs.length === 0 ? 0 : runsWithVerifiedTerminal / runs.length,
+    obligations: totals,
+    verifiedTerminalObligations,
+    commitmentReliability:
+      verifiedTerminalObligations === 0
+        ? null
+        : totals.fulfilled / verifiedTerminalObligations,
+  };
+}
+
+function nonInterferenceSignature(decisions, results) {
+  const normalized = {
+    decisions: decisions.map((record) => ({
+      username: record.username,
+      turnNumber: record.turnNumber,
+      selectedLegalActionId: record.selectedLegalActionId,
+      selectedActionKind: record.selectedActionKind,
+      accepted: record.result?.accepted === true,
+      resultReason: record.result?.reason ?? null,
+      submittedIntent: record.result?.submittedIntent ?? null,
+      fallbackUsed: record.fallbackUsed === true,
+      llmPlannerDegraded: record.llmPlannerDegraded === true,
+    })),
+    result: {
+      game_id: results.game_id,
+      seed: results.seed,
+      scores: results.scores,
+      winner_slot: results.winner_slot,
+      turn_count: results.turn_count,
+      tick: results.tick,
+      decision_count: results.decision_count,
+      accepted_decision_count: results.accepted_decision_count,
+      fallback_count: results.fallback_count,
+      degraded_count: results.degraded_count,
+      players: results.players,
+    },
+  };
+  return sha256(JSON.stringify(normalized));
+}
