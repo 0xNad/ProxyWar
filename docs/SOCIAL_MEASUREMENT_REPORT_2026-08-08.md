@@ -17,7 +17,7 @@ against deliberately constructed controls.
 
 ## Frozen design and provenance
 
-The evaluated source was commit `ccc4a79aa8983047305939b15c11b3cf3858d0aa`
+The episode source was commit `ccc4a79aa8983047305939b15c11b3cf3858d0aa`
 on `codex/league-social-seed-provenance`. The final matrix crossed:
 
 - three explicit seeds: held-out `173205` and `223607`, plus development seed
@@ -40,8 +40,9 @@ through the authoritative deterministic game identity and repeated in
 
 The retained final report is
 `coworld-adapter/artifacts/social-matrix/2026-08-08-full-v5/matrix-report.json`,
-generated at `2026-08-08T19:11:44.932Z`. Its SHA-256 is
-`5e356454258e0645a4056005c0cf3256ba5018ae7f55ffdca4f22695cc7f6e39`.
+re-aggregated through the hardened gate at `2026-08-08T19:33:47.853Z`. Its
+SHA-256 is
+`46c03d589a0eab2233857d02314d2981bcdac298fc0fe420b1bb30dec74cc00c`.
 All 408 non-null per-run artifact hashes were recomputed successfully. Across
 the 72 runs, all 8,928 decisions were accepted, seed/result provenance matched,
 and fallback and degraded counts were zero.
@@ -57,6 +58,8 @@ The frozen gate passed every required condition:
   held-out active cells;
 - keeper held-out reliability is `1.000` on 32 verified obligations;
 - defector held-out reliability is `0.000` on 16 verified obligations;
+- keeper/defector overall reliability is also `1.000`/`0.000` on 48/24
+  verified obligations;
 - both results hold independently on Europe and Pangaea and in every spawn
   rotation;
 - skeptic and deal-blind remain `null`, not perfect, because they accepted no
@@ -90,6 +93,24 @@ counterparty acceptance or a fulfilled obligation.
 The keeper and defector each recorded 72 accepted deals with the other. This is
 useful matched-control evidence, but it is one repeated counterparty pairing,
 not evidence of transfer to unseen counterparties.
+
+## Independent gate hardening
+
+Independent review confirmed that all 72 retained cells, raw summaries, 408
+artifact hashes, and seed-derived identities are valid, but found that the
+first reusable evaluator could pass a malformed 72-row input containing
+duplicate/missing cells or empty game IDs. It also enforced reliability on
+held-out slices but not overall, and trusted cached summary hashes without
+recomputing them or rejecting null hashes for required artifacts.
+
+The gate was repaired before merge. It now requires the exact unique Cartesian
+set, exactly one OFF and ignored run in each of 24 pairs, the expected game ID
+for each seed, complete cache coordinates and recomputed required artifact
+hashes, duplicate-free axes, and both overall and held-out reliability
+thresholds. The original retained runs were then re-aggregated through that
+hardened gate; no episode was rerun and no result changed. Adversarial
+duplicate-cell, empty-ID, overall-threshold, duplicate-axis, null-hash, and
+tampered-cache cases are regression tested.
 
 ## Contrary evidence retained
 

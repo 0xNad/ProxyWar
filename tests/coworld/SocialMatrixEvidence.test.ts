@@ -18,6 +18,16 @@ async function evidenceModule() {
   };
 }
 
+function gameID(seed: number): string {
+  let remaining = seed;
+  const encoded = Array.from({ length: 5 }, () => "A");
+  for (let index = encoded.length - 1; index >= 0; index -= 1) {
+    encoded[index] = String.fromCharCode(65 + (remaining % 26));
+    remaining = Math.floor(remaining / 26);
+  }
+  return `PWS${encoded.join("")}`;
+}
+
 function result() {
   return {
     game_id: "PWSAYDPA",
@@ -70,6 +80,67 @@ function decision(
         }
       : {}),
   };
+}
+
+async function completeMatrix(options?: {
+  developmentKeeperStatus?: "fulfilled" | "violated";
+  developmentDefectorStatus?: "fulfilled" | "violated";
+}) {
+  const { summarizeSocialRun } = await evidenceModule();
+  const runs = [];
+  for (const seed of [173205, 223607, 424242]) {
+    for (const map of ["Pangaea", "Europe"]) {
+      for (const episodeIndex of [0, 1, 2, 3]) {
+        const base = {
+          seed,
+          map,
+          episodeIndex,
+          decisions: [decision("Social keeper")],
+          results: {
+            ...result(),
+            game_id: gameID(seed),
+            seed,
+            decision_count: 1,
+            accepted_decision_count: 1,
+          },
+        };
+        for (const arm of ["off", "ignored"] as const) {
+          runs.push(summarizeSocialRun({ ...base, arm, ledger: null }));
+        }
+        runs.push(
+          summarizeSocialRun({
+            ...base,
+            arm: "active",
+            ledger: {
+              finalizedAtStep: 29,
+              events: [],
+              deals: [
+                {
+                  obligations: [
+                    {
+                      obligorName: "Social keeper",
+                      status:
+                        seed === 424242
+                          ? (options?.developmentKeeperStatus ?? "fulfilled")
+                          : "fulfilled",
+                    },
+                    {
+                      obligorName: "Social defector",
+                      status:
+                        seed === 424242
+                          ? (options?.developmentDefectorStatus ?? "violated")
+                          : "violated",
+                    },
+                  ],
+                },
+              ],
+            },
+          }),
+        );
+      }
+    }
+  }
+  return runs;
 }
 
 describe("social matrix evidence", () => {
@@ -201,5 +272,51 @@ describe("social matrix evidence", () => {
       abstentionNotRewarded: true,
     });
     expect(aggregate.byProfile.skeptic.commitmentReliability).toBeNull();
+  });
+
+  it("requires exactly one run for every cell in the full Cartesian matrix", async () => {
+    const { aggregateSocialMatrix } = await evidenceModule();
+    const runs = await completeMatrix();
+    expect(aggregateSocialMatrix(runs).commitmentConstruct.passed).toBe(true);
+
+    const malformed = [...runs];
+    malformed[malformed.length - 1] = structuredClone(malformed[0]);
+    const aggregate = aggregateSocialMatrix(malformed);
+    expect(aggregate).toMatchObject({
+      runCount: 72,
+      commitmentConstruct: { completeMatrix: false, passed: false },
+    });
+    expect(
+      aggregate.nonInterference.cells.some(
+        (cell: { offCount: number; ignoredCount: number }) =>
+          cell.offCount > 1 || cell.ignoredCount > 1,
+      ),
+    ).toBe(true);
+  });
+
+  it("requires the exact seed-derived game identity in every run", async () => {
+    const { aggregateSocialMatrix } = await evidenceModule();
+    const runs = await completeMatrix();
+    for (const run of runs) run.gameID = "";
+    expect(aggregateSocialMatrix(runs).commitmentConstruct).toMatchObject({
+      provenanceComplete: false,
+      passed: false,
+    });
+  });
+
+  it("enforces reliability thresholds overall as well as on held-out seeds", async () => {
+    const { aggregateSocialMatrix } = await evidenceModule();
+    const runs = await completeMatrix({
+      developmentKeeperStatus: "violated",
+      developmentDefectorStatus: "fulfilled",
+    });
+    const construct = aggregateSocialMatrix(runs).commitmentConstruct;
+    expect(construct.policies.keeper).toMatchObject({
+      heldOut: { commitmentReliability: 1 },
+      overall: { commitmentReliability: 2 / 3 },
+      reliabilityPass: true,
+      overallReliabilityPass: false,
+    });
+    expect(construct.passed).toBe(false);
   });
 });

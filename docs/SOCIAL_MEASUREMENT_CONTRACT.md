@@ -72,13 +72,14 @@ Terminal obligation states are the existing referee enum:
 - `moot`
 
 No accepted obligation may remain `pending` in the finalized artifact. Open
-proposals become `expired` at match end. A negative covenant still pending at
-match end becomes `fulfilled` only in the narrow referee sense that no
-confirmed violation was observed during its active window **and** every active
-decision step had complete confirmed/not-applicable audit coverage. A coverage
-gap produces `unverified`, never inferred fulfilment. A positive commitment
-whose usable window was cut short becomes `moot`; one whose window fully
-elapsed becomes `expired_unfulfilled`.
+proposals become `expired` at match end. A negative covenant whose full window
+elapsed becomes `fulfilled` only in the narrow referee sense that no confirmed
+violation was observed during that window **and** every active decision step
+had complete confirmed/not-applicable audit coverage. A negative covenant
+whose window was cut short by match end becomes `moot`; a coverage gap in a
+fully elapsed window produces `unverified`, never inferred fulfilment. A
+positive commitment whose usable window was cut short becomes `moot`; one
+whose window fully elapsed becomes `expired_unfulfilled`.
 
 ## Facts versus claims
 

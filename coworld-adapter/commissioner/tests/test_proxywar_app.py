@@ -16,6 +16,7 @@ os.environ.setdefault("RULESET_STRATEGY_CONFIG_NAME", "proxywar")
 from commissioners.common.adapters import schedule_rounds_for_request
 from commissioners.common.protocol import (
     DivisionInfo,
+    EPISODE_SEED_MAX,
     EpisodeRequest,
     LeagueInfo,
     MembershipInfo,
@@ -417,6 +418,7 @@ def test_competition_schedule_stamps_episode_index_overrides() -> None:
         assert "episodeIndex" in episode.game_config_overrides
         assert isinstance(episode.game_config_overrides["episodeIndex"], int)
         assert episode.game_config_overrides["episodeIndex"] >= 0
+        assert episode.game_config_overrides["seed"] == episode.seed
 
 
 def test_qualifier_schedule_stamps_episode_index_overrides() -> None:
@@ -429,6 +431,7 @@ def test_qualifier_schedule_stamps_episode_index_overrides() -> None:
         assert "episodeIndex" in episode.game_config_overrides
         assert isinstance(episode.game_config_overrides["episodeIndex"], int)
         assert episode.game_config_overrides["episodeIndex"] >= 0
+        assert episode.game_config_overrides["seed"] == episode.seed
 
 
 @pytest.mark.parametrize("path", ["competition", "qualifier"])
@@ -516,11 +519,13 @@ def test_with_episode_index_preserves_existing_overrides() -> None:
                 variant_id="v",
                 policy_version_ids=[],
                 game_config_overrides={"existing_flag": "keep-me"},
+                seed=1,
             ),
             EpisodeRequest(
                 request_id="1",
                 variant_id="v",
                 policy_version_ids=[],
+                seed=2,
             ),
         ]
     )
@@ -530,8 +535,23 @@ def test_with_episode_index_preserves_existing_overrides() -> None:
     assert stamped.episodes[0].game_config_overrides == {
         "existing_flag": "keep-me",
         "episodeIndex": 0,
+        "seed": 1,
     }
-    assert stamped.episodes[1].game_config_overrides == {"episodeIndex": 1}
+    assert stamped.episodes[1].game_config_overrides == {
+        "episodeIndex": 1,
+        "seed": 2,
+    }
+
+
+@pytest.mark.parametrize("seed", [-1, EPISODE_SEED_MAX + 1])
+def test_episode_request_rejects_seed_outside_manifest_range(seed: int) -> None:
+    with pytest.raises(ValueError):
+        EpisodeRequest(
+            request_id="out-of-range-seed",
+            variant_id="v",
+            policy_version_ids=[],
+            seed=seed,
+        )
 
 
 def test_every_manifest_declares_episode_index_in_config_schema() -> None:
@@ -556,6 +576,18 @@ def test_every_manifest_declares_episode_index_in_config_schema() -> None:
         assert "episodeIndex" not in schema.get("required", []), (
             f"{manifest_path}: episodeIndex must stay optional (default 0)"
         )
+
+
+def test_current_manifests_match_the_commissioner_seed_range() -> None:
+    import json
+
+    manifest_dir = Path(__file__).parents[2] / "coworld"
+    for name in ["coworld_manifest.json", "coworld_manifest_template.json"]:
+        manifest_path = manifest_dir / name
+        manifest = json.loads(manifest_path.read_text())
+        seed_schema = manifest["game"]["config_schema"]["properties"]["seed"]
+        assert seed_schema["minimum"] == 0, manifest_path
+        assert seed_schema["maximum"] == EPISODE_SEED_MAX, manifest_path
 
 
 def test_live_dispatch_throttle_caps_competition_at_three_episodes() -> None:

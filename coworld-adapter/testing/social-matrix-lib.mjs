@@ -8,6 +8,11 @@ export const SOCIAL_MATRIX_PROFILES = [
 ];
 
 export const SOCIAL_MATRIX_ARMS = ["off", "ignored", "active"];
+export const SOCIAL_MATRIX_SEEDS = [173205, 223607, 424242];
+export const SOCIAL_MATRIX_MAPS = ["Pangaea", "Europe"];
+export const SOCIAL_MATRIX_EPISODES = [0, 1, 2, 3];
+
+const MAX_SOCIAL_SEED = 26 ** 5 - 1;
 
 const DEAL_KINDS = [
   "deal_propose",
@@ -34,6 +39,19 @@ export function parseJsonLines(text) {
 
 export function sha256(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+export function expectedSocialGameID(seed) {
+  if (!Number.isSafeInteger(seed) || seed < 0 || seed > MAX_SOCIAL_SEED) {
+    throw new Error(`unsupported social matrix seed: ${seed}`);
+  }
+  let remaining = seed;
+  const encoded = Array.from({ length: 5 }, () => "A");
+  for (let index = encoded.length - 1; index >= 0; index -= 1) {
+    encoded[index] = String.fromCharCode(65 + (remaining % 26));
+    remaining = Math.floor(remaining / 26);
+  }
+  return `PWS${encoded.join("")}`;
 }
 
 export function summarizeSocialRun(input) {
@@ -186,22 +204,28 @@ export function matchedOffIgnoredChecks(runs) {
   for (const run of runs) {
     if (run.arm !== "off" && run.arm !== "ignored") continue;
     const key = `${run.seed}|${run.map}|${run.episodeIndex}`;
-    const cell = byCell.get(key) ?? {};
-    cell[run.arm] = run;
+    const cell = byCell.get(key) ?? { off: [], ignored: [] };
+    cell[run.arm].push(run);
     byCell.set(key, cell);
   }
   return [...byCell.entries()]
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([cell, pair]) => ({
       cell,
-      complete: pair.off !== undefined && pair.ignored !== undefined,
+      complete: pair.off.length === 1 && pair.ignored.length === 1,
       identical:
-        pair.off !== undefined &&
-        pair.ignored !== undefined &&
-        pair.off.nonInterferenceSignature ===
-          pair.ignored.nonInterferenceSignature,
-      offSignature: pair.off?.nonInterferenceSignature ?? null,
-      ignoredSignature: pair.ignored?.nonInterferenceSignature ?? null,
+        pair.off.length === 1 &&
+        pair.ignored.length === 1 &&
+        pair.off[0].nonInterferenceSignature ===
+          pair.ignored[0].nonInterferenceSignature,
+      offCount: pair.off.length,
+      ignoredCount: pair.ignored.length,
+      offSignature:
+        pair.off.length === 1 ? pair.off[0].nonInterferenceSignature : null,
+      ignoredSignature:
+        pair.ignored.length === 1
+          ? pair.ignored[0].nonInterferenceSignature
+          : null,
     }));
 }
 
@@ -299,16 +323,34 @@ export function evaluateCommitmentConstruct(runs, aggregate) {
   const summary = aggregate;
   const activeRuns = runs.filter((run) => run.arm === "active");
   const heldOutRuns = activeRuns.filter((run) => run.seed !== 424242);
-  const expectedRunCount = 3 * 2 * 4 * 3;
+  const expectedCells = new Set(
+    SOCIAL_MATRIX_SEEDS.flatMap((seed) =>
+      SOCIAL_MATRIX_MAPS.flatMap((map) =>
+        SOCIAL_MATRIX_EPISODES.flatMap((episodeIndex) =>
+          SOCIAL_MATRIX_ARMS.map(
+            (arm) => `${seed}|${map}|${episodeIndex}|${arm}`,
+          ),
+        ),
+      ),
+    ),
+  );
+  const actualCellCounts = new Map();
+  for (const run of runs) {
+    const key = `${run.seed}|${run.map}|${run.episodeIndex}|${run.arm}`;
+    actualCellCounts.set(key, (actualCellCounts.get(key) ?? 0) + 1);
+  }
+  const expectedRunCount = expectedCells.size;
   const exactAxes =
     JSON.stringify(summary.seeds) ===
-      JSON.stringify([173205, 223607, 424242]) &&
+      JSON.stringify([...SOCIAL_MATRIX_SEEDS].sort((a, b) => a - b)) &&
     JSON.stringify(summary.maps) === JSON.stringify(["Europe", "Pangaea"]) &&
-    JSON.stringify(summary.episodeIndices) === JSON.stringify([0, 1, 2, 3]) &&
+    JSON.stringify(summary.episodeIndices) ===
+      JSON.stringify(SOCIAL_MATRIX_EPISODES) &&
     JSON.stringify(summary.arms) ===
       JSON.stringify(["active", "ignored", "off"]);
   const policies = Object.fromEntries(
     ["keeper", "defector"].map((profile) => {
+      const overall = constructSlice(activeRuns, profile);
       const heldOut = constructSlice(heldOutRuns, profile);
       const byMap = Object.fromEntries(
         summary.maps.map((map) => [
@@ -340,10 +382,12 @@ export function evaluateCommitmentConstruct(runs, aggregate) {
         profile,
         {
           threshold,
+          overall,
           heldOut,
           byMap,
           byEpisodeIndex,
           coveragePass,
+          overallReliabilityPass: reliabilityPass(overall),
           reliabilityPass: reliabilityPass(heldOut),
           mapBalancePass: Object.values(byMap).every(reliabilityPass),
           spawnRotationPass:
@@ -352,7 +396,14 @@ export function evaluateCommitmentConstruct(runs, aggregate) {
       ];
     }),
   );
-  const completeMatrix = exactAxes && runs.length === expectedRunCount;
+  const completeMatrix =
+    exactAxes &&
+    runs.length === expectedRunCount &&
+    actualCellCounts.size === expectedCells.size &&
+    [...expectedCells].every((key) => actualCellCounts.get(key) === 1) &&
+    [...actualCellCounts].every(
+      ([key, count]) => expectedCells.has(key) && count === 1,
+    );
   const healthyRuns = runs.every(
     (run) =>
       run.fallbackCount === 0 &&
@@ -360,7 +411,9 @@ export function evaluateCommitmentConstruct(runs, aggregate) {
       run.acceptedDecisionCount === run.decisionCount,
   );
   const provenanceComplete = runs.every(
-    (run) => run.resultSeed === run.seed && typeof run.gameID === "string",
+    (run) =>
+      run.resultSeed === run.seed &&
+      run.gameID === expectedSocialGameID(run.seed),
   );
   const abstentionNotRewarded = ["skeptic", "deal-blind"].every(
     (profile) => summary.byProfile[profile].commitmentReliability === null,
@@ -370,10 +423,13 @@ export function evaluateCommitmentConstruct(runs, aggregate) {
     healthyRuns &&
     provenanceComplete &&
     summary.nonInterference.passed &&
+    summary.nonInterference.completeCells === 24 &&
+    summary.nonInterference.identicalCells === 24 &&
     abstentionNotRewarded &&
     Object.values(policies).every(
       (policy) =>
         policy.coveragePass &&
+        policy.overallReliabilityPass &&
         policy.reliabilityPass &&
         policy.mapBalancePass &&
         policy.spawnRotationPass,

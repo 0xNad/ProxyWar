@@ -9,8 +9,12 @@ import { fileURLToPath } from "node:url";
 
 import {
   SOCIAL_MATRIX_ARMS,
+  SOCIAL_MATRIX_EPISODES,
+  SOCIAL_MATRIX_MAPS,
   SOCIAL_MATRIX_PROFILES,
+  SOCIAL_MATRIX_SEEDS,
   aggregateSocialMatrix,
+  expectedSocialGameID,
   parseJsonLines,
   sha256,
   socialPlayerName,
@@ -30,13 +34,13 @@ const GAME_FILE = path.join(
 export async function runSocialMatrix(options = {}) {
   const seeds =
     options.seeds ??
-    integerList("PROXYWAR_SOCIAL_MATRIX_SEEDS", [173205, 223607, 424242]);
+    integerList("PROXYWAR_SOCIAL_MATRIX_SEEDS", [...SOCIAL_MATRIX_SEEDS]);
   const maps =
     options.maps ??
-    stringList("PROXYWAR_SOCIAL_MATRIX_MAPS", ["Pangaea", "Europe"]);
+    stringList("PROXYWAR_SOCIAL_MATRIX_MAPS", [...SOCIAL_MATRIX_MAPS]);
   const episodeIndices =
     options.episodeIndices ??
-    integerList("PROXYWAR_SOCIAL_MATRIX_EPISODES", [0, 1, 2, 3]);
+    integerList("PROXYWAR_SOCIAL_MATRIX_EPISODES", [...SOCIAL_MATRIX_EPISODES]);
   const arms =
     options.arms ??
     stringList("PROXYWAR_SOCIAL_MATRIX_ARMS", [...SOCIAL_MATRIX_ARMS]);
@@ -103,6 +107,10 @@ export async function runSocialMatrix(options = {}) {
       path.join(runDir, "run-summary.json"),
     );
     if (cached !== null) {
+      await validateCachedRun(cached, cell, {
+        maxDecisionSteps,
+        turnsPerDecisionStep,
+      });
       runs.push(cached);
       console.log(
         `[social-matrix ${index + 1}/${plan.length}] cached ${cellLabel(cell)}`,
@@ -139,6 +147,73 @@ export async function runSocialMatrix(options = {}) {
     ),
   );
   return { outputRoot, runs, aggregate };
+}
+
+export async function validateCachedRun(run, cell, expected) {
+  if (run === null || typeof run !== "object") {
+    throw new Error(`invalid cached summary for ${cellLabel(cell)}`);
+  }
+  for (const key of ["seed", "map", "episodeIndex", "arm"]) {
+    if (run[key] !== cell[key]) {
+      throw new Error(
+        `cached ${key} mismatch for ${cellLabel(cell)}: ${run[key]}`,
+      );
+    }
+  }
+  if (
+    run.maxDecisionSteps !== expected.maxDecisionSteps ||
+    run.turnsPerDecisionStep !== expected.turnsPerDecisionStep
+  ) {
+    throw new Error(`cached timing mismatch for ${cellLabel(cell)}`);
+  }
+  if (
+    run.resultSeed !== cell.seed ||
+    run.gameID !== expectedSocialGameID(cell.seed)
+  ) {
+    throw new Error(`cached seed/game mismatch for ${cellLabel(cell)}`);
+  }
+  if (
+    run.artifactPaths === null ||
+    typeof run.artifactPaths !== "object" ||
+    run.sha256 === null ||
+    typeof run.sha256 !== "object"
+  ) {
+    throw new Error(`cached artifact evidence missing for ${cellLabel(cell)}`);
+  }
+  for (const key of [
+    "config",
+    "results",
+    "replay",
+    "decisions",
+    "telemetry",
+    "dealLedger",
+  ]) {
+    if (!Object.hasOwn(run.sha256, key)) {
+      throw new Error(`cached ${key} hash missing for ${cellLabel(cell)}`);
+    }
+    const expectedHash = run.sha256[key];
+    if (expectedHash === null) {
+      if (
+        key !== "dealLedger" ||
+        cell.arm !== "off" ||
+        run.artifactPaths[key] !== null
+      ) {
+        throw new Error(`cached ${key} hash missing for ${cellLabel(cell)}`);
+      }
+      continue;
+    }
+    if (typeof expectedHash !== "string") {
+      throw new Error(`cached ${key} hash invalid for ${cellLabel(cell)}`);
+    }
+    const artifactPath = run.artifactPaths[key];
+    if (typeof artifactPath !== "string") {
+      throw new Error(`cached ${key} path missing for ${cellLabel(cell)}`);
+    }
+    const actualHash = sha256(await fs.readFile(artifactPath));
+    if (actualHash !== expectedHash) {
+      throw new Error(`cached ${key} hash mismatch for ${cellLabel(cell)}`);
+    }
+  }
 }
 
 async function runSocialCell(input) {
@@ -513,7 +588,7 @@ function stringList(name, fallback) {
         .filter(Boolean);
 }
 
-function validateMatrixInputs(input) {
+export function validateMatrixInputs(input) {
   if (
     input.seeds.length === 0 ||
     input.maps.length === 0 ||
@@ -527,6 +602,12 @@ function validateMatrixInputs(input) {
       throw new Error(`unknown social arm: ${arm}`);
     }
   }
+  for (const [axis, values] of Object.entries(input)) {
+    if (new Set(values).size !== values.length) {
+      throw new Error(`social matrix ${axis} must not contain duplicates`);
+    }
+  }
+  for (const seed of input.seeds) expectedSocialGameID(seed);
 }
 
 function readJsonIfPresent(file) {
