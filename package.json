@@ -2,7 +2,7 @@
   "name": "proxywar",
   "scripts": {
     "build-dev": "concurrently \"tsc --noEmit\" \"vite build --mode development\"",
-    "build-prod": "concurrently --kill-others-on-fail \"tsc --noEmit\" \"vite build\"",
+    "build-prod": "npm run verify:league-source && concurrently --kill-others-on-fail \"tsc --noEmit\" \"vite build\"",
     "build-static-replay-viewer": "concurrently --kill-others-on-fail \"tsc --noEmit\" \"vite build --mode static-replay\"",
     "start:client": "vite",
     "start:server": "tsx src/server/Server.ts",
@@ -36,11 +36,6 @@
     "season:status": "tsx src/scripts/season-status.ts",
     "season:remove-event": "tsx src/scripts/season-remove-event.ts",
     "season:program-week": "tsx src/scripts/season-program-week.ts",
-    "premiere-wagering:seal": "tsx src/scripts/premiere-wagering/seal-episode.ts",
-    "premiere-wagering:roster": "tsx src/scripts/premiere-wagering/pull-active-roster.ts",
-    "premiere-wagering:generate": "tsx src/scripts/premiere-wagering/generate-xp-request-episode.ts",
-    "premiere-wagering:demo-crowd": "tsx src/scripts/premiere-wagering/demo-synthetic-crowd.ts",
-    "premiere-wagering:build-source": "tsx src/scripts/premiere-wagering/build-source-bundle.ts",
     "agent:league-smoke:mock-llm": "cross-env GAME_ENV=dev tsx src/scripts/ai-agent-league-smoke.ts --brain=mock-llm",
     "agent:league-smoke:mock-llm:stepped": "cross-env GAME_ENV=dev tsx src/scripts/ai-agent-league-smoke.ts --brain=mock-llm --runner=step-locked",
     "agent:league-smoke:real-llm": "cross-env GAME_ENV=dev tsx src/scripts/ai-agent-league-smoke.ts --brain=real-llm --runner=step-locked --scenario=actions --disable-alliance-actions --max-decision-ms=120000",
@@ -123,7 +118,7 @@
     "prepare": "husky",
     "format:generated-maps": "prettier --ignore-unknown --write resources/maps tests/testdata/maps",
     "gen-maps": "cd map-generator && go run . && npm run format:generated-maps",
-    "verify:league-client": "node scripts/verify-league-client.mjs",
+    "verify:league-source": "node scripts/verify-league-source.mjs",
     "inst": "npm ci --ignore-scripts"
   },
   "lint-staged": {

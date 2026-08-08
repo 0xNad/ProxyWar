@@ -9,6 +9,7 @@ import type {
 import { economyFactsFromAffordance } from "./AgentEconomyNetwork";
 import { economyEventsEnabled, structuredDealsEnabled } from "./AgentTunables";
 import type {
+  AgentActionAuditStatus,
   AgentDecisionRecord,
   AgentEconomyRecordFacts,
   AgentEconomyRecordPairLink,
@@ -22,11 +23,15 @@ export type SpectatorRelationshipLabel =
   | "rival"
   | "neutral";
 
-export type SpectatorAllianceState =
-  | "none"
-  | "requested"
-  | "allied"
-  | "broken";
+export type SpectatorAllianceState = "none" | "requested" | "allied" | "broken";
+
+export type SpectatorEventEvidenceLevel =
+  | "confirmed_effect"
+  | "accepted_action"
+  | "state_derived"
+  | "synthetic";
+
+export type SpectatorEventAuditStatus = AgentActionAuditStatus | "missing";
 
 export type SpectatorEventKind =
   | "spawn"
@@ -130,6 +135,19 @@ export interface SpectatorEvent {
    */
   actionKind: LegalActionKind | "none";
   actionID: string;
+  /**
+   * What the event can honestly claim. A submitted/accepted action is not an
+   * observed effect unless the action auditor (or a state-derived ledger)
+   * proves the transition.
+   */
+  evidenceLevel?: SpectatorEventEvidenceLevel;
+  /** True when the selected action was substituted by a fallback brain/path. */
+  fallbackUsed?: boolean;
+  /** True when this decision was authored under a degraded planner state. */
+  llmPlannerDegraded?: boolean;
+  /** Per-decision effect-audit status; `missing` preserves old artifacts. */
+  auditStatus?: SpectatorEventAuditStatus;
+  auditReason?: string;
   importance: number;
 }
 
@@ -193,10 +211,21 @@ export function buildAgentSpectatorTelemetry(
     ),
   );
   const relationshipMap = buildRelationshipMap(agents);
-  const pendingAllianceRequests = new Set<string>();
+  // Accepted reciprocal requests remain a truthful action-level beat even
+  // when retained artifacts lack effect audits. The boolean remembers which
+  // requests were independently confirmed, so only two confirmed requests
+  // may claim an observed alliance effect.
+  const pendingAllianceRequests = new Map<string, boolean>();
   const events: SpectatorEvent[] = [];
 
   for (const record of [...input.records].sort(recordSort)) {
+    // Rejection is a validation/submission fact, not a game or social event.
+    // In particular, a rejected reciprocal alliance request must never form
+    // an alliance in spectator truth, and rejected combat/support must not
+    // mutate relationship evidence.
+    if (!record.result.accepted) {
+      continue;
+    }
     const actor = agentByID.get(record.agentID);
     if (actor === undefined) {
       continue;
@@ -320,7 +349,7 @@ function eventForRecord(input: {
   record: AgentDecisionRecord;
   actor: SpectatorAgent;
   agentByPlayerID: Map<string, SpectatorAgent>;
-  pendingAllianceRequests: Set<string>;
+  pendingAllianceRequests: Map<string, boolean>;
   relationshipMap: Map<string, MutableRelationship>;
 }): SpectatorEvent | null {
   const metadata = input.record.chosenActionMetadata ?? {};
@@ -330,12 +359,13 @@ function eventForRecord(input: {
   const target =
     primaryPlayerID === null
       ? null
-      : input.agentByPlayerID.get(primaryPlayerID) ?? null;
+      : (input.agentByPlayerID.get(primaryPlayerID) ?? null);
   const secondary =
     targetPlayerID !== null && targetPlayerID !== primaryPlayerID
-      ? input.agentByPlayerID.get(targetPlayerID) ?? null
+      ? (input.agentByPlayerID.get(targetPlayerID) ?? null)
       : null;
   const publicText = publicTextForRecord(input.record);
+  const effectConfirmed = input.record.audit?.auditStatus === "confirmed";
   const eventBase = {
     id: `${input.record.turnNumber}:${input.record.sequence}:${input.record.chosenActionID}`,
     sequence: input.record.sequence,
@@ -353,6 +383,7 @@ function eventForRecord(input: {
     publicText: publicText ?? undefined,
     actionKind: input.record.chosenActionKind,
     actionID: input.record.chosenActionID,
+    ...decisionEventProvenance(input.record),
   };
 
   switch (input.record.chosenActionKind) {
@@ -361,7 +392,9 @@ function eventForRecord(input: {
         ...eventBase,
         kind: "spawn",
         tone: "info",
-        message: `${input.actor.username} enters the match.`,
+        message: effectConfirmed
+          ? `${input.actor.username} enters the match.`
+          : `${input.actor.username} attempts to enter the match.`,
         importance: 40,
       };
     case "attack":
@@ -370,11 +403,13 @@ function eventForRecord(input: {
           ...eventBase,
           kind: "neutral_expansion",
           tone: "info",
-          message: `${input.actor.username} expands into neutral land.`,
+          message: effectConfirmed
+            ? `${input.actor.username} expands into neutral land.`
+            : `${input.actor.username} orders an expansion into neutral land.`,
           importance: input.record.turnNumber <= 1_000 ? 65 : 28,
         };
       }
-      if (target !== null) {
+      if (target !== null && effectConfirmed) {
         mutatePair(input.relationshipMap, input.actor.agentID, target.agentID, {
           distrust: 25,
           tension: 20,
@@ -396,51 +431,77 @@ function eventForRecord(input: {
         tone: "war",
         message:
           target === null
-            ? `${input.actor.username} attacks.`
-            : `${input.actor.username} attacks ${target.username}.`,
+            ? effectConfirmed
+              ? `${input.actor.username} attacks.`
+              : `${input.actor.username} orders an attack.`
+            : effectConfirmed
+              ? `${input.actor.username} attacks ${target.username}.`
+              : `${input.actor.username} orders an attack against ${target.username}.`,
         importance: 70,
       };
     case "alliance_request": {
       if (target !== null) {
         const reverse = allianceRequestKey(target.agentID, input.actor.agentID);
         const forward = allianceRequestKey(input.actor.agentID, target.agentID);
-        input.pendingAllianceRequests.add(forward);
+        const reverseWasAccepted = input.pendingAllianceRequests.has(reverse);
+        const reverseWasConfirmed =
+          input.pendingAllianceRequests.get(reverse) === true;
+        input.pendingAllianceRequests.set(forward, effectConfirmed);
         mutatePair(input.relationshipMap, input.actor.agentID, target.agentID, {
           trust: 12,
           tension: -4,
-          allianceState: "requested",
+          ...(effectConfirmed ? { allianceState: "requested" as const } : {}),
           turnNumber: input.record.turnNumber,
           reason: `Requested alliance with ${target.username}`,
         });
         mutatePair(input.relationshipMap, target.agentID, input.actor.agentID, {
           trust: 6,
           tension: -2,
-          allianceState: "requested",
+          ...(effectConfirmed ? { allianceState: "requested" as const } : {}),
           turnNumber: input.record.turnNumber,
           reason: `${input.actor.username} requested alliance`,
         });
-        if (input.pendingAllianceRequests.has(reverse)) {
-          mutatePair(input.relationshipMap, input.actor.agentID, target.agentID, {
-            trust: 30,
-            distrust: -10,
-            tension: -10,
-            allianceState: "allied",
-            turnNumber: input.record.turnNumber,
-            reason: `Alliance formed with ${target.username}`,
-          });
-          mutatePair(input.relationshipMap, target.agentID, input.actor.agentID, {
-            trust: 30,
-            distrust: -10,
-            tension: -10,
-            allianceState: "allied",
-            turnNumber: input.record.turnNumber,
-            reason: `Alliance formed with ${input.actor.username}`,
-          });
+        if (reverseWasAccepted) {
+          const allianceEffectConfirmed =
+            effectConfirmed && reverseWasConfirmed;
+          if (allianceEffectConfirmed) {
+            mutatePair(
+              input.relationshipMap,
+              input.actor.agentID,
+              target.agentID,
+              {
+                trust: 30,
+                distrust: -10,
+                tension: -10,
+                allianceState: "allied",
+                turnNumber: input.record.turnNumber,
+                reason: `Alliance formed with ${target.username}`,
+              },
+            );
+            mutatePair(
+              input.relationshipMap,
+              target.agentID,
+              input.actor.agentID,
+              {
+                trust: 30,
+                distrust: -10,
+                tension: -10,
+                allianceState: "allied",
+                turnNumber: input.record.turnNumber,
+                reason: `Alliance formed with ${input.actor.username}`,
+              },
+            );
+          }
           return {
             ...eventBase,
             kind: "alliance_formed",
             tone: "pact",
-            message: `${input.actor.username} and ${target.username} form an alliance.`,
+            message: allianceEffectConfirmed
+              ? `${input.actor.username} and ${target.username} form an alliance.`
+              : `${input.actor.username} and ${target.username} exchange reciprocal alliance requests.`,
+            evidenceLevel: allianceEffectConfirmed
+              ? "confirmed_effect"
+              : "accepted_action",
             importance: 92,
           };
         }
@@ -457,7 +518,7 @@ function eventForRecord(input: {
       };
     }
     case "break_alliance":
-      if (target !== null) {
+      if (target !== null && effectConfirmed) {
         mutatePair(input.relationshipMap, input.actor.agentID, target.agentID, {
           trust: -60,
           distrust: 60,
@@ -483,23 +544,27 @@ function eventForRecord(input: {
         tone: "betrayal",
         message:
           target === null
-            ? `${input.actor.username} breaks an alliance.`
-            : `${input.actor.username} breaks alliance with ${target.username}.`,
+            ? effectConfirmed
+              ? `${input.actor.username} breaks an alliance.`
+              : `${input.actor.username} moves to break an alliance.`
+            : effectConfirmed
+              ? `${input.actor.username} breaks alliance with ${target.username}.`
+              : `${input.actor.username} moves to break alliance with ${target.username}.`,
         importance: 100,
       };
     case "donate_gold":
     case "donate_troops":
-      if (target !== null) {
+      if (target !== null && effectConfirmed) {
         mutatePair(input.relationshipMap, input.actor.agentID, target.agentID, {
           trust: 15,
           tension: -4,
           tradeGivenGold:
             input.record.chosenActionKind === "donate_gold"
-              ? numberMetadata(metadata, "gold") ?? 1
+              ? (numberMetadata(metadata, "gold") ?? 1)
               : 0,
           tradeGivenTroops:
             input.record.chosenActionKind === "donate_troops"
-              ? numberMetadata(metadata, "troops") ?? 1
+              ? (numberMetadata(metadata, "troops") ?? 1)
               : 0,
           turnNumber: input.record.turnNumber,
           reason: `Supported ${target.username}`,
@@ -517,13 +582,17 @@ function eventForRecord(input: {
         tone: "trade",
         message:
           target === null
-            ? `${input.actor.username} sends support.`
-            : `${input.actor.username} supports ${target.username}.`,
+            ? effectConfirmed
+              ? `${input.actor.username} sends support.`
+              : `${input.actor.username} attempts to send support.`
+            : effectConfirmed
+              ? `${input.actor.username} supports ${target.username}.`
+              : `${input.actor.username} attempts to support ${target.username}.`,
         importance: 78,
       };
     case "embargo":
     case "embargo_all":
-      if (target !== null) {
+      if (target !== null && effectConfirmed) {
         mutatePair(input.relationshipMap, input.actor.agentID, target.agentID, {
           distrust: 20,
           tension: 18,
@@ -537,12 +606,16 @@ function eventForRecord(input: {
         tone: "threat",
         message:
           target === null
-            ? `${input.actor.username} closes trade routes.`
-            : `${input.actor.username} embargoes ${target.username}.`,
+            ? effectConfirmed
+              ? `${input.actor.username} closes trade routes.`
+              : `${input.actor.username} attempts to close trade routes.`
+            : effectConfirmed
+              ? `${input.actor.username} embargoes ${target.username}.`
+              : `${input.actor.username} attempts to embargo ${target.username}.`,
         importance: input.record.chosenActionKind === "embargo_all" ? 88 : 62,
       };
     case "target_player":
-      if (target !== null) {
+      if (target !== null && effectConfirmed) {
         mutatePair(input.relationshipMap, input.actor.agentID, target.agentID, {
           distrust: 18,
           tension: 22,
@@ -556,8 +629,12 @@ function eventForRecord(input: {
         tone: "threat",
         message:
           target === null
-            ? `${input.actor.username} marks a target.`
-            : `${input.actor.username} marks ${target.username} as target.`,
+            ? effectConfirmed
+              ? `${input.actor.username} marks a target.`
+              : `${input.actor.username} attempts to mark a target.`
+            : effectConfirmed
+              ? `${input.actor.username} marks ${target.username} as target.`
+              : `${input.actor.username} attempts to mark ${target.username} as target.`,
         importance: 82,
       };
     case "quick_chat":
@@ -596,7 +673,7 @@ function eventForRecord(input: {
         importance: 44,
       };
     case "nuke":
-      if (target !== null) {
+      if (target !== null && effectConfirmed) {
         mutatePair(input.relationshipMap, input.actor.agentID, target.agentID, {
           distrust: 80,
           tension: 80,
@@ -610,8 +687,12 @@ function eventForRecord(input: {
         tone: "threat",
         message:
           target === null
-            ? `${input.actor.username} escalates nuclear pressure.`
-            : `${input.actor.username} escalates nuclear pressure against ${target.username}.`,
+            ? effectConfirmed
+              ? `${input.actor.username} escalates nuclear pressure.`
+              : `${input.actor.username} attempts to escalate nuclear pressure.`
+            : effectConfirmed
+              ? `${input.actor.username} escalates nuclear pressure against ${target.username}.`
+              : `${input.actor.username} attempts to escalate nuclear pressure against ${target.username}.`,
         importance: 95,
       };
     case "build":
@@ -620,7 +701,9 @@ function eventForRecord(input: {
         ...eventBase,
         kind: "build",
         tone: "info",
-        message: `${input.actor.username} develops ${String(metadata.unit ?? "infrastructure")}.`,
+        message: effectConfirmed
+          ? `${input.actor.username} develops ${String(metadata.unit ?? "infrastructure")}.`
+          : `${input.actor.username} orders ${String(metadata.unit ?? "infrastructure")} development.`,
         importance: isMajorBuild(metadata) ? 58 : 26,
       };
     case "hold":
@@ -640,6 +723,31 @@ function eventForRecord(input: {
   }
 }
 
+function decisionEventProvenance(
+  record: AgentDecisionRecord,
+): Pick<
+  SpectatorEvent,
+  | "evidenceLevel"
+  | "fallbackUsed"
+  | "llmPlannerDegraded"
+  | "auditStatus"
+  | "auditReason"
+> {
+  const metadata = record.decisionMetadata ?? {};
+  const auditStatus = record.audit?.auditStatus ?? "missing";
+  return {
+    evidenceLevel:
+      auditStatus === "confirmed" ? "confirmed_effect" : "accepted_action",
+    fallbackUsed: booleanMetadata(metadata, "fallbackUsed") ?? false,
+    llmPlannerDegraded:
+      booleanMetadata(metadata, "llmPlannerDegraded") ?? false,
+    auditStatus,
+    ...(record.audit?.auditReason !== undefined
+      ? { auditReason: record.audit.auditReason }
+      : {}),
+  };
+}
+
 function applyCommunicationRelationship(input: {
   relationshipMap: Map<string, MutableRelationship>;
   actor: SpectatorAgent;
@@ -649,24 +757,39 @@ function applyCommunicationRelationship(input: {
   turnNumber: number;
 }) {
   if (input.target !== null) {
-    const trustDelta = /pact|alliance|sign early|quiet border|support|shield/i.test(
-      input.text ?? "",
-    )
-      ? 5
-      : 1;
-    mutatePair(input.relationshipMap, input.actor.agentID, input.target.agentID, {
-      trust: trustDelta,
-      turnNumber: input.turnNumber,
-      reason: `Messaged ${input.target.username}`,
-    });
+    const trustDelta =
+      /pact|alliance|sign early|quiet border|support|shield/i.test(
+        input.text ?? "",
+      )
+        ? 5
+        : 1;
+    mutatePair(
+      input.relationshipMap,
+      input.actor.agentID,
+      input.target.agentID,
+      {
+        trust: trustDelta,
+        turnNumber: input.turnNumber,
+        reason: `Messaged ${input.target.username}`,
+      },
+    );
   }
   if (input.secondary !== null) {
-    mutatePair(input.relationshipMap, input.actor.agentID, input.secondary.agentID, {
-      distrust: /pressure|carve|contain|target/i.test(input.text ?? "") ? 12 : 4,
-      tension: /pressure|carve|contain|target/i.test(input.text ?? "") ? 16 : 4,
-      turnNumber: input.turnNumber,
-      reason: `Discussed pressure on ${input.secondary.username}`,
-    });
+    mutatePair(
+      input.relationshipMap,
+      input.actor.agentID,
+      input.secondary.agentID,
+      {
+        distrust: /pressure|carve|contain|target/i.test(input.text ?? "")
+          ? 12
+          : 4,
+        tension: /pressure|carve|contain|target/i.test(input.text ?? "")
+          ? 16
+          : 4,
+        turnNumber: input.turnNumber,
+        reason: `Discussed pressure on ${input.secondary.username}`,
+      },
+    );
   }
 }
 
@@ -682,12 +805,17 @@ function applyEmojiRelationship(input: {
     return;
   }
   if (input.context === "alliance_signal" || input.emojiText === "🤝") {
-    mutatePair(input.relationshipMap, input.actor.agentID, input.target.agentID, {
-      trust: 4,
-      tension: -2,
-      turnNumber: input.turnNumber,
-      reason: `Signaled cooperation with ${input.target.username}`,
-    });
+    mutatePair(
+      input.relationshipMap,
+      input.actor.agentID,
+      input.target.agentID,
+      {
+        trust: 4,
+        tension: -2,
+        turnNumber: input.turnNumber,
+        reason: `Signaled cooperation with ${input.target.username}`,
+      },
+    );
     return;
   }
   if (
@@ -695,12 +823,17 @@ function applyEmojiRelationship(input: {
     input.context === "anger_under_attack" ||
     input.context === "betrayal_signal"
   ) {
-    mutatePair(input.relationshipMap, input.actor.agentID, input.target.agentID, {
-      distrust: input.context === "betrayal_signal" ? 18 : 10,
-      tension: input.context === "betrayal_signal" ? 18 : 12,
-      turnNumber: input.turnNumber,
-      reason: `Signaled pressure toward ${input.target.username}`,
-    });
+    mutatePair(
+      input.relationshipMap,
+      input.actor.agentID,
+      input.target.agentID,
+      {
+        distrust: input.context === "betrayal_signal" ? 18 : 10,
+        tension: input.context === "betrayal_signal" ? 18 : 12,
+        turnNumber: input.turnNumber,
+        reason: `Signaled pressure toward ${input.target.username}`,
+      },
+    );
   }
 }
 
@@ -757,9 +890,7 @@ function finalizeRelationship(
       ? "ally"
       : relationship.allianceState === "broken" || relationship.betrayals > 0
         ? "betrayed"
-        : relationship.attacksSent > 0 ||
-            distrust >= 55 ||
-            tension >= 60
+        : relationship.attacksSent > 0 || distrust >= 55 || tension >= 60
           ? distrust >= 70 || relationship.attacksSent > 1
             ? "rival"
             : "target"
@@ -824,6 +955,12 @@ function addEliminationEvents(input: {
         message: `${agent.username} is eliminated.`,
         actionKind: "hold",
         actionID: "elimination",
+        evidenceLevel: "synthetic",
+        fallbackUsed: false,
+        llmPlannerDegraded: false,
+        auditStatus: "not_applicable",
+        auditReason:
+          "synthetic elimination derived from final state; timing uses the agent's last decision turn",
         importance: 90,
       });
     }
@@ -922,6 +1059,11 @@ function addEconomyEvents(input: {
         // Derived from state transitions, not from any submitted action.
         actionKind: "none",
         actionID: dedupeKey,
+        evidenceLevel: "state_derived",
+        fallbackUsed: false,
+        llmPlannerDegraded: false,
+        auditStatus: "not_applicable",
+        auditReason: "event derived from recorded economy-state transition",
         importance,
       });
     };
@@ -1059,8 +1201,9 @@ function tradeSeveredText(
  * the flag off this function emits nothing and telemetry is byte-identical to
  * shipped behavior). Derived from records alone (the mirror-backfill path
  * rebuilds telemetry from decisions.jsonl), following the Phase A economy
- * pattern: flag-gated, transition-derived, actionKind "none", bounded per
- * agent per match. Two record surfaces feed it:
+ * pattern: flag-gated and bounded per agent per match. Accepted deal-action
+ * stamps retain record provenance; ledger lifecycle transitions are marked as
+ * state-derived. Two record surfaces feed it:
  *
  * 1. Deal ACTION stamps (dealAction/dealID/dealPublicText, stamped by the
  *    deal manager on accepted propose/accept/reject records) become
@@ -1128,6 +1271,23 @@ function parseDealComplianceEvents(value: unknown): AgentDealLedgerEvent[] {
         return false;
       }
       const candidate = item as Record<string, unknown>;
+      const validOptionalInteger = (key: string) =>
+        candidate[key] === undefined ||
+        (typeof candidate[key] === "number" &&
+          Number.isSafeInteger(candidate[key]) &&
+          candidate[key] >= 0);
+      const validOptionalBoolean = (key: string) =>
+        candidate[key] === undefined || typeof candidate[key] === "boolean";
+      const validSourceAuditStatus =
+        candidate.sourceAuditStatus === undefined ||
+        (typeof candidate.sourceAuditStatus === "string" &&
+          [
+            "confirmed",
+            "unknown",
+            "failed",
+            "not_applicable",
+            "missing",
+          ].includes(candidate.sourceAuditStatus));
       return (
         typeof candidate.event === "string" &&
         DEAL_LEDGER_EVENT_KINDS.has(candidate.event) &&
@@ -1137,7 +1297,14 @@ function parseDealComplianceEvents(value: unknown): AgentDealLedgerEvent[] {
         typeof candidate.publicText === "string" &&
         typeof candidate.tone === "string" &&
         DEAL_EVENT_TONES.has(candidate.tone) &&
-        typeof candidate.importance === "number"
+        typeof candidate.importance === "number" &&
+        validOptionalInteger("sourceSequence") &&
+        validOptionalInteger("sourceTurnNumber") &&
+        validOptionalBoolean("sourceFallbackUsed") &&
+        validOptionalBoolean("sourceLlmPlannerDegraded") &&
+        validSourceAuditStatus &&
+        (candidate.sourceAuditReason === undefined ||
+          typeof candidate.sourceAuditReason === "string")
       );
     });
   } catch {
@@ -1167,6 +1334,9 @@ function addDealEvents(input: {
     dedupeKey: string,
     /** VIEWER-ONLY agent claim, kept out of publicText. */
     statedReason: string | null = null,
+    source: "accepted_action" | "state_derived" = "state_derived",
+    actionKind: LegalActionKind | "none" = "none",
+    origin: AgentDealLedgerEvent | null = null,
   ) => {
     const emitted = emittedByAgent.get(actor.agentID) ?? 0;
     if (emitted >= DEAL_EVENT_LIMIT_PER_AGENT) {
@@ -1174,10 +1344,50 @@ function addDealEvents(input: {
     }
     emittedByAgent.set(actor.agentID, emitted + 1);
     const claim = sanitizeDealStatedReason(statedReason);
+    const immediateDecisionVerdict =
+      kind === "deal_fulfilled" || kind === "deal_violated";
+    const sourceSequence =
+      immediateDecisionVerdict && Number.isInteger(origin?.sourceSequence)
+        ? origin!.sourceSequence!
+        : record.sequence;
+    const sourceTurnNumber =
+      immediateDecisionVerdict && Number.isInteger(origin?.sourceTurnNumber)
+        ? origin!.sourceTurnNumber!
+        : record.turnNumber;
+    const sourceAuditStatus =
+      immediateDecisionVerdict &&
+      ["confirmed", "unknown", "failed", "not_applicable", "missing"].includes(
+        origin?.sourceAuditStatus ?? "",
+      )
+        ? (origin!.sourceAuditStatus as SpectatorEventAuditStatus)
+        : "missing";
+    const provenance =
+      source === "accepted_action"
+        ? {
+            ...decisionEventProvenance(record),
+            evidenceLevel: "accepted_action" as const,
+          }
+        : immediateDecisionVerdict
+          ? {
+              evidenceLevel: "state_derived" as const,
+              fallbackUsed: origin?.sourceFallbackUsed === true,
+              llmPlannerDegraded: origin?.sourceLlmPlannerDegraded === true,
+              auditStatus: sourceAuditStatus,
+              auditReason:
+                origin?.sourceAuditReason ??
+                "verdict source provenance was missing from the ledger event",
+            }
+          : {
+              evidenceLevel: "state_derived" as const,
+              fallbackUsed: false,
+              llmPlannerDegraded: false,
+              auditStatus: "not_applicable" as const,
+              auditReason: "event derived from passive deal lifecycle state",
+            };
     input.events.push({
-      id: `${record.turnNumber}:${record.sequence}:${dedupeKey}`,
-      sequence: record.sequence,
-      turnNumber: record.turnNumber,
+      id: `${sourceTurnNumber}:${sourceSequence}:${dedupeKey}`,
+      sequence: sourceSequence,
+      turnNumber: sourceTurnNumber,
       kind,
       tone,
       actorAgentID: actor.agentID,
@@ -1189,10 +1399,9 @@ function addDealEvents(input: {
       // Re-sanitized at the boundary: this path also rebuilds telemetry from
       // an on-disk decisions.jsonl, so the stamp is untrusted input here.
       ...(claim !== null ? { statedReason: claim } : {}),
-      // Derived from the deal ledger's transitions, not from any submitted
-      // game intent (deal meta-actions carry intent: null).
-      actionKind: "none",
+      actionKind,
       actionID: dedupeKey,
+      ...provenance,
       importance,
     });
   };
@@ -1245,6 +1454,8 @@ function addDealEvents(input: {
           typeof metadata.dealStatedReason === "string"
             ? metadata.dealStatedReason
             : null,
+          "accepted_action",
+          `deal_${dealAction}` as LegalActionKind,
         );
       }
     }
@@ -1267,6 +1478,9 @@ function addDealEvents(input: {
         item.targetName,
         `deal:${item.event}:${item.dealID}:${item.actorPlayerID}`,
         typeof item.statedReason === "string" ? item.statedReason : null,
+        "state_derived",
+        "none",
+        item,
       );
     }
   }
@@ -1301,6 +1515,12 @@ function buildCommunicationThreads(
         "target_call",
         "embargo",
         "nuke",
+        "deal_proposed",
+        "deal_accepted",
+        "deal_rejected",
+        "deal_expired",
+        "deal_fulfilled",
+        "deal_violated",
       ].includes(event.kind)
     ) {
       continue;
@@ -1367,7 +1587,9 @@ function targetPlayerIDForRecord(record: AgentDecisionRecord): string | null {
   return null;
 }
 
-function recipientPlayerIDForRecord(record: AgentDecisionRecord): string | null {
+function recipientPlayerIDForRecord(
+  record: AgentDecisionRecord,
+): string | null {
   const metadata = record.chosenActionMetadata ?? {};
   if (typeof metadata.recipientID === "string") {
     return metadata.recipientID;
@@ -1385,7 +1607,10 @@ function recipientPlayerIDForRecord(record: AgentDecisionRecord): string | null 
 function publicTextForRecord(record: AgentDecisionRecord): string | null {
   const metadata = record.chosenActionMetadata ?? {};
   if (record.chosenActionKind === "quick_chat") {
-    return stringMetadata(metadata, "message") ?? stringMetadata(metadata, "quickChatKey");
+    return (
+      stringMetadata(metadata, "message") ??
+      stringMetadata(metadata, "quickChatKey")
+    );
   }
   if (record.chosenActionKind === "emoji") {
     return (
@@ -1400,10 +1625,13 @@ function publicTextForRecord(record: AgentDecisionRecord): string | null {
 
 function communicationTone(text: string | null): SpectatorEvent["tone"] {
   if (/betray|pact is over|knife/i.test(text ?? "")) return "betrayal";
-  if (/pact|alliance|sign early|quiet border|support|shield/i.test(text ?? "")) {
+  if (
+    /pact|alliance|sign early|quiet border|support|shield/i.test(text ?? "")
+  ) {
     return "pact";
   }
-  if (/pressure|carve|target|contain|recover/i.test(text ?? "")) return "threat";
+  if (/pressure|carve|target|contain|recover/i.test(text ?? ""))
+    return "threat";
   return "info";
 }
 
@@ -1424,7 +1652,9 @@ function emojiTone(context?: string): SpectatorEvent["tone"] {
   return "info";
 }
 
-function isMajorBuild(metadata: Record<string, string | number | boolean | null>) {
+function isMajorBuild(
+  metadata: Record<string, string | number | boolean | null>,
+) {
   const unit = stringMetadata(metadata, "unit");
   return (
     unit === "Missile Silo" ||
@@ -1462,4 +1692,12 @@ function numberMetadata(
 ): number | null {
   const value = metadata[key];
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function booleanMetadata(
+  metadata: Record<string, string | number | boolean | null>,
+  key: string,
+): boolean | null {
+  const value = metadata[key];
+  return typeof value === "boolean" ? value : null;
 }

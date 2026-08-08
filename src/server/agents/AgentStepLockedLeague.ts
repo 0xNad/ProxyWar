@@ -2,13 +2,13 @@ import { Logger } from "winston";
 import { Game } from "../../core/game/Game";
 import { ServerMessage } from "../../core/Schemas";
 import { GameServer } from "../GameServer";
-import { AgentDecisionRecord } from "./AgentTypes";
 import { auditDecisionEffects } from "./AgentActionAuditor";
+import { AgentLeagueMatchRunner } from "./AgentLeagueMatch";
 import {
   AgentLocalGameMirror,
   waitForMirrorState,
 } from "./AgentLocalGameMirror";
-import { AgentLeagueMatchRunner } from "./AgentLeagueMatch";
+import { AgentDecisionRecord } from "./AgentTypes";
 
 export interface AgentStepLockedLeagueConfig {
   turnsPerDecisionStep: number;
@@ -188,7 +188,10 @@ export async function runAgentStepLockedLeague(
   // no-op when the flag is off): every accepted obligation reaches a terminal
   // state at match end, judged against the final audited records. Optional
   // call: test harnesses stub partial league mocks without this method.
-  options.league.finalizeDeals?.({ gameState: currentGame });
+  options.league.finalizeDeals?.({
+    gameState: currentGame,
+    turnNumber: options.mirror.turnCount(),
+  });
 
   if (config.requireWinner && currentGame.getWinner() === null) {
     throw new Error(

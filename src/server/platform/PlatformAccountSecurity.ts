@@ -3,19 +3,14 @@
  * PLATFORM's own account cookie — `proxywar.xyz` is the sole account
  * and session authority (see the platform build's contract).
  *
- * Deliberately a fresh class, not a reuse of the betting origin's
- * `ReplayPremiereGuestSecurity`, for three reasons the contract requires:
+ * Deliberately separate from `ReplayPremiereGuestSecurity`:
  *
  * - New cookie, new name (`proxywar_platform_account`, configurable),
  *   never `proxywar_premiere_guest`. Two identity systems sharing one
  *   cookie name would collide the moment both are visited from the same
  *   browser profile pointed at the same host.
- * - New HMAC key (`PlatformSecrets.ts`), never
- *   `PROXYWAR_REPLAY_PREMIERE_HMAC_KEY_HEX` — a leaked betting key must
- *   never let an attacker mint platform account cookies, and vice versa.
- * - Host-only: no `Path=/api/premieres` narrowing (betting's cookie is
- *   scoped that way only because it predates a real account system and
- *   still shares a domain with the login-intent cookie); this cookie has
+ * - New HMAC key (`PlatformSecrets.ts`), never the replay-premiere key.
+ * - Host-only: no `Path=/api/premieres` narrowing; this cookie has
  *   no `Domain=` attribute at all (never set one — see the contract:
  *   widening a cookie's scope with `Domain=.proxywar.xyz` would let any
  *   sibling origin overwrite platform identity), so per RFC 6265 it is
@@ -24,11 +19,8 @@
  *   platform route — `/account`, `/api/account/*`, `/api/auth/github/*`,
  *   `/handoff/start` — legitimately needs it.
  *
- * Share-attribution and the anonymous-write IP bucket
- * (`ReplayPremiereGuestSecurity`'s `signShareAttribution` /
- * `deriveRequesterBucketId`) are betting-specific anti-abuse features for
- * a public prediction market and have no platform equivalent — omitted
- * here, not ported.
+ * Replay share-attribution and anonymous-write controls have no platform
+ * equivalent and are intentionally omitted.
  */
 import { createHmac, timingSafeEqual } from "node:crypto";
 

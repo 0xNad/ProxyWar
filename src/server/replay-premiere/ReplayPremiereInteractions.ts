@@ -13,25 +13,6 @@ import {
   hashReplayPremiereJson,
   type ReplayPremiereJsonValue,
 } from "./ReplayPremiereIntegrity";
-import {
-  applyBuy,
-  applySell,
-  computeMarketPrices,
-  liquidityForOutcomeCount,
-  maxSharesForBudget,
-  positionsFor,
-  quoteBuy,
-  quoteSell,
-  ReplayPremiereLedger,
-  settleMarket,
-  sharesHeld,
-  STARTING_BANKROLL,
-  validateBuyStake,
-  type ReplayPremiereMarket,
-  type ReplayPremiereMarketParticipantKind,
-  type ReplayPremiereMarketStateView,
-  type ReplayPremiereMarketTrade,
-} from "./wagering";
 
 export const REPLAY_PREMIERE_REACTION_KINDS = [
   "turning_point",
@@ -54,7 +35,6 @@ const DEFAULT_INTERACTION_LIMITS: ReplayPremiereInteractionLimits = {
 };
 const MAX_EVENT_CONTEXT_BYTES = 8_192;
 const OPAQUE_SEAT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
-/** guest_* = real anonymous participants (as opposed to sim_*, the synthetic crowd) — see `assertParticipantId`. */
 const REAL_GUEST_PARTICIPANT_ID_PATTERN = /^guest_[a-f0-9]{32}$/;
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/;
 const REQUESTER_BUCKET_ID_PATTERN = /^ip_[a-f0-9]{32,64}$/;
@@ -181,8 +161,6 @@ export interface ReplayPremiereInteractionsSnapshot {
   premiereId: string;
   checkpoints: ReplayPremiereInteractionCheckpoint[];
   predictions: ReplayPremierePrediction[];
-  market: ReplayPremiereMarket | null;
-  trades: ReplayPremiereMarketTrade[];
   reactions: ReplayPremiereReaction[];
   shares: ReplayPremiereShareMoment[];
   sessions: ReplayPremiereViewerSession[];
@@ -231,14 +209,7 @@ export interface ReplayPremiereInteractionLimits {
 }
 
 export interface ReplayPremiereAnonymousWriteAdmissionRequest {
-  route:
-    | "session"
-    | "heartbeat"
-    | "prediction"
-    | "reaction"
-    | "share"
-    | "clip"
-    | "market_order";
+  route: "session" | "heartbeat" | "prediction" | "reaction" | "share" | "clip";
   premiereId: string;
   participantId: string;
   sessionId: string | null;
@@ -256,54 +227,6 @@ export type ReplayPremiereAnonymousWriteAdmission = (
   request: ReplayPremiereAnonymousWriteAdmissionRequest,
 ) => void;
 
-/**
- * Durable sink for the cross-premiere points leaderboard — structurally
- * satisfied by `ReplayPremierePointsLedger` (`points/`), duck-typed here
- * so this module never imports that concrete class. `recordPremiereSettlement`
- * MUST be idempotent per `(participantId, premiereId)`: it is invoked once
- * per resolution call, and prediction resolution's own idempotent replay
- * (crash recovery, a retried caller) can legitimately invoke it again for
- * an already-settled premiere.
- */
-export interface ReplayPremiereSettlementPointsRecorder {
-  recordPremiereSettlement(
-    premiereId: string,
-    settlements: readonly {
-      participantId: string;
-      granted: number;
-      balance: number;
-    }[],
-  ): Promise<void>;
-}
-
-/**
- * Durable sink for "who won, and what did the market close at" — see
- * `ReplayPremiereSettlementLedger` for the storage reasoning. Duck-typed
- * here, same as `ReplayPremiereSettlementPointsRecorder` above, so this
- * module never imports that concrete class. `recordSettlement` MUST be
- * idempotent per `premiereId`: invoked once per resolution call, and
- * prediction resolution's own idempotent replay can legitimately invoke
- * it again for an already-settled premiere.
- */
-export interface ReplayPremiereSettlementLedgerRecorder {
-  recordSettlement(record: {
-    premiereId: string;
-    episodeRequestId: string | null;
-    matchKind: "real-league" | "exhibition";
-    outcome: "winner" | "refunded";
-    winnerSeatId: string | null;
-    winnerDisplayName: string | null;
-    placements: readonly {
-      seatId: string;
-      displayName: string;
-      placement: 1 | null;
-    }[];
-    settledAt: string;
-    marketFinalPrices: readonly { seatId: string; price: number }[];
-    totalParticipants: number;
-  }): Promise<void>;
-}
-
 export interface ReplayPremiereInteractionsOptions {
   premiereId: string;
   checkpointDescriptors: readonly [
@@ -318,13 +241,6 @@ export interface ReplayPremiereInteractionsOptions {
   getReleasedContext: (
     sequence: number,
   ) => ReplayPremiereReleasedContext | null;
-  /**
-   * Highest sequence currently live-visible, independent of chunk-release
-   * batching — see `ReplayPremiereRuntimeCoordinator.readLiveVisibleSequence`.
-   * `submitMarketOrder` binds every order to this, never to the coarser
-   * `getReleasedContext`, so wagering freshness never depends on chunk size.
-   */
-  getLiveVisibleSequence: () => number;
   persistence: ReplayPremiereInteractionPersistence;
   signAttribution: (options: {
     attributionId: string;
@@ -339,26 +255,6 @@ export interface ReplayPremiereInteractionsOptions {
   minHeartbeatIntervalMs?: number;
   limits?: Partial<ReplayPremiereInteractionLimits>;
   admitAnonymousWrite: ReplayPremiereAnonymousWriteAdmission;
-  /** Server-side LMSR prediction market, continuous from match start to reveal. Off by default — an existing premiere behaves byte-identically with this unset. */
-  wageringEnabled?: boolean;
-  /**
-   * Durable cross-premiere points-ledger sink. When set and wagering is
-   * enabled, every real (`guest_*`) participant who placed at least one
-   * order gets their realized net P&L for this premiere folded into it
-   * exactly once, the moment predictions resolve (see
-   * `recordSettlementPointsIfNeeded`). Absent by default — an existing
-   * premiere behaves byte-identically with this unset.
-   */
-  pointsLedger?: ReplayPremiereSettlementPointsRecorder;
-  /**
-   * Durable cross-premiere settlement-ledger sink. When set and the
-   * market reaches `"settled"`, one immutable record ("who won", final
-   * placements, market closing prices) is written for this premiere
-   * exactly once, the moment predictions resolve (see
-   * `recordSettlementLedgerIfNeeded`). Absent by default — an existing
-   * premiere behaves byte-identically with this unset.
-   */
-  settlementLedger?: ReplayPremiereSettlementLedgerRecorder;
 }
 
 export type ReplayPremiereInteractionSnapshotValidationOptions = Pick<
@@ -368,11 +264,9 @@ export type ReplayPremiereInteractionSnapshotValidationOptions = Pick<
   | "seats"
   | "getPremiereState"
   | "getReleasedContext"
-  | "getLiveVisibleSequence"
   | "maxHeartbeatGapMs"
   | "minHeartbeatIntervalMs"
   | "limits"
-  | "wageringEnabled"
 >;
 
 export interface ReplayPremiereInteractionMetrics {
@@ -579,7 +473,6 @@ export function applyReplayPremierePredictionResolutionTransition(options: {
   eligibleSeatIds: ReadonlySet<string>;
   result: PremiereCanonicalAuthoritativeResult;
   resolvedAt: string;
-  wageringEnabled?: boolean;
 }): ReplayPremierePredictionResolutionTransition {
   const resolvedAtMs = timestamp(options.resolvedAt, "prediction_resolved_at");
   if (
@@ -648,27 +541,6 @@ export function applyReplayPremierePredictionResolutionTransition(options: {
   for (const checkpoint of options.state.checkpoints) {
     checkpoint.resolution = clone(resolution);
   }
-  if (
-    options.wageringEnabled &&
-    options.state.market !== null &&
-    options.state.market.status === "open"
-  ) {
-    const marketLedger = ReplayPremiereLedger.restore({
-      balances: options.state.market.ledgerBalances,
-      granted: options.state.market.ledgerGranted,
-    });
-    const settled = settleMarket({
-      market: options.state.market,
-      ledger: marketLedger,
-      winnerSeatId: outcome.kind === "winner" ? outcome.winnerSeatId : null,
-    });
-    const marketLedgerSnapshot = marketLedger.snapshot();
-    options.state.market = {
-      ...settled,
-      ledgerBalances: marketLedgerSnapshot.balances,
-      ledgerGranted: marketLedgerSnapshot.granted,
-    };
-  }
   return {
     result: {
       resolutions: options.state.checkpoints.map((checkpoint) =>
@@ -712,7 +584,6 @@ export class ReplayPremiereInteractions {
   private readonly getReleasedContext: (
     sequence: number,
   ) => ReplayPremiereReleasedContext | null;
-  private readonly getLiveVisibleSequence: () => number;
   private readonly persistence: ReplayPremiereInteractionPersistence;
   private readonly signAttribution: ReplayPremiereInteractionsOptions["signAttribution"];
   private readonly canonicalPremiereUrl: string;
@@ -722,9 +593,6 @@ export class ReplayPremiereInteractions {
   private readonly minHeartbeatIntervalMs: number;
   private readonly limits: ReplayPremiereInteractionLimits;
   private readonly admitAnonymousWrite: ReplayPremiereAnonymousWriteAdmission;
-  private readonly wageringEnabled: boolean;
-  private readonly pointsLedger: ReplayPremiereSettlementPointsRecorder | null;
-  private readonly settlementLedger: ReplayPremiereSettlementLedgerRecorder | null;
   private readonly snapshotValidationOptions: ReplayPremiereInteractionsOptions;
   private mutationQueue: Promise<void> = Promise.resolve();
   private pendingMutations = 0;
@@ -733,15 +601,6 @@ export class ReplayPremiereInteractions {
   private reactionIndex: ReplayPremiereReactionIndex;
   private writesFenced = false;
   private writeFenceDrain: Promise<void> | null = null;
-  /**
-   * Process-local only, deliberately never part of the durable snapshot —
-   * see `retireForIdentityLinkIfSafe`. Correctness only needs this to
-   * outlive the narrow in-flight race it defends against, never a process
-   * restart: the market ledger itself (the thing actually worth
-   * protecting) is untouched either way, so a crash in that vanishing
-   * window loses nothing durable.
-   */
-  private readonly retiredForLinkParticipantIds = new Set<string>();
 
   constructor(options: ReplayPremiereInteractionsOptions) {
     assertPremiereId(options.premiereId);
@@ -758,7 +617,6 @@ export class ReplayPremiereInteractions {
     }
     this.getPremiereState = options.getPremiereState;
     this.getReleasedContext = options.getReleasedContext;
-    this.getLiveVisibleSequence = options.getLiveVisibleSequence;
     this.persistence = options.persistence;
     this.signAttribution = options.signAttribution;
     this.canonicalPremiereUrl = canonicalUrl(options.canonicalPremiereUrl);
@@ -786,9 +644,6 @@ export class ReplayPremiereInteractions {
       throw invalidInteraction("anonymous_write_admission_required");
     }
     this.admitAnonymousWrite = options.admitAnonymousWrite;
-    this.wageringEnabled = options.wageringEnabled ?? false;
-    this.pointsLedger = options.pointsLedger ?? null;
-    this.settlementLedger = options.settlementLedger ?? null;
     this.snapshotValidationOptions = {
       ...options,
       limits: this.limits,
@@ -814,18 +669,6 @@ export class ReplayPremiereInteractions {
 
   hasCompletePredictionResolution(): boolean {
     return hasCompleteReplayPremierePredictionResolution(this.state);
-  }
-
-  /**
-   * Whether this premiere runs the LMSR wagering market. The runtime
-   * coordinator reads this to decide whether a checkpoint boundary should
-   * pause the release clock (legacy prediction-checkpoint behavior,
-   * unchanged) or pass straight through with no window (see
-   * `prepareMarkCheckpointPassed`) — single source of truth, never
-   * duplicated as a second constructor flag on the coordinator.
-   */
-  isWageringEnabled(): boolean {
-    return this.wageringEnabled;
   }
 
   restoreState(snapshot: ReplayPremiereInteractionsSnapshot): void {
@@ -914,47 +757,6 @@ export class ReplayPremiereInteractions {
       (candidate) => candidate.id === shareId,
     );
     return share === undefined ? null : clone(share);
-  }
-
-  /**
-   * Live, poll-friendly market state — one continuous market spans the
-   * whole premiere and trades continuously from match start to reveal, not
-   * gated to checkpoints. Visible to every caller at any time: the whole
-   * point of a live market is that the crowd sees prices move as trades
-   * land, and exposing current `q`/prices never leaks anything about the
-   * eventual outcome, only current trading activity. `submitMarketOrder`
-   * alone enforces when orders may execute — this is a pure read.
-   */
-  readMarketState(
-    participantId: string | null,
-  ): ReplayPremiereMarketStateView | null {
-    if (participantId !== null) assertParticipantId(participantId);
-    if (!this.wageringEnabled || this.state.market === null) return null;
-    const market = this.state.market;
-    return {
-      outcomeSeatIds: [...market.outcomeSeatIds],
-      b: market.b,
-      q: [...market.q],
-      prices: computeMarketPrices(market),
-      status: market.status,
-      winnerSeatId: market.winnerSeatId,
-      liveVisibleSequence: this.getLiveVisibleSequence(),
-      positions:
-        participantId === null ? null : positionsFor(market, participantId),
-      // Authoritative available balance for the calling participant — the
-      // ONLY money number the client may trust across a reload/new tab.
-      // Mirrors submitMarketOrder's own lazy-grant semantics (a
-      // never-before-traded participant reads as STARTING_BANKROLL, the
-      // exact amount their first order would actually be granted and
-      // charged against) without granting anything on this read — a pure
-      // read never mutates the ledger.
-      balance:
-        participantId === null
-          ? null
-          : (market.ledgerGranted[participantId] ?? 0) > 0
-            ? (market.ledgerBalances[participantId] ?? 0)
-            : STARTING_BANKROLL,
-    };
   }
 
   readCheckpoint(
@@ -1083,50 +885,6 @@ export class ReplayPremiereInteractions {
     });
   }
 
-  /**
-   * Wagering-only sibling of `prepareOpenCheckpoint` + `prepareCloseCheckpoint`:
-   * passes a checkpoint straight from "upcoming" to "closed" in one durable
-   * step, at the instant the coordinator releases its content, with no open
-   * window and no `REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS` pause — the replay
-   * clock never halts for a wagering premiere. `optionSeatIds` is still
-   * recorded (from the same checkpoint projection the legacy path uses) so
-   * post-reveal prediction-resolution eligibility derivation stays correct;
-   * only the pause and the open voting window are gone, per operator
-   * direction that /premiere/<id> (non-wagering) is untouched. Callers must
-   * keep the runtime's own `completedCheckpointIds` in lockstep with this in
-   * the same persisted step — the coordinator's `validateRuntimeSnapshot`
-   * requires every interaction checkpoint past the completed prefix to
-   * still read "upcoming".
-   */
-  prepareMarkCheckpointPassed(options: {
-    checkpointId: string;
-    occurredAt: string;
-    optionSeatIds: readonly string[];
-  }): ReplayPremierePreparedInteractionTransition<ReplayPremiereInteractionCheckpoint> {
-    if (!this.wageringEnabled) throw invalidInteraction("wagering_disabled");
-    return this.prepareCheckpointTransition((next) => {
-      const checkpoint = findCheckpoint(next, options.checkpointId);
-      if (checkpoint.state !== "upcoming") {
-        throw conflict("checkpoint_already_opened");
-      }
-      timestamp(options.occurredAt, "checkpoint_passed_at");
-      const optionSeatIds = [...options.optionSeatIds];
-      if (
-        optionSeatIds.length < 2 ||
-        new Set(optionSeatIds).size !== optionSeatIds.length ||
-        optionSeatIds.some((seatId) => !this.seats.has(seatId))
-      ) {
-        throw invalidInteraction("invalid_checkpoint_options");
-      }
-      checkpoint.opensAt = options.occurredAt;
-      checkpoint.closesAt = options.occurredAt;
-      checkpoint.outageShiftMs = 0;
-      checkpoint.optionSeatIds = optionSeatIds;
-      checkpoint.state = "closed";
-      return clone(checkpoint);
-    });
-  }
-
   async shiftOpenCheckpointForOutage(options: {
     checkpointId: string;
     outageMs: number;
@@ -1236,7 +994,6 @@ export class ReplayPremiereInteractions {
         eligibleSeatIds: new Set(this.seats.keys()),
         result: options.result,
         resolvedAt: options.resolvedAt,
-        wageringEnabled: this.wageringEnabled,
       });
       return {
         result: transition.result,
@@ -1245,137 +1002,7 @@ export class ReplayPremiereInteractions {
         persistenceIdempotencyKey: transition.persistenceIdempotencyKey,
       };
     });
-    await this.recordSettlementPointsIfNeeded();
-    await this.recordSettlementLedgerIfNeeded(
-      options.result,
-      options.resolvedAt,
-    );
     return outcome;
-  }
-
-  /**
-   * Folds a just-settled market's final ledger into the durable
-   * cross-premiere points ledger, once per participant per premiere. A
-   * no-op unless `pointsLedger` was configured, the market is wagering-
-   * enabled, and has actually reached `"settled"` — reads `this.state`
-   * directly, so this MUST only be called after `mutate()` has resolved
-   * (i.e. after any settlement transition already committed). Safe to
-   * call for an already-recorded premiere (e.g. a retried resolution
-   * call): `pointsLedger.recordPremiereSettlement` is itself idempotent
-   * per `(participantId, premiereId)`. Never throws — a durable
-   * leaderboard side-channel failing is never a reason to fail prediction
-   * resolution itself.
-   */
-  private async recordSettlementPointsIfNeeded(): Promise<void> {
-    if (this.pointsLedger === null) return;
-    const market = this.state.market;
-    if (market === null || market.status !== "settled") return;
-    const settlements = Object.entries(market.ledgerGranted)
-      .filter(
-        ([participantId, granted]) =>
-          granted > 0 && REAL_GUEST_PARTICIPANT_ID_PATTERN.test(participantId),
-      )
-      .map(([participantId, granted]) => ({
-        participantId,
-        granted,
-        balance: market.ledgerBalances[participantId] ?? 0,
-      }));
-    if (settlements.length === 0) return;
-    try {
-      await this.pointsLedger.recordPremiereSettlement(
-        this.premiereId,
-        settlements,
-      );
-    } catch (error) {
-      // Best-effort durable side-channel — never fail resolution over it,
-      // but a swallowed failure here is silent data loss (see the
-      // production gap this closed: a real settled premiere with zero
-      // console trace of why its points ledger write never landed).
-      console.error(
-        `settlement_points_ledger_write_failed premiereId=${this.premiereId}:`,
-        error,
-      );
-    }
-  }
-
-  /**
-   * Writes the one durable "who won, and what did the market close at"
-   * record for this premiere, once, the moment predictions resolve. A
-   * no-op unless `settlementLedger` was configured and the market has
-   * actually reached `"settled"` — reads `this.state` directly, so this
-   * MUST only be called after `mutate()` has resolved, same requirement
-   * as `recordSettlementPointsIfNeeded`. Safe to call for an
-   * already-recorded premiere: `settlementLedger.recordSettlement` is
-   * itself idempotent per `premiereId`. Never throws — a durable
-   * settlement side-channel failing is never a reason to fail prediction
-   * resolution itself.
-   *
-   * `outcome`/`winnerSeatId` are read off `market.winnerSeatId`, the
-   * SAME value `settleMarket` just derived and already paid out against
-   * — not re-derived from `result.winner` a second time. `null` there
-   * means the market refunded everyone (a void/no-winner/ambiguous-winner
-   * result, or an invalid one — see `deriveReplayPremierePredictionOutcome`),
-   * which is recorded honestly as `outcome: "refunded"` rather than left
-   * unrecorded: "the market voided and refunded you" is real settlement
-   * information, not an absence of one.
-   *
-   * `matchKind`/`episodeRequestId` come from `result.sourceKind`/
-   * `result.sourceId`: for a `"coworld_result"`, `sourceId` IS the
-   * Coworld `episodeRequestId` (`PremiereWageringSourceBundle.ts` sets
-   * `sourceId: rosterFile.episodeRequestId` at seal time) — no separate
-   * provenance plumbing needed. A `"controlled_result"` (house exhibition)
-   * has no episode behind it, so `episodeRequestId` is `null`.
-   */
-  private async recordSettlementLedgerIfNeeded(
-    result: PremiereCanonicalAuthoritativeResult,
-    resolvedAt: string,
-  ): Promise<void> {
-    if (this.settlementLedger === null) return;
-    const market = this.state.market;
-    if (market === null || market.status !== "settled") return;
-    const totalParticipants = Object.entries(market.ledgerGranted).filter(
-      ([participantId, granted]) =>
-        granted > 0 && REAL_GUEST_PARTICIPANT_ID_PATTERN.test(participantId),
-    ).length;
-    const prices = computeMarketPrices(market);
-    const marketFinalPrices = market.outcomeSeatIds.map((seatId, index) => ({
-      seatId,
-      price: prices[index],
-    }));
-    const winnerSeat =
-      market.winnerSeatId === null
-        ? null
-        : (result.seats.find((seat) => seat.seatId === market.winnerSeatId) ??
-          null);
-    try {
-      await this.settlementLedger.recordSettlement({
-        premiereId: this.premiereId,
-        episodeRequestId:
-          result.sourceKind === "coworld_result" ? result.sourceId : null,
-        matchKind:
-          result.sourceKind === "coworld_result" ? "real-league" : "exhibition",
-        outcome: market.winnerSeatId === null ? "refunded" : "winner",
-        winnerSeatId: market.winnerSeatId,
-        winnerDisplayName: winnerSeat?.displayName ?? null,
-        placements: result.seats.map((seat) => ({
-          seatId: seat.seatId,
-          displayName: seat.displayName,
-          placement: seat.won ? (1 as const) : null,
-        })),
-        settledAt: resolvedAt,
-        marketFinalPrices,
-        totalParticipants,
-      });
-    } catch (error) {
-      // Best-effort durable side-channel — never fail resolution over it,
-      // but see the sibling catch above: silent loss here is exactly what
-      // let the "expired premiere can honestly show who won" feature
-      // ship with an undetected gap for a fully unattended settlement.
-      console.error(
-        `settlement_ledger_write_failed premiereId=${this.premiereId}:`,
-        error,
-      );
-    }
   }
 
   async submitPrediction(options: {
@@ -1469,299 +1096,6 @@ export class ReplayPremiereInteractions {
       };
     });
   }
-  async submitMarketOrder(options: {
-    participantId: string;
-    participantKind: ReplayPremiereMarketParticipantKind;
-    sessionId: string;
-    idempotencyKey: string;
-    requesterBucketId: string;
-    seatId: string;
-    side: "buy" | "sell";
-    /**
-     * The highest sequence the caller currently observes as live-visible
-     * (`readMarketState(...).liveVisibleSequence`). Never trusted as an
-     * upper bound by itself — validated against this server's own
-     * `getLiveVisibleSequence()` at accept time, so a client cannot trade
-     * on any sequence the server itself has not yet independently
-     * surfaced, regardless of how the client obtained it.
-     */
-    sequence: number;
-    /** Buy: credit budget to spend. Sell: exact share count (send the full held amount to sell all). */
-    amount: number;
-    /** 0..100. Ceiling for a buy, floor for a sell — the whole order is rejected if the execution price would be worse, never silently filled worse. */
-    limitPrice: number;
-  }): Promise<{ trade: ReplayPremiereMarketTrade; idempotent: boolean }> {
-    if (!this.wageringEnabled) throw invalidInteraction("wagering_disabled");
-    this.assertWritesOpen();
-    const occurredAt = this.nowChecked().toISOString();
-    assertParticipantId(options.participantId);
-    assertSessionId(options.sessionId);
-    assertIdempotencyKey(options.idempotencyKey);
-    assertRequesterBucketId(options.requesterBucketId);
-    assertSeatId(options.seatId);
-    assertSequence(options.sequence);
-    if (options.side !== "buy" && options.side !== "sell") {
-      throw invalidInteraction("invalid_order_side");
-    }
-    if (
-      options.participantKind !== "real" &&
-      options.participantKind !== "synthetic"
-    ) {
-      throw invalidInteraction("invalid_participant_kind");
-    }
-    if (!Number.isSafeInteger(options.amount) || options.amount <= 0) {
-      throw invalidInteraction("invalid_order_amount");
-    }
-    if (
-      !Number.isFinite(options.limitPrice) ||
-      options.limitPrice < 0 ||
-      options.limitPrice > 100
-    ) {
-      throw invalidInteraction("invalid_limit_price");
-    }
-    this.admitAnonymousWrite({
-      route: "market_order",
-      premiereId: this.premiereId,
-      participantId: options.participantId,
-      sessionId: options.sessionId,
-      requesterBucketId: options.requesterBucketId,
-      idempotencyKey: options.idempotencyKey,
-      occurredAt,
-      currentPremiereRecordCount: premiereRecordCount(this.state),
-    });
-    ownedSession(this.state, options.sessionId, options.participantId);
-    return this.mutate<{
-      trade: ReplayPremiereMarketTrade;
-      idempotent: boolean;
-    }>("market_order_submitted", occurredAt, (next) => {
-      assertParticipantId(options.participantId);
-      assertSessionId(options.sessionId);
-      assertSeatId(options.seatId);
-      // An identity mid-link-transfer: `retireForIdentityLinkIfSafe`
-      // already observed this exact id had no unsettled participation and
-      // marked it retired, atomically, inside this SAME mutation queue —
-      // so no order admitted afterward can ever land under it again,
-      // closing the two-tab race the retirement exists to prevent.
-      if (this.retiredForLinkParticipantIds.has(options.participantId)) {
-        throw gone("order_rejected_identity_retired");
-      }
-      ownedSession(next, options.sessionId, options.participantId);
-      const existingTrade = next.trades.find(
-        (trade) =>
-          trade.participantId === options.participantId &&
-          trade.idempotencyKey === options.idempotencyKey,
-      );
-      if (existingTrade !== undefined) {
-        return {
-          result: { trade: clone(existingTrade), idempotent: true },
-          payload: json({ tradeId: existingTrade.id, idempotent: true }),
-          persist: false,
-        };
-      }
-      if (next.market === null) {
-        throw invalidInteraction("market_not_initialized");
-      }
-      if (!next.market.outcomeSeatIds.includes(options.seatId)) {
-        throw invalidInteraction("order_seat_not_eligible");
-      }
-      // Continuous market, no checkpoint gate: trading is live whenever the
-      // match itself is live. Server-authoritative — `this.getPremiereState()`
-      // is never client-supplied, unlike an `observedSequence` heartbeat
-      // marker, which is client-reported and is never a trust boundary here.
-      const premiereState = this.getPremiereState();
-      if (premiereState !== "playing" && premiereState !== "checkpoint") {
-        throw gone("market_not_live");
-      }
-      // The real anti-read-ahead property: bind the order to the server's
-      // own fine-grained release clock (independent of chunk-release
-      // batching — see `ReplayPremiereRuntimeCoordinator.
-      // readLiveVisibleSequence`), not to `getPremiereState()` alone. Even a
-      // client that somehow obtained future game state through some other
-      // channel cannot trade on it: the server refuses any order claiming a
-      // sequence beyond what it itself currently reveals.
-      if (options.sequence > this.getLiveVisibleSequence()) {
-        throw gone("order_sequence_unreleased");
-      }
-      // Server-authoritative, never client-trusted: the pre-trade `q` this
-      // order prices off of is whatever `next.market` holds at the moment
-      // this callback runs — the single ordered mutation queue below
-      // (`mutate()`) is what guarantees two concurrent orders never price
-      // off the same `q`, and that the `q` update and the ledger
-      // debit/credit commit atomically in the same durable transaction.
-      const ledger = ReplayPremiereLedger.restore({
-        balances: next.market.ledgerBalances,
-        granted: next.market.ledgerGranted,
-      });
-      if (ledger.grantedTo(options.participantId) === 0) {
-        ledger.grant(options.participantId, STARTING_BANKROLL);
-      }
-      let shares: number;
-      if (options.side === "buy") {
-        const bankroll = ledger.balanceOf(options.participantId);
-        const validation = validateBuyStake(options.amount, bankroll);
-        if (!validation.ok) {
-          throw invalidInteraction(`order_rejected_${validation.reason}`);
-        }
-        shares = maxSharesForBudget(
-          next.market,
-          options.seatId,
-          options.amount,
-        );
-        if (shares <= 0) throw invalidInteraction("order_rejected_zero_shares");
-        const fill = quoteBuy(next.market, options.seatId, shares);
-        if (fill.avgPrice > options.limitPrice) {
-          throw invalidInteraction("order_rejected_slippage_exceeded");
-        }
-      } else {
-        const held = sharesHeld(
-          next.market,
-          options.participantId,
-          options.seatId,
-        );
-        if (held <= 0) {
-          throw invalidInteraction("order_rejected_no_shares_to_sell");
-        }
-        shares = Math.min(options.amount, held);
-        if (shares <= 0) throw invalidInteraction("order_rejected_zero_shares");
-        const fill = quoteSell(next.market, options.seatId, shares);
-        if (fill.avgPrice < options.limitPrice) {
-          throw invalidInteraction("order_rejected_slippage_exceeded");
-        }
-      }
-      const applied =
-        options.side === "buy"
-          ? applyBuy({
-              market: next.market,
-              ledger,
-              participantId: options.participantId,
-              seatId: options.seatId,
-              shares,
-            })
-          : applySell({
-              market: next.market,
-              ledger,
-              participantId: options.participantId,
-              seatId: options.seatId,
-              shares,
-            });
-      const avgPrice = shares > 0 ? applied.chips / shares : 0;
-      const ledgerSnapshot = ledger.snapshot();
-      next.market = {
-        ...applied.market,
-        ledgerBalances: ledgerSnapshot.balances,
-        ledgerGranted: ledgerSnapshot.granted,
-      };
-      const trade: ReplayPremiereMarketTrade = {
-        id: `trade_${this.randomHex(16)}`,
-        premiereId: this.premiereId,
-        participantId: options.participantId,
-        participantKind: options.participantKind,
-        seatId: options.seatId,
-        side: options.side,
-        shares,
-        chips: applied.chips,
-        avgPrice,
-        executedAt: occurredAt,
-        sequence: options.sequence,
-        idempotencyKey: options.idempotencyKey,
-      };
-      assertPremiereRecordCapacity(next, this.limits, 1);
-      next.trades.push(trade);
-      return {
-        result: { trade: clone(trade), idempotent: false },
-        payload: json({ trade }),
-        persistenceIdempotencyKey: `interaction:market_order:${options.participantId}:${options.idempotencyKey}`,
-      };
-    });
-  }
-
-  /**
-   * Atomically decides whether `participantId` — a browser's CURRENT
-   * guest id, about to be handed a DIFFERENT (canonical) cookie by the
-   * GitHub link flow — may safely stop trading as itself, and if so,
-   * retires it in the exact same critical section: this runs inside the
-   * SAME `mutationQueue` `submitMarketOrder` uses (see `mutate`'s
-   * chaining), so a concurrent order already in flight under this id
-   * either fully lands BEFORE this check observes the ledger, or is
-   * rejected AFTER by `submitMarketOrder`'s retired-id guard — never a
-   * window where both a stranding order and the retirement can occur.
-   *
-   * "Safe" means `participantId` has never been granted a ledger entry in
-   * THIS premiere's currently-open market — the exact same signal
-   * settlement uses (`ledgerGranted`, see `recordSettlementPointsIfNeeded`)
-   * to decide who counts as a real trader, deliberately not "holds an
-   * open position": a participant who bought and fully sold out still has
-   * a bankroll that diverged from the starting grant, and would be
-   * silently doubled if allowed to link. A settled market can never
-   * strand anything — the payout already landed — so this is always safe
-   * once `status === "settled"`.
-   *
-   * Retirement itself is the load-bearing half. Without it, an order
-   * admitted microseconds after this call returns `{ safe: true }` would
-   * still create a second, stranded bankroll under the old id — exactly
-   * the hole this whole mechanism exists to close, reached through a
-   * two-tab race instead of two browser profiles. Call
-   * `releaseIdentityLinkRetirement` if the link this retirement was
-   * gating does not end up happening (or resolves back to this SAME id) —
-   * a retirement that outlives its own link permanently strands the
-   * participant out of their own trades.
-   */
-  async retireForIdentityLinkIfSafe(
-    participantId: string,
-  ): Promise<{ safe: boolean }> {
-    assertParticipantId(participantId);
-    this.pendingMutations += 1;
-    const run = async (): Promise<{ safe: boolean }> => {
-      const market = this.state.market;
-      const hasUnsettledParticipation =
-        market !== null &&
-        market.status !== "settled" &&
-        (market.ledgerGranted[participantId] ?? 0) > 0;
-      if (hasUnsettledParticipation) return { safe: false };
-      this.retiredForLinkParticipantIds.add(participantId);
-      return { safe: true };
-    };
-    const result = this.mutationQueue.then(run, run);
-    const tracked = result.finally(() => {
-      this.pendingMutations -= 1;
-    });
-    this.mutationQueue = tracked.then(
-      () => undefined,
-      () => undefined,
-    );
-    return tracked;
-  }
-
-  /**
-   * Reverses a `retireForIdentityLinkIfSafe` retirement that must not
-   * stick — either the GitHub round trip or the identity-store write that
-   * was supposed to follow it failed (the link never happened, so this id
-   * is still exactly who it always was), or it succeeded but resolved
-   * back to this SAME participant id (a browser's first-ever link,
-   * becoming its own canonical: no identity actually changed hands, so
-   * nothing should have been retired). Never call this once a DIFFERENT
-   * canonical cookie has actually been handed to the browser — at that
-   * point the old id staying retired is correct, not a bug. Same
-   * mutation-queue serialization as the retirement itself; a no-op if the
-   * id was never retired.
-   */
-  async releaseIdentityLinkRetirement(participantId: string): Promise<void> {
-    assertParticipantId(participantId);
-    this.pendingMutations += 1;
-    const run = async (): Promise<void> => {
-      this.retiredForLinkParticipantIds.delete(participantId);
-    };
-    const result = this.mutationQueue.then(run, run);
-    const tracked = result.finally(() => {
-      this.pendingMutations -= 1;
-    });
-    this.mutationQueue = tracked.then(
-      () => undefined,
-      () => undefined,
-    );
-    return tracked;
-  }
-
   async submitReaction(options: {
     participantId: string;
     sessionId: string;
@@ -2591,18 +1925,6 @@ export class ReplayPremiereInteractions {
   private assertAuthoritativeObservedSequence(sequence: number): void {
     assertObservedSequence(sequence);
     if (sequence === -1) return;
-    // `getReleasedContext`'s `lastSafeReleasedSequence` is a coarse,
-    // chunk-release-action counter — correct for `contentSource: "chunks"`
-    // clients, whose own observed sequence advances at the same coarse
-    // granularity. A `contentSource: "tap"` client (the betting page)
-    // legitimately reports a fine-grained per-turn sequence instead
-    // (`latestFrame.sequence`, the same numbering `readLiveVisibleSequence()`
-    // exposes and market orders already trust as their own authoritative
-    // freshness bound — see `submitMarketOrder`'s `getLiveVisibleSequence()`
-    // check above). Accept either bound: this only WIDENS what a coarse
-    // claim can satisfy, it never lets a claim through that exceeds both
-    // the chunk-release counter AND the server's own live-visible frontier.
-    if (sequence <= this.getLiveVisibleSequence()) return;
     const context = this.getReleasedContext(sequence);
     if (context === null || sequence > context.releasedThroughSequence) {
       throw invalidInteraction("observed_sequence_unreleased");
@@ -2748,21 +2070,6 @@ function createInitialSnapshot(
       resolution: null,
     })),
     predictions: [],
-    market: options.wageringEnabled
-      ? {
-          premiereId: options.premiereId,
-          outcomeSeatIds: options.seats.map((seat) => seat.seatId),
-          b: liquidityForOutcomeCount(options.seats.length),
-          q: options.seats.map(() => 0),
-          status: "open",
-          winnerSeatId: null,
-          holdings: {},
-          costBasis: {},
-          ledgerBalances: {},
-          ledgerGranted: {},
-        }
-      : null,
-    trades: [],
     reactions: [],
     shares: [],
     sessions: [],
@@ -2785,8 +2092,6 @@ function validateSnapshot(
     "premiereId",
     "checkpoints",
     "predictions",
-    "market",
-    "trades",
     "reactions",
     "shares",
     "sessions",
@@ -2798,7 +2103,6 @@ function validateSnapshot(
     !Array.isArray(snapshot.checkpoints) ||
     snapshot.checkpoints.length !== 2 ||
     !Array.isArray(snapshot.predictions) ||
-    !Array.isArray(snapshot.trades) ||
     !Array.isArray(snapshot.reactions) ||
     !Array.isArray(snapshot.shares) ||
     !Array.isArray(snapshot.sessions) ||
@@ -2825,8 +2129,6 @@ function validateSnapshot(
   );
   validateSnapshotCheckpoints(snapshot, options, seatIdentityById);
   validateSnapshotPredictions(snapshot);
-  validateSnapshotMarket(snapshot, options);
-  validateSnapshotTrades(snapshot);
   let validatedReactionIndex: ReplayPremiereReactionIndex | null = null;
   if (appendOnlyReactions === undefined) {
     validatedReactionIndex = validateSnapshotReactions(
@@ -2927,15 +2229,12 @@ function validateSnapshotCheckpoints(
     if (
       // Durable snapshots recorded before the real-speed retune carry 15 s
       // windows; both canonical durations stay valid so archived journals
-      // keep validating. Wagering premieres never open a real window —
-      // `prepareMarkCheckpointPassed` records a zero-duration "passed"
-      // marker instead, honestly reflecting that no pause ever happened.
+      // keep validating.
       (duration !==
         REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS + checkpoint.outageShiftMs &&
         duration !==
           REPLAY_PREMIERE_LEGACY_CHECKPOINT_PAUSE_MS +
-            checkpoint.outageShiftMs &&
-        !(options.wageringEnabled && duration === 0)) ||
+            checkpoint.outageShiftMs) ||
       checkpoint.optionSeatIds.length < 2 ||
       checkpoint.optionSeatIds.length > 64 ||
       new Set(checkpoint.optionSeatIds).size !== checkpoint.optionSeatIds.length
@@ -3069,160 +2368,6 @@ function validateSnapshotPredictions(
     if (keys.has(key))
       throw invalidInteraction("duplicate_snapshot_prediction");
     keys.add(key);
-  }
-}
-
-function validateSnapshotMarket(
-  snapshot: ReplayPremiereInteractionsSnapshot,
-  options: ReplayPremiereInteractionSnapshotValidationOptions,
-): void {
-  const market = snapshot.market;
-  if (!options.wageringEnabled) {
-    if (market !== null)
-      throw invalidInteraction("market_present_while_disabled");
-    return;
-  }
-  if (market === null) throw invalidInteraction("market_missing_while_enabled");
-  if (!isRecord(market)) throw invalidInteraction("market_not_object");
-  assertExactKeys(market, [
-    "premiereId",
-    "outcomeSeatIds",
-    "b",
-    "q",
-    "status",
-    "winnerSeatId",
-    "holdings",
-    "costBasis",
-    "ledgerBalances",
-    "ledgerGranted",
-  ]);
-  const expectedSeatIds = options.seats.map((seat) => seat.seatId);
-  if (
-    market.premiereId !== snapshot.premiereId ||
-    !Array.isArray(market.outcomeSeatIds) ||
-    market.outcomeSeatIds.length !== expectedSeatIds.length ||
-    market.outcomeSeatIds.some(
-      (seatId, index) => seatId !== expectedSeatIds[index],
-    ) ||
-    market.b !== liquidityForOutcomeCount(expectedSeatIds.length) ||
-    !Array.isArray(market.q) ||
-    market.q.length !== expectedSeatIds.length ||
-    market.q.some((value) => !Number.isSafeInteger(value) || value < 0) ||
-    (market.status !== "open" && market.status !== "settled") ||
-    (market.winnerSeatId !== null &&
-      !expectedSeatIds.includes(market.winnerSeatId)) ||
-    (market.status === "open" && market.winnerSeatId !== null)
-  ) {
-    throw invalidInteraction("invalid_snapshot_market");
-  }
-  const totals = expectedSeatIds.map(() => 0);
-  for (const [participantId, holdings] of Object.entries(market.holdings)) {
-    assertParticipantId(participantId);
-    if (
-      !Array.isArray(holdings) ||
-      holdings.length !== expectedSeatIds.length ||
-      holdings.some((value) => !Number.isSafeInteger(value) || value < 0)
-    ) {
-      throw invalidInteraction("invalid_snapshot_market_holdings");
-    }
-    holdings.forEach((value, index) => {
-      totals[index] += value;
-    });
-    const basis = market.costBasis[participantId];
-    if (
-      !Array.isArray(basis) ||
-      basis.length !== expectedSeatIds.length ||
-      basis.some((value) => !Number.isSafeInteger(value) || value < 0)
-    ) {
-      throw invalidInteraction("invalid_snapshot_market_cost_basis");
-    }
-  }
-  if (totals.some((value, index) => value !== market.q[index])) {
-    throw invalidInteraction("market_holdings_q_mismatch");
-  }
-  for (const balance of Object.values(market.ledgerBalances)) {
-    if (!Number.isSafeInteger(balance)) {
-      throw invalidInteraction("invalid_snapshot_ledger_balance");
-    }
-  }
-  if (Object.values(market.ledgerBalances).reduce((a, b) => a + b, 0) !== 0) {
-    throw invalidInteraction("ledger_does_not_balance");
-  }
-  for (const granted of Object.values(market.ledgerGranted)) {
-    if (!Number.isSafeInteger(granted) || granted < 0) {
-      throw invalidInteraction("invalid_snapshot_ledger_granted");
-    }
-  }
-}
-
-function validateSnapshotTrades(
-  snapshot: ReplayPremiereInteractionsSnapshot,
-): void {
-  const ids = new Set<string>();
-  const dedupe = new Set<string>();
-  for (const trade of snapshot.trades) {
-    if (!isRecord(trade)) throw invalidInteraction("trade_not_object");
-    assertExactKeys(trade, [
-      "id",
-      "premiereId",
-      "participantId",
-      "participantKind",
-      "seatId",
-      "side",
-      "shares",
-      "chips",
-      "avgPrice",
-      "executedAt",
-      "sequence",
-      "idempotencyKey",
-    ]);
-    assertTradeId(trade.id);
-    assertParticipantId(trade.participantId);
-    assertSeatId(trade.seatId);
-    assertIdempotencyKey(trade.idempotencyKey);
-    if (
-      trade.participantKind !== "real" &&
-      trade.participantKind !== "synthetic"
-    ) {
-      throw invalidInteraction("invalid_trade_participant_kind");
-    }
-    if (trade.side !== "buy" && trade.side !== "sell") {
-      throw invalidInteraction("invalid_trade_side");
-    }
-    if (!Number.isSafeInteger(trade.shares) || trade.shares <= 0) {
-      throw invalidInteraction("invalid_trade_shares");
-    }
-    if (!Number.isSafeInteger(trade.chips) || trade.chips < 0) {
-      throw invalidInteraction("invalid_trade_chips");
-    }
-    if (
-      typeof trade.avgPrice !== "number" ||
-      !Number.isFinite(trade.avgPrice) ||
-      trade.avgPrice < 0
-    ) {
-      throw invalidInteraction("invalid_trade_avg_price");
-    }
-    timestamp(trade.executedAt, "snapshot_trade_executed_at");
-    // Structural only (safe non-negative integer): a strict upper-bound
-    // check against the live clock is deliberately NOT re-applied here.
-    // Unlike reactions/shares (whose `turn`/`eventContext` must be
-    // re-derived from frozen drafts for content integrity), a trade's
-    // `sequence` is purely an audit/staleness marker already enforced once,
-    // authoritatively, at accept time in `submitMarketOrder` — re-checking
-    // it against a *recovery-time* clock would be unsound: the coarse
-    // `getReleasedContext` fallback available pre-runtime can lag behind
-    // where the fine-grained live clock legitimately was at accept time.
-    if (!Number.isSafeInteger(trade.sequence) || trade.sequence < 0) {
-      throw invalidInteraction("invalid_trade_sequence");
-    }
-    if (trade.premiereId !== snapshot.premiereId) {
-      throw invalidInteraction("invalid_snapshot_trade");
-    }
-    if (ids.has(trade.id)) throw invalidInteraction("duplicate_trade_id");
-    ids.add(trade.id);
-    const key = `${trade.participantId}\u0000${trade.idempotencyKey}`;
-    if (dedupe.has(key)) throw invalidInteraction("duplicate_snapshot_trade");
-    dedupe.add(key);
   }
 }
 
@@ -3789,7 +2934,6 @@ function premiereRecordCount(
   return (
     snapshot.checkpoints.length +
     snapshot.predictions.length +
-    snapshot.trades.length +
     snapshot.reactions.length +
     snapshot.shares.length +
     snapshot.sessions.length +
@@ -3892,15 +3036,6 @@ function assertSnapshotObservedSequence(
 ): void {
   assertObservedSequence(sequence);
   if (sequence === -1) return;
-  // Mirrors `assertAuthoritativeObservedSequence`'s live-path widening
-  // exactly: a `contentSource: "tap"` (wagering) client legitimately
-  // reports a fine-grained observedSequence that can be ahead of the
-  // coarse chunk-release marker `getReleasedContext` exposes. A session
-  // accepted live at that fine-grained bound must still validate at
-  // recovery/restart — re-checking ONLY the coarse bound here would
-  // reject exactly the sessions the live-path widening was meant to
-  // unblock, the moment the server next restarts.
-  if (sequence <= options.getLiveVisibleSequence()) return;
   const context = options.getReleasedContext(sequence);
   if (context === null || sequence > context.releasedThroughSequence) {
     throw invalidInteraction("snapshot_observed_sequence_unreleased");
@@ -4038,11 +3173,7 @@ function assertPremiereId(value: string): void {
 }
 
 function assertParticipantId(value: string): void {
-  // guest_* = real anonymous participants; sim_* = the synthetic crowd,
-  // deliberately in an equally locked, visibly distinct namespace so the
-  // two can never be confused. Both go through the exact same session
-  // ownership, idempotency, and market-order path — no bypass.
-  if (!/^(guest|sim)_[a-f0-9]{32}$/.test(value)) {
+  if (!REAL_GUEST_PARTICIPANT_ID_PATTERN.test(value)) {
     throw invalidInteraction("invalid_participant_id");
   }
 }
@@ -4074,12 +3205,6 @@ function assertReactionId(value: string): void {
 function assertShareId(value: string): void {
   if (!/^share_[a-f0-9]{32}$/.test(value)) {
     throw invalidInteraction("invalid_share_id");
-  }
-}
-
-function assertTradeId(value: string): void {
-  if (!/^trade_[a-f0-9]{32}$/.test(value)) {
-    throw invalidInteraction("invalid_trade_id");
   }
 }
 

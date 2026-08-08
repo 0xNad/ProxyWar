@@ -260,7 +260,6 @@ function createInteractions(
     getPremiereState: () =>
       state.runtime?.readLifecycleState() ?? initialPremiereState,
     getReleasedContext: () => null,
-    getLiveVisibleSequence: () => 0,
     persistence: { persist: async () => undefined },
     signAttribution: () => "a".repeat(64),
     canonicalPremiereUrl: `https://beta.proxywar.xyz/premieres/${gate.premiereId}`,

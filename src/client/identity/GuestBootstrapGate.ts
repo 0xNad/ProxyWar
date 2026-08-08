@@ -2,9 +2,8 @@
  * Serializes every identity-minting network call on a page behind the FIRST
  * one to start — closing a real, live-reproduced race (P0, 2026-08-02):
  * several independent client subsystems mounted together on one page
- * (`PremiereGithubSignIn`'s `/api/identity/status` poll,
- * `ReplayPremiereRuntime`'s `POST .../sessions` bootstrap, `AccountPage`'s
- * own account read, `PointsLeaderboard`'s leaderboard read) each hit an
+ * (`ReplayPremiereRuntime`'s session bootstrap and `AccountPage`'s account
+ * read) each hit an
  * endpoint that mints a fresh signed guest cookie via `Set-Cookie` when none
  * exists yet (`ReplayPremiereGuestSecurity.bootstrap()` and
  * `PlatformAccountSecurity`'s sibling — both correctly REUSE an existing
@@ -15,13 +14,9 @@
  * have round-tripped — each one independently sees no cookie in ITS OWN
  * request and mints its own distinct guest identity. The browser keeps
  * whichever `Set-Cookie` lands LAST; every other concurrently-minted
- * identity (and anything recorded against it — e.g. a wagering session's
- * trade) becomes permanently unreachable the instant a later response wins,
- * discovered only on the next authenticated read or reload as an
- * inexplicable "fresh guest, 1,000cr, no positions" state. Live-reproduced
- * via CDP against a real cold load of `/bet/<id>`: `/api/identity/status`
- * minted `guest_14fe29a1...`, `POST .../sessions` concurrently minted a
- * DIFFERENT `guest_1dd20142...` — two competing identities from one visit.
+ * identity becomes permanently unreachable the instant a later response
+ * wins, discovered only on the next authenticated read or reload. The cold
+ * load reproduction minted two competing identities from one visit.
  *
  * This is NOT new identity semantics — `bootstrap()` already reuses an
  * existing cookie correctly. The fix only adds an ordering guarantee: the

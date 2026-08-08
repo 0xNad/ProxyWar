@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildAgentSpectatorTelemetry } from "../../src/server/agents/AgentSpectatorTelemetry";
 import {
+  AgentActionAuditStatus,
   AgentDecisionRecord,
   LegalActionKind,
 } from "../../src/server/agents/AgentTypes";
@@ -252,7 +253,201 @@ describe("AgentSpectatorTelemetry", () => {
     expect(telemetry.communicationThreads).toHaveLength(1);
     expect(telemetry.communicationThreads[0]!.messages).toHaveLength(2);
   });
+
+  it("does not let a rejected reciprocal request fabricate an alliance", () => {
+    const telemetry = buildAgentSpectatorTelemetry({
+      runID: "rejected-alliance-run",
+      roster: roster(),
+      records: [
+        record(1, "a1", "Atlas", "p1", "alliance_request", {
+          recipientID: "p2",
+          recipientName: "Blitz",
+        }),
+        record(
+          2,
+          "a2",
+          "Blitz",
+          "p2",
+          "alliance_request",
+          { recipientID: "p1", recipientName: "Atlas" },
+          { accepted: false, auditStatus: "not_applicable" },
+        ),
+      ],
+    });
+
+    expect(telemetry.events.map((event) => event.kind)).toEqual([
+      "alliance_request",
+    ]);
+    expect(
+      telemetry.relationships.filter(
+        (relationship) => relationship.allianceState === "allied",
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("suppresses rejected donation and attack records without mutating relationships", () => {
+    const telemetry = buildAgentSpectatorTelemetry({
+      runID: "rejected-effects-run",
+      roster: roster(),
+      records: [
+        record(
+          1,
+          "a1",
+          "Atlas",
+          "p1",
+          "donate_gold",
+          { recipientID: "p2", recipientName: "Blitz", gold: 500 },
+          { accepted: false, auditStatus: "not_applicable" },
+        ),
+        record(
+          2,
+          "a2",
+          "Blitz",
+          "p2",
+          "attack",
+          { targetID: "p1", targetName: "Atlas" },
+          { accepted: false, auditStatus: "not_applicable" },
+        ),
+      ],
+    });
+
+    expect(telemetry.events).toHaveLength(0);
+    for (const relationship of telemetry.relationships) {
+      expect(relationship).toMatchObject({
+        trust: 50,
+        distrust: 10,
+        tension: 10,
+        tradeGivenGold: 0,
+        tradeGivenTroops: 0,
+        attacksSent: 0,
+        attacksReceived: 0,
+        betrayals: 0,
+      });
+    }
+  });
+
+  it("labels fallback/degraded accepted attempts without claiming an unconfirmed effect", () => {
+    const telemetry = buildAgentSpectatorTelemetry({
+      runID: "fallback-provenance-run",
+      roster: roster(),
+      finalState: finalState(),
+      records: [
+        record(
+          1,
+          "a1",
+          "Atlas",
+          "p1",
+          "attack",
+          { targetID: "p2", targetName: "Blitz" },
+          {
+            fallbackUsed: true,
+            llmPlannerDegraded: true,
+            auditStatus: "unknown",
+          },
+        ),
+      ],
+    });
+
+    expect(telemetry.events).toHaveLength(1);
+    expect(telemetry.events[0]).toMatchObject({
+      kind: "attack",
+      evidenceLevel: "accepted_action",
+      fallbackUsed: true,
+      llmPlannerDegraded: true,
+      auditStatus: "unknown",
+      auditReason: "test decision unknown",
+      message: "Atlas orders an attack against Blitz.",
+    });
+    expect(
+      telemetry.relationships.find(
+        (relationship) =>
+          relationship.fromAgentID === "a1" &&
+          relationship.toAgentID === "a2",
+      ),
+    ).toMatchObject({ attacksSent: 0, distrust: 10, tension: 10 });
+  });
+
+  it("keeps an accepted but unaudited donation as an attempt, not a transfer", () => {
+    const telemetry = buildAgentSpectatorTelemetry({
+      runID: "unconfirmed-support-run",
+      roster: roster(),
+      finalState: finalState(),
+      records: [
+        record(
+          1,
+          "a1",
+          "Atlas",
+          "p1",
+          "donate_troops",
+          { recipientID: "p2", recipientName: "Blitz", troops: 200 },
+          { auditStatus: "unknown" },
+        ),
+      ],
+    });
+
+    expect(telemetry.events[0]).toMatchObject({
+      kind: "trade",
+      evidenceLevel: "accepted_action",
+      message: "Atlas attempts to support Blitz.",
+    });
+    expect(
+      telemetry.relationships.find(
+        (relationship) =>
+          relationship.fromAgentID === "a1" &&
+          relationship.toAgentID === "a2",
+      ),
+    ).toMatchObject({ tradeGivenTroops: 0, trust: 50 });
+  });
 });
+
+function roster() {
+  return [
+    {
+      agentID: "a1",
+      username: "Atlas",
+      profile: "diplomatic" as const,
+      clientID: "c1",
+      brainType: "planner-executor" as const,
+    },
+    {
+      agentID: "a2",
+      username: "Blitz",
+      profile: "aggressive" as const,
+      clientID: "c2",
+      brainType: "planner-executor" as const,
+    },
+  ];
+}
+
+function finalState() {
+  return {
+    phase: "active" as const,
+    tick: 1,
+    turnCount: 100,
+    players: [
+      {
+        agentID: "a1",
+        username: "Atlas",
+        profile: "diplomatic" as const,
+        playerID: "p1",
+        isAlive: true,
+        tilesOwned: 10,
+        troops: 1000,
+        gold: "100",
+      },
+      {
+        agentID: "a2",
+        username: "Blitz",
+        profile: "aggressive" as const,
+        playerID: "p2",
+        isAlive: true,
+        tilesOwned: 10,
+        troops: 1000,
+        gold: "100",
+      },
+    ],
+  };
+}
 
 function record(
   sequence: number,
@@ -261,6 +456,12 @@ function record(
   playerID: string,
   kind: LegalActionKind,
   metadata: Record<string, string | number | boolean | null>,
+  options: {
+    accepted?: boolean;
+    auditStatus?: AgentActionAuditStatus;
+    fallbackUsed?: boolean;
+    llmPlannerDegraded?: boolean;
+  } = {},
 ): AgentDecisionRecord {
   return {
     sequence,
@@ -279,17 +480,25 @@ function record(
     attackActionIDs: kind === "attack" ? [`${kind}:${sequence}`] : [],
     chosenActionID: `${kind}:${sequence}`,
     chosenActionKind: kind,
-    reason: `${username} selects ${kind}`,
+    reason: options.fallbackUsed ? null : `${username} selects ${kind}`,
+    decisionMetadata: {
+      ...(options.fallbackUsed !== undefined
+        ? { fallbackUsed: options.fallbackUsed }
+        : {}),
+      ...(options.llmPlannerDegraded !== undefined
+        ? { llmPlannerDegraded: options.llmPlannerDegraded }
+        : {}),
+    },
     chosenActionMetadata: metadata,
     intent: null,
     result: {
-      accepted: true,
-      reason: "accepted",
+      accepted: options.accepted ?? true,
+      reason: options.accepted === false ? "rejected for test" : "accepted",
       submittedIntent: null,
     },
     audit: {
-      auditStatus: "confirmed",
-      auditReason: "test decision applied",
+      auditStatus: options.auditStatus ?? "confirmed",
+      auditReason: `test decision ${options.auditStatus ?? "applied"}`,
       after: {
         tick: sequence,
         playerID,

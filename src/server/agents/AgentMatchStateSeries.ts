@@ -117,6 +117,7 @@ export function computeAllianceIntervals(
     .filter(
       (event) =>
         (event.kind === "alliance_formed" || event.kind === "alliance_break") &&
+        event.evidenceLevel === "confirmed_effect" &&
         event.targetAgentID !== null,
     )
     .sort((a, b) => a.turnNumber - b.turnNumber || a.sequence - b.sequence);

@@ -209,7 +209,8 @@ export function computeMatchAgentMetrics(
   );
   const totalEventCount = agentEvents.length;
   const attackCount = agentEvents.filter(
-    (event) => event.kind === "attack",
+    (event) =>
+      event.kind === "attack" && event.evidenceLevel === "confirmed_effect",
   ).length;
   // `event.actionKind` (the RAW submitted action) is used here, never
   // `event.kind` (the NARRATIVE event kind): when a second agent's own
@@ -241,7 +242,10 @@ export function computeMatchAgentMetrics(
     ) {
       offersReceivedFrom.add(event.actorAgentID);
     }
-    if (event.kind === "alliance_formed") {
+    if (
+      event.kind === "alliance_formed" &&
+      event.evidenceLevel === "confirmed_effect"
+    ) {
       if (event.actorAgentID === agentID && event.targetAgentID !== null) {
         offersAcceptedWith.add(event.targetAgentID);
       } else if (event.targetAgentID === agentID) {
@@ -253,12 +257,15 @@ export function computeMatchAgentMetrics(
   const alliancesInitiatedCount = new Set(
     agentEvents
       .filter((event) => event.actionKind === "alliance_request")
-      .flatMap((event) => (event.targetAgentID === null ? [] : [event.targetAgentID])),
+      .flatMap((event) =>
+        event.targetAgentID === null ? [] : [event.targetAgentID],
+      ),
   ).size;
 
   const betrayalCount = telemetry.events.filter(
     (event) =>
       event.kind === "alliance_break" &&
+      event.evidenceLevel === "confirmed_effect" &&
       event.tone === "betrayal" &&
       event.actorAgentID === agentID,
   ).length;
@@ -292,8 +299,7 @@ export function computeMatchAgentMetrics(
   // touching this agent, this episode only.
   const formedAtByPair = new Map<string, number>();
   const treatyDurationsTurns: number[] = [];
-  const pairKey = (a: string, b: string): string =>
-    [a, b].sort().join("|");
+  const pairKey = (a: string, b: string): string => [a, b].sort().join("|");
   for (const event of [...telemetry.events].sort(
     (a, b) => a.turnNumber - b.turnNumber || a.sequence - b.sequence,
   )) {
@@ -302,9 +308,15 @@ export function computeMatchAgentMetrics(
       event.actorAgentID === agentID || event.targetAgentID === agentID;
     if (!touchesAgent) continue;
     const key = pairKey(event.actorAgentID, event.targetAgentID);
-    if (event.kind === "alliance_formed") {
+    if (
+      event.kind === "alliance_formed" &&
+      event.evidenceLevel === "confirmed_effect"
+    ) {
       formedAtByPair.set(key, event.turnNumber);
-    } else if (event.kind === "alliance_break") {
+    } else if (
+      event.kind === "alliance_break" &&
+      event.evidenceLevel === "confirmed_effect"
+    ) {
       const formedAt = formedAtByPair.get(key);
       if (formedAt !== undefined && event.turnNumber >= formedAt) {
         treatyDurationsTurns.push(event.turnNumber - formedAt);

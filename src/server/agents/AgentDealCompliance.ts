@@ -4,6 +4,7 @@ import {
   STATED_REASON_MAX_LENGTH,
 } from "./AgentDecisiveMoments";
 import type {
+  AgentActionAuditStatus,
   AgentDealObligationKind,
   AgentDealObligationStatus,
   AgentDealStatus,
@@ -101,6 +102,8 @@ export function sanitizeDealStatedReason(value: unknown): string | null {
 }
 
 export interface AgentDealObligationState {
+  /** Deterministic: obligation:<dealID>:<obligorPlayerID>:<kind>. */
+  obligationID: string;
   dealID: string;
   obligorPlayerID: string;
   obligorName: string;
@@ -117,6 +120,14 @@ export interface AgentDealObligationState {
   resolvedAtStep: number | null;
   resolutionEvidence: string | null;
   forcedResolution: boolean;
+  /**
+   * False once any active-window decision lacks a complete effect audit.
+   * Load-bearing for negative covenants: absence of a confirmed violation is
+   * evidence of fulfillment only when the whole observed window is covered.
+   */
+  auditCoverageComplete: boolean;
+  /** Number of active decision steps with missing or incomplete audit evidence. */
+  auditCoverageGapCount: number;
   /**
    * VIEWER-ONLY. The obligor's OWN stated reason on the decision whose
    * confirmed effect resolved this obligation (the betrayal's or the kept
@@ -201,12 +212,19 @@ export interface AgentDealLedgerEvent {
    */
   statedReason?: string;
   step: number;
+  /** Origin decision for immediate fulfilled/violated verdicts. Absent on passive lifecycle events. */
+  sourceSequence?: number;
+  sourceTurnNumber?: number;
+  sourceFallbackUsed?: boolean;
+  sourceLlmPlannerDegraded?: boolean;
+  sourceAuditStatus?: AgentActionAuditStatus | "missing";
+  sourceAuditReason?: string;
 }
 
 export const DEAL_TEMPLATE_LABELS: Record<AgentDealTemplate, string> = {
   non_aggression_pact: "non-aggression pact",
   trade_security_pact: "trade-security pact",
-  joint_attack: "joint-attack pledge",
+  joint_attack: "attack pledge",
   support_request: "support pledge",
 };
 
@@ -232,6 +250,8 @@ export function buildDealObligations(
     resolvedAtStep: null,
     resolutionEvidence: null,
     forcedResolution: false,
+    auditCoverageComplete: true,
+    auditCoverageGapCount: 0,
   };
   switch (deal.template) {
     case "non_aggression_pact":
@@ -243,6 +263,11 @@ export function buildDealObligations(
       return [
         {
           ...base,
+          obligationID: dealObligationID(
+            deal.dealID,
+            deal.proposerPlayerID,
+            kind,
+          ),
           obligorPlayerID: deal.proposerPlayerID,
           obligorName: deal.proposerName,
           counterpartyPlayerID: deal.recipientPlayerID,
@@ -251,6 +276,11 @@ export function buildDealObligations(
         },
         {
           ...base,
+          obligationID: dealObligationID(
+            deal.dealID,
+            deal.recipientPlayerID,
+            kind,
+          ),
           obligorPlayerID: deal.recipientPlayerID,
           obligorName: deal.recipientName,
           counterpartyPlayerID: deal.proposerPlayerID,
@@ -265,6 +295,11 @@ export function buildDealObligations(
       return [
         {
           ...base,
+          obligationID: dealObligationID(
+            deal.dealID,
+            deal.proposerPlayerID,
+            "confirmed_attack_on_target",
+          ),
           obligorPlayerID: deal.proposerPlayerID,
           obligorName: deal.proposerName,
           counterpartyPlayerID: deal.recipientPlayerID,
@@ -280,6 +315,11 @@ export function buildDealObligations(
       return [
         {
           ...base,
+          obligationID: dealObligationID(
+            deal.dealID,
+            deal.recipientPlayerID,
+            "send_support",
+          ),
           obligorPlayerID: deal.recipientPlayerID,
           obligorName: deal.recipientName,
           counterpartyPlayerID: deal.proposerPlayerID,
@@ -290,6 +330,15 @@ export function buildDealObligations(
         },
       ];
   }
+}
+
+/** Stable identity for one server-authored obligation within a deal. */
+export function dealObligationID(
+  dealID: string,
+  obligorPlayerID: string,
+  kind: AgentDealObligationKind,
+): string {
+  return `obligation:${dealID}:${obligorPlayerID}:${kind}`;
 }
 
 function stringMetadata(
@@ -478,6 +527,7 @@ function verdictEvent(
   importance: number,
   publicText: string,
   step: number,
+  sourceRecord: AgentDecisionRecord | null = null,
   /** VIEWER-ONLY agent claim; omitted entirely when there is none. */
   statedReason: string | null = null,
 ): AgentDealLedgerEvent {
@@ -494,6 +544,20 @@ function verdictEvent(
     publicText,
     ...(statedReason !== null ? { statedReason } : {}),
     step,
+    ...(sourceRecord !== null
+      ? {
+          sourceSequence: sourceRecord.sequence,
+          sourceTurnNumber: sourceRecord.turnNumber,
+          sourceFallbackUsed:
+            sourceRecord.decisionMetadata?.fallbackUsed === true,
+          sourceLlmPlannerDegraded:
+            sourceRecord.decisionMetadata?.llmPlannerDegraded === true,
+          sourceAuditStatus: sourceRecord.audit?.auditStatus ?? "missing",
+          ...(sourceRecord.audit?.auditReason !== undefined
+            ? { sourceAuditReason: sourceRecord.audit.auditReason }
+            : {}),
+        }
+      : {}),
   };
 }
 
@@ -528,6 +592,26 @@ export function judgeDealComplianceRecords(input: {
       }
       const records =
         input.recordsByPlayerID.get(obligation.obligorPlayerID) ?? [];
+      if (isNegativeObligationKind(obligation.kind)) {
+        const coverageComplete =
+          records.length > 0 &&
+          records.every((record) => {
+            const audit = record.audit;
+            return (
+              audit !== undefined &&
+              (audit.auditStatus === "confirmed" ||
+                audit.auditStatus === "not_applicable") &&
+              audit.before !== undefined &&
+              audit.before !== null &&
+              audit.after !== undefined &&
+              audit.after !== null
+            );
+          });
+        if (!coverageComplete) {
+          obligation.auditCoverageComplete = false;
+          obligation.auditCoverageGapCount += 1;
+        }
+      }
       for (const record of records) {
         if (obligation.status !== "pending") {
           break;
@@ -584,6 +668,7 @@ function judgeRecordForObligation(
             96,
             `VERDICT: ${obligation.obligorName} violated the pact — ${evidence}.`,
             step,
+            record,
             statedReason,
           ),
         );
@@ -607,6 +692,7 @@ function judgeRecordForObligation(
               96,
               `VERDICT: ${obligation.obligorName} violated the ${label} — ${evidence}.`,
               step,
+              record,
               statedReason,
             ),
           );
@@ -635,6 +721,7 @@ function judgeRecordForObligation(
             70,
             `VERDICT: ${obligation.obligorName} fulfilled the ${label} — ${evidence}.`,
             step,
+            record,
             statedReason,
           ),
         );
@@ -672,6 +759,7 @@ function judgeRecordForObligation(
             70,
             `VERDICT: ${obligation.obligorName} fulfilled the ${label} — ${evidence}.`,
             step,
+            record,
             statedReason,
           ),
         );
@@ -753,7 +841,8 @@ export function resolveMootObligations(input: {
 
 /**
  * Window completion at the start of a step past `expiresAfterStep`: negative
- * covenants that survived the whole window resolve fulfilled; positive
+ * covenants that survived a fully audited window resolve fulfilled; an audit
+ * gap resolves unverified rather than turning missing evidence into praise; positive
  * commitments left unfulfilled resolve expired_unfulfilled (spectator kind
  * deal_expired — an unkept promise is narrated, never punished).
  */
@@ -776,6 +865,15 @@ export function resolveElapsedObligations(input: {
         continue;
       }
       if (isNegativeObligationKind(obligation.kind)) {
+        if (!obligation.auditCoverageComplete) {
+          resolveObligation(
+            obligation,
+            "unverified",
+            input.step,
+            `${obligation.auditCoverageGapCount} active decision step(s) lacked complete audit coverage`,
+          );
+          continue;
+        }
         const evidence =
           obligation.kind === "trade_security"
             ? `${deal.durationSteps} decisions without a confirmed hostile action or new voluntary embargo`
@@ -822,14 +920,13 @@ export function resolveElapsedObligations(input: {
 
 /**
  * Force-resolve at match end: every accepted obligation reaches a terminal
- * state. Negative covenants still pending resolve fulfilled (no confirmed
- * violation occurred while active); positive commitments whose window was cut
- * short by match end resolve moot (impossible through an event outside the
- * obligor's control) so reliability never counts a promise the match gave no
- * time to keep — but a window that ends ON the final step has fully run
- * (finalize judges that step's records first) and resolves
- * expired_unfulfilled. Open proposals expire with the same lapse narration
- * mid-match expiry emits.
+ * state. Any promise whose window was cut short by match end resolves moot so
+ * reliability never counts a duration the match did not allow the obligor to
+ * complete. A negative covenant whose full window elapsed resolves fulfilled
+ * only with complete audit coverage; otherwise it resolves unverified. A
+ * positive window that ends ON the final step has fully run (finalize judges
+ * that step's records first) and resolves expired_unfulfilled. Open proposals
+ * expire with the same lapse narration mid-match expiry emits.
  */
 export function forceResolveDeals(input: {
   deals: AgentDealState[];
@@ -863,6 +960,29 @@ export function forceResolveDeals(input: {
         continue;
       }
       if (isNegativeObligationKind(obligation.kind)) {
+        if (
+          deal.expiresAfterStep === null ||
+          input.step < deal.expiresAfterStep
+        ) {
+          resolveObligation(
+            obligation,
+            "moot",
+            input.step,
+            "match ended before the covenant window elapsed",
+            true,
+          );
+          continue;
+        }
+        if (!obligation.auditCoverageComplete) {
+          resolveObligation(
+            obligation,
+            "unverified",
+            input.step,
+            `match ended after ${obligation.auditCoverageGapCount} active decision step(s) lacked complete audit coverage`,
+            true,
+          );
+          continue;
+        }
         resolveObligation(
           obligation,
           "fulfilled",
@@ -921,13 +1041,26 @@ export function forceResolveDeals(input: {
   return events;
 }
 
-/** Public referee aggregate: fulfilled / terminal non-moot, per obligor. */
+/** Public referee aggregate: fulfilled / verified terminal non-moot, per obligor. */
 export function dealReliabilityByObligor(
   deals: readonly AgentDealState[],
-): Map<string, { fulfilled: number; terminalNonMoot: number; moot: number }> {
+): Map<
+  string,
+  {
+    fulfilled: number;
+    terminalNonMoot: number;
+    moot: number;
+    unverified: number;
+  }
+> {
   const result = new Map<
     string,
-    { fulfilled: number; terminalNonMoot: number; moot: number }
+    {
+      fulfilled: number;
+      terminalNonMoot: number;
+      moot: number;
+      unverified: number;
+    }
   >();
   for (const deal of deals) {
     for (const obligation of deal.obligations) {
@@ -938,9 +1071,12 @@ export function dealReliabilityByObligor(
         fulfilled: 0,
         terminalNonMoot: 0,
         moot: 0,
+        unverified: 0,
       };
       if (obligation.status === "moot") {
         entry.moot += 1;
+      } else if (obligation.status === "unverified") {
+        entry.unverified += 1;
       } else {
         entry.terminalNonMoot += 1;
         if (obligation.status === "fulfilled") {

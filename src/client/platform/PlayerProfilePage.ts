@@ -2,12 +2,12 @@ import { html, LitElement, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { z } from "zod";
 import { PublicAgentStatsSchema } from "../AgentStatsSchema";
-import { AgentTimeSeriesSchema } from "../AgentTimeSeriesSchema";
 import {
   renderAgentFormSection,
   renderAgentStatsSections,
   renderAnalysisTab,
 } from "../AgentStatsSections";
+import { AgentTimeSeriesSchema } from "../AgentTimeSeriesSchema";
 
 const standingSchema = z.object({
   rank: z.number(),
@@ -71,15 +71,12 @@ type LoadState = "loading" | "ready" | "not-found" | "error";
  * The league player profile — the destination the PUBLIC league
  * standings link to (`playerProfileUrl` in `playerProfileLink.ts`, `GET
  * /api/players/:name` here). Lives on the platform origin: this is a
- * platform-level feature now that accounts are platform-level, not a
- * betting one.
+ * platform-level feature now that accounts are platform-level.
  *
  * League-only, deliberately: a league player and a platform account are
  * only the same person by a claim nobody here can verify, and a
- * bettor's display name isn't even unique among linked accounts — see
- * `/api/players/:name`'s doc comment in `ai-agent-demo-server.ts`. A
- * bettor's own stats live at their own stable, account-id-keyed page
- * instead — see `TraderProfilePage.ts`.
+ * display names are not unique among linked accounts — see
+ * `/api/players/:name`'s doc comment in `ai-agent-demo-server.ts`.
  *
  * PUBLIC PAGE. Renders only what `/api/players/:name` returns, and that
  * route is itself constructed to never touch the private league-claim
@@ -313,12 +310,8 @@ export class PlayerProfilePage extends LitElement {
   }
 
   private renderEpisodeRow(episode: Episode) {
-    // Match outcome is deliberately NOT green/red. Those are reserved for
-    // P&L across this codebase, and a linked account's profile shows betting
-    // P&L on this very page — so colouring wins green here would make the
-    // same two colours mean two different things a few hundred pixels apart.
-    // The scouting panel made the same call for the same reason: weight and
-    // wording carry the outcome, colour carries money.
+    // Match outcome is deliberately not green/red: weight and wording carry
+    // the outcome without overloading the global success/error palette.
     const outcome = episode.isWinner
       ? { label: "Won", cls: "font-semibold text-ink" }
       : episode.isAlive

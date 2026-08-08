@@ -3,17 +3,17 @@
  * always renders (h1, how-it-works, credits, entry section) regardless of
  * the optional read-model fetch outcome, and the entry CTA / participant
  * count only ever come from a successfully parsed read model — never
- * hardcoded or invented on fetch failure. Follows the mount-into-jsdom
- * convention in `tests/client/prediction/wagering/page/AccountPage.test.ts`.
+ * hardcoded or invented on fetch failure. Uses the standard jsdom mount
+ * convention.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import "../../../src/client/publicapp/AboutPage";
+import type { AboutPage } from "../../../src/client/publicapp/AboutPage";
 
 vi.mock("../../../src/client/Utils", () => ({
   translateText: (key: string, params?: Record<string, string | number>) =>
     params === undefined ? key : `${key}:${JSON.stringify(params)}`,
 }));
-import "../../../src/client/publicapp/AboutPage";
-import type { AboutPage } from "../../../src/client/publicapp/AboutPage";
 
 function mount(): AboutPage {
   const el = document.createElement("about-page") as AboutPage;

@@ -39,8 +39,6 @@ const RUNTIME_CHECKPOINT_EVENT_TYPES = new Set([
 const MUTABLE_COLLECTIONS = [
   "checkpoint_resolutions",
   "predictions",
-  "market",
-  "trades",
   "reactions",
   "shares",
   "sessions",
@@ -644,12 +642,8 @@ function collectionValues(
           resolution: checkpoint.resolution,
         }),
       );
-    case "market":
-      return snapshot.market === null ? [] : [asJson(snapshot.market)];
     case "predictions":
       return snapshot.predictions.map(asJson);
-    case "trades":
-      return snapshot.trades.map(asJson);
     case "reactions":
       return snapshot.reactions.map(asJson);
     case "shares":
@@ -682,24 +676,9 @@ function assignCollection(
       }
       return;
     }
-    case "market": {
-      if (values.length > 1) {
-        throw recoveryIntegrity("market_collection_multiplicity");
-      }
-      snapshot.market =
-        values.length === 0
-          ? null
-          : (clone(values[0]) as unknown as ReplayPremiereInteractionsSnapshot["market"]);
-      return;
-    }
     case "predictions":
       snapshot.predictions = clone(
         values as unknown as ReplayPremiereInteractionsSnapshot["predictions"],
-      );
-      return;
-    case "trades":
-      snapshot.trades = clone(
-        values as unknown as ReplayPremiereInteractionsSnapshot["trades"],
       );
       return;
     case "reactions":
@@ -732,12 +711,8 @@ function collectionKey(
   switch (collection) {
     case "checkpoint_resolutions":
       return requiredString(item.checkpointId, "checkpoint resolution id");
-    case "market":
-      return "market";
     case "predictions":
       return `${requiredString(item.checkpointId, "prediction checkpoint")}::${requiredString(item.participantId, "prediction participant")}`;
-    case "trades":
-      return requiredString(item.id, "trade id");
     case "reactions":
     case "shares":
     case "sessions":

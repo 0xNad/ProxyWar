@@ -15,11 +15,6 @@ import {
 import { economyRecordFacts } from "./AgentEconomyNetwork";
 import { AgentLocalGameMirror } from "./AgentLocalGameMirror";
 import {
-  assignSpawnSlots,
-  validateSpawnSlotLegality,
-  validateSpawnSlotUniqueness,
-} from "./AgentSpawnAssignment";
-import {
   actionAlignsWithObjective,
   AgentObjectiveManager,
 } from "./AgentObjectiveManager";
@@ -28,6 +23,11 @@ import {
   BuildAgentObservationInput,
 } from "./AgentObservationBuilder";
 import { AgentRunner } from "./AgentRunner";
+import {
+  assignSpawnSlots,
+  validateSpawnSlotLegality,
+  validateSpawnSlotUniqueness,
+} from "./AgentSpawnAssignment";
 import { buildAgentTacticalAffordances } from "./AgentTacticalAffordances";
 import { economyEventsEnabled, structuredDealsEnabled } from "./AgentTunables";
 import {
@@ -35,6 +35,7 @@ import {
   AgentBrain,
   AgentCommunicationIntent,
   AgentCommunicationSignal,
+  AgentDealSlotEvidence,
   AgentDecision,
   AgentDecisionRecord,
   AgentObservation,
@@ -145,6 +146,11 @@ export interface RunAgentDecisionTurnOptions {
  */
 const MAX_STAMPED_DEAL_ACTION_ID_LENGTH = 120;
 const MAX_STAMPED_DEAL_REJECTION_LENGTH = 200;
+
+interface DealSlotApplicationEvidence {
+  stamps: NonNullable<AgentDecision["metadata"]>;
+  evidence: AgentDealSlotEvidence;
+}
 
 export function createDefaultAgentSpecs(count = 4): AgentSpec[] {
   if (count < 1 || count > 8) {
@@ -388,7 +394,8 @@ export class AgentLeagueMatchRunner {
         ),
         recentDecisions: this.recentDecisionsFor(participant),
       };
-      const initialObservation = this.observationBuilder.build(observationInput);
+      const initialObservation =
+        this.observationBuilder.build(observationInput);
       const recentCommunications = this.recentCommunicationSignalsFor(
         participant,
         initialObservation,
@@ -579,7 +586,7 @@ export class AgentLeagueMatchRunner {
         // conflict rule between agents is unchanged and a deal never costs the
         // agent its move. Flag OFF (or no dealActionID): null, leaving records
         // byte-identical.
-        const dealSlotStamps =
+        const dealSlotApplication =
           batchIndex === 0
             ? this.applyDealSlotSelection({
                 participant,
@@ -595,7 +602,7 @@ export class AgentLeagueMatchRunner {
           ) ?? null;
         const dealMetadata: AgentDecision["metadata"] = {
           ...(dealOutcome?.stamps ?? {}),
-          ...(dealSlotStamps ?? {}),
+          ...(dealSlotApplication?.stamps ?? {}),
           ...(complianceStamp !== null
             ? { dealComplianceEvent: complianceStamp }
             : {}),
@@ -618,6 +625,7 @@ export class AgentLeagueMatchRunner {
           decisionLatencyMs,
           reason: selected.reason,
           result,
+          dealSlotEvidence: dealSlotApplication?.evidence,
         });
 
         this.reserveSameTurnDiplomacy(
@@ -763,7 +771,7 @@ export class AgentLeagueMatchRunner {
     decision: AgentDecision;
     legalActions: LegalAction[];
     actionSlotPlayedDeal: boolean;
-  }): AgentDecision["metadata"] | null {
+  }): DealSlotApplicationEvidence | null {
     const manager = this.dealManager;
     if (manager === null) {
       return null;
@@ -784,7 +792,9 @@ export class AgentLeagueMatchRunner {
       0,
       MAX_STAMPED_DEAL_ACTION_ID_LENGTH,
     );
-    const reject = (reason: string): AgentDecision["metadata"] => {
+    const rejectedStamps = (
+      reason: string,
+    ): NonNullable<AgentDecision["metadata"]> => {
       const capped = reason.slice(0, MAX_STAMPED_DEAL_REJECTION_LENGTH);
       this.log.warn("league agent deal selection rejected", {
         agentID: input.participant.runner.agentID,
@@ -795,12 +805,40 @@ export class AgentLeagueMatchRunner {
       return { dealSlotRequestedID: requestedID, dealSlotRejected: capped };
     };
     if (!validation.ok) {
-      return reject(validation.reason);
+      const reason = validation.reason.slice(
+        0,
+        MAX_STAMPED_DEAL_REJECTION_LENGTH,
+      );
+      return {
+        stamps: rejectedStamps(reason),
+        evidence: {
+          requestedActionID: requestedID,
+          validation: { accepted: false, reason },
+          application: {
+            attempted: false,
+            reason: "not attempted because deal-slot validation failed",
+          },
+        },
+      };
     }
     if (input.actionSlotPlayedDeal) {
-      return reject(
-        "a deal action was already played as this decision's game action",
-      );
+      const reason =
+        "a deal action was already played as this decision's game action";
+      return {
+        stamps: rejectedStamps(reason),
+        evidence: {
+          requestedActionID: requestedID,
+          validation: {
+            accepted: true,
+            actionID: validation.action.id,
+            actionKind: validation.action.kind as Extract<
+              LegalActionKind,
+              `deal_${string}`
+            >,
+          },
+          application: { attempted: false, reason },
+        },
+      };
     }
     const outcome = manager.applyDealAction({
       agentID: input.participant.runner.agentID,
@@ -820,12 +858,30 @@ export class AgentLeagueMatchRunner {
       reason: outcome.result.reason,
     });
     return {
-      ...outcome.stamps,
-      // Marks a deal applied through the diplomacy slot rather than the
-      // action slot: the record's `result` then belongs to the GAME action,
-      // so consumers must not read deal success from it.
-      dealSeparateSlot: true,
-      dealSlotResult: outcome.result.reason,
+      stamps: {
+        ...outcome.stamps,
+        // Marks a deal applied through the diplomacy slot rather than the
+        // action slot: the record's `result` then belongs to the GAME action,
+        // so consumers must not read deal success from it.
+        dealSeparateSlot: true,
+        dealSlotResult: outcome.result.reason,
+      },
+      evidence: {
+        requestedActionID: requestedID,
+        validation: {
+          accepted: true,
+          actionID: validation.action.id,
+          actionKind: validation.action.kind as Extract<
+            LegalActionKind,
+            `deal_${string}`
+          >,
+        },
+        application: {
+          attempted: true,
+          accepted: outcome.result.accepted,
+          reason: outcome.result.reason,
+        },
+      },
     };
   }
 
@@ -835,16 +891,31 @@ export class AgentLeagueMatchRunner {
    * obligation to a terminal state (spec: every accepted obligation reaches a
    * terminal state by match end). No-op when the flag is off. Idempotent.
    */
-  finalizeDeals(input: { gameState?: Game } = {}): void {
+  finalizeDeals(input: { gameState?: Game; turnNumber?: number } = {}): void {
     this.dealManager?.finalize({
       gameState: input.gameState,
       records: this.records,
+      turnNumber: input.turnNumber,
     });
   }
 
   /** Full deal-ledger snapshot (operator/test surface); empty when flag off. */
   dealLedger(): AgentDealLedgerSnapshot {
-    return this.dealManager?.ledgerSnapshot() ?? { deals: [], events: [] };
+    return (
+      this.dealManager?.ledgerSnapshot() ?? {
+        finalized: false,
+        finalizedAtStep: null,
+        finalizedAtTurn: null,
+        decisionSteps: [],
+        deals: [],
+        events: [],
+      }
+    );
+  }
+
+  /** Whether the flag-gated match owns a ledger artifact at all. */
+  dealLedgerEnabled(): boolean {
+    return this.dealManager !== null;
   }
 
   /**
@@ -927,6 +998,7 @@ export class AgentLeagueMatchRunner {
     decisionLatencyMs: number;
     reason: string | null;
     result: AgentActionResult;
+    dealSlotEvidence?: AgentDealSlotEvidence;
   }): AgentDecisionRecord {
     const record: AgentDecisionRecord = {
       sequence: this.records.length + 1,
@@ -969,6 +1041,9 @@ export class AgentLeagueMatchRunner {
       // scores, and lengths the report/replay/result exporters need are kept.
       decisionMetadata: compactDecisionMetadata(input.decision.metadata),
       chosenActionMetadata: input.chosenAction?.metadata,
+      ...(input.dealSlotEvidence !== undefined
+        ? { dealSlotEvidence: input.dealSlotEvidence }
+        : {}),
       // tacticalAffordances is the single largest record field on World
       // (~8 KB, ~60% of the record). The Coworld path opts out (see
       // retainTacticalAffordances) to keep long-episode heap flat; local eval
@@ -1054,7 +1129,8 @@ export class AgentLeagueMatchRunner {
         const metadata = record.chosenActionMetadata ?? {};
         const sender = observation.visiblePlayers.find(
           (player) =>
-            player.clientID === record.clientID || player.name === record.username,
+            player.clientID === record.clientID ||
+            player.name === record.username,
         );
         const recipientID = stringOrNull(metadata.recipientID);
         const recipientName = stringOrNull(metadata.recipientName);
@@ -1067,7 +1143,8 @@ export class AgentLeagueMatchRunner {
           senderPlayerID: sender?.playerID ?? null,
           senderName: record.username,
           senderProfile: record.profile,
-          actionKind: record.chosenActionKind as AgentCommunicationSignal["actionKind"],
+          actionKind:
+            record.chosenActionKind as AgentCommunicationSignal["actionKind"],
           intent: communicationIntent(record),
           recipientID,
           recipientName,

@@ -1,4 +1,11 @@
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { gzipSync } from "node:zlib";
@@ -14,8 +21,8 @@ import {
   writeCoworldLeagueSite,
   type CoworldLeagueMirrorData,
 } from "../../src/server/agents/CoworldLeagueSiteWriter";
-import type { AgentProfile } from "../../src/server/identity/IdentitySchemas";
 import type { IdentityRegistrySnapshot } from "../../src/server/identity/IdentityRegistry";
+import type { AgentProfile } from "../../src/server/identity/IdentitySchemas";
 
 function sampleData(): CoworldLeagueMirrorData {
   return {
@@ -68,20 +75,20 @@ function sampleData(): CoworldLeagueMirrorData {
         isHouse: true,
       },
     ],
-  rounds: [
-    {
-      roundNumber: 268,
-      status: "running",
-      startedAt: "2026-07-13T10:36:00Z",
-      completedAt: null,
-    },
-    {
-      roundNumber: 267,
-      status: "completed",
-      startedAt: "2026-07-13T10:05:00Z",
-      completedAt: "2026-07-13T10:20:00Z",
-    },
-  ],
+    rounds: [
+      {
+        roundNumber: 268,
+        status: "running",
+        startedAt: "2026-07-13T10:36:00Z",
+        completedAt: null,
+      },
+      {
+        roundNumber: 267,
+        status: "completed",
+        startedAt: "2026-07-13T10:05:00Z",
+        completedAt: "2026-07-13T10:20:00Z",
+      },
+    ],
     episodes: [
       {
         episodeRequestId: "ereq_aaaa",
@@ -172,7 +179,7 @@ describe("coworldLeagueIndexHtml", () => {
     const html = coworldLeagueIndexHtml(sampleData());
     // RELATIVE, not `${DEFAULT_PLATFORM_ORIGIN}/agent/...`: `/agent/:slug`
     // is mounted unconditionally on every process (beta, apex, and the
-    // betting origin alike), so baking in the platform origin here is what
+    // every product origin), so baking in the platform origin here is what
     // sent every standings-row agent link on beta.proxywar.xyz/league
     // cross-origin to a 404 on the apex (live P0, found 2026-08-02) — see
     // `standingsRowProfileUrl`'s own doc. No registered agent exists for
@@ -474,15 +481,20 @@ describe("coworldLeagueIndexHtml", () => {
     // odin free and the hostile-name row never appear in any mirrored
     // episode — an honest gap, not a fabricated 0.
     expect(
-      (html.match(
-        /<span class="muted-note">Insufficient history\.<\/span>/g,
-      ) ?? []).length,
+      (
+        html.match(
+          /<span class="muted-note">Insufficient history\.<\/span>/g,
+        ) ?? []
+      ).length,
     ).toBe(4); // 2 rows × (recent form + latest match)
   });
 
   test("shows a real win count in recent form once the row actually won", () => {
     const data = sampleData();
-    data.episodes[0].players[1] = { ...data.episodes[0].players[1], isWinner: true };
+    data.episodes[0].players[1] = {
+      ...data.episodes[0].players[1],
+      isWinner: true,
+    };
     const html = coworldLeagueIndexHtml(data);
     expect(html).toContain(
       '<td class="recent-form" data-label="Recent form">1W / 1</td>',
@@ -544,8 +556,7 @@ describe("coworldLeagueIndexHtml", () => {
     data.episodes = [];
     const html = coworldLeagueIndexHtml(data);
     expect(
-      (html.match(/<p class="lede">Insufficient history\.<\/p>/g) ?? [])
-        .length,
+      (html.match(/<p class="lede">Insufficient history\.<\/p>/g) ?? []).length,
     ).toBe(2);
   });
 
@@ -566,7 +577,10 @@ describe("coworldLeagueIndexHtml", () => {
       primaryColor: "#c62f39",
       secondaryColor: "#689e2e",
       debutDate: null,
-      policyMatchRule: { playerName: "Auri", policyFamily: "proxywar-keystone" },
+      policyMatchRule: {
+        playerName: "Auri",
+        policyFamily: "proxywar-keystone",
+      },
       status: "verified",
       publicStrategyDescription: null,
     };
@@ -771,7 +785,10 @@ describe("writeCoworldLeagueSite", () => {
       // `ereq_rotated_stale_test` is deliberately absent from sampleData()'s
       // own episodes[] — it only resolves via the durable archive.
       await writeFile(
-        path.join(summaryArchiveDir, `${episodeRequestId}.replay-summary.json.gz`),
+        path.join(
+          summaryArchiveDir,
+          `${episodeRequestId}.replay-summary.json.gz`,
+        ),
         gzipSync(
           JSON.stringify({
             episodeRequestId,
@@ -789,14 +806,20 @@ describe("writeCoworldLeagueSite", () => {
       );
 
       const data = sampleData();
-      const paths = await writeCoworldLeagueSite(siteDir, data, summaryArchiveDir);
+      const paths = await writeCoworldLeagueSite(
+        siteDir,
+        data,
+        summaryArchiveDir,
+      );
       const firstReadModel = JSON.parse(
         await readFile(paths.readModelPath, "utf8"),
       );
       const firstMatch = firstReadModel.featuredMatches.find(
         (m: { matchId: string }) => m.matchId === matchId,
       );
-      expect(firstMatch.fullRenderHref).toBe(`/ai-league-replay/${publicRunKey}`);
+      expect(firstMatch.fullRenderHref).toBe(
+        `/ai-league-replay/${publicRunKey}`,
+      );
       expect(firstMatch.watchHref).toBeNull();
 
       // Simulates a transient mirror-sync failure: the SAME last-good
@@ -813,13 +836,16 @@ describe("writeCoworldLeagueSite", () => {
       const staleMatch = staleReadModel.featuredMatches.find(
         (m: { matchId: string }) => m.matchId === matchId,
       );
-      expect(staleMatch.fullRenderHref).toBe(`/ai-league-replay/${publicRunKey}`);
+      expect(staleMatch.fullRenderHref).toBe(
+        `/ai-league-replay/${publicRunKey}`,
+      );
       expect(staleMatch.watchHref).toBeNull();
     } finally {
       if (previousFeaturedMatchRoot === undefined) {
         delete process.env.PROXYWAR_FEATURED_MATCH_STATE_ROOT;
       } else {
-        process.env.PROXYWAR_FEATURED_MATCH_STATE_ROOT = previousFeaturedMatchRoot;
+        process.env.PROXYWAR_FEATURED_MATCH_STATE_ROOT =
+          previousFeaturedMatchRoot;
       }
       await Promise.all([
         rm(summaryArchiveDir, { recursive: true, force: true }),
@@ -965,9 +991,7 @@ describe("writeCoworldLeagueSite — standings-history publication", () => {
       // The rest of the publish (data.json/read-model.json) still succeeds.
       const roundTrip = JSON.parse(await readFile(paths.dataPath, "utf8"));
       expect(roundTrip.league.id).toBe("league_test");
-      const readModel = JSON.parse(
-        await readFile(paths.readModelPath, "utf8"),
-      );
+      const readModel = JSON.parse(await readFile(paths.readModelPath, "utf8"));
       const odin = readModel.agents.find(
         (a: { playerName: string }) => a.playerName === "odin free",
       );

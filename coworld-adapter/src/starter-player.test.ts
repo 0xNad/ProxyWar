@@ -168,8 +168,20 @@ describe.each(STARTER_AGENTS)(
       const response = await decisionResponseFor(agent, [
         HOLD,
         ATTACK,
-        action("deal_accept:deal:P_B:P_A:non_aggression_pact:1", "deal_accept"),
-        action("deal_reject:deal:P_B:P_A:non_aggression_pact:1", "deal_reject"),
+        action(
+          "deal_accept:deal:P_B:P_A:non_aggression_pact:1",
+          "deal_accept",
+          {
+            metadata: { template: "non_aggression_pact" },
+          },
+        ),
+        action(
+          "deal_reject:deal:P_B:P_A:non_aggression_pact:1",
+          "deal_reject",
+          {
+            metadata: { template: "non_aggression_pact" },
+          },
+        ),
       ]);
       expect(response.selectedLegalActionId).toBe(ATTACK.id);
       expect(response.selectedDealActionId).toBe(
@@ -181,10 +193,18 @@ describe.each(STARTER_AGENTS)(
       const response = await decisionResponseFor(agent, [
         HOLD,
         SPAWN,
-        action("deal_propose:P_Y:non_aggression_pact", "deal_propose"),
+        action("deal_propose:P_Y:non_aggression_pact", "deal_propose", {
+          metadata: { template: "non_aggression_pact" },
+        }),
         action("deal_reject:deal:P_Z:P_A:trade_security_pact:1", "deal_reject"),
         action("deal_withdraw:deal:P_A:P_W:support_request:1", "deal_withdraw"),
-        action("deal_accept:deal:P_X:P_A:non_aggression_pact:1", "deal_accept"),
+        action(
+          "deal_accept:deal:P_X:P_A:non_aggression_pact:1",
+          "deal_accept",
+          {
+            metadata: { template: "non_aggression_pact" },
+          },
+        ),
       ]);
       expect(response.selectedDealActionId).toBe(
         "deal_accept:deal:P_X:P_A:non_aggression_pact:1",
@@ -195,7 +215,9 @@ describe.each(STARTER_AGENTS)(
       const response = await decisionResponseFor(agent, [
         HOLD,
         SPAWN,
-        action("deal_propose:P_Y:non_aggression_pact", "deal_propose"),
+        action("deal_propose:P_Y:non_aggression_pact", "deal_propose", {
+          metadata: { template: "non_aggression_pact" },
+        }),
         action("deal_withdraw:deal:P_A:P_W:support_request:1", "deal_withdraw"),
         action("deal_reject:deal:P_Z:P_A:trade_security_pact:1", "deal_reject"),
       ]);
@@ -209,7 +231,9 @@ describe.each(STARTER_AGENTS)(
         HOLD,
         SPAWN,
         action("deal_withdraw:deal:P_A:P_W:support_request:1", "deal_withdraw"),
-        action("deal_propose:P_Y:non_aggression_pact", "deal_propose"),
+        action("deal_propose:P_Y:non_aggression_pact", "deal_propose", {
+          metadata: { template: "non_aggression_pact" },
+        }),
       ]);
       expect(response.selectedDealActionId).toBe(
         "deal_propose:P_Y:non_aggression_pact",
@@ -225,8 +249,20 @@ describe.each(STARTER_AGENTS)(
     it("never selects a deal_* action as the primary game action, even when hold is the only non-deal alternative", async () => {
       const response = await decisionResponseFor(agent, [
         HOLD,
-        action("deal_accept:deal:P_B:P_A:non_aggression_pact:1", "deal_accept"),
-        action("deal_reject:deal:P_B:P_A:non_aggression_pact:1", "deal_reject"),
+        action(
+          "deal_accept:deal:P_B:P_A:non_aggression_pact:1",
+          "deal_accept",
+          {
+            metadata: { template: "non_aggression_pact" },
+          },
+        ),
+        action(
+          "deal_reject:deal:P_B:P_A:non_aggression_pact:1",
+          "deal_reject",
+          {
+            metadata: { template: "non_aggression_pact" },
+          },
+        ),
       ]);
       expect(response.selectedLegalActionId).toBe("hold");
       // The diplomacy slot still fires independently of the primary pick.

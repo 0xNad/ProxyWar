@@ -2,9 +2,8 @@
 # Generates the Stage 8 deterministic public-product fixture set and boots
 # the full public product against it — ONE command, zero live Softmax API
 # dependency. Adapts the proven local-exhibition-admission sequence
-# `cycle-premiere.sh` already uses in production for bet.proxywar.xyz's
-# demo (start origin -> admit -> restart origin), simplified for the
-# public LEAGUE origin: no betting/points/GitHub-OAuth concerns here.
+# the public league deployment uses (start origin -> admit -> restart origin),
+# simplified for deterministic local fixtures.
 #
 #   FIXTURE_ROOT=/Volumes/ProxyWar\ Workspace/ProxyWar/fixtures-root \
 #     ./scripts/fixtures/run-public-product-fixtures.sh
@@ -61,36 +60,40 @@ export GAME_ENV=dev
 log() { printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 
 stop_origin() {
-  if [ -f "$PIDFILE" ]; then
-    local pid
-    pid="$(cat "$PIDFILE" 2>/dev/null || true)"
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-      kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
-      for _ in $(seq 1 20); do
-        kill -0 "$pid" 2>/dev/null || break
-        sleep 0.5
-      done
-      kill -KILL "-$pid" 2>/dev/null || true
+    if [ -f "$PIDFILE" ]; then
+        local pid
+        pid="$(cat "$PIDFILE" 2> /dev/null || true)"
+        if [ -n "$pid" ] && kill -0 "$pid" 2> /dev/null; then
+            kill -TERM "-$pid" 2> /dev/null || kill -TERM "$pid" 2> /dev/null || true
+            for _ in $(seq 1 20); do
+                kill -0 "$pid" 2> /dev/null || break
+                sleep 0.5
+            done
+            kill -KILL "-$pid" 2> /dev/null || true
+        fi
+        rm -f "$PIDFILE"
     fi
-    rm -f "$PIDFILE"
-  fi
 }
 
 start_origin() {
-  # setsid isn't available on macOS; `set -m` makes bash job control create
-  # a fresh process group per background job instead, which `kill -TERM
-  # "-$pid"` in stop_origin can still target the same way.
-  ( set -m; npx tsx src/scripts/ai-agent-demo-server.ts \
-      > "$LOGFILE" 2>&1 < /dev/null & echo $! > "$PIDFILE" )
+    # setsid isn't available on macOS; `set -m` makes bash job control create
+    # a fresh process group per background job instead, which `kill -TERM
+    # "-$pid"` in stop_origin can still target the same way.
+    (
+        set -m
+        npx tsx src/scripts/ai-agent-demo-server.ts \
+            > "$LOGFILE" 2>&1 < /dev/null &
+        echo $! > "$PIDFILE"
+    )
 }
 
 wait_for_origin() {
-  for _ in $(seq 1 60); do
-    if curl -s -o /dev/null -m 3 "${ORIGIN}/league"; then return 0; fi
-    sleep 1
-  done
-  echo "origin never came up; see $LOGFILE" >&2
-  return 1
+    for _ in $(seq 1 60); do
+        if curl -s -o /dev/null -m 3 "${ORIGIN}/league"; then return 0; fi
+        sleep 1
+    done
+    echo "origin never came up; see $LOGFILE" >&2
+    return 1
 }
 
 # AI League Full Replay boot inside a real browser requires a PRODUCTION-mode
@@ -116,9 +119,9 @@ wait_for_origin() {
 # route around. Fail fast with an actionable message instead of a silent
 # multi-minute stall discovered only once a browser is pointed at this.
 assert_production_build_for_full_replay() {
-  local manifest_path="$HERE/static/asset-manifest.json"
-  if [ ! -f "$manifest_path" ] || ! grep -q '"maps/' "$manifest_path" 2>/dev/null; then
-    cat >&2 <<'EOF'
+    local manifest_path="$HERE/static/asset-manifest.json"
+    if [ ! -f "$manifest_path" ] || ! grep -q '"maps/' "$manifest_path" 2> /dev/null; then
+        cat >&2 << 'EOF'
 Full Replay build-manifest gate: static/asset-manifest.json is missing (or
 has no maps/ entries) -- Full Replay pages will boot to a permanent
 "Loading replay..." stall inside the game engine's Web Worker (root cause:
@@ -131,11 +134,11 @@ the origin, or set PROXYWAR_FIXTURE_SKIP_BUILD_MANIFEST_GATE=1 if you only
 need the identity/league-mirror/analytics surfaces this script also
 generates, not a real Full Replay browser boot.
 EOF
-    return 1
-  fi
+        return 1
+    fi
 }
 if [ "${PROXYWAR_FIXTURE_SKIP_BUILD_MANIFEST_GATE:-0}" != "1" ]; then
-  assert_production_build_for_full_replay
+    assert_production_build_for_full_replay
 fi
 
 log "==> generating drama match (real local simulation, no Softmax)"
@@ -151,20 +154,20 @@ log "==> generating drama match (real local simulation, no Softmax)"
 DRAMA_RUN_ID="league-fixture-drama-001"
 rm -rf "$HERE/artifacts/ai-league-runs/$DRAMA_RUN_ID"
 npx tsx src/scripts/ai-agent-league-smoke.ts \
-  --brain=rule --runner=step-locked --scenario=actions \
-  --max-steps=35 --turns-per-decision-step=140 --replay-tail-turns=7000 \
-  --bots=10 --run-id="$DRAMA_RUN_ID" > /tmp/pw-fixture-drama.log 2>&1
+    --brain=rule --runner=step-locked --scenario=actions \
+    --max-steps=35 --turns-per-decision-step=140 --replay-tail-turns=7000 \
+    --bots=10 --run-id="$DRAMA_RUN_ID" > /tmp/pw-fixture-drama.log 2>&1
 mkdir -p "$ARTIFACTS_ROOT/ai-league-runs"
 rm -rf "$ARTIFACTS_ROOT/ai-league-runs/$DRAMA_RUN_ID"
 mv "$HERE/artifacts/ai-league-runs/$DRAMA_RUN_ID" "$ARTIFACTS_ROOT/ai-league-runs/$DRAMA_RUN_ID"
 npx tsx src/scripts/proxywar-fixture-episode-from-run.ts \
-  --run-dir="$ARTIFACTS_ROOT/ai-league-runs/$DRAMA_RUN_ID" \
-  --run-id="$DRAMA_RUN_ID" \
-  --out="$FIXTURE_ROOT/drama-episode.json"
+    --run-dir="$ARTIFACTS_ROOT/ai-league-runs/$DRAMA_RUN_ID" \
+    --run-id="$DRAMA_RUN_ID" \
+    --out="$FIXTURE_ROOT/drama-episode.json"
 
 log "==> writing identity registry + league mirror (upcoming premiere card only, for now)"
 UPCOMING_ISO="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(hours=2)).strftime('%Y-%m-%dT%H:%M:%S.000Z'))")"
-cat > "$FIXTURE_ROOT/premiere-upcoming.json" <<EOF
+cat > "$FIXTURE_ROOT/premiere-upcoming.json" << EOF
 {
   "premiereId": "prem_fixture0upcoming01",
   "roundNumber": 503,
@@ -174,9 +177,9 @@ cat > "$FIXTURE_ROOT/premiere-upcoming.json" <<EOF
 }
 EOF
 npx tsx src/scripts/proxywar-fixture-league-data.ts \
-  --root="$FIXTURE_ROOT" \
-  --drama-episode-file="$FIXTURE_ROOT/drama-episode.json" \
-  --premiere-upcoming-file="$FIXTURE_ROOT/premiere-upcoming.json"
+    --root="$FIXTURE_ROOT" \
+    --drama-episode-file="$FIXTURE_ROOT/drama-episode.json" \
+    --premiere-upcoming-file="$FIXTURE_ROOT/premiere-upcoming.json"
 
 # Live-premiere admission (active/late-join-sync/reveal-after-end E2E
 # coverage) is opt-in behind FIXTURE_ADMIT_LIVE_PREMIERE=1, default OFF.
@@ -205,19 +208,19 @@ npx tsx src/scripts/proxywar-fixture-league-data.ts \
 # convergence point.
 if [ "${FIXTURE_ADMIT_LIVE_PREMIERE:-0}" = "1" ]; then
 
-log "==> starting origin (needed for the premiere admission leak audit)"
-stop_origin
-rm -rf "$PREMIERE_STATE_ROOT"
-mkdir -p "$PREMIERE_STATE_ROOT"
-chmod 700 "$PREMIERE_STATE_ROOT"
-start_origin
-wait_for_origin
+    log "==> starting origin (needed for the premiere admission leak audit)"
+    stop_origin
+    rm -rf "$PREMIERE_STATE_ROOT"
+    mkdir -p "$PREMIERE_STATE_ROOT"
+    chmod 700 "$PREMIERE_STATE_ROOT"
+    start_origin
+    wait_for_origin
 
-log "==> generating live premiere match (2-seat aggressive-vs-aggressive, alliance actions disabled — the reliably-converging configuration)"
-mkdir -p "$FIXTURE_ROOT/admit-manifests" "$ADMIT_STAGING"
-rm -f "$FIXTURE_ROOT/admit-manifests"/*.json
-for name in aggressive aggressive2; do
-  cat > "$FIXTURE_ROOT/admit-manifests/$name.json" <<EOF
+    log "==> generating live premiere match (2-seat aggressive-vs-aggressive, alliance actions disabled — the reliably-converging configuration)"
+    mkdir -p "$FIXTURE_ROOT/admit-manifests" "$ADMIT_STAGING"
+    rm -f "$FIXTURE_ROOT/admit-manifests"/*.json
+    for name in aggressive aggressive2; do
+        cat > "$FIXTURE_ROOT/admit-manifests/$name.json" << EOF
 {
   "schemaVersion": 1,
   "agentName": "Fixture $name",
@@ -231,36 +234,36 @@ for name in aggressive aggressive2; do
   }
 }
 EOF
-done
-rm -rf "$HERE/artifacts/ai-league-runs/fixture-premiere-live"
-npx tsx src/scripts/replay-premiere-controlled-exhibition.ts \
-  --run-id=fixture-premiere-live \
-  --private-output-root="$ADMIT_STAGING" \
-  --agent-manifest-dir="$FIXTURE_ROOT/admit-manifests" \
-  --served-root="$HERE" \
-  --served-root="$HERE/static" \
-  --served-root="$ARTIFACTS_ROOT" \
-  --brain=rule \
-  --max-steps=200 \
-  --turns-per-decision-step=200 \
-  --replay-tail-turns=2000 \
-  --disable-action-kinds=alliance_request,alliance_extend \
-  --playback-turn-interval-ms=1 > /tmp/pw-fixture-premiere.log 2>&1
-# 1ms/turn (not the production-realistic 100ms/PREMIERE_REAL_TURN_INTERVAL_MS)
-# is deliberate: 21,400 turns at 1ms plays out live in ~21s, so the E2E
-# suite's "reveal after end" coverage can poll to a real reveal inside one
-# bounded test timeout instead of waiting ~36 minutes at real-time pacing.
-# Playback speed is presentation-only metadata (`replay.turnIntervalMs`);
-# it does not affect the deterministic turnCount/winner above.
-BUNDLE="$ADMIT_STAGING/fixture-premiere-live.source.json"
-SHA="$(shasum -a 256 "$BUNDLE" | awk '{print $1}')"
+    done
+    rm -rf "$HERE/artifacts/ai-league-runs/fixture-premiere-live"
+    npx tsx src/scripts/replay-premiere-controlled-exhibition.ts \
+        --run-id=fixture-premiere-live \
+        --private-output-root="$ADMIT_STAGING" \
+        --agent-manifest-dir="$FIXTURE_ROOT/admit-manifests" \
+        --served-root="$HERE" \
+        --served-root="$HERE/static" \
+        --served-root="$ARTIFACTS_ROOT" \
+        --brain=rule \
+        --max-steps=200 \
+        --turns-per-decision-step=200 \
+        --replay-tail-turns=2000 \
+        --disable-action-kinds=alliance_request,alliance_extend \
+        --playback-turn-interval-ms=1 > /tmp/pw-fixture-premiere.log 2>&1
+    # 1ms/turn (not the production-realistic 100ms/PREMIERE_REAL_TURN_INTERVAL_MS)
+    # is deliberate: 21,400 turns at 1ms plays out live in ~21s, so the E2E
+    # suite's "reveal after end" coverage can poll to a real reveal inside one
+    # bounded test timeout instead of waiting ~36 minutes at real-time pacing.
+    # Playback speed is presentation-only metadata (`replay.turnIntervalMs`);
+    # it does not affect the deterministic turnCount/winner above.
+    BUNDLE="$ADMIT_STAGING/fixture-premiere-live.source.json"
+    SHA="$(shasum -a 256 "$BUNDLE" | awk '{print $1}')"
 
-mkdir -p "$ADMIT_STAGING"
-if [ ! -f "$ADMIT_STAGING/nonce.bin" ]; then
-  python3 -c "import os;open('$ADMIT_STAGING/nonce.bin','wb').write(os.urandom(32))"
-  chmod 600 "$ADMIT_STAGING/nonce.bin"
-fi
-python3 - "$BUNDLE" "$ADMIT_STAGING" <<'PY'
+    mkdir -p "$ADMIT_STAGING"
+    if [ ! -f "$ADMIT_STAGING/nonce.bin" ]; then
+        python3 -c "import os;open('$ADMIT_STAGING/nonce.bin','wb').write(os.urandom(32))"
+        chmod 600 "$ADMIT_STAGING/nonce.bin"
+    fi
+    python3 - "$BUNDLE" "$ADMIT_STAGING" << 'PY'
 import json, os, sys, datetime
 bundle, admit_in = sys.argv[1], sys.argv[2]
 d = json.load(open(bundle))
@@ -299,20 +302,20 @@ json.dump({
 print(f"    turns={tc} duration={tc*d['replay']['turnIntervalMs']/1000:.1f}s")
 PY
 
-log "==> admitting fixture-premiere-live"
-PROXYWAR_PUBLIC_URL="$ORIGIN" npx tsx src/scripts/replay-premiere-admit.ts \
-  --premiere-id="prem_fixture0premiere01" \
-  --source-file="$BUNDLE" \
-  --expected-source-sha256="$SHA" \
-  --private-state-root="$PREMIERE_STATE_ROOT" \
-  --served-root="$HERE" --served-root="$HERE/static" --served-root="$ARTIFACTS_ROOT" \
-  --eligibility-file="$ADMIT_STAGING/eligibility.json" \
-  --definition-file="$ADMIT_STAGING/definition.json" \
-  --deployment-origin="$ORIGIN" \
-  --nonce-file="$ADMIT_STAGING/nonce.bin"
+    log "==> admitting fixture-premiere-live"
+    PROXYWAR_PUBLIC_URL="$ORIGIN" npx tsx src/scripts/replay-premiere-admit.ts \
+        --premiere-id="prem_fixture0premiere01" \
+        --source-file="$BUNDLE" \
+        --expected-source-sha256="$SHA" \
+        --private-state-root="$PREMIERE_STATE_ROOT" \
+        --served-root="$HERE" --served-root="$HERE/static" --served-root="$ARTIFACTS_ROOT" \
+        --eligibility-file="$ADMIT_STAGING/eligibility.json" \
+        --definition-file="$ADMIT_STAGING/definition.json" \
+        --deployment-origin="$ORIGIN" \
+        --nonce-file="$ADMIT_STAGING/nonce.bin"
 
-log "==> regenerating league mirror with the now-live premiere (data.json/read-model.json were written before admission and don't know about it yet)"
-cat > "$FIXTURE_ROOT/premiere-live.json" <<EOF
+    log "==> regenerating league mirror with the now-live premiere (data.json/read-model.json were written before admission and don't know about it yet)"
+    cat > "$FIXTURE_ROOT/premiere-live.json" << EOF
 {
   "premiereId": "prem_fixture0premiere01",
   "roundNumber": null,
@@ -321,27 +324,27 @@ cat > "$FIXTURE_ROOT/premiere-live.json" <<EOF
   "premierePageLive": true
 }
 EOF
-npx tsx src/scripts/proxywar-fixture-league-data.ts \
-  --root="$FIXTURE_ROOT" \
-  --drama-episode-file="$FIXTURE_ROOT/drama-episode.json" \
-  --premiere-upcoming-file="$FIXTURE_ROOT/premiere-live.json"
+    npx tsx src/scripts/proxywar-fixture-league-data.ts \
+        --root="$FIXTURE_ROOT" \
+        --drama-episode-file="$FIXTURE_ROOT/drama-episode.json" \
+        --premiere-upcoming-file="$FIXTURE_ROOT/premiere-live.json"
 
-log "==> restarting origin onto the admitted premiere (admission never hot-registers)"
-stop_origin
-start_origin
-wait_for_origin
-PREMIERE_STATUS="admitted: prem_fixture0premiere01"
+    log "==> restarting origin onto the admitted premiere (admission never hot-registers)"
+    stop_origin
+    start_origin
+    wait_for_origin
+    PREMIERE_STATUS="admitted: prem_fixture0premiere01"
 
 else
 
-log "==> starting origin (FIXTURE_ADMIT_LIVE_PREMIERE not set — skipping live-premiere admission)"
-stop_origin
-rm -rf "$PREMIERE_STATE_ROOT"
-mkdir -p "$PREMIERE_STATE_ROOT"
-chmod 700 "$PREMIERE_STATE_ROOT"
-start_origin
-wait_for_origin
-PREMIERE_STATUS="skipped (set FIXTURE_ADMIT_LIVE_PREMIERE=1 to attempt it)"
+    log "==> starting origin (FIXTURE_ADMIT_LIVE_PREMIERE not set — skipping live-premiere admission)"
+    stop_origin
+    rm -rf "$PREMIERE_STATE_ROOT"
+    mkdir -p "$PREMIERE_STATE_ROOT"
+    chmod 700 "$PREMIERE_STATE_ROOT"
+    start_origin
+    wait_for_origin
+    PREMIERE_STATUS="skipped (set FIXTURE_ADMIT_LIVE_PREMIERE=1 to attempt it)"
 
 fi
 
@@ -349,5 +352,5 @@ URL="${ORIGIN}"
 echo
 echo "    fixture public product live at ${URL}"
 echo "    live premiere: ${PREMIERE_STATUS}"
-echo "    pid $(cat "$PIDFILE" 2>/dev/null || echo unknown), log $LOGFILE"
+echo "    pid $(cat "$PIDFILE" 2> /dev/null || echo unknown), log $LOGFILE"
 echo "    stop with: kill \$(cat $PIDFILE)"

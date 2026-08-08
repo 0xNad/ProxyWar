@@ -1,12 +1,9 @@
 /**
  * Durable GitHub-identity link store for the PLATFORM: GitHub's immutable
  * numeric user id mapped to a canonical platform `accountId`, plus an
- * alias map from any merged-away `accountId` to its canonical target.
- * Structurally the same design as betting's (now-removed)
- * `ReplayPremiereIdentityLinkStore` — same reasoning applies verbatim, see
- * below — but merges `PlatformAccountStore` (display name) and
- * `PlatformPolicyClaimStore` (lineage claim) instead of betting's points
- * ledger and league claim store.
+ * alias map from any merged-away `accountId` to its canonical target. Merges
+ * `PlatformAccountStore` display names and `PlatformPolicyClaimStore`
+ * lineage claims.
  *
  * Deliberately keyed on GitHub's numeric `id`, never `login`: a handle can
  * be renamed or recycled to a different account, so a handle-keyed link
@@ -60,7 +57,10 @@ type StoredLink = z.infer<typeof storedLinkSchema>;
 
 const linkStoreFileSchema = z.object({
   schemaVersion: z.literal(SCHEMA_VERSION),
-  byGithubId: z.record(z.string().regex(GITHUB_USER_ID_PATTERN), storedLinkSchema),
+  byGithubId: z.record(
+    z.string().regex(GITHUB_USER_ID_PATTERN),
+    storedLinkSchema,
+  ),
   githubIdByAccountId: z.record(
     z.string().regex(ACCOUNT_ID_PATTERN),
     z.string().regex(GITHUB_USER_ID_PATTERN),
@@ -78,7 +78,8 @@ export class PlatformGithubIdentityLinkStore {
   private readonly claims: PlatformPolicyClaimStore;
   private writeQueue: Promise<void> = Promise.resolve();
   /** See `ReplayPremiereIdentityLinkStore`'s identical field for the full reasoning: `resolveCanonicalAccountId` is cheap and hot enough (every authenticated platform read/write) to warrant an in-memory cache refreshed synchronously on every write. */
-  private cachedAliasesPromise: Promise<ReadonlyMap<string, string>> | null = null;
+  private cachedAliasesPromise: Promise<ReadonlyMap<string, string>> | null =
+    null;
 
   private constructor(
     root: string,
@@ -122,7 +123,12 @@ export class PlatformGithubIdentityLinkStore {
     const githubId = file.githubIdByAccountId[canonicalAccountId];
     const link = githubId === undefined ? undefined : file.byGithubId[githubId];
     if (link === undefined) {
-      return { signedIn: false, login: null, avatarUrl: null, canonicalAccountId };
+      return {
+        signedIn: false,
+        login: null,
+        avatarUrl: null,
+        canonicalAccountId,
+      };
     }
     return {
       signedIn: true,
@@ -159,7 +165,10 @@ export class PlatformGithubIdentityLinkStore {
       const existing = file.byGithubId[githubId];
       const nowIso = new Date().toISOString();
       const alreadyLinkedGithubId = file.githubIdByAccountId[selfCanonical];
-      if (alreadyLinkedGithubId !== undefined && alreadyLinkedGithubId !== githubId) {
+      if (
+        alreadyLinkedGithubId !== undefined &&
+        alreadyLinkedGithubId !== githubId
+      ) {
         throw new Error("github_identity_conflict");
       }
       if (existing === undefined) {
@@ -202,7 +211,8 @@ export class PlatformGithubIdentityLinkStore {
       // has no conflict left to resolve; nothing here is ever discarded.
       await this.claims.mergeClaims(selfCanonical, canonicalAccountId);
       for (const [aliasedId, target] of Object.entries(file.aliases)) {
-        if (target === selfCanonical) file.aliases[aliasedId] = canonicalAccountId;
+        if (target === selfCanonical)
+          file.aliases[aliasedId] = canonicalAccountId;
       }
       file.aliases[selfCanonical] = canonicalAccountId;
       delete file.githubIdByAccountId[selfCanonical];
@@ -215,12 +225,16 @@ export class PlatformGithubIdentityLinkStore {
     });
   }
 
-  private async mutate<T>(mutator: (file: LinkStoreFile) => Promise<T>): Promise<T> {
+  private async mutate<T>(
+    mutator: (file: LinkStoreFile) => Promise<T>,
+  ): Promise<T> {
     const run = this.writeQueue.then(async () => {
       const file = await this.load();
       const result = await mutator(file);
       await this.save(file);
-      this.cachedAliasesPromise = Promise.resolve(new Map(Object.entries(file.aliases)));
+      this.cachedAliasesPromise = Promise.resolve(
+        new Map(Object.entries(file.aliases)),
+      );
       return result;
     });
     this.writeQueue = run.then(
@@ -249,7 +263,12 @@ export class PlatformGithubIdentityLinkStore {
         throw error;
       }
     }
-    return { schemaVersion: SCHEMA_VERSION, byGithubId: {}, githubIdByAccountId: {}, aliases: {} };
+    return {
+      schemaVersion: SCHEMA_VERSION,
+      byGithubId: {},
+      githubIdByAccountId: {},
+      aliases: {},
+    };
   }
 
   private async save(file: LinkStoreFile): Promise<void> {

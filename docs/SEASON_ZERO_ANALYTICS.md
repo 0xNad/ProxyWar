@@ -213,7 +213,6 @@ universal truths, and not something to hardcode as permanent product law.
 - 100% of public Featured Events have identities, versions, and working
   watch links;
 - zero critical route dead ends;
-- zero public betting surfaces;
 - zero lint errors;
 - zero critical test TODOs.
 

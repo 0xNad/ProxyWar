@@ -2,8 +2,7 @@
  * Boots a real `ai-agent-demo-server.ts` process against the Stage 8
  * public-product fixture data, under a fresh `os.tmpdir()`-rooted
  * `mkdtemp()` directory per boot (same portable pattern every other
- * fixture-scratch test in this repo already uses, e.g.
- * `PremiereWageringBundle.test.ts`). Previously hardcoded to a fixed
+ * fixture-scratch test in this repo already uses. Previously hardcoded to a fixed
  * external-volume path (`/Volumes/ProxyWar Workspace/...`) to keep a
  * since-retired local 25 GiB internal-disk floor policy satisfied during
  * one prior development session — that path doesn't exist on Linux CI
@@ -30,7 +29,7 @@
  * separate process, started with the env var already in its `env`, does
  * not have this problem.
  */
-import { spawn, execFile, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
@@ -110,11 +109,18 @@ export async function startFixtureServer(
   let serverProcess: ChildProcess | null = null;
   try {
     const paths = fixtureEnv(fixtureRoot);
-    const leagueSiteDir = path.join(paths.artifactsRoot, "ai-league-runs", "league");
+    const leagueSiteDir = path.join(
+      paths.artifactsRoot,
+      "ai-league-runs",
+      "league",
+    );
     await fs.mkdir(paths.identityDir, { recursive: true });
     await fs.mkdir(leagueSiteDir, { recursive: true });
 
-    const upcomingPremiereFile = path.join(fixtureRoot, "premiere-upcoming.json");
+    const upcomingPremiereFile = path.join(
+      fixtureRoot,
+      "premiere-upcoming.json",
+    );
     await fs.writeFile(
       upcomingPremiereFile,
       JSON.stringify({

@@ -24,6 +24,7 @@ import {
 describe("ProxyWarPublicArtifacts", () => {
   it("allows the replay artifacts needed by the rendered OpenFront client", () => {
     expect(proxyWarPublicRunArtifacts).toContain("game-record.json");
+    expect(proxyWarPublicRunArtifacts).toContain("deal-ledger.json");
     expect(proxyWarPublicRunArtifacts).toContain("match-summary.json");
     expect(proxyWarPublicRunArtifacts).toContain("replay-ui.json");
     expect(proxyWarPublicRunArtifacts).toContain("match-package.html");
@@ -34,6 +35,7 @@ describe("ProxyWarPublicArtifacts", () => {
     expect(proxyWarPublicRunArtifacts).toContain("match-story.md");
     expect(proxyWarPublicRunArtifacts).toContain("external-agent-feedback.md");
     expect(isProxyWarPublicRunArtifact("game-record.json")).toBe(true);
+    expect(isProxyWarPublicRunArtifact("deal-ledger.json")).toBe(true);
     expect(isProxyWarPublicRunArtifact("replay-ui.json")).toBe(true);
   });
 
@@ -142,7 +144,7 @@ describe("ProxyWarPublicArtifacts", () => {
 
   it("names the apex literally when a process falls back to the shared default", () => {
     // The teeth of the 2026-07-30 cutover, and deliberately a LITERAL: the
-    // betting process sets no PROXYWAR_PLATFORM_ORIGIN, so this fallback is
+    // public process sets no PROXYWAR_PLATFORM_ORIGIN, so this fallback is
     // what lands in the CSP it serves to every league document. When the
     // account origin moved to the apex, the old copy-pasted default left
     // `connect-src 'self' https://app.proxywar.xyz` live — a host that now
@@ -294,14 +296,10 @@ describe("ProxyWarPublicArtifacts", () => {
       isProxyWarPublicPremiereReadPath(`/premiere/${id}/card-v1.svg`),
     ).toBe(true);
     expect(
-      matchProxyWarPublicPremiereReadPath(`/api/premieres/${id}/market`),
-    ).toEqual({ kind: "market_state", premiereId: id });
-    expect(
       matchProxyWarPublicPremiereReadPath(
         `/api/premieres/${id}/live-projection`,
       ),
     ).toEqual({ kind: "live_projection", premiereId: id });
-
     for (const forbidden of [
       `/api/premieres/${id}/source`,
       `/api/premieres/${id}/game-record.json`,
@@ -334,11 +332,6 @@ describe("ProxyWarPublicArtifacts", () => {
     ).toEqual({ kind: "session", premiereId: id });
     expect(
       matchProxyWarPublicPremiereWritePath(
-        `/api/premieres/${id}/market-orders`,
-      ),
-    ).toEqual({ kind: "market_order", premiereId: id });
-    expect(
-      matchProxyWarPublicPremiereWritePath(
         `/api/premieres/${id}/sessions/sess_0123456789abcdef/heartbeat`,
       ),
     ).toEqual({
@@ -353,7 +346,6 @@ describe("ProxyWarPublicArtifacts", () => {
       `/api/premieres/${id}/reveal`,
       `/api/premieres/${id}/archive`,
       `/api/premieres/${id}/predictions/extra`,
-      `/api/premieres/${id}/market-orders/extra`,
       `/api/premieres/${id}/sessions/../../admin/heartbeat`,
       `/api/premieres/${id}/sessions/sess_0123456789ABCDEF/heartbeat`,
     ]) {

@@ -503,7 +503,8 @@ async function ensureEpisodeReplayCached(
 
 // Bump when bundle contents change shape so existing directories regenerate
 // in place on the next sync (files are overwritten, never deleted).
-const bundleVersion = "3";
+// v4 adds the finalized structured-deal ledger to mirrored run bundles.
+const bundleVersion = "4";
 
 async function unpackEpisodeRunDir(
   replay: ParsedHostedReplay,
@@ -583,9 +584,7 @@ async function unpackEpisodeRunDir(
  * (missing/stale recap -> `null`) without requiring the legacy pair to be
  * absent too.
  */
-async function readMatchNarrativeSummaryFromRunDir(
-  runDir: string,
-): Promise<{
+async function readMatchNarrativeSummaryFromRunDir(runDir: string): Promise<{
   dramaScore: number;
   entertainmentGrade: string;
   curatedDramaScore: number | null;

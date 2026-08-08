@@ -85,6 +85,49 @@ describe("AgentActionAuditor", () => {
     expect(audit.auditStatus).toBe("unknown");
     expect(audit.auditReason).toContain("after-state mirror snapshot");
   });
+
+  it("confirms an immediately resolved reciprocal alliance request from alliance state", () => {
+    const before = fakeGame({ actor: fakePlayer({ alliedPlayerIDs: [] }) });
+    const after = fakeGame({
+      actor: fakePlayer({ alliedPlayerIDs: ["TARGET01"] }),
+      target: fakePlayer({ playerID: "TARGET01", clientID: "TARGETCLIENT" }),
+    });
+    const audit = auditDecisionEffect(
+      baseRecord({
+        chosenActionKind: "alliance_request",
+        chosenActionID: "alliance_request:TARGET01",
+        intent: { type: "allianceRequest", recipient: "TARGET01" },
+      }),
+      before,
+      after,
+    );
+
+    expect(audit.auditStatus).toBe("confirmed");
+    expect(audit.auditReason).toContain("newly formed core alliance");
+  });
+
+  it("confirms a core alliance break from the before/after alliance delta", () => {
+    const before = fakeGame({
+      actor: fakePlayer({ alliedPlayerIDs: ["TARGET01"] }),
+      target: fakePlayer({ playerID: "TARGET01", clientID: "TARGETCLIENT" }),
+    });
+    const after = fakeGame({
+      actor: fakePlayer({ alliedPlayerIDs: [] }),
+      target: fakePlayer({ playerID: "TARGET01", clientID: "TARGETCLIENT" }),
+    });
+    const audit = auditDecisionEffect(
+      baseRecord({
+        chosenActionKind: "break_alliance",
+        chosenActionID: "break_alliance:TARGET01",
+        intent: { type: "breakAlliance", recipient: "TARGET01" },
+      }),
+      before,
+      after,
+    );
+
+    expect(audit.auditStatus).toBe("confirmed");
+    expect(audit.auditReason).toContain("no longer shows a core alliance");
+  });
 });
 
 function baseRecord(
@@ -140,6 +183,7 @@ function fakePlayer(input: {
   embargoTargetIDs?: string[];
   outgoingAttackTargetIDs?: string[];
   allianceRecipientIDs?: string[];
+  alliedPlayerIDs?: string[];
 }): Player {
   const playerID = input.playerID ?? "PLAYER01";
   const clientID = input.clientID ?? "CLIENT01";
@@ -167,6 +211,10 @@ function fakePlayer(input: {
         recipient: () =>
           fakePlayer({ playerID: recipientID, clientID: recipientID }),
       })),
+    allies: () =>
+      (input.alliedPlayerIDs ?? []).map((alliedID) =>
+        fakePlayer({ playerID: alliedID, clientID: alliedID }),
+      ),
     getEmbargoes: () =>
       (input.embargoTargetIDs ?? []).map((targetID) => ({
         createdAt: 1,

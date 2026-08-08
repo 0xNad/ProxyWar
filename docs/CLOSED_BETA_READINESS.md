@@ -40,8 +40,6 @@ For same-Wi-Fi testers:
 PROXYWAR_BETA_CODE="your-private-code" npm run agent:closed-beta:lan
 ```
 
-See `docs/REMOTE_FRIENDS_BETA.md` for tunnel options and limitations.
-
 Before sharing any remote URL, run the public readiness gate:
 
 ```bash

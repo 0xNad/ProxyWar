@@ -192,6 +192,37 @@ describe("AgentSpectatorTelemetry economy events (PROXYWAR_TUNE_ECONOMY_EVENTS)"
     expect(events).toHaveLength(0);
   });
 
+  it("emits and advances observed economy transitions independently of action acceptance", () => {
+    process.env[FLAG] = "1";
+    const operational = facts({
+      factoryCount: 1,
+      operationalFactoryCount: 1,
+      eligibleDestinationCount: 1,
+    });
+    const events = economyEvents([
+      record(1, operational, {
+        result: {
+          accepted: false,
+          reason: "rejected for test",
+          submittedIntent: null,
+        },
+        audit: {
+          auditStatus: "not_applicable",
+          auditReason: "rejected action",
+        },
+      }),
+      record(2, operational),
+    ]);
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      kind: "factory_operational",
+      turnNumber: 100,
+      evidenceLevel: "state_derived",
+      auditStatus: "not_applicable",
+    });
+  });
+
   it("emits once per transition (idle -> operational -> link -> severed) with correct kinds, targets, and vocabulary-safe text", () => {
     process.env[FLAG] = "1";
     const idle = facts({ factoryCount: 1, idleFactoryCount: 1 });

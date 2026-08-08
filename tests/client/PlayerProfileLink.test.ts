@@ -23,8 +23,7 @@ describe("playerProfileUrl", () => {
     );
   });
 
-  test("league standings and points leaderboard link to the SAME origin", () => {
-    // Both leaderboards must lead to one shared destination — see module doc.
+  test("league standings link to the platform origin", () => {
     expect(playerProfileUrl("x")).toContain(PLAYER_PROFILE_ORIGIN);
   });
 });

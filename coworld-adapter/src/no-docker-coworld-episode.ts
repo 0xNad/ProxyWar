@@ -20,7 +20,9 @@ import {
   type CoworldResults,
   type WinnerRef,
 } from "./coworld-results.ts";
+import { coworldInlineRunArtifacts } from "./coworld-run-artifact-bundle.ts";
 import { competitiveSeatSpecs } from "./coworld-seat-specs.ts";
+import { coworldPublicRunArtifacts } from "./proxywar-public-run-artifacts.ts";
 
 const localRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -63,23 +65,7 @@ const COWORLD_MAX_RETAINED_SNAPSHOTS = Math.max(
   16,
   Number(process.env.PROXYWAR_MAX_RETAINED_SNAPSHOTS ?? "48"),
 );
-const proxyWarPublicRunArtifacts = new Set([
-  "game-record.json",
-  "decisions.jsonl",
-  "match-summary.json",
-  "match-package.json",
-  "match-package.html",
-  "match-package.md",
-  "spectator-replay.json",
-  "spectator-telemetry.json",
-  "visual-report.html",
-  "spectator.html",
-  "objective-scorecard.md",
-  "match-story.md",
-  "behavior-quality-report.json",
-  "behavior-quality-report.md",
-  "external-agent-feedback.md",
-]);
+const proxyWarPublicRunArtifacts = new Set<string>(coworldPublicRunArtifacts);
 
 let proxyWarAppShellPromise: Promise<string> | null = null;
 
@@ -406,10 +392,7 @@ class CoworldProtocolServer {
     });
   }
 
-  private handlePlayerMessage(
-    slot: number,
-    data: import("ws").RawData,
-  ): void {
+  private handlePlayerMessage(slot: number, data: import("ws").RawData): void {
     let message: Record<string, unknown>;
     try {
       message = JSON.parse(String(data));
@@ -1020,7 +1003,9 @@ async function runProxyWarEpisode(
         memTelemetrySnapshots += 1;
         // Hosted default stays every-10 (lean log tail); local repro can set
         // PROXYWAR_MEM_TELEMETRY_EVERY=1 for per-decision-step heap resolution.
-        const memEvery = Number(process.env.PROXYWAR_MEM_TELEMETRY_EVERY ?? "10");
+        const memEvery = Number(
+          process.env.PROXYWAR_MEM_TELEMETRY_EVERY ?? "10",
+        );
         if (memEvery <= 1 || memTelemetrySnapshots % memEvery === 1) {
           logMemTelemetry("snapshot", snapshot.turnNumber);
         }
@@ -1060,6 +1045,12 @@ async function runProxyWarEpisode(
       snapshots: spectatorSnapshots,
       notes: [runNote, certificationNote],
     });
+    // runAgentStepLockedLeague finalizes deals before returning. Preserve an
+    // enabled-but-empty ledger as evidence that no proposal occurred; omit the
+    // field and artifact entirely when structured deals were disabled.
+    const dealLedger = league.dealLedgerEnabled()
+      ? league.dealLedger()
+      : undefined;
     const artifacts = await modules.writeAgentLeagueRunArtifacts({
       runID,
       matchID: game.id,
@@ -1084,6 +1075,7 @@ async function runProxyWarEpisode(
       startedAt,
       completedAt,
       records: league.decisionRecords(),
+      ...(dealLedger !== undefined ? { dealLedger } : {}),
       roster,
       finalState,
       spectatorReplay,
@@ -1112,18 +1104,10 @@ async function runProxyWarEpisode(
         results,
         finalState,
         proxyWarArtifacts: artifacts,
-        inlineRunArtifacts: {
-          "game-record.json": JSON.stringify(gameRecord),
-          "decisions.jsonl": await fs.readFile(artifacts.decisionsPath, "utf8"),
-          "match-summary.json": await fs.readFile(
-            artifacts.summaryPath,
-            "utf8",
-          ),
-          "spectator-telemetry.json": await fs.readFile(
-            artifacts.spectatorTelemetryPath,
-            "utf8",
-          ),
-        },
+        inlineRunArtifacts: await coworldInlineRunArtifacts({
+          gameRecord,
+          artifacts,
+        }),
         spectatorReplay: compactSpectatorReplay,
         spectatorSnapshotCount: spectatorSnapshots.length,
       },

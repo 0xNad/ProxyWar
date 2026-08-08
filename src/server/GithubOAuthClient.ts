@@ -1,11 +1,10 @@
 /**
- * Generic "talk to GitHub's OAuth + REST API" client — deliberately not
- * owned by betting or the platform: it is pure protocol plumbing (token
+ * Generic "talk to GitHub's OAuth + REST API" client: pure protocol plumbing
+ * (token
  * exchange, `/user` fetch, secret resolution) with no opinion about who
  * calls it or what they do with the resulting `{id, login, avatarUrl}`.
  * `proxywar.xyz` is the only caller today (see
- * `src/server/platform/PlatformGithubAuth.ts`) — GitHub sign-in on the
- * betting/league origins was removed when the platform became the sole
+ * `src/server/platform/PlatformGithubAuth.ts`); the platform is the sole
  * account authority.
  */
 import { promises as fs } from "node:fs";

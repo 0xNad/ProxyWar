@@ -1,6 +1,10 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  loadIdentityRegistrySnapshot,
+  type IdentityRegistrySnapshot,
+} from "../server/identity/IdentityRegistry";
+import {
   ensurePremiereParticipants,
   loadStore,
   parseIdArg,
@@ -10,10 +14,6 @@ import {
   upsertRecord,
   validateSchedule,
 } from "./premiere-schedule-lib";
-import {
-  loadIdentityRegistrySnapshot,
-  type IdentityRegistrySnapshot,
-} from "../server/identity/IdentityRegistry";
 
 /**
  * `premiere:schedule --episode <id> --at <ISO>` — Stage 3 item 3's
@@ -25,61 +25,8 @@ import {
  * writing, and persists. No public admin page — this is the entire
  * operator surface for scheduling, per spec.
  *
- * --- Autocycle coexistence (spec Stage 3 item 4) — DESIGN NOTE, NOT WIRED
- * THIS TURN ---
- *
- * This CLI only manages the `FeaturedMatch` store's `scheduledAt`/`state`
- * fields. It does NOT touch `cycle-premiere.sh`, `autocycle-premiere.sh`,
- * or `premiere-queue-lib.sh` — actually admitting a scheduled premiere
- * through the runtime (the thing that would make `/premiere/:id` and
- * `/bet/:id` show it) is explicitly a LATER turn's work ("actual admission
- * wiring of a scheduled premiere through the runtime" — out of scope here).
- * This note documents the intended integration so that turn does not need
- * to rediscover it:
- *
- * 1. `cycle-premiere.sh`'s queue-claiming step today is unconditional FIFO
- *    (`pq_claim "$STAGING/queue-claim"` — oldest `ready/` item, no concept
- *    of "this specific item is scheduled for later"). The wiring point is
- *    a NEW function in `premiere-queue-lib.sh`, e.g. `pq_claim_scheduled_due`,
- *    called BEFORE the existing `pq_claim`:
- *      - Reads this store's `featured-matches.json` (read-only from shell —
- *        a `jq` one-liner, or a tiny `tsx` helper script emitting the due
- *        item's queue-item name on stdout and nothing else on no-match).
- *      - "Due" = a premiere-lane record in `state: "published"` (NOT
- *        merely "scheduled" — `premiere:publish` is the operator's
- *        explicit "yes, actually run this one" signal, matching this
- *        module's own state-machine intent) whose `scheduledAt` has
- *        arrived (within some small lead window, mirroring
- *        `cycle-premiere.sh`'s own `LEAD_MIN` parameter).
- *      - If found: claim THAT SPECIFIC item by name (`mv` it out of
- *        `ready/` directly — `premiere-queue-lib.sh`'s own `pq_claim` only
- *        supports "claim the oldest"; claiming a specific one needs a
- *        sibling function, not a modification of `pq_claim` itself, so
- *        the existing FIFO behavior is untouched byte-for-byte when no
- *        schedule exists).
- *      - If not found: fall through to the EXISTING `pq_claim` (FIFO) →
- *        exhibition fallback chain, EXACTLY as today. This is the
- *        "autocycle fills gaps" behavior spec item 4 asks for, and it is
- *        already what happens for free once the due-check is a pure
- *        addition ahead of the existing call.
- * 2. On successful admission, that future turn should also flip the
- *    `FeaturedMatch` record's `state` to `"revealed"`/`"archived"` at the
- *    appropriate lifecycle point (out of this turn's scope — see
- *    `FeaturedMatch.ts`'s own state-machine doc) and set `revealAt`.
- * 3. This preserves `autocycle-premiere.sh`'s existing settlement-watch
- *    loop and the `/bet` coupling completely unmodified: it still cycles
- *    on the SAME terminal-status detection it does today; the only change
- *    is which item `cycle-premiere.sh` claims when it decides to cycle,
- *    never whether or when it decides to.
- * 4. Concurrency: the shell side's `mv`-based claim is already atomic
- *    (`premiere-queue-lib.sh`'s own doc explains why). The NEW read of
- *    `featured-matches.json` from shell (a raw `jq` read, bypassing
- *    `FeaturedMatch.ts`'s TypeScript API and its locked
- *    `mutateFeaturedMatchStore` entirely) has no such protection today —
- *    that turn must decide whether a lock is needed for THAT shell-side
- *    read (this CLI family's own TypeScript writes ARE already
- *    lock-protected — see `premiere-schedule-lib.ts`'s module doc — but a
- *    raw shell `jq` read participates in no lock at all).
+ * This CLI changes only the `FeaturedMatch` store. Runtime admission and
+ * lifecycle transitions remain separate, operator-controlled steps.
  */
 
 async function main(): Promise<void> {
@@ -98,7 +45,9 @@ async function main(): Promise<void> {
 
   const scheduledMs = Date.parse(at);
   if (Number.isNaN(scheduledMs)) {
-    console.error(`invalid --at value: "${at}" does not parse as an ISO-8601 date`);
+    console.error(
+      `invalid --at value: "${at}" does not parse as an ISO-8601 date`,
+    );
     process.exitCode = 1;
     return;
   }
@@ -125,9 +74,17 @@ async function main(): Promise<void> {
   }
 
   const identity = await loadIdentityRegistrySnapshot().catch(
-    (): IdentityRegistrySnapshot => ({ builders: [], agents: [], versions: [] }),
+    (): IdentityRegistrySnapshot => ({
+      builders: [],
+      agents: [],
+      versions: [],
+    }),
   );
-  const participants = await ensurePremiereParticipants(target.record, identity, roots);
+  const participants = await ensurePremiereParticipants(
+    target.record,
+    identity,
+    roots,
+  );
   if (!participants.ok) {
     console.error(
       `cannot schedule "${id}": participant identity could not be resolved from the sealed bundle — ${participants.reason}`,
@@ -153,7 +110,10 @@ async function main(): Promise<void> {
     ...store.matches.filter((entry) => entry.matchId !== updated.matchId),
     updated,
   ];
-  const issues = await validateSchedule(proposedMatches, { ...roots, now: () => now });
+  const issues = await validateSchedule(proposedMatches, {
+    ...roots,
+    now: () => now,
+  });
   const ownIssues = issues.filter((issue) => issue.matchId === updated.matchId);
   if (ownIssues.length > 0) {
     console.error(`refusing to schedule "${id}" — would violate the schedule:`);
@@ -176,7 +136,8 @@ async function main(): Promise<void> {
 
 const isMainModule =
   process.argv[1] !== undefined &&
-  path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
+  path.resolve(process.argv[1]) ===
+    path.resolve(fileURLToPath(import.meta.url));
 if (isMainModule) {
   main().catch((error: unknown) => {
     console.error(error);

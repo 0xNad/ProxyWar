@@ -310,7 +310,7 @@ describe("Replay Premiere rated Coworld ingestion", () => {
         publicLabel: "premiere",
         externalEmbargoEvidence: [
           {
-            source: "xp-request premiere-wagering pipeline",
+            source: "private episode ingestion pipeline",
             scope: "source and outcome",
             observedAt: NOW.toISOString(),
             verifier: "operator",

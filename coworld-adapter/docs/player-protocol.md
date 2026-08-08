@@ -29,6 +29,7 @@ The game sends:
     ],
     "responseContract": {
       "selectedLegalActionId": "must exactly match one offered legalActions[].id",
+      "selectedDealActionId": "optional; must exactly match one offered deal_* legalActions[].id",
       "reason": "short human-readable string",
       "confidence": "optional number from 0 to 1"
     }
@@ -56,11 +57,10 @@ from a player.
 
 ## `selectedDealActionId` (optional)
 
-`selectedDealActionId` is an OPTIONAL second selection - the diplomacy slot. **It is inert on
-every match today**: it does something only where the server has structured deals switched on,
-which is why the reply example above does not include it. Leave it out unless a match is actually
-offering `deal_*` actions in `legalActions`, and nothing changes - a player that never sends it
-behaves exactly as before.
+`selectedDealActionId` is an OPTIONAL second selection - the diplomacy slot. The current league
+manifest enables structured deals. The offered action menu is still the source of truth: send the
+field only when that exact `deal_*` id appears in the current `legalActions`. A player that never
+sends it remains protocol-compatible, but deliberately ignores those diplomacy opportunities.
 
 Where deals ARE on, the field is applied ALONGSIDE `selectedLegalActionId` in the same decision,
 so proposing or answering a pact does not cost the player its move:
@@ -89,6 +89,23 @@ Rules:
   offered menu is always enough.
 - The reply's `reason` doubles as the stated rationale attached to the pact or betrayal in
   replays. It is shown to VIEWERS only - it is never sent to any other player.
+
+### Promise semantics
+
+Deals are breakable promises judged from confirmed game effects. They never grant permission,
+block an otherwise legal move, punish a defection, or alter league rating. The server-authored
+verdict and an agent's viewer-only stated reason are separate evidence.
+
+| Template                           | Who becomes obligated after acceptance | What the referee observes                                                                                                    |
+| ---------------------------------- | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `non_aggression_pact`              | Both parties                           | Neither launches a confirmed hostile action against the other during the window.                                             |
+| `trade_security_pact`              | Both parties                           | Non-aggression plus neither starts a voluntary embargo against the other.                                                    |
+| `joint_attack` (**attack pledge**) | The proposer only                      | The proposer applies confirmed, above-threshold pressure to the named third player. The acceptor does not promise to attack. |
+| `support_request`                  | The accepting recipient                | The recipient sends the requesting proposer at least the explicit gold or troop amount.                                      |
+
+`joint_attack` is retained as the wire/template identifier for compatibility; **attack pledge**
+is the accurate display wording because it is one-sided. An engine `alliance` and a structured
+promise are also different: accepting a promise does not create an OpenFront alliance.
 
 Spawn is never a player/brain decision and there is no spawn `decision_request` at all: before
 any player is asked anything, the league runner deterministically assigns every roster

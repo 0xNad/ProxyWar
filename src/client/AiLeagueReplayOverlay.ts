@@ -32,6 +32,7 @@ import {
   type BroadcastDrawerTabId,
   type CompetitorRailEntry,
   type CuratedWarRoomEvent,
+  type CuratedWarRoomEventKind,
   type LowerThirdEvent,
   type MatchStateStripInput,
   type TimelineMarker,
@@ -134,6 +135,17 @@ interface AiLeagueSpectatorEvent {
   targetName: string | null;
   message: string;
   publicText?: string;
+  /** Viewer-only agent-authored claim. Never merge this into publicText. */
+  statedReason?: string;
+  evidenceLevel?:
+    | "confirmed_effect"
+    | "accepted_action"
+    | "state_derived"
+    | "synthetic";
+  fallbackUsed?: boolean;
+  llmPlannerDegraded?: boolean;
+  auditStatus?: string;
+  auditReason?: string;
   importance: number;
 }
 
@@ -171,10 +183,14 @@ interface AiLeagueMapSocialEvent {
   sequence: number;
   username: string;
   text: string;
+  /** Viewer-only agent-authored claim, kept separate from the server fact in text. */
+  statedReason: string | null;
   targetName: string | null;
   tone: string;
   kind: string;
   importance: number;
+  fallbackUsed: boolean;
+  llmPlannerDegraded: boolean;
 }
 
 interface AiLeagueReplayOverlayInput {
@@ -208,6 +224,31 @@ interface AiLeagueReplayOverlayInput {
    * safe.
    */
   matchStateSeries?: unknown;
+}
+
+/**
+ * These legacy event kinds describe an effect even when the underlying
+ * record only proves that an action was accepted. Curated/public effect
+ * surfaces must require the auditor's confirmed-effect evidence.
+ */
+const AI_LEAGUE_EFFECT_EVENT_KINDS = new Set([
+  "attack",
+  "alliance_formed",
+  "alliance_break",
+  "nuke",
+]);
+
+function isAiLeagueEffectEventKind(kind: string): boolean {
+  return AI_LEAGUE_EFFECT_EVENT_KINDS.has(kind);
+}
+
+function isAiLeagueConfirmedEffectEvent(
+  event: AiLeagueSpectatorEvent,
+): boolean {
+  return (
+    !isAiLeagueEffectEventKind(event.kind) ||
+    event.evidenceLevel === "confirmed_effect"
+  );
 }
 
 export interface AiLeagueReplayArtifactAvailability {
@@ -1199,14 +1240,12 @@ function headlineEventsFor(
     (a, b) => a.turnNumber - b.turnNumber || a.sequence - b.sequence,
   );
   for (const event of ordered) {
+    if (!isAiLeagueConfirmedEffectEvent(event)) continue;
     const actor = aiLeagueSpectatorDisplayName(event.actorName);
     const target = event.targetName
       ? aiLeagueSpectatorDisplayName(event.targetName)
       : null;
-    if (
-      (event.kind === "alliance_break" || event.tone === "betrayal") &&
-      target !== null
-    ) {
+    if (event.kind === "alliance_break" && target !== null) {
       headlines.push({
         turnNumber: event.turnNumber,
         sequence: event.sequence,
@@ -1232,10 +1271,7 @@ function headlineEventsFor(
       });
       continue;
     }
-    if (
-      (event.kind === "attack" || event.kind === "target_call") &&
-      target !== null
-    ) {
+    if (event.kind === "attack" && target !== null) {
       const pairKey = `${event.actorAgentID}->${event.targetAgentID ?? target}`;
       if (!firstStrikeSeen.has(pairKey)) {
         firstStrikeSeen.add(pairKey);
@@ -1983,6 +2019,15 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       .ai-league-social-transcript-line span {
         color: var(--pw-text-dim, #cbd5e1);
       }
+      .ai-league-social-transcript-line .ai-league-social-claim,
+      .ai-league-social-transcript-line .ai-league-social-provenance {
+        display: block;
+        margin-top: 3px;
+        font-size: 11px;
+      }
+      .ai-league-social-transcript-line .ai-league-social-claim {
+        font-style: italic;
+      }
       .ai-league-social-tone {
         border-radius: 999px;
         padding: 2px 7px;
@@ -2640,6 +2685,15 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
       .broadcast-timeline-marker[data-kind="alliance"] {
         background: var(--pw-positive, #34d399);
       }
+      .broadcast-timeline-marker[data-kind="deal_proposed"],
+      .broadcast-timeline-marker[data-kind="deal_accepted"],
+      .broadcast-timeline-marker[data-kind="deal_fulfilled"] {
+        background: var(--pw-positive, #34d399);
+      }
+      .broadcast-timeline-marker[data-kind="deal_rejected"],
+      .broadcast-timeline-marker[data-kind="deal_expired"] {
+        background: var(--pw-muted, #a4afbf);
+      }
       .broadcast-timeline-marker[data-kind="first_strike"] {
         background: var(--pw-caution, #fbbf24);
       }
@@ -2647,6 +2701,7 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         background: var(--pw-info, #56c7f5);
       }
       .broadcast-timeline-marker[data-kind="betrayal"],
+      .broadcast-timeline-marker[data-kind="deal_violated"],
       .broadcast-timeline-marker[data-kind="elimination"],
       .broadcast-timeline-marker[data-kind="nuke"] {
         background: var(--pw-danger, #f87171);
@@ -3565,6 +3620,47 @@ const AI_LEAGUE_RAIL_MAX_ROWS = 12;
 // Matches AgentDramaReport.ts's own HIGH_IMPORTANCE_THRESHOLD convention —
 // the War Room feed is deliberately selective, not a mirror of every event.
 const AI_LEAGUE_WAR_ROOM_IMPORTANCE_THRESHOLD = 80;
+const AI_LEAGUE_DEAL_EVENT_KINDS = new Set<CuratedWarRoomEventKind>([
+  "deal_proposed",
+  "deal_accepted",
+  "deal_rejected",
+  "deal_expired",
+  "deal_fulfilled",
+  "deal_violated",
+]);
+
+function isAiLeagueDealEventKind(
+  kind: string,
+): kind is Extract<CuratedWarRoomEventKind, `deal_${string}`> {
+  return AI_LEAGUE_DEAL_EVENT_KINDS.has(kind as CuratedWarRoomEventKind);
+}
+
+/**
+ * The action stamp and ledger transition can both describe the same deal fact.
+ * Collapse only byte-equivalent facts from the same turn/parties; distinct
+ * lifecycle transitions remain separate even when they share a deal ID.
+ */
+function aiLeagueDealFactKey(event: AiLeagueSpectatorEvent): string {
+  return [
+    event.turnNumber,
+    event.kind,
+    event.actorAgentID,
+    event.targetAgentID ?? "",
+    event.publicText ?? event.message,
+  ].join("|");
+}
+
+function aiLeagueDealProvenanceDetail(
+  event: AiLeagueSpectatorEvent,
+): string | null {
+  if (event.fallbackUsed === true) {
+    return translateText("ai_league_replay.deal_recovered_action");
+  }
+  if (event.llmPlannerDegraded === true) {
+    return translateText("ai_league_replay.deal_degraded_action");
+  }
+  return null;
+}
 
 /**
  * Agent identity (emblem, exact version label, builder, color) is always
@@ -5320,8 +5416,12 @@ function consequentialAgentIDs(
   for (const event of events) {
     const isMajor =
       event.kind === "elimination" ||
-      event.kind === "alliance_formed" ||
-      (event.kind === "alliance_break" && event.tone === "betrayal");
+      (isAiLeagueConfirmedEffectEvent(event) &&
+        (event.kind === "alliance_formed" ||
+          (event.kind === "alliance_break" && event.tone === "betrayal"))) ||
+      event.kind === "deal_accepted" ||
+      event.kind === "deal_fulfilled" ||
+      event.kind === "deal_violated";
     if (!isMajor) continue;
     ids.add(event.actorAgentID);
     if (event.targetAgentID !== null) ids.add(event.targetAgentID);
@@ -5426,23 +5526,59 @@ function curatedWarRoomEvents(
 ): CuratedWarRoomEvent[] {
   const curated: CuratedWarRoomEvent[] = [];
   const firstStrikeSeen = new Set<string>();
+  const dealFactsSeen = new Set<string>();
+  const dealProposalPairSeen = new Set<string>();
   const consequential = consequentialAgentIDs(telemetry?.events ?? []);
   const ordered = [...(telemetry?.events ?? [])].sort(
     (a, b) => a.turnNumber - b.turnNumber || a.sequence - b.sequence,
   );
   for (const event of ordered) {
+    if (!isAiLeagueConfirmedEffectEvent(event)) continue;
     const actor = aiLeagueSpectatorDisplayName(event.actorName);
     const target =
       event.targetName !== null
         ? aiLeagueSpectatorDisplayName(event.targetName)
         : null;
-    // P0 fix (2026-08-03): the expanded row's "stated reason" text (raw
-    // `publicText`/`message`) leaked a real agent's name straight through
-    // even with Anonymous Names on -- `headline`/`participants` above were
-    // already anonymized, but this field was passed through verbatim.
-    const publicReason = aiLeagueSpectatorText(
-      event.publicText ?? event.message,
-    );
+    // Keep every server/referee fact separate from an agent-authored claim.
+    // Both still pass through the spectator-text anonymizer so names cannot
+    // leak when Anonymous Names is enabled.
+    const serverFact = aiLeagueSpectatorText(event.publicText ?? event.message);
+    const agentClaim =
+      typeof event.statedReason === "string" &&
+      event.statedReason.trim().length > 0
+        ? aiLeagueSpectatorText(event.statedReason.trim())
+        : null;
+
+    if (isAiLeagueDealEventKind(event.kind)) {
+      const factKey = aiLeagueDealFactKey(event);
+      if (dealFactsSeen.has(factKey)) continue;
+      dealFactsSeen.add(factKey);
+      if (event.kind === "deal_proposed") {
+        const pairKey = `${event.actorAgentID}|${event.targetAgentID ?? ""}`;
+        if (dealProposalPairSeen.has(pairKey)) continue;
+        dealProposalPairSeen.add(pairKey);
+      }
+      curated.push({
+        id: event.id,
+        kind: event.kind,
+        turn: event.turnNumber,
+        sequence: event.sequence,
+        // Server-authored/referee-authored fact. The agent's own words stay
+        // in publicReason below, where BroadcastComposition labels them as a
+        // claim rather than verified reasoning.
+        headline: serverFact,
+        publicReason: agentClaim,
+        participants: target !== null ? [actor, target] : [actor],
+        expandedDetail: aiLeagueDealProvenanceDetail(event),
+        tier:
+          event.kind === "deal_accepted" ||
+          event.kind === "deal_fulfilled" ||
+          event.kind === "deal_violated"
+            ? 1
+            : 2,
+      });
+      continue;
+    }
 
     if (event.kind === "attack" && target !== null) {
       const pairKey = `${event.actorAgentID}|${event.targetAgentID ?? target}`;
@@ -5461,7 +5597,7 @@ function curatedWarRoomEvents(
             actor,
             target,
           }),
-          publicReason,
+          publicReason: null,
           participants: [actor, target],
           expandedDetail: null,
           tier: isConsequential ? 2 : 3,
@@ -5480,7 +5616,7 @@ function curatedWarRoomEvents(
           actor,
           target,
         }),
-        publicReason,
+        publicReason: null,
         participants: [actor, target],
         expandedDetail: null,
         tier: 1,
@@ -5501,7 +5637,7 @@ function curatedWarRoomEvents(
           actor,
           target,
         }),
-        publicReason,
+        publicReason: null,
         participants: [actor, target],
         expandedDetail: null,
         tier: 1,
@@ -5529,7 +5665,7 @@ function curatedWarRoomEvents(
                 target,
               })
             : translateText("ai_league_replay.event_nuke", { actor }),
-        publicReason,
+        publicReason: null,
         participants: target !== null ? [actor, target] : [actor],
         expandedDetail: null,
         tier: 1,
@@ -5545,7 +5681,7 @@ function curatedWarRoomEvents(
         headline: translateText("ai_league_replay.event_eliminated", {
           actor,
         }),
-        publicReason,
+        publicReason: null,
         participants: [actor],
         expandedDetail: null,
         tier: 1,
@@ -5574,6 +5710,7 @@ function matchTimelineEventMarkers(
 ): TimelineMarker[] {
   const markers: TimelineMarker[] = [];
   const firstStrikeSeen = new Set<string>();
+  const dealFactsSeen = new Set<string>();
   const ordered = [...(telemetry?.events ?? [])].sort(
     (a, b) => a.turnNumber - b.turnNumber || a.sequence - b.sequence,
   );
@@ -5590,11 +5727,23 @@ function matchTimelineEventMarkers(
     });
   };
   for (const event of ordered) {
+    if (!isAiLeagueConfirmedEffectEvent(event)) continue;
     const actor = aiLeagueSpectatorDisplayName(event.actorName);
     const target =
       event.targetName !== null
         ? aiLeagueSpectatorDisplayName(event.targetName)
         : null;
+    if (isAiLeagueDealEventKind(event.kind)) {
+      const factKey = aiLeagueDealFactKey(event);
+      if (dealFactsSeen.has(factKey)) continue;
+      dealFactsSeen.add(factKey);
+      push(
+        event.kind,
+        event,
+        aiLeagueSpectatorText(event.publicText ?? event.message),
+      );
+      continue;
+    }
     switch (event.kind) {
       case "spawn":
         push(
@@ -5694,7 +5843,13 @@ function aiLeagueFinishTurn(
 function communicationThreadsHtml(
   telemetry: AiLeagueSpectatorTelemetry,
 ): string {
-  const threads = telemetry.communicationThreads.slice(0, 8);
+  const threads = telemetry.communicationThreads
+    .map((thread) => ({
+      ...thread,
+      messages: thread.messages.filter(isAiLeagueConfirmedEffectEvent),
+    }))
+    .filter((thread) => thread.messages.length > 0)
+    .slice(0, 8);
   if (threads.length === 0) {
     return "";
   }
@@ -5823,38 +5978,61 @@ function mapSocialEvents(
   decisions: readonly AiLeagueDecisionLogEntry[],
   telemetry: AiLeagueSpectatorTelemetry | null,
 ): AiLeagueMapSocialEvent[] {
-  const telemetryEvents =
-    telemetry?.events
-      .filter((event) =>
-        [
-          "chat",
-          "emoji",
-          "alliance_request",
-          "alliance_formed",
-          "alliance_break",
-          "trade",
-          "target_call",
-          "embargo",
-          "nuke",
-        ].includes(event.kind),
-      )
-      .map((event) => ({
-        turnNumber: event.turnNumber,
-        sequence: event.sequence,
-        username: event.actorName,
-        text: event.publicText ?? event.message,
-        targetName: event.targetName,
-        tone: event.tone,
-        kind: event.kind,
-        importance: event.importance,
-      })) ?? [];
-  if (telemetryEvents.length > 0) {
+  const telemetryEvents: AiLeagueMapSocialEvent[] = [];
+  const dealFactsSeen = new Set<string>();
+  for (const event of telemetry?.events ?? []) {
+    const isDeal = isAiLeagueDealEventKind(event.kind);
+    if (!isAiLeagueConfirmedEffectEvent(event)) continue;
+    if (
+      !isDeal &&
+      ![
+        "chat",
+        "emoji",
+        "alliance_request",
+        "alliance_formed",
+        "alliance_break",
+        "trade",
+        "target_call",
+        "embargo",
+        "nuke",
+      ].includes(event.kind)
+    ) {
+      continue;
+    }
+    if (isDeal) {
+      const factKey = aiLeagueDealFactKey(event);
+      if (dealFactsSeen.has(factKey)) continue;
+      dealFactsSeen.add(factKey);
+    }
+    telemetryEvents.push({
+      turnNumber: event.turnNumber,
+      sequence: event.sequence,
+      username: event.actorName,
+      // Server/referee fact. The agent's own words are carried separately.
+      text: event.publicText ?? event.message,
+      statedReason:
+        typeof event.statedReason === "string" &&
+        event.statedReason.trim().length > 0
+          ? event.statedReason.trim()
+          : null,
+      targetName: event.targetName,
+      tone: event.tone,
+      kind: event.kind,
+      importance: event.importance,
+      fallbackUsed: event.fallbackUsed === true,
+      llmPlannerDegraded: event.llmPlannerDegraded === true,
+    });
+  }
+  // Once the provenance-aware telemetry source exists, an empty curated
+  // result is authoritative. Falling back to decision rows here would turn
+  // the same accepted-but-unconfirmed actions back into effect-looking copy.
+  if (telemetry !== null) {
     return telemetryEvents.sort(
       (a, b) => a.turnNumber - b.turnNumber || a.sequence - b.sequence,
     );
   }
   return decisions
-    .map((decision) => {
+    .map<AiLeagueMapSocialEvent | null>((decision) => {
       const text = theatreTextForDecision(decision);
       if (text === null) {
         return null;
@@ -5872,10 +6050,13 @@ function mapSocialEvents(
         sequence: decision.sequence,
         username: decision.username,
         text,
+        statedReason: null,
         targetName: target,
         tone: theatreTone(decision),
         kind: decision.selectedActionKind,
         importance: theatreImportance(decision),
+        fallbackUsed: decision.fallbackUsed,
+        llmPlannerDegraded: false,
       };
     })
     .filter((event): event is AiLeagueMapSocialEvent => event !== null)
@@ -6005,10 +6186,30 @@ function socialTranscriptHtml(
   if (socialEvents.length === 0) {
     return "";
   }
-  return `<div class="ai-league-social-transcript-title">Political radio</div>${socialEvents
+  return `<div class="ai-league-social-transcript-title">${escapeHtml(translateText("ai_league_replay.political_radio_title"))}</div>${socialEvents
     .map((socialEvent) => {
       const tone = socialEvent.tone;
-      return `<div class="ai-league-social-transcript-line"><div class="ai-league-social-tone ${escapeHtml(tone)}">${escapeHtml(theatreToneLabel(tone))}</div><div><b>${escapeHtml(aiLeagueSpectatorDisplayName(socialEvent.username))}</b><span>${escapeHtml(shortText(aiLeagueSpectatorText(socialEvent.text), 150))}</span></div></div>`;
+      const claim =
+        socialEvent.statedReason === null
+          ? ""
+          : `<span class="ai-league-social-claim">${escapeHtml(
+              translateText("ai_league_replay.deal_agent_claim", {
+                reason: shortText(
+                  aiLeagueSpectatorText(socialEvent.statedReason),
+                  150,
+                ),
+              }),
+            )}</span>`;
+      const provenance = socialEvent.fallbackUsed
+        ? `<span class="ai-league-social-provenance">${escapeHtml(
+            translateText("ai_league_replay.deal_recovered_action"),
+          )}</span>`
+        : socialEvent.llmPlannerDegraded
+          ? `<span class="ai-league-social-provenance">${escapeHtml(
+              translateText("ai_league_replay.deal_degraded_action"),
+            )}</span>`
+          : "";
+      return `<div class="ai-league-social-transcript-line"><div class="ai-league-social-tone ${escapeHtml(tone)}">${escapeHtml(theatreToneLabel(tone))}</div><div><b>${escapeHtml(aiLeagueSpectatorDisplayName(socialEvent.username))}</b><span>${escapeHtml(shortText(aiLeagueSpectatorText(socialEvent.text), 150))}</span>${claim}${provenance}</div></div>`;
     })
     .join("")}`;
 }

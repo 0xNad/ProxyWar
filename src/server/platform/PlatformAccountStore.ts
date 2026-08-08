@@ -1,8 +1,6 @@
 /**
- * Durable platform account records — the ONE place a display name lives
- * now (see the platform build's contract: "Display name currently lives
- * in the points ledger — move it to a platform-owned file. Betting reads
- * it for rendering; it does not write it."). Same on-disk conventions as
+ * Durable platform account records — the one place a display name lives.
+ * Same on-disk conventions as
  * every other store in this codebase: flat JSON map, atomic
  * write-temp-then-rename, one file, serialized per-instance write queue.
  *
@@ -11,7 +9,7 @@
  * something worth persisting happens (a display name is set, or a GitHub
  * link creates one implicitly). `getAccount` returning `null` for a
  * cookie-only, never-customized visitor is the expected common case, not
- * an error — exactly like `ReplayPremierePointsLedger.readParticipant`.
+ * an error.
  */
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
@@ -146,7 +144,10 @@ export class PlatformAccountStore {
       const nowIso = new Date().toISOString();
       const merged: StoredAccount = {
         displayName: target.displayName ?? source.displayName,
-        createdAt: source.createdAt < target.createdAt ? source.createdAt : target.createdAt,
+        createdAt:
+          source.createdAt < target.createdAt
+            ? source.createdAt
+            : target.createdAt,
         updatedAt: nowIso,
       };
       file.accounts[intoAccountId] = merged;

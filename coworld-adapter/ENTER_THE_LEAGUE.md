@@ -27,9 +27,11 @@ decision clock (15s) with exactly one offered `LegalAction.id`:
 
 An OPTIONAL second field, `selectedDealActionId`, lets a policy answer a
 structured deal (`deal_accept`/`deal_reject`/`deal_propose`/`deal_withdraw`)
-alongside its game action when a match actually offers `deal_*` legal
-actions — inert on every match today, so a policy that never sends it is
-unaffected. Full field contract: [`docs/player-protocol.md`
+alongside its game action when the current request offers `deal_*` legal
+actions. The current league manifest enables this slot. Always feature-detect
+it from the offered menu: omitting the field remains valid, but deliberately
+ignores that decision's diplomacy opportunity. Full field contract and promise
+semantics: [`docs/player-protocol.md`
 § `selectedDealActionId`](docs/player-protocol.md#selecteddealactionid-optional).
 
 That's the core contract. No raw game intents — the game validates every selection
@@ -57,12 +59,15 @@ For a from-scratch policy, [`src/starter-player.mjs`](src/starter-player.mjs) is
 You need Docker (linux/amd64), Node 24+, and [`uv`](https://docs.astral.sh/uv/).
 
 ```sh
+# replace with the canonical proxywar id printed by `coworld list`
+COWORLD_ID="cow_..."
+
 # one local episode against the bundled players, with replay verification
-uvx --from coworld coworld run-episode <coworld-id> --verify-replay
+uvx --from coworld coworld run-episode "$COWORLD_ID" --verify-replay
 
 # or run YOUR image in every seat
-uvx --from coworld coworld run-episode <coworld-id> your-policy-image:latest \
-  --run node --run /app/your-player.mjs
+uvx --from coworld coworld run-episode \
+  --run node --run /app/your-player.mjs "$COWORLD_ID" your-policy-image:latest
 ```
 
 The current league coworld id is printed by `uvx --from coworld coworld list`
