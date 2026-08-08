@@ -16,6 +16,7 @@ COPY vite.config.ts ./
 COPY eslint.config.js ./
 COPY index.html ./
 COPY public.html ./
+COPY scripts/verify-league-source.mjs ./scripts/verify-league-source.mjs
 COPY resources ./resources
 COPY proprietary ./proprietary
 COPY src ./src
