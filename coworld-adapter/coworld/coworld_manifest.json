@@ -238,7 +238,9 @@
         "tsx/esm",
         "/app/integration/src/no-docker-coworld-episode.ts"
       ],
-      "env": {}
+      "env": {
+        "PROXYWAR_TUNE_STRUCTURED_DEALS": "1"
+      }
     },
     "protocols": {
       "player": {
