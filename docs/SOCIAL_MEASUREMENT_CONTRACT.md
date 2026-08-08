@@ -140,8 +140,13 @@ game the construct.
 The frozen internal control matrix uses keeper, defector, skeptic, and
 deal-blind policies; OFF, enabled-but-ignored, and active arms; three explicit
 simulation seeds; Pangaea and Europe; and all four deterministic spawn
-rotations. Seed `424242` is development evidence. Seeds `161803` and `271828`
-are held-out confirmatory conditions after the control policy is committed.
+rotations. Seed `424242` is development evidence. Seeds `141421` and `223607`
+are fresh held-out confirmatory conditions after the control policy is
+committed. The original held-out pair (`161803`, `271828`) exposed a
+control-policy confound: when trade security was unavailable, the defector
+substituted a non-aggression pact that its embargo did not violate. That failed
+the preregistered map/rotation gate. The substitution was removed before these
+replacement held-out seeds were run; the failed matrix remains retained.
 
 Promotion from “descriptive evidence” to “internally validated control
 construct” requires all of the following:

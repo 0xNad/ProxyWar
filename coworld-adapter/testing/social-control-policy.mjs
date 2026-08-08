@@ -296,13 +296,11 @@ function chooseDealAction({ profile, actions, observation }) {
   );
   if (proposal) return proposal;
 
-  const fallbackProposal = actions.find(
-    (action) =>
-      action.kind === "deal_propose" &&
-      action.metadata?.template === "non_aggression_pact",
-  );
-  if (fallbackProposal) return fallbackProposal;
-
+  // Do not silently substitute another promise template when the frozen
+  // trade-security control is temporarily unavailable. That would change the
+  // obligation being measured: an embargo violates trade security but can
+  // fulfill a non-aggression pact. Withdrawing an old proposal (or abstaining)
+  // keeps the control policy aligned with its preregistered construct.
   return actions.find((action) => action.kind === "deal_withdraw") ?? null;
 }
 

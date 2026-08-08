@@ -205,6 +205,24 @@ describe("deterministic social-control arms", () => {
     expect(defector.selectedDealActionId).toBe(keeperTarget.id);
   });
 
+  it("does not substitute a non-aggression promise into the trade-security control", async () => {
+    const withdraw = {
+      id: "deal_withdraw:old",
+      kind: "deal_withdraw",
+      label: "Withdraw",
+      risk: { level: "none" },
+      metadata: { dealID: "old" },
+    };
+    for (const profile of ["keeper", "defector"] as const) {
+      const decision = await choose({
+        profile,
+        arm: "active",
+        legalActions: [HOLD, PROPOSE_NAP, withdraw, EXPAND],
+      });
+      expect(decision.selectedDealActionId).toBe(withdraw.id);
+    }
+  });
+
   it("holds a negative covenant for complete audit coverage while the defector selects a violation", async () => {
     const deal = activeDeal({
       template: "trade_security_pact",
@@ -395,7 +413,7 @@ describe("deterministic social-control arms", () => {
     expect(a).toEqual(b);
     const offered = new Set(actions.map((action) => action.id));
     expect(offered.has(a.selectedLegalActionId)).toBe(true);
-    expect(offered.has(a.selectedDealActionId ?? "")).toBe(true);
+    expect(a.selectedDealActionId).toBeUndefined();
     expect(a.fallbackUsed).toBe(false);
     expect(a.llmPlannerDegraded).toBe(false);
   });
