@@ -302,7 +302,7 @@ export function evaluateCommitmentConstruct(runs, aggregate) {
   const expectedRunCount = 3 * 2 * 4 * 3;
   const exactAxes =
     JSON.stringify(summary.seeds) ===
-      JSON.stringify([141421, 223607, 424242]) &&
+      JSON.stringify([173205, 223607, 424242]) &&
     JSON.stringify(summary.maps) === JSON.stringify(["Europe", "Pangaea"]) &&
     JSON.stringify(summary.episodeIndices) === JSON.stringify([0, 1, 2, 3]) &&
     JSON.stringify(summary.arms) ===

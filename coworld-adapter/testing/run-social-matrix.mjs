@@ -30,7 +30,7 @@ const GAME_FILE = path.join(
 export async function runSocialMatrix(options = {}) {
   const seeds =
     options.seeds ??
-    integerList("PROXYWAR_SOCIAL_MATRIX_SEEDS", [141421, 223607, 424242]);
+    integerList("PROXYWAR_SOCIAL_MATRIX_SEEDS", [173205, 223607, 424242]);
   const maps =
     options.maps ??
     stringList("PROXYWAR_SOCIAL_MATRIX_MAPS", ["Pangaea", "Europe"]);
