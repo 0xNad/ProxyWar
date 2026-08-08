@@ -38,7 +38,10 @@ export function sha256(value) {
 
 export function summarizeSocialRun(input) {
   const profilesByName = new Map(
-    SOCIAL_MATRIX_PROFILES.map((profile) => [socialPlayerName(profile), profile]),
+    SOCIAL_MATRIX_PROFILES.map((profile) => [
+      socialPlayerName(profile),
+      profile,
+    ]),
   );
   const byProfile = Object.fromEntries(
     SOCIAL_MATRIX_PROFILES.map((profile) => [profile, emptyProfileSummary()]),
@@ -99,7 +102,8 @@ export function summarizeSocialRun(input) {
       verifiedTerminal === 0
         ? null
         : summary.obligations.fulfilled / verifiedTerminal;
-    const proposalWindows = summary.dealOpportunities.deal_propose.decisionWindows;
+    const proposalWindows =
+      summary.dealOpportunities.deal_propose.decisionWindows;
     summary.proposalSelectionRate =
       proposalWindows === 0
         ? null
@@ -253,11 +257,14 @@ export function evaluateCommitmentConstruct(runs, aggregate) {
   const summary = aggregate;
   const activeRuns = runs.filter((run) => run.arm === "active");
   const heldOutRuns = activeRuns.filter((run) => run.seed !== 424242);
-  const expectedRunCount =
-    summary.seeds.length *
-    summary.maps.length *
-    summary.episodeIndices.length *
-    summary.arms.length;
+  const expectedRunCount = 3 * 2 * 4 * 3;
+  const exactAxes =
+    JSON.stringify(summary.seeds) ===
+      JSON.stringify([161803, 271828, 424242]) &&
+    JSON.stringify(summary.maps) === JSON.stringify(["Europe", "Pangaea"]) &&
+    JSON.stringify(summary.episodeIndices) === JSON.stringify([0, 1, 2, 3]) &&
+    JSON.stringify(summary.arms) ===
+      JSON.stringify(["active", "ignored", "off"]);
   const policies = Object.fromEntries(
     ["keeper", "defector"].map((profile) => {
       const heldOut = constructSlice(heldOutRuns, profile);
@@ -274,9 +281,7 @@ export function evaluateCommitmentConstruct(runs, aggregate) {
         summary.episodeIndices.map((episodeIndex) => [
           episodeIndex,
           constructSlice(
-            heldOutRuns.filter(
-              (run) => run.episodeIndex === episodeIndex,
-            ),
+            heldOutRuns.filter((run) => run.episodeIndex === episodeIndex),
             profile,
           ),
         ]),
@@ -299,14 +304,13 @@ export function evaluateCommitmentConstruct(runs, aggregate) {
           coveragePass,
           reliabilityPass: reliabilityPass(heldOut),
           mapBalancePass: Object.values(byMap).every(reliabilityPass),
-          spawnRotationPass: Object.values(byEpisodeIndex).every(
-            reliabilityPass,
-          ),
+          spawnRotationPass:
+            Object.values(byEpisodeIndex).every(reliabilityPass),
         },
       ];
     }),
   );
-  const completeMatrix = runs.length === expectedRunCount;
+  const completeMatrix = exactAxes && runs.length === expectedRunCount;
   const healthyRuns = runs.every(
     (run) =>
       run.fallbackCount === 0 &&
@@ -338,6 +342,7 @@ export function evaluateCommitmentConstruct(runs, aggregate) {
     developmentSeed: 424242,
     heldOutSeeds: summary.seeds.filter((seed) => seed !== 424242),
     expectedRunCount,
+    exactAxes,
     completeMatrix,
     healthyRuns,
     provenanceComplete,

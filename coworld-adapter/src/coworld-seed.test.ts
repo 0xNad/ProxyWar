@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { simpleHash } from "../../src/core/Util.ts";
 import {
   coworldEpisodeIdentity,
   MAX_COWORLD_EPISODE_SEED,
@@ -19,9 +20,12 @@ describe("coworldEpisodeIdentity", () => {
     [25, "PWSAAAAZ"],
     [26, "PWSAAABA"],
     [MAX_COWORLD_EPISODE_SEED, "PWSZZZZZ"],
-  ])("encodes supported seed %i as deterministic game id %s", (seed, gameId) => {
-    expect(coworldEpisodeIdentity(seed)).toEqual({ gameId, seed });
-  });
+  ])(
+    "encodes supported seed %i as deterministic game id %s",
+    (seed, gameId) => {
+      expect(coworldEpisodeIdentity(seed)).toEqual({ gameId, seed });
+    },
+  );
 
   it("keeps sampled seeds distinct and reproducible", () => {
     const seeds = [0, 1, 25, 26, 424242, 9_876_543, MAX_COWORLD_EPISODE_SEED];
@@ -33,19 +37,9 @@ describe("coworldEpisodeIdentity", () => {
   });
 
   it("avoids the signed-hash symmetry that collides in the rejected six-letter range", () => {
-    const signedSimpleHash = (value: string) => {
-      let hash = 0;
-      for (let index = 0; index < value.length; index += 1) {
-        hash = (hash << 5) - hash + value.charCodeAt(index);
-        hash &= hash;
-      }
-      return Math.abs(hash);
-    };
     // These two old game IDs have the same OpenFront RNG seed. Both numeric
     // seeds are now outside the supported range and therefore cannot alias.
-    expect(signedSimpleHash("PWIAAAAB")).toBe(
-      signedSimpleHash("PWZWOZIZ"),
-    );
+    expect(simpleHash("PWIAAAAB")).toBe(simpleHash("PWZWOZIZ"));
     expect(95_051_009).toBeGreaterThan(MAX_COWORLD_EPISODE_SEED);
     expect(307_351_069).toBeGreaterThan(MAX_COWORLD_EPISODE_SEED);
 
@@ -53,7 +47,7 @@ describe("coworldEpisodeIdentity", () => {
       coworldEpisodeIdentity(0).gameId,
       coworldEpisodeIdentity(MAX_COWORLD_EPISODE_SEED).gameId,
     ];
-    expect(boundaryIDs.map(signedSimpleHash)).toEqual([32_564_309, 56_421_934]);
+    expect(boundaryIDs.map(simpleHash)).toEqual([32_564_309, 56_421_934]);
   });
 
   it.each([-1, 1.5, Number.NaN, MAX_COWORLD_EPISODE_SEED + 1])(

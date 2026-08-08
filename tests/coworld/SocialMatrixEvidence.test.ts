@@ -95,7 +95,8 @@ describe("social matrix evidence", () => {
   });
 
   it("requires every matched OFF and ignored cell to have identical normalized play", async () => {
-    const { summarizeSocialRun, aggregateSocialMatrix } = await evidenceModule();
+    const { summarizeSocialRun, aggregateSocialMatrix } =
+      await evidenceModule();
     const base = {
       seed: 424242,
       map: "Pangaea",
@@ -126,14 +127,15 @@ describe("social matrix evidence", () => {
   });
 
   it("does not validate a partial matrix or reward an abstaining policy", async () => {
-    const { summarizeSocialRun, aggregateSocialMatrix } = await evidenceModule();
+    const { summarizeSocialRun, aggregateSocialMatrix } =
+      await evidenceModule();
     const active = summarizeSocialRun({
       arm: "active",
       seed: 161803,
       map: "Pangaea",
       episodeIndex: 0,
       decisions: [decision("Social keeper", "accept")],
-      results: { ...result(), seed: 161803, game_id: "PWSJFJF" },
+      results: { ...result(), seed: 161803, game_id: "PWSAJFJF" },
       ledger: {
         finalizedAtStep: 29,
         events: [],
@@ -150,7 +152,8 @@ describe("social matrix evidence", () => {
     const aggregate = aggregateSocialMatrix([active]);
     expect(aggregate.commitmentConstruct).toMatchObject({
       passed: false,
-      completeMatrix: true,
+      completeMatrix: false,
+      exactAxes: false,
       abstentionNotRewarded: true,
     });
     expect(aggregate.byProfile.skeptic.commitmentReliability).toBeNull();
