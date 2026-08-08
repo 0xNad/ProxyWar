@@ -115,7 +115,11 @@ export class LegalActionBuilder {
     // reserved-quota truncation at the end (total stays <= capActions).
     // Flag OFF => maxActions === capActions and the truncation is a no-op:
     // byte-identical menus to the pre-flag behavior.
-    const diplomacySlots = diplomacySlotsEnabled();
+    // structuredDealsEnabled() also forces this on: deal_propose/accept/
+    // reject/withdraw are DIPLOMACY_KINDS members, so without it a crowded
+    // menu drops every deal action before an agent sees it. Both flags
+    // still default off.
+    const diplomacySlots = diplomacySlotsEnabled() || structuredDealsEnabled();
     const maxActions = diplomacySlots ? capActions + 32 : capActions;
     const actions: LegalAction[] = [];
 
@@ -1255,11 +1259,27 @@ export function reservedQuotaTruncate(
   // the menu always fills to cap when enough actions exist (reviewer finding:
   // without the top-up, 85 others + 20 diplomacy at cap 96/reserve 8 wasted
   // 3 slots while dropping diplomacy).
-  const keepDiplomacy = Math.min(
+  let keepDiplomacy = Math.min(
     diplomacy.length,
     Math.max(reserve, cap - othersCount),
     cap,
   );
+  // Never split a deal_accept from its deal_reject: dealMetaActions always
+  // emits them as an adjacent pair for the same proposal. If the cutoff
+  // lands right between them, drop the accept too; the freed slot returns
+  // to the non-diplomacy budget below.
+  const lastKept = diplomacy[keepDiplomacy - 1];
+  const firstCut = diplomacy[keepDiplomacy];
+  if (
+    keepDiplomacy > 0 &&
+    keepDiplomacy < diplomacy.length &&
+    lastKept.kind === "deal_accept" &&
+    firstCut.kind === "deal_reject" &&
+    lastKept.id.slice("deal_accept:".length) ===
+      firstCut.id.slice("deal_reject:".length)
+  ) {
+    keepDiplomacy -= 1;
+  }
   const keepOthers = Math.min(othersCount, cap - keepDiplomacy);
   const keptDiplomacyIds = new Set(
     diplomacy.slice(0, keepDiplomacy).map((action) => action.id),

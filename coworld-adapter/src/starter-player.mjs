@@ -28,12 +28,15 @@ socket.on("message", (data) => {
     return;
   }
 
-  const action = chooseAction(message.request.legalActions ?? []);
+  const legalActions = message.request.legalActions ?? [];
+  const action = chooseAction(legalActions);
+  const dealAction = chooseDealAction(legalActions);
   socket.send(
     JSON.stringify({
       type: "decision_response",
       requestID: message.requestID,
       selectedLegalActionId: action.id,
+      ...(dealAction !== null ? { selectedDealActionId: dealAction.id } : {}),
       reason: `Starter selected ${action.kind}: ${action.label}`,
       confidence: action.kind === "hold" ? 0.45 : 0.72,
     }),
@@ -109,5 +112,40 @@ function chooseAction(actions) {
       return action;
     }
   }
-  return actions.find((candidate) => candidate.kind === "hold") ?? actions[0];
+  return (
+    actions.find((candidate) => candidate.kind === "hold") ??
+    actions.find((candidate) => !isDealActionKind(candidate.kind)) ??
+    actions[0]
+  );
+}
+
+// Structured-deal meta-actions (deal_propose/deal_accept/deal_reject/
+// deal_withdraw) are never a valid PRIMARY move — chooseAction() above never
+// returns one. This selects the OPTIONAL second action for the diplomacy
+// slot (`selectedDealActionId`, see coworld-adapter/docs/player-protocol.md):
+// inert unless the match actually offers deal_* actions (server flag
+// PROXYWAR_TUNE_STRUCTURED_DEALS is off by default), so a starter that never
+// customizes this still behaves exactly as before. Deterministic, bounded
+// priority: answer an open offer before making one, and prefer a definite
+// answer over silence — accept, then reject, then propose one of our own,
+// and only withdraw a stale offer of our own last.
+const DEAL_ACTION_KINDS = [
+  "deal_accept",
+  "deal_reject",
+  "deal_propose",
+  "deal_withdraw",
+];
+
+function isDealActionKind(kind) {
+  return DEAL_ACTION_KINDS.includes(kind);
+}
+
+function chooseDealAction(actions) {
+  for (const kind of DEAL_ACTION_KINDS) {
+    const action = actions.find((candidate) => candidate.kind === kind);
+    if (action) {
+      return action;
+    }
+  }
+  return null;
 }
