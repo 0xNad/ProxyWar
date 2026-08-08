@@ -258,6 +258,8 @@ interface DecisionLogEntry {
   parseSuccess?: boolean;
   parseFailureReason?: string;
   fallbackUsed: boolean;
+  /** Additive: whether the deciding brain was degraded on THIS decision; absent (not `false`) on records that predate the field or never carried `decisionMetadata.llmPlannerDegraded` — mirrors the live `coworld-results.ts` degraded_count/fallback_count signal onto the persisted artifact. */
+  llmPlannerDegraded?: boolean;
   fallbackActionID?: string;
   /** The substituted fallback brain's OWN genuine reason for its pick — distinct from `reason` (which is `null` on this path). Present only when `fallbackUsed`. */
   fallbackReason?: string;
@@ -779,6 +781,10 @@ function decisionLogEntry(
         }
       : {}),
     fallbackUsed: booleanMetadata(metadata, "fallbackUsed") ?? false,
+    // Additive: absent unless the decision's own metadata carried it.
+    ...(booleanMetadata(metadata, "llmPlannerDegraded") !== undefined
+      ? { llmPlannerDegraded: booleanMetadata(metadata, "llmPlannerDegraded") }
+      : {}),
     ...(stringMetadata(metadata, "fallbackActionID") !== undefined
       ? { fallbackActionID: stringMetadata(metadata, "fallbackActionID") }
       : {}),

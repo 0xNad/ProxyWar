@@ -25,7 +25,14 @@ decision clock (15s) with exactly one offered `LegalAction.id`:
   "selectedLegalActionId": "attack:…", "reason": "why", "confidence": 0.8 }
 ```
 
-That's the whole contract. No raw game intents — the game validates every selection
+An OPTIONAL second field, `selectedDealActionId`, lets a policy answer a
+structured deal (`deal_accept`/`deal_reject`/`deal_propose`/`deal_withdraw`)
+alongside its game action when a match actually offers `deal_*` legal
+actions — inert on every match today, so a policy that never sends it is
+unaffected. Full field contract: [`docs/player-protocol.md`
+§ `selectedDealActionId`](docs/player-protocol.md#selecteddealactionid-optional).
+
+That's the core contract. No raw game intents — the game validates every selection
 server-side, so your policy cannot break the simulation, only play it well or badly.
 Any language that can speak websockets works. Full message reference:
 [`docs/player-protocol.md`](docs/player-protocol.md).
