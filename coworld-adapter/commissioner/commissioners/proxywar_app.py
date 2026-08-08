@@ -41,12 +41,18 @@ COMPETITION_LADDER: list[tuple[int, list[str]]] = [
             # after a FULL 500-step hosted wall-clock probe was deadline-
             # killed at ~100 min (World finished the same shape in 48.3 min;
             # Europe has ~3.6x World's land tiles). That full-length hosted
-            # timing probe has NOT been re-run as of this restoration -- only
-            # local contract tests and the 80-step memory-regression gate
-            # (heap/RSS only, not wall-clock) have passed. Do not treat this
-            # entry as hosted-timing-cleared until a fresh
-            # `coworld run-episode --variant tournament-12p-europe` (or
-            # equivalent) full-length probe is recorded.
+            # timing probe has NOT been re-run as of this restoration.
+            # WARNING: the local 80-step memory-regression gate (`PROXYWAR_
+            # MEMORY_GATE_VARIANT=tournament-12p-europe npm run gate:memory`)
+            # was run 2026-08-08 and FAILED: heapUsedMB late-window slope
+            # 4.255 MB/1k turns vs the 4 MB/1k ceiling (maxRss 429MB, well
+            # under the 600MB ceiling, so this is a slope/leak-shaped signal,
+            # not a ceiling breach) -- see coworld-adapter/artifacts/
+            # memory-gate/2026-08-08T00-04-24-973Z-report.json. Do NOT treat
+            # this entry as either memory- or hosted-timing-cleared; both the
+            # per-turn allocation behind the slope overshoot and a fresh full-
+            # length hosted timing probe must be resolved before this ships
+            # to a real league round.
             "tournament-12p-europe",
         ],
     ),
