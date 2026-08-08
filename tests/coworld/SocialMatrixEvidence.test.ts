@@ -14,6 +14,7 @@ async function evidenceModule() {
   return (await import(pathToFileURL(MODULE_FILE).href)) as {
     summarizeSocialRun: (input: Record<string, unknown>) => any;
     aggregateSocialMatrix: (runs: any[]) => any;
+    evaluateCommitmentConstruct: (runs: any[], aggregate?: any) => any;
   };
 }
 
@@ -122,5 +123,36 @@ describe("social matrix evidence", () => {
     expect(aggregateSocialMatrix([off, changed]).nonInterference.passed).toBe(
       false,
     );
+  });
+
+  it("does not validate a partial matrix or reward an abstaining policy", async () => {
+    const { summarizeSocialRun, aggregateSocialMatrix } = await evidenceModule();
+    const active = summarizeSocialRun({
+      arm: "active",
+      seed: 161803,
+      map: "Pangaea",
+      episodeIndex: 0,
+      decisions: [decision("Social keeper", "accept")],
+      results: { ...result(), seed: 161803, game_id: "PWAAJFJF" },
+      ledger: {
+        finalizedAtStep: 29,
+        events: [],
+        deals: [
+          {
+            obligations: [
+              { obligorName: "Social keeper", status: "fulfilled" },
+              { obligorName: "Social defector", status: "violated" },
+            ],
+          },
+        ],
+      },
+    });
+    const aggregate = aggregateSocialMatrix([active]);
+    expect(aggregate.commitmentConstruct).toMatchObject({
+      passed: false,
+      completeMatrix: true,
+      abstentionNotRewarded: true,
+    });
+    expect(aggregate.byProfile.skeptic.commitmentReliability).toBeNull();
   });
 });

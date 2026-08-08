@@ -351,7 +351,19 @@ function matrixMarkdown(report) {
     "",
     "Reliability is fulfilled / (fulfilled + violated + expired_unfulfilled). Moot and unverified obligations are reported but excluded. A profile with no verified terminal obligations has no reliability estimate; abstention is not perfect trustworthiness.",
     "",
+    "## Construct gate",
+    "",
+    `Status: ${report.commitmentConstruct.status}; pass=${report.commitmentConstruct.passed}.`,
+    `Complete matrix=${report.commitmentConstruct.completeMatrix}; healthy decisions=${report.commitmentConstruct.healthyRuns}; seed/game provenance=${report.commitmentConstruct.provenanceComplete}; non-interference=${report.commitmentConstruct.nonInterferencePass}; abstention not rewarded=${report.commitmentConstruct.abstentionNotRewarded}.`,
+    "",
   );
+  for (const profile of ["keeper", "defector"]) {
+    const value = report.commitmentConstruct.policies[profile];
+    lines.push(
+      `- ${profile}: held-out reliability ${formatRate(value.heldOut.commitmentReliability)}, verified-cell coverage ${formatRate(value.heldOut.verifiedCoverageRate)}, reliability pass=${value.reliabilityPass}, coverage pass=${value.coveragePass}, both maps pass=${value.mapBalancePass}, all spawn rotations pass=${value.spawnRotationPass}.`,
+    );
+  }
+  lines.push("", report.commitmentConstruct.claimBoundary, "");
   return `${lines.join("\n")}\n`;
 }
 

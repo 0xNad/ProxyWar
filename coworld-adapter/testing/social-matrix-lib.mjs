@@ -222,7 +222,7 @@ export function aggregateSocialMatrix(runs) {
   }
 
   const nonInterference = matchedOffIgnoredChecks(runs);
-  return {
+  const aggregate = {
     schemaVersion: 1,
     runCount: runs.length,
     activeRunCount: runs.filter((run) => run.arm === "active").length,
@@ -241,6 +241,111 @@ export function aggregateSocialMatrix(runs) {
         nonInterference.every((cell) => cell.complete && cell.identical),
     },
     byProfile,
+  };
+  aggregate.commitmentConstruct = evaluateCommitmentConstruct(runs, aggregate);
+  return aggregate;
+}
+
+export function evaluateCommitmentConstruct(runs, aggregate) {
+  if (aggregate === null || aggregate === undefined) {
+    throw new Error("evaluateCommitmentConstruct requires a matrix aggregate");
+  }
+  const summary = aggregate;
+  const activeRuns = runs.filter((run) => run.arm === "active");
+  const heldOutRuns = activeRuns.filter((run) => run.seed !== 424242);
+  const expectedRunCount =
+    summary.seeds.length *
+    summary.maps.length *
+    summary.episodeIndices.length *
+    summary.arms.length;
+  const policies = Object.fromEntries(
+    ["keeper", "defector"].map((profile) => {
+      const heldOut = constructSlice(heldOutRuns, profile);
+      const byMap = Object.fromEntries(
+        summary.maps.map((map) => [
+          map,
+          constructSlice(
+            heldOutRuns.filter((run) => run.map === map),
+            profile,
+          ),
+        ]),
+      );
+      const byEpisodeIndex = Object.fromEntries(
+        summary.episodeIndices.map((episodeIndex) => [
+          episodeIndex,
+          constructSlice(
+            heldOutRuns.filter(
+              (run) => run.episodeIndex === episodeIndex,
+            ),
+            profile,
+          ),
+        ]),
+      );
+      const threshold = profile === "keeper" ? 0.9 : 0.25;
+      const reliabilityPass = (slice) =>
+        slice.commitmentReliability !== null &&
+        (profile === "keeper"
+          ? slice.commitmentReliability >= threshold
+          : slice.commitmentReliability <= threshold);
+      const coveragePass =
+        heldOut.runCount > 0 && heldOut.verifiedCoverageRate >= 0.75;
+      return [
+        profile,
+        {
+          threshold,
+          heldOut,
+          byMap,
+          byEpisodeIndex,
+          coveragePass,
+          reliabilityPass: reliabilityPass(heldOut),
+          mapBalancePass: Object.values(byMap).every(reliabilityPass),
+          spawnRotationPass: Object.values(byEpisodeIndex).every(
+            reliabilityPass,
+          ),
+        },
+      ];
+    }),
+  );
+  const completeMatrix = runs.length === expectedRunCount;
+  const healthyRuns = runs.every(
+    (run) =>
+      run.fallbackCount === 0 &&
+      run.degradedCount === 0 &&
+      run.acceptedDecisionCount === run.decisionCount,
+  );
+  const provenanceComplete = runs.every(
+    (run) => run.resultSeed === run.seed && typeof run.gameID === "string",
+  );
+  const abstentionNotRewarded = ["skeptic", "deal-blind"].every(
+    (profile) => summary.byProfile[profile].commitmentReliability === null,
+  );
+  const passed =
+    completeMatrix &&
+    healthyRuns &&
+    provenanceComplete &&
+    summary.nonInterference.passed &&
+    abstentionNotRewarded &&
+    Object.values(policies).every(
+      (policy) =>
+        policy.coveragePass &&
+        policy.reliabilityPass &&
+        policy.mapBalancePass &&
+        policy.spawnRotationPass,
+    );
+  return {
+    status: passed ? "internally_validated_control_construct" : "not_validated",
+    passed,
+    developmentSeed: 424242,
+    heldOutSeeds: summary.seeds.filter((seed) => seed !== 424242),
+    expectedRunCount,
+    completeMatrix,
+    healthyRuns,
+    provenanceComplete,
+    nonInterferencePass: summary.nonInterference.passed,
+    abstentionNotRewarded,
+    policies,
+    claimBoundary:
+      "Distinguishes frozen commitment-control policies under matched internal conditions only; no general social-skill or LLM-trait claim.",
   };
 }
 
@@ -279,6 +384,38 @@ function countDealEvents(events) {
     counts[kind] = (counts[kind] ?? 0) + 1;
   }
   return counts;
+}
+
+function constructSlice(runs, profile) {
+  const totals = {
+    fulfilled: 0,
+    violated: 0,
+    expired_unfulfilled: 0,
+  };
+  let runsWithVerifiedTerminal = 0;
+  for (const run of runs) {
+    const value = run.byProfile[profile];
+    totals.fulfilled += value.obligations.fulfilled;
+    totals.violated += value.obligations.violated;
+    totals.expired_unfulfilled += value.obligations.expired_unfulfilled;
+    if (value.verifiedTerminalObligations > 0) {
+      runsWithVerifiedTerminal += 1;
+    }
+  }
+  const verifiedTerminalObligations =
+    totals.fulfilled + totals.violated + totals.expired_unfulfilled;
+  return {
+    runCount: runs.length,
+    runsWithVerifiedTerminal,
+    verifiedCoverageRate:
+      runs.length === 0 ? 0 : runsWithVerifiedTerminal / runs.length,
+    obligations: totals,
+    verifiedTerminalObligations,
+    commitmentReliability:
+      verifiedTerminalObligations === 0
+        ? null
+        : totals.fulfilled / verifiedTerminalObligations,
+  };
 }
 
 function nonInterferenceSignature(decisions, results) {
