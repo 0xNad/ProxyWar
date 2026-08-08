@@ -289,7 +289,10 @@ def test_twelve_seat_rotation_sweeps_every_map_in_the_pool() -> None:
     from commissioners.proxywar_app import COMPETITION_LADDER
 
     pool = dict(COMPETITION_LADDER)[12]
-    assert len(pool) >= 7, "the 2026-08-02 rotation expansion should be present"
+    assert len(pool) == 9, (
+        "the 2026-08-08 Europe restoration should bring the 12P pool to "
+        f"exactly 9 maps; saw {pool!r}"
+    )
 
     round_start = competition_round_start(12)
     round_start.variants = [
@@ -309,9 +312,82 @@ def test_twelve_seat_rotation_sweeps_every_map_in_the_pool() -> None:
         assert len(variant_ids) == 1, "a round runs exactly one map"
         seen.append(variant_ids.pop())
 
+    # Every map appears in exactly one of the 9 consecutive rounds (an
+    # unbiased sweep, not just "the whole pool showed up somewhere").
+    assert len(seen) == len(set(seen)) == 9, (
+        f"9 consecutive rounds should hit 9 distinct maps with no repeats; saw {seen}"
+    )
     assert set(seen) == set(pool), (
         f"consecutive rounds should sweep the whole pool; saw {seen}"
     )
+
+
+def test_twelve_seat_pool_includes_europe() -> None:
+    # Pins the 2026-08-08 restoration against a silent re-drop like the one
+    # that removed Europe on 2026-07-10 (commit 30cc0331f) without a
+    # corresponding test failure.
+    from commissioners.proxywar_app import COMPETITION_LADDER
+
+    pool = dict(COMPETITION_LADDER)[12]
+    assert "tournament-12p-europe" in pool, (
+        "tournament-12p-europe must stay in the 12P competition pool; "
+        f"saw {pool!r}"
+    )
+
+
+def test_tournament_12p_europe_manifest_shape_matches_sibling_12p_variants() -> None:
+    # World and Asia are the reference points named in the restoration
+    # request: Europe's declared config must be byte-identical to theirs
+    # except for the map itself, so the fix is "restore Europe", not "give
+    # Europe a different, unproven ruleset".
+    import json
+
+    manifest_path = (
+        Path(__file__).parents[2] / "coworld" / "coworld_manifest.json"
+    )
+    manifest = json.loads(manifest_path.read_text())
+    variants = {v["id"]: v for v in manifest["variants"]}
+
+    assert "tournament-12p-europe" in variants, (
+        "tournament-12p-europe must be declared in the checked-in manifest"
+    )
+    europe = variants["tournament-12p-europe"]
+    world = variants["tournament-12p-world"]
+
+    assert europe["name"] == "Tournament 12P - Europe"
+    europe_config = europe["game_config"]
+    world_config = world["game_config"]
+
+    assert europe_config["map"] == "Europe"
+    assert europe_config["difficulty"] == world_config["difficulty"] == "Easy"
+    assert europe_config["num_agents"] == world_config["num_agents"] == 12
+    assert len(europe_config["players"]) == len(world_config["players"]) == 12
+
+    # Same competitive budget as every other 12P map -- not shortened to
+    # dodge the original timeout risk (per restoration requirement).
+    for field in (
+        "max_decision_steps",
+        "turns_per_decision_step",
+        "max_decision_ms",
+        "map_size",
+        "replay_tail_turns",
+        "player_connect_timeout_seconds",
+        "episode_timeout_seconds",
+    ):
+        assert europe_config[field] == world_config[field], (
+            f"{field} diverges between Europe ({europe_config[field]!r}) and "
+            f"World ({world_config[field]!r}); 12P variants must share one budget"
+        )
+    assert europe_config["max_decision_steps"] == 500
+    assert europe_config["turns_per_decision_step"] == 100
+
+
+def test_competition_ladder_twelve_p_ids_are_unique() -> None:
+    from commissioners.proxywar_app import COMPETITION_LADDER
+
+    pool = dict(COMPETITION_LADDER)[12]
+    assert len(pool) == len(set(pool)), f"duplicate id in 12P pool: {pool!r}"
+
 
 
 def _with_full_ladder(round_start: RoundStart) -> RoundStart:

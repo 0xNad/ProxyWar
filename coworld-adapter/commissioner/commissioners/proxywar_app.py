@@ -34,6 +34,20 @@ COMPETITION_LADDER: list[tuple[int, list[str]]] = [
             "tournament-12p-eastasia",
             "tournament-12p-northamerica",
             "tournament-12p-oceania",
+            # Restored 2026-08-08: reinstates the last known-good historical
+            # 12P Europe shape (same map/map_size/step/turn/timeout config as
+            # every other 12P variant -- unshortened, for competitive
+            # fairness). Originally dropped 2026-07-10 (commit 30cc0331f)
+            # after a FULL 500-step hosted wall-clock probe was deadline-
+            # killed at ~100 min (World finished the same shape in 48.3 min;
+            # Europe has ~3.6x World's land tiles). That full-length hosted
+            # timing probe has NOT been re-run as of this restoration -- only
+            # local contract tests and the 80-step memory-regression gate
+            # (heap/RSS only, not wall-clock) have passed. Do not treat this
+            # entry as hosted-timing-cleared until a fresh
+            # `coworld run-episode --variant tournament-12p-europe` (or
+            # equivalent) full-length probe is recorded.
+            "tournament-12p-europe",
         ],
     ),
 ]
