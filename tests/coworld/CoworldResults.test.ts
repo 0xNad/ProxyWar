@@ -154,13 +154,13 @@ describe("coworldResults (Coworld results.json contract)", () => {
 
   it("stamps the exact seed encoded into the authoritative game identity", () => {
     const result = coworldResults({
-      gameId: "PWAAYDPA",
+      gameId: "PWSAYDPA",
       seed: 424242,
       players: [{ name: "Alice" }, { name: "Bob" }],
       finalState: finalState(null),
       records: [],
     });
-    expect(result).toMatchObject({ game_id: "PWAAYDPA", seed: 424242 });
+    expect(result).toMatchObject({ game_id: "PWSAYDPA", seed: 424242 });
   });
 
   it("still scores a decisive winner 1/0 by slot (unchanged by the metadata addition)", () => {

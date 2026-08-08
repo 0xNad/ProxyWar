@@ -89,8 +89,8 @@
         "seed": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 308915775,
-          "description": "Optional deterministic episode seed. Encoded as six base-26 A-Z letters so OpenFront simpleHash remains injective over the supported range."
+          "maximum": 11881375,
+          "description": "Optional deterministic episode seed. Encoded under a fixed PWS prefix as five base-26 A-Z letters so OpenFront Math.abs(simpleHash(...)) remains injective over the supported range."
         },
         "replay_tail_turns": {
           "type": "integer",
@@ -143,7 +143,7 @@
         "seed": {
           "type": ["integer", "null"],
           "minimum": 0,
-          "maximum": 308915775
+          "maximum": 11881375
         },
         "game_id": {
           "type": "string",

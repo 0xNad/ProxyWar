@@ -23,8 +23,8 @@ const seed = Number(seedRaw);
 if (!Number.isSafeInteger(maxDecisionSteps) || maxDecisionSteps < 1) {
   throw new Error("steps must be a positive safe integer");
 }
-if (!Number.isSafeInteger(seed) || seed < 0 || seed > 308915775) {
-  throw new Error("seed must be an integer from 0 through 308915775");
+if (!Number.isSafeInteger(seed) || seed < 0 || seed > 11881375) {
+  throw new Error("seed must be an integer from 0 through 11881375");
 }
 
 const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));

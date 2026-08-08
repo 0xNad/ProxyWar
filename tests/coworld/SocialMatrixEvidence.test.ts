@@ -20,7 +20,7 @@ async function evidenceModule() {
 
 function result() {
   return {
-    game_id: "PWAAYDPA",
+    game_id: "PWSAYDPA",
     seed: 424242,
     scores: [0.4, 0.3, 0.2, 0.1],
     winner_slot: null,
@@ -133,7 +133,7 @@ describe("social matrix evidence", () => {
       map: "Pangaea",
       episodeIndex: 0,
       decisions: [decision("Social keeper", "accept")],
-      results: { ...result(), seed: 161803, game_id: "PWAAJFJF" },
+      results: { ...result(), seed: 161803, game_id: "PWSJFJF" },
       ledger: {
         finalizedAtStep: 29,
         events: [],
