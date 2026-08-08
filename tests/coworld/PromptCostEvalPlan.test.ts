@@ -104,6 +104,8 @@ describe("prompt-cost paired evaluation plan", () => {
       expect(request.body.notes.length).toBeLessThanOrEqual(1000);
       expect(request.body.notes).toContain(`source=${SOURCE_SHA}`);
       expect(request.body.notes).toContain(`model=${MODEL}`);
+      expect(request.body.notes).toContain("hardening=1,max=500,prefill=0");
+      expect(request.body.notes).not.toContain("prefill=1");
       expect(request.body.roster).toHaveLength(12);
       expect(request.body.roster.map((entry) => entry.slot)).toEqual(
         Array.from({ length: 12 }, (_, index) => index),

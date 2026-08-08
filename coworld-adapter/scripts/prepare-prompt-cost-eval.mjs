@@ -111,7 +111,7 @@ export function buildPromptCostEvalPlan(input) {
       const notes =
         `${experiment}; ${parity}; source=${sourceSha}; model=${model}; ` +
         `baseline=${baselinePolicy}@${baselineImageDigest},hardening=0,max=300,prefill=0; ` +
-        `candidate=${candidatePolicy}@${candidateImageDigest},hardening=1,max=500,prefill=1; ` +
+        `candidate=${candidatePolicy}@${candidateImageDigest},hardening=1,max=500,prefill=0; ` +
         "eval-only, never league-submit; compare outcomes, usage, latency, fallback, degradation, and social evidence";
       if (notes.length > 1000)
         throw new Error(
