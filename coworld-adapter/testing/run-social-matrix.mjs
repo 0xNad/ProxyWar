@@ -107,11 +107,15 @@ export async function runSocialMatrix(options = {}) {
       path.join(runDir, "run-summary.json"),
     );
     if (cached !== null) {
-      await validateCachedRun(cached, cell, {
+      const rebuilt = await validateCachedRun(cached, cell, {
         maxDecisionSteps,
         turnsPerDecisionStep,
       });
-      runs.push(cached);
+      await fs.writeFile(
+        path.join(runDir, "run-summary.json"),
+        `${JSON.stringify(rebuilt, null, 2)}\n`,
+      );
+      runs.push(rebuilt);
       console.log(
         `[social-matrix ${index + 1}/${plan.length}] cached ${cellLabel(cell)}`,
       );
@@ -180,6 +184,7 @@ export async function validateCachedRun(run, cell, expected) {
   ) {
     throw new Error(`cached artifact evidence missing for ${cellLabel(cell)}`);
   }
+  const artifactText = {};
   for (const key of [
     "config",
     "results",
@@ -200,6 +205,7 @@ export async function validateCachedRun(run, cell, expected) {
       ) {
         throw new Error(`cached ${key} hash missing for ${cellLabel(cell)}`);
       }
+      artifactText[key] = null;
       continue;
     }
     if (typeof expectedHash !== "string") {
@@ -209,11 +215,88 @@ export async function validateCachedRun(run, cell, expected) {
     if (typeof artifactPath !== "string") {
       throw new Error(`cached ${key} path missing for ${cellLabel(cell)}`);
     }
-    const actualHash = sha256(await fs.readFile(artifactPath));
+    const text = await fs.readFile(artifactPath, "utf8");
+    const actualHash = sha256(text);
     if (actualHash !== expectedHash) {
       throw new Error(`cached ${key} hash mismatch for ${cellLabel(cell)}`);
     }
+    artifactText[key] = text;
   }
+
+  let config;
+  let results;
+  let replay;
+  let decisions;
+  let ledger;
+  try {
+    config = JSON.parse(artifactText.config);
+    results = JSON.parse(artifactText.results);
+    replay = JSON.parse(artifactText.replay);
+    decisions = parseJsonLines(artifactText.decisions);
+    JSON.parse(artifactText.telemetry);
+    ledger =
+      artifactText.dealLedger === null
+        ? null
+        : JSON.parse(artifactText.dealLedger);
+  } catch (error) {
+    throw new Error(
+      `cached artifact parse failed for ${cellLabel(cell)}: ${error.message}`,
+      { cause: error },
+    );
+  }
+
+  const expectedPlayers = SOCIAL_MATRIX_PROFILES.map(socialPlayerName);
+  if (
+    config.seed !== cell.seed ||
+    config.map !== cell.map ||
+    config.episodeIndex !== cell.episodeIndex ||
+    config.max_decision_steps !== expected.maxDecisionSteps ||
+    config.turns_per_decision_step !== expected.turnsPerDecisionStep ||
+    JSON.stringify(config.players?.map((player) => player.name)) !==
+      JSON.stringify(expectedPlayers)
+  ) {
+    throw new Error(`cached config mismatch for ${cellLabel(cell)}`);
+  }
+  const expectedGameID = expectedSocialGameID(cell.seed);
+  if (results.seed !== cell.seed || results.game_id !== expectedGameID) {
+    throw new Error(
+      `cached results provenance mismatch for ${cellLabel(cell)}`,
+    );
+  }
+  if (
+    replay.matchID !== expectedGameID ||
+    replay.results?.seed !== cell.seed ||
+    replay.results?.game_id !== expectedGameID
+  ) {
+    throw new Error(`cached replay provenance mismatch for ${cellLabel(cell)}`);
+  }
+  if (
+    replay.proxyWarArtifacts?.decisionsPath !== run.artifactPaths.decisions ||
+    replay.proxyWarArtifacts?.spectatorTelemetryPath !==
+      run.artifactPaths.telemetry ||
+    (replay.proxyWarArtifacts?.dealLedgerPath ?? null) !==
+      run.artifactPaths.dealLedger
+  ) {
+    throw new Error(
+      `cached replay artifact path mismatch for ${cellLabel(cell)}`,
+    );
+  }
+
+  return {
+    ...summarizeSocialRun({
+      arm: cell.arm,
+      seed: cell.seed,
+      map: cell.map,
+      episodeIndex: cell.episodeIndex,
+      decisions,
+      results,
+      ledger,
+    }),
+    maxDecisionSteps: expected.maxDecisionSteps,
+    turnsPerDecisionStep: expected.turnsPerDecisionStep,
+    artifactPaths: run.artifactPaths,
+    sha256: run.sha256,
+  };
 }
 
 async function runSocialCell(input) {
