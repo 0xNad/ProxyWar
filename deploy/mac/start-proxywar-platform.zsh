@@ -2,22 +2,19 @@
 # launchd entry point for the PLATFORM account origin (proxywar.xyz, the apex).
 #
 # This is the sole account and session authority: GitHub sign-in, account
-# records, display names, lineage claims, the handoff codes children redeem,
-# and the player profile pages. Runs with wagering OFF — accounts existing
-# without a market is the entire point of the identity re-scope.
+# records, display names, lineage claims, and player profile pages.
 #
 # Lives here rather than in the deploy for the same reason the other agents
 # do: it keeps the launchd entry point on a stable, non-TCC-restricted path.
 #
-# Independent of betting by design. It must keep serving accounts and profiles
-# whether or not the betting autocycler or Coworld generation are running.
+# Independent of Coworld generation by design.
 set -u
 
 DEPLOY_DIR="${PROXYWAR_PLATFORM_DEPLOY_DIR:-$HOME/.proxywar-deploy/platform-origin}"
 
 if [[ ! -d "$DEPLOY_DIR" ]]; then
   print -r -- "platform: deploy dir missing: $DEPLOY_DIR" >&2
-  exit 78   # EX_CONFIG — permanent misconfiguration, not a transient fault
+  exit 78 # EX_CONFIG — permanent misconfiguration, not a transient fault
 fi
 
 STATE_ROOT="${PROXYWAR_PLATFORM_STATE_ROOT:-$HOME/.proxywar-deploy/platform-state}"
@@ -26,8 +23,7 @@ chmod 700 "$STATE_ROOT"
 
 # No HMAC key is passed in, deliberately. loadOrCreatePlatformHmacKey mints and
 # persists one (0600, no-follow, pinned to the state root) whenever no hex is
-# configured, and unlike betting's premiere root this state root is durable and
-# never wiped — so there is nothing to protect it from. Passing the key as an
+# configured, and this state root is durable and never wiped. Passing the key as an
 # env value would put the session-signing key one `ps eww <pid>` away from
 # cookie forgery, and passing a second copy by path would just duplicate
 # ownership of a key the loader already owns correctly.
@@ -36,7 +32,7 @@ chmod 700 "$STATE_ROOT"
 # exist — no button, no routes — which is the correct unconfigured state. The
 # secret is passed as a PATH, never a value: `ps eww <pid>` dumps a process's
 # whole environment.
-export PROXYWAR_GITHUB_OAUTH_CLIENT_ID="$(cat "$HOME/.proxywar-deploy/github-oauth-client-id" 2>/dev/null || true)"
+export PROXYWAR_GITHUB_OAUTH_CLIENT_ID="$(cat "$HOME/.proxywar-deploy/github-oauth-client-id" 2> /dev/null || true)"
 export PROXYWAR_GITHUB_OAUTH_CLIENT_SECRET_FILE="$HOME/.proxywar-deploy/github-oauth-client-secret"
 
 cd "$DEPLOY_DIR" || exit 78
@@ -54,12 +50,6 @@ export PROXYWAR_PLATFORM_ENABLED=1
 # session cookie is host-only. The client's build-time define must match, so
 # rebuild static/ with the same value (npx vite build) whenever this changes.
 export PROXYWAR_PLATFORM_ORIGIN="https://proxywar.xyz"
-# MUST be a JSON object of audience -> origin. A comma-separated list parses
-# as invalid JSON, the whole allowlist is dropped, and /handoff/start then
-# 400s for every audience - which is exactly the bug this line shipped with.
-# The platform logs "PROXYWAR_PLATFORM_RETURN_ORIGINS is not valid JSON" when
-# that happens; grep /tmp/pw-platform.log after changing this.
-export PROXYWAR_PLATFORM_RETURN_ORIGINS='{"betting":"https://bet.proxywar.xyz","league":"https://beta.proxywar.xyz"}'
 export PROXYWAR_PLATFORM_STATE_ROOT="$STATE_ROOT"
 export PROXYWAR_LEAGUE_WRAPPER_ONLY=true
 export PROXYWAR_ARTIFACTS_ROOT="${PROXYWAR_ARTIFACTS_ROOT:-$DEPLOY_DIR/artifacts}"

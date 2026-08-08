@@ -125,7 +125,6 @@ function target(
     ],
     getPremiereState: () => "scheduled",
     getReleasedContext: () => null,
-    getLiveVisibleSequence: () => -1,
     persistence: { async persist() {} },
     signAttribution: () => "unused",
     canonicalPremiereUrl: `https://beta.proxywar.xyz/premiere/${premiereId}`,

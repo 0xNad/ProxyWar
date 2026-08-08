@@ -1321,7 +1321,7 @@ function builderNoteMarkup(view: AgentIdentityView, isHouse: boolean): string {
  * `/agent/:slug` is mounted unconditionally on every process
  * (`ai-agent-demo-server.ts`'s `app.get("/agent/:slug", ...)` has no
  * `platformEnabled`/`leagueWrapperOnly` gate), so it exists at the same
- * path on beta, the platform apex, and the betting origin alike. A hardcoded
+ * path on every product origin. A hardcoded
  * `PLAYER_PROFILE_ORIGIN` (`https://proxywar.xyz` by default) here was a
  * live P0 bug: every standings-row agent link on beta.proxywar.xyz/league
  * navigated cross-origin to `proxywar.xyz/agent/<slug>` instead of staying

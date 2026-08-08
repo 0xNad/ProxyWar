@@ -1,11 +1,11 @@
-import { readFileSync } from "node:fs";
-import { promises as fs } from "node:fs";
+import { promises as fs, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
+import { DECISIVE_MOMENTS_SCHEMA_VERSION } from "../../src/server/agents/AgentDecisiveMoments";
+import type { AgentMatchRecap } from "../../src/server/agents/AgentMatchRecap";
 import { generateMatchNarrativeArtifactsForRunDir } from "../../src/server/agents/CoworldLeagueMatchNarrativeBackfill";
 import { generateMatchStateSeriesForRunDir } from "../../src/server/agents/CoworldLeagueMatchStateSeriesBackfill";
-import type { AgentMatchRecap } from "../../src/server/agents/AgentMatchRecap";
 
 /**
  * End-to-end mirror-side integration: `match-state-series.json` generated
@@ -23,11 +23,19 @@ import type { AgentMatchRecap } from "../../src/server/agents/AgentMatchRecap";
  */
 
 const realReplayFixtureRaw = readFileSync(
-  path.join(__dirname, "fixtures", "coworld-mirror-match-state-series-replay.sample.json"),
+  path.join(
+    __dirname,
+    "fixtures",
+    "coworld-mirror-match-state-series-replay.sample.json",
+  ),
   "utf8",
 );
 const realTelemetryFixtureRaw = readFileSync(
-  path.join(__dirname, "fixtures", "coworld-mirror-match-state-series-telemetry.sample.json"),
+  path.join(
+    __dirname,
+    "fixtures",
+    "coworld-mirror-match-state-series-telemetry.sample.json",
+  ),
   "utf8",
 );
 
@@ -36,7 +44,9 @@ let runDir: string;
 
 beforeEach(async () => {
   root = await fs.realpath(
-    await fs.mkdtemp(path.join(os.tmpdir(), "pw-narrative-series-integration-")),
+    await fs.mkdtemp(
+      path.join(os.tmpdir(), "pw-narrative-series-integration-"),
+    ),
   );
   runDir = path.join(root, "league-coworld-integration-1");
   await fs.mkdir(runDir, { recursive: true });
@@ -104,7 +114,11 @@ test("P0 regression: a pre-existing decisive-moments.json on the OLD schema (car
   await fs.writeFile(
     path.join(runDir, "decisions.jsonl"),
     readFileSync(
-      path.join(__dirname, "fixtures", "coworld-mirror-director-cut-decisions.sample.jsonl"),
+      path.join(
+        __dirname,
+        "fixtures",
+        "coworld-mirror-director-cut-decisions.sample.jsonl",
+      ),
       "utf8",
     ),
   );
@@ -159,7 +173,7 @@ test("P0 regression: a pre-existing decisive-moments.json on the OLD schema (car
   const moments = JSON.parse(
     await fs.readFile(path.join(runDir, "decisive-moments.json"), "utf8"),
   ) as { schemaVersion: number; moments: { statedReason: string | null }[] };
-  expect(moments.schemaVersion).toBe(2);
+  expect(moments.schemaVersion).toBe(DECISIVE_MOMENTS_SCHEMA_VERSION);
   for (const moment of moments.moments) {
     // The contaminated moment's statedReason had NO involved agents in the
     // series/telemetry, so it degrades to null (the honest-absence

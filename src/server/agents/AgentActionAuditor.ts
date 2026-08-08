@@ -26,7 +26,11 @@ export function auditDecisionEffects(input: {
   afterGame: Game | null;
 }): void {
   for (const record of input.records) {
-    record.audit = auditDecisionEffect(record, input.beforeGame, input.afterGame);
+    record.audit = auditDecisionEffect(
+      record,
+      input.beforeGame,
+      input.afterGame,
+    );
   }
 }
 
@@ -80,11 +84,24 @@ export function auditDecisionEffect(
     case "build_unit":
       return auditBuild(record, afterGame, before, after, record.intent);
     case "embargo":
-      return auditEmbargo(before, after, record.intent.targetID, record.intent.action);
+      return auditEmbargo(
+        before,
+        after,
+        record.intent.targetID,
+        record.intent.action,
+      );
     case "allianceRequest":
       return auditAllianceRequest(before, after, record.intent.recipient);
+    case "breakAlliance":
+      return auditBreakAlliance(before, after, record.intent.recipient);
     case "attack":
-      return auditAttack(before, after, targetBefore, targetAfter, record.intent);
+      return auditAttack(
+        before,
+        after,
+        targetBefore,
+        targetAfter,
+        record.intent,
+      );
     case "donate_gold":
       return auditDonateGold(before, after, targetBefore, targetAfter);
     case "donate_troops":
@@ -107,7 +124,6 @@ export function auditDecisionEffect(
       return auditTargetPlayer(after, record.intent.target);
     case "allianceReject":
     case "allianceExtension":
-    case "breakAlliance":
     case "quick_chat":
     case "emoji":
       return {
@@ -153,7 +169,8 @@ function auditCancelAttack(
   after: AgentActionAuditSnapshot,
   attackID: string,
 ): AgentActionAudit {
-  const beforeHadAttack = before?.outgoingAttackIDs?.includes(attackID) ?? false;
+  const beforeHadAttack =
+    before?.outgoingAttackIDs?.includes(attackID) ?? false;
   const afterHasAttack = after.outgoingAttackIDs?.includes(attackID) ?? false;
   return {
     auditStatus: beforeHadAttack && !afterHasAttack ? "confirmed" : "unknown",
@@ -171,13 +188,17 @@ function auditCancelBoat(
   after: AgentActionAuditSnapshot,
   unitID: number,
 ): AgentActionAudit {
-  const beforeHadBoat = before?.unitTiles?.[`TransportShip:${unitID}`] !== undefined;
-  const afterHasBoat = after.unitTiles?.[`TransportShip:${unitID}`] !== undefined;
+  const beforeHadBoat =
+    before?.unitTiles?.[`TransportShip:${unitID}`] !== undefined;
+  const afterHasBoat =
+    after.unitTiles?.[`TransportShip:${unitID}`] !== undefined;
   const afterRetreating =
     after.transportRetreatingUnitIDs?.includes(unitID) ?? false;
   return {
     auditStatus:
-      (beforeHadBoat && !afterHasBoat) || afterRetreating ? "confirmed" : "unknown",
+      (beforeHadBoat && !afterHasBoat) || afterRetreating
+        ? "confirmed"
+        : "unknown",
     auditReason:
       (beforeHadBoat && !afterHasBoat) || afterRetreating
         ? `cancel_boat accepted and transport ${unitID} is gone or retreating`
@@ -199,7 +220,8 @@ function auditBoat(
     after.troops !== null &&
     after.troops < before.troops;
   return {
-    auditStatus: afterCount > beforeCount || troopDecrease ? "confirmed" : "unknown",
+    auditStatus:
+      afterCount > beforeCount || troopDecrease ? "confirmed" : "unknown",
     auditReason:
       afterCount > beforeCount || troopDecrease
         ? "boat accepted and after-state shows a new transport or troop commitment"
@@ -266,7 +288,8 @@ function auditDeleteUnit(
     key.endsWith(`:${unitID}`),
   );
   return {
-    auditStatus: beforeKeys.length > 0 && afterKeys.length === 0 ? "confirmed" : "unknown",
+    auditStatus:
+      beforeKeys.length > 0 && afterKeys.length === 0 ? "confirmed" : "unknown",
     auditReason:
       beforeKeys.length > 0 && afterKeys.length === 0
         ? `delete_unit accepted and unit ${unitID} disappeared from snapshot`
@@ -298,7 +321,9 @@ function auditTargetPlayer(
 ): AgentActionAudit {
   return {
     auditStatus:
-      after.targetPlayerIDs?.includes(targetID) === true ? "confirmed" : "unknown",
+      after.targetPlayerIDs?.includes(targetID) === true
+        ? "confirmed"
+        : "unknown",
     auditReason:
       after.targetPlayerIDs?.includes(targetID) === true
         ? `targetPlayer accepted and after-state lists ${targetID} as a target`
@@ -387,10 +412,39 @@ function auditAllianceRequest(
       after,
     };
   }
+  if (
+    before?.alliedPlayerIDs?.includes(recipientID) !== true &&
+    after.alliedPlayerIDs?.includes(recipientID) === true
+  ) {
+    return {
+      auditStatus: "confirmed",
+      auditReason: `allianceRequest accepted and after-state shows a newly formed core alliance with ${recipientID}`,
+      before,
+      after,
+    };
+  }
   return {
     auditStatus: "unknown",
     auditReason:
       "allianceRequest was accepted, but the after-state did not expose the request; it may have expired, been resolved, or been filtered by the mirror snapshot",
+    before,
+    after,
+  };
+}
+
+function auditBreakAlliance(
+  before: AgentActionAuditSnapshot | null,
+  after: AgentActionAuditSnapshot,
+  recipientID: string,
+): AgentActionAudit {
+  const wasAllied = before?.alliedPlayerIDs?.includes(recipientID) === true;
+  const remainsAllied = after.alliedPlayerIDs?.includes(recipientID) === true;
+  return {
+    auditStatus: wasAllied && !remainsAllied ? "confirmed" : "unknown",
+    auditReason:
+      wasAllied && !remainsAllied
+        ? `breakAlliance accepted and after-state no longer shows a core alliance with ${recipientID}`
+        : "breakAlliance was accepted, but a before/after core-alliance state change could not be confirmed",
     before,
     after,
   };
@@ -604,28 +658,24 @@ function snapshotPlayer(
     ),
     unitLevels: Object.fromEntries(
       auditedUnitTypes.flatMap((type) =>
-        player
-          .units(type)
-          .flatMap((unit) => {
-            const id = safeUnitID(unit);
-            const level = safeUnitLevel(unit);
-            return id === null || level === null
-              ? []
-              : [[`${type}:${id}`, level] as const];
-          }),
+        player.units(type).flatMap((unit) => {
+          const id = safeUnitID(unit);
+          const level = safeUnitLevel(unit);
+          return id === null || level === null
+            ? []
+            : [[`${type}:${id}`, level] as const];
+        }),
       ),
     ),
     unitTiles: Object.fromEntries(
       auditedUnitTypes.flatMap((type) =>
-        player
-          .units(type)
-          .flatMap((unit) => {
-            const id = safeUnitID(unit);
-            const tile = safeUnitTile(unit);
-            return id === null || tile === null
-              ? []
-              : [[`${type}:${id}`, tile] as const];
-          }),
+        player.units(type).flatMap((unit) => {
+          const id = safeUnitID(unit);
+          const tile = safeUnitTile(unit);
+          return id === null || tile === null
+            ? []
+            : [[`${type}:${id}`, tile] as const];
+        }),
       ),
     ),
     outgoingAttackTargetIDs: player
@@ -636,6 +686,10 @@ function snapshotPlayer(
     outgoingAllianceRequestRecipientIDs: player
       .outgoingAllianceRequests()
       .map((request) => request.recipient().id()),
+    alliedPlayerIDs: player
+      .allies()
+      .map((ally) => ally.id())
+      .sort(),
     outgoingEmbargoTargetIDs: player
       .getEmbargoes()
       .map((embargo) => embargo.target.id()),
@@ -663,7 +717,8 @@ function safeUnitTile(unit: { tile?: () => number }): number | null {
 }
 
 function playerTargets(player: Player): string[] {
-  const maybeTargets = (player as Player & { targets?: () => Player[] }).targets;
+  const maybeTargets = (player as Player & { targets?: () => Player[] })
+    .targets;
   return typeof maybeTargets === "function"
     ? maybeTargets.call(player).map((target) => target.id())
     : [];
@@ -716,7 +771,12 @@ function compareGold(
   left: string | null | undefined,
   right: string | null | undefined,
 ): number {
-  if (left === null || left === undefined || right === null || right === undefined) {
+  if (
+    left === null ||
+    left === undefined ||
+    right === null ||
+    right === undefined
+  ) {
     return 0;
   }
   try {

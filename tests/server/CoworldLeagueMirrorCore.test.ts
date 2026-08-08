@@ -80,7 +80,9 @@ const standingsFixture = [
 const championMembershipsFixture = [
   {
     status: "competing",
-    substatus: "active",
+    // Coworld currently emits this explicit substatus for a valid champion.
+    // The mirror must not require the older `active` spelling.
+    substatus: "champion",
     is_champion: true,
     end_time: null,
     start_time: "2026-07-15T18:00:00Z",
@@ -178,6 +180,7 @@ const replayPayloadFixture = {
   inlineRunArtifacts: {
     "game-record.json": "{}",
     "decisions.jsonl": "{}",
+    "deal-ledger.json": '{"schemaVersion":1,"deals":[],"events":[]}',
     "../escape.json": "{}",
     "bad/name.json": "{}",
   },
@@ -218,7 +221,7 @@ describe("CoworldLeagueMirrorCore", () => {
     expect(division?.name).toBe("Competition");
   });
 
-  test("maps only active competing champion memberships by player", () => {
+  test("maps active and champion competing memberships by player", () => {
     const labels = activeChampionPolicyLabelsByPlayerId([
       ...championMembershipsFixture,
       {
@@ -359,6 +362,7 @@ describe("CoworldLeagueMirrorCore", () => {
     expect(Object.keys(replay?.inlineRunArtifacts ?? {})).toEqual([
       "game-record.json",
       "decisions.jsonl",
+      "deal-ledger.json",
     ]);
     expect(replay?.spectatorReplay).not.toBeNull();
   });
@@ -1151,6 +1155,31 @@ describe("mirrored decisions.jsonl economy/deal stamp projection (economy-negoti
     // exact keys addDealEvents reads, dealStatedReason and dealSeparateSlot
     // included (the writer withheld both until the stamps were hoisted).
     expect(records[0].decisionMetadata).toEqual(dealStamps);
+  });
+
+  test("a mirrored line preserves fallback, degradation, reason, and audit provenance", () => {
+    const { records } = agentDecisionRecordsFromMirroredDecisionsLog(
+      `${JSON.stringify({
+        ...bareLine,
+        reason: "Attack follows the accepted pact.",
+        fallbackUsed: true,
+        llmPlannerDegraded: true,
+        auditStatus: "confirmed",
+        auditReason: "outgoing attack was visible after execution",
+      })}\n`,
+    );
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      reason: "Attack follows the accepted pact.",
+      decisionMetadata: {
+        fallbackUsed: true,
+        llmPlannerDegraded: true,
+      },
+      audit: {
+        auditStatus: "confirmed",
+        auditReason: "outgoing attack was visible after execution",
+      },
+    });
   });
 
   test("a line without the stamps still projects byte-identically to the pre-economy shape", () => {

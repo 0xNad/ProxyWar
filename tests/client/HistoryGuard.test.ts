@@ -2,7 +2,7 @@
  * P0 fix (found live 2026-08-02): after Back from a replay, Forward failed
  * with "History entry not found" — `Main.ts`'s `handleJoinLobby`'s "ensure
  * a homepage entry" `replaceState` fired on ANY page with an empty hash,
- * including a replay/premiere/bet/game page re-joined via Back/Forward
+ * including a replay/premiere/game page re-joined via Back/Forward
  * (none of those carry a hash either), silently rewriting an
  * already-legitimate history entry to `#refresh` and orphaning whatever
  * the browser's session history expected to sit there.
@@ -24,7 +24,6 @@ describe("isReplayOrGamePathShape", () => {
       true,
     );
     expect(isReplayOrGamePathShape("/premiere/prem_abc123")).toBe(true);
-    expect(isReplayOrGamePathShape("/bet/prem_abc123")).toBe(true);
     expect(isReplayOrGamePathShape("/streamer-mode")).toBe(true);
     expect(isReplayOrGamePathShape("/w1/game/lobby-abc123")).toBe(true);
   });
@@ -40,9 +39,8 @@ describe("isReplayOrGamePathShape", () => {
 
   it("does not false-positive on a path that merely starts similarly", () => {
     // Must anchor at the start and require a trailing `/` after the
-    // matched alternative — a bare "/premiere" or "/bets/x" must not match.
+    // matched alternative — a bare "/premiere" must not match.
     expect(isReplayOrGamePathShape("/premiere")).toBe(false);
-    expect(isReplayOrGamePathShape("/bets/x")).toBe(false);
     expect(isReplayOrGamePathShape("/premieres/x")).toBe(false);
   });
 });

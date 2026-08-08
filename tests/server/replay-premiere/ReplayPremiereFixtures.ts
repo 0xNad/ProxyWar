@@ -67,11 +67,9 @@ export const LONG_REPLAY_CHUNK_LIMITS = {
 /**
  * A 50-minute premiere at REAL production cadence
  * (`PREMIERE_REAL_TURN_INTERVAL_MS`, playbackRate 1) — proves a long-running
- * premiere admits and plays with wagering on using the coarse, unmodified
+ * premiere admits and plays using the coarse, unmodified
  * `REPLAY_PREMIERE_MAX_PRESENTATION_SPAN_MS` chunk-release ceiling (~50
- * chunks, well under the 128-chunk cap). The wagering read-ahead property
- * comes from `ReplayPremiereRuntimeCoordinator.readLiveVisibleSequence`
- * binding orders to the release clock, never from shrinking chunk storage.
+ * chunks, well under the 128-chunk cap).
  */
 export const REALTIME_LONG_TURN_COUNT = 30_000;
 export const REALTIME_LONG_TURN_INTERVAL_MS = PREMIERE_REAL_TURN_INTERVAL_MS;
@@ -359,8 +357,7 @@ function realtimeLongControlledSourceMaterial(): {
 } {
   const completedAt = NOW.toISOString();
   const startedAt = new Date(
-    NOW.getTime() -
-      REALTIME_LONG_TURN_COUNT * REALTIME_LONG_TURN_INTERVAL_MS,
+    NOW.getTime() - REALTIME_LONG_TURN_COUNT * REALTIME_LONG_TURN_INTERVAL_MS,
   ).toISOString();
   const resultBytes = Buffer.from(
     canonicalReplayPremiereJson(

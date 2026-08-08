@@ -1,7 +1,7 @@
 /**
  * Gap 1: the platform's own homepage. Two things must hold:
  *   1. `renderPlatformRootHtml` says what Proxy War is and gives exactly
- *      four ways in (League, Replays, Market, Account).
+ *      three ways in (League, Replays, Account).
  *   2. Against a REAL running server, `GET /` renders that page ONLY when
  *      `PROXYWAR_PLATFORM_ENABLED` — every other process keeps serving the
  *      byte-identical internal demo hub, proven against the SAME pure
@@ -34,31 +34,24 @@ const projectRoot = process.cwd();
 const require = createRequire(import.meta.url);
 
 describe("renderPlatformRootHtml (pure)", () => {
-  test("states what Proxy War is and gives exactly four ways in", () => {
+  test("states what Proxy War is and gives exactly three ways in", () => {
     const html = renderPlatformRootHtml({
       leagueUrl: "https://beta.example/league",
       replaysUrl: "https://beta.example/watch",
-      marketUrl: "https://bet.example/bet",
       githubSignInAvailable: true,
     });
     expect(html).toContain("Proxy War");
     // One clear explainer sentence, not a dashboard.
     expect(html).toMatch(/AI agents fight for territory/);
-    // Exactly four entry points, unmistakably labelled.
-    for (const label of ["League", "Replays", "Market", "Account"]) {
+    // Exactly three entry points, unmistakably labelled.
+    for (const label of ["League", "Replays", "Account"]) {
       expect(html).toContain(`<h2>${label}</h2>`);
     }
     expect(html).toContain('href="https://beta.example/league"');
     expect(html).toContain('href="https://beta.example/watch"');
-    expect(html).toContain('href="https://bet.example/bet"');
-    // Replays and Market cards must have different hrefs
+    expect(html).not.toContain("Market");
     const replayMatch = html.match(/href="([^"]*)"[^<]*<h2>Replays<\/h2>/);
-    const marketMatch = html.match(/href="([^"]*)"[^<]*<h2>Market<\/h2>/);
     expect(replayMatch).toBeTruthy();
-    expect(marketMatch).toBeTruthy();
-    expect(replayMatch![1]).not.toEqual(marketMatch![1]);
-    // Replays href must not point to /bet
-    expect(replayMatch![1]).not.toMatch(/\/bet($|[?#])/);
     // Never a duplicate of the account page's own content/controls.
     expect(html).not.toContain("display-name");
     expect(html).not.toContain("csrfToken");
@@ -68,11 +61,10 @@ describe("renderPlatformRootHtml (pure)", () => {
     // The OAuth routes are absent entirely without configured credentials, so
     // a homepage promising GitHub sign-in would be advertising a 404. The
     // meta description must not claim cross-surface identity either: the
-    // league has no handoff integration, so identity reaches the market only.
+    // account copy must stay honest when OAuth is unavailable.
     const html = renderPlatformRootHtml({
       leagueUrl: "https://beta.example/league",
       replaysUrl: "https://beta.example/watch",
-      marketUrl: "https://bet.example/bet",
       githubSignInAvailable: false,
     });
     expect(html).not.toContain("Sign in with GitHub");
@@ -143,15 +135,11 @@ describe("GET / (real servers)", () => {
           PROXYWAR_LEAGUE_WRAPPER_ONLY: "true",
           PROXYWAR_PLATFORM_STATE_ROOT: platformStateRoot,
           PROXYWAR_LEAGUE_HOME_URL: "https://beta.proxywar.test/league",
-          PROXYWAR_MARKET_HOME_URL: "https://bet.proxywar.test/bet",
           // Deliberately NOT overridden: this is the one test that must
           // exercise the REAL default (`platformReplaysHomeUrl` in
           // ai-agent-demo-server.ts, currently `https://beta.proxywar.xyz/
           // watch`) instead of an env value that happens to already be
-          // correct. Overriding it to a bet.-shaped URL here would make
-          // this suite pass even if the default regressed back to
-          // `${bettingOrigin}/bet` (see `b9ca3238a`'s fix and its own
-          // supersession note above `platformMarketHomeUrl` in that file).
+          // correct.
         },
         stdio: ["ignore", "pipe", "pipe"],
       },
@@ -206,22 +194,18 @@ describe("GET / (real servers)", () => {
     expect(response.status).toBe(200);
     expect(response.headers["content-type"]).toContain("text/html");
     expect(response.body).toContain("Proxy War");
-    for (const label of ["League", "Replays", "Market", "Account"]) {
+    for (const label of ["League", "Replays", "Account"]) {
       expect(response.body).toContain(`<h2>${label}</h2>`);
     }
     expect(response.body).toContain('href="https://beta.proxywar.test/league"');
-    expect(response.body).toContain('href="https://bet.proxywar.test/bet"');
     expect(response.body).toContain('href="/account"');
     // The Replays card must use the REAL, un-overridden production default
     // (`platformReplaysHomeUrl`) — scoped to that card's own anchor, not a
-    // bare substring match, so this fails if a future regression points
-    // Replays back at the betting origin (the exact bug `b9ca3238a` fixed:
-    // Replays and Market sharing one URL with no way to tell them apart).
+    // bare substring match.
     const replaysCardHref = /href="([^"]+)"[^>]*>\s*<h2>Replays<\/h2>/.exec(
       response.body,
     )?.[1];
     expect(replaysCardHref).toBe("https://beta.proxywar.xyz/watch");
-    expect(replaysCardHref).not.toContain("bet.");
     // Not the internal demo hub.
     expect(response.body).not.toContain("Proxy War Demo");
   });
@@ -321,7 +305,6 @@ function baseServerEnv(
     AI_LEAGUE_DEMO_RENDERER: "false",
     PROXYWAR_BETA_ENABLED: "false",
     PROXYWAR_LEAGUE_WRAPPER_ONLY: "false",
-    PROXYWAR_WAGERING_ENABLED: "false",
     PROXYWAR_CLIPS_ENABLED: "false",
     PROXYWAR_PREMIERE_CLIPS_ENABLED: "false",
     PROXYWAR_LEAGUE_CLIPS_ENABLED: "false",
@@ -331,9 +314,8 @@ function baseServerEnv(
   };
 }
 
-// `new Promise(executor)`, not `Promise.withResolvers` — this project
-// targets ES2022 lib (no ES2024), same reasoning as
-// `PremiereWageringXpRequest.ts`'s doc comment.
+// `new Promise(executor)`, not `Promise.withResolvers`: this project targets
+// the ES2022 library, which has no ES2024 helper.
 async function reservePort(): Promise<number> {
   const listener = net.createServer();
   await new Promise<void>((resolve, reject) => {

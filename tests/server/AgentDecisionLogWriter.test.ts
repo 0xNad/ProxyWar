@@ -1236,6 +1236,14 @@ describe("decisions.jsonl external-seat stamps (economyFacts + structured deals)
       dealStatedReason: DEAL_CLAIM,
       dealSeparateSlot: true,
     });
+    expect(proposeRecord!.dealSlotEvidence).toMatchObject({
+      requestedActionID: "deal_propose:P_B:non_aggression_pact",
+      validation: {
+        accepted: true,
+        actionKind: "deal_propose",
+      },
+      application: { attempted: true, accepted: true },
+    });
 
     const entries = await writeAndParseEntries(records);
     const proposeEntry = entries.find(
@@ -1244,6 +1252,9 @@ describe("decisions.jsonl external-seat stamps (economyFacts + structured deals)
     expect(proposeEntry).toBeDefined();
     expect(proposeEntry!.dealStatedReason).toBe(DEAL_CLAIM);
     expect(proposeEntry!.dealSeparateSlot).toBe(true);
+    expect(proposeEntry!.dealSlotEvidence).toEqual(
+      proposeRecord!.dealSlotEvidence,
+    );
   });
 });
 

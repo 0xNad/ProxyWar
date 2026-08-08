@@ -6,7 +6,10 @@ import {
   compressTerminalEliminations,
   type AgentMatchRecapBeat,
 } from "../../src/server/agents/AgentMatchRecap";
-import { buildAgentSpectatorTelemetry } from "../../src/server/agents/AgentSpectatorTelemetry";
+import {
+  buildAgentSpectatorTelemetry,
+  type SpectatorEvent,
+} from "../../src/server/agents/AgentSpectatorTelemetry";
 import type {
   AgentDecisionRecord,
   LegalActionKind,
@@ -47,6 +50,10 @@ function record(
     chosenActionMetadata: metadata,
     intent: null,
     result: { accepted: true, reason: "ok", submittedIntent: null },
+    audit: {
+      auditStatus: "confirmed",
+      auditReason: "the recap fixture represents a realized action",
+    },
     fallbackUsed: false,
   } as AgentDecisionRecord;
 }
@@ -126,6 +133,76 @@ function dramaticRecords(totalTurns: number): AgentDecisionRecord[] {
   ];
 }
 
+function dealEvent(
+  sequence: number,
+  turnNumber: number,
+  kind: Extract<SpectatorEvent["kind"], `deal_${string}`>,
+  message: string,
+  overrides: Partial<SpectatorEvent> = {},
+): SpectatorEvent {
+  return {
+    id: `${turnNumber}:${sequence}:${kind}`,
+    sequence,
+    turnNumber,
+    kind,
+    tone: kind === "deal_violated" ? "betrayal" : "pact",
+    actorAgentID: "a1",
+    actorName: "Atlas",
+    targetAgentID: "a2",
+    targetName: "Blitz",
+    message,
+    publicText: message,
+    actionKind: "none",
+    actionID: `deal:${kind}:fixture`,
+    evidenceLevel:
+      kind === "deal_proposed" ||
+      kind === "deal_accepted" ||
+      kind === "deal_rejected"
+        ? "accepted_action"
+        : "state_derived",
+    fallbackUsed: false,
+    llmPlannerDegraded: false,
+    auditStatus: "not_applicable",
+    importance: kind === "deal_violated" ? 96 : 70,
+    ...overrides,
+  };
+}
+
+function acceptedUnknownEffectEvent(
+  sequence: number,
+  turnNumber: number,
+  kind: "attack" | "alliance_formed" | "alliance_break" | "nuke",
+  message: string,
+): SpectatorEvent {
+  const actionKind: LegalActionKind =
+    kind === "alliance_formed"
+      ? "alliance_request"
+      : kind === "alliance_break"
+        ? "break_alliance"
+        : kind;
+  return {
+    id: `${turnNumber}:${sequence}:${kind}:unknown`,
+    sequence,
+    turnNumber,
+    kind,
+    tone: kind === "alliance_break" ? "betrayal" : "war",
+    actorAgentID: "a1",
+    actorName: "Atlas",
+    targetAgentID: "a2",
+    targetName: "Blitz",
+    message,
+    publicText: message,
+    actionKind,
+    actionID: `${actionKind}:${sequence}`,
+    evidenceLevel: "accepted_action",
+    fallbackUsed: false,
+    llmPlannerDegraded: false,
+    auditStatus: "unknown",
+    auditReason: "accepted action; effect not observed",
+    importance: kind === "alliance_break" ? 100 : 95,
+  };
+}
+
 describe("buildAgentMatchRecap", () => {
   it("curates the War Room vocabulary: alliance, first strike (once per pair), betrayal, final confrontation, and elimination", () => {
     const totalTurns = 10_000;
@@ -166,6 +243,142 @@ describe("buildAgentMatchRecap", () => {
       (beat: AgentMatchRecapBeat) => beat.kind === "first_strike",
     ).length;
     expect(firstStrikeCount).toBe(1);
+  });
+
+  it("recaps structured-deal lifecycle facts without merging viewer-only agent claims or changing the legacy drama score", () => {
+    const totalTurns = 10_000;
+    const telemetry = buildAgentSpectatorTelemetry({
+      runID: "run-deals",
+      records: dramaticRecords(totalTurns),
+      roster: ROSTER,
+      finalState: finalState(totalTurns, [
+        { agentID: "a1", username: "Atlas", isAlive: true },
+        { agentID: "a2", username: "Blitz", isAlive: true },
+        { agentID: "a3", username: "Cinder", isAlive: false },
+      ]),
+    });
+    const baseline = buildAgentMatchRecap({
+      runID: "run-deals",
+      telemetry,
+      finalTurnCount: totalTurns,
+      series: null,
+    });
+    const proposal = dealEvent(
+      100,
+      1000,
+      "deal_proposed",
+      "Atlas proposed a non-aggression pact to Blitz.",
+      { statedReason: "I need a quiet border." },
+    );
+    const withDeals = buildAgentMatchRecap({
+      runID: "run-deals",
+      telemetry: {
+        ...telemetry,
+        events: [
+          ...telemetry.events,
+          proposal,
+          { ...proposal, id: "duplicate-proposal", sequence: 101 },
+          dealEvent(
+            102,
+            1100,
+            "deal_accepted",
+            "Blitz accepted Atlas's non-aggression pact.",
+          ),
+          dealEvent(
+            103,
+            1200,
+            "deal_rejected",
+            "Cinder rejected Atlas's support request.",
+          ),
+          dealEvent(
+            104,
+            1300,
+            "deal_expired",
+            "Atlas's attack pledge expired unfulfilled.",
+          ),
+          dealEvent(
+            105,
+            1400,
+            "deal_fulfilled",
+            "VERDICT: Atlas fulfilled the support promise.",
+          ),
+          dealEvent(
+            106,
+            1500,
+            "deal_violated",
+            "VERDICT: Atlas violated the pact by attacking Blitz.",
+            { statedReason: "Blitz became too dangerous." },
+          ),
+        ],
+      },
+      finalTurnCount: totalTurns,
+      series: null,
+    });
+
+    const dealBeats = withDeals!.beats.filter((beat) =>
+      beat.kind.startsWith("deal_"),
+    );
+    expect(dealBeats.map((beat) => beat.kind)).toEqual([
+      "deal_proposed",
+      "deal_accepted",
+      "deal_rejected",
+      "deal_expired",
+      "deal_fulfilled",
+      "deal_violated",
+    ]);
+    expect(dealBeats).toHaveLength(6);
+    expect(dealBeats.map((beat) => beat.message).join(" ")).not.toContain(
+      "Blitz became too dangerous",
+    );
+    expect(withDeals?.summary).toContain("1 deal proposal");
+    expect(withDeals?.summary).toContain("1 violated promise");
+    expect(withDeals?.curatedDramaScore).toBe(baseline?.curatedDramaScore);
+  });
+
+  it("does not count accepted audit-unknown effect-looking events as recap facts", () => {
+    const events = [
+      acceptedUnknownEffectEvent(
+        1,
+        100,
+        "alliance_formed",
+        "Atlas and Blitz exchange reciprocal alliance requests.",
+      ),
+      acceptedUnknownEffectEvent(
+        2,
+        200,
+        "attack",
+        "Atlas orders an attack against Blitz.",
+      ),
+      acceptedUnknownEffectEvent(
+        3,
+        300,
+        "alliance_break",
+        "Atlas moves to break alliance with Blitz.",
+      ),
+      acceptedUnknownEffectEvent(
+        4,
+        950,
+        "nuke",
+        "Atlas attempts to escalate nuclear pressure against Blitz.",
+      ),
+    ];
+    const recap = buildAgentMatchRecap({
+      runID: "run-unconfirmed-effects",
+      telemetry: {
+        version: 1,
+        runID: "run-unconfirmed-effects",
+        generatedAt: "2026-08-08T12:00:00.000Z",
+        agents: [],
+        relationships: [],
+        events,
+        communicationThreads: [],
+        timelineBuckets: [],
+      },
+      finalTurnCount: 1000,
+      series: null,
+    });
+
+    expect(recap).toBeNull();
   });
 
   it("returns null — never a padded placeholder — for a match with no story-worthy events", () => {

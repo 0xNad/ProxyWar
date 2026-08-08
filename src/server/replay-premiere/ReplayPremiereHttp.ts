@@ -72,15 +72,7 @@ export interface ReplayPremiereRuntimeReader {
    * releasedThroughSequence). Already implemented by the runtime coordinator.
    */
   readReleasedContext(sequence: number): ReplayPremiereReleasedContext | null;
-  /**
-   * The live "tap": highest sequence whose presentationOffsetMs is <= the
-   * authoritative clock right now, and the matching records — independent
-   * of chunk-release batching. This is what the betting page must consume
-   * content through: a client fed straight from chunk releases can hold up
-   * to a full presentation span (~60s) of content the honest, paced viewer
-   * hasn't reached yet, and trade on it. Reading through this instead
-   * collapses that trail to ~0 by construction.
-   */
+  /** Clock-bounded public projection used to verify live league progress. */
   readLiveVisibleSequence(): number;
   readLiveProjection(afterSequence: number): readonly PremiereReleasedRecord[];
 }
@@ -120,19 +112,11 @@ export class ReplayPremiereHttpRegistry {
     return this.targets.get(premiereId) ?? null;
   }
 
-  /**
-   * Registration order, which is admission order. Used by the stable `/bet`
-   * entry point to resolve "the current premiere" without the caller needing
-   * to know an id that changes every time the demo cycles.
-   */
+  /** Registration order, which is admission order. */
   premiereIds(): string[] {
     return [...this.targets.keys()];
   }
 }
-
-export type ReplayPremiereCanonicalParticipantResolver = (
-  participantId: string,
-) => Promise<string>;
 
 export interface ReplayPremiereHttpOptions {
   registry: ReplayPremiereHttpRegistry;
@@ -146,29 +130,8 @@ export interface ReplayPremiereHttpOptions {
    * with a bare 404 (the effective master + Premiere flags are off).
    */
   clips?: ReplayPremiereClips;
-  /**
-   * Resolves a signed-cookie participant id to its durable canonical id
-   * (see `ReplayPremiereIdentityLinkStore.resolveCanonicalParticipantId`)
-   * before it reaches `interactions`, at every authenticated boundary —
-   * self market read, authenticated writes, session creation. Without
-   * this, a cookie merged away by a GitHub link on another
-   * device/process/premiere stays a fully independent, independently
-   * funded trading identity forever: the durable alias exists but is
-   * never consulted on the trading path. Must be a local, cached lookup
-   * — never a network call — so an unreachable GitHub can never block,
-   * delay, or fail a trade. Defaults to identity (no linking configured,
-   * or existing callers/tests that don't wire one), so an unlinked guest
-   * is unaffected either way.
-   */
-  resolveCanonicalParticipantId?: ReplayPremiereCanonicalParticipantResolver;
   /** Operator-only diagnostics sink; never serialized into the response. */
   onOperatorError?: (error: unknown) => void;
-}
-
-async function identityCanonicalParticipantResolver(
-  participantId: string,
-): Promise<string> {
-  return participantId;
 }
 
 export function formatReplayPremiereHttpOperatorError(error: unknown): string {
@@ -297,13 +260,6 @@ async function handlePremiereApiRequest(
   options: ReplayPremiereHttpOptions,
   operationTimeoutMs: number,
 ): Promise<void> {
-  // Resolved once, as early as possible, so every authenticated boundary
-  // below — self market read, authenticated writes, session creation —
-  // sees only the durable canonical id and never has to thread a promise
-  // of its own through call sites that are otherwise synchronous.
-  const resolveCanonicalParticipantId =
-    options.resolveCanonicalParticipantId ??
-    identityCanonicalParticipantResolver;
   const readRoute = matchProxyWarPublicPremiereReadPath(request.path);
   const writeRoute = matchProxyWarPublicPremiereWritePath(request.path);
   if (
@@ -376,34 +332,10 @@ async function handlePremiereApiRequest(
       case "clip_file":
         // The mp4 is served by the document router, not this API adapter.
         throw unavailable("premiere_non_api_route_reached_api_adapter", 404);
-      case "market_state":
-        sendJson(response, 200, {
-          schemaVersion: 1,
-          market: target.interactions.readMarketState(null),
-        });
-        return;
-      case "market_state_self": {
-        // GET-appropriate auth (guest cookie + CSRF + Origin-when-present,
-        // falling back to Sec-Fetch-Site/Referer when a real browser
-        // correctly omits Origin on a same-origin GET) — a read that
-        // returns one participant's private positions is not exempt from
-        // auth just because it is a GET, but it also cannot demand a
-        // header no real browser sends here. Never trusts anything the
-        // caller claims about identity beyond the signed guest cookie.
-        const authorization = options.security.authorizeAuthenticatedRead(
-          requestSecurityHeaders(request),
-        );
-        const selfParticipantId = await resolveCanonicalParticipantId(
-          authorization.participant.participantId,
-        );
-        sendJson(response, 200, {
-          schemaVersion: 1,
-          market: target.interactions.readMarketState(selfParticipantId),
-        });
-        return;
-      }
       case "live_projection": {
-        const afterSequence = parseLiveProjectionAfterQuery(request.query.after);
+        const afterSequence = parseLiveProjectionAfterQuery(
+          request.query.after,
+        );
         sendJson(response, 200, {
           schemaVersion: 1,
           liveVisibleSequence: runtime.readLiveVisibleSequence(),
@@ -440,16 +372,13 @@ async function handlePremiereApiRequest(
         operationTimeoutMs,
         interactionContractVersion,
         clipsEnabled: options.clips !== undefined,
-        resolveCanonicalParticipantId,
       });
       return;
     }
     const authorization = options.security.authorizeWrite(
       requestSecurityHeaders(request),
     );
-    const participantId = await resolveCanonicalParticipantId(
-      authorization.participant.participantId,
-    );
+    const participantId = authorization.participant.participantId;
     switch (writeRoute.kind) {
       case "heartbeat": {
         const body = parseHeartbeatBody(request.body);
@@ -511,25 +440,6 @@ async function handlePremiereApiRequest(
             target.interactions
               .readCheckpoints(participantId)
               .find((entry) => entry.id === body.checkpointId) ?? null,
-        });
-        return;
-      }
-      case "market_order": {
-        const body = parseMarketOrderBody(request.body);
-        const result = await withTimeout(
-          target.interactions.submitMarketOrder({
-            participantId,
-            participantKind: "real",
-            idempotencyKey,
-            requesterBucketId,
-            ...body,
-          }),
-          operationTimeoutMs,
-        );
-        sendJson(response, 200, {
-          schemaVersion: 1,
-          ...result,
-          market: target.interactions.readMarketState(participantId),
         });
         return;
       }
@@ -659,7 +569,6 @@ async function handleSessionWrite(options: {
   operationTimeoutMs: number;
   interactionContractVersion: ReplayPremiereInteractionContractVersion;
   clipsEnabled: boolean;
-  resolveCanonicalParticipantId: ReplayPremiereCanonicalParticipantResolver;
 }): Promise<void> {
   const body = parseSessionBody(options.request.body);
   const guest = options.security.authorizeSessionCreation(
@@ -671,13 +580,7 @@ async function handleSessionWrite(options: {
   if (guest.setCookie !== null) {
     options.response.setHeader("Set-Cookie", guest.setCookie);
   }
-  // Resolved once, immediately after auth: `interactions` (and every read
-  // below that decorates this response) must only ever see the durable
-  // canonical id, never the raw signed-cookie id a GitHub link may have
-  // merged away.
-  const participantId = await options.resolveCanonicalParticipantId(
-    guest.participant.participantId,
-  );
+  const participantId = guest.participant.participantId;
   const attribution =
     body.attributionToken === null
       ? null
@@ -841,65 +744,6 @@ function parsePredictionBody(value: unknown): {
   return { sessionId, checkpointId, selectedSeatId };
 }
 
-function parseMarketOrderBody(value: unknown): {
-  sessionId: string;
-  seatId: string;
-  side: "buy" | "sell";
-  sequence: number;
-  amount: number;
-  limitPrice: number;
-} {
-  const body = exactObject(value, [
-    "sessionId",
-    "seatId",
-    "side",
-    "sequence",
-    "amount",
-    "limitPrice",
-  ]);
-  const sessionId = stringField(body, "sessionId", 64);
-  const seatId = stringField(body, "seatId", 128);
-  const side = stringField(body, "side", 4);
-  const sequence = sequenceField(body, "sequence");
-  const amount = marketOrderAmountField(body, "amount");
-  const limitPrice = limitPriceField(body, "limitPrice");
-  if (
-    !SESSION_ID_PATTERN.test(sessionId) ||
-    !SEAT_ID_PATTERN.test(seatId) ||
-    seatId.includes("..") ||
-    (side !== "buy" && side !== "sell")
-  ) {
-    throw invalidRequest("invalid_market_order_body", 400);
-  }
-  return { sessionId, seatId, side, sequence, amount, limitPrice };
-}
-
-function marketOrderAmountField(
-  record: Record<string, unknown>,
-  key: string,
-): number {
-  const value = record[key];
-  if (
-    !Number.isSafeInteger(value) ||
-    (value as number) <= 0 ||
-    (value as number) > 1_000_000
-  ) {
-    throw invalidRequest(`invalid_${key}`, 400);
-  }
-  return value as number;
-}
-
-function limitPriceField(
-  record: Record<string, unknown>,
-  key: string,
-): number {
-  const value = record[key];
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 100) {
-    throw invalidRequest(`invalid_${key}`, 400);
-  }
-  return value;
-}
-
 function parseReactionBody(value: unknown): {
   sessionId: string;
   sequence: number;
@@ -961,7 +805,6 @@ function parseClipBody(value: unknown): {
   const turn = nullableSequenceField(body, "turn");
   const hasReaction = sourceReactionId !== null;
   const hasSequenceTurn = sequence !== null && turn !== null;
-  // Exactly one anchor form: a source reaction, or a full sequence+turn pair.
   if (
     (hasReaction && (sequence !== null || turn !== null)) ||
     (!hasReaction && !hasSequenceTurn) ||
@@ -972,10 +815,6 @@ function parseClipBody(value: unknown): {
   return { sourceReactionId, sequence, turn };
 }
 
-/**
- * Resolve a clip anchor to a canonical released turn, validated exactly like
- * share moments (sequence <= releasedThroughSequence via readReleasedContext).
- */
 function resolveClipAnchor(
   target: ReplayPremiereHttpTarget,
   body: {
@@ -1064,12 +903,6 @@ function requiredHeader(request: Request, name: string): string {
   return single;
 }
 
-/**
- * Opt-in additive interaction response contract. Each recognized version is
- * immutable; missing, duplicated, malformed, or unknown values deliberately
- * stay on the exact legacy v1 shape. That lets both an old tab and a newly
- * loaded tab survive opposite sides of a rolling server transition.
- */
 function requestedInteractionContract(
   request: Request,
 ): ReplayPremiereInteractionContractVersion {
@@ -1170,12 +1003,7 @@ function nullableSequenceField(
   return sequenceField(record, key);
 }
 
-/**
- * `?after=<sequence>` query param for the live-projection tap. Absent means
- * "from the very start" (-1, matching `readLiveProjection`'s sentinel).
- * Only a single plain string value is accepted — never an array or nested
- * query object, which Express would otherwise happily produce.
- */
+/** Parse a single plain `?after=` cursor; absence means the full prefix. */
 function parseLiveProjectionAfterQuery(
   value: Request["query"][string],
 ): number {

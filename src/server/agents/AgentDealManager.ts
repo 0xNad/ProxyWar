@@ -143,6 +143,16 @@ export interface AgentDealActionOutcome {
 }
 
 export interface AgentDealLedgerSnapshot {
+  /** True only after match-end force resolution has completed. */
+  finalized: boolean;
+  finalizedAtStep: number | null;
+  finalizedAtTurn: number | null;
+  /** Maps every decision-step window to its authoritative game turn. */
+  decisionSteps: Array<{
+    step: number;
+    turnNumber: number;
+    recordsBeforeStep: number;
+  }>;
   deals: Array<
     Omit<AgentDealState, "goldAmount" | "troopAmount" | "obligations"> & {
       goldAmount?: string;
@@ -172,7 +182,9 @@ export class AgentDealManager {
   private currentStep = -1;
   private currentTurnNumber = 0;
   private readonly stepStartSequence: number[] = [];
+  private readonly stepTurnNumbers: number[] = [];
   private finalized = false;
+  private finalizedAtTurn: number | null = null;
 
   currentDecisionStep(): number {
     return this.currentStep;
@@ -203,8 +215,12 @@ export class AgentDealManager {
     gameState?: Game;
     records: readonly AgentDecisionRecord[];
   }): void {
+    if (this.finalized) {
+      throw new Error("deal ledger is finalized");
+    }
     this.currentStep += 1;
     this.stepStartSequence.push(input.records.length);
+    this.stepTurnNumbers.push(input.turnNumber);
     this.currentTurnNumber = input.turnNumber;
 
     const events: AgentDealLedgerEvent[] = [];
@@ -338,6 +354,9 @@ export class AgentDealManager {
      */
     statedReason?: string | null;
   }): AgentDealActionOutcome {
+    if (this.finalized) {
+      throw new Error("deal ledger is finalized");
+    }
     const kind = input.action.kind;
     const dealAction = kind.replace("deal_", "");
     if (input.playerID === null || input.playerID.length === 0) {
@@ -385,11 +404,16 @@ export class AgentDealManager {
   finalize(input: {
     gameState?: Game;
     records: readonly AgentDecisionRecord[];
+    /** Authoritative match-end turn; falls back to the final step's start. */
+    turnNumber?: number;
   }): void {
     if (this.finalized) {
       return;
     }
     this.finalized = true;
+    this.finalizedAtTurn =
+      input.turnNumber ??
+      (this.currentStep >= 0 ? this.currentTurnNumber : null);
     const events: AgentDealLedgerEvent[] = [];
     if (this.currentStep >= 0) {
       const start = this.stepStartSequence[this.currentStep];
@@ -420,28 +444,54 @@ export class AgentDealManager {
     events.push(
       ...forceResolveDeals({ deals: this.deals, step: this.currentStep }),
     );
-    // Post-final events are ledger-only: no further records exist to stamp.
     this.events.push(...events);
+    // No future decision exists after finalize, so persist both newly-created
+    // final events and any still-queued earlier events onto the latest retained
+    // carrier records. This keeps decisions.jsonl sufficient for replay/mirror
+    // reconstruction while each verdict retains its own origin provenance.
+    const unstamped = [
+      ...[...this.pendingStampsByAgentID.values()].flat(),
+      ...events,
+    ];
+    this.pendingStampsByAgentID.clear();
+    this.persistFinalEventStamps(unstamped, input.records);
   }
 
   /** Full serializable ledger (operator/test surface — sees everything). */
   ledgerSnapshot(): AgentDealLedgerSnapshot {
     return {
-      deals: this.deals.map((deal) => ({
-        ...deal,
-        goldAmount:
-          deal.goldAmount === undefined ? undefined : `${deal.goldAmount}`,
-        troopAmount: deal.troopAmount,
-        obligations: deal.obligations.map((obligation) => ({
-          ...obligation,
-          goldAmount:
-            obligation.goldAmount === undefined
-              ? undefined
-              : `${obligation.goldAmount}`,
-          donatedGold: `${obligation.donatedGold}`,
-        })),
+      finalized: this.finalized,
+      finalizedAtStep: this.finalized ? this.currentStep : null,
+      finalizedAtTurn: this.finalized ? this.finalizedAtTurn : null,
+      decisionSteps: this.stepStartSequence.map((recordsBeforeStep, step) => ({
+        step,
+        turnNumber: this.stepTurnNumbers[step] ?? 0,
+        recordsBeforeStep,
       })),
-      events: [...this.events],
+      deals: this.deals
+        .map((deal) => ({
+          ...deal,
+          goldAmount:
+            deal.goldAmount === undefined ? undefined : `${deal.goldAmount}`,
+          troopAmount: deal.troopAmount,
+          obligations: deal.obligations
+            .map((obligation) => ({
+              ...obligation,
+              goldAmount:
+                obligation.goldAmount === undefined
+                  ? undefined
+                  : `${obligation.goldAmount}`,
+              donatedGold: `${obligation.donatedGold}`,
+            }))
+            .sort((a, b) =>
+              stableStringCompare(a.obligationID, b.obligationID),
+            ),
+        }))
+        .sort((a, b) => stableStringCompare(a.dealID, b.dealID)),
+      // Application/referee append order is causal order. It is already
+      // deterministic (participant-ordered submission pass + deterministic
+      // compliance walk); lexical re-sorting can invert same-step causes.
+      events: this.events.map((event) => ({ ...event })),
     };
   }
 
@@ -847,6 +897,51 @@ export class AgentDealManager {
     }
   }
 
+  private persistFinalEventStamps(
+    events: readonly AgentDealLedgerEvent[],
+    records: readonly AgentDecisionRecord[],
+  ): void {
+    if (events.length === 0 || records.length === 0) {
+      return;
+    }
+    const recordsByPlayerID = new Map<string, AgentDecisionRecord[]>();
+    for (const record of records) {
+      const playerID = this.playerIDByAgentID.get(record.agentID);
+      if (playerID === undefined) continue;
+      const list = recordsByPlayerID.get(playerID) ?? [];
+      list.push(record);
+      recordsByPlayerID.set(playerID, list);
+    }
+    const byCarrier = new Map<string, AgentDealLedgerEvent[]>();
+    for (const event of events) {
+      const carrier = this.stampCarrierFor(event, recordsByPlayerID);
+      if (carrier === null) continue;
+      const pending = byCarrier.get(carrier) ?? [];
+      pending.push(event);
+      byCarrier.set(carrier, pending);
+    }
+    for (const [agentID, pending] of byCarrier) {
+      const record = [...records]
+        .reverse()
+        .find((candidate) => candidate.agentID === agentID);
+      if (record === undefined) continue;
+      const current = record.decisionMetadata?.dealComplianceEvent;
+      let existing: unknown[] = [];
+      if (typeof current === "string") {
+        try {
+          const parsed: unknown = JSON.parse(current);
+          if (Array.isArray(parsed)) existing = parsed;
+        } catch {
+          existing = [];
+        }
+      }
+      record.decisionMetadata = {
+        ...(record.decisionMetadata ?? {}),
+        dealComplianceEvent: JSON.stringify([...existing, ...pending]),
+      };
+    }
+  }
+
   /**
    * Deterministic stamp carrier: the event's actor when its seat is known and
    * still producing records (or no counterparty seat is known), else the
@@ -1167,4 +1262,8 @@ function chooseJointAttackTarget(
         b.tilesOwned - a.tilesOwned || a.playerID.localeCompare(b.playerID),
     );
   return candidates[0] ?? null;
+}
+
+function stableStringCompare(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
 }

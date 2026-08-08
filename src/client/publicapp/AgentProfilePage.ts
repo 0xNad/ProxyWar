@@ -222,7 +222,9 @@ export class AgentProfilePage extends LitElement {
         ? this.renderActiveVersion(agent.activeVersion)
         : nothing}
       ${renderAgentStatsSections(agent.stats)}
-      ${renderAgentFormSection(agent.timeSeries ?? { winrate: null, score: null })}
+      ${renderAgentFormSection(
+        agent.timeSeries ?? { winrate: null, score: null },
+      )}
       ${renderAnalysisTab(agent.stats, this.generatedAt)}
       ${this.renderRecentMatches(agent, matches)}
     `;
@@ -232,13 +234,15 @@ export class AgentProfilePage extends LitElement {
   private renderBuilderLine(agent: PublicAgent) {
     if (agent.status === "house" || !agent.registered) return nothing;
     const label =
-      agent.builderDisplayName ?? translateText("agent_profile.builder_unclaimed");
+      agent.builderDisplayName ??
+      translateText("agent_profile.builder_unclaimed");
     const claimHref =
       agent.status === "unclaimed" && agent.slug !== null
         ? `/claim/${encodeURIComponent(agent.slug)}`
         : null;
     return html`<p class="mb-3 text-sm text-ink-muted">
-      ${translateText("agent_profile.builder_label")}: <span class="font-semibold text-ink">${label}</span>
+      ${translateText("agent_profile.builder_label")}:
+      <span class="font-semibold text-ink">${label}</span>
       ${claimHref !== null
         ? html`<a
             href=${claimHref}
@@ -253,17 +257,23 @@ export class AgentProfilePage extends LitElement {
     return html`
       <dl class="mb-4 grid grid-cols-3 gap-3 text-sm">
         <div>
-          <dt class="text-[11px] uppercase text-ink-muted">${translateText("agent_profile.rank")}</dt>
+          <dt class="text-[11px] uppercase text-ink-muted">
+            ${translateText("agent_profile.rank")}
+          </dt>
           <dd class="font-mono font-semibold text-ink">#${standing.rank}</dd>
         </div>
         <div>
-          <dt class="text-[11px] uppercase text-ink-muted">${translateText("agent_profile.score")}</dt>
+          <dt class="text-[11px] uppercase text-ink-muted">
+            ${translateText("agent_profile.score")}
+          </dt>
           <dd class="font-mono font-semibold text-ink">
             ${standing.score === null ? "—" : standing.score.toFixed(2)}
           </dd>
         </div>
         <div>
-          <dt class="text-[11px] uppercase text-ink-muted">${translateText("agent_profile.rated_rounds")}</dt>
+          <dt class="text-[11px] uppercase text-ink-muted">
+            ${translateText("agent_profile.rated_rounds")}
+          </dt>
           <dd class="font-mono font-semibold text-ink">
             ${standing.roundsPlayed ?? "—"}
           </dd>
@@ -331,17 +341,25 @@ export class AgentProfilePage extends LitElement {
       : (match.participants.find((p) => p.displayName === agent.playerName) ??
         null);
     // Same "outcome carries the word, colour stays reserved" call
-    // `PlayerProfilePage.renderEpisodeRow` makes — this page never sits next
-    // to a betting P&L view today, but the language stays consistent across
-    // every public profile regardless.
+    // `PlayerProfilePage.renderEpisodeRow` makes, keeping profile language
+    // consistent.
     const outcome =
       participant === null
         ? { label: "—", cls: "text-ink-muted" }
         : participant.isWinner
-          ? { label: translateText("agent_profile.outcome_won"), cls: "font-semibold text-ink" }
+          ? {
+              label: translateText("agent_profile.outcome_won"),
+              cls: "font-semibold text-ink",
+            }
           : participant.isAlive
-            ? { label: translateText("agent_profile.outcome_survived"), cls: "text-ink-muted" }
-            : { label: translateText("agent_profile.outcome_eliminated"), cls: "text-ink-muted" };
+            ? {
+                label: translateText("agent_profile.outcome_survived"),
+                cls: "text-ink-muted",
+              }
+            : {
+                label: translateText("agent_profile.outcome_eliminated"),
+                cls: "text-ink-muted",
+              };
     // P2 fix (2026-08-02): rows with the same map, date, and outcome were
     // visually indistinguishable — added the round number (parity with
     // LobbyPage's `renderBroadcastCard`, same `lobby.round_suffix`-shaped
@@ -406,9 +424,7 @@ function recentMatchesForPlayerName(
   );
 }
 
-function sortMatchesByRecency(
-  matches: readonly PublicMatch[],
-): PublicMatch[] {
+function sortMatchesByRecency(matches: readonly PublicMatch[]): PublicMatch[] {
   return [...matches]
     .sort((a, b) => {
       const at = a.completedAt === null ? -Infinity : Date.parse(a.completedAt);

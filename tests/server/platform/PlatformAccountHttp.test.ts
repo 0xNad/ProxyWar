@@ -27,12 +27,9 @@ import { createPlatformAccountRouter } from "../../../src/server/platform/Platfo
 import { PlatformAccountSecurity } from "../../../src/server/platform/PlatformAccountSecurity";
 import { PlatformAccountStore } from "../../../src/server/platform/PlatformAccountStore";
 import { PlatformGithubIdentityLinkStore } from "../../../src/server/platform/PlatformGithubIdentityLinkStore";
-import { PlatformHandoffStore } from "../../../src/server/platform/PlatformHandoffStore";
 import { PlatformPolicyClaimStore } from "../../../src/server/platform/PlatformPolicyClaimStore";
 
 const PLATFORM_ORIGIN = "https://app.proxywar.xyz";
-const LEAGUE_ORIGIN = "https://beta.proxywar.xyz";
-const BETTING_ORIGIN = "https://bet.proxywar.xyz";
 
 let stateRoot: string;
 let server: http.Server;
@@ -91,7 +88,6 @@ beforeEach(async () => {
     accounts,
     claims,
   );
-  const handoffs = new PlatformHandoffStore();
   const security = new PlatformAccountSecurity({
     hmacKey: new Uint8Array(32).fill(7),
     expectedOrigin: PLATFORM_ORIGIN,
@@ -104,11 +100,6 @@ beforeEach(async () => {
       accounts,
       claims,
       identityLinkStore,
-      handoffs,
-      returnOrigins: new Map([
-        ["betting", BETTING_ORIGIN],
-        ["league", LEAGUE_ORIGIN],
-      ]),
       githubSignInAvailable: false,
       artifactsRootDir: stateRoot,
     }),

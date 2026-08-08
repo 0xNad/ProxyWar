@@ -4,9 +4,8 @@
  * fully correct in isolation (its own unit tests green) while being entirely
  * unreachable in production, because `createRenderer()`'s `layers: Layer[]`
  * array is the ONLY thing that makes `GameRenderer.tick()`/`init()` ever call
- * it. `HeadsUpMessage` was dropped from that array as pure collateral in
- * f75969b56 ("platform: accounts are not a betting feature") months before
- * this was caught: `.game` was still assigned in `createRenderer()`, every
+ * it. `HeadsUpMessage` was dropped from that array as pure collateral months
+ * before this was caught: `.game` was still assigned in `createRenderer()`, every
  * component-level test still passed calling `.tick()` directly, and nothing
  * ever exercised the actual dispatch path that decides whether `.tick()` is
  * called AT ALL. Item 3a's (deploy 3.9) match-end toast suppression is a
@@ -23,10 +22,10 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { GameRenderer } from "../../../src/client/graphics/GameRenderer";
-import { TransformHandler } from "../../../src/client/graphics/TransformHandler";
 import { HeadsUpMessage } from "../../../src/client/graphics/layers/HeadsUpMessage";
-import { WinModal } from "../../../src/client/graphics/layers/WinModal";
 import { PerformanceOverlay } from "../../../src/client/graphics/layers/PerformanceOverlay";
+import { WinModal } from "../../../src/client/graphics/layers/WinModal";
+import { TransformHandler } from "../../../src/client/graphics/TransformHandler";
 import { UIState } from "../../../src/client/graphics/UIState";
 import { EventBus } from "../../../src/core/EventBus";
 import { GameUpdateType } from "../../../src/core/game/GameUpdates";

@@ -6,8 +6,7 @@
   <string>com.proxywar.platform</string>
 
   <!-- The platform account origin (proxywar.xyz apex, port 8793): sole account
-       and session authority. Runs with wagering OFF. Independent of the
-       betting autocycler and of Coworld generation by design. -->
+       and session authority, independent of Coworld generation. -->
   <key>ProgramArguments</key>
   <array>
     <string>/bin/zsh</string>

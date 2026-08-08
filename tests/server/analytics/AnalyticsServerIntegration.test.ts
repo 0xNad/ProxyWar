@@ -12,7 +12,7 @@
  *    session (redirect / 401 for anonymous, 200 for a real session token),
  *    matching `/tester-dashboard`'s posture — never anonymous.
  */
-import { spawn, execFile, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { createRequire } from "node:module";
 import net from "node:net";
@@ -26,8 +26,7 @@ const execFileAsync = promisify(execFile);
 const REPO_ROOT = path.resolve(__dirname, "../../..");
 const require = createRequire(import.meta.url);
 // Portable os.tmpdir()-rooted scratch dir — same pattern every other
-// fixture-scratch test in this repo already uses (e.g.
-// `PremiereWageringBundle.test.ts`). Previously hardcoded to a fixed
+// fixture-scratch test in this repo already uses. Previously hardcoded to a fixed
 // external-volume path that doesn't exist on Linux CI runners; see
 // `tests/e2e/support/FixtureServer.ts`'s doc comment for the full history.
 const BETA_CODE = "analytics-report-test-invite-code";
@@ -78,9 +77,7 @@ async function waitForOrigin(
     }
     await new Promise((resolve) => setTimeout(resolve, 300));
   }
-  throw new Error(
-    `fixture server did not come up in time:\n${serverOutput()}`,
-  );
+  throw new Error(`fixture server did not come up in time:\n${serverOutput()}`);
 }
 
 // Graceful-then-forced shutdown of a real child process; the bounded wait
@@ -90,7 +87,9 @@ async function stopServer(serverProcess: ChildProcess | null): Promise<void> {
   if (serverProcess === null || serverProcess.exitCode !== null) return;
   serverProcess.kill("SIGTERM");
   await Promise.race([
-    new Promise<void>((resolve) => serverProcess.once("close", () => resolve())),
+    new Promise<void>((resolve) =>
+      serverProcess.once("close", () => resolve()),
+    ),
     new Promise<void>((resolve) => setTimeout(resolve, 5_000)),
   ]);
   if (serverProcess.exitCode === null) serverProcess.kill("SIGKILL");
@@ -115,8 +114,15 @@ async function prepareFixture(label: string): Promise<FixtureDirs> {
   // `PublicSurfaceSecurity.test.ts`'s identical doc for why).
   await execFileAsync(
     "npx",
-    ["tsx", "src/scripts/proxywar-fixture-league-data.ts", `--root=${fixtureRoot}`],
-    { cwd: REPO_ROOT, env: { ...process.env, PROXYWAR_IDENTITY_REGISTRY_DIR: identityDir } },
+    [
+      "tsx",
+      "src/scripts/proxywar-fixture-league-data.ts",
+      `--root=${fixtureRoot}`,
+    ],
+    {
+      cwd: REPO_ROOT,
+      env: { ...process.env, PROXYWAR_IDENTITY_REGISTRY_DIR: identityDir },
+    },
   );
   return { fixtureRoot, identityDir, artifactsRoot };
 }
@@ -141,9 +147,18 @@ function spawnServer(
         PROXYWAR_ARTIFACTS_ROOT: fixture.artifactsRoot,
         PROXYWAR_IDENTITY_REGISTRY_DIR: fixture.identityDir,
         PROXYWAR_NATIONS_DIR: path.join(fixture.fixtureRoot, "nations"),
-        PROXYWAR_FEATURED_MATCH_STATE_ROOT: path.join(fixture.fixtureRoot, "featured-match-state"),
-        PROXYWAR_REPLAY_PREMIERE_STATE_ROOT: path.join(fixture.fixtureRoot, "premiere-state"),
-        PROXYWAR_PLATFORM_STATE_ROOT: path.join(fixture.fixtureRoot, "platform-state"),
+        PROXYWAR_FEATURED_MATCH_STATE_ROOT: path.join(
+          fixture.fixtureRoot,
+          "featured-match-state",
+        ),
+        PROXYWAR_REPLAY_PREMIERE_STATE_ROOT: path.join(
+          fixture.fixtureRoot,
+          "premiere-state",
+        ),
+        PROXYWAR_PLATFORM_STATE_ROOT: path.join(
+          fixture.fixtureRoot,
+          "platform-state",
+        ),
         // This test only exercises the analytics HTTP surface — no clip or
         // replay rendering is under test, so the renderer child process
         // (a Vite dev server, itself capable of spawning headless Chrome
@@ -166,7 +181,9 @@ function analyticsBatchBody(visitorId: string): string {
   return JSON.stringify({
     schemaVersion: 1,
     visitorId,
-    events: [{ name: "page_viewed", occurredAt: new Date().toISOString(), route: "/" }],
+    events: [
+      { name: "page_viewed", occurredAt: new Date().toISOString(), route: "/" },
+    ],
   });
 }
 
@@ -180,15 +197,25 @@ describe("wrapper-only mode: analytics ingest stays reachable, report stays gate
     fixture = await prepareFixture("analytics-wrapper");
     const port = await reservePort();
     origin = `http://127.0.0.1:${port}`;
-    serverProcess = spawnServer(fixture, port, { PROXYWAR_LEAGUE_WRAPPER_ONLY: "true" });
-    serverProcess.stdout?.on("data", (chunk: Buffer) => (serverOutput += chunk.toString()));
-    serverProcess.stderr?.on("data", (chunk: Buffer) => (serverOutput += chunk.toString()));
+    serverProcess = spawnServer(fixture, port, {
+      PROXYWAR_LEAGUE_WRAPPER_ONLY: "true",
+    });
+    serverProcess.stdout?.on(
+      "data",
+      (chunk: Buffer) => (serverOutput += chunk.toString()),
+    );
+    serverProcess.stderr?.on(
+      "data",
+      (chunk: Buffer) => (serverOutput += chunk.toString()),
+    );
     await waitForOrigin(origin, 45_000, () => serverOutput);
   }, 60_000);
 
   afterAll(async () => {
     await stopServer(serverProcess);
-    await fs.rm(fixture.fixtureRoot, { recursive: true, force: true }).catch(() => undefined);
+    await fs
+      .rm(fixture.fixtureRoot, { recursive: true, force: true })
+      .catch(() => undefined);
   }, 20_000);
 
   test("POST /api/analytics/events accepts a valid batch and returns 204", async () => {
@@ -210,7 +237,9 @@ describe("wrapper-only mode: analytics ingest stays reachable, report stays gate
   });
 
   test("GET /analytics-report is unreachable in wrapper-only mode, same posture as every other operator surface", async () => {
-    const response = await fetch(`${origin}/analytics-report`, { redirect: "manual" });
+    const response = await fetch(`${origin}/analytics-report`, {
+      redirect: "manual",
+    });
     expect(response.status).not.toBe(200);
   });
 });
@@ -229,14 +258,22 @@ describe("beta-gated mode: operator report requires a valid session; ingest stay
       PROXYWAR_BETA_ENABLED: "true",
       PROXYWAR_BETA_CODE: BETA_CODE,
     });
-    serverProcess.stdout?.on("data", (chunk: Buffer) => (serverOutput += chunk.toString()));
-    serverProcess.stderr?.on("data", (chunk: Buffer) => (serverOutput += chunk.toString()));
+    serverProcess.stdout?.on(
+      "data",
+      (chunk: Buffer) => (serverOutput += chunk.toString()),
+    );
+    serverProcess.stderr?.on(
+      "data",
+      (chunk: Buffer) => (serverOutput += chunk.toString()),
+    );
     await waitForOrigin(origin, 45_000, () => serverOutput);
   }, 60_000);
 
   afterAll(async () => {
     await stopServer(serverProcess);
-    await fs.rm(fixture.fixtureRoot, { recursive: true, force: true }).catch(() => undefined);
+    await fs
+      .rm(fixture.fixtureRoot, { recursive: true, force: true })
+      .catch(() => undefined);
   }, 20_000);
 
   test("POST /api/analytics/events is reachable without a beta session (it's the product surface)", async () => {
@@ -249,7 +286,9 @@ describe("beta-gated mode: operator report requires a valid session; ingest stay
   });
 
   test("GET /analytics-report redirects an anonymous visitor to /beta", async () => {
-    const response = await fetch(`${origin}/analytics-report`, { redirect: "manual" });
+    const response = await fetch(`${origin}/analytics-report`, {
+      redirect: "manual",
+    });
     expect([301, 302, 303, 307, 308]).toContain(response.status);
     expect(response.headers.get("location")).toMatch(/^\/beta\?next=/);
   });
@@ -272,8 +311,31 @@ describe("beta-gated mode: operator report requires a valid session; ingest stay
 
   test("GET /api/analytics-report returns the computed report JSON for a real operator session", async () => {
     const token = createProxyWarBetaSessionToken({ inviteCode: BETA_CODE });
+    const headers = {
+      cookie: `${BETA_COOKIE_NAME}=${encodeURIComponent(token)}`,
+    };
+
+    // Ingest is intentionally acknowledged before its asynchronous durable
+    // write completes. Wait for that documented eventual write instead of
+    // making this integration test depend on scheduler timing under a busy
+    // full-suite run.
+    await expect
+      .poll(
+        async () => {
+          const response = await fetch(`${origin}/api/analytics-report`, {
+            headers,
+          });
+          const json = (await response.json()) as {
+            homepageToWatchCtr: { status: string };
+          };
+          return json.homepageToWatchCtr.status;
+        },
+        { interval: 50, timeout: 5_000 },
+      )
+      .toBe("insufficient_traffic");
+
     const response = await fetch(`${origin}/api/analytics-report`, {
-      headers: { cookie: `${BETA_COOKIE_NAME}=${encodeURIComponent(token)}` },
+      headers,
     });
     expect(response.status).toBe(200);
     const json = (await response.json()) as {

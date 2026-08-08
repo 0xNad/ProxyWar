@@ -83,7 +83,6 @@ describe("ReplayPremiereInteractions", () => {
             }
           : null;
       },
-      getLiveVisibleSequence: () => releasedThroughSequence,
       persistence: {
         async persist({ eventType, nextState }) {
           await overrides?.beforePersist?.(eventType, nextState);
@@ -579,15 +578,17 @@ describe("ReplayPremiereInteractions", () => {
 
   it("qualifies visible or interacting sessions once per participant and preserves last non-direct attribution", async () => {
     const h = harness();
-    const { session: sourceSession } = await h.interactions.createViewerSession({
-      participantId: guestB,
-      idempotencyKey: h.nextIdempotencyKey(),
-      requesterBucketId: `ip_${"2".repeat(32)}`,
-      visible: true,
-      observedSequence: 10,
-      excludedAsOperator: true,
-      excludedAsBot: false,
-    });
+    const { session: sourceSession } = await h.interactions.createViewerSession(
+      {
+        participantId: guestB,
+        idempotencyKey: h.nextIdempotencyKey(),
+        requesterBucketId: `ip_${"2".repeat(32)}`,
+        visible: true,
+        observedSequence: 10,
+        excludedAsOperator: true,
+        excludedAsBot: false,
+      },
+    );
     const sourceShare = await h.interactions.createShare({
       participantId: guestB,
       sessionId: sourceSession.id,

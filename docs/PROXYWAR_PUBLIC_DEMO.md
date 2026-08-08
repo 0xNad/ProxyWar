@@ -182,7 +182,6 @@ files:
 
 - `/docs/PROXYWAR_EXTERNAL_AGENT_API.md`
 - `/docs/PROXYWAR_TESTER_HANDOFF.md`
-- `/docs/BETA_TESTER_GUIDE.md`
 - `/docs/PROXYWAR_ASSET_AND_LICENSE_AUDIT.md`
 - `/examples/external-agent/README.md`
 - `/examples/external-agent/PROXYWAR_AGENT_CARD.md`

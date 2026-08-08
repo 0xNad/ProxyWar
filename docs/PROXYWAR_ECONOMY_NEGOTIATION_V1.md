@@ -20,9 +20,9 @@ This project is justified in that frame as a **drama and legibility engine**, no
 agent-IQ upgrade:
 
 - Structured deals with a public referee manufacture discrete story beats a stranger can
-  follow — *proposal → pact → betrayal → verdict* — which premieres, clips, and the
-  Director Cut can surface, and which the separate bet surface can turn into markets
-  ("will the pact hold?").
+  follow — _proposal → pact → betrayal → verdict_ — which premieres, clips, and the
+  Director Cut can surface and the league evidence layer can measure as explicit
+  commitments ("did the pact hold?").
 - Economy legibility ("a third of Auri's income depends on Sefirot's ports") gives those
   deals stakes and gives replay captions concrete facts instead of vibes.
 - Starter-agent competence improvements are a side effect, kept cheap and A/B-guarded —
@@ -54,7 +54,7 @@ existing uploaded agents. Rating strength is explicitly not a success criterion.
   separately on `main` (2026-08-07), outside the V1 branch.
 - Preserve the canonical path
   `AgentObservation → LegalAction[] → exact LegalAction.id → AgentDecisionValidator →
-  AgentRunner → GameServer`. No raw-intent bypass. Deal actions are meta-actions with
+AgentRunner → GameServer`. No raw-intent bypass. Deal actions are meta-actions with
   `intent: null` — precedent: the existing `hold` action.
 - Feature gating uses the existing **`AgentTunables.ts`** pattern
   (`PROXYWAR_TUNE_<NAME>`, named exported predicate, doc comment naming the env var,
@@ -76,8 +76,8 @@ existing uploaded agents. Rating strength is explicitly not a success criterion.
 - Replay narrative text is **server-authored artifact text** (e.g.
   `AgentSpectatorTelemetry` `publicText`), not client `translateText()`. Only new client
   UI chrome (if any) needs `translateText()` + `resources/lang/en.json`.
-- No betting functionality in this repo's league surfaces. Deal events may be *consumed*
-  by the separate bet surface later; this project only emits events.
+- Deal events may be consumed by the league's evidence pipeline; this project only
+  emits the underlying events.
 
 ---
 
@@ -95,8 +95,8 @@ wrong or unproven:
   (min 15). Cities/Ports built later get stations because a factory is in range. No
   factory in range ⇒ no station ⇒ the structure is not part of any rail network.
 - Only factories spawn trains (per-station cooldown 10 ticks; per tick one Bernoulli
-  roll per factory *level*, p = 1/((L+10)·15) where L = **sum of the player's factory
-  levels**). Spawning requires the factory's cluster to contain at least one *eligible*
+  roll per factory _level_, p = 1/((L+10)·15) where L = **sum of the player's factory
+  levels**). Spawning requires the factory's cluster to contain at least one _eligible_
   City/Port destination. Trains cost 0 gold. Everything about trains is automatic —
   agents influence them only via builds, upgrades, embargoes, attacks, capture.
 - Destination choice is **uniform random among eligible trade stations in the cluster**
@@ -144,20 +144,20 @@ wrong or unproven:
   attacker** (5 minutes = 3000 ticks), even if the attack is later ruled invalid, unless
   either party is a Bot. It also auto-rejects the defender's pending alliance request to
   the attacker and applies a difficulty-scaled relation penalty. This settles the
-  original document's "which player receives it" question: the *victim* embargoes the
-  *attacker*; the victim's own trade with third parties is untouched.
+  original document's "which player receives it" question: the _victim_ embargoes the
+  _attacker_; the victim's own trade with third parties is untouched.
 - Embargo blocks trade ships and trains **only** — donations are not blocked.
 - **Attacking an ally is impossible** (hard-blocked in `AttackExecution`; forming an
   alliance mid-attack auto-retreats it). Betrayal therefore always requires an explicit
   `break_alliance` first — which marks the breaker **traitor for 30 seconds** (defense
   debuff ×0.5, conquest-speed debuff ×0.8, permanent `betrayals` stat increment) —
-  *unless* the victim is already a traitor or disconnected (then breaking is free).
+  _unless_ the victim is already a traitor or disconnected (then breaking is free).
   **Exception: nukes.** A nuke whose blast crosses the threshold auto-breaks the
   alliance and marks the launcher traitor; MIRVs break at launch.
 - Alliance: request (20s expiry, 30s per-target cooldown), accept/reject, duration 5
-  minutes, extension requires both sides and resets the clock from *now*, expiry is
+  minutes, extension requires both sides and resets the clock from _now_, expiry is
   silent (no traitor, no embargo). Alliance break creates **no embargo**. The
-  mutual-request fast path clears *temporary* embargoes; the normal request→accept path
+  mutual-request fast path clears _temporary_ embargoes; the normal request→accept path
   does not.
 - Donations: require `isFriendly` (ally or teammate), both alive, recipient not
   disconnected; per-recipient 10s cooldown; troops default to 1/3 of the sender's;
@@ -257,19 +257,19 @@ wrong or unproven:
 
 # 3. What was cut from the original, and why
 
-| Original item | Disposition |
-| --- | --- |
-| Stage 0 "verify disputed mechanics" research | **Done** (this audit). Remaining Stage 0 work is writing the verified doc + the missing regression tests (§6 Phase 0). |
-| `PROXYWAR_ECONOMIC_*_V1` feature flags | Replaced by `AgentTunables` `PROXYWAR_TUNE_*` levers (§1). |
-| Four new top-level modules | Become: an affordance block, `StrategicPlan`/directive extensions, one new runner-scoped deal manager, and extensions to the existing audit/telemetry pipeline (§2.4). |
-| "Stable deterministic cluster ID" | Doesn't exist in core; derived key `min(station.id)` (§2.1). |
-| "Decision epochs" | Existing "decision steps" (§2.4). |
-| Team-destination branches, team payout product surface | Cut — league is FFA-only (§2.5). |
-| Seven-plan economic plan taxonomy + plan builder | **Deferred to Phase C.** Phase A ships observation + classification + events; the starter gets a compact econ doctrine, not a plan-ID protocol. Rationale: showcase phase; the drama payoff does not require it; `StrategicPlan`+`AgentBuildDirective` already cover much of it for the house stack. |
-| Five-configuration matched evaluation matrix | Cut as coverage engineering (frozen). Replaced by the existing paired eval-policy A/B + a bounded local episode check (§7). |
-| Counteroffers, free-text deal prose | Out (V1 had them out too; V1 keeps **zero free text** — enumerated templates only, so there is nothing to sanitize). |
-| "Trade-security pact: lift existing manual embargo by deadline" term | Cut from V1 templates — adds a third obligation type for marginal drama; revisit in Phase C. |
-| Alliance-payout conditionality ("only if Stage 0 proves it") | Proven. The economy model and replay language may state that allied trade pays more. |
+| Original item                                                        | Disposition                                                                                                                                                                                                                                                                                          |
+| -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Stage 0 "verify disputed mechanics" research                         | **Done** (this audit). Remaining Stage 0 work is writing the verified doc + the missing regression tests (§6 Phase 0).                                                                                                                                                                               |
+| `PROXYWAR_ECONOMIC_*_V1` feature flags                               | Replaced by `AgentTunables` `PROXYWAR_TUNE_*` levers (§1).                                                                                                                                                                                                                                           |
+| Four new top-level modules                                           | Become: an affordance block, `StrategicPlan`/directive extensions, one new runner-scoped deal manager, and extensions to the existing audit/telemetry pipeline (§2.4).                                                                                                                               |
+| "Stable deterministic cluster ID"                                    | Doesn't exist in core; derived key `min(station.id)` (§2.1).                                                                                                                                                                                                                                         |
+| "Decision epochs"                                                    | Existing "decision steps" (§2.4).                                                                                                                                                                                                                                                                    |
+| Team-destination branches, team payout product surface               | Cut — league is FFA-only (§2.5).                                                                                                                                                                                                                                                                     |
+| Seven-plan economic plan taxonomy + plan builder                     | **Deferred to Phase C.** Phase A ships observation + classification + events; the starter gets a compact econ doctrine, not a plan-ID protocol. Rationale: showcase phase; the drama payoff does not require it; `StrategicPlan`+`AgentBuildDirective` already cover much of it for the house stack. |
+| Five-configuration matched evaluation matrix                         | Cut as coverage engineering (frozen). Replaced by the existing paired eval-policy A/B + a bounded local episode check (§7).                                                                                                                                                                          |
+| Counteroffers, free-text deal prose                                  | Out (V1 had them out too; V1 keeps **zero free text** — enumerated templates only, so there is nothing to sanitize).                                                                                                                                                                                 |
+| "Trade-security pact: lift existing manual embargo by deadline" term | Cut from V1 templates — adds a third obligation type for marginal drama; revisit in Phase C.                                                                                                                                                                                                         |
+| Alliance-payout conditionality ("only if Stage 0 proves it")         | Proven. The economy model and replay language may state that allied trade pays more.                                                                                                                                                                                                                 |
 
 ---
 
@@ -305,8 +305,8 @@ the in-core reference implementation):
   attribution is Phase C.
 - One primary bottleneck with evidence, from:
   `none | missing_trade_destination | insufficient_factory_capacity |
-  population_capacity | foreign_dependency | embargo_disruption | insufficient_gold |
-  unsafe_investment_window | unknown`.
+population_capacity | foreign_dependency | embargo_disruption | insufficient_gold |
+unsafe_investment_window | unknown`.
 - Rival additions: `unitCounts` (City/Factory/Port only) and `isTraitor` on
   `AgentVisiblePlayer` (both currently missing; optional fields).
 
@@ -328,7 +328,7 @@ hosted A/B before defaulting):
   trade out-earns a closed economy; embargo is the trade weapon.
 - If the observation's economy block is present, surface ≤2 compact lines in the GAME
   payload (e.g. `econ: 2 idle factories (no destination); 40% of destinations owned by
-  Auri (allied)`) — token budget for everything economy: ≤300 chars. Measured through
+Auri (allied)`) — token budget for everything economy: ≤300 chars. Measured through
   the paired eval-policy A/B before any default flip.
 
 ## A3. Economy events for spectator surfaces
@@ -359,7 +359,7 @@ New module (e.g. `src/server/agents/AgentDealManager.ts`), deterministic, per-ma
 - Templates (V1, enumerated, zero free text):
   - `non_aggression_pact` — mutual: no confirmed hostile action against each other for
     N decision steps.
-  - `trade_security_pact` — mutual: non-aggression **plus** no new *voluntary* embargo
+  - `trade_security_pact` — mutual: non-aggression **plus** no new _voluntary_ embargo
     against each other. (It does not enable trade, create an alliance, control
     trains/ships, or guarantee income.)
   - `joint_attack` — obligor commits confirmed military pressure on a named third

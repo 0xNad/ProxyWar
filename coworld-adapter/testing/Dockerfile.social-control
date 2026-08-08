@@ -1,0 +1,11 @@
+FROM node:24-bookworm-slim
+
+ARG SOCIAL_CONTROL_POLICY=deal-blind
+ARG SOCIAL_CONTROL_ARM=ignored
+
+WORKDIR /app
+COPY coworld-adapter/testing/social-control-policy.mjs ./
+COPY coworld-adapter/testing/social-control-player.mjs ./
+RUN node -e 'const fs=require("node:fs"); const [profile,arm]=process.argv.slice(1); const profiles=new Set(["keeper","defector","skeptic","deal-blind"]); const arms=new Set(["off","ignored","active"]); if(!profiles.has(profile)||!arms.has(arm)) throw new Error("invalid social-control build config"); fs.writeFileSync("/app/social-control-build.json", JSON.stringify({profile,arm}));' "$SOCIAL_CONTROL_POLICY" "$SOCIAL_CONTROL_ARM"
+
+CMD ["node", "/app/social-control-player.mjs"]

@@ -178,6 +178,23 @@ describe("ReplayPremiere HTTP adapter", () => {
         finalSequence: 5,
         authoritativeResult: { encoding: "canonical_json_utf8_base64" },
       });
+      const liveProjection = await fetch(
+        `${baseUrl}/api/premieres/${PREMIERE_ID}/live-projection?after=4`,
+      );
+      expect(liveProjection.status).toBe(200);
+      expect(liveProjection.headers.get("cache-control")).toContain("no-store");
+      expect(await liveProjection.json()).toEqual({
+        schemaVersion: 1,
+        liveVisibleSequence: 5,
+        records: [],
+      });
+      const malformedCursor = await fetch(
+        `${baseUrl}/api/premieres/${PREMIERE_ID}/live-projection?after=01`,
+      );
+      expect(malformedCursor.status).toBe(400);
+      expect(await malformedCursor.json()).toEqual({
+        error: { code: "PREMIERE_INVALID_REQUEST" },
+      });
     });
   });
 
@@ -1269,7 +1286,6 @@ async function liveRuntimeHttpHarness(root: string) {
     getPremiereState: () => runtime?.readLifecycleState() ?? "scheduled",
     getReleasedContext: (sequence) =>
       runtime?.readReleasedContext(sequence) ?? null,
-    getLiveVisibleSequence: () => runtime?.readLiveVisibleSequence() ?? 0,
     persistence: { persist: async () => undefined },
     signAttribution: () => "a".repeat(64),
     canonicalPremiereUrl: `${EXPECTED_ORIGIN}/premieres/${PREMIERE_ID}`,
@@ -1405,7 +1421,6 @@ async function httpHarness(
             eventContext: { released: sequence },
           }
         : null,
-    getLiveVisibleSequence: () => (revealed ? 5 : 4),
     persistence: {
       async persist() {
         if (httpOptions.hangPersistence === true) {

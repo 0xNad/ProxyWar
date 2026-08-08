@@ -974,6 +974,7 @@ export type AgentDealObligationStatus =
   | "fulfilled"
   | "violated"
   | "expired_unfulfilled"
+  | "unverified"
   | "moot";
 
 export type AgentDealObligationKind =
@@ -1050,7 +1051,7 @@ export interface AgentDealRivalReliabilityView {
   name: string;
   /** Obligations this rival fulfilled as obligor. */
   fulfilled: number;
-  /** Terminal non-moot obligations as obligor (fulfilled + violated + expired_unfulfilled). */
+  /** Terminal, verified non-moot obligations (fulfilled + violated + expired_unfulfilled). */
   terminalNonMoot: number;
   /** fulfilled / terminalNonMoot, rounded to 2 decimals; null with no sample. */
   reliability: number | null;
@@ -1274,6 +1275,43 @@ export interface AgentActionResult {
   submittedIntent: Intent | null;
 }
 
+/**
+ * First-class evidence for the optional diplomacy slot. This is deliberately
+ * separate from `AgentDecisionRecord.result`, which always describes the
+ * primary action slot. A manager-accepted application means only that the
+ * runner applied the selected deal meta-action to its ledger; it does not mean
+ * a proposal was accepted by its counterparty or that any game effect occurred.
+ */
+export interface AgentDealSlotEvidence {
+  /** Bounded prefix of the requested id; accepted validation carries the exact offered actionID. */
+  requestedActionID: string;
+  validation:
+    | {
+        accepted: true;
+        actionID: string;
+        actionKind:
+          | "deal_propose"
+          | "deal_accept"
+          | "deal_reject"
+          | "deal_withdraw";
+      }
+    | {
+        accepted: false;
+        reason: string;
+      };
+  application:
+    | {
+        attempted: false;
+        reason: string;
+      }
+    | {
+        attempted: true;
+        /** AgentDealManager accepted the state transition, not a game effect. */
+        accepted: boolean;
+        reason: string;
+      };
+}
+
 export type AgentActionAuditStatus =
   | "confirmed"
   | "unknown"
@@ -1294,6 +1332,8 @@ export interface AgentActionAuditSnapshot {
   outgoingAttackTargetIDs: string[];
   outgoingAttackIDs?: string[];
   outgoingAllianceRequestRecipientIDs: string[];
+  /** Stable core-alliance state at this audit boundary; optional on legacy artifacts. */
+  alliedPlayerIDs?: string[];
   outgoingEmbargoTargetIDs: string[];
   targetPlayerIDs?: string[];
   transportRetreatingUnitIDs?: number[];
@@ -1336,6 +1376,8 @@ export interface AgentDecisionRecord {
   reason: string | null;
   decisionMetadata?: Record<string, string | number | boolean | null>;
   chosenActionMetadata?: Record<string, string | number | boolean | null>;
+  /** Optional diplomacy-slot evidence; absent when the slot was not requested. */
+  dealSlotEvidence?: AgentDealSlotEvidence;
   tacticalAffordances?: AgentTacticalAffordances;
   /**
    * Compact economy facts at this decision boundary

@@ -1,6 +1,5 @@
 import fs from "fs/promises";
 import path from "path";
-import { AgentBrainType, AgentDecisionRecord } from "./AgentTypes";
 import {
   AgentRunFinalState,
   AgentRunRosterEntry,
@@ -9,6 +8,7 @@ import {
   buildAgentSpectatorTelemetry,
   SpectatorEvent,
 } from "./AgentSpectatorTelemetry";
+import { AgentBrainType, AgentDecisionRecord } from "./AgentTypes";
 
 /**
  * Post-hoc "interestingness" scorer for the LLM-agent league. It reduces the
@@ -93,6 +93,12 @@ export interface AgentDramaReportPaths {
 }
 
 const HIGH_IMPORTANCE_THRESHOLD = 80;
+const EFFECT_CLAIM_KINDS = new Set<SpectatorEvent["kind"]>([
+  "attack",
+  "alliance_formed",
+  "alliance_break",
+  "nuke",
+]);
 const COMMUNICATION_KINDS = new Set<SpectatorEvent["kind"]>([
   "chat",
   "emoji",
@@ -102,6 +108,13 @@ const COMMUNICATION_KINDS = new Set<SpectatorEvent["kind"]>([
 
 function pairKey(a: string, b: string): string {
   return [a, b].sort().join("|");
+}
+
+function isEvidenceBackedDramaEvent(event: SpectatorEvent): boolean {
+  return (
+    !EFFECT_CLAIM_KINDS.has(event.kind) ||
+    event.evidenceLevel === "confirmed_effect"
+  );
 }
 
 function dramaGradeFor(score: number): AgentDramaGrade {
@@ -126,7 +139,11 @@ export function buildAgentDramaReport(
     roster: input.roster,
     finalState: input.finalState,
   });
-  const events = telemetry.events;
+  // Accepted orders are still useful raw telemetry, but they must not become
+  // realized alliances, betrayals, strikes, or nuclear escalations in a
+  // persistent drama score without an explicit confirmed-effect audit.
+  // Missing provenance on legacy v1 telemetry is deliberately unconfirmed.
+  const events = telemetry.events.filter(isEvidenceBackedDramaEvent);
   const finalTilesByAgent = new Map(
     telemetry.agents.map((agent) => [agent.agentID, agent.finalTilesOwned]),
   );
@@ -221,16 +238,19 @@ export function buildAgentDramaReport(
     return {
       agentID: agent.agentID,
       username: agent.username,
-      alliancesFormed: asActor.filter((event) => event.kind === "alliance_formed")
-        .length,
-      alliancesBroken: asActor.filter((event) => event.kind === "alliance_break")
-        .length,
+      alliancesFormed: asActor.filter(
+        (event) => event.kind === "alliance_formed",
+      ).length,
+      alliancesBroken: asActor.filter(
+        (event) => event.kind === "alliance_break",
+      ).length,
       betrayalsSuffered: events.filter(
         (event) =>
           event.kind === "alliance_break" &&
           event.targetAgentID === agent.agentID,
       ).length,
-      attacksInitiated: asActor.filter((event) => event.kind === "attack").length,
+      attacksInitiated: asActor.filter((event) => event.kind === "attack")
+        .length,
       warsInvolved: warsInvolved.size,
       finalTilesOwned: agent.finalTilesOwned,
       isAlive: agent.isAlive,

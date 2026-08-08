@@ -73,23 +73,10 @@ export { REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS };
 export const REPLAY_PREMIERE_MAX_RECOVERABLE_OUTAGE_MS = 60_000;
 export const REPLAY_PREMIERE_MAX_OUTAGE_EVENTS_PER_LIFECYCLE_VERSION = 2;
 /**
- * Cap on records a single readLiveProjection() call returns. A near-real-time
- * tap client polls incrementally (passing its own last-seen sequence back
- * in), so in steady state this only bounds pathological far-behind catch-up
- * requests — not normal steady-state polling. It ALSO bounds a fresh join's
- * FIRST catch-up request on an aged match: a live QA trace on a ~20 min-old
- * real match found a single `after=-1` response alone reaching ~4.7 MB and
- * never completing within the client's per-request timeout — a client
- * cannot make progress on a request that structurally cannot finish before
- * it is aborted and retried (against the identical, still-too-large,
- * response) forever. 1 000 records keeps a single response small enough
- * (with the server's gzip/brotli response compression — see `compression()`
- * in `ai-agent-demo-server.ts` — smaller still) to reliably complete inside
- * a realistic per-request budget even on a slow connection, at the cost of
- * more, smaller round trips to cover the same total catch-up distance —
- * see `LIVE_PROJECTION_MAX_POLLS_PER_TICK` / `LIVE_PROJECTION_MAX_DRAIN_POLLS`
- * in `ReplayPremiereNetwork.ts`, raised in lockstep to preserve the same
- * total per-tick catch-up capacity.
+ * Cap on one live-projection read. Incremental callers pass their last-seen
+ * sequence, while a cold join can request the retained prefix. Keeping that
+ * first response bounded prevents a far-behind reader from repeatedly timing
+ * out on one oversized response.
  */
 export const MAX_LIVE_PROJECTION_RECORDS = 1_000;
 
@@ -338,17 +325,7 @@ export class ReplayPremiereRuntimeCoordinator {
     throw runtimeIntegrity("released_sequence_missing_from_frozen_drafts");
   }
 
-  /**
-   * Highest sequence whose presentationOffsetMs is <= the authoritative
-   * clock right now — independent of chunk-release batching. Chunks still
-   * store and release in coarse (up to `REPLAY_PREMIERE_MAX_PRESENTATION_
-   * SPAN_MS`, ~60s) batches so a 50-minute premiere fits the 128-chunk
-   * cap; the *release* granularity of that store is deliberately unrelated
-   * to what this returns. Wagering binds every order to this value (not to
-   * `readReleasedContext`'s coarser `lastSafeReleasedSequence`) so a client
-   * can never trade ahead of what the server itself would currently
-   * reveal, and freshness never depends on shrinking chunk storage.
-   */
+  /** Highest sequence whose presentation time is visible on the clock now. */
   readLiveVisibleSequence(): number {
     if (this.recoveredReveal !== null) {
       const last = this.drafts.at(-1);
@@ -366,12 +343,8 @@ export class ReplayPremiereRuntimeCoordinator {
   }
 
   /**
-   * The live "tap": records with `sequence > afterSequence` whose
-   * `presentationOffsetMs` is <= the authoritative clock right now. Reads
-   * straight through pending (not-yet-released) drafts held in memory —
-   * the server never selects a record ahead of its own presentation
-   * time, so this can never return more than `readLiveVisibleSequence()`
-   * exposes, regardless of chunk batch size.
+   * Visible records after the caller's cursor. The authoritative clock bounds
+   * active reads; a revealed or archived premiere exposes its full remainder.
    */
   readLiveProjection(afterSequence: number): readonly PremiereReleasedRecord[] {
     if (!Number.isSafeInteger(afterSequence) || afterSequence < -1) {
@@ -904,7 +877,7 @@ export class ReplayPremiereRuntimeCoordinator {
         lifecycle = recordSafeReleasedSequence(lifecycle, sequence, now);
       }
       let activeCheckpoint: PremierePublicCheckpoint | null = null;
-      let completedCheckpointIds = this.state.completedCheckpointIds;
+      const completedCheckpointIds = this.state.completedCheckpointIds;
       let preparedInteraction:
         | ReplayPremierePreparedInteractionTransition<unknown>
         | undefined;
@@ -922,48 +895,28 @@ export class ReplayPremiereRuntimeCoordinator {
         if (projectedCheckpoint === undefined) {
           throw runtimeIntegrity("checkpoint_option_projection_missing");
         }
-        if (this.interactions.isWageringEnabled()) {
-          // Wagering premieres never halt the release clock for a
-          // checkpoint: the legacy open-window-then-pause-then-resume
-          // sequence (below) is replaced with a single durable "passed"
-          // step — no active checkpoint, no lifecycle transition, no
-          // REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS wait. Checkpoints still
-          // exist as content beats (their optionSeatIds are still
-          // recorded, so post-reveal resolution/eligibility is
-          // unaffected) — they just stop gating anything. /premiere/<id>
-          // (wagering disabled) takes the untouched branch below.
-          preparedInteraction = this.interactions.prepareMarkCheckpointPassed(
-            {
-              checkpointId: checkpoint.id,
-              occurredAt: now,
-              optionSeatIds: projectedCheckpoint.optionSeatIds,
-            },
-          );
-          completedCheckpointIds = [...completedCheckpointIds, checkpoint.id];
-        } else {
-          lifecycle = transitionPremiereLifecycle(lifecycle, {
-            action: "open_checkpoint",
-            actor: "service",
-            occurredAt: now,
-          }).snapshot;
-          activeCheckpoint = {
-            id: checkpoint.id,
-            sequence: checkpoint.sequence,
-            opensAt: now,
-            closesAt: new Date(
-              Date.parse(now) + REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS,
-            ).toISOString(),
-            questionKind: "winner_from_here",
-            optionSeatIds: [...projectedCheckpoint.optionSeatIds],
-            state: "open",
-          };
-          preparedInteraction = this.interactions.prepareOpenCheckpoint({
-            checkpointId: activeCheckpoint.id,
-            opensAt: activeCheckpoint.opensAt,
-            closesAt: activeCheckpoint.closesAt,
-            optionSeatIds: activeCheckpoint.optionSeatIds,
-          });
-        }
+        lifecycle = transitionPremiereLifecycle(lifecycle, {
+          action: "open_checkpoint",
+          actor: "service",
+          occurredAt: now,
+        }).snapshot;
+        activeCheckpoint = {
+          id: checkpoint.id,
+          sequence: checkpoint.sequence,
+          opensAt: now,
+          closesAt: new Date(
+            Date.parse(now) + REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS,
+          ).toISOString(),
+          questionKind: "winner_from_here",
+          optionSeatIds: [...projectedCheckpoint.optionSeatIds],
+          state: "open",
+        };
+        preparedInteraction = this.interactions.prepareOpenCheckpoint({
+          checkpointId: activeCheckpoint.id,
+          opensAt: activeCheckpoint.opensAt,
+          closesAt: activeCheckpoint.closesAt,
+          optionSeatIds: activeCheckpoint.optionSeatIds,
+        });
         eventType = "premiere_runtime_chunk_released";
       }
       const next = immutable<ReplayPremiereRuntimeSnapshotV1>(

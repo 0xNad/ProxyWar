@@ -61,9 +61,15 @@
  * a re-surfacing of an existing public field, never a new one. Explicitly
  * labeled client-side as the agent's OWN stated reason, not verified
  * reasoning (spec requirement).
+ *
+ * `deal-ledger.json` contains only finalized server-authored deal state,
+ * terminal obligation evidence, and bounded agent-stated reasons that are
+ * explicitly labeled as claims. It never copies raw prompts or provider output.
+ * See `docs/SOCIAL_MEASUREMENT_CONTRACT.md`.
  */
 export const proxyWarPublicRunArtifacts = [
   "game-record.json",
+  "deal-ledger.json",
   "match-summary.json",
   "replay-ui.json",
   "match-package.json",
@@ -91,7 +97,6 @@ export const proxyWarPublicTournamentArtifacts = [
 export const proxyWarPublicDocs = [
   "PROXYWAR_EXTERNAL_AGENT_API.md",
   "PROXYWAR_TESTER_HANDOFF.md",
-  "BETA_TESTER_GUIDE.md",
   "PROXYWAR_ASSET_AND_LICENSE_AUDIT.md",
 ] as const;
 
@@ -170,12 +175,6 @@ const proxyWarPremiereIdSource = "prem_[a-z0-9]{16,32}";
 const proxyWarPremierePagePattern = new RegExp(
   `^/premiere/(${proxyWarPremiereIdSource})$`,
 );
-// The dedicated live-betting page: same premiere, same anonymous read
-// surface and app shell as `/premiere/:id` (client-side routing decides
-// which page mounts from the URL) — see BettingPremierePage.ts.
-const proxyWarBettingPagePattern = new RegExp(
-  `^/bet/(${proxyWarPremiereIdSource})$`,
-);
 const proxyWarPremiereManifestPattern = new RegExp(
   `^/api/premieres/(${proxyWarPremiereIdSource})/manifest$`,
 );
@@ -212,21 +211,6 @@ const proxyWarPremiereClipCreatePattern = new RegExp(
 const proxyWarPremierePredictionPattern = new RegExp(
   `^/api/premieres/(${proxyWarPremiereIdSource})/predictions$`,
 );
-const proxyWarPremiereMarketOrderPattern = new RegExp(
-  `^/api/premieres/(${proxyWarPremiereIdSource})/market-orders$`,
-);
-const proxyWarPremiereMarketStatePattern = new RegExp(
-  `^/api/premieres/(${proxyWarPremiereIdSource})/market$`,
-);
-/**
- * Authenticated sibling of the anonymous market-state read: returns the
- * CALLING participant's own positions (never another participant's). Same
- * guest cookie + CSRF + Origin discipline as every write route — a read
- * that returns private per-participant data is not exempt from it.
- */
-const proxyWarPremiereMarketSelfPattern = new RegExp(
-  `^/api/premieres/(${proxyWarPremiereIdSource})/market/me$`,
-);
 const proxyWarPremiereLiveProjectionPattern = new RegExp(
   `^/api/premieres/(${proxyWarPremiereIdSource})/live-projection$`,
 );
@@ -253,13 +237,10 @@ export type ProxyWarPublicPremiereReadRoute =
   | { kind: "clip_status"; premiereId: string; bucket: number }
   | { kind: "clip_file"; premiereId: string; bucket: number }
   | { kind: "archive_clip"; premiereId: string }
-  | { kind: "market_state"; premiereId: string }
-  | { kind: "market_state_self"; premiereId: string }
   | { kind: "live_projection"; premiereId: string };
 
 export type ProxyWarPublicPremiereWriteRoute =
   | { kind: "prediction"; premiereId: string }
-  | { kind: "market_order"; premiereId: string }
   | { kind: "reaction"; premiereId: string }
   | { kind: "share"; premiereId: string }
   | { kind: "session"; premiereId: string }
@@ -275,8 +256,6 @@ export function matchProxyWarPublicPremiereReadPath(
 ): ProxyWarPublicPremiereReadRoute | null {
   const page = proxyWarPremierePagePattern.exec(pathname);
   if (page !== null) return { kind: "page", premiereId: page[1] };
-  const betPage = proxyWarBettingPagePattern.exec(pathname);
-  if (betPage !== null) return { kind: "page", premiereId: betPage[1] };
   const bootstrap = proxyWarPremiereBootstrapPattern.exec(pathname);
   if (bootstrap !== null) {
     return { kind: "bootstrap", premiereId: bootstrap[1] };
@@ -317,14 +296,6 @@ export function matchProxyWarPublicPremiereReadPath(
   if (archiveClip !== null) {
     return { kind: "archive_clip", premiereId: archiveClip[1] };
   }
-  const marketState = proxyWarPremiereMarketStatePattern.exec(pathname);
-  if (marketState !== null) {
-    return { kind: "market_state", premiereId: marketState[1] };
-  }
-  const marketSelf = proxyWarPremiereMarketSelfPattern.exec(pathname);
-  if (marketSelf !== null) {
-    return { kind: "market_state_self", premiereId: marketSelf[1] };
-  }
   const liveProjection = proxyWarPremiereLiveProjectionPattern.exec(pathname);
   if (liveProjection !== null) {
     return { kind: "live_projection", premiereId: liveProjection[1] };
@@ -347,10 +318,6 @@ export function matchProxyWarPublicPremiereWritePath(
   const prediction = proxyWarPremierePredictionPattern.exec(pathname);
   if (prediction !== null) {
     return { kind: "prediction", premiereId: prediction[1] };
-  }
-  const marketOrder = proxyWarPremiereMarketOrderPattern.exec(pathname);
-  if (marketOrder !== null) {
-    return { kind: "market_order", premiereId: marketOrder[1] };
   }
   const reaction = proxyWarPremiereReactionPattern.exec(pathname);
   if (reaction !== null) {
@@ -377,44 +344,14 @@ export function isProxyWarPublicPremiereWritePath(pathname: string): boolean {
   return matchProxyWarPublicPremiereWritePath(pathname) !== null;
 }
 
-const PROXYWAR_POINTS_LEADERBOARD_PATH = "/api/premieres/points/leaderboard";
-const PROXYWAR_POINTS_DISPLAY_NAME_PATH = "/api/premieres/points/display-name";
-
-/**
- * Cross-premiere points leaderboard read. Not `:premiereId`-scoped, so it
- * sits outside the premiere route family above and needs its own allowlist
- * entry in league-wrapper-only mode.
- */
-export function isProxyWarPublicPointsReadPath(pathname: string): boolean {
-  return pathname === PROXYWAR_POINTS_LEADERBOARD_PATH;
-}
-
-/** Cross-premiere points leaderboard write (setting a display name) — see {@link isProxyWarPublicPointsReadPath}. */
-export function isProxyWarPublicPointsWritePath(pathname: string): boolean {
-  return pathname === PROXYWAR_POINTS_DISPLAY_NAME_PATH;
-}
-
 const PROXYWAR_ACCOUNT_PAGE_PATH = "/account";
-const PROXYWAR_ACCOUNT_API_PATH = "/api/premieres/account";
-const PROXYWAR_ACCOUNT_LEAGUE_CLAIM_PATH =
-  "/api/premieres/account/league-claim";
 
 /**
- * The account page and its one read API — same "betting-demo feature, not
- * a beta-league one" reasoning as {@link isProxyWarPublicPointsReadPath}:
- * reachable in league-wrapper-only mode (bet.proxywar.xyz), deliberately
- * absent from the beta allowlist.
+ * The account page and its read API are available in league-wrapper-only
+ * mode and deliberately absent from the retired beta allowlist.
  */
 export function isProxyWarPublicAccountReadPath(pathname: string): boolean {
-  return (
-    pathname === PROXYWAR_ACCOUNT_PAGE_PATH ||
-    pathname === PROXYWAR_ACCOUNT_API_PATH
-  );
-}
-
-/** The account page's one write surface: setting or clearing the self-asserted league claim — see {@link isProxyWarPublicPointsWritePath}. */
-export function isProxyWarPublicAccountWritePath(pathname: string): boolean {
-  return pathname === PROXYWAR_ACCOUNT_LEAGUE_CLAIM_PATH;
+  return pathname === PROXYWAR_ACCOUNT_PAGE_PATH;
 }
 
 /**

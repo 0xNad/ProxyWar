@@ -60,8 +60,6 @@ function emptyInteractionSnapshot(
     premiereId,
     checkpoints: [checkpoint("cp_00000001", 2), checkpoint("cp_00000002", 4)],
     predictions: [],
-    market: null,
-    trades: [],
     reactions: [],
     shares: [],
     sessions: [],
@@ -152,7 +150,6 @@ function terminalInteractions(
             eventContext: { headline: `released-${sequence}` },
           }
         : null,
-    getLiveVisibleSequence: () => 6,
     persistence: {
       async persist({ eventType }) {
         await beforePersist?.(eventType);

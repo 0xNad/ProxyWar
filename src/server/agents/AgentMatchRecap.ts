@@ -28,7 +28,8 @@ import type {
  * `AiLeagueReplayOverlay.ts`, `pushWarRoomEvent` in
  * `ReplayPremiereRuntime.ts`) — alliance formation, first strike (first
  * attack per ordered actor/target pair only, never every attack),
- * betrayal (an active alliance break), and elimination — plus one
+ * betrayal (an active alliance break), structured deal lifecycle facts,
+ * and elimination — plus one
  * addition only meaningful post-hoc (a live/streaming overlay can't see
  * ahead): a "final confrontation" beat when the endgame window contains a
  * genuine attack/nuke event, using the SAME endgame window fraction/cap
@@ -72,8 +73,10 @@ import type {
  * made the cut.
  *
  * 2026-08-01 "best battles" ranking fix: this module also now computes
- * `curatedDramaScore` (see `computeCuratedDramaScore`'s doc) from the SAME
- * deduped beats above, and that — not `AgentDramaReport.dramaScore` — is
+ * `curatedDramaScore` (see `computeCuratedDramaScore`'s doc) from the legacy
+ * combat/politics subset of the deduped beats above. Structured deal facts
+ * remain descriptive evidence and do not silently change this pre-existing
+ * composite score. The score — not `AgentDramaReport.dramaScore` — is
  * what the public lobby/`/watch`/`feature:candidates` ranking surfaces
  * rank and badge on. `AgentDramaReport.ts`'s generator and its own
  * `dramaScore` are untouched; this is a parallel, curated score for
@@ -91,6 +94,12 @@ export interface AgentMatchRecapBeat {
     | "alliance"
     | "first_strike"
     | "betrayal"
+    | "deal_proposed"
+    | "deal_accepted"
+    | "deal_rejected"
+    | "deal_expired"
+    | "deal_fulfilled"
+    | "deal_violated"
     | "elimination"
     | "final_confrontation"
     | "lead_change"
@@ -118,14 +127,19 @@ export interface AgentMatchRecapBeat {
  * always stays individual, never swept into the terminal group. (2)
  * repeat betrayals of the SAME pair (a real production match showed the
  * same two agents break their alliance three times) now aggregate after
- * the first — see `curateWarRoomBeats`'s doc. Every bump means exactly
+ * the first — see `curateWarRoomBeats`'s doc. Then 5 -> 6 adds deduplicated
+ * structured deal lifecycle facts to the public recap without adding them
+ * to the legacy composite drama score. Then 6 -> 7 requires
+ * `evidenceLevel === "confirmed_effect"` before alliance, first-strike,
+ * betrayal, or final-confrontation effect claims enter the recap. Every bump
+ * means exactly
  * that: `CoworldLeagueMatchNarrativeBackfill.ts`'s `recapNeedsRegeneration`
  * compares against this constant to force re-curation, and
  * `LeagueEpisodeMatchPage.ts`'s `parseMatchRecapArtifact` refuses to parse
  * anything but the current version (a stale artifact reads as "no recap
  * yet", never as spammy/scoreless content, until the backfill upgrades it).
  */
-export const AGENT_MATCH_RECAP_SCHEMA_VERSION = 5;
+export const AGENT_MATCH_RECAP_SCHEMA_VERSION = 7;
 
 export interface AgentMatchRecap {
   schemaVersion: typeof AGENT_MATCH_RECAP_SCHEMA_VERSION;
@@ -159,21 +173,38 @@ const BEAT_KIND_LABEL: Record<AgentMatchRecapBeat["kind"], string> = {
   alliance: "alliance",
   first_strike: "first strike",
   betrayal: "betrayal",
+  deal_proposed: "deal proposal",
+  deal_accepted: "accepted deal",
+  deal_rejected: "rejected deal",
+  deal_expired: "expired deal",
+  deal_fulfilled: "fulfilled promise",
+  deal_violated: "violated promise",
   elimination: "elimination",
   final_confrontation: "final clash",
   lead_change: "lead change",
   reversal: "reversal",
 };
 
-/** Lower sorts first when trimming — betrayals/eliminations/final-clash are never trimmed by the cap (see `applyImportanceCap`); this only orders the categories that DO get trimmed. `lead_change`/`reversal` sort ahead of `alliance`/`first_strike`: they are derived from the sampled match-state series (typically far rarer per match than alliance/first-strike events — a confirmed, margin-cleared overtake is uncommon), so when the cap DOES bite, this new decisive-derivation content is kept before the higher-volume War Room categories. */
+/** Lower sorts first when trimming — betrayals, terminal deal verdicts, eliminations, and the final clash are never trimmed by the cap (see `applyImportanceCap`); this only orders the categories that DO get trimmed. `lead_change`/`reversal` sort ahead of the higher-volume War Room categories. */
 const TRIMMABLE_KIND_PRIORITY: Record<
-  "alliance" | "first_strike" | "lead_change" | "reversal",
+  | "alliance"
+  | "first_strike"
+  | "lead_change"
+  | "reversal"
+  | "deal_proposed"
+  | "deal_accepted"
+  | "deal_rejected"
+  | "deal_expired",
   number
 > = {
   lead_change: 0,
   reversal: 1,
-  alliance: 2,
-  first_strike: 3,
+  deal_accepted: 2,
+  deal_expired: 3,
+  deal_rejected: 4,
+  deal_proposed: 5,
+  alliance: 6,
+  first_strike: 7,
 };
 
 interface AllianceRun {
@@ -240,12 +271,20 @@ export interface CuratedWarRoomBeats {
   betrayalBeats: AgentMatchRecapBeat[];
   /** Every elimination individually — never dropped by the cap. Simultaneous match-end eliminations are compressed separately, in `buildAgentMatchRecap` (needs `totalTurns`, not available at this layer) — see `compressTerminalEliminations`. */
   eliminationBeats: AgentMatchRecapBeat[];
+  /** Structured deal lifecycle facts, already deduplicated across equivalent action-stamp/ledger projections. */
+  dealBeats: AgentMatchRecapBeat[];
   /** Raw per-category counts for the summary line — BEFORE aggregation/capping, so the summary always reports the full picture even when the beat list is trimmed. */
   rawCounts: {
     alliance: number;
     betrayal: number;
     firstStrike: number;
     elimination: number;
+    dealProposed: number;
+    dealAccepted: number;
+    dealRejected: number;
+    dealExpired: number;
+    dealFulfilled: number;
+    dealViolated: number;
   };
   /** Every source `SpectatorEvent.id` this pass consumed, so `finalConfrontationBeat` never double-reports an attack already covered as a first strike. */
   includedEventIds: Set<string>;
@@ -269,20 +308,79 @@ function curateWarRoomBeats(
   const firstStrikeBeats: AgentMatchRecapBeat[] = [];
   const betrayalBeats: AgentMatchRecapBeat[] = [];
   const eliminationBeats: AgentMatchRecapBeat[] = [];
+  const dealBeats: AgentMatchRecapBeat[] = [];
   const finalizedAllianceBeats: AgentMatchRecapBeat[] = [];
   const openAllianceRuns = new Map<string, AllianceRun>();
   const betrayalOrdinalByPair = new Map<string, number>();
   const openBetrayalRuns = new Map<string, BetrayalRun>();
   const includedEventIds = new Set<string>();
   const firstStrikeSeen = new Set<string>();
+  const dealFactsSeen = new Set<string>();
   const rawCounts = {
     alliance: 0,
     betrayal: 0,
     firstStrike: 0,
     elimination: 0,
+    dealProposed: 0,
+    dealAccepted: 0,
+    dealRejected: 0,
+    dealExpired: 0,
+    dealFulfilled: 0,
+    dealViolated: 0,
   };
 
   for (const event of events) {
+    if (
+      (event.kind === "attack" ||
+        event.kind === "alliance_formed" ||
+        event.kind === "alliance_break" ||
+        event.kind === "nuke") &&
+      event.evidenceLevel !== "confirmed_effect"
+    ) {
+      continue;
+    }
+    if (
+      event.kind === "deal_proposed" ||
+      event.kind === "deal_accepted" ||
+      event.kind === "deal_rejected" ||
+      event.kind === "deal_expired" ||
+      event.kind === "deal_fulfilled" ||
+      event.kind === "deal_violated"
+    ) {
+      const factKey = [
+        event.turnNumber,
+        event.kind,
+        event.actorAgentID,
+        event.targetAgentID ?? "",
+        event.publicText ?? event.message,
+      ].join("|");
+      if (dealFactsSeen.has(factKey)) continue;
+      dealFactsSeen.add(factKey);
+      const countKey = {
+        deal_proposed: "dealProposed",
+        deal_accepted: "dealAccepted",
+        deal_rejected: "dealRejected",
+        deal_expired: "dealExpired",
+        deal_fulfilled: "dealFulfilled",
+        deal_violated: "dealViolated",
+      }[event.kind] as
+        | "dealProposed"
+        | "dealAccepted"
+        | "dealRejected"
+        | "dealExpired"
+        | "dealFulfilled"
+        | "dealViolated";
+      rawCounts[countKey] += 1;
+      includedEventIds.add(event.id);
+      dealBeats.push({
+        turnNumber: event.turnNumber,
+        kind: event.kind,
+        // Referee/server fact only. The viewer-only agent claim remains a
+        // separate telemetry field and is never folded into recap narration.
+        message: event.publicText ?? event.message,
+      });
+      continue;
+    }
     if (event.kind === "attack" && event.targetAgentID !== null) {
       const key = `${event.actorAgentID}|${event.targetAgentID}`;
       if (!firstStrikeSeen.has(key)) {
@@ -382,6 +480,7 @@ function curateWarRoomBeats(
     firstStrikeBeats,
     betrayalBeats,
     eliminationBeats,
+    dealBeats,
     rawCounts,
     includedEventIds,
   };
@@ -401,8 +500,8 @@ function curateWarRoomBeats(
  * and any consumer that still legitimately wants the raw count, keeps
  * reading it there unchanged. This is a SEPARATE score computed from the
  * SAME dedupe pass `curateWarRoomBeats` already runs to build the public
- * recap beats, so it is only ever as inflated as what a reader actually
- * SEES in the recap.
+ * recap beats. Structured deal lifecycle facts are intentionally excluded:
+ * they are descriptive evidence, not an unvalidated social-skill score.
  *
  * Weights mirror `AgentDramaReport.dramaScore`'s recognizable per-unit
  * order (betrayals heaviest, then eliminations, then alliances, first
@@ -474,7 +573,7 @@ export const CURATED_DRAMA_SCORE_METHODOLOGY =
   `min(non-terminal elimination beats, ${CURATED_DRAMA_WEIGHTS.eliminationCap}) x${CURATED_DRAMA_WEIGHTS.elimination} (eliminations at the match's own final turn are compressed into one summary beat and never scored — a normal match end is not a drama signal) + ` +
   `min(distinct alliance pairs, ${CURATED_DRAMA_WEIGHTS.alliancePairCap}) x${CURATED_DRAMA_WEIGHTS.alliancePair} (same-pair re-formations aggregate into one pair, never scored per re-request) + ` +
   `min(distinct first-strike pairs, ${CURATED_DRAMA_WEIGHTS.firstStrikePairCap}) x${CURATED_DRAMA_WEIGHTS.firstStrikePair} + ${CURATED_DRAMA_WEIGHTS.finalConfrontation} if the match ended on a genuine final clash beat; ` +
-  `summed and capped to [0, 100] — computed from the same deduped War Room beats this recap shows, never from raw un-deduped event counts, with each category capped before weighting so a structurally-large-but-ordinary count (e.g. first strikes/eliminations in a completed free-for-all) cannot alone saturate the score`;
+  `summed and capped to [0, 100] — computed from the deduped legacy combat/politics beat subset, with structured deal lifecycle facts excluded, never from raw un-deduped event counts, and with each scored category capped before weighting so a structurally-large-but-ordinary count (e.g. first strikes/eliminations in a completed free-for-all) cannot alone saturate the score`;
 
 function computeCuratedDramaScore(
   curated: CuratedWarRoomBeats,
@@ -524,6 +623,7 @@ function finalConfrontationBeat(
       event.turnNumber >= windowStart &&
       event.targetAgentID !== null &&
       (event.kind === "attack" || event.kind === "nuke") &&
+      event.evidenceLevel === "confirmed_effect" &&
       !alreadyIncluded.has(event.id),
   );
   if (candidates.length === 0) return null;
@@ -633,13 +733,14 @@ function reversalBeats(series: MatchStateSeries | null): AgentMatchRecapBeat[] {
 
 /**
  * Trims to `MAX_PUBLIC_RECAP_BEATS`, chronologically ordered on output.
- * Betrayal/elimination/final-confrontation beats are ALWAYS kept in full
+ * Betrayal, fulfilled/violated deal verdict, elimination, and
+ * final-confrontation beats are ALWAYS kept in full
  * — they never count against the cap's trimming, only against its total
  * (in the practically-impossible case where those three categories alone
  * exceed the cap, every one of them still survives; the cap is then
- * exceeded honestly rather than dropping a betrayal). Alliance beats trim
- * before first-strike beats when the two combined don't fit the remaining
- * budget, each category itself kept in chronological order.
+ * exceeded honestly rather than dropping a terminal fact). Remaining deal,
+ * alliance, and first-strike beats are priority-trimmed when they do not fit
+ * the remaining budget, each category itself kept in chronological order.
  */
 function applyImportanceCap(
   neverTrimmed: readonly AgentMatchRecapBeat[],
@@ -651,11 +752,9 @@ function applyImportanceCap(
   );
   const orderedTrimmable = [...trimmable].sort(
     (a, b) =>
-      TRIMMABLE_KIND_PRIORITY[
-        a.kind as "alliance" | "first_strike" | "lead_change" | "reversal"
-      ] -
+      TRIMMABLE_KIND_PRIORITY[a.kind as keyof typeof TRIMMABLE_KIND_PRIORITY] -
         TRIMMABLE_KIND_PRIORITY[
-          b.kind as "alliance" | "first_strike" | "lead_change" | "reversal"
+          b.kind as keyof typeof TRIMMABLE_KIND_PRIORITY
         ] || a.turnNumber - b.turnNumber,
   );
   const kept = [...neverTrimmed, ...orderedTrimmable.slice(0, remainingBudget)];
@@ -677,6 +776,12 @@ function buildSummary(
     ["final_confrontation", hasFinalConfrontation ? 1 : 0],
     ["lead_change", leadChangeCount],
     ["reversal", reversalCount],
+    ["deal_proposed", counts.dealProposed],
+    ["deal_accepted", counts.dealAccepted],
+    ["deal_rejected", counts.dealRejected],
+    ["deal_expired", counts.dealExpired],
+    ["deal_fulfilled", counts.dealFulfilled],
+    ["deal_violated", counts.dealViolated],
   ];
   for (const [kind, count] of entries) {
     if (count === 0) continue;
@@ -716,6 +821,9 @@ export function buildAgentMatchRecap(
   );
   const neverTrimmed = [
     ...curated.betrayalBeats,
+    ...curated.dealBeats.filter(
+      (beat) => beat.kind === "deal_fulfilled" || beat.kind === "deal_violated",
+    ),
     ...compressedEliminations.beats,
     ...(finalBeat !== null ? [finalBeat] : []),
   ];
@@ -726,6 +834,9 @@ export function buildAgentMatchRecap(
     ...curated.firstStrikeBeats,
     ...leadChanges,
     ...reversals,
+    ...curated.dealBeats.filter(
+      (beat) => beat.kind !== "deal_fulfilled" && beat.kind !== "deal_violated",
+    ),
   ];
   const beats = applyImportanceCap(neverTrimmed, trimmable);
   if (beats.length === 0) {

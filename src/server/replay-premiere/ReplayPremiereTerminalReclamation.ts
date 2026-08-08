@@ -434,7 +434,6 @@ export class ReplayPremiereTerminalReclaimer {
                   policyIdentity: seat.policyIdentity,
                 })),
                 getPremiereState: () => candidate.terminalState,
-                getLiveVisibleSequence: () => -1,
                 limits: this.interactionLimits,
               },
               result: verifyPremiereAuthoritativeResultBytes({
@@ -504,7 +503,6 @@ export class ReplayPremiereTerminalReclaimer {
           })),
           getPremiereState: () => candidate.terminalState,
           getReleasedContext: () => null,
-          getLiveVisibleSequence: () => -1,
           limits: this.interactionLimits,
         });
         const optionSeatIds = record.eligibilityRecord.seats.map(

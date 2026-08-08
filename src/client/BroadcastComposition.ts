@@ -336,6 +336,12 @@ export type CuratedWarRoomEventKind =
   | "alliance"
   | "first_strike"
   | "betrayal"
+  | "deal_proposed"
+  | "deal_accepted"
+  | "deal_rejected"
+  | "deal_expired"
+  | "deal_fulfilled"
+  | "deal_violated"
   | "elimination"
   | "nuke"
   | "plan_change";
@@ -350,6 +356,12 @@ const WAR_ROOM_GLYPHS: Record<CuratedWarRoomEventKind, string> = {
   alliance: "\u26AD", // ⚭ marriage/union symbol
   first_strike: "\u2192", // → arrow
   betrayal: "\u2020", // † dagger
+  deal_proposed: "\u225F", // ≟ questioned equality / proposed terms
+  deal_accepted: "\u2713", // ✓ check mark
+  deal_rejected: "\u2715", // ✕ multiplication x
+  deal_expired: "\u2205", // ∅ empty set / no live agreement
+  deal_fulfilled: "\u2261", // ≡ agreement held
+  deal_violated: "\u2020", // † dagger, matching betrayal
   elimination: "\u2715", // ✕ multiplication x
   nuke: "\u2622", // ☢ radioactive sign — matches ReplayPremiereOverlay.ts's own WAR_EVENT_GLYPHS
   plan_change: "\u21BB", // ↻ clockwise open arrow
@@ -463,7 +475,10 @@ export function renderWarRoomEvent(
   item.dataset.tier = String(event.tier ?? 2);
   const summary = element("button", "broadcast-war-room-summary");
   summary.type = "button";
-  const expanded = event.expandedDetail !== null || event.publicReason !== null;
+  const expanded =
+    event.expandedDetail !== null ||
+    event.publicReason !== null ||
+    callbacks.onJumpToTurn !== undefined;
   summary.setAttribute("aria-expanded", "false");
   const glyph = element(
     "span",
@@ -542,6 +557,12 @@ export type TimelineMarkerKind =
   | "first_strike"
   | "lead_change"
   | "betrayal"
+  | "deal_proposed"
+  | "deal_accepted"
+  | "deal_rejected"
+  | "deal_expired"
+  | "deal_fulfilled"
+  | "deal_violated"
   | "nuke"
   | "elimination"
   | "finish"

@@ -6,8 +6,8 @@ import { translateText } from "../Utils";
  * (`/`, `/watch`, `/agents`, `/agent/:slug`, `/builders`, `/builder/:slug`,
  * `/about`, `/build`) — spec Stage 2 item 2 ("App shell per §4... reuse
  * Stage 0 tokens and primitives"). Not a wrapping custom element: these
- * pages fully replace `document.body` (same pattern as
- * `PlayerProfilePage`/`TraderProfilePage`), so each page's own `render()`
+ * pages fully replace `document.body` (same pattern as `PlayerProfilePage`),
+ * so each page's own `render()`
  * includes `appShellHeader()`/`appShellFooter()` at the top/bottom of its
  * own template instead of nesting inside a shell element.
  *

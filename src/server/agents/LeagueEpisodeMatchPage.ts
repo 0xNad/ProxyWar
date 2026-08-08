@@ -7,6 +7,7 @@ import {
   computeProvisionalIdentities,
   type ProvisionalIdentity,
 } from "../identity/ProvisionalIdentity";
+import { DECISIVE_MOMENTS_SCHEMA_VERSION } from "./AgentDecisiveMoments";
 import { AGENT_MATCH_RECAP_SCHEMA_VERSION } from "./AgentMatchRecap";
 import {
   publicRunKeyFromFullRenderHref,
@@ -406,7 +407,7 @@ export function parseDecisiveMomentsArtifact(
   }
   if (typeof value !== "object" || value === null) return null;
   const record = value as Record<string, unknown>;
-  if (record.schemaVersion !== 1) return null;
+  if (record.schemaVersion !== DECISIVE_MOMENTS_SCHEMA_VERSION) return null;
   const momentsRaw = Array.isArray(record.moments) ? record.moments : [];
   const moments = momentsRaw
     .map((entry) => {

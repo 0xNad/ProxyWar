@@ -2,9 +2,7 @@
  * Server-side reader + per-player aggregation over the public league mirror
  * output (`artifacts/ai-league-runs/league/data.json`, written by
  * `CoworldLeagueSiteWriter`/`coworld-league-mirror.ts`). Feeds the platform
- * player-profile page (`GET /api/players/:name`) — the league half only;
- * betting stats are joined separately in the HTTP route from the points
- * ledger, which this module never touches or even knows about.
+ * player-profile page (`GET /api/players/:name`).
  *
  * Reads the file directly off disk rather than importing the client-side
  * `leagueData.ts` parser: that module is browser-oriented (its module-level
@@ -20,15 +18,11 @@
  *
  * PUBLIC DATA ONLY: every field here comes straight from the public mirror
  * file. This module has no access to (and must never gain access to) the
- * private league-claim store or the GitHub identity link store — the
- * profile route joins betting separately, keyed by a VERIFIED GitHub login,
- * never by anything from here.
+ * private league-claim store or the GitHub identity link store.
  */
 import { promises as fs } from "node:fs";
-import {
-  findPlayerStats,
-  type AgentStatsArtifact,
-} from "./AgentStatsArtifact";
+import type { PublicAgentStats } from "../ProxyWarPublicReadModel";
+import { findPlayerStats, type AgentStatsArtifact } from "./AgentStatsArtifact";
 import {
   computeAgentTimeSeries,
   type AgentTimeSeries,
@@ -37,7 +31,6 @@ import {
   EMPTY_STANDINGS_HISTORY_STORE,
   type StandingsHistoryStore,
 } from "./CoworldLeagueStandingsHistory";
-import type { PublicAgentStats } from "../ProxyWarPublicReadModel";
 
 export interface PlayerProfileStanding {
   readonly rank: number;
@@ -75,7 +68,10 @@ export interface PlayerProfileLeagueSection {
   /** Newest-first. Only the episodes retained in the mirror (12-16 typically) — never a longer history than the source actually keeps. */
   readonly episodes: readonly PlayerProfileEpisode[];
   /** Record over `episodes` ONLY — never extrapolated past the retained window. `null` with no retained episodes for this player. */
-  readonly recentRecord: { readonly wins: number; readonly played: number } | null;
+  readonly recentRecord: {
+    readonly wins: number;
+    readonly played: number;
+  } | null;
   /**
    * Product overhaul spec Stage 6: the SAME `career`/`currentVersion`
    * fingerprint+social object the public read model's `PublicAgent.stats`
@@ -269,8 +265,7 @@ function episodeSortKey(episode: ParsedEpisodeRow): number {
 /**
  * Builds the league half of one player's profile. `null` only when the name
  * appears NOWHERE — no standings row, no episode roster — across the whole
- * retained mirror; the caller then falls back to the betting section (or a
- * genuine 404 if that is empty too).
+ * retained mirror; the caller then returns a genuine 404.
  */
 export function buildLeaguePlayerSection(
   data: ParsedLeagueMirrorData,
@@ -345,8 +340,12 @@ export function buildLeaguePlayerSection(
     episodes: episodeViews,
     recentRecord,
     timeSeries,
-    stats: playerStats === null
-      ? null
-      : { career: playerStats.career, currentVersion: playerStats.currentVersion },
+    stats:
+      playerStats === null
+        ? null
+        : {
+            career: playerStats.career,
+            currentVersion: playerStats.currentVersion,
+          },
   };
 }

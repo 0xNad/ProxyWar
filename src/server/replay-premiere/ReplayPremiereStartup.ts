@@ -32,20 +32,12 @@ import {
   type ReplayPremiereJsonValue,
 } from "./ReplayPremiereIntegrity";
 import {
-  DEFAULT_SYNTHETIC_CROWD_CONFIG,
-  SyntheticCrowdLiveDriver,
-  type SyntheticCrowdConfig,
-  type SyntheticCrowdTerritoryProjector,
-} from "./wagering/simulation";
-import {
   hashReplayPremiereCheckpointSchedule,
   loadReplayPremiereInteractions,
 } from "./ReplayPremiereInteractionRecovery";
 import type {
   ReplayPremiereInteractionLimits,
   ReplayPremiereReleasedContext,
-  ReplayPremiereSettlementLedgerRecorder,
-  ReplayPremiereSettlementPointsRecorder,
 } from "./ReplayPremiereInteractions";
 import {
   compactReplayPremiereEventJournal,
@@ -189,26 +181,6 @@ export interface ReplayPremiereProductionStartupOptions {
   catalogLimits?: ReplayPremiereCatalogLimits;
   eventStoreLimits?: ReplayPremiereEventStoreLimits;
   interactionLimits?: Partial<ReplayPremiereInteractionLimits>;
-  /** Server-side LMSR prediction market, continuous from match start to reveal. Off by default. */
-  wageringEnabled?: boolean;
-  /** Durable cross-premiere points-ledger sink — see `ReplayPremiereSettlementPointsRecorder`. Absent by default; no leaderboard recording happens without it. */
-  pointsLedger?: ReplayPremiereSettlementPointsRecorder;
-  /** Durable "who won" settlement-ledger sink — see `ReplayPremiereSettlementLedgerRecorder`. Absent by default; no settlement record is written without it. */
-  settlementLedger?: ReplayPremiereSettlementLedgerRecorder;
-  /**
-   * Deterministic, seeded synthetic bettors trading the same LMSR market
-   * real participants use, to keep thin markets legible for demos/tester
-   * sessions. Requires `wageringEnabled`. Off by default — see
-   * `SyntheticCrowdSimulator.ts`'s header for why this must never be on in
-   * anything resembling production.
-   */
-  syntheticCrowdEnabled?: boolean;
-  /** Overrides merged onto `DEFAULT_SYNTHETIC_CROWD_CONFIG` when `syntheticCrowdEnabled` is set. */
-  syntheticCrowdConfig?: Partial<SyntheticCrowdConfig>;
-  /** Real-time poll cadence for the synthetic crowd driver; defaults to 1000ms. Lower only for tests. */
-  syntheticCrowdPollIntervalMs?: number;
-  /** Whole-match territory precompute for the synthetic crowd's real per-seat signal (see `SyntheticCrowdTerritoryProjection.ts`). Required for the crowd to price anything beyond the flat floor; omit only if `syntheticCrowdEnabled` is never set. */
-  territoryProjector?: SyntheticCrowdTerritoryProjector;
   clock?: ReplayPremiereRuntimeClock;
   maxStartupMs?: number;
   /**
@@ -260,8 +232,6 @@ export interface ReplayPremiereProductionStartupResult {
 interface AssembledPremiereTarget {
   runtime: ReplayPremiereRuntimeCoordinator;
   target: ReplayPremiereHttpTarget;
-  /** Present only when `syntheticCrowdEnabled` was set at assembly time. Started once registration succeeds, stopped on every teardown path. */
-  syntheticCrowdDriver?: SyntheticCrowdLiveDriver;
 }
 
 interface RecoveryProjection {
@@ -413,7 +383,6 @@ export class ReplayPremiereProductionService {
       failures.push(error);
     } finally {
       for (const assembled of [...this.ownedTargets].reverse()) {
-        assembled.syntheticCrowdDriver?.stop();
         try {
           this.httpRegistry.unregister(assembled.target);
         } catch (error) {
@@ -454,7 +423,6 @@ export class ReplayPremiereProductionService {
       assembled,
       () => {
         this.supervisor.add(assembled.runtime);
-        assembled.syntheticCrowdDriver?.start();
       },
     );
     this.ownedTargets.push(assembled);
@@ -482,7 +450,6 @@ export class ReplayPremiereProductionService {
           return null;
         });
       if (result === null || !result.reclaimed) continue;
-      assembled.syntheticCrowdDriver?.stop();
       this.supervisor.remove(assembled.runtime);
       this.httpRegistry.unregister(assembled.target);
       this.runtimeRegistry.unregister(assembled.runtime);
@@ -850,14 +817,7 @@ export async function startReplayPremiereProduction(
             checkpointProjector: options.checkpointProjector,
             checkpointProjectionCatalog: catalog,
             interactionLimits: options.interactionLimits,
-            wageringEnabled: options.wageringEnabled,
-            pointsLedger: options.pointsLedger,
-            settlementLedger: options.settlementLedger,
-            syntheticCrowdEnabled: options.syntheticCrowdEnabled,
-            syntheticCrowdConfig: options.syntheticCrowdConfig,
-            syntheticCrowdPollIntervalMs: options.syntheticCrowdPollIntervalMs,
             recoveryProjection: plan.projection,
-            territoryProjector: options.territoryProjector,
             fence,
           });
         },
@@ -888,7 +848,6 @@ export async function startReplayPremiereProduction(
           assembled,
           () => {
             supervisor.add(assembled.runtime);
-            assembled.syntheticCrowdDriver?.start();
           },
         );
         ownedTargets.push(assembled);
@@ -946,14 +905,7 @@ export async function startReplayPremiereProduction(
                   checkpointProjector: options.checkpointProjector,
                   checkpointProjectionCatalog: catalog,
                   interactionLimits: options.interactionLimits,
-                  wageringEnabled: options.wageringEnabled,
-                  pointsLedger: options.pointsLedger,
-                  settlementLedger: options.settlementLedger,
-                  syntheticCrowdEnabled: options.syntheticCrowdEnabled,
-                  syntheticCrowdConfig: options.syntheticCrowdConfig,
-                  syntheticCrowdPollIntervalMs: options.syntheticCrowdPollIntervalMs,
                   recoveryProjection: plan.projection,
-                  territoryProjector: options.territoryProjector,
                   fence,
                 });
               },
@@ -1157,13 +1109,6 @@ async function assemblePremiereTarget(options: {
   checkpointProjector: ReplayPremiereCheckpointProjector;
   checkpointProjectionCatalog: ReplayPremiereAdmissionCatalog;
   interactionLimits?: Partial<ReplayPremiereInteractionLimits>;
-  wageringEnabled?: boolean;
-  pointsLedger?: ReplayPremiereSettlementPointsRecorder;
-  settlementLedger?: ReplayPremiereSettlementLedgerRecorder;
-  syntheticCrowdEnabled?: boolean;
-  syntheticCrowdConfig?: Partial<SyntheticCrowdConfig>;
-  syntheticCrowdPollIntervalMs?: number;
-  territoryProjector?: SyntheticCrowdTerritoryProjector;
   recoveryProjection: RecoveryProjection;
   fence: ReplayPremiereStartupOperationFence;
 }): Promise<AssembledPremiereTarget> {
@@ -1224,15 +1169,10 @@ async function assemblePremiereTarget(options: {
           projection.releasedThroughSequence,
           sequence,
         ),
-      getLiveVisibleSequence: () =>
-        runtime?.readLiveVisibleSequence() ?? projection.releasedThroughSequence,
       signAttribution: (value) => options.security.signShareAttribution(value),
       canonicalPremiereUrl: `${options.publicOrigin}/premiere/${options.record.premiereId}`,
       now: () => options.clock.now(),
       limits: options.interactionLimits,
-      wageringEnabled: options.wageringEnabled,
-      pointsLedger: options.pointsLedger,
-      settlementLedger: options.settlementLedger,
       admitAnonymousWrite: options.httpRegistry.admitAnonymousWrite,
     },
   });
@@ -1269,42 +1209,12 @@ async function assemblePremiereTarget(options: {
   ) {
     throw startupIntegrity("startup_interaction_journal_anchor_mismatch");
   }
-  const syntheticCrowdDriver =
-    options.syntheticCrowdEnabled === true && options.wageringEnabled === true
-      ? new SyntheticCrowdLiveDriver({
-          runtime,
-          target: recoveredInteractions.interactions,
-          seatIds: options.record.eligibilityRecord.seats.map(
-            (seat) => seat.seatId,
-          ),
-          finalSequence:
-            drafts.length > 0 ? drafts[drafts.length - 1].descriptor.endSequence : 0,
-          pollIntervalMs: options.syntheticCrowdPollIntervalMs,
-          config: {
-            ...DEFAULT_SYNTHETIC_CROWD_CONFIG,
-            enabled: true,
-            ...options.syntheticCrowdConfig,
-          },
-          territory:
-            options.territoryProjector === undefined
-              ? undefined
-              : { projector: options.territoryProjector, gate, drafts },
-          onError: (error) => {
-            console.error(
-              `Synthetic crowd driver poll failed for ${options.record.premiereId}: ${
-                error instanceof Error ? error.message : String(error)
-              }`,
-            );
-          },
-        })
-      : undefined;
   return {
     runtime,
     target: {
       runtime,
       interactions: recoveredInteractions.interactions,
     },
-    syntheticCrowdDriver,
   };
 }
 

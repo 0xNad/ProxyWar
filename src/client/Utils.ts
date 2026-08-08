@@ -411,9 +411,8 @@ function getCachedLangSelector(): LangSelector | null {
  * `key` resolves against `<lang-selector>`'s loaded translations. `params`
  * feeds ICU interpolation. `defaultText` is an optional English fallback
  * returned instead of the raw `key` whenever a real translation can't be
- * resolved — no `<lang-selector>` in the DOM at all (e.g. the `/bet` SPA
- * shell, which ships without the translation bootstrap by design, see
- * `docs/BETTING_HANDOFF.md` §3), translations not loaded yet, or the key
+ * resolved — no `<lang-selector>` in the DOM at all, translations not loaded
+ * yet, or the key
  * missing from both the active and default translation sets. Callers in a
  * shared component (used by both a translations-bootstrapped shell and an
  * unbootstrapped one) should pass `defaultText`; a bootstrapped shell with

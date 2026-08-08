@@ -6,10 +6,9 @@
  * `?? "https://app.proxywar.xyz"` into four files — the client's profile-link
  * helper, the league site writer, the demo server's CSP origin, and Vite's
  * build-time `define` — and the 2026-07-30 apex cutover proved why that is a
- * defect rather than a style question: moving the origin updated the platform's
- * own env and left the *betting* process (which sets no
- * `PROXYWAR_PLATFORM_ORIGIN`) serving league documents with
- * `connect-src 'self' https://app.proxywar.xyz`.
+ * defect rather than a style question: moving the origin left another process
+ * serving league documents with `connect-src 'self'
+ * https://app.proxywar.xyz`.
  *
  * That failure mode is invisible. The stale host still answers — it 302s to the
  * apex — but CSP is enforced against redirect targets too, so the credentialed

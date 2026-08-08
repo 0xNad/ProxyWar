@@ -113,21 +113,9 @@ import {
   isInIframe,
   translateText,
 } from "./Utils";
+import "./platform/AccountPage";
 import "./platform/PlayerProfilePage";
-import "./platform/TraderProfilePage";
-// LEAGUE builds (PROXYWAR_LEAGUE_CLIENT=1, the coworld package image)
-// resolve these three wagering imports to inert stubs instead — betting
-// routes classify identically but render nothing and redirect to /league,
-// and no module under prediction/wagering/** reaches that bundle. See
-// src/client/prediction/leagueStubs/stubMap.ts and vite.config.ts. Normal
-// builds (beta/bet) are untouched and get the real pages below.
-import "./prediction/wagering/page/AccountPage";
-import {
-  openBettingPremierePage,
-  parseBettingPremiereRoute,
-  resolveCurrentBettingPremiereId,
-} from "./prediction/wagering/page/BettingPremierePage";
-import "./prediction/wagering/page/PremiereEndedPage";
+import "./platform/PremiereEndedPage";
 import { ReplaySpeedMultiplier } from "./utilities/ReplaySpeedMultiplier";
 
 import {
@@ -160,8 +148,8 @@ import "./styles/game-shell-scroll-lock.css";
  * element to resolve keys. In the running game shell that element lives
  * inside `Footer.ts`, nested under the header/nav chrome — but the
  * standalone data pages this module mounts via `document.body.
- * replaceChildren(...)` (`openAccountPage`, `openPlayerProfilePage`,
- * `openTraderProfilePage`) wipe that body-nested element out, silently
+ * replaceChildren(...)` (`openAccountPage`, `openPlayerProfilePage`) wipe
+ * that body-nested element out, silently
  * breaking every `translateText()` call on those pages (same failure
  * mode `PublicApp.ts` already solved for the public app entry point).
  * Call this before any such replace so a `<lang-selector>` always
@@ -351,17 +339,6 @@ export interface JoinLobbyEvent {
     | "ai-league-replay"
     | "coworld-replay"
     | "replay-premiere";
-  /**
-   * Set when the join originated from the dedicated `/bet/<id>` betting
-   * page rather than `/premiere/<id>` — both share `source: "replay-premiere"`
-   * and the same join-lobby/runtime machinery, so this is the only signal
-   * `handleJoinLobby`'s URL canonicalization has to pick the right path
-   * (see its `premierePath` branch) instead of always rewriting the URL
-   * bar to `/premiere/<id>`, which would silently strand the betting page
-   * on a route with no trade ticket/bankroll/positions after the join
-   * completes.
-   */
-  isBettingPremiere?: boolean;
   coworldReplayPath?: string;
   publicLobbyInfo?: GameInfo | PublicGameInfo;
 }
@@ -783,17 +760,6 @@ class Client {
       );
       return;
     }
-    // The trader profile page is likewise standalone — same reasoning as
-    // the account-page branch above, but keyed by the platform's opaque
-    // accountId, never a display name (see `TraderProfilePage.ts`'s doc).
-    const traderProfileMatch =
-      window.location.pathname.match(/^\/trader\/([^/]+)$/);
-    if (traderProfileMatch !== null) {
-      await this.openTraderProfilePage(
-        decodeURIComponent(traderProfileMatch[1]),
-      );
-      return;
-    }
     // Wait for modal custom elements to be defined
     await Promise.all([
       customElements.whenDefined("join-lobby-modal"),
@@ -810,13 +776,6 @@ class Client {
       } else {
         await this.openReplayPremiere(premiereId);
       }
-      return;
-    }
-    const bettingPremiereId = parseBettingPremiereRoute(
-      window.location.pathname,
-    );
-    if (bettingPremiereId !== null) {
-      await this.openBettingPremiere(bettingPremiereId);
       return;
     }
     if (isCoworldPlayerRoute()) {
@@ -990,9 +949,8 @@ class Client {
 
   /**
    * Mounts the standalone `/account` page. Deliberately NOT routed through
-   * any of `ReplayPremiereRuntimeController`/`openBettingPremiere`'s
-   * machinery — there is no replay, session, or WASM engine behind this
-   * route, only a data page over `/api/premieres/account`. The custom
+   * any replay-runtime machinery — there is no replay, session, or WASM
+   * engine behind this route, only a data page over `/api/account`. The custom
    * element is registered by the static `AccountPage` import above.
    */
   private async openAccountPage(): Promise<void> {
@@ -1017,24 +975,10 @@ class Client {
   }
 
   /**
-   * Mounts the standalone `/trader/:accountId` betting profile page —
-   * the destination the points leaderboard links a genuinely LINKED row
-   * to. Same reasoning as `openPlayerProfilePage` just above, keyed by
-   * account id instead of a league player name. The custom element is
-   * registered by the static `TraderProfilePage` import above.
-   */
-  private async openTraderProfilePage(accountId: string): Promise<void> {
-    ensureHeadLangSelector();
-    const page = document.createElement("trader-profile-page");
-    page.setAttribute("account-id", accountId);
-    document.body.replaceChildren(page);
-  }
-
-  /**
    * Mounts the themed "this premiere has ended" page in place of the
    * ordinary game/replay engine — the honest destination for a
    * `premiere_not_found` bootstrap failure (see `openReplayPremiere`'s
-   * and `openBettingPremiere`'s catch blocks below), replacing what used
+   * catch block below), replacing what used
    * to be a raw JSON document Chrome's own viewer rendered before the
    * server ever got the chance to serve this app shell at all (see
    * `ReplayPremierePublicPage.ts`'s content-negotiated 404 branch). Same
@@ -1044,10 +988,7 @@ class Client {
    * and the in-flight runtime attempt) rather than that method's own
    * generic "Replay unavailable" failure screen.
    */
-  private openPremiereEndedPage(
-    premiereId: string,
-    surface: "bet" | "premiere",
-  ): void {
+  private openPremiereEndedPage(premiereId: string): void {
     this.replayLoadingCleanup?.();
     this.replayLoadingCleanup = null;
     this.replayAttemptCleanup?.();
@@ -1063,7 +1004,6 @@ class Client {
     ensureHeadLangSelector();
     const page = document.createElement("premiere-ended-page");
     page.setAttribute("premiere-id", premiereId);
-    page.setAttribute("surface", surface);
     document.body.replaceChildren(page);
   }
 
@@ -1295,7 +1235,7 @@ class Client {
         error instanceof ReplayPremiereNetworkError &&
         error.code === "premiere_not_found"
       ) {
-        this.openPremiereEndedPage(premiereId, "premiere");
+        this.openPremiereEndedPage(premiereId);
         return;
       }
       this.failReplayLoading(
@@ -1305,241 +1245,6 @@ class Client {
         error,
       );
     }
-  }
-
-  /**
-   * The dedicated betting page's own bootstrap — mirrors
-   * `openReplayPremiere` exactly for the veil/join dance (same runtime
-   * class, same game engine mounting), delegating the trading-specific
-   * wiring (continuous market poll, bankroll, buy/sell) to
-   * `openBettingPremierePage`. Deliberately reuses `replayPremiereRuntime`/
-   * `replayAttemptCleanup`/`replayLoadingCleanup` rather than dedicated
-   * fields and the `"replay-premiere"` join source rather than a new one:
-   * the two surfaces are mutually exclusive routes over the SAME runtime
-   * shape, so every existing interruption/cleanup path
-   * (`handleJoinLobby`'s guard, `beforeunload`, `failReplayLoading`)
-   * already does the right thing without new branches.
-   */
-  private async openBettingPremiere(premiereId: string): Promise<void> {
-    this.replayAttemptCleanup?.();
-    this.replayLoadingCleanup?.();
-
-    showReplayLoadingScreen("replay_premiere.loading_premiere");
-    let veilFinished = false;
-    let veilSlowTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
-      if (!veilFinished) {
-        showReplayLoadingScreen("ai_league_replay.loading_slow");
-      }
-    }, REPLAY_LOADING_SLOW_TIMEOUT_MS);
-    const clearVeilSlowTimer = () => {
-      if (veilSlowTimer !== null) {
-        clearTimeout(veilSlowTimer);
-        veilSlowTimer = null;
-      }
-    };
-    // Honest, INACTIVITY-based join-sync watchdog (not a fixed deadline):
-    // see `createJoinSyncWatchdog`'s own doc / `openReplayPremiere`'s
-    // identical wiring for the full rationale -- a catch-up on a
-    // backlogged market can legitimately take longer than
-    // JOIN_SYNC_TIMEOUT_MS while still actively converging, so a fixed
-    // one-shot timer used to fire regardless, latching a "Replay
-    // unavailable" failure OVER a sync that was still advancing.
-    const joinSyncWatchdog = createJoinSyncWatchdog({
-      onStalled: () => {
-        if (!veilFinished) showReplayLoadingFailure();
-      },
-      onRecovered: () => {
-        if (!veilFinished)
-          showReplayLoadingScreen("replay_premiere.joining_live");
-      },
-    });
-    const onVeilReplayError = () => {
-      if (veilFinished) return;
-      veilFinished = true;
-      clearVeilSlowTimer();
-      showReplayLoadingFailure();
-    };
-    document.addEventListener(
-      "ai-league-replay-load-error",
-      onVeilReplayError,
-      {
-        once: true,
-      },
-    );
-    const releaseVeilHold = () => {
-      clearVeilSlowTimer();
-      document.removeEventListener(
-        "ai-league-replay-load-error",
-        onVeilReplayError,
-      );
-    };
-    const finishVeil = () => {
-      if (veilFinished) return;
-      veilFinished = true;
-      joinSyncWatchdog.clear();
-      releaseVeilHold();
-      setReplayLoadingProgress(null);
-      finishReplayLoadingScreen();
-      if (this.replayLoadingCleanup === releaseVeilHold) {
-        this.replayLoadingCleanup = null;
-      }
-    };
-    this.replayLoadingCleanup = releaseVeilHold;
-
-    let active = true;
-    let projectionMounted = false;
-    const handle = openBettingPremierePage(premiereId, {
-      onProjectionReady: (projection) => {
-        if (!active || this.replayPremiereRuntime !== handle.runtime) return;
-        projectionMounted = true;
-        if (
-          projection.state === "playing" ||
-          projection.state === "checkpoint"
-        ) {
-          if (!veilFinished) {
-            clearVeilSlowTimer();
-            showReplayLoadingScreen("replay_premiere.joining_live");
-            // See openReplayPremiere's identical wiring: independent of
-            // the (now-cleared) slow-load timer, and left running so a
-            // join that genuinely finishes late still lifts normally.
-            joinSyncWatchdog.arm();
-          }
-          return;
-        }
-        if (
-          projection.state === "revealed" ||
-          projection.state === "archived"
-        ) {
-          const onFirstFrame = () => finishVeil();
-          document.addEventListener("ai-league-replay-frame", onFirstFrame, {
-            once: true,
-          });
-          return;
-        }
-        finishVeil();
-      },
-      onJoinSync: (update) => {
-        if (!active || this.replayPremiereRuntime !== handle.runtime) return;
-        if (update.state === "complete") {
-          finishVeil();
-          return;
-        }
-        if (veilFinished) return;
-        joinSyncWatchdog.recordProgress(update.currentTurn);
-        if (joinSyncWatchdog.stalled) return;
-        setReplayLoadingProgress(
-          update.currentTurn === null
-            ? translateText("replay_premiere.join_sync_target", {
-                target: update.targetTurn,
-              })
-            : translateText("replay_premiere.join_sync_progress", {
-                current: update.currentTurn,
-                target: update.targetTurn,
-                percent: Math.min(
-                  100,
-                  Math.max(
-                    0,
-                    Math.floor((update.currentTurn / update.targetTurn) * 100),
-                  ),
-                ),
-              }),
-        );
-      },
-      onJoinReady: (request) => {
-        if (
-          !active ||
-          this.replayPremiereRuntime !== handle.runtime ||
-          request.premiereId !== premiereId
-        ) {
-          return;
-        }
-        document.dispatchEvent(
-          new CustomEvent("join-lobby", {
-            detail: {
-              gameID: request.gameID,
-              gameStartInfo: request.gameStartInfo,
-              progressiveReplay: request.progressiveReplay,
-              source: "replay-premiere",
-              premiereId,
-              isBettingPremiere: true,
-            } satisfies JoinLobbyEvent,
-            bubbles: true,
-            composed: true,
-          }),
-        );
-      },
-      onRevealSeek: (turn) => {
-        if (!active || this.replayPremiereRuntime !== handle.runtime) return;
-        this.eventBus.emit(new ReplayJumpToTurnEvent(turn));
-      },
-      onPremiereGone: () => {
-        if (!active) return;
-        cleanupAttempt();
-        void this.rejoinCurrentBettingPremiere(premiereId);
-      },
-    });
-    const cleanupAttempt = () => {
-      if (!active) return;
-      active = false;
-      joinSyncWatchdog.clear();
-      handle.dispose();
-      if (this.replayPremiereRuntime === handle.runtime) {
-        this.replayPremiereRuntime = null;
-      }
-      if (this.replayAttemptCleanup === cleanupAttempt) {
-        this.replayAttemptCleanup = null;
-      }
-    };
-    this.replayPremiereRuntime = handle.runtime;
-    this.replayAttemptCleanup = cleanupAttempt;
-
-    try {
-      await handle.runtime.start();
-    } catch (error) {
-      if (!active || this.replayPremiereRuntime !== handle.runtime) return;
-      if (projectionMounted) {
-        console.error("Betting premiere runtime stopped", error);
-        return;
-      }
-      if (
-        error instanceof ReplayPremiereNetworkError &&
-        error.code === "premiere_not_found"
-      ) {
-        this.openPremiereEndedPage(premiereId, "bet");
-        return;
-      }
-      this.failReplayLoading(
-        premiereId,
-        "replay-premiere",
-        "Betting premiere failed to start",
-        error,
-      );
-    }
-  }
-
-  /**
-   * Recovery for `onPremiereGone` (see
-   * `BettingPremiereMarketController.onPremiereGone`'s own doc): the
-   * origin behind `bet.proxywar.xyz` restarts and mints a brand-new
-   * random premiereId on every premiere cycle, void or not, so an
-   * already-joined betting page's own id is simply gone once that
-   * happens — re-resolve whatever premiere is ACTUALLY live right now
-   * and rejoin it in place, rather than leaving the viewer stuck on a
-   * dead id's frozen terminal view (P1 t3-01/t3-02). Reuses
-   * `openBettingPremiere` verbatim for the rejoin — its own fresh
-   * join-lobby dispatch canonicalizes the URL to the new `/bet/<id>` via
-   * `handleJoinLobby`'s existing `premierePath` branch, so this method
-   * never touches history itself. Falls back to the existing, proven
-   * `PremiereEndedPage` CTA (never a silent dead end) when no live
-   * premiere can be honestly resolved.
-   */
-  private async rejoinCurrentBettingPremiere(staleId: string): Promise<void> {
-    const nextId = await resolveCurrentBettingPremiereId();
-    if (nextId === null) {
-      this.openPremiereEndedPage(staleId, "bet");
-      return;
-    }
-    await this.openBettingPremiere(nextId);
   }
 
   private async openAiLeagueReplay(
@@ -2127,7 +1832,7 @@ class Client {
       const preserveCoworldReplayUrl = lobby.source === "coworld-replay";
       // Ensure there's a homepage entry in history before adding the lobby
       // entry. P0 fix (found live 2026-08-02): the hash-only guard below
-      // fired on ANY page with no hash, including a replay/premiere/bet
+      // fired on ANY page with no hash, including a replay/premiere
       // page the user re-joined via Back/Forward (none of those carry a
       // hash either) — `replaceState`ing the CURRENT entry there silently
       // rewrote an already-legitimate history entry to `#refresh`,
@@ -2153,16 +1858,7 @@ class Client {
       }
       const lobbyIdHidden = !this.userSettings.lobbyIdVisibility();
       if (lobby.progressiveReplay !== undefined && lobby.premiereId) {
-        // Betting joins share this exact same branch (same `source`, same
-        // `progressiveReplay`/`premiereId` shape) — without checking
-        // `isBettingPremiere` this always canonicalized to `/premiere/<id>`,
-        // silently stranding a `/bet/<id>` viewer on the wrong route (no
-        // trade ticket/bankroll/positions there) the instant the join
-        // completed, and breaking reload/second-tab for the betting page.
-        const premierePath =
-          lobby.isBettingPremiere === true
-            ? `/bet/${encodeURIComponent(lobby.premiereId)}`
-            : `/premiere/${encodeURIComponent(lobby.premiereId)}`;
+        const premierePath = `/premiere/${encodeURIComponent(lobby.premiereId)}`;
         if (pathnameAtJoinStart !== premierePath) {
           history.replaceState(
             null,

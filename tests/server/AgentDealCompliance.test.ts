@@ -19,7 +19,8 @@ import {
 // game-state liveness facts, never merely selected actions. The victim's
 // automatic attack-created embargo is never the victim's violation;
 // emoji/quick_chat/target_player are never violations; every accepted
-// obligation reaches a terminal state by match end (force-resolve).
+// obligation reaches a terminal state by match end (force-resolve), while an
+// incomplete negative-covenant audit window resolves unverified, never praised.
 
 const A: StubSeat = { agentID: "a1", playerID: "P_A", username: "Auri" };
 const B: StubSeat = { agentID: "b1", playerID: "P_B", username: "Sefirot" };
@@ -484,7 +485,7 @@ describe("AgentDealCompliance — fulfillment, expiry, moot, force-resolve", () 
     expect(obligation.resolutionEvidence).toContain("25% troops");
     const stamp = harness.manager.takePendingComplianceStamp(A.agentID)!;
     expect(stamp).toContain("deal_fulfilled");
-    expect(stamp).toContain("fulfilled the joint-attack pledge");
+    expect(stamp).toContain("fulfilled the attack pledge");
   });
 
   it("ignores below-threshold token attacks for joint_attack fulfillment (pressure floor)", () => {
@@ -738,7 +739,21 @@ describe("AgentDealCompliance — fulfillment, expiry, moot, force-resolve", () 
     });
     harness.beginStep(); // 1
     expect(harness.respond("deal_accept", B, dealID).accepted).toBe(true);
-    for (let step = 2; step <= 5; step += 1) {
+    harness.beginStep(); // 2 — active window opens
+    for (let step = 2; step <= 4; step += 1) {
+      for (const seat of [A, B]) {
+        harness.push(
+          fabricatedRecord({
+            sequence: 0,
+            agentID: seat.agentID,
+            playerID: seat.playerID,
+            username: seat.username,
+            turnNumber: step * 25,
+            kind: "hold",
+            auditStatus: "not_applicable",
+          }),
+        );
+      }
       harness.beginStep();
     }
     const obligations = obligationsOf(harness, dealID);
@@ -749,6 +764,48 @@ describe("AgentDealCompliance — fulfillment, expiry, moot, force-resolve", () 
     const stamp = harness.manager.takePendingComplianceStamp(A.agentID)!;
     expect(stamp).toContain("honored the non-aggression pact");
     expect(stamp).toContain("without a confirmed hostile action");
+  });
+
+  it("resolves an unaudited pact window as unverified without a fulfillment event", () => {
+    const harness = complianceHarness([A, B]);
+    const dealID = harness.propose(A, B, "non_aggression_pact", {
+      durationSteps: 3,
+    });
+    harness.beginStep(); // 1
+    expect(harness.respond("deal_accept", B, dealID).accepted).toBe(true);
+    harness.beginStep(); // 2 — active window opens
+    for (let step = 2; step <= 4; step += 1) {
+      harness.push(
+        fabricatedRecord({
+          sequence: 0,
+          agentID: A.agentID,
+          playerID: A.playerID,
+          username: A.username,
+          turnNumber: step * 25,
+          kind: "quick_chat",
+          auditStatus: "unknown",
+        }),
+      );
+      // B has no retained record at all: both unknown and missing evidence
+      // must prevent an absence-of-violation claim.
+      harness.beginStep();
+    }
+
+    const obligations = obligationsOf(harness, dealID);
+    expect(obligations.map((obligation) => obligation.status)).toEqual([
+      "unverified",
+      "unverified",
+    ]);
+    expect(
+      obligations.every(
+        (obligation) =>
+          obligation.auditCoverageComplete === false &&
+          obligation.auditCoverageGapCount === 3,
+      ),
+    ).toBe(true);
+    expect(harness.manager.ledgerSnapshot().events).not.toContainEqual(
+      expect.objectContaining({ event: "deal_fulfilled", dealID }),
+    );
   });
 
   it("moots obligations when the counterparty is eliminated (game-state fact)", async () => {
@@ -800,7 +857,7 @@ describe("AgentDealCompliance — fulfillment, expiry, moot, force-resolve", () 
 
   it("force-resolves every accepted obligation to a terminal state at match end", () => {
     const harness = complianceHarness([A, B, C]);
-    // Mid-window NAP (negative → forced fulfilled).
+    // Mid-window NAP (negative → moot because its promised duration was cut short).
     const napID = activatePact(harness, "non_aggression_pact");
     // Mid-window support pledge (positive, window cut short → forced moot).
     // Proposed by C: A already proposed this match and is inside the
@@ -810,6 +867,20 @@ describe("AgentDealCompliance — fulfillment, expiry, moot, force-resolve", () 
     expect(harness.respond("deal_accept", B, supportID).accepted).toBe(true);
     // An open, unanswered proposal (→ expired), from a proposer off cooldown.
     const openID = harness.propose(B, C, "non_aggression_pact");
+
+    for (const seat of [A, B, C]) {
+      harness.push(
+        fabricatedRecord({
+          sequence: 0,
+          agentID: seat.agentID,
+          playerID: seat.playerID,
+          username: seat.username,
+          turnNumber: 75,
+          kind: "hold",
+          auditStatus: "not_applicable",
+        }),
+      );
+    }
 
     harness.manager.finalize({ records: harness.records });
     const ledger = harness.manager.ledgerSnapshot();
@@ -829,8 +900,8 @@ describe("AgentDealCompliance — fulfillment, expiry, moot, force-resolve", () 
           obligation.forcedResolution,
         ]),
     ).toEqual([
-      ["fulfilled", true],
-      ["fulfilled", true],
+      ["moot", true],
+      ["moot", true],
     ]);
     expect(
       byID.get(supportID)!.obligations.map((obligation) => obligation.status),
@@ -841,9 +912,61 @@ describe("AgentDealCompliance — fulfillment, expiry, moot, force-resolve", () 
         expect(obligation.status).not.toBe("pending");
       }
     }
+    const persistedFinalEvents = harness.records.flatMap((record) => {
+      const stamp = record.decisionMetadata?.dealComplianceEvent;
+      return typeof stamp === "string"
+        ? (JSON.parse(stamp) as Array<{ event: string; dealID: string }>)
+        : [];
+    });
+    expect(
+      persistedFinalEvents.some(
+        (event) => event.event === "deal_fulfilled" && event.dealID === napID,
+      ),
+    ).toBe(false);
+    expect(
+      persistedFinalEvents.some(
+        (event) => event.event === "deal_expired" && event.dealID === openID,
+      ),
+    ).toBe(true);
     // Idempotent.
     harness.manager.finalize({ records: harness.records });
     expect(harness.manager.ledgerSnapshot().deals).toEqual(ledger.deals);
+  });
+
+  it("moots a fully audited negative covenant when match end cuts its window short", () => {
+    const harness = complianceHarness([A, B]);
+    const dealID = activatePact(harness, "non_aggression_pact");
+    for (const seat of [A, B]) {
+      harness.push(
+        fabricatedRecord({
+          sequence: 0,
+          agentID: seat.agentID,
+          playerID: seat.playerID,
+          username: seat.username,
+          turnNumber: 50,
+          kind: "hold",
+          auditStatus: "not_applicable",
+        }),
+      );
+    }
+
+    harness.manager.finalize({ records: harness.records, turnNumber: 50 });
+    const obligations = obligationsOf(harness, dealID);
+    expect(obligations.map((obligation) => obligation.status)).toEqual([
+      "moot",
+      "moot",
+    ]);
+    expect(
+      obligations.every(
+        (obligation) =>
+          obligation.auditCoverageComplete === true &&
+          obligation.resolutionEvidence ===
+            "match ended before the covenant window elapsed",
+      ),
+    ).toBe(true);
+    expect(harness.manager.ledgerSnapshot().events).not.toContainEqual(
+      expect.objectContaining({ event: "deal_fulfilled", dealID }),
+    );
   });
 
   it("computes public per-rival reliability as fulfilled / terminal non-moot (null without sample)", () => {
@@ -858,6 +981,17 @@ describe("AgentDealCompliance — fulfillment, expiry, moot, force-resolve", () 
     harness.push(
       fabricatedRecord({
         sequence: 0,
+        agentID: A.agentID,
+        playerID: A.playerID,
+        username: A.username,
+        turnNumber: 50,
+        kind: "hold",
+        auditStatus: "not_applicable",
+      }),
+    );
+    harness.push(
+      fabricatedRecord({
+        sequence: 0,
         agentID: B.agentID,
         playerID: B.playerID,
         username: B.username,
@@ -868,7 +1002,19 @@ describe("AgentDealCompliance — fulfillment, expiry, moot, force-resolve", () 
         auditStatus: "confirmed",
       }),
     );
-    for (let step = 3; step <= 6; step += 1) {
+    harness.beginStep(); // 3, judges step 2
+    for (let step = 3; step <= 4; step += 1) {
+      harness.push(
+        fabricatedRecord({
+          sequence: 0,
+          agentID: A.agentID,
+          playerID: A.playerID,
+          username: A.username,
+          turnNumber: step * 25,
+          kind: "hold",
+          auditStatus: "not_applicable",
+        }),
+      );
       harness.beginStep();
     }
     const view = harness.manager.observationFor({

@@ -538,7 +538,7 @@ describe("season:program-week CLI — real subprocess end to end", () => {
           PROXYWAR_EVENT_PACKAGE_STATE_ROOT: stateDir,
           PROXYWAR_ARTIFACTS_ROOT: artifactsRoot,
           PROXYWAR_IDENTITY_REGISTRY_DIR: artifactsRoot,
-          PW_BET_QUEUE_DIR: queueRoot,
+          PROXYWAR_PREMIERE_QUEUE_DIR: queueRoot,
         },
       });
       return { code: 0, stdout, stderr: "" };

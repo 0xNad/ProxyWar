@@ -1,10 +1,17 @@
 import { z } from "zod";
-import { afterFirstIdentityBootstrap } from "./identity/GuestBootstrapGate";
 import type { GameStartInfo } from "../core/Schemas";
+import type {
+  AnalystActionKindCount,
+  AnalystEventRow,
+  CuratedWarRoomEvent,
+  CuratedWarRoomEventKind,
+  TimelineMarker,
+} from "./BroadcastComposition";
 import {
   readProxyWarClipGenerationCapabilities,
   type ProxyWarClipGenerationCapabilities,
 } from "./ClipGenerationCapabilities";
+import { afterFirstIdentityBootstrap } from "./identity/GuestBootstrapGate";
 import {
   PREMIERE_PRESENTATION_TRAIL_MS,
   premiereClipStatusResponseSchema,
@@ -47,13 +54,6 @@ import {
   type ReplayPremiereShareRequest,
   type ReplayPremiereWarEventView,
 } from "./ReplayPremiereOverlay";
-import type {
-  AnalystActionKindCount,
-  AnalystEventRow,
-  CuratedWarRoomEvent,
-  CuratedWarRoomEventKind,
-  TimelineMarker,
-} from "./BroadcastComposition";
 import {
   ReplayPremierePlaybackController,
   type ReplayPremierePlaybackEvent,
@@ -431,79 +431,6 @@ const predictionResponseSchema = z
     checkpoint: checkpointViewSchema,
   })
   .strict();
-// ---------------------------------------------------------------------------
-// Prediction market — LMSR (Logarithmic Market Scoring Rule), server-
-// authoritative, ONE continuous market per premiere (not per checkpoint,
-// per Main's pivot off the earlier pari-mutuel design). Every seat trades
-// as an integer-chip share priced 0..100 for the whole live phase of the
-// premiere — NOT gated to a checkpoint window; checkpoints are content
-// beats the UI highlights, they gate nothing (see `BettingOverlay.ts`).
-// Price moves with real trades plus a server-side synthetic crowd. One
-// settlement at reveal: winning shares pay 100/share. The client only
-// mirrors and validates the shape — see
-// `src/client/prediction/wagering/lmsr.ts` for the pure pricing math this
-// mirrors.
-// ---------------------------------------------------------------------------
-const marketPositionSchema = z
-  .object({
-    seatId: opaqueIdSchema,
-    shares: nonNegativeIntegerSchema,
-    costBasis: nonNegativeIntegerSchema,
-    currentValue: nonNegativeIntegerSchema,
-    unrealizedPnl: z.number().int().safe(),
-  })
-  .strict();
-const marketStateSchema = z
-  .object({
-    outcomeSeatIds: z.array(opaqueIdSchema).min(2).max(64),
-    q: z.array(z.number().int().safe()),
-    b: z.number().positive().safe(),
-    prices: z.array(z.number().min(0).max(100)),
-    status: z.enum(["open", "settled"]),
-    winnerSeatId: opaqueIdSchema.nullable(),
-    // Anti-replay freshness bound the client echoes back on its NEXT market
-    // order (see `submitMarketOrder`) — never cached across multiple orders.
-    liveVisibleSequence: nonNegativeIntegerSchema,
-    positions: z.array(marketPositionSchema).nullable(),
-    // The caller's own available ledger balance — the SOLE money-
-    // authoritative number for bankroll display and buy-stake validation
-    // (see `src/client/prediction/wagering/**`, which carries no local
-    // debit/credit arithmetic of its own). Null only when this view was
-    // read anonymously (no participant bound); an authenticated read
-    // (`market/me`, or any trade response) always carries a number.
-    balance: nonNegativeIntegerSchema.nullable(),
-  })
-  .strict();
-const marketStateResponseSchema = z
-  .object({
-    schemaVersion: z.literal(1),
-    market: marketStateSchema,
-  })
-  .strict();
-const tradeSchema = z
-  .object({
-    id: z.string().min(1).max(128),
-    premiereId: z.string().regex(PREMIERE_ID_PATTERN),
-    participantId: z.string().regex(PARTICIPANT_ID_PATTERN),
-    participantKind: z.enum(["real", "synthetic"]),
-    seatId: opaqueIdSchema,
-    side: z.enum(["buy", "sell"]),
-    shares: z.number().int().positive().safe(),
-    chips: nonNegativeIntegerSchema,
-    avgPrice: z.number().min(0).max(100),
-    executedAt: canonicalTimestampSchema,
-    sequence: nonNegativeIntegerSchema,
-    idempotencyKey: z.string().min(16).max(128),
-  })
-  .strict();
-const tradeResponseSchema = z
-  .object({
-    schemaVersion: z.literal(1),
-    trade: tradeSchema,
-    idempotent: z.boolean(),
-    market: marketStateSchema,
-  })
-  .strict();
 const reactionSchema = z
   .object({
     id: z.string().regex(REACTION_ID_PATTERN),
@@ -600,15 +527,6 @@ export type ReplayPremiereServiceHeartbeatResponse = z.infer<
 export type ReplayPremiereServicePredictionResponse = z.infer<
   typeof predictionResponseSchema
 >;
-export type ReplayPremiereServiceMarketState = z.infer<
-  typeof marketStateSchema
->;
-export type ReplayPremiereServiceMarketStateResponse = z.infer<
-  typeof marketStateResponseSchema
->;
-export type ReplayPremiereServiceTradeResponse = z.infer<
-  typeof tradeResponseSchema
->;
 export type ReplayPremiereServiceReactionResponse = z.infer<
   typeof reactionResponseSchema
 >;
@@ -666,22 +584,6 @@ export class ReplayPremiereServiceError extends Error {
     super(code);
     this.name = "ReplayPremiereServiceError";
   }
-}
-
-export interface ReplayPremiereTradeRequest {
-  premiereId: string;
-  seatId: string;
-  side: "buy" | "sell";
-  amount: number;
-  /** 0..100 — ceiling for a buy, floor for a sell. The crowd trades the same live book. */
-  limitPrice: number;
-  /**
-   * The freshest `market.liveVisibleSequence` the caller has observed — an
-   * anti-replay freshness bound, NOT a checkpoint reference. The server
-   * rejects with 410 `order_sequence_unreleased` if this is ahead of what
-   * it has actually released. Never reuse a value across multiple orders.
-   */
-  sequence: number;
 }
 
 export interface ReplayPremiereServiceClientOptions {
@@ -949,59 +851,6 @@ export class ReplayPremiereServiceClient {
     return response;
   }
 
-  /**
-   * LMSR market order write (buy or sell). Not part of
-   * `ReplayPremiereOverlayCallbacks` — trading renders its own dedicated
-   * overlay (see `src/client/prediction/wagering/**`), so this is a plain
-   * public method: callable from that overlay's event handlers AND
-   * directly from a programmatic caller (synthetic crowd / persona
-   * testing), same integrity path either way. Unlike the old one-stake-
-   * per-checkpoint wager, a participant may submit MANY orders across the
-   * life of the market — each gets its own fresh idempotency key (a
-   * network-level retry of ONE order reuses it; a second, genuinely
-   * different order never does).
-   */
-  async submitMarketOrder(
-    input: ReplayPremiereTradeRequest,
-  ): Promise<ReplayPremiereServiceTradeResponse> {
-    const session = this.requireSession();
-    if (
-      input.premiereId !== this.options.premiereId ||
-      !OPAQUE_ID_PATTERN.test(input.seatId) ||
-      (input.side !== "buy" && input.side !== "sell") ||
-      !Number.isSafeInteger(input.amount) ||
-      input.amount <= 0 ||
-      !Number.isFinite(input.limitPrice) ||
-      input.limitPrice < 0 ||
-      input.limitPrice > 100 ||
-      !Number.isSafeInteger(input.sequence) ||
-      input.sequence < 0
-    ) {
-      throw serviceError("invalid_configuration");
-    }
-    const body = {
-      sessionId: session.id,
-      seatId: input.seatId,
-      side: input.side,
-      amount: input.amount,
-      limitPrice: input.limitPrice,
-      sequence: input.sequence,
-    };
-    const response = await this.postJson(
-      "market-orders",
-      body,
-      // Each order is a genuinely distinct action (unlike the old
-      // deterministic-per-checkpoint wager key) — a fresh key per call, so
-      // only a network-level retry of THIS call reuses it.
-      this.createIdempotencyKey(),
-      tradeResponseSchema,
-      200,
-      true,
-    );
-    this.assertTradeResponseBound(response, input, session);
-    return response;
-  }
-
   async submitReaction(
     input: ReplayPremiereMarkerRequest,
   ): Promise<ReplayPremiereServiceReactionResponse> {
@@ -1156,59 +1005,6 @@ export class ReplayPremiereServiceClient {
       throw serviceError("invalid_response");
     }
     this.assertClipStatusBound(response);
-    return response;
-  }
-
-  /**
-   * Cheap, participant-agnostic poll read for the live odds ticker:
-   * current LMSR prices for the whole premiere market, no session/CSRF
-   * scoping, safe to poll on an interval independent of the heartbeat
-   * cadence. The market is visible for the entire life of the premiere,
-   * not gated behind having traded. Any per-participant `positions` on
-   * the response are best-effort for an anonymous poll — a trade's own
-   * response is the authoritative source for the viewer's own position.
-   */
-  async readMarketState(): Promise<ReplayPremiereServiceMarketStateResponse> {
-    this.assertActive();
-    const response = await this.getJson(
-      "market",
-      marketStateResponseSchema,
-      200,
-    );
-    if (
-      response.market.q.length !== response.market.outcomeSeatIds.length ||
-      response.market.prices.length !== response.market.outcomeSeatIds.length
-    ) {
-      throw serviceError("invalid_response");
-    }
-    return response;
-  }
-
-  /**
-   * Authenticated participant read: this caller's own open positions AND
-   * available ledger balance — the sole money authority for the client
-   * (see `src/client/prediction/wagering/**`, which keeps no local
-   * debit/credit/payout arithmetic of its own; every figure it shows is
-   * this response, verbatim). Same auth discipline as every write route
-   * (guest cookie + CSRF + strict Origin, via {@link authenticatedGetJson})
-   * — never silently degrades to the anonymous view when creds are
-   * missing; the server 401s, and so does this call (via
-   * {@link requireSession}'s client-side short-circuit) before a request
-   * is even sent.
-   */
-  async readMarketSelf(): Promise<ReplayPremiereServiceMarketStateResponse> {
-    this.requireSession();
-    const response = await this.authenticatedGetJson(
-      "market/me",
-      marketStateResponseSchema,
-      200,
-    );
-    if (
-      response.market.q.length !== response.market.outcomeSeatIds.length ||
-      response.market.prices.length !== response.market.outcomeSeatIds.length
-    ) {
-      throw serviceError("invalid_response");
-    }
     return response;
   }
 
@@ -1499,144 +1295,6 @@ export class ReplayPremiereServiceClient {
     }
   }
 
-  /**
-   * Same-origin GET with the identical transient-status, no-store
-   * application-policy, response-size, and timeout discipline as
-   * {@link postJson} / {@link getJson}, but stamped with the guest CSRF
-   * token like every write — for a read that returns one participant's
-   * own private data (`market/me`) and is never exempt from that
-   * discipline. Throws `session_required` before sending anything if
-   * there is no session yet, exactly like `postJson`'s `requireCsrf` path.
-   */
-  private async authenticatedGetJson<T>(
-    route: string,
-    schema: z.ZodType<T>,
-    expectedStatus: number,
-  ): Promise<T> {
-    this.assertActive();
-    if (this.csrfToken === null) {
-      throw serviceError("session_required");
-    }
-    const requestController = new AbortController();
-    const abortRequest = () => requestController.abort();
-    this.abortController.signal.addEventListener("abort", abortRequest, {
-      once: true,
-    });
-    let timedOut = false;
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      requestController.abort();
-    }, this.requestTimeoutMs);
-    try {
-      let response: Response;
-      try {
-        response = await this.fetchImpl(
-          `/api/premieres/${this.options.premiereId}/${route}`,
-          {
-            method: "GET",
-            headers: {
-              Accept: "application/json",
-              "x-csrf-token": this.csrfToken,
-            },
-            cache: "no-store",
-            credentials: "same-origin",
-            redirect: "error",
-            signal: requestController.signal,
-          },
-        );
-      } catch {
-        if (this.disposed) {
-          throw serviceError("disposed", null, null, "fetch_rejection");
-        }
-        throw serviceError(
-          "request_failed",
-          null,
-          null,
-          timedOut ? "timeout" : "fetch_rejection",
-        );
-      }
-      const transientStatus = isTransientInteractionStatus(response.status);
-      const contentType = response.headers.get("content-type") ?? "";
-      const hasJsonContentType = JSON_CONTENT_TYPE_PATTERN.test(
-        contentType.trim(),
-      );
-      const responseHasApplicationPolicy =
-        hasJsonContentType && hasNoStoreCachePolicy(response.headers);
-      if (transientStatus && !hasJsonContentType) {
-        throw serviceError(
-          "request_failed",
-          response.status,
-          null,
-          "response_status",
-        );
-      }
-      if (!responseHasApplicationPolicy) {
-        throw serviceError(
-          "invalid_response",
-          response.status,
-          null,
-          "response_policy",
-        );
-      }
-      let value: unknown;
-      try {
-        value = await readBoundedJsonResponse(
-          response,
-          this.maxResponseBytes,
-          requestController.signal,
-        );
-      } catch (error) {
-        if (transientStatus) {
-          throw serviceError(
-            "request_failed",
-            response.status,
-            null,
-            "response_status",
-          );
-        }
-        throw error;
-      }
-      if (response.status !== expectedStatus) {
-        const publicFailure = publicErrorResponseSchema.safeParse(value);
-        if (!publicFailure.success) {
-          if (transientStatus) {
-            throw serviceError(
-              "request_failed",
-              response.status,
-              null,
-              "response_status",
-            );
-          }
-          throw serviceError(
-            "invalid_response",
-            response.status,
-            null,
-            "response_schema",
-          );
-        }
-        throw serviceError(
-          "request_rejected",
-          response.status,
-          publicFailure.data.error.code,
-          "response_status",
-        );
-      }
-      const parsed = schema.safeParse(value);
-      if (!parsed.success) {
-        throw serviceError(
-          "invalid_response",
-          response.status,
-          null,
-          "response_schema",
-        );
-      }
-      return parsed.data;
-    } finally {
-      clearTimeout(timeout);
-      this.abortController.signal.removeEventListener("abort", abortRequest);
-    }
-  }
-
   private requireSession(): ReplayPremiereServiceSession {
     this.assertActive();
     if (this.currentSession === null || this.csrfToken === null) {
@@ -1813,56 +1471,6 @@ export class ReplayPremiereServiceClient {
       response.checkpoint.id !== input.checkpointId ||
       response.checkpoint.participantPrediction === null ||
       !samePrediction(response.checkpoint.participantPrediction, prediction)
-    ) {
-      throw serviceError("invalid_response");
-    }
-  }
-
-  private assertTradeResponseBound(
-    response: ReplayPremiereServiceTradeResponse,
-    input: ReplayPremiereTradeRequest,
-    session: ReplayPremiereServiceSession,
-  ): void {
-    const trade = response.trade;
-    // 1 point of chip-rounding slop tolerated between the requested limit
-    // and the executed average price — the server fills in whole chips,
-    // the limit is a continuous 0..100 figure.
-    if (
-      trade.premiereId !== this.options.premiereId ||
-      trade.participantId !== session.participantId ||
-      trade.sequence !== input.sequence ||
-      trade.seatId !== input.seatId ||
-      trade.side !== input.side ||
-      (trade.side === "buy" && trade.avgPrice > input.limitPrice + 1) ||
-      (trade.side === "sell" && trade.avgPrice < input.limitPrice - 1)
-    ) {
-      throw serviceError("invalid_response");
-    }
-    this.assertMarketStateBound(response.market);
-  }
-
-  private assertMarketStateBound(
-    market: ReplayPremiereServiceMarketState,
-  ): void {
-    const binding = this.requireBinding();
-    const uniqueSeats = new Set(market.outcomeSeatIds);
-    const seatsAreBound = market.outcomeSeatIds.every((seatId) =>
-      binding.policyIdentities.has(seatId),
-    );
-    const pricesSum = market.prices.reduce((sum, price) => sum + price, 0);
-    if (
-      uniqueSeats.size !== market.outcomeSeatIds.length ||
-      !seatsAreBound ||
-      market.q.length !== market.outcomeSeatIds.length ||
-      market.prices.length !== market.outcomeSeatIds.length ||
-      Math.abs(pricesSum - 100) > 0.5 ||
-      (market.status === "settled") !== (market.winnerSeatId !== null) ||
-      (market.winnerSeatId !== null &&
-        !uniqueSeats.has(market.winnerSeatId)) ||
-      (market.positions !== null &&
-        market.positions.some(
-          (position) => !uniqueSeats.has(position.seatId),
-        ))
     ) {
       throw serviceError("invalid_response");
     }
@@ -2207,12 +1815,6 @@ export class ReplayPremiereServiceClient {
       (checkpoint.opensAt === null) !== (checkpoint.closesAt === null) ||
       (checkpoint.opensAt !== null &&
         checkpoint.closesAt !== null &&
-        // Strictly `<`, not `<=`: a checkpoint whose pause was bypassed
-        // entirely (wagering premieres never gate on checkpoints — see
-        // `ReplayPremiereInteractions.ts`'s "close without ever opening"
-        // transition) is reported by the server with `opensAt === closesAt`
-        // — a genuine, intentional zero-duration window, not a lie. Only a
-        // window that closes BEFORE it opens is actually impossible.
         Date.parse(checkpoint.closesAt) < Date.parse(checkpoint.opensAt)) ||
       (prediction !== null &&
         (prediction.premiereId !== binding.premiereId ||
@@ -2232,7 +1834,7 @@ export class ReplayPremiereServiceClient {
       (crowd !== null &&
         (resolution?.kind !== "winner" ||
           crowd.correctPredictions > crowd.totalPredictions ||
-      (total !== null && crowd.totalPredictions !== total)))
+          (total !== null && crowd.totalPredictions !== total)))
     ) {
       throw serviceError("invalid_response");
     }
@@ -2312,11 +1914,6 @@ interface ReplayPremiereServiceLike {
   submitReaction(
     input: ReplayPremiereMarkerRequest,
   ): Promise<ReplayPremiereServiceReactionResponse>;
-  submitMarketOrder(
-    input: ReplayPremiereTradeRequest,
-  ): Promise<ReplayPremiereServiceTradeResponse>;
-  readMarketState(): Promise<ReplayPremiereServiceMarketStateResponse>;
-  readMarketSelf(): Promise<ReplayPremiereServiceMarketStateResponse>;
   createShare(input: {
     sequence: number;
     sourceReactionId?: string | null;
@@ -2363,15 +1960,6 @@ export interface ReplayPremiereRuntimeOptions {
   onRevealSeek?: (turn: number) => void;
   onJoinSync?: (update: ReplayPremiereJoinSyncUpdate) => void;
   fetchImpl?: typeof fetch;
-  /**
-   * "chunks" (default): coarse ~60s hash-chained storage chunks — the
-   * ordinary `/premiere/<id>` route, completely unperturbed.
-   * "tap": the fine-grained live-projection tap, used by the betting page
-   * so rendered content and the wagering trade gate are never behind (and
-   * therefore never held ahead of) the authoritative server clock. See
-   * `ReplayPremiereNetworkOptions.contentSource` for the detail.
-   */
-  contentSource?: "chunks" | "tap";
   dependencies?: ReplayPremiereRuntimeDependencies;
 }
 
@@ -2643,7 +2231,6 @@ export class ReplayPremiereRuntimeController {
       premiereId: options.premiereId,
       playback: this.playback,
       callbacks,
-      contentSource: options.contentSource,
       fetchImpl: options.fetchImpl,
     };
     this.network =
@@ -2915,8 +2502,7 @@ export class ReplayPremiereRuntimeController {
     if (!bookkeepingConsistent) {
       this.frameBookkeepingDriftStrikes += 1;
       if (
-        this.frameBookkeepingDriftStrikes >=
-        MAX_FRAME_BOOKKEEPING_DRIFT_STRIKES
+        this.frameBookkeepingDriftStrikes >= MAX_FRAME_BOOKKEEPING_DRIFT_STRIKES
       ) {
         this.latchFailure("integrity_failure");
       }
@@ -3362,7 +2948,9 @@ export class ReplayPremiereRuntimeController {
       // doesn't exist on the resumed shape.
       let freshSession: ReplayPremiereServiceSessionResponse | null = null;
       if (persisted === null) {
-        freshSession = await this.establishFreshSession(this.sessionBootstrapInput);
+        freshSession = await this.establishFreshSession(
+          this.sessionBootstrapInput,
+        );
         response = freshSession;
       } else {
         try {
@@ -3386,7 +2974,9 @@ export class ReplayPremiereRuntimeController {
             this.windowRef.sessionStorage,
             this.options.premiereId,
           );
-          freshSession = await this.establishFreshSession(this.sessionBootstrapInput);
+          freshSession = await this.establishFreshSession(
+            this.sessionBootstrapInput,
+          );
           response = freshSession;
         }
       }
@@ -3448,7 +3038,10 @@ export class ReplayPremiereRuntimeController {
           error instanceof ReplayPremiereServiceError
             ? error.retryAfterMs
             : null;
-        const delayMs = nextRetryDelayMs(this.sessionRetryAttempt, retryAfterMs);
+        const delayMs = nextRetryDelayMs(
+          this.sessionRetryAttempt,
+          retryAfterMs,
+        );
         this.sessionRetryAttempt += 1;
         this.recovery = {
           code: "request_failed",
@@ -3635,7 +3228,10 @@ export class ReplayPremiereRuntimeController {
   }
 
   private clearPersistedSession(): void {
-    removePersistedSession(this.windowRef.sessionStorage, this.options.premiereId);
+    removePersistedSession(
+      this.windowRef.sessionStorage,
+      this.options.premiereId,
+    );
   }
 
   private applyServiceProjection(
@@ -3643,47 +3239,19 @@ export class ReplayPremiereRuntimeController {
       | ReplayPremiereServiceSessionResponse
       | ReplayPremiereServiceHeartbeatResponse,
   ): void {
-    if (this.projection === null) {
-      this.latchFailure("integrity_failure");
-      return;
-    }
     if (
+      this.projection === null ||
       !isLifecycleCompatible(this.currentNetworkState(), response.premiereState)
     ) {
       this.latchFailure("integrity_failure");
       return;
     }
     if (this.reveal === null && hasOutcomeProjection(response.checkpoints)) {
-      // Checkpoint pauses are bypassed for wagering premieres, so the
-      // replay races straight through to the true end with none of the
-      // breathing room a normal premiere's final checkpoint pause gives
-      // the verified-reveal fetch to land first. A session/heartbeat
-      // response can legitimately carry an outcome-bearing checkpoint
-      // before `reveal` has landed client-side — the SAME "ordinary
-      // delivery race, not a failure" distinction `submitMarketOrder`
-      // relies on `isRevealVerificationPending()` for. Skip applying (and
-      // re-hydrating from) a response taken in that exact window instead
-      // of latching a hard failure; the next heartbeat after `reveal`
-      // lands applies normally. A lifecycle mismatch (checked above,
-      // never exempted here) stays a hard failure regardless — an
-      // impossible regression is not explained by a pending reveal.
-      //
-      // NOTE (Resilience session): investigated narrowing this to
-      // `response.premiereState === "revealed" || "archived"`, theorizing
-      // per-checkpoint resolution could arrive mid-match independent of
-      // the premiere's own outcome. Server-side proof this is wrong:
-      // `applyReplayPremierePredictionResolutionTransition`
-      // (`ReplayPremiereInteractions.ts`) throws
-      // `predictions_not_revealable` unless the premiere state is already
-      // `revealed`/`archived`, and resolves every checkpoint atomically
-      // in one transition — a checkpoint's `resolution`/`crowdAccuracy`
-      // literally cannot be non-null while `premiereState` is genuinely
-      // `"playing"`/`"checkpoint"`. A response claiming otherwise IS
-      // exactly the impossible, genuine violation this guard exists to
-      // catch — reverted after the regression suite caught the false
-      // negative this would have introduced. Occurrence 3's real trigger
-      // is elsewhere; see the live-reproduction diagnostic in
-      // `latchFailure`.
+      // The interaction service and verified replay body arrive over separate
+      // reads. Once the replay pointer proves that reveal verification is in
+      // flight, an outcome-bearing response is an ordinary delivery race: wait
+      // for the verified body and apply the next response. Without that proof,
+      // the same response is an integrity violation.
       if (this.isRevealVerificationPending()) return;
       this.latchFailure("integrity_failure");
       return;
@@ -4145,70 +3713,6 @@ export class ReplayPremiereRuntimeController {
     }
   }
 
-  /**
-   * Public market-order write — NOT part of `overlayCallbacks()` because
-   * trading renders its own dedicated overlay (`src/client/prediction/
-   * wagering/**`), not `ReplayPremiereOverlay`. Continuous LMSR trading is
-   * NOT gated to a checkpoint window (operator override — checkpoints are
-   * content beats, not a trading gate); the only client-side freshness
-   * bound is `request.sequence`, the caller's freshest observed
-   * `market.liveVisibleSequence`. The server is the sole authority on
-   * sequence freshness — it independently rejects a stale/ahead claim with
-   * 410 `order_sequence_unreleased`. Also callable directly by a non-UI
-   * caller (synthetic crowd / persona testing) — this is a plain method,
-   * not tucked inside a click handler. Unlike a checkpoint prediction, a
-   * trade does NOT replace anything in `serviceCheckpoints` or re-hydrate
-   * the overlay — the market is a sibling concern the page controller
-   * polls and renders independently (see `readMarketState()` below).
-   */
-  async submitMarketOrder(
-    request: ReplayPremiereTradeRequest,
-  ): Promise<ReplayPremiereServiceTradeResponse> {
-    this.assertInteractionWriteAllowed();
-    const response = await this.strictInteractionWrite(() =>
-      this.service.submitMarketOrder(request),
-    );
-    // Checkpoint pauses are bypassed for wagering premieres (the replay
-    // plays straight through to the end, never pausing at the final
-    // checkpoint the way a non-wagering premiere does) — so a trade
-    // landing in the last moments of a live match can race the verified
-    // reveal payload's own delivery: the market can legitimately settle
-    // (server-authoritative, independent of video reveal) before `reveal`
-    // has been fetched client-side. `isRevealVerificationPending()` is
-    // the SAME "is this an ordinary reveal-delivery race, or a genuinely
-    // impossible claim" distinction `sendHeartbeat` already relies on for
-    // this exact scenario — only latch a hard integrity failure when the
-    // replay's own state machine doesn't yet think the match is over
-    // either (i.e., nothing here can explain a "settled" claim).
-    if (
-      this.reveal === null &&
-      response.market.status === "settled" &&
-      !this.isRevealVerificationPending()
-    ) {
-      this.latchFailure("integrity_failure");
-      throw serviceError("invalid_response");
-    }
-    return response;
-  }
-
-  /** Public poll read for the live odds ticker — no session/write gating. */
-  async readMarketState(): Promise<ReplayPremiereServiceMarketStateResponse> {
-    return this.service.readMarketState();
-  }
-
-  /**
-   * Authenticated participant read — this caller's own positions AND
-   * available ledger balance, the sole money authority for the client
-   * (see `src/client/prediction/wagering/**`; no local bankroll
-   * arithmetic anywhere in that module). Deliberately NOT gated by
-   * {@link assertInteractionWriteAllowed} — unlike a trade, this is a
-   * pure read and must keep working after settlement (to reconcile the
-   * final balance) and before this session has ever placed an order.
-   */
-  async readMarketSelf(): Promise<ReplayPremiereServiceMarketStateResponse> {
-    return this.service.readMarketSelf();
-  }
-
   private overlayCallbacks(): ReplayPremiereOverlayCallbacks {
     return {
       onAddReminder: (request) => this.downloadReminder(request),
@@ -4230,11 +3734,6 @@ export class ReplayPremiereRuntimeController {
         const response = await this.strictInteractionWrite(() =>
           this.service.submitPrediction(request),
         );
-        // Same ordinary reveal-delivery race `submitMarketOrder` guards
-        // against with `isRevealVerificationPending()`: checkpoint pauses
-        // are bypassed for wagering premieres, so a prediction response
-        // can legitimately carry this checkpoint's outcome before `reveal`
-        // has landed client-side.
         if (
           this.reveal === null &&
           hasOutcomeProjection([response.checkpoint]) &&
@@ -5271,6 +4770,12 @@ const ANALYST_TONE_BY_WAR_ROOM_KIND: Record<CuratedWarRoomEventKind, string> = {
   alliance: "pact",
   first_strike: "war",
   betrayal: "betrayal",
+  deal_proposed: "info",
+  deal_accepted: "pact",
+  deal_rejected: "info",
+  deal_expired: "info",
+  deal_fulfilled: "pact",
+  deal_violated: "betrayal",
   elimination: "war",
   nuke: "threat",
   plan_change: "info",
@@ -5547,7 +5052,10 @@ function isRetryableServiceFailure(error: unknown): boolean {
 // `ReplayPremiereNetworkController.runLoop` already uses. A server-supplied
 // `Retry-After` is honored as a floor, never a ceiling: it tells the client
 // the earliest safe time to retry, not the latest useful one.
-function nextRetryDelayMs(attempt: number, retryAfterMs: number | null): number {
+function nextRetryDelayMs(
+  attempt: number,
+  retryAfterMs: number | null,
+): number {
   const exponential = Math.min(
     INTERACTION_RECOVERY_MAX_RETRY_MS,
     INTERACTION_RECOVERY_RETRY_MS * 2 ** attempt,

@@ -9,7 +9,10 @@ import type {
   AgentSpectatorPlayerState,
   AgentSpectatorSnapshot,
 } from "../../src/server/agents/AgentSpectatorReplay";
-import type { SpectatorEvent, SpectatorTelemetry } from "../../src/server/agents/AgentSpectatorTelemetry";
+import type {
+  SpectatorEvent,
+  SpectatorTelemetry,
+} from "../../src/server/agents/AgentSpectatorTelemetry";
 
 /**
  * Hand-computed fixture shared by AgentMatchStateSeries.test.ts and
@@ -100,7 +103,11 @@ export const FIXTURE_SNAPSHOTS: AgentSpectatorSnapshot[] = [
 ];
 
 function allianceEvent(
-  overrides: Partial<SpectatorEvent> & Pick<SpectatorEvent, "id" | "turnNumber" | "kind" | "actorAgentID" | "targetAgentID">,
+  overrides: Partial<SpectatorEvent> &
+    Pick<
+      SpectatorEvent,
+      "id" | "turnNumber" | "kind" | "actorAgentID" | "targetAgentID"
+    >,
 ): SpectatorEvent {
   return {
     sequence: overrides.turnNumber,
@@ -110,6 +117,7 @@ function allianceEvent(
     message: "",
     actionKind: "alliance_request",
     actionID: overrides.id,
+    evidenceLevel: "confirmed_effect",
     importance: 90,
     ...overrides,
   };
@@ -200,9 +208,9 @@ describe("buildAgentMatchStateSeries", () => {
 
   it("reports alive=false and tilesOwned=0 for an eliminated agent from its dead sample onward", () => {
     const series = buildFixtureSeries();
-    const turn30Charlie = series.samples.find((s) => s.turn === 30)!.agents.find(
-      (a) => a.playerID === "p3",
-    )!;
+    const turn30Charlie = series.samples
+      .find((s) => s.turn === 30)!
+      .agents.find((a) => a.playerID === "p3")!;
     expect(turn30Charlie.alive).toBe(false);
     expect(turn30Charlie.tilesOwned).toBe(0);
   });
@@ -230,8 +238,12 @@ describe("buildAgentMatchStateSeries", () => {
       replay: { snapshots: FIXTURE_SNAPSHOTS },
       telemetry: null,
     })!;
-    expect(series.samples.every((sample) => sample.activeAlliancePairs.length === 0)).toBe(true);
-    expect(series.notes.some((note) => note.includes("unavailable"))).toBe(true);
+    expect(
+      series.samples.every((sample) => sample.activeAlliancePairs.length === 0),
+    ).toBe(true);
+    expect(series.notes.some((note) => note.includes("unavailable"))).toBe(
+      true,
+    );
   });
 });
 
@@ -241,14 +253,18 @@ describe("computeAllianceIntervals", () => {
     expect(intervals).toHaveLength(2);
 
     const p1p2 = intervals.find(
-      (interval) => interval.agentIDs.includes("agent-p1") && interval.agentIDs.includes("agent-p2"),
+      (interval) =>
+        interval.agentIDs.includes("agent-p1") &&
+        interval.agentIDs.includes("agent-p2"),
     )!;
     expect(p1p2.formedTurn).toBe(5);
     expect(p1p2.brokenTurn).toBe(35);
     expect(p1p2.brokenByBetrayal).toBe(true);
 
     const p3p4 = intervals.find(
-      (interval) => interval.agentIDs.includes("agent-p3") && interval.agentIDs.includes("agent-p4"),
+      (interval) =>
+        interval.agentIDs.includes("agent-p3") &&
+        interval.agentIDs.includes("agent-p4"),
     )!;
     expect(p3p4.formedTurn).toBe(12);
     expect(p3p4.brokenTurn).toBeNull();
@@ -260,5 +276,27 @@ describe("computeAllianceIntervals", () => {
     for (const interval of intervals) {
       expect(interval.agentIDs[0] < interval.agentIDs[1]).toBe(true);
     }
+  });
+
+  it("does not infer alliance state from accepted-action or legacy provenance-less v1 events", () => {
+    const acceptedOnly = allianceEvent({
+      id: "accepted-only",
+      turnNumber: 2,
+      kind: "alliance_formed",
+      actorAgentID: "agent-p1",
+      targetAgentID: "agent-p2",
+      evidenceLevel: "accepted_action",
+    });
+    const { evidenceLevel: _omitted, ...legacyV1 } = allianceEvent({
+      id: "legacy-v1",
+      turnNumber: 3,
+      kind: "alliance_formed",
+      actorAgentID: "agent-p3",
+      targetAgentID: "agent-p4",
+    });
+
+    expect(
+      computeAllianceIntervals([acceptedOnly, legacyV1 as SpectatorEvent]),
+    ).toEqual([]);
   });
 });

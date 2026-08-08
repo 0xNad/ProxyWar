@@ -256,6 +256,38 @@ describe("renderWarRoomFeed", () => {
     );
   });
 
+  it("renders structured deal lifecycle kinds explicitly and keeps the agent claim separate from the server fact", () => {
+    const kinds: CuratedWarRoomEvent["kind"][] = [
+      "deal_proposed",
+      "deal_accepted",
+      "deal_rejected",
+      "deal_expired",
+      "deal_fulfilled",
+      "deal_violated",
+    ];
+    const feed = renderWarRoomFeed(
+      kinds.map((kind, index) =>
+        warRoomEvent({
+          id: `deal-${index}`,
+          kind,
+          headline: `SERVER FACT ${kind}`,
+          publicReason: index === 5 ? "I chose to break the pact" : null,
+        }),
+      ),
+    );
+    document.body.append(feed);
+    for (const kind of kinds) {
+      const row = feed.querySelector(`[data-kind="${kind}"]`);
+      expect(row).not.toBeNull();
+      expect(row?.textContent).toContain(`SERVER FACT ${kind}`);
+      expect(row?.textContent).toContain(`broadcast.war_room_kind_${kind}`);
+    }
+    const violation = feed.querySelector('[data-kind="deal_violated"]');
+    expect(violation?.textContent).toContain(
+      "broadcast.war_room_stated_reason:reason=I chose to break the pact",
+    );
+  });
+
   it("expands on click, revealing the jump-to-turn control only when onJumpToTurn is wired", () => {
     const onJumpToTurn = vi.fn();
     const feed = renderWarRoomFeed(
@@ -342,6 +374,24 @@ describe("renderMatchTimeline", () => {
     expect(el.dataset.seekable).toBe("true");
     el.click();
     expect(onSeek).toHaveBeenCalledWith(50);
+  });
+
+  it("preserves explicit deal lifecycle marker kinds", () => {
+    const timeline = renderMatchTimeline(
+      [
+        marker({
+          kind: "deal_fulfilled",
+          label: "Auri fulfilled the support promise",
+        }),
+      ],
+      { totalTurns: 200, maxSeekableTurn: null, currentTurn: null },
+    );
+    document.body.append(timeline);
+    const deal = timeline.querySelector(
+      ".broadcast-timeline-marker",
+    ) as HTMLElement;
+    expect(deal.dataset.kind).toBe("deal_fulfilled");
+    expect(deal.title).toBe("Auri fulfilled the support promise");
   });
 
   it("never makes a marker beyond maxSeekableTurn clickable — enforced by construction, not by trusting the caller (Premiere: never navigable past the live edge)", () => {

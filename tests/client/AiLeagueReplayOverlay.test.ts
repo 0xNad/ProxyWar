@@ -237,7 +237,9 @@ describe("AiLeagueReplayOverlay", () => {
     // The political-radio transcript stays and now carries the social line
     // (speaker + text) that used to render in the bubble.
     const transcript = document.getElementById("ai-league-social-transcript");
-    expect(transcript?.textContent).toContain("Political radio");
+    expect(transcript?.textContent).toContain(
+      "ai_league_replay.political_radio_title",
+    );
     expect(transcript?.textContent).toContain("Focus fire on Rival!");
     expect(transcript?.textContent).toContain("Agent One");
 
@@ -479,7 +481,9 @@ describe("AiLeagueReplayOverlay", () => {
     expect(document.querySelector(".ai-league-map-social-bubble")).toBeNull();
     // The political radio stays and caps at two lines at once.
     const transcript = document.getElementById("ai-league-social-transcript");
-    expect(transcript?.textContent).toContain("Political radio");
+    expect(transcript?.textContent).toContain(
+      "ai_league_replay.political_radio_title",
+    );
     expect(
       transcript?.querySelectorAll(".ai-league-social-transcript-line"),
     ).toHaveLength(2);
@@ -2188,6 +2192,302 @@ describe("AiLeagueReplayOverlay", () => {
         expect(locationMock.href).toContain("turn=20");
       });
     });
+
+    it("does not promote accepted audit-unknown effect-looking events into replay facts", () => {
+      const runID = "broadcast-unconfirmed-effects-1";
+      const unconfirmed = [
+        event(
+          1,
+          100,
+          "alliance_formed",
+          "pact",
+          "a1",
+          "Atlas",
+          "a2",
+          "Blitz",
+          "Atlas and Blitz exchange reciprocal alliance requests.",
+        ),
+        event(
+          2,
+          200,
+          "attack",
+          "war",
+          "a1",
+          "Atlas",
+          "a2",
+          "Blitz",
+          "Atlas orders an attack against Blitz.",
+        ),
+        event(
+          3,
+          300,
+          "alliance_break",
+          "betrayal",
+          "a1",
+          "Atlas",
+          "a2",
+          "Blitz",
+          "Atlas moves to break alliance with Blitz.",
+        ),
+        event(
+          4,
+          400,
+          "nuke",
+          "threat",
+          "a1",
+          "Atlas",
+          "a2",
+          "Blitz",
+          "Atlas attempts to escalate nuclear pressure against Blitz.",
+        ),
+      ].map((candidate) => ({
+        ...candidate,
+        evidenceLevel: "accepted_action" as const,
+        auditStatus: "unknown",
+      }));
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        currentTurn: 999,
+        replayMaxTurn: 999,
+        decisions: [],
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events: unconfirmed,
+          communicationThreads: [
+            {
+              id: "a1:a2",
+              agentIDs: ["a1", "a2"],
+              title: "Atlas vs Blitz",
+              latestTurn: 400,
+              tone: "betrayal",
+              messages: unconfirmed,
+            },
+          ],
+          timelineBuckets: [],
+        },
+      });
+
+      for (const kind of ["alliance", "first_strike", "betrayal", "nuke"]) {
+        expect(
+          document.querySelector(
+            `.broadcast-war-room-item[data-kind="${kind}"]`,
+          ),
+        ).toBeNull();
+        expect(
+          document.querySelector(
+            `.broadcast-timeline-marker[data-kind="${kind}"]`,
+          ),
+        ).toBeNull();
+      }
+      expect(
+        document.querySelectorAll(".ai-league-social-transcript-line"),
+      ).toHaveLength(0);
+      expect(
+        document.querySelector("[data-spectator-talks-toggle]"),
+      ).toBeNull();
+
+      document.dispatchEvent(
+        new CustomEvent("ai-league-replay-frame", {
+          detail: { tick: 400, turnNumber: 400, players: [] },
+        }),
+      );
+      expect(document.getElementById("ai-league-headline-event")?.hidden).toBe(
+        true,
+      );
+      expect(
+        document.getElementById("ai-league-lower-third-host")?.textContent,
+      ).not.toContain("Atlas");
+    });
+
+    it("renders the complete structured-deal lifecycle across War Room, timeline, and political radio while separating server fact, agent claim, and fallback provenance", () => {
+      const runID = "broadcast-structured-deals-1";
+      const proposed = {
+        ...event(
+          1,
+          100,
+          "deal_proposed",
+          "info",
+          "a1",
+          "Atlas",
+          "a2",
+          "Blitz",
+          "Atlas proposed a non-aggression pact to Blitz.",
+        ),
+        importance: 55,
+        statedReason: "I need a quiet western border.",
+        evidenceLevel: "accepted_action" as const,
+        fallbackUsed: false,
+        llmPlannerDegraded: false,
+      };
+      const dealEvents = [
+        proposed,
+        // Equivalent action-stamp/ledger projection: one public fact, not two.
+        { ...proposed, id: "duplicate-proposal", sequence: 2 },
+        // A later repeat offer to the same counterparty remains in raw
+        // telemetry/timeline, but does not flood the curated War Room.
+        {
+          ...proposed,
+          id: "later-repeat-proposal",
+          sequence: 8,
+          turnNumber: 110,
+        },
+        {
+          ...event(
+            3,
+            120,
+            "deal_accepted",
+            "pact",
+            "a2",
+            "Blitz",
+            "a1",
+            "Atlas",
+            "Blitz accepted Atlas's non-aggression pact.",
+          ),
+          importance: 78,
+          evidenceLevel: "accepted_action" as const,
+          fallbackUsed: true,
+          llmPlannerDegraded: false,
+        },
+        {
+          ...event(
+            4,
+            140,
+            "deal_rejected",
+            "info",
+            "a3",
+            "Civic",
+            "a1",
+            "Atlas",
+            "Civic rejected Atlas's support request.",
+          ),
+          importance: 45,
+          evidenceLevel: "accepted_action" as const,
+        },
+        {
+          ...event(
+            5,
+            160,
+            "deal_expired",
+            "info",
+            "a3",
+            "Civic",
+            "a1",
+            "Atlas",
+            "Civic's attack pledge expired unfulfilled.",
+          ),
+          importance: 58,
+          evidenceLevel: "state_derived" as const,
+        },
+        {
+          ...event(
+            6,
+            180,
+            "deal_fulfilled",
+            "pact",
+            "a1",
+            "Atlas",
+            "a2",
+            "Blitz",
+            "VERDICT: Atlas fulfilled the support promise by sending troops.",
+          ),
+          importance: 70,
+          evidenceLevel: "state_derived" as const,
+        },
+        {
+          ...event(
+            7,
+            200,
+            "deal_violated",
+            "betrayal",
+            "a2",
+            "Blitz",
+            "a1",
+            "Atlas",
+            "VERDICT: Blitz violated the pact by attacking Atlas.",
+          ),
+          importance: 96,
+          statedReason: "Atlas became too dangerous to leave alone.",
+          evidenceLevel: "state_derived" as const,
+        },
+      ];
+      mountAiLeagueReplayOverlay({
+        runID,
+        artifactBasePath: `/ai-league-runs/${runID}`,
+        currentTurn: 250,
+        replayMaxTurn: 250,
+        decisions: [],
+        spectatorTelemetry: {
+          version: 1,
+          runID,
+          agents: [],
+          relationships: [],
+          events: dealEvents,
+          communicationThreads: [],
+          timelineBuckets: [],
+        },
+      });
+
+      const warRoom = document.querySelector(".broadcast-war-room");
+      const kinds = [
+        "deal_proposed",
+        "deal_accepted",
+        "deal_rejected",
+        "deal_expired",
+        "deal_fulfilled",
+        "deal_violated",
+      ];
+      for (const kind of kinds) {
+        expect(warRoom?.querySelector(`[data-kind="${kind}"]`)).not.toBeNull();
+        expect(
+          document.querySelector(
+            `.broadcast-timeline-marker[data-kind="${kind}"]`,
+          ),
+        ).not.toBeNull();
+      }
+      expect(
+        warRoom?.querySelectorAll('[data-kind="deal_proposed"]'),
+      ).toHaveLength(1);
+
+      const violation = warRoom?.querySelector('[data-kind="deal_violated"]');
+      expect(
+        violation?.querySelector(".broadcast-war-room-headline")?.textContent,
+      ).toBe("VERDICT: Blitz violated the pact by attacking Atlas.");
+      violation
+        ?.querySelector<HTMLButtonElement>(".broadcast-war-room-summary")
+        ?.click();
+      expect(
+        violation?.querySelector(".broadcast-war-room-reason")?.textContent,
+      ).toContain("broadcast.war_room_stated_reason");
+      expect(
+        violation?.querySelector(".broadcast-war-room-reason")?.textContent,
+      ).not.toContain("VERDICT:");
+
+      const accepted = warRoom?.querySelector('[data-kind="deal_accepted"]');
+      accepted
+        ?.querySelector<HTMLButtonElement>(".broadcast-war-room-summary")
+        ?.click();
+      expect(
+        accepted?.querySelector(".broadcast-war-room-extra")?.textContent,
+      ).toContain("ai_league_replay.deal_recovered_action");
+
+      document.dispatchEvent(
+        new CustomEvent("ai-league-replay-frame", {
+          detail: { tick: 250, turnNumber: 250, players: [] },
+        }),
+      );
+      const transcript = document.getElementById("ai-league-social-transcript");
+      expect(transcript?.textContent).toContain(
+        "VERDICT: Blitz violated the pact by attacking Atlas.",
+      );
+      expect(transcript?.textContent).toContain(
+        "ai_league_replay.deal_agent_claim",
+      );
+    });
+
     it("classifies War Room events into visual-weight tiers (content curation spec item 1, deploy 3.3): eliminations/alliances/betrayals are always tier 1; a first strike touching an agent who later becomes consequential (eliminated, or party to an alliance/betrayal) is tier 2; a first strike between two agents who never become consequential is tier 3", () => {
       const runID = "broadcast-war-room-tiers-1";
       mountAiLeagueReplayOverlay({
@@ -4774,6 +5074,12 @@ function event(
   targetName: string | null,
   message: string,
 ) {
+  const effectConfirmed = [
+    "attack",
+    "alliance_formed",
+    "alliance_break",
+    "nuke",
+  ].includes(kind);
   return {
     id: `${turnNumber}:${sequence}:${kind}`,
     sequence,
@@ -4788,6 +5094,14 @@ function event(
     publicText: message,
     actionKind: "quick_chat",
     actionID: `${kind}:${sequence}`,
+    evidenceLevel: effectConfirmed
+      ? ("confirmed_effect" as const)
+      : kind === "elimination"
+        ? ("state_derived" as const)
+        : ("accepted_action" as const),
+    fallbackUsed: false,
+    llmPlannerDegraded: false,
+    auditStatus: effectConfirmed ? "confirmed" : "not_applicable",
     importance: kind === "alliance_break" ? 100 : 85,
   };
 }
