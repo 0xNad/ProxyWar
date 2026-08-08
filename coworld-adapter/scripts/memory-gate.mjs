@@ -128,6 +128,17 @@ const configPath = path.join(workDir, "config.json");
 writeFileSync(configPath, `${JSON.stringify(gameConfig, null, 2)}\n`);
 
 const turnsPerStep = Number(gameConfig.turns_per_decision_step ?? 100);
+// Baseline env the manifest declares for the real hosted container
+// (game.runnable.env in coworld_manifest.json, e.g.
+// PROXYWAR_TUNE_STRUCTURED_DEALS) -- the gate spawns the episode script
+// directly, bypassing the image/host that would otherwise apply this, so
+// without it the gate silently never exercises whatever runtime behavior
+// that env activates. process.env below still takes precedence, so an
+// explicit override in the invoking shell is always possible.
+const runnableEnv = manifest.game?.runnable?.env ?? {};
+console.error(
+  `[memory-gate] manifest game.runnable.env baseline: ${JSON.stringify(runnableEnv)}`,
+);
 console.error(
   `[memory-gate] variant=${VARIANT_ID} map=${gameConfig.map}/${gameConfig.map_size} ` +
     `seats=${seatCount} steps=${STEPS} (~${STEPS * turnsPerStep} turns) ` +
@@ -150,6 +161,7 @@ const child = spawn(
   {
     cwd: repoRoot,
     env: {
+      ...runnableEnv,
       ...process.env,
       GAME_ENV: "dev",
       PROXYWAR_REPO: repoRoot,
