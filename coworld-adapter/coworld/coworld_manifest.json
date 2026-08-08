@@ -1091,7 +1091,7 @@
         "player_connect_timeout_seconds": 120,
         "episode_timeout_seconds": 3600
       },
-      "description": "Twelve-policy free-for-all on Europe (Normal): same seat count, step caps, clock, and scoring as the other Tournament 12P variants \u2014 only the map differs. Qualified for the rotation via the memory-regression gate (80-step native 12P episode under the hosted heap posture) before shipping."
+      "description": "Twelve-policy free-for-all on Europe (Normal): same seat count, step caps, clock, and scoring as the other Tournament 12P variants \u2014 only the map differs. Qualified for the rotation via the memory-regression gate at 120 native 12P steps, not the standard 80 \u2014 this larger map's heap is still in delayed colonization growth at the 80-step window, which reads a false slope failure \u2014 before shipping."
     }
   ],
   "certification": {

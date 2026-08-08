@@ -45,11 +45,11 @@ COMPETITION_LADDER: list[tuple[int, list[str]]] = [
             # Memory-regression gate: the standard 80-step window is too
             # early for Europe's larger map -- its heap is still in delayed
             # colonization growth at that point and reads a false slope
-            # failure. The unchanged gate and threshold (heapUsedMB
-            # late-window slope <= 4 MB/1k, RSS <= 600MB) PASS at 120 steps
-            # once that growth plateaus (slope 0.15 MB/1k, maxRss 452MB) --
-            # see coworld-adapter/artifacts/memory-gate/ reports from
-            # 2026-08-08 (80-step FAIL and 120-step PASS, both retained).
+            # failure (80-step: heapUsedMB late-window slope 4.26 MB/1k,
+            # over the 4 MB/1k threshold). The unchanged gate and threshold
+            # (heapUsedMB late-window slope <= 4 MB/1k, RSS <= 600MB) PASS
+            # at 120 steps once that growth plateaus (slope 0.15 MB/1k,
+            # maxRss 452MB, well under the 600MB ceiling).
             #
             # Still outstanding: a fresh full-length (500-step) hosted
             # wall-clock probe -- the original failure mode -- has not been
