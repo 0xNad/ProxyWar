@@ -225,6 +225,9 @@
         }
       }
     },
+    "replay_viewer": {
+      "bundle": "build/static-replay-viewer"
+    },
     "runnable": {
       "type": "game",
       "image": "proxywar-coworld-local:coworld-bfc17fcd56f2",
