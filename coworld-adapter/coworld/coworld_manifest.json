@@ -220,7 +220,7 @@
     },
     "runnable": {
       "type": "game",
-      "image": "proxywar-coworld-local:coworld-0.1.26-da920bcc",
+      "image": "proxywar-coworld-local:coworld-0.1.26-replay-private-v1",
       "run": [
         "node",
         "--max-old-space-size=640",
@@ -256,7 +256,7 @@
   "player": [
     {
       "type": "player",
-      "image": "proxywar-coworld-local:coworld-0.1.26-da920bcc",
+      "image": "proxywar-coworld-local:coworld-0.1.26-replay-private-v1",
       "run": ["node", "/app/integration/src/starter-player.mjs"],
       "env": {},
       "id": "proxywar-starter-websocket",
@@ -268,7 +268,7 @@
   "commissioner": [
     {
       "type": "commissioner",
-      "image": "proxywar-commissioner-local:coworld-0.1.26-da920bcc",
+      "image": "proxywar-commissioner-local:coworld-0.1.26-replay-private-v1",
       "run": [],
       "env": {},
       "id": "proxywar-ladder-commissioner",
@@ -281,7 +281,7 @@
   "optimizer": [
     {
       "type": "optimizer",
-      "image": "proxywar-coworld-local:coworld-0.1.26-da920bcc",
+      "image": "proxywar-coworld-local:coworld-0.1.26-replay-private-v1",
       "run": ["node", "/app/integration/src/proxywar-optimizer-plan.mjs"],
       "env": {},
       "id": "proxywar-optimizer-plan",

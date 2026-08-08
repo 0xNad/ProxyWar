@@ -24,7 +24,11 @@ import { describe, expect, it } from "vitest";
 const COWORLD_DIR = path.join(process.cwd(), "coworld-adapter", "coworld");
 
 interface Manifest {
-  game: { runnable: { env: Record<string, string> } };
+  game: {
+    runnable: { env: Record<string, string> };
+    protocols: { player: { value: string } };
+    docs: { readme: { value: string } };
+  };
 }
 
 function readManifest(filename: string): Manifest {
@@ -40,6 +44,19 @@ describe("Coworld manifests: PROXYWAR_TUNE_STRUCTURED_DEALS activation", () => {
       expect(readManifest(filename).game.runnable.env).toEqual({
         PROXYWAR_TUNE_STRUCTURED_DEALS: "1",
       });
+    },
+  );
+
+  it.each(["coworld_manifest.json", "coworld_manifest_template.json"])(
+    "%s documents the independent structured-deal response slot",
+    (filename) => {
+      const manifest = readManifest(filename);
+      expect(manifest.game.protocols.player.value).toContain(
+        "selectedDealActionId?",
+      );
+      expect(manifest.game.docs.readme.value).toContain(
+        "selectedDealActionId may separately select one exact deal_* id",
+      );
     },
   );
 

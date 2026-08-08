@@ -20,7 +20,10 @@ import {
   type CoworldResults,
   type WinnerRef,
 } from "./coworld-results.ts";
-import { coworldInlineRunArtifacts } from "./coworld-run-artifact-bundle.ts";
+import {
+  coworldInlineRunArtifacts,
+  coworldPublicReplayPayload,
+} from "./coworld-run-artifact-bundle.ts";
 import { competitiveSeatSpecs } from "./coworld-seat-specs.ts";
 import { coworldEpisodeIdentity } from "./coworld-seed.ts";
 import { coworldPublicRunArtifacts } from "./proxywar-public-run-artifacts.ts";
@@ -262,7 +265,7 @@ class CoworldProtocolServer {
   }
 
   setReplayPayload(payload: unknown): void {
-    this.replayPayload = publicReplayPayload(payload);
+    this.replayPayload = coworldPublicReplayPayload(payload);
     const spectatorReplay = spectatorReplayFromPayload(this.replayPayload);
     if (spectatorReplay !== null) {
       this.spectatorReplay = spectatorReplay;
@@ -1416,31 +1419,6 @@ function publicCoworldConfig(config: CoworldConfig): Record<string, unknown> {
     replay_tail_turns: config.replay_tail_turns,
     player_connect_timeout_seconds: config.player_connect_timeout_seconds,
     player_count: config.tokens.length,
-  };
-}
-
-function publicReplayPayload(payload: unknown): unknown {
-  if (payload === null || typeof payload !== "object") {
-    return payload;
-  }
-  const record = payload as Record<string, unknown>;
-  if (record.config === null || typeof record.config !== "object") {
-    return payload;
-  }
-  const config = record.config as Record<string, unknown>;
-  const { tokens, ...publicConfig } = config;
-  const players = Array.isArray(config.players) ? config.players : [];
-  return {
-    ...record,
-    config: {
-      ...publicConfig,
-      player_count:
-        typeof config.player_count === "number"
-          ? config.player_count
-          : Array.isArray(tokens)
-            ? tokens.length
-            : players.length,
-    },
   };
 }
 
