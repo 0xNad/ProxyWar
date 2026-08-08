@@ -18,11 +18,10 @@
  * That's your agent. Everything else is plumbing.
  */
 import { AnthropicBedrock } from "@anthropic-ai/bedrock-sdk";
+import { pathToFileURL } from "node:url";
 import { WebSocket } from "ws";
 
 const url = process.env.COWORLD_PLAYER_WS_URL;
-if (!url)
-  throw new Error("COWORLD_PLAYER_WS_URL is required (the match provides it)");
 
 const REGION =
   process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || "us-east-1";
@@ -39,12 +38,14 @@ const MODELS = [
 // Locally the env var is absent and the client talks to AWS directly as before.
 const SIDECAR = (process.env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME || "").trim();
 let bedrock = null;
-try {
-  bedrock = new AnthropicBedrock(
-    SIDECAR ? { awsRegion: REGION, baseURL: SIDECAR } : { awsRegion: REGION },
-  );
-} catch (e) {
-  bedrock = null;
+function createBedrockClient() {
+  try {
+    return new AnthropicBedrock(
+      SIDECAR ? { awsRegion: REGION, baseURL: SIDECAR } : { awsRegion: REGION },
+    );
+  } catch {
+    return null;
+  }
 }
 let lockedModel = null;
 
@@ -67,7 +68,13 @@ const STRATEGY = [
   "High-risk actions (nukes) are only playable if you include their kind in preferKinds AND name the",
   "victim in target — do both when you mean it.",
 ].join(" ");
-const PLAN_EVERY = Number(process.env.PLAN_EVERY || 3); // refresh the plan every N decisions
+function boundedIntegerEnv(name, fallback, min, max) {
+  const parsed = Number(process.env[name]);
+  return Number.isInteger(parsed) && parsed >= min && parsed <= max
+    ? parsed
+    : fallback;
+}
+const PLAN_EVERY = boundedIntegerEnv("PLAN_EVERY", 6, 1, 30); // refresh the plan every N decisions
 const PLAN_KINDS = [
   "spawn",
   "attack",
@@ -231,7 +238,7 @@ function buildState(obs, actions) {
 }
 
 // -- lenient JSON extraction (models often wrap JSON in prose) ----------------
-function extractJson(text) {
+function extractJson(text, repairTruncatedReason = false) {
   const s = String(text);
   let depth = 0,
     start = -1,
@@ -260,37 +267,310 @@ function extractJson(text) {
       }
     }
   }
+  // Candidate-only repair: accept exactly one open object whose only open
+  // string is the final optional `reason` value. Never repair a partial focus,
+  // target, avoid-list, deal posture, or nested collection.
+  if (repairTruncatedReason && depth === 1 && start >= 0 && inStr) {
+    const partial = s.slice(start);
+    if (!/"reason"\s*:\s*"(?:[^"\\]|\\.)*$/.test(partial)) return null;
+    try {
+      const repaired = JSON.parse(`${partial}"}`);
+      if (
+        !["expand", "economy", "attack", "defend", "ally"].includes(
+          repaired?.focus,
+        ) ||
+        !Array.isArray(repaired?.preferKinds) ||
+        !(repaired?.target === null || typeof repaired?.target === "string") ||
+        !Array.isArray(repaired?.avoidTargets) ||
+        !(
+          repaired?.deal === null ||
+          repaired?.deal === "accept" ||
+          repaired?.deal === "decline"
+        ) ||
+        typeof repaired?.reason !== "string"
+      ) {
+        return null;
+      }
+      return repaired;
+    } catch {
+      return null;
+    }
+  }
   return null;
+}
+
+const PROMPT_HARDENING = process.env.PROXYWAR_PROMPT_HARDENING === "1";
+const PROMPT_CACHE = process.env.PROXYWAR_PROMPT_CACHE === "1";
+const PROMPT_VARIANT = PROMPT_CACHE
+  ? "full-hardened-cache-v1"
+  : PROMPT_HARDENING
+    ? "full-hardened-telemetry-v2"
+    : "full-baseline-telemetry-v1";
+const plannerUsageTotals = {
+  attempts: 0,
+  responses: 0,
+  errors: 0,
+  responsesWithUsage: 0,
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheCreationInputTokens: 0,
+  cacheReadInputTokens: 0,
+};
+const plannerUsageObserved = {
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheCreationInputTokens: 0,
+  cacheReadInputTokens: 0,
+};
+let plannerAttemptSequence = 0;
+let plannerUsageSummaryEmitted = false;
+
+function tokenCount(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 0;
+}
+
+function optionalTokenCount(value) {
+  if (value === undefined || value === null || value === "") return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0
+    ? Math.floor(parsed)
+    : undefined;
+}
+
+function normalizeBedrockUsage(usage) {
+  const normalized = {
+    inputTokens: optionalTokenCount(usage?.input_tokens ?? usage?.inputTokens),
+    outputTokens: optionalTokenCount(
+      usage?.output_tokens ?? usage?.outputTokens,
+    ),
+    cacheCreationInputTokens: optionalTokenCount(
+      usage?.cache_creation_input_tokens ?? usage?.cacheCreationInputTokens,
+    ),
+    cacheReadInputTokens: optionalTokenCount(
+      usage?.cache_read_input_tokens ?? usage?.cacheReadInputTokens,
+    ),
+  };
+  return {
+    usageAvailable:
+      normalized.inputTokens !== undefined &&
+      normalized.outputTokens !== undefined,
+    ...normalized,
+  };
+}
+
+function normalizePlannerUsageEvent(event) {
+  const normalized = {
+    schemaVersion: 1,
+    promptVariant: PROMPT_VARIANT,
+    planEvery: PLAN_EVERY,
+    promptCache: PROMPT_CACHE,
+    event: clean(event?.event),
+  };
+  for (const key of [
+    "model",
+    "responseModel",
+    "stopReason",
+    "status",
+    "reason",
+  ]) {
+    if (event?.[key] !== undefined) normalized[key] = clean(event[key]);
+  }
+  if (event?.usageAvailable !== undefined)
+    normalized.usageAvailable = event.usageAvailable === true;
+  if (event?.usageComplete !== undefined)
+    normalized.usageComplete = event.usageComplete === true;
+  for (const key of [
+    "attempt",
+    "latencyMs",
+    "attempts",
+    "responses",
+    "errors",
+    "responsesWithUsage",
+    "inFlightRequests",
+    "inputTokens",
+    "outputTokens",
+    "cacheCreationInputTokens",
+    "cacheReadInputTokens",
+  ]) {
+    if (event?.[key] !== undefined && event?.[key] !== null)
+      normalized[key] = tokenCount(event[key]);
+  }
+  return normalized;
+}
+
+function emitPlannerUsage(event) {
+  // Deliberately omit prompt, response, observation, player, and rival data.
+  // The raw counters are sufficient to price an experiment against a pinned
+  // model price table without leaking match or builder content into logs.
+  console.log(
+    `PROXYWAR_LLM_USAGE ${JSON.stringify(normalizePlannerUsageEvent(event))}`,
+  );
+}
+
+function recordPlannerResponse({
+  attempt,
+  model,
+  responseModel,
+  stopReason,
+  latencyMs,
+  usage,
+}) {
+  const normalized = normalizeBedrockUsage(usage);
+  plannerUsageTotals.responses += 1;
+  if (normalized.usageAvailable) plannerUsageTotals.responsesWithUsage += 1;
+  for (const key of [
+    "inputTokens",
+    "outputTokens",
+    "cacheCreationInputTokens",
+    "cacheReadInputTokens",
+  ]) {
+    if (normalized[key] === undefined) continue;
+    plannerUsageTotals[key] += normalized[key];
+    plannerUsageObserved[key] += 1;
+  }
+  emitPlannerUsage({
+    event: "response",
+    attempt,
+    model: clean(model),
+    responseModel: clean(responseModel),
+    stopReason: clean(stopReason),
+    latencyMs: tokenCount(latencyMs),
+    ...normalized,
+  });
+  return normalized;
+}
+
+function outstandingPlannerRequests() {
+  return Math.max(
+    0,
+    plannerUsageTotals.attempts -
+      plannerUsageTotals.responses -
+      plannerUsageTotals.errors,
+  );
+}
+
+function emitPlannerUsageSummary(reason) {
+  if (plannerUsageSummaryEmitted) return;
+  plannerUsageSummaryEmitted = true;
+  const inFlightRequests = outstandingPlannerRequests();
+  const event = {
+    event: "summary",
+    reason: clean(reason),
+    attempts: plannerUsageTotals.attempts,
+    responses: plannerUsageTotals.responses,
+    errors: plannerUsageTotals.errors,
+    responsesWithUsage: plannerUsageTotals.responsesWithUsage,
+    inFlightRequests,
+    usageComplete: inFlightRequests === 0,
+    usageAvailable:
+      plannerUsageTotals.responses > 0 &&
+      plannerUsageTotals.responses === plannerUsageTotals.responsesWithUsage,
+  };
+  for (const key of [
+    "inputTokens",
+    "outputTokens",
+    "cacheCreationInputTokens",
+    "cacheReadInputTokens",
+  ]) {
+    if (plannerUsageObserved[key] > 0) event[key] = plannerUsageTotals[key];
+  }
+  emitPlannerUsage(event);
+}
+
+function buildBedrockRequest(
+  model,
+  staticPrompt,
+  dynamicPrompt,
+  hardening,
+  promptCache,
+) {
+  return {
+    model,
+    max_tokens: hardening ? 500 : 300,
+    messages: [
+      {
+        role: "user",
+        content: promptCache
+          ? [
+              {
+                type: "text",
+                text: staticPrompt,
+                cache_control: { type: "ephemeral" },
+              },
+              { type: "text", text: dynamicPrompt },
+            ]
+          : staticPrompt + dynamicPrompt,
+      },
+    ],
+  };
+}
+
+function bedrockResponseText(response) {
+  return response?.content?.[0]?.text || "";
 }
 
 async function askBedrock(state) {
   if (!bedrock) throw new Error("bedrock client did not initialize");
-  const prompt =
+  const staticPrompt =
     STRATEGY +
     "\n" +
     SECURITY +
     "\n" +
-    'Reply with ONLY JSON: {"focus":"<one of expand|economy|attack|defend|ally>",' +
+    (PROMPT_HARDENING
+      ? 'Reply with ONLY a JSON object — no prose before or after it: {"focus":"<one of expand|economy|attack|defend|ally>",'
+      : 'Reply with ONLY JSON: {"focus":"<one of expand|economy|attack|defend|ally>",') +
     '"preferKinds":["<action kinds from this list, best first: ' +
     PLAN_KINDS.join("|") +
     '>"],' +
     '"target":"<exact rival name to pressure, or null>","avoidTargets":["<rival names not to attack>"],' +
     '"deal":"<accept|decline|null — standing posture for incoming pact offers>",' +
-    '"reason":"<one short sentence>"}\n' +
-    "GAME:\n" +
-    JSON.stringify(state);
+    '"reason":"<one short sentence>"}\n';
+  const dynamicPrompt = "GAME:\n" + JSON.stringify(state);
   const candidates = lockedModel ? [lockedModel] : MODELS;
   let lastErr;
   for (const model of candidates) {
+    const attempt = ++plannerAttemptSequence;
+    plannerUsageTotals.attempts += 1;
+    const startedAt = Date.now();
     try {
-      const r = await bedrock.messages.create({
+      // Both A/B arms use this exact source and telemetry. The candidate arm
+      // differs only through PROMPT_HARDENING: stricter JSON wording,
+      // 500-token headroom, and reason-tail repair. Both arms send one user
+      // message because hosted Sonnet rejects the assistant-prefill form. The
+      // optional cache arm splits the identical text into a static cached block
+      // and one dynamic GAME block; the default stays a byte-identical string.
+      const r = await bedrock.messages.create(
+        buildBedrockRequest(
+          model,
+          staticPrompt,
+          dynamicPrompt,
+          PROMPT_HARDENING,
+          PROMPT_CACHE,
+        ),
+      );
+      recordPlannerResponse({
+        attempt,
         model,
-        max_tokens: 300,
-        messages: [{ role: "user", content: prompt }],
+        responseModel: r?.model,
+        stopReason: r?.stop_reason,
+        latencyMs: Date.now() - startedAt,
+        usage: r?.usage,
       });
       lockedModel = model;
-      return { text: r?.content?.[0]?.text || "", model };
+      return {
+        attempt,
+        text: bedrockResponseText(r),
+        model,
+      };
     } catch (e) {
+      plannerUsageTotals.errors += 1;
+      emitPlannerUsage({
+        event: "request_error",
+        attempt,
+        model: clean(model),
+        latencyMs: tokenCount(Date.now() - startedAt),
+      });
       lastErr = e;
     }
   }
@@ -307,10 +587,17 @@ function refreshPlanInBackground(state) {
   if (planRefreshInFlight) return;
   planRefreshInFlight = true;
   withTimeout(askBedrock(state), 20000)
-    .then(({ text, model }) => {
-      const parsed = extractJson(text);
-      if (!parsed || typeof parsed !== "object")
+    .then(({ attempt, text, model }) => {
+      const parsed = extractJson(text, PROMPT_HARDENING);
+      if (!parsed || typeof parsed !== "object") {
+        emitPlannerUsage({
+          event: "plan_result",
+          attempt,
+          model: clean(model),
+          status: "invalid_json",
+        });
         throw new Error("plan reply had no JSON");
+      }
       const preferKinds = Array.isArray(parsed.preferKinds)
         ? parsed.preferKinds.filter((k) => PLAN_KINDS.includes(k))
         : [];
@@ -331,6 +618,12 @@ function refreshPlanInBackground(state) {
       };
       planDecisionAge = 0;
       lastPlanError = null;
+      emitPlannerUsage({
+        event: "plan_result",
+        attempt,
+        model: clean(model),
+        status: "applied",
+      });
     })
     .catch((e) => {
       lastPlanError = (e?.message || String(e)).slice(0, 130);
@@ -516,66 +809,6 @@ function withTimeout(promise, ms) {
   ]);
 }
 
-const socket = new WebSocket(url);
-socket.on("open", () =>
-  console.log(`connected to match (region=${REGION}, models=${MODELS.length})`),
-);
-
-socket.on("message", (data) => {
-  let message;
-  try {
-    message = JSON.parse(String(data));
-  } catch (e) {
-    console.error(`unparseable message from match: ${e?.message || e}`);
-    return;
-  }
-  if (message.type === "final") {
-    socket.close();
-    return;
-  }
-  if (message.type !== "decision_request") return;
-
-  const actions = message.request.legalActions ?? [];
-  const obs = message.request.observation ?? {};
-  const state = buildState(obs, actions);
-
-  // Keep the plan fresh WITHOUT blocking — the answer below never waits on Bedrock.
-  planDecisionAge += 1;
-  if (plan === null || planDecisionAge >= PLAN_EVERY)
-    refreshPlanInBackground(state);
-
-  const chosen = choose(actions, obs);
-  // The deal posture rides its OWN slot: it is sent alongside the game move,
-  // never instead of it. Absent field => byte-identical to the old reply.
-  const dealMove = chooseDealMove(actions, obs);
-  const degraded = lastPlanError !== null;
-  let reason;
-  if (plan !== null) {
-    const focus = plan.target ? `${plan.focus} -> ${plan.target}` : plan.focus;
-    reason = degraded
-      ? `PLAN(${focus}; stale, refresh failed: ${lastPlanError}): ${chosen.kind}`
-      : `PLAN(${focus}) via ${plan.model}: ${chosen.kind} — ${plan.reason}`;
-  } else {
-    reason = degraded
-      ? `BOOTSTRAP RULE (plan refresh failed: ${lastPlanError}): ${chosen.kind}`
-      : `BOOTSTRAP RULE (first plan in flight): ${chosen.kind}`;
-  }
-
-  history.push({ actionID: chosen.id, kind: chosen.kind });
-  socket.send(
-    JSON.stringify({
-      type: "decision_response",
-      requestID: message.requestID,
-      selectedLegalActionId: chosen.id,
-      ...(dealMove ? { selectedDealActionId: dealMove.id } : {}),
-      reason: reason.slice(0, 200),
-      confidence: plan !== null ? (degraded ? 0.5 : 0.75) : 0.4,
-      fallbackUsed: plan === null || degraded,
-      llmPlannerDegraded: plan === null || degraded,
-    }),
-  );
-});
-
 // Post-final linger (hosted only, via pod env): keeps the finished player
 // pod discoverable through the platform's terminal reconciliation, which
 // otherwise intermittently fails whole episodes with "pod ... not found"
@@ -590,23 +823,105 @@ const postFinalLingerMs = Number(
 const lingerArmed =
   process.env.KUBERNETES_SERVICE_HOST !== undefined ||
   process.env.PROXYWAR_PLAYER_FORCE_LINGER === "1";
-process.on("SIGTERM", () => process.exit(0));
-process.on("SIGINT", () => process.exit(0));
-socket.on("close", () => {
-  if (
-    lingerArmed &&
-    Number.isFinite(postFinalLingerMs) &&
-    postFinalLingerMs > 0
-  ) {
-    console.log(
-      `lingering ${postFinalLingerMs}ms after close for platform reconciliation`,
+
+export function startLlmPlayer({
+  bedrockClient,
+  WebSocketCtor = WebSocket,
+} = {}) {
+  if (!url)
+    throw new Error(
+      "COWORLD_PLAYER_WS_URL is required (the match provides it)",
     );
-    setTimeout(() => process.exit(0), postFinalLingerMs);
-    return;
-  }
-  process.exit(0);
-});
-socket.on("error", (error) => {
-  console.error(error);
-  process.exit(1);
-});
+  bedrock = bedrockClient ?? createBedrockClient();
+  const socket = new WebSocketCtor(url);
+  socket.on("open", () =>
+    console.log(
+      `connected to match (region=${REGION}, models=${MODELS.length})`,
+    ),
+  );
+
+  socket.on("message", (data) => {
+    let message;
+    try {
+      message = JSON.parse(String(data));
+    } catch (e) {
+      console.error(`unparseable message from match: ${e?.message || e}`);
+      return;
+    }
+    if (message.type === "final") {
+      emitPlannerUsageSummary("final_message");
+      socket.close();
+      return;
+    }
+    if (message.type !== "decision_request") return;
+
+    const actions = message.request.legalActions ?? [];
+    const obs = message.request.observation ?? {};
+    const state = buildState(obs, actions);
+
+    // Keep the plan fresh WITHOUT blocking — the answer below never waits on Bedrock.
+    planDecisionAge += 1;
+    if (plan === null || planDecisionAge >= PLAN_EVERY)
+      refreshPlanInBackground(state);
+
+    const chosen = choose(actions, obs);
+    // The deal posture rides its OWN slot: it is sent alongside the game move,
+    // never instead of it. Absent field => byte-identical to the old reply.
+    const dealMove = chooseDealMove(actions, obs);
+    const degraded = lastPlanError !== null;
+    let reason;
+    if (plan !== null) {
+      const focus = plan.target
+        ? `${plan.focus} -> ${plan.target}`
+        : plan.focus;
+      reason = degraded
+        ? `PLAN(${focus}; stale, refresh failed: ${lastPlanError}): ${chosen.kind}`
+        : `PLAN(${focus}) via ${plan.model}: ${chosen.kind} — ${plan.reason}`;
+    } else {
+      reason = degraded
+        ? `BOOTSTRAP RULE (plan refresh failed: ${lastPlanError}): ${chosen.kind}`
+        : `BOOTSTRAP RULE (first plan in flight): ${chosen.kind}`;
+    }
+
+    history.push({ actionID: chosen.id, kind: chosen.kind });
+    socket.send(
+      JSON.stringify({
+        type: "decision_response",
+        requestID: message.requestID,
+        selectedLegalActionId: chosen.id,
+        ...(dealMove ? { selectedDealActionId: dealMove.id } : {}),
+        reason: reason.slice(0, 200),
+        confidence: plan !== null ? (degraded ? 0.5 : 0.75) : 0.4,
+        fallbackUsed: plan === null || degraded,
+        llmPlannerDegraded: plan === null || degraded,
+      }),
+    );
+  });
+
+  process.on("SIGTERM", () => process.exit(0));
+  process.on("SIGINT", () => process.exit(0));
+  socket.on("close", () => {
+    if (
+      lingerArmed &&
+      Number.isFinite(postFinalLingerMs) &&
+      postFinalLingerMs > 0
+    ) {
+      console.log(
+        `lingering ${postFinalLingerMs}ms after close for platform reconciliation`,
+      );
+      setTimeout(() => process.exit(0), postFinalLingerMs);
+      return;
+    }
+    process.exit(0);
+  });
+  socket.on("error", (error) => {
+    console.error(error);
+    process.exit(1);
+  });
+  return socket;
+}
+
+const invokedAsScript =
+  process.argv[1] !== undefined &&
+  import.meta.url === pathToFileURL(process.argv[1]).href;
+if (invokedAsScript) startLlmPlayer();

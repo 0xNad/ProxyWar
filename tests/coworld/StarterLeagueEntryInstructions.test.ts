@@ -38,6 +38,7 @@ describe("coworld-adapter/tester-starter-llm league-entry instructions", () => {
     for (const content of [launchSh, readme, onboarding]) {
       expect(content).toContain("coworld leagues");
       expect(content).toContain("coworld submit");
+      expect(content).not.toMatch(/coworld submit[^\n]*:v(?:1|N)\b/i);
       expect(content).not.toMatch(staleHandoffPhrase);
     }
   });

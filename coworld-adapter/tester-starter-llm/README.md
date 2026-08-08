@@ -42,8 +42,10 @@ isn't entering the league — do that next:
 
 ```bash
 uvx --from coworld coworld leagues        # find the Proxywar league id
-uvx --from coworld coworld submit my-agent:v1 --league <league_id>
+uvx --from coworld coworld submit my-agent --league <league_id>
 ```
+
+The unsuffixed policy name selects your latest uploaded version.
 
 Preflight only: `bash launch.sh --doctor`. Driving it from a coding agent or CI:
 `bash launch.sh my-agent --yes` auto-approves the safe setup steps.
@@ -59,7 +61,7 @@ Open **`llm-player.mjs`** and edit four things:
   structured promise when the match offers one.
 
 That's your agent. Re-run `bash launch.sh my-agent` to push a new version.
-(`PLAN_EVERY` sets how often the plan refreshes; default every 3 decisions.)
+(`PLAN_EVERY` sets how often the plan refreshes; default every 6 decisions.)
 
 Out of the box it already: reads your territory share, troops, gold, and each rival's
 relative strength / who borders you / who's allied; follows the model's plan (focus,

@@ -38,7 +38,10 @@ import type {
  * covered in-process against `runProgramWeek` directly for speed.
  */
 
-const NOW = new Date("2026-08-01T00:00:00.000Z");
+// The real CLI correctly rejects past schedule overrides. Keep the fixture
+// permanently ahead of wall-clock CI so this subprocess suite tests the
+// programming workflow rather than expiring on its calendar date.
+const NOW = new Date("2999-08-01T00:00:00.000Z");
 
 function baseSeason(overrides: Partial<Season> = {}): Season {
   return {
@@ -47,8 +50,8 @@ function baseSeason(overrides: Partial<Season> = {}): Season {
     slug: "zero",
     title: "Season Zero",
     description: "",
-    startDate: "2026-08-01",
-    endDate: "2026-09-26",
+    startDate: "2999-08-01",
+    endDate: "2999-09-26",
     state: "active",
     eventSlots: [],
     archiveFeaturedMatchIds: [],
@@ -318,7 +321,7 @@ async function writeArchiveMirror(
           episodeRequestId,
           shortId: "SMK",
           roundNumber: 1,
-          completedAt: "2026-07-20T00:00:00.000Z",
+          completedAt: "2999-07-20T00:00:00.000Z",
           map: "Pangaea",
           mapSize: "Normal",
           turnCount: 1000,
@@ -453,34 +456,34 @@ describe("computeNextWeeklyCadence", () => {
   it("defaults to one week from now, rounded up to the top of the hour, when the season has no prior slot", () => {
     const result = computeNextWeeklyCadence(
       [],
-      new Date("2026-08-01T00:00:00.000Z"),
+      new Date("2999-08-01T00:00:00.000Z"),
     );
-    expect(result).toBe("2026-08-08T00:00:00.000Z");
+    expect(result).toBe("2999-08-08T00:00:00.000Z");
   });
 
   it("rounds up a non-hour-aligned 'now' to the next full hour", () => {
     const result = computeNextWeeklyCadence(
       [],
-      new Date("2026-08-01T00:17:00.000Z"),
+      new Date("2999-08-01T00:17:00.000Z"),
     );
-    expect(result).toBe("2026-08-08T01:00:00.000Z");
+    expect(result).toBe("2999-08-08T01:00:00.000Z");
   });
 
   it("adds one week to the latest existing slot's own scheduledAt", () => {
     const slots: SeasonEventSlot[] = [
       {
         featuredMatchId: "feat_a",
-        scheduledAt: "2026-08-01T18:00:00.000Z",
+        scheduledAt: "2999-08-01T18:00:00.000Z",
         addedAt: NOW.toISOString(),
       },
       {
         featuredMatchId: "feat_b",
-        scheduledAt: "2026-08-08T18:00:00.000Z",
+        scheduledAt: "2999-08-08T18:00:00.000Z",
         addedAt: NOW.toISOString(),
       },
     ];
     const result = computeNextWeeklyCadence(slots, NOW);
-    expect(result).toBe("2026-08-15T18:00:00.000Z");
+    expect(result).toBe("2999-08-15T18:00:00.000Z");
   });
 
   it("ignores unscheduled (null) slots when finding the latest anchor", () => {
@@ -492,12 +495,12 @@ describe("computeNextWeeklyCadence", () => {
       },
       {
         featuredMatchId: "feat_b",
-        scheduledAt: "2026-08-08T18:00:00.000Z",
+        scheduledAt: "2999-08-08T18:00:00.000Z",
         addedAt: NOW.toISOString(),
       },
     ];
     expect(computeNextWeeklyCadence(slots, NOW)).toBe(
-      "2026-08-15T18:00:00.000Z",
+      "2999-08-15T18:00:00.000Z",
     );
   });
 });
@@ -593,14 +596,14 @@ describe("season:program-week CLI — real subprocess end to end", () => {
     });
 
     it("dry run: picks the archive candidate, computes a passing gate, and writes NOTHING to any store", async () => {
-      const result = runCli(["--at=2026-08-08T18:00:00.000Z", "--json"]);
+      const result = runCli(["--at=2999-08-08T18:00:00.000Z", "--json"]);
       expect(result.code).toBe(0);
       const outcome = JSON.parse(result.stdout);
       expect(outcome.ok).toBe(true);
       expect(outcome.executed).toBe(false);
       expect(outcome.lane).toBe("archive");
       expect(outcome.missing).toEqual([]);
-      expect(outcome.scheduledAt).toBe("2026-08-08T18:00:00.000Z");
+      expect(outcome.scheduledAt).toBe("2999-08-08T18:00:00.000Z");
 
       const matches = await readFeaturedMatchStore(stateDir);
       expect(matches.matches).toEqual([]);
@@ -614,7 +617,7 @@ describe("season:program-week CLI — real subprocess end to end", () => {
 
     it("--execute commits promotion, package, and the season slot", async () => {
       const result = runCli([
-        "--at=2026-08-08T18:00:00.000Z",
+        "--at=2999-08-08T18:00:00.000Z",
         "--execute",
         "--json",
       ]);
@@ -639,7 +642,7 @@ describe("season:program-week CLI — real subprocess end to end", () => {
       const slots: SeasonEventSlot[] = registry.seasons[0]!.eventSlots;
       expect(slots).toHaveLength(1);
       expect(slots[0]!.featuredMatchId).toBe(outcome.matchId);
-      expect(slots[0]!.scheduledAt).toBe("2026-08-08T18:00:00.000Z");
+      expect(slots[0]!.scheduledAt).toBe("2999-08-08T18:00:00.000Z");
 
       expect(outcome.undoCommands).toEqual([
         `npm run season:remove-event -- --season=season_zero --featured=${outcome.matchId}`,
@@ -648,11 +651,11 @@ describe("season:program-week CLI — real subprocess end to end", () => {
 
     it("is idempotent-safe: running --execute twice re-promotes the SAME matchId, not a duplicate", async () => {
       const first = JSON.parse(
-        runCli(["--at=2026-08-08T18:00:00.000Z", "--execute", "--json"]).stdout,
+        runCli(["--at=2999-08-08T18:00:00.000Z", "--execute", "--json"]).stdout,
       );
       expect(first.ok).toBe(true);
       const second = JSON.parse(
-        runCli(["--at=2026-08-15T18:00:00.000Z", "--execute", "--json"]).stdout,
+        runCli(["--at=2999-08-15T18:00:00.000Z", "--execute", "--json"]).stdout,
       );
       expect(second.ok).toBe(true);
       expect(second.matchId).toBe(first.matchId);
@@ -667,7 +670,7 @@ describe("season:program-week CLI — real subprocess end to end", () => {
       await writeRealIdentity(artifactsRoot);
       await writePremiereQueueItem(
         path.join(queueRoot, "ready"),
-        "20260801T000000Z-run1",
+        "29990801T000000Z-run1",
         "ereq_premiere1",
       );
       await writeSeasonRegistry(path.join(seasonDir, "seasons.json"), [
@@ -676,7 +679,7 @@ describe("season:program-week CLI — real subprocess end to end", () => {
     });
 
     it("dry run: schedules+publishes+packages in-memory only, gate passes, nothing written", async () => {
-      const result = runCli(["--at=2026-08-08T18:00:00.000Z", "--json"]);
+      const result = runCli(["--at=2999-08-08T18:00:00.000Z", "--json"]);
       expect(result.code).toBe(0);
       const outcome = JSON.parse(result.stdout);
       expect(outcome.ok).toBe(true);
@@ -694,7 +697,7 @@ describe("season:program-week CLI — real subprocess end to end", () => {
 
     it("--execute commits schedule -> publish -> package -> season:add-event for the premiere lane", async () => {
       const result = runCli([
-        "--at=2026-08-08T18:00:00.000Z",
+        "--at=2999-08-08T18:00:00.000Z",
         "--execute",
         "--json",
       ]);
@@ -739,18 +742,18 @@ describe("season:program-week CLI — real subprocess end to end", () => {
     it("--episode overrides auto-selection to a specific candidate", async () => {
       await writePremiereQueueItem(
         path.join(queueRoot, "ready"),
-        "20260801T000000Z-run2",
+        "29990801T000000Z-run2",
         "ereq_premiere2",
       );
       const result = runCli([
-        "--episode=20260801T000000Z-run2",
-        "--at=2026-08-08T18:00:00.000Z",
+        "--episode=29990801T000000Z-run2",
+        "--at=2999-08-08T18:00:00.000Z",
         "--json",
       ]);
       expect(result.code).toBe(0);
       const outcome = JSON.parse(result.stdout);
       expect(outcome.ok).toBe(true);
-      expect(outcome.episodeRef).toBe("20260801T000000Z-run2");
+      expect(outcome.episodeRef).toBe("29990801T000000Z-run2");
     });
   });
 
@@ -760,7 +763,7 @@ describe("season:program-week CLI — real subprocess end to end", () => {
       // gate must fail on participant_identity_unresolved.
       await writePremiereQueueItem(
         path.join(queueRoot, "ready"),
-        "20260801T000000Z-run1",
+        "29990801T000000Z-run1",
         "ereq_premiere1",
       );
       await writeSeasonRegistry(path.join(seasonDir, "seasons.json"), [
@@ -768,7 +771,7 @@ describe("season:program-week CLI — real subprocess end to end", () => {
       ]);
 
       const dryRun = JSON.parse(
-        runCli(["--at=2026-08-08T18:00:00.000Z", "--json"]).stdout,
+        runCli(["--at=2999-08-08T18:00:00.000Z", "--json"]).stdout,
       );
       expect(dryRun.ok).toBe(false);
       expect(dryRun.reason).toBe("gate_failed");
@@ -784,7 +787,7 @@ describe("season:program-week CLI — real subprocess end to end", () => {
       expect(matchesAfterDryRun.matches).toEqual([]);
 
       const executed = JSON.parse(
-        runCli(["--at=2026-08-08T18:00:00.000Z", "--execute", "--json"]).stdout,
+        runCli(["--at=2999-08-08T18:00:00.000Z", "--execute", "--json"]).stdout,
       );
       expect(executed.ok).toBe(false);
       expect(executed.reason).toBe("gate_failed");
