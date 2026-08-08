@@ -3,6 +3,8 @@ WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev
 COPY llm-player.mjs starter-player.mjs ./
+ARG PROXYWAR_PROMPT_HARDENING=0
+ENV PROXYWAR_PROMPT_HARDENING=${PROXYWAR_PROMPT_HARDENING}
 # Default is the LLM agent. launch.sh (or your upload --run) can point at
 # /app/starter-player.mjs instead for the no-LLM rule agent.
 CMD ["node", "/app/llm-player.mjs"]
