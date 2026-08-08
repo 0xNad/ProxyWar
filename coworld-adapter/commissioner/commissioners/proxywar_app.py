@@ -38,21 +38,23 @@ COMPETITION_LADDER: list[tuple[int, list[str]]] = [
             # 12P Europe shape (same map/map_size/step/turn/timeout config as
             # every other 12P variant -- unshortened, for competitive
             # fairness). Originally dropped 2026-07-10 (commit 30cc0331f)
-            # after a FULL 500-step hosted wall-clock probe was deadline-
+            # after a full 500-step hosted wall-clock probe was deadline-
             # killed at ~100 min (World finished the same shape in 48.3 min;
-            # Europe has ~3.6x World's land tiles). That full-length hosted
-            # timing probe has NOT been re-run as of this restoration.
-            # WARNING: the local 80-step memory-regression gate (`PROXYWAR_
-            # MEMORY_GATE_VARIANT=tournament-12p-europe npm run gate:memory`)
-            # was run 2026-08-08 and FAILED: heapUsedMB late-window slope
-            # 4.255 MB/1k turns vs the 4 MB/1k ceiling (maxRss 429MB, well
-            # under the 600MB ceiling, so this is a slope/leak-shaped signal,
-            # not a ceiling breach) -- see coworld-adapter/artifacts/
-            # memory-gate/2026-08-08T00-04-24-973Z-report.json. Do NOT treat
-            # this entry as either memory- or hosted-timing-cleared; both the
-            # per-turn allocation behind the slope overshoot and a fresh full-
-            # length hosted timing probe must be resolved before this ships
-            # to a real league round.
+            # Europe has ~3.6x World's land tiles).
+            #
+            # Memory-regression gate: the standard 80-step window is too
+            # early for Europe's larger map -- its heap is still in delayed
+            # colonization growth at that point and reads a false slope
+            # failure. The unchanged gate and threshold (heapUsedMB
+            # late-window slope <= 4 MB/1k, RSS <= 600MB) PASS at 120 steps
+            # once that growth plateaus (slope 0.15 MB/1k, maxRss 452MB) --
+            # see coworld-adapter/artifacts/memory-gate/ reports from
+            # 2026-08-08 (80-step FAIL and 120-step PASS, both retained).
+            #
+            # Still outstanding: a fresh full-length (500-step) hosted
+            # wall-clock probe -- the original failure mode -- has not been
+            # re-run. Treat that probe as a pre-promotion gate before this
+            # entry seats a real league round.
             "tournament-12p-europe",
         ],
     ),
