@@ -90,3 +90,23 @@ one more explicit output path; the generator writes the matching manifest with
 `PROXYWAR_TUNE_STRUCTURED_DEALS` removed, and that generated manifest must be
 the manifest argument to `coworld run-episode`. Do not label a deal-enabled
 game as a true OFF arm.
+
+For the repeated internal evidence gate, run the host-side matched matrix. It
+uses the same production episode runner and websocket protocol without Docker,
+crosses three explicit seeds, two maps, all four fairness spawn rotations, and
+the OFF / enabled-but-ignored / active arms, and checkpoints every cell so an
+interrupted run can resume from the same output directory:
+
+```sh
+node coworld-adapter/testing/run-social-matrix.mjs
+```
+
+The default is 72 episodes. `matrix-report.json` preserves per-run artifact
+paths and SHA-256 hashes; `matrix-report.md` reports opportunity denominators,
+selected deal actions, finalized obligation outcomes, fallback counts, and the
+matched OFF-versus-ignored non-interference check. `moot` and `unverified`
+obligations never enter the commitment reliability denominator, and a policy
+that never accepts a commitment receives no reliability estimate rather than a
+perfect score. For a bounded smoke, override comma-separated axes with
+`PROXYWAR_SOCIAL_MATRIX_SEEDS`, `PROXYWAR_SOCIAL_MATRIX_MAPS`,
+`PROXYWAR_SOCIAL_MATRIX_EPISODES`, and `PROXYWAR_SOCIAL_MATRIX_ARMS`.
