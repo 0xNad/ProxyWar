@@ -525,7 +525,7 @@ function matrixMarkdown(report) {
     "## Construct gate",
     "",
     `Status: ${report.commitmentConstruct.status}; pass=${report.commitmentConstruct.passed}.`,
-    `Complete matrix=${report.commitmentConstruct.completeMatrix}; healthy decisions=${report.commitmentConstruct.healthyRuns}; seed/game provenance=${report.commitmentConstruct.provenanceComplete}; non-interference=${report.commitmentConstruct.nonInterferencePass}; abstention not rewarded=${report.commitmentConstruct.abstentionNotRewarded}.`,
+    `Complete matrix=${report.commitmentConstruct.completeMatrix}; healthy decisions=${report.commitmentConstruct.healthyRuns}; seed/game provenance=${report.commitmentConstruct.provenanceComplete}; enabled ledgers finalized=${report.commitmentConstruct.enabledLedgersFinalized}; no pending obligations=${report.commitmentConstruct.noPendingObligations}; non-interference=${report.commitmentConstruct.nonInterferencePass}; abstention not rewarded=${report.commitmentConstruct.abstentionNotRewarded}.`,
     "",
   );
   for (const profile of ["keeper", "defector"]) {

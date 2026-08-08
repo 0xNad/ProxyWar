@@ -415,6 +415,17 @@ export function evaluateCommitmentConstruct(runs, aggregate) {
       run.resultSeed === run.seed &&
       run.gameID === expectedSocialGameID(run.seed),
   );
+  const enabledRuns = runs.filter((run) => run.arm !== "off");
+  const enabledLedgersFinalized =
+    enabledRuns.length === 48 &&
+    enabledRuns.every(
+      (run) => run.ledgerPresent === true && run.ledgerFinalized === true,
+    );
+  const noPendingObligations = enabledRuns.every((run) =>
+    SOCIAL_MATRIX_PROFILES.every(
+      (profile) => run.byProfile[profile].obligations.pending === 0,
+    ),
+  );
   const abstentionNotRewarded = ["skeptic", "deal-blind"].every(
     (profile) => summary.byProfile[profile].commitmentReliability === null,
   );
@@ -422,6 +433,8 @@ export function evaluateCommitmentConstruct(runs, aggregate) {
     completeMatrix &&
     healthyRuns &&
     provenanceComplete &&
+    enabledLedgersFinalized &&
+    noPendingObligations &&
     summary.nonInterference.passed &&
     summary.nonInterference.completeCells === 24 &&
     summary.nonInterference.identicalCells === 24 &&
@@ -444,6 +457,8 @@ export function evaluateCommitmentConstruct(runs, aggregate) {
     completeMatrix,
     healthyRuns,
     provenanceComplete,
+    enabledLedgersFinalized,
+    noPendingObligations,
     nonInterferencePass: summary.nonInterference.passed,
     abstentionNotRewarded,
     policies,

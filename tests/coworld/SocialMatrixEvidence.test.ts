@@ -104,9 +104,14 @@ async function completeMatrix(options?: {
             accepted_decision_count: 1,
           },
         };
-        for (const arm of ["off", "ignored"] as const) {
-          runs.push(summarizeSocialRun({ ...base, arm, ledger: null }));
-        }
+        runs.push(summarizeSocialRun({ ...base, arm: "off", ledger: null }));
+        runs.push(
+          summarizeSocialRun({
+            ...base,
+            arm: "ignored",
+            ledger: { finalizedAtStep: 29, events: [], deals: [] },
+          }),
+        );
         runs.push(
           summarizeSocialRun({
             ...base,
@@ -317,6 +322,28 @@ describe("social matrix evidence", () => {
       reliabilityPass: true,
       overallReliabilityPass: false,
     });
+    expect(construct.passed).toBe(false);
+  });
+
+  it("requires finalized ledgers for both enabled arms", async () => {
+    const { aggregateSocialMatrix } = await evidenceModule();
+    for (const arm of ["active", "ignored"]) {
+      const runs = await completeMatrix();
+      const run = runs.find((candidate) => candidate.arm === arm)!;
+      run.ledgerFinalized = false;
+      const construct = aggregateSocialMatrix(runs).commitmentConstruct;
+      expect(construct.enabledLedgersFinalized).toBe(false);
+      expect(construct.passed).toBe(false);
+    }
+  });
+
+  it("rejects any pending obligation in an enabled-arm ledger", async () => {
+    const { aggregateSocialMatrix } = await evidenceModule();
+    const runs = await completeMatrix();
+    const active = runs.find((run) => run.arm === "active")!;
+    active.byProfile.keeper.obligations.pending = 1;
+    const construct = aggregateSocialMatrix(runs).commitmentConstruct;
+    expect(construct.noPendingObligations).toBe(false);
     expect(construct.passed).toBe(false);
   });
 });

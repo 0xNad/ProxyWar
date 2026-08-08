@@ -40,9 +40,9 @@ through the authoritative deterministic game identity and repeated in
 
 The retained final report is
 `coworld-adapter/artifacts/social-matrix/2026-08-08-full-v5/matrix-report.json`,
-re-aggregated through the hardened gate at `2026-08-08T19:41:34.718Z`. Its
+re-aggregated through the hardened gate at `2026-08-08T19:45:09.637Z`. Its
 SHA-256 is
-`eb489f4ece9de582024dea8d212dd22ab25ac34c371fcea980612f66b8dcc225`.
+`26047c92735076c45ab333f7736908bc5cf875a7d0b83824fb8f762c1ba8e3f2`.
 All 408 non-null per-run artifact hashes were recomputed successfully, and every
 derived run summary was rebuilt from the verified config, results, replay,
 decision, telemetry, and ledger artifacts before aggregation. Across the 72
@@ -66,6 +66,7 @@ The frozen gate passed every required condition:
   rotation;
 - skeptic and deal-blind remain `null`, not perfect, because they accepted no
   obligations;
+- all 48 enabled-arm ledgers are present and finalized;
 - no pending obligation survives finalized ledgers.
 
 Reliability is:
@@ -103,19 +104,22 @@ artifact hashes, and seed-derived identities are valid, but found that the
 first reusable evaluator could pass a malformed 72-row input containing
 duplicate/missing cells or empty game IDs. It also enforced reliability on
 held-out slices but not overall, trusted cached summary hashes without
-recomputing them or rejecting null hashes for required artifacts, and did not
-rebuild the derived run summary from those verified raw artifacts.
+recomputing them or rejecting null hashes for required artifacts, did not
+rebuild the derived run summary from those verified raw artifacts, and did not
+make finalized enabled ledgers or zero pending obligations conditions of a
+passing construct.
 
 The gate was repaired before merge. It now requires the exact unique Cartesian
 set, exactly one OFF and ignored run in each of 24 pairs, the expected game ID
 for each seed, complete cache coordinates and recomputed required artifact
 hashes, raw-artifact parsing and derived-summary reconstruction, replay artifact
-path binding, duplicate-free axes, and both overall and held-out reliability
-thresholds. The original retained runs were then re-aggregated through that
-hardened gate; no episode was rerun and no result changed. Adversarial
-duplicate-cell, empty-ID, overall-threshold, duplicate-axis, forged-summary,
-config/result/replay mismatch, null-hash, and tampered-cache cases are
-regression tested.
+path binding, duplicate-free axes, finalized active/ignored ledgers, zero
+pending obligations, and both overall and held-out reliability thresholds. The
+original retained runs were then re-aggregated through that hardened gate; no
+episode was rerun and no result changed. Adversarial duplicate-cell, empty-ID,
+overall-threshold, duplicate-axis, forged-summary, config/result/replay
+mismatch, null-hash, tampered-cache, unfinalized-ledger, and pending-obligation
+cases are regression tested.
 
 ## Contrary evidence retained
 
