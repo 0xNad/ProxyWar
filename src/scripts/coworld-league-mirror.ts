@@ -504,7 +504,9 @@ async function ensureEpisodeReplayCached(
 // Bump when bundle contents change shape so existing directories regenerate
 // in place on the next sync (files are overwritten, never deleted).
 // v4 adds the finalized structured-deal ledger to mirrored run bundles.
-const bundleVersion = "4";
+// v5 regenerates replay-ui aggregates from the public match summary when the
+// privacy-safe hosted replay correctly omits private decisions.jsonl.
+const bundleVersion = "5";
 
 async function unpackEpisodeRunDir(
   replay: ParsedHostedReplay,

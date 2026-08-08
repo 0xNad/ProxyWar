@@ -3,6 +3,7 @@ import {
   loadAiLeagueReplayDetails,
   type AiLeagueReplayDetails,
 } from "../../src/client/AiLeagueReplayArtifacts";
+import { buildCoworldReplayUiArtifact } from "../../src/server/agents/CoworldLeagueMirrorCore";
 
 function jsonResponse(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), {
@@ -160,6 +161,90 @@ describe("AiLeagueReplayArtifacts", () => {
 
     expect(details.recentDecisions).toEqual([]);
     expect(details.summary).toMatchObject({ actionCounts: { attack: 1 } });
+  });
+
+  it("does not overwrite truthful match-summary counts when replay UI aggregate evidence is unavailable", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/replay-ui.json")) {
+        return jsonResponse({
+          version: 1,
+          aggregateSource: "unavailable",
+          decisionCount: 0,
+          rejectedCount: 0,
+          fallbackCount: 0,
+          actionCounts: {},
+          recentDecisions: [],
+          artifacts: {
+            visualReport: false,
+            spectatorTelemetry: false,
+            decisions: false,
+            summary: false,
+          },
+        });
+      }
+      if (url.endsWith("/match-summary.json")) {
+        return jsonResponse({
+          decisionCount: 6,
+          rejectedCount: 1,
+          fallbackCount: 2,
+          actionCounts: { spawn: 2, attack: 4 },
+        });
+      }
+      return new Response(null, { status: 404 });
+    });
+
+    const details = await loadAiLeagueReplayDetails("/runs/privacy-safe", {
+      fetchImpl,
+    });
+
+    expect(details.summary).toMatchObject({
+      decisionCount: 6,
+      rejectedCount: 1,
+      fallbackCount: 2,
+      actionCounts: { spawn: 2, attack: 4 },
+    });
+    expect(details.recentDecisions).toEqual([]);
+  });
+
+  it("preserves exact sanitized Coworld aggregate truth through mirror projection and client parsing", async () => {
+    const summary = {
+      decisionCount: 6,
+      rejectedCount: 0,
+      fallbackCount: 0,
+      actionCounts: { spawn: 2, attack: 4 },
+    };
+    const publicInlineArtifacts = {
+      "game-record.json": '{"messages":[]}',
+      "deal-ledger.json": '{"schemaVersion":1,"deals":[],"events":[]}',
+      "match-summary.json": JSON.stringify(summary),
+      "spectator-telemetry.json": '{"version":1,"agents":[],"events":[]}',
+    };
+    const replayUi = buildCoworldReplayUiArtifact(publicInlineArtifacts);
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/replay-ui.json")) return jsonResponse(replayUi);
+      if (url.endsWith("/match-summary.json")) return jsonResponse(summary);
+      if (url.endsWith("/spectator-telemetry.json")) {
+        return jsonResponse({ version: 1, agents: [], events: [] });
+      }
+      return new Response(null, { status: 404 });
+    });
+
+    const details = await loadAiLeagueReplayDetails("/runs/sanitized", {
+      fetchImpl,
+    });
+
+    expect(replayUi).toMatchObject({
+      aggregateSource: "match-summary",
+      ...summary,
+      recentDecisions: [],
+    });
+    expect(details.summary).toMatchObject(summary);
+    expect(details.recentDecisions).toEqual([]);
+    expect(
+      JSON.stringify({ publicInlineArtifacts, replayUi, details }),
+    ).not.toMatch(/decisions\.jsonl|rawLlmPrompt|rawLlmOutput|provider-output/);
   });
 
   it("publishes bounded core details before slow optional telemetry settles", async () => {

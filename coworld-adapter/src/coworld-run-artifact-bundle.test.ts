@@ -2,7 +2,10 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { coworldInlineRunArtifacts } from "./coworld-run-artifact-bundle.ts";
+import {
+  coworldInlineRunArtifacts,
+  coworldPublicReplayPayload,
+} from "./coworld-run-artifact-bundle.ts";
 
 const scratchDirs: string[] = [];
 
@@ -52,7 +55,6 @@ describe("Coworld inline run-artifact bundle", () => {
 
     expect(Object.keys(artifacts)).toEqual([
       "game-record.json",
-      "decisions.jsonl",
       "deal-ledger.json",
       "match-summary.json",
       "spectator-telemetry.json",
@@ -62,18 +64,64 @@ describe("Coworld inline run-artifact bundle", () => {
     );
   });
 
-  it("keeps the deals-off bundle byte-shape unchanged", async () => {
+  it("keeps private decisions server-side when deals are disabled", async () => {
+    const paths = await artifactPaths(false);
     const artifacts = await coworldInlineRunArtifacts({
       gameRecord: { info: { gameID: "NO_DEALS" } },
-      artifacts: await artifactPaths(false),
+      artifacts: paths,
     });
 
     expect(Object.keys(artifacts)).toEqual([
       "game-record.json",
-      "decisions.jsonl",
       "match-summary.json",
       "spectator-telemetry.json",
     ]);
     expect(artifacts).not.toHaveProperty("deal-ledger.json");
+    expect(artifacts).not.toHaveProperty("decisions.jsonl");
+    expect(await fs.readFile(paths.decisionsPath, "utf8")).toBe(
+      '{"sequence":1}\n',
+    );
+  });
+
+  it("strips private and unknown inline artifacts from legacy viewer replays", () => {
+    const projected = coworldPublicReplayPayload({
+      schemaVersion: 1,
+      config: {
+        players: ["one", "two"],
+        tokens: ["private-token-one", "private-token-two"],
+      },
+      inlineRunArtifacts: {
+        "game-record.json": '{"messages":[]}',
+        "deal-ledger.json": '{"deals":[]}',
+        "decisions.jsonl":
+          '{"rawLlmPrompt":"private-prompt","rawLlmOutput":"private-output"}\n',
+        "provider-output.json": '{"completion":"private-provider-output"}',
+      },
+    }) as Record<string, unknown>;
+
+    expect(projected.config).toEqual({
+      players: ["one", "two"],
+      player_count: 2,
+    });
+    expect(projected.inlineRunArtifacts).toEqual({
+      "game-record.json": '{"messages":[]}',
+      "deal-ledger.json": '{"deals":[]}',
+    });
+    expect(JSON.stringify(projected)).not.toContain("private-");
+  });
+
+  it("sanitizes legacy inline artifacts even when the replay has no config", () => {
+    expect(
+      coworldPublicReplayPayload({
+        inlineRunArtifacts: {
+          "match-summary.json": '{"decisionCount":1}',
+          "decisions.jsonl": '{"rawLlmPrompt":"private"}\n',
+        },
+      }),
+    ).toEqual({
+      inlineRunArtifacts: {
+        "match-summary.json": '{"decisionCount":1}',
+      },
+    });
   });
 });
