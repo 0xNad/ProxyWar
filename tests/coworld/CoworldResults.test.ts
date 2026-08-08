@@ -58,10 +58,10 @@ describe("resolveWinnerSlot (Coworld result contract, ADAPTER-02)", () => {
 
   it("credits a Team winner to the on-team slot holding the most tiles", () => {
     expect(
-      resolveWinnerSlot(
-        [p(10, "Red", 4), p(11, "Blue", 9), p(12, "Red", 7)],
-        { type: "team", team: "Red" },
-      ),
+      resolveWinnerSlot([p(10, "Red", 4), p(11, "Blue", 9), p(12, "Red", 7)], {
+        type: "team",
+        team: "Red",
+      }),
     ).toBe(2);
   });
 
@@ -86,14 +86,24 @@ describe("resolveWinnerSlot (Coworld result contract, ADAPTER-02)", () => {
   });
 
   it("credits each of the 4 FFA slots by identity, independent of order", () => {
-    const four = [p(10, null, 5), p(11, null, 5), p(12, null, 5), p(13, null, 5)];
+    const four = [
+      p(10, null, 5),
+      p(11, null, 5),
+      p(12, null, 5),
+      p(13, null, 5),
+    ];
     expect(resolveWinnerSlot(four, { type: "player", id: 10 })).toBe(0);
     expect(resolveWinnerSlot(four, { type: "player", id: 12 })).toBe(2);
     expect(resolveWinnerSlot(four, { type: "player", id: 13 })).toBe(3);
   });
 
   it("never returns a slot outside 0..3 for a 4-player FFA (winner_slot schema max=3)", () => {
-    const four = [p(10, null, 1), p(11, null, 1), p(12, null, 1), p(13, null, 1)];
+    const four = [
+      p(10, null, 1),
+      p(11, null, 1),
+      p(12, null, 1),
+      p(13, null, 1),
+    ];
     for (const w of [10, 11, 12, 13]) {
       const slot = resolveWinnerSlot(four, { type: "player", id: w });
       expect(slot).not.toBeNull();

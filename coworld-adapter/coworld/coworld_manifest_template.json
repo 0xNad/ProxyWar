@@ -1,10 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/Metta-AI/coworld/main/src/coworld/coworld_manifest_schema.json",
-  "tags": [
-    "strategy",
-    "multiplayer",
-    "ai-agents"
-  ],
+  "tags": ["strategy", "multiplayer", "ai-agents"],
   "game": {
     "name": "proxywar",
     "description": "Hosted Proxy War Coworld adapter that preserves the LegalAction.id decision path.",
@@ -144,10 +140,7 @@
       ],
       "properties": {
         "seed": {
-          "type": [
-            "integer",
-            "null"
-          ],
+          "type": ["integer", "null"],
           "minimum": 0,
           "maximum": 11881375
         },
@@ -263,10 +256,7 @@
     {
       "type": "player",
       "image": "{{GAME_IMAGE}}",
-      "run": [
-        "node",
-        "/app/integration/src/starter-player.mjs"
-      ],
+      "run": ["node", "/app/integration/src/starter-player.mjs"],
       "env": {},
       "id": "proxywar-starter-websocket",
       "name": "Proxy War Starter Websocket Player",

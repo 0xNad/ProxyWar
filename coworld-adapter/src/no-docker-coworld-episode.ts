@@ -14,7 +14,6 @@ import {
   type CoworldAppShellRoute,
 } from "./coworld-appshell.ts";
 import { episodeIndexFromConfig } from "./coworld-episode-index.ts";
-import { coworldEpisodeIdentity } from "./coworld-seed.ts";
 import {
   coworldResults,
   resolveWinnerSlot,
@@ -23,6 +22,7 @@ import {
 } from "./coworld-results.ts";
 import { coworldInlineRunArtifacts } from "./coworld-run-artifact-bundle.ts";
 import { competitiveSeatSpecs } from "./coworld-seat-specs.ts";
+import { coworldEpisodeIdentity } from "./coworld-seed.ts";
 import { coworldPublicRunArtifacts } from "./proxywar-public-run-artifacts.ts";
 
 const localRoot = path.resolve(
