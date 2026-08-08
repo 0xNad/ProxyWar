@@ -214,6 +214,16 @@ export default defineConfig(({ mode }) => {
       globals: true,
       environment: "jsdom",
       setupFiles: "./tests/setup.ts",
+      alias: {
+        // The exported Coworld starter owns this runtime dependency in its
+        // nested package.json. Root CI intentionally installs only the root
+        // lockfile, so runtime tests inject a fake client and resolve the
+        // otherwise-unused SDK import to this test-only stub.
+        "@anthropic-ai/bedrock-sdk": path.resolve(
+          __dirname,
+          "tests/coworld/fixtures/AnthropicBedrockTestStub.ts",
+        ),
+      },
       // vitest REPLACES its default `exclude` when this is set, so the
       // defaults (node_modules, dist, …) are restated here, plus artifacts/
       // and outputs/ so archived test copies under artifacts/ (pre-rename

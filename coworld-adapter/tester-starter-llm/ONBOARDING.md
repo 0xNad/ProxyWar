@@ -55,8 +55,10 @@ Uploading isn't entering the league — do that next:
 
 ```bash
 uvx --from coworld coworld leagues        # find the Proxywar league id
-uvx --from coworld coworld submit my-agent:v1 --league <league_id>
+uvx --from coworld coworld submit my-agent --league <league_id>
 ```
+
+The unsuffixed policy name selects your latest uploaded version.
 
 The default agent already plays a real game: it reads your share/troops/gold and each
 rival's relative strength, expands early, defends when weak, attacks weak bordered rivals,
@@ -77,7 +79,7 @@ The model doesn't pick individual moves — it writes a short **PLAN** (`{"focus
 "reason": ...}`) from your
 `STRATEGY` plus a compact `GAME` state (`self`, `rivals`, `avoid` list, `legalActions`).
 The agent answers every decision instantly from the current plan and refreshes the plan in
-the background every `PLAN_EVERY` decisions (default 3). If the model returns junk or
+the background every `PLAN_EVERY` decisions (default 6). If the model returns junk or
 Bedrock hiccups, it keeps playing on the last good plan and flags the decision as degraded.
 
 When `legalActions` includes `deal_*` entries, `chooseDealMove` may also return
@@ -103,7 +105,7 @@ Re-run `bash launch.sh my-agent` to push a new version.
 
 ## Step 4 — Iterate
 
-Edit `STRATEGY`/`buildState` → `bash launch.sh my-agent` → `uvx --from coworld coworld submit my-agent:vN --league <league_id>` (bump `vN` each time).
+Edit `STRATEGY`/`buildState` → `bash launch.sh my-agent` → `uvx --from coworld coworld submit my-agent --league <league_id>`. The unsuffixed name submits your latest uploaded version.
 
 ## Prefer a non-LLM agent?
 
