@@ -63,18 +63,17 @@ over argv and environment. A hosted runtime environment override therefore
 cannot silently turn a keeper into a defector or move a policy between arms.
 
 Use the same four image digests, maps, episode counts, and rotated seat orders
-within an arm. The current adapter always seeds the simulation from the fixed
-game identity `COWRLD01`; its optional config `seed` is not applied and
-`results.json` honestly reports `seed: null`. Until that contract is repaired,
-do not describe the numeric experiment id below as a simulation seed or claim a
-multi-seed experiment. Hosted upload/league submission is an outward action and
-must remain a separately authorized experiment; these files only make the
-policies reproducible and uploadable.
+within an arm. The adapter encodes each explicit `game_config.seed` as the
+authoritative eight-character `GameServer.id`; `results.json` records both the
+exact integer seed and derived game identity. A request that omits `seed`
+retains legacy `COWRLD01` and reports `seed: null`. Hosted upload/league
+submission is an outward action and must remain a separately authorized
+experiment; these files only make the policies reproducible and uploadable.
 
 For a bounded, exactly matched local smoke, generate one full Coworld episode
 request per arm. The request freezes the Pangaea variant, roster/seat order,
-fixed runtime game identity, decision-step cap, policy images, and player
-command. The final numeric argument is an audit-only experiment id:
+seed-derived runtime game identity, decision-step cap, policy images, and player
+command. The final numeric argument is the actual simulation seed:
 
 ```sh
 node coworld-adapter/testing/make-social-episode-request.mjs \

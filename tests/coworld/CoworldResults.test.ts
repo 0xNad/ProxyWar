@@ -130,6 +130,7 @@ describe("coworldResults (Coworld results.json contract)", () => {
   it("stamps the authoritative game_id from the caller's game.id, never recomputing it", () => {
     const result = coworldResults({
       gameId: "COWRLD01",
+      seed: null,
       players: [{ name: "Alice" }, { name: "Bob" }],
       finalState: finalState(1),
       records: [],
@@ -139,9 +140,10 @@ describe("coworldResults (Coworld results.json contract)", () => {
     expect(result.game_id).toMatch(/^[A-Za-z0-9]{8}$/);
   });
 
-  it("emits seed: null — no per-episode seed is threaded through the deterministic core", () => {
+  it("emits seed: null for a deliberately seedless episode", () => {
     const result = coworldResults({
       gameId: "COWRLD01",
+      seed: null,
       players: [{ name: "Alice" }, { name: "Bob" }],
       finalState: finalState(null),
       records: [],
@@ -150,9 +152,21 @@ describe("coworldResults (Coworld results.json contract)", () => {
     expect(result.seed).toBeNull();
   });
 
+  it("stamps the exact seed encoded into the authoritative game identity", () => {
+    const result = coworldResults({
+      gameId: "PWAAYDPA",
+      seed: 424242,
+      players: [{ name: "Alice" }, { name: "Bob" }],
+      finalState: finalState(null),
+      records: [],
+    });
+    expect(result).toMatchObject({ game_id: "PWAAYDPA", seed: 424242 });
+  });
+
   it("still scores a decisive winner 1/0 by slot (unchanged by the metadata addition)", () => {
     const result = coworldResults({
       gameId: "COWRLD01",
+      seed: null,
       players: [{ name: "Alice" }, { name: "Bob" }],
       finalState: finalState(1),
       records: [],
@@ -164,6 +178,7 @@ describe("coworldResults (Coworld results.json contract)", () => {
   it("still falls back to tile-share scoring when there is no winner", () => {
     const result = coworldResults({
       gameId: "COWRLD01",
+      seed: null,
       players: [{ name: "Alice" }, { name: "Bob" }],
       finalState: finalState(null, [4, 6]),
       records: [],
@@ -175,6 +190,7 @@ describe("coworldResults (Coworld results.json contract)", () => {
   it("still counts decisions, acceptance, fallback (fallbackUsed OR llmPlannerDegraded), and degraded", () => {
     const result = coworldResults({
       gameId: "COWRLD01",
+      seed: null,
       players: [{ name: "Alice" }, { name: "Bob" }],
       finalState: finalState(1),
       records: [
@@ -193,6 +209,7 @@ describe("coworldResults (Coworld results.json contract)", () => {
   it("still carries per-slot name/score/tiles_owned/is_alive, falling back to finalState username", () => {
     const result = coworldResults({
       gameId: "COWRLD01",
+      seed: null,
       players: [{ name: "Alice" }],
       finalState: finalState(0),
       records: [],

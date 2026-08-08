@@ -92,9 +92,8 @@ export interface CoworldResults {
    *  deterministic simulation RNG via simpleHash(gameID). Always 8
    *  alphanumeric chars, matching results_schema's game_id pattern. */
   readonly game_id: string;
-  /** No per-episode seed is threaded through src/core today — the fixed
-   *  game_id above is the sole determinism input. results_schema allows
-   *  seed to be null; emitting null here is honest, not a fabricated value. */
+  /** Configured episode seed encoded into game_id, or null when the episode
+   *  deliberately used the historical seedless identity. */
   readonly seed: number | null;
   readonly scores: number[];
   readonly winner_slot: number | null;
@@ -122,6 +121,8 @@ export function coworldResults(input: {
    *  caller — never recompute it here, so this stays the single source of
    *  the deterministic match identity. */
   gameId: string;
+  /** Exact configured seed used to derive gameId; null for seedless runs. */
+  seed: number | null;
   players: ReadonlyArray<{ readonly name: string }>;
   finalState: CoworldResultsFinalState;
   records: readonly CoworldDecisionRecord[];
@@ -143,7 +144,7 @@ export function coworldResults(input: {
   });
   return {
     game_id: input.gameId,
-    seed: null,
+    seed: input.seed,
     scores,
     winner_slot,
     turn_count: input.finalState.turnCount,

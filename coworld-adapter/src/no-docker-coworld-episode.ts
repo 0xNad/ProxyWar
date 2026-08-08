@@ -14,6 +14,7 @@ import {
   type CoworldAppShellRoute,
 } from "./coworld-appshell.ts";
 import { episodeIndexFromConfig } from "./coworld-episode-index.ts";
+import { coworldEpisodeIdentity } from "./coworld-seed.ts";
 import {
   coworldResults,
   resolveWinnerSlot,
@@ -97,6 +98,7 @@ export type CoworldConfig = {
   map: string;
   map_size: string;
   difficulty: string;
+  seed?: number;
   replay_tail_turns?: number;
   player_connect_timeout_seconds?: number;
   /**
@@ -841,13 +843,13 @@ async function runProxyWarEpisode(
     maxPlayers: config.tokens.length,
   };
   // NOTE: the 3rd GameServer arg is `createdAt` (a wall-clock game-start
-  // timestamp), NOT the RNG seed. The simulation RNG is seeded from the FIXED
-  // match id "COWRLD01" in GameRunner (simpleHash(gameID)), so the SCORED outcome
-  // and the winner are deterministic given the policies regardless of this
-  // timestamp. (A fixed tiny value would be a footgun for any future code that
-  // calls GameServer.phase(), so use a real now.)
+  // timestamp), NOT the RNG seed. GameRunner seeds the simulation from
+  // simpleHash(gameID), so the adapter encodes an explicit Coworld seed into
+  // the authoritative game identity. Seedless certification runs retain the
+  // historical COWRLD01 identity and report seed:null honestly.
+  const episodeIdentity = coworldEpisodeIdentity(config.seed);
   const game = new modules.GameServer(
-    "COWRLD01",
+    episodeIdentity.gameId,
     log,
     Date.now(),
     {
@@ -1089,6 +1091,7 @@ async function runProxyWarEpisode(
         : JSON.parse(await fs.readFile(artifacts.spectatorReplayPath, "utf8"));
     const results = coworldResults({
       gameId: game.id,
+      seed: episodeIdentity.seed,
       players: config.players,
       finalState,
       records: league.decisionRecords(),
@@ -1409,6 +1412,7 @@ function publicCoworldConfig(config: CoworldConfig): Record<string, unknown> {
     map: config.map,
     map_size: config.map_size,
     difficulty: config.difficulty,
+    seed: config.seed,
     replay_tail_turns: config.replay_tail_turns,
     player_connect_timeout_seconds: config.player_connect_timeout_seconds,
     player_count: config.tokens.length,
