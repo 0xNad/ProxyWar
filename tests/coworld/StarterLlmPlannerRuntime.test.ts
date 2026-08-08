@@ -73,6 +73,8 @@ const previousEnv = {
   wsUrl: process.env.COWORLD_PLAYER_WS_URL,
   model: process.env.BEDROCK_MODEL,
   hardening: process.env.PROXYWAR_PROMPT_HARDENING,
+  promptCache: process.env.PROXYWAR_PROMPT_CACHE,
+  planEvery: process.env.PLAN_EVERY,
 };
 
 function decisionRequest(requestID: string) {
@@ -139,6 +141,8 @@ describe("tester-starter-llm hardened runtime arm", () => {
     process.env.COWORLD_PLAYER_WS_URL = "ws://runtime-test.invalid";
     process.env.BEDROCK_MODEL = "test.sonnet-full";
     process.env.PROXYWAR_PROMPT_HARDENING = "1";
+    process.env.PROXYWAR_PROMPT_CACHE = "0";
+    process.env.PLAN_EVERY = "3";
     logSpy = vi.spyOn(console, "log").mockImplementation((...args) => {
       logLines.push(args.map(String).join(" "));
     });
@@ -167,6 +171,11 @@ describe("tester-starter-llm hardened runtime arm", () => {
     if (previousEnv.hardening === undefined)
       delete process.env.PROXYWAR_PROMPT_HARDENING;
     else process.env.PROXYWAR_PROMPT_HARDENING = previousEnv.hardening;
+    if (previousEnv.promptCache === undefined)
+      delete process.env.PROXYWAR_PROMPT_CACHE;
+    else process.env.PROXYWAR_PROMPT_CACHE = previousEnv.promptCache;
+    if (previousEnv.planEvery === undefined) delete process.env.PLAN_EVERY;
+    else process.env.PLAN_EVERY = previousEnv.planEvery;
   });
 
   it("keeps the full menu, applies a prefixed JSON plan, and emits exact safe usage", async () => {
@@ -240,6 +249,8 @@ describe("tester-starter-llm hardened runtime arm", () => {
       expect.objectContaining({
         event: "response",
         promptVariant: "full-hardened-telemetry-v2",
+        planEvery: 3,
+        promptCache: false,
         model: "test.sonnet-full",
         responseModel: "test.sonnet-full",
         stopReason: "end_turn",

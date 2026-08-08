@@ -105,27 +105,48 @@ describe("tester-starter-llm full-prompt hardening", () => {
       `${extractFunction(source, "buildBedrockRequest")}\nreturn buildBedrockRequest;`,
     )() as (
       model: string,
-      prompt: string,
+      staticPrompt: string,
+      dynamicPrompt: string,
       hardening: boolean,
+      promptCache: boolean,
     ) => Record<string, unknown>;
     const responseText = new Function(
       `${extractFunction(source, "bedrockResponseText")}\nreturn bedrockResponseText;`,
     )() as (response: unknown) => string;
 
-    expect(buildRequest("model", "prompt", false)).toEqual({
+    expect(buildRequest("model", "static\n", "dynamic", false, false)).toEqual({
       model: "model",
       max_tokens: 300,
-      messages: [{ role: "user", content: "prompt" }],
+      messages: [{ role: "user", content: "static\ndynamic" }],
     });
-    expect(buildRequest("model", "prompt", true)).toEqual({
+    expect(buildRequest("model", "static\n", "dynamic", true, false)).toEqual({
       model: "model",
       max_tokens: 500,
-      messages: [{ role: "user", content: "prompt" }],
+      messages: [{ role: "user", content: "static\ndynamic" }],
+    });
+    expect(buildRequest("model", "static\n", "dynamic", true, true)).toEqual({
+      model: "model",
+      max_tokens: 500,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: "static\n",
+              cache_control: { type: "ephemeral" },
+            },
+            { type: "text", text: "dynamic" },
+          ],
+        },
+      ],
     });
     const response = { content: [{ text: '{"focus":"attack"}' }] };
     expect(responseText(response)).toBe('{"focus":"attack"}');
 
     expect(source).toContain("PROXYWAR_PROMPT_HARDENING");
+    expect(source).toContain("PROXYWAR_PROMPT_CACHE");
+    expect(source).toContain('boundedIntegerEnv("PLAN_EVERY", 3, 1, 30)');
     expect(source).not.toContain("PROXYWAR_PROMPT_VARIANT");
     expect(source).toContain("Reply with ONLY JSON:");
     expect(source).toContain(

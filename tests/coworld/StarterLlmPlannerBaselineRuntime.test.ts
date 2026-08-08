@@ -57,6 +57,8 @@ const previousEnv = {
   wsUrl: process.env.COWORLD_PLAYER_WS_URL,
   model: process.env.BEDROCK_MODEL,
   hardening: process.env.PROXYWAR_PROMPT_HARDENING,
+  promptCache: process.env.PROXYWAR_PROMPT_CACHE,
+  planEvery: process.env.PLAN_EVERY,
 };
 
 function decisionRequest(requestID: string) {
@@ -112,6 +114,8 @@ describe("tester-starter-llm baseline runtime arm", () => {
     process.env.COWORLD_PLAYER_WS_URL = "ws://baseline-runtime-test.invalid";
     process.env.BEDROCK_MODEL = "test.sonnet-full";
     process.env.PROXYWAR_PROMPT_HARDENING = "0";
+    process.env.PROXYWAR_PROMPT_CACHE = "0";
+    process.env.PLAN_EVERY = "3";
     logSpy = vi.spyOn(console, "log").mockImplementation((...args) => {
       logLines.push(args.map(String).join(" "));
     });
@@ -134,6 +138,11 @@ describe("tester-starter-llm baseline runtime arm", () => {
     if (previousEnv.hardening === undefined)
       delete process.env.PROXYWAR_PROMPT_HARDENING;
     else process.env.PROXYWAR_PROMPT_HARDENING = previousEnv.hardening;
+    if (previousEnv.promptCache === undefined)
+      delete process.env.PROXYWAR_PROMPT_CACHE;
+    else process.env.PROXYWAR_PROMPT_CACHE = previousEnv.promptCache;
+    if (previousEnv.planEvery === undefined) delete process.env.PLAN_EVERY;
+    else process.env.PLAN_EVERY = previousEnv.planEvery;
   });
 
   it("preserves the full current request behavior and applies an offered action", async () => {

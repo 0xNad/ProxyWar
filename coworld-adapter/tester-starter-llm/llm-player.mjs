@@ -68,7 +68,13 @@ const STRATEGY = [
   "High-risk actions (nukes) are only playable if you include their kind in preferKinds AND name the",
   "victim in target — do both when you mean it.",
 ].join(" ");
-const PLAN_EVERY = Number(process.env.PLAN_EVERY || 3); // refresh the plan every N decisions
+function boundedIntegerEnv(name, fallback, min, max) {
+  const parsed = Number(process.env[name]);
+  return Number.isInteger(parsed) && parsed >= min && parsed <= max
+    ? parsed
+    : fallback;
+}
+const PLAN_EVERY = boundedIntegerEnv("PLAN_EVERY", 3, 1, 30); // refresh the plan every N decisions
 const PLAN_KINDS = [
   "spawn",
   "attack",
@@ -292,9 +298,12 @@ function extractJson(text, repairTruncatedReason = false) {
 }
 
 const PROMPT_HARDENING = process.env.PROXYWAR_PROMPT_HARDENING === "1";
-const PROMPT_VARIANT = PROMPT_HARDENING
-  ? "full-hardened-telemetry-v2"
-  : "full-baseline-telemetry-v1";
+const PROMPT_CACHE = process.env.PROXYWAR_PROMPT_CACHE === "1";
+const PROMPT_VARIANT = PROMPT_CACHE
+  ? "full-hardened-cache-v1"
+  : PROMPT_HARDENING
+    ? "full-hardened-telemetry-v2"
+    : "full-baseline-telemetry-v1";
 const plannerUsageTotals = {
   attempts: 0,
   responses: 0,
@@ -352,6 +361,8 @@ function normalizePlannerUsageEvent(event) {
   const normalized = {
     schemaVersion: 1,
     promptVariant: PROMPT_VARIANT,
+    planEvery: PLAN_EVERY,
+    promptCache: PROMPT_CACHE,
     event: clean(event?.event),
   };
   for (const key of [
@@ -465,11 +476,31 @@ function emitPlannerUsageSummary(reason) {
   emitPlannerUsage(event);
 }
 
-function buildBedrockRequest(model, prompt, hardening) {
+function buildBedrockRequest(
+  model,
+  staticPrompt,
+  dynamicPrompt,
+  hardening,
+  promptCache,
+) {
   return {
     model,
     max_tokens: hardening ? 500 : 300,
-    messages: [{ role: "user", content: prompt }],
+    messages: [
+      {
+        role: "user",
+        content: promptCache
+          ? [
+              {
+                type: "text",
+                text: staticPrompt,
+                cache_control: { type: "ephemeral" },
+              },
+              { type: "text", text: dynamicPrompt },
+            ]
+          : staticPrompt + dynamicPrompt,
+      },
+    ],
   };
 }
 
@@ -479,7 +510,7 @@ function bedrockResponseText(response) {
 
 async function askBedrock(state) {
   if (!bedrock) throw new Error("bedrock client did not initialize");
-  const prompt =
+  const staticPrompt =
     STRATEGY +
     "\n" +
     SECURITY +
@@ -492,9 +523,8 @@ async function askBedrock(state) {
     '>"],' +
     '"target":"<exact rival name to pressure, or null>","avoidTargets":["<rival names not to attack>"],' +
     '"deal":"<accept|decline|null — standing posture for incoming pact offers>",' +
-    '"reason":"<one short sentence>"}\n' +
-    "GAME:\n" +
-    JSON.stringify(state);
+    '"reason":"<one short sentence>"}\n';
+  const dynamicPrompt = "GAME:\n" + JSON.stringify(state);
   const candidates = lockedModel ? [lockedModel] : MODELS;
   let lastErr;
   for (const model of candidates) {
@@ -505,9 +535,17 @@ async function askBedrock(state) {
       // Both A/B arms use this exact source and telemetry. The candidate arm
       // differs only through PROMPT_HARDENING: stricter JSON wording,
       // 500-token headroom, and reason-tail repair. Both arms send one user
-      // message because hosted Sonnet rejects the assistant-prefill form.
+      // message because hosted Sonnet rejects the assistant-prefill form. The
+      // optional cache arm splits the identical text into a static cached block
+      // and one dynamic GAME block; the default stays a byte-identical string.
       const r = await bedrock.messages.create(
-        buildBedrockRequest(model, prompt, PROMPT_HARDENING),
+        buildBedrockRequest(
+          model,
+          staticPrompt,
+          dynamicPrompt,
+          PROMPT_HARDENING,
+          PROMPT_CACHE,
+        ),
       );
       recordPlannerResponse({
         attempt,
