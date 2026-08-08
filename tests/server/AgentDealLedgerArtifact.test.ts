@@ -85,7 +85,7 @@ async function writeRun(
 }
 
 describe("final structured-deal ledger artifact", () => {
-  it("persists force-resolved obligations with stable ids, turns, facts, and separate claims", async () => {
+  it("persists moot force-resolutions with stable ids, turns, facts, and separate claims", async () => {
     const harness = await runAcceptedPact();
     harness.league.finalizeDeals({ turnNumber: 75 });
     const ledger = harness.league.dealLedger();
@@ -127,14 +127,14 @@ describe("final structured-deal ledger artifact", () => {
         obligationID: `obligation:${DEAL_ID}:P_A:non_aggression`,
         obligorPlayerID: "P_A",
         counterpartyPlayerID: "P_B",
-        status: "fulfilled",
+        status: "moot",
         forcedResolution: true,
       },
       {
         obligationID: `obligation:${DEAL_ID}:P_B:non_aggression`,
         obligorPlayerID: "P_B",
         counterpartyPlayerID: "P_A",
-        status: "fulfilled",
+        status: "moot",
         forcedResolution: true,
       },
     ]);

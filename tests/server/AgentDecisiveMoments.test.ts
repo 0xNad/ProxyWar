@@ -7,6 +7,7 @@ import {
 } from "../../src/server/agents/AgentDecisiveMoments";
 import { buildAgentMatchStateSeries } from "../../src/server/agents/AgentMatchStateSeries";
 import type { AgentSpectatorSnapshot } from "../../src/server/agents/AgentSpectatorReplay";
+import type { SpectatorEvent } from "../../src/server/agents/AgentSpectatorTelemetry";
 import {
   buildFixtureSeries,
   FIXTURE_EVENTS,
@@ -20,13 +21,23 @@ import {
  * underlying lead-change/reversal/elimination/swing math a third time.
  */
 
+const CONFIRMED_FIXTURE_EVENTS: SpectatorEvent[] = FIXTURE_EVENTS.map(
+  (event) => ({
+    ...event,
+    evidenceLevel: "confirmed_effect",
+    fallbackUsed: false,
+    llmPlannerDegraded: false,
+    auditStatus: "confirmed",
+  }),
+);
+
 describe("buildAgentDecisiveMoments", () => {
   it("selects between MIN and MAX moments, chronologically ordered, deduplicated across the same real swing", () => {
     const series = buildFixtureSeries();
     const artifact = buildAgentDecisiveMoments({
       runID: "run-fixture",
       series,
-      telemetryEvents: FIXTURE_EVENTS,
+      telemetryEvents: CONFIRMED_FIXTURE_EVENTS,
       totalTurns: 50,
       replaySnapshots: FIXTURE_SNAPSHOTS,
     });
@@ -48,7 +59,7 @@ describe("buildAgentDecisiveMoments", () => {
     const artifact = buildAgentDecisiveMoments({
       runID: "run-fixture",
       series,
-      telemetryEvents: FIXTURE_EVENTS,
+      telemetryEvents: CONFIRMED_FIXTURE_EVENTS,
       totalTurns: 50,
       replaySnapshots: FIXTURE_SNAPSHOTS,
     });
@@ -65,7 +76,7 @@ describe("buildAgentDecisiveMoments", () => {
     const input = {
       runID: "run-fixture",
       series,
-      telemetryEvents: FIXTURE_EVENTS,
+      telemetryEvents: CONFIRMED_FIXTURE_EVENTS,
       totalTurns: 50,
       replaySnapshots: FIXTURE_SNAPSHOTS,
     };
@@ -76,6 +87,147 @@ describe("buildAgentDecisiveMoments", () => {
     expect(first?.moments).toEqual(second?.moments);
     expect(first?.schemaVersion).toEqual(second?.schemaVersion);
     expect(first?.runID).toEqual(second?.runID);
+  });
+
+  it("elevates only clean state-derived deal verdicts and keeps the exact agent claim bound to the server fact", () => {
+    const verdict = {
+      id: "7:700:deal_violated",
+      sequence: 700,
+      turnNumber: 7,
+      kind: "deal_violated",
+      tone: "betrayal",
+      actorAgentID: "agent-p4",
+      actorName: "Delta",
+      targetAgentID: "agent-p1",
+      targetName: "Alpha",
+      message: "VERDICT: Delta violated the pact by attacking Alpha.",
+      publicText: "VERDICT: Delta violated the pact by attacking Alpha.",
+      statedReason: "Alpha became too dangerous to leave alone.",
+      actionKind: "none",
+      actionID: "deal:deal_violated:fixture",
+      evidenceLevel: "state_derived",
+      fallbackUsed: false,
+      llmPlannerDegraded: false,
+      auditStatus: "not_applicable",
+      importance: 96,
+    } satisfies SpectatorEvent;
+    const artifact = buildAgentDecisiveMoments({
+      runID: "run-deal-verdict",
+      series: buildFixtureSeries(),
+      telemetryEvents: [...CONFIRMED_FIXTURE_EVENTS, verdict],
+      totalTurns: 50,
+      replaySnapshots: FIXTURE_SNAPSHOTS,
+    });
+    const moment = artifact?.moments.find(
+      (candidate) => candidate.type === "deal_violated",
+    );
+    expect(moment).toMatchObject({
+      turn: 7,
+      headline: verdict.publicText,
+      involvedAgents: ["Delta", "Alpha"],
+      statedReason: verdict.statedReason,
+    });
+
+    const notVerdicts: SpectatorEvent[] = [
+      { ...verdict, id: "accepted", evidenceLevel: "accepted_action" },
+      { ...verdict, id: "fallback", fallbackUsed: true },
+      { ...verdict, id: "degraded", llmPlannerDegraded: true },
+      {
+        ...verdict,
+        id: "passive-fulfillment",
+        kind: "deal_fulfilled",
+        importance: 62,
+      },
+    ];
+    const filtered = buildAgentDecisiveMoments({
+      runID: "run-filtered-deal-verdicts",
+      series: buildFixtureSeries(),
+      telemetryEvents: [...CONFIRMED_FIXTURE_EVENTS, ...notVerdicts],
+      totalTurns: 50,
+      replaySnapshots: FIXTURE_SNAPSHOTS,
+    });
+    expect(
+      filtered?.moments.some(
+        (candidate) =>
+          candidate.type === "deal_violated" ||
+          candidate.type === "deal_fulfilled",
+      ),
+    ).toBe(false);
+  });
+
+  it("does not turn accepted audit-unknown effects into alliance-betrayal or final-confrontation moments", () => {
+    const unknownBase = {
+      tone: "war",
+      actorAgentID: "agent-p1",
+      actorName: "Alpha",
+      targetAgentID: "agent-p2",
+      targetName: "Bravo",
+      publicText: "Accepted action; effect not observed.",
+      message: "Accepted action; effect not observed.",
+      actionKind: "attack",
+      evidenceLevel: "accepted_action",
+      fallbackUsed: false,
+      llmPlannerDegraded: false,
+      auditStatus: "unknown",
+      auditReason: "effect not observed",
+      importance: 100,
+    } as const;
+    const unknownEffects: SpectatorEvent[] = [
+      {
+        ...unknownBase,
+        id: "unknown-alliance",
+        sequence: 5,
+        turnNumber: 5,
+        kind: "alliance_formed",
+        tone: "pact",
+        actionKind: "alliance_request",
+        actionID: "alliance_request:unknown",
+      },
+      {
+        ...unknownBase,
+        id: "unknown-break",
+        sequence: 35,
+        turnNumber: 35,
+        kind: "alliance_break",
+        tone: "betrayal",
+        actionKind: "break_alliance",
+        actionID: "break_alliance:unknown",
+      },
+      {
+        ...unknownBase,
+        id: "unknown-attack",
+        sequence: 45,
+        turnNumber: 45,
+        kind: "attack",
+        actionID: "attack:unknown",
+      },
+      {
+        ...unknownBase,
+        id: "unknown-nuke",
+        sequence: 48,
+        turnNumber: 48,
+        kind: "nuke",
+        tone: "threat",
+        actionKind: "nuke",
+        actionID: "nuke:unknown",
+      },
+    ];
+    const artifact = buildAgentDecisiveMoments({
+      runID: "run-unconfirmed-effects",
+      series: buildFixtureSeries(),
+      telemetryEvents: unknownEffects,
+      totalTurns: 50,
+      replaySnapshots: FIXTURE_SNAPSHOTS,
+    });
+
+    expect(artifact).not.toBeNull();
+    expect(
+      artifact?.moments.some(
+        (moment) =>
+          moment.type === "alliance_betrayal" ||
+          moment.type === "final_confrontation",
+      ),
+    ).toBe(false);
   });
 
   it("finds a stated reason from the replay's per-snapshot decision log when one exists for an involved agent near the moment turn", () => {

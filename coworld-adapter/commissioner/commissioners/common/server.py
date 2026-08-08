@@ -7,7 +7,6 @@ from typing import Any
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
-from commissioners.common.commissioners import Commissioner
 from commissioners.common.adapters import (
     complete_round_for_round_start,
     describe_division_for_request,
@@ -18,10 +17,11 @@ from commissioners.common.adapters import (
     schedule_episodes_for_round_start,
     schedule_rounds_for_request,
 )
+from commissioners.common.commissioners import Commissioner
 from commissioners.common.protocol import (
     DescribeDivisionRequest,
-    EpisodeCancel,
     EpisodeAccepted,
+    EpisodeCancel,
     EpisodeFailed,
     EpisodeRequest,
     EpisodeResult,
@@ -32,8 +32,8 @@ from commissioners.common.protocol import (
     RoundAbort,
     RoundCompletedRequest,
     RoundStart,
-    ScheduleRoundsRequest,
     ScheduleEpisodes,
+    ScheduleRoundsRequest,
 )
 
 _MIN_EPISODE_DURATION_SECONDS = 5 * 60
@@ -82,21 +82,29 @@ def _configured_episode_timeout_seconds(config: Mapping[str, Any]) -> float | No
     return _positive_number(config.get("player_connect_timeout_seconds"))
 
 
-def _episode_game_config(episode: EpisodeRequest, variants: dict[str, Any]) -> Mapping[str, Any]:
+def _episode_game_config(
+    episode: EpisodeRequest, variants: dict[str, Any]
+) -> Mapping[str, Any]:
     if episode.game_config is not None:
         return episode.game_config
     variant = variants[episode.variant_id]
     return variant.game_config
 
 
-def _episode_duration_limit_seconds(episode: EpisodeRequest, variants: dict[str, Any]) -> float | None:
-    timeout = _configured_episode_timeout_seconds(_episode_game_config(episode, variants))
+def _episode_duration_limit_seconds(
+    episode: EpisodeRequest, variants: dict[str, Any]
+) -> float | None:
+    timeout = _configured_episode_timeout_seconds(
+        _episode_game_config(episode, variants)
+    )
     if timeout is None:
         return None
     return max(_MIN_EPISODE_DURATION_SECONDS, 2 * timeout)
 
 
-def _episode_game_timeout_seconds(episode: EpisodeRequest, variants: dict[str, Any]) -> float | None:
+def _episode_game_timeout_seconds(
+    episode: EpisodeRequest, variants: dict[str, Any]
+) -> float | None:
     return _configured_episode_timeout_seconds(_episode_game_config(episode, variants))
 
 
@@ -154,7 +162,9 @@ def create_app(commissioner: Commissioner) -> FastAPI:
             max_concurrent = getattr(throttle_config, "max_concurrent_episodes", None)
             if not callable(max_concurrent):
                 return len(expected_request_ids) or 1
-            return max_concurrent(_episode_game_timeout_seconds(episode, variants_by_id))
+            return max_concurrent(
+                _episode_game_timeout_seconds(episode, variants_by_id)
+            )
 
         def stagger_seconds(episode: EpisodeRequest) -> float:
             stagger = getattr(throttle_config, "episode_stagger_seconds", None)
@@ -206,7 +216,9 @@ def create_app(commissioner: Commissioner) -> FastAPI:
                 pending_ack_request_ids.add(episode.request_id)
                 schedule_episode_timeout(episode)
 
-        async def send_episode_after_delay(episode: EpisodeRequest, delay_seconds: float) -> None:
+        async def send_episode_after_delay(
+            episode: EpisodeRequest, delay_seconds: float
+        ) -> None:
             if delay_seconds > 0:
                 await asyncio.sleep(delay_seconds)
             if (
@@ -232,54 +244,48 @@ def create_app(commissioner: Commissioner) -> FastAPI:
         async def fill_throttled_episode_window(*, initial: bool = False) -> None:
             if not queued_episodes:
                 return
-            to_send: list[EpisodeRequest] = []
-            while queued_episodes:
-                next_episode = queued_episodes[0]
-                if len(in_flight_request_ids) >= max_in_flight(next_episode):
-                    break
-                episode = queued_episodes.pop(0)
-                # Reserve throttle capacity immediately, but do not call an
-                # episode sent until its stagger delay has elapsed and the
-                # websocket transmission is actually attempted.
-                in_flight_request_ids.add(episode.request_id)
-                to_send.append(episode)
-            if not to_send:
+            next_episode = queued_episodes[0]
+            if len(in_flight_request_ids) >= max_in_flight(next_episode):
                 return
-            interval = stagger_seconds(to_send[0])
-            if interval <= 0:
-                # No staggering: every episode in this window is admitted at
-                # once, so send them as a single ScheduleEpisodes batch --
-                # matching the platform's original (pre-throttle) wire shape
-                # of one message per admitted window, instead of N
-                # back-to-back single-episode messages before any of them
-                # are acknowledged.
-                await _send_episode_batch(
-                    websocket,
-                    send_lock,
-                    to_send,
-                    mark_episode_batch_sent,
-                )
-                return
-            for offset, episode in enumerate(to_send):
-                delay = 0.0 if initial and offset == 0 else interval * offset
-                if delay <= 0:
-                    await send_episode_after_delay(episode, delay)
-                else:
-                    task = asyncio.create_task(send_episode_after_delay(episode, delay))
-                    send_tasks.add(task)
-                    task.add_done_callback(send_tasks.discard)
+            # The dispatch websocket acknowledges each ScheduleEpisodes message
+            # with episodes_accepted / episodes_rejected. Sending messages
+            # back-to-back before an acknowledgement admitted only the first
+            # episode in production, while batching several requests admitted
+            # none. Keep max_in_flight as the concurrency ceiling, but open the
+            # window one acknowledged request at a time.
+            episode = queued_episodes.pop(0)
+            # Reserve capacity immediately, but do not call the request sent or
+            # start its timeout until websocket transmission succeeds.
+            in_flight_request_ids.add(episode.request_id)
+            interval = stagger_seconds(episode)
+            delay = 0.0 if initial else interval
+            if delay <= 0:
+                await send_episode_after_delay(episode, delay)
+            else:
+                task = asyncio.create_task(send_episode_after_delay(episode, delay))
+                send_tasks.add(task)
+                task.add_done_callback(send_tasks.discard)
 
-        async def cancel_episode_after_timeout(request_id: str, timeout_seconds: float) -> None:
+        async def cancel_episode_after_timeout(
+            request_id: str, timeout_seconds: float
+        ) -> None:
             await asyncio.sleep(timeout_seconds)
-            if request_id in results_by_request_id or request_id in failed_by_request_id:
+            if (
+                request_id in results_by_request_id
+                or request_id in failed_by_request_id
+            ):
                 return
             reason = f"Episode job duration exceeded {_duration_text(timeout_seconds)}"
-            failed_by_request_id[request_id] = EpisodeFailed(request_id=request_id, error=reason)
+            failed_by_request_id[request_id] = EpisodeFailed(
+                request_id=request_id, error=reason
+            )
             pending_ack_request_ids.discard(request_id)
             accepted_request_ids.discard(request_id)
             in_flight_request_ids.discard(request_id)
             async with send_lock:
-                await websocket.send_json(EpisodeCancel(request_id=request_id, reason=reason).to_json())
+                await websocket.send_json(
+                    EpisodeCancel(request_id=request_id, reason=reason).to_json()
+                )
             if throttle_enabled():
                 await fill_throttled_episode_window()
             await complete_round_if_settled()
@@ -293,9 +299,15 @@ def create_app(commissioner: Commissioner) -> FastAPI:
                     round_start = RoundStart.model_validate(
                         {key: value for key, value in data.items() if key != "type"}
                     )
-                    schedule = schedule_episodes_for_round_start(commissioner, round_start)
-                    expected_request_ids = {episode.request_id for episode in schedule.episodes}
-                    variants_by_id = {variant.id: variant for variant in round_start.variants}
+                    schedule = schedule_episodes_for_round_start(
+                        commissioner, round_start
+                    )
+                    expected_request_ids = {
+                        episode.request_id for episode in schedule.episodes
+                    }
+                    variants_by_id = {
+                        variant.id: variant for variant in round_start.variants
+                    }
                     if throttle_enabled():
                         queued_episodes = list(schedule.episodes)
                         await fill_throttled_episode_window(initial=True)
@@ -324,51 +336,76 @@ def create_app(commissioner: Commissioner) -> FastAPI:
                     request = ScheduleRoundsRequest.model_validate(
                         {key: value for key, value in data.items() if key != "type"}
                     )
-                    await websocket.send_json(schedule_rounds_for_request(commissioner, request).to_json())
+                    await websocket.send_json(
+                        schedule_rounds_for_request(commissioner, request).to_json()
+                    )
                     continue
 
                 if msg_type == "league_migration_config_request":
                     request = LeagueMigrationConfigRequest.model_validate(
                         {key: value for key, value in data.items() if key != "type"}
                     )
-                    await websocket.send_json(league_migration_config_for_request(commissioner, request).to_json())
+                    await websocket.send_json(
+                        league_migration_config_for_request(
+                            commissioner, request
+                        ).to_json()
+                    )
                     continue
 
                 if msg_type == "league_migration_request":
                     request = LeagueMigrationRequest.model_validate(
                         {key: value for key, value in data.items() if key != "type"}
                     )
-                    await websocket.send_json(migrate_league_for_request(commissioner, request).to_json())
+                    await websocket.send_json(
+                        migrate_league_for_request(commissioner, request).to_json()
+                    )
                     continue
 
                 if msg_type == "rank_division_request":
                     request = RankDivisionRequest.model_validate(
                         {key: value for key, value in data.items() if key != "type"}
                     )
-                    await websocket.send_json(rank_division_for_request(commissioner, request).to_json())
+                    await websocket.send_json(
+                        rank_division_for_request(commissioner, request).to_json()
+                    )
                     continue
 
                 if msg_type == "describe_division_request":
                     request = DescribeDivisionRequest.model_validate(
                         {key: value for key, value in data.items() if key != "type"}
                     )
-                    await websocket.send_json(describe_division_for_request(commissioner, request).to_json())
+                    await websocket.send_json(
+                        describe_division_for_request(commissioner, request).to_json()
+                    )
                     continue
 
                 if msg_type == "round_completed_request":
                     request = RoundCompletedRequest.model_validate(
                         {key: value for key, value in data.items() if key != "type"}
                     )
-                    await websocket.send_json(round_completed_for_request(commissioner, request).to_json())
+                    await websocket.send_json(
+                        round_completed_for_request(commissioner, request).to_json()
+                    )
                     continue
 
                 if msg_type == "episode_result":
                     if round_start is None:
-                        await websocket.close(code=1008, reason="episode_result received before round_start")
+                        await websocket.close(
+                            code=1008,
+                            reason="episode_result received before round_start",
+                        )
                         return
-                    result = EpisodeResult.model_validate({key: value for key, value in data.items() if key != "type"})
-                    if expected_request_ids and result.request_id not in expected_request_ids:
-                        await websocket.close(code=1008, reason=f"unknown episode request id: {result.request_id!r}")
+                    result = EpisodeResult.model_validate(
+                        {key: value for key, value in data.items() if key != "type"}
+                    )
+                    if (
+                        expected_request_ids
+                        and result.request_id not in expected_request_ids
+                    ):
+                        await websocket.close(
+                            code=1008,
+                            reason=f"unknown episode request id: {result.request_id!r}",
+                        )
                         return
                     if not await request_was_sent(result.request_id):
                         await websocket.close(
@@ -376,8 +413,21 @@ def create_app(commissioner: Commissioner) -> FastAPI:
                             reason=f"result for unknown or unsent episode request id: {result.request_id!r}",
                         )
                         return
+                    previous_result = results_by_request_id.get(result.request_id)
+                    if previous_result is not None:
+                        if previous_result == result:
+                            continue
+                        await websocket.close(
+                            code=1008,
+                            reason=f"conflicting duplicate result for episode request id: {result.request_id!r}",
+                        )
+                        return
                     if result.request_id in failed_by_request_id:
-                        continue
+                        await websocket.close(
+                            code=1008,
+                            reason=f"result contradicts prior terminal failure or rejection for episode request id: {result.request_id!r}",
+                        )
+                        return
                     task = cancel_tasks.pop(result.request_id, None)
                     if task is not None:
                         task.cancel()
@@ -386,12 +436,23 @@ def create_app(commissioner: Commissioner) -> FastAPI:
                     in_flight_request_ids.discard(result.request_id)
                     results_by_request_id[result.request_id] = result
                 elif msg_type == "episode_failed":
-                    failed = EpisodeFailed.model_validate({key: value for key, value in data.items() if key != "type"})
+                    failed = EpisodeFailed.model_validate(
+                        {key: value for key, value in data.items() if key != "type"}
+                    )
                     if round_start is None:
-                        await websocket.close(code=1008, reason="episode_failed received before round_start")
+                        await websocket.close(
+                            code=1008,
+                            reason="episode_failed received before round_start",
+                        )
                         return
-                    if expected_request_ids and failed.request_id not in expected_request_ids:
-                        await websocket.close(code=1008, reason=f"unknown episode request id: {failed.request_id!r}")
+                    if (
+                        expected_request_ids
+                        and failed.request_id not in expected_request_ids
+                    ):
+                        await websocket.close(
+                            code=1008,
+                            reason=f"unknown episode request id: {failed.request_id!r}",
+                        )
                         return
                     if not await request_was_sent(failed.request_id):
                         await websocket.close(
@@ -400,7 +461,23 @@ def create_app(commissioner: Commissioner) -> FastAPI:
                         )
                         return
                     if failed.request_id in results_by_request_id:
-                        continue
+                        await websocket.close(
+                            code=1008,
+                            reason=f"failure contradicts prior result for episode request id: {failed.request_id!r}",
+                        )
+                        return
+                    previous_failure = failed_by_request_id.get(failed.request_id)
+                    if previous_failure is not None:
+                        if (
+                            failed.request_id not in rejected_request_ids
+                            and previous_failure == failed
+                        ):
+                            continue
+                        await websocket.close(
+                            code=1008,
+                            reason=f"failure contradicts prior terminal failure or rejection for episode request id: {failed.request_id!r}",
+                        )
+                        return
                     task = cancel_tasks.pop(failed.request_id, None)
                     if task is not None:
                         task.cancel()
@@ -412,8 +489,12 @@ def create_app(commissioner: Commissioner) -> FastAPI:
                     accepted = EpisodeAccepted.model_validate(
                         {key: value for key, value in data.items() if key != "type"}
                     )
+                    newly_accepted_in_flight = False
                     for request_id in accepted.request_ids:
-                        if request_id not in expected_request_ids or not await request_was_sent(request_id):
+                        if (
+                            request_id not in expected_request_ids
+                            or not await request_was_sent(request_id)
+                        ):
                             await websocket.close(
                                 code=1008,
                                 reason=f"accepted unknown or unsent episode request id: {request_id!r}",
@@ -428,16 +509,27 @@ def create_app(commissioner: Commissioner) -> FastAPI:
                         # A terminal result may race ahead of the acknowledgement.
                         # Treat its later acceptance as idempotent rather than
                         # reopening capacity or restarting a timer.
-                        if request_id in results_by_request_id or request_id in failed_by_request_id:
+                        if (
+                            request_id in results_by_request_id
+                            or request_id in failed_by_request_id
+                        ):
                             continue
+                        if request_id not in accepted_request_ids:
+                            newly_accepted_in_flight = True
                         pending_ack_request_ids.discard(request_id)
                         accepted_request_ids.add(request_id)
+                    if not newly_accepted_in_flight:
+                        continue
                 elif msg_type == "episodes_rejected":
                     rejected = EpisodesRejected.model_validate(
                         {key: value for key, value in data.items() if key != "type"}
                     )
+                    rejected_in_flight = False
                     for request_id in rejected.request_ids:
-                        if request_id not in expected_request_ids or not await request_was_sent(request_id):
+                        if (
+                            request_id not in expected_request_ids
+                            or not await request_was_sent(request_id)
+                        ):
                             await websocket.close(
                                 code=1008,
                                 reason=f"rejected unknown or unsent episode request id: {request_id!r}",
@@ -449,26 +541,46 @@ def create_app(commissioner: Commissioner) -> FastAPI:
                                 reason=f"rejected previously accepted episode request id: {request_id!r}",
                             )
                             return
+                        rejection_failure = EpisodeFailed(
+                            request_id=request_id,
+                            error=rejected.errors.get(
+                                request_id, "platform rejected scheduled episode"
+                            ),
+                        )
                         if request_id in rejected_request_ids:
-                            continue
+                            if failed_by_request_id.get(request_id) == rejection_failure:
+                                continue
+                            await websocket.close(
+                                code=1008,
+                                reason=f"conflicting duplicate rejection for episode request id: {request_id!r}",
+                            )
+                            return
+                        if request_id in failed_by_request_id:
+                            await websocket.close(
+                                code=1008,
+                                reason=f"rejection contradicts prior terminal failure for episode request id: {request_id!r}",
+                            )
+                            return
+                        rejected_in_flight = True
                         rejected_request_ids.add(request_id)
                         pending_ack_request_ids.discard(request_id)
                         in_flight_request_ids.discard(request_id)
                         task = cancel_tasks.pop(request_id, None)
                         if task is not None:
                             task.cancel()
-                        failed_by_request_id[request_id] = EpisodeFailed(
-                            request_id=request_id,
-                            error=rejected.errors.get(
-                                request_id, "platform rejected scheduled episode"
-                            ),
-                        )
+                        failed_by_request_id[request_id] = rejection_failure
+                    if not rejected_in_flight:
+                        continue
                 elif msg_type == "round_abort":
-                    RoundAbort.model_validate({key: value for key, value in data.items() if key != "type"})
+                    RoundAbort.model_validate(
+                        {key: value for key, value in data.items() if key != "type"}
+                    )
                     await websocket.close(code=1000)
                     return
                 else:
-                    await websocket.close(code=1008, reason=f"unknown message type: {msg_type!r}")
+                    await websocket.close(
+                        code=1008, reason=f"unknown message type: {msg_type!r}"
+                    )
                     return
 
                 if throttle_enabled():

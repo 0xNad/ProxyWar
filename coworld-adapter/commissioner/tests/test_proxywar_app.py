@@ -3,10 +3,11 @@ import os
 from pathlib import Path
 from uuid import UUID
 
-from anyio import WouldBlock
-from fastapi.testclient import TestClient
 import pytest
 import yaml
+from anyio import WouldBlock
+from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 # Importing commissioners.proxywar_app also constructs the shared FastAPI app,
 # whose default config name is not bundled in this game-specific image.
@@ -45,8 +46,7 @@ QUALIFIER_DIVISION_ID = UUID("00000000-0000-0000-0000-000000000009")
 
 def qualifier_round_start(entrant_count: int = 1) -> RoundStart:
     policy_ids = [
-        UUID(f"00000000-0000-0000-0003-{index:012d}")
-        for index in range(entrant_count)
+        UUID(f"00000000-0000-0000-0003-{index:012d}") for index in range(entrant_count)
     ]
     return RoundStart(
         round_id=UUID("00000000-0000-0000-0000-000000000005"),
@@ -81,16 +81,13 @@ def qualifier_round_start(entrant_count: int = 1) -> RoundStart:
                 game_config={"num_agents": 1},
             )
         ],
-        state={
-            "round_config": {"current_division_id": str(QUALIFIER_DIVISION_ID)}
-        },
+        state={"round_config": {"current_division_id": str(QUALIFIER_DIVISION_ID)}},
     )
 
 
 def competition_round_start(champion_count: int) -> RoundStart:
     policy_ids = [
-        UUID(f"00000000-0000-0000-0001-{index:012d}")
-        for index in range(champion_count)
+        UUID(f"00000000-0000-0000-0001-{index:012d}") for index in range(champion_count)
     ]
     return RoundStart(
         round_id=UUID("00000000-0000-0000-0000-000000000003"),
@@ -278,9 +275,7 @@ def test_competition_ladder_ids_all_exist_in_the_manifest() -> None:
 
     from commissioners.proxywar_app import COMPETITION_LADDER
 
-    manifest_path = (
-        Path(__file__).parents[2] / "coworld" / "coworld_manifest.json"
-    )
+    manifest_path = Path(__file__).parents[2] / "coworld" / "coworld_manifest.json"
     manifest = json.loads(manifest_path.read_text())
     manifest_ids = {variant["id"] for variant in manifest["variants"]}
     for seat_count, pool in COMPETITION_LADDER:
@@ -289,9 +284,7 @@ def test_competition_ladder_ids_all_exist_in_the_manifest() -> None:
                 f"ladder rung {seat_count}p references {variant_id!r} "
                 f"which is not in the manifest"
             )
-            variant = next(
-                v for v in manifest["variants"] if v["id"] == variant_id
-            )
+            variant = next(v for v in manifest["variants"] if v["id"] == variant_id)
             assert variant["game_config"]["num_agents"] == seat_count
 
 
@@ -340,8 +333,7 @@ def test_twelve_seat_pool_includes_europe() -> None:
 
     pool = dict(COMPETITION_LADDER)[12]
     assert "tournament-12p-europe" in pool, (
-        "tournament-12p-europe must stay in the 12P competition pool; "
-        f"saw {pool!r}"
+        f"tournament-12p-europe must stay in the 12P competition pool; saw {pool!r}"
     )
 
 
@@ -352,9 +344,7 @@ def test_tournament_12p_europe_manifest_shape_matches_sibling_12p_variants() -> 
     # Europe a different, unproven ruleset".
     import json
 
-    manifest_path = (
-        Path(__file__).parents[2] / "coworld" / "coworld_manifest.json"
-    )
+    manifest_path = Path(__file__).parents[2] / "coworld" / "coworld_manifest.json"
     manifest = json.loads(manifest_path.read_text())
     variants = {v["id"]: v for v in manifest["variants"]}
 
@@ -397,7 +387,6 @@ def test_competition_ladder_twelve_p_ids_are_unique() -> None:
 
     pool = dict(COMPETITION_LADDER)[12]
     assert len(pool) == len(set(pool)), f"duplicate id in 12P pool: {pool!r}"
-
 
 
 def _with_full_ladder(round_start: RoundStart) -> RoundStart:
@@ -588,21 +577,24 @@ def test_dispatch_acknowledgements_preserve_capacity_and_named_rejections_drain(
         initial_message = websocket.receive_json()
         assert [
             episode["request_id"] for episode in initial_message["episodes"]
-        ] == ["0", "1", "2"]
+        ] == ["0"]
 
-        # Partial acceptance does not free capacity: omitted ids remain sent
-        # and pending acknowledgement rather than being inferred rejected.
+        # Each acknowledgement opens exactly one more request until the
+        # max_in_flight=3 window is full.
         websocket.send_json({"type": "episodes_accepted", "request_ids": ["0"]})
-        with pytest.raises(WouldBlock):
-            websocket.portal.call(websocket._send_rx.receive_nowait)
+        second = websocket.receive_json()
+        assert [episode["request_id"] for episode in second["episodes"]] == ["1"]
+        websocket.send_json({"type": "episodes_accepted", "request_ids": ["1"]})
+        third = websocket.receive_json()
+        assert [episode["request_id"] for episode in third["episodes"]] == ["2"]
 
         # An explicit, named rejection settles only that request and drains
         # exactly one queued replacement into the newly free slot.
         websocket.send_json(
             {
                 "type": "episodes_rejected",
-                "request_ids": ["1"],
-                "errors": {"1": "synthetic platform rejection"},
+                "request_ids": ["2"],
+                "errors": {"2": "synthetic platform rejection"},
             }
         )
         replacement = websocket.receive_json()
@@ -610,23 +602,24 @@ def test_dispatch_acknowledgements_preserve_capacity_and_named_rejections_drain(
             "3"
         ]
 
-        # Duplicate acceptance is idempotent. A terminal failure may also
-        # arrive before its acceptance without violating the loose wire order.
+        # Duplicate acceptance is idempotent. A terminal failure may also be
+        # followed by a late duplicate acknowledgement without reopening the
+        # dispatch window.
         websocket.send_json({"type": "episodes_accepted", "request_ids": ["0"]})
         with pytest.raises(WouldBlock):
             websocket.portal.call(websocket._send_rx.receive_nowait)
         websocket.send_json(
             {
                 "type": "episode_failed",
-                "request_id": "2",
-                "error": "synthetic result-before-ack settlement",
+                "request_id": "1",
+                "error": "synthetic settlement-before-duplicate-ack",
             }
         )
         next_replacement = websocket.receive_json()
         assert [
             episode["request_id"] for episode in next_replacement["episodes"]
         ] == ["4"]
-        websocket.send_json({"type": "episodes_accepted", "request_ids": ["2"]})
+        websocket.send_json({"type": "episodes_accepted", "request_ids": ["1"]})
         with pytest.raises(WouldBlock):
             websocket.portal.call(websocket._send_rx.receive_nowait)
 
@@ -789,6 +782,8 @@ def test_dispatch_rejects_accept_then_reject_contradiction() -> None:
         websocket.send_json(competition_round_start(24).to_json())
         websocket.receive_json()
         websocket.send_json({"type": "episodes_accepted", "request_ids": ["0"]})
+        scheduled = websocket.receive_json()
+        assert [episode["request_id"] for episode in scheduled["episodes"]] == ["1"]
         websocket.send_json(
             {
                 "type": "episodes_rejected",
@@ -802,6 +797,37 @@ def test_dispatch_rejects_accept_then_reject_contradiction() -> None:
         assert "rejected previously accepted episode request id" in close_message["reason"]
 
 
+def test_unthrottled_server_accepts_batch_acknowledgement_and_completes() -> None:
+    round_start = competition_round_start(12)
+    unthrottled = commissioner()
+    unthrottled.dispatch_throttle_config = lambda: None  # type: ignore[method-assign]
+
+    with TestClient(create_app(unthrottled)).websocket_connect(
+        "/round"
+    ) as websocket:
+        websocket.send_json(round_start.to_json())
+        scheduled = websocket.receive_json()
+        request_ids = [
+            episode["request_id"] for episode in scheduled["episodes"]
+        ]
+        assert scheduled["type"] == "schedule_episodes"
+        assert request_ids
+
+        websocket.send_json(
+            {"type": "episodes_accepted", "request_ids": request_ids}
+        )
+        for request_id in request_ids:
+            websocket.send_json(
+                {
+                    "type": "episode_failed",
+                    "request_id": request_id,
+                    "error": "synthetic unthrottled settlement",
+                }
+            )
+        complete = websocket.receive_json()
+        assert complete["type"] == "round_complete"
+
+
 def test_live_17_champion_server_dispatches_three_then_drains_the_queue() -> None:
     round_start = competition_round_start(17)
 
@@ -810,14 +836,29 @@ def test_live_17_champion_server_dispatches_three_then_drains_the_queue() -> Non
     ) as websocket:
         websocket.send_json(round_start.to_json())
 
-        # max_in_flight=3 with zero stagger: the initial window is admitted
-        # as ONE ScheduleEpisodes batch of exactly 3 episodes, not three
-        # separate single-episode messages sent before any are acknowledged.
+        # Open the max_in_flight=3 window one acknowledged request at a time.
+        # Production proved that back-to-back single messages admitted only the
+        # first request, while one three-request batch admitted none.
         initial_message = websocket.receive_json()
         assert initial_message["type"] == "schedule_episodes"
-        assert [
-            episode["request_id"] for episode in initial_message["episodes"]
-        ] == ["0", "1", "2"]
+        assert [episode["request_id"] for episode in initial_message["episodes"]] == [
+            "0"
+        ]
+
+        for accepted_index in range(2):
+            websocket.send_json(
+                {
+                    "type": "episodes_accepted",
+                    "request_ids": [str(accepted_index)],
+                }
+            )
+            next_message = websocket.receive_json()
+            assert next_message["type"] == "schedule_episodes"
+            assert [episode["request_id"] for episode in next_message["episodes"]] == [
+                str(accepted_index + 1)
+            ]
+
+        websocket.send_json({"type": "episodes_accepted", "request_ids": ["2"]})
 
         with pytest.raises(WouldBlock):
             websocket.portal.call(websocket._send_rx.receive_nowait)
@@ -834,9 +875,15 @@ def test_live_17_champion_server_dispatches_three_then_drains_the_queue() -> Non
             assert replacement["type"] == "schedule_episodes"
             # One slot freed -> exactly one replacement episode, still sent
             # as its own single-episode batch.
-            assert [
-                episode["request_id"] for episode in replacement["episodes"]
-            ] == [str(settled_index + 3)]
+            assert [episode["request_id"] for episode in replacement["episodes"]] == [
+                str(settled_index + 3)
+            ]
+            websocket.send_json(
+                {
+                    "type": "episodes_accepted",
+                    "request_ids": [str(settled_index + 3)],
+                }
+            )
 
         with pytest.raises(WouldBlock):
             websocket.portal.call(websocket._send_rx.receive_nowait)
@@ -846,7 +893,194 @@ def test_live_17_champion_server_dispatches_three_then_drains_the_queue() -> Non
         )
 
 
-def test_live_24_champion_round_drains_all_thirteen_episodes_via_batched_windows() -> None:
+@pytest.mark.parametrize("terminal_type", ["episode_result", "episode_failed"])
+def test_duplicate_terminal_message_does_not_reopen_dispatch_capacity(
+    terminal_type: str,
+) -> None:
+    round_start = competition_round_start(17)
+    terminal = (
+        {"type": "episode_result", "request_id": "0", "scores": []}
+        if terminal_type == "episode_result"
+        else {"type": "episode_failed", "request_id": "0", "error": "synthetic"}
+    )
+
+    with TestClient(create_app(commissioner())).websocket_connect(
+        "/round"
+    ) as websocket:
+        websocket.send_json(round_start.to_json())
+        for request_id in ("0", "1", "2"):
+            scheduled = websocket.receive_json()
+            assert [episode["request_id"] for episode in scheduled["episodes"]] == [
+                request_id
+            ]
+            websocket.send_json(
+                {"type": "episodes_accepted", "request_ids": [request_id]}
+            )
+
+        websocket.send_json(terminal)
+        replacement = websocket.receive_json()
+        assert [episode["request_id"] for episode in replacement["episodes"]] == [
+            "3"
+        ]
+        websocket.send_json({"type": "episodes_accepted", "request_ids": ["3"]})
+
+        websocket.send_json(terminal)
+        with pytest.raises(WouldBlock):
+            websocket.portal.call(websocket._send_rx.receive_nowait)
+
+        websocket.send_json({"type": "round_abort", "reason": "duplicate tested"})
+
+
+@pytest.mark.parametrize(
+    "first, second, expected_reason",
+    [
+        (
+            {"type": "episode_result", "request_id": "0", "scores": []},
+            {
+                "type": "episode_result",
+                "request_id": "0",
+                "scores": [],
+                "game_results": {"winner": "different"},
+            },
+            "conflicting duplicate result",
+        ),
+        (
+            {
+                "type": "episode_failed",
+                "request_id": "0",
+                "error": "first failure",
+            },
+            {
+                "type": "episode_failed",
+                "request_id": "0",
+                "error": "different failure",
+            },
+            "failure contradicts prior terminal failure",
+        ),
+        (
+            {"type": "episode_result", "request_id": "0", "scores": []},
+            {
+                "type": "episode_failed",
+                "request_id": "0",
+                "error": "contradiction",
+            },
+            "failure contradicts prior result",
+        ),
+        (
+            {
+                "type": "episode_failed",
+                "request_id": "0",
+                "error": "first failure",
+            },
+            {"type": "episode_result", "request_id": "0", "scores": []},
+            "result contradicts prior terminal failure",
+        ),
+    ],
+)
+def test_conflicting_terminal_messages_close_the_round_socket(
+    first: dict[str, object],
+    second: dict[str, object],
+    expected_reason: str,
+) -> None:
+    with TestClient(create_app(commissioner())).websocket_connect(
+        "/round"
+    ) as websocket:
+        websocket.send_json(competition_round_start(17).to_json())
+        scheduled = websocket.receive_json()
+        assert [episode["request_id"] for episode in scheduled["episodes"]] == [
+            "0"
+        ]
+        websocket.send_json(first)
+        websocket.receive_json()  # replacement request opens the freed slot
+        websocket.send_json(second)
+        close_message = websocket.receive()
+        assert close_message["type"] == "websocket.close"
+        assert close_message["code"] == 1008
+        assert expected_reason in close_message["reason"]
+
+
+def test_result_after_rejection_closes_the_round_socket() -> None:
+    with TestClient(create_app(commissioner())).websocket_connect(
+        "/round"
+    ) as websocket:
+        websocket.send_json(competition_round_start(17).to_json())
+        websocket.receive_json()
+        websocket.send_json(
+            {
+                "type": "episodes_rejected",
+                "request_ids": ["0"],
+                "errors": {"0": "synthetic admission refusal"},
+            }
+        )
+        websocket.receive_json()  # replacement request opens the freed slot
+        websocket.send_json(
+            {"type": "episode_result", "request_id": "0", "scores": []}
+        )
+        close_message = websocket.receive()
+        assert close_message["type"] == "websocket.close"
+        assert close_message["code"] == 1008
+        assert "result contradicts prior terminal failure or rejection" in close_message[
+            "reason"
+        ]
+
+
+def test_conflicting_duplicate_rejection_closes_the_round_socket() -> None:
+    with TestClient(create_app(commissioner())).websocket_connect(
+        "/round"
+    ) as websocket:
+        websocket.send_json(competition_round_start(17).to_json())
+        websocket.receive_json()
+        websocket.send_json(
+            {
+                "type": "episodes_rejected",
+                "request_ids": ["0"],
+                "errors": {"0": "first refusal"},
+            }
+        )
+        websocket.receive_json()  # replacement request opens the freed slot
+        websocket.send_json(
+            {
+                "type": "episodes_rejected",
+                "request_ids": ["0"],
+                "errors": {"0": "different refusal"},
+            }
+        )
+        close_message = websocket.receive()
+        assert close_message["type"] == "websocket.close"
+        assert close_message["code"] == 1008
+        assert "conflicting duplicate rejection" in close_message["reason"]
+
+
+@pytest.mark.parametrize("terminal_type", ["episode_result", "episode_failed"])
+def test_queued_undispatched_terminal_message_is_rejected(
+    terminal_type: str,
+) -> None:
+    round_start = competition_round_start(17)
+    future = (
+        {"type": "episode_result", "request_id": "1", "scores": []}
+        if terminal_type == "episode_result"
+        else {
+            "type": "episode_failed",
+            "request_id": "1",
+            "error": "future synthetic",
+        }
+    )
+
+    with TestClient(create_app(commissioner())).websocket_connect(
+        "/round"
+    ) as websocket:
+        websocket.send_json(round_start.to_json())
+        first = websocket.receive_json()
+        assert [episode["request_id"] for episode in first["episodes"]] == ["0"]
+        websocket.send_json(future)
+        with pytest.raises(WebSocketDisconnect) as closed:
+            websocket.receive_json()
+        assert closed.value.code == 1008
+
+
+def test_live_24_champion_round_drains_all_thirteen_episodes_via_acknowledged_windows() -> (
+    None
+):
     # 24 champions / 12 seats -> 13 episodes (rolling-window coverage),
     # max_in_flight=3 from the live config -- the exact live shape behind
     # the P1 under-dispatch symptom.
@@ -859,9 +1093,24 @@ def test_live_24_champion_round_drains_all_thirteen_episodes_via_batched_windows
 
         initial_message = websocket.receive_json()
         assert initial_message["type"] == "schedule_episodes"
-        assert [
-            episode["request_id"] for episode in initial_message["episodes"]
-        ] == ["0", "1", "2"]
+        assert [episode["request_id"] for episode in initial_message["episodes"]] == [
+            "0"
+        ]
+
+        for accepted_index in range(2):
+            websocket.send_json(
+                {
+                    "type": "episodes_accepted",
+                    "request_ids": [str(accepted_index)],
+                }
+            )
+            next_message = websocket.receive_json()
+            assert next_message["type"] == "schedule_episodes"
+            assert [episode["request_id"] for episode in next_message["episodes"]] == [
+                str(accepted_index + 1)
+            ]
+
+        websocket.send_json({"type": "episodes_accepted", "request_ids": ["2"]})
 
         with pytest.raises(WouldBlock):
             websocket.portal.call(websocket._send_rx.receive_nowait)
@@ -876,9 +1125,15 @@ def test_live_24_champion_round_drains_all_thirteen_episodes_via_batched_windows
             )
             replacement = websocket.receive_json()
             assert replacement["type"] == "schedule_episodes"
-            assert [
-                episode["request_id"] for episode in replacement["episodes"]
-            ] == [str(settled_index + 3)]
+            assert [episode["request_id"] for episode in replacement["episodes"]] == [
+                str(settled_index + 3)
+            ]
+            websocket.send_json(
+                {
+                    "type": "episodes_accepted",
+                    "request_ids": [str(settled_index + 3)],
+                }
+            )
 
         with pytest.raises(WouldBlock):
             websocket.portal.call(websocket._send_rx.receive_nowait)
@@ -903,3 +1158,31 @@ def test_live_24_champion_round_drains_all_thirteen_episodes_via_batched_windows
         )
         complete_message = websocket.receive_json()
         assert complete_message["type"] == "round_complete"
+
+
+def test_rejected_episode_is_recorded_and_dispatch_window_continues() -> None:
+    round_start = competition_round_start(17)
+
+    with TestClient(create_app(commissioner())).websocket_connect(
+        "/round"
+    ) as websocket:
+        websocket.send_json(round_start.to_json())
+        initial_message = websocket.receive_json()
+        assert [episode["request_id"] for episode in initial_message["episodes"]] == [
+            "0"
+        ]
+
+        websocket.send_json(
+            {
+                "type": "episodes_rejected",
+                "request_ids": ["0"],
+                "errors": {"0": "synthetic admission refusal"},
+            }
+        )
+        replacement = websocket.receive_json()
+        assert replacement["type"] == "schedule_episodes"
+        assert [episode["request_id"] for episode in replacement["episodes"]] == ["1"]
+
+        websocket.send_json(
+            {"type": "round_abort", "reason": "synthetic rejection test complete"}
+        )

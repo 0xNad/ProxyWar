@@ -33,6 +33,9 @@ import type { SpectatorEvent } from "./AgentSpectatorTelemetry";
  * the telemetry builder already vetted, or a small factual template built
  * only from real usernames/shares/ranks/turns — never an inferred or
  * embellished claim, matching `AgentMatchRecap.ts`'s own convention.
+ * Confirmed deal fulfillment/violation verdicts may also qualify, but only
+ * when telemetry marks them `state_derived`, non-fallback, non-degraded, and
+ * important enough to represent an immediate consequential effect.
  *
  * Ranked by a shared `importance` score, deduplicated by turn PROXIMITY
  * (two candidates anchored within the same small window collapse to the
@@ -53,9 +56,11 @@ import type { SpectatorEvent } from "./AgentSpectatorTelemetry";
  * `CoworldLeagueMatchNarrativeBackfill.ts`'s
  * `decisiveMomentsNeedGeneration` to re-derive every already-published
  * artifact through the sanitizer, exactly like `AgentMatchRecap.ts`'s own
- * schema-version-triggered regeneration.
+ * schema-version-triggered regeneration. Bumped 2 -> 3 so existing artifacts
+ * are regenerated under the truth contract that alliance betrayal and final
+ * confrontation candidates require `evidenceLevel === "confirmed_effect"`.
  */
-export const DECISIVE_MOMENTS_SCHEMA_VERSION = 2;
+export const DECISIVE_MOMENTS_SCHEMA_VERSION = 3;
 /** Spec-mandated bounds — "exactly three to five... where supported". Fewer than the floor and the whole artifact is omitted (see the module doc); more than the ceiling and only the most important survive. */
 export const MIN_DECISIVE_MOMENTS = 3;
 export const MAX_DECISIVE_MOMENTS = 5;
@@ -65,6 +70,8 @@ export type DecisiveMomentType =
   | "reversal"
   | "elimination"
   | "alliance_betrayal"
+  | "deal_fulfilled"
+  | "deal_violated"
   | "territorial_swing"
   | "final_confrontation";
 
@@ -133,6 +140,8 @@ interface Candidate {
   headline: string;
   involvedAgents: readonly string[];
   importance: number;
+  /** undefined = use the nearby-decision lookup; null = deliberately no claim. */
+  statedReason?: string | null;
 }
 
 function sampleAtOrBefore(
@@ -289,7 +298,8 @@ function finalConfrontationCandidate(
     (event) =>
       event.turnNumber >= windowStart &&
       event.targetAgentID !== null &&
-      (event.kind === "attack" || event.kind === "nuke"),
+      (event.kind === "attack" || event.kind === "nuke") &&
+      event.evidenceLevel === "confirmed_effect",
   );
   if (candidates.length === 0) return null;
   const top = candidates.reduce((best, event) =>
@@ -396,7 +406,15 @@ function candidatesFromTelemetry(
   totalTurns: number,
 ): Candidate[] {
   const candidates: Candidate[] = [];
-  for (const alliance of computeAllianceDurations(series, events)) {
+  const confirmedAllianceEvents = events.filter(
+    (event) =>
+      (event.kind !== "alliance_formed" && event.kind !== "alliance_break") ||
+      event.evidenceLevel === "confirmed_effect",
+  );
+  for (const alliance of computeAllianceDurations(
+    series,
+    confirmedAllianceEvents,
+  )) {
     if (alliance.brokenByBetrayal !== true || alliance.brokenTurn === null)
       continue;
     candidates.push({
@@ -405,6 +423,39 @@ function candidatesFromTelemetry(
       headline: `${alliance.agentAUsername} and ${alliance.agentBUsername}'s alliance ends in betrayal after ${alliance.durationTurns} turns.`,
       involvedAgents: [alliance.agentAUsername, alliance.agentBUsername],
       importance: 95,
+    });
+  }
+  for (const event of events) {
+    if (
+      (event.kind !== "deal_fulfilled" && event.kind !== "deal_violated") ||
+      // A compliance/lifecycle verdict is a server-derived fact. Accepted
+      // deal actions and synthetic presentation events are not verdict proof.
+      event.evidenceLevel !== "state_derived" ||
+      // The match page has no provenance row for decisive moments. Do not
+      // elevate recovered/degraded play into an unlabeled strategy claim.
+      event.fallbackUsed === true ||
+      event.llmPlannerDegraded === true ||
+      // Importance 70 is the compliance layer's boundary for an immediate,
+      // confirmed-effect fulfillment; passive match-end/elapsed covenants are
+      // valid ledger facts but not necessarily decisive match moments.
+      event.importance < 70
+    ) {
+      continue;
+    }
+    candidates.push({
+      turn: event.turnNumber,
+      type: event.kind,
+      headline: event.publicText ?? event.message,
+      involvedAgents: [event.actorName, event.targetName ?? ""].filter(
+        (name) => name.length > 0,
+      ),
+      importance: event.importance,
+      // This claim is bound to the exact referee event. Never substitute a
+      // merely nearby decision when the event carries none.
+      statedReason:
+        typeof event.statedReason === "string"
+          ? sanitizeStatedReason(event.statedReason)
+          : null,
     });
   }
   const finalConfrontation = finalConfrontationCandidate(events, totalTurns);
@@ -480,12 +531,15 @@ export function buildAgentDecisiveMoments(
         beforeState: momentState(beforeSample),
         afterState: momentState(afterSample),
         jumpToReplayTurn: candidate.turn,
-        statedReason: findStatedReason(
-          input.replaySnapshots,
-          involvedAgentIDs,
-          candidate.turn,
-          window,
-        ),
+        statedReason:
+          candidate.statedReason !== undefined
+            ? candidate.statedReason
+            : findStatedReason(
+                input.replaySnapshots,
+                involvedAgentIDs,
+                candidate.turn,
+                window,
+              ),
       };
     })
     .sort((a, b) => a.turn - b.turn);

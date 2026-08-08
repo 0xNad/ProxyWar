@@ -974,6 +974,7 @@ export type AgentDealObligationStatus =
   | "fulfilled"
   | "violated"
   | "expired_unfulfilled"
+  | "unverified"
   | "moot";
 
 export type AgentDealObligationKind =
@@ -1050,7 +1051,7 @@ export interface AgentDealRivalReliabilityView {
   name: string;
   /** Obligations this rival fulfilled as obligor. */
   fulfilled: number;
-  /** Terminal non-moot obligations as obligor (fulfilled + violated + expired_unfulfilled). */
+  /** Terminal, verified non-moot obligations (fulfilled + violated + expired_unfulfilled). */
   terminalNonMoot: number;
   /** fulfilled / terminalNonMoot, rounded to 2 decimals; null with no sample. */
   reliability: number | null;
@@ -1331,6 +1332,8 @@ export interface AgentActionAuditSnapshot {
   outgoingAttackTargetIDs: string[];
   outgoingAttackIDs?: string[];
   outgoingAllianceRequestRecipientIDs: string[];
+  /** Stable core-alliance state at this audit boundary; optional on legacy artifacts. */
+  alliedPlayerIDs?: string[];
   outgoingEmbargoTargetIDs: string[];
   targetPlayerIDs?: string[];
   transportRetreatingUnitIDs?: number[];
