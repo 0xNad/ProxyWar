@@ -1246,3 +1246,58 @@ describe("decisions.jsonl external-seat stamps (economyFacts + structured deals)
     expect(proposeEntry!.dealSeparateSlot).toBe(true);
   });
 });
+
+describe("decisions.jsonl llmPlannerDegraded stamp (per-record degradation)", () => {
+  // coworld-adapter/src/coworld-results.ts's degraded_count/fallback_count
+  // already read record.decisionMetadata.llmPlannerDegraded off the LIVE
+  // in-memory records at episode-run time; this pins that the SAME signal
+  // survives onto the persisted decisions.jsonl artifact.
+  it("hoists decisionMetadata.llmPlannerDegraded onto the entry when true, and omits it (never false) when absent", async () => {
+    const degraded: AgentDecisionRecord = {
+      ...fabricatedRecord({
+        sequence: 1,
+        agentID: "llm-agent-1",
+        playerID: "P_A",
+        username: "Degraded Agent",
+        turnNumber: 5,
+      }),
+      brainType: "external-http",
+      decisionMetadata: { llmPlannerDegraded: true },
+    };
+    const healthy: AgentDecisionRecord = {
+      ...fabricatedRecord({
+        sequence: 2,
+        agentID: "llm-agent-2",
+        playerID: "P_B",
+        username: "Healthy Agent",
+        turnNumber: 5,
+      }),
+      brainType: "external-http",
+    };
+
+    const [degradedEntry, healthyEntry] = await writeAndParseEntries([
+      degraded,
+      healthy,
+    ]);
+    expect(degradedEntry.llmPlannerDegraded).toBe(true);
+    // Absence, not a fabricated `false` — old/never-stamped records must
+    // stay byte-identical to their pre-fix shape.
+    expect("llmPlannerDegraded" in healthyEntry).toBe(false);
+  });
+
+  it("hoists an explicit false the same way fallbackUsed does (typed boolean helper semantics)", async () => {
+    const explicitlyFalse: AgentDecisionRecord = {
+      ...fabricatedRecord({
+        sequence: 1,
+        agentID: "llm-agent-3",
+        playerID: "P_C",
+        username: "Explicit False Agent",
+        turnNumber: 5,
+      }),
+      brainType: "external-http",
+      decisionMetadata: { llmPlannerDegraded: false },
+    };
+    const [entry] = await writeAndParseEntries([explicitlyFalse]);
+    expect(entry.llmPlannerDegraded).toBe(false);
+  });
+});
