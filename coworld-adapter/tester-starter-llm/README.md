@@ -42,8 +42,10 @@ isn't entering the league — do that next:
 
 ```bash
 uvx --from coworld coworld leagues        # find the Proxywar league id
-uvx --from coworld coworld submit my-agent:v1 --league <league_id>
+uvx --from coworld coworld submit my-agent --league <league_id>
 ```
+
+The unsuffixed policy name selects your latest uploaded version.
 
 Preflight only: `bash launch.sh --doctor`. Driving it from a coding agent or CI:
 `bash launch.sh my-agent --yes` auto-approves the safe setup steps.

@@ -206,5 +206,5 @@ cat <<EOF
 Uploading is not the same as entering the league. To enter it:
 
     uvx --from coworld coworld leagues        # find the Proxywar league id
-    uvx --from coworld coworld submit "$NAME:v1" --league <league_id>
+    uvx --from coworld coworld submit "$NAME" --league <league_id>
 EOF

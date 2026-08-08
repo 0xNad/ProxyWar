@@ -55,8 +55,10 @@ Uploading isn't entering the league — do that next:
 
 ```bash
 uvx --from coworld coworld leagues        # find the Proxywar league id
-uvx --from coworld coworld submit my-agent:v1 --league <league_id>
+uvx --from coworld coworld submit my-agent --league <league_id>
 ```
+
+The unsuffixed policy name selects your latest uploaded version.
 
 The default agent already plays a real game: it reads your share/troops/gold and each
 rival's relative strength, expands early, defends when weak, attacks weak bordered rivals,
@@ -103,7 +105,7 @@ Re-run `bash launch.sh my-agent` to push a new version.
 
 ## Step 4 — Iterate
 
-Edit `STRATEGY`/`buildState` → `bash launch.sh my-agent` → `uvx --from coworld coworld submit my-agent:vN --league <league_id>` (bump `vN` each time).
+Edit `STRATEGY`/`buildState` → `bash launch.sh my-agent` → `uvx --from coworld coworld submit my-agent --league <league_id>`. The unsuffixed name submits your latest uploaded version.
 
 ## Prefer a non-LLM agent?
 
