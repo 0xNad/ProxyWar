@@ -8,6 +8,12 @@ const STARTER_FILE = path.join(
   "tester-starter-llm",
   "llm-player.mjs",
 );
+const STARTER_DOCKERFILE = path.join(
+  process.cwd(),
+  "coworld-adapter",
+  "tester-starter-llm",
+  "Dockerfile",
+);
 
 function extractFunction(source: string, name: string): string {
   const start = source.indexOf(`function ${name}(`);
@@ -20,6 +26,14 @@ function extractFunction(source: string, name: string): string {
 }
 
 describe("tester-starter-llm full-prompt hardening", () => {
+  it("ships hardening on while keeping cost experiments opt-in", async () => {
+    const dockerfile = await fs.readFile(STARTER_DOCKERFILE, "utf8");
+
+    expect(dockerfile).toContain("ARG PROXYWAR_PROMPT_HARDENING=1");
+    expect(dockerfile).toContain("ARG PROXYWAR_PROMPT_CACHE=0");
+    expect(dockerfile).toContain("ARG PLAN_EVERY=3");
+  });
+
   it("parses normal JSON and repairs only a truncated final reason", async () => {
     const source = await fs.readFile(STARTER_FILE, "utf8");
     const extractJson = new Function(
