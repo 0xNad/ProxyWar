@@ -576,14 +576,14 @@ def test_live_17_champion_server_dispatches_three_then_drains_the_queue() -> Non
     ) as websocket:
         websocket.send_json(round_start.to_json())
 
-        initial_messages = [websocket.receive_json() for _ in range(3)]
-        assert [message["type"] for message in initial_messages] == [
-            "schedule_episodes"
-        ] * 3
+        # max_in_flight=3 with zero stagger: the initial window is admitted
+        # as ONE ScheduleEpisodes batch of exactly 3 episodes, not three
+        # separate single-episode messages sent before any are acknowledged.
+        initial_message = websocket.receive_json()
+        assert initial_message["type"] == "schedule_episodes"
         assert [
-            message["episodes"][0]["request_id"] for message in initial_messages
+            episode["request_id"] for episode in initial_message["episodes"]
         ] == ["0", "1", "2"]
-        assert all(len(message["episodes"]) == 1 for message in initial_messages)
 
         with pytest.raises(WouldBlock):
             websocket.portal.call(websocket._send_rx.receive_nowait)
@@ -598,9 +598,11 @@ def test_live_17_champion_server_dispatches_three_then_drains_the_queue() -> Non
             )
             replacement = websocket.receive_json()
             assert replacement["type"] == "schedule_episodes"
-            assert replacement["episodes"][0]["request_id"] == str(
-                settled_index + 3
-            )
+            # One slot freed -> exactly one replacement episode, still sent
+            # as its own single-episode batch.
+            assert [
+                episode["request_id"] for episode in replacement["episodes"]
+            ] == [str(settled_index + 3)]
 
         with pytest.raises(WouldBlock):
             websocket.portal.call(websocket._send_rx.receive_nowait)
@@ -608,3 +610,62 @@ def test_live_17_champion_server_dispatches_three_then_drains_the_queue() -> Non
         websocket.send_json(
             {"type": "round_abort", "reason": "synthetic throttle test complete"}
         )
+
+
+def test_live_24_champion_round_drains_all_thirteen_episodes_via_batched_windows() -> None:
+    # 24 champions / 12 seats -> 13 episodes (rolling-window coverage),
+    # max_in_flight=3 from the live config -- the exact live shape behind
+    # the P1 under-dispatch symptom.
+    round_start = competition_round_start(24)
+
+    with TestClient(create_app(commissioner())).websocket_connect(
+        "/round"
+    ) as websocket:
+        websocket.send_json(round_start.to_json())
+
+        initial_message = websocket.receive_json()
+        assert initial_message["type"] == "schedule_episodes"
+        assert [
+            episode["request_id"] for episode in initial_message["episodes"]
+        ] == ["0", "1", "2"]
+
+        with pytest.raises(WouldBlock):
+            websocket.portal.call(websocket._send_rx.receive_nowait)
+
+        for settled_index in range(10):
+            websocket.send_json(
+                {
+                    "type": "episode_failed",
+                    "request_id": str(settled_index),
+                    "error": "synthetic full-drain settlement",
+                }
+            )
+            replacement = websocket.receive_json()
+            assert replacement["type"] == "schedule_episodes"
+            assert [
+                episode["request_id"] for episode in replacement["episodes"]
+            ] == [str(settled_index + 3)]
+
+        with pytest.raises(WouldBlock):
+            websocket.portal.call(websocket._send_rx.receive_nowait)
+
+        for settled_index in range(10, 12):
+            websocket.send_json(
+                {
+                    "type": "episode_failed",
+                    "request_id": str(settled_index),
+                    "error": "synthetic full-drain settlement",
+                }
+            )
+            with pytest.raises(WouldBlock):
+                websocket.portal.call(websocket._send_rx.receive_nowait)
+
+        websocket.send_json(
+            {
+                "type": "episode_failed",
+                "request_id": "12",
+                "error": "synthetic full-drain settlement",
+            }
+        )
+        complete_message = websocket.receive_json()
+        assert complete_message["type"] == "round_complete"

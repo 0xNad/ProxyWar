@@ -203,6 +203,16 @@ def create_app(commissioner: Commissioner) -> FastAPI:
             if not to_send:
                 return
             interval = stagger_seconds(to_send[0])
+            if interval <= 0:
+                # No staggering: every episode in this window is admitted at
+                # once, so send them as a single ScheduleEpisodes batch --
+                # matching the platform's original (pre-throttle) wire shape
+                # of one message per admitted window, instead of N
+                # back-to-back single-episode messages before any of them
+                # are acknowledged.
+                async with send_lock:
+                    await websocket.send_json(ScheduleEpisodes(episodes=to_send).to_json())
+                return
             for offset, episode in enumerate(to_send):
                 delay = 0.0 if initial and offset == 0 else interval * offset
                 if delay <= 0:
