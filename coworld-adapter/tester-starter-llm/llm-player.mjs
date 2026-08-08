@@ -293,7 +293,7 @@ function extractJson(text, repairTruncatedReason = false) {
 
 const PROMPT_HARDENING = process.env.PROXYWAR_PROMPT_HARDENING === "1";
 const PROMPT_VARIANT = PROMPT_HARDENING
-  ? "full-hardened-telemetry-v1"
+  ? "full-hardened-telemetry-v2"
   : "full-baseline-telemetry-v1";
 const plannerUsageTotals = {
   attempts: 0,
@@ -469,18 +469,12 @@ function buildBedrockRequest(model, prompt, hardening) {
   return {
     model,
     max_tokens: hardening ? 500 : 300,
-    messages: hardening
-      ? [
-          { role: "user", content: prompt },
-          { role: "assistant", content: "{" },
-        ]
-      : [{ role: "user", content: prompt }],
+    messages: [{ role: "user", content: prompt }],
   };
 }
 
-function bedrockResponseText(response, hardening) {
-  const text = response?.content?.[0]?.text || "";
-  return hardening ? `{${text}` : text;
+function bedrockResponseText(response) {
+  return response?.content?.[0]?.text || "";
 }
 
 async function askBedrock(state) {
@@ -509,9 +503,9 @@ async function askBedrock(state) {
     const startedAt = Date.now();
     try {
       // Both A/B arms use this exact source and telemetry. The candidate arm
-      // differs only through PROMPT_HARDENING: 500-token headroom, opening-brace
-      // assistant prefill, and reason-tail repair. The baseline preserves the
-      // current 300-token/user-message behavior.
+      // differs only through PROMPT_HARDENING: stricter JSON wording,
+      // 500-token headroom, and reason-tail repair. Both arms send one user
+      // message because hosted Sonnet rejects the assistant-prefill form.
       const r = await bedrock.messages.create(
         buildBedrockRequest(model, prompt, PROMPT_HARDENING),
       );
@@ -526,7 +520,7 @@ async function askBedrock(state) {
       lockedModel = model;
       return {
         attempt,
-        text: bedrockResponseText(r, PROMPT_HARDENING),
+        text: bedrockResponseText(r),
         model,
       };
     } catch (e) {

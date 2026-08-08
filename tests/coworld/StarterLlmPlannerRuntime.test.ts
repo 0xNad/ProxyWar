@@ -55,8 +55,7 @@ const fakeBedrock = {
         content: [
           {
             type: "text",
-            // The player supplied the opening assistant-prefill brace.
-            text: '"focus":"attack","preferKinds":["attack"],"target":"Auri","avoidTargets":[],"deal":null,"reason":"Press the exposed border."}',
+            text: '{"focus":"attack","preferKinds":["attack"],"target":"Auri","avoidTargets":[],"deal":null,"reason":"Press the exposed border."}',
           },
         ],
         usage: {
@@ -192,7 +191,8 @@ describe("tester-starter-llm hardened runtime arm", () => {
     };
     expect(call.model).toBe("test.sonnet-full");
     expect(call.max_tokens).toBe(500);
-    expect(call.messages[1]).toEqual({ role: "assistant", content: "{" });
+    expect(call.messages).toHaveLength(1);
+    expect(call.messages[0].role).toBe("user");
     expect(call.messages[0].content).toContain('"legalActions"');
     expect(call.messages[0].content).toContain("Attack Auri with 40% troops");
     expect(call.messages[0].content).not.toContain('"legalKinds"');
@@ -239,7 +239,7 @@ describe("tester-starter-llm hardened runtime arm", () => {
     expect(usageRecords).toContainEqual(
       expect.objectContaining({
         event: "response",
-        promptVariant: "full-hardened-telemetry-v1",
+        promptVariant: "full-hardened-telemetry-v2",
         model: "test.sonnet-full",
         responseModel: "test.sonnet-full",
         stopReason: "end_turn",

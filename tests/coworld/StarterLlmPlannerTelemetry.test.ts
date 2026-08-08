@@ -110,7 +110,7 @@ describe("tester-starter-llm full-prompt hardening", () => {
     ) => Record<string, unknown>;
     const responseText = new Function(
       `${extractFunction(source, "bedrockResponseText")}\nreturn bedrockResponseText;`,
-    )() as (response: unknown, hardening: boolean) => string;
+    )() as (response: unknown) => string;
 
     expect(buildRequest("model", "prompt", false)).toEqual({
       model: "model",
@@ -120,14 +120,10 @@ describe("tester-starter-llm full-prompt hardening", () => {
     expect(buildRequest("model", "prompt", true)).toEqual({
       model: "model",
       max_tokens: 500,
-      messages: [
-        { role: "user", content: "prompt" },
-        { role: "assistant", content: "{" },
-      ],
+      messages: [{ role: "user", content: "prompt" }],
     });
-    const response = { content: [{ text: '"focus":"attack"}' }] };
-    expect(responseText(response, false)).toBe('"focus":"attack"}');
-    expect(responseText(response, true)).toBe('{"focus":"attack"}');
+    const response = { content: [{ text: '{"focus":"attack"}' }] };
+    expect(responseText(response)).toBe('{"focus":"attack"}');
 
     expect(source).toContain("PROXYWAR_PROMPT_HARDENING");
     expect(source).not.toContain("PROXYWAR_PROMPT_VARIANT");
@@ -143,8 +139,8 @@ describe("tester-starter-llm full-prompt hardening", () => {
     expect(source).toContain("legalActions: legal,");
     expect(source).not.toContain("legalKinds,");
     expect(source).toContain("max_tokens: hardening ? 500 : 300,");
-    expect(source).toContain('{ role: "assistant", content: "{" },');
-    expect(source).toContain("return hardening ? `{${text}` : text;");
+    expect(source).not.toContain('{ role: "assistant", content: "{" },');
+    expect(source).toContain('return response?.content?.[0]?.text || "";');
     expect(source).toContain("PROXYWAR_LLM_USAGE");
     expect(source).toContain('event: "response"');
     expect(source).toContain('event: "plan_result"');

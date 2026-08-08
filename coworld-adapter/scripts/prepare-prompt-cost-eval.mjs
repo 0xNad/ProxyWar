@@ -185,10 +185,10 @@ export function buildPromptCostEvalPlan(input) {
       candidate: {
         policyVersionId: candidatePolicy,
         imageDigest: candidateImageDigest,
-        promptVariant: "full-hardened-telemetry-v1",
+        promptVariant: "full-hardened-telemetry-v2",
         promptHardening: true,
         maxTokens: 500,
-        assistantPrefill: true,
+        assistantPrefill: false,
       },
     },
     seatCount,
