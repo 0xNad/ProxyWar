@@ -3,20 +3,20 @@
 // bg-surface, ...) depend on. Vite only emits a CSS file for an entry that
 // actually imports one; without this, `public.html` gets no
 // `<link rel="stylesheet">` at all and every page renders unstyled.
-import "./styles.css";
 import { analytics } from "./analytics/AnalyticsClient";
 import "./LangSelector";
 import "./publicapp/AboutPage";
 import "./publicapp/AgentProfilePage";
 import "./publicapp/AgentsDirectoryPage";
-import "./publicapp/BuildPage";
 import "./publicapp/BuilderClaimPage";
 import "./publicapp/BuilderDashboardPage";
 import "./publicapp/BuilderProfilePage";
 import "./publicapp/BuildersDirectoryPage";
+import "./publicapp/BuildPage";
 import "./publicapp/LobbyPage";
 import "./publicapp/MatchDetailPage";
 import "./publicapp/WatchPage";
+import "./styles.css";
 
 /**
  * Entry point for the Stage 2 public app (`/`, `/watch`, `/agents`,
@@ -32,8 +32,8 @@ import "./publicapp/WatchPage";
  * `index.html`) references this file instead of `Main.ts`, and
  * `sendPublicAppShellPage` in `ai-agent-demo-server.ts` serves
  * `public.html`'s built output for exactly these routes; every other route
- * (game, `/ai-league-replay/*`, `/premiere/*`, `/bet/*`, `/player/:name`,
- * `/account`, `/trader/:accountId`) is untouched and keeps loading
+ * (game, `/ai-league-replay/*`, `/premiere/*`, `/player/:name`, `/account`)
+ * is untouched and keeps loading
  * `index.html` + `Main.ts` exactly as before.
  *
  * Each public page fully replaces `document.body` on mount (see
@@ -105,9 +105,7 @@ function mount(pathname: string): boolean {
     return true;
   }
   if (pathname === "/claim") {
-    document.body.replaceChildren(
-      document.createElement("builder-claim-page"),
-    );
+    document.body.replaceChildren(document.createElement("builder-claim-page"));
     return true;
   }
   const builderClaimMatch = pathname.match(/^\/claim\/([^/]+)$/);

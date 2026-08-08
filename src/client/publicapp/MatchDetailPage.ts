@@ -861,12 +861,8 @@ export class MatchDetailPage extends LitElement {
   //
   // Pure, evidence-only computation off the already-fetched read model's
   // `matches` array — the same source `AgentProfilePage`'s own recent-
-  // matches section reads, reimplemented here (not imported) because the
-  // only existing recent-form/head-to-head helpers
-  // (`src/client/prediction/wagering/leagueData.ts`'s `recentForm`/
-  // `headToHead`) are wagering-only, keyed by a different `LeagueDataSnapshot`
-  // shape fetched from a different endpoint (`/ai-league-runs/league/data.json`)
-  // this page must not depend on. Skipped entirely (never a fabricated
+  // matches section reads, implemented locally against the public read model.
+  // Skipped entirely (never a fabricated
   // "no history" claim) for a participant with no registered `agentSlug`.
 
   private renderStorylines(

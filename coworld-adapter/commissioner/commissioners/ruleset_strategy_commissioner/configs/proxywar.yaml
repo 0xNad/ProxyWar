@@ -1,11 +1,9 @@
 schedule_interval_minutes: 30
 
-# Competition currently schedules six 12-seat episodes per round. Dispatching
-# all six together asks Coworld to admit 78 Kubernetes pods in one burst; that
-# live shape has coincided with intermittent player_never_started/pod-not-found
-# failures. Keep the schedule unchanged, but reduce the exposure by allowing at
-# most three episodes concurrently. Explicit zero staggering avoids consuming
-# an episode's timeout budget before its request is sent.
+# A 24-entrant, 12-seat competition currently schedules thirteen rolling-window
+# jobs. Reduce admission exposure by allowing at most three episodes
+# concurrently. Explicit zero staggering avoids consuming an episode's timeout
+# budget before its request is sent.
 dispatch_throttle:
   enabled: true
   min_in_flight: 1

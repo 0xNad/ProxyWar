@@ -8,6 +8,7 @@ import {
   buildAgentBehaviorQualityReport,
   writeAgentBehaviorQualityArtifacts,
 } from "./AgentBehaviorQualityReport";
+import type { AgentDealLedgerSnapshot } from "./AgentDealManager";
 import {
   buildAgentDramaReport,
   writeAgentDramaReportArtifacts,
@@ -122,6 +123,11 @@ export interface WriteAgentLeagueRunArtifactsInput {
   startedAt: number;
   completedAt: number;
   records: AgentDecisionRecord[];
+  /**
+   * Final structured-deal ledger. Omit when structured deals were disabled;
+   * an enabled match writes the artifact even when no proposal was made.
+   */
+  dealLedger?: AgentDealLedgerSnapshot;
   roster: AgentRunRosterEntry[];
   finalState?: AgentRunFinalState;
   spectatorReplay?: AgentSpectatorReplay;
@@ -134,6 +140,8 @@ export interface AgentLeagueRunArtifactPaths {
   runID: string;
   directory: string;
   decisionsPath: string;
+  /** Absent when structured deals were disabled for this match. */
+  dealLedgerPath?: string;
   summaryPath: string;
   reportPath: string;
   visualReportPath: string;
@@ -204,6 +212,8 @@ interface DecisionLogEntry {
   selectedLegalActionId: string;
   selectedActionKind: LegalActionKind;
   selectedActionMetadata?: Record<string, string | number | boolean | null>;
+  /** Staged diplomacy-slot evidence, separate from the primary action result. */
+  dealSlotEvidence?: AgentDecisionRecord["dealSlotEvidence"];
   /**
    * Compact economy facts stamped on the record at the decision boundary
    * (PROXYWAR_TUNE_ECONOMY_EVENTS; absent when the flag was off). Copied
@@ -355,6 +365,11 @@ interface PersonalityDiplomacyPressureLogGroup {
 export async function writeAgentLeagueRunArtifacts(
   input: WriteAgentLeagueRunArtifactsInput,
 ): Promise<AgentLeagueRunArtifactPaths> {
+  if (input.dealLedger !== undefined && !input.dealLedger.finalized) {
+    throw new Error(
+      "refusing to write deal-ledger.json before finalizeDeals() completed",
+    );
+  }
   const directory = path.join(
     input.rootDir ?? path.join(process.cwd(), "artifacts", "ai-league-runs"),
     safePathSegment(input.runID),
@@ -362,6 +377,10 @@ export async function writeAgentLeagueRunArtifacts(
   await fs.mkdir(directory, { recursive: true });
 
   const decisionsPath = path.join(directory, "decisions.jsonl");
+  const dealLedgerPath =
+    input.dealLedger === undefined
+      ? undefined
+      : path.join(directory, "deal-ledger.json");
   const summaryPath = path.join(directory, "match-summary.json");
   const reportPath = path.join(directory, "match-report.md");
   const visualReportPath = path.join(directory, "visual-report.html");
@@ -463,6 +482,25 @@ export async function writeAgentLeagueRunArtifacts(
     decisionsPath,
     `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
   );
+  if (dealLedgerPath !== undefined && input.dealLedger !== undefined) {
+    await fs.writeFile(
+      dealLedgerPath,
+      `${JSON.stringify(
+        {
+          schemaVersion: 1,
+          runID: input.runID,
+          matchID: input.matchID,
+          finalizedAtStep: input.dealLedger.finalizedAtStep,
+          finalizedAtTurn: input.dealLedger.finalizedAtTurn,
+          decisionSteps: input.dealLedger.decisionSteps,
+          deals: input.dealLedger.deals,
+          events: input.dealLedger.events,
+        },
+        null,
+        2,
+      )}\n`,
+    );
+  }
   await fs.writeFile(
     spectatorTelemetryPath,
     `${JSON.stringify(spectatorTelemetry, null, 2)}\n`,
@@ -509,6 +547,7 @@ export async function writeAgentLeagueRunArtifacts(
     runID: input.runID,
     directory,
     decisionsPath,
+    ...(dealLedgerPath !== undefined ? { dealLedgerPath } : {}),
     summaryPath,
     reportPath,
     visualReportPath,
@@ -700,6 +739,9 @@ function decisionLogEntry(
     selectedActionKind: record.chosenActionKind,
     ...(record.chosenActionMetadata
       ? { selectedActionMetadata: record.chosenActionMetadata }
+      : {}),
+    ...(record.dealSlotEvidence !== undefined
+      ? { dealSlotEvidence: record.dealSlotEvidence }
       : {}),
     // Economy facts + structured-deal stamps ride the entry verbatim (flag
     // OFF => the record never carried them => keys absent, bytes identical).

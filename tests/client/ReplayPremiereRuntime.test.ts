@@ -350,7 +350,11 @@ describe("ReplayPremiereRuntimeController", () => {
       (_input: RequestInfo | URL, _init?: RequestInit): Promise<Response> =>
         Promise.resolve(
           jsonResponse(
-            { ...sessionResponse("playing"), session: reusedSession, created: false },
+            {
+              ...sessionResponse("playing"),
+              session: reusedSession,
+              created: false,
+            },
             201,
           ),
         ),
@@ -2344,7 +2348,7 @@ describe("ReplayPremiereRuntimeController", () => {
     },
   );
 
-  describe("wagering premiere reveal-delivery race (natural end, checkpoint pauses bypassed)", () => {
+  describe("premiere reveal-delivery race at natural end", () => {
     function resolvedCheckpoint(): ReplayPremiereServiceCheckpoint {
       return {
         ...checkpoint("cp_12345678", 10),
@@ -2364,7 +2368,10 @@ describe("ReplayPremiereRuntimeController", () => {
           heartbeat: vi.fn(
             async (): Promise<ReplayPremiereServiceHeartbeatResponse> => ({
               ...heartbeatResponse("revealed"),
-              checkpoints: [resolvedCheckpoint(), checkpoint("cp_abcdef12", 20)],
+              checkpoints: [
+                resolvedCheckpoint(),
+                checkpoint("cp_abcdef12", 20),
+              ],
             }),
           ),
         },
@@ -2373,10 +2380,9 @@ describe("ReplayPremiereRuntimeController", () => {
       await harness.callbacks.onReady?.(projection("playing"));
       await started;
 
-      // The content-tap's own network state races ahead to "revealed"
-      // (checkpoint pauses are bypassed for wagering premieres, so there is
-      // no final-checkpoint breathing room) while the verified reveal fetch
-      // is still in flight — `isRevealVerificationPending()` becomes true.
+      // The replay pointer races ahead to "revealed" while the verified
+      // reveal fetch is still in flight — `isRevealVerificationPending()`
+      // becomes true.
       await harness.callbacks.onManifest?.(revealedPointer());
       await vi.advanceTimersByTimeAsync(10_000);
 
@@ -2405,7 +2411,10 @@ describe("ReplayPremiereRuntimeController", () => {
           heartbeat: vi.fn(
             async (): Promise<ReplayPremiereServiceHeartbeatResponse> => ({
               ...heartbeatResponse("playing"),
-              checkpoints: [resolvedCheckpoint(), checkpoint("cp_abcdef12", 20)],
+              checkpoints: [
+                resolvedCheckpoint(),
+                checkpoint("cp_abcdef12", 20),
+              ],
             }),
           ),
         },
@@ -3430,17 +3439,10 @@ describe("ReplayPremiereServiceClient", () => {
     client.dispose();
   });
 
-  it("accepts a checkpoint the server closed without ever opening it (wagering bypass — opensAt equals closesAt)", async () => {
-    // Checkpoint pauses are bypassed entirely for wagering premieres — the
-    // server closes a checkpoint the instant its sequence is reached rather
-    // than ever opening a real voting window, reporting `opensAt ===
-    // closesAt` (see `ReplayPremiereInteractions.ts`'s "close without ever
-    // opening" transition). That's a genuine, intentional zero-duration
-    // window, not an impossible claim — only a window that closes BEFORE it
-    // opens is actually impossible. This is the exact condition that
-    // latched the live Buy-click bug: this same `heartbeat()` (and
-    // `startSession()`) response shape used to reject with
-    // `invalid_response`, tearing down the whole trading panel.
+  it("accepts a checkpoint the server closed without ever opening it", async () => {
+    // A server may report an intentional zero-duration window with
+    // `opensAt === closesAt`; only a window that closes before it opens is
+    // impossible.
     const bypassClosed = heartbeatResponse("playing");
     bypassClosed.checkpoints[0] = {
       ...checkpoint("cp_12345678", 10),
@@ -3474,7 +3476,7 @@ describe("ReplayPremiereServiceClient", () => {
   });
 
   it("still rejects a checkpoint window that closes before it opens as invalid_response", async () => {
-    // Unlike the zero-duration bypass case above, a window that closes
+    // Unlike the zero-duration case above, a window that closes
     // strictly BEFORE it opens can never be produced by any real server
     // transition — a genuine, unexplainable claim the verified chain
     // cannot support.

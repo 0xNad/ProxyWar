@@ -154,6 +154,18 @@ describe("deal slot — league submission pass", () => {
       "deal selection named a non-deal action kind (alliance_request): alliance:P_B",
     );
     expect(record.decisionMetadata?.dealSlotRequestedID).toBe("alliance:P_B");
+    expect(record.dealSlotEvidence).toEqual({
+      requestedActionID: "alliance:P_B",
+      validation: {
+        accepted: false,
+        reason:
+          "deal selection named a non-deal action kind (alliance_request): alliance:P_B",
+      },
+      application: {
+        attempted: false,
+        reason: "not attempted because deal-slot validation failed",
+      },
+    });
     // No deal was applied, and no second record was produced for the seat.
     expect(record.decisionMetadata?.dealAction).toBeUndefined();
     expect(step0.filter((entry) => entry.agentID === A.agentID)).toHaveLength(
@@ -206,6 +218,19 @@ describe("deal slot — league submission pass", () => {
     });
     // ...and the deal applied independently of how the game action fared.
     expect(record.result.accepted).toBe(false);
+    expect(record.dealSlotEvidence).toEqual({
+      requestedActionID: PROPOSE_B_NAP,
+      validation: {
+        accepted: true,
+        actionID: PROPOSE_B_NAP,
+        actionKind: "deal_propose",
+      },
+      application: {
+        attempted: true,
+        accepted: true,
+        reason: `deal proposed: ${NAP_A_TO_B}`,
+      },
+    });
     expect(record.decisionMetadata).toMatchObject({
       dealAction: "propose",
       dealID: NAP_A_TO_B,
@@ -233,6 +258,19 @@ describe("deal slot — league submission pass", () => {
     expect(record.decisionMetadata?.dealSlotRejected).toBe(
       "a deal action was already played as this decision's game action",
     );
+    expect(record.dealSlotEvidence).toEqual({
+      requestedActionID: PROPOSE_B_NAP,
+      validation: {
+        accepted: true,
+        actionID: PROPOSE_B_NAP,
+        actionKind: "deal_propose",
+      },
+      application: {
+        attempted: false,
+        reason:
+          "a deal action was already played as this decision's game action",
+      },
+    });
     expect(harness.league.dealLedger().deals).toHaveLength(1);
   });
 

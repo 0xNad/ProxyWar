@@ -1,10 +1,7 @@
 import { EventBus } from "../../core/EventBus";
 import { GameView } from "../../core/game/GameView";
 import { UserSettings } from "../../core/game/UserSettings";
-import {
-  isAiLeagueNativeSpectatorUiEnabled,
-  isBettingPremiereRoute,
-} from "../AiLeagueReplayMode";
+import { isAiLeagueNativeSpectatorUiEnabled } from "../AiLeagueReplayMode";
 import { GameStartingModal } from "../GameStartingModal";
 import { RefreshGraphicsEvent as RedrawGraphicsEvent } from "../InputHandler";
 import { installCompetitorLocateBridge } from "./CompetitorLocateBridge";
@@ -61,23 +58,9 @@ export function createRenderer(
   const transformHandler = new TransformHandler(game, eventBus, canvas);
   const userSettings = new UserSettings();
   const nativeSpectatorUiEnabled = isAiLeagueNativeSpectatorUiEnabled();
-  // The betting page (`/bet/<id>`) wants the SAME standalone, detached
-  // `<leader-board>` this promo flag already builds below — live match
-  // standings rendered outside `game-left-sidebar` (which
-  // `BettingPremierePage.ts` hides unconditionally for every /bet
-  // visitor, spectator chrome included). Kept as its own condition
-  // rather than folding into `nativeSpectatorUiEnabled`: that flag also
-  // drives the AI-league promo/clip-capture declutter
-  // (`AiLeagueReplayOverlay.ts`), which /bet never mounts and has no
-  // reason to couple to.
-  const bettingStandingsEnabled = isBettingPremiereRoute();
   document.body.classList.toggle(
     "ai-league-native-spectator-ui",
     nativeSpectatorUiEnabled,
-  );
-  document.body.classList.toggle(
-    "betting-standings-enabled",
-    bettingStandingsEnabled,
   );
   mountAiLeagueNativeSpectatorStyles();
 
@@ -120,9 +103,7 @@ export function createRenderer(
   leaderboard.eventBus = eventBus;
   leaderboard.game = game;
 
-  const standaloneStandingsEnabled =
-    nativeSpectatorUiEnabled || bettingStandingsEnabled;
-  const nativeSpectatorLeaderboard = standaloneStandingsEnabled
+  const nativeSpectatorLeaderboard = nativeSpectatorUiEnabled
     ? (document.createElement("leader-board") as Leaderboard)
     : null;
   if (nativeSpectatorLeaderboard !== null) {
@@ -136,54 +117,14 @@ export function createRenderer(
       zIndex: "50002",
       width: "min(360px, calc(100vw - 32px))",
     });
-    if (bettingStandingsEnabled) {
-      // A bettor needs a reachable, readable panel — never the
-      // decorative/click-through treatment the promo overlay uses below.
-      nativeSpectatorLeaderboard.classList.add("betting-standings-leaderboard");
-      nativeSpectatorLeaderboard.compact = true;
-      // Bridges the market's live prices in from `BettingPremierePage.ts`
-      // without this shared rendering module importing anything from the
-      // wagering feature — same cross-module-flag shape as
-      // `window.__openFrontPromoNativeUi` above, just read-only and
-      // per-tick instead of a one-shot boolean. `readBettingSeatPrice`
-      // returns `null` on every route but /bet (nothing ever sets the
-      // global), so this is a no-op everywhere else.
-      nativeSpectatorLeaderboard.priceLookup = (clientID) =>
-        readBettingSeatPrice(clientID);
-      nativeSpectatorLeaderboard.setAttribute("role", "region");
-      nativeSpectatorLeaderboard.setAttribute(
-        "aria-label",
-        "Live match standings",
-      );
-      Object.assign(nativeSpectatorLeaderboard.style, {
-        width: "min(260px, calc(100vw - 32px))",
-      });
-    } else {
-      // Promo/clip-capture only: decorative, non-interactive, never
-      // focusable — the opposite of what a bettor needs, so /bet never
-      // takes this branch.
-      nativeSpectatorLeaderboard.classList.add("ai-league-native-leaderboard");
-      nativeSpectatorLeaderboard.style.pointerEvents = "none";
-    }
-    // Tab order should follow reading order: the standings panel sits
-    // visually top-left, ahead of the trading sheet the overlay already
-    // appended to `body` — a plain `appendChild` here would instead land
-    // it AFTER every trading control in the tab sequence (last on the
-    // page, despite being first on screen). `prepend` fixes that for the
-    // one variant that's actually focusable; the promo/clip-capture
-    // variant is `pointerEvents: none` and never in the tab order to
-    // begin with, so its position doesn't matter and stays untouched.
-    if (bettingStandingsEnabled) {
-      document.body.prepend(nativeSpectatorLeaderboard);
-    } else {
-      document.body.appendChild(nativeSpectatorLeaderboard);
-    }
+    nativeSpectatorLeaderboard.classList.add("ai-league-native-leaderboard");
+    nativeSpectatorLeaderboard.style.pointerEvents = "none";
+    document.body.appendChild(nativeSpectatorLeaderboard);
   }
 
   // Competitor rail one-shot camera locate — every spectator/replay route
-  // (`isReplaySpectatorView()`: bet, premiere, ai-league-replay,
-  // proxywar-replay, legacy openfront-replay, Coworld routes), not just
-  // betting or the AI-league promo UI. Live play never mounts this.
+  // (`isReplaySpectatorView()`: premiere, ai-league-replay, proxywar-replay,
+  // legacy openfront-replay, Coworld routes), not just the promo UI.
   // Renders no UI of its own (a Competitors panel click resolves and
   // recenters once; no persisted "followed" selection, no dimming, no
   // leaderboard pin), so there is nothing to append to the DOM here.
@@ -414,14 +355,10 @@ export function createRenderer(
     settingsModal,
     teamStats,
     playerPanel,
-    // P0 fix (2026-08-03): dropped from this array by f75969b56 ("platform:
-    // accounts are not a betting feature") as pure collateral -- that
-    // commit's own diff shows this line removed in the SAME hunk as adding
-    // povSelector below, alongside multiTabModal/inGamePromo (also still
-    // dead; both flagged separately, not restored here -- see deploy
-    // notes). Nothing in that 319-file identity/accounts refactor's intent
-    // ever mentions HeadsUpMessage; the removal is an oversight, not a
-    // decision. Without this, tick()/init() never ran for it at all --
+    // P0 fix (2026-08-03): dropped from this array as collateral during the
+    // identity/account refactor. Nothing in that refactor's intent mentions
+    // HeadsUpMessage; the removal was an oversight, not a decision. Without
+    // this, tick()/init() never ran for it at all --
     // spawn/pause/immunity/catching-up status messages, AND item 3a's
     // (deploy 3.9) match-end combat-toast suppression, were silently inert.
     headsUpMessage,
@@ -453,29 +390,8 @@ function mountAiLeagueNativeSpectatorStyles() {
     body.ai-league-native-spectator-ui leader-board.ai-league-native-leaderboard {
       filter: drop-shadow(0 14px 32px rgba(2, 6, 23, 0.32));
     }
-    body.betting-standings-enabled leader-board.betting-standings-leaderboard {
-      filter: drop-shadow(0 14px 32px rgba(2, 6, 23, 0.32));
-    }
   `;
   document.head.appendChild(style);
-}
-
-/**
- * The market's live per-seat prices, as last written by
- * `BettingPremiereMarketController` (`BettingPremierePage.ts`) — read here
- * so the standalone betting standings leaderboard can show each row's
- * price without this shared rendering module statically importing
- * anything from the wagering feature. Set only on `/bet/<id>`; `undefined`
- * (and therefore `null` from every lookup) on every other route, since
- * nothing else ever assigns it.
- */
-function readBettingSeatPrice(clientID: string): number | null {
-  const prices = (
-    window as typeof window & {
-      __bettingSeatPrices?: Readonly<Record<string, number>>;
-    }
-  ).__bettingSeatPrices;
-  return prices?.[clientID] ?? null;
 }
 
 export class GameRenderer {

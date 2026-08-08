@@ -54,7 +54,8 @@ async function writeQueueItem(
 ): Promise<void> {
   const itemDir = path.join(queueReadyDir, itemName);
   await mkdir(itemDir, { recursive: true });
-  const contents = typeof meta === "string" ? meta : JSON.stringify(meta, null, 2);
+  const contents =
+    typeof meta === "string" ? meta : JSON.stringify(meta, null, 2);
   await writeFile(path.join(itemDir, "meta.json"), contents, "utf8");
   await writeFile(
     path.join(itemDir, "bundle.source.json"),
@@ -126,16 +127,25 @@ describe("premiere:candidates", () => {
     await writeQueueItem(
       queueReadyDir,
       "20260701T000000Z-run-published",
-      sampleMeta({ experienceRequestId: "ereq_published_1", episodeId: "ep_published_1" }),
+      sampleMeta({
+        experienceRequestId: "ereq_published_1",
+        episodeId: "ep_published_1",
+      }),
     );
     await writeQueueItem(
       queueReadyDir,
       "20260701T000100Z-run-clean",
-      sampleMeta({ experienceRequestId: "ereq_clean_1", episodeId: "ep_clean_1" }),
+      sampleMeta({
+        experienceRequestId: "ereq_clean_1",
+        episodeId: "ep_clean_1",
+      }),
     );
     await writePublishedEpisodes(artifactsRoot, ["ereq_published_1"]);
 
-    const result = await rankPremiereCandidates({ queueReadyDir, artifactsRoot });
+    const result = await rankPremiereCandidates({
+      queueReadyDir,
+      artifactsRoot,
+    });
 
     expect(result.candidates.map((c) => c.queueItemName)).toEqual([
       "20260701T000100Z-run-clean",
@@ -158,7 +168,10 @@ describe("premiere:candidates", () => {
     );
     await writePublishedEpisodes(artifactsRoot, ["ep_only_id"]);
 
-    const result = await rankPremiereCandidates({ queueReadyDir, artifactsRoot });
+    const result = await rankPremiereCandidates({
+      queueReadyDir,
+      artifactsRoot,
+    });
 
     expect(result.candidates).toHaveLength(0);
     expect(result.rejected[0]!.reason).toBe(
@@ -180,7 +193,10 @@ describe("premiere:candidates", () => {
     );
     await writePublishedEpisodes(artifactsRoot, []);
 
-    const result = await rankPremiereCandidates({ queueReadyDir, artifactsRoot });
+    const result = await rankPremiereCandidates({
+      queueReadyDir,
+      artifactsRoot,
+    });
 
     expect(result.candidates.map((c) => c.queueItemName)).toEqual([
       "20260701T000100Z-run-healthy",
@@ -205,7 +221,10 @@ describe("premiere:candidates", () => {
     );
     await writePublishedEpisodes(artifactsRoot, []);
 
-    const result = await rankPremiereCandidates({ queueReadyDir, artifactsRoot });
+    const result = await rankPremiereCandidates({
+      queueReadyDir,
+      artifactsRoot,
+    });
 
     expect(result.candidates.map((c) => c.queueItemName)).toEqual([
       "20260701T000100Z-run-healthy",
@@ -218,7 +237,10 @@ describe("premiere:candidates", () => {
     await writeQueueItem(queueReadyDir, "20260701T000000Z-run-1", sampleMeta());
     await writePublishedEpisodes(artifactsRoot, []);
 
-    const result = await rankPremiereCandidates({ queueReadyDir, artifactsRoot });
+    const result = await rankPremiereCandidates({
+      queueReadyDir,
+      artifactsRoot,
+    });
 
     const evidence = result.candidates[0]!.featuredMatch.evidence;
     expect(evidence.dramaScore).toBeNull();
@@ -230,7 +252,9 @@ describe("premiere:candidates", () => {
     expect(evidence.turnCount).toBe(420);
     expect(evidence.seatCount).toBe(8);
     expect(
-      evidence.notes.some((note) => note.includes("unavailable for the premiere-queue lane")),
+      evidence.notes.some((note) =>
+        note.includes("unavailable for the premiere-queue lane"),
+      ),
     ).toBe(true);
   });
 
@@ -243,7 +267,10 @@ describe("premiere:candidates", () => {
     );
     await writePublishedEpisodes(artifactsRoot, []);
 
-    const result = await rankPremiereCandidates({ queueReadyDir, artifactsRoot });
+    const result = await rankPremiereCandidates({
+      queueReadyDir,
+      artifactsRoot,
+    });
     const match = result.candidates[0]!.featuredMatch;
 
     expect(match.lane).toBe("premiere");
@@ -257,10 +284,17 @@ describe("premiere:candidates", () => {
 
   test("a queue item with unreadable meta.json is reported rejected, not silently dropped", async () => {
     const { queueReadyDir, artifactsRoot } = await setupFixture();
-    await writeQueueItem(queueReadyDir, "20260701T000000Z-run-bad", "{ not json");
+    await writeQueueItem(
+      queueReadyDir,
+      "20260701T000000Z-run-bad",
+      "{ not json",
+    );
     await writePublishedEpisodes(artifactsRoot, []);
 
-    const result = await rankPremiereCandidates({ queueReadyDir, artifactsRoot });
+    const result = await rankPremiereCandidates({
+      queueReadyDir,
+      artifactsRoot,
+    });
 
     expect(result.candidates).toHaveLength(0);
     expect(result.rejected).toHaveLength(1);
@@ -281,17 +315,23 @@ describe("premiere:candidates", () => {
     const { queueReadyDir, artifactsRoot } = await setupFixture();
     await writeQueueItem(queueReadyDir, "20260701T000000Z-run-1", sampleMeta());
     // artifactsRoot/ai-league-runs/league/data.json intentionally not written.
-    const result = await rankPremiereCandidates({ queueReadyDir, artifactsRoot });
+    const result = await rankPremiereCandidates({
+      queueReadyDir,
+      artifactsRoot,
+    });
     expect(result.candidates).toHaveLength(1);
     expect(result.rejected).toHaveLength(0);
   });
 
-  test("resolveDefaultQueueReadyDir honors PW_BET_QUEUE_DIR and falls back to the documented default", () => {
+  test("resolveDefaultQueueReadyDir honors PROXYWAR_PREMIERE_QUEUE_DIR and falls back to the documented default", () => {
     expect(resolveDefaultQueueReadyDir({}, "/home/op")).toBe(
       path.join("/home/op", ".proxywar-deploy", "premiere-queue", "ready"),
     );
     expect(
-      resolveDefaultQueueReadyDir({ PW_BET_QUEUE_DIR: "/custom/queue" }, "/home/op"),
+      resolveDefaultQueueReadyDir(
+        { PROXYWAR_PREMIERE_QUEUE_DIR: "/custom/queue" },
+        "/home/op",
+      ),
     ).toBe(path.join("/custom/queue", "ready"));
   });
 
@@ -300,7 +340,10 @@ describe("premiere:candidates", () => {
       path.join("/repo", "artifacts"),
     );
     expect(
-      resolveDefaultArtifactsRoot({ PROXYWAR_ARTIFACTS_ROOT: "/custom/artifacts" }, "/repo"),
+      resolveDefaultArtifactsRoot(
+        { PROXYWAR_ARTIFACTS_ROOT: "/custom/artifacts" },
+        "/repo",
+      ),
     ).toBe(path.resolve("/custom/artifacts"));
   });
 });

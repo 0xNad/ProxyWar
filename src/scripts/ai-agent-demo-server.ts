@@ -131,13 +131,10 @@ import {
 } from "../server/agents/ProxyWarNationRegistry";
 import {
   isProxyWarPublicAccountReadPath,
-  isProxyWarPublicAccountWritePath,
   isProxyWarPublicDoc,
   isProxyWarPublicExternalAgentExample,
   isProxyWarPublicLeagueArtifact,
   isProxyWarPublicLeaguePath,
-  isProxyWarPublicPointsReadPath,
-  isProxyWarPublicPointsWritePath,
   isProxyWarPublicPremiereReadPath,
   isProxyWarPublicPremiereWritePath,
   isProxyWarPublicRendererAssetPath,
@@ -173,7 +170,6 @@ import {
   buildAnalyticsReport,
 } from "../server/analytics/AnalyticsReport";
 import { renderAnalyticsReportHtml } from "../server/analytics/AnalyticsReportPage";
-import { resolveBettingProfileServiceToken } from "../server/BettingProfileServiceAuth";
 import {
   createGithubOAuthClient,
   resolveGithubOAuthConfig,
@@ -202,9 +198,7 @@ import { createPlatformBuilderVersionRouter } from "../server/platform/PlatformB
 import { resolveCanonicalHostRedirect } from "../server/platform/PlatformCanonicalHost";
 import { createPlatformGithubAuthRouter } from "../server/platform/PlatformGithubAuth";
 import { PlatformGithubIdentityLinkStore } from "../server/platform/PlatformGithubIdentityLinkStore";
-import { PlatformHandoffStore } from "../server/platform/PlatformHandoffStore";
 import { PlatformPolicyClaimStore } from "../server/platform/PlatformPolicyClaimStore";
-import { resolvePlatformReturnOrigins } from "../server/platform/PlatformReturnOrigins";
 import { renderPlatformRootHtml } from "../server/platform/PlatformRootPage";
 import {
   loadOrCreatePlatformHmacKey,
@@ -217,21 +211,6 @@ import {
   getAppShellContent,
   setHtmlNoCacheHeaders,
 } from "../server/RenderHtml";
-import {
-  createBettingIdentityHandoffRouter,
-  createBettingIdentityStatusRouter,
-} from "../server/replay-premiere/BettingIdentityHandoff";
-import { createPlatformHandoffClient } from "../server/replay-premiere/PlatformHandoffClient";
-import {
-  BettingPlatformAccountLinkStore,
-  pointsMergerFor,
-} from "../server/replay-premiere/points/BettingPlatformAccountLinkStore";
-import { createBettingProfileClient } from "../server/replay-premiere/points/BettingProfileClient";
-import {
-  ReplayPremierePointsLedger,
-  resolveReplayPremierePointsLedgerRoot,
-} from "../server/replay-premiere/points/ReplayPremierePointsLedger";
-import { ReplayPremiereSettlementLedger } from "../server/replay-premiere/points/ReplayPremiereSettlementLedger";
 import { ReplayPremiereAnonymousWriteLimiter } from "../server/replay-premiere/ReplayPremiereAnonymousWriteLimiter";
 import { ReplayPremiereArchivedClipPromoter } from "../server/replay-premiere/ReplayPremiereArchivedClipPromoter";
 import { ReplayPremiereArchiveStore } from "../server/replay-premiere/ReplayPremiereArchiveIndex";
@@ -247,22 +226,14 @@ import {
   ReplayPremiereClips,
   ReplayPremiereRevealAutoClip,
 } from "../server/replay-premiere/ReplayPremiereClips";
-import {
-  PREMIERE_ID_PATTERN,
-  premiereClipRepresentativeAnchorTurn,
-} from "../server/replay-premiere/ReplayPremiereContracts";
-import {
-  ReplayPremiereError,
-  toPublicReplayPremiereFailure,
-} from "../server/replay-premiere/ReplayPremiereErrors";
+import { premiereClipRepresentativeAnchorTurn } from "../server/replay-premiere/ReplayPremiereContracts";
+import { ReplayPremiereError } from "../server/replay-premiere/ReplayPremiereErrors";
 import { ReplayPremiereGuestSecurity } from "../server/replay-premiere/ReplayPremiereGuestSecurity";
 import {
   createReplayPremiereRouter,
   formatReplayPremiereHttpOperatorError,
   ReplayPremiereHttpRegistry,
-  requestSecurityHeaders,
 } from "../server/replay-premiere/ReplayPremiereHttp";
-import type { ReplayPremiereSettlementPointsRecorder } from "../server/replay-premiere/ReplayPremiereInteractions";
 import { derivePremiereId } from "../server/replay-premiere/ReplayPremiereLoopCore";
 import {
   createReplayPremierePublicPageRouter,
@@ -279,12 +250,11 @@ import {
 } from "../server/replay-premiere/ReplayPremiereSecrets";
 import { startReplayPremiereProduction } from "../server/replay-premiere/ReplayPremiereStartup";
 import { loadReplayPremiereReclamationExclusions } from "../server/replay-premiere/ReplayPremiereTerminalReclamation";
-import { DeterministicSyntheticCrowdTerritoryProjector } from "../server/replay-premiere/wagering/simulation";
 import { applyStaticAssetCacheControl } from "../server/StaticAssetCache";
 
 const app = express();
 // Gzip/brotli-compresses every response this app sends, including the
-// premiere replay/live-projection JSON API (`ReplayPremiereHttp.ts`'s
+// premiere replay JSON API (`ReplayPremiereHttp.ts`'s
 // `sendJson`), which is otherwise sent uncompressed. Real Turn-payload JSON
 // (repetitive keys, small numeric deltas) compresses well; this is a pure
 // transport-layer change — the exact same bytes are hashed/verified after
@@ -368,7 +338,7 @@ const leagueContentSecurityPolicy = (): string =>
 // whose every write then 403s with `origin_rejected` — see
 // `PlatformCanonicalHost` for why that shape is worse than a hard failure.
 // Mounted before any route so a deep link survives the bounce, and platform
-// mode only: a betting/league process has its own origin and must not redirect
+// mode only: a league process has its own origin and must not redirect
 // anything. 302, not 301 — this is a compatibility shim for a hostname that
 // just moved once already, and a permanent redirect is cached indefinitely by
 // browsers that would then have to be told twice if it moves again.
@@ -388,32 +358,10 @@ if (platformEnabled && configuredPlatformOrigin !== undefined) {
     res.redirect(302, canonicalRedirect);
   });
 }
-// Sibling origins this process links out to from its own homepage nav
-// (`PlatformRootPage`, platform mode only) and — for `bettingOrigin` only
-// — calls server-to-server for a linked bettor's public points stats (see
-// `BettingProfileClient`). Hardcoded defaults match the other hardcoded
-// `beta.proxywar.xyz` references already in this file (e.g. the
-// agent-start bootstrap commands below); overridable for tests/dev.
-const bettingOrigin =
-  firstConfiguredEnv("PROXYWAR_BETTING_ORIGIN") ?? "https://bet.proxywar.xyz";
+// Sibling origins this process links out to from its own homepage nav.
 const platformLeagueHomeUrl =
   firstConfiguredEnv("PROXYWAR_LEAGUE_HOME_URL") ??
   "https://beta.proxywar.xyz/league";
-// Replays and the Market used to be, deliberately, the same page (betting's
-// `/bet` resolved to whichever premiere was live, and the homepage's
-// Replays card pointed there too) — that decision is SUPERSEDED as of
-// `b9ca3238a` (2026-08-02, "point Replays card to watch URL instead of
-// betting URL"). A visitor clicking "Replays" wants the non-wagering
-// archive, not a page whose whole point is a live wagering panel; sharing
-// one URL between the two cards meant "Replays" silently dropped a
-// stranger onto the betting surface with no way to tell the cards apart
-// by where they actually went. The homepage still gives them separate
-// cards with separate framing (spectate vs. trade) because that IS how a
-// stranger decides which one they want — see `platformReplaysHomeUrl`
-// below (now `beta.proxywar.xyz/watch`) and `platformMarketHomeUrl`
-// (still `${bettingOrigin}/bet`).
-const platformMarketHomeUrl =
-  firstConfiguredEnv("PROXYWAR_MARKET_HOME_URL") ?? `${bettingOrigin}/bet`;
 const platformReplaysHomeUrl =
   firstConfiguredEnv("PROXYWAR_REPLAYS_HOME_URL") ??
   "https://beta.proxywar.xyz/watch";
@@ -432,73 +380,17 @@ const replayPremiereGuestSecurity = new ReplayPremiereGuestSecurity({
   expectedOrigin: replayPremierePublicOrigin,
   production: replayPremierePublicOrigin.startsWith("https://"),
 });
-// Durable, cross-premiere points ledger and leaderboard — keyed by the same
-// signed guest cookie identity as bankroll/positions, but stored outside
-// `replayPremierePrivateStateRoot` (default a distinct
-// `storage/points-ledger` root, override via PROXYWAR_POINTS_LEDGER_ROOT) so
-// cycle-premiere.sh wiping the premiere state root never touches it. See
-// `ReplayPremierePointsLedger`'s doc comment for the points-formula
-// reasoning.
-const replayPremierePointsLedgerRoot = resolveReplayPremierePointsLedgerRoot();
-export const replayPremierePointsLedger = await ReplayPremierePointsLedger.open(
-  replayPremierePointsLedgerRoot,
-);
-// Durable "who won" settlement ledger — beside the points ledger, same
-// root, same atomic write-temp-then-rename convention, its own file (the
-// exact precedent `BettingPlatformAccountLinkStore` already set for a
-// second store sharing this root). Survives `cycle-premiere.sh`'s state-
-// root wipe for the same reason the points ledger does: this root is
-// outside it. See `ReplayPremiereSettlementLedger`'s doc comment.
-export const replayPremiereSettlementLedger =
-  await ReplayPremiereSettlementLedger.open(replayPremierePointsLedgerRoot);
-// Betting's link to the platform account authority — proxywar.xyz is
-// the sole account/session authority now (see the platform build's
-// contract), so betting never talks to GitHub directly and never writes a
-// display name; it only LEARNS a platformAccountId + cached display name
-// once a handoff redemption succeeds (`BettingIdentityHandoff.ts`), and
-// caches it here. Beside the points ledger: same root, same atomic
-// write-temp-then-rename convention, its own file
-// (`platform-account-links-v1.json`).
-export const bettingPlatformAccountLinkStore =
-  await BettingPlatformAccountLinkStore.open(
-    replayPremierePointsLedgerRoot,
-    pointsMergerFor(replayPremierePointsLedger),
-  );
 // GitHub sign-in is cleanly absent — no button client-side, no mounted
 // route below — unless BOTH secrets are configured. See
 // `resolveGithubOAuthConfig` and `RUNBOOK.md` for the exact
 // app-registration recipe. One OAuth app, read once here, used ONLY by
 // the platform's own router (mounted further below, gated on
-// `platformEnabled`) — betting never sees these values.
+// `platformEnabled`).
 const githubOAuthConfig = await resolveGithubOAuthConfig();
 const githubOAuthClient =
   githubOAuthConfig === null
     ? null
     : createGithubOAuthClient(githubOAuthConfig);
-// Wraps the raw ledger so a settlement always credits the CURRENT canonical
-// identity, even from a browser whose guest cookie was merged away by a
-// platform-account link completed on a different device.
-// `resolveCanonicalParticipantId` is a local file lookup, never a network
-// call to the platform — this can never block, delay, or fail a trade
-// because the platform is unreachable (see the contract: "Platform down:
-// betting trades, settles and ranks normally").
-const replayPremierePointsRecorder: ReplayPremiereSettlementPointsRecorder = {
-  async recordPremiereSettlement(premiereId, settlements) {
-    const resolved = await Promise.all(
-      settlements.map(async (settlement) => ({
-        ...settlement,
-        participantId:
-          await bettingPlatformAccountLinkStore.resolveCanonicalParticipantId(
-            settlement.participantId,
-          ),
-      })),
-    );
-    await replayPremierePointsLedger.recordPremiereSettlement(
-      premiereId,
-      resolved,
-    );
-  },
-};
 export const replayPremiereRuntimeRegistry =
   new ReplayPremiereRuntimeRegistry();
 // Durable archive of reclaimed premieres: keeps `/premiere/<id>` resolvable
@@ -574,9 +466,6 @@ const replayPremiereProduction = await startReplayPremiereProduction({
   checkpointProjector: new DeterministicReplayPremiereCheckpointProjector(
     path.join(process.cwd(), "resources", "maps"),
   ),
-  territoryProjector: new DeterministicSyntheticCrowdTerritoryProjector(
-    path.join(process.cwd(), "resources", "maps"),
-  ),
   archiveStore: replayPremiereArchiveStore,
   archivedClipPromoter: replayPremiereArchivedClipPromoter,
   reclamationExcludedPremiereIds: replayPremiereReclaimExclusions,
@@ -585,16 +474,6 @@ const replayPremiereProduction = await startReplayPremiereProduction({
   onPremiereRevealed: notifyPremiereRevealed,
   // Leave bounded launch headroom for the remaining initialization and bind.
   maxStartupMs: 8_000,
-  // Play money only, off by default. PROXYWAR_WAGERING_ENABLED=1 turns on
-  // the continuous LMSR prediction market for the whole live premiere (not
-  // checkpoint-gated) for local/dev testing.
-  wageringEnabled: envFlag("PROXYWAR_WAGERING_ENABLED"),
-  pointsLedger: replayPremierePointsRecorder,
-  settlementLedger: replayPremiereSettlementLedger,
-  // Deterministic, seeded synthetic bettors that keep a thin local/dev
-  // market legible for demos/tester sessions. Requires PROXYWAR_WAGERING_ENABLED=1
-  // too. Off by default, never for production.
-  syntheticCrowdEnabled: envFlag("PROXYWAR_SYNTHETIC_CROWD_ENABLED"),
   onDiagnostic: (diagnostic) => {
     // Deferred fresh-admission lane, orphan-reclamation, and archived-clip
     // promotion events are progress, not rejections; keep the historical
@@ -950,329 +829,10 @@ app.get("/api/clip-capabilities", (_req, res) => {
   });
 });
 
-// Mount before the generic parser so Premiere's stricter 32 KiB body ceiling
-// applies to both declared-length and chunked requests.
-// Gated on wagering rather than on middleware ordering: these must sit ABOVE
-// createReplayPremiereRouter (which claims all of /api/premieres and 404s an
-// unknown id), but that is also above the league-wrapper and beta gates. A
-// wagering check is the precise condition anyway - points only exist where a
-// market does, so beta (no PROXYWAR_WAGERING_ENABLED) serves 404 here.
-const pointsRoutesEnabled = envFlag("PROXYWAR_WAGERING_ENABLED");
-
-// Cross-premiere points leaderboard. Mounted after the league-wrapper-only
-// and beta gates. League-wrapper-only mode explicitly allowlists the two
-// exact paths below (`isProxyWarPublicPointsReadPath`/`WritePath`) so this
-// surface reaches the betting demo (`bet.proxywar.xyz`); the beta gate does
-// NOT allowlist them, so this is unreachable in beta mode (`PROXYWAR_BETA_
-// ENABLED=1`, the real-participant league) — deliberately: points/leaderboard
-// is a betting-demo feature, not a beta-league one. See
-// `ReplayPremierePointsLedger` for the durable-storage and points-formula
-// reasoning; `bootstrapRead` mints/reuses the same signed guest cookie the
-// premiere session flow uses, so a viewer's identity here is the SAME
-// identity that owns their bankroll and positions.
-function sendReplayPremiereFailure(res: Response, error: unknown): void {
-  const status = error instanceof ReplayPremiereError ? error.httpStatus : 503;
-  if (error instanceof ReplayPremiereError) {
-    console.error(formatReplayPremiereHttpOperatorError(error));
-  } else {
-    console.error(
-      `Points route failed: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-  res.status(status).json(toPublicReplayPremiereFailure(error));
-}
-/** Attaches the platform-linked display name (or `null`, when unlinked) to leaderboard/viewer entries in one bulk lookup — never per-row. `platformAccountId` is non-null ONLY for a genuinely linked account (see `BettingPlatformAccountLinkStore.describeMany`), the anti-spoof primitive `/api/players/:name` below relies on. */
-async function decoratePointsEntries<T extends { participantId: string }>(
-  entries: readonly T[],
-): Promise<
-  Array<T & { displayName: string | null; platformAccountId: string | null }>
-> {
-  const described = await bettingPlatformAccountLinkStore.describeMany(
-    entries.map((entry) => entry.participantId),
-  );
-  return entries.map((entry) => {
-    const link = described.get(entry.participantId);
-    return {
-      ...entry,
-      displayName: link?.displayName ?? null,
-      platformAccountId: link?.platformAccountId ?? null,
-    };
-  });
-}
-app.get("/api/premieres/points/leaderboard", async (req, res) => {
-  if (!pointsRoutesEnabled) {
-    res.status(404).json({ error: { code: "PREMIERE_UNAVAILABLE" } });
-    return;
-  }
-  try {
-    res.setHeader("Cache-Control", "no-store, max-age=0");
-    const guest = replayPremiereGuestSecurity.bootstrapRead(
-      requestSecurityHeaders(req),
-    );
-    if (guest.setCookie !== null) {
-      res.setHeader("Set-Cookie", guest.setCookie);
-    }
-    // Resolve through any platform-account merge first: a browser whose
-    // guest cookie was merged away into a canonical identity still finds
-    // ITSELF here — never an empty orphaned row (see
-    // `BettingPlatformAccountLinkStore`).
-    const viewerParticipantId =
-      await bettingPlatformAccountLinkStore.resolveCanonicalParticipantId(
-        guest.participant.participantId,
-      );
-    const leaderboard = await replayPremierePointsLedger.readLeaderboard({
-      viewerParticipantId,
-    });
-    res.status(200).json({
-      schemaVersion: 1,
-      csrfToken: guest.csrfToken,
-      leaderboard: {
-        ...leaderboard,
-        entries: await decoratePointsEntries(leaderboard.entries),
-        viewer:
-          leaderboard.viewer === null
-            ? null
-            : (await decoratePointsEntries([leaderboard.viewer]))[0],
-      },
-    });
-  } catch (error) {
-    sendReplayPremiereFailure(res, error);
-  }
-});
-// -----------------------------------------------------------------------
-// Server-to-server projection for the platform's per-account betting
-// profile (see `BettingProfileServiceAuth.ts` and `BettingProfileClient.ts`'s
-// doc comments for the full contract). NOT a browser-facing route: no
-// guest bootstrap, no cookies, nothing here is scoped to a caller's
-// session. Keyed by the platform's own opaque `accountId` — a direct,
-// O(1) lookup via `BettingPlatformAccountLinkStore.getByPlatformAccountId`,
-// never a display-name scan: display names are not unique
-// (`PlatformAccountStore.setDisplayName` never enforces it), so matching
-// on one — as this route used to — can silently surface one linked
-// account's stats under a DIFFERENT account's chosen name. Absent
-// entirely unless BOTH wagering is on (there is a ledger to read) AND
-// the shared token is configured, matching "unset env means the route
-// doesn't exist" elsewhere in this file (GitHub sign-in, above).
-// -----------------------------------------------------------------------
-const bettingProfileServiceToken = await resolveBettingProfileServiceToken();
-if (pointsRoutesEnabled && bettingProfileServiceToken !== null) {
-  app.get(
-    "/api/internal/accounts/:accountId/betting-profile",
-    async (req, res) => {
-      res.setHeader("Cache-Control", "no-store, max-age=0");
-      const presented = bearerToken(req);
-      if (
-        presented === undefined ||
-        !sameSecretValue(presented, bettingProfileServiceToken)
-      ) {
-        res
-          .status(401)
-          .json({ error: { code: "BETTING_PROFILE_UNAUTHORIZED" } });
-        return;
-      }
-      try {
-        const link =
-          await bettingPlatformAccountLinkStore.getByPlatformAccountId(
-            req.params.accountId,
-          );
-        if (link === null) {
-          res.status(200).json({ schemaVersion: 1, profile: null });
-          return;
-        }
-        const board = await replayPremierePointsLedger.readLeaderboard({
-          limit: 1,
-          viewerParticipantId: link.participantId,
-        });
-        const viewer = board.viewer;
-        res.status(200).json({
-          schemaVersion: 1,
-          profile:
-            viewer !== null &&
-            viewer.premieresTraded > 0 &&
-            viewer.rank !== null
-              ? {
-                  lifetimePoints: viewer.lifetimePoints,
-                  premieresTraded: viewer.premieresTraded,
-                  premieresWon: viewer.premieresWon,
-                  rank: viewer.rank,
-                  totalRankedParticipants: board.totalRankedParticipants,
-                }
-              : null,
-        });
-      } catch (error) {
-        sendReplayPremiereFailure(res, error);
-      }
-    },
-  );
-}
-// The client half. Used by the platform's own
-// `/api/accounts/:accountId/betting-profile` (mounted only when
-// platformEnabled, further below) ONLY when this process itself has no
-// ledger to read (wagering off) and the shared token is configured;
-// otherwise `null` and the betting section simply stays absent.
-const bettingProfileClient =
-  !pointsRoutesEnabled && bettingProfileServiceToken !== null
-    ? createBettingProfileClient(bettingOrigin, bettingProfileServiceToken)
-    : null;
-// -----------------------------------------------------------------------
-// Account page: the one place a participant sees everything the system
-// knows about THEM, both as a bettor and — if they've made one — as a
-// self-asserted league agent owner. Same guest identity and same
-// wagering gate as the points routes above.
-// -----------------------------------------------------------------------
-
-/**
- * The viewer's own live position in the "current" premiere — same
- * definition `/api/premieres/auth/github/*` uses below (the most
- * recently registered id; at most one premiere has an open market at a
- * time in this exhibition loop). `null` when there is no current
- * premiere, its runtime is gone from the live registry (already
- * reclaimed), or the viewer holds no open position in it — a bankroll
- * entry with zero positions is not a "live position" worth surfacing.
- */
-async function readCurrentPremierePositionSummary(
-  participantId: string,
-): Promise<{
-  premiereId: string;
-  status: "open" | "settled";
-  balance: number | null;
-  positionCount: number;
-  unrealizedPnl: number;
-} | null> {
-  const currentPremiereId = replayPremiereHttpRegistry.premiereIds().at(-1);
-  if (currentPremiereId === undefined) return null;
-  const target = replayPremiereHttpRegistry.get(currentPremiereId);
-  if (target === null) return null;
-  try {
-    const market = target.interactions.readMarketState(participantId);
-    const positions = market?.positions ?? [];
-    if (positions.length === 0) return null;
-    return {
-      premiereId: currentPremiereId,
-      status: market?.status ?? "open",
-      balance: market?.balance ?? null,
-      positionCount: positions.length,
-      unrealizedPnl: positions.reduce((sum, p) => sum + p.unrealizedPnl, 0),
-    };
-  } catch {
-    return null;
-  }
-}
-
-app.get("/api/premieres/account", async (req, res) => {
-  if (!pointsRoutesEnabled) {
-    res.status(404).json({ error: { code: "PREMIERE_UNAVAILABLE" } });
-    return;
-  }
-  try {
-    res.setHeader("Cache-Control", "no-store, max-age=0");
-    const guest = replayPremiereGuestSecurity.bootstrapRead(
-      requestSecurityHeaders(req),
-    );
-    if (guest.setCookie !== null) {
-      res.setHeader("Set-Cookie", guest.setCookie);
-    }
-    const canonicalParticipantId =
-      await bettingPlatformAccountLinkStore.resolveCanonicalParticipantId(
-        guest.participant.participantId,
-      );
-    const [pointsEntry, board, platformLink, currentPremiere] =
-      await Promise.all([
-        replayPremierePointsLedger.readParticipant(canonicalParticipantId),
-        replayPremierePointsLedger.readLeaderboard({
-          viewerParticipantId: canonicalParticipantId,
-        }),
-        bettingPlatformAccountLinkStore.getStatus(canonicalParticipantId),
-        readCurrentPremierePositionSummary(canonicalParticipantId),
-      ]);
-    const matches = Object.entries(pointsEntry?.premiereResults ?? {})
-      .map(([premiereId, net]) => ({
-        premiereId,
-        net,
-        revealedAt:
-          replayPremiereArchiveStore.lookup(premiereId)?.revealedAt ?? null,
-      }))
-      .sort((a, b) => {
-        const aTime =
-          a.revealedAt === null ? -Infinity : Date.parse(a.revealedAt);
-        const bTime =
-          b.revealedAt === null ? -Infinity : Date.parse(b.revealedAt);
-        if (bTime !== aTime) return bTime - aTime;
-        return a.premiereId < b.premiereId
-          ? -1
-          : a.premiereId > b.premiereId
-            ? 1
-            : 0;
-      });
-    res.status(200).json({
-      schemaVersion: 1,
-      csrfToken: guest.csrfToken,
-      identity: {
-        participantId: canonicalParticipantId,
-        // Sourced from the platform via the handoff, cached locally —
-        // never written by betting. See `BettingPlatformAccountLinkStore`.
-        displayName: platformLink.displayName,
-        platformLinked: platformLink.linked,
-        // Private, self-asserted, and stale-by-design (refreshed only on
-        // the next sign-in) — see `BettingPlatformAccountLinkStore`'s
-        // class doc. Never joined into the leaderboard or any public
-        // route: only this participant's OWN authenticated read sees it.
-        claims: platformLink.claims,
-      },
-      betting: {
-        lifetimePoints: pointsEntry?.lifetimePoints ?? 0,
-        premieresTraded: pointsEntry?.premieresTraded ?? 0,
-        premieresWon: pointsEntry?.premieresWon ?? 0,
-        rank: board.viewer?.rank ?? null,
-        totalRankedParticipants: board.totalRankedParticipants,
-        matches,
-        currentPremiere,
-      },
-    });
-  } catch (error) {
-    sendReplayPremiereFailure(res, error);
-  }
-});
-
-// Narrow, public "who won" read for a premiere whose market has already
-// settled — see `ReplayPremiereSettlementLedger`'s class doc for the
-// durability/scope reasoning and `PremiereEndedPage.ts` for the one
-// caller. Public data, deliberately no guest bootstrap/cookie: the winner
-// was always public the instant the market settled, and this route never
-// exposes anything narrower than that (no episode payloads, no turn
-// data, no per-viewer position). 404 for an id with no recorded
-// settlement — a pre-feature premiere, an unsettled/void-without-refund
-// premiere state that never reaches this ledger, or simply a bad id; the
-// three are indistinguishable on purpose (nothing here should hint at
-// whether an id is real).
-app.get("/api/premieres/:id/settlement", async (req, res) => {
-  if (!pointsRoutesEnabled) {
-    res.status(404).json({ error: { code: "PREMIERE_UNAVAILABLE" } });
-    return;
-  }
-  res.setHeader("Cache-Control", "no-store, max-age=0");
-  try {
-    const premiereId = req.params.id;
-    const record = PREMIERE_ID_PATTERN.test(premiereId)
-      ? await replayPremiereSettlementLedger.readSettlement(premiereId)
-      : null;
-    if (record === null) {
-      res.status(404).json({ error: { code: "SETTLEMENT_NOT_FOUND" } });
-      return;
-    }
-    res.status(200).json({ schemaVersion: 1, settlement: record });
-  } catch (error) {
-    sendReplayPremiereFailure(res, error);
-  }
-});
-
 // Narrow, per-record FeaturedMatch detail + participant identity routes
 // (product overhaul spec Stage 3 item 6 / hero states A/B). Deliberately
-// separate from the bulk `read-model.json` mirror artifact and from the
-// `pointsRoutesEnabled` wagering gate above — this is league/editorial
-// data (a scheduled or published match and who is in it), always
-// available on a league-origin process regardless of the wagering flag,
-// exactly like `/league`/`read-model.json` already are. See
+// separate from the bulk `read-model.json` mirror artifact. This is public
+// league/editorial data, available exactly like `/league`/`read-model.json`.
 // `FeaturedMatchParticipants.ts`'s own doc for why participant identity
 // must never be folded into the bulk read model: only a route keyed to
 // ONE match id (this route) or ONE live premiere id (the route below) is
@@ -1460,9 +1020,8 @@ app.get("/api/matches/:episodeId", async (req, res) => {
 });
 // The account page itself — a plain app-shell document, not premiere-
 // scoped, so it needs none of `ReplayPremierePublicPage`'s per-premiere
-// metadata/CSP machinery. Always reachable (like `/premiere/:id`); the
-// client-side component degrades to "betting isn't live here" if the API
-// above 404s for a deployment with wagering off.
+// metadata/CSP machinery. Non-platform deployments redirect to the configured
+// platform origin.
 app.get("/account", async (_req, res) => {
   if (!platformEnabled) {
     if (configuredPlatformOrigin === undefined) {
@@ -1504,20 +1063,12 @@ app.get("/account", async (_req, res) => {
 // -----------------------------------------------------------------------
 // League player profile: the destination the PUBLIC league standings
 // link to — one place that shows a league competitor's rating/rank now
-// plus recent results. Always mounted, ungated by wagering (league data
-// is public regardless).
+// plus recent results. League data is public.
 //
 // PUBLIC PAGE — keyed ONLY by the league's own player-name namespace,
-// which is genuinely unique within the league. This route does NOT, and
-// must never, join a league player to a platform account or a betting
-// profile by matching display-name TEXT: a league player and an account
-// are only the same person by a claim nobody here can verify, and
-// display names are not even unique among linked accounts (see
-// `BettingPlatformAccountLinkStore.getByPlatformAccountId`'s doc — this
-// route used to match on display name and that was unsound). A bettor's
-// stats live at their own stable, account-id-keyed profile instead — see
-// `GET /api/accounts/:accountId/betting-profile`, mounted on the
-// platform below, and `TraderProfilePage.ts` on the client.
+// which is genuinely unique within the league. It never joins a league player
+// to a platform account by display-name text: those identities are not proven
+// equivalent, and account display names are not unique.
 // -----------------------------------------------------------------------
 const leagueDataJsonPath = path.join(runsRootDir, "league", "data.json");
 const agentStatsJsonPath = path.join(runsRootDir, "league", "agent-stats.json");
@@ -1555,7 +1106,10 @@ app.get("/api/players/:name", async (req, res) => {
     }
     res.status(200).json({ schemaVersion: 1, name, league });
   } catch (error) {
-    sendReplayPremiereFailure(res, error);
+    console.error(
+      `Failed to serve player profile: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    res.status(503).json({ error: { code: "PLAYER_PROFILE_UNAVAILABLE" } });
   }
 });
 // The player profile page itself — a plain app-shell document, same
@@ -1588,43 +1142,11 @@ app.get("/player/:name", async (_req, res) => {
       .send("Proxy War player profile page is not built for this server.");
   }
 });
-// The trader profile page — a plain app-shell document, same pattern as
-// `/player/:name` just above, but keyed by the platform's opaque
-// accountId (`GET /api/accounts/:accountId/betting-profile`, mounted
-// only when platformEnabled, further below). Always reachable so a
-// stale/cross-origin link never 404s at the HTTP layer; the client-side
-// component itself renders "not found" for an unknown accountId.
-app.get("/trader/:accountId", async (_req, res) => {
-  try {
-    const appShell = await getAppShellContent(
-      path.resolve(staticRootDir, "index.html"),
-    );
-    const scriptNonce = randomBytes(24).toString("base64");
-    res.setHeader(
-      "Content-Security-Policy",
-      pageContentSecurityPolicyWithNonce(
-        leagueContentSecurityPolicy(),
-        scriptNonce,
-      ),
-    );
-    setHtmlNoCacheHeaders(res);
-    res.send(nonceInlineScripts(appShell, scriptNonce));
-  } catch (error) {
-    console.error(
-      `Failed to serve the trader profile page: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
-    res
-      .status(503)
-      .send("Proxy War trader profile page is not built for this server.");
-  }
-});
 // -----------------------------------------------------------------------
 // Stage 2 public pages (product overhaul §4 Target IA): event lobby, watch,
 // agents/builders directories and profiles, about — plus Stage 3 item 6's
 // `/match/:matchId` canonical FeaturedMatch page. Every one is a plain
-// app-shell document — same pattern as `/player/:name`/`/trader/:accountId`
+// app-shell document — same pattern as `/player/:name`
 // just above (always reachable, no premiere/session machinery behind it,
 // the client-side component does all the fetching, via
 // `GET /ai-league-runs/league/read-model.json` plus, for `/match/:matchId`,
@@ -1639,7 +1161,7 @@ app.get("/trader/:accountId", async (_req, res) => {
 // game/replay/premiere `index.html` + `Main.ts` entry every other route
 // serves. Every caller below is one of the 9 public-app routes (Stage 7
 // adds `/build`); game,
-// replay, premiere, `/player/:name`, `/account`, and `/trader/:accountId`
+// replay, premiere, `/player/:name`, and `/account`
 // never call this — they keep using `index.html` unchanged (see
 // `RenderHtml.ts`'s `getAppShellContent`, which this reuses unmodified for
 // either shell — it's generic over `htmlPath`).
@@ -1780,9 +1302,7 @@ function sendThemedNotFoundPage(
 // then falls back to the site-wide default metadata already baked into
 // `public.html` — the client's own "not found" state is what actually
 // explains that to a visitor, not the social card.
-async function resolveMatchDetailPageMetadata(
-  matchId: string,
-): Promise<{
+async function resolveMatchDetailPageMetadata(matchId: string): Promise<{
   title: string;
   description: string;
   card: MatchShareCardInput;
@@ -2019,23 +1539,7 @@ async function sendMatchDetailPageShell(
 // `betaAccess.enabled` -> `/public`; else -> the internal demo hub) —
 // unchanged, untouched, never intercepted.
 //
-// The `pointsRoutesEnabled` check MUST run FIRST, ahead of the
-// `leagueWrapperOnly && !platformEnabled` branch immediately below (P0
-// fix, live 2026-08-02): production bet-origin sets BOTH flags true
-// (cycle-premiere.sh's `start_origin()`: `PROXYWAR_WAGERING_ENABLED=1` AND
-// `PROXYWAR_LEAGUE_WRAPPER_ONLY=true`, with `PROXYWAR_PLATFORM_ENABLED`
-// never set), so the demo-hub branch below would otherwise ALWAYS win —
-// a cache-busted GET of bet.proxywar.xyz/ served the legacy internal demo
-// shell ("Proxy War (ALPHA)") instead of the live market, even though
-// `/bet` on the exact same origin already correctly resolved to it. The
-// betting origin's homepage must BE the market: redirect to `/bet` (the
-// existing, unchanged redirect below) rather than duplicating its
-// premiere-resolution/503 logic here.
 app.get("/", async (_req, res, next) => {
-  if (pointsRoutesEnabled) {
-    res.redirect(302, "/bet");
-    return;
-  }
   if (leagueWrapperOnly && !platformEnabled) {
     await sendPublicAppShellPage(res, "the event lobby");
     return;
@@ -2118,28 +1622,11 @@ app.get("/claim/:agentSlug", async (_req, res) => {
 app.get("/builder-dashboard", async (_req, res) => {
   await sendPublicAppShellPage(res, "the builder dashboard");
 });
-// GitHub sign-in lives ONLY on the platform now — proxywar.xyz is the
-// sole account authority (see the platform build's contract). Exactly one
-// of the two branches below mounts, based on `PROXYWAR_PLATFORM_ENABLED`:
-//
-// - Platform mode: the real `/api/auth/github/*` routes (only when OAuth
-//   credentials are configured — see `resolveGithubOAuthConfig`; unset
-//   means these paths simply don't exist, matching "unset env means the
-//   route doesn't exist" rather than "exists but always fails") plus the
-//   account/claim/handoff-issuance API.
-// - Child (betting) mode: the handoff start/callback routes that redirect
-//   to the platform and redeem its opaque code server-to-server — never
-//   GitHub directly.
+// GitHub sign-in and account ownership live on the platform origin.
 if (platformEnabled) {
   // --- Platform-only state (proxywar.xyz) ---------------------------
-  // Every store below lives in its OWN root (`resolvePlatformPrivateStateRoot`,
-  // default `storage/platform-private`, override via
-  // PROXYWAR_PLATFORM_STATE_ROOT) — distinct from both the premiere state
-  // root (wiped every betting cycle) and the points-ledger root above
-  // (betting's own durable state). Constructed ONLY here, inside
-  // `platformEnabled` — a betting/league process never touches this root
-  // at all, satisfying the contract's "one writer per file" rule by
-  // construction, not just by convention.
+  // Every store below lives in its own platform-private root. Constructing
+  // them only in platform mode preserves the one-writer-per-file contract.
   const platformPrivateStateRoot = resolvePlatformPrivateStateRoot();
   const platformAccountStore = await PlatformAccountStore.open(
     platformPrivateStateRoot,
@@ -2153,7 +1640,6 @@ if (platformEnabled) {
       platformAccountStore,
       platformPolicyClaimStore,
     );
-  const platformHandoffStore = new PlatformHandoffStore();
   const platformAccountSecurity = new PlatformAccountSecurity({
     hmacKey: await loadOrCreatePlatformHmacKey({
       privateStateRoot: platformPrivateStateRoot,
@@ -2169,7 +1655,6 @@ if (platformEnabled) {
     expectedOrigin: replayPremierePublicOrigin,
     production: replayPremierePublicOrigin.startsWith("https://"),
   });
-  const platformReturnOrigins = resolvePlatformReturnOrigins();
   if (githubOAuthClient !== null) {
     app.use(
       createPlatformGithubAuthRouter({
@@ -2193,8 +1678,6 @@ if (platformEnabled) {
       accounts: platformAccountStore,
       claims: platformPolicyClaimStore,
       identityLinkStore: platformGithubIdentityLinkStore,
-      handoffs: platformHandoffStore,
-      returnOrigins: platformReturnOrigins,
       githubSignInAvailable: githubOAuthClient !== null,
       artifactsRootDir,
       onOperatorError: (operatorCode, error) => {
@@ -2279,90 +1762,7 @@ if (platformEnabled) {
       },
     }),
   );
-  // Public per-account betting profile — the destination the betting
-  // leaderboard links to for a genuinely LINKED row (see
-  // `accountProfileUrl`/`PointsLeaderboard.ts` and `TraderProfilePage.ts`
-  // on the client). Keyed by THIS origin's own opaque `accountId`,
-  // resolved from `platformAccountStore` — never from a display-name
-  // match (see `/api/players/:name`'s doc, above). `betting` degrades to
-  // `null` — never a 500 — when betting is unreachable, slow, or has no
-  // shared secret configured; see `BettingProfileClient`'s doc.
-  app.get("/api/accounts/:accountId/betting-profile", async (req, res) => {
-    res.setHeader("Cache-Control", "no-store, max-age=0");
-    try {
-      const accountId = req.params.accountId;
-      const account = await platformAccountStore
-        .getAccount(accountId)
-        .catch(() => null);
-      if (account === null) {
-        res.status(404).json({ error: { code: "PLATFORM_ACCOUNT_NOT_FOUND" } });
-        return;
-      }
-      const betting =
-        bettingProfileClient === null
-          ? null
-          : await bettingProfileClient.fetchProfile(accountId);
-      res.status(200).json({
-        schemaVersion: 1,
-        accountId,
-        displayName: account.displayName,
-        betting,
-      });
-    } catch (error) {
-      sendReplayPremiereFailure(res, error);
-    }
-  });
-} else if (configuredPlatformOrigin !== undefined) {
-  app.use(
-    createBettingIdentityHandoffRouter({
-      security: replayPremiereGuestSecurity,
-      linkStore: bettingPlatformAccountLinkStore,
-      handoffClient: createPlatformHandoffClient(configuredPlatformOrigin),
-      platformOrigin: configuredPlatformOrigin,
-      ownOrigin: replayPremierePublicOrigin,
-      resolveCurrentMarketIdentityGuard: () => {
-        const currentPremiereId = replayPremiereHttpRegistry
-          .premiereIds()
-          .at(-1);
-        if (currentPremiereId === undefined) return null;
-        return (
-          replayPremiereHttpRegistry.get(currentPremiereId)?.interactions ??
-          null
-        );
-      },
-      onOperatorError: (operatorCode, error) => {
-        console.error(
-          `Identity handoff ${operatorCode}: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      },
-    }),
-  );
-  app.use(
-    createBettingIdentityStatusRouter({
-      security: replayPremiereGuestSecurity,
-      linkStore: bettingPlatformAccountLinkStore,
-      handoffAvailable: true,
-      onOperatorError: (operatorCode, error) => {
-        console.error(
-          `Identity status ${operatorCode}: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      },
-    }),
-  );
-} else {
-  app.use(
-    createBettingIdentityStatusRouter({
-      security: replayPremiereGuestSecurity,
-      linkStore: bettingPlatformAccountLinkStore,
-      handoffAvailable: false,
-    }),
-  );
 }
-
 app.use(
   createReplayPremiereRouter({
     registry: replayPremiereHttpRegistry,
@@ -2373,19 +1773,6 @@ app.use(
       // not trust forwarding headers from LAN or directly exposed peers.
       trustedProxyAddresses: REPLAY_PREMIERE_LOOPBACK_PROXY_ADDRESSES,
     }),
-    // Closes the durable Sybil hole: a signed cookie merged away by a
-    // platform-account link (on this device, another device, or a prior
-    // premiere/process lifetime) resolves to its canonical id before it
-    // ever reaches `interactions`, at every authenticated boundary — not
-    // just the settlement/points routes wired below. Local, cached file
-    // lookup (see
-    // `BettingPlatformAccountLinkStore.resolveCanonicalParticipantId`) —
-    // never a call to the platform — so a platform outage can never
-    // block, delay, or fail a trade.
-    resolveCanonicalParticipantId: (participantId) =>
-      bettingPlatformAccountLinkStore.resolveCanonicalParticipantId(
-        participantId,
-      ),
     onOperatorError: (error) => {
       console.error(formatReplayPremiereHttpOperatorError(error));
     },
@@ -2431,45 +1818,6 @@ app.use(
     },
   }),
 );
-// Stable entry point. Every admission mints a fresh premiere id, so a link to
-// /bet/<id> dies as soon as the demo cycles onto the next match. /bet resolves
-// to whatever is registered right now, which keeps a shared URL alive across
-// cycles. Redirect rather than render, so the address bar still shows the
-// concrete premiere being traded.
-app.get("/bet", (request, response) => {
-  const ids = replayPremiereHttpRegistry.premiereIds();
-  const current = ids.at(-1);
-  if (current === undefined) {
-    // Between cycles (a settled premiere replacing, or the queue briefly
-    // empty) — genuinely temporary, not a broken link, so this is neither
-    // `sendThemedNotFoundPage`'s default "Not found" framing nor a raw
-    // plain-text 503 (the previous behavior here — no branding, no nav,
-    // indistinguishable from a real outage to a visitor who just wants to
-    // trade). Same themed shell, honest copy, and a retry-shortly nudge
-    // instead of a dead end.
-    sendThemedNotFoundPage(
-      response,
-      503,
-      "No premiere is currently running. The next one comes up automatically within a few minutes.",
-      {
-        title: "Between markets",
-        ctaLabel: "Go to the league",
-        ctaHref: "/league",
-      },
-    );
-    return;
-  }
-  // The GitHub callback lands on /bet?github=… and this is a second hop, so
-  // the marker has to survive or the sign-in banner never renders. Carry only
-  // the allowlisted values — this path is reached straight from an external
-  // provider's redirect, so nothing else is echoed onward.
-  const marker = request.query.github;
-  const suffix =
-    marker === "linked" || marker === "error" || marker === "active_trade"
-      ? `?github=${marker}`
-      : "";
-  response.redirect(302, `/bet/${current}${suffix}`);
-});
 app.use(
   createReplayPremierePublicPageRouter({
     registry: replayPremiereHttpRegistry,
@@ -2539,7 +1887,6 @@ if (leagueWrapperOnly) {
       if (
         isProxyWarPublicLeaguePath(req.path) ||
         isProxyWarPublicPremiereReadPath(req.path) ||
-        isProxyWarPublicPointsReadPath(req.path) ||
         isProxyWarPublicAccountReadPath(req.path) ||
         isProxyWarPublicRendererAssetPath(req.path) ||
         // The platform's own homepage — only when platformEnabled — see
@@ -2593,11 +1940,7 @@ if (leagueWrapperOnly) {
         res.status(404).json({ error: { code: "LEAGUE_CLIP_UNAVAILABLE" } });
         return;
       }
-      if (
-        isProxyWarPublicPremiereWritePath(req.path) ||
-        isProxyWarPublicPointsWritePath(req.path) ||
-        isProxyWarPublicAccountWritePath(req.path)
-      ) {
+      if (isProxyWarPublicPremiereWritePath(req.path)) {
         next();
         return;
       }
@@ -3106,69 +2449,6 @@ if (aiLeagueRunClips !== null) {
   });
 }
 
-// Bet-origin's own copy of the league mirror (this route's static file,
-// plus its `/ai-league-runs/league*` and `/runs/league*` aliases below,
-// which resolve to the identical file) is a byte-for-byte snapshot from
-// whenever this deploy's clone was checked out. `cycle-premiere.sh`'s
-// `refresh_league_data` keeps only the STANDINGS JSON current every cycle;
-// the HTML shell's baked `generated-at`/`data-stale="false"` attributes are
-// never touched, so a visitor can land on a confidently "LIVE" page that
-// silently stopped advancing weeks ago (found live 2026-08-02: bet's copy
-// frozen at 2026-07-27T12:04:13Z while beta had already moved on).
-// Product separation: a league standings PAGE belongs on the league
-// origin, not a wagering mirror — redirect a real visitor there instead of
-// trying to keep a second copy fresh forever.
-//
-// Deliberately narrow, not a blanket redirect on these paths:
-//  - `pointsRoutesEnabled` is this file's own established signal for "this
-//    is the wagering/bet origin" (see the points-leaderboard gate above);
-//    beta and the platform apex keep their OWN mirrors fresh via separate
-//    launchd refreshers (RUNBOOK §16.1) and must never be redirected here.
-//  - `isTrustedLocalRelayRequest` excludes a request that genuinely never
-//    left the box (no Cloudflare forwarding headers), so a local tester
-//    hitting 127.0.0.1:<port>/league directly still sees their own build.
-//  - `Sec-Fetch-Dest: document` (sent by every real browser navigation,
-//    never by curl or Node's fetch/undici) is the condition that actually
-//    matters in production. Two internal safety checks require this exact
-//    path to answer 200 with real content and cannot be pointed anywhere
-//    else: `wait_for_origin` (cycle-premiere.sh) and `restartReadyUrl`
-//    (replay-premiere-loop.ts) poll it over loopback to confirm a restart
-//    landed (already covered by the trusted-local check above — this is
-//    belt-and-suspenders for them), but replay-premiere-admit.ts's
-//    leak-audit collector fetches this exact URL over the PUBLIC origin
-//    with `redirect: "error"` as a wagering safety check, and
-//    `assertProductionLeakAuditOrigin`
-//    (ReplayPremiereCheckpointProjectionStore.ts) pins every leak-audit
-//    target to this single deployment origin — there is no second origin
-//    to point that check at instead. A blanket redirect here would fail
-//    every premiere admission with `collector_redirect_rejected` and take
-//    the market down (confirmed by reading the collector's `redirect:
-//    "error"` fetch mode, not merely inferred).
-function isCopiedLeagueMirrorPagePath(requestPath: string): boolean {
-  return (
-    requestPath === "/league" ||
-    requestPath === "/runs/league" ||
-    requestPath === "/runs/league/" ||
-    requestPath.startsWith("/runs/league/") ||
-    requestPath === "/ai-league-runs/league" ||
-    requestPath === "/ai-league-runs/league/" ||
-    requestPath.startsWith("/ai-league-runs/league/")
-  );
-}
-app.use((req, res, next) => {
-  if (
-    !pointsRoutesEnabled ||
-    (req.method !== "GET" && req.method !== "HEAD") ||
-    !isCopiedLeagueMirrorPagePath(req.path) ||
-    isTrustedLocalRelayRequest(req) ||
-    req.headers["sec-fetch-dest"] !== "document"
-  ) {
-    next();
-    return;
-  }
-  res.redirect(302, platformLeagueHomeUrl);
-});
-
 app.get("/league", (req, res) => {
   res.setHeader("Content-Security-Policy", leagueContentSecurityPolicy());
   sendPublicArtifactFile(
@@ -3294,7 +2574,6 @@ app.get("/", async (_req, res, next) => {
       renderPlatformRootHtml({
         leagueUrl: platformLeagueHomeUrl,
         replaysUrl: platformReplaysHomeUrl,
-        marketUrl: platformMarketHomeUrl,
         githubSignInAvailable: githubOAuthConfig !== null,
       }),
     );

@@ -101,6 +101,8 @@ export function sanitizeDealStatedReason(value: unknown): string | null {
 }
 
 export interface AgentDealObligationState {
+  /** Deterministic: obligation:<dealID>:<obligorPlayerID>:<kind>. */
+  obligationID: string;
   dealID: string;
   obligorPlayerID: string;
   obligorName: string;
@@ -243,6 +245,11 @@ export function buildDealObligations(
       return [
         {
           ...base,
+          obligationID: dealObligationID(
+            deal.dealID,
+            deal.proposerPlayerID,
+            kind,
+          ),
           obligorPlayerID: deal.proposerPlayerID,
           obligorName: deal.proposerName,
           counterpartyPlayerID: deal.recipientPlayerID,
@@ -251,6 +258,11 @@ export function buildDealObligations(
         },
         {
           ...base,
+          obligationID: dealObligationID(
+            deal.dealID,
+            deal.recipientPlayerID,
+            kind,
+          ),
           obligorPlayerID: deal.recipientPlayerID,
           obligorName: deal.recipientName,
           counterpartyPlayerID: deal.proposerPlayerID,
@@ -265,6 +277,11 @@ export function buildDealObligations(
       return [
         {
           ...base,
+          obligationID: dealObligationID(
+            deal.dealID,
+            deal.proposerPlayerID,
+            "confirmed_attack_on_target",
+          ),
           obligorPlayerID: deal.proposerPlayerID,
           obligorName: deal.proposerName,
           counterpartyPlayerID: deal.recipientPlayerID,
@@ -280,6 +297,11 @@ export function buildDealObligations(
       return [
         {
           ...base,
+          obligationID: dealObligationID(
+            deal.dealID,
+            deal.recipientPlayerID,
+            "send_support",
+          ),
           obligorPlayerID: deal.recipientPlayerID,
           obligorName: deal.recipientName,
           counterpartyPlayerID: deal.proposerPlayerID,
@@ -290,6 +312,15 @@ export function buildDealObligations(
         },
       ];
   }
+}
+
+/** Stable identity for one server-authored obligation within a deal. */
+export function dealObligationID(
+  dealID: string,
+  obligorPlayerID: string,
+  kind: AgentDealObligationKind,
+): string {
+  return `obligation:${dealID}:${obligorPlayerID}:${kind}`;
 }
 
 function stringMetadata(

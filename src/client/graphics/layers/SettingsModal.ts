@@ -212,8 +212,8 @@ export class SettingsModal extends LitElement implements Layer {
     // P1 ghost-modal fix (pass-10 t1-03): this used to be `z-2000`, which
     // sat BELOW every high-z feature overlay this app has grown since
     // (`AiLeagueReplayOverlay.ts`'s broadcast panels top out
-    // at z-[50010] for the Analyst-mode centered panel; betting/points/
-    // sign-in surfaces reach z-[52000]-z-[54000]). With Analyst mode on,
+    // at z-[50010] for the Analyst-mode centered panel, while account/sign-in
+    // surfaces reach z-[52000]-z-[54000]). With Analyst mode on,
     // that promoted panel renders fixed and CENTERED — the exact same
     // screen region this modal opens into — so this modal's own
     // computed styles looked correct (z-index 2000, opacity 1, display

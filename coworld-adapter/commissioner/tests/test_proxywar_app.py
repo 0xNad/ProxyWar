@@ -1,3 +1,4 @@
+import asyncio
 import os
 from pathlib import Path
 from uuid import UUID
@@ -14,13 +15,14 @@ os.environ.setdefault("RULESET_STRATEGY_CONFIG_NAME", "proxywar")
 from commissioners.common.adapters import schedule_rounds_for_request
 from commissioners.common.protocol import (
     DivisionInfo,
+    EpisodeRequest,
     LeagueInfo,
     MembershipInfo,
     RoundStart,
     ScheduleRoundsRequest,
     VariantInfo,
 )
-from commissioners.common.server import create_app
+from commissioners.common.server import _send_episode_batch, create_app
 from commissioners.common.ruleset_strategy.config import (
     RulesetStrategyCommissionerConfig,
 )
@@ -145,6 +147,14 @@ def commissioner() -> ProxyWarCommissioner:
         yaml.safe_load(CONFIG_PATH.read_text())
     )
     return ProxyWarCommissioner(config)
+
+
+def commissioner_with_stagger(seconds: float) -> ProxyWarCommissioner:
+    mapping = yaml.safe_load(CONFIG_PATH.read_text())
+    mapping["dispatch_throttle"]["stagger_seconds"] = seconds
+    return ProxyWarCommissioner(
+        RulesetStrategyCommissionerConfig.from_mapping(mapping)
+    )
 
 
 def test_qualifier_self_play_survives_scheduling_protocol_round_trip() -> None:
@@ -566,6 +576,230 @@ def test_live_dispatch_throttle_caps_competition_at_three_episodes() -> None:
     assert throttle.max_concurrent_episodes(3600) == 3
     assert throttle.max_concurrent_episodes(180) == 3
     assert throttle.episode_stagger_seconds(3600) == 0
+
+
+def test_dispatch_acknowledgements_preserve_capacity_and_named_rejections_drain() -> None:
+    round_start = competition_round_start(24)
+
+    with TestClient(create_app(commissioner())).websocket_connect(
+        "/round"
+    ) as websocket:
+        websocket.send_json(round_start.to_json())
+        initial_message = websocket.receive_json()
+        assert [
+            episode["request_id"] for episode in initial_message["episodes"]
+        ] == ["0", "1", "2"]
+
+        # Partial acceptance does not free capacity: omitted ids remain sent
+        # and pending acknowledgement rather than being inferred rejected.
+        websocket.send_json({"type": "episodes_accepted", "request_ids": ["0"]})
+        with pytest.raises(WouldBlock):
+            websocket.portal.call(websocket._send_rx.receive_nowait)
+
+        # An explicit, named rejection settles only that request and drains
+        # exactly one queued replacement into the newly free slot.
+        websocket.send_json(
+            {
+                "type": "episodes_rejected",
+                "request_ids": ["1"],
+                "errors": {"1": "synthetic platform rejection"},
+            }
+        )
+        replacement = websocket.receive_json()
+        assert [episode["request_id"] for episode in replacement["episodes"]] == [
+            "3"
+        ]
+
+        # Duplicate acceptance is idempotent. A terminal failure may also
+        # arrive before its acceptance without violating the loose wire order.
+        websocket.send_json({"type": "episodes_accepted", "request_ids": ["0"]})
+        with pytest.raises(WouldBlock):
+            websocket.portal.call(websocket._send_rx.receive_nowait)
+        websocket.send_json(
+            {
+                "type": "episode_failed",
+                "request_id": "2",
+                "error": "synthetic result-before-ack settlement",
+            }
+        )
+        next_replacement = websocket.receive_json()
+        assert [
+            episode["request_id"] for episode in next_replacement["episodes"]
+        ] == ["4"]
+        websocket.send_json({"type": "episodes_accepted", "request_ids": ["2"]})
+        with pytest.raises(WouldBlock):
+            websocket.portal.call(websocket._send_rx.receive_nowait)
+
+        websocket.send_json(
+            {"type": "round_abort", "reason": "synthetic acknowledgement test complete"}
+        )
+
+
+@pytest.mark.parametrize(
+    "message, expected_reason",
+    [
+        (
+            {"type": "episodes_accepted", "request_ids": ["999"]},
+            "accepted unknown or unsent episode request id",
+        ),
+        (
+            {
+                "type": "episodes_rejected",
+                "request_ids": ["999"],
+                "errors": {"999": "synthetic"},
+            },
+            "rejected unknown or unsent episode request id",
+        ),
+    ],
+)
+def test_dispatch_rejects_unknown_acknowledgement_ids(
+    message: dict[str, object], expected_reason: str
+) -> None:
+    with TestClient(create_app(commissioner())).websocket_connect(
+        "/round"
+    ) as websocket:
+        websocket.send_json(competition_round_start(24).to_json())
+        websocket.receive_json()
+        websocket.send_json(message)
+        close_message = websocket.receive()
+        assert close_message["type"] == "websocket.close"
+        assert close_message["code"] == 1008
+        assert expected_reason in close_message["reason"]
+
+
+def test_dispatch_does_not_accept_acknowledgement_before_staggered_send() -> None:
+    with TestClient(create_app(commissioner_with_stagger(60))).websocket_connect(
+        "/round"
+    ) as websocket:
+        websocket.send_json(competition_round_start(17).to_json())
+        first = websocket.receive_json()
+        assert [episode["request_id"] for episode in first["episodes"]] == ["0"]
+
+        # Request 1 reserves throttle capacity but its delay has not elapsed,
+        # so the platform cannot validly acknowledge or reject it yet.
+        websocket.send_json(
+            {
+                "type": "episodes_rejected",
+                "request_ids": ["1"],
+                "errors": {"1": "premature synthetic rejection"},
+            }
+        )
+        close_message = websocket.receive()
+        assert close_message["type"] == "websocket.close"
+        assert close_message["code"] == 1008
+        assert "rejected unknown or unsent episode request id" in close_message["reason"]
+
+
+@pytest.mark.parametrize(
+    "message, expected_reason",
+    [
+        (
+            {"type": "episode_result", "request_id": "1", "scores": []},
+            "result for unknown or unsent episode request id",
+        ),
+        (
+            {
+                "type": "episode_failed",
+                "request_id": "1",
+                "error": "premature synthetic failure",
+            },
+            "failure for unknown or unsent episode request id",
+        ),
+    ],
+)
+def test_dispatch_rejects_terminal_message_before_staggered_send(
+    message: dict[str, object], expected_reason: str
+) -> None:
+    with TestClient(create_app(commissioner_with_stagger(60))).websocket_connect(
+        "/round"
+    ) as websocket:
+        websocket.send_json(competition_round_start(17).to_json())
+        websocket.receive_json()
+        websocket.send_json(message)
+        close_message = websocket.receive()
+        assert close_message["type"] == "websocket.close"
+        assert close_message["code"] == 1008
+        assert expected_reason in close_message["reason"]
+
+
+def test_episode_batch_is_not_marked_sent_while_waiting_for_send_lock() -> None:
+    async def scenario() -> None:
+        lock = asyncio.Lock()
+        await lock.acquire()
+        messages: list[dict[str, object]] = []
+        marked: list[str] = []
+
+        class FakeWebSocket:
+            async def send_json(self, message: dict[str, object]) -> None:
+                messages.append(message)
+
+        episode = EpisodeRequest(
+            request_id="0",
+            variant_id="v",
+            policy_version_ids=[],
+        )
+        task = asyncio.create_task(
+            _send_episode_batch(
+                FakeWebSocket(),  # type: ignore[arg-type]
+                lock,
+                [episode],
+                lambda sent: marked.extend(item.request_id for item in sent),
+            )
+        )
+        await asyncio.sleep(0)
+        assert messages == []
+        assert marked == []
+        lock.release()
+        await task
+        assert len(messages) == 1
+        assert marked == ["0"]
+
+    asyncio.run(scenario())
+
+
+def test_episode_batch_is_not_marked_sent_when_transmission_fails() -> None:
+    async def scenario() -> None:
+        marked: list[str] = []
+
+        class FailingWebSocket:
+            async def send_json(self, _message: dict[str, object]) -> None:
+                raise RuntimeError("synthetic transport failure")
+
+        episode = EpisodeRequest(
+            request_id="0",
+            variant_id="v",
+            policy_version_ids=[],
+        )
+        with pytest.raises(RuntimeError, match="synthetic transport failure"):
+            await _send_episode_batch(
+                FailingWebSocket(),  # type: ignore[arg-type]
+                asyncio.Lock(),
+                [episode],
+                lambda sent: marked.extend(item.request_id for item in sent),
+            )
+        assert marked == []
+
+    asyncio.run(scenario())
+
+
+def test_dispatch_rejects_accept_then_reject_contradiction() -> None:
+    with TestClient(create_app(commissioner())).websocket_connect(
+        "/round"
+    ) as websocket:
+        websocket.send_json(competition_round_start(24).to_json())
+        websocket.receive_json()
+        websocket.send_json({"type": "episodes_accepted", "request_ids": ["0"]})
+        websocket.send_json(
+            {
+                "type": "episodes_rejected",
+                "request_ids": ["0"],
+                "errors": {"0": "synthetic contradiction"},
+            }
+        )
+        close_message = websocket.receive()
+        assert close_message["type"] == "websocket.close"
+        assert close_message["code"] == 1008
+        assert "rejected previously accepted episode request id" in close_message["reason"]
 
 
 def test_live_17_champion_server_dispatches_three_then_drains_the_queue() -> None:

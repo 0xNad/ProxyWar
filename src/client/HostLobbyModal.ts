@@ -508,12 +508,12 @@ export class HostLobbyModal extends BaseModal {
     // modal was never opened for that flow at all — `this.lobbyId` is
     // still its initial ""). `leaveLobby()` below already no-ops on an
     // empty `lobbyId`, but `updateHistory("/")` used to run unconditionally
-    // alongside it, clobbering the URL the OTHER flow had just set (e.g.
-    // `/bet/<premiereId>`) back to "/" moments after a live premiere join
+    // alongside it, clobbering the URL the OTHER flow had just set back to
+    // "/" moments after a live premiere join
     // started — with nothing to undo it, since this modal was never
     // actually the thing the viewer navigated through. Root cause of the
-    // "Go to the live market" SPA-transition join that crawls forever:
-    // several route-scoped checks key off `window.location.pathname`, so
+    // live-premiere SPA transition that crawls forever: several route-scoped
+    // checks key off `window.location.pathname`, so
     // once it silently drifted to "/" the join could never signal complete.
     if (this.leaveLobbyOnClose && this.lobbyId) {
       this.leaveLobby();

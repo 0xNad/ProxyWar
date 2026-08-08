@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -21,9 +21,11 @@ from commissioners.common.adapters import (
 from commissioners.common.protocol import (
     DescribeDivisionRequest,
     EpisodeCancel,
+    EpisodeAccepted,
     EpisodeFailed,
     EpisodeRequest,
     EpisodeResult,
+    EpisodesRejected,
     LeagueMigrationConfigRequest,
     LeagueMigrationRequest,
     RankDivisionRequest,
@@ -104,6 +106,18 @@ def _duration_text(seconds: float) -> str:
     return f"{seconds:.1f} seconds"
 
 
+async def _send_episode_batch(
+    websocket: WebSocket,
+    send_lock: asyncio.Lock,
+    episodes: list[EpisodeRequest],
+    mark_sent: Callable[[list[EpisodeRequest]], None],
+) -> None:
+    """Mark a batch sent only after its websocket transmission succeeds."""
+    async with send_lock:
+        await websocket.send_json(ScheduleEpisodes(episodes=episodes).to_json())
+        mark_sent(episodes)
+
+
 def create_app(commissioner: Commissioner) -> FastAPI:
     app = FastAPI()
 
@@ -118,6 +132,10 @@ def create_app(commissioner: Commissioner) -> FastAPI:
         schedule: ScheduleEpisodes | None = None
         expected_request_ids: set[str] = set()
         queued_episodes: list[EpisodeRequest] = []
+        sent_request_ids: set[str] = set()
+        pending_ack_request_ids: set[str] = set()
+        accepted_request_ids: set[str] = set()
+        rejected_request_ids: set[str] = set()
         in_flight_request_ids: set[str] = set()
         results_by_request_id: dict[str, EpisodeResult] = {}
         failed_by_request_id: dict[str, EpisodeFailed] = {}
@@ -175,11 +193,34 @@ def create_app(commissioner: Commissioner) -> FastAPI:
                     ).to_json()
                 )
 
+        async def request_was_sent(request_id: str) -> bool:
+            # A successful dispatch marks the request while holding this same
+            # lock. If an immediate peer response races the send coroutine's
+            # continuation, wait for that transport boundary before deciding.
+            async with send_lock:
+                return request_id in sent_request_ids
+
+        def mark_episode_batch_sent(episodes: list[EpisodeRequest]) -> None:
+            for episode in episodes:
+                sent_request_ids.add(episode.request_id)
+                pending_ack_request_ids.add(episode.request_id)
+                schedule_episode_timeout(episode)
+
         async def send_episode_after_delay(episode: EpisodeRequest, delay_seconds: float) -> None:
             if delay_seconds > 0:
                 await asyncio.sleep(delay_seconds)
-            async with send_lock:
-                await websocket.send_json(ScheduleEpisodes(episodes=[episode]).to_json())
+            if (
+                episode.request_id in results_by_request_id
+                or episode.request_id in failed_by_request_id
+                or episode.request_id in rejected_request_ids
+            ):
+                return
+            await _send_episode_batch(
+                websocket,
+                send_lock,
+                [episode],
+                mark_episode_batch_sent,
+            )
 
         def schedule_episode_timeout(episode: EpisodeRequest) -> None:
             timeout_seconds = _episode_duration_limit_seconds(episode, variants_by_id)
@@ -197,8 +238,10 @@ def create_app(commissioner: Commissioner) -> FastAPI:
                 if len(in_flight_request_ids) >= max_in_flight(next_episode):
                     break
                 episode = queued_episodes.pop(0)
+                # Reserve throttle capacity immediately, but do not call an
+                # episode sent until its stagger delay has elapsed and the
+                # websocket transmission is actually attempted.
                 in_flight_request_ids.add(episode.request_id)
-                schedule_episode_timeout(episode)
                 to_send.append(episode)
             if not to_send:
                 return
@@ -210,8 +253,12 @@ def create_app(commissioner: Commissioner) -> FastAPI:
                 # of one message per admitted window, instead of N
                 # back-to-back single-episode messages before any of them
                 # are acknowledged.
-                async with send_lock:
-                    await websocket.send_json(ScheduleEpisodes(episodes=to_send).to_json())
+                await _send_episode_batch(
+                    websocket,
+                    send_lock,
+                    to_send,
+                    mark_episode_batch_sent,
+                )
                 return
             for offset, episode in enumerate(to_send):
                 delay = 0.0 if initial and offset == 0 else interval * offset
@@ -228,6 +275,8 @@ def create_app(commissioner: Commissioner) -> FastAPI:
                 return
             reason = f"Episode job duration exceeded {_duration_text(timeout_seconds)}"
             failed_by_request_id[request_id] = EpisodeFailed(request_id=request_id, error=reason)
+            pending_ack_request_ids.discard(request_id)
+            accepted_request_ids.discard(request_id)
             in_flight_request_ids.discard(request_id)
             async with send_lock:
                 await websocket.send_json(EpisodeCancel(request_id=request_id, reason=reason).to_json())
@@ -251,10 +300,12 @@ def create_app(commissioner: Commissioner) -> FastAPI:
                         queued_episodes = list(schedule.episodes)
                         await fill_throttled_episode_window(initial=True)
                     else:
-                        async with send_lock:
-                            await websocket.send_json(schedule.to_json())
-                        for episode in schedule.episodes:
-                            schedule_episode_timeout(episode)
+                        await _send_episode_batch(
+                            websocket,
+                            send_lock,
+                            schedule.episodes,
+                            mark_episode_batch_sent,
+                        )
                     if not expected_request_ids:
                         round_complete_sent = True
                         async with send_lock:
@@ -319,11 +370,19 @@ def create_app(commissioner: Commissioner) -> FastAPI:
                     if expected_request_ids and result.request_id not in expected_request_ids:
                         await websocket.close(code=1008, reason=f"unknown episode request id: {result.request_id!r}")
                         return
+                    if not await request_was_sent(result.request_id):
+                        await websocket.close(
+                            code=1008,
+                            reason=f"result for unknown or unsent episode request id: {result.request_id!r}",
+                        )
+                        return
                     if result.request_id in failed_by_request_id:
                         continue
                     task = cancel_tasks.pop(result.request_id, None)
                     if task is not None:
                         task.cancel()
+                    pending_ack_request_ids.discard(result.request_id)
+                    accepted_request_ids.discard(result.request_id)
                     in_flight_request_ids.discard(result.request_id)
                     results_by_request_id[result.request_id] = result
                 elif msg_type == "episode_failed":
@@ -334,18 +393,76 @@ def create_app(commissioner: Commissioner) -> FastAPI:
                     if expected_request_ids and failed.request_id not in expected_request_ids:
                         await websocket.close(code=1008, reason=f"unknown episode request id: {failed.request_id!r}")
                         return
+                    if not await request_was_sent(failed.request_id):
+                        await websocket.close(
+                            code=1008,
+                            reason=f"failure for unknown or unsent episode request id: {failed.request_id!r}",
+                        )
+                        return
                     if failed.request_id in results_by_request_id:
                         continue
                     task = cancel_tasks.pop(failed.request_id, None)
                     if task is not None:
                         task.cancel()
+                    pending_ack_request_ids.discard(failed.request_id)
+                    accepted_request_ids.discard(failed.request_id)
                     in_flight_request_ids.discard(failed.request_id)
                     failed_by_request_id[failed.request_id] = failed
                 elif msg_type == "episodes_accepted":
-                    continue
+                    accepted = EpisodeAccepted.model_validate(
+                        {key: value for key, value in data.items() if key != "type"}
+                    )
+                    for request_id in accepted.request_ids:
+                        if request_id not in expected_request_ids or not await request_was_sent(request_id):
+                            await websocket.close(
+                                code=1008,
+                                reason=f"accepted unknown or unsent episode request id: {request_id!r}",
+                            )
+                            return
+                        if request_id in rejected_request_ids:
+                            await websocket.close(
+                                code=1008,
+                                reason=f"accepted previously rejected episode request id: {request_id!r}",
+                            )
+                            return
+                        # A terminal result may race ahead of the acknowledgement.
+                        # Treat its later acceptance as idempotent rather than
+                        # reopening capacity or restarting a timer.
+                        if request_id in results_by_request_id or request_id in failed_by_request_id:
+                            continue
+                        pending_ack_request_ids.discard(request_id)
+                        accepted_request_ids.add(request_id)
                 elif msg_type == "episodes_rejected":
-                    await websocket.close(code=1011, reason="platform rejected scheduled episodes")
-                    return
+                    rejected = EpisodesRejected.model_validate(
+                        {key: value for key, value in data.items() if key != "type"}
+                    )
+                    for request_id in rejected.request_ids:
+                        if request_id not in expected_request_ids or not await request_was_sent(request_id):
+                            await websocket.close(
+                                code=1008,
+                                reason=f"rejected unknown or unsent episode request id: {request_id!r}",
+                            )
+                            return
+                        if request_id in accepted_request_ids or request_id in results_by_request_id:
+                            await websocket.close(
+                                code=1008,
+                                reason=f"rejected previously accepted episode request id: {request_id!r}",
+                            )
+                            return
+                        if request_id in rejected_request_ids:
+                            continue
+                        rejected_request_ids.add(request_id)
+                        pending_ack_request_ids.discard(request_id)
+                        in_flight_request_ids.discard(request_id)
+                        task = cancel_tasks.pop(request_id, None)
+                        if task is not None:
+                            task.cancel()
+                        failed_by_request_id[request_id] = EpisodeFailed(
+                            request_id=request_id,
+                            error=rejected.errors.get(
+                                request_id, "platform rejected scheduled episode"
+                            ),
+                        )
                 elif msg_type == "round_abort":
                     RoundAbort.model_validate({key: value for key, value in data.items() if key != "type"})
                     await websocket.close(code=1000)

@@ -417,13 +417,11 @@ describe("ReplayPremiere public page and card", () => {
       const browserAccept =
         "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8";
 
-      // Real browser navigation (both the league `/premiere/<id>` and the
-      // dedicated betting `/bet/<id>` surface share this exact router — see
-      // ProxyWarPublicArtifacts.ts's `matchProxyWarPublicPremiereReadPath`)
-      // must NEVER render the raw {"error":{"code":"..."}} body — the P0
+      // Real browser navigation to `/premiere/<id>` must never render the raw
+      // {"error":{"code":"..."}} body — the P0
       // fix for QA screenshot pass-4/m-20 (Chrome's own JSON viewer, zero
       // site chrome, for a plain page load).
-      for (const route of [`/premiere/${unknown}`, `/bet/${unknown}`]) {
+      for (const route of [`/premiere/${unknown}`]) {
         const response = await fetch(`${baseUrl}${route}`, {
           headers: { Accept: browserAccept },
         });
@@ -441,11 +439,10 @@ describe("ReplayPremiere public page and card", () => {
 
       // A bare/wildcard Accept (curl, plain `fetch()`, health checks, any
       // non-browser API client) is NOT a browser navigation and must keep
-      // the exact pre-existing JSON contract this same file's other test
-      // already pins for `/premiere/<id>` — proven here for `/bet/<id>`
-      // too, and again with an EXPLICIT `Accept: application/json`.
+      // the exact pre-existing JSON contract, including with an explicit
+      // `Accept: application/json`.
       for (const accept of [undefined, "application/json"]) {
-        const response = await fetch(`${baseUrl}/bet/${unknown}`, {
+        const response = await fetch(`${baseUrl}/premiere/${unknown}`, {
           headers: accept === undefined ? {} : { Accept: accept },
         });
         expect(response.status).toBe(404);

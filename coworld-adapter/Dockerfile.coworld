@@ -3,26 +3,11 @@ FROM --platform=$TARGETPLATFORM node:24-bookworm-slim
 ENV GAME_ENV=dev
 ENV HUSKY=0
 ENV PROXYWAR_REPO=/app/proxywar
-# This image IS the league package: build the client with every
-# betting/wagering surface excluded (vite.config.ts aliases the wagering
-# module graph to inert stubs and hard-fails if any wagering module loads).
-# Operator boundary 2026-07-27: speculation lives only on the separate bet
-# surface, never inside the league. beta/bet deployments build without this
-# env and are unaffected.
-ENV PROXYWAR_LEAGUE_CLIENT=1
-
 WORKDIR /app/proxywar
 COPY proxywar/package.json proxywar/package-lock.json ./
 RUN npm ci --ignore-scripts
 COPY proxywar/ ./
 RUN npm run build-prod
-# Mechanical proof on the exact assets this package ships: fail the image
-# build if the wagering build sentinel appears anywhere in static/. The
-# inverse self-test (a NORMAL build must CONTAIN the sentinel, so this scan
-# can never pass because the sentinel rotted) runs host-side in the
-# build:image chain via `npm run verify:league-client`.
-RUN node scripts/scan-wagering-sentinel.mjs --expect absent --dir static
-
 WORKDIR /app/integration
 COPY integration/package.json integration/package-lock.json ./
 RUN npm ci --ignore-scripts

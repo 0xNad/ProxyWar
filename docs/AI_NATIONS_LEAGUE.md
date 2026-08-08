@@ -222,7 +222,7 @@ participant a spawn tile via `AgentSpawnAssignment.assignSpawnSlots`:
    participant via greedy maximin (farthest-point) sampling, seeded from the
    single highest-quality qualifying candidate.
 3. Each roster participant is assigned `slots[(rosterIndex + episodeIndex) %
-   slots.length]` - a modular rotation so that `slots.length` consecutive
+slots.length]` - a modular rotation so that `slots.length` consecutive
    episodes reusing the same map/roster cycle every participant through
    every slot exactly once.
 4. `validateSpawnSlotUniqueness` guards the selection never repeats a tile;
@@ -275,17 +275,17 @@ observation JSON and still may only select one offered `LegalAction.id`.
 
 ## Action Coverage Matrix
 
-| Action family | Status | Proof source |
-| --- | --- | --- |
-| Spawn | Working (deterministic assignment, never a brain choice) | Every roster participant is assigned a quality-floored, well-spaced tile via `AgentSpawnAssignment.assignSpawnSlots`, submitted directly as a normal `spawn` intent before any brain decision runs. |
-| Hold | Working | Safe no-intent fallback. |
-| Alliance | Working | `player.canSendAllianceRequest(other)`. |
-| Attack | Working | `sharesBorderWith` plus `canAttackPlayer`. |
-| Build | Working for `Defense Post`, `City`, `Factory` | `player.canBuild(unit, tile)`. |
-| Support / donate | Implemented when allies exist | `canDonateTroops` / `canDonateGold`; normal FFA needs an accepted alliance first. |
-| Embargo | Working for start embargo | Alive non-friendly target with no current outgoing embargo. |
-| Missile / nuke | Not yet exposed | Needs target selection, silo/cooldown checks, and alliance-safety policy. |
-| Expansion | Blocked as explicit action | Land growth is simulation-driven; there is no client expansion intent. |
+| Action family    | Status                                                   | Proof source                                                                                                                                                                                        |
+| ---------------- | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Spawn            | Working (deterministic assignment, never a brain choice) | Every roster participant is assigned a quality-floored, well-spaced tile via `AgentSpawnAssignment.assignSpawnSlots`, submitted directly as a normal `spawn` intent before any brain decision runs. |
+| Hold             | Working                                                  | Safe no-intent fallback.                                                                                                                                                                            |
+| Alliance         | Working                                                  | `player.canSendAllianceRequest(other)`.                                                                                                                                                             |
+| Attack           | Working                                                  | `sharesBorderWith` plus `canAttackPlayer`.                                                                                                                                                          |
+| Build            | Working for `Defense Post`, `City`, `Factory`            | `player.canBuild(unit, tile)`.                                                                                                                                                                      |
+| Support / donate | Implemented when allies exist                            | `canDonateTroops` / `canDonateGold`; normal FFA needs an accepted alliance first.                                                                                                                   |
+| Embargo          | Working for start embargo                                | Alive non-friendly target with no current outgoing embargo.                                                                                                                                         |
+| Missile / nuke   | Not yet exposed                                          | Needs target selection, silo/cooldown checks, and alliance-safety policy.                                                                                                                           |
+| Expansion        | Blocked as explicit action                               | Land growth is simulation-driven; there is no client expansion intent.                                                                                                                              |
 
 ## What Works Now
 
@@ -539,8 +539,6 @@ For same-Wi-Fi/LAN testers:
 ```bash
 PROXYWAR_BETA_CODE="your-private-code" npm run agent:closed-beta:lan
 ```
-
-Remote setup details live in `docs/REMOTE_FRIENDS_BETA.md`.
 
 Open:
 

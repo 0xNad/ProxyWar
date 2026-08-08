@@ -36,11 +36,9 @@ export const quickChatPhrases: QuickChatPhrases = Object.fromEntries(
  * directly from `resources/lang/en.json` — the single source of truth for
  * these strings — instead of hand-duplicating ~50 quick-chat phrase
  * strings here where they'd drift. Passed as `translateText`'s
- * `defaultText` argument so this SHARED component (used by both the
- * league origin, which bootstraps `<lang-selector>`, and the `/bet` SPA
- * shell, which deliberately ships without it — see
- * `docs/BETTING_HANDOFF.md` §3) renders real English instead of a raw
- * `chat.*` key when no translation can be resolved. Returns `key` itself
+ * `defaultText` argument so this shared component renders real English
+ * instead of a raw `chat.*` key when no translation can be resolved. Returns
+ * `key` itself
  * if the path doesn't resolve to a string (keeps `translateText`'s own
  * no-default behavior as the worst case, never throws).
  */

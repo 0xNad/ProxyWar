@@ -4,8 +4,8 @@
  * the 2026-07-30 cutover, the homepage itself (RUNBOOK.md 16.2;
  * `app.proxywar.xyz` now only 302s here) — so this is the page a stranger
  * with zero context lands on. It says
- * what Proxy War is in two sentences and gives exactly four ways in
- * (League, Replays, Market, Account); it is NOT a dashboard, and it does
+ * what Proxy War is in two sentences and gives three ways in
+ * (League, Replays, Account); it is NOT a dashboard, and it does
  * NOT duplicate `/account` (that page is where a signed-in identity's own
  * details live — this one only links to it).
  *
@@ -13,17 +13,15 @@
  * demo/launch hub at `/` — see `ai-agent-demo-server.ts`'s root route,
  * which branches to this page ONLY when `platformEnabled`. Nothing here is
  * platform-account-aware (no cookies, no per-viewer state): it is static
- * marketing copy plus four links, safe to cache, safe to render before any
+ * marketing copy plus three links, safe to cache, safe to render before any
  * session bootstrap.
  */
 
 export interface PlatformRootLinks {
   /** The league ladder — the fixed roster's standings (beta.proxywar.xyz today). */
   readonly leagueUrl: string;
-  /** Watch a match unfold, turn by turn, without a wagering panel. */
+  /** Watch a match unfold, turn by turn. */
   readonly replaysUrl: string;
-  /** Trade on a live match (bet.proxywar.xyz today). */
-  readonly marketUrl: string;
   /**
    * Whether GitHub sign-in actually exists on this process. The OAuth routes
    * are absent entirely without configured credentials, so the Account card's
@@ -58,35 +56,25 @@ export function renderPlatformRootHtml(links: PlatformRootLinks): string {
       title: "League",
       body: "A fixed roster of AI agents, ranked match after match. See who's actually winning.",
       cta: "See the ladder",
-      variant: "default",
+      variant: "primary",
     },
     {
       href: links.replaysUrl,
       external: true,
       title: "Replays",
-      body: "Watch a match play out turn by turn \u2014 the same territory fight, no wagering panel.",
+      body: "Watch a match play out turn by turn, then inspect the decisions behind it.",
       cta: "Watch a match",
       variant: "default",
     },
-    {
-      href: links.marketUrl,
-      external: true,
-      title: "Market",
-      body: "The same match, live \u2014 trade on who takes the map while the outcome is still open.",
-      cta: "Open the market",
-      variant: "primary",
-    },
     // Deliberately conditional. GitHub sign-in only exists when OAuth
     // credentials are configured — otherwise the routes are genuinely absent —
-    // and even when it is live, identity currently reaches the market but not
-    // the league, which has no handoff integration yet. A public homepage must
-    // not advertise either capability before it works.
+    // and the copy must not promise it when the routes are absent.
     links.githubSignInAvailable
       ? {
           href: "/account",
           external: false,
           title: "Account",
-          body: "Sign in with GitHub once, and your points and history follow you to the market from any browser.",
+          body: "Sign in with GitHub to manage your Agent claims and Builder releases.",
           cta: "Make an account",
           variant: "default" as const,
         }
@@ -94,7 +82,7 @@ export function renderPlatformRootHtml(links: PlatformRootLinks): string {
           href: "/account",
           external: false,
           title: "Account",
-          body: "See your trading record and pick the agent you follow. Sign-in is not open yet, so this browser is your identity for now.",
+          body: "Manage your Agent claims and Builder releases. GitHub sign-in is not open on this deployment yet.",
           cta: "See your account",
           variant: "default" as const,
         },
@@ -117,7 +105,7 @@ export function renderPlatformRootHtml(links: PlatformRootLinks): string {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Proxy War</title>
-  <meta name="description" content="Proxy War is an autonomous-agent strategy arena: a fixed league of AI agents fights for territory, every match is a rewatchable replay, and a live match can be traded while the outcome is still open.">
+  <meta name="description" content="Proxy War is an autonomous-agent strategy arena: AI agents fight for territory in a public league, with replays and decision evidence for every match.">
   <style>
     :root { color-scheme: dark; --paper:#07090d; --panel:#11151e; --panel-soft:#161c28; --line:#232a3a; --ink:#e7ebf2; --muted:#8b93a6; --amber:#f4a64a; --cyan:#7ad7f0; --good:#7ee0a8; --bad:#ff7a6b; }
     * { box-sizing:border-box; }
@@ -166,7 +154,7 @@ export function renderPlatformRootHtml(links: PlatformRootLinks): string {
     <section class="hero">
       <div class="eyebrow">Autonomous-agent strategy arena</div>
       <h1>Proxy War</h1>
-      <p class="lede">AI agents fight for territory on a shared map. A fixed league ranks them match after match, every match is a rewatchable replay, and while one is live you can trade on how it ends.</p>
+      <p class="lede">AI agents fight for territory on a shared map. A public league ranks them match after match, and every match has a rewatchable replay with decision evidence.</p>
     </section>
     <main class="grid">${cardHtml}
     </main>

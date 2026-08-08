@@ -15,27 +15,18 @@ import { resolveAgentIdentityView } from "../server/identity/IdentityMatching";
 import type { IdentityRegistrySnapshot } from "../server/identity/IdentityRegistry";
 
 /**
- * `premiere:candidates` — read-only ranking CLI for Stage 3's SEALED
- * premiere lane (product overhaul spec Stage 3 item 2). Lists the sealed,
- * unpublished items sitting in the real-premiere queue's `ready/` directory
- * (`premiere-queue-lib.sh`) and ranks them for an operator to hand-pick from
+ * `premiere:candidates` — read-only ranking CLI for sealed premiere bundles.
+ * Lists unpublished items in the configured queue's `ready/` directory and
+ * ranks them for an operator to hand-pick
  * ahead of a future scheduling step. This CLI NEVER writes to the
  * `FeaturedMatch` store (`premiere:schedule`/`publish`, built elsewhere,
  * own that) and NEVER mixes with the archive lane (`feature:candidates`).
  *
  * Evidence honesty (see `FeaturedMatchEvidenceSchema`'s own doc comment):
  * a sealed queue item's `bundle.source.json` embeds the OpenFront game
- * record plus seat identities, but `generate-premiere-queue.sh` deletes the
- * raw episode artifacts (`decisions.jsonl`, the drama/story reports
- * `AgentDecisionLogWriter.ts` writes, etc.) the moment a bundle is sealed —
- * confirmed by reading that script's own `rm -rf "$work_tmp" "$bundle_dir"`
- * cleanup after `pq_publish`. `meta.json` and `bundle.source.json` alike
- * carry no `decisionCount`/`degradedCount`/drama/story fields (verified by
- * reading `PremiereWageringSourceBundle.ts`'s bundle writer end to end —
- * the only per-episode AI-decision stats it ever reads,
- * `xp-request-roster.json`'s `decisionCount`/`degradedCount`, are consumed
- * for the wagering lane's own purposes and never copied into the bundle it
- * writes). So for THIS lane those signals are always `null`, always with an
+ * record plus seat identities, while `meta.json` and `bundle.source.json`
+ * carry no decision/degradation/drama fields. For this lane those signals
+ * are always `null`, always with an
  * explanatory `evidence.notes` entry — never a fabricated zero. Ranking
  * below is therefore turnCount/seatCount only; this CLI never opens
  * `bundle.source.json` at all (it can embed an arbitrarily large game
@@ -106,12 +97,12 @@ export interface RankPremiereCandidatesResult {
   rejected: PremiereQueueRejection[];
 }
 
-/** Same default as `premiere-queue-lib.sh`'s `PW_QUEUE_ROOT` — `${PW_BET_QUEUE_DIR:-$HOME/.proxywar-deploy/premiere-queue}`. */
+/** Queue root for locally sealed premiere bundles. */
 export function resolveDefaultQueueReadyDir(
   environment: Record<string, string | undefined> = process.env,
   homeDirectory: string = os.homedir(),
 ): string {
-  const configured = environment.PW_BET_QUEUE_DIR?.trim();
+  const configured = environment.PROXYWAR_PREMIERE_QUEUE_DIR?.trim();
   const queueRoot =
     configured === undefined || configured === ""
       ? path.join(homeDirectory, ".proxywar-deploy", "premiere-queue")
@@ -359,13 +350,12 @@ type SealedBundleSeat = z.infer<
   typeof SealedBundleSeatsOnlySchema
 >["seats"][number];
 
-/** Same bound `PremiereWageringSourceBundle.ts`'s `MAX_GAME_RECORD_BYTES` uses for the same file family (`bundle.source.json` embeds a full game record). */
+/** Bounded because `bundle.source.json` embeds a full game record. */
 const MAX_SEALED_BUNDLE_BYTES = 512 * 1024 * 1024;
 
 /**
  * `displayName` is the real Coworld player name for this seat (verbatim
- * `game-record.json` `player.username` — see `PremiereWageringSourceBundle.ts`'s
- * own doc comment on why), the SAME namespace `findAgentForPlayerName`
+ * `game-record.json` `player.username`), the same namespace `findAgentForPlayerName`
  * matches on everywhere else. The bundle's `policyIdentity.policyName`
  * (when `namespace === "softmax_policy_version"`) is the EXACT policy
  * label live for this specific captured match — passed as
@@ -375,8 +365,7 @@ const MAX_SEALED_BUNDLE_BYTES = 512 * 1024 * 1024;
  * "current"): footage of an already-played sealed match should credit
  * the version that ACTUALLY played in it, not whatever the agent has
  * moved on to by air time. `local_manifest` seats (a locally-produced
- * exhibition identity scheme, never emitted by THIS queue's own
- * `PremiereWageringSourceBundle.ts` builder today) have no comparable
+ * exhibition identity scheme) have no comparable
  * label in this shape — `agentVersionId` stays `null` rather than
  * guessed from a different field.
  */

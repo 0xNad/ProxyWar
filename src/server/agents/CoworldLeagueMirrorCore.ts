@@ -166,7 +166,9 @@ export function activeChampionPolicyLabelsByPlayerId(
     if (
       !membership ||
       membership.status !== "competing" ||
-      (substatus !== null && substatus !== "active") ||
+      (substatus !== null &&
+        substatus !== "active" &&
+        substatus !== "champion") ||
       membership.is_champion !== true ||
       asString(membership.end_time) !== null
     ) {

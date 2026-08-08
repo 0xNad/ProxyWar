@@ -1,19 +1,9 @@
 /**
  * Platform-only secret material: the private state root and HMAC signing
  * key for `proxywar.xyz`'s own session cookie
- * (`PlatformAccountSecurity`). Deliberately its own root, distinct from
- * every one betting or the league own:
- *
- * - NOT `resolveReplayPremierePrivateStateRoot()` — that root is `rm -rf`'d
- *   wholesale every ~25 minutes by `cycle-premiere.sh` (see that script's
- *   header comment). A platform account surviving exactly as long as the
- *   next betting cycle would be absurd — the account is the one thing
- *   meant to outlive every premiere, every cycle, every origin restart.
- * - NOT `resolveReplayPremierePointsLedgerRoot()` — that root is
- *   betting's own durable state (points, and formerly display names).
- *   Betting must remain free to reshape or wipe its own root without
- *   touching platform accounts, and vice versa — see the "one writer per
- *   file" rule in the platform build's contract.
+ * (`PlatformAccountSecurity`). Deliberately its own durable root, which must
+ * outlive every premiere and origin restart and never share a lifecycle with
+ * replay-private state.
  *
  * Key loading itself is not reimplemented here:
  * `loadOrCreateReplayPremiereGuestHmacKey` (re-exported below as

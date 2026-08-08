@@ -4,7 +4,6 @@ import { assetUrl } from "../../../core/AssetUrls";
 import { EventBus } from "../../../core/EventBus";
 import { GameType } from "../../../core/game/Game";
 import { GameView } from "../../../core/game/GameView";
-import { isBettingPremiereRoute } from "../../AiLeagueReplayMode";
 import { crazyGamesSDK } from "../../CrazyGamesSDK";
 import {
   ReplaySpeedChangeEvent,
@@ -258,16 +257,9 @@ export class GameRightSidebar extends LitElement implements Layer {
 
   private async onExitButtonClick() {
     const isAlive = this.game.myPlayer()?.isAlive();
-    // A betting-premiere viewer stakes real chips on this match but is
-    // never `isAlive` (they're not a player) — without this, "Leave
-    // match" skipped the confirmation entirely for the one context where
-    // leaving actually costs something.
-    const hasStakeAtRisk = isBettingPremiereRoute();
-    if (isAlive || hasStakeAtRisk) {
+    if (isAlive) {
       const isConfirmed = confirm(
-        hasStakeAtRisk
-          ? translateText("game_controls.exit_confirmation_betting")
-          : translateText("help_modal.exit_confirmation"),
+        translateText("help_modal.exit_confirmation"),
       );
       if (!isConfirmed) return;
     }

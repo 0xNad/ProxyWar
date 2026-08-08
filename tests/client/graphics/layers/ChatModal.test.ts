@@ -1,12 +1,9 @@
 /**
- * Coverage for the quick-chat raw-i18n-key leak QA reproduced on
- * bet.proxywar.xyz (4 passes: `chat.category`, `chat.cat.help/attack/
+ * Coverage for the quick-chat raw-i18n-key leak (`chat.category`,
+ * `chat.cat.help/attack/
  * defend/greet/misc/warnings`, `chat.build`, `chat.send` rendered as
  * literal strings, both visually and in the accessible tree). Root cause:
- * `ChatModal` lives in `graphics/layers/` — the SHARED game shell used by
- * BOTH the league origin (which bootstraps `<lang-selector>`) and the
- * `/bet` SPA shell, which deliberately ships without the translation
- * bootstrap (see `docs/BETTING_HANDOFF.md` §3). `translateText()` returns
+ * `ChatModal` lives in the shared game shell. `translateText()` returns
  * the raw key whenever it can't resolve a real translation (no
  * `<lang-selector>` in the DOM, translations still loading, or the key
  * missing) — hardcoding English would regress the bootstrapped shell, so
@@ -17,7 +14,7 @@
  *
  * Uses the REAL `translateText()` (not mocked), exactly like
  * `GameInfoModal.test.ts`'s precedent for this leak class, against either
- * no `<lang-selector>` at all (the bet shell) or a fake one with loaded
+ * no `<lang-selector>` at all or a fake one with loaded
  * translations (a translated shell) to prove both sides of the contract.
  */
 import { afterEach, describe, expect, it } from "vitest";
@@ -76,7 +73,7 @@ describe("retired quick-chat compatibility", () => {
   });
 });
 
-describe("ChatModal quick-chat i18n fallback — unbootstrapped shell (no <lang-selector>, e.g. /bet)", () => {
+describe("ChatModal quick-chat i18n fallback without <lang-selector>", () => {
   let modal: ChatModal;
 
   afterEach(() => {

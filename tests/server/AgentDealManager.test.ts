@@ -309,6 +309,28 @@ describe("AgentDealManager (league-driven timing, visibility, privacy)", () => {
     expect(await run()).toEqual(await run());
     expect(await run()).toEqual(["deal:P_A:P_B:non_aggression_pact:0"]);
   });
+
+  it("preserves same-step causal append order instead of lexically sorting events", async () => {
+    // Participant B applies first, but B's deal id sorts AFTER A's. The
+    // immutable ledger must retain application order; sorting by deal id would
+    // invert the two server-authored facts within the same decision step.
+    const harness = dealLeagueHarness({
+      seats: [B, A, C],
+      scripts: [
+        [pickByID("deal_propose:P_A:non_aggression_pact")],
+        [pickByID("deal_propose:P_C:non_aggression_pact")],
+        [],
+      ],
+    });
+    await harness.league.runDecisionTurn({ turnNumber: 0 });
+
+    const events = harness.league.dealLedger().events;
+    expect(events.map((event) => [event.step, event.actorPlayerID])).toEqual([
+      [0, "P_B"],
+      [0, "P_A"],
+    ]);
+    expect(events[0].dealID > events[1].dealID).toBe(true);
+  });
 });
 
 describe("AgentDealManager caps and clamps (direct)", () => {

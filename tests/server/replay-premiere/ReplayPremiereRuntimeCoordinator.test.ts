@@ -259,9 +259,6 @@ describe("ReplayPremiereRuntimeCoordinator", () => {
     expect(retried.operations).toContain("revealed");
     expect(runtime.readLifecycleState()).toBe("revealed");
     expect(runtime.readReveal()).toMatchObject({ state: "revealed" });
-    expect(runtime.readLiveVisibleSequence()).toBe(
-      drafts.at(-1)!.descriptor.endSequence,
-    );
     expect(
       store.recovered.events.filter(
         (event) => event.eventType === "premiere_reveal_committed",
@@ -1380,7 +1377,6 @@ function createInteractions(
     getPremiereState: () =>
       state.runtime?.readLifecycleState() ?? initialPremiereState,
     getReleasedContext: () => null,
-    getLiveVisibleSequence: () => 0,
     persistence: { persist: async () => undefined },
     signAttribution: () => "a".repeat(64),
     canonicalPremiereUrl: `https://beta.proxywar.xyz/premieres/${gate.premiereId}`,

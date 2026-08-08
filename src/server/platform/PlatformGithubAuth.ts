@@ -1,14 +1,9 @@
 /**
  * "Sign in with GitHub" on the platform — `proxywar.xyz` is the sole
- * account and session authority, so this is the ONLY place in the whole
- * system GitHub OAuth happens (see the platform build's contract; betting
- * no longer does this directly — it goes through the handoff instead, see
- * `src/server/replay-premiere/BettingIdentityHandoff.ts`).
+ * account and session authority, so this is the only place in the system
+ * GitHub OAuth happens.
  *
- * Three routes, all under `/api/auth/github/` (ungated by wagering — see
- * `PROXYWAR_WAGERING_ENABLED`'s absence from every check below — the
- * platform runs with wagering off and still serves accounts, which is the
- * entire point of the re-scope):
+ * Three routes, all under `/api/auth/github/`:
  *
  * - `GET .../start` — mints the link-intent cookie, redirects to GitHub.
  * - `GET .../callback` — GitHub redirects back here. A deliberate
@@ -33,9 +28,12 @@ import type {
   PlatformGithubLinkResult,
 } from "./PlatformGithubIdentityLinkStore";
 
-export const PLATFORM_GITHUB_AUTH_START_PATH = "/api/auth/github/start" as const;
-export const PLATFORM_GITHUB_AUTH_CALLBACK_PATH = "/api/auth/github/callback" as const;
-export const PLATFORM_GITHUB_AUTH_STATUS_PATH = "/api/auth/github/status" as const;
+export const PLATFORM_GITHUB_AUTH_START_PATH =
+  "/api/auth/github/start" as const;
+export const PLATFORM_GITHUB_AUTH_CALLBACK_PATH =
+  "/api/auth/github/callback" as const;
+export const PLATFORM_GITHUB_AUTH_STATUS_PATH =
+  "/api/auth/github/status" as const;
 
 export interface PlatformGithubAuthRouterOptions {
   readonly security: PlatformAccountSecurity;
@@ -59,10 +57,11 @@ export function createPlatformGithubAuthRouter(
   router.get(PLATFORM_GITHUB_AUTH_START_PATH, (req: Request, res: Response) => {
     res.setHeader("Cache-Control", "no-store, max-age=0");
     try {
-      const bootstrap = options.security.bootstrapRead(requestSecurityHeaders(req));
-      const { cookie: linkIntentCookie, nonce } = options.security.mintLinkIntentCookie(
-        bootstrap.account.accountId,
+      const bootstrap = options.security.bootstrapRead(
+        requestSecurityHeaders(req),
       );
+      const { cookie: linkIntentCookie, nonce } =
+        options.security.mintLinkIntentCookie(bootstrap.account.accountId);
       const setCookies =
         bootstrap.setCookie === null
           ? [linkIntentCookie]
@@ -85,7 +84,10 @@ export function createPlatformGithubAuthRouter(
       res.setHeader("Cache-Control", "no-store, max-age=0");
       const failClosed = (operatorCode: string, error?: unknown): void => {
         logError(operatorCode, error ?? new Error(operatorCode));
-        res.setHeader("Set-Cookie", options.security.clearLinkIntentCookieHeader());
+        res.setHeader(
+          "Set-Cookie",
+          options.security.clearLinkIntentCookieHeader(),
+        );
         res.redirect(302, `${returnPath}?github=error`);
       };
       try {
@@ -98,7 +100,8 @@ export function createPlatformGithubAuthRouter(
           req.headers.cookie,
           account.accountId,
         );
-        const state = typeof req.query.state === "string" ? req.query.state : null;
+        const state =
+          typeof req.query.state === "string" ? req.query.state : null;
         const code = typeof req.query.code === "string" ? req.query.code : null;
         if (linkIntent === null) {
           failClosed("platform_github_auth_link_intent_missing_or_expired");
@@ -114,7 +117,10 @@ export function createPlatformGithubAuthRouter(
         }
         let accessToken: string;
         try {
-          accessToken = await options.oauthClient.exchangeCodeForToken(code, redirectUri);
+          accessToken = await options.oauthClient.exchangeCodeForToken(
+            code,
+            redirectUri,
+          );
         } catch (error) {
           failClosed("platform_github_auth_code_exchange_failed", error);
           return;
@@ -152,8 +158,11 @@ export function createPlatformGithubAuthRouter(
     async (req: Request, res: Response) => {
       res.setHeader("Cache-Control", "no-store, max-age=0");
       try {
-        const bootstrap = options.security.bootstrapRead(requestSecurityHeaders(req));
-        if (bootstrap.setCookie !== null) res.setHeader("Set-Cookie", bootstrap.setCookie);
+        const bootstrap = options.security.bootstrapRead(
+          requestSecurityHeaders(req),
+        );
+        if (bootstrap.setCookie !== null)
+          res.setHeader("Set-Cookie", bootstrap.setCookie);
         const identity = await options.identityLinkStore.getStatus(
           bootstrap.account.accountId,
         );

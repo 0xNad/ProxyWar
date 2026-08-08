@@ -143,6 +143,16 @@ export interface AgentDealActionOutcome {
 }
 
 export interface AgentDealLedgerSnapshot {
+  /** True only after match-end force resolution has completed. */
+  finalized: boolean;
+  finalizedAtStep: number | null;
+  finalizedAtTurn: number | null;
+  /** Maps every decision-step window to its authoritative game turn. */
+  decisionSteps: Array<{
+    step: number;
+    turnNumber: number;
+    recordsBeforeStep: number;
+  }>;
   deals: Array<
     Omit<AgentDealState, "goldAmount" | "troopAmount" | "obligations"> & {
       goldAmount?: string;
@@ -172,7 +182,9 @@ export class AgentDealManager {
   private currentStep = -1;
   private currentTurnNumber = 0;
   private readonly stepStartSequence: number[] = [];
+  private readonly stepTurnNumbers: number[] = [];
   private finalized = false;
+  private finalizedAtTurn: number | null = null;
 
   currentDecisionStep(): number {
     return this.currentStep;
@@ -203,8 +215,12 @@ export class AgentDealManager {
     gameState?: Game;
     records: readonly AgentDecisionRecord[];
   }): void {
+    if (this.finalized) {
+      throw new Error("deal ledger is finalized");
+    }
     this.currentStep += 1;
     this.stepStartSequence.push(input.records.length);
+    this.stepTurnNumbers.push(input.turnNumber);
     this.currentTurnNumber = input.turnNumber;
 
     const events: AgentDealLedgerEvent[] = [];
@@ -338,6 +354,9 @@ export class AgentDealManager {
      */
     statedReason?: string | null;
   }): AgentDealActionOutcome {
+    if (this.finalized) {
+      throw new Error("deal ledger is finalized");
+    }
     const kind = input.action.kind;
     const dealAction = kind.replace("deal_", "");
     if (input.playerID === null || input.playerID.length === 0) {
@@ -385,11 +404,16 @@ export class AgentDealManager {
   finalize(input: {
     gameState?: Game;
     records: readonly AgentDecisionRecord[];
+    /** Authoritative match-end turn; falls back to the final step's start. */
+    turnNumber?: number;
   }): void {
     if (this.finalized) {
       return;
     }
     this.finalized = true;
+    this.finalizedAtTurn =
+      input.turnNumber ??
+      (this.currentStep >= 0 ? this.currentTurnNumber : null);
     const events: AgentDealLedgerEvent[] = [];
     if (this.currentStep >= 0) {
       const start = this.stepStartSequence[this.currentStep];
@@ -427,21 +451,38 @@ export class AgentDealManager {
   /** Full serializable ledger (operator/test surface — sees everything). */
   ledgerSnapshot(): AgentDealLedgerSnapshot {
     return {
-      deals: this.deals.map((deal) => ({
-        ...deal,
-        goldAmount:
-          deal.goldAmount === undefined ? undefined : `${deal.goldAmount}`,
-        troopAmount: deal.troopAmount,
-        obligations: deal.obligations.map((obligation) => ({
-          ...obligation,
-          goldAmount:
-            obligation.goldAmount === undefined
-              ? undefined
-              : `${obligation.goldAmount}`,
-          donatedGold: `${obligation.donatedGold}`,
-        })),
+      finalized: this.finalized,
+      finalizedAtStep: this.finalized ? this.currentStep : null,
+      finalizedAtTurn: this.finalized ? this.finalizedAtTurn : null,
+      decisionSteps: this.stepStartSequence.map((recordsBeforeStep, step) => ({
+        step,
+        turnNumber: this.stepTurnNumbers[step] ?? 0,
+        recordsBeforeStep,
       })),
-      events: [...this.events],
+      deals: this.deals
+        .map((deal) => ({
+          ...deal,
+          goldAmount:
+            deal.goldAmount === undefined ? undefined : `${deal.goldAmount}`,
+          troopAmount: deal.troopAmount,
+          obligations: deal.obligations
+            .map((obligation) => ({
+              ...obligation,
+              goldAmount:
+                obligation.goldAmount === undefined
+                  ? undefined
+                  : `${obligation.goldAmount}`,
+              donatedGold: `${obligation.donatedGold}`,
+            }))
+            .sort((a, b) =>
+              stableStringCompare(a.obligationID, b.obligationID),
+            ),
+        }))
+        .sort((a, b) => stableStringCompare(a.dealID, b.dealID)),
+      // Application/referee append order is causal order. It is already
+      // deterministic (participant-ordered submission pass + deterministic
+      // compliance walk); lexical re-sorting can invert same-step causes.
+      events: this.events.map((event) => ({ ...event })),
     };
   }
 
@@ -1167,4 +1208,8 @@ function chooseJointAttackTarget(
         b.tilesOwned - a.tilesOwned || a.playerID.localeCompare(b.playerID),
     );
   return candidates[0] ?? null;
+}
+
+function stableStringCompare(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
 }

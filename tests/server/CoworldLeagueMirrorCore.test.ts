@@ -80,7 +80,9 @@ const standingsFixture = [
 const championMembershipsFixture = [
   {
     status: "competing",
-    substatus: "active",
+    // Coworld currently emits this explicit substatus for a valid champion.
+    // The mirror must not require the older `active` spelling.
+    substatus: "champion",
     is_champion: true,
     end_time: null,
     start_time: "2026-07-15T18:00:00Z",
@@ -178,6 +180,7 @@ const replayPayloadFixture = {
   inlineRunArtifacts: {
     "game-record.json": "{}",
     "decisions.jsonl": "{}",
+    "deal-ledger.json": '{"schemaVersion":1,"deals":[],"events":[]}',
     "../escape.json": "{}",
     "bad/name.json": "{}",
   },
@@ -218,7 +221,7 @@ describe("CoworldLeagueMirrorCore", () => {
     expect(division?.name).toBe("Competition");
   });
 
-  test("maps only active competing champion memberships by player", () => {
+  test("maps active and champion competing memberships by player", () => {
     const labels = activeChampionPolicyLabelsByPlayerId([
       ...championMembershipsFixture,
       {
@@ -359,6 +362,7 @@ describe("CoworldLeagueMirrorCore", () => {
     expect(Object.keys(replay?.inlineRunArtifacts ?? {})).toEqual([
       "game-record.json",
       "decisions.jsonl",
+      "deal-ledger.json",
     ]);
     expect(replay?.spectatorReplay).not.toBeNull();
   });
