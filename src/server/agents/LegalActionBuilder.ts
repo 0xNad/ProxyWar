@@ -870,6 +870,118 @@ function hostileAttackTroopPercentages(): number[] {
  * (spatial coverage first, then quality top-up) when the full scan exceeds
  * `maxCandidates` - a pool-curation/performance concern, not agent choice.
  */
+
+/**
+ * `buildSpawnCandidates`'s `localLandRatioFromIndex` sampling radius: ~9.6%
+ * of the map's shorter dimension, floored at 16 tiles so tiny maps still
+ * get a meaningful disk.
+ */
+function defaultLocalLandRadius(gameMap: GameMap): number {
+  return Math.max(
+    16,
+    Math.round(Math.min(gameMap.width(), gameMap.height()) * 0.096),
+  );
+}
+
+/**
+ * Per-row prefix-sum ("summed area") index over `GameMap.isLand`, built
+ * once per `buildSpawnCandidates` scan and reused by every candidate's
+ * `localLandRatioFromIndex` query below. Reduces the disk-average land
+ * ratio from an O(radius^2) brute-force scan per candidate (the dominant
+ * episode start-up cost on large maps - ~215s of a ~505s profiled 12P
+ * Europe episode start) to one O(width*height) build plus O(radius) per
+ * query, with byte-identical land/total/ratio output (proven in
+ * tests/server/LocalLandRatioEquivalence.test.ts against a brute-force
+ * reference). `prefix` is a single flat `Uint32Array`, row-major with a
+ * (width+1)-wide stride so each row's exclusive prefix sum starts at 0 -
+ * no per-row JS arrays, no per-query allocation. Local to one
+ * `buildSpawnCandidates` call; released for GC once that call returns.
+ */
+export interface LandPrefixIndex {
+  readonly prefix: Uint32Array;
+  readonly width: number;
+  readonly height: number;
+}
+
+export function buildLandPrefixIndex(gameMap: GameMap): LandPrefixIndex {
+  const width = gameMap.width();
+  const height = gameMap.height();
+  const stride = width + 1;
+  const prefix = new Uint32Array(stride * height);
+  for (let y = 0; y < height; y++) {
+    const rowBase = y * stride;
+    let land = 0;
+    prefix[rowBase] = 0;
+    for (let x = 0; x < width; x++) {
+      if (gameMap.isLand(gameMap.ref(x, y))) {
+        land += 1;
+      }
+      prefix[rowBase + x + 1] = land;
+    }
+  }
+  return { prefix, width, height };
+}
+
+/**
+ * Largest integer `h` with `h * h <= value`, exact regardless of
+ * `Math.sqrt`'s floating-point rounding (adjusts by at most one step
+ * either way).
+ */
+function integerSqrtFloor(value: number): number {
+  if (value <= 0) {
+    return 0;
+  }
+  let root = Math.floor(Math.sqrt(value));
+  while ((root + 1) * (root + 1) <= value) {
+    root += 1;
+  }
+  while (root * root > value) {
+    root -= 1;
+  }
+  return root;
+}
+
+/**
+ * O(radius) disk-average land ratio using a prebuilt `LandPrefixIndex`.
+ * For each row `y`, the exact circular membership test a brute-force scan
+ * would apply per-cell (`dx*dx + dy*dy <= radiusSquared`) reduces to one
+ * integer half-width (`integerSqrtFloor`) bounding that row's contiguous
+ * x-range, then an O(1) range-sum against the row's prefix sums. `y` is
+ * clamped to `[centerY-radius, centerY+radius]` before the loop starts, so
+ * `dy^2 <= radiusSquared` always holds - the row-remaining term passed to
+ * `integerSqrtFloor` is never negative. `halfWidth <= radius` always
+ * follows (since `radiusSquared - dy*dy <= radiusSquared`), so clamping
+ * that range to `[0, width-1]` reproduces a brute force's map-edge
+ * clipping exactly - never a coarser or tighter bound.
+ */
+export function localLandRatioFromIndex(
+  index: LandPrefixIndex,
+  centerX: number,
+  centerY: number,
+  radius: number,
+): number {
+  const { prefix, width, height } = index;
+  const stride = width + 1;
+  const radiusSquared = radius * radius;
+  const yLo = Math.max(0, centerY - radius);
+  const yHi = Math.min(height - 1, centerY + radius);
+  let land = 0;
+  let total = 0;
+  for (let y = yLo; y <= yHi; y++) {
+    const dy = y - centerY;
+    const halfWidth = integerSqrtFloor(radiusSquared - dy * dy);
+    const xLo = Math.max(0, centerX - halfWidth);
+    const xHi = Math.min(width - 1, centerX + halfWidth);
+    if (xHi < xLo) {
+      continue;
+    }
+    total += xHi - xLo + 1;
+    const rowBase = y * stride;
+    land += prefix[rowBase + xHi + 1] - prefix[rowBase + xLo];
+  }
+  return total === 0 ? 0 : land / total;
+}
+
 export function buildSpawnCandidates(
   gameMap: GameMap,
   options: SpawnCandidateBuilderOptions = {},
@@ -899,10 +1011,8 @@ export function buildSpawnCandidates(
   const diplomacyScores: number[] = [];
   const opportunityScores: number[] = [];
   const localLandScores: number[] = [];
-  const localLandRadius = Math.max(
-    16,
-    Math.round(Math.min(gameMap.width(), gameMap.height()) * 0.096),
-  );
+  const localLandRadius = defaultLocalLandRadius(gameMap);
+  const landIndex = buildLandPrefixIndex(gameMap);
 
   gameMap.forEachTile((tile) => {
     if (tile % stride !== 0) {
@@ -930,7 +1040,12 @@ export function buildSpawnCandidates(
       1 -
       Math.abs(y - centerY) /
         Math.max(centerY, gameMap.height() - 1 - centerY, 1);
-    const localLandScore = localLandRatio(gameMap, tile, localLandRadius);
+    const localLandScore = localLandRatioFromIndex(
+      landIndex,
+      x,
+      y,
+      localLandRadius,
+    );
     const opportunityScore =
       edgeDistance / maxEdgeDistance + deterministicFraction(tile);
 
@@ -1019,40 +1134,6 @@ export function buildSpawnCandidates(
   }
 
   return selected.map(materialize);
-}
-
-function localLandRatio(
-  gameMap: GameMap,
-  tile: TileRef,
-  radius: number,
-): number {
-  const centerX = gameMap.x(tile);
-  const centerY = gameMap.y(tile);
-  const radiusSquared = radius * radius;
-  let land = 0;
-  let total = 0;
-  for (
-    let y = Math.max(0, centerY - radius);
-    y <= Math.min(gameMap.height() - 1, centerY + radius);
-    y += 1
-  ) {
-    for (
-      let x = Math.max(0, centerX - radius);
-      x <= Math.min(gameMap.width() - 1, centerX + radius);
-      x += 1
-    ) {
-      const dx = x - centerX;
-      const dy = y - centerY;
-      if (dx * dx + dy * dy > radiusSquared) {
-        continue;
-      }
-      total += 1;
-      if (gameMap.isLand(gameMap.ref(x, y))) {
-        land += 1;
-      }
-    }
-  }
-  return total === 0 ? 0 : land / total;
 }
 
 function boatTroopFractions(
