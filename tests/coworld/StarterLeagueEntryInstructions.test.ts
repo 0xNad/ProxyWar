@@ -42,4 +42,28 @@ describe("coworld-adapter/tester-starter-llm league-entry instructions", () => {
       expect(content).not.toMatch(staleHandoffPhrase);
     }
   });
+
+  it("teaches the complete structured-deal loop without claiming a trust score", async () => {
+    const [readme, onboarding, deals] = await Promise.all([
+      fs.readFile(path.join(starterDir, "README.md"), "utf8"),
+      fs.readFile(path.join(starterDir, "ONBOARDING.md"), "utf8"),
+      fs.readFile(path.join(starterDir, "DEALS.md"), "utf8"),
+    ]);
+
+    for (const content of [readme, onboarding, deals]) {
+      expect(content).toContain("dealPolicies");
+      expect(content).toContain("breakDealIDs");
+      expect(content).toContain("proposalOptions");
+    }
+    expect(deals).toContain("selectedDealActionId");
+    expect(deals).toContain("non_aggression_pact");
+    expect(deals).toContain("trade_security_pact");
+    expect(deals).toContain("joint_attack");
+    expect(deals).toContain("support_request");
+    expect(deals).toContain("at least 20% of troops");
+    expect(deals).toContain("playerID");
+    expect(deals).toContain("dealID");
+    expect(deals).toContain("terminal deal evidence");
+    expect(deals).not.toMatch(/measures? (?:latent )?trust/i);
+  });
 });
