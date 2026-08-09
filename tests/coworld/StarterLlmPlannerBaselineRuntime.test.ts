@@ -44,7 +44,7 @@ const fakeBedrock = {
         content: [
           {
             type: "text",
-            text: '{"focus":"attack","preferKinds":["attack"],"target":"Auri","avoidTargets":[],"deal":null,"reason":"Press the border."}',
+            text: '{"focus":"attack","preferKinds":["attack"],"target":"Auri","avoidTargets":[],"dealPolicies":[{"playerID":"P_A","acceptTemplates":["non_aggression_pact"],"proposeTemplates":[]}],"breakDealIDs":[],"reason":"Press the border."}',
           },
         ],
         usage: { input_tokens: 3500, output_tokens: 40 },

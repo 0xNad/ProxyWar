@@ -48,7 +48,7 @@ bash launch.sh my-agent
 
 This checks your setup (offering to install uv / start Docker, and signing you in if
 needed), builds your agent, uploads it (Bedrock auto-enabled), and prints your
-**policy id** (a UUID) — a diagnostic reference, not proof you're in the league yet.
+**policy-version id** (a UUID) — a diagnostic reference, not proof you're in the league yet.
 First build pulls a base image (a couple of minutes, once).
 
 Uploading isn't entering the league — do that next:
@@ -75,8 +75,8 @@ Open **`llm-player.mjs`** and edit four things — that's your agent:
   promise without spending the game move.
 
 The model doesn't pick individual moves — it writes a short **PLAN** (`{"focus": ...,
-"preferKinds": [...], "target": ..., "avoidTargets": [...], "deal": ...,
-"reason": ...}`) from your
+"preferKinds": [...], "target": ..., "avoidTargets": [...], "dealPolicies": ...,
+"breakDealIDs": [...], "reason": ...}`) from your
 `STRATEGY` plus a compact `GAME` state (`self`, `rivals`, `avoid` list, `legalActions`).
 The agent answers every decision instantly from the current plan and refreshes the plan in
 the background every `PLAN_EVERY` decisions (default 6). If the model returns junk or
@@ -84,10 +84,22 @@ Bedrock hiccups, it keeps playing on the last good plan and flags the decision a
 
 When `legalActions` includes `deal_*` entries, `chooseDealMove` may also return
 one of those exact offered ids as `selectedDealActionId`. It rides beside
-`selectedLegalActionId`; it is never a second game move. The shipped posture
-accepts only bounded non-aggression/trade-security promises, proposes only a
-non-aggression promise, and avoids accidentally attacking a partner. Structured
-promises do not create an engine alliance or prevent an intentional defection.
+`selectedLegalActionId`; it is never a second game move. The shipped planner sets a
+separate deal disposition for each relevant stable `playerID`. Omitted rivals and
+templates default to rejection. It nominates proposals only from
+`observation.deals.proposalOptions`, suppresses the same pair/template retry for 12
+decisions, and answers incoming proposals before making another offer. The server
+independently enforces a three-decision proposal cooldown.
+
+Accepted promises produce explicit obligations. The executor prioritizes remaining
+support donations and qualifying joint-attack pressure before ordinary strategy, while
+continuing to filter attacks and embargoes forbidden by pending pacts. Selection is not
+proof of fulfillment: the replay referee confirms the game effect and records the
+terminal verdict. A target name alone cannot authorize betrayal; the plan must include
+the exact active promise in `breakDealIDs`.
+
+Read [`DEALS.md`](DEALS.md) before changing `chooseDealMove`. It lists every template,
+who becomes obligated, the exact observation/action fields, and the tests to run.
 
 > **Spawn placement:** you never choose where you spawn and there is no spawn decision to
 > handle in your model - the game deterministically assigns every player a quality-floored,
@@ -109,8 +121,10 @@ Edit `STRATEGY`/`buildState` → `bash launch.sh my-agent` → `uvx --from cowor
 
 ## Prefer a non-LLM agent?
 
-`starter-player.mjs` is a ~80-line rule agent (no model, no Bedrock). Point `launch.sh` at
-`--run node --run /app/starter-player.mjs` and drop `--use-bedrock`.
+`starter-player.mjs` is a conservative rule agent (no model, no Bedrock). It accepts
+only promises it already knows how to keep, rejects positive commitments, and filters
+accidental pact violations. Point `launch.sh` at `--run node --run
+/app/starter-player.mjs` and drop `--use-bedrock`.
 
 ## Troubleshooting
 

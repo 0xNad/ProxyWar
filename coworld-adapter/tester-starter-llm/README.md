@@ -37,7 +37,7 @@ bash launch.sh my-agent
 ```
 
 First run: checks your setup → signs you in (browser, once) → builds → uploads
-(**Bedrock auto-enabled — no API key needed**) → prints your **policy id**. Uploading
+(**Bedrock auto-enabled — no API key needed**) → prints your **policy-version id**. Uploading
 isn't entering the league — do that next:
 
 ```bash
@@ -69,14 +69,54 @@ preferred moves, named target, allies to spare) instantly each turn; **avoids re
 the same move** when it stops helping; parses the model's reply robustly; and **keeps
 playing on the last good plan (loudly flagged)** if Bedrock ever hiccups. In a
 deal-enabled match it uses the optional diplomacy slot alongside the game move,
-accepts only non-aggression/trade-security promises under its declared posture,
-proposes only non-aggression promises, and avoids accidentally attacking a partner
-while its promise is pending. Naming that partner as the plan target remains an
-explicit, replay-visible defection.
+answers offers from a standing policy keyed by the rival's stable player ID,
+proposes only exact terms the plan nominates from the current option list, and avoids
+repeating the same rejected or expired offer for 12 decision steps. It actively works
+to fulfill support and attack promises it owes. A strategic target change cannot break
+a pact accidentally; deliberate defection requires the exact active `dealID` in
+`breakDealIDs`.
+
+## Make deals part of your strategy
+
+The model's plan includes per-rival deal policy, not one global accept/decline switch:
+
+```json
+{
+  "dealPolicies": [
+    {
+      "playerID": "P_A",
+      "acceptTemplates": ["non_aggression_pact"],
+      "proposeTemplates": ["joint_attack"]
+    }
+  ],
+  "breakDealIDs": []
+}
+```
+
+- An omitted rival or template defaults to **reject / do not propose**.
+- The selector matches proposals to `observation.deals.proposalOptions` and then returns
+  the exact offered `deal_propose` action ID. The server also enforces its own
+  three-decision proposal cooldown.
+- `support_request` binds the accepting recipient to donate the stated gold **or**
+  troops. `joint_attack` binds the proposer to make a qualifying attack on the named
+  target; accepting that pledge does not bind the recipient to attack.
+- `non_aggression_pact` and `trade_security_pact` are honored by default. To break one,
+  name its exact active ID in `breakDealIDs`; the replay referee, not your policy, judges
+  the resulting effect.
+- Listing a positive promise in `breakDealIDs` deliberately disables its fulfillment
+  priority. The referee still decides whether it expires unfulfilled, becomes moot, or
+  reaches another terminal state.
+- `rivalReliability` is observed promise follow-through in this match. It is useful
+  context, not a universal trust score.
+
+See **[`DEALS.md`](DEALS.md)** for the action contract, template semantics, examples,
+and a test checklist.
 
 ## Prefer a non-LLM agent?
 
-`starter-player.mjs` is a ~80-line rule agent (no model, no Bedrock). To use it instead,
+`starter-player.mjs` is a small conservative rule agent (no model, no Bedrock). It
+accepts only non-aggression/trade-security promises, rejects positive commitments it
+does not implement, and avoids accidental pact violations. To use it instead,
 edit `launch.sh` to `--run node --run /app/starter-player.mjs` and drop `--use-bedrock`.
 
 ## More

@@ -3,20 +3,9 @@ import path from "path";
 import { describe, expect, it } from "vitest";
 
 /**
- * Phase B starter surface: `buildState` may surface the flag-gated
- * observation `deals` block as ONE compact `deals` line (<= 300 chars,
- * absent => byte-identical state), and the deterministic executor gains a
- * deal posture: auto-reject offers from the plan's target, auto-accept
- * pact offers from avoidTargets or under the "accept" posture, propose one
- * non-aggression pact when focus === "ally", and never violate an accepted
- * pact unless the LLM plan explicitly names the partner as target.
- *
- * Like StarterEconomyState.test.ts, the module opens a WebSocket at import
- * time, so the pure functions (clean/buildState/dealConstraints/
- * chooseDealMove/choose) are extracted from the shipped source text and
- * evaluated standalone.
+ * Public LLM starter deal policy. The module opens a WebSocket at import time,
+ * so these tests extract and execute its pure selection functions.
  */
-
 const STARTER_FILE = path.join(
   process.cwd(),
   "coworld-adapter",
@@ -26,9 +15,7 @@ const STARTER_FILE = path.join(
 
 function extractFunction(source: string, name: string): string {
   const start = source.indexOf(`function ${name}(`);
-  expect(start, `function ${name} not found in llm-player.mjs`).toBeGreaterThan(
-    -1,
-  );
+  expect(start, `function ${name} not found`).toBeGreaterThan(-1);
   const end = source.indexOf("\n}", start);
   expect(end).toBeGreaterThan(start);
   return source.slice(start, end + 2);
@@ -38,10 +25,12 @@ async function loadBuildState(): Promise<
   (obs: unknown, actions: unknown[]) => Record<string, unknown>
 > {
   const source = await fs.readFile(STARTER_FILE, "utf8");
-  const cleanSrc = extractFunction(source, "clean");
-  const buildStateSrc = extractFunction(source, "buildState");
   return new Function(
-    `function avoidActionIDs() { return []; }\n${cleanSrc}\n${buildStateSrc}\nreturn buildState;`,
+    `function avoidActionIDs() { return []; }
+     ${extractFunction(source, "clean")}
+     ${extractFunction(source, "cleanID")}
+     ${extractFunction(source, "buildState")}
+     return buildState;`,
   )() as (obs: unknown, actions: unknown[]) => Record<string, unknown>;
 }
 
@@ -49,41 +38,67 @@ type ChooseFn = (
   plan: unknown,
   actions: unknown[],
   obs: unknown,
-) => { id: string; kind: string } | undefined;
+) => { id: string; kind: string } | undefined | null;
 
-/**
- * `choose` (the GAME move) and `chooseDealMove` (the deal posture) are now
- * two independent selections: the starter sends the deal in the separate
- * `selectedDealActionId` slot ALONGSIDE the game action, so a pact never
- * costs it a turn. Both are extracted here from the shipped source text.
- */
 async function loadSelectors(): Promise<{
   choose: ChooseFn;
   dealMove: ChooseFn;
+  socialNote: (
+    plan: unknown,
+    chosen: unknown,
+    dealMove: unknown,
+    obs: unknown,
+  ) => string;
 }> {
   const source = await fs.readFile(STARTER_FILE, "utf8");
-  const orderSrc = source.match(/const DEFAULT_ORDER = \[[\s\S]*?\];/)?.[0];
-  expect(orderSrc, "DEFAULT_ORDER not found in llm-player.mjs").toBeDefined();
-  const cleanSrc = extractFunction(source, "clean");
-  const constraintsSrc = extractFunction(source, "dealConstraints");
-  const moveSrc = extractFunction(source, "chooseDealMove");
-  const chooseSrc = extractFunction(source, "choose");
-  const preamble = `${orderSrc}\nfunction avoidActionIDs() { return []; }\nlet plan = null;\n${cleanSrc}\n${constraintsSrc}\n${moveSrc}\n${chooseSrc}\n`;
+  const order = source.match(/const DEFAULT_ORDER = \[[\s\S]*?\];/)?.[0];
+  const retry = source.match(/const DEAL_PROPOSAL_RETRY_STEPS = \d+;/)?.[0];
+  const attempts = source.match(/const proposalAttempts = new Map\(\);/)?.[0];
+  expect(order).toBeDefined();
+  expect(retry).toBeDefined();
+  expect(attempts).toBeDefined();
   return new Function(
-    `${preamble}return {
+    `${order}
+     ${retry}
+     ${attempts}
+     function avoidActionIDs() { return []; }
+     let plan = null;
+     ${extractFunction(source, "clean")}
+     ${extractFunction(source, "cleanID")}
+     ${extractFunction(source, "dealConstraints")}
+     ${extractFunction(source, "dealPolicyFor")}
+     ${extractFunction(source, "chooseDealMove")}
+     ${extractFunction(source, "chooseObligationMove")}
+     ${extractFunction(source, "socialActionNote")}
+     ${extractFunction(source, "choose")}
+     return {
        choose: (p, actions, obs) => { plan = p; return choose(actions, obs); },
        dealMove: (p, actions, obs) => { plan = p; return chooseDealMove(actions, obs); },
+       socialNote: (p, chosen, dealMove, obs) => {
+         plan = p;
+         return socialActionNote(chosen, dealMove, obs);
+       },
      };`,
-  )() as { choose: ChooseFn; dealMove: ChooseFn };
+  )() as {
+    choose: ChooseFn;
+    dealMove: ChooseFn;
+    socialNote: (
+      plan: unknown,
+      chosen: unknown,
+      dealMove: unknown,
+      obs: unknown,
+    ) => string;
+  };
 }
 
-async function loadChoose(): Promise<ChooseFn> {
-  return (await loadSelectors()).choose;
-}
-
-async function loadDealMove(): Promise<ChooseFn> {
-  return (await loadSelectors()).dealMove;
-}
+const BASE_PLAN = {
+  focus: "expand",
+  preferKinds: [],
+  target: null,
+  avoidTargets: [],
+  dealPolicies: [],
+  breakDealIDs: [],
+};
 
 const BASE_OBS = {
   phase: "active",
@@ -140,12 +155,13 @@ const EXPAND = {
 
 function incomingProposal(
   dealID: string,
+  proposerPlayerID: string,
   proposerName: string,
   template = "non_aggression_pact",
 ) {
   return {
     dealID,
-    proposerPlayerID: `P_${proposerName}`,
+    proposerPlayerID,
     proposerName,
     recipientPlayerID: "P_ME",
     recipientName: "Me",
@@ -160,28 +176,49 @@ function responseActions(dealID: string) {
     {
       id: `deal_accept:${dealID}`,
       kind: "deal_accept",
-      label: "Accept pact",
+      label: "Accept deal",
       risk: { level: "medium" },
       metadata: { dealID },
     },
     {
       id: `deal_reject:${dealID}`,
       kind: "deal_reject",
-      label: "Reject pact",
+      label: "Reject deal",
       risk: { level: "none" },
       metadata: { dealID },
     },
   ];
 }
 
-describe("tester-starter-llm buildState deals line", () => {
-  it("without a deals block the state has no deals key and stays byte-identical", async () => {
+function proposalOption(recipientPlayerID: string, template: string) {
+  return {
+    recipientPlayerID,
+    recipientName: recipientPlayerID === "P_A" ? "Auri" : "Sefirot",
+    terms: { template, durationSteps: 12 },
+  };
+}
+
+function proposalAction(recipientPlayerID: string, template: string) {
+  return {
+    id: `deal_propose:${recipientPlayerID}:${template}`,
+    kind: "deal_propose",
+    label: `Propose ${template} to ${recipientPlayerID}`,
+    risk: { level: "low" },
+    metadata: { recipientID: recipientPlayerID, template },
+  };
+}
+
+describe("tester-starter-llm bounded deal state", () => {
+  it("is byte-compatible when deals are absent", async () => {
     const buildState = await loadBuildState();
     const state = buildState(BASE_OBS, [HOLD]);
     expect("deals" in state).toBe(false);
+    expect((state.rivals as Array<{ playerID?: string }>)[0].playerID).toBe(
+      undefined,
+    );
   });
 
-  it("with a deals block it adds ONE compact deals line (<= 300 chars) and nothing else", async () => {
+  it("preserves exact counterparties, obligations, terms, options, and reliability", async () => {
     const buildState = await loadBuildState();
     const withoutDeals = buildState(BASE_OBS, [HOLD]);
     const withDeals = buildState(
@@ -189,42 +226,106 @@ describe("tester-starter-llm buildState deals line", () => {
         ...BASE_OBS,
         deals: {
           decisionStep: 4,
-          incomingProposals: [incomingProposal("D1", "Auri")],
-          outgoingProposals: [
-            incomingProposal("D2", "Me"),
-            incomingProposal("D3", "Me"),
-          ],
-          activeDeals: [
+          incomingProposals: [
             {
-              dealID: "D4",
-              template: "non_aggression_pact",
-              proposerPlayerID: "P_ME",
-              proposerName: "Me",
-              recipientPlayerID: "P_S",
-              recipientName: "Sefirot",
-              stepsRemaining: 8,
-              obligations: [],
+              ...incomingProposal("D1", "P_A", "Auri", "support_request"),
+              terms: {
+                template: "support_request",
+                durationSteps: 6,
+                goldAmount: "150000",
+                troopAmount: 20000,
+              },
             },
           ],
-          proposalOptions: [],
-          rivalReliability: [],
+          outgoingProposals: [],
+          activeDeals: [
+            {
+              dealID: "D2",
+              template: "joint_attack",
+              proposerPlayerID: "P_ME",
+              proposerName: "Me",
+              recipientPlayerID: "P_A",
+              recipientName: "Auri",
+              stepsRemaining: 4,
+              obligations: [
+                {
+                  obligorPlayerID: "P_ME",
+                  status: "pending",
+                  kind: "confirmed_attack_on_target",
+                  targetPlayerID: "P_S",
+                  targetName: "Sefirot",
+                },
+              ],
+            },
+          ],
+          proposalOptions: [
+            {
+              recipientPlayerID: "P_S",
+              recipientName: "Sefirot",
+              terms: {
+                template: "support_request",
+                durationSteps: 6,
+                goldAmount: "150000",
+                troopAmount: 20000,
+              },
+            },
+          ],
+          rivalReliability: [
+            {
+              playerID: "P_A",
+              name: "Auri",
+              fulfilled: 2,
+              terminalNonMoot: 3,
+              reliability: 0.67,
+            },
+          ],
         },
       },
       [HOLD],
     );
-    const deals = withDeals.deals as string;
-    expect(typeof deals).toBe("string");
-    expect(deals.length).toBeLessThanOrEqual(300);
-    expect(deals).not.toContain("\n");
-    expect(deals).toContain("1 offer in (nap from Auri)");
-    expect(deals).toContain("1 active (nap w/ Sefirot, 8 left)");
-    expect(deals).toContain("2 out");
-
-    const { deals: _line, ...rest } = withDeals;
+    const deals = withDeals.deals as {
+      counterparties: Array<Record<string, unknown>>;
+      incoming: Array<Record<string, unknown>>;
+      active: Array<Record<string, unknown>>;
+      proposalOptions: Array<Record<string, unknown>>;
+      reliability: Array<Record<string, unknown>>;
+    };
+    expect(deals.counterparties).toContainEqual({
+      playerID: "P_A",
+      name: "Auri",
+    });
+    expect(deals.incoming[0]).toMatchObject({
+      id: "D1",
+      fromID: "P_A",
+      template: "support_request",
+      gold: "150000",
+      troops: 20000,
+    });
+    expect(deals.active[0]).toMatchObject({
+      id: "D2",
+      withID: "P_A",
+      template: "joint_attack",
+      owe: [{ kind: "confirmed_attack_on_target", targetID: "P_S" }],
+    });
+    expect(deals.proposalOptions[0]).toMatchObject({
+      toID: "P_S",
+      template: "support_request",
+      duration: 6,
+      gold: "150000",
+      troops: 20000,
+    });
+    expect(deals.reliability[0]).toMatchObject({
+      playerID: "P_A",
+      kept: 2,
+      judged: 3,
+      rate: 0.67,
+    });
+    expect(JSON.stringify(deals).length).toBeLessThan(2500);
+    const { deals: _deals, ...rest } = withDeals;
     expect(JSON.stringify(rest)).toBe(JSON.stringify(withoutDeals));
   });
 
-  it("an empty deals block adds nothing", async () => {
+  it("keeps stable counterparty IDs visible during an empty proposal cooldown", async () => {
     const buildState = await loadBuildState();
     const state = buildState(
       {
@@ -240,230 +341,560 @@ describe("tester-starter-llm buildState deals line", () => {
       },
       [HOLD],
     );
-    expect("deals" in state).toBe(false);
-    expect(JSON.stringify(state)).toBe(
-      JSON.stringify(buildState(BASE_OBS, [HOLD])),
-    );
+    expect(state.deals).toMatchObject({
+      step: 4,
+      counterparties: [
+        { playerID: "P_A", name: "Auri" },
+        { playerID: "P_S", name: "Sefirot" },
+      ],
+      incoming: [],
+      active: [],
+      outgoing: [],
+      reliability: [],
+      proposalOptions: [],
+    });
   });
 });
 
-describe("tester-starter-llm decision reply shape", () => {
-  it("sends the deal in its own slot alongside the game action, and only when there is one", async () => {
+describe("tester-starter-llm deal selection", () => {
+  it("keeps exact game and deal selections in separate slots", async () => {
     const source = await fs.readFile(STARTER_FILE, "utf8");
-    // Both selections are made, independently, on every decision.
     expect(source).toContain("const chosen = choose(actions, obs);");
     expect(source).toContain("const dealMove = chooseDealMove(actions, obs);");
-    // The game action is always sent; the deal slot only when one was chosen.
     expect(source).toContain("selectedLegalActionId: chosen.id,");
     expect(source).toContain(
       "...(dealMove ? { selectedDealActionId: dealMove.id } : {}),",
     );
-    // Deal kinds are not plannable game kinds any more.
-    const planKinds = source.match(/const PLAN_KINDS = \[[\s\S]*?\];/)?.[0];
-    expect(planKinds).toBeDefined();
-    expect(planKinds).not.toContain("deal_");
+    expect(source).toContain('"dealPolicies"');
+    expect(source).toContain('"breakDealIDs"');
+    expect(source).not.toContain('"deal":"<accept|decline');
+
+    const { choose, dealMove } = await loadSelectors();
+    const obs = {
+      ...BASE_OBS,
+      deals: {
+        incomingProposals: [incomingProposal("D1", "P_A", "Auri")],
+        outgoingProposals: [],
+        activeDeals: [],
+        proposalOptions: [],
+      },
+    };
+    const plan = {
+      ...BASE_PLAN,
+      dealPolicies: [
+        {
+          playerID: "P_A",
+          acceptTemplates: ["non_aggression_pact"],
+          proposeTemplates: [],
+        },
+      ],
+    };
+    const actions = [...responseActions("D1"), EXPAND, HOLD];
+    expect(dealMove(plan, actions, obs)?.id).toBe("deal_accept:D1");
+    expect(choose(plan, actions, obs)?.id).toBe(EXPAND.id);
+  });
+
+  it("answers by stable counterparty ID and defaults unknown or unsupported offers to rejection", async () => {
+    const { dealMove } = await loadSelectors();
+    const plan = {
+      ...BASE_PLAN,
+      dealPolicies: [
+        {
+          playerID: "P_A",
+          acceptTemplates: ["non_aggression_pact"],
+          proposeTemplates: [],
+        },
+        {
+          playerID: "P_S",
+          acceptTemplates: ["trade_security_pact"],
+          proposeTemplates: [],
+        },
+      ],
+    };
+    const auri = incomingProposal("D1", "P_A", "Same Name");
+    const sefirot = incomingProposal("D2", "P_S", "Same Name");
+    const obs = {
+      ...BASE_OBS,
+      deals: {
+        incomingProposals: [auri, sefirot],
+        outgoingProposals: [],
+        activeDeals: [],
+        proposalOptions: [],
+      },
+    };
+    const actions = [...responseActions("D1"), ...responseActions("D2"), HOLD];
+    expect(dealMove(plan, actions, obs)?.id).toBe("deal_accept:D1");
+    expect(
+      dealMove(plan, actions, {
+        ...obs,
+        deals: { ...obs.deals, incomingProposals: [sefirot] },
+      })?.id,
+    ).toBe("deal_reject:D2");
+
+    const unknown = incomingProposal(
+      "D3",
+      "P_UNKNOWN",
+      "Unknown",
+      "support_request",
+    );
+    expect(
+      dealMove(plan, [...responseActions("D3"), HOLD], {
+        ...obs,
+        deals: { ...obs.deals, incomingProposals: [unknown] },
+      })?.id,
+    ).toBe("deal_reject:D3");
+  });
+
+  it("matches a nominated proposal to an exact current option and suppresses pair/template retries", async () => {
+    const { dealMove } = await loadSelectors();
+    const napA = proposalAction("P_A", "non_aggression_pact");
+    const tradeA = proposalAction("P_A", "trade_security_pact");
+    const actions = [napA, tradeA, EXPAND, HOLD];
+    const plan = {
+      ...BASE_PLAN,
+      dealPolicies: [
+        {
+          playerID: "P_A",
+          acceptTemplates: [],
+          proposeTemplates: ["non_aggression_pact", "trade_security_pact"],
+        },
+      ],
+    };
+    const obsAt = (step: number, options: unknown[]) => ({
+      ...BASE_OBS,
+      deals: {
+        decisionStep: step,
+        incomingProposals: [],
+        outgoingProposals: [],
+        activeDeals: [],
+        proposalOptions: options,
+      },
+    });
+
+    expect(
+      dealMove(
+        plan,
+        actions,
+        obsAt(1, [proposalOption("P_S", "non_aggression_pact")]),
+      ),
+    ).toBeNull();
+    expect(
+      dealMove(
+        plan,
+        actions,
+        obsAt(1, [proposalOption("P_A", "non_aggression_pact")]),
+      )?.id,
+    ).toBe(napA.id);
+    expect(
+      dealMove(
+        plan,
+        actions,
+        obsAt(4, [proposalOption("P_A", "non_aggression_pact")]),
+      ),
+    ).toBeNull();
+    expect(
+      dealMove(
+        plan,
+        actions,
+        obsAt(4, [proposalOption("P_A", "trade_security_pact")]),
+      )?.id,
+    ).toBe(tradeA.id);
+    expect(
+      dealMove(
+        plan,
+        actions,
+        obsAt(13, [proposalOption("P_A", "non_aggression_pact")]),
+      )?.id,
+    ).toBe(napA.id);
+  });
+
+  it("answers incoming proposals before making another proposal", async () => {
+    const { dealMove } = await loadSelectors();
+    const plan = {
+      ...BASE_PLAN,
+      dealPolicies: [
+        {
+          playerID: "P_A",
+          acceptTemplates: [],
+          proposeTemplates: ["non_aggression_pact"],
+        },
+      ],
+    };
+    const obs = {
+      ...BASE_OBS,
+      deals: {
+        decisionStep: 1,
+        incomingProposals: [incomingProposal("D1", "P_S", "Sefirot")],
+        outgoingProposals: [],
+        activeDeals: [],
+        proposalOptions: [proposalOption("P_A", "non_aggression_pact")],
+      },
+    };
+    expect(
+      dealMove(
+        plan,
+        [
+          ...responseActions("D1"),
+          proposalAction("P_A", "non_aggression_pact"),
+        ],
+        obs,
+      )?.id,
+    ).toBe("deal_reject:D1");
+  });
+
+  it("does not let a duplicate display name suppress a stable-ID proposal", async () => {
+    const { dealMove } = await loadSelectors();
+    const action = proposalAction("P_A", "non_aggression_pact");
+    const obs = {
+      ...BASE_OBS,
+      visiblePlayers: BASE_OBS.visiblePlayers.map((player) => ({
+        ...player,
+        name: "Same Name",
+      })),
+      deals: {
+        decisionStep: 1,
+        incomingProposals: [],
+        outgoingProposals: [],
+        activeDeals: [],
+        proposalOptions: [proposalOption("P_A", "non_aggression_pact")],
+      },
+    };
+    expect(
+      dealMove(
+        {
+          ...BASE_PLAN,
+          target: "Same Name",
+          dealPolicies: [
+            {
+              playerID: "P_A",
+              acceptTemplates: [],
+              proposeTemplates: ["non_aggression_pact"],
+            },
+          ],
+        },
+        [action, HOLD],
+        obs,
+      )?.id,
+    ).toBe(action.id);
+  });
+
+  it("uses the one response slot for the earliest-expiring offer", async () => {
+    const { dealMove } = await loadSelectors();
+    const later = incomingProposal("D1", "P_A", "Auri");
+    const urgent = {
+      ...incomingProposal("D2", "P_S", "Sefirot"),
+      answerableThroughStep: 3,
+    };
+    expect(
+      dealMove(
+        BASE_PLAN,
+        [...responseActions("D1"), ...responseActions("D2"), HOLD],
+        {
+          ...BASE_OBS,
+          deals: {
+            incomingProposals: [later, urgent],
+            outgoingProposals: [],
+            activeDeals: [],
+            proposalOptions: [],
+          },
+        },
+      )?.id,
+    ).toBe("deal_reject:D2");
   });
 });
 
-describe("tester-starter-llm deterministic deal posture", () => {
-  it("keeps the deal out of the game slot: the deal move and the game move are separate", async () => {
-    const { choose, dealMove } = await loadSelectors();
+describe("tester-starter-llm obligation execution", () => {
+  it("prioritizes partial support progress to the exact requesting counterparty", async () => {
+    const { choose } = await loadSelectors();
     const obs = {
       ...BASE_OBS,
       deals: {
-        incomingProposals: [incomingProposal("D1", "Auri")],
+        incomingProposals: [],
         outgoingProposals: [],
-        activeDeals: [],
+        proposalOptions: [],
+        activeDeals: [
+          {
+            dealID: "SUPPORT",
+            template: "support_request",
+            proposerPlayerID: "P_A",
+            proposerName: "Auri",
+            recipientPlayerID: "P_ME",
+            recipientName: "Me",
+            stepsRemaining: 4,
+            obligations: [
+              {
+                obligorPlayerID: "P_ME",
+                status: "pending",
+                kind: "send_support",
+                goldAmount: "150000",
+                troopAmount: 20000,
+                donatedGold: "50000",
+                donatedTroops: 0,
+              },
+            ],
+          },
+        ],
       },
     };
-    const actions = [...responseActions("D1"), EXPAND, HOLD];
-    const plan = { target: null, avoidTargets: [], deal: "accept" };
-    // The pact is answered AND the expansion still happens in the same step.
-    expect(dealMove(plan, actions, obs)?.id).toBe("deal_accept:D1");
-    expect(choose(plan, actions, obs)?.id).toBe(EXPAND.id);
-    // `choose` never returns a deal action, whatever the plan asks for.
+    const donateA = {
+      id: "donate_gold:P_A",
+      kind: "donate_gold",
+      label: "Donate gold to Auri",
+      risk: { level: "low" },
+      metadata: { recipientID: "P_A", gold: 100000 },
+    };
+    const donateS = {
+      ...donateA,
+      id: "donate_gold:P_S",
+      metadata: { recipientID: "P_S", gold: 100000 },
+    };
+    expect(choose(BASE_PLAN, [donateS, EXPAND, donateA, HOLD], obs)?.id).toBe(
+      donateA.id,
+    );
+    const partialGold = {
+      ...donateA,
+      metadata: { recipientID: "P_A", gold: 50000 },
+    };
+    const completingTroops = {
+      id: "donate_troops:P_A",
+      kind: "donate_troops",
+      label: "Donate troops to Auri",
+      risk: { level: "medium" },
+      metadata: { recipientID: "P_A", troops: 30000 },
+    };
+    expect(
+      choose(BASE_PLAN, [partialGold, EXPAND, completingTroops, HOLD], obs)?.id,
+    ).toBe(completingTroops.id);
     expect(
       choose(
-        { ...plan, preferKinds: ["deal_accept", "deal_reject"] },
-        actions,
+        { ...BASE_PLAN, breakDealIDs: ["SUPPORT"] },
+        [donateA, EXPAND, HOLD],
         obs,
       )?.id,
     ).toBe(EXPAND.id);
-  });
 
-  it("auto-rejects proposals from the plan's current target — even under an accept posture", async () => {
-    const dealMove = await loadDealMove();
-    const obs = {
-      ...BASE_OBS,
+    const complete = {
+      ...obs,
       deals: {
-        incomingProposals: [incomingProposal("D1", "Sefirot")],
-        outgoingProposals: [],
-        activeDeals: [],
+        ...obs.deals,
+        activeDeals: [
+          {
+            ...obs.deals.activeDeals[0],
+            obligations: [
+              {
+                ...obs.deals.activeDeals[0].obligations[0],
+                donatedTroops: 20000,
+              },
+            ],
+          },
+        ],
       },
     };
-    const actions = [...responseActions("D1"), EXPAND, HOLD];
-    const chosen = dealMove(
-      { target: "Sefirot", avoidTargets: [], deal: "accept" },
-      actions,
-      obs,
-    );
-    expect(chosen?.id).toBe("deal_reject:D1");
-  });
-
-  it("auto-accepts pact offers from avoidTargets or under the accept posture", async () => {
-    const { choose, dealMove } = await loadSelectors();
-    const obs = {
-      ...BASE_OBS,
-      deals: {
-        incomingProposals: [incomingProposal("D1", "Auri")],
-        outgoingProposals: [],
-        activeDeals: [],
-      },
-    };
-    const actions = [...responseActions("D1"), EXPAND, HOLD];
-    expect(
-      dealMove({ target: null, avoidTargets: ["Auri"] }, actions, obs)?.id,
-    ).toBe("deal_accept:D1");
-    expect(
-      dealMove({ target: null, avoidTargets: [], deal: "accept" }, actions, obs)
-        ?.id,
-    ).toBe("deal_accept:D1");
-    // No posture and not an avoid-target: the offer is left pending, and the
-    // game move is unaffected either way.
-    expect(
-      dealMove({ target: null, avoidTargets: [] }, actions, obs),
-    ).toBeFalsy();
-    expect(choose({ target: null, avoidTargets: [] }, actions, obs)?.id).toBe(
+    expect(choose(BASE_PLAN, [donateA, EXPAND, HOLD], complete)?.id).toBe(
       EXPAND.id,
     );
   });
 
-  it("never auto-accepts joint-attack or support pledges", async () => {
-    const { choose, dealMove } = await loadSelectors();
-    const obs = {
-      ...BASE_OBS,
-      deals: {
-        incomingProposals: [
-          incomingProposal("D1", "Auri", "joint_attack"),
-          incomingProposal("D2", "Auri", "support_request"),
-        ],
-        outgoingProposals: [],
-        activeDeals: [],
+  it("fulfills only its own pending joint-attack pledge with qualifying pressure", async () => {
+    const { choose } = await loadSelectors();
+    const attack = (pct: number) => ({
+      id: `attack:P_S:${pct}`,
+      kind: "attack",
+      label: `Attack Sefirot with ${pct}% troops`,
+      risk: { level: "medium" },
+      metadata: {
+        targetID: "P_S",
+        expansion: false,
+        troopPercentage: pct / 100,
       },
-    };
-    const actions = [...responseActions("D1"), ...responseActions("D2"), HOLD];
-    const plan = { target: null, avoidTargets: [], deal: "accept" };
-    expect(dealMove(plan, actions, obs)).toBeFalsy();
-    expect(choose(plan, actions, obs)?.id).toBe("hold");
-  });
-
-  it("proposes ONE non-aggression pact to the strongest non-target neighbor when focus is ally", async () => {
-    const { choose, dealMove } = await loadSelectors();
-    const proposeAuri = {
-      id: "deal_propose:P_A:non_aggression_pact",
-      kind: "deal_propose",
-      label: "Propose non-aggression pact to Auri",
-      risk: { level: "low" },
-      metadata: { recipientID: "P_A", template: "non_aggression_pact" },
-    };
-    const proposeSefirot = {
-      id: "deal_propose:P_S:non_aggression_pact",
-      kind: "deal_propose",
-      label: "Propose non-aggression pact to Sefirot",
-      risk: { level: "low" },
-      metadata: { recipientID: "P_S", template: "non_aggression_pact" },
-    };
-    const obs = {
-      ...BASE_OBS,
-      deals: { incomingProposals: [], outgoingProposals: [], activeDeals: [] },
-    };
-    const actions = [proposeAuri, proposeSefirot, EXPAND, HOLD];
-    // Sefirot is the strongest neighbor but is the plan's target: Auri wins.
-    expect(
-      dealMove(
-        { focus: "ally", target: "Sefirot", avoidTargets: [] },
-        actions,
-        obs,
-      )?.id,
-    ).toBe(proposeAuri.id);
-    // The offer costs no move: the game action is still the expansion.
-    expect(
-      choose(
-        { focus: "ally", target: "Sefirot", avoidTargets: [] },
-        actions,
-        obs,
-      )?.id,
-    ).toBe(EXPAND.id);
-    // Strongest neighbor when no target is named.
-    expect(
-      dealMove({ focus: "ally", target: null, avoidTargets: [] }, actions, obs)
-        ?.id,
-    ).toBe(proposeSefirot.id);
-    // An open proposal to the strongest neighbor moves to the next candidate.
-    const withOpen = {
-      ...BASE_OBS,
-      deals: {
-        incomingProposals: [],
-        outgoingProposals: [
-          {
-            dealID: "D9",
-            proposerPlayerID: "P_ME",
-            proposerName: "Me",
-            recipientPlayerID: "P_S",
-            recipientName: "Sefirot",
-            terms: { template: "non_aggression_pact", durationSteps: 12 },
-            proposedAtStep: 1,
-            answerableThroughStep: 5,
-          },
-        ],
-        activeDeals: [],
-      },
-    };
-    expect(
-      dealMove(
-        { focus: "ally", target: null, avoidTargets: [] },
-        actions,
-        withOpen,
-      )?.id,
-    ).toBe(proposeAuri.id);
-    // Without the ally focus, no proposal is made.
-    expect(
-      dealMove(
-        { focus: "expand", target: null, avoidTargets: [] },
-        actions,
-        obs,
-      ),
-    ).toBeFalsy();
-    expect(
-      choose({ focus: "expand", target: null, avoidTargets: [] }, actions, obs)
-        ?.id,
-    ).toBe(EXPAND.id);
-  });
-
-  it("honors accepted pacts: hostile actions on the partner are filtered unless the plan names them", async () => {
-    const choose = await loadChoose();
-    const activePact = (myStatus: string) => ({
+    });
+    const active = (obligorPlayerID: string, status = "pending") => ({
       ...BASE_OBS,
       deals: {
         incomingProposals: [],
         outgoingProposals: [],
+        proposalOptions: [],
         activeDeals: [
           {
-            dealID: "D4",
-            template: "trade_security_pact",
-            proposerPlayerID: "P_ME",
-            proposerName: "Me",
-            recipientPlayerID: "P_S",
-            recipientName: "Sefirot",
-            stepsRemaining: 8,
+            dealID: "ATTACK",
+            template: "joint_attack",
+            proposerPlayerID: obligorPlayerID,
+            proposerName: obligorPlayerID === "P_ME" ? "Me" : "Auri",
+            recipientPlayerID: obligorPlayerID === "P_ME" ? "P_A" : "P_ME",
+            recipientName: obligorPlayerID === "P_ME" ? "Auri" : "Me",
+            stepsRemaining: 3,
             obligations: [
-              { obligorPlayerID: "P_ME", status: myStatus },
-              { obligorPlayerID: "P_S", status: "pending" },
+              {
+                obligorPlayerID,
+                status,
+                kind: "confirmed_attack_on_target",
+                targetPlayerID: "P_S",
+                targetName: "Sefirot",
+              },
             ],
           },
         ],
       },
     });
+    expect(
+      choose(
+        BASE_PLAN,
+        [attack(10), attack(40), attack(20), EXPAND],
+        active("P_ME"),
+      )?.id,
+    ).toBe(attack(20).id);
+    const nuke = {
+      id: "nuke:P_S:AtomBomb",
+      kind: "nuke",
+      label: "Launch Atom Bomb at Sefirot",
+      risk: { level: "high" },
+      metadata: { targetID: "P_S" },
+    };
+    expect(choose(BASE_PLAN, [nuke, EXPAND], active("P_ME"))?.id).toBe(
+      EXPAND.id,
+    );
+    expect(
+      choose(
+        { ...BASE_PLAN, preferKinds: ["nuke"], target: "Auri" },
+        [nuke, EXPAND],
+        active("P_ME"),
+      )?.id,
+    ).toBe(EXPAND.id);
+    expect(
+      choose(
+        { ...BASE_PLAN, preferKinds: ["nuke"], target: "Sefirot" },
+        [nuke, EXPAND],
+        active("P_ME"),
+      )?.id,
+    ).toBe(nuke.id);
+    expect(
+      choose(BASE_PLAN, [EXPAND, attack(20), HOLD], active("P_A"))?.id,
+    ).toBe(EXPAND.id);
+    expect(
+      choose(BASE_PLAN, [EXPAND, attack(20), HOLD], active("P_ME", "moot"))?.id,
+    ).toBe(EXPAND.id);
+  });
+});
+
+describe("tester-starter-llm social reason evidence", () => {
+  it("reports actual fulfillment ahead of a stale break intent", async () => {
+    const { socialNote } = await loadSelectors();
+    const obs = {
+      ...BASE_OBS,
+      deals: {
+        activeDeals: [
+          {
+            dealID: "SUPPORT",
+            template: "support_request",
+            proposerPlayerID: "P_A",
+            recipientPlayerID: "P_ME",
+            obligations: [
+              {
+                obligorPlayerID: "P_ME",
+                status: "pending",
+                kind: "send_support",
+              },
+            ],
+          },
+        ],
+      },
+    };
+    const donate = {
+      id: "donate_gold:P_A",
+      kind: "donate_gold",
+      label: "Donate gold to Auri",
+      metadata: { recipientID: "P_A", gold: 100000 },
+    };
+    const plan = { ...BASE_PLAN, breakDealIDs: ["SUPPORT"] };
+    expect(socialNote(plan, donate, null, obs)).toBe(
+      "fulfil support promise SUPPORT",
+    );
+    expect(socialNote(plan, EXPAND, null, obs)).toBe(
+      "intentional non-fulfilment SUPPORT",
+    );
+  });
+
+  it("labels only referee-relevant pact violations as intentional breach", async () => {
+    const { socialNote } = await loadSelectors();
+    const obs = {
+      ...BASE_OBS,
+      deals: {
+        activeDeals: [
+          {
+            dealID: "PACT",
+            template: "trade_security_pact",
+            proposerPlayerID: "P_ME",
+            recipientPlayerID: "P_S",
+            obligations: [
+              {
+                obligorPlayerID: "P_ME",
+                status: "pending",
+                kind: "trade_security",
+              },
+            ],
+          },
+        ],
+      },
+    };
+    const plan = { ...BASE_PLAN, breakDealIDs: ["PACT"] };
+    const allianceRequest = {
+      id: "alliance_request:P_S",
+      kind: "alliance_request",
+      label: "Request alliance with Sefirot",
+      metadata: { targetID: "P_S" },
+    };
+    const attack = {
+      id: "attack:P_S:25",
+      kind: "attack",
+      label: "Attack Sefirot",
+      metadata: { targetID: "P_S", expansion: false },
+    };
+    const embargo = {
+      id: "embargo:P_S:start",
+      kind: "embargo",
+      label: "Embargo Sefirot",
+      metadata: { targetID: "P_S", action: "start" },
+    };
+    const boat = {
+      id: "boat:P_S:25",
+      kind: "boat",
+      label: "Launch transport toward Sefirot",
+      metadata: { targetID: "P_S" },
+    };
+    expect(socialNote(plan, allianceRequest, null, obs)).toBe("");
+    expect(socialNote(plan, attack, null, obs)).toBe("intentional breach PACT");
+    expect(socialNote(plan, embargo, null, obs)).toBe(
+      "intentional breach PACT",
+    );
+    expect(socialNote(plan, boat, null, obs)).toBe("intentional breach PACT");
+  });
+});
+
+describe("tester-starter-llm explicit breach authority", () => {
+  it("requires every exact active dealID; target names and wrong IDs do nothing", async () => {
+    const { choose } = await loadSelectors();
+    const pact = (dealID: string, template = "non_aggression_pact") => ({
+      dealID,
+      template,
+      proposerPlayerID: "P_ME",
+      proposerName: "Me",
+      recipientPlayerID: "P_S",
+      recipientName: "Sefirot",
+      stepsRemaining: 8,
+      obligations: [
+        { obligorPlayerID: "P_ME", status: "pending" },
+        { obligorPlayerID: "P_S", status: "pending" },
+      ],
+    });
+    const obs = {
+      ...BASE_OBS,
+      deals: {
+        incomingProposals: [],
+        outgoingProposals: [],
+        proposalOptions: [],
+        activeDeals: [pact("D4"), pact("D5")],
+      },
+    };
     const attackPartner = {
       id: "attack:P_S:25",
       kind: "attack",
@@ -471,58 +902,49 @@ describe("tester-starter-llm deterministic deal posture", () => {
       risk: { level: "medium" },
       metadata: { targetID: "P_S", targetName: "Sefirot" },
     };
-    const embargoPartner = {
-      id: "embargo:P_S:start",
-      kind: "embargo",
-      label: "Embargo Sefirot",
-      risk: { level: "medium" },
-      metadata: { targetID: "P_S", action: "start" },
-    };
-    const embargoAll = {
-      id: "embargo_all:start",
-      kind: "embargo_all",
-      label: "Embargo all eligible rivals",
-      risk: { level: "medium" },
-      metadata: { action: "start" },
-    };
-    const actions = [attackPartner, embargoPartner, embargoAll, EXPAND, HOLD];
-
-    // Pact pending, partner not targeted: hostile options are filtered.
+    const actions = [attackPartner, EXPAND, HOLD];
+    expect(choose({ ...BASE_PLAN, target: "Sefirot" }, actions, obs)?.id).toBe(
+      EXPAND.id,
+    );
     expect(
-      choose({ target: null, avoidTargets: [] }, actions, activePact("pending"))
-        ?.id,
+      choose({ ...BASE_PLAN, breakDealIDs: ["WRONG"] }, actions, obs)?.id,
     ).toBe(EXPAND.id);
     expect(
-      choose(
-        { target: null, avoidTargets: [], preferKinds: ["embargo"] },
-        actions,
-        activePact("pending"),
-      )?.id,
+      choose({ ...BASE_PLAN, breakDealIDs: ["D4"] }, actions, obs)?.id,
     ).toBe(EXPAND.id);
     expect(
-      choose(
-        { target: null, avoidTargets: [], preferKinds: ["embargo_all"] },
-        actions,
-        activePact("pending"),
-      )?.id,
-    ).toBe(EXPAND.id);
-
-    // Betrayal stays possible and intentional: the plan names the partner.
-    expect(
-      choose(
-        { target: "Sefirot", avoidTargets: [] },
-        actions,
-        activePact("pending"),
-      )?.id,
+      choose({ ...BASE_PLAN, breakDealIDs: ["D4", "D5"] }, actions, obs)?.id,
     ).toBe(attackPartner.id);
+  });
 
-    // A terminal own-obligation lifts the constraint.
-    expect(
-      choose(
-        { target: null, avoidTargets: [] },
-        actions,
-        activePact("violated"),
-      )?.id,
-    ).toBe(attackPartner.id);
+  it("does not treat terminal obligations as binding", async () => {
+    const { choose } = await loadSelectors();
+    const attackPartner = {
+      id: "attack:P_S:25",
+      kind: "attack",
+      label: "Attack Sefirot",
+      risk: { level: "medium" },
+      metadata: { targetID: "P_S" },
+    };
+    const obs = {
+      ...BASE_OBS,
+      deals: {
+        incomingProposals: [],
+        outgoingProposals: [],
+        proposalOptions: [],
+        activeDeals: [
+          {
+            dealID: "D4",
+            template: "trade_security_pact",
+            proposerPlayerID: "P_ME",
+            recipientPlayerID: "P_S",
+            obligations: [{ obligorPlayerID: "P_ME", status: "violated" }],
+          },
+        ],
+      },
+    };
+    expect(choose(BASE_PLAN, [attackPartner, EXPAND], obs)?.id).toBe(
+      attackPartner.id,
+    );
   });
 });

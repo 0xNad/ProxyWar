@@ -48,7 +48,7 @@ describe("tester-starter-llm full-prompt hardening", () => {
     ).toEqual({ focus: "attack", preferKinds: ["attack"] });
     expect(
       extractJson(
-        '{"focus":"attack","preferKinds":["attack"],"target":"Auri","avoidTargets":[],"deal":null,"reason":"press now',
+        '{"focus":"attack","preferKinds":["attack"],"target":"Auri","avoidTargets":[],"dealPolicies":[{"playerID":"P_A","acceptTemplates":["non_aggression_pact"],"proposeTemplates":[]}],"breakDealIDs":[],"reason":"press now',
         true,
       ),
     ).toEqual({
@@ -56,7 +56,14 @@ describe("tester-starter-llm full-prompt hardening", () => {
       preferKinds: ["attack"],
       target: "Auri",
       avoidTargets: [],
-      deal: null,
+      dealPolicies: [
+        {
+          playerID: "P_A",
+          acceptTemplates: ["non_aggression_pact"],
+          proposeTemplates: [],
+        },
+      ],
+      breakDealIDs: [],
       reason: "press now",
     });
     expect(
@@ -67,7 +74,7 @@ describe("tester-starter-llm full-prompt hardening", () => {
     ).toBeNull();
     expect(
       extractJson(
-        '{"focus":"attack","preferKinds":["attack"],"target":"Auri","avoidTargets":[],"deal":null,"reason":"press now',
+        '{"focus":"attack","preferKinds":["attack"],"target":"Auri","avoidTargets":[],"dealPolicies":[],"breakDealIDs":[],"reason":"press now',
       ),
     ).toBeNull();
     expect(extractJson("ordinary prose without an object")).toBeNull();
