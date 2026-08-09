@@ -34,28 +34,11 @@ COMPETITION_LADDER: list[tuple[int, list[str]]] = [
             "tournament-12p-eastasia",
             "tournament-12p-northamerica",
             "tournament-12p-oceania",
-            # Restored 2026-08-08: reinstates the last known-good historical
-            # 12P Europe shape (same map/map_size/step/turn/timeout config as
-            # every other 12P variant -- unshortened, for competitive
-            # fairness). Originally dropped 2026-07-10 (commit 30cc0331f)
-            # after a full 500-step hosted wall-clock probe was deadline-
-            # killed at ~100 min (World finished the same shape in 48.3 min;
-            # Europe has ~3.6x World's land tiles).
-            #
-            # Memory-regression gate: the standard 80-step window is too
-            # early for Europe's larger map -- its heap is still in delayed
-            # colonization growth at that point and reads a false slope
-            # failure (80-step: heapUsedMB late-window slope 4.26 MB/1k,
-            # over the 4 MB/1k threshold). The unchanged gate and threshold
-            # (heapUsedMB late-window slope <= 4 MB/1k, RSS <= 600MB) PASS
-            # at 120 steps once that growth plateaus (slope 0.15 MB/1k,
-            # maxRss 452MB, well under the 600MB ceiling).
-            #
-            # Still outstanding: a fresh full-length (500-step) hosted
-            # wall-clock probe -- the original failure mode -- has not been
-            # re-run. Treat that probe as a pre-promotion gate before this
-            # entry seats a real league round.
-            "tournament-12p-europe",
+            # tournament-12p-europe remains a declared manual variant, but is
+            # quarantined from automatic Competition scheduling. The missing
+            # pre-promotion wall-clock gate recurred in live rounds 1323 and
+            # 1332: 10 Europe episodes timed out before results/replay across
+            # 0.1.24 and 0.1.26. Re-add only after a full hosted deadline proof.
         ],
     ),
 ]

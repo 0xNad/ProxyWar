@@ -273,7 +273,7 @@
       "env": {},
       "id": "proxywar-ladder-commissioner",
       "name": "ProxyWar Ladder Commissioner",
-      "description": "Config-driven ruleset_strategy commissioner (Qualifiers self-play crash check -> Competition), with one custom override: each Competition round counts the real distinct champions currently in the league and routes to the largest declared seat count (2/4/8/12) that fits them, then rotates that rung's map pool (Pangaea/Asia/World/Europe) by round number - so the league runs today at 2p, scales up as more committed policies join, and sweeps every map across a season, with no re-publish required. Scoring is win-rate per episode aggregated into an OpenSkill (MMR) rating, since the same league runs episodes of varying size over time and only a placement-based rating is comparable across match sizes."
+      "description": "Config-driven ruleset_strategy commissioner (Qualifiers self-play crash check -> Competition), with one custom override: each Competition round counts the real distinct champions currently in the league and routes to the largest declared seat count (2/4/8/12) that fits them, then rotates that rung's deadline-proven map pool by round number. The 12-player Europe variant remains available for manual validation but is quarantined from automatic Competition scheduling after repeated hosted artifact timeouts. Scoring is win-rate per episode aggregated into an OpenSkill (MMR) rating, since the same league runs episodes of varying size over time and only a placement-based rating is comparable across match sizes."
     }
   ],
   "grader": [],
@@ -1080,7 +1080,7 @@
         "player_connect_timeout_seconds": 120,
         "episode_timeout_seconds": 3600
       },
-      "description": "Twelve-policy free-for-all on Europe (Normal): same seat count, step caps, clock, and scoring as the other Tournament 12P variants \u2014 only the map differs. Qualified for the rotation via the memory-regression gate at 120 native 12P steps, not the standard 80 \u2014 this larger map's heap is still in delayed colonization growth at the 80-step window, which reads a false slope failure \u2014 before shipping."
+      "description": "Twelve-policy free-for-all on Europe (Normal): same seat count, step caps, clock, and scoring as the other Tournament 12P variants \u2014 only the map differs. Retained for manual validation, but quarantined from automatic Competition scheduling after repeated hosted runs exceeded the artifact deadline before producing results and replay."
     }
   ],
   "certification": {
