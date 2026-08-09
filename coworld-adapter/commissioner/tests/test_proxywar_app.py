@@ -293,9 +293,19 @@ def test_twelve_seat_rotation_sweeps_every_map_in_the_pool() -> None:
     from commissioners.proxywar_app import COMPETITION_LADDER
 
     pool = dict(COMPETITION_LADDER)[12]
-    assert len(pool) == 9, (
-        "the 2026-08-08 Europe restoration should bring the 12P pool to "
-        f"exactly 9 maps; saw {pool!r}"
+    expected_pool = {
+        "tournament-12p-pangaea",
+        "tournament-12p-world",
+        "tournament-12p-asia",
+        "tournament-12p-britannia",
+        "tournament-12p-blacksea",
+        "tournament-12p-eastasia",
+        "tournament-12p-northamerica",
+        "tournament-12p-oceania",
+    }
+    assert set(pool) == expected_pool, (
+        "the automatic 12P Competition pool must contain exactly the eight "
+        f"deadline-proven variants while Europe is quarantined; saw {pool!r}"
     )
 
     round_start = competition_round_start(12)
@@ -316,36 +326,42 @@ def test_twelve_seat_rotation_sweeps_every_map_in_the_pool() -> None:
         assert len(variant_ids) == 1, "a round runs exactly one map"
         seen.append(variant_ids.pop())
 
-    # Every map appears in exactly one of the 9 consecutive rounds (an
+    # Every map appears in exactly one of the 8 consecutive rounds (an
     # unbiased sweep, not just "the whole pool showed up somewhere").
-    assert len(seen) == len(set(seen)) == 9, (
-        f"9 consecutive rounds should hit 9 distinct maps with no repeats; saw {seen}"
+    assert len(seen) == len(set(seen)) == 8, (
+        f"8 consecutive rounds should hit 8 distinct maps with no repeats; saw {seen}"
     )
     assert set(seen) == set(pool), (
         f"consecutive rounds should sweep the whole pool; saw {seen}"
     )
 
 
-def test_twelve_seat_pool_includes_europe() -> None:
-    # Pins the 2026-08-08 restoration against a silent re-drop like the one
-    # that removed Europe on 2026-07-10 (commit 30cc0331f) without a
-    # corresponding test failure.
+def test_twelve_seat_pool_quarantines_europe() -> None:
+    # Europe remains declared for manual validation, but two live rounds have
+    # reproduced its hosted artifact deadline failure. Automatic Competition
+    # scheduling must stay off until a full hosted wall-clock proof passes.
     from commissioners.proxywar_app import COMPETITION_LADDER
 
     pool = dict(COMPETITION_LADDER)[12]
-    assert "tournament-12p-europe" in pool, (
-        f"tournament-12p-europe must stay in the 12P competition pool; saw {pool!r}"
+    assert "tournament-12p-europe" not in pool, (
+        "tournament-12p-europe must remain quarantined from the 12P "
+        f"Competition pool; saw {pool!r}"
     )
 
 
-def test_tournament_12p_europe_manifest_shape_matches_sibling_12p_variants() -> None:
+@pytest.mark.parametrize(
+    "manifest_name", ["coworld_manifest.json", "coworld_manifest_template.json"]
+)
+def test_tournament_12p_europe_manifest_shape_matches_sibling_12p_variants(
+    manifest_name: str,
+) -> None:
     # World and Asia are the reference points named in the restoration
     # request: Europe's declared config must be byte-identical to theirs
     # except for the map itself, so the fix is "restore Europe", not "give
     # Europe a different, unproven ruleset".
     import json
 
-    manifest_path = Path(__file__).parents[2] / "coworld" / "coworld_manifest.json"
+    manifest_path = Path(__file__).parents[2] / "coworld" / manifest_name
     manifest = json.loads(manifest_path.read_text())
     variants = {v["id"]: v for v in manifest["variants"]}
 
