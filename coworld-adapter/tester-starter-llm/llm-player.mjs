@@ -1109,6 +1109,45 @@ function choose(actions, obs) {
     (action) => !violatesPact(action),
   );
   if (obligationMove) return obligationMove;
+  // A support request is offered only to a core-friendly player because the
+  // promised donation must already be legal. When the model explicitly plans
+  // to request support from a living rival, reciprocate the exact offered core
+  // alliance request first; otherwise the support plan can never become an
+  // offered deal action. Fulfilment of accepted obligations remains above this
+  // prerequisite, and no alliance id is ever invented.
+  for (const policy of plan?.dealPolicies || []) {
+    if (!policy.proposeTemplates?.includes("support_request")) continue;
+    const rival = (obs?.visiblePlayers || []).find(
+      (candidate) =>
+        candidate?.playerID === policy.playerID && candidate.isAlive,
+    );
+    if (!rival || rival.isFriendly) continue;
+    const alliance = actions.find(
+      (candidate) =>
+        candidate.kind === "alliance_request" &&
+        candidate.metadata?.recipientID === policy.playerID,
+    );
+    if (!alliance || violatesPact(alliance)) continue;
+    const key = `${policy.playerID}:support_alliance`;
+    const attempt = proposalAttempts.get(key);
+    const allianceStep = Number.isInteger(obs?.deals?.decisionStep)
+      ? obs.deals.decisionStep
+      : null;
+    if (
+      attempt &&
+      (attempt.count >= DEAL_PROPOSAL_MAX_ATTEMPTS_PER_KEY ||
+        allianceStep === null ||
+        attempt.lastStep === null ||
+        allianceStep - attempt.lastStep < DEAL_PROPOSAL_RETRY_STEPS)
+    ) {
+      continue;
+    }
+    proposalAttempts.set(key, {
+      count: (attempt?.count || 0) + 1,
+      lastStep: allianceStep,
+    });
+    return alliance;
+  }
   const avoid = new Set(avoidActionIDs());
   const planned = plan?.preferKinds?.length ? plan.preferKinds : [];
   const order = [

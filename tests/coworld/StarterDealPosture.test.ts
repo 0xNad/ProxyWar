@@ -405,6 +405,42 @@ describe("tester-starter-llm deal selection", () => {
     expect(choose(plan, actions, obs)?.id).toBe(EXPAND.id);
   });
 
+  it("reciprocates the exact alliance prerequisite for an explicit planned support request", async () => {
+    const { choose } = await loadSelectors();
+    const alliance = {
+      id: "alliance:P_A",
+      kind: "alliance_request",
+      label: "Request alliance with Auri",
+      risk: { level: "low", score: 0.2 },
+      metadata: { recipientID: "P_A", recipientName: "Auri" },
+    };
+    const supportPlan = {
+      ...BASE_PLAN,
+      dealPolicies: [
+        {
+          playerID: "P_A",
+          acceptTemplates: [],
+          proposeTemplates: ["support_request"],
+        },
+      ],
+    };
+
+    expect(choose(supportPlan, [EXPAND, alliance, HOLD], BASE_OBS)?.id).toBe(
+      alliance.id,
+    );
+    expect(
+      choose(supportPlan, [EXPAND, alliance, HOLD], {
+        ...BASE_OBS,
+        visiblePlayers: BASE_OBS.visiblePlayers.map((player) =>
+          player.playerID === "P_A" ? { ...player, isFriendly: true } : player,
+        ),
+      })?.id,
+    ).toBe(EXPAND.id);
+    expect(choose(supportPlan, [EXPAND, alliance, HOLD], BASE_OBS)?.id).toBe(
+      EXPAND.id,
+    );
+  });
+
   it("answers by stable counterparty ID and defaults unknown or unsupported offers to rejection", async () => {
     const { dealMove } = await loadSelectors();
     const plan = {
