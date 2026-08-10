@@ -33,7 +33,7 @@
         "players": {
           "type": "array",
           "minItems": 2,
-          "maxItems": 12,
+          "maxItems": 25,
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -112,13 +112,13 @@
         "num_agents": {
           "type": "integer",
           "minimum": 2,
-          "maximum": 12,
+          "maximum": 25,
           "description": "Connected real-policy seats for this variant (commissioner ladder routing)."
         },
         "episode_timeout_seconds": {
           "type": "integer",
           "minimum": 60,
-          "maximum": 3600,
+          "maximum": 6000,
           "description": "Real wall-clock budget for this variant's episode. Explicit so the commissioner framework's max(300, 2x this) duration limit isn't computed from the unrelated player_connect_timeout_seconds fallback and truncate a real multi-minute match."
         }
       }
@@ -152,7 +152,7 @@
         "scores": {
           "type": "array",
           "minItems": 2,
-          "maxItems": 12,
+          "maxItems": 25,
           "items": {
             "type": "number"
           }
@@ -160,7 +160,7 @@
         "winner_slot": {
           "type": ["integer", "null"],
           "minimum": 0,
-          "maximum": 11
+          "maximum": 24
         },
         "turn_count": {
           "type": ["integer", "null"],
@@ -189,7 +189,7 @@
         "players": {
           "type": "array",
           "minItems": 2,
-          "maxItems": 12,
+          "maxItems": 25,
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -198,7 +198,7 @@
               "slot": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 11
+                "maximum": 24
               },
               "name": {
                 "type": "string"
@@ -1081,6 +1081,73 @@
         "episode_timeout_seconds": 3600
       },
       "description": "Twelve-policy free-for-all on Europe (Normal): same seat count, step caps, clock, and scoring as the other Tournament 12P variants \u2014 only the map differs. Retained for manual validation, but quarantined from automatic Competition scheduling after repeated hosted runs exceeded the artifact deadline before producing results and replay."
+    },
+    {
+      "id": "tournament-16p-pangaea",
+      "name": "Tournament 16P - Pangaea",
+      "game_config": {
+        "players": [
+          {
+            "name": "Coworld Starter 1"
+          },
+          {
+            "name": "Coworld Starter 2"
+          },
+          {
+            "name": "Coworld Starter 3"
+          },
+          {
+            "name": "Coworld Starter 4"
+          },
+          {
+            "name": "Coworld Starter 5"
+          },
+          {
+            "name": "Coworld Starter 6"
+          },
+          {
+            "name": "Coworld Starter 7"
+          },
+          {
+            "name": "Coworld Starter 8"
+          },
+          {
+            "name": "Coworld Starter 9"
+          },
+          {
+            "name": "Coworld Starter 10"
+          },
+          {
+            "name": "Coworld Starter 11"
+          },
+          {
+            "name": "Coworld Starter 12"
+          },
+          {
+            "name": "Coworld Starter 13"
+          },
+          {
+            "name": "Coworld Starter 14"
+          },
+          {
+            "name": "Coworld Starter 15"
+          },
+          {
+            "name": "Coworld Starter 16"
+          }
+        ],
+        "num_agents": 16,
+        "max_decision_steps": 500,
+        "turns_per_decision_step": 100,
+        "max_decision_ms": 15000,
+        "map": "Pangaea",
+        "map_size": "Normal",
+        "difficulty": "Easy",
+        "replay_tail_turns": 500,
+        "player_connect_timeout_seconds": 120,
+        "episode_timeout_seconds": 4500
+      },
+      "description": "16-policy free-for-all backing the 16-seat Competition rung (Pangaea-only pool, most battle-tested map). Added 2026-08-10 for whole-company league events: at 25 entrants a round is ten 16-seat games instead of fourteen 12-seat ones, with denser per-game social interaction. A full local 16-seat episode (2026-08-10: decisive winner, 15,600 turns, all 1,451 decisions accepted, ~331MB peak RSS, 14MB replay, ~60 min wall) validated seats/memory/artifacts; the rung is revertable by a commissioner-only patch."
     }
   ],
   "certification": {

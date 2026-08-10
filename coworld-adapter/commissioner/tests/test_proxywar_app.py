@@ -251,7 +251,7 @@ def test_every_supported_ladder_shape_schedules_every_entrant(
             name=f"{seat_count}-player Pangaea",
             game_config={"num_agents": seat_count},
         )
-        for seat_count in (2, 4, 8, 12)
+        for seat_count in (2, 4, 8, 12, 16)
     ]
 
     scheduled = commissioner().schedule_episodes_for_round_start(round_start)
@@ -265,6 +265,89 @@ def test_every_supported_ladder_shape_schedules_every_entrant(
         membership.policy_version_id for membership in round_start.memberships
     }
     assert scheduled_policy_ids == champion_policy_ids
+
+
+def _sixteen_rung_variants() -> list[VariantInfo]:
+    # The variant list a live RoundStart carries once the package declares the
+    # 16-seat variant alongside the 12-seat pool.
+    return [
+        VariantInfo(
+            id="tournament-12p-pangaea",
+            name="12-player Pangaea",
+            game_config={"num_agents": 12, "episode_timeout_seconds": 3600},
+        ),
+        VariantInfo(
+            id="tournament-16p-pangaea",
+            name="16-player Pangaea",
+            game_config={"num_agents": 16, "episode_timeout_seconds": 4500},
+        ),
+    ]
+
+
+def test_live_25_champion_field_routes_to_sixteen_seats_and_covers_every_entrant() -> (
+    None
+):
+    round_start = competition_round_start(25)
+    round_start.variants = _sixteen_rung_variants()
+
+    scheduled = commissioner().schedule_episodes_for_round_start(round_start)
+
+    # 25 entrants at 16 seats: max(4, 25 - 16 + 1) = 10 rolling-window episodes.
+    assert len(scheduled.episodes) == 10
+    for episode in scheduled.episodes:
+        assert episode.variant_id == "tournament-16p-pangaea"
+        assert len(episode.policy_version_ids) == 16
+        assert len(set(episode.policy_version_ids)) == 16
+    scheduled_policy_ids = {
+        policy_id
+        for episode in scheduled.episodes
+        for policy_id in episode.policy_version_ids
+    }
+    champion_policy_ids = {
+        membership.policy_version_id for membership in round_start.memberships
+    }
+    assert scheduled_policy_ids == champion_policy_ids
+
+
+def test_sixteen_champion_field_routes_to_sixteen_seats() -> None:
+    # Exact boundary: at precisely 16 champions the 16-seat rung fits
+    # (seats <= champions), producing the 4-episode floor of full-field games.
+    round_start = competition_round_start(16)
+    round_start.variants = _sixteen_rung_variants()
+
+    scheduled = commissioner().schedule_episodes_for_round_start(round_start)
+
+    assert len(scheduled.episodes) == 4
+    for episode in scheduled.episodes:
+        assert episode.variant_id == "tournament-16p-pangaea"
+        assert len(set(episode.policy_version_ids)) == 16
+
+
+def test_fifteen_champion_field_stays_on_twelve_seats() -> None:
+    round_start = competition_round_start(15)
+    round_start.variants = _sixteen_rung_variants()
+
+    scheduled = commissioner().schedule_episodes_for_round_start(round_start)
+
+    assert scheduled.episodes
+    for episode in scheduled.episodes:
+        assert episode.variant_id == "tournament-12p-pangaea"
+        assert len(episode.policy_version_ids) == 12
+
+
+def test_sixteen_rung_without_manifest_variant_falls_back_to_twelve_seats() -> None:
+    # Rollout order safety: a commissioner that declares the 16-seat rung but
+    # runs against a package without the 16p variant must keep scheduling
+    # 12-seat rounds (the rung filters to available variants), so the
+    # commissioner and package can ship in either order.
+    round_start = competition_round_start(25)
+
+    scheduled = commissioner().schedule_episodes_for_round_start(round_start)
+
+    assert scheduled.episodes
+    for episode in scheduled.episodes:
+        assert episode.variant_id == "tournament-12p-pangaea"
+        assert len(episode.policy_version_ids) == 12
 
 
 def test_competition_ladder_ids_all_exist_in_the_manifest() -> None:
@@ -606,11 +689,15 @@ def test_current_manifests_match_the_commissioner_seed_range() -> None:
         assert seed_schema["maximum"] == EPISODE_SEED_MAX, manifest_path
 
 
-def test_live_dispatch_throttle_caps_competition_at_three_episodes() -> None:
+def test_live_dispatch_throttle_caps_competition_at_five_episodes() -> None:
     throttle = commissioner().dispatch_throttle_config()
 
     assert throttle.enabled is True
-    assert throttle.max_concurrent_episodes(3600) == 3
+    # Live 12-seat episodes run episode_timeout_seconds=3600 and get the full
+    # configured max_in_flight ceiling.
+    assert throttle.max_concurrent_episodes(3600) == 5
+    # Short-timeout certification smokes stay below the ceiling because the
+    # duty-cycle load formula binds first.
     assert throttle.max_concurrent_episodes(180) == 3
     assert throttle.episode_stagger_seconds(3600) == 0
 
@@ -628,26 +715,31 @@ def test_dispatch_acknowledgements_preserve_capacity_and_named_rejections_drain(
         ] == ["0"]
 
         # Each acknowledgement opens exactly one more request until the
-        # max_in_flight=3 window is full.
-        websocket.send_json({"type": "episodes_accepted", "request_ids": ["0"]})
-        second = websocket.receive_json()
-        assert [episode["request_id"] for episode in second["episodes"]] == ["1"]
-        websocket.send_json({"type": "episodes_accepted", "request_ids": ["1"]})
-        third = websocket.receive_json()
-        assert [episode["request_id"] for episode in third["episodes"]] == ["2"]
+        # max_in_flight=5 window is full.
+        for accepted_index in range(4):
+            websocket.send_json(
+                {
+                    "type": "episodes_accepted",
+                    "request_ids": [str(accepted_index)],
+                }
+            )
+            opened = websocket.receive_json()
+            assert [episode["request_id"] for episode in opened["episodes"]] == [
+                str(accepted_index + 1)
+            ]
 
         # An explicit, named rejection settles only that request and drains
         # exactly one queued replacement into the newly free slot.
         websocket.send_json(
             {
                 "type": "episodes_rejected",
-                "request_ids": ["2"],
-                "errors": {"2": "synthetic platform rejection"},
+                "request_ids": ["4"],
+                "errors": {"4": "synthetic platform rejection"},
             }
         )
         replacement = websocket.receive_json()
         assert [episode["request_id"] for episode in replacement["episodes"]] == [
-            "3"
+            "5"
         ]
 
         # Duplicate acceptance is idempotent. A terminal failure may also be
@@ -666,7 +758,7 @@ def test_dispatch_acknowledgements_preserve_capacity_and_named_rejections_drain(
         next_replacement = websocket.receive_json()
         assert [
             episode["request_id"] for episode in next_replacement["episodes"]
-        ] == ["4"]
+        ] == ["6"]
         websocket.send_json({"type": "episodes_accepted", "request_ids": ["1"]})
         with pytest.raises(WouldBlock):
             websocket.portal.call(websocket._send_rx.receive_nowait)
@@ -876,7 +968,7 @@ def test_unthrottled_server_accepts_batch_acknowledgement_and_completes() -> Non
         assert complete["type"] == "round_complete"
 
 
-def test_live_17_champion_server_dispatches_three_then_drains_the_queue() -> None:
+def test_live_17_champion_server_dispatches_five_then_drains_the_queue() -> None:
     round_start = competition_round_start(17)
 
     with TestClient(create_app(commissioner())).websocket_connect(
@@ -884,7 +976,7 @@ def test_live_17_champion_server_dispatches_three_then_drains_the_queue() -> Non
     ) as websocket:
         websocket.send_json(round_start.to_json())
 
-        # Open the max_in_flight=3 window one acknowledged request at a time.
+        # Open the max_in_flight=5 window one acknowledged request at a time.
         # Production proved that back-to-back single messages admitted only the
         # first request, while one three-request batch admitted none.
         initial_message = websocket.receive_json()
@@ -893,7 +985,7 @@ def test_live_17_champion_server_dispatches_three_then_drains_the_queue() -> Non
             "0"
         ]
 
-        for accepted_index in range(2):
+        for accepted_index in range(4):
             websocket.send_json(
                 {
                     "type": "episodes_accepted",
@@ -906,12 +998,31 @@ def test_live_17_champion_server_dispatches_three_then_drains_the_queue() -> Non
                 str(accepted_index + 1)
             ]
 
-        websocket.send_json({"type": "episodes_accepted", "request_ids": ["2"]})
+        websocket.send_json({"type": "episodes_accepted", "request_ids": ["4"]})
 
         with pytest.raises(WouldBlock):
             websocket.portal.call(websocket._send_rx.receive_nowait)
 
-        for settled_index in range(3):
+        # 17 champions -> 6 episodes, so the queue holds exactly one episode
+        # beyond the five-slot window. The first settlement drains it; further
+        # settlements find the queue empty and open nothing.
+        websocket.send_json(
+            {
+                "type": "episode_failed",
+                "request_id": "0",
+                "error": "synthetic throttle-test settlement",
+            }
+        )
+        replacement = websocket.receive_json()
+        assert replacement["type"] == "schedule_episodes"
+        # One slot freed -> exactly one replacement episode, still sent
+        # as its own single-episode batch.
+        assert [episode["request_id"] for episode in replacement["episodes"]] == [
+            "5"
+        ]
+        websocket.send_json({"type": "episodes_accepted", "request_ids": ["5"]})
+
+        for settled_index in (1, 2):
             websocket.send_json(
                 {
                     "type": "episode_failed",
@@ -919,22 +1030,8 @@ def test_live_17_champion_server_dispatches_three_then_drains_the_queue() -> Non
                     "error": "synthetic throttle-test settlement",
                 }
             )
-            replacement = websocket.receive_json()
-            assert replacement["type"] == "schedule_episodes"
-            # One slot freed -> exactly one replacement episode, still sent
-            # as its own single-episode batch.
-            assert [episode["request_id"] for episode in replacement["episodes"]] == [
-                str(settled_index + 3)
-            ]
-            websocket.send_json(
-                {
-                    "type": "episodes_accepted",
-                    "request_ids": [str(settled_index + 3)],
-                }
-            )
-
-        with pytest.raises(WouldBlock):
-            websocket.portal.call(websocket._send_rx.receive_nowait)
+            with pytest.raises(WouldBlock):
+                websocket.portal.call(websocket._send_rx.receive_nowait)
 
         websocket.send_json(
             {"type": "round_abort", "reason": "synthetic throttle test complete"}
@@ -945,7 +1042,10 @@ def test_live_17_champion_server_dispatches_three_then_drains_the_queue() -> Non
 def test_duplicate_terminal_message_does_not_reopen_dispatch_capacity(
     terminal_type: str,
 ) -> None:
-    round_start = competition_round_start(17)
+    # 18 champions -> 7 episodes: after the window fills and one settlement
+    # dispatches "5", episode "6" is still queued, so a wrongly reopened slot
+    # would observably emit it instead of blocking.
+    round_start = competition_round_start(18)
     terminal = (
         {"type": "episode_result", "request_id": "0", "scores": []}
         if terminal_type == "episode_result"
@@ -956,7 +1056,7 @@ def test_duplicate_terminal_message_does_not_reopen_dispatch_capacity(
         "/round"
     ) as websocket:
         websocket.send_json(round_start.to_json())
-        for request_id in ("0", "1", "2"):
+        for request_id in ("0", "1", "2", "3", "4"):
             scheduled = websocket.receive_json()
             assert [episode["request_id"] for episode in scheduled["episodes"]] == [
                 request_id
@@ -968,9 +1068,9 @@ def test_duplicate_terminal_message_does_not_reopen_dispatch_capacity(
         websocket.send_json(terminal)
         replacement = websocket.receive_json()
         assert [episode["request_id"] for episode in replacement["episodes"]] == [
-            "3"
+            "5"
         ]
-        websocket.send_json({"type": "episodes_accepted", "request_ids": ["3"]})
+        websocket.send_json({"type": "episodes_accepted", "request_ids": ["5"]})
 
         websocket.send_json(terminal)
         with pytest.raises(WouldBlock):
@@ -1126,13 +1226,14 @@ def test_queued_undispatched_terminal_message_is_rejected(
         assert closed.value.code == 1008
 
 
-def test_live_24_champion_round_drains_all_thirteen_episodes_via_acknowledged_windows() -> (
+def test_live_25_champion_round_drains_all_fourteen_episodes_via_acknowledged_windows() -> (
     None
 ):
-    # 24 champions / 12 seats -> 13 episodes (rolling-window coverage),
-    # max_in_flight=3 from the live config -- the exact live shape behind
-    # the P1 under-dispatch symptom.
-    round_start = competition_round_start(24)
+    # 25 champions / 12 seats -> 14 episodes (rolling-window coverage),
+    # max_in_flight=5 from the live config -- the exact live shape. The full
+    # acknowledged drain to round_complete is what round 1323 (0.1.24) failed
+    # to reach.
+    round_start = competition_round_start(25)
 
     with TestClient(create_app(commissioner())).websocket_connect(
         "/round"
@@ -1145,7 +1246,7 @@ def test_live_24_champion_round_drains_all_thirteen_episodes_via_acknowledged_wi
             "0"
         ]
 
-        for accepted_index in range(2):
+        for accepted_index in range(4):
             websocket.send_json(
                 {
                     "type": "episodes_accepted",
@@ -1158,12 +1259,12 @@ def test_live_24_champion_round_drains_all_thirteen_episodes_via_acknowledged_wi
                 str(accepted_index + 1)
             ]
 
-        websocket.send_json({"type": "episodes_accepted", "request_ids": ["2"]})
+        websocket.send_json({"type": "episodes_accepted", "request_ids": ["4"]})
 
         with pytest.raises(WouldBlock):
             websocket.portal.call(websocket._send_rx.receive_nowait)
 
-        for settled_index in range(10):
+        for settled_index in range(9):
             websocket.send_json(
                 {
                     "type": "episode_failed",
@@ -1174,19 +1275,19 @@ def test_live_24_champion_round_drains_all_thirteen_episodes_via_acknowledged_wi
             replacement = websocket.receive_json()
             assert replacement["type"] == "schedule_episodes"
             assert [episode["request_id"] for episode in replacement["episodes"]] == [
-                str(settled_index + 3)
+                str(settled_index + 5)
             ]
             websocket.send_json(
                 {
                     "type": "episodes_accepted",
-                    "request_ids": [str(settled_index + 3)],
+                    "request_ids": [str(settled_index + 5)],
                 }
             )
 
         with pytest.raises(WouldBlock):
             websocket.portal.call(websocket._send_rx.receive_nowait)
 
-        for settled_index in range(10, 12):
+        for settled_index in range(9, 13):
             websocket.send_json(
                 {
                     "type": "episode_failed",
@@ -1200,7 +1301,7 @@ def test_live_24_champion_round_drains_all_thirteen_episodes_via_acknowledged_wi
         websocket.send_json(
             {
                 "type": "episode_failed",
-                "request_id": "12",
+                "request_id": "13",
                 "error": "synthetic full-drain settlement",
             }
         )

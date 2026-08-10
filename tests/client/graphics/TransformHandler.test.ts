@@ -868,4 +868,22 @@ describe("embedded spectator frames land the whole-map contain fit (Softmax Obse
       window.history.pushState({}, "", "/");
     }
   });
+
+  it("the standalone static replay viewer (window.__PROXYWAR_STATIC_REPLAY__ — the bundle Observatory opens for finished replays) lands contain even top-level", () => {
+    (window as unknown as Record<string, unknown>).__PROXYWAR_AI_REPLAY__ =
+      true;
+    (window as unknown as Record<string, unknown>).__PROXYWAR_STATIC_REPLAY__ =
+      true;
+    try {
+      const transform = new TransformHandler(
+        makeGameView(2000, 1000),
+        new EventBus(),
+        makeCanvas(1600, 900),
+      );
+      expect(transform.scale).toBeCloseTo(0.8 * 0.95, 6);
+    } finally {
+      delete (window as unknown as Record<string, unknown>)
+        .__PROXYWAR_STATIC_REPLAY__;
+    }
+  });
 });

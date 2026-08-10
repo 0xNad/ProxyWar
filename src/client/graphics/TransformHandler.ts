@@ -836,22 +836,31 @@ export class TransformHandler {
     //
     //Embedded frames (isEmbeddedSpectatorFrame — see its doc) land the same
     //whole-map "contain" fit as forceWholeMap: an Observatory-style iframe
-    //panel must always show the FULL board on load. The Coworld
-    //`/client/{global,replay}` routes (isCoworldReplayRoute, including the
-    //Observatory pod-proxy path shapes) are ALWAYS that observatory-facing
-    //surface, so they land contain even when opened top-level — Softmax
-    //controls how those pages are presented, not us. Only the LANDING
-    //shape changes; the spectator clamp semantics (fill/floor set below,
-    //blended bounds, zoom-out-to-whole-board) stay active in both cases.
+    //panel must always show the FULL board on load. Two more surfaces are
+    //ALWAYS observatory-facing and land contain even when opened top-level,
+    //because Softmax controls their presentation, not us:
+    //  - the Coworld `/client/{global,replay}` routes (isCoworldReplayRoute,
+    //    including the Observatory pod-proxy path shapes);
+    //  - the standalone static replay viewer bundle
+    //    (`game.replay_viewer.bundle`; its shell sets
+    //    `window.__PROXYWAR_STATIC_REPLAY__` before the bundle runs — the
+    //    bundle Observatory actually opens for finished-episode replays).
+    //Only the LANDING shape changes; the spectator clamp semantics
+    //(fill/floor set below, blended bounds, zoom-out-to-whole-board) stay
+    //active in all cases.
     const vpWidth = this.boundingRect().width;
     const vpHeight = this.boundingRect().height;
     const mapWidth = this.game.width();
     const mapHeight = this.game.height();
+    const staticViewer =
+      (window as typeof window & { __PROXYWAR_STATIC_REPLAY__?: boolean })
+        .__PROXYWAR_STATIC_REPLAY__ === true;
     const spectator =
       !options.forceWholeMap &&
       isReplaySpectatorView() &&
       !isEmbeddedSpectatorFrame() &&
-      !isCoworldReplayRoute();
+      !isCoworldReplayRoute() &&
+      !staticViewer;
 
     const { scale: tScale, fillScale, zoomFloor } = computeSpectatorFitScale({
       vpWidth,
