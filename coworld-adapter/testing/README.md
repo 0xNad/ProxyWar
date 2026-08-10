@@ -63,6 +63,33 @@ The Docker build validates and writes the profile/arm to
 over argv and environment. A hosted runtime environment override therefore
 cannot silently turn a keeper into a defector or move a policy between arms.
 
+## Hosted support acceptance control
+
+`Dockerfile.hosted-support-control` is a narrower eval-only counterparty for
+proving that a candidate starter can accept and fulfill a feasible support
+request in the hosted runtime. It requests a core alliance through an exact
+offered action, continues ordinary expansion, accepts incoming negative
+covenants, and selects each currently offered `support_request` to a friendly
+player. A rejection is allowed to reach the server-governed retry window so an
+LLM starter receives a post-plan opportunity instead of only a startup-step
+offer.
+
+Build it from the repository root:
+
+```sh
+docker build -f coworld-adapter/testing/Dockerfile.hosted-support-control \
+  --platform linux/amd64 \
+  -t proxywar-hosted-support-control:local .
+```
+
+This policy is a reproducible evaluation fixture, not a league candidate. Never
+submit or promote it. A passing acceptance requires the replay's finalized
+`deal-ledger.json` to contain a support obligation fulfilled by an immutable
+`confirmedDonation` receipt; a proposal, selected action, or metadata amount is
+not execution evidence.
+
+## Matched matrix execution
+
 Use the same four image digests, maps, episode counts, and rotated seat orders
 within an arm. The adapter encodes each explicit `game_config.seed` as the
 authoritative eight-character `GameServer.id`; `results.json` records both the

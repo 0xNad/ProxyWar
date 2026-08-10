@@ -1,0 +1,7 @@
+FROM node:24-bookworm-slim
+
+WORKDIR /app
+COPY coworld-adapter/testing/hosted-support-control-policy.mjs ./
+COPY coworld-adapter/testing/hosted-support-control-player.mjs ./
+
+CMD ["node", "/app/hosted-support-control-player.mjs"]
