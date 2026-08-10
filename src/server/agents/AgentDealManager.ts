@@ -166,6 +166,30 @@ export interface AgentDealLedgerSnapshot {
     }
   >;
   events: AgentDealLedgerEvent[];
+  /**
+   * Bounded public proof of validator-accepted diplomacy-slot selections. It
+   * carries server-authored offered IDs, the exact validated selection, and a
+   * manager-application boolean. Rejected agent input, reasons, prompts, and
+   * the primary action stay out.
+   */
+  actionEvidence: AgentDealActionEvidence[];
+}
+
+export interface AgentDealActionEvidence {
+  sequence: number;
+  turnNumber: number;
+  actorPlayerID: string | null;
+  actorName: string;
+  offeredActionIDs: string[];
+  selectedActionID: string;
+  selectedActionKind:
+    | "deal_propose"
+    | "deal_accept"
+    | "deal_reject"
+    | "deal_withdraw";
+  managerApplied: boolean;
+  sourceFallbackUsed: boolean;
+  sourceLlmPlannerDegraded: boolean;
 }
 
 export class AgentDealManager {
@@ -177,6 +201,7 @@ export class AgentDealManager {
     string,
     AgentDealLedgerEvent[]
   >();
+  private actionEvidence: AgentDealActionEvidence[] = [];
   /** Decision step of each player's last ACCEPTED proposal (cooldown clock). */
   private readonly lastProposalStepByPlayerID = new Map<string, number>();
   private currentStep = -1;
@@ -414,6 +439,33 @@ export class AgentDealManager {
     this.finalizedAtTurn =
       input.turnNumber ??
       (this.currentStep >= 0 ? this.currentTurnNumber : null);
+    this.actionEvidence = input.records
+      .filter(
+        (record) =>
+          record.dealSlotEvidence?.validation.accepted === true &&
+          record.dealSlotEvidence.application.attempted === true,
+      )
+      .map((record) => {
+        const evidence = record.dealSlotEvidence!;
+        if (!evidence.validation.accepted || !evidence.application.attempted) {
+          throw new Error("accepted deal action evidence invariant failed");
+        }
+        return {
+          sequence: record.sequence,
+          turnNumber: record.turnNumber,
+          actorPlayerID: this.playerIDByAgentID.get(record.agentID) ?? null,
+          actorName: record.username,
+          offeredActionIDs: DEAL_ACTION_KINDS.flatMap(
+            (kind) => record.legalActionIDsByKind[kind] ?? [],
+          ),
+          selectedActionID: evidence.validation.actionID,
+          selectedActionKind: evidence.validation.actionKind,
+          managerApplied: evidence.application.accepted,
+          sourceFallbackUsed: record.decisionMetadata?.fallbackUsed === true,
+          sourceLlmPlannerDegraded:
+            record.decisionMetadata?.llmPlannerDegraded === true,
+        };
+      });
     const events: AgentDealLedgerEvent[] = [];
     if (this.currentStep >= 0) {
       const start = this.stepStartSequence[this.currentStep];
@@ -492,6 +544,10 @@ export class AgentDealManager {
       // deterministic (participant-ordered submission pass + deterministic
       // compliance walk); lexical re-sorting can invert same-step causes.
       events: this.events.map((event) => ({ ...event })),
+      actionEvidence: this.actionEvidence.map((evidence) => ({
+        ...evidence,
+        offeredActionIDs: [...evidence.offeredActionIDs],
+      })),
     };
   }
 

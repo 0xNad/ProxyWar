@@ -59,6 +59,8 @@ const STRATEGY = [
   "Read relativeTroopRatio (your troops / theirs): attack when comfortably above 1, avoid when below 1.",
   "Don't attack allies. Don't start several wars at once. Ally early, betray late and only when it clearly wins.",
   "For structured deals, set a standing disposition for each relevant rival by exact playerID.",
+  "Use compact deal aliases: nap, trade, joint, support. Omit rivals with no concrete policy.",
+  "Prioritize live offers, active promises, bordered rivals, and partners with observed same-match reliability.",
   "Omitted rivals default to reject/no proposal. Reliability is same-match history, not a universal trust score.",
   "Accept only templates you can keep, and propose only terms with a concrete strategic purpose.",
   "NAP/trade bind both parties; joint_attack binds only its proposer; accepting support_request binds its recipient.",
@@ -80,6 +82,15 @@ function boundedIntegerEnv(name, fallback, min, max) {
     : fallback;
 }
 const PLAN_EVERY = boundedIntegerEnv("PLAN_EVERY", 6, 1, 30); // refresh the plan every N decisions
+const MAX_DEAL_POLICIES = 12;
+const MAX_DEAL_TEMPLATES_PER_POLICY = 4;
+const MAX_BREAK_DEAL_IDS = 6;
+const DEAL_TEMPLATE_ALIASES = {
+  nap: "non_aggression_pact",
+  trade: "trade_security_pact",
+  joint: "joint_attack",
+  support: "support_request",
+};
 const PLAN_KINDS = [
   "spawn",
   "attack",
@@ -137,6 +148,44 @@ function cleanID(s) {
     .replace(/[^\x20-\x7e]/g, "")
     .trim()
     .slice(0, 180);
+}
+function normalizeDealPolicies(value) {
+  const entries = Array.isArray(value)
+    ? value.map((entry) => [entry?.playerID, entry])
+    : value && typeof value === "object"
+      ? Object.entries(value)
+      : [];
+  return entries
+    .filter(([playerID, entry]) => typeof playerID === "string" && entry)
+    .slice(0, MAX_DEAL_POLICIES)
+    .map(([playerID, entry]) => {
+      const templates = (candidate) =>
+        [
+          ...new Set(
+            (Array.isArray(candidate) ? candidate : []).map(
+              (template) => DEAL_TEMPLATE_ALIASES[template] || template,
+            ),
+          ),
+        ]
+          .filter((template) =>
+            Object.values(DEAL_TEMPLATE_ALIASES).includes(template),
+          )
+          .slice(0, MAX_DEAL_TEMPLATES_PER_POLICY);
+      return {
+        playerID: cleanID(playerID),
+        acceptTemplates: templates(
+          Array.isArray(value) ? entry.acceptTemplates : entry.accept,
+        ),
+        proposeTemplates: templates(
+          Array.isArray(value) ? entry.proposeTemplates : entry.propose,
+        ),
+      };
+    })
+    .filter(
+      (entry) =>
+        entry.playerID &&
+        (entry.acceptTemplates.length > 0 || entry.proposeTemplates.length > 0),
+    );
 }
 function buildState(obs, actions) {
   const own = obs.ownState || {};
@@ -355,12 +404,9 @@ function extractJson(text, repairTruncatedReason = false) {
         !Array.isArray(repaired?.preferKinds) ||
         !(repaired?.target === null || typeof repaired?.target === "string") ||
         !Array.isArray(repaired?.avoidTargets) ||
-        !Array.isArray(repaired?.dealPolicies) ||
-        !repaired.dealPolicies.every(
-          (entry) =>
-            typeof entry?.playerID === "string" &&
-            Array.isArray(entry?.acceptTemplates) &&
-            Array.isArray(entry?.proposeTemplates),
+        !(
+          Array.isArray(repaired?.dealPolicies) ||
+          (repaired?.dealPolicies && typeof repaired.dealPolicies === "object")
         ) ||
         !Array.isArray(repaired?.breakDealIDs) ||
         typeof repaired?.reason !== "string"
@@ -378,9 +424,9 @@ function extractJson(text, repairTruncatedReason = false) {
 const PROMPT_HARDENING = process.env.PROXYWAR_PROMPT_HARDENING === "1";
 const PROMPT_CACHE = process.env.PROXYWAR_PROMPT_CACHE === "1";
 const PROMPT_VARIANT = PROMPT_CACHE
-  ? "full-hardened-cache-v1"
+  ? "full-hardened-compact-deals-cache-v2"
   : PROMPT_HARDENING
-    ? "full-hardened-telemetry-v2"
+    ? "full-hardened-compact-deals-v3"
     : "full-baseline-telemetry-v1";
 const plannerUsageTotals = {
   attempts: 0,
@@ -600,12 +646,13 @@ async function askBedrock(state) {
     PLAN_KINDS.join("|") +
     '>"],' +
     '"target":"<exact rival name to pressure, or null>","avoidTargets":["<rival names not to attack>"],' +
-    '"dealPolicies":[{"playerID":"<exact rival playerID>","acceptTemplates":["<deal templates>"],"proposeTemplates":["<deal templates>"]}],' +
+    '"dealPolicies":{"<exact rival playerID>":{"accept":["<nap|trade|joint|support>"],"propose":["<nap|trade|joint|support>"]}},' +
     '"breakDealIDs":["<exact active dealID to deliberately break>"],' +
-    '"reason":"<one short sentence>"}\n' +
+    '"reason":"<at most 12 words>"}\n' +
     "Deal templates are non_aggression_pact, trade_security_pact, joint_attack, support_request. " +
     "NAP/trade bind both parties; joint_attack binds only its proposer to qualifying pressure; " +
     "support_request acceptance binds its recipient to the stated gold OR troop threshold. " +
+    `Return at most ${MAX_DEAL_POLICIES} dealPolicies, at most ${MAX_DEAL_TEMPLATES_PER_POLICY} aliases in each accept/propose list, and at most ${MAX_BREAK_DEAL_IDS} breakDealIDs. Omit empty policies. ` +
     "Omit a rival to reject their offers and make no offer. Use only IDs shown in GAME.\n";
   const dynamicPrompt = "GAME:\n" + JSON.stringify(state);
   const candidates = lockedModel ? [lockedModel] : MODELS;
@@ -617,7 +664,7 @@ async function askBedrock(state) {
     try {
       // Both A/B arms use this exact source and telemetry. The candidate arm
       // differs only through PROMPT_HARDENING: stricter JSON wording,
-      // 500-token headroom, and reason-tail repair. Both arms send one user
+      // 500-token headroom, compact deal policy, and reason-tail repair. Both arms send one user
       // message because hosted Sonnet rejects the assistant-prefill form. The
       // optional cache arm splits the identical text into a static cached block
       // and one dynamic GAME block; the default stays a byte-identical string.
@@ -689,42 +736,14 @@ function refreshPlanInBackground(state) {
         avoidTargets: Array.isArray(parsed.avoidTargets)
           ? parsed.avoidTargets.map(clean)
           : [],
-        dealPolicies: Array.isArray(parsed.dealPolicies)
-          ? parsed.dealPolicies
-              .filter((entry) => entry && typeof entry.playerID === "string")
-              .slice(0, 12)
-              .map((entry) => ({
-                playerID: cleanID(entry.playerID),
-                acceptTemplates: Array.isArray(entry.acceptTemplates)
-                  ? entry.acceptTemplates
-                      .filter((template) =>
-                        [
-                          "non_aggression_pact",
-                          "trade_security_pact",
-                          "joint_attack",
-                          "support_request",
-                        ].includes(template),
-                      )
-                      .slice(0, 4)
-                  : [],
-                proposeTemplates: Array.isArray(entry.proposeTemplates)
-                  ? entry.proposeTemplates
-                      .filter((template) =>
-                        [
-                          "non_aggression_pact",
-                          "trade_security_pact",
-                          "joint_attack",
-                          "support_request",
-                        ].includes(template),
-                      )
-                      .slice(0, 4)
-                  : [],
-              }))
-          : [],
+        dealPolicies: normalizeDealPolicies(parsed.dealPolicies),
         breakDealIDs: Array.isArray(parsed.breakDealIDs)
-          ? parsed.breakDealIDs.map(cleanID).filter(Boolean).slice(0, 6)
+          ? parsed.breakDealIDs
+              .map(cleanID)
+              .filter(Boolean)
+              .slice(0, MAX_BREAK_DEAL_IDS)
           : [],
-        reason: clean(parsed.reason).slice(0, 120),
+        reason: clean(parsed.reason).slice(0, 80),
         model,
       };
       planDecisionAge = 0;
@@ -796,8 +815,35 @@ function dealConstraints(obs) {
   return res;
 }
 
-const DEAL_PROPOSAL_RETRY_STEPS = 12;
+// A rejected or expired offer is evidence. Repeating the same terms every time
+// the server cooldown reopens is spam, not negotiation. Each recipient/template
+// gets one initial offer and at most one later renegotiation after a long
+// cooldown. The pair/template cap stays binding even if terms change.
+const DEAL_PROPOSAL_RETRY_STEPS = 60;
+const DEAL_PROPOSAL_MAX_ATTEMPTS_PER_KEY = 2;
 const proposalAttempts = new Map();
+
+function hasOpenDeal(obs, playerID, template) {
+  const ownID = obs?.ownState?.playerID;
+  if (
+    (obs?.deals?.outgoingProposals || []).some(
+      (proposal) =>
+        proposal.recipientPlayerID === playerID &&
+        proposal.terms?.template === template,
+    )
+  ) {
+    return true;
+  }
+  return (obs?.deals?.activeDeals || []).some((deal) => {
+    const otherID =
+      deal.proposerPlayerID === ownID
+        ? deal.recipientPlayerID
+        : deal.recipientPlayerID === ownID
+          ? deal.proposerPlayerID
+          : null;
+    return otherID === playerID && deal.template === template;
+  });
+}
 
 function dealPolicyFor(playerID) {
   return (plan?.dealPolicies || []).find(
@@ -811,7 +857,7 @@ function dealPolicyFor(playerID) {
 // (a) answer the first live proposal from its proposer's stable-ID policy;
 // (b) default unknown rivals/templates to rejection, never silent expiry;
 // (c) propose only an exact currently offered recipient/template nominated by
-//     the plan; suppress repeated pair/template attempts for a fixed window.
+//     the plan; suppress live duplicates and cap pair/template attempts.
 function chooseDealMove(actions, obs) {
   if (!obs?.deals) return null;
   const incoming = [...(obs.deals.incomingProposals || [])].sort(
@@ -842,6 +888,7 @@ function chooseDealMove(actions, obs) {
     );
     if (!rival) continue;
     for (const template of policy.proposeTemplates || []) {
+      if (hasOpenDeal(obs, policy.playerID, template)) continue;
       const option = options.find(
         (candidate) =>
           candidate.recipientPlayerID === policy.playerID &&
@@ -849,11 +896,14 @@ function chooseDealMove(actions, obs) {
       );
       if (!option) continue;
       const key = `${policy.playerID}:${template}`;
-      const lastAttempt = proposalAttempts.get(key);
+      const attempt = proposalAttempts.get(key);
+      const proposalStep = Number.isInteger(step) ? step : null;
       if (
-        Number.isInteger(step) &&
-        Number.isInteger(lastAttempt) &&
-        step - lastAttempt < DEAL_PROPOSAL_RETRY_STEPS
+        attempt &&
+        (attempt.count >= DEAL_PROPOSAL_MAX_ATTEMPTS_PER_KEY ||
+          proposalStep === null ||
+          attempt.lastStep === null ||
+          proposalStep - attempt.lastStep < DEAL_PROPOSAL_RETRY_STEPS)
       ) {
         continue;
       }
@@ -864,7 +914,10 @@ function chooseDealMove(actions, obs) {
           candidate.metadata?.template === template,
       );
       if (!action) continue;
-      if (Number.isInteger(step)) proposalAttempts.set(key, step);
+      proposalAttempts.set(key, {
+        count: (attempt?.count || 0) + 1,
+        lastStep: proposalStep,
+      });
       return action;
     }
   }

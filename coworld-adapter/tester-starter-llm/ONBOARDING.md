@@ -87,16 +87,21 @@ one of those exact offered ids as `selectedDealActionId`. It rides beside
 `selectedLegalActionId`; it is never a second game move. The shipped planner sets a
 separate deal disposition for each relevant stable `playerID`. Omitted rivals and
 templates default to rejection. It nominates proposals only from
-`observation.deals.proposalOptions`, suppresses the same pair/template retry for 12
-decisions, and answers incoming proposals before making another offer. The server
-independently enforces a three-decision proposal cooldown.
+`observation.deals.proposalOptions`, blocks duplicate open proposals, and allows at most
+one later selected proposal attempt per pair/template after 60 decisions. Selection
+consumes an attempt because the policy process has no application callback. It answers incoming
+proposals before making another offer. The server independently enforces its own proposal
+cooldown.
 
 Accepted promises produce explicit obligations. The executor prioritizes remaining
 support donations and qualifying joint-attack pressure before ordinary strategy, while
-continuing to filter attacks and embargoes forbidden by pending pacts. Selection is not
-proof of fulfillment: the replay referee confirms the game effect and records the
-terminal verdict. A target name alone cannot authorize betrayal; the plan must include
-the exact active promise in `breakDealIDs`.
+continuing to filter land attacks, hostile boat launches, nukes, and embargoes forbidden
+by pending pacts. Selection is not
+proof of fulfillment: for non-aggression and trade-security promises, the replay referee
+checks validator-accepted hostile action IDs throughout the active window; for support
+and joint-attack promises, it requires a confirmed game effect. A target name alone
+cannot authorize betrayal; the plan must include the exact active promise in
+`breakDealIDs`.
 
 Read [`DEALS.md`](DEALS.md) before changing `chooseDealMove`. It lists every template,
 who becomes obligated, the exact observation/action fields, and the tests to run.

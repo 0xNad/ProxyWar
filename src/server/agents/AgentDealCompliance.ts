@@ -16,26 +16,25 @@ import type {
  * Structured-deal compliance referee (PROXYWAR_TUNE_STRUCTURED_DEALS, default
  * OFF — economy+negotiation V1 Phase B).
  *
- * Deterministic per-match judge of CONFIRMED game effects only: it reads
- * decision records' result/audit data and live game-state liveness facts,
- * never merely which action a policy selected. Deals never alter any game
- * permission — agents remain free to defect — so the referee narrates
- * follow-through; it never punishes. There is NO hidden morality score and NO
- * rating input; per-agent reliability is a public aggregate
+ * Deterministic per-match judge of validator-accepted hostile actions for negative
+ * covenants and CONFIRMED game effects for positive promises. It reads exact
+ * validated action/result records, audit data, and live game-state liveness
+ * facts. Deals never alter any game permission — agents remain free to defect
+ * — so the referee narrates follow-through; it never punishes. There is NO
+ * hidden morality score and NO rating input; per-agent reliability is a public aggregate
  * (fulfilled / terminal non-moot) exposed for observation and narration only.
  *
  * Detection rules (verified mechanics, docs/OPENFRONT_ECONOMY_NEGOTIATION_
  * VERIFIED.md §2.4-2.5, §3-4):
- * - non_aggression / trade_security violation: a confirmed land attack
- *   launched against the partner (attack record audited `confirmed`, or a NEW
- *   outgoing attack appearing between a record's before/after audit
- *   snapshots — which also catches transport invasion ARRIVAL, since arrival
- *   creates the attack), or a confirmed nuke/MIRV against the partner.
- * - trade_security additionally: a MANUAL embargo created against the partner
- *   (an `embargo`/`embargo_all` ACTION record audited confirmed — embargo_all
+ * - non_aggression / trade_security violation: a validator-accepted exact land attack,
+ *   naval-invasion launch, or nuke/MIRV action against the partner during the
+ *   active window. A transport launched before the promise is outside this
+ *   action-window contract even if it arrives later.
+ * - trade_security additionally: a MANUAL embargo chosen against the partner
+ *   (a validator-accepted exact `embargo`/`embargo_all` ACTION record — embargo_all
  *   counts). The automatic temporary embargo a victim gains by BEING attacked
- *   is never the victim's violation: it appears only in audit snapshots, and
- *   embargo violations are judged exclusively from embargo ACTION records.
+ *   is never the victim's violation: embargo violations are judged exclusively
+ *   from accepted embargo ACTION records.
  * - Emoji, quick chat, and target markers are never violations.
  * - joint_attack fulfilled only by confirmed attack execution (or confirmed
  *   nuke) against the named third seat within the window.
@@ -121,17 +120,19 @@ export interface AgentDealObligationState {
   resolutionEvidence: string | null;
   forcedResolution: boolean;
   /**
-   * False once any active-window decision lacks a complete effect audit.
-   * Load-bearing for negative covenants: absence of a confirmed violation is
-   * evidence of fulfillment only when the whole observed window is covered.
+   * False once any active-window decision lacks enough retained action
+   * evidence to classify it under the negative-covenant contract. Every
+   * retained `chosenActionID` has already passed `AgentDecisionValidator`; the field
+   * name is retained for artifact compatibility; it now measures exact-action
+   * coverage, not downstream game-effect confirmation.
    */
   auditCoverageComplete: boolean;
-  /** Number of active decision steps with missing or incomplete audit evidence. */
+  /** Number of active decision steps with missing or ambiguous action evidence. */
   auditCoverageGapCount: number;
   /**
    * VIEWER-ONLY. The obligor's OWN stated reason on the decision whose
-   * confirmed effect resolved this obligation (the betrayal's or the kept
-   * promise's rationale, already sanitized). Absent when the resolution came
+   * validator-accepted action or confirmed effect resolved this obligation
+   * (the betrayal's or the kept promise's rationale, already sanitized). Absent when the resolution came
    * from the clock (elapsed/forced/moot) or the decision had no stated
    * reason. NEVER enters any agent's observation — see `AgentDealState`.
    */
@@ -358,44 +359,39 @@ function numberMetadata(
 }
 
 /**
- * A confirmed hostile action by this record's player against `targetPlayerID`:
- * a confirmed non-expansion attack record naming the target, a confirmed nuke
- * record naming the target, or a NEW outgoing attack appearing between the
- * before/after audit snapshots (transport invasion arrival shows up here —
- * arrival creates the attack). Returns a short description or null.
+ * A validator-accepted hostile action by this record's player against
+ * `targetPlayerID`: an exact non-expansion attack, naval-invasion launch, or
+ * nuke action naming the target. `chosenActionID` and its action metadata are
+ * written only after `AgentDecisionValidator` accepts the menu selection; the
+ * later `result.accepted` says whether GameServer accepted the submitted
+ * intent and does not erase the choice. Downstream effect snapshots are
+ * deliberately excluded: a transport launched before the covenant may arrive
+ * inside its window, and that is not a new promise-breaking choice.
  */
-function confirmedHostileActionAgainst(
+function validatedHostileActionAgainst(
   record: AgentDecisionRecord,
   targetPlayerID: string,
 ): string | null {
-  if (!record.result.accepted) {
-    return null;
-  }
-  const audit = record.audit;
   if (
     record.chosenActionKind === "attack" &&
     record.chosenActionMetadata?.expansion !== true &&
-    stringMetadata(record, "targetID") === targetPlayerID &&
-    audit?.auditStatus === "confirmed"
+    stringMetadata(record, "targetID") === targetPlayerID
   ) {
-    return "land attack";
+    return "validator-accepted land attack";
   }
   if (
     record.chosenActionKind === "nuke" &&
-    stringMetadata(record, "targetID") === targetPlayerID &&
-    audit?.auditStatus === "confirmed"
+    stringMetadata(record, "targetID") === targetPlayerID
   ) {
-    return "nuclear strike";
+    return "validator-accepted nuclear strike";
   }
-  const beforeIDs = audit?.before?.outgoingAttackTargetIDs;
-  const afterIDs = audit?.after?.outgoingAttackTargetIDs;
   if (
-    beforeIDs !== undefined &&
-    afterIDs !== undefined &&
-    !beforeIDs.includes(targetPlayerID) &&
-    afterIDs.includes(targetPlayerID)
+    record.chosenActionKind === "boat" &&
+    record.chosenActionMetadata?.navalInvasion === true &&
+    record.chosenActionMetadata?.expansion === false &&
+    stringMetadata(record, "targetID") === targetPlayerID
   ) {
-    return "confirmed attack";
+    return "validator-accepted naval invasion launch";
   }
   return null;
 }
@@ -407,9 +403,8 @@ function confirmedHostileActionAgainst(
  * / 0.4) to count as the pledged "confirmed military pressure" — a token
  * below-floor poke earns no credit. A confirmed nuke always qualifies
  * (decisive pressure with no troop commitment to measure). Snapshot-only
- * attack deltas (transport arrivals) carry no troop evidence and therefore
- * never FULFILL a pledge — they still VIOLATE pacts, where magnitude is
- * irrelevant.
+ * attack deltas (including transport arrivals) are not action choices and
+ * therefore neither fulfill a pledge nor violate a negative covenant.
  */
 export const MIN_JOINT_ATTACK_TROOP_PERCENT = 0.2;
 
@@ -450,19 +445,16 @@ function confirmedJointAttackPressureOn(
 }
 
 /**
- * A MANUAL embargo created against `targetPlayerID` by this record: judged
- * exclusively from confirmed `embargo`/`embargo_all` ACTION records, never
- * from embargo-set snapshot diffs — the automatic temporary embargo a victim
- * gains by being attacked appears only in snapshots and must never be
+ * A MANUAL embargo selected against `targetPlayerID` by this record: judged
+ * exclusively from validator-accepted exact `embargo`/`embargo_all` ACTION records,
+ * never from embargo-set snapshot diffs — the automatic temporary embargo a
+ * victim gains by being attacked appears only in snapshots and must never be
  * attributed to the victim as a violation.
  */
-function confirmedManualEmbargoAgainst(
+function validatedManualEmbargoAgainst(
   record: AgentDecisionRecord,
   targetPlayerID: string,
 ): string | null {
-  if (!record.result.accepted || record.audit?.auditStatus !== "confirmed") {
-    return null;
-  }
   if (
     record.chosenActionKind === "embargo" &&
     stringMetadata(record, "action") === "start" &&
@@ -504,6 +496,67 @@ function confirmedDonationTo(
       ? Math.max(0, Math.floor(numberMetadata(record, "troops") ?? 0))
       : 0;
   return { gold, troops };
+}
+
+/**
+ * Whether one retained decision fully covers a negative covenant for this
+ * counterparty. This contract judges the agent's validator-accepted exact action choice,
+ * not its asynchronous downstream effect. A later GameServer rejection does
+ * not erase that choice. Unrelated actions are covered without an effect audit.
+ * A violation-capable action with ambiguous target/action metadata is a gap
+ * rather than inferred compliance.
+ */
+function hasNegativeCovenantCoverage(
+  record: AgentDecisionRecord,
+  obligation: AgentDealObligationState,
+): boolean {
+  const counterpartyID = obligation.counterpartyPlayerID;
+  if (validatedHostileActionAgainst(record, counterpartyID) !== null) {
+    return true;
+  }
+  const targetID = stringMetadata(record, "targetID");
+  if (record.chosenActionKind === "attack") {
+    if (record.chosenActionMetadata?.expansion === true) {
+      return true;
+    }
+    return targetID !== null && targetID.length > 0;
+  }
+  if (record.chosenActionKind === "nuke") {
+    return targetID !== null && targetID.length > 0;
+  }
+  if (record.chosenActionKind === "boat") {
+    const expansion = record.chosenActionMetadata?.expansion;
+    const navalInvasion = record.chosenActionMetadata?.navalInvasion;
+    if (
+      expansion === true &&
+      navalInvasion === false &&
+      (targetID === null || targetID.length === 0)
+    ) {
+      return true;
+    }
+    return (
+      expansion === false &&
+      navalInvasion === true &&
+      targetID !== null &&
+      targetID.length > 0
+    );
+  }
+  if (obligation.kind === "trade_security") {
+    if (validatedManualEmbargoAgainst(record, counterpartyID) !== null) {
+      return true;
+    }
+    const action = stringMetadata(record, "action");
+    if (record.chosenActionKind === "embargo") {
+      if (action === "stop") {
+        return true;
+      }
+      return action === "start" && targetID !== null && targetID.length > 0;
+    }
+    if (record.chosenActionKind === "embargo_all") {
+      return action === "start" || action === "stop";
+    }
+  }
+  return true;
 }
 
 function resolveObligation(
@@ -595,18 +648,9 @@ export function judgeDealComplianceRecords(input: {
       if (isNegativeObligationKind(obligation.kind)) {
         const coverageComplete =
           records.length > 0 &&
-          records.every((record) => {
-            const audit = record.audit;
-            return (
-              audit !== undefined &&
-              (audit.auditStatus === "confirmed" ||
-                audit.auditStatus === "not_applicable") &&
-              audit.before !== undefined &&
-              audit.before !== null &&
-              audit.after !== undefined &&
-              audit.after !== null
-            );
-          });
+          records.every((record) =>
+            hasNegativeCovenantCoverage(record, obligation),
+          );
         if (!coverageComplete) {
           obligation.auditCoverageComplete = false;
           obligation.auditCoverageGapCount += 1;
@@ -637,11 +681,11 @@ function judgeRecordForObligation(
   events: AgentDealLedgerEvent[],
 ): void {
   const label = DEAL_TEMPLATE_LABELS[deal.template];
-  // VIEWER-ONLY: the obligor's own words on the very decision whose CONFIRMED
-  // effect resolves this obligation — the betrayal's (or the kept promise's)
-  // stated rationale, beside the referee's server-authored verdict but never
-  // merged into it. No extra model call: every decision already carries a
-  // reason. Null (provider failure / no stated reason) omits the field.
+  // VIEWER-ONLY: the obligor's own words on the decision whose validator-accepted action
+  // or confirmed effect resolves this obligation — the betrayal's (or the kept
+  // promise's) stated rationale, beside the referee's server-authored verdict
+  // but never merged into it. No extra model call: every decision already
+  // carries a reason. Null (provider failure / no stated reason) omits it.
   const statedReason = sanitizeDealStatedReason(record.reason);
   const attachStatedReason = () => {
     if (statedReason !== null) {
@@ -651,7 +695,7 @@ function judgeRecordForObligation(
   switch (obligation.kind) {
     case "non_aggression":
     case "trade_security": {
-      const hostile = confirmedHostileActionAgainst(
+      const hostile = validatedHostileActionAgainst(
         record,
         obligation.counterpartyPlayerID,
       );
@@ -675,7 +719,7 @@ function judgeRecordForObligation(
         return;
       }
       if (obligation.kind === "trade_security") {
-        const embargo = confirmedManualEmbargoAgainst(
+        const embargo = validatedManualEmbargoAgainst(
           record,
           obligation.counterpartyPlayerID,
         );
@@ -841,10 +885,11 @@ export function resolveMootObligations(input: {
 
 /**
  * Window completion at the start of a step past `expiresAfterStep`: negative
- * covenants that survived a fully audited window resolve fulfilled; an audit
- * gap resolves unverified rather than turning missing evidence into praise; positive
- * commitments left unfulfilled resolve expired_unfulfilled (spectator kind
- * deal_expired — an unkept promise is narrated, never punished).
+ * covenants that survived a fully covered exact-action window resolve
+ * fulfilled; an evidence gap resolves unverified rather than turning missing
+ * evidence into praise; positive commitments left unfulfilled resolve
+ * expired_unfulfilled (spectator kind deal_expired — an unkept promise is
+ * narrated, never punished).
  */
 export function resolveElapsedObligations(input: {
   deals: AgentDealState[];
@@ -870,14 +915,14 @@ export function resolveElapsedObligations(input: {
             obligation,
             "unverified",
             input.step,
-            `${obligation.auditCoverageGapCount} active decision step(s) lacked complete audit coverage`,
+            `${obligation.auditCoverageGapCount} active decision step(s) lacked complete action evidence`,
           );
           continue;
         }
         const evidence =
           obligation.kind === "trade_security"
-            ? `${deal.durationSteps} decisions without a confirmed hostile action or new voluntary embargo`
-            : `${deal.durationSteps} decisions without a confirmed hostile action`;
+            ? `${deal.durationSteps} decisions without a validator-accepted hostile action or new voluntary embargo`
+            : `${deal.durationSteps} decisions without a validator-accepted hostile action`;
         resolveObligation(obligation, "fulfilled", input.step, evidence);
         events.push(
           verdictEvent(
@@ -923,7 +968,7 @@ export function resolveElapsedObligations(input: {
  * state. Any promise whose window was cut short by match end resolves moot so
  * reliability never counts a duration the match did not allow the obligor to
  * complete. A negative covenant whose full window elapsed resolves fulfilled
- * only with complete audit coverage; otherwise it resolves unverified. A
+ * only with complete exact-action coverage; otherwise it resolves unverified. A
  * positive window that ends ON the final step has fully run (finalize judges
  * that step's records first) and resolves expired_unfulfilled. Open proposals
  * expire with the same lapse narration mid-match expiry emits.
@@ -978,7 +1023,7 @@ export function forceResolveDeals(input: {
             obligation,
             "unverified",
             input.step,
-            `match ended after ${obligation.auditCoverageGapCount} active decision step(s) lacked complete audit coverage`,
+            `match ended after ${obligation.auditCoverageGapCount} active decision step(s) lacked complete action evidence`,
             true,
           );
           continue;
@@ -987,7 +1032,7 @@ export function forceResolveDeals(input: {
           obligation,
           "fulfilled",
           input.step,
-          "match ended with no confirmed violation during the active window",
+          "match ended with no validator-accepted hostile action during the active window",
           true,
         );
         events.push(
@@ -997,7 +1042,7 @@ export function forceResolveDeals(input: {
             "deal_fulfilled",
             "pact",
             50,
-            `${obligation.obligorName} held the ${label} with ${obligation.counterpartyName} to match end with no confirmed violation.`,
+            `${obligation.obligorName} held the ${label} with ${obligation.counterpartyName} to match end with no validator-accepted hostile action.`,
             input.step,
           ),
         );
@@ -1042,9 +1087,7 @@ export function forceResolveDeals(input: {
 }
 
 /** Public referee aggregate: fulfilled / verified terminal non-moot, per obligor. */
-export function dealReliabilityByObligor(
-  deals: readonly AgentDealState[],
-): Map<
+export function dealReliabilityByObligor(deals: readonly AgentDealState[]): Map<
   string,
   {
     fulfilled: number;

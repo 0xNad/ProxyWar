@@ -37,16 +37,17 @@ choice; only an exact ID from that menu can execute it.
 
 ## The four templates
 
-| Template              | Who is obligated after acceptance | Referee-confirmed requirement                                                                                |
+| Template              | Who is obligated after acceptance | Referee requirement                                                                                          |
 | --------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `non_aggression_pact` | Both parties                      | No confirmed hostile action against the other during the window.                                             |
-| `trade_security_pact` | Both parties                      | Non-aggression plus no new voluntary embargo against the other.                                              |
+| `non_aggression_pact` | Both parties                      | No validator-accepted hostile action against the other during the fully covered action window.               |
+| `trade_security_pact` | Both parties                      | Non-aggression plus no validator-accepted new voluntary embargo against the other.                           |
 | `joint_attack`        | The proposer only                 | A confirmed attack or nuke against the named third player; a land attack must commit at least 20% of troops. |
 | `support_request`     | The accepting recipient           | Confirmed donations to the requester reach the stated gold **or** troop threshold.                           |
 
 The server records `fulfilled`, `violated`, `expired_unfulfilled`, `unverified`, or
-`moot`. Choosing an attack or donation is not proof it happened; confirmed effects are
-the source of truth.
+`moot`. Negative covenants judge validator-accepted exact action choices, not asynchronous
+combat effects; positive promises require confirmed effects. A pre-pact transport arriving
+during the window is therefore not a new pact-breaking choice.
 
 ## The shipped LLM policy
 
@@ -55,16 +56,17 @@ deal decision:
 
 ```json
 {
-  "dealPolicies": [
-    {
-      "playerID": "P_A",
-      "acceptTemplates": ["non_aggression_pact", "trade_security_pact"],
-      "proposeTemplates": ["joint_attack"]
-    }
-  ],
+  "dealPolicies": {
+    "P_A": { "accept": ["nap", "trade"], "propose": ["joint"] }
+  },
   "breakDealIDs": []
 }
 ```
+
+The planner-only aliases are `nap`, `trade`, `joint`, and `support`. The
+executor immediately normalizes them to the canonical template names carried
+by observations and offered actions. The previous verbose array shape remains
+accepted for one compatibility release.
 
 Rules implemented by `llm-player.mjs`:
 
@@ -75,13 +77,20 @@ Rules implemented by `llm-player.mjs`:
    Omitted rivals/templates are rejected immediately, so offers do not silently expire.
 3. Propose only when the exact recipient/template is present in `proposalOptions` and a
    matching `deal_propose` ID is currently offered.
-4. Do not repeat the same recipient/template attempt for 12 decision steps. This is
-   policy-level suppression in addition to the server's three-step global cooldown.
-5. Prioritize an owed support donation or a qualifying joint attack before ordinary
+4. Use the compact stable-ID map and omit empty policies. This bounds planner output in
+   crowded games without reducing the twelve visible counterparties or replacing the
+   full legal-action menu.
+5. Never duplicate an open recipient/template proposal. After the first selected
+   proposal attempt, allow at most one later selected attempt after 60 decision steps. A
+   third attempt stays blocked even if terms change. Selection consumes the attempt
+   because the public policy process has no validator/manager result callback. This is
+   policy-level discipline in addition to the server cooldown.
+6. Prioritize an owed support donation or a qualifying joint attack before ordinary
    game actions. Continue until the referee reports a terminal obligation state.
-6. Filter accidental attacks and embargoes against pending pact partners. A deliberate
-   breach requires every affected active pact's exact ID in `breakDealIDs`.
-7. Listing a positive promise in `breakDealIDs` deliberately disables its fulfillment
+7. Filter accidental land attacks, hostile boat launches, nukes, and embargoes against
+   pending pact partners. A deliberate breach requires every affected active pact's exact
+   ID in `breakDealIDs`.
+8. Listing a positive promise in `breakDealIDs` deliberately disables its fulfillment
    priority. The referee still determines whether it expires unfulfilled or becomes moot.
 
 `rivalReliability` may inform the model's policy, but it is only observed promise
@@ -99,13 +108,22 @@ cross-match reputation, latent trust, or a general social-skill score.
 - Require exact active `dealID` authorization for intentional breach.
 - Inspect the replay deal ledger for terminal effects; do not infer fulfillment from a
   selected action or stated reason.
+- Audit `deal-ledger.json.actionEvidence` for the exact server-authored offered
+  deal IDs, exact validated selected ID and kind, manager-application boolean,
+  and fallback/degradation state. Rejected requested text and reasons remain
+  private. This closes the successful public deal-slot path without exposing
+  prompts or the primary move.
 
 Run the focused starter tests before uploading:
 
 ```bash
 npx vitest tests/coworld/StarterDealPosture.test.ts \
+  tests/coworld/StarterDealControlledResponderMatrix.test.ts \
+  tests/coworld/StarterLlmPlannerRuntime.test.ts \
+  tests/coworld/StarterLlmPlannerTelemetry.test.ts \
   tests/coworld/StarterMinimalDealPosture.test.ts \
-  tests/coworld/StarterLeagueEntryInstructions.test.ts --run
+  tests/coworld/StarterLeagueEntryInstructions.test.ts \
+  tests/server/AgentDealLedgerArtifact.test.ts --run
 ```
 
 Local tests establish action-selection correctness. Whether a strategy negotiates well

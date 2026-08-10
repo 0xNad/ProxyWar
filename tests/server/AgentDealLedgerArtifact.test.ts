@@ -15,6 +15,7 @@ import {
 const A: StubSeat = { agentID: "a1", playerID: "P_A", username: "Auri" };
 const B: StubSeat = { agentID: "b1", playerID: "P_B", username: "Sefirot" };
 const DEAL_ID = "deal:P_A:P_B:non_aggression_pact:0";
+const REJECTED_REQUESTED_ID = `deal_reject:PRIVATE\u0000${"X".repeat(512)}`;
 const scratchDirs: string[] = [];
 
 beforeEach(() => {
@@ -41,7 +42,11 @@ async function runAcceptedPact() {
           "I want a quiet western border",
         ),
         () => null,
-        () => null,
+        pickWithDeal(
+          null,
+          REJECTED_REQUESTED_ID,
+          "PRIVATE REJECTED REASON MUST NOT ENTER LEDGER",
+        ),
       ],
       [
         () => null,
@@ -87,6 +92,23 @@ async function writeRun(
 describe("final structured-deal ledger artifact", () => {
   it("persists moot force-resolutions with stable ids, turns, facts, and separate claims", async () => {
     const harness = await runAcceptedPact();
+    harness.records()[0].decisionMetadata = {
+      ...harness.records()[0].decisionMetadata,
+      llmPrompt: "PRIVATE PROMPT MUST NOT ENTER LEDGER",
+    };
+    expect(
+      harness
+        .records()
+        .find((record) =>
+          record.dealSlotEvidence?.requestedActionID.startsWith(
+            "deal_reject:PRIVATE",
+          ),
+        )?.dealSlotEvidence,
+    ).toMatchObject({
+      requestedActionID: expect.stringContaining("deal_reject:PRIVATE"),
+      validation: { accepted: false },
+      application: { attempted: false },
+    });
     harness.league.finalizeDeals({ turnNumber: 75 });
     const ledger = harness.league.dealLedger();
 
@@ -100,6 +122,37 @@ describe("final structured-deal ledger artifact", () => {
         { step: 2, turnNumber: 50, recordsBeforeStep: 4 },
       ],
     });
+    expect(ledger.actionEvidence).toHaveLength(2);
+    expect(ledger.actionEvidence[0]).toMatchObject({
+      sequence: expect.any(Number),
+      turnNumber: 0,
+      actorPlayerID: "P_A",
+      actorName: "Auri",
+      offeredActionIDs: expect.arrayContaining([
+        "deal_propose:P_B:non_aggression_pact",
+      ]),
+      selectedActionID: "deal_propose:P_B:non_aggression_pact",
+      selectedActionKind: "deal_propose",
+      managerApplied: true,
+      sourceFallbackUsed: false,
+      sourceLlmPlannerDegraded: false,
+    });
+    expect(ledger.actionEvidence[1]).toMatchObject({
+      sequence: expect.any(Number),
+      turnNumber: 25,
+      actorPlayerID: "P_B",
+      actorName: "Sefirot",
+      offeredActionIDs: expect.arrayContaining([`deal_accept:${DEAL_ID}`]),
+      selectedActionID: `deal_accept:${DEAL_ID}`,
+      selectedActionKind: "deal_accept",
+      managerApplied: true,
+    });
+    for (const evidence of ledger.actionEvidence) {
+      expect(evidence.offeredActionIDs).toContain(evidence.selectedActionID);
+    }
+    expect(ledger.actionEvidence[0].sequence).toBeLessThan(
+      ledger.actionEvidence[1].sequence,
+    );
     const deal = ledger.deals.find(
       (candidate) => candidate.dealID === DEAL_ID,
     )!;
@@ -144,11 +197,6 @@ describe("final structured-deal ledger artifact", () => {
     expect(proposalEvent.statedReason).toBe("I want a quiet western border");
     expect(proposalEvent.publicText).not.toContain(proposalEvent.statedReason);
 
-    // Private/debug decision fields are not part of the ledger input surface.
-    harness.records()[0].decisionMetadata = {
-      ...harness.records()[0].decisionMetadata,
-      llmPrompt: "PRIVATE PROMPT MUST NOT ENTER LEDGER",
-    };
     const firstPaths = await writeRun(ledger, harness.records());
     const secondPaths = await writeRun(ledger, harness.records());
     expect(firstPaths.dealLedgerPath).toBeDefined();
@@ -156,14 +204,18 @@ describe("final structured-deal ledger artifact", () => {
     const secondBytes = await fs.readFile(secondPaths.dealLedgerPath!, "utf8");
     expect(secondBytes).toBe(firstBytes);
     expect(firstBytes).not.toContain("PRIVATE PROMPT MUST NOT ENTER LEDGER");
+    expect(firstBytes).not.toContain("PRIVATE REJECTED REASON");
+    expect(firstBytes).not.toContain("deal_reject:PRIVATE");
 
     const artifact = JSON.parse(firstBytes);
+    expect(JSON.stringify(artifact)).not.toContain("PRIVATE");
     expect(artifact).toMatchObject({
       schemaVersion: 1,
       runID: "deal-ledger-run",
       matchID: "DEAL_LEDGER",
       finalizedAtStep: 2,
       finalizedAtTurn: 75,
+      actionEvidence: ledger.actionEvidence,
     });
     for (const persistedDeal of artifact.deals) {
       for (const obligation of persistedDeal.obligations) {

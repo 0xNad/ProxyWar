@@ -495,6 +495,7 @@ export async function writeAgentLeagueRunArtifacts(
           decisionSteps: input.dealLedger.decisionSteps,
           deals: input.dealLedger.deals,
           events: input.dealLedger.events,
+          actionEvidence: input.dealLedger.actionEvidence,
         },
         null,
         2,
