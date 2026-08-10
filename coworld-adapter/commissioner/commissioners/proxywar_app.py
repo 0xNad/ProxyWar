@@ -41,6 +41,18 @@ COMPETITION_LADDER: list[tuple[int, list[str]]] = [
             # 0.1.24 and 0.1.26. Re-add only after a full hosted deadline proof.
         ],
     ),
+    (
+        16,
+        [
+            # Single-map rung, added 2026-08-10 for whole-company league events
+            # (operator-directed, requested by the platform team): denser games
+            # and fewer episodes per round at 16+ entrants. Pangaea only -- the
+            # most battle-tested map -- until a hosted 16-seat deadline/memory
+            # proof exists for any other map. Reverting the league to 12-seat
+            # rounds is a commissioner-only patch that removes this entry.
+            "tournament-16p-pangaea",
+        ],
+    ),
 ]
 
 

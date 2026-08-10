@@ -1,6 +1,10 @@
 {
   "$schema": "https://raw.githubusercontent.com/Metta-AI/coworld/main/src/coworld/coworld_manifest_schema.json",
-  "tags": ["strategy", "multiplayer", "ai-agents"],
+  "tags": [
+    "strategy",
+    "multiplayer",
+    "ai-agents"
+  ],
   "game": {
     "name": "proxywar",
     "description": "Hosted Proxy War Coworld adapter that preserves the LegalAction.id decision path.",
@@ -32,11 +36,13 @@
         "players": {
           "type": "array",
           "minItems": 2,
-          "maxItems": 12,
+          "maxItems": 25,
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["name"],
+            "required": [
+              "name"
+            ],
             "properties": {
               "name": {
                 "type": "string",
@@ -79,11 +85,17 @@
         },
         "map_size": {
           "type": "string",
-          "enum": ["Compact", "Normal"]
+          "enum": [
+            "Compact",
+            "Normal"
+          ]
         },
         "difficulty": {
           "type": "string",
-          "enum": ["Easy", "Medium"]
+          "enum": [
+            "Easy",
+            "Medium"
+          ]
         },
         "seed": {
           "type": "integer",
@@ -111,13 +123,13 @@
         "num_agents": {
           "type": "integer",
           "minimum": 2,
-          "maximum": 12,
+          "maximum": 25,
           "description": "Connected real-policy seats for this variant (commissioner ladder routing)."
         },
         "episode_timeout_seconds": {
           "type": "integer",
           "minimum": 60,
-          "maximum": 3600,
+          "maximum": 6000,
           "description": "Real wall-clock budget for this variant's episode. Explicit so the commissioner framework's max(300, 2x this) duration limit isn't computed from the unrelated player_connect_timeout_seconds fallback and truncate a real multi-minute match."
         }
       }
@@ -140,7 +152,10 @@
       ],
       "properties": {
         "seed": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0,
           "maximum": 11881375
         },
@@ -157,16 +172,25 @@
           }
         },
         "winner_slot": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0,
           "maximum": 11
         },
         "turn_count": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0
         },
         "tick": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0
         },
         "decision_count": {
@@ -192,7 +216,13 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["slot", "name", "score", "tiles_owned", "is_alive"],
+            "required": [
+              "slot",
+              "name",
+              "score",
+              "tiles_owned",
+              "is_alive"
+            ],
             "properties": {
               "slot": {
                 "type": "integer",
@@ -206,11 +236,17 @@
                 "type": "number"
               },
               "tiles_owned": {
-                "type": ["integer", "null"],
+                "type": [
+                  "integer",
+                  "null"
+                ],
                 "minimum": 0
               },
               "is_alive": {
-                "type": ["boolean", "null"]
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             }
           }
@@ -256,7 +292,10 @@
     {
       "type": "player",
       "image": "{{GAME_IMAGE}}",
-      "run": ["node", "/app/integration/src/starter-player.mjs"],
+      "run": [
+        "node",
+        "/app/integration/src/starter-player.mjs"
+      ],
       "env": {},
       "id": "proxywar-starter-websocket",
       "name": "Proxy War Starter Websocket Player",
@@ -279,7 +318,10 @@
     {
       "type": "optimizer",
       "image": "{{GAME_IMAGE}}",
-      "run": ["node", "/app/integration/src/proxywar-optimizer-plan.mjs"],
+      "run": [
+        "node",
+        "/app/integration/src/proxywar-optimizer-plan.mjs"
+      ],
       "env": {},
       "id": "proxywar-optimizer-plan",
       "name": "Proxy War Optimizer Plan",
@@ -1078,6 +1120,73 @@
         "player_connect_timeout_seconds": 120,
         "episode_timeout_seconds": 3600
       }
+    },
+    {
+      "id": "tournament-16p-pangaea",
+      "name": "Tournament 16P - Pangaea",
+      "game_config": {
+        "players": [
+          {
+            "name": "Coworld Starter 1"
+          },
+          {
+            "name": "Coworld Starter 2"
+          },
+          {
+            "name": "Coworld Starter 3"
+          },
+          {
+            "name": "Coworld Starter 4"
+          },
+          {
+            "name": "Coworld Starter 5"
+          },
+          {
+            "name": "Coworld Starter 6"
+          },
+          {
+            "name": "Coworld Starter 7"
+          },
+          {
+            "name": "Coworld Starter 8"
+          },
+          {
+            "name": "Coworld Starter 9"
+          },
+          {
+            "name": "Coworld Starter 10"
+          },
+          {
+            "name": "Coworld Starter 11"
+          },
+          {
+            "name": "Coworld Starter 12"
+          },
+          {
+            "name": "Coworld Starter 13"
+          },
+          {
+            "name": "Coworld Starter 14"
+          },
+          {
+            "name": "Coworld Starter 15"
+          },
+          {
+            "name": "Coworld Starter 16"
+          }
+        ],
+        "num_agents": 16,
+        "max_decision_steps": 500,
+        "turns_per_decision_step": 100,
+        "max_decision_ms": 15000,
+        "map": "Pangaea",
+        "map_size": "Normal",
+        "difficulty": "Easy",
+        "replay_tail_turns": 500,
+        "player_connect_timeout_seconds": 120,
+        "episode_timeout_seconds": 4500
+      },
+      "description": "16-policy free-for-all backing the 16-seat Competition rung (Pangaea-only pool, most battle-tested map). Added 2026-08-10 for whole-company league events: at 25 entrants a round is ten 16-seat games instead of fourteen 12-seat ones, with denser per-game social interaction. Wall-clock/memory validated via a full local 16-seat episode before shipping; the rung is revertable by a commissioner-only patch."
     }
   ],
   "episode_timeout_minutes": 100,
