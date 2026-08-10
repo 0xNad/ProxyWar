@@ -1361,6 +1361,7 @@ class Client {
     try {
       replayOverlay = mountAiLeagueReplayOverlay({
         runID,
+        embedded: isInIframe(),
         decisions: [],
         summary: null,
         spectatorTelemetry: null,

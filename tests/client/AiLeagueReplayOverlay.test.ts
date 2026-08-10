@@ -963,6 +963,45 @@ describe("AiLeagueReplayOverlay", () => {
     expect(document.getElementById("ai-league-headline-event")).toBeNull();
   });
 
+  it("docks embedded replay activity beside the map instead of opening a bottom sheet over it", () => {
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      value: 672,
+    });
+    Object.defineProperty(window, "innerHeight", {
+      configurable: true,
+      value: 470,
+    });
+
+    const handle = mountAiLeagueReplayOverlay({
+      runID: "embedded-replay",
+      embedded: true,
+      artifactBasePath: ".",
+      decisions: [],
+      remoteFeaturesEnabled: false,
+    });
+    const overlay = document.getElementById("ai-league-replay-overlay");
+
+    expect(document.body.classList.contains("ai-league-embedded-replay")).toBe(
+      true,
+    );
+    expect(overlay?.classList.contains("collapsed")).toBe(false);
+    expect(overlay?.classList.contains("mobile-bottom-sheet")).toBe(false);
+    expect(
+      overlay
+        ?.querySelector('[data-tab-id="events"]')
+        ?.getAttribute("aria-selected"),
+    ).toBe("true");
+    expect(overlay?.querySelector("style")?.textContent).toContain(
+      "body.ai-league-embedded-replay > canvas",
+    );
+
+    handle.dispose();
+    expect(document.body.classList.contains("ai-league-embedded-replay")).toBe(
+      false,
+    );
+  });
+
   it("prefers complete summary metrics over a bounded recent decision list", () => {
     mountAiLeagueReplayOverlay({
       runID: "summary-metrics",

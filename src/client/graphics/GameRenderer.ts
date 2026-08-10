@@ -452,8 +452,9 @@ export class GameRenderer {
   }
 
   resizeCanvas() {
-    this.canvas.width = window.innerWidth;
-    this.canvas.height = window.innerHeight;
+    const rect = this.canvas.getBoundingClientRect();
+    this.canvas.width = Math.ceil(rect.width);
+    this.canvas.height = Math.ceil(rect.height);
     this.transformHandler.updateCanvasBoundingRect();
     //this.redraw()
   }

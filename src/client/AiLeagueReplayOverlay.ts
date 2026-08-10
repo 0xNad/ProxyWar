@@ -201,6 +201,8 @@ interface AiLeagueReplayOverlayInput {
    */
   currentTurn?: number;
   runID: string;
+  /** Embedded viewers dock their spectator UI beside the map. */
+  embedded?: boolean;
   decisions: AiLeagueDecisionLogEntry[];
   summary?: AiLeagueReplaySummary | null;
   spectatorTelemetry?: unknown;
@@ -322,6 +324,10 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
   document.getElementById(AI_LEAGUE_BROADCAST_DRAWER_PORTAL_ID)?.remove();
   document.body.classList.remove("ai-league-analyst-mode");
   document.body.classList.add("ai-league-replay-mode");
+  document.body.classList.toggle(
+    "ai-league-embedded-replay",
+    input.embedded === true,
+  );
   document.body.classList.toggle(
     "ai-league-native-spectator-ui",
     isAiLeagueNativeSpectatorUiEnabled(),
@@ -642,6 +648,7 @@ function disposeReplayOverlay(overlay: HTMLElement) {
   document.getElementById(AI_LEAGUE_BROADCAST_DRAWER_PORTAL_ID)?.remove();
   document.body.classList.remove(
     "ai-league-replay-mode",
+    "ai-league-embedded-replay",
     "ai-league-native-spectator-ui",
     "ai-league-analyst-mode",
   );
@@ -886,9 +893,18 @@ const AI_LEAGUE_MOBILE_BREAKPOINT = 740;
 // too (see the matching `@media (max-height: ...) and (orientation:
 // landscape)` rule in overlayHtml's stylesheet).
 const AI_LEAGUE_MOBILE_LANDSCAPE_MAX_HEIGHT = 430;
+const AI_LEAGUE_EMBEDDED_RAIL_MIN_WIDTH = 600;
+
+function isEmbeddedReplayRail(): boolean {
+  return (
+    document.body.classList.contains("ai-league-embedded-replay") &&
+    window.innerWidth >= AI_LEAGUE_EMBEDDED_RAIL_MIN_WIDTH
+  );
+}
 
 function isNarrowReplayViewport(): boolean {
   return (
+    isEmbeddedReplayRail() ||
     window.innerWidth <= AI_LEAGUE_MOBILE_BREAKPOINT ||
     (window.innerHeight <= AI_LEAGUE_MOBILE_LANDSCAPE_MAX_HEIGHT &&
       window.innerWidth > window.innerHeight)
@@ -913,22 +929,25 @@ function mountReplayPanelDisclosure(overlay: HTMLElement) {
   };
 
   let narrow = isNarrowReplayViewport();
-  overlay.classList.toggle("mobile-bottom-sheet", narrow);
-  setExpanded(!narrow);
+  let docked = isEmbeddedReplayRail();
+  overlay.classList.toggle("mobile-bottom-sheet", narrow && !docked);
+  setExpanded(docked || !narrow);
   toggle.addEventListener("click", () => {
     setExpanded(overlay.classList.contains("collapsed"));
   });
 
   const onResize = () => {
     const nextNarrow = isNarrowReplayViewport();
-    if (nextNarrow === narrow) {
+    const nextDocked = isEmbeddedReplayRail();
+    if (nextNarrow === narrow && nextDocked === docked) {
       return;
     }
     narrow = nextNarrow;
-    overlay.classList.toggle("mobile-bottom-sheet", narrow);
+    docked = nextDocked;
+    overlay.classList.toggle("mobile-bottom-sheet", narrow && !docked);
     // Crossing the breakpoint resets to the useful default for that layout:
     // map-first on phones and the full inspector on desktop.
-    setExpanded(!narrow);
+    setExpanded(docked || !narrow);
   };
   const win = window as Window & {
     __aiLeaguePanelDisclosureCleanup?: () => void;
@@ -3049,6 +3068,92 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
           order: 3;
         }
       }
+      /*
+       * Twitch-style embeds get two real layout regions: the game canvas on
+       * the left and the spectator/activity rail on the right. This is not a
+       * floating overlay with a convenient-looking offset — the canvas itself
+       * is narrower, so the whole-map camera fits against the unobstructed
+       * game region and no replay panel can cover it. Very narrow embeds keep
+       * the existing collapsed bottom sheet because a 260px rail would leave
+       * too little map to be useful.
+       */
+      @media (min-width: 600px) {
+        body.ai-league-embedded-replay {
+          --ai-league-embedded-rail-width: clamp(260px, 42vw, 320px);
+        }
+        body.ai-league-embedded-replay > canvas {
+          width: calc(100% - var(--ai-league-embedded-rail-width)) !important;
+        }
+        body.ai-league-embedded-replay #pw-game-control-cluster {
+          right: var(--ai-league-embedded-rail-width) !important;
+        }
+        body.ai-league-embedded-replay #ai-league-replay-overlay,
+        body.ai-league-embedded-replay.ai-league-native-spectator-ui #ai-league-replay-overlay {
+          top: 0;
+          right: 0;
+          bottom: 0;
+          left: auto;
+          width: var(--ai-league-embedded-rail-width);
+          height: 100vh;
+          max-height: none;
+          border-width: 0 0 0 1px;
+          border-radius: 0;
+          box-sizing: border-box;
+        }
+        body.ai-league-embedded-replay #ai-league-replay-overlay header {
+          cursor: default;
+        }
+        body.ai-league-embedded-replay #ai-league-replay-overlay [data-ai-league-reset-layout],
+        body.ai-league-embedded-replay #ai-league-replay-overlay [data-ai-league-toggle],
+        body.ai-league-embedded-replay #ai-league-replay-overlay .ai-league-resize-handle {
+          display: none;
+        }
+        body.ai-league-embedded-replay #ai-league-replay-overlay .ai-league-body {
+          display: block;
+          padding: 10px;
+        }
+        body.ai-league-embedded-replay #ai-league-replay-overlay .ai-league-standings {
+          display: none;
+        }
+        body.ai-league-embedded-replay [data-ai-league-broadcast-drawer] .broadcast-drawer-tabs {
+          display: flex;
+          gap: 4px;
+          margin: 0 0 8px;
+        }
+        body.ai-league-embedded-replay .broadcast-drawer-tab {
+          flex: 1 1 0;
+          min-width: 0;
+          min-height: 36px;
+          padding: 5px 3px;
+          font-size: 10px;
+        }
+        body.ai-league-embedded-replay .broadcast-drawer-panel,
+        body.ai-league-embedded-replay .broadcast-drawer-panel[data-tab-id="events"],
+        body.ai-league-embedded-replay .broadcast-drawer-panel[data-tab-id="timeline"] {
+          position: static;
+          top: auto;
+          right: auto;
+          bottom: auto;
+          left: auto;
+          transform: none;
+          width: auto;
+          max-height: none;
+          z-index: auto;
+          display: none;
+        }
+        body.ai-league-embedded-replay .broadcast-drawer-panel[data-tab-active="true"] {
+          display: block;
+        }
+        body.ai-league-embedded-replay.ai-league-analyst-mode .broadcast-drawer-panel[data-tab-id="analysis"] {
+          position: static;
+          transform: none;
+          width: auto;
+          max-height: none;
+        }
+        body.ai-league-embedded-replay .broadcast-rail-list {
+          max-height: none;
+        }
+      }
     </style>
     <header data-ai-league-drag>
       <div>
@@ -4846,7 +4951,9 @@ function mountAiLeagueBroadcastDrawer(
   ): void => {
     AI_LEAGUE_BROADCAST_DRAWER_LAST_FRAME.set(container, framePlayers);
     AI_LEAGUE_BROADCAST_DRAWER_LAST_TURN.set(container, turnNumber);
-    const activeTab = AI_LEAGUE_DRAWER_ACTIVE_TAB.get(container) ?? "agents";
+    const activeTab =
+      AI_LEAGUE_DRAWER_ACTIVE_TAB.get(container) ??
+      (input.embedded === true ? "events" : "agents");
     const railEntries = competitorRailEntries(
       telemetry,
       decisions,
