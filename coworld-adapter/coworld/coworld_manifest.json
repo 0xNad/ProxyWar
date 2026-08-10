@@ -1,10 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/Metta-AI/coworld/main/src/coworld/coworld_manifest_schema.json",
-  "tags": [
-    "strategy",
-    "multiplayer",
-    "ai-agents"
-  ],
+  "tags": ["strategy", "multiplayer", "ai-agents"],
   "game": {
     "name": "proxywar",
     "version": "0.1.26",
@@ -41,9 +37,7 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": [
-              "name"
-            ],
+            "required": ["name"],
             "properties": {
               "name": {
                 "type": "string",
@@ -86,17 +80,11 @@
         },
         "map_size": {
           "type": "string",
-          "enum": [
-            "Compact",
-            "Normal"
-          ]
+          "enum": ["Compact", "Normal"]
         },
         "difficulty": {
           "type": "string",
-          "enum": [
-            "Easy",
-            "Medium"
-          ]
+          "enum": ["Easy", "Medium"]
         },
         "seed": {
           "type": "integer",
@@ -153,10 +141,7 @@
       ],
       "properties": {
         "seed": {
-          "type": [
-            "integer",
-            "null"
-          ],
+          "type": ["integer", "null"],
           "minimum": 0,
           "maximum": 11881375
         },
@@ -167,31 +152,22 @@
         "scores": {
           "type": "array",
           "minItems": 2,
-          "maxItems": 12,
+          "maxItems": 25,
           "items": {
             "type": "number"
           }
         },
         "winner_slot": {
-          "type": [
-            "integer",
-            "null"
-          ],
+          "type": ["integer", "null"],
           "minimum": 0,
-          "maximum": 11
+          "maximum": 24
         },
         "turn_count": {
-          "type": [
-            "integer",
-            "null"
-          ],
+          "type": ["integer", "null"],
           "minimum": 0
         },
         "tick": {
-          "type": [
-            "integer",
-            "null"
-          ],
+          "type": ["integer", "null"],
           "minimum": 0
         },
         "decision_count": {
@@ -213,22 +189,16 @@
         "players": {
           "type": "array",
           "minItems": 2,
-          "maxItems": 12,
+          "maxItems": 25,
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": [
-              "slot",
-              "name",
-              "score",
-              "tiles_owned",
-              "is_alive"
-            ],
+            "required": ["slot", "name", "score", "tiles_owned", "is_alive"],
             "properties": {
               "slot": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 11
+                "maximum": 24
               },
               "name": {
                 "type": "string"
@@ -237,17 +207,11 @@
                 "type": "number"
               },
               "tiles_owned": {
-                "type": [
-                  "integer",
-                  "null"
-                ],
+                "type": ["integer", "null"],
                 "minimum": 0
               },
               "is_alive": {
-                "type": [
-                  "boolean",
-                  "null"
-                ]
+                "type": ["boolean", "null"]
               }
             }
           }
@@ -293,10 +257,7 @@
     {
       "type": "player",
       "image": "proxywar-coworld-local:coworld-0.1.26-replay-private-v2",
-      "run": [
-        "node",
-        "/app/integration/src/starter-player.mjs"
-      ],
+      "run": ["node", "/app/integration/src/starter-player.mjs"],
       "env": {},
       "id": "proxywar-starter-websocket",
       "name": "Proxy War Starter Websocket Player",
@@ -321,10 +282,7 @@
     {
       "type": "optimizer",
       "image": "proxywar-coworld-local:coworld-0.1.26-replay-private-v2",
-      "run": [
-        "node",
-        "/app/integration/src/proxywar-optimizer-plan.mjs"
-      ],
+      "run": ["node", "/app/integration/src/proxywar-optimizer-plan.mjs"],
       "env": {},
       "id": "proxywar-optimizer-plan",
       "name": "Proxy War Optimizer Plan",
@@ -1189,7 +1147,7 @@
         "player_connect_timeout_seconds": 120,
         "episode_timeout_seconds": 4500
       },
-      "description": "16-policy free-for-all backing the 16-seat Competition rung (Pangaea-only pool, most battle-tested map). Added 2026-08-10 for whole-company league events: at 25 entrants a round is ten 16-seat games instead of fourteen 12-seat ones, with denser per-game social interaction. Wall-clock/memory validated via a full local 16-seat episode before shipping; the rung is revertable by a commissioner-only patch."
+      "description": "16-policy free-for-all backing the 16-seat Competition rung (Pangaea-only pool, most battle-tested map). Added 2026-08-10 for whole-company league events: at 25 entrants a round is ten 16-seat games instead of fourteen 12-seat ones, with denser per-game social interaction. A full local 16-seat episode (2026-08-10: decisive winner, 15,600 turns, all 1,451 decisions accepted, ~331MB peak RSS, 14MB replay, ~60 min wall) validated seats/memory/artifacts; the rung is revertable by a commissioner-only patch."
     }
   ],
   "certification": {

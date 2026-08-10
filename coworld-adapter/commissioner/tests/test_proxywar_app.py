@@ -309,6 +309,20 @@ def test_live_25_champion_field_routes_to_sixteen_seats_and_covers_every_entrant
     assert scheduled_policy_ids == champion_policy_ids
 
 
+def test_sixteen_champion_field_routes_to_sixteen_seats() -> None:
+    # Exact boundary: at precisely 16 champions the 16-seat rung fits
+    # (seats <= champions), producing the 4-episode floor of full-field games.
+    round_start = competition_round_start(16)
+    round_start.variants = _sixteen_rung_variants()
+
+    scheduled = commissioner().schedule_episodes_for_round_start(round_start)
+
+    assert len(scheduled.episodes) == 4
+    for episode in scheduled.episodes:
+        assert episode.variant_id == "tournament-16p-pangaea"
+        assert len(set(episode.policy_version_ids)) == 16
+
+
 def test_fifteen_champion_field_stays_on_twelve_seats() -> None:
     round_start = competition_round_start(15)
     round_start.variants = _sixteen_rung_variants()
