@@ -17,17 +17,18 @@ import { ChatModal } from "./layers/ChatModal";
 import { ControlPanel } from "./layers/ControlPanel";
 import { CoordinateGridLayer } from "./layers/CoordinateGridLayer";
 import { DynamicUILayer } from "./layers/DynamicUILayer";
-import { EmojiTable } from "./layers/EmojiTable";
 import { EventsDisplay } from "./layers/EventsDisplay";
 import { FxLayer } from "./layers/FxLayer";
 import { GameLeftSidebar } from "./layers/GameLeftSidebar";
-import { GameRightSidebar } from "./layers/GameRightSidebar";
+import {
+  GameRightSidebar,
+  HUD_HIDDEN_BODY_CLASS,
+} from "./layers/GameRightSidebar";
 import { HeadsUpMessage } from "./layers/HeadsUpMessage";
 import { ImmunityTimer } from "./layers/ImmunityTimer";
 import { InGamePromo } from "./layers/InGamePromo";
 import { Layer } from "./layers/Layer";
 import { Leaderboard } from "./layers/Leaderboard";
-import { MainRadialMenu } from "./layers/MainRadialMenu";
 import { MultiTabModal } from "./layers/MultiTabModal";
 import { NameLayer } from "./layers/NameLayer";
 import { NukeTrajectoryPreviewLayer } from "./layers/NukeTrajectoryPreviewLayer";
@@ -37,7 +38,6 @@ import { PlayerPanel } from "./layers/PlayerPanel";
 import { RailroadLayer } from "./layers/RailroadLayer";
 import { ReplayPanel } from "./layers/ReplayPanel";
 import { SAMRadiusLayer } from "./layers/SAMRadiusLayer";
-import { SettingsModal } from "./layers/SettingsModal";
 import { SpawnTimer } from "./layers/SpawnTimer";
 import { StructureIconsLayer } from "./layers/StructureIconsLayer";
 import { StructureLayer } from "./layers/StructureLayer";
@@ -53,7 +53,6 @@ export function createRenderer(
   canvas: HTMLCanvasElement,
   game: GameView,
   eventBus: EventBus,
-  playerRole: string | null,
 ): GameRenderer {
   const transformHandler = new TransformHandler(game, eventBus, canvas);
   const userSettings = new UserSettings();
@@ -63,6 +62,7 @@ export function createRenderer(
     nativeSpectatorUiEnabled,
   );
   mountAiLeagueNativeSpectatorStyles();
+  mountHudVisibilityStyles();
 
   const uiState: UIState = {
     attackRatio: 20,
@@ -79,14 +79,6 @@ export function createRenderer(
   startingModal.hide();
 
   // TODO maybe append this to document instead of querying for them?
-  const emojiTable = document.querySelector("emoji-table") as EmojiTable;
-  if (!emojiTable || !(emojiTable instanceof EmojiTable)) {
-    console.error("EmojiTable element not found in the DOM");
-  }
-  emojiTable.transformHandler = transformHandler;
-  emojiTable.game = game;
-  emojiTable.initEventBus(eventBus);
-
   const buildMenu = document.querySelector("build-menu") as BuildMenu;
   if (!buildMenu || !(buildMenu instanceof BuildMenu)) {
     console.error("BuildMenu element not found in the DOM");
@@ -216,15 +208,6 @@ export function createRenderer(
   gameRightSidebar.game = game;
   gameRightSidebar.eventBus = eventBus;
 
-  const settingsModal = document.querySelector(
-    "settings-modal",
-  ) as SettingsModal;
-  if (!(settingsModal instanceof SettingsModal)) {
-    console.error("settings modal not found");
-  }
-  settingsModal.userSettings = userSettings;
-  settingsModal.eventBus = eventBus;
-
   const unitDisplay = document.querySelector("unit-display") as UnitDisplay;
   if (!(unitDisplay instanceof UnitDisplay)) {
     console.error("unit display not found");
@@ -239,10 +222,7 @@ export function createRenderer(
   }
   playerPanel.g = game;
   playerPanel.initEventBus(eventBus);
-  playerPanel.emojiTable = emojiTable;
-  playerPanel.uiState = uiState;
-
-  playerPanel.setRole(playerRole);
+  playerPanel.transformHandler = transformHandler;
 
   const chatModal = document.querySelector("chat-modal") as ChatModal;
   if (!(chatModal instanceof ChatModal)) {
@@ -330,15 +310,6 @@ export function createRenderer(
     attacksDisplay,
     chatDisplay,
     buildMenu,
-    new MainRadialMenu(
-      eventBus,
-      game,
-      transformHandler,
-      emojiTable as EmojiTable,
-      buildMenu,
-      uiState,
-      playerPanel,
-    ),
     spawnTimer,
     immunityTimer,
     leaderboard,
@@ -352,7 +323,6 @@ export function createRenderer(
     playerInfo,
     winModal,
     replayPanel,
-    settingsModal,
     teamStats,
     playerPanel,
     // P0 fix (2026-08-03): dropped from this array as collateral during the
@@ -375,6 +345,31 @@ export function createRenderer(
     layers,
     performanceOverlay,
   );
+}
+
+/**
+ * Style sheet backing the sidebar's "hide interface" toggle: with
+ * HUD_HIDDEN_BODY_CLASS on <body>, every HUD element disappears except
+ * game-right-sidebar, which renders only its restore button in that mode.
+ */
+function mountHudVisibilityStyles() {
+  if (document.getElementById("proxywar-hud-visibility-styles") !== null) {
+    return;
+  }
+  const style = document.createElement("style");
+  style.id = "proxywar-hud-visibility-styles";
+  style.textContent = `
+    body.${HUD_HIDDEN_BODY_CLASS} :is(
+      attacks-display, control-panel, unit-display, chat-display,
+      events-display, build-menu, win-modal, player-panel, spawn-timer,
+      immunity-timer, in-game-promo, alert-frame, chat-modal, multi-tab-modal,
+      game-left-sidebar, player-info-overlay, leader-board, team-stats,
+      heads-up-message, replay-panel, performance-overlay
+    ) {
+      display: none !important;
+    }
+  `;
+  document.head.appendChild(style);
 }
 
 function mountAiLeagueNativeSpectatorStyles() {

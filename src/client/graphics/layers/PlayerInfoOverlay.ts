@@ -33,7 +33,6 @@ import {
 import { TransformHandler } from "../TransformHandler";
 import { ImmunityBarVisibleEvent } from "./ImmunityTimer";
 import { Layer } from "./Layer";
-import { CloseRadialMenuEvent } from "./RadialMenu";
 import "./RelationSmiley";
 import { SpawnBarVisibleEvent } from "./SpawnTimer";
 const soldierIconAquarius = assetUrl("images/SoldierIconAquarius.svg");
@@ -111,7 +110,6 @@ export class PlayerInfoOverlay extends LitElement implements Layer {
       this.maybeShow(e.x, e.y),
     );
     this.eventBus.on(TouchEvent, (e: TouchEvent) => this.maybeShow(e.x, e.y));
-    this.eventBus.on(CloseRadialMenuEvent, () => this.hide());
     this.eventBus.on(SpawnBarVisibleEvent, (e) => {
       this.spawnBarVisible = e.visible;
     });

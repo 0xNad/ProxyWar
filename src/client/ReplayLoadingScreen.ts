@@ -112,7 +112,8 @@ export type ReplayLoadingMessageKey =
   | "ai_league_replay.loading_slow"
   | "ai_league_replay.loading_failed"
   | "replay_premiere.loading_premiere"
-  | "replay_premiere.joining_live";
+  | "replay_premiere.joining_live"
+  | "replay_premiere.waiting_for_start";
 
 export function showReplayLoadingScreen(
   messageKey: ReplayLoadingMessageKey = "ai_league_replay.loading_replay",

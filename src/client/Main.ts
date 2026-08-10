@@ -19,8 +19,7 @@ import {
   UserSettings,
 } from "../core/game/UserSettings";
 import "./AccountModal";
-import { loadAiLeagueReplayDetails } from "./AiLeagueReplayArtifacts";
-import { mountAiLeagueReplayOverlay } from "./AiLeagueReplayOverlay";
+import { mountReplayWatchAnalytics } from "./ReplayWatchAnalytics";
 import { getUserMe } from "./Api";
 import { userAuth } from "./Auth";
 import "./ClanModal";
@@ -60,7 +59,6 @@ import { initNavigation } from "./Navigation";
 import "./NewsModal";
 import "./PatternInput";
 import {
-  initialReplayClipRenderableThroughTurn,
   replayClipPreviewTarget,
 } from "./ReplayClipControl";
 import {
@@ -78,12 +76,10 @@ import {
   watchReplayPositionForResume,
 } from "./ReplayPositionPersistence";
 import {
-  mountArchivedReplayPremiereOverlay,
   readReplayPremiereArchivePayload,
   type ReplayPremiereArchivePayload,
 } from "./ReplayPremiereArchiveView";
 import { ReplayPremiereNetworkError } from "./ReplayPremiereNetwork";
-import type { ReplayPremiereOverlayHandle } from "./ReplayPremiereOverlay";
 import type { ReplayPremiereProgressiveReplayConfig } from "./ReplayPremierePlayback";
 import {
   parseReplayPremiereRoute,
@@ -349,8 +345,6 @@ class Client {
   private replayLoadingCleanup: (() => void) | null = null;
   private replayAttemptCleanup: (() => void) | null = null;
   private replayPremiereRuntime: ReplayPremiereRuntimeController | null = null;
-  private replayPremiereArchiveOverlay: ReplayPremiereOverlayHandle | null =
-    null;
 
   private currentUrl: string | null = null;
 
@@ -1016,25 +1010,22 @@ class Client {
   private async openArchivedReplayPremiere(
     payload: ReplayPremiereArchivePayload,
   ): Promise<void> {
-    this.replayPremiereArchiveOverlay?.dispose();
-    this.replayPremiereArchiveOverlay =
-      mountArchivedReplayPremiereOverlay(payload);
-    finishReplayLoadingScreen();
+    // The archived-results skin is retired: an archived premiere is the
+    // ordinary league replay under the plain OpenFront HUD. When the replay
+    // has aged off the mirror there is nothing left to play, so the themed
+    // premiere-ended page is the honest destination.
     if (payload.replayRunKey !== null) {
       try {
         await this.openAiLeagueReplay(payload.replayRunKey, {
           source: "ai-league-replay",
         });
+        return;
       } catch (error) {
         console.warn("Archived premiere replay unavailable", error);
         finishReplayLoadingScreen();
       }
-      // The ordinary replay path mounts its own overlays; re-assert the durable
-      // results overlay so it floats on top of the rendered replay.
-      this.replayPremiereArchiveOverlay?.dispose();
-      this.replayPremiereArchiveOverlay =
-        mountArchivedReplayPremiereOverlay(payload);
     }
+    this.openPremiereEndedPage(payload.premiereId);
   }
 
   private async openReplayPremiere(premiereId: string): Promise<void> {
@@ -1150,9 +1141,24 @@ class Client {
           });
           return;
         }
-        // Scheduled countdown and terminal failure/cancel pages have no game
-        // playback to wait for.
-        finishVeil();
+        if (projection.state === "scheduled") {
+          // The retired premiere skin rendered a countdown page here; the
+          // veil itself is now the pre-live surface until the runtime
+          // advances to the live join.
+          if (!veilFinished) {
+            clearVeilSlowTimer();
+            showReplayLoadingScreen("replay_premiere.waiting_for_start");
+          }
+          return;
+        }
+        // Terminal failure/cancel before any playback: the themed
+        // premiere-ended page is the honest destination now that the skin's
+        // failure panels are retired.
+        if (!veilFinished) {
+          veilFinished = true;
+          joinSyncWatchdog.clear();
+          this.openPremiereEndedPage(premiereId);
+        }
       },
       onJoinSync: (update) => {
         if (!active || this.replayPremiereRuntime !== runtime) return;
@@ -1257,7 +1263,6 @@ class Client {
       coworldReplayPath?: string;
       artifactBasePath?: string;
       gameRecord?: GameRecord;
-      loadArtifactDetails?: boolean;
     } = {},
   ) {
     this.replayAttemptCleanup?.();
@@ -1357,34 +1362,14 @@ class Client {
       clearTimeout(recordTimeout);
     }
 
-    let replayOverlay: ReturnType<typeof mountAiLeagueReplayOverlay>;
-    try {
-      replayOverlay = mountAiLeagueReplayOverlay({
-        runID,
-        decisions: [],
-        summary: null,
-        spectatorTelemetry: null,
-        artifactBasePath,
-        replayMaxTurn: initialReplayClipRenderableThroughTurn(gameRecord.info),
-        detailsLoading: options.loadArtifactDetails !== false,
-        remoteFeaturesEnabled: options.loadArtifactDetails !== false,
-        artifactAvailability: {
-          visualReport: false,
-          spectatorTelemetry: false,
-          decisions: false,
-          summary: false,
-        },
-      });
-    } catch (error) {
-      this.failReplayLoading(
-        runID,
-        options.source,
-        "Replay overlay failed to initialize",
-        error,
-      );
-      return;
-    }
-    attemptCleanups.push(() => replayOverlay.dispose());
+    // Plain OpenFront HUD only — the custom league skin is retired. The
+    // retention milestones it carried live on in ReplayWatchAnalytics.
+    attemptCleanups.push(
+      mountReplayWatchAnalytics({
+        matchId: runID,
+        totalTurns: gameRecord.turns.length,
+      }),
+    );
 
     const onReplayJump = (event: Event) => {
       const turnNumber = (event as CustomEvent<{ turnNumber?: number }>).detail
@@ -1504,74 +1489,6 @@ class Client {
       attemptCleanups.push(watchReplaySpeedForResume(runID, this.eventBus));
     }
 
-    const hydrateAfterFirstFrame = () => {
-      document.removeEventListener(
-        "ai-league-replay-frame",
-        hydrateAfterFirstFrame,
-      );
-      if (this.replayAttemptCleanup !== cleanupAttempt) return;
-      const detailsController = new AbortController();
-      const abortDetails = () => detailsController.abort();
-      attemptController.signal.addEventListener("abort", abortDetails, {
-        once: true,
-      });
-      const detailsTimeout = setTimeout(
-        () => detailsController.abort("Replay details request timed out"),
-        15_000,
-      );
-      void loadAiLeagueReplayDetails(artifactBasePath, {
-        signal: detailsController.signal,
-        onPartial: (details) => {
-          if (this.replayAttemptCleanup !== cleanupAttempt) {
-            return;
-          }
-          replayOverlay.hydrate({
-            decisions: details.recentDecisions,
-            summary: details.summary,
-            spectatorTelemetry: details.spectatorTelemetry,
-            matchStateSeries: details.matchStateSeries,
-            detailsLoading: false,
-            artifactAvailability: details.artifactAvailability,
-          });
-        },
-      })
-        .then((details) => {
-          if (this.replayAttemptCleanup !== cleanupAttempt) {
-            return;
-          }
-          replayOverlay.hydrate({
-            decisions: details.recentDecisions,
-            summary: details.summary,
-            spectatorTelemetry: details.spectatorTelemetry,
-            matchStateSeries: details.matchStateSeries,
-            detailsLoading: false,
-            artifactAvailability: details.artifactAvailability,
-          });
-        })
-        .catch((error) => {
-          if (!detailsController.signal.aborted) {
-            console.warn("Replay details unavailable", error);
-          }
-        })
-        .finally(() => {
-          clearTimeout(detailsTimeout);
-          attemptController.signal.removeEventListener("abort", abortDetails);
-        });
-    };
-    if (options.loadArtifactDetails !== false) {
-      document.addEventListener(
-        "ai-league-replay-frame",
-        hydrateAfterFirstFrame,
-        { once: true },
-      );
-      attemptCleanups.push(() =>
-        document.removeEventListener(
-          "ai-league-replay-frame",
-          hydrateAfterFirstFrame,
-        ),
-      );
-    }
-
     document.dispatchEvent(
       new CustomEvent("join-lobby", {
         detail: {
@@ -1597,7 +1514,6 @@ class Client {
         coworldReplayPath: window.location.pathname + window.location.search,
         artifactBasePath: ".",
         gameRecord: replay.gameRecord,
-        loadArtifactDetails: false,
       });
     } catch (error) {
       this.failReplayLoading(

@@ -324,12 +324,7 @@ async function createClientGame(
       lobbyConfig.gameStartInfo.players,
     );
     const canvas = createCanvas();
-    const gameRenderer = createRenderer(
-      canvas,
-      gameView,
-      eventBus,
-      lobbyConfig.playerRole,
-    );
+    const gameRenderer = createRenderer(canvas, gameView, eventBus);
 
     console.log(
       `creating private game got difficulty: ${lobbyConfig.gameStartInfo.config.difficulty}`,
