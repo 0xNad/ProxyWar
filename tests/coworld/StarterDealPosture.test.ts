@@ -498,7 +498,7 @@ describe("tester-starter-llm deal selection", () => {
     ).toBe("deal_reject:D3");
   });
 
-  it("accepts support from a friendly partner only when it can immediately honor the threshold", async () => {
+  it("accepts support from a friendly partner only when current reserves can cover the cumulative threshold", async () => {
     const { dealMove } = await loadSelectors();
     const support = {
       ...incomingProposal("SUPPORT", "P_A", "Auri", "support_request"),
@@ -514,7 +514,7 @@ describe("tester-starter-llm deal selection", () => {
       kind: "donate_gold",
       label: "Donate gold to Auri",
       risk: { level: "low" },
-      metadata: { recipientID: "P_A", gold: 150000 },
+      metadata: { recipientID: "P_A", gold: 100000 },
     };
     const obs = {
       ...BASE_OBS,
@@ -532,15 +532,10 @@ describe("tester-starter-llm deal selection", () => {
     const actions = [...responseActions("SUPPORT"), donateGold, HOLD];
     expect(dealMove(BASE_PLAN, actions, obs)?.id).toBe("deal_accept:SUPPORT");
     expect(
-      dealMove(
-        BASE_PLAN,
-        [
-          ...responseActions("SUPPORT"),
-          { ...donateGold, metadata: { recipientID: "P_A", gold: 100000 } },
-          HOLD,
-        ],
-        obs,
-      )?.id,
+      dealMove(BASE_PLAN, [...responseActions("SUPPORT"), donateGold, HOLD], {
+        ...obs,
+        ownState: { ...BASE_OBS.ownState, gold: "100000", troops: 10000 },
+      })?.id,
     ).toBe("deal_reject:SUPPORT");
     expect(
       dealMove(BASE_PLAN, actions, {

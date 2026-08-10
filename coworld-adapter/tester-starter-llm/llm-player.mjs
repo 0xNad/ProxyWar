@@ -874,17 +874,21 @@ function chooseDealMove(actions, obs) {
     );
     const goldRequired = Number(proposal.terms?.goldAmount ?? 0);
     const troopsRequired = Number(proposal.terms?.troopAmount ?? 0);
+    const ownGold = Number(obs.ownState?.gold ?? 0);
+    const ownTroops = Number(obs.ownState?.troops ?? 0);
     const canHonorSupport =
       proposal.terms?.template === "support_request" &&
       proposer?.isFriendly === true &&
       actions.some(
         (action) =>
           ((action.kind === "donate_gold" &&
-            Number(action.metadata?.gold ?? 0) >= goldRequired &&
-            goldRequired > 0) ||
+            Number(action.metadata?.gold ?? 0) > 0 &&
+            goldRequired > 0 &&
+            ownGold >= goldRequired) ||
             (action.kind === "donate_troops" &&
-              Number(action.metadata?.troops ?? 0) >= troopsRequired &&
-              troopsRequired > 0)) &&
+              Number(action.metadata?.troops ?? 0) > 0 &&
+              troopsRequired > 0 &&
+              ownTroops >= troopsRequired)) &&
           action.metadata?.recipientID === proposal.proposerPlayerID,
       );
     const accepts = Boolean(
