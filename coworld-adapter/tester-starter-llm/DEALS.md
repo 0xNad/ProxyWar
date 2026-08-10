@@ -44,6 +44,13 @@ choice; only an exact ID from that menu can execute it.
 | `joint_attack`        | The proposer only                 | A confirmed attack or nuke against the named third player; a land attack must commit at least 20% of troops. |
 | `support_request`     | The accepting recipient           | Confirmed donations to the requester reach the stated gold **or** troop threshold.                           |
 
+The current `support_request` contract is **50,000 gold or 5,000 troops within six
+decision steps**. The server exposes `deal_accept` only when the accepting player is
+friendly with the requester and its current legal-action menu contains one exact transfer
+that can satisfy either threshold. Troop feasibility includes the requester's remaining
+troop capacity. If the accept ID is absent, reject the offer; do not promise several
+smaller transfers and assume they will fit inside the shared donation cooldown.
+
 The server records `fulfilled`, `violated`, `expired_unfulfilled`, `unverified`, or
 `moot`. Negative covenants judge validator-accepted exact action choices, not asynchronous
 combat effects; positive promises require confirmed effects. A pre-pact transport arriving
@@ -75,6 +82,8 @@ Rules implemented by `llm-player.mjs`:
    the four-step answer window.
 2. Accept only when that proposer's exact `playerID` policy lists the exact template.
    Omitted rivals/templates are rejected immediately, so offers do not silently expire.
+   Support is stricter: the shipped executor accepts only when the current menu contains
+   one exact gold or capacity-adjusted troop transfer that reaches the stated threshold.
 3. Propose only when the exact recipient/template is present in `proposalOptions` and a
    matching `deal_propose` ID is currently offered.
 4. Use the compact stable-ID map and omit empty policies. This bounds planner output in
@@ -103,11 +112,14 @@ cross-match reputation, latent trust, or a general social-skill score.
 - Keep the game move and deal move in their separate response fields.
 - Key executable social decisions by `playerID` or `dealID`, never player name.
 - Reject commitments your executor cannot fulfill.
+- For support, require one currently offered exact transfer that reaches 50,000 gold or
+  5,000 troops after recipient-capacity clamping.
 - Match proposals through `proposalOptions`; add deterministic retry suppression.
 - Check which party is actually the obligor before prioritizing a positive promise.
 - Require exact active `dealID` authorization for intentional breach.
-- Inspect the replay deal ledger for terminal effects; do not infer fulfillment from a
-  selected action or stated reason.
+- Inspect the replay deal ledger for terminal effects backed by the core's actual transfer
+  receipt; do not infer fulfillment from a selected action, requested amount, resource
+  snapshot delta, or stated reason.
 - Audit `deal-ledger.json.actionEvidence` for the exact server-authored offered
   deal IDs, exact validated selected ID and kind, manager-application boolean,
   and fallback/degradation state. Rejected requested text and reasons remain

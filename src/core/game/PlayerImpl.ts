@@ -28,6 +28,7 @@ import {
   Player,
   PlayerBuildable,
   PlayerBuildableUnitType,
+  PlayerDonation,
   PlayerID,
   PlayerInfo,
   PlayerProfile,
@@ -60,13 +61,6 @@ interface Target {
   target: Player;
 }
 
-class Donation {
-  constructor(
-    public readonly recipient: Player,
-    public readonly tick: Tick,
-  ) {}
-}
-
 export class PlayerImpl implements Player {
   public _lastTileChange: number = 0;
   public _pseudo_random: PseudoRandom;
@@ -91,7 +85,7 @@ export class PlayerImpl implements Player {
 
   private outgoingEmojis_: EmojiMessage[] = [];
 
-  private sentDonations: Donation[] = [];
+  private sentDonations: PlayerDonation[] = [];
 
   private relations = new Map<Player, number>();
 
@@ -750,7 +744,7 @@ export class PlayerImpl implements Player {
       return false;
     }
     for (const donation of this.sentDonations) {
-      if (donation.recipient === recipient) {
+      if (donation.recipientID === recipient.id()) {
         if (
           this.mg.ticks() - donation.tick <
           this.mg.config().donateCooldown()
@@ -777,7 +771,7 @@ export class PlayerImpl implements Player {
       return false;
     }
     for (const donation of this.sentDonations) {
-      if (donation.recipient === recipient) {
+      if (donation.recipientID === recipient.id()) {
         if (
           this.mg.ticks() - donation.tick <
           this.mg.config().donateCooldown()
@@ -795,7 +789,12 @@ export class PlayerImpl implements Player {
     if (removed === 0) return false;
     recipient.addTroops(removed);
 
-    this.sentDonations.push(new Donation(recipient, this.mg.ticks()));
+    this.sentDonations.push({
+      recipientID: recipient.id(),
+      tick: this.mg.ticks(),
+      resource: "troops",
+      amount: removed,
+    });
     this.mg.displayMessage(
       "events_display.sent_troops_to_player",
       MessageType.SENT_TROOPS_TO_PLAYER,
@@ -819,7 +818,12 @@ export class PlayerImpl implements Player {
     if (removed === 0n) return false;
     recipient.addGold(removed);
 
-    this.sentDonations.push(new Donation(recipient, this.mg.ticks()));
+    this.sentDonations.push({
+      recipientID: recipient.id(),
+      tick: this.mg.ticks(),
+      resource: "gold",
+      amount: removed,
+    });
     this.mg.displayMessage(
       "events_display.sent_gold_to_player",
       MessageType.SENT_GOLD_TO_PLAYER,
@@ -835,6 +839,19 @@ export class PlayerImpl implements Player {
       { gold: renderNumber(gold), name: this.displayName() },
     );
     return true;
+  }
+
+  donationCount(): number {
+    return this.sentDonations.length;
+  }
+
+  donationsSentSince(cursor: number): readonly PlayerDonation[] {
+    if (!Number.isSafeInteger(cursor) || cursor < 0) {
+      return [];
+    }
+    return this.sentDonations
+      .slice(cursor)
+      .map((donation) => ({ ...donation }));
   }
 
   canDeleteUnit(): boolean {

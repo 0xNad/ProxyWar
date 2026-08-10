@@ -874,27 +874,33 @@ function chooseDealMove(actions, obs) {
     );
     const goldRequired = Number(proposal.terms?.goldAmount ?? 0);
     const troopsRequired = Number(proposal.terms?.troopAmount ?? 0);
-    const ownGold = Number(obs.ownState?.gold ?? 0);
-    const ownTroops = Number(obs.ownState?.troops ?? 0);
     const canHonorSupport =
       proposal.terms?.template === "support_request" &&
       proposer?.isFriendly === true &&
       actions.some(
         (action) =>
-          ((action.kind === "donate_gold" &&
-            Number(action.metadata?.gold ?? 0) > 0 &&
+          (action.kind === "donate_gold" &&
+            Number(action.metadata?.gold ?? 0) >= goldRequired &&
             goldRequired > 0 &&
-            ownGold >= goldRequired) ||
-            (action.kind === "donate_troops" &&
-              Number(action.metadata?.troops ?? 0) > 0 &&
-              troopsRequired > 0 &&
-              ownTroops >= troopsRequired)) &&
-          action.metadata?.recipientID === proposal.proposerPlayerID,
+            action.metadata?.recipientID === proposal.proposerPlayerID) ||
+          (action.kind === "donate_troops" &&
+            troopsRequired > 0 &&
+            action.metadata?.recipientID === proposal.proposerPlayerID &&
+            Number.isFinite(Number(proposer?.maxTroops)) &&
+            Math.min(
+              Number(action.metadata?.troops ?? 0),
+              Math.max(
+                0,
+                Number(proposer.maxTroops) - Number(proposer.troops ?? 0),
+              ),
+            ) >= troopsRequired),
       );
-    const accepts = Boolean(
-      policy?.acceptTemplates?.includes(proposal.terms?.template) ||
-      canHonorSupport,
+    const policyAccepts = Boolean(
+      policy?.acceptTemplates?.includes(proposal.terms?.template),
     );
+    const accepts =
+      policyAccepts &&
+      (proposal.terms?.template !== "support_request" || canHonorSupport);
     return (
       actions.find(
         (action) =>

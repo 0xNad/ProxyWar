@@ -339,6 +339,9 @@ export function fabricatedRecord(input: {
   attackTargetsAfter?: string[];
   embargoTargetsBefore?: string[];
   embargoTargetsAfter?: string[];
+  confirmedDonation?: NonNullable<
+    AgentDecisionRecord["audit"]
+  >["confirmedDonation"];
 }): AgentDecisionRecord {
   const kind = input.kind ?? "hold";
   const snapshot = (attackTargets: string[], embargoTargets: string[]) => ({
@@ -390,6 +393,9 @@ export function fabricatedRecord(input: {
         input.attackTargetsAfter ?? [],
         input.embargoTargetsAfter ?? [],
       ),
+      ...(input.confirmedDonation !== undefined
+        ? { confirmedDonation: input.confirmedDonation }
+        : {}),
     },
   };
 }

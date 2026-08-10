@@ -484,18 +484,22 @@ function confirmedDonationTo(
   ) {
     return null;
   }
-  if (stringMetadata(record, "recipientID") !== recipientPlayerID) {
-    return null;
+  const receipt = record.audit.confirmedDonation;
+  if (receipt !== undefined) {
+    if (
+      receipt.recipientPlayerID !== recipientPlayerID ||
+      (record.chosenActionKind === "donate_gold" &&
+        receipt.resource !== "gold") ||
+      (record.chosenActionKind === "donate_troops" &&
+        receipt.resource !== "troops")
+    ) {
+      return null;
+    }
+    return receipt.resource === "gold"
+      ? { gold: BigInt(receipt.amount), troops: 0 }
+      : { gold: 0n, troops: Math.max(0, Math.floor(receipt.amount)) };
   }
-  const gold =
-    record.chosenActionKind === "donate_gold"
-      ? BigInt(Math.max(0, Math.floor(numberMetadata(record, "gold") ?? 0)))
-      : 0n;
-  const troops =
-    record.chosenActionKind === "donate_troops"
-      ? Math.max(0, Math.floor(numberMetadata(record, "troops") ?? 0))
-      : 0;
-  return { gold, troops };
+  return null;
 }
 
 /**

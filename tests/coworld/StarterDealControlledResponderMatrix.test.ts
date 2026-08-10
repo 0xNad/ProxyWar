@@ -346,6 +346,22 @@ function confirmedRecord(
   action: LegalAction,
   reason: string,
 ): AgentDecisionRecord {
+  const confirmedDonation =
+    action.kind === "donate_gold"
+      ? {
+          recipientPlayerID: String(action.metadata?.recipientID),
+          tick: state.step * 25 + 1,
+          resource: "gold" as const,
+          amount: String(action.metadata?.gold ?? 0),
+        }
+      : action.kind === "donate_troops"
+        ? {
+            recipientPlayerID: String(action.metadata?.recipientID),
+            tick: state.step * 25 + 1,
+            resource: "troops" as const,
+            amount: Number(action.metadata?.troops ?? 0),
+          }
+        : undefined;
   return fabricatedRecord({
     sequence: state.records.length + 1,
     agentID: seat.agentID,
@@ -356,7 +372,11 @@ function confirmedRecord(
     actionID: action.id,
     reason,
     metadata: action.metadata,
-    auditStatus: action.kind === "attack" ? "confirmed" : "not_applicable",
+    auditStatus:
+      action.kind === "attack" || confirmedDonation !== undefined
+        ? "confirmed"
+        : "not_applicable",
+    ...(confirmedDonation !== undefined ? { confirmedDonation } : {}),
   });
 }
 
@@ -505,7 +525,26 @@ describe("public starter controlled-responder deal matrix", () => {
     const dealID = applyDealPick(state, RESPONDER, proposal)!;
     advanceTo(state, 1);
 
-    const responseMenu = menuFor(state, STARTER);
+    const support = (seat: StubSeat): AgentSupportOption => ({
+      recipientID: seat.playerID,
+      recipientName: seat.username,
+      canDonateGold: true,
+      canDonateTroops: true,
+      suggestedGold: 50_000,
+      suggestedTroops: 5_000,
+      legalReasons: ["controlled donation affordance"],
+    });
+    const responseMenu = menuFor(state, STARTER, {
+      visibleOverrides: {
+        [RESPONDER.playerID]: {
+          isFriendly: true,
+          canAttack: false,
+          troops: 20_000,
+          maxTroops: 100_000,
+        },
+      },
+      supportOptions: [support(RESPONDER)],
+    });
     const accept = validateDealPick(
       executor.dealMove(
         planFor(RESPONDER.playerID, { accept: ["support_request"] }),
@@ -518,15 +557,6 @@ describe("public starter controlled-responder deal matrix", () => {
     applyDealPick(state, STARTER, accept);
     advanceTo(state, 2);
 
-    const support = (seat: StubSeat): AgentSupportOption => ({
-      recipientID: seat.playerID,
-      recipientName: seat.username,
-      canDonateGold: true,
-      canDonateTroops: true,
-      suggestedGold: 150_000,
-      suggestedTroops: 20_000,
-      legalReasons: ["controlled donation affordance"],
-    });
     const fulfillmentMenu = menuFor(state, STARTER, {
       // The decoy is intentionally first in the real builder input.
       supportOptions: [support(TARGET), support(RESPONDER)],
@@ -542,7 +572,7 @@ describe("public starter controlled-responder deal matrix", () => {
     expect(chosen).toMatchObject({
       id: `donate_gold:${RESPONDER.playerID}`,
       kind: "donate_gold",
-      metadata: { recipientID: RESPONDER.playerID, gold: 150_000 },
+      metadata: { recipientID: RESPONDER.playerID, gold: 50_000 },
     });
     const source = confirmedRecord(
       state,
@@ -561,7 +591,7 @@ describe("public starter controlled-responder deal matrix", () => {
       obligorPlayerID: STARTER.playerID,
       counterpartyPlayerID: RESPONDER.playerID,
       status: "fulfilled",
-      donatedGold: "150000",
+      donatedGold: "50000",
       donatedTroops: 0,
     });
   });

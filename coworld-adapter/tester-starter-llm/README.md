@@ -104,8 +104,10 @@ completion evidence remains the release gate.
   acknowledgement because the public policy process has no result callback. The server
   also enforces its own proposal cooldown.
 - `support_request` binds the accepting recipient to donate the stated gold **or**
-  troops. `joint_attack` binds the proposer to make a qualifying attack on the named
-  target; accepting that pledge does not bind the recipient to attack.
+  troops within six decision steps. The current terms are 50,000 gold or 5,000 troops;
+  accept is offered only when one exact current transfer can meet a threshold after troop
+  recipient-capacity clamping. `joint_attack` binds the proposer to make a qualifying
+  attack on the named target; accepting that pledge does not bind the recipient to attack.
 - `non_aggression_pact` and `trade_security_pact` are honored by default. To break one,
   name its exact active ID in `breakDealIDs`; the replay referee, not your policy, judges
   the resulting effect.

@@ -1337,6 +1337,8 @@ export interface AgentActionAuditSnapshot {
   outgoingEmbargoTargetIDs: string[];
   targetPlayerIDs?: string[];
   transportRetreatingUnitIDs?: number[];
+  /** Compact cursor into deterministic Player donation receipts. */
+  sentDonationCount?: number;
 }
 
 export interface AgentActionAudit {
@@ -1346,6 +1348,23 @@ export interface AgentActionAudit {
   after?: AgentActionAuditSnapshot | null;
   targetBefore?: AgentActionAuditSnapshot | null;
   targetAfter?: AgentActionAuditSnapshot | null;
+  /**
+   * Exact successful transfer effect, when the core receipt proves one.
+   * Amounts are the resources actually removed, never requested metadata.
+   */
+  confirmedDonation?:
+    | {
+        recipientPlayerID: string;
+        tick: number;
+        resource: "gold";
+        amount: string;
+      }
+    | {
+        recipientPlayerID: string;
+        tick: number;
+        resource: "troops";
+        amount: number;
+      };
 }
 
 export interface AgentDecisionRecord {

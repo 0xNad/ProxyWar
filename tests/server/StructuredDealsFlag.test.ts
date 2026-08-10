@@ -70,8 +70,8 @@ function dealsBlock(): AgentDealsObservation {
         terms: {
           template: "support_request",
           durationSteps: 6,
-          goldAmount: "150000",
-          troopAmount: 20000,
+          goldAmount: "50000",
+          troopAmount: 5000,
         },
         proposedAtStep: 2,
         answerableThroughStep: 6,
@@ -146,6 +146,131 @@ describe("structured deals flag — legal-action menu", () => {
       (action) => !action.kind.startsWith("deal_"),
     );
     expect(JSON.stringify(stripped)).toBe(baseline);
+  });
+
+  it("offers support acceptance only when one exact built transfer can meet the terms", () => {
+    process.env[DEALS_FLAG] = "1";
+    const base = menuObservation();
+    const observation: AgentObservation = {
+      ...base,
+      visiblePlayers: base.visiblePlayers.map((player) =>
+        player.playerID === B.playerID
+          ? {
+              ...player,
+              isFriendly: true,
+              troops: 20_000,
+              maxTroops: 100_000,
+            }
+          : player,
+      ),
+      nonCombat: {
+        ...base.nonCombat,
+        supportOptions: [
+          {
+            recipientID: B.playerID,
+            recipientName: B.username,
+            canDonateGold: true,
+            canDonateTroops: false,
+            suggestedGold: 50_000,
+            suggestedTroops: null,
+            legalReasons: ["test"],
+          },
+        ],
+      },
+      deals: {
+        ...dealsBlock(),
+        incomingProposals: [
+          {
+            dealID: "deal:P_B:P_A:support_request:2",
+            proposerPlayerID: B.playerID,
+            proposerName: B.username,
+            recipientPlayerID: A.playerID,
+            recipientName: A.username,
+            terms: {
+              template: "support_request",
+              durationSteps: 6,
+              goldAmount: "50000",
+              troopAmount: 5000,
+            },
+            proposedAtStep: 2,
+            answerableThroughStep: 6,
+          },
+        ],
+      },
+    };
+
+    const actions = new LegalActionBuilder().build({ observation });
+    expect(actions.map((action) => action.id)).toEqual(
+      expect.arrayContaining([
+        `donate_gold:${B.playerID}`,
+        "deal_accept:deal:P_B:P_A:support_request:2",
+        "deal_reject:deal:P_B:P_A:support_request:2",
+      ]),
+    );
+    expect(
+      actions.find(
+        (action) => action.id === "deal_accept:deal:P_B:P_A:support_request:2",
+      )?.metadata?.supportFeasible,
+    ).toBe(true);
+  });
+
+  it("keeps rejection but suppresses support acceptance when troop recipient capacity makes the exact action insufficient", () => {
+    process.env[DEALS_FLAG] = "1";
+    const base = menuObservation();
+    const observation: AgentObservation = {
+      ...base,
+      visiblePlayers: base.visiblePlayers.map((player) =>
+        player.playerID === B.playerID
+          ? {
+              ...player,
+              isFriendly: true,
+              troops: 98_000,
+              maxTroops: 100_000,
+            }
+          : player,
+      ),
+      nonCombat: {
+        ...base.nonCombat,
+        supportOptions: [
+          {
+            recipientID: B.playerID,
+            recipientName: B.username,
+            canDonateGold: false,
+            canDonateTroops: true,
+            suggestedGold: null,
+            suggestedTroops: 7_000,
+            legalReasons: ["test"],
+          },
+        ],
+      },
+      deals: {
+        ...dealsBlock(),
+        incomingProposals: [
+          {
+            dealID: "deal:P_B:P_A:support_request:2",
+            proposerPlayerID: B.playerID,
+            proposerName: B.username,
+            recipientPlayerID: A.playerID,
+            recipientName: A.username,
+            terms: {
+              template: "support_request",
+              durationSteps: 6,
+              goldAmount: "50000",
+              troopAmount: 5000,
+            },
+            proposedAtStep: 2,
+            answerableThroughStep: 6,
+          },
+        ],
+      },
+    };
+
+    const ids = new LegalActionBuilder()
+      .build({ observation })
+      .map((action) => action.id);
+    expect(ids).toContain(`donate_troops:${B.playerID}`);
+    expect(ids).not.toContain("deal_accept:deal:P_B:P_A:support_request:2");
+    expect(ids).toContain("deal_reject:deal:P_B:P_A:support_request:2");
   });
 
   it("reserved diplomacy slots protect deal actions under menu pressure", () => {

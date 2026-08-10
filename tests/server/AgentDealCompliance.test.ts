@@ -114,7 +114,10 @@ function complianceHarness(seats: StubSeat[]): ComplianceHarness {
           label: kind,
           intent: null,
           risk: { level: "none", score: 0 },
-          metadata: { dealID },
+          metadata: {
+            dealID,
+            ...(kind === "deal_accept" ? { supportFeasible: true } : {}),
+          },
         },
         turnNumber: 0,
       });
@@ -924,29 +927,72 @@ describe("AgentDealCompliance — fulfillment, expiry, moot, force-resolve", () 
         actionID: `donate_gold:${A.playerID}`,
         metadata: { recipientID: A.playerID, gold: 100_000 },
         auditStatus: "confirmed",
+        confirmedDonation: {
+          recipientPlayerID: A.playerID,
+          tick: 51,
+          resource: "gold",
+          amount: "30000",
+        },
       }),
     );
     harness.beginStep(); // 3
     const partway = obligationsOf(harness, dealID)[0];
     expect(partway.status).toBe("pending");
-    expect(partway.donatedGold).toBe("100000");
+    expect(partway.donatedGold).toBe("30000");
+    for (const confirmedDonation of [
+      {
+        recipientPlayerID: B.playerID,
+        tick: 76,
+        resource: "gold" as const,
+        amount: "999999",
+      },
+      {
+        recipientPlayerID: A.playerID,
+        tick: 77,
+        resource: "troops" as const,
+        amount: 999_999,
+      },
+    ]) {
+      harness.push(
+        fabricatedRecord({
+          sequence: 0,
+          agentID: B.agentID,
+          playerID: B.playerID,
+          username: B.username,
+          turnNumber: 75,
+          kind: "donate_gold",
+          actionID: `donate_gold:${A.playerID}`,
+          metadata: { recipientID: A.playerID, gold: 999_999 },
+          auditStatus: "confirmed",
+          confirmedDonation,
+        }),
+      );
+    }
+    harness.beginStep(); // 4 — retained, wrong-recipient, and wrong-resource receipts do not count
+    expect(obligationsOf(harness, dealID)[0].donatedGold).toBe("30000");
     harness.push(
       fabricatedRecord({
         sequence: 0,
         agentID: B.agentID,
         playerID: B.playerID,
         username: B.username,
-        turnNumber: 75,
+        turnNumber: 100,
         kind: "donate_gold",
         actionID: `donate_gold:${A.playerID}`,
         metadata: { recipientID: A.playerID, gold: 60_000 },
         auditStatus: "confirmed",
+        confirmedDonation: {
+          recipientPlayerID: A.playerID,
+          tick: 101,
+          resource: "gold",
+          amount: "20000",
+        },
       }),
     );
-    harness.beginStep(); // 4
+    harness.beginStep(); // 5
     const fulfilled = obligationsOf(harness, dealID)[0];
     expect(fulfilled.status).toBe("fulfilled");
-    expect(fulfilled.donatedGold).toBe("160000");
+    expect(fulfilled.donatedGold).toBe("50000");
     expect(harness.manager.takePendingComplianceStamp(B.agentID)).toContain(
       "fulfilled the support pledge",
     );

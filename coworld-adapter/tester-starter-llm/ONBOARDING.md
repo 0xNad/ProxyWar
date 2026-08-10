@@ -96,10 +96,13 @@ cooldown.
 Accepted promises produce explicit obligations. The executor prioritizes remaining
 support donations and qualifying joint-attack pressure before ordinary strategy, while
 continuing to filter land attacks, hostile boat launches, nukes, and embargoes forbidden
-by pending pacts. Selection is not
+by pending pacts. A support request currently promises 50,000 gold or 5,000 troops within
+six decision steps. Its accept ID appears only when one exact current donation can meet a
+threshold after recipient-capacity clamping; otherwise the agent must reject it. Selection is not
 proof of fulfillment: for non-aggression and trade-security promises, the replay referee
 checks validator-accepted hostile action IDs throughout the active window; for support
-and joint-attack promises, it requires a confirmed game effect. A target name alone
+and joint-attack promises, it requires a confirmed game effect. Support credit uses the
+core's actual transfer receipt, not the selected or requested amount. A target name alone
 cannot authorize betrayal; the plan must include the exact active promise in
 `breakDealIDs`.
 
