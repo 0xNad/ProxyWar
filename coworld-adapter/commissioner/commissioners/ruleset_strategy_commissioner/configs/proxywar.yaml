@@ -1,7 +1,8 @@
 schedule_interval_minutes: 30
 
-# A 25-entrant, 12-seat competition currently schedules fourteen rolling-window
-# jobs. Admission is acknowledgement-paced (one ScheduleEpisodes message per
+# A 25-entrant competition on the 16-seat rung (since 0.1.32) schedules ten
+# rolling-window jobs; on the 12-seat rung it was fourteen.
+# Admission is acknowledgement-paced (one ScheduleEpisodes message per
 # episode, the next only after episodes_accepted), so this cap bounds steady
 # concurrency only -- it is not a burst size. The July player_never_started
 # class was platform-side and never attributed to a specific concurrency

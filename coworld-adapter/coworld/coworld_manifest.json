@@ -24,7 +24,7 @@
         "tokens": {
           "type": "array",
           "minItems": 2,
-          "maxItems": 12,
+          "maxItems": 25,
           "items": {
             "type": "string",
             "minLength": 1
