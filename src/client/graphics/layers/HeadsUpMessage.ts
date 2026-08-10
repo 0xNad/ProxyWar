@@ -4,6 +4,7 @@ import { GameType } from "../../../core/game/Game";
 import { GameUpdateType } from "../../../core/game/GameUpdates";
 import { GameView } from "../../../core/game/GameView";
 import { translateText } from "../../Utils";
+import { isReplaySpectatorView } from "../TransformHandler";
 import { Layer } from "./Layer";
 
 @customElement("heads-up-message")
@@ -126,8 +127,11 @@ export class HeadsUpMessage extends LitElement implements Layer {
     this.isCatchingUp =
       this.catchingUpTicks >= HeadsUpMessage.CATCHING_UP_SHOW_THRESHOLD;
 
+    // "Choose a starting location" is a player instruction — spectators on
+    // replay/premiere routes can't spawn, so the spawn-phase banner stays
+    // hidden for them (pause/immunity/catch-up notices still show).
     this.isVisible =
-      this.game.inSpawnPhase() ||
+      (this.game.inSpawnPhase() && !isReplaySpectatorView()) ||
       this.isPaused ||
       this.isImmunityActive ||
       this.isCatchingUp;

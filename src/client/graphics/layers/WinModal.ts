@@ -3,7 +3,6 @@ import { customElement, state } from "lit/decorators.js";
 import { aiLeagueSpectatorDisplayName } from "../../../client/AiLeagueReplayMode";
 import { translateText } from "../../../client/Utils";
 import { EventBus } from "../../../core/EventBus";
-import { RankedType } from "../../../core/game/Game";
 import { GameUpdateType } from "../../../core/game/GameUpdates";
 import { GameView } from "../../../core/game/GameView";
 import {
@@ -34,13 +33,7 @@ export class WinModal extends LitElement implements Layer {
   isVisible = false;
 
   @state()
-  showButtons = false;
-
-  @state()
   private isWin = false;
-
-  @state()
-  private isRankedGame = false;
 
   @state()
   private patternContent: TemplateResult | null = null;
@@ -112,43 +105,6 @@ export class WinModal extends LitElement implements Layer {
           ${this._title || ""}
         </h2>
         ${this.innerHtml()}
-        <div
-          class="${this.showButtons
-            ? "flex justify-between gap-2.5"
-            : "hidden"}"
-        >
-          <o-button
-            variant="primary"
-            width="block"
-            class="flex-1"
-            .title=${translateText(
-              this.isLeagueReplay()
-                ? "win_modal.back_to_league"
-                : "win_modal.exit",
-            )}
-            @click=${this._handleExit}
-          ></o-button>
-          ${this.isRankedGame
-            ? html`
-                <o-button
-                  variant="primary"
-                  width="block"
-                  class="flex-1"
-                  translationKey="win_modal.requeue"
-                  @click=${this._handleRequeue}
-                ></o-button>
-              `
-            : null}
-          <o-button
-            variant="primary"
-            width="block"
-            class="flex-1"
-            .title=${this.game?.myPlayer()?.isAlive()
-              ? translateText("win_modal.keep")
-              : translateText("win_modal.spectate")}
-            @click=${this.hide}
-          ></o-button>
-        </div>
       </div>
     `;
   }
@@ -220,32 +176,13 @@ export class WinModal extends LitElement implements Layer {
     if (!this.isLeagueReplay()) {
       await this.loadPatternContent();
     }
-    // Check if this is a ranked game
-    this.isRankedGame =
-      this.game.config().gameConfig().rankedType === RankedType.OneVOne;
     this.isVisible = true;
     this.requestUpdate();
-    setTimeout(() => {
-      this.showButtons = true;
-      this.requestUpdate();
-    }, 3000);
   }
 
   hide() {
     this.isVisible = false;
-    this.showButtons = false;
     this.requestUpdate();
-  }
-
-  private _handleExit() {
-    this.hide();
-    window.location.href = this.isLeagueReplay() ? "/league" : "/";
-  }
-
-  private _handleRequeue() {
-    this.hide();
-    // Navigate to homepage and open matchmaking modal
-    window.location.href = "/?requeue";
   }
 
   init() {}
