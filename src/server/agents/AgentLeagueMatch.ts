@@ -909,6 +909,7 @@ export class AgentLeagueMatchRunner {
         decisionSteps: [],
         deals: [],
         events: [],
+        actionEvidence: [],
       }
     );
   }

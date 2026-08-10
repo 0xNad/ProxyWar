@@ -15,12 +15,11 @@ import {
 } from "./DealTestHarness";
 
 // Phase B compliance referee (PROXYWAR_TUNE_STRUCTURED_DEALS): judges
-// CONFIRMED game effects only — decision records' audit/result data and
-// game-state liveness facts, never merely selected actions. The victim's
-// automatic attack-created embargo is never the victim's violation;
+// accepted exact hostile actions for negative covenants; CONFIRMED game
+// effects for positive promises. The victim's automatic attack-created embargo is never the victim's violation;
 // emoji/quick_chat/target_player are never violations; every accepted
 // obligation reaches a terminal state by match end (force-resolve), while an
-// incomplete negative-covenant audit window resolves unverified, never praised.
+// incomplete negative-covenant action evidence resolves unverified, never praised.
 
 const A: StubSeat = { agentID: "a1", playerID: "P_A", username: "Auri" };
 const B: StubSeat = { agentID: "b1", playerID: "P_B", username: "Sefirot" };
@@ -147,7 +146,7 @@ function obligationsOf(harness: ComplianceHarness, dealID: string) {
   return deal.obligations;
 }
 
-describe("AgentDealCompliance — violations (confirmed effects only)", () => {
+describe("AgentDealCompliance — negative-covenant violations", () => {
   it("confirms a land-attack violation from an audited attack record with the verdict text", () => {
     const harness = complianceHarness([A, B, C]);
     const dealID = activatePact(harness, "non_aggression_pact");
@@ -189,7 +188,7 @@ describe("AgentDealCompliance — violations (confirmed effects only)", () => {
       }),
     ]);
     expect(events[0].publicText).toBe(
-      "VERDICT: Auri violated the pact — land attack on Sefirot at step 2.",
+      "VERDICT: Auri violated the pact — validator-accepted land attack on Sefirot at step 2.",
     );
   });
 
@@ -226,7 +225,7 @@ describe("AgentDealCompliance — violations (confirmed effects only)", () => {
     expect(verdict.statedReason).toBe(claim);
     // The referee's FACT and the agent's CLAIM stay separable.
     expect(verdict.publicText).toBe(
-      "VERDICT: Auri violated the pact — land attack on Sefirot at step 2.",
+      "VERDICT: Auri violated the pact — validator-accepted land attack on Sefirot at step 2.",
     );
     expect(verdict.publicText).not.toContain(claim);
   });
@@ -290,7 +289,7 @@ describe("AgentDealCompliance — violations (confirmed effects only)", () => {
     ]);
   });
 
-  it("catches transport-invasion arrival through the before/after attack snapshots", () => {
+  it("does not misclassify a pre-pact transport arrival as a new hostile choice", () => {
     const harness = complianceHarness([A, B]);
     const dealID = activatePact(harness, "non_aggression_pact");
     // No attack ACTION was selected this step — the arrival of an earlier
@@ -308,11 +307,232 @@ describe("AgentDealCompliance — violations (confirmed effects only)", () => {
       }),
     );
     harness.beginStep();
+    const obligor = obligationsOf(harness, dealID).find(
+      (obligation) => obligation.obligorPlayerID === A.playerID,
+    )!;
+    expect(obligor.status).toBe("pending");
+    expect(obligor.resolutionEvidence).toBeNull();
+    expect(harness.manager.ledgerSnapshot().events).not.toContainEqual(
+      expect.objectContaining({
+        event: "deal_violated",
+        actorPlayerID: A.playerID,
+      }),
+    );
+  });
+
+  it("records a validator-accepted naval-invasion launch as a pact violation even when its effect audit is unknown", () => {
+    const harness = complianceHarness([A, B]);
+    const dealID = activatePact(harness, "non_aggression_pact");
+    harness.push(
+      fabricatedRecord({
+        sequence: 0,
+        agentID: A.agentID,
+        playerID: A.playerID,
+        username: A.username,
+        turnNumber: 50,
+        kind: "boat",
+        actionID: `boat:${B.playerID}:100:25`,
+        metadata: {
+          targetID: B.playerID,
+          targetName: B.username,
+          navalInvasion: true,
+          expansion: false,
+        },
+        auditStatus: "unknown",
+      }),
+    );
+    harness.beginStep();
+
     const violator = obligationsOf(harness, dealID).find(
       (obligation) => obligation.obligorPlayerID === A.playerID,
     )!;
-    expect(violator.status).toBe("violated");
-    expect(violator.resolutionEvidence).toContain("confirmed attack");
+    expect(violator).toMatchObject({
+      status: "violated",
+      resolutionEvidence:
+        "validator-accepted naval invasion launch on Sefirot at step 2",
+    });
+  });
+
+  it.each([
+    {
+      label: "land attack",
+      kind: "attack" as const,
+      actionID: `attack:${B.playerID}:25`,
+      metadata: {
+        targetID: B.playerID,
+        expansion: false,
+        troopPercentage: 0.25,
+        navalInvasion: false,
+      },
+    },
+    {
+      label: "naval invasion",
+      kind: "boat" as const,
+      actionID: `boat:${B.playerID}:100:25`,
+      metadata: {
+        targetID: B.playerID,
+        expansion: false,
+        navalInvasion: true,
+        troopPercentage: 0.25,
+      },
+    },
+    {
+      label: "nuclear strike",
+      kind: "nuke" as const,
+      actionID: `nuke:${B.playerID}:100`,
+      metadata: {
+        targetID: B.playerID,
+        expansion: false,
+        navalInvasion: false,
+        troopPercentage: 0,
+      },
+    },
+  ])(
+    "records a validator-accepted $label as betrayal even when GameServer rejects it",
+    ({ kind, actionID, metadata }) => {
+      const harness = complianceHarness([A, B]);
+      const dealID = activatePact(harness, "non_aggression_pact");
+      harness.push(
+        fabricatedRecord({
+          sequence: 0,
+          agentID: A.agentID,
+          playerID: A.playerID,
+          username: A.username,
+          turnNumber: 50,
+          kind,
+          actionID,
+          metadata,
+          accepted: false,
+          auditStatus: "failed",
+        }),
+      );
+      harness.beginStep();
+
+      const violator = obligationsOf(harness, dealID).find(
+        (obligation) => obligation.obligorPlayerID === A.playerID,
+      )!;
+      expect(violator.status).toBe("violated");
+      expect(violator.resolutionEvidence).toContain("validator-accepted");
+    },
+  );
+
+  it("covers neutral boat expansion throughout a complete pact window", () => {
+    const harness = complianceHarness([A, B]);
+    const dealID = harness.propose(A, B, "non_aggression_pact", {
+      durationSteps: 3,
+    });
+    harness.beginStep();
+    expect(harness.respond("deal_accept", B, dealID).accepted).toBe(true);
+    harness.beginStep();
+    for (let step = 2; step <= 4; step += 1) {
+      harness.push(
+        fabricatedRecord({
+          sequence: 0,
+          agentID: A.agentID,
+          playerID: A.playerID,
+          username: A.username,
+          turnNumber: step * 25,
+          kind: "boat",
+          actionID: `boat:neutral-${step}:10`,
+          metadata: {
+            targetID: null,
+            expansion: true,
+            navalInvasion: false,
+          },
+          auditStatus: "unknown",
+        }),
+      );
+      harness.push(
+        fabricatedRecord({
+          sequence: 0,
+          agentID: B.agentID,
+          playerID: B.playerID,
+          username: B.username,
+          turnNumber: step * 25,
+        }),
+      );
+      harness.beginStep();
+    }
+
+    expect(obligationsOf(harness, dealID)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          obligorPlayerID: A.playerID,
+          status: "fulfilled",
+          auditCoverageComplete: true,
+          auditCoverageGapCount: 0,
+        }),
+      ]),
+    );
+  });
+
+  it.each([
+    ["missing classification", { targetID: B.playerID }],
+    [
+      "contradictory classification",
+      { targetID: null, expansion: true, navalInvasion: true },
+    ],
+  ])("fails closed for a boat with %s metadata", (_label, metadata) => {
+    const harness = complianceHarness([A, B]);
+    const dealID = activatePact(harness, "non_aggression_pact");
+    harness.push(
+      fabricatedRecord({
+        sequence: 0,
+        agentID: A.agentID,
+        playerID: A.playerID,
+        username: A.username,
+        turnNumber: 50,
+        kind: "boat",
+        actionID: "boat:ambiguous:25",
+        metadata,
+        auditStatus: "unknown",
+      }),
+    );
+    harness.push(
+      fabricatedRecord({
+        sequence: 0,
+        agentID: B.agentID,
+        playerID: B.playerID,
+        username: B.username,
+        turnNumber: 50,
+      }),
+    );
+    harness.beginStep();
+
+    const obligor = obligationsOf(harness, dealID).find(
+      (obligation) => obligation.obligorPlayerID === A.playerID,
+    )!;
+    expect(obligor).toMatchObject({
+      status: "pending",
+      auditCoverageComplete: false,
+      auditCoverageGapCount: 1,
+    });
+  });
+
+  it("covers a validator-accepted unrelated action without requiring an effect audit", () => {
+    const harness = complianceHarness([A, B]);
+    const dealID = activatePact(harness, "non_aggression_pact");
+    const record = fabricatedRecord({
+      sequence: 0,
+      agentID: A.agentID,
+      playerID: A.playerID,
+      username: A.username,
+      turnNumber: 50,
+      kind: "build",
+      actionID: "build:city:10:10",
+    });
+    record.audit = undefined;
+    harness.push(record);
+    harness.beginStep();
+
+    const obligor = obligationsOf(harness, dealID).find(
+      (obligation) => obligation.obligorPlayerID === A.playerID,
+    )!;
+    expect(obligor).toMatchObject({
+      status: "pending",
+      auditCoverageComplete: true,
+      auditCoverageGapCount: 0,
+    });
   });
 
   it("attributes the victim's automatic attack-created embargo to nobody (trade_security)", () => {
@@ -732,7 +952,7 @@ describe("AgentDealCompliance — fulfillment, expiry, moot, force-resolve", () 
     );
   });
 
-  it("fulfills a pact whose whole window passes without a confirmed violation", () => {
+  it("fulfills a pact whose fully covered window has no validator-accepted hostile action", () => {
     const harness = complianceHarness([A, B]);
     const dealID = harness.propose(A, B, "non_aggression_pact", {
       durationSteps: 3,
@@ -749,8 +969,18 @@ describe("AgentDealCompliance — fulfillment, expiry, moot, force-resolve", () 
             playerID: seat.playerID,
             username: seat.username,
             turnNumber: step * 25,
-            kind: "hold",
-            auditStatus: "not_applicable",
+            kind: seat === A ? "attack" : "hold",
+            ...(seat === A
+              ? {
+                  actionID: "expand:terra-nullius:10",
+                  metadata: {
+                    targetID: null,
+                    expansion: true,
+                    troopPercentage: 0.1,
+                  },
+                  auditStatus: "unknown" as const,
+                }
+              : { auditStatus: "not_applicable" as const }),
           }),
         );
       }
@@ -763,10 +993,10 @@ describe("AgentDealCompliance — fulfillment, expiry, moot, force-resolve", () 
     ]);
     const stamp = harness.manager.takePendingComplianceStamp(A.agentID)!;
     expect(stamp).toContain("honored the non-aggression pact");
-    expect(stamp).toContain("without a confirmed hostile action");
+    expect(stamp).toContain("without a validator-accepted hostile action");
   });
 
-  it("resolves an unaudited pact window as unverified without a fulfillment event", () => {
+  it("resolves an unresolved hostile-action pact window as unverified without a fulfillment event", () => {
     const harness = complianceHarness([A, B]);
     const dealID = harness.propose(A, B, "non_aggression_pact", {
       durationSteps: 3,
@@ -782,7 +1012,9 @@ describe("AgentDealCompliance — fulfillment, expiry, moot, force-resolve", () 
           playerID: A.playerID,
           username: A.username,
           turnNumber: step * 25,
-          kind: "quick_chat",
+          kind: "attack",
+          actionID: `attack:${B.playerID}:25`,
+          metadata: { expansion: false, troopPercentage: 0.25 },
           auditStatus: "unknown",
         }),
       );
@@ -806,6 +1038,128 @@ describe("AgentDealCompliance — fulfillment, expiry, moot, force-resolve", () 
     expect(harness.manager.ledgerSnapshot().events).not.toContainEqual(
       expect.objectContaining({ event: "deal_fulfilled", dealID }),
     );
+  });
+
+  it("records a validator-accepted trade embargo as a violation even when its effect audit is unknown", () => {
+    const harness = complianceHarness([A, B]);
+    const dealID = harness.propose(A, B, "trade_security_pact", {
+      durationSteps: 3,
+    });
+    harness.beginStep(); // 1
+    expect(harness.respond("deal_accept", B, dealID).accepted).toBe(true);
+    harness.beginStep(); // 2 — active window opens
+    for (let step = 2; step <= 4; step += 1) {
+      harness.push(
+        fabricatedRecord({
+          sequence: 0,
+          agentID: A.agentID,
+          playerID: A.playerID,
+          username: A.username,
+          turnNumber: step * 25,
+          kind: "embargo",
+          actionID: `embargo:${B.playerID}:start`,
+          metadata: { targetID: B.playerID, action: "start" },
+          auditStatus: "unknown",
+        }),
+      );
+      harness.push(
+        fabricatedRecord({
+          sequence: 0,
+          agentID: B.agentID,
+          playerID: B.playerID,
+          username: B.username,
+          turnNumber: step * 25,
+          kind: "hold",
+          auditStatus: "not_applicable",
+        }),
+      );
+      harness.beginStep();
+    }
+
+    const obligations = obligationsOf(harness, dealID);
+    expect(obligations.map((obligation) => obligation.status)).toEqual([
+      "violated",
+      "fulfilled",
+    ]);
+    expect(obligations[0]).toMatchObject({
+      auditCoverageComplete: true,
+      auditCoverageGapCount: 0,
+      resolutionEvidence: "manual embargo against Sefirot at step 2",
+    });
+  });
+
+  it.each([
+    ["manual embargo", "embargo" as const, `embargo:${B.playerID}:start`],
+    ["global embargo", "embargo_all" as const, "embargo_all:start"],
+  ])(
+    "records a validator-accepted %s even when GameServer rejects it",
+    (_label, kind, actionID) => {
+      const harness = complianceHarness([A, B]);
+      const dealID = activatePact(harness, "trade_security_pact");
+      harness.push(
+        fabricatedRecord({
+          sequence: 0,
+          agentID: A.agentID,
+          playerID: A.playerID,
+          username: A.username,
+          turnNumber: 50,
+          kind,
+          actionID,
+          metadata:
+            kind === "embargo"
+              ? { targetID: B.playerID, action: "start" }
+              : { action: "start" },
+          accepted: false,
+          auditStatus: "failed",
+        }),
+      );
+      harness.beginStep();
+
+      const violator = obligationsOf(harness, dealID).find(
+        (obligation) => obligation.obligorPlayerID === A.playerID,
+      )!;
+      expect(violator.status).toBe("violated");
+    },
+  );
+
+  it.each([
+    ["missing action", { targetID: B.playerID }],
+    ["missing target", { action: "start" }],
+  ])("fails closed for an embargo with %s metadata", (_label, metadata) => {
+    const harness = complianceHarness([A, B]);
+    const dealID = activatePact(harness, "trade_security_pact");
+    harness.push(
+      fabricatedRecord({
+        sequence: 0,
+        agentID: A.agentID,
+        playerID: A.playerID,
+        username: A.username,
+        turnNumber: 50,
+        kind: "embargo",
+        actionID: `embargo:${B.playerID}:start`,
+        metadata,
+        auditStatus: "unknown",
+      }),
+    );
+    harness.push(
+      fabricatedRecord({
+        sequence: 0,
+        agentID: B.agentID,
+        playerID: B.playerID,
+        username: B.username,
+        turnNumber: 50,
+      }),
+    );
+    harness.beginStep();
+
+    const obligor = obligationsOf(harness, dealID).find(
+      (obligation) => obligation.obligorPlayerID === A.playerID,
+    )!;
+    expect(obligor).toMatchObject({
+      status: "pending",
+      auditCoverageComplete: false,
+      auditCoverageGapCount: 1,
+    });
   });
 
   it("moots obligations when the counterparty is eliminated (game-state fact)", async () => {
@@ -933,7 +1287,7 @@ describe("AgentDealCompliance — fulfillment, expiry, moot, force-resolve", () 
     expect(harness.manager.ledgerSnapshot().deals).toEqual(ledger.deals);
   });
 
-  it("moots a fully audited negative covenant when match end cuts its window short", () => {
+  it("moots a fully covered negative covenant when match end cuts its window short", () => {
     const harness = complianceHarness([A, B]);
     const dealID = activatePact(harness, "non_aggression_pact");
     for (const seat of [A, B]) {

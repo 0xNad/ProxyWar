@@ -68,6 +68,22 @@ describe("tester-starter-llm full-prompt hardening", () => {
     });
     expect(
       extractJson(
+        '{"focus":"ally","preferKinds":["hold"],"target":null,"avoidTargets":[],"dealPolicies":{"P_A":{"accept":["nap"],"propose":["support"]}},"breakDealIDs":[],"reason":"keep the agreement',
+        true,
+      ),
+    ).toEqual({
+      focus: "ally",
+      preferKinds: ["hold"],
+      target: null,
+      avoidTargets: [],
+      dealPolicies: {
+        P_A: { accept: ["nap"], propose: ["support"] },
+      },
+      breakDealIDs: [],
+      reason: "keep the agreement",
+    });
+    expect(
+      extractJson(
         '{"focus":"attack","preferKinds":["attack"],"target":"Aur',
         true,
       ),
@@ -79,6 +95,78 @@ describe("tester-starter-llm full-prompt hardening", () => {
     ).toBeNull();
     expect(extractJson("ordinary prose without an object")).toBeNull();
     expect(extractJson('{"focus": not-json')).toBeNull();
+  });
+
+  it("normalizes compact aliases and retains the legacy deal-plan shape", async () => {
+    const source = await fs.readFile(STARTER_FILE, "utf8");
+    const maxPolicies = source.match(/const MAX_DEAL_POLICIES = \d+;/)?.[0];
+    const maxTemplates = source.match(
+      /const MAX_DEAL_TEMPLATES_PER_POLICY = \d+;/,
+    )?.[0];
+    const aliases = source.match(
+      /const DEAL_TEMPLATE_ALIASES = \{[\s\S]*?\};/,
+    )?.[0];
+    expect(maxPolicies).toBeDefined();
+    expect(maxTemplates).toBeDefined();
+    expect(aliases).toBeDefined();
+    const normalize = new Function(
+      `${maxPolicies}
+       ${maxTemplates}
+       ${aliases}
+       ${extractFunction(source, "cleanID")}
+       ${extractFunction(source, "normalizeDealPolicies")}
+       return normalizeDealPolicies;`,
+    )() as (value: unknown) => Array<{
+      playerID: string;
+      acceptTemplates: string[];
+      proposeTemplates: string[];
+    }>;
+
+    expect(
+      normalize({
+        P_A: {
+          accept: ["nap", "non_aggression_pact", "unknown"],
+          propose: ["joint", "support"],
+        },
+        EMPTY: { accept: [], propose: [] },
+      }),
+    ).toEqual([
+      {
+        playerID: "P_A",
+        acceptTemplates: ["non_aggression_pact"],
+        proposeTemplates: ["joint_attack", "support_request"],
+      },
+    ]);
+    const bounded = normalize(
+      Object.fromEntries(
+        Array.from({ length: 13 }, (_, index) => [
+          `P_${index}`,
+          {
+            accept: ["nap", "trade", "joint", "support"],
+            propose: ["nap", "trade", "joint", "support"],
+          },
+        ]),
+      ),
+    );
+    expect(bounded).toHaveLength(12);
+    expect(bounded.every((entry) => entry.acceptTemplates.length === 4)).toBe(
+      true,
+    );
+    expect(
+      normalize([
+        {
+          playerID: "P_B",
+          acceptTemplates: ["trade_security_pact"],
+          proposeTemplates: ["support_request"],
+        },
+      ]),
+    ).toEqual([
+      {
+        playerID: "P_B",
+        acceptTemplates: ["trade_security_pact"],
+        proposeTemplates: ["support_request"],
+      },
+    ]);
   });
 
   it("normalizes raw Bedrock usage counters without inventing tokens", async () => {
@@ -181,6 +269,9 @@ describe("tester-starter-llm full-prompt hardening", () => {
     expect(source).toContain("legalActions: legal,");
     expect(source).not.toContain("legalKinds,");
     expect(source).toContain("max_tokens: hardening ? 500 : 300,");
+    expect(source).toContain("const MAX_DEAL_POLICIES = 12;");
+    expect(source).toContain("const MAX_DEAL_TEMPLATES_PER_POLICY = 4;");
+    expect(source).toContain("const MAX_BREAK_DEAL_IDS = 6;");
     expect(source).not.toContain('{ role: "assistant", content: "{" },');
     expect(source).toContain('return response?.content?.[0]?.text || "";');
     expect(source).toContain("PROXYWAR_LLM_USAGE");

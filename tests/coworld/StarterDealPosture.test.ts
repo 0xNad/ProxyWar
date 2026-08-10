@@ -53,19 +53,26 @@ async function loadSelectors(): Promise<{
   const source = await fs.readFile(STARTER_FILE, "utf8");
   const order = source.match(/const DEFAULT_ORDER = \[[\s\S]*?\];/)?.[0];
   const retry = source.match(/const DEAL_PROPOSAL_RETRY_STEPS = \d+;/)?.[0];
+  const maxAttempts = source.match(
+    /const DEAL_PROPOSAL_MAX_ATTEMPTS_PER_KEY = \d+;/,
+  )?.[0];
   const attempts = source.match(/const proposalAttempts = new Map\(\);/)?.[0];
   expect(order).toBeDefined();
   expect(retry).toBeDefined();
+  expect(maxAttempts).toBeDefined();
   expect(attempts).toBeDefined();
   return new Function(
     `${order}
      ${retry}
+     ${maxAttempts}
      ${attempts}
+     const history = [];
      function avoidActionIDs() { return []; }
      let plan = null;
      ${extractFunction(source, "clean")}
      ${extractFunction(source, "cleanID")}
      ${extractFunction(source, "dealConstraints")}
+     ${extractFunction(source, "hasOpenDeal")}
      ${extractFunction(source, "dealPolicyFor")}
      ${extractFunction(source, "chooseDealMove")}
      ${extractFunction(source, "chooseObligationMove")}
@@ -190,11 +197,15 @@ function responseActions(dealID: string) {
   ];
 }
 
-function proposalOption(recipientPlayerID: string, template: string) {
+function proposalOption(
+  recipientPlayerID: string,
+  template: string,
+  terms: Record<string, unknown> = {},
+) {
   return {
     recipientPlayerID,
     recipientName: recipientPlayerID === "P_A" ? "Auri" : "Sefirot",
-    terms: { template, durationSteps: 12 },
+    terms: { template, durationSteps: 12, ...terms },
   };
 }
 
@@ -445,18 +456,23 @@ describe("tester-starter-llm deal selection", () => {
     ).toBe("deal_reject:D3");
   });
 
-  it("matches a nominated proposal to an exact current option and suppresses pair/template retries", async () => {
+  it("matches exact proposal options and permits only one retry after 60 steps", async () => {
     const { dealMove } = await loadSelectors();
     const napA = proposalAction("P_A", "non_aggression_pact");
     const tradeA = proposalAction("P_A", "trade_security_pact");
-    const actions = [napA, tradeA, EXPAND, HOLD];
+    const jointA = proposalAction("P_A", "joint_attack");
+    const actions = [napA, tradeA, jointA, EXPAND, HOLD];
     const plan = {
       ...BASE_PLAN,
       dealPolicies: [
         {
           playerID: "P_A",
           acceptTemplates: [],
-          proposeTemplates: ["non_aggression_pact", "trade_security_pact"],
+          proposeTemplates: [
+            "non_aggression_pact",
+            "trade_security_pact",
+            "joint_attack",
+          ],
         },
       ],
     };
@@ -503,9 +519,121 @@ describe("tester-starter-llm deal selection", () => {
       dealMove(
         plan,
         actions,
-        obsAt(13, [proposalOption("P_A", "non_aggression_pact")]),
+        obsAt(61, [proposalOption("P_A", "non_aggression_pact")]),
       )?.id,
     ).toBe(napA.id);
+    expect(
+      dealMove(
+        plan,
+        actions,
+        obsAt(121, [proposalOption("P_A", "non_aggression_pact")]),
+      ),
+    ).toBeNull();
+
+    expect(
+      dealMove(
+        plan,
+        actions,
+        obsAt(5, [
+          proposalOption("P_A", "joint_attack", { targetPlayerID: "P_X" }),
+        ]),
+      )?.id,
+    ).toBe(jointA.id);
+    expect(
+      dealMove(
+        plan,
+        actions,
+        obsAt(65, [
+          proposalOption("P_A", "joint_attack", { targetPlayerID: "P_Y" }),
+        ]),
+      )?.id,
+    ).toBe(jointA.id);
+    expect(
+      dealMove(
+        plan,
+        actions,
+        obsAt(125, [
+          proposalOption("P_A", "joint_attack", { targetPlayerID: "P_Z" }),
+        ]),
+      ),
+    ).toBeNull();
+  });
+
+  it("fails closed on retries when the decision clock is missing", async () => {
+    const { dealMove } = await loadSelectors();
+    const plan = {
+      ...BASE_PLAN,
+      dealPolicies: [
+        {
+          playerID: "P_A",
+          acceptTemplates: [],
+          proposeTemplates: ["non_aggression_pact"],
+        },
+      ],
+    };
+    const action = proposalAction("P_A", "non_aggression_pact");
+    const observation = {
+      ...BASE_OBS,
+      deals: {
+        incomingProposals: [],
+        outgoingProposals: [],
+        activeDeals: [],
+        proposalOptions: [proposalOption("P_A", "non_aggression_pact")],
+      },
+    };
+    expect(dealMove(plan, [action, EXPAND, HOLD], observation)?.id).toBe(
+      action.id,
+    );
+    expect(dealMove(plan, [action, EXPAND, HOLD], observation)).toBeNull();
+  });
+
+  it("never duplicates an outgoing or active recipient/template deal", async () => {
+    const plan = {
+      ...BASE_PLAN,
+      dealPolicies: [
+        {
+          playerID: "P_A",
+          acceptTemplates: [],
+          proposeTemplates: ["non_aggression_pact"],
+        },
+      ],
+    };
+    const action = proposalAction("P_A", "non_aggression_pact");
+
+    for (const open of ["outgoing", "active"] as const) {
+      const { dealMove } = await loadSelectors();
+      const outgoingProposals =
+        open === "outgoing"
+          ? [
+              {
+                recipientPlayerID: "P_A",
+                terms: { template: "non_aggression_pact" },
+              },
+            ]
+          : [];
+      const activeDeals =
+        open === "active"
+          ? [
+              {
+                proposerPlayerID: "P_ME",
+                recipientPlayerID: "P_A",
+                template: "non_aggression_pact",
+              },
+            ]
+          : [];
+      expect(
+        dealMove(plan, [action, EXPAND, HOLD], {
+          ...BASE_OBS,
+          deals: {
+            decisionStep: 20,
+            incomingProposals: [],
+            outgoingProposals,
+            activeDeals,
+            proposalOptions: [proposalOption("P_A", "non_aggression_pact")],
+          },
+        }),
+      ).toBeNull();
+    }
   });
 
   it("answers incoming proposals before making another proposal", async () => {

@@ -25,14 +25,14 @@ slot. The diplomacy slot can never carry a game intent.
 
 Each stage answers a different question. Consumers must not collapse stages.
 
-| Stage             | Durable evidence                                                                                                     | What it proves                                                                                                                                                              | What it does not prove                                                                               |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| offered           | `decisions.jsonl.legalActionIDsByKind.deal_*`                                                                        | The exact deal action id was available in that submitted menu.                                                                                                              | The agent noticed, preferred, or selected it.                                                        |
-| selected          | primary `selectedLegalActionId`, or bounded `dealSlotEvidence.requestedActionID` plus accepted `validation.actionID` | The primary id is exact; a valid deal-slot selection retains the exact offered id in `validation.actionID`. Invalid agent-controlled text is capped in `requestedActionID`. | The id was manager-applied or produced an effect.                                                    |
-| validated         | primary validator outcome, or `dealSlotEvidence.validation`                                                          | The requested id matched the submitted menu and the slot's allowed deal kinds.                                                                                              | The deal manager accepted the state transition.                                                      |
-| applied           | primary deal result, or `dealSlotEvidence.application`                                                               | `AgentDealManager` accepted or rejected the requested ledger transition.                                                                                                    | A proposal was accepted by its counterparty, an obligation was fulfilled, or a game effect occurred. |
-| response          | `deal-ledger.json` deal status, response step/turn, and `deal_accepted` / `deal_rejected` events                     | The named counterparty accepted or rejected the proposal according to the server referee.                                                                                   | Follow-through on the resulting obligations.                                                         |
-| effect / terminal | obligation status, resolution evidence, forced-resolution flag, and verdict events                                   | The server observed the configured compliance fact, violation, elapsed window, moot condition, or match-end adjudication.                                                   | The action caused a later win/state, or that the agent possesses a general social skill.             |
+| Stage             | Durable evidence                                                                                                                                               | What it proves                                                                                                                             | What it does not prove                                                                               |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
+| offered           | private `decisions.jsonl.legalActionIDsByKind.deal_*`, plus public `deal-ledger.json.actionEvidence[].offeredActionIDs` for validator-accepted slot selections | The exact deal action id was available in that submitted menu.                                                                             | The agent noticed, preferred, or selected it.                                                        |
+| selected          | primary `selectedLegalActionId`, private `dealSlotEvidence.requestedActionID`, or public `actionEvidence[].selectedActionID` after validation                  | The primary id is exact; a valid deal-slot selection retains the exact offered id. Rejected agent-controlled requested text stays private. | The id was manager-applied or produced an effect.                                                    |
+| validated         | primary validator outcome, private `dealSlotEvidence.validation`, or the presence and `selectedActionKind` of a public `actionEvidence` entry                  | A published deal-slot id matched the submitted menu and the slot's allowed deal kinds.                                                     | The deal manager accepted the state transition.                                                      |
+| applied           | primary deal result, private `dealSlotEvidence.application`, or public `actionEvidence[].managerApplied`                                                       | Whether `AgentDealManager` accepted the validated ledger transition.                                                                       | A proposal was accepted by its counterparty, an obligation was fulfilled, or a game effect occurred. |
+| response          | `deal-ledger.json` deal status, response step/turn, and `deal_accepted` / `deal_rejected` events                                                               | The named counterparty accepted or rejected the proposal according to the server referee.                                                  | Follow-through on the resulting obligations.                                                         |
+| effect / terminal | obligation status, resolution evidence, forced-resolution flag, and verdict events                                                                             | The server observed the configured compliance fact, violation, elapsed window, moot condition, or match-end adjudication.                  | The action caused a later win/state, or that the agent possesses a general social skill.             |
 
 `AgentDecisionRecord.result` and the top-level `decisions.jsonl.result` always
 belong to the primary action slot. The diplomacy slot has its own
@@ -55,6 +55,12 @@ Top-level fields:
 - `deals[]`: stable-sorted complete proposal/response state.
 - `events[]`: server-authored proposal, response, and verdict facts in the
   referee's deterministic causal append/application order.
+- `actionEvidence[]`: every validator-accepted optional diplomacy-slot
+  selection that reached manager application, with its actor, exact
+  server-authored deal IDs offered in that decision, exact validated selected
+  ID and kind, manager-application boolean, and fallback/degradation flags. It
+  deliberately excludes rejected requested text and reasons, the primary move,
+  prompts, provider output, and general decision reasoning.
 
 Every deal has a deterministic `dealID`, proposer and recipient player IDs,
 proposal/response steps and turns, its answer and active windows, terms,
@@ -73,13 +79,17 @@ Terminal obligation states are the existing referee enum:
 
 No accepted obligation may remain `pending` in the finalized artifact. Open
 proposals become `expired` at match end. A negative covenant whose full window
-elapsed becomes `fulfilled` only in the narrow referee sense that no confirmed
-violation was observed during that window **and** every active decision step
-had complete confirmed/not-applicable audit coverage. A negative covenant
-whose window was cut short by match end becomes `moot`; a coverage gap in a
-fully elapsed window produces `unverified`, never inferred fulfilment. A
-positive commitment whose usable window was cut short becomes `moot`; one
-whose window fully elapsed becomes `expired_unfulfilled`.
+elapsed becomes `fulfilled` only in the narrow referee sense that the retained
+decision record contains no validator-accepted land attack, naval-invasion
+launch, nuke/MIRV, or (for trade-security) voluntary embargo action against the
+counterparty during that window. Every decision step must have enough exact
+action metadata to classify it. A missing record or an accepted
+violation-capable action with ambiguous target metadata produces `unverified`,
+never inferred fulfilment. A transport launched before the covenant is outside
+this action-window contract even if it arrives later. A negative covenant whose
+window was cut short by match end becomes `moot`. A positive commitment whose
+usable window was cut short becomes `moot`; one whose window fully elapsed
+becomes `expired_unfulfilled`.
 
 ## Facts versus claims
 
@@ -99,6 +109,8 @@ The artifact can support statements such as:
 
 - “A proposed this exact pact to B at step 4 / turn 100.”
 - “B accepted the proposal at step 5.”
+- “A submitted no validator-accepted hostile action against B during the fully covered
+  covenant window.”
 - “The referee observed a confirmed qualifying donation during the window.”
 - “This obligation ended `expired_unfulfilled` at match end.”
 - “A stated this reason for the proposal,” with the text labeled as a claim.
@@ -108,7 +120,7 @@ It cannot by itself support statements such as:
 - “A trusts B” or “B is trustworthy.”
 - “The proposal caused B's later action or the match result.”
 - “Manager application means the counterparty accepted.”
-- “No confirmed violation means no violation occurred.”
+- “No validator-accepted hostile action means no hostile game effect occurred.”
 - “This policy is better at commitment, negotiation, or social reasoning.”
 
 Comparative construct claims require repeated matched play with frozen policy
@@ -125,7 +137,8 @@ or policy. Report these quantities separately for every policy and condition:
 - accepted obligations and their terms/counterparties;
 - `fulfilled`, `violated`, `expired_unfulfilled`, `unverified`, and `moot`
   counts;
-- fallback/degraded decisions and primary-action audit coverage.
+- fallback/degraded decisions, exact-action coverage for negative covenants,
+  and confirmed-effect audit coverage for positive promises.
 
 The narrow reliability estimate is:
 

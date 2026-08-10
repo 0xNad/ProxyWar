@@ -55,7 +55,7 @@ const fakeBedrock = {
         content: [
           {
             type: "text",
-            text: '{"focus":"attack","preferKinds":["attack"],"target":"Auri","avoidTargets":[],"dealPolicies":[{"playerID":"P_A","acceptTemplates":["non_aggression_pact"],"proposeTemplates":[]}],"breakDealIDs":[],"reason":"Press the exposed border."}',
+            text: '{"focus":"attack","preferKinds":["attack"],"target":"Auri","avoidTargets":[],"dealPolicies":{"P_A":{"accept":["nap"],"propose":[]}},"breakDealIDs":[],"reason":"Press the exposed border."}',
           },
         ],
         usage: {
@@ -248,7 +248,7 @@ describe("tester-starter-llm hardened runtime arm", () => {
     expect(usageRecords).toContainEqual(
       expect.objectContaining({
         event: "response",
-        promptVariant: "full-hardened-telemetry-v2",
+        promptVariant: "full-hardened-compact-deals-v3",
         planEvery: 3,
         promptCache: false,
         model: "test.sonnet-full",

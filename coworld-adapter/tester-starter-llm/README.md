@@ -71,7 +71,9 @@ playing on the last good plan (loudly flagged)** if Bedrock ever hiccups. In a
 deal-enabled match it uses the optional diplomacy slot alongside the game move,
 answers offers from a standing policy keyed by the rival's stable player ID,
 proposes only exact terms the plan nominates from the current option list, and avoids
-repeating the same rejected or expired offer for 12 decision steps. It actively works
+duplicate open offers. Each recipient/template gets one selected proposal
+attempt plus at most one later selected attempt after 60 decisions; selection
+consumes the attempt because the policy process has no application callback. It actively works
 to fulfill support and attack promises it owes. A strategic target change cannot break
 a pact accidentally; deliberate defection requires the exact active `dealID` in
 `breakDealIDs`.
@@ -82,21 +84,25 @@ The model's plan includes per-rival deal policy, not one global accept/decline s
 
 ```json
 {
-  "dealPolicies": [
-    {
-      "playerID": "P_A",
-      "acceptTemplates": ["non_aggression_pact"],
-      "proposeTemplates": ["joint_attack"]
-    }
-  ],
+  "dealPolicies": {
+    "P_A": { "accept": ["nap"], "propose": ["joint"] }
+  },
   "breakDealIDs": []
 }
 ```
 
+`nap`, `trade`, `joint`, and `support` are compact model-output aliases. The
+executor converts them to the canonical server template names before choosing
+an action. The compact map reduces twelve-player plan truncation risk; hosted
+completion evidence remains the release gate.
+
 - An omitted rival or template defaults to **reject / do not propose**.
 - The selector matches proposals to `observation.deals.proposalOptions` and then returns
-  the exact offered `deal_propose` action ID. The server also enforces its own
-  three-decision proposal cooldown.
+  the exact offered `deal_propose` action ID. It blocks open duplicates, allows at most
+  one later selected proposal attempt after 60 decisions, and blocks a third selected
+  attempt even if terms change. Selection consumes the attempt before validator/manager
+  acknowledgement because the public policy process has no result callback. The server
+  also enforces its own proposal cooldown.
 - `support_request` binds the accepting recipient to donate the stated gold **or**
   troops. `joint_attack` binds the proposer to make a qualifying attack on the named
   target; accepting that pledge does not bind the recipient to attack.
