@@ -110,8 +110,8 @@ deal-blind behavior comparable without inventing raw intents. They are tagged
 and documented as `eval_only_never_submit`; uploading for an authorized
 Experience Request never authorizes league submission.
 
-Generate a bounded four-profile local request with the canonical manifest,
-explicit steps, and an explicit seed:
+Generate a bounded four-profile local request with an explicitly chosen
+manifest, explicit steps, and an explicit seed:
 
 ```sh
 node coworld-adapter/testing/make-meaningful-social-episode-request.mjs \
@@ -124,6 +124,9 @@ deal ledger to distinguish fulfilled keeper obligations, attributable breaker
 violations, bounded mutual-aid proposals, and zero deal selections by the blind
 profile. The deterministic matrix validates the instrument; only later matched
 episodes with an autonomous subject can support a social-gameplay conclusion.
+The checked-in manifest is local-source truth, not proof of the currently
+canonical hosted Coworld. Hosted claims must name and query the exact `cow_*`
+ID and inspect its terminal replay artifacts separately.
 
 ## Matched matrix execution
 
