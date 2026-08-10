@@ -11,6 +11,7 @@ import {
 } from "../../../core/game/Game";
 import { TileRef } from "../../../core/game/GameMap";
 import { GameView, PlayerView } from "../../../core/game/GameView";
+import { aiLeagueSpectatorDisplayName } from "../../AiLeagueReplayMode";
 import "../../components/ui/Divider";
 import {
   CloseViewEvent,
@@ -359,11 +360,26 @@ export class PlayerPanel extends LitElement implements Layer {
   private renderStats(other: PlayerView, my: PlayerView | null) {
     // With a viewer player the trading row is pairwise (does `other` embargo
     // *me*); a spectator has no side, so it reflects the player's global
-    // stance instead: stopped once they embargo anyone.
+    // stance instead: stopped once they embargo anyone — and names them,
+    // because "Stopped" alone leaves the viewer asking "with whom?".
     const stoppedTrading =
       my !== null
         ? other.hasEmbargoAgainst(my)
         : other.data.embargoes.size > 0;
+    const stoppedWith =
+      my === null && stoppedTrading
+        ? [...other.data.embargoes]
+            .map((id) => {
+              try {
+                return aiLeagueSpectatorDisplayName(
+                  this.g.player(id).displayName(),
+                );
+              } catch {
+                return null;
+              }
+            })
+            .filter((name): name is string => name !== null)
+        : [];
 
     return html`
       <!-- Betrayals -->
@@ -399,6 +415,16 @@ export class PlayerPanel extends LitElement implements Layer {
               >`}
         </div>
       </div>
+
+      ${stoppedWith.length > 0
+        ? html`<div
+            class="text-right text-[13px] leading-snug text-amber-200/90"
+          >
+            ${translateText("player_panel.stopped_with", {
+              players: stoppedWith.join(", "),
+            })}
+          </div>`
+        : ""}
     `;
   }
 

@@ -16,7 +16,16 @@ vi.mock("lit/decorators.js", () => ({
 }));
 
 vi.mock("../../../../src/client/Utils", () => ({
-  translateText: vi.fn((key: string) => key),
+  translateText: vi.fn(
+    (key: string, params?: Record<string, string | number>) =>
+      params === undefined
+        ? key
+        : Object.entries(params).reduce(
+            (text, [name, value]) =>
+              text.replaceAll(`{${name}}`, String(value)),
+            key + " " + Object.values(params).join(" "),
+          ),
+  ),
   renderDuration: vi.fn(),
   renderNumber: vi.fn((n: unknown) => String(n)),
   renderTroops: vi.fn((n: unknown) => String(n)),
@@ -154,15 +163,24 @@ describe("PlayerPanel - spectator right-click card", () => {
   test("spectator trading row reflects the player's global embargo stance", () => {
     const trading = fakeOther();
     const stopped = fakeOther({
-      data: { betrayals: 3, embargoes: new Set(["someone"]) },
+      data: { betrayals: 3, embargoes: new Set(["p7", "p9"]) },
     });
     const panel = new PlayerPanel();
+    panel.g = {
+      player: (id: string) => ({
+        displayName: () => (id === "p7" ? "Vendetta" : "Cyberspell"),
+      }),
+    } as any;
     expect(JSON.stringify((panel as any).renderStats(trading, null))).toContain(
       "player_panel.active",
     );
-    expect(JSON.stringify((panel as any).renderStats(stopped, null))).toContain(
-      "player_panel.stopped",
+    const stoppedHtml = JSON.stringify(
+      (panel as any).renderStats(stopped, null),
     );
+    expect(stoppedHtml).toContain("player_panel.stopped");
+    // "Stopped with whom?" — the card names the embargoed players.
+    expect(stoppedHtml).toContain("player_panel.stopped_with");
+    expect(stoppedHtml).toContain("Vendetta, Cyberspell");
   });
 
   test("with a viewer player the trading row stays pairwise", () => {
