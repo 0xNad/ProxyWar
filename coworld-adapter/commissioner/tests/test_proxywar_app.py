@@ -251,7 +251,7 @@ def test_every_supported_ladder_shape_schedules_every_entrant(
             name=f"{seat_count}-player Pangaea",
             game_config={"num_agents": seat_count},
         )
-        for seat_count in (2, 4, 8, 12)
+        for seat_count in (2, 4, 8, 12, 16)
     ]
 
     scheduled = commissioner().schedule_episodes_for_round_start(round_start)
@@ -265,6 +265,89 @@ def test_every_supported_ladder_shape_schedules_every_entrant(
         membership.policy_version_id for membership in round_start.memberships
     }
     assert scheduled_policy_ids == champion_policy_ids
+
+
+def _sixteen_rung_variants() -> list[VariantInfo]:
+    # The variant list a live RoundStart carries once the package declares the
+    # 16-seat variant alongside the 12-seat pool.
+    return [
+        VariantInfo(
+            id="tournament-12p-pangaea",
+            name="12-player Pangaea",
+            game_config={"num_agents": 12, "episode_timeout_seconds": 3600},
+        ),
+        VariantInfo(
+            id="tournament-16p-pangaea",
+            name="16-player Pangaea",
+            game_config={"num_agents": 16, "episode_timeout_seconds": 4500},
+        ),
+    ]
+
+
+def test_live_25_champion_field_routes_to_sixteen_seats_and_covers_every_entrant() -> (
+    None
+):
+    round_start = competition_round_start(25)
+    round_start.variants = _sixteen_rung_variants()
+
+    scheduled = commissioner().schedule_episodes_for_round_start(round_start)
+
+    # 25 entrants at 16 seats: max(4, 25 - 16 + 1) = 10 rolling-window episodes.
+    assert len(scheduled.episodes) == 10
+    for episode in scheduled.episodes:
+        assert episode.variant_id == "tournament-16p-pangaea"
+        assert len(episode.policy_version_ids) == 16
+        assert len(set(episode.policy_version_ids)) == 16
+    scheduled_policy_ids = {
+        policy_id
+        for episode in scheduled.episodes
+        for policy_id in episode.policy_version_ids
+    }
+    champion_policy_ids = {
+        membership.policy_version_id for membership in round_start.memberships
+    }
+    assert scheduled_policy_ids == champion_policy_ids
+
+
+def test_sixteen_champion_field_routes_to_sixteen_seats() -> None:
+    # Exact boundary: at precisely 16 champions the 16-seat rung fits
+    # (seats <= champions), producing the 4-episode floor of full-field games.
+    round_start = competition_round_start(16)
+    round_start.variants = _sixteen_rung_variants()
+
+    scheduled = commissioner().schedule_episodes_for_round_start(round_start)
+
+    assert len(scheduled.episodes) == 4
+    for episode in scheduled.episodes:
+        assert episode.variant_id == "tournament-16p-pangaea"
+        assert len(set(episode.policy_version_ids)) == 16
+
+
+def test_fifteen_champion_field_stays_on_twelve_seats() -> None:
+    round_start = competition_round_start(15)
+    round_start.variants = _sixteen_rung_variants()
+
+    scheduled = commissioner().schedule_episodes_for_round_start(round_start)
+
+    assert scheduled.episodes
+    for episode in scheduled.episodes:
+        assert episode.variant_id == "tournament-12p-pangaea"
+        assert len(episode.policy_version_ids) == 12
+
+
+def test_sixteen_rung_without_manifest_variant_falls_back_to_twelve_seats() -> None:
+    # Rollout order safety: a commissioner that declares the 16-seat rung but
+    # runs against a package without the 16p variant must keep scheduling
+    # 12-seat rounds (the rung filters to available variants), so the
+    # commissioner and package can ship in either order.
+    round_start = competition_round_start(25)
+
+    scheduled = commissioner().schedule_episodes_for_round_start(round_start)
+
+    assert scheduled.episodes
+    for episode in scheduled.episodes:
+        assert episode.variant_id == "tournament-12p-pangaea"
+        assert len(episode.policy_version_ids) == 12
 
 
 def test_competition_ladder_ids_all_exist_in_the_manifest() -> None:
