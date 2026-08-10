@@ -868,8 +868,28 @@ function chooseDealMove(actions, obs) {
   if (incoming.length > 0) {
     const proposal = incoming[0];
     const policy = dealPolicyFor(proposal.proposerPlayerID);
+    const proposer = (obs.visiblePlayers || []).find(
+      (player) =>
+        player?.playerID === proposal.proposerPlayerID && player.isAlive,
+    );
+    const goldRequired = Number(proposal.terms?.goldAmount ?? 0);
+    const troopsRequired = Number(proposal.terms?.troopAmount ?? 0);
+    const canHonorSupport =
+      proposal.terms?.template === "support_request" &&
+      proposer?.isFriendly === true &&
+      actions.some(
+        (action) =>
+          ((action.kind === "donate_gold" &&
+            Number(action.metadata?.gold ?? 0) >= goldRequired &&
+            goldRequired > 0) ||
+            (action.kind === "donate_troops" &&
+              Number(action.metadata?.troops ?? 0) >= troopsRequired &&
+              troopsRequired > 0)) &&
+          action.metadata?.recipientID === proposal.proposerPlayerID,
+      );
     const accepts = Boolean(
-      policy?.acceptTemplates?.includes(proposal.terms?.template),
+      policy?.acceptTemplates?.includes(proposal.terms?.template) ||
+      canHonorSupport,
     );
     return (
       actions.find(
@@ -1109,44 +1129,60 @@ function choose(actions, obs) {
     (action) => !violatesPact(action),
   );
   if (obligationMove) return obligationMove;
-  // A support request is offered only to a core-friendly player because the
-  // promised donation must already be legal. When the model explicitly plans
-  // to request support from a living rival, reciprocate the exact offered core
-  // alliance request first; otherwise the support plan can never become an
-  // offered deal action. Fulfilment of accepted obligations remains above this
-  // prerequisite, and no alliance id is ever invented.
-  for (const policy of plan?.dealPolicies || []) {
-    if (!policy.proposeTemplates?.includes("support_request")) continue;
-    const rival = (obs?.visiblePlayers || []).find(
-      (candidate) =>
-        candidate?.playerID === policy.playerID && candidate.isAlive,
+  // Support can be offered only to a core-friendly player because donation
+  // must already be legal. Open one bounded relationship using an exact
+  // offered alliance id even before the planner happens to nominate support;
+  // otherwise the public default can leave the support branch unreachable.
+  // Fulfilment of accepted obligations remains above this prerequisite.
+  if (
+    obs?.deals &&
+    (obs.deals.incomingProposals || []).length === 0 &&
+    (obs.deals.outgoingProposals || []).length === 0 &&
+    (obs.deals.activeDeals || []).length === 0
+  ) {
+    const supportPartners = new Set(
+      (plan?.dealPolicies || [])
+        .filter((policy) =>
+          policy.proposeTemplates?.includes("support_request"),
+        )
+        .map((policy) => policy.playerID),
     );
-    if (!rival || rival.isFriendly) continue;
-    const alliance = actions.find(
-      (candidate) =>
-        candidate.kind === "alliance_request" &&
-        candidate.metadata?.recipientID === policy.playerID,
-    );
-    if (!alliance || violatesPact(alliance)) continue;
-    const key = `${policy.playerID}:support_alliance`;
-    const attempt = proposalAttempts.get(key);
-    const allianceStep = Number.isInteger(obs?.deals?.decisionStep)
-      ? obs.deals.decisionStep
-      : null;
-    if (
-      attempt &&
-      (attempt.count >= DEAL_PROPOSAL_MAX_ATTEMPTS_PER_KEY ||
-        allianceStep === null ||
-        attempt.lastStep === null ||
-        allianceStep - attempt.lastStep < DEAL_PROPOSAL_RETRY_STEPS)
-    ) {
-      continue;
+    const rivals = [...(obs.visiblePlayers || [])]
+      .filter((candidate) => candidate?.playerID && candidate.isAlive)
+      .sort(
+        (a, b) =>
+          Number(supportPartners.has(b.playerID)) -
+            Number(supportPartners.has(a.playerID)) ||
+          String(a.playerID).localeCompare(String(b.playerID)),
+      );
+    for (const rival of rivals) {
+      if (!rival || rival.isFriendly) continue;
+      const alliance = actions.find(
+        (candidate) =>
+          candidate.kind === "alliance_request" &&
+          candidate.metadata?.recipientID === rival.playerID,
+      );
+      if (!alliance || violatesPact(alliance)) continue;
+      const key = `${rival.playerID}:support_alliance`;
+      const attempt = proposalAttempts.get(key);
+      const allianceStep = Number.isInteger(obs?.deals?.decisionStep)
+        ? obs.deals.decisionStep
+        : null;
+      if (
+        attempt &&
+        (attempt.count >= DEAL_PROPOSAL_MAX_ATTEMPTS_PER_KEY ||
+          allianceStep === null ||
+          attempt.lastStep === null ||
+          allianceStep - attempt.lastStep < DEAL_PROPOSAL_RETRY_STEPS)
+      ) {
+        continue;
+      }
+      proposalAttempts.set(key, {
+        count: (attempt?.count || 0) + 1,
+        lastStep: allianceStep,
+      });
+      return alliance;
     }
-    proposalAttempts.set(key, {
-      count: (attempt?.count || 0) + 1,
-      lastStep: allianceStep,
-    });
-    return alliance;
   }
   const avoid = new Set(avoidActionIDs());
   const planned = plan?.preferKinds?.length ? plan.preferKinds : [];
