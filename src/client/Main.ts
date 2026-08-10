@@ -1429,7 +1429,14 @@ class Client {
       )
     ) {
       const resumeTurn = loadResumableReplayTurn(runID);
-      if (resumeTurn !== null) {
+      // A viewer who already watched to the end wants a rewatch, not an
+      // instant winner banner over seemingly dead playback controls —
+      // resume only positions meaningfully before the final recorded turn.
+      const lastRecordedTurn =
+        gameRecord.turns.length > 0
+          ? gameRecord.turns[gameRecord.turns.length - 1].turnNumber
+          : 0;
+      if (resumeTurn !== null && resumeTurn < lastRecordedTurn - 50) {
         const resumeAfterFirstFrame = () => {
           this.eventBus.emit(new ReplayJumpToTurnEvent(resumeTurn));
           document.removeEventListener(
