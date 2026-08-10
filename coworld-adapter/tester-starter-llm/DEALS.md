@@ -86,8 +86,8 @@ Rules implemented by `llm-player.mjs`:
    one exact gold or capacity-adjusted troop transfer that reaches the stated threshold.
    Once a rival has at least one terminal non-moot obligation and its observed same-match
    reliability falls below `0.5`, the executor rejects its new offers and suppresses new
-   proposals to it even if a stale planner disposition still says yes. A later promise
-   cannot erase the already observed breach within that match.
+   proposals to it even if a stale planner disposition still says yes. Eligibility returns
+   only if later terminal fulfillment restores the observed aggregate to at least `0.5`.
 3. Propose only when the exact recipient/template is present in `proposalOptions` and a
    matching `deal_propose` ID is currently offered.
 4. Use the compact stable-ID map and omit empty policies. This bounds planner output in
