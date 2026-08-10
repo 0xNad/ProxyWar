@@ -39,6 +39,7 @@ describe("computeSpectatorFitScale", () => {
       mapHeight: 700,
       fit: 1,
       spectator: true,
+      embedded: false,
     });
     const rawScHor = 1200 / 1000;
     const rawScVer = 800 / 700;
@@ -65,6 +66,7 @@ describe("computeSpectatorFitScale", () => {
       mapHeight,
       fit: 0.95,
       spectator: true,
+      embedded: false,
     });
 
     const renderedWidth = mapWidth * result.scale;
@@ -87,6 +89,7 @@ describe("computeSpectatorFitScale", () => {
       mapHeight: 1000,
       fit: 1,
       spectator: true,
+      embedded: false,
     });
     const coverScale = Math.max(3000 / 1000, 400 / 1000);
     expect(result.scale).toBeLessThanOrEqual(coverScale + 1e-9);
@@ -103,6 +106,7 @@ describe("computeSpectatorFitScale", () => {
       mapHeight: 1000,
       fit: 1,
       spectator: true,
+      embedded: false,
     });
     const containScale = Math.min(850 / 400, 800 / 1000);
     expect(result.scale).toBeGreaterThanOrEqual(containScale - 1e-9);
@@ -123,6 +127,7 @@ describe("computeSpectatorFitScale", () => {
       mapHeight,
       fit: 0.95,
       spectator: true,
+      embedded: false,
     });
     const rawScVer = vpHeight / mapHeight;
     const portraitTarget = rawScVer * 0.75;
@@ -146,9 +151,36 @@ describe("computeSpectatorFitScale", () => {
       mapHeight: 1000,
       fit: 1,
       spectator: false,
+      embedded: false,
     });
     const containScale = Math.min(844 / 1000, 390 / 1000);
     expect(result.scale).toBeCloseTo(containScale, 5);
+  });
+
+  it("REGRESSION: an embedded replay contains the whole map instead of cropping it to fill a Twitch-style frame", () => {
+    const vpWidth = 672;
+    const vpHeight = 470;
+    const mapWidth = 700;
+    const mapHeight = 1000;
+    const fit = 0.95;
+    const input = {
+      vpWidth,
+      vpHeight,
+      mapWidth,
+      mapHeight,
+      fit,
+      spectator: true,
+    };
+    const standalone = computeSpectatorFitScale({
+      ...input,
+      embedded: false,
+    });
+    const embedded = computeSpectatorFitScale({ ...input, embedded: true });
+    const containScale = Math.min(vpWidth / mapWidth, vpHeight / mapHeight);
+    expect(standalone.scale).toBeGreaterThan(containScale);
+    expect(embedded.scale).toBeCloseTo(containScale * fit, 5);
+    expect(mapWidth * embedded.scale).toBeLessThan(vpWidth);
+    expect(mapHeight * embedded.scale).toBeLessThan(vpHeight);
   });
 
   it("returns fillScale (coverScale) and zoomFloor (containScale * 0.85) independent of the landing-shape branch taken", () => {
@@ -163,6 +195,7 @@ describe("computeSpectatorFitScale", () => {
       mapHeight,
       fit: 0.95,
       spectator: true,
+      embedded: false,
     });
     const containScale = Math.min(vpWidth / mapWidth, vpHeight / mapHeight);
     const coverScale = Math.max(vpWidth / mapWidth, vpHeight / mapHeight);
