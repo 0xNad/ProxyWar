@@ -405,7 +405,7 @@ describe("tester-starter-llm deal selection", () => {
     expect(choose(plan, actions, obs)?.id).toBe(EXPAND.id);
   });
 
-  it("reciprocates the exact alliance prerequisite for an explicit planned support request", async () => {
+  it("opens one bounded exact-ID alliance path so support can become legal", async () => {
     const { choose } = await loadSelectors();
     const alliance = {
       id: "alliance:P_A",
@@ -414,29 +414,35 @@ describe("tester-starter-llm deal selection", () => {
       risk: { level: "low", score: 0.2 },
       metadata: { recipientID: "P_A", recipientName: "Auri" },
     };
-    const supportPlan = {
-      ...BASE_PLAN,
-      dealPolicies: [
-        {
-          playerID: "P_A",
-          acceptTemplates: [],
-          proposeTemplates: ["support_request"],
-        },
-      ],
-    };
+    const obsAt = (step: number, friendly = false) => ({
+      ...BASE_OBS,
+      visiblePlayers: BASE_OBS.visiblePlayers.map((player) =>
+        player.playerID === "P_A"
+          ? { ...player, isFriendly: friendly }
+          : { ...player, isFriendly: true },
+      ),
+      deals: {
+        decisionStep: step,
+        incomingProposals: [],
+        outgoingProposals: [],
+        activeDeals: [],
+        proposalOptions: [],
+      },
+    });
 
-    expect(choose(supportPlan, [EXPAND, alliance, HOLD], BASE_OBS)?.id).toBe(
+    expect(choose(BASE_PLAN, [EXPAND, alliance, HOLD], obsAt(1))?.id).toBe(
       alliance.id,
     );
     expect(
-      choose(supportPlan, [EXPAND, alliance, HOLD], {
-        ...BASE_OBS,
-        visiblePlayers: BASE_OBS.visiblePlayers.map((player) =>
-          player.playerID === "P_A" ? { ...player, isFriendly: true } : player,
-        ),
-      })?.id,
+      choose(BASE_PLAN, [EXPAND, alliance, HOLD], obsAt(2, true))?.id,
     ).toBe(EXPAND.id);
-    expect(choose(supportPlan, [EXPAND, alliance, HOLD], BASE_OBS)?.id).toBe(
+    expect(choose(BASE_PLAN, [EXPAND, alliance, HOLD], obsAt(2))?.id).toBe(
+      EXPAND.id,
+    );
+    expect(choose(BASE_PLAN, [EXPAND, alliance, HOLD], obsAt(61))?.id).toBe(
+      alliance.id,
+    );
+    expect(choose(BASE_PLAN, [EXPAND, alliance, HOLD], obsAt(121))?.id).toBe(
       EXPAND.id,
     );
   });
@@ -490,6 +496,58 @@ describe("tester-starter-llm deal selection", () => {
         deals: { ...obs.deals, incomingProposals: [unknown] },
       })?.id,
     ).toBe("deal_reject:D3");
+  });
+
+  it("accepts support from a friendly partner only when it can immediately honor the threshold", async () => {
+    const { dealMove } = await loadSelectors();
+    const support = {
+      ...incomingProposal("SUPPORT", "P_A", "Auri", "support_request"),
+      terms: {
+        template: "support_request",
+        durationSteps: 6,
+        goldAmount: "150000",
+        troopAmount: 20000,
+      },
+    };
+    const donateGold = {
+      id: "donate_gold:P_A",
+      kind: "donate_gold",
+      label: "Donate gold to Auri",
+      risk: { level: "low" },
+      metadata: { recipientID: "P_A", gold: 150000 },
+    };
+    const obs = {
+      ...BASE_OBS,
+      visiblePlayers: BASE_OBS.visiblePlayers.map((player) =>
+        player.playerID === "P_A" ? { ...player, isFriendly: true } : player,
+      ),
+      deals: {
+        decisionStep: 3,
+        incomingProposals: [support],
+        outgoingProposals: [],
+        activeDeals: [],
+        proposalOptions: [],
+      },
+    };
+    const actions = [...responseActions("SUPPORT"), donateGold, HOLD];
+    expect(dealMove(BASE_PLAN, actions, obs)?.id).toBe("deal_accept:SUPPORT");
+    expect(
+      dealMove(
+        BASE_PLAN,
+        [
+          ...responseActions("SUPPORT"),
+          { ...donateGold, metadata: { recipientID: "P_A", gold: 100000 } },
+          HOLD,
+        ],
+        obs,
+      )?.id,
+    ).toBe("deal_reject:SUPPORT");
+    expect(
+      dealMove(BASE_PLAN, actions, {
+        ...obs,
+        visiblePlayers: BASE_OBS.visiblePlayers,
+      })?.id,
+    ).toBe("deal_reject:SUPPORT");
   });
 
   it("matches exact proposal options and permits only one retry after 60 steps", async () => {
