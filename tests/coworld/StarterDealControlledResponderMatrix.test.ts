@@ -113,15 +113,20 @@ async function loadStarterExecutor(): Promise<StarterExecutor> {
   const maxAttempts = source.match(
     /const DEAL_PROPOSAL_MAX_ATTEMPTS_PER_KEY = \d+;/,
   )?.[0];
+  const trustFloor = source.match(
+    /const DEAL_TRUST_MIN_RELIABILITY = [\d.]+;/,
+  )?.[0];
   const attempts = source.match(/const proposalAttempts = new Map\(\);/)?.[0];
   expect(order).toBeDefined();
   expect(retry).toBeDefined();
   expect(maxAttempts).toBeDefined();
+  expect(trustFloor).toBeDefined();
   expect(attempts).toBeDefined();
   return new Function(
     `${order}
      ${retry}
      ${maxAttempts}
+     ${trustFloor}
      ${attempts}
      const history = [];
      function avoidActionIDs() { return []; }
@@ -131,6 +136,7 @@ async function loadStarterExecutor(): Promise<StarterExecutor> {
      ${extractFunction(source, "dealConstraints")}
      ${extractFunction(source, "hasOpenDeal")}
      ${extractFunction(source, "dealPolicyFor")}
+     ${extractFunction(source, "failedReliabilityGate")}
      ${extractFunction(source, "chooseDealMove")}
      ${extractFunction(source, "chooseObligationMove")}
      ${extractFunction(source, "socialActionNote")}

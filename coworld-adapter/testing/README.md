@@ -88,6 +88,46 @@ submit or promote it. A passing acceptance requires the replay's finalized
 `confirmedDonation` receipt; a proposal, selected action, or metadata amount is
 not execution evidence.
 
+## Meaningful-gameplay counterparties
+
+`Dockerfile.hosted-social-counterparty` builds four immutable eval-only
+counterparties for the next behavioral gate:
+
+- `pact-keeper` accepts negative covenants and filters exact hostile actions
+  against the partner until the referee closes the obligation;
+- `pact-breaker` accepts the same covenants and selects the first exact hostile
+  action against that partner once the judged window is active;
+- `mutual-aid` requests support only when materially behind or under attack,
+  caps itself at two attempts, and accepts/fulfills a reciprocal support request
+  only after that partner has a positive terminal same-match reliability record;
+- `deal-blind` uses the same ordinary-action ordering but never selects the
+  diplomacy slot.
+
+Build one immutable image per profile with
+`--build-arg HOSTED_SOCIAL_COUNTERPARTY_PROFILE=<profile>`. These controls make
+opportunity, kept promise, attributable defection, earned reciprocity, and
+deal-blind behavior comparable without inventing raw intents. They are tagged
+and documented as `eval_only_never_submit`; uploading for an authorized
+Experience Request never authorizes league submission.
+
+Generate a bounded four-profile local request with an explicitly chosen
+manifest, explicit steps, and an explicit seed:
+
+```sh
+node coworld-adapter/testing/make-meaningful-social-episode-request.mjs \
+  coworld-adapter/coworld/coworld_manifest.json \
+  /safe/output/meaningful-social-request.json 80 173205
+```
+
+Run it through `coworld run-episode --verify-replay` and require the finalized
+deal ledger to distinguish fulfilled keeper obligations, attributable breaker
+violations, bounded mutual-aid proposals, and zero deal selections by the blind
+profile. The deterministic matrix validates the instrument; only later matched
+episodes with an autonomous subject can support a social-gameplay conclusion.
+The checked-in manifest is local-source truth, not proof of the currently
+canonical hosted Coworld. Hosted claims must name and query the exact `cow_*`
+ID and inspect its terminal replay artifacts separately.
+
 ## Matched matrix execution
 
 Use the same four image digests, maps, episode counts, and rotated seat orders

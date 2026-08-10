@@ -56,15 +56,20 @@ async function loadSelectors(): Promise<{
   const maxAttempts = source.match(
     /const DEAL_PROPOSAL_MAX_ATTEMPTS_PER_KEY = \d+;/,
   )?.[0];
+  const trustFloor = source.match(
+    /const DEAL_TRUST_MIN_RELIABILITY = [\d.]+;/,
+  )?.[0];
   const attempts = source.match(/const proposalAttempts = new Map\(\);/)?.[0];
   expect(order).toBeDefined();
   expect(retry).toBeDefined();
   expect(maxAttempts).toBeDefined();
+  expect(trustFloor).toBeDefined();
   expect(attempts).toBeDefined();
   return new Function(
     `${order}
      ${retry}
      ${maxAttempts}
+     ${trustFloor}
      ${attempts}
      const history = [];
      function avoidActionIDs() { return []; }
@@ -74,6 +79,7 @@ async function loadSelectors(): Promise<{
      ${extractFunction(source, "dealConstraints")}
      ${extractFunction(source, "hasOpenDeal")}
      ${extractFunction(source, "dealPolicyFor")}
+     ${extractFunction(source, "failedReliabilityGate")}
      ${extractFunction(source, "chooseDealMove")}
      ${extractFunction(source, "chooseObligationMove")}
      ${extractFunction(source, "socialActionNote")}
@@ -496,6 +502,97 @@ describe("tester-starter-llm deal selection", () => {
         deals: { ...obs.deals, incomingProposals: [unknown] },
       })?.id,
     ).toBe("deal_reject:D3");
+  });
+
+  it("turns an observed breach into refusal of new offers and proposals", async () => {
+    const { dealMove } = await loadSelectors();
+    const plan = {
+      ...BASE_PLAN,
+      dealPolicies: [
+        {
+          playerID: "P_A",
+          acceptTemplates: ["non_aggression_pact"],
+          proposeTemplates: ["trade_security_pact"],
+        },
+      ],
+    };
+    const reliability = [
+      {
+        playerID: "P_A",
+        fulfilled: 0,
+        terminalNonMoot: 1,
+        reliability: 0,
+      },
+    ];
+    const incoming = incomingProposal("BROKEN", "P_A", "Auri");
+    const response = dealMove(plan, [...responseActions("BROKEN"), HOLD], {
+      ...BASE_OBS,
+      deals: {
+        decisionStep: 30,
+        incomingProposals: [incoming],
+        outgoingProposals: [],
+        activeDeals: [],
+        proposalOptions: [],
+        rivalReliability: reliability,
+      },
+    });
+    expect(response?.id).toBe("deal_reject:BROKEN");
+
+    const proposal = proposalAction("P_A", "trade_security_pact");
+    expect(
+      dealMove(plan, [proposal, HOLD], {
+        ...BASE_OBS,
+        deals: {
+          decisionStep: 31,
+          incomingProposals: [],
+          outgoingProposals: [],
+          activeDeals: [],
+          proposalOptions: [proposalOption("P_A", "trade_security_pact")],
+          rivalReliability: reliability,
+        },
+      }),
+    ).toBeNull();
+  });
+
+  it("does not punish an unjudged or reliable counterparty", async () => {
+    for (const rivalReliability of [
+      [],
+      [
+        {
+          playerID: "P_A",
+          fulfilled: 1,
+          terminalNonMoot: 1,
+          reliability: 1,
+        },
+      ],
+    ]) {
+      const { dealMove } = await loadSelectors();
+      const incoming = incomingProposal("TRUSTED", "P_A", "Auri");
+      const decision = dealMove(
+        {
+          ...BASE_PLAN,
+          dealPolicies: [
+            {
+              playerID: "P_A",
+              acceptTemplates: ["non_aggression_pact"],
+              proposeTemplates: [],
+            },
+          ],
+        },
+        [...responseActions("TRUSTED"), HOLD],
+        {
+          ...BASE_OBS,
+          deals: {
+            incomingProposals: [incoming],
+            outgoingProposals: [],
+            activeDeals: [],
+            proposalOptions: [],
+            rivalReliability,
+          },
+        },
+      );
+      expect(decision?.id).toBe("deal_accept:TRUSTED");
+    }
   });
 
   it("accepts support from a friendly partner only when one exact offered transfer can fulfill it", async () => {

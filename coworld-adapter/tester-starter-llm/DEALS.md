@@ -84,6 +84,10 @@ Rules implemented by `llm-player.mjs`:
    Omitted rivals/templates are rejected immediately, so offers do not silently expire.
    Support is stricter: the shipped executor accepts only when the current menu contains
    one exact gold or capacity-adjusted troop transfer that reaches the stated threshold.
+   Once a rival has at least one terminal non-moot obligation and its observed same-match
+   reliability falls below `0.5`, the executor rejects its new offers and suppresses new
+   proposals to it even if a stale planner disposition still says yes. Eligibility returns
+   only if later terminal fulfillment restores the observed aggregate to at least `0.5`.
 3. Propose only when the exact recipient/template is present in `proposalOptions` and a
    matching `deal_propose` ID is currently offered.
 4. Use the compact stable-ID map and omit empty policies. This bounds planner output in
@@ -115,6 +119,8 @@ cross-match reputation, latent trust, or a general social-skill score.
 - For support, require one currently offered exact transfer that reaches 50,000 gold or
   5,000 troops after recipient-capacity clamping.
 - Match proposals through `proposalOptions`; add deterministic retry suppression.
+- Give observed defection a consequence: refuse new deals with a rival below the bounded
+  same-match reliability floor instead of letting a stale plan keep trusting it.
 - Check which party is actually the obligor before prioritizing a positive promise.
 - Require exact active `dealID` authorization for intentional breach.
 - Inspect the replay deal ledger for terminal effects backed by the core's actual transfer

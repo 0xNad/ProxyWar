@@ -62,6 +62,7 @@ const STRATEGY = [
   "Use compact deal aliases: nap, trade, joint, support. Omit rivals with no concrete policy.",
   "Prioritize live offers, active promises, bordered rivals, and partners with observed same-match reliability.",
   "Omitted rivals default to reject/no proposal. Reliability is same-match history, not a universal trust score.",
+  "A rival with judged reliability below 0.5 has broken too many promises: reject new offers and stop proposing to them.",
   "Accept only templates you can keep, and propose only terms with a concrete strategic purpose.",
   "NAP/trade bind both parties; joint_attack binds only its proposer; accepting support_request binds its recipient.",
   "Keep promises you accept. Authorize a deliberate betrayal only with the exact active dealID in breakDealIDs.",
@@ -821,6 +822,7 @@ function dealConstraints(obs) {
 // cooldown. The pair/template cap stays binding even if terms change.
 const DEAL_PROPOSAL_RETRY_STEPS = 60;
 const DEAL_PROPOSAL_MAX_ATTEMPTS_PER_KEY = 2;
+const DEAL_TRUST_MIN_RELIABILITY = 0.5;
 const proposalAttempts = new Map();
 
 function hasOpenDeal(obs, playerID, template) {
@@ -849,6 +851,19 @@ function dealPolicyFor(playerID) {
   return (plan?.dealPolicies || []).find(
     (policy) => policy.playerID === playerID,
   );
+}
+
+function failedReliabilityGate(obs, playerID) {
+  const reliability = (obs?.deals?.rivalReliability || []).find(
+    (entry) => entry?.playerID === playerID,
+  );
+  const judged = Number(reliability?.terminalNonMoot ?? 0);
+  if (!Number.isFinite(judged) || judged <= 0) return false;
+  const observed = Number(reliability?.reliability);
+  const rate = Number.isFinite(observed)
+    ? observed
+    : Number(reliability?.fulfilled ?? 0) / judged;
+  return rate < DEAL_TRUST_MIN_RELIABILITY;
 }
 
 // Deterministic deal executor. The move it returns is sent in the SEPARATE
@@ -900,6 +915,7 @@ function chooseDealMove(actions, obs) {
     );
     const accepts =
       policyAccepts &&
+      !failedReliabilityGate(obs, proposal.proposerPlayerID) &&
       (proposal.terms?.template !== "support_request" || canHonorSupport);
     return (
       actions.find(
@@ -913,6 +929,7 @@ function chooseDealMove(actions, obs) {
   const options = obs.deals.proposalOptions || [];
   const step = obs.deals.decisionStep;
   for (const policy of plan?.dealPolicies || []) {
+    if (failedReliabilityGate(obs, policy.playerID)) continue;
     const rival = (obs.visiblePlayers || []).find(
       (player) => player?.playerID === policy.playerID && player.isAlive,
     );
