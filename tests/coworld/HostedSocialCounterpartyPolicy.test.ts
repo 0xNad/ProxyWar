@@ -83,7 +83,12 @@ function baseObservation(step = 10) {
       incomingProposals: [],
       outgoingProposals: [],
       activeDeals: [],
-      rivalReliability: [],
+      rivalReliability: [] as Array<{
+        playerID: string;
+        fulfilled: number;
+        terminalNonMoot: number;
+        reliability: number;
+      }>,
     },
   };
 }
@@ -206,6 +211,20 @@ describe("hosted social counterparty policy", () => {
     const { choose } = await policy("mutual-aid");
     const observation = baseObservation(18);
     observation.visiblePlayers[0].isFriendly = true;
+    expect(
+      choose({
+        legalActions: [SUPPORT, EXPAND, HOLD],
+        observation,
+      }).selectedDealActionId,
+    ).toBeUndefined();
+    observation.deals.rivalReliability = [
+      {
+        playerID: "P_STARTER",
+        fulfilled: 1,
+        terminalNonMoot: 1,
+        reliability: 1,
+      },
+    ];
     const first = choose({
       legalActions: [SUPPORT, EXPAND, HOLD],
       observation,

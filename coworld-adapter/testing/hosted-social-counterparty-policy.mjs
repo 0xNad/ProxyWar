@@ -265,6 +265,7 @@ function chooseDeal(profile, actions, observation, proposalAttempts) {
     if (
       profile === "mutual-aid" &&
       candidate.isFriendly === true &&
+      trustedReciprocity(observation, candidate.playerID) &&
       step >= 18 &&
       needsSupport(observation, candidate) &&
       proposalAllowed(
