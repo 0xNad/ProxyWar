@@ -83,8 +83,6 @@ export interface SpectatorFitInput {
   readonly fit: number;
   /** `!options.forceWholeMap && isReplaySpectatorView()` at the call site — `false` collapses straight to whole-map "contain", matching live play and `FitWholeMapEvent`. */
   readonly spectator: boolean;
-  /** Embedded replay frames prioritize full-board context over filling every pixel; standalone replay pages keep the richer crop-to-fill framing. */
-  readonly embedded: boolean;
 }
 
 export interface SpectatorFitResult {
@@ -101,11 +99,11 @@ export interface SpectatorFitResult {
  * real `GameView`/`HTMLCanvasElement`).
  *
  * Three landing shapes, checked in order:
- * 1. `cover` — standalone spectator AND the viewport/map aspect ratios are close
+ * 1. `cover` — spectator AND the viewport/map aspect ratios are close
  *    enough (`aspectRatioDeviation` in `(0.5, 2)`) that filling the frame
  *    with zero letterboxing only crops a plausible amount off the far
  *    edges.
- * 2. Portrait/landscape overzoom — standalone spectator AND `cover` was rejected AND
+ * 2. Portrait/landscape overzoom — spectator AND `cover` was rejected AND
  *    the viewport is meaningfully non-square in EITHER orientation: land
  *    at whichever scale renders the map at `SPECTATOR_OVERZOOM_TARGET_FILL`
  *    of the viewport's limiting dimension (height in portrait, width in
@@ -114,19 +112,17 @@ export interface SpectatorFitResult {
  *    Clamped so this never zooms in LESS than a whole-map contain fit
  *    (rare near-square maps already exceed the target) or MORE than a
  *    true cover fit (never crop tighter than cover would).
- * 3. Plain "contain" — live play, `forceWholeMap`, an embedded replay, or
- *    a spectator viewport close enough to square that neither overzoom
- *    branch is needed.
+ * 3. Plain "contain" — live play, `forceWholeMap`, or a spectator
+ *    viewport close enough to square that neither overzoom branch is
+ *    needed.
  */
 export function computeSpectatorFitScale(
   input: SpectatorFitInput,
 ): SpectatorFitResult {
-  const { vpWidth, vpHeight, mapWidth, mapHeight, fit, spectator, embedded } =
-    input;
-  const fillFrame = spectator && !embedded;
+  const { vpWidth, vpHeight, mapWidth, mapHeight, fit, spectator } = input;
   const aspectRatioDeviation = vpWidth / vpHeight / (mapWidth / mapHeight);
   const cover =
-    fillFrame && aspectRatioDeviation > 0.5 && aspectRatioDeviation < 2;
+    spectator && aspectRatioDeviation > 0.5 && aspectRatioDeviation < 2;
 
   const rawScHor = vpWidth / mapWidth;
   const rawScVer = vpHeight / mapHeight;
@@ -136,13 +132,13 @@ export function computeSpectatorFitScale(
   let scale: number;
   if (cover) {
     scale = coverScale * Math.max(fit, 1);
-  } else if (fillFrame && vpHeight > vpWidth) {
+  } else if (spectator && vpHeight > vpWidth) {
     const portraitTarget = rawScVer * SPECTATOR_OVERZOOM_TARGET_FILL;
     scale = Math.min(
       Math.max(containScale * fit, portraitTarget),
       coverScale,
     );
-  } else if (fillFrame && vpWidth > vpHeight) {
+  } else if (spectator && vpWidth > vpHeight) {
     // P2 fix (found live 2026-08-02): a landscape phone viewport (e.g.
     // 844x390, aspect ~2.16) against a map NOT wide enough to fall inside
     // the `cover` band (e.g. a roughly square map, aspect ~1.0 ->
@@ -742,14 +738,15 @@ export class TransformHandler {
   centerAll(fit: number = 1, options: { forceWholeMap?: boolean } = {}) {
     //position entire map centered on the screen.
     //
-    //Standalone replay/spectator surfaces use a "cover" fit instead of
-    //"contain": the map fills the viewport with no letterboxing, cropping a
-    //little of the far edges instead. Embedded replay frames need the opposite
-    //tradeoff: their smaller Twitch-style boxes must retain the whole-board
-    //context, so they use the existing "contain" fit. Live play is unaffected:
-    //it never reaches here with isReplaySpectatorView() true, and even when
-    //this fires during its own transient startup call, it's immediately
-    //superseded by the real spawn/goToPlayer zoom.
+    //Standalone replay/spectator surfaces use a
+    //"cover" fit instead of "contain": the map fills the viewport with no
+    //letterboxing, cropping a little of the far edges instead. The whole
+    //appeal of watching is territory filling the frame, so dead grey bands
+    //(which "contain" produces whenever the viewport aspect ratio doesn't
+    //match the map's) read as a broken layout, not a deliberate one. Live
+    //play is unaffected: it never reaches here with isReplaySpectatorView()
+    //true, and even when this fires during its own transient startup call,
+    //it's immediately superseded by the real spawn/goToPlayer zoom.
     //
     //`options.forceWholeMap` (FitWholeMapEvent, currently dispatched
     //automatically by WinModal at match end) bypasses `cover` AND the
@@ -763,7 +760,10 @@ export class TransformHandler {
     const vpHeight = this.boundingRect().height;
     const mapWidth = this.game.width();
     const mapHeight = this.game.height();
-    const spectator = !options.forceWholeMap && isReplaySpectatorView();
+    const spectator =
+      !options.forceWholeMap &&
+      isReplaySpectatorView() &&
+      window.self === window.top;
 
     const { scale: tScale, fillScale, zoomFloor } = computeSpectatorFitScale({
       vpWidth,
@@ -772,7 +772,6 @@ export class TransformHandler {
       mapHeight,
       fit,
       spectator,
-      embedded: window.self !== window.top,
     });
 
     const oHor = (mapWidth - vpWidth) / 2 / tScale;

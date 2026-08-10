@@ -51,7 +51,7 @@ import {
   REPLAY_SHARE_IMAGE_RESULT_EVENT,
   type ReplayShareImageResultDetail,
 } from "./ReplayShareImageBinding";
-import { translateText } from "./Utils";
+import { isInIframe, translateText } from "./Utils";
 
 interface AiLeagueDecisionLogEntry {
   sequence: number;
@@ -201,8 +201,6 @@ interface AiLeagueReplayOverlayInput {
    */
   currentTurn?: number;
   runID: string;
-  /** Embedded viewers dock their spectator UI beside the map. */
-  embedded?: boolean;
   decisions: AiLeagueDecisionLogEntry[];
   summary?: AiLeagueReplaySummary | null;
   spectatorTelemetry?: unknown;
@@ -324,10 +322,7 @@ export function mountAiLeagueReplayOverlay(input: AiLeagueReplayOverlayInput) {
   document.getElementById(AI_LEAGUE_BROADCAST_DRAWER_PORTAL_ID)?.remove();
   document.body.classList.remove("ai-league-analyst-mode");
   document.body.classList.add("ai-league-replay-mode");
-  document.body.classList.toggle(
-    "ai-league-embedded-replay",
-    input.embedded === true,
-  );
+  document.body.classList.toggle("ai-league-embedded-replay", isInIframe());
   document.body.classList.toggle(
     "ai-league-native-spectator-ui",
     isAiLeagueNativeSpectatorUiEnabled(),
@@ -898,13 +893,13 @@ const AI_LEAGUE_EMBEDDED_RAIL_MIN_WIDTH = 600;
 function isEmbeddedReplayRail(): boolean {
   return (
     document.body.classList.contains("ai-league-embedded-replay") &&
-    window.innerWidth >= AI_LEAGUE_EMBEDDED_RAIL_MIN_WIDTH
+    window.innerWidth >= AI_LEAGUE_EMBEDDED_RAIL_MIN_WIDTH &&
+    window.innerWidth <= AI_LEAGUE_MOBILE_BREAKPOINT
   );
 }
 
 function isNarrowReplayViewport(): boolean {
   return (
-    isEmbeddedReplayRail() ||
     window.innerWidth <= AI_LEAGUE_MOBILE_BREAKPOINT ||
     (window.innerHeight <= AI_LEAGUE_MOBILE_LANDSCAPE_MAX_HEIGHT &&
       window.innerWidth > window.innerHeight)
@@ -3068,16 +3063,10 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
           order: 3;
         }
       }
-      /*
-       * Twitch-style embeds get two real layout regions: the game canvas on
-       * the left and the spectator/activity rail on the right. This is not a
-       * floating overlay with a convenient-looking offset — the canvas itself
-       * is narrower, so the whole-map camera fits against the unobstructed
-       * game region and no replay panel can cover it. Very narrow embeds keep
-       * the existing collapsed bottom sheet because a 260px rail would leave
-       * too little map to be useful.
-       */
-      @media (min-width: 600px) {
+      /* Reserve a Twitch-style side rail at the embed widths that otherwise
+         use the mobile bottom sheet. The existing mobile rules above provide
+         the tabbed drawer behavior; only the two-pane geometry is new. */
+      @media (min-width: 600px) and (max-width: 740px) {
         body.ai-league-embedded-replay {
           --ai-league-embedded-rail-width: clamp(260px, 42vw, 320px);
         }
@@ -3087,71 +3076,18 @@ function overlayHtml(input: AiLeagueReplayOverlayInput): string {
         body.ai-league-embedded-replay #pw-game-control-cluster {
           right: var(--ai-league-embedded-rail-width) !important;
         }
-        body.ai-league-embedded-replay #ai-league-replay-overlay,
-        body.ai-league-embedded-replay.ai-league-native-spectator-ui #ai-league-replay-overlay {
-          top: 0;
-          right: 0;
-          bottom: 0;
-          left: auto;
+        body.ai-league-embedded-replay #ai-league-replay-overlay {
+          inset: 0 0 0 auto;
           width: var(--ai-league-embedded-rail-width);
-          height: 100vh;
+          height: auto;
           max-height: none;
           border-width: 0 0 0 1px;
           border-radius: 0;
           box-sizing: border-box;
         }
-        body.ai-league-embedded-replay #ai-league-replay-overlay header {
-          cursor: default;
-        }
-        body.ai-league-embedded-replay #ai-league-replay-overlay [data-ai-league-reset-layout],
         body.ai-league-embedded-replay #ai-league-replay-overlay [data-ai-league-toggle],
-        body.ai-league-embedded-replay #ai-league-replay-overlay .ai-league-resize-handle {
-          display: none;
-        }
-        body.ai-league-embedded-replay #ai-league-replay-overlay .ai-league-body {
-          display: block;
-          padding: 10px;
-        }
         body.ai-league-embedded-replay #ai-league-replay-overlay .ai-league-standings {
           display: none;
-        }
-        body.ai-league-embedded-replay [data-ai-league-broadcast-drawer] .broadcast-drawer-tabs {
-          display: flex;
-          gap: 4px;
-          margin: 0 0 8px;
-        }
-        body.ai-league-embedded-replay .broadcast-drawer-tab {
-          flex: 1 1 0;
-          min-width: 0;
-          min-height: 36px;
-          padding: 5px 3px;
-          font-size: 10px;
-        }
-        body.ai-league-embedded-replay .broadcast-drawer-panel,
-        body.ai-league-embedded-replay .broadcast-drawer-panel[data-tab-id="events"],
-        body.ai-league-embedded-replay .broadcast-drawer-panel[data-tab-id="timeline"] {
-          position: static;
-          top: auto;
-          right: auto;
-          bottom: auto;
-          left: auto;
-          transform: none;
-          width: auto;
-          max-height: none;
-          z-index: auto;
-          display: none;
-        }
-        body.ai-league-embedded-replay .broadcast-drawer-panel[data-tab-active="true"] {
-          display: block;
-        }
-        body.ai-league-embedded-replay.ai-league-analyst-mode .broadcast-drawer-panel[data-tab-id="analysis"] {
-          position: static;
-          transform: none;
-          width: auto;
-          max-height: none;
-        }
-        body.ai-league-embedded-replay .broadcast-rail-list {
-          max-height: none;
         }
       }
     </style>
@@ -4953,7 +4889,9 @@ function mountAiLeagueBroadcastDrawer(
     AI_LEAGUE_BROADCAST_DRAWER_LAST_TURN.set(container, turnNumber);
     const activeTab =
       AI_LEAGUE_DRAWER_ACTIVE_TAB.get(container) ??
-      (input.embedded === true ? "events" : "agents");
+      (document.body.classList.contains("ai-league-embedded-replay")
+        ? "events"
+        : "agents");
     const railEntries = competitorRailEntries(
       telemetry,
       decisions,

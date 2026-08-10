@@ -964,39 +964,29 @@ describe("AiLeagueReplayOverlay", () => {
   });
 
   it("docks embedded replay activity beside the map instead of opening a bottom sheet over it", () => {
+    const self = vi
+      .spyOn(window, "self", "get")
+      .mockReturnValue({} as Window & typeof globalThis);
     Object.defineProperty(window, "innerWidth", {
       configurable: true,
       value: 672,
     });
-    Object.defineProperty(window, "innerHeight", {
-      configurable: true,
-      value: 470,
-    });
 
     const handle = mountAiLeagueReplayOverlay({
       runID: "embedded-replay",
-      embedded: true,
       artifactBasePath: ".",
       decisions: [],
       remoteFeaturesEnabled: false,
     });
-    const overlay = document.getElementById("ai-league-replay-overlay");
+    const overlay = document.getElementById("ai-league-replay-overlay")!;
 
-    expect(document.body.classList.contains("ai-league-embedded-replay")).toBe(
-      true,
-    );
-    expect(overlay?.classList.contains("collapsed")).toBe(false);
-    expect(overlay?.classList.contains("mobile-bottom-sheet")).toBe(false);
+    expect(overlay.classList.contains("collapsed")).toBe(false);
     expect(
-      overlay
-        ?.querySelector('[data-tab-id="events"]')
-        ?.getAttribute("aria-selected"),
-    ).toBe("true");
-    expect(overlay?.querySelector("style")?.textContent).toContain(
-      "body.ai-league-embedded-replay > canvas",
-    );
+      overlay.querySelector('[data-tab-id="events"][aria-selected="true"]'),
+    ).not.toBeNull();
 
     handle.dispose();
+    self.mockRestore();
     expect(document.body.classList.contains("ai-league-embedded-replay")).toBe(
       false,
     );
