@@ -3,10 +3,11 @@ schedule_interval_minutes: 30
 # A 25-entrant, 12-seat competition currently schedules fourteen rolling-window
 # jobs. Admission is acknowledgement-paced (one ScheduleEpisodes message per
 # episode, the next only after episodes_accepted), so this cap bounds steady
-# concurrency only -- it is not a burst size. Five concurrent 12-seat episodes
-# stay below the six-at-once admission shape that coincided with the July
-# player_never_started failures; raised from three on 2026-08-10 to roughly
-# halve round wall-time and restore six-hour round-ceiling headroom. If
+# concurrency only -- it is not a burst size. The July player_never_started
+# class was platform-side and never attributed to a specific concurrency
+# level, so this cap is exposure control, not a proven safety line. Raised
+# from three on 2026-08-10 to roughly halve round wall-time and restore
+# six-hour round-ceiling headroom. If
 # pod-not-found/player_never_started recurs, drop back to three. Explicit zero
 # staggering avoids consuming an episode's timeout budget before its request is
 # sent. Short-timeout certification smokes stay at three because the duty-cycle

@@ -959,7 +959,10 @@ def test_live_17_champion_server_dispatches_five_then_drains_the_queue() -> None
 def test_duplicate_terminal_message_does_not_reopen_dispatch_capacity(
     terminal_type: str,
 ) -> None:
-    round_start = competition_round_start(17)
+    # 18 champions -> 7 episodes: after the window fills and one settlement
+    # dispatches "5", episode "6" is still queued, so a wrongly reopened slot
+    # would observably emit it instead of blocking.
+    round_start = competition_round_start(18)
     terminal = (
         {"type": "episode_result", "request_id": "0", "scores": []}
         if terminal_type == "episode_result"
