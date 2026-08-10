@@ -1,7 +1,10 @@
 import { EventBus, GameEvent } from "../../core/EventBus";
 import { Cell } from "../../core/game/Game";
 import { GameView, PlayerView, UnitView } from "../../core/game/GameView";
-import { isAiLeagueReplayRoute } from "../AiLeagueReplayMode";
+import {
+  isAiLeagueReplayRoute,
+  isCoworldReplayRoute,
+} from "../AiLeagueReplayMode";
 import { CenterCameraEvent, DragEvent, ZoomEvent } from "../InputHandler";
 
 /**
@@ -19,6 +22,32 @@ export function isReplaySpectatorView(): boolean {
     __PROXYWAR_AI_REPLAY__?: boolean;
   };
   return replayWindow.__PROXYWAR_AI_REPLAY__ === true || isAiLeagueReplayRoute();
+}
+
+/**
+ * Embedded replay/spectator surfaces (Softmax Observatory's "twitch-style"
+ * iframe embeds of our replay routes, or any other third-party framing of a
+ * spectator page) must land the literal WHOLE-map "contain" fit, never the
+ * `cover`/overzoom crops `centerAll()` applies to our own full-page
+ * spectator surfaces. A cover fit is the right call when the replay IS the
+ * page (territory filling the frame reads as intentional); inside a small
+ * embedded panel the cropped edges instead read as "the map doesn't fit" —
+ * reported live by the Softmax team on 2026-08-10 against their Observatory
+ * embeds. Frame detection, not viewport size, is the signal: a small
+ * standalone phone viewport still deliberately gets the overzoom landing
+ * (P2-F10/F11), while ANY framed viewport gets the whole board.
+ *
+ * `window.self !== window.top` never throws (reference identity is allowed
+ * cross-origin); the try/catch is belt-and-braces for exotic sandboxed
+ * embedders where even `window.top` access traps — being framed is the only
+ * way that trap can happen, so the catch answers `true`.
+ */
+export function isEmbeddedSpectatorFrame(): boolean {
+  try {
+    return window.self !== window.top;
+  } catch {
+    return true;
+  }
 }
 
 export class GoToPlayerEvent implements GameEvent {
@@ -253,6 +282,22 @@ export function spectatorZoomBlendT(
   return (scale - zoomFloor) / (fillScale - zoomFloor);
 }
 
+/**
+ * The "tight" (zero-background) bound formulas below assume the scaled map
+ * covers the viewport on this axis (`dim * scale >= viewport`). When it
+ * does NOT — reachable live whenever a spectator zooms out past the fill
+ * point and back in while `spectatorFillScale` describes a smaller,
+ * pre-fullscreen viewport (see updateCanvasBoundingRect), or on any axis
+ * whose aspect leaves the map narrower than the frame at fill scale — the
+ * raw formulas INVERT (min > max), and per-tick clamping against an empty
+ * range oscillates the camera between the two conflicting bounds: the
+ * fullscreen "zoom back in twitches" bug reported 2026-08-10. A map that
+ * cannot cover the viewport at this scale has exactly one background-
+ * minimizing position — centered — so both tight bounds degenerate to the
+ * centered offset `(dim - viewport) / (2 * scale)`. At the boundary
+ * (`dim * scale === viewport`) all three expressions coincide, so the
+ * guard introduces no new discontinuity.
+ */
 export function spectatorAxisMinOffset(
   dim: number,
   viewport: number,
@@ -260,7 +305,10 @@ export function spectatorAxisMinOffset(
   t: number,
 ): number {
   if (t <= 0) return -dim / 2 + (dim - viewport) / (2 * scale);
-  const tight = dim / (2 * scale) - dim / 2;
+  const tight =
+    dim * scale <= viewport
+      ? (dim - viewport) / (2 * scale)
+      : dim / (2 * scale) - dim / 2;
   if (t >= 1) return tight;
   const generic = -dim / 2 + (dim - viewport) / (2 * scale);
   return generic + (tight - generic) * t;
@@ -273,7 +321,10 @@ export function spectatorAxisMaxOffset(
   t: number,
 ): number {
   if (t <= 0) return dim / 2 + (dim - viewport) / (2 * scale);
-  const tight = dim / 2 - (viewport - dim / 2) / scale;
+  const tight =
+    dim * scale <= viewport
+      ? (dim - viewport) / (2 * scale)
+      : dim / 2 - (viewport - dim / 2) / scale;
   if (t >= 1) return tight;
   const generic = dim / 2 + (dim - viewport) / (2 * scale);
   return generic + (tight - generic) * t;
@@ -338,6 +389,32 @@ export class TransformHandler {
     // caused by that gesture instead of the resize that actually invalidated
     // it. Re-clamping here fixes the timing only — same bound math
     // clampOffsets() always used, no recentering, no pointer/anchor logic.
+    //
+    // spectatorFillScale/spectatorZoomFloor must be refreshed FIRST: they
+    // were previously only computed by centerAll(), so after any resize
+    // (fullscreen enter/exit being the drastic case) clampOffsets() kept
+    // blending toward bounds derived from the OLD viewport. Live
+    // consequence (reported 2026-08-10): enter fullscreen, zoom out past
+    // the (stale, too-low) floor so the whole board plus background is
+    // visible, then zoom back in — the stale fillScale marks the map as
+    // "covering" the viewport long before it actually does, engaging the
+    // tight zero-background bound while it is mathematically unsatisfiable
+    // and (before the degenerate-axis guard above) inverted, so every
+    // wheel tick slammed the camera between conflicting clamp values —
+    // visible as twitching. Only fill/floor are refreshed; scale and
+    // offsets are deliberately untouched (no recentering on resize).
+    if (isReplaySpectatorView()) {
+      const { fillScale, zoomFloor } = computeSpectatorFitScale({
+        vpWidth: this._boundingRect.width,
+        vpHeight: this._boundingRect.height,
+        mapWidth: this.game.width(),
+        mapHeight: this.game.height(),
+        fit: 0.95,
+        spectator: true,
+      });
+      this.spectatorFillScale = fillScale;
+      this.spectatorZoomFloor = zoomFloor;
+    }
     this.clampOffsets();
   }
 
@@ -756,11 +833,34 @@ export class TransformHandler {
     //full board. See computeSpectatorFitScale() for the full landing-scale
     //derivation (all three shapes: cover, portrait/landscape overzoom,
     //plain contain).
+    //
+    //Embedded frames (isEmbeddedSpectatorFrame — see its doc) land the same
+    //whole-map "contain" fit as forceWholeMap: an Observatory-style iframe
+    //panel must always show the FULL board on load. Two more surfaces are
+    //ALWAYS observatory-facing and land contain even when opened top-level,
+    //because Softmax controls their presentation, not us:
+    //  - the Coworld `/client/{global,replay}` routes (isCoworldReplayRoute,
+    //    including the Observatory pod-proxy path shapes);
+    //  - the standalone static replay viewer bundle
+    //    (`game.replay_viewer.bundle`; its shell sets
+    //    `window.__PROXYWAR_STATIC_REPLAY__` before the bundle runs — the
+    //    bundle Observatory actually opens for finished-episode replays).
+    //Only the LANDING shape changes; the spectator clamp semantics
+    //(fill/floor set below, blended bounds, zoom-out-to-whole-board) stay
+    //active in all cases.
     const vpWidth = this.boundingRect().width;
     const vpHeight = this.boundingRect().height;
     const mapWidth = this.game.width();
     const mapHeight = this.game.height();
-    const spectator = !options.forceWholeMap && isReplaySpectatorView();
+    const staticViewer =
+      (window as typeof window & { __PROXYWAR_STATIC_REPLAY__?: boolean })
+        .__PROXYWAR_STATIC_REPLAY__ === true;
+    const spectator =
+      !options.forceWholeMap &&
+      isReplaySpectatorView() &&
+      !isEmbeddedSpectatorFrame() &&
+      !isCoworldReplayRoute() &&
+      !staticViewer;
 
     const { scale: tScale, fillScale, zoomFloor } = computeSpectatorFitScale({
       vpWidth,

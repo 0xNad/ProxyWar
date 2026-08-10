@@ -14,11 +14,12 @@
  * regression (a wasted-width scenario now overzooms) and that every
  * other landing shape (cover, portrait, live play) is unchanged.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   computeCenterOnCellOffset,
   computeSpectatorFitScale,
   GoToPlayerEvent,
+  isEmbeddedSpectatorFrame,
   spectatorAxisMaxOffset,
   spectatorAxisMinOffset,
   spectatorZoomBlendT,
@@ -642,5 +643,247 @@ describe("TransformHandler.onGoToPlayer — replay/spectator camera-locate is a 
     expect(hooks.target).toMatchObject({ x: 900, y: 400 });
     expect(hooks.targetScale).toBe(3);
     clearInterval(hooks.intervalID ?? undefined);
+  });
+});
+
+/**
+ * Regression coverage for the 2026-08-10 fullscreen "zoom back in twitches"
+ * report. Two independent defects compounded:
+ *
+ * 1. The tight (zero-background) per-axis bound formulas assumed the scaled
+ *    map covers the viewport on that axis; when it doesn't, they INVERT
+ *    (min > max) and per-tick clamping oscillates the camera between the
+ *    two conflicting values.
+ * 2. spectatorFillScale/spectatorZoomFloor were only computed by
+ *    centerAll(), so after a resize (fullscreen enter being the drastic
+ *    case) clampOffsets() kept blending toward bounds derived from the OLD
+ *    viewport — which is exactly what made state 1 reachable: a stale, too-
+ *    low fillScale engaged the tight bound while the map was still far
+ *    smaller than the real (fullscreen) viewport.
+ */
+describe("spectator tight clamp bounds on a non-covering axis (fullscreen twitch, 2026-08-10)", () => {
+  it("REGRESSION: when the scaled map cannot cover the viewport, both tight bounds degenerate to the single centered offset instead of inverting (min > max)", () => {
+    // Map 1000 wide at scale 0.918 spans 918px against a 1920px fullscreen
+    // viewport — the exact live shape. The raw tight formulas here give
+    // min≈+44.7 and max≈-501: an EMPTY range.
+    const dim = 1000;
+    const viewport = 1920;
+    const scale = 0.918;
+    const centered = (dim - viewport) / (2 * scale);
+    expect(spectatorAxisMinOffset(dim, viewport, scale, 1)).toBeCloseTo(
+      centered,
+      10,
+    );
+    expect(spectatorAxisMaxOffset(dim, viewport, scale, 1)).toBeCloseTo(
+      centered,
+      10,
+    );
+    // The blend interior must be a valid (min <= max) range at every t.
+    for (const t of [0.1, 0.25, 0.5, 0.75, 0.9, 1]) {
+      expect(
+        spectatorAxisMinOffset(dim, viewport, scale, t),
+      ).toBeLessThanOrEqual(
+        spectatorAxisMaxOffset(dim, viewport, scale, t) + 1e-9,
+      );
+    }
+  });
+
+  it("is continuous at the exact dim*scale === viewport boundary — the guard changes nothing where the original formulas already agreed", () => {
+    const dim = 1000;
+    const viewport = 800;
+    const scale = viewport / dim;
+    const centered = (dim - viewport) / (2 * scale);
+    // Both ORIGINAL tight formulas independently equal the centered offset
+    // at the boundary, so the guarded versions introduce no jump.
+    expect(dim / (2 * scale) - dim / 2).toBeCloseTo(centered, 10);
+    expect(dim / 2 - (viewport - dim / 2) / scale).toBeCloseTo(centered, 10);
+    expect(spectatorAxisMinOffset(dim, viewport, scale, 1)).toBeCloseTo(
+      centered,
+      10,
+    );
+    expect(spectatorAxisMaxOffset(dim, viewport, scale, 1)).toBeCloseTo(
+      centered,
+      10,
+    );
+  });
+
+  it("covering axes are byte-for-byte unchanged by the guard", () => {
+    const dim = 2000;
+    const viewport = 1600;
+    const scale = 0.9; // dim*scale = 1800 > 1600: the normal covering case
+    expect(spectatorAxisMinOffset(dim, viewport, scale, 1)).toBe(
+      dim / (2 * scale) - dim / 2,
+    );
+    expect(spectatorAxisMaxOffset(dim, viewport, scale, 1)).toBe(
+      dim / 2 - (viewport - dim / 2) / scale,
+    );
+  });
+});
+
+describe("TransformHandler.updateCanvasBoundingRect — resize refreshes spectator fill/floor (fullscreen twitch, 2026-08-10)", () => {
+  afterEach(() => {
+    delete (window as unknown as Record<string, unknown>)
+      .__PROXYWAR_AI_REPLAY__;
+  });
+
+  it("REGRESSION: after entering fullscreen, zoom-out floors at the NEW viewport's whole-map scale, not the stale pre-fullscreen floor", () => {
+    (window as unknown as Record<string, unknown>).__PROXYWAR_AI_REPLAY__ =
+      true;
+    const mapWidth = 1000;
+    const mapHeight = 1000;
+    const canvas = makeCanvas(800, 600); // small pre-fullscreen window
+    const transform = new TransformHandler(
+      makeGameView(mapWidth, mapHeight),
+      new EventBus(),
+      canvas,
+    );
+
+    // "Enter fullscreen": the only DOM consequence is a new bounding rect,
+    // then GameRenderer.resizeCanvas() calls updateCanvasBoundingRect().
+    canvas.getBoundingClientRect = () =>
+      ({
+        width: 1920,
+        height: 1080,
+        left: 0,
+        top: 0,
+        right: 1920,
+        bottom: 1080,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }) as DOMRect;
+    transform.updateCanvasBoundingRect();
+
+    // A hard zoom-out must stop at the REFRESHED floor:
+    // containScale(min(1920,1080)/1000 = 1.08) * 0.85 = 0.918 — not the
+    // stale pre-fullscreen floor (600/1000)*0.85 = 0.51.
+    transform.onZoom(new ZoomEvent(960, 540, 1e9));
+    expect(transform.scale).toBeCloseTo(1.08 * 0.85, 6);
+  });
+
+  it("REGRESSION: zooming back in from the fullscreen whole-board view keeps the (smaller-than-viewport) map centered — no per-tick clamp oscillation", () => {
+    (window as unknown as Record<string, unknown>).__PROXYWAR_AI_REPLAY__ =
+      true;
+    const mapWidth = 1000;
+    const mapHeight = 1000;
+    const canvas = makeCanvas(800, 600);
+    const transform = new TransformHandler(
+      makeGameView(mapWidth, mapHeight),
+      new EventBus(),
+      canvas,
+    );
+    canvas.getBoundingClientRect = () =>
+      ({
+        width: 1920,
+        height: 1080,
+        left: 0,
+        top: 0,
+        right: 1920,
+        bottom: 1080,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }) as DOMRect;
+    transform.updateCanvasBoundingRect();
+    transform.onZoom(new ZoomEvent(960, 540, 1e9)); // out to the floor
+
+    // Zoom back in at the viewport center in many small steps, crossing
+    // the whole formerly-twitching band. The pre-fix inverted bounds
+    // clamped the offset to ~+44.7 (tight min) and ~-501 (tight max) on
+    // ALTERNATING ticks — a ~500-world-unit slam per wheel step. A smooth
+    // center-anchored zoom moves the implied offset only a few units per
+    // step (mid-blend drift included), so a generous 100-unit per-tick
+    // ceiling separates the two behaviors by almost an order of magnitude.
+    let previousImpliedOffsetX: number | null = null;
+    for (let i = 0; i < 40; i++) {
+      transform.onZoom(new ZoomEvent(960, 540, -60));
+      const scale = transform.scale;
+      const [topLeft] = transform.screenBoundingRect();
+      const impliedOffsetX =
+        topLeft.x + mapWidth / (2 * scale) - mapWidth / 2;
+      if (previousImpliedOffsetX !== null) {
+        expect(
+          Math.abs(impliedOffsetX - previousImpliedOffsetX),
+        ).toBeLessThanOrEqual(100);
+      }
+      previousImpliedOffsetX = impliedOffsetX;
+    }
+    // The loop must actually have crossed into covering territory, or the
+    // assertion above never exercised the transition.
+    expect(transform.scale * mapWidth).toBeGreaterThan(1920);
+  });
+});
+
+describe("embedded spectator frames land the whole-map contain fit (Softmax Observatory embeds, 2026-08-10)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete (window as unknown as Record<string, unknown>)
+      .__PROXYWAR_AI_REPLAY__;
+  });
+
+  it("isEmbeddedSpectatorFrame() is false for a top-level window and true when window.top is a different window", () => {
+    expect(isEmbeddedSpectatorFrame()).toBe(false);
+    vi.stubGlobal("top", {} as Window);
+    expect(isEmbeddedSpectatorFrame()).toBe(true);
+  });
+
+  it("REGRESSION: a framed cover-eligible spectator viewport lands contain*fit (whole map visible), not the cover crop", () => {
+    (window as unknown as Record<string, unknown>).__PROXYWAR_AI_REPLAY__ =
+      true;
+    // 1600x900 viewport vs 2000x1000 map: aspect deviation 0.889 — inside
+    // the cover band, so an UNframed spectator page lands coverScale 0.9.
+    // Framed, the whole board must be visible: containScale 0.8 * 0.95.
+    vi.stubGlobal("top", {} as Window);
+    const transform = new TransformHandler(
+      makeGameView(2000, 1000),
+      new EventBus(),
+      makeCanvas(1600, 900),
+    );
+    expect(transform.scale).toBeCloseTo(0.8 * 0.95, 6);
+  });
+
+  it("the same viewport UNframed still lands the cover fit — our own full-page spectator surfaces are unchanged", () => {
+    (window as unknown as Record<string, unknown>).__PROXYWAR_AI_REPLAY__ =
+      true;
+    const transform = new TransformHandler(
+      makeGameView(2000, 1000),
+      new EventBus(),
+      makeCanvas(1600, 900),
+    );
+    expect(transform.scale).toBeCloseTo(0.9, 6);
+  });
+
+  it("the Coworld /client/replay route (the Observatory-facing surface) lands contain even when opened TOP-LEVEL — Softmax controls its presentation, not us", () => {
+    (window as unknown as Record<string, unknown>).__PROXYWAR_AI_REPLAY__ =
+      true;
+    window.history.pushState({}, "", "/client/replay");
+    try {
+      const transform = new TransformHandler(
+        makeGameView(2000, 1000),
+        new EventBus(),
+        makeCanvas(1600, 900),
+      );
+      expect(transform.scale).toBeCloseTo(0.8 * 0.95, 6);
+    } finally {
+      window.history.pushState({}, "", "/");
+    }
+  });
+
+  it("the standalone static replay viewer (window.__PROXYWAR_STATIC_REPLAY__ — the bundle Observatory opens for finished replays) lands contain even top-level", () => {
+    (window as unknown as Record<string, unknown>).__PROXYWAR_AI_REPLAY__ =
+      true;
+    (window as unknown as Record<string, unknown>).__PROXYWAR_STATIC_REPLAY__ =
+      true;
+    try {
+      const transform = new TransformHandler(
+        makeGameView(2000, 1000),
+        new EventBus(),
+        makeCanvas(1600, 900),
+      );
+      expect(transform.scale).toBeCloseTo(0.8 * 0.95, 6);
+    } finally {
+      delete (window as unknown as Record<string, unknown>)
+        .__PROXYWAR_STATIC_REPLAY__;
+    }
   });
 });
