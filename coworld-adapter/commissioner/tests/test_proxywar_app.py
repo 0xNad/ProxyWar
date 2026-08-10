@@ -350,6 +350,44 @@ def test_sixteen_rung_without_manifest_variant_falls_back_to_twelve_seats() -> N
         assert len(episode.policy_version_ids) == 12
 
 
+def test_manifest_schema_ceilings_cover_every_ladder_rung() -> None:
+    # 2026-08-10 lesson, twice in one night: raising a rung's seat count
+    # requires raising EVERY per-seat schema ceiling. The results_schema caps
+    # were caught in review; the config_schema `tokens` cap was caught only by
+    # the upload validator. This pins all seven ceilings to the ladder so the
+    # next rung addition fails here, locally, first.
+    import json
+
+    from commissioners.proxywar_app import COMPETITION_LADDER
+
+    max_seats = max(seat_count for seat_count, _pool in COMPETITION_LADDER)
+    for name in ("coworld_manifest.json", "coworld_manifest_template.json"):
+        manifest = json.loads(
+            (Path(__file__).parents[2] / "coworld" / name).read_text()
+        )
+        config = manifest["game"]["config_schema"]["properties"]
+        results = manifest["game"]["results_schema"]["properties"]
+        ceilings = {
+            "config num_agents.maximum": config["num_agents"]["maximum"],
+            "config players.maxItems": config["players"]["maxItems"],
+            "config tokens.maxItems": config["tokens"]["maxItems"],
+            "results scores.maxItems": results["scores"]["maxItems"],
+            "results players.maxItems": results["players"]["maxItems"],
+        }
+        for label, ceiling in ceilings.items():
+            assert ceiling >= max_seats, f"{name}: {label}={ceiling} < {max_seats}"
+        slot_ceilings = {
+            "results players.slot.maximum": results["players"]["items"][
+                "properties"
+            ]["slot"]["maximum"],
+            "results winner_slot.maximum": results["winner_slot"]["maximum"],
+        }
+        for label, ceiling in slot_ceilings.items():
+            assert ceiling >= max_seats - 1, (
+                f"{name}: {label}={ceiling} < {max_seats - 1}"
+            )
+
+
 def test_competition_ladder_ids_all_exist_in_the_manifest() -> None:
     # The ladder is declared "once here and in the manifest's variants[]";
     # this is the check that keeps a ladder edit and a manifest edit honest
