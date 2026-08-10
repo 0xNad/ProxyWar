@@ -1,4 +1,4 @@
-import { Game, Player, UnitType } from "../../core/game/Game";
+import { Game, Player, PlayerDonation, UnitType } from "../../core/game/Game";
 import { Intent } from "../../core/Schemas";
 import {
   AgentActionAudit,
@@ -20,16 +20,42 @@ const auditedUnitTypes = [
   UnitType.MIRV,
 ] as const;
 
+export interface AgentDecisionAuditBaseline {
+  before: AgentActionAuditSnapshot | null;
+  targetBefore: AgentActionAuditSnapshot | null;
+}
+
+/**
+ * Captures immutable pre-advance boundaries. The local mirror mutates one
+ * persistent Game instance, so retaining a Game reference is not a snapshot.
+ */
+export function captureDecisionAuditBaselines(
+  records: readonly AgentDecisionRecord[],
+  game: Game | null,
+): ReadonlyMap<AgentDecisionRecord, AgentDecisionAuditBaseline> {
+  return new Map(
+    records.map((record) => [
+      record,
+      {
+        before: snapshotForRecord(game, record),
+        targetBefore: snapshotForTarget(game, record.intent),
+      },
+    ]),
+  );
+}
+
 export function auditDecisionEffects(input: {
   records: AgentDecisionRecord[];
   beforeGame: Game | null;
   afterGame: Game | null;
+  baselines?: ReadonlyMap<AgentDecisionRecord, AgentDecisionAuditBaseline>;
 }): void {
   for (const record of input.records) {
     record.audit = auditDecisionEffect(
       record,
       input.beforeGame,
       input.afterGame,
+      input.baselines?.get(record),
     );
   }
 }
@@ -38,10 +64,12 @@ export function auditDecisionEffect(
   record: AgentDecisionRecord,
   beforeGame: Game | null,
   afterGame: Game | null,
+  baseline?: AgentDecisionAuditBaseline,
 ): AgentActionAudit {
-  const before = snapshotForRecord(beforeGame, record);
+  const before = baseline?.before ?? snapshotForRecord(beforeGame, record);
   const after = snapshotForRecord(afterGame, record);
-  const targetBefore = snapshotForTarget(beforeGame, record.intent);
+  const targetBefore =
+    baseline?.targetBefore ?? snapshotForTarget(beforeGame, record.intent);
   const targetAfter = snapshotForTarget(afterGame, record.intent);
 
   if (!record.result.accepted) {
@@ -103,9 +131,23 @@ export function auditDecisionEffect(
         record.intent,
       );
     case "donate_gold":
-      return auditDonateGold(before, after, targetBefore, targetAfter);
+      return auditDonateGold(
+        before,
+        after,
+        targetBefore,
+        targetAfter,
+        record.intent.recipient,
+        newDonationReceipt(afterGame, record, before, "gold"),
+      );
     case "donate_troops":
-      return auditDonateTroops(before, after, targetBefore, targetAfter);
+      return auditDonateTroops(
+        before,
+        after,
+        targetBefore,
+        targetAfter,
+        record.intent.recipient,
+        newDonationReceipt(afterGame, record, before, "troops"),
+      );
     case "cancel_attack":
       return auditCancelAttack(before, after, record.intent.attackID);
     case "cancel_boat":
@@ -550,7 +592,36 @@ function auditDonateGold(
   after: AgentActionAuditSnapshot,
   targetBefore: AgentActionAuditSnapshot | null,
   targetAfter: AgentActionAuditSnapshot | null,
+  recipientPlayerID: string,
+  receipt: PlayerDonation | null,
 ): AgentActionAudit {
+  if (receipt?.resource === "gold") {
+    return {
+      auditStatus: "confirmed",
+      auditReason: `donate_gold accepted and core receipt confirms ${receipt.amount} gold transferred to ${recipientPlayerID}`,
+      before,
+      after,
+      targetBefore,
+      targetAfter,
+      confirmedDonation: {
+        recipientPlayerID,
+        tick: receipt.tick,
+        resource: "gold",
+        amount: `${receipt.amount}`,
+      },
+    };
+  }
+  if (before?.sentDonationCount !== undefined) {
+    return {
+      auditStatus: "unknown",
+      auditReason:
+        "donate_gold was accepted, but no new successful core donation receipt matched the recipient and resource",
+      before,
+      after,
+      targetBefore,
+      targetAfter,
+    };
+  }
   const actorDecrease = compareGold(after.gold, before?.gold) < 0;
   const targetIncrease = compareGold(targetAfter?.gold, targetBefore?.gold) > 0;
   if (actorDecrease || targetIncrease) {
@@ -575,12 +646,70 @@ function auditDonateGold(
   };
 }
 
+function newDonationReceipt(
+  afterGame: Game,
+  record: AgentDecisionRecord,
+  before: AgentActionAuditSnapshot | null,
+  resource: PlayerDonation["resource"],
+): PlayerDonation | null {
+  const cursor = before?.sentDonationCount;
+  const recipientPlayerID =
+    record.intent === null ? null : targetPlayerID(record.intent);
+  const player = playerByClientID(afterGame, record.clientID);
+  const donations = playerDonationsSince(player, cursor);
+  if (
+    cursor === undefined ||
+    recipientPlayerID === null ||
+    donations === null ||
+    cursor < 0
+  ) {
+    return null;
+  }
+  return (
+    donations.find(
+      (donation) =>
+        donation.recipientID === recipientPlayerID &&
+        donation.resource === resource &&
+        donation.amount > 0,
+    ) ?? null
+  );
+}
+
 function auditDonateTroops(
   before: AgentActionAuditSnapshot | null,
   after: AgentActionAuditSnapshot,
   targetBefore: AgentActionAuditSnapshot | null,
   targetAfter: AgentActionAuditSnapshot | null,
+  recipientPlayerID: string,
+  receipt: PlayerDonation | null,
 ): AgentActionAudit {
+  if (receipt?.resource === "troops") {
+    return {
+      auditStatus: "confirmed",
+      auditReason: `donate_troops accepted and core receipt confirms ${receipt.amount} troops transferred to ${recipientPlayerID}`,
+      before,
+      after,
+      targetBefore,
+      targetAfter,
+      confirmedDonation: {
+        recipientPlayerID,
+        tick: receipt.tick,
+        resource: "troops",
+        amount: receipt.amount,
+      },
+    };
+  }
+  if (before?.sentDonationCount !== undefined) {
+    return {
+      auditStatus: "unknown",
+      auditReason:
+        "donate_troops was accepted, but no new successful core donation receipt matched the recipient and resource",
+      before,
+      after,
+      targetBefore,
+      targetAfter,
+    };
+  }
   const actorDecrease =
     before?.troops !== null &&
     before?.troops !== undefined &&
@@ -645,6 +774,7 @@ function snapshotPlayer(
   if (game === null || player === null) {
     return null;
   }
+  const sentDonationCount = playerDonationCount(player);
   return {
     tick: game.ticks(),
     playerID: player.id(),
@@ -701,7 +831,39 @@ function snapshotPlayer(
         const id = safeUnitID(unit);
         return id === null ? [] : [id];
       }),
+    ...(sentDonationCount !== null ? { sentDonationCount } : {}),
   };
+}
+
+function playerDonationCount(player: Player | null): number | null {
+  if (player === null) {
+    return null;
+  }
+  const donationCount = (
+    player as Player & {
+      donationCount?: () => number;
+    }
+  ).donationCount;
+  return typeof donationCount === "function"
+    ? donationCount.call(player)
+    : null;
+}
+
+function playerDonationsSince(
+  player: Player | null,
+  cursor: number | undefined,
+): readonly PlayerDonation[] | null {
+  if (player === null || cursor === undefined) {
+    return null;
+  }
+  const donationsSentSince = (
+    player as Player & {
+      donationsSentSince?: (from: number) => readonly PlayerDonation[];
+    }
+  ).donationsSentSince;
+  return typeof donationsSentSince === "function"
+    ? donationsSentSince.call(player, cursor)
+    : null;
 }
 
 function safeUnitID(unit: { id?: () => number }): number | null {

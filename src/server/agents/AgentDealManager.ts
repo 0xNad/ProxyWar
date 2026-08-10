@@ -128,8 +128,8 @@ const DEFAULT_DURATION_STEPS: Record<AgentDealTemplate, number> = {
  * support_request EXPLICIT amounts (the core donate-gold null-amount bug
  * silently sends 0 — verified doc §4 — so amounts are always explicit).
  */
-export const DEAL_SUPPORT_GOLD_AMOUNT = 150_000n;
-export const DEAL_SUPPORT_TROOP_AMOUNT = 20_000;
+export const DEAL_SUPPORT_GOLD_AMOUNT = 50_000n;
+export const DEAL_SUPPORT_TROOP_AMOUNT = 5_000;
 
 const OBSERVATION_PROPOSAL_CAP = 6;
 const OBSERVATION_ACTIVE_DEAL_CAP = 8;
@@ -853,6 +853,18 @@ export class AgentDealManager {
           dealPublicText: publicText,
         },
       };
+    }
+    if (
+      deal.template === "support_request" &&
+      metadata.supportFeasible !== true
+    ) {
+      deal.respondedAtStep = null;
+      deal.respondedAtTurn = null;
+      return this.failure(
+        "accept",
+        "support acceptance lacked an exact currently feasible transfer",
+        dealID,
+      );
     }
     if (
       this.activeDealCount(deal.proposerPlayerID) >=

@@ -16,7 +16,10 @@ import {
 import { GameMapLoader, MapData } from "../core/game/GameMapLoader";
 import { MapManifest, loadTerrainMap } from "../core/game/TerrainMapLoader";
 import { GameConfig, ServerMessage, Winner } from "../core/Schemas";
-import { auditDecisionEffects } from "../server/agents/AgentActionAuditor";
+import {
+  auditDecisionEffects,
+  captureDecisionAuditBaselines,
+} from "../server/agents/AgentActionAuditor";
 import {
   AgentRunFinalState,
   WriteAgentLeagueRunArtifactsInput,
@@ -719,6 +722,10 @@ export async function runAgentLeagueSmoke(
       turnNumber: mirror.turnCount(),
       gameState: postSpawnGame,
     });
+    const postSpawnAuditBaselines = captureDecisionAuditBaselines(
+      postSpawnRecords,
+      postSpawnGame,
+    );
     const postSpawnTurnCount = mirror.turnCount();
     // startGame() runs the match on a manual clock (realtimeClock: false), so
     // nothing ends turns by itself here: advance two — one to land the
@@ -733,8 +740,9 @@ export async function runAgentLeagueSmoke(
     });
     auditDecisionEffects({
       records: postSpawnRecords,
-      beforeGame: postSpawnGame,
+      beforeGame: null,
       afterGame: afterPostSpawnGame,
+      baselines: postSpawnAuditBaselines,
     });
     spectatorSnapshots.push(
       buildAgentSpectatorSnapshot({

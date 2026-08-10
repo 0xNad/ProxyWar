@@ -283,11 +283,11 @@ describe("deterministic social-control arms", () => {
     expect(pactDecision.selectedLegalActionId).toBe(HOLD.id);
 
     const donate = {
-      id: "donate_gold:P_OTHER:150000",
+      id: "donate_gold:P_OTHER:50000",
       kind: "donate_gold",
       label: "Donate gold",
       risk: { level: "low" },
-      metadata: { recipientID: "P_OTHER", gold: 150_000 },
+      metadata: { recipientID: "P_OTHER", gold: 50_000 },
     };
     const supportDecision = await choose({
       profile: "keeper",

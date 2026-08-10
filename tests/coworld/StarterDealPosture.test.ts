@@ -243,8 +243,8 @@ describe("tester-starter-llm bounded deal state", () => {
               terms: {
                 template: "support_request",
                 durationSteps: 6,
-                goldAmount: "150000",
-                troopAmount: 20000,
+                goldAmount: "50000",
+                troopAmount: 5000,
               },
             },
           ],
@@ -276,8 +276,8 @@ describe("tester-starter-llm bounded deal state", () => {
               terms: {
                 template: "support_request",
                 durationSteps: 6,
-                goldAmount: "150000",
-                troopAmount: 20000,
+                goldAmount: "50000",
+                troopAmount: 5000,
               },
             },
           ],
@@ -309,8 +309,8 @@ describe("tester-starter-llm bounded deal state", () => {
       id: "D1",
       fromID: "P_A",
       template: "support_request",
-      gold: "150000",
-      troops: 20000,
+      gold: "50000",
+      troops: 5000,
     });
     expect(deals.active[0]).toMatchObject({
       id: "D2",
@@ -322,8 +322,8 @@ describe("tester-starter-llm bounded deal state", () => {
       toID: "P_S",
       template: "support_request",
       duration: 6,
-      gold: "150000",
-      troops: 20000,
+      gold: "50000",
+      troops: 5000,
     });
     expect(deals.reliability[0]).toMatchObject({
       playerID: "P_A",
@@ -498,15 +498,15 @@ describe("tester-starter-llm deal selection", () => {
     ).toBe("deal_reject:D3");
   });
 
-  it("accepts support from a friendly partner only when current reserves can cover the cumulative threshold", async () => {
+  it("accepts support from a friendly partner only when one exact offered transfer can fulfill it", async () => {
     const { dealMove } = await loadSelectors();
     const support = {
       ...incomingProposal("SUPPORT", "P_A", "Auri", "support_request"),
       terms: {
         template: "support_request",
         durationSteps: 6,
-        goldAmount: "150000",
-        troopAmount: 20000,
+        goldAmount: "50000",
+        troopAmount: 5000,
       },
     };
     const donateGold = {
@@ -514,7 +514,7 @@ describe("tester-starter-llm deal selection", () => {
       kind: "donate_gold",
       label: "Donate gold to Auri",
       risk: { level: "low" },
-      metadata: { recipientID: "P_A", gold: 100000 },
+      metadata: { recipientID: "P_A", gold: 50000 },
     };
     const obs = {
       ...BASE_OBS,
@@ -530,18 +530,62 @@ describe("tester-starter-llm deal selection", () => {
       },
     };
     const actions = [...responseActions("SUPPORT"), donateGold, HOLD];
-    expect(dealMove(BASE_PLAN, actions, obs)?.id).toBe("deal_accept:SUPPORT");
+    const supportPlan = {
+      ...BASE_PLAN,
+      dealPolicies: [
+        {
+          playerID: "P_A",
+          acceptTemplates: ["support_request"],
+          proposeTemplates: [],
+        },
+      ],
+    };
+    expect(dealMove(supportPlan, actions, obs)?.id).toBe("deal_accept:SUPPORT");
+    expect(dealMove(BASE_PLAN, actions, obs)?.id).toBe("deal_reject:SUPPORT");
     expect(
-      dealMove(BASE_PLAN, [...responseActions("SUPPORT"), donateGold, HOLD], {
-        ...obs,
-        ownState: { ...BASE_OBS.ownState, gold: "100000", troops: 10000 },
-      })?.id,
+      dealMove(
+        supportPlan,
+        [
+          ...responseActions("SUPPORT"),
+          { ...donateGold, metadata: { recipientID: "P_A", gold: 49999 } },
+          HOLD,
+        ],
+        obs,
+      )?.id,
     ).toBe("deal_reject:SUPPORT");
     expect(
-      dealMove(BASE_PLAN, actions, {
+      dealMove(supportPlan, actions, {
         ...obs,
         visiblePlayers: BASE_OBS.visiblePlayers,
       })?.id,
+    ).toBe("deal_reject:SUPPORT");
+
+    const donateTroops = {
+      id: "donate_troops:P_A",
+      kind: "donate_troops",
+      label: "Donate troops to Auri",
+      risk: { level: "medium" },
+      metadata: { recipientID: "P_A", troops: 7000 },
+    };
+    const nearCap = {
+      ...obs,
+      visiblePlayers: obs.visiblePlayers.map((player) =>
+        player.playerID === "P_A"
+          ? {
+              ...player,
+              isFriendly: true,
+              troops: 98_000,
+              maxTroops: 100_000,
+            }
+          : player,
+      ),
+    };
+    expect(
+      dealMove(
+        supportPlan,
+        [...responseActions("SUPPORT"), donateTroops, HOLD],
+        nearCap,
+      )?.id,
     ).toBe("deal_reject:SUPPORT");
   });
 
@@ -843,9 +887,9 @@ describe("tester-starter-llm obligation execution", () => {
                 obligorPlayerID: "P_ME",
                 status: "pending",
                 kind: "send_support",
-                goldAmount: "150000",
-                troopAmount: 20000,
-                donatedGold: "50000",
+                goldAmount: "50000",
+                troopAmount: 5000,
+                donatedGold: "0",
                 donatedTroops: 0,
               },
             ],
@@ -858,7 +902,7 @@ describe("tester-starter-llm obligation execution", () => {
       kind: "donate_gold",
       label: "Donate gold to Auri",
       risk: { level: "low" },
-      metadata: { recipientID: "P_A", gold: 100000 },
+      metadata: { recipientID: "P_A", gold: 50000 },
     };
     const donateS = {
       ...donateA,
@@ -870,14 +914,14 @@ describe("tester-starter-llm obligation execution", () => {
     );
     const partialGold = {
       ...donateA,
-      metadata: { recipientID: "P_A", gold: 50000 },
+      metadata: { recipientID: "P_A", gold: 20000 },
     };
     const completingTroops = {
       id: "donate_troops:P_A",
       kind: "donate_troops",
       label: "Donate troops to Auri",
       risk: { level: "medium" },
-      metadata: { recipientID: "P_A", troops: 30000 },
+      metadata: { recipientID: "P_A", troops: 7000 },
     };
     expect(
       choose(BASE_PLAN, [partialGold, EXPAND, completingTroops, HOLD], obs)?.id,
@@ -900,7 +944,7 @@ describe("tester-starter-llm obligation execution", () => {
             obligations: [
               {
                 ...obs.deals.activeDeals[0].obligations[0],
-                donatedTroops: 20000,
+                donatedTroops: 5000,
               },
             ],
           },

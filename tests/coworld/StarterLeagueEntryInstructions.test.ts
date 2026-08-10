@@ -60,6 +60,10 @@ describe("coworld-adapter/tester-starter-llm league-entry instructions", () => {
     expect(deals).toContain("trade_security_pact");
     expect(deals).toContain("joint_attack");
     expect(deals).toContain("support_request");
+    expect(deals).toContain("50,000 gold");
+    expect(deals).toContain("5,000 troops");
+    expect(deals).toMatch(/six\s+decision steps/);
+    expect(deals).toContain("actual transfer");
     expect(deals).toContain("at least 20% of troops");
     expect(deals).toContain("playerID");
     expect(deals).toContain("dealID");

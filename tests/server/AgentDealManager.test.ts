@@ -60,6 +60,7 @@ function proposeAction(
 function responseAction(
   kind: "deal_accept" | "deal_reject" | "deal_withdraw",
   dealID: string,
+  metadata: Record<string, string | number | boolean | null> = {},
 ): LegalAction {
   return {
     id: `${kind}:${dealID}`,
@@ -67,7 +68,11 @@ function responseAction(
     label: `${kind} ${dealID}`,
     intent: null,
     risk: { level: "none", score: 0 },
-    metadata: { dealID },
+    metadata: {
+      dealID,
+      ...(kind === "deal_accept" ? { supportFeasible: true } : {}),
+      ...metadata,
+    },
   };
 }
 
@@ -568,8 +573,8 @@ describe("AgentDealManager caps and clamps (direct)", () => {
       (option) => option.terms.template === "support_request",
     );
     expect(support).toBeDefined();
-    expect(support!.terms.goldAmount).toBe("150000");
-    expect(support!.terms.troopAmount).toBe(20000);
+    expect(support!.terms.goldAmount).toBe("50000");
+    expect(support!.terms.troopAmount).toBe(5000);
     // Non-friendly recipient never gets a support_request offer.
     expect(
       rich!.proposalOptions.some(
@@ -651,6 +656,34 @@ describe("AgentDealManager caps and clamps (direct)", () => {
       "deal is not open (status: accepted)",
     );
     expect(second.manager.ledgerSnapshot().deals[0].status).toBe("accepted");
+  });
+
+  it("fails closed when a support accept action lacks the server feasibility stamp", () => {
+    const { manager, beginStep } = registeredManager([A, B]);
+    const proposed = manager.applyDealAction({
+      agentID: A.agentID,
+      playerID: A.playerID,
+      playerName: A.username,
+      action: proposeAction(B, "support_request"),
+      turnNumber: 0,
+    });
+    expect(proposed.result.accepted).toBe(true);
+    const dealID = proposed.stamps.dealID as string;
+    beginStep(25);
+
+    const outcome = manager.applyDealAction({
+      agentID: B.agentID,
+      playerID: B.playerID,
+      playerName: B.username,
+      action: responseAction("deal_accept", dealID, {
+        supportFeasible: false,
+      }),
+      turnNumber: 25,
+    });
+
+    expect(outcome.result.accepted).toBe(false);
+    expect(outcome.result.reason).toContain("currently feasible transfer");
+    expect(manager.ledgerSnapshot().deals[0].status).toBe("open");
   });
 
   it("returns no deals block for spawn-phase or dead observations", () => {

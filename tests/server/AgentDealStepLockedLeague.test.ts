@@ -282,6 +282,135 @@ async function runArm(flagOn: boolean, dealerUsesSlot = false) {
   }
 }
 
+function supportRequesterBrain(): AgentBrain {
+  return {
+    brainType: "rule",
+    decide: (input: AgentBrainInput) => {
+      const ally = input.legalActions.find(
+        (action) =>
+          action.kind === "alliance_request" &&
+          action.metadata?.recipientName === "Supporter",
+      );
+      const request = input.legalActions.find(
+        (action) =>
+          action.kind === "deal_propose" &&
+          action.metadata?.template === "support_request" &&
+          action.metadata?.recipientName === "Supporter",
+      );
+      return {
+        actionID: ally?.id ?? request?.id ?? "hold",
+        reason: ally !== undefined ? "form alliance" : "request support",
+      };
+    },
+  };
+}
+
+function supportDonorBrain(): AgentBrain {
+  return {
+    brainType: "rule",
+    decide: (input: AgentBrainInput) => {
+      const ally = input.legalActions.find(
+        (action) =>
+          action.kind === "alliance_request" &&
+          action.metadata?.recipientName === "Requester",
+      );
+      const accept = input.legalActions.find(
+        (action) =>
+          action.kind === "deal_accept" &&
+          action.metadata?.template === "support_request",
+      );
+      const transfer = input.legalActions.find(
+        (action) =>
+          action.metadata?.recipientName === "Requester" &&
+          ((action.kind === "donate_gold" &&
+            Number(action.metadata?.gold ?? 0) >= 50_000) ||
+            (action.kind === "donate_troops" &&
+              Number(action.metadata?.troops ?? 0) >= 5_000)),
+      );
+      if (ally !== undefined) {
+        return { actionID: ally.id, reason: "form alliance" };
+      }
+      if (accept !== undefined) {
+        return {
+          actionID: "hold",
+          dealActionID: accept.id,
+          reason: "accept feasible support, then transfer next step",
+        };
+      }
+      return {
+        actionID: transfer?.id ?? "hold",
+        reason: transfer !== undefined ? "send exact promised support" : "hold",
+      };
+    },
+  };
+}
+
+async function runSupportReceiptArm() {
+  process.env[DEALS_FLAG] = "1";
+  const log = makeLogger();
+  const mapLoader = new StaticMapLoader();
+  const supportConfig: GameConfig = {
+    ...gameConfig,
+    donateGold: true,
+    donateTroops: true,
+    maxPlayers: 2,
+  };
+  const terrain = await loadTerrainMap(
+    supportConfig.gameMap,
+    supportConfig.gameMapSize,
+    mapLoader,
+  );
+  const participants = createAgentParticipants(
+    [
+      { username: "Requester", profile: "diplomatic" },
+      { username: "Supporter", profile: "defensive" },
+    ],
+    log,
+    {
+      brainFactory: (_spec, index) =>
+        index === 0 ? supportRequesterBrain() : supportDonorBrain(),
+    },
+  );
+  const game = new GameServer(
+    "SUPPORT1",
+    log,
+    Date.now(),
+    steppedServerConfig,
+    supportConfig,
+  );
+  const league = new AgentLeagueMatchRunner({
+    game,
+    participants,
+    spawnCandidates: buildSpawnCandidates(terrain.gameMap, {
+      maxCandidates: 300,
+      stride: 2,
+    }),
+    log,
+  });
+  const mirror = new AgentLocalGameMirror(mapLoader, log);
+  try {
+    league.attachAgents();
+    league.startGame();
+    const result = await runAgentStepLockedLeague({
+      league,
+      game,
+      mirror,
+      messages: () => participants[0]?.runner.serverMessages() ?? [],
+      config: {
+        turnsPerDecisionStep: 25,
+        maxSteps: 12,
+        maxSpawnAdvanceTurns: 2_000,
+        maxDecisionMs: 5_000,
+        waitForMirrorCatchup: true,
+      },
+      log,
+    });
+    return { result, ledger: league.dealLedger() };
+  } finally {
+    await game.end({ archive: false });
+  }
+}
+
 describe("structured deals — step-locked league end to end", () => {
   afterEach(() => {
     delete process.env[DEALS_FLAG];
@@ -406,5 +535,37 @@ describe("structured deals — step-locked league end to end", () => {
     }
     expect(on.tilesByUsername).toEqual(off.tilesByUsername);
     expect(off.ledger.deals).toEqual([]);
+  }, 600_000);
+
+  it("confirms an exact support receipt across a real 25-turn mirror advance", async () => {
+    const arm = await runSupportReceiptArm();
+    const support = arm.ledger.deals.find(
+      (deal) => deal.template === "support_request",
+    );
+    expect(support).toBeDefined();
+    expect(support?.status).toBe("accepted");
+    expect(support?.obligations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          status: "fulfilled",
+          resolutionEvidence: expect.stringContaining("confirmed donation"),
+        }),
+      ]),
+    );
+    const transfer = arm.result.postSpawnRecords.find(
+      (record) =>
+        record.username === "Supporter" &&
+        record.audit?.confirmedDonation !== undefined,
+    );
+    expect(transfer?.audit?.auditStatus).toBe("confirmed");
+    expect(transfer?.audit?.before?.sentDonationCount).toBe(0);
+    expect(transfer?.audit?.after?.sentDonationCount).toBe(1);
+    const receipt = transfer?.audit?.confirmedDonation;
+    expect(
+      receipt !== undefined &&
+        (receipt.resource === "gold"
+          ? BigInt(receipt.amount) >= 50_000n
+          : receipt.amount >= 5_000),
+    ).toBe(true);
   }, 600_000);
 });

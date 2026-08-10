@@ -19,7 +19,10 @@ import {
 import { GameMapLoader, MapData } from "../core/game/GameMapLoader";
 import { loadTerrainMap, MapManifest } from "../core/game/TerrainMapLoader";
 import { GameConfig, ServerMessage } from "../core/Schemas";
-import { auditDecisionEffects } from "../server/agents/AgentActionAuditor";
+import {
+  auditDecisionEffects,
+  captureDecisionAuditBaselines,
+} from "../server/agents/AgentActionAuditor";
 import {
   AgentRunFinalState,
   AgentRunRosterEntry,
@@ -381,12 +384,15 @@ async function runSingleMatch(input: {
         break;
       }
 
-      const before = currentGame;
       const records = await league.runDecisionTurn({
         turnNumber: mirror.turnCount(),
         gameState: currentGame,
         maxDecisionMs: input.config.maxDecisionMs,
       });
+      const auditBaselines = captureDecisionAuditBaselines(
+        records,
+        currentGame,
+      );
       game.advanceTurnsForTesting(input.config.turnsPerDecision);
       currentGame = await waitForMirrorState({
         mirror,
@@ -396,8 +402,9 @@ async function runSingleMatch(input: {
       });
       auditDecisionEffects({
         records,
-        beforeGame: before,
+        beforeGame: null,
         afterGame: currentGame,
+        baselines: auditBaselines,
       });
       spectatorSnapshots.push(
         buildAgentSpectatorSnapshot({

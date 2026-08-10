@@ -2,7 +2,10 @@ import { Logger } from "winston";
 import { Game } from "../../core/game/Game";
 import { ServerMessage } from "../../core/Schemas";
 import { GameServer } from "../GameServer";
-import { auditDecisionEffects } from "./AgentActionAuditor";
+import {
+  auditDecisionEffects,
+  captureDecisionAuditBaselines,
+} from "./AgentActionAuditor";
 import { AgentLeagueMatchRunner } from "./AgentLeagueMatch";
 import {
   AgentLocalGameMirror,
@@ -130,13 +133,13 @@ export async function runAgentStepLockedLeague(
       );
       options.onAutopilotEngage?.({ step });
     }
-    const beforeStepGame = currentGame;
     const records = await options.league.runDecisionTurn({
       turnNumber: options.mirror.turnCount(),
       gameState: currentGame,
       maxDecisionMs: config.maxDecisionMs,
     });
     postSpawnRecords.push(...records);
+    const auditBaselines = captureDecisionAuditBaselines(records, currentGame);
 
     const turnsThisStep = turnsForDecisionStep(config, step);
     options.game.advanceTurnsForTesting(turnsThisStep);
@@ -153,8 +156,9 @@ export async function runAgentStepLockedLeague(
     }
     auditDecisionEffects({
       records,
-      beforeGame: beforeStepGame,
+      beforeGame: null,
       afterGame: currentGame,
+      baselines: auditBaselines,
     });
     options.onSnapshot?.({
       label: `Post-spawn cycle ${step + 1}${

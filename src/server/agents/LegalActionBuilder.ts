@@ -1,12 +1,16 @@
 import { isValidSpawnSite } from "../../core/execution/Util";
+import { UnitType } from "../../core/game/Game";
+import { GameMap, TileRef } from "../../core/game/GameMap";
+import { DEAL_TEMPLATE_LABELS } from "./AgentDealCompliance";
+import {
+  DEAL_SUPPORT_GOLD_AMOUNT,
+  DEAL_SUPPORT_TROOP_AMOUNT,
+} from "./AgentDealManager";
 import {
   diplomacyReservedSlots,
   diplomacySlotsEnabled,
   structuredDealsEnabled,
 } from "./AgentTunables";
-import { UnitType } from "../../core/game/Game";
-import { GameMap, TileRef } from "../../core/game/GameMap";
-import { DEAL_TEMPLATE_LABELS } from "./AgentDealCompliance";
 import {
   AgentDealTermsView,
   AgentObservation,
@@ -342,7 +346,8 @@ export class LegalActionBuilder {
                 targetStructureLevel: build.nukeTargetStructureLevel ?? null,
                 targetStructurePriority:
                   build.nukeTargetStructurePriority ?? null,
-                targetStructureDensity: build.nukeTargetStructureDensity ?? null,
+                targetStructureDensity:
+                  build.nukeTargetStructureDensity ?? null,
                 targetSamCoverage: build.nukeTargetSamCoverage ?? null,
                 nuclearTargetPriority: build.nukeTargetPriority ?? null,
               }
@@ -574,6 +579,7 @@ export class LegalActionBuilder {
     for (const action of dealMetaActions(
       input.observation,
       maxActions - actions.length,
+      actions,
     )) {
       actions.push(action);
     }
@@ -677,7 +683,11 @@ export class LegalActionBuilder {
     }
 
     if (diplomacySlots && actions.length > capActions) {
-      return reservedQuotaTruncate(actions, capActions, diplomacyReservedSlots());
+      return reservedQuotaTruncate(
+        actions,
+        capActions,
+        diplomacyReservedSlots(),
+      );
     }
     return actions.slice(0, capActions);
   }
@@ -1202,6 +1212,64 @@ const DIPLOMACY_KINDS = new Set([
   "deal_withdraw",
 ]);
 
+function supportAcceptanceFeasible(
+  observation: AgentObservation,
+  primaryActions: readonly LegalAction[],
+  proposerPlayerID: string,
+  terms: AgentDealTermsView,
+): boolean {
+  if (terms.template !== "support_request") {
+    return true;
+  }
+  const proposer = observation.visiblePlayers.find(
+    (player) => player.playerID === proposerPlayerID && player.isAlive,
+  );
+  if (proposer?.isFriendly !== true) {
+    return false;
+  }
+  const goldThreshold = parseIntegerString(
+    terms.goldAmount ?? `${DEAL_SUPPORT_GOLD_AMOUNT}`,
+  );
+  const troopThreshold = terms.troopAmount ?? DEAL_SUPPORT_TROOP_AMOUNT;
+  if (
+    goldThreshold === null ||
+    goldThreshold <= 0n ||
+    !Number.isSafeInteger(troopThreshold) ||
+    troopThreshold <= 0
+  ) {
+    return false;
+  }
+  return primaryActions.some((action) => {
+    if (action.metadata?.recipientID !== proposerPlayerID) {
+      return false;
+    }
+    if (action.kind === "donate_gold") {
+      const amount = action.metadata.gold;
+      return (
+        typeof amount === "number" &&
+        Number.isFinite(amount) &&
+        amount > 0 &&
+        BigInt(Math.floor(amount)) >= goldThreshold
+      );
+    }
+    if (action.kind !== "donate_troops") {
+      return false;
+    }
+    const offered = action.metadata?.troops;
+    const maxTroops = proposer.maxTroops;
+    if (
+      typeof offered !== "number" ||
+      !Number.isFinite(offered) ||
+      typeof maxTroops !== "number" ||
+      !Number.isFinite(maxTroops)
+    ) {
+      return false;
+    }
+    const recipientHeadroom = Math.max(0, maxTroops - proposer.troops);
+    return Math.min(Math.floor(offered), recipientHeadroom) >= troopThreshold;
+  });
+}
+
 /**
  * Structured-deal meta-actions (PROXYWAR_TUNE_STRUCTURED_DEALS, default OFF).
  * Emitted only when the flag is on AND the league runner injected the
@@ -1215,6 +1283,7 @@ const DIPLOMACY_KINDS = new Set([
 function dealMetaActions(
   observation: AgentObservation,
   budget: number,
+  primaryActions: readonly LegalAction[],
 ): LegalAction[] {
   if (!structuredDealsEnabled() || observation.deals === undefined) {
     return [];
@@ -1246,10 +1315,20 @@ function dealMetaActions(
   });
 
   for (const proposal of deals.incomingProposals) {
-    // Emit the accept/reject pair atomically: under budget pressure a menu
-    // that can accept but not reject (or vice versa) would bias the answer,
-    // so a proposal gets both entries or neither.
-    if (actions.length + 2 > budget) {
+    const supportFeasible = supportAcceptanceFeasible(
+      observation,
+      primaryActions,
+      proposal.proposerPlayerID,
+      proposal.terms,
+    );
+    const offerAccept =
+      proposal.terms.template !== "support_request" || supportFeasible;
+    // Feasible proposals keep the atomic accept/reject pair under budget
+    // pressure. An infeasible support request deliberately exposes rejection
+    // alone: accepting a promise no currently offered transfer can satisfy is
+    // not a legal choice.
+    const requiredSlots = offerAccept ? 2 : 1;
+    if (actions.length + requiredSlots > budget) {
       return actions;
     }
     const label = DEAL_TEMPLATE_LABELS[proposal.terms.template];
@@ -1260,14 +1339,21 @@ function dealMetaActions(
       ...termsMetadata(proposal.terms),
       legalReason: "open proposal addressed to this agent",
     };
-    push({
-      id: `deal_accept:${proposal.dealID}`,
-      kind: "deal_accept",
-      label: `Accept ${proposal.proposerName}'s ${label}`,
-      intent: null,
-      risk: { level: "medium", score: 0.35 },
-      metadata: shared,
-    });
+    if (offerAccept) {
+      push({
+        id: `deal_accept:${proposal.dealID}`,
+        kind: "deal_accept",
+        label: `Accept ${proposal.proposerName}'s ${label}`,
+        intent: null,
+        risk: { level: "medium", score: 0.35 },
+        metadata: {
+          ...shared,
+          ...(proposal.terms.template === "support_request"
+            ? { supportFeasible: true }
+            : {}),
+        },
+      });
+    }
     push({
       id: `deal_reject:${proposal.dealID}`,
       kind: "deal_reject",
@@ -1334,7 +1420,9 @@ export function reservedQuotaTruncate(
   cap: number,
   reserve: number,
 ): LegalAction[] {
-  const diplomacy = actions.filter((action) => DIPLOMACY_KINDS.has(action.kind));
+  const diplomacy = actions.filter((action) =>
+    DIPLOMACY_KINDS.has(action.kind),
+  );
   const othersCount = actions.length - diplomacy.length;
   // Diplomacy gets its reserve PLUS any budget the other kinds cannot use, so
   // the menu always fills to cap when enough actions exist (reviewer finding:
@@ -1370,10 +1458,7 @@ export function reservedQuotaTruncate(
   for (const action of actions) {
     if (keptDiplomacyIds.has(action.id)) {
       result.push(action);
-    } else if (
-      !DIPLOMACY_KINDS.has(action.kind) &&
-      othersKept < keepOthers
-    ) {
+    } else if (!DIPLOMACY_KINDS.has(action.kind) && othersKept < keepOthers) {
       result.push(action);
       othersKept++;
     }

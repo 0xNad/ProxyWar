@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { Game, Player, UnitType } from "../../src/core/game/Game";
-import { auditDecisionEffect } from "../../src/server/agents/AgentActionAuditor";
+import {
+  Game,
+  Player,
+  PlayerDonation,
+  UnitType,
+} from "../../src/core/game/Game";
+import {
+  auditDecisionEffect,
+  captureDecisionAuditBaselines,
+} from "../../src/server/agents/AgentActionAuditor";
 import { AgentDecisionRecord } from "../../src/server/agents/AgentTypes";
 
 describe("AgentActionAuditor", () => {
@@ -128,6 +136,67 @@ describe("AgentActionAuditor", () => {
     expect(audit.auditStatus).toBe("confirmed");
     expect(audit.auditReason).toContain("no longer shows a core alliance");
   });
+
+  it("preserves the pre-advance cursor and confirms an exact core donation receipt despite flat net resources", () => {
+    const donations: PlayerDonation[] = [];
+    const actor = fakePlayer({ donations, gold: "1000" });
+    const target = fakePlayer({
+      playerID: "TARGET01",
+      clientID: "TARGETCLIENT",
+      gold: "1000",
+    });
+    const game = fakeGame({ actor, target });
+    const record = baseRecord({
+      chosenActionKind: "donate_gold",
+      chosenActionID: "donate_gold:TARGET01",
+      chosenActionMetadata: { recipientID: "TARGET01", gold: 50000 },
+      intent: { type: "donate_gold", recipient: "TARGET01", gold: 50000 },
+    });
+    const baseline = captureDecisionAuditBaselines([record], game).get(record);
+    donations.push({
+      recipientID: "TARGET01",
+      tick: 11,
+      resource: "gold",
+      amount: 30000n,
+    });
+
+    const audit = auditDecisionEffect(record, null, game, baseline);
+
+    expect(audit.before?.sentDonationCount).toBe(0);
+    expect(audit.after?.sentDonationCount).toBe(1);
+    expect(audit.auditStatus).toBe("confirmed");
+    expect(audit.confirmedDonation).toEqual({
+      recipientPlayerID: "TARGET01",
+      tick: 11,
+      resource: "gold",
+      amount: "30000",
+    });
+  });
+
+  it("does not confirm a receipt for the wrong recipient or resource", () => {
+    const beforeDonations: PlayerDonation[] = [];
+    const afterDonations: PlayerDonation[] = [
+      {
+        recipientID: "OTHER01",
+        tick: 11,
+        resource: "troops",
+        amount: 5000,
+      },
+    ];
+    const record = baseRecord({
+      chosenActionKind: "donate_gold",
+      chosenActionID: "donate_gold:TARGET01",
+      intent: { type: "donate_gold", recipient: "TARGET01", gold: 50000 },
+    });
+    const audit = auditDecisionEffect(
+      record,
+      fakeGame({ actor: fakePlayer({ donations: beforeDonations }) }),
+      fakeGame({ actor: fakePlayer({ donations: afterDonations }) }),
+    );
+
+    expect(audit.auditStatus).toBe("unknown");
+    expect(audit.confirmedDonation).toBeUndefined();
+  });
 });
 
 function baseRecord(
@@ -184,6 +253,9 @@ function fakePlayer(input: {
   outgoingAttackTargetIDs?: string[];
   allianceRecipientIDs?: string[];
   alliedPlayerIDs?: string[];
+  troops?: number;
+  gold?: string;
+  donations?: PlayerDonation[];
 }): Player {
   const playerID = input.playerID ?? "PLAYER01";
   const clientID = input.clientID ?? "CLIENT01";
@@ -194,8 +266,11 @@ function fakePlayer(input: {
     isAlive: () => true,
     hasSpawned: () => true,
     numTilesOwned: () => 10,
-    troops: () => 100,
-    gold: () => ({ toString: () => "1000" }),
+    troops: () => input.troops ?? 100,
+    gold: () => ({ toString: () => input.gold ?? "1000" }),
+    donationCount: () => input.donations?.length ?? 0,
+    donationsSentSince: (cursor: number) =>
+      (input.donations ?? []).slice(cursor),
     units: (type?: UnitType) =>
       units
         .filter((unit) => type === undefined || unit.type === type)

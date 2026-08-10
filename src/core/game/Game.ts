@@ -678,6 +678,25 @@ export interface Embargo {
   target: Player;
 }
 
+/**
+ * A successful resource transfer recorded at the deterministic simulation
+ * boundary. The receipt stores the amount actually removed from the sender,
+ * which may be lower than the requested intent amount when resources clamp.
+ */
+export type PlayerDonation =
+  | {
+      readonly recipientID: PlayerID;
+      readonly tick: Tick;
+      readonly resource: "gold";
+      readonly amount: Gold;
+    }
+  | {
+      readonly recipientID: PlayerID;
+      readonly tick: Tick;
+      readonly resource: "troops";
+      readonly amount: number;
+    };
+
 export interface Player {
   // Basic Info
   smallID(): number;
@@ -791,6 +810,10 @@ export interface Player {
   canDonateTroops(recipient: Player): boolean;
   donateTroops(recipient: Player, troops: number): boolean;
   donateGold(recipient: Player, gold: Gold): boolean;
+  /** Cursor for successful deterministic donation receipts. */
+  donationCount(): number;
+  /** Defensive copy of successful receipts at or after `cursor`. */
+  donationsSentSince(cursor: number): readonly PlayerDonation[];
   canDeleteUnit(): boolean;
   recordDeleteUnit(): void;
   canEmbargoAll(): boolean;
