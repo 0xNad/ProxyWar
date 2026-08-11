@@ -110,7 +110,7 @@ decision branches ready to bind to that API.
 - `🎨 Prettier`
 - `🗺️ Generated maps up to date`
 - `🐳 Docker build (root image, build stage)`
-- `🚫 No Open&#32;Frontier residue`
+- 🚫 No Open&#32;Frontier residue
 - `🔐 Trusted release automation`
 
 The inherited `🎨 Prettier` job is guarded to the upstream
