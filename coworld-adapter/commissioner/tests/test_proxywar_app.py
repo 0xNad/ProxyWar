@@ -420,17 +420,15 @@ def test_twelve_seat_rotation_sweeps_every_map_in_the_pool() -> None:
     pool = dict(COMPETITION_LADDER)[12]
     expected_pool = {
         "tournament-12p-pangaea",
-        "tournament-12p-world",
         "tournament-12p-asia",
-        "tournament-12p-britannia",
         "tournament-12p-blacksea",
         "tournament-12p-eastasia",
-        "tournament-12p-northamerica",
         "tournament-12p-oceania",
     }
     assert set(pool) == expected_pool, (
-        "the automatic 12P Competition pool must contain exactly the eight "
-        f"deadline-proven variants while Europe is quarantined; saw {pool!r}"
+        "the automatic 12P Competition pool must contain exactly the five "
+        "compact-map variants while Europe and the continental maps are "
+        f"quarantined; saw {pool!r}"
     )
 
     round_start = competition_round_start(12)
@@ -451,10 +449,10 @@ def test_twelve_seat_rotation_sweeps_every_map_in_the_pool() -> None:
         assert len(variant_ids) == 1, "a round runs exactly one map"
         seen.append(variant_ids.pop())
 
-    # Every map appears in exactly one of the 8 consecutive rounds (an
+    # Every map appears in exactly one of the 5 consecutive rounds (an
     # unbiased sweep, not just "the whole pool showed up somewhere").
-    assert len(seen) == len(set(seen)) == 8, (
-        f"8 consecutive rounds should hit 8 distinct maps with no repeats; saw {seen}"
+    assert len(seen) == len(set(seen)) == 5, (
+        f"5 consecutive rounds should hit 5 distinct maps with no repeats; saw {seen}"
     )
     assert set(seen) == set(pool), (
         f"consecutive rounds should sweep the whole pool; saw {seen}"
@@ -467,17 +465,15 @@ def test_sixteen_seat_rotation_sweeps_every_map_in_the_pool() -> None:
     pool = dict(COMPETITION_LADDER)[16]
     expected_pool = {
         "tournament-16p-pangaea",
-        "tournament-16p-world",
         "tournament-16p-asia",
-        "tournament-16p-britannia",
         "tournament-16p-blacksea",
         "tournament-16p-eastasia",
-        "tournament-16p-northamerica",
         "tournament-16p-oceania",
     }
     assert set(pool) == expected_pool, (
-        "the automatic 16P Competition pool must contain exactly the eight "
-        f"boot-proven variants while Europe is quarantined; saw {pool!r}"
+        "the automatic 16P Competition pool must contain exactly the five "
+        "compact-map variants while Europe and the continental maps are "
+        f"quarantined; saw {pool!r}"
     )
 
     round_start = competition_round_start(25)
@@ -506,12 +502,31 @@ def test_sixteen_seat_rotation_sweeps_every_map_in_the_pool() -> None:
         assert len(variant_ids) == 1, "a round runs exactly one map"
         seen.append(variant_ids.pop())
 
-    assert len(seen) == len(set(seen)) == 8, (
-        f"8 consecutive rounds should hit 8 distinct maps with no repeats; saw {seen}"
+    assert len(seen) == len(set(seen)) == 5, (
+        f"5 consecutive rounds should hit 5 distinct maps with no repeats; saw {seen}"
     )
     assert set(seen) == set(pool), (
         f"consecutive rounds should sweep the whole pool; saw {seen}"
     )
+
+
+def test_competition_pools_quarantine_continental_maps() -> None:
+    # World, Britannia, and NorthAmerica remain declared for manual
+    # validation, but engine cost per decision cycle scales with land tiles
+    # and live rounds on them ran 2-5 hours (NorthAmerica also burned
+    # episode_timeout kills with no scores). Automatic Competition scheduling
+    # must stay off until an engine-efficiency pass plus a full-length hosted
+    # probe on the map lands well inside the artifact deadline.
+    from commissioners.proxywar_app import COMPETITION_LADDER
+
+    ladder = dict(COMPETITION_LADDER)
+    for seat_count in (12, 16):
+        for map_name in ("world", "britannia", "northamerica"):
+            variant_id = f"tournament-{seat_count}p-{map_name}"
+            assert variant_id not in ladder[seat_count], (
+                f"{variant_id} must remain quarantined from the "
+                f"{seat_count}P Competition pool; saw {ladder[seat_count]!r}"
+            )
 
 
 def test_twelve_seat_pool_quarantines_europe() -> None:

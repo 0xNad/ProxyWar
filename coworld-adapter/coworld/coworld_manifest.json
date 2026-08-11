@@ -273,7 +273,7 @@
       "env": {},
       "id": "proxywar-ladder-commissioner",
       "name": "ProxyWar Ladder Commissioner",
-      "description": "Config-driven ruleset_strategy commissioner (Qualifiers self-play crash check -> Competition), with one custom override: each Competition round counts the real distinct champions currently in the league and routes to the largest declared seat count (2/4/8/12) that fits them, then rotates that rung's deadline-proven map pool by round number. The 12-player Europe variant remains available for manual validation but is quarantined from automatic Competition scheduling after repeated hosted artifact timeouts. Scoring is win-rate per episode aggregated into an OpenSkill (MMR) rating, since the same league runs episodes of varying size over time and only a placement-based rating is comparable across match sizes."
+      "description": "Config-driven ruleset_strategy commissioner (Qualifiers self-play crash check -> Competition), with one custom override: each Competition round counts the real distinct champions currently in the league and routes to the largest declared seat count (2/4/8/12) that fits them, then rotates that rung's deadline-proven map pool by round number. The 12-player Europe variant remains available for manual validation but is quarantined from automatic Competition scheduling after repeated hosted artifact timeouts; the World, Britannia, and NorthAmerica variants at both 12 and 16 seats are likewise quarantined (2026-08-11) for multi-hour round wall-times pending engine-efficiency work on large maps. Scoring is win-rate per episode aggregated into an OpenSkill (MMR) rating, since the same league runs episodes of varying size over time and only a placement-based rating is comparable across match sizes."
     }
   ],
   "grader": [],
@@ -695,7 +695,7 @@
         "player_connect_timeout_seconds": 120,
         "episode_timeout_seconds": 3600
       },
-      "description": "DRAFT, unvalidated by the game author: a 12-policy free-for-all -- the seat count the author expects the game to 'shine' at. Extrapolated, not playtested; verify real wall-clock via `coworld run-episode --variant tournament-12p` before this rung ever seats a real league round."
+      "description": "DRAFT, unvalidated by the game author: a 12-policy free-for-all -- the seat count the author expects the game to 'shine' at. Extrapolated, not playtested; verify real wall-clock via `coworld run-episode --variant tournament-12p` before this rung ever seats a real league round. Quarantined 2026-08-11 from automatic Competition scheduling for round wall-time: engine cost per decision cycle scales with land tiles, so this map ran multi-hour league rounds. Retained for manual validation; re-add after engine-efficiency work plus a full-length hosted probe lands well inside the artifact deadline."
     },
     {
       "id": "tournament-12p-asia",
@@ -970,7 +970,7 @@
         "player_connect_timeout_seconds": 120,
         "episode_timeout_seconds": 3600
       },
-      "description": "Twelve-policy free-for-all on Britannia (Normal): same seat count, step caps, clock, and scoring as the other Tournament 12P variants \u2014 only the map differs. Qualified for the rotation via the memory-regression gate (80-step native 12P episode under the hosted heap posture) before shipping."
+      "description": "Twelve-policy free-for-all on Britannia (Normal): same seat count, step caps, clock, and scoring as the other Tournament 12P variants \u2014 only the map differs. Qualified for the rotation via the memory-regression gate (80-step native 12P episode under the hosted heap posture) before shipping. Quarantined 2026-08-11 from automatic Competition scheduling for round wall-time: engine cost per decision cycle scales with land tiles, so this map ran multi-hour league rounds. Retained for manual validation; re-add after engine-efficiency work plus a full-length hosted probe lands well inside the artifact deadline."
     },
     {
       "id": "tournament-12p-northamerica",
@@ -1025,7 +1025,7 @@
         "player_connect_timeout_seconds": 120,
         "episode_timeout_seconds": 3600
       },
-      "description": "Twelve-policy free-for-all on North America (Normal): same seat count, step caps, clock, and scoring as the other Tournament 12P variants \u2014 only the map differs. Qualified for the rotation via the memory-regression gate (80-step native 12P episode under the hosted heap posture) before shipping."
+      "description": "Twelve-policy free-for-all on North America (Normal): same seat count, step caps, clock, and scoring as the other Tournament 12P variants \u2014 only the map differs. Qualified for the rotation via the memory-regression gate (80-step native 12P episode under the hosted heap posture) before shipping. Quarantined 2026-08-11 from automatic Competition scheduling for round wall-time: engine cost per decision cycle scales with land tiles, so this map ran multi-hour league rounds. Retained for manual validation; re-add after engine-efficiency work plus a full-length hosted probe lands well inside the artifact deadline."
     },
     {
       "id": "tournament-12p-europe",
@@ -1214,7 +1214,7 @@
         "player_connect_timeout_seconds": 120,
         "episode_timeout_seconds": 5400
       },
-      "description": "16-policy free-for-all widening the 16-seat Competition rotation to the proven 12P map pool (Europe excluded while quarantined). Added 2026-08-11: per-map 16-seat boot proof (spawn feasibility + game start) on this exact map before ship, bracketed by full-length 16-seat games on Pangaea and World (smallest/largest proven ends). Revertable per-map by a commissioner-only pool patch."
+      "description": "16-policy free-for-all widening the 16-seat Competition rotation to the proven 12P map pool (Europe excluded while quarantined). Added 2026-08-11: per-map 16-seat boot proof (spawn feasibility + game start) on this exact map before ship, bracketed by full-length 16-seat games on Pangaea and World (smallest/largest proven ends). Revertable per-map by a commissioner-only pool patch. Quarantined 2026-08-11 from automatic Competition scheduling for round wall-time: engine cost per decision cycle scales with land tiles, so this map ran multi-hour league rounds. Retained for manual validation; re-add after engine-efficiency work plus a full-length hosted probe lands well inside the artifact deadline."
     },
     {
       "id": "tournament-16p-asia",
@@ -1348,7 +1348,7 @@
         "player_connect_timeout_seconds": 120,
         "episode_timeout_seconds": 4500
       },
-      "description": "16-policy free-for-all widening the 16-seat Competition rotation to the proven 12P map pool (Europe excluded while quarantined). Added 2026-08-11: per-map 16-seat boot proof (spawn feasibility + game start) on this exact map before ship, bracketed by full-length 16-seat games on Pangaea and World (smallest/largest proven ends). Revertable per-map by a commissioner-only pool patch."
+      "description": "16-policy free-for-all widening the 16-seat Competition rotation to the proven 12P map pool (Europe excluded while quarantined). Added 2026-08-11: per-map 16-seat boot proof (spawn feasibility + game start) on this exact map before ship, bracketed by full-length 16-seat games on Pangaea and World (smallest/largest proven ends). Revertable per-map by a commissioner-only pool patch. Quarantined 2026-08-11 from automatic Competition scheduling for round wall-time: engine cost per decision cycle scales with land tiles, so this map ran multi-hour league rounds. Retained for manual validation; re-add after engine-efficiency work plus a full-length hosted probe lands well inside the artifact deadline."
     },
     {
       "id": "tournament-16p-blacksea",
@@ -1549,7 +1549,7 @@
         "player_connect_timeout_seconds": 120,
         "episode_timeout_seconds": 4500
       },
-      "description": "16-policy free-for-all widening the 16-seat Competition rotation to the proven 12P map pool (Europe excluded while quarantined). Added 2026-08-11: per-map 16-seat boot proof (spawn feasibility + game start) on this exact map before ship, bracketed by full-length 16-seat games on Pangaea and World (smallest/largest proven ends). Revertable per-map by a commissioner-only pool patch."
+      "description": "16-policy free-for-all widening the 16-seat Competition rotation to the proven 12P map pool (Europe excluded while quarantined). Added 2026-08-11: per-map 16-seat boot proof (spawn feasibility + game start) on this exact map before ship, bracketed by full-length 16-seat games on Pangaea and World (smallest/largest proven ends). Revertable per-map by a commissioner-only pool patch. Quarantined 2026-08-11 from automatic Competition scheduling for round wall-time: engine cost per decision cycle scales with land tiles, so this map ran multi-hour league rounds. Retained for manual validation; re-add after engine-efficiency work plus a full-length hosted probe lands well inside the artifact deadline."
     },
     {
       "id": "tournament-16p-oceania",
