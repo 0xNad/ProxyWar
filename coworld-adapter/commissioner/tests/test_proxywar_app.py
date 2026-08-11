@@ -24,7 +24,11 @@ from commissioners.common.protocol import (
     ScheduleRoundsRequest,
     VariantInfo,
 )
-from commissioners.common.server import _send_episode_batch, create_app
+from commissioners.common.server import (
+    _close_reason,
+    _send_episode_batch,
+    create_app,
+)
 from commissioners.common.ruleset_strategy.config import (
     RulesetStrategyCommissionerConfig,
 )
@@ -784,12 +788,17 @@ def test_live_dispatch_throttle_caps_competition_at_five_episodes() -> None:
     throttle = commissioner().dispatch_throttle_config()
 
     assert throttle.enabled is True
-    # Live 12-seat episodes run episode_timeout_seconds=3600 and get the full
-    # configured max_in_flight ceiling.
+    # Live league episodes (12-seat 3600s, 16-seat 4500s, World 5400s) all get
+    # the full configured max_in_flight ceiling.
     assert throttle.max_concurrent_episodes(3600) == 5
-    # Short-timeout certification smokes stay below the ceiling because the
-    # duty-cycle load formula binds first.
+    assert throttle.max_concurrent_episodes(4500) == 5
+    assert throttle.max_concurrent_episodes(5400) == 5
+    # The duty-cycle load formula only binds below the ceiling for genuinely
+    # short timeouts. The 180s qualifier resolves to three; the 300s
+    # certification fixture resolves to five, NOT three -- an earlier comment
+    # here claimed otherwise and was falsified when the cap rose from 3 to 5.
     assert throttle.max_concurrent_episodes(180) == 3
+    assert throttle.max_concurrent_episodes(300) == 5
     assert throttle.episode_stagger_seconds(3600) == 0
 
 
@@ -1426,3 +1435,58 @@ def test_rejected_episode_is_recorded_and_dispatch_window_continues() -> None:
         websocket.send_json(
             {"type": "round_abort", "reason": "synthetic rejection test complete"}
         )
+
+
+def test_binary_frame_reaches_the_diagnostic_handler_instead_of_vanishing() -> None:
+    # A binary frame makes Starlette raise KeyError('text') inside receive_json.
+    # Before the 2026-08-11 hardening this escaped silently; uvicorn dropped the
+    # TCP transport with NO close frame, which the platform reports as
+    # "no close frame received or sent" -- the exact string that made round 1357
+    # impossible to attribute to either our code or a lost pod.
+    #
+    # The contract is: the handler closes with 1011 + a diagnostic reason AND
+    # re-raises so uvicorn still logs the traceback. The re-raise is what this
+    # asserts; TestClient tears the stream down on the raise, so the close frame
+    # itself is covered by the byte-budget and unknown-type tests below.
+    with pytest.raises(KeyError):
+        with TestClient(create_app(commissioner())).websocket_connect(
+            "/round"
+        ) as websocket:
+            websocket.send_bytes(b"\x00\x01\x02")
+            websocket.receive()
+
+
+@pytest.mark.parametrize("payload", ["[]", "null", '"a string"', "17"])
+def test_non_object_json_reaches_the_diagnostic_handler(payload: str) -> None:
+    # data.get("type") on a non-dict raises AttributeError; same escape path.
+    with pytest.raises(AttributeError):
+        with TestClient(create_app(commissioner())).websocket_connect(
+            "/round"
+        ) as websocket:
+            websocket.send_text(payload)
+            websocket.receive()
+
+
+def test_close_reason_is_trimmed_to_the_close_frame_byte_budget() -> None:
+    # RFC 6455 allows 123 bytes of reason. Trimming by CHARACTERS overflows on
+    # multi-byte text, and websockets then raises ProtocolError inside the close
+    # call itself -- turning a clean protocol rejection into the same abrupt,
+    # unattributable teardown. Trim by bytes, and never split a character.
+    assert len(_close_reason("a" * 500).encode("utf-8")) == 123
+    trimmed = _close_reason("é" * 500)
+    assert len(trimmed.encode("utf-8")) <= 123
+    assert trimmed.encode("utf-8").decode("utf-8") == trimmed
+    assert _close_reason("short") == "short"
+
+
+def test_unknown_message_type_still_closes_cleanly_when_the_type_is_huge() -> None:
+    # msg_type is platform-controlled and unbounded; the reason it produces must
+    # not overflow the close frame.
+    with TestClient(create_app(commissioner())).websocket_connect(
+        "/round"
+    ) as websocket:
+        websocket.send_json({"type": "x" * 400})
+        message = websocket.receive()
+        assert message["type"] == "websocket.close"
+        assert message["code"] == 1008
+        assert len(message["reason"].encode("utf-8")) <= 123

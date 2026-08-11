@@ -11,9 +11,13 @@ schedule_interval_minutes: 30
 # six-hour round-ceiling headroom. If
 # pod-not-found/player_never_started recurs, drop back to three. Explicit zero
 # staggering avoids consuming an episode's timeout budget before its request is
-# sent. Short-timeout certification smokes stay at three because the duty-cycle
-# load formula (target_load * usable_window / worker_seconds_per_episode) binds
-# before this ceiling does.
+# sent. The duty-cycle load formula
+# (target_load * usable_window / worker_seconds_per_episode, clamped to this
+# ceiling) only binds below it for genuinely short timeouts: the 180s qualifier
+# resolves to three, but the 300s certification fixture resolves to five, same
+# as league rounds. An earlier version of this comment claimed certification
+# stayed at three -- that was true only while max_in_flight was 3 and was
+# falsified by raising it (caught in the 2026-08-11 round-1357 audit).
 dispatch_throttle:
   enabled: true
   min_in_flight: 1
