@@ -486,6 +486,14 @@ def test_sixteen_seat_rotation_sweeps_every_map_in_the_pool() -> None:
         for variant_id in pool
     ]
 
+    # Round 1 anchors on pool[0]: a fresh league's first 16-seat round (and
+    # the certifier's) lands on the most battle-tested map, not a phase shift.
+    round_start.round_number = 1
+    anchored = commissioner().schedule_episodes_for_round_start(round_start)
+    assert {episode.variant_id for episode in anchored.episodes} == {
+        "tournament-16p-pangaea"
+    }
+
     seen: list[str] = []
     for offset in range(len(pool)):
         round_start.round_number = 3000 + offset
