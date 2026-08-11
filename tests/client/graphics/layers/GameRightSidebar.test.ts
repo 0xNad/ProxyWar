@@ -29,6 +29,7 @@ vi.mock("../../../../src/client/CrazyGamesSDK", () => ({
 
 vi.mock("../../../../src/client/LocalServer", () => ({
   AI_LEAGUE_REPLAY_CATCHUP_EVENT: "ai-league-replay-catchup",
+  AI_LEAGUE_REPLAY_PROGRESS_EVENT: "ai-league-replay-progress",
 }));
 
 vi.mock("../../../../src/client/Transport", () => ({
@@ -38,13 +39,14 @@ vi.mock("../../../../src/client/Transport", () => ({
   SendWinnerEvent: class {},
 }));
 
-import { EventBus } from "../../../../src/core/EventBus";
-import type { GameView } from "../../../../src/core/game/GameView";
-import { CloseViewEvent } from "../../../../src/client/InputHandler";
 import {
   GameRightSidebar,
   HUD_HIDDEN_BODY_CLASS,
 } from "../../../../src/client/graphics/layers/GameRightSidebar";
+import { CloseViewEvent } from "../../../../src/client/InputHandler";
+import { AI_LEAGUE_REPLAY_PROGRESS_EVENT } from "../../../../src/client/LocalServer";
+import { EventBus } from "../../../../src/core/EventBus";
+import type { GameView } from "../../../../src/core/game/GameView";
 
 function fakeGame(): GameView {
   return {
@@ -100,6 +102,40 @@ describe("GameRightSidebar - top-right control cluster", () => {
     expect(collapsed).not.toContain("game_controls.playback_speed");
     (sidebar as any).onToggleHudClick();
     expect(document.body.classList.contains(HUD_HIDDEN_BODY_CLASS)).toBe(false);
+  });
+
+  test("renders the plain-digit replay turn counter once progress arrives", () => {
+    const { sidebar } = wiredSidebar();
+    const before = JSON.stringify((sidebar as any).render());
+    expect(before).not.toContain("game_controls.replay_progress_tip");
+
+    (sidebar as any).onReplayProgressEvent(
+      new CustomEvent(AI_LEAGUE_REPLAY_PROGRESS_EVENT, {
+        detail: { turnsRendered: 1234, turnsTotal: 56789 },
+      }),
+    );
+    const rendered = JSON.stringify((sidebar as any).render());
+    expect(rendered).toContain("game_controls.replay_progress_tip");
+    // Raw numbers land in the template slots — never locale-formatted
+    // ("1,234" would corrupt the leaguecast kiosk's "N / M" body-text parse).
+    expect(rendered).toContain("1234");
+    expect(rendered).toContain("56789");
+  });
+
+  test("init() clears counters left over from a previous game", () => {
+    // The element is static in index.html and leaving a lobby is an SPA
+    // transition, so the same instance is re-init()ed for the next game.
+    const { sidebar } = wiredSidebar();
+    (sidebar as any).onReplayProgressEvent(
+      new CustomEvent(AI_LEAGUE_REPLAY_PROGRESS_EVENT, {
+        detail: { turnsRendered: 5000, turnsTotal: 5000 },
+      }),
+    );
+    expect((sidebar as any)._replayProgress).not.toBeNull();
+
+    (sidebar as any).init();
+    expect((sidebar as any)._replayProgress).toBeNull();
+    expect((sidebar as any)._catchUpProgress).toBeNull();
   });
 
   test("Escape (CloseViewEvent) restores a hidden interface", () => {
