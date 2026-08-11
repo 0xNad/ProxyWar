@@ -12,6 +12,7 @@ const production = readFileSync(
 );
 const ci = readFileSync(".github/workflows/ci.yml", "utf8");
 const queue = readFileSync(".github/scripts/coworld-queue.mjs", "utf8");
+const vite = readFileSync("vite.config.ts", "utf8");
 
 test("privileged admission executes only protected main metadata code", () => {
   assert.match(admission, /pull_request_target:/);
@@ -100,6 +101,7 @@ test("main CI retains PR, push, merge-group, and explicit recursion fallback cov
   assert.match(ci, /workflow_dispatch:/);
   assert.match(ci, /🔐 Trusted release automation/);
   assert.match(ci, /ref: \$\{\{ inputs\.source_sha \|\| github\.sha \}\}/);
+  assert.match(vite, /\*\*\/tests\/automation\/\*\*/);
 });
 
 test("workflows never echo or artifact production credentials", () => {
