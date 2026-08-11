@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "trustedAuthors": ["johomax", "relh"],
+  "baseBranch": "main",
+  "blockingLabels": ["do-not-merge", "security-hold", "release-hold"],
+  "auditLabel": "softmax-release",
+  "queueLabel": "coworld-release-queued",
+  "completedLabel": "coworld-release-complete",
+  "failedLabel": "coworld-release-failed",
+  "protectedPaths": [
+    ".github/automation/**",
+    ".github/workflows/**",
+    ".github/actions/**",
+    ".github/scripts/**",
+    "scripts/coworld-production-*.mjs",
+    "tests/automation/**"
+  ],
+  "requiredChecks": [
+    "🏗️ Build",
+    "🔬 Test (1/4)",
+    "🔬 Test (2/4)",
+    "🔬 Test (3/4)",
+    "🔬 Test (4/4)",
+    "🔬 Test (heavy: agent-league-match)",
+    "🔬 Test (e2e)",
+    "🔍 ESLint",
+    "🎨 Prettier",
+    "🗺️ Generated maps up to date",
+    "🐳 Docker build (root image, build stage)",
+    "🚫 No \u004fpen \u0046rontier residue",
+    "🔐 Trusted release automation"
+  ],
+  "allowedCheckConclusions": {
+    "🎨 Prettier": ["success", "skipped"]
+  },
+  "requiredCheckApp": {
+    "slug": "github-actions",
+    "id": 15368
+  },
+  "coworld": {
+    "cliVersion": "0.1.38",
+    "name": "proxywar",
+    "productionEnvironment": "coworld-production",
+    "expectedLeagueId": "league_cb60d526-ecfd-4836-ab3a-81fc6cf7dc42"
+  }
+}

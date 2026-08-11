@@ -1,0 +1,711 @@
+name: 🌍 Coworld production
+run-name: Coworld production ${{ inputs.queue_issue || inputs.acceptance_source_sha || 'queue-drain' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      queue_issue:
+        description: Optional queue hint; authoritative merge order always wins
+        required: false
+        type: string
+      acceptance_source_sha:
+        description: 0xNad-only controlled acceptance SHA; must equal current main
+        required: false
+        type: string
+  schedule:
+    - cron: "*/10 * * * *"
+
+# GitHub concurrency coalesces pending runs. Open github-actions[bot] issues are
+# the durable FIFO; the worker orders them by the PR's authoritative merged_at.
+concurrency:
+  group: proxywar-coworld-production
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+  contents: read
+  deployments: write
+  issues: write
+  pull-requests: write
+
+env:
+  COWORLD_CLI_VERSION: "0.1.38"
+  COWORLD_NAME: proxywar
+  EXPECTED_LEAGUE_ID: league_cb60d526-ecfd-4836-ab3a-81fc6cf7dc42
+
+jobs:
+  dequeue:
+    name: Validate durable release queue
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      has_item: ${{ steps.acceptance.outputs.has_item || steps.queue.outputs.has_item }}
+      queue_issue: ${{ steps.acceptance.outputs.queue_issue || steps.queue.outputs.queue_issue }}
+      pr_number: ${{ steps.acceptance.outputs.pr_number || steps.queue.outputs.pr_number }}
+      author: ${{ steps.acceptance.outputs.author || steps.queue.outputs.author }}
+      tested_head_sha: ${{ steps.acceptance.outputs.tested_head_sha || steps.queue.outputs.tested_head_sha }}
+      merge_sha: ${{ steps.acceptance.outputs.merge_sha || steps.queue.outputs.merge_sha }}
+    steps:
+      - name: Checkout protected queue code from main
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: main
+          persist-credentials: false
+          submodules: false
+      - name: Validate oldest trusted-contributor queue item
+        id: queue
+        if: ${{ !inputs.acceptance_source_sha }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          QUEUE_ISSUE: ${{ inputs.queue_issue || '' }}
+        run: node .github/scripts/coworld-queue.mjs
+      - name: Validate controlled acceptance request
+        id: acceptance
+        if: ${{ inputs.acceptance_source_sha }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.acceptance_source_sha }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTOR" = "0xNad"
+          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+          test "$SOURCE_SHA" = "$(gh api repos/$GITHUB_REPOSITORY/git/ref/heads/main --jq .object.sha)"
+          {
+            echo "has_item=true"
+            echo "queue_issue=0"
+            echo "pr_number=0"
+            echo "author=0xNad"
+            echo "tested_head_sha=$SOURCE_SHA"
+            echo "merge_sha=$SOURCE_SHA"
+          } >> "$GITHUB_OUTPUT"
+
+  await-main-ci:
+    name: Require complete exact-source main CI
+    needs: dequeue
+    if: ${{ needs.dequeue.outputs.has_item == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 130
+    outputs:
+      main_ci_run_id: ${{ steps.ci.outputs.main_ci_run_id }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: main
+          persist-credentials: false
+          submodules: false
+      - name: Wait for push CI or dispatch exact-source fallback
+        id: ci
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.dequeue.outputs.merge_sha }}
+        run: node .github/scripts/await-main-ci.mjs
+
+  preflight:
+    name: Allocate immutable release and snapshot rollback target
+    needs: [dequeue, await-main-ci]
+    if: ${{ needs.dequeue.outputs.has_item == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: coworld-production
+      deployment: false
+    outputs:
+      deployment_id: ${{ steps.audit.outputs.deployment_id }}
+      started: ${{ steps.audit.outputs.started }}
+      start_epoch: ${{ steps.audit.outputs.start_epoch }}
+      previous_id: ${{ steps.state.outputs.previous_id }}
+      previous_version: ${{ steps.state.outputs.previous_version }}
+      existing_id: ${{ steps.state.outputs.existing_id }}
+      blocked_candidate: ${{ steps.state.outputs.blocked_candidate }}
+      idempotent: ${{ steps.state.outputs.idempotent }}
+      version: ${{ steps.state.outputs.version }}
+    steps:
+      - name: Checkout only protected release control code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.dequeue.outputs.merge_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: |
+            .github/automation
+            .github/scripts
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: "0.8.12"
+          enable-cache: false
+      - name: Install pinned Coworld toolchain without credentials
+        run: |
+          set -euo pipefail
+          export UV_NO_CACHE=1
+          export UV_TOOL_DIR="$RUNNER_TEMP/coworld-tools"
+          export UV_TOOL_BIN_DIR="$RUNNER_TEMP/coworld-bin"
+          uv tool install --force "coworld==$COWORLD_CLI_VERSION"
+          {
+            echo "COWORLD_BIN=$UV_TOOL_BIN_DIR/coworld"
+            echo "COWORLD_PYTHON=$UV_TOOL_DIR/coworld/bin/python"
+          } >> "$GITHUB_ENV"
+      - name: Create in-progress GitHub deployment
+        id: audit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.dequeue.outputs.merge_sha }}
+        run: |
+          set -euo pipefail
+          STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          START_EPOCH=$(date -u +%s)
+          DEPLOYMENT_ID=$(jq -n \
+            --arg ref "$SOURCE_SHA" \
+            --arg environment "coworld-production" \
+            --arg description "ProxyWar Coworld release from $SOURCE_SHA" \
+            '{ref:$ref, environment:$environment, description:$description, auto_merge:false, required_contexts:[], production_environment:true}' \
+            | gh api --method POST "repos/$GITHUB_REPOSITORY/deployments" --input - --jq .id)
+          gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
+            -f state=in_progress -f environment=coworld-production -F auto_inactive=false \
+            -f description="Allocating immutable Coworld release" >/dev/null
+          {
+            echo "started=$STARTED"
+            echo "start_epoch=$START_EPOCH"
+            echo "deployment_id=$DEPLOYMENT_ID"
+          } >> "$GITHUB_OUTPUT"
+      - name: Read hosted state, persist original rollback target, and allocate
+        id: state
+        env:
+          COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.dequeue.outputs.merge_sha }}
+          QUEUE_ISSUE: ${{ needs.dequeue.outputs.queue_issue }}
+        run: |
+          set -euo pipefail
+          test -n "$COWORLD_API_TOKEN"
+          LIST="$RUNNER_TEMP/coworld-list-before.json"
+          node .github/scripts/coworld-authenticated-command.mjs list --json > "$LIST"
+          CURRENT_ID=$(jq -r --arg name "$COWORLD_NAME" '[.[] | select(.name==$name and .canonical==true)][0].id' "$LIST")
+          CURRENT_VERSION=$(jq -r --arg name "$COWORLD_NAME" '[.[] | select(.name==$name and .canonical==true)][0].version' "$LIST")
+          [[ "$CURRENT_ID" =~ ^cow_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
+          [[ "$CURRENT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          PREVIOUS_ID="$CURRENT_ID"
+          PREVIOUS_VERSION="$CURRENT_VERSION"
+          if [ "$QUEUE_ISSUE" != "0" ]; then
+            COMMENTS="$RUNNER_TEMP/queue-comments.json"
+            gh api "repos/$GITHUB_REPOSITORY/issues/$QUEUE_ISSUE/comments?per_page=100" > "$COMMENTS"
+            SAVED=$(jq -r --arg sha "$SOURCE_SHA" '[.[] | select(.user.login=="github-actions[bot]" and .user.type=="Bot") | select(.body | contains("proxywar-coworld-rollback-target-v1") and contains("source: `"+$sha+"`"))][0].body // ""' "$COMMENTS")
+            if [ -n "$SAVED" ]; then
+              PREVIOUS_ID=$(printf '%s\n' "$SAVED" | sed -n 's/^- Previous canonical ID: `\([^`]*\)`$/\1/p')
+              PREVIOUS_VERSION=$(printf '%s\n' "$SAVED" | sed -n 's/^- Previous canonical version: `\([^`]*\)`$/\1/p')
+            else
+              BODY="<!-- proxywar-coworld-rollback-target-v1 -->
+          - Previous canonical ID: \`$PREVIOUS_ID\`
+          - Previous canonical version: \`$PREVIOUS_VERSION\`
+          - Captured before first upload for source: \`$SOURCE_SHA\`"
+              gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$QUEUE_ISSUE/comments" -f body="$BODY" >/dev/null
+            fi
+          fi
+          [[ "$PREVIOUS_ID" =~ ^cow_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
+          [[ "$PREVIOUS_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          EXISTING_ID=$(jq -r --arg name "$COWORLD_NAME" --arg sha "$SOURCE_SHA" '[.[] | select(.name==$name) | select(any(.manifest.game.docs.pages[]?; .id=="proxywar-release-provenance" and (.content.value | contains("source_sha="+$sha))))] | sort_by(.version | split(".") | map(tonumber)) | last | .id // ""' "$LIST")
+          IDEMPOTENT=false
+          BLOCKED_CANDIDATE=""
+          if [ -n "$EXISTING_ID" ]; then
+            [[ "$EXISTING_ID" =~ ^cow_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
+            STATUS="$RUNNER_TEMP/coworld-existing-status.json"
+            node .github/scripts/coworld-authenticated-command.mjs status "$EXISTING_ID" --json > "$STATUS"
+            if [ "$(jq -r .certification.state "$STATUS")" = "certified" ] && \
+               [ "$(jq '[.certification.transcript_summary[] | select(.status=="pass")] | length' "$STATUS")" = "10" ] && \
+               [ "$(jq -r .coworld.canonical "$STATUS")" = "true" ]; then
+              IDEMPOTENT=true
+            else
+              BLOCKED_CANDIDATE="$EXISTING_ID"
+            fi
+          fi
+          VERSION=""
+          if [ "$IDEMPOTENT" != "true" ] && [ -z "$BLOCKED_CANDIDATE" ]; then
+            VERSION=$(node .github/scripts/coworld-authenticated-command.mjs next-version "$COWORLD_NAME")
+            [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          fi
+          {
+            echo "previous_id=$PREVIOUS_ID"
+            echo "previous_version=$PREVIOUS_VERSION"
+            echo "existing_id=$EXISTING_ID"
+            echo "blocked_candidate=$BLOCKED_CANDIDATE"
+            echo "idempotent=$IDEMPOTENT"
+            echo "version=$VERSION"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Stop before allocation when the source already has an unhealthy candidate
+        if: ${{ steps.state.outputs.blocked_candidate != '' }}
+        env:
+          BLOCKED_CANDIDATE: ${{ steps.state.outputs.blocked_candidate }}
+          SOURCE_SHA: ${{ needs.dequeue.outputs.merge_sha }}
+        run: |
+          echo "::error::Source $SOURCE_SHA already has unhealthy Coworld candidate $BLOCKED_CANDIDATE; refusing to allocate an uncontrolled duplicate"
+          exit 1
+
+  build:
+    name: Credentialless exact-source build and local certification
+    needs: [dequeue, await-main-ci, preflight]
+    if: ${{ needs.preflight.outputs.idempotent != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout exact merged SHA
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.dequeue.outputs.merge_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: false
+      - name: Prove source is merged to protected main
+        env:
+          SOURCE_SHA: ${{ needs.dequeue.outputs.merge_sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/main
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: "0.8.12"
+          enable-cache: false
+      - name: Install dependencies and pinned credentialless Coworld tool
+        run: |
+          set -euo pipefail
+          npm run inst
+          npm ci --ignore-scripts --prefix coworld-adapter
+          export UV_NO_CACHE=1
+          export UV_TOOL_DIR="$RUNNER_TEMP/coworld-tools"
+          export UV_TOOL_BIN_DIR="$RUNNER_TEMP/coworld-bin"
+          uv tool install --force "coworld==$COWORLD_CLI_VERSION"
+          echo "COWORLD_BIN=$UV_TOOL_BIN_DIR/coworld" >> "$GITHUB_ENV"
+      - name: Run focused readiness checks
+        run: |
+          npm exec -- tsc --noEmit
+          npx vitest tests/client/CoworldStaticReplay.test.ts tests/client/LocalServerReplayCatchUp.test.ts tests/client/WinModal.test.ts --run
+          npm run typecheck --prefix coworld-adapter
+          uv run --project coworld-adapter/commissioner --group dev pytest -q coworld-adapter/commissioner/tests
+          node .github/scripts/coworld-manifest.mjs verify-template coworld-adapter/coworld/coworld_manifest_template.json
+      - name: Build all images and final manifest from the canonical template
+        env:
+          SOURCE_SHA: ${{ needs.dequeue.outputs.merge_sha }}
+          MERGE_SHA: ${{ needs.dequeue.outputs.merge_sha }}
+          TESTED_HEAD_SHA: ${{ needs.dequeue.outputs.tested_head_sha }}
+          PR_NUMBER: ${{ needs.dequeue.outputs.pr_number }}
+          PR_AUTHOR: ${{ needs.dequeue.outputs.author }}
+          MAIN_CI_RUN_ID: ${{ needs.await-main-ci.outputs.main_ci_run_id }}
+        run: |
+          set -euo pipefail
+          npm run build:image --prefix coworld-adapter
+          docker compose -f coworld-adapter/coworld_compose.yaml build commissioner
+          "$COWORLD_BIN" build --version "${{ needs.preflight.outputs.version }}" --project coworld-adapter --compose coworld_compose.yaml --template coworld/coworld_manifest_template.json
+          node .github/scripts/coworld-manifest.mjs stamp coworld-adapter/dist/coworld_manifest.json
+      - name: Verify manifest, replay-viewer rebuild, and local certification
+        env:
+          SOURCE_SHA: ${{ needs.dequeue.outputs.merge_sha }}
+        run: |
+          set -euo pipefail
+          MANIFEST=coworld-adapter/dist/coworld_manifest.json
+          test "$(jq -r .game.version "$MANIFEST")" = "${{ needs.preflight.outputs.version }}"
+          test "$(jq -r '.game.docs.pages[] | select(.id=="proxywar-release-provenance") | .content.value' "$MANIFEST" | sed -n 's/^source_sha=//p')" = "$SOURCE_SHA"
+          test "$(jq -r .game.replay_viewer.bundle "$MANIFEST")" = "build/static-replay-viewer"
+          test -f coworld-adapter/dist/build/static-replay-viewer/index.html
+          rg -q 'ai-league-replay-progress|replay_progress_tip' coworld-adapter/dist/build/static-replay-viewer
+          ! rg -q 'Support Proxy War!|Purchase a territory skin' coworld-adapter/dist/build/static-replay-viewer
+          mkdir -p coworld-adapter/tmp
+          TMPDIR="$PWD/coworld-adapter/tmp" "$COWORLD_BIN" certify "$MANIFEST" --timeout-seconds 300
+      - name: Package checksummed immutable release artifact
+        env:
+          SOURCE_SHA: ${{ needs.dequeue.outputs.merge_sha }}
+        run: |
+          set -euo pipefail
+          tar -czf "$RUNNER_TEMP/coworld-release.tgz" -C coworld-adapter/dist .
+          (cd "$RUNNER_TEMP" && sha256sum coworld-release.tgz > coworld-release.sha256)
+          jq -n --arg source_sha "$SOURCE_SHA" --arg version "${{ needs.preflight.outputs.version }}" \
+            '{source_sha:$source_sha,version:$version}' > "$RUNNER_TEMP/coworld-release.json"
+      - name: Upload immutable release artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coworld-release-${{ needs.dequeue.outputs.merge_sha }}
+          path: |
+            ${{ runner.temp }}/coworld-release.tgz
+            ${{ runner.temp }}/coworld-release.sha256
+            ${{ runner.temp }}/coworld-release.json
+          if-no-files-found: error
+          retention-days: 7
+
+  deploy:
+    name: Hosted certification, canonical and league verification
+    needs: [dequeue, await-main-ci, preflight, build]
+    if: ${{ always() && needs.preflight.result == 'success' && (needs.preflight.outputs.idempotent == 'true' || needs.build.result == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment:
+      name: coworld-production
+      deployment: false
+    env:
+      SOURCE_SHA: ${{ needs.dequeue.outputs.merge_sha }}
+      TESTED_HEAD_SHA: ${{ needs.dequeue.outputs.tested_head_sha }}
+      PR_NUMBER: ${{ needs.dequeue.outputs.pr_number }}
+      PR_AUTHOR: ${{ needs.dequeue.outputs.author }}
+      QUEUE_ISSUE: ${{ needs.dequeue.outputs.queue_issue }}
+      MAIN_CI_RUN_ID: ${{ needs.await-main-ci.outputs.main_ci_run_id }}
+      PREVIOUS_ID: ${{ needs.preflight.outputs.previous_id }}
+      PREVIOUS_VERSION: ${{ needs.preflight.outputs.previous_version }}
+    steps:
+      - name: Checkout only protected deployment control code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.dequeue.outputs.merge_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: "0.8.12"
+          enable-cache: false
+      - name: Install pinned Coworld toolchain on the fresh production runner
+        run: |
+          set -euo pipefail
+          export UV_NO_CACHE=1
+          export UV_TOOL_DIR="$RUNNER_TEMP/coworld-tools"
+          export UV_TOOL_BIN_DIR="$RUNNER_TEMP/coworld-bin"
+          uv tool install --force "coworld==$COWORLD_CLI_VERSION"
+          {
+            echo "COWORLD_BIN=$UV_TOOL_BIN_DIR/coworld"
+            echo "COWORLD_PYTHON=$UV_TOOL_DIR/coworld/bin/python"
+          } >> "$GITHUB_ENV"
+      - name: Download exact-source build artifact
+        if: ${{ needs.preflight.outputs.idempotent != 'true' }}
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: coworld-release-${{ needs.dequeue.outputs.merge_sha }}
+          path: ${{ runner.temp }}/release-artifact
+      - name: Verify and safely extract the release artifact
+        if: ${{ needs.preflight.outputs.idempotent != 'true' }}
+        env:
+          EXPECTED_VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/release-artifact"
+          sha256sum --check coworld-release.sha256
+          test "$(jq -r .source_sha coworld-release.json)" = "$SOURCE_SHA"
+          test "$(jq -r .version coworld-release.json)" = "$EXPECTED_VERSION"
+          python - <<'PY'
+          import json, os, pathlib, re, tarfile
+          archive = os.path.join(os.environ["RUNNER_TEMP"], "release-artifact", "coworld-release.tgz")
+          target = os.path.join(os.environ["RUNNER_TEMP"], "release")
+          with tarfile.open(archive, "r:gz") as bundle:
+              for member in bundle.getmembers():
+                  path = pathlib.PurePosixPath(member.name)
+                  if path.is_absolute() or ".." in path.parts or not (member.isfile() or member.isdir()):
+                      raise SystemExit(f"unsafe release artifact member: {member.name}")
+              bundle.extractall(target, filter="data")
+          with open(os.path.join(target, "coworld_manifest.json"), encoding="utf-8") as handle:
+              manifest = json.load(handle)
+          artifact_values = [
+              manifest["game"]["replay_viewer"]["bundle"],
+              manifest["game"]["runnable"]["image"],
+              *[entry["image"] for section in ("player", "commissioner", "optimizer") for entry in manifest.get(section, [])],
+          ]
+          for value in artifact_values:
+              if not isinstance(value, str) or not value or value.startswith(("/", "~")) or ".." in pathlib.PurePosixPath(value).parts:
+                  raise SystemExit(f"unsafe manifest artifact reference: {value!r}")
+              if not re.fullmatch(r"[A-Za-z0-9._:/-]+", value):
+                  raise SystemExit(f"unexpected manifest artifact reference: {value!r}")
+          PY
+          test -f "$RUNNER_TEMP/release/coworld_manifest.json"
+      - name: Run final list and allocation check immediately before upload
+        if: ${{ needs.preflight.outputs.idempotent != 'true' }}
+        env:
+          COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
+          EXPECTED_VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          node .github/scripts/coworld-authenticated-command.mjs list --json > "$RUNNER_TEMP/coworld-list-preupload.json"
+          NEXT=$(node .github/scripts/coworld-authenticated-command.mjs next-version "$COWORLD_NAME")
+          if [ "$NEXT" != "$EXPECTED_VERSION" ]; then
+            echo "::error::Coworld version collision ($EXPECTED_VERSION -> $NEXT); no upload occurred. The durable oldest queue will rebuild on its next scheduled run."
+            exit 1
+          fi
+      - name: Upload and wait for hosted smoke plus full certification
+        id: upload
+        if: ${{ needs.preflight.outputs.idempotent != 'true' }}
+        env:
+          COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
+        run: |
+          set -uo pipefail
+          OUTPUT="$RUNNER_TEMP/coworld-upload.txt"
+          node .github/scripts/coworld-authenticated-command.mjs upload-coworld "$RUNNER_TEMP/release/coworld_manifest.json" --wait-hosted-smoke --wait-certification --timeout-seconds 300 --hosted-smoke-timeout-seconds 1800 --certification-timeout-seconds 1800 | tee "$OUTPUT"
+          UPLOAD_STATUS=${PIPESTATUS[0]}
+          COWORLD_ID=$(sed -n 's/^Coworld: //p' "$OUTPUT" | tail -1)
+          MANIFEST_HASH=$(sed -n 's/^Manifest hash: //p' "$OUTPUT" | tail -1)
+          {
+            echo "coworld_id=$COWORLD_ID"
+            echo "manifest_hash=$MANIFEST_HASH"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$UPLOAD_STATUS" -ne 0 ]; then
+            echo "::error::Coworld upload or hosted certification failed; the failure finalizer will query live candidate state"
+            exit "$UPLOAD_STATUS"
+          fi
+          test -n "$COWORLD_ID"
+          test -n "$MANIFEST_HASH"
+      - name: Resolve deployed or idempotent package
+        id: package
+        env:
+          COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
+          EXISTING_ID: ${{ needs.preflight.outputs.existing_id }}
+          UPLOADED_ID: ${{ steps.upload.outputs.coworld_id }}
+        run: |
+          set -euo pipefail
+          if [ "${{ needs.preflight.outputs.idempotent }}" = "true" ]; then
+            COWORLD_ID="$EXISTING_ID"
+          else
+            COWORLD_ID="$UPLOADED_ID"
+          fi
+          [[ "$COWORLD_ID" =~ ^cow_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
+          STATUS="$RUNNER_TEMP/coworld-status.json"
+          node .github/scripts/coworld-authenticated-command.mjs status "$COWORLD_ID" --json > "$STATUS"
+          test "$(jq -r .certification.state "$STATUS")" = certified
+          test "$(jq '[.certification.transcript_summary[] | select(.status=="pass")] | length' "$STATUS")" = 10
+          test "$(jq -r .coworld.canonical "$STATUS")" = true
+          test "$(jq -r '.coworld.manifest.game.docs.pages[] | select(.id=="proxywar-release-provenance") | .content.value' "$STATUS" | sed -n 's/^source_sha=//p')" = "$SOURCE_SHA"
+          PACKAGE_VERSION=$(jq -r .coworld.version "$STATUS")
+          MANIFEST_HASH=$(jq -r .coworld.manifest_hash "$STATUS")
+          REPLAY_BUNDLE=$(jq -r .coworld.manifest.game.replay_viewer.bundle "$STATUS")
+          CERTIFICATION_JOB_ID=$(jq -r .certification.certification_job_id "$STATUS")
+          SMOKE_EPISODE=$(jq -r .hosted_smoke_episodes[0].id "$STATUS")
+          [[ "$PACKAGE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$MANIFEST_HASH" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$REPLAY_BUNDLE" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$CERTIFICATION_JOB_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
+          [[ "$SMOKE_EPISODE" =~ ^ereq_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
+          {
+            echo "coworld_id=$COWORLD_ID"
+            echo "version=$PACKAGE_VERSION"
+            echo "manifest_hash=$MANIFEST_HASH"
+            echo "replay_bundle=$REPLAY_BUNDLE"
+            echo "certification_job_id=$CERTIFICATION_JOB_ID"
+            echo "smoke_episode=$SMOKE_EPISODE"
+          } >> "$GITHUB_OUTPUT"
+      - name: Verify existing league binding and resolve published replay
+        id: live
+        env:
+          COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
+          PACKAGE_ID: ${{ steps.package.outputs.coworld_id }}
+          SMOKE_EPISODE: ${{ steps.package.outputs.smoke_episode }}
+        run: |
+          set -euo pipefail
+          LEAGUE="$RUNNER_TEMP/league.json"
+          node .github/scripts/coworld-authenticated-command.mjs leagues "$EXPECTED_LEAGUE_ID" --json > "$LEAGUE"
+          test "$(jq -r .id "$LEAGUE")" = "$EXPECTED_LEAGUE_ID"
+          test "$(jq -r .game.coworld_id "$LEAGUE")" = "$PACKAGE_ID"
+          EPISODE="$SMOKE_EPISODE"
+          EPISODE_JSON="$RUNNER_TEMP/episode.json"
+          node .github/scripts/coworld-authenticated-command.mjs episodes "$EPISODE" --json > "$EPISODE_JSON"
+          test "$(jq -r .status "$EPISODE_JSON")" = completed
+          test "$(jq -r .coworld_id "$EPISODE_JSON")" = "$PACKAGE_ID"
+          REPLAY_URL=$(jq -r .replay_url "$EPISODE_JSON")
+          curl --fail --silent --show-error --location --range 0-1023 "$REPLAY_URL" > "$RUNNER_TEMP/replay-prefix.bin"
+          VIEWER_URL=$(node .github/scripts/coworld-authenticated-command.mjs replay-open "$EPISODE" --hosted --no-open-browser | tr -d '\r\n')
+          {
+            echo "league_id=$EXPECTED_LEAGUE_ID"
+            echo "smoke_episode=$EPISODE"
+            echo "viewer_url=$VIEWER_URL"
+          } >> "$GITHUB_OUTPUT"
+      - name: Execute the published replay in isolated headless Chrome
+        env:
+          VIEWER_URL: ${{ steps.live.outputs.viewer_url }}
+        run: node .github/scripts/coworld-published-replay.mjs "$VIEWER_URL"
+      - name: Record successful deployment and audit summary
+        id: deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE_VERSION: ${{ steps.package.outputs.version }}
+          PACKAGE_ID: ${{ steps.package.outputs.coworld_id }}
+          MANIFEST_HASH: ${{ steps.package.outputs.manifest_hash }}
+          REPLAY_BUNDLE: ${{ steps.package.outputs.replay_bundle }}
+          CERTIFICATION_JOB_ID: ${{ steps.package.outputs.certification_job_id }}
+          LEAGUE_ID: ${{ steps.live.outputs.league_id }}
+          SMOKE_EPISODE: ${{ steps.live.outputs.smoke_episode }}
+        run: |
+          set -euo pipefail
+          ENDED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          END_EPOCH=$(date -u +%s)
+          ELAPSED_SECONDS=$((END_EPOCH - ${{ needs.preflight.outputs.start_epoch }}))
+          DEPLOYMENT_ID="${{ needs.preflight.outputs.deployment_id }}"
+          gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
+            -f state=success -f environment=coworld-production -F auto_inactive=false \
+            -f description="Certified, canonical, league-bound, replay verified" >/dev/null
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ## Coworld production release
+
+          - PR: #$PR_NUMBER by $PR_AUTHOR
+          - Tested head: \`$TESTED_HEAD_SHA\`
+          - Merge/source SHA: \`$SOURCE_SHA\`
+          - Main CI run: $MAIN_CI_RUN_ID
+          - Coworld: \`$PACKAGE_VERSION\` / \`$PACKAGE_ID\`
+          - Manifest: \`$MANIFEST_HASH\`
+          - Replay bundle: \`$REPLAY_BUNDLE\`
+          - Certification: 10/10 / \`$CERTIFICATION_JOB_ID\`
+          - Canonical: yes
+          - League: \`$LEAGUE_ID\`
+          - Hosted smoke/replay: \`$SMOKE_EPISODE\`
+          - Original rollback target retained: \`$PREVIOUS_VERSION\` / \`$PREVIOUS_ID\`
+          - Started: ${{ needs.preflight.outputs.started }}
+          - Ended: $ENDED
+          - Elapsed: ${ELAPSED_SECONDS}s
+          EOF
+          echo "deployment_id=$DEPLOYMENT_ID" >> "$GITHUB_OUTPUT"
+      - name: Close queue record and comment on source PR
+        if: ${{ success() && env.QUEUE_ISSUE != '0' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE_VERSION: ${{ steps.package.outputs.version }}
+          PACKAGE_ID: ${{ steps.package.outputs.coworld_id }}
+          MANIFEST_HASH: ${{ steps.package.outputs.manifest_hash }}
+          REPLAY_BUNDLE: ${{ steps.package.outputs.replay_bundle }}
+          CERTIFICATION_JOB_ID: ${{ steps.package.outputs.certification_job_id }}
+          LEAGUE_ID: ${{ steps.live.outputs.league_id }}
+          SMOKE_EPISODE: ${{ steps.live.outputs.smoke_episode }}
+        run: |
+          set -euo pipefail
+          BODY="Coworld release complete: source \`$SOURCE_SHA\`, main CI $MAIN_CI_RUN_ID, \`$PACKAGE_VERSION\` / \`$PACKAGE_ID\`, manifest \`$MANIFEST_HASH\`, replay bundle \`$REPLAY_BUNDLE\`, certification 10/10 \`$CERTIFICATION_JOB_ID\`, league \`$LEAGUE_ID\`, smoke \`$SMOKE_EPISODE\`. Original rollback target: \`$PREVIOUS_VERSION\` / \`$PREVIOUS_ID\`."
+          gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -f body="$BODY" >/dev/null
+          gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$QUEUE_ISSUE/labels" -f 'labels[]=coworld-release-complete' >/dev/null
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/issues/$QUEUE_ISSUE" -f state=closed >/dev/null
+      - name: Record failed release without deleting history
+        if: ${{ failure() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
+          UPLOADED_CANDIDATE_ID: ${{ steps.upload.outputs.coworld_id }}
+        run: |
+          set -euo pipefail
+          DEPLOYMENT_ID="${{ needs.preflight.outputs.deployment_id }}"
+          gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
+            -f state=failure -f environment=coworld-production -F auto_inactive=false \
+            -f description="Release failed; inspect exact candidate and rollback evidence" >/dev/null
+          CURRENT_ID="unknown"
+          CURRENT_VERSION="unknown"
+          CANDIDATE_ID="$UPLOADED_CANDIDATE_ID"
+          FAILURE_LIST="$RUNNER_TEMP/coworld-list-failure.json"
+          if node .github/scripts/coworld-authenticated-command.mjs list --json > "$FAILURE_LIST"; then
+            CURRENT_ID=$(jq -r --arg name "$COWORLD_NAME" '[.[] | select(.name==$name and .canonical==true)][0].id // "unknown"' "$FAILURE_LIST")
+            CURRENT_VERSION=$(jq -r --arg name "$COWORLD_NAME" '[.[] | select(.name==$name and .canonical==true)][0].version // "unknown"' "$FAILURE_LIST")
+            if [ -z "$CANDIDATE_ID" ]; then
+              CANDIDATE_ID=$(jq -r --arg name "$COWORLD_NAME" --arg sha "$SOURCE_SHA" '[.[] | select(.name==$name) | select(any(.manifest.game.docs.pages[]?; .id=="proxywar-release-provenance" and (.content.value | contains("source_sha="+$sha))))][0].id // "unknown"' "$FAILURE_LIST")
+            fi
+          fi
+          if ! [[ "$CANDIDATE_ID" =~ ^cow_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then CANDIDATE_ID="unknown"; fi
+          if ! [[ "$CURRENT_ID" =~ ^cow_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then CURRENT_ID="unknown"; fi
+          if ! [[ "$CURRENT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then CURRENT_VERSION="unknown"; fi
+          echo "::error::Coworld release failed: source=$SOURCE_SHA candidate=$CANDIDATE_ID current=$CURRENT_VERSION/$CURRENT_ID original_previous=$PREVIOUS_VERSION/$PREVIOUS_ID; rollback API unavailable"
+          if [ "$QUEUE_ISSUE" != "0" ]; then
+            BODY="<!-- proxywar-coworld-deploy-failure:$GITHUB_RUN_ID -->
+          Coworld release failed for source \`$SOURCE_SHA\`. Candidate: \`$CANDIDATE_ID\`. Current canonical: \`$CURRENT_VERSION\` / \`$CURRENT_ID\`. Original rollback target: \`$PREVIOUS_VERSION\` / \`$PREVIOUS_ID\`. Coworld exposes no safe rollback endpoint; inspect run $GITHUB_RUN_ID. The queue remains open for a safe retry."
+            gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$QUEUE_ISSUE/comments" -f body="$BODY" >/dev/null
+            gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$QUEUE_ISSUE/labels" -f 'labels[]=coworld-release-failed' >/dev/null
+            if [ -n "$CANDIDATE_ID" ] && [ "$CANDIDATE_ID" != "unknown" ]; then
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/issues/$QUEUE_ISSUE/labels/coworld-release-queued" >/dev/null
+            fi
+          fi
+      - name: Remove any residual ephemeral credential directories
+        if: always()
+        run: |
+          node - <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const root = path.resolve(process.env.RUNNER_TEMP);
+          for (const name of fs.readdirSync(root).filter((entry) => entry.startsWith("coworld-auth-"))) {
+            const target = path.resolve(root, name);
+            if (path.dirname(target) !== root) throw new Error(`unexpected credential home: ${target}`);
+            fs.rmSync(target, { recursive: true, force: true });
+          }
+          NODE
+
+  predeploy-failure:
+    name: Record pre-upload pipeline failure
+    needs: [dequeue, preflight, build, deploy]
+    if: ${{ always() && needs.dequeue.outputs.has_item == 'true' && (needs.preflight.result != 'success' || (needs.preflight.outputs.idempotent != 'true' && needs.build.result != 'success')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Mark deployment failed and retain queue for retry
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOYMENT_ID: ${{ needs.preflight.outputs.deployment_id }}
+          QUEUE_ISSUE: ${{ needs.dequeue.outputs.queue_issue }}
+          SOURCE_SHA: ${{ needs.dequeue.outputs.merge_sha }}
+          BLOCKED_CANDIDATE: ${{ needs.preflight.outputs.blocked_candidate }}
+        run: |
+          set -euo pipefail
+          if [ -n "$DEPLOYMENT_ID" ]; then
+            gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
+              -f state=failure -f environment=coworld-production -F auto_inactive=false \
+              -f description="Release failed before hosted upload; queue retained" >/dev/null
+          fi
+          if [ "$QUEUE_ISSUE" != "0" ]; then
+            if [ -n "$BLOCKED_CANDIDATE" ]; then
+              BODY="Coworld release for source \`$SOURCE_SHA\` is blocked by existing unhealthy candidate \`$BLOCKED_CANDIDATE\`. No duplicate was allocated. Operator recovery is required."
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/issues/$QUEUE_ISSUE/labels/coworld-release-queued" >/dev/null
+            else
+              BODY="Coworld release for source \`$SOURCE_SHA\` failed before upload in run $GITHUB_RUN_ID. No candidate was uploaded. The durable queue remains open for a safe retry."
+            fi
+            gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$QUEUE_ISSUE/comments" -f body="$BODY" >/dev/null
+            gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$QUEUE_ISSUE/labels" -f 'labels[]=coworld-release-failed' >/dev/null
+          fi
+
+  deploy-finalizer:
+    name: Recover interrupted deployment audit state
+    needs: [dequeue, preflight, build, deploy]
+    if: ${{ always() && needs.dequeue.outputs.has_item == 'true' && needs.preflight.result == 'success' && (needs.preflight.outputs.idempotent == 'true' || needs.build.result == 'success') && needs.deploy.result != 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Finalize an interrupted or cancelled deploy runner
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOYMENT_ID: ${{ needs.preflight.outputs.deployment_id }}
+          QUEUE_ISSUE: ${{ needs.dequeue.outputs.queue_issue }}
+          SOURCE_SHA: ${{ needs.dequeue.outputs.merge_sha }}
+        run: |
+          set -euo pipefail
+          LATEST_STATE=""
+          if [ -n "$DEPLOYMENT_ID" ]; then
+            LATEST_STATE=$(gh api "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" --jq '.[0].state // ""')
+            if [ "$LATEST_STATE" != "success" ] && [ "$LATEST_STATE" != "failure" ]; then
+              gh api --method POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" \
+                -f state=failure -f environment=coworld-production -F auto_inactive=false \
+                -f description="Deploy runner interrupted; hosted state requires reconciliation" >/dev/null
+              LATEST_STATE=failure
+            fi
+          fi
+          if [ "$QUEUE_ISSUE" != "0" ]; then
+            MARKER="proxywar-coworld-deploy-failure:$GITHUB_RUN_ID"
+            COMMENTS="$RUNNER_TEMP/comments.json"
+            gh api "repos/$GITHUB_REPOSITORY/issues/$QUEUE_ISSUE/comments" > "$COMMENTS"
+            RECORDED=$(jq --arg marker "$MARKER" '[.[] | select(.user.login=="github-actions[bot]" and .user.type=="Bot" and (.body | contains($marker)))] | length' "$COMMENTS")
+            if [ "$RECORDED" = "0" ]; then
+              if [ "$LATEST_STATE" = "success" ]; then
+                BODY="<!-- $MARKER -->
+          Deploy worker ended after recording success for source \`$SOURCE_SHA\`; the finalizer recovered the durable queue audit state from deployment \`$DEPLOYMENT_ID\`."
+                gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$QUEUE_ISSUE/labels" -f 'labels[]=coworld-release-complete' >/dev/null
+                gh api --method PATCH "repos/$GITHUB_REPOSITORY/issues/$QUEUE_ISSUE" -f state=closed >/dev/null
+              else
+                BODY="<!-- $MARKER -->
+          Deploy worker was interrupted for source \`$SOURCE_SHA\` in run $GITHUB_RUN_ID. Hosted state may have changed; deployment \`$DEPLOYMENT_ID\` is failed and the durable queue remains for provenance-based reconciliation."
+                gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$QUEUE_ISSUE/labels" -f 'labels[]=coworld-release-failed' >/dev/null
+              fi
+              gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$QUEUE_ISSUE/comments" -f body="$BODY" >/dev/null
+            fi
+          fi

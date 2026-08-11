@@ -231,7 +231,9 @@ export default defineConfig(({ mode }) => {
       // .codex/ so test copies inside sibling-session git worktrees are not
       // scanned as live tests of this checkout. deploy/ holds node:test
       // (`.test.mjs`) launchd suites run via `node --test`, not vitest; scanning
-      // them as vitest suites reports a spurious failure.
+      // them as vitest suites reports a spurious failure. tests/automation/
+      // likewise contains node:test security suites that run in the dedicated
+      // required automation job rather than in Vitest shards.
       exclude: [
         "**/node_modules/**",
         "**/dist/**",
@@ -244,6 +246,7 @@ export default defineConfig(({ mode }) => {
         "**/.codex/**",
         "**/.docker-context/**",
         "**/deploy/**",
+        "**/tests/automation/**",
       ],
     },
     root: "./",

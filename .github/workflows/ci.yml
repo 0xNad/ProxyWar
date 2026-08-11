@@ -1,4 +1,5 @@
 name: 🧪 CI
+run-name: CI ${{ inputs.source_sha || github.sha }}
 
 on:
   merge_group:
@@ -7,6 +8,12 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact merged main SHA to test when push recursion was suppressed
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -20,6 +27,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.source_sha || github.sha }}
           submodules: false
       - name: Setup node
         uses: actions/setup-node@v6
@@ -119,6 +127,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.source_sha || github.sha }}
           submodules: false
       - name: Setup node
         uses: actions/setup-node@v6
@@ -156,6 +165,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.source_sha || github.sha }}
           submodules: false
       - name: Setup node
         uses: actions/setup-node@v6
@@ -183,6 +193,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.source_sha || github.sha }}
           submodules: false
       - name: Setup node
         uses: actions/setup-node@v6
@@ -202,6 +213,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
@@ -216,6 +229,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
@@ -229,6 +244,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
@@ -255,6 +272,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.source_sha || github.sha }}
           submodules: false
       # Every other job here works from a full checkout, which always has
       # every source file -- it can never catch the root Dockerfile's COPY
@@ -270,3 +288,33 @@ jobs:
       - name: Build root image's build stage
         run: docker build --target build .
 
+  trusted-release-automation:
+    name: 🔐 Trusted release automation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+          submodules: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+      - name: Run admission and release security tests
+        run: node --test tests/automation/*.test.mjs
+      - name: Parse workflow YAML
+        run: ruby -e 'require "yaml"; Dir[".github/workflows/*.{yml,yaml}"].each { |f| YAML.parse_file(f) }'
+      - name: Validate workflow schema, expressions, and permissions
+        run: |
+          set -euo pipefail
+          ARCHIVE="$RUNNER_TEMP/actionlint.tar.gz"
+          curl --fail --silent --show-error --location \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
+            --output "$ARCHIVE"
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $ARCHIVE" | sha256sum --check --status
+          tar -xzf "$ARCHIVE" -C "$RUNNER_TEMP" actionlint
+          # The fork inherits shellcheck findings in disabled upstream deploy
+          # workflows. Keep actionlint's schema/expression/permission checks
+          # authoritative here without turning that unrelated backlog into a
+          # release-automation gate.
+          "$RUNNER_TEMP/actionlint" -shellcheck= .github/workflows/*.yml
