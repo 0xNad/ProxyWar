@@ -1145,6 +1145,475 @@
         "episode_timeout_seconds": 4500
       },
       "description": "16-policy free-for-all backing the 16-seat Competition rung (Pangaea-only pool, most battle-tested map). Added 2026-08-10 for whole-company league events: at 25 entrants a round is ten 16-seat games instead of fourteen 12-seat ones, with denser per-game social interaction. A full local 16-seat episode (2026-08-10: decisive winner, 15,600 turns, all 1,451 decisions accepted, ~331MB peak RSS, 14MB replay, ~60 min wall) validated seats/memory/artifacts; the rung is revertable by a commissioner-only patch."
+    },
+    {
+      "id": "tournament-16p-world",
+      "name": "Tournament 16P - World",
+      "game_config": {
+        "players": [
+          {
+            "name": "Coworld Starter 1"
+          },
+          {
+            "name": "Coworld Starter 2"
+          },
+          {
+            "name": "Coworld Starter 3"
+          },
+          {
+            "name": "Coworld Starter 4"
+          },
+          {
+            "name": "Coworld Starter 5"
+          },
+          {
+            "name": "Coworld Starter 6"
+          },
+          {
+            "name": "Coworld Starter 7"
+          },
+          {
+            "name": "Coworld Starter 8"
+          },
+          {
+            "name": "Coworld Starter 9"
+          },
+          {
+            "name": "Coworld Starter 10"
+          },
+          {
+            "name": "Coworld Starter 11"
+          },
+          {
+            "name": "Coworld Starter 12"
+          },
+          {
+            "name": "Coworld Starter 13"
+          },
+          {
+            "name": "Coworld Starter 14"
+          },
+          {
+            "name": "Coworld Starter 15"
+          },
+          {
+            "name": "Coworld Starter 16"
+          }
+        ],
+        "num_agents": 16,
+        "max_decision_steps": 500,
+        "turns_per_decision_step": 100,
+        "max_decision_ms": 15000,
+        "map": "World",
+        "map_size": "Normal",
+        "difficulty": "Easy",
+        "replay_tail_turns": 500,
+        "player_connect_timeout_seconds": 120,
+        "episode_timeout_seconds": 4500
+      },
+      "description": "16-policy free-for-all widening the 16-seat Competition rotation to the proven 12P map pool (Europe excluded while quarantined). Added 2026-08-11: per-map 16-seat boot proof (spawn feasibility + game start) on this exact map before ship, bracketed by full-length 16-seat games on Pangaea and World (smallest/largest proven ends). Revertable per-map by a commissioner-only pool patch."
+    },
+    {
+      "id": "tournament-16p-asia",
+      "name": "Tournament 16P - Asia",
+      "game_config": {
+        "players": [
+          {
+            "name": "Coworld Starter 1"
+          },
+          {
+            "name": "Coworld Starter 2"
+          },
+          {
+            "name": "Coworld Starter 3"
+          },
+          {
+            "name": "Coworld Starter 4"
+          },
+          {
+            "name": "Coworld Starter 5"
+          },
+          {
+            "name": "Coworld Starter 6"
+          },
+          {
+            "name": "Coworld Starter 7"
+          },
+          {
+            "name": "Coworld Starter 8"
+          },
+          {
+            "name": "Coworld Starter 9"
+          },
+          {
+            "name": "Coworld Starter 10"
+          },
+          {
+            "name": "Coworld Starter 11"
+          },
+          {
+            "name": "Coworld Starter 12"
+          },
+          {
+            "name": "Coworld Starter 13"
+          },
+          {
+            "name": "Coworld Starter 14"
+          },
+          {
+            "name": "Coworld Starter 15"
+          },
+          {
+            "name": "Coworld Starter 16"
+          }
+        ],
+        "num_agents": 16,
+        "max_decision_steps": 500,
+        "turns_per_decision_step": 100,
+        "max_decision_ms": 15000,
+        "map": "Asia",
+        "map_size": "Normal",
+        "difficulty": "Easy",
+        "replay_tail_turns": 500,
+        "player_connect_timeout_seconds": 120,
+        "episode_timeout_seconds": 4500
+      },
+      "description": "16-policy free-for-all widening the 16-seat Competition rotation to the proven 12P map pool (Europe excluded while quarantined). Added 2026-08-11: per-map 16-seat boot proof (spawn feasibility + game start) on this exact map before ship, bracketed by full-length 16-seat games on Pangaea and World (smallest/largest proven ends). Revertable per-map by a commissioner-only pool patch."
+    },
+    {
+      "id": "tournament-16p-britannia",
+      "name": "Tournament 16P - Britannia",
+      "game_config": {
+        "players": [
+          {
+            "name": "Coworld Starter 1"
+          },
+          {
+            "name": "Coworld Starter 2"
+          },
+          {
+            "name": "Coworld Starter 3"
+          },
+          {
+            "name": "Coworld Starter 4"
+          },
+          {
+            "name": "Coworld Starter 5"
+          },
+          {
+            "name": "Coworld Starter 6"
+          },
+          {
+            "name": "Coworld Starter 7"
+          },
+          {
+            "name": "Coworld Starter 8"
+          },
+          {
+            "name": "Coworld Starter 9"
+          },
+          {
+            "name": "Coworld Starter 10"
+          },
+          {
+            "name": "Coworld Starter 11"
+          },
+          {
+            "name": "Coworld Starter 12"
+          },
+          {
+            "name": "Coworld Starter 13"
+          },
+          {
+            "name": "Coworld Starter 14"
+          },
+          {
+            "name": "Coworld Starter 15"
+          },
+          {
+            "name": "Coworld Starter 16"
+          }
+        ],
+        "num_agents": 16,
+        "max_decision_steps": 500,
+        "turns_per_decision_step": 100,
+        "max_decision_ms": 15000,
+        "map": "Britannia",
+        "map_size": "Normal",
+        "difficulty": "Easy",
+        "replay_tail_turns": 500,
+        "player_connect_timeout_seconds": 120,
+        "episode_timeout_seconds": 4500
+      },
+      "description": "16-policy free-for-all widening the 16-seat Competition rotation to the proven 12P map pool (Europe excluded while quarantined). Added 2026-08-11: per-map 16-seat boot proof (spawn feasibility + game start) on this exact map before ship, bracketed by full-length 16-seat games on Pangaea and World (smallest/largest proven ends). Revertable per-map by a commissioner-only pool patch."
+    },
+    {
+      "id": "tournament-16p-blacksea",
+      "name": "Tournament 16P - BlackSea",
+      "game_config": {
+        "players": [
+          {
+            "name": "Coworld Starter 1"
+          },
+          {
+            "name": "Coworld Starter 2"
+          },
+          {
+            "name": "Coworld Starter 3"
+          },
+          {
+            "name": "Coworld Starter 4"
+          },
+          {
+            "name": "Coworld Starter 5"
+          },
+          {
+            "name": "Coworld Starter 6"
+          },
+          {
+            "name": "Coworld Starter 7"
+          },
+          {
+            "name": "Coworld Starter 8"
+          },
+          {
+            "name": "Coworld Starter 9"
+          },
+          {
+            "name": "Coworld Starter 10"
+          },
+          {
+            "name": "Coworld Starter 11"
+          },
+          {
+            "name": "Coworld Starter 12"
+          },
+          {
+            "name": "Coworld Starter 13"
+          },
+          {
+            "name": "Coworld Starter 14"
+          },
+          {
+            "name": "Coworld Starter 15"
+          },
+          {
+            "name": "Coworld Starter 16"
+          }
+        ],
+        "num_agents": 16,
+        "max_decision_steps": 500,
+        "turns_per_decision_step": 100,
+        "max_decision_ms": 15000,
+        "map": "BlackSea",
+        "map_size": "Normal",
+        "difficulty": "Easy",
+        "replay_tail_turns": 500,
+        "player_connect_timeout_seconds": 120,
+        "episode_timeout_seconds": 4500
+      },
+      "description": "16-policy free-for-all widening the 16-seat Competition rotation to the proven 12P map pool (Europe excluded while quarantined). Added 2026-08-11: per-map 16-seat boot proof (spawn feasibility + game start) on this exact map before ship, bracketed by full-length 16-seat games on Pangaea and World (smallest/largest proven ends). Revertable per-map by a commissioner-only pool patch."
+    },
+    {
+      "id": "tournament-16p-eastasia",
+      "name": "Tournament 16P - EastAsia",
+      "game_config": {
+        "players": [
+          {
+            "name": "Coworld Starter 1"
+          },
+          {
+            "name": "Coworld Starter 2"
+          },
+          {
+            "name": "Coworld Starter 3"
+          },
+          {
+            "name": "Coworld Starter 4"
+          },
+          {
+            "name": "Coworld Starter 5"
+          },
+          {
+            "name": "Coworld Starter 6"
+          },
+          {
+            "name": "Coworld Starter 7"
+          },
+          {
+            "name": "Coworld Starter 8"
+          },
+          {
+            "name": "Coworld Starter 9"
+          },
+          {
+            "name": "Coworld Starter 10"
+          },
+          {
+            "name": "Coworld Starter 11"
+          },
+          {
+            "name": "Coworld Starter 12"
+          },
+          {
+            "name": "Coworld Starter 13"
+          },
+          {
+            "name": "Coworld Starter 14"
+          },
+          {
+            "name": "Coworld Starter 15"
+          },
+          {
+            "name": "Coworld Starter 16"
+          }
+        ],
+        "num_agents": 16,
+        "max_decision_steps": 500,
+        "turns_per_decision_step": 100,
+        "max_decision_ms": 15000,
+        "map": "EastAsia",
+        "map_size": "Normal",
+        "difficulty": "Easy",
+        "replay_tail_turns": 500,
+        "player_connect_timeout_seconds": 120,
+        "episode_timeout_seconds": 4500
+      },
+      "description": "16-policy free-for-all widening the 16-seat Competition rotation to the proven 12P map pool (Europe excluded while quarantined). Added 2026-08-11: per-map 16-seat boot proof (spawn feasibility + game start) on this exact map before ship, bracketed by full-length 16-seat games on Pangaea and World (smallest/largest proven ends). Revertable per-map by a commissioner-only pool patch."
+    },
+    {
+      "id": "tournament-16p-northamerica",
+      "name": "Tournament 16P - NorthAmerica",
+      "game_config": {
+        "players": [
+          {
+            "name": "Coworld Starter 1"
+          },
+          {
+            "name": "Coworld Starter 2"
+          },
+          {
+            "name": "Coworld Starter 3"
+          },
+          {
+            "name": "Coworld Starter 4"
+          },
+          {
+            "name": "Coworld Starter 5"
+          },
+          {
+            "name": "Coworld Starter 6"
+          },
+          {
+            "name": "Coworld Starter 7"
+          },
+          {
+            "name": "Coworld Starter 8"
+          },
+          {
+            "name": "Coworld Starter 9"
+          },
+          {
+            "name": "Coworld Starter 10"
+          },
+          {
+            "name": "Coworld Starter 11"
+          },
+          {
+            "name": "Coworld Starter 12"
+          },
+          {
+            "name": "Coworld Starter 13"
+          },
+          {
+            "name": "Coworld Starter 14"
+          },
+          {
+            "name": "Coworld Starter 15"
+          },
+          {
+            "name": "Coworld Starter 16"
+          }
+        ],
+        "num_agents": 16,
+        "max_decision_steps": 500,
+        "turns_per_decision_step": 100,
+        "max_decision_ms": 15000,
+        "map": "NorthAmerica",
+        "map_size": "Normal",
+        "difficulty": "Easy",
+        "replay_tail_turns": 500,
+        "player_connect_timeout_seconds": 120,
+        "episode_timeout_seconds": 4500
+      },
+      "description": "16-policy free-for-all widening the 16-seat Competition rotation to the proven 12P map pool (Europe excluded while quarantined). Added 2026-08-11: per-map 16-seat boot proof (spawn feasibility + game start) on this exact map before ship, bracketed by full-length 16-seat games on Pangaea and World (smallest/largest proven ends). Revertable per-map by a commissioner-only pool patch."
+    },
+    {
+      "id": "tournament-16p-oceania",
+      "name": "Tournament 16P - Oceania",
+      "game_config": {
+        "players": [
+          {
+            "name": "Coworld Starter 1"
+          },
+          {
+            "name": "Coworld Starter 2"
+          },
+          {
+            "name": "Coworld Starter 3"
+          },
+          {
+            "name": "Coworld Starter 4"
+          },
+          {
+            "name": "Coworld Starter 5"
+          },
+          {
+            "name": "Coworld Starter 6"
+          },
+          {
+            "name": "Coworld Starter 7"
+          },
+          {
+            "name": "Coworld Starter 8"
+          },
+          {
+            "name": "Coworld Starter 9"
+          },
+          {
+            "name": "Coworld Starter 10"
+          },
+          {
+            "name": "Coworld Starter 11"
+          },
+          {
+            "name": "Coworld Starter 12"
+          },
+          {
+            "name": "Coworld Starter 13"
+          },
+          {
+            "name": "Coworld Starter 14"
+          },
+          {
+            "name": "Coworld Starter 15"
+          },
+          {
+            "name": "Coworld Starter 16"
+          }
+        ],
+        "num_agents": 16,
+        "max_decision_steps": 500,
+        "turns_per_decision_step": 100,
+        "max_decision_ms": 15000,
+        "map": "Oceania",
+        "map_size": "Normal",
+        "difficulty": "Easy",
+        "replay_tail_turns": 500,
+        "player_connect_timeout_seconds": 120,
+        "episode_timeout_seconds": 4500
+      },
+      "description": "16-policy free-for-all widening the 16-seat Competition rotation to the proven 12P map pool (Europe excluded while quarantined). Added 2026-08-11: per-map 16-seat boot proof (spawn feasibility + game start) on this exact map before ship, bracketed by full-length 16-seat games on Pangaea and World (smallest/largest proven ends). Revertable per-map by a commissioner-only pool patch."
     }
   ],
   "episode_timeout_minutes": 100,
