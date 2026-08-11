@@ -27,18 +27,23 @@ COMPETITION_LADDER: list[tuple[int, list[str]]] = [
             # each qualified through the memory-regression gate (80-step native
             # 12P episode under the hosted heap posture) before shipping.
             "tournament-12p-pangaea",
-            "tournament-12p-world",
             "tournament-12p-asia",
-            "tournament-12p-britannia",
             "tournament-12p-blacksea",
             "tournament-12p-eastasia",
-            "tournament-12p-northamerica",
             "tournament-12p-oceania",
             # tournament-12p-europe remains a declared manual variant, but is
             # quarantined from automatic Competition scheduling. The missing
             # pre-promotion wall-clock gate recurred in live rounds 1323 and
             # 1332: 10 Europe episodes timed out before results/replay across
             # 0.1.24 and 0.1.26. Re-add only after a full hosted deadline proof.
+            #
+            # tournament-12p-{world,britannia,northamerica} are likewise
+            # declared manual variants quarantined 2026-08-11 (operator-
+            # directed) for round wall-time: engine cost per 100-turn decision
+            # cycle scales with land tiles, so these continental maps run
+            # multi-hour rounds (12P NorthAmerica rounds hit 171-324 min).
+            # Re-add per map after engine work plus a full-length hosted probe
+            # on that map lands well inside the 100-min artifact deadline.
         ],
     ),
     (
@@ -55,13 +60,20 @@ COMPETITION_LADDER: list[tuple[int, list[str]]] = [
             # patch that removes this entry; individual maps can be pulled from
             # this pool the same way.
             "tournament-16p-pangaea",
-            "tournament-16p-world",
             "tournament-16p-asia",
-            "tournament-16p-britannia",
             "tournament-16p-blacksea",
             "tournament-16p-eastasia",
-            "tournament-16p-northamerica",
             "tournament-16p-oceania",
+            # tournament-16p-{world,britannia,northamerica} remain declared
+            # manual variants but are quarantined 2026-08-11 (operator-
+            # directed) for round wall-time. Engine cost per 100-turn decision
+            # cycle scales with land tiles (~15s/cycle on NorthAmerica's 1.24M
+            # land tiles vs ~5s on Oceania's 195k), so these maps ran 62/45/40
+            # min average episodes and 126-187 min rounds vs 36-52 min on the
+            # compact maps; NorthAmerica also produced the rung's only
+            # episode_timeout kills (100 min burned, no scores). Re-add per
+            # map after engine work plus a full-length hosted 16-seat probe on
+            # that map lands well inside the 100-min artifact deadline.
         ],
     ),
 ]
