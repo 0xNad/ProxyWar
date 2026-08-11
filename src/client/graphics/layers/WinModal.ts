@@ -1,4 +1,4 @@
-import { html, LitElement, TemplateResult } from "lit";
+import { html, LitElement } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { aiLeagueSpectatorDisplayName } from "../../../client/AiLeagueReplayMode";
 import { translateText } from "../../../client/Utils";
@@ -9,15 +9,7 @@ import {
   ANONYMOUS_NAMES_KEY,
   USER_SETTINGS_CHANGED_EVENT,
 } from "../../../core/game/UserSettings";
-import { getUserMe } from "../../Api";
-import "../../components/CosmeticButton";
-import {
-  fetchCosmetics,
-  purchaseCosmetic,
-  resolveCosmetics,
-} from "../../Cosmetics";
 import { crazyGamesSDK } from "../../CrazyGamesSDK";
-import { Platform } from "../../Platform";
 import { SendWinnerEvent } from "../../Transport";
 import { FitWholeMapEvent } from "../TransformHandler";
 import { Layer } from "./Layer";
@@ -34,9 +26,6 @@ export class WinModal extends LitElement implements Layer {
 
   @state()
   private isWin = false;
-
-  @state()
-  private patternContent: TemplateResult | null = null;
 
   private _title: string;
 
@@ -104,78 +93,12 @@ export class WinModal extends LitElement implements Layer {
         <h2 class="m-0 mb-4 text-[26px] text-center text-white">
           ${this._title || ""}
         </h2>
-        ${this.innerHtml()}
       </div>
     `;
   }
 
-  /**
-   * True when the client is showing a rendered league/agent replay
-   * (`/ai-league-replay/<runID>`) rather than a played game. Replay viewers
-   * get the bare result — no tutorials, store upsells, or play-again flows.
-   */
-  private isLeagueReplay(): boolean {
-    return window.location.pathname.startsWith("/ai-league-replay/");
-  }
-
-  innerHtml() {
-    if (this.isLeagueReplay()) {
-      return html``;
-    }
-    return this.renderPatternButton();
-  }
-
-  renderPatternButton() {
-    return html`
-      <div class="text-center mb-6 bg-black/30 p-2.5 rounded-sm">
-        <h3 class="text-xl font-semibold text-white mb-3">
-          ${translateText("win_modal.support_openfront")}
-        </h3>
-        <p class="text-white mb-3">
-          ${translateText("win_modal.territory_pattern")}
-        </p>
-        <div class="flex justify-center">${this.patternContent}</div>
-      </div>
-    `;
-  }
-
-  async loadPatternContent() {
-    const me = await getUserMe();
-    const cosmetics = await fetchCosmetics();
-
-    const purchasable = resolveCosmetics(cosmetics, me, null).filter(
-      (r) => r.type === "pattern" && r.relationship === "purchasable",
-    );
-
-    if (purchasable.length === 0) {
-      this.patternContent = html``;
-      return;
-    }
-
-    // Shuffle the array and take patterns based on screen size
-    const shuffled = [...purchasable].sort(() => Math.random() - 0.5);
-    const maxPatterns = Platform.isMobileWidth ? 1 : 3;
-    const selected = shuffled.slice(0, Math.min(maxPatterns, shuffled.length));
-
-    this.patternContent = html`
-      <div class="flex gap-4 flex-wrap justify-start">
-        ${selected.map(
-          (r) => html`
-            <cosmetic-button
-              .resolved=${r}
-              .onPurchase=${purchaseCosmetic}
-            ></cosmetic-button>
-          `,
-        )}
-      </div>
-    `;
-  }
-
-  async show() {
+  show() {
     crazyGamesSDK.gameplayStop();
-    if (!this.isLeagueReplay()) {
-      await this.loadPatternContent();
-    }
     this.isVisible = true;
     this.requestUpdate();
   }
