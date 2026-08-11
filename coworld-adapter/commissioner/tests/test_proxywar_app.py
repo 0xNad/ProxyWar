@@ -457,6 +457,59 @@ def test_twelve_seat_rotation_sweeps_every_map_in_the_pool() -> None:
     )
 
 
+def test_sixteen_seat_rotation_sweeps_every_map_in_the_pool() -> None:
+    from commissioners.proxywar_app import COMPETITION_LADDER
+
+    pool = dict(COMPETITION_LADDER)[16]
+    expected_pool = {
+        "tournament-16p-pangaea",
+        "tournament-16p-world",
+        "tournament-16p-asia",
+        "tournament-16p-britannia",
+        "tournament-16p-blacksea",
+        "tournament-16p-eastasia",
+        "tournament-16p-northamerica",
+        "tournament-16p-oceania",
+    }
+    assert set(pool) == expected_pool, (
+        "the automatic 16P Competition pool must contain exactly the eight "
+        f"boot-proven variants while Europe is quarantined; saw {pool!r}"
+    )
+
+    round_start = competition_round_start(25)
+    round_start.variants = [
+        VariantInfo(
+            id=variant_id,
+            name=variant_id,
+            game_config={"num_agents": 16},
+        )
+        for variant_id in pool
+    ]
+
+    # Round 1 anchors on pool[0]: a fresh league's first 16-seat round (and
+    # the certifier's) lands on the most battle-tested map, not a phase shift.
+    round_start.round_number = 1
+    anchored = commissioner().schedule_episodes_for_round_start(round_start)
+    assert {episode.variant_id for episode in anchored.episodes} == {
+        "tournament-16p-pangaea"
+    }
+
+    seen: list[str] = []
+    for offset in range(len(pool)):
+        round_start.round_number = 3000 + offset
+        scheduled = commissioner().schedule_episodes_for_round_start(round_start)
+        variant_ids = {episode.variant_id for episode in scheduled.episodes}
+        assert len(variant_ids) == 1, "a round runs exactly one map"
+        seen.append(variant_ids.pop())
+
+    assert len(seen) == len(set(seen)) == 8, (
+        f"8 consecutive rounds should hit 8 distinct maps with no repeats; saw {seen}"
+    )
+    assert set(seen) == set(pool), (
+        f"consecutive rounds should sweep the whole pool; saw {seen}"
+    )
+
+
 def test_twelve_seat_pool_quarantines_europe() -> None:
     # Europe remains declared for manual validation, but two live rounds have
     # reproduced its hosted artifact deadline failure. Automatic Competition
