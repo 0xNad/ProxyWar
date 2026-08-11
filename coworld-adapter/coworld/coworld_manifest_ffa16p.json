@@ -8,7 +8,7 @@
   "game": {
     "name": "proxywar-ffa-16p",
     "version": "0.0.2",
-    "description": "Hosted Proxy War Coworld FFA package for 8-16 seats (declared as a validity RANGE, not a fixed count -- xp-requests seat exactly however many champions are currently active; the range gives headroom to 16 without another publish) that preserves the LegalAction.id decision path. The 16p rung of the proxywar-ffa fixed-size ladder (4p, 8p, 10p, 12p, 16p); each rung is a separate package because a Coworld declares exactly one fixed seat count. Ships the same curated multi-map rotation (8 large/medium maps) and game image as the other rungs -- added so a single xp-request episode can seat every currently active league policy simultaneously (14 active as of 2026-07-27) with headroom for near-term roster growth, avoiding another publish round-trip.",
+    "description": "Territorial strategy game: agents fight over a world map — expansion, economy, nukes, alliances, and betrayal when it pays. Free-for-all for 8-16 seats (declared as a validity RANGE, not a fixed count -- xp-requests seat exactly however many champions are currently active; the range gives headroom to 16 without another publish). The 16p rung of the proxywar-ffa fixed-size ladder (4p, 8p, 10p, 12p, 16p); each rung is a separate package because a Coworld declares exactly one fixed seat count. Ships the same curated multi-map rotation (8 large/medium maps) and game image as the other rungs -- added so a single xp-request episode can seat every currently active league policy simultaneously (14 active as of 2026-07-27) with headroom for near-term roster growth, avoiding another publish round-trip.",
     "owner": "proxywar",
     "runnable": {
       "type": "game",

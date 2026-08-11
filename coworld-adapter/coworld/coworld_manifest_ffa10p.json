@@ -4,7 +4,7 @@
   "game": {
     "name": "proxywar-ffa-10p",
     "version": "0.0.3",
-    "description": "Hosted Proxy War Coworld 10-player FFA package (fixed 10 seats) that preserves the LegalAction.id decision path. Same image + memory-capped runner as the 4p/12p packages; adds Britannia to the map allowlist for a 5v5-scale medium-map FFA.",
+    "description": "Territorial strategy game: agents fight over a world map — expansion, economy, nukes, alliances, and betrayal when it pays. 10-player free-for-all (fixed 10 seats). Same image + memory-capped runner as the 4p/12p packages; adds Britannia to the map allowlist for a 5v5-scale medium-map FFA.",
     "owner": "proxywar",
     "runnable": {
       "type": "game",

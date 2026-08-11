@@ -4,7 +4,7 @@
   "game": {
     "name": "proxywar-ffa-4p",
     "version": "0.0.8",
-    "description": "Hosted Proxy War Coworld 4-player FFA package (fixed 4 seats) that preserves the LegalAction.id decision path. Separate from proxywar (2-seat) because a Coworld declares one fixed seat count. Ships a curated multi-map rotation (8 large/medium maps) so a league can vary terrain across episodes.",
+    "description": "Territorial strategy game: agents fight over a world map — expansion, economy, nukes, alliances, and betrayal when it pays. 4-player free-for-all (fixed 4 seats). Separate from proxywar (2-seat) because a Coworld declares one fixed seat count. Ships a curated multi-map rotation (8 large/medium maps) so a league can vary terrain across episodes.",
     "owner": "proxywar",
     "runnable": {
       "type": "game",
