@@ -60,6 +60,12 @@ export const AI_LEAGUE_REPLAY_CATCHUP_DEBOUNCE_MS = 200;
 // position, `null` the instant it clears. Dispatched by
 // LocalServer.reportReplayCatchUp(); consumed by GameRightSidebar.
 export const AI_LEAGUE_REPLAY_CATCHUP_EVENT = "ai-league-replay-catchup";
+// Steady playhead position for archived Full Replay. `detail` is
+// `{ turnsRendered, turnsTotal }`, dispatched once at start() (0 rendered)
+// and again per rendered-turn acknowledgement. Consumed by GameRightSidebar,
+// which renders it as a plain "N / M" turn counter that kiosk watchdogs
+// (leaguecast) parse from body text to detect end-of-replay and stalls.
+export const AI_LEAGUE_REPLAY_PROGRESS_EVENT = "ai-league-replay-progress";
 // A late-join catch-up must never enqueue an unbounded replay in one main-
 // thread loop. The premiere-only worker accepts turns in bounded batches and
 // drains them without rendering every intermediate frame, so keep enough work
@@ -177,6 +183,7 @@ export class LocalServer {
       this.paused = true;
     }
     this.applyArchivedReplayDefaultSpeed();
+    this.reportReplayProgress();
     this.turnCheckInterval = setInterval(() => {
       const turnIntervalMs = this.progressiveReplayDelayForNextTurn();
       // Starvation is a visible state, not a silent freeze: a null delay on
@@ -461,6 +468,30 @@ export class LocalServer {
     );
   }
 
+  /**
+   * Steady counterpart to the transient catch-up report above: the playhead
+   * position itself, from the same two counters. No debounce — dispatched at
+   * start() so the counter is on screen before the first turn renders, then
+   * per acknowledgement batch until it lands on `total / total` at the end.
+   */
+  private reportReplayProgress(): void {
+    if (
+      typeof document === "undefined" ||
+      this.lobbyConfig.progressiveReplay !== undefined ||
+      this.lobbyConfig.gameRecord === undefined
+    ) {
+      return;
+    }
+    document.dispatchEvent(
+      new CustomEvent(AI_LEAGUE_REPLAY_PROGRESS_EVENT, {
+        detail: {
+          turnsRendered: this.turnsExecuted,
+          turnsTotal: this.replayTurns.length,
+        },
+      }),
+    );
+  }
+
   public turnsComplete(completedTurns: number) {
     const outstandingTurns = this.turns.length - this.turnsExecuted;
     if (
@@ -473,6 +504,7 @@ export class LocalServer {
     }
     this.turnsExecuted += completedTurns;
     this.reportReplayCatchUp();
+    this.reportReplayProgress();
     this.runPendingProgressiveCatchUp();
     this.finishProgressiveReplayIfReady();
   }

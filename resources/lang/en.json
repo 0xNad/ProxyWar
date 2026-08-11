@@ -1324,6 +1324,7 @@
     "toolbar_label": "Video playback controls",
     "replay_catching_up": "Catching up — turn {rendered} of {total}",
     "replay_catching_up_tip": "The replay is dispatching turns faster than they've rendered yet. This will clear automatically.",
+    "replay_progress_tip": "Replay position — rendered turns out of the match total.",
     "hide_hud": "Hide interface",
     "show_hud": "Show interface"
   },

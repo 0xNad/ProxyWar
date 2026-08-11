@@ -10,7 +10,10 @@ import {
   ReplaySpeedChangeEvent,
   TogglePauseIntentEvent,
 } from "../../InputHandler";
-import { AI_LEAGUE_REPLAY_CATCHUP_EVENT } from "../../LocalServer";
+import {
+  AI_LEAGUE_REPLAY_CATCHUP_EVENT,
+  AI_LEAGUE_REPLAY_PROGRESS_EVENT,
+} from "../../LocalServer";
 import { PauseGameIntentEvent, SendWinnerEvent } from "../../Transport";
 import { defaultReplaySpeedMultiplier } from "../../utilities/ReplaySpeedMultiplier";
 import { translateText } from "../../Utils";
@@ -111,6 +114,14 @@ export class GameRightSidebar extends LitElement implements Layer {
     turnsTotal: number;
   } | null = null;
 
+  // Steady playhead position from LocalServer.reportReplayProgress() --
+  // archived replays only, present from boot through the final turn.
+  @state()
+  private _replayProgress: {
+    turnsRendered: number;
+    turnsTotal: number;
+  } | null = null;
+
   private hasWinner = false;
   private isLobbyCreator = false;
   private spawnBarVisible = false;
@@ -174,6 +185,10 @@ export class GameRightSidebar extends LitElement implements Layer {
       AI_LEAGUE_REPLAY_CATCHUP_EVENT,
       this.onReplayCatchUpEvent,
     );
+    document.addEventListener(
+      AI_LEAGUE_REPLAY_PROGRESS_EVENT,
+      this.onReplayProgressEvent,
+    );
     this.onFullscreenChange();
   }
 
@@ -183,6 +198,10 @@ export class GameRightSidebar extends LitElement implements Layer {
     document.removeEventListener(
       AI_LEAGUE_REPLAY_CATCHUP_EVENT,
       this.onReplayCatchUpEvent,
+    );
+    document.removeEventListener(
+      AI_LEAGUE_REPLAY_PROGRESS_EVENT,
+      this.onReplayProgressEvent,
     );
     document.body.classList.remove(HUD_HIDDEN_BODY_CLASS);
   }
@@ -195,6 +214,15 @@ export class GameRightSidebar extends LitElement implements Layer {
       turnsTotal: number;
     } | null>;
     this._catchUpProgress = catchUpEvent.detail;
+  };
+
+  private onReplayProgressEvent = (e: Event) => {
+    // Same in-house CustomEvent contract as the catch-up event above.
+    const progressEvent = e as CustomEvent<{
+      turnsRendered: number;
+      turnsTotal: number;
+    }>;
+    this._replayProgress = progressEvent.detail;
   };
 
   getTickIntervalMs() {
@@ -348,6 +376,23 @@ export class GameRightSidebar extends LitElement implements Layer {
         >
           ${this.secondsToHms(this.timer)}
         </div>
+
+        <!-- Steady "rendered / total" turn counter (archived replays only).
+             Kiosk watchdogs (leaguecast) detect end-of-replay by parsing the
+             first "N / M" digit pair in body text, so the numbers must stay
+             plain digits — no locale separators. -->
+        ${this._replayProgress !== null
+          ? html`
+              <div
+                class="text-xs text-white/70 whitespace-nowrap tabular-nums"
+                title=${translateText("game_controls.replay_progress_tip")}
+                aria-label=${translateText("game_controls.replay_progress_tip")}
+              >
+                ${this._replayProgress.turnsRendered} /
+                ${this._replayProgress.turnsTotal}
+              </div>
+            `
+          : ""}
 
         <!-- Real turn-count catch-up progress (P2 incident follow-up):
              honest, from LocalServer's own dispatched/rendered counters --
