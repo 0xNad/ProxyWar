@@ -269,7 +269,7 @@
       "type": "commissioner",
       "id": "proxywar-ladder-commissioner",
       "name": "ProxyWar Ladder Commissioner",
-      "description": "Config-driven ruleset_strategy commissioner (Qualifiers self-play crash check -> Competition), with one custom override: each Competition round counts the real distinct champions currently in the league and routes to the largest declared seat count (2/4/8/12) that fits them, then rotates that rung's deadline-proven map pool by round number. The 12-player Europe variant remains available for manual validation but is quarantined from automatic Competition scheduling after repeated hosted artifact timeouts; the World, Britannia, and NorthAmerica variants at both 12 and 16 seats are likewise quarantined (2026-08-11) for multi-hour round wall-times pending engine-efficiency work on large maps. Scoring is win-rate per episode aggregated into an OpenSkill (MMR) rating, since the same league runs episodes of varying size over time and only a placement-based rating is comparable across match sizes.",
+      "description": "Config-driven ruleset_strategy commissioner (Qualifiers self-play crash check -> Competition), with one custom override: each Competition round counts the real distinct champions currently in the league and routes to the largest declared seat count (2/4/8/12/16) that fits them, then rotates that rung's deadline-proven map pool by round number. The 12-player Europe variant remains available for manual validation but is quarantined from automatic Competition scheduling after repeated hosted artifact timeouts; the World, Britannia, and NorthAmerica variants at both 12 and 16 seats are likewise quarantined (2026-08-11) for multi-hour round wall-times pending engine-efficiency work on large maps. Scoring is win-rate per episode aggregated into an OpenSkill (MMR) rating, since the same league runs episodes of varying size over time and only a placement-based rating is comparable across match sizes.",
       "image": "{{COMMISSIONER_IMAGE}}"
     }
   ],
@@ -642,7 +642,7 @@
     {
       "id": "tournament-12p-world",
       "name": "Tournament 12P - World",
-      "description": "DRAFT, unvalidated by the game author: a 12-policy free-for-all -- the seat count the author expects the game to 'shine' at. Extrapolated, not playtested; verify real wall-clock via `coworld run-episode --variant tournament-12p` before this rung ever seats a real league round. Quarantined 2026-08-11 from automatic Competition scheduling for round wall-time: engine cost per decision cycle scales with land tiles, so this map ran multi-hour league rounds. Retained for manual validation; re-add after engine-efficiency work plus a full-length hosted probe lands well inside the artifact deadline.",
+      "description": "Twelve-policy free-for-all on World (Normal): same seat count, step caps, clock, and scoring as the other Tournament 12P variants -- only the map differs. Quarantined 2026-08-11 from automatic Competition scheduling for round wall-time: engine cost per decision cycle scales with land tiles, so this map ran multi-hour league rounds. Retained for manual validation; re-add after engine-efficiency work plus a full-length hosted probe lands well inside the artifact deadline.",
       "game_config": {
         "players": [
           {
