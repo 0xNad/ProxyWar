@@ -1,0 +1,128 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import test from "node:test";
+
+const admission = readFileSync(
+  ".github/workflows/trusted-pr-admission.yml",
+  "utf8",
+);
+const production = readFileSync(
+  ".github/workflows/coworld-production.yml",
+  "utf8",
+);
+const ci = readFileSync(".github/workflows/ci.yml", "utf8");
+const queue = readFileSync(".github/scripts/coworld-queue.mjs", "utf8");
+
+test("privileged admission executes only protected main metadata code", () => {
+  assert.match(admission, /pull_request_target:/);
+  assert.match(admission, /ref: main/);
+  assert.match(admission, /persist-credentials: false/);
+  assert.doesNotMatch(admission, /pull_request\.head\.sha/);
+  assert.doesNotMatch(admission, /refs\/pull/);
+  assert.doesNotMatch(admission, /download-artifact/);
+  assert.doesNotMatch(admission, /secrets\.[A-Z0-9_]+/);
+});
+
+test("admission identity comes from API pull_request.user.login", () => {
+  const source = readFileSync(
+    ".github/scripts/trusted-pr-admission.mjs",
+    "utf8",
+  );
+  assert.match(source, /authorLogin: pr\.user\.login/);
+  assert.match(source, /fresh\.input\.headSha/);
+  assert.match(source, /expectedHeadOid/);
+  assert.doesNotMatch(source, /enablePullRequestAutoMerge/);
+  assert.doesNotMatch(source, /commit.*email/i);
+  assert.doesNotMatch(source, /head\.ref.*trusted/i);
+});
+
+test("production secrets are isolated to a protected main environment job", () => {
+  assert.match(production, /name: coworld-production/);
+  assert.match(
+    production,
+    /COWORLD_API_TOKEN: \$\{\{ secrets\.COWORLD_API_TOKEN \}\}/,
+  );
+  assert.doesNotMatch(production, /enable-cache: true/);
+  assert.match(production, /UV_NO_CACHE=1/);
+  assert.match(production, /\.user\.login=="github-actions\[bot\]"/);
+  assert.match(production, /blocked_candidate/);
+  assert.match(production, /deploy-finalizer:/);
+  assert.match(production, /needs\.deploy\.result != 'success'/);
+  assert.match(production, /needs\.preflight\.result != 'success'/);
+  assert.match(production, /needs\.build\.result != 'success'/);
+  assert.match(production, /proxywar-coworld-deploy-failure:/);
+  assert.doesNotMatch(production, /original_previous=\$\{\{/);
+  assert.doesNotMatch(production, /pull_request:/);
+  assert.doesNotMatch(production, /pull_request_target:/);
+  assert.match(
+    production,
+    /test "\$SOURCE_SHA" = "\$\(gh api repos\/\$GITHUB_REPOSITORY\/git\/ref\/heads\/main/,
+  );
+});
+
+test("release queue is durable beyond GitHub concurrency coalescing", () => {
+  assert.match(production, /schedule:/);
+  assert.match(production, /cancel-in-progress: false/);
+  assert.match(production, /durable FIFO/);
+  assert.match(production, /github-actions\[bot\]/);
+  assert.match(queue, /merge_order_at/);
+  assert.match(queue, /pr\.merged_at/);
+});
+
+test("Coworld release is pinned, template-built, collision-checked, and fully certified", () => {
+  assert.match(production, /COWORLD_CLI_VERSION: "0\.1\.38"/);
+  assert.match(production, /"\$COWORLD_BIN" build --version/);
+  assert.match(production, /coworld_manifest_template\.json/);
+  assert.match(production, /coworld-authenticated-command\.mjs list --json/);
+  assert.match(production, /coworld-authenticated-command\.mjs next-version/);
+  assert.match(production, /"\$COWORLD_BIN" certify/);
+  assert.match(production, /--wait-hosted-smoke --wait-certification/);
+  assert.match(production, /transcript_summary/);
+  assert.match(
+    production,
+    /coworld-authenticated-command\.mjs replay-open.*--hosted --no-open-browser/,
+  );
+  assert.match(production, /coworld-published-replay\.mjs/);
+  assert.match(production, /\.game\.coworld_id/);
+});
+
+test("ordinary frontend changes cannot skip replay-viewer rebuild", () => {
+  assert.doesNotMatch(production, /paths-ignore:/);
+  assert.doesNotMatch(production, /if:.*coworld-adapter/);
+  assert.match(production, /build\/static-replay-viewer/);
+  assert.match(production, /ai-league-replay-progress\|replay_progress_tip/);
+});
+
+test("main CI retains PR, push, merge-group, and explicit recursion fallback coverage", () => {
+  assert.match(ci, /merge_group:/);
+  assert.match(ci, /pull_request:/);
+  assert.match(ci, /push:/);
+  assert.match(ci, /workflow_dispatch:/);
+  assert.match(ci, /🔐 Trusted release automation/);
+  assert.match(ci, /ref: \$\{\{ inputs\.source_sha \|\| github\.sha \}\}/);
+});
+
+test("workflows never echo or artifact production credentials", () => {
+  assert.doesNotMatch(production, /echo.*COWORLD_API_TOKEN/);
+  assert.match(production, /actions\/upload-artifact@ea165f8/);
+  assert.match(production, /coworld-release\.sha256/);
+  assert.doesNotMatch(
+    production,
+    /upload-artifact[\s\S]{0,500}(credentials|\.softmax)/i,
+  );
+  assert.doesNotMatch(production, /set -x/);
+  assert.match(
+    production,
+    /Remove any residual ephemeral credential directories/,
+  );
+  const secretSteps = production
+    .split(/\n {6}- name:/)
+    .filter((step) => step.includes("secrets.COWORLD_API_TOKEN"));
+  assert.ok(secretSteps.length > 0);
+  for (const step of secretSteps) {
+    assert.doesNotMatch(
+      step,
+      /npm run|npx |docker |vitest|pytest|\$COWORLD_BIN" (build|certify)/,
+    );
+  }
+});

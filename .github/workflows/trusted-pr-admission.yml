@@ -1,0 +1,70 @@
+name: 🔐 Trusted PR admission
+
+on:
+  pull_request_target:
+    types:
+      [
+        opened,
+        reopened,
+        synchronize,
+        ready_for_review,
+        labeled,
+        unlabeled,
+        closed,
+      ]
+  pull_request_review:
+    types: [submitted, dismissed]
+  pull_request_review_comment:
+    types: [created, edited, deleted]
+  workflow_run:
+    workflows: ["🧪 CI", "🏷️ Rename guard"]
+    types: [completed]
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      pr_numbers:
+        description: Comma-separated PR numbers for a metadata-only audit
+        required: true
+        type: string
+      dry_run:
+        description: Inspect only; never label, merge, comment, enqueue, or dispatch
+        required: true
+        default: true
+        type: boolean
+      historical:
+        description: Ignore current-base/open-state drift for historical policy audits
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  actions: write
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  admit:
+    name: Exact-author trusted admission
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # This privileged workflow checks out only protected main. It never checks out
+      # a PR head, merge ref, fork, or artifact, and never executes contributor code.
+      - name: Checkout protected admission code from main
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: main
+          persist-credentials: false
+          submodules: false
+      - name: Evaluate exact PR metadata and enable auto-merge
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBERS: ${{ inputs.pr_numbers || '' }}
+          DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
+          HISTORICAL: ${{ inputs.historical && 'true' || 'false' }}
+        run: node .github/scripts/trusted-pr-admission.mjs
