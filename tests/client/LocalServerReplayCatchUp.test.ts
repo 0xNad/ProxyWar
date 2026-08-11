@@ -237,6 +237,23 @@ describe("LocalServer archived-replay progress counter", () => {
     ]);
   });
 
+  it("flushes the newest suppressed value when the throttle window closes", () => {
+    const captured = captureEvents<ReplayTurnProgress>(
+      AI_LEAGUE_REPLAY_PROGRESS_EVENT,
+    );
+    const { server, tickAt } = startServerWithManualPacingTimer(
+      lobbyConfig(10),
+    );
+    tickAt(0);
+    server.turnsComplete(1);
+    // Suppressed by the throttle (inside the start() dispatch's window) --
+    // but acks stopping here must not leave the counter frozen at 0.
+    expect(captured).toEqual([{ turnsRendered: 0, turnsTotal: 10 }]);
+
+    vi.advanceTimersByTime(AI_LEAGUE_REPLAY_PROGRESS_THROTTLE_MS);
+    expect(captured.at(-1)).toEqual({ turnsRendered: 1, turnsTotal: 10 });
+  });
+
   it("dispatches a mid-replay ack once the throttle window has passed", () => {
     const captured = captureEvents<ReplayTurnProgress>(
       AI_LEAGUE_REPLAY_PROGRESS_EVENT,

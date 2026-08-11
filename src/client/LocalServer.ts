@@ -136,6 +136,8 @@ export class LocalServer {
   private reportedCatchingUp = false;
   // When the last progress event went out -- see reportReplayProgress.
   private lastProgressDispatchMs = Number.NEGATIVE_INFINITY;
+  // Pending trailing-edge flush for a throttled progress dispatch.
+  private progressFlushTimeout: NodeJS.Timeout | null = null;
 
   private turnCheckInterval: NodeJS.Timeout;
   private clientConnect: () => void;
@@ -504,24 +506,38 @@ export class LocalServer {
    * position itself, from the same two counters. Dispatched at start() so
    * the counter is on screen before the first turn renders, then throttled
    * per acknowledgement batch (see AI_LEAGUE_REPLAY_PROGRESS_THROTTLE_MS).
-   * The final `total / total` dispatch always goes out so the end state is
-   * never throttled away.
+   * The throttle has a trailing edge: a suppressed update schedules a flush
+   * for when the window closes, so the counter never freezes at a stale
+   * value if acks stop (pause, clip preview parked at its anchor, worker
+   * stall). The final `total / total` dispatch always goes out directly.
    */
   private reportReplayProgress(): void {
     if (!this.archivedReplayHudEventsEnabled()) {
       return;
     }
-    const detail = this.replayTurnProgress();
     const now = Date.now();
+    // Clamp so a backwards wall-clock step reads as "window just opened",
+    // never as a window that outlives the step.
+    const sinceLast = Math.max(0, now - this.lastProgressDispatchMs);
     if (
-      detail.turnsRendered < detail.turnsTotal &&
-      now - this.lastProgressDispatchMs < AI_LEAGUE_REPLAY_PROGRESS_THROTTLE_MS
+      this.turnsExecuted < this.replayTurns.length &&
+      sinceLast < AI_LEAGUE_REPLAY_PROGRESS_THROTTLE_MS
     ) {
+      this.progressFlushTimeout ??= setTimeout(() => {
+        this.progressFlushTimeout = null;
+        this.reportReplayProgress();
+      }, AI_LEAGUE_REPLAY_PROGRESS_THROTTLE_MS - sinceLast);
       return;
+    }
+    if (this.progressFlushTimeout !== null) {
+      clearTimeout(this.progressFlushTimeout);
+      this.progressFlushTimeout = null;
     }
     this.lastProgressDispatchMs = now;
     document.dispatchEvent(
-      new CustomEvent(AI_LEAGUE_REPLAY_PROGRESS_EVENT, { detail }),
+      new CustomEvent(AI_LEAGUE_REPLAY_PROGRESS_EVENT, {
+        detail: this.replayTurnProgress(),
+      }),
     );
   }
 
@@ -745,6 +761,10 @@ export class LocalServer {
     console.log("local server ending game");
     this.running = false;
     clearInterval(this.turnCheckInterval);
+    if (this.progressFlushTimeout !== null) {
+      clearTimeout(this.progressFlushTimeout);
+      this.progressFlushTimeout = null;
+    }
     this.progressiveReplayUnsubscribe?.();
     this.progressiveReplayUnsubscribe = null;
     if (this.isReplay) {

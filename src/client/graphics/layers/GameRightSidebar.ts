@@ -131,6 +131,10 @@ export class GameRightSidebar extends LitElement implements Layer {
       this.game?.config()?.gameConfig()?.gameType === GameType.Singleplayer ||
       this.game.config().isReplay();
     this._isVisible = true;
+    // This element outlives games (static in index.html; leaving a lobby is
+    // an SPA transition, no reload) -- drop the previous game's counters.
+    this._replayProgress = null;
+    this._catchUpProgress = null;
     this.game.inSpawnPhase();
 
     this.eventBus.on(SpawnBarVisibleEvent, (e) => {

@@ -122,6 +122,22 @@ describe("GameRightSidebar - top-right control cluster", () => {
     expect(rendered).toContain("56789");
   });
 
+  test("init() clears counters left over from a previous game", () => {
+    // The element is static in index.html and leaving a lobby is an SPA
+    // transition, so the same instance is re-init()ed for the next game.
+    const { sidebar } = wiredSidebar();
+    (sidebar as any).onReplayProgressEvent(
+      new CustomEvent(AI_LEAGUE_REPLAY_PROGRESS_EVENT, {
+        detail: { turnsRendered: 5000, turnsTotal: 5000 },
+      }),
+    );
+    expect((sidebar as any)._replayProgress).not.toBeNull();
+
+    (sidebar as any).init();
+    expect((sidebar as any)._replayProgress).toBeNull();
+    expect((sidebar as any)._catchUpProgress).toBeNull();
+  });
+
   test("Escape (CloseViewEvent) restores a hidden interface", () => {
     const { sidebar, bus } = wiredSidebar();
     (sidebar as any).onToggleHudClick();
