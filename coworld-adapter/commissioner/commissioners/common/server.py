@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -112,6 +113,24 @@ def _duration_text(seconds: float) -> str:
     if seconds.is_integer():
         return f"{int(seconds)} seconds"
     return f"{seconds:.1f} seconds"
+
+
+# RFC 6455 caps a close frame's payload at 125 bytes, two of which carry the
+# status code. `websockets` raises ProtocolError("control frame too long") past
+# that, and because the raise happens inside the close call it escapes the
+# handler -- uvicorn then drops the TCP connection with no close frame at all.
+# The platform reports that as "no close frame received or sent" instead of our
+# diagnostic close, which is exactly how a protocol rejection can masquerade as
+# a lost pod. Trim by BYTES; slicing by characters is not the same budget.
+_CLOSE_REASON_MAX_BYTES = 123
+
+
+def _close_reason(text: str) -> str:
+    return text.encode("utf-8")[:_CLOSE_REASON_MAX_BYTES].decode("utf-8", "ignore")
+
+
+async def _close_socket(websocket: WebSocket, code: int, reason: str) -> None:
+    await websocket.close(code=code, reason=_close_reason(reason))
 
 
 async def _send_episode_batch(
@@ -390,10 +409,7 @@ def create_app(commissioner: Commissioner) -> FastAPI:
 
                 if msg_type == "episode_result":
                     if round_start is None:
-                        await websocket.close(
-                            code=1008,
-                            reason="episode_result received before round_start",
-                        )
+                        await _close_socket(websocket, 1008, "episode_result received before round_start")
                         return
                     result = EpisodeResult.model_validate(
                         {key: value for key, value in data.items() if key != "type"}
@@ -402,31 +418,19 @@ def create_app(commissioner: Commissioner) -> FastAPI:
                         expected_request_ids
                         and result.request_id not in expected_request_ids
                     ):
-                        await websocket.close(
-                            code=1008,
-                            reason=f"unknown episode request id: {result.request_id!r}",
-                        )
+                        await _close_socket(websocket, 1008, f"unknown episode request id: {result.request_id!r}")
                         return
                     if not await request_was_sent(result.request_id):
-                        await websocket.close(
-                            code=1008,
-                            reason=f"result for unknown or unsent episode request id: {result.request_id!r}",
-                        )
+                        await _close_socket(websocket, 1008, f"result for unknown or unsent episode request id: {result.request_id!r}")
                         return
                     previous_result = results_by_request_id.get(result.request_id)
                     if previous_result is not None:
                         if previous_result == result:
                             continue
-                        await websocket.close(
-                            code=1008,
-                            reason=f"conflicting duplicate result for episode request id: {result.request_id!r}",
-                        )
+                        await _close_socket(websocket, 1008, f"conflicting duplicate result for episode request id: {result.request_id!r}")
                         return
                     if result.request_id in failed_by_request_id:
-                        await websocket.close(
-                            code=1008,
-                            reason=f"result contradicts prior terminal failure or rejection for episode request id: {result.request_id!r}",
-                        )
+                        await _close_socket(websocket, 1008, f"result contradicts prior terminal failure or rejection for episode request id: {result.request_id!r}")
                         return
                     task = cancel_tasks.pop(result.request_id, None)
                     if task is not None:
@@ -440,31 +444,19 @@ def create_app(commissioner: Commissioner) -> FastAPI:
                         {key: value for key, value in data.items() if key != "type"}
                     )
                     if round_start is None:
-                        await websocket.close(
-                            code=1008,
-                            reason="episode_failed received before round_start",
-                        )
+                        await _close_socket(websocket, 1008, "episode_failed received before round_start")
                         return
                     if (
                         expected_request_ids
                         and failed.request_id not in expected_request_ids
                     ):
-                        await websocket.close(
-                            code=1008,
-                            reason=f"unknown episode request id: {failed.request_id!r}",
-                        )
+                        await _close_socket(websocket, 1008, f"unknown episode request id: {failed.request_id!r}")
                         return
                     if not await request_was_sent(failed.request_id):
-                        await websocket.close(
-                            code=1008,
-                            reason=f"failure for unknown or unsent episode request id: {failed.request_id!r}",
-                        )
+                        await _close_socket(websocket, 1008, f"failure for unknown or unsent episode request id: {failed.request_id!r}")
                         return
                     if failed.request_id in results_by_request_id:
-                        await websocket.close(
-                            code=1008,
-                            reason=f"failure contradicts prior result for episode request id: {failed.request_id!r}",
-                        )
+                        await _close_socket(websocket, 1008, f"failure contradicts prior result for episode request id: {failed.request_id!r}")
                         return
                     previous_failure = failed_by_request_id.get(failed.request_id)
                     if previous_failure is not None:
@@ -473,10 +465,7 @@ def create_app(commissioner: Commissioner) -> FastAPI:
                             and previous_failure == failed
                         ):
                             continue
-                        await websocket.close(
-                            code=1008,
-                            reason=f"failure contradicts prior terminal failure or rejection for episode request id: {failed.request_id!r}",
-                        )
+                        await _close_socket(websocket, 1008, f"failure contradicts prior terminal failure or rejection for episode request id: {failed.request_id!r}")
                         return
                     task = cancel_tasks.pop(failed.request_id, None)
                     if task is not None:
@@ -495,16 +484,10 @@ def create_app(commissioner: Commissioner) -> FastAPI:
                             request_id not in expected_request_ids
                             or not await request_was_sent(request_id)
                         ):
-                            await websocket.close(
-                                code=1008,
-                                reason=f"accepted unknown or unsent episode request id: {request_id!r}",
-                            )
+                            await _close_socket(websocket, 1008, f"accepted unknown or unsent episode request id: {request_id!r}")
                             return
                         if request_id in rejected_request_ids:
-                            await websocket.close(
-                                code=1008,
-                                reason=f"accepted previously rejected episode request id: {request_id!r}",
-                            )
+                            await _close_socket(websocket, 1008, f"accepted previously rejected episode request id: {request_id!r}")
                             return
                         # A terminal result may race ahead of the acknowledgement.
                         # Treat its later acceptance as idempotent rather than
@@ -530,16 +513,10 @@ def create_app(commissioner: Commissioner) -> FastAPI:
                             request_id not in expected_request_ids
                             or not await request_was_sent(request_id)
                         ):
-                            await websocket.close(
-                                code=1008,
-                                reason=f"rejected unknown or unsent episode request id: {request_id!r}",
-                            )
+                            await _close_socket(websocket, 1008, f"rejected unknown or unsent episode request id: {request_id!r}")
                             return
                         if request_id in accepted_request_ids or request_id in results_by_request_id:
-                            await websocket.close(
-                                code=1008,
-                                reason=f"rejected previously accepted episode request id: {request_id!r}",
-                            )
+                            await _close_socket(websocket, 1008, f"rejected previously accepted episode request id: {request_id!r}")
                             return
                         rejection_failure = EpisodeFailed(
                             request_id=request_id,
@@ -550,16 +527,10 @@ def create_app(commissioner: Commissioner) -> FastAPI:
                         if request_id in rejected_request_ids:
                             if failed_by_request_id.get(request_id) == rejection_failure:
                                 continue
-                            await websocket.close(
-                                code=1008,
-                                reason=f"conflicting duplicate rejection for episode request id: {request_id!r}",
-                            )
+                            await _close_socket(websocket, 1008, f"conflicting duplicate rejection for episode request id: {request_id!r}")
                             return
                         if request_id in failed_by_request_id:
-                            await websocket.close(
-                                code=1008,
-                                reason=f"rejection contradicts prior terminal failure for episode request id: {request_id!r}",
-                            )
+                            await _close_socket(websocket, 1008, f"rejection contradicts prior terminal failure for episode request id: {request_id!r}")
                             return
                         rejected_in_flight = True
                         rejected_request_ids.add(request_id)
@@ -578,8 +549,8 @@ def create_app(commissioner: Commissioner) -> FastAPI:
                     await websocket.close(code=1000)
                     return
                 else:
-                    await websocket.close(
-                        code=1008, reason=f"unknown message type: {msg_type!r}"
+                    await _close_socket(
+                        websocket, 1008, f"unknown message type: {msg_type!r}"
                     )
                     return
 
@@ -589,7 +560,20 @@ def create_app(commissioner: Commissioner) -> FastAPI:
         except WebSocketDisconnect:
             return
         except (ValueError, ValidationError) as exc:
-            await websocket.close(code=1008, reason=str(exc)[:120])
+            await _close_socket(websocket, 1008, str(exc))
+        except Exception as exc:
+            # Anything else would escape the ASGI app; uvicorn then closes the
+            # TCP transport with no close frame, which the platform reports as
+            # "no close frame received or sent" -- wire-indistinguishable from
+            # losing the pod, and the reason round 1357 could not be attributed.
+            # Close deliberately with a diagnostic reason, then re-raise so
+            # uvicorn still logs the traceback. asyncio.CancelledError is a
+            # BaseException and is deliberately NOT caught here.
+            with contextlib.suppress(Exception):
+                await _close_socket(
+                    websocket, 1011, f"commissioner error: {type(exc).__name__}: {exc}"
+                )
+            raise
         finally:
             for task in cancel_tasks.values():
                 task.cancel()
