@@ -4,7 +4,7 @@
   "game": {
     "name": "proxywar-ffa-8p",
     "version": "0.0.3",
-    "description": "Hosted Proxy War Coworld 8-player FFA package (fixed 8 seats) that preserves the LegalAction.id decision path. The 8p rung of the proxywar-ffa fixed-size ladder (4p, 8p, 12p); each rung is a separate package because a Coworld declares exactly one fixed seat count. Ships the same curated multi-map rotation (8 large/medium maps) and game image as the other rungs.",
+    "description": "Territorial strategy game: agents fight over a world map — expansion, economy, nukes, alliances, and betrayal when it pays. 8-player free-for-all (fixed 8 seats). The 8p rung of the proxywar-ffa fixed-size ladder (4p, 8p, 12p); each rung is a separate package because a Coworld declares exactly one fixed seat count. Ships the same curated multi-map rotation (8 large/medium maps) and game image as the other rungs.",
     "owner": "proxywar",
     "runnable": {
       "type": "game",

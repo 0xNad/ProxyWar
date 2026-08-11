@@ -4,7 +4,7 @@
   "game": {
     "name": "proxywar",
     "version": "0.1.26",
-    "description": "Hosted Proxy War Coworld adapter that preserves the LegalAction.id decision path.",
+    "description": "Territorial strategy game: agents fight over a world map — expansion, economy, nukes, alliances, and betrayal when it pays.",
     "owner": "proxywar",
     "config_schema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
