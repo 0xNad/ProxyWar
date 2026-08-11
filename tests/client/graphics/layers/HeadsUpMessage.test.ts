@@ -1,38 +1,28 @@
-/**
- * P0 fix (2026-08-03, deploy 3.9, item 3a): combat toasts ("show-message"
- * window events fired for build/attack/etc.) kept firing and stacking up
- * over the win banner once a match ended. The toast (`z-[800]`,
- * `top-6 left-1/2`) and WinModal's centered banner (`z-[10010]`,
- * `top-1/2 left-1/2`) never overlap on screen, so a toast stayed fully
- * VISIBLE alongside the banner regardless of z-index stacking — a
- * "frozen HUD" over a finished match rather than a clean end state.
- */
+vi.mock("lit", () => ({
+  html: (strings: TemplateStringsArray, ...values: unknown[]) => ({
+    strings,
+    values,
+  }),
+  LitElement: class extends EventTarget {
+    requestUpdate() {}
+  },
+}));
+
+vi.mock("lit/decorators.js", () => ({
+  customElement: () => (clazz: unknown) => clazz,
+  state: () => () => {},
+  property: () => () => {},
+}));
+
+vi.mock("../../../../src/client/Utils", () => ({
+  translateText: vi.fn((key: string) => key),
+}));
+
 import { GameUpdateType } from "../../../../src/core/game/GameUpdates";
+import type { GameView } from "../../../../src/core/game/GameView";
+import { HeadsUpMessage } from "../../../../src/client/graphics/layers/HeadsUpMessage";
 
-interface MinimalGame {
-  updatesSinceLastTick: () => Record<number, unknown[]>;
-  config: () => {
-    numSpawnPhaseTurns: () => number;
-    hasExtendedSpawnImmunity: () => boolean;
-    isReplay: () => boolean;
-    isRandomSpawn: () => boolean;
-  };
-  ticks: () => number;
-  inSpawnPhase: () => boolean;
-  isSpawnImmunityActive: () => boolean;
-  isCatchingUp: () => boolean;
-}
-
-interface HeadsUpMessageTestHooks {
-  game: unknown;
-  tick: () => void;
-  init: () => void;
-  connectedCallback: () => void;
-  disconnectedCallback: () => void;
-  toastMessage: string | null;
-}
-
-function baseGame(overrides: Partial<MinimalGame> = {}): MinimalGame {
+function spawnPhaseGame(): GameView {
   return {
     updatesSinceLastTick: () => ({
       [GameUpdateType.GamePaused]: [],
@@ -44,88 +34,66 @@ function baseGame(overrides: Partial<MinimalGame> = {}): MinimalGame {
       isReplay: () => true,
       isRandomSpawn: () => false,
     }),
-    ticks: () => 500,
-    inSpawnPhase: () => false,
+    ticks: () => 5,
+    inSpawnPhase: () => true,
     isSpawnImmunityActive: () => false,
     isCatchingUp: () => false,
-    ...overrides,
-  };
+  } as unknown as GameView;
 }
 
-async function newMessage(): Promise<HeadsUpMessageTestHooks> {
-  const { HeadsUpMessage } = await import(
-    "../../../../src/client/graphics/layers/HeadsUpMessage"
-  );
-  const message = new HeadsUpMessage() as unknown as HeadsUpMessageTestHooks;
-  message.game = baseGame();
-  message.connectedCallback();
-  message.init();
-  return message;
+function withPath<T>(pathname: string, run: () => T): T {
+  const original = window.location.pathname;
+  Object.defineProperty(window, "location", {
+    value: { ...window.location, pathname },
+    writable: true,
+    configurable: true,
+  });
+  try {
+    return run();
+  } finally {
+    Object.defineProperty(window, "location", {
+      value: { ...window.location, pathname: original },
+      writable: true,
+      configurable: true,
+    });
+  }
 }
 
-describe("HeadsUpMessage match-end toast suppression", () => {
-  let message: HeadsUpMessageTestHooks | null = null;
-
+describe("HeadsUpMessage - spawn banner visibility", () => {
   afterEach(() => {
-    message?.disconnectedCallback();
-    message = null;
+    vi.clearAllMocks();
   });
 
-  it("clears an already-showing toast the instant the match ends", async () => {
-    message = await newMessage();
-    // Simulate an in-flight combat toast (as "show-message" would set it).
-    window.dispatchEvent(
-      new CustomEvent("show-message", {
-        detail: { message: "Attack launched", duration: 2000, color: "green" },
-      }),
-    );
-    expect(message.toastMessage).toBe("Attack launched");
+  // Operator decision 2026-08-10: "Choose a starting location" is a player
+  // instruction; spectators can't spawn, so it never shows on watch routes.
+  it("hides the spawn-phase banner for replay spectators", () => {
+    const hud = new HeadsUpMessage();
+    hud.game = spawnPhaseGame();
+    withPath("/ai-league-replay/league-coworld-x", () => hud.tick());
+    expect((hud as any).isVisible).toBe(false);
+  });
 
-    message.game = baseGame({
-      updatesSinceLastTick: () => ({
-        [GameUpdateType.GamePaused]: [],
-        [GameUpdateType.Win]: [{ winner: ["player", "WINNER_CLIENT"] }],
-      }),
+  it("still shows the spawn-phase banner in an ordinary game", () => {
+    const hud = new HeadsUpMessage();
+    hud.game = spawnPhaseGame();
+    withPath("/", () => hud.tick());
+    expect((hud as any).isVisible).toBe(true);
+  });
+
+  it("keeps the catching-up notice for spectators", () => {
+    const hud = new HeadsUpMessage();
+    const game = spawnPhaseGame();
+    (game as any).config = () => ({
+      numSpawnPhaseTurns: () => 100,
+      hasExtendedSpawnImmunity: () => false,
+      isReplay: () => false,
+      isRandomSpawn: () => false,
     });
-    message.tick();
-
-    expect(message.toastMessage).toBeNull();
-  });
-
-  it("suppresses any new toast fired after the match has ended", async () => {
-    message = await newMessage();
-    message.game = baseGame({
-      updatesSinceLastTick: () => ({
-        [GameUpdateType.GamePaused]: [],
-        [GameUpdateType.Win]: [{ winner: ["player", "WINNER_CLIENT"] }],
-      }),
+    (game as any).isCatchingUp = () => true;
+    hud.game = game;
+    withPath("/ai-league-replay/league-coworld-x", () => {
+      for (let i = 0; i < 12; i++) hud.tick();
     });
-    message.tick();
-    expect(message.toastMessage).toBeNull();
-
-    window.dispatchEvent(
-      new CustomEvent("show-message", {
-        detail: {
-          message: "A late-arriving combat message",
-          duration: 2000,
-          color: "green",
-        },
-      }),
-    );
-
-    expect(message.toastMessage).toBeNull();
-  });
-
-  it("still shows toasts normally before the match has ended", async () => {
-    message = await newMessage();
-    message.tick();
-
-    window.dispatchEvent(
-      new CustomEvent("show-message", {
-        detail: { message: "Attack launched", duration: 2000, color: "green" },
-      }),
-    );
-
-    expect(message.toastMessage).toBe("Attack launched");
+    expect((hud as any).isVisible).toBe(true);
   });
 });

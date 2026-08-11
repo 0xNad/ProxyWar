@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FitWholeMapEvent } from "../../../../src/client/graphics/TransformHandler";
 import { GameUpdateType } from "../../../../src/core/game/GameUpdates";
-import { RankedType } from "../../../../src/core/game/Game";
 
 vi.mock("../../../../src/client/Utils", () => ({
   translateText: vi.fn(
@@ -51,7 +50,6 @@ vi.mock("../../../../src/client/CrazyGamesSDK", () => ({
 
 interface WinModalTestHooks {
   isVisible: boolean;
-  _handleExit: () => void;
 }
 
 interface MinimalPlayer {
@@ -107,62 +105,38 @@ describe("WinModal Requeue", () => {
     localStorage.clear();
   });
 
-  describe("isRankedGame detection", () => {
-    it("should detect ranked 1v1 game", () => {
-      const gameConfig = {
-        rankedType: RankedType.OneVOne,
-      };
-      const isRankedGame = gameConfig.rankedType === RankedType.OneVOne;
-      expect(isRankedGame).toBe(true);
-    });
-
-    it("should not detect non-ranked game", () => {
-      const gameConfig = {
-        rankedType: undefined,
-      };
-      const isRankedGame = gameConfig.rankedType === RankedType.OneVOne;
-      expect(isRankedGame).toBe(false);
-    });
-  });
-
-  describe("requeue navigation", () => {
-    it("should navigate to /?requeue when requeue is triggered", () => {
-      // Simulate the _handleRequeue behavior
-      const handleRequeue = () => {
-        window.location.href = "/?requeue";
-      };
-
-      handleRequeue();
-
-      expect(window.location.href).toBe("/?requeue");
-    });
-
-    it("should navigate to / when exit is triggered", () => {
-      // Simulate the _handleExit behavior
-      const handleExit = () => {
-        window.location.href = "/";
-      };
-
-      handleExit();
-
-      expect(window.location.href).toBe("/");
-    });
-  });
-
   describe("league replay mode", () => {
-    it("exit navigates to /league from a replay, / otherwise", async () => {
+    // Operator decision 2026-08-10: the winner screen announces the winner
+    // and nothing else — no Exit/Back-to-league, no Requeue, no
+    // Keep-playing/Spectate. The machinery is gone, not merely hidden.
+    it("renders only the winner headline — no action buttons", async () => {
       const { WinModal } = await import(
         "../../../../src/client/graphics/layers/WinModal"
       );
       const modal = new WinModal() as unknown as WinModalTestHooks;
-
-      window.location.pathname = "/ai-league-replay/league-coworld-x";
-      modal._handleExit();
-      expect(window.location.href).toBe("/league");
-
-      window.location.pathname = "/";
-      modal._handleExit();
-      expect(window.location.href).toBe("/");
+      modal.isVisible = true;
+      const rendered = (
+        modal as unknown as {
+          render: () => {
+            strings: readonly string[];
+            values: readonly unknown[];
+          };
+        }
+      ).render();
+      const html = rendered.strings.join(" ") + rendered.values.join(" ");
+      expect(html).not.toContain("o-button");
+      for (const removed of [
+        "win_modal.exit",
+        "win_modal.back_to_league",
+        "win_modal.requeue",
+        "win_modal.keep",
+        "win_modal.spectate",
+      ]) {
+        expect(html).not.toContain(removed);
+      }
+      const hooks = modal as unknown as Record<string, unknown>;
+      expect(hooks._handleExit).toBeUndefined();
+      expect(hooks._handleRequeue).toBeUndefined();
     });
 
     it("shows no tutorial or store upsell in replay mode", async () => {
@@ -286,20 +260,6 @@ describe("WinModal Requeue", () => {
       expect(emitted.some((event) => event instanceof FitWholeMapEvent)).toBe(
         false,
       );
-    });
-  });
-
-  describe("requeue URL parameter handling", () => {
-    it("should parse requeue parameter from URL", () => {
-      const url = new URL("http://localhost:9000/?requeue");
-      const hasRequeue = url.searchParams.has("requeue");
-      expect(hasRequeue).toBe(true);
-    });
-
-    it("should not find requeue parameter when absent", () => {
-      const url = new URL("http://localhost:9000/");
-      const hasRequeue = url.searchParams.has("requeue");
-      expect(hasRequeue).toBe(false);
     });
   });
 

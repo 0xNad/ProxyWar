@@ -6,6 +6,7 @@ import { GameType } from "../../../core/game/Game";
 import { GameView } from "../../../core/game/GameView";
 import { crazyGamesSDK } from "../../CrazyGamesSDK";
 import {
+  CloseViewEvent,
   ReplaySpeedChangeEvent,
   TogglePauseIntentEvent,
 } from "../../InputHandler";
@@ -16,7 +17,6 @@ import { translateText } from "../../Utils";
 import { ImmunityBarVisibleEvent } from "./ImmunityTimer";
 import { Layer } from "./Layer";
 import { ShowReplayPanelEvent } from "./ReplayPanel";
-import { ShowSettingsModalEvent } from "./SettingsModal";
 import { SpawnBarVisibleEvent } from "./SpawnTimer";
 /**
  * ReplaySpeedMultiplier is a DELAY multiplier, not a speed one: slow=2 means
@@ -56,13 +56,20 @@ const CONTROL_BUTTON_CLASS =
   "hover:bg-white/10 active:bg-white/15 focus-visible:outline-hidden " +
   "focus-visible:ring-2 focus-visible:ring-info/60";
 
-const exitIcon = assetUrl("images/ExitIconWhite.svg");
 const FastForwardIconSolid = assetUrl("images/FastForwardIconSolidWhite.svg");
 const pauseIcon = assetUrl("images/PauseIconWhite.svg");
 const playIcon = assetUrl("images/PlayIconWhite.svg");
-const settingsIcon = assetUrl("images/SettingIconWhite.svg");
 const fullscreenIcon = assetUrl("images/FullscreenIconWhite.svg");
 const exitFullscreenIcon = assetUrl("images/ExitFullscreenIconWhite.svg");
+const hideUiIcon = assetUrl("images/HideUiIconWhite.svg");
+const showUiIcon = assetUrl("images/ShowUiIconWhite.svg");
+
+/**
+ * Body class that hides every HUD element except this sidebar (which
+ * collapses to a lone restore button). The matching CSS is injected by
+ * GameRenderer.mountHudVisibilityStyles.
+ */
+export const HUD_HIDDEN_BODY_CLASS = "proxywar-hud-hidden";
 
 @customElement("game-right-sidebar")
 export class GameRightSidebar extends LitElement implements Layer {
@@ -83,6 +90,10 @@ export class GameRightSidebar extends LitElement implements Layer {
 
   @state()
   private isFullscreen: boolean = false;
+
+  // "Hide interface" mode: everything vanishes except the restore button.
+  @state()
+  private hudHidden: boolean = false;
 
   @state()
   private timer: number = 0;
@@ -142,6 +153,13 @@ export class GameRightSidebar extends LitElement implements Layer {
       }
     });
 
+    // Escape restores a hidden interface.
+    this.eventBus.on(CloseViewEvent, () => {
+      if (this.hudHidden) {
+        this.setHudHidden(false);
+      }
+    });
+
     this.requestUpdate();
   }
 
@@ -166,6 +184,7 @@ export class GameRightSidebar extends LitElement implements Layer {
       AI_LEAGUE_REPLAY_CATCHUP_EVENT,
       this.onReplayCatchUpEvent,
     );
+    document.body.classList.remove(HUD_HIDDEN_BODY_CLASS);
   }
 
   private onReplayCatchUpEvent = (e: Event) => {
@@ -255,24 +274,13 @@ export class GameRightSidebar extends LitElement implements Layer {
     this.eventBus.emit(new PauseGameIntentEvent(this.isPaused));
   }
 
-  private async onExitButtonClick() {
-    const isAlive = this.game.myPlayer()?.isAlive();
-    if (isAlive) {
-      const isConfirmed = confirm(
-        translateText("help_modal.exit_confirmation"),
-      );
-      if (!isConfirmed) return;
-    }
-    await crazyGamesSDK.requestMidgameAd();
-    await crazyGamesSDK.gameplayStop();
-    // redirect to the home page
-    window.location.href = "/";
+  private setHudHidden(hidden: boolean) {
+    this.hudHidden = hidden;
+    document.body.classList.toggle(HUD_HIDDEN_BODY_CLASS, hidden);
   }
 
-  private onSettingsButtonClick() {
-    this.eventBus.emit(
-      new ShowSettingsModalEvent(true, this._isSinglePlayer, this.isPaused),
-    );
+  private onToggleHudClick() {
+    this.setHudHidden(!this.hudHidden);
   }
 
   private onFullscreenButtonClick() {
@@ -289,6 +297,32 @@ export class GameRightSidebar extends LitElement implements Layer {
 
   render() {
     if (this.game === undefined) return html``;
+
+    if (this.hudHidden) {
+      // Everything else is CSS-hidden; only this restore chip stays.
+      return html`
+        <aside
+          class="w-fit flex flex-row items-center py-2 px-3 text-white opacity-50 hover:opacity-100 transition-opacity"
+          @contextmenu=${(e: Event) => e.preventDefault()}
+        >
+          <button
+            type="button"
+            class=${CONTROL_BUTTON_CLASS}
+            title=${translateText("game_controls.show_hud")}
+            aria-label=${translateText("game_controls.show_hud")}
+            @click=${this.onToggleHudClick}
+          >
+            <img
+              src=${showUiIcon}
+              alt=""
+              aria-hidden="true"
+              width="20"
+              height="20"
+            />
+          </button>
+        </aside>
+      `;
+    }
 
     const timerColor =
       this.game.config().gameConfig().maxTimerValue !== undefined &&
@@ -342,22 +376,6 @@ export class GameRightSidebar extends LitElement implements Layer {
              flush against "pause". -->
         <span class="w-px self-stretch bg-white/15" aria-hidden="true"></span>
 
-        <button
-          type="button"
-          class=${CONTROL_BUTTON_CLASS}
-          title=${translateText("game_controls.settings")}
-          aria-label=${translateText("game_controls.settings")}
-          @click=${this.onSettingsButtonClick}
-        >
-          <img
-            src=${settingsIcon}
-            alt=""
-            aria-hidden="true"
-            width="20"
-            height="20"
-          />
-        </button>
-
         ${document.fullscreenEnabled
           ? html`<button
               type="button"
@@ -382,13 +400,13 @@ export class GameRightSidebar extends LitElement implements Layer {
 
         <button
           type="button"
-          class=${`${CONTROL_BUTTON_CLASS} hover:bg-danger/25`}
-          title=${translateText("game_controls.exit")}
-          aria-label=${translateText("game_controls.exit")}
-          @click=${this.onExitButtonClick}
+          class=${CONTROL_BUTTON_CLASS}
+          title=${translateText("game_controls.hide_hud")}
+          aria-label=${translateText("game_controls.hide_hud")}
+          @click=${this.onToggleHudClick}
         >
           <img
-            src=${exitIcon}
+            src=${hideUiIcon}
             alt=""
             aria-hidden="true"
             width="20"
