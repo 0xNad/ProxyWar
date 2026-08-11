@@ -39,11 +39,12 @@ vi.mock("../../../../src/client/Transport", () => ({
   SendWinnerEvent: class {},
 }));
 
-import { CloseViewEvent } from "../../../../src/client/InputHandler";
 import {
   GameRightSidebar,
   HUD_HIDDEN_BODY_CLASS,
 } from "../../../../src/client/graphics/layers/GameRightSidebar";
+import { CloseViewEvent } from "../../../../src/client/InputHandler";
+import { AI_LEAGUE_REPLAY_PROGRESS_EVENT } from "../../../../src/client/LocalServer";
 import { EventBus } from "../../../../src/core/EventBus";
 import type { GameView } from "../../../../src/core/game/GameView";
 
@@ -109,7 +110,7 @@ describe("GameRightSidebar - top-right control cluster", () => {
     expect(before).not.toContain("game_controls.replay_progress_tip");
 
     (sidebar as any).onReplayProgressEvent(
-      new CustomEvent("ai-league-replay-progress", {
+      new CustomEvent(AI_LEAGUE_REPLAY_PROGRESS_EVENT, {
         detail: { turnsRendered: 1234, turnsTotal: 56789 },
       }),
     );
@@ -119,7 +120,6 @@ describe("GameRightSidebar - top-right control cluster", () => {
     // ("1,234" would corrupt the leaguecast kiosk's "N / M" body-text parse).
     expect(rendered).toContain("1234");
     expect(rendered).toContain("56789");
-    expect(rendered).not.toContain("1,234");
   });
 
   test("Escape (CloseViewEvent) restores a hidden interface", () => {

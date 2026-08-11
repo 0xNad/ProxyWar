@@ -13,6 +13,7 @@ import {
 import {
   AI_LEAGUE_REPLAY_CATCHUP_EVENT,
   AI_LEAGUE_REPLAY_PROGRESS_EVENT,
+  type ReplayTurnProgress,
 } from "../../LocalServer";
 import { PauseGameIntentEvent, SendWinnerEvent } from "../../Transport";
 import { defaultReplaySpeedMultiplier } from "../../utilities/ReplaySpeedMultiplier";
@@ -109,18 +110,12 @@ export class GameRightSidebar extends LitElement implements Layer {
   // Real turn-count catch-up progress from LocalServer.reportReplayCatchUp()
   // -- null whenever the replay isn't behind its own dispatched position.
   @state()
-  private _catchUpProgress: {
-    turnsRendered: number;
-    turnsTotal: number;
-  } | null = null;
+  private _catchUpProgress: ReplayTurnProgress | null = null;
 
   // Steady playhead position from LocalServer.reportReplayProgress() --
   // archived replays only, present from boot through the final turn.
   @state()
-  private _replayProgress: {
-    turnsRendered: number;
-    turnsTotal: number;
-  } | null = null;
+  private _replayProgress: ReplayTurnProgress | null = null;
 
   private hasWinner = false;
   private isLobbyCreator = false;
@@ -206,23 +201,14 @@ export class GameRightSidebar extends LitElement implements Layer {
     document.body.classList.remove(HUD_HIDDEN_BODY_CLASS);
   }
 
-  private onReplayCatchUpEvent = (e: Event) => {
-    // A DOM CustomEvent LocalServer.ts dispatches itself -- the detail
-    // shape is ours, not external/untrusted input.
-    const catchUpEvent = e as CustomEvent<{
-      turnsRendered: number;
-      turnsTotal: number;
-    } | null>;
-    this._catchUpProgress = catchUpEvent.detail;
+  private onReplayCatchUpEvent = (
+    e: CustomEvent<ReplayTurnProgress | null>,
+  ) => {
+    this._catchUpProgress = e.detail;
   };
 
-  private onReplayProgressEvent = (e: Event) => {
-    // Same in-house CustomEvent contract as the catch-up event above.
-    const progressEvent = e as CustomEvent<{
-      turnsRendered: number;
-      turnsTotal: number;
-    }>;
-    this._replayProgress = progressEvent.detail;
+  private onReplayProgressEvent = (e: CustomEvent<ReplayTurnProgress>) => {
+    this._replayProgress = e.detail;
   };
 
   getTickIntervalMs() {

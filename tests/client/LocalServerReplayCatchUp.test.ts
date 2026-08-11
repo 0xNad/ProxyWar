@@ -4,7 +4,9 @@ import {
   AI_LEAGUE_REPLAY_CATCHUP_DEBOUNCE_MS,
   AI_LEAGUE_REPLAY_CATCHUP_EVENT,
   AI_LEAGUE_REPLAY_PROGRESS_EVENT,
+  AI_LEAGUE_REPLAY_PROGRESS_THROTTLE_MS,
   LocalServer,
+  type ReplayTurnProgress,
 } from "../../src/client/LocalServer";
 import { EventBus } from "../../src/core/EventBus";
 import {
@@ -20,8 +22,7 @@ import {
   ServerMessage,
 } from "../../src/core/Schemas";
 
-type CatchUpDetail = { turnsRendered: number; turnsTotal: number } | null;
-type ProgressDetail = { turnsRendered: number; turnsTotal: number };
+type CatchUpDetail = ReplayTurnProgress | null;
 
 function gameStartInfo(): GameStartInfo {
   return {
@@ -114,39 +115,26 @@ function startServerWithManualPacingTimer(config: LobbyConfig) {
   };
 }
 
-function captureCatchUpEvents(): CatchUpDetail[] {
-  const captured: CatchUpDetail[] = [];
-  const onEvent = (e: Event) => {
-    // A DOM CustomEvent we dispatch ourselves in LocalServer.ts -- the
-    // detail shape is ours, not external/untrusted input.
-    const customEvent = e as CustomEvent<CatchUpDetail>;
-    captured.push(customEvent.detail);
-  };
-  document.addEventListener(AI_LEAGUE_REPLAY_CATCHUP_EVENT, onEvent);
+// DOM CustomEvents we dispatch ourselves in LocalServer.ts -- the detail
+// shape is ours, not external/untrusted input.
+function captureEvents<T>(eventName: string): T[] {
+  const captured: T[] = [];
+  document.addEventListener(eventName, (e: Event) => {
+    captured.push((e as CustomEvent<T>).detail);
+  });
   return captured;
 }
 
-function captureProgressEvents(): ProgressDetail[] {
-  const captured: ProgressDetail[] = [];
-  const onEvent = (e: Event) => {
-    // Same in-house CustomEvent contract as the catch-up event above.
-    const customEvent = e as CustomEvent<ProgressDetail>;
-    captured.push(customEvent.detail);
-  };
-  document.addEventListener(AI_LEAGUE_REPLAY_PROGRESS_EVENT, onEvent);
-  return captured;
-}
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(0);
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("LocalServer archived-replay catch-up", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-    vi.setSystemTime(0);
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
   it("defaults archived Full Replay to fastest speed without depending on ReplaySpeedChangeEvent", () => {
     // turnIntervalMs=1000 makes `normal` (1x, the pre-fix default) starve
     // the pacing gate for a full second: `Date.now() >= turnStartTime +
@@ -162,7 +150,9 @@ describe("LocalServer archived-replay catch-up", () => {
   });
 
   it("reports real, debounced catch-up progress for a synthetic heavy replay", () => {
-    const captured = captureCatchUpEvents();
+    const captured = captureEvents<CatchUpDetail>(
+      AI_LEAGUE_REPLAY_CATCHUP_EVENT,
+    );
     const { tickAt } = startServerWithManualPacingTimer(lobbyConfig(5_000));
     for (let i = 0; i < 5; i++) {
       tickAt(i);
@@ -180,7 +170,9 @@ describe("LocalServer archived-replay catch-up", () => {
   });
 
   it("clears the instant the playhead moves (first turnsComplete)", () => {
-    const captured = captureCatchUpEvents();
+    const captured = captureEvents<CatchUpDetail>(
+      AI_LEAGUE_REPLAY_CATCHUP_EVENT,
+    );
     const { server, tickAt } = startServerWithManualPacingTimer(
       lobbyConfig(5_000),
     );
@@ -193,7 +185,9 @@ describe("LocalServer archived-replay catch-up", () => {
   });
 
   it("never appears for a replay that catches up within one worker round-trip", () => {
-    const captured = captureCatchUpEvents();
+    const captured = captureEvents<CatchUpDetail>(
+      AI_LEAGUE_REPLAY_CATCHUP_EVENT,
+    );
     const { server, tickAt } = startServerWithManualPacingTimer(lobbyConfig(3));
     tickAt(0);
     server.turnsComplete(1);
@@ -205,7 +199,9 @@ describe("LocalServer archived-replay catch-up", () => {
   });
 
   it("never fires for a live (non-archived) game", () => {
-    const captured = captureCatchUpEvents();
+    const captured = captureEvents<CatchUpDetail>(
+      AI_LEAGUE_REPLAY_CATCHUP_EVENT,
+    );
     const config = lobbyConfig(10);
     delete config.gameRecord;
     const { tickAt } = startServerWithManualPacingTimer(config);
@@ -216,45 +212,51 @@ describe("LocalServer archived-replay catch-up", () => {
 });
 
 describe("LocalServer archived-replay progress counter", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-    vi.setSystemTime(0);
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
   it("is on screen from start(), before the first turn renders", () => {
-    const captured = captureProgressEvents();
+    const captured = captureEvents<ReplayTurnProgress>(
+      AI_LEAGUE_REPLAY_PROGRESS_EVENT,
+    );
     startServerWithManualPacingTimer(lobbyConfig(5_000));
     expect(captured).toEqual([{ turnsRendered: 0, turnsTotal: 5_000 }]);
   });
 
-  it("advances per rendered turn and lands on total / total at the end", () => {
-    const captured = captureProgressEvents();
+  it("throttles mid-replay acks but never the final total / total", () => {
+    const captured = captureEvents<ReplayTurnProgress>(
+      AI_LEAGUE_REPLAY_PROGRESS_EVENT,
+    );
     const { server, tickAt } = startServerWithManualPacingTimer(lobbyConfig(3));
+    // All three acks land inside one throttle window: the intermediate
+    // values are suppressed, the final turn dispatches regardless.
     for (let i = 0; i < 3; i++) {
       tickAt(i);
       server.turnsComplete(1);
     }
-    expect(captured.at(-1)).toEqual({ turnsRendered: 3, turnsTotal: 3 });
-    expect(captured.map((detail) => detail.turnsRendered)).toEqual([
-      0, 1, 2, 3,
+    expect(captured).toEqual([
+      { turnsRendered: 0, turnsTotal: 3 },
+      { turnsRendered: 3, turnsTotal: 3 },
     ]);
   });
 
+  it("dispatches a mid-replay ack once the throttle window has passed", () => {
+    const captured = captureEvents<ReplayTurnProgress>(
+      AI_LEAGUE_REPLAY_PROGRESS_EVENT,
+    );
+    const { server, tickAt } = startServerWithManualPacingTimer(lobbyConfig(3));
+    tickAt(AI_LEAGUE_REPLAY_PROGRESS_THROTTLE_MS);
+    server.turnsComplete(1);
+    expect(captured.at(-1)).toEqual({ turnsRendered: 1, turnsTotal: 3 });
+  });
+
   it("never fires for a live (non-archived) game", () => {
-    const captured = captureProgressEvents();
+    const captured = captureEvents<ReplayTurnProgress>(
+      AI_LEAGUE_REPLAY_PROGRESS_EVENT,
+    );
     const config = lobbyConfig(10);
     delete config.gameRecord;
     const { server, tickAt } = startServerWithManualPacingTimer(config);
-    // Live games pace at turnIntervalMs (100ms here), so tick past each
-    // deadline to actually dispatch a turn before acknowledging it.
-    for (let i = 1; i <= 3; i++) {
-      tickAt(i * 100);
-      server.turnsComplete(1);
-    }
+    // Live pacing dispatches one turn at the 100ms deadline; ack it.
+    tickAt(100);
+    server.turnsComplete(1);
     expect(captured).toEqual([]);
   });
 });

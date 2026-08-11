@@ -60,12 +60,31 @@ export const AI_LEAGUE_REPLAY_CATCHUP_DEBOUNCE_MS = 200;
 // position, `null` the instant it clears. Dispatched by
 // LocalServer.reportReplayCatchUp(); consumed by GameRightSidebar.
 export const AI_LEAGUE_REPLAY_CATCHUP_EVENT = "ai-league-replay-catchup";
-// Steady playhead position for archived Full Replay. `detail` is
-// `{ turnsRendered, turnsTotal }`, dispatched once at start() (0 rendered)
-// and again per rendered-turn acknowledgement. Consumed by GameRightSidebar,
-// which renders it as a plain "N / M" turn counter that kiosk watchdogs
-// (leaguecast) parse from body text to detect end-of-replay and stalls.
+// Steady playhead position for archived Full Replay, dispatched once at
+// start() (0 rendered) and again per rendered-turn acknowledgement.
+// Consumed by GameRightSidebar, which renders it as a plain "N / M" turn
+// counter. Kiosk watchdogs (leaguecast) detect end-of-replay and stalls by
+// parsing the FIRST digits/digits pair in body text, so the counter must
+// stay plain digits and remain the first such pair on the page.
 export const AI_LEAGUE_REPLAY_PROGRESS_EVENT = "ai-league-replay-progress";
+// Mid-replay progress dispatches are throttled to this interval: at fastest
+// speed, turn acks arrive often enough to re-render the HUD hundreds of
+// times a second, and nothing reads the counter faster than a few Hz. The
+// final `total / total` dispatch is never throttled.
+export const AI_LEAGUE_REPLAY_PROGRESS_THROTTLE_MS = 250;
+
+// Payload shared by both archived-replay HUD events above.
+export type ReplayTurnProgress = {
+  turnsRendered: number;
+  turnsTotal: number;
+};
+
+declare global {
+  interface DocumentEventMap {
+    [AI_LEAGUE_REPLAY_CATCHUP_EVENT]: CustomEvent<ReplayTurnProgress | null>;
+    [AI_LEAGUE_REPLAY_PROGRESS_EVENT]: CustomEvent<ReplayTurnProgress>;
+  }
+}
 // A late-join catch-up must never enqueue an unbounded replay in one main-
 // thread loop. The premiere-only worker accepts turns in bounded batches and
 // drains them without rendering every intermediate frame, so keep enough work
@@ -115,6 +134,8 @@ export class LocalServer {
   // See reportReplayCatchUp's own doc for both fields.
   private catchUpPendingSinceMs: number | null = null;
   private reportedCatchingUp = false;
+  // When the last progress event went out -- see reportReplayProgress.
+  private lastProgressDispatchMs = Number.NEGATIVE_INFINITY;
 
   private turnCheckInterval: NodeJS.Timeout;
   private clientConnect: () => void;
@@ -428,12 +449,25 @@ export class LocalServer {
    * one honest signal and the same debounce, so a catch-up that resolves
    * inside a single worker round-trip never reaches the viewer.
    */
+  // Shared eligibility for both archived-replay HUD events: an archived,
+  // non-progressive replay in a DOM context.
+  private archivedReplayHudEventsEnabled(): boolean {
+    return (
+      typeof document !== "undefined" &&
+      this.lobbyConfig.progressiveReplay === undefined &&
+      this.lobbyConfig.gameRecord !== undefined
+    );
+  }
+
+  private replayTurnProgress(): ReplayTurnProgress {
+    return {
+      turnsRendered: this.turnsExecuted,
+      turnsTotal: this.replayTurns.length,
+    };
+  }
+
   private reportReplayCatchUp(): void {
-    if (
-      typeof document === "undefined" ||
-      this.lobbyConfig.progressiveReplay !== undefined ||
-      this.lobbyConfig.gameRecord === undefined
-    ) {
+    if (!this.archivedReplayHudEventsEnabled()) {
       return;
     }
     const backlog = Math.max(0, this.turns.length - this.turnsExecuted);
@@ -460,35 +494,34 @@ export class LocalServer {
     this.reportedCatchingUp = true;
     document.dispatchEvent(
       new CustomEvent(AI_LEAGUE_REPLAY_CATCHUP_EVENT, {
-        detail: {
-          turnsRendered: this.turnsExecuted,
-          turnsTotal: this.replayTurns.length,
-        },
+        detail: this.replayTurnProgress(),
       }),
     );
   }
 
   /**
    * Steady counterpart to the transient catch-up report above: the playhead
-   * position itself, from the same two counters. No debounce — dispatched at
-   * start() so the counter is on screen before the first turn renders, then
-   * per acknowledgement batch until it lands on `total / total` at the end.
+   * position itself, from the same two counters. Dispatched at start() so
+   * the counter is on screen before the first turn renders, then throttled
+   * per acknowledgement batch (see AI_LEAGUE_REPLAY_PROGRESS_THROTTLE_MS).
+   * The final `total / total` dispatch always goes out so the end state is
+   * never throttled away.
    */
   private reportReplayProgress(): void {
+    if (!this.archivedReplayHudEventsEnabled()) {
+      return;
+    }
+    const detail = this.replayTurnProgress();
+    const now = Date.now();
     if (
-      typeof document === "undefined" ||
-      this.lobbyConfig.progressiveReplay !== undefined ||
-      this.lobbyConfig.gameRecord === undefined
+      detail.turnsRendered < detail.turnsTotal &&
+      now - this.lastProgressDispatchMs < AI_LEAGUE_REPLAY_PROGRESS_THROTTLE_MS
     ) {
       return;
     }
+    this.lastProgressDispatchMs = now;
     document.dispatchEvent(
-      new CustomEvent(AI_LEAGUE_REPLAY_PROGRESS_EVENT, {
-        detail: {
-          turnsRendered: this.turnsExecuted,
-          turnsTotal: this.replayTurns.length,
-        },
-      }),
+      new CustomEvent(AI_LEAGUE_REPLAY_PROGRESS_EVENT, { detail }),
     );
   }
 
