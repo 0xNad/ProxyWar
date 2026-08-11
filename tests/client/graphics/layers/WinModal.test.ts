@@ -26,20 +26,6 @@ vi.mock("../../../../src/client/Utils", () => ({
   TUTORIAL_VIDEO_URL: "https://example.com/tutorial",
 }));
 
-vi.mock("../../../../src/client/Api", () => ({
-  getUserMe: vi.fn(async () => null),
-}));
-
-vi.mock("../../../../src/client/Cosmetics", () => ({
-  fetchCosmetics: vi.fn(async () => []),
-  handlePurchase: vi.fn(),
-  patternRelationship: vi.fn(() => ({})),
-  resolveCosmetics: vi.fn(() => []),
-  purchaseCosmetic: vi.fn(),
-}));
-
-vi.mock("../../../../src/client/components/CosmeticButton", () => ({}));
-
 vi.mock("../../../../src/client/CrazyGamesSDK", () => ({
   crazyGamesSDK: {
     happytime: vi.fn(),
@@ -139,22 +125,24 @@ describe("WinModal Requeue", () => {
       expect(hooks._handleRequeue).toBeUndefined();
     });
 
-    it("shows no tutorial or store upsell in replay mode", async () => {
+    it("shows no tutorial or store upsell in any mode", async () => {
       const { WinModal } = await import(
         "../../../../src/client/graphics/layers/WinModal"
       );
-      const modal = new WinModal();
-
-      window.location.pathname = "/ai-league-replay/league-coworld-x";
-      const replayInner = modal.innerHtml();
-      expect(replayInner.strings.join("").trim()).toBe("");
-
-      window.location.pathname = "/";
-      const normalInner = modal.innerHtml();
-      const rendered =
-        normalInner.strings.join(" ") + normalInner.values.join(" ");
-      expect(rendered).toContain("win_modal.support_openfront");
-      expect(rendered).not.toContain("iframe");
+      const modal = new WinModal() as unknown as WinModalTestHooks;
+      modal.isVisible = true;
+      const rendered = (
+        modal as unknown as {
+          render: () => {
+            strings: readonly string[];
+            values: readonly unknown[];
+          };
+        }
+      ).render();
+      const html = rendered.strings.join(" ") + rendered.values.join(" ");
+      expect(html).not.toContain("win_modal.support_openfront");
+      expect(html).not.toContain("win_modal.territory_pattern");
+      expect(html).not.toContain("iframe");
     });
   });
 
