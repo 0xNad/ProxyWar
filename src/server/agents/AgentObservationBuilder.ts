@@ -39,6 +39,7 @@ import {
 interface BuildTargetCandidate {
   targetTile: number;
   buildTile: number;
+  usedCachedSpawn: boolean;
   placement: BuildPlacementAnalysis;
 }
 
@@ -84,6 +85,33 @@ const DEFENSE_POST_FRONTIER_SEARCH_RANGE = 75;
 const NEUTRAL_ISLAND_SHORE_SAMPLE_LIMIT = 48;
 const NEUTRAL_ISLAND_TRANSPORT_TARGET_LIMIT = 10;
 const NEUTRAL_ISLAND_TRANSPORT_SCAN_LIMIT = 80;
+
+export const BUILD_OPTION_CANDIDATES = [
+  { unit: UnitType.DefensePost, role: "defensive" },
+  { unit: UnitType.City, role: "economic" },
+  { unit: UnitType.Port, role: "economic" },
+  { unit: UnitType.Factory, role: "economic" },
+  { unit: UnitType.SAMLauncher, role: "defensive" },
+  { unit: UnitType.MissileSilo, role: "infrastructure" },
+  { unit: UnitType.AtomBomb, role: "infrastructure" },
+  { unit: UnitType.HydrogenBomb, role: "infrastructure" },
+  { unit: UnitType.MIRV, role: "infrastructure" },
+] as const satisfies ReadonlyArray<{
+  unit: AgentBuildOption["unit"];
+  role: AgentBuildOption["role"];
+}>;
+
+// These types share PlayerImpl's landBasedStructureSpawn path after eligibility checks.
+export const SHARED_LAND_STRUCTURE_BUILD_TYPES = [
+  UnitType.DefensePost,
+  UnitType.City,
+  UnitType.Factory,
+  UnitType.SAMLauncher,
+  UnitType.MissileSilo,
+] as const satisfies readonly UnitType[];
+const SHARED_LAND_STRUCTURE_BUILD_TYPE_SET: ReadonlySet<UnitType> = new Set(
+  SHARED_LAND_STRUCTURE_BUILD_TYPES,
+);
 
 type SynchronousResult<T> = T extends PromiseLike<unknown> ? never : T;
 
@@ -662,51 +690,28 @@ export class AgentObservationBuilder {
   }
 
   private buildOptions(gameState: Game, player: Player): AgentBuildOption[] {
-    const candidates: Array<{
-      unit: AgentBuildOption["unit"];
-      role: AgentBuildOption["role"];
-    }> = [
-      {
-        unit: UnitType.DefensePost,
-        role: "defensive",
-      },
-      {
-        unit: UnitType.City,
-        role: "economic",
-      },
-      {
-        unit: UnitType.Port,
-        role: "economic",
-      },
-      {
-        unit: UnitType.Factory,
-        role: "economic",
-      },
-      {
-        unit: UnitType.SAMLauncher,
-        role: "defensive",
-      },
-      {
-        unit: UnitType.MissileSilo,
-        role: "infrastructure",
-      },
-      {
-        unit: UnitType.AtomBomb,
-        role: "infrastructure",
-      },
-      {
-        unit: UnitType.HydrogenBomb,
-        role: "infrastructure",
-      },
-      {
-        unit: UnitType.MIRV,
-        role: "infrastructure",
-      },
-    ];
-    const options: AgentBuildOption[] = [];
+    if (!player.isAlive()) {
+      return [];
+    }
 
-    for (const option of candidates) {
-      const target = this.findBuildTarget(gameState, player, option.unit);
+    const config = gameState.config();
+    const options: AgentBuildOption[] = [];
+    const landStructureSpawnByTarget = new Map<number, number | false>();
+
+    for (const option of BUILD_OPTION_CANDIDATES) {
+      if (config.isUnitDisabled(option.unit)) {
+        continue;
+      }
+      const cost = config.unitInfo(option.unit).cost(gameState, player);
+      if (player.gold() < cost) {
+        continue;
+      }
+      const target = this.findBuildTarget(
+        gameState,
+        player,
+        option.unit,
+        landStructureSpawnByTarget,
+      );
       if (target === null) {
         continue;
       }
@@ -715,12 +720,10 @@ export class AgentObservationBuilder {
         role: option.role,
         targetTile: target.targetTile,
         buildTile: target.buildTile,
-        cost: gameState
-          .config()
-          .unitInfo(option.unit)
-          .cost(gameState, player)
-          .toString(),
-        legalReason: `core canBuild(${option.unit}) returned build tile ${target.buildTile}`,
+        cost: cost.toString(),
+        legalReason: target.usedCachedSpawn
+          ? `shared land-structure spawn check returned build tile ${target.buildTile}`
+          : `core canBuild(${option.unit}) returned build tile ${target.buildTile}`,
         ...target.placement,
       });
     }
@@ -732,6 +735,7 @@ export class AgentObservationBuilder {
     gameState: Game,
     player: Player,
     unit: AgentBuildOption["unit"],
+    landStructureSpawnByTarget: Map<number, number | false>,
   ): BuildTargetCandidate | null {
     let best: BuildTargetCandidate | null = null;
     let bestScore = Number.NEGATIVE_INFINITY;
@@ -743,11 +747,19 @@ export class AgentObservationBuilder {
     const borderTiles = Array.from(player.borderTiles());
     const hostileFrontTiles = this.hostileFrontTiles(gameState, player);
     const incomingFrontTiles = this.incomingAttackFrontTiles(gameState, player);
+    const cache = SHARED_LAND_STRUCTURE_BUILD_TYPE_SET.has(unit)
+      ? landStructureSpawnByTarget
+      : undefined;
     for (const tile of this.buildSearchTiles(gameState, player, unit).slice(
       0,
       buildCandidateLimit(unit),
     )) {
-      const buildTile = player.canBuild(unit, tile);
+      let buildTile = cache?.get(tile);
+      const usedCachedSpawn = buildTile !== undefined;
+      if (buildTile === undefined) {
+        buildTile = player.canBuild(unit, tile);
+        cache?.set(tile, buildTile);
+      }
       if (buildTile !== false) {
         const placement = this.buildPlacementAnalysis(
           gameState,
@@ -767,7 +779,7 @@ export class AgentObservationBuilder {
         }
         const score = buildPlacementScore(unit, placement);
         if (score > bestScore) {
-          best = { targetTile: tile, buildTile, placement };
+          best = { targetTile: tile, buildTile, usedCachedSpawn, placement };
           bestScore = score;
         }
       }
