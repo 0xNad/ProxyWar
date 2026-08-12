@@ -9,6 +9,16 @@ services:
     image: proxywar-coworld-local:latest
     platform: linux/amd64
 
+  runnables:
+    # Player and optimizer processes need only Node plus their small protocol scripts.
+    # Keeping them out of the full OpenFront game image satisfies Coworld's 512 MiB
+    # non-game-role limit and shortens hosted policy startup.
+    image: proxywar-runnables-local:latest
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile.runnables
+
   commissioner:
     # Hosted Coworld episodes require linux/amd64 -- without this, `docker compose build`
     # on an Apple Silicon host produces an arm64 image that upload-coworld rejects outright.
