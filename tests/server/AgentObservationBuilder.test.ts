@@ -3,7 +3,9 @@ import { AttackExecution } from "../../src/core/execution/AttackExecution";
 import { SpawnExecution } from "../../src/core/execution/SpawnExecution";
 import { AllianceRequestExecution } from "../../src/core/execution/alliance/AllianceRequestExecution";
 import {
+  BuildableAttacks,
   Game,
+  Player,
   PlayerInfo,
   PlayerType,
   UnitType,
@@ -11,6 +13,7 @@ import {
 import {
   AgentObservationBuilder,
   BUILD_OPTION_CANDIDATES,
+  buildCandidateLimit,
   SHARED_LAND_STRUCTURE_BUILD_TYPES,
 } from "../../src/server/agents/AgentObservationBuilder";
 import { LegalActionBuilder } from "../../src/server/agents/LegalActionBuilder";
@@ -149,6 +152,95 @@ function disconnectedSeasGame(): {
   return { game, agent, rival, unreachableShore, reachableShore };
 }
 
+const BUILD_OPTION_UNITS = [
+  UnitType.DefensePost,
+  UnitType.City,
+  UnitType.Port,
+  UnitType.Factory,
+  UnitType.SAMLauncher,
+  UnitType.MissileSilo,
+  UnitType.AtomBomb,
+  UnitType.HydrogenBomb,
+  UnitType.MIRV,
+] as const;
+
+type AgentObservationBuilderInternals = {
+  buildOptions(gameState: Game, player: Player): unknown;
+  buildSearchTiles(
+    gameState: Game,
+    player: Player,
+    unit: UnitType,
+    context: unknown,
+  ): readonly number[];
+  hostileFrontTiles(gameState: Game, player: Player): number[];
+  incomingAttackFrontTiles(gameState: Game, player: Player): number[];
+  nukeTargetTiles(gameState: Game, player: Player): number[];
+};
+
+function midGameBuildSearchGame(): Game {
+  const width = 208;
+  const height = 108;
+  const grid = Array.from({ length: height }, (_, y) =>
+    Array.from({ length: width }, (_, x) =>
+      x === 0 || y === 0 || x === width - 1 || y === height - 1 ? W : L,
+    ),
+  ).flat();
+  const game = createPathfindingGame({ width, height, grid });
+  const agent = new PlayerInfo(
+    "Agent",
+    PlayerType.Human,
+    "CLNT_AGENT",
+    "P_AGENT",
+  );
+  const rival = new PlayerInfo(
+    "Rival",
+    PlayerType.Human,
+    "CLNT_RIVAL",
+    "P_RIVAL",
+  );
+  spawnPlayers(game, [
+    { info: agent, x: 20, y: height / 2 },
+    { info: rival, x: width - 21, y: height / 2 },
+  ]);
+
+  for (let y = 1; y < height - 1; y += 1) {
+    for (let x = 1; x < width - 1; x += 1) {
+      const owner = x < width / 2 ? agent : rival;
+      game.player(owner.id).conquer(game.ref(x, y));
+    }
+  }
+  return game;
+}
+
+function legacyBuildSearchTiles(
+  builder: AgentObservationBuilderInternals,
+  gameState: Game,
+  player: Player,
+  unit: UnitType,
+): number[] {
+  const tiles = Array.from(player.tiles());
+  const spawnTile = player.spawnTile();
+  let source: number[];
+  if (unit === UnitType.DefensePost) {
+    source = Array.from(player.borderTiles());
+  } else if (unit === UnitType.Port) {
+    source = tiles.filter((tile) => gameState.isShore(tile));
+  } else if (BuildableAttacks.has(unit)) {
+    return builder.nukeTargetTiles(gameState, player);
+  } else {
+    source = tiles;
+  }
+  return source.sort((a, b) => {
+    if (spawnTile === undefined) {
+      return a - b;
+    }
+    return (
+      gameState.manhattanDist(a, spawnTile) -
+        gameState.manhattanDist(b, spawnTile) || a - b
+    );
+  });
+}
+
 function ally(
   game: Awaited<ReturnType<typeof threePlayerGame>>,
   a: string,
@@ -175,13 +267,23 @@ describe("AgentObservationBuilder build search pruning", () => {
     const player = game.player("P_AGENT");
     player.removeGold(player.gold());
     const canBuild = vi.spyOn(player, "canBuild");
+    const internals =
+      new AgentObservationBuilder() as unknown as AgentObservationBuilderInternals;
+    const tiles = vi.spyOn(player, "tiles");
+    const hostileFrontTiles = vi.spyOn(internals, "hostileFrontTiles");
+    const incomingFrontTiles = vi.spyOn(internals, "incomingAttackFrontTiles");
+    const nukeTargetTiles = vi.spyOn(internals, "nukeTargetTiles");
 
-    const observation = observe(game);
+    const buildOptions = internals.buildOptions(game, player);
 
-    expect(observation.nonCombat.buildOptions).toEqual([]);
+    expect(buildOptions).toEqual([]);
     expect(
       canBuild.mock.calls.filter(([unit]) => buildOptionUnits.has(unit)),
     ).toEqual([]);
+    expect(tiles).not.toHaveBeenCalled();
+    expect(hostileFrontTiles).not.toHaveBeenCalled();
+    expect(incomingFrontTiles).not.toHaveBeenCalled();
+    expect(nukeTargetTiles).not.toHaveBeenCalled();
   });
 
   it("does not calculate costs for disabled units", async () => {
@@ -280,6 +382,63 @@ describe("AgentObservationBuilder build search pruning", () => {
       expect(targets.map((target) => player.canBuild(unit, target))).toEqual(
         expected,
       );
+    }
+  });
+});
+
+describe("AgentObservationBuilder build search", () => {
+  it("preserves legacy candidate lists while sharing search work", () => {
+    const game = midGameBuildSearchGame();
+    const player = game.player("P_AGENT");
+    player.addGold(1_000_000_000_000n);
+    const builder = new AgentObservationBuilder();
+    const internals = builder as unknown as AgentObservationBuilderInternals;
+    const expected = new Map<UnitType, number[]>();
+
+    expect(player.numTilesOwned()).toBeGreaterThan(240);
+    expect(
+      Array.from(player.tiles()).filter((tile) => game.isShore(tile)).length,
+    ).toBeGreaterThan(120);
+    expect(player.borderTiles().size).toBeGreaterThan(400);
+    for (const unit of BUILD_OPTION_UNITS) {
+      expected.set(
+        unit,
+        legacyBuildSearchTiles(internals, game, player, unit).slice(
+          0,
+          buildCandidateLimit(unit),
+        ),
+      );
+    }
+
+    const tiles = vi.spyOn(player, "tiles");
+    const buildSearchTiles = vi.spyOn(internals, "buildSearchTiles");
+    const hostileFrontTiles = vi.spyOn(internals, "hostileFrontTiles");
+    const incomingFrontTiles = vi.spyOn(internals, "incomingAttackFrontTiles");
+    const nukeTargetTiles = vi.spyOn(internals, "nukeTargetTiles");
+    vi.spyOn(player, "canBuild").mockReturnValue(false);
+
+    internals.buildOptions(game, player);
+
+    expect(tiles).toHaveBeenCalledTimes(1);
+    expect(buildSearchTiles).toHaveBeenCalledTimes(BUILD_OPTION_UNITS.length);
+    expect(hostileFrontTiles).toHaveBeenCalledTimes(1);
+    expect(incomingFrontTiles).toHaveBeenCalledTimes(1);
+    expect(nukeTargetTiles).toHaveBeenCalledTimes(1);
+
+    const actual = new Map<UnitType, number[]>();
+    for (const [index, call] of buildSearchTiles.mock.calls.entries()) {
+      const unit = call[2];
+      const returned = buildSearchTiles.mock.results[index]?.value as
+        | readonly number[]
+        | undefined;
+      expect(returned).toBeDefined();
+      actual.set(
+        unit,
+        Array.from(returned ?? []).slice(0, buildCandidateLimit(unit)),
+      );
+    }
+    for (const unit of BUILD_OPTION_UNITS) {
+      expect(actual.get(unit)).toEqual(expected.get(unit));
     }
   });
 });
