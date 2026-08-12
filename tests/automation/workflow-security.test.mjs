@@ -193,9 +193,18 @@ test("main CI retains PR, push, merge-group, and explicit recursion fallback cov
 test("every main CI dependency install uses the bounded retry wrapper", () => {
   assert.doesNotMatch(ci, /- run: npm ci\s*$/m);
   assert.equal(
-    ci.match(/node \.github\/scripts\/npm-ci-with-retry\.mjs/g)?.length,
+    ci.match(
+      /node \.trusted-ci-control\/\.github\/scripts\/npm-ci-with-retry\.mjs/g,
+    )?.length,
     7,
   );
+  assert.match(ci, /ref: main/);
+  assert.match(ci, /path: \.trusted-ci-control/);
+  assert.match(
+    ci,
+    /sparse-checkout: \.github\/scripts\/npm-ci-with-retry\.mjs/,
+  );
+  assert.match(ci, /persist-credentials: false/);
 });
 
 test("production retries failed exact-source CI without bypassing it", () => {
