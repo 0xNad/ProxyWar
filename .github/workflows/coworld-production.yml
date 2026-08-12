@@ -328,7 +328,7 @@ jobs:
           mkdir -p coworld-adapter/tmp
           TMPDIR="$PWD/coworld-adapter/tmp" "$COWORLD_BIN" certify "$MANIFEST" --timeout-seconds 300
           "$COWORLD_PYTHON" .github/scripts/coworld-certification-cache-key.py "$MANIFEST" > "$RUNNER_TEMP/coworld-certification-key.txt"
-          [[ "$(cat "$RUNNER_TEMP/coworld-certification-key.txt")" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$(cat "$RUNNER_TEMP/coworld-certification-key.txt")" =~ ^sha256:[0-9a-f]{64}$ ]]
           install -m 600 "$XDG_CACHE_HOME/coworld/certified_manifest_hashes.json" "$RUNNER_TEMP/coworld-certified-manifests.json"
       - name: Package checksummed immutable release artifact
         env:
@@ -463,7 +463,7 @@ jobs:
           PY
           test -f "$RUNNER_TEMP/release/coworld_manifest.json"
           test -s "$RUNNER_TEMP/release-artifact/coworld-images.tar.gz"
-          [[ "$(cat "$RUNNER_TEMP/release-artifact/coworld-certification-key.txt")" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$(cat "$RUNNER_TEMP/release-artifact/coworld-certification-key.txt")" =~ ^sha256:[0-9a-f]{64}$ ]]
           jq -e --arg key "$(cat "$RUNNER_TEMP/release-artifact/coworld-certification-key.txt")" 'type == "object" and length == 1 and .[$key] == "certified"' "$RUNNER_TEMP/release-artifact/coworld-certified-manifests.json" >/dev/null
       - name: Load exact-source images without executing contributor code
         if: ${{ needs.preflight.outputs.idempotent != 'true' }}
