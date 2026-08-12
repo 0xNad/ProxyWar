@@ -1,7 +1,9 @@
 schedule_interval_minutes: 30
 
 # A 25-entrant competition on the 16-seat rung (since 0.1.32) schedules ten
-# rolling-window jobs; on the 12-seat rung it was fourteen.
+# one-entrant-step window jobs (walked over the per-round shuffled entrant
+# order since 2026-08-12 -- see defaults.seating); on the 12-seat rung it was
+# fourteen.
 # Admission is acknowledgement-paced (one ScheduleEpisodes message per
 # episode, the next only after episodes_accepted), so this cap bounds steady
 # concurrency only -- it is not a burst size. The July player_never_started
@@ -40,7 +42,20 @@ scoring:
     provisional_min_rounds: 5
 
 defaults:
-  seating: rolling_window
+  # shuffled_window (2026-08-12): rolling_window seated a one-entrant-step window
+  # over a per-round-STABLE entrant order, so per-round coverage was a fixed
+  # triangle over list position -- mid-list entrants sat in ~86-100% of a round's
+  # episodes while both ends of the list got only the single guaranteed
+  # appearance (~7-14%). Measured live over 08-08..08-11 (rounds 1270-1365):
+  # position 0 played 9% of episodes, positions 11-12 played 91-92%, and the
+  # tail-pinned house seat played 7.5-12%, its EWMA sliding from rank 1 to 10
+  # while exposure-starved. shuffled_window redraws the entrant permutation
+  # every scheduling (wall-clock seeded, never reused on re-schedule), keeping
+  # the same episode count and the every-entrant >=1 appearance guarantee while
+  # equalizing expected coverage at windows*seats/entrants for every list
+  # position. Window construction itself is unchanged; only the order the
+  # windows walk is re-randomized. See common/ruleset_strategy/scheduling.py.
+  seating: shuffled_window
   # `strict` is intentional, not a placeholder: the custom commissioner's ladder always routes each
   # Competition round to the largest declared variant whose seat count is <= the real champion count
   # (see proxywar_app.py), so num_agents <= len(primary_entries) is a structural invariant here, not

@@ -87,11 +87,84 @@ test("Coworld release is pinned, template-built, collision-checked, and fully ce
   assert.match(production, /\.game\.coworld_id/);
 });
 
+test("exact-source images cross into production only as a checksummed inert archive", () => {
+  const save = production.indexOf('docker image save "${IMAGES[@]}"');
+  const load = production.indexOf("docker image load");
+  const upload = production.indexOf(
+    "coworld-authenticated-command.mjs upload-coworld",
+  );
+  assert.ok(save > 0);
+  assert.ok(load > save);
+  assert.ok(upload > load);
+  assert.match(
+    production,
+    /sha256sum coworld-release\.tgz coworld-images\.tar\.gz coworld-images\.txt coworld-certified-manifests\.json coworld-certification-key\.txt > coworld-release\.sha256/,
+  );
+  assert.match(production, /sha256sum --check coworld-release\.sha256/);
+  assert.match(production, /image_archive_refs != image_values/);
+  assert.match(production, /compression-level: 0/);
+  assert.doesNotMatch(production, /docker (container )?run/);
+});
+
+test("credentialless certification proof is restored before guarded production upload", () => {
+  const certify = production.indexOf('"$COWORLD_BIN" certify');
+  const cacheArtifact = production.indexOf(
+    "coworld-certified-manifests.json",
+    certify,
+  );
+  const restore = production.indexOf(
+    'install -m 600 "$RUNNER_TEMP/release-artifact/coworld-certified-manifests.json"',
+  );
+  const guard = production.indexOf(
+    'install -m 755 "$GITHUB_WORKSPACE/.github/scripts/coworld-docker-guard.mjs"',
+  );
+  const cacheProof = production.indexOf(
+    "coworld-certification-cache-key.py",
+    restore,
+  );
+  const upload = production.indexOf(
+    "coworld-authenticated-command.mjs upload-coworld",
+  );
+  assert.ok(certify > 0);
+  assert.ok(cacheArtifact > certify);
+  assert.ok(restore > cacheArtifact);
+  assert.ok(guard > restore);
+  assert.ok(cacheProof > guard);
+  assert.ok(upload > cacheProof);
+  assert.equal(
+    production.match(/XDG_CACHE_HOME=\$CERTIFICATION_CACHE/g)?.length,
+    2,
+  );
+  assert.equal(
+    production.match(/\^sha256:\[0-9a-f\]\{64\}\$/g)?.length,
+    4,
+  );
+  assert.match(
+    production,
+    /coworld-certification-key\.txt"\)" =~ \^sha256:\[0-9a-f\]\{64\}\$/,
+  );
+  assert.match(production, /test "\$ACTUAL_KEY" =/);
+  assert.match(
+    production,
+    /coworld-docker-guard\/docker" run --rm invalid-image/,
+  );
+  assert.match(production, /test "\$\?" -eq 126/);
+});
+
 test("ordinary frontend changes cannot skip replay-viewer rebuild", () => {
   assert.doesNotMatch(production, /paths-ignore:/);
   assert.doesNotMatch(production, /if:.*coworld-adapter/);
   assert.match(production, /build\/static-replay-viewer/);
-  assert.match(production, /ai-league-replay-progress\|replay_progress_tip/);
+  assert.match(
+    production,
+    /grep -r -q -E 'ai-league-replay-progress\|replay_progress_tip' coworld-adapter\/dist\/build\/static-replay-viewer/,
+  );
+  assert.match(
+    production,
+    /! grep -r -q -E 'Support Proxy War!\|Purchase a territory skin' coworld-adapter\/dist\/build\/static-replay-viewer/,
+  );
+  assert.doesNotMatch(production, /grep -R/);
+  assert.doesNotMatch(production, /\brg -q/);
 });
 
 test("main CI retains PR, push, merge-group, and explicit recursion fallback coverage", () => {

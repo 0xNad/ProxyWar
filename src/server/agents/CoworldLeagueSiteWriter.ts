@@ -1087,7 +1087,7 @@ ${leagueSocialMetaHtml()}
         .join("\n")}</div>
     </section>
     <footer>
-      <div>Runs on ${escapeHtml(data.links.platformLabel)} · read-only mirror · league <code>${escapeHtml(
+      <div>Game: <a href="https://openfront.io" rel="noopener noreferrer">OpenFront</a> · Runs on ${escapeHtml(data.links.platformLabel)} · read-only mirror · league <code>${escapeHtml(
         league.id,
       )}</code></div>
       <div>${escapeHtml(translateText("coworld_league.update_cadence"))}</div>
