@@ -192,15 +192,15 @@ describe("AgentObservationBuilder rival-rival coalition graph", () => {
 });
 
 describe("AgentObservationBuilder boat targets", () => {
-  it("reuses the neutral-shore scan without changing either seat's options", () => {
+  it("reuses neutral-shore scans only within a stable observation batch", () => {
     const { game, agent, rival } = disconnectedSeasGame();
     const sharedBuilder = new AgentObservationBuilder();
     const scan = vi.spyOn(game, "forEachTile");
 
-    const cachedAtTick = [
+    const cachedAtTick = sharedBuilder.withObservationBatch(game, () => [
       boatOptionsFor(sharedBuilder, game, agent),
       boatOptionsFor(sharedBuilder, game, rival),
-    ];
+    ]);
     expect(scan).toHaveBeenCalledTimes(1);
 
     scan.mockClear();
@@ -211,20 +211,51 @@ describe("AgentObservationBuilder boat targets", () => {
     expect(scan).toHaveBeenCalledTimes(2);
     expect(cachedAtTick).toEqual(uncachedAtTick);
 
-    const claimedOption = cachedAtTick[0].find(
+    const falloutOption = cachedAtTick[0].find(
+      (option) => option.targetID === null,
+    );
+    expect(falloutOption).toBeDefined();
+    const previousTick = game.ticks();
+    game.setFallout(falloutOption!.targetTile, true);
+    expect(game.ticks()).toBe(previousTick);
+    expect(game.hasFallout(falloutOption!.targetTile)).toBe(true);
+
+    scan.mockClear();
+    const cachedAfterFallout = sharedBuilder.withObservationBatch(game, () => [
+      boatOptionsFor(sharedBuilder, game, agent),
+      boatOptionsFor(sharedBuilder, game, rival),
+    ]);
+    expect(scan).toHaveBeenCalledTimes(1);
+
+    scan.mockClear();
+    const uncachedAfterFallout = [
+      boatOptionsFor(sharedBuilder, game, agent),
+      boatOptionsFor(sharedBuilder, game, rival),
+    ];
+    expect(scan).toHaveBeenCalledTimes(2);
+    expect(cachedAfterFallout).toEqual(uncachedAfterFallout);
+    expect(
+      cachedAfterFallout[0].some(
+        (option) => option.targetTile === falloutOption!.targetTile,
+      ),
+    ).toBe(false);
+
+    const claimedOption = cachedAfterFallout[0].find(
       (option) => option.targetID === null,
     );
     expect(claimedOption).toBeDefined();
     game.player(agent.id).conquer(claimedOption!.targetTile);
-    const previousTick = game.ticks();
     game.executeNextTick();
     expect(game.ticks()).toBe(previousTick + 1);
 
     scan.mockClear();
-    const cachedAfterOwnershipChange = [
-      boatOptionsFor(sharedBuilder, game, agent),
-      boatOptionsFor(sharedBuilder, game, rival),
-    ];
+    const cachedAfterOwnershipChange = sharedBuilder.withObservationBatch(
+      game,
+      () => [
+        boatOptionsFor(sharedBuilder, game, agent),
+        boatOptionsFor(sharedBuilder, game, rival),
+      ],
+    );
     expect(scan).toHaveBeenCalledTimes(1);
 
     scan.mockClear();

@@ -450,27 +450,32 @@ async function runDecisionStep(input: {
   const legalActionBuilder = new LegalActionBuilder();
   const stampedIntents: StampedIntent[] = [];
 
-  for (const seat of input.seats) {
-    const player = game.playerByClientID(seat.clientID);
-    if (player === null || !player.isAlive()) {
-      continue;
-    }
-    const observationInput: BuildAgentObservationInput = {
-      agentID: seat.agentID,
-      clientID: seat.clientID,
-      username: player.name(),
-      profile: seat.profile,
-      // gameID is a label only (it does not affect the deterministic sim); a
-      // stable per-rollout string keeps observations well-formed.
-      gameID: `sim-rollout:${game.config().gameConfig().gameMap}`,
-      turnNumber: game.ticks(),
-      gameState: game,
-    };
-    const observation = observationBuilder.build(observationInput);
-    const legalActions = legalActionBuilder.build({ observation });
-    if (legalActions.length === 0) {
-      continue;
-    }
+  const decisionInputs = observationBuilder.withObservationBatch(game, () =>
+    input.seats.flatMap((seat) => {
+      const player = game.playerByClientID(seat.clientID);
+      if (player === null || !player.isAlive()) {
+        return [];
+      }
+      const observationInput: BuildAgentObservationInput = {
+        agentID: seat.agentID,
+        clientID: seat.clientID,
+        username: player.name(),
+        profile: seat.profile,
+        // gameID is a label only (it does not affect the deterministic sim); a
+        // stable per-rollout string keeps observations well-formed.
+        gameID: `sim-rollout:${game.config().gameConfig().gameMap}`,
+        turnNumber: game.ticks(),
+        gameState: game,
+      };
+      const observation = observationBuilder.build(observationInput);
+      const legalActions = legalActionBuilder.build({ observation });
+      return legalActions.length === 0
+        ? []
+        : [{ seat, observation, legalActions }];
+    }),
+  );
+
+  for (const { seat, observation, legalActions } of decisionInputs) {
     const decision = await seat.brain.decide({ observation, legalActions });
     const actionIDs =
       decision.actionIDs !== undefined && decision.actionIDs.length > 0

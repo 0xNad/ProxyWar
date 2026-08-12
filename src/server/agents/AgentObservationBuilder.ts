@@ -102,9 +102,24 @@ export interface BuildAgentObservationInput {
 export class AgentObservationBuilder {
   private neutralIslandTransportTileCache: {
     gameState: Game;
-    tick: number;
-    tiles: readonly number[];
+    tiles: readonly number[] | null;
   } | null = null;
+
+  /** Shares snapshot-derived work while a synchronous callback builds one batch. */
+  withObservationBatch<T>(gameState: Game | undefined, callback: () => T): T {
+    if (gameState === undefined) {
+      return callback();
+    }
+    const cache = { gameState, tiles: null };
+    this.neutralIslandTransportTileCache = cache;
+    try {
+      return callback();
+    } finally {
+      if (this.neutralIslandTransportTileCache === cache) {
+        this.neutralIslandTransportTileCache = null;
+      }
+    }
+  }
 
   build(input: BuildAgentObservationInput): AgentObservation {
     const notes: string[] = [];
@@ -1389,9 +1404,8 @@ export class AgentObservationBuilder {
   }
 
   private unownedNonFalloutShoreTiles(gameState: Game): readonly number[] {
-    const tick = gameState.ticks();
     const cached = this.neutralIslandTransportTileCache;
-    if (cached?.gameState === gameState && cached.tick === tick) {
+    if (cached?.gameState === gameState && cached.tiles !== null) {
       return cached.tiles;
     }
 
@@ -1406,7 +1420,9 @@ export class AgentObservationBuilder {
         tiles.push(tile);
       }
     });
-    this.neutralIslandTransportTileCache = { gameState, tick, tiles };
+    if (cached?.gameState === gameState) {
+      cached.tiles = tiles;
+    }
     return tiles;
   }
 

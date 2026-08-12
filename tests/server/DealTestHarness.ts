@@ -287,6 +287,8 @@ export function dealLeagueHarness(input: {
     }),
   }));
   const observationBuilder = {
+    withObservationBatch: (_gameState: unknown, callback: () => unknown) =>
+      callback(),
     build: (builderInput: { agentID: string; turnNumber: number }) => {
       const seat = input.seats.find(
         (candidate) => candidate.agentID === builderInput.agentID,
