@@ -6,7 +6,7 @@ import {
   isBatchQuiet,
   parseQueueIssue,
   selectQueueBatch,
-  validateBatchAncestry,
+  validateBatchSnapshot,
 } from "../../.github/scripts/coworld-queue.mjs";
 import {
   assertTemplateRebuildsReplayViewer,
@@ -208,6 +208,13 @@ test("durable queue batches every open labeled issue in merge order", () => {
     selectQueueBatch(issues, 2).map((issue) => issue.number),
     [1, 2],
   );
+  assert.deepEqual(
+    selectQueueBatch([
+      { ...issues[1], number: 9, merge_order_at: "2026-08-11T02:00:00Z" },
+      { ...issues[1], number: 8, merge_order_at: "2026-08-11T02:00:00Z" },
+    ]).map((issue) => issue.number),
+    [8, 9],
+  );
 });
 
 test("batch waits for a quiet window after the newest included merge", () => {
@@ -220,26 +227,29 @@ test("batch waits for a quiet window after the newest included merge", () => {
   assert.equal(isBatchQuiet([], new Date("2026-08-12T10:25:00Z")), false);
 });
 
-test("batch source must contain every earlier queued merge", () => {
+test("protected main snapshot must contain every queued merge", () => {
   const records = [
     { mergeSha: "a".repeat(40) },
     { mergeSha: "b".repeat(40) },
     { mergeSha: "c".repeat(40) },
   ];
   assert.equal(
-    validateBatchAncestry(records, [
+    validateBatchSnapshot(records, "d".repeat(40), [
       { status: "ahead", behind_by: 0 },
       { status: "ahead", behind_by: 0 },
-    ]).mergeSha,
-    "c".repeat(40),
+      { status: "ahead", behind_by: 0 },
+    ]),
+    "d".repeat(40),
   );
   assert.throws(() =>
-    validateBatchAncestry(records, [
+    validateBatchSnapshot(records, "d".repeat(40), [
       { status: "ahead", behind_by: 0 },
       { status: "diverged", behind_by: 1 },
+      { status: "ahead", behind_by: 0 },
     ]),
   );
-  assert.throws(() => validateBatchAncestry(records, []));
+  assert.throws(() => validateBatchSnapshot(records, "d".repeat(40), []));
+  assert.throws(() => validateBatchSnapshot(records, "not-a-sha", []));
 });
 
 test("queue parser rejects spoofed issue authors", () => {

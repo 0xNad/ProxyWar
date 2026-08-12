@@ -44,9 +44,11 @@ returned merge SHA and explicitly dispatches the production worker. Each issue
 is a durable per-PR audit record, not necessarily a separate package. The worker
 waits until no newer eligible merge has arrived for 15 minutes, snapshots every
 open queue record, orders them by each PR's live authoritative `merged_at`, and
-uses the newest included merge only after proving it contains every earlier
-queued merge. GitHub concurrency is only a single-worker lock; the issue ledger
-and quiet-window snapshot define the durable batch.
+snapshots protected current `main` as the release source only after proving it
+contains every queued merge. Using current `main` prevents an older held queue
+record from ever downgrading a newer canonical release. GitHub concurrency is
+only a single-worker lock; the issue ledger and quiet-window snapshot define the
+durable batch.
 
 The repository-level GitHub App configuration is:
 
@@ -68,7 +70,7 @@ and revoked by the token action after the job.
 
 1. revalidates every included queue issue, trusted author, tested head, merge
    SHA, labels, changed paths, required owner approval, merge order, and ancestry;
-2. waits for complete CI on the newest included merge SHA, explicitly
+2. waits for complete CI on the protected `main` snapshot SHA, explicitly
    dispatching the exact-source CI fallback if a token-created merge suppressed
    `push`;
 3. allocates the next hosted version on a fresh protected-code-only runner and

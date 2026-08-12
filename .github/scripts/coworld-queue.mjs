@@ -47,11 +47,12 @@ export function selectQueueBatch(issues, requestedNumber = null) {
       (issue) =>
         !issue.labels?.some((label) => label.name === policy.batchHoldLabel),
     )
-    .sort(
-      (left, right) =>
+    .sort((left, right) => {
+      const timeDelta =
         Date.parse(left.merge_order_at ?? left.created_at) -
-        Date.parse(right.merge_order_at ?? right.created_at),
-    );
+        Date.parse(right.merge_order_at ?? right.created_at);
+      return timeDelta || left.number - right.number;
+    });
   if (requestedNumber !== null) {
     const requested = eligible.find(
       (issue) => issue.number === requestedNumber,
@@ -74,12 +75,14 @@ export function isBatchQuiet(batch, now = new Date()) {
   return now.getTime() - mergedAt >= policy.batchQuietMinutes * 60_000;
 }
 
-export function validateBatchAncestry(records, comparisons) {
+export function validateBatchSnapshot(records, sourceSha, comparisons) {
   if (records.length === 0) throw new Error("Coworld batch is empty");
-  if (comparisons.length !== Math.max(0, records.length - 1)) {
+  if (!/^[0-9a-f]{40}$/.test(sourceSha)) {
+    throw new Error("Coworld batch source SHA is invalid");
+  }
+  if (comparisons.length !== records.length) {
     throw new Error("Coworld batch ancestry evidence is incomplete");
   }
-  const source = records.at(-1);
   for (let index = 0; index < comparisons.length; index += 1) {
     const compare = comparisons[index];
     if (
@@ -87,11 +90,11 @@ export function validateBatchAncestry(records, comparisons) {
       !["ahead", "identical"].includes(compare.status)
     ) {
       throw new Error(
-        `batch source ${source.mergeSha} does not contain queued merge ${records[index].mergeSha}`,
+        `batch source ${sourceSha} does not contain queued merge ${records[index].mergeSha}`,
       );
     }
   }
-  return source;
+  return sourceSha;
 }
 
 async function run() {
@@ -201,25 +204,26 @@ async function run() {
     records.push({ ...record, mergedAt: pr.merged_at });
   }
 
-  const candidateSource = records.at(-1);
+  const mainRef = await api(`/repos/${owner}/${repo}/git/ref/heads/main`);
+  const sourceSha = mainRef?.object?.sha;
+  if (!/^[0-9a-f]{40}$/.test(sourceSha ?? "")) {
+    throw new Error("protected main ref returned an invalid source SHA");
+  }
   const comparisons = await Promise.all(
-    records
-      .slice(0, -1)
-      .map((record) =>
-        api(
-          `/repos/${owner}/${repo}/compare/${record.mergeSha}...${candidateSource.mergeSha}`,
-        ),
-      ),
+    records.map((record) =>
+      api(`/repos/${owner}/${repo}/compare/${record.mergeSha}...${sourceSha}`),
+    ),
   );
-  const source = validateBatchAncestry(records, comparisons);
+  validateBatchSnapshot(records, sourceSha, comparisons);
+  const auditSource = records.at(-1);
 
   for (const [name, value] of Object.entries({
     has_item: "true",
-    queue_issue: source.issueNumber,
-    pr_number: source.prNumber,
-    author: source.author,
-    tested_head_sha: source.testedHeadSha,
-    merge_sha: source.mergeSha,
+    queue_issue: auditSource.issueNumber,
+    pr_number: auditSource.prNumber,
+    author: auditSource.author,
+    tested_head_sha: auditSource.testedHeadSha,
+    merge_sha: sourceSha,
     batch_records_json: JSON.stringify(records),
     batch_queue_issues: records.map((record) => record.issueNumber).join("-"),
     batch_pr_numbers: records.map((record) => record.prNumber).join("-"),
@@ -228,7 +232,7 @@ async function run() {
     appendFileSync(process.env.GITHUB_OUTPUT, `${name}=${value}\n`);
   }
   process.stdout.write(
-    `Validated Coworld batch of ${records.length} queue record(s), source ${source.mergeSha}.\n`,
+    `Validated Coworld batch of ${records.length} queue record(s), protected main snapshot ${sourceSha}.\n`,
   );
 }
 

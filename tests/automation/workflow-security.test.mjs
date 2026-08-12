@@ -93,7 +93,8 @@ test("release ledger batches every eligible merge after a quiet window", () => {
   assert.match(queue, /merge_order_at/);
   assert.match(queue, /pr\.merged_at/);
   assert.match(queue, /batchQuietMinutes/);
-  assert.match(queue, /validateBatchAncestry/);
+  assert.match(queue, /validateBatchSnapshot/);
+  assert.match(queue, /git\/ref\/heads\/main/);
 });
 
 test("Coworld release is pinned, template-built, collision-checked, and fully certified", () => {
