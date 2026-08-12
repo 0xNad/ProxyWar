@@ -135,10 +135,7 @@ test("credentialless certification proof is restored before guarded production u
     production.match(/XDG_CACHE_HOME=\$CERTIFICATION_CACHE/g)?.length,
     2,
   );
-  assert.equal(
-    production.match(/\^sha256:\[0-9a-f\]\{64\}\$/g)?.length,
-    4,
-  );
+  assert.equal(production.match(/\^sha256:\[0-9a-f\]\{64\}\$/g)?.length, 4);
   assert.match(
     production,
     /coworld-certification-key\.txt"\)" =~ \^sha256:\[0-9a-f\]\{64\}\$/,
@@ -175,6 +172,25 @@ test("main CI retains PR, push, merge-group, and explicit recursion fallback cov
   assert.match(ci, /🔐 Trusted release automation/);
   assert.match(ci, /ref: \$\{\{ inputs\.source_sha \|\| github\.sha \}\}/);
   assert.match(vite, /\*\*\/tests\/automation\/\*\*/);
+});
+
+test("every main CI dependency install uses the bounded retry wrapper", () => {
+  assert.doesNotMatch(ci, /- run: npm ci\s*$/m);
+  assert.equal(
+    ci.match(/node \.github\/scripts\/npm-ci-with-retry\.mjs/g)?.length,
+    7,
+  );
+});
+
+test("production retries failed exact-source CI without bypassing it", () => {
+  const awaitMainCi = readFileSync(".github/scripts/await-main-ci.mjs", "utf8");
+  assert.match(awaitMainCi, /rerun-failed-jobs/);
+  assert.match(awaitMainCi, /requiredCiRunAction/);
+  assert.match(awaitMainCi, /action === "fail"/);
+  assert.doesNotMatch(
+    awaitMainCi,
+    /conclusion !== "success"[^]*process\.exit\(0\)/,
+  );
 });
 
 test("workflows never echo or artifact production credentials", () => {

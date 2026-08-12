@@ -2,6 +2,7 @@
 
 import { readFileSync } from "node:fs";
 
+import { workflowRunCandidates } from "./trusted-pr-events.mjs";
 import {
   changedPathsFromPullFiles,
   evaluatePullRequest,
@@ -415,11 +416,13 @@ async function eventPullRequests() {
       },
     ];
   }
-  if (event.workflow_run?.pull_requests?.length) {
-    return event.workflow_run.pull_requests.map((pr) => ({
-      number: pr.number,
-      expectedHeadSha: pr.head.sha,
-    }));
+  if (event.workflow_run) {
+    const direct = workflowRunCandidates(event.workflow_run);
+    if (direct.length > 0) return direct;
+    const pulls = await paginate(
+      `/repos/${owner}/${repo}/pulls?state=open&base=${encodeURIComponent(policy.baseBranch)}`,
+    );
+    return workflowRunCandidates(event.workflow_run, pulls);
   }
   if (process.env.GITHUB_EVENT_NAME === "schedule") {
     const pulls = await paginate(
