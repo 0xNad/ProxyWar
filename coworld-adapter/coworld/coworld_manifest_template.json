@@ -264,7 +264,7 @@
   "player": [
     {
       "type": "player",
-      "image": "{{GAME_IMAGE}}",
+      "image": "{{RUNNABLES_IMAGE}}",
       "run": ["node", "/app/integration/src/starter-player.mjs"],
       "env": {},
       "id": "proxywar-starter-websocket",
@@ -287,7 +287,7 @@
   "optimizer": [
     {
       "type": "optimizer",
-      "image": "{{GAME_IMAGE}}",
+      "image": "{{RUNNABLES_IMAGE}}",
       "run": ["node", "/app/integration/src/proxywar-optimizer-plan.mjs"],
       "env": {},
       "id": "proxywar-optimizer-plan",
