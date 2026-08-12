@@ -162,6 +162,19 @@ export function evaluatePullRequest(input, options = {}) {
   };
 }
 
+const BRANCH_REFRESH_REASONS = new Set([
+  "branch-not-current",
+  "required-check-missing",
+  "required-check-not-successful",
+]);
+
+export function canRefreshTrustedBranch(result) {
+  return (
+    result?.reasons?.includes("branch-not-current") === true &&
+    result.reasons.every((reason) => BRANCH_REFRESH_REASONS.has(reason))
+  );
+}
+
 export function assertReleaseRecordSafe(record) {
   const text = JSON.stringify(record);
   const forbidden = [

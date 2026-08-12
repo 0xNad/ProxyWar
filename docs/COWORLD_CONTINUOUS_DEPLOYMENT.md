@@ -34,11 +34,28 @@ fail rather than race. Repository auto-merge remains enabled for ordinary
 operator use but is not an authorization mechanism.
 
 GitHub suppresses most recursive events created with `GITHUB_TOKEN`. Admission
-therefore writes a `github-actions[bot]` queue issue from the returned merge
-SHA and explicitly dispatches the production worker. `workflow_dispatch` is a
-documented recursion exception. Queue selection uses each PR's live
-authoritative `merged_at`, not issue creation order; GitHub concurrency is only
-a single-worker lock.
+therefore mints a short-lived installation token from the dedicated trusted
+release GitHub App. The App token lets an otherwise-safe trusted PR branch be
+updated to current `main` at an exact expected head SHA while still triggering
+ordinary read-only pull-request CI. No branch update occurs with the fallback
+`GITHUB_TOKEN`; admission reports the missing App token and fails closed. After
+an exact-head merge, admission writes a bot-authored queue issue from the
+returned merge SHA and explicitly dispatches the production worker. Queue
+selection uses each PR's live authoritative `merged_at`, not issue creation
+order; GitHub concurrency is only a single-worker lock.
+
+The repository-level GitHub App configuration is:
+
+- variable `TRUSTED_RELEASE_APP_CLIENT_ID` — the App's non-secret client ID;
+- secret `TRUSTED_RELEASE_APP_PRIVATE_KEY` — the App private key;
+- installation scope — only `0xNad/ProxyWar`;
+- repository permissions — Actions read/write, Checks read, Contents
+  read/write, Issues read/write, Metadata read, Pull requests read/write, and
+  Workflows write.
+
+The App requires no webhook and no production or Coworld credential. Its token
+is minted for one job, explicitly narrowed to `ProxyWar`, masked by Actions,
+and revoked by the token action after the job.
 
 ## Coworld production pipeline
 

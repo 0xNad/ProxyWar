@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 
 import { workflowRunCandidates } from "./trusted-pr-events.mjs";
 import {
+  canRefreshTrustedBranch,
   changedPathsFromPullFiles,
   evaluatePullRequest,
   isTrustedAuthor,
@@ -17,6 +18,9 @@ const graphqlUrl =
   process.env.GITHUB_GRAPHQL_URL ?? "https://api.github.com/graphql";
 const dryRun = process.env.DRY_RUN === "true";
 const historical = process.env.HISTORICAL === "true";
+const branchRefreshTokenReady =
+  process.env.BRANCH_REFRESH_TOKEN_READY === "true";
+const trustedReleaseAppSlug = process.env.TRUSTED_RELEASE_APP_SLUG || null;
 
 if (!owner || !repo) throw new Error("GITHUB_REPOSITORY must be owner/repo");
 if (!token) throw new Error("GITHUB_TOKEN is required");
@@ -240,6 +244,13 @@ async function mergeExactHead(nodeId, expectedHeadOid) {
   return merged;
 }
 
+async function updateBranchExact(number, expectedHeadSha) {
+  return api(`/repos/${owner}/${repo}/pulls/${number}/update-branch`, {
+    method: "PUT",
+    body: { expected_head_sha: expectedHeadSha },
+  });
+}
+
 async function findQueueIssue(mergeSha) {
   const query = encodeURIComponent(
     `repo:${owner}/${repo} is:issue in:title "coworld-release:${mergeSha}"`,
@@ -317,6 +328,7 @@ async function processPullRequest(number, expectedHeadSha) {
     eligible: inspected.result.eligible,
     reasons: inspected.result.reasons,
     protectedFiles: inspected.result.protectedFiles,
+    trustedReleaseApp: trustedReleaseAppSlug,
   };
   process.stdout.write(`${JSON.stringify(audit)}\n`);
   if (mergedRecovery && inspected.result.eligible) {
@@ -334,6 +346,30 @@ async function processPullRequest(number, expectedHeadSha) {
       mergeSha: inspected.pr.merge_commit_sha,
       queueIssue: queueIssue.number,
     };
+  }
+  if (!dryRun && !historical && canRefreshTrustedBranch(inspected.result)) {
+    if (!branchRefreshTokenReady) {
+      const blocked = {
+        ...audit,
+        branchUpdateBlocked: "missing-trusted-release-github-app-token",
+      };
+      process.stdout.write(`${JSON.stringify(blocked)}\n`);
+      return blocked;
+    }
+    const fresh = await inspectPullRequest(number, inspected.input.headSha);
+    if (!canRefreshTrustedBranch(fresh.result)) {
+      throw new Error(
+        `PR #${number} changed before branch refresh: ${fresh.result.reasons.join(",")}`,
+      );
+    }
+    await updateBranchExact(number, fresh.input.headSha);
+    const refreshed = {
+      ...audit,
+      branchUpdateRequested: true,
+      previousHeadSha: fresh.input.headSha,
+    };
+    process.stdout.write(`${JSON.stringify(refreshed)}\n`);
+    return refreshed;
   }
   if (dryRun || historical || !inspected.result.eligible) {
     if (
