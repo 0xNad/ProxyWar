@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
+  hasGlobalBatchHold,
   isBatchQuiet,
   parseQueueIssue,
   selectQueueBatch,
@@ -201,11 +202,11 @@ test("durable queue batches every open labeled issue in merge order", () => {
     },
   ];
   assert.deepEqual(
-    selectQueueBatch(issues).map((issue) => issue.number),
+    selectQueueBatch(issues.slice(0, 3)).map((issue) => issue.number),
     [1, 2],
   );
   assert.deepEqual(
-    selectQueueBatch(issues, 2).map((issue) => issue.number),
+    selectQueueBatch(issues.slice(0, 3), 2).map((issue) => issue.number),
     [1, 2],
   );
   assert.deepEqual(
@@ -215,6 +216,27 @@ test("durable queue batches every open labeled issue in merge order", () => {
     ]).map((issue) => issue.number),
     [8, 9],
   );
+  assert.equal(hasGlobalBatchHold(issues), true);
+  assert.deepEqual(selectQueueBatch(issues), []);
+});
+
+test("a held newer merge globally blocks an older unheld batch", () => {
+  const issues = [
+    {
+      number: 10,
+      state: "open",
+      merge_order_at: "2026-08-12T10:00:00Z",
+      labels: [{ name: "coworld-release-queued" }],
+    },
+    {
+      number: 11,
+      state: "open",
+      merge_order_at: "2026-08-12T10:01:00Z",
+      labels: [{ name: "coworld-release-batch-hold" }],
+    },
+  ];
+  assert.equal(hasGlobalBatchHold(issues), true);
+  assert.deepEqual(selectQueueBatch(issues), []);
 });
 
 test("batch waits for a quiet window after the newest included merge", () => {

@@ -38,6 +38,7 @@ export function parseQueueIssue(issue) {
 }
 
 export function selectQueueBatch(issues, requestedNumber = null) {
+  if (hasGlobalBatchHold(issues)) return [];
   const eligible = issues
     .filter((issue) => issue.state === "open")
     .filter((issue) =>
@@ -64,6 +65,14 @@ export function selectQueueBatch(issues, requestedNumber = null) {
     }
   }
   return eligible;
+}
+
+export function hasGlobalBatchHold(issues) {
+  return issues.some(
+    (issue) =>
+      issue.state === "open" &&
+      issue.labels?.some((label) => label.name === policy.batchHoldLabel),
+  );
 }
 
 export function isBatchQuiet(batch, now = new Date()) {
@@ -130,9 +139,25 @@ async function run() {
   const requested = process.env.QUEUE_ISSUE
     ? Number.parseInt(process.env.QUEUE_ISSUE, 10)
     : null;
-  const issues = await paginate(
-    `/repos/${owner}/${repo}/issues?state=open&labels=${encodeURIComponent(policy.queueLabel)}`,
+  const issueLists = await Promise.all(
+    [policy.queueLabel, policy.batchHoldLabel].map((label) =>
+      paginate(
+        `/repos/${owner}/${repo}/issues?state=open&labels=${encodeURIComponent(label)}`,
+      ),
+    ),
   );
+  const issues = [
+    ...new Map(
+      issueLists.flat().map((issue) => [issue.number, issue]),
+    ).values(),
+  ];
+  if (hasGlobalBatchHold(issues)) {
+    appendFileSync(process.env.GITHUB_OUTPUT, "has_item=false\n");
+    process.stdout.write(
+      "Coworld batch is globally paused by an open batch-hold queue record.\n",
+    );
+    return;
+  }
   const orderedIssues = await Promise.all(
     issues.map(async (issue) => {
       const record = parseQueueIssue(issue);

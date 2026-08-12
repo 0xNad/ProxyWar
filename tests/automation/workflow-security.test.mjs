@@ -93,6 +93,7 @@ test("release ledger batches every eligible merge after a quiet window", () => {
   assert.match(queue, /merge_order_at/);
   assert.match(queue, /pr\.merged_at/);
   assert.match(queue, /batchQuietMinutes/);
+  assert.match(queue, /hasGlobalBatchHold/);
   assert.match(queue, /validateBatchSnapshot/);
   assert.match(queue, /git\/ref\/heads\/main/);
 });

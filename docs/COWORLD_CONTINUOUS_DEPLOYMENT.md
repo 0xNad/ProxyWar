@@ -50,6 +50,11 @@ record from ever downgrading a newer canonical release. GitHub concurrency is
 only a single-worker lock; the issue ledger and quiet-window snapshot define the
 durable batch.
 
+An open `coworld-release-batch-hold` ledger record globally pauses dequeue. This
+is intentionally fail-closed: because a held merge is already part of `main`, no
+other batch may publish a current-main snapshot until every explicit hold is
+removed. A hold never permits the code to deploy without its audit record.
+
 The repository-level GitHub App configuration is:
 
 - variable `TRUSTED_RELEASE_APP_CLIENT_ID` — the App's non-secret client ID;
