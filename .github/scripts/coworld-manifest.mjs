@@ -25,6 +25,9 @@ if (command === "verify-template") {
     author: process.env.PR_AUTHOR,
     tested_head_sha: process.env.TESTED_HEAD_SHA,
     merge_sha: process.env.MERGE_SHA,
+    batch_prs: process.env.BATCH_PRS,
+    batch_queue_issues: process.env.BATCH_QUEUE_ISSUES,
+    batch_merge_shas: process.env.BATCH_MERGE_SHAS,
     main_ci_run_id: process.env.MAIN_CI_RUN_ID,
   });
   writeFileSync(path, `${JSON.stringify(stamped, null, 2)}\n`);

@@ -37,11 +37,15 @@ export function parseQueueIssue(issue) {
   };
 }
 
-export function selectOldestQueueIssue(issues, requestedNumber = null) {
+export function selectQueueBatch(issues, requestedNumber = null) {
   const eligible = issues
     .filter((issue) => issue.state === "open")
     .filter((issue) =>
       issue.labels?.some((label) => label.name === policy.queueLabel),
+    )
+    .filter(
+      (issue) =>
+        !issue.labels?.some((label) => label.name === policy.batchHoldLabel),
     )
     .sort(
       (left, right) =>
@@ -58,7 +62,36 @@ export function selectOldestQueueIssue(issues, requestedNumber = null) {
       );
     }
   }
-  return eligible[0] ?? null;
+  return eligible;
+}
+
+export function isBatchQuiet(batch, now = new Date()) {
+  if (batch.length === 0) return false;
+  const latest = batch.at(-1);
+  const mergedAt = Date.parse(latest.merge_order_at ?? latest.created_at);
+  if (!Number.isFinite(mergedAt))
+    throw new Error("batch merge time is invalid");
+  return now.getTime() - mergedAt >= policy.batchQuietMinutes * 60_000;
+}
+
+export function validateBatchAncestry(records, comparisons) {
+  if (records.length === 0) throw new Error("Coworld batch is empty");
+  if (comparisons.length !== Math.max(0, records.length - 1)) {
+    throw new Error("Coworld batch ancestry evidence is incomplete");
+  }
+  const source = records.at(-1);
+  for (let index = 0; index < comparisons.length; index += 1) {
+    const compare = comparisons[index];
+    if (
+      compare.behind_by !== 0 ||
+      !["ahead", "identical"].includes(compare.status)
+    ) {
+      throw new Error(
+        `batch source ${source.mergeSha} does not contain queued merge ${records[index].mergeSha}`,
+      );
+    }
+  }
+  return source;
 }
 
 async function run() {
@@ -109,66 +142,93 @@ async function run() {
       return { ...issue, merge_order_at: pr.merged_at };
     }),
   );
-  const issue = selectOldestQueueIssue(orderedIssues, requested);
-  if (!issue) {
+  const batch = selectQueueBatch(orderedIssues, requested);
+  if (batch.length === 0) {
     appendFileSync(process.env.GITHUB_OUTPUT, "has_item=false\n");
     process.stdout.write("No queued Coworld release.\n");
     return;
   }
+  if (!isBatchQuiet(batch)) {
+    appendFileSync(process.env.GITHUB_OUTPUT, "has_item=false\n");
+    process.stdout.write(
+      `Coworld batch is waiting for ${policy.batchQuietMinutes} quiet minutes after its newest merge.\n`,
+    );
+    return;
+  }
 
-  const record = parseQueueIssue(issue);
-  const [pr, files, reviews] = await Promise.all([
-    api(`/repos/${owner}/${repo}/pulls/${record.prNumber}`),
-    paginate(`/repos/${owner}/${repo}/pulls/${record.prNumber}/files`),
-    paginate(`/repos/${owner}/${repo}/pulls/${record.prNumber}/reviews`),
-  ]);
-  const labels = new Set(pr.labels.map((label) => label.name));
-  if (!pr.merged_at || pr.merge_commit_sha !== record.mergeSha)
-    throw new Error("queued merge SHA is not the PR merge SHA");
-  if (pr.head.sha !== record.testedHeadSha)
-    throw new Error("queued tested head is stale");
-  if (pr.base.ref !== policy.baseBranch)
-    throw new Error("queued PR did not target main");
-  if (
-    !isTrustedAuthor(pr.user.login) ||
-    pr.user.login.toLowerCase() !== record.author
-  ) {
-    throw new Error("queued PR author is not an exact trusted login");
-  }
-  if (!labels.has(policy.auditLabel))
-    throw new Error("queued PR lacks the admission audit label");
-  if (policy.blockingLabels.some((label) => labels.has(label)))
-    throw new Error("queued PR now has a blocking label");
-  const protectedFiles =
-    changedPathsFromPullFiles(files).filter(isTrustBoundaryPath);
-  if (protectedFiles.length > 0) {
-    const latestOwnerReview = reviews
-      .filter((review) => review.user?.login?.toLowerCase() === "0xnad")
-      .sort(
-        (left, right) =>
-          Date.parse(right.submitted_at ?? 0) -
-          Date.parse(left.submitted_at ?? 0),
-      )[0];
+  const records = [];
+  for (const issue of batch) {
+    const record = parseQueueIssue(issue);
+    const [pr, files, reviews] = await Promise.all([
+      api(`/repos/${owner}/${repo}/pulls/${record.prNumber}`),
+      paginate(`/repos/${owner}/${repo}/pulls/${record.prNumber}/files`),
+      paginate(`/repos/${owner}/${repo}/pulls/${record.prNumber}/reviews`),
+    ]);
+    const labels = new Set(pr.labels.map((label) => label.name));
+    if (!pr.merged_at || pr.merge_commit_sha !== record.mergeSha)
+      throw new Error("queued merge SHA is not the PR merge SHA");
+    if (pr.head.sha !== record.testedHeadSha)
+      throw new Error("queued tested head is stale");
+    if (pr.base.ref !== policy.baseBranch)
+      throw new Error("queued PR did not target main");
     if (
-      latestOwnerReview?.state !== "APPROVED" ||
-      latestOwnerReview.commit_id !== record.testedHeadSha
+      !isTrustedAuthor(pr.user.login) ||
+      pr.user.login.toLowerCase() !== record.author
     ) {
-      throw new Error("trust-boundary PR lacks an exact-head 0xNad approval");
+      throw new Error("queued PR author is not an exact trusted login");
     }
+    if (!labels.has(policy.auditLabel))
+      throw new Error("queued PR lacks the admission audit label");
+    if (policy.blockingLabels.some((label) => labels.has(label)))
+      throw new Error("queued PR now has a blocking label");
+    const protectedFiles =
+      changedPathsFromPullFiles(files).filter(isTrustBoundaryPath);
+    if (protectedFiles.length > 0) {
+      const latestOwnerReview = reviews
+        .filter((review) => review.user?.login?.toLowerCase() === "0xnad")
+        .sort(
+          (left, right) =>
+            Date.parse(right.submitted_at ?? 0) -
+            Date.parse(left.submitted_at ?? 0),
+        )[0];
+      if (
+        latestOwnerReview?.state !== "APPROVED" ||
+        latestOwnerReview.commit_id !== record.testedHeadSha
+      ) {
+        throw new Error("trust-boundary PR lacks an exact-head 0xNad approval");
+      }
+    }
+    records.push({ ...record, mergedAt: pr.merged_at });
   }
+
+  const candidateSource = records.at(-1);
+  const comparisons = await Promise.all(
+    records
+      .slice(0, -1)
+      .map((record) =>
+        api(
+          `/repos/${owner}/${repo}/compare/${record.mergeSha}...${candidateSource.mergeSha}`,
+        ),
+      ),
+  );
+  const source = validateBatchAncestry(records, comparisons);
 
   for (const [name, value] of Object.entries({
     has_item: "true",
-    queue_issue: record.issueNumber,
-    pr_number: record.prNumber,
-    author: record.author,
-    tested_head_sha: record.testedHeadSha,
-    merge_sha: record.mergeSha,
+    queue_issue: source.issueNumber,
+    pr_number: source.prNumber,
+    author: source.author,
+    tested_head_sha: source.testedHeadSha,
+    merge_sha: source.mergeSha,
+    batch_records_json: JSON.stringify(records),
+    batch_queue_issues: records.map((record) => record.issueNumber).join("-"),
+    batch_pr_numbers: records.map((record) => record.prNumber).join("-"),
+    batch_merge_shas: records.map((record) => record.mergeSha).join("-"),
   })) {
     appendFileSync(process.env.GITHUB_OUTPUT, `${name}=${value}\n`);
   }
   process.stdout.write(
-    `Validated queue issue #${record.issueNumber} for PR #${record.prNumber}.\n`,
+    `Validated Coworld batch of ${records.length} queue record(s), source ${source.mergeSha}.\n`,
   );
 }
 

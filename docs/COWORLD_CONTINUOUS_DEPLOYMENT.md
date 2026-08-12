@@ -1,9 +1,9 @@
 # Trusted-contributor merge and Coworld deployment
 
 ProxyWar automatically admits pull requests authored by the exact GitHub logins
-`johomax` and `relh`, then deploys every admitted merge as a new immutable
-`proxywar` Coworld version. The live target is the existing Proxy War league;
-the automation never creates another league.
+`johomax` and `relh`, then batches eligible admitted merges after a 15-minute
+quiet window into one immutable `proxywar` Coworld version. The live target is
+the existing Proxy War league; the automation never creates another league.
 
 ## Trust boundary
 
@@ -40,9 +40,13 @@ updated to current `main` at an exact expected head SHA while still triggering
 ordinary read-only pull-request CI. No branch update occurs with the fallback
 `GITHUB_TOKEN`; admission reports the missing App token and fails closed. After
 an exact-head merge, admission writes a bot-authored queue issue from the
-returned merge SHA and explicitly dispatches the production worker. Queue
-selection uses each PR's live authoritative `merged_at`, not issue creation
-order; GitHub concurrency is only a single-worker lock.
+returned merge SHA and explicitly dispatches the production worker. Each issue
+is a durable per-PR audit record, not necessarily a separate package. The worker
+waits until no newer eligible merge has arrived for 15 minutes, snapshots every
+open queue record, orders them by each PR's live authoritative `merged_at`, and
+uses the newest included merge only after proving it contains every earlier
+queued merge. GitHub concurrency is only a single-worker lock; the issue ledger
+and quiet-window snapshot define the durable batch.
 
 The repository-level GitHub App configuration is:
 
@@ -62,10 +66,11 @@ and revoked by the token action after the job.
 `🌍 Coworld production` runs only from protected `main` and accesses the
 `coworld-production` environment. It:
 
-1. revalidates the queue issue, trusted author, tested head, merge SHA, labels,
-   changed paths, and any required owner approval;
-2. waits for complete CI on the exact merged SHA, explicitly dispatching the
-   exact-source CI fallback if a token-created merge suppressed `push`;
+1. revalidates every included queue issue, trusted author, tested head, merge
+   SHA, labels, changed paths, required owner approval, merge order, and ancestry;
+2. waits for complete CI on the newest included merge SHA, explicitly
+   dispatching the exact-source CI fallback if a token-created merge suppressed
+   `push`;
 3. allocates the next hosted version on a fresh protected-code-only runner and
    persists the original rollback target in the durable queue record;
 4. runs focused replay tests, typechecks, commissioner tests, the memory gate,
@@ -79,15 +84,16 @@ and revoked by the token action after the job.
    `coworld-adapter/coworld/coworld_manifest_template.json`, whose replay bundle
    is the local `build/static-replay-viewer` hook, never a downloaded hosted
    manifest or `sha256:` substitution;
-7. stamps the exact source, PR, tested head, merge SHA, and main-CI run into the
-   hosted manifest's release-provenance page;
+7. stamps the exact source plus all included PR numbers, queue records, merge
+   SHAs, and the main-CI run into the hosted manifest's release-provenance page;
 8. uploads with hosted smoke and full certification waits, requiring all ten
    certification steps;
 9. verifies canonical state, the existing league binding, a completed hosted
    smoke episode and replay bytes, then executes the published viewer in an
    isolated Chrome session and requires a canvas plus numeric replay progress;
-10. creates a GitHub deployment record, job summary, PR comment, and closed
-    durable queue record with the previous canonical package retained.
+10. creates one GitHub deployment record and job summary, then comments on every
+    included PR and closes every included durable queue record with the previous
+    canonical package retained.
 
 The Coworld toolchain is pinned to `coworld==0.1.38`. The required environment
 secret is:

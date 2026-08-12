@@ -3,8 +3,10 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
+  isBatchQuiet,
   parseQueueIssue,
-  selectOldestQueueIssue,
+  selectQueueBatch,
+  validateBatchAncestry,
 } from "../../.github/scripts/coworld-queue.mjs";
 import {
   assertTemplateRebuildsReplayViewer,
@@ -164,7 +166,7 @@ test("release records reject secret-shaped output", () => {
   assert.throws(() => createReleaseRecord({ private_key: "forbidden" }));
 });
 
-test("durable queue selects the oldest open labeled issue", () => {
+test("durable queue batches every open labeled issue in merge order", () => {
   const issues = [
     {
       number: 2,
@@ -187,9 +189,57 @@ test("durable queue selects the oldest open labeled issue", () => {
       merge_order_at: "2026-08-11T00:00:00Z",
       labels: [{ name: "coworld-release-queued" }],
     },
+    {
+      number: 4,
+      state: "open",
+      created_at: "2026-08-11T03:00:00Z",
+      merge_order_at: "2026-08-11T03:00:00Z",
+      labels: [
+        { name: "coworld-release-queued" },
+        { name: "coworld-release-batch-hold" },
+      ],
+    },
   ];
-  assert.equal(selectOldestQueueIssue(issues).number, 1);
-  assert.equal(selectOldestQueueIssue(issues, 2).number, 1);
+  assert.deepEqual(
+    selectQueueBatch(issues).map((issue) => issue.number),
+    [1, 2],
+  );
+  assert.deepEqual(
+    selectQueueBatch(issues, 2).map((issue) => issue.number),
+    [1, 2],
+  );
+});
+
+test("batch waits for a quiet window after the newest included merge", () => {
+  const batch = [
+    { merge_order_at: "2026-08-12T10:00:00Z" },
+    { merge_order_at: "2026-08-12T10:10:00Z" },
+  ];
+  assert.equal(isBatchQuiet(batch, new Date("2026-08-12T10:24:59Z")), false);
+  assert.equal(isBatchQuiet(batch, new Date("2026-08-12T10:25:00Z")), true);
+  assert.equal(isBatchQuiet([], new Date("2026-08-12T10:25:00Z")), false);
+});
+
+test("batch source must contain every earlier queued merge", () => {
+  const records = [
+    { mergeSha: "a".repeat(40) },
+    { mergeSha: "b".repeat(40) },
+    { mergeSha: "c".repeat(40) },
+  ];
+  assert.equal(
+    validateBatchAncestry(records, [
+      { status: "ahead", behind_by: 0 },
+      { status: "ahead", behind_by: 0 },
+    ]).mergeSha,
+    "c".repeat(40),
+  );
+  assert.throws(() =>
+    validateBatchAncestry(records, [
+      { status: "ahead", behind_by: 0 },
+      { status: "diverged", behind_by: 1 },
+    ]),
+  );
+  assert.throws(() => validateBatchAncestry(records, []));
 });
 
 test("queue parser rejects spoofed issue authors", () => {

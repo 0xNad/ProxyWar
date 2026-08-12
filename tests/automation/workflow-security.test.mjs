@@ -82,13 +82,18 @@ test("production secrets are isolated to a protected main environment job", () =
   );
 });
 
-test("release queue is durable beyond GitHub concurrency coalescing", () => {
+test("release ledger batches every eligible merge after a quiet window", () => {
   assert.match(production, /schedule:/);
   assert.match(production, /cancel-in-progress: false/);
-  assert.match(production, /durable FIFO/);
+  assert.match(production, /durable release ledger/);
+  assert.match(production, /batch_records_json/);
+  assert.match(production, /Batch merge SHAs/);
+  assert.match(production, /Close batch queue records/);
   assert.match(production, /github-actions\[bot\]/);
   assert.match(queue, /merge_order_at/);
   assert.match(queue, /pr\.merged_at/);
+  assert.match(queue, /batchQuietMinutes/);
+  assert.match(queue, /validateBatchAncestry/);
 });
 
 test("Coworld release is pinned, template-built, collision-checked, and fully certified", () => {
