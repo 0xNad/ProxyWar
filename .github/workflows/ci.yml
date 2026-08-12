@@ -29,11 +29,21 @@ jobs:
         with:
           ref: ${{ inputs.source_sha || github.sha }}
           submodules: false
+      - &checkout-protected-ci-control
+        name: Checkout protected CI retry control
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: main
+          path: artifacts/trusted-ci-control
+          sparse-checkout: .github/scripts/npm-ci-with-retry.mjs
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+          submodules: false
       - name: Setup node
         uses: actions/setup-node@v6
         with:
           node-version: 24
-      - run: node .github/scripts/npm-ci-with-retry.mjs
+      - run: node artifacts/trusted-ci-control/.github/scripts/npm-ci-with-retry.mjs
       - run: npm run build-prod
       - uses: actions/upload-artifact@v7
         with:
@@ -129,11 +139,12 @@ jobs:
         with:
           ref: ${{ inputs.source_sha || github.sha }}
           submodules: false
+      - *checkout-protected-ci-control
       - name: Setup node
         uses: actions/setup-node@v6
         with:
           node-version: 24
-      - run: node .github/scripts/npm-ci-with-retry.mjs
+      - run: node artifacts/trusted-ci-control/.github/scripts/npm-ci-with-retry.mjs
       - name: Download static app shell
         uses: actions/download-artifact@v7
         with:
@@ -167,11 +178,12 @@ jobs:
         with:
           ref: ${{ inputs.source_sha || github.sha }}
           submodules: false
+      - *checkout-protected-ci-control
       - name: Setup node
         uses: actions/setup-node@v6
         with:
           node-version: 24
-      - run: node .github/scripts/npm-ci-with-retry.mjs
+      - run: node artifacts/trusted-ci-control/.github/scripts/npm-ci-with-retry.mjs
       - run: npm run test:coverage -- ${{ matrix.file }}
 
   test-e2e:
@@ -195,11 +207,12 @@ jobs:
         with:
           ref: ${{ inputs.source_sha || github.sha }}
           submodules: false
+      - *checkout-protected-ci-control
       - name: Setup node
         uses: actions/setup-node@v6
         with:
           node-version: 24
-      - run: node .github/scripts/npm-ci-with-retry.mjs
+      - run: node artifacts/trusted-ci-control/.github/scripts/npm-ci-with-retry.mjs
       - name: Download static app shell
         uses: actions/download-artifact@v7
         with:
@@ -215,11 +228,12 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.source_sha || github.sha }}
+      - *checkout-protected-ci-control
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
           cache: "npm"
-      - run: node .github/scripts/npm-ci-with-retry.mjs
+      - run: node artifacts/trusted-ci-control/.github/scripts/npm-ci-with-retry.mjs
       - run: npx eslint --format gha
 
   prettier:
@@ -231,11 +245,12 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.source_sha || github.sha }}
+      - *checkout-protected-ci-control
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
           cache: "npm"
-      - run: node .github/scripts/npm-ci-with-retry.mjs
+      - run: node artifacts/trusted-ci-control/.github/scripts/npm-ci-with-retry.mjs
       - run: npx prettier --check .
 
   gen-maps:
@@ -246,6 +261,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.source_sha || github.sha }}
+      - *checkout-protected-ci-control
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
@@ -254,7 +270,7 @@ jobs:
         with:
           go-version-file: map-generator/go.mod
           cache-dependency-path: map-generator/go.sum
-      - run: node .github/scripts/npm-ci-with-retry.mjs
+      - run: node artifacts/trusted-ci-control/.github/scripts/npm-ci-with-retry.mjs
       - run: npm run gen-maps
       - name: Check for diff
         run: |
