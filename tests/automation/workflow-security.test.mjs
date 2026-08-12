@@ -135,6 +135,14 @@ test("credentialless certification proof is restored before guarded production u
     production.match(/XDG_CACHE_HOME=\$CERTIFICATION_CACHE/g)?.length,
     2,
   );
+  assert.equal(
+    production.match(/\^sha256:\[0-9a-f\]\{64\}\$/g)?.length,
+    4,
+  );
+  assert.match(
+    production,
+    /coworld-certification-key\.txt"\)" =~ \^sha256:\[0-9a-f\]\{64\}\$/,
+  );
   assert.match(production, /test "\$ACTUAL_KEY" =/);
   assert.match(
     production,
