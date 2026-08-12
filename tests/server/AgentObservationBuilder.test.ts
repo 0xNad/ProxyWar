@@ -444,6 +444,55 @@ describe("AgentObservationBuilder build search", () => {
 });
 
 describe("AgentObservationBuilder rival-rival coalition graph", () => {
+  it("matches the legacy double-build result with one communication-aware build", async () => {
+    const game = await threePlayerGame();
+    const input = {
+      agentID: "agent-1",
+      clientID: "CLNT_AGENT",
+      username: "Agent",
+      profile: "aggressive" as const,
+      gameID: "COMMUNICATION_EQUIVALENCE",
+      turnNumber: 10,
+      gameState: game,
+    };
+    const recentCommunications = [
+      {
+        sequence: 7,
+        turnNumber: 9,
+        senderAgentID: "rival-agent-a",
+        senderPlayerID: "P_A",
+        senderName: "Rival A",
+        senderProfile: "diplomatic" as const,
+        actionKind: "quick_chat" as const,
+        intent: "coordinate_attack" as const,
+        recipientID: "P_AGENT",
+        recipientName: "Agent",
+        targetID: "P_B",
+        targetName: "Rival B",
+        quickChatKey: "attack.now",
+        message: "Attack Rival B",
+        directToAgent: true,
+      },
+    ];
+
+    const legacyBuilder = new AgentObservationBuilder();
+    legacyBuilder.build(input);
+    const legacyDoubleBuild = legacyBuilder.build({
+      ...input,
+      recentCommunications,
+    });
+
+    const singleBuildBuilder = new AgentObservationBuilder();
+    const singleBuildSpy = vi.spyOn(singleBuildBuilder, "build");
+    const singleBuild = singleBuildBuilder.build({
+      ...input,
+      recentCommunications,
+    });
+
+    expect(singleBuild).toEqual(legacyDoubleBuild);
+    expect(singleBuildSpy).toHaveBeenCalledTimes(1);
+  });
+
   it("surfaces which rivals are allied with EACH OTHER (not just with the agent)", async () => {
     const game = await threePlayerGame();
     ally(game, "P_A", "P_B");
