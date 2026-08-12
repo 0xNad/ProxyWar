@@ -249,7 +249,7 @@
     "protocols": {
       "player": {
         "type": "text",
-        "value": "Proxy War Coworld player protocol: connect to COWORLD_PLAYER_WS_URL. The game sends {type:'decision_request', requestID, request:{protocolVersion:'proxywar-agent-v1', observation, legalActions, responseContract}}. The player replies {type:'decision_response', requestID, selectedLegalActionId, reason, confidence?}. selectedLegalActionId must be one offered LegalAction.id from legalActions[].id. The game still validates through Proxy War AgentDecisionValidator."
+        "value": "Proxy War Coworld player protocol: connect to COWORLD_PLAYER_WS_URL. The game sends {type:'decision_request', requestID, request:{protocolVersion:'proxywar-agent-v1', observation, legalActions, responseContract}}. The player replies {type:'decision_response', requestID, selectedLegalActionId, selectedLegalActionIds?, reason, confidence?}. selectedLegalActionId must be one offered LegalAction.id from legalActions[].id. selectedLegalActionIds may optionally carry an ordered batch of up to five offered ids, with selectedLegalActionId first; each id is validated and multi-player batches resolve one action per player per layer. The game still validates through Proxy War AgentDecisionValidator."
       },
       "global": {
         "type": "text",

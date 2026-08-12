@@ -233,11 +233,12 @@ export function dominanceConversionShareFloor(): number {
  * Wire-primary argmax flag (keystone v7, 4-game forensics 2026-07-12). Reads the EXACT
  * env var `PROXYWAR_TUNE_PRIMARY_ARGMAX` (A/B arms set "0"/"1"). DEFAULT OFF. The
  * Frontier scheduler assembles multi-action batches whose PRIMARY is chosen by module
- * rotation, not score — correct for the local runtime (the whole batch executes) but
- * catastrophic on single-action wires (Coworld carries ONE selectedLegalActionId per
- * decision): measured 28/40 decisions in one hosted game shipped a score-9-16 neutral
+ * rotation, not score. This was catastrophic on the historical scalar-only Coworld
+ * wire: measured 28/40 decisions in one hosted game shipped a score-9-16 neutral
  * expand while a score-100 defensive build / combat attack / mainland expand rode the
- * batch and was dropped. When ON, the batch is reordered so the highest-scored
+ * dropped batch tail. The current Coworld wire carries bounded batches, but this flag
+ * remains useful when a legacy scalar policy host is in play. When ON, the batch is
+ * reordered so the highest-scored
  * promotable candidate (attack/boat/build/upgrade — never diplomacy, social, or nuke,
  * whose cross-module scores are not calibrated against these) becomes the primary,
  * and a deliberate combat primary is never displaced by a different combat action

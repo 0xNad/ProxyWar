@@ -9,6 +9,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import zlib from "node:zlib";
 
 import {
+  parseCoworldActionBatch,
+  withCoworldActionBatchContract,
+} from "./coworld-action-batch.ts";
+import {
   coworldAppShellRoute,
   injectCoworldSplash,
   type CoworldAppShellRoute,
@@ -84,6 +88,7 @@ type LegalActionView = {
 type PendingDecision = {
   resolve: (decision: {
     actionID: string;
+    actionIDs?: string[];
     reason: string;
     metadata: Record<string, unknown>;
   }) => void;
@@ -291,6 +296,7 @@ class CoworldProtocolServer {
     request: unknown,
   ): Promise<{
     actionID: string;
+    actionIDs?: string[];
     reason: string;
     metadata: Record<string, unknown>;
   }> {
@@ -324,7 +330,7 @@ class CoworldProtocolServer {
           type: "decision_request",
           requestID,
           slot,
-          request,
+          request: withCoworldActionBatchContract(request),
         }),
       );
     });
@@ -424,7 +430,11 @@ class CoworldProtocolServer {
     }
     clearTimeout(pending.timeout);
     this.pending.delete(requestID);
-    const selectedLegalActionId = String(message.selectedLegalActionId ?? "");
+    const actionBatch = parseCoworldActionBatch(
+      message.selectedLegalActionId,
+      message.selectedLegalActionIds,
+    );
+    const selectedLegalActionId = actionBatch.actionIDs[0];
     // Optional second selection (the diplomacy slot). Forwarded only when the
     // player actually sent a non-empty string, so a player that never sends
     // it produces the exact same AgentDecision as before. The league runner's
@@ -441,6 +451,9 @@ class CoworldProtocolServer {
         : null;
     pending.resolve({
       actionID: selectedLegalActionId,
+      ...(actionBatch.actionIDs.length > 1
+        ? { actionIDs: actionBatch.actionIDs }
+        : {}),
       ...(selectedDealActionId !== null
         ? { dealActionID: selectedDealActionId }
         : {}),
@@ -465,6 +478,9 @@ class CoworldProtocolServer {
         rawProviderOutputPresent: true,
         externalRawOutput: JSON.stringify(message).slice(0, 1000),
         offeredLegalActionCount: pending.legalActions.length,
+        ...(actionBatch.wireIssue !== null
+          ? { coworldActionBatchWireIssue: actionBatch.wireIssue }
+          : {}),
         confidence:
           typeof message.confidence === "number"
             ? message.confidence
