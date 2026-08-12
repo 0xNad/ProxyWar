@@ -74,18 +74,23 @@ export function normalizeDecisionResponse(
   let actionIDs: string[] | undefined;
   if (Array.isArray(message.selectedLegalActionIds)) {
     const normalized: string[] = [];
-    const push = (value: string): void => {
+    // Stops once the cap is held: an inbound frame may carry thousands of
+    // agent-controlled ids, and every extra one would cost a full linear
+    // `includes` scan. Ids past the cap can never survive it, so the early
+    // exit changes no output.
+    const push = (value: string): boolean => {
       const id = value.trim().slice(0, MAX_WIRE_ACTION_ID_LENGTH);
       if (id.length > 0 && !normalized.includes(id)) {
         normalized.push(id);
       }
+      return normalized.length < MAX_WIRE_ACTIONS_PER_DECISION;
     };
-    if (actionID.length > 0) {
-      push(actionID);
-    }
-    for (const entry of message.selectedLegalActionIds) {
-      if (typeof entry === "string") {
-        push(entry);
+    const hasRoom = actionID.length === 0 || push(actionID);
+    if (hasRoom) {
+      for (const entry of message.selectedLegalActionIds) {
+        if (typeof entry === "string" && !push(entry)) {
+          break;
+        }
       }
     }
     const capped = normalized.slice(0, MAX_WIRE_ACTIONS_PER_DECISION);

@@ -43,8 +43,8 @@ import {
 } from "../../core/Schemas";
 import { validateAgentDecision } from "./AgentDecisionValidator";
 import {
+  dedupeAndCapActionIDs,
   interleaveLayers,
-  MAX_WIRE_ACTIONS_PER_DECISION,
 } from "./AgentWireProtocol";
 import {
   AgentObservationBuilder,
@@ -481,11 +481,14 @@ async function runDecisionStep(input: {
       continue;
     }
     const decision = await seat.brain.decide({ observation, legalActions });
-    const actionIDs = (
+    // Dedupe THEN cap, sharing the league runner's helper: capping first
+    // would let a duplicated id burn batch capacity here but not in live
+    // play, so a forecast could execute an intent the real match drops.
+    const actionIDs = dedupeAndCapActionIDs(
       decision.actionIDs !== undefined && decision.actionIDs.length > 0
         ? decision.actionIDs
-        : [decision.actionID]
-    ).slice(0, MAX_WIRE_ACTIONS_PER_DECISION);
+        : [decision.actionID],
+    );
     const seatIntents: StampedIntent[] = [];
     for (const actionID of actionIDs) {
       const validation = validateAgentDecision(

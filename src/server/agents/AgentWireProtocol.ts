@@ -27,24 +27,59 @@ export const MAX_WIRE_ACTIONS_PER_DECISION = 5;
  * Normalize a wire batch: scalar-first, trimmed, empties dropped, deduped
  * preserving order. Does NOT cap — strict parsing rejects oversized batches
  * with a coaching error while robust parsing truncates, so the cap decision
- * belongs to the caller.
+ * belongs to the caller. It DOES stop collecting at `stopAt` (default cap+1),
+ * which bounds the scan without changing any result the caller can observe.
  */
 export function normalizeWireActionIds(
   primary: string,
   requested: readonly string[],
+  stopAt: number = MAX_WIRE_ACTIONS_PER_DECISION + 1,
 ): string[] {
   const normalized: string[] = [];
-  const push = (value: string): void => {
+  // Returns false once `stopAt` ids are held, so callers stop walking an
+  // agent-controlled array. Default is cap+1: enough for a strict parser to
+  // detect "more than the cap" while bounding the quadratic `includes` scan
+  // (an inbound frame may carry thousands of ids). Ids past that point can
+  // never survive the cap, so stopping early changes no output.
+  const push = (value: string): boolean => {
     const id = value.trim();
     if (id.length > 0 && !normalized.includes(id)) {
       normalized.push(id);
     }
+    return normalized.length < stopAt;
   };
-  push(primary);
+  if (!push(primary)) {
+    return normalized;
+  }
   for (const id of requested) {
-    push(id);
+    if (!push(id)) {
+      break;
+    }
   }
   return normalized;
+}
+
+/**
+ * Deduplicate then cap — the order the league runner uses
+ * (`requestedDecisionActionIDs`), so a duplicated id never consumes batch
+ * capacity. Shared so the sim rollout stages exactly the ids live play would
+ * submit; capping before deduping would let a forecast execute a duplicate
+ * intent the real match drops.
+ */
+export function dedupeAndCapActionIDs(
+  ids: readonly string[],
+  cap: number = MAX_WIRE_ACTIONS_PER_DECISION,
+): string[] {
+  const deduplicated: string[] = [];
+  for (const id of ids) {
+    if (typeof id === "string" && id.length > 0 && !deduplicated.includes(id)) {
+      deduplicated.push(id);
+      if (deduplicated.length === cap) {
+        break;
+      }
+    }
+  }
+  return deduplicated;
 }
 
 /**
