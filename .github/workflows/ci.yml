@@ -33,7 +33,7 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: 24
-      - run: npm ci
+      - run: node .github/scripts/npm-ci-with-retry.mjs
       - run: npm run build-prod
       - uses: actions/upload-artifact@v7
         with:
@@ -133,7 +133,7 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: 24
-      - run: npm ci
+      - run: node .github/scripts/npm-ci-with-retry.mjs
       - name: Download static app shell
         uses: actions/download-artifact@v7
         with:
@@ -171,7 +171,7 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: 24
-      - run: npm ci
+      - run: node .github/scripts/npm-ci-with-retry.mjs
       - run: npm run test:coverage -- ${{ matrix.file }}
 
   test-e2e:
@@ -199,7 +199,7 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: 24
-      - run: npm ci
+      - run: node .github/scripts/npm-ci-with-retry.mjs
       - name: Download static app shell
         uses: actions/download-artifact@v7
         with:
@@ -219,7 +219,7 @@ jobs:
         with:
           node-version: "24"
           cache: "npm"
-      - run: npm ci
+      - run: node .github/scripts/npm-ci-with-retry.mjs
       - run: npx eslint --format gha
 
   prettier:
@@ -235,7 +235,7 @@ jobs:
         with:
           node-version: "24"
           cache: "npm"
-      - run: npm ci
+      - run: node .github/scripts/npm-ci-with-retry.mjs
       - run: npx prettier --check .
 
   gen-maps:
@@ -254,7 +254,7 @@ jobs:
         with:
           go-version-file: map-generator/go.mod
           cache-dependency-path: map-generator/go.sum
-      - run: npm ci
+      - run: node .github/scripts/npm-ci-with-retry.mjs
       - run: npm run gen-maps
       - name: Check for diff
         run: |
