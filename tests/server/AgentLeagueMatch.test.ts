@@ -425,6 +425,213 @@ describe("AgentLeagueMatchRunner", () => {
     }
   });
 
+  // Behavior pin for the batch-layer round-robin rewrite: all-scalar decisions
+  // must keep EXACTLY this record order and shape (order, sequences, batch
+  // metadata, validator-fallback form) before and after the submission-pass
+  // restructure. Authored against the participant-major loop; do not adapt it
+  // to a rewrite — the rewrite must satisfy it.
+  it("pins scalar submission order and the same-turn diplomacy conflict record shape", async () => {
+    const log = makeLogger();
+    const legalActions: LegalAction[] = [
+      {
+        id: "alliance:request:SHARED",
+        kind: "alliance_request",
+        label: "Request Alliance",
+        intent: null,
+        risk: { level: "low", score: 0.1 },
+        metadata: { recipientID: "SHARED" },
+      },
+      {
+        id: "hold",
+        kind: "hold",
+        label: "Hold",
+        intent: null,
+        risk: { level: "none", score: 0 },
+      },
+    ];
+    const decisionByUsername: Record<string, string> = {
+      "First Agent": "alliance:request:SHARED",
+      "Second Agent": "alliance:request:SHARED",
+      "Third Agent": "hold",
+    };
+    const participants = createAgentParticipants(
+      [
+        { username: "First Agent", profile: "opportunistic" },
+        { username: "Second Agent", profile: "aggressive" },
+        { username: "Third Agent", profile: "defensive" },
+      ],
+      log,
+      {
+        brainFactory: (spec) => ({
+          brainType: "rule",
+          decide: () => ({
+            actionID: decisionByUsername[spec.username],
+            reason: `${spec.username} scalar pick`,
+          }),
+        }),
+      },
+    );
+    const game = new GameServer(
+      "AGENT_PIN_DIPLO",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: [],
+      log,
+      legalActionBuilder: {
+        build: () => legalActions,
+      } as unknown as LegalActionBuilder,
+    });
+
+    try {
+      const records = await match.runDecisionTurn({ turnNumber: 2 });
+
+      expect(records.map((record) => record.username)).toEqual([
+        "First Agent",
+        "Second Agent",
+        "Third Agent",
+      ]);
+      expect(records.map((record) => record.sequence)).toEqual([1, 2, 3]);
+      expect(records.map((record) => record.chosenActionID)).toEqual([
+        "alliance:request:SHARED",
+        "hold",
+        "hold",
+      ]);
+
+      // First Agent: clean scalar submission. Scalar decisions still carry
+      // batch metadata (batchIndex 0, batchSize 1) — pinned so the rewrite
+      // cannot change scalar record bytes.
+      expect(records[0].decisionMetadata).toMatchObject({
+        batchIndex: 0,
+        batchSize: 1,
+        batchActionIDs: "alliance:request:SHARED",
+        batchRejectedActionIDs: "",
+      });
+      expect(records[0].decisionMetadata?.fallbackUsed).toBeUndefined();
+      expect(records[0].result.accepted).toBe(true);
+      expect(records[0].legalActionIDs).toContain("alliance:request:SHARED");
+
+      // Second Agent: recipient SHARED is reserved by the earlier submission,
+      // so the alliance action is filtered from the SUBMISSION menu, the
+      // requested id fails validation, and the validator substitutes a hold —
+      // recorded loudly as a validation fallback. This pins that validation
+      // runs against the same-turn-filtered menu, not the offered menu.
+      expect(records[1].legalActionIDs).not.toContain(
+        "alliance:request:SHARED",
+      );
+      expect(records[1].decisionMetadata).toMatchObject({
+        batchIndex: 0,
+        batchSize: 1,
+        batchActionIDs: "alliance:request:SHARED",
+        batchRejectedActionIDs: "alliance:request:SHARED",
+        fallbackUsed: true,
+        validationFallbackUsed: true,
+      });
+
+      // Third Agent: hold is never diplomacy-filtered.
+      expect(records[2].decisionMetadata?.fallbackUsed).toBeUndefined();
+      expect(records[2].result.accepted).toBe(true);
+    } finally {
+      await game.end({ archive: false });
+    }
+  });
+
+  it("pins the same-turn build-tile conflict record shape (no game state)", async () => {
+    const log = makeLogger();
+    const legalActions: LegalAction[] = [
+      {
+        id: "build:City:100",
+        kind: "build",
+        label: "Build City at 100",
+        intent: null,
+        risk: { level: "low", score: 0.1 },
+        metadata: { role: "economic", unit: UnitType.City, buildTile: 100 },
+      },
+      {
+        id: "build:City:200",
+        kind: "build",
+        label: "Build City at 200",
+        intent: null,
+        risk: { level: "low", score: 0.1 },
+        metadata: { role: "economic", unit: UnitType.City, buildTile: 200 },
+      },
+      {
+        id: "hold",
+        kind: "hold",
+        label: "Hold",
+        intent: null,
+        risk: { level: "none", score: 0 },
+      },
+    ];
+    const decisionByUsername: Record<string, string> = {
+      "First Agent": "build:City:100",
+      "Second Agent": "build:City:100",
+      "Third Agent": "build:City:200",
+    };
+    const participants = createAgentParticipants(
+      [
+        { username: "First Agent", profile: "opportunistic" },
+        { username: "Second Agent", profile: "aggressive" },
+        { username: "Third Agent", profile: "defensive" },
+      ],
+      log,
+      {
+        brainFactory: (spec) => ({
+          brainType: "rule",
+          decide: () => ({
+            actionID: decisionByUsername[spec.username],
+            reason: `${spec.username} scalar pick`,
+          }),
+        }),
+      },
+    );
+    const game = new GameServer(
+      "AGENT_PIN_BUILD",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: [],
+      log,
+      legalActionBuilder: {
+        build: () => legalActions,
+      } as unknown as LegalActionBuilder,
+    });
+
+    try {
+      const records = await match.runDecisionTurn({ turnNumber: 2 });
+
+      expect(records.map((record) => record.chosenActionID)).toEqual([
+        "build:City:100",
+        "hold",
+        "build:City:200",
+      ]);
+      // With no gameState the conflict test is exact-tile: Second Agent's
+      // duplicate tile is filtered and falls back; Third Agent's distinct
+      // tile passes even after two earlier submissions.
+      expect(records[1].legalActionIDs).not.toContain("build:City:100");
+      expect(records[1].legalActionIDs).toContain("build:City:200");
+      expect(records[1].decisionMetadata).toMatchObject({
+        fallbackUsed: true,
+        validationFallbackUsed: true,
+        batchRejectedActionIDs: "build:City:100",
+      });
+      expect(records[2].result.accepted).toBe(true);
+      expect(records[2].decisionMetadata?.fallbackUsed).toBeUndefined();
+    } finally {
+      await game.end({ archive: false });
+    }
+  });
+
   it("proves chosen multi-agent spawn decisions execute legally in core", async () => {
     const log = makeLogger();
     const candidateGame = await setup("big_plains", { nations: "disabled" });
