@@ -316,8 +316,8 @@ jobs:
           test "$(jq -r '.game.docs.pages[] | select(.id=="proxywar-release-provenance") | .content.value' "$MANIFEST" | sed -n 's/^source_sha=//p')" = "$SOURCE_SHA"
           test "$(jq -r .game.replay_viewer.bundle "$MANIFEST")" = "build/static-replay-viewer"
           test -f coworld-adapter/dist/build/static-replay-viewer/index.html
-          rg -q 'ai-league-replay-progress|replay_progress_tip' coworld-adapter/dist/build/static-replay-viewer
-          ! rg -q 'Support Proxy War!|Purchase a territory skin' coworld-adapter/dist/build/static-replay-viewer
+          grep -r -q -E 'ai-league-replay-progress|replay_progress_tip' coworld-adapter/dist/build/static-replay-viewer
+          ! grep -r -q -E 'Support Proxy War!|Purchase a territory skin' coworld-adapter/dist/build/static-replay-viewer
           mkdir -p coworld-adapter/tmp
           TMPDIR="$PWD/coworld-adapter/tmp" "$COWORLD_BIN" certify "$MANIFEST" --timeout-seconds 300
       - name: Package checksummed immutable release artifact

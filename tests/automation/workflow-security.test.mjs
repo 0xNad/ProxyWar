@@ -91,7 +91,16 @@ test("ordinary frontend changes cannot skip replay-viewer rebuild", () => {
   assert.doesNotMatch(production, /paths-ignore:/);
   assert.doesNotMatch(production, /if:.*coworld-adapter/);
   assert.match(production, /build\/static-replay-viewer/);
-  assert.match(production, /ai-league-replay-progress\|replay_progress_tip/);
+  assert.match(
+    production,
+    /grep -r -q -E 'ai-league-replay-progress\|replay_progress_tip' coworld-adapter\/dist\/build\/static-replay-viewer/,
+  );
+  assert.match(
+    production,
+    /! grep -r -q -E 'Support Proxy War!\|Purchase a territory skin' coworld-adapter\/dist\/build\/static-replay-viewer/,
+  );
+  assert.doesNotMatch(production, /grep -R/);
+  assert.doesNotMatch(production, /\brg -q/);
 });
 
 test("main CI retains PR, push, merge-group, and explicit recursion fallback coverage", () => {
