@@ -8,7 +8,11 @@ import {
   PlayerType,
   UnitType,
 } from "../../src/core/game/Game";
-import { AgentObservationBuilder } from "../../src/server/agents/AgentObservationBuilder";
+import {
+  AgentObservationBuilder,
+  BUILD_OPTION_CANDIDATES,
+  SHARED_LAND_STRUCTURE_BUILD_TYPES,
+} from "../../src/server/agents/AgentObservationBuilder";
 import { LegalActionBuilder } from "../../src/server/agents/LegalActionBuilder";
 import {
   createGame as createPathfindingGame,
@@ -17,20 +21,47 @@ import {
 } from "../core/pathfinding/_fixtures";
 import { setup } from "../util/Setup";
 
-async function threePlayerGame() {
-  const agent = new PlayerInfo("Agent", PlayerType.Human, "CLNT_AGENT", "P_AGENT");
-  const rivalA = new PlayerInfo("Rival A", PlayerType.Human, "CLNT_A", "P_A");
-  const rivalB = new PlayerInfo("Rival B", PlayerType.Human, "CLNT_B", "P_B");
+async function plainsGame(
+  rivals: PlayerInfo[] = [],
+  gameConfig: Parameters<typeof setup>[1] = {},
+) {
+  const agent = new PlayerInfo(
+    "Agent",
+    PlayerType.Human,
+    "CLNT_AGENT",
+    "P_AGENT",
+  );
+  const players = [agent, ...rivals];
   const game = await setup(
     "plains",
-    { nations: "disabled", infiniteGold: true, instantBuild: true, infiniteTroops: true },
-    [agent, rivalA, rivalB],
+    { nations: "disabled", instantBuild: true, ...gameConfig },
+    players,
   );
-  game.player("P_AGENT").conquer(game.ref(0, 0));
-  game.player("P_A").conquer(game.ref(0, 1));
-  game.player("P_B").conquer(game.ref(0, 2));
+  for (const [index, player] of players.entries()) {
+    game.player(player.id).conquer(game.ref(0, index));
+  }
   while (game.inSpawnPhase()) {
     game.executeNextTick();
+  }
+  return game;
+}
+
+async function threePlayerGame() {
+  const rivalA = new PlayerInfo("Rival A", PlayerType.Human, "CLNT_A", "P_A");
+  const rivalB = new PlayerInfo("Rival B", PlayerType.Human, "CLNT_B", "P_B");
+  return plainsGame([rivalA, rivalB], {
+    infiniteGold: true,
+    infiniteTroops: true,
+  });
+}
+
+async function finiteGoldGame() {
+  const game = await plainsGame();
+  const player = game.player("P_AGENT");
+  for (let x = 30; x <= 45; x++) {
+    for (let y = 46; y <= 54; y++) {
+      player.conquer(game.ref(x, y));
+    }
   }
   return game;
 }
@@ -130,6 +161,128 @@ function ally(
   game.addExecution(new AllianceRequestExecution(pb, pa.id()));
   game.executeNextTick();
 }
+
+describe("AgentObservationBuilder build search pruning", () => {
+  const buildOptionUnits = new Set<UnitType>(
+    BUILD_OPTION_CANDIDATES.map(({ unit }) => unit),
+  );
+  const sharedLandStructureTypes = new Set<UnitType>(
+    SHARED_LAND_STRUCTURE_BUILD_TYPES,
+  );
+
+  it("does not search build tiles for unaffordable units", async () => {
+    const game = await finiteGoldGame();
+    const player = game.player("P_AGENT");
+    player.removeGold(player.gold());
+    const canBuild = vi.spyOn(player, "canBuild");
+
+    const observation = observe(game);
+
+    expect(observation.nonCombat.buildOptions).toEqual([]);
+    expect(
+      canBuild.mock.calls.filter(([unit]) => buildOptionUnits.has(unit)),
+    ).toEqual([]);
+  });
+
+  it("does not calculate costs for disabled units", async () => {
+    const game = await plainsGame([], {
+      disabledUnits: [UnitType.AtomBomb],
+    });
+    const atomBombCost = vi.spyOn(
+      game.config().unitInfo(UnitType.AtomBomb),
+      "cost",
+    );
+
+    observe(game);
+
+    expect(atomBombCost).not.toHaveBeenCalled();
+  });
+
+  it("searches build tiles when gold exactly equals the unit cost", async () => {
+    const game = await finiteGoldGame();
+    const player = game.player("P_AGENT");
+    player.removeGold(player.gold());
+    player.addGold(game.config().unitInfo(UnitType.City).cost(game, player));
+
+    const observation = observe(game);
+
+    expect(
+      observation.nonCombat.buildOptions.some(
+        ({ unit }) => unit === UnitType.City,
+      ),
+    ).toBe(true);
+  });
+
+  it("checks each land target only once across structure types", async () => {
+    const game = await finiteGoldGame();
+    const player = game.player("P_AGENT");
+    player.addGold(1_000_000_000_000n);
+    player.buildUnit(UnitType.City, game.ref(30, 50), {});
+    const canBuild = vi.spyOn(player, "canBuild");
+
+    const observation = observe(game);
+
+    const sharedCalls = canBuild.mock.calls.flatMap(([unit, target], index) =>
+      sharedLandStructureTypes.has(unit) ? [{ index, target, unit }] : [],
+    );
+    const checkedTargets = sharedCalls.map(({ target }) => target);
+    const checkedTypes = new Set(sharedCalls.map(({ unit }) => unit));
+    expect(checkedTypes.has(UnitType.DefensePost)).toBe(true);
+    expect(checkedTypes.has(UnitType.City)).toBe(true);
+    expect(new Set(checkedTargets).size).toBeGreaterThan(1);
+    expect(new Set(checkedTargets).size).toBe(checkedTargets.length);
+    expect(
+      sharedCalls.some(({ index, target }) => {
+        const buildTile = canBuild.mock.results[index]?.value;
+        return buildTile !== false && buildTile !== target;
+      }),
+    ).toBe(true);
+
+    const sharedOptions = observation.nonCombat.buildOptions.filter(
+      ({ unit }) => sharedLandStructureTypes.has(unit),
+    );
+    const wasDirectlyChecked = (unit: UnitType, target: number) =>
+      canBuild.mock.calls.some(
+        ([calledUnit, calledTarget]) =>
+          calledUnit === unit && calledTarget === target,
+      );
+    expect(
+      sharedOptions.some(
+        ({ unit, targetTile }) => !wasDirectlyChecked(unit, targetTile),
+      ),
+    ).toBe(true);
+    for (const option of sharedOptions) {
+      expect(option.legalReason).toBe(
+        wasDirectlyChecked(option.unit, option.targetTile)
+          ? `core canBuild(${option.unit}) returned build tile ${option.buildTile}`
+          : `shared land-structure spawn check returned build tile ${option.buildTile}`,
+      );
+    }
+  });
+
+  it("keeps shared land-structure spawn results equivalent", async () => {
+    const game = await finiteGoldGame();
+    const player = game.player("P_AGENT");
+    player.addGold(1_000_000_000_000n);
+    player.buildUnit(UnitType.City, game.ref(30, 50), {});
+    const targets = [game.ref(30, 50), game.ref(35, 50), game.ref(45, 50)];
+
+    expect(sharedLandStructureTypes.has(UnitType.Port)).toBe(false);
+    const [firstType, ...remainingTypes] = SHARED_LAND_STRUCTURE_BUILD_TYPES;
+    const expected = targets.map((target) =>
+      player.canBuild(firstType, target),
+    );
+    expect(expected[0]).toBe(false);
+    expect(expected[1]).not.toBe(false);
+    expect(expected[1]).not.toBe(targets[1]);
+    expect(expected[2]).toBe(targets[2]);
+    for (const unit of remainingTypes) {
+      expect(targets.map((target) => player.canBuild(unit, target))).toEqual(
+        expected,
+      );
+    }
+  });
+});
 
 describe("AgentObservationBuilder rival-rival coalition graph", () => {
   it("surfaces which rivals are allied with EACH OTHER (not just with the agent)", async () => {
