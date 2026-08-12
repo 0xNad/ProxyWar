@@ -52,7 +52,7 @@ No definite production bypass was found in the main league, demo, tournament, pl
 Risk areas to keep visible:
 
 - `AgentDecisionValidator` has both single-decision and batch-validation helpers. `AgentLeagueMatch` currently loops through selected ids and validates each one. This is not a bypass, but it is duplication that should be simplified later.
-- `PlannerExecutorAgentBrain` can schedule multiple offered ids from one observation. Each id is still validated before submission, but later actions in the batch are not rebuilt after earlier accepted intents change state. `GameServer` remains the final guard.
+- `PlannerExecutorAgentBrain` can schedule multiple offered ids from one observation. Local and Coworld execution resolve these in fair batch layers (every participant's first action, then every participant's second). Each id is still validated before submission, but later actions in the batch are not rebuilt after earlier accepted intents change state. `GameServer` remains the final guard.
 - `src/scripts/ai-agent-frontier-benchmark.ts` includes targeted offline policy coverage. Those targeted cases are useful for behavior coverage, but they are not end-to-end proof unless they run through `AgentRunner -> GameServer`.
 - `src/scripts/ai-agent-smoke.ts` still contains a legacy hardcoded smoke helper. It is acceptable as a historical smoke path, not as a product behavior path.
 

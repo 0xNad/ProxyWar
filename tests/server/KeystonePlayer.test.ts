@@ -247,6 +247,24 @@ describe("Coworld keystone player", () => {
     expect((response.reason as string).length).toBe(500);
   });
 
+  it("decisionToResponse preserves the executor's ordered action batch", () => {
+    const response = decisionToResponse("req_batch", {
+      actionID: "attack:rival",
+      actionIDs: ["attack:rival", "build:City:100", "upgrade:City:100"],
+      reason: "run compatible modules",
+    });
+
+    expect(response).toMatchObject({
+      selectedLegalActionId: "attack:rival",
+      selectedLegalActionIds: [
+        "attack:rival",
+        "build:City:100",
+        "upgrade:City:100",
+      ],
+      reason: "run compatible modules",
+    });
+  });
+
   it("decisionToResponse wires an honest empty base for a fallback decision (reason: null)", () => {
     // P0 fix: an LlmAgentBrain fallback decision (the exact `brain.decide()`
     // return value this function's real caller feeds it) now carries

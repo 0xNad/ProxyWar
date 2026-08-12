@@ -425,6 +425,104 @@ describe("AgentLeagueMatchRunner", () => {
     }
   });
 
+  it("executes multi-agent action batches in fair batch rounds", async () => {
+    const log = makeLogger();
+    const action = (id: string, tile: number): LegalAction => ({
+      id,
+      kind: "build",
+      label: id,
+      intent: {
+        type: "build_unit",
+        unit: UnitType.City,
+        tile,
+      },
+      risk: { level: "none", score: 0 },
+      metadata: { buildTile: tile, unit: UnitType.City },
+    });
+    const legalActions = [
+      action("a:first", 100),
+      action("a:second", 200),
+      action("b:first", 300),
+      action("b:second", 400),
+      {
+        id: "hold",
+        kind: "hold",
+        label: "Hold",
+        intent: null,
+        risk: { level: "none", score: 0 },
+      },
+    ];
+    const participants = createAgentParticipants(
+      [
+        { username: "Agent A", profile: "aggressive" },
+        { username: "Agent B", profile: "aggressive" },
+      ],
+      log,
+      {
+        brainFactory: (spec) => ({
+          brainType: "planner-executor",
+          decide: () => ({
+            actionID: spec.username === "Agent A" ? "a:first" : "b:first",
+            actionIDs:
+              spec.username === "Agent A"
+                ? ["a:first", "a:second"]
+                : ["b:first", "b:second"],
+            reason: "execute both compatible actions",
+          }),
+        }),
+      },
+    );
+    const game = new GameServer(
+      "AGENT_BATCH_ROUNDS",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: [],
+      log,
+      legalActionBuilder: {
+        build: () => legalActions,
+      } as unknown as LegalActionBuilder,
+    });
+
+    try {
+      match.attachAgents();
+      match.startGame();
+      const records = await match.runDecisionTurn({ turnNumber: 2 });
+
+      expect(records.map((record) => record.chosenActionID)).toEqual([
+        "a:first",
+        "b:first",
+        "a:second",
+        "b:second",
+      ]);
+      expect(
+        records.map((record) => record.decisionMetadata?.batchIndex),
+      ).toEqual([0, 0, 1, 1]);
+      expect(
+        records.every((record) => record.decisionMetadata?.batchSize === 2),
+      ).toBe(true);
+      expect(records.every((record) => record.result.accepted)).toBe(true);
+
+      game.advanceTurnsForTesting(1);
+      const submittedIntents = participants[0].runner
+        .serverMessages()
+        .filter((message) => message.type === "turn")
+        .flatMap((message) => message.turn.intents);
+      expect(
+        submittedIntents
+          .filter((intent) => intent.type === "build_unit")
+          .map((intent) => intent.tile),
+      ).toEqual([100, 300, 200, 400]);
+    } finally {
+      await game.end({ archive: false });
+    }
+  });
+
   it("proves chosen multi-agent spawn decisions execute legally in core", async () => {
     const log = makeLogger();
     const candidateGame = await setup("big_plains", { nations: "disabled" });

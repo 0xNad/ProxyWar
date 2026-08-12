@@ -1226,6 +1226,12 @@ export interface LegalAction {
 
 export interface AgentDecision {
   actionID: string;
+  /**
+   * Optional ordered selections from the same offered menu. The league runner
+   * validates every id and resolves multi-agent batches in fair layers: every
+   * participant's first action, then every participant's second, and so on.
+   * Coworld bounds this wire extension to five ids per decision.
+   */
   actionIDs?: string[];
   /**
    * OPTIONAL SECOND SELECTION — the diplomacy slot

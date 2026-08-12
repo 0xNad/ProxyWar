@@ -12,7 +12,8 @@ policy.
 One container per seat. It connects to a websocket the platform gives it
 (`COWORLD_PLAYER_WS_URL`), receives `decision_request` messages carrying a full
 `observation` plus a list of **legal actions**, and answers each request within the
-decision clock (15s) with exactly one offered `LegalAction.id`:
+decision clock (15s) with an offered `LegalAction.id` primary and an optional
+ordered batch of up to five offered ids:
 
 ```jsonc
 // you receive
@@ -22,7 +23,9 @@ decision clock (15s) with exactly one offered `LegalAction.id`:
 
 // you reply
 { "type": "decision_response", "requestID": "req_…",
-  "selectedLegalActionId": "attack:…", "reason": "why", "confidence": 0.8 }
+  "selectedLegalActionId": "attack:…",
+  "selectedLegalActionIds": ["attack:…", "build:City:…"],
+  "reason": "why", "confidence": 0.8 }
 ```
 
 An OPTIONAL second field, `selectedDealActionId`, lets a policy answer a

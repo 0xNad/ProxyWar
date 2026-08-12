@@ -29,6 +29,7 @@ The game sends:
     ],
     "responseContract": {
       "selectedLegalActionId": "must exactly match one offered legalActions[].id",
+      "selectedLegalActionIds": "optional ordered array of 1-5 offered legalActions[].id values; first must equal selectedLegalActionId",
       "selectedDealActionId": "optional; must exactly match one offered deal_* legalActions[].id",
       "reason": "short human-readable string",
       "confidence": "optional number from 0 to 1"
@@ -54,6 +55,40 @@ off-menu ids, for every action kind: the websocket adapter returns an `AgentDeci
 existing `AgentDecisionValidator`, `AgentRunner`, and `GameServer` remain the sole authority, and
 `LegalAction.id` selection is still the only way to act - no raw core intent is ever accepted
 from a player.
+
+## `selectedLegalActionIds` (optional)
+
+`selectedLegalActionIds` carries an ordered batch of up to five compatible actions selected from
+the same offered menu. The legacy scalar remains required and authoritative: the first array item
+must equal `selectedLegalActionId`. A player that omits the array retains the original one-action
+behavior.
+
+```json
+{
+  "type": "decision_response",
+  "requestID": "req_...",
+  "selectedLegalActionId": "attack:rival:35",
+  "selectedLegalActionIds": [
+    "attack:rival:35",
+    "build:City:100",
+    "upgrade:City:100"
+  ],
+  "reason": "Pressure the rival while investing accumulated gold.",
+  "confidence": 0.7
+}
+```
+
+Every array item must exactly match an offered `legalActions[].id`; each item is independently
+validated through the same `AgentDecisionValidator → AgentRunner → GameServer` path as the scalar
+selection. Duplicate ids are removed, batches are capped at five, and malformed arrays safely
+degrade to the scalar primary. Off-menu ids are rejected and recorded rather than converted into
+raw intents.
+
+Multi-player batches resolve in fair layers: all players' first actions in roster order, then all
+players' second actions, and so on. Same-turn construction and diplomacy conflict reservations are
+rechecked at every layer. All actions in a batch are chosen from one observation; policies should
+therefore batch only actions that remain sensible together and rely on later decision steps for
+state-dependent follow-ups.
 
 ## `selectedDealActionId` (optional)
 
@@ -83,7 +118,8 @@ Rules:
 - Any other id is rejected and dropped - including any id that carries a game action. There is no
   fallback and no second game action: a game action can never be played through this field.
 - One deal action per decision. If `selectedLegalActionId` is itself a `deal_*` action, the deal
-  slot is rejected outright (the game action stands) - so send the deal in one place, not both.
+  slot is rejected outright (the action batch stands). An action batch may likewise contain at
+  most one `deal_*` action - so send a deal in one place, not several.
 - Proposals are additionally rate-limited to one every few decision steps; while a player is
   inside that window no `deal_propose` action is offered at all, so selecting only from the
   offered menu is always enough.

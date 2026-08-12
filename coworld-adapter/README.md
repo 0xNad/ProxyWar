@@ -9,7 +9,9 @@ War as a Coworld so policies can compete in local episodes, certification,
 hosted play, and tournaments — **without changing how Proxy War makes
 decisions.**
 
-The core invariant: a policy still chooses exactly one offered `LegalAction.id`.
+The core invariant: a policy chooses only offered `LegalAction.id` values. A
+legacy policy may choose one; a batching policy may choose up to five from the
+same menu.
 The adapter sends that selection back through Proxy War's existing
 `AgentDecisionValidator → AgentLeagueMatchRunner → AgentRunner → GameServer`
 path. There is **no second action schema, validator, or runner**, and external
@@ -17,7 +19,7 @@ agents are never allowed to emit raw game intents.
 
 ```text
 Coworld policy container
-  -> /player websocket (one offered LegalAction.id is selected)
+  -> /player websocket (one or more offered LegalAction.id values are selected)
   -> existing AgentDecisionValidator
   -> existing AgentRunner
   -> GameServer
@@ -65,7 +67,7 @@ around the existing Proxy War starter agent (`createStarterAgent` from
 `examples/external-agent/starter-framework.mjs`). It reuses the real prompt,
 strict legal-id validation, cross-episode memory, anti-stall, ranking, and safe
 fallback; the only policy-specific code is the websocket loop and the LLM
-provider. It still only ever returns one offered `LegalAction.id`, and the game
+provider. It still returns only offered `LegalAction.id` values, and the game
 re-validates it.
 
 The provider is pluggable via env — no keys in the image or manifest:
@@ -95,7 +97,8 @@ policy. The executor answers every `decision_request` from the current
 Strategic Directive without awaiting any LLM call; Commander refreshes run in
 the background between decisions (`DeferredAgentPlanner`), so the
 `max_decision_ms` clock is structurally satisfied. It still only ever returns
-one offered `LegalAction.id`, and the game re-validates it.
+an ordered batch of offered `LegalAction.id` values, and the game re-validates
+every id. The scalar primary remains supported for older policies.
 
 The default mode is the **LLM Commander**: Claude on Bedrock in hosted
 `--use-bedrock` pods (`USE_BEDROCK=true`), the Claude CLI subscription locally.

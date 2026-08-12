@@ -3,8 +3,8 @@
 // Runs the in-house Commander–Executor v2 agent (PlannerExecutorAgentBrain with
 // binding directives) as a Coworld websocket policy. The decision path is the
 // canonical one: the game offers AgentObservation + LegalAction[] over the
-// /player websocket and this player only ever answers with one offered
-// LegalAction.id — the game side re-validates through AgentDecisionValidator.
+// /player websocket and this player answers with offered LegalAction.id values
+// only — the game side re-validates each through AgentDecisionValidator.
 // No raw intents, no second validator, no new runner.
 //
 // In-clock guarantee: the executor answers every decision_request from the
@@ -12,9 +12,9 @@
 // refreshes run in the background between decisions (DeferredAgentPlanner), so
 // Coworld's max_decision_ms reject-on-timeout is structurally satisfied.
 //
-// Known v1 limitation: the Coworld wire protocol carries ONE
-// selectedLegalActionId per decision, so executor cascade batches
-// (AgentDecision.actionIDs) degrade to their primary action here.
+// The Coworld wire keeps selectedLegalActionId as its backwards-compatible
+// primary and optionally carries the executor's ordered actionIDs cascade in
+// selectedLegalActionIds. The game validates every id before submission.
 //
 // Modes (PROXYWAR_KEYSTONE_MODE; DEFAULT = the LLM Commander — bedrock when
 // USE_BEDROCK=true, otherwise claude-cli; "the agent" IS the LLM brain):
@@ -236,31 +236,25 @@ export function decisionToResponse(
   // because the transport had no loudness channel).
   const llmPlannerDegraded = decision.metadata?.llmPlannerDegraded === true;
   const plannerFallbackUsed = decision.metadata?.plannerFallbackUsed === true;
-  // Truthful artifacts: the Coworld wire carries ONE selectedLegalActionId,
-  // so when the executor scheduled a cascade batch, only the primary executes.
-  // Without this note, decisions.jsonl reads "queued N action(s)" for actions
-  // that never ran.
-  const droppedBatchActions = Array.isArray(decision.actionIDs)
-    ? Math.max(0, decision.actionIDs.length - 1)
-    : 0;
-  const wireNote =
-    droppedBatchActions > 0
-      ? ` [wire carries primary only; ${droppedBatchActions} batched follow-up(s) not executed]`
-      : "";
-  // Truncate the base reason, never the truth note. `decision.reason` is
+  // `decision.reason` is
   // `null` on a fallback/failure decision (no stated reason — see
   // `AgentDecision.reason`'s doc in src/server/agents/AgentTypes.ts); the
   // wire carries an honest empty base rather than fabricating text, while
   // `llmPlannerDegraded`/`fallbackUsed` below still flag the degradation.
-  const wireReason =
-    (decision.reason ?? "").slice(
-      0,
-      Math.max(0, RESPONSE_REASON_MAX_LENGTH - wireNote.length),
-    ) + wireNote;
+  const wireReason = (decision.reason ?? "").slice(
+    0,
+    RESPONSE_REASON_MAX_LENGTH,
+  );
+  const selectedLegalActionIds = Array.isArray(decision.actionIDs)
+    ? decision.actionIDs
+    : null;
   return {
     type: "decision_response",
     requestID,
     selectedLegalActionId: decision.actionID,
+    ...(selectedLegalActionIds !== null && selectedLegalActionIds.length > 1
+      ? { selectedLegalActionIds }
+      : {}),
     reason: wireReason,
     confidence,
     ...(llmPlannerDegraded ? { llmPlannerDegraded: true } : {}),

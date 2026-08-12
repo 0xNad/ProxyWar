@@ -466,13 +466,124 @@ export class AgentLeagueMatchRunner {
     const sameTurnDiplomacyParticipants = new Set<string>();
     const sameTurnAllianceRequests = new Set<string>();
     const sameTurnBuildTiles: number[] = [];
+    type SelectedAction = {
+      action: LegalAction | null;
+      requestedActionID: string;
+      reason: string | null;
+      submissionLegalActions: LegalAction[];
+    };
+    type DecisionExecutionState = (typeof decisions)[number] & {
+      requestedActionIDs: string[];
+      rejectedActionIDs: string[];
+      selectedActions: SelectedAction[];
+      validationFallbackUsed: boolean;
+    };
+    type ScheduledAction = {
+      state: DecisionExecutionState;
+      selected: SelectedAction;
+    };
 
-    for (const input of decisions) {
+    const executionStates: DecisionExecutionState[] = decisions.map(
+      (input) => ({
+        ...input,
+        requestedActionIDs: requestedDecisionActionIDs(input.decision),
+        rejectedActionIDs: [],
+        selectedActions: [],
+        validationFallbackUsed: false,
+      }),
+    );
+    const maxBatchSize = Math.max(
+      0,
+      ...executionStates.map((state) => state.requestedActionIDs.length),
+    );
+    const scheduledRounds: Array<Array<ScheduledAction | null>> = Array.from(
+      { length: maxBatchSize },
+      () => executionStates.map(() => null),
+    );
+
+    // Resolve batches in fair layers: every participant's first selection,
+    // then every participant's second, and so on. Same-turn reservations are
+    // applied while building this schedule, so later layers cannot bypass a
+    // build/diplomacy conflict created by an earlier layer.
+    for (
+      let requestedIndex = 0;
+      requestedIndex < maxBatchSize;
+      requestedIndex++
+    ) {
+      for (
+        let participantIndex = 0;
+        participantIndex < executionStates.length;
+        participantIndex++
+      ) {
+        const state = executionStates[participantIndex];
+        const actionID = state.requestedActionIDs[requestedIndex];
+        if (actionID === undefined) {
+          continue;
+        }
+        const submissionLegalActions = this.filterDisabledActionKinds(
+          this.filterSameTurnBuildActions(
+            this.filterSameTurnDiplomacyActions(
+              state.legalActions,
+              state.observation,
+              sameTurnDiplomacyParticipants,
+              sameTurnAllianceRequests,
+            ),
+            options.gameState,
+            sameTurnBuildTiles,
+          ),
+        );
+        const validation = this.decisionValidator(
+          { ...state.decision, actionID },
+          submissionLegalActions,
+        );
+        if (!validation.ok) {
+          state.rejectedActionIDs.push(actionID);
+          continue;
+        }
+        if (
+          isDealActionKind(validation.action.kind) &&
+          state.selectedActions.some(
+            (entry) =>
+              entry.action !== null && isDealActionKind(entry.action.kind),
+          )
+        ) {
+          state.rejectedActionIDs.push(actionID);
+          continue;
+        }
+        const selected: SelectedAction = {
+          action: validation.action,
+          requestedActionID: actionID,
+          reason: state.decision.reason,
+          submissionLegalActions,
+        };
+        state.selectedActions.push(selected);
+        scheduledRounds[requestedIndex][participantIndex] = { state, selected };
+        this.reserveSameTurnDiplomacy(
+          selected.action,
+          state.observation,
+          sameTurnDiplomacyParticipants,
+          sameTurnAllianceRequests,
+        );
+        this.reserveSameTurnBuild(selected.action, sameTurnBuildTiles);
+      }
+    }
+
+    // If every requested id was invalid, retain the historical one-record
+    // fallback behavior and place it in that participant's first batch layer.
+    for (
+      let participantIndex = 0;
+      participantIndex < executionStates.length;
+      participantIndex++
+    ) {
+      const state = executionStates[participantIndex];
+      if (state.selectedActions.length > 0) {
+        continue;
+      }
       const submissionLegalActions = this.filterDisabledActionKinds(
         this.filterSameTurnBuildActions(
           this.filterSameTurnDiplomacyActions(
-            input.legalActions,
-            input.observation,
+            state.legalActions,
+            state.observation,
             sameTurnDiplomacyParticipants,
             sameTurnAllianceRequests,
           ),
@@ -480,64 +591,50 @@ export class AgentLeagueMatchRunner {
           sameTurnBuildTiles,
         ),
       );
-      const { participant, observation, decision, decisionLatencyMs } = input;
-      const requestedActionIDs = requestedDecisionActionIDs(decision);
-      const rejectedActionIDs: string[] = [];
-      const selectedActions: Array<{
-        action: LegalAction | null;
-        requestedActionID: string;
-        reason: string | null;
-      }> = [];
-
-      for (const actionID of requestedActionIDs) {
-        const actionDecision: AgentDecision = { ...decision, actionID };
-        const validation = this.decisionValidator(
-          actionDecision,
-          submissionLegalActions,
-        );
-        if (validation.ok) {
-          selectedActions.push({
-            action: validation.action,
-            requestedActionID: actionID,
-            reason: decision.reason,
-          });
-        } else {
-          rejectedActionIDs.push(actionID);
-        }
-      }
-
-      let validationFallbackUsed = false;
-      if (selectedActions.length === 0) {
-        const validation = this.decisionValidator(
-          decision,
-          submissionLegalActions,
-        );
-        const action = actionFromValidation(validation);
-        // The policy's requested action id(s) were all invalid; the validator
-        // substituted a fallback (hold). Record it loudly (below) instead of
-        // letting it read as a healthy hold.
-        validationFallbackUsed = !validation.ok;
-        selectedActions.push({
-          action,
-          requestedActionID: decision.actionID,
-          reason: decisionReason(decision, validation, action),
-        });
-      }
-
-      // Did the ACTION slot already play a deal meta-action this decision?
-      // If so the deal slot is refused outright — not just for the same id.
-      // Two deal actions in one decision would collide on the SAME record
-      // stamp keys (dealAction/dealID/dealPublicText/dealStatedReason), so
-      // the second silently overwrites the first: the record would name an
-      // action that never happened and the overwritten deal's story beat
-      // (e.g. the pact's deal_accepted, tone pact) would never reach
-      // spectator telemetry while the pact itself was live. One deal action
-      // per decision — the contract the player protocol states.
-      const actionSlotPlayedDeal = selectedActions.some(
-        (entry) => entry.action !== null && isDealActionKind(entry.action.kind),
+      const validation = this.decisionValidator(
+        state.decision,
+        submissionLegalActions,
       );
+      const action = actionFromValidation(validation);
+      state.validationFallbackUsed = !validation.ok;
+      const selected: SelectedAction = {
+        action,
+        requestedActionID: state.decision.actionID,
+        reason: decisionReason(state.decision, validation, action),
+        submissionLegalActions,
+      };
+      state.selectedActions.push(selected);
+      if (scheduledRounds.length === 0) {
+        scheduledRounds.push(executionStates.map(() => null));
+      }
+      scheduledRounds[0][participantIndex] = { state, selected };
+    }
 
-      selectedActions.forEach((selected, batchIndex) => {
+    for (const round of scheduledRounds) {
+      for (const scheduled of round) {
+        if (scheduled === null) {
+          continue;
+        }
+        const { state, selected } = scheduled;
+        const {
+          participant,
+          observation,
+          decision,
+          decisionLatencyMs,
+          requestedActionIDs,
+          rejectedActionIDs,
+          selectedActions,
+          validationFallbackUsed,
+        } = state;
+        const submissionLegalActions = selected.submissionLegalActions;
+        const batchIndex = selectedActions.indexOf(selected);
+        // Did the ACTION batch already play a deal meta-action this decision?
+        // If so the separate deal slot is refused outright. One deal action
+        // per decision remains the contract even when game actions are batched.
+        const actionSlotPlayedDeal = selectedActions.some(
+          (entry) =>
+            entry.action !== null && isDealActionKind(entry.action.kind),
+        );
         const batchDecision: AgentDecision = {
           ...decision,
           actionID: selected.requestedActionID,
@@ -551,8 +648,8 @@ export class AgentLeagueMatchRunner {
           }),
         };
         // Structured-deal meta-actions are processed by the runner-scoped
-        // deal manager during this same sequential submission pass
-        // (participant order — earlier submissions win conflicts); they
+        // deal manager during this same round-robin submission pass
+        // (batch layer, then participant order); they
         // submit no game intent. Pending referee/lifecycle events drain onto
         // this agent's next record as the dealComplianceEvent stamp. Flag
         // OFF: dealManager is null and this whole block is inert, leaving
@@ -583,11 +680,8 @@ export class AgentLeagueMatchRunner {
                 };
         // Diplomacy slot: the OPTIONAL second selection, applied exactly once
         // per decision (at batch index 0, i.e. immediately after the FIRST of
-        // this agent's submitted actions — batched `actionIDs` submit their
-        // remaining actions afterwards) and always within this agent's turn in
-        // the participant-ordered pass, so the "earlier submission wins"
-        // conflict rule between agents is unchanged and a deal never costs the
-        // agent its move. Flag OFF (or no dealActionID): null, leaving records
+        // this agent's submitted actions) so a deal never costs the agent its
+        // primary move. Flag OFF (or no dealActionID): null, leaving records
         // byte-identical.
         const dealSlotApplication =
           batchIndex === 0
@@ -620,7 +714,7 @@ export class AgentLeagueMatchRunner {
         const record = this.recordDecision({
           participant,
           turnNumber: observation.turnNumber,
-          observationSummary: input.observationSummary,
+          observationSummary: state.observationSummary,
           observation,
           legalActions: submissionLegalActions,
           chosenAction: selected.action,
@@ -630,14 +724,6 @@ export class AgentLeagueMatchRunner {
           result,
           dealSlotEvidence: dealSlotApplication?.evidence,
         });
-
-        this.reserveSameTurnDiplomacy(
-          selected.action,
-          observation,
-          sameTurnDiplomacyParticipants,
-          sameTurnAllianceRequests,
-        );
-        this.reserveSameTurnBuild(selected.action, sameTurnBuildTiles);
 
         this.log.info("league agent decision recorded", {
           sequence: record.sequence,
@@ -667,7 +753,7 @@ export class AgentLeagueMatchRunner {
           reason: record.reason,
           fallbackUsed: record.decisionMetadata?.fallbackUsed ?? false,
         });
-      });
+      }
     }
 
     return this.records.slice(startingRecordCount);
