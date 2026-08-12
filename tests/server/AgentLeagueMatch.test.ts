@@ -632,6 +632,89 @@ describe("AgentLeagueMatchRunner", () => {
     }
   });
 
+  it("caps a requested batch at the wire limit and stamps the dropped ids", async () => {
+    const log = makeLogger();
+    const ids = [
+      "attack:one",
+      "attack:two",
+      "attack:three",
+      "attack:four",
+      "attack:five",
+      "attack:six",
+      "attack:seven",
+    ];
+    const legalActions: LegalAction[] = [
+      ...ids.map((id) => ({
+        id,
+        kind: "attack" as const,
+        label: id,
+        intent: null,
+        risk: { level: "low" as const, score: 0.1 },
+      })),
+      {
+        id: "hold",
+        kind: "hold",
+        label: "Hold",
+        intent: null,
+        risk: { level: "none", score: 0 },
+      },
+    ];
+    const participants = createAgentParticipants(
+      [{ username: "Cap Agent", profile: "opportunistic" }],
+      log,
+      {
+        brainFactory: () => ({
+          brainType: "planner-executor",
+          decide: () => ({
+            actionID: ids[0],
+            actionIDs: ids,
+            reason: "request everything",
+          }),
+        }),
+      },
+    );
+    const game = new GameServer(
+      "AGENT_CAP",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: [],
+      log,
+      legalActionBuilder: {
+        build: () => legalActions,
+      } as unknown as LegalActionBuilder,
+    });
+
+    try {
+      const records = await match.runDecisionTurn({ turnNumber: 2 });
+
+      expect(records).toHaveLength(5);
+      expect(records.map((record) => record.chosenActionID)).toEqual(
+        ids.slice(0, 5),
+      );
+      expect(records[0].decisionMetadata).toMatchObject({
+        batchSize: 5,
+        batchActionIDs: ids.slice(0, 5).join(","),
+        batchDroppedActionIDs: "attack:six,attack:seven",
+      });
+      // Every record of the capped batch carries the same honest drop stamp.
+      expect(
+        records.every(
+          (record) =>
+            record.decisionMetadata?.batchDroppedActionIDs ===
+            "attack:six,attack:seven",
+        ),
+      ).toBe(true);
+    } finally {
+      await game.end({ archive: false });
+    }
+  });
+
   it("proves chosen multi-agent spawn decisions execute legally in core", async () => {
     const log = makeLogger();
     const candidateGame = await setup("big_plains", { nations: "disabled" });

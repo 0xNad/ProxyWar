@@ -30,6 +30,7 @@ import {
 } from "./AgentSpawnAssignment";
 import { buildAgentTacticalAffordances } from "./AgentTacticalAffordances";
 import { economyEventsEnabled, structuredDealsEnabled } from "./AgentTunables";
+import { MAX_WIRE_ACTIONS_PER_DECISION } from "./AgentWireProtocol";
 import {
   AgentActionResult,
   AgentBrain,
@@ -478,7 +479,8 @@ export class AgentLeagueMatchRunner {
         ),
       );
       const { participant, observation, decision, decisionLatencyMs } = input;
-      const requestedActionIDs = requestedDecisionActionIDs(decision);
+      const { actionIDs: requestedActionIDs, droppedByCapActionIDs } =
+        requestedDecisionActionIDs(decision);
       const rejectedActionIDs: string[] = [];
       const selectedActions: Array<{
         action: LegalAction | null;
@@ -544,6 +546,7 @@ export class AgentLeagueMatchRunner {
             batchSize: selectedActions.length,
             requestedActionIDs,
             rejectedActionIDs,
+            droppedByCapActionIDs,
             validationFallbackUsed: validationFallbackUsed && batchIndex === 0,
           }),
         };
@@ -1507,7 +1510,10 @@ function compactDecisionMetadata(
   return compacted;
 }
 
-function requestedDecisionActionIDs(decision: AgentDecision): string[] {
+function requestedDecisionActionIDs(decision: AgentDecision): {
+  actionIDs: string[];
+  droppedByCapActionIDs: string[];
+} {
   const ids =
     decision.actionIDs !== undefined && decision.actionIDs.length > 0
       ? decision.actionIDs
@@ -1518,7 +1524,18 @@ function requestedDecisionActionIDs(decision: AgentDecision): string[] {
       deduplicated.push(id);
     }
   }
-  return deduplicated.length > 0 ? deduplicated : [decision.actionID];
+  if (deduplicated.length === 0) {
+    return { actionIDs: [decision.actionID], droppedByCapActionIDs: [] };
+  }
+  // Wire cap: dedupe first, then truncate, so duplicates never consume
+  // capacity. The cut ids are surfaced to the caller and stamped as
+  // batchDroppedActionIDs — never silently discarded (the keystone drop-note
+  // discipline: records must not imply actions that never ran, and drops
+  // must not be invisible).
+  return {
+    actionIDs: deduplicated.slice(0, MAX_WIRE_ACTIONS_PER_DECISION),
+    droppedByCapActionIDs: deduplicated.slice(MAX_WIRE_ACTIONS_PER_DECISION),
+  };
 }
 
 function isCommunicationRecord(record: AgentDecisionRecord): boolean {
@@ -1594,6 +1611,7 @@ function batchDecisionMetadata(input: {
   batchSize: number;
   requestedActionIDs: string[];
   rejectedActionIDs: string[];
+  droppedByCapActionIDs?: string[];
   validationFallbackUsed?: boolean;
 }): AgentDecision["metadata"] {
   const metadata: AgentDecision["metadata"] = {
@@ -1603,6 +1621,16 @@ function batchDecisionMetadata(input: {
     batchActionIDs: input.requestedActionIDs.join(","),
     batchRejectedActionIDs: input.rejectedActionIDs.join(","),
   };
+
+  // Stamped ONLY when the wire cap actually cut ids, so every pre-cap record
+  // stays byte-identical. Honest-drop discipline: the record must show what
+  // the policy asked for that will not run.
+  if (
+    input.droppedByCapActionIDs !== undefined &&
+    input.droppedByCapActionIDs.length > 0
+  ) {
+    metadata.batchDroppedActionIDs = input.droppedByCapActionIDs.join(",");
+  }
 
   if (input.validationFallbackUsed) {
     // Every offered action the policy selected was invalid, so the validator
