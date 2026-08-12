@@ -1,7 +1,35 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { LlmDecisionParser } from "../../src/server/agents/LlmDecisionParser";
-import { MAX_WIRE_ACTIONS_PER_DECISION } from "../../src/server/agents/AgentWireProtocol";
+import {
+  interleaveLayers,
+  MAX_WIRE_ACTIONS_PER_DECISION,
+} from "../../src/server/agents/AgentWireProtocol";
 import { LegalAction } from "../../src/server/agents/AgentTypes";
+
+describe("interleaveLayers", () => {
+  it("emits one element per list per layer in fixed list order", () => {
+    expect(
+      interleaveLayers([
+        ["A1", "A2", "A3"],
+        ["B1"],
+        ["C1", "C2"],
+      ]),
+    ).toEqual(["A1", "B1", "C1", "A2", "C2", "A3"]);
+  });
+
+  it("handles empty input and empty lists", () => {
+    expect(interleaveLayers([])).toEqual([]);
+    expect(interleaveLayers([[], ["B1"]])).toEqual(["B1"]);
+  });
+
+  it("degenerates to the flat list for all-scalar layers", () => {
+    expect(interleaveLayers([["A1"], ["B1"], ["C1"]])).toEqual([
+      "A1",
+      "B1",
+      "C1",
+    ]);
+  });
+});
 
 function action(id: string, kind: LegalAction["kind"] = "attack"): LegalAction {
   return {

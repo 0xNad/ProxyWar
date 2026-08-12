@@ -46,3 +46,24 @@ export function normalizeWireActionIds(
   }
   return normalized;
 }
+
+/**
+ * Batch-layer round-robin: one element per list per layer, fixed list order
+ * within every layer (A1,B1,…,A2,B2,…). This is the submission/staging order
+ * for batched decisions everywhere — the league runner's driver and the sim
+ * rollout's intent staging — so "earlier participant wins" holds within each
+ * layer instead of one seat's whole batch preempting the next seat's first
+ * action.
+ */
+export function interleaveLayers<T>(layers: readonly (readonly T[])[]): T[] {
+  const interleaved: T[] = [];
+  const maxLayer = layers.reduce((max, list) => Math.max(max, list.length), 0);
+  for (let layer = 0; layer < maxLayer; layer += 1) {
+    for (const list of layers) {
+      if (layer < list.length) {
+        interleaved.push(list[layer]);
+      }
+    }
+  }
+  return interleaved;
+}

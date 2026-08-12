@@ -43,6 +43,10 @@ import {
 } from "../../core/Schemas";
 import { validateAgentDecision } from "./AgentDecisionValidator";
 import {
+  interleaveLayers,
+  MAX_WIRE_ACTIONS_PER_DECISION,
+} from "./AgentWireProtocol";
+import {
   AgentObservationBuilder,
   BuildAgentObservationInput,
 } from "./AgentObservationBuilder";
@@ -448,7 +452,12 @@ async function runDecisionStep(input: {
   const game = input.runner.game;
   const observationBuilder = new AgentObservationBuilder();
   const legalActionBuilder = new LegalActionBuilder();
-  const stampedIntents: StampedIntent[] = [];
+  // Per-seat validated intent lists, staged then interleaved layer
+  // round-robin (A1,B1,…,A2,B2,…) to match the league runner's submission
+  // order — the core executor consumes a turn's intents in array order, so
+  // seat-major staging would let one seat's whole batch preempt the next
+  // seat's first action.
+  const seatIntentLayers: StampedIntent[][] = [];
 
   for (const seat of input.seats) {
     const player = game.playerByClientID(seat.clientID);
@@ -472,10 +481,12 @@ async function runDecisionStep(input: {
       continue;
     }
     const decision = await seat.brain.decide({ observation, legalActions });
-    const actionIDs =
+    const actionIDs = (
       decision.actionIDs !== undefined && decision.actionIDs.length > 0
         ? decision.actionIDs
-        : [decision.actionID];
+        : [decision.actionID]
+    ).slice(0, MAX_WIRE_ACTIONS_PER_DECISION);
+    const seatIntents: StampedIntent[] = [];
     for (const actionID of actionIDs) {
       const validation = validateAgentDecision(
         { ...decision, actionID },
@@ -484,9 +495,16 @@ async function runDecisionStep(input: {
       if (!validation.ok || validation.action.intent === null) {
         continue;
       }
-      stampedIntents.push(stampIntent(validation.action.intent, seat.clientID));
+      seatIntents.push(stampIntent(validation.action.intent, seat.clientID));
+    }
+    if (seatIntents.length > 0) {
+      seatIntentLayers.push(seatIntents);
     }
   }
+
+  // Interleave: one intent per seat per layer, fixed seat order within each
+  // layer, until every seat's batch is exhausted.
+  const stampedIntents = interleaveLayers(seatIntentLayers);
 
   // The decision turn carries every seat's intents; subsequent ticks in the step
   // run with empty turns (pure simulation), exactly like the live cadence.
