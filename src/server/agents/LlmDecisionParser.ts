@@ -1,5 +1,9 @@
 import { structuredDealsEnabled } from "./AgentTunables";
 import { LegalAction } from "./AgentTypes";
+import {
+  MAX_WIRE_ACTIONS_PER_DECISION,
+  normalizeWireActionIds,
+} from "./AgentWireProtocol";
 
 export interface LlmDecisionParserOptions {
   maxReasonLength?: number;
@@ -19,6 +23,17 @@ export type LlmDecisionParseResult =
   | {
       ok: true;
       selectedLegalActionId: string;
+      /**
+       * OPTIONAL action batch. Present only when the reply carried a
+       * `selectedLegalActionIds` array that normalized (scalar-first, deduped,
+       * capped at MAX_WIRE_ACTIONS_PER_DECISION) to two or more offered ids —
+       * a one-element batch IS the scalar and is omitted so single-action
+       * replies stay byte-identical. Unlike the deal slot below, this key is
+       * accepted unconditionally: acceptance is backward-compatible (old
+       * emitters never send it) and the capability gate lives on the EMIT
+       * side of the wire.
+       */
+      selectedLegalActionIds?: string[];
       /**
        * OPTIONAL second selection — the diplomacy slot
        * (PROXYWAR_TUNE_STRUCTURED_DEALS). Present only when the reply carried
@@ -40,12 +55,18 @@ export type LlmDecisionParseResult =
 
 interface LlmDecisionJson {
   selectedLegalActionId?: unknown;
+  selectedLegalActionIds?: unknown;
   selectedDealActionId?: unknown;
   reason?: unknown;
   confidence?: unknown;
 }
 
-const allowedKeys = new Set(["selectedLegalActionId", "reason", "confidence"]);
+const allowedKeys = new Set([
+  "selectedLegalActionId",
+  "selectedLegalActionIds",
+  "reason",
+  "confidence",
+]);
 
 /**
  * The optional deal slot is accepted only while the structured-deal flag is
@@ -142,6 +163,42 @@ export class LlmDecisionParser {
       );
     }
 
+    let selectedLegalActionIds: string[] | undefined;
+    if (decision.selectedLegalActionIds !== undefined) {
+      const batch = decision.selectedLegalActionIds;
+      if (
+        !Array.isArray(batch) ||
+        batch.some((entry) => typeof entry !== "string")
+      ) {
+        return this.fail(
+          raw,
+          "selectedLegalActionIds must be an array of strings",
+        );
+      }
+      if (batch.some((entry: string) => entry.trim().length === 0)) {
+        return this.fail(raw, "selectedLegalActionIds entries cannot be empty");
+      }
+      const normalized = normalizeWireActionIds(
+        selectedLegalActionId,
+        batch as string[],
+      );
+      if (normalized.length > MAX_WIRE_ACTIONS_PER_DECISION) {
+        return this.fail(
+          raw,
+          `selectedLegalActionIds exceeds ${MAX_WIRE_ACTIONS_PER_DECISION} actions per decision (primary included)`,
+        );
+      }
+      const unknown = normalized.find(
+        (id) => !legalActions.some((action) => action.id === id),
+      );
+      if (unknown !== undefined) {
+        return this.fail(raw, `unknown selectedLegalActionIds entry: ${unknown}`);
+      }
+      // A one-element batch IS the scalar; omit so single-action replies stay
+      // byte-identical to a reply that never sent the key.
+      selectedLegalActionIds = normalized.length >= 2 ? normalized : undefined;
+    }
+
     if (typeof decision.reason !== "string") {
       return this.fail(raw, "reason must be a string");
     }
@@ -170,6 +227,9 @@ export class LlmDecisionParser {
     return {
       ok: true,
       selectedLegalActionId,
+      ...(selectedLegalActionIds !== undefined
+        ? { selectedLegalActionIds }
+        : {}),
       ...(selectedDealActionId !== undefined ? { selectedDealActionId } : {}),
       reason,
       ...(typeof decision.confidence === "number"
@@ -243,10 +303,32 @@ export class LlmDecisionParser {
         ? decision.confidence
         : undefined;
 
+    // Tolerant batch handling: keep offered string ids, drop the rest,
+    // truncate to the wire cap. Same normalization rule as strict mode.
+    let selectedLegalActionIds: string[] | undefined;
+    if (Array.isArray(decision.selectedLegalActionIds)) {
+      const offered = decision.selectedLegalActionIds
+        .filter((entry): entry is string => typeof entry === "string")
+        .map((entry) => entry.trim())
+        .filter(
+          (entry) =>
+            entry.length > 0 &&
+            legalActions.some((action) => action.id === entry),
+        );
+      const normalized = normalizeWireActionIds(
+        selectedLegalActionId,
+        offered,
+      ).slice(0, MAX_WIRE_ACTIONS_PER_DECISION);
+      selectedLegalActionIds = normalized.length >= 2 ? normalized : undefined;
+    }
+
     const selectedDealActionId = parsedDealActionId(decision);
     return {
       ok: true,
       selectedLegalActionId,
+      ...(selectedLegalActionIds !== undefined
+        ? { selectedLegalActionIds }
+        : {}),
       ...(selectedDealActionId !== undefined ? { selectedDealActionId } : {}),
       reason,
       ...(confidence !== undefined ? { confidence } : {}),

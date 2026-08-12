@@ -124,6 +124,12 @@ export class ExternalHttpAgentBrain implements AgentBrain {
 
     return {
       actionID: parsed.selectedLegalActionId,
+      // Optional action batch (parser-normalized: scalar-first, deduped,
+      // capped); absent unless the endpoint sent one, so a single-action
+      // reply is byte-for-byte unaffected.
+      ...(parsed.selectedLegalActionIds !== undefined
+        ? { actionIDs: parsed.selectedLegalActionIds }
+        : {}),
       // Optional diplomacy slot; absent unless the endpoint sent one, so an
       // agent that never uses it is byte-for-byte unaffected. The runner's
       // validator, not this brain, decides whether it is a legal deal id.

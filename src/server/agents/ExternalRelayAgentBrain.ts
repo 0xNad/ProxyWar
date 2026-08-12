@@ -71,6 +71,11 @@ export class ExternalRelayAgentBrain implements AgentBrain {
 
     return {
       actionID: parsed.selectedLegalActionId,
+      // Optional action batch, forwarded for parity with the HTTP brain
+      // (parser-normalized: scalar-first, deduped, capped).
+      ...(parsed.selectedLegalActionIds !== undefined
+        ? { actionIDs: parsed.selectedLegalActionIds }
+        : {}),
       // Optional diplomacy slot, forwarded for parity with the HTTP brain.
       // The parser only ever returns it while the structured-deal flag is on,
       // and the runner's validator remains the sole authority over it.
