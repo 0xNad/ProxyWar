@@ -284,7 +284,14 @@ jobs:
           export UV_TOOL_DIR="$RUNNER_TEMP/coworld-tools"
           export UV_TOOL_BIN_DIR="$RUNNER_TEMP/coworld-bin"
           uv tool install --force "coworld==$COWORLD_CLI_VERSION"
-          echo "COWORLD_BIN=$UV_TOOL_BIN_DIR/coworld" >> "$GITHUB_ENV"
+          CERTIFICATION_CACHE="$RUNNER_TEMP/coworld-certification-cache"
+          test ! -e "$CERTIFICATION_CACHE"
+          mkdir -m 700 "$CERTIFICATION_CACHE"
+          {
+            echo "COWORLD_BIN=$UV_TOOL_BIN_DIR/coworld"
+            echo "COWORLD_PYTHON=$UV_TOOL_DIR/coworld/bin/python"
+            echo "XDG_CACHE_HOME=$CERTIFICATION_CACHE"
+          } >> "$GITHUB_ENV"
       - name: Run focused readiness checks
         run: |
           npm exec -- tsc --noEmit
@@ -316,17 +323,31 @@ jobs:
           test "$(jq -r '.game.docs.pages[] | select(.id=="proxywar-release-provenance") | .content.value' "$MANIFEST" | sed -n 's/^source_sha=//p')" = "$SOURCE_SHA"
           test "$(jq -r .game.replay_viewer.bundle "$MANIFEST")" = "build/static-replay-viewer"
           test -f coworld-adapter/dist/build/static-replay-viewer/index.html
-          rg -q 'ai-league-replay-progress|replay_progress_tip' coworld-adapter/dist/build/static-replay-viewer
-          ! rg -q 'Support Proxy War!|Purchase a territory skin' coworld-adapter/dist/build/static-replay-viewer
+          grep -r -q -E 'ai-league-replay-progress|replay_progress_tip' coworld-adapter/dist/build/static-replay-viewer
+          ! grep -r -q -E 'Support Proxy War!|Purchase a territory skin' coworld-adapter/dist/build/static-replay-viewer
           mkdir -p coworld-adapter/tmp
           TMPDIR="$PWD/coworld-adapter/tmp" "$COWORLD_BIN" certify "$MANIFEST" --timeout-seconds 300
+          "$COWORLD_PYTHON" .github/scripts/coworld-certification-cache-key.py "$MANIFEST" > "$RUNNER_TEMP/coworld-certification-key.txt"
+          [[ "$(cat "$RUNNER_TEMP/coworld-certification-key.txt")" =~ ^sha256:[0-9a-f]{64}$ ]]
+          install -m 600 "$XDG_CACHE_HOME/coworld/certified_manifest_hashes.json" "$RUNNER_TEMP/coworld-certified-manifests.json"
       - name: Package checksummed immutable release artifact
         env:
           SOURCE_SHA: ${{ needs.dequeue.outputs.merge_sha }}
         run: |
           set -euo pipefail
+          MANIFEST=coworld-adapter/dist/coworld_manifest.json
+          mapfile -t IMAGES < <(jq -r '[.game.runnable.image, (.player[]?.image), (.commissioner[]?.image), (.optimizer[]?.image)] | map(select(type=="string" and length>0)) | unique[]' "$MANIFEST")
+          test "${#IMAGES[@]}" -gt 0
+          printf '%s\n' "${IMAGES[@]}" > "$RUNNER_TEMP/coworld-images.txt"
+          for image in "${IMAGES[@]}"; do
+            [[ "$image" =~ ^[A-Za-z0-9._:/-]+$ ]]
+            [[ "$image" != sha256:* ]]
+            docker image inspect "$image" >/dev/null
+          done
+          docker image save "${IMAGES[@]}" | gzip -n > "$RUNNER_TEMP/coworld-images.tar.gz"
+          test -s "$RUNNER_TEMP/coworld-images.tar.gz"
           tar -czf "$RUNNER_TEMP/coworld-release.tgz" -C coworld-adapter/dist .
-          (cd "$RUNNER_TEMP" && sha256sum coworld-release.tgz > coworld-release.sha256)
+          (cd "$RUNNER_TEMP" && sha256sum coworld-release.tgz coworld-images.tar.gz coworld-images.txt coworld-certified-manifests.json coworld-certification-key.txt > coworld-release.sha256)
           jq -n --arg source_sha "$SOURCE_SHA" --arg version "${{ needs.preflight.outputs.version }}" \
             '{source_sha:$source_sha,version:$version}' > "$RUNNER_TEMP/coworld-release.json"
       - name: Upload immutable release artifact
@@ -337,8 +358,13 @@ jobs:
             ${{ runner.temp }}/coworld-release.tgz
             ${{ runner.temp }}/coworld-release.sha256
             ${{ runner.temp }}/coworld-release.json
+            ${{ runner.temp }}/coworld-images.tar.gz
+            ${{ runner.temp }}/coworld-images.txt
+            ${{ runner.temp }}/coworld-certified-manifests.json
+            ${{ runner.temp }}/coworld-certification-key.txt
           if-no-files-found: error
           retention-days: 7
+          compression-level: 0
 
   deploy:
     name: Hosted certification, canonical and league verification
@@ -380,9 +406,13 @@ jobs:
           export UV_TOOL_DIR="$RUNNER_TEMP/coworld-tools"
           export UV_TOOL_BIN_DIR="$RUNNER_TEMP/coworld-bin"
           uv tool install --force "coworld==$COWORLD_CLI_VERSION"
+          CERTIFICATION_CACHE="$RUNNER_TEMP/coworld-certification-cache"
+          test ! -e "$CERTIFICATION_CACHE"
+          mkdir -m 700 "$CERTIFICATION_CACHE"
           {
             echo "COWORLD_BIN=$UV_TOOL_BIN_DIR/coworld"
             echo "COWORLD_PYTHON=$UV_TOOL_DIR/coworld/bin/python"
+            echo "XDG_CACHE_HOME=$CERTIFICATION_CACHE"
           } >> "$GITHUB_ENV"
       - name: Download exact-source build artifact
         if: ${{ needs.preflight.outputs.idempotent != 'true' }}
@@ -412,18 +442,61 @@ jobs:
               bundle.extractall(target, filter="data")
           with open(os.path.join(target, "coworld_manifest.json"), encoding="utf-8") as handle:
               manifest = json.load(handle)
-          artifact_values = [
-              manifest["game"]["replay_viewer"]["bundle"],
+          image_values = sorted(set([
               manifest["game"]["runnable"]["image"],
               *[entry["image"] for section in ("player", "commissioner", "optimizer") for entry in manifest.get(section, [])],
+          ]))
+          artifact_values = [
+              manifest["game"]["replay_viewer"]["bundle"],
+              *image_values,
           ]
           for value in artifact_values:
               if not isinstance(value, str) or not value or value.startswith(("/", "~")) or ".." in pathlib.PurePosixPath(value).parts:
                   raise SystemExit(f"unsafe manifest artifact reference: {value!r}")
               if not re.fullmatch(r"[A-Za-z0-9._:/-]+", value):
                   raise SystemExit(f"unexpected manifest artifact reference: {value!r}")
+          image_list = os.path.join(os.environ["RUNNER_TEMP"], "release-artifact", "coworld-images.txt")
+          with open(image_list, encoding="utf-8") as handle:
+              image_archive_refs = [line.rstrip("\n") for line in handle if line.rstrip("\n")]
+          if image_archive_refs != image_values:
+              raise SystemExit("image archive references do not exactly match the release manifest")
           PY
           test -f "$RUNNER_TEMP/release/coworld_manifest.json"
+          test -s "$RUNNER_TEMP/release-artifact/coworld-images.tar.gz"
+          [[ "$(cat "$RUNNER_TEMP/release-artifact/coworld-certification-key.txt")" =~ ^sha256:[0-9a-f]{64}$ ]]
+          jq -e --arg key "$(cat "$RUNNER_TEMP/release-artifact/coworld-certification-key.txt")" 'type == "object" and length == 1 and .[$key] == "certified"' "$RUNNER_TEMP/release-artifact/coworld-certified-manifests.json" >/dev/null
+      - name: Load exact-source images without executing contributor code
+        if: ${{ needs.preflight.outputs.idempotent != 'true' }}
+        run: |
+          set -euo pipefail
+          gzip -dc "$RUNNER_TEMP/release-artifact/coworld-images.tar.gz" | docker image load
+          while IFS= read -r image; do
+            test -n "$image"
+            docker image inspect "$image" >/dev/null
+          done < "$RUNNER_TEMP/release-artifact/coworld-images.txt"
+          mkdir -p "$XDG_CACHE_HOME/coworld"
+          install -m 600 "$RUNNER_TEMP/release-artifact/coworld-certified-manifests.json" "$XDG_CACHE_HOME/coworld/certified_manifest_hashes.json"
+          REAL_DOCKER=$(command -v docker)
+          [[ "$REAL_DOCKER" = /* ]]
+          GUARD_DIR="$RUNNER_TEMP/coworld-docker-guard"
+          mkdir -m 700 "$GUARD_DIR"
+          install -m 755 "$GITHUB_WORKSPACE/.github/scripts/coworld-docker-guard.mjs" "$GUARD_DIR/docker"
+          echo "COWORLD_REAL_DOCKER=$REAL_DOCKER" >> "$GITHUB_ENV"
+          echo "$GUARD_DIR" >> "$GITHUB_PATH"
+      - name: Prove exact certification cache hit behind fail-closed Docker guard
+        if: ${{ needs.preflight.outputs.idempotent != 'true' }}
+        run: |
+          set -euo pipefail
+          test "$(command -v docker)" = "$RUNNER_TEMP/coworld-docker-guard/docker"
+          test "$COWORLD_REAL_DOCKER" != "$(command -v docker)"
+          if "$RUNNER_TEMP/coworld-docker-guard/docker" run --rm invalid-image; then
+            echo "::error::Production Docker guard allowed container execution"
+            exit 1
+          else
+            test "$?" -eq 126
+          fi
+          ACTUAL_KEY=$("$COWORLD_PYTHON" .github/scripts/coworld-certification-cache-key.py "$RUNNER_TEMP/release/coworld_manifest.json")
+          test "$ACTUAL_KEY" = "$(cat "$RUNNER_TEMP/release-artifact/coworld-certification-key.txt")"
       - name: Run final list and allocation check immediately before upload
         if: ${{ needs.preflight.outputs.idempotent != 'true' }}
         env:

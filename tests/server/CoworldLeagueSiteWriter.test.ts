@@ -175,6 +175,13 @@ describe("coworldLeagueIndexHtml", () => {
     expect(html).toContain("proxywar-keystone:v40");
   });
 
+  test("names and links the underlying OpenFront game in the footer so first-time visitors can tell what the game is", () => {
+    const html = coworldLeagueIndexHtml(sampleData());
+    expect(html).toContain(
+      'Game: <a href="https://openfront.io" rel="noopener noreferrer">OpenFront</a>',
+    );
+  });
+
   test("links each standings row to a provisional /agent/:slug profile with a generated emblem (2026-08-01 P0 fix)", () => {
     const html = coworldLeagueIndexHtml(sampleData());
     // RELATIVE, not `${DEFAULT_PLATFORM_ORIGIN}/agent/...`: `/agent/:slug`

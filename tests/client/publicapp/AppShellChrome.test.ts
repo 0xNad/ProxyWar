@@ -125,6 +125,16 @@ describe("appShellFooter community link", () => {
     expect(telegramLink?.tagName).toBe("A");
     expect(telegramLink?.hasAttribute("href")).toBe(true);
   });
+
+  it("links the underlying OpenFront game so new visitors can tell what the game is", () => {
+    const root = renderFooter();
+    const openfrontLink = root.querySelector<HTMLAnchorElement>(
+      'a[href="https://openfront.io"]',
+    );
+    expect(openfrontLink).toBeTruthy();
+    expect(openfrontLink?.textContent).toBe("app_shell.footer_openfront");
+    expect(openfrontLink?.getAttribute("rel")).toBe("noopener noreferrer");
+  });
 });
 
 /**

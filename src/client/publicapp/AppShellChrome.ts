@@ -139,6 +139,12 @@ export function appShellFooter(): TemplateResult {
         <div class="flex flex-wrap items-center gap-3">
           <span>${translateText("app_shell.footer_tagline")}</span>
           <a
+            href="https://openfront.io"
+            class="font-semibold text-ink-muted underline decoration-line outline-none hover:text-ink focus-visible:ring-2 focus-visible:ring-accent"
+            rel="noopener noreferrer"
+            >${translateText("app_shell.footer_openfront")}</a
+          >
+          <a
             href="https://github.com/0xNad/ProxyWar"
             class="font-semibold text-ink-muted underline decoration-line outline-none hover:text-ink focus-visible:ring-2 focus-visible:ring-accent"
             >${translateText("app_shell.footer_repository")}</a
