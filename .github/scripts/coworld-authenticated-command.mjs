@@ -58,11 +58,12 @@ try {
 
   const result = spawnSync(coworld, [command, ...args], {
     env: childEnv,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
+    // Hosted `coworld list --json` grows with immutable release history and is
+    // already larger than Node's 1 MiB spawnSync buffer. Stream the trusted
+    // CLI output directly to this wrapper's descriptors so shell redirects and
+    // `tee` keep working without an artificial in-memory ceiling.
+    stdio: ["ignore", "inherit", "inherit"],
   });
-  process.stdout.write(result.stdout ?? "");
-  process.stderr.write(result.stderr ?? "");
   if (result.error) throw result.error;
   process.exitCode = result.status ?? 1;
 } finally {
