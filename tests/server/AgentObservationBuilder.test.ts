@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AttackExecution } from "../../src/core/execution/AttackExecution";
 import { SpawnExecution } from "../../src/core/execution/SpawnExecution";
 import { AllianceRequestExecution } from "../../src/core/execution/alliance/AllianceRequestExecution";
@@ -45,6 +45,24 @@ function observe(game: Game) {
     turnNumber: 10,
     gameState: game,
   });
+}
+
+function boatOptionsFor(
+  builder: AgentObservationBuilder,
+  game: Game,
+  player: PlayerInfo,
+) {
+  return (
+    builder.build({
+      agentID: `agent-${player.id}`,
+      clientID: player.clientID,
+      username: player.name,
+      profile: "aggressive",
+      gameID: "BOAT_TARGETS",
+      turnNumber: game.ticks(),
+      gameState: game,
+    }).nonCombat.boatOptions ?? []
+  );
 }
 
 function spawnPlayers(
@@ -174,6 +192,97 @@ describe("AgentObservationBuilder rival-rival coalition graph", () => {
 });
 
 describe("AgentObservationBuilder boat targets", () => {
+  it("reuses neutral-shore scans only within a stable observation batch", () => {
+    const { game, agent, rival } = disconnectedSeasGame();
+    const sharedBuilder = new AgentObservationBuilder();
+    const scan = vi.spyOn(game, "forEachTile");
+    const seats = [agent, rival];
+
+    for (const seat of seats) {
+      expect(
+        Array.from(game.player(seat.id).borderTiles()).some((tile) =>
+          game.isShore(tile),
+        ),
+      ).toBe(true);
+    }
+
+    const buildAndCompare = () => {
+      scan.mockClear();
+      const batched = sharedBuilder.withObservationBatch(game, () =>
+        seats.map((seat) => boatOptionsFor(sharedBuilder, game, seat)),
+      );
+      expect(scan).toHaveBeenCalledTimes(1);
+
+      scan.mockClear();
+      const uncached = seats.map((seat) =>
+        boatOptionsFor(sharedBuilder, game, seat),
+      );
+      expect(scan).toHaveBeenCalledTimes(2);
+      expect(batched).toEqual(uncached);
+      return batched;
+    };
+
+    const cachedAtTick = buildAndCompare();
+
+    const falloutOption = cachedAtTick[0].find(
+      (option) => option.targetID === null,
+    );
+    expect(falloutOption).toBeDefined();
+    const previousTick = game.ticks();
+    game.setFallout(falloutOption!.targetTile, true);
+    expect(game.ticks()).toBe(previousTick);
+    expect(game.hasFallout(falloutOption!.targetTile)).toBe(true);
+
+    const cachedAfterFallout = buildAndCompare();
+    expect(
+      cachedAfterFallout[0].some(
+        (option) => option.targetTile === falloutOption!.targetTile,
+      ),
+    ).toBe(false);
+
+    const claimedOption = cachedAfterFallout[0].find(
+      (option) => option.targetID === null,
+    );
+    expect(claimedOption).toBeDefined();
+    game.player(agent.id).conquer(claimedOption!.targetTile);
+    game.executeNextTick();
+    expect(game.ticks()).toBe(previousTick + 1);
+
+    const cachedAfterOwnershipChange = buildAndCompare();
+    expect(
+      cachedAfterOwnershipChange[0].some(
+        (option) => option.targetTile === claimedOption!.targetTile,
+      ),
+    ).toBe(false);
+  });
+
+  it("restores nested batches and rejects asynchronous callbacks", () => {
+    const { game, agent, rival } = disconnectedSeasGame();
+    const builder = new AgentObservationBuilder();
+    const scan = vi.spyOn(game, "forEachTile");
+
+    builder.withObservationBatch(game, () => {
+      boatOptionsFor(builder, game, agent);
+      builder.withObservationBatch(game, () => {
+        boatOptionsFor(builder, game, rival);
+      });
+      boatOptionsFor(builder, game, rival);
+    });
+    expect(scan).toHaveBeenCalledTimes(2);
+
+    const asyncCallback = vi.fn(() => ({ then: () => undefined }));
+    expect(() =>
+      builder.withObservationBatch(
+        game,
+        asyncCallback as unknown as () => void,
+      ),
+    ).toThrow("observation batch callback must be synchronous");
+
+    expect(() =>
+      builder.withObservationBatch(game, () => game.executeNextTick()),
+    ).toThrow("game tick changed during observation batch");
+  });
+
   it("offers a hostile transatlantic landing on the real World map", async () => {
     const game = await setup("world", {
       nations: "disabled",

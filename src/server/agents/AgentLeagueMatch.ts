@@ -21,6 +21,7 @@ import {
 import {
   AgentObservationBuilder,
   BuildAgentObservationInput,
+  ObservationBuilderLike,
 } from "./AgentObservationBuilder";
 import { AgentRunner } from "./AgentRunner";
 import {
@@ -106,7 +107,7 @@ export interface AgentLeagueMatchOptions {
    * maximin slot selection. Default `DEFAULT_SPAWN_QUALITY_FLOOR`.
    */
   spawnQualityFloor?: number;
-  observationBuilder?: AgentObservationBuilder;
+  observationBuilder?: ObservationBuilderLike;
   legalActionBuilder?: LegalActionBuilder;
   decisionValidator?: typeof validateAgentDecision;
   disabledActionKinds?: LegalActionKind[];
@@ -193,7 +194,7 @@ export class AgentLeagueMatchRunner {
   private readonly log: Logger;
   private readonly records: AgentDecisionRecord[] = [];
   private readonly retainTacticalAffordances: boolean;
-  private readonly observationBuilder: AgentObservationBuilder;
+  private readonly observationBuilder: ObservationBuilderLike;
   private readonly legalActionBuilder: LegalActionBuilder;
   private readonly objectiveManager = new AgentObjectiveManager();
   private readonly decisionValidator: typeof validateAgentDecision;
@@ -379,68 +380,70 @@ export class AgentLeagueMatchRunner {
       gameState: options.gameState,
       records: this.records,
     });
-    const decisionInputs = activeParticipants.map((participant) => {
-      const observationInput: BuildAgentObservationInput = {
-        agentID: participant.runner.agentID,
-        clientID: participant.runner.clientID(),
-        username: participant.spec.username,
-        profile: participant.spec.profile,
-        gameID: this.options.game.id,
-        turnNumber: options.turnNumber ?? 0,
-        gameState: options.gameState,
-        phaseOverride: options.phaseOverride,
-        objective: this.objectiveManager.currentObjective(
-          participant.runner.agentID,
-        ),
-        recentDecisions: this.recentDecisionsFor(participant),
-      };
-      const initialObservation =
-        this.observationBuilder.build(observationInput);
-      const recentCommunications = this.recentCommunicationSignalsFor(
-        participant,
-        initialObservation,
-      );
-      const baseObservation =
-        recentCommunications.length === 0
-          ? initialObservation
-          : this.observationBuilder.build({
-              ...observationInput,
-              recentCommunications,
-            });
-      // Bilateral deals block (flag-gated; undefined leaves the observation
-      // object untouched, byte-identical to shipped behavior). Privacy: the
-      // manager returns only this seat's own proposals and deals.
-      const dealsView = this.dealManager?.observationFor({
-        agentID: participant.runner.agentID,
-        observation: baseObservation,
-      });
-      const dealAwareObservation: AgentObservation =
-        dealsView === undefined
-          ? baseObservation
-          : { ...baseObservation, deals: dealsView };
-      const legalActions = this.filterDisabledActionKinds(
-        this.legalActionBuilder.build({
+    const buildDecisionInputs = () =>
+      activeParticipants.map((participant) => {
+        const observationInput: BuildAgentObservationInput = {
+          agentID: participant.runner.agentID,
+          clientID: participant.runner.clientID(),
+          username: participant.spec.username,
+          profile: participant.spec.profile,
+          gameID: this.options.game.id,
+          turnNumber: options.turnNumber ?? 0,
+          gameState: options.gameState,
+          phaseOverride: options.phaseOverride,
+          objective: this.objectiveManager.currentObjective(
+            participant.runner.agentID,
+          ),
+          recentDecisions: this.recentDecisionsFor(participant),
+        };
+        const initialObservation =
+          this.observationBuilder.build(observationInput);
+        const recentCommunications = this.recentCommunicationSignalsFor(
+          participant,
+          initialObservation,
+        );
+        const baseObservation =
+          recentCommunications.length === 0
+            ? initialObservation
+            : { ...initialObservation, recentCommunications };
+        // Bilateral deals block (flag-gated; undefined leaves the observation
+        // object untouched, byte-identical to shipped behavior). Privacy: the
+        // manager returns only this seat's own proposals and deals.
+        const dealsView = this.dealManager?.observationFor({
+          agentID: participant.runner.agentID,
+          observation: baseObservation,
+        });
+        const dealAwareObservation: AgentObservation =
+          dealsView === undefined
+            ? baseObservation
+            : { ...baseObservation, deals: dealsView };
+        const legalActions = this.filterDisabledActionKinds(
+          this.legalActionBuilder.build({
+            observation: dealAwareObservation,
+          }),
+        );
+        const objective = this.objectiveManager.objectiveFor({
+          agentID: participant.runner.agentID,
+          profile: participant.spec.profile,
           observation: dealAwareObservation,
-        }),
-      );
-      const objective = this.objectiveManager.objectiveFor({
-        agentID: participant.runner.agentID,
-        profile: participant.spec.profile,
-        observation: dealAwareObservation,
-        legalActions,
-        turnNumber: dealAwareObservation.turnNumber,
+          legalActions,
+          turnNumber: dealAwareObservation.turnNumber,
+        });
+        const observation: AgentObservation = {
+          ...dealAwareObservation,
+          objective,
+        };
+        return {
+          participant,
+          observation,
+          observationSummary: this.observationBuilder.summarize(observation),
+          legalActions,
+        };
       });
-      const observation: AgentObservation = {
-        ...dealAwareObservation,
-        objective,
-      };
-      return {
-        participant,
-        observation,
-        observationSummary: this.observationBuilder.summarize(observation),
-        legalActions,
-      };
-    });
+    const decisionInputs = this.observationBuilder.withObservationBatch(
+      options.gameState,
+      buildDecisionInputs,
+    );
 
     const decisions = await Promise.all(
       decisionInputs.map(async (input) => {

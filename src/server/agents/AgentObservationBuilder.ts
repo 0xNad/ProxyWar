@@ -85,6 +85,17 @@ const NEUTRAL_ISLAND_SHORE_SAMPLE_LIMIT = 48;
 const NEUTRAL_ISLAND_TRANSPORT_TARGET_LIMIT = 10;
 const NEUTRAL_ISLAND_TRANSPORT_SCAN_LIMIT = 80;
 
+type SynchronousResult<T> = T extends PromiseLike<unknown> ? never : T;
+
+export interface ObservationBuilderLike {
+  build(input: BuildAgentObservationInput): AgentObservation;
+  summarize(observation: AgentObservation): string;
+  withObservationBatch<T>(
+    gameState: Game | undefined,
+    callback: () => SynchronousResult<T>,
+  ): T;
+}
+
 export interface BuildAgentObservationInput {
   agentID: string;
   clientID: string | null;
@@ -100,6 +111,37 @@ export interface BuildAgentObservationInput {
 }
 
 export class AgentObservationBuilder {
+  private neutralIslandTransportTileCache: {
+    gameState: Game;
+    tick: number;
+    tiles: readonly number[] | null;
+  } | null = null;
+
+  /** Shares work while a synchronous, non-mutating callback builds one snapshot. */
+  withObservationBatch<T>(
+    gameState: Game | undefined,
+    callback: () => SynchronousResult<T>,
+  ): T {
+    const previousCache = this.neutralIslandTransportTileCache;
+    const cache =
+      gameState === undefined
+        ? null
+        : { gameState, tick: gameState.ticks(), tiles: null };
+    this.neutralIslandTransportTileCache = cache;
+    try {
+      const result = callback();
+      if (isPromiseLike(result)) {
+        throw new Error("observation batch callback must be synchronous");
+      }
+      if (cache !== null) {
+        this.assertObservationBatchTick(cache);
+      }
+      return result as T;
+    } finally {
+      this.neutralIslandTransportTileCache = previousCache;
+    }
+  }
+
   build(input: BuildAgentObservationInput): AgentObservation {
     const notes: string[] = [];
     const phase = input.phaseOverride ?? this.phaseFromGame(input.gameState);
@@ -1361,21 +1403,15 @@ export class AgentObservationBuilder {
     const sampledShores = shores.slice(0, NEUTRAL_ISLAND_SHORE_SAMPLE_LIMIT);
     const scored: Array<{ tile: number; distance: number }> = [];
 
-    gameState.forEachTile((tile) => {
-      if (
-        !gameState.isLand(tile) ||
-        !gameState.isShore(tile) ||
-        gameState.hasOwner(tile) ||
-        gameState.hasFallout(tile) ||
-        this.touchesOwnedTerritory(gameState, player, tile)
-      ) {
-        return;
+    for (const tile of this.unownedNonFalloutShoreTiles(gameState)) {
+      if (this.touchesOwnedTerritory(gameState, player, tile)) {
+        continue;
       }
       scored.push({
         tile,
         distance: nearestManhattanDistance(gameState, tile, sampledShores),
       });
-    });
+    }
 
     return scored
       .sort((a, b) => a.distance - b.distance || a.tile - b.tile)
@@ -1386,6 +1422,38 @@ export class AgentObservationBuilder {
       )
       .slice(0, NEUTRAL_ISLAND_TRANSPORT_TARGET_LIMIT)
       .map((candidate) => candidate.tile);
+  }
+
+  private unownedNonFalloutShoreTiles(gameState: Game): readonly number[] {
+    const cached = this.neutralIslandTransportTileCache;
+    if (cached?.gameState !== gameState) {
+      return this.scanUnownedNonFalloutShoreTiles(gameState);
+    }
+    this.assertObservationBatchTick(cached);
+    return (cached.tiles ??= this.scanUnownedNonFalloutShoreTiles(gameState));
+  }
+
+  private assertObservationBatchTick(cache: {
+    gameState: Game;
+    tick: number;
+  }): void {
+    if (cache.gameState.ticks() !== cache.tick) {
+      throw new Error("game tick changed during observation batch");
+    }
+  }
+
+  private scanUnownedNonFalloutShoreTiles(gameState: Game): number[] {
+    const tiles: number[] = [];
+    gameState.forEachTile((tile) => {
+      if (
+        gameState.isShore(tile) &&
+        !gameState.hasOwner(tile) &&
+        !gameState.hasFallout(tile)
+      ) {
+        tiles.push(tile);
+      }
+    });
+    return tiles;
   }
 
   private touchesOwnedTerritory(
@@ -1906,4 +1974,13 @@ function nearestManhattanDistanceOrNull(
 
 function clamp01(value: number): number {
   return Math.max(0, Math.min(1, Math.round(value * 100) / 100));
+}
+
+function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+  return (
+    value !== null &&
+    (typeof value === "object" || typeof value === "function") &&
+    "then" in value &&
+    typeof value.then === "function"
+  );
 }

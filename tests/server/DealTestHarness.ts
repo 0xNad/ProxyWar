@@ -2,7 +2,10 @@ import { Logger } from "winston";
 import { PlayerType, Relation } from "../../src/core/game/Game";
 import type { AgentParticipant } from "../../src/server/agents/AgentLeagueMatch";
 import { AgentLeagueMatchRunner } from "../../src/server/agents/AgentLeagueMatch";
-import type { AgentObservationBuilder } from "../../src/server/agents/AgentObservationBuilder";
+import type {
+  BuildAgentObservationInput,
+  ObservationBuilderLike,
+} from "../../src/server/agents/AgentObservationBuilder";
 import { AgentRunner } from "../../src/server/agents/AgentRunner";
 import type {
   AgentBrain,
@@ -286,8 +289,9 @@ export function dealLeagueHarness(input: {
       log,
     }),
   }));
-  const observationBuilder = {
-    build: (builderInput: { agentID: string; turnNumber: number }) => {
+  const observationBuilder: ObservationBuilderLike = {
+    withObservationBatch: (_gameState, callback) => callback(),
+    build: (builderInput: BuildAgentObservationInput) => {
       const seat = input.seats.find(
         (candidate) => candidate.agentID === builderInput.agentID,
       );
@@ -305,7 +309,7 @@ export function dealLeagueHarness(input: {
       });
     },
     summarize: () => "stub observation",
-  } as unknown as AgentObservationBuilder;
+  };
   const league = new AgentLeagueMatchRunner({
     game: { id: input.gameID ?? "DEAL_TEST" } as unknown as GameServer,
     participants,
