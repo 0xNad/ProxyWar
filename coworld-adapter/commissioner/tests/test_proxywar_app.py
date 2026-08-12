@@ -32,6 +32,7 @@ from commissioners.common.server import (
 from commissioners.common.ruleset_strategy.config import (
     RulesetStrategyCommissionerConfig,
 )
+from commissioners.common.ruleset_strategy import scheduling as ruleset_scheduling
 from commissioners.proxywar_app import ProxyWarCommissioner
 
 CONFIG_PATH = (
@@ -228,11 +229,11 @@ def test_live_17_champion_field_schedules_every_entrant() -> None:
     champion_policy_ids = {
         membership.policy_version_id for membership in round_start.memberships
     }
+    # The set equality above is the every-entrant guarantee. Under
+    # shuffled_window the final configured entrant is no longer pinned to the
+    # final episode (the pre-shuffle regression this test originally guarded),
+    # so no positional assertion is made here.
     assert scheduled_policy_ids == champion_policy_ids
-    assert (
-        round_start.memberships[-1].policy_version_id
-        in scheduled.episodes[-1].policy_version_ids
-    )
 
 
 def test_configured_four_episode_floor_is_preserved_at_12_champions() -> None:
@@ -311,6 +312,75 @@ def test_live_25_champion_field_routes_to_sixteen_seats_and_covers_every_entrant
         membership.policy_version_id for membership in round_start.memberships
     }
     assert scheduled_policy_ids == champion_policy_ids
+
+
+def test_competition_seating_is_shuffled_window() -> None:
+    # Seating is a live-league fairness contract, not a free knob: rolling_window
+    # starved both ends of the stable entrant order down to ~1 episode per round
+    # (see the defaults.seating comment in proxywar.yaml). Pin the shipped value
+    # so a revert is a deliberate, reviewed decision.
+    mapping = yaml.safe_load(CONFIG_PATH.read_text())
+    assert mapping["defaults"]["seating"] == "shuffled_window"
+
+
+def test_shuffled_window_is_seed_reproducible_and_seed_sensitive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    round_start = competition_round_start(25)
+    round_start.variants = _sixteen_rung_variants()
+
+    def scheduled_with_seed(seed: int) -> list[tuple[str, ...]]:
+        monkeypatch.setattr(ruleset_scheduling, "_round_shuffle_seed", lambda: seed)
+        scheduled = commissioner().schedule_episodes_for_round_start(round_start)
+        assert len(scheduled.episodes) == 10
+        for episode in scheduled.episodes:
+            assert len(episode.policy_version_ids) == 16
+            assert len(set(episode.policy_version_ids)) == 16
+        return [
+            tuple(str(policy_id) for policy_id in episode.policy_version_ids)
+            for episode in scheduled.episodes
+        ]
+
+    # Same seed -> identical schedule (re-runs are reproducible under a pinned
+    # seed); different seed -> a different window walk. If seating silently
+    # regressed to a stable-order strategy both draws would be identical.
+    assert scheduled_with_seed(1234) == scheduled_with_seed(1234)
+    assert scheduled_with_seed(1234) != scheduled_with_seed(5678)
+
+
+def test_shuffled_window_unpins_positional_coverage_across_rounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression for the 08-06..08-11 starvation incident: under rolling_window
+    # the same entrants sat at the ends of the stable order every round, so over
+    # R rounds a head/tail entrant totalled exactly R appearances (one guaranteed
+    # window per round) while mid-list entrants totalled ~12R/14. With the
+    # per-round shuffle, expected coverage is uniform (10 * 16 / 25 = 6.4 per
+    # round here); assert every entrant clears 3x the old starvation floor over
+    # 20 deterministic simulated rounds.
+    round_start = competition_round_start(25)
+    round_start.variants = _sixteen_rung_variants()
+    champion_policy_ids = {
+        membership.policy_version_id for membership in round_start.memberships
+    }
+
+    rounds = 20
+    appearances: dict[UUID, int] = {policy_id: 0 for policy_id in champion_policy_ids}
+    for simulated_round in range(rounds):
+        monkeypatch.setattr(
+            ruleset_scheduling, "_round_shuffle_seed", lambda seed=simulated_round: seed
+        )
+        scheduled = commissioner().schedule_episodes_for_round_start(round_start)
+        assert len(scheduled.episodes) == 10
+        seen_this_round: set[UUID] = set()
+        for episode in scheduled.episodes:
+            for policy_id in episode.policy_version_ids:
+                appearances[policy_id] += 1
+                seen_this_round.add(policy_id)
+        # The every-entrant >=1 guarantee must survive the shuffle each round.
+        assert seen_this_round == champion_policy_ids
+
+    assert min(appearances.values()) >= 3 * rounds
 
 
 def test_sixteen_champion_field_routes_to_sixteen_seats() -> None:
