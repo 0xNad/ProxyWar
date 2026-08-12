@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AttackExecution } from "../../src/core/execution/AttackExecution";
 import { SpawnExecution } from "../../src/core/execution/SpawnExecution";
 import { AllianceRequestExecution } from "../../src/core/execution/alliance/AllianceRequestExecution";
@@ -45,6 +45,24 @@ function observe(game: Game) {
     turnNumber: 10,
     gameState: game,
   });
+}
+
+function boatOptionsFor(
+  builder: AgentObservationBuilder,
+  game: Game,
+  player: PlayerInfo,
+) {
+  return (
+    builder.build({
+      agentID: `agent-${player.id}`,
+      clientID: player.clientID,
+      username: player.name,
+      profile: "aggressive",
+      gameID: "BOAT_TARGETS",
+      turnNumber: game.ticks(),
+      gameState: game,
+    }).nonCombat.boatOptions ?? []
+  );
 }
 
 function spawnPlayers(
@@ -174,6 +192,55 @@ describe("AgentObservationBuilder rival-rival coalition graph", () => {
 });
 
 describe("AgentObservationBuilder boat targets", () => {
+  it("reuses the neutral-shore scan without changing either seat's options", () => {
+    const { game, agent, rival } = disconnectedSeasGame();
+    const sharedBuilder = new AgentObservationBuilder();
+    const scan = vi.spyOn(game, "forEachTile");
+
+    const cachedAtTick = [
+      boatOptionsFor(sharedBuilder, game, agent),
+      boatOptionsFor(sharedBuilder, game, rival),
+    ];
+    expect(scan).toHaveBeenCalledTimes(1);
+
+    scan.mockClear();
+    const uncachedAtTick = [
+      boatOptionsFor(new AgentObservationBuilder(), game, agent),
+      boatOptionsFor(new AgentObservationBuilder(), game, rival),
+    ];
+    expect(scan).toHaveBeenCalledTimes(2);
+    expect(cachedAtTick).toEqual(uncachedAtTick);
+
+    const claimedOption = cachedAtTick[0].find(
+      (option) => option.targetID === null,
+    );
+    expect(claimedOption).toBeDefined();
+    game.player(agent.id).conquer(claimedOption!.targetTile);
+    const previousTick = game.ticks();
+    game.executeNextTick();
+    expect(game.ticks()).toBe(previousTick + 1);
+
+    scan.mockClear();
+    const cachedAfterOwnershipChange = [
+      boatOptionsFor(sharedBuilder, game, agent),
+      boatOptionsFor(sharedBuilder, game, rival),
+    ];
+    expect(scan).toHaveBeenCalledTimes(1);
+
+    scan.mockClear();
+    const uncachedAfterOwnershipChange = [
+      boatOptionsFor(new AgentObservationBuilder(), game, agent),
+      boatOptionsFor(new AgentObservationBuilder(), game, rival),
+    ];
+    expect(scan).toHaveBeenCalledTimes(2);
+    expect(cachedAfterOwnershipChange).toEqual(uncachedAfterOwnershipChange);
+    expect(
+      cachedAfterOwnershipChange[0].some(
+        (option) => option.targetTile === claimedOption!.targetTile,
+      ),
+    ).toBe(false);
+  });
+
   it("offers a hostile transatlantic landing on the real World map", async () => {
     const game = await setup("world", {
       nations: "disabled",

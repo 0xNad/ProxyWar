@@ -100,6 +100,12 @@ export interface BuildAgentObservationInput {
 }
 
 export class AgentObservationBuilder {
+  private neutralIslandTransportTileCache: {
+    gameState: Game;
+    tick: number;
+    tiles: readonly number[];
+  } | null = null;
+
   build(input: BuildAgentObservationInput): AgentObservation {
     const notes: string[] = [];
     const phase = input.phaseOverride ?? this.phaseFromGame(input.gameState);
@@ -1361,21 +1367,15 @@ export class AgentObservationBuilder {
     const sampledShores = shores.slice(0, NEUTRAL_ISLAND_SHORE_SAMPLE_LIMIT);
     const scored: Array<{ tile: number; distance: number }> = [];
 
-    gameState.forEachTile((tile) => {
-      if (
-        !gameState.isLand(tile) ||
-        !gameState.isShore(tile) ||
-        gameState.hasOwner(tile) ||
-        gameState.hasFallout(tile) ||
-        this.touchesOwnedTerritory(gameState, player, tile)
-      ) {
-        return;
+    for (const tile of this.unownedNonFalloutShoreTiles(gameState)) {
+      if (this.touchesOwnedTerritory(gameState, player, tile)) {
+        continue;
       }
       scored.push({
         tile,
         distance: nearestManhattanDistance(gameState, tile, sampledShores),
       });
-    });
+    }
 
     return scored
       .sort((a, b) => a.distance - b.distance || a.tile - b.tile)
@@ -1386,6 +1386,28 @@ export class AgentObservationBuilder {
       )
       .slice(0, NEUTRAL_ISLAND_TRANSPORT_TARGET_LIMIT)
       .map((candidate) => candidate.tile);
+  }
+
+  private unownedNonFalloutShoreTiles(gameState: Game): readonly number[] {
+    const tick = gameState.ticks();
+    const cached = this.neutralIslandTransportTileCache;
+    if (cached?.gameState === gameState && cached.tick === tick) {
+      return cached.tiles;
+    }
+
+    const tiles: number[] = [];
+    gameState.forEachTile((tile) => {
+      if (
+        gameState.isLand(tile) &&
+        gameState.isShore(tile) &&
+        !gameState.hasOwner(tile) &&
+        !gameState.hasFallout(tile)
+      ) {
+        tiles.push(tile);
+      }
+    });
+    this.neutralIslandTransportTileCache = { gameState, tick, tiles };
+    return tiles;
   }
 
   private touchesOwnedTerritory(
