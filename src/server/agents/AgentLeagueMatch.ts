@@ -21,6 +21,7 @@ import {
 import {
   AgentObservationBuilder,
   BuildAgentObservationInput,
+  ObservationBuilderLike,
 } from "./AgentObservationBuilder";
 import { AgentRunner } from "./AgentRunner";
 import {
@@ -106,7 +107,7 @@ export interface AgentLeagueMatchOptions {
    * maximin slot selection. Default `DEFAULT_SPAWN_QUALITY_FLOOR`.
    */
   spawnQualityFloor?: number;
-  observationBuilder?: AgentObservationBuilder;
+  observationBuilder?: ObservationBuilderLike;
   legalActionBuilder?: LegalActionBuilder;
   decisionValidator?: typeof validateAgentDecision;
   disabledActionKinds?: LegalActionKind[];
@@ -193,7 +194,7 @@ export class AgentLeagueMatchRunner {
   private readonly log: Logger;
   private readonly records: AgentDecisionRecord[] = [];
   private readonly retainTacticalAffordances: boolean;
-  private readonly observationBuilder: AgentObservationBuilder;
+  private readonly observationBuilder: ObservationBuilderLike;
   private readonly legalActionBuilder: LegalActionBuilder;
   private readonly objectiveManager = new AgentObjectiveManager();
   private readonly decisionValidator: typeof validateAgentDecision;
@@ -404,10 +405,7 @@ export class AgentLeagueMatchRunner {
         const baseObservation =
           recentCommunications.length === 0
             ? initialObservation
-            : this.observationBuilder.build({
-                ...observationInput,
-                recentCommunications,
-              });
+            : { ...initialObservation, recentCommunications };
         // Bilateral deals block (flag-gated; undefined leaves the observation
         // object untouched, byte-identical to shipped behavior). Privacy: the
         // manager returns only this seat's own proposals and deals.

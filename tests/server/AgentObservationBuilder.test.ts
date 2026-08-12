@@ -196,20 +196,33 @@ describe("AgentObservationBuilder boat targets", () => {
     const { game, agent, rival } = disconnectedSeasGame();
     const sharedBuilder = new AgentObservationBuilder();
     const scan = vi.spyOn(game, "forEachTile");
+    const seats = [agent, rival];
 
-    const cachedAtTick = sharedBuilder.withObservationBatch(game, () => [
-      boatOptionsFor(sharedBuilder, game, agent),
-      boatOptionsFor(sharedBuilder, game, rival),
-    ]);
-    expect(scan).toHaveBeenCalledTimes(1);
+    for (const seat of seats) {
+      expect(
+        Array.from(game.player(seat.id).borderTiles()).some((tile) =>
+          game.isShore(tile),
+        ),
+      ).toBe(true);
+    }
 
-    scan.mockClear();
-    const uncachedAtTick = [
-      boatOptionsFor(new AgentObservationBuilder(), game, agent),
-      boatOptionsFor(new AgentObservationBuilder(), game, rival),
-    ];
-    expect(scan).toHaveBeenCalledTimes(2);
-    expect(cachedAtTick).toEqual(uncachedAtTick);
+    const buildAndCompare = () => {
+      scan.mockClear();
+      const batched = sharedBuilder.withObservationBatch(game, () =>
+        seats.map((seat) => boatOptionsFor(sharedBuilder, game, seat)),
+      );
+      expect(scan).toHaveBeenCalledTimes(1);
+
+      scan.mockClear();
+      const uncached = seats.map((seat) =>
+        boatOptionsFor(sharedBuilder, game, seat),
+      );
+      expect(scan).toHaveBeenCalledTimes(2);
+      expect(batched).toEqual(uncached);
+      return batched;
+    };
+
+    const cachedAtTick = buildAndCompare();
 
     const falloutOption = cachedAtTick[0].find(
       (option) => option.targetID === null,
@@ -220,20 +233,7 @@ describe("AgentObservationBuilder boat targets", () => {
     expect(game.ticks()).toBe(previousTick);
     expect(game.hasFallout(falloutOption!.targetTile)).toBe(true);
 
-    scan.mockClear();
-    const cachedAfterFallout = sharedBuilder.withObservationBatch(game, () => [
-      boatOptionsFor(sharedBuilder, game, agent),
-      boatOptionsFor(sharedBuilder, game, rival),
-    ]);
-    expect(scan).toHaveBeenCalledTimes(1);
-
-    scan.mockClear();
-    const uncachedAfterFallout = [
-      boatOptionsFor(sharedBuilder, game, agent),
-      boatOptionsFor(sharedBuilder, game, rival),
-    ];
-    expect(scan).toHaveBeenCalledTimes(2);
-    expect(cachedAfterFallout).toEqual(uncachedAfterFallout);
+    const cachedAfterFallout = buildAndCompare();
     expect(
       cachedAfterFallout[0].some(
         (option) => option.targetTile === falloutOption!.targetTile,
@@ -248,28 +248,39 @@ describe("AgentObservationBuilder boat targets", () => {
     game.executeNextTick();
     expect(game.ticks()).toBe(previousTick + 1);
 
-    scan.mockClear();
-    const cachedAfterOwnershipChange = sharedBuilder.withObservationBatch(
-      game,
-      () => [
-        boatOptionsFor(sharedBuilder, game, agent),
-        boatOptionsFor(sharedBuilder, game, rival),
-      ],
-    );
-    expect(scan).toHaveBeenCalledTimes(1);
-
-    scan.mockClear();
-    const uncachedAfterOwnershipChange = [
-      boatOptionsFor(new AgentObservationBuilder(), game, agent),
-      boatOptionsFor(new AgentObservationBuilder(), game, rival),
-    ];
-    expect(scan).toHaveBeenCalledTimes(2);
-    expect(cachedAfterOwnershipChange).toEqual(uncachedAfterOwnershipChange);
+    const cachedAfterOwnershipChange = buildAndCompare();
     expect(
       cachedAfterOwnershipChange[0].some(
         (option) => option.targetTile === claimedOption!.targetTile,
       ),
     ).toBe(false);
+  });
+
+  it("restores nested batches and rejects asynchronous callbacks", () => {
+    const { game, agent, rival } = disconnectedSeasGame();
+    const builder = new AgentObservationBuilder();
+    const scan = vi.spyOn(game, "forEachTile");
+
+    builder.withObservationBatch(game, () => {
+      boatOptionsFor(builder, game, agent);
+      builder.withObservationBatch(game, () => {
+        boatOptionsFor(builder, game, rival);
+      });
+      boatOptionsFor(builder, game, rival);
+    });
+    expect(scan).toHaveBeenCalledTimes(2);
+
+    const asyncCallback = vi.fn(() => ({ then: () => undefined }));
+    expect(() =>
+      builder.withObservationBatch(
+        game,
+        asyncCallback as unknown as () => void,
+      ),
+    ).toThrow("observation batch callback must be synchronous");
+
+    expect(() =>
+      builder.withObservationBatch(game, () => game.executeNextTick()),
+    ).toThrow("game tick changed during observation batch");
   });
 
   it("offers a hostile transatlantic landing on the real World map", async () => {
