@@ -147,6 +147,7 @@ export interface RunAgentDecisionTurnOptions {
  */
 const MAX_STAMPED_DEAL_ACTION_ID_LENGTH = 120;
 const MAX_STAMPED_DEAL_REJECTION_LENGTH = 200;
+const RECENT_COMMUNICATION_RECORD_LIMIT = 18;
 
 interface DealSlotApplicationEvidence {
   stamps: NonNullable<AgentDecision["metadata"]>;
@@ -193,6 +194,10 @@ export function createAgentParticipants(
 export class AgentLeagueMatchRunner {
   private readonly log: Logger;
   private readonly records: AgentDecisionRecord[] = [];
+  private readonly recentCommunicationRecordsByAgentID = new Map<
+    string,
+    AgentDecisionRecord[]
+  >();
   private readonly retainTacticalAffordances: boolean;
   private readonly observationBuilder: ObservationBuilderLike;
   private readonly legalActionBuilder: LegalActionBuilder;
@@ -382,6 +387,10 @@ export class AgentLeagueMatchRunner {
     });
     const buildDecisionInputs = () =>
       activeParticipants.map((participant) => {
+        const recentCommunications = this.recentCommunicationSignalsFor(
+          participant,
+          options.gameState,
+        );
         const observationInput: BuildAgentObservationInput = {
           agentID: participant.runner.agentID,
           clientID: participant.runner.clientID(),
@@ -395,17 +404,11 @@ export class AgentLeagueMatchRunner {
             participant.runner.agentID,
           ),
           recentDecisions: this.recentDecisionsFor(participant),
+          ...(recentCommunications.length > 0
+            ? { recentCommunications }
+            : {}),
         };
-        const initialObservation =
-          this.observationBuilder.build(observationInput);
-        const recentCommunications = this.recentCommunicationSignalsFor(
-          participant,
-          initialObservation,
-        );
-        const baseObservation =
-          recentCommunications.length === 0
-            ? initialObservation
-            : { ...initialObservation, recentCommunications };
+        const baseObservation = this.observationBuilder.build(observationInput);
         // Bilateral deals block (flag-gated; undefined leaves the observation
         // object untouched, byte-identical to shipped behavior). Privacy: the
         // manager returns only this seat's own proposals and deals.
@@ -1072,7 +1075,29 @@ export class AgentLeagueMatchRunner {
       result: input.result,
     };
     this.records.push(record);
+    this.rememberCommunicationRecord(record);
     return record;
+  }
+
+  private rememberCommunicationRecord(record: AgentDecisionRecord): void {
+    if (!record.result.accepted || !isCommunicationRecord(record)) {
+      return;
+    }
+    for (const participant of this.options.participants) {
+      const agentID = participant.runner.agentID;
+      if (agentID === record.agentID) {
+        continue;
+      }
+      let recentRecords = this.recentCommunicationRecordsByAgentID.get(agentID);
+      if (recentRecords === undefined) {
+        recentRecords = [];
+        this.recentCommunicationRecordsByAgentID.set(agentID, recentRecords);
+      }
+      recentRecords.push(record);
+      if (recentRecords.length > RECENT_COMMUNICATION_RECORD_LIMIT) {
+        recentRecords.shift();
+      }
+    }
   }
 
   private recentDecisionsFor(
@@ -1118,23 +1143,27 @@ export class AgentLeagueMatchRunner {
 
   private recentCommunicationSignalsFor(
     participant: AgentParticipant,
-    observation: AgentObservation,
+    gameState?: Game,
   ): AgentCommunicationSignal[] {
-    const ownPlayerID = observation.ownState?.playerID ?? null;
-    return this.records
-      .filter(
-        (record) =>
-          record.agentID !== participant.runner.agentID &&
-          record.result.accepted &&
-          isCommunicationRecord(record),
-      )
-      .slice(-18)
+    const clientID = participant.runner.clientID();
+    const player =
+      clientID && gameState ? gameState.playerByClientID(clientID) : null;
+    const ownPlayerID = player?.id() ?? null;
+    const visiblePlayers =
+      gameState && player
+        ? gameState.players().filter((other) => other.id() !== player.id())
+        : [];
+    return (
+      this.recentCommunicationRecordsByAgentID.get(
+        participant.runner.agentID,
+      ) ?? []
+    )
       .map((record) => {
         const metadata = record.chosenActionMetadata ?? {};
-        const sender = observation.visiblePlayers.find(
+        const sender = visiblePlayers.find(
           (player) =>
-            player.clientID === record.clientID ||
-            player.name === record.username,
+            player.clientID() === record.clientID ||
+            player.name() === record.username,
         );
         const recipientID = stringOrNull(metadata.recipientID);
         const recipientName = stringOrNull(metadata.recipientName);
@@ -1144,7 +1173,7 @@ export class AgentLeagueMatchRunner {
           sequence: record.sequence,
           turnNumber: record.turnNumber,
           senderAgentID: record.agentID,
-          senderPlayerID: sender?.playerID ?? null,
+          senderPlayerID: sender?.id() ?? null,
           senderName: record.username,
           senderProfile: record.profile,
           actionKind:
