@@ -1204,9 +1204,27 @@ export class AgentLeagueMatchRunner {
   private recentDecisionsFor(
     participant: AgentParticipant,
   ): RecentAgentDecision[] {
-    return this.records
-      .filter((record) => record.agentID === participant.runner.agentID)
-      .slice(-8)
+    const own = this.records.filter(
+      (record) => record.agentID === participant.runner.agentID,
+    );
+    // Window by DECISION CYCLE (turnNumber — monotonic per step), not by raw
+    // record count: a batched decision writes one record per action, and a
+    // record-count window would let a single 5-action batch evict most of
+    // the agent's own memory. All-scalar play has one record per cycle, so
+    // the last 8 cycles are exactly the last 8 records — byte-identical to
+    // the old slice(-8).
+    const cycleTurns: number[] = [];
+    for (let i = own.length - 1; i >= 0 && cycleTurns.length < 8; i -= 1) {
+      const turn = own[i].turnNumber;
+      if (cycleTurns[0] !== turn) {
+        cycleTurns.unshift(turn);
+      }
+    }
+    const windowStart = cycleTurns[0];
+    return own
+      .filter(
+        (record) => windowStart !== undefined && record.turnNumber >= windowStart,
+      )
       .map((record) => {
         const metadata = record.chosenActionMetadata ?? {};
         const targetID = metadata.targetID ?? metadata.recipientID;

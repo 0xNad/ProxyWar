@@ -1312,3 +1312,117 @@ describe("decisions.jsonl llmPlannerDegraded stamp (per-record degradation)", ()
     expect(entry.llmPlannerDegraded).toBe(false);
   });
 });
+
+describe("match summary cycle-level counts under action batching", () => {
+  async function writeAndParseSummary(
+    records: AgentDecisionRecord[],
+  ): Promise<Record<string, unknown>> {
+    const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-league-batch-"));
+    try {
+      const paths = await writeAgentLeagueRunArtifacts({
+        rootDir,
+        runID: "batch-summary-run",
+        matchID: "BATCHSUM",
+        scenario: "coworld",
+        brainMode: "external-http",
+        startedAt: Date.UTC(2026, 0, 1),
+        completedAt: Date.UTC(2026, 0, 1, 0, 0, 1),
+        records,
+        roster: [],
+      });
+      return JSON.parse(
+        await fs.readFile(paths.summaryPath, "utf8"),
+      ) as Record<string, unknown>;
+    } finally {
+      await fs.rm(rootDir, { recursive: true, force: true });
+    }
+  }
+
+  function batchedRecord(input: {
+    sequence: number;
+    agentID: string;
+    username: string;
+    batchIndex?: number;
+    batchSize?: number;
+    fallbackUsed: boolean;
+    decisionLatencyMs: number;
+  }): AgentDecisionRecord {
+    return {
+      ...fabricatedRecord({
+        sequence: input.sequence,
+        agentID: input.agentID,
+        playerID: `P_${input.agentID}`,
+        username: input.username,
+        turnNumber: 10,
+        kind: "attack",
+        actionID: `attack:${input.sequence}`,
+      }),
+      decisionLatencyMs: input.decisionLatencyMs,
+      decisionMetadata: {
+        fallbackUsed: input.fallbackUsed,
+        ...(input.batchIndex !== undefined
+          ? { batchIndex: input.batchIndex, batchSize: input.batchSize ?? 1 }
+          : {}),
+      },
+    };
+  }
+
+  it("adds brainDecisionCount/brainFallbackCount and averages latency over primaries only", async () => {
+    // Agent A: one DEGRADED brain decision fanned out to a 3-action batch —
+    // fallbackUsed rides every record of the batch (the metadata spread),
+    // and each record re-carries the same 300ms brain-call latency.
+    const batched = [0, 1, 2].map((batchIndex) =>
+      batchedRecord({
+        sequence: batchIndex + 1,
+        agentID: "agent-a",
+        username: "Batched A",
+        batchIndex,
+        batchSize: 3,
+        fallbackUsed: true,
+        decisionLatencyMs: 300,
+      }),
+    );
+    // Agent B: one healthy scalar decision (no batch metadata at all —
+    // absent batchIndex counts as primary).
+    const scalar = batchedRecord({
+      sequence: 4,
+      agentID: "agent-b",
+      username: "Scalar B",
+      fallbackUsed: false,
+      decisionLatencyMs: 100,
+    });
+
+    const summary = await writeAndParseSummary([...batched, scalar]);
+
+    expect(summary).toMatchObject({
+      // Record-level counts keep their existing semantics (per action).
+      decisionCount: 4,
+      fallbackCount: 3,
+      // Cycle-level truth: two brains were asked, one was degraded.
+      brainDecisionCount: 2,
+      brainFallbackCount: 1,
+      // (300 + 100) / 2 primaries — NOT (300*3 + 100) / 4 records.
+      averageDecisionLatencyMs: 200,
+    });
+  });
+
+  it("keeps the pairs equal for all-scalar matches", async () => {
+    const records = [1, 2, 3].map((sequence) =>
+      batchedRecord({
+        sequence,
+        agentID: `agent-${sequence}`,
+        username: `Scalar ${sequence}`,
+        fallbackUsed: sequence === 2,
+        decisionLatencyMs: 90,
+      }),
+    );
+    const summary = await writeAndParseSummary(records);
+    expect(summary).toMatchObject({
+      decisionCount: 3,
+      brainDecisionCount: 3,
+      fallbackCount: 1,
+      brainFallbackCount: 1,
+      averageDecisionLatencyMs: 90,
+    });
+  });
+});

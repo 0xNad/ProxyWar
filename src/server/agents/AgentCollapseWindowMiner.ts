@@ -519,6 +519,13 @@ function windowMetrics(records: AgentDecisionRecordLike[]): WindowMetrics {
   let neutralGrowthMisses = 0;
   let socialActions = 0;
 
+  // NOTE(action-batching): this loop counts per RECORD, which since the wire
+  // batch landed means per ACTION, and the collapse window itself is sized in
+  // records — both still literally true, but a heavily-batched agent packs
+  // more actions into fewer decision cycles, so windows span less wall-time.
+  // Deliberately deferred: revisit with cycle-grouped windows (see
+  // AgentHumanOpportunityMiner.decisionCycles) if collapse mining misreads
+  // batched matches.
   for (const record of records) {
     const actionKind = selectedActionKind(record);
     increment(actionCounts, actionKind ?? "unknown");

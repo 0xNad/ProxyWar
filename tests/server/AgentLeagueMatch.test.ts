@@ -57,6 +57,7 @@ import {
   createDefaultAgentSpecs,
 } from "../../src/server/agents/AgentLeagueMatch";
 import { AgentLocalGameMirror } from "../../src/server/agents/AgentLocalGameMirror";
+import { AgentObservationBuilder } from "../../src/server/agents/AgentObservationBuilder";
 import { runAgentStepLockedLeague } from "../../src/server/agents/AgentStepLockedLeague";
 import { LlmAgentBrain } from "../../src/server/agents/LlmAgentBrain";
 import {
@@ -883,6 +884,88 @@ describe("AgentLeagueMatchRunner", () => {
       expect(records[0].result.accepted).toBe(true);
       expect(records[1].result.accepted).toBe(false);
       expect(records[1].result.reason).toContain("same-turn build conflict");
+    } finally {
+      await game.end({ archive: false });
+    }
+  });
+
+  it("windows recentDecisions by decision cycle so one batch cannot evict the memory", async () => {
+    const log = makeLogger();
+    const ids = [
+      "attack:one",
+      "attack:two",
+      "attack:three",
+      "attack:four",
+      "attack:five",
+    ];
+    const legalActions: LegalAction[] = [
+      ...ids.map((id) => ({
+        id,
+        kind: "attack" as const,
+        label: id,
+        intent: null,
+        risk: { level: "low" as const, score: 0.1 },
+      })),
+      {
+        id: "hold",
+        kind: "hold",
+        label: "Hold",
+        intent: null,
+        risk: { level: "none", score: 0 },
+      },
+    ];
+    const participants = createAgentParticipants(
+      [{ username: "Memory Agent", profile: "opportunistic" }],
+      log,
+      {
+        brainFactory: () => ({
+          brainType: "planner-executor",
+          decide: () => ({
+            actionID: ids[0],
+            actionIDs: ids,
+            reason: "full five-action batch",
+          }),
+        }),
+      },
+    );
+    const recentWindows: number[] = [];
+    const realBuilder = new AgentObservationBuilder();
+    const game = new GameServer(
+      "AGENT_MEMWIN",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: [],
+      log,
+      legalActionBuilder: {
+        build: () => legalActions,
+      } as unknown as LegalActionBuilder,
+      observationBuilder: {
+        build: (input: Parameters<AgentObservationBuilder["build"]>[0]) => {
+          recentWindows.push(input.recentDecisions?.length ?? 0);
+          return realBuilder.build(input);
+        },
+        summarize: (observation: Parameters<AgentObservationBuilder["summarize"]>[0]) =>
+          realBuilder.summarize(observation),
+      } as unknown as AgentObservationBuilder,
+    });
+
+    try {
+      // Two 5-action batches = 10 records across 2 decision cycles.
+      await match.runDecisionTurn({ turnNumber: 1 });
+      await match.runDecisionTurn({ turnNumber: 2 });
+      recentWindows.length = 0;
+      await match.runDecisionTurn({ turnNumber: 3 });
+
+      // A record-count window (the old slice(-8)) would have fed back only 8
+      // of the 10 records, silently dropping part of cycle 1. The cycle
+      // window keeps both complete cycles.
+      expect(Math.max(...recentWindows)).toBe(10);
     } finally {
       await game.end({ archive: false });
     }
