@@ -61,7 +61,7 @@ test("non-game Node runnables do not reuse the oversized OpenFront game image", 
   );
 
   const compose = readFileSync("coworld-adapter/coworld_compose.yaml", "utf8");
-  assert.match(compose, /^  runnables:\n/m);
+  assert.match(compose, /^ {2}runnables:\n/m);
   assert.match(compose, /dockerfile: Dockerfile\.runnables/);
   assert.match(compose, /proxywar-runnables-local:latest/);
 
