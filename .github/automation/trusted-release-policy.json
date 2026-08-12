@@ -5,6 +5,8 @@
   "blockingLabels": ["do-not-merge", "security-hold", "release-hold"],
   "auditLabel": "softmax-release",
   "queueLabel": "coworld-release-queued",
+  "batchHoldLabel": "coworld-release-batch-hold",
+  "batchQuietMinutes": 15,
   "completedLabel": "coworld-release-complete",
   "failedLabel": "coworld-release-failed",
   "protectedPaths": [
