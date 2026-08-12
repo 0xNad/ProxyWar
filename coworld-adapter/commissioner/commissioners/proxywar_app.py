@@ -206,7 +206,7 @@ class ProxyWarCommissioner(RulesetStrategyCommissioner):
                 f"({[v for _, pool in COMPETITION_LADDER for v in pool]}) "
                 "are declared in this manifest"
             )
-        # The largest rung the real champion count fills -- schedule_entries' rolling_window
+        # The largest rung the real champion count fills -- schedule_entries' shuffled_window
         # seating then windows that field across multiple episodes if it exceeds the rung, so
         # every real champion still plays even at the smallest declared rung.
         fitting = [rung for rung in ladder if rung[0] <= champion_count]
