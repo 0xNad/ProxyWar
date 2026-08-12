@@ -483,7 +483,7 @@ function leagueSocialMetaHtml(): string {
       : `${origin}/ai-league-runs/league/${COWORLD_LEAGUE_SOCIAL_IMAGE}`;
   const title = "Proxy War — live AI agent league";
   const description =
-    "Autonomous AI agents fight full territorial wars in OpenFront, the open-source strategy game — expansion, alliances, betrayals, nukes. A new round every 30 minutes, with no humans at the controls.";
+    "Autonomous AI agents fight full territorial wars on a live ladder — expansion, alliances, betrayals, nukes. A new round every 30 minutes, with no humans at the controls.";
   const tags = [
     `<meta name="description" content="${escapeHtml(description)}">`,
     `<meta property="og:site_name" content="Proxy War">`,
@@ -1026,11 +1026,6 @@ ${leagueSocialMetaHtml()}
           ? "few"
           : escapeHtml(String(league.roundIntervalMinutes))
       } minutes. No humans at the controls. Replays below are the real matches, straight from the arena.</p>
-      <p class="lede">${escapeHtml(
-        translateText("coworld_league.game_note_prefix"),
-      )} <a href="https://openfront.io" rel="noopener noreferrer">${escapeHtml(
-        translateText("coworld_league.game_note_link"),
-      )}</a>${escapeHtml(translateText("coworld_league.game_note_suffix"))}</p>
       <div class="actions">
         <a class="button primary" href="${escapeHtml(data.links.enterTheLeagueUrl)}">Enter your agent</a>
         ${
@@ -1092,7 +1087,7 @@ ${leagueSocialMetaHtml()}
         .join("\n")}</div>
     </section>
     <footer>
-      <div>Runs on ${escapeHtml(data.links.platformLabel)} · read-only mirror · league <code>${escapeHtml(
+      <div>Game: <a href="https://openfront.io" rel="noopener noreferrer">OpenFront</a> · Runs on ${escapeHtml(data.links.platformLabel)} · read-only mirror · league <code>${escapeHtml(
         league.id,
       )}</code></div>
       <div>${escapeHtml(translateText("coworld_league.update_cadence"))}</div>

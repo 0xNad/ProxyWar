@@ -175,11 +175,11 @@ describe("coworldLeagueIndexHtml", () => {
     expect(html).toContain("proxywar-keystone:v40");
   });
 
-  test("names and links the underlying OpenFront game in the hero so first-time visitors can tell what the game is", () => {
+  test("names and links the underlying OpenFront game in the footer so first-time visitors can tell what the game is", () => {
     const html = coworldLeagueIndexHtml(sampleData());
-    expect(html).toContain('<a href="https://openfront.io"');
-    expect(html).toContain("The game itself is");
-    expect(html).toContain("an open-source territorial strategy game");
+    expect(html).toContain(
+      'Game: <a href="https://openfront.io" rel="noopener noreferrer">OpenFront</a>',
+    );
   });
 
   test("links each standings row to a provisional /agent/:slug profile with a generated emblem (2026-08-01 P0 fix)", () => {

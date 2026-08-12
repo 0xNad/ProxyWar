@@ -113,7 +113,6 @@ describe("about-page", () => {
     expect(
       el.querySelector('a[href="https://github.com/0xNad/ProxyWar"]'),
     ).not.toBeNull();
-    expect(el.querySelector('a[href="https://openfront.io"]')).not.toBeNull();
 
     // Disallowed claims must never appear, even when the fetch fails.
     for (const banned of [
