@@ -297,7 +297,8 @@ def test_live_25_champion_field_routes_to_sixteen_seats_and_covers_every_entrant
 
     scheduled = commissioner().schedule_episodes_for_round_start(round_start)
 
-    # 25 entrants at 16 seats: max(4, 25 - 16 + 1) = 10 rolling-window episodes.
+    # 25 entrants at 16 seats: max(4, 25 - 16 + 1) = 10 one-step window
+    # episodes, walked over the per-round shuffled entrant order.
     assert len(scheduled.episodes) == 10
     for episode in scheduled.episodes:
         assert episode.variant_id == "tournament-16p-pangaea"
@@ -1414,7 +1415,7 @@ def test_queued_undispatched_terminal_message_is_rejected(
 def test_live_25_champion_round_drains_all_fourteen_episodes_via_acknowledged_windows() -> (
     None
 ):
-    # 25 champions / 12 seats -> 14 episodes (rolling-window coverage),
+    # 25 champions / 12 seats -> 14 episodes (one-step window coverage),
     # max_in_flight=5 from the live config -- the exact live shape. The full
     # acknowledged drain to round_complete is what round 1323 (0.1.24) failed
     # to reach.

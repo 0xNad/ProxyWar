@@ -1,7 +1,9 @@
 schedule_interval_minutes: 30
 
 # A 25-entrant competition on the 16-seat rung (since 0.1.32) schedules ten
-# rolling-window jobs; on the 12-seat rung it was fourteen.
+# one-entrant-step window jobs (walked over the per-round shuffled entrant
+# order since 2026-08-12 -- see defaults.seating); on the 12-seat rung it was
+# fourteen.
 # Admission is acknowledgement-paced (one ScheduleEpisodes message per
 # episode, the next only after episodes_accepted), so this cap bounds steady
 # concurrency only -- it is not a burst size. The July player_never_started
@@ -46,8 +48,8 @@ defaults:
   # episodes while both ends of the list got only the single guaranteed
   # appearance (~7-14%). Measured live over 08-08..08-11 (rounds 1270-1365):
   # position 0 played 9% of episodes, positions 11-12 played 91-92%, and the
-  # tail-pinned house seat played 7.5-12%, decaying its EWMA from rank 1 to 10
-  # on seating exposure alone. shuffled_window redraws the entrant permutation
+  # tail-pinned house seat played 7.5-12%, its EWMA sliding from rank 1 to 10
+  # while exposure-starved. shuffled_window redraws the entrant permutation
   # every scheduling (wall-clock seeded, never reused on re-schedule), keeping
   # the same episode count and the every-entrant >=1 appearance guarantee while
   # equalizing expected coverage at windows*seats/entrants for every list
