@@ -632,6 +632,262 @@ describe("AgentLeagueMatchRunner", () => {
     }
   });
 
+  it("interleaves batched submissions layer round-robin across participants", async () => {
+    const log = makeLogger();
+    const ids = ["attack:one", "attack:two", "attack:three"];
+    const legalActions: LegalAction[] = [
+      ...ids.map((id) => ({
+        id,
+        kind: "attack" as const,
+        label: id,
+        intent: null,
+        risk: { level: "low" as const, score: 0.1 },
+      })),
+      {
+        id: "hold",
+        kind: "hold",
+        label: "Hold",
+        intent: null,
+        risk: { level: "none", score: 0 },
+      },
+    ];
+    const participants = createAgentParticipants(
+      [
+        { username: "Batch A", profile: "opportunistic" },
+        { username: "Batch B", profile: "aggressive" },
+      ],
+      log,
+      {
+        brainFactory: () => ({
+          brainType: "planner-executor",
+          decide: () => ({
+            actionID: ids[0],
+            actionIDs: ids,
+            reason: "full cascade",
+          }),
+        }),
+      },
+    );
+    const game = new GameServer(
+      "AGENT_RR",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: [],
+      log,
+      legalActionBuilder: {
+        build: () => legalActions,
+      } as unknown as LegalActionBuilder,
+    });
+
+    try {
+      const records = await match.runDecisionTurn({ turnNumber: 2 });
+
+      // A1,B1,A2,B2,A3,B3 — one action per participant per layer, fixed
+      // roster order within every layer, sequences stamped in true
+      // submission order.
+      expect(
+        records.map((record) => [
+          record.username,
+          record.decisionMetadata?.batchIndex,
+        ]),
+      ).toEqual([
+        ["Batch A", 0],
+        ["Batch B", 0],
+        ["Batch A", 1],
+        ["Batch B", 1],
+        ["Batch A", 2],
+        ["Batch B", 2],
+      ]);
+      expect(records.map((record) => record.sequence)).toEqual([
+        1, 2, 3, 4, 5, 6,
+      ]);
+      expect(
+        records.every((record) => record.decisionMetadata?.batchSize === 3),
+      ).toBe(true);
+    } finally {
+      await game.end({ archive: false });
+    }
+  });
+
+  it("stale-gates a mid-batch build whose tile was reserved after validation", async () => {
+    const log = makeLogger();
+    const legalActions: LegalAction[] = [
+      {
+        id: "build:City:100",
+        kind: "build",
+        label: "Build City at 100",
+        intent: null,
+        risk: { level: "low", score: 0.1 },
+        metadata: { role: "economic", unit: UnitType.City, buildTile: 100 },
+      },
+      {
+        id: "attack:cover",
+        kind: "attack",
+        label: "Covering attack",
+        intent: null,
+        risk: { level: "low", score: 0.1 },
+      },
+      {
+        id: "hold",
+        kind: "hold",
+        label: "Hold",
+        intent: null,
+        risk: { level: "none", score: 0 },
+      },
+    ];
+    // A's batch: attack first, THEN build tile 100. B (earlier in no seat —
+    // later roster) also builds tile 100 at layer 0. Timeline:
+    //   A layer-0: attack        (validates whole batch first — tile free)
+    //   B layer-0: build 100     (reserves tile 100)
+    //   A layer-1: build 100     -> STALE (reserved after A validated)
+    const decisionsByUsername: Record<
+      string,
+      { actionID: string; actionIDs?: string[] }
+    > = {
+      "Batch A": {
+        actionID: "attack:cover",
+        actionIDs: ["attack:cover", "build:City:100"],
+      },
+      "Scalar B": { actionID: "build:City:100" },
+    };
+    const participants = createAgentParticipants(
+      [
+        { username: "Batch A", profile: "opportunistic" },
+        { username: "Scalar B", profile: "aggressive" },
+      ],
+      log,
+      {
+        brainFactory: (spec) => ({
+          brainType: "planner-executor",
+          decide: () => ({
+            ...decisionsByUsername[spec.username],
+            reason: `${spec.username} pick`,
+          }),
+        }),
+      },
+    );
+    const game = new GameServer(
+      "AGENT_STALE",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: [],
+      log,
+      legalActionBuilder: {
+        build: () => legalActions,
+      } as unknown as LegalActionBuilder,
+    });
+
+    try {
+      const records = await match.runDecisionTurn({ turnNumber: 2 });
+
+      expect(
+        records.map((record) => [record.username, record.chosenActionID]),
+      ).toEqual([
+        ["Batch A", "attack:cover"],
+        ["Scalar B", "build:City:100"],
+        ["Batch A", "build:City:100"],
+      ]);
+      // B's scalar build was validated against a menu where tile 100 was
+      // still free (A's layer-0 attack reserves nothing) and submits fine.
+      expect(records[1].result.accepted).toBe(true);
+      // A's layer-1 build hits the staleness gate: honest accepted:false
+      // record naming the conflict, batch metadata intact, no vanishing.
+      expect(records[2].result.accepted).toBe(false);
+      expect(records[2].result.reason).toContain("same-turn build conflict");
+      expect(records[2].decisionMetadata).toMatchObject({
+        batchIndex: 1,
+        batchSize: 2,
+      });
+    } finally {
+      await game.end({ archive: false });
+    }
+  });
+
+  it("gates a self-batch double-build on the same tile", async () => {
+    const log = makeLogger();
+    const legalActions: LegalAction[] = [
+      {
+        id: "build:City:100",
+        kind: "build",
+        label: "Build City at 100",
+        intent: null,
+        risk: { level: "low", score: 0.1 },
+        metadata: { role: "economic", unit: UnitType.City, buildTile: 100 },
+      },
+      {
+        id: "build:Factory:100",
+        kind: "build",
+        label: "Build Factory at 100",
+        intent: null,
+        risk: { level: "low", score: 0.1 },
+        metadata: { role: "economic", unit: UnitType.Factory, buildTile: 100 },
+      },
+      {
+        id: "hold",
+        kind: "hold",
+        label: "Hold",
+        intent: null,
+        risk: { level: "none", score: 0 },
+      },
+    ];
+    const participants = createAgentParticipants(
+      [{ username: "Greedy Builder", profile: "opportunistic" }],
+      log,
+      {
+        brainFactory: () => ({
+          brainType: "planner-executor",
+          decide: () => ({
+            actionID: "build:City:100",
+            actionIDs: ["build:City:100", "build:Factory:100"],
+            reason: "stack the same tile",
+          }),
+        }),
+      },
+    );
+    const game = new GameServer(
+      "AGENT_SELF",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: [],
+      log,
+      legalActionBuilder: {
+        build: () => legalActions,
+      } as unknown as LegalActionBuilder,
+    });
+
+    try {
+      const records = await match.runDecisionTurn({ turnNumber: 2 });
+
+      // Before the round-robin rewrite the participant's own batch never saw
+      // its own reservations — both builds landed on tile 100. Now the
+      // second is stale-gated by the agent's OWN layer-0 reservation.
+      expect(records).toHaveLength(2);
+      expect(records[0].result.accepted).toBe(true);
+      expect(records[1].result.accepted).toBe(false);
+      expect(records[1].result.reason).toContain("same-turn build conflict");
+    } finally {
+      await game.end({ archive: false });
+    }
+  });
+
   it("caps a requested batch at the wire limit and stamps the dropped ids", async () => {
     const log = makeLogger();
     const ids = [
