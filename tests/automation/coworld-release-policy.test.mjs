@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -40,6 +41,29 @@ test("every release template requires the canonical replay-viewer rebuild hook",
       game: { replay_viewer: { bundle: `sha256:${"b".repeat(64)}` } },
     }),
   );
+});
+
+test("non-game Node runnables do not reuse the oversized OpenFront game image", () => {
+  const manifest = JSON.parse(
+    readFileSync(
+      "coworld-adapter/coworld/coworld_manifest_template.json",
+      "utf8",
+    ),
+  );
+  assert.equal(manifest.game.runnable.image, "{{GAME_IMAGE}}");
+  assert.deepEqual(
+    manifest.player.map((entry) => entry.image),
+    ["{{RUNNABLES_IMAGE}}"],
+  );
+  assert.deepEqual(
+    manifest.optimizer.map((entry) => entry.image),
+    ["{{RUNNABLES_IMAGE}}"],
+  );
+
+  const compose = readFileSync("coworld-adapter/coworld_compose.yaml", "utf8");
+  assert.match(compose, /^  runnables:\n/m);
+  assert.match(compose, /dockerfile: Dockerfile\.runnables/);
+  assert.match(compose, /proxywar-runnables-local:latest/);
 });
 
 test("source provenance supports idempotent retry detection", () => {
