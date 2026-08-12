@@ -13,6 +13,11 @@ const production = readFileSync(
 const ci = readFileSync(".github/workflows/ci.yml", "utf8");
 const queue = readFileSync(".github/scripts/coworld-queue.mjs", "utf8");
 const vite = readFileSync("vite.config.ts", "utf8");
+const gitignore = readFileSync(".gitignore", "utf8");
+const leagueSourceGuard = readFileSync(
+  "scripts/verify-league-source.mjs",
+  "utf8",
+);
 
 test("privileged admission executes only protected main metadata code", () => {
   assert.match(admission, /pull_request_target:/);
@@ -194,17 +199,19 @@ test("every main CI dependency install uses the bounded retry wrapper", () => {
   assert.doesNotMatch(ci, /- run: npm ci\s*$/m);
   assert.equal(
     ci.match(
-      /node \.trusted-ci-control\/\.github\/scripts\/npm-ci-with-retry\.mjs/g,
+      /node artifacts\/trusted-ci-control\/\.github\/scripts\/npm-ci-with-retry\.mjs/g,
     )?.length,
     7,
   );
   assert.match(ci, /ref: main/);
-  assert.match(ci, /path: \.trusted-ci-control/);
+  assert.match(ci, /path: artifacts\/trusted-ci-control/);
   assert.match(
     ci,
     /sparse-checkout: \.github\/scripts\/npm-ci-with-retry\.mjs/,
   );
   assert.match(ci, /persist-credentials: false/);
+  assert.match(gitignore, /^artifacts\/$/m);
+  assert.match(leagueSourceGuard, /"artifacts"/);
 });
 
 test("production retries failed exact-source CI without bypassing it", () => {
