@@ -64,6 +64,19 @@ test("non-game Node runnables do not reuse the oversized OpenFront game image", 
   assert.match(compose, /^  runnables:\n/m);
   assert.match(compose, /dockerfile: Dockerfile\.runnables/);
   assert.match(compose, /proxywar-runnables-local:latest/);
+
+  const dockerfile = readFileSync(
+    "coworld-adapter/Dockerfile.runnables",
+    "utf8",
+  );
+  assert.match(
+    dockerfile,
+    /^FROM --platform=\$TARGETPLATFORM node:24-bookworm-slim@sha256:[0-9a-f]{64}$/m,
+  );
+  assert.match(
+    dockerfile,
+    /COPY src\/starter-player\.mjs src\/coworld-url\.mjs src\/proxywar-optimizer-plan\.mjs \.\/src\//,
+  );
 });
 
 test("source provenance supports idempotent retry detection", () => {
