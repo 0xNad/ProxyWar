@@ -80,12 +80,21 @@ interface NukeTargetAnalysis {
   priority: number;
 }
 
+interface BuildSearchContext {
+  sortedOwnedTiles?: readonly number[];
+  borderTileSet?: ReadonlySet<number>;
+  borderTiles?: readonly number[];
+  hostileFrontTiles?: readonly number[];
+  incomingFrontTiles?: readonly number[];
+  nukeTargetTiles?: readonly number[];
+  landStructureSpawnByTarget: Map<number, number | false>;
+}
+
 const DEFENSE_POST_EFFECTIVE_RANGE = 30;
 const DEFENSE_POST_FRONTIER_SEARCH_RANGE = 75;
 const NEUTRAL_ISLAND_SHORE_SAMPLE_LIMIT = 48;
 const NEUTRAL_ISLAND_TRANSPORT_TARGET_LIMIT = 10;
 const NEUTRAL_ISLAND_TRANSPORT_SCAN_LIMIT = 80;
-
 export const BUILD_OPTION_CANDIDATES = [
   { unit: UnitType.DefensePost, role: "defensive" },
   { unit: UnitType.City, role: "economic" },
@@ -96,10 +105,9 @@ export const BUILD_OPTION_CANDIDATES = [
   { unit: UnitType.AtomBomb, role: "infrastructure" },
   { unit: UnitType.HydrogenBomb, role: "infrastructure" },
   { unit: UnitType.MIRV, role: "infrastructure" },
-] as const satisfies ReadonlyArray<{
-  unit: AgentBuildOption["unit"];
-  role: AgentBuildOption["role"];
-}>;
+] as const satisfies readonly Pick<AgentBuildOption, "unit" | "role">[];
+
+type BuildOptionUnit = (typeof BUILD_OPTION_CANDIDATES)[number]["unit"];
 
 // These types share PlayerImpl's landBasedStructureSpawn path after eligibility checks.
 export const SHARED_LAND_STRUCTURE_BUILD_TYPES = [
@@ -689,6 +697,32 @@ export class AgentObservationBuilder {
     };
   }
 
+  private buildSearchContext(): BuildSearchContext {
+    return { landStructureSpawnByTarget: new Map() };
+  }
+
+  private prepareOwnedBuildSearch(
+    gameState: Game,
+    player: Player,
+    context: BuildSearchContext,
+  ): BuildSearchContext {
+    if (context.sortedOwnedTiles !== undefined) {
+      return context;
+    }
+    const borderTileSet = player.borderTiles();
+    context.sortedOwnedTiles = Array.from(player.tiles()).sort(
+      buildSearchTileComparator(gameState, player.spawnTile()),
+    );
+    context.borderTileSet = borderTileSet;
+    context.borderTiles = Array.from(borderTileSet);
+    context.hostileFrontTiles = this.hostileFrontTiles(gameState, player);
+    context.incomingFrontTiles = this.incomingAttackFrontTiles(
+      gameState,
+      player,
+    );
+    return context;
+  }
+
   private buildOptions(gameState: Game, player: Player): AgentBuildOption[] {
     if (!player.isAlive()) {
       return [];
@@ -696,7 +730,7 @@ export class AgentObservationBuilder {
 
     const config = gameState.config();
     const options: AgentBuildOption[] = [];
-    const landStructureSpawnByTarget = new Map<number, number | false>();
+    let context: BuildSearchContext | undefined;
 
     for (const option of BUILD_OPTION_CANDIDATES) {
       if (config.isUnitDisabled(option.unit)) {
@@ -706,11 +740,12 @@ export class AgentObservationBuilder {
       if (player.gold() < cost) {
         continue;
       }
+      context ??= this.buildSearchContext();
       const target = this.findBuildTarget(
         gameState,
         player,
         option.unit,
-        landStructureSpawnByTarget,
+        context,
       );
       if (target === null) {
         continue;
@@ -734,26 +769,20 @@ export class AgentObservationBuilder {
   private findBuildTarget(
     gameState: Game,
     player: Player,
-    unit: AgentBuildOption["unit"],
-    landStructureSpawnByTarget: Map<number, number | false>,
+    unit: BuildOptionUnit,
+    context: BuildSearchContext,
   ): BuildTargetCandidate | null {
     let best: BuildTargetCandidate | null = null;
     let bestScore = Number.NEGATIVE_INFINITY;
-    // Candidate-independent inputs, hoisted: recomputing these per candidate
-    // (up to 400 of them) re-ran three full border×neighbor scans each time —
-    // the same per-iteration-copy class as the touchesOwnedTerritory hotspot,
-    // and it fires exactly when the agent is rich enough to afford builds on
-    // a large late-game border.
-    const borderTiles = Array.from(player.borderTiles());
-    const hostileFrontTiles = this.hostileFrontTiles(gameState, player);
-    const incomingFrontTiles = this.incomingAttackFrontTiles(gameState, player);
     const cache = SHARED_LAND_STRUCTURE_BUILD_TYPE_SET.has(unit)
-      ? landStructureSpawnByTarget
+      ? context.landStructureSpawnByTarget
       : undefined;
-    for (const tile of this.buildSearchTiles(gameState, player, unit).slice(
-      0,
-      buildCandidateLimit(unit),
-    )) {
+    for (const tile of this.buildSearchTiles(
+      gameState,
+      player,
+      unit,
+      context,
+    ).slice(0, buildCandidateLimit(unit))) {
       let buildTile = cache?.get(tile);
       const usedCachedSpawn = buildTile !== undefined;
       if (buildTile === undefined) {
@@ -767,9 +796,7 @@ export class AgentObservationBuilder {
           unit,
           tile,
           buildTile,
-          borderTiles,
-          hostileFrontTiles,
-          incomingFrontTiles,
+          context,
         );
         if (
           unit === UnitType.DefensePost &&
@@ -790,62 +817,49 @@ export class AgentObservationBuilder {
   private buildSearchTiles(
     gameState: Game,
     player: Player,
-    unit: AgentBuildOption["unit"],
-  ): number[] {
-    const tiles = Array.from(player.tiles());
-    const spawnTile = player.spawnTile();
-    let source: number[];
-    if (unit === UnitType.DefensePost) {
-      source = Array.from(player.borderTiles());
-    } else if (unit === UnitType.Port) {
-      source = tiles.filter((tile) => gameState.isShore(tile));
-    } else if (unit === UnitType.Warship) {
-      source = this.waterTilesNearPorts(gameState, player);
-    } else if (BuildableAttacks.has(unit)) {
-      return this.nukeTargetTiles(gameState, player);
-    } else {
-      source = tiles;
+    unit: BuildOptionUnit,
+    context: BuildSearchContext,
+  ): readonly number[] {
+    if (BuildableAttacks.has(unit)) {
+      context.nukeTargetTiles ??= this.nukeTargetTiles(gameState, player);
+      return context.nukeTargetTiles;
     }
-    return source.sort((a, b) => {
-      if (spawnTile === undefined) {
-        return a - b;
-      }
-      // Manhattan distance, not |Δref|: linear tile-ref arithmetic treats a
-      // tile one row down as ~a full map-width away, which row-biased the
-      // candidate pool feeding the buildCandidateLimit() truncation.
-      return (
-        gameState.manhattanDist(a, spawnTile) -
-          gameState.manhattanDist(b, spawnTile) || a - b
+    this.prepareOwnedBuildSearch(gameState, player, context);
+    const sortedOwnedTiles = context.sortedOwnedTiles!;
+    if (unit === UnitType.DefensePost) {
+      return sortedOwnedTiles.filter((tile) =>
+        context.borderTileSet!.has(tile),
       );
-    });
+    } else if (unit === UnitType.Port) {
+      return sortedOwnedTiles.filter((tile) => gameState.isShore(tile));
+    } else {
+      return sortedOwnedTiles;
+    }
   }
 
   private buildPlacementAnalysis(
     gameState: Game,
     player: Player,
-    unit: AgentBuildOption["unit"],
+    unit: BuildOptionUnit,
     targetTile: number,
     buildTile: number,
-    // Candidate-independent, computed once per findBuildTarget sweep and
-    // passed in — see the hoist comment there.
-    borderTiles: readonly number[],
-    hostileFrontTiles: readonly number[],
-    incomingFrontTiles: readonly number[],
+    context: BuildSearchContext,
   ): BuildPlacementAnalysis {
+    this.prepareOwnedBuildSearch(gameState, player, context);
     const borderDistance = nearestManhattanDistance(
       gameState,
       buildTile,
-      borderTiles,
+      context.borderTiles!,
     );
     const hostileBorderDistance = nearestManhattanDistanceOrNull(
       gameState,
       buildTile,
-      hostileFrontTiles,
+      context.hostileFrontTiles!,
     );
     const incomingFrontDistance = nearestManhattanDistanceOrNull(
       gameState,
       buildTile,
-      incomingFrontTiles,
+      context.incomingFrontTiles!,
     );
     const nearbyIncomingAttack =
       incomingFrontDistance !== null &&
@@ -1215,21 +1229,6 @@ export class AgentObservationBuilder {
         return true;
       })
       .slice(0, 10);
-  }
-
-  private waterTilesNearPorts(gameState: Game, player: Player): number[] {
-    const result: number[] = [];
-    for (const port of player.units(UnitType.Port)) {
-      for (const neighbor of gameState.neighbors(port.tile())) {
-        if (gameState.isWater(neighbor)) {
-          result.push(neighbor);
-        }
-      }
-      if (result.length >= 12) {
-        break;
-      }
-    }
-    return result;
   }
 
   private nukeTargetTiles(gameState: Game, player: Player): number[] {
@@ -1874,7 +1873,21 @@ function coordinationQuickChatOptions(
   });
 }
 
-function buildCandidateLimit(unit: AgentBuildOption["unit"]): number {
+function buildSearchTileComparator(
+  gameState: Game,
+  spawnTile: number | undefined,
+): (a: number, b: number) => number {
+  if (spawnTile === undefined) {
+    return (a, b) => a - b;
+  }
+  // Manhattan distance, not |Δref|: linear tile-ref arithmetic treats a tile
+  // one row down as ~a full map-width away, which row-biased candidate pools.
+  return (a, b) =>
+    gameState.manhattanDist(a, spawnTile) -
+      gameState.manhattanDist(b, spawnTile) || a - b;
+}
+
+export function buildCandidateLimit(unit: UnitType): number {
   switch (unit) {
     case UnitType.DefensePost:
       return 400;
