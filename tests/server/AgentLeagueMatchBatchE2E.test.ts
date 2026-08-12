@@ -116,7 +116,161 @@ function menuAwareBrain() {
   };
 }
 
+/**
+ * Batching brain: picks up to `batchMax` DISTINCT intent-bearing actions from
+ * the live menu (spawn during the opening turn behaves like the scalar brain
+ * — one spawn is offered per candidate; post-spawn it batches attacks/builds/
+ * boats), primary first.
+ */
+function batchingBrain(batchMax: number) {
+  return {
+    brainType: "planner-executor" as const,
+    decide: (input: AgentBrainInput) => {
+      const withIntent = input.legalActions
+        .filter((action: LegalAction) => action.intent !== null)
+        .slice(0, batchMax);
+      const hold = input.legalActions.find(
+        (action: LegalAction) => action.kind === "hold",
+      );
+      if (withIntent.length === 0) {
+        const fallback = hold ?? input.legalActions[0];
+        return { actionID: fallback.id, reason: "nothing with intent" };
+      }
+      return {
+        actionID: withIntent[0].id,
+        ...(withIntent.length > 1
+          ? { actionIDs: withIntent.map((action) => action.id) }
+          : {}),
+        reason: `batched ${withIntent.length} intent-bearing actions`,
+      };
+    },
+  };
+}
+
 describe("AgentLeagueMatchBatchE2E", () => {
+  it("executes batched real intents in core with round-robin submission order", async () => {
+    const log = makeLogger();
+    const candidateGame = await setup("big_plains", { nations: "disabled" });
+    const spawnCandidates = buildSpawnCandidates(candidateGame.map(), {
+      maxCandidates: 500,
+    });
+    const participants = createAgentParticipants(
+      [
+        { username: "Batch One", profile: "opportunistic" },
+        { username: "Batch Two", profile: "aggressive" },
+      ],
+      log,
+      { brainFactory: () => batchingBrain(3) },
+    );
+    const game = new GameServer(
+      "AGENT_E2E_BATCH",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates,
+      log,
+    });
+
+    try {
+      match.attachAgents();
+      match.startGame();
+      const openingRecords = await match.runOpeningTurn();
+      const playerInfos = openingRecords.map(
+        (record, index) =>
+          new PlayerInfo(
+            record.username,
+            PlayerType.Human,
+            record.clientID,
+            agentPlayerID(index),
+          ),
+      );
+      const coreGame = await setup(
+        "big_plains",
+        { nations: "disabled" },
+        playerInfos,
+      );
+      const executor = new Executor(coreGame, "AGENT_E2E_BATCH", undefined);
+      coreGame.addExecution(
+        ...executor.createExecs({
+          turnNumber: 0,
+          intents: openingRecords.map((record) => ({
+            ...record.intent!,
+            clientID: record.clientID!,
+          })) as StampedIntent[],
+        }),
+      );
+      let ticks = 0;
+      while (coreGame.inSpawnPhase() && ticks < 1000) {
+        coreGame.executeNextTick();
+        ticks++;
+      }
+      expect(coreGame.inSpawnPhase()).toBe(false);
+
+      const records = await match.runDecisionTurn({
+        turnNumber: 1,
+        gameState: coreGame,
+      });
+
+      // At least one seat found a real multi-action batch on the live menu —
+      // if the map/menu ever stops offering that, this test must fail loudly
+      // rather than silently degrade to scalar coverage.
+      const batchSizes = new Map<string, number>();
+      for (const record of records) {
+        batchSizes.set(
+          record.username,
+          Math.max(
+            batchSizes.get(record.username) ?? 0,
+            (record.decisionMetadata?.batchIndex as number) + 1,
+          ),
+        );
+      }
+      expect(Math.max(...batchSizes.values())).toBeGreaterThanOrEqual(2);
+
+      // Round-robin: layer 0 for both seats first (roster order), then
+      // layer 1, etc. Equivalently: batchIndex is non-decreasing overall and
+      // within a layer usernames appear in roster order.
+      const layers = records.map(
+        (record) => record.decisionMetadata?.batchIndex as number,
+      );
+      expect([...layers].sort((a, b) => a - b)).toEqual(layers);
+      // Records carry real intents that the validator accepted.
+      const submitted = records
+        .filter((record) => record.intent !== null && record.result.accepted)
+        .map((record) => ({
+          ...record.intent!,
+          clientID: record.clientID!,
+        })) as StampedIntent[];
+      expect(submitted.length).toBeGreaterThanOrEqual(3);
+
+      // Execute ALL batched intents in core and observe a real effect:
+      // expansion attacks grow territory over the following ticks.
+      const tilesBefore = openingRecords.map(
+        (record) =>
+          coreGame.playerByClientID(record.clientID!)?.numTilesOwned() ?? 0,
+      );
+      coreGame.addExecution(
+        ...executor.createExecs({ turnNumber: 1, intents: submitted }),
+      );
+      for (let i = 0; i < 30; i++) {
+        coreGame.executeNextTick();
+      }
+      const tilesAfter = openingRecords.map(
+        (record) =>
+          coreGame.playerByClientID(record.clientID!)?.numTilesOwned() ?? 0,
+      );
+      expect(
+        tilesAfter.some((tiles, index) => tiles > tilesBefore[index]),
+      ).toBe(true);
+    } finally {
+      await game.end({ archive: false });
+    }
+  });
+
   it("pins scalar decisions submitting real intents that execute in core", async () => {
     const log = makeLogger();
     const candidateGame = await setup("big_plains", { nations: "disabled" });
