@@ -4,9 +4,14 @@ import path from "node:path";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createGunzip, gunzipSync, gzipSync } from "node:zlib";
-import { isSafeCoworldEpisodeRequestId } from "./CoworldLeagueMirrorCore";
-import { withFileMutex } from "./FileMutex";
+import { gameRecordFileIsRenderable } from "./AgentSpectatorReplay";
+import {
+  isSafeCoworldEpisodeRequestId,
+  parseHostedReplayPayload,
+  type ParsedHostedReplay,
+} from "./CoworldLeagueMirrorCore";
 import type { CoworldLeagueEpisodeRow } from "./CoworldLeagueSiteWriter";
+import { withFileMutex } from "./FileMutex";
 
 const managedRunPattern = /^league-coworld-[A-Za-z0-9-]+$/;
 const managedReplayPattern = /^ereq_[A-Za-z0-9_-]+\.replay$/;
@@ -197,6 +202,7 @@ const MAX_ARCHIVED_REPLAY_SUMMARY_BYTES = 1024 * 1024; // compact JSON, generous
 // caught by the existing try/catch below exactly like any other corrupt
 // archive, and returns the same honest `null`.
 const MAX_ARCHIVED_REPLAY_SUMMARY_DECOMPRESSED_BYTES = 4 * 1024 * 1024;
+const MAX_RETAINED_REPLAY_BYTES = 64 * 1024 * 1024;
 
 function archivedReplaySummaryPath(
   summaryArchiveDir: string,
@@ -242,6 +248,68 @@ export async function resolveArchivedPublicRunKey(
   summaryArchiveDir: string,
   episodeRequestId: string,
 ): Promise<string | null> {
+  return (
+    (
+      await readArchivedCoworldReplaySummary(
+        summaryArchiveDir,
+        episodeRequestId,
+      )
+    )?.publicRunKey ?? null
+  );
+}
+
+/**
+ * Bounded reader for the indefinitely retained compact replay summary.
+ *
+ * The filename alone is not evidence that the archive belongs to the requested
+ * episode, so the embedded `episodeRequestId` must match exactly. The retained
+ * replay projection is then passed through the same hosted-replay parser used
+ * by the live mirror; this keeps run-id validation and result projection on one
+ * canonical path. Any missing, oversized, corrupt, mismatched, or unsafe input
+ * resolves to `null` and never escapes as a partially trusted replay row.
+ */
+export interface ArchivedCoworldReplaySummary {
+  readonly publicRunKey: string;
+  readonly replay: ParsedHostedReplay;
+}
+
+/**
+ * Bounded exact lookup for a replay that has left the live episode window but
+ * has not yet become a pruning candidate (and therefore has no compact archive
+ * yet). The mirror itself names this file from the validated episode request
+ * id; its payload still has to pass the canonical hosted-replay parser.
+ */
+export async function readRetainedCoworldReplay(
+  cacheDir: string,
+  episodeRequestId: string,
+): Promise<ArchivedCoworldReplaySummary | null> {
+  if (!isSafeCoworldEpisodeRequestId(episodeRequestId)) return null;
+  const replayPath = coworldLeagueReplayCachePath(cacheDir, episodeRequestId);
+  try {
+    const stat = await fs.lstat(replayPath);
+    if (
+      !stat.isFile() ||
+      stat.isSymbolicLink() ||
+      stat.size > MAX_RETAINED_REPLAY_BYTES
+    ) {
+      return null;
+    }
+    const parsed: unknown = JSON.parse(await fs.readFile(replayPath, "utf8"));
+    const replay = parseHostedReplayPayload(parsed);
+    if (replay === null) return null;
+    const publicRunKey = `league-${replay.runID}`;
+    return managedRunPattern.test(publicRunKey)
+      ? { publicRunKey, replay }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function readArchivedCoworldReplaySummary(
+  summaryArchiveDir: string,
+  episodeRequestId: string,
+): Promise<ArchivedCoworldReplaySummary | null> {
   const archivePath = archivedReplaySummaryPath(
     summaryArchiveDir,
     episodeRequestId,
@@ -266,17 +334,13 @@ export async function resolveArchivedPublicRunKey(
   } catch {
     return null;
   }
-  if (
-    typeof parsed !== "object" ||
-    parsed === null ||
-    Array.isArray(parsed) ||
-    !("runID" in parsed) ||
-    typeof parsed.runID !== "string"
-  ) {
+  if (!isJsonObject(parsed) || parsed.episodeRequestId !== episodeRequestId) {
     return null;
   }
-  const publicRunKey = `league-${parsed.runID}`;
-  return managedRunPattern.test(publicRunKey) ? publicRunKey : null;
+  const replay = parseHostedReplayPayload(parsed);
+  if (replay === null) return null;
+  const publicRunKey = `league-${replay.runID}`;
+  return managedRunPattern.test(publicRunKey) ? { publicRunKey, replay } : null;
 }
 
 /**
@@ -289,11 +353,10 @@ export async function resolveArchivedPublicRunKey(
  * `match-summary.json`/`game-record.json`/`spectator-telemetry.json` are
  * (`archivePlans` above) — reconstructing it would mean REGENERATING
  * spectator artifacts, not restoring them, which this fix does not do.
- * `fullRenderHref` is populated ONLY when the exact
- * `<publicRunKey>.game-record.json.gz` archive exists — the one file
+ * `fullRenderHref` is populated ONLY when the exact active game record or its
+ * `<publicRunKey>.game-record.json.gz` archive exists — the files
  * `/ai-league-replay/:runID`'s own renderability gate actually needs (see
- * `restoreArchivedGameRecord` below) — never a link the server can't
- * back.
+ * `restoreArchivedGameRecord` below) — never a link the server can't back.
  */
 export interface CoworldLeagueArchivedReplayHrefs {
   readonly watchHref: null;
@@ -303,27 +366,37 @@ export interface CoworldLeagueArchivedReplayHrefs {
 export async function resolveArchivedEpisodeReplayHrefs(
   summaryArchiveDir: string,
   episodeRequestId: string,
+  activeRunsRootDir?: string,
 ): Promise<CoworldLeagueArchivedReplayHrefs | null> {
-  const publicRunKey = await resolveArchivedPublicRunKey(
+  const archivedSummary = await readArchivedCoworldReplaySummary(
     summaryArchiveDir,
     episodeRequestId,
   );
-  if (publicRunKey === null) return null;
+  if (archivedSummary === null) return null;
+  const { publicRunKey } = archivedSummary;
   const gameRecordArchivePath = archivedGameRecordArchivePath(
     summaryArchiveDir,
     publicRunKey,
   );
-  let hasGameRecordArchive = false;
+  let hasGameRecord = false;
   if (gameRecordArchivePath !== null) {
     try {
-      hasGameRecordArchive = (await fs.lstat(gameRecordArchivePath)).isFile();
+      hasGameRecord = (await fs.lstat(gameRecordArchivePath)).isFile();
     } catch {
-      hasGameRecordArchive = false;
+      hasGameRecord = false;
     }
+  }
+  // A summary is archived before the heavier run bundle is pruned. During
+  // that interval the byte-faithful game record is still served directly from
+  // the active run directory, so it is equally valid evidence for the link.
+  if (!hasGameRecord && activeRunsRootDir !== undefined) {
+    hasGameRecord = await gameRecordFileIsRenderable(
+      path.join(activeRunsRootDir, publicRunKey, "game-record.json"),
+    );
   }
   return {
     watchHref: null,
-    fullRenderHref: hasGameRecordArchive
+    fullRenderHref: hasGameRecord
       ? `/ai-league-replay/${encodeURIComponent(publicRunKey)}`
       : null,
   };
@@ -432,10 +505,12 @@ export async function readCoworldLeagueRetentionPinManifest(
   pinManifestPath: string,
 ): Promise<CoworldLeagueRetentionPinManifest> {
   try {
-    const raw: unknown = JSON.parse(
-      await fs.readFile(pinManifestPath, "utf8"),
-    );
-    if (isJsonObject(raw) && raw.schemaVersion === 1 && Array.isArray(raw.pins)) {
+    const raw: unknown = JSON.parse(await fs.readFile(pinManifestPath, "utf8"));
+    if (
+      isJsonObject(raw) &&
+      raw.schemaVersion === 1 &&
+      Array.isArray(raw.pins)
+    ) {
       // Full validation (safe ids, no cross-pin duplicates, exact keys) —
       // matches writePinManifest's own "fail closed" discipline: a manifest
       // this reader can't validate is a loud failure, not a silent partial
@@ -480,7 +555,12 @@ export async function writeCoworldLeagueRetentionPinManifest(
 }
 
 type PinOwnerOperation =
-  | { type: "add"; episodeRequestId: string; publicRunKey: string; ownerTag: string }
+  | {
+      type: "add";
+      episodeRequestId: string;
+      publicRunKey: string;
+      ownerTag: string;
+    }
   | { type: "remove"; episodeRequestId: string; ownerTag: string };
 
 /** Pure: applies ONE add/remove operation to an in-memory pins array. No I/O — the caller owns locking/read/write around a whole batch. */
@@ -532,7 +612,10 @@ function applyPinOwnerOperation(
   if (remainingOwners.length === 0) {
     nextPins.splice(existingIndex, 1);
   } else {
-    nextPins[existingIndex] = { ...existing, reason: remainingOwners.join(";") };
+    nextPins[existingIndex] = {
+      ...existing,
+      reason: remainingOwners.join(";"),
+    };
   }
   return { pins: nextPins, changed: true };
 }
@@ -557,9 +640,8 @@ export async function applyRetentionPinOwnerBatch(
 ): Promise<boolean> {
   if (operations.length === 0) return false;
   return withFileMutex(pinManifestPath, async () => {
-    const manifest = await readCoworldLeagueRetentionPinManifest(
-      pinManifestPath,
-    );
+    const manifest =
+      await readCoworldLeagueRetentionPinManifest(pinManifestPath);
     let pins = manifest.pins;
     let changed = false;
     for (const operation of operations) {

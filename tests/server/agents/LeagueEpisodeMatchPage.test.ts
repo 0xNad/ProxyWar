@@ -1,9 +1,10 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { gzipSync } from "node:zlib";
 import { afterEach, describe, expect, test } from "vitest";
-import { AGENT_MATCH_RECAP_SCHEMA_VERSION } from "../../../src/server/agents/AgentMatchRecap";
 import { DECISIVE_MOMENTS_SCHEMA_VERSION } from "../../../src/server/agents/AgentDecisiveMoments";
+import { AGENT_MATCH_RECAP_SCHEMA_VERSION } from "../../../src/server/agents/AgentMatchRecap";
 import type { CoworldLeagueEpisodeRow } from "../../../src/server/agents/CoworldLeagueSiteWriter";
 import {
   buildLeagueEpisodeMatchPageModel,
@@ -13,11 +14,12 @@ import {
   leagueEpisodeRunKey,
   leagueEpisodeSpoilerSafeDescription,
   leagueEpisodeSpoilerSafeTitle,
-  parseMatchRecapArtifact,
   parseDecisiveMomentsArtifact,
+  parseMatchRecapArtifact,
   readCoworldLeagueEpisodesFromDataJson,
-  readLeagueEpisodeRecap,
   readLeagueEpisodeDecisiveMoments,
+  readLeagueEpisodeRecap,
+  resolveLeagueEpisodeRow,
 } from "../../../src/server/agents/LeagueEpisodeMatchPage";
 import {
   FIXTURE_AGENTS,
@@ -355,6 +357,277 @@ describe("readCoworldLeagueEpisodesFromDataJson / findLeagueEpisodeByRequestId",
     expect(
       findLeagueEpisodeByRequestId([episode()], "ereq_totally-unknown"),
     ).toBeNull();
+  });
+});
+
+describe("resolveLeagueEpisodeRow", () => {
+  let scratch: string;
+
+  afterEach(async () => {
+    if (scratch) await rm(scratch, { recursive: true, force: true });
+  });
+
+  async function writeArchivedSummary(options: {
+    episodeRequestId: string;
+    embeddedEpisodeRequestId?: string;
+    runID?: string;
+    withGameRecord?: boolean;
+    withActiveGameRecord?: boolean;
+  }): Promise<{
+    dataJsonPath: string;
+    summaryArchiveDir: string;
+    runKey: string;
+  }> {
+    scratch = await mkdtemp(path.join(tmpdir(), "league-episode-resolver-"));
+    const dataJsonPath = path.join(scratch, "data.json");
+    const summaryArchiveDir = path.join(scratch, "summaries");
+    await writeFile(dataJsonPath, JSON.stringify({ episodes: [] }));
+    await mkdir(summaryArchiveDir, { recursive: true });
+    const runID = options.runID ?? "coworld-archived-resolver-0001";
+    const runKey = `league-${runID}`;
+    await writeFile(
+      path.join(
+        summaryArchiveDir,
+        `${options.episodeRequestId}.replay-summary.json.gz`,
+      ),
+      gzipSync(
+        JSON.stringify({
+          episodeRequestId:
+            options.embeddedEpisodeRequestId ?? options.episodeRequestId,
+          runID,
+          config: { map: "World", map_size: "Compact" },
+          results: {
+            turn_count: 1234,
+            decision_count: 88,
+            degraded_count: 2,
+            winner_slot: 1,
+            players: [
+              {
+                slot: 0,
+                name: "Alpha",
+                tiles_owned: 25,
+                is_alive: false,
+              },
+              {
+                slot: 1,
+                name: "Beta",
+                tiles_owned: 250,
+                is_alive: true,
+              },
+            ],
+          },
+        }),
+      ),
+    );
+    if (options.withGameRecord === true) {
+      await writeFile(
+        path.join(summaryArchiveDir, `${runKey}.game-record.json.gz`),
+        gzipSync(JSON.stringify({ runID })),
+      );
+    }
+    if (options.withActiveGameRecord === true) {
+      await mkdir(path.join(scratch, "runs", runKey), { recursive: true });
+      await writeFile(
+        path.join(scratch, "runs", runKey, "game-record.json"),
+        JSON.stringify({ runID, turns: [] }),
+      );
+    }
+    return { dataJsonPath, summaryArchiveDir, runKey };
+  }
+
+  test("reconstructs a rotated episode from compact evidence with truthful live-only nulls", async () => {
+    const episodeRequestId = "ereq_archived_resolver_1";
+    const { dataJsonPath, summaryArchiveDir, runKey } =
+      await writeArchivedSummary({
+        episodeRequestId,
+        withGameRecord: true,
+      });
+
+    const row = await resolveLeagueEpisodeRow(
+      dataJsonPath,
+      summaryArchiveDir,
+      episodeRequestId,
+    );
+
+    expect(row).toMatchObject({
+      episodeRequestId,
+      roundNumber: null,
+      completedAt: null,
+      map: "World",
+      mapSize: "Compact",
+      turnCount: 1234,
+      decisionCount: 88,
+      degradedCount: 2,
+      winnerName: "Beta",
+      watchHref: null,
+      fullRenderHref: `/ai-league-replay/${runKey}`,
+    });
+    expect(
+      row?.players.map(({ name, isWinner }) => ({ name, isWinner })),
+    ).toEqual([
+      { name: "Beta", isWinner: true },
+      { name: "Alpha", isWinner: false },
+    ]);
+  });
+
+  test("keeps fullRenderHref null when the archived game record is absent", async () => {
+    const episodeRequestId = "ereq_archived_resolver_2";
+    const { dataJsonPath, summaryArchiveDir } = await writeArchivedSummary({
+      episodeRequestId,
+    });
+    await expect(
+      resolveLeagueEpisodeRow(
+        dataJsonPath,
+        summaryArchiveDir,
+        episodeRequestId,
+      ),
+    ).resolves.toMatchObject({ watchHref: null, fullRenderHref: null });
+  });
+
+  test("keeps the full replay link while the game record remains in the active run directory", async () => {
+    const episodeRequestId = "ereq_archived_resolver_active";
+    const { dataJsonPath, summaryArchiveDir, runKey } =
+      await writeArchivedSummary({
+        episodeRequestId,
+        withActiveGameRecord: true,
+      });
+    await expect(
+      resolveLeagueEpisodeRow(
+        dataJsonPath,
+        summaryArchiveDir,
+        episodeRequestId,
+        path.join(scratch, "runs"),
+      ),
+    ).resolves.toMatchObject({
+      watchHref: null,
+      fullRenderHref: `/ai-league-replay/${runKey}`,
+    });
+  });
+
+  test("does not link a compacted active game-record stub", async () => {
+    const episodeRequestId = "ereq_archived_resolver_compacted";
+    const { dataJsonPath, summaryArchiveDir, runKey } =
+      await writeArchivedSummary({
+        episodeRequestId,
+        withActiveGameRecord: true,
+      });
+    await writeFile(
+      path.join(scratch, "runs", runKey, "game-record.json"),
+      JSON.stringify({ compacted: true, turnCount: 10 }),
+    );
+    await expect(
+      resolveLeagueEpisodeRow(
+        dataJsonPath,
+        summaryArchiveDir,
+        episodeRequestId,
+        path.join(scratch, "runs"),
+      ),
+    ).resolves.toMatchObject({ fullRenderHref: null });
+  });
+
+  test("does not link a malformed active game record", async () => {
+    const episodeRequestId = "ereq_archived_resolver_malformed";
+    const { dataJsonPath, summaryArchiveDir, runKey } =
+      await writeArchivedSummary({
+        episodeRequestId,
+        withActiveGameRecord: true,
+      });
+    await writeFile(
+      path.join(scratch, "runs", runKey, "game-record.json"),
+      "not-json",
+    );
+    await expect(
+      resolveLeagueEpisodeRow(
+        dataJsonPath,
+        summaryArchiveDir,
+        episodeRequestId,
+        path.join(scratch, "runs"),
+      ),
+    ).resolves.toMatchObject({ fullRenderHref: null });
+  });
+
+  test("resolves a rotated episode from the retained raw cache before a compact archive exists", async () => {
+    scratch = await mkdtemp(path.join(tmpdir(), "league-episode-raw-cache-"));
+    const episodeRequestId = "ereq_retained_raw_episode";
+    const runID = "coworld-retained-raw-episode-0001";
+    const runKey = `league-${runID}`;
+    const dataJsonPath = path.join(scratch, "data.json");
+    const summaryArchiveDir = path.join(scratch, "summaries");
+    const replayCacheDir = path.join(scratch, "replays");
+    const runsRootDir = path.join(scratch, "runs");
+    await mkdir(path.join(runsRootDir, runKey), { recursive: true });
+    await mkdir(replayCacheDir, { recursive: true });
+    await writeFile(dataJsonPath, JSON.stringify({ episodes: [] }));
+    await writeFile(
+      path.join(replayCacheDir, `${episodeRequestId}.replay`),
+      JSON.stringify({
+        runID,
+        config: { map: "Asia", map_size: "Normal" },
+        results: {
+          winner_slot: 0,
+          players: [{ slot: 0, name: "Raw Cache Winner", tiles_owned: 9 }],
+        },
+      }),
+    );
+    await writeFile(
+      path.join(runsRootDir, runKey, "game-record.json"),
+      JSON.stringify({ turns: [] }),
+    );
+    await expect(
+      resolveLeagueEpisodeRow(
+        dataJsonPath,
+        summaryArchiveDir,
+        episodeRequestId,
+        runsRootDir,
+        replayCacheDir,
+      ),
+    ).resolves.toMatchObject({
+      episodeRequestId,
+      map: "Asia",
+      winnerName: "Raw Cache Winner",
+      fullRenderHref: `/ai-league-replay/${runKey}`,
+    });
+  });
+
+  test("returns the live row unchanged before consulting a conflicting archive", async () => {
+    const episodeRequestId = "ereq_live_precedence";
+    const { dataJsonPath, summaryArchiveDir } = await writeArchivedSummary({
+      episodeRequestId,
+      embeddedEpisodeRequestId: "ereq_wrong_archive",
+      withGameRecord: true,
+    });
+    const live = episode({
+      episodeRequestId,
+      roundNumber: 99,
+      completedAt: "2026-08-13T16:00:00.000Z",
+      map: "Pangaea",
+    });
+    await writeFile(dataJsonPath, JSON.stringify({ episodes: [live] }));
+    await expect(
+      resolveLeagueEpisodeRow(
+        dataJsonPath,
+        summaryArchiveDir,
+        episodeRequestId,
+      ),
+    ).resolves.toEqual(live);
+  });
+
+  test("returns null for mismatched archived evidence and unsafe request ids", async () => {
+    const episodeRequestId = "ereq_expected_archive";
+    const { dataJsonPath, summaryArchiveDir } = await writeArchivedSummary({
+      episodeRequestId,
+      embeddedEpisodeRequestId: "ereq_other_archive",
+    });
+    await expect(
+      resolveLeagueEpisodeRow(
+        dataJsonPath,
+        summaryArchiveDir,
+        episodeRequestId,
+      ),
+    ).resolves.toBeNull();
+    await expect(
+      resolveLeagueEpisodeRow(dataJsonPath, summaryArchiveDir, "../unsafe"),
+    ).resolves.toBeNull();
   });
 });
 
