@@ -946,6 +946,12 @@ describe("AgentLeagueMatchRunner", () => {
         build: () => legalActions,
       } as unknown as LegalActionBuilder,
       observationBuilder: {
+        // Passthrough batch scope (main's per-tick observation cache); the
+        // spy only needs to see what recentDecisions each build receives.
+        withObservationBatch: <T,>(
+          _gameState: unknown,
+          callback: () => T,
+        ): T => callback(),
         build: (input: Parameters<AgentObservationBuilder["build"]>[0]) => {
           recentWindows.push(input.recentDecisions?.length ?? 0);
           return realBuilder.build(input);
