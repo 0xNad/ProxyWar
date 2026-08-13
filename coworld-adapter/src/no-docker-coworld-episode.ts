@@ -13,6 +13,10 @@ import {
   injectCoworldSplash,
   type CoworldAppShellRoute,
 } from "./coworld-appshell.ts";
+import {
+  decisionRequestEnvelope,
+  normalizeDecisionResponse,
+} from "./coworld-decision-wire.ts";
 import { episodeIndexFromConfig } from "./coworld-episode-index.ts";
 import {
   coworldResults,
@@ -84,6 +88,10 @@ type LegalActionView = {
 type PendingDecision = {
   resolve: (decision: {
     actionID: string;
+    /** Optional wire batch (selectedLegalActionIds), normalized + capped. */
+    actionIDs?: string[];
+    /** Optional diplomacy-slot selection (selectedDealActionId). */
+    dealActionID?: string;
     reason: string;
     metadata: Record<string, unknown>;
   }) => void;
@@ -291,6 +299,8 @@ class CoworldProtocolServer {
     request: unknown,
   ): Promise<{
     actionID: string;
+    actionIDs?: string[];
+    dealActionID?: string;
     reason: string;
     metadata: Record<string, unknown>;
   }> {
@@ -320,12 +330,11 @@ class CoworldProtocolServer {
         legalActions,
       });
       websocket.send(
-        JSON.stringify({
-          type: "decision_request",
-          requestID,
-          slot,
-          request,
-        }),
+        // Envelope carries the batch capability advertisement
+        // (protocol.maxActionsPerDecision) as a sibling of requestID/slot;
+        // the inner request payload is untouched. Players ignore unknown
+        // envelope keys, so pre-batching policies are unaffected.
+        JSON.stringify(decisionRequestEnvelope({ requestID, slot, request })),
       );
     });
   }
@@ -424,30 +433,15 @@ class CoworldProtocolServer {
     }
     clearTimeout(pending.timeout);
     this.pending.delete(requestID);
-    const selectedLegalActionId = String(message.selectedLegalActionId ?? "");
-    // Optional second selection (the diplomacy slot). Forwarded only when the
-    // player actually sent a non-empty string, so a player that never sends
-    // it produces the exact same AgentDecision as before. The league runner's
-    // AgentDecisionValidator is the sole authority on whether it is a legal
-    // deal action id; a game action id here is rejected there, never applied.
-    // Length-capped like `reason` above: an inbound frame may be up to the
-    // socket's maxPayload, and this value is stamped into decisions.jsonl on
-    // rejection — unbounded per-decision text is the long-episode memory
-    // class the 0.1.19 work closed. A real deal action id is ~60 chars.
-    const selectedDealActionId =
-      typeof message.selectedDealActionId === "string" &&
-      message.selectedDealActionId.trim().length > 0
-        ? message.selectedDealActionId.trim().slice(0, 200)
-        : null;
+    // Decision fields (scalar primary, optional selectedLegalActionIds
+    // batch, optional deal slot, reason) are parsed and length-bounded by
+    // the shared wire module — see coworld-decision-wire.ts for the
+    // normalization contract and why menu membership is deliberately NOT
+    // checked here. Metadata assembly stays in place: it reads
+    // episode-local state (slot, requestID, offered menu size).
+    const normalized = normalizeDecisionResponse(message);
     pending.resolve({
-      actionID: selectedLegalActionId,
-      ...(selectedDealActionId !== null
-        ? { dealActionID: selectedDealActionId }
-        : {}),
-      reason:
-        typeof message.reason === "string"
-          ? message.reason.slice(0, 500)
-          : "Coworld player returned no reason.",
+      ...normalized,
       metadata: {
         brain: "coworld-websocket",
         externalActionCall: true,

@@ -180,6 +180,8 @@ export function stubObservation(input: {
  */
 export interface ScriptedPick {
   actionID?: string | null;
+  /** Optional action batch (AgentDecision.actionIDs) for wire-batching tests. */
+  actionIDs?: string[];
   dealActionID?: string | null;
   reason?: string | null;
 }
@@ -214,6 +216,7 @@ export function scriptedBrain(
         const actionID = pick.actionID ?? null;
         return {
           actionID: actionID ?? "hold",
+          ...(pick.actionIDs !== undefined ? { actionIDs: pick.actionIDs } : {}),
           reason:
             pick.reason !== undefined
               ? pick.reason

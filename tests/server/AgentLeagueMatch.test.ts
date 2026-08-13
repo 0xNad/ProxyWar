@@ -426,6 +426,640 @@ describe("AgentLeagueMatchRunner", () => {
     }
   });
 
+  // Behavior pin for the batch-layer round-robin rewrite: all-scalar decisions
+  // must keep EXACTLY this record order and shape (order, sequences, batch
+  // metadata, validator-fallback form) before and after the submission-pass
+  // restructure. Authored against the participant-major loop; do not adapt it
+  // to a rewrite — the rewrite must satisfy it.
+  it("pins scalar submission order and the same-turn diplomacy conflict record shape", async () => {
+    const log = makeLogger();
+    const legalActions: LegalAction[] = [
+      {
+        id: "alliance:request:SHARED",
+        kind: "alliance_request",
+        label: "Request Alliance",
+        intent: null,
+        risk: { level: "low", score: 0.1 },
+        metadata: { recipientID: "SHARED" },
+      },
+      {
+        id: "hold",
+        kind: "hold",
+        label: "Hold",
+        intent: null,
+        risk: { level: "none", score: 0 },
+      },
+    ];
+    const decisionByUsername: Record<string, string> = {
+      "First Agent": "alliance:request:SHARED",
+      "Second Agent": "alliance:request:SHARED",
+      "Third Agent": "hold",
+    };
+    const participants = createAgentParticipants(
+      [
+        { username: "First Agent", profile: "opportunistic" },
+        { username: "Second Agent", profile: "aggressive" },
+        { username: "Third Agent", profile: "defensive" },
+      ],
+      log,
+      {
+        brainFactory: (spec) => ({
+          brainType: "rule",
+          decide: () => ({
+            actionID: decisionByUsername[spec.username],
+            reason: `${spec.username} scalar pick`,
+          }),
+        }),
+      },
+    );
+    const game = new GameServer(
+      "AGENT_PIN_DIPLO",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: [],
+      log,
+      legalActionBuilder: {
+        build: () => legalActions,
+      } as unknown as LegalActionBuilder,
+    });
+
+    try {
+      const records = await match.runDecisionTurn({ turnNumber: 2 });
+
+      expect(records.map((record) => record.username)).toEqual([
+        "First Agent",
+        "Second Agent",
+        "Third Agent",
+      ]);
+      expect(records.map((record) => record.sequence)).toEqual([1, 2, 3]);
+      expect(records.map((record) => record.chosenActionID)).toEqual([
+        "alliance:request:SHARED",
+        "hold",
+        "hold",
+      ]);
+
+      // First Agent: clean scalar submission. Scalar decisions still carry
+      // batch metadata (batchIndex 0, batchSize 1) — pinned so the rewrite
+      // cannot change scalar record bytes.
+      expect(records[0].decisionMetadata).toMatchObject({
+        batchIndex: 0,
+        batchSize: 1,
+        batchActionIDs: "alliance:request:SHARED",
+        batchRejectedActionIDs: "",
+      });
+      expect(records[0].decisionMetadata?.fallbackUsed).toBeUndefined();
+      expect(records[0].result.accepted).toBe(true);
+      expect(records[0].legalActionIDs).toContain("alliance:request:SHARED");
+
+      // Second Agent: recipient SHARED is reserved by the earlier submission,
+      // so the alliance action is filtered from the SUBMISSION menu, the
+      // requested id fails validation, and the validator substitutes a hold —
+      // recorded loudly as a validation fallback. This pins that validation
+      // runs against the same-turn-filtered menu, not the offered menu.
+      expect(records[1].legalActionIDs).not.toContain(
+        "alliance:request:SHARED",
+      );
+      expect(records[1].decisionMetadata).toMatchObject({
+        batchIndex: 0,
+        batchSize: 1,
+        batchActionIDs: "alliance:request:SHARED",
+        batchRejectedActionIDs: "alliance:request:SHARED",
+        fallbackUsed: true,
+        validationFallbackUsed: true,
+      });
+
+      // Third Agent: hold is never diplomacy-filtered.
+      expect(records[2].decisionMetadata?.fallbackUsed).toBeUndefined();
+      expect(records[2].result.accepted).toBe(true);
+    } finally {
+      await game.end({ archive: false });
+    }
+  });
+
+  it("pins the same-turn build-tile conflict record shape (no game state)", async () => {
+    const log = makeLogger();
+    const legalActions: LegalAction[] = [
+      {
+        id: "build:City:100",
+        kind: "build",
+        label: "Build City at 100",
+        intent: null,
+        risk: { level: "low", score: 0.1 },
+        metadata: { role: "economic", unit: UnitType.City, buildTile: 100 },
+      },
+      {
+        id: "build:City:200",
+        kind: "build",
+        label: "Build City at 200",
+        intent: null,
+        risk: { level: "low", score: 0.1 },
+        metadata: { role: "economic", unit: UnitType.City, buildTile: 200 },
+      },
+      {
+        id: "hold",
+        kind: "hold",
+        label: "Hold",
+        intent: null,
+        risk: { level: "none", score: 0 },
+      },
+    ];
+    const decisionByUsername: Record<string, string> = {
+      "First Agent": "build:City:100",
+      "Second Agent": "build:City:100",
+      "Third Agent": "build:City:200",
+    };
+    const participants = createAgentParticipants(
+      [
+        { username: "First Agent", profile: "opportunistic" },
+        { username: "Second Agent", profile: "aggressive" },
+        { username: "Third Agent", profile: "defensive" },
+      ],
+      log,
+      {
+        brainFactory: (spec) => ({
+          brainType: "rule",
+          decide: () => ({
+            actionID: decisionByUsername[spec.username],
+            reason: `${spec.username} scalar pick`,
+          }),
+        }),
+      },
+    );
+    const game = new GameServer(
+      "AGENT_PIN_BUILD",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: [],
+      log,
+      legalActionBuilder: {
+        build: () => legalActions,
+      } as unknown as LegalActionBuilder,
+    });
+
+    try {
+      const records = await match.runDecisionTurn({ turnNumber: 2 });
+
+      expect(records.map((record) => record.chosenActionID)).toEqual([
+        "build:City:100",
+        "hold",
+        "build:City:200",
+      ]);
+      // With no gameState the conflict test is exact-tile: Second Agent's
+      // duplicate tile is filtered and falls back; Third Agent's distinct
+      // tile passes even after two earlier submissions.
+      expect(records[1].legalActionIDs).not.toContain("build:City:100");
+      expect(records[1].legalActionIDs).toContain("build:City:200");
+      expect(records[1].decisionMetadata).toMatchObject({
+        fallbackUsed: true,
+        validationFallbackUsed: true,
+        batchRejectedActionIDs: "build:City:100",
+      });
+      expect(records[2].result.accepted).toBe(true);
+      expect(records[2].decisionMetadata?.fallbackUsed).toBeUndefined();
+    } finally {
+      await game.end({ archive: false });
+    }
+  });
+
+  it("interleaves batched submissions layer round-robin across participants", async () => {
+    const log = makeLogger();
+    const ids = ["attack:one", "attack:two", "attack:three"];
+    const legalActions: LegalAction[] = [
+      ...ids.map((id) => ({
+        id,
+        kind: "attack" as const,
+        label: id,
+        intent: null,
+        risk: { level: "low" as const, score: 0.1 },
+      })),
+      {
+        id: "hold",
+        kind: "hold",
+        label: "Hold",
+        intent: null,
+        risk: { level: "none", score: 0 },
+      },
+    ];
+    const participants = createAgentParticipants(
+      [
+        { username: "Batch A", profile: "opportunistic" },
+        { username: "Batch B", profile: "aggressive" },
+      ],
+      log,
+      {
+        brainFactory: () => ({
+          brainType: "planner-executor",
+          decide: () => ({
+            actionID: ids[0],
+            actionIDs: ids,
+            reason: "full cascade",
+          }),
+        }),
+      },
+    );
+    const game = new GameServer(
+      "AGENT_RR",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: [],
+      log,
+      legalActionBuilder: {
+        build: () => legalActions,
+      } as unknown as LegalActionBuilder,
+    });
+
+    try {
+      const records = await match.runDecisionTurn({ turnNumber: 2 });
+
+      // A1,B1,A2,B2,A3,B3 — one action per participant per layer, fixed
+      // roster order within every layer, sequences stamped in true
+      // submission order.
+      expect(
+        records.map((record) => [
+          record.username,
+          record.decisionMetadata?.batchIndex,
+        ]),
+      ).toEqual([
+        ["Batch A", 0],
+        ["Batch B", 0],
+        ["Batch A", 1],
+        ["Batch B", 1],
+        ["Batch A", 2],
+        ["Batch B", 2],
+      ]);
+      expect(records.map((record) => record.sequence)).toEqual([
+        1, 2, 3, 4, 5, 6,
+      ]);
+      expect(
+        records.every((record) => record.decisionMetadata?.batchSize === 3),
+      ).toBe(true);
+    } finally {
+      await game.end({ archive: false });
+    }
+  });
+
+  it("stale-gates a mid-batch build whose tile was reserved after validation", async () => {
+    const log = makeLogger();
+    const legalActions: LegalAction[] = [
+      {
+        id: "build:City:100",
+        kind: "build",
+        label: "Build City at 100",
+        intent: null,
+        risk: { level: "low", score: 0.1 },
+        metadata: { role: "economic", unit: UnitType.City, buildTile: 100 },
+      },
+      {
+        id: "attack:cover",
+        kind: "attack",
+        label: "Covering attack",
+        intent: null,
+        risk: { level: "low", score: 0.1 },
+      },
+      {
+        id: "hold",
+        kind: "hold",
+        label: "Hold",
+        intent: null,
+        risk: { level: "none", score: 0 },
+      },
+    ];
+    // A's batch: attack first, THEN build tile 100. B (earlier in no seat —
+    // later roster) also builds tile 100 at layer 0. Timeline:
+    //   A layer-0: attack        (validates whole batch first — tile free)
+    //   B layer-0: build 100     (reserves tile 100)
+    //   A layer-1: build 100     -> STALE (reserved after A validated)
+    const decisionsByUsername: Record<
+      string,
+      { actionID: string; actionIDs?: string[] }
+    > = {
+      "Batch A": {
+        actionID: "attack:cover",
+        actionIDs: ["attack:cover", "build:City:100"],
+      },
+      "Scalar B": { actionID: "build:City:100" },
+    };
+    const participants = createAgentParticipants(
+      [
+        { username: "Batch A", profile: "opportunistic" },
+        { username: "Scalar B", profile: "aggressive" },
+      ],
+      log,
+      {
+        brainFactory: (spec) => ({
+          brainType: "planner-executor",
+          decide: () => ({
+            ...decisionsByUsername[spec.username],
+            reason: `${spec.username} pick`,
+          }),
+        }),
+      },
+    );
+    const game = new GameServer(
+      "AGENT_STALE",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: [],
+      log,
+      legalActionBuilder: {
+        build: () => legalActions,
+      } as unknown as LegalActionBuilder,
+    });
+
+    try {
+      const records = await match.runDecisionTurn({ turnNumber: 2 });
+
+      expect(
+        records.map((record) => [record.username, record.chosenActionID]),
+      ).toEqual([
+        ["Batch A", "attack:cover"],
+        ["Scalar B", "build:City:100"],
+        ["Batch A", "build:City:100"],
+      ]);
+      // B's scalar build was validated against a menu where tile 100 was
+      // still free (A's layer-0 attack reserves nothing) and submits fine.
+      expect(records[1].result.accepted).toBe(true);
+      // A's layer-1 build hits the staleness gate: honest accepted:false
+      // record naming the conflict, batch metadata intact, no vanishing.
+      expect(records[2].result.accepted).toBe(false);
+      expect(records[2].result.reason).toContain("same-turn build conflict");
+      expect(records[2].decisionMetadata).toMatchObject({
+        batchIndex: 1,
+        batchSize: 2,
+      });
+    } finally {
+      await game.end({ archive: false });
+    }
+  });
+
+  it("gates a self-batch double-build on the same tile", async () => {
+    const log = makeLogger();
+    const legalActions: LegalAction[] = [
+      {
+        id: "build:City:100",
+        kind: "build",
+        label: "Build City at 100",
+        intent: null,
+        risk: { level: "low", score: 0.1 },
+        metadata: { role: "economic", unit: UnitType.City, buildTile: 100 },
+      },
+      {
+        id: "build:Factory:100",
+        kind: "build",
+        label: "Build Factory at 100",
+        intent: null,
+        risk: { level: "low", score: 0.1 },
+        metadata: { role: "economic", unit: UnitType.Factory, buildTile: 100 },
+      },
+      {
+        id: "hold",
+        kind: "hold",
+        label: "Hold",
+        intent: null,
+        risk: { level: "none", score: 0 },
+      },
+    ];
+    const participants = createAgentParticipants(
+      [{ username: "Greedy Builder", profile: "opportunistic" }],
+      log,
+      {
+        brainFactory: () => ({
+          brainType: "planner-executor",
+          decide: () => ({
+            actionID: "build:City:100",
+            actionIDs: ["build:City:100", "build:Factory:100"],
+            reason: "stack the same tile",
+          }),
+        }),
+      },
+    );
+    const game = new GameServer(
+      "AGENT_SELF",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: [],
+      log,
+      legalActionBuilder: {
+        build: () => legalActions,
+      } as unknown as LegalActionBuilder,
+    });
+
+    try {
+      const records = await match.runDecisionTurn({ turnNumber: 2 });
+
+      // Before the round-robin rewrite the participant's own batch never saw
+      // its own reservations — both builds landed on tile 100. Now the
+      // second is stale-gated by the agent's OWN layer-0 reservation.
+      expect(records).toHaveLength(2);
+      expect(records[0].result.accepted).toBe(true);
+      expect(records[1].result.accepted).toBe(false);
+      expect(records[1].result.reason).toContain("same-turn build conflict");
+    } finally {
+      await game.end({ archive: false });
+    }
+  });
+
+  it("windows recentDecisions by decision cycle so one batch cannot evict the memory", async () => {
+    const log = makeLogger();
+    const ids = [
+      "attack:one",
+      "attack:two",
+      "attack:three",
+      "attack:four",
+      "attack:five",
+    ];
+    const legalActions: LegalAction[] = [
+      ...ids.map((id) => ({
+        id,
+        kind: "attack" as const,
+        label: id,
+        intent: null,
+        risk: { level: "low" as const, score: 0.1 },
+      })),
+      {
+        id: "hold",
+        kind: "hold",
+        label: "Hold",
+        intent: null,
+        risk: { level: "none", score: 0 },
+      },
+    ];
+    const participants = createAgentParticipants(
+      [{ username: "Memory Agent", profile: "opportunistic" }],
+      log,
+      {
+        brainFactory: () => ({
+          brainType: "planner-executor",
+          decide: () => ({
+            actionID: ids[0],
+            actionIDs: ids,
+            reason: "full five-action batch",
+          }),
+        }),
+      },
+    );
+    const recentWindows: number[] = [];
+    const realBuilder = new AgentObservationBuilder();
+    const game = new GameServer(
+      "AGENT_MEMWIN",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: [],
+      log,
+      legalActionBuilder: {
+        build: () => legalActions,
+      } as unknown as LegalActionBuilder,
+      observationBuilder: {
+        // Passthrough batch scope (main's per-tick observation cache); the
+        // spy only needs to see what recentDecisions each build receives.
+        withObservationBatch: <T,>(
+          _gameState: unknown,
+          callback: () => T,
+        ): T => callback(),
+        build: (input: Parameters<AgentObservationBuilder["build"]>[0]) => {
+          recentWindows.push(input.recentDecisions?.length ?? 0);
+          return realBuilder.build(input);
+        },
+        summarize: (observation: Parameters<AgentObservationBuilder["summarize"]>[0]) =>
+          realBuilder.summarize(observation),
+      } as unknown as AgentObservationBuilder,
+    });
+
+    try {
+      // Two 5-action batches = 10 records across 2 decision cycles.
+      await match.runDecisionTurn({ turnNumber: 1 });
+      await match.runDecisionTurn({ turnNumber: 2 });
+      recentWindows.length = 0;
+      await match.runDecisionTurn({ turnNumber: 3 });
+
+      // A record-count window (the old slice(-8)) would have fed back only 8
+      // of the 10 records, silently dropping part of cycle 1. The cycle
+      // window keeps both complete cycles.
+      expect(Math.max(...recentWindows)).toBe(10);
+    } finally {
+      await game.end({ archive: false });
+    }
+  });
+
+  it("caps a requested batch at the wire limit and stamps the dropped ids", async () => {
+    const log = makeLogger();
+    const ids = [
+      "attack:one",
+      "attack:two",
+      "attack:three",
+      "attack:four",
+      "attack:five",
+      "attack:six",
+      "attack:seven",
+    ];
+    const legalActions: LegalAction[] = [
+      ...ids.map((id) => ({
+        id,
+        kind: "attack" as const,
+        label: id,
+        intent: null,
+        risk: { level: "low" as const, score: 0.1 },
+      })),
+      {
+        id: "hold",
+        kind: "hold",
+        label: "Hold",
+        intent: null,
+        risk: { level: "none", score: 0 },
+      },
+    ];
+    const participants = createAgentParticipants(
+      [{ username: "Cap Agent", profile: "opportunistic" }],
+      log,
+      {
+        brainFactory: () => ({
+          brainType: "planner-executor",
+          decide: () => ({
+            actionID: ids[0],
+            actionIDs: ids,
+            reason: "request everything",
+          }),
+        }),
+      },
+    );
+    const game = new GameServer(
+      "AGENT_CAP",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: [],
+      log,
+      legalActionBuilder: {
+        build: () => legalActions,
+      } as unknown as LegalActionBuilder,
+    });
+
+    try {
+      const records = await match.runDecisionTurn({ turnNumber: 2 });
+
+      expect(records).toHaveLength(5);
+      expect(records.map((record) => record.chosenActionID)).toEqual(
+        ids.slice(0, 5),
+      );
+      expect(records[0].decisionMetadata).toMatchObject({
+        batchSize: 5,
+        batchActionIDs: ids.slice(0, 5).join(","),
+        batchDroppedActionIDs: "attack:six,attack:seven",
+      });
+      // Every record of the capped batch carries the same honest drop stamp.
+      expect(
+        records.every(
+          (record) =>
+            record.decisionMetadata?.batchDroppedActionIDs ===
+            "attack:six,attack:seven",
+        ),
+      ).toBe(true);
+    } finally {
+      await game.end({ archive: false });
+    }
+  });
+
   it("proves chosen multi-agent spawn decisions execute legally in core", async () => {
     const log = makeLogger();
     const candidateGame = await setup("big_plains", { nations: "disabled" });

@@ -1367,6 +1367,11 @@ function actionDiversity(records: AgentDecisionRecord[]): Set<string> {
   return new Set(records.map(storyKind).filter((kind) => kind !== "hold"));
 }
 
+// NOTE(action-batching): counts per RECORD = per ACTION since the wire batch
+// landed — still literally true for a story's "what happened" counts, and
+// spectators see one beat per action. Deliberately deferred: if story pacing
+// misreads heavily-batched matches, group by decision cycle (turnNumber)
+// like AgentHumanOpportunityMiner.decisionCycles.
 function countActionKinds(
   records: AgentDecisionRecord[],
 ): Partial<Record<LegalActionKind, number>> {

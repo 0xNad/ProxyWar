@@ -778,3 +778,86 @@ describe("deal slot — untouched when unused", () => {
     expect(normalize(first)).not.toContain("dealSlot");
   });
 });
+
+describe("deal slot under action batching", () => {
+  it("applies the deal slot once, at batch index 0 of a batched decision", async () => {
+    const harness = dealLeagueHarness({
+      seats: [A, B, C],
+      scripts: [
+        [
+          () => ({
+            actionID: "alliance:P_C",
+            actionIDs: ["alliance:P_C", "hold"],
+            dealActionID: PROPOSE_B_NAP,
+            reason: "flank, hold, pact",
+          }),
+        ],
+        [],
+        [],
+      ],
+    });
+    const turnRecords = await harness.league.runDecisionTurn({
+      turnNumber: 0,
+    });
+    const aRecords = turnRecords.filter(
+      (record) => record.agentID === A.agentID,
+    );
+
+    expect(aRecords).toHaveLength(2);
+    expect(
+      aRecords.map((record) => record.decisionMetadata?.batchIndex),
+    ).toEqual([0, 1]);
+    // The slot fires exactly once, at the agent's layer-0 slot; the layer-1
+    // record carries no deal-slot evidence or stamps.
+    expect(aRecords[0].dealSlotEvidence).toMatchObject({
+      requestedActionID: PROPOSE_B_NAP,
+      application: { attempted: true, accepted: true },
+    });
+    expect(aRecords[1].dealSlotEvidence).toBeUndefined();
+    expect(aRecords[1].decisionMetadata?.dealSlotResult).toBeUndefined();
+    expect(
+      harness.league.dealLedger().deals.map((deal) => deal.dealID),
+    ).toEqual([NAP_A_TO_B]);
+  });
+
+  it("refuses the slot when a deal meta-action rides a later batch layer — which still executes", async () => {
+    const harness = dealLeagueHarness({
+      seats: [A, B, C],
+      scripts: [
+        [
+          () => ({
+            actionID: "alliance:P_C",
+            actionIDs: ["alliance:P_C", PROPOSE_B_NAP],
+            dealActionID: PROPOSE_B_NAP,
+            reason: "alliance then propose",
+          }),
+        ],
+        [],
+        [],
+      ],
+    });
+    const turnRecords = await harness.league.runDecisionTurn({
+      turnNumber: 0,
+    });
+    const aRecords = turnRecords.filter(
+      (record) => record.agentID === A.agentID,
+    );
+
+    expect(aRecords).toHaveLength(2);
+    // actionSlotPlayedDeal is computed over the WHOLE validated batch, so the
+    // slot is refused at batch index 0 even though the deal action sits at
+    // layer 1 — otherwise the same proposal would apply twice in one
+    // decision.
+    expect(aRecords[0].decisionMetadata?.dealSlotRejected).toBe(
+      "a deal action was already played as this decision's game action",
+    );
+    // The batched deal action itself executes normally with its own record.
+    expect(aRecords[1].chosenActionKind).toBe("deal_propose");
+    expect(aRecords[1].decisionMetadata?.dealAction).toBe("propose");
+    expect(aRecords[1].decisionMetadata?.dealID).toBe(NAP_A_TO_B);
+    // Exactly one proposal reached the ledger.
+    expect(
+      harness.league.dealLedger().deals.map((deal) => deal.dealID),
+    ).toEqual([NAP_A_TO_B]);
+  });
+});

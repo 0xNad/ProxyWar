@@ -31,6 +31,7 @@ import {
 } from "./AgentSpawnAssignment";
 import { buildAgentTacticalAffordances } from "./AgentTacticalAffordances";
 import { economyEventsEnabled, structuredDealsEnabled } from "./AgentTunables";
+import { MAX_WIRE_ACTIONS_PER_DECISION } from "./AgentWireProtocol";
 import {
   AgentActionResult,
   AgentBrain,
@@ -470,7 +471,39 @@ export class AgentLeagueMatchRunner {
     const sameTurnAllianceRequests = new Set<string>();
     const sameTurnBuildTiles: number[] = [];
 
-    for (const input of decisions) {
+    // Batch-layer round-robin submission (A1,B1,…,A2,B2,…): each participant's
+    // batch is validated ONCE, at its layer-0 slot — the exact point the old
+    // participant-major pass validated it, so all-scalar play stays
+    // byte-identical — then one action per participant per layer submits in
+    // fixed roster order. "Earlier submission wins" now holds within every
+    // layer instead of one seat's whole batch preempting the next seat's
+    // first action.
+    interface ParticipantSubmission {
+      input: (typeof decisions)[number];
+      /**
+       * The same-turn-filtered menu snapshotted at this participant's
+       * layer-0 slot: the validation authority and the menu recorded on
+       * every record of the batch. Layers >= 1 re-check ONLY the two
+       * same-turn filters (the staleness gate below) so conflicts that arise
+       * mid-batch surface as honest accepted:false records instead of
+       * vanishing.
+       */
+      submissionLegalActions: LegalAction[];
+      selected: Array<{
+        action: LegalAction | null;
+        requestedActionID: string;
+        reason: string | null;
+      }>;
+      requestedActionIDs: string[];
+      droppedByCapActionIDs: string[];
+      rejectedActionIDs: string[];
+      validationFallbackUsed: boolean;
+      actionSlotPlayedDeal: boolean;
+    }
+
+    const validateParticipantBatch = (
+      input: (typeof decisions)[number],
+    ): ParticipantSubmission => {
       const submissionLegalActions = this.filterDisabledActionKinds(
         this.filterSameTurnBuildActions(
           this.filterSameTurnDiplomacyActions(
@@ -483,8 +516,9 @@ export class AgentLeagueMatchRunner {
           sameTurnBuildTiles,
         ),
       );
-      const { participant, observation, decision, decisionLatencyMs } = input;
-      const requestedActionIDs = requestedDecisionActionIDs(decision);
+      const { decision } = input;
+      const { actionIDs: requestedActionIDs, droppedByCapActionIDs } =
+        requestedDecisionActionIDs(decision);
       const rejectedActionIDs: string[] = [];
       const selectedActions: Array<{
         action: LegalAction | null;
@@ -535,47 +569,115 @@ export class AgentLeagueMatchRunner {
       // action that never happened and the overwritten deal's story beat
       // (e.g. the pact's deal_accepted, tone pact) would never reach
       // spectator telemetry while the pact itself was live. One deal action
-      // per decision — the contract the player protocol states.
+      // per decision — the contract the player protocol states. Computed over
+      // the WHOLE validated batch upfront (a deal at any layer refuses the
+      // slot); safe under the staleness gate because deal meta-actions pass
+      // both same-turn filters by construction and always execute.
       const actionSlotPlayedDeal = selectedActions.some(
         (entry) => entry.action !== null && isDealActionKind(entry.action.kind),
       );
 
-      selectedActions.forEach((selected, batchIndex) => {
-        const batchDecision: AgentDecision = {
-          ...decision,
-          actionID: selected.requestedActionID,
-          metadata: batchDecisionMetadata({
-            metadata: decision.metadata,
-            batchIndex,
-            batchSize: selectedActions.length,
-            requestedActionIDs,
-            rejectedActionIDs,
-            validationFallbackUsed: validationFallbackUsed && batchIndex === 0,
-          }),
-        };
-        // Structured-deal meta-actions are processed by the runner-scoped
-        // deal manager during this same sequential submission pass
-        // (participant order — earlier submissions win conflicts); they
-        // submit no game intent. Pending referee/lifecycle events drain onto
-        // this agent's next record as the dealComplianceEvent stamp. Flag
-        // OFF: dealManager is null and this whole block is inert, leaving
-        // records byte-identical.
-        const dealOutcome =
-          this.dealManager !== null &&
-          selected.action !== null &&
-          isDealActionKind(selected.action.kind)
-            ? this.dealManager.applyDealAction({
-                agentID: participant.runner.agentID,
-                playerID: observation.ownState?.playerID ?? null,
-                playerName:
-                  observation.ownState?.name ?? participant.spec.username,
-                action: selected.action,
-                turnNumber: observation.turnNumber,
-                statedReason: decision.reason,
-              })
-            : null;
-        const result =
-          dealOutcome !== null
+      return {
+        input,
+        submissionLegalActions,
+        selected: selectedActions,
+        requestedActionIDs,
+        droppedByCapActionIDs,
+        rejectedActionIDs,
+        validationFallbackUsed,
+        actionSlotPlayedDeal,
+      };
+    };
+
+    const submitBatchEntry = (
+      submission: ParticipantSubmission,
+      selected: ParticipantSubmission["selected"][number],
+      batchIndex: number,
+    ): void => {
+      const { input } = submission;
+      const { participant, observation, decision, decisionLatencyMs } = input;
+      const {
+        submissionLegalActions,
+        requestedActionIDs,
+        rejectedActionIDs,
+        droppedByCapActionIDs,
+        validationFallbackUsed,
+        actionSlotPlayedDeal,
+      } = submission;
+      const batchDecision: AgentDecision = {
+        ...decision,
+        actionID: selected.requestedActionID,
+        metadata: batchDecisionMetadata({
+          metadata: decision.metadata,
+          batchIndex,
+          batchSize: submission.selected.length,
+          requestedActionIDs,
+          rejectedActionIDs,
+          droppedByCapActionIDs,
+          validationFallbackUsed: validationFallbackUsed && batchIndex === 0,
+        }),
+      };
+      // Staleness gate (layers >= 1 only): re-run the two same-turn filters
+      // over just this action against the reservations accumulated since this
+      // batch validated at layer 0 — including this participant's OWN earlier
+      // layers, which closes the old self-batch double-build gap. At layer 0
+      // the reservation state is identical to the validation state one step
+      // earlier, so the gate is skipped and scalar play is untouched. A gated
+      // entry records accepted:false with the conflict named and reserves
+      // nothing (a phantom reservation would poison later layers).
+      let staleReason: string | null = null;
+      if (batchIndex > 0 && selected.action !== null) {
+        const action = selected.action;
+        if (
+          this.filterSameTurnDiplomacyActions(
+            [action],
+            observation,
+            sameTurnDiplomacyParticipants,
+            sameTurnAllianceRequests,
+          ).length === 0
+        ) {
+          staleReason = `same-turn diplomacy conflict: a party to ${action.id} already engaged in diplomacy this decision step`;
+        } else if (
+          this.filterSameTurnBuildActions(
+            [action],
+            options.gameState,
+            sameTurnBuildTiles,
+          ).length === 0
+        ) {
+          staleReason = `same-turn build conflict: ${action.id} targets a tile within structure range of one reserved earlier this decision step`;
+        }
+      }
+      // Structured-deal meta-actions are processed by the runner-scoped
+      // deal manager during this same sequential submission pass (layer
+      // round-robin — earlier participants win conflicts within each layer);
+      // they submit no game intent. Pending referee/lifecycle events drain
+      // onto this agent's next record as the dealComplianceEvent stamp. Flag
+      // OFF: dealManager is null and this whole block is inert, leaving
+      // records byte-identical. A stale-gated entry never reaches the deal
+      // manager (uniformity guard — deal actions cannot actually go stale).
+      const dealOutcome =
+        staleReason === null &&
+        this.dealManager !== null &&
+        selected.action !== null &&
+        isDealActionKind(selected.action.kind)
+          ? this.dealManager.applyDealAction({
+              agentID: participant.runner.agentID,
+              playerID: observation.ownState?.playerID ?? null,
+              playerName:
+                observation.ownState?.name ?? participant.spec.username,
+              action: selected.action,
+              turnNumber: observation.turnNumber,
+              statedReason: decision.reason,
+            })
+          : null;
+      const result =
+        staleReason !== null
+          ? {
+              accepted: false,
+              reason: staleReason,
+              submittedIntent: null,
+            }
+          : dealOutcome !== null
             ? dealOutcome.result
             : selected.action
               ? this.submitLegalAction(participant.runner, selected.action)
@@ -584,56 +686,58 @@ export class AgentLeagueMatchRunner {
                   reason: "no legal fallback action available",
                   submittedIntent: null,
                 };
-        // Diplomacy slot: the OPTIONAL second selection, applied exactly once
-        // per decision (at batch index 0, i.e. immediately after the FIRST of
-        // this agent's submitted actions — batched `actionIDs` submit their
-        // remaining actions afterwards) and always within this agent's turn in
-        // the participant-ordered pass, so the "earlier submission wins"
-        // conflict rule between agents is unchanged and a deal never costs the
-        // agent its move. Flag OFF (or no dealActionID): null, leaving records
-        // byte-identical.
-        const dealSlotApplication =
-          batchIndex === 0
-            ? this.applyDealSlotSelection({
-                participant,
-                observation,
-                decision,
-                legalActions: submissionLegalActions,
-                actionSlotPlayedDeal,
-              })
-            : null;
-        const complianceStamp =
-          this.dealManager?.takePendingComplianceStamp(
-            participant.runner.agentID,
-          ) ?? null;
-        const dealMetadata: AgentDecision["metadata"] = {
-          ...(dealOutcome?.stamps ?? {}),
-          ...(dealSlotApplication?.stamps ?? {}),
-          ...(complianceStamp !== null
-            ? { dealComplianceEvent: complianceStamp }
-            : {}),
-        };
-        const recordedDecision =
-          Object.keys(dealMetadata).length === 0
-            ? batchDecision
-            : {
-                ...batchDecision,
-                metadata: { ...batchDecision.metadata, ...dealMetadata },
-              };
-        const record = this.recordDecision({
-          participant,
-          turnNumber: observation.turnNumber,
-          observationSummary: input.observationSummary,
-          observation,
-          legalActions: submissionLegalActions,
-          chosenAction: selected.action,
-          decision: recordedDecision,
-          decisionLatencyMs,
-          reason: selected.reason,
-          result,
-          dealSlotEvidence: dealSlotApplication?.evidence,
-        });
+      // Diplomacy slot: the OPTIONAL second selection, applied exactly once
+      // per decision (at batch index 0, i.e. at this agent's layer-0 slot in
+      // the round-robin — before any participant's layer-1 action) so the
+      // "earlier submission wins" conflict rule between agents is unchanged
+      // and a deal never costs the agent its move. Flag OFF (or no
+      // dealActionID): null, leaving records byte-identical.
+      const dealSlotApplication =
+        batchIndex === 0
+          ? this.applyDealSlotSelection({
+              participant,
+              observation,
+              decision,
+              legalActions: submissionLegalActions,
+              actionSlotPlayedDeal,
+            })
+          : null;
+      const complianceStamp =
+        this.dealManager?.takePendingComplianceStamp(
+          participant.runner.agentID,
+        ) ?? null;
+      const dealMetadata: AgentDecision["metadata"] = {
+        ...(dealOutcome?.stamps ?? {}),
+        ...(dealSlotApplication?.stamps ?? {}),
+        ...(complianceStamp !== null
+          ? { dealComplianceEvent: complianceStamp }
+          : {}),
+      };
+      const recordedDecision =
+        Object.keys(dealMetadata).length === 0
+          ? batchDecision
+          : {
+              ...batchDecision,
+              metadata: { ...batchDecision.metadata, ...dealMetadata },
+            };
+      const record = this.recordDecision({
+        participant,
+        turnNumber: observation.turnNumber,
+        observationSummary: input.observationSummary,
+        observation,
+        legalActions: submissionLegalActions,
+        chosenAction: selected.action,
+        decision: recordedDecision,
+        decisionLatencyMs,
+        reason: selected.reason,
+        result,
+        dealSlotEvidence: dealSlotApplication?.evidence,
+      });
 
+      // A gated action never executed — reserving it would poison later
+      // layers with phantom reservations. Engine-rejected submissions still
+      // reserve, exactly as before.
+      if (staleReason === null) {
         this.reserveSameTurnDiplomacy(
           selected.action,
           observation,
@@ -641,36 +745,61 @@ export class AgentLeagueMatchRunner {
           sameTurnAllianceRequests,
         );
         this.reserveSameTurnBuild(selected.action, sameTurnBuildTiles);
+      }
 
-        this.log.info("league agent decision recorded", {
-          sequence: record.sequence,
-          agentID: record.agentID,
-          profile: record.profile,
-          observationSummary: record.observationSummary,
-          objectiveKind: record.objectiveKind,
-          objectiveAligned: record.objectiveAligned,
-          legalActionIDs: record.legalActionIDs,
-          legalActionIDsByKind: record.legalActionIDsByKind,
-          chosenActionID: record.chosenActionID,
-          chosenActionKind: record.chosenActionKind,
-          chosenActionMetadata: record.chosenActionMetadata,
-          runtimeMode: record.decisionMetadata?.runtimeMode,
-          plannerSource: record.decisionMetadata?.plannerSource,
-          executorSource: record.decisionMetadata?.executorSource,
-          actionSelectionSource: record.decisionMetadata?.actionSelectionSource,
-          externalPlannerCall: record.decisionMetadata?.externalPlannerCall,
-          externalActionCall: record.decisionMetadata?.externalActionCall,
-          rawProviderOutputPresent:
-            record.decisionMetadata?.rawProviderOutputPresent,
-          attackActionIDs: record.attackActionIDs,
-          decisionMetadata: compactDecisionMetadata(record.decisionMetadata),
-          decisionLatencyMs: record.decisionLatencyMs,
-          intent: record.intent,
-          accepted: result.accepted,
-          reason: record.reason,
-          fallbackUsed: record.decisionMetadata?.fallbackUsed ?? false,
-        });
+      this.log.info("league agent decision recorded", {
+        sequence: record.sequence,
+        agentID: record.agentID,
+        profile: record.profile,
+        observationSummary: record.observationSummary,
+        objectiveKind: record.objectiveKind,
+        objectiveAligned: record.objectiveAligned,
+        legalActionIDs: record.legalActionIDs,
+        legalActionIDsByKind: record.legalActionIDsByKind,
+        chosenActionID: record.chosenActionID,
+        chosenActionKind: record.chosenActionKind,
+        chosenActionMetadata: record.chosenActionMetadata,
+        runtimeMode: record.decisionMetadata?.runtimeMode,
+        plannerSource: record.decisionMetadata?.plannerSource,
+        executorSource: record.decisionMetadata?.executorSource,
+        actionSelectionSource: record.decisionMetadata?.actionSelectionSource,
+        externalPlannerCall: record.decisionMetadata?.externalPlannerCall,
+        externalActionCall: record.decisionMetadata?.externalActionCall,
+        rawProviderOutputPresent:
+          record.decisionMetadata?.rawProviderOutputPresent,
+        attackActionIDs: record.attackActionIDs,
+        decisionMetadata: compactDecisionMetadata(record.decisionMetadata),
+        decisionLatencyMs: record.decisionLatencyMs,
+        intent: record.intent,
+        accepted: result.accepted,
+        reason: record.reason,
+        fallbackUsed: record.decisionMetadata?.fallbackUsed ?? false,
       });
+    };
+
+    // The round-robin driver. Layer 0 both validates (at the exact point the
+    // old pass validated each participant) and submits; later layers submit
+    // one action per participant until every batch is exhausted. All-scalar
+    // decisions have one layer, so the driver degenerates to the old
+    // participant-major order exactly.
+    const submissions: ParticipantSubmission[] = [];
+    let maxBatchSize = 1;
+    for (let layer = 0; layer < maxBatchSize; layer += 1) {
+      for (let index = 0; index < decisions.length; index += 1) {
+        if (layer === 0) {
+          submissions[index] = validateParticipantBatch(decisions[index]);
+          maxBatchSize = Math.max(
+            maxBatchSize,
+            submissions[index].selected.length,
+          );
+        }
+        const submission = submissions[index];
+        const selected = submission.selected[layer];
+        if (selected === undefined) {
+          continue;
+        }
+        submitBatchEntry(submission, selected, layer);
+      }
     }
 
     return this.records.slice(startingRecordCount);
@@ -1103,9 +1232,27 @@ export class AgentLeagueMatchRunner {
   private recentDecisionsFor(
     participant: AgentParticipant,
   ): RecentAgentDecision[] {
-    return this.records
-      .filter((record) => record.agentID === participant.runner.agentID)
-      .slice(-8)
+    const own = this.records.filter(
+      (record) => record.agentID === participant.runner.agentID,
+    );
+    // Window by DECISION CYCLE (turnNumber — monotonic per step), not by raw
+    // record count: a batched decision writes one record per action, and a
+    // record-count window would let a single 5-action batch evict most of
+    // the agent's own memory. All-scalar play has one record per cycle, so
+    // the last 8 cycles are exactly the last 8 records — byte-identical to
+    // the old slice(-8).
+    const cycleTurns: number[] = [];
+    for (let i = own.length - 1; i >= 0 && cycleTurns.length < 8; i -= 1) {
+      const turn = own[i].turnNumber;
+      if (cycleTurns[0] !== turn) {
+        cycleTurns.unshift(turn);
+      }
+    }
+    const windowStart = cycleTurns[0];
+    return own
+      .filter(
+        (record) => windowStart !== undefined && record.turnNumber >= windowStart,
+      )
       .map((record) => {
         const metadata = record.chosenActionMetadata ?? {};
         const targetID = metadata.targetID ?? metadata.recipientID;
@@ -1539,7 +1686,10 @@ function compactDecisionMetadata(
   return compacted;
 }
 
-function requestedDecisionActionIDs(decision: AgentDecision): string[] {
+function requestedDecisionActionIDs(decision: AgentDecision): {
+  actionIDs: string[];
+  droppedByCapActionIDs: string[];
+} {
   const ids =
     decision.actionIDs !== undefined && decision.actionIDs.length > 0
       ? decision.actionIDs
@@ -1550,7 +1700,18 @@ function requestedDecisionActionIDs(decision: AgentDecision): string[] {
       deduplicated.push(id);
     }
   }
-  return deduplicated.length > 0 ? deduplicated : [decision.actionID];
+  if (deduplicated.length === 0) {
+    return { actionIDs: [decision.actionID], droppedByCapActionIDs: [] };
+  }
+  // Wire cap: dedupe first, then truncate, so duplicates never consume
+  // capacity. The cut ids are surfaced to the caller and stamped as
+  // batchDroppedActionIDs — never silently discarded (the keystone drop-note
+  // discipline: records must not imply actions that never ran, and drops
+  // must not be invisible).
+  return {
+    actionIDs: deduplicated.slice(0, MAX_WIRE_ACTIONS_PER_DECISION),
+    droppedByCapActionIDs: deduplicated.slice(MAX_WIRE_ACTIONS_PER_DECISION),
+  };
 }
 
 function isCommunicationRecord(record: AgentDecisionRecord): boolean {
@@ -1626,6 +1787,7 @@ function batchDecisionMetadata(input: {
   batchSize: number;
   requestedActionIDs: string[];
   rejectedActionIDs: string[];
+  droppedByCapActionIDs?: string[];
   validationFallbackUsed?: boolean;
 }): AgentDecision["metadata"] {
   const metadata: AgentDecision["metadata"] = {
@@ -1635,6 +1797,16 @@ function batchDecisionMetadata(input: {
     batchActionIDs: input.requestedActionIDs.join(","),
     batchRejectedActionIDs: input.rejectedActionIDs.join(","),
   };
+
+  // Stamped ONLY when the wire cap actually cut ids, so every pre-cap record
+  // stays byte-identical. Honest-drop discipline: the record must show what
+  // the policy asked for that will not run.
+  if (
+    input.droppedByCapActionIDs !== undefined &&
+    input.droppedByCapActionIDs.length > 0
+  ) {
+    metadata.batchDroppedActionIDs = input.droppedByCapActionIDs.join(",");
+  }
 
   if (input.validationFallbackUsed) {
     // Every offered action the policy selected was invalid, so the validator

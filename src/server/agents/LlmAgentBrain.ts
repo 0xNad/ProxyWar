@@ -98,6 +98,11 @@ export class LlmAgentBrain implements AgentBrain {
     if (parsed.ok) {
       return {
         actionID: parsed.selectedLegalActionId,
+        // Optional action batch (parser-normalized: scalar-first, deduped,
+        // capped); absent for single-action replies.
+        ...(parsed.selectedLegalActionIds !== undefined
+          ? { actionIDs: parsed.selectedLegalActionIds }
+          : {}),
         reason: parsed.reason,
         metadata: {
           brain: "llm",

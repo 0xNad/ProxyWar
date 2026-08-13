@@ -8,6 +8,7 @@ import {
   buildExternalAgentRequestPayload,
   ExternalHttpAgentBrain,
 } from "../../src/server/agents/ExternalHttpAgentBrain";
+import { ExternalRelayAgentBrain } from "../../src/server/agents/ExternalRelayAgentBrain";
 
 const observation: AgentObservation = {
   agentID: "agent-1",
@@ -160,6 +161,55 @@ describe("ExternalHttpAgentBrain", () => {
       usefulNonHoldActionIDs: ["expand:terra-nullius:10"],
       safeFallbackActionID: "hold",
     });
+    // Scalar-only replies never grow an actionIDs batch.
+    expect(decision.actionIDs).toBeUndefined();
+  });
+
+  it("maps a selectedLegalActionIds batch onto AgentDecision.actionIDs", async () => {
+    const brain = new ExternalHttpAgentBrain({
+      endpointUrl: "https://1.1.1.1/decide",
+      token: "secret-token",
+      profile: "aggressive",
+      fetchFn: async () =>
+        new Response(
+          JSON.stringify({
+            selectedLegalActionId: "expand:terra-nullius:10",
+            selectedLegalActionIds: ["expand:terra-nullius:10", "hold"],
+            reason: "expand, then bank the remainder as a hold",
+          }),
+          { status: 200 },
+        ),
+    });
+
+    const decision = await brain.decide({ observation, legalActions });
+
+    expect(decision.actionID).toBe("expand:terra-nullius:10");
+    expect(decision.actionIDs).toEqual(["expand:terra-nullius:10", "hold"]);
+    expect(decision.metadata).toMatchObject({ fallbackUsed: false });
+  });
+
+  it("maps the batch through the relay transport for parity", async () => {
+    const brain = new ExternalRelayAgentBrain({
+      relayBaseUrl: "https://relay.example",
+      sessionID: "sess-1",
+      profile: "aggressive",
+      fetchFn: async () =>
+        new Response(
+          JSON.stringify({
+            responseText: JSON.stringify({
+              selectedLegalActionId: "expand:terra-nullius:10",
+              selectedLegalActionIds: ["expand:terra-nullius:10", "hold"],
+              reason: "expand, then bank the remainder as a hold",
+            }),
+          }),
+          { status: 200 },
+        ),
+    });
+
+    const decision = await brain.decide({ observation, legalActions });
+
+    expect(decision.actionID).toBe("expand:terra-nullius:10");
+    expect(decision.actionIDs).toEqual(["expand:terra-nullius:10", "hold"]);
   });
 
   it("falls back safely when the endpoint returns an unknown action id, recording no stated reason", async () => {

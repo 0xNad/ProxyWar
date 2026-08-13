@@ -889,6 +889,14 @@ function matchSummary(
   const objectiveAlignedDecisionCount = entries.filter(
     (entry) => entry.objectiveAligned === true,
   ).length;
+  // A batched decision produces one entry PER ACTION (batchIndex 0..k), all
+  // carrying the same brain-cycle metadata. Primary entries (batchIndex
+  // absent or 0) therefore count BRAIN DECISIONS — the honest denominator
+  // for fallback-rate dashboards, which `decisionCount` (record/action
+  // count, kept for compatibility) stops being once batches exist.
+  const primaryEntries = entries.filter(
+    (entry) => (entry.batchIndex ?? 0) === 0,
+  );
   const frontierConversionTiming = frontierConversionTimingSummary(entries);
   const frontierFinishPressure = frontierFinishPressureSummary(entries);
   const openingExpansionTempo = openingExpansionTempoSummary(entries);
@@ -911,6 +919,14 @@ function matchSummary(
     durationMs: input.completedAt - input.startedAt,
     roster: input.roster,
     decisionCount: entries.length,
+    // Cycle-level truth alongside the record-level counts: how many times a
+    // brain was actually asked, and how many of THOSE were fallbacks. With
+    // all-scalar play both pairs are equal; under batching fallbackUsed rides
+    // every record of a degraded batch, so fallbackCount/decisionCount would
+    // overstate per-record and dashboards need this pair instead.
+    brainDecisionCount: primaryEntries.length,
+    brainFallbackCount: primaryEntries.filter((entry) => entry.fallbackUsed)
+      .length,
     acceptedCount: entries.filter((entry) => entry.result.accepted).length,
     rejectedCount: entries.filter((entry) => !entry.result.accepted).length,
     fallbackCount: entries.filter((entry) => entry.fallbackUsed).length,
@@ -935,12 +951,17 @@ function matchSummary(
     notApplicableEffectCount: entries.filter(
       (entry) => entry.auditStatus === "not_applicable",
     ).length,
+    // Primary entries only: every record of a batch re-carries the SAME
+    // brain-call latency, so averaging over all entries would double-count
+    // it per action. Identical to the old value for all-scalar matches.
     averageDecisionLatencyMs:
-      entries.length === 0
+      primaryEntries.length === 0
         ? 0
         : Math.round(
-            entries.reduce((sum, entry) => sum + entry.decisionLatencyMs, 0) /
-              entries.length,
+            primaryEntries.reduce(
+              (sum, entry) => sum + entry.decisionLatencyMs,
+              0,
+            ) / primaryEntries.length,
           ),
     actionCounts,
     strategicPriorityCounts,
