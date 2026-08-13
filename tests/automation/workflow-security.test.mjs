@@ -13,6 +13,11 @@ const production = readFileSync(
 const ci = readFileSync(".github/workflows/ci.yml", "utf8");
 const queue = readFileSync(".github/scripts/coworld-queue.mjs", "utf8");
 const vite = readFileSync("vite.config.ts", "utf8");
+const gitignore = readFileSync(".gitignore", "utf8");
+const leagueSourceGuard = readFileSync(
+  "scripts/verify-league-source.mjs",
+  "utf8",
+);
 
 test("privileged admission executes only protected main metadata code", () => {
   assert.match(admission, /pull_request_target:/);
@@ -21,7 +26,19 @@ test("privileged admission executes only protected main metadata code", () => {
   assert.doesNotMatch(admission, /pull_request\.head\.sha/);
   assert.doesNotMatch(admission, /refs\/pull/);
   assert.doesNotMatch(admission, /download-artifact/);
-  assert.doesNotMatch(admission, /secrets\.[A-Z0-9_]+/);
+  assert.deepEqual(
+    [...admission.matchAll(/secrets\.([A-Z0-9_]+)/g)].map((match) => match[1]),
+    ["TRUSTED_RELEASE_APP_PRIVATE_KEY"],
+  );
+  assert.match(
+    admission,
+    /actions\/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1/,
+  );
+  assert.match(admission, /permission-workflows: write/);
+  assert.match(
+    admission,
+    /GITHUB_TOKEN: \$\{\{ steps\.trusted_app\.outputs\.token \|\| github\.token \}\}/,
+  );
 });
 
 test("admission identity comes from API pull_request.user.login", () => {
@@ -32,6 +49,10 @@ test("admission identity comes from API pull_request.user.login", () => {
   assert.match(source, /authorLogin: pr\.user\.login/);
   assert.match(source, /fresh\.input\.headSha/);
   assert.match(source, /expectedHeadOid/);
+  assert.match(source, /expected_head_sha: expectedHeadSha/);
+  assert.match(source, /canRefreshTrustedBranch/);
+  assert.match(source, /branchRefreshTokenReady/);
+  assert.match(source, /missing-trusted-release-github-app-token/);
   assert.doesNotMatch(source, /enablePullRequestAutoMerge/);
   assert.doesNotMatch(source, /commit.*email/i);
   assert.doesNotMatch(source, /head\.ref.*trusted/i);
@@ -61,13 +82,20 @@ test("production secrets are isolated to a protected main environment job", () =
   );
 });
 
-test("release queue is durable beyond GitHub concurrency coalescing", () => {
+test("release ledger batches every eligible merge after a quiet window", () => {
   assert.match(production, /schedule:/);
   assert.match(production, /cancel-in-progress: false/);
-  assert.match(production, /durable FIFO/);
+  assert.match(production, /durable release ledger/);
+  assert.match(production, /batch_records_json/);
+  assert.match(production, /Batch merge SHAs/);
+  assert.match(production, /Close batch queue records/);
   assert.match(production, /github-actions\[bot\]/);
   assert.match(queue, /merge_order_at/);
   assert.match(queue, /pr\.merged_at/);
+  assert.match(queue, /batchQuietMinutes/);
+  assert.match(queue, /hasGlobalBatchHold/);
+  assert.match(queue, /validateBatchSnapshot/);
+  assert.match(queue, /git\/ref\/heads\/main/);
 });
 
 test("Coworld release is pinned, template-built, collision-checked, and fully certified", () => {
@@ -135,10 +163,7 @@ test("credentialless certification proof is restored before guarded production u
     production.match(/XDG_CACHE_HOME=\$CERTIFICATION_CACHE/g)?.length,
     2,
   );
-  assert.equal(
-    production.match(/\^sha256:\[0-9a-f\]\{64\}\$/g)?.length,
-    4,
-  );
+  assert.equal(production.match(/\^sha256:\[0-9a-f\]\{64\}\$/g)?.length, 4);
   assert.match(
     production,
     /coworld-certification-key\.txt"\)" =~ \^sha256:\[0-9a-f\]\{64\}\$/,
@@ -175,6 +200,36 @@ test("main CI retains PR, push, merge-group, and explicit recursion fallback cov
   assert.match(ci, /🔐 Trusted release automation/);
   assert.match(ci, /ref: \$\{\{ inputs\.source_sha \|\| github\.sha \}\}/);
   assert.match(vite, /\*\*\/tests\/automation\/\*\*/);
+});
+
+test("every main CI dependency install uses the bounded retry wrapper", () => {
+  assert.doesNotMatch(ci, /- run: npm ci\s*$/m);
+  assert.equal(
+    ci.match(
+      /node artifacts\/trusted-ci-control\/\.github\/scripts\/npm-ci-with-retry\.mjs/g,
+    )?.length,
+    7,
+  );
+  assert.match(ci, /ref: main/);
+  assert.match(ci, /path: artifacts\/trusted-ci-control/);
+  assert.match(
+    ci,
+    /sparse-checkout: \.github\/scripts\/npm-ci-with-retry\.mjs/,
+  );
+  assert.match(ci, /persist-credentials: false/);
+  assert.match(gitignore, /^artifacts\/$/m);
+  assert.match(leagueSourceGuard, /"artifacts"/);
+});
+
+test("production retries failed exact-source CI without bypassing it", () => {
+  const awaitMainCi = readFileSync(".github/scripts/await-main-ci.mjs", "utf8");
+  assert.match(awaitMainCi, /rerun-failed-jobs/);
+  assert.match(awaitMainCi, /requiredCiRunAction/);
+  assert.match(awaitMainCi, /action === "fail"/);
+  assert.doesNotMatch(
+    awaitMainCi,
+    /conclusion !== "success"[^]*process\.exit\(0\)/,
+  );
 });
 
 test("workflows never echo or artifact production credentials", () => {

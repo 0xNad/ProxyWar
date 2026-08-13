@@ -16,7 +16,8 @@ on:
     - cron: "*/10 * * * *"
 
 # GitHub concurrency coalesces pending runs. Open github-actions[bot] issues are
-# the durable FIFO; the worker orders them by the PR's authoritative merged_at.
+# the durable release ledger. After a quiet window the worker snapshots every
+# eligible open record into one immutable batch ordered by authoritative merged_at.
 concurrency:
   group: proxywar-coworld-production
   cancel-in-progress: false
@@ -45,6 +46,10 @@ jobs:
       author: ${{ steps.acceptance.outputs.author || steps.queue.outputs.author }}
       tested_head_sha: ${{ steps.acceptance.outputs.tested_head_sha || steps.queue.outputs.tested_head_sha }}
       merge_sha: ${{ steps.acceptance.outputs.merge_sha || steps.queue.outputs.merge_sha }}
+      batch_records_json: ${{ steps.acceptance.outputs.batch_records_json || steps.queue.outputs.batch_records_json }}
+      batch_queue_issues: ${{ steps.acceptance.outputs.batch_queue_issues || steps.queue.outputs.batch_queue_issues }}
+      batch_pr_numbers: ${{ steps.acceptance.outputs.batch_pr_numbers || steps.queue.outputs.batch_pr_numbers }}
+      batch_merge_shas: ${{ steps.acceptance.outputs.batch_merge_shas || steps.queue.outputs.batch_merge_shas }}
     steps:
       - name: Checkout protected queue code from main
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -52,7 +57,7 @@ jobs:
           ref: main
           persist-credentials: false
           submodules: false
-      - name: Validate oldest trusted-contributor queue item
+      - name: Validate trusted-contributor release batch
         id: queue
         if: ${{ !inputs.acceptance_source_sha }}
         env:
@@ -70,6 +75,7 @@ jobs:
           test "$GITHUB_ACTOR" = "0xNad"
           test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
           test "$SOURCE_SHA" = "$(gh api repos/$GITHUB_REPOSITORY/git/ref/heads/main --jq .object.sha)"
+          BATCH_RECORD=$(jq -cn --arg sha "$SOURCE_SHA" '[{issueNumber:0,prNumber:0,author:"0xNad",testedHeadSha:$sha,mergeSha:$sha}]')
           {
             echo "has_item=true"
             echo "queue_issue=0"
@@ -77,6 +83,10 @@ jobs:
             echo "author=0xNad"
             echo "tested_head_sha=$SOURCE_SHA"
             echo "merge_sha=$SOURCE_SHA"
+            echo "batch_records_json=$BATCH_RECORD"
+            echo "batch_queue_issues=0"
+            echo "batch_pr_numbers=0"
+            echo "batch_merge_shas=$SOURCE_SHA"
           } >> "$GITHUB_OUTPUT"
 
   await-main-ci:
@@ -177,6 +187,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ needs.dequeue.outputs.merge_sha }}
           QUEUE_ISSUE: ${{ needs.dequeue.outputs.queue_issue }}
+          BATCH_RECORDS_JSON: ${{ needs.dequeue.outputs.batch_records_json }}
         run: |
           set -euo pipefail
           test -n "$COWORLD_API_TOKEN"
@@ -195,13 +206,18 @@ jobs:
             if [ -n "$SAVED" ]; then
               PREVIOUS_ID=$(printf '%s\n' "$SAVED" | sed -n 's/^- Previous canonical ID: `\([^`]*\)`$/\1/p')
               PREVIOUS_VERSION=$(printf '%s\n' "$SAVED" | sed -n 's/^- Previous canonical version: `\([^`]*\)`$/\1/p')
-            else
-              BODY="<!-- proxywar-coworld-rollback-target-v1 -->
+            fi
+            BODY="<!-- proxywar-coworld-rollback-target-v1 -->
           - Previous canonical ID: \`$PREVIOUS_ID\`
           - Previous canonical version: \`$PREVIOUS_VERSION\`
           - Captured before first upload for source: \`$SOURCE_SHA\`"
-              gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$QUEUE_ISSUE/comments" -f body="$BODY" >/dev/null
-            fi
+            while IFS= read -r ISSUE_NUMBER; do
+              ISSUE_COMMENTS="$RUNNER_TEMP/queue-comments-$ISSUE_NUMBER.json"
+              gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER/comments?per_page=100" > "$ISSUE_COMMENTS"
+              if [ "$(jq --arg sha "$SOURCE_SHA" '[.[] | select(.user.login=="github-actions[bot]" and .user.type=="Bot") | select(.body | contains("proxywar-coworld-rollback-target-v1") and contains("source: `"+$sha+"`"))] | length' "$ISSUE_COMMENTS")" = "0" ]; then
+                gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER/comments" -f body="$BODY" >/dev/null
+              fi
+            done < <(jq -r '.[].issueNumber' <<< "$BATCH_RECORDS_JSON")
           fi
           [[ "$PREVIOUS_ID" =~ ^cow_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
           [[ "$PREVIOUS_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
@@ -306,6 +322,9 @@ jobs:
           TESTED_HEAD_SHA: ${{ needs.dequeue.outputs.tested_head_sha }}
           PR_NUMBER: ${{ needs.dequeue.outputs.pr_number }}
           PR_AUTHOR: ${{ needs.dequeue.outputs.author }}
+          BATCH_PRS: ${{ needs.dequeue.outputs.batch_pr_numbers }}
+          BATCH_QUEUE_ISSUES: ${{ needs.dequeue.outputs.batch_queue_issues }}
+          BATCH_MERGE_SHAS: ${{ needs.dequeue.outputs.batch_merge_shas }}
           MAIN_CI_RUN_ID: ${{ needs.await-main-ci.outputs.main_ci_run_id }}
         run: |
           set -euo pipefail
@@ -333,6 +352,7 @@ jobs:
       - name: Package checksummed immutable release artifact
         env:
           SOURCE_SHA: ${{ needs.dequeue.outputs.merge_sha }}
+          BATCH_RECORDS_JSON: ${{ needs.dequeue.outputs.batch_records_json }}
         run: |
           set -euo pipefail
           MANIFEST=coworld-adapter/dist/coworld_manifest.json
@@ -349,7 +369,8 @@ jobs:
           tar -czf "$RUNNER_TEMP/coworld-release.tgz" -C coworld-adapter/dist .
           (cd "$RUNNER_TEMP" && sha256sum coworld-release.tgz coworld-images.tar.gz coworld-images.txt coworld-certified-manifests.json coworld-certification-key.txt > coworld-release.sha256)
           jq -n --arg source_sha "$SOURCE_SHA" --arg version "${{ needs.preflight.outputs.version }}" \
-            '{source_sha:$source_sha,version:$version}' > "$RUNNER_TEMP/coworld-release.json"
+            --argjson batch_records "$BATCH_RECORDS_JSON" \
+            '{source_sha:$source_sha,version:$version,batch_records:$batch_records}' > "$RUNNER_TEMP/coworld-release.json"
       - name: Upload immutable release artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -381,6 +402,10 @@ jobs:
       PR_NUMBER: ${{ needs.dequeue.outputs.pr_number }}
       PR_AUTHOR: ${{ needs.dequeue.outputs.author }}
       QUEUE_ISSUE: ${{ needs.dequeue.outputs.queue_issue }}
+      BATCH_RECORDS_JSON: ${{ needs.dequeue.outputs.batch_records_json }}
+      BATCH_QUEUE_ISSUES: ${{ needs.dequeue.outputs.batch_queue_issues }}
+      BATCH_PR_NUMBERS: ${{ needs.dequeue.outputs.batch_pr_numbers }}
+      BATCH_MERGE_SHAS: ${{ needs.dequeue.outputs.batch_merge_shas }}
       MAIN_CI_RUN_ID: ${{ needs.await-main-ci.outputs.main_ci_run_id }}
       PREVIOUS_ID: ${{ needs.preflight.outputs.previous_id }}
       PREVIOUS_VERSION: ${{ needs.preflight.outputs.previous_version }}
@@ -430,6 +455,7 @@ jobs:
           sha256sum --check coworld-release.sha256
           test "$(jq -r .source_sha coworld-release.json)" = "$SOURCE_SHA"
           test "$(jq -r .version coworld-release.json)" = "$EXPECTED_VERSION"
+          test "$(jq -c .batch_records coworld-release.json)" = "$(jq -c . <<< "$BATCH_RECORDS_JSON")"
           python - <<'PY'
           import json, os, pathlib, re, tarfile
           archive = os.path.join(os.environ["RUNNER_TEMP"], "release-artifact", "coworld-release.tgz")
@@ -622,7 +648,9 @@ jobs:
           cat >> "$GITHUB_STEP_SUMMARY" <<EOF
           ## Coworld production release
 
-          - PR: #$PR_NUMBER by $PR_AUTHOR
+          - Batch PRs: \`$BATCH_PR_NUMBERS\`
+          - Batch queue records: \`$BATCH_QUEUE_ISSUES\`
+          - Batch merge SHAs: \`$BATCH_MERGE_SHAS\`
           - Tested head: \`$TESTED_HEAD_SHA\`
           - Merge/source SHA: \`$SOURCE_SHA\`
           - Main CI run: $MAIN_CI_RUN_ID
@@ -639,7 +667,7 @@ jobs:
           - Elapsed: ${ELAPSED_SECONDS}s
           EOF
           echo "deployment_id=$DEPLOYMENT_ID" >> "$GITHUB_OUTPUT"
-      - name: Close queue record and comment on source PR
+      - name: Close batch queue records and comment on every source PR
         if: ${{ success() && env.QUEUE_ISSUE != '0' }}
         env:
           GH_TOKEN: ${{ github.token }}
@@ -652,10 +680,17 @@ jobs:
           SMOKE_EPISODE: ${{ steps.live.outputs.smoke_episode }}
         run: |
           set -euo pipefail
-          BODY="Coworld release complete: source \`$SOURCE_SHA\`, main CI $MAIN_CI_RUN_ID, \`$PACKAGE_VERSION\` / \`$PACKAGE_ID\`, manifest \`$MANIFEST_HASH\`, replay bundle \`$REPLAY_BUNDLE\`, certification 10/10 \`$CERTIFICATION_JOB_ID\`, league \`$LEAGUE_ID\`, smoke \`$SMOKE_EPISODE\`. Original rollback target: \`$PREVIOUS_VERSION\` / \`$PREVIOUS_ID\`."
-          gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -f body="$BODY" >/dev/null
-          gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$QUEUE_ISSUE/labels" -f 'labels[]=coworld-release-complete' >/dev/null
-          gh api --method PATCH "repos/$GITHUB_REPOSITORY/issues/$QUEUE_ISSUE" -f state=closed >/dev/null
+          BODY="Coworld batch release complete: source \`$SOURCE_SHA\`, included PRs \`$BATCH_PR_NUMBERS\`, included merges \`$BATCH_MERGE_SHAS\`, main CI $MAIN_CI_RUN_ID, \`$PACKAGE_VERSION\` / \`$PACKAGE_ID\`, manifest \`$MANIFEST_HASH\`, replay bundle \`$REPLAY_BUNDLE\`, certification 10/10 \`$CERTIFICATION_JOB_ID\`, league \`$LEAGUE_ID\`, smoke \`$SMOKE_EPISODE\`. Original rollback target: \`$PREVIOUS_VERSION\` / \`$PREVIOUS_ID\`."
+          jq -c '.[]' <<< "$BATCH_RECORDS_JSON" | while IFS= read -r RECORD; do
+            BATCH_PR=$(jq -r .prNumber <<< "$RECORD")
+            BATCH_ISSUE=$(jq -r .issueNumber <<< "$RECORD")
+            gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$BATCH_PR/comments" -f body="$BODY" >/dev/null
+            gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$BATCH_ISSUE/labels" -f 'labels[]=coworld-release-complete' >/dev/null
+            gh api --method DELETE "repos/$GITHUB_REPOSITORY/issues/$BATCH_ISSUE/labels/coworld-release-queued" >/dev/null || test "$?" -eq 1
+            gh api --method DELETE "repos/$GITHUB_REPOSITORY/issues/$BATCH_ISSUE/labels/coworld-release-batch-hold" >/dev/null || test "$?" -eq 1
+            gh api --method DELETE "repos/$GITHUB_REPOSITORY/issues/$BATCH_ISSUE/labels/coworld-release-failed" >/dev/null || test "$?" -eq 1
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/issues/$BATCH_ISSUE" -f state=closed >/dev/null
+          done
       - name: Record failed release without deleting history
         if: ${{ failure() }}
         env:
@@ -686,11 +721,13 @@ jobs:
           if [ "$QUEUE_ISSUE" != "0" ]; then
             BODY="<!-- proxywar-coworld-deploy-failure:$GITHUB_RUN_ID -->
           Coworld release failed for source \`$SOURCE_SHA\`. Candidate: \`$CANDIDATE_ID\`. Current canonical: \`$CURRENT_VERSION\` / \`$CURRENT_ID\`. Original rollback target: \`$PREVIOUS_VERSION\` / \`$PREVIOUS_ID\`. Coworld exposes no safe rollback endpoint; inspect run $GITHUB_RUN_ID. The queue remains open for a safe retry."
-            gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$QUEUE_ISSUE/comments" -f body="$BODY" >/dev/null
-            gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$QUEUE_ISSUE/labels" -f 'labels[]=coworld-release-failed' >/dev/null
-            if [ -n "$CANDIDATE_ID" ] && [ "$CANDIDATE_ID" != "unknown" ]; then
-              gh api --method DELETE "repos/$GITHUB_REPOSITORY/issues/$QUEUE_ISSUE/labels/coworld-release-queued" >/dev/null
-            fi
+            jq -r '.[].issueNumber' <<< "$BATCH_RECORDS_JSON" | while IFS= read -r BATCH_ISSUE; do
+              gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$BATCH_ISSUE/comments" -f body="$BODY" >/dev/null
+              gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$BATCH_ISSUE/labels" -f 'labels[]=coworld-release-failed' >/dev/null
+              if [ -n "$CANDIDATE_ID" ] && [ "$CANDIDATE_ID" != "unknown" ]; then
+                gh api --method DELETE "repos/$GITHUB_REPOSITORY/issues/$BATCH_ISSUE/labels/coworld-release-queued" >/dev/null
+              fi
+            done
           fi
       - name: Remove any residual ephemeral credential directories
         if: always()
@@ -718,6 +755,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           DEPLOYMENT_ID: ${{ needs.preflight.outputs.deployment_id }}
           QUEUE_ISSUE: ${{ needs.dequeue.outputs.queue_issue }}
+          BATCH_RECORDS_JSON: ${{ needs.dequeue.outputs.batch_records_json }}
           SOURCE_SHA: ${{ needs.dequeue.outputs.merge_sha }}
           BLOCKED_CANDIDATE: ${{ needs.preflight.outputs.blocked_candidate }}
         run: |
@@ -730,12 +768,16 @@ jobs:
           if [ "$QUEUE_ISSUE" != "0" ]; then
             if [ -n "$BLOCKED_CANDIDATE" ]; then
               BODY="Coworld release for source \`$SOURCE_SHA\` is blocked by existing unhealthy candidate \`$BLOCKED_CANDIDATE\`. No duplicate was allocated. Operator recovery is required."
-              gh api --method DELETE "repos/$GITHUB_REPOSITORY/issues/$QUEUE_ISSUE/labels/coworld-release-queued" >/dev/null
             else
               BODY="Coworld release for source \`$SOURCE_SHA\` failed before upload in run $GITHUB_RUN_ID. No candidate was uploaded. The durable queue remains open for a safe retry."
             fi
-            gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$QUEUE_ISSUE/comments" -f body="$BODY" >/dev/null
-            gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$QUEUE_ISSUE/labels" -f 'labels[]=coworld-release-failed' >/dev/null
+            jq -r '.[].issueNumber' <<< "$BATCH_RECORDS_JSON" | while IFS= read -r BATCH_ISSUE; do
+              gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$BATCH_ISSUE/comments" -f body="$BODY" >/dev/null
+              gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$BATCH_ISSUE/labels" -f 'labels[]=coworld-release-failed' >/dev/null
+              if [ -n "$BLOCKED_CANDIDATE" ]; then
+                gh api --method DELETE "repos/$GITHUB_REPOSITORY/issues/$BATCH_ISSUE/labels/coworld-release-queued" >/dev/null
+              fi
+            done
           fi
 
   deploy-finalizer:
@@ -751,6 +793,7 @@ jobs:
           DEPLOYMENT_ID: ${{ needs.preflight.outputs.deployment_id }}
           QUEUE_ISSUE: ${{ needs.dequeue.outputs.queue_issue }}
           SOURCE_SHA: ${{ needs.dequeue.outputs.merge_sha }}
+          BATCH_RECORDS_JSON: ${{ needs.dequeue.outputs.batch_records_json }}
         run: |
           set -euo pipefail
           LATEST_STATE=""
@@ -772,13 +815,19 @@ jobs:
               if [ "$LATEST_STATE" = "success" ]; then
                 BODY="<!-- $MARKER -->
           Deploy worker ended after recording success for source \`$SOURCE_SHA\`; the finalizer recovered the durable queue audit state from deployment \`$DEPLOYMENT_ID\`."
-                gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$QUEUE_ISSUE/labels" -f 'labels[]=coworld-release-complete' >/dev/null
-                gh api --method PATCH "repos/$GITHUB_REPOSITORY/issues/$QUEUE_ISSUE" -f state=closed >/dev/null
+                jq -r '.[].issueNumber' <<< "$BATCH_RECORDS_JSON" | while IFS= read -r BATCH_ISSUE; do
+                  gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$BATCH_ISSUE/labels" -f 'labels[]=coworld-release-complete' >/dev/null
+                  gh api --method PATCH "repos/$GITHUB_REPOSITORY/issues/$BATCH_ISSUE" -f state=closed >/dev/null
+                done
               else
                 BODY="<!-- $MARKER -->
           Deploy worker was interrupted for source \`$SOURCE_SHA\` in run $GITHUB_RUN_ID. Hosted state may have changed; deployment \`$DEPLOYMENT_ID\` is failed and the durable queue remains for provenance-based reconciliation."
-                gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$QUEUE_ISSUE/labels" -f 'labels[]=coworld-release-failed' >/dev/null
+                jq -r '.[].issueNumber' <<< "$BATCH_RECORDS_JSON" | while IFS= read -r BATCH_ISSUE; do
+                  gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$BATCH_ISSUE/labels" -f 'labels[]=coworld-release-failed' >/dev/null
+                done
               fi
-              gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$QUEUE_ISSUE/comments" -f body="$BODY" >/dev/null
+              jq -r '.[].issueNumber' <<< "$BATCH_RECORDS_JSON" | while IFS= read -r BATCH_ISSUE; do
+                gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$BATCH_ISSUE/comments" -f body="$BODY" >/dev/null
+              done
             fi
           fi

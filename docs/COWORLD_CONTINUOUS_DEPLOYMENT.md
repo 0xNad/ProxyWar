@@ -1,9 +1,9 @@
 # Trusted-contributor merge and Coworld deployment
 
 ProxyWar automatically admits pull requests authored by the exact GitHub logins
-`johomax` and `relh`, then deploys every admitted merge as a new immutable
-`proxywar` Coworld version. The live target is the existing Proxy War league;
-the automation never creates another league.
+`johomax` and `relh`, then batches eligible admitted merges after a 15-minute
+quiet window into one immutable `proxywar` Coworld version. The live target is
+the existing Proxy War league; the automation never creates another league.
 
 ## Trust boundary
 
@@ -34,21 +34,50 @@ fail rather than race. Repository auto-merge remains enabled for ordinary
 operator use but is not an authorization mechanism.
 
 GitHub suppresses most recursive events created with `GITHUB_TOKEN`. Admission
-therefore writes a `github-actions[bot]` queue issue from the returned merge
-SHA and explicitly dispatches the production worker. `workflow_dispatch` is a
-documented recursion exception. Queue selection uses each PR's live
-authoritative `merged_at`, not issue creation order; GitHub concurrency is only
-a single-worker lock.
+therefore mints a short-lived installation token from the dedicated trusted
+release GitHub App. The App token lets an otherwise-safe trusted PR branch be
+updated to current `main` at an exact expected head SHA while still triggering
+ordinary read-only pull-request CI. No branch update occurs with the fallback
+`GITHUB_TOKEN`; admission reports the missing App token and fails closed. After
+an exact-head merge, admission writes a bot-authored queue issue from the
+returned merge SHA and explicitly dispatches the production worker. Each issue
+is a durable per-PR audit record, not necessarily a separate package. The worker
+waits until no newer eligible merge has arrived for 15 minutes, snapshots every
+open queue record, orders them by each PR's live authoritative `merged_at`, and
+snapshots protected current `main` as the release source only after proving it
+contains every queued merge. Using current `main` prevents an older held queue
+record from ever downgrading a newer canonical release. GitHub concurrency is
+only a single-worker lock; the issue ledger and quiet-window snapshot define the
+durable batch.
+
+An open `coworld-release-batch-hold` ledger record globally pauses dequeue. This
+is intentionally fail-closed: because a held merge is already part of `main`, no
+other batch may publish a current-main snapshot until every explicit hold is
+removed. A hold never permits the code to deploy without its audit record.
+
+The repository-level GitHub App configuration is:
+
+- variable `TRUSTED_RELEASE_APP_CLIENT_ID` — the App's non-secret client ID;
+- secret `TRUSTED_RELEASE_APP_PRIVATE_KEY` — the App private key;
+- installation scope — only `0xNad/ProxyWar`;
+- repository permissions — Actions read/write, Checks read, Contents
+  read/write, Issues read/write, Metadata read, Pull requests read/write, and
+  Workflows write.
+
+The App requires no webhook and no production or Coworld credential. Its token
+is minted for one job, explicitly narrowed to `ProxyWar`, masked by Actions,
+and revoked by the token action after the job.
 
 ## Coworld production pipeline
 
 `🌍 Coworld production` runs only from protected `main` and accesses the
 `coworld-production` environment. It:
 
-1. revalidates the queue issue, trusted author, tested head, merge SHA, labels,
-   changed paths, and any required owner approval;
-2. waits for complete CI on the exact merged SHA, explicitly dispatching the
-   exact-source CI fallback if a token-created merge suppressed `push`;
+1. revalidates every included queue issue, trusted author, tested head, merge
+   SHA, labels, changed paths, required owner approval, merge order, and ancestry;
+2. waits for complete CI on the protected `main` snapshot SHA, explicitly
+   dispatching the exact-source CI fallback if a token-created merge suppressed
+   `push`;
 3. allocates the next hosted version on a fresh protected-code-only runner and
    persists the original rollback target in the durable queue record;
 4. runs focused replay tests, typechecks, commissioner tests, the memory gate,
@@ -62,15 +91,16 @@ a single-worker lock.
    `coworld-adapter/coworld/coworld_manifest_template.json`, whose replay bundle
    is the local `build/static-replay-viewer` hook, never a downloaded hosted
    manifest or `sha256:` substitution;
-7. stamps the exact source, PR, tested head, merge SHA, and main-CI run into the
-   hosted manifest's release-provenance page;
+7. stamps the exact source plus all included PR numbers, queue records, merge
+   SHAs, and the main-CI run into the hosted manifest's release-provenance page;
 8. uploads with hosted smoke and full certification waits, requiring all ten
    certification steps;
 9. verifies canonical state, the existing league binding, a completed hosted
    smoke episode and replay bytes, then executes the published viewer in an
    isolated Chrome session and requires a canvas plus numeric replay progress;
-10. creates a GitHub deployment record, job summary, PR comment, and closed
-    durable queue record with the previous canonical package retained.
+10. creates one GitHub deployment record and job summary, then comments on every
+    included PR and closes every included durable queue record with the previous
+    canonical package retained.
 
 The Coworld toolchain is pinned to `coworld==0.1.38`. The required environment
 secret is:

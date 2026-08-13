@@ -1783,11 +1783,14 @@ describe("AgentLeagueMatchRunner", () => {
       serverConfig,
       gameConfig,
     );
+    const observationBuilder = new AgentObservationBuilder();
+    const observationBuildSpy = vi.spyOn(observationBuilder, "build");
     const match = new AgentLeagueMatchRunner({
       game,
       participants,
       spawnCandidates,
       log,
+      observationBuilder,
     });
 
     try {
@@ -1855,6 +1858,23 @@ describe("AgentLeagueMatchRunner", () => {
         seenPairs.add(pair);
       }
       expect(reciprocalPair).not.toBeNull();
+
+      observationBuildSpy.mockClear();
+      const communicationAwareRecords = await match.runDecisionTurn({
+        turnNumber: 2,
+        gameState: coreGame,
+      });
+      expect(
+        communicationAwareRecords.some((record) =>
+          record.observationSummary.includes(", comms="),
+        ),
+      ).toBe(true);
+      expect(observationBuildSpy).toHaveBeenCalledTimes(participants.length);
+      expect(
+        observationBuildSpy.mock.calls.some(
+          ([input]) => (input.recentCommunications?.length ?? 0) > 0,
+        ),
+      ).toBe(true);
 
       const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
       try {

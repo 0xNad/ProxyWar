@@ -39,6 +39,7 @@ import {
 interface BuildTargetCandidate {
   targetTile: number;
   buildTile: number;
+  usedCachedSpawn: boolean;
   placement: BuildPlacementAnalysis;
 }
 
@@ -79,11 +80,57 @@ interface NukeTargetAnalysis {
   priority: number;
 }
 
+interface BuildSearchContext {
+  sortedOwnedTiles?: readonly number[];
+  borderTileSet?: ReadonlySet<number>;
+  borderTiles?: readonly number[];
+  hostileFrontTiles?: readonly number[];
+  incomingFrontTiles?: readonly number[];
+  nukeTargetTiles?: readonly number[];
+  landStructureSpawnByTarget: Map<number, number | false>;
+}
+
 const DEFENSE_POST_EFFECTIVE_RANGE = 30;
 const DEFENSE_POST_FRONTIER_SEARCH_RANGE = 75;
 const NEUTRAL_ISLAND_SHORE_SAMPLE_LIMIT = 48;
 const NEUTRAL_ISLAND_TRANSPORT_TARGET_LIMIT = 10;
 const NEUTRAL_ISLAND_TRANSPORT_SCAN_LIMIT = 80;
+export const BUILD_OPTION_CANDIDATES = [
+  { unit: UnitType.DefensePost, role: "defensive" },
+  { unit: UnitType.City, role: "economic" },
+  { unit: UnitType.Port, role: "economic" },
+  { unit: UnitType.Factory, role: "economic" },
+  { unit: UnitType.SAMLauncher, role: "defensive" },
+  { unit: UnitType.MissileSilo, role: "infrastructure" },
+  { unit: UnitType.AtomBomb, role: "infrastructure" },
+  { unit: UnitType.HydrogenBomb, role: "infrastructure" },
+  { unit: UnitType.MIRV, role: "infrastructure" },
+] as const satisfies readonly Pick<AgentBuildOption, "unit" | "role">[];
+
+type BuildOptionUnit = (typeof BUILD_OPTION_CANDIDATES)[number]["unit"];
+
+// These types share PlayerImpl's landBasedStructureSpawn path after eligibility checks.
+export const SHARED_LAND_STRUCTURE_BUILD_TYPES = [
+  UnitType.DefensePost,
+  UnitType.City,
+  UnitType.Factory,
+  UnitType.SAMLauncher,
+  UnitType.MissileSilo,
+] as const satisfies readonly UnitType[];
+const SHARED_LAND_STRUCTURE_BUILD_TYPE_SET: ReadonlySet<UnitType> = new Set(
+  SHARED_LAND_STRUCTURE_BUILD_TYPES,
+);
+
+type SynchronousResult<T> = T extends PromiseLike<unknown> ? never : T;
+
+export interface ObservationBuilderLike {
+  build(input: BuildAgentObservationInput): AgentObservation;
+  summarize(observation: AgentObservation): string;
+  withObservationBatch<T>(
+    gameState: Game | undefined,
+    callback: () => SynchronousResult<T>,
+  ): T;
+}
 
 export interface BuildAgentObservationInput {
   agentID: string;
@@ -100,6 +147,37 @@ export interface BuildAgentObservationInput {
 }
 
 export class AgentObservationBuilder {
+  private neutralIslandTransportTileCache: {
+    gameState: Game;
+    tick: number;
+    tiles: readonly number[] | null;
+  } | null = null;
+
+  /** Shares work while a synchronous, non-mutating callback builds one snapshot. */
+  withObservationBatch<T>(
+    gameState: Game | undefined,
+    callback: () => SynchronousResult<T>,
+  ): T {
+    const previousCache = this.neutralIslandTransportTileCache;
+    const cache =
+      gameState === undefined
+        ? null
+        : { gameState, tick: gameState.ticks(), tiles: null };
+    this.neutralIslandTransportTileCache = cache;
+    try {
+      const result = callback();
+      if (isPromiseLike(result)) {
+        throw new Error("observation batch callback must be synchronous");
+      }
+      if (cache !== null) {
+        this.assertObservationBatchTick(cache);
+      }
+      return result as T;
+    } finally {
+      this.neutralIslandTransportTileCache = previousCache;
+    }
+  }
+
   build(input: BuildAgentObservationInput): AgentObservation {
     const notes: string[] = [];
     const phase = input.phaseOverride ?? this.phaseFromGame(input.gameState);
@@ -619,52 +697,56 @@ export class AgentObservationBuilder {
     };
   }
 
-  private buildOptions(gameState: Game, player: Player): AgentBuildOption[] {
-    const candidates: Array<{
-      unit: AgentBuildOption["unit"];
-      role: AgentBuildOption["role"];
-    }> = [
-      {
-        unit: UnitType.DefensePost,
-        role: "defensive",
-      },
-      {
-        unit: UnitType.City,
-        role: "economic",
-      },
-      {
-        unit: UnitType.Port,
-        role: "economic",
-      },
-      {
-        unit: UnitType.Factory,
-        role: "economic",
-      },
-      {
-        unit: UnitType.SAMLauncher,
-        role: "defensive",
-      },
-      {
-        unit: UnitType.MissileSilo,
-        role: "infrastructure",
-      },
-      {
-        unit: UnitType.AtomBomb,
-        role: "infrastructure",
-      },
-      {
-        unit: UnitType.HydrogenBomb,
-        role: "infrastructure",
-      },
-      {
-        unit: UnitType.MIRV,
-        role: "infrastructure",
-      },
-    ];
-    const options: AgentBuildOption[] = [];
+  private buildSearchContext(): BuildSearchContext {
+    return { landStructureSpawnByTarget: new Map() };
+  }
 
-    for (const option of candidates) {
-      const target = this.findBuildTarget(gameState, player, option.unit);
+  private prepareOwnedBuildSearch(
+    gameState: Game,
+    player: Player,
+    context: BuildSearchContext,
+  ): BuildSearchContext {
+    if (context.sortedOwnedTiles !== undefined) {
+      return context;
+    }
+    const borderTileSet = player.borderTiles();
+    context.sortedOwnedTiles = Array.from(player.tiles()).sort(
+      buildSearchTileComparator(gameState, player.spawnTile()),
+    );
+    context.borderTileSet = borderTileSet;
+    context.borderTiles = Array.from(borderTileSet);
+    context.hostileFrontTiles = this.hostileFrontTiles(gameState, player);
+    context.incomingFrontTiles = this.incomingAttackFrontTiles(
+      gameState,
+      player,
+    );
+    return context;
+  }
+
+  private buildOptions(gameState: Game, player: Player): AgentBuildOption[] {
+    if (!player.isAlive()) {
+      return [];
+    }
+
+    const config = gameState.config();
+    const options: AgentBuildOption[] = [];
+    let context: BuildSearchContext | undefined;
+
+    for (const option of BUILD_OPTION_CANDIDATES) {
+      if (config.isUnitDisabled(option.unit)) {
+        continue;
+      }
+      const cost = config.unitInfo(option.unit).cost(gameState, player);
+      if (player.gold() < cost) {
+        continue;
+      }
+      context ??= this.buildSearchContext();
+      const target = this.findBuildTarget(
+        gameState,
+        player,
+        option.unit,
+        context,
+      );
       if (target === null) {
         continue;
       }
@@ -673,12 +755,10 @@ export class AgentObservationBuilder {
         role: option.role,
         targetTile: target.targetTile,
         buildTile: target.buildTile,
-        cost: gameState
-          .config()
-          .unitInfo(option.unit)
-          .cost(gameState, player)
-          .toString(),
-        legalReason: `core canBuild(${option.unit}) returned build tile ${target.buildTile}`,
+        cost: cost.toString(),
+        legalReason: target.usedCachedSpawn
+          ? `shared land-structure spawn check returned build tile ${target.buildTile}`
+          : `core canBuild(${option.unit}) returned build tile ${target.buildTile}`,
         ...target.placement,
       });
     }
@@ -689,23 +769,26 @@ export class AgentObservationBuilder {
   private findBuildTarget(
     gameState: Game,
     player: Player,
-    unit: AgentBuildOption["unit"],
+    unit: BuildOptionUnit,
+    context: BuildSearchContext,
   ): BuildTargetCandidate | null {
     let best: BuildTargetCandidate | null = null;
     let bestScore = Number.NEGATIVE_INFINITY;
-    // Candidate-independent inputs, hoisted: recomputing these per candidate
-    // (up to 400 of them) re-ran three full border×neighbor scans each time —
-    // the same per-iteration-copy class as the touchesOwnedTerritory hotspot,
-    // and it fires exactly when the agent is rich enough to afford builds on
-    // a large late-game border.
-    const borderTiles = Array.from(player.borderTiles());
-    const hostileFrontTiles = this.hostileFrontTiles(gameState, player);
-    const incomingFrontTiles = this.incomingAttackFrontTiles(gameState, player);
-    for (const tile of this.buildSearchTiles(gameState, player, unit).slice(
-      0,
-      buildCandidateLimit(unit),
-    )) {
-      const buildTile = player.canBuild(unit, tile);
+    const cache = SHARED_LAND_STRUCTURE_BUILD_TYPE_SET.has(unit)
+      ? context.landStructureSpawnByTarget
+      : undefined;
+    for (const tile of this.buildSearchTiles(
+      gameState,
+      player,
+      unit,
+      context,
+    ).slice(0, buildCandidateLimit(unit))) {
+      let buildTile = cache?.get(tile);
+      const usedCachedSpawn = buildTile !== undefined;
+      if (buildTile === undefined) {
+        buildTile = player.canBuild(unit, tile);
+        cache?.set(tile, buildTile);
+      }
       if (buildTile !== false) {
         const placement = this.buildPlacementAnalysis(
           gameState,
@@ -713,9 +796,7 @@ export class AgentObservationBuilder {
           unit,
           tile,
           buildTile,
-          borderTiles,
-          hostileFrontTiles,
-          incomingFrontTiles,
+          context,
         );
         if (
           unit === UnitType.DefensePost &&
@@ -725,7 +806,7 @@ export class AgentObservationBuilder {
         }
         const score = buildPlacementScore(unit, placement);
         if (score > bestScore) {
-          best = { targetTile: tile, buildTile, placement };
+          best = { targetTile: tile, buildTile, usedCachedSpawn, placement };
           bestScore = score;
         }
       }
@@ -736,62 +817,49 @@ export class AgentObservationBuilder {
   private buildSearchTiles(
     gameState: Game,
     player: Player,
-    unit: AgentBuildOption["unit"],
-  ): number[] {
-    const tiles = Array.from(player.tiles());
-    const spawnTile = player.spawnTile();
-    let source: number[];
-    if (unit === UnitType.DefensePost) {
-      source = Array.from(player.borderTiles());
-    } else if (unit === UnitType.Port) {
-      source = tiles.filter((tile) => gameState.isShore(tile));
-    } else if (unit === UnitType.Warship) {
-      source = this.waterTilesNearPorts(gameState, player);
-    } else if (BuildableAttacks.has(unit)) {
-      return this.nukeTargetTiles(gameState, player);
-    } else {
-      source = tiles;
+    unit: BuildOptionUnit,
+    context: BuildSearchContext,
+  ): readonly number[] {
+    if (BuildableAttacks.has(unit)) {
+      context.nukeTargetTiles ??= this.nukeTargetTiles(gameState, player);
+      return context.nukeTargetTiles;
     }
-    return source.sort((a, b) => {
-      if (spawnTile === undefined) {
-        return a - b;
-      }
-      // Manhattan distance, not |Δref|: linear tile-ref arithmetic treats a
-      // tile one row down as ~a full map-width away, which row-biased the
-      // candidate pool feeding the buildCandidateLimit() truncation.
-      return (
-        gameState.manhattanDist(a, spawnTile) -
-          gameState.manhattanDist(b, spawnTile) || a - b
+    this.prepareOwnedBuildSearch(gameState, player, context);
+    const sortedOwnedTiles = context.sortedOwnedTiles!;
+    if (unit === UnitType.DefensePost) {
+      return sortedOwnedTiles.filter((tile) =>
+        context.borderTileSet!.has(tile),
       );
-    });
+    } else if (unit === UnitType.Port) {
+      return sortedOwnedTiles.filter((tile) => gameState.isShore(tile));
+    } else {
+      return sortedOwnedTiles;
+    }
   }
 
   private buildPlacementAnalysis(
     gameState: Game,
     player: Player,
-    unit: AgentBuildOption["unit"],
+    unit: BuildOptionUnit,
     targetTile: number,
     buildTile: number,
-    // Candidate-independent, computed once per findBuildTarget sweep and
-    // passed in — see the hoist comment there.
-    borderTiles: readonly number[],
-    hostileFrontTiles: readonly number[],
-    incomingFrontTiles: readonly number[],
+    context: BuildSearchContext,
   ): BuildPlacementAnalysis {
+    this.prepareOwnedBuildSearch(gameState, player, context);
     const borderDistance = nearestManhattanDistance(
       gameState,
       buildTile,
-      borderTiles,
+      context.borderTiles!,
     );
     const hostileBorderDistance = nearestManhattanDistanceOrNull(
       gameState,
       buildTile,
-      hostileFrontTiles,
+      context.hostileFrontTiles!,
     );
     const incomingFrontDistance = nearestManhattanDistanceOrNull(
       gameState,
       buildTile,
-      incomingFrontTiles,
+      context.incomingFrontTiles!,
     );
     const nearbyIncomingAttack =
       incomingFrontDistance !== null &&
@@ -1163,21 +1231,6 @@ export class AgentObservationBuilder {
       .slice(0, 10);
   }
 
-  private waterTilesNearPorts(gameState: Game, player: Player): number[] {
-    const result: number[] = [];
-    for (const port of player.units(UnitType.Port)) {
-      for (const neighbor of gameState.neighbors(port.tile())) {
-        if (gameState.isWater(neighbor)) {
-          result.push(neighbor);
-        }
-      }
-      if (result.length >= 12) {
-        break;
-      }
-    }
-    return result;
-  }
-
   private nukeTargetTiles(gameState: Game, player: Player): number[] {
     const candidates: Array<{ tile: number; score: number }> = [];
     const enemies = gameState
@@ -1361,21 +1414,15 @@ export class AgentObservationBuilder {
     const sampledShores = shores.slice(0, NEUTRAL_ISLAND_SHORE_SAMPLE_LIMIT);
     const scored: Array<{ tile: number; distance: number }> = [];
 
-    gameState.forEachTile((tile) => {
-      if (
-        !gameState.isLand(tile) ||
-        !gameState.isShore(tile) ||
-        gameState.hasOwner(tile) ||
-        gameState.hasFallout(tile) ||
-        this.touchesOwnedTerritory(gameState, player, tile)
-      ) {
-        return;
+    for (const tile of this.unownedNonFalloutShoreTiles(gameState)) {
+      if (this.touchesOwnedTerritory(gameState, player, tile)) {
+        continue;
       }
       scored.push({
         tile,
         distance: nearestManhattanDistance(gameState, tile, sampledShores),
       });
-    });
+    }
 
     return scored
       .sort((a, b) => a.distance - b.distance || a.tile - b.tile)
@@ -1386,6 +1433,38 @@ export class AgentObservationBuilder {
       )
       .slice(0, NEUTRAL_ISLAND_TRANSPORT_TARGET_LIMIT)
       .map((candidate) => candidate.tile);
+  }
+
+  private unownedNonFalloutShoreTiles(gameState: Game): readonly number[] {
+    const cached = this.neutralIslandTransportTileCache;
+    if (cached?.gameState !== gameState) {
+      return this.scanUnownedNonFalloutShoreTiles(gameState);
+    }
+    this.assertObservationBatchTick(cached);
+    return (cached.tiles ??= this.scanUnownedNonFalloutShoreTiles(gameState));
+  }
+
+  private assertObservationBatchTick(cache: {
+    gameState: Game;
+    tick: number;
+  }): void {
+    if (cache.gameState.ticks() !== cache.tick) {
+      throw new Error("game tick changed during observation batch");
+    }
+  }
+
+  private scanUnownedNonFalloutShoreTiles(gameState: Game): number[] {
+    const tiles: number[] = [];
+    gameState.forEachTile((tile) => {
+      if (
+        gameState.isShore(tile) &&
+        !gameState.hasOwner(tile) &&
+        !gameState.hasFallout(tile)
+      ) {
+        tiles.push(tile);
+      }
+    });
+    return tiles;
   }
 
   private touchesOwnedTerritory(
@@ -1794,7 +1873,21 @@ function coordinationQuickChatOptions(
   });
 }
 
-function buildCandidateLimit(unit: AgentBuildOption["unit"]): number {
+function buildSearchTileComparator(
+  gameState: Game,
+  spawnTile: number | undefined,
+): (a: number, b: number) => number {
+  if (spawnTile === undefined) {
+    return (a, b) => a - b;
+  }
+  // Manhattan distance, not |Δref|: linear tile-ref arithmetic treats a tile
+  // one row down as ~a full map-width away, which row-biased candidate pools.
+  return (a, b) =>
+    gameState.manhattanDist(a, spawnTile) -
+      gameState.manhattanDist(b, spawnTile) || a - b;
+}
+
+export function buildCandidateLimit(unit: UnitType): number {
   switch (unit) {
     case UnitType.DefensePost:
       return 400;
@@ -1906,4 +1999,13 @@ function nearestManhattanDistanceOrNull(
 
 function clamp01(value: number): number {
   return Math.max(0, Math.min(1, Math.round(value * 100) / 100));
+}
+
+function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+  return (
+    value !== null &&
+    (typeof value === "object" || typeof value === "function") &&
+    "then" in value &&
+    typeof value.then === "function"
+  );
 }

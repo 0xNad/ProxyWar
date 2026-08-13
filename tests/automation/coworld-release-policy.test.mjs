@@ -3,8 +3,11 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
+  hasGlobalBatchHold,
+  isBatchQuiet,
   parseQueueIssue,
-  selectOldestQueueIssue,
+  selectQueueBatch,
+  validateBatchSnapshot,
 } from "../../.github/scripts/coworld-queue.mjs";
 import {
   assertTemplateRebuildsReplayViewer,
@@ -164,7 +167,7 @@ test("release records reject secret-shaped output", () => {
   assert.throws(() => createReleaseRecord({ private_key: "forbidden" }));
 });
 
-test("durable queue selects the oldest open labeled issue", () => {
+test("durable queue batches every open labeled issue in merge order", () => {
   const issues = [
     {
       number: 2,
@@ -187,9 +190,88 @@ test("durable queue selects the oldest open labeled issue", () => {
       merge_order_at: "2026-08-11T00:00:00Z",
       labels: [{ name: "coworld-release-queued" }],
     },
+    {
+      number: 4,
+      state: "open",
+      created_at: "2026-08-11T03:00:00Z",
+      merge_order_at: "2026-08-11T03:00:00Z",
+      labels: [
+        { name: "coworld-release-queued" },
+        { name: "coworld-release-batch-hold" },
+      ],
+    },
   ];
-  assert.equal(selectOldestQueueIssue(issues).number, 1);
-  assert.equal(selectOldestQueueIssue(issues, 2).number, 1);
+  assert.deepEqual(
+    selectQueueBatch(issues.slice(0, 3)).map((issue) => issue.number),
+    [1, 2],
+  );
+  assert.deepEqual(
+    selectQueueBatch(issues.slice(0, 3), 2).map((issue) => issue.number),
+    [1, 2],
+  );
+  assert.deepEqual(
+    selectQueueBatch([
+      { ...issues[1], number: 9, merge_order_at: "2026-08-11T02:00:00Z" },
+      { ...issues[1], number: 8, merge_order_at: "2026-08-11T02:00:00Z" },
+    ]).map((issue) => issue.number),
+    [8, 9],
+  );
+  assert.equal(hasGlobalBatchHold(issues), true);
+  assert.deepEqual(selectQueueBatch(issues), []);
+});
+
+test("a held newer merge globally blocks an older unheld batch", () => {
+  const issues = [
+    {
+      number: 10,
+      state: "open",
+      merge_order_at: "2026-08-12T10:00:00Z",
+      labels: [{ name: "coworld-release-queued" }],
+    },
+    {
+      number: 11,
+      state: "open",
+      merge_order_at: "2026-08-12T10:01:00Z",
+      labels: [{ name: "coworld-release-batch-hold" }],
+    },
+  ];
+  assert.equal(hasGlobalBatchHold(issues), true);
+  assert.deepEqual(selectQueueBatch(issues), []);
+});
+
+test("batch waits for a quiet window after the newest included merge", () => {
+  const batch = [
+    { merge_order_at: "2026-08-12T10:00:00Z" },
+    { merge_order_at: "2026-08-12T10:10:00Z" },
+  ];
+  assert.equal(isBatchQuiet(batch, new Date("2026-08-12T10:24:59Z")), false);
+  assert.equal(isBatchQuiet(batch, new Date("2026-08-12T10:25:00Z")), true);
+  assert.equal(isBatchQuiet([], new Date("2026-08-12T10:25:00Z")), false);
+});
+
+test("protected main snapshot must contain every queued merge", () => {
+  const records = [
+    { mergeSha: "a".repeat(40) },
+    { mergeSha: "b".repeat(40) },
+    { mergeSha: "c".repeat(40) },
+  ];
+  assert.equal(
+    validateBatchSnapshot(records, "d".repeat(40), [
+      { status: "ahead", behind_by: 0 },
+      { status: "ahead", behind_by: 0 },
+      { status: "ahead", behind_by: 0 },
+    ]),
+    "d".repeat(40),
+  );
+  assert.throws(() =>
+    validateBatchSnapshot(records, "d".repeat(40), [
+      { status: "ahead", behind_by: 0 },
+      { status: "diverged", behind_by: 1 },
+      { status: "ahead", behind_by: 0 },
+    ]),
+  );
+  assert.throws(() => validateBatchSnapshot(records, "d".repeat(40), []));
+  assert.throws(() => validateBatchSnapshot(records, "not-a-sha", []));
 });
 
 test("queue parser rejects spoofed issue authors", () => {

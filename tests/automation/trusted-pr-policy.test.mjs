@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   assertReleaseRecordSafe,
+  canRefreshTrustedBranch,
   changedPathsFromPullFiles,
   evaluatePullRequest,
   isTrustBoundaryPath,
@@ -81,6 +82,45 @@ test("drafts, wrong bases, stale heads, conflicts, unresolved threads, requested
       evaluatePullRequest(passingInput(override)).reasons.includes(reason),
       reason,
     );
+});
+
+test("only a stale otherwise-safe trusted branch may be refreshed before new CI", () => {
+  const stale = evaluatePullRequest(
+    passingInput({ behindBy: 2, checkRuns: [] }),
+  );
+  assert.equal(canRefreshTrustedBranch(stale), true);
+
+  for (const override of [
+    { authorLogin: "attacker" },
+    { baseBranch: "develop" },
+    { draft: true },
+    { expectedHeadSha: "b".repeat(40) },
+    { mergeable: "CONFLICTING" },
+    { unresolvedReviewThreads: 1 },
+    { reviewDecision: "CHANGES_REQUESTED" },
+    { labels: ["security-hold"] },
+    { files: [".github/workflows/ci.yml"] },
+  ]) {
+    const result = evaluatePullRequest(
+      passingInput({ behindBy: 1, checkRuns: [], ...override }),
+    );
+    assert.equal(
+      canRefreshTrustedBranch(result),
+      false,
+      result.reasons.join(","),
+    );
+  }
+
+  assert.equal(
+    canRefreshTrustedBranch(evaluatePullRequest(passingInput())),
+    false,
+  );
+  assert.equal(
+    canRefreshTrustedBranch(
+      evaluatePullRequest(passingInput({ checkRuns: [] })),
+    ),
+    false,
+  );
 });
 
 test("manually applying the audit label never bypasses author verification", () => {
