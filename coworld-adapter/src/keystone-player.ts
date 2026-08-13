@@ -12,9 +12,12 @@
 // refreshes run in the background between decisions (DeferredAgentPlanner), so
 // Coworld's max_decision_ms reject-on-timeout is structurally satisfied.
 //
-// Known v1 limitation: the Coworld wire protocol carries ONE
-// selectedLegalActionId per decision, so executor cascade batches
-// (AgentDecision.actionIDs) degrade to their primary action here.
+// Action batching (since the game image advertising protocol.maxActionsPerDecision):
+// the decision_request envelope tells us how many actions the wire will carry.
+// When it advertises >= 2 we emit the executor's existing cascade as
+// selectedLegalActionIds (scalar primary first); when it does not — an older
+// game image — we degrade to the primary and say so in the reason, exactly as
+// before. Anything the advertised cap cannot carry keeps that honest note.
 //
 // Modes (PROXYWAR_KEYSTONE_MODE; DEFAULT = the LLM Commander — bedrock when
 // USE_BEDROCK=true, otherwise claude-cli; "the agent" IS the LLM brain):
@@ -222,6 +225,12 @@ export function requestToBrainInput(
 export function decisionToResponse(
   requestID: string,
   decision: AgentDecision,
+  /**
+   * What the game advertised on the decision_request envelope
+   * (`protocol.maxActionsPerDecision`). Absent/<2 means an older game image
+   * that carries only the scalar primary, so we must not emit the batch key.
+   */
+  wireMaxActionsPerDecision?: number,
 ): Record<string, unknown> {
   const rawConfidence = decision.metadata?.confidence;
   const confidence =
@@ -236,16 +245,35 @@ export function decisionToResponse(
   // because the transport had no loudness channel).
   const llmPlannerDegraded = decision.metadata?.llmPlannerDegraded === true;
   const plannerFallbackUsed = decision.metadata?.plannerFallbackUsed === true;
-  // Truthful artifacts: the Coworld wire carries ONE selectedLegalActionId,
-  // so when the executor scheduled a cascade batch, only the primary executes.
-  // Without this note, decisions.jsonl reads "queued N action(s)" for actions
-  // that never ran.
-  const droppedBatchActions = Array.isArray(decision.actionIDs)
-    ? Math.max(0, decision.actionIDs.length - 1)
-    : 0;
+  // The executor's cascade, normalized for the wire: primary first, deduped,
+  // then capped to whatever the game advertised it will carry. Emitting more
+  // than the advertisement would be silently truncated game-side, so the
+  // remainder stays in the honest note instead.
+  const cascade: string[] = [];
+  for (const id of [
+    decision.actionID,
+    ...(Array.isArray(decision.actionIDs) ? decision.actionIDs : []),
+  ]) {
+    if (typeof id === "string" && id.length > 0 && !cascade.includes(id)) {
+      cascade.push(id);
+    }
+  }
+  const wireCapacity =
+    typeof wireMaxActionsPerDecision === "number" &&
+    Number.isFinite(wireMaxActionsPerDecision) &&
+    wireMaxActionsPerDecision >= 2
+      ? Math.floor(wireMaxActionsPerDecision)
+      : 1;
+  const carried = cascade.slice(0, Math.max(1, wireCapacity));
+  // Truthful artifacts: whatever the wire cannot carry never executes, so it
+  // must not read as "queued N action(s)" in decisions.jsonl. With no
+  // advertisement this is the pre-batching behavior verbatim (primary only).
+  const droppedBatchActions = Math.max(0, cascade.length - carried.length);
   const wireNote =
     droppedBatchActions > 0
-      ? ` [wire carries primary only; ${droppedBatchActions} batched follow-up(s) not executed]`
+      ? carried.length === 1
+        ? ` [wire carries primary only; ${droppedBatchActions} batched follow-up(s) not executed]`
+        : ` [wire carries ${carried.length} action(s); ${droppedBatchActions} batched follow-up(s) not executed]`
       : "";
   // Truncate the base reason, never the truth note. `decision.reason` is
   // `null` on a fallback/failure decision (no stated reason — see
@@ -261,6 +289,10 @@ export function decisionToResponse(
     type: "decision_response",
     requestID,
     selectedLegalActionId: decision.actionID,
+    // Capability-gated: absent unless the game advertised a batch wire AND the
+    // executor actually scheduled more than one action, so an old image (or an
+    // ordinary single-action decision) sees a byte-identical response.
+    ...(carried.length >= 2 ? { selectedLegalActionIds: carried } : {}),
     reason: wireReason,
     confidence,
     ...(llmPlannerDegraded ? { llmPlannerDegraded: true } : {}),
@@ -278,6 +310,26 @@ export function decisionToResponse(
  * because this branch had no loudness channel. Prefers an offered hold action
  * (lowest-risk no-op) over blindly taking legalActions[0].
  */
+/**
+ * Reads the batch capability the game advertised on the decision_request
+ * envelope: `{ type, requestID, slot, protocol: { maxActionsPerDecision },
+ * request }`. Undefined for an older image that never sends `protocol` — the
+ * caller then emits the scalar primary only.
+ */
+export function wireMaxActionsPerDecision(
+  message: Record<string, unknown>,
+): number | undefined {
+  const protocol = message.protocol;
+  if (protocol === null || typeof protocol !== "object") {
+    return undefined;
+  }
+  const advertised = (protocol as { maxActionsPerDecision?: unknown })
+    .maxActionsPerDecision;
+  return typeof advertised === "number" && Number.isFinite(advertised)
+    ? advertised
+    : undefined;
+}
+
 export function transportFallbackResponse(
   requestID: string,
   request: unknown,
@@ -712,7 +764,11 @@ async function main(): Promise<void> {
       try {
         const input = requestToBrainInput(message.request, profile);
         const decision = await brain.decide(input);
-        response = decisionToResponse(requestID, decision);
+        response = decisionToResponse(
+          requestID,
+          decision,
+          wireMaxActionsPerDecision(message),
+        );
       } catch (error) {
         const messageText =
           error instanceof Error ? error.message : String(error);

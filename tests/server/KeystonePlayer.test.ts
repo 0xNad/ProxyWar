@@ -14,6 +14,10 @@ import type {
   LegalAction,
 } from "../../src/server/agents/AgentTypes";
 import {
+  decisionRequestEnvelope,
+  normalizeDecisionResponse,
+} from "../../coworld-adapter/src/coworld-decision-wire";
+import {
   bedrockModelCandidates,
   createKeystoneBrain,
   decisionToResponse,
@@ -22,6 +26,7 @@ import {
   keystoneModeFromEnv,
   requestToBrainInput,
   transportFallbackResponse,
+  wireMaxActionsPerDecision,
   type KeystoneModules,
 } from "../../coworld-adapter/src/keystone-player";
 
@@ -319,6 +324,160 @@ describe("Coworld keystone player", () => {
     expect(isModelUnavailableError("Request timed out after 12000ms")).toBe(
       false,
     );
+  });
+
+  // ---- action batching (capability-negotiated) ----
+
+  it("decisionToResponse emits NO batch and the primary-only note when the wire never advertised one", () => {
+    // Behavior pin for older game images: identical to pre-batching keystone.
+    const response = decisionToResponse("req_noadv", {
+      actionID: "attack:rival",
+      actionIDs: ["attack:rival", "build:City:10", "boat:20"],
+      reason: "cascade",
+      metadata: { confidence: 0.8 },
+    });
+
+    expect(response.selectedLegalActionIds).toBeUndefined();
+    expect(response.selectedLegalActionId).toBe("attack:rival");
+    expect(response.reason).toContain(
+      "[wire carries primary only; 2 batched follow-up(s) not executed]",
+    );
+  });
+
+  it("decisionToResponse emits the executor cascade once the wire advertises a batch", () => {
+    const response = decisionToResponse(
+      "req_adv",
+      {
+        actionID: "attack:rival",
+        actionIDs: ["attack:rival", "build:City:10", "boat:20"],
+        reason: "cascade",
+        metadata: { confidence: 0.8 },
+      },
+      5,
+    );
+
+    // Scalar stays the authoritative primary AND leads the batch.
+    expect(response.selectedLegalActionId).toBe("attack:rival");
+    expect(response.selectedLegalActionIds).toEqual([
+      "attack:rival",
+      "build:City:10",
+      "boat:20",
+    ]);
+    // Nothing was dropped, so no note is fabricated.
+    expect(response.reason).not.toContain("not executed");
+  });
+
+  it("decisionToResponse caps at the ADVERTISED width and stays honest about the remainder", () => {
+    const response = decisionToResponse(
+      "req_narrow",
+      {
+        actionID: "a",
+        actionIDs: ["a", "b", "c", "d"],
+        reason: "cascade",
+      },
+      2,
+    );
+
+    expect(response.selectedLegalActionIds).toEqual(["a", "b"]);
+    expect(response.reason).toContain(
+      "[wire carries 2 action(s); 2 batched follow-up(s) not executed]",
+    );
+  });
+
+  it("decisionToResponse dedupes the primary out of the cascade", () => {
+    const response = decisionToResponse(
+      "req_dupe",
+      {
+        actionID: "a",
+        actionIDs: ["a", "a", "b"],
+        reason: "cascade",
+      },
+      5,
+    );
+
+    expect(response.selectedLegalActionIds).toEqual(["a", "b"]);
+    expect(response.reason).not.toContain("not executed");
+  });
+
+  it("decisionToResponse omits the batch key for an ordinary single-action decision", () => {
+    const response = decisionToResponse(
+      "req_single",
+      { actionID: "hold", reason: "waiting" },
+      5,
+    );
+
+    expect(response.selectedLegalActionIds).toBeUndefined();
+    expect(response.reason).not.toContain("not executed");
+  });
+
+  it("wireMaxActionsPerDecision reads the envelope advertisement defensively", () => {
+    expect(
+      wireMaxActionsPerDecision({
+        type: "decision_request",
+        protocol: { maxActionsPerDecision: 5 },
+      }),
+    ).toBe(5);
+    // Older image: no protocol block at all.
+    expect(wireMaxActionsPerDecision({ type: "decision_request" })).toBeUndefined();
+    // Hostile/garbled shapes must not throw or fabricate a width.
+    expect(wireMaxActionsPerDecision({ protocol: null })).toBeUndefined();
+    expect(wireMaxActionsPerDecision({ protocol: "5" })).toBeUndefined();
+    expect(
+      wireMaxActionsPerDecision({ protocol: { maxActionsPerDecision: "5" } }),
+    ).toBeUndefined();
+  });
+
+  it("round-trips: the game's envelope drives the emit, and the game's parser accepts it", () => {
+    // Both halves of the protocol in one test — the emitter (this PR) against
+    // the game-side envelope builder and reply normalizer (shipped in the
+    // batching wire PR). If either side drifts, this fails.
+    const envelope = decisionRequestEnvelope({
+      requestID: "req_rt",
+      slot: 3,
+      request: { legalActions: [] },
+    });
+
+    const advertised = wireMaxActionsPerDecision(envelope);
+    expect(advertised).toBe(5);
+
+    const response = decisionToResponse(
+      "req_rt",
+      {
+        actionID: "attack:rival",
+        actionIDs: ["attack:rival", "build:City:10", "boat:20"],
+        reason: "cascade",
+      },
+      advertised,
+    );
+
+    const parsed = normalizeDecisionResponse(
+      response as Record<string, unknown>,
+    );
+    expect(parsed.actionID).toBe("attack:rival");
+    expect(parsed.actionIDs).toEqual([
+      "attack:rival",
+      "build:City:10",
+      "boat:20",
+    ]);
+  });
+
+  it("round-trips a scalar decision to a byte-identical parse (no batch key either side)", () => {
+    const response = decisionToResponse(
+      "req_rt_scalar",
+      { actionID: "hold", reason: "waiting" },
+      wireMaxActionsPerDecision(
+        decisionRequestEnvelope({
+          requestID: "req_rt_scalar",
+          slot: 0,
+          request: {},
+        }),
+      ),
+    );
+    const parsed = normalizeDecisionResponse(
+      response as Record<string, unknown>,
+    );
+    expect(parsed.actionID).toBe("hold");
+    expect(parsed.actionIDs).toBeUndefined();
   });
 
   it("decisionToResponse carries degradation flags on the wire", () => {
