@@ -73,13 +73,12 @@ import { reconcileFeaturedMatchStore } from "../server/agents/FeaturedMatchRecon
 import {
   buildLeagueEpisodeMatchPageModel,
   buildLeagueEpisodeParticipantCards,
-  findLeagueEpisodeByRequestId,
   findLeagueEpisodeRunDir,
   leagueEpisodeSpoilerSafeDescription,
   leagueEpisodeSpoilerSafeTitle,
-  readCoworldLeagueEpisodesFromDataJson,
   readLeagueEpisodeDecisiveMoments,
   readLeagueEpisodeRecap,
+  resolveLeagueEpisodeRow,
 } from "../server/agents/LeagueEpisodeMatchPage";
 import {
   buildLeaguePlayerSection,
@@ -295,6 +294,11 @@ const runsRootDir = path.join(artifactsRootDir, "ai-league-runs");
 // directory backs.
 const summaryArchiveDir =
   resolveCoworldLeagueSummaryArchiveDir(artifactsRootDir);
+const leagueReplayCacheDir = path.join(
+  artifactsRootDir,
+  "coworld-league-mirror",
+  "replays",
+);
 const publicReplayRenderabilityCache = new Map<
   string,
   { fingerprint: string; verdict: Promise<boolean> }
@@ -992,12 +996,13 @@ app.get("/api/matches/:episodeId", async (req, res) => {
       res.status(404).json({ error: { code: "LEAGUE_EPISODE_NOT_FOUND" } });
       return;
     }
-    const episodes =
-      await readCoworldLeagueEpisodesFromDataJson(leagueDataJsonPath);
-    const row =
-      episodes === null
-        ? null
-        : findLeagueEpisodeByRequestId(episodes, episodeId);
+    const row = await resolveLeagueEpisodeRow(
+      leagueDataJsonPath,
+      summaryArchiveDir,
+      episodeId,
+      runsRootDir,
+      leagueReplayCacheDir,
+    );
     if (row === null) {
       res.status(404).json({ error: { code: "LEAGUE_EPISODE_NOT_FOUND" } });
       return;
@@ -1362,10 +1367,13 @@ async function resolveMatchDetailPageMetadata(matchId: string): Promise<{
       card,
     };
   }
-  const episodes =
-    await readCoworldLeagueEpisodesFromDataJson(leagueDataJsonPath);
-  const row =
-    episodes === null ? null : findLeagueEpisodeByRequestId(episodes, matchId);
+  const row = await resolveLeagueEpisodeRow(
+    leagueDataJsonPath,
+    summaryArchiveDir,
+    matchId,
+    runsRootDir,
+    leagueReplayCacheDir,
+  );
   if (row === null) return null;
   // League episodes are always post-match (see `MatchDetailPage.ts`'s own
   // doc), so the card is always the result variant.

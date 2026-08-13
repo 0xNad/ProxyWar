@@ -9,10 +9,18 @@ import {
 } from "../identity/ProvisionalIdentity";
 import { DECISIVE_MOMENTS_SCHEMA_VERSION } from "./AgentDecisiveMoments";
 import { AGENT_MATCH_RECAP_SCHEMA_VERSION } from "./AgentMatchRecap";
+import { gameRecordFileIsRenderable } from "./AgentSpectatorReplay";
 import {
   publicRunKeyFromFullRenderHref,
   publicRunKeyFromWatchHref,
+  readArchivedCoworldReplaySummary,
+  readRetainedCoworldReplay,
+  resolveArchivedEpisodeReplayHrefs,
 } from "./CoworldLeagueArtifactRetention";
+import {
+  buildEpisodeRow,
+  isSafeCoworldEpisodeRequestId,
+} from "./CoworldLeagueMirrorCore";
 import type {
   CoworldLeagueEpisodePlayerRow,
   CoworldLeagueEpisodeRow,
@@ -147,6 +155,81 @@ export function findLeagueEpisodeByRequestId(
     episodes.find((episode) => episode.episodeRequestId === episodeRequestId) ??
     null
   );
+}
+
+/**
+ * Resolves an ordinary episode from the rolling live mirror first, then from
+ * the indefinitely retained compact archive after it rotates out. Archive
+ * reconstruction deliberately leaves live-only facts (`roundNumber`,
+ * `completedAt`, and the lightweight spectator bundle) null. The native replay
+ * href is exposed only when its byte-faithful game record exists in either the
+ * active run directory or durable archive, so this helper never manufactures
+ * a broken replay link.
+ */
+export async function resolveLeagueEpisodeRow(
+  dataJsonPath: string,
+  summaryArchiveDir: string,
+  episodeRequestId: string,
+  activeRunsRootDir?: string,
+  replayCacheDir?: string,
+): Promise<CoworldLeagueEpisodeRow | null> {
+  if (!isSafeCoworldEpisodeRequestId(episodeRequestId)) return null;
+
+  const liveEpisodes =
+    await readCoworldLeagueEpisodesFromDataJson(dataJsonPath);
+  const liveRow =
+    liveEpisodes === null
+      ? null
+      : findLeagueEpisodeByRequestId(liveEpisodes, episodeRequestId);
+  if (liveRow !== null) return liveRow;
+
+  const retained =
+    replayCacheDir === undefined
+      ? null
+      : await readRetainedCoworldReplay(replayCacheDir, episodeRequestId);
+  const evidence =
+    retained ??
+    (await readArchivedCoworldReplaySummary(
+      summaryArchiveDir,
+      episodeRequestId,
+    ));
+  if (evidence === null) return null;
+  const activeGameRecordExists =
+    activeRunsRootDir !== undefined &&
+    (await gameRecordFileIsRenderable(
+      path.join(activeRunsRootDir, evidence.publicRunKey, "game-record.json"),
+    ));
+  const archivedHrefs =
+    retained === null
+      ? await resolveArchivedEpisodeReplayHrefs(
+          summaryArchiveDir,
+          episodeRequestId,
+          activeRunsRootDir,
+        )
+      : {
+          watchHref: null,
+          fullRenderHref: activeGameRecordExists
+            ? `/ai-league-replay/${encodeURIComponent(evidence.publicRunKey)}`
+            : null,
+        };
+  if (archivedHrefs === null) return null;
+
+  return buildEpisodeRow({
+    meta: {
+      episodeRequestId,
+      roundId: null,
+      completedAt: null,
+      replayUrl: null,
+      variantName: null,
+      map: evidence.replay.map ?? "Unknown map",
+      mapSize: evidence.replay.mapSize ?? "",
+      legacyConfigMap: null,
+    },
+    replay: evidence.replay,
+    roundNumber: null,
+    watchHref: null,
+    fullRenderHref: archivedHrefs.fullRenderHref,
+  });
 }
 
 /** Same derivation `feature-candidates.ts`'s `findArtifactDirectory` already uses: the mirror's own managed run key, recovered from whichever href is present. `null` when neither href is a well-formed managed run link (replay never downloaded). */
