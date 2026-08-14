@@ -8,6 +8,7 @@ import {
   isDealActionKind,
   type AgentDealLedgerSnapshot,
 } from "./AgentDealManager";
+import { withDeferredDecisionTimeout } from "./AgentDecisionTimeout";
 import {
   validateAgentDealDecision,
   validateAgentDecision,
@@ -437,11 +438,21 @@ export class AgentLeagueMatchRunner {
           ...dealAwareObservation,
           objective,
         };
+        const observationSummary =
+          this.observationBuilder.summarize(observation);
+        // Dispatch only after this seat's complete observation and menu exist.
+        // The batch remains synchronous even though its result carries Promises.
+        const decisionPromise = dispatchBrainDecision({
+          brain: participant.brain,
+          observation,
+          legalActions,
+        });
         return {
           participant,
           observation,
-          observationSummary: this.observationBuilder.summarize(observation),
+          observationSummary,
           legalActions,
+          decisionPromise,
         };
       });
     const decisionInputs = this.observationBuilder.withObservationBatch(
@@ -451,12 +462,15 @@ export class AgentLeagueMatchRunner {
 
     const decisions = await Promise.all(
       decisionInputs.map(async (input) => {
+        // Preserve the existing metric and timeout origin: both begin only
+        // after every seat's observation has left the synchronous batch.
         const decisionStartedAt = Date.now();
         const decision = await decideWithSafetyFallback({
           brain: input.participant.brain,
           fallbackProfile: input.participant.spec.profile,
           observation: input.observation,
           legalActions: input.legalActions,
+          decisionPromise: input.decisionPromise,
           maxDecisionMs: options.maxDecisionMs,
         });
         return {
@@ -1539,21 +1553,42 @@ const LLM_DEGRADABLE_BRAIN_TYPES = new Set<string>([
   "llm",
 ]);
 
+function dispatchBrainDecision(input: {
+  brain: AgentBrain;
+  observation: AgentObservation;
+  legalActions: LegalAction[];
+}): Promise<AgentDecision> {
+  let decisionPromise: Promise<AgentDecision>;
+  try {
+    decisionPromise = Promise.resolve(
+      input.brain.decide({
+        observation: input.observation,
+        legalActions: input.legalActions,
+      }),
+    );
+  } catch (error) {
+    decisionPromise = Promise.reject(error);
+  }
+
+  // A later seat can still fail while its observation is being built. Attach
+  // a rejection observer immediately so an already-dispatched request cannot
+  // become unhandled before the batch exits; the original promise remains
+  // rejected for the post-batch safety fallback below.
+  void decisionPromise.catch(() => undefined);
+  return decisionPromise;
+}
+
 async function decideWithSafetyFallback(input: {
   brain: AgentBrain;
   fallbackProfile: AgentStrategyProfile;
   observation: AgentObservation;
   legalActions: LegalAction[];
+  decisionPromise: Promise<AgentDecision>;
   maxDecisionMs?: number;
 }): Promise<AgentDecision> {
   try {
     return await withOptionalTimeout(
-      Promise.resolve(
-        input.brain.decide({
-          observation: input.observation,
-          legalActions: input.legalActions,
-        }),
-      ),
+      input.decisionPromise,
       input.maxDecisionMs,
     );
   } catch (error) {
@@ -1600,30 +1635,14 @@ async function withOptionalTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number | undefined,
 ): Promise<T> {
-  if (
-    timeoutMs === undefined ||
-    !Number.isFinite(timeoutMs) ||
-    timeoutMs <= 0
-  ) {
+  if (timeoutMs === undefined) {
     return promise;
   }
-
-  let timeoutID: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<T>((_resolve, reject) => {
-        timeoutID = setTimeout(
-          () => reject(new Error(`Agent brain timed out after ${timeoutMs}ms`)),
-          timeoutMs,
-        );
-      }),
-    ]);
-  } finally {
-    if (timeoutID !== undefined) {
-      clearTimeout(timeoutID);
-    }
-  }
+  return withDeferredDecisionTimeout(
+    promise,
+    timeoutMs,
+    () => new Error(`Agent brain timed out after ${timeoutMs}ms`),
+  ).promise;
 }
 
 function groupLegalActionsByKind(

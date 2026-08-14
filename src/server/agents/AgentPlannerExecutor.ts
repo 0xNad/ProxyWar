@@ -1,4 +1,5 @@
 import { PlayerType, Relation, UnitType } from "../../core/game/Game";
+import { withDeferredDecisionTimeout } from "./AgentDecisionTimeout";
 import {
   nuclearStrikePriorityScore,
   nuclearTargetStructurePriority,
@@ -23177,23 +23178,9 @@ async function withTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number,
 ): Promise<T> {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    return promise;
-  }
-  let timeoutID: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<T>((_resolve, reject) => {
-        timeoutID = setTimeout(
-          () => reject(new Error(`Planner timed out after ${timeoutMs}ms`)),
-          timeoutMs,
-        );
-      }),
-    ]);
-  } finally {
-    if (timeoutID !== undefined) {
-      clearTimeout(timeoutID);
-    }
-  }
+  return withDeferredDecisionTimeout(
+    promise,
+    timeoutMs,
+    () => new Error(`Planner timed out after ${timeoutMs}ms`),
+  ).promise;
 }

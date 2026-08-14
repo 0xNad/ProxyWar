@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_OPENROUTER_MAX_TOKENS,
   DEFAULT_OPENROUTER_MODEL,
@@ -138,6 +138,42 @@ describe("OpenRouterLlmProvider", () => {
     });
 
     await expect(provider.complete("prompt")).rejects.toThrow(/timed out/);
+  });
+
+  it("does not let synchronous work after dispatch consume the timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveFetch: () => void = () => undefined;
+      const provider = new OpenRouterLlmProvider({
+        apiKey: "test-key",
+        model: "m",
+        endpoint: "https://example.test/v1/chat/completions",
+        timeoutMs: 10,
+        maxRetries: 0,
+        maxOutputTokens: 600,
+        temperature: 0.2,
+        fetchFn: (_input, init) =>
+          new Promise<Response>((resolve, reject) => {
+            resolveFetch = () => resolve(chatResponse("ok"));
+            init.signal?.addEventListener("abort", () => {
+              const error = new Error("aborted");
+              error.name = "AbortError";
+              reject(error);
+            });
+          }),
+      });
+
+      const completion = provider.complete("prompt");
+      // Simulates an observation batch running after dispatch: the abort
+      // timer arms on a microtask, so this elapsed time is excluded.
+      vi.advanceTimersByTime(1_000);
+      await Promise.resolve();
+      vi.advanceTimersByTime(9);
+      resolveFetch();
+      await expect(completion).resolves.toBe("ok");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("fails loud on a non-2xx response and redacts bearer tokens", async () => {
