@@ -12,10 +12,13 @@ import {
 } from "../../src/core/game/Game";
 import {
   AgentObservationBuilder,
+  BOAT_OPTION_LIMIT,
   BUILD_OPTION_CANDIDATES,
   buildCandidateLimit,
+  NEUTRAL_ISLAND_TRANSPORT_SCAN_LIMIT,
   SHARED_LAND_STRUCTURE_BUILD_TYPES,
 } from "../../src/server/agents/AgentObservationBuilder";
+import { AgentBoatOption } from "../../src/server/agents/AgentTypes";
 import { LegalActionBuilder } from "../../src/server/agents/LegalActionBuilder";
 import {
   createGame as createPathfindingGame,
@@ -175,7 +178,64 @@ type AgentObservationBuilderInternals = {
   hostileFrontTiles(gameState: Game, player: Player): number[];
   incomingAttackFrontTiles(gameState: Game, player: Player): number[];
   nukeTargetTiles(gameState: Game, player: Player): number[];
+  boatOptions(gameState: Game, player: Player): AgentBoatOption[];
+  neutralIslandTransportTiles(
+    gameState: Game,
+    player: Player,
+    reachableWaterComponents: ReadonlySet<number>,
+    transportSpawnByTarget: Map<number, number | false>,
+  ): number[];
+  unownedNonFalloutShoreTiles(gameState: Game): readonly number[];
+  touchesOwnedTerritory(gameState: Game, player: Player, tile: number): boolean;
 };
+
+/** Feeds the neutral scan a fixed candidate list with canBuild valid only at
+ * the given scan positions; reachability is stubbed to pass every candidate. */
+function neutralScanHarness(validIndexes: readonly number[]) {
+  const { game } = disconnectedSeasGame();
+  const player = game.player("P_AGENT");
+  const internals =
+    new AgentObservationBuilder() as unknown as AgentObservationBuilderInternals;
+  const candidates: number[] = [];
+  game.forEachTile((tile) => {
+    if (candidates.length < NEUTRAL_ISLAND_TRANSPORT_SCAN_LIMIT) {
+      candidates.push(tile);
+    }
+  });
+  expect(candidates).toHaveLength(NEUTRAL_ISLAND_TRANSPORT_SCAN_LIMIT);
+  vi.spyOn(internals, "unownedNonFalloutShoreTiles").mockReturnValue(
+    candidates,
+  );
+  vi.spyOn(internals, "touchesOwnedTerritory").mockReturnValue(false);
+  const component = 1;
+  vi.spyOn(game, "getWaterComponent").mockReturnValue(component);
+  const sourceForIndex = (index: number) =>
+    game.ref(index % game.width(), Math.floor(index / game.width()));
+  const validIndexSet = new Set(validIndexes);
+  let callIndex = 0;
+  const canBuild = vi.spyOn(player, "canBuild").mockImplementation((unit) => {
+    expect(unit).toBe(UnitType.TransportShip);
+    const index = callIndex++;
+    return validIndexSet.has(index) ? sourceForIndex(index) : false;
+  });
+  const transportSpawnByTarget = new Map<number, number | false>();
+  const targets = internals.neutralIslandTransportTiles(
+    game,
+    player,
+    new Set([component]),
+    transportSpawnByTarget,
+  );
+  const expectValidatedTargets = () => {
+    const scannedTiles = canBuild.mock.calls.map(([, tile]) => tile);
+    expect(targets).toEqual(validIndexes.map((index) => scannedTiles[index]));
+    for (const [position, target] of targets.entries()) {
+      expect(transportSpawnByTarget.get(target)).toBe(
+        sourceForIndex(validIndexes[position]),
+      );
+    }
+  };
+  return { canBuild, targets, expectValidatedTargets };
+}
 
 function midGameBuildSearchGame(): Game {
   const width = 208;
@@ -644,6 +704,79 @@ describe("AgentObservationBuilder boat targets", () => {
     ).toThrow("game tick changed during observation batch");
   });
 
+  it("stops the neutral scan immediately after the sixth success", () => {
+    const validIndexes = [1, 3, 4, 7, 9, 10];
+    expect(validIndexes).toHaveLength(BOAT_OPTION_LIMIT);
+    const { canBuild, expectValidatedTargets } =
+      neutralScanHarness(validIndexes);
+
+    expect(canBuild).toHaveBeenCalledTimes(validIndexes.at(-1)! + 1);
+    expectValidatedTargets();
+  });
+
+  it("scans every candidate when fewer than six are valid", () => {
+    const { canBuild, expectValidatedTargets } = neutralScanHarness([
+      2, 19, 47, 79,
+    ]);
+
+    expect(canBuild).toHaveBeenCalledTimes(NEUTRAL_ISLAND_TRANSPORT_SCAN_LIMIT);
+    expectValidatedTargets();
+  });
+
+  it("skips neutral islands on unreachable water without calling canBuild", () => {
+    const { game, unreachableShore } = disconnectedSeasGame();
+    const player = game.player("P_AGENT");
+    // Own the whole near coastline (except the rival's shore) so every
+    // remaining neutral candidate sits on the far, disconnected sea.
+    for (let y = 0; y < game.height(); y += 1) {
+      const tile = game.ref(2, y);
+      if (!game.hasOwner(tile)) {
+        player.conquer(tile);
+      }
+    }
+    const internals =
+      new AgentObservationBuilder() as unknown as AgentObservationBuilderInternals;
+    const canBuild = vi.spyOn(player, "canBuild");
+
+    const options = internals.boatOptions(game, player);
+
+    expect(options.length).toBeGreaterThan(0);
+    const farSea = game.getWaterComponent(unreachableShore);
+    expect(farSea).not.toBeNull();
+    const transportTargets = canBuild.mock.calls
+      .filter(([unit]) => unit === UnitType.TransportShip)
+      .map(([, tile]) => tile);
+    expect(transportTargets.length).toBeGreaterThan(0);
+    expect(
+      transportTargets.every((tile) => game.getWaterComponent(tile) !== farSea),
+    ).toBe(true);
+  });
+
+  it("reuses the neutral scan's validation instead of rechecking targets", () => {
+    const { game, rival } = disconnectedSeasGame();
+    const player = game.player("P_AGENT");
+    const internals =
+      new AgentObservationBuilder() as unknown as AgentObservationBuilderInternals;
+    const canBuild = vi.spyOn(player, "canBuild");
+
+    const options = internals.boatOptions(game, player);
+
+    expect(options).toHaveLength(BOAT_OPTION_LIMIT);
+    expect(options[0].targetID).toBe(rival.id);
+    expect(options.slice(1).every((option) => option.targetID === null)).toBe(
+      true,
+    );
+    const transportTargets = canBuild.mock.calls
+      .filter(([unit]) => unit === UnitType.TransportShip)
+      .map(([, tile]) => tile);
+    expect(new Set(transportTargets).size).toBe(transportTargets.length);
+    for (const option of options) {
+      expect(player.canBuild(UnitType.TransportShip, option.targetTile)).toBe(
+        option.sourceTile,
+      );
+    }
+  });
+
   it("offers a hostile transatlantic landing on the real World map", async () => {
     const game = await setup("world", {
       nations: "disabled",
@@ -740,9 +873,7 @@ describe("AgentObservationBuilder boat targets", () => {
       .build({ observation: observe(game) })
       .filter((action) => action.kind === "boat");
     expect(
-      legalBoatActions.some(
-        (action) => action.metadata?.targetID === rival.id,
-      ),
+      legalBoatActions.some((action) => action.metadata?.targetID === rival.id),
     ).toBe(true);
     expect(
       legalBoatActions.some(
