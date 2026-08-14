@@ -119,5 +119,36 @@ export function isAiLeagueNativeSpectatorUiEnabled(): boolean {
   }
 
   const params = new URLSearchParams(window.location.search);
-  return params.has("native-spectator-ui");
+  // Order matters: `has()` is true for "?native-spectator-ui=0" too, so the
+  // explicit opt-out must be tested BEFORE the presence check or "=0" turns
+  // the mode ON — the exact opposite of what it says.
+  if (params.get("native-spectator-ui") === "0") {
+    return false;
+  }
+  if (params.has("native-spectator-ui")) {
+    return true;
+  }
+  // Default ON for the coworld replay surface.
+  //
+  // The replay was shipping FOUR competing leaderboards: the sidebar
+  // <leader-board>, the fixed native one, the overlay's "Standings" section and
+  // the broadcast drawer's "Competitors" rail. The native table is the one an
+  // OpenFront player already knows how to read, and it is the only one that
+  // isn't gated on being a participant, so it becomes the single source of
+  // truth and the overlay's two duplicates are hidden (see the
+  // .ai-league-native-spectator-ui rules in AiLeagueReplayOverlay).
+  //
+  // Opt out with ?native-spectator-ui=0 (handled above).
+  // Keyed on the STATIC REPLAY BUNDLE, not on the URL path. The hosted bundle
+  // is served from index.html under a content-addressed prefix, so the
+  // /client/replay path checks never match there — only the container-backed
+  // route has that shape.
+  const staticReplayWindow = window as typeof window & {
+    __PROXYWAR_STATIC_REPLAY__?: boolean;
+  };
+  return (
+    staticReplayWindow.__PROXYWAR_STATIC_REPLAY__ === true ||
+    isCoworldReplayRoute() ||
+    isCoworldPlayerRoute()
+  );
 }

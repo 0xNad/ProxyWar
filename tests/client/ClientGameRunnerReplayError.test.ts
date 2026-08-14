@@ -32,13 +32,14 @@ describe("ClientGameRunner replay startup errors", () => {
     let updateCallback: (update: never) => void = () => {
       throw new Error("Replay worker callback was not registered");
     };
-    const eventBus = { on: vi.fn(), emit: vi.fn() };
-    const renderer = { initialize: vi.fn() };
-    const input = { initialize: vi.fn() };
+    const eventBus = { on: vi.fn(), off: vi.fn(), emit: vi.fn() };
+    const renderer = { initialize: vi.fn(), dispose: vi.fn() };
+    const input = { initialize: vi.fn(), dispose: vi.fn() };
     const transport = {
       updateCallback: vi.fn(),
       rejoinGame: vi.fn(),
       leaveGame: vi.fn(),
+      dispose: vi.fn(),
     };
     const worker = {
       start: vi.fn((callback: (update: never) => void) => {
@@ -78,13 +79,14 @@ describe("ClientGameRunner replay startup errors", () => {
     let updateCallback: (update: never) => void = () => {
       throw new Error("Replay worker callback was not registered");
     };
-    const eventBus = { on: vi.fn(), emit: vi.fn() };
-    const renderer = { initialize: vi.fn() };
-    const input = { initialize: vi.fn() };
+    const eventBus = { on: vi.fn(), off: vi.fn(), emit: vi.fn() };
+    const renderer = { initialize: vi.fn(), dispose: vi.fn() };
+    const input = { initialize: vi.fn(), dispose: vi.fn() };
     const transport = {
       updateCallback: vi.fn(),
       rejoinGame: vi.fn(),
       leaveGame: vi.fn(),
+      dispose: vi.fn(),
     };
     const worker = {
       start: vi.fn((callback: (update: never) => void) => {
@@ -215,17 +217,19 @@ describe("ClientGameRunner replay startup errors", () => {
     let updateCallback: (update: never) => void = () => {
       throw new Error("Replay worker callback was not registered");
     };
-    const eventBus = { on: vi.fn(), emit: vi.fn() };
+    const eventBus = { on: vi.fn(), off: vi.fn(), emit: vi.fn() };
     const renderer = {
       initialize: vi.fn(),
       tick: vi.fn(),
       transformHandler: { centerAll: vi.fn() },
+      dispose: vi.fn(),
     };
-    const input = { initialize: vi.fn() };
+    const input = { initialize: vi.fn(), dispose: vi.fn() };
     const transport = {
       updateCallback: vi.fn(),
       rejoinGame: vi.fn(),
       leaveGame: vi.fn(),
+      dispose: vi.fn(),
       turnComplete: vi.fn(),
       turnsComplete: vi.fn(),
     };

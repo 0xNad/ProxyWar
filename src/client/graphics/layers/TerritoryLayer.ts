@@ -1,3 +1,4 @@
+import { isStaticReplayBroadcast } from "../../../core/configuration/Colors";
 import { PriorityQueue } from "@datastructures-js/priority-queue";
 import { Colord } from "colord";
 import { Theme } from "../../../core/configuration/Config";
@@ -588,7 +589,15 @@ export class TerritoryLayer implements Layer {
         this.imageData,
         tile,
         owner.territoryColor(tile),
-        150,
+        // BROADCAST: 210, not 150. The fill alpha was tuned against the stock
+        // dark terrain (L 138-190). The Situation Display ground is FAR darker
+        // (warm charcoal, L 28-98), and 150/255 of a seat colour over
+        // near-black comes out muddy brown — the owner's exact words were
+        // "all brown and washed out", and per-tile measurement confirmed the
+        // theme was returning correct charcoal with the muddiness introduced
+        // at this composite. 210 lets the seat read true while the relief
+        // still whispers through. Live play keeps 150 exactly.
+        isStaticReplayBroadcast() ? 210 : 150,
       );
     }
   }

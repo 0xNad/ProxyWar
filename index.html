@@ -24,9 +24,17 @@
         display: none;
       }
 
+      /*
+       * BROADCAST BOOT SCREEN. This is the first frame of the show and, since
+       * a backward scrub re-simulates the match, it is also the frame a viewer
+       * lands on every time they rewind — so it cannot be a generic
+       * cool-slate spinner. Same palette as the board: warm near-black stage,
+       * warm ink, amber as the only accent. Values are literal rather than
+       * --pw-* tokens because this paints before any script runs.
+       */
       html.proxywar-replay-route {
-        background: #070b12;
-        color: #f8fafc;
+        background: #14110f;
+        color: #f2ece2;
       }
 
       html.preload.proxywar-replay-route {
@@ -68,9 +76,9 @@
           max(24px, env(safe-area-inset-bottom))
           max(24px, env(safe-area-inset-left));
         overflow: hidden;
-        background: #070b12;
-        color: #f8fafc;
-        font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+        background: #14110f;
+        color: #f2ece2;
+        font-family: "Avenir Next", "Futura", ui-sans-serif, system-ui, sans-serif;
         text-align: center;
       }
 
@@ -81,14 +89,30 @@
         gap: 18px;
       }
 
+      /* A sweep, not a disc: the same hairline-and-amber vocabulary the
+       * scrubber uses, so the boot screen and the transport look related. */
       .proxywar-replay-loading-spinner {
-        width: 44px;
-        height: 44px;
+        position: relative;
+        width: 210px;
+        max-width: 60vw;
+        height: 2px;
         box-sizing: border-box;
-        border: 3px solid rgba(56, 189, 248, 0.22);
-        border-top-color: #38bdf8;
-        border-radius: 9999px;
-        animation: proxywar-replay-spin 0.9s linear infinite;
+        border: 0;
+        border-radius: 0;
+        background: rgba(242, 236, 226, 0.14);
+        overflow: hidden;
+        animation: none;
+      }
+
+      .proxywar-replay-loading-spinner::after {
+        content: "";
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: 0;
+        width: 38%;
+        background: #ffc24a;
+        animation: proxywar-replay-sweep 1.25s ease-in-out infinite;
       }
 
       #proxywar-replay-loading[aria-busy="false"]
@@ -99,17 +123,18 @@
       #proxywar-replay-loading p {
         min-height: 1.5em;
         margin: 0;
-        color: #e2e8f0;
-        font-size: clamp(16px, 2.4vw, 19px);
+        color: #f2ece2;
+        font-size: clamp(15px, 2.2vw, 18px);
         font-weight: 600;
-        letter-spacing: 0.01em;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
       }
 
       #proxywar-replay-loading .proxywar-replay-loading-progress {
         min-height: 1.3em;
-        color: #7dd3fc;
-        font-size: clamp(13px, 1.8vw, 15px);
-        font-weight: 700;
+        color: #ffc24a;
+        font: 500 clamp(12px, 1.6vw, 14px)/1.4 ui-monospace, "SF Mono", Menlo, monospace;
+        letter-spacing: 0.1em;
         font-variant-numeric: tabular-nums;
       }
 
@@ -132,12 +157,15 @@
         align-items: center;
         justify-content: center;
         padding: 10px 18px;
-        border: 1px solid rgba(125, 211, 252, 0.5);
-        border-radius: 10px;
-        background: #0c4a6e;
-        color: #f8fafc;
+        border: 1px solid rgba(255, 194, 74, 0.42);
+        border-radius: 0;
+        background: rgba(24, 20, 17, 0.93);
+        color: #ffc24a;
         font: inherit;
-        font-weight: 700;
+        font-weight: 650;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        font-size: 12px;
         cursor: pointer;
         text-decoration: none;
       }
@@ -153,19 +181,20 @@
 
       #proxywar-replay-loading button:focus-visible,
       #proxywar-replay-loading a:focus-visible {
-        outline: 3px solid #7dd3fc;
+        outline: 2px solid #ffc24a;
         outline-offset: 3px;
       }
 
-      @keyframes proxywar-replay-spin {
-        to {
-          transform: rotate(360deg);
-        }
+      @keyframes proxywar-replay-sweep {
+        0% { transform: translateX(-100%); }
+        100% { transform: translateX(363%); }
       }
 
       @media (prefers-reduced-motion: reduce) {
-        .proxywar-replay-loading-spinner {
+        .proxywar-replay-loading-spinner::after {
           animation: none;
+          width: 100%;
+          opacity: 0.5;
         }
       }
 

@@ -240,6 +240,22 @@ export class InputHandler {
   private readonly LONG_PRESS_MS = 800;
 
   private moveInterval: NodeJS.Timeout | null = null;
+
+  /**
+   * TEARDOWN. An in-place rewind builds a NEW InputHandler without a page
+   * reload, and this class had no way to take the old one off the window. Each
+   * rewind therefore stranded ~10 window listeners, an EventBus subscription
+   * and a 1ms setInterval, all still live against a dead GameView. The visible
+   * symptom was keyboard zoom ACCELERATING with every rewind, because N stale
+   * keydown handlers each emitted their own ZoomEvent for one keypress.
+   *
+   * An AbortController is used rather than storing ten handler references
+   * because every registration here is an inline arrow — identity is not
+   * recoverable after the fact, so signal-based removal is the only option
+   * that does not mean rewriting every call site.
+   */
+  private readonly teardown = new AbortController();
+  private onUnitSelection: ((e: UnitSelectionEvent) => void) | null = null;
   private activeKeys = new Set<string>();
   private keybinds: Record<string, string> = {};
   private coordinateGridEnabled = false;
@@ -257,11 +273,25 @@ export class InputHandler {
     private eventBus: EventBus,
   ) {}
 
+
+  /** See the `teardown` field for why this exists and what leaked without it. */
+  public dispose() {
+    this.teardown.abort();
+    if (this.moveInterval !== null) {
+      clearInterval(this.moveInterval);
+      this.moveInterval = null;
+    }
+    if (this.onUnitSelection !== null) {
+      this.eventBus.off(UnitSelectionEvent, this.onUnitSelection);
+      this.onUnitSelection = null;
+    }
+  }
+
   initialize() {
     this.keybinds = this.userSettings.keybinds(Platform.isMac);
 
     // Listen for warship selection to change cursor
-    this.eventBus.on(UnitSelectionEvent, (e) => {
+    this.onUnitSelection = (e: UnitSelectionEvent) => {
       if (e.isSelected && (e.units ?? []).length > 0) {
         // Multi-selection active
         this.multiSelectionActive = true;
@@ -277,11 +307,18 @@ export class InputHandler {
           this.canvas.style.cursor = "";
         }
       }
-    });
+    };
+    this.eventBus.on(UnitSelectionEvent, this.onUnitSelection);
 
-    this.canvas.addEventListener("pointerdown", (e) => this.onPointerDown(e));
-    window.addEventListener("pointerup", (e) => this.onPointerUp(e));
-    window.addEventListener("pointercancel", (e) => this.onPointerUp(e));
+    this.canvas.addEventListener("pointerdown", (e) => this.onPointerDown(e), {
+      signal: this.teardown.signal,
+    });
+    window.addEventListener("pointerup", (e) => this.onPointerUp(e), {
+      signal: this.teardown.signal,
+    });
+    window.addEventListener("pointercancel", (e) => this.onPointerUp(e), {
+      signal: this.teardown.signal,
+    });
     this.canvas.addEventListener(
       "wheel",
       (e) => {
@@ -289,15 +326,19 @@ export class InputHandler {
         this.onShiftScroll(e);
         e.preventDefault();
       },
-      { passive: false },
+      { passive: false, signal: this.teardown.signal },
     );
-    window.addEventListener("pointermove", this.onPointerMove.bind(this));
-    this.canvas.addEventListener("contextmenu", (e) => this.onContextMenu(e));
+    window.addEventListener("pointermove", this.onPointerMove.bind(this), {
+      signal: this.teardown.signal,
+    });
+    this.canvas.addEventListener("contextmenu", (e) => this.onContextMenu(e), {
+      signal: this.teardown.signal,
+    });
     window.addEventListener("mousemove", (e) => {
       if (e.movementX || e.movementY) {
         this.eventBus.emit(new MouseMoveEvent(e.clientX, e.clientY));
       }
-    });
+    }, { signal: this.teardown.signal });
     // Clear all tracked keys when the window loses focus so keys that had
     // their keyup swallowed by the browser (e.g. cmd+zoom) don't stay stuck.
     // Also release the hold-to-view state and any active pointer/drag state
@@ -322,7 +363,7 @@ export class InputHandler {
         this.eventBus.emit(new WarshipSelectionBoxCancelEvent());
       }
       this.canvas.style.cursor = "";
-    });
+    }, { signal: this.teardown.signal });
     this.pointers.clear();
 
     this.moveInterval = setInterval(() => {
@@ -469,7 +510,7 @@ export class InputHandler {
         }
         this.canvas.style.cursor = "crosshair";
       }
-    });
+    }, { signal: this.teardown.signal });
     window.addEventListener("keyup", (e) => {
       const isTextInput = this.isTextInputTarget(e.target);
       if (isTextInput && !this.activeKeys.has(e.code)) {
@@ -604,7 +645,7 @@ export class InputHandler {
       ) {
         this.canvas.style.cursor = "";
       }
-    });
+    }, { signal: this.teardown.signal });
   }
 
   private onPointerDown(event: PointerEvent) {

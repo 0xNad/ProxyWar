@@ -1,5 +1,5 @@
 import { translateText } from "../client/Utils";
-import { EventBus } from "../core/EventBus";
+import { EventBus, EventConstructor, GameEvent } from "../core/EventBus";
 import {
   ClientID,
   GameID,
@@ -124,7 +124,14 @@ export function isReplayLobby(
 }
 
 export interface JoinLobbyResult {
-  stop: (force?: boolean) => boolean;
+  /**
+   * `releaseRenderSurface` is opt-in and only the in-place replay rewind
+   * (Main.ts) passes it: that path is about to build a REPLACEMENT full-screen
+   * canvas, so the outgoing one has to leave the document instead of stranding
+   * its backing store there. Every other caller leaves the last painted frame
+   * exactly where it is, as before.
+   */
+  stop: (force?: boolean, releaseRenderSurface?: boolean) => boolean;
   prestart: Promise<void>;
   join: Promise<void>;
 }
@@ -254,17 +261,22 @@ export function joinLobby(
   };
   transport.connect(onconnect, onmessage);
   return {
-    stop: (force: boolean = false) => {
+    stop: (force: boolean = false, releaseRenderSurface: boolean = false) => {
       if (!force && currentGameRunner?.shouldPreventWindowClose()) {
         console.log("Player is active, prevent leaving game");
         return false;
       }
       console.log("leaving game");
       if (currentGameRunner) {
-        currentGameRunner.stop();
+        currentGameRunner.stop(releaseRenderSurface);
         currentGameRunner = null;
       } else {
+        // The runner never got built (a join that failed, or one stopped
+        // before `createClientGame()` resolved), but the Transport exists from
+        // `joinLobby`'s first line and is already subscribed to the shared
+        // page-lifetime EventBus — so it still has to be taken back off it.
         transport.leaveGame();
+        transport.dispose();
       }
       return true;
     },
@@ -371,6 +383,12 @@ export class ClientGameRunner {
 
   /** Removes the share-image capture listener; set while the game is active. */
   private disposeShareImageCapture: (() => void) | null = null;
+
+  // Same H1 reasoning as LocalServer/Transport: the EventBus outlives any one
+  // game, `.bind(this)` mints a fresh function every call (so nothing could
+  // have been `off()`ed as written), and the in-place replay rewind means a
+  // stopped runner is no longer the last one the page will ever have.
+  private readonly eventBusUnsubscribes: Array<() => void> = [];
 
   constructor(
     private lobby: LobbyConfig,
@@ -481,26 +499,23 @@ export class ClientGameRunner {
       );
     }, 20000);
 
-    this.eventBus.on(MouseUpEvent, this.inputEvent.bind(this));
-    this.eventBus.on(MouseMoveEvent, this.onMouseMove.bind(this));
-    this.eventBus.on(AutoUpgradeEvent, this.autoUpgradeEvent.bind(this));
-    this.eventBus.on(
-      DoBoatAttackEvent,
-      this.doBoatAttackUnderCursor.bind(this),
-    );
-    this.eventBus.on(
+    this.subscribe(MouseUpEvent, this.inputEvent.bind(this));
+    this.subscribe(MouseMoveEvent, this.onMouseMove.bind(this));
+    this.subscribe(AutoUpgradeEvent, this.autoUpgradeEvent.bind(this));
+    this.subscribe(DoBoatAttackEvent, this.doBoatAttackUnderCursor.bind(this));
+    this.subscribe(
       DoGroundAttackEvent,
       this.doGroundAttackUnderCursor.bind(this),
     );
-    this.eventBus.on(
+    this.subscribe(
       DoRetaliateAttackEvent,
       this.doRetaliateAttackMostRecent.bind(this),
     );
-    this.eventBus.on(
+    this.subscribe(
       DoRequestAllianceEvent,
       this.doRequestAllianceUnderCursor.bind(this),
     );
-    this.eventBus.on(
+    this.subscribe(
       DoBreakAllianceEvent,
       this.doBreakAllianceUnderCursor.bind(this),
     );
@@ -847,16 +862,40 @@ export class ClientGameRunner {
     }
   }
 
-  public stop() {
+  private subscribe<T extends GameEvent>(
+    eventType: EventConstructor<T>,
+    handler: (event: T) => void,
+  ): void {
+    this.eventBus.on(eventType, handler);
+    this.eventBusUnsubscribes.push(() => this.eventBus.off(eventType, handler));
+  }
+
+  /**
+   * `releaseRenderSurface` — see `JoinLobbyResult.stop`. Only the in-place
+   * rewind sets it; everything else keeps the outgoing canvas in the document
+   * so the last frame stays on screen exactly as it did before.
+   */
+  public stop(releaseRenderSurface: boolean = false) {
     if (!this.isActive) return;
 
     this.isActive = false;
+    // Without this every in-place rewind strands the previous handler's
+    // window listeners and its 1ms interval — see InputHandler.teardown.
+    this.input.dispose();
     if (this.disposeShareImageCapture !== null) {
       this.disposeShareImageCapture();
       this.disposeShareImageCapture = null;
     }
     this.worker.cleanup();
     this.transport.leaveGame();
+    // Order matters: `leaveGame()` is what archives a finished singleplayer
+    // game through LocalServer, and `dispose()` is what removes both from the
+    // shared EventBus afterwards.
+    this.transport.dispose();
+    this.renderer.dispose({ releaseCanvas: releaseRenderSurface });
+    for (const unsubscribe of this.eventBusUnsubscribes.splice(0)) {
+      unsubscribe();
+    }
     if (this.connectionCheckInterval) {
       clearInterval(this.connectionCheckInterval);
       this.connectionCheckInterval = null;

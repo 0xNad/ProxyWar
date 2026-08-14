@@ -4,15 +4,53 @@ import { PlayerType, Team, TerrainType } from "../game/Game";
 import { GameMap, TileRef } from "../game/GameMap";
 import { PlayerView } from "../game/GameView";
 import { ColorAllocator } from "./ColorAllocator";
-import { botColors, fallbackColors, humanColors, nationColors } from "./Colors";
+import {
+  botColors,
+  fallbackColors,
+  humanColors,
+  isStaticReplayBroadcast,
+  nationColors,
+  REPLAY_SEAT_COLORS,
+} from "./Colors";
 import { Theme } from "./Config";
 
 export class PastelTheme implements Theme {
   private rand = new PseudoRandom(123);
-  private humanColorAllocator = new ColorAllocator(humanColors, fallbackColors);
   private botColorAllocator = new ColorAllocator(botColors, botColors);
   private teamColorAllocator = new ColorAllocator(humanColors, fallbackColors);
   private nationColorAllocator = new ColorAllocator(nationColors, nationColors);
+
+  /**
+   * The player-territory allocator, replay-gated (see REPLAY_SEAT_COLORS in
+   * Colors.ts for the full audit rationale): in the static replay broadcast
+   * the 16 seats come from the validated OKLCH palette IN ORDER (seat
+   * N % 16 for colour-index N — the seatOrder constructor arg), because the
+   * stock list sampled as raw daisyUI/Tailwind values with two violets, two
+   * map-scale-identical blues, and a uniform pastel value. Outside the
+   * broadcast this is exactly the stock allocator.
+   *
+   * Built lazily (not a field initializer) so the flag is read on the first
+   * territoryColor() call — after the broadcast host page has set
+   * window.__PROXYWAR_STATIC_REPLAY__ — rather than whenever the theme
+   * singletons in DefaultConfig happen to be constructed. Same lazy-read
+   * idiom as UserSettings.darkMode(). PastelThemeDark inherits this, so
+   * both light and dark themes are covered.
+   *
+   * Border/structure colours need no changes: PlayerView derives its border
+   * via theme.borderColor(territoryColor) (darken 0.125) and
+   * theme.structureColors(), both of which operate on whatever Colord this
+   * allocator returns — so they darken our seats exactly as they darkened
+   * the stock colours.
+   */
+  private humanColorAllocatorInstance: ColorAllocator | null = null;
+  private humanColorAllocator(): ColorAllocator {
+    // Fallback list is irrelevant in seatOrder mode (seats wrap modulo 16
+    // and the fallback path is never reached), hence the empty array.
+    this.humanColorAllocatorInstance ??= isStaticReplayBroadcast()
+      ? new ColorAllocator(REPLAY_SEAT_COLORS, [], REPLAY_SEAT_COLORS)
+      : new ColorAllocator(humanColors, fallbackColors);
+    return this.humanColorAllocatorInstance;
+  }
 
   private background = colord("rgb(60,60,60)");
   private shore = colord("rgb(204,203,158)");
@@ -54,7 +92,7 @@ export class PastelTheme implements Theme {
       return this.teamColorAllocator.assignTeamPlayerColor(team, player.id());
     }
     if (player.type() === PlayerType.Human) {
-      return this.humanColorAllocator.assignColor(player.id());
+      return this.humanColorAllocator().assignColor(player.id());
     }
     if (player.type() === PlayerType.Bot) {
       return this.botColorAllocator.assignColor(player.id());

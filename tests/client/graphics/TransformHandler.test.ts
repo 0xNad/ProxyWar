@@ -55,8 +55,7 @@ describe("computeSpectatorFitScale", () => {
     const vpHeight = 390;
     const mapWidth = 1000;
     const mapHeight = 1000; // square map: aspect deviation ~2.16, outside the (0.5,2) cover band
-    const aspectRatioDeviation =
-      vpWidth / vpHeight / (mapWidth / mapHeight);
+    const aspectRatioDeviation = vpWidth / vpHeight / (mapWidth / mapHeight);
     expect(aspectRatioDeviation).toBeGreaterThan(2); // confirms this case is NOT eligible for `cover`
 
     const result = computeSpectatorFitScale({
@@ -290,6 +289,8 @@ function makeGameView(mapWidth: number, mapHeight: number): GameView {
   return {
     width: () => mapWidth,
     height: () => mapHeight,
+    x: (tile: number) => tile % mapWidth,
+    y: (tile: number) => Math.floor(tile / mapWidth),
   } as unknown as GameView;
 }
 
@@ -531,9 +532,16 @@ describe("TransformHandler.updateCanvasBoundingRect — resize immediately re-cl
   });
 });
 
-/** Minimal PlayerView mock: `onGoToPlayer` only ever reads `nameLocation()`. */
-function makePlayer(x: number, y: number): PlayerView {
-  return { nameLocation: () => ({ x, y }) } as unknown as PlayerView;
+/** Minimal PlayerView mock for replay camera locate and territory fitting. */
+function makePlayer(
+  x: number,
+  y: number,
+  borderTiles: ReadonlySet<number> = new Set(),
+): PlayerView {
+  return {
+    nameLocation: () => ({ x, y }),
+    borderTiles: async () => ({ borderTiles }),
+  } as unknown as PlayerView;
 }
 
 describe("computeCenterOnCellOffset", () => {
@@ -621,6 +629,32 @@ describe("TransformHandler.onGoToPlayer — replay/spectator camera-locate is a 
     transform.onZoom(new ZoomEvent(px, py, -100));
     const after = worldUnderCursor(transform, px, py);
     expect(Math.hypot(after.x - before.x, after.y - before.y)).toBeLessThan(1);
+  });
+
+  it("fits a selected competitor's territory into the spectator frame", async () => {
+    (window as unknown as Record<string, unknown>).__PROXYWAR_AI_REPLAY__ =
+      true;
+    const transform = new TransformHandler(
+      makeGameView(2000, 1000),
+      new EventBus(),
+      makeCanvas(1600, 900),
+    );
+    const borderTiles = new Set([
+      400 * 2000 + 800,
+      400 * 2000 + 1200,
+      600 * 2000 + 800,
+      600 * 2000 + 1200,
+    ]);
+    transform.onGoToPlayer(
+      new GoToPlayerEvent(makePlayer(1000, 500, borderTiles)),
+    );
+
+    await Promise.resolve();
+
+    expect(transform.scale).toBeCloseTo(2.8, 5);
+    const world = worldUnderCursor(transform, 800, 450);
+    expect(world.x).toBeCloseTo(1000, 0);
+    expect(world.y).toBeCloseTo(500, 0);
   });
 
   it("live play (non-spectator) GoToPlayerEvent is byte-for-byte unchanged: still the eased multi-tick chase, still uses event.zoom", () => {
@@ -799,8 +833,7 @@ describe("TransformHandler.updateCanvasBoundingRect — resize refreshes spectat
       transform.onZoom(new ZoomEvent(960, 540, -60));
       const scale = transform.scale;
       const [topLeft] = transform.screenBoundingRect();
-      const impliedOffsetX =
-        topLeft.x + mapWidth / (2 * scale) - mapWidth / 2;
+      const impliedOffsetX = topLeft.x + mapWidth / (2 * scale) - mapWidth / 2;
       if (previousImpliedOffsetX !== null) {
         expect(
           Math.abs(impliedOffsetX - previousImpliedOffsetX),

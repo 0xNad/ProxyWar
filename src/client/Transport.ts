@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { EventBus, GameEvent } from "../core/EventBus";
+import { EventBus, EventConstructor, GameEvent } from "../core/EventBus";
 import {
   AllPlayers,
   GameType,
@@ -188,6 +188,19 @@ export class Transport {
   private pingInterval: number | null = null;
   public readonly isLocal: boolean;
 
+  // H1 (2026-08-12, in-place rewind): a Transport is per-game, the EventBus is
+  // page-lifetime, and the broadcast scrubber's backward seek now replaces one
+  // Transport with another without a page load. The ~25 registrations below
+  // used to be unremovable inline arrows (`EventBus.off()` matches by function
+  // identity), so every rewind left another dead Transport subscribed to the
+  // live bus. The worst of those is SendHashEvent: a stale Transport forwards
+  // it into its OWN dead LocalServer's replay-hash verification, which on a
+  // mismatch reports a desync — and the desync path appends a full-screen
+  // ERROR MODAL over a board that is perfectly fine. `subscribe()` keeps the
+  // handler reference so `dispose()` can take all of them back off.
+  private readonly eventBusUnsubscribes: Array<() => void> = [];
+  private disposed = false;
+
   constructor(
     private lobbyConfig: LobbyConfig,
     private eventBus: EventBus,
@@ -199,74 +212,106 @@ export class Transport {
       lobbyConfig.progressiveReplay !== undefined ||
       lobbyConfig.gameStartInfo?.config.gameType === GameType.Singleplayer;
 
-    this.eventBus.on(SendAllianceRequestIntentEvent, (e) =>
+    this.subscribe(SendAllianceRequestIntentEvent, (e) =>
       this.onSendAllianceRequest(e),
     );
-    this.eventBus.on(SendAllianceRejectIntentEvent, (e) =>
+    this.subscribe(SendAllianceRejectIntentEvent, (e) =>
       this.onAllianceRejectUIEvent(e),
     );
-    this.eventBus.on(SendAllianceExtensionIntentEvent, (e) =>
+    this.subscribe(SendAllianceExtensionIntentEvent, (e) =>
       this.onSendAllianceExtensionIntent(e),
     );
-    this.eventBus.on(SendBreakAllianceIntentEvent, (e) =>
+    this.subscribe(SendBreakAllianceIntentEvent, (e) =>
       this.onBreakAllianceRequestUIEvent(e),
     );
-    this.eventBus.on(SendSpawnIntentEvent, (e) =>
+    this.subscribe(SendSpawnIntentEvent, (e) =>
       this.onSendSpawnIntentEvent(e),
     );
-    this.eventBus.on(SendAttackIntentEvent, (e) => this.onSendAttackIntent(e));
-    this.eventBus.on(SendUpgradeStructureIntentEvent, (e) =>
+    this.subscribe(SendAttackIntentEvent, (e) => this.onSendAttackIntent(e));
+    this.subscribe(SendUpgradeStructureIntentEvent, (e) =>
       this.onSendUpgradeStructureIntent(e),
     );
-    this.eventBus.on(SendBoatAttackIntentEvent, (e) =>
+    this.subscribe(SendBoatAttackIntentEvent, (e) =>
       this.onSendBoatAttackIntent(e),
     );
-    this.eventBus.on(SendTargetPlayerIntentEvent, (e) =>
+    this.subscribe(SendTargetPlayerIntentEvent, (e) =>
       this.onSendTargetPlayerIntent(e),
     );
-    this.eventBus.on(SendEmojiIntentEvent, (e) => this.onSendEmojiIntent(e));
-    this.eventBus.on(SendDonateGoldIntentEvent, (e) =>
+    this.subscribe(SendEmojiIntentEvent, (e) => this.onSendEmojiIntent(e));
+    this.subscribe(SendDonateGoldIntentEvent, (e) =>
       this.onSendDonateGoldIntent(e),
     );
-    this.eventBus.on(SendDonateTroopsIntentEvent, (e) =>
+    this.subscribe(SendDonateTroopsIntentEvent, (e) =>
       this.onSendDonateTroopIntent(e),
     );
-    this.eventBus.on(SendQuickChatEvent, (e) => this.onSendQuickChatIntent(e));
-    this.eventBus.on(SendEmbargoIntentEvent, (e) =>
+    this.subscribe(SendQuickChatEvent, (e) => this.onSendQuickChatIntent(e));
+    this.subscribe(SendEmbargoIntentEvent, (e) =>
       this.onSendEmbargoIntent(e),
     );
-    this.eventBus.on(SendEmbargoAllIntentEvent, (e) =>
+    this.subscribe(SendEmbargoAllIntentEvent, (e) =>
       this.onSendEmbargoAllIntent(e),
     );
-    this.eventBus.on(BuildUnitIntentEvent, (e) => this.onBuildUnitIntent(e));
+    this.subscribe(BuildUnitIntentEvent, (e) => this.onBuildUnitIntent(e));
 
-    this.eventBus.on(PauseGameIntentEvent, (e) => this.onPauseGameIntent(e));
-    this.eventBus.on(SendWinnerEvent, (e) => this.onSendWinnerEvent(e));
-    this.eventBus.on(SendHashEvent, (e) => this.onSendHashEvent(e));
-    this.eventBus.on(CancelAttackIntentEvent, (e) =>
+    this.subscribe(PauseGameIntentEvent, (e) => this.onPauseGameIntent(e));
+    this.subscribe(SendWinnerEvent, (e) => this.onSendWinnerEvent(e));
+    this.subscribe(SendHashEvent, (e) => this.onSendHashEvent(e));
+    this.subscribe(CancelAttackIntentEvent, (e) =>
       this.onCancelAttackIntentEvent(e),
     );
-    this.eventBus.on(CancelBoatIntentEvent, (e) =>
+    this.subscribe(CancelBoatIntentEvent, (e) =>
       this.onCancelBoatIntentEvent(e),
     );
 
-    this.eventBus.on(MoveWarshipIntentEvent, (e) => {
+    this.subscribe(MoveWarshipIntentEvent, (e) => {
       this.onMoveWarshipEvent(e);
     });
 
-    this.eventBus.on(SendDeleteUnitIntentEvent, (e) =>
+    this.subscribe(SendDeleteUnitIntentEvent, (e) =>
       this.onSendDeleteUnitIntent(e),
     );
 
-    this.eventBus.on(SendKickPlayerIntentEvent, (e) =>
+    this.subscribe(SendKickPlayerIntentEvent, (e) =>
       this.onSendKickPlayerIntent(e),
     );
 
-    this.eventBus.on(SendUpdateGameConfigIntentEvent, (e) =>
+    this.subscribe(SendUpdateGameConfigIntentEvent, (e) =>
       this.onSendUpdateGameConfigIntent(e),
     );
 
-    this.eventBus.on(SendStartGameEvent, () => this.onSendStartGame());
+    this.subscribe(SendStartGameEvent, () => this.onSendStartGame());
+  }
+
+  private subscribe<T extends GameEvent>(
+    eventType: EventConstructor<T>,
+    handler: (event: T) => void,
+  ): void {
+    this.eventBus.on(eventType, handler);
+    this.eventBusUnsubscribes.push(() => this.eventBus.off(eventType, handler));
+  }
+
+  /**
+   * Terminal teardown: this Transport stops existing as far as the shared
+   * EventBus is concerned. Called from `ClientGameRunner.stop()` (and from
+   * `joinLobby`'s stop handle when the runner never got built), always AFTER
+   * `leaveGame()` — that ordering matters for a live singleplayer game, whose
+   * `leaveGame()` -> `LocalServer.endGame()` is what archives the match.
+   *
+   * Idempotent: `stop()` can be reached twice (an error stop followed by the
+   * lobby handle's own stop), and the second pass must not off() handlers a
+   * NEWER Transport has since registered on the same bus.
+   */
+  public dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    for (const unsubscribe of this.eventBusUnsubscribes.splice(0)) {
+      unsubscribe();
+    }
+    this.stopPing();
+    this.killExistingSocket();
+    // A join that failed before `connectLocal()` ran never got one, despite
+    // the field's non-optional declared type.
+    this.localServer?.dispose();
   }
 
   private startPing() {

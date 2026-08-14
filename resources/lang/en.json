@@ -907,7 +907,11 @@
     "betrayals": "Betrayals",
     "configure_columns": "Choose columns",
     "show_control": "Show Control",
-    "show_units": "Show Units"
+    "show_units": "Show Units",
+    "broadcast_column_over_second": "▲{amount} over 2nd",
+    "broadcast_margin_behind": "▼{points} behind",
+    "broadcast_margin_over_second": "▲{points} over 2nd",
+    "broadcast_out": "OUT"
   },
   "events_display": {
     "events": "Events",
@@ -1122,7 +1126,24 @@
     "clip_download_file": "Download MP4",
     "clip_copy_caption": "Copy caption",
     "clip_failed": "The clip could not be prepared. Try again later.",
-    "clip_busy": "The clip service is busy. Try again in a moment."
+    "clip_busy": "The clip service is busy. Try again in a moment.",
+    "deal_degraded_action": "Planner degraded for this action.",
+    "deal_recovered_action": "Recovered action — selected by fallback play.",
+    "event_alliance_formed": "{actor} and {target} form an alliance",
+    "event_eliminated": "{actor} is eliminated",
+    "event_lead_change_detail": "{actor} {toShare} vs {target} {fromShare} of claimed land at the overtake",
+    "event_nuke": "{actor} escalates nuclear pressure",
+    "event_nuke_target": "{actor} escalates nuclear pressure against {target}",
+    "event_plan_change": "{actor} shifts plan to {plan}",
+    "event_spawn": "{actor} enters the match",
+    "first_watch_hint": "Click any nation to follow it",
+    "gui_hide": "Hide interface",
+    "gui_show": "Show interface",
+    "headline_betrayal": "{actor} breaks alliance with {target}",
+    "headline_first_strike": "{actor} strikes {target}",
+    "headline_lead_change_from": "{actor} takes the lead from {target} — {toShare} to {fromShare}",
+    "timeline_finish": "Match ends",
+    "war_room_grouped_skirmishes": "+{count} more {count, plural, one {skirmish} other {skirmishes}}"
   },
   "error_modal": {
     "crashed": "Game crashed!",
@@ -1890,6 +1911,7 @@
     "rail_expand": "Expand competitors panel",
     "war_room_heading": "War Room",
     "war_room_empty": "No notable events yet.",
+    "war_room_show_earlier": "Show {count} earlier",
     "war_room_kind_alliance": "Alliance",
     "war_room_kind_first_strike": "First strike",
     "war_room_kind_betrayal": "Betrayal",

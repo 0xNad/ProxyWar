@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { EventBus } from "../core/EventBus";
+import { EventBus, EventConstructor, GameEvent } from "../core/EventBus";
 import {
   AllPlayersStats,
   ClientID,
@@ -115,6 +115,12 @@ export class LocalServer {
   // applying for the rest of this instance's life. Never reset mid-session;
   // a fresh page load (Reset button, a backward jump-to-turn navigation)
   // makes a new LocalServer instance and starts this at false again.
+  // H6 (2026-08-12): the in-place rewind path makes a new instance with NO
+  // page load, so `applyArchivedReplayDefaultSpeed()` below would snap a
+  // viewer who had deliberately picked 1x back to the broadcast default.
+  // Main.ts re-emits the retained user pick on the rewound game's first frame
+  // (the same restore the `?turn=` reload path already performs from
+  // sessionStorage) so the latch is set again before it can matter.
   private userOverrodeReplaySpeed = false;
 
   private progressiveReplayTurns: Readonly<ReplayPremiereReleasedTurn>[] = [];
@@ -142,12 +148,57 @@ export class LocalServer {
   private turnCheckInterval: NodeJS.Timeout;
   private clientConnect: () => void;
   private clientMessage: (message: ServerMessage) => void;
+  /** See the hash-verification branch in onMessage for why this exists. */
+  private warnedNoArchivedHash = false;
+
+  // H1 (2026-08-12, in-place rewind): the EventBus is a single PAGE-lifetime
+  // instance while a LocalServer is per-game, and the broadcast scrubber's
+  // backward seek now stops one instance and starts another WITHOUT a page
+  // load. Every handler start() registers therefore has to be removable, and
+  // the previous inline `eventBus.on(X, (e) => ...)` registrations were not:
+  // `EventBus.off()` matches by function identity and nothing held those
+  // references. Left unfixed, N rewinds leave N dead LocalServers all
+  // answering the same ReplayJumpToTurnEvent — each one seeking a replay whose
+  // client is gone, on the same main thread the live one needs.
+  private readonly eventBusUnsubscribes: Array<() => void> = [];
+  private disposed = false;
 
   constructor(
     private lobbyConfig: LobbyConfig,
     private isReplay: boolean,
     private eventBus: EventBus,
   ) {}
+
+  private subscribe<T extends GameEvent>(
+    eventType: EventConstructor<T>,
+    handler: (event: T) => void,
+  ): void {
+    this.eventBus.on(eventType, handler);
+    this.eventBusUnsubscribes.push(() => this.eventBus.off(eventType, handler));
+  }
+
+  /**
+   * Terminal teardown of this instance's page-lifetime subscriptions and its
+   * pacing interval.
+   *
+   * Deliberately NOT called from `endGame()`: that also runs at the NATURAL
+   * end of a replay (see `endTurn()`'s `turns.length >= replayTurns.length`
+   * branch), where the viewer is still sitting on a live board and a forward
+   * seek must keep working. The stop path calls this instead —
+   * `ClientGameRunner.stop()` -> `Transport.dispose()` -> here — which only
+   * runs when the game is genuinely being torn down.
+   */
+  public dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.running = false;
+    clearInterval(this.turnCheckInterval);
+    this.progressiveReplayUnsubscribe?.();
+    this.progressiveReplayUnsubscribe = null;
+    for (const unsubscribe of this.eventBusUnsubscribes.splice(0)) {
+      unsubscribe();
+    }
+  }
 
   public updateCallback(
     clientConnect: () => void,
@@ -239,7 +290,7 @@ export class LocalServer {
       this.reportReplayCatchUp();
     }, 5);
 
-    this.eventBus.on(ReplaySpeedChangeEvent, (event) => {
+    this.subscribe(ReplaySpeedChangeEvent, (event) => {
       if (
         this.lobbyConfig.progressiveReplay &&
         !this.progressiveReplayFinalized
@@ -259,12 +310,12 @@ export class LocalServer {
       }
       this.replaySpeedMultiplier = event.replaySpeedMultiplier;
     });
-    this.eventBus.on(ReplayJumpToTurnEvent, (event) => {
+    this.subscribe(ReplayJumpToTurnEvent, (event) => {
       this.jumpReplayForward(event.turnNumber);
     });
 
     if (!this.isReplay) {
-      this.eventBus.on(GameSpeedUpIntentEvent, () => {
+      this.subscribe(GameSpeedUpIntentEvent, () => {
         const idx = SPEED_ORDER.indexOf(this.replaySpeedMultiplier);
         if (idx < 0 || idx >= SPEED_ORDER.length - 1) return;
         this.replaySpeedMultiplier = SPEED_ORDER[idx + 1];
@@ -273,7 +324,7 @@ export class LocalServer {
         );
       });
 
-      this.eventBus.on(GameSpeedDownIntentEvent, () => {
+      this.subscribe(GameSpeedDownIntentEvent, () => {
         const idx = SPEED_ORDER.indexOf(this.replaySpeedMultiplier);
         if (idx <= 0) return;
         this.replaySpeedMultiplier = SPEED_ORDER[idx - 1];
@@ -370,9 +421,20 @@ export class LocalServer {
             ?.hash
         : this.replayTurns[clientMsg.turnNumber]?.hash;
       if (archivedHash === undefined || archivedHash === null) {
-        console.warn(
-          `no archived hash found for turn ${clientMsg.turnNumber}, client hash: ${clientMsg.hash}`,
-        );
+        // ONCE, not per turn. A missing archived hash is the EXPECTED case,
+        // not a fault: the recorder stores a hash every 100th turn (see the
+        // singleplayer branch above), so on a 12,800-turn match this warned
+        // about 12,672 times — 1,258 lines in a single league replay. That
+        // volume is what turns the desync check below, the one line here that
+        // means something is actually wrong, into something nobody reads.
+        // Replay-only path (guarded by isReplay above), so live play is
+        // untouched either way.
+        if (!this.warnedNoArchivedHash) {
+          this.warnedNoArchivedHash = true;
+          console.warn(
+            `no archived hash for turn ${clientMsg.turnNumber} — this record samples hashes, so unverified turns are expected; suppressing further notices`,
+          );
+        }
         return;
       }
       if (archivedHash !== clientMsg.hash) {
@@ -435,7 +497,22 @@ export class LocalServer {
     ) {
       return;
     }
-    this.replaySpeedMultiplier = ReplaySpeedMultiplier.fastest;
+    // BROADCAST EXCEPTION. "Fastest" exists for the analyst use-case — skim an
+    // archived record to a moment you care about. As a BROADCAST default it is
+    // a catastrophe: the whole 21-minute match rips past in ~25 seconds of
+    // strobing territory and feed spam, and by the time the board first paints
+    // the opening is already thousands of turns gone. A first-time viewer's
+    // verdict was, verbatim, "wow that was a horrible user experience."
+    //
+    // The broadcast opens at 2x: dead time is collapsed but every beat still
+    // reads (the L20 rule — speed collapses the idle, never the beat). The
+    // speed control still offers fastest to anyone who wants the skim.
+    const staticBroadcast =
+      (window as typeof window & { __PROXYWAR_STATIC_REPLAY__?: boolean })
+        .__PROXYWAR_STATIC_REPLAY__ === true;
+    this.replaySpeedMultiplier = staticBroadcast
+      ? ReplaySpeedMultiplier.fast
+      : ReplaySpeedMultiplier.fastest;
   }
 
   /**

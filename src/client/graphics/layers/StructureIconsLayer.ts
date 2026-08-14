@@ -30,7 +30,7 @@ import {
   BuildUnitIntentEvent,
   SendUpgradeStructureIntentEvent,
 } from "../../Transport";
-import { renderNumber } from "../../Utils";
+import { canvasPixelRatio, renderNumber } from "../../Utils";
 import { TransformHandler } from "../TransformHandler";
 import { UIState } from "../UIState";
 import { Layer } from "./Layer";
@@ -306,9 +306,16 @@ export class StructureIconsLayer implements Layer {
     if (this.rendererOrGLContextLost()) {
       return;
     }
-    this.pixicanvas.width = window.innerWidth;
-    this.pixicanvas.height = window.innerHeight;
-    this.renderer?.resize(innerWidth, innerHeight, 1);
+    // Sized to match the MAIN canvas's backing store, not to CSS pixels.
+    // renderLayer blits this bitmap with drawImage(…, 0, 0) under a base
+    // transform that now carries the device-pixel ratio on replay routes, so a
+    // CSS-pixel bitmap was being upscaled by that ratio — structure icons came
+    // out SOFTER than the board they sit on, which is the exact defect the
+    // ratio was introduced to fix. Live play resolves to 1 and is unchanged.
+    const ratio = canvasPixelRatio();
+    this.pixicanvas.width = Math.round(window.innerWidth * ratio);
+    this.pixicanvas.height = Math.round(window.innerHeight * ratio);
+    this.renderer?.resize(innerWidth, innerHeight, ratio);
   }
 
   /**
@@ -396,7 +403,19 @@ export class StructureIconsLayer implements Layer {
     this.levelsStage!.visible = scale > ZOOM_THRESHOLD && this.renderSprites;
     if (this.renderer) {
       this.renderer.render(this.rootStage);
-      mainContext.drawImage(this.renderer.canvas, 0, 0);
+      // Destination size stated explicitly in CSS pixels. shouldTransform() is
+      // false, so this draws under the BASE transform, which carries the
+      // device-pixel ratio — and the source bitmap is now sized in device
+      // pixels too (resizeCanvas). Without an explicit destination the ratio
+      // would be applied twice and the icon layer would render at ratio times
+      // its correct size. Live play has ratio 1, where this is a no-op.
+      mainContext.drawImage(
+        this.renderer.canvas,
+        0,
+        0,
+        window.innerWidth,
+        window.innerHeight,
+      );
     }
   }
 

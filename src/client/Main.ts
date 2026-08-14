@@ -19,6 +19,13 @@ import {
   UserSettings,
 } from "../core/game/UserSettings";
 import "./AccountModal";
+import { mountBroadcastBeats } from "./BroadcastBeats";
+import {
+  decisionsFromSpectatorSnapshots,
+  publishReplayDecisions,
+} from "./ReplayDecisionStore";
+import { publishReplayIntegrity } from "./ReplayIntegrityStore";
+import { spectatorReplaySnapshots } from "./SpectatorReplayStore";
 import { mountReplayWatchAnalytics } from "./ReplayWatchAnalytics";
 import { getUserMe } from "./Api";
 import { userAuth } from "./Auth";
@@ -36,11 +43,17 @@ import { FlagInput } from "./FlagInput";
 import "./FlagInputModal";
 import { FlagInputModal } from "./FlagInputModal";
 import { GameInfoModal } from "./GameInfoModal";
+import { REPLAY_SEEK_DEAD_ZONE_TURNS } from "./graphics/layers/BroadcastScrubber";
+import {
+  followedCompetitorSmallId,
+  restoreFollowedCompetitor,
+} from "./graphics/layers/FollowedCompetitor";
 import "./GameModeSelector";
 import { GameModeSelector } from "./GameModeSelector";
 import { GameStartingModal } from "./GameStartingModal";
 import "./GoogleAdElement";
 import { HelpModal } from "./HelpModal";
+import { installLullDirector } from "./LullDirector";
 import {
   isReplayOrGamePathShape,
   shouldPushAiLeagueReplayHistoryEntry,
@@ -59,8 +72,13 @@ import { initNavigation } from "./Navigation";
 import "./NewsModal";
 import "./PatternInput";
 import {
+  initialReplayClipRenderableThroughTurn,
   replayClipPreviewTarget,
 } from "./ReplayClipControl";
+import {
+  installReplayFrameCapture,
+  nearestFrameAtOrBefore,
+} from "./ReplayFrameCache";
 import {
   createJoinSyncWatchdog,
   finishReplayLoadingScreen,
@@ -89,6 +107,7 @@ import {
   loadPersistedReplaySpeed,
   watchReplaySpeedForResume,
 } from "./ReplaySpeedPersistence";
+import { raiseRewindCurtain } from "./RewindCurtain";
 import "./SinglePlayerModal";
 import { StoreModal } from "./Store";
 import "./TerritoryPatternsModal";
@@ -339,12 +358,115 @@ export interface JoinLobbyEvent {
   publicLobbyInfo?: GameInfo | PublicGameInfo;
 }
 
+/**
+ * Named (rather than inline on `openAiLeagueReplay`) so the in-place rewind
+ * can RETAIN the exact argument set a replay was opened with and re-open from
+ * it later without re-deriving anything.
+ */
+interface AiLeagueReplayOpenOptions {
+  source?: Extract<
+    JoinLobbyEvent["source"],
+    "ai-league-replay" | "coworld-replay"
+  >;
+  coworldReplayPath?: string;
+  artifactBasePath?: string;
+  gameRecord?: GameRecord;
+  /**
+   * Broadcast artifacts already in hand, skipping the network hydrate.
+   * The static bundle has no artifact server, so these arrive inline in
+   * the replay envelope instead.
+   *
+   * 0.1.42: `inlineRunResults` is the one of the three with a live consumer
+   * (`publishReplayIntegrity`). Upstream deleted the league overlay that read
+   * the telemetry and summary — and with it `curatedWarRoomEvents`, the only
+   * code that ever turned telemetry into anything a viewer saw — so those two
+   * are carried, not consumed. They stay wired because the envelope still
+   * ships them and re-homing a curated feed later must not also have to
+   * re-thread the plumbing; the alternative was silently dropping the two
+   * richest artifacts the bundle contains.
+   *
+   * The old `loadArtifactDetails` flag went with that overlay: it gated
+   * `AiLeagueReplayArtifacts.loadAiLeagueReplayDetails`, which 0.1.42 deletes.
+   * No route fetches `replay-ui.json` any more, hosted or bundled.
+   */
+  inlineSpectatorTelemetry?: unknown | null;
+  inlineMatchSummary?: unknown | null;
+  inlineRunResults?: unknown | null;
+  /**
+   * Set only by `rewindReplayInPlace`. This method otherwise ALWAYS raises
+   * the boot-style veil (`holdReplayLoadingScreenUntilFirstFrame`, right
+   * below) -- correct for a fresh page load, where there is nothing on
+   * screen yet to protect. An in-place rewind has a live board with a
+   * viewer's attention on it and uses its own treatment instead (the
+   * `RewindCurtain` dimmed hold raised by the caller before this method is
+   * even entered) -- so for that one call site this flag skips raising the
+   * boot veil entirely rather than raising and instantly re-hiding it,
+   * which would still be a visible flash and would still fire the
+   * `replay_load_started` analytics event for something that is not,
+   * conceptually, a load.
+   */
+  suppressBootCover?: boolean;
+}
+
+/**
+ * REWIND IN-FLIGHT GUARD — module-level on purpose.
+ *
+ * A backward seek tears the game down and builds a new one in place, which
+ * destroys every layer instance including the scrubber. The only guard this
+ * ever had was `BroadcastScrubber`'s own `rewinding` field, and the rebuild
+ * mounts a FRESH scrubber whose flag starts false — while `RewindCurtain` over
+ * it is `pointer-events: none` by design (it is a hold, not a modal). So the
+ * new transport was fully clickable mid-resimulation and a second rewind could
+ * start on top of the first: two `openAiLeagueReplay` attempts racing over one
+ * document, the loser's listeners already retired by the winner's
+ * `replayAttemptCleanup`. Nothing that lives on a layer, a DOM node or an
+ * attempt can guard this; only module scope survives the rebuild.
+ */
+let rewindInFlight = false;
+
+/**
+ * Backstop for the flag above: it is normally released the moment the
+ * resimulation reaches the target (with the curtain drop). If that frame never
+ * arrives — a record that terminates early, or a future change to the one-shot
+ * jump this rides on — a stuck flag would leave the transport permanently
+ * unable to seek backward, which is worse than the double-rewind it prevents.
+ * Three minutes is far beyond the measured worst case (~0.6ms/turn, so ~4s for
+ * a 6,000-turn rewind).
+ */
+const REWIND_GUARD_FAILSAFE_MS = 180_000;
+
 class Client {
   private lobbyHandle: JoinLobbyResult | null = null;
   private eventBus: EventBus = new EventBus();
   private replayLoadingCleanup: (() => void) | null = null;
   private replayAttemptCleanup: (() => void) | null = null;
   private replayPremiereRuntime: ReplayPremiereRuntimeController | null = null;
+
+  /**
+   * Everything a backward seek needs to rebuild the CURRENT replay in place,
+   * captured the moment its record is in hand.
+   *
+   * The whole point is `options.gameRecord`: `decompressGameRecord()`
+   * (core/Util.ts) expands turns IN PLACE and returns the same object, so this
+   * is the identical already-expanded array `LocalServer.replayTurns` is
+   * reading. Re-opening from it skips the 6MB `cache: "no-store"` refetch, two
+   * JSON.parse passes and a `GameRecordSchema.safeParse` over ~14,000 turns
+   * that the old reload-based rewind paid for state that never left memory.
+   */
+  private replayRewindContext: {
+    runID: string;
+    options: AiLeagueReplayOpenOptions;
+  } | null = null;
+  /**
+   * Last speed the VIEWER picked, mirrored here because H6: the rewind builds
+   * a fresh LocalServer whose `userOverrodeReplaySpeed` latch starts false, so
+   * `applyArchivedReplayDefaultSpeed()` would otherwise snap a deliberate 1x
+   * back to the broadcast default. sessionStorage already covers this for the
+   * reload path, but only for sources that arm `watchReplaySpeedForResume` —
+   * never `coworld-replay`, which is exactly the static broadcast bundle the
+   * scrubber ships on.
+   */
+  private lastUserReplaySpeed: ReplaySpeedMultiplier | null = null;
 
   private currentUrl: string | null = null;
 
@@ -1255,23 +1377,16 @@ class Client {
 
   private async openAiLeagueReplay(
     runID: string,
-    options: {
-      source?: Extract<
-        JoinLobbyEvent["source"],
-        "ai-league-replay" | "coworld-replay"
-      >;
-      coworldReplayPath?: string;
-      artifactBasePath?: string;
-      gameRecord?: GameRecord;
-    } = {},
+    options: AiLeagueReplayOpenOptions = {},
   ) {
     this.replayAttemptCleanup?.();
     this.replayLoadingCleanup?.();
-    this.replayLoadingCleanup = holdReplayLoadingScreenUntilFirstFrame(
-      undefined,
-      undefined,
-      runID,
-    );
+    // See `AiLeagueReplayOpenOptions.suppressBootCover`'s own doc: every
+    // route into this method except the in-place rewind wants the ordinary
+    // boot veil, held until the first rendered frame of the new attempt.
+    this.replayLoadingCleanup = options.suppressBootCover
+      ? null
+      : holdReplayLoadingScreenUntilFirstFrame(undefined, undefined, runID);
 
     const artifactBasePath =
       options.artifactBasePath ??
@@ -1362,6 +1477,102 @@ class Client {
       clearTimeout(recordTimeout);
     }
 
+    // The record is now in hand however it got here (fetched above, or handed
+    // in by the static bundle). Retaining it is what makes a backward seek a
+    // ~4s resimulation instead of a 15-25s page load — see the field's doc.
+    this.replayRewindContext = { runID, options: { ...options, gameRecord } };
+
+    // Publish the match's SCHEDULED end (gameRecord.info.num_turns) where the
+    // broadcast clock can read it. The first attempt piped this through the
+    // catch-up event's turnsTotal — but that event only carries a non-null
+    // detail DURING catch-up, and a straight linear playthrough never enters
+    // catch-up, so the clock silently never armed. A body dataset is passive:
+    // no timing dependency, no event plumbing, absent entirely in live play.
+    document.body.dataset.pwReplayTotalTurns = String(gameRecord.info.num_turns);
+    // ...and taken back off when this attempt is torn down, because "absent
+    // entirely in live play" is only true if someone removes it. This client
+    // is a single-page app: `handleLeaveLobby` is stop() + replaceState with
+    // NO page reload, so a key left on <body> outlives the replay and is still
+    // there when the next LIVE match mounts its HUD — which read it and counted
+    // a live FFA down from this record's turn count instead of the engine's
+    // maxTimerValue. `attemptCleanups` is the right home rather than the leave
+    // handler alone: `handleLeaveLobby` drains exactly this list (via
+    // `replayAttemptCleanup`), and so do `failReplayLoading` and a
+    // non-premiere `handleJoinLobby`, so one push covers every exit from a
+    // replay. Safe for the in-place rewind, which re-enters this method: the
+    // drain happens at the top of the new attempt and the line above rewrites
+    // the key long before any renderer reads it, and `rewindReplayInPlace` has
+    // already taken its own copy (see its note there) before that point.
+    attemptCleanups.push(() => {
+      delete document.body.dataset.pwReplayTotalTurns;
+    });
+
+    // The decision store is the WHY surfaces' single source (dossier decision
+    // line, toast reasons, analyst drawer). Republished on every entry so an
+    // in-place rewind re-entering here wipes the previous match's log instead
+    // of leaking it across games.
+    //
+    // ...but the wipe cannot be UNCONDITIONAL, because it must always be
+    // followed by a refill. The only other refill lived in
+    // `openCoworldStaticReplay`, which a rewind never re-enters — it calls
+    // this method directly. So the first backward seek permanently deleted the
+    // agent rationale for the rest of the session: an empty analyst drawer and
+    // no "last decision, and why" on the dossier, which on this product is the
+    // whole differentiator.
+    //
+    // `SpectatorReplayStore` is module-level and holds the envelope's own
+    // (richer) decision log from parse time, so it survives the rebuild and is
+    // the right refill source on every entry, not just the first. On a hosted
+    // route the store is null and `decisionsFromSpectatorSnapshots` returns
+    // `[]` — byte-for-byte the previous wipe.
+    //
+    // 0.1.42 NOTE: this used to mirror the league overlay's own network
+    // hydrate (`replay-ui.json` via `AiLeagueReplayArtifacts`). Upstream
+    // deleted both the overlay and that artifact loader, so the envelope is
+    // now the ONLY decision source on every route, not just the bundle.
+    publishReplayDecisions(
+      decisionsFromSpectatorSnapshots(spectatorReplaySnapshots()),
+    );
+    // The run's own decision tallies, for the surfaces that report whether
+    // this match was actually agent-driven. Published beside the decisions
+    // because they answer the same question at two scales: this is what one
+    // agent decided, and this is how often the agents decided at all.
+    publishReplayIntegrity(options.inlineRunResults ?? null);
+
+    /**
+     * THE CURATED BEATS, and the consumer `inlineSpectatorTelemetry` spent
+     * 0.1.42 waiting for.
+     *
+     * 0.1.42 deleted `AiLeagueReplayOverlay.ts`, and the beat curation lived
+     * INSIDE it rather than in `BroadcastComposition.ts` — so the telemetry
+     * threaded through this method reached nothing, and three of our own
+     * surfaces went dark with it: `WarRoomToasts` harvests
+     * `.broadcast-war-room-item`, `BroadcastScrubber` and `LullDirector`
+     * harvest `.broadcast-timeline-marker`. `BroadcastBeats.ts` is that
+     * curation, re-homed; its host renders the two incumbent regions
+     * off-screen purely so those harvesters have real DOM to read.
+     *
+     * `inlineMatchSummary` deliberately stays unconsumed: its only 0.1.35
+     * readers were the deleted overlay's details header, roster and share
+     * card — chrome our own surfaces replaced outright, not data any beat is
+     * derived from. Passing it here would be plumbing to nowhere.
+     *
+     * Per-attempt, disposed with the attempt, so an in-place rewind rebuilds
+     * one host rather than accumulating a feed per seek.
+     */
+    attemptCleanups.push(
+      mountBroadcastBeats({
+        runID,
+        spectatorTelemetry: options.inlineSpectatorTelemetry ?? null,
+        // The whole-match series artifact is unreachable on every 0.1.42
+        // route (upstream deleted the artifact loader with the overlay), so
+        // lead-change beats always come from the envelope's own snapshots via
+        // `SpectatorReplayStore` — see `aiLeagueLeadChangeBeats`.
+        matchStateSeries: null,
+        replayMaxTurn: initialReplayClipRenderableThroughTurn(gameRecord.info),
+      }).dispose,
+    );
+
     // Plain OpenFront HUD only — the custom league skin is retired. The
     // retention milestones it carried live on in ReplayWatchAnalytics.
     attemptCleanups.push(
@@ -1371,24 +1582,128 @@ class Client {
       }),
     );
 
+    /**
+     * THE PLAYHEAD, tracked off the same per-frame event every other replay
+     * subsystem in this method already rides (see
+     * `ReplayPositionPersistence.ts`'s doc for why that event is always the
+     * right subscription). `onReplayJump` below has to know where the viewer
+     * IS before it can tell a forward jump from a resimulation, and nothing
+     * else in this scope has it: `JoinLobbyResult` exposes only
+     * `stop`/`prestart`/`join`, never the GameView. Per-attempt, so a rewind's
+     * rebuilt match counts from its own turn 0 instead of inheriting the
+     * pre-rewind playhead.
+     */
+    let renderedReplayTurn = 0;
+    const trackRenderedTurn = (event: Event) => {
+      const turnNumber = (event as CustomEvent<{ turnNumber?: unknown }>).detail
+        ?.turnNumber;
+      if (typeof turnNumber === "number" && Number.isFinite(turnNumber)) {
+        renderedReplayTurn = turnNumber;
+      }
+    };
+    document.addEventListener("ai-league-replay-frame", trackRenderedTurn);
+
+    /**
+     * THE ONE SEEK POLICY, and the reason it lives here.
+     *
+     * Every surface that wants to move the playhead dispatches
+     * `ai-league-replay-jump-turn`: the scrubber, the analyst drawer
+     * (AnalystDrawer.ts:131), the jump controls and EVERY timeline marker
+     * (AiLeagueReplayOverlay.ts:1215 / :4850 in 0.1.35; that file is gone in
+     * 0.1.42, the markers with it), the premiere archive view
+     * (ReplayPremiereArchiveView.ts:132) and the auto-pacer (LullDirector.ts:
+     * 511). Only the scrubber ever branched forward-vs-backward, so from all
+     * the others a backward ask reached `LocalServer.jumpReplayForward()` —
+     * which clamps to `Math.max(this.turns.length, ...)` and CANNOT move
+     * backward — and was a silent no-op with no feedback at all. The analyst
+     * drawer lists decisions newest-first across the whole match, so most of
+     * its visible rows are behind the playhead: most of the drawer was dead,
+     * as was every timeline marker left of the playhead.
+     *
+     * So the branch is here, once, and no dispatcher gets an opinion about it.
+     * `REPLAY_SEEK_DEAD_ZONE_TURNS` is the engine's own reach (its doc in
+     * BroadcastScrubber.ts has the derivation): anything nearer than that in
+     * either direction is somewhere playback is about to be anyway, and paying
+     * a resimulation for it would be absurd — those fall through to the
+     * forward emit, where the engine clamps them to a no-op.
+     */
     const onReplayJump = (event: Event) => {
       const turnNumber = (event as CustomEvent<{ turnNumber?: number }>).detail
         ?.turnNumber;
-      if (typeof turnNumber === "number" && Number.isFinite(turnNumber)) {
-        this.eventBus.emit(new ReplayJumpToTurnEvent(turnNumber));
+      if (typeof turnNumber !== "number" || !Number.isFinite(turnNumber)) {
+        return;
       }
+      const target = Math.max(0, Math.floor(turnNumber));
+      if (target < renderedReplayTurn - REPLAY_SEEK_DEAD_ZONE_TURNS) {
+        this.seekReplayBackward(target);
+        return;
+      }
+      this.eventBus.emit(new ReplayJumpToTurnEvent(target));
     };
     const onReplayPause = (event: Event) => {
       const paused = (event as CustomEvent<{ paused?: boolean }>).detail
         ?.paused;
       this.eventBus.emit(new PauseGameIntentEvent(paused !== false));
     };
+    /**
+     * The backward half of the transport. Forward is a seek the engine can do
+     * (`onReplayJump` above -> `LocalServer.jumpReplayForward`); backward is
+     * not — there is no rewind in the engine, so the match has to be run again
+     * from turn 0. What changed is that "again from turn 0" no longer means a
+     * page load.
+     *
+     * `preventDefault()` is the answer back to the dispatcher: the scrubber
+     * reads `dispatchEvent()`'s return value and falls back to its original
+     * `location.replace(?turn=N)` when nothing here claimed the seek (no
+     * retained record — a replay that never reached `openAiLeagueReplay`'s
+     * record-in-hand point can only be rebuilt by reloading).
+     */
+    const onReplayRewind = (event: Event) => {
+      const turnNumber = (event as CustomEvent<{ turnNumber?: number }>).detail
+        ?.turnNumber;
+      if (typeof turnNumber !== "number" || !Number.isFinite(turnNumber)) {
+        return;
+      }
+      if (this.replayRewindContext === null) return;
+      event.preventDefault();
+      void this.rewindReplayInPlace(Math.max(1, Math.floor(turnNumber)));
+    };
     document.addEventListener("ai-league-replay-jump-turn", onReplayJump);
     document.addEventListener("ai-league-replay-pause", onReplayPause);
+    document.addEventListener("ai-league-replay-rewind-turn", onReplayRewind);
+    // The scrubber's drag-preview frame cache starts capturing with the same
+    // per-frame event everything above rides on. Armed HERE — the one point
+    // every replay entry path (archived, static bundle, rewind re-entry)
+    // funnels through with the other document-level replay listeners — and
+    // NOT in attemptCleanups: the cache and its listener are module-scoped
+    // and deliberately OUTLIVE the attempt, because a rewind replays the
+    // same deterministic match and the frames stay true. The installer is
+    // idempotent and route-gated, so re-entering here is a no-op.
+    installReplayFrameCapture();
     attemptCleanups.push(() => {
       document.removeEventListener("ai-league-replay-jump-turn", onReplayJump);
       document.removeEventListener("ai-league-replay-pause", onReplayPause);
+      document.removeEventListener(
+        "ai-league-replay-rewind-turn",
+        onReplayRewind,
+      );
+      document.removeEventListener(
+        "ai-league-replay-frame",
+        trackRenderedTurn,
+      );
     });
+
+    // H6's mirror (see `lastUserReplaySpeed`). Registered per attempt and
+    // taken back off with it, so this never accumulates across rewinds the way
+    // the handlers it exists to compensate for used to.
+    const onUserSpeedPick = (event: ReplaySpeedChangeEvent) => {
+      if (event.source !== "user") return;
+      this.lastUserReplaySpeed = event.replaySpeedMultiplier;
+    };
+    this.eventBus.on(ReplaySpeedChangeEvent, onUserSpeedPick);
+    attemptCleanups.push(() =>
+      this.eventBus.off(ReplaySpeedChangeEvent, onUserSpeedPick),
+    );
 
     const replaySearchParams = new URLSearchParams(window.location.search);
     const requestedTurn = Number(replaySearchParams.get("turn"));
@@ -1420,6 +1735,10 @@ class Client {
     // wins; resume only applies when the visitor arrived with no such
     // param. Never for `coworld-replay` (a distinct lightweight replay
     // source with no equivalent "leave and come back" viewing pattern).
+    // The LullDirector install below reads this flag: a scheduled resume
+    // jump is a viewer's own place in the match, and the intro skip must
+    // never race it to the first frame.
+    let resumeTurnScheduled = false;
     if (
       options.source !== "coworld-replay" &&
       !(
@@ -1437,6 +1756,9 @@ class Client {
           ? gameRecord.turns[gameRecord.turns.length - 1].turnNumber
           : 0;
       if (resumeTurn !== null && resumeTurn < lastRecordedTurn - 50) {
+        // The intro skip must stand down when the viewer is being returned
+        // to a remembered position (see installLullDirector's allowIntroSkip).
+        resumeTurnScheduled = true;
         const resumeAfterFirstFrame = () => {
           this.eventBus.emit(new ReplayJumpToTurnEvent(resumeTurn));
           document.removeEventListener(
@@ -1496,6 +1818,30 @@ class Client {
       attemptCleanups.push(watchReplaySpeedForResume(runID, this.eventBus));
     }
 
+    // AUTO-PACING (LullDirector.ts): the intro skip + PaintBot-style
+    // fast-forward through quiet stretches. Armed HERE, with the rest of
+    // this attempt's document-level replay listeners, because this is the
+    // one point that has everything the director needs in hand at once: the
+    // decompression-shared GameRecord (its intent stream is the lull
+    // signal), the page EventBus (its speed changes ride the same
+    // ReplaySpeedChangeEvent channel the panel and LocalServer use), and —
+    // for the intro-skip gate — the ?turn= deep link, the clip-preview
+    // target and the resume schedule, all already resolved just above. The
+    // dispose rides attemptCleanups like every other listener, so an
+    // in-place rewind retires this director with its attempt and arms a
+    // fresh one (whose intro skip stays off: the rewind path writes ?turn=
+    // into the URL before re-entering here).
+    attemptCleanups.push(
+      installLullDirector({
+        gameRecord,
+        eventBus: this.eventBus,
+        allowIntroSkip:
+          previewTarget === null &&
+          !(Number.isFinite(requestedTurn) && requestedTurn > 0) &&
+          !resumeTurnScheduled,
+      }),
+    );
+
     document.dispatchEvent(
       new CustomEvent("join-lobby", {
         detail: {
@@ -1512,6 +1858,284 @@ class Client {
     );
   }
 
+  /**
+   * The backward half of the one seek policy (see `onReplayJump`). Backward is
+   * a resimulation — there is no rewind in the engine — so it is either the
+   * in-place rebuild below or, for an attempt that never reached the point
+   * where the record is retained, the `?turn=` reload that rebuild replaced.
+   *
+   * The scrubber used to own this decision AND this fallback privately, which
+   * is exactly why the other four dispatchers had no backward seek at all.
+   * It now dispatches like everything else and this is the only implementation.
+   */
+  private seekReplayBackward(target: number): void {
+    const turn = Math.max(1, Math.floor(target));
+    if (this.replayRewindContext !== null) {
+      void this.rewindReplayInPlace(turn);
+      return;
+    }
+    // No retained record. Unreachable in practice — the context is assigned in
+    // `openAiLeagueReplay` before any of these listeners exist — but a
+    // backward seek silently doing nothing is the entire defect this policy
+    // exists to remove, so the honest slow path stays.
+    const url = new URL(window.location.href);
+    url.searchParams.set("turn", String(turn));
+    window.location.replace(url.toString());
+  }
+
+  /**
+   * BACKWARD SEEK WITHOUT A PAGE LOAD.
+   *
+   * Measured before: 15-25 seconds, essentially none of it simulation. The
+   * `?turn=` reload refetched a 6MB `.replay` with `cache: "no-store"`, ran
+   * two JSON.parse passes and a `GameRecordSchema.safeParse` over ~14,000
+   * turns, and re-initialised the whole page — to rebuild state that had never
+   * left memory. The resimulation itself measured ~0.6ms/turn (3,300 turns in
+   * ~2s), so a 6,000-turn rewind is ~4s of real work.
+   *
+   * What is REBUILT rather than reused, and why it has to be: GameView is
+   * constructed fresh through the ordinary join path because none of it
+   * survives a rewind — `_players` is insert-only (an eliminated competitor
+   * would linger frozen at its death-time snapshot), `_units` keys collide
+   * once `GameImpl._nextUnitID` restarts at 1, and `_map` is a Uint16Array
+   * mutated in place, so every tile the rewound range never touches would keep
+   * its FUTURE owner. Only the immutable game RECORD is carried over.
+   *
+   * Routed through `openAiLeagueReplay` rather than a hand-rolled
+   * `joinLobby()` call: that method's `replayAttemptCleanup` correctly retires
+   * the previous attempt's overlay, listeners and position-persistence watcher
+   * and re-arms them, and its existing `?turn=` branch is exactly the one-shot
+   * first-frame jump this needs — so the rewind adds no second mechanism for
+   * "start a replay and land on turn N".
+   *
+   * Never reached in live play: the only dispatcher is the broadcast
+   * scrubber, and the listener that calls this exists only for the duration of
+   * an `openAiLeagueReplay` attempt.
+   *
+   * THE LOADING TREATMENT lives entirely in `RewindCurtain.ts`, raised and
+   * dropped by this method only — never the boot-style veil
+   * `openAiLeagueReplay` raises for every other entry point (see
+   * `AiLeagueReplayOpenOptions.suppressBootCover`'s own doc), and never the
+   * outgoing map left on screen to visibly re-simulate itself from turn 0.
+   * Product decision, verbatim: "Dimmed hold — keep the last frame, dim it,
+   * overlay REWINDING TO 13:50 with a real progress bar (turn N of M). Never
+   * the boot screen, never the racing map."
+   */
+  private async rewindReplayInPlace(targetTurn: number): Promise<void> {
+    const context = this.replayRewindContext;
+    if (context === null) return;
+    // ONE REWIND AT A TIME — see `rewindInFlight`'s doc for why the flag has
+    // to be module-level (the rebuild destroys every instance that could
+    // otherwise hold it, and the curtain does not block input).
+    if (rewindInFlight) return;
+    rewindInFlight = true;
+    const guardFailsafe = window.setTimeout(() => {
+      rewindInFlight = false;
+    }, REWIND_GUARD_FAILSAFE_MS);
+    const releaseRewindGuard = () => {
+      window.clearTimeout(guardFailsafe);
+      rewindInFlight = false;
+    };
+    // Kept in sync with the URL bar before anything else so a manual refresh
+    // mid-rewind lands where the viewer asked to go — and so this same URL is
+    // the honest fallback target if the in-place path fails below.
+    const url = new URL(window.location.href);
+    url.searchParams.set("turn", String(targetTurn));
+    // Captured HERE, before anything below touches the outgoing game: once
+    // `stop()` runs, the renderer tears down and the board canvas's backing
+    // store is zeroed (a fresh `width`/`height`, the idiomatic "clear the
+    // bitmap"), so a reference taken any later paints a blank rectangle
+    // instead of the last real frame. `RewindCurtain` blits this into its
+    // own canvas the instant it is raised and never reads it again, so the
+    // live canvas tearing down a moment later cannot flicker the curtain.
+    //
+    // `"body > canvas"` and not a bare `"canvas"`: the board is the one canvas
+    // mounted directly on <body> (GameRenderer.initialize's appendChild) while
+    // the curtain's own canvas and the scrubber's drag preview live nested in
+    // their overlay divs. A back-to-back rewind therefore had a curtain root
+    // already ahead of the board in document order, and the bare selector
+    // would blit the PREVIOUS curtain's frozen frame into the new one. Same
+    // selector, same reasoning, as `ReplayFrameCache.ts:260` — they disagreed.
+    const lastFrame = document.querySelector<HTMLCanvasElement>("body > canvas");
+    // Same reasoning, same reason it has to happen before `stop()`:
+    // `installFollowedCompetitor` resets its module-level follow state to
+    // null on every install, and the outgoing renderer's disposal (inside
+    // `stop()`) is what triggers that reset for the instance being replaced
+    // here. Whoever the viewer was following has to be read off before this
+    // point or it is simply gone — there is nothing left to restore from.
+    const followedSmallId = followedCompetitorSmallId();
+    // The whole match's turn count, not this seek's target -- read from the
+    // OUTGOING instance's dataset write (`openAiLeagueReplay`'s own doc on
+    // `pwReplayTotalTurns`), which is stable across a rewind because a
+    // rewind never changes which match is playing, only where in it the
+    // viewer is. Falls back to `targetTurn` only if that dataset write is
+    // somehow missing, so the progress caption never divides by zero.
+    const totalTurnsRaw = Number(document.body.dataset.pwReplayTotalTurns);
+    const totalTurns =
+      Number.isFinite(totalTurnsRaw) && totalTurnsRaw > 0
+        ? totalTurnsRaw
+        : targetTurn;
+    let curtain: ReturnType<typeof raiseRewindCurtain> | null = null;
+    try {
+      // The curtain goes up BEFORE the outgoing game is stopped. A rewind is
+      // seconds of nothing; the one thing that must never happen is a viewer
+      // left staring at a board that has silently stopped moving with
+      // nothing overlaid to explain it.
+      //
+      // DESTINATION PREVIEW: when the frame cache holds a picture at or
+      // before the seek target (it usually does — the first watch captured
+      // frames on the way through), the curtain paints THAT instead of the
+      // outgoing frame: a ~3s resimulation reads as arriving where the
+      // viewer asked to go, not staring at where they came from. `null`
+      // falls back to the pre-existing outgoing-frame behaviour exactly
+      // (the curtain option is additive/optional).
+      const destination = nearestFrameAtOrBefore(targetTurn);
+      curtain = raiseRewindCurtain({
+        targetTurn,
+        totalTurns,
+        lastFrame,
+        destination,
+      });
+      // Stop FIRST, then re-arm below. The outgoing game is still emitting
+      // `ai-league-replay-frame` until its runner is stopped — arming the
+      // curtain's own frame listener before this would let a frame from the
+      // game being torn down retire it early.
+      if (this.lobbyHandle !== null) {
+        this.lobbyHandle.stop(true, true);
+        this.lobbyHandle = null;
+      }
+      history.replaceState(null, "", url.pathname + url.search + url.hash);
+      const options: AiLeagueReplayOpenOptions = {
+        ...context.options,
+        // The static bundle deliberately restores its own URL on join
+        // (`handleJoinLobby`'s `preserveCoworldReplayUrl` branch) from the
+        // path captured when it opened — which predates the `?turn=` just
+        // written above and would quietly drop it.
+        ...(context.options.coworldReplayPath !== undefined
+          ? { coworldReplayPath: url.pathname + url.search }
+          : {}),
+        // The curtain raised above IS this attempt's loading treatment;
+        // without this, `openAiLeagueReplay` would still raise its own
+        // boot-style veil underneath it for the (synchronous, in this path)
+        // moment before the code below can react — a flash of the very
+        // thing this whole feature exists to avoid. See the option's doc.
+        suppressBootCover: true,
+      };
+      await this.openAiLeagueReplay(context.runID, options);
+
+      // Drives the curtain's progress bar off the SAME per-frame event the
+      // rest of this file's replay machinery already reads (position-resume,
+      // speed-resume, the `?turn=` jump itself) rather than a bespoke timer —
+      // see `ReplayPositionPersistence.ts`'s own doc for why that event is
+      // always the right one to subscribe to. Registered after the restart
+      // is underway, same footing `restoreSpeedAfterFirstFrame` below
+      // already relies on: no frame can land in between, since everything
+      // above this point is synchronous once the record is in hand. Not
+      // `{ once: true }` — this has to see every frame of the resimulation,
+      // not just the first, and removes itself once the target is reached.
+      const raisedCurtain = curtain;
+      const onRewindFrame = (event: Event) => {
+        const turnNumber = (event as CustomEvent<{ turnNumber?: unknown }>)
+          .detail?.turnNumber;
+        if (typeof turnNumber !== "number" || !Number.isFinite(turnNumber)) {
+          return;
+        }
+        raisedCurtain.updateProgress(turnNumber);
+        // `>=` rather than `===`: the one-shot jump this rides on
+        // (`openAiLeagueReplay`'s own `?turn=` branch) lands on exactly
+        // `targetTurn`, but guarding with `>=` means a future change to that
+        // mechanism landing slightly past the target still retires the
+        // curtain instead of leaving it stranded.
+        if (turnNumber >= targetTurn) {
+          document.removeEventListener(
+            "ai-league-replay-frame",
+            onRewindFrame,
+          );
+          raisedCurtain.drop();
+          // The viewer gets the transport back at exactly the moment the
+          // curtain comes off, not a frame before it.
+          releaseRewindGuard();
+        }
+      };
+      document.addEventListener("ai-league-replay-frame", onRewindFrame);
+
+      // Selection persistence: restored as EARLY as the rebuilt instance
+      // allows, then kept trying until it sticks. Early matters — the dossier
+      // and camera gating read `followedCompetitorSmallId()` live each tick,
+      // so an early restore means following is active for the whole
+      // resimulation, not just once playback lands. But the first rendered
+      // frame is near turn 0, and `GameView._players` is populated as the
+      // resim's update batches arrive — a competitor who spawns later does
+      // not EXIST yet at frame one, `restoreFollowedCompetitor` would no-op
+      // (its lookup THROWS for unknown ids, so it commits nothing), and a
+      // fire-once listener would silently lose the follow. So: retry each
+      // frame until the id resolves and commits, giving up only when the
+      // catch-up reaches the target (if the player is not registered by
+      // then, the id really is stale).
+      //
+      // TWO BUGS THAT MADE THE RETRY LOOP ABOVE A LIE, both fixed here:
+      // the registration carried `{ once: true }`, so it fired against frame
+      // one (near turn 0, before a late-spawning competitor exists), committed
+      // nothing and was gone — the follow was silently lost after EVERY
+      // rewind, which is precisely what the paragraph above says must not
+      // happen. And the give-up test read `detail.turn`, a field this event
+      // does not have: `ClientGameRunner.ts:828` dispatches `turnNumber` (and
+      // `tick`), so the `?? 0` fallback made `turn >= targetTurn` false
+      // forever. The listener removes itself from inside, on the commit status
+      // `restoreFollowedCompetitor` returns for exactly this purpose.
+      const restoreFollowAfterFirstFrame = (event: Event) => {
+        const done = restoreFollowedCompetitor(followedSmallId);
+        const turn = Number(
+          (event as CustomEvent<{ turnNumber?: number }>).detail?.turnNumber ??
+            0,
+        );
+        if (done || turn >= targetTurn) {
+          document.removeEventListener(
+            "ai-league-replay-frame",
+            restoreFollowAfterFirstFrame,
+          );
+        }
+      };
+      document.addEventListener(
+        "ai-league-replay-frame",
+        restoreFollowAfterFirstFrame,
+      );
+
+      // H6. Armed after the restart is underway (no frame can land in
+      // between — everything above is synchronous once the record is in hand)
+      // and re-emitted as a `"user"` pick because that is precisely what it
+      // is: the same event a fresh manual pick sends, which is what re-latches
+      // `LocalServer.userOverrodeReplaySpeed` against the archived-replay
+      // default speed the new instance is about to apply.
+      const restoreSpeed = this.lastUserReplaySpeed;
+      if (restoreSpeed !== null) {
+        const restoreSpeedAfterFirstFrame = () => {
+          document.removeEventListener(
+            "ai-league-replay-frame",
+            restoreSpeedAfterFirstFrame,
+          );
+          this.eventBus.emit(new ReplaySpeedChangeEvent(restoreSpeed, "user"));
+        };
+        document.addEventListener(
+          "ai-league-replay-frame",
+          restoreSpeedAfterFirstFrame,
+          { once: true },
+        );
+      }
+    } catch (error) {
+      // A failed rewind must never leave the viewer on a dead board: the old
+      // game is already stopped by this point, so there is nothing to recover
+      // to in-page. Fall back to the behaviour this replaced -- but the
+      // curtain has to come down FIRST, or the navigation below would leave
+      // it painted over the last thing rendered before the browser tears the
+      // document down, which on a slow navigation can be visible for a beat.
+      curtain?.drop();
+      releaseRewindGuard();
+      console.error("In-place replay rewind failed, reloading instead", error);
+      window.location.replace(url.toString());
+    }
+  }
+
   private async openCoworldStaticReplay(): Promise<void> {
     showReplayLoadingScreen("ai_league_replay.loading_replay");
     try {
@@ -1521,7 +2145,23 @@ class Client {
         coworldReplayPath: window.location.pathname + window.location.search,
         artifactBasePath: ".",
         gameRecord: replay.gameRecord,
+        inlineSpectatorTelemetry: replay.spectatorTelemetry,
+        inlineMatchSummary: replay.matchSummary,
+        inlineRunResults: replay.runResults,
       });
+      // NOTHING FETCHES replay-ui.json ANY MORE — the bundle is offline by
+      // design and 0.1.42 deleted the hosted artifact loader with the league
+      // overlay — so the WHY surfaces (dossier decision line, toast reasons,
+      // analyst drawer) would sit empty forever without this. The envelope
+      // itself carries a RICHER log — the spectatorReplay snapshots hold 240
+      // decisions on the real fixture versus the 60 the network artifact
+      // sampled — so feed the store from what the parser already retained.
+      // AFTER openAiLeagueReplay: its mount publishes an empty array first
+      // (the rewind-wipe), and this must land on top of that wipe, not under
+      // it.
+      publishReplayDecisions(
+        decisionsFromSpectatorSnapshots(spectatorReplaySnapshots()),
+      );
     } catch (error) {
       this.failReplayLoading(
         "static-coworld-replay",
@@ -1856,11 +2496,20 @@ class Client {
         if (runtimeWindow.__openFrontPromoCaptureLock === true) {
           this.eventBus.emit(new PauseGameIntentEvent(true));
         } else if (clipPreviewTarget === null) {
-          console.log(
-            "[DEBUG] Main.ts emitting ReplaySpeedChangeEvent(fastest)",
-          );
+          // The broadcast surface opens at a watchable 2x, not the analyst
+          // skim speed — same rule as LocalServer.applyArchivedReplayDefault-
+          // Speed(), applied on both sides of the emit/subscribe race that
+          // function's doc describes.
+          const staticBroadcast =
+            (window as typeof window & { __PROXYWAR_STATIC_REPLAY__?: boolean })
+              .__PROXYWAR_STATIC_REPLAY__ === true;
           this.eventBus.emit(
-            new ReplaySpeedChangeEvent(ReplaySpeedMultiplier.fastest, "auto"),
+            new ReplaySpeedChangeEvent(
+              staticBroadcast
+                ? ReplaySpeedMultiplier.fast
+                : ReplaySpeedMultiplier.fastest,
+              "auto",
+            ),
           );
         } else {
           console.log(

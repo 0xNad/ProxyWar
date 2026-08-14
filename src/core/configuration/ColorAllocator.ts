@@ -23,10 +23,23 @@ export class ColorAllocator {
   private fallbackColors: Colord[];
   private assigned = new Map<string, Colord>();
   private teamPlayerColors = new Map<string, Colord>();
+  /**
+   * STATIC REPLAY BROADCAST ONLY (see REPLAY_SEAT_COLORS in Colors.ts).
+   * When non-null, assignColor hands this list out strictly in order: the
+   * Nth distinct id gets seatOrder[N % seatOrder.length]. Always null in
+   * live play, so the stock hash-random + max-deltaE path below is
+   * byte-for-byte untouched.
+   */
+  private readonly seatOrder: Colord[] | null;
 
-  constructor(colors: Colord[], fallback: Colord[]) {
+  constructor(
+    colors: Colord[],
+    fallback: Colord[],
+    seatOrder: Colord[] | null = null,
+  ) {
     this.availableColors = [...colors];
     this.fallbackColors = [...colors, ...fallback];
+    this.seatOrder = seatOrder;
   }
 
   private getTeamColorVariations(team: Team): Colord[] {
@@ -59,6 +72,21 @@ export class ColorAllocator {
   assignColor(id: string): Colord {
     if (this.assigned.has(id)) {
       return this.assigned.get(id)!;
+    }
+
+    if (this.seatOrder !== null) {
+      // Deterministic seat mapping for the static replay broadcast: the
+      // player at colour-index N (the Nth distinct id to reach this
+      // allocator — PlayerView construction order, which is fixed by the
+      // replay data) gets seatOrder[N % 16]. The stock hash-random first
+      // pick and O(n^2) max-deltaE search below are deliberately bypassed:
+      // the seat palette was already optimised offline for pairwise
+      // distinctness (closest pair dE 0.083), and seat ORDER is itself a
+      // validated property of the palette — reordering it here would undo
+      // that validation.
+      const color = this.seatOrder[this.assigned.size % this.seatOrder.length];
+      this.assigned.set(id, color);
+      return color;
     }
 
     if (this.availableColors.length === 0) {
