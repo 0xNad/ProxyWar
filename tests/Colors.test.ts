@@ -7,6 +7,7 @@ import {
   blue,
   botColor,
   green,
+  isStaticReplayBroadcast,
   orange,
   purple,
   red,
@@ -81,6 +82,17 @@ describe("ColorAllocator", () => {
     expect(c2.isEqual(c2Again)).toBe(true);
   });
 
+  test("assigns replay seat colors in order and wraps deterministically", () => {
+    const seats = [colord("#123456"), colord("#abcdef"), colord("#fedcba")];
+    const allocator = new ColorAllocator(mockColors, fallbackMockColors, seats);
+
+    expect(allocator.assignColor("seat-0").isEqual(seats[0])).toBe(true);
+    expect(allocator.assignColor("seat-1").isEqual(seats[1])).toBe(true);
+    expect(allocator.assignColor("seat-2").isEqual(seats[2])).toBe(true);
+    expect(allocator.assignColor("seat-3").isEqual(seats[0])).toBe(true);
+    expect(allocator.assignColor("seat-1").isEqual(seats[1])).toBe(true);
+  });
+
   test("assignTeamColor returns the base color from the team", () => {
     expect(allocator.assignTeamColor(ColoredTeams.Blue)).toEqual(blue);
     expect(allocator.assignTeamColor(ColoredTeams.Red)).toEqual(red);
@@ -145,6 +157,23 @@ describe("ColorAllocator", () => {
     );
 
     expect(redColorPlayerOne.isEqual(redColorPlayerTwo)).toBe(false);
+  });
+});
+
+describe("static replay presentation boundary", () => {
+  afterEach(() => {
+    delete window.__PROXYWAR_STATIC_REPLAY__;
+  });
+
+  test("the replay palette flag is opt-in and does not persist", () => {
+    delete window.__PROXYWAR_STATIC_REPLAY__;
+    expect(isStaticReplayBroadcast()).toBe(false);
+
+    window.__PROXYWAR_STATIC_REPLAY__ = true;
+    expect(isStaticReplayBroadcast()).toBe(true);
+
+    delete window.__PROXYWAR_STATIC_REPLAY__;
+    expect(isStaticReplayBroadcast()).toBe(false);
   });
 });
 

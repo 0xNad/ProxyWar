@@ -1,3 +1,4 @@
+import { formatReplayActionKind } from "./ReplayDecisionStore";
 import { translateText } from "./Utils";
 
 /**
@@ -343,6 +344,7 @@ export type CuratedWarRoomEventKind =
   | "deal_fulfilled"
   | "deal_violated"
   | "elimination"
+  | "lead_change"
   | "nuke"
   | "plan_change";
 
@@ -363,8 +365,25 @@ const WAR_ROOM_GLYPHS: Record<CuratedWarRoomEventKind, string> = {
   deal_fulfilled: "\u2261", // ≡ agreement held
   deal_violated: "\u2020", // † dagger, matching betrayal
   elimination: "\u2715", // ✕ multiplication x
+  lead_change: "\u2654", // ♔ white chess king — a crown, matching the scorebug's crown chip; text-presentation symbol, never an emoji
   nuke: "\u2622", // ☢ radioactive sign — matches ReplayPremiereOverlay.ts's own WAR_EVENT_GLYPHS
   plan_change: "\u21BB", // ↻ clockwise open arrow
+};
+
+/**
+ * English fallback for a kind whose `broadcast.war_room_kind_*` key has not
+ * shipped in the lang resources yet — `translateText` returns the raw
+ * dotted key otherwise, and "BROADCAST.WAR_ROOM_KIND_LEAD_CHANGE" inside
+ * the kind chip (and the toast layer, which re-reads the chip's rendered
+ * text as its own label) reads as a bug on air. Only kinds actually missing
+ * a resource key belong here; once a real translation ships it wins over
+ * this fallback automatically (see `translateText`'s own `defaultText`
+ * contract in client/Utils.ts).
+ */
+const WAR_ROOM_KIND_FALLBACKS: Partial<
+  Record<CuratedWarRoomEventKind, string>
+> = {
+  lead_change: "Lead change",
 };
 
 /**
@@ -491,7 +510,11 @@ export function renderWarRoomEvent(
     element(
       "span",
       "broadcast-war-room-kind",
-      translateText(`broadcast.war_room_kind_${event.kind}`),
+      translateText(
+        `broadcast.war_room_kind_${event.kind}`,
+        undefined,
+        WAR_ROOM_KIND_FALLBACKS[event.kind],
+      ),
     ),
     element("span", "broadcast-war-room-headline", event.headline),
     element(
@@ -1076,7 +1099,7 @@ export function renderAnalystDecisionRow(
     ),
     element("td", "", row.playerName),
     element("td", "", row.brainType ?? "\u2014"),
-    element("td", "", row.selectedActionKind),
+    element("td", "", formatReplayActionKind(row.selectedActionKind)),
     element(
       "td",
       "",

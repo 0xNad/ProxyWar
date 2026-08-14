@@ -46,8 +46,12 @@ export const FONT_ARIAL_BLACK =
 /** Slate background color, ported from assemble.py's endcard (0x0e0e12). */
 export const SLATE_BACKGROUND = "0x0e0e12";
 /** Gold accent, ported from assemble.py's endcard line color. */
-// Canonical Proxy War amber (--pw-accent #f4a64a). ffmpeg wants 0xRRGGBB.
-export const SLATE_ACCENT = "0xF4A64A";
+// The broadcast's amber (#ffc24a, set on body.ai-league-native-spectator-ui,
+// which beats the :root token). ffmpeg wants 0xRRGGBB. This read 0xF4A64A and
+// called it canonical, so a clip's end slate came out a different amber from
+// the broadcast it was cut from — see ReplayShareImage's ACCENT for the
+// measurement.
+export const SLATE_ACCENT = "0xFFC24A";
 
 export const CLIP_FPS = 30;
 export const CLIP_CRF = 21;

@@ -24,6 +24,18 @@ describe("AiLeagueReplayMode", () => {
       false,
     );
   });
+
+  it("forces dark mode only in the standalone static replay viewer", () => {
+    const settings = new UserSettings();
+    if (settings.darkMode()) settings.toggleDarkMode();
+    expect(settings.darkMode()).toBe(false);
+
+    window.__PROXYWAR_STATIC_REPLAY__ = true;
+    expect(settings.darkMode()).toBe(true);
+
+    delete window.__PROXYWAR_STATIC_REPLAY__;
+    expect(settings.darkMode()).toBe(false);
+  });
 });
 
 // UserSettings keeps its own static, process-lifetime cache on top of

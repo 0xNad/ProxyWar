@@ -2,6 +2,7 @@ import { html, LitElement } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { EventBus } from "../../../core/EventBus";
 import { GameView } from "../../../core/game/GameView";
+import { isAiLeagueReplayRoute } from "../../AiLeagueReplayMode";
 import { ReplaySpeedChangeEvent } from "../../InputHandler";
 import {
   defaultReplaySpeedMultiplier,
@@ -37,6 +38,22 @@ export class ReplayPanel extends LitElement implements Layer {
 
   init() {
     if (this.eventBus) {
+      // Main.ts's join.then() handler sets the archived-replay broadcast to
+      // a watchable 2x (or `fastest` off the plain analyst surface) the
+      // instant an AI League replay joins, via a synchronous
+      // `eventBus.emit(new ReplaySpeedChangeEvent(..., "auto"))` inside
+      // `join.then()` -- before `createClientGame()`'s async layer
+      // construction ever reaches this component's own `init()` below and
+      // registers the listener. `EventBus.emit()` has zero buffering for a
+      // not-yet-registered listener (see EventBus.emit's own doc), so that
+      // first "auto" emit is silently dropped here every time, leaving
+      // `_replaySpeedMultiplier` stuck at its field-initializer default
+      // (1x) while the game is actually already running at 2x -- the ×1
+      // button stayed highlighted for the whole match. LocalServer.ts hit
+      // the identical race for its own copy of this state and fixed it the
+      // same way: derive the SAME starting value directly here instead of
+      // depending on catching that one racy emit.
+      this._replaySpeedMultiplier = this.resolveInitialReplaySpeedMultiplier();
       this.eventBus.on(ShowReplayPanelEvent, (event: ShowReplayPanelEvent) => {
         this.visible = event.visible;
         this.isSingleplayer = event.isSingleplayer;
@@ -49,6 +66,24 @@ export class ReplayPanel extends LitElement implements Layer {
         },
       );
     }
+  }
+
+  /**
+   * Mirrors Main.ts's "broadcast opens at 2x" rule (see `init()`'s doc for
+   * why the emitted event that would normally carry this can't be trusted).
+   * Live play is untouched: `isAiLeagueReplayRoute()` is false there, so
+   * this always falls through to the ordinary field-initializer default.
+   */
+  private resolveInitialReplaySpeedMultiplier(): ReplaySpeedMultiplier {
+    if (!isAiLeagueReplayRoute() || !this.game?.config()?.isReplay()) {
+      return defaultReplaySpeedMultiplier;
+    }
+    const staticBroadcast =
+      (window as typeof window & { __PROXYWAR_STATIC_REPLAY__?: boolean })
+        .__PROXYWAR_STATIC_REPLAY__ === true;
+    return staticBroadcast
+      ? ReplaySpeedMultiplier.fast
+      : ReplaySpeedMultiplier.fastest;
   }
 
   getTickIntervalMs() {

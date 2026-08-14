@@ -16,7 +16,11 @@ import {
   type ReplayTurnProgress,
 } from "../../LocalServer";
 import { PauseGameIntentEvent, SendWinnerEvent } from "../../Transport";
-import { defaultReplaySpeedMultiplier } from "../../utilities/ReplaySpeedMultiplier";
+import { isAiLeagueReplayRoute } from "../../AiLeagueReplayMode";
+import {
+  defaultReplaySpeedMultiplier,
+  ReplaySpeedMultiplier,
+} from "../../utilities/ReplaySpeedMultiplier";
 import { translateText } from "../../Utils";
 import { ImmunityBarVisibleEvent } from "./ImmunityTimer";
 import { Layer } from "./Layer";
@@ -107,6 +111,23 @@ export class GameRightSidebar extends LitElement implements Layer {
   @state()
   private _replaySpeedMultiplier: number = defaultReplaySpeedMultiplier;
 
+  /**
+   * Mirrors Main.ts's opening-rate rule, exactly as ReplayPanel does. Live
+   * play is untouched: isAiLeagueReplayRoute() is false there, so this always
+   * falls through to the ordinary default.
+   */
+  private resolveInitialReplaySpeedMultiplier(): number {
+    if (!isAiLeagueReplayRoute() || !this.game?.config()?.isReplay()) {
+      return defaultReplaySpeedMultiplier;
+    }
+    const staticBroadcast =
+      (window as typeof window & { __PROXYWAR_STATIC_REPLAY__?: boolean })
+        .__PROXYWAR_STATIC_REPLAY__ === true;
+    return staticBroadcast
+      ? ReplaySpeedMultiplier.fast
+      : ReplaySpeedMultiplier.fastest;
+  }
+
   // Real turn-count catch-up progress from LocalServer.reportReplayCatchUp()
   // -- null whenever the replay isn't behind its own dispatched position.
   @state()
@@ -121,6 +142,13 @@ export class GameRightSidebar extends LitElement implements Layer {
   private isLobbyCreator = false;
   private spawnBarVisible = false;
   private immunityBarVisible = false;
+
+  // Scheduled end of THIS match, in ticks (gameRecord.info.num_turns) --
+  // latched from the first non-null AI_LEAGUE_REPLAY_CATCHUP_EVENT detail's
+  // turnsTotal (see onReplayCatchUpEvent below). Stays null for a live game,
+  // which has no such record and must keep using the engine's maxTimerValue
+  // countdown in tick() exactly as before.
+  private replayTotalTurns: number | null = null;
 
   createRenderRoot() {
     return this;
@@ -151,8 +179,43 @@ export class GameRightSidebar extends LitElement implements Layer {
       this.requestUpdate();
     });
 
+    // EVERY LATCHED FIELD MUST BE RE-DERIVED HERE, for the same reason the
+    // speed below is: <game-right-sidebar> is a SINGLETON the renderer QUERIES
+    // out of the document (GameRenderer's element list) rather than creating,
+    // and this client is a single-page app -- handleLeaveLobby stops the game
+    // and rewrites the URL with no page reload, and an in-place replay rewind
+    // rebuilds the game the same way. The very same element instance is handed
+    // to the next match with whatever the last one latched still on it, so a
+    // field that is only ever set (never cleared) is a cross-match leak by
+    // construction. Two shipped as exactly that bug:
+    //
+    // - replayTotalTurns: a 14,200-turn AI-league replay followed the viewer
+    //   into a live FFA -- tick() found it already set and counted the live HUD
+    //   down from 1420s instead of the engine's maxTimerValue, so the clock
+    //   never landed on the real match end. (tick()'s dataset read is
+    //   route-gated too; either leak alone reproduces this, so both are closed.)
+    // - hasWinner: latched true by SendWinnerEvent below and read by tick() as
+    //   "freeze the clock on its final value". Once any match ended with a
+    //   winner it stayed true for the rest of the session, so the next game --
+    //   most visibly after an in-place rewind -- displayed a frozen time
+    //   belonging to a match that no longer exists.
+    this.replayTotalTurns = null;
+    this.hasWinner = false;
+
+    // SAME RACE ReplayPanel HAD, and this is the copy a viewer actually sees:
+    // Main.ts emits the "broadcast opens at 2x" ReplaySpeedChangeEvent
+    // SYNCHRONOUSLY in its join handler, long before createClientGame's async
+    // layer construction gets here to register this listener. EventBus.emit
+    // does not buffer for a listener that does not exist yet, so that first
+    // auto-set was dropped on the floor and this field kept its 1x default
+    // while the match genuinely ran at 2x — the transport cluster read "1x"
+    // for the whole broadcast. Derive the opening value instead of trusting an
+    // event we were not yet listening for; the subscription below still
+    // handles every later change.
+    this._replaySpeedMultiplier = this.resolveInitialReplaySpeedMultiplier();
     this.eventBus.on(ReplaySpeedChangeEvent, (e: ReplaySpeedChangeEvent) => {
       this._replaySpeedMultiplier = e.replaySpeedMultiplier;
+      this.requestUpdate();
     });
 
     this.eventBus.on(TogglePauseIntentEvent, () => {
@@ -209,6 +272,15 @@ export class GameRightSidebar extends LitElement implements Layer {
     e: CustomEvent<ReplayTurnProgress | null>,
   ) => {
     this._catchUpProgress = e.detail;
+
+    // Latch the match's SCHEDULED end the first time we see a real detail.
+    // The event also fires with detail: null once catch-up finishes (or
+    // whenever it isn't running), so overwriting unconditionally would erase
+    // turnsTotal right as catch-up ends -- but tick()'s clock needs this
+    // value for the entire rest of playback, not just the catch-up window.
+    if (e.detail !== null && this.replayTotalTurns === null) {
+      this.replayTotalTurns = e.detail.turnsTotal;
+    }
   };
 
   private onReplayProgressEvent = (e: CustomEvent<ReplayTurnProgress>) => {
@@ -245,7 +317,48 @@ export class GameRightSidebar extends LitElement implements Layer {
       return;
     }
 
-    if (maxTimerValue !== null && maxTimerValue !== undefined) {
+    // A replay's clock must count down to the match's SCHEDULED end
+    // (replayTotalTurns, latched in onReplayCatchUpEvent above), not the
+    // engine's maxTimerValue FFA rule -- the two only agree when a match
+    // happens to run its full distance. An early win already freezes the
+    // display via the hasWinner return above (a nonzero "FINAL"); this
+    // branch is what lets a genuine full-distance timeout land on 0:00
+    // instead of whatever time the FFA clock had left when it ended. A live
+    // game never latches replayTotalTurns, so it always falls through to
+    // the untouched maxTimerValue/elapsedSeconds behaviour below.
+    if (this.replayTotalTurns === null) {
+      // Primary channel: Main publishes the scheduled end on the body dataset
+      // before the renderer mounts. The catch-up event latch above remains as
+      // a fallback, but it only fires with a payload during catch-up — a
+      // straight linear playthrough never arms it.
+      //
+      // ROUTE-GATED, and this gate is load-bearing: the key lives on <body>,
+      // which is document-level global state, and this element is a singleton
+      // reused across games in a single-page app (see init()'s reset). Leaving
+      // a replay is stop() + history.replaceState with no page reload, so the
+      // NEXT live match inherits the same <body> — an ungated read let a live
+      // FFA's HUD count down from the replay's length (1420s after a
+      // 14,200-turn AI-league record) instead of the engine's maxTimerValue.
+      // Main deletes the key on replay teardown; this gate is the second line,
+      // so a live game never consults it even if that delete is ever missed.
+      const fromDataset = isAiLeagueReplayRoute()
+        ? document.body.dataset.pwReplayTotalTurns
+        : undefined;
+      if (fromDataset !== undefined) {
+        const parsed = Number(fromDataset);
+        if (Number.isFinite(parsed) && parsed > 0) {
+          this.replayTotalTurns = parsed;
+        }
+      }
+    }
+    if (this.replayTotalTurns !== null) {
+      this.timer = Math.max(
+        0,
+        Math.ceil(
+          (this.replayTotalTurns - Math.max(ticks, spawnPhaseTurns)) / 10,
+        ),
+      );
+    } else if (maxTimerValue !== null && maxTimerValue !== undefined) {
       this.timer = Math.max(0, maxTimerValue * 60 - elapsedSeconds);
     } else {
       this.timer = elapsedSeconds;

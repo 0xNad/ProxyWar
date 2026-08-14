@@ -12,8 +12,27 @@ import {
 } from "../../InputHandler";
 import type { LangSelector } from "../../LangSelector";
 import { translateText } from "../../Utils";
+import { isAiLeagueReplayRoute } from "../../AiLeagueReplayMode";
 import { FrameProfiler } from "../FrameProfiler";
 import { Layer } from "./Layer";
+
+/** Panel height used to place its top edge; it is draggable, so an estimate is enough. */
+const OVERLAY_TYPICAL_HEIGHT_PX = 170;
+/** Height of the broadcast transport band the panel must clear (see BroadcastScrubber). */
+const BROADCAST_BAND_PX = 94;
+
+function performanceOverlayHome(): { x: number; y: number } {
+  if (typeof window === "undefined" || !isAiLeagueReplayRoute()) {
+    return { x: 8, y: 8 };
+  }
+  return {
+    x: 16,
+    y: Math.max(
+      8,
+      window.innerHeight - BROADCAST_BAND_PX - OVERLAY_TYPICAL_HEIGHT_PX,
+    ),
+  };
+}
 
 @customElement("performance-overlay")
 export class PerformanceOverlay extends LitElement implements Layer {
@@ -60,7 +79,18 @@ export class PerformanceOverlay extends LitElement implements Layer {
   private isDragging: boolean = false;
 
   @state()
-  private position: { x: number; y: number } = { x: 8, y: 8 }; // px values
+  /**
+   * Opening corner. Top-left (8, 8) is right for the live game, and wrong for
+   * the broadcast: the scorebug lives in exactly that corner, so the panel
+   * opened on top of the standings and hid the thing a viewer is watching.
+   *
+   * On a replay route it opens BOTTOM-left instead, sitting on the transport
+   * band — the one corner this broadcast keeps clear. Positioned by its top
+   * edge (all this component exposes), so the landing uses the panel's typical
+   * height; it stays fully draggable from there, and the component's own
+   * clamps still keep it on screen at any viewport.
+   */
+  private position: { x: number; y: number } = performanceOverlayHome();
 
   @state()
   private copyStatus: "idle" | "success" | "error" = "idle";

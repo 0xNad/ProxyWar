@@ -6,6 +6,7 @@ import {
   isCoworldReplayRoute,
 } from "../AiLeagueReplayMode";
 import { CenterCameraEvent, DragEvent, ZoomEvent } from "../InputHandler";
+import { canvasPixelRatio } from "../Utils";
 
 /**
  * Replay / spectator surfaces (the `/ai-league-replay/...`, `/proxywar-replay/...`,
@@ -61,6 +62,13 @@ export class GoToPositionEvent implements GameEvent {
   constructor(
     public x: number,
     public y: number,
+    /**
+     * Optional target scale, animated alongside the pan by the same easing
+     * `GoToPlayerEvent` already uses. Omitting it leaves the zoom exactly
+     * where it was, which is what every pre-existing caller expects and gets.
+     * Added for the broadcast nuke cinema's punch-in and its return trip.
+     */
+    public zoom?: number,
   ) {}
 }
 
@@ -358,13 +366,23 @@ export class TransformHandler {
     private canvas: HTMLCanvasElement,
   ) {
     this._boundingRect = this.canvas.getBoundingClientRect();
-    this.eventBus.on(ZoomEvent, (e) => this.onZoom(e));
-    this.eventBus.on(DragEvent, (e) => this.onMove(e));
-    this.eventBus.on(GoToPlayerEvent, (e) => this.onGoToPlayer(e));
-    this.eventBus.on(GoToPositionEvent, (e) => this.onGoToPosition(e));
-    this.eventBus.on(GoToUnitEvent, (e) => this.onGoToUnit(e));
-    this.eventBus.on(CenterCameraEvent, () => this.centerCamera());
-    this.eventBus.on(FitWholeMapEvent, () =>
+    // Registered through a tracked helper for the same reason LocalServer and
+    // Transport were (H1): the EventBus lives for the page, this object lives
+    // for ONE game, and an in-place rewind creates a new TransformHandler per
+    // rebuild. Un-off()'d, the stale instance keeps answering every camera
+    // event against a dead GameView — and its worst failure is a timer wedge:
+    // a rewind mid-punch-in orphans the eased goTo() chase with its 16ms
+    // setInterval running forever, because nothing can ever reach clearTarget
+    // on an instance the bus still feeds but nothing else references.
+    this.subscribe(ZoomEvent, (e: ZoomEvent) => this.onZoom(e));
+    this.subscribe(DragEvent, (e: DragEvent) => this.onMove(e));
+    this.subscribe(GoToPlayerEvent, (e: GoToPlayerEvent) => this.onGoToPlayer(e));
+    this.subscribe(GoToPositionEvent, (e: GoToPositionEvent) =>
+      this.onGoToPosition(e),
+    );
+    this.subscribe(GoToUnitEvent, (e: GoToUnitEvent) => this.onGoToUnit(e));
+    this.subscribe(CenterCameraEvent, () => this.centerCamera());
+    this.subscribe(FitWholeMapEvent, () =>
       this.centerAll(0.95, { forceWholeMap: true }),
     );
 
@@ -376,6 +394,24 @@ export class TransformHandler {
     if (isReplaySpectatorView()) {
       this.centerAll(0.95);
     }
+  }
+
+  private readonly subscriptions: Array<() => void> = [];
+
+  private subscribe<T>(
+    eventType: new (...args: never[]) => T,
+    handler: (event: T) => void,
+  ): void {
+    this.eventBus.on(eventType as never, handler as never);
+    this.subscriptions.push(() =>
+      this.eventBus.off(eventType as never, handler as never),
+    );
+  }
+
+  /** See the constructor comment; called from GameRenderer.dispose(). */
+  public dispose(): void {
+    this.clearTarget();
+    for (const unsubscribe of this.subscriptions.splice(0)) unsubscribe();
   }
 
   public updateCanvasBoundingRect() {
@@ -436,14 +472,18 @@ export class TransformHandler {
     // Disable image smoothing for pixelated effect
     context.imageSmoothingEnabled = false;
 
-    // Apply zoom and pan
+    // Apply zoom and pan, in CSS pixels, then scale the whole matrix into
+    // device pixels. Keeping the logical space in CSS pixels is what lets
+    // every coordinate helper here (screenToCanvas, worldToCanvas, and the
+    // hit-testing built on them) stay exactly as it was.
+    const ratio = canvasPixelRatio();
     context.setTransform(
-      this.scale,
+      this.scale * ratio,
       0,
       0,
-      this.scale,
-      this.game.width() / 2 - this.offsetX * this.scale,
-      this.game.height() / 2 - this.offsetY * this.scale,
+      this.scale * ratio,
+      (this.game.width() / 2 - this.offsetX * this.scale) * ratio,
+      (this.game.height() / 2 - this.offsetY * this.scale) * ratio,
     );
   }
 
@@ -589,6 +629,15 @@ export class TransformHandler {
       this.offsetY = offsetY;
       this.clampOffsets();
       this.changed = true;
+      // ...then FIT them in the frame. Centring at the current scale answers
+      // "where are they" and not "how big are they" — on a 16-nation board
+      // that lands a viewer on a nation they still cannot see the shape of.
+      // The extent comes from the engine's own borderTiles(), which is a
+      // worker round-trip, so the fit lands a frame or two after the pan. That
+      // ordering is deliberate: the pan is instant feedback, the zoom is the
+      // refinement, and a click never feels like it did nothing while the
+      // worker answers.
+      this.fitPlayerInView(event.player);
       return;
     }
     // Live play: unchanged eased multi-tick chase, own targets always stay
@@ -600,9 +649,92 @@ export class TransformHandler {
     this.intervalID = setInterval(() => this.goTo(), GOTO_INTERVAL_MS);
   }
 
+  /**
+   * Incremented per fit request so a resolution that arrives after the viewer
+   * has clicked something else is discarded rather than yanking the camera to
+   * a nation they have already moved on from.
+   */
+  private fitRequestToken = 0;
+
+  /**
+   * Share of the viewport's smaller axis a fitted nation should occupy. The
+   * owner's ask, and a good number: it leaves a margin of context on every
+   * side, so a viewer can see who the nation borders — which on this board is
+   * most of the story — instead of filling the frame with one colour.
+   */
+  private static readonly FIT_VIEWPORT_FRACTION = 0.7;
+
+  /**
+   * Zoom so a nation's whole territory sits inside FIT_VIEWPORT_FRACTION of
+   * the frame, then centre on the middle of that territory rather than on its
+   * name plate (a name sits in the largest inscribed area, which for a long or
+   * forked empire is nowhere near its centre).
+   *
+   * Replay/spectator only — reached solely from onGoToPlayer's spectator
+   * branch, so live play's eased chase is untouched.
+   */
+  private fitPlayerInView(player: PlayerView): void {
+    const token = ++this.fitRequestToken;
+    void player
+      .borderTiles()
+      .then((border) => {
+        if (token !== this.fitRequestToken) return;
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+        for (const tile of border.borderTiles) {
+          const x = this.game.x(tile);
+          const y = this.game.y(tile);
+          if (x < minX) minX = x;
+          if (y < minY) minY = y;
+          if (x > maxX) maxX = x;
+          if (y > maxY) maxY = y;
+        }
+        // A nation with no border tiles has nothing to fit — it has just been
+        // eliminated, or has not spawned. The pan already happened; leave the
+        // zoom alone rather than dividing by a zero extent.
+        if (!Number.isFinite(minX) || maxX < minX) return;
+        const spanX = Math.max(1, maxX - minX);
+        const spanY = Math.max(1, maxY - minY);
+        const { width: canvasWidth, height: canvasHeight } =
+          this.boundingRect();
+        const fraction = TransformHandler.FIT_VIEWPORT_FRACTION;
+        const fitScale = Math.min(
+          (canvasWidth * fraction) / spanX,
+          (canvasHeight * fraction) / spanY,
+        );
+        // Same bounds the wheel obeys, so a fit can never land somewhere a
+        // viewer could not have reached by hand.
+        this.scale = Math.max(
+          0.2,
+          this.spectatorZoomFloor,
+          Math.min(20, fitScale),
+        );
+        const centred = computeCenterOnCellOffset({
+          targetX: (minX + maxX) / 2,
+          targetY: (minY + maxY) / 2,
+          scale: this.scale,
+          gameWidth: this.game.width(),
+          gameHeight: this.game.height(),
+          canvasWidth,
+          canvasHeight,
+        });
+        this.offsetX = centred.offsetX;
+        this.offsetY = centred.offsetY;
+        this.clampOffsets();
+        this.changed = true;
+      })
+      .catch(() => {
+        // A view that goes away mid-resolve (rewind, elimination). The pan
+        // stands; there is simply no fit.
+      });
+  }
+
   onGoToPosition(event: GoToPositionEvent) {
     this.clearTarget();
     this.target = new Cell(event.x, event.y);
+    this.targetScale = event.zoom ?? null;
     this.intervalID = setInterval(() => this.goTo(), GOTO_INTERVAL_MS);
   }
 
@@ -882,5 +1014,44 @@ export class TransformHandler {
     this.spectatorZoomFloor = zoomFloor;
 
     this.override(oHor, oVer, tScale);
+
+    // L27: publish the letterbox geometry so broadcast chrome can DOCK into
+    // the bands instead of floating over the board.
+    //
+    // A square map contain-fit into 16:9 leaves ~316px of dead space each side
+    // at 1280x720. The instinct is to shrink the fit region so the rails get
+    // their own space — but that is backwards: the fit is HEIGHT-bound, so
+    // subtracting any horizontal inset immediately makes it WIDTH-bound and
+    // the board gets SMALLER (648px -> 583px). Rail width and band width
+    // become mutually recursive.
+    //
+    // So the camera stays exactly as it is and simply reports where the bands
+    // are; the rails size themselves from that. Pure output — nothing reads
+    // these back, so there is no layout/camera feedback loop.
+    //
+    // Published on fit and on resize, never on ZOOM: a rail that resizes while
+    // the viewer is pinching is worse than one that stays put.
+    // Replay-only: live play must not acquire even inert DOM state from the
+    // broadcast skin. Every consumer selector is replay-scoped, so this was
+    // visually a no-op live — but "byte-for-byte untouched" means the class
+    // and the custom properties simply do not appear there. (Found by the
+    // live-safety audit as the patch's only ungated DOM write.)
+    if (!isReplaySpectatorView()) return;
+    const boardW = mapWidth * tScale;
+    const boardH = mapHeight * tScale;
+    const bandX = Math.max(0, (vpWidth - boardW) / 2);
+    const bandY = Math.max(0, (vpHeight - boardH) / 2);
+    const rootStyle = document.documentElement.style;
+    rootStyle.setProperty("--pw-board-w", `${Math.round(boardW)}px`);
+    rootStyle.setProperty("--pw-board-h", `${Math.round(boardH)}px`);
+    rootStyle.setProperty("--pw-band-left", `${Math.round(bandX)}px`);
+    // Wide (2:1) maps leave almost no band; the HUD needs to know whether it
+    // is DOCKED beside the board or OVERLAYING it, because the two modes have
+    // different pixel budgets. A class, not a variable: the consumers are
+    // media-query-scoped CSS blocks.
+    document.body.classList.toggle("pw-narrow-band", bandX < 220);
+    rootStyle.setProperty("--pw-band-right", `${Math.round(bandX)}px`);
+    rootStyle.setProperty("--pw-band-top", `${Math.round(bandY)}px`);
+    rootStyle.setProperty("--pw-band-bottom", `${Math.round(bandY)}px`);
   }
 }

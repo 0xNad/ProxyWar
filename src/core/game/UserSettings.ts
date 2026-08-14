@@ -162,6 +162,23 @@ export class UserSettings {
   }
 
   darkMode() {
+    // The broadcast replay always runs the dark theme. The daylight basemap's
+    // bright saturated ocean is the largest object on screen and outshines
+    // the sixteen territory colours the viewer is there to read; the engine's
+    // own PastelThemeDark (near-black water, muted land) is exactly the
+    // "lit world in a dark operations centre" the broadcast wants. Keyed on
+    // the static-replay build flag — never true in live play — and not
+    // persisted, so it cannot leak into a player's saved preference.
+    // typeof-guarded like the sibling in Colors.ts: this file lives in core/,
+    // one refactor away from being constructed inside the worker, where a bare
+    // `window` reference is a ReferenceError that kills the sim thread.
+    if (
+      typeof window !== "undefined" &&
+      (window as typeof window & { __PROXYWAR_STATIC_REPLAY__?: boolean })
+        .__PROXYWAR_STATIC_REPLAY__ === true
+    ) {
+      return true;
+    }
     return this.getBool(DARK_MODE_KEY, false);
   }
 

@@ -10,6 +10,7 @@ import {
   Trios,
 } from "../core/game/Game";
 import { GameConfig } from "../core/Schemas";
+import { isAiLeagueReplayRoute } from "./AiLeagueReplayMode";
 import type { LangSelector } from "./LangSelector";
 import { Platform } from "./Platform";
 
@@ -336,6 +337,33 @@ export function formatKeyForDisplay(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
+/**
+ * Device pixels per CSS pixel, for sizing canvas BACKING STORES.
+ *
+ * The board canvas used to be sized in CSS pixels while being displayed at
+ * CSS size, which means that on any HiDPI screen the browser rendered the
+ * whole game at half the resolution the display can show and then upscaled the
+ * finished bitmap with bilinear smoothing. That compositing step happens
+ * OUTSIDE the 2D context, so `imageSmoothingEnabled = false` never had any
+ * effect on it — which is why the board looked soft at every zoom, and why
+ * zooming in showed blur instead of detail.
+ *
+ * Capped at 2: past that the memory (a full-screen backing store is
+ * width x height x ratio^2 x 4 bytes) buys almost nothing the eye can see.
+ *
+ * REPLAY ROUTES ONLY. This was written for the broadcast board, where the
+ * softness was the complaint, and it was shipped ungated — which quietly
+ * quadrupled per-frame fill and backing-store memory for every live player on
+ * a HiDPI display, for a change they did not ask for and cannot turn off.
+ * Sharper is not the same as unchanged, and this patch's contract is that a
+ * live match behaves exactly as it did upstream. Live play gets 1, as before.
+ */
+export function canvasPixelRatio(): number {
+  if (typeof window === "undefined") return 1;
+  if (!isAiLeagueReplayRoute()) return 1;
+  return Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+}
+
 export function createCanvas(): HTMLCanvasElement {
   const canvas = document.createElement("canvas");
 
@@ -430,7 +458,14 @@ export const translateText = (
 
   const langSelector = getCachedLangSelector();
   if (!langSelector) {
-    console.warn("LangSelector not found in DOM");
+    // Once, not per call: translateText runs in render loops, and on the
+    // static replay bundle (which has no lang selector at all) this warning
+    // was most of a 34,000-line console log in twenty minutes.
+    const self2 = translateText as unknown as { warnedNoSelector?: boolean };
+    if (!self2.warnedNoSelector) {
+      self2.warnedNoSelector = true;
+      console.warn("LangSelector not found in DOM");
+    }
     return defaultText ?? key;
   }
 

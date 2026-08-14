@@ -1,6 +1,9 @@
 import { html, LitElement } from "lit";
 import { customElement, state } from "lit/decorators.js";
-import { aiLeagueSpectatorDisplayName } from "../../../client/AiLeagueReplayMode";
+import {
+  aiLeagueSpectatorDisplayName,
+  isAiLeagueReplayRoute,
+} from "../../../client/AiLeagueReplayMode";
 import { translateText } from "../../../client/Utils";
 import { EventBus } from "../../../core/EventBus";
 import { GameUpdateType } from "../../../core/game/GameUpdates";
@@ -142,7 +145,16 @@ export class WinModal extends LitElement implements Layer {
           });
           this.isWin = false;
         }
-        history.replaceState(null, "", `${window.location.pathname}?replay`);
+        // Live-play only. On the static broadcast the URL IS the product's
+        // address — ?replay=<bundle>&turn=N is what a viewer refreshes and
+        // shares — and this stock rewrite was destroying it at the exact
+        // moment the result makes it most worth sharing: refresh after the
+        // end card rendered "Replay unavailable" with a Retry that could
+        // never work. (WinModal still ticks on the broadcast; it is only
+        // CSS-hidden, so its side effects fire unless gated.)
+        if (!isAiLeagueReplayRoute()) {
+          history.replaceState(null, "", `${window.location.pathname}?replay`);
+        }
         // Spec 02 non-negotiable #2: camera must resolve to a full-board
         // framing at match end, full stop -- a random mid-zoom crop is the
         // last thing a viewer should see after a whole match. Reuses the
@@ -183,7 +195,16 @@ export class WinModal extends LitElement implements Layer {
           });
           this.isWin = false;
         }
-        history.replaceState(null, "", `${window.location.pathname}?replay`);
+        // Live-play only. On the static broadcast the URL IS the product's
+        // address — ?replay=<bundle>&turn=N is what a viewer refreshes and
+        // shares — and this stock rewrite was destroying it at the exact
+        // moment the result makes it most worth sharing: refresh after the
+        // end card rendered "Replay unavailable" with a Retry that could
+        // never work. (WinModal still ticks on the broadcast; it is only
+        // CSS-hidden, so its side effects fire unless gated.)
+        if (!isAiLeagueReplayRoute()) {
+          history.replaceState(null, "", `${window.location.pathname}?replay`);
+        }
         this.eventBus.emit(new FitWholeMapEvent());
         this.show();
       }

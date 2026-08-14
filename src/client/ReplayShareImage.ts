@@ -42,8 +42,18 @@ export interface ReplayShareImageInput {
 export const SHARE_IMAGE_SIZE = 1080;
 export const SHARE_IMAGE_STANDINGS_LIMIT = 5;
 
-/** Canonical Proxy War amber (--pw-accent). */
-const ACCENT = "#f4a64a";
+/**
+ * The broadcast's amber, and it has to be THIS one.
+ *
+ * This said #f4a64a and called itself canonical. It is not: the broadcast
+ * redefines --pw-accent to #ffc24a on body.ai-league-native-spectator-ui
+ * (GameRenderer's stage block), which beats the :root token every replay
+ * frame — so the share image, the one frame that actually gets posted, was
+ * rendering a different amber from the product it depicts. Measured at ΔE
+ * 0.055 and 13.5 degrees of hue apart: not a rounding difference, a second
+ * brand colour. CSS cannot reach this renderer, so it has to be stated here.
+ */
+const ACCENT = "#ffc24a";
 const WORDMARK = "Proxy War";
 const CTA = "proxywar.xyz/league";
 
