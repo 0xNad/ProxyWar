@@ -3,10 +3,12 @@ import {
   isAiLeagueReplayRoute,
 } from "../../AiLeagueReplayMode";
 import {
+  formatReplayActionKind,
   replayDecisions,
   statedReason,
   type AiLeagueReplayUiDecision,
 } from "../../ReplayDecisionStore";
+import { translateText } from "../../Utils";
 import { Layer } from "./Layer";
 
 /**
@@ -135,7 +137,11 @@ export class AnalystDrawer implements Layer {
     chevron.setAttribute("aria-hidden", "true");
     const tabLabel = document.createElement("span");
     tabLabel.className = "pw-analyst-tab-label";
-    tabLabel.textContent = "ANALYST";
+    tabLabel.textContent = translateText(
+      "ai_league_replay.analyst",
+      undefined,
+      "ANALYST",
+    );
     tab.append(chevron, tabLabel);
     tab.addEventListener("click", () => this.toggle());
 
@@ -146,10 +152,20 @@ export class AnalystDrawer implements Layer {
     header.className = "pw-analyst-header";
     const count = document.createElement("span");
     count.className = "pw-analyst-count";
+    const headerStart = translateText(
+      "ai_league_replay.analyst_header_start",
+      undefined,
+      "ANALYST — ",
+    );
+    const headerEnd = translateText(
+      "ai_league_replay.analyst_header_end",
+      undefined,
+      " SAMPLED DECISIONS",
+    );
     header.append(
-      document.createTextNode("ANALYST — "),
+      document.createTextNode(headerStart),
       count,
-      document.createTextNode(" SAMPLED DECISIONS"),
+      document.createTextNode(headerEnd),
     );
     const list = document.createElement("div");
     list.className = "pw-analyst-list";
@@ -230,7 +246,11 @@ export class AnalystDrawer implements Layer {
     meta.className = "pw-analyst-row-meta";
     const turn = document.createElement("span");
     turn.className = "pw-analyst-turn";
-    turn.textContent = `T${decision.turnNumber}`;
+    turn.textContent = translateText(
+      "ai_league_replay.turn_short",
+      { turn: decision.turnNumber },
+      `T${decision.turnNumber}`,
+    );
     const seat = document.createElement("span");
     seat.className = "pw-analyst-seat";
     // The same rebrand choke point every other surface uses, so this log
@@ -238,16 +258,34 @@ export class AnalystDrawer implements Layer {
     seat.textContent = aiLeagueSpectatorDisplayName(decision.username);
     const kind = document.createElement("span");
     kind.className = "pw-analyst-kind";
-    kind.textContent = decision.selectedActionKind.replace(/_/g, " ");
+    kind.textContent = formatReplayActionKind(decision.selectedActionKind);
     meta.append(turn, seat, kind);
     // FALLBACK is amber — the one accent, marking "the brain did not decide
     // this". REJECTED is faint, NOT coral: a refused order is bookkeeping,
     // and coral stays reserved for violence on this stage.
     if (decision.fallbackUsed) {
-      meta.append(flag("FALLBACK", "fallback"));
+      meta.append(
+        flag(
+          translateText(
+            "ai_league_replay.decision_fallback",
+            undefined,
+            "FALLBACK",
+          ),
+          "fallback",
+        ),
+      );
     }
     if (!decision.result.accepted) {
-      meta.append(flag("REJECTED", "rejected"));
+      meta.append(
+        flag(
+          translateText(
+            "ai_league_replay.decision_rejected",
+            undefined,
+            "REJECTED",
+          ),
+          "rejected",
+        ),
+      );
     }
 
     const reason = document.createElement("p");
@@ -255,7 +293,11 @@ export class AnalystDrawer implements Layer {
     const stated = statedReason(decision);
     if (stated === null) {
       reason.dataset.none = "1";
-      reason.textContent = "no stated reason";
+      reason.textContent = translateText(
+        "ai_league_replay.no_stated_reason",
+        undefined,
+        "no stated reason",
+      );
     } else {
       reason.textContent = `“${clip(stated, MAX_ROW_REASON)}”`;
     }

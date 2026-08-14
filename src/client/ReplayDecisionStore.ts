@@ -1,4 +1,5 @@
 import { aiLeagueSpectatorDisplayName } from "./AiLeagueReplayMode";
+import { translateText } from "./Utils";
 
 /**
  * One sampled agent decision, as the replay envelope serializes it.
@@ -101,6 +102,19 @@ export function statedReason(
   // is short, space-less, and colon-jointed; prose always has spaces.
   if (!reason.includes(" ") && reason.includes(":")) return null;
   return reason;
+}
+
+/** Localized display form for the bounded action-kind token. */
+export function formatReplayActionKind(kind: string): string {
+  const normalized = kind.trim().toLowerCase();
+  const safeKey = normalized.replace(/[^a-z0-9_]/g, "_") || "unknown";
+  const words = (normalized || "unknown").replace(/_/g, " ");
+  const fallback = `${words.charAt(0).toUpperCase()}${words.slice(1)}`;
+  return translateText(
+    `ai_league_replay.action_kind_${safeKey}`,
+    undefined,
+    fallback,
+  );
 }
 
 /**

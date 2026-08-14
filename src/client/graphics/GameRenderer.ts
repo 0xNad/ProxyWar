@@ -4,32 +4,29 @@ import { UserSettings } from "../../core/game/UserSettings";
 import { isAiLeagueNativeSpectatorUiEnabled } from "../AiLeagueReplayMode";
 import { GameStartingModal } from "../GameStartingModal";
 import { RefreshGraphicsEvent as RedrawGraphicsEvent } from "../InputHandler";
+import { replayIntegrity } from "../ReplayIntegrityStore";
+import { canvasPixelRatio, translateText } from "../Utils";
 import { installCompetitorLocateBridge } from "./CompetitorLocateBridge";
 import { FrameProfiler } from "./FrameProfiler";
-import { canvasPixelRatio, translateText } from "../Utils";
 import { isReplaySpectatorView, TransformHandler } from "./TransformHandler";
 import { UIState } from "./UIState";
 import { AlertFrame } from "./layers/AlertFrame";
+import { mountAnalystDrawer } from "./layers/AnalystDrawer";
 import { AttackingTroopsOverlay } from "./layers/AttackingTroopsOverlay";
 import { AttacksDisplay } from "./layers/AttacksDisplay";
 import { mountBroadcastScrubber } from "./layers/BroadcastScrubber";
 import { mountBroadcastSpotlight } from "./layers/BroadcastSpotlight";
-import { replayIntegrity } from "../ReplayIntegrityStore";
-import { mountAnalystDrawer } from "./layers/AnalystDrawer";
-import { mountNationDossier } from "./layers/NationDossier";
-import { mountTradeAttackLanes } from "./layers/TradeAttackLanes";
-import { mountWarRoomToasts } from "./layers/WarRoomToasts";
 import { BuildMenu } from "./layers/BuildMenu";
 import { ChatDisplay } from "./layers/ChatDisplay";
 import { ChatModal } from "./layers/ChatModal";
 import { ControlPanel } from "./layers/ControlPanel";
 import { CoordinateGridLayer } from "./layers/CoordinateGridLayer";
 import { DynamicUILayer } from "./layers/DynamicUILayer";
+import { EventsDisplay } from "./layers/EventsDisplay";
 import {
   followedCompetitorSmallId,
   installFollowedCompetitor,
 } from "./layers/FollowedCompetitor";
-import { EventsDisplay } from "./layers/EventsDisplay";
 import { FxLayer } from "./layers/FxLayer";
 import { GameLeftSidebar } from "./layers/GameLeftSidebar";
 import {
@@ -43,6 +40,7 @@ import { Layer } from "./layers/Layer";
 import { Leaderboard } from "./layers/Leaderboard";
 import { MultiTabModal } from "./layers/MultiTabModal";
 import { NameLayer } from "./layers/NameLayer";
+import { mountNationDossier } from "./layers/NationDossier";
 import { mountNukeCinema } from "./layers/NukeCinema";
 import { NukeTrajectoryPreviewLayer } from "./layers/NukeTrajectoryPreviewLayer";
 import { PerformanceOverlay } from "./layers/PerformanceOverlay";
@@ -58,9 +56,11 @@ import { StructureLayer } from "./layers/StructureLayer";
 import { TeamStats } from "./layers/TeamStats";
 import { TerrainLayer } from "./layers/TerrainLayer";
 import { TerritoryLayer } from "./layers/TerritoryLayer";
+import { mountTradeAttackLanes } from "./layers/TradeAttackLanes";
 import { UILayer } from "./layers/UILayer";
 import { UnitDisplay } from "./layers/UnitDisplay";
 import { UnitLayer } from "./layers/UnitLayer";
+import { mountWarRoomToasts } from "./layers/WarRoomToasts";
 import { WinModal } from "./layers/WinModal";
 
 export function createRenderer(
@@ -151,8 +151,7 @@ export function createRenderer(
       // Allowed a little past the band edge: the board's outer margin is open
       // ocean, so a small overlap costs nothing and buys the name column real
       // width. Strictly clamping to the band starved it.
-      width:
-        "min(440px, max(300px, calc(var(--pw-band-left, 316px) + 24px)))",
+      width: "min(440px, max(300px, calc(var(--pw-band-left, 316px) + 24px)))",
     });
     nativeSpectatorLeaderboard.classList.add("ai-league-native-leaderboard");
     nativeSpectatorLeaderboard.style.pointerEvents = "none";
@@ -172,7 +171,8 @@ export function createRenderer(
       .gameConfig()
       .gameMap.replace(/([a-z])([A-Z])/g, "$1 $2")
       .toUpperCase();
-    const seats = game.config().gameConfig().maxPlayers;
+    const seats =
+      game.config().gameConfig().maxPlayers ?? game.playerViews().length;
     // NAME THE PREMISE. A first-encounter study watched this for five minutes
     // and never worked out that the sixteen colours are AI AGENTS — which is
     // the entire product. The sentence that says so already existed, in the
@@ -189,12 +189,24 @@ export function createRenderer(
     const decisions =
       integrity === null
         ? null
-        : `${integrity.decisions.toLocaleString()} DECISIONS`;
+        : translateText(
+            "ai_league_replay.identity_decisions",
+            { count: integrity.decisions },
+            `${integrity.decisions.toLocaleString()} DECISIONS`,
+          );
     identityChip.textContent = [
       mapName,
-      `${seats} AI AGENTS`,
+      translateText(
+        "ai_league_replay.identity_agents",
+        { count: seats },
+        `${seats.toLocaleString()} AI AGENTS`,
+      ),
       decisions,
-      `BROADCAST r${PW_BROADCAST_REV}`,
+      translateText(
+        "ai_league_replay.identity_revision",
+        { revision: PW_BROADCAST_REV },
+        `BROADCAST r${PW_BROADCAST_REV}`,
+      ),
     ]
       .filter((part) => part !== null)
       .join(" · ");
@@ -505,7 +517,6 @@ export function createRenderer(
   );
 }
 
-
 /**
  * ONE SENTENCE, ONCE — the difference between a screen recording and a product.
  *
@@ -563,7 +574,6 @@ function mountFirstWatchHint(teardowns: Array<() => void>): void {
     hint.remove();
   });
 }
-
 
 /**
  * HIDE ALL GUI. Everything this patch draws is chrome over a map, and the map
@@ -1936,7 +1946,10 @@ export class GameRenderer {
    */
   private watchPixelRatio() {
     if (typeof window.matchMedia !== "function") return;
-    this.pixelRatioWatch?.removeEventListener("change", this.onPixelRatioChange);
+    this.pixelRatioWatch?.removeEventListener(
+      "change",
+      this.onPixelRatioChange,
+    );
     if (this.disposed) {
       this.pixelRatioWatch = null;
       return;
@@ -2042,7 +2055,10 @@ export class GameRenderer {
     }
     window.removeEventListener("resize", this.onWindowResize);
     document.removeEventListener("fullscreenchange", this.onFullscreenChange);
-    this.pixelRatioWatch?.removeEventListener("change", this.onPixelRatioChange);
+    this.pixelRatioWatch?.removeEventListener(
+      "change",
+      this.onPixelRatioChange,
+    );
     this.pixelRatioWatch = null;
     this.eventBus.off(RedrawGraphicsEvent, this.onRedrawGraphics);
     // The camera has bus subscriptions and a possible eased-goTo interval of
@@ -2080,7 +2096,9 @@ export class GameRenderer {
       }
     }
     // Created by createRenderer rather than queried, so nothing else owns them.
-    document.querySelector("leader-board.ai-league-native-leaderboard")?.remove();
+    document
+      .querySelector("leader-board.ai-league-native-leaderboard")
+      ?.remove();
     document.getElementById("pw-board-identity")?.remove();
     // Debug handle installed at initialize(); a stale one points at a dead
     // transform and reads as live state to anyone poking at the console.
@@ -2264,5 +2282,4 @@ export class GameRenderer {
       this.performanceOverlay.updateTickLayerMetrics(tickLayerDurations);
     }
   }
-
 }

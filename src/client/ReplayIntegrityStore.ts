@@ -1,3 +1,5 @@
+import { translateText } from "./Utils";
+
 /**
  * ============================================================================
  * DECISION INTEGRITY — how much of this match was actually the agents.
@@ -109,12 +111,32 @@ function parseIntegrity(raw: unknown): ReplayIntegrity | null {
  */
 export function formatReplayIntegrity(v: ReplayIntegrity): string {
   const pct = (n: number) => Math.round((n / v.decisions) * 100);
-  const parts = [`${v.decisions.toLocaleString()} DECISIONS`];
+  const parts = [
+    translateText(
+      "ai_league_replay.integrity_decisions",
+      { count: v.decisions },
+      `${v.decisions.toLocaleString()} DECISIONS`,
+    ),
+  ];
   if (v.fallback > 0) {
-    parts.push(`${v.fallback.toLocaleString()} FALLBACK (${pct(v.fallback)}%)`);
+    const percentage = pct(v.fallback);
+    parts.push(
+      translateText(
+        "ai_league_replay.integrity_fallback",
+        { count: v.fallback, percentage },
+        `${v.fallback.toLocaleString()} FALLBACK (${percentage}%)`,
+      ),
+    );
   }
   if (v.degraded > 0) {
-    parts.push(`${v.degraded.toLocaleString()} DEGRADED (${pct(v.degraded)}%)`);
+    const percentage = pct(v.degraded);
+    parts.push(
+      translateText(
+        "ai_league_replay.integrity_degraded",
+        { count: v.degraded, percentage },
+        `${v.degraded.toLocaleString()} DEGRADED (${percentage}%)`,
+      ),
+    );
   }
   return parts.join("  ·  ");
 }

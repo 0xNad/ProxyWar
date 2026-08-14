@@ -1,9 +1,10 @@
+import { EventBus } from "../core/EventBus";
 import { GameType } from "../core/game/Game";
 import { GameRecord } from "../core/Schemas";
-import { EventBus } from "../core/EventBus";
 import { ReplaySpeedChangeEvent } from "./InputHandler";
 import { parseReplayRenderSpeed } from "./ReplayRenderFastForward";
 import { ReplaySpeedMultiplier } from "./utilities/ReplaySpeedMultiplier";
+import { translateText } from "./Utils";
 
 /**
  * ============================================================================
@@ -266,8 +267,7 @@ class LullDirector {
 
   /** True while our boost is applied; savedSpeed is what restores. */
   private boosting = false;
-  private savedSpeed: ReplaySpeedMultiplier =
-    ReplaySpeedMultiplier.normal;
+  private savedSpeed: ReplaySpeedMultiplier = ReplaySpeedMultiplier.normal;
   /**
    * The viewer's current speed as observed on the bus, seeded with the SAME
    * derivation LocalServer.applyArchivedReplayDefaultSpeed (LocalServer.ts:
@@ -406,9 +406,7 @@ class LullDirector {
       });
     }
     this.publishSpans(
-      spans.filter(
-        (s) => s.endTurn - s.startTurn + 1 >= MIN_LULL_SPAN_TURNS,
-      ),
+      spans.filter((s) => s.endTurn - s.startTurn + 1 >= MIN_LULL_SPAN_TURNS),
     );
   }
 
@@ -468,9 +466,7 @@ class LullDirector {
       spans = next;
     }
     this.publishSpans(
-      spans.filter(
-        (s) => s.endTurn - s.startTurn + 1 >= MIN_LULL_SPAN_TURNS,
-      ),
+      spans.filter((s) => s.endTurn - s.startTurn + 1 >= MIN_LULL_SPAN_TURNS),
     );
   }
 
@@ -528,10 +524,18 @@ class LullDirector {
     toast.className = "pw-lull-toast";
     const kind = document.createElement("div");
     kind.className = "pw-lull-toast-kind";
-    kind.textContent = "AUTO-PACING";
+    kind.textContent = translateText(
+      "ai_league_replay.auto_pacing",
+      undefined,
+      "AUTO-PACING",
+    );
     const body = document.createElement("div");
     body.className = "pw-lull-toast-body";
-    body.textContent = `SKIPPED ${skippedTurns.toLocaleString()} QUIET TURNS — MATCH BEGINS`;
+    body.textContent = translateText(
+      "ai_league_replay.skipped_quiet_turns",
+      { count: skippedTurns },
+      `SKIPPED ${skippedTurns.toLocaleString()} QUIET TURNS — MATCH BEGINS`,
+    );
     toast.append(kind, body);
     document.body.appendChild(toast);
     // Two-step fade on wall clock: a notice about a jump we already made has
@@ -611,10 +615,18 @@ class LullDirector {
     // PaintBot's chip is "SKIPPING LULL" with no number (its boost is a
     // fixed 8x); ours rides the uncapped `fastest` tier, so the multiplier
     // reads MAX rather than a figure that would sometimes be false.
-    line.textContent = "FAST-FORWARD ×MAX — QUIET PERIOD";
+    line.textContent = translateText(
+      "ai_league_replay.quiet_fast_forward",
+      undefined,
+      "FAST-FORWARD ×MAX — QUIET PERIOD",
+    );
     const hint = document.createElement("span");
     hint.className = "pw-lull-ffwd-hint";
-    hint.textContent = "CLICK TO RESUME NORMAL SPEED";
+    hint.textContent = translateText(
+      "ai_league_replay.resume_normal_speed",
+      undefined,
+      "CLICK TO RESUME NORMAL SPEED",
+    );
     chip.append(line, hint);
     chip.addEventListener("click", () => {
       // The escape hatch IS a cancellation of automation, not a speed pick:

@@ -1,3 +1,5 @@
+import { translateText } from "./Utils";
+
 /**
  * ============================================================================
  * REWIND CURTAIN — the in-place-rewind loading treatment ("dimmed hold").
@@ -160,11 +162,20 @@ export function raiseRewindCurtain(
 
   const eyebrow = document.createElement("div");
   eyebrow.className = "pw-rewind-eyebrow";
-  eyebrow.textContent = "REWINDING";
+  eyebrow.textContent = translateText(
+    "ai_league_replay.rewinding",
+    undefined,
+    "REWINDING",
+  );
 
   const clock = document.createElement("div");
   clock.className = "pw-rewind-clock";
-  clock.textContent = `TO ${formatClock(opts.targetTurn)}`;
+  const targetClock = formatClock(opts.targetTurn);
+  clock.textContent = translateText(
+    "ai_league_replay.rewind_to",
+    { time: targetClock },
+    `TO ${targetClock}`,
+  );
 
   const track = document.createElement("div");
   track.className = "pw-rewind-track";
@@ -184,7 +195,12 @@ export function raiseRewindCurtain(
   if (destination !== null) {
     const destTag = document.createElement("div");
     destTag.className = "pw-rewind-desttag";
-    destTag.textContent = `DESTINATION — ${formatClock(destination.turn)}`;
+    const destinationClock = formatClock(destination.turn);
+    destTag.textContent = translateText(
+      "ai_league_replay.rewind_destination",
+      { time: destinationClock },
+      `DESTINATION — ${destinationClock}`,
+    );
     root.appendChild(destTag);
   }
   document.body.appendChild(root);
@@ -196,7 +212,11 @@ export function raiseRewindCurtain(
     const clampedTurn = Math.min(Math.max(0, Math.round(turn)), totalTurns);
     const fraction = Math.min(1, Math.max(0, clampedTurn / targetTurn));
     fill.style.width = `${(fraction * 100).toFixed(2)}%`;
-    caption.textContent = `TURN ${clampedTurn} OF ${totalTurns} — RESIMULATING`;
+    caption.textContent = translateText(
+      "ai_league_replay.rewind_progress",
+      { current: clampedTurn, total: totalTurns },
+      `TURN ${clampedTurn.toLocaleString()} OF ${totalTurns.toLocaleString()} — RESIMULATING`,
+    );
   };
   applyProgress(0);
 

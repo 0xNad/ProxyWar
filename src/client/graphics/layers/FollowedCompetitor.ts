@@ -1,11 +1,12 @@
 import { EventBus } from "../../../core/EventBus";
 import { GameView } from "../../../core/game/GameView";
+import { aiLeagueSpectatorDisplayName } from "../../AiLeagueReplayMode";
 import {
   ContextMenuEvent,
-  MouseUpEvent,
   TouchEvent as InputTouchEvent,
+  MouseUpEvent,
 } from "../../InputHandler";
-import { aiLeagueSpectatorDisplayName } from "../../AiLeagueReplayMode";
+import { translateText } from "../../Utils";
 import { TransformHandler } from "../TransformHandler";
 
 /**
@@ -177,9 +178,14 @@ export function installFollowedCompetitor(
       chip.dataset.on = "0";
       return;
     }
-    chip.textContent = `FOLLOWING · ${aiLeagueSpectatorDisplayName(
+    const name = aiLeagueSpectatorDisplayName(
       player.displayName(),
-    ).toUpperCase()}`;
+    ).toUpperCase();
+    chip.textContent = translateText(
+      "ai_league_replay.following_competitor",
+      { name },
+      `FOLLOWING · ${name}`,
+    );
     chip.dataset.on = "1";
   };
   // Published for `restoreFollowedCompetitor` — see that function's own doc

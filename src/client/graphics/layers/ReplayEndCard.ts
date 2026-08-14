@@ -4,14 +4,19 @@ import { Winner } from "../../../core/Schemas";
 import { GameUpdateType } from "../../../core/game/GameUpdates";
 import { GameView, PlayerView } from "../../../core/game/GameView";
 import {
+  aiLeagueSpectatorDisplayName,
+  isAiLeagueReplayRoute,
+} from "../../AiLeagueReplayMode";
+import {
   formatReplayIntegrity,
   replayIntegrity,
 } from "../../ReplayIntegrityStore";
 import {
-  aiLeagueSpectatorDisplayName,
-  isAiLeagueReplayRoute,
-} from "../../AiLeagueReplayMode";
-import { formatPercentage, renderNumber, renderTroops } from "../../Utils";
+  formatPercentage,
+  renderNumber,
+  renderTroops,
+  translateText,
+} from "../../Utils";
 import { Layer } from "./Layer";
 
 /**
@@ -379,23 +384,51 @@ export class ReplayEndCard extends LitElement implements Layer {
       // Also the fallback when a winner was declared but could not be resolved
       // to a PlayerView: state the truth (no attributable winner) instead of
       // inventing one.
-      eyebrow = "Result";
-      headline = "No winner";
+      eyebrow = translateText(
+        "ai_league_replay.end_result",
+        undefined,
+        "Result",
+      );
+      headline = translateText(
+        "ai_league_replay.end_no_winner",
+        undefined,
+        "No winner",
+      );
       headlineSeat = null;
       share = leaderRow.share;
-      metricLabel = "largest holding";
+      metricLabel = translateText(
+        "ai_league_replay.end_largest_holding",
+        undefined,
+        "largest holding",
+      );
     } else if (kind === "team" && winner !== undefined) {
-      eyebrow = "Winning team";
+      eyebrow = translateText(
+        "ai_league_replay.end_winning_team",
+        undefined,
+        "Winning team",
+      );
       headline = String(winner[1]);
       headlineSeat = winnerRows[0].seat;
       share = winnerRows.reduce((sum, r) => sum + r.share, 0);
-      metricLabel = "of the map";
+      metricLabel = translateText(
+        "ai_league_replay.end_of_map",
+        undefined,
+        "of the map",
+      );
     } else {
-      eyebrow = "Winner";
+      eyebrow = translateText(
+        "ai_league_replay.end_winner",
+        undefined,
+        "Winner",
+      );
       headline = winnerRows[0].name;
       headlineSeat = winnerRows[0].seat;
       share = winnerRows[0].share;
-      metricLabel = "of the map";
+      metricLabel = translateText(
+        "ai_league_replay.end_of_map",
+        undefined,
+        "of the map",
+      );
     }
 
     const verdictName =
@@ -501,14 +534,44 @@ export class ReplayEndCard extends LitElement implements Layer {
     // eat a hit test during play.
     if (snapshot === null) return html``;
 
+    const finalResult = translateText(
+      "ai_league_replay.final_result",
+      undefined,
+      "Final result",
+    );
+    const finalTurn = formatTurn(snapshot.finalTurn);
+    let footerSummary =
+      snapshot.survivors === 0
+        ? translateText(
+            "ai_league_replay.end_footer_none",
+            { field: snapshot.field },
+            `${snapshot.field.toLocaleString()} competitors · none left standing`,
+          )
+        : translateText(
+            "ai_league_replay.end_footer_survivors",
+            { field: snapshot.field, survivors: snapshot.survivors },
+            `${snapshot.field.toLocaleString()} competitors · ${snapshot.survivors.toLocaleString()} still standing`,
+          );
+    if (snapshot.hiddenRows > 0) {
+      footerSummary = translateText(
+        "ai_league_replay.end_footer_hidden",
+        { summary: footerSummary, count: snapshot.hiddenRows },
+        `${footerSummary} · +${snapshot.hiddenRows.toLocaleString()} eliminated earlier`,
+      );
+    }
+
     return html`
       <div class="pw-ec-scrim"></div>
       <div class="pw-ec-anchor">
-        <section class="pw-ec-card" role="region" aria-label="Final result">
+        <section class="pw-ec-card" role="region" aria-label=${finalResult}>
           <header class="pw-ec-topline">
-            <span class="pw-ec-eyebrow">Final result</span>
+            <span class="pw-ec-eyebrow">${finalResult}</span>
             <span class="pw-ec-eyebrow pw-ec-num"
-              >Turn ${formatTurn(snapshot.finalTurn)}</span
+              >${translateText(
+                "ai_league_replay.turn_value",
+                { turn: finalTurn },
+                `Turn ${finalTurn}`,
+              )}</span
             >
           </header>
 
@@ -540,15 +603,7 @@ export class ReplayEndCard extends LitElement implements Layer {
           ${this.renderStandings(snapshot)}
 
           <footer class="pw-ec-foot">
-            <span class="pw-ec-eyebrow"
-              >${snapshot.field} competitors ·
-              ${snapshot.survivors === 0
-                ? "none left standing"
-                : `${snapshot.survivors} still standing`}${snapshot.hiddenRows >
-              0
-                ? ` · +${snapshot.hiddenRows} eliminated earlier`
-                : ""}</span
-            >
+            <span class="pw-ec-eyebrow">${footerSummary}</span>
             <span class="pw-ec-eyebrow pw-ec-wordmark">Proxy War</span>
           </footer>
           ${this.renderIntegrity()}
@@ -620,10 +675,34 @@ export class ReplayEndCard extends LitElement implements Layer {
               <div class="pw-ec-row pw-ec-row-head">
                 <span class="pw-ec-eyebrow">#</span>
                 <span aria-hidden="true"></span>
-                <span class="pw-ec-eyebrow">Competitor</span>
-                <span class="pw-ec-eyebrow pw-ec-right">Map</span>
-                <span class="pw-ec-eyebrow pw-ec-right">Gold</span>
-                <span class="pw-ec-eyebrow pw-ec-right">Troops</span>
+                <span class="pw-ec-eyebrow"
+                  >${translateText(
+                    "ai_league_replay.end_competitor",
+                    undefined,
+                    "Competitor",
+                  )}</span
+                >
+                <span class="pw-ec-eyebrow pw-ec-right"
+                  >${translateText(
+                    "ai_league_replay.end_map",
+                    undefined,
+                    "Map",
+                  )}</span
+                >
+                <span class="pw-ec-eyebrow pw-ec-right"
+                  >${translateText(
+                    "ai_league_replay.end_gold",
+                    undefined,
+                    "Gold",
+                  )}</span
+                >
+                <span class="pw-ec-eyebrow pw-ec-right"
+                  >${translateText(
+                    "ai_league_replay.end_troops",
+                    undefined,
+                    "Troops",
+                  )}</span
+                >
               </div>
               ${column.map((row) => this.renderRow(row))}
             </div>
@@ -659,8 +738,12 @@ export class ReplayEndCard extends LitElement implements Layer {
             ? null
             : html`<span class="pw-ec-out pw-ec-num"
                 >${row.eliminatedAtTurn === null
-                  ? "out"
-                  : `out T${formatTurn(row.eliminatedAtTurn)}`}</span
+                  ? translateText("ai_league_replay.end_out", undefined, "out")
+                  : translateText(
+                      "ai_league_replay.end_out_turn",
+                      { turn: formatTurn(row.eliminatedAtTurn) },
+                      `out T${formatTurn(row.eliminatedAtTurn)}`,
+                    )}</span
               >`}
         </span>
         <span class="pw-ec-cell pw-ec-num"
@@ -749,7 +832,11 @@ function buildCategories(
 
   const territory = rows[0]; // rows are already ranked by placement
   tiles.push({
-    label: "Most territory",
+    label: translateText(
+      "ai_league_replay.end_most_territory",
+      undefined,
+      "Most territory",
+    ),
     name: territory.name,
     seat: territory.seat,
     value: territory.shareLabel,
@@ -760,7 +847,11 @@ function buildCategories(
   const byGold = maxBy(rows, (r) => parseCompact(r.gold));
   if (byGold !== null) {
     tiles.push({
-      label: "Deepest treasury",
+      label: translateText(
+        "ai_league_replay.end_deepest_treasury",
+        undefined,
+        "Deepest treasury",
+      ),
       name: byGold.name,
       seat: byGold.seat,
       value: byGold.gold,
@@ -770,7 +861,11 @@ function buildCategories(
   const byTroops = maxBy(rows, (r) => parseCompact(r.troops));
   if (byTroops !== null) {
     tiles.push({
-      label: "Largest army",
+      label: translateText(
+        "ai_league_replay.end_largest_army",
+        undefined,
+        "Largest army",
+      ),
       name: byTroops.name,
       seat: byTroops.seat,
       value: byTroops.troops,
@@ -780,7 +875,11 @@ function buildCategories(
   const collapse = findCollapse(rows, denominator, null);
   if (collapse !== null) {
     tiles.push({
-      label: "Biggest collapse",
+      label: translateText(
+        "ai_league_replay.end_biggest_collapse",
+        undefined,
+        "Biggest collapse",
+      ),
       name: collapse.row.name,
       seat: collapse.row.seat,
       value: `−${renderNumber(collapse.lost)}`,
@@ -791,7 +890,11 @@ function buildCategories(
   const byPeak = maxBy(rows, (r) => r.peakTiles ?? -1);
   if (byPeak !== null && (byPeak.peakTiles ?? 0) > 0) {
     tiles.push({
-      label: "High-water mark",
+      label: translateText(
+        "ai_league_replay.end_high_water_mark",
+        undefined,
+        "High-water mark",
+      ),
       name: byPeak.name,
       seat: byPeak.seat,
       value: formatPercentage((byPeak.peakTiles ?? 0) / denominator),
@@ -853,28 +956,63 @@ function buildVerdict(ctx: VerdictContext): string {
   const pct = formatPercentage(ctx.share);
 
   if (ctx.kind === "none") {
-    return (
-      `No one closed it out — ${ctx.name} finishes on top with ${pct} of the map, ` +
-      `${ctx.survivors} of ${ctx.field} still standing after ${formatTurn(ctx.finalTurn)} turns.`
+    const turn = formatTurn(ctx.finalTurn);
+    return translateText(
+      "ai_league_replay.verdict_no_winner",
+      {
+        name: ctx.name,
+        share: pct,
+        survivors: ctx.survivors,
+        field: ctx.field,
+        turn,
+      },
+      `No one closed it out — ${ctx.name} finishes on top with ${pct} of the map, ${ctx.survivors.toLocaleString()} of ${ctx.field.toLocaleString()} still standing after ${turn} turns.`,
     );
   }
 
-  const subject = ctx.kind === "team" ? `Team ${ctx.name}` : ctx.name;
+  const subject =
+    ctx.kind === "team"
+      ? translateText(
+          "ai_league_replay.verdict_team_subject",
+          { name: ctx.name },
+          `Team ${ctx.name}`,
+        )
+      : ctx.name;
 
   let head: string;
   let marginUsed = false;
   if (ctx.share >= SHARE_DOMINANT) {
-    head = `${subject} takes it with ${pct} of the map`;
+    head = translateText(
+      "ai_league_replay.verdict_dominant",
+      { subject, share: pct },
+      `${subject} takes it with ${pct} of the map`,
+    );
   } else if (ctx.share >= SHARE_SOLID) {
-    head = `${subject} wins on ${pct} of the map`;
+    head = translateText(
+      "ai_league_replay.verdict_solid",
+      { subject, share: pct },
+      `${subject} wins on ${pct} of the map`,
+    );
   } else if (runnerUp !== null && margin < MARGIN_NARROW) {
     // Narrow AND small: the win was survival, not conquest. Say both.
-    head =
-      `${subject} scrapes in on just ${pct} of the map, ` +
-      `${formatPercentage(Math.max(margin, 0))} clear of ${runnerUp.name}`;
+    const marginLabel = formatPercentage(Math.max(margin, 0));
+    head = translateText(
+      "ai_league_replay.verdict_narrow",
+      {
+        subject,
+        share: pct,
+        margin: marginLabel,
+        runnerUp: runnerUp.name,
+      },
+      `${subject} scrapes in on just ${pct} of the map, ${marginLabel} clear of ${runnerUp.name}`,
+    );
     marginUsed = true;
   } else {
-    head = `${subject} limps in on just ${pct} of the map`;
+    head = translateText(
+      "ai_league_replay.verdict_limp",
+      { subject, share: pct },
+      `${subject} limps in on just ${pct} of the map`,
+    );
   }
 
   const tail =
@@ -882,7 +1020,13 @@ function buildVerdict(ctx: VerdictContext): string {
     (marginUsed ? null : marginClause(runnerUp, margin)) ??
     survivalClause(ctx);
 
-  return tail === null ? `${head}.` : `${head} — ${tail}.`;
+  return tail === null
+    ? translateText("ai_league_replay.verdict_complete", { head }, `${head}.`)
+    : translateText(
+        "ai_league_replay.verdict_complete_with_tail",
+        { head, tail },
+        `${head} — ${tail}.`,
+      );
 }
 
 function collapseClause(ctx: VerdictContext): string | null {
@@ -897,14 +1041,19 @@ function collapseClause(ctx: VerdictContext): string | null {
 
   const peak = renderNumber(collapse.peak);
   if (collapse.row.tiles === 0) {
-    return (
-      `${collapse.row.name} peaked at ${peak} tiles and was gone ` +
-      `${formatTurn(collapse.turns)} turns later`
+    const turns = formatTurn(collapse.turns);
+    return translateText(
+      "ai_league_replay.verdict_collapse_gone",
+      { name: collapse.row.name, peak, turns },
+      `${collapse.row.name} peaked at ${peak} tiles and was gone ${turns} turns later`,
     );
   }
-  return (
-    `${collapse.row.name} collapsed from ${peak} tiles to ` +
-    `${renderNumber(collapse.row.tiles)} over ${formatTurn(collapse.turns)} turns`
+  const current = renderNumber(collapse.row.tiles);
+  const turns = formatTurn(collapse.turns);
+  return translateText(
+    "ai_league_replay.verdict_collapse",
+    { name: collapse.row.name, peak, current, turns },
+    `${collapse.row.name} collapsed from ${peak} tiles to ${current} over ${turns} turns`,
   );
 }
 
@@ -914,14 +1063,28 @@ function marginClause(
 ): string | null {
   if (runnerUp === null) return null;
   if (margin >= MARGIN_NARROW * 2) return null;
-  return `only ${formatPercentage(Math.max(margin, 0))} of the map clear of ${runnerUp.name}`;
+  const marginLabel = formatPercentage(Math.max(margin, 0));
+  return translateText(
+    "ai_league_replay.verdict_margin",
+    { margin: marginLabel, runnerUp: runnerUp.name },
+    `only ${marginLabel} of the map clear of ${runnerUp.name}`,
+  );
 }
 
 function survivalClause(ctx: VerdictContext): string {
+  const turn = formatTurn(ctx.finalTurn);
   if (ctx.survivors <= 1) {
-    return `the last of ${ctx.field} left standing after ${formatTurn(ctx.finalTurn)} turns`;
+    return translateText(
+      "ai_league_replay.verdict_last_standing",
+      { field: ctx.field, turn },
+      `the last of ${ctx.field.toLocaleString()} left standing after ${turn} turns`,
+    );
   }
-  return `${ctx.survivors} of ${ctx.field} still standing at turn ${formatTurn(ctx.finalTurn)}`;
+  return translateText(
+    "ai_league_replay.verdict_still_standing",
+    { survivors: ctx.survivors, field: ctx.field, turn },
+    `${ctx.survivors.toLocaleString()} of ${ctx.field.toLocaleString()} still standing at turn ${turn}`,
+  );
 }
 
 function maxBy<T>(items: T[], score: (item: T) => number): T | null {
@@ -956,7 +1119,7 @@ function parseCompact(value: string): number {
 
 /** Turn counts are read as counts, not magnitudes: "1,204", never "1.20K". */
 function formatTurn(turn: number): string {
-  return Math.max(0, Math.round(turn)).toLocaleString("en-US");
+  return Math.max(0, Math.round(turn)).toLocaleString();
 }
 
 // ===========================================================================

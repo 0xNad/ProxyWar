@@ -442,7 +442,14 @@ export class BroadcastScrubber implements Layer {
     const track = document.createElement("div");
     track.className = "pw-scrub-track";
     track.setAttribute("role", "slider");
-    track.setAttribute("aria-label", "Match timeline");
+    track.setAttribute(
+      "aria-label",
+      translateText(
+        "ai_league_replay.match_timeline",
+        undefined,
+        "Match timeline",
+      ),
+    );
     track.tabIndex = 0;
 
     const rail = document.createElement("div");
@@ -480,7 +487,11 @@ export class BroadcastScrubber implements Layer {
     graph.setAttribute("aria-hidden", "true");
     const graphLabel = document.createElement("div");
     graphLabel.className = "pw-scrub-graph-label";
-    graphLabel.textContent = "TERRITORY RACE";
+    graphLabel.textContent = translateText(
+      "ai_league_replay.territory_race",
+      undefined,
+      "TERRITORY RACE",
+    );
 
     // SPOILERS toggle, INSIDE the strip at its right end — the same
     // affordance PaintBot puts on its transport chrome ("spoilers", lit when
@@ -491,8 +502,16 @@ export class BroadcastScrubber implements Layer {
     const spoilersBtn = document.createElement("button");
     spoilersBtn.className = "pw-scrub-spoilers";
     spoilersBtn.type = "button";
-    spoilersBtn.textContent = "SPOILERS";
-    spoilersBtn.title = "Show future events ahead of the playhead (o)";
+    spoilersBtn.textContent = translateText(
+      "ai_league_replay.spoilers",
+      undefined,
+      "SPOILERS",
+    );
+    spoilersBtn.title = translateText(
+      "ai_league_replay.spoilers_hint",
+      undefined,
+      "Show future events ahead of the playhead (o)",
+    );
     spoilersBtn.setAttribute("aria-pressed", spoilersOn ? "true" : "false");
     // POINTERDOWN, not just click: the track's drag starts on the pointer
     // stream (see the trap note in bindSeek), so a click-only
@@ -764,7 +783,13 @@ export class BroadcastScrubber implements Layer {
       // Nowhere to go: playback reaches this mark inside ~6 seconds and any
       // seek that could move would land PAST it. Say that, rather than
       // absorbing the click into silence.
-      this.flashStatus("ALREADY ARRIVING — KEEP WATCHING");
+      this.flashStatus(
+        translateText(
+          "ai_league_replay.already_arriving",
+          undefined,
+          "ALREADY ARRIVING — KEEP WATCHING",
+        ),
+      );
       return;
     }
     this.seekToTurn(
@@ -793,12 +818,24 @@ export class BroadcastScrubber implements Layer {
   private scrubHintFor(fraction: number): string {
     const target = fraction * this.totalTurns;
     if (target > this.currentTurn + REPLAY_SEEK_DEAD_ZONE_TURNS) {
-      return "RELEASE TO SEEK";
+      return translateText(
+        "ai_league_replay.release_to_seek",
+        undefined,
+        "RELEASE TO SEEK",
+      );
     }
     if (target < this.currentTurn - REPLAY_SEEK_DEAD_ZONE_TURNS) {
-      return "RELEASE TO REWIND — COSTS A RESIMULATION";
+      return translateText(
+        "ai_league_replay.release_to_rewind",
+        undefined,
+        "RELEASE TO REWIND — COSTS A RESIMULATION",
+      );
     }
-    return "ALREADY HERE";
+    return translateText(
+      "ai_league_replay.already_here",
+      undefined,
+      "ALREADY HERE",
+    );
   }
 
   /** Ticks every frame; the work is a handful of style writes. */
@@ -1109,7 +1146,13 @@ export class BroadcastScrubber implements Layer {
       if (el.style.left !== left) el.style.left = left;
       const title = redacted ? "" : mark.label;
       if (el.title !== title) el.title = title;
-      const aria = redacted ? "Upcoming event" : mark.label;
+      const aria = redacted
+        ? translateText(
+            "ai_league_replay.upcoming_event",
+            undefined,
+            "Upcoming event",
+          )
+        : mark.label;
       if (el.getAttribute("aria-label") !== aria) {
         el.setAttribute("aria-label", aria);
       }
@@ -1458,7 +1501,11 @@ export class BroadcastScrubber implements Layer {
       // tag would keep saying "no frame" over a perfectly good picture.
       this.previewPaintedTurn = -1;
       if (this.previewTag !== null) {
-        this.previewTag.textContent = "NO FRAME YET — RELEASE TO SEEK";
+        this.previewTag.textContent = translateText(
+          "ai_league_replay.no_preview_frame",
+          undefined,
+          "NO FRAME YET — RELEASE TO SEEK",
+        );
       }
       return;
     }
@@ -1476,7 +1523,12 @@ export class BroadcastScrubber implements Layer {
         canvas.getContext("2d")?.drawImage(frame.bitmap, 0, 0);
       }
       if (this.previewTag !== null) {
-        this.previewTag.textContent = `PREVIEW — ${formatClock(frame.turn, this.totalTurns)}`;
+        const time = formatClock(frame.turn, this.totalTurns);
+        this.previewTag.textContent = translateText(
+          "ai_league_replay.preview_time",
+          { time },
+          `PREVIEW — ${time}`,
+        );
       }
     }
   }

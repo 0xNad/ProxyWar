@@ -5,12 +5,17 @@ import {
   aiLeagueSpectatorDisplayName,
   isAiLeagueReplayRoute,
 } from "../../AiLeagueReplayMode";
-import { lastDecisionFor, statedReason } from "../../ReplayDecisionStore";
+import {
+  formatReplayActionKind,
+  lastDecisionFor,
+  statedReason,
+} from "../../ReplayDecisionStore";
 import {
   formatPercentage,
   renderDuration,
   renderNumber,
   renderTroops,
+  translateText,
 } from "../../Utils";
 import { TransformHandler } from "../TransformHandler";
 import { followedCompetitorSmallId } from "./FollowedCompetitor";
@@ -147,16 +152,56 @@ const TICKS_PER_SECOND = 10;
  * something a viewer can see is one dot would make the panel disagree with the
  * board it is describing.
  */
-const FORCE_TYPES: { type: UnitType; one: string; many: string }[] = [
-  { type: UnitType.City, one: "city", many: "cities" },
-  { type: UnitType.Factory, one: "factory", many: "factories" },
-  { type: UnitType.Port, one: "port", many: "ports" },
-  { type: UnitType.MissileSilo, one: "missile silo", many: "missile silos" },
-  { type: UnitType.SAMLauncher, one: "SAM site", many: "SAM sites" },
-  { type: UnitType.DefensePost, one: "defense post", many: "defense posts" },
-  { type: UnitType.Warship, one: "warship", many: "warships" },
-  { type: UnitType.TradeShip, one: "trade ship", many: "trade ships" },
-  { type: UnitType.TransportShip, one: "transport", many: "transports" },
+const FORCE_TYPES: {
+  type: UnitType;
+  key: string;
+  one: string;
+  many: string;
+}[] = [
+  { type: UnitType.City, key: "city", one: "city", many: "cities" },
+  {
+    type: UnitType.Factory,
+    key: "factory",
+    one: "factory",
+    many: "factories",
+  },
+  { type: UnitType.Port, key: "port", one: "port", many: "ports" },
+  {
+    type: UnitType.MissileSilo,
+    key: "missile_silo",
+    one: "missile silo",
+    many: "missile silos",
+  },
+  {
+    type: UnitType.SAMLauncher,
+    key: "sam_site",
+    one: "SAM site",
+    many: "SAM sites",
+  },
+  {
+    type: UnitType.DefensePost,
+    key: "defense_post",
+    one: "defense post",
+    many: "defense posts",
+  },
+  {
+    type: UnitType.Warship,
+    key: "warship",
+    one: "warship",
+    many: "warships",
+  },
+  {
+    type: UnitType.TradeShip,
+    key: "trade_ship",
+    one: "trade ship",
+    many: "trade ships",
+  },
+  {
+    type: UnitType.TransportShip,
+    key: "transport",
+    one: "transport",
+    many: "transports",
+  },
 ];
 
 /**
@@ -168,10 +213,10 @@ const FORCE_TYPES: { type: UnitType; one: string; many: string }[] = [
  * engine's filler nation, and telling those apart from the entrants is real
  * information a viewer cannot get anywhere else on this stage.
  */
-const KIND_LABEL: Record<PlayerType, string> = {
-  [PlayerType.Human]: "COMPETITOR",
-  [PlayerType.Bot]: "BOT NATION",
-  [PlayerType.Nation]: "NATION",
+const KIND_LABEL: Record<PlayerType, { key: string; fallback: string }> = {
+  [PlayerType.Human]: { key: "competitor", fallback: "COMPETITOR" },
+  [PlayerType.Bot]: { key: "bot_nation", fallback: "BOT NATION" },
+  [PlayerType.Nation]: { key: "nation", fallback: "NATION" },
 };
 
 interface Fact {
@@ -370,16 +415,38 @@ export class NationDossier implements Layer {
     // Fallout tiles belong to nobody and are excluded from the denominator, so
     // the shares of every nation still add up after a strike. Copied from the
     // scorebug for the same "one dataset, not two" reason as the rank.
-    const habitable = Math.max(1, game.numLandTiles() - game.numTilesWithFallout());
+    const habitable = Math.max(
+      1,
+      game.numLandTiles() - game.numTilesWithFallout(),
+    );
 
     const troops = player.troops();
     const gold = Number(player.gold());
     const standing: Fact[] = [];
-    if (tiles > 0) standing.push({ value: renderNumber(tiles), unit: "tiles" });
-    if (troops > 0) {
-      standing.push({ value: renderTroops(troops), unit: "troops" });
+    if (tiles > 0) {
+      standing.push({
+        value: renderNumber(tiles),
+        unit: translatedUnit("tiles", tiles, "tile", "tiles"),
+      });
     }
-    if (gold > 0) standing.push({ value: renderNumber(gold), unit: "gold" });
+    if (troops > 0) {
+      standing.push({
+        value: renderTroops(troops),
+        unit: translatedUnit("troops", troops, "troop", "troops"),
+      });
+    }
+    if (gold > 0) {
+      standing.push({
+        value: renderNumber(gold),
+        unit: translateText(
+          "ai_league_replay.dossier_unit_gold",
+          undefined,
+          "gold",
+        ),
+      });
+    }
+
+    const kind = KIND_LABEL[player.type()] ?? KIND_LABEL[PlayerType.Nation];
 
     return {
       name: aiLeagueSpectatorDisplayName(player.displayName()).toUpperCase(),
@@ -405,7 +472,11 @@ export class NationDossier implements Layer {
           )
         : null,
       record: this.record(player),
-      kind: KIND_LABEL[player.type()] ?? "NATION",
+      kind: translateText(
+        `ai_league_replay.dossier_kind_${kind.key}`,
+        undefined,
+        kind.fallback,
+      ),
       disconnected: player.isDisconnected(),
     };
   }
@@ -440,7 +511,9 @@ export class NationDossier implements Layer {
     return {
       // "break_alliance" → "BREAK ALLIANCE": the panel's grammar is uppercase
       // labels, and the raw kind token is not broadcast copy.
-      kind: entry.selectedActionKind.replace(/_/g, " ").toUpperCase(),
+      kind: formatReplayActionKind(
+        entry.selectedActionKind,
+      ).toLocaleUpperCase(),
       turn: entry.turnNumber,
       reason: reason === null ? null : truncate(reason, MAX_DECISION_TEXT),
       objective:
@@ -471,7 +544,7 @@ export class NationDossier implements Layer {
       if (count === 0) continue;
       facts.push({
         value: renderNumber(count),
-        unit: count === 1 ? force.one : force.many,
+        unit: translatedUnit(force.key, count, force.one, force.many),
       });
     }
     return facts;
@@ -597,7 +670,7 @@ export class NationDossier implements Layer {
     if (betrayals > 0) {
       facts.push({
         value: renderNumber(betrayals),
-        unit: betrayals === 1 ? "betrayal" : "betrayals",
+        unit: translatedUnit("betrayal", betrayals, "betrayal", "betrayals"),
       });
     }
     const embargoes =
@@ -605,7 +678,7 @@ export class NationDossier implements Layer {
     if (embargoes > 0) {
       facts.push({
         value: renderNumber(embargoes),
-        unit: embargoes === 1 ? "embargo" : "embargoes",
+        unit: translatedUnit("embargo", embargoes, "embargo", "embargoes"),
       });
     }
     return facts;
@@ -626,16 +699,33 @@ export class NationDossier implements Layer {
 
     // --- who ------------------------------------------------------------
     const head = div("pw-dossier-head");
-    head.append(span("pw-dossier-eyebrow", "FOLLOWING"));
+    head.append(
+      span(
+        "pw-dossier-eyebrow",
+        translateText(
+          "ai_league_replay.dossier_following",
+          undefined,
+          "FOLLOWING",
+        ),
+      ),
+    );
     const rank = span("pw-dossier-rank", "");
     if (s.alive) {
       // Never a bare figure: a rank is only meaningful against a field size,
       // and the field shrinks as nations are knocked out.
-      rank.append(text("RANK "), num(String(s.rank)), text(" OF "), num(String(s.field)));
+      rank.textContent = translateText(
+        "ai_league_replay.dossier_rank",
+        { rank: s.rank, field: s.field },
+        `RANK ${s.rank.toLocaleString()} OF ${s.field.toLocaleString()}`,
+      );
     } else {
       // The one sanctioned use of hazard coral outside a warhead.
       rank.dataset.out = "1";
-      rank.textContent = "ELIMINATED";
+      rank.textContent = translateText(
+        "ai_league_replay.dossier_eliminated",
+        undefined,
+        "ELIMINATED",
+      );
     }
     head.append(rank);
     kids.push(head);
@@ -655,7 +745,14 @@ export class NationDossier implements Layer {
       const hero = div("pw-dossier-hero");
       hero.append(
         span("pw-dossier-figure", s.share),
-        span("pw-dossier-hero-unit", "of the land"),
+        span(
+          "pw-dossier-hero-unit",
+          translateText(
+            "ai_league_replay.dossier_of_land",
+            undefined,
+            "of the land",
+          ),
+        ),
       );
       kids.push(hero);
     }
@@ -673,11 +770,25 @@ export class NationDossier implements Layer {
     // the latest the sample HAS, not the latest the agent MADE.
     if (s.decision !== null) {
       const section = div("pw-dossier-sec");
-      const label = labelEl("LAST SAMPLED DECISION");
+      const label = labelEl(
+        translateText(
+          "ai_league_replay.dossier_last_sampled_decision",
+          undefined,
+          "LAST SAMPLED DECISION",
+        ),
+      );
       const row = div("pw-dossier-row");
       row.append(span("pw-dossier-who", s.decision.kind));
       const when = span("pw-dossier-val", "");
-      when.append(num(`T${s.decision.turn}`));
+      when.append(
+        num(
+          translateText(
+            "ai_league_replay.turn_short",
+            { turn: s.decision.turn },
+            `T${s.decision.turn}`,
+          ),
+        ),
+      );
       row.append(when);
       section.append(label, row);
       const trim: HTMLElement[] = [];
@@ -685,15 +796,19 @@ export class NationDossier implements Layer {
       // quieter standing-plan line. Trim order is the reverse of value:
       // objective goes first, the quoted reason second, the row itself last.
       if (s.decision.reason !== null) {
-        const line = span(
-          "pw-dossier-quote",
-          `“${s.decision.reason}”`,
-        );
+        const line = span("pw-dossier-quote", `“${s.decision.reason}”`);
         section.append(line);
         trim.push(line);
       }
       if (s.decision.objective !== null) {
-        const line = span("pw-dossier-plan", `Plan · ${s.decision.objective}`);
+        const line = span(
+          "pw-dossier-plan",
+          translateText(
+            "ai_league_replay.dossier_plan",
+            { objective: s.decision.objective },
+            `Plan · ${s.decision.objective}`,
+          ),
+        );
         section.append(line);
         trim.unshift(line);
       }
@@ -705,7 +820,9 @@ export class NationDossier implements Layer {
     // --- forces -----------------------------------------------------------
     if (s.forces.length > 0) {
       const section = div("pw-dossier-sec");
-      const label = labelEl("FORCES");
+      const label = labelEl(
+        translateText("ai_league_replay.dossier_forces", undefined, "FORCES"),
+      );
       const line = factLine("pw-dossier-body", s.forces);
       section.append(label, line);
       kids.push(section);
@@ -715,17 +832,34 @@ export class NationDossier implements Layer {
     // --- fronts -----------------------------------------------------------
     if (s.wars.length > 0) {
       const section = div("pw-dossier-sec");
-      const label = labelEl("AT WAR WITH");
+      const label = labelEl(
+        translateText(
+          "ai_league_replay.dossier_at_war_with",
+          undefined,
+          "AT WAR WITH",
+        ),
+      );
       section.append(label);
       const trim: HTMLElement[] = [];
       for (const war of s.wars) {
-        const row = rowEl(war, "troops");
+        const row = rowEl(
+          war,
+          translateText(
+            "ai_league_replay.dossier_troops_label",
+            undefined,
+            "troops",
+          ),
+        );
         section.append(row);
         trim.unshift(row);
       }
       if (s.moreWars > 0) {
         const more = span("pw-dossier-more", "");
-        more.append(num(`+${s.moreWars}`), text(" more"));
+        more.textContent = translateText(
+          "ai_league_replay.dossier_more",
+          { count: s.moreWars },
+          `+${s.moreWars.toLocaleString()} more`,
+        );
         section.append(more);
         trim.unshift(more);
       }
@@ -737,7 +871,13 @@ export class NationDossier implements Layer {
     // --- diplomacy --------------------------------------------------------
     if (s.allies.length > 0) {
       const section = div("pw-dossier-sec");
-      const label = labelEl("ALLIED WITH");
+      const label = labelEl(
+        translateText(
+          "ai_league_replay.dossier_allied_with",
+          undefined,
+          "ALLIED WITH",
+        ),
+      );
       section.append(label);
       const trim: HTMLElement[] = [];
       for (const ally of s.allies) {
@@ -747,7 +887,11 @@ export class NationDossier implements Layer {
       }
       if (s.moreAllies > 0) {
         const more = span("pw-dossier-more", "");
-        more.append(num(`+${s.moreAllies}`), text(" more"));
+        more.textContent = translateText(
+          "ai_league_replay.dossier_more",
+          { count: s.moreAllies },
+          `+${s.moreAllies.toLocaleString()} more`,
+        );
         section.append(more);
         trim.unshift(more);
       }
@@ -758,10 +902,10 @@ export class NationDossier implements Layer {
 
     if (s.expansion !== null) {
       const line = span("pw-dossier-note", "");
-      line.append(
-        text("Expanding into unclaimed ground · "),
-        num(s.expansion),
-        text(" troops"),
+      line.textContent = translateText(
+        "ai_league_replay.dossier_expanding",
+        { troops: s.expansion },
+        `Expanding into unclaimed ground · ${s.expansion} troops`,
       );
       kids.push(line);
       groups.push([line]);
@@ -770,7 +914,11 @@ export class NationDossier implements Layer {
     if (s.traitor !== null) {
       const line = span("pw-dossier-note", "");
       line.dataset.warn = "1";
-      line.append(text("Marked a traitor · "), num(s.traitor), text(" remaining"));
+      line.textContent = translateText(
+        "ai_league_replay.dossier_traitor",
+        { duration: s.traitor },
+        `Marked a traitor · ${s.traitor} remaining`,
+      );
       kids.push(line);
       groups.push([line]);
     }
@@ -780,7 +928,17 @@ export class NationDossier implements Layer {
     // the empty one.
     const record = span("pw-dossier-note", "");
     record.append(text(s.kind));
-    if (s.disconnected) record.append(text(" · disconnected"));
+    if (s.disconnected) {
+      record.append(
+        text(
+          translateText(
+            "ai_league_replay.dossier_disconnected_suffix",
+            undefined,
+            " · disconnected",
+          ),
+        ),
+      );
+    }
     for (const fact of s.record) {
       record.append(text(" · "), num(fact.value), text(` ${fact.unit}`));
     }
@@ -832,6 +990,19 @@ export class NationDossier implements Layer {
 }
 
 // --------------------------------------------------------------- DOM helpers
+
+function translatedUnit(
+  key: string,
+  count: number,
+  one: string,
+  many: string,
+): string {
+  return translateText(
+    `ai_league_replay.dossier_unit_${key}`,
+    { count },
+    count === 1 ? one : many,
+  );
+}
 
 function div(className: string): HTMLElement {
   const element = document.createElement("div");

@@ -1,3 +1,4 @@
+import { formatReplayActionKind } from "./ReplayDecisionStore";
 import { translateText } from "./Utils";
 
 /**
@@ -1098,7 +1099,7 @@ export function renderAnalystDecisionRow(
     ),
     element("td", "", row.playerName),
     element("td", "", row.brainType ?? "\u2014"),
-    element("td", "", row.selectedActionKind),
+    element("td", "", formatReplayActionKind(row.selectedActionKind)),
     element(
       "td",
       "",

@@ -242,8 +242,7 @@ export class WarRoomToasts implements Layer {
   /** Ticks per wall-clock second; see CATCHUP_TICKS_PER_SECOND. */
   private measureTickRate(now: number) {
     const tick = this.game.ticks();
-    const advanced =
-      this.lastTick < 0 ? 0 : Math.max(0, tick - this.lastTick);
+    const advanced = this.lastTick < 0 ? 0 : Math.max(0, tick - this.lastTick);
     this.lastTick = tick;
     const dt = now - this.rateSampledAtMs;
     this.rateSampledAtMs = now;
@@ -313,7 +312,7 @@ export class WarRoomToasts implements Layer {
     const turn = text(row, ".broadcast-war-room-turn");
     if (headline === "") return;
 
-    const severity = severityOf(kind, headline);
+    const severity = severityOf(row.dataset.kind ?? "");
     const el = document.createElement("article");
     el.className = "pw-toast";
     el.dataset.severity = severity;
@@ -436,7 +435,10 @@ function statedReasonOf(row: HTMLElement): string {
 }
 
 function rowKey(row: HTMLElement): string {
+  const eventId = row.dataset.warRoomEventId?.trim();
+  if (eventId !== undefined && eventId !== "") return eventId;
   return [
+    row.dataset.kind ?? "",
     text(row, ".broadcast-war-room-kind"),
     text(row, ".broadcast-war-room-turn"),
     text(row, ".broadcast-war-room-headline"),
@@ -448,17 +450,16 @@ function rowKey(row: HTMLElement): string {
  * is the same severity rule the map and the scrubber follow, so a viewer only
  * ever has to learn it once.
  */
-function severityOf(kind: string, headline: string): string {
-  const haystack = `${kind} ${headline}`.toLowerCase();
-  if (haystack.includes("nuke") || haystack.includes("nuclear")) return "grave";
-  if (haystack.includes("eliminat") || haystack.includes("is out")) {
-    return "grave";
+function severityOf(kind: string): string {
+  if (kind === "nuke" || kind === "elimination") return "grave";
+  if (
+    kind === "first_strike" ||
+    kind === "betrayal" ||
+    kind === "deal_violated" ||
+    kind === "lead_change"
+  ) {
+    return "sharp";
   }
-  if (haystack.includes("strike") || haystack.includes("betray")) return "sharp";
-  // A lead change is a standings beat, not a violent one — amber, never coral.
-  // Matched on the KIND alone: the headline would false-positive on ordinary
-  // prose ("the leader", "leading the field") and turn quiet beats sharp.
-  if (kind.toLowerCase().includes("lead")) return "sharp";
   return "quiet";
 }
 

@@ -1,13 +1,14 @@
 import { EventBus } from "../../../core/EventBus";
 import { Nukes, UnitType } from "../../../core/game/Game";
-import { GameView, UnitView } from "../../../core/game/GameView";
 import { TileRef } from "../../../core/game/GameMap";
-import { followedCompetitorSmallId } from "./FollowedCompetitor";
+import { GameView, UnitView } from "../../../core/game/GameView";
 import {
   aiLeagueSpectatorDisplayName,
   isAiLeagueReplayRoute,
 } from "../../AiLeagueReplayMode";
+import { translateText } from "../../Utils";
 import { GoToPositionEvent, TransformHandler } from "../TransformHandler";
+import { followedCompetitorSmallId } from "./FollowedCompetitor";
 import { Layer } from "./Layer";
 
 /**
@@ -533,7 +534,8 @@ export class NukeCinema implements Layer {
       const instant = closed / dt;
       // Light EMA: enough to stop the readout flickering, light enough that a
       // speed change (or a scrub to a different rate) is picked up in a beat.
-      nuke.speed = nuke.speed === 0 ? instant : nuke.speed * 0.7 + instant * 0.3;
+      nuke.speed =
+        nuke.speed === 0 ? instant : nuke.speed * 0.7 + instant * 0.3;
     }
     nuke.distance = distance;
     nuke.lastSampleMs = now;
@@ -799,7 +801,11 @@ export class NukeCinema implements Layer {
     const tx = this.game.x(primary.targetTile);
     const ty = this.game.y(primary.targetTile);
     this.eventBus.emit(
-      new GoToPositionEvent(tx, ty, this.transformHandler.scale * PUNCH_IN_ZOOM),
+      new GoToPositionEvent(
+        tx,
+        ty,
+        this.transformHandler.scale * PUNCH_IN_ZOOM,
+      ),
     );
   }
 
@@ -849,24 +855,66 @@ export class NukeCinema implements Layer {
     const impacted = cinema.beat !== "flight";
     const state = impacted ? "impact" : "flight";
     const count = cinema.nukes.length;
-    const warhead = WARHEAD_LABEL[cinema.primary.type] ?? "WARHEAD";
+    const warheadDefault = WARHEAD_LABEL[cinema.primary.type] ?? "WARHEAD";
+    const warhead = translateText(
+      `ai_league_replay.warhead_${warheadDefault.toLowerCase()}`,
+      undefined,
+      warheadDefault,
+    );
     // A shot-down warhead must never be announced as a detonation — the SAM
     // save is its own story and the broadcast tells it as one.
     const shotDown = cinema.intercepted === true && !this.anyDetonated;
     const headline = impacted
       ? shotDown
         ? count > 1
-          ? `${count} WARHEADS INTERCEPTED`
-          : "INTERCEPTED"
+          ? translateText(
+              "ai_league_replay.warheads_intercepted",
+              { count },
+              `${count.toLocaleString()} WARHEADS INTERCEPTED`,
+            )
+          : translateText(
+              "ai_league_replay.intercepted",
+              undefined,
+              "INTERCEPTED",
+            )
         : count > 1
-          ? `${count} DETONATIONS`
-          : "DETONATION"
+          ? translateText(
+              "ai_league_replay.detonations",
+              { count },
+              `${count.toLocaleString()} DETONATIONS`,
+            )
+          : translateText(
+              "ai_league_replay.detonation",
+              undefined,
+              "DETONATION",
+            )
       : count > 1
-        ? `NUCLEAR LAUNCH -- ${count} WARHEADS`
-        : "NUCLEAR LAUNCH";
-    const from = cinema.primary.ownerName || "UNKNOWN";
+        ? translateText(
+            "ai_league_replay.nuclear_launch_multiple",
+            { count },
+            `NUCLEAR LAUNCH — ${count.toLocaleString()} WARHEADS`,
+          )
+        : translateText(
+            "ai_league_replay.nuclear_launch",
+            undefined,
+            "NUCLEAR LAUNCH",
+          );
+    const from =
+      cinema.primary.ownerName ||
+      translateText("ai_league_replay.unknown", undefined, "UNKNOWN");
     const onto = cinema.primary.targetName;
-    const line = onto === null ? `${from} → unclaimed ground` : `${from} → ${onto}`;
+    const line =
+      onto === null
+        ? translateText(
+            "ai_league_replay.nuke_target_unclaimed",
+            { actor: from },
+            `${from} → unclaimed ground`,
+          )
+        : translateText(
+            "ai_league_replay.nuke_target",
+            { actor: from, target: onto },
+            `${from} → ${onto}`,
+          );
 
     // Time to impact, not time since launch: a stopwatch counting up tells the
     // viewer nothing they want to know. Rounded to whole seconds because the
@@ -875,11 +923,19 @@ export class NukeCinema implements Layer {
     const secondsOut = this.eta(cinema.primary);
     const readout = impacted
       ? shotDown
-        ? "NO DETONATION"
-        : "IMPACT"
+        ? translateText(
+            "ai_league_replay.no_detonation",
+            undefined,
+            "NO DETONATION",
+          )
+        : translateText("ai_league_replay.impact", undefined, "IMPACT")
       : secondsOut === null
-        ? "IN FLIGHT"
-        : `T-${Math.max(0, Math.round(secondsOut))}s`;
+        ? translateText("ai_league_replay.in_flight", undefined, "IN FLIGHT")
+        : translateText(
+            "ai_league_replay.time_to_impact",
+            { seconds: Math.max(0, Math.round(secondsOut)) },
+            `T-${Math.max(0, Math.round(secondsOut))}s`,
+          );
     const key = `${state}|${headline}|${line}|${warhead}|${readout}`;
 
     if (plate.dataset.key === key) return;
@@ -1098,7 +1154,6 @@ export class NukeCinema implements Layer {
     context.beginPath();
     context.arc(x, y, impact.radius * (0.35 + 1.5 * eased), 0, Math.PI * 2);
     context.stroke();
-
   }
 
   /**
@@ -1215,9 +1270,9 @@ const CLOUD_MAX_PX = 190;
  * "sticker" look. Breaking the threshold up per pixel turns those rims into
  * stipple, which is also how the terrain's own edges behave.
  */
-const BAYER_4 = [
-  0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5,
-].map((v) => (v + 0.5) / 16);
+const BAYER_4 = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5].map(
+  (v) => (v + 0.5) / 16,
+);
 
 /**
  * Ash, warm and dark, from shadowed underside to lit crown. Deliberately
@@ -1256,7 +1311,10 @@ function cloudNoise(seed: number, i: number): number {
 function buildCloudPuffs(radius: number, seed: number, age: number): Puff[] {
   const rise = Math.min(1, Math.pow(age / CLOUD_RISE_FRACTION, 0.62));
   // After the rise the column keeps growing and softening as it disperses.
-  const spread = age <= CLOUD_RISE_FRACTION ? 0 : (age - CLOUD_RISE_FRACTION) / (1 - CLOUD_RISE_FRACTION);
+  const spread =
+    age <= CLOUD_RISE_FRACTION
+      ? 0
+      : (age - CLOUD_RISE_FRACTION) / (1 - CLOUD_RISE_FRACTION);
   const puffs: Puff[] = [];
 
   // A mushroom is a NARROW stem under a WIDE, FLAT cap. The first pixel pass
@@ -1341,8 +1399,14 @@ function buildCloudRaster(impact: Impact, age: number): CloudRaster | null {
   }
   if (!Number.isFinite(minX)) return null;
 
-  const cols = Math.min(CLOUD_MAX_PX, Math.ceil((maxX - minX) / CLOUD_CELL) + 2);
-  const rows = Math.min(CLOUD_MAX_PX, Math.ceil((maxY - minY) / CLOUD_CELL) + 2);
+  const cols = Math.min(
+    CLOUD_MAX_PX,
+    Math.ceil((maxX - minX) / CLOUD_CELL) + 2,
+  );
+  const rows = Math.min(
+    CLOUD_MAX_PX,
+    Math.ceil((maxY - minY) / CLOUD_CELL) + 2,
+  );
   if (cols <= 0 || rows <= 0) return null;
 
   // Density field. Only the cells a billow actually covers are visited, so the
@@ -1400,7 +1464,9 @@ function buildCloudRaster(impact: Impact, age: number): CloudRaster | null {
       const height = Math.min(1, -worldY / Math.max(1, impact.radius * 2.1));
       const light =
         (1 - height * 0.88) *
-        (1 - Math.min(1, Math.abs(worldX) / Math.max(1, impact.radius * 1.5)) * 0.3);
+        (1 -
+          Math.min(1, Math.abs(worldX) / Math.max(1, impact.radius * 1.5)) *
+            0.3);
 
       // Light carries the shading and density only shapes the edges. The first
       // pass summed a constant, the light AND the density, which saturated:
