@@ -1,5 +1,10 @@
 import {
+  AbortableRequestAttempt,
+  createAbortableRequestAttempt,
+} from "./AgentDecisionTimeout";
+import {
   AgentBrain,
+  AgentBrainDecision,
   AgentBrainInput,
   AgentDecision,
   AgentStrategyProfile,
@@ -39,7 +44,7 @@ export class ExternalRelayAgentBrain implements AgentBrain {
       options.fallbackBrain ?? new RuleAgentBrain(options.profile);
   }
 
-  async decide(input: AgentBrainInput): Promise<AgentDecision> {
+  decide(input: AgentBrainInput): AgentBrainDecision {
     if (input.legalActions.length === 0) {
       return {
         actionID: "",
@@ -53,9 +58,20 @@ export class ExternalRelayAgentBrain implements AgentBrain {
       };
     }
 
+    const attempt = createAbortableRequestAttempt(this.timeoutMs);
+    // Microtask arming: the window starts only after the synchronous
+    // observation batch, so later seats' builds cannot consume it.
+    queueMicrotask(attempt.timeout.arm);
+    return this.decideRequested(input, attempt);
+  }
+
+  private async decideRequested(
+    input: AgentBrainInput,
+    attempt: AbortableRequestAttempt,
+  ): Promise<AgentDecision> {
     let raw = "";
     try {
-      raw = await this.complete(input);
+      raw = await this.complete(input, attempt);
     } catch (error) {
       return this.fallback(
         input,
@@ -96,9 +112,10 @@ export class ExternalRelayAgentBrain implements AgentBrain {
     };
   }
 
-  private async complete(input: AgentBrainInput): Promise<string> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+  private async complete(
+    input: AgentBrainInput,
+    attempt: AbortableRequestAttempt,
+  ): Promise<string> {
     try {
       const response = await this.fetchFn(this.requestUrl(), {
         method: "POST",
@@ -107,7 +124,7 @@ export class ExternalRelayAgentBrain implements AgentBrain {
           request: buildExternalAgentRequestPayload(input),
           timeoutMs: this.timeoutMs,
         }),
-        signal: controller.signal,
+        signal: attempt.controller.signal,
         redirect: "manual",
       });
       const text = await response.text();
@@ -130,7 +147,7 @@ export class ExternalRelayAgentBrain implements AgentBrain {
       }
       throw error;
     } finally {
-      clearTimeout(timeout);
+      attempt.timeout.clear();
     }
   }
 

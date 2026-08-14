@@ -85,18 +85,20 @@ type LegalActionView = {
   metadata?: Record<string, unknown>;
 };
 
+type CoworldDecision = {
+  actionID: string;
+  /** Optional wire batch (selectedLegalActionIds), normalized + capped. */
+  actionIDs?: string[];
+  /** Optional diplomacy-slot selection (selectedDealActionId). */
+  dealActionID?: string;
+  reason: string;
+  metadata: Record<string, unknown>;
+};
+
 type PendingDecision = {
-  resolve: (decision: {
-    actionID: string;
-    /** Optional wire batch (selectedLegalActionIds), normalized + capped. */
-    actionIDs?: string[];
-    /** Optional diplomacy-slot selection (selectedDealActionId). */
-    dealActionID?: string;
-    reason: string;
-    metadata: Record<string, unknown>;
-  }) => void;
+  resolve: (decision: CoworldDecision) => void;
   reject: (error: Error) => void;
-  timeout: NodeJS.Timeout;
+  timeout: NodeJS.Timeout | null;
   legalActions: LegalActionView[];
 };
 
@@ -207,7 +209,9 @@ class CoworldProtocolServer {
 
   async close(): Promise<void> {
     for (const pending of this.pending.values()) {
-      clearTimeout(pending.timeout);
+      if (pending.timeout !== null) {
+        clearTimeout(pending.timeout);
+      }
       pending.reject(new Error("Coworld protocol server closed"));
     }
     this.pending.clear();
@@ -255,8 +259,7 @@ class CoworldProtocolServer {
   brainForSlot(slot: number, buildRequestPayload: (input: unknown) => unknown) {
     return {
       brainType: "external-http",
-      decide: async (input: unknown) =>
-        this.decide(slot, buildRequestPayload(input)),
+      decide: (input: unknown) => this.decide(slot, buildRequestPayload(input)),
     };
   }
 
@@ -294,16 +297,7 @@ class CoworldProtocolServer {
     }
   }
 
-  private async decide(
-    slot: number,
-    request: unknown,
-  ): Promise<{
-    actionID: string;
-    actionIDs?: string[];
-    dealActionID?: string;
-    reason: string;
-    metadata: Record<string, unknown>;
-  }> {
+  private decide(slot: number, request: unknown): Promise<CoworldDecision> {
     const websocket = this.players.get(slot);
     if (websocket === undefined || websocket.readyState !== WebSocket.OPEN) {
       throw new Error(`Coworld player slot ${slot} is not connected`);
@@ -314,19 +308,11 @@ class CoworldProtocolServer {
       : [];
     const requestID = `req_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
     const timeoutMs = Math.max(250, this.config.max_decision_ms);
-    return await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.pending.delete(requestID);
-        reject(
-          new Error(
-            `Coworld player slot ${slot} timed out after ${timeoutMs}ms`,
-          ),
-        );
-      }, timeoutMs);
+    const decisionPromise = new Promise<CoworldDecision>((resolve, reject) => {
       this.pending.set(requestID, {
         resolve,
         reject,
-        timeout,
+        timeout: null,
         legalActions,
       });
       websocket.send(
@@ -337,6 +323,25 @@ class CoworldProtocolServer {
         JSON.stringify(decisionRequestEnvelope({ requestID, slot, request })),
       );
     });
+    // The frame above is sent during the league's synchronous observation
+    // batch. The microtask fires only after that batch, so the transport
+    // window excludes later seats' observation work — and always arms, even
+    // if the batch throws before the league ever awaits this promise.
+    queueMicrotask(() => {
+      const pending = this.pending.get(requestID);
+      if (pending === undefined || pending.timeout !== null) {
+        return;
+      }
+      pending.timeout = setTimeout(() => {
+        this.pending.delete(requestID);
+        pending.reject(
+          new Error(
+            `Coworld player slot ${slot} timed out after ${timeoutMs}ms`,
+          ),
+        );
+      }, timeoutMs);
+    });
+    return decisionPromise;
   }
 
   private async handleHttp(
@@ -431,7 +436,9 @@ class CoworldProtocolServer {
     if (pending === undefined) {
       return;
     }
-    clearTimeout(pending.timeout);
+    if (pending.timeout !== null) {
+      clearTimeout(pending.timeout);
+    }
     this.pending.delete(requestID);
     // Decision fields (scalar primary, optional selectedLegalActionIds
     // batch, optional deal slot, reason) are parsed and length-bounded by

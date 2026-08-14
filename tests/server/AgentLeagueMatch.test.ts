@@ -58,14 +58,22 @@ import {
 } from "../../src/server/agents/AgentLeagueMatch";
 import { AgentLocalGameMirror } from "../../src/server/agents/AgentLocalGameMirror";
 import { AgentObservationBuilder } from "../../src/server/agents/AgentObservationBuilder";
+import {
+  LlmAgentPlanner,
+  PlannerExecutorAgentBrain,
+} from "../../src/server/agents/AgentPlannerExecutor";
 import { runAgentStepLockedLeague } from "../../src/server/agents/AgentStepLockedLeague";
+import { ExternalHttpAgentBrain } from "../../src/server/agents/ExternalHttpAgentBrain";
+import { ExternalRelayAgentBrain } from "../../src/server/agents/ExternalRelayAgentBrain";
 import { LlmAgentBrain } from "../../src/server/agents/LlmAgentBrain";
+import { LlmProvider } from "../../src/server/agents/LlmProvider";
 import {
   buildSpawnLegalAction,
   LegalActionBuilder,
 } from "../../src/server/agents/LegalActionBuilder";
 import { MockLlmProvider } from "../../src/server/agents/MockLlmProvider";
 import {
+  AgentBrain,
   AgentDecision,
   LegalAction,
 } from "../../src/server/agents/AgentTypes";
@@ -248,21 +256,28 @@ describe("AgentLeagueMatchRunner", () => {
     }
   });
 
-  it("requests all participant decisions in parallel before applying them in roster order", async () => {
+  it("dispatches each decision as its menu is ready, then applies the batch in roster order", async () => {
     const log = makeLogger();
     const legalActions: LegalAction[] = [
       {
-        id: "hold",
+        id: "hold:first",
         kind: "hold",
-        label: "Hold",
+        label: "First hold",
+        intent: null,
+        risk: { level: "none", score: 0 },
+      },
+      {
+        id: "hold:second",
+        kind: "hold",
+        label: "Second hold",
         intent: null,
         risk: { level: "none", score: 0 },
       },
     ];
-    const calls: string[] = [];
+    const events: string[] = [];
     const deferred = [
-      deferredDecision("hold", "first held"),
-      deferredDecision("hold", "second held"),
+      deferredDecision("hold:first", "first held"),
+      deferredDecision("hold:second", "second held"),
     ];
     const participants = createAgentParticipants(
       [
@@ -274,7 +289,7 @@ describe("AgentLeagueMatchRunner", () => {
         brainFactory: (spec, index) => ({
           brainType: "rule",
           decide: () => {
-            calls.push(spec.username);
+            events.push(`decide:${spec.username}`);
             return deferred[index].promise;
           },
         }),
@@ -282,6 +297,394 @@ describe("AgentLeagueMatchRunner", () => {
     );
     const game = new GameServer(
       "AGENT_PARALLEL",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const realObservationBuilder = new AgentObservationBuilder();
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: [],
+      log,
+      legalActionBuilder: {
+        build: (input: Parameters<LegalActionBuilder["build"]>[0]) => {
+          events.push(`menu:${input.observation.username}`);
+          return legalActions;
+        },
+      } as unknown as LegalActionBuilder,
+      observationBuilder: {
+        withObservationBatch: <T>(
+          _gameState: unknown,
+          callback: () => T,
+        ): T => {
+          events.push("batch:start");
+          const result = callback();
+          events.push("batch:end");
+          return result;
+        },
+        build: (input: Parameters<AgentObservationBuilder["build"]>[0]) => {
+          events.push(`observation:${input.username}:start`);
+          expect(match.decisionRecords()).toEqual([]);
+          const observation = realObservationBuilder.build(input);
+          events.push(`observation:${input.username}:end`);
+          return observation;
+        },
+        summarize: (
+          observation: Parameters<AgentObservationBuilder["summarize"]>[0],
+        ) => {
+          events.push(`summary:${observation.username}`);
+          return realObservationBuilder.summarize(observation);
+        },
+      } as unknown as AgentObservationBuilder,
+    });
+
+    try {
+      const recordsPromise = match.runDecisionTurn({ turnNumber: 2 });
+
+      expect(events).toEqual([
+        "batch:start",
+        "observation:Slow Agent:start",
+        "observation:Slow Agent:end",
+        "menu:Slow Agent",
+        "summary:Slow Agent",
+        "decide:Slow Agent",
+        "observation:Other Agent:start",
+        "observation:Other Agent:end",
+        "menu:Other Agent",
+        "summary:Other Agent",
+        "decide:Other Agent",
+        "batch:end",
+      ]);
+      expect(match.decisionRecords()).toEqual([]);
+
+      deferred[1].resolve();
+      await Promise.resolve();
+      expect(match.decisionRecords()).toEqual([]);
+
+      deferred[0].resolve();
+      const records = await recordsPromise;
+
+      expect(records.map((record) => record.username)).toEqual([
+        "Slow Agent",
+        "Other Agent",
+      ]);
+      expect(records.map((record) => record.chosenActionID)).toEqual([
+        "hold:first",
+        "hold:second",
+      ]);
+    } finally {
+      await game.end({ archive: false });
+    }
+  });
+
+  it("starts maxDecisionMs after the complete synchronous observation batch", async () => {
+    vi.useFakeTimers();
+    const log = makeLogger();
+    const legalActions: LegalAction[] = [
+      {
+        id: "hold",
+        kind: "hold",
+        label: "Hold",
+        intent: null,
+        risk: { level: "none", score: 0 },
+      },
+    ];
+    const deferred = [
+      deferredDecision("hold", "first held"),
+      deferredDecision("hold", "second held"),
+    ];
+    const participants = createAgentParticipants(
+      [
+        { username: "First Agent", profile: "opportunistic" },
+        { username: "Slow Build Agent", profile: "aggressive" },
+      ],
+      log,
+      {
+        brainFactory: (_spec, index) => ({
+          brainType: "rule",
+          decide: () => deferred[index].promise,
+        }),
+      },
+    );
+    const game = new GameServer(
+      "AGENT_TIMEOUT_WINDOW",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const realObservationBuilder = new AgentObservationBuilder();
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: [],
+      log,
+      legalActionBuilder: {
+        build: () => legalActions,
+      } as unknown as LegalActionBuilder,
+      observationBuilder: {
+        withObservationBatch: <T>(_gameState: unknown, callback: () => T): T =>
+          callback(),
+        build: (input: Parameters<AgentObservationBuilder["build"]>[0]) => {
+          if (input.username === "Slow Build Agent") {
+            vi.advanceTimersByTime(1_000);
+          }
+          return realObservationBuilder.build(input);
+        },
+        summarize: realObservationBuilder.summarize.bind(
+          realObservationBuilder,
+        ),
+      } as unknown as AgentObservationBuilder,
+    });
+
+    try {
+      const recordsPromise = match.runDecisionTurn({
+        turnNumber: 2,
+        maxDecisionMs: 10,
+      });
+
+      vi.advanceTimersByTime(9);
+      deferred.forEach((decision) => decision.resolve());
+      const records = await recordsPromise;
+
+      expect(records.map((record) => record.decisionLatencyMs)).toEqual([9, 9]);
+      expect(
+        records.every(
+          (record) => record.decisionMetadata?.fallbackUsed !== true,
+        ),
+      ).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      await game.end({ archive: false });
+    }
+  });
+
+  it.each(["external-http", "external-relay", "llm", "planner"] as const)(
+    "does not let later observation work consume the %s brain timeout",
+    async (brainKind) => {
+      vi.useFakeTimers();
+      const log = makeLogger();
+      const legalActions: LegalAction[] = [
+        {
+          id: "hold",
+          kind: "hold",
+          label: "Hold",
+          intent: null,
+          risk: { level: "none", score: 0 },
+        },
+      ];
+      const responseText = JSON.stringify({
+        selectedLegalActionId: "hold",
+        reason: "controlled response",
+      });
+      const policyStarted = vi.fn();
+      let resolvePolicy: () => void = () => undefined;
+      let timedBrain: AgentBrain;
+
+      if (brainKind === "external-http") {
+        timedBrain = new ExternalHttpAgentBrain({
+          endpointUrl: "https://1.1.1.1/decide",
+          profile: "opportunistic",
+          timeoutMs: 10,
+          maxRetries: 0,
+          fetchFn: (_url, init) => {
+            policyStarted();
+            return new Promise<Response>((resolve, reject) => {
+              resolvePolicy = () =>
+                resolve(new Response(responseText, { status: 200 }));
+              init.signal?.addEventListener("abort", () => {
+                reject(new DOMException("aborted", "AbortError"));
+              });
+            });
+          },
+        });
+      } else if (brainKind === "external-relay") {
+        timedBrain = new ExternalRelayAgentBrain({
+          relayBaseUrl: "https://relay.example",
+          sessionID: "relay_timeout_window",
+          profile: "opportunistic",
+          timeoutMs: 10,
+          fetchFn: (_url, init) => {
+            policyStarted();
+            return new Promise<Response>((resolve, reject) => {
+              resolvePolicy = () =>
+                resolve(
+                  new Response(JSON.stringify({ responseText }), {
+                    status: 200,
+                  }),
+                );
+              init.signal?.addEventListener("abort", () => {
+                reject(new DOMException("aborted", "AbortError"));
+              });
+            });
+          },
+        });
+      } else if (brainKind === "llm") {
+        const provider: LlmProvider = {
+          providerType: "custom",
+          complete: () => {
+            policyStarted();
+            return new Promise<string>((resolve) => {
+              resolvePolicy = () => resolve(responseText);
+            });
+          },
+        };
+        timedBrain = new LlmAgentBrain({
+          provider,
+          profile: "opportunistic",
+          providerTimeoutMs: 10,
+        });
+      } else {
+        const provider: LlmProvider = {
+          providerType: "custom",
+          complete: () => {
+            policyStarted();
+            return new Promise<string>((resolve) => {
+              resolvePolicy = () =>
+                resolve(
+                  JSON.stringify({
+                    objective: "survive",
+                    turnIntent: "hold",
+                    rationale: "controlled plan",
+                    maxDecisionCycles: 2,
+                    preferredActionKinds: ["hold"],
+                    enabledModules: ["utility_social"],
+                    targetPlayerId: null,
+                  }),
+                );
+            });
+          },
+        };
+        timedBrain = new PlannerExecutorAgentBrain({
+          profile: "opportunistic",
+          planner: new LlmAgentPlanner({
+            provider,
+            profile: "opportunistic",
+            plannerType: "real-llm",
+            providerTimeoutMs: 10,
+          }),
+        });
+      }
+
+      const participants = createAgentParticipants(
+        [
+          { username: "Timed Agent", profile: "opportunistic" },
+          { username: "Slow Build Agent", profile: "aggressive" },
+        ],
+        log,
+        {
+          brainFactory: (_spec, index) =>
+            index === 0
+              ? timedBrain
+              : {
+                  brainType: "rule",
+                  decide: () => ({ actionID: "hold", reason: "held" }),
+                },
+        },
+      );
+      const game = new GameServer(
+        `AGENT_${brainKind.toUpperCase()}`,
+        log,
+        Date.now(),
+        serverConfig,
+        gameConfig,
+      );
+      const realObservationBuilder = new AgentObservationBuilder();
+      const match = new AgentLeagueMatchRunner({
+        game,
+        participants,
+        spawnCandidates: [],
+        log,
+        legalActionBuilder: {
+          build: () => legalActions,
+        } as unknown as LegalActionBuilder,
+        observationBuilder: {
+          withObservationBatch: <T>(
+            _gameState: unknown,
+            callback: () => T,
+          ): T => callback(),
+          build: (
+            input: Parameters<AgentObservationBuilder["build"]>[0],
+          ) => {
+            if (input.username === "Slow Build Agent") {
+              expect(policyStarted).toHaveBeenCalledTimes(1);
+              vi.advanceTimersByTime(1_000);
+            }
+            return realObservationBuilder.build(input);
+          },
+          summarize: realObservationBuilder.summarize.bind(
+            realObservationBuilder,
+          ),
+        } as unknown as AgentObservationBuilder,
+      });
+
+      try {
+        const recordsPromise = match.runDecisionTurn({
+          turnNumber: 2,
+          maxDecisionMs: 20,
+        });
+        expect(match.decisionRecords()).toEqual([]);
+
+        vi.advanceTimersByTime(9);
+        resolvePolicy();
+        const records = await recordsPromise;
+
+        expect(records.map((record) => record.username)).toEqual([
+          "Timed Agent",
+          "Slow Build Agent",
+        ]);
+        if (brainKind === "planner") {
+          expect(records[0].decisionMetadata?.plannerFallbackUsed).toBe(false);
+        } else {
+          expect(records[0].decisionMetadata?.fallbackUsed).toBe(false);
+        }
+        expect(records[0].decisionMetadata?.brainErrorReason).toBeUndefined();
+        expect(records[0].decisionLatencyMs).toBe(9);
+      } finally {
+        vi.useRealTimers();
+        await game.end({ archive: false });
+      }
+    },
+  );
+
+  it("falls back in roster order for synchronous throws, rejections, and timeouts", async () => {
+    vi.useFakeTimers();
+    const log = makeLogger();
+    const legalActions: LegalAction[] = [
+      {
+        id: "hold",
+        kind: "hold",
+        label: "Hold",
+        intent: null,
+        risk: { level: "none", score: 0 },
+      },
+    ];
+    const participants = createAgentParticipants(
+      [
+        { username: "Throw Agent", profile: "opportunistic" },
+        { username: "Reject Agent", profile: "aggressive" },
+        { username: "Timeout Agent", profile: "defensive" },
+      ],
+      log,
+      {
+        brainFactory: (_spec, index) => ({
+          brainType: "real-llm",
+          decide: () => {
+            if (index === 0) {
+              throw new Error("synchronous policy failure");
+            }
+            if (index === 1) {
+              return Promise.reject(new Error("rejected policy failure"));
+            }
+            return new Promise<AgentDecision>(() => undefined);
+          },
+        }),
+      },
+    );
+    const game = new GameServer(
+      "AGENT_PIPELINE_FAILURES",
       log,
       Date.now(),
       serverConfig,
@@ -298,25 +701,43 @@ describe("AgentLeagueMatchRunner", () => {
     });
 
     try {
-      const recordsPromise = match.runDecisionTurn({ turnNumber: 2 });
-      await Promise.resolve();
+      const recordsPromise = match.runDecisionTurn({
+        turnNumber: 2,
+        maxDecisionMs: 10,
+      });
+      expect(match.decisionRecords()).toEqual([]);
 
-      expect(calls).toEqual(["Slow Agent", "Other Agent"]);
-
-      deferred[1].resolve();
-      await Promise.resolve();
-      deferred[0].resolve();
+      await vi.advanceTimersByTimeAsync(10);
       const records = await recordsPromise;
 
       expect(records.map((record) => record.username)).toEqual([
-        "Slow Agent",
-        "Other Agent",
+        "Throw Agent",
+        "Reject Agent",
+        "Timeout Agent",
       ]);
       expect(records.map((record) => record.chosenActionID)).toEqual([
         "hold",
         "hold",
+        "hold",
       ]);
+      expect(
+        records.map((record) => record.decisionMetadata?.brainErrorReason),
+      ).toEqual([
+        "synchronous policy failure",
+        "rejected policy failure",
+        "Agent brain timed out after 10ms",
+      ]);
+      expect(
+        records.every(
+          (record) =>
+            record.reason === null &&
+            record.decisionMetadata?.fallbackUsed === true &&
+            record.decisionMetadata?.fallbackActionID === "hold" &&
+            record.decisionMetadata?.llmPlannerDegraded === true,
+        ),
+      ).toBe(true);
     } finally {
+      vi.useRealTimers();
       await game.end({ archive: false });
     }
   });

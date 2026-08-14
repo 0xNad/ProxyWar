@@ -1,6 +1,11 @@
+import {
+  AbortableRequestAttempt,
+  createAbortableRequestAttempt,
+} from "./AgentDecisionTimeout";
 import { structuredDealsEnabled } from "./AgentTunables";
 import {
   AgentBrain,
+  AgentBrainDecision,
   AgentBrainInput,
   AgentDecision,
   AgentStrategyProfile,
@@ -92,7 +97,7 @@ export class ExternalHttpAgentBrain implements AgentBrain {
       options.fallbackBrain ?? new RuleAgentBrain(options.profile);
   }
 
-  async decide(input: AgentBrainInput): Promise<AgentDecision> {
+  decide(input: AgentBrainInput): AgentBrainDecision {
     if (input.legalActions.length === 0) {
       return {
         actionID: "",
@@ -106,9 +111,20 @@ export class ExternalHttpAgentBrain implements AgentBrain {
       };
     }
 
+    const firstAttempt = createAbortableRequestAttempt(this.timeoutMs);
+    // Microtask arming: the window starts only after the synchronous
+    // observation batch, so later seats' builds cannot consume it.
+    queueMicrotask(firstAttempt.timeout.arm);
+    return this.decideRequested(input, firstAttempt);
+  }
+
+  private async decideRequested(
+    input: AgentBrainInput,
+    firstAttempt: AbortableRequestAttempt,
+  ): Promise<AgentDecision> {
     let raw = "";
     try {
-      raw = await this.complete(input);
+      raw = await this.complete(input, firstAttempt);
     } catch (error) {
       return this.fallback(
         input,
@@ -150,11 +166,17 @@ export class ExternalHttpAgentBrain implements AgentBrain {
     };
   }
 
-  private async complete(input: AgentBrainInput): Promise<string> {
+  private async complete(
+    input: AgentBrainInput,
+    firstAttempt: AbortableRequestAttempt,
+  ): Promise<string> {
     let attempt = 0;
     while (true) {
       try {
-        return await this.completeOnce(input);
+        return await this.completeOnce(
+          input,
+          attempt === 0 ? firstAttempt : undefined,
+        );
       } catch (error) {
         if (
           attempt >= this.maxRetries ||
@@ -168,15 +190,21 @@ export class ExternalHttpAgentBrain implements AgentBrain {
     }
   }
 
-  private async completeOnce(input: AgentBrainInput): Promise<string> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+  private async completeOnce(
+    input: AgentBrainInput,
+    deferredAttempt?: AbortableRequestAttempt,
+  ): Promise<string> {
+    const attempt =
+      deferredAttempt ?? createAbortableRequestAttempt(this.timeoutMs);
+    if (deferredAttempt === undefined) {
+      attempt.timeout.arm();
+    }
     try {
       const init: RequestInit = {
         method: "POST",
         headers: this.headers(),
         body: JSON.stringify(buildExternalAgentRequestPayload(input)),
-        signal: controller.signal,
+        signal: attempt.controller.signal,
         redirect: "manual",
       };
       const response =
@@ -199,7 +227,7 @@ export class ExternalHttpAgentBrain implements AgentBrain {
       }
       throw error;
     } finally {
-      clearTimeout(timeout);
+      attempt.timeout.clear();
     }
   }
 

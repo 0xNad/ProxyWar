@@ -1,3 +1,4 @@
+import { createAbortableRequestAttempt } from "./AgentDecisionTimeout";
 import { LlmProvider, LlmProviderConfigError } from "./LlmProvider";
 
 export { LlmProviderConfigError } from "./LlmProvider";
@@ -44,11 +45,12 @@ export class OpenAiLlmProvider implements LlmProvider {
   }
 
   private async completeOnce(prompt: string): Promise<string> {
-    const controller = new AbortController();
-    const timeoutID = setTimeout(
-      () => controller.abort(),
+    const { controller, timeout } = createAbortableRequestAttempt(
       this.config.timeoutMs,
     );
+    // Microtask arming: a request dispatched during the synchronous
+    // observation batch does not have its window consumed by later builds.
+    queueMicrotask(timeout.arm);
 
     try {
       const response = await this.fetchFn(this.config.endpoint, {
@@ -96,7 +98,7 @@ export class OpenAiLlmProvider implements LlmProvider {
       }
       throw error;
     } finally {
-      clearTimeout(timeoutID);
+      timeout.clear();
     }
   }
 }

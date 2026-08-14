@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   OpenAiLlmProvider,
   extractOpenAiResponseText,
@@ -97,6 +97,54 @@ describe("OpenAiLlmProvider", () => {
     });
 
     await expect(provider.complete("prompt")).rejects.toThrow(/timed out/);
+  });
+
+  it("does not let synchronous work after dispatch consume the timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveFetch: () => void = () => undefined;
+      const provider = new OpenAiLlmProvider({
+        apiKey: "test-key",
+        model: "gpt-test",
+        endpoint: "https://example.test/v1/responses",
+        timeoutMs: 10,
+        maxRetries: 0,
+        maxOutputTokens: 42,
+        fetchFn: (_input, init) =>
+          new Promise<Response>((resolve, reject) => {
+            resolveFetch = () =>
+              resolve(
+                new Response(
+                  JSON.stringify({
+                    output: [
+                      {
+                        type: "message",
+                        content: [{ type: "output_text", text: "ok" }],
+                      },
+                    ],
+                  }),
+                  { status: 200 },
+                ),
+              );
+            init.signal?.addEventListener("abort", () => {
+              const error = new Error("aborted");
+              error.name = "AbortError";
+              reject(error);
+            });
+          }),
+      });
+
+      const completion = provider.complete("prompt");
+      // Simulates an observation batch running after dispatch: the abort
+      // timer arms on a microtask, so this elapsed time is excluded.
+      vi.advanceTimersByTime(1_000);
+      await Promise.resolve();
+      vi.advanceTimersByTime(9);
+      resolveFetch();
+      await expect(completion).resolves.toBe("ok");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("redacts non-sk bearer tokens from HTTP error bodies", async () => {
