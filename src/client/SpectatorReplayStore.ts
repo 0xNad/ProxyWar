@@ -120,6 +120,16 @@ export function publishSpectatorReplay(raw: unknown): void {
   version += 1;
 }
 
+/**
+ * Clears static-envelope state when the SPA leaves that replay or opens a
+ * hosted replay. The version still advances so memoized consumers discard any
+ * series derived from the previous match.
+ */
+export function clearSpectatorReplay(): void {
+  snapshots = null;
+  version += 1;
+}
+
 /** The validated series, or null when the envelope had nothing usable. */
 export function spectatorReplaySnapshots(): SpectatorSnapshot[] | null {
   return snapshots;

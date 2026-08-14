@@ -7,6 +7,11 @@ import {
   parseCoworldStaticReplay,
 } from "../../src/client/CoworldStaticReplay";
 import {
+  clearSpectatorReplay,
+  publishSpectatorReplay,
+  spectatorReplaySnapshots,
+} from "../../src/client/SpectatorReplayStore";
+import {
   RATED_RUN_ID,
   ratedCoworldGameRecordValue,
   ratedCoworldRawReplayValue,
@@ -43,6 +48,19 @@ describe("CoworldStaticReplay", () => {
     expect(replay.runID).toBe(RATED_RUN_ID);
     expect(replay.sourceUrl).toBe("https://replays.example/match.replay");
     expect(replay.gameRecord.info.gameID).toBe("RATE0001");
+  });
+
+  it("clears a static match's snapshot store before a hosted replay transition", () => {
+    publishSpectatorReplay({
+      snapshots: [
+        { turnNumber: 100, players: [{ username: "A", tilesOwned: 10 }] },
+        { turnNumber: 200, players: [{ username: "A", tilesOwned: 20 }] },
+      ],
+    });
+    expect(spectatorReplaySnapshots()).not.toBeNull();
+
+    clearSpectatorReplay();
+    expect(spectatorReplaySnapshots()).toBeNull();
   });
 
   it("rejects an invalid embedded game record", () => {

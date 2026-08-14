@@ -336,6 +336,7 @@ export class NukeCinema implements Layer {
   private root: HTMLElement | null = null;
   private plate: HTMLElement | null = null;
   private flash: HTMLElement | null = null;
+  private flashTimer: number | null = null;
 
   constructor(
     private game: GameView,
@@ -829,8 +830,10 @@ export class NukeCinema implements Layer {
     void flash.offsetWidth;
     flash.classList.add("is-firing");
     if (big) flash.classList.add("is-big");
-    window.setTimeout(() => {
+    if (this.flashTimer !== null) window.clearTimeout(this.flashTimer);
+    this.flashTimer = window.setTimeout(() => {
       flash.classList.remove("is-firing", "is-big");
+      this.flashTimer = null;
     }, FLASH_MS);
   }
 
@@ -1230,6 +1233,22 @@ export class NukeCinema implements Layer {
   }
 
   // --------------------------------------------------------------- teardown
+
+  /** Removes every DOM, timer and body-level claim owned by this game. */
+  dispose() {
+    if (this.flashTimer !== null) {
+      window.clearTimeout(this.flashTimer);
+      this.flashTimer = null;
+    }
+    this.tracked.clear();
+    this.impacts = [];
+    this.cinema = null;
+    this.setStageClaimed(false);
+    this.root?.remove();
+    this.root = null;
+    this.plate = null;
+    this.flash = null;
+  }
 
   private reset() {
     this.tracked.clear();

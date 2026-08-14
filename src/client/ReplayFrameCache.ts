@@ -113,6 +113,10 @@ let frames: StoredFrame[] = [];
 let totalRasterBytes = 0;
 
 let installed = false;
+/** Match identity whose deterministic frames are currently retained. */
+let replayScope: string | null = null;
+/** Invalidates rAF/toBlob/createImageBitmap work started by an older match. */
+let replayGeneration = 0;
 let lastSeenTurn = -1;
 /** Highest crossed multiple-of-CAPTURE_EVERY_TURNS; re-armed downward when a rewind restarts playback. */
 let lastBoundaryCrossed = -1;
@@ -170,24 +174,35 @@ export function frameCoverage(): {
  * re-runs on every in-place rewind and must not stack listeners — and gated
  * on the replay routes: live play must never pay for frame captures.
  */
-export function installReplayFrameCapture(): void {
-  if (installed) return;
+export function installReplayFrameCapture(runID: string): void {
   if (!isAiLeagueReplayRoute()) return;
+  if (runID.length === 0) return;
+  if (replayScope !== runID) {
+    resetReplayFrameState();
+    replayScope = runID;
+  }
+  if (installed) return;
   installed = true;
   document.addEventListener("ai-league-replay-frame", onReplayFrame);
 }
 
 /**
- * Full teardown, for completeness/tests: the product intentionally never
- * calls this mid-session — the frames outliving a rewind is the entire point.
- * `ImageBitmap.close()` releases the decoded rasters eagerly rather than
- * waiting on GC.
+ * Full teardown when replay mode ends. It is deliberately not part of an
+ * individual replay-attempt cleanup because an in-place rewind must retain
+ * this match's frames. A different runID resets the same state in-place.
+ * `ImageBitmap.close()` releases decoded rasters eagerly rather than GC.
  */
 export function disposeReplayFrameCache(): void {
   if (installed) {
     document.removeEventListener("ai-league-replay-frame", onReplayFrame);
     installed = false;
   }
+  resetReplayFrameState();
+  replayScope = null;
+}
+
+function resetReplayFrameState(): void {
+  replayGeneration += 1;
   for (const f of frames) f.bitmap.close();
   frames = [];
   totalRasterBytes = 0;
@@ -236,7 +251,8 @@ function onReplayFrame(event: Event): void {
   // rAF, not synchronous: the renderer's own rAF (scheduled last frame) runs
   // before this one, so by the time this fires the canvas holds the newest
   // painted tick. See the header doc's cadence section.
-  requestAnimationFrame(runCapture);
+  const scheduledGeneration = replayGeneration;
+  requestAnimationFrame(() => runCapture(scheduledGeneration));
 }
 
 // A BACKGROUNDED TAB NEVER FIRES rAF. The flag above is cleared inside
@@ -254,7 +270,11 @@ if (typeof document !== "undefined") {
   });
 }
 
-function runCapture(): void {
+function runCapture(generation: number): void {
+  // A different replay (or live play) replaced the session while this rAF was
+  // waiting. It must not clear the new session's pending flag or read its
+  // canvas and file those pixels under the old turn.
+  if (generation !== replayGeneration) return;
   capturePending = false;
   // Label the pixels with the NEWEST turn the runner has reported, not the
   // turn that scheduled this capture: a catch-up can tick several turns
@@ -291,19 +311,28 @@ function runCapture(): void {
   scratch.toBlob(
     (blob) => {
       if (blob === null) return; // encoder refused (tainted/zero canvas) — skip, never throw
-      void storeEncodedFrame(turn, blob);
+      void storeEncodedFrame(turn, blob, generation);
     },
     "image/webp",
     WEBP_QUALITY,
   );
 }
 
-async function storeEncodedFrame(turn: number, blob: Blob): Promise<void> {
+async function storeEncodedFrame(
+  turn: number,
+  blob: Blob,
+  generation: number,
+): Promise<void> {
+  if (generation !== replayGeneration) return;
   let bitmap: ImageBitmap;
   try {
     bitmap = await createImageBitmap(blob);
   } catch {
     return; // decode failure — a missing frame is a shrug, never a crash
+  }
+  if (generation !== replayGeneration) {
+    bitmap.close();
+    return;
   }
   insertFrame({
     turn,

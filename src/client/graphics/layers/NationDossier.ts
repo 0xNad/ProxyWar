@@ -342,6 +342,18 @@ export class NationDossier implements Layer {
     this.paint(panel, snapshot);
   }
 
+  /** Removes every body-level claim made by this replay-only layer. */
+  dispose() {
+    this.panel?.remove();
+    this.panel = null;
+    document.body.classList.remove("pw-dossier-on");
+    this.lastKey = "";
+    this.lastFollowed = null;
+    this.lastSampleMs = 0;
+    this.budget = 0;
+    this.lastTopPx = -1;
+  }
+
   /**
    * Resolve the followed nation WITHOUT game.playerBySmallID().
    *

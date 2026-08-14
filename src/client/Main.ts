@@ -19,16 +19,9 @@ import {
   UserSettings,
 } from "../core/game/UserSettings";
 import "./AccountModal";
-import { mountBroadcastBeats } from "./BroadcastBeats";
-import {
-  decisionsFromSpectatorSnapshots,
-  publishReplayDecisions,
-} from "./ReplayDecisionStore";
-import { publishReplayIntegrity } from "./ReplayIntegrityStore";
-import { spectatorReplaySnapshots } from "./SpectatorReplayStore";
-import { mountReplayWatchAnalytics } from "./ReplayWatchAnalytics";
 import { getUserMe } from "./Api";
 import { userAuth } from "./Auth";
+import { mountBroadcastBeats } from "./BroadcastBeats";
 import "./ClanModal";
 import { joinLobby, type JoinLobbyResult } from "./ClientGameRunner";
 import { getPlayerCosmeticsRefs } from "./Cosmetics";
@@ -43,17 +36,11 @@ import { FlagInput } from "./FlagInput";
 import "./FlagInputModal";
 import { FlagInputModal } from "./FlagInputModal";
 import { GameInfoModal } from "./GameInfoModal";
-import { REPLAY_SEEK_DEAD_ZONE_TURNS } from "./graphics/layers/BroadcastScrubber";
-import {
-  followedCompetitorSmallId,
-  restoreFollowedCompetitor,
-} from "./graphics/layers/FollowedCompetitor";
 import "./GameModeSelector";
 import { GameModeSelector } from "./GameModeSelector";
 import { GameStartingModal } from "./GameStartingModal";
 import "./GoogleAdElement";
 import { HelpModal } from "./HelpModal";
-import { installLullDirector } from "./LullDirector";
 import {
   isReplayOrGamePathShape,
   shouldPushAiLeagueReplayHistoryEntry,
@@ -66,6 +53,7 @@ import "./LangSelector";
 import { LangSelector } from "./LangSelector";
 import { initLayout } from "./Layout";
 import "./LeaderboardModal";
+import { installLullDirector } from "./LullDirector";
 import "./Matchmaking";
 import { MatchmakingModal } from "./Matchmaking";
 import { initNavigation } from "./Navigation";
@@ -76,9 +64,15 @@ import {
   replayClipPreviewTarget,
 } from "./ReplayClipControl";
 import {
+  decisionsFromSpectatorSnapshots,
+  publishReplayDecisions,
+} from "./ReplayDecisionStore";
+import {
+  disposeReplayFrameCache,
   installReplayFrameCapture,
   nearestFrameAtOrBefore,
 } from "./ReplayFrameCache";
+import { publishReplayIntegrity } from "./ReplayIntegrityStore";
 import {
   createJoinSyncWatchdog,
   finishReplayLoadingScreen,
@@ -107,8 +101,13 @@ import {
   loadPersistedReplaySpeed,
   watchReplaySpeedForResume,
 } from "./ReplaySpeedPersistence";
+import { mountReplayWatchAnalytics } from "./ReplayWatchAnalytics";
 import { raiseRewindCurtain } from "./RewindCurtain";
 import "./SinglePlayerModal";
+import {
+  clearSpectatorReplay,
+  spectatorReplaySnapshots,
+} from "./SpectatorReplayStore";
 import { StoreModal } from "./Store";
 import "./TerritoryPatternsModal";
 import { TerritoryPatternsModal } from "./TerritoryPatternsModal";
@@ -128,6 +127,11 @@ import {
   isInIframe,
   translateText,
 } from "./Utils";
+import { REPLAY_SEEK_DEAD_ZONE_TURNS } from "./graphics/layers/BroadcastScrubber";
+import {
+  followedCompetitorSmallId,
+  restoreFollowedCompetitor,
+} from "./graphics/layers/FollowedCompetitor";
 import "./platform/AccountPage";
 import "./platform/PlayerProfilePage";
 import "./platform/PremiereEndedPage";
@@ -393,6 +397,12 @@ interface AiLeagueReplayOpenOptions {
   inlineMatchSummary?: unknown | null;
   inlineRunResults?: unknown | null;
   /**
+   * The static envelope parser has published this match's snapshot series to
+   * SpectatorReplayStore. Retained across an in-place rewind of the same
+   * record; absent on hosted routes, which must clear any prior static match.
+   */
+  useStaticSpectatorSnapshots?: boolean;
+  /**
    * Set only by `rewindReplayInPlace`. This method otherwise ALWAYS raises
    * the boot-style veil (`holdReplayLoadingScreenUntilFirstFrame`, right
    * below) -- correct for a fresh page load, where there is nothing on
@@ -469,6 +479,13 @@ class Client {
   private lastUserReplaySpeed: ReplaySpeedMultiplier | null = null;
 
   private currentUrl: string | null = null;
+
+  /** Releases replay-only module state before the SPA returns to live play. */
+  private disposeReplaySessionState(): void {
+    disposeReplayFrameCache();
+    clearSpectatorReplay();
+    this.replayRewindContext = null;
+  }
 
   private usernameInput: UsernameInput | null = null;
   private flagInput: FlagInput | null = null;
@@ -553,6 +570,7 @@ class Client {
     window.addEventListener("beforeunload", async () => {
       console.log("Browser is closing");
       this.replayAttemptCleanup?.();
+      this.disposeReplaySessionState();
       if (this.lobbyHandle !== null) {
         this.lobbyHandle.stop(true);
         await crazyGamesSDK.gameplayStop();
@@ -564,6 +582,7 @@ class Client {
         event.detail.gameRecord !== undefined ||
         event.detail.progressiveReplay !== undefined;
       if (!isReplayJoin || !isAiLeagueReplayRoute()) {
+        this.disposeReplaySessionState();
         void this.handleJoinLobby(event);
         return;
       }
@@ -1108,6 +1127,7 @@ class Client {
     this.replayLoadingCleanup?.();
     this.replayLoadingCleanup = null;
     this.replayAttemptCleanup?.();
+    this.disposeReplaySessionState();
     // `showReplayLoadingScreen` (already active by this point on both
     // callers) marks `document.documentElement` with the CSS class that
     // hides every OTHER body child until a real frame/ready state lifts
@@ -1488,7 +1508,9 @@ class Client {
     // detail DURING catch-up, and a straight linear playthrough never enters
     // catch-up, so the clock silently never armed. A body dataset is passive:
     // no timing dependency, no event plumbing, absent entirely in live play.
-    document.body.dataset.pwReplayTotalTurns = String(gameRecord.info.num_turns);
+    document.body.dataset.pwReplayTotalTurns = String(
+      gameRecord.info.num_turns,
+    );
     // ...and taken back off when this attempt is torn down, because "absent
     // entirely in live play" is only true if someone removes it. This client
     // is a single-page app: `handleLeaveLobby` is stop() + replaceState with
@@ -1522,14 +1544,17 @@ class Client {
     //
     // `SpectatorReplayStore` is module-level and holds the envelope's own
     // (richer) decision log from parse time, so it survives the rebuild and is
-    // the right refill source on every entry, not just the first. On a hosted
-    // route the store is null and `decisionsFromSpectatorSnapshots` returns
-    // `[]` — byte-for-byte the previous wipe.
+    // the right refill source on every entry, not just the first. Hosted
+    // routes clear the store explicitly before reading it: a static -> hosted
+    // SPA transition must never inherit the previous match's series.
     //
     // 0.1.42 NOTE: this used to mirror the league overlay's own network
     // hydrate (`replay-ui.json` via `AiLeagueReplayArtifacts`). Upstream
     // deleted both the overlay and that artifact loader, so the envelope is
     // now the ONLY decision source on every route, not just the bundle.
+    if (options.useStaticSpectatorSnapshots !== true) {
+      clearSpectatorReplay();
+    }
     publishReplayDecisions(
       decisionsFromSpectatorSnapshots(spectatorReplaySnapshots()),
     );
@@ -1678,8 +1703,9 @@ class Client {
     // NOT in attemptCleanups: the cache and its listener are module-scoped
     // and deliberately OUTLIVE the attempt, because a rewind replays the
     // same deterministic match and the frames stay true. The installer is
-    // idempotent and route-gated, so re-entering here is a no-op.
-    installReplayFrameCapture();
+    // idempotent for the same runID and atomically resets frames plus pending
+    // encodes when a different match enters this SPA.
+    installReplayFrameCapture(runID);
     attemptCleanups.push(() => {
       document.removeEventListener("ai-league-replay-jump-turn", onReplayJump);
       document.removeEventListener("ai-league-replay-pause", onReplayPause);
@@ -1687,10 +1713,7 @@ class Client {
         "ai-league-replay-rewind-turn",
         onReplayRewind,
       );
-      document.removeEventListener(
-        "ai-league-replay-frame",
-        trackRenderedTurn,
-      );
+      document.removeEventListener("ai-league-replay-frame", trackRenderedTurn);
     });
 
     // H6's mirror (see `lastUserReplaySpeed`). Registered per attempt and
@@ -1956,7 +1979,8 @@ class Client {
     // already ahead of the board in document order, and the bare selector
     // would blit the PREVIOUS curtain's frozen frame into the new one. Same
     // selector, same reasoning, as `ReplayFrameCache.ts:260` — they disagreed.
-    const lastFrame = document.querySelector<HTMLCanvasElement>("body > canvas");
+    const lastFrame =
+      document.querySelector<HTMLCanvasElement>("body > canvas");
     // Same reasoning, same reason it has to happen before `stop()`:
     // `installFollowedCompetitor` resets its module-level follow state to
     // null on every install, and the outgoing renderer's disposal (inside
@@ -2047,10 +2071,7 @@ class Client {
         // mechanism landing slightly past the target still retires the
         // curtain instead of leaving it stranded.
         if (turnNumber >= targetTurn) {
-          document.removeEventListener(
-            "ai-league-replay-frame",
-            onRewindFrame,
-          );
+          document.removeEventListener("ai-league-replay-frame", onRewindFrame);
           raisedCurtain.drop();
           // The viewer gets the transport back at exactly the moment the
           // curtain comes off, not a frame before it.
@@ -2148,6 +2169,7 @@ class Client {
         inlineSpectatorTelemetry: replay.spectatorTelemetry,
         inlineMatchSummary: replay.matchSummary,
         inlineRunResults: replay.runResults,
+        useStaticSpectatorSnapshots: true,
       });
       // NOTHING FETCHES replay-ui.json ANY MORE — the bundle is offline by
       // design and 0.1.42 deleted the hosted artifact loader with the league
@@ -2220,6 +2242,7 @@ class Client {
     this.replayLoadingCleanup?.();
     this.replayLoadingCleanup = null;
     this.replayAttemptCleanup?.();
+    this.disposeReplaySessionState();
     showReplayLoadingFailure();
     console.error(`${message} for run ${runID}`, error);
   }
@@ -2550,6 +2573,7 @@ class Client {
   private async handleLeaveLobby(event?: CustomEvent) {
     this.replayAttemptCleanup?.();
     this.replayAttemptCleanup = null;
+    this.disposeReplaySessionState();
     if (this.lobbyHandle === null) {
       return;
     }
