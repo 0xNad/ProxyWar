@@ -183,6 +183,9 @@ export interface ScriptedPick {
   /** Optional action batch (AgentDecision.actionIDs) for wire-batching tests. */
   actionIDs?: string[];
   dealActionID?: string | null;
+  /** Optional comms slot (PROXYWAR_TUNE_FREETEXT_MESSAGES). Travels as a pair. */
+  messageActionID?: string | null;
+  messageText?: string | null;
   reason?: string | null;
 }
 
@@ -226,6 +229,12 @@ export function scriptedBrain(
           ...(pick.dealActionID !== undefined
             ? { dealActionID: pick.dealActionID }
             : {}),
+          ...(pick.messageActionID !== undefined
+            ? { messageActionID: pick.messageActionID }
+            : {}),
+          ...(pick.messageText !== undefined
+            ? { messageText: pick.messageText }
+            : {}),
         };
       },
     },
@@ -262,6 +271,13 @@ export interface DealLeagueHarness {
   seats: StubSeat[];
   handles: ScriptedBrainHandle[];
   records: () => AgentDecisionRecord[];
+  /**
+   * The seats' runners, in `seats` order. Exposed so a test can stub intent
+   * SUBMISSION: these runners never join a real game, so anything that submits
+   * a game intent (rather than an `intent: null` meta-action) fails here for a
+   * transport reason that has nothing to do with the behavior under test.
+   */
+  runners: AgentRunner[];
 }
 
 /**
@@ -325,6 +341,7 @@ export function dealLeagueHarness(input: {
     seats: input.seats,
     handles,
     records: () => league.decisionRecords(),
+    runners: participants.map((participant) => participant.runner),
   };
 }
 
