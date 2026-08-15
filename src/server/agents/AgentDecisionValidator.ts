@@ -132,15 +132,43 @@ export function validateAgentMessageDecision(
       reason: `messageText is ${text.length} chars, over the ${FREETEXT_MESSAGE_MAX_CHARS}-char cap (rejected, not truncated)`,
     };
   }
-  // C0 controls, DEL, and C1 controls. Whitespace was already collapsed
-  // above, so anything remaining in these ranges is a deliberate attempt to
-  // smuggle terminal escapes, bidi overrides, or framing into a surface that
-  // renders this text.
+  // C0 controls, DEL, and C1 controls: terminal escapes and framing. Bidi
+  // overrides are NOT in these ranges and are handled separately below.
   // eslint-disable-next-line no-control-regex
   if (/[\u0000-\u001F\u007F-\u009F]/u.test(text)) {
     return {
       ok: false,
       reason: "messageText contained control characters",
+    };
+  }
+
+  // Invisible formatting characters, which the whitespace collapse above does
+  // NOT touch and the control ranges above do NOT cover. Two distinct abuses:
+  //
+  // 1. BIDI OVERRIDES (U+202A-202E, U+2066-2069, U+200E-200F, U+061C) visually
+  //    reorder the rendered line. The transcript renders as
+  //    "{sender} -> {recipient}: {msg}" and we own only the English string --
+  //    Crowdin owns every other locale, and any locale placing {msg} first
+  //    would let attacker text reorder the ATTRIBUTION. Spoofing who said what
+  //    in a negotiation transcript corrupts the very evidence this feature
+  //    exists to produce, and `unsafeDescription: false` makes the line a
+  //    single text node, so it cannot be repaired with <bdi> at render time.
+  //
+  // 2. ZERO-WIDTH PADDING (U+200B-200D, U+2060, U+00AD, U+FEFF) buys up to 280
+  //    invisible characters that cost real tokens in every recipient's prompt
+  //    and render as a blank chat row.
+  //
+  // Rejected rather than stripped, like every other violation here: silently
+  // removing characters would change what the agent wrote.
+  if (
+    /[\u00AD\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF\uFFF9-\uFFFB]/u.test(
+      text,
+    )
+  ) {
+    return {
+      ok: false,
+      reason:
+        "messageText contained invisible formatting or bidi-override characters",
     };
   }
   return { ok: true, action, text };
@@ -174,12 +202,26 @@ export function validateAgentDecision(
   const action = legalActions.find(
     (candidate) => candidate.id === decision.actionID,
   );
+  const fallback =
+    legalActions.find((candidate) => candidate.kind === "hold") ?? null;
   if (action !== undefined) {
+    // A `message` id is offered, but it belongs in the COMMS slot. Selected as
+    // the game action it would submit no intent and send no message — the
+    // agent would silently forfeit its move and believe it had spoken. Deal
+    // meta-actions survive this path because the runner routes them to the
+    // deal manager; messages have no such route, so refuse loudly instead of
+    // failing quietly.
+    if (action.kind === "message") {
+      return {
+        ok: false,
+        reason:
+          "message actions belong in the comms slot (messageActionID + messageText), not the game action slot; nothing was sent",
+        fallback,
+      };
+    }
     return { ok: true, action };
   }
 
-  const fallback =
-    legalActions.find((candidate) => candidate.kind === "hold") ?? null;
   return {
     ok: false,
     reason: `decision selected unknown action id: ${decision.actionID}`,

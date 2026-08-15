@@ -904,14 +904,27 @@ const MESSAGE_REPLIES = {
   neutral: "Noted. I am open to a pact if you stay off my border.",
 };
 
+// Openers. Without these the starter is purely reactive, and since most league
+// seats descend from this file, a starter-only league would never contain a
+// single conversation: everyone waits to be spoken to. One agent has to be
+// willing to speak first for the channel to exist at all.
+const MESSAGE_OPENERS = {
+  withProposal:
+    "I have put an offer to you. Take it and neither of us wastes troops on the other.",
+  border: "We share a border. I would rather point my troops elsewhere - pact?",
+};
+
 // Answers at most one rival per decision: the one who most recently wrote to
 // us and has not already been answered since. Silence is the default — an
 // agent that talks every step is noise, not negotiation.
-function chooseMessageMove(actions, obs, answered) {
+function chooseMessageMove(actions, obs, answered, dealMove) {
   const offers = (actions || []).filter((action) => action.kind === "message");
   if (offers.length === 0) return null;
   const inbound = obs?.nonCombat?.inboundMessages || [];
-  if (inbound.length === 0) return null;
+
+  if (inbound.length === 0) {
+    return chooseMessageOpener(offers, obs, answered, dealMove);
+  }
 
   const newest = [...inbound].sort(
     (a, b) => Number(a.turnNumber ?? 0) - Number(b.turnNumber ?? 0),
@@ -947,6 +960,48 @@ function chooseMessageMove(actions, obs, answered) {
 
   answered.add(key);
   return { id: offer.id, text: text.slice(0, MESSAGE_MAX_CHARS) };
+}
+
+// Speaks first, but rarely and only when there is something to say. Two
+// occasions, both tied to a concrete opportunity rather than chatter:
+//   (a) we are proposing a deal to this rival on this very decision - the
+//       message is the reason to accept, which the bare template lacks;
+//   (b) we share a border with a rival we have never written to.
+// At most one opener per counterparty per match.
+function chooseMessageOpener(offers, obs, answered, dealMove) {
+  const dealRecipient =
+    dealMove?.kind === "deal_propose" ? dealMove?.metadata?.recipientID : null;
+  if (dealRecipient) {
+    const offer = offers.find(
+      (action) => action.metadata?.recipientID === dealRecipient,
+    );
+    const key = `opener:${dealRecipient}`;
+    if (offer && !answered.has(key)) {
+      answered.add(key);
+      return {
+        id: offer.id,
+        text: MESSAGE_OPENERS.withProposal.slice(0, MESSAGE_MAX_CHARS),
+      };
+    }
+  }
+
+  for (const offer of offers) {
+    const recipientID = offer.metadata?.recipientID;
+    const key = `opener:${recipientID}`;
+    if (answered.has(key)) continue;
+    const rival = (obs?.visiblePlayers || []).find(
+      (player) => player?.playerID === recipientID,
+    );
+    // Only borderers, and never someone already proven unreliable.
+    if (!rival?.sharesBorder || rival.isAllied) continue;
+    if (failedReliabilityGate(obs, recipientID)) continue;
+    answered.add(key);
+    return {
+      id: offer.id,
+      text: MESSAGE_OPENERS.border.slice(0, MESSAGE_MAX_CHARS),
+    };
+  }
+  return null;
 }
 
 // Deterministic deal executor. The move it returns is sent in the SEPARATE
@@ -1409,7 +1464,12 @@ export function startLlmPlayer({
     // Comms slot: independent of the game action and the deal action, so
     // answering a rival never costs a move. Returns null (silence) unless
     // someone actually wrote to us.
-    const messageMove = chooseMessageMove(actions, obs, answeredMessages);
+    const messageMove = chooseMessageMove(
+      actions,
+      obs,
+      answeredMessages,
+      dealMove,
+    );
     const degraded = lastPlanError !== null;
     let reason;
     if (plan !== null) {

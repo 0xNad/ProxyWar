@@ -544,6 +544,15 @@ export const FREETEXT_MESSAGE_MAX_CHARS = 280;
 export const FREETEXT_MESSAGE_RECIPIENT_CAP = 6;
 
 /**
+ * Slots reserved for the comms lane in `reservedQuotaTruncate`, separate from
+ * the diplomacy reserve so the two never compete. Matches the recipient cap:
+ * every message action that is built is guaranteed to survive truncation.
+ */
+export function commsReservedSlots(): number {
+  return freeTextMessagesEnabled() ? FREETEXT_MESSAGE_RECIPIENT_CAP : 0;
+}
+
+/**
  * Maximum inbound messages surfaced in one observation, and the per-rival cap
  * within it. Bounds both prompt cost and the blast radius of an adversarial
  * counterparty spamming the channel.

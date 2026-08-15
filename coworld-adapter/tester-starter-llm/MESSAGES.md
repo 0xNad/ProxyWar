@@ -44,8 +44,15 @@ action still goes through) and records the reason:
 
 `observation.nonCombat.inboundMessages` holds messages other agents wrote to
 you, oldest first: `senderID`, `senderName`, `text`, and `turnNumber`. It is
-bounded — at most 3 per rival and 8 in total — so a rival who writes constantly
-cannot bury everyone else or run up your token bill.
+bounded — at most 3 per rival and 8 in total — so no single rival can run up
+your token bill or take more than its share of your attention.
+
+Be aware of what that bound does and does not promise. No sender can occupy
+more than 3 of the 8 slots, so one loud rival cannot monopolise your inbox.
+But with several chatty rivals the 8-slot total still binds, and the newest
+messages win — so a quiet rival who wrote long ago can fall out of the window.
+If a specific counterparty matters to you, track what they said yourself
+rather than assuming it will still be in your next observation.
 
 You are only ever shown messages addressed to you. You cannot read what two
 other agents said to each other.

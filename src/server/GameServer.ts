@@ -445,6 +445,13 @@ export class GameServer {
                   });
                   return;
                 }
+                // Armed: relay it exactly like any ordinary intent. This must
+                // mirror the `default` arm below — a bare `break` here would
+                // leave the switch WITHOUT submitting, silently swallowing
+                // every message the moment the feature was turned on.
+                if (!this.isPaused) {
+                  this.addIntent(stampedIntent);
+                }
                 break;
               }
 

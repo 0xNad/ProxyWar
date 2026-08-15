@@ -259,6 +259,22 @@ interface DecisionLogEntry {
   dealApplyAccepted?: boolean;
   dealSeparateSlot?: boolean;
   dealComplianceEvent?: string;
+  /**
+   * Comms slot (PROXYWAR_TUNE_FREETEXT_MESSAGES). Hoisted explicitly because
+   * this entry is an ALLOWLIST, not a passthrough — the same omission already
+   * cost this file every agent's stated deal reason once (see the note above
+   * `dealStatedReason`). Without these keys the message text, its recipient,
+   * and its rejection reason never reach `decisions.jsonl`, and the hosted
+   * mirror can only project what the line carries — which would leave the
+   * negotiation evidence this feature exists to produce unmeasurable.
+   */
+  commsSlotActionID?: string;
+  commsSlotRecipientID?: string;
+  commsSlotText?: string;
+  commsSlotAccepted?: boolean;
+  commsSlotResult?: string;
+  commsSlotRequestedID?: string;
+  commsSlotRejected?: string;
   tacticalAffordances?: AgentTacticalAffordances;
   /** `null` for a fallback/failure decision with no stated reason — see `AgentDecision.reason`'s doc. */
   reason: string | null;
@@ -783,6 +799,37 @@ function decisionLogEntry(
       : {}),
     ...(stringMetadata(metadata, "dealComplianceEvent") !== undefined
       ? { dealComplianceEvent: stringMetadata(metadata, "dealComplianceEvent") }
+      : {}),
+    ...(stringMetadata(metadata, "commsSlotActionID") !== undefined
+      ? { commsSlotActionID: stringMetadata(metadata, "commsSlotActionID") }
+      : {}),
+    ...(stringMetadata(metadata, "commsSlotRecipientID") !== undefined
+      ? {
+          commsSlotRecipientID: stringMetadata(
+            metadata,
+            "commsSlotRecipientID",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commsSlotText") !== undefined
+      ? { commsSlotText: stringMetadata(metadata, "commsSlotText") }
+      : {}),
+    ...(booleanMetadata(metadata, "commsSlotAccepted") !== undefined
+      ? { commsSlotAccepted: booleanMetadata(metadata, "commsSlotAccepted") }
+      : {}),
+    ...(stringMetadata(metadata, "commsSlotResult") !== undefined
+      ? { commsSlotResult: stringMetadata(metadata, "commsSlotResult") }
+      : {}),
+    ...(stringMetadata(metadata, "commsSlotRequestedID") !== undefined
+      ? {
+          commsSlotRequestedID: stringMetadata(
+            metadata,
+            "commsSlotRequestedID",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commsSlotRejected") !== undefined
+      ? { commsSlotRejected: stringMetadata(metadata, "commsSlotRejected") }
       : {}),
     ...(record.tacticalAffordances
       ? { tacticalAffordances: record.tacticalAffordances }
@@ -2659,7 +2706,30 @@ function maxRounded(values: Array<number | null>): number | null {
   return Math.round(Math.max(...finite) * 1_000) / 1_000;
 }
 
+/**
+ * The game action, plus the comms slot when one was used.
+ *
+ * The comms slot is orthogonal to the game action — an agent attacks AND
+ * writes in the same decision — so a switch on `selectedActionKind` alone can
+ * never surface a message. Without this suffix the only human-readable report
+ * we publish would show every negotiation as silence.
+ */
 function humanAction(entry: DecisionLogEntry): string {
+  const game = humanGameAction(entry);
+  if (entry.commsSlotText !== undefined) {
+    const recipient = entry.commsSlotRecipientID ?? "another player";
+    const delivered = entry.commsSlotAccepted === false ? " (not delivered)" : "";
+    // Quoted verbatim: the negotiation evidence depends on exact wording, and
+    // the validator already bounded it to 280 printable characters.
+    return `${game} They privately wrote to ${recipient}${delivered}: "${entry.commsSlotText}"`;
+  }
+  if (entry.commsSlotRejected !== undefined) {
+    return `${game} A message was rejected: ${entry.commsSlotRejected}`;
+  }
+  return game;
+}
+
+function humanGameAction(entry: DecisionLogEntry): string {
   const metadata = entry.selectedActionMetadata ?? {};
   switch (entry.selectedActionKind) {
     case "spawn":
@@ -2687,9 +2757,12 @@ function humanAction(entry: DecisionLogEntry): string {
     case "quick_chat":
       return `${entry.username} publicly said "${String(metadata.message ?? metadata.quickChatKey ?? "quick chat")}" to ${String(metadata.recipientName ?? metadata.recipientID ?? "another player")}.`;
     case "message":
-      // The body is agent-authored text; it is quoted verbatim because the
-      // negotiation evidence depends on the exact wording.
-      return `${entry.username} privately wrote to ${String(metadata.recipientName ?? metadata.recipientID ?? "another player")}: "${String(metadata.messageText ?? "")}"`;
+      // Reached only when a `message:` id was put in the PRIMARY action slot,
+      // which sends nothing (the text rides the comms slot). Say exactly that
+      // rather than quoting `metadata.messageText`, a key this action's
+      // metadata does not carry — that printed a confident, permanently empty
+      // quote for a message that never existed.
+      return `${entry.username} selected a message action as its game action, which sends no message (the text belongs in the comms slot).`;
     case "build":
     case "warship":
     case "nuke":

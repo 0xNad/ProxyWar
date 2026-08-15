@@ -1158,9 +1158,25 @@ export class AgentLeagueMatchRunner {
   }): void {
     const existing = this.messageInbox.get(input.recipientPlayerID) ?? [];
     existing.push(input.message);
-    // Bound retention at the source. A hostile seat that writes every step
-    // must not be able to grow another seat's mailbox without limit.
-    const trimmed = existing.slice(-FREETEXT_INBOX_MAX_MESSAGES * 2);
+    // Bound retention at the source, PER SENDER. A global FIFO trim here would
+    // silently defeat `selectInboxWindow`'s per-rival fairness: one seat
+    // writing every decision would own the whole mailbox and evict every other
+    // rival's message before the window ever ran. Keeping a couple of windows'
+    // worth per sender means a quiet counterparty is still there to be read.
+    const bySender = new Map<string, AgentInboundMessage[]>();
+    for (const message of existing) {
+      const bucket = bySender.get(message.senderID) ?? [];
+      bucket.push(message);
+      bySender.set(message.senderID, bucket);
+    }
+    const trimmed: AgentInboundMessage[] = [];
+    for (const bucket of bySender.values()) {
+      trimmed.push(...bucket.slice(-FREETEXT_INBOX_MAX_PER_RIVAL * 2));
+    }
+    trimmed.sort(
+      (a, b) =>
+        a.turnNumber - b.turnNumber || a.senderID.localeCompare(b.senderID),
+    );
     this.messageInbox.set(input.recipientPlayerID, trimmed);
   }
 

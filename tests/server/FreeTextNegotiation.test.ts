@@ -7,6 +7,7 @@ import {
   FREETEXT_INBOX_MAX_MESSAGES,
   FREETEXT_INBOX_MAX_PER_RIVAL,
   FREETEXT_MESSAGE_RECIPIENT_CAP,
+  freeTextMessagesEnabled,
 } from "../../src/server/agents/AgentTunables";
 import type {
   AgentDecision,
@@ -58,6 +59,12 @@ function buildMenu(options: {
   inbound?: Array<{ senderID: string; turnNumber: number }>;
   alliedIDs?: string[];
   extendableIDs?: string[];
+  /**
+   * Fill the menu with enough ordinary actions to actually reach the 96-action
+   * cap. Without this the fixture never truncates, and any test claiming to
+   * measure eviction silently passes no matter what the builder does.
+   */
+  crowded?: boolean;
 }): LegalAction[] {
   const visiblePlayers = [];
   for (let i = 0; i < options.rivalCount; i++) {
@@ -100,16 +107,64 @@ function buildMenu(options: {
       spawnTile: 1,
     },
     visiblePlayers,
-    combat: { outgoingAttacks: [], incomingAttacks: [], attackOptions: [] },
+    combat: {
+      outgoingAttacks: [],
+      incomingAttacks: [],
+      attackOptions: options.crowded
+        ? visiblePlayers.map((rival, i) => ({
+            attackID: `atk${i}`,
+            targetID: rival.playerID,
+            targetName: rival.name,
+            troops: 1000,
+            retreating: false,
+            sourceTile: 100 + i,
+            borderSize: 10,
+          }))
+        : [],
+    },
     nonCombat: {
-      buildOptions: [],
+      buildOptions: options.crowded
+        ? Array.from({ length: 40 }, (_, i) => ({
+            unit: "City",
+            role: "economy",
+            targetTile: 500 + i,
+            buildTile: 500 + i,
+            cost: "100",
+            legalReason: "affordable",
+          }))
+        : [],
       upgradeOptions: [],
-      boatOptions: [],
-      allianceOptions: [],
+      boatOptions: options.crowded
+        ? Array.from({ length: 16 }, (_, i) => ({
+            targetID: null,
+            targetName: "shore",
+            targetTile: 900 + i,
+            troops: 500,
+            legalReason: "reachable",
+          }))
+        : [],
+      // alliance_extend is emitted ONLY from allianceOptions — the builder
+      // never reads visiblePlayers[].canExtendAlliance. An earlier version of
+      // this fixture left this empty, so the non-eviction test compared 0
+      // against 0 and proved nothing about the kind hosted evidence shows is
+      // already starved at ~2.45% of menus.
+      allianceOptions: (options.extendableIDs ?? []).map((playerID) => ({
+        playerID,
+        playerName: `Rival ${playerID}`,
+        action: "extend" as const,
+        legalReason: "alliance is in its extension window",
+      })),
       supportOptions: [],
       embargoOptions: [],
       quickChatOptions: [],
       emojiOptions: [],
+      targetOptions: options.crowded
+        ? visiblePlayers.map((rival) => ({
+            targetID: rival.playerID,
+            targetName: rival.name,
+            legalReason: "targetable",
+          }))
+        : [],
       ...(options.inbound
         ? {
             inboundMessages: options.inbound.map((m) => ({
@@ -168,24 +223,88 @@ describe("free-text negotiation menu (PROXYWAR_TUNE_FREETEXT_MESSAGES)", () => {
     expect(first.map((a) => a.id)).toEqual(second.map((a) => a.id));
   });
 
-  it("does not evict alliance_extend, which hosted evidence shows is already starved", () => {
-    process.env[FLAG] = "1";
-    process.env[DEALS_FLAG] = "1";
+  // These run with the free-text flag ALONE on purpose. An earlier version of
+  // this test also set PROXYWAR_TUNE_STRUCTURED_DEALS, which turns on the
+  // assembly headroom and the reserved-quota truncation — and therefore could
+  // not detect that the free-text flag was failing to turn them on itself.
+  // That is false assurance, not coverage.
+  it("does not evict alliance_extend with the free-text flag ALONE", () => {
     const extendable = ["P3", "P9"];
-    const withMessages = buildMenu({
+    const menuArgs = {
       rivalCount: 15,
       alliedIDs: extendable,
       extendableIDs: extendable,
-    });
-    delete process.env[FLAG];
-    const withoutMessages = buildMenu({
-      rivalCount: 15,
-      alliedIDs: extendable,
-      extendableIDs: extendable,
-    });
+      crowded: true,
+    };
+    const withoutMessages = buildMenu(menuArgs);
+    process.env[FLAG] = "1";
+    const withMessages = buildMenu(menuArgs);
     const extendCount = (actions: LegalAction[]) =>
       actions.filter((a) => a.kind === "alliance_extend").length;
-    expect(extendCount(withMessages)).toBe(extendCount(withoutMessages));
+    // Must not DECREASE. It may legitimately increase: arming this flag also
+    // arms the diplomacy reserve and the assembly headroom, which on a crowded
+    // menu rescues `alliance_extend` from plain assembly-order truncation.
+    // Measured here: 0 without the flag, 2 with it.
+    expect(extendCount(withMessages)).toBeGreaterThanOrEqual(
+      extendCount(withoutMessages),
+    );
+    expect(extendCount(withMessages)).toBeGreaterThan(0);
+  });
+
+  it("takes its slots from bulk kinds, never from diplomacy", () => {
+    // At a hard 96-action cap, adding message actions MUST displace something
+    // — the honest property is WHICH something. Bulk kinds (attack, boat,
+    // build) may lose slots; diplomacy kinds must not, because they are the
+    // scarce, already-starved ones (`alliance_extend` reaches ~2.45% of hosted
+    // menus). The regression this pins: message actions sharing the diplomacy
+    // pool wiped `target_player` out entirely at 18 rivals.
+    const menuArgs = { rivalCount: 18, crowded: true };
+    const before = buildMenu(menuArgs);
+    process.env[FLAG] = "1";
+    const after = buildMenu(menuArgs);
+
+    const countByKind = (actions: LegalAction[]) => {
+      const counts: Record<string, number> = {};
+      for (const action of actions) {
+        counts[action.kind] = (counts[action.kind] ?? 0) + 1;
+      }
+      return counts;
+    };
+    const beforeCounts = countByKind(before);
+    const afterCounts = countByKind(after);
+    const diplomacyKinds = [
+      "alliance_request",
+      "alliance_extend",
+      "alliance_reject",
+      "break_alliance",
+      "target_player",
+      "donate_gold",
+      "donate_troops",
+      "embargo_all",
+    ];
+    for (const kind of diplomacyKinds) {
+      expect(
+        afterCounts[kind] ?? 0,
+        `${kind} lost slots to the comms lane`,
+      ).toBeGreaterThanOrEqual(beforeCounts[kind] ?? 0);
+    }
+    // And the total menu size is unchanged: the lane is a reallocation, not
+    // an expansion past the cap.
+    expect(after.length).toBe(before.length);
+  });
+
+  it("still offers message actions on a crowded menu", () => {
+    // The other half of the same bug: without the reserved lane, message
+    // actions silently vanished at high rival counts — the feature would be
+    // absent in exactly the 16-seat lobbies it exists for.
+    process.env[FLAG] = "1";
+    for (const rivalCount of [15, 18, 24, 30]) {
+      const actions = buildMenu({ rivalCount, crowded: true });
+      expect(
+        actions.filter((a) => a.kind === "message").length,
+        `no message actions at ${rivalCount} rivals`,
+      ).toBe(FREETEXT_MESSAGE_RECIPIENT_CAP);
+    }
   });
 });
 
@@ -295,6 +414,80 @@ describe("comms-slot validation", () => {
     expect((result as { reason: string }).reason).toContain("control");
   });
 
+  it("rejects bidi overrides that could spoof transcript attribution", () => {
+    // The rendered line is "{sender} → {recipient}: {msg}" as a single text
+    // node. RLO inside {msg} can visually reorder the line, and non-English
+    // locales (Crowdin-owned) may place {msg} first.
+    for (const ch of [
+      "‮", // RLO
+      "‭", // LRO
+      "‫", // RLE
+      "⁦", // LRI
+      "⁩", // PDI
+      "‏", // RLM
+      "؜", // ALM
+    ]) {
+      const result = validateAgentMessageDecision(
+        decision({
+          messageActionID: "message:P1",
+          messageText: `Peace offer ${ch}dnammoc reganam`,
+        }),
+        menu,
+      );
+      expect(result, `bidi ${escape(ch)} slipped through`).toMatchObject({
+        ok: false,
+      });
+    }
+  });
+
+  it("rejects zero-width padding that inflates prompt cost invisibly", () => {
+    // U+FEFF is deliberately absent: JS `\s` matches it, so the whitespace
+    // collapse above already destroys the payload rather than smuggling it.
+    for (const ch of ["​", "‌", "‍", "⁠", "­"]) {
+      const result = validateAgentMessageDecision(
+        decision({
+          messageActionID: "message:P1",
+          messageText: `a${ch.repeat(100)}b`,
+        }),
+        menu,
+      );
+      expect(result, `zero-width ${escape(ch)} slipped through`).toMatchObject({
+        ok: false,
+      });
+    }
+  });
+
+  it("collapses U+FEFF padding to nothing instead of carrying it", () => {
+    const result = validateAgentMessageDecision(
+      decision({
+        messageActionID: "message:P1",
+        messageText: `a${"﻿".repeat(200)}b`,
+      }),
+      menu,
+    );
+    // 202 characters in, 3 out: the invisible payload never reaches a prompt.
+    expect(result).toMatchObject({ ok: true, text: "a b" });
+  });
+
+  it("still accepts ordinary non-ASCII text", () => {
+    // The invisible-character guard must not become an English-only filter.
+    for (const text of [
+      "Отступи от границы, и я не нападу.",
+      "北の国境で停戦しよう",
+      "خذ الشمال ولن أهاجمك",
+      "Trêve à la frontière — d'accord ?",
+      "🤝 deal?",
+    ]) {
+      expect(
+        validateAgentMessageDecision(
+          decision({ messageActionID: "message:P1", messageText: text }),
+          menu,
+        ),
+        `rejected legitimate text: ${text}`,
+      ).toMatchObject({ ok: true });
+    }
+  });
+
   it("treats a manipulation attempt as ordinary legal text", () => {
     // Injection is fair play in this league; the validator's job is bounds,
     // not content judgement. The starter is what must be hardened.
@@ -325,14 +518,30 @@ describe("inbox windowing (prompt cost + denial-of-attention bounds)", () => {
     expect(window.map((m) => m.turnNumber)).toEqual([7, 8, 9]);
   });
 
-  it("a spammer cannot crowd out a quiet rival (per-rival cap applied first)", () => {
-    const mailbox = [
-      ...Array.from({ length: 30 }, (_, i) => msg("LOUD0001", i)),
-      msg("QUIET001", 5),
-    ];
+  it("a quiet rival survives several simultaneous spammers", () => {
+    // The earlier version of this test used ONE spammer, where the per-rival
+    // cap alone brought the total under the global cap — it passed without
+    // proving the property. With enough loud rivals the global cap binds, so
+    // this is the case that actually tests fairness.
+    const mailbox = [];
+    for (let loud = 0; loud < 6; loud++) {
+      for (let i = 0; i < 30; i++) {
+        mailbox.push(msg(`LOUD000${loud}`, i));
+      }
+    }
+    mailbox.push(msg("QUIET001", 29));
     const window = selectInboxWindow(mailbox);
-    // The quiet rival's single message survives the flood.
     expect(window.some((m) => m.senderID === "QUIET001")).toBe(true);
+
+    // The structural guarantee, independent of who happened to speak last:
+    // no single sender can occupy more than its per-rival share of the window.
+    const perSender: Record<string, number> = {};
+    for (const m of window) perSender[m.senderID] = (perSender[m.senderID] ?? 0) + 1;
+    for (const [sender, count] of Object.entries(perSender)) {
+      expect(count, `${sender} took more than its share`).toBeLessThanOrEqual(
+        FREETEXT_INBOX_MAX_PER_RIVAL,
+      );
+    }
   });
 
   it("never exceeds the global cap", () => {
@@ -357,6 +566,39 @@ describe("inbox windowing (prompt cost + denial-of-attention bounds)", () => {
 
   it("returns an empty window for an empty mailbox", () => {
     expect(selectInboxWindow([])).toEqual([]);
+  });
+});
+
+describe("server-side flag gate (unmoderated-text boundary)", () => {
+  // `agent_message` is the only intent carrying client-authored prose. With the
+  // feature off it must be refused at the server, because the schema bounds the
+  // LENGTH of that text but not the right to send it: without the gate a
+  // hand-crafted client on an ordinary public server could inject 280
+  // characters into every other player's chat panel and into the replay.
+  //
+  // This asserts the gate's CONDITION directly. The handler lives inside
+  // GameServer's websocket switch, which needs a live socket, client, and
+  // lobby to reach; what can go wrong without a socket is the predicate, and
+  // that is what is pinned here.
+  it("reports the feature as off by default", () => {
+    delete process.env[FLAG];
+    expect(freeTextMessagesEnabled()).toBe(false);
+  });
+
+  it("reports the feature as on only when the exact env var is armed", () => {
+    process.env[FLAG] = "1";
+    expect(freeTextMessagesEnabled()).toBe(true);
+    process.env[FLAG] = "0";
+    expect(freeTextMessagesEnabled()).toBe(false);
+  });
+
+  it("reads the flag live, so it cannot be cached past a rollback", () => {
+    delete process.env[FLAG];
+    expect(freeTextMessagesEnabled()).toBe(false);
+    process.env[FLAG] = "1";
+    expect(freeTextMessagesEnabled()).toBe(true);
+    delete process.env[FLAG];
+    expect(freeTextMessagesEnabled()).toBe(false);
   });
 });
 

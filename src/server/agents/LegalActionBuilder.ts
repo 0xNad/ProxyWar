@@ -8,6 +8,7 @@ import {
 } from "./AgentDealManager";
 import {
   FREETEXT_MESSAGE_RECIPIENT_CAP,
+  commsReservedSlots,
   diplomacyReservedSlots,
   diplomacySlotsEnabled,
   freeTextMessagesEnabled,
@@ -125,9 +126,21 @@ export class LegalActionBuilder {
     // reject/withdraw are DIPLOMACY_KINDS members, so without it a crowded
     // menu drops every deal action before an agent sees it. Both flags
     // still default off.
-    const diplomacySlots = diplomacySlotsEnabled() || structuredDealsEnabled();
+    // freeTextMessagesEnabled() forces this on for the same reason
+    // structuredDealsEnabled() does: `message` is a DIPLOMACY_KINDS member, so
+    // without the assembly headroom AND the reserved-quota truncation, message
+    // actions would just consume the ordinary 96-action budget in assembly
+    // order — evicting later kinds (measured: `target_player` wiped out
+    // entirely at 18 rivals) while themselves vanishing on crowded menus,
+    // which is exactly the 16-seat case this feature is for.
+    const diplomacySlots =
+      diplomacySlotsEnabled() ||
+      structuredDealsEnabled() ||
+      freeTextMessagesEnabled();
     const maxActions = diplomacySlots ? capActions + 32 : capActions;
     const actions: LegalAction[] = [];
+    // Built up front, independent of the assembly budget; appended below.
+    const commsActions = messageActions(input.observation);
 
     for (const attack of input.observation.combat.outgoingAttacks ?? []) {
       if (actions.length >= maxActions) {
@@ -586,12 +599,14 @@ export class LegalActionBuilder {
       actions.push(action);
     }
 
-    for (const action of messageActions(
-      input.observation,
-      maxActions - actions.length,
-    )) {
-      actions.push(action);
-    }
+    // Comms actions are appended from a side list built OUTSIDE the assembly
+    // budget. Every other kind stops at `maxActions`, so on a crowded map
+    // (measured: 24+ rivals) attacks and boats alone exhaust the budget before
+    // this point and the channel would silently vanish — in exactly the large
+    // lobbies it exists for. A reserve cannot rescue actions that were never
+    // assembled, so they must be built unconditionally and protected by their
+    // own lane in reservedQuotaTruncate.
+    actions.push(...commsActions);
 
     for (const target of input.observation.nonCombat.targetOptions ?? []) {
       if (actions.length >= maxActions) {
@@ -696,6 +711,7 @@ export class LegalActionBuilder {
         actions,
         capActions,
         diplomacyReservedSlots(),
+        commsReservedSlots(),
       );
     }
     return actions.slice(0, capActions);
@@ -1212,11 +1228,8 @@ function parseIntegerString(value: string | null): bigint | null {
  * time): people this agent is already in a conversation or commitment with
  * come first, then people the map makes relevant.
  */
-function messageActions(
-  observation: AgentObservation,
-  budget: number,
-): LegalAction[] {
-  if (!freeTextMessagesEnabled() || budget <= 0) {
+function messageActions(observation: AgentObservation): LegalAction[] {
+  if (!freeTextMessagesEnabled()) {
     return [];
   }
 
@@ -1269,7 +1282,7 @@ function messageActions(
         b.lastHeard - a.lastHeard ||
         a.other.playerID.localeCompare(b.other.playerID),
     )
-    .slice(0, Math.min(FREETEXT_MESSAGE_RECIPIENT_CAP, budget));
+    .slice(0, FREETEXT_MESSAGE_RECIPIENT_CAP);
 
   return ranked.map(({ other }) => ({
     id: `message:${other.playerID}`,
@@ -1312,11 +1325,19 @@ const DIPLOMACY_KINDS = new Set([
   "deal_accept",
   "deal_reject",
   "deal_withdraw",
-  // Free-text negotiation (PROXYWAR_TUNE_FREETEXT_MESSAGES): reserved with the
-  // other diplomacy kinds. Already capped at FREETEXT_MESSAGE_RECIPIENT_CAP
-  // recipients, so this adds at most a handful of ids to the reserved pool.
-  "message",
 ]);
+
+/**
+ * Free-text negotiation gets its OWN lane, deliberately NOT a member of
+ * DIPLOMACY_KINDS.
+ *
+ * Sharing the diplomacy pool fails in both directions, and both were measured:
+ * message actions took slots from `alliance_extend`/`target_player` on
+ * contended menus, and were themselves starved to zero at 24+ rivals. A
+ * separate reserve means talking can never cost a diplomacy slot and a crowded
+ * map can never silently remove the channel.
+ */
+const COMMS_KINDS = new Set(["message"]);
 
 function supportAcceptanceFeasible(
   observation: AgentObservation,
@@ -1525,19 +1546,31 @@ export function reservedQuotaTruncate(
   actions: readonly LegalAction[],
   cap: number,
   reserve: number,
+  commsReserve: number = 0,
 ): LegalAction[] {
+  // Free-text messages are taken off the top into their own lane before the
+  // diplomacy maths, so the two reserves never compete. `commsReserve` is 0
+  // for every caller that predates the feature, making this identical to the
+  // previous two-way split.
+  const comms = actions.filter((action) => COMMS_KINDS.has(action.kind));
+  const keepComms = Math.min(comms.length, commsReserve, cap);
+  const keptCommsIds = new Set(
+    comms.slice(0, keepComms).map((action) => action.id),
+  );
+  const commsCap = cap - keepComms;
+
   const diplomacy = actions.filter((action) =>
     DIPLOMACY_KINDS.has(action.kind),
   );
-  const othersCount = actions.length - diplomacy.length;
+  const othersCount = actions.length - diplomacy.length - comms.length;
   // Diplomacy gets its reserve PLUS any budget the other kinds cannot use, so
   // the menu always fills to cap when enough actions exist (reviewer finding:
   // without the top-up, 85 others + 20 diplomacy at cap 96/reserve 8 wasted
   // 3 slots while dropping diplomacy).
   let keepDiplomacy = Math.min(
     diplomacy.length,
-    Math.max(reserve, cap - othersCount),
-    cap,
+    Math.max(reserve, commsCap - othersCount),
+    commsCap,
   );
   // Never split a deal_accept from its deal_reject: dealMetaActions always
   // emits them as an adjacent pair for the same proposal. If the cutoff
@@ -1555,16 +1588,20 @@ export function reservedQuotaTruncate(
   ) {
     keepDiplomacy -= 1;
   }
-  const keepOthers = Math.min(othersCount, cap - keepDiplomacy);
+  const keepOthers = Math.min(othersCount, commsCap - keepDiplomacy);
   const keptDiplomacyIds = new Set(
     diplomacy.slice(0, keepDiplomacy).map((action) => action.id),
   );
   const result: LegalAction[] = [];
   let othersKept = 0;
   for (const action of actions) {
-    if (keptDiplomacyIds.has(action.id)) {
+    if (keptCommsIds.has(action.id) || keptDiplomacyIds.has(action.id)) {
       result.push(action);
-    } else if (!DIPLOMACY_KINDS.has(action.kind) && othersKept < keepOthers) {
+    } else if (
+      !DIPLOMACY_KINDS.has(action.kind) &&
+      !COMMS_KINDS.has(action.kind) &&
+      othersKept < keepOthers
+    ) {
       result.push(action);
       othersKept++;
     }
