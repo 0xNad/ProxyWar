@@ -19,13 +19,14 @@ import {
   computeCenterOnCellOffset,
   computeSpectatorFitScale,
   GoToPlayerEvent,
+  GoToPositionEvent,
   isEmbeddedSpectatorFrame,
   spectatorAxisMaxOffset,
   spectatorAxisMinOffset,
   spectatorZoomBlendT,
   TransformHandler,
 } from "../../../src/client/graphics/TransformHandler";
-import { ZoomEvent } from "../../../src/client/InputHandler";
+import { DragEvent, ZoomEvent } from "../../../src/client/InputHandler";
 import { EventBus } from "../../../src/core/EventBus";
 import type { GameView, PlayerView } from "../../../src/core/game/GameView";
 
@@ -530,6 +531,38 @@ describe("TransformHandler.updateCanvasBoundingRect — resize immediately re-cl
     expect(impliedOffsetX).toBeLessThanOrEqual(expectedMaxOffsetX + 1);
     expect(impliedOffsetX).toBeGreaterThanOrEqual(expectedMinOffsetX - 1);
   });
+
+  it("preserves the world point at screen center when a manually altered replay camera is resized", () => {
+    (window as unknown as Record<string, unknown>).__PROXYWAR_AI_REPLAY__ =
+      true;
+    const canvas = makeCanvas(1600, 900);
+    const transform = new TransformHandler(
+      makeGameView(2000, 1000),
+      new EventBus(),
+      canvas,
+    );
+    transform.onZoom(new ZoomEvent(800, 450, -600));
+    transform.onMove(new DragEvent(220, -140));
+    const before = worldUnderCursor(transform, 800, 450);
+
+    canvas.getBoundingClientRect = () =>
+      ({
+        width: 1200,
+        height: 700,
+        left: 0,
+        top: 0,
+        right: 1200,
+        bottom: 700,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }) as DOMRect;
+    transform.updateCanvasBoundingRect();
+    const after = worldUnderCursor(transform, 600, 350);
+
+    expect(after.x).toBe(before.x);
+    expect(after.y).toBe(before.y);
+  });
 });
 
 /** Minimal PlayerView mock for replay camera locate and territory fitting. */
@@ -918,5 +951,179 @@ describe("embedded spectator frames land the whole-map contain fit (Softmax Obse
       delete (window as unknown as Record<string, unknown>)
         .__PROXYWAR_STATIC_REPLAY__;
     }
+  });
+});
+
+describe("TransformHandler replay camera intent and large zoom deltas", () => {
+  afterEach(() => {
+    delete (window as unknown as Record<string, unknown>)
+      .__PROXYWAR_AI_REPLAY__;
+  });
+
+  it("keeps large zoom deltas finite and monotonic without losing cursor anchoring", () => {
+    const transform = new TransformHandler(
+      makeGameView(4000, 3000),
+      new EventBus(),
+      makeCanvas(1600, 900),
+    );
+    const x = 900;
+    const y = 500;
+    const beforeScale = transform.scale;
+    const before = worldUnderCursor(transform, x, y);
+
+    // This crossed the old linear factor through zero and reversed direction.
+    transform.onZoom(new ZoomEvent(x, y, -1000));
+    const after = worldUnderCursor(transform, x, y);
+    expect(transform.scale).toBeGreaterThan(beforeScale);
+    expect(Number.isFinite(transform.scale)).toBe(true);
+    expect(Math.hypot(after.x - before.x, after.y - before.y)).toBeLessThan(2);
+
+    transform.onZoom(new ZoomEvent(x, y, Number.POSITIVE_INFINITY));
+    expect(transform.scale).toBe(0.2);
+    expect(Number.isFinite(transform.scale)).toBe(true);
+  });
+
+  it("invalidates a delayed competitor fit when the viewer pans before it resolves", async () => {
+    (window as unknown as Record<string, unknown>).__PROXYWAR_AI_REPLAY__ =
+      true;
+    let resolveBorder!: (value: { borderTiles: Set<number> }) => void;
+    const borderPromise = new Promise<{ borderTiles: Set<number> }>(
+      (resolve) => (resolveBorder = resolve),
+    );
+    const player = {
+      nameLocation: () => ({ x: 1000, y: 500 }),
+      borderTiles: () => borderPromise,
+    } as unknown as PlayerView;
+    const transform = new TransformHandler(
+      makeGameView(2000, 1000),
+      new EventBus(),
+      makeCanvas(1600, 900),
+    );
+
+    transform.onGoToPlayer(new GoToPlayerEvent(player));
+    expect(transform.userCameraIntentEpoch()).toBe(1);
+    transform.onMove(new DragEvent(100, 20));
+    const manualScale = transform.scale;
+    expect(transform.userCameraIntentEpoch()).toBe(2);
+
+    resolveBorder({
+      borderTiles: new Set([
+        400 * 2000 + 800,
+        400 * 2000 + 1200,
+        600 * 2000 + 800,
+        600 * 2000 + 1200,
+      ]),
+    });
+    await borderPromise;
+    await Promise.resolve();
+
+    expect(transform.scale).toBe(manualScale);
+  });
+
+  it("invalidates a delayed competitor fit when the transform is disposed before it resolves", async () => {
+    (window as unknown as Record<string, unknown>).__PROXYWAR_AI_REPLAY__ =
+      true;
+    let resolveBorder!: (value: { borderTiles: Set<number> }) => void;
+    const borderPromise = new Promise<{ borderTiles: Set<number> }>(
+      (resolve) => (resolveBorder = resolve),
+    );
+    const player = {
+      nameLocation: () => ({ x: 1000, y: 500 }),
+      borderTiles: () => borderPromise,
+    } as unknown as PlayerView;
+    const transform = new TransformHandler(
+      makeGameView(2000, 1000),
+      new EventBus(),
+      makeCanvas(1600, 900),
+    );
+    transform.onGoToPlayer(new GoToPlayerEvent(player));
+    const scaleAtDispose = transform.scale;
+
+    transform.dispose();
+    resolveBorder({
+      borderTiles: new Set([
+        400 * 2000 + 800,
+        400 * 2000 + 1200,
+        600 * 2000 + 800,
+        600 * 2000 + 1200,
+      ]),
+    });
+    await borderPromise;
+    await Promise.resolve();
+
+    expect(transform.scale).toBe(scaleAtDispose);
+  });
+
+  it("invalidates a delayed fit when a newer competitor has no name location", async () => {
+    (window as unknown as Record<string, unknown>).__PROXYWAR_AI_REPLAY__ =
+      true;
+    let resolveBorder!: (value: { borderTiles: Set<number> }) => void;
+    const borderPromise = new Promise<{ borderTiles: Set<number> }>(
+      (resolve) => (resolveBorder = resolve),
+    );
+    const first = {
+      nameLocation: () => ({ x: 1000, y: 500 }),
+      borderTiles: () => borderPromise,
+    } as unknown as PlayerView;
+    const unavailable = {
+      nameLocation: () => null,
+    } as unknown as PlayerView;
+    const transform = new TransformHandler(
+      makeGameView(2000, 1000),
+      new EventBus(),
+      makeCanvas(1600, 900),
+    );
+    transform.onGoToPlayer(new GoToPlayerEvent(first));
+    transform.onGoToPlayer(new GoToPlayerEvent(unavailable));
+    const scaleAfterNewerCommand = transform.scale;
+
+    resolveBorder({
+      borderTiles: new Set([400 * 2000 + 800, 600 * 2000 + 1200]),
+    });
+    await borderPromise;
+    await Promise.resolve();
+
+    expect(transform.scale).toBe(scaleAfterNewerCommand);
+  });
+
+  it("invalidates a delayed fit when a newer position command arrives", async () => {
+    (window as unknown as Record<string, unknown>).__PROXYWAR_AI_REPLAY__ =
+      true;
+    let resolveBorder!: (value: { borderTiles: Set<number> }) => void;
+    const borderPromise = new Promise<{ borderTiles: Set<number> }>(
+      (resolve) => (resolveBorder = resolve),
+    );
+    const player = {
+      nameLocation: () => ({ x: 1000, y: 500 }),
+      borderTiles: () => borderPromise,
+    } as unknown as PlayerView;
+    const transform = new TransformHandler(
+      makeGameView(2000, 1000),
+      new EventBus(),
+      makeCanvas(1600, 900),
+    );
+    transform.onGoToPlayer(new GoToPlayerEvent(player));
+    transform.onGoToPosition(new GoToPositionEvent(1200, 600));
+    const scaleAfterNewerCommand = transform.scale;
+
+    resolveBorder({
+      borderTiles: new Set([400 * 2000 + 800, 600 * 2000 + 1200]),
+    });
+    await borderPromise;
+    await Promise.resolve();
+
+    expect(transform.scale).toBe(scaleAfterNewerCommand);
+    transform.dispose();
+  });
+
+  it("does not mark live-play zoom and pan as replay camera intent", () => {
+    const transform = new TransformHandler(
+      makeGameView(2000, 1000),
+      new EventBus(),
+      makeCanvas(1600, 900),
+    );
+    transform.onZoom(new ZoomEvent(800, 450, -20));
+    transform.onMove(new DragEvent(10, 10));
+    expect(transform.userCameraIntentEpoch()).toBe(0);
   });
 });

@@ -5,7 +5,12 @@ import {
   isAiLeagueReplayRoute,
   isCoworldReplayRoute,
 } from "../AiLeagueReplayMode";
-import { CenterCameraEvent, DragEvent, ZoomEvent } from "../InputHandler";
+import {
+  CenterCameraEvent,
+  DragEvent,
+  ZOOM_DELTA_DIVISOR,
+  ZoomEvent,
+} from "../InputHandler";
 import { canvasPixelRatio } from "../Utils";
 
 /**
@@ -22,7 +27,9 @@ export function isReplaySpectatorView(): boolean {
   const replayWindow = window as typeof window & {
     __PROXYWAR_AI_REPLAY__?: boolean;
   };
-  return replayWindow.__PROXYWAR_AI_REPLAY__ === true || isAiLeagueReplayRoute();
+  return (
+    replayWindow.__PROXYWAR_AI_REPLAY__ === true || isAiLeagueReplayRoute()
+  );
 }
 
 /**
@@ -171,10 +178,7 @@ export function computeSpectatorFitScale(
     scale = coverScale * Math.max(fit, 1);
   } else if (spectator && vpHeight > vpWidth) {
     const portraitTarget = rawScVer * SPECTATOR_OVERZOOM_TARGET_FILL;
-    scale = Math.min(
-      Math.max(containScale * fit, portraitTarget),
-      coverScale,
-    );
+    scale = Math.min(Math.max(containScale * fit, portraitTarget), coverScale);
   } else if (spectator && vpWidth > vpHeight) {
     // P2 fix (found live 2026-08-02): a landscape phone viewport (e.g.
     // 844x390, aspect ~2.16) against a map NOT wide enough to fall inside
@@ -188,10 +192,7 @@ export function computeSpectatorFitScale(
     // branch above: overzoom to fill SPECTATOR_OVERZOOM_TARGET_FILL of
     // the viewport's WIDTH instead.
     const landscapeTarget = rawScHor * SPECTATOR_OVERZOOM_TARGET_FILL;
-    scale = Math.min(
-      Math.max(containScale * fit, landscapeTarget),
-      coverScale,
-    );
+    scale = Math.min(Math.max(containScale * fit, landscapeTarget), coverScale);
   } else {
     scale = containScale * fit;
   }
@@ -360,6 +361,15 @@ export class TransformHandler {
   private spectatorFillScale = 0;
   private spectatorZoomFloor = 0;
 
+  /**
+   * Monotonic replay-only boundary for deliberate viewer camera commands.
+   * Async fits and cinematic restores snapshot it and may only land while it
+   * is unchanged.
+   */
+  private replayUserCameraIntentEpoch = 0;
+  /** Invalidates asynchronous territory fits after any newer camera command. */
+  private fitRequestToken = 0;
+
   constructor(
     private game: GameView,
     private eventBus: EventBus,
@@ -376,15 +386,18 @@ export class TransformHandler {
     // on an instance the bus still feeds but nothing else references.
     this.subscribe(ZoomEvent, (e: ZoomEvent) => this.onZoom(e));
     this.subscribe(DragEvent, (e: DragEvent) => this.onMove(e));
-    this.subscribe(GoToPlayerEvent, (e: GoToPlayerEvent) => this.onGoToPlayer(e));
+    this.subscribe(GoToPlayerEvent, (e: GoToPlayerEvent) =>
+      this.onGoToPlayer(e),
+    );
     this.subscribe(GoToPositionEvent, (e: GoToPositionEvent) =>
       this.onGoToPosition(e),
     );
     this.subscribe(GoToUnitEvent, (e: GoToUnitEvent) => this.onGoToUnit(e));
     this.subscribe(CenterCameraEvent, () => this.centerCamera());
-    this.subscribe(FitWholeMapEvent, () =>
-      this.centerAll(0.95, { forceWholeMap: true }),
-    );
+    this.subscribe(FitWholeMapEvent, () => {
+      this.recordReplayUserCameraIntent();
+      this.centerAll(0.95, { forceWholeMap: true });
+    });
 
     // Replay/spectator: start fit-to-map (whole board centered) from t=0.
     // GameRenderer.initialize() also calls centerAll() shortly after, but
@@ -410,12 +423,52 @@ export class TransformHandler {
 
   /** See the constructor comment; called from GameRenderer.dispose(). */
   public dispose(): void {
+    // Pending borderTiles() work belongs to this camera instance. Invalidate
+    // it even when no later user intent occurs, so a disposed replay can never
+    // mutate after an in-place rewind replaces it.
+    this.replayUserCameraIntentEpoch++;
+    this.fitRequestToken++;
     this.clearTarget();
     for (const unsubscribe of this.subscriptions.splice(0)) unsubscribe();
   }
 
+  public userCameraIntentEpoch(): number {
+    return this.replayUserCameraIntentEpoch;
+  }
+
+  private recordReplayUserCameraIntent(): number {
+    if (isReplaySpectatorView()) this.replayUserCameraIntentEpoch++;
+    return this.replayUserCameraIntentEpoch;
+  }
+
+  private invalidatePendingFit(): number {
+    return ++this.fitRequestToken;
+  }
+
   public updateCanvasBoundingRect() {
+    const previousRect = this._boundingRect;
+    const preserveReplayComposition =
+      isReplaySpectatorView() && this.replayUserCameraIntentEpoch > 0;
+    const centerWorldX =
+      (previousRect.width / 2 - this.game.width() / 2) / this.scale +
+      this.offsetX;
+    const centerWorldY =
+      (previousRect.height / 2 - this.game.height() / 2) / this.scale +
+      this.offsetY;
+
     this._boundingRect = this.canvas.getBoundingClientRect();
+    if (preserveReplayComposition) {
+      // `offset` is relative to the map-sized transform origin, not the
+      // viewport center. Keeping it verbatim therefore moves the viewed world
+      // point by half the viewport-size delta. Recompose around the exact
+      // world point that occupied screen center before the resize.
+      this.offsetX =
+        centerWorldX -
+        (this._boundingRect.width / 2 - this.game.width() / 2) / this.scale;
+      this.offsetY =
+        centerWorldY -
+        (this._boundingRect.height / 2 - this.game.height() / 2) / this.scale;
+    }
     // A resize/orientation-change can invalidate the CURRENT offset against
     // the NEW viewport (e.g. spectator "filling" mode's tight pan bound
     // moves to a different axis on a portrait<->landscape flip) — without
@@ -437,8 +490,9 @@ export class TransformHandler {
     // tight zero-background bound while it is mathematically unsatisfiable
     // and (before the degenerate-axis guard above) inverted, so every
     // wheel tick slammed the camera between conflicting clamp values —
-    // visible as twitching. Only fill/floor are refreshed; scale and
-    // offsets are deliberately untouched (no recentering on resize).
+    // visible as twitching. Only fill/floor are refreshed; scale is untouched
+    // and a manually altered replay camera is recomposed around its prior
+    // world-at-screen-center before the ordinary bounds clamp below.
     if (isReplaySpectatorView()) {
       const { fillScale, zoomFloor } = computeSpectatorFitScale({
         vpWidth: this._boundingRect.width,
@@ -595,11 +649,15 @@ export class TransformHandler {
 
   onGoToPlayer(event: GoToPlayerEvent) {
     this.clearTarget();
+    // Even an eliminated/unspawned target with no name location is a newer
+    // camera command and must retire any older borderTiles() result.
+    const fitToken = this.invalidatePendingFit();
     const nameLocation = event.player.nameLocation();
     if (!nameLocation) {
       return;
     }
     if (isReplaySpectatorView()) {
+      const intentEpoch = this.recordReplayUserCameraIntent();
       // Replay/spectator: a competitor rail click (or any other
       // GoToPlayerEvent — leaderboard row, event feed) is a ONE-SHOT,
       // clamp-bounded camera locate, never a multi-tick eased chase. The
@@ -637,7 +695,7 @@ export class TransformHandler {
       // ordering is deliberate: the pan is instant feedback, the zoom is the
       // refinement, and a click never feels like it did nothing while the
       // worker answers.
-      this.fitPlayerInView(event.player);
+      this.fitPlayerInView(event.player, intentEpoch, fitToken);
       return;
     }
     // Live play: unchanged eased multi-tick chase, own targets always stay
@@ -648,13 +706,6 @@ export class TransformHandler {
     this.targetScale = event.zoom ?? null;
     this.intervalID = setInterval(() => this.goTo(), GOTO_INTERVAL_MS);
   }
-
-  /**
-   * Incremented per fit request so a resolution that arrives after the viewer
-   * has clicked something else is discarded rather than yanking the camera to
-   * a nation they have already moved on from.
-   */
-  private fitRequestToken = 0;
 
   /**
    * Share of the viewport's smaller axis a fitted nation should occupy. The
@@ -673,12 +724,20 @@ export class TransformHandler {
    * Replay/spectator only — reached solely from onGoToPlayer's spectator
    * branch, so live play's eased chase is untouched.
    */
-  private fitPlayerInView(player: PlayerView): void {
-    const token = ++this.fitRequestToken;
+  private fitPlayerInView(
+    player: PlayerView,
+    intentEpoch: number,
+    fitToken: number,
+  ): void {
     void player
       .borderTiles()
       .then((border) => {
-        if (token !== this.fitRequestToken) return;
+        if (
+          intentEpoch !== this.replayUserCameraIntentEpoch ||
+          fitToken !== this.fitRequestToken
+        ) {
+          return;
+        }
         let minX = Infinity;
         let minY = Infinity;
         let maxX = -Infinity;
@@ -733,6 +792,7 @@ export class TransformHandler {
 
   onGoToPosition(event: GoToPositionEvent) {
     this.clearTarget();
+    this.invalidatePendingFit();
     this.target = new Cell(event.x, event.y);
     this.targetScale = event.zoom ?? null;
     this.intervalID = setInterval(() => this.goTo(), GOTO_INTERVAL_MS);
@@ -740,6 +800,7 @@ export class TransformHandler {
 
   onGoToUnit(event: GoToUnitEvent) {
     this.clearTarget();
+    this.invalidatePendingFit();
     this.target = new Cell(
       this.game.x(event.unit.lastTile()),
       this.game.y(event.unit.lastTile()),
@@ -749,6 +810,7 @@ export class TransformHandler {
 
   centerCamera() {
     this.clearTarget();
+    this.invalidatePendingFit();
     const player = this.game.myPlayer();
     if (!player || !player.nameLocation()) return;
     this.target = new Cell(player.nameLocation().x, player.nameLocation().y);
@@ -826,9 +888,15 @@ export class TransformHandler {
 
   onZoom(event: ZoomEvent) {
     this.clearTarget();
+    this.invalidatePendingFit();
+    this.recordReplayUserCameraIntent();
     const oldScale = this.scale;
-    const zoomFactor = 1 + event.delta / 600;
-    this.scale /= zoomFactor;
+    // Exponential scaling stays finite and directionally monotonic for every
+    // wheel/pinch delta. The old `1 + delta/600` crossed zero for a large
+    // zoom-in delta and reversed into a zoom-out.
+    const delta = Number.isNaN(event.delta) ? 0 : event.delta;
+    const exponent = Math.max(-50, Math.min(50, -delta / ZOOM_DELTA_DIVISOR));
+    this.scale = oldScale * Math.exp(exponent);
 
     // Clamp the scale to prevent extreme zooming. Spectator/replay routes
     // additionally floor zoom-out at spectatorZoomFloor (see centerAll) —
@@ -920,6 +988,8 @@ export class TransformHandler {
 
   onMove(event: DragEvent) {
     this.clearTarget();
+    this.invalidatePendingFit();
+    this.recordReplayUserCameraIntent();
     this.offsetX -= event.deltaX / this.scale;
     this.offsetY -= event.deltaY / this.scale;
     this.clampOffsets();
@@ -938,10 +1008,42 @@ export class TransformHandler {
   override(x: number = 0, y: number = 0, s: number = 1) {
     //hardset view position
     this.clearTarget();
+    this.invalidatePendingFit();
     this.offsetX = x;
     this.offsetY = y;
     this.scale = s;
     this.changed = true;
+  }
+
+  /**
+   * Refresh broadcast docking geometry for a resized frame without touching
+   * the current camera. Used once the viewer has manually panned or zoomed.
+   */
+  updateBroadcastLayout(fit: number = 1): void {
+    if (!isReplaySpectatorView()) return;
+    const { scale } = this.computeLandingFit(fit, false);
+    this.publishBroadcastLayout(scale);
+  }
+
+  private computeLandingFit(fit: number, forceWholeMap: boolean) {
+    const vpWidth = this.boundingRect().width;
+    const vpHeight = this.boundingRect().height;
+    const staticViewer =
+      (window as typeof window & { __PROXYWAR_STATIC_REPLAY__?: boolean })
+        .__PROXYWAR_STATIC_REPLAY__ === true;
+    return computeSpectatorFitScale({
+      vpWidth,
+      vpHeight,
+      mapWidth: this.game.width(),
+      mapHeight: this.game.height(),
+      fit,
+      spectator:
+        !forceWholeMap &&
+        isReplaySpectatorView() &&
+        !isEmbeddedSpectatorFrame() &&
+        !isCoworldReplayRoute() &&
+        !staticViewer,
+    });
   }
 
   centerAll(fit: number = 1, options: { forceWholeMap?: boolean } = {}) {
@@ -984,24 +1086,11 @@ export class TransformHandler {
     const vpHeight = this.boundingRect().height;
     const mapWidth = this.game.width();
     const mapHeight = this.game.height();
-    const staticViewer =
-      (window as typeof window & { __PROXYWAR_STATIC_REPLAY__?: boolean })
-        .__PROXYWAR_STATIC_REPLAY__ === true;
-    const spectator =
-      !options.forceWholeMap &&
-      isReplaySpectatorView() &&
-      !isEmbeddedSpectatorFrame() &&
-      !isCoworldReplayRoute() &&
-      !staticViewer;
-
-    const { scale: tScale, fillScale, zoomFloor } = computeSpectatorFitScale({
-      vpWidth,
-      vpHeight,
-      mapWidth,
-      mapHeight,
-      fit,
-      spectator,
-    });
+    const {
+      scale: tScale,
+      fillScale,
+      zoomFloor,
+    } = this.computeLandingFit(fit, options.forceWholeMap === true);
 
     const oHor = (mapWidth - vpWidth) / 2 / tScale;
     const oVer = (mapHeight - vpHeight) / 2 / tScale;
@@ -1036,9 +1125,17 @@ export class TransformHandler {
     // visually a no-op live — but "byte-for-byte untouched" means the class
     // and the custom properties simply do not appear there. (Found by the
     // live-safety audit as the patch's only ungated DOM write.)
+    this.publishBroadcastLayout(tScale);
+  }
+
+  private publishBroadcastLayout(scale: number): void {
     if (!isReplaySpectatorView()) return;
-    const boardW = mapWidth * tScale;
-    const boardH = mapHeight * tScale;
+    const vpWidth = this.boundingRect().width;
+    const vpHeight = this.boundingRect().height;
+    const mapWidth = this.game.width();
+    const mapHeight = this.game.height();
+    const boardW = mapWidth * scale;
+    const boardH = mapHeight * scale;
     const bandX = Math.max(0, (vpWidth - boardW) / 2);
     const bandY = Math.max(0, (vpHeight - boardH) / 2);
     const rootStyle = document.documentElement.style;
