@@ -215,6 +215,28 @@ export class AgentRunner {
     return this.submitIntent(action.intent);
   }
 
+  /**
+   * Free-text negotiation (PROXYWAR_TUNE_FREETEXT_MESSAGES). Submits the ONLY
+   * intent carrying agent-authored prose.
+   *
+   * The caller must have run `validateAgentMessageDecision` first: `text`
+   * arrives already length-, whitespace- and control-character-checked. This
+   * method deliberately does not re-normalize it — the message that reaches
+   * the game must be the exact message the validator approved and the decision
+   * record stamped, or the negotiation evidence and the rendered transcript
+   * would disagree. `AgentMessageIntentSchema` is the final independent bound.
+   */
+  submitAgentMessage(input: {
+    recipient: string;
+    text: string;
+  }): AgentIntentResult {
+    return this.submitIntent({
+      type: "agent_message",
+      recipient: input.recipient,
+      text: input.text,
+    });
+  }
+
   private submitIntent(intent: Intent): AgentIntentResult {
     this.log.info("agent intent submitted", {
       intentType: intent.type,

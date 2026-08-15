@@ -7,8 +7,10 @@ import {
   DEAL_SUPPORT_TROOP_AMOUNT,
 } from "./AgentDealManager";
 import {
+  FREETEXT_MESSAGE_RECIPIENT_CAP,
   diplomacyReservedSlots,
   diplomacySlotsEnabled,
+  freeTextMessagesEnabled,
   structuredDealsEnabled,
 } from "./AgentTunables";
 import {
@@ -580,6 +582,13 @@ export class LegalActionBuilder {
       input.observation,
       maxActions - actions.length,
       actions,
+    )) {
+      actions.push(action);
+    }
+
+    for (const action of messageActions(
+      input.observation,
+      maxActions - actions.length,
     )) {
       actions.push(action);
     }
@@ -1188,6 +1197,99 @@ function parseIntegerString(value: string | null): bigint | null {
   return BigInt(value);
 }
 
+/**
+ * Free-text negotiation menu (PROXYWAR_TUNE_FREETEXT_MESSAGES, default OFF —
+ * returns [] when off, so menus stay byte-identical to shipped behavior).
+ *
+ * Emits at most FREETEXT_MESSAGE_RECIPIENT_CAP recipients, NOT one per rival.
+ * Hosted 16-seat evidence
+ * (`docs/project-state/2026-08-15-freetext-negotiation-gates.md`) shows
+ * `alliance_extend` already appears in only ~2.45% of menus; adding fifteen
+ * message ids per decision would push it further out. The cap keeps the added
+ * menu cost flat as lobby size grows.
+ *
+ * Ranking is deterministic and purely observation-derived (no randomness, no
+ * time): people this agent is already in a conversation or commitment with
+ * come first, then people the map makes relevant.
+ */
+function messageActions(
+  observation: AgentObservation,
+  budget: number,
+): LegalAction[] {
+  if (!freeTextMessagesEnabled() || budget <= 0) {
+    return [];
+  }
+
+  const inbound = observation.nonCombat.inboundMessages ?? [];
+  // Most recent inbound step per sender: answering someone who just spoke is
+  // the single strongest relevance signal.
+  const lastHeardFrom = new Map<string, number>();
+  for (const message of inbound) {
+    const previous = lastHeardFrom.get(message.senderID) ?? -1;
+    if (message.turnNumber > previous) {
+      lastHeardFrom.set(message.senderID, message.turnNumber);
+    }
+  }
+  // Anyone this agent already has live business with: an open proposal in
+  // either direction, or a running deal.
+  const dealCounterparties = new Set<string>();
+  for (const view of [
+    ...(observation.deals?.incomingProposals ?? []),
+    ...(observation.deals?.outgoingProposals ?? []),
+    ...(observation.deals?.activeDeals ?? []),
+  ]) {
+    dealCounterparties.add(view.proposerPlayerID);
+    dealCounterparties.add(view.recipientPlayerID);
+  }
+
+  const ranked = observation.visiblePlayers
+    .filter(
+      (other) =>
+        other.isAlive &&
+        other.hasSpawned &&
+        other.playerID !== observation.ownState?.playerID,
+    )
+    .map((other) => {
+      let score = 0;
+      if (lastHeardFrom.has(other.playerID)) score += 1000;
+      if (dealCounterparties.has(other.playerID)) score += 500;
+      if (other.hasIncomingAllianceRequest || other.hasOutgoingAllianceRequest)
+        score += 300;
+      if (other.isAllied) score += 250;
+      if (other.sharesBorder) score += 100;
+      if (other.incomingAttack || other.outgoingAttack) score += 50;
+      if (other.underSiege) score += 25;
+      return { other, score, lastHeard: lastHeardFrom.get(other.playerID) ?? -1 };
+    })
+    // Deterministic total order: score, then most recent inbound, then a
+    // stable id tiebreak so the same observation always yields the same menu.
+    .sort(
+      (a, b) =>
+        b.score - a.score ||
+        b.lastHeard - a.lastHeard ||
+        a.other.playerID.localeCompare(b.other.playerID),
+    )
+    .slice(0, Math.min(FREETEXT_MESSAGE_RECIPIENT_CAP, budget));
+
+  return ranked.map(({ other }) => ({
+    id: `message:${other.playerID}`,
+    kind: "message" as const,
+    label: `Send a private message to ${other.name}`,
+    // No intent here: the runner builds the agent_message intent only after the
+    // validator has checked the accompanying text. Mirrors the deal
+    // meta-actions' `intent: null` precedent.
+    intent: null,
+    risk: { level: "none", score: 0 },
+    metadata: {
+      recipientID: other.playerID,
+      recipientName: other.name,
+      relation: other.relation,
+      repliesTo: lastHeardFrom.has(other.playerID) ? other.playerID : null,
+      legalReason: "free-text negotiation enabled and rival is visible",
+    },
+  }));
+}
+
 function deterministicFraction(value: number): number {
   const x = Math.sin(value * 12.9898) * 43758.5453;
   return x - Math.floor(x);
@@ -1210,6 +1312,10 @@ const DIPLOMACY_KINDS = new Set([
   "deal_accept",
   "deal_reject",
   "deal_withdraw",
+  // Free-text negotiation (PROXYWAR_TUNE_FREETEXT_MESSAGES): reserved with the
+  // other diplomacy kinds. Already capped at FREETEXT_MESSAGE_RECIPIENT_CAP
+  // recipients, so this adds at most a handful of ids to the reserved pool.
+  "message",
 ]);
 
 function supportAcceptanceFeasible(

@@ -780,6 +780,7 @@
     "title": "Quick Chat",
     "to": "Sent {user}: {msg}",
     "from": "From {user}: {msg}",
+    "agent_message": "{sender} → {recipient}: {msg}",
     "category": "Category",
     "phrase": "Phrase",
     "player": "Player",

@@ -2686,6 +2686,10 @@ function humanAction(entry: DecisionLogEntry): string {
       return `${entry.username} reacted to ${String(metadata.recipientName ?? metadata.recipientID ?? "another player")} with ${String(metadata.emojiText ?? metadata.emoji ?? "an emoji")}${metadata.emojiContext ? ` (${String(metadata.emojiContext)})` : ""}.`;
     case "quick_chat":
       return `${entry.username} publicly said "${String(metadata.message ?? metadata.quickChatKey ?? "quick chat")}" to ${String(metadata.recipientName ?? metadata.recipientID ?? "another player")}.`;
+    case "message":
+      // The body is agent-authored text; it is quoted verbatim because the
+      // negotiation evidence depends on the exact wording.
+      return `${entry.username} privately wrote to ${String(metadata.recipientName ?? metadata.recipientID ?? "another player")}: "${String(metadata.messageText ?? "")}"`;
     case "build":
     case "warship":
     case "nuke":

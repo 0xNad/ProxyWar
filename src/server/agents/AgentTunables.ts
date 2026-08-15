@@ -498,3 +498,55 @@ export function structuredDealsEnabled(): boolean {
 export function economyEventsEnabled(): boolean {
   return tunedNumber("ECONOMY_EVENTS", 0) >= 1;
 }
+
+/**
+ * Free-text negotiation flag. Reads the EXACT env var
+ * `PROXYWAR_TUNE_FREETEXT_MESSAGES`. DEFAULT OFF — ships inert.
+ *
+ * When ON, agents may write a short private message to one rival per decision
+ * through the decision's comms slot, alongside (never instead of) their game
+ * action. The text is simulation-inert cargo: it is delivered, rendered, and
+ * logged, but nothing in `src/core` ever branches on its content, so the
+ * simulation stays deterministic and replay hashes are unaffected by wording.
+ *
+ * Talk is free; only actions bind. A message never creates an obligation —
+ * the structured-deal meta-actions remain the sole commitment path, and the
+ * compliance referee still derives every verdict from selected
+ * `LegalAction.id` values, never from prose.
+ *
+ * Menu cost is bounded on purpose. Hosted 16-seat evidence
+ * (`docs/project-state/2026-08-15-freetext-negotiation-gates.md`) shows
+ * assembly already reaches the last-emitted kinds, but `alliance_extend` is
+ * genuinely starved at 2.45% of menus, so this flag must not add one action
+ * per rival. `LegalActionBuilder` emits at most
+ * `FREETEXT_MESSAGE_RECIPIENT_CAP` relevance-ranked recipients.
+ *
+ * When OFF, menus, observations, decision records, intents, and telemetry are
+ * byte-identical to shipped behavior.
+ */
+export function freeTextMessagesEnabled(): boolean {
+  return tunedNumber("FREETEXT_MESSAGES", 0) >= 1;
+}
+
+/**
+ * Hard cap on message length, in characters, enforced by
+ * `AgentDecisionValidator` before any text reaches an intent. Over-cap text is
+ * REJECTED, never silently truncated: a trimmed promise is a different promise,
+ * and evidence built on rewritten words would be false.
+ */
+export const FREETEXT_MESSAGE_MAX_CHARS = 280;
+
+/**
+ * Maximum message recipients offered per decision. Keeps the added menu cost
+ * flat instead of scaling with lobby size (16 seats would otherwise add 15
+ * actions and push the already-starved `alliance_extend` further out).
+ */
+export const FREETEXT_MESSAGE_RECIPIENT_CAP = 6;
+
+/**
+ * Maximum inbound messages surfaced in one observation, and the per-rival cap
+ * within it. Bounds both prompt cost and the blast radius of an adversarial
+ * counterparty spamming the channel.
+ */
+export const FREETEXT_INBOX_MAX_MESSAGES = 8;
+export const FREETEXT_INBOX_MAX_PER_RIVAL = 3;

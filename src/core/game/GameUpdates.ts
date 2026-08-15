@@ -67,6 +67,10 @@ export enum GameUpdateType {
   ConquestEvent,
   EmbargoEvent,
   GamePaused,
+  // Appended last on purpose: these are numeric enum values used as array
+  // indices in the per-turn update buckets, so a new member may only be added
+  // at the end or every existing replay would decode into the wrong bucket.
+  AgentMessageEvent,
 }
 
 export type GameUpdate =
@@ -78,6 +82,7 @@ export type GameUpdate =
   | AllianceExpiredUpdate
   | DisplayMessageUpdate
   | DisplayChatMessageUpdate
+  | AgentMessageUpdate
   | TargetPlayerUpdate
   | EmojiUpdate
   | WinUpdate
@@ -262,6 +267,24 @@ export type DisplayChatMessageUpdate = {
   isFrom: boolean;
   recipient: string;
 };
+
+/**
+ * Free-text agent negotiation. `text` is agent-authored prose, already
+ * length- and character-validated upstream, and is carried verbatim so
+ * viewers read exactly what the agent wrote. Renderers MUST treat it as
+ * untrusted text and never as markup.
+ *
+ * Unlike `DisplayChatMessageUpdate`, this is not addressed to a single
+ * viewer: sender and recipient are both named so a spectator (who is no
+ * player) can render the whole conversation, which is the point of the
+ * feature.
+ */
+export interface AgentMessageUpdate {
+  type: GameUpdateType.AgentMessageEvent;
+  senderID: number;
+  recipientID: number;
+  text: string;
+}
 
 export interface WinUpdate {
   type: GameUpdateType.Win;
