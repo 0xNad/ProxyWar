@@ -156,6 +156,11 @@ describe("Proxy War beta runtime config", () => {
     expect(runbook).toContain("these eight unsets");
   });
 
+  // macOS-only, so CI (ubuntu-latest on every job) always skips it — this runs
+  // only on a developer Mac, where its fixture setup (mkdtemp, chmod, copied
+  // helpers, a PATH-shimmed node) exceeded vitest's 5s default on a cold run
+  // while taking ~1.4s warm. An explicit budget keeps the one platform that
+  // can exercise it from reporting a cold cache as a failure.
   it.skipIf(process.platform !== "darwin")(
     "binds Clip activation to the outside-Documents content attestation after the private env replaces PATH",
     async () => {
@@ -562,6 +567,7 @@ describe("Proxy War beta runtime config", () => {
         await fs.rm(rawFixture, { recursive: true, force: true });
       }
     },
+    30_000,
   );
 
   it("bounds Claude planner waits in the live beta scripts without shortening the match", async () => {
