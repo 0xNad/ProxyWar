@@ -272,7 +272,10 @@ export function warModeMinStrikeRatio(): number {
 
 /** War-mode duel combined-share threshold (`PROXYWAR_TUNE_WAR_DUEL_COMBINED_SHARE`, default 0.6). */
 export function warModeDuelCombinedShare(): number {
-  return Math.max(0.3, Math.min(0.95, tunedNumber("WAR_DUEL_COMBINED_SHARE", 0.6)));
+  return Math.max(
+    0.3,
+    Math.min(0.95, tunedNumber("WAR_DUEL_COMBINED_SHARE", 0.6)),
+  );
 }
 
 /**
@@ -298,7 +301,10 @@ export function coalitionEnabled(): boolean {
 
 /** Coalition leader share floor (`PROXYWAR_TUNE_COALITION_LEADER_FLOOR`, default 0.18). */
 export function coalitionLeaderShareFloor(): number {
-  return Math.max(0.05, Math.min(0.6, tunedNumber("COALITION_LEADER_FLOOR", 0.18)));
+  return Math.max(
+    0.05,
+    Math.min(0.6, tunedNumber("COALITION_LEADER_FLOOR", 0.18)),
+  );
 }
 
 /** Coalition leader ratio vs own share (`PROXYWAR_TUNE_COALITION_LEADER_RATIO`, default 1.15, clamped >= 1). */
@@ -351,12 +357,18 @@ export function openingPhaseLockEnabled(): boolean {
 
 /** Floored expansion commitment when troops idle high (default 0.35, clamped 0.1-0.5). */
 export function openingCommitRatio(): number {
-  return Math.max(0.1, Math.min(0.5, tunedNumber("OPENING_COMMIT_RATIO", 0.35)));
+  return Math.max(
+    0.1,
+    Math.min(0.5, tunedNumber("OPENING_COMMIT_RATIO", 0.35)),
+  );
 }
 
 /** Own troopRatio above which the commitment floor applies (default 0.55). */
 export function openingCommitTroopFloor(): number {
-  return Math.max(0.2, Math.min(0.95, tunedNumber("OPENING_COMMIT_TROOP_FLOOR", 0.55)));
+  return Math.max(
+    0.2,
+    Math.min(0.95, tunedNumber("OPENING_COMMIT_TROOP_FLOOR", 0.55)),
+  );
 }
 
 /**
@@ -379,7 +391,10 @@ export function navalWarEnabled(): boolean {
 
 /** Own troopRatio above which the naval war trips (default 0.7). */
 export function navalWarTroopFloor(): number {
-  return Math.max(0.3, Math.min(0.95, tunedNumber("NAVAL_WAR_TROOP_FLOOR", 0.7)));
+  return Math.max(
+    0.3,
+    Math.min(0.95, tunedNumber("NAVAL_WAR_TROOP_FLOOR", 0.7)),
+  );
 }
 
 /**
@@ -446,6 +461,20 @@ export function economyBootstrapMinTiles(): number {
  */
 export function economyObservationEnabled(): boolean {
   return tunedNumber("ECONOMY_OBSERVATION", 0) >= 1;
+}
+
+/**
+ * Spatial observation parent flag. Default OFF: when disabled, no observation
+ * or prompt shape changes are emitted. The optional minimap has a separate
+ * child flag so its token/behavior effect can be measured independently.
+ */
+export function spatialObservationEnabled(): boolean {
+  return tunedNumber("SPATIAL_OBSERVATION", 0) >= 1;
+}
+
+/** The minimap is meaningful only inside an enabled spatial observation. */
+export function spatialMinimapEnabled(): boolean {
+  return spatialObservationEnabled() && tunedNumber("SPATIAL_MINIMAP", 0) >= 1;
 }
 
 /**

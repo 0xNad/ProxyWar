@@ -137,12 +137,12 @@ function avoidActionIDs() {
 }
 
 // -- show the model what matters: shares, ratios, booleans (not map tiles) ----
-function clean(s) {
+function clean(s, maxLength = 60) {
   return String(s ?? "")
     .replace(/[^\x20-\x7e]/g, " ")
     .replace(/\s+/g, " ")
     .trim()
-    .slice(0, 60);
+    .slice(0, maxLength);
 }
 function cleanID(s) {
   return String(s ?? "")
@@ -190,6 +190,7 @@ function normalizeDealPolicies(value) {
 }
 function buildState(obs, actions) {
   const own = obs.ownState || {};
+  const spatialEnabled = obs.spatial?.schemaVersion === 1;
   const self = {
     tileShare: own.tileShare,
     troops: own.troops,
@@ -209,6 +210,65 @@ function buildState(obs, actions) {
       isAllied: p.isAllied,
       relation: p.relation,
       canAttack: p.canAttack,
+      ...(spatialEnabled
+        ? {
+            playerID: cleanID(p.playerID),
+            ...([
+              "north",
+              "northeast",
+              "east",
+              "southeast",
+              "south",
+              "southwest",
+              "west",
+              "northwest",
+            ].includes(p.bearing)
+              ? { bearing: p.bearing }
+              : {}),
+            ...(["adjacent", "near", "far"].includes(p.distanceClass)
+              ? { distanceClass: p.distanceClass }
+              : {}),
+            ...(p.borderWithYou
+              ? {
+                  borderWithYou: {
+                    tiles: Math.max(
+                      0,
+                      Math.floor(Number(p.borderWithYou.tiles) || 0),
+                    ),
+                    shareOfYourBorder: Math.max(
+                      0,
+                      Math.min(
+                        100,
+                        Math.round(
+                          Number(p.borderWithYou.shareOfYourBorder) || 0,
+                        ),
+                      ),
+                    ),
+                    terrain: ["land", "coastal", "mixed"].includes(
+                      p.borderWithYou.terrain,
+                    )
+                      ? p.borderWithYou.terrain
+                      : "land",
+                    defensePostsCovering: Math.max(
+                      0,
+                      Math.floor(
+                        Number(p.borderWithYou.defensePostsCovering) || 0,
+                      ),
+                    ),
+                    underAttackHere: p.borderWithYou.underAttackHere === true,
+                  },
+                }
+              : {}),
+            ...(Array.isArray(p.bordersWith)
+              ? {
+                  bordersWith: p.bordersWith.slice(0, 16).map((edge) => ({
+                    playerID: cleanID(edge?.playerID),
+                    sizeClass: edge?.sizeClass === "major" ? "major" : "minor",
+                  })),
+                }
+              : {}),
+          }
+        : {}),
     }));
   const legal = actions.map((a) => ({
     id: a.id,
@@ -349,6 +409,107 @@ function buildState(obs, actions) {
       proposalOptions,
     };
   }
+  let spatial;
+  if (spatialEnabled && obs.spatial?.ownShape) {
+    const sourceShape = obs.spatial.ownShape;
+    const quadrants = [
+      "northwest",
+      "north",
+      "northeast",
+      "west",
+      "center",
+      "east",
+      "southwest",
+      "south",
+      "southeast",
+    ];
+    const shape = {
+      quadrant: quadrants.includes(sourceShape.quadrant)
+        ? sourceShape.quadrant
+        : "center",
+      ...(["compact", "stretched", "fragmented"].includes(
+        sourceShape.compactness,
+      )
+        ? { compactness: sourceShape.compactness }
+        : {}),
+      ...(Number.isInteger(sourceShape.regionCount) &&
+      sourceShape.regionCount >= 0
+        ? { regionCount: sourceShape.regionCount }
+        : {}),
+      ...(Number.isFinite(sourceShape.largestRegionShare)
+        ? {
+            largestRegionShare: Math.max(
+              0,
+              Math.min(100, Math.round(sourceShape.largestRegionShare)),
+            ),
+          }
+        : {}),
+      regionAnalysis:
+        sourceShape.regionAnalysis === "complete"
+          ? "complete"
+          : "omitted_budget",
+      centroidBasis:
+        sourceShape.centroidBasis === "largest_region_border"
+          ? "largest_region_border"
+          : "all_border_budget_fallback",
+      coastShare: Math.max(
+        0,
+        Math.min(100, Math.round(Number(sourceShape.coastShare) || 0)),
+      ),
+      centroid: {
+        xPct: Math.max(
+          0,
+          Math.min(100, Math.round(Number(sourceShape.centroid?.xPct) || 0)),
+        ),
+        yPct: Math.max(
+          0,
+          Math.min(100, Math.round(Number(sourceShape.centroid?.yPct) || 0)),
+        ),
+      },
+    };
+    const briefing = (obs.notes || [])
+      .filter((note) => String(note).startsWith("Spatial "))
+      .slice(0, 3)
+      .map((note) => clean(note, 240));
+    let minimap;
+    if (
+      obs.spatial.minimap?.schemaVersion === 1 &&
+      obs.spatial.minimap.width === 24 &&
+      obs.spatial.minimap.height === 12
+    ) {
+      const rows = (obs.spatial.minimap.rows || []).slice(0, 12).map((row) =>
+        String(row)
+          .replace(/[^A-Za-z0-9.@#~]/g, "")
+          .slice(0, 24),
+      );
+      const legend = (obs.spatial.minimap.legend || [])
+        .slice(0, 64)
+        .map((entry) => ({
+          glyph: String(entry?.glyph || "")
+            .replace(/[^A-Za-z0-9@#]/g, "")
+            .slice(0, 1),
+          playerID: cleanID(entry?.playerID),
+          name: clean(entry?.name),
+          isYou: entry?.isYou === true,
+        }))
+        .filter((entry) => entry.glyph && entry.playerID);
+      if (rows.length === 12 && rows.every((row) => row.length === 24)) {
+        minimap = {
+          schemaVersion: 1,
+          width: 24,
+          height: 12,
+          rows,
+          legend,
+        };
+      }
+    }
+    spatial = {
+      schemaVersion: 1,
+      ownShape: shape,
+      ...(briefing.length ? { briefing } : {}),
+      ...(minimap ? { minimap } : {}),
+    };
+  }
   return {
     phase: obs.phase,
     self,
@@ -357,6 +518,7 @@ function buildState(obs, actions) {
     legalActions: legal,
     ...(econ ? { econ } : {}),
     ...(deals ? { deals } : {}),
+    ...(spatial ? { spatial } : {}),
   };
 }
 
@@ -447,6 +609,8 @@ const plannerUsageObserved = {
 };
 let plannerAttemptSequence = 0;
 let plannerUsageSummaryEmitted = false;
+let plannerSpatialSchemaVersion = 0;
+let plannerSpatialMinimap = false;
 
 function tokenCount(value) {
   const parsed = Number(value);
@@ -488,6 +652,13 @@ function normalizePlannerUsageEvent(event) {
     promptVariant: PROMPT_VARIANT,
     planEvery: PLAN_EVERY,
     promptCache: PROMPT_CACHE,
+    spatialSchemaVersion: tokenCount(
+      event?.spatialSchemaVersion ?? plannerSpatialSchemaVersion,
+    ),
+    spatialMinimap:
+      event?.spatialMinimap === undefined
+        ? plannerSpatialMinimap
+        : event.spatialMinimap === true,
     event: clean(event?.event),
   };
   for (const key of [
@@ -715,6 +886,9 @@ let lastPlanError = null; // set when the most recent refresh failed (loud degra
 function refreshPlanInBackground(state) {
   if (planRefreshInFlight) return;
   planRefreshInFlight = true;
+  plannerSpatialSchemaVersion =
+    state?.spatial?.schemaVersion === 1 ? state.spatial.schemaVersion : 0;
+  plannerSpatialMinimap = state?.spatial?.minimap?.schemaVersion === 1;
   withTimeout(askBedrock(state), 20000)
     .then(({ attempt, text, model }) => {
       const parsed = extractJson(text, PROMPT_HARDENING);

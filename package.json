@@ -88,6 +88,8 @@
     "agent:saved-agents:health": "cross-env GAME_ENV=dev tsx src/scripts/proxywar-saved-agents-health.ts",
     "agent:evaluate": "tsx src/scripts/ai-agent-evaluate.ts",
     "agent:benchmark:bots": "cross-env GAME_ENV=dev tsx src/scripts/ai-agent-frontier-benchmark.ts --brain=planner --runs=2 --nations=3 --max-turns=6000",
+    "agent:benchmark:spatial": "node --expose-gc --import tsx src/scripts/agent-spatial-observation-benchmark.ts",
+    "agent:verify:spatial-ab": "tsx src/scripts/agent-spatial-observation-ab-verify.ts",
     "agent:benchmark:external-full": "cross-env GAME_ENV=dev PROXYWAR_ALLOW_PRIVATE_AGENT_ENDPOINTS=true tsx src/scripts/ai-agent-frontier-benchmark.ts --brain=external-http --full-match --runs=1 --require-wins=1 --nations=1 --bots=0 --map=Pangaea --map-size=Compact --difficulty=Easy --turns-per-decision=100 --max-turns=12000 --write-replay --external-agent-endpoint-url=http://127.0.0.1:7777/proxywar/decide --external-agent-timeout-ms=5000",
     "agent:benchmark:bots:full": "cross-env GAME_ENV=dev tsx src/scripts/ai-agent-frontier-benchmark.ts --brain=planner --full-match --runs=10 --require-wins=10 --nations=5 --bots=5 --map=Pangaea --map-size=Compact --difficulty=Easy --max-turns=90000 --write-replay",
     "agent:benchmark:bots:full:codex-medium": "cross-env GAME_ENV=dev AI_LEAGUE_LLM_PROVIDER=codex-cli AI_LEAGUE_REQUIRE_EXTERNAL_BRAIN_SUCCESS=true AI_LEAGUE_CODEX_REASONING_EFFORT=medium AI_LEAGUE_CODEX_TIMEOUT_MS=180000 tsx src/scripts/ai-agent-frontier-benchmark.ts --brain=planner-codex-cli --full-match --runs=1 --require-wins=1 --nations=5 --bots=5 --map=Pangaea --map-size=Compact --difficulty=Easy --max-turns=90000 --write-replay",

@@ -1,10 +1,10 @@
+import { rankLegalActionsForPrompt } from "./AgentPlannerExecutor";
 import {
   economyDeterrencePlaybook,
   frontierAgentSkill,
   openFrontAgentPlaybook,
   profilePlaybook,
 } from "./AgentPlaybook";
-import { rankLegalActionsForPrompt } from "./AgentPlannerExecutor";
 import { AgentObservation, LegalAction } from "./AgentTypes";
 import {
   sanitizeUntrustedDisplayString,
@@ -125,6 +125,27 @@ export class LlmPromptBuilder {
       turnNumber: observation.turnNumber,
       tick: observation.tick,
       ownState: observation.ownState,
+      spatial:
+        observation.spatial === undefined
+          ? undefined
+          : {
+              schemaVersion: observation.spatial.schemaVersion,
+              ownShape: observation.spatial.ownShape,
+              ...(observation.spatial.minimap !== undefined
+                ? {
+                    minimap: {
+                      ...observation.spatial.minimap,
+                      rows: [...observation.spatial.minimap.rows],
+                      legend: observation.spatial.minimap.legend.map(
+                        (entry) => ({
+                          ...entry,
+                          name: sanitizeUntrustedDisplayString(entry.name),
+                        }),
+                      ),
+                    },
+                  }
+                : {}),
+            },
       visiblePlayers: observation.visiblePlayers.map((player) => ({
         playerID: player.playerID,
         // Rival display names are untrusted free text — sanitize the prompt copy.
@@ -140,6 +161,10 @@ export class LlmPromptBuilder {
         isAllied: player.isAllied,
         isFriendly: player.isFriendly,
         relation: player.relation,
+        bearing: player.bearing,
+        distanceClass: player.distanceClass,
+        borderWithYou: player.borderWithYou,
+        bordersWith: player.bordersWith,
         // Rival-rival coalition edge so the Commander can see a 3v1 forming.
         alliedWithVisibleIds: player.alliedWithVisibleIds,
         canAttack: player.canAttack,
