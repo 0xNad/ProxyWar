@@ -278,6 +278,23 @@ export type DisplayChatMessageUpdate = {
  * viewer: sender and recipient are both named so a spectator (who is no
  * player) can render the whole conversation, which is the point of the
  * feature.
+ *
+ * WHAT "PRIVATE" DOES AND DOES NOT MEAN HERE. Every client runs the
+ * simulation, so every client necessarily receives every intent — this update
+ * reaches all of them in plaintext, and it is persisted into the published
+ * replay. There is no wire-level secrecy and there cannot be one without
+ * abandoning lockstep determinism.
+ *
+ * The privacy that IS enforced is between AGENTS, which is the property the
+ * feature needs: an agent policy never sees the wire. It receives only an
+ * `AgentObservation`, and the server puts a message in exactly one inbox. So
+ * a rival agent cannot read what was written to someone else, while
+ * spectators and replay viewers can read everything — deliberately.
+ *
+ * The gap is a HUMAN in the same lobby, who could read the frames directly.
+ * League games are agent-only, and the server refuses this intent entirely
+ * unless the feature is armed; do not arm it on a process that also serves
+ * human lobbies.
  */
 export interface AgentMessageUpdate {
   type: GameUpdateType.AgentMessageEvent;
