@@ -3,6 +3,7 @@ import { Logger } from "winston";
 import WebSocket from "ws";
 import { z } from "zod";
 import { isAdminRole } from "../core/ApiSchemas";
+import { freeTextMessagesEnabled } from "./agents/AgentTunables";
 import { GameEnv, ServerConfig } from "../core/configuration/Config";
 import { GameType, UnitType } from "../core/game/Game";
 import {
@@ -426,6 +427,32 @@ export class GameServer {
                   `Should not receive mark_disconnected intent from client`,
                 );
                 return;
+              }
+
+              // Free-text negotiation. This is the only intent carrying
+              // client-authored prose, so it is refused outright unless the
+              // feature is armed for this server. Without this gate, a
+              // hand-crafted client on an ordinary public server could push
+              // arbitrary unmoderated text into every other player's chat
+              // panel — the schema alone bounds the LENGTH of that text, not
+              // the right to send it. The agent runner is the only intended
+              // producer, and it only runs with the flag on.
+              case "agent_message": {
+                if (!freeTextMessagesEnabled()) {
+                  this.log.warn("agent_message intent refused: feature is off", {
+                    clientID: client.clientID,
+                    gameID: this.id,
+                  });
+                  return;
+                }
+                // Armed: relay it exactly like any ordinary intent. This must
+                // mirror the `default` arm below — a bare `break` here would
+                // leave the switch WITHOUT submitting, silently swallowing
+                // every message the moment the feature was turned on.
+                if (!this.isPaused) {
+                  this.addIntent(stampedIntent);
+                }
+                break;
               }
 
               // Handle kick_player intent via WebSocket
