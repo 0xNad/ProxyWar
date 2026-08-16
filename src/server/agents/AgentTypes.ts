@@ -106,6 +106,19 @@ export interface AgentVisiblePlayer {
   underSiege?: boolean;
   allianceExpiresAt?: number;
   allianceInExtensionWindow?: boolean;
+  /** True once THIS agent has asked to renew the alliance with this rival.
+   *  `canExtendAlliance` goes false at the same moment (the core refuses a
+   *  second ask), so without this the agent cannot tell "I already asked" apart
+   *  from "renewal is not available". Present only while an alliance exists. */
+  allianceSelfAgreedToExtend?: boolean;
+  /** True once the RIVAL has asked to renew and is waiting on this agent.
+   *  Renewal is mutual — `AllianceExtensionExecution` only extends once
+   *  `bothAgreedToExtend()` — so this is the signal that one `alliance_extend`
+   *  keeps the alliance alive. Bots (`TribeExecution`) and nations
+   *  (`NationAllianceBehavior`) already reciprocate off the core's equivalent
+   *  `onlyOneAgreedToExtend()`; before this field agents could not.
+   *  Present only while an alliance exists. */
+  allianceOtherAgreedToExtend?: boolean;
   relativeTroopRatio?: number;
   spawnDistance?: number;
   /** Player IDs of OTHER visible players this rival is allied with (the rival-rival

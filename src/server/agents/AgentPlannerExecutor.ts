@@ -22505,6 +22505,7 @@ function plannerPrompt(
     "Include targetPlayerId and tacticalSettings for reserveRatio, triggerRatio, expansionRatio, maxConcurrentWars, retreatThreshold, and maxActionsPerDecision.",
     "OPPONENT MODELING (theory of mind): each visiblePlayers entry now carries relation, alliance status/expiry (allianceExpiresAt, allianceInExtensionWindow), pending alliance requests (hasIncoming/OutgoingAllianceRequest), embargoes (hasEmbargoAgainst), and incoming/outgoing attacks. observation.recentCommunications shows what other players just signaled (propose_alliance, coordinate_attack, warn_threat, request_support, taunt) and to whom. Use these to infer each rival's intentions, not just their troop counts: who is a dependable ally, who is likely to betray, who is coordinating against whom, and who is snowballing into the lead.",
     "DIPLOMACY: prefer build_alliance/pressure_rival objectives when an alliance protects a flank or balances a stronger rival, when a rival proposes one (hasIncomingAllianceRequest), or when two rivals are coordinating against you. Anticipate betrayal: an ally whose alliance is expiring (allianceInExtensionWindow) or who would gain by turning on you is a betrayal risk; consider pre-empting or breaking the alliance first. Politics and timely betrayal are legitimate winning play, not noise.",
+    "RENEWAL: an alliance is renewed only when BOTH sides ask inside the short window before it expires, and that window is a handful of decisions wide. allianceOtherAgreedToExtend means that ally has already asked and is waiting on you: a single alliance_extend keeps the alliance alive, and doing nothing lets it lapse. allianceSelfAgreedToExtend means you already asked and cannot ask again — the ally has to answer. Letting an alliance you still want simply expire is a mistake, not a neutral outcome; deliberately declining to renew one you intend to turn on is fine.",
     ...(directiveCommitmentEnabled()
       ? [
           'BINDING COMMITMENT (your real authority): when a kill-window is genuinely open — a reachable rival you must break now, with a real troop edge or strategic necessity — add "commitment":{"targetPlayerId":"<their id>","minAttackRatio":0.25} to your JSON. A commitment BINDS the executor: it must sustain attacks of at least minAttackRatio on that target and may not veto your decision with safety heuristics (only true survival emergencies pre-empt it). Without a commitment the executor may decline attacks it judges unsafe — which loses won games when pressure must be sustained.',
@@ -22589,6 +22590,8 @@ function plannerPrompt(
         canRejectAlliance: player.canRejectAlliance,
         allianceExpiresAt: player.allianceExpiresAt,
         allianceInExtensionWindow: player.allianceInExtensionWindow,
+        allianceSelfAgreedToExtend: player.allianceSelfAgreedToExtend,
+        allianceOtherAgreedToExtend: player.allianceOtherAgreedToExtend,
         canEmbargo: player.canEmbargo,
         hasEmbargoAgainst: player.hasEmbargoAgainst,
         canStopEmbargo: player.canStopEmbargo,
