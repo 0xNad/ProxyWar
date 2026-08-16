@@ -11,8 +11,18 @@ import { flattenedEmojiTable } from "../../core/Util";
 import { buildEconomyObservationExtension } from "./AgentEconomyNetwork";
 import { AgentMemoryBuilder } from "./AgentMemoryBuilder";
 import { nuclearTargetStructurePriority } from "./AgentNuclearPolicy";
+import {
+  AgentSpatialSnapshot,
+  buildSpatialObservationExtension,
+  createAgentSpatialSnapshot,
+  SpatialObservationExtension,
+} from "./AgentSpatialObservation";
 import { AgentStrategicStateBuilder } from "./AgentStrategicStateBuilder";
 import { buildAgentTacticalAffordances } from "./AgentTacticalAffordances";
+import {
+  spatialMinimapEnabled,
+  spatialObservationEnabled,
+} from "./AgentTunables";
 import {
   AgentAllianceOption,
   AgentBoatOption,
@@ -153,6 +163,10 @@ export class AgentObservationBuilder {
     tick: number;
     tiles: readonly number[] | null;
   } | null = null;
+  private spatialObservationBatchCache: {
+    gameState: Game;
+    snapshot: AgentSpatialSnapshot | null;
+  } | null = null;
 
   /** Shares work while a synchronous, non-mutating callback builds one snapshot. */
   withObservationBatch<T>(
@@ -160,11 +174,14 @@ export class AgentObservationBuilder {
     callback: () => SynchronousResult<T>,
   ): T {
     const previousCache = this.neutralIslandTransportTileCache;
+    const previousSpatialCache = this.spatialObservationBatchCache;
     const cache =
       gameState === undefined
         ? null
         : { gameState, tick: gameState.ticks(), tiles: null };
     this.neutralIslandTransportTileCache = cache;
+    this.spatialObservationBatchCache =
+      gameState === undefined ? null : { gameState, snapshot: null };
     try {
       const result = callback();
       if (isPromiseLike(result)) {
@@ -176,6 +193,7 @@ export class AgentObservationBuilder {
       return result as T;
     } finally {
       this.neutralIslandTransportTileCache = previousCache;
+      this.spatialObservationBatchCache = previousSpatialCache;
     }
   }
 
@@ -204,6 +222,11 @@ export class AgentObservationBuilder {
       input.gameState && player
         ? this.visiblePlayers(input.gameState, player)
         : [];
+    const spatial =
+      input.gameState && player
+        ? this.spatialObservation(input.gameState, player, visiblePlayers)
+        : undefined;
+    if (spatial !== undefined) notes.push(...spatial.notes);
     const combat = this.combatState(
       input.gameState,
       player,
@@ -248,6 +271,7 @@ export class AgentObservationBuilder {
         tick,
         ownState,
         visiblePlayers,
+        ...(spatial !== undefined ? { spatial: spatial.spatial } : {}),
         combat,
         nonCombat,
         strategic,
@@ -277,6 +301,7 @@ export class AgentObservationBuilder {
       tick,
       ownState,
       visiblePlayers,
+      ...(spatial !== undefined ? { spatial: spatial.spatial } : {}),
       combat,
       nonCombat,
       strategic,
@@ -289,6 +314,34 @@ export class AgentObservationBuilder {
       endgame: this.endgameState(input.gameState, player),
       notes,
     };
+  }
+
+  private spatialObservation(
+    gameState: Game,
+    player: Player,
+    visiblePlayers: AgentVisiblePlayer[],
+  ): SpatialObservationExtension | undefined {
+    if (!spatialObservationEnabled() || player.numTilesOwned() === 0) {
+      return undefined;
+    }
+    const batch = this.spatialObservationBatchCache;
+    if (batch === null || batch.gameState !== gameState) {
+      return buildSpatialObservationExtension({
+        gameState,
+        player,
+        visiblePlayers,
+      });
+    }
+    batch.snapshot ??= createAgentSpatialSnapshot(
+      gameState,
+      spatialMinimapEnabled(),
+    );
+    return buildSpatialObservationExtension({
+      gameState,
+      player,
+      visiblePlayers,
+      snapshot: batch.snapshot,
+    });
   }
 
   summarize(observation: AgentObservation): string {
