@@ -36,9 +36,10 @@ export class StrategyAgentBrain implements AgentBrain {
       return v === null || v === undefined ? undefined : String(v);
     };
 
-    // Spawn placement is a deterministic fairness assignment
-    // (AgentSpawnAssignment.ts), never a brain choice - no LegalAction ever
-    // carries kind:"spawn" here.
+    // During the sealed spawn-only round there is no hold action, so `hold`
+    // above resolves to the first offered spawn. This scalar legacy response
+    // becomes the first preference; the allocator completes its deterministic
+    // tail from the common offered order.
 
     // Targets = everyone alive except bots and our own teammates (team modes). Crucially
     // this INCLUDES our allies: we must be able to break alliances and conquer them to
@@ -135,9 +136,7 @@ export class StrategyAgentBrain implements AgentBrain {
           x.metadata?.expansion === true &&
           x.risk.level !== "high",
       ) ??
-      find(
-        (x) => x.kind === "boat" && (x.metadata?.targetID ?? null) === null,
-      );
+      find((x) => x.kind === "boat" && (x.metadata?.targetID ?? null) === null);
     if (expand) return expand;
 
     // 6. Fallbacks: a clearly favorable (low-risk, we're stronger) attack, build, hold.

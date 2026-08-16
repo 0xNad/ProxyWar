@@ -956,6 +956,17 @@ export interface Game extends GameMap {
     recipient: string,
   ): void;
 
+  /**
+   * Free-text agent negotiation. Emits one agent-authored message for display
+   * and observation. `text` is inert cargo — no simulation state reads it — so
+   * wording can never affect determinism or replay hashes.
+   */
+  displayAgentMessage(
+    text: string,
+    senderID: PlayerID,
+    recipientID: PlayerID,
+  ): void;
+
   // Nations
   nations(): Nation[];
 

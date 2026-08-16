@@ -103,6 +103,15 @@ export class ExternalRelayAgentBrain implements AgentBrain {
       ...(parsed.selectedDealActionId !== undefined
         ? { dealActionID: parsed.selectedDealActionId }
         : {}),
+      // Comms slot: forwarded as a PAIR or not at all, so the id can never
+      // reach the validator without the body it must be judged with.
+      ...(parsed.selectedMessageActionId !== undefined &&
+      parsed.messageText !== undefined
+        ? {
+            messageActionID: parsed.selectedMessageActionId,
+            messageText: parsed.messageText,
+          }
+        : {}),
       reason: parsed.reason,
       metadata: {
         brain: "external-relay",

@@ -472,29 +472,59 @@ describe("buildExternalAgentRequestPayload map identity and spawn protocol", () 
   });
 
   it("advertises a bounded ranked ballot only for an all-spawn menu and never exposes raw coordinates", () => {
-    const spawnPayload = buildExternalAgentRequestPayload({
-      observation: spawnObservation,
-      legalActions: spawnLegalActions,
-    });
-    expect(spawnPayload.decisionSupport).not.toHaveProperty("spawnFreeform");
-    expect(spawnPayload.responseContract).toMatchObject({
-      spawnPreferenceLegalActionIds: expect.stringContaining("exact offered"),
-      maxSpawnPreferences: 16,
-    });
-    expect(JSON.stringify(spawnPayload.responseContract)).not.toContain(
-      "coordinate",
-    );
+    const previousDeals = process.env.PROXYWAR_TUNE_STRUCTURED_DEALS;
+    const previousMessages = process.env.PROXYWAR_TUNE_FREETEXT_MESSAGES;
+    process.env.PROXYWAR_TUNE_STRUCTURED_DEALS = "1";
+    process.env.PROXYWAR_TUNE_FREETEXT_MESSAGES = "1";
+    try {
+      const spawnPayload = buildExternalAgentRequestPayload({
+        observation: spawnObservation,
+        legalActions: spawnLegalActions,
+      });
+      expect(spawnPayload.decisionSupport).not.toHaveProperty("spawnFreeform");
+      expect(spawnPayload.responseContract).toMatchObject({
+        spawnPreferenceLegalActionIds: expect.stringContaining("exact offered"),
+        maxSpawnPreferences: 16,
+      });
+      expect(spawnPayload.responseContract).not.toHaveProperty(
+        "selectedDealActionId",
+      );
+      expect(spawnPayload.responseContract).not.toHaveProperty(
+        "selectedMessageActionId",
+      );
+      expect(spawnPayload.responseContract).not.toHaveProperty("messageText");
+      expect(JSON.stringify(spawnPayload.responseContract)).not.toContain(
+        "coordinate",
+      );
 
-    const activePayload = buildExternalAgentRequestPayload({
-      observation,
-      legalActions,
-    });
-    expect(activePayload.decisionSupport).not.toHaveProperty("spawnFreeform");
-    expect(activePayload.responseContract).not.toHaveProperty(
-      "spawnPreferenceLegalActionIds",
-    );
-    expect(activePayload.responseContract).not.toHaveProperty(
-      "maxSpawnPreferences",
-    );
+      const activePayload = buildExternalAgentRequestPayload({
+        observation,
+        legalActions,
+      });
+      expect(activePayload.decisionSupport).not.toHaveProperty("spawnFreeform");
+      expect(activePayload.responseContract).not.toHaveProperty(
+        "spawnPreferenceLegalActionIds",
+      );
+      expect(activePayload.responseContract).not.toHaveProperty(
+        "maxSpawnPreferences",
+      );
+      expect(activePayload.responseContract).toHaveProperty(
+        "selectedDealActionId",
+      );
+      expect(activePayload.responseContract).toHaveProperty(
+        "selectedMessageActionId",
+      );
+    } finally {
+      if (previousDeals === undefined) {
+        delete process.env.PROXYWAR_TUNE_STRUCTURED_DEALS;
+      } else {
+        process.env.PROXYWAR_TUNE_STRUCTURED_DEALS = previousDeals;
+      }
+      if (previousMessages === undefined) {
+        delete process.env.PROXYWAR_TUNE_FREETEXT_MESSAGES;
+      } else {
+        process.env.PROXYWAR_TUNE_FREETEXT_MESSAGES = previousMessages;
+      }
+    }
   });
 });

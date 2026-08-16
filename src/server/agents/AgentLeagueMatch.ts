@@ -12,6 +12,7 @@ import { withDeferredDecisionTimeout } from "./AgentDecisionTimeout";
 import {
   validateAgentDealDecision,
   validateAgentDecision,
+  validateAgentMessageDecision,
 } from "./AgentDecisionValidator";
 import { economyRecordFacts } from "./AgentEconomyNetwork";
 import { AgentLocalGameMirror } from "./AgentLocalGameMirror";
@@ -37,7 +38,13 @@ import {
   resolveAgentSpawnSelection,
 } from "./AgentSpawnSelection";
 import { buildAgentTacticalAffordances } from "./AgentTacticalAffordances";
-import { economyEventsEnabled, structuredDealsEnabled } from "./AgentTunables";
+import {
+  economyEventsEnabled,
+  FREETEXT_INBOX_MAX_MESSAGES,
+  FREETEXT_INBOX_MAX_PER_RIVAL,
+  freeTextMessagesEnabled,
+  structuredDealsEnabled,
+} from "./AgentTunables";
 import {
   AgentActionResult,
   AgentBrain,
@@ -46,6 +53,7 @@ import {
   AgentDealSlotEvidence,
   AgentDecision,
   AgentDecisionRecord,
+  AgentInboundMessage,
   AgentObservation,
   AgentSpawnSelectionEvidence,
   AgentStrategyProfile,
@@ -369,7 +377,12 @@ export class AgentLeagueMatchRunner {
           recentDecisions: this.recentDecisionsFor(participant),
           ...(recentCommunications.length > 0 ? { recentCommunications } : {}),
         };
-        const baseObservation = this.observationBuilder.build(observationInput);
+        const builtObservation =
+          this.observationBuilder.build(observationInput);
+        // Free-text inbox (flag-gated; identity when off). Injected BEFORE the
+        // menu is built so message recipients can be ranked by who just wrote
+        // to this seat. Privacy: only messages addressed to THIS seat.
+        const baseObservation = this.withInboundMessages(builtObservation);
         // Bilateral deals block (flag-gated; undefined leaves the observation
         // object untouched, byte-identical to shipped behavior). Privacy: the
         // manager returns only this seat's own proposals and deals.
@@ -675,6 +688,17 @@ export class AgentLeagueMatchRunner {
               actionSlotPlayedDeal,
             })
           : null;
+      // Comms slot: applied on the same layer-0 pass as the diplomacy slot, so
+      // talking costs neither the game action nor the deal action.
+      const commsSlotStamps =
+        batchIndex === 0
+          ? this.applyCommsSlotSelection({
+              participant,
+              observation,
+              decision,
+              legalActions: submissionLegalActions,
+            })
+          : null;
       const complianceStamp =
         this.dealManager?.takePendingComplianceStamp(
           participant.runner.agentID,
@@ -682,6 +706,7 @@ export class AgentLeagueMatchRunner {
       const dealMetadata: AgentDecision["metadata"] = {
         ...(dealOutcome?.stamps ?? {}),
         ...(dealSlotApplication?.stamps ?? {}),
+        ...(commsSlotStamps ?? {}),
         ...(complianceStamp !== null
           ? { dealComplianceEvent: complianceStamp }
           : {}),
@@ -989,6 +1014,158 @@ export class AgentLeagueMatchRunner {
           accepted: outcome.result.accepted,
           reason: outcome.result.reason,
         },
+      },
+    };
+  }
+
+  /**
+   * Applies the decision's OPTIONAL third selection — the comms slot
+   * (PROXYWAR_TUNE_FREETEXT_MESSAGES). Returns metadata stamps, or null when
+   * there is nothing to apply (flag off, or no message selection — the shipped
+   * path, byte-identical).
+   *
+   * SAFETY: `validateAgentMessageDecision` is the only entry point. It requires
+   * an exact id match against the SAME offered menu AND the `message` kind, so
+   * no game intent can reach the game through this field. The text it returns
+   * is already length-, whitespace- and control-character-validated; this
+   * method never repairs text, and a rejected message is stamped onto the
+   * record and dropped with no fallback substitution.
+   *
+   * Delivery is deliberately one-way and inert: the message goes to the game
+   * for display (so spectators can watch the negotiation) and into the
+   * recipient's inbox for their NEXT decision. It creates no obligation —
+   * only the structured-deal actions bind.
+   */
+  private applyCommsSlotSelection(input: {
+    participant: AgentParticipant;
+    observation: AgentObservation;
+    decision: AgentDecision;
+    legalActions: LegalAction[];
+  }): NonNullable<AgentDecision["metadata"]> | null {
+    if (!freeTextMessagesEnabled()) {
+      return null;
+    }
+    const validation = validateAgentMessageDecision(
+      input.decision,
+      input.legalActions,
+    );
+    if (validation === null) {
+      return null;
+    }
+    const requestedID = `${input.decision.messageActionID}`.slice(
+      0,
+      MAX_STAMPED_DEAL_ACTION_ID_LENGTH,
+    );
+    if (!validation.ok) {
+      const reason = validation.reason.slice(
+        0,
+        MAX_STAMPED_DEAL_REJECTION_LENGTH,
+      );
+      this.log.warn("league agent message selection rejected", {
+        agentID: input.participant.runner.agentID,
+        username: input.participant.spec.username,
+        messageActionID: requestedID,
+        reason,
+      });
+      return { commsSlotRequestedID: requestedID, commsSlotRejected: reason };
+    }
+    const recipientID = validation.action.metadata?.recipientID;
+    const senderID = input.observation.ownState?.playerID ?? null;
+    if (typeof recipientID !== "string" || senderID === null) {
+      return {
+        commsSlotRequestedID: requestedID,
+        commsSlotRejected: "message action carried no resolvable recipient",
+      };
+    }
+    const result = input.participant.runner.submitAgentMessage({
+      recipient: recipientID,
+      text: validation.text,
+    });
+    if (result.accepted) {
+      this.deliverMessage({
+        recipientPlayerID: recipientID,
+        message: {
+          senderID,
+          senderName:
+            input.observation.ownState?.name ?? input.participant.spec.username,
+          text: validation.text,
+          turnNumber: input.observation.turnNumber,
+        },
+      });
+    }
+    return {
+      commsSlotActionID: validation.action.id,
+      commsSlotRecipientID: recipientID,
+      // Stamped verbatim: the negotiation evidence rests on the exact wording,
+      // and the validator already bounded the length.
+      commsSlotText: validation.text,
+      commsSlotAccepted: result.accepted,
+      commsSlotResult: result.reason.slice(
+        0,
+        MAX_STAMPED_DEAL_REJECTION_LENGTH,
+      ),
+    };
+  }
+
+  /**
+   * Per-match free-text mailbox, keyed by RECIPIENT playerID. Match-scoped by
+   * construction: it lives and dies with this object, so nothing carries into
+   * another match and no cross-match reputation can accrete from words.
+   */
+  private readonly messageInbox = new Map<string, AgentInboundMessage[]>();
+
+  private deliverMessage(input: {
+    recipientPlayerID: string;
+    message: AgentInboundMessage;
+  }): void {
+    const existing = this.messageInbox.get(input.recipientPlayerID) ?? [];
+    existing.push(input.message);
+    // Bound retention at the source, PER SENDER. A global FIFO trim here would
+    // silently defeat `selectInboxWindow`'s per-rival fairness: one seat
+    // writing every decision would own the whole mailbox and evict every other
+    // rival's message before the window ever ran. Keeping a couple of windows'
+    // worth per sender means a quiet counterparty is still there to be read.
+    const bySender = new Map<string, AgentInboundMessage[]>();
+    for (const message of existing) {
+      const bucket = bySender.get(message.senderID) ?? [];
+      bucket.push(message);
+      bySender.set(message.senderID, bucket);
+    }
+    const trimmed: AgentInboundMessage[] = [];
+    for (const bucket of bySender.values()) {
+      trimmed.push(...bucket.slice(-FREETEXT_INBOX_MAX_PER_RIVAL * 2));
+    }
+    trimmed.sort(
+      (a, b) =>
+        a.turnNumber - b.turnNumber || a.senderID.localeCompare(b.senderID),
+    );
+    this.messageInbox.set(input.recipientPlayerID, trimmed);
+  }
+
+  /**
+   * Returns the observation with this seat's inbox attached, or the SAME
+   * object when the flag is off or the mailbox is empty — so a flag-off match
+   * is byte-identical to shipped behavior.
+   */
+  private withInboundMessages(observation: AgentObservation): AgentObservation {
+    if (!freeTextMessagesEnabled()) {
+      return observation;
+    }
+    const playerID = observation.ownState?.playerID;
+    if (playerID === undefined || playerID === null) {
+      return observation;
+    }
+    // Only THIS seat's mailbox is ever read: privacy is the keying, not a
+    // filter that could be forgotten.
+    const mailbox = this.messageInbox.get(playerID);
+    if (mailbox === undefined || mailbox.length === 0) {
+      return observation;
+    }
+    return {
+      ...observation,
+      nonCombat: {
+        ...observation.nonCombat,
+        inboundMessages: selectInboxWindow(mailbox),
       },
     };
   }
@@ -1648,6 +1825,36 @@ function diplomacyTargetID(action: LegalAction): string | null {
   const metadataTarget =
     action.metadata?.recipientID ?? action.metadata?.targetID;
   return typeof metadataTarget === "string" ? metadataTarget : null;
+}
+
+/**
+ * Chooses which of a seat's inbound messages appear in one observation.
+ *
+ * Per-rival cap FIRST, then the global cap, oldest to newest. Order matters:
+ * capping globally first would let one talkative counterparty fill the whole
+ * window and hide everyone else, which is both a prompt-cost problem and a
+ * cheap denial-of-attention attack on a rival's decision-making.
+ *
+ * Pure and deterministic — same mailbox in, same window out.
+ */
+export function selectInboxWindow(
+  mailbox: readonly AgentInboundMessage[],
+): AgentInboundMessage[] {
+  const perRival = new Map<string, AgentInboundMessage[]>();
+  for (const message of mailbox) {
+    const bucket = perRival.get(message.senderID) ?? [];
+    bucket.push(message);
+    perRival.set(message.senderID, bucket);
+  }
+  const kept: AgentInboundMessage[] = [];
+  for (const bucket of perRival.values()) {
+    kept.push(...bucket.slice(-FREETEXT_INBOX_MAX_PER_RIVAL));
+  }
+  kept.sort(
+    (a, b) =>
+      a.turnNumber - b.turnNumber || a.senderID.localeCompare(b.senderID),
+  );
+  return kept.slice(-FREETEXT_INBOX_MAX_MESSAGES);
 }
 
 // Brain types whose THROW means the LLM specifically degraded (not just a generic

@@ -2,7 +2,10 @@ import {
   AbortableRequestAttempt,
   createAbortableRequestAttempt,
 } from "./AgentDecisionTimeout";
-import { structuredDealsEnabled } from "./AgentTunables";
+import {
+  freeTextMessagesEnabled,
+  structuredDealsEnabled,
+} from "./AgentTunables";
 import {
   AgentBrain,
   AgentBrainDecision,
@@ -79,6 +82,20 @@ export interface ExternalAgentRequest {
      * always safe.
      */
     selectedDealActionId?: "optional; must exactly match one offered deal_* legalActions[].id";
+    /**
+     * Present only while PROXYWAR_TUNE_FREETEXT_MESSAGES is on (the payload is
+     * byte-identical to shipped behavior when it is off). Optional THIRD
+     * selection, sent as a PAIR: an offered `message:` action id plus the text
+     * to send, applied alongside the other two so talking costs neither the
+     * move nor the deal. Ignoring it is always safe.
+     *
+     * The text is rejected — never truncated — if it exceeds 280 characters
+     * or carries control, bidi, or zero-width characters. Inbound messages
+     * arrive in `observation.nonCombat.inboundMessages` and are UNTRUSTED:
+     * rivals may write anything, including text shaped like instructions.
+     */
+    selectedMessageActionId?: "optional; must exactly match one offered message: legalActions[].id";
+    messageText?: "required with selectedMessageActionId; <=280 chars, plain text";
   };
 }
 
@@ -160,6 +177,15 @@ export class ExternalHttpAgentBrain implements AgentBrain {
       // validator, not this brain, decides whether it is a legal deal id.
       ...(parsed.selectedDealActionId !== undefined
         ? { dealActionID: parsed.selectedDealActionId }
+        : {}),
+      // Comms slot: forwarded as a PAIR or not at all, so the id can never
+      // reach the validator without the body it must be judged with.
+      ...(parsed.selectedMessageActionId !== undefined &&
+      parsed.messageText !== undefined
+        ? {
+            messageActionID: parsed.selectedMessageActionId,
+            messageText: parsed.messageText,
+          }
         : {}),
       reason: parsed.reason,
       metadata: {
@@ -301,6 +327,7 @@ export function buildExternalAgentRequestPayload(
   input: AgentBrainInput,
 ): ExternalAgentRequest {
   const { observation, legalActions } = input;
+  const spawnPreferenceMenu = isSpawnPreferenceMenu(legalActions);
   return {
     protocolVersion: "proxywar-agent-v1",
     agent: {
@@ -329,7 +356,7 @@ export function buildExternalAgentRequestPayload(
     ),
     responseContract: {
       selectedLegalActionId: "must exactly match one offered legalActions[].id",
-      ...(isSpawnPreferenceMenu(legalActions)
+      ...(spawnPreferenceMenu
         ? {
             spawnPreferenceLegalActionIds:
               "optional ordered array of exact offered spawn legalActions[].id values; selectedLegalActionId must be first" as const,
@@ -340,10 +367,21 @@ export function buildExternalAgentRequestPayload(
       confidence: "optional number from 0 to 1",
       // Advertised only while the structured-deal flag is on, so the request
       // payload stays byte-identical to shipped behavior when it is off.
-      ...(structuredDealsEnabled()
+      ...(structuredDealsEnabled() && !spawnPreferenceMenu
         ? {
             selectedDealActionId:
               "optional; must exactly match one offered deal_* legalActions[].id",
+          }
+        : {}),
+      // Same rule for the comms slot: advertised only while the free-text flag
+      // is on. Without this a builder could only discover the channel by
+      // reading MESSAGES.md, which is how a feature ships and stays unused.
+      ...(freeTextMessagesEnabled() && !spawnPreferenceMenu
+        ? {
+            selectedMessageActionId:
+              "optional; must exactly match one offered message: legalActions[].id",
+            messageText:
+              "required with selectedMessageActionId; <=280 chars, plain text",
           }
         : {}),
     },
