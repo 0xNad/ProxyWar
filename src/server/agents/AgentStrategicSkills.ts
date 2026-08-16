@@ -728,7 +728,9 @@ function skillForAction(action: LegalAction): StrategicSkill {
     case "deal_accept":
     case "deal_reject":
     case "deal_withdraw":
-      // The deal_* arms (PROXYWAR_TUNE_STRUCTURED_DEALS, default OFF) are
+    case "message":
+      // The deal_* and message arms (PROXYWAR_TUNE_STRUCTURED_DEALS /
+      // PROXYWAR_TUNE_FREETEXT_MESSAGES, both default OFF) are
       // type-exhaustiveness only — flag-gated kinds count as diplomacy.
       return "diplomacy";
     case "donate_gold":
