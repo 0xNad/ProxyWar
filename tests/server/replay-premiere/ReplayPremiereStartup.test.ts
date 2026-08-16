@@ -195,7 +195,14 @@ describe("ReplayPremiere production startup", () => {
       ...restartedContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
-      maxStartupMs: 500,
+      // 8_000 to match this file's other success-path startups. This is a real
+      // wall-clock budget handed to production code, not a test timeout: when
+      // it lapses, ReplayPremiereStartup's `remainingMs <= 0` branch calls
+      // deadlineMiss() and registers nothing, so a loaded machine turned this
+      // into `expected [] to deeply equal [PREMIERE_ID]` rather than a timeout.
+      // The deliberate deadline-exceeded cases below use maxStartupMs: 1, so
+      // 500 was neither a success budget nor a miss budget — just a race.
+      maxStartupMs: 8_000,
     });
     services.push(restarted.service);
     expect(restarted.registeredPremiereIds).toEqual([PREMIERE_ID]);

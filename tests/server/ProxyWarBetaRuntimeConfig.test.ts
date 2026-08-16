@@ -156,6 +156,11 @@ describe("Proxy War beta runtime config", () => {
     expect(runbook).toContain("these eight unsets");
   });
 
+  // macOS-only, so CI (ubuntu-latest on every job) always skips it — a developer
+  // Mac is the ONLY place this ever runs, and therefore the only place its cost
+  // is ever paid: real mkdtemp, chmod, copied helpers and a PATH-shimmed node,
+  // ~1.4s warm but past vitest's old 5s default cold. Covered by the shared 60s
+  // testTimeout in vite.config.ts.
   it.skipIf(process.platform !== "darwin")(
     "binds Clip activation to the outside-Documents content attestation after the private env replaces PATH",
     async () => {
