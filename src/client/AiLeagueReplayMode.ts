@@ -128,27 +128,27 @@ export function isAiLeagueNativeSpectatorUiEnabled(): boolean {
   if (params.has("native-spectator-ui")) {
     return true;
   }
-  // Default ON for the coworld replay surface.
+  // Default ON for EVERY replay surface — the route guard at the top of this
+  // function is the whole condition.
   //
   // The replay was shipping FOUR competing leaderboards: the sidebar
   // <leader-board>, the fixed native one, the overlay's "Standings" section and
   // the broadcast drawer's "Competitors" rail. The native table is the one an
   // OpenFront player already knows how to read, and it is the only one that
   // isn't gated on being a participant, so it becomes the single source of
-  // truth and the overlay's two duplicates are hidden (see the
-  // .ai-league-native-spectator-ui rules in AiLeagueReplayOverlay).
+  // truth.
+  //
+  // This landed keyed on the static-replay bundle plus the /client/* Coworld
+  // routes, which turned the broadcast skin on for a Coworld-served replay and
+  // left ProxyWar's own /ai-league-replay/, /proxywar-replay/,
+  // /openfront-replay/ and /premiere/ routes rendering a bare map: no pinned
+  // leaderboard, no lower third, no analyst drawer. That was a side effect of
+  // detecting the Coworld surface, not a decision to exclude ours — the two
+  // duplicate leaderboards the narrow keying protected against went away with
+  // AiLeagueReplayOverlay, and the clip worker already forces this same skin on
+  // (__openFrontPromoNativeUi, replay-premiere-clip-worker.ts). One league, one
+  // presentation, wherever the replay is served from.
   //
   // Opt out with ?native-spectator-ui=0 (handled above).
-  // Keyed on the STATIC REPLAY BUNDLE, not on the URL path. The hosted bundle
-  // is served from index.html under a content-addressed prefix, so the
-  // /client/replay path checks never match there — only the container-backed
-  // route has that shape.
-  const staticReplayWindow = window as typeof window & {
-    __PROXYWAR_STATIC_REPLAY__?: boolean;
-  };
-  return (
-    staticReplayWindow.__PROXYWAR_STATIC_REPLAY__ === true ||
-    isCoworldReplayRoute() ||
-    isCoworldPlayerRoute()
-  );
+  return true;
 }
