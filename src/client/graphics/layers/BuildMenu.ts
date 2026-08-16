@@ -35,6 +35,7 @@ const hydrogenBombIcon = assetUrl("images/MushroomCloudIconWhite.svg");
 const atomBombIcon = assetUrl("images/NukeIconWhite.svg");
 const portIcon = assetUrl("images/PortIcon.svg");
 const samlauncherIcon = assetUrl("images/SamLauncherIconWhite.svg");
+const warshipIcon = assetUrl("images/BattleshipIconWhite.svg");
 const shieldIcon = assetUrl("images/ShieldIconWhite.svg");
 
 export interface BuildItemDisplay {
@@ -67,6 +68,13 @@ export const buildTable: BuildItemDisplay[][] = [
       description: "build_menu.desc.hydrogen_bomb",
       key: "unit_type.hydrogen_bomb",
       countable: false,
+    },
+    {
+      unitType: UnitType.Warship,
+      icon: warshipIcon,
+      description: "build_menu.desc.warship",
+      key: "unit_type.warship",
+      countable: true,
     },
     {
       unitType: UnitType.Port,

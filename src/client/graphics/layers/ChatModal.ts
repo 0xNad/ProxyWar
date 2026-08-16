@@ -19,8 +19,10 @@ export type QuickChatPhrase = {
 export type QuickChatPhrases = Record<string, QuickChatPhrase[]>;
 
 // Keep retired keys in the schema for historical replay compatibility, but do
-// not offer them in new chat menus.
-const retiredQuickChatKeys = new Set(["attack.build_warships"]);
+// not offer them in new chat menus. Empty since warships returned (2026-08-16
+// operator decision reversed the 2026-08-07 retirement); the mechanism stays
+// for any future phrase retirement.
+const retiredQuickChatKeys = new Set<string>();
 
 export const quickChatPhrases: QuickChatPhrases = Object.fromEntries(
   Object.entries(quickChatData).map(([category, phrases]) => [

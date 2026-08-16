@@ -52,6 +52,12 @@ export type SpectatorEventKind =
   | "target_call"
   | "nuke"
   | "build"
+  // Warship patrol repositioning (warships restored 2026-08-16). Kept as its
+  // own kind so `move_warship` decisions do not fall through `decisionEvent`'s
+  // `default: return null` — the same telemetry blind spot the renewal kinds
+  // above fixed. Deliberately NOT an effect-claim kind: an accepted move order
+  // is not a confirmed effect.
+  | "warship_move"
   | "chat"
   | "emoji"
   | "elimination"
@@ -750,6 +756,26 @@ function eventForRecord(input: {
           ? `${input.actor.username} develops ${String(metadata.unit ?? "infrastructure")}.`
           : `${input.actor.username} orders ${String(metadata.unit ?? "infrastructure")} development.`,
         importance: isMajorBuild(metadata) ? 58 : 26,
+      };
+    case "warship":
+      return {
+        ...eventBase,
+        kind: "build",
+        tone: "info",
+        message: effectConfirmed
+          ? `${input.actor.username} launches a warship.`
+          : `${input.actor.username} orders a warship to sea.`,
+        importance: 52,
+      };
+    case "move_warship":
+      return {
+        ...eventBase,
+        kind: "warship_move",
+        tone: "info",
+        message: effectConfirmed
+          ? `${input.actor.username} redeploys warship patrols.`
+          : `${input.actor.username} orders warship patrols to redeploy.`,
+        importance: 24,
       };
     case "hold":
       return {

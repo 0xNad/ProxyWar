@@ -837,7 +837,7 @@ async function runProxyWarEpisode(
     infiniteTroops: false,
     instantBuild: false,
     randomSpawn: false,
-    disabledUnits: [modules.UnitType.Warship],
+    disabledUnits: [],
     // A bounded territorial tiebreak prevents genuine late-game deadlocks
     // without forcing agents to abandon diplomacy or manufacture an attack.
     // 60 simulated minutes is 36,000 turns, below the 50,000-turn budget used

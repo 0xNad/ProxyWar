@@ -150,7 +150,7 @@ compatible behavior modules in one decision pass:
 5. `economy`: cities, factories, ports, useful upgrades.
 6. `diplomacy`: alliance requests/extensions, support, embargo stops.
 7. `combat`: target marks, embargo pressure, break/reject, attacks.
-8. `naval`: ports and Transport boats.
+8. `naval`: ports, Transport boats, and Warships.
 9. `nuclear_endgame`: SAM coverage, silos, nukes, MIRV pressure.
 10. `utility_social`: delete only when useful, quick chat/emoji sparingly, hold.
 
@@ -585,11 +585,16 @@ Transport state is progress, not a new decision. When `transportStates` marks a
 boat `en_route` or `returning`, do not invent a recall or relaunch action. A
 returning transport still occupies a slot until it reaches friendly shore.
 
-## Retired Warships
+## Warships
 
-Warships are retired from new ProxyWar games. Never request, build, or move one.
-Historical observations and replays may still contain Warship records; treat
-those records as read-only compatibility data, not available strategy.
+Warships are available when the lobby has not disabled them. A `warship` build
+action costs gold and requires an active Port; the new hull spawns at that Port
+and patrols the chosen water tile. `move_warship` repositions an owned
+warship's patrol anchor and costs nothing. Inside patrol range a warship
+automatically fires on enemy transports and warships and captures enemy trade
+ships, so use one to guard your port's trade lane, cover a hostile-facing
+shoreline against landings, or choke a rival port's sea trade. Skip warships
+while you have no Port, no sea threat, and no trade worth protecting.
 
 ## Upgrades
 
