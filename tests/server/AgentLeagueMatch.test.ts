@@ -1937,6 +1937,9 @@ describe("AgentLeagueMatchRunner", () => {
       mapLoader,
     );
     expect(cached.gameMap.hasOwner(tile)).toBe(false);
+    // Three real loads of GameMapType.Asia (2.4M tiles): ~1.5s warm and alone,
+    // several seconds cold or against a loaded parallel suite. Covered by the
+    // shared 60s testTimeout in vite.config.ts rather than a local budget.
   });
 
   it("retains the turn stream on the primary seat only when asked", async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PlayerType } from "../../src/core/game/Game";
+import { PlayerType, Relation } from "../../src/core/game/Game";
 import type {
   AgentObservation,
   LegalAction,
@@ -526,5 +526,95 @@ describe("buildExternalAgentRequestPayload map identity and spawn protocol", () 
         process.env.PROXYWAR_TUNE_FREETEXT_MESSAGES = previousMessages;
       }
     }
+  });
+});
+
+// The renewal fact rides on the observation, but a policy reading fifteen
+// rivals' worth of JSON will not notice one new boolean, and the window to
+// answer is only a few decisions wide. The hint makes it salient, exactly like
+// antiStallHint, and stays null when there is nothing to answer.
+describe("buildExternalAgentRequestPayload alliance renewal hint", () => {
+  const ally = (
+    overrides: Partial<AgentObservation["visiblePlayers"][number]> = {},
+  ): AgentObservation["visiblePlayers"][number] =>
+    ({
+      playerID: "PLAYER02",
+      clientID: "CLNT0002",
+      smallID: 2,
+      name: "Steady Ally",
+      type: PlayerType.Human,
+      isAlive: true,
+      isDisconnected: false,
+      hasSpawned: true,
+      troops: 100,
+      maxTroops: 200,
+      troopRatio: 0.5,
+      gold: "50",
+      tilesOwned: 30,
+      tileShare: 0.03,
+      sharesBorder: true,
+      isAllied: true,
+      isFriendly: true,
+      relation: Relation.Friendly,
+      canAttack: false,
+      canRequestAlliance: false,
+      canDonateGold: false,
+      canDonateTroops: false,
+      canEmbargo: false,
+      hasEmbargoAgainst: false,
+      outgoingAttack: false,
+      incomingAttack: false,
+      hasOutgoingAllianceRequest: false,
+      hasIncomingAllianceRequest: false,
+      allianceInExtensionWindow: true,
+      ...overrides,
+    }) as AgentObservation["visiblePlayers"][number];
+
+  const extendAction: LegalAction = {
+    id: "alliance_extend:PLAYER02",
+    kind: "alliance_extend",
+    label: "extend alliance with Steady Ally",
+    intent: null,
+    risk: { level: "low", score: 0.2 },
+    metadata: { targetID: "PLAYER02", targetName: "Steady Ally" },
+  };
+
+  it("names the ally waiting on a reply and says the alliance lapses without one", () => {
+    const payload = buildExternalAgentRequestPayload({
+      observation: {
+        ...observation,
+        visiblePlayers: [ally({ allianceOtherAgreedToExtend: true })],
+      },
+      legalActions: [extendAction],
+    });
+    expect(payload.decisionSupport.allianceRenewalHint).toContain(
+      "Steady Ally",
+    );
+    expect(payload.decisionSupport.allianceRenewalHint).toContain("BOTH sides");
+    expect(payload.decisionSupport.allianceRenewalHint).toContain("lapses");
+  });
+
+  it("stays null when the ally has not asked, or when no extend is offered", () => {
+    expect(
+      buildExternalAgentRequestPayload({
+        observation: { ...observation, visiblePlayers: [ally()] },
+        legalActions: [extendAction],
+      }).decisionSupport.allianceRenewalHint,
+    ).toBeNull();
+
+    expect(
+      buildExternalAgentRequestPayload({
+        observation: {
+          ...observation,
+          visiblePlayers: [ally({ allianceOtherAgreedToExtend: true })],
+        },
+        legalActions: [],
+      }).decisionSupport.allianceRenewalHint,
+    ).toBeNull();
+
+    expect(
+      buildExternalAgentRequestPayload({ observation, legalActions })
+        .decisionSupport.allianceRenewalHint,
+    ).toBeNull();
   });
 });

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { AttackExecution } from "../../src/core/execution/AttackExecution";
 import { SpawnExecution } from "../../src/core/execution/SpawnExecution";
+import { AllianceExtensionExecution } from "../../src/core/execution/alliance/AllianceExtensionExecution";
 import { AllianceRequestExecution } from "../../src/core/execution/alliance/AllianceRequestExecution";
 import {
   BuildableAttacks,
@@ -19,6 +20,7 @@ import {
   SHARED_LAND_STRUCTURE_BUILD_TYPES,
 } from "../../src/server/agents/AgentObservationBuilder";
 import { AgentBoatOption } from "../../src/server/agents/AgentTypes";
+import { buildExternalAgentRequestPayload } from "../../src/server/agents/ExternalHttpAgentBrain";
 import { LegalActionBuilder } from "../../src/server/agents/LegalActionBuilder";
 import {
   createGame as createPathfindingGame,
@@ -609,6 +611,128 @@ describe("AgentObservationBuilder rival-rival coalition graph", () => {
     );
     expect(seenA?.underSiege).toBe(true);
     expect(seenA?.incomingAttack).toBe(false);
+  });
+
+  // Renewal is MUTUAL: AllianceExtensionExecution extends only once
+  // bothAgreedToExtend(). PlayerImpl.allianceInfo() has always computed both
+  // agreement flags; the observation used to drop them, so an agent could not
+  // tell "my ally is waiting on me" from "renewal is unavailable" and 40 of 42
+  // hosted renewal attempts died one-sided.
+  it("shows an agent that its ally has already asked to renew", async () => {
+    const game = await threePlayerGame();
+    ally(game, "P_AGENT", "P_A");
+    // The window is the last 300 of an alliance's 3,000 ticks. Widen the prompt
+    // offset rather than simulating 2,700 ticks: the fields under test are the
+    // plain agreement flags, so this stays fast and deterministic.
+    vi.spyOn(game.config(), "allianceExtensionPromptOffset").mockReturnValue(
+      1_000_000,
+    );
+
+    // The RIVAL asks first. The agent has not answered, so the alliance is one
+    // reply away from renewing and one silence away from lapsing.
+    game.addExecution(
+      new AllianceExtensionExecution(game.player("P_A"), "P_AGENT"),
+    );
+    game.executeNextTick();
+
+    const seenA = observe(game).visiblePlayers.find(
+      (player) => player.playerID === "P_A",
+    );
+    expect(seenA?.allianceOtherAgreedToExtend).toBe(true);
+    expect(seenA?.allianceSelfAgreedToExtend).toBe(false);
+    expect(seenA?.canExtendAlliance).toBe(true);
+
+    // ...and the offered action says so, which is the only evidence path that
+    // reaches decisions.jsonl without touching the decision-log allowlist.
+    const extendAction = new LegalActionBuilder()
+      .build({ observation: observe(game) })
+      .find((action) => action.id === "alliance_extend:P_A");
+    expect(extendAction?.metadata?.legalReason).toContain(
+      "the ally has already asked to renew",
+    );
+  });
+
+  it("shows the asker that it has asked and cannot ask again", async () => {
+    const game = await threePlayerGame();
+    ally(game, "P_AGENT", "P_A");
+    vi.spyOn(game.config(), "allianceExtensionPromptOffset").mockReturnValue(
+      1_000_000,
+    );
+
+    // This time the AGENT asks. The core refuses a second ask from the same
+    // side, so canExtendAlliance goes false and only the new self flag
+    // distinguishes "already asked" from "renewal unavailable".
+    game.addExecution(
+      new AllianceExtensionExecution(game.player("P_AGENT"), "P_A"),
+    );
+    game.executeNextTick();
+
+    const seenA = observe(game).visiblePlayers.find(
+      (player) => player.playerID === "P_A",
+    );
+    expect(seenA?.allianceSelfAgreedToExtend).toBe(true);
+    expect(seenA?.allianceOtherAgreedToExtend).toBe(false);
+    expect(seenA?.canExtendAlliance).toBe(false);
+  });
+
+  // End-to-end over a REAL game: the flags feed the diplomacy affordance that
+  // both our own brain and every external policy read, and the external request
+  // payload's hint. Unit tests cover each link; this proves the chain.
+  it("recommends answering, and tells an external policy who is waiting", async () => {
+    const game = await threePlayerGame();
+    ally(game, "P_AGENT", "P_A");
+    vi.spyOn(game.config(), "allianceExtensionPromptOffset").mockReturnValue(
+      1_000_000,
+    );
+    game.addExecution(
+      new AllianceExtensionExecution(game.player("P_A"), "P_AGENT"),
+    );
+    game.executeNextTick();
+
+    const observeAs = (profile: "diplomatic" | "aggressive") =>
+      new AgentObservationBuilder().build({
+        agentID: "agent-1",
+        clientID: "CLNT_AGENT",
+        username: "Agent",
+        profile,
+        gameID: "RENEWAL",
+        turnNumber: 10,
+        gameState: game,
+      });
+
+    // A diplomacy-leaning agent now treats answering as its best social move.
+    const diplomatic = observeAs("diplomatic");
+    expect(
+      diplomatic.tacticalAffordances?.personalityDiplomacyPressure,
+    ).toMatchObject({
+      bestSocialActionID: "alliance_extend:P_A",
+      bestSocialActionKind: "alliance_extend",
+      bestSocialTargetName: "Rival A",
+    });
+
+    // An aggressive agent may still rank pressuring a weak neighbour higher —
+    // that is its profile, not a defect. What must not happen is the agent
+    // being left unaware, so the external payload still names who is waiting.
+    for (const observation of [diplomatic, observeAs("aggressive")]) {
+      const payload = buildExternalAgentRequestPayload({
+        observation,
+        legalActions: new LegalActionBuilder().build({ observation }),
+      });
+      expect(payload.decisionSupport.allianceRenewalHint).toContain("Rival A");
+      expect(payload.decisionSupport.allianceRenewalHint).toContain(
+        "BOTH sides",
+      );
+    }
+  });
+
+  it("omits both renewal flags for a rival with no alliance", async () => {
+    const game = await threePlayerGame();
+    const seenB = observe(game).visiblePlayers.find(
+      (player) => player.playerID === "P_B",
+    );
+    expect(seenB?.isAllied).toBe(false);
+    expect(seenB?.allianceSelfAgreedToExtend).toBeUndefined();
+    expect(seenB?.allianceOtherAgreedToExtend).toBeUndefined();
   });
 });
 

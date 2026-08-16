@@ -1,8 +1,9 @@
+import { execFileSync } from "child_process";
 import { randomUUID } from "crypto";
 import fs from "fs";
+import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
-import os from "os";
 import winston from "winston";
 import { GameEnv, ServerConfig } from "../core/configuration/Config";
 import {
@@ -35,17 +36,15 @@ import {
   createAgentParticipants,
 } from "../server/agents/AgentLeagueMatch";
 import { writeAgentLearningArtifacts } from "../server/agents/AgentLearningArtifacts";
-import { createClaudeCliLlmProviderFromEnv } from "../server/agents/ClaudeCliLlmProvider";
-import {
-  buildAgentMatchStory,
-  type AgentProfileDifferentiationGate,
-} from "../server/agents/AgentMatchStory";
 import {
   AgentLocalGameMirror,
   waitForMirrorState,
 } from "../server/agents/AgentLocalGameMirror";
+import {
+  buildAgentMatchStory,
+  type AgentProfileDifferentiationGate,
+} from "../server/agents/AgentMatchStory";
 import { AgentObservationBuilder } from "../server/agents/AgentObservationBuilder";
-import { StrategyAgentBrain } from "../server/agents/StrategyAgentBrain";
 import {
   AgentSettings,
   FrontierPolicyExecutor,
@@ -54,12 +53,17 @@ import {
   PlannerExecutorAgentBrain,
   RuleAgentPlanner,
 } from "../server/agents/AgentPlannerExecutor";
+import { spatialObservationEmissionCount } from "../server/agents/AgentSpatialObservation";
 import {
   AgentSpectatorSnapshot,
   buildAgentSpectatorReplay,
   buildAgentSpectatorSnapshot,
   buildGameRecordFromServerMessages,
 } from "../server/agents/AgentSpectatorReplay";
+import {
+  spatialMinimapEnabled,
+  spatialObservationEnabled,
+} from "../server/agents/AgentTunables";
 import {
   AgentBrain,
   AgentBrainType,
@@ -68,12 +72,13 @@ import {
   AgentObservation,
   AgentRuntimeMode,
   AgentStrategyProfile,
+  agentStrategyProfiles,
   AgentVisiblePlayer,
   LegalAction,
   LegalActionKind,
-  agentStrategyProfiles,
   legalActionKinds,
 } from "../server/agents/AgentTypes";
+import { createClaudeCliLlmProviderFromEnv } from "../server/agents/ClaudeCliLlmProvider";
 import {
   CodexCliLlmProvider,
   CodexCliLlmProviderConfig,
@@ -86,6 +91,7 @@ import {
 } from "../server/agents/LegalActionBuilder";
 import { LlmAgentBrain } from "../server/agents/LlmAgentBrain";
 import { LlmProviderConfigError } from "../server/agents/LlmProvider";
+import { StrategyAgentBrain } from "../server/agents/StrategyAgentBrain";
 import { GameServer } from "../server/GameServer";
 
 type FrontierBrainMode =
@@ -271,6 +277,7 @@ async function run() {
   });
   const summaryPayload = {
     config,
+    attribution: benchmarkAttribution(),
     pass:
       runSummaries.filter((summary) => summary.won).length >= config.targetWins,
     requiredWins: config.targetWins,
@@ -300,6 +307,37 @@ async function run() {
     diagnosis: path.join(artifactDir, "performance-diagnosis.md"),
     learning: learningPaths.markdownPath,
   });
+}
+
+function benchmarkAttribution() {
+  let sourceCommit = "unavailable";
+  let sourceTreeState: "clean" | "dirty" | "unavailable" = "unavailable";
+  try {
+    sourceCommit = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+    }).trim();
+    sourceTreeState =
+      execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], {
+        cwd: process.cwd(),
+        encoding: "utf8",
+      }).trim() === ""
+        ? "clean"
+        : "dirty";
+  } catch {
+    // The benchmark remains runnable from source archives without Git. Such
+    // output is explicitly unattributable rather than silently called clean.
+  }
+  return {
+    sourceCommit,
+    sourceTreeState,
+    spatialObservationEnabled: spatialObservationEnabled(),
+    spatialMinimapEnabled: spatialMinimapEnabled(),
+    // Observed emission, not the flag reading. An OFF/ON behavioral-equality
+    // check passes just as green when the ON arm produced nothing at all, so
+    // the A/B gate asserts this separately.
+    spatialObservationsEmitted: spatialObservationEmissionCount(),
+  };
 }
 
 async function runSingleMatch(input: {
@@ -672,10 +710,7 @@ function createBrain(
   });
 }
 
-function withBrainClose<T extends AgentBrain>(
-  brain: T,
-  close: () => void,
-): T {
+function withBrainClose<T extends AgentBrain>(brain: T, close: () => void): T {
   (brain as ClosableAgentBrain).close = close;
   return brain;
 }
@@ -1862,16 +1897,26 @@ function profileDifferentiationBenchmarkReport(
     profileRows.length === 0
       ? "No per-profile signatures were recorded."
       : markdownTable(
-          ["Run", "Profile", "Signature", "Score", "Non-hold", "Hold", "Top Actions"],
-          profileRows.slice(0, 16).map((row) => [
-            String(row.run),
-            row.profile,
-            row.signature,
-            `${row.score}/100`,
-            percent(row.nonHoldRate),
-            percent(row.holdRate),
-            row.topActions,
-          ]),
+          [
+            "Run",
+            "Profile",
+            "Signature",
+            "Score",
+            "Non-hold",
+            "Hold",
+            "Top Actions",
+          ],
+          profileRows
+            .slice(0, 16)
+            .map((row) => [
+              String(row.run),
+              row.profile,
+              row.signature,
+              `${row.score}/100`,
+              percent(row.nonHoldRate),
+              percent(row.holdRate),
+              row.topActions,
+            ]),
         ),
   ];
 }

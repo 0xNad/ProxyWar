@@ -555,6 +555,132 @@ describe("AgentTacticalAffordances", () => {
       "personality_diplomacy_pressure",
     );
   });
+
+  // Renewal is mutual: the core extends an alliance only once BOTH sides have
+  // asked, inside a window a handful of decisions wide. An ally that already
+  // asked is waiting on this agent, so answering has a deadline and a
+  // guaranteed effect — it must outrank an ordinary alliance offer.
+  it("ranks answering an ally's pending renewal above a fresh alliance offer", () => {
+    const base = observationWithTroops({
+      troops: 240_000,
+      maxTroops: 300_000,
+    });
+    const rival = (
+      overrides: Partial<AgentObservation["visiblePlayers"][number]>,
+    ): AgentObservation["visiblePlayers"][number] => ({
+      playerID: "ally-1",
+      clientID: "ally-1",
+      smallID: 2,
+      name: "Steady Ally",
+      type: PlayerType.Human,
+      isAlive: true,
+      isDisconnected: false,
+      hasSpawned: true,
+      troops: 120_000,
+      maxTroops: 260_000,
+      troopRatio: 0.46,
+      gold: "10000",
+      tilesOwned: 5_000,
+      tileShare: 0.05,
+      sharesBorder: true,
+      isAllied: true,
+      isFriendly: true,
+      relation: Relation.Friendly,
+      canAttack: false,
+      canRequestAlliance: false,
+      canDonateGold: false,
+      canDonateTroops: false,
+      canEmbargo: false,
+      hasEmbargoAgainst: false,
+      outgoingAttack: false,
+      incomingAttack: false,
+      hasOutgoingAllianceRequest: false,
+      hasIncomingAllianceRequest: false,
+      relativeTroopRatio: 1.55,
+      ...overrides,
+    });
+    const extendAction: LegalAction = {
+      id: "alliance_extend:ally-1",
+      kind: "alliance_extend",
+      label: "extend alliance with Steady Ally",
+      intent: null,
+      risk: { level: "low", score: 0.2 },
+      metadata: { targetID: "ally-1", targetName: "Steady Ally" },
+    };
+    const requestAction: LegalAction = {
+      id: "alliance:stranger-1",
+      kind: "alliance_request",
+      label: "Request alliance with Stranger",
+      intent: null,
+      risk: { level: "low", score: 0.2 },
+      metadata: { targetID: "stranger-1", targetName: "Stranger" },
+    };
+    const stranger = rival({
+      playerID: "stranger-1",
+      clientID: "stranger-1",
+      name: "Stranger",
+      isAllied: false,
+      isFriendly: false,
+      relation: Relation.Neutral,
+      canRequestAlliance: true,
+    });
+
+    const affordanceFor = (input: {
+      allyAsked: boolean;
+      allyIsLeader?: boolean;
+    }) =>
+      buildAgentTacticalAffordances({
+        observation: {
+          ...base,
+          profile: "diplomatic",
+          turnNumber: 1_100,
+          ...(input.allyIsLeader === true
+            ? {
+                endgame: {
+                  winner: null,
+                  leaderID: "ally-1",
+                  leaderName: "Steady Ally",
+                  leaderTileShare: 0.4,
+                  ownTileShare: 0.1,
+                  turnsToTimer: null,
+                },
+              }
+            : {}),
+          visiblePlayers: [
+            rival({
+              allianceInExtensionWindow: true,
+              ...(input.allyAsked ? { allianceOtherAgreedToExtend: true } : {}),
+            }),
+            stranger,
+          ],
+        },
+        legalActions: [requestAction, extendAction, holdAction()],
+      }).personalityDiplomacyPressure;
+
+    // A pending renewal is worth a fixed, sizeable bump and nothing else moves.
+    const quiet = affordanceFor({ allyAsked: false });
+    const waiting = affordanceFor({ allyAsked: true });
+    expect(quiet?.bestSocialActionID).toBe("alliance_extend:ally-1");
+    expect(waiting?.bestSocialScore ?? 0).toBe(
+      (quiet?.bestSocialScore ?? 0) + 40,
+    );
+
+    // The bump is deliberately large enough to survive the alliance-with-the-
+    // leader penalty: when the leader is the ally waiting on you, renewing is
+    // still the right move, and without the bump it loses.
+    expect(
+      affordanceFor({ allyAsked: false, allyIsLeader: true })
+        ?.bestSocialActionID,
+    ).not.toBe("alliance_extend:ally-1");
+    expect(
+      affordanceFor({ allyAsked: true, allyIsLeader: true }),
+    ).toMatchObject({
+      bestSocialActionID: "alliance_extend:ally-1",
+      bestSocialActionKind: "alliance_extend",
+      bestSocialTargetName: "Steady Ally",
+      recommended: true,
+    });
+  });
 });
 
 function observationWithTroops(input: {

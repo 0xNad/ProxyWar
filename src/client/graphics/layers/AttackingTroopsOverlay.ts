@@ -82,6 +82,7 @@ export class AttackingTroopsOverlay implements Layer {
     this.container.style.pointerEvents = "none";
     // z-index 4 places labels above NameLayer (z-index 3).
     this.container.style.zIndex = "4";
+    this.container.dataset.pwLayer = "attacking-troops";
     document.body.appendChild(this.container);
 
     this.labelTemplate = this.createLabelTemplate();
@@ -93,7 +94,13 @@ export class AttackingTroopsOverlay implements Layer {
     this.eventBus.on(AlternateViewEvent, this.onAlternateView);
   }
 
-  destroy() {
+  /**
+   * Layer-contract teardown. This was named `destroy()`, which
+   * GameRenderer.dispose() never calls — so rewinds stranded frozen troop
+   * counters on document.body exactly like NameLayer's labels. Idempotent;
+   * safe before init().
+   */
+  dispose() {
     if (!this.container) return;
     this.clearAllLabels();
     this.container.remove();

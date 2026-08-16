@@ -40,6 +40,13 @@ export type SpectatorEventKind =
   | "alliance_request"
   | "alliance_formed"
   | "alliance_break"
+  // Renewal / refusal diplomacy. Before these existed, an agent selecting
+  // `alliance_extend` or `alliance_reject` fell through `decisionEvent`'s
+  // `default: return null` and produced NO spectator event at all, so hosted
+  // telemetry reported zero extensions even in episodes whose own replay
+  // carried `allianceExtension` intents.
+  | "alliance_renewal_offer"
+  | "alliance_reject"
   | "trade"
   | "embargo"
   | "target_call"
@@ -551,6 +558,44 @@ function eventForRecord(input: {
               ? `${input.actor.username} breaks alliance with ${target.username}.`
               : `${input.actor.username} moves to break alliance with ${target.username}.`,
         importance: 100,
+      };
+    case "alliance_extend":
+      if (target !== null && effectConfirmed) {
+        mutatePair(input.relationshipMap, input.actor.agentID, target.agentID, {
+          trust: 10,
+          tension: -4,
+          turnNumber: input.record.turnNumber,
+          reason: `Offered to renew the alliance with ${target.username}`,
+        });
+      }
+      return {
+        ...eventBase,
+        kind: "alliance_renewal_offer",
+        tone: "pact",
+        message:
+          target === null
+            ? `${input.actor.username} offers to renew an expiring alliance.`
+            : `${input.actor.username} offers to renew the expiring alliance with ${target.username}.`,
+        importance: 74,
+      };
+    case "alliance_reject":
+      if (target !== null && effectConfirmed) {
+        mutatePair(input.relationshipMap, input.actor.agentID, target.agentID, {
+          trust: -12,
+          tension: 8,
+          turnNumber: input.record.turnNumber,
+          reason: `Refused an alliance request from ${target.username}`,
+        });
+      }
+      return {
+        ...eventBase,
+        kind: "alliance_reject",
+        tone: "threat",
+        message:
+          target === null
+            ? `${input.actor.username} refuses a pact.`
+            : `${input.actor.username} refuses ${target.username}'s pact.`,
+        importance: 66,
       };
     case "donate_gold":
     case "donate_troops":
@@ -1511,6 +1556,8 @@ function buildCommunicationThreads(
         "alliance_request",
         "alliance_formed",
         "alliance_break",
+        "alliance_renewal_offer",
+        "alliance_reject",
         "trade",
         "target_call",
         "embargo",

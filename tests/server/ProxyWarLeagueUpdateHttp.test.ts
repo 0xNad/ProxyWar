@@ -282,7 +282,7 @@ describe("league update HTTP contract", () => {
       waitForServer(openOrigin, () => openServerOutput, openChild),
       waitForServer(degradedOrigin, () => degradedServerOutput, degradedChild),
     ]);
-  }, 30_000);
+  }, 90_000);
 
   afterAll(async () => {
     await Promise.all([
@@ -827,7 +827,13 @@ async function waitForServer(
   output: () => string,
   child: ChildProcess,
 ): Promise<void> {
-  const deadline = Date.now() + 12_000;
+  // 45s, and the beforeAll below allows 90s: this hook boots THREE real league
+  // servers concurrently via npx tsx and waits for all of them. 12s inside a 30s
+  // hook was enough alone but not against a loaded parallel suite, where the
+  // in-test deadline threw first and failed the whole suite as "Timed out
+  // waiting for league server". Mirrors PublicSurfaceSecurity's 45s wait, with
+  // extra hook headroom because that one boots a single server.
+  const deadline = Date.now() + 45_000;
   while (Date.now() < deadline) {
     if (child.exitCode !== null) {
       throw new Error(`League server exited early:\n${output()}`);
