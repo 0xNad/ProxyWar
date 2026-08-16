@@ -106,6 +106,7 @@ import { raiseRewindCurtain } from "./RewindCurtain";
 import "./SinglePlayerModal";
 import {
   clearSpectatorReplay,
+  publishSpectatorReplay,
   spectatorReplaySnapshots,
 } from "./SpectatorReplayStore";
 import { StoreModal } from "./Store";
@@ -391,11 +392,19 @@ interface AiLeagueReplayOpenOptions {
    *
    * The old `loadArtifactDetails` flag went with that overlay: it gated
    * `AiLeagueReplayArtifacts.loadAiLeagueReplayDetails`, which 0.1.42 deletes.
-   * No route fetches `replay-ui.json` any more, hosted or bundled.
+   * No route fetches `replay-ui.json` any more, hosted or bundled — the
+   * envelope replaced it as the decision source (see
+   * `hydrateHostedBroadcastArtifacts`, which is how a HOSTED route gets one).
    */
   inlineSpectatorTelemetry?: unknown | null;
   inlineMatchSummary?: unknown | null;
   inlineRunResults?: unknown | null;
+  /**
+   * The hosted route's own copy of the envelope, retained on the rewind
+   * context the same way `gameRecord` is: a backward seek re-enters
+   * `openAiLeagueReplay` and must not pay for these artifacts twice.
+   */
+  inlineSpectatorReplay?: unknown | null;
   /**
    * The static envelope parser has published this match's snapshot series to
    * SpectatorReplayStore. Retained across an in-place rewind of the same
@@ -1395,6 +1404,35 @@ class Client {
     }
   }
 
+  /**
+   * A broadcast side artifact, or null if it is not there.
+   *
+   * Deliberately NOT routed through `failReplayLoading`: these enrich the
+   * replay, they are not the replay. `null` is a first-class answer — a
+   * premiere still filling in, a match whose extras rotated off the mirror
+   * ahead of its record, or a route that never published them at all. The
+   * caller's `?? null` fallbacks all already mean "no beats / no decisions",
+   * which is exactly right and strictly better than a dead board.
+   *
+   * The abort signal is the ATTEMPT's, so a leave or a rewind mid-flight
+   * cancels these with everything else rather than resolving into a page that
+   * has moved on.
+   */
+  private async fetchBroadcastSideArtifact(
+    url: string,
+    signal: AbortSignal,
+  ): Promise<unknown | null> {
+    try {
+      const response = await fetch(url, { signal });
+      if (!response.ok) return null;
+      return await response.json();
+    } catch (error) {
+      if (signal.aborted) return null;
+      console.warn(`Broadcast side artifact unavailable: ${url}`, error);
+      return null;
+    }
+  }
+
   private async openAiLeagueReplay(
     runID: string,
     options: AiLeagueReplayOpenOptions = {},
@@ -1497,9 +1535,62 @@ class Client {
       clearTimeout(recordTimeout);
     }
 
+    /**
+     * THE WHY ARTIFACTS, on the hosted route.
+     *
+     * The static bundle carries the envelope and the telemetry inline, so the
+     * Coworld surface lit up the analyst drawer, the dossier's "last decision,
+     * and why", the war-room toasts and the scrubber's beat markers. Nothing
+     * fetched them on `/ai-league-replay/` — 0.1.42 deleted the hosted artifact
+     * loader along with the league overlay, and the envelope path that replaced
+     * it was only ever wired into `openCoworldStaticReplay`. Same match, same
+     * mirror, and proxywar.xyz rendered a bare board while Coworld rendered the
+     * broadcast: the drawer hid itself (`[data-on="0"]`, correctly — it had no
+     * decisions), the toasts had nothing to say, and the scrubber had no beats.
+     *
+     * The artifacts were published the whole time (`spectator-replay.json`,
+     * `spectator-telemetry.json`, beside the `game-record.json` fetched above);
+     * only the fetch was missing. ~200 KB compressed for the pair against the
+     * bundle's own 836 KB, so this is hydrate-and-wait rather than a
+     * progressive fill: `mountBroadcastBeats` below consumes the telemetry
+     * ONCE at mount, and a late arrival would leave the beat feed permanently
+     * empty on exactly the surfaces this exists to fill.
+     *
+     * Best-effort by construction. A 404, a parse failure or a timeout costs
+     * the WHY surfaces and nothing else — the board still plays. That matters
+     * most for the premiere and rotated-off-the-mirror routes, where a replay
+     * legitimately outlives its side artifacts.
+     */
+    if (options.useStaticSpectatorSnapshots !== true) {
+      const [spectatorReplay, spectatorTelemetry] = await Promise.all([
+        options.inlineSpectatorReplay !== undefined
+          ? Promise.resolve(options.inlineSpectatorReplay)
+          : this.fetchBroadcastSideArtifact(
+              `${artifactBasePath}/spectator-replay.json`,
+              attemptController.signal,
+            ),
+        options.inlineSpectatorTelemetry !== undefined
+          ? Promise.resolve(options.inlineSpectatorTelemetry)
+          : this.fetchBroadcastSideArtifact(
+              `${artifactBasePath}/spectator-telemetry.json`,
+              attemptController.signal,
+            ),
+      ]);
+      // A newer attempt (or a leave) landed while those were in flight; its
+      // own cleanup already owns the page. Publishing now would hand the new
+      // match this one's decisions.
+      if (this.replayAttemptCleanup !== cleanupAttempt) return;
+      options = { ...options, inlineSpectatorReplay: spectatorReplay };
+      if (options.inlineSpectatorTelemetry === undefined) {
+        options = { ...options, inlineSpectatorTelemetry: spectatorTelemetry };
+      }
+    }
+
     // The record is now in hand however it got here (fetched above, or handed
     // in by the static bundle). Retaining it is what makes a backward seek a
     // ~4s resimulation instead of a 15-25s page load — see the field's doc.
+    // The side artifacts ride along for the same reason: a rewind re-enters
+    // this method and must not refetch what this attempt already holds.
     this.replayRewindContext = { runID, options: { ...options, gameRecord } };
 
     // Publish the match's SCHEDULED end (gameRecord.info.num_turns) where the
@@ -1553,7 +1644,18 @@ class Client {
     // deleted both the overlay and that artifact loader, so the envelope is
     // now the ONLY decision source on every route, not just the bundle.
     if (options.useStaticSpectatorSnapshots !== true) {
+      // Clear THEN refill from this attempt's own envelope (hydrated above, or
+      // carried on the rewind context). The clear is what stops a previous
+      // match's log leaking across an SPA transition; without the refill right
+      // behind it the hosted route would keep the empty store it has had since
+      // 0.1.42 deleted the artifact loader.
       clearSpectatorReplay();
+      if (
+        options.inlineSpectatorReplay !== null &&
+        options.inlineSpectatorReplay !== undefined
+      ) {
+        publishSpectatorReplay(options.inlineSpectatorReplay);
+      }
     }
     publishReplayDecisions(
       decisionsFromSpectatorSnapshots(spectatorReplaySnapshots()),
