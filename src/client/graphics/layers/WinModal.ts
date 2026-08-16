@@ -111,6 +111,18 @@ export class WinModal extends LitElement implements Layer {
     this.requestUpdate();
   }
 
+  /**
+   * Layer-contract teardown: <win-modal> is a top-level element (index.html)
+   * that survives an in-place rewind, so the winner/death banner must be
+   * re-hidden when the renderer is disposed or it floats over the rebuilt
+   * match forever. Idempotent; safe before init().
+   */
+  dispose() {
+    this.hasShownDeathModal = false;
+    this.otherPlayerWinnerRawName = null;
+    this.hide();
+  }
+
   init() {}
 
   tick() {

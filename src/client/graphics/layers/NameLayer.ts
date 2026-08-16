@@ -80,6 +80,16 @@ export class NameLayer implements Layer {
   private emojiTemplate: HTMLDivElement;
   private replayNameTransitionMs = 0;
   private progressivePresentationIntervalMs: number | null = null;
+  // Stored rather than inline so dispose() can actually take them back off
+  // the page-lifetime EventBus (Layer teardown contract).
+  private readonly onReplaySpeedChangeHandler = (
+    event: ReplaySpeedChangeEvent,
+  ) => this.onReplaySpeedChange(event);
+  private readonly onReplayPresentationCadenceHandler = (
+    event: ReplayPresentationCadenceEvent,
+  ) => this.onReplayPresentationCadence(event);
+  private readonly onAlternateViewHandler = (e: AlternateViewEvent) =>
+    this.onAlternateViewChange(e);
 
   constructor(
     private game: GameView,
@@ -93,6 +103,26 @@ export class NameLayer implements Layer {
 
   redraw() {} // not affected by Canvas/WebGL context loss as this layer is DOM-based
 
+  /**
+   * Layer-contract teardown: the label container lives on document.body and
+   * the EventBus outlives the game, so an in-place rewind that rebuilds the
+   * renderer must take both back — otherwise every backward seek strands a
+   * frozen copy of all name labels on screen. Idempotent; safe before init().
+   */
+  public dispose() {
+    if (this.container) {
+      this.container.remove();
+    }
+    this.renders = [];
+    this.seenPlayers.clear();
+    this.eventBus.off(ReplaySpeedChangeEvent, this.onReplaySpeedChangeHandler);
+    this.eventBus.off(
+      ReplayPresentationCadenceEvent,
+      this.onReplayPresentationCadenceHandler,
+    );
+    this.eventBus.off(AlternateViewEvent, this.onAlternateViewHandler);
+  }
+
   public init() {
     this.container = document.createElement("div");
     this.container.style.position = "fixed";
@@ -100,6 +130,7 @@ export class NameLayer implements Layer {
     this.container.style.top = "50%";
     this.container.style.pointerEvents = "none";
     this.container.style.zIndex = "2";
+    this.container.dataset.pwLayer = "names";
     document.body.appendChild(this.container);
 
     // Add CSS keyframes for traitor icon flashing animation
@@ -125,11 +156,10 @@ export class NameLayer implements Layer {
       this.replayNameTransitionMs = replayPresentationTransitionDurationMs(
         defaultReplaySpeedMultiplier,
       );
-      this.eventBus.on(ReplaySpeedChangeEvent, (event) =>
-        this.onReplaySpeedChange(event),
-      );
-      this.eventBus.on(ReplayPresentationCadenceEvent, (event) =>
-        this.onReplayPresentationCadence(event),
+      this.eventBus.on(ReplaySpeedChangeEvent, this.onReplaySpeedChangeHandler);
+      this.eventBus.on(
+        ReplayPresentationCadenceEvent,
+        this.onReplayPresentationCadenceHandler,
       );
     }
 
@@ -150,7 +180,7 @@ export class NameLayer implements Layer {
     this.emojiTemplate.style.top = "50%";
     this.emojiTemplate.style.transform = "translateY(-50%)";
 
-    this.eventBus.on(AlternateViewEvent, (e) => this.onAlternateViewChange(e));
+    this.eventBus.on(AlternateViewEvent, this.onAlternateViewHandler);
   }
 
   private onAlternateViewChange(event: AlternateViewEvent) {
