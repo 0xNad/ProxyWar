@@ -6,11 +6,15 @@ import type { UIState } from "../../../src/client/graphics/UIState";
 import { EventBus } from "../../../src/core/EventBus";
 import type { GameView } from "../../../src/core/game/GameView";
 
-function makeRenderer(intentEpoch: number) {
+function makeRenderer(viewerOwnsCamera: boolean) {
   const canvas = document.createElement("canvas");
   canvas.getContext = vi.fn(() => ({})) as never;
   const transform = {
-    userCameraIntentEpoch: vi.fn(() => intentEpoch),
+    // Ownership, not the epoch: automatic camera commands advance the epoch
+    // too, so the renderer must never branch on it. See the FitWholeMapEvent
+    // regression in TransformHandler.test.ts.
+    replayCameraIsViewerOwned: vi.fn(() => viewerOwnsCamera),
+    userCameraIntentEpoch: vi.fn(() => (viewerOwnsCamera ? 2 : 0)),
     updateBroadcastLayout: vi.fn(),
     centerAll: vi.fn(),
     updateCanvasBoundingRect: vi.fn(),
@@ -42,7 +46,7 @@ describe("GameRenderer replay camera resize lifecycle", () => {
   it("preserves a manually altered camera while still refreshing broadcast layout", () => {
     (window as unknown as Record<string, unknown>).__PROXYWAR_AI_REPLAY__ =
       true;
-    const { renderer, transform } = makeRenderer(2);
+    const { renderer, transform } = makeRenderer(true);
     const hooks = renderer as unknown as RendererHooks;
 
     hooks.refitBoardToViewport();
@@ -54,7 +58,7 @@ describe("GameRenderer replay camera resize lifecycle", () => {
   it("still refits an untouched replay camera", () => {
     (window as unknown as Record<string, unknown>).__PROXYWAR_AI_REPLAY__ =
       true;
-    const { renderer, transform } = makeRenderer(0);
+    const { renderer, transform } = makeRenderer(false);
     const hooks = renderer as unknown as RendererHooks;
 
     hooks.refitBoardToViewport();
@@ -74,7 +78,7 @@ describe("GameRenderer replay camera resize lifecycle", () => {
       return id;
     });
     vi.stubGlobal("cancelAnimationFrame", (id: number) => callbacks.delete(id));
-    const { renderer, transform } = makeRenderer(0);
+    const { renderer, transform } = makeRenderer(false);
     const hooks = renderer as unknown as RendererHooks;
 
     hooks.onFullscreenChange();

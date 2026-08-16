@@ -362,11 +362,27 @@ export class TransformHandler {
   private spectatorZoomFloor = 0;
 
   /**
-   * Monotonic replay-only boundary for deliberate viewer camera commands.
+   * Monotonic replay-only boundary for NEWER CAMERA COMMANDS of any origin.
    * Async fits and cinematic restores snapshot it and may only land while it
-   * is unchanged.
+   * is unchanged. The automatic end-of-match whole-map fit advances it too:
+   * a cinematic restore captured before that fit must not land on top of the
+   * finale framing.
    */
   private replayUserCameraIntentEpoch = 0;
+  /**
+   * Whether a HUMAN framed this replay camera — a drag, a zoom, or a
+   * competitor locate. Deliberately NOT the same thing as the epoch above.
+   *
+   * `WinModal` emits `FitWholeMapEvent` by itself the moment a match ends
+   * (its own comment: "the sole automatic trigger for it"), and it ticks on
+   * the broadcast surface, so counting that event as viewer ownership marked
+   * EVERY replay watched to its end as viewer-owned. `refitBoardToViewport()`
+   * then refused to refit, and going fullscreen after a finish left the board
+   * at the pre-fullscreen scale in a much larger frame — 12.7% of a
+   * 1280x720 -> 2560x1440 transition, i.e. the exact "small map in a big grey
+   * field" report CAM-02 exists to fix, reintroduced on the commonest path.
+   */
+  private replayViewerOwnsCamera = false;
   /** Invalidates asynchronous territory fits after any newer camera command. */
   private fitRequestToken = 0;
 
@@ -395,7 +411,12 @@ export class TransformHandler {
     this.subscribe(GoToUnitEvent, (e: GoToUnitEvent) => this.onGoToUnit(e));
     this.subscribe(CenterCameraEvent, () => this.centerCamera());
     this.subscribe(FitWholeMapEvent, () => {
-      this.recordReplayUserCameraIntent();
+      // Supersedes a pending fit or cinematic restore, but is NOT a viewer
+      // choice — see replayViewerOwnsCamera. It also returns the camera to its
+      // canonical automatic framing, so a later resize is free to refit from
+      // there and ownership is released rather than merely withheld.
+      this.advanceCameraEpoch();
+      this.replayViewerOwnsCamera = false;
       this.centerAll(0.95, { forceWholeMap: true });
     });
 
@@ -427,6 +448,7 @@ export class TransformHandler {
     // it even when no later user intent occurs, so a disposed replay can never
     // mutate after an in-place rewind replaces it.
     this.replayUserCameraIntentEpoch++;
+    this.replayViewerOwnsCamera = false;
     this.fitRequestToken++;
     this.clearTarget();
     for (const unsubscribe of this.subscriptions.splice(0)) unsubscribe();
@@ -436,9 +458,25 @@ export class TransformHandler {
     return this.replayUserCameraIntentEpoch;
   }
 
-  private recordReplayUserCameraIntent(): number {
+  /**
+   * Whether a human, rather than an automatic camera command, framed the
+   * current replay view. `GameRenderer.refitBoardToViewport()` branches on
+   * this — never on the epoch, which automatic commands also advance.
+   */
+  public replayCameraIsViewerOwned(): boolean {
+    return this.replayViewerOwnsCamera;
+  }
+
+  /** A newer camera command: retires pending async fits and cinematic restores. */
+  private advanceCameraEpoch(): number {
     if (isReplaySpectatorView()) this.replayUserCameraIntentEpoch++;
     return this.replayUserCameraIntentEpoch;
+  }
+
+  /** A newer camera command the VIEWER issued: also takes ownership. */
+  private recordReplayUserCameraIntent(): number {
+    if (isReplaySpectatorView()) this.replayViewerOwnsCamera = true;
+    return this.advanceCameraEpoch();
   }
 
   private invalidatePendingFit(): number {
@@ -448,7 +486,7 @@ export class TransformHandler {
   public updateCanvasBoundingRect() {
     const previousRect = this._boundingRect;
     const preserveReplayComposition =
-      isReplaySpectatorView() && this.replayUserCameraIntentEpoch > 0;
+      isReplaySpectatorView() && this.replayViewerOwnsCamera;
     const centerWorldX =
       (previousRect.width / 2 - this.game.width() / 2) / this.scale +
       this.offsetX;
@@ -888,8 +926,14 @@ export class TransformHandler {
 
   onZoom(event: ZoomEvent) {
     this.clearTarget();
-    this.invalidatePendingFit();
-    this.recordReplayUserCameraIntent();
+    // A zero delta moves nothing, and the ctrl+wheel trackpad path can emit
+    // one from a horizontal pan. Retiring a pending competitor fit (CAM-01)
+    // or claiming ownership (CAM-02) on it would punish a gesture the viewer
+    // never made.
+    if (event.delta !== 0 && !Number.isNaN(event.delta)) {
+      this.invalidatePendingFit();
+      this.recordReplayUserCameraIntent();
+    }
     const oldScale = this.scale;
     // Exponential scaling stays finite and directionally monotonic for every
     // wheel/pinch delta. The old `1 + delta/600` crossed zero for a large
@@ -988,8 +1032,15 @@ export class TransformHandler {
 
   onMove(event: DragEvent) {
     this.clearTarget();
-    this.invalidatePendingFit();
-    this.recordReplayUserCameraIntent();
+    // `pointermove` fires on the sub-pixel jitter of an ordinary click, and
+    // InputHandler emits a DragEvent for every one of them, delta 0 included.
+    // Treating that as a camera command cancelled the competitor fit the
+    // viewer had just requested AND took the camera off automatic refit for
+    // the rest of the session, both from a click that moved nothing.
+    if (event.deltaX !== 0 || event.deltaY !== 0) {
+      this.invalidatePendingFit();
+      this.recordReplayUserCameraIntent();
+    }
     this.offsetX -= event.deltaX / this.scale;
     this.offsetY -= event.deltaY / this.scale;
     this.clampOffsets();

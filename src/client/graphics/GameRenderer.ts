@@ -1841,9 +1841,13 @@ export class GameRenderer {
    */
   private refitBoardToViewport() {
     if (!isReplaySpectatorView()) return;
+    // Ownership, NOT the camera epoch: automatic commands advance the epoch
+    // too (WinModal fires FitWholeMapEvent by itself at match end), and
+    // branching on it here left every replay watched to its end unable to
+    // refit — a fullscreen after the finish kept the small-viewport scale.
     if (
       followedCompetitorSmallId() !== null ||
-      this.transformHandler.userCameraIntentEpoch() > 0
+      this.transformHandler.replayCameraIsViewerOwned()
     ) {
       // The HUD still needs fresh docking dimensions for the new frame even
       // though the viewer-owned camera must stay exactly where they put it.

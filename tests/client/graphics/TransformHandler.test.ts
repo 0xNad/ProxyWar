@@ -18,6 +18,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   computeCenterOnCellOffset,
   computeSpectatorFitScale,
+  FitWholeMapEvent,
   GoToPlayerEvent,
   GoToPositionEvent,
   isEmbeddedSpectatorFrame,
@@ -1124,6 +1125,179 @@ describe("TransformHandler replay camera intent and large zoom deltas", () => {
     );
     transform.onZoom(new ZoomEvent(800, 450, -20));
     transform.onMove(new DragEvent(10, 10));
+    expect(transform.userCameraIntentEpoch()).toBe(0);
+  });
+});
+
+/**
+ * CAMERA OWNERSHIP vs CAMERA EPOCH.
+ *
+ * The replay camera tracks two different things and they are NOT the same:
+ *
+ *   epoch      — "a newer camera command happened". Async territory fits and
+ *                the nuke cinema's restore snapshot it and refuse to land if
+ *                it moved. Automatic commands advance it too, deliberately.
+ *   ownership  — "a HUMAN framed this view". Only this suppresses the
+ *                automatic refit on resize/fullscreen.
+ *
+ * They were one field. `WinModal` emits `FitWholeMapEvent` by itself when a
+ * match ends ("the sole automatic trigger for it", and it ticks on the
+ * broadcast surface), so every replay watched to its end marked itself
+ * viewer-owned and stopped refitting — a fullscreen after the finish kept the
+ * small-viewport scale and left the board in a field of background, which is
+ * the CAM-02 report the refit exists to answer. A 0px DragEvent — which
+ * `InputHandler` emits on the sub-pixel jitter of an ordinary click — did the
+ * same thing, and additionally cancelled the competitor fit the viewer had
+ * just asked for.
+ */
+describe("TransformHandler replay camera ownership", () => {
+  afterEach(() => {
+    delete (window as unknown as Record<string, unknown>)
+      .__PROXYWAR_AI_REPLAY__;
+  });
+
+  function spectatorTransform(
+    canvas: HTMLCanvasElement,
+    bus: EventBus = new EventBus(),
+  ): TransformHandler {
+    (window as unknown as Record<string, unknown>).__PROXYWAR_AI_REPLAY__ =
+      true;
+    return new TransformHandler(makeGameView(1000, 1000), bus, canvas);
+  }
+
+  it("REGRESSION: WinModal's automatic end-of-match FitWholeMapEvent does not claim viewer ownership", () => {
+    const bus = new EventBus();
+    const transform = spectatorTransform(makeCanvas(1280, 720), bus);
+    expect(transform.replayCameraIsViewerOwned()).toBe(false);
+
+    // Exactly what WinModal.ts emits at match end. Nobody touched anything.
+    bus.emit(new FitWholeMapEvent());
+
+    expect(transform.replayCameraIsViewerOwned()).toBe(false);
+    // ...but it IS a newer camera command, so a cinematic restore captured
+    // before the finale must still be retired by the epoch.
+    expect(transform.userCameraIntentEpoch()).toBeGreaterThan(0);
+  });
+
+  it("REGRESSION: fullscreen after a match ends still refits the board to the new viewport", () => {
+    let vpWidth = 1280;
+    let vpHeight = 720;
+    const canvas = document.createElement("canvas");
+    canvas.getBoundingClientRect = () =>
+      ({
+        width: vpWidth,
+        height: vpHeight,
+        left: 0,
+        top: 0,
+        right: vpWidth,
+        bottom: vpHeight,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }) as DOMRect;
+
+    const bus = new EventBus();
+    const transform = spectatorTransform(canvas, bus);
+    transform.centerAll(0.9);
+    bus.emit(new FitWholeMapEvent()); // match ends on its own
+
+    // GameRenderer.refitBoardToViewport() consults ownership, so an automatic
+    // finale must leave it free to refit.
+    expect(transform.replayCameraIsViewerOwned()).toBe(false);
+
+    vpWidth = 2560;
+    vpHeight = 1440;
+    transform.updateCanvasBoundingRect(); // GameRenderer.resizeCanvas()
+    transform.centerAll(0.9); // the refit the ownership check now permits
+
+    // Pinned against a fresh load at the fullscreen size: the board must fill
+    // the frame, not sit at the 720p scale in a grey field (~12.7% coverage
+    // before this fix).
+    const reference = spectatorTransform(makeCanvas(2560, 1440));
+    reference.centerAll(0.9);
+    expect(transform.scale).toBeCloseTo(reference.scale, 6);
+  });
+
+  it("REGRESSION: a 0px DragEvent neither claims the camera nor cancels a pending competitor fit", () => {
+    const transform = spectatorTransform(makeCanvas(1280, 720));
+    const before = {
+      world: worldUnderCursor(transform, 640, 360),
+      scale: transform.scale,
+      epoch: transform.userCameraIntentEpoch(),
+    };
+
+    transform.onMove(new DragEvent(0, 0));
+
+    expect(transform.replayCameraIsViewerOwned()).toBe(false);
+    // No epoch bump either: the epoch is what a pending borderTiles() fit and
+    // the nuke restore compare against, so a jitter click must not retire one.
+    expect(transform.userCameraIntentEpoch()).toBe(before.epoch);
+    const after = worldUnderCursor(transform, 640, 360);
+    expect(after.x).toBe(before.world.x);
+    expect(after.y).toBe(before.world.y);
+    expect(transform.scale).toBe(before.scale);
+  });
+
+  it("REGRESSION: a 0-delta ZoomEvent neither claims the camera nor cancels a pending competitor fit", () => {
+    const transform = spectatorTransform(makeCanvas(1280, 720));
+    const epochBefore = transform.userCameraIntentEpoch();
+
+    // Reachable from the ctrl+wheel trackpad path on a horizontal pan.
+    transform.onZoom(new ZoomEvent(640, 360, 0));
+
+    expect(transform.replayCameraIsViewerOwned()).toBe(false);
+    expect(transform.userCameraIntentEpoch()).toBe(epochBefore);
+  });
+
+  it("a real drag and a real zoom DO claim the camera", () => {
+    const dragged = spectatorTransform(makeCanvas(1280, 720));
+    dragged.onMove(new DragEvent(24, -12));
+    expect(dragged.replayCameraIsViewerOwned()).toBe(true);
+    expect(dragged.userCameraIntentEpoch()).toBeGreaterThan(0);
+
+    const zoomed = spectatorTransform(makeCanvas(1280, 720));
+    zoomed.onZoom(new ZoomEvent(640, 360, -40));
+    expect(zoomed.replayCameraIsViewerOwned()).toBe(true);
+    expect(zoomed.userCameraIntentEpoch()).toBeGreaterThan(0);
+  });
+
+  it("an automatic whole-map fit RELEASES a camera the viewer had taken", () => {
+    const bus = new EventBus();
+    const transform = spectatorTransform(makeCanvas(1280, 720), bus);
+    transform.onMove(new DragEvent(40, 40));
+    expect(transform.replayCameraIsViewerOwned()).toBe(true);
+    const epochAfterDrag = transform.userCameraIntentEpoch();
+
+    // The finale overwrites their framing anyway, so holding ownership past it
+    // would only freeze the camera at a scale nobody chose.
+    bus.emit(new FitWholeMapEvent());
+
+    expect(transform.replayCameraIsViewerOwned()).toBe(false);
+    // Monotonic: releasing ownership must not rewind the epoch, or a stale
+    // cinematic snapshot could match again and fire its restore.
+    expect(transform.userCameraIntentEpoch()).toBeGreaterThan(epochAfterDrag);
+  });
+
+  it("disposal releases ownership and advances the epoch, so an in-place rewind starts clean", () => {
+    const transform = spectatorTransform(makeCanvas(1280, 720));
+    transform.onMove(new DragEvent(40, 40));
+    const epochAfterDrag = transform.userCameraIntentEpoch();
+
+    transform.dispose();
+
+    expect(transform.replayCameraIsViewerOwned()).toBe(false);
+    expect(transform.userCameraIntentEpoch()).toBeGreaterThan(epochAfterDrag);
+  });
+
+  it("live play is untouched: no ownership, no epoch, on any gesture", () => {
+    const transform = new TransformHandler(
+      makeGameView(1000, 1000),
+      new EventBus(),
+      makeCanvas(1280, 720),
+    );
+    transform.onMove(new DragEvent(40, 40));
+    transform.onZoom(new ZoomEvent(640, 360, -40));
+    expect(transform.replayCameraIsViewerOwned()).toBe(false);
     expect(transform.userCameraIntentEpoch()).toBe(0);
   });
 });
