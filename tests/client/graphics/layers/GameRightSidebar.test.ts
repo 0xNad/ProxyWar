@@ -138,6 +138,20 @@ describe("GameRightSidebar - top-right control cluster", () => {
     expect((sidebar as any)._catchUpProgress).toBeNull();
   });
 
+  test("init() clears hidden HUD state left by an in-place replay rebuild", () => {
+    const { sidebar } = wiredSidebar();
+    (sidebar as any).onToggleHudClick();
+    expect(document.body.classList.contains(HUD_HIDDEN_BODY_CLASS)).toBe(true);
+
+    sidebar.init();
+
+    expect(document.body.classList.contains(HUD_HIDDEN_BODY_CLASS)).toBe(false);
+    expect((sidebar as any).hudHidden).toBe(false);
+    const rendered = JSON.stringify((sidebar as any).render());
+    expect(rendered).toContain("game_controls.hide_hud");
+    expect(rendered).not.toContain("game_controls.show_hud");
+  });
+
   test("Escape (CloseViewEvent) restores a hidden interface", () => {
     const { sidebar, bus } = wiredSidebar();
     (sidebar as any).onToggleHudClick();

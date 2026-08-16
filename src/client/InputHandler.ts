@@ -61,6 +61,9 @@ export class ContextMenuEvent implements GameEvent {
   ) {}
 }
 
+/** Shared wheel/gesture zoom sensitivity. */
+export const ZOOM_DELTA_DIVISOR = 600;
+
 export class ZoomEvent implements GameEvent {
   constructor(
     public readonly x: number,
@@ -213,6 +216,13 @@ export class TickMetricsEvent implements GameEvent {
   ) {}
 }
 
+/** WebKit's non-standard Safari trackpad-pinch event. */
+interface WebKitGestureEvent extends Event {
+  readonly scale: number;
+  readonly clientX: number;
+  readonly clientY: number;
+}
+
 export class InputHandler {
   private lastPointerX: number = 0;
   private lastPointerY: number = 0;
@@ -223,6 +233,11 @@ export class InputHandler {
   private pointers: Map<number, PointerEvent> = new Map();
 
   private lastPinchDistance: number = 0;
+
+  private lastGestureScale: number | null = null;
+
+  /** Suppresses taps until every pointer from a pinch has been released. */
+  private multiPointerGestureActive: boolean = false;
 
   private pointerDown: boolean = false;
 
@@ -276,6 +291,7 @@ export class InputHandler {
 
   /** See the `teardown` field for why this exists and what leaked without it. */
   public dispose() {
+    this.releaseAllPointerCaptures();
     this.teardown.abort();
     if (this.moveInterval !== null) {
       clearInterval(this.moveInterval);
@@ -316,15 +332,45 @@ export class InputHandler {
     window.addEventListener("pointerup", (e) => this.onPointerUp(e), {
       signal: this.teardown.signal,
     });
-    window.addEventListener("pointercancel", (e) => this.onPointerUp(e), {
+    window.addEventListener("pointercancel", (e) => this.onPointerCancel(e), {
       signal: this.teardown.signal,
     });
+    this.canvas.addEventListener(
+      "lostpointercapture",
+      (e) => this.onLostPointerCapture(e),
+      { signal: this.teardown.signal },
+    );
     this.canvas.addEventListener(
       "wheel",
       (e) => {
         this.onScroll(e);
         this.onShiftScroll(e);
         e.preventDefault();
+      },
+      { passive: false, signal: this.teardown.signal },
+    );
+    // Safari emits these for trackpad pinch instead of ctrl+wheel.
+    this.canvas.addEventListener(
+      "gesturestart",
+      (e) => {
+        e.preventDefault();
+        this.lastGestureScale = (e as WebKitGestureEvent).scale;
+      },
+      { passive: false, signal: this.teardown.signal },
+    );
+    this.canvas.addEventListener(
+      "gesturechange",
+      (e) => {
+        e.preventDefault();
+        this.onGestureChange(e as WebKitGestureEvent);
+      },
+      { passive: false, signal: this.teardown.signal },
+    );
+    this.canvas.addEventListener(
+      "gestureend",
+      (e) => {
+        e.preventDefault();
+        this.lastGestureScale = null;
       },
       { passive: false, signal: this.teardown.signal },
     );
@@ -350,7 +396,10 @@ export class InputHandler {
         this.eventBus.emit(new AlternateViewEvent(false));
       }
       this.pointerDown = false;
+      this.releaseAllPointerCaptures();
       this.pointers.clear();
+      this.lastGestureScale = null;
+      this.multiPointerGestureActive = false;
       if (this.longPressTimer !== null) {
         clearTimeout(this.longPressTimer);
         this.longPressTimer = null;
@@ -661,6 +710,7 @@ export class InputHandler {
 
     this.pointerDown = true;
     this.pointers.set(event.pointerId, event);
+    this.capturePointer(event.pointerId);
 
     if (this.pointers.size === 1) {
       this.lastPointerX = event.clientX;
@@ -691,6 +741,7 @@ export class InputHandler {
         }, this.LONG_PRESS_MS);
       }
     } else if (this.pointers.size === 2) {
+      this.multiPointerGestureActive = true;
       // Second finger down — cancel any pending long-press to avoid
       // triggering selection mode mid-pinch
       if (this.longPressTimer !== null) {
@@ -706,6 +757,25 @@ export class InputHandler {
   }
 
   onPointerUp(event: PointerEvent) {
+    this.finishPointer(event, false);
+  }
+
+  private onPointerCancel(event: PointerEvent) {
+    this.finishPointer(event, true);
+  }
+
+  private onLostPointerCapture(event: PointerEvent) {
+    // releasePointerCapture() can itself dispatch this after pointerup. By
+    // then the pointer is already gone, so only an unexpected loss cleans up.
+    if (!this.pointers.has(event.pointerId)) return;
+    this.finishPointer(event, true, false);
+  }
+
+  private finishPointer(
+    event: PointerEvent,
+    cancelled: boolean,
+    releaseCapture: boolean = true,
+  ) {
     if (event.button === 1) {
       event.preventDefault();
       return;
@@ -714,8 +784,29 @@ export class InputHandler {
     if (event.button > 0) {
       return;
     }
+    if (!this.pointers.has(event.pointerId)) return;
+    this.pointers.delete(event.pointerId);
+    if (releaseCapture) this.releasePointerCapture(event.pointerId);
+
+    // A pinch ends one pointer at a time. Keep the other pointer alive and
+    // reset its pan origin so its first one-finger move has no discontinuity.
+    const remaining = this.pointers.values().next().value as
+      | PointerEvent
+      | undefined;
+    if (remaining !== undefined) {
+      this.pointerDown = true;
+      this.lastPointerX = remaining.clientX;
+      this.lastPointerY = remaining.clientY;
+      this.lastPointerDownX = remaining.clientX;
+      this.lastPointerDownY = remaining.clientY;
+      this.lastPinchDistance =
+        this.pointers.size >= 2 ? this.getPinchDistance() : 0;
+      return;
+    }
+
     this.pointerDown = false;
-    this.pointers.clear();
+    const suppressGestureTap = this.multiPointerGestureActive || cancelled;
+    this.multiPointerGestureActive = false;
 
     // Clean up long-press state
     if (this.longPressTimer !== null) {
@@ -731,6 +822,16 @@ export class InputHandler {
       if (!this.selectionBoxActive) {
         this.suppressNextTap = true;
       }
+    }
+
+    if (suppressGestureTap) {
+      if (this.selectionBoxActive) {
+        this.selectionBoxActive = false;
+        this.eventBus.emit(new WarshipSelectionBoxCancelEvent());
+      }
+      this.suppressNextTap = false;
+      event.preventDefault();
+      return;
     }
 
     // Complete selection box if it was active
@@ -821,6 +922,19 @@ export class InputHandler {
     }
   }
 
+  /** Convert Safari's cumulative scale into our exponential zoom delta. */
+  private onGestureChange(event: WebKitGestureEvent) {
+    if (this.lastGestureScale === null) return;
+    const ratio = event.scale / this.lastGestureScale;
+    if (!Number.isFinite(ratio) || ratio <= 0) return;
+    this.lastGestureScale = event.scale;
+    // iOS also emits pointer pinch events; do not apply the same motion twice.
+    if (this.pointers.size >= 2) return;
+    const delta = -ZOOM_DELTA_DIVISOR * Math.log(ratio);
+    if (delta === 0) return;
+    this.eventBus.emit(new ZoomEvent(event.clientX, event.clientY, delta));
+  }
+
   private onShiftScroll(event: WheelEvent) {
     if (event.shiftKey) {
       const scrollValue = event.deltaY === 0 ? event.deltaX : event.deltaY;
@@ -840,12 +954,14 @@ export class InputHandler {
       return;
     }
 
-    this.pointers.set(event.pointerId, event);
-
     if (!this.pointerDown) {
       this.eventBus.emit(new MouseOverEvent(event.clientX, event.clientY));
       return;
     }
+    // Window-level moves can arrive for a pointer this canvas never owned, or
+    // for the just-released finger after a pinch. Never resurrect either.
+    if (!this.pointers.has(event.pointerId)) return;
+    this.pointers.set(event.pointerId, event);
 
     if (this.pointers.size === 1) {
       const deltaX = event.clientX - this.lastPointerX;
@@ -1046,6 +1162,33 @@ export class InputHandler {
       x: (pointerEvents[0].clientX + pointerEvents[1].clientX) / 2,
       y: (pointerEvents[0].clientY + pointerEvents[1].clientY) / 2,
     };
+  }
+
+  private capturePointer(pointerId: number): void {
+    try {
+      this.canvas.setPointerCapture?.(pointerId);
+    } catch {
+      // Capture can fail if the browser has already cancelled the pointer.
+    }
+  }
+
+  private releasePointerCapture(pointerId: number): void {
+    try {
+      if (
+        this.canvas.hasPointerCapture === undefined ||
+        this.canvas.hasPointerCapture(pointerId)
+      ) {
+        this.canvas.releasePointerCapture?.(pointerId);
+      }
+    } catch {
+      // A lost/cancelled pointer is already effectively released.
+    }
+  }
+
+  private releaseAllPointerCaptures(): void {
+    for (const pointerId of this.pointers.keys()) {
+      this.releasePointerCapture(pointerId);
+    }
   }
 
   private isTextInputTarget(target: EventTarget | null): boolean {

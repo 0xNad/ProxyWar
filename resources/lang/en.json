@@ -1138,8 +1138,6 @@
     "event_plan_change": "{actor} shifts plan to {plan}",
     "event_spawn": "{actor} enters the match",
     "first_watch_hint": "Click any nation to follow it",
-    "gui_hide": "Hide interface",
-    "gui_show": "Show interface",
     "headline_betrayal": "{actor} breaks alliance with {target}",
     "headline_first_strike": "{actor} strikes {target}",
     "headline_lead_change_from": "{actor} takes the lead from {target} — {toShare} to {fromShare}",
