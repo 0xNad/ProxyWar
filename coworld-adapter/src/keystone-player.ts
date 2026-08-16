@@ -18,6 +18,10 @@
 // selectedLegalActionIds (scalar primary first); when it does not — an older
 // game image — we degrade to the primary and say so in the reason, exactly as
 // before. Anything the advertised cap cannot carry keeps that honest note.
+// Spawn ranking is a separate capability (`protocol.maxSpawnPreferences`):
+// an all-spawn menu is ranked locally from offered metadata and returned as
+// `spawnPreferenceLegalActionIds`. It bypasses the Commander/executor entirely,
+// so the pre-game ballot neither refreshes a plan nor enters gameplay history.
 //
 // Modes (PROXYWAR_KEYSTONE_MODE; DEFAULT = the LLM Commander — bedrock when
 // USE_BEDROCK=true, otherwise claude-cli; "the agent" IS the LLM brain):
@@ -45,6 +49,13 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { MAX_WIRE_SPAWN_PREFERENCE_ACTION_IDS } from "./coworld-decision-wire";
+
+import type {
+  AgentPlanDecision,
+  AgentPlanner,
+  StrategicPlan,
+} from "../../src/server/agents/AgentPlannerExecutor";
 import type {
   AgentBrain,
   AgentBrainInput,
@@ -53,11 +64,6 @@ import type {
   AgentStrategyProfile,
   LegalAction,
 } from "../../src/server/agents/AgentTypes";
-import type {
-  AgentPlanDecision,
-  AgentPlanner,
-  StrategicPlan,
-} from "../../src/server/agents/AgentPlannerExecutor";
 import type { LlmProvider } from "../../src/server/agents/LlmProvider";
 
 type PlannerExecutorModule =
@@ -215,8 +221,7 @@ export function requestToBrainInput(
   // config, not game state: pin it to OUR configured profile so behavior is
   // slot-invariant. Game state is untouched.
   const observation =
-    pinnedProfile !== undefined &&
-    record.observation.profile !== pinnedProfile
+    pinnedProfile !== undefined && record.observation.profile !== pinnedProfile
       ? { ...record.observation, profile: pinnedProfile }
       : record.observation;
   return { observation, legalActions };
@@ -231,6 +236,8 @@ export function decisionToResponse(
    * that carries only the scalar primary, so we must not emit the batch key.
    */
   wireMaxActionsPerDecision?: number,
+  /** Independent spawn-ballot capability; never interpreted as batch width. */
+  wireMaxSpawnPreferences?: number,
 ): Record<string, unknown> {
   const rawConfidence = decision.metadata?.confidence;
   const confidence =
@@ -265,6 +272,24 @@ export function decisionToResponse(
       ? Math.floor(wireMaxActionsPerDecision)
       : 1;
   const carried = cascade.slice(0, Math.max(1, wireCapacity));
+  const spawnCapacity =
+    typeof wireMaxSpawnPreferences === "number" &&
+    Number.isFinite(wireMaxSpawnPreferences) &&
+    wireMaxSpawnPreferences >= 1
+      ? Math.min(
+          MAX_WIRE_SPAWN_PREFERENCE_ACTION_IDS,
+          Math.floor(wireMaxSpawnPreferences),
+        )
+      : 0;
+  const spawnPreferences =
+    spawnCapacity > 0 && Array.isArray(decision.spawnPreferenceActionIDs)
+      ? [
+          decision.actionID,
+          ...decision.spawnPreferenceActionIDs.filter(
+            (id) => typeof id === "string" && id !== decision.actionID,
+          ),
+        ].slice(0, spawnCapacity)
+      : undefined;
   // Truthful artifacts: whatever the wire cannot carry never executes, so it
   // must not read as "queued N action(s)" in decisions.jsonl. With no
   // advertisement this is the pre-batching behavior verbatim (primary only).
@@ -293,6 +318,9 @@ export function decisionToResponse(
     // executor actually scheduled more than one action, so an old image (or an
     // ordinary single-action decision) sees a byte-identical response.
     ...(carried.length >= 2 ? { selectedLegalActionIds: carried } : {}),
+    ...(spawnPreferences !== undefined
+      ? { spawnPreferenceLegalActionIds: spawnPreferences }
+      : {}),
     reason: wireReason,
     confidence,
     ...(llmPlannerDegraded ? { llmPlannerDegraded: true } : {}),
@@ -328,6 +356,97 @@ export function wireMaxActionsPerDecision(
   return typeof advertised === "number" && Number.isFinite(advertised)
     ? advertised
     : undefined;
+}
+
+export function wireMaxSpawnPreferences(
+  message: Record<string, unknown>,
+): number | undefined {
+  const protocol = message.protocol;
+  if (protocol === null || typeof protocol !== "object") {
+    return undefined;
+  }
+  const advertised = (protocol as { maxSpawnPreferences?: unknown })
+    .maxSpawnPreferences;
+  return typeof advertised === "number" && Number.isFinite(advertised)
+    ? advertised
+    : undefined;
+}
+
+export function spawnPreferenceDecision(
+  input: AgentBrainInput,
+  maxSpawnPreferences: number | undefined,
+): AgentDecision | null {
+  if (
+    input.legalActions.length === 0 ||
+    input.legalActions.some((action) => action.kind !== "spawn") ||
+    typeof maxSpawnPreferences !== "number" ||
+    !Number.isFinite(maxSpawnPreferences) ||
+    maxSpawnPreferences < 1
+  ) {
+    return null;
+  }
+  const limit = Math.min(
+    MAX_WIRE_SPAWN_PREFERENCE_ACTION_IDS,
+    Math.floor(maxSpawnPreferences),
+  );
+  const ranked = input.legalActions
+    .map((action, index) => ({
+      action,
+      index,
+      score: spawnPreferenceScore(action),
+      tile:
+        typeof action.metadata?.tile === "number" &&
+        Number.isFinite(action.metadata.tile)
+          ? action.metadata.tile
+          : Number.POSITIVE_INFINITY,
+    }))
+    .sort(
+      (left, right) =>
+        right.score - left.score ||
+        left.tile - right.tile ||
+        left.action.id.localeCompare(right.action.id) ||
+        left.index - right.index,
+    )
+    .slice(0, limit)
+    .map(({ action }) => action.id);
+  return {
+    actionID: ranked[0],
+    spawnPreferenceActionIDs: ranked,
+    reason: `Keystone ranked ${ranked.length} offered spawn actions from metadata.`,
+    metadata: {
+      brain: "keystone-spawn-preference",
+      externalActionCall: false,
+      fallbackUsed: false,
+    },
+  };
+}
+
+function spawnPreferenceScore(action: LegalAction): number {
+  const score = (key: string): number => {
+    const value = action.metadata?.[key];
+    return typeof value === "number" && Number.isFinite(value) ? value : 0;
+  };
+  const opportunity = score("opportunityScore");
+  const pressure = score("pressureScore");
+  const safety = score("safetyScore");
+  const diplomacy = score("diplomacyScore");
+  const localLand = score("localLandScore");
+  const middleSafetyBand = Math.max(0, 1 - Math.abs(safety - 0.32) / 0.24);
+  const lowSafetyPenalty =
+    safety < 0.18
+      ? (0.18 - safety) * 2.4 + 0.16
+      : safety < 0.23
+        ? (0.23 - safety) * 1.1
+        : 0;
+  return (
+    opportunity * 0.32 +
+    pressure * 0.18 +
+    middleSafetyBand * 0.03 +
+    localLand * 0.5 +
+    safety * 0.25 +
+    diplomacy * 0.28 -
+    lowSafetyPenalty
+  );
 }
 
 export function transportFallbackResponse(
@@ -737,6 +856,7 @@ async function main(): Promise<void> {
       type?: unknown;
       requestID?: unknown;
       request?: unknown;
+      protocol?: unknown;
     };
     try {
       message = JSON.parse(String(data));
@@ -763,11 +883,17 @@ async function main(): Promise<void> {
       let response: Record<string, unknown>;
       try {
         const input = requestToBrainInput(message.request, profile);
-        const decision = await brain.decide(input);
+        // The sealed spawn ballot is local and deterministic. Bypassing the
+        // Commander/executor prevents a pre-game preference request from
+        // consuming planning cadence or ordinary action history.
+        const decision =
+          spawnPreferenceDecision(input, wireMaxSpawnPreferences(message)) ??
+          (await brain.decide(input));
         response = decisionToResponse(
           requestID,
           decision,
           wireMaxActionsPerDecision(message),
+          wireMaxSpawnPreferences(message),
         );
       } catch (error) {
         const messageText =

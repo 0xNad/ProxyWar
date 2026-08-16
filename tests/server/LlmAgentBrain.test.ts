@@ -140,6 +140,30 @@ const legalActions: LegalAction[] = [
   },
 ];
 
+const spawnObservation: AgentObservation = {
+  ...observation,
+  phase: "spawn",
+};
+
+const spawnLegalActions: LegalAction[] = [
+  {
+    id: "spawn:10",
+    kind: "spawn",
+    label: "Spawn at tile 10",
+    intent: { type: "spawn", tile: 10 },
+    risk: { level: "low", score: 0.2 },
+    metadata: { tile: 10, safetyScore: 0.8, opportunityScore: 0.6 },
+  },
+  {
+    id: "spawn:20",
+    kind: "spawn",
+    label: "Spawn at tile 20",
+    intent: { type: "spawn", tile: 20 },
+    risk: { level: "medium", score: 0.4 },
+    metadata: { tile: 20, safetyScore: 0.6, opportunityScore: 0.9 },
+  },
+];
+
 describe("LLM agent decision contract", () => {
   it("builds a prompt with observation data and legal action ids", () => {
     const prompt = new LlmPromptBuilder().build({
@@ -165,6 +189,91 @@ describe("LLM agent decision contract", () => {
     expect(prompt).toContain("diplomacy");
   });
 
+  it("builds a spawn-only sealed ranking contract without executable batch language", () => {
+    const prompt = new LlmPromptBuilder().build({
+      observation: spawnObservation,
+      legalActions: spawnLegalActions,
+    });
+
+    expect(prompt).toContain("one-round sealed spawn preference ballot");
+    expect(prompt).toContain("spawnPreferenceLegalActionIds");
+    expect(prompt).toContain(
+      "selectedLegalActionId is required and must equal the first ranked id",
+    );
+    expect(prompt).toContain("There is no reaction phase");
+    expect(prompt).toContain("not an executable action batch");
+  });
+
+  it("keeps ordinary and mixed action menus on the single-action contract", () => {
+    for (const menu of [
+      legalActions,
+      [spawnLegalActions[0], legalActions[0]],
+    ]) {
+      const prompt = new LlmPromptBuilder().build({
+        observation,
+        legalActions: menu,
+      });
+
+      expect(prompt).toContain(
+        "Choose exactly one action by selecting a listed LegalAction.id.",
+      );
+      expect(prompt).toContain(
+        'Required shape: {"selectedLegalActionId":"<one listed id>","reason":"short reason","confidence":0.0}',
+      );
+      expect(prompt).not.toContain("spawnPreferenceLegalActionIds");
+      expect(prompt).not.toContain("one-round sealed spawn preference ballot");
+    }
+  });
+
+  it("maps an LLM spawn ranking onto AgentDecision.spawnPreferenceActionIDs", async () => {
+    const provider: LlmProvider = {
+      providerType: "custom",
+      complete: async () =>
+        JSON.stringify({
+          selectedLegalActionId: "spawn:20",
+          spawnPreferenceLegalActionIds: ["spawn:20", "spawn:10"],
+          reason: "Prefer opportunity, then safety.",
+          confidence: 0.7,
+        }),
+    };
+    const brain = new LlmAgentBrain({ provider });
+
+    const decision = await brain.decide({
+      observation: spawnObservation,
+      legalActions: spawnLegalActions,
+    });
+
+    expect(decision.actionID).toBe("spawn:20");
+    expect(decision.spawnPreferenceActionIDs).toEqual(["spawn:20", "spawn:10"]);
+    expect(decision.actionIDs).toBeUndefined();
+  });
+
+  it("preserves the fallback brain's ranked spawn ballot after an LLM parse failure", async () => {
+    const provider: LlmProvider = {
+      providerType: "custom",
+      complete: async () =>
+        JSON.stringify({
+          selectedLegalActionId: "spawn:invented",
+          reason: "Invalid off-menu spawn.",
+        }),
+    };
+    const brain = new LlmAgentBrain({ provider, profile: "opportunistic" });
+
+    const decision = await brain.decide({
+      observation: spawnObservation,
+      legalActions: spawnLegalActions,
+    });
+
+    expect(decision.actionID).toBe("spawn:10");
+    expect(decision.spawnPreferenceActionIDs).toEqual(["spawn:10", "spawn:20"]);
+    expect(decision.actionIDs).toBeUndefined();
+    expect(decision.metadata).toMatchObject({
+      llmParseOk: false,
+      fallbackUsed: true,
+      fallbackActionID: "spawn:10",
+    });
+  });
+
   // The house parser is ROBUST (not strict): an agentic LLM wraps its decision in prose /
   // code fences / extra reasoning fields. We extract the decision and tolerate advisory-field
   // noise, while PRESERVING the safety-critical checks (must be a valid offered LegalAction.id;
@@ -179,7 +288,10 @@ describe("LLM agent decision contract", () => {
       legalActions,
     );
 
-    expect(result).toMatchObject({ ok: true, selectedLegalActionId: "alliance:PLAYER02" });
+    expect(result).toMatchObject({
+      ok: true,
+      selectedLegalActionId: "alliance:PLAYER02",
+    });
     if (result.ok) {
       expect(result.confidence).toBeUndefined();
     }
@@ -305,13 +417,19 @@ describe("LLM agent decision contract", () => {
   });
 
   it("rejects empty output", () => {
-    const result = new LlmDecisionParser({ strict: false }).parse("", legalActions);
+    const result = new LlmDecisionParser({ strict: false }).parse(
+      "",
+      legalActions,
+    );
 
     expect(result).toMatchObject({ ok: false, reason: "empty LLM response" });
   });
 
   it("truncates overlong reasons instead of failing", () => {
-    const result = new LlmDecisionParser({ maxReasonLength: 10, strict: false }).parse(
+    const result = new LlmDecisionParser({
+      maxReasonLength: 10,
+      strict: false,
+    }).parse(
       JSON.stringify({
         selectedLegalActionId: "hold",
         reason: "This reason is too long.",
@@ -466,7 +584,8 @@ describe("LLM agent decision contract", () => {
         repeatedActionKind: "attack",
         repeatedActionCount: 2,
         avoidActionIDs: ["expand:terra-nullius:10"],
-        summary: "recent=attack,attack; expansions=2; builds=0; repeat=attackx2",
+        summary:
+          "recent=attack,attack; expansions=2; builds=0; repeat=attackx2",
         notes: ["recent expansion streak"],
       },
       objective: {
@@ -674,7 +793,9 @@ describe("prompt-injection hardening (rival strings are data)", () => {
 
   it("sanitizer strips control/zero-width chars, collapses whitespace, caps length", () => {
     expect(sanitizeUntrustedDisplayString("a b\u200bc\nd")).toBe("a b c d");
-    expect(sanitizeUntrustedDisplayString("  spaced   out  ")).toBe("spaced out");
+    expect(sanitizeUntrustedDisplayString("  spaced   out  ")).toBe(
+      "spaced out",
+    );
     expect(
       sanitizeUntrustedDisplayString(hostileName).length,
     ).toBeLessThanOrEqual(48);

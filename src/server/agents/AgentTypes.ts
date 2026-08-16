@@ -1198,10 +1198,10 @@ export interface AgentObservation {
   recentCommunications?: AgentCommunicationSignal[];
   /**
    * Bounded episode-level map identity for external providers - the map's
-   * own name/dimensions, never a terrain dump or the SpawnCandidate pool.
-   * Spawn is never a player/brain decision, so this exists purely for
-   * providers that want map identity in their own prompt/context, not to
-   * support any spawn-tile request.
+   * own name/dimensions, never a terrain dump. Spawn selection relies on the
+   * exact offered spawn LegalActions (including their bounded candidate
+   * metadata); this field is optional context and is not an alternate raw
+   * coordinate or terrain-query channel.
    */
   mapInfo?: { name: string; width: number; height: number };
   /** Persistent per-rival belief state (theory of mind). Populated by the brain. */
@@ -1337,6 +1337,15 @@ export interface AgentDecision {
   actionID: string;
   actionIDs?: string[];
   /**
+   * Optional sealed spawn ballot. It is allocation input for exactly ONE
+   * eventual spawn action, never an executable action batch. When present,
+   * `actionID` must exactly equal element 0. The spawn-stage validator rejects
+   * the WHOLE ballot for a duplicate, off-menu/non-spawn/non-string id,
+   * mismatch, or cap violation; valid partial rankings are completed by the
+   * server's report-independent offered order.
+   */
+  spawnPreferenceActionIDs?: string[];
+  /**
    * OPTIONAL SECOND SELECTION — the diplomacy slot
    * (PROXYWAR_TUNE_STRUCTURED_DEALS, default OFF; ignored entirely when the
    * flag is off, so an absent field and a flag-off match are byte-identical
@@ -1409,6 +1418,71 @@ export interface AgentActionResult {
   accepted: boolean;
   reason: string;
   submittedIntent: Intent | null;
+}
+
+export type AgentSpawnBallotSource =
+  | "explicit-ranked"
+  | "scalar-action-id"
+  | "none";
+
+export type AgentSpawnBallotInvalidReason =
+  | "no-decision"
+  | "action-id-not-string"
+  | "action-id-too-long"
+  | "executable-action-batch-on-spawn"
+  | "preferences-not-array"
+  | "empty-preference-ballot"
+  | "too-many-preferences"
+  | "preference-not-string"
+  | "preference-id-too-long"
+  | "duplicate-preference"
+  | "first-preference-mismatch"
+  | "off-menu-preference"
+  | "wrong-kind-preference";
+
+export type AgentSpawnSelectionDefaultReason =
+  | "invalid-ballot"
+  | "brain-timeout"
+  | "brain-error"
+  | "brain-fallback";
+
+/**
+ * Bounded replay evidence for the one-stage spawn allocation. This belongs on
+ * the decision record itself rather than loose decision metadata because it
+ * contains ordered arrays and must round-trip into decisions.jsonl exactly.
+ */
+export interface AgentSpawnSelectionEvidence {
+  algorithmVersion: string;
+  offeredActionIDs: string[];
+  ballotSource: AgentSpawnBallotSource;
+  /** Bounded representation; null denotes a submitted non-string value. */
+  submittedBallotActionIDs: Array<string | null>;
+  submittedBallotEntryTypes: string[];
+  submittedBallotCount: number;
+  submittedBallotTruncated: boolean;
+  /** Bounded copy of the brain's own reason; never substituted server text. */
+  submittedReason: string | null;
+  /** Full effective permutation after tail completion or deterministic default. */
+  normalizedBallotActionIDs: string[];
+  ballotValid: boolean;
+  ballotInvalidReason: AgentSpawnBallotInvalidReason | null;
+  defaultReason: AgentSpawnSelectionDefaultReason | null;
+  /** Stable allocator identity for this row's participant. */
+  participantID: string;
+  /** Stable allocator identities, aligned index-for-index with priorityOrder. */
+  priorityParticipantIDs: string[];
+  /** Display-name projection of priorityParticipantIDs for operator review. */
+  priorityOrder: string[];
+  /** One-based rank. */
+  priorityRank: number;
+  assignedActionID: string;
+  /** One-based rank in normalizedBallotActionIDs. */
+  assignedPreferenceRank: number;
+  /** One-based submitted rank; null when completion/default supplied the id. */
+  assignedSubmittedPreferenceRank: number | null;
+  stageLatencyMs: number;
+  stageFallbackUsed: boolean;
+  stageDegradationReason: string | null;
 }
 
 /**
@@ -1533,6 +1607,8 @@ export interface AgentDecisionRecord {
   chosenActionMetadata?: Record<string, string | number | boolean | null>;
   /** Optional diplomacy-slot evidence; absent when the slot was not requested. */
   dealSlotEvidence?: AgentDealSlotEvidence;
+  /** Present exactly once per seat on the final spawn record. */
+  spawnSelectionEvidence?: AgentSpawnSelectionEvidence;
   tacticalAffordances?: AgentTacticalAffordances;
   /**
    * Compact economy facts at this decision boundary

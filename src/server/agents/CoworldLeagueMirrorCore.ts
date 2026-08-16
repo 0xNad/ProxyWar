@@ -20,7 +20,11 @@ import type {
   AgentDecisionRecord,
   LegalActionKind,
 } from "./AgentTypes";
-import type { LatestPremierePointer } from "./CoworldLeaguePremiereSuppression";
+import {
+  filterSuppressedEpisodeRows,
+  type LatestPremierePointer,
+  type PremiereSuppressionState,
+} from "./CoworldLeaguePremiereSuppression";
 import type {
   CoworldLeagueEpisodePlayerRow,
   CoworldLeagueEpisodeRow,
@@ -282,6 +286,64 @@ export function mergeEpisodeRows(
 function episodeCompletedAt(episode: CoworldLeagueEpisodeRow): number {
   const completedAt = Date.parse(episode.completedAt ?? "");
   return Number.isFinite(completedAt) ? completedAt : Number.NEGATIVE_INFINITY;
+}
+
+/**
+ * Decides which episode rows this cycle publishes to `data.json`.
+ *
+ * 2026-08-16 archive wipe: a cycle where premiere suppression deferred EVERY
+ * fetched candidate looked like a healthy feed with zero fresh episodes — the
+ * previous-cards merge only engaged on stale feeds — so an empty list
+ * overwrote a populated 12-card archive (and `pruneMirrorArtifacts` then
+ * swept the orphaned caches). Retention now engages whenever the feed is
+ * stale, OR suppression deferred any candidate, OR the fresh list is empty,
+ * with a last-resort refusal to replace a non-empty archive with an empty
+ * list. The spoiler shield is unchanged: the final suppression filter runs
+ * over whichever list is chosen, so a held or quarantined card can never
+ * resurface through retention.
+ */
+export function selectPublishedEpisodeRows(args: {
+  freshEpisodes: CoworldLeagueEpisodeRow[];
+  previousEpisodes: CoworldLeagueEpisodeRow[];
+  maxRenderedEpisodes: number;
+  replayFeedStale: boolean;
+  suppressionDeferredCount: number;
+  finalSuppression: PremiereSuppressionState;
+  now: Date;
+}): {
+  published: CoworldLeagueEpisodeRow[];
+  suppressedFromMerged: number;
+  retainedPreviousOverEmpty: boolean;
+} {
+  const retain =
+    args.replayFeedStale ||
+    args.suppressionDeferredCount > 0 ||
+    args.freshEpisodes.length === 0;
+  const base = retain
+    ? mergeEpisodeRows(
+        args.freshEpisodes,
+        args.previousEpisodes,
+        args.maxRenderedEpisodes,
+      )
+    : args.freshEpisodes;
+  let published = filterSuppressedEpisodeRows(
+    args.finalSuppression,
+    base,
+    args.now,
+  );
+  const suppressedFromMerged = base.length - published.length;
+  let retainedPreviousOverEmpty = false;
+  if (published.length === 0 && args.previousEpisodes.length > 0) {
+    // Last resort: never overwrite a populated archive with an empty list.
+    // Previously published rows still have to pass the spoiler filter.
+    published = filterSuppressedEpisodeRows(
+      args.finalSuppression,
+      mergeEpisodeRows([], args.previousEpisodes, args.maxRenderedEpisodes),
+      args.now,
+    );
+    retainedPreviousOverEmpty = published.length > 0;
+  }
+  return { published, suppressedFromMerged, retainedPreviousOverEmpty };
 }
 
 export function buildRoundRows(

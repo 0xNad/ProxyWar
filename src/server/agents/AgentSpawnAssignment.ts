@@ -41,8 +41,8 @@ export interface SelectSpawnSlotsOptions {
  *
  * Returns the `slotCount` selected candidates sorted by ascending tile ID -
  * a stable, reproducible order independent of selection order or of the
- * input array's own ordering, so `spawnSlotForRosterIndex` is reproducible
- * regardless of incidental upstream iteration order.
+ * input array's own ordering, so both the active sealed allocator and legacy
+ * deterministic-assignment helpers receive a reproducible menu.
  */
 export function selectSpawnSlots(
   candidates: readonly SpawnCandidate[],
@@ -112,7 +112,9 @@ export function selectSpawnSlots(
       }
       if (
         distance > bestDistance ||
-        (distance === bestDistance && best !== null && candidate.tile < best.tile)
+        (distance === bestDistance &&
+          best !== null &&
+          candidate.tile < best.tile)
       ) {
         best = candidate;
         bestDistance = distance;
@@ -143,6 +145,12 @@ export function selectSpawnSlots(
 }
 
 /**
+ * Legacy deterministic-assignment baseline retained for compatibility and
+ * matched-control tests. Active agent-selected spawning uses
+ * `buildAgentSpawnPriority` / `resolveAgentSpawnSelection` instead.
+ *
+ * @deprecated Not used by the production sealed-ranked-v1 spawn path.
+ *
  * Assigns roster participant `rosterIndex` (0-based, array position in the
  * league's participant roster) to a slot for `episodeIndex` (0-based ordinal
  * of this episode among repeated episodes reusing the SAME slot set):
@@ -182,6 +190,11 @@ export interface AssignSpawnSlotsInput {
 }
 
 /**
+ * Legacy deterministic-assignment baseline retained for compatibility and
+ * matched-control tests.
+ *
+ * @deprecated Not used by the production sealed-ranked-v1 spawn path.
+ *
  * Convenience wrapper composing `selectSpawnSlots` + `spawnSlotForRosterIndex`:
  * returns an array of length `participantCount` where index `i` is the slot
  * assigned to roster participant `i`.
@@ -273,5 +286,8 @@ export function validateSpawnSlotLegality(
 }
 
 function spawnDistance(a: SpawnCandidate, b: SpawnCandidate): number {
-  return Math.hypot((a.x as number) - (b.x as number), (a.y as number) - (b.y as number));
+  return Math.hypot(
+    (a.x as number) - (b.x as number),
+    (a.y as number) - (b.y as number),
+  );
 }

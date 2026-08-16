@@ -87,6 +87,7 @@ export async function runAgentStepLockedLeague(
     mirror: options.mirror,
     messages: options.messages,
     turnsPerSpawnTick: turnsForDecisionStep(config, 0),
+    maxDecisionMs: config.maxDecisionMs,
   });
 
   let currentGame = await advanceUntil({

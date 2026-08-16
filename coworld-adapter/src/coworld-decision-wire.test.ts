@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import { MAX_WIRE_ACTIONS_PER_DECISION as CANONICAL_MAX } from "../../src/server/agents/AgentWireProtocol.ts";
+import {
+  MAX_WIRE_ACTIONS_PER_DECISION as CANONICAL_MAX,
+  MAX_SPAWN_PREFERENCE_ACTION_IDS as CANONICAL_MAX_SPAWN_PREFERENCES,
+} from "../../src/server/agents/AgentWireProtocol.ts";
 import {
   decisionRequestEnvelope,
   MAX_WIRE_ACTION_ID_LENGTH,
   MAX_WIRE_ACTIONS_PER_DECISION,
+  MAX_WIRE_SPAWN_PREFERENCE_ACTION_IDS,
   normalizeDecisionResponse,
 } from "./coworld-decision-wire.ts";
 
@@ -14,6 +18,12 @@ describe("wire constant parity", () => {
     // to /app/integration with the engine at /app/proxywar), so it carries a
     // literal. This pin is what keeps the mirror honest.
     expect(MAX_WIRE_ACTIONS_PER_DECISION).toBe(CANONICAL_MAX);
+  });
+
+  it("mirrors the independent canonical spawn-preference cap exactly", () => {
+    expect(MAX_WIRE_SPAWN_PREFERENCE_ACTION_IDS).toBe(
+      CANONICAL_MAX_SPAWN_PREFERENCES,
+    );
   });
 });
 
@@ -29,7 +39,10 @@ describe("decisionRequestEnvelope", () => {
       type: "decision_request",
       requestID: "req_1",
       slot: 3,
-      protocol: { maxActionsPerDecision: MAX_WIRE_ACTIONS_PER_DECISION },
+      protocol: {
+        maxActionsPerDecision: MAX_WIRE_ACTIONS_PER_DECISION,
+        maxSpawnPreferences: MAX_WIRE_SPAWN_PREFERENCE_ACTION_IDS,
+      },
       request,
     });
     // The inner payload rides by reference — byte-identical on the wire.
@@ -136,5 +149,90 @@ describe("normalizeDecisionResponse", () => {
     });
     expect("dealActionID" in withoutDeal).toBe(false);
     expect(withoutDeal.reason).toHaveLength(500);
+  });
+
+  it("maps an explicit spawn ballot to its independent internal field without creating an action batch", () => {
+    const normalized = normalizeDecisionResponse({
+      selectedLegalActionId: "spawn:20",
+      spawnPreferenceLegalActionIds: ["spawn:20", "spawn:10", "spawn:30"],
+      reason: "ranked spawn ballot",
+    });
+
+    expect(normalized.spawnPreferenceActionIDs).toEqual([
+      "spawn:20",
+      "spawn:10",
+      "spawn:30",
+    ]);
+    expect(normalized.actionIDs).toBeUndefined();
+  });
+
+  it.each([
+    ["without a ranked ballot", undefined],
+    ["alongside a ranked ballot", ["spawn:20", "spawn:10"]],
+  ])(
+    "marks an all-spawn response invalid when it carries executable batching %s",
+    (_case, spawnPreferenceLegalActionIds) => {
+      const normalized = normalizeDecisionResponse(
+        {
+          selectedLegalActionId: "spawn:20",
+          selectedLegalActionIds: ["spawn:20", "spawn:10"],
+          ...(spawnPreferenceLegalActionIds === undefined
+            ? {}
+            : { spawnPreferenceLegalActionIds }),
+          reason: "conflicting spawn wire fields",
+        },
+        { allSpawnMenu: true },
+      );
+
+      expect(normalized.actionIDs).toBeUndefined();
+      expect(normalized.spawnPreferenceActionIDs).toBeNull();
+    },
+  );
+
+  it("preserves one-item ballot presence and malformed evidence for backend rejection", () => {
+    expect(
+      normalizeDecisionResponse({
+        selectedLegalActionId: "spawn:10",
+        spawnPreferenceLegalActionIds: ["spawn:10"],
+      }).spawnPreferenceActionIDs,
+    ).toEqual(["spawn:10"]);
+
+    expect(
+      normalizeDecisionResponse({
+        selectedLegalActionId: "spawn:10",
+        spawnPreferenceLegalActionIds: "spawn:10",
+      }).spawnPreferenceActionIDs,
+    ).toBeNull();
+
+    expect(
+      normalizeDecisionResponse({
+        selectedLegalActionId: "spawn:10",
+        spawnPreferenceLegalActionIds: ["spawn:10", 7, "spawn:10"],
+      }).spawnPreferenceActionIDs,
+    ).toEqual(["spawn:10", 7, "spawn:10"]);
+  });
+
+  it("bounds hostile spawn ballots while preserving an overflow witness and overlong-id rejection", () => {
+    const overflow = Array.from(
+      { length: MAX_WIRE_SPAWN_PREFERENCE_ACTION_IDS + 100 },
+      (_, index) => `spawn:${index}`,
+    );
+    const normalizedOverflow = normalizeDecisionResponse({
+      selectedLegalActionId: "spawn:0",
+      spawnPreferenceLegalActionIds: overflow,
+    });
+    expect(normalizedOverflow.spawnPreferenceActionIDs).toHaveLength(
+      MAX_WIRE_SPAWN_PREFERENCE_ACTION_IDS + 1,
+    );
+
+    const overlong = `spawn:${"x".repeat(MAX_WIRE_ACTION_ID_LENGTH)}`;
+    const normalizedOverlong = normalizeDecisionResponse({
+      selectedLegalActionId: "spawn:1",
+      spawnPreferenceLegalActionIds: ["spawn:1", overlong],
+    });
+    expect(normalizedOverlong.spawnPreferenceActionIDs).toEqual([
+      "spawn:1",
+      "",
+    ]);
   });
 });

@@ -1,5 +1,8 @@
 import { describe, expect, test } from "vitest";
-import { mergeEpisodeRows } from "../../src/server/agents/CoworldLeagueMirrorCore";
+import {
+  mergeEpisodeRows,
+  selectPublishedEpisodeRows,
+} from "../../src/server/agents/CoworldLeagueMirrorCore";
 import {
   buildPremiereSiteBlock,
   classifyEpisodeSuppression,
@@ -541,5 +544,129 @@ describe("revealed-premiere links never bypass suppression", () => {
     expect(containsExactStructuredIdentity(json, SECRET_JSON_LEAVES)).toBe(
       false,
     );
+  });
+});
+
+// ————————————————————————————————————————————————————————————————————————
+// 2026-08-16 archive-wipe regression: an all-quarantined cycle must never
+// publish an empty list over a populated archive. selectPublishedEpisodeRows
+// is the single decision point the mirror now uses for retention + shield.
+// ————————————————————————————————————————————————————————————————————————
+
+function agedRow(id: string, hoursAgo: number): CoworldLeagueEpisodeRow {
+  return episodeRow({
+    episodeRequestId: `ereq_${id}`,
+    shortId: id,
+    completedAt: new Date(NOW.getTime() - hoursAgo * 3_600_000).toISOString(),
+  });
+}
+
+describe("mirror retention — the all-quarantined cycle (2026-08-16 wipe)", () => {
+  test("every fresh candidate deferred → previously published cards are retained", () => {
+    const state = activeContract({ holds: [] }); // blanket 12-min quarantine
+    const previous = [
+      agedRow("olda", 2),
+      agedRow("oldb", 3),
+      agedRow("oldc", 4),
+    ];
+    const selection = selectPublishedEpisodeRows({
+      freshEpisodes: [],
+      previousEpisodes: previous,
+      maxRenderedEpisodes: 12,
+      replayFeedStale: false,
+      suppressionDeferredCount: 12,
+      finalSuppression: state,
+      now: NOW,
+    });
+    expect(selection.published.map((row) => row.episodeRequestId)).toEqual([
+      "ereq_olda",
+      "ereq_oldb",
+      "ereq_oldc",
+    ]);
+    expect(selection.retainedPreviousOverEmpty).toBe(false);
+    expect(selection.suppressedFromMerged).toBe(0);
+  });
+
+  test("partial deferral merges fresh revealable rows with retained cards, newest first", () => {
+    const state = activeContract({ holds: [] });
+    const fresh = [agedRow("fresh1", 1)];
+    const previous = [agedRow("olda", 2), agedRow("oldb", 3)];
+    const selection = selectPublishedEpisodeRows({
+      freshEpisodes: fresh,
+      previousEpisodes: previous,
+      maxRenderedEpisodes: 12,
+      replayFeedStale: false,
+      suppressionDeferredCount: 5,
+      finalSuppression: state,
+      now: NOW,
+    });
+    expect(selection.published.map((row) => row.episodeRequestId)).toEqual([
+      "ereq_fresh1",
+      "ereq_olda",
+      "ereq_oldb",
+    ]);
+  });
+
+  test("a previously published card that is NOW quarantined is still stripped (shield intact)", () => {
+    const state = activeContract({ holds: [] });
+    const requarantined = episodeRow({
+      episodeRequestId: "ereq_requar",
+      shortId: "requar",
+      completedAt: new Date(NOW.getTime() - 5 * 60_000).toISOString(),
+    });
+    const selection = selectPublishedEpisodeRows({
+      freshEpisodes: [],
+      previousEpisodes: [requarantined, agedRow("olda", 2)],
+      maxRenderedEpisodes: 12,
+      replayFeedStale: false,
+      suppressionDeferredCount: 3,
+      finalSuppression: state,
+      now: NOW,
+    });
+    expect(selection.published.map((row) => row.episodeRequestId)).toEqual([
+      "ereq_olda",
+    ]);
+    expect(selection.suppressedFromMerged).toBe(1);
+  });
+
+  test("healthy cycle with zero deferrals publishes exactly the fresh list (no behavior change)", () => {
+    const state = activeContract({ holds: [] });
+    const fresh = [agedRow("fresh1", 1), agedRow("fresh2", 2)];
+    const selection = selectPublishedEpisodeRows({
+      freshEpisodes: fresh,
+      previousEpisodes: [agedRow("rotated", 9)],
+      maxRenderedEpisodes: 12,
+      replayFeedStale: false,
+      suppressionDeferredCount: 0,
+      finalSuppression: state,
+      now: NOW,
+    });
+    expect(selection.published.map((row) => row.episodeRequestId)).toEqual([
+      "ereq_fresh1",
+      "ereq_fresh2",
+    ]);
+    expect(selection.retainedPreviousOverEmpty).toBe(false);
+  });
+
+  test("last resort: a fresh list that filters to empty never overwrites a populated archive", () => {
+    const state = activeContract({ holds: [] });
+    const midCycleQuarantined = episodeRow({
+      episodeRequestId: "ereq_race",
+      shortId: "race",
+      completedAt: new Date(NOW.getTime() - 4 * 60_000).toISOString(),
+    });
+    const selection = selectPublishedEpisodeRows({
+      freshEpisodes: [midCycleQuarantined],
+      previousEpisodes: [agedRow("olda", 2)],
+      maxRenderedEpisodes: 12,
+      replayFeedStale: false,
+      suppressionDeferredCount: 0,
+      finalSuppression: state,
+      now: NOW,
+    });
+    expect(selection.published.map((row) => row.episodeRequestId)).toEqual([
+      "ereq_olda",
+    ]);
+    expect(selection.retainedPreviousOverEmpty).toBe(true);
   });
 });

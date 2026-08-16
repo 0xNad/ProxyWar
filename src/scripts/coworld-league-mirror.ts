@@ -33,7 +33,6 @@ import {
   buildEpisodeRow,
   buildRoundRows,
   buildStandingRows,
-  mergeEpisodeRows,
   parseCompletedEpisodeMetaList,
   parseCuratedDramaScore,
   parseHostedReplayPayload,
@@ -44,6 +43,7 @@ import {
   resolveLatestRevealedPremiere,
   roundNumberByRoundId,
   scoreLabelFromStandings,
+  selectPublishedEpisodeRows,
   selectServingLatestPremiere,
   summarizePremiereArchiveIndex,
   type HostedEpisodeMeta,
@@ -54,7 +54,6 @@ import { withCoworldLeagueMirrorOperationLock } from "../server/agents/CoworldLe
 import {
   buildPremiereSiteBlock,
   classifyEpisodeSuppression,
-  filterSuppressedEpisodeRows,
   loadLatestPremierePointer,
   loadPremiereSuppressionContract,
   type PremiereSuppressionState,
@@ -976,13 +975,19 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
         : `premiere suppression inactive (contract ${suppressionAtCycleStart.reason})`,
     );
   }
-  const episodeMetasToProcess = (
+  // Suppression filters BEFORE the display window: quarantined-fresh
+  // candidates must not consume the render slots that older, revealable
+  // episodes could fill. The deferral count feeds retention in
+  // selectPublishedEpisodeRows (2026-08-16 archive wipe).
+  let suppressionDeferredCount = 0;
+  const suppressionLogBudget = options.maxRenderedEpisodes * 2;
+  const candidateMetas =
     recoveryReferences === null
-      ? episodeMetas.slice(0, options.maxRenderedEpisodes)
+      ? episodeMetas
       : episodeMetas.filter((meta) =>
           recoveryReferences.episodeRequestIds.has(meta.episodeRequestId),
-        )
-  ).filter((meta) => {
+        );
+  const publishableMetas = candidateMetas.filter((meta) => {
     if (suppressionAtCycleStart === null) {
       return true;
     }
@@ -992,16 +997,28 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
       new Date(),
     );
     if (decision !== "publish") {
-      log(
-        `episode ${meta.episodeRequestId} ${
-          decision === "held"
-            ? "held for premiere — excluded"
-            : "deferred this cycle (premiere quarantine)"
-        }`,
-      );
+      suppressionDeferredCount += 1;
+      if (suppressionDeferredCount <= suppressionLogBudget) {
+        log(
+          `episode ${meta.episodeRequestId} ${
+            decision === "held"
+              ? "held for premiere — excluded"
+              : "deferred this cycle (premiere quarantine)"
+          }`,
+        );
+      }
     }
     return decision === "publish";
   });
+  if (suppressionDeferredCount > suppressionLogBudget) {
+    log(
+      `…and ${suppressionDeferredCount - suppressionLogBudget} more candidate(s) deferred/held by premiere suppression`,
+    );
+  }
+  const episodeMetasToProcess =
+    recoveryReferences === null
+      ? publishableMetas.slice(0, options.maxRenderedEpisodes)
+      : publishableMetas;
 
   const freshEpisodes: CoworldLeagueEpisodeRow[] = [];
   // Season Zero Phase 2: `match-state-series.json` generation runs FIRST
@@ -1031,6 +1048,7 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
           new Date(),
         );
         if (decision !== "publish") {
+          suppressionDeferredCount += 1;
           log(
             `episode ${meta.episodeRequestId} suppressed before unpack (${
               decision === "held" ? "premiere hold" : "premiere quarantine"
@@ -1199,38 +1217,41 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
 
   const replayFeedStale =
     !replayRead.ok || !replayStorageAvailable || replayEpisodeFailures > 0;
-  const episodes =
-    replayRead.ok && replayStorageAvailable
-      ? replayFeedStale
-        ? mergeEpisodeRows(
-            freshEpisodes,
-            previousData?.episodes ?? [],
-            options.maxRenderedEpisodes,
-          )
-        : freshEpisodes
-      : (previousData?.episodes ?? []).slice(0, options.maxRenderedEpisodes);
   if (replayEpisodeFailures > 0) {
     log(
       `${replayEpisodeFailures} replay episode(s) failed; retaining available previous battle cards`,
     );
   }
 
-  // Final defense: mergeEpisodeRows retains previously-published cards, so a
-  // card published before a premiere claim can still be in `episodes`. Re-read
-  // the contract and filter held/quarantined episodes out of the MERGED list
-  // before it reaches data.json. Stale/absent contract returns the list
-  // unchanged, so the mirror output stays byte-identical to today.
+  // Retention + spoiler shield live together in selectPublishedEpisodeRows —
+  // see its doc for the 2026-08-16 archive wipe this replaces (an
+  // all-quarantined cycle used to publish an empty list over a populated
+  // archive). The contract is re-read here so a claim that landed mid-cycle
+  // still suppresses merged cards.
   const finalSuppression = await readSuppressionState(options);
-  const publishedEpisodes = filterSuppressedEpisodeRows(
+  const selection = selectPublishedEpisodeRows({
+    freshEpisodes,
+    previousEpisodes: previousData?.episodes ?? [],
+    maxRenderedEpisodes: options.maxRenderedEpisodes,
+    replayFeedStale,
+    suppressionDeferredCount,
     finalSuppression,
-    episodes,
-    new Date(),
-  );
-  if (publishedEpisodes.length !== episodes.length) {
+    now: new Date(),
+  });
+  const publishedEpisodes = selection.published;
+  if (suppressionDeferredCount > 0) {
     log(
-      `premiere suppression removed ${
-        episodes.length - publishedEpisodes.length
-      } card(s) from the merged episode list`,
+      `premiere suppression deferred ${suppressionDeferredCount} candidate(s) this cycle; previously published cards retained`,
+    );
+  }
+  if (selection.suppressedFromMerged > 0) {
+    log(
+      `premiere suppression removed ${selection.suppressedFromMerged} card(s) from the merged episode list`,
+    );
+  }
+  if (selection.retainedPreviousOverEmpty) {
+    log(
+      `refused to overwrite a populated archive with an empty episode list; retained ${publishedEpisodes.length} previously published card(s)`,
     );
   }
   const premiere = buildPremiereSiteBlock(finalSuppression, new Date());

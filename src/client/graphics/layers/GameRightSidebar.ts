@@ -159,6 +159,10 @@ export class GameRightSidebar extends LitElement implements Layer {
       this.game?.config()?.gameConfig()?.gameType === GameType.Singleplayer ||
       this.game.config().isReplay();
     this._isVisible = true;
+    // This singleton is reused for in-place replay rewinds. Hidden HUD state
+    // belongs to the old renderer and must never carry into its replacement.
+    this.hudHidden = false;
+    document.body.classList.remove(HUD_HIDDEN_BODY_CLASS);
     // This element outlives games (static in index.html; leaving a lobby is
     // an SPA transition, no reload) -- drop the previous game's counters.
     this._replayProgress = null;

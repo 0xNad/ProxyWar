@@ -24,6 +24,13 @@
 export const MAX_WIRE_ACTIONS_PER_DECISION = 5;
 
 /**
+ * Independent cap for the spawn-only ranked ballot. These ids describe
+ * preferences for ONE eventual spawn assignment; they are never executable
+ * action batching and must not share MAX_WIRE_ACTIONS_PER_DECISION's width.
+ */
+export const MAX_SPAWN_PREFERENCE_ACTION_IDS = 16;
+
+/**
  * Normalize a wire batch: scalar-first, trimmed, empties dropped, deduped
  * preserving order. Does NOT cap — strict parsing rejects oversized batches
  * with a coaching error while robust parsing truncates, so the cap decision

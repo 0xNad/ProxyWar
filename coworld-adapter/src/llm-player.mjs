@@ -141,6 +141,69 @@ function createMockComplete() {
   };
 }
 
+function spawnPreferenceRanking(message, actions) {
+  const advertised = message?.protocol?.maxSpawnPreferences;
+  if (
+    !Array.isArray(actions) ||
+    actions.length === 0 ||
+    !actions.every((action) => action?.kind === "spawn") ||
+    typeof advertised !== "number" ||
+    !Number.isFinite(advertised) ||
+    advertised < 1
+  ) {
+    return null;
+  }
+  const limit = Math.min(16, Math.floor(advertised));
+  return actions
+    .map((action, index) => ({
+      action,
+      index,
+      score: spawnPreferenceScore(action),
+      tile:
+        typeof action?.metadata?.tile === "number" &&
+        Number.isFinite(action.metadata.tile)
+          ? action.metadata.tile
+          : Number.POSITIVE_INFINITY,
+    }))
+    .sort(
+      (left, right) =>
+        right.score - left.score ||
+        left.tile - right.tile ||
+        String(left.action.id).localeCompare(String(right.action.id)) ||
+        left.index - right.index,
+    )
+    .slice(0, limit)
+    .map(({ action }) => action);
+}
+
+function spawnPreferenceScore(action) {
+  const score = (key) => {
+    const value = action?.metadata?.[key];
+    return typeof value === "number" && Number.isFinite(value) ? value : 0;
+  };
+  const opportunity = score("opportunityScore");
+  const pressure = score("pressureScore");
+  const safety = score("safetyScore");
+  const diplomacy = score("diplomacyScore");
+  const localLand = score("localLandScore");
+  const middleSafetyBand = Math.max(0, 1 - Math.abs(safety - 0.32) / 0.24);
+  const lowSafetyPenalty =
+    safety < 0.18
+      ? (0.18 - safety) * 2.4 + 0.16
+      : safety < 0.23
+        ? (0.23 - safety) * 1.1
+        : 0;
+  return (
+    opportunity * 0.32 +
+    pressure * 0.18 +
+    middleSafetyBand * 0.03 +
+    localLand * 0.5 +
+    safety * 0.25 +
+    diplomacy * 0.28 -
+    lowSafetyPenalty
+  );
+}
+
 async function main() {
   const require = createRequire(import.meta.url);
   const { WebSocket } = require(`${proxyWarRepo}/node_modules/ws`);
@@ -203,6 +266,27 @@ async function main() {
       return;
     }
 
+    const actions = message.request?.legalActions ?? [];
+    const spawnPreferences = spawnPreferenceRanking(message, actions);
+    if (spawnPreferences !== null) {
+      socket.send(
+        JSON.stringify({
+          type: "decision_response",
+          requestID: message.requestID,
+          selectedLegalActionId: spawnPreferences[0].id,
+          spawnPreferenceLegalActionIds: spawnPreferences.map(
+            (preference) => preference.id,
+          ),
+          reason: `starter ranked ${spawnPreferences.length} offered spawn actions from metadata`,
+          confidence: 0.7,
+        }),
+      );
+      // Spawn allocation is a sealed preference round, not strategic play:
+      // bypass the starter SDK so it creates no prompt, planning refresh, or
+      // ordinary decision-history entry for this request.
+      return;
+    }
+
     let decision;
     let degraded = false;
     try {
@@ -216,7 +300,6 @@ async function main() {
       // on the wire so game-side artifacts record it (the v1 seat played 60+
       // hosted rounds in this branch while replays reported 0 fallbacks).
       degraded = true;
-      const actions = message.request?.legalActions ?? [];
       decision = {
         selectedLegalActionId: actions[0]?.id,
         reason: `transport fallback: ${String(error?.message ?? error).slice(0, 200)}`,

@@ -7,6 +7,9 @@ import type { CoworldConfig } from "./no-docker-coworld-episode.ts";
  * side-effect-free sibling module (matching `coworld-seat-specs.ts` etc.)
  * because `no-docker-coworld-episode.ts` itself runs `main()` unconditionally
  * at import time and so cannot be imported directly by a unit test.
+ * Competition commissioners stamp a consecutive episode ordinal within a
+ * same-variant recurrence block. The league uses it for report-independent
+ * spawn priority and deterministic fallback.
  */
 export function episodeIndexFromConfig(config: CoworldConfig): number {
   return config.episodeIndex ?? 0;

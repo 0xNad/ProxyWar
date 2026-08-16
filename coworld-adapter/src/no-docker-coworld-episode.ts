@@ -89,6 +89,12 @@ type CoworldDecision = {
   actionID: string;
   /** Optional wire batch (selectedLegalActionIds), normalized + capped. */
   actionIDs?: string[];
+  /**
+   * Optional untrusted spawn-ballot shape. Runtime validation in the backend
+   * owns its string-array contract; this transport preserves bounded hostile
+   * shapes so malformed explicit ballots cannot become legacy scalar replies.
+   */
+  spawnPreferenceActionIDs?: unknown;
   /** Optional diplomacy-slot selection (selectedDealActionId). */
   dealActionID?: string;
   reason: string;
@@ -115,16 +121,11 @@ export type CoworldConfig = {
   replay_tail_turns?: number;
   player_connect_timeout_seconds?: number;
   /**
-   * Zero-based ordinal for this episode among repeated episodes reusing the
-   * SAME map + roster (AgentLeagueMatchOptions.episodeIndex): rotates which
-   * fairness-assigned spawn slot each seat lands on so N same-map/roster
-   * episodes cycle every agent through every slot exactly once
-   * (AgentSpawnAssignment.ts). No in-repo orchestrator currently launches a
-   * sequence of Coworld containers for the same map/roster yet - this field
-   * is the hook for the external scheduler that eventually does (e.g. a
-   * season programming the same map/agents on a recurring slot): pass the
-   * scheduler's own zero-based repeat-occurrence number here. Defaults to 0
-   * (single/first episode) when omitted.
+   * Zero-based episode ordinal within the commissioner's same-variant
+   * recurrence blocks (AgentLeagueMatchOptions.episodeIndex). The sealed
+   * spawn allocator uses it to rotate report-independent priority/default
+   * order; ballots and response arrival never influence that order. Defaults
+   * to 0 for a standalone/first occurrence when omitted.
    */
   episodeIndex?: number;
 };
@@ -316,10 +317,11 @@ class CoworldProtocolServer {
         legalActions,
       });
       websocket.send(
-        // Envelope carries the batch capability advertisement
-        // (protocol.maxActionsPerDecision) as a sibling of requestID/slot;
-        // the inner request payload is untouched. Players ignore unknown
-        // envelope keys, so pre-batching policies are unaffected.
+        // Envelope carries independent capability advertisements for action
+        // batching and spawn ranking (protocol.maxActionsPerDecision /
+        // protocol.maxSpawnPreferences) as siblings of requestID/slot; the
+        // inner request payload is untouched. Players ignore unknown envelope
+        // keys, so older policies remain scalar-only compatible.
         JSON.stringify(decisionRequestEnvelope({ requestID, slot, request })),
       );
     });
@@ -440,13 +442,18 @@ class CoworldProtocolServer {
       clearTimeout(pending.timeout);
     }
     this.pending.delete(requestID);
-    // Decision fields (scalar primary, optional selectedLegalActionIds
-    // batch, optional deal slot, reason) are parsed and length-bounded by
+    // Decision fields (scalar primary, optional selectedLegalActionIds batch,
+    // independent spawnPreferenceLegalActionIds ballot, optional deal slot,
+    // reason) are shape/length-bounded by
     // the shared wire module — see coworld-decision-wire.ts for the
     // normalization contract and why menu membership is deliberately NOT
     // checked here. Metadata assembly stays in place: it reads
     // episode-local state (slot, requestID, offered menu size).
-    const normalized = normalizeDecisionResponse(message);
+    const normalized = normalizeDecisionResponse(message, {
+      allSpawnMenu:
+        pending.legalActions.length > 0 &&
+        pending.legalActions.every((action) => action.kind === "spawn"),
+    });
     pending.resolve({
       ...normalized,
       metadata: {
@@ -1040,6 +1047,8 @@ async function runProxyWarEpisode(
     const certificationNote = process.env.COGAME_RESULTS_URI
       ? "This episode ran through Coworld's game/player container env contract."
       : "Official Coworld certification is not part of this no-Docker command.";
+    const spawnSelectionNote =
+      "spawnSelectionMode=sealed-ranked-v1; one concurrent hidden ballot, no reaction phase.";
     const spectatorReplay = modules.buildAgentSpectatorReplay({
       runID,
       matchID: game.id,
@@ -1049,7 +1058,7 @@ async function runProxyWarEpisode(
       finalGameState: stepResult.finalGameState,
       roster,
       snapshots: spectatorSnapshots,
-      notes: [runNote, certificationNote],
+      notes: [runNote, certificationNote, spawnSelectionNote],
     });
     // runAgentStepLockedLeague finalizes deals before returning. Preserve an
     // enabled-but-empty ledger as evidence that no proposal occurred; omit the
@@ -1077,6 +1086,7 @@ async function runProxyWarEpisode(
         mapSize: selectedGameConfig.gameMapSize,
         difficulty: selectedGameConfig.difficulty,
         variedSpawns: false,
+        spawnSelectionMode: "sealed-ranked-v1",
       },
       startedAt,
       completedAt,
@@ -1087,7 +1097,7 @@ async function runProxyWarEpisode(
       spectatorReplay,
       gameRecord,
       rootDir: path.join(workspace, "proxywar-runs"),
-      notes: [runNote, certificationNote],
+      notes: [runNote, certificationNote, spawnSelectionNote],
     });
     const compactSpectatorReplay =
       artifacts.spectatorReplayPath === null

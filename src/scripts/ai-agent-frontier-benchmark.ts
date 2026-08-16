@@ -383,6 +383,7 @@ async function runSingleMatch(input: {
       mirror,
       messages,
       turnsPerSpawnTick: input.config.turnsPerDecision,
+      maxDecisionMs: input.config.maxDecisionMs,
     });
     let currentGame = await advanceUntil({
       game,
@@ -813,6 +814,7 @@ async function writeFrontierReplayArtifacts(input: {
       map: input.config.map,
       mapSize: input.config.mapSize,
       difficulty: input.config.difficulty,
+      spawnSelectionMode: "sealed-ranked-v1",
     },
     startedAt: input.startedAt,
     completedAt: input.completedAt,
