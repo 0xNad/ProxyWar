@@ -131,6 +131,10 @@ menu of `LegalAction[]`, then returns strict JSON selecting one listed id:
 Rules:
 
 - `selectedLegalActionId` must exactly match one offered `LegalAction.id`.
+- On an all-spawn menu, an optional `spawnPreferenceLegalActionIds` array may
+  rank up to 16 exact offered spawn ids. The scalar remains required and must
+  equal element 0. This ballot is allocation input for one spawn, never an
+  executable `selectedLegalActionIds` batch.
 - `reason` must be a short string.
 - `confidence` is optional. Numeric values are clamped to 0..1; non-numeric
   confidence is rejected.
@@ -152,6 +156,9 @@ friends who want to run their own agent service. Endpoint agents still use the
 same contract as LLM brains: they receive `AgentObservation` plus public
 `LegalAction[]` entries and must return strict JSON with one
 `selectedLegalActionId`. They never receive or submit raw game intents.
+For the active spawn-preference request, `responseContract` additionally
+advertises `spawnPreferenceLegalActionIds` and `maxSpawnPreferences: 16` only
+when the offered menu consists entirely of spawn actions.
 
 Endpoint-backed entrants are saved as normal manifests with
 `brainType: "external-http"` and `provider.provider: "external-http"`. When a
@@ -210,33 +217,53 @@ artifact instead of scanning for the newest artifact after start time.
 
 ## Spawn Placement
 
-Spawn is never a brain/agent choice and is never offered as a `LegalAction` -
-`LegalActionBuilder.build()` does not emit a `spawn` kind. Before any brain
-decision runs, the league runner deterministically assigns every roster
-participant a spawn tile via `AgentSpawnAssignment.assignSpawnSlots`:
+Active spawn-selection protocol is **sealed-ranked-v1**: one hidden concurrent
+pre-game ballot, with no reaction phase.
 
-1. Candidates below a minimum land-quality floor
-   (`DEFAULT_SPAWN_QUALITY_FLOOR`, the same `localLandScore` signal
-   `buildSpawnCandidates` already computes) are dropped.
-2. The remaining candidates are reduced to exactly one well-spaced slot per
-   participant via greedy maximin (farthest-point) sampling, seeded from the
-   single highest-quality qualifying candidate.
-3. Each roster participant is assigned `slots[(rosterIndex + episodeIndex) %
-slots.length]` - a modular rotation so that `slots.length` consecutive
-   episodes reusing the same map/roster cycle every participant through
-   every slot exactly once.
-4. `validateSpawnSlotUniqueness` guards the selection never repeats a tile;
-   `validateSpawnSlotLegality` re-checks every assigned tile against live
-   game state (bounds/land/unowned/border/footprint) immediately before
-   submission.
+1. Candidates below `DEFAULT_SPAWN_QUALITY_FLOOR` are dropped. Greedy maximin
+   then selects exactly `N` quality-floored, maximin-spaced slots for `N`
+   participants.
+2. The runner builds those slots as exact `spawn:<tile>` `LegalAction`s and
+   offers the same `N`-item menu to every brain from the same pre-spawn state.
+3. Every brain is dispatched before any response is awaited. Responses remain
+   sealed until the common round settles; arrival order cannot affect the
+   allocation.
+4. `selectedLegalActionId` is the required first preference. An optional
+   `spawnPreferenceActionIDs` internal ballot (wire:
+   `spawnPreferenceLegalActionIds`) may rank up to 16 distinct exact offered
+   spawn ids. Valid partial or scalar-only rankings receive a deterministic
+   offered-order tail. A malformed, duplicate, off-menu, non-string,
+   mismatched, or oversized explicit ballot is rejected as a whole and gets a
+   recorded deterministic default.
+5. A report-independent recorded priority order resolves the ballots by
+   serial dictatorship: each participant receives its highest-ranked
+   remaining slot. This is one allocation pass only—no reveal, reaction,
+   relocation, trade, retry, or second ballot in v1.
+6. The complete allocation is rechecked for uniqueness and live spawn
+   legality, then each final assigned offered action follows the existing
+   `AgentDecisionValidator -> AgentRunner -> GameServer` path. Exactly one
+   spawn intent is submitted per participant; brains never send coordinates or
+   raw intents.
 
-Insufficient qualifying candidates for the roster size throws a specific,
-actionable error rather than silently falling back to an unfair or
-lower-quality slot. There is no off-menu `spawn:<tile>` request path and no
-agent-facing spawn menu.
+Insufficient qualifying slots still throws a specific actionable error. The
+spawn ballot is deliberately separate from `actionIDs`/
+`selectedLegalActionIds`, whose meaning remains sequential executable action
+batching. Coworld artifacts identify this contract as
+`spawnSelectionMode: "sealed-ranked-v1"` while `variedSpawns` retains its
+independent map/scenario meaning.
+
+The private operator `decisions.jsonl` is the audit source for the offered
+menu, authored and normalized ballot, validation/default reason, priority
+position, assigned id, and assigned rank. Public spectator/Coworld replays
+prove only the final spawn intents and resulting locations; they do **not**
+currently prove that the hidden ballots were allocated fairly. Do not present
+a public replay alone as allocation-integrity evidence.
 
 ## Current Legal Actions
 
+- `spawn`: offered only during the single sealed pre-game preference round.
+  All participants see the same maximin-spaced menu and rank exact ids; only the
+  allocator's final assigned id is submitted.
 - `hold`: a no-op wrapper with no game intent, used as a safe fallback
   because the core intent schema has no explicit no-op.
 - `attack`: generated only when a post-spawn observation exposes a target that
@@ -277,7 +304,7 @@ observation JSON and still may only select one offered `LegalAction.id`.
 
 | Action family    | Status                                                   | Proof source                                                                                                                                                                                        |
 | ---------------- | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Spawn            | Working (deterministic assignment, never a brain choice) | Every roster participant is assigned a quality-floored, well-spaced tile via `AgentSpawnAssignment.assignSpawnSlots`, submitted directly as a normal `spawn` intent before any brain decision runs. |
+| Spawn            | Working (sealed ranked v1)                               | Every participant ranks the same quality-floored, maximin-spaced offered menu in one concurrent hidden round; deterministic allocation submits one final exact offered `spawn` action through the normal validator/runner path. |
 | Hold             | Working                                                  | Safe no-intent fallback.                                                                                                                                                                            |
 | Alliance         | Working                                                  | `player.canSendAllianceRequest(other)`.                                                                                                                                                             |
 | Attack           | Working                                                  | `sharesBorderWith` plus `canAttackPlayer`.                                                                                                                                                          |
@@ -291,9 +318,9 @@ observation JSON and still may only select one offered `LegalAction.id`.
 
 - One hardcoded agent can join an in-process private game and submit a normal
   `ClientIntentMessage`.
-- Four hardcoded agents can join one in-process private game, each get a
-  distinct deterministically assigned spawn tile, and submit those spawn
-  actions through the same server intent path.
+- Four hardcoded agents can join one in-process private game, answer the same
+  sealed spawn menu concurrently, receive distinct deterministic allocations,
+  and submit those final spawn actions through the same server intent path.
 - The league runner now uses the formal pipeline:
   `AgentObservationBuilder -> LegalActionBuilder -> AgentBrain -> validator`.
 - The league smoke advances a real in-process match past spawn using server
@@ -323,8 +350,9 @@ observation JSON and still may only select one offered `LegalAction.id`.
 - Every league smoke run writes durable artifacts under
   `artifacts/ai-league-runs/<run-id>/`: `decisions.jsonl`,
   `match-summary.json`, `match-report.md`, and `visual-report.html`.
-- Focused tests cover observation building, pre-spawn legal action generation,
-  brain selection, invalid decision fallback, multi-agent spawn execution, and a
+- Focused tests cover observation building, the sealed ranked spawn wire and
+  allocation contract, invalid-ballot defaults, completion-order invariance,
+  multi-agent spawn execution, and a
   live post-spawn alliance request executed through core. The attack scenario
   test proves bordered targets appear in observation, attack candidates are
   generated, the selected attack passes validation and server submission, and
@@ -369,9 +397,9 @@ no useful post-spawn actions were available.
 
 ## Live Versus Supplied Observation
 
-Pre-spawn smoke decisions can be made from supplied spawn candidates because the
-agent has not yet spawned and no live player state exists. Post-spawn decisions
-use a live `Game` snapshot from `AgentLocalGameMirror` or tests. That snapshot is
+The spawn preference round uses a shared pre-spawn snapshot and the same exact
+bounded offered menu for every participant. Post-spawn decisions use a live
+`Game` snapshot from `AgentLocalGameMirror` or tests. That snapshot is
 the same deterministic core state a client would build by consuming server
 turns, so legal action generation can call real player methods such as
 `canSendAllianceRequest`, `canAttackPlayer`, `sharesBorderWith`, and

@@ -263,7 +263,7 @@ interface Cinema {
   nukes: TrackedNuke[];
   primary: TrackedNuke;
   /** Camera state captured the instant before the punch-in. */
-  restore: { x: number; y: number; scale: number } | null;
+  restore: { x: number; y: number; scale: number; intentEpoch: number } | null;
   /** Set once the camera has been sent to the target; the cut happens once. */
   punchedIn: boolean;
   /** At least one of this cinema's warheads was shot down short of its target. */
@@ -797,6 +797,7 @@ export class NukeCinema implements Layer {
       x: center.screenX,
       y: center.screenY,
       scale: this.transformHandler.scale,
+      intentEpoch: this.transformHandler.userCameraIntentEpoch(),
     };
 
     const tx = this.game.x(primary.targetTile);
@@ -814,6 +815,11 @@ export class NukeCinema implements Layer {
     const restore = this.cinema?.restore;
     if (restore === undefined || restore === null) return;
     if (this.cinema !== null) this.cinema.restore = null;
+    // A drag, zoom, or competitor locate after the punch-in is the viewer's
+    // new camera choice. Never let an old cinematic snapshot overwrite it.
+    if (restore.intentEpoch !== this.transformHandler.userCameraIntentEpoch()) {
+      return;
+    }
     this.eventBus.emit(
       new GoToPositionEvent(restore.x, restore.y, restore.scale),
     );

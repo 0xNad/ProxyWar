@@ -21,9 +21,44 @@ import type {
 } from "../../src/server/agents/AgentTypes";
 import { LegalActionBuilder } from "../../src/server/agents/LegalActionBuilder";
 import { RuleAgentBrain } from "../../src/server/agents/RuleAgentBrain";
+import { MAX_SPAWN_PREFERENCE_ACTION_IDS } from "../../src/server/agents/AgentWireProtocol";
 import { setup } from "../util/Setup";
 
 describe("AI Nations League agent interface", () => {
+  it("caps a rule brain's 25-seat spawn ballot without changing its first choice", () => {
+    const observation = new AgentObservationBuilder().build({
+      agentID: "agent-1",
+      clientID: null,
+      username: "Agent One",
+      profile: "aggressive",
+      gameID: "AGENTOBS",
+      turnNumber: 0,
+      phaseOverride: "spawn",
+    });
+    const legalActions: LegalAction[] = Array.from(
+      { length: 25 },
+      (_, index) => ({
+        id: `spawn:${index + 1}`,
+        kind: "spawn",
+        label: `Spawn ${index + 1}`,
+        intent: { type: "spawn", tile: index + 1 },
+        risk: { level: "none", score: 0 },
+      }),
+    );
+
+    const decision = new RuleAgentBrain("aggressive").decide({
+      observation,
+      legalActions,
+    });
+
+    expect(decision.actionID).toBe("spawn:1");
+    expect(decision.spawnPreferenceActionIDs).toEqual(
+      legalActions
+        .slice(0, MAX_SPAWN_PREFERENCE_ACTION_IDS)
+        .map((action) => action.id),
+    );
+  });
+
   it("builds a stable observation object from a core game snapshot", async () => {
     const player = new PlayerInfo(
       "Agent One",

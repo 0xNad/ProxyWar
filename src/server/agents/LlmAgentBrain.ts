@@ -95,8 +95,7 @@ export class LlmAgentBrain implements AgentBrain {
     const timedProvider = withDeferredDecisionTimeout(
       providerPromise,
       providerTimeoutMs,
-      () =>
-        new Error(`LLM provider timed out after ${providerTimeoutMs}ms`),
+      () => new Error(`LLM provider timed out after ${providerTimeoutMs}ms`),
     );
     return this.decideFromProvider(input, prompt, timedProvider.promise);
   }
@@ -126,6 +125,13 @@ export class LlmAgentBrain implements AgentBrain {
         // capped); absent for single-action replies.
         ...(parsed.selectedLegalActionIds !== undefined
           ? { actionIDs: parsed.selectedLegalActionIds }
+          : {}),
+        // Spawn preferences are allocation input for one eventual spawn,
+        // never an executable action batch.
+        ...(parsed.spawnPreferenceLegalActionIds !== undefined
+          ? {
+              spawnPreferenceActionIDs: parsed.spawnPreferenceLegalActionIds,
+            }
           : {}),
         reason: parsed.reason,
         metadata: {
@@ -185,6 +191,14 @@ export class LlmAgentBrain implements AgentBrain {
     const fallbackDecision = await fallbackBrain.decide(input);
     return {
       actionID: fallbackDecision.actionID,
+      // Preserve the rule/custom fallback's spawn ballot. It remains input to
+      // one allocation, never an executable batch; dropping it would turn a
+      // deliberately ranked fallback into an unrelated legacy scalar reply.
+      ...(fallbackDecision.spawnPreferenceActionIDs !== undefined
+        ? {
+            spawnPreferenceActionIDs: fallbackDecision.spawnPreferenceActionIDs,
+          }
+        : {}),
       reason: null,
       metadata: {
         ...fallbackDecision.metadata,

@@ -4,9 +4,12 @@ import {
 } from "./AgentTunables";
 import { LegalAction } from "./AgentTypes";
 import {
+  MAX_SPAWN_PREFERENCE_ACTION_IDS,
   MAX_WIRE_ACTIONS_PER_DECISION,
   normalizeWireActionIds,
 } from "./AgentWireProtocol";
+
+const MAX_SPAWN_PREFERENCE_ID_LENGTH = 200;
 
 export interface LlmDecisionParserOptions {
   maxReasonLength?: number;
@@ -37,6 +40,14 @@ export type LlmDecisionParseResult =
        * side of the wire.
        */
       selectedLegalActionIds?: string[];
+      /**
+       * OPTIONAL spawn-only ranked ballot. Unlike `selectedLegalActionIds`,
+       * these ids are preferences for one eventual spawn assignment, not a
+       * batch of executable actions. Presence is preserved even for a
+       * one-element ranking so the allocator can distinguish an authored
+       * partial ballot from a legacy scalar-only reply.
+       */
+      spawnPreferenceLegalActionIds?: string[];
       /**
        * OPTIONAL second selection — the diplomacy slot
        * (PROXYWAR_TUNE_STRUCTURED_DEALS). Present only when the reply carried
@@ -69,6 +80,7 @@ export type LlmDecisionParseResult =
 interface LlmDecisionJson {
   selectedLegalActionId?: unknown;
   selectedLegalActionIds?: unknown;
+  spawnPreferenceLegalActionIds?: unknown;
   selectedDealActionId?: unknown;
   selectedMessageActionId?: unknown;
   messageText?: unknown;
@@ -79,6 +91,7 @@ interface LlmDecisionJson {
 const allowedKeys = new Set([
   "selectedLegalActionId",
   "selectedLegalActionIds",
+  "spawnPreferenceLegalActionIds",
   "reason",
   "confidence",
 ]);
@@ -176,7 +189,11 @@ export class LlmDecisionParser {
       return this.fail(raw, `malformed JSON: ${message}`);
     }
 
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    if (
+      parsed === null ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed)
+    ) {
       return this.fail(raw, "LLM response must be a JSON object");
     }
 
@@ -216,6 +233,16 @@ export class LlmDecisionParser {
       );
     }
 
+    if (
+      isSpawnPreferenceMenu(legalActions) &&
+      decision.selectedLegalActionIds !== undefined
+    ) {
+      return this.fail(
+        raw,
+        "selectedLegalActionIds is not allowed on an all-spawn menu; use spawnPreferenceLegalActionIds for the one-spawn preference ballot",
+      );
+    }
+
     let selectedLegalActionIds: string[] | undefined;
     if (decision.selectedLegalActionIds !== undefined) {
       const batch = decision.selectedLegalActionIds;
@@ -245,11 +272,23 @@ export class LlmDecisionParser {
         (id) => !legalActions.some((action) => action.id === id),
       );
       if (unknown !== undefined) {
-        return this.fail(raw, `unknown selectedLegalActionIds entry: ${unknown}`);
+        return this.fail(
+          raw,
+          `unknown selectedLegalActionIds entry: ${unknown}`,
+        );
       }
       // A one-element batch IS the scalar; omit so single-action replies stay
       // byte-identical to a reply that never sent the key.
       selectedLegalActionIds = normalized.length >= 2 ? normalized : undefined;
+    }
+
+    const spawnPreferences = validateSpawnPreferences(
+      decision.spawnPreferenceLegalActionIds,
+      selectedLegalActionId,
+      legalActions,
+    );
+    if (!spawnPreferences.ok) {
+      return this.fail(raw, spawnPreferences.reason);
     }
 
     if (typeof decision.reason !== "string") {
@@ -283,6 +322,9 @@ export class LlmDecisionParser {
       selectedLegalActionId,
       ...(selectedLegalActionIds !== undefined
         ? { selectedLegalActionIds }
+        : {}),
+      ...(spawnPreferences.value !== undefined
+        ? { spawnPreferenceLegalActionIds: spawnPreferences.value }
         : {}),
       ...(selectedDealActionId !== undefined ? { selectedDealActionId } : {}),
       ...(messageSlot !== undefined
@@ -324,7 +366,11 @@ export class LlmDecisionParser {
       return this.fail(raw, `malformed JSON: ${message}`);
     }
 
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    if (
+      parsed === null ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed)
+    ) {
       return this.fail(raw, "LLM response must be a JSON object");
     }
 
@@ -347,6 +393,16 @@ export class LlmDecisionParser {
       return this.fail(
         raw,
         `unknown selectedLegalActionId: ${selectedLegalActionId}`,
+      );
+    }
+
+    if (
+      isSpawnPreferenceMenu(legalActions) &&
+      decision.selectedLegalActionIds !== undefined
+    ) {
+      return this.fail(
+        raw,
+        "selectedLegalActionIds is not allowed on an all-spawn menu; use spawnPreferenceLegalActionIds for the one-spawn preference ballot",
       );
     }
 
@@ -382,6 +438,19 @@ export class LlmDecisionParser {
       selectedLegalActionIds = normalized.length >= 2 ? normalized : undefined;
     }
 
+    // Spawn preferences are allocation input, not advisory output. Robust
+    // mode therefore applies the same whole-ballot rejection as strict mode:
+    // silently dropping, deduping, or truncating a malformed ranking could
+    // turn it into a different valid ballot.
+    const spawnPreferences = validateSpawnPreferences(
+      decision.spawnPreferenceLegalActionIds,
+      selectedLegalActionId,
+      legalActions,
+    );
+    if (!spawnPreferences.ok) {
+      return this.fail(raw, spawnPreferences.reason);
+    }
+
     const selectedDealActionId = parsedDealActionId(decision);
     const messageSlot = parsedMessageSlot(decision);
     return {
@@ -389,6 +458,9 @@ export class LlmDecisionParser {
       selectedLegalActionId,
       ...(selectedLegalActionIds !== undefined
         ? { selectedLegalActionIds }
+        : {}),
+      ...(spawnPreferences.value !== undefined
+        ? { spawnPreferenceLegalActionIds: spawnPreferences.value }
         : {}),
       ...(selectedDealActionId !== undefined ? { selectedDealActionId } : {}),
       ...(messageSlot !== undefined
@@ -406,6 +478,99 @@ export class LlmDecisionParser {
   private fail(raw: string, reason: string): LlmDecisionParseResult {
     return { ok: false, reason, raw };
   }
+}
+
+type SpawnPreferenceValidation =
+  | { ok: true; value?: string[] }
+  | { ok: false; reason: string };
+
+function validateSpawnPreferences(
+  rawPreferences: unknown,
+  selectedLegalActionId: string,
+  legalActions: LegalAction[],
+): SpawnPreferenceValidation {
+  if (rawPreferences === undefined) {
+    return { ok: true };
+  }
+  if (
+    legalActions.length === 0 ||
+    legalActions.some((action) => action.kind !== "spawn")
+  ) {
+    return {
+      ok: false,
+      reason:
+        "spawnPreferenceLegalActionIds is allowed only when every offered legal action is a spawn action",
+    };
+  }
+  if (!Array.isArray(rawPreferences)) {
+    return {
+      ok: false,
+      reason: "spawnPreferenceLegalActionIds must be an array of strings",
+    };
+  }
+  if (rawPreferences.length === 0) {
+    return {
+      ok: false,
+      reason: "spawnPreferenceLegalActionIds cannot be empty",
+    };
+  }
+  if (rawPreferences.length > MAX_SPAWN_PREFERENCE_ACTION_IDS) {
+    return {
+      ok: false,
+      reason: `spawnPreferenceLegalActionIds exceeds ${MAX_SPAWN_PREFERENCE_ACTION_IDS} preferences`,
+    };
+  }
+  if (rawPreferences.some((entry) => typeof entry !== "string")) {
+    return {
+      ok: false,
+      reason: "spawnPreferenceLegalActionIds must be an array of strings",
+    };
+  }
+
+  const preferences = rawPreferences as string[];
+  if (preferences.some((entry) => entry.length === 0)) {
+    return {
+      ok: false,
+      reason: "spawnPreferenceLegalActionIds entries cannot be empty",
+    };
+  }
+  if (
+    preferences.some((entry) => entry.length > MAX_SPAWN_PREFERENCE_ID_LENGTH)
+  ) {
+    return {
+      ok: false,
+      reason: `spawnPreferenceLegalActionIds entries cannot exceed ${MAX_SPAWN_PREFERENCE_ID_LENGTH} characters`,
+    };
+  }
+  if (preferences[0] !== selectedLegalActionId) {
+    return {
+      ok: false,
+      reason:
+        "selectedLegalActionId must be the first spawnPreferenceLegalActionIds entry",
+    };
+  }
+  if (new Set(preferences).size !== preferences.length) {
+    return {
+      ok: false,
+      reason: "spawnPreferenceLegalActionIds cannot contain duplicate ids",
+    };
+  }
+  const offered = new Set(legalActions.map((action) => action.id));
+  const unknown = preferences.find((id) => !offered.has(id));
+  if (unknown !== undefined) {
+    return {
+      ok: false,
+      reason: `unknown spawnPreferenceLegalActionIds entry: ${unknown}`,
+    };
+  }
+  return { ok: true, value: preferences };
+}
+
+function isSpawnPreferenceMenu(legalActions: LegalAction[]): boolean {
+  return (
+    legalActions.length > 0 &&
+    legalActions.every((action) => action.kind === "spawn")
+  );
 }
 
 function isMarkdownFence(value: string): boolean {

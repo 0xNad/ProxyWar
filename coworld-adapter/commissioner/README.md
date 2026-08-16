@@ -21,13 +21,15 @@ present.
 
 A second custom piece: every episode `ProxyWarCommissioner` schedules (both the Competition
 ladder path and the stock qualifier path it delegates to `super()` for) is stamped with a
-deterministic `episodeIndex` in `game_config_overrides` before it is returned - a zero-based,
-round-aware, round-number-derived ordinal (never a hash, never random, never the simulation
-`seed`) that rotates which fairness-assigned spawn slot a roster lands on across repeated
-same-map/same-roster episodes (`AgentSpawnAssignment.ts` on the ProxyWar side). `episodeIndex`
-is declared in every shipped manifest's `game.config_schema` as an optional non-negative
-integer defaulting to 0. See `ProxyWarCommissioner._with_episode_index` in `proxywar_app.py`
-for the exact formula and its documented same-width-round assumption, and `EpisodeRequest.
+deterministic `episodeIndex` in `game_config_overrides` before it is returned. Competition uses
+the zero-based occurrence of the selected map within its rung's map rotation (never a hash,
+never random, never the simulation `seed`) as a round block, then advances the index once per
+scheduled episode. ProxyWar code-unit-sorts participant identities and rotates that stable
+order by the precommitted index, so response arrival and commissioner seat order cannot affect
+priority. Fixed-roster, same-width recurrences traverse the complete priority cycle; dynamic
+rosters remain deterministic but cannot promise a complete permutation. `episodeIndex` is
+declared in every shipped manifest's `game.config_schema` as an optional non-negative integer
+defaulting to 0. See `ProxyWarCommissioner._with_episode_index` in `proxywar_app.py`, and `EpisodeRequest.
 game_config_overrides` in `commissioners/common/protocol.py` for the upstream
 (`Metta-AI/coworld` `commissioner/protocol.py`) wire field this is additive against.
 

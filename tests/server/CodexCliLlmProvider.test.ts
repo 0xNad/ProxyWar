@@ -133,6 +133,13 @@ describe("CodexCliLlmProvider", () => {
         required: ["selectedLegalActionId", "reason", "confidence"],
         properties: {
           selectedLegalActionId: { type: "string" },
+          spawnPreferenceLegalActionIds: {
+            type: "array",
+            minItems: 1,
+            maxItems: 16,
+            uniqueItems: true,
+            items: { type: "string", maxLength: 200 },
+          },
           reason: { type: "string" },
           confidence: { type: "number" },
         },

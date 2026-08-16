@@ -92,6 +92,11 @@ export class ExternalRelayAgentBrain implements AgentBrain {
       ...(parsed.selectedLegalActionIds !== undefined
         ? { actionIDs: parsed.selectedLegalActionIds }
         : {}),
+      ...(parsed.spawnPreferenceLegalActionIds !== undefined
+        ? {
+            spawnPreferenceActionIDs: parsed.spawnPreferenceLegalActionIds,
+          }
+        : {}),
       // Optional diplomacy slot, forwarded for parity with the HTTP brain.
       // The parser only ever returns it while the structured-deal flag is on,
       // and the runner's validator remains the sole authority over it.
@@ -115,7 +120,9 @@ export class ExternalRelayAgentBrain implements AgentBrain {
         parseSuccess: true,
         fallbackUsed: false,
         rawProviderOutputPresent: raw.trim().length > 0,
-        ...(parsed.confidence !== undefined ? { confidence: parsed.confidence } : {}),
+        ...(parsed.confidence !== undefined
+          ? { confidence: parsed.confidence }
+          : {}),
         externalRawOutput: truncate(raw, 1_000),
       },
     };
@@ -152,7 +159,9 @@ export class ExternalRelayAgentBrain implements AgentBrain {
       return (parsed as { responseText: string }).responseText;
     } catch (error) {
       if (isAbortError(error)) {
-        throw new Error(`timed out after ${this.timeoutMs}ms`, { cause: error });
+        throw new Error(`timed out after ${this.timeoutMs}ms`, {
+          cause: error,
+        });
       }
       throw error;
     } finally {

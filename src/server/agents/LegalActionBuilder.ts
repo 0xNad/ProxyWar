@@ -27,10 +27,10 @@ export interface SpawnCandidate {
   /** Distance-from-map-center scores (buildSpawnCandidates) - informational
    * metadata for live post-spawn/downstream consumers (e.g.
    * shouldOfferNationOpeningForceExpansion's neutral-expansion gate,
-   * AgentLeagueMatch.recentDecisionsFor's memory summary). NEVER used to
-   * rank/choose a spawn tile - fairness slot selection is maximin spacing
-   * over `localLandScore` alone (AgentSpawnAssignment.ts); no agent brain
-   * ever ranks or picks a spawn candidate by these scores anymore. */
+   * AgentLeagueMatch.recentDecisionsFor's memory summary) and for a brain
+   * ranking the already-selected bounded spawn slot menu. They never expand
+   * that menu: AgentSpawnAssignment first chooses exactly N quality-floored,
+   * maximin-spaced candidates. */
   pressureScore: number;
   safetyScore: number;
   diplomacyScore: number;
@@ -51,16 +51,15 @@ export interface BuildLegalActionsInput {
 }
 
 /**
- * The single canonical constructor for a spawn `LegalAction`: the truthful,
- * internal record of a fairness-assigned slot
- * (`AgentLeagueMatchRunner.runSpawnPhase` / `AgentSpawnAssignment.ts`).
- * There is no agent-facing spawn menu anymore - spawn placement is never a
- * brain choice - so this is the ONLY place a spawn `LegalAction` is built.
+ * The single canonical constructor for an offered/final spawn `LegalAction`.
+ * `AgentSpawnAssignment` first selects exactly N quality-floored,
+ * maximin-spaced candidates; AgentLeagueMatch then offers this same exact N
+ * action menu to every sealed ballot and submits only the final allocation.
  * Metadata carries the FULL candidate score set (not just localLandScore):
  * live, non-agent-choice downstream readers (shouldOfferNationOpeningForce
  * Expansion's neutral-expansion gate, AgentLeagueMatch.recentDecisionsFor's
  * spawn-memory summary) need pressure/safety/diplomacy/opportunity on the
- * ACCEPTED record - nothing here ranks or chooses BETWEEN candidates.
+ * ACCEPTED record and agent ballot may use it to rank the bounded menu.
  */
 export function buildSpawnLegalAction(candidate: SpawnCandidate): LegalAction {
   return {

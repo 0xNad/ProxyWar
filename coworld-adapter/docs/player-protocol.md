@@ -16,6 +16,10 @@ The game sends:
   "type": "decision_request",
   "requestID": "req_...",
   "slot": 0,
+  "protocol": {
+    "maxActionsPerDecision": 5,
+    "maxSpawnPreferences": 16
+  },
   "request": {
     "protocolVersion": "proxywar-agent-v1",
     "observation": {},
@@ -54,6 +58,71 @@ off-menu ids, for every action kind: the websocket adapter returns an `AgentDeci
 existing `AgentDecisionValidator`, `AgentRunner`, and `GameServer` remain the sole authority, and
 `LegalAction.id` selection is still the only way to act - no raw core intent is ever accepted
 from a player.
+
+## Spawn preference round (active v1)
+
+Before ordinary play, the game runs exactly one sealed, concurrent spawn
+preference round. For `N` players it offers every player the same `N`
+quality-floored, maximin-spaced `spawn:<tile>` legal actions. Each action
+includes bounded metadata such as `tile`, `x`, `y`, `pressureScore`,
+`safetyScore`, `diplomacyScore`, `opportunityScore`, and `localLandScore`.
+
+The request advertises both
+`protocol.maxSpawnPreferences` and this spawn-only response contract:
+
+```json
+{
+  "responseContract": {
+    "selectedLegalActionId": "must exactly match one offered legalActions[].id",
+    "spawnPreferenceLegalActionIds": "optional ordered array of exact offered spawn legalActions[].id values; selectedLegalActionId must be first",
+    "maxSpawnPreferences": 16,
+    "reason": "short human-readable string",
+    "confidence": "optional number from 0 to 1"
+  }
+}
+```
+
+Reply with the scalar first choice and, when supported, the ranked ballot:
+
+```json
+{
+  "type": "decision_response",
+  "requestID": "req_...",
+  "selectedLegalActionId": "spawn:420",
+  "spawnPreferenceLegalActionIds": ["spawn:420", "spawn:105", "spawn:880"],
+  "reason": "Prefer local land and safety, then opportunity.",
+  "confidence": 0.7
+}
+```
+
+Rules:
+
+- `selectedLegalActionId` is required and must exactly equal element 0 of an
+  explicit `spawnPreferenceLegalActionIds` ballot.
+- The ballot is spawn-only, contains at most 16 unique strings of at most 200
+  characters each, and every entry must exactly match an offered spawn id.
+  Partial rankings are allowed. A scalar-only legacy reply is a one-item
+  partial ranking.
+- The server completes a valid partial ranking in deterministic offered-menu
+  order. It rejects an explicit malformed, duplicate, off-menu, mismatched, or
+  oversized ballot as a whole and applies the recorded deterministic default.
+- The ranking describes preferences for one eventual assignment. It is never
+  `selectedLegalActionIds`, never an executable action batch, and never causes
+  more than one spawn intent.
+- All responses remain hidden until the common round settles. Allocation uses
+  a recorded, report-independent priority order and each player receives its
+  highest-ranked remaining slot. Response arrival time cannot improve priority.
+- This is active protocol v1: one sealed round only. There is no reveal,
+  reaction, relocation, trade, retry, or second preference phase.
+- The final assigned offered action still passes through
+  `AgentDecisionValidator -> AgentRunner -> GameServer`. Players never send a
+  tile coordinate or raw spawn intent.
+
+The complete sealed-round evidence is retained in the operator's private
+`decisions.jsonl`: offered ids, submitted and normalized ballot, fallback or
+validation reason, report-independent priority position, assigned id, and
+assigned rank. The public replay records the final executed spawn only. It does
+not expose the hidden ballots or by itself prove allocation integrity.
 
 ## `selectedDealActionId` (optional)
 
@@ -107,8 +176,6 @@ verdict and an agent's viewer-only stated reason are separate evidence.
 is the accurate display wording because it is one-sided. An engine `alliance` and a structured
 promise are also different: accepting a promise does not create an OpenFront alliance.
 
-Spawn is never a player/brain decision and there is no spawn `decision_request` at all: before
-any player is asked anything, the league runner deterministically assigns every roster
-participant a quality-floored, well-spaced spawn tile
-(`AgentSpawnAssignment.assignSpawnSlots` on the ProxyWar side) and submits it directly. A
-player's first `decision_request` always arrives after it already has territory.
+After the single spawn preference request resolves, ordinary decision requests
+begin with every player already holding its assigned territory. Spawn
+preferences are not requested again during the game.

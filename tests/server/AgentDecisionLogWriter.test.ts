@@ -139,6 +139,7 @@ describe("AgentDecisionLogWriter", () => {
           stepsCompleted: 1,
           mirrorCatchupSucceeded: true,
           onlyHoldReason: null,
+          spawnSelectionMode: "sealed-ranked-v1",
         },
         startedAt: Date.UTC(2026, 0, 1),
         completedAt: Date.UTC(2026, 0, 1, 0, 0, 1),
@@ -222,6 +223,9 @@ describe("AgentDecisionLogWriter", () => {
         planFollowedCount: 1,
         plannerFallbackCount: 0,
         runnerMode: "step-locked",
+        runnerConfig: {
+          spawnSelectionMode: "sealed-ranked-v1",
+        },
         postSpawnNonHoldActionCount: 1,
         confirmedEffectCount: 1,
         failedEffectCount: 0,
@@ -1051,6 +1055,54 @@ async function writeAndParseEntries(
   }
 }
 
+describe("decisions.jsonl sealed spawn evidence", () => {
+  it("copies bounded structured spawn-selection evidence verbatim", async () => {
+    const evidence: NonNullable<AgentDecisionRecord["spawnSelectionEvidence"]> =
+      {
+        algorithmVersion: "sealed-ranked-serial-dictatorship-v1",
+        offeredActionIDs: ["spawn:10", "spawn:20"],
+        ballotSource: "explicit-ranked",
+        submittedBallotActionIDs: ["spawn:20", "spawn:10"],
+        submittedBallotEntryTypes: ["string", "string"],
+        submittedBallotCount: 2,
+        submittedBallotTruncated: false,
+        submittedReason: "Prefer tile 20",
+        normalizedBallotActionIDs: ["spawn:20", "spawn:10"],
+        ballotValid: true,
+        ballotInvalidReason: null,
+        defaultReason: null,
+        participantID: "11111111-1111-4111-8111-111111111111",
+        priorityParticipantIDs: [
+          "11111111-1111-4111-8111-111111111111",
+          "22222222-2222-4222-8222-222222222222",
+        ],
+        priorityOrder: ["Alpha", "Bravo"],
+        priorityRank: 1,
+        assignedActionID: "spawn:20",
+        assignedPreferenceRank: 1,
+        assignedSubmittedPreferenceRank: 1,
+        stageLatencyMs: 12,
+        stageFallbackUsed: false,
+        stageDegradationReason: null,
+      };
+    const record: AgentDecisionRecord = {
+      ...fabricatedRecord({
+        sequence: 1,
+        agentID: "spawn-agent",
+        playerID: "P_SPAWN",
+        username: "Alpha",
+        turnNumber: 0,
+        kind: "spawn",
+        actionID: "spawn:20",
+      }),
+      spawnSelectionEvidence: evidence,
+    };
+
+    const [entry] = await writeAndParseEntries([record]);
+    expect(entry.spawnSelectionEvidence).toEqual(evidence);
+  });
+});
+
 describe("decisions.jsonl external-seat stamps (economyFacts + structured deals)", () => {
   afterEach(() => {
     delete process.env[DEALS_FLAG];
@@ -1317,7 +1369,9 @@ describe("match summary cycle-level counts under action batching", () => {
   async function writeAndParseSummary(
     records: AgentDecisionRecord[],
   ): Promise<Record<string, unknown>> {
-    const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "ai-league-batch-"));
+    const rootDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), "ai-league-batch-"),
+    );
     try {
       const paths = await writeAgentLeagueRunArtifacts({
         rootDir,
@@ -1330,9 +1384,10 @@ describe("match summary cycle-level counts under action batching", () => {
         records,
         roster: [],
       });
-      return JSON.parse(
-        await fs.readFile(paths.summaryPath, "utf8"),
-      ) as Record<string, unknown>;
+      return JSON.parse(await fs.readFile(paths.summaryPath, "utf8")) as Record<
+        string,
+        unknown
+      >;
     } finally {
       await fs.rm(rootDir, { recursive: true, force: true });
     }

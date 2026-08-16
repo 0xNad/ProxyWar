@@ -106,6 +106,7 @@ const columnNoteStyle =
 // so it simply absorbs the difference.
 const broadcastGridTemplate =
   "minmax(22px, 26px) minmax(0, 1fr) minmax(0, 52px) minmax(0, 46px) minmax(0, 62px)";
+const compactScorebugMediaQuery = "(max-width: 980px)";
 
 interface Entry {
   name: string;
@@ -211,6 +212,20 @@ export class Leaderboard extends StatsTable implements Layer {
   private _sortOrder: "asc" | "desc" = "desc";
 
   /**
+   * Compact mode hides the gold and max-troops columns. If either one was the
+   * active desktop sort when the viewer exits fullscreen, retaining it would
+   * make the visible top rows depend on an invisible metric. The media-query
+   * listener restores territory sorting at the same breakpoint that hides
+   * those columns, so the compact scorebug always explains its own order.
+   */
+  private compactScorebugMedia: MediaQueryList | null = null;
+  private readonly handleCompactScorebugChange = (
+    event: MediaQueryListEvent,
+  ): void => {
+    if (event.matches) this.restoreVisibleCompactSort();
+  };
+
+  /**
    * LEAD-CHANGE beat state (broadcast only). The tracker applies the same
    * overtake policy the curated feed's lead_change events use (see
    * LeadChangeTracker.ts: 3-share-point margin, mirrored from the server's
@@ -255,6 +270,32 @@ export class Leaderboard extends StatsTable implements Layer {
   }
 
   init() {}
+
+  connectedCallback(): void {
+    super.connectedCallback();
+    if (
+      !this.broadcast ||
+      typeof window === "undefined" ||
+      typeof window.matchMedia !== "function"
+    ) {
+      return;
+    }
+    this.compactScorebugMedia = window.matchMedia(compactScorebugMediaQuery);
+    this.compactScorebugMedia.addEventListener(
+      "change",
+      this.handleCompactScorebugChange,
+    );
+    if (this.compactScorebugMedia.matches) this.restoreVisibleCompactSort();
+  }
+
+  disconnectedCallback(): void {
+    this.compactScorebugMedia?.removeEventListener(
+      "change",
+      this.handleCompactScorebugChange,
+    );
+    this.compactScorebugMedia = null;
+    super.disconnectedCallback();
+  }
 
   tick() {
     if (!this.broadcast) {
@@ -337,6 +378,17 @@ export class Leaderboard extends StatsTable implements Layer {
     } else {
       this._sortKey = key;
       this._sortOrder = "desc";
+    }
+    this.updateLeaderboard();
+  }
+
+  private restoreVisibleCompactSort(): void {
+    if (this._sortKey === "tiles") return;
+    this._sortKey = "tiles";
+    this._sortOrder = "desc";
+    if (this.game === null) {
+      this.requestUpdate();
+      return;
     }
     this.updateLeaderboard();
   }
@@ -1049,16 +1101,21 @@ export class Leaderboard extends StatsTable implements Layer {
           style="grid-template-columns: ${broadcastGridTemplate};"
         >
           <div class="contents font-bold bg-gray-700/60">
-            <div class="py-1 md:py-2 text-center border-b border-slate-500">
+            <div
+              class="py-1 md:py-2 text-center border-b border-slate-500"
+              data-scorebug-column="rank"
+            >
               #
             </div>
             <div
               class="py-1 md:py-2 text-center border-b border-slate-500 truncate"
+              data-scorebug-column="player"
             >
               ${translateText("leaderboard.player")}
             </div>
             <div
               class="py-1 md:py-2 text-center border-b border-slate-500 cursor-pointer whitespace-nowrap truncate"
+              data-scorebug-column="owned"
               @click=${() => this.setBroadcastSort("tiles")}
             >
               ${translateText("leaderboard.owned")}
@@ -1066,6 +1123,7 @@ export class Leaderboard extends StatsTable implements Layer {
             </div>
             <div
               class="py-1 md:py-2 text-center border-b border-slate-500 cursor-pointer whitespace-nowrap truncate"
+              data-scorebug-column="gold"
               @click=${() => this.setBroadcastSort("gold")}
             >
               ${translateText("leaderboard.gold")}
@@ -1073,6 +1131,7 @@ export class Leaderboard extends StatsTable implements Layer {
             </div>
             <div
               class="py-1 md:py-2 text-center border-b border-slate-500 cursor-pointer whitespace-nowrap truncate"
+              data-scorebug-column="max-troops"
               @click=${() => this.setBroadcastSort("maxtroops")}
             >
               ${translateText("leaderboard.maxtroops")}
@@ -1088,6 +1147,7 @@ export class Leaderboard extends StatsTable implements Layer {
                 class="contents hover:bg-slate-600/60 ${player.isOnSameTeam
                   ? "font-bold"
                   : ""} cursor-pointer"
+                data-scorebug-row="player"
                 @click=${() => this.handleRowClickPlayer(player.player)}
               >
                 <div
@@ -1095,6 +1155,7 @@ export class Leaderboard extends StatsTable implements Layer {
                   this.players.length - 1
                     ? "border-b border-slate-500"
                     : ""}"
+                  data-scorebug-column="rank"
                   data-flip=${this.flipCell(player, 0)}
                   style=${this.cellStyle(player, 0)}
                 >
@@ -1105,6 +1166,7 @@ export class Leaderboard extends StatsTable implements Layer {
                   this.players.length - 1
                     ? "border-b border-slate-500"
                     : ""}"
+                  data-scorebug-column="player"
                   data-flip=${this.flipCell(player, 1)}
                   style=${this.cellStyle(player, 1)}
                 >
@@ -1130,7 +1192,7 @@ export class Leaderboard extends StatsTable implements Layer {
                     >
                     ${player.marginNote === null
                       ? nothing
-                      : html`<span style=${marginNoteStyle}
+                      : html`<span data-scorebug-margin style=${marginNoteStyle}
                           >${player.marginNote}</span
                         >`}
                   </span>
@@ -1140,6 +1202,7 @@ export class Leaderboard extends StatsTable implements Layer {
                   this.players.length - 1
                     ? "border-b border-slate-500"
                     : ""}"
+                  data-scorebug-column="owned"
                   data-flip=${this.flipCell(player, 2)}
                   style=${this.cellStyle(player, 2)}
                 >
@@ -1150,6 +1213,7 @@ export class Leaderboard extends StatsTable implements Layer {
                   this.players.length - 1
                     ? "border-b border-slate-500"
                     : ""}"
+                  data-scorebug-column="gold"
                   data-flip=${this.flipCell(player, 3)}
                   style=${this.cellStyle(player, 3)}
                 >
@@ -1160,6 +1224,7 @@ export class Leaderboard extends StatsTable implements Layer {
                   this.players.length - 1
                     ? "border-b border-slate-500"
                     : ""}"
+                  data-scorebug-column="max-troops"
                   data-flip=${this.flipCell(player, 4)}
                   style=${this.cellStyle(player, 4)}
                 >
