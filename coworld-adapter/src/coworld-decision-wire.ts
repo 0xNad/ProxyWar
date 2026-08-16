@@ -5,9 +5,10 @@
  *
  * Envelope (game -> player):
  *   { type: "decision_request", requestID, slot,
- *     protocol: { maxActionsPerDecision, maxSpawnPreferences }, request }
- * `protocol` is the capability advertisement for the OPTIONAL action batch
- * and the independent spawn-only preference ballot:
+ *     protocol: { maxActionsPerDecision, maxSpawnPreferences,
+ *                 maxMessageChars? }, request }
+ * `protocol` is the capability advertisement for the OPTIONAL action batch,
+ * the independent spawn-only preference ballot, and the comms slot:
  * emitters must send `selectedLegalActionIds` ONLY when it is present, so a
  * new player against an old image degrades to primary-only instead of relying
  * on the old parser's tolerance. The inner `request` payload is untouched.
@@ -20,6 +21,8 @@
  *     spawnPreferenceActionIDs with malformed/overflow evidence preserved for
  *     whole-ballot backend rejection
  *   selectedDealActionId   — deal side channel (unchanged)
+ *   selectedMessageActionId + messageText — OPTIONAL comms slot, forwarded as
+ *     the messageActionID/messageText PAIR the league's AgentDecision declares
  *
  * Bounds-only discipline: menu membership is deliberately NOT checked here.
  * The league runner's decision validator is the recording authority — dropping
@@ -50,6 +53,43 @@ export const MAX_WIRE_SPAWN_PREFERENCE_ACTION_IDS = 16;
  */
 export const MAX_WIRE_ACTION_ID_LENGTH = 200;
 
+/**
+ * Transport bound for the comms body. DELIBERATELY far above
+ * AgentTunables.FREETEXT_MESSAGE_MAX_CHARS (280), and the parity test beside
+ * this file pins that inequality — it is the whole reason this number is safe.
+ *
+ * The validator REJECTS over-cap text rather than truncating it, because "a
+ * trimmed promise is a different promise". If this transport clamped to the
+ * cap instead, a 300-char message would arrive as a 280-char message the
+ * validator then ACCEPTS — silently rewriting an agent's words and stamping
+ * the rewrite into `commsSlotText` as verbatim negotiation evidence. That is
+ * the exact failure the reject-don't-rewrite contract exists to prevent, and
+ * it would be introduced HERE, one layer below the code that forbids it.
+ *
+ * So the bound sits high enough that every text the validator could possibly
+ * accept passes through byte-identically. Note the validator collapses
+ * whitespace BEFORE measuring, so a legitimately-accepted message can be much
+ * longer raw than 280; the headroom covers pretty-printed bodies rather than
+ * betting that policies emit tight text.
+ */
+export const MAX_WIRE_MESSAGE_TEXT_LENGTH = 4000;
+
+/**
+ * Stand-in for a body that overflows the transport bound. Not a truncation:
+ * slicing an overlong body could yield text that collapses UNDER the cap and
+ * is then accepted as a shorter message the agent never wrote. This sentinel
+ * is exactly MAX_WIRE_MESSAGE_TEXT_LENGTH non-whitespace characters, so it
+ * cannot collapse below its own length and is therefore guaranteed to fail the
+ * validator's cap check (the parity test pins bound > cap).
+ *
+ * The paired id still rides along, so the attempt is recorded as a normal
+ * rejection in `commsSlotRequestedID`/`commsSlotRejected` instead of vanishing
+ * — the same "preserve an explicit invalid sentinel" discipline the spawn
+ * ballot uses, and the reason this is not the silent adapter-side drop the
+ * header warns about.
+ */
+const OVERSIZE_MESSAGE_TEXT_SENTINEL = "x".repeat(MAX_WIRE_MESSAGE_TEXT_LENGTH);
+
 export interface NormalizedDecisionResponse {
   actionID: string;
   actionIDs?: string[];
@@ -60,6 +100,13 @@ export interface NormalizedDecisionResponse {
    */
   spawnPreferenceActionIDs?: unknown;
   dealActionID?: string;
+  /**
+   * Comms slot, named to match the AgentDecision fields the league reads
+   * (AgentTypes.messageActionID / messageText). Present only as a PAIR — see
+   * normalizeDecisionResponse.
+   */
+  messageActionID?: string;
+  messageText?: string;
   reason: string;
 }
 
@@ -72,7 +119,22 @@ export function decisionRequestEnvelope(input: {
   requestID: string;
   slot: number;
   request: unknown;
+  /**
+   * The live FREETEXT_MESSAGE_MAX_CHARS, supplied by the caller ONLY while the
+   * free-text flag is on. Injected rather than imported on purpose: this module
+   * is copied to /app/integration while the engine lives at /app/proxywar, so a
+   * static import of AgentTunables would break at image runtime — and reading
+   * the env var here instead would fork the flag's meaning into a second place.
+   * Omitted (flag off) keeps the envelope byte-identical to shipped behavior.
+   */
+  maxMessageChars?: number;
 }): Record<string, unknown> {
+  const maxMessageChars =
+    typeof input.maxMessageChars === "number" &&
+    Number.isFinite(input.maxMessageChars) &&
+    input.maxMessageChars > 0
+      ? Math.floor(input.maxMessageChars)
+      : undefined;
   return {
     type: "decision_request",
     requestID: input.requestID,
@@ -80,6 +142,10 @@ export function decisionRequestEnvelope(input: {
     protocol: {
       maxActionsPerDecision: MAX_WIRE_ACTIONS_PER_DECISION,
       maxSpawnPreferences: MAX_WIRE_SPAWN_PREFERENCE_ACTION_IDS,
+      // Advertised only when the feature is actually on, so a policy can
+      // detect the capability instead of guessing, and an old image simply
+      // never advertises it.
+      ...(maxMessageChars !== undefined ? { maxMessageChars } : {}),
     },
     request: input.request,
   };
@@ -171,6 +237,36 @@ export function normalizeDecisionResponse(
       ? message.selectedDealActionId.trim().slice(0, MAX_WIRE_ACTION_ID_LENGTH)
       : undefined;
 
+  // Optional third selection (the comms slot). Forwarded as a PAIR or not at
+  // all, mirroring LlmDecisionParser.parsedMessageSlot: an id must never reach
+  // the validator without the body it has to be judged with. This is a SHAPE
+  // gate, not a menu gate — whether the id is a currently-offered `message:`
+  // action remains AgentDecisionValidator's call alone, as does the 280-char
+  // cap and the control/bidi/zero-width contract.
+  const messageActionIDRaw = message.selectedMessageActionId;
+  const messageTextRaw = message.messageText;
+  let messageActionID: string | undefined;
+  let messageText: string | undefined;
+  if (
+    typeof messageActionIDRaw === "string" &&
+    typeof messageTextRaw === "string"
+  ) {
+    const trimmedID = messageActionIDRaw
+      .trim()
+      .slice(0, MAX_WIRE_ACTION_ID_LENGTH);
+    if (trimmedID.length > 0 && messageTextRaw.trim().length > 0) {
+      messageActionID = trimmedID;
+      // The body rides UNTRIMMED past the emptiness guard above. The validator
+      // owns normalization (it collapses whitespace, then measures); doing it
+      // here too is how the delivered text and the stamped `commsSlotText`
+      // evidence drift apart.
+      messageText =
+        messageTextRaw.length > MAX_WIRE_MESSAGE_TEXT_LENGTH
+          ? OVERSIZE_MESSAGE_TEXT_SENTINEL
+          : messageTextRaw;
+    }
+  }
+
   return {
     actionID,
     ...(actionIDs !== undefined ? { actionIDs } : {}),
@@ -178,6 +274,9 @@ export function normalizeDecisionResponse(
       ? { spawnPreferenceActionIDs }
       : {}),
     ...(dealActionID !== undefined ? { dealActionID } : {}),
+    ...(messageActionID !== undefined && messageText !== undefined
+      ? { messageActionID, messageText }
+      : {}),
     reason:
       typeof message.reason === "string"
         ? message.reason.slice(0, 500)
