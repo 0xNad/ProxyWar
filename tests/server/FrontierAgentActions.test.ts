@@ -32,11 +32,17 @@ import { LlmPromptBuilder } from "../../src/server/agents/LlmPromptBuilder";
 // (PROXYWAR_TUNE_STRUCTURED_DEALS, default OFF; emitted only when the runner
 // injects the observation `deals` block), so they are not part of the
 // autonomous gameplay (intent-emitting) surface this suite pins.
+// `message` is excluded for the same reason as the deal kinds: it is
+// intent:null and flag-gated (PROXYWAR_TUNE_FREETEXT_MESSAGES, default OFF),
+// so it is not part of the autonomous gameplay (intent-emitting) surface this
+// suite pins. Its own menu, validation, and delivery coverage lives in
+// tests/server/FreeTextNegotiation.test.ts.
 const autonomousGameplayKinds = legalActionKinds.filter(
   (kind) =>
     kind !== "hold" &&
     kind !== "boat_retreat" &&
     kind !== "spawn" &&
+    kind !== "message" &&
     !kind.startsWith("deal_"),
 );
 
@@ -905,12 +911,14 @@ function objectiveForKind(kind: LegalActionKind): StrategicPlan["objective"] {
     case "embargo":
     case "embargo_all":
       return "pressure_rival";
-    // Type-exhaustiveness only: deal meta-actions are excluded from
-    // autonomousGameplayKinds above and never reach this helper at runtime.
+    // Type-exhaustiveness only: deal meta-actions and free-text messages are
+    // excluded from autonomousGameplayKinds above and never reach this helper
+    // at runtime.
     case "deal_propose":
     case "deal_accept":
     case "deal_reject":
     case "deal_withdraw":
+    case "message":
       return "build_alliance";
     case "delete_unit":
     case "hold":

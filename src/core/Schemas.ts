@@ -43,6 +43,7 @@ export type Intent =
   | BuildUnitIntent
   | EmbargoIntent
   | QuickChatIntent
+  | AgentMessageIntent
   | MoveWarshipIntent
   | MarkDisconnectedIntent
   | EmbargoAllIntent
@@ -73,6 +74,7 @@ export type UpgradeStructureIntent = z.infer<
 >;
 export type MoveWarshipIntent = z.infer<typeof MoveWarshipIntentSchema>;
 export type QuickChatIntent = z.infer<typeof QuickChatIntentSchema>;
+export type AgentMessageIntent = z.infer<typeof AgentMessageIntentSchema>;
 export type MarkDisconnectedIntent = z.infer<
   typeof MarkDisconnectedIntentSchema
 >;
@@ -439,6 +441,26 @@ export const QuickChatIntentSchema = z.object({
   target: ID.optional(),
 });
 
+/**
+ * Free-text agent negotiation (PROXYWAR_TUNE_FREETEXT_MESSAGES, default OFF).
+ *
+ * The ONLY wire message carrying agent-authored prose. The text is
+ * simulation-inert: `AgentMessageExecution` delivers it for display and
+ * observation and nothing in the simulation branches on its content, so
+ * wording cannot change game state or replay hashes.
+ *
+ * The 280-character bound is duplicated here on purpose. `AgentDecisionValidator`
+ * rejects over-cap text before it ever becomes an intent; this schema is the
+ * second, independent gate that also covers any future producer, so a bug or a
+ * hostile policy upstream cannot push unbounded text onto the wire, into every
+ * client's turn stream, and into the replay file.
+ */
+export const AgentMessageIntentSchema = z.object({
+  type: z.literal("agent_message"),
+  recipient: ID,
+  text: z.string().min(1).max(280),
+});
+
 export const MarkDisconnectedIntentSchema = z.object({
   type: z.literal("mark_disconnected"),
   clientID: ID,
@@ -484,6 +506,7 @@ const IntentSchema = z.discriminatedUnion("type", [
   EmbargoAllIntentSchema,
   MoveWarshipIntentSchema,
   QuickChatIntentSchema,
+  AgentMessageIntentSchema,
   AllianceExtensionIntentSchema,
   DeleteUnitIntentSchema,
   KickPlayerIntentSchema,

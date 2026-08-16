@@ -1,4 +1,5 @@
 import { isDealActionKind } from "./AgentDealManager";
+import { FREETEXT_MESSAGE_MAX_CHARS } from "./AgentTunables";
 import { AgentDecision, LegalAction } from "./AgentTypes";
 
 export type AgentDecisionValidation =
@@ -7,6 +8,10 @@ export type AgentDecisionValidation =
 
 export type AgentDealDecisionValidation =
   | { ok: true; action: LegalAction }
+  | { ok: false; reason: string };
+
+export type AgentMessageDecisionValidation =
+  | { ok: true; action: LegalAction; text: string }
   | { ok: false; reason: string };
 
 /**
@@ -56,6 +61,120 @@ export function validateAgentDealDecision(
 }
 
 /**
+ * Validates the OPTIONAL third selection — the comms slot
+ * (`AgentDecision.messageActionID` + `messageText`). Returns null when the
+ * field is absent/blank, leaving every shipped path untouched.
+ *
+ * This is the ONLY validator that admits agent-authored free text, so it is
+ * deliberately the strictest. Four mandatory gates:
+ * 1. exact-id match against the SAME offered menu as `actionID`;
+ * 2. the action's kind must be `message` — the raw-intent-bypass boundary,
+ *    without which a policy could name an attack id here and buy itself a
+ *    second game action per decision;
+ * 3. the body must be present, non-blank, and within
+ *    FREETEXT_MESSAGE_MAX_CHARS after normalization;
+ * 4. the body must contain no control characters.
+ *
+ * Violations are REJECTED, never repaired. Truncating or stripping would put
+ * words the agent did not write in its mouth, and every negotiation claim we
+ * later make rests on the text being verbatim. There is no fallback: a
+ * rejected message is dropped and the game action proceeds untouched.
+ *
+ * NOT this function's job: judging whether the text is manipulative. Messages
+ * that try to talk a rival's model into a bad move are legal play in this
+ * league, and the starter is hardened to treat inbound text as untrusted
+ * claims rather than instructions.
+ */
+export function validateAgentMessageDecision(
+  decision: AgentDecision,
+  legalActions: LegalAction[],
+): AgentMessageDecisionValidation | null {
+  if (typeof decision.messageActionID !== "string") {
+    return null;
+  }
+  const requestedID = decision.messageActionID.trim();
+  if (requestedID.length === 0) {
+    return null;
+  }
+  const action = legalActions.find((candidate) => candidate.id === requestedID);
+  if (action === undefined) {
+    return {
+      ok: false,
+      reason: `message selection named unknown action id: ${loggableActionID(requestedID)}`,
+    };
+  }
+  if (action.kind !== "message") {
+    return {
+      ok: false,
+      reason: `message selection named a non-message action kind (${action.kind}): ${loggableActionID(requestedID)}`,
+    };
+  }
+  if (typeof decision.messageText !== "string") {
+    return {
+      ok: false,
+      reason: `message selection ${loggableActionID(requestedID)} carried no messageText`,
+    };
+  }
+  // Collapse runs of whitespace (including newlines) to single spaces so a
+  // message cannot smuggle in layout that breaks the chat rendering or pads
+  // the prompt. This normalizes SPACING only — never wording — and the length
+  // gate below is applied to the normalized text that will actually be sent.
+  const text = decision.messageText.replace(/\s+/gu, " ").trim();
+  if (text.length === 0) {
+    return {
+      ok: false,
+      reason: `message selection ${loggableActionID(requestedID)} carried blank messageText`,
+    };
+  }
+  if (text.length > FREETEXT_MESSAGE_MAX_CHARS) {
+    return {
+      ok: false,
+      reason: `messageText is ${text.length} chars, over the ${FREETEXT_MESSAGE_MAX_CHARS}-char cap (rejected, not truncated)`,
+    };
+  }
+  // C0 controls, DEL, and C1 controls: terminal escapes and framing. Bidi
+  // overrides are NOT in these ranges and are handled separately below.
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001F\u007F-\u009F]/u.test(text)) {
+    return {
+      ok: false,
+      reason: "messageText contained control characters",
+    };
+  }
+
+  // Invisible formatting characters, which the whitespace collapse above does
+  // NOT touch and the control ranges above do NOT cover. Two distinct abuses:
+  //
+  // 1. BIDI OVERRIDES (U+202A-202E, U+2066-2069, U+200E-200F, U+061C) visually
+  //    reorder the rendered line. The transcript renders as
+  //    "{sender} -> {recipient}: {msg}" and we own only the English string --
+  //    Crowdin owns every other locale, and any locale placing {msg} first
+  //    would let attacker text reorder the ATTRIBUTION. Spoofing who said what
+  //    in a negotiation transcript corrupts the very evidence this feature
+  //    exists to produce, and `unsafeDescription: false` makes the line a
+  //    single text node, so it cannot be repaired with <bdi> at render time.
+  //
+  // 2. ZERO-WIDTH PADDING (U+200B-200D, U+2060, U+00AD, U+FEFF) buys up to 280
+  //    invisible characters that cost real tokens in every recipient's prompt
+  //    and render as a blank chat row.
+  //
+  // Rejected rather than stripped, like every other violation here: silently
+  // removing characters would change what the agent wrote.
+  if (
+    /[\u00AD\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF\uFFF9-\uFFFB]/u.test(
+      text,
+    )
+  ) {
+    return {
+      ok: false,
+      reason:
+        "messageText contained invisible formatting or bidi-override characters",
+    };
+  }
+  return { ok: true, action, text };
+}
+
+/**
  * The rejection reason is stamped into decisions.jsonl by the league runner,
  * so the agent-controlled id it quotes is bounded here (the lookup above
  * still uses the full id, so a long-but-legal id can never be mismatched).
@@ -83,12 +202,26 @@ export function validateAgentDecision(
   const action = legalActions.find(
     (candidate) => candidate.id === decision.actionID,
   );
+  const fallback =
+    legalActions.find((candidate) => candidate.kind === "hold") ?? null;
   if (action !== undefined) {
+    // A `message` id is offered, but it belongs in the COMMS slot. Selected as
+    // the game action it would submit no intent and send no message — the
+    // agent would silently forfeit its move and believe it had spoken. Deal
+    // meta-actions survive this path because the runner routes them to the
+    // deal manager; messages have no such route, so refuse loudly instead of
+    // failing quietly.
+    if (action.kind === "message") {
+      return {
+        ok: false,
+        reason:
+          "message actions belong in the comms slot (messageActionID + messageText), not the game action slot; nothing was sent",
+        fallback,
+      };
+    }
     return { ok: true, action };
   }
 
-  const fallback =
-    legalActions.find((candidate) => candidate.kind === "hold") ?? null;
   return {
     ok: false,
     reason: `decision selected unknown action id: ${decision.actionID}`,

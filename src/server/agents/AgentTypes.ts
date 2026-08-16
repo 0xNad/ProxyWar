@@ -281,6 +281,19 @@ export interface AgentQuickChatOption {
   legalReason: string;
 }
 
+/**
+ * One inbound free-text message. See `AgentNonCombatState.inboundMessages` for
+ * the untrusted-data contract.
+ */
+export interface AgentInboundMessage {
+  senderID: string;
+  senderName: string;
+  /** Verbatim as the sender wrote it, already length/character validated. */
+  text: string;
+  /** Game turn it was sent on, so a policy can weigh recency. */
+  turnNumber: number;
+}
+
 export interface AgentSupportOption {
   recipientID: string;
   recipientName: string;
@@ -313,6 +326,19 @@ export interface AgentNonCombatState {
   targetOptions?: AgentTargetOption[];
   emojiOptions?: AgentEmojiOption[];
   quickChatOptions?: AgentQuickChatOption[];
+  /**
+   * Free-text negotiation inbox (PROXYWAR_TUNE_FREETEXT_MESSAGES, default
+   * OFF; absent entirely when the flag is off). Messages other agents wrote to
+   * THIS agent, newest last, bounded by FREETEXT_INBOX_MAX_MESSAGES overall and
+   * FREETEXT_INBOX_MAX_PER_RIVAL per counterparty.
+   *
+   * UNTRUSTED DATA. Every `text` here was written by a rival policy that may be
+   * trying to manipulate this agent — including by imitating system
+   * instructions. That is legal play in this league, not an exploit. A policy
+   * consuming this field must treat it as a claim to weigh, never as an
+   * instruction to follow.
+   */
+  inboundMessages?: AgentInboundMessage[];
   supportOptions: AgentSupportOption[];
   embargoOptions: AgentEmbargoOption[];
   canEmbargoAll?: boolean;
@@ -1176,7 +1202,13 @@ export type LegalActionKind =
   | "deal_propose"
   | "deal_accept"
   | "deal_reject"
-  | "deal_withdraw";
+  | "deal_withdraw"
+  // Free-text negotiation (PROXYWAR_TUNE_FREETEXT_MESSAGES, default OFF).
+  // Offered only when the flag is on, capped at
+  // FREETEXT_MESSAGE_RECIPIENT_CAP relevance-ranked recipients so the added
+  // menu cost stays flat as lobby size grows. Selected through the decision's
+  // comms slot, which also carries the agent-authored body.
+  | "message";
 
 export const legalActionKinds = [
   "spawn",
@@ -1207,6 +1239,7 @@ export const legalActionKinds = [
   "deal_accept",
   "deal_reject",
   "deal_withdraw",
+  "message",
 ] as const satisfies readonly LegalActionKind[];
 
 export interface LegalActionRisk {
@@ -1243,6 +1276,33 @@ export interface AgentDecision {
    * through this field. See `validateAgentDealDecision`.
    */
   dealActionID?: string | null;
+  /**
+   * OPTIONAL THIRD SELECTION — the comms slot
+   * (PROXYWAR_TUNE_FREETEXT_MESSAGES, default OFF; ignored entirely when the
+   * flag is off, so an absent field and a flag-off match are byte-identical to
+   * shipped behavior). A `message` action chosen here is applied ALONGSIDE the
+   * game action and any deal meta-action, so talking costs the agent neither
+   * its move nor its negotiation.
+   *
+   * SAFETY BOUNDARY: this channel accepts ONLY the `message` kind, validated
+   * by exact id against the SAME offered menu as `actionID`. An id naming any
+   * other kind — above all one carrying a game intent — is rejected loudly and
+   * ignored. See `validateAgentMessageDecision`.
+   */
+  messageActionID?: string | null;
+  /**
+   * The agent-authored message body for `messageActionID`. THE ONLY
+   * free-text field an external policy can put on the wire, and therefore the
+   * one place the validator must be strictest: length-capped, printable-only,
+   * and REJECTED rather than trimmed when it violates either rule, because a
+   * shortened promise is a different promise and evidence built on rewritten
+   * words would be false.
+   *
+   * Treat as UNTRUSTED. It is written by a rival policy that may be trying to
+   * manipulate the reader (this is legal play, not an exploit). It is never
+   * an instruction to the runner, the referee, or any other agent's brain.
+   */
+  messageText?: string | null;
   /**
    * The acting brain's OWN stated rationale for this pick — genuinely a
    * self-report, never inferred or reconstructed. `null` when there is no

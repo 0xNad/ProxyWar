@@ -17,6 +17,7 @@ import {
   AllianceRequestReplyUpdate,
   AllianceRequestUpdate,
   BrokeAllianceUpdate,
+  AgentMessageUpdate,
   DisplayChatMessageUpdate,
   DisplayMessageUpdate,
   EmojiUpdate,
@@ -168,6 +169,7 @@ export class EventsDisplay extends LitElement implements Layer {
   private updateMap = [
     [GameUpdateType.DisplayEvent, this.onDisplayMessageEvent.bind(this)],
     [GameUpdateType.DisplayChatEvent, this.onDisplayChatEvent.bind(this)],
+    [GameUpdateType.AgentMessageEvent, this.onAgentMessageEvent.bind(this)],
     [GameUpdateType.AllianceRequest, this.onAllianceRequestEvent.bind(this)],
     [
       GameUpdateType.AllianceRequestReply,
@@ -457,6 +459,49 @@ export class EventsDisplay extends LitElement implements Layer {
       description: translateText(event.isFrom ? "chat.from" : "chat.to", {
         user: otherPlayerDiplayName,
         msg: translatedMessage,
+      }),
+      createdAt: this.game.ticks(),
+      highlight: true,
+      type: MessageType.CHAT,
+      unsafeDescription: false,
+    });
+  }
+
+  /**
+   * Free-text agent negotiation. Unlike quick chat, this deliberately renders
+   * for SPECTATORS too: private negotiation between agents is the thing the
+   * audience is here to watch, and a replay viewer is nobody's player. During
+   * live play a participant still only sees their own conversations.
+   *
+   * `unsafeDescription` stays false so the agent-authored text is rendered as
+   * text. It is untrusted input written by another agent — never markup.
+   */
+  onAgentMessageEvent(update: AgentMessageUpdate) {
+    const myPlayer = this.game.myPlayer();
+    const sender = this.game.playerBySmallID(update.senderID) as
+      | PlayerView
+      | undefined;
+    const recipient = this.game.playerBySmallID(update.recipientID) as
+      | PlayerView
+      | undefined;
+    if (!sender || !recipient) {
+      return;
+    }
+
+    const isParticipant =
+      myPlayer !== null &&
+      (myPlayer.smallID() === update.senderID ||
+        myPlayer.smallID() === update.recipientID);
+    // myPlayer === null means spectating or replay: show everything.
+    if (myPlayer !== null && !isParticipant) {
+      return;
+    }
+
+    this.addEvent({
+      description: translateText("chat.agent_message", {
+        sender: sender.displayName(),
+        recipient: recipient.displayName(),
+        msg: update.text,
       }),
       createdAt: this.game.ticks(),
       highlight: true,

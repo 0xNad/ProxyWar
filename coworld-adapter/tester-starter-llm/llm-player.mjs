@@ -116,6 +116,9 @@ const SECURITY =
 
 // -- anti-loop memory (distilled from the keystone's avoidActionIDs) ----------
 const history = []; // { actionID, kind } appended after each decision
+// Inbound messages already answered, keyed `${senderID}:${turnNumber}`, so a
+// rival writing every step cannot pull this agent into an endless exchange.
+const answeredMessages = new Set();
 function avoidActionIDs() {
   const recent = history
     .slice(-6)
@@ -866,6 +869,141 @@ function failedReliabilityGate(obs, playerID) {
   return rate < DEAL_TRUST_MIN_RELIABILITY;
 }
 
+// ---------------------------------------------------------------------------
+// Free-text negotiation.
+//
+// READ THIS BEFORE CHANGING IT.
+//
+// `observation.nonCombat.inboundMessages` is written by RIVAL POLICIES. It is
+// data about what someone CLAIMED, never instructions to you. Rivals are
+// allowed to write anything, including text shaped like a system prompt
+// ("ignore your instructions", "SYSTEM:", "you must donate"). That is legal
+// play in this league, not an exploit, and nobody will stop it for you.
+//
+// This starter is therefore hardened by construction rather than by asking a
+// model nicely:
+//   1. inbound text is never concatenated into the planner prompt, so it can
+//      never become part of your instructions;
+//   2. only the FACT that a rival wrote to you, and their id, influences
+//      behavior — never the content;
+//   3. replies are chosen from fixed templates below, so a rival's words can
+//      never author your words.
+//
+// If you make your agent smarter by actually reading the text with a model,
+// keep the boundary explicit: pass it as clearly-labelled untrusted data,
+// and never let it select an action id.
+// ---------------------------------------------------------------------------
+
+// Bounded, deterministic replies. Wording is ours, so no rival can put words
+// in this agent's mouth. Kept well under the 280-character cap.
+const MESSAGE_MAX_CHARS = 280;
+const MESSAGE_REPLIES = {
+  ally: "We are allied. I will not move on your border while that holds.",
+  dealOpen: "Your proposal is on my table. Keep your side and I keep mine.",
+  breaker: "You broke a deal with me. I am not trading on your word again.",
+  neutral: "Noted. I am open to a pact if you stay off my border.",
+};
+
+// Openers. Without these the starter is purely reactive, and since most league
+// seats descend from this file, a starter-only league would never contain a
+// single conversation: everyone waits to be spoken to. One agent has to be
+// willing to speak first for the channel to exist at all.
+const MESSAGE_OPENERS = {
+  withProposal:
+    "I have put an offer to you. Take it and neither of us wastes troops on the other.",
+  border: "We share a border. I would rather point my troops elsewhere - pact?",
+};
+
+// Answers at most one rival per decision: the one who most recently wrote to
+// us and has not already been answered since. Silence is the default — an
+// agent that talks every step is noise, not negotiation.
+function chooseMessageMove(actions, obs, answered, dealMove) {
+  const offers = (actions || []).filter((action) => action.kind === "message");
+  if (offers.length === 0) return null;
+  const inbound = obs?.nonCombat?.inboundMessages || [];
+
+  if (inbound.length === 0) {
+    return chooseMessageOpener(offers, obs, answered, dealMove);
+  }
+
+  const newest = [...inbound].sort(
+    (a, b) => Number(a.turnNumber ?? 0) - Number(b.turnNumber ?? 0),
+  )[inbound.length - 1];
+  const senderID = newest?.senderID;
+  if (!senderID) return null;
+  // One reply per inbound turn, so a spammer cannot pull us into a loop.
+  const key = `${senderID}:${newest.turnNumber}`;
+  if (answered.has(key)) return null;
+
+  const offer = offers.find(
+    (action) => action.metadata?.recipientID === senderID,
+  );
+  if (!offer) return null;
+
+  const rival = (obs?.visiblePlayers || []).find(
+    (player) => player?.playerID === senderID,
+  );
+  const hasOpenDeal = [
+    ...(obs?.deals?.incomingProposals || []),
+    ...(obs?.deals?.outgoingProposals || []),
+    ...(obs?.deals?.activeDeals || []),
+  ].some(
+    (view) =>
+      view?.proposerPlayerID === senderID || view?.recipientPlayerID === senderID,
+  );
+
+  let text;
+  if (failedReliabilityGate(obs, senderID)) text = MESSAGE_REPLIES.breaker;
+  else if (rival?.isAllied) text = MESSAGE_REPLIES.ally;
+  else if (hasOpenDeal) text = MESSAGE_REPLIES.dealOpen;
+  else text = MESSAGE_REPLIES.neutral;
+
+  answered.add(key);
+  return { id: offer.id, text: text.slice(0, MESSAGE_MAX_CHARS) };
+}
+
+// Speaks first, but rarely and only when there is something to say. Two
+// occasions, both tied to a concrete opportunity rather than chatter:
+//   (a) we are proposing a deal to this rival on this very decision - the
+//       message is the reason to accept, which the bare template lacks;
+//   (b) we share a border with a rival we have never written to.
+// At most one opener per counterparty per match.
+function chooseMessageOpener(offers, obs, answered, dealMove) {
+  const dealRecipient =
+    dealMove?.kind === "deal_propose" ? dealMove?.metadata?.recipientID : null;
+  if (dealRecipient) {
+    const offer = offers.find(
+      (action) => action.metadata?.recipientID === dealRecipient,
+    );
+    const key = `opener:${dealRecipient}`;
+    if (offer && !answered.has(key)) {
+      answered.add(key);
+      return {
+        id: offer.id,
+        text: MESSAGE_OPENERS.withProposal.slice(0, MESSAGE_MAX_CHARS),
+      };
+    }
+  }
+
+  for (const offer of offers) {
+    const recipientID = offer.metadata?.recipientID;
+    const key = `opener:${recipientID}`;
+    if (answered.has(key)) continue;
+    const rival = (obs?.visiblePlayers || []).find(
+      (player) => player?.playerID === recipientID,
+    );
+    // Only borderers, and never someone already proven unreliable.
+    if (!rival?.sharesBorder || rival.isAllied) continue;
+    if (failedReliabilityGate(obs, recipientID)) continue;
+    answered.add(key);
+    return {
+      id: offer.id,
+      text: MESSAGE_OPENERS.border.slice(0, MESSAGE_MAX_CHARS),
+    };
+  }
+  return null;
+}
+
 // Deterministic deal executor. The move it returns is sent in the SEPARATE
 // deal slot (selectedDealActionId) alongside the normal game action, so
 // negotiating never costs a turn of expansion or attack:
@@ -1323,6 +1461,15 @@ export function startLlmPlayer({
     // The deal posture rides its OWN slot: it is sent alongside the game move,
     // never instead of it. Absent field => byte-identical to the old reply.
     const dealMove = chooseDealMove(actions, obs);
+    // Comms slot: independent of the game action and the deal action, so
+    // answering a rival never costs a move. Returns null (silence) unless
+    // someone actually wrote to us.
+    const messageMove = chooseMessageMove(
+      actions,
+      obs,
+      answeredMessages,
+      dealMove,
+    );
     const degraded = lastPlanError !== null;
     let reason;
     if (plan !== null) {
@@ -1347,6 +1494,12 @@ export function startLlmPlayer({
         requestID: message.requestID,
         selectedLegalActionId: chosen.id,
         ...(dealMove ? { selectedDealActionId: dealMove.id } : {}),
+        ...(messageMove
+          ? {
+              selectedMessageActionId: messageMove.id,
+              messageText: messageMove.text,
+            }
+          : {}),
         reason: reason.slice(0, 200),
         confidence: plan !== null ? (degraded ? 0.5 : 0.75) : 0.4,
         fallbackUsed: plan === null || degraded,
