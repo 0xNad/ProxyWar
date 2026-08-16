@@ -942,6 +942,19 @@ export class GameImpl implements Game {
     });
   }
 
+  displayAgentMessage(
+    text: string,
+    senderID: PlayerID,
+    recipientID: PlayerID,
+  ): void {
+    this.addUpdate({
+      type: GameUpdateType.AgentMessageEvent,
+      senderID: this.player(senderID).smallID(),
+      recipientID: this.player(recipientID).smallID(),
+      text,
+    });
+  }
+
   displayIncomingUnit(
     unitID: number,
     message: string,

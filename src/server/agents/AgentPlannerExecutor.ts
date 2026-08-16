@@ -16878,9 +16878,11 @@ function moduleForActionKind(kind: LegalActionKind): FrontierPolicyModule {
     case "deal_accept":
     case "deal_reject":
     case "deal_withdraw":
-      // The deal_* arms (PROXYWAR_TUNE_STRUCTURED_DEALS, default OFF) are
-      // type-exhaustiveness only — the flag-gated meta-action kinds classify
-      // as diplomacy when present. No scoring/ranking/selection change.
+    case "message":
+      // The deal_* and message arms (PROXYWAR_TUNE_STRUCTURED_DEALS /
+      // PROXYWAR_TUNE_FREETEXT_MESSAGES, both default OFF) are
+      // type-exhaustiveness only — the flag-gated kinds classify as diplomacy
+      // when present. No scoring/ranking/selection change.
       return "diplomacy";
     case "build":
     case "upgrade_structure":
