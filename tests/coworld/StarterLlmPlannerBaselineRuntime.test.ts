@@ -189,6 +189,8 @@ describe("tester-starter-llm baseline runtime arm", () => {
       logLines.some(
         (line) =>
           line.includes('"promptVariant":"full-baseline-telemetry-v1"') &&
+          line.includes('"spatialSchemaVersion":0') &&
+          line.includes('"spatialMinimap":false') &&
           line.includes('"usageComplete":true'),
       ),
     ).toBe(true);

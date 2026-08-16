@@ -361,8 +361,7 @@ describe("AgentSpectatorTelemetry", () => {
     expect(
       telemetry.relationships.find(
         (relationship) =>
-          relationship.fromAgentID === "a1" &&
-          relationship.toAgentID === "a2",
+          relationship.fromAgentID === "a1" && relationship.toAgentID === "a2",
       ),
     ).toMatchObject({ attacksSent: 0, distrust: 10, tension: 10 });
   });
@@ -393,10 +392,78 @@ describe("AgentSpectatorTelemetry", () => {
     expect(
       telemetry.relationships.find(
         (relationship) =>
-          relationship.fromAgentID === "a1" &&
-          relationship.toAgentID === "a2",
+          relationship.fromAgentID === "a1" && relationship.toAgentID === "a2",
       ),
     ).toMatchObject({ tradeGivenTroops: 0, trust: 50 });
+  });
+
+  // Regression: `alliance_extend` and `alliance_reject` used to fall through
+  // `decisionEvent`'s `default: return null`, so a selected renewal offer or
+  // refusal produced NO spectator event. That made hosted telemetry report
+  // zero extensions in episodes whose own replay carried `allianceExtension`
+  // intents (e.g. league-coworld-2026-07-14T16-58-11-547Z-a67f0574 selected
+  // alliance_extend 16 times and its telemetry recorded 0), which is why
+  // renewal behaviour looked absent rather than merely rare.
+  it("emits spectator events for alliance renewal offers and refusals", () => {
+    const telemetry = buildAgentSpectatorTelemetry({
+      runID: "renewal-run",
+      roster: roster(),
+      finalState: finalState(),
+      records: [
+        record(1, "a1", "Atlas", "p1", "alliance_extend", {
+          targetID: "p2",
+          targetName: "Blitz",
+          action: "extend",
+        }),
+        record(2, "a2", "Blitz", "p2", "alliance_reject", {
+          targetID: "p1",
+          targetName: "Atlas",
+          action: "reject",
+        }),
+      ],
+    });
+
+    expect(telemetry.events).toHaveLength(2);
+    expect(telemetry.events[0]).toMatchObject({
+      kind: "alliance_renewal_offer",
+      actionKind: "alliance_extend",
+      tone: "pact",
+      message: "Atlas offers to renew the expiring alliance with Blitz.",
+    });
+    expect(telemetry.events[1]).toMatchObject({
+      kind: "alliance_reject",
+      actionKind: "alliance_reject",
+      tone: "threat",
+      message: "Blitz refuses Atlas's pact.",
+    });
+  });
+
+  // The renewal offer proves an ACCEPTED action, not a renewed alliance: the
+  // core only calls `alliance.extend()` once BOTH sides have asked inside the
+  // same window, so the message must never claim the alliance was renewed.
+  it("never claims a renewal took effect from one side's offer", () => {
+    const telemetry = buildAgentSpectatorTelemetry({
+      runID: "one-sided-renewal-run",
+      roster: roster(),
+      finalState: finalState(),
+      records: [
+        record(
+          1,
+          "a1",
+          "Atlas",
+          "p1",
+          "alliance_extend",
+          { targetID: "p2", targetName: "Blitz", action: "extend" },
+          { auditStatus: "unknown" },
+        ),
+      ],
+    });
+
+    expect(telemetry.events[0]).toMatchObject({
+      kind: "alliance_renewal_offer",
+      evidenceLevel: "accepted_action",
+    });
+    expect(telemetry.events[0].message).not.toMatch(/renewed|extended/i);
   });
 });
 

@@ -95,6 +95,34 @@ function decisionRequest(requestID: string) {
             incomingAttacks: 0,
             units: {},
           },
+          spatial: {
+            schemaVersion: 1,
+            ownShape: {
+              quadrant: "west",
+              compactness: "compact",
+              regionCount: 1,
+              largestRegionShare: 100,
+              regionAnalysis: "complete",
+              centroidBasis: "largest_region_border",
+              coastShare: 0,
+              centroid: { xPct: 25, yPct: 50 },
+            },
+            minimap: {
+              schemaVersion: 1,
+              width: 24,
+              height: 12,
+              rows: Array.from({ length: 12 }, () => "A".repeat(24)),
+              legend: [
+                {
+                  glyph: "A",
+                  playerID: "P_ME",
+                  name: "Me",
+                  isYou: true,
+                },
+              ],
+            },
+          },
+          notes: ["Spatial exposure 1: Auri is east."],
           visiblePlayers: [
             {
               name: "Auri",
@@ -251,6 +279,8 @@ describe("tester-starter-llm hardened runtime arm", () => {
         promptVariant: "full-hardened-compact-deals-v3",
         planEvery: 3,
         promptCache: false,
+        spatialSchemaVersion: 1,
+        spatialMinimap: true,
         model: "test.sonnet-full",
         responseModel: "test.sonnet-full",
         stopReason: "end_turn",
@@ -263,6 +293,8 @@ describe("tester-starter-llm hardened runtime arm", () => {
     expect(usageRecords).toContainEqual(
       expect.objectContaining({
         event: "summary",
+        spatialSchemaVersion: 1,
+        spatialMinimap: true,
         attempts: 2,
         responses: 1,
         errors: 0,

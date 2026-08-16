@@ -64,6 +64,62 @@ export interface AgentOwnState {
   spawnTile?: TileRef;
 }
 
+export type AgentSpatialQuadrant =
+  | "northwest"
+  | "north"
+  | "northeast"
+  | "west"
+  | "center"
+  | "east"
+  | "southwest"
+  | "south"
+  | "southeast";
+
+export type AgentSpatialBearing = Exclude<AgentSpatialQuadrant, "center">;
+
+export interface AgentOwnShape {
+  quadrant: AgentSpatialQuadrant;
+  compactness?: "compact" | "stretched" | "fragmented";
+  regionCount?: number;
+  largestRegionShare?: number;
+  regionAnalysis: "complete" | "omitted_budget";
+  centroidBasis: "largest_region_border" | "all_border_budget_fallback";
+  coastShare: number;
+  centroid: { xPct: number; yPct: number };
+}
+
+export interface AgentSpatialMinimap {
+  schemaVersion: 1;
+  width: 24;
+  height: 12;
+  rows: string[];
+  legend: Array<{
+    glyph: string;
+    playerID: string;
+    name: string;
+    isYou: boolean;
+  }>;
+}
+
+export interface AgentSpatialObservation {
+  schemaVersion: 1;
+  ownShape: AgentOwnShape;
+  minimap?: AgentSpatialMinimap;
+}
+
+export interface AgentBorderWithYou {
+  tiles: number;
+  shareOfYourBorder: number;
+  terrain: "land" | "coastal" | "mixed";
+  defensePostsCovering: number;
+  underAttackHere: boolean;
+}
+
+export interface AgentRivalBorder {
+  playerID: string;
+  sizeClass: "minor" | "major";
+}
+
 export interface AgentVisiblePlayer {
   playerID: string;
   clientID: string | null;
@@ -106,8 +162,26 @@ export interface AgentVisiblePlayer {
   underSiege?: boolean;
   allianceExpiresAt?: number;
   allianceInExtensionWindow?: boolean;
+  /** True once THIS agent has asked to renew the alliance with this rival.
+   *  `canExtendAlliance` goes false at the same moment (the core refuses a
+   *  second ask), so without this the agent cannot tell "I already asked" apart
+   *  from "renewal is not available". Present only while an alliance exists. */
+  allianceSelfAgreedToExtend?: boolean;
+  /** True once the RIVAL has asked to renew and is waiting on this agent.
+   *  Renewal is mutual — `AllianceExtensionExecution` only extends once
+   *  `bothAgreedToExtend()` — so this is the signal that one `alliance_extend`
+   *  keeps the alliance alive. Bots (`TribeExecution`) and nations
+   *  (`NationAllianceBehavior`) already reciprocate off the core's equivalent
+   *  `onlyOneAgreedToExtend()`; before this field agents could not.
+   *  Present only while an alliance exists. */
+  allianceOtherAgreedToExtend?: boolean;
   relativeTroopRatio?: number;
   spawnDistance?: number;
+  /** Optional spatial-observation relations; absent with the parent flag off. */
+  bearing?: AgentSpatialBearing;
+  distanceClass?: "adjacent" | "near" | "far";
+  borderWithYou?: AgentBorderWithYou;
+  bordersWith?: AgentRivalBorder[];
   /** Player IDs of OTHER visible players this rival is allied with (the rival-rival
    *  coalition edge — excludes the agent itself, whose alliance is `isAllied`). Lets the
    *  Commander see a coalition / 3v1 forming instead of only its own alliances. Omitted
@@ -1112,6 +1186,8 @@ export interface AgentObservation {
   tick: number | null;
   ownState: AgentOwnState | null;
   visiblePlayers: AgentVisiblePlayer[];
+  /** Flag-gated read-side spatial summary; absent by default and for no-land seats. */
+  spatial?: AgentSpatialObservation;
   combat: AgentCombatState;
   nonCombat: AgentNonCombatState;
   strategic: AgentStrategicState;

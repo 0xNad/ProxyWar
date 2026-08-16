@@ -175,6 +175,18 @@ export function personalityDiplomacyActionScore(
   if ((group === "alliance" || group === "support") && targetIsLeader) {
     score -= input.homeDanger === "high" ? 4 : 24;
   }
+  // Answering an ally that has ALREADY asked to renew is the one diplomacy
+  // action with a hard deadline and a guaranteed effect: renewal is mutual, so
+  // this single reply is what stops the alliance lapsing, and the window is only
+  // 300 ticks (1-4 decisions) wide. Deliberately large enough to survive the
+  // leader penalty above — renewing with the leader is still a live choice when
+  // that leader is the ally waiting on you.
+  if (
+    action.kind === "alliance_extend" &&
+    target?.allianceOtherAgreedToExtend === true
+  ) {
+    score += 40;
+  }
   if ((input.recentExpansionCount ?? 0) >= 2) {
     score += group === "communication" ? 8 : 14;
   }
