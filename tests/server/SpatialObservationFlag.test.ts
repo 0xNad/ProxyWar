@@ -9,11 +9,13 @@ import {
 import { AgentObservationBuilder } from "../../src/server/agents/AgentObservationBuilder";
 import {
   createAgentSpatialSnapshot,
+  resetSpatialObservationEmissionCount,
   SPATIAL_MINIMAP_HEIGHT,
   SPATIAL_MINIMAP_WIDTH,
   SPATIAL_NOTE_PREFIX,
   SPATIAL_REGION_RUN_BUDGET,
   SPATIAL_REGION_TILE_BUDGET,
+  spatialObservationEmissionCount,
 } from "../../src/server/agents/AgentSpatialObservation";
 import type {
   AgentObservation,
@@ -111,6 +113,36 @@ describe("spatial observation flags", () => {
   afterEach(() => {
     delete process.env[SPATIAL_FLAG];
     delete process.env[MINIMAP_FLAG];
+  });
+
+  it("counts only observations that actually carried a spatial block", async () => {
+    const game = await shapedGame();
+    resetSpatialObservationEmissionCount();
+
+    observe(game);
+    expect(spatialObservationEmissionCount()).toBe(0);
+
+    process.env[SPATIAL_FLAG] = "1";
+    observe(game);
+    observe(game);
+    expect(spatialObservationEmissionCount()).toBe(2);
+
+    // A seat with no land emits nothing even with the flag on, so the count
+    // tracks real emission rather than the flag reading.
+    const landless = new PlayerInfo(
+      "Landless",
+      PlayerType.Human,
+      "CLNT_NONE",
+      "P_NONE",
+    );
+    game.addPlayer(landless);
+    const landlessObservation = observe(game, landless);
+    // Assert the seat was actually resolved before asserting it emitted
+    // nothing, so this cannot pass because the player lookup silently failed.
+    expect(landlessObservation.ownState).not.toBeNull();
+    expect(landlessObservation.ownState?.tilesOwned).toBe(0);
+    expect(landlessObservation.spatial).toBeUndefined();
+    expect(spatialObservationEmissionCount()).toBe(2);
   });
 
   it("keeps serialized observations byte-identical when the parent flag is off", async () => {

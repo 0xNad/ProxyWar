@@ -31,6 +31,7 @@ interface ArmSummary {
     sourceTreeState: "clean" | "dirty" | "unavailable";
     spatialObservationEnabled: boolean;
     spatialMinimapEnabled: boolean;
+    spatialObservationsEmitted?: number;
   };
 }
 
@@ -72,6 +73,13 @@ const attributionChecks = {
   equivalentConfig:
     JSON.stringify(comparableConfig(offSummary)) ===
     JSON.stringify(comparableConfig(onSummary)),
+  // Behavioral equality alone cannot separate "spatial ran and changed no
+  // decision" from "spatial silently produced nothing". Require the ON arm to
+  // have actually emitted observations, and the OFF arm to have emitted none.
+  onArmEmittedSpatial:
+    (onSummary.attribution.spatialObservationsEmitted ?? 0) > 0,
+  offArmEmittedNoSpatial:
+    offSummary.attribution.spatialObservationsEmitted === 0,
 };
 
 const runResults: Array<{

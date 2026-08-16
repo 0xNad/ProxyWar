@@ -53,6 +53,7 @@ import {
   PlannerExecutorAgentBrain,
   RuleAgentPlanner,
 } from "../server/agents/AgentPlannerExecutor";
+import { spatialObservationEmissionCount } from "../server/agents/AgentSpatialObservation";
 import {
   AgentSpectatorSnapshot,
   buildAgentSpectatorReplay,
@@ -332,6 +333,10 @@ function benchmarkAttribution() {
     sourceTreeState,
     spatialObservationEnabled: spatialObservationEnabled(),
     spatialMinimapEnabled: spatialMinimapEnabled(),
+    // Observed emission, not the flag reading. An OFF/ON behavioral-equality
+    // check passes just as green when the ON arm produced nothing at all, so
+    // the A/B gate asserts this separately.
+    spatialObservationsEmitted: spatialObservationEmissionCount(),
   };
 }
 

@@ -1,4 +1,4 @@
-import { Game, Player, UnitType } from "../../core/game/Game";
+import { Game, Player, Unit, UnitType } from "../../core/game/Game";
 import {
   spatialMinimapEnabled,
   spatialObservationEnabled,
@@ -20,6 +20,22 @@ export const SPATIAL_NOTE_PREFIX = "Spatial ";
 
 const MINIMAP_GLYPHS =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@#";
+
+/**
+ * Count of observations that actually carried a spatial block. Read-side
+ * telemetry only — nothing branches on it. It exists so an OFF/ON comparison
+ * can prove the ON arm emitted data instead of silently emitting nothing,
+ * which an equality-only check cannot distinguish from success.
+ */
+let spatialExtensionsEmitted = 0;
+
+export function spatialObservationEmissionCount(): number {
+  return spatialExtensionsEmitted;
+}
+
+export function resetSpatialObservationEmissionCount(): void {
+  spatialExtensionsEmitted = 0;
+}
 
 interface SpatialCentroid {
   x: number;
@@ -209,13 +225,12 @@ export function buildSpatialObservationExtension(
           sharedTiles,
           ownGeometry.coastalBorderTiles,
         ),
-        defensePostsCovering: defensePosts.filter((post) =>
-          [...sharedTiles].some(
-            (tile) =>
-              input.gameState.euclideanDistSquared(post.tile(), tile) <=
-              defenseRangeSquared,
-          ),
-        ).length,
+        defensePostsCovering: countPostsCovering(
+          input.gameState,
+          defensePosts,
+          sharedTiles,
+          defenseRangeSquared,
+        ),
         // OpenFront attacks are pooled by player. This is observer-relative
         // live combat, not a claim about a finer sub-segment of the front.
         underAttackHere: visible.incomingAttack,
@@ -268,6 +283,7 @@ export function buildSpatialObservationExtension(
         }
       : {}),
   };
+  spatialExtensionsEmitted += 1;
   return {
     spatial,
     notes: spatialBriefing(input.player, input.visiblePlayers),
@@ -589,6 +605,31 @@ function relationBetweenCentroids(
     "northeast",
   ];
   return { bearing: directions[sector], distanceClass };
+}
+
+/**
+ * Count posts within range of at least one shared-border tile. Iterates the
+ * tile set directly and hoists the post tile: the previous form rebuilt an
+ * array copy of the whole shared border once per post, which is the term that
+ * grows with both late-game build-out and front length.
+ */
+function countPostsCovering(
+  gameState: Game,
+  posts: readonly Unit[],
+  sharedTiles: ReadonlySet<number>,
+  rangeSquared: number,
+): number {
+  let covering = 0;
+  for (const post of posts) {
+    const postTile = post.tile();
+    for (const tile of sharedTiles) {
+      if (gameState.euclideanDistSquared(postTile, tile) <= rangeSquared) {
+        covering += 1;
+        break;
+      }
+    }
+  }
+  return covering;
 }
 
 function sharedBorderTerrain(
