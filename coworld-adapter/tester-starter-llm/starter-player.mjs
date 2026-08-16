@@ -193,7 +193,19 @@ function wouldBreakPromise(action, constraints) {
 // omits this field remains compatible but ignores the opportunity.
 // Deterministic, bounded posture: accept only promises this minimal policy can
 // keep automatically (non-aggression / trade security), reject unsupported
-// commitments, propose only a non-aggression pact, and withdraw last.
+// commitments, and propose only a non-aggression pact.
+//
+// Do NOT give this chain a `?? deal_withdraw` tail. An offer stays answerable
+// for 4 decision steps, but a proposer may only open one every 3, and while a
+// pair already holds an open deal the manager offers no deal_propose for it —
+// so on the step right after proposing there is often nothing left to match
+// except deal_withdraw. A terminal withdraw therefore retracts the offer one
+// step after making it, before the recipient has answered even once. Measured
+// across 96 hosted league matches: 2,870 of 5,256 proposals (54.6%) were
+// withdrawn, 96.4% of them at exactly +1 step, cutting the recipient's four
+// chances to answer down to one. Withdrawing is de-escalation and needs a
+// reason, not an idle slot; returning null is correct, and the protocol treats
+// `selectedDealActionId` as optional.
 const DEAL_ACTION_KINDS = [
   "deal_accept",
   "deal_reject",
@@ -221,7 +233,6 @@ function chooseDealAction(actions) {
         candidate.kind === "deal_propose" &&
         candidate.metadata?.template === "non_aggression_pact",
     ) ??
-    actions.find((candidate) => candidate.kind === "deal_withdraw") ??
     null
   );
 }

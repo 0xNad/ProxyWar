@@ -104,8 +104,18 @@ function chooseAction(actions, obs) {
 // PROXYWAR_TUNE_STRUCTURED_DEALS is off by default), so a starter that never
 // customizes this still behaves exactly as before. Deterministic, bounded
 // priority: answer an open offer before making one, and prefer a definite
-// answer over silence — accept, then reject, then propose one of our own,
-// and only withdraw a stale offer of our own last.
+// answer over silence — accept, then reject, then propose one of our own.
+//
+// deal_withdraw is deliberately NOT selectable below. There is no staleness
+// signal in `actions`, so a trailing withdraw fires on fresh offers: an offer
+// stays answerable for 4 decision steps, but a proposer may only open one
+// every 3, and while a pair already holds an open deal the manager offers no
+// deal_propose for it — so the step right after proposing often has nothing
+// left to match except withdraw. Measured across 96 hosted league matches:
+// 2,870 of 5,256 proposals (54.6%) were withdrawn, 96.4% at exactly +1 step,
+// cutting the recipient's four chances to answer down to one. Withdrawing is
+// de-escalation and needs a reason, not an idle slot; `selectedDealActionId`
+// is optional, so selecting nothing is correct.
 const DEAL_ACTION_KINDS = [
   "deal_accept",
   "deal_reject",
@@ -113,12 +123,19 @@ const DEAL_ACTION_KINDS = [
   "deal_withdraw",
 ];
 
+// Kinds this policy will actually pick, in priority order. Keep
+// DEAL_ACTION_KINDS complete above — isDealActionKind() uses it to keep every
+// deal meta-action out of the PRIMARY action slot.
+const DEAL_SELECTION_KINDS = DEAL_ACTION_KINDS.filter(
+  (kind) => kind !== "deal_withdraw",
+);
+
 function isDealActionKind(kind) {
   return DEAL_ACTION_KINDS.includes(kind);
 }
 
 function chooseDealAction(actions) {
-  for (const kind of DEAL_ACTION_KINDS) {
+  for (const kind of DEAL_SELECTION_KINDS) {
     const action = actions.find((candidate) => candidate.kind === kind);
     if (action) {
       return action;
