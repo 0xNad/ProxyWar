@@ -5,6 +5,7 @@ import {
   AgentStrategyProfile,
   LegalAction,
 } from "./AgentTypes";
+import { MAX_SPAWN_PREFERENCE_ACTION_IDS } from "./AgentWireProtocol";
 
 export class RuleAgentBrain implements AgentBrain {
   readonly brainType = "rule";
@@ -12,6 +13,22 @@ export class RuleAgentBrain implements AgentBrain {
   constructor(private readonly profile: AgentStrategyProfile) {}
 
   decide(input: AgentBrainInput): AgentDecision {
+    if (input.observation.phase === "spawn") {
+      const rankedSpawns = input.legalActions.filter(
+        (action) => action.kind === "spawn",
+      );
+      if (rankedSpawns.length > 0) {
+        const authoredRanking = rankedSpawns.slice(
+          0,
+          MAX_SPAWN_PREFERENCE_ACTION_IDS,
+        );
+        return {
+          actionID: authoredRanking[0].id,
+          spawnPreferenceActionIDs: authoredRanking.map((action) => action.id),
+          reason: `${this.profile} rule brain ranked the offered spawn slots`,
+        };
+      }
+    }
     const selected = this.selectAction(input);
     return {
       actionID: selected.id,
@@ -86,9 +103,7 @@ export class RuleAgentBrain implements AgentBrain {
     return hold ?? legalActions[0];
   }
 
-  private preferredStrategicAction(
-    input: AgentBrainInput,
-  ): LegalAction | null {
+  private preferredStrategicAction(input: AgentBrainInput): LegalAction | null {
     const { legalActions } = input;
     switch (input.observation.strategic.priority) {
       case "expand":
@@ -106,7 +121,8 @@ export class RuleAgentBrain implements AgentBrain {
               action.kind === "attack" && action.metadata?.expansion === true,
           ) ??
           legalActions.find(
-            (action) => action.kind === "boat" && action.metadata?.targetID === null,
+            (action) =>
+              action.kind === "boat" && action.metadata?.targetID === null,
           ) ??
           null
         );
@@ -179,9 +195,7 @@ export class RuleAgentBrain implements AgentBrain {
     }
   }
 
-  private preferredObjectiveAction(
-    input: AgentBrainInput,
-  ): LegalAction | null {
+  private preferredObjectiveAction(input: AgentBrainInput): LegalAction | null {
     const { legalActions } = input;
     const objective = input.observation.objective;
     if (objective === null || objective.status !== "active") {
@@ -189,9 +203,9 @@ export class RuleAgentBrain implements AgentBrain {
     }
 
     switch (objective.kind) {
-      // No LegalAction ever carries kind:"spawn" anymore - spawn placement
-      // is a deterministic fairness assignment (AgentSpawnAssignment.ts),
-      // never a brain choice. Falls through to the rest of selectAction.
+      // Spawn ballots are handled at decide() before ordinary objective/action
+      // selection. This branch remains defensive for retained observations or
+      // a malformed spawn-phase menu with no offered spawn LegalAction.
       case "choose_spawn":
         return null;
       case "expand_territory":
@@ -205,7 +219,8 @@ export class RuleAgentBrain implements AgentBrain {
               action.kind === "attack" && action.metadata?.expansion === true,
           ) ??
           legalActions.find(
-            (action) => action.kind === "boat" && action.metadata?.targetID === null,
+            (action) =>
+              action.kind === "boat" && action.metadata?.targetID === null,
           ) ??
           null
         );
@@ -298,7 +313,8 @@ export class RuleAgentBrain implements AgentBrain {
     legalActions: LegalAction[],
   ): LegalAction | null {
     const defensiveBuilds = legalActions.filter(
-      (action) => action.kind === "build" && action.metadata?.role === "defensive",
+      (action) =>
+        action.kind === "build" && action.metadata?.role === "defensive",
     );
     if (defensiveBuilds.length === 0) {
       return null;
@@ -309,8 +325,7 @@ export class RuleAgentBrain implements AgentBrain {
         score: defenseBuildScore(action),
       }))
       .sort(
-        (a, b) =>
-          b.score - a.score || a.action.id.localeCompare(b.action.id),
+        (a, b) => b.score - a.score || a.action.id.localeCompare(b.action.id),
       )[0];
     return best.score >= 10 ? best.action : null;
   }
@@ -349,7 +364,10 @@ function defenseBuildScore(action: LegalAction): number {
 }
 
 function isDefensePost(action: LegalAction): boolean {
-  return action.metadata?.unit === "Defense Post" || action.metadata?.unit === "DefensePost";
+  return (
+    action.metadata?.unit === "Defense Post" ||
+    action.metadata?.unit === "DefensePost"
+  );
 }
 
 function hasPlacementMetadata(action: LegalAction): boolean {

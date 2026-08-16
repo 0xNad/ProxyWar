@@ -109,6 +109,31 @@ const legalActions: LegalAction[] = [
   },
 ];
 
+const spawnObservation: AgentObservation = {
+  ...observation,
+  phase: "spawn",
+  mapInfo: { name: "Pangaea", width: 3000, height: 2000 },
+};
+
+const spawnLegalActions: LegalAction[] = [
+  {
+    id: "spawn:10",
+    kind: "spawn",
+    label: "Spawn at tile 10",
+    intent: { type: "spawn", tile: 10 },
+    risk: { level: "low", score: 0.2 },
+    metadata: { tile: 10, safetyScore: 0.8, opportunityScore: 0.7 },
+  },
+  {
+    id: "spawn:20",
+    kind: "spawn",
+    label: "Spawn at tile 20",
+    intent: { type: "spawn", tile: 20 },
+    risk: { level: "medium", score: 0.4 },
+    metadata: { tile: 20, safetyScore: 0.6, opportunityScore: 0.9 },
+  },
+];
+
 describe("ExternalHttpAgentBrain", () => {
   it("posts observation and public legal actions, then accepts a selected LegalAction id", async () => {
     const captured: { requestBody?: Record<string, unknown> } = {};
@@ -146,9 +171,7 @@ describe("ExternalHttpAgentBrain", () => {
       fallbackUsed: false,
       confidence: 0.84,
     });
-    expect(captured.requestBody?.protocolVersion).toBe(
-      "proxywar-agent-v1",
-    );
+    expect(captured.requestBody?.protocolVersion).toBe("proxywar-agent-v1");
     expect(
       (captured.requestBody?.legalActions as Array<Record<string, unknown>>)[0]
         .intent,
@@ -210,6 +233,103 @@ describe("ExternalHttpAgentBrain", () => {
 
     expect(decision.actionID).toBe("expand:terra-nullius:10");
     expect(decision.actionIDs).toEqual(["expand:terra-nullius:10", "hold"]);
+  });
+
+  it("maps a spawn-only ranking without treating it as an executable batch", async () => {
+    const brain = new ExternalHttpAgentBrain({
+      endpointUrl: "https://1.1.1.1/decide",
+      profile: "aggressive",
+      fetchFn: async () =>
+        new Response(
+          JSON.stringify({
+            selectedLegalActionId: "spawn:20",
+            spawnPreferenceLegalActionIds: ["spawn:20", "spawn:10"],
+            reason: "Prefer the stronger opportunity score.",
+          }),
+          { status: 200 },
+        ),
+    });
+
+    const decision = await brain.decide({
+      observation: spawnObservation,
+      legalActions: spawnLegalActions,
+    });
+
+    expect(decision.actionID).toBe("spawn:20");
+    expect(decision.spawnPreferenceActionIDs).toEqual(["spawn:20", "spawn:10"]);
+    expect(decision.actionIDs).toBeUndefined();
+  });
+
+  it("maps the spawn ranking through the relay transport for parity", async () => {
+    const brain = new ExternalRelayAgentBrain({
+      relayBaseUrl: "https://relay.example",
+      sessionID: "sess-spawn",
+      profile: "aggressive",
+      fetchFn: async () =>
+        new Response(
+          JSON.stringify({
+            responseText: JSON.stringify({
+              selectedLegalActionId: "spawn:10",
+              spawnPreferenceLegalActionIds: ["spawn:10", "spawn:20"],
+              reason: "Prefer safety.",
+            }),
+          }),
+          { status: 200 },
+        ),
+    });
+
+    const decision = await brain.decide({
+      observation: spawnObservation,
+      legalActions: spawnLegalActions,
+    });
+
+    expect(decision.spawnPreferenceActionIDs).toEqual(["spawn:10", "spawn:20"]);
+    expect(decision.actionIDs).toBeUndefined();
+  });
+
+  it("rejects executable batching alongside a spawn ballot through HTTP and relay", async () => {
+    const conflictingReply = JSON.stringify({
+      selectedLegalActionId: "spawn:20",
+      selectedLegalActionIds: ["spawn:20", "spawn:10"],
+      spawnPreferenceLegalActionIds: ["spawn:20", "spawn:10"],
+      reason: "This incorrectly treats spawn preferences as executable moves.",
+    });
+    const http = new ExternalHttpAgentBrain({
+      endpointUrl: "https://1.1.1.1/decide",
+      profile: "aggressive",
+      fetchFn: async () => new Response(conflictingReply, { status: 200 }),
+    });
+    const relay = new ExternalRelayAgentBrain({
+      relayBaseUrl: "https://relay.example",
+      sessionID: "sess-spawn-conflict",
+      profile: "aggressive",
+      fetchFn: async () =>
+        new Response(JSON.stringify({ responseText: conflictingReply }), {
+          status: 200,
+        }),
+    });
+
+    const decisions = await Promise.all(
+      [http, relay].map((brain) =>
+        brain.decide({
+          observation: spawnObservation,
+          legalActions: spawnLegalActions,
+        }),
+      ),
+    );
+
+    for (const decision of decisions) {
+      expect(decision.actionID).toBe("spawn:10");
+      expect(decision.actionIDs).toBeUndefined();
+      expect(decision.spawnPreferenceActionIDs).toEqual([
+        "spawn:10",
+        "spawn:20",
+      ]);
+      expect(decision.metadata).toMatchObject({ fallbackUsed: true });
+      expect(decision.metadata?.externalFailureReason).toContain(
+        "selectedLegalActionIds is not allowed on an all-spawn menu",
+      );
+    }
   });
 
   it("falls back safely when the endpoint returns an unknown action id, recording no stated reason", async () => {
@@ -332,20 +452,11 @@ describe("ExternalHttpAgentBrain", () => {
   });
 });
 
-describe("buildExternalAgentRequestPayload map identity and spawn-protocol absence", () => {
-  const spawnPhaseObservation: AgentObservation = {
-    ...observation,
-    phase: "spawn",
-    mapInfo: { name: "Pangaea", width: 3000, height: 2000 },
-  };
-  const spawnPhaseLegalActions: LegalAction[] = [
-    { id: "hold", kind: "hold", label: "Hold", intent: null, risk: { level: "none", score: 0 } },
-  ];
-
+describe("buildExternalAgentRequestPayload map identity and spawn protocol", () => {
   it("echoes bounded map identity/dimensions whenever the observation carries it", () => {
     const spawnPayload = buildExternalAgentRequestPayload({
-      observation: spawnPhaseObservation,
-      legalActions: spawnPhaseLegalActions,
+      observation: spawnObservation,
+      legalActions: spawnLegalActions,
     });
     expect(spawnPayload.match.map).toEqual({
       name: "Pangaea",
@@ -360,18 +471,30 @@ describe("buildExternalAgentRequestPayload map identity and spawn-protocol absen
     expect(activePayload.match.map).toBeNull();
   });
 
-  it("never exposes an off-menu spawn request protocol - spawn is a deterministic assignment, never a player/brain choice", () => {
+  it("advertises a bounded ranked ballot only for an all-spawn menu and never exposes raw coordinates", () => {
     const spawnPayload = buildExternalAgentRequestPayload({
-      observation: spawnPhaseObservation,
-      legalActions: spawnPhaseLegalActions,
+      observation: spawnObservation,
+      legalActions: spawnLegalActions,
     });
     expect(spawnPayload.decisionSupport).not.toHaveProperty("spawnFreeform");
-    expect(JSON.stringify(spawnPayload)).not.toContain("spawn:<tile>");
+    expect(spawnPayload.responseContract).toMatchObject({
+      spawnPreferenceLegalActionIds: expect.stringContaining("exact offered"),
+      maxSpawnPreferences: 16,
+    });
+    expect(JSON.stringify(spawnPayload.responseContract)).not.toContain(
+      "coordinate",
+    );
 
     const activePayload = buildExternalAgentRequestPayload({
       observation,
       legalActions,
     });
     expect(activePayload.decisionSupport).not.toHaveProperty("spawnFreeform");
+    expect(activePayload.responseContract).not.toHaveProperty(
+      "spawnPreferenceLegalActionIds",
+    );
+    expect(activePayload.responseContract).not.toHaveProperty(
+      "maxSpawnPreferences",
+    );
   });
 });

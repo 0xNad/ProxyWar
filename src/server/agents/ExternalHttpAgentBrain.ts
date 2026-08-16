@@ -11,6 +11,7 @@ import {
   AgentStrategyProfile,
   LegalAction,
 } from "./AgentTypes";
+import { MAX_SPAWN_PREFERENCE_ACTION_IDS } from "./AgentWireProtocol";
 import {
   fetchExternalAgentWithPolicy,
   normalizeExternalAgentEndpointUrl,
@@ -65,6 +66,9 @@ export interface ExternalAgentRequest {
   };
   responseContract: {
     selectedLegalActionId: "must exactly match one offered legalActions[].id";
+    /** Spawn-only ranked ballot; advertised only on an all-spawn menu. */
+    spawnPreferenceLegalActionIds?: "optional ordered array of exact offered spawn legalActions[].id values; selectedLegalActionId must be first";
+    maxSpawnPreferences?: number;
     reason: "short human-readable string";
     confidence: "optional number from 0 to 1";
     /**
@@ -146,6 +150,11 @@ export class ExternalHttpAgentBrain implements AgentBrain {
       ...(parsed.selectedLegalActionIds !== undefined
         ? { actionIDs: parsed.selectedLegalActionIds }
         : {}),
+      ...(parsed.spawnPreferenceLegalActionIds !== undefined
+        ? {
+            spawnPreferenceActionIDs: parsed.spawnPreferenceLegalActionIds,
+          }
+        : {}),
       // Optional diplomacy slot; absent unless the endpoint sent one, so an
       // agent that never uses it is byte-for-byte unaffected. The runner's
       // validator, not this brain, decides whether it is a legal deal id.
@@ -160,7 +169,9 @@ export class ExternalHttpAgentBrain implements AgentBrain {
         parseSuccess: true,
         fallbackUsed: false,
         rawProviderOutputPresent: raw.trim().length > 0,
-        ...(parsed.confidence !== undefined ? { confidence: parsed.confidence } : {}),
+        ...(parsed.confidence !== undefined
+          ? { confidence: parsed.confidence }
+          : {}),
         externalRawOutput: truncate(raw, 1_000),
       },
     };
@@ -312,10 +323,19 @@ export function buildExternalAgentRequestPayload(
       risk: action.risk,
       metadata: action.metadata,
     })),
-    decisionSupport: buildExternalAgentDecisionSupport(observation, legalActions),
+    decisionSupport: buildExternalAgentDecisionSupport(
+      observation,
+      legalActions,
+    ),
     responseContract: {
-      selectedLegalActionId:
-        "must exactly match one offered legalActions[].id",
+      selectedLegalActionId: "must exactly match one offered legalActions[].id",
+      ...(isSpawnPreferenceMenu(legalActions)
+        ? {
+            spawnPreferenceLegalActionIds:
+              "optional ordered array of exact offered spawn legalActions[].id values; selectedLegalActionId must be first" as const,
+            maxSpawnPreferences: MAX_SPAWN_PREFERENCE_ACTION_IDS,
+          }
+        : {}),
       reason: "short human-readable string",
       confidence: "optional number from 0 to 1",
       // Advertised only while the structured-deal flag is on, so the request
@@ -328,6 +348,13 @@ export function buildExternalAgentRequestPayload(
         : {}),
     },
   };
+}
+
+function isSpawnPreferenceMenu(legalActions: LegalAction[]): boolean {
+  return (
+    legalActions.length > 0 &&
+    legalActions.every((action) => action.kind === "spawn")
+  );
 }
 
 export function buildExternalAgentDecisionSupport(

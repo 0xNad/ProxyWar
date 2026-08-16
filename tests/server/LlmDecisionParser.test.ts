@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { LlmDecisionParser } from "../../src/server/agents/LlmDecisionParser";
-import { MAX_WIRE_ACTIONS_PER_DECISION } from "../../src/server/agents/AgentWireProtocol";
 import { LegalAction } from "../../src/server/agents/AgentTypes";
+import {
+  MAX_SPAWN_PREFERENCE_ACTION_IDS,
+  MAX_WIRE_ACTIONS_PER_DECISION,
+} from "../../src/server/agents/AgentWireProtocol";
+import { LlmDecisionParser } from "../../src/server/agents/LlmDecisionParser";
 
 function action(id: string, kind: LegalAction["kind"] = "attack"): LegalAction {
   return {
@@ -22,6 +25,11 @@ const MENU: LegalAction[] = [
   action("attack:six"),
   action("hold", "hold"),
 ];
+
+const SPAWN_MENU: LegalAction[] = Array.from(
+  { length: MAX_SPAWN_PREFERENCE_ACTION_IDS + 1 },
+  (_, index) => action(`spawn:${index + 1}`, "spawn"),
+);
 
 function reply(fields: Record<string, unknown>): string {
   return JSON.stringify({ reason: "test reason", ...fields });
@@ -299,5 +307,137 @@ describe("LlmDecisionParser selectedLegalActionIds", () => {
       if (!result.ok) return;
       expect(result.selectedLegalActionIds).toBeUndefined();
     });
+  });
+});
+
+describe.each([
+  ["strict", new LlmDecisionParser()],
+  ["robust", new LlmDecisionParser({ strict: false })],
+] as const)("LlmDecisionParser spawn preferences (%s)", (_mode, parser) => {
+  it("keeps a legacy scalar-only spawn reply unchanged", () => {
+    const result = parser.parse(
+      reply({ selectedLegalActionId: "spawn:1" }),
+      SPAWN_MENU,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.spawnPreferenceLegalActionIds).toBeUndefined();
+  });
+
+  it("accepts an exact offered ranking and preserves a one-item authored ballot", () => {
+    const ranked = parser.parse(
+      reply({
+        selectedLegalActionId: "spawn:2",
+        spawnPreferenceLegalActionIds: ["spawn:2", "spawn:1", "spawn:3"],
+      }),
+      SPAWN_MENU,
+    );
+    expect(ranked.ok).toBe(true);
+    if (!ranked.ok) return;
+    expect(ranked.spawnPreferenceLegalActionIds).toEqual([
+      "spawn:2",
+      "spawn:1",
+      "spawn:3",
+    ]);
+
+    const one = parser.parse(
+      reply({
+        selectedLegalActionId: "spawn:4",
+        spawnPreferenceLegalActionIds: ["spawn:4"],
+      }),
+      SPAWN_MENU,
+    );
+    expect(one.ok).toBe(true);
+    if (!one.ok) return;
+    expect(one.spawnPreferenceLegalActionIds).toEqual(["spawn:4"]);
+  });
+
+  it.each([
+    ["without a ballot", undefined],
+    ["alongside a ballot", ["spawn:1", "spawn:2"]],
+  ])(
+    "rejects the executable batch field on an all-spawn menu %s",
+    (_case, spawnPreferenceLegalActionIds) => {
+      const result = parser.parse(
+        reply({
+          selectedLegalActionId: "spawn:1",
+          selectedLegalActionIds: ["spawn:1", "spawn:2"],
+          ...(spawnPreferenceLegalActionIds === undefined
+            ? {}
+            : { spawnPreferenceLegalActionIds }),
+        }),
+        SPAWN_MENU,
+      );
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.reason).toContain(
+        "selectedLegalActionIds is not allowed on an all-spawn menu",
+      );
+    },
+  );
+
+  it("rejects the field outside an all-spawn menu", () => {
+    const result = parser.parse(
+      reply({
+        selectedLegalActionId: "attack:one",
+        spawnPreferenceLegalActionIds: ["attack:one"],
+      }),
+      MENU,
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toContain(
+      "only when every offered legal action is a spawn",
+    );
+  });
+
+  it.each([
+    [
+      "does not start with the scalar",
+      ["spawn:2", "spawn:1"],
+      "selectedLegalActionId must be the first",
+    ],
+    [
+      "contains a duplicate",
+      ["spawn:1", "spawn:2", "spawn:2"],
+      "cannot contain duplicate",
+    ],
+    [
+      "contains an off-menu id",
+      ["spawn:1", "spawn:999"],
+      "unknown spawnPreferenceLegalActionIds entry: spawn:999",
+    ],
+    [
+      "contains a whitespace-normalized rather than exact id",
+      ["spawn:1", " spawn:2 "],
+      "unknown spawnPreferenceLegalActionIds entry:  spawn:2 ",
+    ],
+    ["contains a non-string", ["spawn:1", 2], "array of strings"],
+  ])("rejects a ranking that %s", (_case, preferences, expected) => {
+    const result = parser.parse(
+      reply({
+        selectedLegalActionId: "spawn:1",
+        spawnPreferenceLegalActionIds: preferences,
+      }),
+      SPAWN_MENU,
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toContain(expected);
+  });
+
+  it("rejects overflow instead of truncating or deduplicating it", () => {
+    const result = parser.parse(
+      reply({
+        selectedLegalActionId: "spawn:1",
+        spawnPreferenceLegalActionIds: SPAWN_MENU.map((action) => action.id),
+      }),
+      SPAWN_MENU,
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toContain(
+      `exceeds ${MAX_SPAWN_PREFERENCE_ACTION_IDS} preferences`,
+    );
   });
 });

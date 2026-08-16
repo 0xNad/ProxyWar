@@ -5,27 +5,24 @@ import { fileURLToPath } from "url";
 import { describe, expect, it, vi } from "vitest";
 import { Logger } from "winston";
 
-vi.mock(
-  "../../src/core/configuration/ConfigLoader",
-  async (importOriginal) => {
-    const actual =
-      await importOriginal<
-        typeof import("../../src/core/configuration/ConfigLoader")
-      >();
-    return {
-      ...actual,
-      getServerConfigFromServer: () => ({
-        otelEnabled: () => false,
-        otelAuthHeader: () => "",
-        otelEndpoint: () => "",
-        env: () => 0,
-      }),
-      getServerConfig: () => ({
-        otelEnabled: () => false,
-      }),
-    };
-  },
-);
+vi.mock("../../src/core/configuration/ConfigLoader", async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import("../../src/core/configuration/ConfigLoader")
+    >();
+  return {
+    ...actual,
+    getServerConfigFromServer: () => ({
+      otelEnabled: () => false,
+      otelAuthHeader: () => "",
+      otelEndpoint: () => "",
+      env: () => 0,
+    }),
+    getServerConfig: () => ({
+      otelEnabled: () => false,
+    }),
+  };
+});
 
 import { GameEnv, ServerConfig } from "../../src/core/configuration/Config";
 import { Executor } from "../../src/core/execution/ExecutionManager";
@@ -63,20 +60,22 @@ import {
   PlannerExecutorAgentBrain,
 } from "../../src/server/agents/AgentPlannerExecutor";
 import { runAgentStepLockedLeague } from "../../src/server/agents/AgentStepLockedLeague";
+import {
+  AgentBrain,
+  AgentBrainInput,
+  AgentDecision,
+  AgentDecisionRecord,
+  LegalAction,
+} from "../../src/server/agents/AgentTypes";
 import { ExternalHttpAgentBrain } from "../../src/server/agents/ExternalHttpAgentBrain";
 import { ExternalRelayAgentBrain } from "../../src/server/agents/ExternalRelayAgentBrain";
-import { LlmAgentBrain } from "../../src/server/agents/LlmAgentBrain";
-import { LlmProvider } from "../../src/server/agents/LlmProvider";
 import {
   buildSpawnLegalAction,
   LegalActionBuilder,
 } from "../../src/server/agents/LegalActionBuilder";
+import { LlmAgentBrain } from "../../src/server/agents/LlmAgentBrain";
+import { LlmProvider } from "../../src/server/agents/LlmProvider";
 import { MockLlmProvider } from "../../src/server/agents/MockLlmProvider";
-import {
-  AgentBrain,
-  AgentDecision,
-  LegalAction,
-} from "../../src/server/agents/AgentTypes";
 import { GameServer } from "../../src/server/GameServer";
 import { setup } from "../util/Setup";
 
@@ -179,7 +178,20 @@ describe("AgentLeagueMatchRunner", () => {
       ]);
       expect(records.every((record) => record.result.accepted)).toBe(true);
       expect(
-        records.every((record) => (record.reason?.length ?? 0) > 0),
+        records.every(
+          (record) =>
+            (record.spawnSelectionEvidence?.submittedReason?.length ?? 0) > 0,
+        ),
+      ).toBe(true);
+      expect(
+        records.every((record) => {
+          const evidence = record.spawnSelectionEvidence;
+          const keptTopChoice =
+            evidence?.submittedBallotActionIDs[0] === record.chosenActionID;
+          return keptTopChoice
+            ? record.reason !== null
+            : record.reason === null;
+        }),
       ).toBe(true);
       expect(records.every((record) => record.legalActionIDs.length > 0)).toBe(
         true,
@@ -206,17 +218,19 @@ describe("AgentLeagueMatchRunner", () => {
     }
   });
 
-  it("runs opening decisions with zero brain calls (runOpeningTurn never asks a brain to choose spawn)", async () => {
+  it("collects one opening ballot per brain and defaults invalid scalar choices report-independently", async () => {
     const log = makeLogger();
     const candidateGame = await setup("big_plains", { nations: "disabled" });
     const spawnCandidates = buildSpawnCandidates(candidateGame.map(), {
       maxCandidates: 500,
     });
     const specs = createDefaultAgentSpecs(4);
-    const decideSpy = vi.fn(async () => ({
-      actionID: "hold",
-      reason: "the brain must not be consulted for spawn via runOpeningTurn",
-    }));
+    const decideSpy = vi.fn(
+      async (_input: { legalActions: LegalAction[] }) => ({
+        actionID: "hold",
+        reason: "invalid non-spawn scalar",
+      }),
+    );
     const participants = createAgentParticipants(specs, log, {
       brainFactory: () => ({ brainType: "mock-llm", decide: decideSpy }),
     });
@@ -239,7 +253,7 @@ describe("AgentLeagueMatchRunner", () => {
       match.startGame();
       const records = await match.runOpeningTurn();
 
-      expect(decideSpy).not.toHaveBeenCalled();
+      expect(decideSpy).toHaveBeenCalledTimes(4);
       expect(records).toHaveLength(4);
       expect(records.every((record) => record.result.accepted)).toBe(true);
       expect(
@@ -247,6 +261,16 @@ describe("AgentLeagueMatchRunner", () => {
           (record) => record.decisionMetadata?.spawnAssignment === true,
         ),
       ).toBe(true);
+      expect(
+        records.every(
+          (record) =>
+            record.spawnSelectionEvidence?.ballotInvalidReason ===
+              "off-menu-preference" &&
+            record.spawnSelectionEvidence.defaultReason === "invalid-ballot" &&
+            record.spawnSelectionEvidence.stageFallbackUsed,
+        ),
+      ).toBe(true);
+      expect(records.every((record) => record.reason === null)).toBe(true);
       expect(records.every((record) => record.intent?.type === "spawn")).toBe(
         true,
       );
@@ -254,6 +278,131 @@ describe("AgentLeagueMatchRunner", () => {
     } finally {
       await game.end({ archive: false });
     }
+  });
+
+  it("dispatches all sealed spawn ballots before awaiting and allocates independently of arrival/roster order", async () => {
+    const log = makeLogger();
+    const candidateGame = await setup("big_plains", { nations: "disabled" });
+    const spawnCandidates = buildSpawnCandidates(candidateGame.map(), {
+      maxCandidates: 500,
+    });
+    const specs: AgentSpec[] = [
+      { username: "Zulu", profile: "aggressive" },
+      { username: "Alpha", profile: "defensive" },
+    ];
+    async function runWithCompletionOrder(
+      completionOrder: readonly string[],
+      runID: string,
+    ): Promise<AgentDecisionRecord[]> {
+      const pending = new Map<
+        string,
+        {
+          input: AgentBrainInput;
+          resolve: (decision: AgentDecision) => void;
+        }
+      >();
+      const participants = createAgentParticipants(specs, log, {
+        brainFactory: (spec) => ({
+          brainType: "mock-llm",
+          decide: (input: AgentBrainInput) =>
+            new Promise<AgentDecision>((resolve) => {
+              pending.set(spec.username, { input, resolve });
+            }),
+        }),
+      });
+      const game = new GameServer(
+        runID,
+        log,
+        Date.now(),
+        serverConfig,
+        gameConfig,
+      );
+      const match = new AgentLeagueMatchRunner({
+        game,
+        participants,
+        spawnCandidates,
+        log,
+      });
+
+      try {
+        match.attachAgents();
+        match.startGame();
+        const recordsPromise = match.runOpeningTurn(0, {
+          maxDecisionMs: 1_000,
+        });
+
+        // runOpeningTurn reaches its first await only after both decide calls.
+        expect([...pending.keys()]).toEqual(["Zulu", "Alpha"]);
+        const zuluInput = pending.get("Zulu")!.input;
+        const alphaInput = pending.get("Alpha")!.input;
+        expect(alphaInput.legalActions).toBe(zuluInput.legalActions);
+        const ranked = alphaInput.legalActions
+          .map((action) => action.id)
+          .reverse();
+
+        for (let index = 0; index < completionOrder.length; index += 1) {
+          const username = completionOrder[index];
+          pending.get(username)!.resolve({
+            actionID: ranked[0],
+            spawnPreferenceActionIDs: ranked,
+            reason: `${username} top choice`,
+          });
+          await Promise.resolve();
+          if (index < completionOrder.length - 1) {
+            // No spawn is submitted or recorded until the full sealed stage settles.
+            expect(match.decisionRecords()).toEqual([]);
+          }
+        }
+        return await recordsPromise;
+      } finally {
+        await game.end({ archive: false });
+      }
+    }
+
+    const reversedArrival = await runWithCompletionOrder(
+      ["Zulu", "Alpha"],
+      "AGENT_SEALED_REVERSED",
+    );
+    const priorityArrival = await runWithCompletionOrder(
+      ["Alpha", "Zulu"],
+      "AGENT_SEALED_PRIORITY",
+    );
+    expect(
+      Object.fromEntries(
+        reversedArrival.map((record) => [
+          record.username,
+          record.chosenActionID,
+        ]),
+      ),
+    ).toEqual(
+      Object.fromEntries(
+        priorityArrival.map((record) => [
+          record.username,
+          record.chosenActionID,
+        ]),
+      ),
+    );
+    expect(reversedArrival.map((record) => record.username)).toEqual([
+      "Alpha",
+      "Zulu",
+    ]);
+    expect(reversedArrival).toHaveLength(2);
+    expect(
+      new Set(reversedArrival.map((record) => record.chosenActionID)).size,
+    ).toBe(2);
+    expect(
+      reversedArrival.every((record) => record.intent?.type === "spawn"),
+    ).toBe(true);
+    expect(reversedArrival[0].reason).toBe("Alpha top choice");
+    expect(reversedArrival[1].reason).toBeNull();
+    expect(reversedArrival[1].spawnSelectionEvidence?.submittedReason).toBe(
+      "Zulu top choice",
+    );
+    expect(
+      reversedArrival.every(
+        (record) => record.spawnSelectionEvidence?.priorityOrder[0] === "Alpha",
+      ),
+    ).toBe(true);
   });
 
   it("dispatches each decision as its menu is ready, then applies the batch in roster order", async () => {
@@ -605,9 +754,7 @@ describe("AgentLeagueMatchRunner", () => {
             _gameState: unknown,
             callback: () => T,
           ): T => callback(),
-          build: (
-            input: Parameters<AgentObservationBuilder["build"]>[0],
-          ) => {
+          build: (input: Parameters<AgentObservationBuilder["build"]>[0]) => {
             if (input.username === "Slow Build Agent") {
               expect(policyStarted).toHaveBeenCalledTimes(1);
               vi.advanceTimersByTime(1_000);
@@ -827,11 +974,9 @@ describe("AgentLeagueMatchRunner", () => {
         "build:City:100",
         "alliance:request:RIVAL001",
       ]);
-      expect(records.map((record) => record.decisionMetadata?.batchIndex)).toEqual([
-        0,
-        1,
-        2,
-      ]);
+      expect(
+        records.map((record) => record.decisionMetadata?.batchIndex),
+      ).toEqual([0, 1, 2]);
       expect(records[0].decisionMetadata).toMatchObject({
         batchSize: 3,
         batchRejectedActionIDs: "invented:admin:kick",
@@ -1369,16 +1514,15 @@ describe("AgentLeagueMatchRunner", () => {
       observationBuilder: {
         // Passthrough batch scope (main's per-tick observation cache); the
         // spy only needs to see what recentDecisions each build receives.
-        withObservationBatch: <T,>(
-          _gameState: unknown,
-          callback: () => T,
-        ): T => callback(),
+        withObservationBatch: <T>(_gameState: unknown, callback: () => T): T =>
+          callback(),
         build: (input: Parameters<AgentObservationBuilder["build"]>[0]) => {
           recentWindows.push(input.recentDecisions?.length ?? 0);
           return realBuilder.build(input);
         },
-        summarize: (observation: Parameters<AgentObservationBuilder["summarize"]>[0]) =>
-          realBuilder.summarize(observation),
+        summarize: (
+          observation: Parameters<AgentObservationBuilder["summarize"]>[0],
+        ) => realBuilder.summarize(observation),
       } as unknown as AgentObservationBuilder,
     });
 
@@ -1564,7 +1708,7 @@ describe("AgentLeagueMatchRunner", () => {
     }
   });
 
-  it("assigns every participant a deterministic fairness slot with zero brain calls or provider latency (runSpawnPhase)", async () => {
+  it("offers one identical maximin menu to every spawn brain and records one final intent per seat", async () => {
     const log = makeLogger();
     const mapLoader = new StaticMapLoader();
     const config = { ...gameConfig, gameMapSize: GameMapSize.Compact };
@@ -1578,14 +1722,12 @@ describe("AgentLeagueMatchRunner", () => {
       stride: 2,
     });
     const specs = createDefaultAgentSpecs(4);
-    // The spy proves the brain is fully bypassed during spawn: any call to
-    // brain.decide while runSpawnPhase drives the phase is a regression -
-    // the fairness assignment is a pure, offline computation over the
-    // candidate pool and the roster, never a per-agent decision.
-    const decideSpy = vi.fn(async () => ({
-      actionID: "hold",
-      reason: "the brain must not be consulted during the spawn phase",
-    }));
+    const decideSpy = vi.fn(
+      async (_input: { legalActions: LegalAction[] }) => ({
+        actionID: "hold",
+        reason: "invalid non-spawn scalar",
+      }),
+    );
     const participants = createAgentParticipants(specs, log, {
       brainFactory: () => ({ brainType: "mock-llm", decide: decideSpy }),
     });
@@ -1615,9 +1757,20 @@ describe("AgentLeagueMatchRunner", () => {
       });
       const elapsedMs = Date.now() - startedAt;
 
-      // No brain call at all - the mechanism is a pure roster/candidate
-      // computation, never a per-agent decision.
-      expect(decideSpy).not.toHaveBeenCalled();
+      // Exactly one provider/brain call per seat, with the same immutable
+      // exact N-slot menu. Invalid ballots default by offered order.
+      expect(decideSpy).toHaveBeenCalledTimes(4);
+      const offeredMenus = decideSpy.mock.calls.map(
+        ([input]) => input.legalActions,
+      );
+      expect(offeredMenus.every((menu) => menu === offeredMenus[0])).toBe(true);
+      expect(
+        offeredMenus.every(
+          (menu) =>
+            menu.length === 4 &&
+            menu.every((action: LegalAction) => action.kind === "spawn"),
+        ),
+      ).toBe(true);
 
       // Exactly one record per agent for the WHOLE phase: an assignment is
       // submitted once, immediately, and never revisited.
@@ -1628,23 +1781,19 @@ describe("AgentLeagueMatchRunner", () => {
       expect(
         spawnRecords.every((record) => record.chosenActionKind === "spawn"),
       ).toBe(true);
-      expect(spawnRecords.every((record) => record.result.accepted)).toBe(
-        true,
-      );
+      expect(spawnRecords.every((record) => record.result.accepted)).toBe(true);
       expect(
         spawnRecords.every(
           (record) => record.decisionMetadata?.spawnAssignment === true,
         ),
       ).toBe(true);
-      // Kept OUT of both the LLM-aliveness count and the external-brain-
-      // cleanliness external-call count, same convention the old synthetic
-      // spawn decisions used.
       expect(
         spawnRecords.every(
           (record) =>
-            record.decisionMetadata?.externalPlannerCall === false &&
-            record.decisionMetadata?.externalActionCall === false &&
-            record.decisionMetadata?.rawProviderOutputPresent === false,
+            record.spawnSelectionEvidence?.defaultReason === "invalid-ballot" &&
+            record.spawnSelectionEvidence.ballotInvalidReason ===
+              "off-menu-preference" &&
+            record.spawnSelectionEvidence.offeredActionIDs.length === 4,
         ),
       ).toBe(true);
 
@@ -1685,19 +1834,13 @@ describe("AgentLeagueMatchRunner", () => {
       }
       expect(mirrorGame.inSpawnPhase()).toBe(false);
       for (const record of spawnRecords) {
-        expect(
-          mirrorGame.playerByClientID(record.clientID!)?.spawnTile(),
-        ).toBe(spawnIntent(record).tile);
+        expect(mirrorGame.playerByClientID(record.clientID!)?.spawnTile()).toBe(
+          spawnIntent(record).tile,
+        );
       }
 
-      // No provider round trip means no meaningful decision latency: every
-      // record's decisionLatencyMs is a flat 0 (never a real wall-clock
-      // wait), and the whole 4-agent spawn phase - candidate scan already
-      // paid for above, pure in-memory assignment + a handful of turn
-      // advances - finishes in well under a second, nowhere near what N
-      // sequential or even N concurrent provider calls would cost.
       expect(
-        spawnRecords.every((record) => record.decisionLatencyMs === 0),
+        spawnRecords.every((record) => record.decisionLatencyMs >= 0),
       ).toBe(true);
       expect(elapsedMs).toBeLessThan(5_000);
     } finally {
@@ -1766,12 +1909,22 @@ describe("AgentLeagueMatchRunner", () => {
   it("returns isolated datasets when the terrain cache is bypassed", async () => {
     const mapLoader = new StaticMapLoader();
     const config = { ...gameConfig, gameMapSize: GameMapSize.Compact };
-    const a = await loadTerrainMap(config.gameMap, config.gameMapSize, mapLoader, {
-      cache: false,
-    });
-    const b = await loadTerrainMap(config.gameMap, config.gameMapSize, mapLoader, {
-      cache: false,
-    });
+    const a = await loadTerrainMap(
+      config.gameMap,
+      config.gameMapSize,
+      mapLoader,
+      {
+        cache: false,
+      },
+    );
+    const b = await loadTerrainMap(
+      config.gameMap,
+      config.gameMapSize,
+      mapLoader,
+      {
+        cache: false,
+      },
+    );
     expect(a.gameMap).not.toBe(b.gameMap);
     // Mutating one uncached dataset must not leak into the other, and must not
     // poison the cached path either.
@@ -1909,17 +2062,15 @@ describe("AgentLeagueMatchRunner", () => {
       }
       expect(mirrorGame.inSpawnPhase()).toBe(false);
       expect(spawnRecords).toHaveLength(4);
-      expect(spawnRecords.every((record) => record.result.accepted)).toBe(
-        true,
-      );
+      expect(spawnRecords.every((record) => record.result.accepted)).toBe(true);
       // Submitted on the very first tick, far below any boundary.
       expect(
         Math.max(...spawnRecords.map((record) => record.turnNumber)),
       ).toBeLessThan(mirrorGame.config().numSpawnPhaseTurns());
       for (const record of spawnRecords) {
-        expect(
-          mirrorGame.playerByClientID(record.clientID!)?.spawnTile(),
-        ).toBe(spawnIntent(record).tile);
+        expect(mirrorGame.playerByClientID(record.clientID!)?.spawnTile()).toBe(
+          spawnIntent(record).tile,
+        );
       }
     } finally {
       await game.end({ archive: false });
@@ -2345,19 +2496,15 @@ describe("AgentLeagueMatchRunner", () => {
       brainFactory: (spec) =>
         new LlmAgentBrain({
           provider: new MockLlmProvider({
-            mode:
-              spec.profile === "aggressive" ? "attack" : "spawn_then_hold",
+            mode: spec.profile === "aggressive" ? "attack" : "spawn_then_hold",
           }),
           profile: spec.profile,
         }),
     });
-    const game = new GameServer(
-      "AGENT006",
-      log,
-      Date.now(),
-      serverConfig,
-      { ...gameConfig, spawnImmunityDuration: 0 },
-    );
+    const game = new GameServer("AGENT006", log, Date.now(), serverConfig, {
+      ...gameConfig,
+      spawnImmunityDuration: 0,
+    });
     const match = new AgentLeagueMatchRunner({
       game,
       participants,
@@ -2497,13 +2644,10 @@ describe("AgentLeagueMatchRunner", () => {
           profile: spec.profile,
         }),
     });
-    const game = new GameServer(
-      "AGENT007",
-      log,
-      Date.now(),
-      serverConfig,
-      { ...gameConfig, startingGold: 200_000 },
-    );
+    const game = new GameServer("AGENT007", log, Date.now(), serverConfig, {
+      ...gameConfig,
+      startingGold: 200_000,
+    });
     const match = new AgentLeagueMatchRunner({
       game,
       participants,
@@ -2670,12 +2814,11 @@ describe("AgentLeagueMatchRunner", () => {
       expect(
         spawnRecords.every((record) => record.chosenActionKind === "spawn"),
       ).toBe(true);
-      expect(spawnRecords.every((record) => record.result.accepted)).toBe(
-        true,
-      );
+      expect(spawnRecords.every((record) => record.result.accepted)).toBe(true);
       expect(
         spawnRecords.every(
-          (record) => record.decisionMetadata?.rawProviderOutputPresent !== true,
+          (record) =>
+            record.decisionMetadata?.rawProviderOutputPresent !== true,
         ),
       ).toBe(true);
       expect(
@@ -2688,7 +2831,8 @@ describe("AgentLeagueMatchRunner", () => {
       const finalTiles = [...new Set(spawnRecords.map((r) => r.agentID))].map(
         (agentID) => {
           const record = spawnRecords.find((r) => r.agentID === agentID)!;
-          return result.finalGameState.playerByClientID(record.clientID!)
+          return result.finalGameState
+            .playerByClientID(record.clientID!)
             ?.spawnTile();
         },
       );
@@ -2711,6 +2855,63 @@ describe("AgentLeagueMatchRunner", () => {
       expect(
         result.postSpawnRecords.every(
           (record) => record.decisionLatencyMs >= 0,
+        ),
+      ).toBe(true);
+    } finally {
+      await game.end({ archive: false });
+    }
+  }, 600_000);
+
+  it("bounds a hung spawn brain for direct realtime runSpawnPhase callers", async () => {
+    const log = makeLogger();
+    const mapLoader = new StaticMapLoader();
+    const config = { ...gameConfig, gameMapSize: GameMapSize.Compact };
+    const terrain = await loadTerrainMap(
+      config.gameMap,
+      config.gameMapSize,
+      mapLoader,
+    );
+    const specs = createDefaultAgentSpecs(2);
+    const participants = createAgentParticipants(specs, log, {
+      brainFactory: () => ({
+        brainType: "mock-llm",
+        decide: () => new Promise(() => undefined),
+      }),
+    });
+    const game = new GameServer(
+      "AGENTRTM",
+      log,
+      Date.now(),
+      steppedServerConfig,
+      config,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: buildSpawnCandidates(terrain.gameMap, {
+        maxCandidates: 500,
+        stride: 2,
+      }),
+      log,
+    });
+    const mirror = new AgentLocalGameMirror(mapLoader, log);
+
+    try {
+      match.attachAgents();
+      match.startGame();
+      const records = await match.runSpawnPhase({
+        mirror,
+        messages: () => participants[0]?.runner.serverMessages() ?? [],
+        turnsPerSpawnTick: 25,
+        maxDecisionMs: 1,
+      });
+
+      expect(records).toHaveLength(2);
+      expect(
+        records.every(
+          (record) =>
+            record.result.accepted &&
+            record.spawnSelectionEvidence?.defaultReason === "brain-timeout",
         ),
       ).toBe(true);
     } finally {
@@ -2770,18 +2971,30 @@ describe("AgentLeagueMatchRunner", () => {
         log,
       });
 
-      // Spawn never consults the brain at all (deterministic fairness
-      // assignment only), so a permanently-hanging brain.decide() has zero
-      // effect on the spawn phase - every seat is assigned and accepted
-      // regardless.
+      // The sealed spawn stage dispatches every hanging brain concurrently,
+      // then gives each timeout the same report-independent offered-order
+      // default. Exactly one final record/intent remains for every seat.
+      expect(result.openingRecords).toHaveLength(4);
       expect(
         result.openingRecords.every(
           (record) => record.chosenActionKind === "spawn",
         ),
       ).toBe(true);
-      expect(result.openingRecords.every((record) => record.result.accepted)).toBe(
-        true,
-      );
+      expect(
+        result.openingRecords.every((record) => record.result.accepted),
+      ).toBe(true);
+      expect(
+        result.openingRecords.every(
+          (record) =>
+            record.reason === null &&
+            record.decisionMetadata?.fallbackUsed === true &&
+            record.spawnSelectionEvidence?.defaultReason === "brain-timeout" &&
+            record.spawnSelectionEvidence.stageFallbackUsed &&
+            record.spawnSelectionEvidence.stageDegradationReason?.includes(
+              "timed out",
+            ),
+        ),
+      ).toBe(true);
       // The ACTIVE phase hits the timing-out brain and falls back safely.
       expect(result.postSpawnRecords).toHaveLength(4);
       expect(
@@ -2827,7 +3040,8 @@ describe("AgentLeagueMatchRunner", () => {
       ).toBe(true);
       expect(
         result.postSpawnRecords.every(
-          (record) => typeof record.decisionMetadata?.fallbackReason === "string",
+          (record) =>
+            typeof record.decisionMetadata?.fallbackReason === "string",
         ),
       ).toBe(true);
     } finally {
@@ -3021,7 +3235,10 @@ describe("AgentLeagueMatchRunner", () => {
   });
 
   it("is deterministic: the same gameID, agent specs, and candidate pool reproduce identical spawn tiles across two independent runs", async () => {
-    async function runOnce(): Promise<{ tiles: number[]; accepted: boolean[] }> {
+    async function runOnce(): Promise<{
+      tiles: number[];
+      accepted: boolean[];
+    }> {
       const log = makeLogger();
       const mapLoader = new StaticMapLoader();
       const config = { ...gameConfig, gameMapSize: GameMapSize.Compact };
@@ -3137,7 +3354,8 @@ describe("AgentLeagueMatchRunner", () => {
         throw new Error("expected mirror game state after the spawn phase");
       }
       expect(
-        finalGameState.playerByClientID(chosenAgent.runner.clientID()!)
+        finalGameState
+          .playerByClientID(chosenAgent.runner.clientID()!)
           ?.spawnTile(),
       ).toBe(chosenTile);
 
@@ -3178,7 +3396,9 @@ describe("AgentLeagueMatchRunner", () => {
       const outDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-e2e-"));
       const outPath = path.join(outDir, "game-record.json");
       fs.writeFileSync(outPath, JSON.stringify(partialRecord, null, 2));
-      const reloaded = JSON.parse(fs.readFileSync(outPath, "utf8")) as typeof partialRecord;
+      const reloaded = JSON.parse(
+        fs.readFileSync(outPath, "utf8"),
+      ) as typeof partialRecord;
       const reloadedSpawnIntents = reloaded.turns
         .flatMap((turn: { intents: StampedIntent[] }) => turn.intents)
         .filter(
@@ -3194,7 +3414,7 @@ describe("AgentLeagueMatchRunner", () => {
     }
   }, 600_000);
 
-  it("rotates every roster participant through every fairness slot across N same-map episodes via the constructor's episodeIndex option", async () => {
+  it("rotates identical offered-order ballots through every slot across N same-map episodes", async () => {
     const log = makeLogger();
     const mapLoader = new StaticMapLoader();
     const config = { ...gameConfig, gameMapSize: GameMapSize.Compact };
@@ -3261,10 +3481,10 @@ describe("AgentLeagueMatchRunner", () => {
       expect(new Set(tiles)).toEqual(slotSet);
     }
 
-    // Every roster position visits every slot EXACTLY once across the N
-    // episodes - the actual fairness guarantee, proven end to end through
-    // real AgentLeagueMatchRunner construction + runSpawnPhase, not just
-    // the isolated AgentSpawnAssignment helper.
+    // Under this test's deliberately identical offered-order RuleAgent
+    // ballots, every fixed participant visits every slot exactly once. This
+    // proves priority rotation is wired end to end; heterogeneous authored
+    // rankings can and should produce different assignment histories.
     for (let rosterIndex = 0; rosterIndex < N; rosterIndex += 1) {
       const tilesForThisSeat = tilesByEpisode.map(
         (tiles) => tiles[rosterIndex],
@@ -3273,7 +3493,7 @@ describe("AgentLeagueMatchRunner", () => {
     }
 
     // episodeIndex 0 and episodeIndex 1 must disagree on at least one
-    // roster position (N > 1) - proves episodeIndex is genuinely wired
+    // participant assignment (N > 1) - proves episodeIndex is genuinely wired
     // through the constructor into a real behavioral difference, not just
     // documented and ignored.
     expect(tilesByEpisode[0]).not.toEqual(tilesByEpisode[1]);
@@ -3373,7 +3593,10 @@ class StaticMapLoader implements GameMapLoader {
 
   constructor() {
     const currentFile = fileURLToPath(import.meta.url);
-    this.rootDir = path.resolve(path.dirname(currentFile), "../../resources/maps");
+    this.rootDir = path.resolve(
+      path.dirname(currentFile),
+      "../../resources/maps",
+    );
   }
 
   getMapData(map: GameMapType): MapData {
@@ -3565,7 +3788,10 @@ describe("AgentLeagueMatchRunner manual-clock determinism", () => {
     // exact artifact that diverged in the original bug: a wall-clock
     // mark_disconnected intent landed on a load-dependent turn. With the fix it
     // is purely agent-driven, so two same-seed manual-clock runs are identical.
-    const runOnce = async (): Promise<{ opening: string[]; turns: string[] }> => {
+    const runOnce = async (): Promise<{
+      opening: string[];
+      turns: string[];
+    }> => {
       const log = makeLogger();
       const mapLoader = new StaticMapLoader();
       const config = { ...gameConfig, gameMapSize: GameMapSize.Compact };

@@ -26,13 +26,18 @@ import {
 } from "./AgentObservationBuilder";
 import { AgentRunner } from "./AgentRunner";
 import {
-  assignSpawnSlots,
+  selectSpawnSlots,
   validateSpawnSlotLegality,
   validateSpawnSlotUniqueness,
 } from "./AgentSpawnAssignment";
+import {
+  AGENT_SPAWN_SELECTION_ALGORITHM_VERSION,
+  AgentSpawnBallotInput,
+  buildAgentSpawnPriority,
+  resolveAgentSpawnSelection,
+} from "./AgentSpawnSelection";
 import { buildAgentTacticalAffordances } from "./AgentTacticalAffordances";
 import { economyEventsEnabled, structuredDealsEnabled } from "./AgentTunables";
-import { MAX_WIRE_ACTIONS_PER_DECISION } from "./AgentWireProtocol";
 import {
   AgentActionResult,
   AgentBrain,
@@ -42,12 +47,14 @@ import {
   AgentDecision,
   AgentDecisionRecord,
   AgentObservation,
+  AgentSpawnSelectionEvidence,
   AgentStrategyProfile,
   agentStrategyProfiles,
   LegalAction,
   LegalActionKind,
   RecentAgentDecision,
 } from "./AgentTypes";
+import { MAX_WIRE_ACTIONS_PER_DECISION } from "./AgentWireProtocol";
 import {
   buildSpawnCandidates,
   buildSpawnLegalAction,
@@ -91,11 +98,9 @@ export interface AgentLeagueMatchOptions {
   spawnCandidates: SpawnCandidate[];
   log: Logger;
   /**
-   * Zero-based ordinal for this episode among repeated episodes reusing the
-   * SAME map/candidate pool, used by `runSpawnPhase` to rotate which
-   * fairness-assigned spawn slot each roster participant lands on
-   * (`slots[(rosterIndex + episodeIndex) % N]`) so N same-map episodes cycle
-   * every agent through every slot exactly once. No single existing
+   * Zero-based ordinal for this episode among repeated episodes, used by the
+   * sealed spawn allocator to rotate the report-independent priority computed
+   * from stable participant usernames and persistent identities. No single existing
    * "episode ordinal" field exists elsewhere in this codebase (the closest
    * is a season's `eventSlots` array position) - callers running a sequence
    * of episodes on one map should pass their own zero-based position (e.g.
@@ -104,9 +109,9 @@ export interface AgentLeagueMatchOptions {
    */
   episodeIndex?: number;
   /**
-   * Minimum acceptable `localLandScore` (see AgentSpawnAssignment.ts) a
-   * `runSpawnPhase` slot candidate must clear before it is eligible for
-   * maximin slot selection. Default `DEFAULT_SPAWN_QUALITY_FLOOR`.
+   * Minimum acceptable `localLandScore` a candidate must clear before it is
+   * eligible for the exact N-slot maximin menu. Default
+   * `DEFAULT_SPAWN_QUALITY_FLOOR`.
    */
   spawnQualityFloor?: number;
   observationBuilder?: ObservationBuilderLike;
@@ -257,65 +262,35 @@ export class AgentLeagueMatchRunner {
   /**
    * A synchronous, no-tick-loop convenience for tests/scenarios that just
    * need every participant spawned once with no live game/mirror driving
-   * turns: submits the SAME deterministic fairness assignment `runSpawnPhase`
-   * uses (`assignSpawnSlots`), validated for uniqueness (there is no live
-   * game snapshot available here to also re-check authoritative legality
-   * against - `runSpawnPhase`, which DOES have mirror access, does that
-   * additional check; this trusts the terrain-level validation
-   * `buildSpawnCandidates` already performed at candidate-generation time).
-   * `maxDecisionMs` is accepted only for call-site source compatibility and
-   * is unused: no brain is ever consulted for a spawn decision here or
-   * anywhere else in this runner.
+   * turns. It runs the same single sealed ranked ballot as `runSpawnPhase`.
+   * There is no live snapshot here for the additional authoritative legality
+   * re-check; candidate generation still performed the terrain predicates.
    */
   async runOpeningTurn(
     turnNumber = 0,
-    _options: Pick<RunAgentDecisionTurnOptions, "maxDecisionMs"> = {},
+    options: Pick<RunAgentDecisionTurnOptions, "maxDecisionMs"> = {},
   ): Promise<AgentDecisionRecord[]> {
     const startingRecordCount = this.records.length;
-    const agentIDs = this.options.participants.map(
-      (participant) => participant.runner.agentID,
-    );
-    const assignment = assignSpawnSlots({
-      candidates: this.options.spawnCandidates,
-      participantCount: this.options.participants.length,
-      episodeIndex: this.options.episodeIndex ?? 0,
-      qualityFloor: this.options.spawnQualityFloor,
+    await this.selectSubmitAndRecordSpawns({
+      turnNumber,
+      maxDecisionMs: options.maxDecisionMs,
     });
-    validateSpawnSlotUniqueness(assignment, agentIDs);
-    for (let i = 0; i < this.options.participants.length; i += 1) {
-      this.submitAndRecordAssignedSpawn(
-        this.options.participants[i],
-        assignment[i],
-        turnNumber,
-      );
-    }
     return this.records.slice(startingRecordCount);
   }
 
   /**
-   * Place every participant at its fairness-assigned spawn slot and advance
-   * turns until the phase ends. NO agent/brain choice is involved: exactly
-   * `participants.length` well-spaced, quality-floored slots are selected
-   * once (via `assignSpawnSlots` - deterministic maximin spacing over the
-   * authoritative `buildSpawnCandidates` pool) and roster index `i` is
-   * assigned `slots[(i + episodeIndex) % N]`, so repeated episodes on the
-   * same map/candidate pool rotate every agent through every slot. The
-   * assignment is computed and validated (`validateSpawnSlotUniqueness` +
-   * `validateSpawnSlotLegality` against the LIVE game state, re-checking the
-   * exact same authoritative predicates `buildSpawnCandidates` used at
-   * generation time - never merely trusted) on the first tick a live game
-   * snapshot is available, then every participant's tile is submitted
-   * exactly once, immediately - there is no negotiation, no relocation, no
-   * retry, and the assignment is final for the life of this match. A
-   * rejected submission is an invariant failure (see
-   * `submitAndRecordAssignedSpawn`) - it throws rather than ever falling
-   * back to a different or engine-default spawn.
+   * Select exactly N quality-floored maximin slots, offer the same exact
+   * spawn LegalActions to every brain in one sealed concurrent stage, resolve
+   * ranked ballots by report-independent serial dictatorship, and submit one
+   * final validated action per seat. There is no reaction/reveal round,
+   * relocation, retry, arrival-order power, or RuleAgentBrain fallback.
    */
   async runSpawnPhase(options: {
     mirror: AgentLocalGameMirror;
     messages: () => ServerMessage[];
     turnsPerSpawnTick?: number;
     maxSpawnTicks?: number;
+    maxDecisionMs?: number;
   }): Promise<AgentDecisionRecord[]> {
     const startingRecordCount = this.records.length;
     const turnsPerSpawnTick = Math.max(1, options.turnsPerSpawnTick ?? 10);
@@ -331,31 +306,17 @@ export class AgentLeagueMatchRunner {
       if (gameState !== null && !gameState.inSpawnPhase()) {
         if (!submitted) {
           throw new Error(
-            "runSpawnPhase: left the spawn phase before the fairness " +
-              "assignment could be submitted",
+            "runSpawnPhase: left the spawn phase before sealed spawn selection could be submitted",
           );
         }
         return this.records.slice(startingRecordCount);
       }
       if (!submitted && gameState !== null) {
-        const agentIDs = this.options.participants.map(
-          (participant) => participant.runner.agentID,
-        );
-        const assignment = assignSpawnSlots({
-          candidates: this.options.spawnCandidates,
-          participantCount: this.options.participants.length,
-          episodeIndex: this.options.episodeIndex ?? 0,
-          qualityFloor: this.options.spawnQualityFloor,
+        await this.selectSubmitAndRecordSpawns({
+          turnNumber: gameState.ticks(),
+          gameState,
+          maxDecisionMs: options.maxDecisionMs,
         });
-        validateSpawnSlotUniqueness(assignment, agentIDs);
-        validateSpawnSlotLegality(assignment, agentIDs, gameState);
-        for (let i = 0; i < this.options.participants.length; i += 1) {
-          this.submitAndRecordAssignedSpawn(
-            this.options.participants[i],
-            assignment[i],
-            gameState.ticks(),
-          );
-        }
         submitted = true;
       }
       this.options.game.advanceTurnsForTesting(turnsPerSpawnTick);
@@ -406,9 +367,7 @@ export class AgentLeagueMatchRunner {
             participant.runner.agentID,
           ),
           recentDecisions: this.recentDecisionsFor(participant),
-          ...(recentCommunications.length > 0
-            ? { recentCommunications }
-            : {}),
+          ...(recentCommunications.length > 0 ? { recentCommunications } : {}),
         };
         const baseObservation = this.observationBuilder.build(observationInput);
         // Bilateral deals block (flag-gated; undefined leaves the observation
@@ -1068,71 +1027,215 @@ export class AgentLeagueMatchRunner {
     return this.dealManager !== null;
   }
 
-  /**
-   * Submits a participant's fairness-assigned spawn slot exactly once. A
-   * synthetic, deterministic (non-LLM, non-brain) decision: the metadata
-   * flags keep it OUT of the LLM-aliveness count (rawProviderOutputPresent:
-   * false) and the external-brain-cleanliness external-call count
-   * (externalPlannerCall/externalActionCall:false). The assigned tile
-   * already passed `validateSpawnSlotUniqueness` + `validateSpawnSlotLegality`
-   * before this is ever called, so the submit is expected to be accepted -
-   * a rejection here is an INVARIANT failure (the fairness assignment
-   * itself is broken, or core state moved out from under an
-   * already-validated tile), never something to paper over: the truthful
-   * (rejected) record is retained first, then this throws immediately
-   * naming the agent/tile/reason, so the engine's own fallback/default
-   * spawn can never silently contradict the assigned slot.
-   */
-  private submitAndRecordAssignedSpawn(
-    participant: AgentParticipant,
-    candidate: SpawnCandidate,
-    turnNumber: number,
-  ): void {
-    const observation = this.observationBuilder.build({
-      agentID: participant.runner.agentID,
-      clientID: participant.runner.clientID(),
-      username: participant.spec.username,
-      profile: participant.spec.profile,
-      gameID: this.options.game.id,
-      turnNumber,
-      phaseOverride: "spawn",
-      objective: this.objectiveManager.currentObjective(
-        participant.runner.agentID,
-      ),
-      recentDecisions: this.recentDecisionsFor(participant),
+  private async selectSubmitAndRecordSpawns(input: {
+    turnNumber: number;
+    gameState?: Game;
+    maxDecisionMs?: number;
+  }): Promise<void> {
+    const participants = this.options.participants;
+    const agentIDs = participants.map(
+      (participant) => participant.runner.agentID,
+    );
+    const slots = selectSpawnSlots(
+      this.options.spawnCandidates,
+      participants.length,
+      { qualityFloor: this.options.spawnQualityFloor },
+    );
+    validateSpawnSlotUniqueness(slots, agentIDs);
+    if (input.gameState !== undefined) {
+      validateSpawnSlotLegality(slots, agentIDs, input.gameState);
+    }
+    const offeredActions = immutableSpawnMenu(slots.map(buildSpawnLegalAction));
+
+    // Priority is fixed before a single ballot is dispatched. Stable display
+    // usernames are the ordering key; stable participant ids disambiguate the
+    // defensive duplicate-name case. Neither mutable participant array order
+    // nor provider arrival can change allocation power.
+    const priorityOrder = buildAgentSpawnPriority(
+      participants.map((participant) => ({
+        participantID: participant.runner.persistentID,
+        username: participant.spec.username,
+      })),
+      this.options.episodeIndex ?? 0,
+    );
+
+    const dispatched = this.observationBuilder.withObservationBatch(
+      input.gameState,
+      () =>
+        participants.map((participant) => {
+          const observation = this.observationBuilder.build({
+            agentID: participant.runner.agentID,
+            clientID: participant.runner.clientID(),
+            username: participant.spec.username,
+            profile: participant.spec.profile,
+            gameID: this.options.game.id,
+            turnNumber: input.turnNumber,
+            gameState: input.gameState,
+            phaseOverride: "spawn",
+            objective: this.objectiveManager.currentObjective(
+              participant.runner.agentID,
+            ),
+            recentDecisions: this.recentDecisionsFor(participant),
+          });
+          const observationSummary =
+            this.observationBuilder.summarize(observation);
+          const dispatchedAt = Date.now();
+          const decisionPromise = dispatchBrainDecision({
+            brain: participant.brain,
+            observation,
+            legalActions: offeredActions,
+          });
+          return {
+            participant,
+            observation,
+            observationSummary,
+            dispatchedAt,
+            decisionPromise,
+          };
+        }),
+    );
+
+    // Every decide() call above has already returned its promise before any
+    // await occurs here. Promise.all preserves input identity, while the
+    // allocator below ignores completion/arrival order entirely.
+    const settled = await Promise.all(
+      dispatched.map(async (entry) => ({
+        ...entry,
+        settlement: await settleSpawnBallot({
+          decisionPromise: entry.decisionPromise,
+          dispatchedAt: entry.dispatchedAt,
+          maxDecisionMs: input.maxDecisionMs,
+        }),
+      })),
+    );
+    const assignments = resolveAgentSpawnSelection({
+      offeredActions,
+      priorityOrder,
+      ballots: settled.map<AgentSpawnBallotInput>((entry) => ({
+        participantID: entry.participant.runner.persistentID,
+        username: entry.participant.spec.username,
+        decision: entry.settlement.decision,
+        stageLatencyMs: entry.settlement.latencyMs,
+        forcedDefaultReason: entry.settlement.forcedDefaultReason,
+        stageDegradationReason: entry.settlement.degradationReason,
+      })),
     });
-    const spawnAction = buildSpawnLegalAction(candidate);
+    const settledByParticipantID = new Map(
+      settled.map((entry) => [entry.participant.runner.persistentID, entry]),
+    );
+
+    // Submission and record sequence follow the precommitted priority order,
+    // never the response arrival order. Each assigned action is an existing
+    // member of the common offered menu and is still routed through the
+    // configured existing decision validator before AgentRunner/GameServer.
+    for (const assignment of assignments) {
+      const entry = settledByParticipantID.get(assignment.participantID);
+      if (entry === undefined) {
+        throw new Error(
+          `sealed spawn selection lost participant ${assignment.participantID}`,
+        );
+      }
+      this.submitAndRecordSelectedSpawn({
+        participant: entry.participant,
+        observation: entry.observation,
+        observationSummary: entry.observationSummary,
+        offeredActions,
+        assignedAction: assignment.action,
+        submittedDecision: assignment.decision,
+        evidence: assignment.evidence,
+      });
+    }
+  }
+
+  /**
+   * Submit one atomic final spawn assignment. The selected slot already
+   * passed maximin selection and (when live) authoritative legality checks.
+   * A validator or GameServer rejection is an invariant failure: retain the
+   * truthful rejected record when submission was attempted, then fail loud.
+   */
+  private submitAndRecordSelectedSpawn(input: {
+    participant: AgentParticipant;
+    observation: AgentObservation;
+    observationSummary: string;
+    offeredActions: LegalAction[];
+    assignedAction: LegalAction;
+    submittedDecision: AgentDecision | null;
+    evidence: AgentSpawnSelectionEvidence;
+  }): void {
+    const originalMetadata = spawnRecordMetadata(
+      input.submittedDecision?.metadata,
+    );
+    const fallbackUsed = input.evidence.stageFallbackUsed;
+    const topSubmittedActionID = input.evidence.submittedBallotActionIDs[0];
+    const preserveSubmittedReason =
+      input.evidence.ballotValid &&
+      input.evidence.defaultReason === null &&
+      topSubmittedActionID === input.assignedAction.id;
     const decision: AgentDecision = {
-      actionID: spawnAction.id,
-      reason: "deterministic fairness-assigned spawn slot",
+      actionID: input.assignedAction.id,
+      reason: preserveSubmittedReason ? input.evidence.submittedReason : null,
       metadata: {
-        brain: "deterministic-spawn",
-        actionSelectionSource: "deterministic-spawn",
-        externalPlannerCall: false,
-        externalActionCall: false,
-        rawProviderOutputPresent: false,
+        ...originalMetadata,
+        actionSelectionSource: AGENT_SPAWN_SELECTION_ALGORITHM_VERSION,
         spawnAssignment: true,
+        spawnSelectionAlgorithm: AGENT_SPAWN_SELECTION_ALGORITHM_VERSION,
+        ...(fallbackUsed
+          ? {
+              fallbackUsed: true,
+              fallbackActionID: input.assignedAction.id,
+              spawnSelectionDegradationReason:
+                input.evidence.stageDegradationReason ??
+                input.evidence.defaultReason ??
+                "spawn selection default",
+            }
+          : {}),
+        ...(fallbackUsed &&
+        LLM_DEGRADABLE_BRAIN_TYPES.has(input.participant.brain.brainType ?? "")
+          ? { llmPlannerDegraded: true }
+          : {}),
       },
     };
-    const result = this.submitLegalAction(participant.runner, spawnAction);
+    const validation = this.decisionValidator(decision, input.offeredActions);
+    if (
+      !validation.ok ||
+      validation.action.kind !== "spawn" ||
+      validation.action.id !== input.assignedAction.id
+    ) {
+      throw new Error(
+        `sealed spawn assignment failed existing decision validation for ${input.participant.runner.agentID}: ${
+          validation.ok
+            ? `validator returned ${validation.action.kind}:${validation.action.id}`
+            : validation.reason
+        }`,
+      );
+    }
+
+    const result = this.submitLegalAction(
+      input.participant.runner,
+      validation.action,
+    );
     this.recordDecision({
-      participant,
-      turnNumber: observation.turnNumber,
-      observationSummary: this.observationBuilder.summarize(observation),
-      observation,
-      legalActions: [spawnAction],
-      chosenAction: spawnAction,
+      participant: input.participant,
+      turnNumber: input.observation.turnNumber,
+      observationSummary: input.observationSummary,
+      observation: input.observation,
+      legalActions: input.offeredActions,
+      chosenAction: validation.action,
       decision,
-      decisionLatencyMs: 0,
+      decisionLatencyMs: input.evidence.stageLatencyMs,
       reason: decision.reason,
       result,
+      spawnSelectionEvidence: input.evidence,
     });
     if (!result.accepted) {
+      const tile =
+        validation.action.intent?.type === "spawn"
+          ? validation.action.intent.tile
+          : "unknown";
       throw new Error(
-        `runSpawnPhase: fairness-assigned spawn was rejected for agent ` +
-          `${participant.runner.agentID} at tile ${candidate.tile}: ` +
-          `${result.reason}. A rejection here means the assignment or the ` +
-          "live game state is broken - never falls back silently.",
+        `runSpawnPhase: sealed spawn assignment was rejected for agent ` +
+          `${input.participant.runner.agentID} at tile ${tile}: ` +
+          `${result.reason}. Never falls back silently.`,
       );
     }
   }
@@ -1149,6 +1252,7 @@ export class AgentLeagueMatchRunner {
     reason: string | null;
     result: AgentActionResult;
     dealSlotEvidence?: AgentDealSlotEvidence;
+    spawnSelectionEvidence?: AgentSpawnSelectionEvidence;
   }): AgentDecisionRecord {
     const record: AgentDecisionRecord = {
       sequence: this.records.length + 1,
@@ -1193,6 +1297,9 @@ export class AgentLeagueMatchRunner {
       chosenActionMetadata: input.chosenAction?.metadata,
       ...(input.dealSlotEvidence !== undefined
         ? { dealSlotEvidence: input.dealSlotEvidence }
+        : {}),
+      ...(input.spawnSelectionEvidence !== undefined
+        ? { spawnSelectionEvidence: input.spawnSelectionEvidence }
         : {}),
       // tacticalAffordances is the single largest record field on World
       // (~8 KB, ~60% of the record). The Coworld path opts out (see
@@ -1265,7 +1372,8 @@ export class AgentLeagueMatchRunner {
     const windowStart = cycleTurns[0];
     return own
       .filter(
-        (record) => windowStart !== undefined && record.turnNumber >= windowStart,
+        (record) =>
+          windowStart !== undefined && record.turnNumber >= windowStart,
       )
       .map((record) => {
         const metadata = record.chosenActionMetadata ?? {};
@@ -1553,6 +1661,72 @@ const LLM_DEGRADABLE_BRAIN_TYPES = new Set<string>([
   "llm",
 ]);
 
+class AgentSpawnBallotTimeoutError extends Error {}
+
+interface SettledSpawnBallot {
+  decision: AgentDecision | null;
+  latencyMs: number;
+  forcedDefaultReason:
+    | "brain-timeout"
+    | "brain-error"
+    | "brain-fallback"
+    | null;
+  degradationReason: string | null;
+}
+
+async function settleSpawnBallot(input: {
+  decisionPromise: Promise<AgentDecision>;
+  dispatchedAt: number;
+  maxDecisionMs?: number;
+}): Promise<SettledSpawnBallot> {
+  try {
+    const resolved =
+      input.maxDecisionMs === undefined
+        ? await input.decisionPromise
+        : await withDeferredDecisionTimeout(
+            input.decisionPromise,
+            input.maxDecisionMs,
+            () =>
+              new AgentSpawnBallotTimeoutError(
+                `Agent brain timed out after ${input.maxDecisionMs}ms`,
+              ),
+          ).promise;
+    const decision =
+      typeof resolved === "object" && resolved !== null ? resolved : null;
+    if (decision === null) {
+      return {
+        decision: null,
+        latencyMs: Date.now() - input.dispatchedAt,
+        forcedDefaultReason: "brain-error",
+        degradationReason: "brain returned a non-object decision",
+      };
+    }
+    const metadata = decisionMetadataObject(decision?.metadata);
+    const reportedFallback =
+      metadata.fallbackUsed === true || metadata.llmPlannerDegraded === true;
+    return {
+      decision,
+      latencyMs: Date.now() - input.dispatchedAt,
+      forcedDefaultReason: reportedFallback ? "brain-fallback" : null,
+      degradationReason: reportedFallback
+        ? (reportedSpawnDegradation(metadata) ??
+          "brain reported fallback/degradation during spawn selection")
+        : null,
+    };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    return {
+      decision: null,
+      latencyMs: Date.now() - input.dispatchedAt,
+      forcedDefaultReason:
+        error instanceof AgentSpawnBallotTimeoutError
+          ? "brain-timeout"
+          : "brain-error",
+      degradationReason: reason,
+    };
+  }
+}
+
 function dispatchBrainDecision(input: {
   brain: AgentBrain;
   observation: AgentObservation;
@@ -1576,6 +1750,63 @@ function dispatchBrainDecision(input: {
   // rejected for the post-batch safety fallback below.
   void decisionPromise.catch(() => undefined);
   return decisionPromise;
+}
+
+function immutableSpawnMenu(actions: LegalAction[]): LegalAction[] {
+  const frozen = actions.map((action) =>
+    Object.freeze({
+      ...action,
+      intent:
+        action.intent === null ? null : Object.freeze({ ...action.intent }),
+      risk: Object.freeze({
+        ...action.risk,
+        ...(action.risk.notes !== undefined
+          ? { notes: Object.freeze([...action.risk.notes]) }
+          : {}),
+      }),
+      ...(action.metadata !== undefined
+        ? { metadata: Object.freeze({ ...action.metadata }) }
+        : {}),
+    }),
+  );
+  return Object.freeze(frozen) as unknown as LegalAction[];
+}
+
+function decisionMetadataObject(
+  metadata: AgentDecision["metadata"] | unknown,
+): NonNullable<AgentDecision["metadata"]> {
+  return typeof metadata === "object" && metadata !== null
+    ? (metadata as NonNullable<AgentDecision["metadata"]>)
+    : {};
+}
+
+function spawnRecordMetadata(
+  metadata: AgentDecision["metadata"] | unknown,
+): NonNullable<AgentDecision["metadata"]> {
+  const retained = { ...decisionMetadataObject(metadata) };
+  // A provider's internal RuleAgentBrain fallback ballot is deliberately
+  // ignored by the spawn mechanism. Do not let its action/reason read as the
+  // rationale for the server's report-independent offered-order default.
+  delete retained.fallbackActionID;
+  delete retained.fallbackReason;
+  return retained;
+}
+
+function reportedSpawnDegradation(
+  metadata: NonNullable<AgentDecision["metadata"]>,
+): string | null {
+  for (const key of [
+    "brainErrorReason",
+    "externalFailureReason",
+    "llmPlannerFailureReason",
+    "parseFailureReason",
+  ]) {
+    const value = metadata[key];
+    if (typeof value === "string" && value.length > 0) {
+      return value;
+    }
+  }
+  return null;
 }
 
 async function decideWithSafetyFallback(input: {

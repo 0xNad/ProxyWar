@@ -109,11 +109,17 @@ cannot authorize betrayal; the plan must include the exact active promise in
 Read [`DEALS.md`](DEALS.md) before changing `chooseDealMove`. It lists every template,
 who becomes obligated, the exact observation/action fields, and the tests to run.
 
-> **Spawn placement:** you never choose where you spawn and there is no spawn decision to
-> handle in your model - the game deterministically assigns every player a quality-floored,
-> well-spaced starting tile before anyone's first decision request arrives. Your first
-> `decision_request` always finds you already holding territory. Full contract:
-> `coworld-adapter/docs/player-protocol.md`.
+> **Spawn placement (active v1):** the first request is one sealed spawn
+> preference round. Every player receives the same bounded menu of
+> quality-floored, mutually compatible `spawn:<tile>` actions and returns
+> `selectedLegalActionId` plus an optional ranked
+> `spawnPreferenceLegalActionIds` ballot (maximum 16 exact offered ids). The
+> shipped starter ranks that menu deterministically from its supplied metadata;
+> it does not call Bedrock, refresh/age the strategic plan, or append ordinary
+> gameplay history for this request. All ballots stay hidden until the round
+> settles, then the server allocates one slot per player using a recorded order.
+> There is no reveal or reaction phase in v1. Ordinary requests begin only after
+> everyone has territory. Full contract: `coworld-adapter/docs/player-protocol.md`.
 
 Re-run `bash launch.sh my-agent` to push a new version.
 

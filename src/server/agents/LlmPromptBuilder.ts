@@ -1,11 +1,12 @@
+import { rankLegalActionsForPrompt } from "./AgentPlannerExecutor";
 import {
   economyDeterrencePlaybook,
   frontierAgentSkill,
   openFrontAgentPlaybook,
   profilePlaybook,
 } from "./AgentPlaybook";
-import { rankLegalActionsForPrompt } from "./AgentPlannerExecutor";
 import { AgentObservation, LegalAction } from "./AgentTypes";
+import { MAX_SPAWN_PREFERENCE_ACTION_IDS } from "./AgentWireProtocol";
 import {
   sanitizeUntrustedDisplayString,
   UNTRUSTED_DISPLAY_RULE,
@@ -19,6 +20,9 @@ export interface BuildLlmPromptInput {
 
 export class LlmPromptBuilder {
   build(input: BuildLlmPromptInput): string {
+    const spawnPreferenceRound =
+      input.legalActions.length > 0 &&
+      input.legalActions.every((action) => action.kind === "spawn");
     const observation = this.observationView(input.observation);
     const legalActions = input.legalActions.map((action) => ({
       id: action.id,
@@ -51,7 +55,15 @@ export class LlmPromptBuilder {
 
     return [
       "You are an AI Nations League agent brain.",
-      "Choose exactly one action by selecting a listed LegalAction.id.",
+      spawnPreferenceRound
+        ? "This is the one-round sealed spawn preference ballot. Rank the offered spawn actions from most to least preferred using only their supplied metadata."
+        : "Choose exactly one action by selecting a listed LegalAction.id.",
+      spawnPreferenceRound
+        ? `Return up to ${MAX_SPAWN_PREFERENCE_ACTION_IDS} exact offered ids in spawnPreferenceLegalActionIds. selectedLegalActionId is required and must equal the first ranked id. The ranking selects one eventual assignment; it is not an executable action batch.`
+        : null,
+      spawnPreferenceRound
+        ? "All agents answer concurrently from the same hidden ballot round. There is no reaction phase and no arrival-order advantage."
+        : null,
       UNTRUSTED_DISPLAY_RULE,
       "You must not invent actions, describe new actions, or output raw game intents.",
       "Do not write code, TypeScript, shell commands, tool calls, or analysis outside the JSON object.",
@@ -71,7 +83,9 @@ export class LlmPromptBuilder {
       "END_FRONTIER_AGENT_SKILL",
       profileGuidance(input.observation.profile),
       "Return JSON only, with no prose outside the JSON object.",
-      'Required shape: {"selectedLegalActionId":"<one listed id>","reason":"short reason","confidence":0.0}',
+      spawnPreferenceRound
+        ? 'Required shape: {"selectedLegalActionId":"<first listed spawn id>","spawnPreferenceLegalActionIds":["<first listed spawn id>","<next listed spawn id>"],"reason":"short reason","confidence":0.0}'
+        : 'Required shape: {"selectedLegalActionId":"<one listed id>","reason":"short reason","confidence":0.0}',
       "confidence is optional and must be a number from 0 to 1 if present.",
       input.personality ? `Agent personality: ${input.personality}` : null,
       `Agent profile: ${input.observation.profile}`,

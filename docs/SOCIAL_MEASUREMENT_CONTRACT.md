@@ -165,6 +165,15 @@ Seed `141421` was then used for the post-fix smoke, so it was explicitly
 removed from the confirmatory set before the final matrix rather than being
 mislabelled as held out.
 
+That matrix remains historical deterministic-spawn evidence. New experiments
+run with agent-selected spawning must either hold the offered slots, sealed
+ballots, priority order, and final assignments matched across arms, or declare
+spawn selection as an explicit experimental factor. A win or social outcome
+from unmatched spawn choices cannot be attributed to the social treatment.
+Those matching claims require the private `decisions.jsonl` allocation
+evidence; the public replay proves final spawn outcomes, not the sealed ballot
+or priority procedure.
+
 Promotion from “descriptive evidence” to “internally validated control
 construct” requires all of the following:
 

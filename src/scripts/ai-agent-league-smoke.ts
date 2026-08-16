@@ -622,6 +622,7 @@ export async function runAgentLeagueSmoke(
           mapSize: selectedGameConfig.gameMapSize,
           difficulty: selectedGameConfig.difficulty,
           variedSpawns: args.includes("--vary-spawns"),
+          spawnSelectionMode: "sealed-ranked-v1",
         },
         startedAt,
         completedAt,
@@ -690,13 +691,13 @@ export async function runAgentLeagueSmoke(
       return;
     }
 
-    // Deterministic built-in-style spawn (no LLM): runSpawnPhase submits an
-    // exploring spawn tile per agent each spawn tick and advances the sim
-    // itself until the spawn phase ends, so the wait below resolves on the
-    // first poll. Same entrypoint swap as the benchmark and step-locked paths.
+    // The sealed spawn ballot consults every configured brain concurrently.
+    // Bound that pre-game stage just like ordinary decisions so a hung
+    // provider cannot block a realtime smoke forever.
     const openingRecords = await league.runSpawnPhase({
       mirror,
       messages: mirrorMessages,
+      maxDecisionMs: decisionTimeoutMs ?? stepLockedConfig.maxDecisionMs,
     });
     const postSpawnGame = await waitForMirrorState({
       mirror,
@@ -821,6 +822,7 @@ export async function runAgentLeagueSmoke(
         mapSize: selectedGameConfig.gameMapSize,
         difficulty: selectedGameConfig.difficulty,
         variedSpawns: args.includes("--vary-spawns"),
+        spawnSelectionMode: "sealed-ranked-v1",
       },
       startedAt,
       completedAt,

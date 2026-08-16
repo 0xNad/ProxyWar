@@ -18,11 +18,11 @@ function baseConfig(overrides: Partial<CoworldConfig> = {}): CoworldConfig {
 }
 
 describe("episodeIndexFromConfig (real runtime wiring: runProxyWarEpisode -> AgentLeagueMatchOptions.episodeIndex)", () => {
-  it("defaults to episode 0 when the config omits episodeIndex (single/first episode, current production configs)", () => {
+  it("defaults to occurrence 0 when the config omits episodeIndex", () => {
     expect(episodeIndexFromConfig(baseConfig())).toBe(0);
   });
 
-  it("passes an explicit episodeIndex straight through, unmodified, for a future repeated-episode scheduler to set", () => {
+  it("passes the commissioner's same-variant episode ordinal through unmodified", () => {
     expect(episodeIndexFromConfig(baseConfig({ episodeIndex: 0 }))).toBe(0);
     expect(episodeIndexFromConfig(baseConfig({ episodeIndex: 1 }))).toBe(1);
     expect(episodeIndexFromConfig(baseConfig({ episodeIndex: 7 }))).toBe(7);

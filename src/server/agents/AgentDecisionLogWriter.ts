@@ -119,6 +119,8 @@ export interface WriteAgentLeagueRunArtifactsInput {
     mapSize?: string | null;
     difficulty?: string | null;
     variedSpawns?: boolean | null;
+    /** Spawn allocation contract; independent of variedSpawns map/scenario semantics. */
+    spawnSelectionMode?: "deterministic" | "sealed-ranked-v1" | null;
   };
   startedAt: number;
   completedAt: number;
@@ -214,6 +216,8 @@ interface DecisionLogEntry {
   selectedActionMetadata?: Record<string, string | number | boolean | null>;
   /** Staged diplomacy-slot evidence, separate from the primary action result. */
   dealSlotEvidence?: AgentDecisionRecord["dealSlotEvidence"];
+  /** One-stage sealed spawn allocation evidence, copied verbatim and bounded at source. */
+  spawnSelectionEvidence?: AgentDecisionRecord["spawnSelectionEvidence"];
   /**
    * Compact economy facts stamped on the record at the decision boundary
    * (PROXYWAR_TUNE_ECONOMY_EVENTS; absent when the flag was off). Copied
@@ -743,6 +747,9 @@ function decisionLogEntry(
       : {}),
     ...(record.dealSlotEvidence !== undefined
       ? { dealSlotEvidence: record.dealSlotEvidence }
+      : {}),
+    ...(record.spawnSelectionEvidence !== undefined
+      ? { spawnSelectionEvidence: record.spawnSelectionEvidence }
       : {}),
     // Economy facts + structured-deal stamps ride the entry verbatim (flag
     // OFF => the record never carried them => keys absent, bytes identical).
