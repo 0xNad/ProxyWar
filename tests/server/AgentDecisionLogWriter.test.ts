@@ -15,6 +15,7 @@ import {
   fabricatedRecord,
   pickByID,
   pickWithDeal,
+  type ScriptedPicker,
   type StubSeat,
 } from "./DealTestHarness";
 
@@ -1307,6 +1308,263 @@ describe("decisions.jsonl external-seat stamps (economyFacts + structured deals)
     expect(proposeEntry!.dealSlotEvidence).toEqual(
       proposeRecord!.dealSlotEvidence,
     );
+  });
+});
+
+// The comms slot writes the ONLY agent-authored prose in the protocol, and
+// decisions.jsonl is the surface hosted episodes and the mirror backfill
+// read. decisionLogEntry is an ALLOWLIST, not a passthrough — the same
+// omission silently severed every agent's stated deal reason once
+// (dealStatedReason) and the flag-gated deal stamps before that. These
+// suites pin all seven commsSlot* keys onto the actual serialized artifact
+// so a third allowlist regression cannot pass review quietly.
+
+const COMMS_FLAG = "PROXYWAR_TUNE_FREETEXT_MESSAGES";
+
+const COMMS_SLOT_KEYS = [
+  "commsSlotActionID",
+  "commsSlotRecipientID",
+  "commsSlotText",
+  "commsSlotAccepted",
+  "commsSlotResult",
+  "commsSlotRequestedID",
+  "commsSlotRejected",
+] as const;
+
+/** Agent-authored message body; survives the validator's tidying unchanged. */
+const MESSAGE_CLAIM =
+  "Hold the north line until turn 400 and I will not touch your ports";
+
+/** Selects hold plus a message to `recipientPlayerID`, if one is offered. */
+function pickMessageTo(
+  recipientPlayerID: string,
+  text: string,
+): ScriptedPicker {
+  return (input) => {
+    const offer = input.legalActions.find(
+      (action) =>
+        action.kind === "message" &&
+        action.metadata?.recipientID === recipientPlayerID,
+    );
+    return {
+      actionID: null,
+      ...(offer ? { messageActionID: offer.id, messageText: text } : {}),
+    };
+  };
+}
+
+/**
+ * The harness runners never join a real game, so genuine `agent_message`
+ * intents fail on transport. Stubbing submission to ACCEPTED isolates the
+ * stamp→artifact mapping under test; the REAL socket relay (unstubbed
+ * submitAgentMessage through a live GameServer) is covered by
+ * tests/server/FreeTextGameServerRelay.test.ts.
+ */
+function stubAcceptedSubmission(
+  harness: ReturnType<typeof dealLeagueHarness>,
+): void {
+  for (const runner of harness.runners) {
+    runner.submitAgentMessage = () => ({
+      accepted: true,
+      reason: "accepted",
+      intent: null,
+    });
+  }
+}
+
+describe("decisions.jsonl comms-slot stamps (free-text negotiation)", () => {
+  afterEach(() => {
+    delete process.env[COMMS_FLAG];
+  });
+
+  it("maps every comms-slot stamp onto entries verbatim, and omits all of them from bare records", async () => {
+    const accepted: AgentDecisionRecord = {
+      ...fabricatedRecord({
+        sequence: 1,
+        agentID: EXT_A.agentID,
+        playerID: EXT_A.playerID,
+        username: EXT_A.username,
+        turnNumber: 12,
+      }),
+      brainType: "external-http",
+      decisionMetadata: {
+        commsSlotActionID: "message:P_B",
+        commsSlotRecipientID: "P_B",
+        commsSlotText: MESSAGE_CLAIM,
+        commsSlotAccepted: true,
+        commsSlotResult: "accepted",
+      },
+    };
+    const rejected: AgentDecisionRecord = {
+      ...fabricatedRecord({
+        sequence: 2,
+        agentID: EXT_B.agentID,
+        playerID: EXT_B.playerID,
+        username: EXT_B.username,
+        turnNumber: 12,
+      }),
+      brainType: "external-http",
+      decisionMetadata: {
+        commsSlotRequestedID: "attack:P_A",
+        commsSlotRejected:
+          "comms slot selected a non-message action kind: attack",
+      },
+    };
+    const bare: AgentDecisionRecord = {
+      ...fabricatedRecord({
+        sequence: 3,
+        agentID: EXT_A.agentID,
+        playerID: EXT_A.playerID,
+        username: EXT_A.username,
+        turnNumber: 13,
+      }),
+      brainType: "external-http",
+    };
+
+    const [acceptedEntry, rejectedEntry, bareEntry] =
+      await writeAndParseEntries([accepted, rejected, bare]);
+    // The negotiation evidence: exact wording, recipient, and outcome.
+    expect(acceptedEntry).toMatchObject({
+      commsSlotActionID: "message:P_B",
+      commsSlotRecipientID: "P_B",
+      commsSlotText: MESSAGE_CLAIM,
+      commsSlotAccepted: true,
+      commsSlotResult: "accepted",
+    });
+    // The rejected case carries its own two keys — a rejected message is
+    // evidence too (who tried to say what, and why it never went out).
+    expect(rejectedEntry).toMatchObject({
+      commsSlotRequestedID: "attack:P_A",
+      commsSlotRejected:
+        "comms slot selected a non-message action kind: attack",
+    });
+    for (const key of COMMS_SLOT_KEYS) {
+      expect(key in bareEntry, `${key} must be absent on a bare record`).toBe(
+        false,
+      );
+    }
+  });
+
+  it("carries a real accepted message end to end into decisions.jsonl (flag ON)", async () => {
+    process.env[COMMS_FLAG] = "1";
+    const harness = dealLeagueHarness({
+      seats: [EXT_A, EXT_B],
+      scripts: [[pickMessageTo(EXT_B.playerID, MESSAGE_CLAIM)], []],
+      gameID: "COMMSEXT1",
+      brainType: "external-http",
+    });
+    stubAcceptedSubmission(harness);
+    await harness.league.runDecisionTurn({ turnNumber: 0 });
+    const records = harness.records();
+    const stamped = records.find(
+      (record) => record.decisionMetadata?.commsSlotActionID !== undefined,
+    );
+    // The league stamped the record in memory…
+    expect(stamped).toBeDefined();
+    expect(stamped!.decisionMetadata).toMatchObject({
+      commsSlotActionID: `message:${EXT_B.playerID}`,
+      commsSlotRecipientID: EXT_B.playerID,
+      commsSlotText: MESSAGE_CLAIM,
+      commsSlotAccepted: true,
+    });
+
+    // …and the artifact carries the same truth.
+    const entries = await writeAndParseEntries(records);
+    const entry = entries.find(
+      (candidate) => candidate.commsSlotActionID !== undefined,
+    );
+    expect(entry).toBeDefined();
+    expect(entry).toMatchObject({
+      commsSlotActionID: `message:${EXT_B.playerID}`,
+      commsSlotRecipientID: EXT_B.playerID,
+      commsSlotText: MESSAGE_CLAIM,
+      commsSlotAccepted: true,
+      commsSlotResult: "accepted",
+    });
+  });
+
+  it("keeps commsSlotAccepted: false on the entry when transport refused the intent", async () => {
+    // Unstubbed on purpose: the harness runners never joined a game, so the
+    // REAL submitAgentMessage refuses, stamping accepted: false. A truthiness
+    // check anywhere in the allowlist would silently drop exactly this value
+    // — and with it the evidence that a message was tried and failed.
+    process.env[COMMS_FLAG] = "1";
+    const harness = dealLeagueHarness({
+      seats: [EXT_A, EXT_B],
+      scripts: [[pickMessageTo(EXT_B.playerID, MESSAGE_CLAIM)], []],
+      gameID: "COMMSEXT2",
+      brainType: "external-http",
+    });
+    await harness.league.runDecisionTurn({ turnNumber: 0 });
+    const entries = await writeAndParseEntries(harness.records());
+    const entry = entries.find(
+      (candidate) => candidate.commsSlotActionID !== undefined,
+    );
+    expect(entry).toBeDefined();
+    expect(entry!.commsSlotAccepted).toBe(false);
+    expect(String(entry!.commsSlotResult)).toContain(
+      "agent has not joined a game",
+    );
+  });
+
+  it("carries a rejected comms selection's evidence keys end to end", async () => {
+    process.env[COMMS_FLAG] = "1";
+    const harness = dealLeagueHarness({
+      seats: [EXT_A, EXT_B],
+      scripts: [
+        [
+          () => ({
+            actionID: null,
+            messageActionID: "message:P_NOBODY0",
+            messageText: "hi",
+          }),
+        ],
+        [],
+      ],
+      gameID: "COMMSEXT3",
+      brainType: "external-http",
+    });
+    await harness.league.runDecisionTurn({ turnNumber: 0 });
+    const entries = await writeAndParseEntries(harness.records());
+    const entry = entries.find(
+      (candidate) => candidate.commsSlotRequestedID !== undefined,
+    );
+    expect(entry).toBeDefined();
+    expect(entry!.commsSlotRequestedID).toBe("message:P_NOBODY0");
+    expect(String(entry!.commsSlotRejected)).toContain("unknown action id");
+    // A rejected selection must not fabricate the accepted-path keys.
+    expect("commsSlotText" in entry!).toBe(false);
+    expect("commsSlotAccepted" in entry!).toBe(false);
+  });
+
+  it("emits no comms-slot key anywhere when the flag is off", async () => {
+    const harness = dealLeagueHarness({
+      seats: [EXT_A, EXT_B],
+      scripts: [
+        [
+          // The brain still TRIES to speak; with the feature off the league
+          // must not stamp so much as a rejection onto the record.
+          () => ({
+            actionID: null,
+            messageActionID: `message:${EXT_B.playerID}`,
+            messageText: MESSAGE_CLAIM,
+          }),
+        ],
+        [],
+      ],
+      gameID: "COMMSEXT4",
+      brainType: "external-http",
+    });
+    await harness.league.runDecisionTurn({ turnNumber: 0 });
+    const entries = await writeAndParseEntries(harness.records());
+    expect(entries.length).toBeGreaterThan(0);
+    for (const entry of entries) {
+      for (const key of COMMS_SLOT_KEYS) {
+        expect(key in entry, `${key} must be absent when the flag is off`).toBe(
+          false,
+        );
+      }
+    }
   });
 });
 
