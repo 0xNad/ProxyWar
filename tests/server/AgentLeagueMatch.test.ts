@@ -5,27 +5,24 @@ import { fileURLToPath } from "url";
 import { describe, expect, it, vi } from "vitest";
 import { Logger } from "winston";
 
-vi.mock(
-  "../../src/core/configuration/ConfigLoader",
-  async (importOriginal) => {
-    const actual =
-      await importOriginal<
-        typeof import("../../src/core/configuration/ConfigLoader")
-      >();
-    return {
-      ...actual,
-      getServerConfigFromServer: () => ({
-        otelEnabled: () => false,
-        otelAuthHeader: () => "",
-        otelEndpoint: () => "",
-        env: () => 0,
-      }),
-      getServerConfig: () => ({
-        otelEnabled: () => false,
-      }),
-    };
-  },
-);
+vi.mock("../../src/core/configuration/ConfigLoader", async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import("../../src/core/configuration/ConfigLoader")
+    >();
+  return {
+    ...actual,
+    getServerConfigFromServer: () => ({
+      otelEnabled: () => false,
+      otelAuthHeader: () => "",
+      otelEndpoint: () => "",
+      env: () => 0,
+    }),
+    getServerConfig: () => ({
+      otelEnabled: () => false,
+    }),
+  };
+});
 
 import { GameEnv, ServerConfig } from "../../src/core/configuration/Config";
 import { Executor } from "../../src/core/execution/ExecutionManager";
@@ -63,20 +60,20 @@ import {
   PlannerExecutorAgentBrain,
 } from "../../src/server/agents/AgentPlannerExecutor";
 import { runAgentStepLockedLeague } from "../../src/server/agents/AgentStepLockedLeague";
-import { ExternalHttpAgentBrain } from "../../src/server/agents/ExternalHttpAgentBrain";
-import { ExternalRelayAgentBrain } from "../../src/server/agents/ExternalRelayAgentBrain";
-import { LlmAgentBrain } from "../../src/server/agents/LlmAgentBrain";
-import { LlmProvider } from "../../src/server/agents/LlmProvider";
-import {
-  buildSpawnLegalAction,
-  LegalActionBuilder,
-} from "../../src/server/agents/LegalActionBuilder";
-import { MockLlmProvider } from "../../src/server/agents/MockLlmProvider";
 import {
   AgentBrain,
   AgentDecision,
   LegalAction,
 } from "../../src/server/agents/AgentTypes";
+import { ExternalHttpAgentBrain } from "../../src/server/agents/ExternalHttpAgentBrain";
+import { ExternalRelayAgentBrain } from "../../src/server/agents/ExternalRelayAgentBrain";
+import {
+  buildSpawnLegalAction,
+  LegalActionBuilder,
+} from "../../src/server/agents/LegalActionBuilder";
+import { LlmAgentBrain } from "../../src/server/agents/LlmAgentBrain";
+import { LlmProvider } from "../../src/server/agents/LlmProvider";
+import { MockLlmProvider } from "../../src/server/agents/MockLlmProvider";
 import { GameServer } from "../../src/server/GameServer";
 import { setup } from "../util/Setup";
 
@@ -178,9 +175,9 @@ describe("AgentLeagueMatchRunner", () => {
         ...agentStrategyProfiles,
       ]);
       expect(records.every((record) => record.result.accepted)).toBe(true);
-      expect(
-        records.every((record) => (record.reason?.length ?? 0) > 0),
-      ).toBe(true);
+      expect(records.every((record) => (record.reason?.length ?? 0) > 0)).toBe(
+        true,
+      );
       expect(records.every((record) => record.legalActionIDs.length > 0)).toBe(
         true,
       );
@@ -605,9 +602,7 @@ describe("AgentLeagueMatchRunner", () => {
             _gameState: unknown,
             callback: () => T,
           ): T => callback(),
-          build: (
-            input: Parameters<AgentObservationBuilder["build"]>[0],
-          ) => {
+          build: (input: Parameters<AgentObservationBuilder["build"]>[0]) => {
             if (input.username === "Slow Build Agent") {
               expect(policyStarted).toHaveBeenCalledTimes(1);
               vi.advanceTimersByTime(1_000);
@@ -827,11 +822,9 @@ describe("AgentLeagueMatchRunner", () => {
         "build:City:100",
         "alliance:request:RIVAL001",
       ]);
-      expect(records.map((record) => record.decisionMetadata?.batchIndex)).toEqual([
-        0,
-        1,
-        2,
-      ]);
+      expect(
+        records.map((record) => record.decisionMetadata?.batchIndex),
+      ).toEqual([0, 1, 2]);
       expect(records[0].decisionMetadata).toMatchObject({
         batchSize: 3,
         batchRejectedActionIDs: "invented:admin:kick",
@@ -1369,16 +1362,15 @@ describe("AgentLeagueMatchRunner", () => {
       observationBuilder: {
         // Passthrough batch scope (main's per-tick observation cache); the
         // spy only needs to see what recentDecisions each build receives.
-        withObservationBatch: <T,>(
-          _gameState: unknown,
-          callback: () => T,
-        ): T => callback(),
+        withObservationBatch: <T>(_gameState: unknown, callback: () => T): T =>
+          callback(),
         build: (input: Parameters<AgentObservationBuilder["build"]>[0]) => {
           recentWindows.push(input.recentDecisions?.length ?? 0);
           return realBuilder.build(input);
         },
-        summarize: (observation: Parameters<AgentObservationBuilder["summarize"]>[0]) =>
-          realBuilder.summarize(observation),
+        summarize: (
+          observation: Parameters<AgentObservationBuilder["summarize"]>[0],
+        ) => realBuilder.summarize(observation),
       } as unknown as AgentObservationBuilder,
     });
 
@@ -1628,9 +1620,7 @@ describe("AgentLeagueMatchRunner", () => {
       expect(
         spawnRecords.every((record) => record.chosenActionKind === "spawn"),
       ).toBe(true);
-      expect(spawnRecords.every((record) => record.result.accepted)).toBe(
-        true,
-      );
+      expect(spawnRecords.every((record) => record.result.accepted)).toBe(true);
       expect(
         spawnRecords.every(
           (record) => record.decisionMetadata?.spawnAssignment === true,
@@ -1685,9 +1675,9 @@ describe("AgentLeagueMatchRunner", () => {
       }
       expect(mirrorGame.inSpawnPhase()).toBe(false);
       for (const record of spawnRecords) {
-        expect(
-          mirrorGame.playerByClientID(record.clientID!)?.spawnTile(),
-        ).toBe(spawnIntent(record).tile);
+        expect(mirrorGame.playerByClientID(record.clientID!)?.spawnTile()).toBe(
+          spawnIntent(record).tile,
+        );
       }
 
       // No provider round trip means no meaningful decision latency: every
@@ -1766,12 +1756,22 @@ describe("AgentLeagueMatchRunner", () => {
   it("returns isolated datasets when the terrain cache is bypassed", async () => {
     const mapLoader = new StaticMapLoader();
     const config = { ...gameConfig, gameMapSize: GameMapSize.Compact };
-    const a = await loadTerrainMap(config.gameMap, config.gameMapSize, mapLoader, {
-      cache: false,
-    });
-    const b = await loadTerrainMap(config.gameMap, config.gameMapSize, mapLoader, {
-      cache: false,
-    });
+    const a = await loadTerrainMap(
+      config.gameMap,
+      config.gameMapSize,
+      mapLoader,
+      {
+        cache: false,
+      },
+    );
+    const b = await loadTerrainMap(
+      config.gameMap,
+      config.gameMapSize,
+      mapLoader,
+      {
+        cache: false,
+      },
+    );
     expect(a.gameMap).not.toBe(b.gameMap);
     // Mutating one uncached dataset must not leak into the other, and must not
     // poison the cached path either.
@@ -1784,6 +1784,9 @@ describe("AgentLeagueMatchRunner", () => {
       mapLoader,
     );
     expect(cached.gameMap.hasOwner(tile)).toBe(false);
+    // Three real loads of GameMapType.Asia (2.4M tiles): ~1.5s warm and alone,
+    // several seconds cold or against a loaded parallel suite. Covered by the
+    // shared 60s testTimeout in vite.config.ts rather than a local budget.
   });
 
   it("retains the turn stream on the primary seat only when asked", async () => {
@@ -1909,17 +1912,15 @@ describe("AgentLeagueMatchRunner", () => {
       }
       expect(mirrorGame.inSpawnPhase()).toBe(false);
       expect(spawnRecords).toHaveLength(4);
-      expect(spawnRecords.every((record) => record.result.accepted)).toBe(
-        true,
-      );
+      expect(spawnRecords.every((record) => record.result.accepted)).toBe(true);
       // Submitted on the very first tick, far below any boundary.
       expect(
         Math.max(...spawnRecords.map((record) => record.turnNumber)),
       ).toBeLessThan(mirrorGame.config().numSpawnPhaseTurns());
       for (const record of spawnRecords) {
-        expect(
-          mirrorGame.playerByClientID(record.clientID!)?.spawnTile(),
-        ).toBe(spawnIntent(record).tile);
+        expect(mirrorGame.playerByClientID(record.clientID!)?.spawnTile()).toBe(
+          spawnIntent(record).tile,
+        );
       }
     } finally {
       await game.end({ archive: false });
@@ -2345,19 +2346,15 @@ describe("AgentLeagueMatchRunner", () => {
       brainFactory: (spec) =>
         new LlmAgentBrain({
           provider: new MockLlmProvider({
-            mode:
-              spec.profile === "aggressive" ? "attack" : "spawn_then_hold",
+            mode: spec.profile === "aggressive" ? "attack" : "spawn_then_hold",
           }),
           profile: spec.profile,
         }),
     });
-    const game = new GameServer(
-      "AGENT006",
-      log,
-      Date.now(),
-      serverConfig,
-      { ...gameConfig, spawnImmunityDuration: 0 },
-    );
+    const game = new GameServer("AGENT006", log, Date.now(), serverConfig, {
+      ...gameConfig,
+      spawnImmunityDuration: 0,
+    });
     const match = new AgentLeagueMatchRunner({
       game,
       participants,
@@ -2497,13 +2494,10 @@ describe("AgentLeagueMatchRunner", () => {
           profile: spec.profile,
         }),
     });
-    const game = new GameServer(
-      "AGENT007",
-      log,
-      Date.now(),
-      serverConfig,
-      { ...gameConfig, startingGold: 200_000 },
-    );
+    const game = new GameServer("AGENT007", log, Date.now(), serverConfig, {
+      ...gameConfig,
+      startingGold: 200_000,
+    });
     const match = new AgentLeagueMatchRunner({
       game,
       participants,
@@ -2670,12 +2664,11 @@ describe("AgentLeagueMatchRunner", () => {
       expect(
         spawnRecords.every((record) => record.chosenActionKind === "spawn"),
       ).toBe(true);
-      expect(spawnRecords.every((record) => record.result.accepted)).toBe(
-        true,
-      );
+      expect(spawnRecords.every((record) => record.result.accepted)).toBe(true);
       expect(
         spawnRecords.every(
-          (record) => record.decisionMetadata?.rawProviderOutputPresent !== true,
+          (record) =>
+            record.decisionMetadata?.rawProviderOutputPresent !== true,
         ),
       ).toBe(true);
       expect(
@@ -2688,7 +2681,8 @@ describe("AgentLeagueMatchRunner", () => {
       const finalTiles = [...new Set(spawnRecords.map((r) => r.agentID))].map(
         (agentID) => {
           const record = spawnRecords.find((r) => r.agentID === agentID)!;
-          return result.finalGameState.playerByClientID(record.clientID!)
+          return result.finalGameState
+            .playerByClientID(record.clientID!)
             ?.spawnTile();
         },
       );
@@ -2779,9 +2773,9 @@ describe("AgentLeagueMatchRunner", () => {
           (record) => record.chosenActionKind === "spawn",
         ),
       ).toBe(true);
-      expect(result.openingRecords.every((record) => record.result.accepted)).toBe(
-        true,
-      );
+      expect(
+        result.openingRecords.every((record) => record.result.accepted),
+      ).toBe(true);
       // The ACTIVE phase hits the timing-out brain and falls back safely.
       expect(result.postSpawnRecords).toHaveLength(4);
       expect(
@@ -2827,7 +2821,8 @@ describe("AgentLeagueMatchRunner", () => {
       ).toBe(true);
       expect(
         result.postSpawnRecords.every(
-          (record) => typeof record.decisionMetadata?.fallbackReason === "string",
+          (record) =>
+            typeof record.decisionMetadata?.fallbackReason === "string",
         ),
       ).toBe(true);
     } finally {
@@ -3021,7 +3016,10 @@ describe("AgentLeagueMatchRunner", () => {
   });
 
   it("is deterministic: the same gameID, agent specs, and candidate pool reproduce identical spawn tiles across two independent runs", async () => {
-    async function runOnce(): Promise<{ tiles: number[]; accepted: boolean[] }> {
+    async function runOnce(): Promise<{
+      tiles: number[];
+      accepted: boolean[];
+    }> {
       const log = makeLogger();
       const mapLoader = new StaticMapLoader();
       const config = { ...gameConfig, gameMapSize: GameMapSize.Compact };
@@ -3137,7 +3135,8 @@ describe("AgentLeagueMatchRunner", () => {
         throw new Error("expected mirror game state after the spawn phase");
       }
       expect(
-        finalGameState.playerByClientID(chosenAgent.runner.clientID()!)
+        finalGameState
+          .playerByClientID(chosenAgent.runner.clientID()!)
           ?.spawnTile(),
       ).toBe(chosenTile);
 
@@ -3178,7 +3177,9 @@ describe("AgentLeagueMatchRunner", () => {
       const outDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-e2e-"));
       const outPath = path.join(outDir, "game-record.json");
       fs.writeFileSync(outPath, JSON.stringify(partialRecord, null, 2));
-      const reloaded = JSON.parse(fs.readFileSync(outPath, "utf8")) as typeof partialRecord;
+      const reloaded = JSON.parse(
+        fs.readFileSync(outPath, "utf8"),
+      ) as typeof partialRecord;
       const reloadedSpawnIntents = reloaded.turns
         .flatMap((turn: { intents: StampedIntent[] }) => turn.intents)
         .filter(
@@ -3373,7 +3374,10 @@ class StaticMapLoader implements GameMapLoader {
 
   constructor() {
     const currentFile = fileURLToPath(import.meta.url);
-    this.rootDir = path.resolve(path.dirname(currentFile), "../../resources/maps");
+    this.rootDir = path.resolve(
+      path.dirname(currentFile),
+      "../../resources/maps",
+    );
   }
 
   getMapData(map: GameMapType): MapData {
@@ -3565,7 +3569,10 @@ describe("AgentLeagueMatchRunner manual-clock determinism", () => {
     // exact artifact that diverged in the original bug: a wall-clock
     // mark_disconnected intent landed on a load-dependent turn. With the fix it
     // is purely agent-driven, so two same-seed manual-clock runs are identical.
-    const runOnce = async (): Promise<{ opening: string[]; turns: string[] }> => {
+    const runOnce = async (): Promise<{
+      opening: string[];
+      turns: string[];
+    }> => {
       const log = makeLogger();
       const mapLoader = new StaticMapLoader();
       const config = { ...gameConfig, gameMapSize: GameMapSize.Compact };

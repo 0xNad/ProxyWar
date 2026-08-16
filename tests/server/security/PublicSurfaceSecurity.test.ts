@@ -14,7 +14,7 @@
  * live process, not a unit test of the gating function in isolation.
  */
 import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { promises as fs } from "node:fs";
+import { existsSync, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -25,6 +25,43 @@ const execFileAsync = promisify(execFile);
 const REPO_ROOT = path.resolve(__dirname, "../../..");
 const PORT = 18787;
 const ORIGIN = `http://127.0.0.1:${PORT}`;
+
+/**
+ * `static/public.html` is a Vite build output (`npm run build-prod`), and
+ * `npm test` never builds. CI does: `ci.yml` builds it in the `build` job and
+ * every test shard restores it via the "Download static app shell" step before
+ * running vitest — so a shell missing *in CI* is a real failure, not a local
+ * prerequisite gap, and must stop the run rather than quietly skip.
+ *
+ * Without the shell, `sendPublicAppShellPage()` cannot read the file and
+ * answers 503. That surfaced as eight opaque `expected 503 to be 200`
+ * assertions that read like a product regression on a fresh checkout. Skipping
+ * the shell-dependent blocks locally, with a pointer to the build command,
+ * keeps the failure honest; every assertion that does not need the shell
+ * (the anonymous-access gate, the mutating-endpoint blocks, the public-JSON
+ * field audits) still runs.
+ *
+ * Deliberately a skip, not a stub shell: the OG/spoiler-safety test asserts
+ * the raw HTML never contains the winner name, which a placeholder would
+ * satisfy vacuously — a green test protecting nothing is worse than a
+ * declared skip.
+ */
+const APP_SHELL_PATH = path.join(REPO_ROOT, "static", "public.html");
+const APP_SHELL_BUILT = existsSync(APP_SHELL_PATH);
+
+if (!APP_SHELL_BUILT && process.env.CI) {
+  throw new Error(
+    `Missing ${APP_SHELL_PATH}: CI must restore the static app shell artifact before this suite runs.`,
+  );
+}
+if (!APP_SHELL_BUILT) {
+  console.warn(
+    `[PublicSurfaceSecurity] ${APP_SHELL_PATH} is not built — skipping the app-shell-dependent blocks. Run \`npm run build-prod\` first to exercise them.`,
+  );
+}
+
+/** `describe` for blocks that need the built public app shell to answer 200. */
+const describeWithAppShell = APP_SHELL_BUILT ? describe : describe.skip;
 
 let fixtureRoot: string;
 let serverProcess: ChildProcess | null = null;
@@ -198,14 +235,27 @@ describe("decisions.jsonl and visual-report.html stay 404 on every public surfac
   });
 });
 
+// `/league` is served by the league wrapper, not `sendPublicAppShellPage()`,
+// so it stays reachable without a build — `waitForOrigin()` already depends on
+// that. The other four are public-app-shell pages; see APP_SHELL_BUILT.
+describeWithAppShell(
+  "public app-shell routes stay reachable (sanity — the gate isn't over-blocking)",
+  () => {
+    test.each(["/watch", "/agents", "/builders", "/build"])(
+      "GET %s returns 200",
+      async (route) => {
+        const response = await fetch(`${ORIGIN}${route}`);
+        expect(response.status).toBe(200);
+      },
+    );
+  },
+);
+
 describe("genuinely public routes stay reachable (sanity — the gate isn't over-blocking)", () => {
-  test.each(["/league", "/watch", "/agents", "/builders", "/build"])(
-    "GET %s returns 200",
-    async (route) => {
-      const response = await fetch(`${ORIGIN}${route}`);
-      expect(response.status).toBe(200);
-    },
-  );
+  test.each(["/league"])("GET %s returns 200", async (route) => {
+    const response = await fetch(`${ORIGIN}${route}`);
+    expect(response.status).toBe(200);
+  });
 
   test("POST /api/build/funnel-event (the one genuinely public POST route) succeeds", async () => {
     const response = await fetch(`${ORIGIN}/api/build/funnel-event`, {
@@ -326,59 +376,65 @@ describe("GET /api/matches/:episodeId (league-episode match page) never carries 
   });
 });
 
-describe("/match/:matchId page shell (OG/social metadata) is spoiler-safe for a league episode", () => {
-  test("the raw, un-hydrated HTML never contains the episode's own winner name in <title>/description/og:*", async () => {
-    const response = await fetch(
-      `${ORIGIN}/match/${encodeURIComponent(ORDINARY_EPISODE.episodeRequestId)}`,
-    );
-    expect(response.status).toBe(200);
-    const html = await response.text();
-    expect(html).not.toContain(`${ORDINARY_EPISODE.winnerName} wins`);
-    expect(html.toLowerCase()).not.toContain("winner:");
-  });
-});
+describeWithAppShell(
+  "/match/:matchId page shell (OG/social metadata) is spoiler-safe for a league episode",
+  () => {
+    test("the raw, un-hydrated HTML never contains the episode's own winner name in <title>/description/og:*", async () => {
+      const response = await fetch(
+        `${ORIGIN}/match/${encodeURIComponent(ORDINARY_EPISODE.episodeRequestId)}`,
+      );
+      expect(response.status).toBe(200);
+      const html = await response.text();
+      expect(html).not.toContain(`${ORDINARY_EPISODE.winnerName} wins`);
+      expect(html.toLowerCase()).not.toContain("winner:");
+    });
+  },
+);
 
-describe("status-code parity: a not-found /match|/agent|/builder page returns a real 404, not a 200 for content whose only body is 'not found' (P2, 2026-08-02)", () => {
-  test("GET /match/:matchId returns 200 for a real fixture episode, 404 for an unknown id — same HTML app-shell body either way", async () => {
-    const found = await fetch(
-      `${ORIGIN}/match/${encodeURIComponent(ORDINARY_EPISODE.episodeRequestId)}`,
-    );
-    expect(found.status).toBe(200);
-    const notFound = await fetch(
-      `${ORIGIN}/match/${encodeURIComponent("ereq_totally-unknown-id")}`,
-    );
-    expect(notFound.status).toBe(404);
-    // The client-rendered not-found UX is unchanged — same app shell body,
-    // only the transport-level status code differs.
-    const notFoundBody = await notFound.text();
-    expect(notFoundBody).toContain("<!doctype html>");
-    expect(notFoundBody).toContain("window.ASSET_MANIFEST");
-    expect(notFoundBody).not.toContain("Cannot GET");
-  });
+describeWithAppShell(
+  "status-code parity: a not-found /match|/agent|/builder page returns a real 404, not a 200 for content whose only body is 'not found' (P2, 2026-08-02)",
+  () => {
+    test("GET /match/:matchId returns 200 for a real fixture episode, 404 for an unknown id — same HTML app-shell body either way", async () => {
+      const found = await fetch(
+        `${ORIGIN}/match/${encodeURIComponent(ORDINARY_EPISODE.episodeRequestId)}`,
+      );
+      expect(found.status).toBe(200);
+      const notFound = await fetch(
+        `${ORIGIN}/match/${encodeURIComponent("ereq_totally-unknown-id")}`,
+      );
+      expect(notFound.status).toBe(404);
+      // The client-rendered not-found UX is unchanged — same app shell body,
+      // only the transport-level status code differs.
+      const notFoundBody = await notFound.text();
+      expect(notFoundBody).toContain("<!doctype html>");
+      expect(notFoundBody).toContain("window.ASSET_MANIFEST");
+      expect(notFoundBody).not.toContain("Cannot GET");
+    });
 
-  test("GET /agent/:slug returns 200 for a real fixture agent, 404 for an unknown slug", async () => {
-    const found = await fetch(`${ORIGIN}/agent/fixture-cyan-hellstar`);
-    expect(found.status).toBe(200);
-    const notFound = await fetch(
-      `${ORIGIN}/agent/totally-unknown-agent-slug-9f3c1a`,
-    );
-    expect(notFound.status).toBe(404);
-    const notFoundBody = await notFound.text();
-    expect(notFoundBody).toContain("<!doctype html>");
-    expect(notFoundBody).toContain("window.ASSET_MANIFEST");
-    expect(notFoundBody).not.toContain("Cannot GET");
-  });
+    test("GET /agent/:slug returns 200 for a real fixture agent, 404 for an unknown slug", async () => {
+      const found = await fetch(`${ORIGIN}/agent/fixture-cyan-hellstar`);
+      expect(found.status).toBe(200);
+      const notFound = await fetch(
+        `${ORIGIN}/agent/totally-unknown-agent-slug-9f3c1a`,
+      );
+      expect(notFound.status).toBe(404);
+      const notFoundBody = await notFound.text();
+      expect(notFoundBody).toContain("<!doctype html>");
+      expect(notFoundBody).toContain("window.ASSET_MANIFEST");
+      expect(notFoundBody).not.toContain("Cannot GET");
+    });
 
-  test("GET /builder/:slug returns 200 for a real fixture builder, 404 for an unknown slug", async () => {
-    const found = await fetch(`${ORIGIN}/builder/fixture-ada`);
-    expect(found.status).toBe(200);
-    const notFound = await fetch(
-      `${ORIGIN}/builder/totally-unknown-builder-slug-9f3c1a`,
-    );
-    expect(notFound.status).toBe(404);
-    const notFoundBody = await notFound.text();
-    expect(notFoundBody).toContain("<!doctype html>");
-    expect(notFoundBody).toContain("window.ASSET_MANIFEST");
-    expect(notFoundBody).not.toContain("Cannot GET");
-  });
-});
+    test("GET /builder/:slug returns 200 for a real fixture builder, 404 for an unknown slug", async () => {
+      const found = await fetch(`${ORIGIN}/builder/fixture-ada`);
+      expect(found.status).toBe(200);
+      const notFound = await fetch(
+        `${ORIGIN}/builder/totally-unknown-builder-slug-9f3c1a`,
+      );
+      expect(notFound.status).toBe(404);
+      const notFoundBody = await notFound.text();
+      expect(notFoundBody).toContain("<!doctype html>");
+      expect(notFoundBody).toContain("window.ASSET_MANIFEST");
+      expect(notFoundBody).not.toContain("Cannot GET");
+    });
+  },
+);
