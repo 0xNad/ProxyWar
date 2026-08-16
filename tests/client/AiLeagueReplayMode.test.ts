@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   aiLeagueSpectatorDisplayName,
   aiLeagueSpectatorText,
+  isAiLeagueNativeSpectatorUiEnabled,
   isAiLeagueReplayRoute,
   isReplayPremiereRoute,
 } from "../../src/client/AiLeagueReplayMode";
@@ -92,5 +93,77 @@ describe("AiLeagueReplayMode anonymization (P0 fix, deploy 2B: 'Hidden Names' le
     const text = aiLeagueSpectatorText("daveey strikes relh");
     expect(text).toContain(anonymized);
     expect(text).not.toContain("daveey");
+  });
+});
+
+// The broadcast skin (pinned leaderboard, lower third, analyst drawer, and the
+// body.ai-league-native-spectator-ui CSS in GameRenderer) shipped default-ON
+// keyed on the static-replay bundle and the /client/* Coworld routes. That made
+// a Coworld-served replay and a proxywar.xyz-served replay of the SAME match
+// look like different products: our own routes fell back to a bare map. These
+// pin the skin to the replay route itself.
+describe("AiLeagueReplayMode native spectator UI", () => {
+  const originalLocation = window.location;
+
+  function atUrl(pathname: string, search = ""): void {
+    Object.defineProperty(window, "location", {
+      value: { ...originalLocation, pathname, search },
+      writable: true,
+      configurable: true,
+    });
+  }
+
+  afterEach(() => {
+    Object.defineProperty(window, "location", {
+      value: originalLocation,
+      writable: true,
+      configurable: true,
+    });
+    delete window.__PROXYWAR_STATIC_REPLAY__;
+  });
+
+  it("is on for ProxyWar's own league replay route, not just the Coworld one", () => {
+    atUrl("/ai-league-replay/league-coworld-2026-08-15T23-20-11-358Z-f7195ab9");
+    expect(isAiLeagueNativeSpectatorUiEnabled()).toBe(true);
+  });
+
+  it("stays on for the Coworld-served replay and player routes", () => {
+    atUrl("/client/replay");
+    expect(isAiLeagueNativeSpectatorUiEnabled()).toBe(true);
+
+    atUrl("/client/player");
+    expect(isAiLeagueNativeSpectatorUiEnabled()).toBe(true);
+  });
+
+  it("stays on for the static replay bundle, which has no recognizable path", () => {
+    atUrl("/index.html");
+    window.__PROXYWAR_STATIC_REPLAY__ = true;
+    expect(isAiLeagueNativeSpectatorUiEnabled()).toBe(true);
+  });
+
+  it("is on for premieres and the legacy replay paths", () => {
+    for (const pathname of [
+      "/premiere/prem_0123456789abcdef",
+      "/proxywar-replay/some-match",
+      "/openfront-replay/some-match",
+    ]) {
+      atUrl(pathname);
+      expect(isAiLeagueNativeSpectatorUiEnabled()).toBe(true);
+    }
+  });
+
+  it("still honors the ?native-spectator-ui=0 opt-out on our own routes", () => {
+    atUrl("/ai-league-replay/some-match", "?native-spectator-ui=0");
+    expect(isAiLeagueNativeSpectatorUiEnabled()).toBe(false);
+  });
+
+  it("is off everywhere that is not a replay", () => {
+    for (const pathname of ["/", "/league", "/watch", "/build"]) {
+      atUrl(pathname);
+      expect(isAiLeagueNativeSpectatorUiEnabled()).toBe(false);
+    }
+    // Not even with the explicit opt-in — a live game is not a broadcast.
+    atUrl("/league", "?native-spectator-ui=1");
+    expect(isAiLeagueNativeSpectatorUiEnabled()).toBe(false);
   });
 });
