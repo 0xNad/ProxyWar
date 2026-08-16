@@ -214,6 +214,18 @@ export default defineConfig(({ mode }) => {
       globals: true,
       environment: "jsdom",
       setupFiles: "./tests/setup.ts",
+      // Matches the 60s that CI already enforces. Every CI test job runs
+      // `npm run test:coverage` (or `test:e2e`), and both pass
+      // `--testTimeout=60000` on the command line — so CI has never exercised
+      // these suites at vitest's 5s default. Only the local `npm test` script
+      // (no timeout flag) did, which is why a fresh checkout could fail tests
+      // that CI reported green: heavy suites spawn real subprocesses and load
+      // real maps, and lose to 5s on a cold or loaded machine.
+      //
+      // A CLI `--testTimeout` still overrides this, so test:coverage and
+      // test:e2e keep their existing 60s and CI behaviour is unchanged. This
+      // only raises the floor for `npm test`, making local and CI agree.
+      testTimeout: 60_000,
       alias: {
         // The exported Coworld starter owns this runtime dependency in its
         // nested package.json. Root CI intentionally installs only the root

@@ -1784,11 +1784,10 @@ describe("AgentLeagueMatchRunner", () => {
       mapLoader,
     );
     expect(cached.gameMap.hasOwner(tile)).toBe(false);
-    // Three real loads of GameMapType.Asia (2.4M tiles). ~1.5s warm and alone,
-    // but past vitest's 5s default on a cold checkout or against the parallel
-    // workers of a full `npm test` — it timed out in both. Every other heavy
-    // test in this file already carries an explicit budget.
-  }, 60_000);
+    // Three real loads of GameMapType.Asia (2.4M tiles): ~1.5s warm and alone,
+    // several seconds cold or against a loaded parallel suite. Covered by the
+    // shared 60s testTimeout in vite.config.ts rather than a local budget.
+  });
 
   it("retains the turn stream on the primary seat only when asked", async () => {
     const log = makeLogger();
