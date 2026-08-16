@@ -715,7 +715,7 @@ def test_qualifier_schedule_stamps_episode_index_overrides() -> None:
 
 
 @pytest.mark.parametrize("path", ["competition", "qualifier"])
-def test_per_episode_indices_are_consecutive_within_a_round(path: str) -> None:
+def test_spawn_priority_indices_are_consecutive_within_a_round(path: str) -> None:
     if path == "competition":
         round_start = _with_full_ladder(competition_round_start(4))
         round_start.round_number = 1
@@ -727,66 +727,109 @@ def test_per_episode_indices_are_consecutive_within_a_round(path: str) -> None:
     indices = [
         episode.game_config_overrides["episodeIndex"] for episode in scheduled.episodes
     ]
-    n = len(indices)
-    assert n > 0
-    expected = list(range(indices[0], indices[0] + n))
-    assert indices == expected, (
-        f"episode indices within one round must be consecutive; got {indices}"
+    assert indices
+    assert indices == list(range(indices[0], indices[0] + len(indices))), (
+        "each episode is the next occurrence of this variant and must advance "
+        f"username-sorted spawn priority exactly once: got {indices}"
     )
 
 
-def test_episode_index_advances_across_comparable_rounds_never_resets() -> None:
-    # "Comparable" here means the same champion field -> the same ladder rung
-    # -> the same per-round episode count, the documented precondition for
-    # the rotation to stay aligned round over round.
-    round_start = _with_full_ladder(competition_round_start(4))
+def test_episode_index_advances_when_the_same_map_recurs() -> None:
+    round_start = competition_round_start(4)
+    round_start.variants = [
+        VariantInfo(
+            id=variant_id,
+            name=variant_id,
+            game_config={"num_agents": 4},
+        )
+        for variant_id in (
+            "tournament-4p-pangaea",
+            "tournament-4p-asia",
+            "tournament-4p-europe",
+        )
+    ]
 
-    round_start.round_number = 5
+    # The four-player rung has three maps. Round 1 and round 4 therefore use
+    # the same variant, with occurrence indices 0 and 1 respectively.
+    round_start.round_number = 1
     first_round = commissioner().schedule_episodes_for_round_start(round_start)
     first_indices = [
         episode.game_config_overrides["episodeIndex"]
         for episode in first_round.episodes
     ]
 
-    round_start.round_number = 6
+    round_start.round_number = 4
     second_round = commissioner().schedule_episodes_for_round_start(round_start)
     second_indices = [
         episode.game_config_overrides["episodeIndex"]
         for episode in second_round.episodes
     ]
 
-    assert len(first_indices) == len(second_indices), (
-        "this test's premise requires two comparable (same-width) rounds"
-    )
-    assert min(second_indices) > max(first_indices), (
-        "the next equivalent round must advance the episode index, never reset it: "
-        f"round 5 -> {first_indices}, round 6 -> {second_indices}"
+    assert first_round.episodes[0].variant_id == second_round.episodes[0].variant_id
+    assert first_indices == list(range(len(first_indices)))
+    assert second_indices == list(
+        range(len(first_indices), len(first_indices) + len(second_indices))
     )
 
 
-def test_n_indices_rotate_a_fixed_roster_through_n_slots() -> None:
-    # For any single round of N episodes, `_with_episode_index` assigns N
-    # CONSECUTIVE integers (proven by the consecutiveness test above). N
-    # consecutive integers modulo N are, by construction, a complete
-    # residue system - i.e. exactly {0, 1, ..., N-1} in some order. That
-    # mod-N value is what `AgentSpawnAssignment.spawnSlotForRosterIndex`
-    # uses on the ProxyWar side to pick a roster's fairness slot, so this
-    # proves a fixed N-seat roster rotates through every one of its N
-    # slots across N consecutive occurrences of a same-width round.
-    round_start = _with_full_ladder(competition_round_start(4))
-    round_start.round_number = 3
+def test_same_variant_indices_balance_username_priority_for_fixed_16p_roster(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from commissioners.proxywar_app import COMPETITION_LADDER
 
-    scheduled = commissioner().schedule_episodes_for_round_start(round_start)
-    indices = [
-        episode.game_config_overrides["episodeIndex"] for episode in scheduled.episodes
+    pool = dict(COMPETITION_LADDER)[16]
+    round_start = competition_round_start(16)
+    round_start.variants = [
+        VariantInfo(
+            id=variant_id,
+            name=variant_id,
+            game_config={"num_agents": 16},
+        )
+        for variant_id in pool
     ]
-    n = len(indices)
-    assert n > 0
-    residues = {index % n for index in indices}
-    assert residues == set(range(n)), (
-        f"{n} consecutive indices must cover every slot 0..{n - 1} mod {n}; "
-        f"got residues {sorted(residues)} from indices {indices}"
-    )
+    monkeypatch.setattr(ruleset_scheduling, "_round_shuffle_seed", lambda: 1234)
+
+    # AgentSpawnSelection.buildAgentSpawnPriority code-unit sorts usernames,
+    # then rotates that stable order by episodeIndex. Four episodes per round
+    # and five maps mean Pangaea's first four occurrences span indices 0..15.
+    # That is one full priority cycle for a fixed 16-player roster, regardless
+    # of the commissioner-provided seat order.
+    username_by_policy = {
+        membership.policy_version_id: f"agent-{15 - index:02d}"
+        for index, membership in enumerate(round_start.memberships)
+    }
+    ranks_by_username: dict[str, list[int]] = {
+        username: [] for username in username_by_policy.values()
+    }
+    episode_indices: list[int] = []
+    seat_orders: set[tuple[UUID, ...]] = set()
+
+    for variant_occurrence in range(4):
+        round_start.round_number = 1 + variant_occurrence * len(pool)
+        scheduled = commissioner().schedule_episodes_for_round_start(round_start)
+        assert {episode.variant_id for episode in scheduled.episodes} == {pool[0]}
+
+        for episode in scheduled.episodes:
+            seat_orders.add(tuple(episode.policy_version_ids))
+            usernames = [
+                username_by_policy[policy_id]
+                for policy_id in episode.policy_version_ids
+            ]
+            assert set(usernames) == set(ranks_by_username)
+
+            episode_index = episode.game_config_overrides["episodeIndex"]
+            episode_indices.append(episode_index)
+            stable = sorted(usernames)
+            offset = episode_index % len(stable)
+            priority = stable[offset:] + stable[:offset]
+            for rank, username in enumerate(priority):
+                ranks_by_username[username].append(rank)
+
+    assert len(seat_orders) > 1, "the proof must not rely on one fixed seat order"
+    assert episode_indices == list(range(16))
+    assert all(
+        sorted(ranks) == list(range(16)) for ranks in ranks_by_username.values()
+    ), "every username must occupy every report-independent priority rank once"
 
 
 def test_with_episode_index_preserves_existing_overrides() -> None:
@@ -810,15 +853,17 @@ def test_with_episode_index_preserves_existing_overrides() -> None:
         ]
     )
 
-    stamped = ProxyWarCommissioner._with_episode_index(schedule, round_number=1)
+    stamped = ProxyWarCommissioner._with_episode_index(
+        schedule, variant_round_occurrence_index=3
+    )
 
     assert stamped.episodes[0].game_config_overrides == {
         "existing_flag": "keep-me",
-        "episodeIndex": 0,
+        "episodeIndex": 6,
         "seed": 1,
     }
     assert stamped.episodes[1].game_config_overrides == {
-        "episodeIndex": 1,
+        "episodeIndex": 7,
         "seed": 2,
     }
 

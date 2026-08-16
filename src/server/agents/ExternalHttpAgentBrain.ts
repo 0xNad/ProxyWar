@@ -15,6 +15,7 @@ import {
   AgentStrategyProfile,
   LegalAction,
 } from "./AgentTypes";
+import { MAX_SPAWN_PREFERENCE_ACTION_IDS } from "./AgentWireProtocol";
 import {
   fetchExternalAgentWithPolicy,
   normalizeExternalAgentEndpointUrl,
@@ -78,6 +79,9 @@ export interface ExternalAgentRequest {
   };
   responseContract: {
     selectedLegalActionId: "must exactly match one offered legalActions[].id";
+    /** Spawn-only ranked ballot; advertised only on an all-spawn menu. */
+    spawnPreferenceLegalActionIds?: "optional ordered array of exact offered spawn legalActions[].id values; selectedLegalActionId must be first";
+    maxSpawnPreferences?: number;
     reason: "short human-readable string";
     confidence: "optional number from 0 to 1";
     /**
@@ -173,6 +177,11 @@ export class ExternalHttpAgentBrain implements AgentBrain {
       ...(parsed.selectedLegalActionIds !== undefined
         ? { actionIDs: parsed.selectedLegalActionIds }
         : {}),
+      ...(parsed.spawnPreferenceLegalActionIds !== undefined
+        ? {
+            spawnPreferenceActionIDs: parsed.spawnPreferenceLegalActionIds,
+          }
+        : {}),
       // Optional diplomacy slot; absent unless the endpoint sent one, so an
       // agent that never uses it is byte-for-byte unaffected. The runner's
       // validator, not this brain, decides whether it is a legal deal id.
@@ -196,7 +205,9 @@ export class ExternalHttpAgentBrain implements AgentBrain {
         parseSuccess: true,
         fallbackUsed: false,
         rawProviderOutputPresent: raw.trim().length > 0,
-        ...(parsed.confidence !== undefined ? { confidence: parsed.confidence } : {}),
+        ...(parsed.confidence !== undefined
+          ? { confidence: parsed.confidence }
+          : {}),
         externalRawOutput: truncate(raw, 1_000),
       },
     };
@@ -326,6 +337,7 @@ export function buildExternalAgentRequestPayload(
   input: AgentBrainInput,
 ): ExternalAgentRequest {
   const { observation, legalActions } = input;
+  const spawnPreferenceMenu = isSpawnPreferenceMenu(legalActions);
   return {
     protocolVersion: "proxywar-agent-v1",
     agent: {
@@ -348,15 +360,24 @@ export function buildExternalAgentRequestPayload(
       risk: action.risk,
       metadata: action.metadata,
     })),
-    decisionSupport: buildExternalAgentDecisionSupport(observation, legalActions),
+    decisionSupport: buildExternalAgentDecisionSupport(
+      observation,
+      legalActions,
+    ),
     responseContract: {
-      selectedLegalActionId:
-        "must exactly match one offered legalActions[].id",
+      selectedLegalActionId: "must exactly match one offered legalActions[].id",
+      ...(spawnPreferenceMenu
+        ? {
+            spawnPreferenceLegalActionIds:
+              "optional ordered array of exact offered spawn legalActions[].id values; selectedLegalActionId must be first" as const,
+            maxSpawnPreferences: MAX_SPAWN_PREFERENCE_ACTION_IDS,
+          }
+        : {}),
       reason: "short human-readable string",
       confidence: "optional number from 0 to 1",
       // Advertised only while the structured-deal flag is on, so the request
       // payload stays byte-identical to shipped behavior when it is off.
-      ...(structuredDealsEnabled()
+      ...(structuredDealsEnabled() && !spawnPreferenceMenu
         ? {
             selectedDealActionId:
               "optional; must exactly match one offered deal_* legalActions[].id",
@@ -365,7 +386,7 @@ export function buildExternalAgentRequestPayload(
       // Same rule for the comms slot: advertised only while the free-text flag
       // is on. Without this a builder could only discover the channel by
       // reading MESSAGES.md, which is how a feature ships and stays unused.
-      ...(freeTextMessagesEnabled()
+      ...(freeTextMessagesEnabled() && !spawnPreferenceMenu
         ? {
             selectedMessageActionId:
               "optional; must exactly match one offered message: legalActions[].id",
@@ -375,6 +396,13 @@ export function buildExternalAgentRequestPayload(
         : {}),
     },
   };
+}
+
+function isSpawnPreferenceMenu(legalActions: LegalAction[]): boolean {
+  return (
+    legalActions.length > 0 &&
+    legalActions.every((action) => action.kind === "spawn")
+  );
 }
 
 export function buildExternalAgentDecisionSupport(

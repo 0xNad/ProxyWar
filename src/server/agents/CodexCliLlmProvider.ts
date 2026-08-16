@@ -4,6 +4,7 @@ import fs from "fs/promises";
 import os from "os";
 import path from "path";
 import { legalActionKinds } from "./AgentTypes";
+import { MAX_SPAWN_PREFERENCE_ACTION_IDS } from "./AgentWireProtocol";
 import { LlmProvider, LlmProviderConfigError } from "./LlmProvider";
 
 export interface CodexCliCommandInput {
@@ -78,6 +79,17 @@ const codexDecisionSchema = {
     selectedLegalActionId: {
       type: "string",
       minLength: 1,
+    },
+    spawnPreferenceLegalActionIds: {
+      type: "array",
+      minItems: 1,
+      maxItems: MAX_SPAWN_PREFERENCE_ACTION_IDS,
+      uniqueItems: true,
+      items: {
+        type: "string",
+        minLength: 1,
+        maxLength: 200,
+      },
     },
     reason: {
       type: "string",
@@ -393,7 +405,10 @@ export class CodexCliLlmProvider implements LlmProvider {
   }
 
   async complete(prompt: string): Promise<string> {
-    if (this.transport() === "app-server" && this.appServerDisabledReason === null) {
+    if (
+      this.transport() === "app-server" &&
+      this.appServerDisabledReason === null
+    ) {
       try {
         return await this.completeViaAppServer(prompt);
       } catch (error) {
@@ -590,8 +605,9 @@ export function loadCodexCliLlmProviderConfig(
     profile: optionalNonEmpty(env.AI_LEAGUE_CODEX_PROFILE),
     transport: codexCliTransportFromEnv(env),
     appServerFallbackToExec:
-      optionalNonEmpty(env.AI_LEAGUE_CODEX_APP_SERVER_FALLBACK)?.toLowerCase() !==
-      "false",
+      optionalNonEmpty(
+        env.AI_LEAGUE_CODEX_APP_SERVER_FALLBACK,
+      )?.toLowerCase() !== "false",
     appServerIdleCloseMs: positiveIntegerEnv(
       env,
       "AI_LEAGUE_CODEX_APP_SERVER_IDLE_CLOSE_MS",
@@ -637,9 +653,7 @@ interface PendingCodexAppServerTurn {
   reject: (error: Error) => void;
 }
 
-class StdioCodexAppServerCompletionClient
-  implements CodexAppServerCompletionClient
-{
+class StdioCodexAppServerCompletionClient implements CodexAppServerCompletionClient {
   private child: ChildProcessWithoutNullStreams | null = null;
   private startPromise: Promise<void> | null = null;
   private stdoutBuffer = "";
@@ -647,7 +661,10 @@ class StdioCodexAppServerCompletionClient
   private command: string | null = null;
   private idleCloseMs = DEFAULT_CODEX_APP_SERVER_IDLE_CLOSE_MS;
   private idleCloseID: ReturnType<typeof setTimeout> | null = null;
-  private readonly pendingRequests = new Map<JsonRpcID, PendingJsonRpcRequest>();
+  private readonly pendingRequests = new Map<
+    JsonRpcID,
+    PendingJsonRpcRequest
+  >();
   private readonly pendingTurns = new Map<string, PendingCodexAppServerTurn>();
   private exitHookInstalled = false;
 
@@ -714,7 +731,9 @@ class StdioCodexAppServerCompletionClient
     child?.kill("SIGTERM");
   }
 
-  private async ensureStarted(input: CodexAppServerCompletionInput): Promise<void> {
+  private async ensureStarted(
+    input: CodexAppServerCompletionInput,
+  ): Promise<void> {
     if (this.idleCloseID !== null) {
       clearTimeout(this.idleCloseID);
       this.idleCloseID = null;
@@ -747,7 +766,9 @@ class StdioCodexAppServerCompletionClient
       this.child = null;
       this.startPromise = null;
       this.rejectAll(
-        new Error(`Codex app-server exited with code ${exitCode ?? "unknown"}.`),
+        new Error(
+          `Codex app-server exited with code ${exitCode ?? "unknown"}.`,
+        ),
       );
     });
     if (!this.exitHookInstalled) {
@@ -849,7 +870,9 @@ class StdioCodexAppServerCompletionClient
         if (error !== undefined && error !== null) {
           clearTimeout(timeoutID);
           this.pendingRequests.delete(id);
-          reject(errorWithCause("Codex app-server request write failed.", error));
+          reject(
+            errorWithCause("Codex app-server request write failed.", error),
+          );
         }
       });
     });

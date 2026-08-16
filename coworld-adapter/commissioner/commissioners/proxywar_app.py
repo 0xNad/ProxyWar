@@ -103,13 +103,14 @@ class ProxyWarCommissioner(RulesetStrategyCommissioner):
             # game_config.num_agents (the "qualifier" variant, always variants[0]) resolves
             # normally through view.variant().
             return self._with_episode_index(
-                super().schedule_episodes_for_round_start(round_start), round_number
+                super().schedule_episodes_for_round_start(round_start),
+                max(round_number, 1) - 1,
             )
 
         rule = select_rule(config, view.current_division, view.memberships)
         entries = view.entries(rule)
         available_variant_ids = {variant.id for variant in round_start.variants}
-        variant_id, num_agents = self._fit_ladder_rung(
+        variant_id, num_agents, variant_round_occurrence_index = self._fit_ladder_rung(
             len(entries), available_variant_ids, round_number
         )
         pool = view.pool(rule)
@@ -136,45 +137,32 @@ class ProxyWarCommissioner(RulesetStrategyCommissioner):
                 config=config,
                 recent_results=round_start.recent_results,
             ),
-            round_number,
+            variant_round_occurrence_index,
         )
 
     @staticmethod
     def _with_episode_index(
-        schedule: CommissionerScheduleEpisodes, round_number: int
+        schedule: CommissionerScheduleEpisodes, variant_round_occurrence_index: int
     ) -> CommissionerScheduleEpisodes:
-        """Stamps a stable, zero-based, round-aware `episodeIndex` onto every
-        scheduled episode's `game_config_overrides`
-        (`AgentLeagueMatchOptions.episodeIndex` on the ProxyWar side - rotates
-        which fairness-assigned spawn slot a roster lands on across repeated
-        same-map/same-roster episodes; see `AgentSpawnAssignment.ts`).
+        """Stamp consecutive same-variant spawn-priority occurrence indices.
 
-        Deterministic and stateless (no persisted counter, no hash/random,
-        and copies the request's bounded `seed` into the game config so the
-        adapter applies and reports the same deterministic identity. `base` is
-        this round's zero-based ordinal
-        (round_number 1 -> base 0, the same anchoring `_fit_ladder_rung`
-        already uses for its own pool rotation) times THIS round's own
-        episode count, so episode `i` within the round gets `base + i` -
-        consecutive integers, which for any `N` in-round episodes form a
-        complete residue system mod `N`. Round over round this strictly
-        advances (never resets to 0) as `round_number` increases, so a
-        roster that keeps landing at the same episode position across
-        comparable rounds still keeps rotating through every fairness slot
-        instead of replaying slot 0 forever.
+        Spawn priority is computed from sorted unique usernames, not seat
+        position, so every scheduled episode can advance the report-independent
+        rotation without aliasing against shuffled-window seating. For a fixed
+        roster and map, same-variant round occurrence `k` begins at
+        `k * episode_count`; the episodes in that round then receive the next
+        consecutive indices. Repeated comparable rounds therefore continue one
+        deterministic priority cycle instead of resetting or holding one
+        priority order for the entire round.
 
-        Assumption (documented, not enforced here): the modular alignment
-        with a specific prior round's rotation is only guaranteed while
-        comparable rounds (same map/roster) keep the SAME per-round episode
-        count. A ladder/pool change that alters the count between rounds
-        still never repeats an exact (base, position) pair - so it can
-        never silently replay history - it just starts a new local residue
-        cycle at the new width.
+        `episodeIndex` remains the additive game-config wire field consumed by
+        AgentLeagueMatch. The request's bounded seed is copied unchanged so the
+        adapter applies and reports the same deterministic episode identity.
         """
         episode_count = len(schedule.episodes)
         if episode_count == 0:
             return schedule
-        base = (max(round_number, 1) - 1) * episode_count
+        first_episode_index = variant_round_occurrence_index * episode_count
         return schedule.model_copy(
             update={
                 "episodes": [
@@ -182,7 +170,7 @@ class ProxyWarCommissioner(RulesetStrategyCommissioner):
                         update={
                             "game_config_overrides": {
                                 **episode.game_config_overrides,
-                                "episodeIndex": base + position,
+                                "episodeIndex": first_episode_index + position,
                                 "seed": episode.seed,
                             }
                         }
@@ -194,7 +182,7 @@ class ProxyWarCommissioner(RulesetStrategyCommissioner):
 
     def _fit_ladder_rung(
         self, champion_count: int, available_variant_ids: set[str], round_number: int
-    ) -> tuple[str, int]:
+    ) -> tuple[str, int, int]:
         ladder = [
             (seats, pool)
             for seats, variant_pool in COMPETITION_LADDER
@@ -214,7 +202,12 @@ class ProxyWarCommissioner(RulesetStrategyCommissioner):
         # Rotate the rung's map pool by round number: deterministic, stateless, and a
         # season sweeps every declared map. Anchored so round 1 (and the certifier's
         # round_number-less probe) lands on pool[0] -- the battle-tested Pangaea config.
-        return pool[(max(round_number, 1) - 1) % len(pool)], seats
+        zero_based_round = max(round_number, 1) - 1
+        return (
+            pool[zero_based_round % len(pool)],
+            seats,
+            zero_based_round // len(pool),
+        )
 
 
 register_commissioner("proxywar_scaling", ProxyWarCommissioner)

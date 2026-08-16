@@ -10,6 +10,7 @@
 // startPlayers spawn the identical file as a child process and talk
 // decision_request/decision_response JSON frames over a `/player` socket).
 import { spawn, type ChildProcess } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -23,6 +24,7 @@ type DecisionResponse = {
   type: string;
   requestID: string;
   selectedLegalActionId: string;
+  spawnPreferenceLegalActionIds?: string[];
   selectedDealActionId?: string;
   reason: string;
   confidence?: number;
@@ -53,6 +55,18 @@ const STARTER_AGENTS: Array<{
       repoRoot,
       "coworld-adapter/tester-starter-llm/starter-player.mjs",
     ),
+  },
+];
+
+const SPAWN_PREFERENCE_AGENTS = [
+  ...STARTER_AGENTS,
+  {
+    label: "canonical LLM wrapper (coworld-adapter/src/llm-player.mjs)",
+    scriptPath: path.join(here, "llm-player.mjs"),
+    extraEnv: {
+      PROXYWAR_REPO: repoRoot,
+      PROXYWAR_LLM_MOCK: "1",
+    },
   },
 ];
 
@@ -111,6 +125,7 @@ async function decisionResponseFor(
             type: "decision_request",
             requestID: "req_test1",
             slot: 0,
+            protocol: { maxSpawnPreferences: 16 },
             request: { legalActions, observation: {} },
           }),
         );
@@ -272,3 +287,69 @@ describe.each(STARTER_AGENTS)(
     }, 15000);
   },
 );
+
+describe.each(SPAWN_PREFERENCE_AGENTS)(
+  "shipped Coworld starter agent — spawn preference round ($label)",
+  (agent) => {
+    it("ranks the exact offered spawn ids deterministically from metadata and keeps the scalar first", async () => {
+      const response = await decisionResponseFor(agent, [
+        action("spawn:10", "spawn", {
+          metadata: {
+            tile: 10,
+            safetyScore: 0.5,
+            localLandScore: 0.5,
+          },
+        }),
+        action("spawn:30", "spawn", {
+          metadata: {
+            tile: 30,
+            safetyScore: 0.5,
+            localLandScore: 0.9,
+          },
+        }),
+        action("spawn:20", "spawn", {
+          metadata: {
+            tile: 20,
+            safetyScore: 0.5,
+            localLandScore: 0.7,
+          },
+        }),
+      ]);
+
+      expect(response.spawnPreferenceLegalActionIds).toEqual([
+        "spawn:30",
+        "spawn:20",
+        "spawn:10",
+      ]);
+      expect(response.selectedLegalActionId).toBe("spawn:30");
+      expect(response.reason).toContain("ranked 3 offered spawn actions");
+      expect(response).not.toHaveProperty("selectedLegalActionIds");
+      expect(response).not.toHaveProperty("selectedDealActionId");
+    }, 15000);
+  },
+);
+
+it("public LLM starter returns its spawn ballot before planning cadence or gameplay history", async () => {
+  // This public file has a production-only static Bedrock dependency that is
+  // deliberately not installed in the root test workspace. Pin the critical
+  // control-flow ordering here; the same ranking is exercised over a real
+  // websocket by the canonical LLM wrapper above.
+  const source = await readFile(
+    path.join(
+      repoRoot,
+      "coworld-adapter/tester-starter-llm/llm-player.mjs",
+    ),
+    "utf8",
+  );
+  const spawnBranch = source.indexOf(
+    "const spawnPreferences = spawnPreferenceRanking(message, actions);",
+  );
+  const buildState = source.indexOf("const state = buildState", spawnBranch);
+  const agePlan = source.indexOf("planDecisionAge += 1", spawnBranch);
+  const appendHistory = source.indexOf("history.push", spawnBranch);
+  expect(spawnBranch).toBeGreaterThan(-1);
+  expect(source.slice(spawnBranch, buildState)).toContain("return;");
+  expect(buildState).toBeGreaterThan(spawnBranch);
+  expect(agePlan).toBeGreaterThan(buildState);
+  expect(appendHistory).toBeGreaterThan(agePlan);
+});

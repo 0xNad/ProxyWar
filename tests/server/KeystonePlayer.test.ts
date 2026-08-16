@@ -1,18 +1,5 @@
 import { describe, expect, it } from "vitest";
 
-import * as plannerExecutorModule from "../../src/server/agents/AgentPlannerExecutor";
-import * as claudeCliModule from "../../src/server/agents/ClaudeCliLlmProvider";
-import { AgentObservationBuilder } from "../../src/server/agents/AgentObservationBuilder";
-import { buildExternalAgentRequestPayload } from "../../src/server/agents/ExternalHttpAgentBrain";
-import type {
-  AgentPlanDecision,
-  AgentPlanner,
-  StrategicPlan,
-} from "../../src/server/agents/AgentPlannerExecutor";
-import type {
-  AgentBrainInput,
-  LegalAction,
-} from "../../src/server/agents/AgentTypes";
 import {
   decisionRequestEnvelope,
   normalizeDecisionResponse,
@@ -25,10 +12,25 @@ import {
   isModelUnavailableError,
   keystoneModeFromEnv,
   requestToBrainInput,
+  spawnPreferenceDecision,
   transportFallbackResponse,
   wireMaxActionsPerDecision,
+  wireMaxSpawnPreferences,
   type KeystoneModules,
 } from "../../coworld-adapter/src/keystone-player";
+import { AgentObservationBuilder } from "../../src/server/agents/AgentObservationBuilder";
+import type {
+  AgentPlanDecision,
+  AgentPlanner,
+  StrategicPlan,
+} from "../../src/server/agents/AgentPlannerExecutor";
+import * as plannerExecutorModule from "../../src/server/agents/AgentPlannerExecutor";
+import type {
+  AgentBrainInput,
+  LegalAction,
+} from "../../src/server/agents/AgentTypes";
+import * as claudeCliModule from "../../src/server/agents/ClaudeCliLlmProvider";
+import { buildExternalAgentRequestPayload } from "../../src/server/agents/ExternalHttpAgentBrain";
 
 const modules: KeystoneModules = {
   plannerExecutor: plannerExecutorModule,
@@ -66,6 +68,38 @@ function spawnBrainInput(): AgentBrainInput {
     phaseOverride: "spawn",
   });
   return { observation, legalActions: spawnLegalActions() };
+}
+
+function rankedSpawnBrainInput(): AgentBrainInput {
+  return {
+    observation: { ...spawnBrainInput().observation, phase: "spawn" },
+    legalActions: [
+      {
+        id: "spawn:10",
+        kind: "spawn",
+        label: "Spawn at 10",
+        intent: { type: "spawn", tile: 10 },
+        risk: { level: "medium", score: 0.4 },
+        metadata: { tile: 10, safetyScore: 0.5, localLandScore: 0.5 },
+      },
+      {
+        id: "spawn:30",
+        kind: "spawn",
+        label: "Spawn at 30",
+        intent: { type: "spawn", tile: 30 },
+        risk: { level: "low", score: 0.2 },
+        metadata: { tile: 30, safetyScore: 0.5, localLandScore: 0.9 },
+      },
+      {
+        id: "spawn:20",
+        kind: "spawn",
+        label: "Spawn at 20",
+        intent: { type: "spawn", tile: 20 },
+        risk: { level: "medium", score: 0.3 },
+        metadata: { tile: 20, safetyScore: 0.5, localLandScore: 0.7 },
+      },
+    ],
+  };
 }
 
 /** Simulates the Coworld wire: the game serializes the canonical payload and
@@ -252,6 +286,38 @@ describe("Coworld keystone player", () => {
     expect((response.reason as string).length).toBe(500);
   });
 
+  it("ranks an all-spawn menu locally and carries the independent preference field", () => {
+    const decision = spawnPreferenceDecision(rankedSpawnBrainInput(), 16);
+    expect(decision).not.toBeNull();
+    expect(decision?.actionID).toBe("spawn:30");
+    expect(decision?.spawnPreferenceActionIDs).toEqual([
+      "spawn:30",
+      "spawn:20",
+      "spawn:10",
+    ]);
+    expect(decision?.actionIDs).toBeUndefined();
+    expect(decision?.metadata).toMatchObject({
+      externalActionCall: false,
+      fallbackUsed: false,
+    });
+
+    const response = decisionToResponse("req_spawn", decision!, 5, 16);
+    expect(response.selectedLegalActionId).toBe("spawn:30");
+    expect(response.spawnPreferenceLegalActionIds).toEqual([
+      "spawn:30",
+      "spawn:20",
+      "spawn:10",
+    ]);
+    expect(response.selectedLegalActionIds).toBeUndefined();
+  });
+
+  it("does not synthesize a spawn ranking without capability or for a mixed menu", () => {
+    expect(
+      spawnPreferenceDecision(rankedSpawnBrainInput(), undefined),
+    ).toBeNull();
+    expect(spawnPreferenceDecision(spawnBrainInput(), 16)).toBeNull();
+  });
+
   it("decisionToResponse wires an honest empty base for a fallback decision (reason: null)", () => {
     // P0 fix: an LlmAgentBrain fallback decision (the exact `brain.decide()`
     // return value this function's real caller feeds it) now carries
@@ -418,12 +484,30 @@ describe("Coworld keystone player", () => {
       }),
     ).toBe(5);
     // Older image: no protocol block at all.
-    expect(wireMaxActionsPerDecision({ type: "decision_request" })).toBeUndefined();
+    expect(
+      wireMaxActionsPerDecision({ type: "decision_request" }),
+    ).toBeUndefined();
     // Hostile/garbled shapes must not throw or fabricate a width.
     expect(wireMaxActionsPerDecision({ protocol: null })).toBeUndefined();
     expect(wireMaxActionsPerDecision({ protocol: "5" })).toBeUndefined();
     expect(
       wireMaxActionsPerDecision({ protocol: { maxActionsPerDecision: "5" } }),
+    ).toBeUndefined();
+  });
+
+  it("wireMaxSpawnPreferences reads the independent envelope advertisement defensively", () => {
+    expect(
+      wireMaxSpawnPreferences({
+        type: "decision_request",
+        protocol: { maxSpawnPreferences: 16 },
+      }),
+    ).toBe(16);
+    expect(
+      wireMaxSpawnPreferences({ type: "decision_request" }),
+    ).toBeUndefined();
+    expect(wireMaxSpawnPreferences({ protocol: null })).toBeUndefined();
+    expect(
+      wireMaxSpawnPreferences({ protocol: { maxSpawnPreferences: "16" } }),
     ).toBeUndefined();
   });
 
@@ -439,6 +523,7 @@ describe("Coworld keystone player", () => {
 
     const advertised = wireMaxActionsPerDecision(envelope);
     expect(advertised).toBe(5);
+    expect(wireMaxSpawnPreferences(envelope)).toBe(16);
 
     const response = decisionToResponse(
       "req_rt",
@@ -459,6 +544,35 @@ describe("Coworld keystone player", () => {
       "build:City:10",
       "boat:20",
     ]);
+  });
+
+  it("round-trips a spawn ballot through the advertised Coworld wire", () => {
+    const envelope = decisionRequestEnvelope({
+      requestID: "req_spawn_rt",
+      slot: 0,
+      request: {},
+    });
+    const decision = spawnPreferenceDecision(
+      rankedSpawnBrainInput(),
+      wireMaxSpawnPreferences(envelope),
+    );
+    expect(decision).not.toBeNull();
+    const response = decisionToResponse(
+      "req_spawn_rt",
+      decision!,
+      wireMaxActionsPerDecision(envelope),
+      wireMaxSpawnPreferences(envelope),
+    );
+    const parsed = normalizeDecisionResponse(
+      response as Record<string, unknown>,
+    );
+    expect(parsed.actionID).toBe("spawn:30");
+    expect(parsed.spawnPreferenceActionIDs).toEqual([
+      "spawn:30",
+      "spawn:20",
+      "spawn:10",
+    ]);
+    expect(parsed.actionIDs).toBeUndefined();
   });
 
   it("round-trips a scalar decision to a byte-identical parse (no batch key either side)", () => {
@@ -504,8 +618,8 @@ describe("Coworld keystone player", () => {
     // on a silent fallback because this branch had no loudness channel.
     const request = wireRequest(spawnBrainInput());
     const offeredIDs = (
-      (request as { legalActions: Array<{ id: string }> }).legalActions
-    ).map((action) => action.id);
+      request as { legalActions: Array<{ id: string }> }
+    ).legalActions.map((action) => action.id);
 
     const response = transportFallbackResponse(
       "req_fallback",
