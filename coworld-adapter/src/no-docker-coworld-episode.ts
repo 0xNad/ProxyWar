@@ -1229,20 +1229,23 @@ function startPlayers(
   config: CoworldConfig,
   protocolServer: CoworldProtocolServer,
 ): ChildProcess[] {
+  // Opt-in override so a local proof can drive the REAL league starter
+  // (tester-starter-llm) against this exact hosted code path instead of the
+  // bundled deterministic seat. Unset — which is always the case in the
+  // image — resolves to the bundled player, so hosted behavior is unchanged.
+  const playerScript =
+    process.env.PROXYWAR_PLAYER_SCRIPT ??
+    path.join(localRoot, "src", "starter-player.mjs");
   return config.tokens.map((_token, slot) =>
-    spawn(
-      process.execPath,
-      [path.join(localRoot, "src", "starter-player.mjs")],
-      {
-        cwd: localRoot,
-        env: {
-          ...process.env,
-          PROXYWAR_REPO: proxyWarRepo,
-          COWORLD_PLAYER_WS_URL: protocolServer.playerUrl(slot),
-        },
-        stdio: ["ignore", "pipe", "pipe"],
+    spawn(process.execPath, [playerScript], {
+      cwd: localRoot,
+      env: {
+        ...process.env,
+        PROXYWAR_REPO: proxyWarRepo,
+        COWORLD_PLAYER_WS_URL: protocolServer.playerUrl(slot),
       },
-    ).on("error", (error) => {
+      stdio: ["ignore", "pipe", "pipe"],
+    }).on("error", (error) => {
       throw error;
     }),
   );
