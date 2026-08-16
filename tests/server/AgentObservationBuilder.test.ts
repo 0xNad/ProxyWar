@@ -482,7 +482,13 @@ describe("AgentObservationBuilder build search", () => {
     internals.buildOptions(game, player);
 
     expect(tiles).toHaveBeenCalledTimes(1);
-    expect(buildSearchTiles).toHaveBeenCalledTimes(BUILD_OPTION_UNITS.length);
+    // One search per candidate. BUILD_OPTION_UNITS deliberately stays the
+    // legacy pre-warship list: the parity loop below checks that the shared
+    // search work still reproduces the legacy per-unit candidate tiles, and
+    // the restored Warship candidate has no legacy list to compare against.
+    expect(buildSearchTiles).toHaveBeenCalledTimes(
+      BUILD_OPTION_CANDIDATES.length,
+    );
     expect(hostileFrontTiles).toHaveBeenCalledTimes(1);
     expect(incomingFrontTiles).toHaveBeenCalledTimes(1);
     expect(nukeTargetTiles).toHaveBeenCalledTimes(1);

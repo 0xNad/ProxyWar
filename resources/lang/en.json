@@ -874,6 +874,7 @@
       "missile_silo": "Used to launch nukes",
       "sam_launcher": "Defends against incoming nukes",
       "port": "Sends trade ships to generate gold",
+      "warship": "Captures trade ships, destroys ships and boats",
       "defense_post": "Increases defenses of nearby borders",
       "city": "Increases max population",
       "factory": "Creates railroads and spawns trains"

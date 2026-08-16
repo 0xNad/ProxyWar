@@ -63,13 +63,13 @@ describe("englishChatFallback", () => {
 });
 
 describe("retired quick-chat compatibility", () => {
-  it("parses the historical Warship key without offering it in new menus", () => {
+  it("parses the Warship key and offers it again (warships restored 2026-08-16)", () => {
     expect(QuickChatKeySchema.safeParse("attack.build_warships").success).toBe(
       true,
     );
     expect(
       quickChatPhrases.attack.some((phrase) => phrase.key === "build_warships"),
-    ).toBe(false);
+    ).toBe(true);
   });
 });
 

@@ -109,7 +109,7 @@ describe("agent advanced warfare (directed proof, executed-with-effect)", () => 
     expect(pAgent.numTilesOwned()).toBe(before);
   });
 
-  it("WARSHIP: legacy simulation remains compatible but agents receive no warship action", async () => {
+  it("WARSHIP: restored — agents receive the warship build action again and the simulation executes warships", async () => {
     const coastX = 7;
     const agent = new PlayerInfo("Agent", PlayerType.Human, "CLNT_AGENT", "P_AGENT");
     const enemy = new PlayerInfo("Enemy", PlayerType.Human, "CLNT_ENEMY", "P_ENEMY");
@@ -129,14 +129,18 @@ describe("agent advanced warfare (directed proof, executed-with-effect)", () => 
     pAgent.buildUnit(UnitType.Port, game.ref(coastX, 10), {});
     expect(pAgent.units(UnitType.Port)).toHaveLength(1);
 
-    // PRODUCT CONTRACT: even when a legacy-compatible core game can field one,
-    // agents no longer receive a warship build or movement action.
-    const warshipActions = agentLegalActions(game).filter(
-      (a) => a.kind === "warship" || a.kind === "move_warship",
+    // PRODUCT CONTRACT (2026-08-16 operator decision reversed the 2026-08-07
+    // retirement): with an active Port and affordable cost, agents receive the
+    // warship build action again, targeting a water patrol anchor core accepts.
+    // Move affordances for an owned warship are covered in
+    // tests/server/WarshipRestoration.test.ts.
+    const warshipBuilds = agentLegalActions(game).filter(
+      (a) => a.kind === "warship",
     );
-    expect(warshipActions).toEqual([]);
+    expect(warshipBuilds.length).toBeGreaterThan(0);
 
-    // COMPATIBILITY PROOF: historical replay simulation still executes a warship.
+    // EXECUTION PROOF: a fielded warship still hunts enemy trade (also keeps
+    // historical replays with warships deterministic).
     const portTile = game.ref(coastX, 10);
     game.addExecution(
       new WarshipExecution(

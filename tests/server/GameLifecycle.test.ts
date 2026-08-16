@@ -53,7 +53,7 @@ describe("GameLifecycle", () => {
     vi.clearAllTimers();
   });
 
-  it("retires warships from every new game and cannot re-enable them", () => {
+  it("keeps the lobby's disabled units exactly as configured (warship retirement reversed 2026-08-16)", () => {
     const game = new GameServer(
       "test-game",
       mockLogger,
@@ -65,12 +65,14 @@ describe("GameLifecycle", () => {
       } as any,
     );
 
-    expect(game.gameConfig.disabledUnits).toEqual([
-      UnitType.AtomBomb,
-      UnitType.Warship,
-    ]);
+    // No forced union: the lobby config is the sole authority again.
+    expect(game.gameConfig.disabledUnits).toEqual([UnitType.AtomBomb]);
 
     game.updateGameConfig({ disabledUnits: [] });
+    expect(game.gameConfig.disabledUnits).toEqual([]);
+
+    // An explicit disable still applies for compatibility with old manifests.
+    game.updateGameConfig({ disabledUnits: [UnitType.Warship] });
     expect(game.gameConfig.disabledUnits).toEqual([UnitType.Warship]);
   });
 

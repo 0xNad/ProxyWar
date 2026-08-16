@@ -56,7 +56,7 @@ const DEFAULT_OPTIONS = {
   goldMultiplierValue: undefined as number | undefined,
   startingGold: false,
   startingGoldValue: undefined as number | undefined,
-  disabledUnits: [UnitType.Warship] as UnitType[],
+  disabledUnits: [] as UnitType[],
   disableAlliances: false,
   waterNukes: false,
 } as const;

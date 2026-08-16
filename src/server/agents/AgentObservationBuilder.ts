@@ -1,10 +1,12 @@
 import {
   BuildableAttacks,
   Game,
+  Nukes,
   Player,
   PlayerType,
   Structures,
   TerraNullius,
+  Unit,
   UnitType,
 } from "../../core/game/Game";
 import { flattenedEmojiTable } from "../../core/Util";
@@ -43,6 +45,7 @@ import {
   AgentTransportState,
   AgentUpgradeOption,
   AgentVisiblePlayer,
+  AgentWarshipMoveOption,
   RecentAgentDecision,
 } from "./AgentTypes";
 
@@ -106,10 +109,17 @@ const NEUTRAL_ISLAND_SHORE_SAMPLE_LIMIT = 48;
 export const BOAT_OPTION_LIMIT = 6;
 const BOAT_TARGET_TILE_LIMIT = 16;
 export const NEUTRAL_ISLAND_TRANSPORT_SCAN_LIMIT = 80;
+export const WARSHIP_MOVE_OPTION_LIMIT = 6;
+const WARSHIP_DEPLOY_PORT_LIMIT = 3;
+const WARSHIP_DEPLOY_SEARCH_RADIUS = 12;
+const WARSHIP_DEPLOY_TILES_PER_PORT = 8;
+const WARSHIP_DEPLOY_TILE_LIMIT = 24;
+const WARSHIP_PATROL_MIN_REPOSITION_DIST = 8;
 export const BUILD_OPTION_CANDIDATES = [
   { unit: UnitType.DefensePost, role: "defensive" },
   { unit: UnitType.City, role: "economic" },
   { unit: UnitType.Port, role: "economic" },
+  { unit: UnitType.Warship, role: "defensive" },
   { unit: UnitType.Factory, role: "economic" },
   { unit: UnitType.SAMLauncher, role: "defensive" },
   { unit: UnitType.MissileSilo, role: "infrastructure" },
@@ -648,6 +658,8 @@ export class AgentObservationBuilder {
       gameState && player ? this.deleteUnitOptions(player) : [];
     const boatOptions =
       gameState && player ? this.boatOptions(gameState, player) : [];
+    const warshipMoveOptions =
+      gameState && player ? this.warshipMoveOptions(gameState, player) : [];
     const transportStates =
       gameState && player ? this.transportStates(gameState, player) : [];
     const maximumTransportCount = gameState?.config().boatMaxNumber() ?? 0;
@@ -677,7 +689,8 @@ export class AgentObservationBuilder {
       gameState !== undefined &&
       player !== null &&
       (player.units(UnitType.MissileSilo).length > 0 ||
-        buildOptions.some((build) => BuildableAttacks.has(build.unit)));
+        // Nukes only: a Warship build option is naval, not a nuclear threat.
+        buildOptions.some((build) => Nukes.has(build.unit)));
     const quickChatOptions = this.quickChatOptions(visiblePlayers, {
       nuclearThreatReady,
     });
@@ -747,6 +760,7 @@ export class AgentObservationBuilder {
       boatOptions,
       transportStates,
       transportLaunch,
+      warshipMoveOptions,
       allianceOptions,
       targetOptions,
       emojiOptions,
@@ -881,6 +895,12 @@ export class AgentObservationBuilder {
     unit: BuildOptionUnit,
     context: BuildSearchContext,
   ): readonly number[] {
+    // Warship is in core's BuildableAttacks group (it builds onto a target
+    // tile), but its targets are own-sea patrol anchors, never nuke targets —
+    // so it must branch before the nuke-target search below.
+    if (unit === UnitType.Warship) {
+      return this.warshipDeployTargetTiles(gameState, player);
+    }
     if (BuildableAttacks.has(unit)) {
       context.nukeTargetTiles ??= this.nukeTargetTiles(gameState, player);
       return context.nukeTargetTiles;
@@ -896,6 +916,60 @@ export class AgentObservationBuilder {
     } else {
       return sortedOwnedTiles;
     }
+  }
+
+  /**
+   * Water patrol-anchor candidates for building a new Warship. Core placement
+   * (PlayerImpl.warshipSpawn) requires the TARGET tile to be water and an
+   * active, finished own Port in the same water component; the hull spawns at
+   * that Port while the target tile becomes the initial patrol anchor
+   * (ConstructionExecution passes it as `patrolTile`). Candidates prefer the
+   * outer edge of a bounded ring around each Port so a new warship patrols
+   * the trade and landing lanes instead of hugging the dock. Every candidate
+   * is re-validated through core `canBuild` in findBuildTarget.
+   */
+  private warshipDeployTargetTiles(
+    gameState: Game,
+    player: Player,
+  ): readonly number[] {
+    const ports = player
+      .units(UnitType.Port)
+      .filter((port) => port.isActive() && !port.isUnderConstruction())
+      .sort((a, b) => a.id() - b.id())
+      .slice(0, WARSHIP_DEPLOY_PORT_LIMIT);
+    if (ports.length === 0) {
+      return [];
+    }
+    const candidates: number[] = [];
+    const seen = new Set<number>();
+    for (const port of ports) {
+      const portTile = port.tile();
+      const reachable = gameState.bfs(
+        portTile,
+        (gm, tile) =>
+          tile === portTile ||
+          (gm.isWater(tile) &&
+            gm.manhattanDist(portTile, tile) <= WARSHIP_DEPLOY_SEARCH_RADIUS),
+      );
+      const water = Array.from(reachable)
+        .filter((tile) => tile !== portTile)
+        .sort(
+          (a, b) =>
+            gameState.manhattanDist(portTile, b) -
+              gameState.manhattanDist(portTile, a) || a - b,
+        )
+        .slice(0, WARSHIP_DEPLOY_TILES_PER_PORT);
+      for (const tile of water) {
+        if (!seen.has(tile)) {
+          seen.add(tile);
+          candidates.push(tile);
+        }
+      }
+      if (candidates.length >= WARSHIP_DEPLOY_TILE_LIMIT) {
+        break;
+      }
+    }
+    return candidates.slice(0, WARSHIP_DEPLOY_TILE_LIMIT);
   }
 
   private buildPlacementAnalysis(
@@ -966,7 +1040,8 @@ export class AgentObservationBuilder {
     const isBorderBuild =
       hostileBorderDistance !== null &&
       hostileBorderDistance <= DEFENSE_POST_FRONTIER_SEARCH_RANGE;
-    const nukeTarget = BuildableAttacks.has(unit)
+    // Nukes only: Warship is in BuildableAttacks but has no nuke target.
+    const nukeTarget = Nukes.has(unit)
       ? this.nukeTargetAnalysis(gameState, player, targetTile)
       : null;
 
@@ -1191,6 +1266,140 @@ export class AgentObservationBuilder {
               : gameState.manhattanDist(unit.tile(), targetTile),
         };
       });
+  }
+
+  /**
+   * Patrol repositioning for owned Warships. Mirrors what a human can do with
+   * a selected warship — order it to any water tile — but offers a bounded,
+   * deterministic target menu: own-port anchorages (guard trade), water off
+   * the own hostile-facing shoreline (intercept landings), and water beside
+   * rival ports (contest their lanes). Each option orders the single closest
+   * reachable warship (same water component, like core targeting) and skips
+   * near-no-op moves, capped at WARSHIP_MOVE_OPTION_LIMIT like the other
+   * option lists. `move_warship` needs no gold and core MoveWarshipExecution
+   * accepts any valid water tile for an owned active warship.
+   */
+  private warshipMoveOptions(
+    gameState: Game,
+    player: Player,
+  ): AgentWarshipMoveOption[] {
+    const warships = player
+      .units(UnitType.Warship)
+      .filter((unit) => unit.isActive())
+      .sort((a, b) => a.id() - b.id());
+    if (warships.length === 0) {
+      return [];
+    }
+    const options: AgentWarshipMoveOption[] = [];
+    const usedTargets = new Set<number>();
+    const pushOption = (targetTile: number | null, purpose: string) => {
+      if (
+        targetTile === null ||
+        usedTargets.has(targetTile) ||
+        options.length >= WARSHIP_MOVE_OPTION_LIMIT
+      ) {
+        return;
+      }
+      const component = gameState.getWaterComponent(targetTile);
+      if (component === null) {
+        return;
+      }
+      let best: Unit | null = null;
+      let bestDistance = Number.POSITIVE_INFINITY;
+      for (const warship of warships) {
+        if (!gameState.hasWaterComponent(warship.tile(), component)) {
+          continue;
+        }
+        const patrolTile = warship.warshipState().patrolTile;
+        if (
+          patrolTile !== undefined &&
+          gameState.manhattanDist(patrolTile, targetTile) <
+            WARSHIP_PATROL_MIN_REPOSITION_DIST
+        ) {
+          // Already patrolling this water; a move order would be a no-op.
+          continue;
+        }
+        const distance = gameState.manhattanDist(warship.tile(), targetTile);
+        if (distance < bestDistance) {
+          best = warship;
+          bestDistance = distance;
+        }
+      }
+      if (best === null) {
+        return;
+      }
+      usedTargets.add(targetTile);
+      options.push({
+        unitIDs: [best.id()],
+        targetTile,
+        legalReason: `${purpose}; owned warship ${best.id()} is active in the same sea and core move_warship accepts any water tile`,
+      });
+    };
+
+    // 1. Guard own trade: the anchorage beside each active own Port.
+    const ownPorts = player
+      .units(UnitType.Port)
+      .filter((port) => port.isActive() && !port.isUnderConstruction())
+      .sort((a, b) => a.id() - b.id());
+    for (const port of ownPorts.slice(0, 2)) {
+      pushOption(
+        this.adjacentWaterTile(gameState, port.tile()),
+        "guard own port trade lane",
+      );
+    }
+
+    // 2. Intercept landings: water off the own shoreline facing hostiles.
+    const hostileShores = this.hostileFrontTiles(gameState, player).filter(
+      (tile) => gameState.isShore(tile),
+    );
+    for (const index of [0, Math.floor(hostileShores.length / 2)]) {
+      const shore = hostileShores[index];
+      if (shore !== undefined) {
+        pushOption(
+          this.adjacentWaterTile(gameState, shore),
+          "cover own hostile-facing coastline",
+        );
+      }
+    }
+
+    // 3. Contest rival lanes: water beside the weakest rivals' ports.
+    const rivals = gameState
+      .players()
+      .filter(
+        (other) =>
+          other !== player && other.isAlive() && !player.isFriendly(other),
+      )
+      .sort((a, b) => a.troops() - b.troops() || a.id().localeCompare(b.id()));
+    outer: for (const rival of rivals) {
+      const rivalPorts = rival
+        .units(UnitType.Port)
+        .sort((a, b) => a.id() - b.id());
+      for (const port of rivalPorts) {
+        const anchorage = this.adjacentWaterTile(gameState, port.tile());
+        if (anchorage !== null) {
+          // Rival names are untrusted display text; keep them out of
+          // legalReason so prompts and metadata stay name-free.
+          pushOption(anchorage, "contest a rival port's trade lane");
+          if (options.length >= WARSHIP_MOVE_OPTION_LIMIT) {
+            break outer;
+          }
+          break;
+        }
+      }
+    }
+    return options;
+  }
+
+  private adjacentWaterTile(gameState: Game, tile: number): number | null {
+    if (gameState.isWater(tile)) {
+      return tile;
+    }
+    for (const neighbor of gameState.neighbors(tile)) {
+      if (gameState.isWater(neighbor)) {
+        return neighbor;
+      }
+    }
+    return null;
   }
 
   private allianceOptions(
@@ -2039,7 +2248,9 @@ function buildPlacementScore(
   unit: AgentBuildOption["unit"],
   placement: BuildPlacementAnalysis,
 ): number {
-  if (BuildableAttacks.has(unit)) {
+  // Nukes only: Warship is in BuildableAttacks but scores as a generic
+  // placement (its candidates are own-sea patrol anchors, not nuke targets).
+  if (Nukes.has(unit)) {
     return (
       (placement.nukeTargetPriority ?? 0) * 10 +
       (placement.nukeTargetStructurePriority ?? 0) * 3 -
