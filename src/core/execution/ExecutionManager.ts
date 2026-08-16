@@ -20,6 +20,7 @@ import { MoveWarshipExecution } from "./MoveWarshipExecution";
 import { NationExecution } from "./NationExecution";
 import { NoOpExecution } from "./NoOpExecution";
 import { PauseExecution } from "./PauseExecution";
+import { AgentMessageExecution } from "./AgentMessageExecution";
 import { QuickChatExecution } from "./QuickChatExecution";
 import { RetreatExecution } from "./RetreatExecution";
 import { SpawnExecution } from "./SpawnExecution";
@@ -116,6 +117,12 @@ export class Executor {
           intent.recipient,
           intent.quickChatKey,
           intent.target,
+        );
+      case "agent_message":
+        return new AgentMessageExecution(
+          player,
+          intent.recipient,
+          intent.text,
         );
       case "mark_disconnected":
         return new MarkDisconnectedExecution(player, intent.isDisconnected);
