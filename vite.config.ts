@@ -226,6 +226,17 @@ export default defineConfig(({ mode }) => {
       // test:e2e keep their existing 60s and CI behaviour is unchanged. This
       // only raises the floor for `npm test`, making local and CI agree.
       testTimeout: 60_000,
+      // The 60s above is only safe at CI's concurrency. Every CI test job runs
+      // `npm run test:coverage`, which is `--testTimeout=60000 --maxWorkers=2`
+      // — one setting, not two. Local `npm test` defaulted to roughly one
+      // worker per core, and this suite is subprocess-heavy (single files spawn
+      // dozens of `npx tsx` children and boot real servers), so a saturated
+      // machine plus a long timeout is the worst combination: slow tests hold
+      // workers for up to a minute instead of dying at 5s, which starves the
+      // rest into timing out too. Measured on this checkout: 5s/default workers
+      // = 6 failures, 60s/default workers = 15 failures and a 3x longer run,
+      // 60s/2 workers = the CI configuration.
+      maxWorkers: 2,
       alias: {
         // The exported Coworld starter owns this runtime dependency in its
         // nested package.json. Root CI intentionally installs only the root
