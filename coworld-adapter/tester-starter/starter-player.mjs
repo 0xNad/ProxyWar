@@ -12,7 +12,9 @@ import { WebSocket } from "ws";
 
 const url = process.env.COWORLD_PLAYER_WS_URL;
 if (!url) {
-  throw new Error("COWORLD_PLAYER_WS_URL is required (the match provides it at runtime)");
+  throw new Error(
+    "COWORLD_PLAYER_WS_URL is required (the match provides it at runtime)",
+  );
 }
 
 const socket = new WebSocket(url);
