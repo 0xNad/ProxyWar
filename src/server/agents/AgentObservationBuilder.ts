@@ -539,6 +539,12 @@ export class AgentObservationBuilder {
             ? {
                 allianceExpiresAt: allianceInfo.expiresAt,
                 allianceInExtensionWindow: allianceInfo.inExtensionWindow,
+                // Renewal is MUTUAL: the core extends only once both sides have
+                // asked. Dropping these two left an agent unable to see that its
+                // ally was already waiting on it, which is why 40 of 42 hosted
+                // renewal attempts died one-sided.
+                allianceSelfAgreedToExtend: allianceInfo.myPlayerAgreedToExtend,
+                allianceOtherAgreedToExtend: allianceInfo.otherAgreedToExtend,
               }
             : {}),
           ...(relativeTroopRatio !== undefined ? { relativeTroopRatio } : {}),
@@ -1205,7 +1211,15 @@ export class AgentObservationBuilder {
           playerID: player.playerID,
           playerName: player.name,
           action: "extend",
-          legalReason: "alliance is inside extension window",
+          // The pending-reply case is called out in the reason itself because
+          // this string is the ONLY evidence path that survives to
+          // decisions.jsonl without touching the decision-log metadata
+          // allowlist: LegalActionBuilder copies it into the action's metadata
+          // and chosenActionMetadata is written through whole.
+          legalReason:
+            player.allianceOtherAgreedToExtend === true
+              ? "alliance is inside extension window and the ally has already asked to renew; this reply completes the renewal"
+              : "alliance is inside extension window",
         });
       }
       if (player.canBreakAlliance) {

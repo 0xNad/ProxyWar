@@ -184,6 +184,8 @@ export class LlmPromptBuilder {
         hasIncomingAllianceRequest: player.hasIncomingAllianceRequest,
         allianceExpiresAt: player.allianceExpiresAt,
         allianceInExtensionWindow: player.allianceInExtensionWindow,
+        allianceSelfAgreedToExtend: player.allianceSelfAgreedToExtend,
+        allianceOtherAgreedToExtend: player.allianceOtherAgreedToExtend,
         relativeTroopRatio: player.relativeTroopRatio,
       })),
       combat: observation.combat,
