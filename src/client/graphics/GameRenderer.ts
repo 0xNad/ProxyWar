@@ -238,7 +238,6 @@ export function createRenderer(
     });
     document.body.appendChild(identityChip);
     mountFirstWatchHint(broadcastTeardowns);
-    mountGuiToggle(broadcastTeardowns);
   }
 
   // Competitor rail one-shot camera locate — every spectator/replay route
@@ -248,7 +247,10 @@ export function createRenderer(
   // recenters once; no persisted "followed" selection, no dimming, no
   // leaderboard pin), so there is nothing to append to the DOM here.
   if (isReplaySpectatorView()) {
-    installCompetitorLocateBridge(game, eventBus);
+    // The EventBus outlives an in-place replay rewind. Retaining the disposer
+    // prevents the old bridge from issuing a second, stale camera fit after a
+    // replacement renderer takes ownership.
+    broadcastTeardowns.push(installCompetitorLocateBridge(game, eventBus));
     // Right-click a nation to follow it. Nothing on this surface moves the
     // camera on its own; a follow is what opts the viewer into the nuke
     // cinema's punch-in. See FollowedCompetitor for why right-click is the
@@ -576,80 +578,11 @@ function mountFirstWatchHint(teardowns: Array<() => void>): void {
 }
 
 /**
- * HIDE ALL GUI. Everything this patch draws is chrome over a map, and the map
- * is sometimes the thing you actually want — a clean frame to capture, or a
- * look at what the territory is doing with nothing in front of it.
- *
- * The button never hides itself (see the CSS: it is excluded from the hide
- * list and only fades to a ghost). A control that vanishes when you press it
- * is a trap with no way back, and on a surface with no menu there would be no
- * second route to the chrome. "h" does the same thing for anyone who would
- * rather not go looking for a 30px circle.
- */
-function mountGuiToggle(teardowns: Array<() => void>): void {
-  document.getElementById("pw-gui-toggle")?.remove();
-  const button = document.createElement("button");
-  button.id = "pw-gui-toggle";
-  button.type = "button";
-  const label = () =>
-    document.body.classList.contains("pw-gui-hidden")
-      ? translateText("ai_league_replay.gui_show", undefined, "Show interface")
-      : translateText("ai_league_replay.gui_hide", undefined, "Hide interface");
-  // Two paths, so the icon states which way the control goes rather than
-  // relying on the viewer remembering what it did last.
-  const EYE =
-    '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3C4.7 3 2 5.6 1 8c1 2.4 3.7 5 7 5s6-2.6 7-5c-1-2.4-3.7-5-7-5Zm0 8.2A3.2 3.2 0 1 1 8 4.8a3.2 3.2 0 0 1 0 6.4Zm0-1.7a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z"/></svg>';
-  const EYE_OFF =
-    '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.1 1 1 2.1l2.5 2.5C2.3 5.5 1.4 6.7 1 8c1 2.4 3.7 5 7 5 1.2 0 2.3-.3 3.3-.9l2.6 2.6 1.1-1.1Zm5.9 10c-2.4 0-4.5-1.8-5.4-3 .4-.6 1-1.3 1.8-1.9l1.4 1.4a3.2 3.2 0 0 0 4.3 4.3l.8.8c-.9.3-1.9.4-2.9.4Zm7-3c-.7 1.7-2.3 3.4-4.4 4.2l-1.3-1.3A3.2 3.2 0 0 0 6.1 5.5L4.9 4.3C5.9 3.5 6.9 3 8 3c3.3 0 6 2.6 7 5Z"/></svg>';
-  const paint = () => {
-    const hidden = document.body.classList.contains("pw-gui-hidden");
-    button.innerHTML = hidden ? EYE_OFF : EYE;
-    button.setAttribute("aria-label", label());
-    button.title = label();
-    button.setAttribute("aria-pressed", hidden ? "true" : "false");
-  };
-  const toggle = () => {
-    document.body.classList.toggle("pw-gui-hidden");
-    paint();
-  };
-  paint();
-  button.addEventListener("click", (event) => {
-    event.stopPropagation();
-    toggle();
-  });
-  // pointerdown too: the board's own gesture handlers run on the pointer
-  // stream, and a click that reaches them selects a nation behind the button.
-  button.addEventListener("pointerdown", (event) => event.stopPropagation());
-  document.body.appendChild(button);
-
-  const onKey = (event: KeyboardEvent) => {
-    if (event.key !== "h" && event.key !== "H") return;
-    const target = event.target as HTMLElement | null;
-    // Never while someone is typing into something.
-    if (
-      target !== null &&
-      (target.isContentEditable ||
-        target.tagName === "INPUT" ||
-        target.tagName === "TEXTAREA")
-    ) {
-      return;
-    }
-    toggle();
-  };
-  window.addEventListener("keydown", onKey);
-  teardowns.push(() => {
-    window.removeEventListener("keydown", onKey);
-    document.body.classList.remove("pw-gui-hidden");
-    button.remove();
-  });
-}
-
-/**
  * Build revision stamped onto the board identity chip. Bump on every bundle
  * rebuild that changes something visible, so "which build am I looking at"
  * is answered by the frame itself, never by guesswork.
  */
-const PW_BROADCAST_REV = 83;
+const PW_BROADCAST_REV = 85;
 
 /**
  * Whether the warm broadcast stage applies. Read from the body class the
@@ -677,7 +610,12 @@ function mountHudVisibilityStyles() {
       events-display, build-menu, win-modal, player-panel, spawn-timer,
       immunity-timer, in-game-promo, alert-frame, chat-modal, multi-tab-modal,
       game-left-sidebar, player-info-overlay, leader-board, team-stats,
-      heads-up-message, replay-panel, performance-overlay
+      heads-up-message, replay-panel, performance-overlay,
+      #pw-board-identity, #pw-first-watch-hint, .pw-scrubber, .pw-toasts,
+      .pw-analyst, .pw-dossier, #ai-league-replay-overlay,
+      #ai-league-social-transcript, #ai-league-headline-event,
+      #ai-league-lower-third-host, .broadcast-drawer-panel, replay-end-card,
+      .pw-nuke-cinema, .pw-following-chip, .pw-rewind-curtain
     ) {
       display: none !important;
     }
@@ -897,62 +835,6 @@ function mountAiLeagueNativeSpectatorStyles() {
      * override here would either lose to that inline style or, with
      * !important, break dragging.) */
 
-    /* HIDE ALL GUI — the board on its own.
-     *
-     * Everything this patch draws is chrome over a map, and sometimes the map
-     * IS the thing you want: a clean frame to screenshot, or a look at what
-     * the territory is doing without a panel in front of it. One toggle takes
-     * all of it down and leaves the board.
-     *
-     * The toggle itself is deliberately NOT in this list — a control that
-     * hides itself is a trap with no way back — it only fades to a ghost that
-     * the corner still holds. */
-    body.pw-gui-hidden leader-board.ai-league-native-leaderboard,
-    body.pw-gui-hidden #pw-game-control-cluster,
-    body.pw-gui-hidden #pw-board-identity,
-    body.pw-gui-hidden #pw-first-watch-hint,
-    body.pw-gui-hidden .pw-scrubber,
-    body.pw-gui-hidden .pw-toasts,
-    body.pw-gui-hidden .pw-analyst,
-    body.pw-gui-hidden .pw-dossier,
-    body.pw-gui-hidden performance-overlay,
-    body.pw-gui-hidden player-info-overlay {
-      display: none !important;
-    }
-    #pw-gui-toggle {
-      position: fixed;
-      top: 96px;
-      right: 16px;
-      z-index: 50006;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      width: 30px;
-      height: 30px;
-      padding: 0;
-      border: 1px solid var(--pw-hairline, rgba(242, 236, 226, 0.11));
-      border-radius: 999px;
-      background: var(--pw-panel, rgba(24, 20, 17, 0.82));
-      color: var(--pw-ink-dim, #a79e92);
-      cursor: pointer;
-      transition: opacity 160ms ease, color 160ms ease;
-    }
-    #pw-gui-toggle:hover { color: var(--pw-ink, #f2ece2); }
-    #pw-gui-toggle:focus-visible {
-      outline: 1px solid var(--pw-accent, #ffc24a);
-      outline-offset: 2px;
-    }
-    #pw-gui-toggle svg { width: 15px; height: 15px; fill: currentColor; display: block; }
-    /* With the chrome down the toggle recedes to a ghost — present enough to
-     * find, quiet enough not to be furniture in a clean frame. It comes back
-     * to full strength on hover. */
-    body.pw-gui-hidden #pw-gui-toggle {
-      opacity: 0.25;
-      background: transparent;
-      border-color: transparent;
-    }
-    body.pw-gui-hidden #pw-gui-toggle:hover { opacity: 1; }
-
     body.ai-league-native-spectator-ui game-left-sidebar {
       display: none !important;
     }
@@ -1107,6 +989,55 @@ function mountAiLeagueNativeSpectatorStyles() {
     body.ai-league-native-spectator-ui
       leader-board.ai-league-native-leaderboard .md\\:max-h-\\[50vh\\] {
       max-height: none !important;
+    }
+
+    /* COMPACT SCOREBUG. Below the full broadcast rail, the map needs the
+     * horizontal space more than it needs two secondary economy columns.
+     * Rank, identity, and territory share remain visible; GOLD and MAX TROOPS
+     * return at 981px with the full five-track table. A viewport-relative
+     * width replaces the old fixed-width + transform stack, whose physical
+     * footprint jumped from 27% to 34% as the iframe narrowed.
+     *
+     * Keep this rule on semantic column hooks rather than nth-child selectors:
+     * the grid is display:contents rows, and a future column insertion must
+     * not silently hide the wrong data. */
+    @media (max-width: 980px) {
+      body.ai-league-native-spectator-ui
+        leader-board.ai-league-native-leaderboard {
+        width: clamp(142px, 24vw, 220px) !important;
+        top: clamp(8px, 1.1vw, 12px) !important;
+        left: clamp(8px, 1.1vw, 12px) !important;
+        transform: none !important;
+        zoom: 1 !important;
+      }
+      body.ai-league-native-spectator-ui
+        leader-board.ai-league-native-leaderboard .grid {
+        grid-template-columns:
+          minmax(18px, 22px) minmax(0, 1fr) minmax(40px, 46px) !important;
+      }
+      body.ai-league-native-spectator-ui
+        leader-board.ai-league-native-leaderboard > .mt-2 {
+        margin-top: var(--pw-s-xs) !important;
+      }
+      body.ai-league-native-spectator-ui
+        leader-board.ai-league-native-leaderboard
+        [data-scorebug-column="gold"],
+      body.ai-league-native-spectator-ui
+        leader-board.ai-league-native-leaderboard
+        [data-scorebug-column="max-troops"] {
+        display: none !important;
+      }
+      body.ai-league-native-spectator-ui
+        leader-board.ai-league-native-leaderboard
+        [data-scorebug-margin] {
+        display: none !important;
+      }
+      body.ai-league-native-spectator-ui
+        leader-board.ai-league-native-leaderboard .contents > div {
+        font-size: 10px !important;
+        padding-top: 2px !important;
+        padding-bottom: 2px !important;
+      }
     }
 
     /* WIDE (2:1) MAPS: the board is near-full-bleed and there is almost no
@@ -1477,8 +1408,9 @@ function mountAiLeagueNativeSpectatorStyles() {
      * is "look, a live match", and the parent page already provides names and
      * standings. Chrome yields progressively:
      *   <=560px  (tiles):   map + clock only.
-     *   561-740px (floor):  top-5 scorebug, no feed (already hidden).
-     *   741-980px (stage):  top-8 scorebug, feed stays.
+     *   561-640px (floor):  top-3 compact scorebug, no feed.
+     *   641-740px (embed):  top-4 compact scorebug, no feed.
+     *   741-980px (stage):  top-6 compact scorebug, feed stays.
      */
     @media (max-width: 560px) {
       body.ai-league-native-spectator-ui leader-board.ai-league-native-leaderboard,
@@ -1491,17 +1423,24 @@ function mountAiLeagueNativeSpectatorStyles() {
         zoom: 0.55;
       }
     }
-    @media (min-width: 561px) and (max-width: 740px) {
+    @media (min-width: 561px) and (max-width: 640px) {
       body.ai-league-native-spectator-ui
         leader-board.ai-league-native-leaderboard
-        .contents:not(.font-bold):nth-of-type(n + 7) {
+        .contents[data-scorebug-row]:nth-of-type(n + 5) {
+        display: none !important;
+      }
+    }
+    @media (min-width: 641px) and (max-width: 740px) {
+      body.ai-league-native-spectator-ui
+        leader-board.ai-league-native-leaderboard
+        .contents[data-scorebug-row]:nth-of-type(n + 6) {
         display: none !important;
       }
     }
     @media (min-width: 741px) and (max-width: 980px) {
       body.ai-league-native-spectator-ui
         leader-board.ai-league-native-leaderboard
-        .contents:not(.font-bold):nth-of-type(n + 10) {
+        .contents[data-scorebug-row]:nth-of-type(n + 8) {
         display: none !important;
       }
     }
@@ -1797,7 +1736,7 @@ function mountAiLeagueNativeSpectatorStyles() {
         transform-origin: top right;
       }
       /* The band is ~158px here — narrower than any readable rail — so the
-       * scorebug must minimise its trespass onto the board: tighter width,
+       * scorebug must minimise its trespass onto the board: tighter insets,
        * smaller type, and glass transparent enough that territory reads
        * through it.
        *
@@ -1807,49 +1746,22 @@ function mountAiLeagueNativeSpectatorStyles() {
        * values survive the floor, they do not describe a level - leave them
        * literal so nobody reads them as a seventh step. */
       body.ai-league-native-spectator-ui leader-board.ai-league-native-leaderboard {
-        width: 250px !important;
         background: rgba(24, 20, 17, 0.66) !important;
+      }
+      body.ai-league-native-spectator-ui
+        leader-board.ai-league-native-leaderboard .grid {
+        padding-left: var(--pw-s-xs) !important;
+        padding-right: var(--pw-s-xs) !important;
       }
       body.ai-league-native-spectator-ui
         leader-board.ai-league-native-leaderboard .contents > div {
         font-size: 10px !important;
-        padding-top: 3px !important;
-        padding-bottom: 3px !important;
+        padding-top: 2px !important;
+        padding-bottom: 2px !important;
       }
     }
     body.ai-league-native-spectator-ui leader-board.ai-league-native-leaderboard {
       filter: drop-shadow(0 14px 32px rgba(2, 6, 23, 0.32));
-    }
-    /*
-     * The Observatory embeds this replay in an iframe as small as 640x360, and
-     * at that size the standings were vanishing entirely — the native HUD is
-     * gated on Platform.isDesktopWidth (innerWidth >= 1024) and has no
-     * breakpoint anywhere near 700px. This leaderboard is mounted directly with
-     * visible = true so it survives the gate, but at 360px wide it was still
-     * eating over half the frame.
-     *
-     * Scale it down instead of reflowing: transform-origin at the top-left
-     * keeps it pinned in the corner, and scaling preserves the column
-     * proportions the native table depends on (Leaderboard.ts uses a fixed
-     * grid-template-columns that does not reflow).
-     */
-    @media (max-width: 900px) {
-      body.ai-league-native-spectator-ui leader-board.ai-league-native-leaderboard {
-        width: min(300px, calc(100vw - 20px)) !important;
-        top: 10px !important;
-        left: 10px !important;
-        transform: scale(0.82);
-        transform-origin: top left;
-      }
-    }
-    @media (max-width: 700px) {
-      body.ai-league-native-spectator-ui leader-board.ai-league-native-leaderboard {
-        width: 280px !important;
-        top: 8px !important;
-        left: 8px !important;
-        transform: scale(0.68);
-        transform-origin: top left;
-      }
     }
   `;
   document.head.appendChild(style);
@@ -1871,6 +1783,7 @@ export class GameRenderer {
   // GameView over the live board's frames.
   private running = false;
   private rafId: number | null = null;
+  private fullscreenRafId: number | null = null;
   private disposed = false;
   // Stored rather than inline so `dispose()` can actually take them back off:
   // both `removeEventListener` and `EventBus.off()` match by identity.
@@ -1895,12 +1808,18 @@ export class GameRenderer {
    * parent page cannot reach in and re-fit the camera for us.
    */
   private readonly onFullscreenChange = () => {
-    requestAnimationFrame(() =>
-      requestAnimationFrame(() => {
+    if (this.fullscreenRafId !== null) {
+      cancelAnimationFrame(this.fullscreenRafId);
+    }
+    this.fullscreenRafId = requestAnimationFrame(() => {
+      if (this.disposed) return;
+      this.fullscreenRafId = requestAnimationFrame(() => {
+        this.fullscreenRafId = null;
+        if (this.disposed) return;
         this.resizeCanvas();
         this.refitBoardToViewport();
-      }),
-    );
+      });
+    });
   };
 
   /**
@@ -1922,7 +1841,19 @@ export class GameRenderer {
    */
   private refitBoardToViewport() {
     if (!isReplaySpectatorView()) return;
-    if (followedCompetitorSmallId() !== null) return;
+    // Ownership, NOT the camera epoch: automatic commands advance the epoch
+    // too (WinModal fires FitWholeMapEvent by itself at match end), and
+    // branching on it here left every replay watched to its end unable to
+    // refit — a fullscreen after the finish kept the small-viewport scale.
+    if (
+      followedCompetitorSmallId() !== null ||
+      this.transformHandler.replayCameraIsViewerOwned()
+    ) {
+      // The HUD still needs fresh docking dimensions for the new frame even
+      // though the viewer-owned camera must stay exactly where they put it.
+      this.transformHandler.updateBroadcastLayout(0.9);
+      return;
+    }
     this.transformHandler.centerAll(0.9);
   }
   /** Torn off in dispose(); see watchPixelRatio for why it re-arms. */
@@ -2052,6 +1983,10 @@ export class GameRenderer {
     if (this.rafId !== null) {
       cancelAnimationFrame(this.rafId);
       this.rafId = null;
+    }
+    if (this.fullscreenRafId !== null) {
+      cancelAnimationFrame(this.fullscreenRafId);
+      this.fullscreenRafId = null;
     }
     window.removeEventListener("resize", this.onWindowResize);
     document.removeEventListener("fullscreenchange", this.onFullscreenChange);

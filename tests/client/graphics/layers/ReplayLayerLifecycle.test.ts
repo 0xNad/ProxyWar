@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
-import type { TransformHandler } from "../../../../src/client/graphics/TransformHandler";
+import {
+  GoToPositionEvent,
+  type TransformHandler,
+} from "../../../../src/client/graphics/TransformHandler";
 import { AttackingTroopsOverlay } from "../../../../src/client/graphics/layers/AttackingTroopsOverlay";
 import { NameLayer } from "../../../../src/client/graphics/layers/NameLayer";
 import { NationDossier } from "../../../../src/client/graphics/layers/NationDossier";
@@ -114,5 +117,65 @@ describe("replay body-layer lifecycle", () => {
     modal.dispose();
 
     expect(modal.isVisible).toBe(false);
+  });
+
+  it("NukeCinema does not restore a stale camera snapshot after viewer intent changes", () => {
+    const eventBus = new EventBus();
+    let epoch = 4;
+    const transform = {
+      userCameraIntentEpoch: () => epoch,
+    } as unknown as TransformHandler;
+    const cinema = new NukeCinema({} as GameView, eventBus, transform);
+    const restores: GoToPositionEvent[] = [];
+    eventBus.on(GoToPositionEvent, (event) => restores.push(event));
+    const hooks = cinema as unknown as {
+      cinema: {
+        restore: {
+          x: number;
+          y: number;
+          scale: number;
+          intentEpoch: number;
+        } | null;
+      } | null;
+      restoreCamera(): void;
+    };
+    hooks.cinema = {
+      restore: { x: 100, y: 200, scale: 2, intentEpoch: epoch },
+    };
+
+    epoch++;
+    hooks.restoreCamera();
+
+    expect(restores).toHaveLength(0);
+    expect(hooks.cinema.restore).toBeNull();
+  });
+
+  it("NukeCinema restores when no viewer camera intent occurred", () => {
+    const eventBus = new EventBus();
+    const transform = {
+      userCameraIntentEpoch: () => 4,
+    } as unknown as TransformHandler;
+    const cinema = new NukeCinema({} as GameView, eventBus, transform);
+    const restores: GoToPositionEvent[] = [];
+    eventBus.on(GoToPositionEvent, (event) => restores.push(event));
+    const hooks = cinema as unknown as {
+      cinema: {
+        restore: {
+          x: number;
+          y: number;
+          scale: number;
+          intentEpoch: number;
+        } | null;
+      };
+      restoreCamera(): void;
+    };
+    hooks.cinema = {
+      restore: { x: 100, y: 200, scale: 2, intentEpoch: 4 },
+    };
+
+    hooks.restoreCamera();
+
+    expect(restores).toHaveLength(1);
+    expect(restores[0]).toMatchObject({ x: 100, y: 200, zoom: 2 });
   });
 });
