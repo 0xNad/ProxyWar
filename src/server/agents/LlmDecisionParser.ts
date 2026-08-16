@@ -1,4 +1,7 @@
-import { structuredDealsEnabled } from "./AgentTunables";
+import {
+  freeTextMessagesEnabled,
+  structuredDealsEnabled,
+} from "./AgentTunables";
 import { LegalAction } from "./AgentTypes";
 import {
   MAX_WIRE_ACTIONS_PER_DECISION,
@@ -43,6 +46,16 @@ export type LlmDecisionParseResult =
        * meta-action id.
        */
       selectedDealActionId?: string;
+      /**
+       * OPTIONAL third selection — the comms slot
+       * (PROXYWAR_TUNE_FREETEXT_MESSAGES). Present as a pair only when the
+       * reply carried a non-empty `selectedMessageActionId`. Neither is
+       * validated here beyond being a non-empty string:
+       * `validateAgentMessageDecision` is the sole authority on the id, the
+       * length cap, and the character set.
+       */
+      selectedMessageActionId?: string;
+      messageText?: string;
       reason: string;
       confidence?: number;
       raw: string;
@@ -57,6 +70,8 @@ interface LlmDecisionJson {
   selectedLegalActionId?: unknown;
   selectedLegalActionIds?: unknown;
   selectedDealActionId?: unknown;
+  selectedMessageActionId?: unknown;
+  messageText?: unknown;
   reason?: unknown;
   confidence?: unknown;
 }
@@ -88,6 +103,38 @@ function parsedDealActionId(decision: LlmDecisionJson): string | undefined {
   }
   const trimmed = value.trim();
   return trimmed.length === 0 ? undefined : trimmed;
+}
+
+/**
+ * Same contract as the deal slot: the comms keys are accepted only while the
+ * free-text flag is on, so with the flag off the strict parser still rejects
+ * them as unknown fields and behavior is byte-identical.
+ */
+function commsSlotKeysAllowed(): boolean {
+  return freeTextMessagesEnabled();
+}
+
+function parsedMessageSlot(
+  decision: LlmDecisionJson,
+): { actionID: string; text: string } | undefined {
+  if (!commsSlotKeysAllowed()) {
+    return undefined;
+  }
+  const id = decision.selectedMessageActionId;
+  const text = decision.messageText;
+  if (typeof id !== "string" || typeof text !== "string") {
+    return undefined;
+  }
+  const trimmedID = id.trim();
+  if (trimmedID.length === 0) {
+    return undefined;
+  }
+  // The body is passed through UNTRIMMED beyond this emptiness guard: the
+  // validator owns normalization, and doing it twice in two places is how the
+  // stamped text and the delivered text drift apart.
+  return text.trim().length === 0
+    ? undefined
+    : { actionID: trimmedID, text };
 }
 
 export class LlmDecisionParser {
@@ -135,6 +182,12 @@ export class LlmDecisionParser {
 
     for (const key of Object.keys(parsed)) {
       if (key === "selectedDealActionId" && dealSlotKeyAllowed()) {
+        continue;
+      }
+      if (
+        (key === "selectedMessageActionId" || key === "messageText") &&
+        commsSlotKeysAllowed()
+      ) {
         continue;
       }
       if (!allowedKeys.has(key)) {
@@ -224,6 +277,7 @@ export class LlmDecisionParser {
     }
 
     const selectedDealActionId = parsedDealActionId(decision);
+    const messageSlot = parsedMessageSlot(decision);
     return {
       ok: true,
       selectedLegalActionId,
@@ -231,6 +285,12 @@ export class LlmDecisionParser {
         ? { selectedLegalActionIds }
         : {}),
       ...(selectedDealActionId !== undefined ? { selectedDealActionId } : {}),
+      ...(messageSlot !== undefined
+        ? {
+            selectedMessageActionId: messageSlot.actionID,
+            messageText: messageSlot.text,
+          }
+        : {}),
       reason,
       ...(typeof decision.confidence === "number"
         ? { confidence: decision.confidence }
@@ -323,6 +383,7 @@ export class LlmDecisionParser {
     }
 
     const selectedDealActionId = parsedDealActionId(decision);
+    const messageSlot = parsedMessageSlot(decision);
     return {
       ok: true,
       selectedLegalActionId,
@@ -330,6 +391,12 @@ export class LlmDecisionParser {
         ? { selectedLegalActionIds }
         : {}),
       ...(selectedDealActionId !== undefined ? { selectedDealActionId } : {}),
+      ...(messageSlot !== undefined
+        ? {
+            selectedMessageActionId: messageSlot.actionID,
+            messageText: messageSlot.text,
+          }
+        : {}),
       reason,
       ...(confidence !== undefined ? { confidence } : {}),
       raw,
