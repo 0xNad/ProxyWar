@@ -129,6 +129,12 @@
         "players"
       ],
       "properties": {
+        "seed": {
+          "type": ["string", "number", "null"]
+        },
+        "game_id": {
+          "type": ["string", "null"]
+        },
         "scores": {
           "type": "array",
           "minItems": 10,
