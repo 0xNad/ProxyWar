@@ -3,7 +3,6 @@ import { Logger } from "winston";
 import WebSocket from "ws";
 import { z } from "zod";
 import { isAdminRole } from "../core/ApiSchemas";
-import { freeTextMessagesEnabled } from "./agents/AgentTunables";
 import { GameEnv, ServerConfig } from "../core/configuration/Config";
 import { GameType } from "../core/game/Game";
 import {
@@ -26,6 +25,7 @@ import {
   Turn,
 } from "../core/Schemas";
 import { createPartialGameRecord } from "../core/Util";
+import { freeTextMessagesEnabled } from "./agents/AgentTunables";
 import { archive, finalizeGameRecord } from "./Archive";
 import { Client } from "./Client";
 import {
@@ -426,10 +426,13 @@ export class GameServer {
               // producer, and it only runs with the flag on.
               case "agent_message": {
                 if (!freeTextMessagesEnabled()) {
-                  this.log.warn("agent_message intent refused: feature is off", {
-                    clientID: client.clientID,
-                    gameID: this.id,
-                  });
+                  this.log.warn(
+                    "agent_message intent refused: feature is off",
+                    {
+                      clientID: client.clientID,
+                      gameID: this.id,
+                    },
+                  );
                   return;
                 }
                 // Armed: relay it exactly like any ordinary intent. This must
@@ -802,7 +805,17 @@ export class GameServer {
     });
     if (!result.success) {
       const error = z.prettifyError(result.error);
-      this.log.error("Error parsing game start info", { message: error });
+      // Deliberately NOT a throw: a player-supplied field (username, clan tag,
+      // cosmetics) can fail this schema, and hanging one game is better than
+      // throwing through a worker that is serving others. But say what the
+      // consequence IS - without start info no client is ever sent a `start`
+      // message, so the game cannot begin and every client waits until timeout.
+      // The most common cause in local harnesses is a gameID that is not 8
+      // alphanumeric characters.
+      this.log.error(
+        "Error parsing game start info: no start message will be sent and this game cannot begin",
+        { message: error, gameID: this.id },
+      );
       return;
     }
     this.gameStartInfo = result.data satisfies GameStartInfo;
