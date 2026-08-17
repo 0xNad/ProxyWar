@@ -448,15 +448,21 @@ function rowKey(row: HTMLElement): string {
 /**
  * Coral is reserved for the two violent kinds; everything else is quiet. This
  * is the same severity rule the map and the scrubber follow, so a viewer only
- * ever has to learn it once.
+ * ever has to learn it once. Agent messages take the gold "sharp" accent —
+ * the card grammar the operator approved from the 2026-08-16 free-text demo
+ * renders — because negotiation is the beat this product exists to broadcast,
+ * but it is never hazard-coloured: talk is not violence.
+ *
+ * Exported for tests; this module has no other seam to pin the rule.
  */
-function severityOf(kind: string): string {
+export function severityOf(kind: string): string {
   if (kind === "nuke" || kind === "elimination") return "grave";
   if (
     kind === "first_strike" ||
     kind === "betrayal" ||
     kind === "deal_violated" ||
-    kind === "lead_change"
+    kind === "lead_change" ||
+    kind === "message"
   ) {
     return "sharp";
   }

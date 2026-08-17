@@ -311,6 +311,220 @@ function normalizeName(value: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// message (free-text agent negotiation)
+// ---------------------------------------------------------------------------
+
+/**
+ * The page global the display kill switch stamps (blocker 5). The serving
+ * process reads `PROXYWAR_TUNE_MESSAGE_BEATS_DISPLAY` (AgentTunables) and,
+ * only when OFF, injects `window.__PROXYWAR_MESSAGE_BEATS_DISPLAY__ = false`
+ * into the replay app shell (`withMessageBeatsDisplayFlag`,
+ * ProxyWarDemoServerConfig.ts — declared literally on both sides so no
+ * server module is dragged into the bundle). Absent global — the default,
+ * every static bundle, every test — means ON. Suppression is DISPLAY ONLY:
+ * the record, decisions and telemetry this page loads are untouched, so
+ * flipping the switch can never rewrite evidence.
+ */
+export const MESSAGE_BEATS_DISPLAY_GLOBAL = "__PROXYWAR_MESSAGE_BEATS_DISPLAY__";
+
+function messageBeatsDisplayEnabled(): boolean {
+  const value = (globalThis as Record<string, unknown>)[
+    MESSAGE_BEATS_DISPLAY_GLOBAL
+  ];
+  return value !== false && value !== "0" && value !== 0;
+}
+
+/**
+ * One DELIVERED agent message, extracted from the replay record itself.
+ *
+ * THE TURN STREAM IS THE SOURCE, deliberately. decisions.jsonl also carries
+ * the comms slot (`commsSlotText` + `commsSlotAccepted`), but that flag is
+ * the RUNNER's claim: a runner armed with PROXYWAR_TUNE_FREETEXT_MESSAGES
+ * against a server without it records `accepted: true` for a message the
+ * relay silently dropped (known evidence-honesty gap, owned elsewhere). An
+ * `agent_message` intent inside a recorded turn is the game server's own
+ * relay — if it is in the record, every client simulated it and the
+ * recipient's observation carried it. Beats built from intents can never
+ * announce a conversation that did not happen.
+ */
+export interface RecordedAgentMessage {
+  turn: number;
+  /** Ordinal in record order — deterministic tiebreak among same-turn beats. */
+  sequence: number;
+  /** Sender username resolved from the record's own roster (info.players). */
+  senderName: string;
+  /** Persistent player id exactly as the intent carries it — resolved to a
+   * name against the telemetry roster at curation time, never guessed. */
+  recipientPlayerID: string;
+  text: string;
+}
+
+/**
+ * Walk a raw game record for delivered `agent_message` intents. Runtime
+ * shape-checked like every other artifact this module consumes: the record
+ * arrives as parsed JSON, and a malformed turn costs that turn's messages,
+ * never the mount. Sender names resolve through `info.players` (clientID →
+ * username), which every record carries; a message whose sender is missing
+ * from the roster is dropped rather than misattributed.
+ */
+export function recordedAgentMessages(
+  gameRecord: unknown,
+): RecordedAgentMessage[] {
+  if (gameRecord === null || typeof gameRecord !== "object") return [];
+  const record = gameRecord as {
+    info?: { players?: unknown };
+    turns?: unknown;
+  };
+  const usernameByClientID = new Map<string, string>();
+  if (Array.isArray(record.info?.players)) {
+    for (const player of record.info.players) {
+      const entry = player as { clientID?: unknown; username?: unknown };
+      if (
+        typeof entry.clientID === "string" &&
+        typeof entry.username === "string"
+      ) {
+        usernameByClientID.set(entry.clientID, entry.username);
+      }
+    }
+  }
+  if (!Array.isArray(record.turns)) return [];
+  const messages: RecordedAgentMessage[] = [];
+  for (const turn of record.turns) {
+    const entry = turn as { turnNumber?: unknown; intents?: unknown };
+    if (typeof entry.turnNumber !== "number" || !Array.isArray(entry.intents)) {
+      continue;
+    }
+    for (const intent of entry.intents) {
+      const candidate = intent as {
+        type?: unknown;
+        clientID?: unknown;
+        recipient?: unknown;
+        text?: unknown;
+      };
+      if (
+        candidate.type !== "agent_message" ||
+        typeof candidate.clientID !== "string" ||
+        typeof candidate.recipient !== "string" ||
+        typeof candidate.text !== "string" ||
+        candidate.text.length === 0
+      ) {
+        continue;
+      }
+      const senderName = usernameByClientID.get(candidate.clientID);
+      if (senderName === undefined) continue;
+      messages.push({
+        turn: entry.turnNumber,
+        sequence: messages.length,
+        senderName,
+        recipientPlayerID: candidate.recipient,
+        text: candidate.text,
+      });
+    }
+  }
+  return messages;
+}
+
+/**
+ * Recipient names come from the telemetry roster (`SpectatorAgent.playerID`
+ * → `username`) — the record's own `info.players` has no playerID, and the
+ * intent's `recipient` is nothing else. A run without telemetry loses its
+ * message beats along with every other WHY surface (the mount's existing
+ * best-effort contract), never a beat with a guessed name.
+ */
+function telemetryPlayerRoster(
+  telemetry: AiLeagueSpectatorTelemetry | null,
+): Map<string, string> {
+  const roster = new Map<string, string>();
+  for (const agent of telemetry?.agents ?? []) {
+    const entry = agent as { playerID?: unknown; username?: unknown };
+    if (
+      typeof entry.playerID === "string" &&
+      entry.playerID.length > 0 &&
+      typeof entry.username === "string"
+    ) {
+      roster.set(entry.playerID, entry.username);
+    }
+  }
+  return roster;
+}
+
+/**
+ * Toast cadence: an ordered pair's FIRST message in this many turns is news
+ * (tier 2 — the toast stack announces it); the back-and-forth inside the
+ * window is transcript (tier 3 — feed and timeline record it, the stack
+ * stays quiet, and `groupRoutineWarRoomEvents` collapses the runs). Same
+ * editorial rule as deal proposals ("a pact that nobody answered is not
+ * news"): the hosted proof exhibition produced 866 messages in one 4-seat
+ * episode, and announcing every reply would make the one surface built for
+ * news unreadable. Both directions of a conversation are separate ordered
+ * pairs, so an opener AND its first reply both toast — exactly the approved
+ * reference frame (opener, reply, rival counter-offer, three cards).
+ */
+const MESSAGE_BEAT_REANNOUNCE_TURNS = 1000;
+
+/**
+ * `message` beats — the free-text negotiation feature's viewer surface
+ * (war-room feed rows + the toast stack's MESSAGE cards; see severityOf in
+ * WarRoomToasts.ts for the gold "sharp" accent).
+ *
+ * EXCLUSIONS, BY DESIGN (2026-08-17 operator direction): a message is talk,
+ * not an effect — the kind stays OUT of AI_LEAGUE_EFFECT_EVENT_KINDS above
+ * and out of AgentDramaReport's EFFECT_CLAIM_KINDS, the same discipline as
+ * alliance_renewal_offer. No timeline markers either: markers are sparse,
+ * positional and spoiler-surfaced, and a talkative match would bury the
+ * scrubber's few real symbols under hundreds of envelopes.
+ *
+ * Headline wording is `chat.agent_message` — the SAME key the participant
+ * chat panel uses — so the one conversation is never worded two ways.
+ * Names and the agent-authored body all pass the spectator anonymizer.
+ */
+function messageWarRoomEvents(
+  messages: readonly RecordedAgentMessage[],
+  telemetry: AiLeagueSpectatorTelemetry | null,
+): CuratedWarRoomEvent[] {
+  if (messages.length === 0) return [];
+  const roster = telemetryPlayerRoster(telemetry);
+  const lastAnnouncedTurnByPair = new Map<string, number>();
+  const curated: CuratedWarRoomEvent[] = [];
+  for (const message of messages) {
+    const recipientName = roster.get(message.recipientPlayerID);
+    if (recipientName === undefined) continue;
+    const sender = aiLeagueSpectatorDisplayName(message.senderName);
+    const recipient = aiLeagueSpectatorDisplayName(recipientName);
+    // The body is a rival policy's own words — legal play, never markup and
+    // never narration. The anonymizer scrubs embedded real names; the
+    // renderers only ever assign it through textContent.
+    const body = aiLeagueSpectatorText(message.text);
+    // Pair key on RAW identities, not display names: flipping Anonymous
+    // Names must never change which beats announce.
+    const pairKey = `${message.senderName}|${message.recipientPlayerID}`;
+    const lastAnnounced = lastAnnouncedTurnByPair.get(pairKey);
+    const announces =
+      lastAnnounced === undefined ||
+      message.turn - lastAnnounced >= MESSAGE_BEAT_REANNOUNCE_TURNS;
+    if (announces) {
+      lastAnnouncedTurnByPair.set(pairKey, message.turn);
+    }
+    curated.push({
+      id: `message:${message.turn}:${message.sequence}`,
+      kind: "message",
+      turn: message.turn,
+      sequence: message.sequence,
+      headline: translateText(
+        "chat.agent_message",
+        { sender, recipient, msg: body },
+        `${sender} → ${recipient}: ${body}`,
+      ),
+      publicReason: null,
+      participants: [sender, recipient],
+      expandedDetail: null,
+      tier: announces ? 2 : 3,
+    });
+  }
+  return curated;
+}
+
+// ---------------------------------------------------------------------------
 // plan_change
 // ---------------------------------------------------------------------------
 
@@ -722,16 +936,26 @@ function groupRoutineWarRoomEvents(
       const first = run[0];
       const last = run[run.length - 1];
       const participants = [...new Set(run.flatMap((e) => e.participants))];
+      // A collapsed run of quiet negotiation is "+N more messages", not
+      // "+N more skirmishes" — a mixed run keeps the incumbent wording,
+      // because combat noise is what floods mixed runs.
+      const allMessages = run.every((event) => event.kind === "message");
       grouped.push({
         id: `war-room-group:${first.id}:${last.id}`,
         kind: last.kind,
         turn: last.turn,
         sequence: last.sequence,
-        headline: translateText(
-          "ai_league_replay.war_room_grouped_skirmishes",
-          { count: run.length },
-          `+${run.length} more ${run.length === 1 ? "skirmish" : "skirmishes"}`,
-        ),
+        headline: allMessages
+          ? translateText(
+              "ai_league_replay.war_room_grouped_messages",
+              { count: run.length },
+              `+${run.length} more ${run.length === 1 ? "message" : "messages"}`,
+            )
+          : translateText(
+              "ai_league_replay.war_room_grouped_skirmishes",
+              { count: run.length },
+              `+${run.length} more ${run.length === 1 ? "skirmish" : "skirmishes"}`,
+            ),
         publicReason: null,
         participants,
         expandedDetail: run
@@ -791,6 +1015,7 @@ export function curatedWarRoomEvents(
   telemetry: AiLeagueSpectatorTelemetry | null,
   decisions: readonly BroadcastBeatsDecision[],
   matchStateSeries: AiLeagueMatchStateSeries | null,
+  agentMessages: readonly RecordedAgentMessage[] = [],
 ): CuratedWarRoomEvent[] {
   const curated: CuratedWarRoomEvent[] = [];
   const firstStrikeSeen = new Set<string>();
@@ -978,6 +1203,12 @@ export function curatedWarRoomEvents(
   }
   curated.push(...planChangeWarRoomEvents(decisions));
   curated.push(...leadChangeWarRoomEvents(matchStateSeries));
+  // The blocker-5 kill switch gates ONLY this push: with the page global
+  // stamped false, the feed simply carries no message beats while every
+  // other beat — and every artifact — is untouched.
+  if (messageBeatsDisplayEnabled()) {
+    curated.push(...messageWarRoomEvents(agentMessages, telemetry));
+  }
   const sorted = curated.sort(
     (a, b) => a.turn - b.turn || a.sequence - b.sequence,
   );
@@ -1404,6 +1635,8 @@ export interface BroadcastBeatsInput {
   /** Canonical record range, the timeline's own 100% mark. */
   replayMaxTurn?: number | null;
   decisions?: readonly BroadcastBeatsDecision[];
+  /** Delivered free-text messages off the record's own turns — see `recordedAgentMessages`. */
+  agentMessages?: readonly RecordedAgentMessage[];
 }
 
 export interface BroadcastBeatsHandle {
@@ -1454,6 +1687,7 @@ export function mountBroadcastBeats(
     telemetry,
     decisions,
     matchStateSeries,
+    input.agentMessages ?? [],
   );
   const timelineMarkers: TimelineMarker[] = [
     ...matchTimelineEventMarkers(telemetry, matchStateSeries),

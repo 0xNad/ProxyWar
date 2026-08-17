@@ -83,6 +83,21 @@ export class LlmPromptBuilder {
       "END_FRONTIER_AGENT_SKILL",
       profileGuidance(input.observation.profile),
       "Return JSON only, with no prose outside the JSON object.",
+      // DELIBERATE (2026-08-16): the in-house lane is NOT taught the optional
+      // deal/comms reply slots (`selectedDealActionId`,
+      // `selectedMessageActionId` + `messageText`) that the external lanes
+      // document (see ExternalHttpAgentBrain's wire contract). When
+      // PROXYWAR_TUNE_STRUCTURED_DEALS / PROXYWAR_TUNE_FREETEXT_MESSAGES are
+      // on, deal/message offers DO still appear in LEGAL_ACTIONS_JSON below —
+      // an untaught model that names a `message` id as its PRIMARY
+      // selectedLegalActionId is refused loudly by validateAgentDecision
+      // (deal meta-actions taken as primary survive; the runner routes them
+      // to the deal manager). Free-text and deals are external-lane-first:
+      // teaching this prompt the slots is an in-house prompt change, and the
+      // 2026-08-07 menu-cut ruling requires a hosted A/B before any such
+      // change ships. The brain side is already bridged (LlmAgentBrain
+      // forwards both slots), so when that A/B happens, a reply-shape line
+      // here is the only missing piece.
       spawnPreferenceRound
         ? 'Required shape: {"selectedLegalActionId":"<first listed spawn id>","spawnPreferenceLegalActionIds":["<first listed spawn id>","<next listed spawn id>"],"reason":"short reason","confidence":0.0}'
         : 'Required shape: {"selectedLegalActionId":"<one listed id>","reason":"short reason","confidence":0.0}',

@@ -21,7 +21,7 @@ import {
 import "./AccountModal";
 import { getUserMe } from "./Api";
 import { userAuth } from "./Auth";
-import { mountBroadcastBeats } from "./BroadcastBeats";
+import { mountBroadcastBeats, recordedAgentMessages } from "./BroadcastBeats";
 import "./ClanModal";
 import { joinLobby, type JoinLobbyResult } from "./ClientGameRunner";
 import { getPlayerCosmeticsRefs } from "./Cosmetics";
@@ -1697,6 +1697,10 @@ class Client {
         // `SpectatorReplayStore` — see `aiLeagueLeadChangeBeats`.
         matchStateSeries: null,
         replayMaxTurn: initialReplayClipRenderableThroughTurn(gameRecord.info),
+        // Free-text negotiation, off the record's own delivered intents (the
+        // turn stream, never the runner's accepted flag) — the MESSAGE beat
+        // cards' only source. Empty on every pre-freetext record.
+        agentMessages: recordedAgentMessages(gameRecord),
       }).dispose,
     );
 

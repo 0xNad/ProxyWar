@@ -1,4 +1,45 @@
 import os from "os";
+import { messageBeatsDisplayEnabled } from "./AgentTunables";
+
+/**
+ * The page global `BroadcastBeats.ts` reads before curating MESSAGE beats.
+ * Kept here beside the injector so the server and the client agree on one
+ * name by construction (the client re-declares it literally; a shared import
+ * would drag server code into the bundle).
+ */
+export const MESSAGE_BEATS_DISPLAY_GLOBAL_NAME =
+  "__PROXYWAR_MESSAGE_BEATS_DISPLAY__";
+
+/**
+ * Applies the public display kill switch (blocker 5,
+ * `PROXYWAR_TUNE_MESSAGE_BEATS_DISPLAY` — see
+ * `AgentTunables.messageBeatsDisplayEnabled`) to a served replay app-shell
+ * document. With the switch ON (the default) the document passes through
+ * byte-identical. With it OFF, one inline script stamping the page global
+ * `false` is injected before `</head>`, and the client's beat curation skips
+ * MESSAGE beats. Display only: the artifacts the page fetches are untouched.
+ *
+ * The replay route this feeds sets no Content-Security-Policy header (the
+ * nonce'd CSP lives on `/account`-family routes, which never render beats),
+ * so a plain inline script is deliverable here; if that route ever gains a
+ * nonce'd CSP, pass the nonce through `scriptNonce`.
+ */
+export function withMessageBeatsDisplayFlag(
+  html: string,
+  options: { scriptNonce?: string } = {},
+): string {
+  if (messageBeatsDisplayEnabled()) {
+    return html;
+  }
+  const nonceAttr =
+    options.scriptNonce === undefined ? "" : ` nonce="${options.scriptNonce}"`;
+  const stamp = `<script${nonceAttr}>window.${MESSAGE_BEATS_DISPLAY_GLOBAL_NAME}=false;</script>`;
+  const headEnd = html.indexOf("</head>");
+  if (headEnd === -1) {
+    return stamp + html;
+  }
+  return html.slice(0, headEnd) + stamp + html.slice(headEnd);
+}
 
 export interface ProxyWarDemoServerNetworkConfig {
   host: string;

@@ -119,6 +119,7 @@ import {
 import {
   buildProxyWarDemoServerUrls,
   loadProxyWarDemoServerNetworkConfig,
+  withMessageBeatsDisplayFlag,
 } from "../server/agents/ProxyWarDemoServerConfig";
 import type { ProxyWarDoctrine } from "../server/agents/ProxyWarNationRegistry";
 import {
@@ -2541,7 +2542,10 @@ if (leagueWrapperOnly) {
         path.resolve(staticRootDir, "index.html"),
       );
       setHtmlNoCacheHeaders(res);
-      res.send(content);
+      // Blocker-5 display kill switch: a pass-through no-op unless
+      // PROXYWAR_TUNE_MESSAGE_BEATS_DISPLAY turns MESSAGE beats off for the
+      // pages this process serves. Records and artifacts are untouched.
+      res.send(withMessageBeatsDisplayFlag(content));
     } catch (error) {
       console.error(
         `Failed to serve the built replay client: ${
