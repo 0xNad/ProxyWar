@@ -14,8 +14,10 @@ import {
   type CoworldAppShellRoute,
 } from "./coworld-appshell.ts";
 import {
+  composeCoworldDecision,
   decisionRequestEnvelope,
   normalizeDecisionResponse,
+  type ComposedCoworldDecision,
 } from "./coworld-decision-wire.ts";
 import { episodeIndexFromConfig } from "./coworld-episode-index.ts";
 import {
@@ -85,21 +87,15 @@ type LegalActionView = {
   metadata?: Record<string, unknown>;
 };
 
-type CoworldDecision = {
-  actionID: string;
-  /** Optional wire batch (selectedLegalActionIds), normalized + capped. */
-  actionIDs?: string[];
-  /**
-   * Optional untrusted spawn-ballot shape. Runtime validation in the backend
-   * owns its string-array contract; this transport preserves bounded hostile
-   * shapes so malformed explicit ballots cannot become legacy scalar replies.
-   */
-  spawnPreferenceActionIDs?: unknown;
-  /** Optional diplomacy-slot selection (selectedDealActionId). */
-  dealActionID?: string;
-  reason: string;
-  metadata: Record<string, unknown>;
-};
+/**
+ * The object handed to AgentLeagueMatch by `brainForSlot` — i.e. the seat's
+ * AgentDecision. Deliberately an alias, NOT a second hand-listed field set:
+ * re-listing the selection fields here is a third place a new slot has to be
+ * remembered, and the comms slot was already lost once to exactly that class
+ * of omission. The wire module owns the shape; `tests/coworld/
+ * DecisionSlotParity.test.ts` pins it against AgentTypes.AgentDecision.
+ */
+type CoworldDecision = ComposedCoworldDecision;
 
 type PendingDecision = {
   resolve: (decision: CoworldDecision) => void;
@@ -159,6 +155,11 @@ class CoworldProtocolServer {
   private spectatorReplay: Record<string, unknown> | null = null;
   private replayPayload: unknown = null;
   private portValue: number | null = null;
+  // Comms capability advertised in every decision envelope. Null until the
+  // episode resolves it from the engine's own tunables, and it STAYS null when
+  // free text is off, so the flag-off envelope is byte-identical to shipped
+  // behavior. Set before the first decision (see runProxyWarEpisode).
+  private maxMessageChars: number | null = null;
 
   constructor(private readonly config: CoworldConfig) {
     this.server.on("upgrade", (request, socket, head) => {
@@ -257,6 +258,16 @@ class CoworldProtocolServer {
     );
   }
 
+  /**
+   * Publishes the comms capability for this episode. The value comes from the
+   * engine's AgentTunables (dynamically imported by the episode), never from a
+   * second env read here — `freeTextMessagesEnabled()` stays the single
+   * authority on whether the feature is on.
+   */
+  setCommsCapability(maxMessageChars: number | null): void {
+    this.maxMessageChars = maxMessageChars;
+  }
+
   brainForSlot(slot: number, buildRequestPayload: (input: unknown) => unknown) {
     return {
       brainType: "external-http",
@@ -318,11 +329,21 @@ class CoworldProtocolServer {
       });
       websocket.send(
         // Envelope carries independent capability advertisements for action
-        // batching and spawn ranking (protocol.maxActionsPerDecision /
-        // protocol.maxSpawnPreferences) as siblings of requestID/slot; the
+        // batching, spawn ranking, and the comms slot
+        // (protocol.maxActionsPerDecision / protocol.maxSpawnPreferences /
+        // protocol.maxMessageChars) as siblings of requestID/slot; the
         // inner request payload is untouched. Players ignore unknown envelope
         // keys, so older policies remain scalar-only compatible.
-        JSON.stringify(decisionRequestEnvelope({ requestID, slot, request })),
+        JSON.stringify(
+          decisionRequestEnvelope({
+            requestID,
+            slot,
+            request,
+            ...(this.maxMessageChars !== null
+              ? { maxMessageChars: this.maxMessageChars }
+              : {}),
+          }),
+        ),
       );
     });
     // The frame above is sent during the league's synchronous observation
@@ -444,41 +465,25 @@ class CoworldProtocolServer {
     this.pending.delete(requestID);
     // Decision fields (scalar primary, optional selectedLegalActionIds batch,
     // independent spawnPreferenceLegalActionIds ballot, optional deal slot,
-    // reason) are shape/length-bounded by
+    // optional comms pair, reason) are shape/length-bounded by
     // the shared wire module — see coworld-decision-wire.ts for the
     // normalization contract and why menu membership is deliberately NOT
-    // checked here. Metadata assembly stays in place: it reads
-    // episode-local state (slot, requestID, offered menu size).
+    // checked here. The metadata envelope is composed there too, from the
+    // episode-local state passed in below (slot, requestID, offered menu size).
     const normalized = normalizeDecisionResponse(message, {
       allSpawnMenu:
         pending.legalActions.length > 0 &&
         pending.legalActions.every((action) => action.kind === "spawn"),
     });
-    pending.resolve({
-      ...normalized,
-      metadata: {
-        brain: "coworld-websocket",
-        externalActionCall: true,
-        parseSuccess: true,
-        // Degradation flags come from the player on the wire — never assume
-        // health. A policy whose brain failed must show up in fallback_count
-        // and replays (the v1 bedrock seat failed silently for 60+ rounds
-        // because this was hardcoded false).
-        fallbackUsed: message.fallbackUsed === true,
-        ...(message.llmPlannerDegraded === true
-          ? { llmPlannerDegraded: true }
-          : {}),
-        coworldSlot: slot,
-        coworldRequestID: requestID,
-        rawProviderOutputPresent: true,
-        externalRawOutput: JSON.stringify(message).slice(0, 1000),
+    pending.resolve(
+      composeCoworldDecision({
+        normalized,
+        message,
+        slot,
+        requestID,
         offeredLegalActionCount: pending.legalActions.length,
-        confidence:
-          typeof message.confidence === "number"
-            ? message.confidence
-            : undefined,
-      },
-    });
+      }),
+    );
   }
 
   private statusSnapshot(
@@ -825,6 +830,14 @@ async function runProxyWarEpisode(
   proxyWarArtifactDir: string;
 }> {
   const modules = await loadProxyWarModules();
+  // Publish the comms capability before any decision frame goes out. Resolved
+  // from the engine's own tunables so the advertisement can never disagree
+  // with the cap the validator actually enforces; null while the flag is off.
+  protocolServer.setCommsCapability(
+    modules.freeTextMessagesEnabled?.() === true
+      ? (modules.FREETEXT_MESSAGE_MAX_CHARS ?? null)
+      : null,
+  );
   const log = winston.createLogger({
     level: "warn",
     format: winston.format.simple(),
@@ -1148,6 +1161,7 @@ async function loadProxyWarModules(): Promise<Record<string, any>> {
     logWriterMod,
     externalMod,
     manifestMod,
+    tunablesMod,
   ] = await Promise.all([
     importProxyWar("src/core/configuration/Config.ts"),
     importProxyWar("src/core/game/Game.ts"),
@@ -1160,6 +1174,7 @@ async function loadProxyWarModules(): Promise<Record<string, any>> {
     importProxyWar("src/server/agents/AgentDecisionLogWriter.ts"),
     importProxyWar("src/server/agents/ExternalHttpAgentBrain.ts"),
     importProxyWar("src/server/agents/AgentManifest.ts"),
+    importProxyWar("src/server/agents/AgentTunables.ts"),
   ]);
   return {
     ...configMod,
@@ -1173,6 +1188,7 @@ async function loadProxyWarModules(): Promise<Record<string, any>> {
     ...logWriterMod,
     ...externalMod,
     ...manifestMod,
+    ...tunablesMod,
   };
 }
 
@@ -1184,20 +1200,23 @@ function startPlayers(
   config: CoworldConfig,
   protocolServer: CoworldProtocolServer,
 ): ChildProcess[] {
+  // Opt-in override so a local proof can drive the REAL league starter
+  // (tester-starter-llm) against this exact hosted code path instead of the
+  // bundled deterministic seat. Unset — which is always the case in the
+  // image — resolves to the bundled player, so hosted behavior is unchanged.
+  const playerScript =
+    process.env.PROXYWAR_PLAYER_SCRIPT ??
+    path.join(localRoot, "src", "starter-player.mjs");
   return config.tokens.map((_token, slot) =>
-    spawn(
-      process.execPath,
-      [path.join(localRoot, "src", "starter-player.mjs")],
-      {
-        cwd: localRoot,
-        env: {
-          ...process.env,
-          PROXYWAR_REPO: proxyWarRepo,
-          COWORLD_PLAYER_WS_URL: protocolServer.playerUrl(slot),
-        },
-        stdio: ["ignore", "pipe", "pipe"],
+    spawn(process.execPath, [playerScript], {
+      cwd: localRoot,
+      env: {
+        ...process.env,
+        PROXYWAR_REPO: proxyWarRepo,
+        COWORLD_PLAYER_WS_URL: protocolServer.playerUrl(slot),
       },
-    ).on("error", (error) => {
+      stdio: ["ignore", "pipe", "pipe"],
+    }).on("error", (error) => {
       throw error;
     }),
   );
