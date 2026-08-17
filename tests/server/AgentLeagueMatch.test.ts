@@ -1942,6 +1942,142 @@ describe("AgentLeagueMatchRunner", () => {
     // shared 60s testTimeout in vite.config.ts rather than a local budget.
   });
 
+  it("names the real cause when the game never produced start info", async () => {
+    // Regression for a debugging session lost on 2026-08-17. A gameID that is not 8
+    // alphanumeric characters makes GameStartInfoSchema reject the start info, so
+    // GameServer.start() logs and returns, no `start` message is ever sent, the mirror
+    // never builds a game state - and the failure surfaced 80 spawn ticks later as
+    // "did not reach the active phase", which points at the spawn loop rather than at
+    // the id. The loop is fine; there was never a game to advance.
+    const log = makeLogger();
+    const mapLoader = new StaticMapLoader();
+    const config = { ...gameConfig, gameMapSize: GameMapSize.Compact };
+    const terrain = await loadTerrainMap(
+      config.gameMap,
+      config.gameMapSize,
+      mapLoader,
+      { cache: false },
+    );
+    const participants = createAgentParticipants(
+      createDefaultAgentSpecs(2),
+      log,
+      {
+        brainFactory: () => ({
+          brainType: "mock-llm",
+          decide: async () => ({ actionID: "hold", reason: "unused" }),
+        }),
+      },
+    );
+    const game = new GameServer(
+      // 20 characters with underscores: descriptive, and invalid.
+      "AGENT_START_INFO_BAD",
+      log,
+      Date.now(),
+      steppedServerConfig,
+      config,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: buildSpawnCandidates(terrain.gameMap, {
+        maxCandidates: 64,
+        stride: 4,
+      }),
+      log,
+    });
+    const mirror = new AgentLocalGameMirror(mapLoader, log, terrain);
+
+    try {
+      match.attachAgents();
+      match.startGame();
+      // Names the missing start message rather than blaming the spawn loop, and names
+      // the actual constraint that produced it.
+      await expect(
+        match.runSpawnPhase({
+          mirror,
+          messages: () => participants[0]?.runner.serverMessages() ?? [],
+          turnsPerSpawnTick: 250,
+          maxSpawnTicks: 3,
+        }),
+      ).rejects.toThrow(
+        /never received a `start` message[\s\S]*AGENT_START_INFO_BAD[\s\S]*20 chars[\s\S]*8-character alphanumeric/,
+      );
+    } finally {
+      await game.end({ archive: false });
+    }
+  }, 600_000);
+
+  it("does not blame the id when the id is fine and start info failed anyway", async () => {
+    // The other half of the diagnostic. A valid 8-character id with a start info
+    // failure elsewhere (here a 2-character username, under UsernameSchema's min of 3)
+    // must NOT accuse the id - a diagnostic that always blames the same thing is a
+    // guess wearing an error message.
+    const log = makeLogger();
+    const mapLoader = new StaticMapLoader();
+    const config = { ...gameConfig, gameMapSize: GameMapSize.Compact };
+    const terrain = await loadTerrainMap(
+      config.gameMap,
+      config.gameMapSize,
+      mapLoader,
+      { cache: false },
+    );
+    const participants = createAgentParticipants(
+      [
+        { username: "Ok", profile: "aggressive" },
+        { username: "Also Fine", profile: "diplomatic" },
+      ],
+      log,
+      {
+        brainFactory: () => ({
+          brainType: "mock-llm",
+          decide: async () => ({ actionID: "hold", reason: "unused" }),
+        }),
+      },
+    );
+    const game = new GameServer(
+      "AGENT016",
+      log,
+      Date.now(),
+      steppedServerConfig,
+      config,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: buildSpawnCandidates(terrain.gameMap, {
+        maxCandidates: 64,
+        stride: 4,
+      }),
+      log,
+    });
+    const mirror = new AgentLocalGameMirror(mapLoader, log, terrain);
+
+    try {
+      match.attachAgents();
+      match.startGame();
+      const failure = await match
+        .runSpawnPhase({
+          mirror,
+          messages: () => participants[0]?.runner.serverMessages() ?? [],
+          turnsPerSpawnTick: 250,
+          maxSpawnTicks: 3,
+        })
+        .then(() => null)
+        .catch((error: unknown) =>
+          error instanceof Error ? error.message : String(error),
+        );
+
+      expect(failure).not.toBeNull();
+      expect(failure).toContain("never received a `start` message");
+      expect(failure).toContain("is valid");
+      // It points at the real place to look instead of at the id.
+      expect(failure).toContain("Error parsing game start info");
+      expect(failure).not.toContain("8-character alphanumeric");
+    } finally {
+      await game.end({ archive: false });
+    }
+  }, 600_000);
+
   it("retains the turn stream on the primary seat only when asked", async () => {
     const log = makeLogger();
     const mapLoader = new StaticMapLoader();
