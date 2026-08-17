@@ -230,7 +230,8 @@
         "/app/integration/src/no-docker-coworld-episode.ts"
       ],
       "env": {
-        "PROXYWAR_TUNE_STRUCTURED_DEALS": "1"
+        "PROXYWAR_TUNE_STRUCTURED_DEALS": "1",
+        "PROXYWAR_TUNE_FREETEXT_MESSAGES": "1"
       }
     },
     "protocols": {

@@ -13,6 +13,14 @@ import { describe, expect, it } from "vitest";
  * flag from either manifest or lets the two drift apart, and (2) a future
  * edit widens this activation onto an unrelated economy or social flag.
  *
+ * PROXYWAR_TUNE_FREETEXT_MESSAGES=1 was added deliberately on 2026-08-17
+ * (`freeTextMessagesEnabled` in AgentTunables.ts) so agents can exchange
+ * free-text messages in league episodes. Talk binds nothing -- structured
+ * deals remain the only commitment path -- and the transport carrying the
+ * comms pair is pinned separately by
+ * `tests/coworld/DecisionSlotParity.test.ts`. Widening this list again should
+ * stay just as conscious: update it only alongside an intended activation.
+ *
  * This is a manifest-text pin only. The behavioral guarantee that arming
  * STRUCTURED_DEALS alone (DIPLOMACY_SLOTS left unset) still offers complete
  * deal_accept/deal_reject pairs on a crowded >96-action menu is covered by
@@ -39,10 +47,11 @@ function readManifest(filename: string): Manifest {
 
 describe("Coworld manifests: PROXYWAR_TUNE_STRUCTURED_DEALS activation", () => {
   it.each(["coworld_manifest.json", "coworld_manifest_template.json"])(
-    "%s arms exactly the structured-deals flag in game.runnable.env",
+    "%s arms exactly the structured-deals and free-text flags in game.runnable.env",
     (filename) => {
       expect(readManifest(filename).game.runnable.env).toEqual({
         PROXYWAR_TUNE_STRUCTURED_DEALS: "1",
+        PROXYWAR_TUNE_FREETEXT_MESSAGES: "1",
       });
     },
   );
