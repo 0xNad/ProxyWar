@@ -70,7 +70,7 @@ export const MAX_WIRE_ACTION_ID_LENGTH = 200;
  * accept passes through byte-identically. Note the validator collapses
  * whitespace BEFORE measuring, so a legitimately-accepted message can be much
  * longer raw than 280; the headroom covers pretty-printed bodies rather than
- * betting that policies emit tight text.
+ * assuming that policies emit tight text.
  */
 export const MAX_WIRE_MESSAGE_TEXT_LENGTH = 4000;
 
