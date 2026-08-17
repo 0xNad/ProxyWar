@@ -1,27 +1,24 @@
 import { describe, expect, it, vi } from "vitest";
 import { Logger } from "winston";
 
-vi.mock(
-  "../../src/core/configuration/ConfigLoader",
-  async (importOriginal) => {
-    const actual =
-      await importOriginal<
-        typeof import("../../src/core/configuration/ConfigLoader")
-      >();
-    return {
-      ...actual,
-      getServerConfigFromServer: () => ({
-        otelEnabled: () => false,
-        otelAuthHeader: () => "",
-        otelEndpoint: () => "",
-        env: () => 0,
-      }),
-      getServerConfig: () => ({
-        otelEnabled: () => false,
-      }),
-    };
-  },
-);
+vi.mock("../../src/core/configuration/ConfigLoader", async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import("../../src/core/configuration/ConfigLoader")
+    >();
+  return {
+    ...actual,
+    getServerConfigFromServer: () => ({
+      otelEnabled: () => false,
+      otelAuthHeader: () => "",
+      otelEndpoint: () => "",
+      env: () => 0,
+    }),
+    getServerConfig: () => ({
+      otelEnabled: () => false,
+    }),
+  };
+});
 
 import { GameEnv, ServerConfig } from "../../src/core/configuration/Config";
 import { Executor } from "../../src/core/execution/ExecutionManager";
@@ -40,7 +37,10 @@ import {
   buildSpawnCandidates,
   createAgentParticipants,
 } from "../../src/server/agents/AgentLeagueMatch";
-import { AgentBrainInput, LegalAction } from "../../src/server/agents/AgentTypes";
+import {
+  AgentBrainInput,
+  LegalAction,
+} from "../../src/server/agents/AgentTypes";
 import { GameServer } from "../../src/server/GameServer";
 import { setup } from "../util/Setup";
 
@@ -163,7 +163,7 @@ describe("AgentLeagueMatchBatchE2E", () => {
       { brainFactory: () => batchingBrain(3) },
     );
     const game = new GameServer(
-      "AGENT_E2E_BATCH",
+      "AGE2EBAT",
       log,
       Date.now(),
       serverConfig,
@@ -194,7 +194,7 @@ describe("AgentLeagueMatchBatchE2E", () => {
         { nations: "disabled" },
         playerInfos,
       );
-      const executor = new Executor(coreGame, "AGENT_E2E_BATCH", undefined);
+      const executor = new Executor(coreGame, "AGE2EBAT", undefined);
       coreGame.addExecution(
         ...executor.createExecs({
           turnNumber: 0,
@@ -286,7 +286,7 @@ describe("AgentLeagueMatchBatchE2E", () => {
       { brainFactory: () => menuAwareBrain() },
     );
     const game = new GameServer(
-      "AGENT_E2E_SCALAR",
+      "AGE2ESCL",
       log,
       Date.now(),
       serverConfig,
@@ -304,9 +304,9 @@ describe("AgentLeagueMatchBatchE2E", () => {
       match.startGame();
       const openingRecords = await match.runOpeningTurn();
       expect(openingRecords).toHaveLength(2);
-      expect(
-        openingRecords.every((record) => record.intent !== null),
-      ).toBe(true);
+      expect(openingRecords.every((record) => record.intent !== null)).toBe(
+        true,
+      );
 
       const playerInfos = openingRecords.map(
         (record, index) =>
@@ -322,7 +322,7 @@ describe("AgentLeagueMatchBatchE2E", () => {
         { nations: "disabled" },
         playerInfos,
       );
-      const executor = new Executor(coreGame, "AGENT_E2E_SCALAR", undefined);
+      const executor = new Executor(coreGame, "AGE2ESCL", undefined);
       coreGame.addExecution(
         ...executor.createExecs({
           turnNumber: 0,
@@ -349,10 +349,12 @@ describe("AgentLeagueMatchBatchE2E", () => {
         "Real Intent One",
         "Real Intent Two",
       ]);
-      expect(records.map((record) => record.decisionMetadata?.batchIndex))
-        .toEqual([0, 0]);
-      expect(records.map((record) => record.decisionMetadata?.batchSize))
-        .toEqual([1, 1]);
+      expect(
+        records.map((record) => record.decisionMetadata?.batchIndex),
+      ).toEqual([0, 0]);
+      expect(
+        records.map((record) => record.decisionMetadata?.batchSize),
+      ).toEqual([1, 1]);
       // Every choice came from the menu that was actually offered.
       expect(
         records.every((record) =>
