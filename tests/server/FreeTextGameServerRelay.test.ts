@@ -151,7 +151,7 @@ describe("GameServer agent_message relay (real socket path)", () => {
   beforeEach(() => {
     log = makeLogger();
     game = new GameServer(
-      "FREETEXT1",
+      "FRETEXT1",
       log as never,
       Date.now(),
       serverConfig,
@@ -195,7 +195,7 @@ describe("GameServer agent_message relay (real socket path)", () => {
 
     expect(log.warn).toHaveBeenCalledWith(
       "agent_message intent refused: feature is off",
-      expect.objectContaining({ gameID: "FREETEXT1" }),
+      expect.objectContaining({ gameID: "FRETEXT1" }),
     );
 
     game.advanceTurnsForTesting(3);
@@ -272,7 +272,7 @@ describe("GameServer agent_message relay (real socket path)", () => {
     while (coreGame.inSpawnPhase()) {
       coreGame.executeNextTick();
     }
-    const executor = new Executor(coreGame, "FREETEXT1", undefined);
+    const executor = new Executor(coreGame, "FRETEXT1", undefined);
     coreGame.addExecution(
       ...executor.createExecs({
         turnNumber: 0,

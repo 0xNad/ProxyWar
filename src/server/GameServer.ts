@@ -783,13 +783,12 @@ export class GameServer {
     // it skips both the wall-clock endTurn interval and the wall-clock
     // disconnect detection that would otherwise inject mark_disconnected
     // intents at a load-dependent turn number. Production leaves it enabled.
-    this.realtimeClock = options.realtimeClock ?? true;
-    this._hasStarted = true;
-    this._startTime = Date.now();
-    // Set last ping to start so we don't immediately stop the game
-    // if no client connects/pings.
-    this.lastPingUpdate = Date.now();
-
+    // Validate BEFORE mutating any start state. The previous order set
+    // `_hasStarted = true` first and then returned on a parse failure, which left the
+    // game permanently marked started with no start info and no start message: the
+    // guard at the top of this method then blocked every retry, and `GameManager`
+    // never calls `start()` again for a game that reports `hasStarted()`. A
+    // misconfigured game became a zombie that no client could ever join.
     const result = GameStartInfoSchema.safeParse({
       gameID: this.id,
       lobbyCreatedAt: this.createdAt,
@@ -805,19 +804,32 @@ export class GameServer {
     });
     if (!result.success) {
       const error = z.prettifyError(result.error);
-      // Deliberately NOT a throw: a player-supplied field (username, clan tag,
-      // cosmetics) can fail this schema, and hanging one game is better than
-      // throwing through a worker that is serving others. But say what the
-      // consequence IS - without start info no client is ever sent a `start`
-      // message, so the game cannot begin and every client waits until timeout.
-      // The most common cause in local harnesses is a gameID that is not 8
-      // alphanumeric characters.
       this.log.error(
-        "Error parsing game start info: no start message will be sent and this game cannot begin",
+        "Error parsing game start info: this game cannot begin and no start message will be sent",
         { message: error, gameID: this.id },
       );
-      return;
+      // THROW rather than return. An earlier version returned here, reasoning that a
+      // player-supplied field (username, clan tag, cosmetics) could fail this schema
+      // and that hanging one game beat throwing through a worker serving others. That
+      // reasoning was wrong on the facts: both callers already contain it -
+      // `GameManager` wraps `start()` in try/catch and logs
+      // `error starting game <id>`, and the websocket `start_game` path sits inside
+      // the handler-wide catch. Returning did not protect anything; it produced a
+      // started-but-unstartable game and pushed the symptom to whatever timed out
+      // first.
+      throw new Error(
+        `game ${this.id} cannot start: start info failed validation (${error})`.slice(
+          0,
+          500,
+        ),
+      );
     }
+    this.realtimeClock = options.realtimeClock ?? true;
+    this._hasStarted = true;
+    this._startTime = Date.now();
+    // Set last ping to start so we don't immediately stop the game
+    // if no client connects/pings.
+    this.lastPingUpdate = Date.now();
     this.gameStartInfo = result.data satisfies GameStartInfo;
 
     if (this.realtimeClock) {

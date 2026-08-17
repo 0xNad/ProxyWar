@@ -361,11 +361,11 @@ describe("AgentLeagueMatchRunner", () => {
 
     const reversedArrival = await runWithCompletionOrder(
       ["Zulu", "Alpha"],
-      "AGENT_SEALED_REVERSED",
+      "AGSEALRV",
     );
     const priorityArrival = await runWithCompletionOrder(
       ["Alpha", "Zulu"],
-      "AGENT_SEALED_PRIORITY",
+      "AGENTSEA",
     );
     expect(
       Object.fromEntries(
@@ -445,7 +445,7 @@ describe("AgentLeagueMatchRunner", () => {
       },
     );
     const game = new GameServer(
-      "AGENT_PARALLEL",
+      "AGENTPAR",
       log,
       Date.now(),
       serverConfig,
@@ -640,7 +640,7 @@ describe("AgentLeagueMatchRunner", () => {
       },
     );
     const game = new GameServer(
-      "AGENT_TIMEOUT_WINDOW",
+      "AGENTTIM",
       log,
       Date.now(),
       serverConfig,
@@ -913,7 +913,7 @@ describe("AgentLeagueMatchRunner", () => {
       },
     );
     const game = new GameServer(
-      "AGENT_PIPELINE_FAILURES",
+      "AGENTPIP",
       log,
       Date.now(),
       serverConfig,
@@ -1032,7 +1032,7 @@ describe("AgentLeagueMatchRunner", () => {
       },
     );
     const game = new GameServer(
-      "AGENT_BATCH",
+      "AGENTBAT",
       log,
       Date.now(),
       serverConfig,
@@ -1121,7 +1121,7 @@ describe("AgentLeagueMatchRunner", () => {
       },
     );
     const game = new GameServer(
-      "AGENT_PIN_DIPLO",
+      "AGENTPI0",
       log,
       Date.now(),
       serverConfig,
@@ -1240,7 +1240,7 @@ describe("AgentLeagueMatchRunner", () => {
       },
     );
     const game = new GameServer(
-      "AGENT_PIN_BUILD",
+      "AGENTPIN",
       log,
       Date.now(),
       serverConfig,
@@ -1318,7 +1318,7 @@ describe("AgentLeagueMatchRunner", () => {
       },
     );
     const game = new GameServer(
-      "AGENT_RR",
+      "AGENTRR0",
       log,
       Date.now(),
       serverConfig,
@@ -1422,7 +1422,7 @@ describe("AgentLeagueMatchRunner", () => {
       },
     );
     const game = new GameServer(
-      "AGENT_STALE",
+      "AGENTSTL",
       log,
       Date.now(),
       serverConfig,
@@ -1506,7 +1506,7 @@ describe("AgentLeagueMatchRunner", () => {
       },
     );
     const game = new GameServer(
-      "AGENT_SELF",
+      "AGENTSEL",
       log,
       Date.now(),
       serverConfig,
@@ -1579,7 +1579,7 @@ describe("AgentLeagueMatchRunner", () => {
     const recentWindows: number[] = [];
     const realBuilder = new AgentObservationBuilder();
     const game = new GameServer(
-      "AGENT_MEMWIN",
+      "AGENTMEM",
       log,
       Date.now(),
       serverConfig,
@@ -1666,7 +1666,7 @@ describe("AgentLeagueMatchRunner", () => {
       },
     );
     const game = new GameServer(
-      "AGENT_CAP",
+      "AGENTCAP",
       log,
       Date.now(),
       serverConfig,
@@ -2024,6 +2024,197 @@ describe("AgentLeagueMatchRunner", () => {
     // shared 60s testTimeout in vite.config.ts rather than a local budget.
   });
 
+  it("refuses to start, loudly and without corrupting state, when start info is invalid", async () => {
+    // A gameID that is not 8 alphanumeric characters makes GameStartInfoSchema reject
+    // the start info. Two things used to go wrong, and the second was the real bug:
+    //
+    //  1. the failure surfaced ~80 spawn ticks later as "did not reach the active
+    //     phase", blaming the spawn loop for a game that never existed;
+    //  2. `start()` had already set `_hasStarted = true` BEFORE validating, then
+    //     returned - leaving a game permanently marked started with no start info and
+    //     no start message, which the guard at the top of `start()` made unretryable.
+    //
+    // Now it validates first and throws. Both call sites already contain it
+    // (`GameManager` wraps `start()` in try/catch; the websocket `start_game` path is
+    // inside the handler-wide catch), so nothing is protected by staying quiet.
+    const log = makeLogger();
+    const mapLoader = new StaticMapLoader();
+    const config = { ...gameConfig, gameMapSize: GameMapSize.Compact };
+    const terrain = await loadTerrainMap(
+      config.gameMap,
+      config.gameMapSize,
+      mapLoader,
+      { cache: false },
+    );
+    const participants = createAgentParticipants(
+      createDefaultAgentSpecs(2),
+      log,
+      {
+        brainFactory: () => ({
+          brainType: "mock-llm",
+          decide: async () => ({ actionID: "hold", reason: "unused" }),
+        }),
+      },
+    );
+    const game = new GameServer(
+      // 20 characters with underscores: descriptive, and invalid.
+      "AGENT_START_INFO_BAD",
+      log,
+      Date.now(),
+      steppedServerConfig,
+      config,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: buildSpawnCandidates(terrain.gameMap, {
+        maxCandidates: 64,
+        stride: 4,
+      }),
+      log,
+    });
+
+    try {
+      match.attachAgents();
+      // Fails at the point the mistake was made, naming the game.
+      expect(() => match.startGame()).toThrow(
+        /AGENT_START_INFO_BAD cannot start: start info failed validation/,
+      );
+      // And leaves no zombie: the game is not marked started, so the state is
+      // consistent and a corrected retry is still possible.
+      expect(game.hasStarted()).toBe(false);
+    } finally {
+      await game.end({ archive: false });
+    }
+  }, 600_000);
+
+  it("blames the field that actually failed, not the id, when the id is fine", async () => {
+    // The other half of the contract. A valid 8-character id with a start info failure
+    // elsewhere (here a 2-character username, under UsernameSchema's min of 3) must
+    // name THAT, and must not accuse the id: a diagnostic that always blames the same
+    // thing is a guess wearing an error message.
+    const log = makeLogger();
+    const mapLoader = new StaticMapLoader();
+    const config = { ...gameConfig, gameMapSize: GameMapSize.Compact };
+    const terrain = await loadTerrainMap(
+      config.gameMap,
+      config.gameMapSize,
+      mapLoader,
+      { cache: false },
+    );
+    const participants = createAgentParticipants(
+      [
+        { username: "Ok", profile: "aggressive" },
+        { username: "Also Fine", profile: "diplomatic" },
+      ],
+      log,
+      {
+        brainFactory: () => ({
+          brainType: "mock-llm",
+          decide: async () => ({ actionID: "hold", reason: "unused" }),
+        }),
+      },
+    );
+    const game = new GameServer(
+      "AGENT016",
+      log,
+      Date.now(),
+      steppedServerConfig,
+      config,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: buildSpawnCandidates(terrain.gameMap, {
+        maxCandidates: 64,
+        stride: 4,
+      }),
+      log,
+    });
+
+    try {
+      match.attachAgents();
+      const failure = (() => {
+        try {
+          match.startGame();
+          return null;
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error);
+        }
+      })();
+
+      expect(failure).not.toBeNull();
+      expect(failure).toContain("AGENT016 cannot start");
+      // Points at the field that failed...
+      expect(failure).toMatch(/username|>=3 characters/);
+      // ...and does not invent an id problem.
+      expect(failure).not.toContain("8-character alphanumeric");
+      expect(game.hasStarted()).toBe(false);
+    } finally {
+      await game.end({ archive: false });
+    }
+  }, 600_000);
+
+  it("still explains a missing start message if one never arrives for another reason", async () => {
+    // `start()` now throws on invalid start info, so the delayed spawn-phase check is
+    // a defensive fallback rather than the primary signal. It still earns its place:
+    // a harness that never starts the game (or whose message stream is empty) leaves
+    // the mirror with no state, and the old failure text blamed the spawn loop for it.
+    const log = makeLogger();
+    const mapLoader = new StaticMapLoader();
+    const config = { ...gameConfig, gameMapSize: GameMapSize.Compact };
+    const terrain = await loadTerrainMap(
+      config.gameMap,
+      config.gameMapSize,
+      mapLoader,
+      { cache: false },
+    );
+    const participants = createAgentParticipants(
+      createDefaultAgentSpecs(2),
+      log,
+      {
+        brainFactory: () => ({
+          brainType: "mock-llm",
+          decide: async () => ({ actionID: "hold", reason: "unused" }),
+        }),
+      },
+    );
+    const game = new GameServer(
+      "AGENT017",
+      log,
+      Date.now(),
+      steppedServerConfig,
+      config,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: buildSpawnCandidates(terrain.gameMap, {
+        maxCandidates: 64,
+        stride: 4,
+      }),
+      log,
+    });
+    const mirror = new AgentLocalGameMirror(mapLoader, log, terrain);
+
+    try {
+      match.attachAgents();
+      // Deliberately no startGame(), and an empty message stream.
+      await expect(
+        match.runSpawnPhase({
+          mirror,
+          messages: () => [],
+          turnsPerSpawnTick: 250,
+          maxSpawnTicks: 2,
+        }),
+      ).rejects.toThrow(
+        /never received a `start` message[\s\S]*AGENT017.*is valid/,
+      );
+    } finally {
+      await game.end({ archive: false });
+    }
+  }, 600_000);
+
   it("attributes a sealed spawn ballot that timed out, in the shared cause field", async () => {
     // The spawn stage has had its own cause taxonomy since it was built
     // (`forcedDefaultReason`), and this vocabulary was taken FROM it - but the spawn
@@ -2088,142 +2279,6 @@ describe("AgentLeagueMatchRunner", () => {
       for (const record of timedOut) {
         expect(record.decisionMetadata?.degradedCause).toBe("brain-timeout");
       }
-    } finally {
-      await game.end({ archive: false });
-    }
-  }, 600_000);
-
-  it("names the real cause when the game never produced start info", async () => {
-    // Regression for a debugging session lost on 2026-08-17. A gameID that is not 8
-    // alphanumeric characters makes GameStartInfoSchema reject the start info, so
-    // GameServer.start() logs and returns, no `start` message is ever sent, the mirror
-    // never builds a game state - and the failure surfaced 80 spawn ticks later as
-    // "did not reach the active phase", which points at the spawn loop rather than at
-    // the id. The loop is fine; there was never a game to advance.
-    const log = makeLogger();
-    const mapLoader = new StaticMapLoader();
-    const config = { ...gameConfig, gameMapSize: GameMapSize.Compact };
-    const terrain = await loadTerrainMap(
-      config.gameMap,
-      config.gameMapSize,
-      mapLoader,
-      { cache: false },
-    );
-    const participants = createAgentParticipants(
-      createDefaultAgentSpecs(2),
-      log,
-      {
-        brainFactory: () => ({
-          brainType: "mock-llm",
-          decide: async () => ({ actionID: "hold", reason: "unused" }),
-        }),
-      },
-    );
-    const game = new GameServer(
-      // 20 characters with underscores: descriptive, and invalid.
-      "AGENT_START_INFO_BAD",
-      log,
-      Date.now(),
-      steppedServerConfig,
-      config,
-    );
-    const match = new AgentLeagueMatchRunner({
-      game,
-      participants,
-      spawnCandidates: buildSpawnCandidates(terrain.gameMap, {
-        maxCandidates: 64,
-        stride: 4,
-      }),
-      log,
-    });
-    const mirror = new AgentLocalGameMirror(mapLoader, log, terrain);
-
-    try {
-      match.attachAgents();
-      match.startGame();
-      // Names the missing start message rather than blaming the spawn loop, and names
-      // the actual constraint that produced it.
-      await expect(
-        match.runSpawnPhase({
-          mirror,
-          messages: () => participants[0]?.runner.serverMessages() ?? [],
-          turnsPerSpawnTick: 250,
-          maxSpawnTicks: 3,
-        }),
-      ).rejects.toThrow(
-        /never received a `start` message[\s\S]*AGENT_START_INFO_BAD[\s\S]*20 chars[\s\S]*8-character alphanumeric/,
-      );
-    } finally {
-      await game.end({ archive: false });
-    }
-  }, 600_000);
-
-  it("does not blame the id when the id is fine and start info failed anyway", async () => {
-    // The other half of the diagnostic. A valid 8-character id with a start info
-    // failure elsewhere (here a 2-character username, under UsernameSchema's min of 3)
-    // must NOT accuse the id - a diagnostic that always blames the same thing is a
-    // guess wearing an error message.
-    const log = makeLogger();
-    const mapLoader = new StaticMapLoader();
-    const config = { ...gameConfig, gameMapSize: GameMapSize.Compact };
-    const terrain = await loadTerrainMap(
-      config.gameMap,
-      config.gameMapSize,
-      mapLoader,
-      { cache: false },
-    );
-    const participants = createAgentParticipants(
-      [
-        { username: "Ok", profile: "aggressive" },
-        { username: "Also Fine", profile: "diplomatic" },
-      ],
-      log,
-      {
-        brainFactory: () => ({
-          brainType: "mock-llm",
-          decide: async () => ({ actionID: "hold", reason: "unused" }),
-        }),
-      },
-    );
-    const game = new GameServer(
-      "AGENT016",
-      log,
-      Date.now(),
-      steppedServerConfig,
-      config,
-    );
-    const match = new AgentLeagueMatchRunner({
-      game,
-      participants,
-      spawnCandidates: buildSpawnCandidates(terrain.gameMap, {
-        maxCandidates: 64,
-        stride: 4,
-      }),
-      log,
-    });
-    const mirror = new AgentLocalGameMirror(mapLoader, log, terrain);
-
-    try {
-      match.attachAgents();
-      match.startGame();
-      const failure = await match
-        .runSpawnPhase({
-          mirror,
-          messages: () => participants[0]?.runner.serverMessages() ?? [],
-          turnsPerSpawnTick: 250,
-          maxSpawnTicks: 3,
-        })
-        .then(() => null)
-        .catch((error: unknown) =>
-          error instanceof Error ? error.message : String(error),
-        );
-
-      expect(failure).not.toBeNull();
-      expect(failure).toContain("never received a `start` message");
-      expect(failure).toContain("is valid");
-      // It points at the real place to look instead of at the id.
-      expect(failure).toContain("Error parsing game start info");
-      expect(failure).not.toContain("8-character alphanumeric");
     } finally {
       await game.end({ archive: false });
     }
@@ -4003,7 +4058,7 @@ describe("AgentLeagueMatchRunner manual-clock determinism", () => {
     );
     const participants = makeParticipants(log);
     const game = new GameServer(
-      "DETERMCLK1",
+      "DETRMCK1",
       log,
       Date.now(),
       steppedServerConfig,
@@ -4045,7 +4100,7 @@ describe("AgentLeagueMatchRunner manual-clock determinism", () => {
     );
     const participants = makeParticipants(log);
     const game = new GameServer(
-      "DETERMCLK2",
+      "DETRMCK2",
       log,
       Date.now(),
       steppedServerConfig,
@@ -4093,7 +4148,7 @@ describe("AgentLeagueMatchRunner manual-clock determinism", () => {
       const participants = makeParticipants(log);
       // Identical gameID across both runs => identical core PRNG seed.
       const game = new GameServer(
-        "DETERMSEED",
+        "DETRMSED",
         log,
         1_000_003,
         steppedServerConfig,
