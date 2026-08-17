@@ -25,7 +25,7 @@ async function selectors() {
   )?.[0];
   expect(dealKinds).toBeDefined();
   return new Function(
-    `${dealKinds}\n${extractFunction(source, "isDealActionKind")}\n${extractFunction(source, "activePromiseConstraints")}\n${extractFunction(source, "wouldBreakPromise")}\n${extractFunction(source, "chooseAction")}\n${extractFunction(source, "chooseDealAction")}\nreturn { chooseAction, chooseDealAction };`,
+    `${dealKinds}\n${extractFunction(source, "isDealActionKind")}\n${extractFunction(source, "activePromiseConstraints")}\n${extractFunction(source, "wouldBreakPromise")}\n${extractFunction(source, "pendingRenewalAction")}\n${extractFunction(source, "chooseAction")}\n${extractFunction(source, "chooseDealAction")}\nreturn { chooseAction, chooseDealAction };`,
   )() as {
     chooseAction: (actions: unknown[], obs: unknown) => { id: string };
     chooseDealAction: (actions: unknown[]) => { id: string } | null;

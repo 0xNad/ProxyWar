@@ -124,18 +124,48 @@ socket.on("error", (error) => {
  *  high-risk moves, and holding if nothing better is offered. Replace it with
  *  whatever logic (or LLM call) you like — just always return a valid action.
  * ──────────────────────────────────────────────────────────────────────────── */
+// Alliance renewal is MUTUAL and one-shot: the core extends only once BOTH
+// sides have asked inside a short window (~10% of alliance life), and
+// `canExtendAlliance` goes false the moment you ask. 0.1.48 added
+// `allianceOtherAgreedToExtend` to the observation precisely so a policy can
+// see that its ally is already waiting on it — bots and nations have always
+// reciprocated off the core's equivalent signal.
+//
+// Answering a pending renewal is the cheapest good move on the board: ONE
+// action preserves an existing alliance. So it pre-empts the ordinary
+// preference list rather than sitting inside it.
+function pendingRenewalAction(actions, obs) {
+  const rivals = obs?.visiblePlayers || [];
+  for (const action of actions || []) {
+    if (action?.kind !== "alliance_extend") continue;
+    const targetID =
+      action.metadata?.targetID ??
+      action.metadata?.recipientID ??
+      action.metadata?.playerID;
+    const rival = rivals.find((player) => player?.playerID === targetID);
+    if (rival?.allianceOtherAgreedToExtend === true) return action;
+  }
+  return null;
+}
+
 function chooseAction(actions, obs) {
   if (!Array.isArray(actions) || actions.length === 0) {
     throw new Error("decision_request had no legalActions");
   }
 
   const promiseConstraints = activePromiseConstraints(obs);
+  // An ally already asked to renew: answer it before anything else, because the
+  // window is short, one-shot, and this single action saves the alliance.
+  const renewal = pendingRenewalAction(actions, obs);
+  if (renewal) return renewal;
+
   const preferredKinds = [
     "spawn",
     "attack",
     "build",
     "upgrade_structure",
     "boat",
+    "alliance_extend",
     "alliance_request",
     "quick_chat",
     "emoji",
