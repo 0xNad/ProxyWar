@@ -1,8 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { messageBeatsDisplayEnabled } from "../../src/server/agents/AgentTunables";
 import {
   buildProxyWarDemoServerUrls,
   loadProxyWarDemoServerNetworkConfig,
+  MESSAGE_BEATS_DISPLAY_GLOBAL_NAME,
   validateRemoteBetaInviteConfig,
+  withMessageBeatsDisplayFlag,
 } from "../../src/server/agents/ProxyWarDemoServerConfig";
 
 describe("ProxyWarDemoServerConfig", () => {
@@ -74,5 +77,45 @@ describe("ProxyWarDemoServerConfig", () => {
     ).not.toContain(
       "Do not use the default local invite code for remote friend access.",
     );
+  });
+});
+
+describe("message-beats display kill switch (blocker 5)", () => {
+  const FLAG = "PROXYWAR_TUNE_MESSAGE_BEATS_DISPLAY";
+  const SHELL = "<html><head><title>x</title></head><body></body></html>";
+
+  afterEach(() => {
+    delete process.env[FLAG];
+  });
+
+  it("defaults ON and passes the served shell through byte-identical", () => {
+    expect(messageBeatsDisplayEnabled()).toBe(true);
+    expect(withMessageBeatsDisplayFlag(SHELL)).toBe(SHELL);
+  });
+
+  it("stamps the page global false — and nothing else — when switched off", () => {
+    process.env[FLAG] = "0";
+    expect(messageBeatsDisplayEnabled()).toBe(false);
+    const served = withMessageBeatsDisplayFlag(SHELL);
+    expect(served).toContain(
+      `<script>window.${MESSAGE_BEATS_DISPLAY_GLOBAL_NAME}=false;</script></head>`,
+    );
+    // Display only: the document around the stamp is untouched.
+    expect(served.replace(/<script>[^<]*<\/script>/, "")).toBe(SHELL);
+  });
+
+  it("carries a CSP nonce through when the serving route has one", () => {
+    process.env[FLAG] = "0";
+    const served = withMessageBeatsDisplayFlag(SHELL, {
+      scriptNonce: "abc123",
+    });
+    expect(served).toContain(`<script nonce="abc123">`);
+  });
+
+  it("still stamps a headless document rather than silently skipping it", () => {
+    process.env[FLAG] = "0";
+    const served = withMessageBeatsDisplayFlag("<body>bare</body>");
+    expect(served.startsWith("<script>")).toBe(true);
+    expect(served).toContain("<body>bare</body>");
   });
 });

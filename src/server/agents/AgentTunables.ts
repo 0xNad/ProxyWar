@@ -588,3 +588,23 @@ export function commsReservedSlots(): number {
  */
 export const FREETEXT_INBOX_MAX_MESSAGES = 8;
 export const FREETEXT_INBOX_MAX_PER_RIVAL = 3;
+
+/**
+ * PUBLIC DISPLAY KILL SWITCH for agent-message war-room beats (free-text
+ * review blocker 5). Reads the EXACT env var
+ * `PROXYWAR_TUNE_MESSAGE_BEATS_DISPLAY`. DEFAULT ON.
+ *
+ * DISPLAY ONLY, and deliberately independent of
+ * `PROXYWAR_TUNE_FREETEXT_MESSAGES` (which governs whether agents may talk at
+ * all): turning this off makes app-shell replay pages served by THIS process
+ * stamp `window.__PROXYWAR_MESSAGE_BEATS_DISPLAY__ = false`, and the client's
+ * beat curation (`BroadcastBeats.ts`) then skips MESSAGE beats. Nothing about
+ * generation or records changes — `agent_message` intents in
+ * game-record.json, the decisions.jsonl comms fields, and telemetry are all
+ * byte-identical either way, so the evidence is never rewritten to match the
+ * display. Static replay bundles served off-plane cannot see this process
+ * env and stay ON; their escape hatch is the client global itself.
+ */
+export function messageBeatsDisplayEnabled(): boolean {
+  return tunedNumber("MESSAGE_BEATS_DISPLAY", 1) >= 1;
+}

@@ -4778,6 +4778,11 @@ const ANALYST_TONE_BY_WAR_ROOM_KIND: Record<CuratedWarRoomEventKind, string> = {
   deal_violated: "betrayal",
   elimination: "war",
   lead_change: "info",
+  // Unreachable like plan_change/nuke/lead_change above: a sealed Premiere
+  // never curates message beats (they are Full Replay's record-derived
+  // beats, see BroadcastBeats.recordedAgentMessages). Mapped for type
+  // completeness.
+  message: "info",
   nuke: "threat",
   plan_change: "info",
 };

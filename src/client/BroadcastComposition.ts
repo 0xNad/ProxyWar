@@ -345,6 +345,7 @@ export type CuratedWarRoomEventKind =
   | "deal_violated"
   | "elimination"
   | "lead_change"
+  | "message"
   | "nuke"
   | "plan_change";
 
@@ -366,6 +367,7 @@ const WAR_ROOM_GLYPHS: Record<CuratedWarRoomEventKind, string> = {
   deal_violated: "\u2020", // † dagger, matching betrayal
   elimination: "\u2715", // ✕ multiplication x
   lead_change: "\u2654", // ♔ white chess king — a crown, matching the scorebug's crown chip; text-presentation symbol, never an emoji
+  message: "\u2709", // ✉ envelope — Dingbats block, text presentation, same family as ☢ below
   nuke: "\u2622", // ☢ radioactive sign — matches ReplayPremiereOverlay.ts's own WAR_EVENT_GLYPHS
   plan_change: "\u21BB", // ↻ clockwise open arrow
 };
@@ -384,6 +386,7 @@ const WAR_ROOM_KIND_FALLBACKS: Partial<
   Record<CuratedWarRoomEventKind, string>
 > = {
   lead_change: "Lead change",
+  message: "Message",
 };
 
 /**

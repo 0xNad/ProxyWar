@@ -133,6 +133,25 @@ export class LlmAgentBrain implements AgentBrain {
               spawnPreferenceActionIDs: parsed.spawnPreferenceLegalActionIds,
             }
           : {}),
+        // Optional diplomacy slot, forwarded for parity with the external
+        // brains. The parser only returns it while the structured-deal flag
+        // is on; the runner's validator remains the sole authority over it.
+        ...(parsed.selectedDealActionId !== undefined
+          ? { dealActionID: parsed.selectedDealActionId }
+          : {}),
+        // Comms slot (flag-gated at the parser): forwarded as a PAIR or not
+        // at all, so the id can never reach the validator without the body it
+        // must be judged with. Without this pass-through the in-house lane
+        // silently dropped what the parser had just accepted — found during
+        // the 2026-08-16 free-text UI demo; AgentLeagueMatch reads
+        // decision.messageActionID.
+        ...(parsed.selectedMessageActionId !== undefined &&
+        parsed.messageText !== undefined
+          ? {
+              messageActionID: parsed.selectedMessageActionId,
+              messageText: parsed.messageText,
+            }
+          : {}),
         reason: parsed.reason,
         metadata: {
           brain: "llm",
