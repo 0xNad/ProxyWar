@@ -115,10 +115,50 @@ export function validateAgentMessageDecision(
       reason: `message selection ${loggableActionID(requestedID)} carried no messageText`,
     };
   }
+  // Invisible formatting characters are checked on the RAW text, BEFORE any
+  // whitespace normalization. Two distinct abuses:
+  //
+  // 1. BIDI OVERRIDES (U+202A-202E, U+2066-2069, U+200E-200F, U+061C) visually
+  //    reorder the rendered line. The transcript renders as
+  //    "{sender} -> {recipient}: {msg}" and we own only the English string --
+  //    Crowdin owns every other locale, and any locale placing {msg} first
+  //    would let attacker text reorder the ATTRIBUTION. Spoofing who said what
+  //    in a negotiation transcript corrupts the very evidence this feature
+  //    exists to produce, and `unsafeDescription: false` makes the line a
+  //    single text node, so it cannot be repaired with <bdi> at render time.
+  //
+  // 2. ZERO-WIDTH PADDING (U+200B-200D, U+2060, U+00AD, U+FEFF) buys up to 280
+  //    invisible characters that cost real tokens in every recipient's prompt
+  //    and render as a blank chat row.
+  //
+  // Rejected rather than stripped, like every other violation here: silently
+  // removing characters would change what the agent wrote.
+  //
+  // ORDER MATTERS, and getting it wrong made the U+FEFF arm DEAD CODE. JS `\s`
+  // matches U+FEFF, so running this check after the collapse below meant FEFF
+  // never reached it: `"deal\uFEFF\uFEFFnow"` was ACCEPTED and silently
+  // rewritten to `"deal now"`, and `commsSlotText` recorded a sentence with a
+  // word boundary the agent never wrote. For a feature whose whole purpose is
+  // negotiation EVIDENCE, a rewritten quote is worse than a rejected one, so
+  // the check runs on the raw string. (The other listed characters are not JS
+  // whitespace, so their behaviour is unchanged.)
+  if (
+    /[\u00AD\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF\uFFF9-\uFFFB]/u.test(
+      decision.messageText,
+    )
+  ) {
+    return {
+      ok: false,
+      reason:
+        "messageText contained invisible formatting or bidi-override characters",
+    };
+  }
   // Collapse runs of whitespace (including newlines) to single spaces so a
   // message cannot smuggle in layout that breaks the chat rendering or pads
   // the prompt. This normalizes SPACING only — never wording — and the length
   // gate below is applied to the normalized text that will actually be sent.
+  // Tabs and newlines are deliberately normalized rather than rejected: they
+  // are layout, not content, and a wrapped sentence is still the same sentence.
   const text = decision.messageText.replace(/\s+/gu, " ").trim();
   if (text.length === 0) {
     return {
@@ -139,36 +179,6 @@ export function validateAgentMessageDecision(
     return {
       ok: false,
       reason: "messageText contained control characters",
-    };
-  }
-
-  // Invisible formatting characters, which the whitespace collapse above does
-  // NOT touch and the control ranges above do NOT cover. Two distinct abuses:
-  //
-  // 1. BIDI OVERRIDES (U+202A-202E, U+2066-2069, U+200E-200F, U+061C) visually
-  //    reorder the rendered line. The transcript renders as
-  //    "{sender} -> {recipient}: {msg}" and we own only the English string --
-  //    Crowdin owns every other locale, and any locale placing {msg} first
-  //    would let attacker text reorder the ATTRIBUTION. Spoofing who said what
-  //    in a negotiation transcript corrupts the very evidence this feature
-  //    exists to produce, and `unsafeDescription: false` makes the line a
-  //    single text node, so it cannot be repaired with <bdi> at render time.
-  //
-  // 2. ZERO-WIDTH PADDING (U+200B-200D, U+2060, U+00AD, U+FEFF) buys up to 280
-  //    invisible characters that cost real tokens in every recipient's prompt
-  //    and render as a blank chat row.
-  //
-  // Rejected rather than stripped, like every other violation here: silently
-  // removing characters would change what the agent wrote.
-  if (
-    /[\u00AD\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF\uFFF9-\uFFFB]/u.test(
-      text,
-    )
-  ) {
-    return {
-      ok: false,
-      reason:
-        "messageText contained invisible formatting or bidi-override characters",
     };
   }
   return { ok: true, action, text };
