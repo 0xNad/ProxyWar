@@ -98,6 +98,7 @@ const PLAN_KINDS = [
   "build",
   "boat",
   "alliance_request",
+  "alliance_extend",
   "upgrade_structure",
   "donate_gold",
   "donate_troops",
@@ -253,6 +254,18 @@ function buildState(obs, actions) {
       isAllied: p.isAllied,
       relation: p.relation,
       canAttack: p.canAttack,
+      // Alliance renewal is MUTUAL, one-shot, and only offered inside a short
+      // window. `otherAskedToRenew` is the signal that ONE alliance_extend
+      // keeps this alliance alive; without it the model cannot tell "my ally is
+      // waiting on me" from "renewal is unavailable". Absent unless an alliance
+      // is actually in its window, so a normal rival entry is unchanged.
+      ...(p.allianceInExtensionWindow === true
+        ? {
+            allianceExpiringSoon: true,
+            iAskedToRenew: p.allianceSelfAgreedToExtend === true,
+            otherAskedToRenew: p.allianceOtherAgreedToExtend === true,
+          }
+        : {}),
       ...(spatialEnabled
         ? {
             playerID: cleanID(p.playerID),
@@ -1515,7 +1528,59 @@ function socialActionNote(chosen, dealMove, obs) {
 }
 // The GAME move. Deal actions are never returned here — they ride the
 // separate deal slot — so the agent always spends its action on the map.
+// Alliance renewal is MUTUAL and one-shot: the core extends only once BOTH
+// sides ask inside a short window, and `canExtendAlliance` goes false the moment
+// you ask. 0.1.48 added `allianceOtherAgreedToExtend` so a policy can see its
+// ally is already waiting; bots and nations have always reciprocated off the
+// core's equivalent signal. Answering costs one action and saves an existing
+// alliance, so it is taken deterministically rather than left to the plan.
+// Acceptance is a RETURNING request: there is no `alliance_accept` kind, so an
+// alliance forms only when both sides ask. Our own executor already nudges this
+// (`allianceReciprocityPriority` adds +20 when a rival has asked); starters read
+// the flag nowhere, so their requests scatter across rivals who never asked.
+// Measured locally: 6 seats over 7,300 turns sent 19 alliance requests and
+// formed ZERO alliances.
+//
+// This deliberately does NOT change how OFTEN a starter seeks an alliance — only
+// WHOM it asks when it has already decided to ask. Appetite unchanged, so it
+// cannot push the field toward the social stalemate the 2026-08-07 territorial
+// backstop exists to catch.
+function preferReciprocalAlliance(actions, obs, kind) {
+  if (kind !== "alliance_request") return null;
+  const rivals = obs?.visiblePlayers || [];
+  for (const action of actions || []) {
+    if (action?.kind !== "alliance_request") continue;
+    const targetID =
+      action.metadata?.targetID ??
+      action.metadata?.recipientID ??
+      action.metadata?.playerID;
+    const rival = rivals.find((player) => player?.playerID === targetID);
+    if (rival?.hasIncomingAllianceRequest === true) return action;
+  }
+  return null;
+}
+
+function pendingRenewalAction(actions, obs) {
+  const rivals = obs?.visiblePlayers || [];
+  for (const action of actions || []) {
+    if (action?.kind !== "alliance_extend") continue;
+    const targetID =
+      action.metadata?.targetID ??
+      action.metadata?.recipientID ??
+      action.metadata?.playerID;
+    const rival = rivals.find((player) => player?.playerID === targetID);
+    if (rival?.allianceOtherAgreedToExtend === true) return action;
+  }
+  return null;
+}
+
 function choose(actions, obs) {
+  // An ally already asked to renew: answer before consulting the plan, because
+  // the window is short and one-shot and the plan refreshes only every
+  // PLAN_EVERY decisions.
+  const renewal = pendingRenewalAction(actions, obs);
+  if (renewal) return renewal;
+
   const cons = dealConstraints(obs);
   const authorizedBreaks = new Set(plan?.breakDealIDs || []);
   const allAuthorized = (dealIDs) =>
@@ -1639,6 +1704,13 @@ function choose(actions, obs) {
         !violatesPact(c),
     );
     if (candidates.length === 0) continue;
+    // Same appetite, better aim: when this decision is going to ask for an
+    // alliance anyway, ask the rival who already asked us. Acceptance is a
+    // returning request, so this is the difference between a formed alliance and
+    // a wasted one-sided ask. Checked before the plan's named target because a
+    // pending request is a fact about the board, not a preference.
+    const reciprocal = preferReciprocalAlliance(candidates, obs, kind);
+    if (reciprocal) return reciprocal;
     // Within the kind, prefer the plan's named target when one is offered.
     if (plan?.target) {
       const targeted = candidates.find(matchesPlanTarget);

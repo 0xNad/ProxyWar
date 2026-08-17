@@ -30,7 +30,9 @@ socket.on("message", (data) => {
 
   const legalActions = message.request.legalActions ?? [];
   const spawnPreferences = spawnPreferenceRanking(message, legalActions);
-  const action = spawnPreferences?.[0] ?? chooseAction(legalActions);
+  const action =
+    spawnPreferences?.[0] ??
+    chooseAction(legalActions, message.request.observation ?? {});
   const dealAction =
     spawnPreferences === null ? chooseDealAction(legalActions) : null;
   // Comms slot: independent of both the game action and the deal action, so
@@ -116,10 +118,65 @@ socket.on("error", (error) => {
   process.exit(1);
 });
 
-function chooseAction(actions) {
+// Alliance renewal is MUTUAL and one-shot: the core extends only once BOTH
+// sides have asked inside a short window (~10% of alliance life), and
+// `canExtendAlliance` goes false the moment you ask. 0.1.48 added
+// `allianceOtherAgreedToExtend` to the observation precisely so a policy can
+// see that its ally is already waiting on it — bots and nations have always
+// reciprocated off the core's equivalent signal.
+//
+// Answering a pending renewal is the cheapest good move on the board: ONE
+// action preserves an existing alliance. So it pre-empts the ordinary
+// preference list rather than sitting inside it.
+// Acceptance is a RETURNING request: there is no `alliance_accept` kind, so an
+// alliance forms only when both sides ask. Our own executor already nudges this
+// (`allianceReciprocityPriority` adds +20 when a rival has asked); starters read
+// the flag nowhere, so their requests scatter across rivals who never asked.
+// Measured locally: 6 seats over 7,300 turns sent 19 alliance requests and
+// formed ZERO alliances.
+//
+// This deliberately does NOT change how OFTEN a starter seeks an alliance — only
+// WHOM it asks when it has already decided to ask. Appetite unchanged, so it
+// cannot push the field toward the social stalemate the 2026-08-07 territorial
+// backstop exists to catch.
+function preferReciprocalAlliance(actions, obs, kind) {
+  if (kind !== "alliance_request") return null;
+  const rivals = obs?.visiblePlayers || [];
+  for (const action of actions || []) {
+    if (action?.kind !== "alliance_request") continue;
+    const targetID =
+      action.metadata?.targetID ??
+      action.metadata?.recipientID ??
+      action.metadata?.playerID;
+    const rival = rivals.find((player) => player?.playerID === targetID);
+    if (rival?.hasIncomingAllianceRequest === true) return action;
+  }
+  return null;
+}
+
+function pendingRenewalAction(actions, obs) {
+  const rivals = obs?.visiblePlayers || [];
+  for (const action of actions || []) {
+    if (action?.kind !== "alliance_extend") continue;
+    const targetID =
+      action.metadata?.targetID ??
+      action.metadata?.recipientID ??
+      action.metadata?.playerID;
+    const rival = rivals.find((player) => player?.playerID === targetID);
+    if (rival?.allianceOtherAgreedToExtend === true) return action;
+  }
+  return null;
+}
+
+function chooseAction(actions, obs) {
   if (!Array.isArray(actions) || actions.length === 0) {
     throw new Error("decision_request contained no legalActions");
   }
+
+  // An ally already asked to renew: answer it before anything else, because the
+  // window is short, one-shot, and this single action saves the alliance.
+  const renewal = pendingRenewalAction(actions, obs);
+  if (renewal) return renewal;
 
   const preferredKinds = [
     "spawn",
@@ -127,11 +184,16 @@ function chooseAction(actions) {
     "build",
     "upgrade_structure",
     "boat",
+    "alliance_extend",
     "alliance_request",
     "quick_chat",
     "emoji",
   ];
   for (const kind of preferredKinds) {
+    // Same appetite, better aim: if we are about to ask for an alliance, ask
+    // the rival who already asked us, so the pair actually forms one.
+    const reciprocal = preferReciprocalAlliance(actions, obs, kind);
+    if (reciprocal) return reciprocal;
     const action = actions.find(
       (candidate) =>
         candidate.kind === kind &&
