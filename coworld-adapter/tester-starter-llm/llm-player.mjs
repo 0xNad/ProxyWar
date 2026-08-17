@@ -1509,6 +1509,32 @@ function socialActionNote(chosen, dealMove, obs) {
 // ally is already waiting; bots and nations have always reciprocated off the
 // core's equivalent signal. Answering costs one action and saves an existing
 // alliance, so it is taken deterministically rather than left to the plan.
+// Acceptance is a RETURNING request: there is no `alliance_accept` kind, so an
+// alliance forms only when both sides ask. Our own executor already nudges this
+// (`allianceReciprocityPriority` adds +20 when a rival has asked); starters read
+// the flag nowhere, so their requests scatter across rivals who never asked.
+// Measured locally: 6 seats over 7,300 turns sent 19 alliance requests and
+// formed ZERO alliances.
+//
+// This deliberately does NOT change how OFTEN a starter seeks an alliance — only
+// WHOM it asks when it has already decided to ask. Appetite unchanged, so it
+// cannot push the field toward the social stalemate the 2026-08-07 territorial
+// backstop exists to catch.
+function preferReciprocalAlliance(actions, obs, kind) {
+  if (kind !== "alliance_request") return null;
+  const rivals = obs?.visiblePlayers || [];
+  for (const action of actions || []) {
+    if (action?.kind !== "alliance_request") continue;
+    const targetID =
+      action.metadata?.targetID ??
+      action.metadata?.recipientID ??
+      action.metadata?.playerID;
+    const rival = rivals.find((player) => player?.playerID === targetID);
+    if (rival?.hasIncomingAllianceRequest === true) return action;
+  }
+  return null;
+}
+
 function pendingRenewalAction(actions, obs) {
   const rivals = obs?.visiblePlayers || [];
   for (const action of actions || []) {
@@ -1653,6 +1679,13 @@ function choose(actions, obs) {
         !violatesPact(c),
     );
     if (candidates.length === 0) continue;
+    // Same appetite, better aim: when this decision is going to ask for an
+    // alliance anyway, ask the rival who already asked us. Acceptance is a
+    // returning request, so this is the difference between a formed alliance and
+    // a wasted one-sided ask. Checked before the plan's named target because a
+    // pending request is a fact about the board, not a preference.
+    const reciprocal = preferReciprocalAlliance(candidates, obs, kind);
+    if (reciprocal) return reciprocal;
     // Within the kind, prefer the plan's named target when one is offered.
     if (plan?.target) {
       const targeted = candidates.find(matchesPlanTarget);

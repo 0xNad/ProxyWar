@@ -211,6 +211,7 @@ describe("the entry point actually reciprocates", () => {
           extractFunction(source, "isDealActionKind"),
           optionalFunction(source, "activePromiseConstraints"),
           optionalFunction(source, "wouldBreakPromise"),
+          extractFunction(source, "preferReciprocalAlliance"),
           extractFunction(source, "pendingRenewalAction"),
           extractFunction(source, "chooseAction"),
           "return chooseAction;",
@@ -267,6 +268,7 @@ describe("the entry point actually reciprocates", () => {
         extractFunction(source, "socialActionNote"),
         optionalFunction(source, "activePromiseConstraints"),
         optionalFunction(source, "wouldBreakPromise"),
+        extractFunction(source, "preferReciprocalAlliance"),
         extractFunction(source, "pendingRenewalAction"),
         extractFunction(source, "choose"),
         "return choose;",
@@ -285,4 +287,118 @@ describe("the entry point actually reciprocates", () => {
     );
     expect(attacked.kind).toBe("attack");
   });
+});
+
+/**
+ * Acceptance is a RETURNING alliance request — there is no `alliance_accept`
+ * kind — so an alliance forms only when both sides ask. Measured locally before
+ * this: 6 deterministic seats over 7,300 turns sent 19 alliance requests and
+ * formed ZERO alliances, because nothing consulted `hasIncomingAllianceRequest`
+ * (our own executor adds +20 for it).
+ *
+ * These pin AIM, not appetite: the starter must not ask for MORE alliances, it
+ * must aim the ask it was already going to make at the rival who already asked.
+ * Appetite changes would risk the social stalemate the 2026-08-07 territorial
+ * backstop exists to catch.
+ */
+describe("alliance requests are aimed at whoever already asked", () => {
+  const ASKED = {
+    id: "alliance_request:P_ASKED",
+    kind: "alliance_request",
+    risk: { level: "low" },
+    metadata: { targetID: "P_ASKED", targetName: "Asked" },
+  };
+  const STRANGER = {
+    id: "alliance_request:P_STRANGER",
+    kind: "alliance_request",
+    risk: { level: "low" },
+    metadata: { targetID: "P_STRANGER", targetName: "Stranger" },
+  };
+  const allianceObs = (incomingFrom: string | null) => ({
+    phase: "active",
+    turnNumber: 2_000,
+    ownState: { playerID: "P_ME" },
+    visiblePlayers: [
+      {
+        playerID: "P_STRANGER",
+        name: "Stranger",
+        isAlive: true,
+        hasSpawned: true,
+        sharesBorder: true,
+        isAllied: false,
+        hasIncomingAllianceRequest: incomingFrom === "P_STRANGER",
+      },
+      {
+        playerID: "P_ASKED",
+        name: "Asked",
+        isAlive: true,
+        hasSpawned: true,
+        sharesBorder: true,
+        isAllied: false,
+        hasIncomingAllianceRequest: incomingFrom === "P_ASKED",
+      },
+    ],
+  });
+
+  it.each(ALL_STARTERS)(
+    "%s prefers the rival who already asked",
+    async (starter) => {
+      const source = await read(starter);
+      const prefer = new Function(
+        `${extractFunction(source, "preferReciprocalAlliance")}\nreturn preferReciprocalAlliance;`,
+      )() as (
+        actions: unknown[],
+        obs: unknown,
+        kind: string,
+      ) => { id: string } | null;
+
+      // Stranger is offered FIRST, so first-match order would pick it.
+      expect(
+        prefer([STRANGER, ASKED], allianceObs("P_ASKED"), "alliance_request")
+          ?.id,
+      ).toBe("alliance_request:P_ASKED");
+      // Nobody asked: no override, the caller's own ordering stands.
+      expect(
+        prefer([STRANGER, ASKED], allianceObs(null), "alliance_request"),
+      ).toBeNull();
+      // Never fires for another kind, so appetite for other actions is untouched.
+      expect(
+        prefer([STRANGER, ASKED], allianceObs("P_ASKED"), "attack"),
+      ).toBeNull();
+    },
+  );
+
+  it.each(DETERMINISTIC_STARTERS)(
+    "%s still asks nobody extra: appetite is unchanged",
+    async (starter) => {
+      const source = await read(starter);
+      const dealKinds = source.match(
+        /const DEAL_ACTION_KINDS = \[[\s\S]*?\];/,
+      )?.[0];
+      const chooseAction = new Function(
+        [
+          dealKinds!,
+          extractFunction(source, "isDealActionKind"),
+          optionalFunction(source, "activePromiseConstraints"),
+          optionalFunction(source, "wouldBreakPromise"),
+          extractFunction(source, "preferReciprocalAlliance"),
+          extractFunction(source, "pendingRenewalAction"),
+          extractFunction(source, "chooseAction"),
+          "return chooseAction;",
+        ].join("\n"),
+      )() as (actions: unknown[], obs: unknown) => { id: string; kind: string };
+
+      // Attack outranks alliance_request in preferredKinds, and a pending
+      // request must NOT change that — otherwise this becomes an appetite change.
+      const withAttack = chooseAction(
+        [ATTACK_ACTION, STRANGER, ASKED],
+        allianceObs("P_ASKED"),
+      );
+      expect(withAttack.kind).toBe("attack");
+
+      // With no attack available the seat asks anyway — and now aims correctly.
+      const asked = chooseAction([STRANGER, ASKED], allianceObs("P_ASKED"));
+      expect(asked.id).toBe("alliance_request:P_ASKED");
+    },
+  );
 });

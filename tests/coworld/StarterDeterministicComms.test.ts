@@ -116,6 +116,7 @@ async function chooseActionFor(
       extractFunction(source, "isDealActionKind"),
       optionalFunction(source, "activePromiseConstraints"),
       optionalFunction(source, "wouldBreakPromise"),
+      extractFunction(source, "preferReciprocalAlliance"),
       extractFunction(source, "pendingRenewalAction"),
       extractFunction(source, "chooseAction"),
       "return chooseAction;",

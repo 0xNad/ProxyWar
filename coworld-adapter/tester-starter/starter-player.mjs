@@ -107,6 +107,32 @@ socket.on("error", (error) => {
 // Answering a pending renewal is the cheapest good move on the board: ONE
 // action preserves an existing alliance. So it pre-empts the ordinary
 // preference list rather than sitting inside it.
+// Acceptance is a RETURNING request: there is no `alliance_accept` kind, so an
+// alliance forms only when both sides ask. Our own executor already nudges this
+// (`allianceReciprocityPriority` adds +20 when a rival has asked); starters read
+// the flag nowhere, so their requests scatter across rivals who never asked.
+// Measured locally: 6 seats over 7,300 turns sent 19 alliance requests and
+// formed ZERO alliances.
+//
+// This deliberately does NOT change how OFTEN a starter seeks an alliance — only
+// WHOM it asks when it has already decided to ask. Appetite unchanged, so it
+// cannot push the field toward the social stalemate the 2026-08-07 territorial
+// backstop exists to catch.
+function preferReciprocalAlliance(actions, obs, kind) {
+  if (kind !== "alliance_request") return null;
+  const rivals = obs?.visiblePlayers || [];
+  for (const action of actions || []) {
+    if (action?.kind !== "alliance_request") continue;
+    const targetID =
+      action.metadata?.targetID ??
+      action.metadata?.recipientID ??
+      action.metadata?.playerID;
+    const rival = rivals.find((player) => player?.playerID === targetID);
+    if (rival?.hasIncomingAllianceRequest === true) return action;
+  }
+  return null;
+}
+
 function pendingRenewalAction(actions, obs) {
   const rivals = obs?.visiblePlayers || [];
   for (const action of actions || []) {
@@ -144,6 +170,10 @@ function chooseAction(actions, obs) {
   ];
 
   for (const kind of preferredKinds) {
+    // Same appetite, better aim: if we are about to ask for an alliance, ask
+    // the rival who already asked us, so the pair actually forms one.
+    const reciprocal = preferReciprocalAlliance(actions, obs, kind);
+    if (reciprocal) return reciprocal;
     const action = actions.find(
       (candidate) =>
         candidate.kind === kind &&

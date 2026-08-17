@@ -83,6 +83,7 @@ async function loadSelectors(): Promise<{
      ${extractFunction(source, "chooseDealMove")}
      ${extractFunction(source, "chooseObligationMove")}
      ${extractFunction(source, "socialActionNote")}
+     ${extractFunction(source, "preferReciprocalAlliance")}
      ${extractFunction(source, "pendingRenewalAction")}
      ${extractFunction(source, "choose")}
      return {
