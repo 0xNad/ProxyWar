@@ -14,7 +14,7 @@ describe("externalBrainCleanlinessReport", () => {
           externalPlannerCall: true,
           plannerFallbackUsed: true,
           plannerParseOk: false,
-          plannerParseFailureReason: "Codex app-server timed out.",
+          plannerParseFailureReason: "Codex planner returned unparseable JSON.",
         }),
       ],
     });
@@ -26,6 +26,51 @@ describe("externalBrainCleanlinessReport", () => {
       parserFailures: 1,
       fallbacks: 1,
     });
+  });
+
+  it("counts a provider that never answered as a provider failure, not a parser failure", () => {
+    // `parserFailures` keys on `plannerParseOk === false`. The house planner used to
+    // stamp that on EVERY fallback, including a provider timeout or transport throw, so
+    // an outage was tallied against the parser - and the fixtures in this very file
+    // still describe a timeout that way ("Codex app-server timed out." next to
+    // `plannerParseOk: false`). Nothing was parsed on those paths, so the field is now
+    // absent and the failure lands where it belongs.
+    const timedOut = externalBrainCleanlinessReport({
+      brainMode: "planner-codex-cli",
+      records: [
+        record({
+          externalPlannerCall: true,
+          plannerFallbackUsed: true,
+          llmPlannerDegraded: true,
+          degradedCause: "plan-timeout",
+        }),
+      ],
+    });
+
+    expect(timedOut).toMatchObject({
+      ok: false,
+      externalCalls: 1,
+      cleanExternalCalls: 0,
+      // The point of the test: an outage is not a parser failure.
+      parserFailures: 0,
+      fallbacks: 1,
+    });
+
+    // Contrast, so this cannot pass by the report ignoring the field: the SAME record
+    // with the pre-fix shape is still counted as a parser failure.
+    const preFixShape = externalBrainCleanlinessReport({
+      brainMode: "planner-codex-cli",
+      records: [
+        record({
+          externalPlannerCall: true,
+          plannerFallbackUsed: true,
+          llmPlannerDegraded: true,
+          degradedCause: "plan-timeout",
+          plannerParseOk: false,
+        }),
+      ],
+    });
+    expect(preFixShape).toMatchObject({ parserFailures: 1 });
   });
 
   it("allows a later house planner fallback after clean Codex planner control", () => {
@@ -41,7 +86,7 @@ describe("externalBrainCleanlinessReport", () => {
           externalPlannerCall: true,
           plannerFallbackUsed: true,
           plannerParseOk: false,
-          plannerParseFailureReason: "Codex app-server timed out.",
+          plannerParseFailureReason: "Codex planner returned unparseable JSON.",
         }),
       ],
     });
@@ -118,8 +163,7 @@ function record(
     clientID: null,
     username: "Agent",
     profile: "opportunistic",
-    brainType:
-      options.brainMode === "codex-cli" ? "llm" : "planner-executor",
+    brainType: options.brainMode === "codex-cli" ? "llm" : "planner-executor",
     turnNumber: 1,
     decidedAt: 1,
     decisionLatencyMs: 1,

@@ -19185,8 +19185,12 @@ describe("Betray late: deterministic backstab of an overmatched ally", () => {
     expect(decision.metadata?.llmPlannerDegraded).toBe(true);
     // Our own side failed to obtain a plan; nothing was parsed.
     expect(decision.metadata?.degradedCause).toBe("policy-error");
-    // And it must not claim a malformed answer that never arrived.
+    // And it must not claim a malformed answer that never arrived. `plannerParseOk`
+    // matters as much as the reason text: `externalBrainCleanlinessReport` counts
+    // `plannerParseOk === false` as a PARSER failure, so a `false` here would tally a
+    // provider outage against the parser.
     expect(decision.metadata?.plannerParseFailureReason).toBeUndefined();
+    expect(decision.metadata?.plannerParseOk).toBeUndefined();
   });
 
   it("reports plan-timeout when the provider exceeds its budget", async () => {
@@ -19216,6 +19220,7 @@ describe("Betray late: deterministic backstab of an overmatched ally", () => {
     expect(decision.metadata?.llmPlannerDegraded).toBe(true);
     expect(decision.metadata?.degradedCause).toBe("plan-timeout");
     expect(decision.metadata?.plannerParseFailureReason).toBeUndefined();
+    expect(decision.metadata?.plannerParseOk).toBeUndefined();
   });
 
   it("still reports plan-parse for an answer it could not parse", async () => {
@@ -19240,8 +19245,9 @@ describe("Betray late: deterministic backstab of an overmatched ally", () => {
 
     const decision = await brain.decide({ observation, legalActions });
     expect(decision.metadata?.degradedCause).toBe("plan-parse");
-    // The parse reason belongs HERE, and only here.
+    // The parse verdict and its reason belong HERE, and only here.
     expect(decision.metadata?.plannerParseFailureReason).toBeDefined();
+    expect(decision.metadata?.plannerParseOk).toBe(false);
   });
 
   it("forwards the planner's bounded cause onto decision metadata", async () => {
