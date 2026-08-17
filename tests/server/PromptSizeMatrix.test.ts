@@ -4,7 +4,7 @@ import {
   buildBoard,
   loadStarterBuildState,
   measureArm,
-} from "../../src/scripts/agent-prompt-size-matrix";
+} from "../perf/agent-prompt-size-matrix";
 
 /**
  * Guards the offline prompt-size matrix (charter item L) against SILENT

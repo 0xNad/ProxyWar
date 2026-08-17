@@ -47,29 +47,29 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { setup } from "../../tests/util/Setup";
-import { SpawnExecution } from "../core/execution/SpawnExecution";
-import type { Game, Player } from "../core/game/Game";
-import { PlayerInfo, PlayerType, UnitType } from "../core/game/Game";
-import type { TileRef } from "../core/game/GameMap";
-import { selectInboxWindow } from "../server/agents/AgentLeagueMatch";
-import { AgentObservationBuilder } from "../server/agents/AgentObservationBuilder";
-import { selectSpawnSlots } from "../server/agents/AgentSpawnAssignment";
+import { SpawnExecution } from "../../src/core/execution/SpawnExecution";
+import type { Game, Player } from "../../src/core/game/Game";
+import { PlayerInfo, PlayerType, UnitType } from "../../src/core/game/Game";
+import type { TileRef } from "../../src/core/game/GameMap";
+import { selectInboxWindow } from "../../src/server/agents/AgentLeagueMatch";
+import { AgentObservationBuilder } from "../../src/server/agents/AgentObservationBuilder";
+import { selectSpawnSlots } from "../../src/server/agents/AgentSpawnAssignment";
 import {
   FREETEXT_INBOX_MAX_MESSAGES,
   FREETEXT_MESSAGE_MAX_CHARS,
-} from "../server/agents/AgentTunables";
+} from "../../src/server/agents/AgentTunables";
 import type {
   AgentInboundMessage,
   AgentObservation,
   LegalAction,
-} from "../server/agents/AgentTypes";
+} from "../../src/server/agents/AgentTypes";
 import {
   buildSpawnCandidates,
   buildSpawnLegalAction,
   LegalActionBuilder,
-} from "../server/agents/LegalActionBuilder";
-import { LlmPromptBuilder } from "../server/agents/LlmPromptBuilder";
+} from "../../src/server/agents/LegalActionBuilder";
+import { LlmPromptBuilder } from "../../src/server/agents/LlmPromptBuilder";
+import { setup } from "../util/Setup";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, "../..");
