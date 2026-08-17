@@ -97,6 +97,15 @@ type CoworldDecision = {
   spawnPreferenceActionIDs?: unknown;
   /** Optional diplomacy-slot selection (selectedDealActionId). */
   dealActionID?: string;
+  /**
+   * Optional comms-slot selection (selectedMessageActionId + messageText),
+   * carried as a pair. This object IS the AgentDecision handed to
+   * AgentLeagueMatch by `brainForSlot`, so these names must stay identical to
+   * the AgentTypes fields the league reads — a rename here silently drops
+   * every league message back to the pre-fix behavior.
+   */
+  messageActionID?: string;
+  messageText?: string;
   reason: string;
   metadata: Record<string, unknown>;
 };
@@ -159,6 +168,11 @@ class CoworldProtocolServer {
   private spectatorReplay: Record<string, unknown> | null = null;
   private replayPayload: unknown = null;
   private portValue: number | null = null;
+  // Comms capability advertised in every decision envelope. Null until the
+  // episode resolves it from the engine's own tunables, and it STAYS null when
+  // free text is off, so the flag-off envelope is byte-identical to shipped
+  // behavior. Set before the first decision (see runProxyWarEpisode).
+  private maxMessageChars: number | null = null;
 
   constructor(private readonly config: CoworldConfig) {
     this.server.on("upgrade", (request, socket, head) => {
@@ -257,6 +271,16 @@ class CoworldProtocolServer {
     );
   }
 
+  /**
+   * Publishes the comms capability for this episode. The value comes from the
+   * engine's AgentTunables (dynamically imported by the episode), never from a
+   * second env read here — `freeTextMessagesEnabled()` stays the single
+   * authority on whether the feature is on.
+   */
+  setCommsCapability(maxMessageChars: number | null): void {
+    this.maxMessageChars = maxMessageChars;
+  }
+
   brainForSlot(slot: number, buildRequestPayload: (input: unknown) => unknown) {
     return {
       brainType: "external-http",
@@ -318,11 +342,21 @@ class CoworldProtocolServer {
       });
       websocket.send(
         // Envelope carries independent capability advertisements for action
-        // batching and spawn ranking (protocol.maxActionsPerDecision /
-        // protocol.maxSpawnPreferences) as siblings of requestID/slot; the
+        // batching, spawn ranking, and the comms slot
+        // (protocol.maxActionsPerDecision / protocol.maxSpawnPreferences /
+        // protocol.maxMessageChars) as siblings of requestID/slot; the
         // inner request payload is untouched. Players ignore unknown envelope
         // keys, so older policies remain scalar-only compatible.
-        JSON.stringify(decisionRequestEnvelope({ requestID, slot, request })),
+        JSON.stringify(
+          decisionRequestEnvelope({
+            requestID,
+            slot,
+            request,
+            ...(this.maxMessageChars !== null
+              ? { maxMessageChars: this.maxMessageChars }
+              : {}),
+          }),
+        ),
       );
     });
     // The frame above is sent during the league's synchronous observation
@@ -825,6 +859,14 @@ async function runProxyWarEpisode(
   proxyWarArtifactDir: string;
 }> {
   const modules = await loadProxyWarModules();
+  // Publish the comms capability before any decision frame goes out. Resolved
+  // from the engine's own tunables so the advertisement can never disagree
+  // with the cap the validator actually enforces; null while the flag is off.
+  protocolServer.setCommsCapability(
+    modules.freeTextMessagesEnabled?.() === true
+      ? (modules.FREETEXT_MESSAGE_MAX_CHARS ?? null)
+      : null,
+  );
   const log = winston.createLogger({
     level: "warn",
     format: winston.format.simple(),
@@ -1148,6 +1190,7 @@ async function loadProxyWarModules(): Promise<Record<string, any>> {
     logWriterMod,
     externalMod,
     manifestMod,
+    tunablesMod,
   ] = await Promise.all([
     importProxyWar("src/core/configuration/Config.ts"),
     importProxyWar("src/core/game/Game.ts"),
@@ -1160,6 +1203,7 @@ async function loadProxyWarModules(): Promise<Record<string, any>> {
     importProxyWar("src/server/agents/AgentDecisionLogWriter.ts"),
     importProxyWar("src/server/agents/ExternalHttpAgentBrain.ts"),
     importProxyWar("src/server/agents/AgentManifest.ts"),
+    importProxyWar("src/server/agents/AgentTunables.ts"),
   ]);
   return {
     ...configMod,
@@ -1173,6 +1217,7 @@ async function loadProxyWarModules(): Promise<Record<string, any>> {
     ...logWriterMod,
     ...externalMod,
     ...manifestMod,
+    ...tunablesMod,
   };
 }
 
@@ -1184,20 +1229,23 @@ function startPlayers(
   config: CoworldConfig,
   protocolServer: CoworldProtocolServer,
 ): ChildProcess[] {
+  // Opt-in override so a local proof can drive the REAL league starter
+  // (tester-starter-llm) against this exact hosted code path instead of the
+  // bundled deterministic seat. Unset — which is always the case in the
+  // image — resolves to the bundled player, so hosted behavior is unchanged.
+  const playerScript =
+    process.env.PROXYWAR_PLAYER_SCRIPT ??
+    path.join(localRoot, "src", "starter-player.mjs");
   return config.tokens.map((_token, slot) =>
-    spawn(
-      process.execPath,
-      [path.join(localRoot, "src", "starter-player.mjs")],
-      {
-        cwd: localRoot,
-        env: {
-          ...process.env,
-          PROXYWAR_REPO: proxyWarRepo,
-          COWORLD_PLAYER_WS_URL: protocolServer.playerUrl(slot),
-        },
-        stdio: ["ignore", "pipe", "pipe"],
+    spawn(process.execPath, [playerScript], {
+      cwd: localRoot,
+      env: {
+        ...process.env,
+        PROXYWAR_REPO: proxyWarRepo,
+        COWORLD_PLAYER_WS_URL: protocolServer.playerUrl(slot),
       },
-    ).on("error", (error) => {
+      stdio: ["ignore", "pipe", "pipe"],
+    }).on("error", (error) => {
       throw error;
     }),
   );
