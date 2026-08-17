@@ -215,6 +215,20 @@ export interface StrategicPlan {
    * refresh replaces the plan and the flag clears with it.
    */
   degradedOrigin?: boolean;
+  /**
+   * WHY this plan is degraded-origin, from the bounded wire vocabulary.
+   *
+   * Travels with `degradedOrigin` for exactly the same reason the boolean does. The
+   * cadence-amplified decisions are the MAJORITY of the league's degraded count -
+   * measured at 66.3% of degraded decisions - so a cause that only appeared on the
+   * refresh decision itself would leave two thirds of the number unexplained, which
+   * is the gap the field exists to close.
+   *
+   * This is provenance, not invention: the standing plan really is degraded, and its
+   * origin failure is known. Fabrication would be claiming a NEW failure on each
+   * inheriting decision. Cleared by a healthy refresh, with the boolean.
+   */
+  degradedOriginCause?: AgentDegradationCause;
 }
 
 export interface AgentPlanDecision {
@@ -712,10 +726,17 @@ export class PlannerExecutorAgentBrain implements AgentBrain {
           : {}),
         // The cause rides with the flag or it reaches no artifact: this object is
         // built by explicit field picking, not a metadata spread.
-        ...(asAgentDegradationCause(planDecision?.degradedCause) !== undefined
+        // The refresh decision's own cause first; otherwise the standing plan's
+        // origin cause, so an inherited degradation says WHY too. Without the second
+        // half, the cadence-amplified majority of degraded decisions would carry the
+        // flag and no explanation - the exact shape that made the headline number
+        // unactionable in the first place.
+        ...(asAgentDegradationCause(
+          planDecision?.degradedCause ?? plan.degradedOriginCause,
+        ) !== undefined
           ? {
               degradedCause: asAgentDegradationCause(
-                planDecision?.degradedCause,
+                planDecision?.degradedCause ?? plan.degradedOriginCause,
               ),
             }
           : {}),
@@ -2078,6 +2099,7 @@ export class LlmAgentPlanner implements AgentPlanner {
         ...fallback.plan,
         plannerSource: this.plannerType,
         degradedOrigin: true,
+        degradedOriginCause: "plan-parse",
       },
       reason: `Planner fallback after LLM planner failed: ${reason}`,
       latencyMs: Date.now() - started,

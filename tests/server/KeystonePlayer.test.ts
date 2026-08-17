@@ -237,6 +237,12 @@ describe("Coworld keystone player", () => {
 
     expect(second.llmPlannerDegraded).toBe(true);
     expect(second.degradedCause).toBe("plan-stale");
+    // The cause must also ride ON THE PLAN, not just on this decision. The executor
+    // reports an inherited degradation from the standing plan's tag, and those
+    // cadence-amplified decisions are the majority of the league's degraded count -
+    // a decision-level cause alone would explain only the refresh itself.
+    expect(second.plan.degradedOrigin).toBe(true);
+    expect(second.plan.degradedOriginCause).toBe("plan-stale");
   });
 
   it("reports plan-stale on the surfacing path too, not only from the landed refresh", async () => {
