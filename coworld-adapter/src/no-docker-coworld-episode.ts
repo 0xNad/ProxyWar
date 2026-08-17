@@ -14,8 +14,10 @@ import {
   type CoworldAppShellRoute,
 } from "./coworld-appshell.ts";
 import {
+  composeCoworldDecision,
   decisionRequestEnvelope,
   normalizeDecisionResponse,
+  type ComposedCoworldDecision,
 } from "./coworld-decision-wire.ts";
 import { episodeIndexFromConfig } from "./coworld-episode-index.ts";
 import {
@@ -85,30 +87,15 @@ type LegalActionView = {
   metadata?: Record<string, unknown>;
 };
 
-type CoworldDecision = {
-  actionID: string;
-  /** Optional wire batch (selectedLegalActionIds), normalized + capped. */
-  actionIDs?: string[];
-  /**
-   * Optional untrusted spawn-ballot shape. Runtime validation in the backend
-   * owns its string-array contract; this transport preserves bounded hostile
-   * shapes so malformed explicit ballots cannot become legacy scalar replies.
-   */
-  spawnPreferenceActionIDs?: unknown;
-  /** Optional diplomacy-slot selection (selectedDealActionId). */
-  dealActionID?: string;
-  /**
-   * Optional comms-slot selection (selectedMessageActionId + messageText),
-   * carried as a pair. This object IS the AgentDecision handed to
-   * AgentLeagueMatch by `brainForSlot`, so these names must stay identical to
-   * the AgentTypes fields the league reads — a rename here silently drops
-   * every league message back to the pre-fix behavior.
-   */
-  messageActionID?: string;
-  messageText?: string;
-  reason: string;
-  metadata: Record<string, unknown>;
-};
+/**
+ * The object handed to AgentLeagueMatch by `brainForSlot` — i.e. the seat's
+ * AgentDecision. Deliberately an alias, NOT a second hand-listed field set:
+ * re-listing the selection fields here is a third place a new slot has to be
+ * remembered, and the comms slot was already lost once to exactly that class
+ * of omission. The wire module owns the shape; `tests/coworld/
+ * DecisionSlotParity.test.ts` pins it against AgentTypes.AgentDecision.
+ */
+type CoworldDecision = ComposedCoworldDecision;
 
 type PendingDecision = {
   resolve: (decision: CoworldDecision) => void;
@@ -478,41 +465,25 @@ class CoworldProtocolServer {
     this.pending.delete(requestID);
     // Decision fields (scalar primary, optional selectedLegalActionIds batch,
     // independent spawnPreferenceLegalActionIds ballot, optional deal slot,
-    // reason) are shape/length-bounded by
+    // optional comms pair, reason) are shape/length-bounded by
     // the shared wire module — see coworld-decision-wire.ts for the
     // normalization contract and why menu membership is deliberately NOT
-    // checked here. Metadata assembly stays in place: it reads
-    // episode-local state (slot, requestID, offered menu size).
+    // checked here. The metadata envelope is composed there too, from the
+    // episode-local state passed in below (slot, requestID, offered menu size).
     const normalized = normalizeDecisionResponse(message, {
       allSpawnMenu:
         pending.legalActions.length > 0 &&
         pending.legalActions.every((action) => action.kind === "spawn"),
     });
-    pending.resolve({
-      ...normalized,
-      metadata: {
-        brain: "coworld-websocket",
-        externalActionCall: true,
-        parseSuccess: true,
-        // Degradation flags come from the player on the wire — never assume
-        // health. A policy whose brain failed must show up in fallback_count
-        // and replays (the v1 bedrock seat failed silently for 60+ rounds
-        // because this was hardcoded false).
-        fallbackUsed: message.fallbackUsed === true,
-        ...(message.llmPlannerDegraded === true
-          ? { llmPlannerDegraded: true }
-          : {}),
-        coworldSlot: slot,
-        coworldRequestID: requestID,
-        rawProviderOutputPresent: true,
-        externalRawOutput: JSON.stringify(message).slice(0, 1000),
+    pending.resolve(
+      composeCoworldDecision({
+        normalized,
+        message,
+        slot,
+        requestID,
         offeredLegalActionCount: pending.legalActions.length,
-        confidence:
-          typeof message.confidence === "number"
-            ? message.confidence
-            : undefined,
-      },
-    });
+      }),
+    );
   }
 
   private statusSnapshot(
