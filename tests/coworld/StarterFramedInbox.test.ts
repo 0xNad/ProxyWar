@@ -62,6 +62,7 @@ async function loadStarter(): Promise<StarterInboxApi> {
     extractConst(source, "MESSAGE_MAX_CHARS"),
     extractConst(source, "MESSAGE_REPLIES"),
     extractConst(source, "MESSAGE_OPENERS"),
+    extractConst(source, "MESSAGE_MAX_REPLIES_PER_RIVAL"),
     extractFunction(source, "clean"),
     extractFunction(source, "cleanID"),
     extractFunction(source, "cleanMessage"),

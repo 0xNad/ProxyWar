@@ -122,8 +122,19 @@ const SECURITY =
 
 // -- anti-loop memory (distilled from the keystone's avoidActionIDs) ----------
 const history = []; // { actionID, kind } appended after each decision
-// Inbound messages already answered, keyed `${senderID}:${turnNumber}`, so a
-// rival writing every step cannot pull this agent into an endless exchange.
+// Inbound messages already answered, keyed `${senderID}:${turnNumber}`, plus
+// `reply:${senderID}:${n}` for the lifetime reply budget that actually bounds
+// an exchange.
+// Lifetime replies per counterparty, per match. The per-inbound-message key
+// below CANNOT break a mutual exchange: every reply we send becomes a new
+// inbound message with a new turn number on the other side, so both agents keep
+// seeing a key neither has answered. Hosted episode ereq_3fc90743 (0.1.49, four
+// talker seats) produced 5 openers and 861 replies over 1,204 decisions --
+// 285/285 and 145/146 per mirrored pair, a message on ~72% of all decisions.
+// Three replies is enough for a negotiation (answer, counter, confirmation) and
+// matches the server's per-rival inbox window
+// (FREETEXT_INBOX_MAX_PER_RIVAL), past which older messages are not even shown.
+const MESSAGE_MAX_REPLIES_PER_RIVAL = 3;
 const answeredMessages = new Set();
 function avoidActionIDs() {
   const recent = history
@@ -167,18 +178,20 @@ function cleanID(s) {
 // here means a future server change can never quietly widen what reaches the
 // prompt.
 function cleanMessage(s) {
-  return String(s ?? "")
-    // C0/C1 controls and DEL -> space.
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\u0000-\u001F\u007F-\u009F]/gu, " ")
-    // Bidi overrides, zero-width joiners/spaces, soft hyphen, BOM -> dropped.
-    .replace(
-      /[\u00AD\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF]/gu,
-      "",
-    )
-    .replace(/\s+/gu, " ")
-    .trim()
-    .slice(0, 280);
+  return (
+    String(s ?? "")
+      // C0/C1 controls and DEL -> space.
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\u0000-\u001F\u007F-\u009F]/gu, " ")
+      // Bidi overrides, zero-width joiners/spaces, soft hyphen, BOM -> dropped.
+      .replace(
+        /[\u00AD\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF]/gu,
+        "",
+      )
+      .replace(/\s+/gu, " ")
+      .trim()
+      .slice(0, 280)
+  );
 }
 function normalizeDealPolicies(value) {
   const entries = Array.isArray(value)
@@ -1158,9 +1171,22 @@ function chooseMessageMove(actions, obs, answered, dealMove) {
   )[inbound.length - 1];
   const senderID = newest?.senderID;
   if (!senderID) return null;
-  // One reply per inbound turn, so a spammer cannot pull us into a loop.
+  // One reply per inbound TURN. This alone does not bound an exchange -- it
+  // only stops us answering the same message twice -- so the lifetime budget
+  // below is what actually ends a conversation.
   const key = `${senderID}:${newest.turnNumber}`;
   if (answered.has(key)) return null;
+
+  // Lifetime reply budget for this counterparty: sequential slot keys in the
+  // same match-scoped memory, so no extra state and no signature change.
+  let repliesSpent = 0;
+  while (
+    repliesSpent < MESSAGE_MAX_REPLIES_PER_RIVAL &&
+    answered.has(`reply:${senderID}:${repliesSpent}`)
+  ) {
+    repliesSpent += 1;
+  }
+  if (repliesSpent >= MESSAGE_MAX_REPLIES_PER_RIVAL) return null;
 
   const offer = offers.find(
     (action) => action.metadata?.recipientID === senderID,
@@ -1176,7 +1202,8 @@ function chooseMessageMove(actions, obs, answered, dealMove) {
     ...(obs?.deals?.activeDeals || []),
   ].some(
     (view) =>
-      view?.proposerPlayerID === senderID || view?.recipientPlayerID === senderID,
+      view?.proposerPlayerID === senderID ||
+      view?.recipientPlayerID === senderID,
   );
 
   let text;
@@ -1186,6 +1213,7 @@ function chooseMessageMove(actions, obs, answered, dealMove) {
   else text = MESSAGE_REPLIES.neutral;
 
   answered.add(key);
+  answered.add(`reply:${senderID}:${repliesSpent}`);
   return { id: offer.id, text: text.slice(0, MESSAGE_MAX_CHARS) };
 }
 

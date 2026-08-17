@@ -86,6 +86,7 @@ async function commsFor(relativePath: string): Promise<CommsApi> {
       extractConst(source, "MESSAGE_REPLIES"),
       extractConst(source, "MESSAGE_OPENERS"),
       extractConst(source, "MESSAGE_TRUST_MIN_RELIABILITY"),
+      extractConst(source, "MESSAGE_MAX_REPLIES_PER_RIVAL"),
       extractFunction(source, "provenDealBreaker"),
       extractFunction(source, "chooseMessageMove"),
       extractFunction(source, "chooseMessageOpener"),
