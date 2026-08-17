@@ -2283,7 +2283,6 @@ describe("AgentLeagueMatchRunner", () => {
       await game.end({ archive: false });
     }
   }, 600_000);
-
   it("retains the turn stream on the primary seat only when asked", async () => {
     const log = makeLogger();
     const mapLoader = new StaticMapLoader();
