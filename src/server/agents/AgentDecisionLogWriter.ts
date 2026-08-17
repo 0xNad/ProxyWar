@@ -55,6 +55,10 @@ import {
   LegalActionKind,
 } from "./AgentTypes";
 import {
+  asAgentDegradationCause,
+  type AgentDegradationCause,
+} from "./AgentWireProtocol";
+import {
   buildExternalAgentFeedback,
   ExternalAgentFeedback,
   ExternalAgentFeedbackPaths,
@@ -290,6 +294,22 @@ interface DecisionLogEntry {
   fallbackUsed: boolean;
   /** Additive: whether the deciding brain was degraded on THIS decision; absent (not `false`) on records that predate the field or never carried `decisionMetadata.llmPlannerDegraded` — mirrors the live `coworld-results.ts` degraded_count/fallback_count signal onto the persisted artifact. */
   llmPlannerDegraded?: boolean;
+  /**
+   * Additive: WHY it degraded, from the bounded `AGENT_DEGRADATION_CAUSES`
+   * vocabulary. Absent whenever nobody said, so the boolean above still stands
+   * alone. Hoisted into this ALLOWLIST deliberately - `brainErrorReason` below
+   * was dropped entirely by this very list, and a cause that never reaches
+   * `decisions.jsonl` cannot reach the public mirror, which is the only feed a
+   * league-wide census can read (other builders' logs are 403).
+   */
+  degradedCause?: AgentDegradationCause;
+  /**
+   * Additive: the server-observed failure text behind a `brain-*` cause - a
+   * timeout message or a thrown error. `decideWithSafetyFallback` has always
+   * produced it and this allowlist always discarded it, so the one cause the
+   * server knows first-hand never survived to any artifact.
+   */
+  brainErrorReason?: string;
   fallbackActionID?: string;
   /** The substituted fallback brain's OWN genuine reason for its pick — distinct from `reason` (which is `null` on this path). Present only when `fallbackUsed`. */
   fallbackReason?: string;
@@ -881,6 +901,17 @@ function decisionLogEntry(
     // Additive: absent unless the decision's own metadata carried it.
     ...(booleanMetadata(metadata, "llmPlannerDegraded") !== undefined
       ? { llmPlannerDegraded: booleanMetadata(metadata, "llmPlannerDegraded") }
+      : {}),
+    ...(asAgentDegradationCause(stringMetadata(metadata, "degradedCause")) !==
+    undefined
+      ? {
+          degradedCause: asAgentDegradationCause(
+            stringMetadata(metadata, "degradedCause"),
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "brainErrorReason") !== undefined
+      ? { brainErrorReason: stringMetadata(metadata, "brainErrorReason") }
       : {}),
     ...(stringMetadata(metadata, "fallbackActionID") !== undefined
       ? { fallbackActionID: stringMetadata(metadata, "fallbackActionID") }
@@ -2725,7 +2756,8 @@ function humanAction(entry: DecisionLogEntry): string {
   const game = humanGameAction(entry);
   if (entry.commsSlotText !== undefined) {
     const recipient = entry.commsSlotRecipientID ?? "another player";
-    const delivered = entry.commsSlotAccepted === false ? " (not delivered)" : "";
+    const delivered =
+      entry.commsSlotAccepted === false ? " (not delivered)" : "";
     // Quoted verbatim: the negotiation evidence depends on exact wording, and
     // the validator already bounded it to 280 printable characters.
     return `${game} They privately wrote to ${recipient}${delivered}: "${entry.commsSlotText}"`;

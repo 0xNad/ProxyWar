@@ -33,6 +33,11 @@ import {
 import { competitiveSeatSpecs } from "./coworld-seat-specs.ts";
 import { coworldEpisodeIdentity } from "./coworld-seed.ts";
 import { coworldPublicRunArtifacts } from "./proxywar-public-run-artifacts.ts";
+import {
+  createSnapshotRetention,
+  finalizeSnapshotRetention,
+  offerSnapshot,
+} from "./spectator-snapshot-retention.ts";
 
 const localRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -923,7 +928,12 @@ async function runProxyWarEpisode(
     retainTurnMessagesPrimaryOnly: true,
   });
   const roster = agentRunRoster(participants);
-  const spectatorSnapshots: unknown[] = [];
+  // The retained array IS the artifact's snapshot list: every downstream reader
+  // (replay payload, counts) keeps working, and retention owns the spacing.
+  const snapshotRetention = createSnapshotRetention<unknown>(
+    COWORLD_MAX_RETAINED_SNAPSHOTS,
+  );
+  const spectatorSnapshots = snapshotRetention.retained;
   let memTelemetrySnapshots = 0;
   // stderr, NOT the winston logger: the episode logger is level "warn", and pod
   // log retrieval is the whole point — this is the hosted OOM/crash forensics line.
@@ -1000,24 +1010,10 @@ async function runProxyWarEpisode(
           ...snapshot,
           roster,
         });
-        spectatorSnapshots.push(spectatorSnapshot);
-        if (spectatorSnapshots.length > COWORLD_MAX_RETAINED_SNAPSHOTS) {
-          // Even-stride decimation: keep every other snapshot (indices
-          // 0,2,4,...), halving the array in place while preserving the first
-          // snapshot and an even temporal spread. Retained snapshot heap stays
-          // O(1) in episode length. A full-length episode DOES hit this cap
-          // (that is the point — it flattens snapshot heap through the mid-game
-          // crash window); the resulting spectator replay carries up to
-          // COWORLD_MAX_RETAINED_SNAPSHOTS evenly-spaced snapshots instead of
-          // one per decision step. The rendered replay (message-derived
-          // game-record) and the result scores are unaffected.
-          let write = 0;
-          for (let read = 0; read < spectatorSnapshots.length; read += 2) {
-            spectatorSnapshots[write] = spectatorSnapshots[read];
-            write += 1;
-          }
-          spectatorSnapshots.length = write;
-        }
+        // Retention keeps an EVEN temporal spread, not just a bounded array:
+        // halving alone left the head coarse and the tail fine, which cost live
+        // episodes most of their early game (see spectator-snapshot-retention.ts).
+        offerSnapshot(snapshotRetention, spectatorSnapshot);
         protocolServer.recordSnapshot(spectatorSnapshot, {
           width: snapshot.gameState.width(),
           height: snapshot.gameState.height(),
@@ -1062,6 +1058,10 @@ async function runProxyWarEpisode(
       : "Official Coworld certification is not part of this no-Docker command.";
     const spawnSelectionNote =
       "spawnSelectionMode=sealed-ranked-v1; one concurrent hidden ballot, no reaction phase.";
+    // The episode rarely ends on a stride boundary, and the replay builder reads
+    // `finalGameState` for map metadata only — so the terminal frame has to be
+    // reserved here or the artifact ends before the result.
+    finalizeSnapshotRetention(snapshotRetention);
     const spectatorReplay = modules.buildAgentSpectatorReplay({
       runID,
       matchID: game.id,

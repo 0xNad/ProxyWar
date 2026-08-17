@@ -1,7 +1,11 @@
 import { randomUUID } from "crypto";
 import { Logger } from "winston";
 import { Game } from "../../core/game/Game";
-import { ServerMessage } from "../../core/Schemas";
+import {
+  GAME_ID_REGEX,
+  isValidGameID,
+  ServerMessage,
+} from "../../core/Schemas";
 import { GameServer } from "../GameServer";
 import {
   AgentDealManager,
@@ -61,8 +65,13 @@ import {
   LegalAction,
   LegalActionKind,
   RecentAgentDecision,
+  type AgentSpawnSelectionDefaultReason,
 } from "./AgentTypes";
-import { MAX_WIRE_ACTIONS_PER_DECISION } from "./AgentWireProtocol";
+import {
+  asPlayerReportedDegradationCause,
+  MAX_WIRE_ACTIONS_PER_DECISION,
+  type AgentDegradationCause,
+} from "./AgentWireProtocol";
 import {
   buildSpawnCandidates,
   buildSpawnLegalAction,
@@ -330,6 +339,31 @@ export class AgentLeagueMatchRunner {
       this.options.game.advanceTurnsForTesting(turnsPerSpawnTick);
     }
 
+    // Diagnose before giving up. The generic "did not reach the active phase" is
+    // technically true and practically useless: the overwhelmingly common cause is
+    // that the game never produced start info at all, so the mirror never received a
+    // `start` message and has no state to leave the spawn phase WITH. `GameServer`
+    // logs that failure and returns, which is the right call in production - a
+    // player-supplied field can fail that schema, and hanging one game beats throwing
+    // through a worker that is serving others - but in a local harness it surfaces
+    // here, ${maxSpawnTicks} ticks later, pointing at the wrong thing. It cost one
+    // debugging session already (2026-08-17).
+    if (options.mirror.gameState() === null) {
+      const gameID = this.options.game.id;
+      throw new Error(
+        `runSpawnPhase: the mirror never received a \`start\` message, so no game state ` +
+          `ever existed (after ${maxSpawnTicks} spawn ticks). The game did not produce ` +
+          `start info.` +
+          (isValidGameID(gameID)
+            ? ` The game id ${JSON.stringify(gameID)} is valid, so look for another ` +
+              `GameStartInfoSchema failure - GameServer.start() logs it as "Error parsing ` +
+              `game start info".`
+            : ` Its id ${JSON.stringify(gameID)} (${gameID.length} chars) fails ` +
+              `GAME_ID_REGEX (${GAME_ID_REGEX.source}), which makes GameStartInfoSchema ` +
+              `reject the start info and GameServer.start() return without sending a start ` +
+              `message. Use an 8-character alphanumeric id.`),
+      );
+    }
     throw new Error(
       `runSpawnPhase did not reach the active phase after ${maxSpawnTicks} spawn ticks`,
     );
@@ -1370,6 +1404,20 @@ export class AgentLeagueMatchRunner {
         LLM_DEGRADABLE_BRAIN_TYPES.has(input.participant.brain.brainType ?? "")
           ? { llmPlannerDegraded: true }
           : {}),
+        // The spawn stage has had a cause taxonomy since it was built
+        // (`forcedDefaultReason`), and this vocabulary was taken FROM it - but the
+        // spawn record never carried it in the shared field, so a smoke test found
+        // three uncaused turn-0 fallbacks in a real episode. Map the two
+        // server-observed values across; `brain-fallback` means the seat reported
+        // its own degradation, so its own cause (if it sent one) is the truthful
+        // value, and `invalid-ballot` is a decision-quality fault rather than a
+        // brain failure and deliberately maps to nothing.
+        ...(fallbackUsed
+          ? spawnDegradedCause(
+              input.evidence.defaultReason,
+              originalMetadata.degradedCause,
+            )
+          : {}),
       },
     };
     const validation = this.decisionValidator(decision, input.offeredActions);
@@ -1870,6 +1918,13 @@ const LLM_DEGRADABLE_BRAIN_TYPES = new Set<string>([
 
 class AgentSpawnBallotTimeoutError extends Error {}
 
+/**
+ * Distinct marker for a DECISION that never arrived, so the degradation cause can
+ * say `brain-timeout` rather than lumping it with a brain that threw. Mirrors the
+ * spawn-ballot path's existing timeout/error split.
+ */
+class AgentDecisionTimeoutError extends Error {}
+
 interface SettledSpawnBallot {
   decision: AgentDecision | null;
   latencyMs: number;
@@ -1999,6 +2054,22 @@ function spawnRecordMetadata(
   return retained;
 }
 
+/**
+ * Maps the spawn stage's existing default-reason taxonomy onto the shared
+ * `degradedCause` field. Returns a spreadable object so an unmappable reason adds
+ * nothing at all rather than an invented value.
+ */
+function spawnDegradedCause(
+  defaultReason: AgentSpawnSelectionDefaultReason | null,
+  playerReportedCause: unknown,
+): { degradedCause?: AgentDegradationCause } {
+  if (defaultReason === "brain-timeout" || defaultReason === "brain-error") {
+    return { degradedCause: defaultReason };
+  }
+  const reported = asPlayerReportedDegradationCause(playerReportedCause);
+  return reported !== undefined ? { degradedCause: reported } : {};
+}
+
 function reportedSpawnDegradation(
   metadata: NonNullable<AgentDecision["metadata"]>,
 ): string | null {
@@ -2034,6 +2105,10 @@ async function decideWithSafetyFallback(input: {
     const isLlmBrain = LLM_DEGRADABLE_BRAIN_TYPES.has(
       input.brain.brainType ?? "",
     );
+    // `withOptionalTimeout` is the only thing on this path that rejects with the
+    // timeout marker, so this distinguishes "never answered" from "answered with
+    // an exception" without parsing arbitrary provider text.
+    const isDecisionTimeout = error instanceof AgentDecisionTimeoutError;
     const fallbackDecision = await new RuleAgentBrain(
       input.fallbackProfile,
     ).decide({
@@ -2057,6 +2132,13 @@ async function decideWithSafetyFallback(input: {
         ...fallbackDecision.metadata,
         brainType: input.brain.brainType ?? "rule",
         brainErrorReason: reason,
+        // The server's OWN observation of why this seat did not answer. Only this
+        // path may stamp a `brain-*` cause: the player wire rejects that family
+        // outright (asPlayerReportedDegradationCause), so a policy can never claim
+        // the server failed to hear from it. Note league seats are `external-http`,
+        // which LLM_DEGRADABLE_BRAIN_TYPES deliberately excludes, so for them this
+        // attributes a FALLBACK rather than a `degraded_count` entry.
+        degradedCause: isDecisionTimeout ? "brain-timeout" : "brain-error",
         fallbackUsed: true,
         // An LLM-backed brain that THREW degraded the LLM specifically — flag it
         // so auditors keyed on llmPlannerDegraded (Coworld result contract, the
@@ -2079,7 +2161,10 @@ async function withOptionalTimeout<T>(
   return withDeferredDecisionTimeout(
     promise,
     timeoutMs,
-    () => new Error(`Agent brain timed out after ${timeoutMs}ms`),
+    () =>
+      new AgentDecisionTimeoutError(
+        `Agent brain timed out after ${timeoutMs}ms`,
+      ),
   ).promise;
 }
 

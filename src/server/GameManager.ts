@@ -129,6 +129,21 @@ export class GameManager {
               game.start();
             } catch (error) {
               this.log.error(`error starting game ${id}: ${error}`);
+              // A game that cannot start MUST NOT linger. `prestart()` above already
+              // set the prestart flag, and `hasStarted()` is
+              // `_hasStarted || _hasPrestarted`, so the guard at the top of this loop
+              // will never retry it: without this, clients that were told to start
+              // loading wait forever and the entry leaks in `this.games`. End it so
+              // sockets close with a definitive reason and the next tick drops it.
+              // Nothing to archive - it never produced a turn.
+              void game
+                .end({ archive: false })
+                .catch((endError: unknown) =>
+                  this.log.error(
+                    `error ending unstartable game ${id}: ${endError}`,
+                  ),
+                );
+              this.games.delete(id);
             }
           }, 2000);
         }

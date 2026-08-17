@@ -30,7 +30,9 @@ socket.on("message", (data) => {
 
   const legalActions = message.request.legalActions ?? [];
   const spawnPreferences = spawnPreferenceRanking(message, legalActions);
-  const action = spawnPreferences?.[0] ?? chooseAction(legalActions);
+  const action =
+    spawnPreferences?.[0] ??
+    chooseAction(legalActions, message.request.observation ?? {});
   const dealAction =
     spawnPreferences === null ? chooseDealAction(legalActions) : null;
   // Comms slot: independent of both the game action and the deal action, so
@@ -116,10 +118,65 @@ socket.on("error", (error) => {
   process.exit(1);
 });
 
-function chooseAction(actions) {
+// Alliance renewal is MUTUAL and one-shot: the core extends only once BOTH
+// sides have asked inside a short window (~10% of alliance life), and
+// `canExtendAlliance` goes false the moment you ask. 0.1.48 added
+// `allianceOtherAgreedToExtend` to the observation precisely so a policy can
+// see that its ally is already waiting on it — bots and nations have always
+// reciprocated off the core's equivalent signal.
+//
+// Answering a pending renewal is the cheapest good move on the board: ONE
+// action preserves an existing alliance. So it pre-empts the ordinary
+// preference list rather than sitting inside it.
+// Acceptance is a RETURNING request: there is no `alliance_accept` kind, so an
+// alliance forms only when both sides ask. Our own executor already nudges this
+// (`allianceReciprocityPriority` adds +20 when a rival has asked); starters read
+// the flag nowhere, so their requests scatter across rivals who never asked.
+// Measured locally: 6 seats over 7,300 turns sent 19 alliance requests and
+// formed ZERO alliances.
+//
+// This deliberately does NOT change how OFTEN a starter seeks an alliance — only
+// WHOM it asks when it has already decided to ask. Appetite unchanged, so it
+// cannot push the field toward the social stalemate the 2026-08-07 territorial
+// backstop exists to catch.
+function preferReciprocalAlliance(actions, obs, kind) {
+  if (kind !== "alliance_request") return null;
+  const rivals = obs?.visiblePlayers || [];
+  for (const action of actions || []) {
+    if (action?.kind !== "alliance_request") continue;
+    const targetID =
+      action.metadata?.targetID ??
+      action.metadata?.recipientID ??
+      action.metadata?.playerID;
+    const rival = rivals.find((player) => player?.playerID === targetID);
+    if (rival?.hasIncomingAllianceRequest === true) return action;
+  }
+  return null;
+}
+
+function pendingRenewalAction(actions, obs) {
+  const rivals = obs?.visiblePlayers || [];
+  for (const action of actions || []) {
+    if (action?.kind !== "alliance_extend") continue;
+    const targetID =
+      action.metadata?.targetID ??
+      action.metadata?.recipientID ??
+      action.metadata?.playerID;
+    const rival = rivals.find((player) => player?.playerID === targetID);
+    if (rival?.allianceOtherAgreedToExtend === true) return action;
+  }
+  return null;
+}
+
+function chooseAction(actions, obs) {
   if (!Array.isArray(actions) || actions.length === 0) {
     throw new Error("decision_request contained no legalActions");
   }
+
+  // An ally already asked to renew: answer it before anything else, because the
+  // window is short, one-shot, and this single action saves the alliance.
+  const renewal = pendingRenewalAction(actions, obs);
+  if (renewal) return renewal;
 
   const preferredKinds = [
     "spawn",
@@ -127,11 +184,16 @@ function chooseAction(actions) {
     "build",
     "upgrade_structure",
     "boat",
+    "alliance_extend",
     "alliance_request",
     "quick_chat",
     "emoji",
   ];
   for (const kind of preferredKinds) {
+    // Same appetite, better aim: if we are about to ask for an alliance, ask
+    // the rival who already asked us, so the pair actually forms one.
+    const reciprocal = preferReciprocalAlliance(actions, obs, kind);
+    if (reciprocal) return reciprocal;
     const action = actions.find(
       (candidate) =>
         candidate.kind === kind &&
@@ -332,9 +394,19 @@ const MESSAGE_OPENERS = {
 const MESSAGE_TRUST_MIN_RELIABILITY = 0.5;
 
 // Inbound messages already answered, keyed `${senderID}:${turnNumber}`, plus
-// `opener:${recipientID}` for counterparties already opened with. Module
-// scope, so it is exactly one match's memory: a rival writing every step
-// cannot pull this agent into an endless exchange.
+// `opener:${recipientID}` for counterparties already opened with and
+// `reply:${senderID}:${n}` for the lifetime reply budget. Module scope, so it
+// is exactly one match's memory.
+// Lifetime replies per counterparty, per match. The per-inbound-message key
+// below CANNOT break a mutual exchange: every reply we send becomes a new
+// inbound message with a new turn number on the other side, so both agents keep
+// seeing a key neither has answered. Hosted episode ereq_3fc90743 (0.1.49, four
+// talker seats) produced 5 openers and 861 replies over 1,204 decisions --
+// 285/285 and 145/146 per mirrored pair, a message on ~72% of all decisions.
+// Three replies is enough for a negotiation (answer, counter, confirmation) and
+// matches the server's per-rival inbox window
+// (FREETEXT_INBOX_MAX_PER_RIVAL), past which older messages are not even shown.
+const MESSAGE_MAX_REPLIES_PER_RIVAL = 3;
 const answeredMessages = new Set();
 
 // Reputation from OBSERVED outcomes only (deals that actually terminated),
@@ -376,11 +448,24 @@ function chooseMessageMove(actions, obs, answered, dealMove) {
     }
   }
   const senderID = newest.senderID;
-  // One reply per inbound message, so a spammer cannot farm replies out of us.
-  // Deliberately NOT falling through to an opener here: having just declined
-  // to repeat ourselves, opening a second conversation would be chatter.
+  // One reply per inbound MESSAGE. This alone does not bound an exchange --
+  // it only stops us answering the same message twice -- so the lifetime budget
+  // below is what actually ends a conversation. Deliberately NOT falling
+  // through to an opener here: having just declined to repeat ourselves,
+  // opening a second conversation would be chatter.
   const key = `${senderID}:${newest.turnNumber}`;
   if (answered.has(key)) return null;
+
+  // Lifetime reply budget for this counterparty: sequential slot keys in the
+  // same match-scoped memory, so no extra state and no signature change.
+  let repliesSpent = 0;
+  while (
+    repliesSpent < MESSAGE_MAX_REPLIES_PER_RIVAL &&
+    answered.has(`reply:${senderID}:${repliesSpent}`)
+  ) {
+    repliesSpent += 1;
+  }
+  if (repliesSpent >= MESSAGE_MAX_REPLIES_PER_RIVAL) return null;
 
   const offer = offers.find(
     (action) => action.metadata?.recipientID === senderID,
@@ -409,6 +494,7 @@ function chooseMessageMove(actions, obs, answered, dealMove) {
   else text = MESSAGE_REPLIES.neutral;
 
   answered.add(key);
+  answered.add(`reply:${senderID}:${repliesSpent}`);
   return { id: offer.id, text: text.slice(0, MESSAGE_MAX_CHARS) };
 }
 

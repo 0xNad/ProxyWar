@@ -1233,6 +1233,41 @@ describe("mirrored decisions.jsonl economy/deal stamp projection (economy-negoti
     });
   });
 
+  test("a mirrored line round-trips a bounded degradedCause and rejects an unrecognized one", () => {
+    // This projection is the last hop to the only league-wide feed a census can
+    // read: other builders' decision logs are 403, so a cause that does not survive
+    // here leaves the mirrored artifact with exactly the ambiguity the field exists
+    // to remove — warmup and a dead planner both reading as plain "degraded".
+    const { records } = agentDecisionRecordsFromMirroredDecisionsLog(
+      `${JSON.stringify({
+        ...bareLine,
+        fallbackUsed: true,
+        llmPlannerDegraded: true,
+        degradedCause: "plan-unavailable",
+      })}\n`,
+    );
+    expect(records).toHaveLength(1);
+    expect(records[0].decisionMetadata).toMatchObject({
+      llmPlannerDegraded: true,
+      degradedCause: "plan-unavailable",
+    });
+
+    // A mirrored line is not a trusted source either: it is rebuilt from published
+    // bytes anyone can serve, so the vocabulary is enforced here too.
+    const { records: forged } = agentDecisionRecordsFromMirroredDecisionsLog(
+      `${JSON.stringify({
+        ...bareLine,
+        fallbackUsed: true,
+        llmPlannerDegraded: true,
+        degradedCause: "plan-unavailable-ish",
+      })}\n`,
+    );
+    expect(forged[0].decisionMetadata).toMatchObject({
+      llmPlannerDegraded: true,
+    });
+    expect(forged[0].decisionMetadata).not.toHaveProperty("degradedCause");
+  });
+
   test("a line without the stamps still projects byte-identically to the pre-economy shape", () => {
     const { records } = agentDecisionRecordsFromMirroredDecisionsLog(
       `${JSON.stringify(bareLine)}\n`,

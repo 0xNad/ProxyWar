@@ -4,11 +4,11 @@ import {
   nuclearStrikePriorityScore,
   nuclearTargetStructurePriority,
 } from "./AgentNuclearPolicy";
+import { frontierAgentSkill } from "./AgentPlaybook";
 import {
   scoreProfileRepairRerankAction,
   type AgentProfileRepairRerankScore,
 } from "./AgentProfileRepairPolicy";
-import { frontierAgentSkill } from "./AgentPlaybook";
 import {
   compactSkillSummary,
   skillEvaluationForAction,
@@ -49,37 +49,41 @@ import {
   warModeMinStrikeRatio,
 } from "./AgentTunables";
 import {
-  sanitizeUntrustedDisplayString,
-  UNTRUSTED_DISPLAY_RULE,
-} from "./PromptSanitizer";
-import {
   AgentBrain,
   AgentBrainInput,
   AgentBrainType,
   AgentCommunicationIntent,
   AgentCommunicationSignal,
   AgentDecision,
-  AgentOpponentModelEntry,
-  AgentVisiblePlayer,
   AgentFrontierConversionTimingAffordance,
   AgentFrontierFinishPressureAffordance,
   AgentObjectiveKind,
   AgentObservation,
+  AgentOpponentModelEntry,
   AgentRuntimeMode,
   AgentStrategyProfile,
   AgentTransportTroopBankingAffordance,
+  AgentVisiblePlayer,
   LegalAction,
   LegalActionKind,
   legalActionKinds,
   observedTransportStates,
 } from "./AgentTypes";
+import {
+  asAgentDegradationCause,
+  type AgentDegradationCause,
+} from "./AgentWireProtocol";
 import { LlmProvider } from "./LlmProvider";
-import { RuleAgentBrain } from "./RuleAgentBrain";
+import type { PlayerStrategySpec } from "./PlayerStrategySpec";
 import {
   doctrinePromptSuffix,
   mergePlayerConstraintsIntoPlan,
 } from "./PlayerStrategySpec";
-import type { PlayerStrategySpec } from "./PlayerStrategySpec";
+import {
+  sanitizeUntrustedDisplayString,
+  UNTRUSTED_DISPLAY_RULE,
+} from "./PromptSanitizer";
+import { RuleAgentBrain } from "./RuleAgentBrain";
 
 export type FrontierPolicyModule =
   | "emergency_survival"
@@ -211,6 +215,20 @@ export interface StrategicPlan {
    * refresh replaces the plan and the flag clears with it.
    */
   degradedOrigin?: boolean;
+  /**
+   * WHY this plan is degraded-origin, from the bounded wire vocabulary.
+   *
+   * Travels with `degradedOrigin` for exactly the same reason the boolean does. The
+   * cadence-amplified decisions are the MAJORITY of the league's degraded count -
+   * measured at 66.3% of degraded decisions - so a cause that only appeared on the
+   * refresh decision itself would leave two thirds of the number unexplained, which
+   * is the gap the field exists to close.
+   *
+   * This is provenance, not invention: the standing plan really is degraded, and its
+   * origin failure is known. Fabrication would be claiming a NEW failure on each
+   * inheriting decision. Cleared by a healthy refresh, with the boolean.
+   */
+  degradedOriginCause?: AgentDegradationCause;
 }
 
 export interface AgentPlanDecision {
@@ -219,6 +237,13 @@ export interface AgentPlanDecision {
   latencyMs: number;
   fallbackUsed: boolean;
   llmPlannerDegraded?: boolean;
+  /**
+   * WHY the planner degraded, from the bounded wire vocabulary. Additive: absent
+   * unless the planner knew. Forwarded onto decision metadata so it reaches
+   * decisions.jsonl and the mirror - the boolean alone cannot separate a planner
+   * that is warming up from one that is dead.
+   */
+  degradedCause?: AgentDegradationCause;
   rawPlannerOutput?: string;
   promptLength?: number;
   parseOk?: boolean;
@@ -596,7 +621,11 @@ export class PlannerExecutorAgentBrain implements AgentBrain {
     // enforcement code paths): did the final selection honor an active commitment?
     const commitmentAudit = auditCommitmentAdherence(input, plan, execution);
     this.lastCommitmentHonored = commitmentAudit?.honored === true;
-    const allianceAudit = auditAllianceDirectiveAdherence(input, plan, execution);
+    const allianceAudit = auditAllianceDirectiveAdherence(
+      input,
+      plan,
+      execution,
+    );
     const buildAudit = auditBuildDirectiveAdherence(input, plan, execution);
 
     return {
@@ -695,6 +724,22 @@ export class PlannerExecutorAgentBrain implements AgentBrain {
                 plan.degradedOrigin === true,
             }
           : {}),
+        // The cause rides with the flag or it reaches no artifact: this object is
+        // built by explicit field picking, not a metadata spread.
+        // The refresh decision's own cause first; otherwise the standing plan's
+        // origin cause, so an inherited degradation says WHY too. Without the second
+        // half, the cadence-amplified majority of degraded decisions would carry the
+        // flag and no explanation - the exact shape that made the headline number
+        // unactionable in the first place.
+        ...(asAgentDegradationCause(
+          planDecision?.degradedCause ?? plan.degradedOriginCause,
+        ) !== undefined
+          ? {
+              degradedCause: asAgentDegradationCause(
+                planDecision?.degradedCause ?? plan.degradedOriginCause,
+              ),
+            }
+          : {}),
         ...(planDecision?.reason !== undefined
           ? { plannerDecisionReason: planDecision.reason }
           : {}),
@@ -732,7 +777,10 @@ export class PlannerExecutorAgentBrain implements AgentBrain {
             }
           : {}),
         ...(execution.profileRepairRerankSelected !== undefined
-          ? { profileRepairRerankSelected: execution.profileRepairRerankSelected }
+          ? {
+              profileRepairRerankSelected:
+                execution.profileRepairRerankSelected,
+            }
           : {}),
         ...(execution.profileRepairRerankSuggestedActionID !== undefined
           ? {
@@ -1970,6 +2018,19 @@ export class LlmAgentPlanner implements AgentPlanner {
               `${raw}\n\nREPAIR_OUTPUT:\n${repairedRaw}`,
               `planner repair still contradicted must-follow control: ${repairedViolation}`,
               prompt.length + repairPrompt.length,
+              // The planner ANSWERED and our own validation refused the content. The
+              // bounded vocabulary has no member for that - `plan-parse` would claim a
+              // malformed answer, `policy-error` would blame our code for throwing - so
+              // the honest record is no cause at all. The degraded flag still stands.
+              // A `plan-rejected` member would fit; that is a wire-contract change and
+              // is recorded as a follow-up rather than slipped in here.
+              undefined,
+              // NOT a parse failure: the repaired output parsed, and our control
+              // validation refused its content. Stamping `parseOk: false` here would
+              // recreate exactly the parse/content conflation this file just removed,
+              // one branch further down, and would inflate `parserFailures`.
+              false,
+              `planner repair still contradicted must-follow control: ${repairedViolation}`,
             );
           }
           return this.fallback(
@@ -1979,6 +2040,9 @@ export class LlmAgentPlanner implements AgentPlanner {
             `${raw}\n\nREPAIR_OUTPUT:\n${repairedRaw}`,
             `planner repair JSON invalid after must-follow violation (${controlViolation}): ${repaired.reason}`,
             prompt.length + repairPrompt.length,
+            // This one genuinely failed to parse.
+            "plan-parse",
+            true,
           );
         }
         return {
@@ -2019,6 +2083,8 @@ export class LlmAgentPlanner implements AgentPlanner {
         raw,
         parsed.reason,
         prompt.length,
+        "plan-parse",
+        true,
       );
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
@@ -2029,6 +2095,14 @@ export class LlmAgentPlanner implements AgentPlanner {
         raw,
         reason,
         prompt.length,
+        // A budget overrun and an unexpected throw are different facts, and the
+        // vocabulary already distinguishes them: `plan-timeout` is the provider
+        // exceeding its budget, `policy-error` is our own side failing.
+        error instanceof AgentPlannerTimeoutError
+          ? "plan-timeout"
+          : "policy-error",
+        // Nothing was parsed: the provider never returned usable output.
+        false,
       );
     }
   }
@@ -2040,6 +2114,31 @@ export class LlmAgentPlanner implements AgentPlanner {
     raw: string,
     reason: string,
     promptLength: number,
+    /**
+     * WHY this fallback ran. Passed in rather than assumed: this method serves BOTH
+     * an unparseable answer and a provider that never answered, and hardcoding
+     * `plan-parse` published "the model answered and we could not parse it" for a
+     * timeout or an outage - misattribution inside the field whose entire purpose is
+     * attribution.
+     */
+    cause: AgentDegradationCause | undefined,
+    /**
+     * Whether the planner actually PRODUCED output we could not use. Separate from
+     * `cause` on purpose: `parseOk: false` flows to `plannerParseOk`, which
+     * `externalBrainCleanlinessReport` counts as a PARSER failure. Deriving it from the
+     * cause meant a provider outage was tallied as a parser failure - the same
+     * misattribution one consumer further along, which is why omitting
+     * `parseFailureReason` alone did not fix it.
+     */
+    parseFailed: boolean,
+    /**
+     * Set when the planner's output PARSED and our own control validation refused the
+     * content. Recorded through `repairReason` (the field the success path already
+     * uses) rather than `parseFailureReason`, because the parser did its job - claiming
+     * otherwise inflates `parserFailures` in `externalBrainCleanlinessReport` and
+     * blames the parser for a content decision.
+     */
+    rejectionReason?: string,
   ): Promise<AgentPlanDecision> {
     const fallback = await new RuleAgentPlanner(this.options.profile).plan(
       input,
@@ -2051,6 +2150,7 @@ export class LlmAgentPlanner implements AgentPlanner {
         ...fallback.plan,
         plannerSource: this.plannerType,
         degradedOrigin: true,
+        ...(cause !== undefined ? { degradedOriginCause: cause } : {}),
       },
       reason: `Planner fallback after LLM planner failed: ${reason}`,
       latencyMs: Date.now() - started,
@@ -2059,10 +2159,21 @@ export class LlmAgentPlanner implements AgentPlanner {
       // whose LLM planner call failed: the match is now running on local policy,
       // NOT LLM-controlled. Flag it so artifacts/audits can detect a degraded match.
       llmPlannerDegraded: true,
+      // The planner answered and we could not use its answer - a distinct fault
+      // from a timeout or an unreachable provider.
+      ...(cause !== undefined ? { degradedCause: cause } : {}),
       rawPlannerOutput: raw,
       promptLength,
-      parseOk: false,
-      parseFailureReason: reason,
+      // Only claimed when the planner answered and the answer was unusable (invalid
+      // or rejected). A timeout or transport throw never produced output to parse, so
+      // both fields stay absent rather than inventing a malformed answer.
+      ...(parseFailed ? { parseOk: false, parseFailureReason: reason } : {}),
+      // A refused-but-parseable answer keeps `parseOk` TRUE: the parse succeeded, and
+      // `fallbackUsed` below already accounts for the degradation. `cleanExternalCalls`
+      // excludes any fallback regardless, so this cannot make the call look clean.
+      ...(rejectionReason !== undefined
+        ? { parseOk: true, repairUsed: true, repairReason: rejectionReason }
+        : {}),
       // The rule fallback never emits a commitment; if the previous plan was
       // driving a binding kill-order, record that the fallback dropped it.
       ...(previousPlan?.commitment !== undefined
@@ -2189,7 +2300,9 @@ function commitmentDirectiveCandidate(
     return undefined;
   }
   const ownTroops =
-    input.observation.combat.ownTroops ?? input.observation.ownState?.troops ?? 0;
+    input.observation.combat.ownTroops ??
+    input.observation.ownState?.troops ??
+    0;
   const qualifying = scored.filter((candidate) => {
     if (!actionTargetsPlayer(candidate.action, commitment.targetPlayerId)) {
       return false;
@@ -2203,7 +2316,8 @@ function commitmentDirectiveCandidate(
     }
     if (
       isLandAttack &&
-      committedTroopRatio(candidate.action, ownTroops) < commitment.minAttackRatio
+      committedTroopRatio(candidate.action, ownTroops) <
+        commitment.minAttackRatio
     ) {
       return false;
     }
@@ -2540,7 +2654,9 @@ function auditCommitmentAdherence(
     return null;
   }
   const ownTroops =
-    input.observation.combat.ownTroops ?? input.observation.ownState?.troops ?? 0;
+    input.observation.combat.ownTroops ??
+    input.observation.ownState?.troops ??
+    0;
   const qualifiesLand = (action: LegalAction) =>
     action.kind === "attack" &&
     action.metadata?.expansion !== true &&
@@ -6249,7 +6365,8 @@ function isBehindAndFalling(
   }
   const minLossRatio = tunedNumber("BEHIND_FALL_MIN_LOSS", 0.02);
   return (
-    recentOwnTileLossRatio(observation, ownState.tilesOwned ?? 0) >= minLossRatio
+    recentOwnTileLossRatio(observation, ownState.tilesOwned ?? 0) >=
+    minLossRatio
   );
 }
 
@@ -6732,14 +6849,17 @@ export function warModeCounterstrikeCandidate(
           observation,
           actionPlayerID(b.action) ?? "",
         );
-        const distA = Math.abs(committedTroopRatio(a.action, ownTroops) - desiredA);
-        const distB = Math.abs(committedTroopRatio(b.action, ownTroops) - desiredB);
+        const distA = Math.abs(
+          committedTroopRatio(a.action, ownTroops) - desiredA,
+        );
+        const distB = Math.abs(
+          committedTroopRatio(b.action, ownTroops) - desiredB,
+        );
         if (distA !== distB) {
           return distA - distB;
         }
         return (
-          b.totalScore - a.totalScore ||
-          a.action.id.localeCompare(b.action.id)
+          b.totalScore - a.totalScore || a.action.id.localeCompare(b.action.id)
         );
       }
       return (
@@ -6773,7 +6893,10 @@ function behindAndFallingStrikeCandidate(
   input: AgentBrainInput,
   scored: readonly FrontierRankedAction[],
 ): FrontierRankedAction | undefined {
-  if (!behindAndFallingEscapeEnabled() || !isBehindAndFalling(input.observation)) {
+  if (
+    !behindAndFallingEscapeEnabled() ||
+    !isBehindAndFalling(input.observation)
+  ) {
     return undefined;
   }
   const observation = input.observation;
@@ -15003,11 +15126,13 @@ function replaceOpeningCommitPrimary(
   const maxActions = Math.max(1, Math.trunc(maxActionsPerDecision));
   return [
     replacement,
-    ...selectedBatch.slice(1).filter(
-      (candidate) =>
-        candidate !== replacement &&
-        candidate.action.metadata?.expansion !== true,
-    ),
+    ...selectedBatch
+      .slice(1)
+      .filter(
+        (candidate) =>
+          candidate !== replacement &&
+          candidate.action.metadata?.expansion !== true,
+      ),
   ].slice(0, maxActions);
 }
 
@@ -17174,10 +17299,7 @@ function scoreFrontierAction(input: {
     if (repairScore !== null) {
       profileRepairRerank = repairScore;
       add(repairScore.module, repairScore.score, repairScore.reason);
-      penalize(
-        repairScore.penaltyScore ?? 0,
-        repairScore.penaltyReason ?? "",
-      );
+      penalize(repairScore.penaltyScore ?? 0, repairScore.penaltyReason ?? "");
     }
   }
 
@@ -17190,7 +17312,10 @@ function scoreFrontierAction(input: {
   // precautionary Defense Posts so gold banks toward the City. Building the first City
   // once it is affordable is forced UPSTREAM by economyBootstrapCityCandidate (it
   // pre-empts the neutral-expansion selectors that otherwise outrank a scored build).
-  if (economyBootstrapBankingActive(observation) && isDefensePostAction(action)) {
+  if (
+    economyBootstrapBankingActive(observation) &&
+    isDefensePostAction(action)
+  ) {
     penalize(
       320,
       "economy bootstrap: bank gold for the economy baseline instead of precautionary defense",
@@ -18893,7 +19018,11 @@ function scoreFrontierAction(input: {
   ) {
     // Binding directive, sea route: a player-targeted boat on the committed target
     // is the qualifying invasion when no land attack exists (island/coastal rivals).
-    add("combat", 150, "decisive directive commitment binds this boat invasion");
+    add(
+      "combat",
+      150,
+      "decisive directive commitment binds this boat invasion",
+    );
   }
   if (action.kind === "attack" && action.metadata?.expansion !== true) {
     add(
@@ -20868,9 +20997,7 @@ function strategicPlanForObjective(input: {
     ...(input.tacticalSettings !== undefined
       ? { tacticalSettings: input.tacticalSettings }
       : {}),
-    ...(input.commitment !== undefined
-      ? { commitment: input.commitment }
-      : {}),
+    ...(input.commitment !== undefined ? { commitment: input.commitment } : {}),
     ...(input.allianceDirective !== undefined
       ? { allianceDirective: input.allianceDirective }
       : {}),
@@ -21977,8 +22104,7 @@ function plannerDecisionBrief(
       }),
       targetPlayerIdPolicy:
         coalitionLeader !== null
-          ? observation.turnNumber <= 3_000 &&
-            neutralGrowthActions.length > 0
+          ? observation.turnNumber <= 3_000 && neutralGrowthActions.length > 0
             ? "Use null during the coalition opening land grab; do not start a war on any rival."
             : `Coalition mode allows pressure on ${coalitionLeader.playerID} only; never target a non-leader.`
           : pressureReady
@@ -22626,7 +22752,7 @@ function plannerPrompt(
               ? sanitizeUntrustedDisplayString(signal.targetName)
               : null,
           message:
-            signal.message ?? signal.emojiText
+            (signal.message ?? signal.emojiText)
               ? sanitizeUntrustedDisplayString(
                   signal.message ?? signal.emojiText ?? "",
                   160,
@@ -23002,7 +23128,10 @@ function parsePlannerOutput(
     reconciledModules !== undefined &&
     !reconciledModules.includes("combat")
   ) {
-    reconciledModules = [...reconciledModules, "combat" as FrontierPolicyModule];
+    reconciledModules = [
+      ...reconciledModules,
+      "combat" as FrontierPolicyModule,
+    ];
   }
   if (
     allianceDirective !== undefined &&
@@ -23019,7 +23148,10 @@ function parsePlannerOutput(
     reconciledModules !== undefined &&
     !reconciledModules.includes("economy")
   ) {
-    reconciledModules = [...reconciledModules, "economy" as FrontierPolicyModule];
+    reconciledModules = [
+      ...reconciledModules,
+      "economy" as FrontierPolicyModule,
+    ];
   }
   return {
     ok: true,
@@ -23179,6 +23311,13 @@ function isFrontierPolicyModule(value: unknown): value is FrontierPolicyModule {
   );
 }
 
+/**
+ * Marker for a planner provider call that exceeded its budget, so the degradation
+ * cause can say `plan-timeout` instead of guessing. Untyped, this failure was
+ * indistinguishable from a transport throw and both were published as `plan-parse`.
+ */
+export class AgentPlannerTimeoutError extends Error {}
+
 async function withTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number,
@@ -23186,6 +23325,7 @@ async function withTimeout<T>(
   return withDeferredDecisionTimeout(
     promise,
     timeoutMs,
-    () => new Error(`Planner timed out after ${timeoutMs}ms`),
+    () =>
+      new AgentPlannerTimeoutError(`Planner timed out after ${timeoutMs}ms`),
   ).promise;
 }

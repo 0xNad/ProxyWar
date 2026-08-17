@@ -14,8 +14,6 @@ import {
   singleBindingDirective,
   StrategicPlan,
 } from "../../src/server/agents/AgentPlannerExecutor";
-import { LlmAgentBrain } from "../../src/server/agents/LlmAgentBrain";
-import { MockLlmProvider } from "../../src/server/agents/MockLlmProvider";
 import { buildAgentTacticalAffordances } from "../../src/server/agents/AgentTacticalAffordances";
 import {
   AgentObjectiveKind,
@@ -23,7 +21,9 @@ import {
   AgentVisiblePlayer,
   LegalAction,
 } from "../../src/server/agents/AgentTypes";
+import { LlmAgentBrain } from "../../src/server/agents/LlmAgentBrain";
 import { LlmProvider } from "../../src/server/agents/LlmProvider";
+import { MockLlmProvider } from "../../src/server/agents/MockLlmProvider";
 
 describe("Planner/executor agent brain", () => {
   it("creates a spawn plan before spawn", async () => {
@@ -380,7 +380,11 @@ describe("Planner/executor agent brain", () => {
       ...base,
       gameID: "GAME-A",
       visiblePlayers: [
-        rival({ isAllied: true, isFriendly: true, relation: Relation.Friendly }),
+        rival({
+          isAllied: true,
+          isFriendly: true,
+          relation: Relation.Friendly,
+        }),
         tribe,
       ],
     };
@@ -417,7 +421,11 @@ describe("Planner/executor agent brain", () => {
       ...base,
       gameID: "GAME-B",
       visiblePlayers: [
-        rival({ isAllied: false, isFriendly: false, relation: Relation.Hostile }),
+        rival({
+          isAllied: false,
+          isFriendly: false,
+          relation: Relation.Hostile,
+        }),
       ],
     };
     await brain.decide({ observation: obs3, legalActions });
@@ -15341,7 +15349,10 @@ describe("rankLegalActionsForPrompt (unified LLM shortlist ranker)", () => {
     const legalActions = buildLegalActions();
     const offered = new Set(legalActions.map((action) => action.id));
     const ranked = rankLegalActionsForPrompt({
-      input: { observation: activeObservation("expand_territory"), legalActions },
+      input: {
+        observation: activeObservation("expand_territory"),
+        legalActions,
+      },
       profile: "opportunistic",
     });
     expect(ranked.length).toBeGreaterThan(0);
@@ -15354,7 +15365,10 @@ describe("rankLegalActionsForPrompt (unified LLM shortlist ranker)", () => {
   it("returns candidates sorted by descending totalScore with policy + skill fields", () => {
     const legalActions = buildLegalActions();
     const ranked = rankLegalActionsForPrompt({
-      input: { observation: activeObservation("expand_territory"), legalActions },
+      input: {
+        observation: activeObservation("expand_territory"),
+        legalActions,
+      },
       profile: "opportunistic",
     });
     for (let i = 1; i < ranked.length; i++) {
@@ -15371,7 +15385,10 @@ describe("rankLegalActionsForPrompt (unified LLM shortlist ranker)", () => {
   it("respects the limit and returns [] for no legal actions", () => {
     const legalActions = buildLegalActions();
     const limited = rankLegalActionsForPrompt({
-      input: { observation: activeObservation("expand_territory"), legalActions },
+      input: {
+        observation: activeObservation("expand_territory"),
+        legalActions,
+      },
       profile: "opportunistic",
       limit: 1,
     });
@@ -17534,7 +17551,9 @@ describe("Planner/executor demo-quality behavior gates", () => {
     expect(decision.actionID).toBe("build:City:100");
     expect(decision.profileRepairRerankOpportunity).toBe(true);
     expect(decision.profileRepairRerankSelected).toBe(true);
-    expect(decision.profileRepairRerankSuggestedActionID).toBe("build:City:100");
+    expect(decision.profileRepairRerankSuggestedActionID).toBe(
+      "build:City:100",
+    );
     expect(decision.profileRepairRerankCandidates).toContain("build:City:100");
   });
 
@@ -17881,7 +17900,14 @@ describe("binding directives (commitment keystone)", () => {
     const observation = commitmentObservation();
     // relativeTroopRatio 0.9 => "attacking a stronger rival feeds them troops" would
     // normally block this attack; the decisive-commitment exemption must clear it.
-    const attack = hardNationAttackAction("RIVAL001", "Rival One", 25, 25_000, 0.9, 0.18);
+    const attack = hardNationAttackAction(
+      "RIVAL001",
+      "Rival One",
+      25,
+      25_000,
+      0.9,
+      0.18,
+    );
     const legalActions = [attack, hold()];
 
     const withCommitment = new FrontierPolicyExecutor("aggressive").decide(
@@ -18377,7 +18403,11 @@ describe("FM-1 enforce conversion over neutral (cash the midgame kill window)", 
       label: "Expand neutral land",
       intent: { type: "attack", targetID: null, troops: troopPercent * 1000 },
       risk: { level: "low", score: 0.1 },
-      metadata: { expansion: true, troopPercentage: troopPercent / 100, troopPercent },
+      metadata: {
+        expansion: true,
+        troopPercentage: troopPercent / 100,
+        troopPercent,
+      },
     };
   }
 
@@ -18437,13 +18467,21 @@ describe("FM-1 enforce conversion over neutral (cash the midgame kill window)", 
 
   function fmPlan(): StrategicPlan {
     return {
-      ...pressurePlan(fmObservation({ ownTroops: 300_000, ownTiles: 16_000 }), "RIVAL001"),
+      ...pressurePlan(
+        fmObservation({ ownTroops: 300_000, ownTiles: 16_000 }),
+        "RIVAL001",
+      ),
     };
   }
 
   it("the constructed position offers an executor-ready conversion attack", () => {
     const observation = fmObservation({ ownTroops: 300_000, ownTiles: 16_000 });
-    const legalActions = [fmAttack(25, 300_000), fmNeutral(35), fmNeutral(10), hold()];
+    const legalActions = [
+      fmAttack(25, 300_000),
+      fmNeutral(35),
+      fmNeutral(10),
+      hold(),
+    ];
     const conversion = buildAgentTacticalAffordances({
       observation,
       legalActions,
@@ -18456,7 +18494,12 @@ describe("FM-1 enforce conversion over neutral (cash the midgame kill window)", 
   it("ON: selects the decisive conversion attack over neutral expansion (cashes the kill)", () => {
     process.env[FLAG] = "1";
     const observation = fmObservation({ ownTroops: 300_000, ownTiles: 16_000 });
-    const legalActions = [fmAttack(25, 300_000), fmNeutral(35), fmNeutral(10), hold()];
+    const legalActions = [
+      fmAttack(25, 300_000),
+      fmNeutral(35),
+      fmNeutral(10),
+      hold(),
+    ];
     const decision = new FrontierPolicyExecutor("aggressive").decide(
       { observation, legalActions },
       fmPlan(),
@@ -18467,7 +18510,12 @@ describe("FM-1 enforce conversion over neutral (cash the midgame kill window)", 
   it("default (flag unset) behaves as ON and cashes the kill", () => {
     delete process.env[FLAG];
     const observation = fmObservation({ ownTroops: 300_000, ownTiles: 16_000 });
-    const legalActions = [fmAttack(25, 300_000), fmNeutral(35), fmNeutral(10), hold()];
+    const legalActions = [
+      fmAttack(25, 300_000),
+      fmNeutral(35),
+      fmNeutral(10),
+      hold(),
+    ];
     const decision = new FrontierPolicyExecutor("aggressive").decide(
       { observation, legalActions },
       fmPlan(),
@@ -18478,15 +18526,21 @@ describe("FM-1 enforce conversion over neutral (cash the midgame kill window)", 
   it("ON: clamps every neutral-growth candidate strictly below the conversion-ready attack", () => {
     process.env[FLAG] = "1";
     const observation = fmObservation({ ownTroops: 300_000, ownTiles: 16_000 });
-    const legalActions = [fmAttack(25, 300_000), fmNeutral(35), fmNeutral(10), hold()];
+    const legalActions = [
+      fmAttack(25, 300_000),
+      fmNeutral(35),
+      fmNeutral(10),
+      hold(),
+    ];
     const ranked = rankLegalActionsForPrompt({
       input: { observation, legalActions },
       profile: "aggressive",
       plan: fmPlan(),
       limit: 8,
     });
-    const attackScore = ranked.find((r) => r.id === "attack:RIVAL001:25")
-      ?.totalScore;
+    const attackScore = ranked.find(
+      (r) => r.id === "attack:RIVAL001:25",
+    )?.totalScore;
     expect(attackScore).toBeDefined();
     const neutralScores = ranked
       .filter((r) => r.id.startsWith("expand:terra-nullius"))
@@ -18509,7 +18563,12 @@ describe("FM-1 enforce conversion over neutral (cash the midgame kill window)", 
   // cycle to re-plan rather than farming neutral.
   it("under-resourced kill window: OFF farms neutral, ON never selects neutral over the conversion attack", () => {
     const observation = underResourcedObservation();
-    const legalActions = [fmAttack(35, 100_000), fmNeutral(35), fmNeutral(10), hold()];
+    const legalActions = [
+      fmAttack(35, 100_000),
+      fmNeutral(35),
+      fmNeutral(10),
+      hold(),
+    ];
     // Precondition: the affordance still says a conversion attack is executor-ready.
     expect(
       buildAgentTacticalAffordances({ observation, legalActions })
@@ -18547,19 +18606,32 @@ describe("FM-1 enforce conversion over neutral (cash the midgame kill window)", 
     }> = [
       {
         observation: fmObservation({ ownTroops: 300_000, ownTiles: 16_000 }),
-        legalActions: [fmAttack(25, 300_000), fmNeutral(35), fmNeutral(10), hold()],
+        legalActions: [
+          fmAttack(25, 300_000),
+          fmNeutral(35),
+          fmNeutral(10),
+          hold(),
+        ],
         baseline: "attack:RIVAL001:25",
       },
       {
         observation: underResourcedObservation(),
-        legalActions: [fmAttack(35, 100_000), fmNeutral(35), fmNeutral(10), hold()],
+        legalActions: [
+          fmAttack(35, 100_000),
+          fmNeutral(35),
+          fmNeutral(10),
+          hold(),
+        ],
         baseline: "expand:terra-nullius:10",
       },
     ];
     for (const testCase of cases) {
       process.env[FLAG] = "0";
       const decision = new FrontierPolicyExecutor("aggressive").decide(
-        { observation: testCase.observation, legalActions: testCase.legalActions },
+        {
+          observation: testCase.observation,
+          legalActions: testCase.legalActions,
+        },
         fmPlan(),
       );
       expect(decision.actionID).toBe(testCase.baseline);
@@ -18690,7 +18762,11 @@ describe("Economy bootstrap lever (PROXYWAR_TUNE_ECONOMY_BOOTSTRAP)", () => {
     const base = noCityObservation();
     const observation: AgentObservation = {
       ...base,
-      strategic: { ...base.strategic, priority: "build_defense", urgency: "high" },
+      strategic: {
+        ...base.strategic,
+        priority: "build_defense",
+        urgency: "high",
+      },
     };
     const decision = await decide(observation, [
       expandAction(),
@@ -18741,7 +18817,6 @@ describe("Economy bootstrap lever (PROXYWAR_TUNE_ECONOMY_BOOTSTRAP)", () => {
     ]);
     expect(decision.actionID).not.toBe("build:Defense Post:200");
   });
-
 });
 
 describe("Dominant endgame conversion: overmatch commits decisively", () => {
@@ -18928,7 +19003,9 @@ describe("Betray late: deterministic backstab of an overmatched ally", () => {
     };
   };
 
-  const withAffordances = (observation: AgentObservation): AgentObservation => ({
+  const withAffordances = (
+    observation: AgentObservation,
+  ): AgentObservation => ({
     ...observation,
     tacticalAffordances: buildAgentTacticalAffordances({ observation }),
   });
@@ -18947,9 +19024,9 @@ describe("Betray late: deterministic backstab of an overmatched ally", () => {
     expect(observation.tacticalAffordances?.backstabAlly?.recommended).toBe(
       true,
     );
-    expect(observation.tacticalAffordances?.backstabAlly?.backstabTargetID).toBe(
-      "SIDE02",
-    );
+    expect(
+      observation.tacticalAffordances?.backstabAlly?.backstabTargetID,
+    ).toBe("SIDE02");
     const decision = await decide(observation, [
       breakAlliance("SIDE02"),
       hold(),
@@ -19079,5 +19156,284 @@ describe("Betray late: deterministic backstab of an overmatched ally", () => {
     // Decision 5: interval decision under the HEALTHY plan stays unflagged.
     const d5 = await brain.decide({ observation, legalActions });
     expect(d5.metadata?.llmPlannerDegraded ?? false).toBe(false);
+  });
+
+  it("does not blame the parser when the planner answered and control validation refused it", async () => {
+    // The branch that survived mutation testing until now, and the reason it mattered:
+    // this path's output PARSES, so stamping `parseOk: false` recreated the exact
+    // parse/content conflation fixed elsewhere in this file - and `parserFailures` in
+    // `externalBrainCleanlinessReport` keys on `plannerParseOk === false`.
+    //
+    // The spawn phase is the cheapest MUST FOLLOW control (`plannerRecommendedControls`
+    // returns must_follow with objective=choose_spawn), so a provider that answers with
+    // a different objective twice violates it, gets repaired, violates again, and lands
+    // in the rejection branch.
+    const spawnObservation: AgentObservation = {
+      ...new AgentObservationBuilder().build({
+        agentID: "agent-1",
+        clientID: null,
+        username: "Planner Agent",
+        profile: "opportunistic",
+        gameID: "PLANSPWN",
+        turnNumber: 0,
+        phaseOverride: "spawn",
+      }),
+    };
+    const legalActions = buildLegalActions();
+    let calls = 0;
+    const stubborn: LlmProvider = {
+      providerType: "codex-cli",
+      async complete(): Promise<string> {
+        calls += 1;
+        // Valid JSON every time, and every time the wrong objective.
+        return JSON.stringify({
+          objective: "expand_territory",
+          turnIntent: "growth",
+          rationale: `Ignoring the spawn directive, attempt ${calls}.`,
+          maxDecisionCycles: 2,
+          preferredActionKinds: ["attack", "hold"],
+          enabledModules: ["expansion"],
+          targetPlayerId: null,
+          tacticalSettings: {
+            reserveRatio: 0.42,
+            triggerRatio: 0.6,
+            expansionRatio: 0.12,
+            maxConcurrentWars: 1,
+            retreatThreshold: 0.38,
+            maxActionsPerDecision: 3,
+          },
+        });
+      },
+    };
+    const brain = new PlannerExecutorAgentBrain({
+      profile: "opportunistic",
+      planner: new LlmAgentPlanner({
+        provider: stubborn,
+        profile: "opportunistic",
+        plannerType: "codex-cli",
+      }),
+      executor: new FrontierPolicyExecutor("opportunistic"),
+      planEveryDecisionSteps: 3,
+    });
+
+    const decision = await brain.decide({
+      observation: spawnObservation,
+      legalActions,
+    });
+
+    // The planner was asked twice: original, then repair.
+    expect(calls).toBeGreaterThanOrEqual(2);
+    expect(decision.metadata?.llmPlannerDegraded).toBe(true);
+    expect(decision.metadata?.plannerFallbackUsed).toBe(true);
+    // The parse SUCCEEDED, so the parser must not be blamed...
+    expect(decision.metadata?.plannerParseOk).not.toBe(false);
+    expect(decision.metadata?.plannerParseFailureReason).toBeUndefined();
+    // ...and the refusal is recorded as a control rejection instead.
+    expect(decision.metadata?.plannerRepairReason).toContain(
+      "still contradicted must-follow control",
+    );
+    // No cause is claimed: the bounded vocabulary has no member for a refused answer.
+    expect(decision.metadata?.degradedCause).toBeUndefined();
+
+    // The report outcome for this shape is pinned in
+    // AgentExternalBrainCleanliness.test.ts, using that suite's own record builder.
+  });
+
+  it("distinguishes a provider throw from an unparseable answer", async () => {
+    // Both failures reach the SAME `fallback()`, which used to hardcode `plan-parse`.
+    // A provider outage therefore published "the model answered and we could not parse
+    // it" - misattribution inside the field whose whole purpose is attribution.
+    const observation = activeObservation("secure_economy");
+    const legalActions = buildLegalActions();
+    const throwing: LlmProvider = {
+      providerType: "codex-cli",
+      async complete(): Promise<string> {
+        throw new Error("bedrock connection reset");
+      },
+    };
+    const brain = new PlannerExecutorAgentBrain({
+      profile: "opportunistic",
+      planner: new LlmAgentPlanner({
+        provider: throwing,
+        profile: "opportunistic",
+        plannerType: "codex-cli",
+      }),
+      executor: new FrontierPolicyExecutor("opportunistic"),
+      planEveryDecisionSteps: 3,
+    });
+
+    const decision = await brain.decide({ observation, legalActions });
+    expect(decision.metadata?.llmPlannerDegraded).toBe(true);
+    // Our own side failed to obtain a plan; nothing was parsed.
+    expect(decision.metadata?.degradedCause).toBe("policy-error");
+    // And it must not claim a malformed answer that never arrived. `plannerParseOk`
+    // matters as much as the reason text: `externalBrainCleanlinessReport` counts
+    // `plannerParseOk === false` as a PARSER failure, so a `false` here would tally a
+    // provider outage against the parser.
+    expect(decision.metadata?.plannerParseFailureReason).toBeUndefined();
+    expect(decision.metadata?.plannerParseOk).toBeUndefined();
+  });
+
+  it("reports plan-timeout when the provider exceeds its budget", async () => {
+    // `plan-timeout` exists to separate "too slow" from "unusable answer", which is the
+    // difference between a capacity story and a prompt/model story.
+    const observation = activeObservation("secure_economy");
+    const legalActions = buildLegalActions();
+    const slow: LlmProvider = {
+      providerType: "codex-cli",
+      complete(): Promise<string> {
+        return new Promise((resolve) => setTimeout(() => resolve("{}"), 5_000));
+      },
+    };
+    const brain = new PlannerExecutorAgentBrain({
+      profile: "opportunistic",
+      planner: new LlmAgentPlanner({
+        provider: slow,
+        profile: "opportunistic",
+        plannerType: "codex-cli",
+        providerTimeoutMs: 25,
+      }),
+      executor: new FrontierPolicyExecutor("opportunistic"),
+      planEveryDecisionSteps: 3,
+    });
+
+    const decision = await brain.decide({ observation, legalActions });
+    expect(decision.metadata?.llmPlannerDegraded).toBe(true);
+    expect(decision.metadata?.degradedCause).toBe("plan-timeout");
+    expect(decision.metadata?.plannerParseFailureReason).toBeUndefined();
+    expect(decision.metadata?.plannerParseOk).toBeUndefined();
+  });
+
+  it("still reports plan-parse for an answer it could not parse", async () => {
+    const observation = activeObservation("secure_economy");
+    const legalActions = buildLegalActions();
+    const garbage: LlmProvider = {
+      providerType: "codex-cli",
+      async complete(): Promise<string> {
+        return "not json at all";
+      },
+    };
+    const brain = new PlannerExecutorAgentBrain({
+      profile: "opportunistic",
+      planner: new LlmAgentPlanner({
+        provider: garbage,
+        profile: "opportunistic",
+        plannerType: "codex-cli",
+      }),
+      executor: new FrontierPolicyExecutor("opportunistic"),
+      planEveryDecisionSteps: 3,
+    });
+
+    const decision = await brain.decide({ observation, legalActions });
+    expect(decision.metadata?.degradedCause).toBe("plan-parse");
+    // The parse verdict and its reason belong HERE, and only here.
+    expect(decision.metadata?.plannerParseFailureReason).toBeDefined();
+    expect(decision.metadata?.plannerParseOk).toBe(false);
+  });
+
+  it("forwards the planner's bounded cause onto decision metadata", async () => {
+    // The provider fails, so the LLM planner's own fallback path reports why:
+    // `plan-parse` is the executor's label for "the planner answered and we could
+    // not use the answer", and a provider throw lands on the same fallback. The
+    // point of the assertion is the FORWARDING: decision metadata is assembled by
+    // explicit field picking, so a cause the planner knows reaches no artifact
+    // unless the executor names it.
+    const observation = activeObservation("secure_economy");
+    const legalActions = buildLegalActions();
+    const provider: LlmProvider = {
+      providerType: "codex-cli",
+      async complete(): Promise<string> {
+        return "not json at all";
+      },
+    };
+    const brain = new PlannerExecutorAgentBrain({
+      profile: "opportunistic",
+      planner: new LlmAgentPlanner({
+        provider,
+        profile: "opportunistic",
+        plannerType: "codex-cli",
+      }),
+      executor: new FrontierPolicyExecutor("opportunistic"),
+      planEveryDecisionSteps: 3,
+    });
+
+    const first = await brain.decide({ observation, legalActions });
+    expect(first.metadata?.llmPlannerDegraded).toBe(true);
+    expect(first.metadata?.degradedCause).toBe("plan-parse");
+
+    // The standing plan is fallback-authored, so the following interval decisions
+    // stay flagged - and they must say WHY too. These cadence-amplified decisions
+    // are the MAJORITY of the league's degraded count (66.3% of degraded decisions
+    // measured over 101 mirrored matches), so a cause that appeared only on the
+    // refresh decision would leave two thirds of the number unexplained.
+    //
+    // An earlier version of this test asserted the opposite, on the reasoning that a
+    // per-decision cause would be fabrication. That conflated two things: claiming a
+    // NEW failure per decision would be invention, but reporting the known origin of
+    // the plan a decision actually ran under is provenance - and it is exactly the
+    // reasoning the propagated `llmPlannerDegraded` flag itself already rests on.
+    const second = await brain.decide({ observation, legalActions });
+    expect(second.metadata?.plannerRan).toBe(false);
+    expect(second.metadata?.llmPlannerDegraded).toBe(true);
+    expect(second.metadata?.degradedCause).toBe("plan-parse");
+  });
+
+  it("clears the inherited cause when a healthy refresh replaces the plan", async () => {
+    // The cause must not outlive the degradation. It rides on the plan object, so a
+    // healthy refresh drops it with the flag - if it leaked, every later decision in
+    // a recovered match would still read as degraded-for-reason-X.
+    const observation = activeObservation("secure_economy");
+    const legalActions = buildLegalActions();
+    let failNext = true;
+    const provider: LlmProvider = {
+      providerType: "codex-cli",
+      async complete(): Promise<string> {
+        if (failNext) return "not json at all";
+        return JSON.stringify({
+          objective: "expand_territory",
+          turnIntent: "expand",
+          rationale: "Recovered: expand while the front is open.",
+          maxDecisionCycles: 2,
+          preferredActionKinds: ["expand", "attack", "hold"],
+          enabledModules: ["expansion", "defense"],
+          targetPlayerId: null,
+          tacticalSettings: {
+            reserveRatio: 0.42,
+            triggerRatio: 0.6,
+            expansionRatio: 0.12,
+            maxConcurrentWars: 1,
+            retreatThreshold: 0.38,
+            maxActionsPerDecision: 3,
+          },
+        });
+      },
+    };
+    const brain = new PlannerExecutorAgentBrain({
+      profile: "opportunistic",
+      planner: new LlmAgentPlanner({
+        provider,
+        profile: "opportunistic",
+        plannerType: "codex-cli",
+      }),
+      executor: new FrontierPolicyExecutor("opportunistic"),
+      planEveryDecisionSteps: 3,
+    });
+
+    const failed = await brain.decide({ observation, legalActions });
+    expect(failed.metadata?.degradedCause).toBe("plan-parse");
+    const inherited = await brain.decide({ observation, legalActions });
+    expect(inherited.metadata?.degradedCause).toBe("plan-parse");
+
+    // Decision 4 is due a refresh, and the provider is healthy again.
+    await brain.decide({ observation, legalActions });
+    failNext = false;
+    const recovered = await brain.decide({ observation, legalActions });
+    expect(recovered.metadata?.plannerRan).toBe(true);
+    expect(recovered.metadata?.llmPlannerDegraded ?? false).toBe(false);
+    expect(recovered.metadata?.degradedCause).toBeUndefined();
+
+    const afterRecovery = await brain.decide({ observation, legalActions });
+    expect(afterRecovery.metadata?.llmPlannerDegraded ?? false).toBe(false);
+    expect(afterRecovery.metadata?.degradedCause).toBeUndefined();
   });
 });

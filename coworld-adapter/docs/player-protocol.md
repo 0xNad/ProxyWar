@@ -59,6 +59,32 @@ existing `AgentDecisionValidator`, `AgentRunner`, and `GameServer` remain the so
 `LegalAction.id` selection is still the only way to act - no raw core intent is ever accepted
 from a player.
 
+### Reporting a degraded brain
+
+When your policy could not decide for itself, say so: `"fallbackUsed": true` and
+`"llmPlannerDegraded": true` travel with the decision so replays and results never
+report a dead brain as a healthy one.
+
+`"degradedCause"` is optional and explains WHY. It is validated against a fixed
+vocabulary and silently dropped otherwise — an invented cause in an attribution field
+is worse than no cause at all:
+
+| value              | meaning                                                               |
+| ------------------ | --------------------------------------------------------------------- |
+| `plan-warmup`      | No plan yet; the first refresh is still in flight. Benign.            |
+| `plan-stale`       | A plan exists, but the latest refresh failed; acting on stale intent. |
+| `plan-unavailable` | No plan at all, and the refresh failed.                               |
+| `plan-timeout`     | The planner's provider call exceeded the policy's own budget.         |
+| `plan-parse`       | The model answered, but its output could not be parsed.               |
+| `policy-error`     | The policy's own code threw before it could decide.                   |
+
+A cause is only recorded alongside `"llmPlannerDegraded": true`; sent on its own it is
+ignored, so a decision that reports health can never carry failure evidence.
+
+`brain-timeout` and `brain-error` belong to the same vocabulary but are stamped by the
+GAME when it never hears from a policy, or when a brain throws. They are rejected on
+the inbound wire: a policy cannot attribute its own failure to the server.
+
 ## Spawn preference round (active v1)
 
 Before ordinary play, the game runs exactly one sealed, concurrent spawn

@@ -339,7 +339,9 @@ describe("comms-slot validation", () => {
       menu,
     );
     expect(result).toMatchObject({ ok: false });
-    expect((result as { reason: string }).reason).toContain("unknown action id");
+    expect((result as { reason: string }).reason).toContain(
+      "unknown action id",
+    );
   });
 
   it("REJECTS a game action in the comms slot (raw-intent bypass boundary)", () => {
@@ -441,9 +443,10 @@ describe("comms-slot validation", () => {
   });
 
   it("rejects zero-width padding that inflates prompt cost invisibly", () => {
-    // U+FEFF is deliberately absent: JS `\s` matches it, so the whitespace
-    // collapse above already destroys the payload rather than smuggling it.
-    for (const ch of ["​", "‌", "‍", "⁠", "­"]) {
+    // U+FEFF is included now: the invisible-character check runs on the RAW
+    // text, before whitespace normalization, so JS `\s` matching U+FEFF no
+    // longer makes that arm dead code.
+    for (const ch of ["​", "‌", "‍", "⁠", "­", "﻿"]) {
       const result = validateAgentMessageDecision(
         decision({
           messageActionID: "message:P1",
@@ -457,16 +460,52 @@ describe("comms-slot validation", () => {
     }
   });
 
-  it("collapses U+FEFF padding to nothing instead of carrying it", () => {
-    const result = validateAgentMessageDecision(
+  it("rejects U+FEFF padding instead of rewriting the sentence around it", () => {
+    // SUPERSEDES the earlier "collapses U+FEFF to nothing" expectation. That
+    // behaviour was not a strip, it was a REWRITE: JS `\s` matches U+FEFF, so
+    // the whitespace collapse turned `a<200x FEFF>b` into `"a b"` and
+    // `commsSlotText` recorded a two-word sentence the agent never wrote.
+    // `"deal\uFEFF\uFEFFnow"` became `"deal now"` — an invented word boundary.
+    // This feature exists to produce negotiation EVIDENCE, and a rewritten
+    // quote is worse than a rejected one, so the raw text is checked first.
+    const padded = validateAgentMessageDecision(
       decision({
         messageActionID: "message:P1",
-        messageText: `a${"﻿".repeat(200)}b`,
+        messageText: `a${"\ufeff".repeat(200)}b`,
       }),
       menu,
     );
-    // 202 characters in, 3 out: the invisible payload never reaches a prompt.
-    expect(result).toMatchObject({ ok: true, text: "a b" });
+    expect(padded).toMatchObject({ ok: false });
+
+    // The exact rewrite that used to slip through, now refused.
+    const boundary = validateAgentMessageDecision(
+      decision({
+        messageActionID: "message:P1",
+        messageText: "deal\ufeff\ufeffnow",
+      }),
+      menu,
+    );
+    expect(boundary).toMatchObject({ ok: false });
+  });
+
+  it("still normalizes ordinary layout whitespace instead of rejecting it", () => {
+    // Tabs and newlines are layout, not content: a wrapped sentence is the same
+    // sentence, so these must keep being collapsed and accepted. Without this
+    // the FEFF fix would over-reach into every multi-line message.
+    for (const [input, expected] of [
+      ["hold\tthe\tline", "hold the line"],
+      ["hold\nthe\nline", "hold the line"],
+      ["  hold   the line  ", "hold the line"],
+      ["hold\u00a0the line", "hold the line"],
+    ] as const) {
+      expect(
+        validateAgentMessageDecision(
+          decision({ messageActionID: "message:P1", messageText: input }),
+          menu,
+        ),
+        `layout whitespace ${JSON.stringify(input)} must normalize, not reject`,
+      ).toMatchObject({ ok: true, text: expected });
+    }
   });
 
   it("still accepts ordinary non-ASCII text", () => {
@@ -536,7 +575,8 @@ describe("inbox windowing (prompt cost + denial-of-attention bounds)", () => {
     // The structural guarantee, independent of who happened to speak last:
     // no single sender can occupy more than its per-rival share of the window.
     const perSender: Record<string, number> = {};
-    for (const m of window) perSender[m.senderID] = (perSender[m.senderID] ?? 0) + 1;
+    for (const m of window)
+      perSender[m.senderID] = (perSender[m.senderID] ?? 0) + 1;
     for (const [sender, count] of Object.entries(perSender)) {
       expect(count, `${sender} took more than its share`).toBeLessThanOrEqual(
         FREETEXT_INBOX_MAX_PER_RIVAL,
@@ -557,7 +597,11 @@ describe("inbox windowing (prompt cost + denial-of-attention bounds)", () => {
   });
 
   it("is deterministic and ordered oldest to newest", () => {
-    const mailbox = [msg("B0000001", 3), msg("A0000001", 1), msg("C0000001", 2)];
+    const mailbox = [
+      msg("B0000001", 3),
+      msg("A0000001", 1),
+      msg("C0000001", 2),
+    ];
     const first = selectInboxWindow(mailbox);
     const second = selectInboxWindow(mailbox);
     expect(first).toEqual(second);

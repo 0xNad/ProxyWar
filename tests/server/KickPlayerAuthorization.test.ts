@@ -93,7 +93,7 @@ describe("GameServer - kick_player authorization", () => {
 
   function makeGame(creatorPersistentID?: string) {
     return new GameServer(
-      "test-game",
+      "TESTGAM0",
       mockLogger,
       Date.now(),
       mockConfig,

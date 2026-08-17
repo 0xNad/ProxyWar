@@ -98,6 +98,7 @@ const PLAN_KINDS = [
   "build",
   "boat",
   "alliance_request",
+  "alliance_extend",
   "upgrade_structure",
   "donate_gold",
   "donate_troops",
@@ -122,8 +123,19 @@ const SECURITY =
 
 // -- anti-loop memory (distilled from the keystone's avoidActionIDs) ----------
 const history = []; // { actionID, kind } appended after each decision
-// Inbound messages already answered, keyed `${senderID}:${turnNumber}`, so a
-// rival writing every step cannot pull this agent into an endless exchange.
+// Inbound messages already answered, keyed `${senderID}:${turnNumber}`, plus
+// `reply:${senderID}:${n}` for the lifetime reply budget that actually bounds
+// an exchange.
+// Lifetime replies per counterparty, per match. The per-inbound-message key
+// below CANNOT break a mutual exchange: every reply we send becomes a new
+// inbound message with a new turn number on the other side, so both agents keep
+// seeing a key neither has answered. Hosted episode ereq_3fc90743 (0.1.49, four
+// talker seats) produced 5 openers and 861 replies over 1,204 decisions --
+// 285/285 and 145/146 per mirrored pair, a message on ~72% of all decisions.
+// Three replies is enough for a negotiation (answer, counter, confirmation) and
+// matches the server's per-rival inbox window
+// (FREETEXT_INBOX_MAX_PER_RIVAL), past which older messages are not even shown.
+const MESSAGE_MAX_REPLIES_PER_RIVAL = 3;
 const answeredMessages = new Set();
 function avoidActionIDs() {
   const recent = history
@@ -167,18 +179,20 @@ function cleanID(s) {
 // here means a future server change can never quietly widen what reaches the
 // prompt.
 function cleanMessage(s) {
-  return String(s ?? "")
-    // C0/C1 controls and DEL -> space.
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\u0000-\u001F\u007F-\u009F]/gu, " ")
-    // Bidi overrides, zero-width joiners/spaces, soft hyphen, BOM -> dropped.
-    .replace(
-      /[\u00AD\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF]/gu,
-      "",
-    )
-    .replace(/\s+/gu, " ")
-    .trim()
-    .slice(0, 280);
+  return (
+    String(s ?? "")
+      // C0/C1 controls and DEL -> space.
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\u0000-\u001F\u007F-\u009F]/gu, " ")
+      // Bidi overrides, zero-width joiners/spaces, soft hyphen, BOM -> dropped.
+      .replace(
+        /[\u00AD\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF]/gu,
+        "",
+      )
+      .replace(/\s+/gu, " ")
+      .trim()
+      .slice(0, 280)
+  );
 }
 function normalizeDealPolicies(value) {
   const entries = Array.isArray(value)
@@ -240,6 +254,18 @@ function buildState(obs, actions) {
       isAllied: p.isAllied,
       relation: p.relation,
       canAttack: p.canAttack,
+      // Alliance renewal is MUTUAL, one-shot, and only offered inside a short
+      // window. `otherAskedToRenew` is the signal that ONE alliance_extend
+      // keeps this alliance alive; without it the model cannot tell "my ally is
+      // waiting on me" from "renewal is unavailable". Absent unless an alliance
+      // is actually in its window, so a normal rival entry is unchanged.
+      ...(p.allianceInExtensionWindow === true
+        ? {
+            allianceExpiringSoon: true,
+            iAskedToRenew: p.allianceSelfAgreedToExtend === true,
+            otherAskedToRenew: p.allianceOtherAgreedToExtend === true,
+          }
+        : {}),
       ...(spatialEnabled
         ? {
             playerID: cleanID(p.playerID),
@@ -1158,9 +1184,22 @@ function chooseMessageMove(actions, obs, answered, dealMove) {
   )[inbound.length - 1];
   const senderID = newest?.senderID;
   if (!senderID) return null;
-  // One reply per inbound turn, so a spammer cannot pull us into a loop.
+  // One reply per inbound TURN. This alone does not bound an exchange -- it
+  // only stops us answering the same message twice -- so the lifetime budget
+  // below is what actually ends a conversation.
   const key = `${senderID}:${newest.turnNumber}`;
   if (answered.has(key)) return null;
+
+  // Lifetime reply budget for this counterparty: sequential slot keys in the
+  // same match-scoped memory, so no extra state and no signature change.
+  let repliesSpent = 0;
+  while (
+    repliesSpent < MESSAGE_MAX_REPLIES_PER_RIVAL &&
+    answered.has(`reply:${senderID}:${repliesSpent}`)
+  ) {
+    repliesSpent += 1;
+  }
+  if (repliesSpent >= MESSAGE_MAX_REPLIES_PER_RIVAL) return null;
 
   const offer = offers.find(
     (action) => action.metadata?.recipientID === senderID,
@@ -1176,7 +1215,8 @@ function chooseMessageMove(actions, obs, answered, dealMove) {
     ...(obs?.deals?.activeDeals || []),
   ].some(
     (view) =>
-      view?.proposerPlayerID === senderID || view?.recipientPlayerID === senderID,
+      view?.proposerPlayerID === senderID ||
+      view?.recipientPlayerID === senderID,
   );
 
   let text;
@@ -1186,6 +1226,7 @@ function chooseMessageMove(actions, obs, answered, dealMove) {
   else text = MESSAGE_REPLIES.neutral;
 
   answered.add(key);
+  answered.add(`reply:${senderID}:${repliesSpent}`);
   return { id: offer.id, text: text.slice(0, MESSAGE_MAX_CHARS) };
 }
 
@@ -1487,7 +1528,59 @@ function socialActionNote(chosen, dealMove, obs) {
 }
 // The GAME move. Deal actions are never returned here — they ride the
 // separate deal slot — so the agent always spends its action on the map.
+// Alliance renewal is MUTUAL and one-shot: the core extends only once BOTH
+// sides ask inside a short window, and `canExtendAlliance` goes false the moment
+// you ask. 0.1.48 added `allianceOtherAgreedToExtend` so a policy can see its
+// ally is already waiting; bots and nations have always reciprocated off the
+// core's equivalent signal. Answering costs one action and saves an existing
+// alliance, so it is taken deterministically rather than left to the plan.
+// Acceptance is a RETURNING request: there is no `alliance_accept` kind, so an
+// alliance forms only when both sides ask. Our own executor already nudges this
+// (`allianceReciprocityPriority` adds +20 when a rival has asked); starters read
+// the flag nowhere, so their requests scatter across rivals who never asked.
+// Measured locally: 6 seats over 7,300 turns sent 19 alliance requests and
+// formed ZERO alliances.
+//
+// This deliberately does NOT change how OFTEN a starter seeks an alliance — only
+// WHOM it asks when it has already decided to ask. Appetite unchanged, so it
+// cannot push the field toward the social stalemate the 2026-08-07 territorial
+// backstop exists to catch.
+function preferReciprocalAlliance(actions, obs, kind) {
+  if (kind !== "alliance_request") return null;
+  const rivals = obs?.visiblePlayers || [];
+  for (const action of actions || []) {
+    if (action?.kind !== "alliance_request") continue;
+    const targetID =
+      action.metadata?.targetID ??
+      action.metadata?.recipientID ??
+      action.metadata?.playerID;
+    const rival = rivals.find((player) => player?.playerID === targetID);
+    if (rival?.hasIncomingAllianceRequest === true) return action;
+  }
+  return null;
+}
+
+function pendingRenewalAction(actions, obs) {
+  const rivals = obs?.visiblePlayers || [];
+  for (const action of actions || []) {
+    if (action?.kind !== "alliance_extend") continue;
+    const targetID =
+      action.metadata?.targetID ??
+      action.metadata?.recipientID ??
+      action.metadata?.playerID;
+    const rival = rivals.find((player) => player?.playerID === targetID);
+    if (rival?.allianceOtherAgreedToExtend === true) return action;
+  }
+  return null;
+}
+
 function choose(actions, obs) {
+  // An ally already asked to renew: answer before consulting the plan, because
+  // the window is short and one-shot and the plan refreshes only every
+  // PLAN_EVERY decisions.
+  const renewal = pendingRenewalAction(actions, obs);
+  if (renewal) return renewal;
+
   const cons = dealConstraints(obs);
   const authorizedBreaks = new Set(plan?.breakDealIDs || []);
   const allAuthorized = (dealIDs) =>
@@ -1611,6 +1704,13 @@ function choose(actions, obs) {
         !violatesPact(c),
     );
     if (candidates.length === 0) continue;
+    // Same appetite, better aim: when this decision is going to ask for an
+    // alliance anyway, ask the rival who already asked us. Acceptance is a
+    // returning request, so this is the difference between a formed alliance and
+    // a wasted one-sided ask. Checked before the plan's named target because a
+    // pending request is a fact about the board, not a preference.
+    const reciprocal = preferReciprocalAlliance(candidates, obs, kind);
+    if (reciprocal) return reciprocal;
     // Within the kind, prefer the plan's named target when one is offered.
     if (plan?.target) {
       const targeted = candidates.find(matchesPlanTarget);
@@ -1682,6 +1782,30 @@ function spawnPreferenceScore(action) {
     diplomacy * 0.28 -
     lowSafetyPenalty
   );
+}
+
+/**
+ * WHY this decision was degraded, from the bounded wire vocabulary (see
+ * AGENT_DEGRADATION_CAUSES in src/server/agents/AgentWireProtocol.ts).
+ *
+ * These four states have always been visible HERE and nowhere else. The wire
+ * carried one boolean, so a seat playing rule logic while its FIRST plan is still
+ * in flight has been indistinguishable, in every artifact, from a seat whose
+ * planner is dead - which is most of why a third of league decisions cannot be
+ * attributed to anything.
+ *
+ * `lastPlanError` is exactly "timeout" when this file's own `withTimeout` rejected,
+ * so the timeout case needs no text parsing. Timeout takes precedence over the
+ * has-a-plan/has-no-plan split: both are real breakage, so the useful thing to
+ * report is the provider behaviour rather than which of two broken states we are in.
+ *
+ * Returns null for a healthy decision, so the caller omits the field entirely.
+ */
+function degradedCauseFor(plan, degraded, lastPlanError) {
+  if (plan === null && !degraded) return "plan-warmup";
+  if (!degraded) return null;
+  if (lastPlanError === "timeout") return "plan-timeout";
+  return plan !== null ? "plan-stale" : "plan-unavailable";
 }
 
 function withTimeout(promise, ms) {
@@ -1814,6 +1938,9 @@ export function startLlmPlayer({
         confidence: plan !== null ? (degraded ? 0.5 : 0.75) : 0.4,
         fallbackUsed: plan === null || degraded,
         llmPlannerDegraded: plan === null || degraded,
+        ...(degradedCauseFor(plan, degraded, lastPlanError)
+          ? { degradedCause: degradedCauseFor(plan, degraded, lastPlanError) }
+          : {}),
       }),
     );
   });
