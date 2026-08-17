@@ -2025,6 +2025,15 @@ export class LlmAgentPlanner implements AgentPlanner {
               // A `plan-rejected` member would fit; that is a wire-contract change and
               // is recorded as a follow-up rather than slipped in here.
               undefined,
+              // The output PARSED and our control validation refused it, so it is a
+              // rejected planner answer - a parser-side failure for cleanliness
+              // accounting, even though the bounded cause vocabulary has no member.
+              //
+              // UNCOVERED BRANCH, stated rather than implied: reaching this needs a
+              // must-follow control violation that SURVIVES repair, and no test builds
+              // that fixture. A mutation flipping this argument is not caught. The
+              // adjacent paths (parse failure, timeout, transport throw) are all pinned.
+              true,
             );
           }
           return this.fallback(
@@ -2036,6 +2045,7 @@ export class LlmAgentPlanner implements AgentPlanner {
             prompt.length + repairPrompt.length,
             // This one genuinely failed to parse.
             "plan-parse",
+            true,
           );
         }
         return {
@@ -2077,6 +2087,7 @@ export class LlmAgentPlanner implements AgentPlanner {
         parsed.reason,
         prompt.length,
         "plan-parse",
+        true,
       );
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
@@ -2093,6 +2104,8 @@ export class LlmAgentPlanner implements AgentPlanner {
         error instanceof AgentPlannerTimeoutError
           ? "plan-timeout"
           : "policy-error",
+        // Nothing was parsed: the provider never returned usable output.
+        false,
       );
     }
   }
@@ -2112,6 +2125,15 @@ export class LlmAgentPlanner implements AgentPlanner {
      * attribution.
      */
     cause: AgentDegradationCause | undefined,
+    /**
+     * Whether the planner actually PRODUCED output we could not use. Separate from
+     * `cause` on purpose: `parseOk: false` flows to `plannerParseOk`, which
+     * `externalBrainCleanlinessReport` counts as a PARSER failure. Deriving it from the
+     * cause meant a provider outage was tallied as a parser failure - the same
+     * misattribution one consumer further along, which is why omitting
+     * `parseFailureReason` alone did not fix it.
+     */
+    parseFailed: boolean,
   ): Promise<AgentPlanDecision> {
     const fallback = await new RuleAgentPlanner(this.options.profile).plan(
       input,
@@ -2137,11 +2159,10 @@ export class LlmAgentPlanner implements AgentPlanner {
       ...(cause !== undefined ? { degradedCause: cause } : {}),
       rawPlannerOutput: raw,
       promptLength,
-      parseOk: false,
-      // Only a genuine parse failure gets a parse reason. A timeout or transport
-      // throw never produced output to parse, and stamping this field made the
-      // artifact claim a malformed answer that never arrived.
-      ...(cause === "plan-parse" ? { parseFailureReason: reason } : {}),
+      // Only claimed when the planner answered and the answer was unusable (invalid
+      // or rejected). A timeout or transport throw never produced output to parse, so
+      // both fields stay absent rather than inventing a malformed answer.
+      ...(parseFailed ? { parseOk: false, parseFailureReason: reason } : {}),
       // The rule fallback never emits a commitment; if the previous plan was
       // driving a binding kill-order, record that the fallback dropped it.
       ...(previousPlan?.commitment !== undefined
