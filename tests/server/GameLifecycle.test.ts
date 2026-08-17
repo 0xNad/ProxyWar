@@ -55,7 +55,7 @@ describe("GameLifecycle", () => {
 
   it("keeps the lobby's disabled units exactly as configured (warship retirement reversed 2026-08-16)", () => {
     const game = new GameServer(
-      "test-game",
+      "TESTGAME",
       mockLogger,
       Date.now(),
       mockConfig,
@@ -78,7 +78,7 @@ describe("GameLifecycle", () => {
 
   it("should not start turn interval if game has ended", async () => {
     const game = new GameServer(
-      "test-game",
+      "TESTGAME",
       mockLogger,
       Date.now(),
       mockConfig,
@@ -101,7 +101,7 @@ describe("GameLifecycle", () => {
   it("should clear turn interval and set _hasEnded on end()", async () => {
     // We need to initialize the game such that start() can succeed
     const game = new GameServer(
-      "test-game",
+      "TESTGAME",
       mockLogger,
       Date.now(),
       mockConfig,
@@ -127,7 +127,7 @@ describe("GameLifecycle", () => {
 
   it("should be resilient to multiple end() calls", async () => {
     const game = new GameServer(
-      "test-game",
+      "TESTGAME",
       mockLogger,
       Date.now(),
       mockConfig,

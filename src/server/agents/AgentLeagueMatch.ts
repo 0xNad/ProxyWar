@@ -1,7 +1,11 @@
 import { randomUUID } from "crypto";
 import { Logger } from "winston";
 import { Game } from "../../core/game/Game";
-import { ServerMessage } from "../../core/Schemas";
+import {
+  GAME_ID_REGEX,
+  isValidGameID,
+  ServerMessage,
+} from "../../core/Schemas";
 import { GameServer } from "../GameServer";
 import {
   AgentDealManager,
@@ -330,6 +334,31 @@ export class AgentLeagueMatchRunner {
       this.options.game.advanceTurnsForTesting(turnsPerSpawnTick);
     }
 
+    // Diagnose before giving up. The generic "did not reach the active phase" is
+    // technically true and practically useless: the overwhelmingly common cause is
+    // that the game never produced start info at all, so the mirror never received a
+    // `start` message and has no state to leave the spawn phase WITH. `GameServer`
+    // logs that failure and returns, which is the right call in production - a
+    // player-supplied field can fail that schema, and hanging one game beats throwing
+    // through a worker that is serving others - but in a local harness it surfaces
+    // here, ${maxSpawnTicks} ticks later, pointing at the wrong thing. It cost one
+    // debugging session already (2026-08-17).
+    if (options.mirror.gameState() === null) {
+      const gameID = this.options.game.id;
+      throw new Error(
+        `runSpawnPhase: the mirror never received a \`start\` message, so no game state ` +
+          `ever existed (after ${maxSpawnTicks} spawn ticks). The game did not produce ` +
+          `start info.` +
+          (isValidGameID(gameID)
+            ? ` The game id ${JSON.stringify(gameID)} is valid, so look for another ` +
+              `GameStartInfoSchema failure - GameServer.start() logs it as "Error parsing ` +
+              `game start info".`
+            : ` Its id ${JSON.stringify(gameID)} (${gameID.length} chars) fails ` +
+              `GAME_ID_REGEX (${GAME_ID_REGEX.source}), which makes GameStartInfoSchema ` +
+              `reject the start info and GameServer.start() return without sending a start ` +
+              `message. Use an 8-character alphanumeric id.`),
+      );
+    }
     throw new Error(
       `runSpawnPhase did not reach the active phase after ${maxSpawnTicks} spawn ticks`,
     );
