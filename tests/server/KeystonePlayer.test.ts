@@ -1,3 +1,5 @@
+import fs from "node:fs/promises";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -214,6 +216,129 @@ describe("Coworld keystone player", () => {
     await new Promise((resolve) => setTimeout(resolve, 150));
     const second = await deferred.plan(input, first.plan);
     expect(second.plan.planID).toBe("llm-plan-1");
+  });
+
+  it("DeferredAgentPlanner reports plan-stale when a refresh fails with a standing directive", async () => {
+    // A plan exists and the refresh that would have replaced it failed. This is a
+    // materially better state than having no plan, and the boolean cannot say so.
+    const input = spawnBrainInput();
+    const failingInner: AgentPlanner = {
+      plannerType: "real-llm",
+      plan: () => Promise.reject(new Error("bedrock 500")),
+    };
+    const deferred = new DeferredAgentPlanner(
+      failingInner,
+      new plannerExecutorModule.RuleAgentPlanner("aggressive"),
+    );
+
+    const first = await deferred.plan(input, null);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const second = await deferred.plan(input, first.plan);
+
+    expect(second.llmPlannerDegraded).toBe(true);
+    expect(second.degradedCause).toBe("plan-stale");
+  });
+
+  it("reports plan-stale on the surfacing path too, not only from the landed refresh", async () => {
+    // Two distinct code paths produce `plan-stale`, and a test that only covers the
+    // landed-refresh one lets the other be mislabelled - mutation testing showed
+    // exactly that. This is the surfacing path: the background refresh AND its
+    // bootstrap both failed, so nothing landed and a degradation is pending; the
+    // caller then asks again while holding a previous plan, which is what the
+    // executor always does. A directive is standing, so the honest label is stale.
+    const input = spawnBrainInput();
+    const failingInner: AgentPlanner = {
+      plannerType: "real-llm",
+      plan: () => Promise.reject(new Error("bedrock 500")),
+    };
+    let bootstrapCalls = 0;
+    const flakyBootstrap: AgentPlanner = {
+      plannerType: "rule",
+      plan: (planInput, previous) => {
+        bootstrapCalls += 1;
+        return bootstrapCalls <= 2
+          ? Promise.reject(new Error("bootstrap unavailable"))
+          : new plannerExecutorModule.RuleAgentPlanner("aggressive").plan(
+              planInput,
+              previous,
+            );
+      },
+    };
+    const deferred = new DeferredAgentPlanner(failingInner, flakyBootstrap);
+
+    await deferred.plan(input, null).catch(() => null);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const standing = makePlanDecision("standing-directive").plan;
+    const surfaced = await deferred.plan(input, standing);
+
+    expect(surfaced.plan.planID).toBe("standing-directive");
+    expect(surfaced.llmPlannerDegraded).toBe(true);
+    expect(surfaced.degradedCause).toBe("plan-stale");
+  });
+
+  it("DeferredAgentPlanner reports plan-unavailable only when no directive is standing", async () => {
+    // Reachability is narrower than it looks, and the difference is truthful rather
+    // than cosmetic. A degradation surfaces on the NEXT plan() call, and by then a
+    // bootstrap plan is usually standing - so `plan-stale` is the honest label. To
+    // reach `plan-unavailable` the bootstrap must have failed too, leaving the seat
+    // with no intent at all. Call 1 invokes the bootstrap twice (once inside the
+    // background catch, once on the main path), so both must fail.
+    const input = spawnBrainInput();
+    const failingInner: AgentPlanner = {
+      plannerType: "real-llm",
+      plan: () => Promise.reject(new Error("bedrock 500")),
+    };
+    let bootstrapCalls = 0;
+    const flakyBootstrap: AgentPlanner = {
+      plannerType: "rule",
+      plan: (planInput, previous) => {
+        bootstrapCalls += 1;
+        return bootstrapCalls <= 2
+          ? Promise.reject(new Error("bootstrap unavailable"))
+          : new plannerExecutorModule.RuleAgentPlanner("aggressive").plan(
+              planInput,
+              previous,
+            );
+      },
+    };
+    const deferred = new DeferredAgentPlanner(failingInner, flakyBootstrap);
+
+    // Call 1 cannot produce any plan at all, so nothing is retained.
+    await expect(deferred.plan(input, null)).rejects.toThrow(
+      "bootstrap unavailable",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const surfaced = await deferred.plan(input, null);
+
+    expect(surfaced.llmPlannerDegraded).toBe(true);
+    expect(surfaced.degradedCause).toBe("plan-unavailable");
+  });
+
+  it("DeferredAgentPlanner claims no cause while it is merely warming up", async () => {
+    // Keystone treats a healthy bootstrap during the first refresh as NOT degraded,
+    // unlike tester-starter-llm which reports warmup as degradation. That difference
+    // is the open question about whether warmup should count at all, so this pins
+    // current behaviour rather than quietly redefining either policy's metric.
+    const input = spawnBrainInput();
+    const slowInner: AgentPlanner = {
+      plannerType: "real-llm",
+      plan: () =>
+        new Promise((resolve) =>
+          setTimeout(() => resolve(makePlanDecision("llm-plan-1")), 100),
+        ),
+    };
+    const deferred = new DeferredAgentPlanner(
+      slowInner,
+      new plannerExecutorModule.RuleAgentPlanner("aggressive"),
+    );
+
+    const first = await deferred.plan(input, null);
+    expect(first.llmPlannerDegraded).toBeUndefined();
+    expect(first.degradedCause).toBeUndefined();
+    // Not a fallback either: the bootstrap plan is a healthy in-clock answer, and
+    // flipping this would silently reclassify every warming seat as degraded in
+    // `fallback_count` - the metric-redefinition trap.
+    expect(first.fallbackUsed).toBe(false);
   });
 
   it("DeferredAgentPlanner keeps the full Commander cadence: consuming a landed plan arms the next refresh", async () => {
@@ -658,5 +783,119 @@ describe("Coworld keystone player", () => {
     expect(response.selectedLegalActionId).toBe("");
     expect(response.llmPlannerDegraded).toBe(true);
     expect(response.fallbackUsed).toBe(true);
+  });
+});
+
+describe("keystone deployment shape", () => {
+  it("never VALUE-imports from the repo tree, only types", async () => {
+    // The deployed layout puts this file at `/app/integration/src` with the ProxyWar
+    // repo at `/app/proxywar`, so a runtime `../../src/...` specifier resolves to
+    // `/app/src/...` and the player dies on import. Every existing `src/` import
+    // here is `import type`, which erases at build time; values are resolved at
+    // runtime through `createRequire` and `PROXYWAR_REPO`.
+    //
+    // This is not hypothetical: the degraded-cause work added exactly such an import
+    // and no monorepo test could see it, because in the monorepo the path resolves.
+    const source = await fs.readFile(
+      path.join("coworld-adapter", "src", "keystone-player.ts"),
+      "utf8",
+    );
+    // `[^;]*` keeps each match inside ONE statement: a lazy `[\s\S]*?` can start at
+    // an earlier import and span into the next one, which made the first version of
+    // this test report a false failure.
+    const repoImports = [
+      ...source.matchAll(
+        /^import\s+(type\s+)?[^;]*?from\s+"(\.\.\/\.\.\/src\/[^"]+)";/gm,
+      ),
+    ];
+    expect(repoImports.length).toBeGreaterThan(0);
+    for (const match of repoImports) {
+      expect(
+        match[1],
+        `value import of ${match[2]} will not resolve in the deployed image`,
+      ).toBeDefined();
+    }
+  });
+});
+
+describe("keystone degradation cause", () => {
+  it("stamps a truthful self-reported cause on the transport fallback", () => {
+    const response = transportFallbackResponse(
+      "req_dead",
+      { legalActions: [{ id: "hold:1", kind: "hold" }] },
+      "socket hung up",
+    );
+    expect(response).toMatchObject({
+      type: "decision_response",
+      requestID: "req_dead",
+      selectedLegalActionId: "hold:1",
+      llmPlannerDegraded: true,
+      fallbackUsed: true,
+      // NOT a planner diagnosis: the catch behind this path covers request
+      // reconstruction, spawn handling and executor exceptions, so the only claim
+      // it supports is "our own side threw".
+      degradedCause: "policy-error",
+    });
+  });
+
+  it("forwards a cause through decisionToResponse, which picks fields explicitly", () => {
+    // The regression this pins: `decisionToResponse` names every field it emits,
+    // so a cause stamped upstream reaches no artifact unless it is named here. The
+    // first version of this feature stamped the metadata and shipped nothing.
+    const response = decisionToResponse(
+      "req_fwd",
+      {
+        actionID: "hold:1",
+        reason: null,
+        metadata: {
+          fallbackUsed: true,
+          plannerFallbackUsed: true,
+          llmPlannerDegraded: true,
+          degradedCause: "plan-timeout",
+        },
+      },
+      5,
+      16,
+    );
+    expect(response).toMatchObject({
+      llmPlannerDegraded: true,
+      degradedCause: "plan-timeout",
+    });
+  });
+
+  it("cannot emit a server-observed cause, even if one is stamped upstream", () => {
+    // Keystone is a PLAYER. `brain-timeout` asserts the server never heard from
+    // the seat, so a player emitting it would forge provenance.
+    const response = decisionToResponse(
+      "req_forge",
+      {
+        actionID: "hold:1",
+        reason: null,
+        metadata: {
+          fallbackUsed: true,
+          plannerFallbackUsed: true,
+          llmPlannerDegraded: true,
+          degradedCause: "brain-timeout",
+        },
+      },
+      5,
+      16,
+    );
+    expect(response).not.toHaveProperty("degradedCause");
+    expect(response).toMatchObject({ llmPlannerDegraded: true });
+  });
+
+  it("omits the cause on a healthy decision", () => {
+    const response = decisionToResponse(
+      "req_ok",
+      {
+        actionID: "attack:1",
+        reason: "push north",
+        metadata: { degradedCause: "plan-warmup" },
+      },
+      5,
+      16,
+    );
+    expect(response).not.toHaveProperty("degradedCause");
   });
 });

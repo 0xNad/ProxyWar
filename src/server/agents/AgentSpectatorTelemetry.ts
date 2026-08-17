@@ -15,6 +15,10 @@ import type {
   AgentEconomyRecordPairLink,
   LegalActionKind,
 } from "./AgentTypes";
+import {
+  asAgentDegradationCause,
+  type AgentDegradationCause,
+} from "./AgentWireProtocol";
 
 export type SpectatorRelationshipLabel =
   | "ally"
@@ -158,6 +162,12 @@ export interface SpectatorEvent {
   fallbackUsed?: boolean;
   /** True when this decision was authored under a degraded planner state. */
   llmPlannerDegraded?: boolean;
+  /**
+   * WHY it degraded, when the deciding policy or the server said. Absent when
+   * nobody did. This is the field that makes a degraded replay diagnosable:
+   * `plan-warmup` and `plan-unavailable` render identically without it.
+   */
+  degradedCause?: AgentDegradationCause;
   /** Per-decision effect-audit status; `missing` preserves old artifacts. */
   auditStatus?: SpectatorEventAuditStatus;
   auditReason?: string;
@@ -801,6 +811,7 @@ function decisionEventProvenance(
   | "evidenceLevel"
   | "fallbackUsed"
   | "llmPlannerDegraded"
+  | "degradedCause"
   | "auditStatus"
   | "auditReason"
 > {
@@ -812,6 +823,14 @@ function decisionEventProvenance(
     fallbackUsed: booleanMetadata(metadata, "fallbackUsed") ?? false,
     llmPlannerDegraded:
       booleanMetadata(metadata, "llmPlannerDegraded") ?? false,
+    ...(asAgentDegradationCause(stringMetadata(metadata, "degradedCause")) !==
+    undefined
+      ? {
+          degradedCause: asAgentDegradationCause(
+            stringMetadata(metadata, "degradedCause"),
+          ),
+        }
+      : {}),
     auditStatus,
     ...(record.audit?.auditReason !== undefined
       ? { auditReason: record.audit.auditReason }

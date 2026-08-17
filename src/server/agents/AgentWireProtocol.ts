@@ -17,11 +17,126 @@
  * brain schedules, not what the wire accepts.
  *
  * The Coworld adapter (coworld-adapter/src/coworld-decision-wire.ts) mirrors
- * MAX_WIRE_ACTIONS_PER_DECISION as a literal because the deployed image
- * cannot value-import from src/ at runtime; an adapter test pins the mirror
- * to this constant.
+ * MAX_WIRE_ACTIONS_PER_DECISION and AGENT_DEGRADATION_CAUSES as literals because the deployed image
+ * cannot value-import from src/ at runtime; an adapter test pins both mirrors
+ * to these constants.
  */
 export const MAX_WIRE_ACTIONS_PER_DECISION = 5;
+/**
+ * The bounded vocabulary for WHY a decision was degraded, carried as the
+ * OPTIONAL `degradedCause` field on `decision_response`.
+ *
+ * Why it exists: `llmPlannerDegraded` is a boolean, so the league's largest live
+ * number - about a third of all decisions - is unattributable. The cause is known
+ * at the moment of failure and then discarded. League seats are `external-http`,
+ * which `AgentLeagueMatch`'s LLM_DEGRADABLE_BRAIN_TYPES deliberately excludes, so
+ * the degraded flag on a league decision is ALWAYS the policy's own word - and
+ * therefore so is the only cause that can explain it.
+ *
+ * Two families in one vocabulary:
+ *
+ * - `plan-*` are SELF-REPORTED. Only the deciding policy knows whether its
+ *   planner was still warming up or had actually failed, and that is the entire
+ *   ambiguity: today a seat playing rule logic during its first plan is
+ *   indistinguishable, in every artifact, from a seat whose brain is dead.
+ * - `brain-*` are SERVER-OBSERVED (we timed the seat out, or its brain threw).
+ *   These reuse the exact words the spawn-ballot path already uses for the same
+ *   three facts (`forcedDefaultReason`: brain-timeout / brain-error), because a
+ *   second vocabulary for one concept is worse than none.
+ *
+ * Bounds, not manners: a broken or hostile policy can send anything, so
+ * `asAgentDegradationCause` is a strict equality parse - no trimming, no case
+ * folding, no prefix matching. An almost-right value is not evidence.
+ */
+export const AGENT_DEGRADATION_CAUSES = [
+  /** Self-reported: no plan yet, first refresh still in flight. Benign. */
+  "plan-warmup",
+  /** Self-reported: a plan exists but the latest refresh failed; acting on stale intent. */
+  "plan-stale",
+  /** Self-reported: no plan at all and the refresh failed. The dead-brain shape. */
+  "plan-unavailable",
+  /** Self-reported: the planner's provider call exceeded the policy's own budget. */
+  "plan-timeout",
+  /** Self-reported: the planner answered, but its output could not be parsed. */
+  "plan-parse",
+  /**
+   * Self-reported: the policy's own code failed before it could decide - a
+   * reconstruction error, a transport failure to its provider, an unexpected
+   * exception. Deliberately vague about WHICH: the catch that reports it does not
+   * establish more than "our side threw", and a narrower label would be invented.
+   */
+  "policy-error",
+  /** Server-observed: no decision arrived within the decision budget. */
+  "brain-timeout",
+  /** Server-observed: the brain threw, or returned something that was not a decision. */
+  "brain-error",
+] as const;
+
+export type AgentDegradationCause = (typeof AGENT_DEGRADATION_CAUSES)[number];
+
+const DEGRADATION_CAUSE_LOOKUP: ReadonlySet<string> = new Set(
+  AGENT_DEGRADATION_CAUSES,
+);
+
+/**
+ * Parses an untrusted value into a cause, or `undefined`.
+ *
+ * `undefined` is the honest answer for anything unrecognized: the degradation
+ * boolean still stands by itself and we simply do not know why. There is
+ * deliberately no catch-all bucket - inventing a value in the one field whose
+ * purpose is attribution would defeat the field.
+ */
+export function asAgentDegradationCause(
+  value: unknown,
+): AgentDegradationCause | undefined {
+  return typeof value === "string" && DEGRADATION_CAUSE_LOOKUP.has(value)
+    ? (value as AgentDegradationCause)
+    : undefined;
+}
+
+/**
+ * The causes only the deciding policy can know first-hand.
+ *
+ * An EXPLICIT set, not a name prefix. Trust is the one thing in this module that
+ * must not depend on spelling: the first version tested `startsWith("plan-")`, and
+ * the moment a truthful non-`plan` self-reported cause was needed
+ * (`policy-error`), a prefix rule would have silently classified it as a server
+ * observation and let a policy forge server evidence.
+ */
+const SELF_REPORTED_CAUSES: ReadonlySet<AgentDegradationCause> = new Set([
+  "plan-warmup",
+  "plan-stale",
+  "plan-unavailable",
+  "plan-timeout",
+  "plan-parse",
+  "policy-error",
+]);
+
+/** True for the causes only the deciding policy can know first-hand. */
+export function isSelfReportedDegradationCause(
+  cause: AgentDegradationCause,
+): boolean {
+  return SELF_REPORTED_CAUSES.has(cause);
+}
+
+/**
+ * Parses a cause arriving from an UNTRUSTED player frame.
+ *
+ * `brain-timeout` and `brain-error` are the server's OWN observations - we timed
+ * the seat out, or its brain threw. A policy able to send those would be forging
+ * provenance in an evidence field: a seat that answered perfectly well could stamp
+ * its record `brain-timeout` and the artifact would read as though the server had
+ * failed to hear from it. Only `SELF_REPORTED_CAUSES` cross this boundary; the
+ * server-observed pair is stamped exclusively by `AgentLeagueMatch`.
+ */
+export function asPlayerReportedDegradationCause(
+  value: unknown,
+): AgentDegradationCause | undefined {
+  const cause = asAgentDegradationCause(value);
+  return cause !== undefined && isSelfReportedDegradationCause(cause)
+    ? cause
+    : undefined;
+}
 
 /**
  * Independent cap for the spawn-only ranked ballot. These ids describe

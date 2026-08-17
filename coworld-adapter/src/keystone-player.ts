@@ -48,8 +48,10 @@
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-
-import { MAX_WIRE_SPAWN_PREFERENCE_ACTION_IDS } from "./coworld-decision-wire";
+import {
+  MAX_WIRE_SPAWN_PREFERENCE_ACTION_IDS,
+  normalizeDegradedCause,
+} from "./coworld-decision-wire";
 
 import type {
   AgentPlanDecision,
@@ -251,6 +253,15 @@ export function decisionToResponse(
   // replays (the hosted proxywar-bedrock seat failed silently for 60+ rounds
   // because the transport had no loudness channel).
   const llmPlannerDegraded = decision.metadata?.llmPlannerDegraded === true;
+  // Validated through the SIBLING module, never `src/`. Every other `src/` import
+  // in this file is `import type` and erases at build time; a value import would
+  // resolve at runtime, and the deployed layout puts this file at
+  // `/app/integration/src` with the repo at `/app/proxywar`, so `../../src/...`
+  // points at nothing. The local mirror also happens to be exactly right here:
+  // keystone is a PLAYER, so it may only emit the self-reported family.
+  const degradedCause = llmPlannerDegraded
+    ? normalizeDegradedCause(decision.metadata?.degradedCause)
+    : undefined;
   const plannerFallbackUsed = decision.metadata?.plannerFallbackUsed === true;
   // The executor's cascade, normalized for the wire: primary first, deduped,
   // then capped to whatever the game advertised it will carry. Emitting more
@@ -325,6 +336,12 @@ export function decisionToResponse(
     confidence,
     ...(llmPlannerDegraded ? { llmPlannerDegraded: true } : {}),
     ...(plannerFallbackUsed ? { fallbackUsed: true } : {}),
+    // The cause has to be forwarded EXPLICITLY: this function picks fields rather
+    // than spreading metadata, so a cause stamped upstream (transportFallbackResponse,
+    // the executor) reaches no artifact unless it is named here. Validated through
+    // the player-side parser, which means keystone - itself a player - cannot emit
+    // the server-observed `brain-*` family even by mistake.
+    ...(degradedCause !== undefined ? { degradedCause } : {}),
   };
 }
 
@@ -467,6 +484,11 @@ export function transportFallbackResponse(
       fallbackUsed: true,
       plannerFallbackUsed: true,
       llmPlannerDegraded: true,
+      // Bounded cause. NOT a planner state: this catch covers request
+      // reconstruction, spawn handling and executor exceptions, so it establishes
+      // only that our own side threw. Claiming `plan-unavailable` here would
+      // invent a planner diagnosis the code path does not support.
+      degradedCause: "policy-error",
     },
   });
 }
@@ -526,7 +548,11 @@ export class DeferredAgentPlanner implements AgentPlanner {
             : "Commander refresh in flight; executing the standing directive in-clock.",
         latencyMs: 0,
         fallbackUsed: degraded !== null,
-        ...(degraded !== null ? { llmPlannerDegraded: true } : {}),
+        ...(degraded !== null
+          ? // A standing directive exists and the refresh failed: acting on stale
+            // intent, which is a materially better state than having none.
+            { llmPlannerDegraded: true, degradedCause: "plan-stale" as const }
+          : {}),
       };
     }
     const bootstrapDecision = await this.bootstrap.plan(input, previousPlan);
@@ -538,7 +564,13 @@ export class DeferredAgentPlanner implements AgentPlanner {
           ? `Bootstrap plan after a Commander refresh failed (${degraded}); running degraded.`
           : `Bootstrap plan while the first Commander refresh is in flight: ${bootstrapDecision.reason}`,
       fallbackUsed: degraded !== null ? true : bootstrapDecision.fallbackUsed,
-      ...(degraded !== null ? { llmPlannerDegraded: true } : {}),
+      ...(degraded !== null
+        ? // No standing directive AND the refresh failed - the dead-planner shape.
+          {
+            llmPlannerDegraded: true,
+            degradedCause: "plan-unavailable" as const,
+          }
+        : {}),
     };
   }
 
@@ -573,6 +605,9 @@ export class DeferredAgentPlanner implements AgentPlanner {
             latencyMs: 0,
             fallbackUsed: true,
             llmPlannerDegraded: true,
+            // Same state as above, reached from the background refresh: a plan
+            // exists, the refresh that would have replaced it failed.
+            degradedCause: "plan-stale",
           };
         } else {
           // No standing directive and the bootstrap also failed: we cannot

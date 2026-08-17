@@ -167,18 +167,20 @@ function cleanID(s) {
 // here means a future server change can never quietly widen what reaches the
 // prompt.
 function cleanMessage(s) {
-  return String(s ?? "")
-    // C0/C1 controls and DEL -> space.
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\u0000-\u001F\u007F-\u009F]/gu, " ")
-    // Bidi overrides, zero-width joiners/spaces, soft hyphen, BOM -> dropped.
-    .replace(
-      /[\u00AD\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF]/gu,
-      "",
-    )
-    .replace(/\s+/gu, " ")
-    .trim()
-    .slice(0, 280);
+  return (
+    String(s ?? "")
+      // C0/C1 controls and DEL -> space.
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\u0000-\u001F\u007F-\u009F]/gu, " ")
+      // Bidi overrides, zero-width joiners/spaces, soft hyphen, BOM -> dropped.
+      .replace(
+        /[\u00AD\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF]/gu,
+        "",
+      )
+      .replace(/\s+/gu, " ")
+      .trim()
+      .slice(0, 280)
+  );
 }
 function normalizeDealPolicies(value) {
   const entries = Array.isArray(value)
@@ -1176,7 +1178,8 @@ function chooseMessageMove(actions, obs, answered, dealMove) {
     ...(obs?.deals?.activeDeals || []),
   ].some(
     (view) =>
-      view?.proposerPlayerID === senderID || view?.recipientPlayerID === senderID,
+      view?.proposerPlayerID === senderID ||
+      view?.recipientPlayerID === senderID,
   );
 
   let text;
@@ -1684,6 +1687,30 @@ function spawnPreferenceScore(action) {
   );
 }
 
+/**
+ * WHY this decision was degraded, from the bounded wire vocabulary (see
+ * AGENT_DEGRADATION_CAUSES in src/server/agents/AgentWireProtocol.ts).
+ *
+ * These four states have always been visible HERE and nowhere else. The wire
+ * carried one boolean, so a seat playing rule logic while its FIRST plan is still
+ * in flight has been indistinguishable, in every artifact, from a seat whose
+ * planner is dead - which is most of why a third of league decisions cannot be
+ * attributed to anything.
+ *
+ * `lastPlanError` is exactly "timeout" when this file's own `withTimeout` rejected,
+ * so the timeout case needs no text parsing. Timeout takes precedence over the
+ * has-a-plan/has-no-plan split: both are real breakage, so the useful thing to
+ * report is the provider behaviour rather than which of two broken states we are in.
+ *
+ * Returns null for a healthy decision, so the caller omits the field entirely.
+ */
+function degradedCauseFor(plan, degraded, lastPlanError) {
+  if (plan === null && !degraded) return "plan-warmup";
+  if (!degraded) return null;
+  if (lastPlanError === "timeout") return "plan-timeout";
+  return plan !== null ? "plan-stale" : "plan-unavailable";
+}
+
 function withTimeout(promise, ms) {
   return Promise.race([
     promise,
@@ -1814,6 +1841,9 @@ export function startLlmPlayer({
         confidence: plan !== null ? (degraded ? 0.5 : 0.75) : 0.4,
         fallbackUsed: plan === null || degraded,
         llmPlannerDegraded: plan === null || degraded,
+        ...(degradedCauseFor(plan, degraded, lastPlanError)
+          ? { degradedCause: degradedCauseFor(plan, degraded, lastPlanError) }
+          : {}),
       }),
     );
   });

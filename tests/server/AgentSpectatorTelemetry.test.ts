@@ -528,6 +528,7 @@ function record(
     auditStatus?: AgentActionAuditStatus;
     fallbackUsed?: boolean;
     llmPlannerDegraded?: boolean;
+    degradedCause?: string;
   } = {},
 ): AgentDecisionRecord {
   return {
@@ -554,6 +555,9 @@ function record(
         : {}),
       ...(options.llmPlannerDegraded !== undefined
         ? { llmPlannerDegraded: options.llmPlannerDegraded }
+        : {}),
+      ...(options.degradedCause !== undefined
+        ? { degradedCause: options.degradedCause }
         : {}),
     },
     chosenActionMetadata: metadata,
@@ -582,3 +586,101 @@ function record(
     },
   };
 }
+
+describe("spectator telemetry degradation cause", () => {
+  it("carries a bounded cause onto the event, and drops an unrecognized one", () => {
+    // A degraded replay is undiagnosable without this: `plan-warmup` and
+    // `plan-unavailable` render identically as "degraded" today, and the spectator
+    // telemetry is one of only two public artifacts a league-wide census can read.
+    const telemetry = buildAgentSpectatorTelemetry({
+      runID: "run-cause",
+      roster: [
+        {
+          agentID: "a1",
+          username: "Atlas",
+          profile: "diplomatic",
+          clientID: "c1",
+          brainType: "planner-executor",
+        },
+        {
+          agentID: "a2",
+          username: "Blitz",
+          profile: "aggressive",
+          clientID: "c2",
+          brainType: "planner-executor",
+        },
+      ],
+      records: [
+        record(
+          1,
+          "a1",
+          "Atlas",
+          "p1",
+          "attack",
+          { targetID: "p2", targetName: "Blitz" },
+          {
+            fallbackUsed: true,
+            llmPlannerDegraded: true,
+            degradedCause: "plan-warmup",
+          },
+        ),
+        record(
+          2,
+          "a2",
+          "Blitz",
+          "p2",
+          "attack",
+          { targetID: "p1", targetName: "Atlas" },
+          {
+            fallbackUsed: true,
+            llmPlannerDegraded: true,
+            degradedCause: "sounds-bad",
+          },
+        ),
+      ],
+    });
+
+    expect(telemetry.events[0]).toMatchObject({
+      llmPlannerDegraded: true,
+      degradedCause: "plan-warmup",
+    });
+    // Invented causes must not survive into an evidence surface; the flag does.
+    expect(telemetry.events[1]).toMatchObject({ llmPlannerDegraded: true });
+    expect(telemetry.events[1]).not.toHaveProperty("degradedCause");
+  });
+
+  it("omits the cause entirely on a healthy decision", () => {
+    const telemetry = buildAgentSpectatorTelemetry({
+      runID: "run-healthy",
+      roster: [
+        {
+          agentID: "a1",
+          username: "Atlas",
+          profile: "diplomatic",
+          clientID: "c1",
+          brainType: "planner-executor",
+        },
+        {
+          agentID: "a2",
+          username: "Blitz",
+          profile: "aggressive",
+          clientID: "c2",
+          brainType: "planner-executor",
+        },
+      ],
+      records: [
+        record(
+          1,
+          "a1",
+          "Atlas",
+          "p1",
+          "attack",
+          { targetID: "p2", targetName: "Blitz" },
+          {},
+        ),
+      ],
+    });
+    expect(telemetry.events[0]).not.toHaveProperty("degradedCause");
+    expect(telemetry.events[0]).toMatchObject({ llmPlannerDegraded: false });
+  });
+});

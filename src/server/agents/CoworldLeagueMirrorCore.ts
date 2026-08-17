@@ -20,6 +20,7 @@ import type {
   AgentDecisionRecord,
   LegalActionKind,
 } from "./AgentTypes";
+import { asAgentDegradationCause } from "./AgentWireProtocol";
 import {
   filterSuppressedEpisodeRows,
   type LatestPremierePointer,
@@ -1437,6 +1438,12 @@ function decisionRecordFromMirroredLogLine(
   }
   if (record.llmPlannerDegraded === true) {
     decisionMetadata.llmPlannerDegraded = true;
+  }
+  // The cause travels with the flag, or the mirrored artifact reproduces exactly
+  // the ambiguity this field exists to remove.
+  const degradedCause = asAgentDegradationCause(record.degradedCause);
+  if (degradedCause !== undefined) {
+    decisionMetadata.degradedCause = degradedCause;
   }
   const persistedAuditStatus = asString(record.auditStatus);
   const auditStatus: AgentActionAuditStatus =

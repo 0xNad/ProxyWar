@@ -3,8 +3,10 @@ import { describe, expect, it } from "vitest";
 import { validateAgentMessageDecision } from "../../src/server/agents/AgentDecisionValidator.ts";
 import { FREETEXT_MESSAGE_MAX_CHARS } from "../../src/server/agents/AgentTunables.ts";
 import {
+  AGENT_DEGRADATION_CAUSES,
   MAX_WIRE_ACTIONS_PER_DECISION as CANONICAL_MAX,
   MAX_SPAWN_PREFERENCE_ACTION_IDS as CANONICAL_MAX_SPAWN_PREFERENCES,
+  isSelfReportedDegradationCause,
 } from "../../src/server/agents/AgentWireProtocol.ts";
 import {
   composeCoworldDecision,
@@ -14,6 +16,7 @@ import {
   MAX_WIRE_MESSAGE_TEXT_LENGTH,
   MAX_WIRE_SPAWN_PREFERENCE_ACTION_IDS,
   normalizeDecisionResponse,
+  normalizeDegradedCause,
 } from "./coworld-decision-wire.ts";
 
 describe("wire constant parity", () => {
@@ -577,5 +580,108 @@ describe("composeCoworldDecision", () => {
         offeredLegalActionCount: 1,
       }).metadata.confidence,
     ).toBeUndefined();
+  });
+});
+
+describe("degraded cause on the wire", () => {
+  const normalized = normalizeDecisionResponse({
+    selectedLegalActionId: "attack:one",
+    reason: "push north",
+  });
+
+  it("mirrors the canonical SELF-REPORTED vocabulary exactly", () => {
+    // Same reason the action cap is mirrored: the deployed player image cannot
+    // value-import from src/. Drift must fail here rather than silently drop a
+    // cause the league is already emitting.
+    const canonicalSelfReported = AGENT_DEGRADATION_CAUSES.filter((cause) =>
+      isSelfReportedDegradationCause(cause),
+    );
+    for (const cause of canonicalSelfReported) {
+      expect(
+        normalizeDegradedCause(cause),
+        `${cause} is canonical but the adapter mirror rejects it`,
+      ).toBe(cause);
+    }
+    const canonicalServerObserved = AGENT_DEGRADATION_CAUSES.filter(
+      (cause) => !isSelfReportedDegradationCause(cause),
+    );
+    for (const cause of canonicalServerObserved) {
+      expect(
+        normalizeDegradedCause(cause),
+        `${cause} is a SERVER observation and must not be accepted from a player`,
+      ).toBeUndefined();
+    }
+  });
+
+  it("rejects near-miss and hostile causes instead of coercing them", () => {
+    for (const value of [
+      " plan-warmup",
+      "PLAN-WARMUP",
+      "plan-warmupX",
+      "plan",
+      "",
+      undefined,
+      null,
+      7,
+      {},
+      ["plan-warmup"],
+      "x".repeat(3_000),
+    ]) {
+      expect(normalizeDegradedCause(value)).toBeUndefined();
+    }
+  });
+
+  it("carries a self-reported cause only alongside the policy's own degraded flag", () => {
+    const composedWithFlag = composeCoworldDecision({
+      normalized,
+      message: {
+        selectedLegalActionId: "attack:one",
+        llmPlannerDegraded: true,
+        degradedCause: "plan-warmup",
+      },
+      slot: 1,
+      requestID: "req_cause",
+      offeredLegalActionCount: 3,
+    });
+    expect(composedWithFlag.metadata).toMatchObject({
+      llmPlannerDegraded: true,
+      degradedCause: "plan-warmup",
+    });
+
+    // A cause without the flag would let a seat that reported HEALTH carry
+    // failure evidence — the record must stay clean.
+    const composedWithoutFlag = composeCoworldDecision({
+      normalized,
+      message: {
+        selectedLegalActionId: "attack:one",
+        degradedCause: "plan-unavailable",
+      },
+      slot: 1,
+      requestID: "req_nocause",
+      offeredLegalActionCount: 3,
+    });
+    expect(composedWithoutFlag.metadata).not.toHaveProperty("degradedCause");
+    expect(composedWithoutFlag.metadata.llmPlannerDegraded).toBeUndefined();
+  });
+
+  it("refuses a forged SERVER observation from the player frame", () => {
+    // `brain-timeout` asserts the server never heard from this seat. This seat
+    // answered, so the claim is false by construction and must not be recorded —
+    // while its honest degradation flag still stands.
+    for (const forged of ["brain-timeout", "brain-error"]) {
+      const composed = composeCoworldDecision({
+        normalized,
+        message: {
+          selectedLegalActionId: "attack:one",
+          llmPlannerDegraded: true,
+          degradedCause: forged,
+        },
+        slot: 4,
+        requestID: `req_${forged}`,
+        offeredLegalActionCount: 5,
+      });
+      expect(composed.metadata).not.toHaveProperty("degradedCause");
+      expect(composed.metadata.llmPlannerDegraded).toBe(true);
+    }
   });
 });

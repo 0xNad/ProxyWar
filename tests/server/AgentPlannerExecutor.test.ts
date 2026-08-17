@@ -14,8 +14,6 @@ import {
   singleBindingDirective,
   StrategicPlan,
 } from "../../src/server/agents/AgentPlannerExecutor";
-import { LlmAgentBrain } from "../../src/server/agents/LlmAgentBrain";
-import { MockLlmProvider } from "../../src/server/agents/MockLlmProvider";
 import { buildAgentTacticalAffordances } from "../../src/server/agents/AgentTacticalAffordances";
 import {
   AgentObjectiveKind,
@@ -23,7 +21,9 @@ import {
   AgentVisiblePlayer,
   LegalAction,
 } from "../../src/server/agents/AgentTypes";
+import { LlmAgentBrain } from "../../src/server/agents/LlmAgentBrain";
 import { LlmProvider } from "../../src/server/agents/LlmProvider";
+import { MockLlmProvider } from "../../src/server/agents/MockLlmProvider";
 
 describe("Planner/executor agent brain", () => {
   it("creates a spawn plan before spawn", async () => {
@@ -380,7 +380,11 @@ describe("Planner/executor agent brain", () => {
       ...base,
       gameID: "GAME-A",
       visiblePlayers: [
-        rival({ isAllied: true, isFriendly: true, relation: Relation.Friendly }),
+        rival({
+          isAllied: true,
+          isFriendly: true,
+          relation: Relation.Friendly,
+        }),
         tribe,
       ],
     };
@@ -417,7 +421,11 @@ describe("Planner/executor agent brain", () => {
       ...base,
       gameID: "GAME-B",
       visiblePlayers: [
-        rival({ isAllied: false, isFriendly: false, relation: Relation.Hostile }),
+        rival({
+          isAllied: false,
+          isFriendly: false,
+          relation: Relation.Hostile,
+        }),
       ],
     };
     await brain.decide({ observation: obs3, legalActions });
@@ -15341,7 +15349,10 @@ describe("rankLegalActionsForPrompt (unified LLM shortlist ranker)", () => {
     const legalActions = buildLegalActions();
     const offered = new Set(legalActions.map((action) => action.id));
     const ranked = rankLegalActionsForPrompt({
-      input: { observation: activeObservation("expand_territory"), legalActions },
+      input: {
+        observation: activeObservation("expand_territory"),
+        legalActions,
+      },
       profile: "opportunistic",
     });
     expect(ranked.length).toBeGreaterThan(0);
@@ -15354,7 +15365,10 @@ describe("rankLegalActionsForPrompt (unified LLM shortlist ranker)", () => {
   it("returns candidates sorted by descending totalScore with policy + skill fields", () => {
     const legalActions = buildLegalActions();
     const ranked = rankLegalActionsForPrompt({
-      input: { observation: activeObservation("expand_territory"), legalActions },
+      input: {
+        observation: activeObservation("expand_territory"),
+        legalActions,
+      },
       profile: "opportunistic",
     });
     for (let i = 1; i < ranked.length; i++) {
@@ -15371,7 +15385,10 @@ describe("rankLegalActionsForPrompt (unified LLM shortlist ranker)", () => {
   it("respects the limit and returns [] for no legal actions", () => {
     const legalActions = buildLegalActions();
     const limited = rankLegalActionsForPrompt({
-      input: { observation: activeObservation("expand_territory"), legalActions },
+      input: {
+        observation: activeObservation("expand_territory"),
+        legalActions,
+      },
       profile: "opportunistic",
       limit: 1,
     });
@@ -17534,7 +17551,9 @@ describe("Planner/executor demo-quality behavior gates", () => {
     expect(decision.actionID).toBe("build:City:100");
     expect(decision.profileRepairRerankOpportunity).toBe(true);
     expect(decision.profileRepairRerankSelected).toBe(true);
-    expect(decision.profileRepairRerankSuggestedActionID).toBe("build:City:100");
+    expect(decision.profileRepairRerankSuggestedActionID).toBe(
+      "build:City:100",
+    );
     expect(decision.profileRepairRerankCandidates).toContain("build:City:100");
   });
 
@@ -17881,7 +17900,14 @@ describe("binding directives (commitment keystone)", () => {
     const observation = commitmentObservation();
     // relativeTroopRatio 0.9 => "attacking a stronger rival feeds them troops" would
     // normally block this attack; the decisive-commitment exemption must clear it.
-    const attack = hardNationAttackAction("RIVAL001", "Rival One", 25, 25_000, 0.9, 0.18);
+    const attack = hardNationAttackAction(
+      "RIVAL001",
+      "Rival One",
+      25,
+      25_000,
+      0.9,
+      0.18,
+    );
     const legalActions = [attack, hold()];
 
     const withCommitment = new FrontierPolicyExecutor("aggressive").decide(
@@ -18377,7 +18403,11 @@ describe("FM-1 enforce conversion over neutral (cash the midgame kill window)", 
       label: "Expand neutral land",
       intent: { type: "attack", targetID: null, troops: troopPercent * 1000 },
       risk: { level: "low", score: 0.1 },
-      metadata: { expansion: true, troopPercentage: troopPercent / 100, troopPercent },
+      metadata: {
+        expansion: true,
+        troopPercentage: troopPercent / 100,
+        troopPercent,
+      },
     };
   }
 
@@ -18437,13 +18467,21 @@ describe("FM-1 enforce conversion over neutral (cash the midgame kill window)", 
 
   function fmPlan(): StrategicPlan {
     return {
-      ...pressurePlan(fmObservation({ ownTroops: 300_000, ownTiles: 16_000 }), "RIVAL001"),
+      ...pressurePlan(
+        fmObservation({ ownTroops: 300_000, ownTiles: 16_000 }),
+        "RIVAL001",
+      ),
     };
   }
 
   it("the constructed position offers an executor-ready conversion attack", () => {
     const observation = fmObservation({ ownTroops: 300_000, ownTiles: 16_000 });
-    const legalActions = [fmAttack(25, 300_000), fmNeutral(35), fmNeutral(10), hold()];
+    const legalActions = [
+      fmAttack(25, 300_000),
+      fmNeutral(35),
+      fmNeutral(10),
+      hold(),
+    ];
     const conversion = buildAgentTacticalAffordances({
       observation,
       legalActions,
@@ -18456,7 +18494,12 @@ describe("FM-1 enforce conversion over neutral (cash the midgame kill window)", 
   it("ON: selects the decisive conversion attack over neutral expansion (cashes the kill)", () => {
     process.env[FLAG] = "1";
     const observation = fmObservation({ ownTroops: 300_000, ownTiles: 16_000 });
-    const legalActions = [fmAttack(25, 300_000), fmNeutral(35), fmNeutral(10), hold()];
+    const legalActions = [
+      fmAttack(25, 300_000),
+      fmNeutral(35),
+      fmNeutral(10),
+      hold(),
+    ];
     const decision = new FrontierPolicyExecutor("aggressive").decide(
       { observation, legalActions },
       fmPlan(),
@@ -18467,7 +18510,12 @@ describe("FM-1 enforce conversion over neutral (cash the midgame kill window)", 
   it("default (flag unset) behaves as ON and cashes the kill", () => {
     delete process.env[FLAG];
     const observation = fmObservation({ ownTroops: 300_000, ownTiles: 16_000 });
-    const legalActions = [fmAttack(25, 300_000), fmNeutral(35), fmNeutral(10), hold()];
+    const legalActions = [
+      fmAttack(25, 300_000),
+      fmNeutral(35),
+      fmNeutral(10),
+      hold(),
+    ];
     const decision = new FrontierPolicyExecutor("aggressive").decide(
       { observation, legalActions },
       fmPlan(),
@@ -18478,15 +18526,21 @@ describe("FM-1 enforce conversion over neutral (cash the midgame kill window)", 
   it("ON: clamps every neutral-growth candidate strictly below the conversion-ready attack", () => {
     process.env[FLAG] = "1";
     const observation = fmObservation({ ownTroops: 300_000, ownTiles: 16_000 });
-    const legalActions = [fmAttack(25, 300_000), fmNeutral(35), fmNeutral(10), hold()];
+    const legalActions = [
+      fmAttack(25, 300_000),
+      fmNeutral(35),
+      fmNeutral(10),
+      hold(),
+    ];
     const ranked = rankLegalActionsForPrompt({
       input: { observation, legalActions },
       profile: "aggressive",
       plan: fmPlan(),
       limit: 8,
     });
-    const attackScore = ranked.find((r) => r.id === "attack:RIVAL001:25")
-      ?.totalScore;
+    const attackScore = ranked.find(
+      (r) => r.id === "attack:RIVAL001:25",
+    )?.totalScore;
     expect(attackScore).toBeDefined();
     const neutralScores = ranked
       .filter((r) => r.id.startsWith("expand:terra-nullius"))
@@ -18509,7 +18563,12 @@ describe("FM-1 enforce conversion over neutral (cash the midgame kill window)", 
   // cycle to re-plan rather than farming neutral.
   it("under-resourced kill window: OFF farms neutral, ON never selects neutral over the conversion attack", () => {
     const observation = underResourcedObservation();
-    const legalActions = [fmAttack(35, 100_000), fmNeutral(35), fmNeutral(10), hold()];
+    const legalActions = [
+      fmAttack(35, 100_000),
+      fmNeutral(35),
+      fmNeutral(10),
+      hold(),
+    ];
     // Precondition: the affordance still says a conversion attack is executor-ready.
     expect(
       buildAgentTacticalAffordances({ observation, legalActions })
@@ -18547,19 +18606,32 @@ describe("FM-1 enforce conversion over neutral (cash the midgame kill window)", 
     }> = [
       {
         observation: fmObservation({ ownTroops: 300_000, ownTiles: 16_000 }),
-        legalActions: [fmAttack(25, 300_000), fmNeutral(35), fmNeutral(10), hold()],
+        legalActions: [
+          fmAttack(25, 300_000),
+          fmNeutral(35),
+          fmNeutral(10),
+          hold(),
+        ],
         baseline: "attack:RIVAL001:25",
       },
       {
         observation: underResourcedObservation(),
-        legalActions: [fmAttack(35, 100_000), fmNeutral(35), fmNeutral(10), hold()],
+        legalActions: [
+          fmAttack(35, 100_000),
+          fmNeutral(35),
+          fmNeutral(10),
+          hold(),
+        ],
         baseline: "expand:terra-nullius:10",
       },
     ];
     for (const testCase of cases) {
       process.env[FLAG] = "0";
       const decision = new FrontierPolicyExecutor("aggressive").decide(
-        { observation: testCase.observation, legalActions: testCase.legalActions },
+        {
+          observation: testCase.observation,
+          legalActions: testCase.legalActions,
+        },
         fmPlan(),
       );
       expect(decision.actionID).toBe(testCase.baseline);
@@ -18690,7 +18762,11 @@ describe("Economy bootstrap lever (PROXYWAR_TUNE_ECONOMY_BOOTSTRAP)", () => {
     const base = noCityObservation();
     const observation: AgentObservation = {
       ...base,
-      strategic: { ...base.strategic, priority: "build_defense", urgency: "high" },
+      strategic: {
+        ...base.strategic,
+        priority: "build_defense",
+        urgency: "high",
+      },
     };
     const decision = await decide(observation, [
       expandAction(),
@@ -18741,7 +18817,6 @@ describe("Economy bootstrap lever (PROXYWAR_TUNE_ECONOMY_BOOTSTRAP)", () => {
     ]);
     expect(decision.actionID).not.toBe("build:Defense Post:200");
   });
-
 });
 
 describe("Dominant endgame conversion: overmatch commits decisively", () => {
@@ -18928,7 +19003,9 @@ describe("Betray late: deterministic backstab of an overmatched ally", () => {
     };
   };
 
-  const withAffordances = (observation: AgentObservation): AgentObservation => ({
+  const withAffordances = (
+    observation: AgentObservation,
+  ): AgentObservation => ({
     ...observation,
     tacticalAffordances: buildAgentTacticalAffordances({ observation }),
   });
@@ -18947,9 +19024,9 @@ describe("Betray late: deterministic backstab of an overmatched ally", () => {
     expect(observation.tacticalAffordances?.backstabAlly?.recommended).toBe(
       true,
     );
-    expect(observation.tacticalAffordances?.backstabAlly?.backstabTargetID).toBe(
-      "SIDE02",
-    );
+    expect(
+      observation.tacticalAffordances?.backstabAlly?.backstabTargetID,
+    ).toBe("SIDE02");
     const decision = await decide(observation, [
       breakAlliance("SIDE02"),
       hold(),
@@ -19079,5 +19156,44 @@ describe("Betray late: deterministic backstab of an overmatched ally", () => {
     // Decision 5: interval decision under the HEALTHY plan stays unflagged.
     const d5 = await brain.decide({ observation, legalActions });
     expect(d5.metadata?.llmPlannerDegraded ?? false).toBe(false);
+  });
+
+  it("forwards the planner's bounded cause onto decision metadata", async () => {
+    // The provider fails, so the LLM planner's own fallback path reports why:
+    // `plan-parse` is the executor's label for "the planner answered and we could
+    // not use the answer", and a provider throw lands on the same fallback. The
+    // point of the assertion is the FORWARDING: decision metadata is assembled by
+    // explicit field picking, so a cause the planner knows reaches no artifact
+    // unless the executor names it.
+    const observation = activeObservation("secure_economy");
+    const legalActions = buildLegalActions();
+    const provider: LlmProvider = {
+      providerType: "codex-cli",
+      async complete(): Promise<string> {
+        return "not json at all";
+      },
+    };
+    const brain = new PlannerExecutorAgentBrain({
+      profile: "opportunistic",
+      planner: new LlmAgentPlanner({
+        provider,
+        profile: "opportunistic",
+        plannerType: "codex-cli",
+      }),
+      executor: new FrontierPolicyExecutor("opportunistic"),
+      planEveryDecisionSteps: 3,
+    });
+
+    const first = await brain.decide({ observation, legalActions });
+    expect(first.metadata?.llmPlannerDegraded).toBe(true);
+    expect(first.metadata?.degradedCause).toBe("plan-parse");
+
+    // The standing plan is fallback-authored, so the following interval decisions
+    // stay flagged. They carry no cause of their own: the failure happened on the
+    // refresh, and inventing a per-decision cause here would be fabrication.
+    const second = await brain.decide({ observation, legalActions });
+    expect(second.metadata?.plannerRan).toBe(false);
+    expect(second.metadata?.llmPlannerDegraded).toBe(true);
+    expect(second.metadata?.degradedCause).toBeUndefined();
   });
 });

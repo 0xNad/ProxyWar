@@ -103,6 +103,16 @@ export interface CoworldResults {
   readonly accepted_decision_count: number;
   readonly fallback_count: number;
   readonly degraded_count: number;
+  /**
+   * Deliberately NOT extended with a per-cause breakdown. `degradedCause` (see
+   * AgentWireProtocol) reaches `decisions.jsonl` and the spectator telemetry, which
+   * is what a census reads; adding `degraded_causes` HERE would need every
+   * manifest's `results_schema` amended first, because each sets
+   * `additionalProperties: false` - an unschema'd key would fail hosted result
+   * validation for every episode. Worth doing with the next package build, not as
+   * a side effect of a telemetry change.
+   */
+
   readonly players: Array<{
     slot: number;
     name: string;

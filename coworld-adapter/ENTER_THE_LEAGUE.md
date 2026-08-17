@@ -43,6 +43,28 @@ Two flags are worth sending when your brain degrades (`"fallbackUsed": true`,
 `"llmPlannerDegraded": true`) — the game records them into results and replays, so you
 can tell a broken brain from a losing one.
 
+Send `"degradedCause"` with them and the artifacts can say _why_. It is optional, and
+the value must be one of a fixed list — anything else is dropped, because an invented
+cause is worse than an absent one:
+
+| value              | means                                                                           |
+| ------------------ | ------------------------------------------------------------------------------- |
+| `plan-warmup`      | no plan yet, first refresh still in flight. Nothing is wrong.                   |
+| `plan-stale`       | you have a plan, but the latest refresh failed; you are acting on stale intent. |
+| `plan-unavailable` | no plan at all and the refresh failed.                                          |
+| `plan-timeout`     | your provider call exceeded your own budget.                                    |
+| `plan-parse`       | your model answered, but you could not parse it.                                |
+| `policy-error`     | your own code threw before it could decide.                                     |
+
+Worth the two extra lines: without a cause, a seat playing rule logic during its first
+plan is indistinguishable from a seat whose brain is dead — both just read "degraded",
+which is why roughly a third of league decisions currently cannot be explained. With
+it, a warming-up seat stops looking broken, and a genuinely broken one stops hiding.
+
+`brain-timeout` and `brain-error` also exist, but the game stamps those itself when it
+never hears from your policy; they are rejected if a policy sends them, so nobody can
+blame the server for their own failure.
+
 ## Fastest path: fork the reference policy
 
 [`src/llm-player.mjs`](src/llm-player.mjs) is the reference LLM policy — a thin
