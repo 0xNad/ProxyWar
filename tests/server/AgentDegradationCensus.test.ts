@@ -32,7 +32,10 @@ import {
 let scratch: string | undefined;
 
 async function writeMatches(
-  matches: Record<string, { name: string; flags: boolean[] }[]>,
+  matches: Record<
+    string,
+    { name: string; flags: boolean[]; causes?: (string | undefined)[] }[]
+  >,
 ): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "degradation-census-"));
   scratch = dir;
@@ -41,12 +44,15 @@ async function writeMatches(
     await fs.mkdir(matchDir, { recursive: true });
     let sequence = 0;
     const events = seats.flatMap((seat, seatIndex) =>
-      seat.flags.map((degraded) => ({
+      seat.flags.map((degraded, decisionIndex) => ({
         actorAgentID: `agent-${seatIndex}`,
         actorName: seat.name,
         actionKind: "attack",
         sequence: sequence++,
         llmPlannerDegraded: degraded,
+        ...(seat.causes?.[decisionIndex] !== undefined
+          ? { degradedCause: seat.causes[decisionIndex] }
+          : {}),
       })),
     );
     await fs.writeFile(
@@ -125,6 +131,82 @@ describe("agent degradation census", () => {
       name: "Dead Policy",
       matches: 2,
     });
+  });
+
+  it("reports the headline recomputed without warmup, and the dead share", async () => {
+    // The operator question is literally "should warmup stop counting as
+    // degradation?", so the census has to state the MAGNITUDE, not just the classes.
+    // Two seats, ten decisions each: one warms up for four decisions then runs clean,
+    // one is dead for all ten.
+    const dir = await writeMatches({
+      "league-coworld-2026-08-17T00-00-00-000Z-a": [
+        {
+          name: "Warmer",
+          flags: [...Array(4).fill(true), ...Array(6).fill(false)],
+        },
+        { name: "Dead Brain", flags: Array(10).fill(true) },
+      ],
+    });
+    const summary = summarizeSeats(
+      await censusForDirectory({ runsDir: dir, minDecisions: 5 }),
+    );
+
+    // 14 of 20 decisions degraded; 4 of those are the warmup prefix.
+    expect(summary.degraded).toBe(14);
+    expect(summary.degradedShare).toBeCloseTo(14 / 20, 6);
+    expect(summary.shareExcludingWarmup).toBeCloseTo(10 / 20, 6);
+    // Only the dead seat means "broken agent", and it is a smaller number than the
+    // headline implies - which is the whole point of reporting it separately.
+    expect(summary.deadShare).toBeCloseTo(10 / 20, 6);
+  });
+
+  it("aggregates reported causes and counts the rest as unreported", async () => {
+    const dir = await writeMatches({
+      "league-coworld-2026-08-17T00-00-00-000Z-b": [
+        {
+          name: "Reporting Policy",
+          flags: [true, true, true, false, false, false],
+          causes: ["plan-warmup", "plan-warmup", "plan-unavailable"],
+        },
+        {
+          name: "Silent Policy",
+          flags: [true, true, false, false, false, false],
+        },
+      ],
+    });
+    const summary = summarizeSeats(
+      await censusForDirectory({ runsDir: dir, minDecisions: 5 }),
+    );
+
+    expect(summary.causeCounts).toEqual({
+      "plan-warmup": 2,
+      "plan-unavailable": 1,
+    });
+    // The silent policy's two degraded decisions stay explicitly unexplained rather
+    // than being folded into a bucket - a census that invents attribution is worse
+    // than one that admits a gap.
+    expect(summary.causeUnreported).toBe(2);
+  });
+
+  it("ignores a cause that arrives without the degraded flag", async () => {
+    // The wire refuses that combination, but a mirrored line is rebuilt from
+    // published bytes, so the census must not treat a bare cause as evidence.
+    const dir = await writeMatches({
+      "league-coworld-2026-08-17T00-00-00-000Z-c": [
+        {
+          name: "Confused Policy",
+          flags: [false, false, false, false, false, false],
+          causes: ["plan-unavailable", "plan-timeout"],
+        },
+      ],
+    });
+    const summary = summarizeSeats(
+      await censusForDirectory({ runsDir: dir, minDecisions: 5 }),
+    );
+
+    expect(summary.degraded).toBe(0);
+    expect(summary.causeCounts).toEqual({});
+    expect(summary.causeUnreported).toBe(0);
   });
 
   it("counts only real decisions and ignores short seats", async () => {
