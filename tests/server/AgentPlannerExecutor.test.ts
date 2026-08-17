@@ -19189,11 +19189,78 @@ describe("Betray late: deterministic backstab of an overmatched ally", () => {
     expect(first.metadata?.degradedCause).toBe("plan-parse");
 
     // The standing plan is fallback-authored, so the following interval decisions
-    // stay flagged. They carry no cause of their own: the failure happened on the
-    // refresh, and inventing a per-decision cause here would be fabrication.
+    // stay flagged - and they must say WHY too. These cadence-amplified decisions
+    // are the MAJORITY of the league's degraded count (66.3% of degraded decisions
+    // measured over 101 mirrored matches), so a cause that appeared only on the
+    // refresh decision would leave two thirds of the number unexplained.
+    //
+    // An earlier version of this test asserted the opposite, on the reasoning that a
+    // per-decision cause would be fabrication. That conflated two things: claiming a
+    // NEW failure per decision would be invention, but reporting the known origin of
+    // the plan a decision actually ran under is provenance - and it is exactly the
+    // reasoning the propagated `llmPlannerDegraded` flag itself already rests on.
     const second = await brain.decide({ observation, legalActions });
     expect(second.metadata?.plannerRan).toBe(false);
     expect(second.metadata?.llmPlannerDegraded).toBe(true);
-    expect(second.metadata?.degradedCause).toBeUndefined();
+    expect(second.metadata?.degradedCause).toBe("plan-parse");
+  });
+
+  it("clears the inherited cause when a healthy refresh replaces the plan", async () => {
+    // The cause must not outlive the degradation. It rides on the plan object, so a
+    // healthy refresh drops it with the flag - if it leaked, every later decision in
+    // a recovered match would still read as degraded-for-reason-X.
+    const observation = activeObservation("secure_economy");
+    const legalActions = buildLegalActions();
+    let failNext = true;
+    const provider: LlmProvider = {
+      providerType: "codex-cli",
+      async complete(): Promise<string> {
+        if (failNext) return "not json at all";
+        return JSON.stringify({
+          objective: "expand_territory",
+          turnIntent: "expand",
+          rationale: "Recovered: expand while the front is open.",
+          maxDecisionCycles: 2,
+          preferredActionKinds: ["expand", "attack", "hold"],
+          enabledModules: ["expansion", "defense"],
+          targetPlayerId: null,
+          tacticalSettings: {
+            reserveRatio: 0.42,
+            triggerRatio: 0.6,
+            expansionRatio: 0.12,
+            maxConcurrentWars: 1,
+            retreatThreshold: 0.38,
+            maxActionsPerDecision: 3,
+          },
+        });
+      },
+    };
+    const brain = new PlannerExecutorAgentBrain({
+      profile: "opportunistic",
+      planner: new LlmAgentPlanner({
+        provider,
+        profile: "opportunistic",
+        plannerType: "codex-cli",
+      }),
+      executor: new FrontierPolicyExecutor("opportunistic"),
+      planEveryDecisionSteps: 3,
+    });
+
+    const failed = await brain.decide({ observation, legalActions });
+    expect(failed.metadata?.degradedCause).toBe("plan-parse");
+    const inherited = await brain.decide({ observation, legalActions });
+    expect(inherited.metadata?.degradedCause).toBe("plan-parse");
+
+    // Decision 4 is due a refresh, and the provider is healthy again.
+    await brain.decide({ observation, legalActions });
+    failNext = false;
+    const recovered = await brain.decide({ observation, legalActions });
+    expect(recovered.metadata?.plannerRan).toBe(true);
+    expect(recovered.metadata?.llmPlannerDegraded ?? false).toBe(false);
+    expect(recovered.metadata?.degradedCause).toBeUndefined();
+
+    const afterRecovery = await brain.decide({ observation, legalActions });
+    expect(afterRecovery.metadata?.llmPlannerDegraded ?? false).toBe(false);
+    expect(afterRecovery.metadata?.degradedCause).toBeUndefined();
   });
 });
