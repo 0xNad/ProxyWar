@@ -73,6 +73,36 @@ describe("externalBrainCleanlinessReport", () => {
     expect(preFixShape).toMatchObject({ parserFailures: 1 });
   });
 
+  it("does not count a refused-but-parseable planner answer as a parser failure", () => {
+    // The house planner's control validation can refuse an answer that PARSED fine
+    // (a must-follow violation surviving repair). That is a content decision, so the
+    // record carries `plannerParseOk: true` with a repair reason - and this report must
+    // count it as a fallback only. Stamping `plannerParseOk: false` there, as the
+    // planner used to, inflated `parserFailures` with content rejections.
+    const report = externalBrainCleanlinessReport({
+      brainMode: "planner-codex-cli",
+      records: [
+        record({
+          externalPlannerCall: true,
+          plannerFallbackUsed: true,
+          llmPlannerDegraded: true,
+          plannerParseOk: true,
+          plannerRepairUsed: true,
+          plannerRepairReason:
+            "planner repair still contradicted must-follow control: objective expand_territory did not match choose_spawn",
+        }),
+      ],
+    });
+
+    expect(report).toMatchObject({
+      ok: false,
+      externalCalls: 1,
+      cleanExternalCalls: 0,
+      parserFailures: 0,
+      fallbacks: 1,
+    });
+  });
+
   it("allows a later house planner fallback after clean Codex planner control", () => {
     const report = externalBrainCleanlinessReport({
       brainMode: "planner-codex-cli",

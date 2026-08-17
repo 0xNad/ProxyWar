@@ -2025,15 +2025,12 @@ export class LlmAgentPlanner implements AgentPlanner {
               // A `plan-rejected` member would fit; that is a wire-contract change and
               // is recorded as a follow-up rather than slipped in here.
               undefined,
-              // The output PARSED and our control validation refused it, so it is a
-              // rejected planner answer - a parser-side failure for cleanliness
-              // accounting, even though the bounded cause vocabulary has no member.
-              //
-              // UNCOVERED BRANCH, stated rather than implied: reaching this needs a
-              // must-follow control violation that SURVIVES repair, and no test builds
-              // that fixture. A mutation flipping this argument is not caught. The
-              // adjacent paths (parse failure, timeout, transport throw) are all pinned.
-              true,
+              // NOT a parse failure: the repaired output parsed, and our control
+              // validation refused its content. Stamping `parseOk: false` here would
+              // recreate exactly the parse/content conflation this file just removed,
+              // one branch further down, and would inflate `parserFailures`.
+              false,
+              `planner repair still contradicted must-follow control: ${repairedViolation}`,
             );
           }
           return this.fallback(
@@ -2134,6 +2131,14 @@ export class LlmAgentPlanner implements AgentPlanner {
      * `parseFailureReason` alone did not fix it.
      */
     parseFailed: boolean,
+    /**
+     * Set when the planner's output PARSED and our own control validation refused the
+     * content. Recorded through `repairReason` (the field the success path already
+     * uses) rather than `parseFailureReason`, because the parser did its job - claiming
+     * otherwise inflates `parserFailures` in `externalBrainCleanlinessReport` and
+     * blames the parser for a content decision.
+     */
+    rejectionReason?: string,
   ): Promise<AgentPlanDecision> {
     const fallback = await new RuleAgentPlanner(this.options.profile).plan(
       input,
@@ -2163,6 +2168,12 @@ export class LlmAgentPlanner implements AgentPlanner {
       // or rejected). A timeout or transport throw never produced output to parse, so
       // both fields stay absent rather than inventing a malformed answer.
       ...(parseFailed ? { parseOk: false, parseFailureReason: reason } : {}),
+      // A refused-but-parseable answer keeps `parseOk` TRUE: the parse succeeded, and
+      // `fallbackUsed` below already accounts for the degradation. `cleanExternalCalls`
+      // excludes any fallback regardless, so this cannot make the call look clean.
+      ...(rejectionReason !== undefined
+        ? { parseOk: true, repairUsed: true, repairReason: rejectionReason }
+        : {}),
       // The rule fallback never emits a commitment; if the previous plan was
       // driving a binding kill-order, record that the fallback dropped it.
       ...(previousPlan?.commitment !== undefined

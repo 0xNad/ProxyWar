@@ -19158,6 +19158,87 @@ describe("Betray late: deterministic backstab of an overmatched ally", () => {
     expect(d5.metadata?.llmPlannerDegraded ?? false).toBe(false);
   });
 
+  it("does not blame the parser when the planner answered and control validation refused it", async () => {
+    // The branch that survived mutation testing until now, and the reason it mattered:
+    // this path's output PARSES, so stamping `parseOk: false` recreated the exact
+    // parse/content conflation fixed elsewhere in this file - and `parserFailures` in
+    // `externalBrainCleanlinessReport` keys on `plannerParseOk === false`.
+    //
+    // The spawn phase is the cheapest MUST FOLLOW control (`plannerRecommendedControls`
+    // returns must_follow with objective=choose_spawn), so a provider that answers with
+    // a different objective twice violates it, gets repaired, violates again, and lands
+    // in the rejection branch.
+    const spawnObservation: AgentObservation = {
+      ...new AgentObservationBuilder().build({
+        agentID: "agent-1",
+        clientID: null,
+        username: "Planner Agent",
+        profile: "opportunistic",
+        gameID: "PLANSPWN",
+        turnNumber: 0,
+        phaseOverride: "spawn",
+      }),
+    };
+    const legalActions = buildLegalActions();
+    let calls = 0;
+    const stubborn: LlmProvider = {
+      providerType: "codex-cli",
+      async complete(): Promise<string> {
+        calls += 1;
+        // Valid JSON every time, and every time the wrong objective.
+        return JSON.stringify({
+          objective: "expand_territory",
+          turnIntent: "growth",
+          rationale: `Ignoring the spawn directive, attempt ${calls}.`,
+          maxDecisionCycles: 2,
+          preferredActionKinds: ["attack", "hold"],
+          enabledModules: ["expansion"],
+          targetPlayerId: null,
+          tacticalSettings: {
+            reserveRatio: 0.42,
+            triggerRatio: 0.6,
+            expansionRatio: 0.12,
+            maxConcurrentWars: 1,
+            retreatThreshold: 0.38,
+            maxActionsPerDecision: 3,
+          },
+        });
+      },
+    };
+    const brain = new PlannerExecutorAgentBrain({
+      profile: "opportunistic",
+      planner: new LlmAgentPlanner({
+        provider: stubborn,
+        profile: "opportunistic",
+        plannerType: "codex-cli",
+      }),
+      executor: new FrontierPolicyExecutor("opportunistic"),
+      planEveryDecisionSteps: 3,
+    });
+
+    const decision = await brain.decide({
+      observation: spawnObservation,
+      legalActions,
+    });
+
+    // The planner was asked twice: original, then repair.
+    expect(calls).toBeGreaterThanOrEqual(2);
+    expect(decision.metadata?.llmPlannerDegraded).toBe(true);
+    expect(decision.metadata?.plannerFallbackUsed).toBe(true);
+    // The parse SUCCEEDED, so the parser must not be blamed...
+    expect(decision.metadata?.plannerParseOk).not.toBe(false);
+    expect(decision.metadata?.plannerParseFailureReason).toBeUndefined();
+    // ...and the refusal is recorded as a control rejection instead.
+    expect(decision.metadata?.plannerRepairReason).toContain(
+      "still contradicted must-follow control",
+    );
+    // No cause is claimed: the bounded vocabulary has no member for a refused answer.
+    expect(decision.metadata?.degradedCause).toBeUndefined();
+
+    // The report outcome for this shape is pinned in
+    // AgentExternalBrainCleanliness.test.ts, using that suite's own record builder.
+  });
+
   it("distinguishes a provider throw from an unparseable answer", async () => {
     // Both failures reach the SAME `fallback()`, which used to hardcode `plan-parse`.
     // A provider outage therefore published "the model answered and we could not parse
