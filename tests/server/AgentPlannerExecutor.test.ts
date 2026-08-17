@@ -19158,6 +19158,92 @@ describe("Betray late: deterministic backstab of an overmatched ally", () => {
     expect(d5.metadata?.llmPlannerDegraded ?? false).toBe(false);
   });
 
+  it("distinguishes a provider throw from an unparseable answer", async () => {
+    // Both failures reach the SAME `fallback()`, which used to hardcode `plan-parse`.
+    // A provider outage therefore published "the model answered and we could not parse
+    // it" - misattribution inside the field whose whole purpose is attribution.
+    const observation = activeObservation("secure_economy");
+    const legalActions = buildLegalActions();
+    const throwing: LlmProvider = {
+      providerType: "codex-cli",
+      async complete(): Promise<string> {
+        throw new Error("bedrock connection reset");
+      },
+    };
+    const brain = new PlannerExecutorAgentBrain({
+      profile: "opportunistic",
+      planner: new LlmAgentPlanner({
+        provider: throwing,
+        profile: "opportunistic",
+        plannerType: "codex-cli",
+      }),
+      executor: new FrontierPolicyExecutor("opportunistic"),
+      planEveryDecisionSteps: 3,
+    });
+
+    const decision = await brain.decide({ observation, legalActions });
+    expect(decision.metadata?.llmPlannerDegraded).toBe(true);
+    // Our own side failed to obtain a plan; nothing was parsed.
+    expect(decision.metadata?.degradedCause).toBe("policy-error");
+    // And it must not claim a malformed answer that never arrived.
+    expect(decision.metadata?.plannerParseFailureReason).toBeUndefined();
+  });
+
+  it("reports plan-timeout when the provider exceeds its budget", async () => {
+    // `plan-timeout` exists to separate "too slow" from "unusable answer", which is the
+    // difference between a capacity story and a prompt/model story.
+    const observation = activeObservation("secure_economy");
+    const legalActions = buildLegalActions();
+    const slow: LlmProvider = {
+      providerType: "codex-cli",
+      complete(): Promise<string> {
+        return new Promise((resolve) => setTimeout(() => resolve("{}"), 5_000));
+      },
+    };
+    const brain = new PlannerExecutorAgentBrain({
+      profile: "opportunistic",
+      planner: new LlmAgentPlanner({
+        provider: slow,
+        profile: "opportunistic",
+        plannerType: "codex-cli",
+        providerTimeoutMs: 25,
+      }),
+      executor: new FrontierPolicyExecutor("opportunistic"),
+      planEveryDecisionSteps: 3,
+    });
+
+    const decision = await brain.decide({ observation, legalActions });
+    expect(decision.metadata?.llmPlannerDegraded).toBe(true);
+    expect(decision.metadata?.degradedCause).toBe("plan-timeout");
+    expect(decision.metadata?.plannerParseFailureReason).toBeUndefined();
+  });
+
+  it("still reports plan-parse for an answer it could not parse", async () => {
+    const observation = activeObservation("secure_economy");
+    const legalActions = buildLegalActions();
+    const garbage: LlmProvider = {
+      providerType: "codex-cli",
+      async complete(): Promise<string> {
+        return "not json at all";
+      },
+    };
+    const brain = new PlannerExecutorAgentBrain({
+      profile: "opportunistic",
+      planner: new LlmAgentPlanner({
+        provider: garbage,
+        profile: "opportunistic",
+        plannerType: "codex-cli",
+      }),
+      executor: new FrontierPolicyExecutor("opportunistic"),
+      planEveryDecisionSteps: 3,
+    });
+
+    const decision = await brain.decide({ observation, legalActions });
+    expect(decision.metadata?.degradedCause).toBe("plan-parse");
+    // The parse reason belongs HERE, and only here.
+    expect(decision.metadata?.plannerParseFailureReason).toBeDefined();
+  });
+
   it("forwards the planner's bounded cause onto decision metadata", async () => {
     // The provider fails, so the LLM planner's own fallback path reports why:
     // `plan-parse` is the executor's label for "the planner answered and we could

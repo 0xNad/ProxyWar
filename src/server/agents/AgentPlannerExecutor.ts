@@ -2018,6 +2018,13 @@ export class LlmAgentPlanner implements AgentPlanner {
               `${raw}\n\nREPAIR_OUTPUT:\n${repairedRaw}`,
               `planner repair still contradicted must-follow control: ${repairedViolation}`,
               prompt.length + repairPrompt.length,
+              // The planner ANSWERED and our own validation refused the content. The
+              // bounded vocabulary has no member for that - `plan-parse` would claim a
+              // malformed answer, `policy-error` would blame our code for throwing - so
+              // the honest record is no cause at all. The degraded flag still stands.
+              // A `plan-rejected` member would fit; that is a wire-contract change and
+              // is recorded as a follow-up rather than slipped in here.
+              undefined,
             );
           }
           return this.fallback(
@@ -2027,6 +2034,8 @@ export class LlmAgentPlanner implements AgentPlanner {
             `${raw}\n\nREPAIR_OUTPUT:\n${repairedRaw}`,
             `planner repair JSON invalid after must-follow violation (${controlViolation}): ${repaired.reason}`,
             prompt.length + repairPrompt.length,
+            // This one genuinely failed to parse.
+            "plan-parse",
           );
         }
         return {
@@ -2067,6 +2076,7 @@ export class LlmAgentPlanner implements AgentPlanner {
         raw,
         parsed.reason,
         prompt.length,
+        "plan-parse",
       );
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
@@ -2077,6 +2087,12 @@ export class LlmAgentPlanner implements AgentPlanner {
         raw,
         reason,
         prompt.length,
+        // A budget overrun and an unexpected throw are different facts, and the
+        // vocabulary already distinguishes them: `plan-timeout` is the provider
+        // exceeding its budget, `policy-error` is our own side failing.
+        error instanceof AgentPlannerTimeoutError
+          ? "plan-timeout"
+          : "policy-error",
       );
     }
   }
@@ -2088,6 +2104,14 @@ export class LlmAgentPlanner implements AgentPlanner {
     raw: string,
     reason: string,
     promptLength: number,
+    /**
+     * WHY this fallback ran. Passed in rather than assumed: this method serves BOTH
+     * an unparseable answer and a provider that never answered, and hardcoding
+     * `plan-parse` published "the model answered and we could not parse it" for a
+     * timeout or an outage - misattribution inside the field whose entire purpose is
+     * attribution.
+     */
+    cause: AgentDegradationCause | undefined,
   ): Promise<AgentPlanDecision> {
     const fallback = await new RuleAgentPlanner(this.options.profile).plan(
       input,
@@ -2099,7 +2123,7 @@ export class LlmAgentPlanner implements AgentPlanner {
         ...fallback.plan,
         plannerSource: this.plannerType,
         degradedOrigin: true,
-        degradedOriginCause: "plan-parse",
+        ...(cause !== undefined ? { degradedOriginCause: cause } : {}),
       },
       reason: `Planner fallback after LLM planner failed: ${reason}`,
       latencyMs: Date.now() - started,
@@ -2110,11 +2134,14 @@ export class LlmAgentPlanner implements AgentPlanner {
       llmPlannerDegraded: true,
       // The planner answered and we could not use its answer - a distinct fault
       // from a timeout or an unreachable provider.
-      degradedCause: "plan-parse",
+      ...(cause !== undefined ? { degradedCause: cause } : {}),
       rawPlannerOutput: raw,
       promptLength,
       parseOk: false,
-      parseFailureReason: reason,
+      // Only a genuine parse failure gets a parse reason. A timeout or transport
+      // throw never produced output to parse, and stamping this field made the
+      // artifact claim a malformed answer that never arrived.
+      ...(cause === "plan-parse" ? { parseFailureReason: reason } : {}),
       // The rule fallback never emits a commitment; if the previous plan was
       // driving a binding kill-order, record that the fallback dropped it.
       ...(previousPlan?.commitment !== undefined
@@ -23252,6 +23279,13 @@ function isFrontierPolicyModule(value: unknown): value is FrontierPolicyModule {
   );
 }
 
+/**
+ * Marker for a planner provider call that exceeded its budget, so the degradation
+ * cause can say `plan-timeout` instead of guessing. Untyped, this failure was
+ * indistinguishable from a transport throw and both were published as `plan-parse`.
+ */
+export class AgentPlannerTimeoutError extends Error {}
+
 async function withTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number,
@@ -23259,6 +23293,7 @@ async function withTimeout<T>(
   return withDeferredDecisionTimeout(
     promise,
     timeoutMs,
-    () => new Error(`Planner timed out after ${timeoutMs}ms`),
+    () =>
+      new AgentPlannerTimeoutError(`Planner timed out after ${timeoutMs}ms`),
   ).promise;
 }
