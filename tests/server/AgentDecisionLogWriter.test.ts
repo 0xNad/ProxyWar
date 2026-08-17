@@ -1621,6 +1621,78 @@ describe("decisions.jsonl llmPlannerDegraded stamp (per-record degradation)", ()
     const [entry] = await writeAndParseEntries([explicitlyFalse]);
     expect(entry.llmPlannerDegraded).toBe(false);
   });
+
+  it("carries the bounded degradedCause, and drops anything outside the vocabulary", async () => {
+    // The cause is the whole point of the field: `degraded_count` alone cannot
+    // separate a seat warming up from a seat whose planner is dead, which is why a
+    // third of league decisions have never been attributable. If the cause does not
+    // reach decisions.jsonl it cannot reach the public mirror either, and the mirror
+    // is the only feed a league-wide census can read (other builders' logs are 403).
+    const withCause: AgentDecisionRecord = {
+      ...fabricatedRecord({
+        sequence: 1,
+        agentID: "llm-agent-4",
+        playerID: "P_D",
+        username: "Warming Agent",
+        turnNumber: 5,
+      }),
+      brainType: "external-http",
+      decisionMetadata: {
+        llmPlannerDegraded: true,
+        degradedCause: "plan-warmup",
+      },
+    };
+    const forged: AgentDecisionRecord = {
+      ...fabricatedRecord({
+        sequence: 2,
+        agentID: "llm-agent-5",
+        playerID: "P_E",
+        username: "Creative Agent",
+        turnNumber: 5,
+      }),
+      brainType: "external-http",
+      decisionMetadata: {
+        llmPlannerDegraded: true,
+        degradedCause: "totally-fine-actually",
+      },
+    };
+    const [causedEntry, forgedEntry] = await writeAndParseEntries([
+      withCause,
+      forged,
+    ]);
+    expect(causedEntry.degradedCause).toBe("plan-warmup");
+    // Unrecognized values are dropped rather than recorded: an invented cause in
+    // an attribution field is worse than an absent one, and the degradation flag
+    // still stands on its own.
+    expect("degradedCause" in forgedEntry).toBe(false);
+    expect(forgedEntry.llmPlannerDegraded).toBe(true);
+  });
+
+  it("carries the server-observed brainErrorReason this allowlist used to discard", async () => {
+    // `decideWithSafetyFallback` has always produced this text and this allowlist
+    // always dropped it, so the one failure cause the server knows first-hand
+    // reached no artifact at all.
+    const timedOut: AgentDecisionRecord = {
+      ...fabricatedRecord({
+        sequence: 1,
+        agentID: "llm-agent-6",
+        playerID: "P_F",
+        username: "Silent Agent",
+        turnNumber: 5,
+      }),
+      brainType: "external-http",
+      decisionMetadata: {
+        fallbackUsed: true,
+        brainErrorReason: "Agent brain timed out after 30000ms",
+        degradedCause: "brain-timeout",
+      },
+    };
+    const [entry] = await writeAndParseEntries([timedOut]);
+    expect(entry.brainErrorReason).toBe("Agent brain timed out after 30000ms");
+    // A server-observed cause is legitimate on the persisted record: only the
+    // PLAYER wire refuses this family.
+    expect(entry.degradedCause).toBe("brain-timeout");
+  });
 });
 
 describe("match summary cycle-level counts under action batching", () => {

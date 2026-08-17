@@ -1712,6 +1712,30 @@ function spawnPreferenceScore(action) {
   );
 }
 
+/**
+ * WHY this decision was degraded, from the bounded wire vocabulary (see
+ * AGENT_DEGRADATION_CAUSES in src/server/agents/AgentWireProtocol.ts).
+ *
+ * These four states have always been visible HERE and nowhere else. The wire
+ * carried one boolean, so a seat playing rule logic while its FIRST plan is still
+ * in flight has been indistinguishable, in every artifact, from a seat whose
+ * planner is dead - which is most of why a third of league decisions cannot be
+ * attributed to anything.
+ *
+ * `lastPlanError` is exactly "timeout" when this file's own `withTimeout` rejected,
+ * so the timeout case needs no text parsing. Timeout takes precedence over the
+ * has-a-plan/has-no-plan split: both are real breakage, so the useful thing to
+ * report is the provider behaviour rather than which of two broken states we are in.
+ *
+ * Returns null for a healthy decision, so the caller omits the field entirely.
+ */
+function degradedCauseFor(plan, degraded, lastPlanError) {
+  if (plan === null && !degraded) return "plan-warmup";
+  if (!degraded) return null;
+  if (lastPlanError === "timeout") return "plan-timeout";
+  return plan !== null ? "plan-stale" : "plan-unavailable";
+}
+
 function withTimeout(promise, ms) {
   return Promise.race([
     promise,
@@ -1842,6 +1866,9 @@ export function startLlmPlayer({
         confidence: plan !== null ? (degraded ? 0.5 : 0.75) : 0.4,
         fallbackUsed: plan === null || degraded,
         llmPlannerDegraded: plan === null || degraded,
+        ...(degradedCauseFor(plan, degraded, lastPlanError)
+          ? { degradedCause: degradedCauseFor(plan, degraded, lastPlanError) }
+          : {}),
       }),
     );
   });

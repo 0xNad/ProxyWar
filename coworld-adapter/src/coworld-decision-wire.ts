@@ -39,6 +39,41 @@
 export const MAX_WIRE_ACTIONS_PER_DECISION = 5;
 
 /**
+ * Mirror of the SELF-REPORTED half of `AGENT_DEGRADATION_CAUSES`
+ * (src/server/agents/AgentWireProtocol.ts). Duplicated as a literal for the same
+ * reason the action cap is: the deployed player image cannot value-import from
+ * src/ at runtime. `coworld-decision-wire.test.ts` pins this list against the
+ * server's, so drift fails a test rather than silently dropping a cause the
+ * league is emitting.
+ *
+ * The `brain-*` causes are deliberately ABSENT. They are the server's own
+ * observations, and a policy able to send them could forge provenance - a seat
+ * that answered fine could stamp itself `brain-timeout` and the artifact would
+ * read as though the server never heard from it.
+ */
+const SELF_REPORTED_DEGRADATION_CAUSES: ReadonlySet<string> = new Set([
+  "plan-warmup",
+  "plan-stale",
+  "plan-unavailable",
+  "plan-timeout",
+  "plan-parse",
+  "policy-error",
+]);
+
+/**
+ * Strict equality parse of an untrusted `degradedCause`, restricted to the
+ * self-reported family. No trimming, no case folding: a policy that sends an
+ * almost-right value has told us nothing, and `undefined` (we do not know) is the
+ * honest record.
+ */
+export function normalizeDegradedCause(value: unknown): string | undefined {
+  return typeof value === "string" &&
+    SELF_REPORTED_DEGRADATION_CAUSES.has(value)
+    ? value
+    : undefined;
+}
+
+/**
  * Mirror of AgentWireProtocol.MAX_SPAWN_PREFERENCE_ACTION_IDS. This is
  * deliberately independent from executable action batching.
  */
@@ -334,6 +369,16 @@ export function composeCoworldDecision(input: {
       fallbackUsed: message.fallbackUsed === true,
       ...(message.llmPlannerDegraded === true
         ? { llmPlannerDegraded: true }
+        : {}),
+      // WHY it degraded, when the policy chose to say. Optional, strictly parsed,
+      // and only ever recorded next to a degradation the policy itself declared:
+      // a cause arriving without the flag would let a seat that reported health
+      // carry failure evidence. League seats are `external-http`, so the server
+      // cannot infer warmup from a dead planner - this field is the only way that
+      // distinction reaches an artifact.
+      ...(message.llmPlannerDegraded === true &&
+      normalizeDegradedCause(message.degradedCause) !== undefined
+        ? { degradedCause: normalizeDegradedCause(message.degradedCause) }
         : {}),
       coworldSlot: slot,
       coworldRequestID: requestID,

@@ -528,6 +528,88 @@ describe("AgentLeagueMatchRunner", () => {
     }
   });
 
+  it("stamps a server-observed brain-timeout cause when a seat never answers", async () => {
+    // The cause the SERVER knows first-hand. Two things are pinned: the bounded
+    // `degradedCause` (so an artifact can attribute the fallback at all) and
+    // `brainErrorReason`, which decideWithSafetyFallback has always produced and the
+    // log writer's allowlist silently dropped, so it reached no artifact.
+    //
+    // Note what is deliberately NOT asserted: `llmPlannerDegraded`. A league seat is
+    // `external-http`, which LLM_DEGRADABLE_BRAIN_TYPES excludes, so a server-side
+    // timeout is a FALLBACK, not part of the degraded count. That is exactly why the
+    // league's degraded number cannot be explained by server-observed causes.
+    vi.useFakeTimers();
+    const log = makeLogger();
+    const legalActions: LegalAction[] = [
+      {
+        id: "hold",
+        kind: "hold",
+        label: "Hold",
+        intent: null,
+        risk: { level: "none", score: 0 },
+      },
+    ];
+    const participants = createAgentParticipants(
+      [{ username: "Silent Agent", profile: "aggressive" }],
+      log,
+      {
+        // Seat 0 never answers its ballot; the others answer normally. The
+        // mixed case is the realistic one, and a whole-roster silence cannot
+        // leave the spawn phase at all (worth knowing separately).
+        brainFactory: (_spec, index) => ({
+          // `mock-llm` for the same reason the sibling spawn tests use it: an
+          // `external-http` seat is driven by the adapter, so the runner's own
+          // message stream stays empty and the mirror never leaves spawn.
+          brainType: "mock-llm",
+          decide: () =>
+            index === 0
+              ? new Promise<AgentDecision>(() => {})
+              : Promise.resolve({
+                  actionID: "hold",
+                  reason: "answers the ballot",
+                }),
+        }),
+      },
+    );
+    const game = new GameServer(
+      "AGENT_TIMEOUT_CAUSE",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: [],
+      log,
+      legalActionBuilder: {
+        build: () => legalActions,
+      } as unknown as LegalActionBuilder,
+    });
+
+    try {
+      const recordsPromise = match.runDecisionTurn({
+        turnNumber: 3,
+        maxDecisionMs: 25,
+      });
+      await vi.advanceTimersByTimeAsync(26);
+      const records = await recordsPromise;
+
+      expect(records).toHaveLength(1);
+      expect(records[0].decisionMetadata).toMatchObject({
+        fallbackUsed: true,
+        degradedCause: "brain-timeout",
+      });
+      expect(records[0].decisionMetadata?.brainErrorReason).toContain(
+        "timed out",
+      );
+    } finally {
+      vi.useRealTimers();
+      await game.end({ archive: false });
+    }
+  });
+
   it("starts maxDecisionMs after the complete synchronous observation batch", async () => {
     vi.useFakeTimers();
     const log = makeLogger();
@@ -1941,6 +2023,75 @@ describe("AgentLeagueMatchRunner", () => {
     // several seconds cold or against a loaded parallel suite. Covered by the
     // shared 60s testTimeout in vite.config.ts rather than a local budget.
   });
+
+  it("attributes a sealed spawn ballot that timed out, in the shared cause field", async () => {
+    // The spawn stage has had its own cause taxonomy since it was built
+    // (`forcedDefaultReason`), and this vocabulary was taken FROM it - but the spawn
+    // record never carried it in the shared `degradedCause` field. A real episode
+    // then showed three turn-0 fallbacks with no cause at all, which is how the gap
+    // was found. Live evidence is not a regression guard, so this pins the mapping.
+    const log = makeLogger();
+    const mapLoader = new StaticMapLoader();
+    const config = { ...gameConfig, gameMapSize: GameMapSize.Compact };
+    const terrain = await loadTerrainMap(
+      config.gameMap,
+      config.gameMapSize,
+      mapLoader,
+      { cache: false },
+    );
+    const participants = createAgentParticipants(
+      createDefaultAgentSpecs(3),
+      log,
+      {
+        // Never answers the ballot: the server must time it out and say so.
+        brainFactory: () => ({
+          brainType: "external-http",
+          decide: () => new Promise<AgentDecision>(() => {}),
+        }),
+      },
+    );
+    const game = new GameServer(
+      "AGENT015",
+      log,
+      Date.now(),
+      steppedServerConfig,
+      config,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: buildSpawnCandidates(terrain.gameMap, {
+        maxCandidates: 200,
+        stride: 2,
+      }),
+      log,
+    });
+    const mirror = new AgentLocalGameMirror(mapLoader, log, terrain);
+
+    try {
+      match.attachAgents();
+      match.startGame();
+      const spawnRecords = await match.runSpawnPhase({
+        mirror,
+        messages: () => participants[0]?.runner.serverMessages() ?? [],
+        turnsPerSpawnTick: 25,
+        maxDecisionMs: 40,
+      });
+
+      expect(spawnRecords.length).toBeGreaterThan(0);
+      // The silent seat was defaulted, and its record now says WHY rather than
+      // only that a fallback happened.
+      const timedOut = spawnRecords.filter(
+        (record) => record.decisionMetadata?.fallbackUsed === true,
+      );
+      expect(timedOut.length).toBeGreaterThan(0);
+      for (const record of timedOut) {
+        expect(record.decisionMetadata?.degradedCause).toBe("brain-timeout");
+      }
+    } finally {
+      await game.end({ archive: false });
+    }
+  }, 600_000);
 
   it("retains the turn stream on the primary seat only when asked", async () => {
     const log = makeLogger();
