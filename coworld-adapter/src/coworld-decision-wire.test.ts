@@ -7,6 +7,7 @@ import {
   MAX_SPAWN_PREFERENCE_ACTION_IDS as CANONICAL_MAX_SPAWN_PREFERENCES,
 } from "../../src/server/agents/AgentWireProtocol.ts";
 import {
+  composeCoworldDecision,
   decisionRequestEnvelope,
   MAX_WIRE_ACTION_ID_LENGTH,
   MAX_WIRE_ACTIONS_PER_DECISION,
@@ -480,21 +481,101 @@ describe("normalizeDecisionResponse comms slot", () => {
   });
 
   it("survives the runner's resolve composition alongside metadata", () => {
-    // The episode runner resolves `{ ...normalized, metadata }` as the
-    // AgentDecision (no-docker-coworld-episode.ts is un-importable here — it
-    // ends in a top-level `await main()`), so this pins the composition that
-    // carries comms into AgentLeagueMatch. The real proof is the end-to-end
-    // episode; this catches a spread being replaced by explicit field picking.
+    // The REAL composition the episode runner resolves as the AgentDecision,
+    // not a hand-rebuilt copy of it: no-docker-coworld-episode.ts cannot be
+    // imported (top-level `await main()`), so this used to be reconstructed
+    // here — and a reconstruction cannot catch the actual spread being
+    // replaced by explicit field picking, which is the drift that would drop
+    // a slot again.
     const normalized = normalizeDecisionResponse({
       selectedLegalActionId: "attack:one",
       selectedMessageActionId: "message:P_B",
       messageText: "hello",
     });
-    const resolved = {
-      ...normalized,
-      metadata: { brain: "coworld-websocket" },
-    };
+    const resolved = composeCoworldDecision({
+      normalized,
+      message: {},
+      slot: 1,
+      requestID: "req_1",
+      offeredLegalActionCount: 4,
+    });
     expect(resolved.messageActionID).toBe("message:P_B");
     expect(resolved.messageText).toBe("hello");
+  });
+});
+
+describe("composeCoworldDecision", () => {
+  const normalized = normalizeDecisionResponse({
+    selectedLegalActionId: "attack:one",
+    reason: "push north",
+  });
+
+  it("adds the episode-local metadata envelope and nothing else", () => {
+    const composed = composeCoworldDecision({
+      normalized,
+      message: { selectedLegalActionId: "attack:one" },
+      slot: 2,
+      requestID: "req_42",
+      offeredLegalActionCount: 7,
+    });
+    const { metadata, ...selection } = composed;
+    // The selection half must be the normalized decision verbatim — the
+    // composition's only job is provenance.
+    expect(selection).toEqual(normalized);
+    expect(metadata).toMatchObject({
+      brain: "coworld-websocket",
+      externalActionCall: true,
+      parseSuccess: true,
+      coworldSlot: 2,
+      coworldRequestID: "req_42",
+      offeredLegalActionCount: 7,
+      rawProviderOutputPresent: true,
+    });
+  });
+
+  it("reports the player's own degradation flags rather than assuming health", () => {
+    // The v1 bedrock seat failed silently for 60+ rounds because this was
+    // hardcoded healthy; a degraded seat has to reach fallback_count.
+    const healthy = composeCoworldDecision({
+      normalized,
+      message: {},
+      slot: 0,
+      requestID: "req_1",
+      offeredLegalActionCount: 1,
+    });
+    expect(healthy.metadata.fallbackUsed).toBe(false);
+    expect("llmPlannerDegraded" in healthy.metadata).toBe(false);
+
+    const degraded = composeCoworldDecision({
+      normalized,
+      message: { fallbackUsed: true, llmPlannerDegraded: true },
+      slot: 0,
+      requestID: "req_1",
+      offeredLegalActionCount: 1,
+    });
+    expect(degraded.metadata.fallbackUsed).toBe(true);
+    expect(degraded.metadata.llmPlannerDegraded).toBe(true);
+  });
+
+  it("bounds the raw frame it stamps as evidence", () => {
+    const composed = composeCoworldDecision({
+      normalized,
+      message: { reason: "r".repeat(5_000), confidence: 0.5 },
+      slot: 0,
+      requestID: "req_1",
+      offeredLegalActionCount: 1,
+    });
+    expect(String(composed.metadata.externalRawOutput)).toHaveLength(1_000);
+    expect(composed.metadata.confidence).toBe(0.5);
+    // A non-numeric confidence is dropped, never coerced into a fake score.
+    expect(
+      composeCoworldDecision({
+        normalized,
+        message: { confidence: "high" },
+        slot: 0,
+        requestID: "req_1",
+        offeredLegalActionCount: 1,
+      }).metadata.confidence,
+    ).toBeUndefined();
   });
 });

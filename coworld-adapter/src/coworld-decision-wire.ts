@@ -283,3 +283,65 @@ export function normalizeDecisionResponse(
         : "Coworld player returned no reason.",
   };
 }
+
+/**
+ * The AgentDecision the league runner actually receives from a Coworld seat:
+ * the normalized wire selection PLUS the episode-local metadata envelope.
+ *
+ * Deliberately `NormalizedDecisionResponse & { metadata }` rather than a
+ * re-listed field set. Re-listing is exactly how the comms slot was lost once
+ * already — a decision field that is normalized but not composed is a field
+ * the league never sees.
+ */
+export interface ComposedCoworldDecision extends NormalizedDecisionResponse {
+  metadata: Record<string, unknown>;
+}
+
+/**
+ * Composes the resolved decision from the normalized selection and the
+ * episode-local facts the socket handler owns (slot, requestID, offered menu
+ * size, raw frame).
+ *
+ * Extracted from no-docker-coworld-episode.ts so it is TESTABLE: that file
+ * ends in a top-level `await main()` and requires `ws` at import time, so no
+ * test can import it, and the composition — the last hop before
+ * AgentLeagueMatch — was previously only ever reconstructed by hand in a test.
+ * A reconstruction cannot catch the real spread being replaced by explicit
+ * field picking, which is the drift class this guards.
+ *
+ * Pure: no I/O, no clock, no module state.
+ */
+export function composeCoworldDecision(input: {
+  normalized: NormalizedDecisionResponse;
+  /** The raw decision_response frame, for player-reported degradation flags. */
+  message: Record<string, unknown>;
+  slot: number;
+  requestID: string;
+  offeredLegalActionCount: number;
+}): ComposedCoworldDecision {
+  const { normalized, message, slot, requestID, offeredLegalActionCount } =
+    input;
+  return {
+    ...normalized,
+    metadata: {
+      brain: "coworld-websocket",
+      externalActionCall: true,
+      parseSuccess: true,
+      // Degradation flags come from the player on the wire — never assume
+      // health. A policy whose brain failed must show up in fallback_count
+      // and replays (the v1 bedrock seat failed silently for 60+ rounds
+      // because this was hardcoded false).
+      fallbackUsed: message.fallbackUsed === true,
+      ...(message.llmPlannerDegraded === true
+        ? { llmPlannerDegraded: true }
+        : {}),
+      coworldSlot: slot,
+      coworldRequestID: requestID,
+      rawProviderOutputPresent: true,
+      externalRawOutput: JSON.stringify(message).slice(0, 1000),
+      offeredLegalActionCount,
+      confidence:
+        typeof message.confidence === "number" ? message.confidence : undefined,
+    },
+  };
+}
