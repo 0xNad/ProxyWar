@@ -322,6 +322,203 @@ export function withKeystoneMessage(
   return { ...decision, messageActionID: move.id, messageText: move.text };
 }
 
+/**
+ * Structured deals for the house seat.
+ *
+ * Same shape of gap as the voice: the Commander/Executor emits no
+ * `dealActionID`, so keystone has never proposed, accepted or rejected a
+ * single deal. It is one of the 18-of-27 league policies that never answer,
+ * and those policies absorbed 94.9% of all expired proposals
+ * (`2026-08-16-deal-non-response-diagnosis.md`).
+ *
+ * The hard constraint shaping this policy: keystone's brain does not know
+ * deals exist, so ACCEPTING an obligation it will not honor is worse than
+ * silence — a proven violator poisons the trust evidence the whole social
+ * layer is meant to produce. Two rules follow.
+ *
+ * 1. Accept only what we can honor. `non_aggression_pact`/`trade_security_pact`
+ *    bind BOTH sides to abstain, so they are accepted only together with the
+ *    compliance guard below, which removes attacks/embargoes against that
+ *    partner from the menu before the brain ever sees them. `joint_attack`
+ *    puts the obligation on the PROPOSER only (`buildDealObligations`), so
+ *    accepting one costs us nothing. `support_request` demands donations from
+ *    the main action slot, which belongs to the Commander — so it is rejected,
+ *    explicitly.
+ * 2. Answer everything, always. An explicit reject is honest and closes the
+ *    loop; silent expiry is the defect measured across the league.
+ *
+ * We never withdraw our own unanswered offer — that was the deterministic
+ * starters' defect (PR #113), where 96.4% of withdrawals landed one step after
+ * the proposal and collapsed the recipient's answer window.
+ */
+const KEYSTONE_ABSTENTION_TEMPLATES = new Set([
+  "non_aggression_pact",
+  "trade_security_pact",
+]);
+const KEYSTONE_MAX_PROPOSALS_PER_RIVAL = 2;
+
+type KeystoneDealDeps = {
+  observation: AgentObservation;
+  legalActions: LegalAction[];
+  proposed: Set<string>;
+};
+
+function keystoneDealMetadata(action: LegalAction): {
+  dealID?: string;
+  recipientID?: string;
+  template?: string;
+} {
+  const metadata = action.metadata as
+    | { dealID?: unknown; recipientID?: unknown; template?: unknown }
+    | undefined;
+  return {
+    dealID: typeof metadata?.dealID === "string" ? metadata.dealID : undefined,
+    recipientID:
+      typeof metadata?.recipientID === "string"
+        ? metadata.recipientID
+        : undefined,
+    template:
+      typeof metadata?.template === "string" ? metadata.template : undefined,
+  };
+}
+
+/**
+ * Partners we owe an abstention to right now: every active deal carrying a
+ * pending `non_aggression`/`trade_security` obligation whose obligor is us.
+ */
+export function keystoneAbstentionPartners(
+  observation: AgentObservation,
+): Set<string> {
+  const ownID = observation.ownState?.playerID;
+  const partners = new Set<string>();
+  if (typeof ownID !== "string") return partners;
+  for (const deal of observation.deals?.activeDeals ?? []) {
+    for (const obligation of deal.obligations ?? []) {
+      if (
+        obligation.obligorPlayerID === ownID &&
+        obligation.status === "pending" &&
+        (obligation.kind === "non_aggression" ||
+          obligation.kind === "trade_security")
+      ) {
+        partners.add(
+          deal.proposerPlayerID === ownID
+            ? deal.recipientPlayerID
+            : deal.proposerPlayerID,
+        );
+      }
+    }
+  }
+  return partners;
+}
+
+/**
+ * Compliance guard. Keystone's brain cannot see deals, so the only way an
+ * accepted pact is actually honored is to remove the actions that would break
+ * it BEFORE the brain chooses. Only attacks and embargoes aimed at a partner
+ * we owe abstention to are withheld; everything else — including attacks on
+ * everyone else — is untouched, so the Commander keeps its full game.
+ */
+export function withoutKeystoneTreatyBreaches(
+  legalActions: LegalAction[],
+  observation: AgentObservation,
+): LegalAction[] {
+  const partners = keystoneAbstentionPartners(observation);
+  if (partners.size === 0) return legalActions;
+  const kept = legalActions.filter((action) => {
+    if (action.kind !== "attack" && action.kind !== "embargo") return true;
+    const metadata = action.metadata as { targetID?: unknown } | undefined;
+    const targetID =
+      typeof metadata?.targetID === "string" ? metadata.targetID : undefined;
+    return targetID === undefined || !partners.has(targetID);
+  });
+  // Never hand the brain an empty menu: a treaty is not worth a stalled seat.
+  return kept.length > 0 ? kept : legalActions;
+}
+
+/**
+ * One deal action per decision, in the sibling slot to the game action. Answer
+ * first (oldest deadline wins), propose only when there is nothing to answer.
+ */
+export function chooseKeystoneDealMove({
+  observation,
+  legalActions,
+  proposed,
+}: KeystoneDealDeps): LegalAction | null {
+  if (!observation.deals) return null;
+
+  const incoming = [...(observation.deals.incomingProposals ?? [])].sort(
+    (a, b) =>
+      (a.answerableThroughStep ?? 0) - (b.answerableThroughStep ?? 0) ||
+      String(a.dealID).localeCompare(String(b.dealID)),
+  );
+  if (incoming.length > 0) {
+    const proposal = incoming[0];
+    const template = proposal.terms?.template;
+    const proposerAlive = (observation.visiblePlayers ?? []).some(
+      (player) =>
+        player.playerID === proposal.proposerPlayerID && player.isAlive,
+    );
+    // `joint_attack` obligates the proposer only; abstention pacts we can hold
+    // because the guard enforces them. Everything else gets an honest no.
+    const accepts =
+      proposerAlive &&
+      (template === "joint_attack" ||
+        (typeof template === "string" &&
+          KEYSTONE_ABSTENTION_TEMPLATES.has(template)));
+    const wanted = accepts ? "deal_accept" : "deal_reject";
+    return (
+      legalActions.find(
+        (action) =>
+          action.kind === wanted &&
+          keystoneDealMetadata(action).dealID === proposal.dealID,
+      ) ?? null
+    );
+  }
+
+  // Propose a non-aggression pact to a bordering rival, at most twice per
+  // counterparty per match, and never while one is already open with them.
+  const openWith = new Set<string>();
+  for (const view of [
+    ...(observation.deals.outgoingProposals ?? []),
+    ...(observation.deals.activeDeals ?? []),
+  ]) {
+    openWith.add(view.recipientPlayerID);
+    openWith.add(view.proposerPlayerID);
+  }
+  for (const action of legalActions) {
+    if (action.kind !== "deal_propose") continue;
+    const { recipientID, template } = keystoneDealMetadata(action);
+    if (recipientID === undefined || template !== "non_aggression_pact") {
+      continue;
+    }
+    if (openWith.has(recipientID)) continue;
+    const spent =
+      Number(proposed.has(`${recipientID}:2`)) +
+      Number(proposed.has(`${recipientID}:1`)) +
+      Number(proposed.has(`${recipientID}:0`));
+    if (spent >= KEYSTONE_MAX_PROPOSALS_PER_RIVAL) continue;
+    const rival = (observation.visiblePlayers ?? []).find(
+      (player) => player.playerID === recipientID,
+    );
+    if (!rival?.sharesBorder || rival.isAllied || rival.isAlive === false) {
+      continue;
+    }
+    proposed.add(`${recipientID}:${spent}`);
+    return action;
+  }
+  return null;
+}
+
+/** Attaches a chosen deal action to the decision's dedicated deal slot. */
+export function withKeystoneDeal(
+  decision: AgentDecision,
+  move: LegalAction | null,
+): AgentDecision {
+  if (move === null) return decision;
+  if (typeof decision.dealActionID === "string") return decision;
+  return { ...decision, dealActionID: move.id };
+}
+
 export function requestToBrainInput(
   request: unknown,
   pinnedProfile?: AgentStrategyProfile,
@@ -493,6 +690,11 @@ export function decisionToResponse(
           selectedMessageActionId: decision.messageActionID,
           messageText: decision.messageText,
         }
+      : {}),
+    // Deal slot — same explicit-forwarding rule as the comms pair above.
+    ...(typeof decision.dealActionID === "string" &&
+    decision.dealActionID.length > 0
+      ? { selectedDealActionId: decision.dealActionID }
       : {}),
   };
 }
@@ -1047,6 +1249,8 @@ async function main(): Promise<void> {
   // Match-scoped comms memory: answered turns + per-rival lifetime reply
   // budget. One Set per connection, so it dies with the episode.
   const answeredMessages = new Set<string>();
+  // Match-scoped proposal budget, keyed `<recipientID>:<n>`.
+  const proposedDeals = new Set<string>();
   socket.on("message", (data: unknown) => {
     let message: {
       type?: unknown;
@@ -1089,16 +1293,36 @@ async function main(): Promise<void> {
         // Spawn ballots carry an all-spawn menu with no comms offers, and the
         // game suppresses the comms slot there anyway — so only an ordinary
         // decision is given a voice.
-        const decision =
-          spawnDecision ??
-          withKeystoneMessage(
-            await brain.decide(input),
-            chooseKeystoneMessageMove(
+        let decision: AgentDecision;
+        if (spawnDecision !== null) {
+          decision = spawnDecision;
+        } else {
+          // Honor first, then decide: treaty-breaking actions are withheld
+          // from the brain, so an accepted pact cannot be violated by a
+          // Commander that does not know it exists.
+          const compliantInput: AgentBrainInput = {
+            ...input,
+            legalActions: withoutKeystoneTreatyBreaches(
               input.legalActions,
               input.observation,
-              answeredMessages,
             ),
+          };
+          decision = withKeystoneDeal(
+            withKeystoneMessage(
+              await brain.decide(compliantInput),
+              chooseKeystoneMessageMove(
+                input.legalActions,
+                input.observation,
+                answeredMessages,
+              ),
+            ),
+            chooseKeystoneDealMove({
+              observation: input.observation,
+              legalActions: input.legalActions,
+              proposed: proposedDeals,
+            }),
           );
+        }
         response = decisionToResponse(
           requestID,
           decision,
