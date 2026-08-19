@@ -67,6 +67,20 @@ COPY src ./src
 COPY resources ./resources
 
 # --- player tree: the policy entrypoint ------------------------------------
+# The adapter's OWN dependencies must be installed here, not just its source.
+# `createBedrockProvider` resolves `@anthropic-ai/bedrock-sdk` by BARE specifier
+# through a dynamic import at first model call, and that package is declared in
+# coworld-adapter/package.json — NOT in the root manifest installed above. Ship
+# the source alone and the image builds clean, boots clean, prints a healthy
+# banner, and then fails EVERY model call with "Cannot find package
+# '@anthropic-ai/bedrock-sdk'" — silently degrading to the rule planner.
+# Verified 2026-08-19 by the in-pod diagnostic (PROXYWAR_KEYSTONE_BEDROCK_DIAG=1):
+# `key=set AWS_REGION=us-east-1 probe=Cannot find package '@anthropic-ai/bedrock-sdk'`
+# — credentials were fine all along; the library was simply absent.
+WORKDIR /app/integration
+COPY coworld-adapter/package.json coworld-adapter/package-lock.json ./
+RUN npm ci --ignore-scripts --omit=dev \
+    && npm cache clean --force
 COPY coworld-adapter/src /app/integration/src
 
 # WORKDIR IS LOAD-BEARING, NOT COSMETIC. The run command imports tsx by BARE
