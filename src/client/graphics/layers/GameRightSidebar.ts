@@ -1,9 +1,11 @@
 import { html, LitElement } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { assetUrl } from "../../../core/AssetUrls";
+import { isBroadcastReplayPresentation } from "../../../core/configuration/Colors";
 import { EventBus } from "../../../core/EventBus";
 import { GameType } from "../../../core/game/Game";
 import { GameView } from "../../../core/game/GameView";
+import { isAiLeagueReplayRoute } from "../../AiLeagueReplayMode";
 import { crazyGamesSDK } from "../../CrazyGamesSDK";
 import {
   CloseViewEvent,
@@ -16,7 +18,6 @@ import {
   type ReplayTurnProgress,
 } from "../../LocalServer";
 import { PauseGameIntentEvent, SendWinnerEvent } from "../../Transport";
-import { isAiLeagueReplayRoute } from "../../AiLeagueReplayMode";
 import {
   defaultReplaySpeedMultiplier,
   ReplaySpeedMultiplier,
@@ -120,10 +121,8 @@ export class GameRightSidebar extends LitElement implements Layer {
     if (!isAiLeagueReplayRoute() || !this.game?.config()?.isReplay()) {
       return defaultReplaySpeedMultiplier;
     }
-    const staticBroadcast =
-      (window as typeof window & { __PROXYWAR_STATIC_REPLAY__?: boolean })
-        .__PROXYWAR_STATIC_REPLAY__ === true;
-    return staticBroadcast
+    const broadcastPresentation = isBroadcastReplayPresentation();
+    return broadcastPresentation
       ? ReplaySpeedMultiplier.fast
       : ReplaySpeedMultiplier.fastest;
   }

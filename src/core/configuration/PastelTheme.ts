@@ -8,7 +8,7 @@ import {
   botColors,
   fallbackColors,
   humanColors,
-  isStaticReplayBroadcast,
+  isBroadcastReplayPresentation,
   nationColors,
   REPLAY_SEAT_COLORS,
 } from "./Colors";
@@ -21,20 +21,26 @@ export class PastelTheme implements Theme {
   private nationColorAllocator = new ColorAllocator(nationColors, nationColors);
 
   /**
-   * The player-territory allocator, replay-gated (see REPLAY_SEAT_COLORS in
-   * Colors.ts for the full audit rationale): in the static replay broadcast
+   * The player-territory allocator, broadcast-gated (see REPLAY_SEAT_COLORS in
+   * Colors.ts for the full audit rationale): on a broadcast presentation plane
    * the 16 seats come from the validated OKLCH palette IN ORDER (seat
    * N % 16 for colour-index N — the seatOrder constructor arg), because the
    * stock list sampled as raw daisyUI/Tailwind values with two violets, two
    * map-scale-identical blues, and a uniform pastel value. Outside the
    * broadcast this is exactly the stock allocator.
    *
-   * Built lazily (not a field initializer) so the flag is read on the first
-   * territoryColor() call — after the broadcast host page has set
-   * window.__PROXYWAR_STATIC_REPLAY__ — rather than whenever the theme
-   * singletons in DefaultConfig happen to be constructed. Same lazy-read
-   * idiom as UserSettings.darkMode(). PastelThemeDark inherits this, so
-   * both light and dark themes are covered.
+   * BOTH planes, not just the offline bundle. This read used to be the
+   * static-replay BUILD flag, which meant the Observatory showed the audited
+   * seat palette while proxywar.xyz showed stock pastels for the very same
+   * match — half the operator's 2026-08-19 "colours are not right" report,
+   * the other half being the daylight theme underneath them.
+   * `isBroadcastReplayPresentation()` is the plane; see its doc.
+   *
+   * Built lazily (not a field initializer) so the plane is read on the first
+   * territoryColor() call — after the shell has decided it — rather than
+   * whenever the theme singletons in DefaultConfig happen to be constructed.
+   * Same lazy-read idiom as UserSettings.darkMode(). PastelThemeDark inherits
+   * this, so both light and dark themes are covered.
    *
    * Border/structure colours need no changes: PlayerView derives its border
    * via theme.borderColor(territoryColor) (darken 0.125) and
@@ -46,7 +52,7 @@ export class PastelTheme implements Theme {
   private humanColorAllocator(): ColorAllocator {
     // Fallback list is irrelevant in seatOrder mode (seats wrap modulo 16
     // and the fallback path is never reached), hence the empty array.
-    this.humanColorAllocatorInstance ??= isStaticReplayBroadcast()
+    this.humanColorAllocatorInstance ??= isBroadcastReplayPresentation()
       ? new ColorAllocator(REPLAY_SEAT_COLORS, [], REPLAY_SEAT_COLORS)
       : new ColorAllocator(humanColors, fallbackColors);
     return this.humanColorAllocatorInstance;

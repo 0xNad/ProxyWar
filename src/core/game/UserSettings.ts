@@ -167,17 +167,35 @@ export class UserSettings {
     // the sixteen territory colours the viewer is there to read; the engine's
     // own PastelThemeDark (near-black water, muted land) is exactly the
     // "lit world in a dark operations centre" the broadcast wants. Keyed on
-    // the static-replay build flag — never true in live play — and not
+    // the broadcast presentation plane — never true in live play — and not
     // persisted, so it cannot leak into a player's saved preference.
+    //
+    // BOTH globals, deliberately. This used to read the static-replay BUILD
+    // flag alone, so only the Coworld Observatory's offline bundle ever got
+    // the dark theme: proxywar.xyz served the very same archived match from
+    // the production build in broad daylight (operator, 2026-08-19, "it is
+    // also in day mode vs night mode"). `__PROXYWAR_BROADCAST_REPLAY__`
+    // (index.html) is the plane rather than the build, and covers both.
+    //
+    // Read inline rather than through `isBroadcastReplayPresentation()` in
+    // ../configuration/Colors.ts — held in lockstep with it by test — because
+    // this module is constructed on the simulation side and has no business
+    // dragging the colour library into that graph.
+    //
     // typeof-guarded like the sibling in Colors.ts: this file lives in core/,
     // one refactor away from being constructed inside the worker, where a bare
     // `window` reference is a ReferenceError that kills the sim thread.
-    if (
-      typeof window !== "undefined" &&
-      (window as typeof window & { __PROXYWAR_STATIC_REPLAY__?: boolean })
-        .__PROXYWAR_STATIC_REPLAY__ === true
-    ) {
-      return true;
+    if (typeof window !== "undefined") {
+      const broadcastWindow = window as typeof window & {
+        __PROXYWAR_STATIC_REPLAY__?: boolean;
+        __PROXYWAR_BROADCAST_REPLAY__?: boolean;
+      };
+      if (
+        broadcastWindow.__PROXYWAR_STATIC_REPLAY__ === true ||
+        broadcastWindow.__PROXYWAR_BROADCAST_REPLAY__ === true
+      ) {
+        return true;
+      }
     }
     return this.getBool(DARK_MODE_KEY, false);
   }

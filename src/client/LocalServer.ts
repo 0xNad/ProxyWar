@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isBroadcastReplayPresentation } from "../core/configuration/Colors";
 import { EventBus, EventConstructor, GameEvent } from "../core/EventBus";
 import {
   AllPlayersStats,
@@ -507,10 +508,8 @@ export class LocalServer {
     // The broadcast opens at 2x: dead time is collapsed but every beat still
     // reads (the L20 rule — speed collapses the idle, never the beat). The
     // speed control still offers fastest to anyone who wants the skim.
-    const staticBroadcast =
-      (window as typeof window & { __PROXYWAR_STATIC_REPLAY__?: boolean })
-        .__PROXYWAR_STATIC_REPLAY__ === true;
-    this.replaySpeedMultiplier = staticBroadcast
+    const broadcastPresentation = isBroadcastReplayPresentation();
+    this.replaySpeedMultiplier = broadcastPresentation
       ? ReplaySpeedMultiplier.fast
       : ReplaySpeedMultiplier.fastest;
   }
