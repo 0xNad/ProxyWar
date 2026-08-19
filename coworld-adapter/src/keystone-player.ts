@@ -434,12 +434,15 @@ export function keystoneAbstentionPartners(observation: AgentObservation): {
  * the brain chooses.
  *
  * The withheld set MIRRORS THE REFEREE, rule for rule — see
- * `hostileActionAgainst`/`embargoActionAgainst` in
+ * `validatedHostileActionAgainst`/`validatedManualEmbargoAgainst` in
  * `src/server/agents/AgentDealCompliance.ts`. An earlier version filtered only
  * `attack` and `embargo`; review measured that against real
  * planner-executor artifacts and found the three missing shapes are 380 of 910
  * hostile actions (42%), with naval invasions OUTNUMBERING land attacks in a
- * league-representative episode. Keystone would have pacted exactly the
+ * league-representative episode (measured by the 2026-08-19 independent
+ * review over planner-executor `decisions.jsonl` under `artifacts/`, incl.
+ * `xpreq-coworld-2026-07-27T13-50-01-751Z-9d4448c8`; recorded in the
+ * decision log). Keystone would have pacted exactly the
  * bordering seats it then boats and nukes, and each breach publishes a
  * `betrayal`-toned VERDICT into the public reliability aggregate. If a new
  * violation shape is ever added to the referee, it must be added here.
@@ -479,7 +482,14 @@ export function withoutKeystoneTreatyBreaches(
           metadata?.expansion === false
         );
       case "embargo":
-        return !(aimedAtPartner && metadata?.action === "start");
+        // The referee judges a targeted embargo ONLY under a trade-security
+        // obligation (`validatedManualEmbargoAgainst` is gated on it), so a
+        // plain non-aggression pact must not cost the Commander this move.
+        return !(
+          tradeSecurityHeld &&
+          aimedAtPartner &&
+          metadata?.action === "start"
+        );
       case "embargo_all":
         // Target-independent: one pending trade-security pact bans it.
         return !(tradeSecurityHeld && metadata?.action === "start");

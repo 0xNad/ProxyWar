@@ -317,10 +317,6 @@ describe("keystone treaty compliance guard", () => {
     const kept = withoutKeystoneTreatyBreaches(
       [
         action("attack", "attack:partner", { targetID: "partner" }),
-        action("embargo", "embargo:partner", {
-          targetID: "partner",
-          action: "start",
-        }),
         action("attack", "attack:other", { targetID: "other" }),
         action("build", "build:city"),
       ],
@@ -329,8 +325,42 @@ describe("keystone treaty compliance guard", () => {
     expect(kept).toEqual(["attack:other", "build:city"]);
   });
 
+  it("withholds a targeted embargo only under a trade-security pact", () => {
+    const tradePact = observation({
+      active: [
+        {
+          dealID: "d9",
+          proposerPlayerID: "me",
+          recipientPlayerID: "partner",
+          obligations: [
+            {
+              obligorPlayerID: "me",
+              kind: "trade_security",
+              status: "pending",
+            },
+          ],
+        },
+      ],
+      rivals: [liveRival("partner")],
+    });
+    const menu = [
+      action("embargo", "embargo:partner", {
+        targetID: "partner",
+        action: "start",
+      }),
+      action("embargo", "embargo:stop", {
+        targetID: "partner",
+        action: "stop",
+      }),
+      action("hold", "hold"),
+    ];
+    expect(
+      withoutKeystoneTreatyBreaches(menu, tradePact).map((a) => a.id),
+    ).toEqual(["embargo:stop", "hold"]);
+  });
+
   // The three shapes an earlier guard missed. The referee counts each as a
-  // pact breach (AgentDealCompliance hostileActionAgainst/embargoActionAgainst),
+  // pact breach (AgentDealCompliance validatedHostileActionAgainst/validatedManualEmbargoAgainst),
   // and in real planner-executor artifacts they are 380 of 910 hostile actions
   // — naval invasions alone outnumber land attacks in a league-representative
   // episode. Every one of these must fail if the guard stops mirroring the
@@ -400,16 +430,22 @@ describe("keystone treaty compliance guard", () => {
         tradePact,
       ).map((a) => a.id),
     ).toEqual(["hold"]);
-    // A non-aggression pact does not bind trade, so the same action survives.
+    // A non-aggression pact binds neither embargo shape: the referee gates
+    // BOTH embargo rules behind a trade-security obligation, so withholding
+    // them under a plain pact would cost the Commander a legal move.
     expect(
       withoutKeystoneTreatyBreaches(
         [
           action("embargo_all", "embargo_all:start", { action: "start" }),
+          action("embargo", "embargo:partner", {
+            targetID: "partner",
+            action: "start",
+          }),
           action("build", "build:city"),
         ],
         pactObservation,
       ).map((a) => a.id),
-    ).toEqual(["embargo_all:start", "build:city"]);
+    ).toEqual(["embargo_all:start", "embargo:partner", "build:city"]);
   });
 
   // The referee exempts expansion attacks, so withholding them would cost the
@@ -466,10 +502,18 @@ describe("keystone treaty compliance guard", () => {
       ],
       rivals: [liveRival("partner")],
     });
+    // Trailing `hold` again: with a single-action menu the filtered list
+    // empties and the never-empty fallback returns the SAME array identity, so
+    // `toBe(actions)` would pass even with the pending check deleted — which
+    // would freeze keystone into permanent abstention against every seat it
+    // ever pacted with, on green CI.
     const actions = [
       action("attack", "attack:partner", { targetID: "partner" }),
+      action("hold", "hold"),
     ];
-    expect(withoutKeystoneTreatyBreaches(actions, settled)).toBe(actions);
+    expect(
+      withoutKeystoneTreatyBreaches(actions, settled).map((a) => a.id),
+    ).toEqual(["attack:partner", "hold"]);
   });
 });
 
