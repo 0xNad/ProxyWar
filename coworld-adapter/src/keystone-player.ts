@@ -326,10 +326,19 @@ export function withKeystoneMessage(
  * Structured deals for the house seat.
  *
  * Same shape of gap as the voice: the Commander/Executor emits no
- * `dealActionID`, so keystone has never proposed, accepted or rejected a
- * single deal. It is one of the 18-of-27 league policies that never answer,
- * and those policies absorbed 94.9% of all expired proposals
+ * `dealActionID`, so keystone never uses the dedicated DEAL SLOT, and the
+ * league measured 18 of 27 policies never answering a proposal — those
+ * policies absorbed 94.9% of every expired offer
  * (`2026-08-16-deal-non-response-diagnosis.md`).
+ *
+ * Residual exposure, stated rather than assumed: deal meta-actions are also
+ * scored as ordinary `diplomacy` candidates by the planner
+ * (`moduleForActionKind`), and the runner applies one chosen in the PRIMARY
+ * slot via `applyDealAction`. So the brain can still play a deal on its own —
+ * including accepting a `support_request` obligation this policy would refuse
+ * — and when it does while the slot below is also filled, the slot is refused
+ * and stamped `dealSlotRejected`. Whether that actually happens in hosted
+ * keystone play is UNVERIFIED; it is a known gap, not a claim of "never".
  *
  * The hard constraint shaping this policy: keystone's brain does not know
  * deals exist, so ACCEPTING an obligation it will not honor is worse than
@@ -386,12 +395,19 @@ function keystoneDealMetadata(action: LegalAction): {
  * Partners we owe an abstention to right now: every active deal carrying a
  * pending `non_aggression`/`trade_security` obligation whose obligor is us.
  */
-export function keystoneAbstentionPartners(
-  observation: AgentObservation,
-): Set<string> {
+export function keystoneAbstentionPartners(observation: AgentObservation): {
+  /** Partners protected from targeted aggression (both pact kinds). */
+  partners: Set<string>;
+  /**
+   * True while ANY pending `trade_security` obligation is ours. `embargo_all`
+   * is judged target-independently, so one such pact bans it outright.
+   */
+  tradeSecurityHeld: boolean;
+} {
   const ownID = observation.ownState?.playerID;
   const partners = new Set<string>();
-  if (typeof ownID !== "string") return partners;
+  let tradeSecurityHeld = false;
+  if (typeof ownID !== "string") return { partners, tradeSecurityHeld };
   for (const deal of observation.deals?.activeDeals ?? []) {
     for (const obligation of deal.obligations ?? []) {
       if (
@@ -405,33 +421,75 @@ export function keystoneAbstentionPartners(
             ? deal.recipientPlayerID
             : deal.proposerPlayerID,
         );
+        if (obligation.kind === "trade_security") tradeSecurityHeld = true;
       }
     }
   }
-  return partners;
+  return { partners, tradeSecurityHeld };
 }
 
 /**
  * Compliance guard. Keystone's brain cannot see deals, so the only way an
- * accepted pact is actually honored is to remove the actions that would break
- * it BEFORE the brain chooses. Only attacks and embargoes aimed at a partner
- * we owe abstention to are withheld; everything else — including attacks on
- * everyone else — is untouched, so the Commander keeps its full game.
+ * accepted pact is actually honored is to remove the breaching actions BEFORE
+ * the brain chooses.
+ *
+ * The withheld set MIRRORS THE REFEREE, rule for rule — see
+ * `hostileActionAgainst`/`embargoActionAgainst` in
+ * `src/server/agents/AgentDealCompliance.ts`. An earlier version filtered only
+ * `attack` and `embargo`; review measured that against real
+ * planner-executor artifacts and found the three missing shapes are 380 of 910
+ * hostile actions (42%), with naval invasions OUTNUMBERING land attacks in a
+ * league-representative episode. Keystone would have pacted exactly the
+ * bordering seats it then boats and nukes, and each breach publishes a
+ * `betrayal`-toned VERDICT into the public reliability aggregate. If a new
+ * violation shape is ever added to the referee, it must be added here.
+ *
+ * Expansion carve-outs are copied deliberately: the referee does not count an
+ * expansion attack or an expansion boat as a breach, so neither does the
+ * guard — withholding them would cost the Commander moves it is entitled to.
  */
 export function withoutKeystoneTreatyBreaches(
   legalActions: LegalAction[],
   observation: AgentObservation,
 ): LegalAction[] {
-  const partners = keystoneAbstentionPartners(observation);
+  const { partners, tradeSecurityHeld } =
+    keystoneAbstentionPartners(observation);
   if (partners.size === 0) return legalActions;
   const kept = legalActions.filter((action) => {
-    if (action.kind !== "attack" && action.kind !== "embargo") return true;
-    const metadata = action.metadata as { targetID?: unknown } | undefined;
+    const metadata = action.metadata as
+      | {
+          targetID?: unknown;
+          expansion?: unknown;
+          navalInvasion?: unknown;
+          action?: unknown;
+        }
+      | undefined;
     const targetID =
       typeof metadata?.targetID === "string" ? metadata.targetID : undefined;
-    return targetID === undefined || !partners.has(targetID);
+    const aimedAtPartner = targetID !== undefined && partners.has(targetID);
+    switch (action.kind) {
+      case "attack":
+        return !(aimedAtPartner && metadata?.expansion !== true);
+      case "nuke":
+        return !aimedAtPartner;
+      case "boat":
+        return !(
+          aimedAtPartner &&
+          metadata?.navalInvasion === true &&
+          metadata?.expansion === false
+        );
+      case "embargo":
+        return !(aimedAtPartner && metadata?.action === "start");
+      case "embargo_all":
+        // Target-independent: one pending trade-security pact bans it.
+        return !(tradeSecurityHeld && metadata?.action === "start");
+      default:
+        return true;
+    }
   });
   // Never hand the brain an empty menu: a treaty is not worth a stalled seat.
+  // Unreachable against a real menu — LegalActionBuilder always appends
+  // `hold`, which is never filtered — so this cannot silently license a breach.
   return kept.length > 0 ? kept : legalActions;
 }
 
@@ -1300,28 +1358,51 @@ async function main(): Promise<void> {
           // Honor first, then decide: treaty-breaking actions are withheld
           // from the brain, so an accepted pact cannot be violated by a
           // Commander that does not know it exists.
-          const compliantInput: AgentBrainInput = {
-            ...input,
-            legalActions: withoutKeystoneTreatyBreaches(
+          let compliantActions = input.legalActions;
+          try {
+            compliantActions = withoutKeystoneTreatyBreaches(
               input.legalActions,
               input.observation,
-            ),
+            );
+          } catch (guardError) {
+            // Fail OPEN on the menu (the brain still plays) but say so: a
+            // silent unfiltered menu is how a pact gets broken unnoticed.
+            console.error(
+              `keystone treaty guard skipped, menu unfiltered: ${guardError instanceof Error ? guardError.message : String(guardError)}`,
+            );
+          }
+          const compliantInput: AgentBrainInput = {
+            ...input,
+            legalActions: compliantActions,
           };
-          decision = withKeystoneDeal(
-            withKeystoneMessage(
-              await brain.decide(compliantInput),
-              chooseKeystoneMessageMove(
-                input.legalActions,
-                input.observation,
-                answeredMessages,
+          const decided = await brain.decide(compliantInput);
+          // The social slots are cosmetic relative to the game action: a bug
+          // in either chooser must never discard an already-valid decision and
+          // stamp it degraded, which would pollute the very degradation
+          // telemetry this project tracks.
+          let socialDecision = decided;
+          try {
+            socialDecision = withKeystoneDeal(
+              withKeystoneMessage(
+                decided,
+                chooseKeystoneMessageMove(
+                  input.legalActions,
+                  input.observation,
+                  answeredMessages,
+                ),
               ),
-            ),
-            chooseKeystoneDealMove({
-              observation: input.observation,
-              legalActions: input.legalActions,
-              proposed: proposedDeals,
-            }),
-          );
+              chooseKeystoneDealMove({
+                observation: input.observation,
+                legalActions: input.legalActions,
+                proposed: proposedDeals,
+              }),
+            );
+          } catch (socialError) {
+            console.error(
+              `keystone social slots skipped: ${socialError instanceof Error ? socialError.message : String(socialError)}`,
+            );
+          }
+          decision = socialDecision;
         }
         response = decisionToResponse(
           requestID,

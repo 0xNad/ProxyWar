@@ -308,7 +308,7 @@ describe("keystone treaty compliance guard", () => {
   });
 
   it("identifies the partners we owe abstention to", () => {
-    expect([...keystoneAbstentionPartners(pactObservation)]).toEqual([
+    expect([...keystoneAbstentionPartners(pactObservation).partners]).toEqual([
       "partner",
     ]);
   });
@@ -317,13 +317,119 @@ describe("keystone treaty compliance guard", () => {
     const kept = withoutKeystoneTreatyBreaches(
       [
         action("attack", "attack:partner", { targetID: "partner" }),
-        action("embargo", "embargo:partner", { targetID: "partner" }),
+        action("embargo", "embargo:partner", {
+          targetID: "partner",
+          action: "start",
+        }),
         action("attack", "attack:other", { targetID: "other" }),
         action("build", "build:city"),
       ],
       pactObservation,
     ).map((a) => a.id);
     expect(kept).toEqual(["attack:other", "build:city"]);
+  });
+
+  // The three shapes an earlier guard missed. The referee counts each as a
+  // pact breach (AgentDealCompliance hostileActionAgainst/embargoActionAgainst),
+  // and in real planner-executor artifacts they are 380 of 910 hostile actions
+  // — naval invasions alone outnumber land attacks in a league-representative
+  // episode. Every one of these must fail if the guard stops mirroring the
+  // referee.
+  it("withholds a NUCLEAR STRIKE on a pact partner", () => {
+    const kept = withoutKeystoneTreatyBreaches(
+      [
+        action("nuke", "nuke:partner", { targetID: "partner" }),
+        action("nuke", "nuke:other", { targetID: "other" }),
+      ],
+      pactObservation,
+    ).map((a) => a.id);
+    expect(kept).toEqual(["nuke:other"]);
+  });
+
+  it("withholds a NAVAL INVASION on a pact partner but keeps expansion boats", () => {
+    const kept = withoutKeystoneTreatyBreaches(
+      [
+        action("boat", "boat:invade:partner", {
+          targetID: "partner",
+          navalInvasion: true,
+          expansion: false,
+        }),
+        action("boat", "boat:expand:partner", {
+          targetID: "partner",
+          navalInvasion: true,
+          expansion: true,
+        }),
+        action("boat", "boat:invade:other", {
+          targetID: "other",
+          navalInvasion: true,
+          expansion: false,
+        }),
+      ],
+      pactObservation,
+    ).map((a) => a.id);
+    expect(kept).toEqual(["boat:expand:partner", "boat:invade:other"]);
+  });
+
+  it("withholds embargo_all while a trade-security pact is held, since it breaks every one at once", () => {
+    const tradePact = observation({
+      active: [
+        {
+          dealID: "d2",
+          proposerPlayerID: "me",
+          recipientPlayerID: "partner",
+          obligations: [
+            {
+              obligorPlayerID: "me",
+              kind: "trade_security",
+              status: "pending",
+            },
+          ],
+        },
+      ],
+      rivals: [liveRival("partner")],
+    });
+    // `hold` stands in for LegalActionBuilder's unconditional trailing hold —
+    // without it the menu would empty and the never-empty fallback (rightly)
+    // returns everything.
+    expect(
+      withoutKeystoneTreatyBreaches(
+        [
+          action("embargo_all", "embargo_all:start", { action: "start" }),
+          action("hold", "hold"),
+        ],
+        tradePact,
+      ).map((a) => a.id),
+    ).toEqual(["hold"]);
+    // A non-aggression pact does not bind trade, so the same action survives.
+    expect(
+      withoutKeystoneTreatyBreaches(
+        [
+          action("embargo_all", "embargo_all:start", { action: "start" }),
+          action("build", "build:city"),
+        ],
+        pactObservation,
+      ).map((a) => a.id),
+    ).toEqual(["embargo_all:start", "build:city"]);
+  });
+
+  // The referee exempts expansion attacks, so withholding them would cost the
+  // Commander moves it is entitled to.
+  it("keeps expansion attacks on a pact partner, which the referee does not judge", () => {
+    const kept = withoutKeystoneTreatyBreaches(
+      [
+        action("attack", "attack:expand:partner", {
+          targetID: "partner",
+          expansion: true,
+        }),
+        // Stands in for the builder's trailing `hold`. Without it the filtered
+        // menu would empty and the never-empty fallback would return the
+        // original list — which silently passes this assertion even when the
+        // expansion carve-out is gone (caught by mutation testing).
+        action("hold", "hold"),
+      ],
+      pactObservation,
+    ).map((a) => a.id);
+    expect(kept).toEqual(["attack:expand:partner", "hold"]);
   });
 
   it("leaves the menu untouched when we owe nobody", () => {
@@ -350,7 +456,11 @@ describe("keystone treaty compliance guard", () => {
           proposerPlayerID: "partner",
           recipientPlayerID: "me",
           obligations: [
-            { obligorPlayerID: "me", kind: "non_aggression", status: "kept" },
+            {
+              obligorPlayerID: "me",
+              kind: "non_aggression",
+              status: "fulfilled",
+            },
           ],
         },
       ],

@@ -4,6 +4,7 @@ import {
   decisionToResponse,
   withKeystoneMessage,
 } from "../../coworld-adapter/src/keystone-player";
+import { validateAgentMessageDecision } from "../../src/server/agents/AgentDecisionValidator";
 import type {
   AgentDecision,
   AgentObservation,
@@ -155,6 +156,61 @@ describe("keystone free-text voice", () => {
     // rival-a is exhausted; rival-b borders us and is unwritten — but an
     // unanswered inbound must not be stepped over to start a new conversation.
     expect(chooseKeystoneMessageMove(actions, obs(500), answered)).toBeNull();
+  });
+
+  // Round-trip through the REAL validator: keystone's canned lines are the
+  // only text our champion will ever publish, and the validator rejects
+  // (never trims) control, bidi and zero-width characters. Reading them is
+  // not proof; this is.
+  it("every canned line survives the server-side message validator", () => {
+    const rivals = ["rival-a"];
+    const cases: Array<{ inbound?: boolean; allied?: boolean }> = [
+      { inbound: true },
+      { inbound: true, allied: true },
+      { inbound: false },
+    ];
+    const seen = new Set<string>();
+    for (const testCase of cases) {
+      const move = chooseKeystoneMessageMove(
+        [messageOffer("rival-a")],
+        observation({
+          inbound: testCase.inbound
+            ? [{ senderID: "rival-a", turnNumber: 10 }]
+            : [],
+          rivals: rivals.map((id) => ({
+            playerID: id,
+            sharesBorder: true,
+            isAllied: testCase.allied === true,
+          })),
+        }),
+        new Set(),
+      );
+      if (move === null) continue;
+      seen.add(move.text);
+      const validation = validateAgentMessageDecision(
+        { messageActionID: move.id, messageText: move.text } as never,
+        [
+          {
+            id: move.id,
+            kind: "message",
+            label: "m",
+            intent: null,
+            risk: { level: "none", score: 0 },
+            metadata: { recipientID: "rival-a" },
+          } as never,
+        ],
+      );
+      // Narrow rather than optional-chain: the failure arm carries `reason`,
+      // and asserting through `?.` would pass vacuously if it ever failed.
+      expect(validation).not.toBeNull();
+      if (validation === null || validation.ok !== true) {
+        throw new Error(
+          `validator rejected a canned line: ${validation === null ? "null" : validation.reason}`,
+        );
+      }
+      expect(validation.text).toBe(move.text);
+    }
+    expect(seen.size).toBeGreaterThan(1);
   });
 
   it("attaches the pair to a decision without clobbering a brain that already spoke", () => {
