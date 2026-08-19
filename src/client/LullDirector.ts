@@ -1,3 +1,4 @@
+import { isBroadcastReplayPresentation } from "../core/configuration/Colors";
 import { EventBus } from "../core/EventBus";
 import { GameType } from "../core/game/Game";
 import { GameRecord } from "../core/Schemas";
@@ -307,10 +308,8 @@ class LullDirector {
     this.eventBus = options.eventBus;
     this.allowIntroSkip = options.allowIntroSkip;
     this.totalTurns = options.gameRecord.info.num_turns;
-    const staticBroadcast =
-      (window as typeof window & { __PROXYWAR_STATIC_REPLAY__?: boolean })
-        .__PROXYWAR_STATIC_REPLAY__ === true;
-    this.viewerSpeed = staticBroadcast
+    const broadcastPresentation = isBroadcastReplayPresentation();
+    this.viewerSpeed = broadcastPresentation
       ? ReplaySpeedMultiplier.fast
       : ReplaySpeedMultiplier.fastest;
     mountLullStyles();

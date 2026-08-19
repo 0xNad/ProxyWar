@@ -2,7 +2,7 @@ import { Colord, colord } from "colord";
 import { PseudoRandom } from "../PseudoRandom";
 import { TerrainType } from "../game/Game";
 import { GameMap, TileRef } from "../game/GameMap";
-import { isStaticReplayBroadcast } from "./Colors";
+import { isBroadcastReplayPresentation } from "./Colors";
 import { PastelTheme } from "./PastelTheme";
 
 /** v5 lowland biome palette — see situationTerrainColor's comment. */
@@ -15,7 +15,11 @@ function mixRgb(
   b: [number, number, number],
   t: number,
 ): [number, number, number] {
-  return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+  return [
+    a[0] + (b[0] - a[0]) * t,
+    a[1] + (b[1] - a[1]) * t,
+    a[2] + (b[2] - a[2]) * t,
+  ];
 }
 
 function segRgb(
@@ -124,14 +128,14 @@ export class PastelThemeDark extends PastelTheme {
   private opsFalloutRand = new PseudoRandom(9174);
 
   falloutColor(): Colord {
-    if (isStaticReplayBroadcast()) {
+    if (isBroadcastReplayPresentation()) {
       return this.opsFalloutRand.randElement(this.opsFalloutColors);
     }
     return super.falloutColor();
   }
 
   terrainColor(gm: GameMap, tile: TileRef): Colord {
-    if (isStaticReplayBroadcast()) {
+    if (isBroadcastReplayPresentation()) {
       return this.situationTerrainColor(gm, tile);
     }
     const mag = gm.magnitude(tile);

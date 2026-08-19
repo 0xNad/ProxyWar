@@ -1,6 +1,6 @@
-import { isStaticReplayBroadcast } from "../../../core/configuration/Colors";
 import { PriorityQueue } from "@datastructures-js/priority-queue";
 import { Colord } from "colord";
+import { isBroadcastReplayPresentation } from "../../../core/configuration/Colors";
 import { Theme } from "../../../core/configuration/Config";
 import { EventBus } from "../../../core/EventBus";
 import {
@@ -597,7 +597,7 @@ export class TerritoryLayer implements Layer {
         // theme was returning correct charcoal with the muddiness introduced
         // at this composite. 210 lets the seat read true while the relief
         // still whispers through. Live play keeps 150 exactly.
-        isStaticReplayBroadcast() ? 210 : 150,
+        isBroadcastReplayPresentation() ? 210 : 150,
       );
     }
   }

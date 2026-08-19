@@ -161,6 +161,7 @@ import "./styles/modal/chat.css";
 // shared `styles.css` so it never leaks into the public app's pages
 // (`PublicApp.ts` imports `styles.css` too, but NOT this file). See the
 // stylesheet's own header comment for why.
+import { isBroadcastReplayPresentation } from "../core/configuration/Colors";
 import "./styles/game-shell-scroll-lock.css";
 
 /**
@@ -2629,12 +2630,10 @@ class Client {
           // skim speed — same rule as LocalServer.applyArchivedReplayDefault-
           // Speed(), applied on both sides of the emit/subscribe race that
           // function's doc describes.
-          const staticBroadcast =
-            (window as typeof window & { __PROXYWAR_STATIC_REPLAY__?: boolean })
-              .__PROXYWAR_STATIC_REPLAY__ === true;
+          const broadcastPresentation = isBroadcastReplayPresentation();
           this.eventBus.emit(
             new ReplaySpeedChangeEvent(
-              staticBroadcast
+              broadcastPresentation
                 ? ReplaySpeedMultiplier.fast
                 : ReplaySpeedMultiplier.fastest,
               "auto",

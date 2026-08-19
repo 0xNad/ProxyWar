@@ -282,6 +282,33 @@
         isCoworldRoute("/client/global") ||
         isCoworldRoute("/client/replay") ||
         isCoworldRoute("/client/player");
+      // THE BROADCAST PRESENTATION PLANE.
+      //
+      // The static-replay bundle -- what the Coworld Observatory serves -- is
+      // not the only broadcast surface any more. proxywar.xyz replays the SAME
+      // archived matches from its own routes off the ordinary production
+      // build, where __PROXYWAR_STATIC_REPLAY__ is false by construction
+      // (vite.config.ts sets `staticReplay` only for mode "static-replay";
+      // RenderHtml.ts always passes false). Every look-and-feel gate keyed on
+      // that BUILD flag therefore excluded our own hosted replays and the two
+      // planes drifted visibly apart: daylight basemap instead of the ops-room
+      // dark theme, stock territory colours instead of the 16-seat broadcast
+      // palette, 150/255 fill instead of 210, and the analyst skim speed
+      // instead of the watchable 2x that lets a nuke bloom and a war-room beat
+      // be read at all.
+      //
+      // Decided HERE, in the shell, for the same reason the flag above is:
+      // the theme, the colour allocator and the opening speed are all read
+      // lazily but exactly once, and the first read can happen before any
+      // module has a chance to look at the route.
+      //
+      // /client/player is deliberately NOT a broadcast surface: a human plays
+      // there, live, and live play keeps stock behaviour. The static build
+      // still wins outright, so an offline bundle can never be demoted by the
+      // path it happens to be opened at.
+      window.__PROXYWAR_BROADCAST_REPLAY__ =
+        window.__PROXYWAR_STATIC_REPLAY__ ||
+        (window.__PROXYWAR_AI_REPLAY__ && !isCoworldRoute("/client/player"));
       if (window.__PROXYWAR_AI_REPLAY__) {
         document.documentElement.classList.add(
           "proxywar-replay-route",

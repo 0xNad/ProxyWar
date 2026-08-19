@@ -129,6 +129,43 @@ export function isStaticReplayBroadcast(): boolean {
   return w.__PROXYWAR_STATIC_REPLAY__ === true;
 }
 
+/**
+ * True on every surface that presents an archived match AS A BROADCAST —
+ * the offline static bundle the Coworld Observatory serves AND proxywar.xyz's
+ * own hosted replay routes, which play the identical records off the ordinary
+ * production build.
+ *
+ * Why this exists rather than `isStaticReplayBroadcast()` alone: that one
+ * reports a BUILD MODE (`vite.config.ts`, mode "static-replay"), and every
+ * presentation gate that keyed on it was accidentally scoped to one of the two
+ * planes. The observatory got the ops-room look; proxywar.xyz got the stock
+ * daylight game — same match, same code, visibly different broadcast. Reported
+ * by the operator, 2026-08-19: "no nuke animation, no messages, colours are
+ * not right, day mode vs night mode."
+ *
+ * `__PROXYWAR_BROADCAST_REPLAY__` is computed once in the app shell
+ * (index.html) beside `__PROXYWAR_AI_REPLAY__`, before the bundle runs, so the
+ * lazily-built theme and colour-allocator singletons below can never latch a
+ * value from before the plane was known. The static flag is still honoured on
+ * its own so an offline bundle stays correct even if a host page predates the
+ * shell that sets the newer global.
+ *
+ * Same `typeof` guard as its sibling: this module is also loaded where
+ * `window` does not exist (server/workers/tests), and there it is false —
+ * i.e. stock behaviour, which is also exactly what LIVE PLAY must keep.
+ */
+export function isBroadcastReplayPresentation(): boolean {
+  if (typeof window === "undefined") return false;
+  const w = window as typeof window & {
+    __PROXYWAR_STATIC_REPLAY__?: boolean;
+    __PROXYWAR_BROADCAST_REPLAY__?: boolean;
+  };
+  return (
+    w.__PROXYWAR_STATIC_REPLAY__ === true ||
+    w.__PROXYWAR_BROADCAST_REPLAY__ === true
+  );
+}
+
 export const red = colord("rgb(235,51,51)");
 export const blue = colord("rgb(41,98,255)");
 export const teal = colord("rgb(43,212,189)");
