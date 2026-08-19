@@ -1,4 +1,4 @@
-import { promises as fs } from "node:fs";
+import { promises as fs, type StatsFs } from "node:fs";
 import path from "node:path";
 import {
   Difficulty,
@@ -35,6 +35,28 @@ import {
   VerifiedPremiereEligibilityGate,
   type PremierePublicDefinition,
 } from "../../../src/server/replay-premiere/ReplayPremierePublication";
+
+/**
+ * Premiere staging enforces a real production disk floor
+ * (`assertPremiereDurableWriteAdmission`). A fixture that lets that check read
+ * the HOST's free space makes every suite using it a hostage to whatever else
+ * is on the machine: on 2026-08-19 a host below the floor turned 268 tests red
+ * across 20 files, all of them `durable_write_free_space_floor_not_met` and
+ * none of them a real defect — which also meant a genuine premiere regression
+ * would have been indistinguishable from the noise.
+ *
+ * So the fixture injects ample space and the suites assert premiere LOGIC.
+ * This is the convention the clip suites already use (see
+ * `ReplayPremiereArchivedClipPromoter`/`ReplayPremiereClipRoutes`), which is
+ * exactly why those stayed green on the same host.
+ *
+ * A suite that means to test the floor ITSELF must inject its own low value
+ * rather than rely on the machine happening to be full.
+ */
+// `fs.statfs` is overloaded (StatsFs | BigIntStatsFs), so the double cast is
+// what lets one stub satisfy the declared `typeof fs.statfs` seam.
+export const AMPLE_DISK = (async () =>
+  ({ bavail: 100 * 1024 ** 3, bsize: 1 }) as StatsFs) as unknown as typeof fs.statfs;
 
 export const PREMIERE_ID = "prem_0123456789abcdef";
 export const NOW = new Date("2026-07-20T18:00:00.000Z");
@@ -600,6 +622,7 @@ export async function verifiedPublicationFixture(
   eligibility = collectedLeakAudit.eligibility;
   const leakAuditReceipt = collectedLeakAudit.receipt;
   const staged = await stagePremiereSource({
+    statfs: AMPLE_DISK,
     sourceFilePath: sourcePath,
     privateStateRoot: privateRoot,
     servedRoots: [servedRoot],
@@ -690,6 +713,7 @@ export async function verifiedLongPublicationFixture(
   );
   eligibility = collectedLeakAudit.eligibility;
   const staged = await stagePremiereSource({
+    statfs: AMPLE_DISK,
     sourceFilePath: sourcePath,
     privateStateRoot: privateRoot,
     servedRoots: [servedRoot],
@@ -787,6 +811,7 @@ export async function verifiedRealtimeLongPublicationFixture(
   );
   eligibility = collectedLeakAudit.eligibility;
   const staged = await stagePremiereSource({
+    statfs: AMPLE_DISK,
     sourceFilePath: sourcePath,
     privateStateRoot: privateRoot,
     servedRoots: [servedRoot],
