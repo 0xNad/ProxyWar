@@ -46,6 +46,7 @@ import {
   type ReplayPremiereProductionService,
 } from "../../../src/server/replay-premiere/ReplayPremiereStartup";
 import { ReplayPremiereTerminalReclaimer } from "../../../src/server/replay-premiere/ReplayPremiereTerminalReclamation";
+import { AMPLE_DISK } from "./ReplayPremiereFixtures";
 import {
   NOW,
   PREMIERE_ID,
@@ -157,6 +158,7 @@ describe("ReplayPremiere production startup", () => {
     const context = startupContext();
 
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -179,6 +181,7 @@ describe("ReplayPremiere production startup", () => {
     const firstContext = startupContext();
     const project = vi.spyOn(firstContext.checkpointProjector, "project");
     const first = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...firstContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -192,6 +195,7 @@ describe("ReplayPremiere production startup", () => {
     const restartedContext = startupContext();
     restartedContext.checkpointProjector = throwingCheckpointProjector();
     const restarted = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...restartedContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -241,6 +245,7 @@ describe("ReplayPremiere production startup", () => {
       };
 
       const started = await startReplayPremiereProduction({
+        statfs: AMPLE_DISK,
         ...context,
         privateStateRoot: path.join(root, "private"),
         servedRoots: [path.join(root, "served")],
@@ -302,6 +307,7 @@ describe("ReplayPremiere production startup", () => {
       const context = startupContext();
 
       const started = await startReplayPremiereProduction({
+        statfs: AMPLE_DISK,
         ...context,
         privateStateRoot: path.join(root, "private"),
         servedRoots: [path.join(root, "served")],
@@ -327,6 +333,7 @@ describe("ReplayPremiere production startup", () => {
     await writeAdmission(root);
     const firstContext = startupContext(() => new Date());
     const first = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...firstContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -348,6 +355,7 @@ describe("ReplayPremiere production startup", () => {
     const httpRegister = vi.spyOn(restartedContext.httpRegistry, "register");
     const restartBegan = process.hrtime.bigint();
     const restarted = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...restartedContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -381,6 +389,7 @@ describe("ReplayPremiere production startup", () => {
     await writeAdmission(root);
     const firstContext = startupContext(() => new Date());
     const first = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...firstContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -402,6 +411,7 @@ describe("ReplayPremiere production startup", () => {
     const httpRegister = vi.spyOn(restartedContext.httpRegistry, "register");
     const restartBegan = process.hrtime.bigint();
     const restarted = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...restartedContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -447,6 +457,7 @@ describe("ReplayPremiere production startup", () => {
     await writeAdmission(root);
     const firstContext = startupContext();
     const first = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...firstContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -486,6 +497,7 @@ describe("ReplayPremiere production startup", () => {
     const restartedContext = startupContext();
     restartedContext.checkpointProjector = throwingCheckpointProjector();
     const restarted = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...restartedContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -508,6 +520,7 @@ describe("ReplayPremiere production startup", () => {
     await writeAdmission(root);
     const context = startupContext(() => new Date());
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -534,6 +547,7 @@ describe("ReplayPremiere production startup", () => {
     await writeAdmission(root);
     const context = startupContext(() => new Date());
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -561,6 +575,7 @@ describe("ReplayPremiere production startup", () => {
     vi.setSystemTime(NOW.getTime() + 1);
     const recoveredContext = startupContext(() => new Date());
     const recovered = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...recoveredContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -587,6 +602,7 @@ describe("ReplayPremiere production startup", () => {
     await writeAdmission(root);
     const firstContext = startupContext(() => new Date());
     const first = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...firstContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -630,6 +646,7 @@ describe("ReplayPremiere production startup", () => {
     const beganAtMs = NOW.getTime();
     const recoveredContext = startupContext(() => new Date());
     const recovered = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...recoveredContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -671,6 +688,7 @@ describe("ReplayPremiere production startup", () => {
     await writeAdmission(root);
     const context = startupContext(() => new Date());
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -705,6 +723,7 @@ describe("ReplayPremiere production startup", () => {
     await writeAdmission(root);
     const context = startupContext(() => new Date());
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -739,6 +758,7 @@ describe("ReplayPremiere production startup", () => {
       await writeAdmission(caseRoot);
       const context = startupContext();
       const started = await startReplayPremiereProduction({
+        statfs: AMPLE_DISK,
         ...context,
         privateStateRoot: path.join(caseRoot, "private"),
         servedRoots: [path.join(caseRoot, "served")],
@@ -764,6 +784,7 @@ describe("ReplayPremiere production startup", () => {
     await writeAdmission(root);
     const context = startupContext();
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -771,6 +792,7 @@ describe("ReplayPremiere production startup", () => {
     services.push(started.service);
 
     const operatorCatalog = await ReplayPremiereAdmissionCatalog.open({
+      statfs: AMPLE_DISK,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
     });
@@ -797,6 +819,7 @@ describe("ReplayPremiere production startup", () => {
     const operatorLines: string[] = [];
 
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -823,6 +846,7 @@ describe("ReplayPremiere production startup", () => {
     await writeAdmission(root);
     const context = startupContext();
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -854,6 +878,7 @@ describe("ReplayPremiere production startup", () => {
       let nowMs = NOW.getTime() - 120_000;
       const context = startupContext(() => new Date(nowMs));
       const started = await startReplayPremiereProduction({
+        statfs: AMPLE_DISK,
         ...context,
         privateStateRoot: path.join(root, "private"),
         servedRoots: [path.join(root, "served")],
@@ -948,6 +973,7 @@ describe("ReplayPremiere production startup", () => {
     const context = startupContext();
 
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -971,6 +997,7 @@ describe("ReplayPremiere production startup", () => {
     const context = startupContext();
 
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -994,6 +1021,7 @@ describe("ReplayPremiere production startup", () => {
     await writeAdmission(root);
     const firstContext = startupContext();
     const first = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...firstContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -1004,6 +1032,7 @@ describe("ReplayPremiere production startup", () => {
 
     const secondContext = startupContext();
     const second = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...secondContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -1046,6 +1075,7 @@ describe("ReplayPremiere production startup", () => {
       });
       const firstContext = startupContext(() => new Date());
       const first = await startReplayPremiereProduction({
+        statfs: AMPLE_DISK,
         ...firstContext,
         privateStateRoot: path.join(root, "private"),
         servedRoots: [path.join(root, "served")],
@@ -1103,6 +1133,7 @@ describe("ReplayPremiere production startup", () => {
 
       const recoveredContext = startupContext(() => new Date());
       const recovered = await startReplayPremiereProduction({
+        statfs: AMPLE_DISK,
         ...recoveredContext,
         privateStateRoot: path.join(root, "private"),
         servedRoots: [path.join(root, "served")],
@@ -1120,6 +1151,7 @@ describe("ReplayPremiere production startup", () => {
     const beforeSchedule = NOW.getTime() - 120_000;
     const firstContext = startupContext(() => new Date(beforeSchedule));
     const first = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...firstContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -1135,6 +1167,7 @@ describe("ReplayPremiere production startup", () => {
     const attempts: string[] = [];
     const context = startupContext(() => new Date(beforeSchedule));
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -1158,6 +1191,7 @@ describe("ReplayPremiere production startup", () => {
     await writeAlternateAdmission(root, olderPremiereId);
     const olderContext = startupContext(() => new Date());
     const older = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...olderContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -1173,6 +1207,7 @@ describe("ReplayPremiere production startup", () => {
     vi.setSystemTime(NOW.getTime());
     const latestContext = startupContext(() => new Date());
     const latest = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...latestContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -1188,6 +1223,7 @@ describe("ReplayPremiere production startup", () => {
     const attempts: string[] = [];
     const restartedContext = startupContext(() => new Date());
     const restarted = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...restartedContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -1213,6 +1249,7 @@ describe("ReplayPremiere production startup", () => {
     const context = startupContext(() => new Date(beforeSchedule));
     const attempts: string[] = [];
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -1234,6 +1271,7 @@ describe("ReplayPremiere production startup", () => {
     await writeAdmission(root);
     const primaryContext = startupContext(() => new Date(NOW));
     const primary = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...primaryContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -1255,6 +1293,7 @@ describe("ReplayPremiere production startup", () => {
       await writeAlternateAdmission(root, alternatePremiereId);
       const alternateContext = startupContext(() => new Date(NOW));
       const alternate = await startReplayPremiereProduction({
+        statfs: AMPLE_DISK,
         ...alternateContext,
         privateStateRoot: path.join(root, "private"),
         servedRoots: [path.join(root, "served")],
@@ -1274,6 +1313,7 @@ describe("ReplayPremiere production startup", () => {
     const allActiveContext = startupContext(() => new Date(NOW));
     const allActiveAttempts: string[] = [];
     const allActive = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...allActiveContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -1308,6 +1348,7 @@ describe("ReplayPremiere production startup", () => {
       markBlockedActiveEntered = resolve;
     });
     const starting = startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...timeoutContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -1379,6 +1420,7 @@ describe("ReplayPremiere production startup", () => {
     const context = startupContext();
 
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -1406,6 +1448,7 @@ describe("ReplayPremiere production startup", () => {
     const beforeSchedule = NOW.getTime() - 120_000;
     const firstContext = startupContext(() => new Date(beforeSchedule));
     const first = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...firstContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -1454,6 +1497,7 @@ describe("ReplayPremiere production startup", () => {
 
     const context = startupContext(() => new Date(beforeSchedule));
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -1483,6 +1527,7 @@ describe("ReplayPremiere production startup", () => {
       const beforeSchedule = NOW.getTime() - 120_000;
       const firstContext = startupContext(() => new Date(beforeSchedule));
       const first = await startReplayPremiereProduction({
+        statfs: AMPLE_DISK,
         ...firstContext,
         privateStateRoot: path.join(root, "private"),
         servedRoots: [path.join(root, "served")],
@@ -1520,6 +1565,7 @@ describe("ReplayPremiere production startup", () => {
 
       const context = startupContext(() => new Date(beforeSchedule));
       const started = await startReplayPremiereProduction({
+        statfs: AMPLE_DISK,
         ...context,
         privateStateRoot: path.join(root, "private"),
         servedRoots: [path.join(root, "served")],
@@ -1547,6 +1593,7 @@ describe("ReplayPremiere production startup", () => {
     });
 
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -1588,6 +1635,7 @@ describe("ReplayPremiere production startup", () => {
 
     const restartedContext = startupContext();
     const restarted = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...restartedContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -1628,6 +1676,7 @@ describe("ReplayPremiere production startup", () => {
 
     let settled = false;
     const startup = startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -1677,6 +1726,7 @@ describe("ReplayPremiere production startup", () => {
     );
 
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       httpRegistry: rejectingRegistry,
       privateStateRoot: path.join(root, "private"),
@@ -1710,6 +1760,7 @@ describe("ReplayPremiere production startup", () => {
     const context = startupContext();
 
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -1746,6 +1797,7 @@ describe("ReplayPremiere production startup", () => {
     await writeAdmissionObject(resultPath, resultPreimage);
     const resultContext = startupContext();
     const rejectedResult = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...resultContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -1775,6 +1827,7 @@ describe("ReplayPremiere production startup", () => {
     await writeAdmissionObject(receiptPath, receiptPreimage);
     const receiptContext = startupContext();
     const rejectedReceipt = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...receiptContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -1803,6 +1856,7 @@ describe("ReplayPremiere production startup", () => {
     const context = startupContext();
 
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -1821,6 +1875,7 @@ describe("ReplayPremiere production startup", () => {
     await writeAdmission(root);
     const firstContext = startupContext();
     const first = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...firstContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -1841,6 +1896,7 @@ describe("ReplayPremiere production startup", () => {
 
     const secondContext = startupContext();
     const second = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...secondContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -1859,6 +1915,7 @@ describe("ReplayPremiere production startup", () => {
     await writeAdmission(root);
     const firstContext = startupContext();
     const first = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...firstContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -1901,6 +1958,7 @@ describe("ReplayPremiere production startup", () => {
     const secondContext = startupContext();
 
     const second = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...secondContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -1919,6 +1977,7 @@ describe("ReplayPremiere production startup", () => {
     await writeAdmission(root);
     const firstContext = startupContext();
     const first = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...firstContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -1950,6 +2009,7 @@ describe("ReplayPremiere production startup", () => {
     const secondContext = startupContext();
 
     const second = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...secondContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -1974,6 +2034,7 @@ describe("ReplayPremiere production startup", () => {
       operatorCode: string;
     }> = [];
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -2032,6 +2093,7 @@ describe("ReplayPremiere production startup", () => {
     await writeAdmission(root);
     const context = startupContext(() => new Date());
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -2103,6 +2165,7 @@ describe("ReplayPremiere production startup", () => {
     ).toHaveLength(1);
     const revealedContext = startupContext(() => new Date());
     const revealed = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...revealedContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -2138,6 +2201,7 @@ describe("ReplayPremiere production startup", () => {
     ).toHaveLength(1);
     const archivedContext = startupContext(() => new Date());
     const archived = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...archivedContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -2155,6 +2219,7 @@ describe("ReplayPremiere production startup", () => {
     await writeAdmission(root);
     const firstContext = startupContext(() => new Date());
     const first = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...firstContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -2238,6 +2303,7 @@ describe("ReplayPremiere production startup", () => {
       );
     const restartedContext = startupContext(() => new Date());
     const restarted = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...restartedContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -2303,6 +2369,7 @@ describe("ReplayPremiere production startup", () => {
     });
     const context = startupContext(() => new Date());
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -2375,6 +2442,7 @@ describe("ReplayPremiere production startup", () => {
     const context = startupContext(() => new Date());
     const observed: string[] = [];
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -2408,6 +2476,7 @@ describe("ReplayPremiere production startup", () => {
     const recoveredObserved: string[] = [];
     const recoveredContext = startupContext(() => new Date());
     const recovered = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...recoveredContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -2422,6 +2491,7 @@ describe("ReplayPremiere production startup", () => {
     services.splice(services.indexOf(recovered.service), 1);
     const throwingContext = startupContext(() => new Date());
     const throwing = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...throwingContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -2447,6 +2517,7 @@ describe("ReplayPremiere production startup", () => {
     const context = startupContext();
     const lines: string[] = [];
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -2501,6 +2572,7 @@ describe("ReplayPremiere production startup", () => {
       () => new Date(NOW.getTime() + 24 * 60 * 60_000),
     );
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -2531,6 +2603,7 @@ describe("ReplayPremiere production startup", () => {
       );
     });
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -2562,6 +2635,7 @@ describe("ReplayPremiere production startup", () => {
     await writeAdmission(root);
     const context = startupContext();
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -2636,6 +2710,7 @@ describe("ReplayPremiere production startup", () => {
 
     const context = startupContext();
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -2665,6 +2740,7 @@ describe("ReplayPremiere production startup", () => {
     await writeAdmission(root);
     const context = startupContext();
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -2689,6 +2765,7 @@ describe("ReplayPremiere production startup", () => {
     await writeAdmission(root);
     const context = startupContext();
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -2731,6 +2808,7 @@ describe("ReplayPremiere production startup", () => {
       () => new Date(NOW.getTime() - 120_000),
     );
     const first = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...firstContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -2747,6 +2825,7 @@ describe("ReplayPremiere production startup", () => {
     // burned the entire budget. Excluded ids are now skipped outright.
     const excludedContext = startupContext();
     const excluded = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...excludedContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -2763,6 +2842,7 @@ describe("ReplayPremiere production startup", () => {
     const context = startupContext();
     const lines: string[] = [];
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -2805,6 +2885,7 @@ describe("ReplayPremiere production startup", () => {
     await writeAdmission(root);
     const firstContext = startupContext(() => new Date());
     const first = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...firstContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -2844,6 +2925,7 @@ describe("ReplayPremiere production startup", () => {
       () => new Date(NOW.getTime() + 45 * 60_000),
     );
     const rebooted = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...rebootContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -2900,6 +2982,7 @@ describe("ReplayPremiere production startup", () => {
       () => new Date(NOW.getTime() + 45 * 60_000),
     );
     const rebooted = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...rebootContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -2936,6 +3019,7 @@ describe("ReplayPremiere production startup", () => {
     const clipFence = vi.fn(async (_premiereId: string) => undefined);
     const context = startupContext(() => new Date());
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -2963,6 +3047,7 @@ describe("ReplayPremiere production startup", () => {
     await writeAdmission(root);
     const context = startupContext(() => new Date());
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -3030,6 +3115,7 @@ describe("ReplayPremiere production startup", () => {
     await writeAdmission(root);
     const context = startupContext(() => new Date());
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...context,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -3103,6 +3189,7 @@ describe("ReplayPremiere production startup", () => {
       privateStateRoot: path.join(root, "private"),
     });
     const rebooted = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...rebootContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -3150,6 +3237,7 @@ describe("ReplayPremiere production startup", () => {
       () => new Date(Date.parse(pending.revealedAt) + 45 * 60_000),
     );
     const rebooted = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...rebootContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -3201,6 +3289,7 @@ describe("ReplayPremiere production startup", () => {
     });
     const lines: string[] = [];
     const rebooted = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...rebootContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -3232,6 +3321,7 @@ describe("ReplayPremiere production startup", () => {
     });
     const lines: string[] = [];
     const rebooted = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       ...rebootContext,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
@@ -3264,6 +3354,7 @@ describe("ReplayPremiere production startup", () => {
   test("orphan reclamation fails closed without a proven reveal instant, and stays neutral for cancelled orphans", async () => {
     await writeAdmission(root);
     const catalog = await ReplayPremiereAdmissionCatalog.open({
+      statfs: AMPLE_DISK,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
     });
@@ -3313,6 +3404,7 @@ const ORPHAN_ALTERNATE_ID = "prem_89abcdef01234567";
 async function writeAdmission(root: string, origin?: string): Promise<void> {
   const fixture = await verifiedPublicationFixture(root, { origin });
   const catalog = await ReplayPremiereAdmissionCatalog.open({
+    statfs: AMPLE_DISK,
     privateStateRoot: path.join(root, "private"),
     servedRoots: [path.join(root, "served")],
   });
@@ -3335,6 +3427,7 @@ async function writeProjectedAdmission(root: string): Promise<{
 }> {
   const fixture = await verifiedPublicationFixture(root);
   const catalog = await ReplayPremiereAdmissionCatalog.open({
+    statfs: AMPLE_DISK,
     privateStateRoot: path.join(root, "private"),
     servedRoots: [path.join(root, "served")],
   });
@@ -3394,6 +3487,7 @@ async function writeAdmissionWithChunkLimits(
   };
   const gate = VerifiedPremiereEligibilityGate.verify(verification);
   const catalog = await ReplayPremiereAdmissionCatalog.open({
+    statfs: AMPLE_DISK,
     privateStateRoot: path.join(root, "private"),
     servedRoots: [path.join(root, "served")],
   });
@@ -3625,6 +3719,7 @@ async function writeTwoAdmissions(root: string): Promise<{
     alternateVerification,
   );
   const catalog = await ReplayPremiereAdmissionCatalog.open({
+    statfs: AMPLE_DISK,
     privateStateRoot: path.join(root, "private"),
     servedRoots: [path.join(root, "served")],
   });
@@ -3678,6 +3773,7 @@ async function writeAlternateAdmission(
     alternateVerification,
   );
   const catalog = await ReplayPremiereAdmissionCatalog.open({
+    statfs: AMPLE_DISK,
     privateStateRoot: path.join(root, "private"),
     servedRoots: [path.join(root, "served")],
   });

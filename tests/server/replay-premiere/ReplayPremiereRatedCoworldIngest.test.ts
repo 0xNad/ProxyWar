@@ -22,6 +22,7 @@ import {
 } from "../../../src/server/replay-premiere/ReplayPremiereIntegrity";
 import { ReplayPremiereRuntimeRegistry } from "../../../src/server/replay-premiere/ReplayPremiereRuntimeCoordinator";
 import { startReplayPremiereProduction } from "../../../src/server/replay-premiere/ReplayPremiereStartup";
+import { AMPLE_DISK } from "./ReplayPremiereFixtures";
 import {
   NOW,
   RATED_COWORLD_ID,
@@ -359,6 +360,7 @@ describe("Replay Premiere rated Coworld ingestion", () => {
     await runReplayPremiereAdmission(harness.args, harness.dependencies);
     expect(httpRegistry.get(RATED_PREMIERE_ID)).toBeNull();
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       privateStateRoot: harness.privateStateRoot,
       servedRoots: [harness.servedRoot],
       publicOrigin: EXPECTED_ORIGIN,
