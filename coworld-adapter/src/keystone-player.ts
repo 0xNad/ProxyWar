@@ -1222,7 +1222,23 @@ function createBedrockProvider(
         if (AnthropicBedrock === undefined) {
           throw new Error("@anthropic-ai/bedrock-sdk did not export a client");
         }
-        client = new AnthropicBedrock({ awsRegion: region });
+        // SIDECAR ENDPOINT (platform change 2026-07-30). Hosted pods do NOT
+        // reach AWS directly: they get a per-pod proxy at
+        // AWS_ENDPOINT_URL_BEDROCK_RUNTIME plus DELIBERATELY FAKE placeholder
+        // credentials. Calling the real Bedrock host with those placeholders
+        // returns `403 {"Message":"Invalid API Key format: Must start with
+        // pre-defined prefix"}` and the seat silently degrades to the rule
+        // planner — which is what the league has been ranking. Verified in-pod
+        // 2026-08-19 via PROXYWAR_KEYSTONE_BEDROCK_DIAG=1. Absent variable
+        // falls back to the SDK default, so local runs are unchanged.
+        const sidecarEndpoint =
+          process.env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME?.trim();
+        client = new AnthropicBedrock({
+          awsRegion: region,
+          ...(sidecarEndpoint !== undefined && sidecarEndpoint.length > 0
+            ? { baseURL: sidecarEndpoint }
+            : {}),
+        });
       }
       const startIndex = lockedIndex ?? 0;
       let lastError: unknown = null;
