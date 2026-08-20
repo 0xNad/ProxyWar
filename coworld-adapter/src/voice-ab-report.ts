@@ -19,6 +19,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { keystoneVoiceCohort } from "./keystone-player";
 
 type Outcome = "accepted" | "rejected" | "expired" | "withdrawn" | "other";
@@ -217,4 +218,20 @@ function main(): void {
   }
 }
 
-main();
+// Run ONLY when invoked as a script. `main()` at module scope calls
+// `process.exit(2)` when `--agent` is absent, so the first test (or tool) that
+// imports anything from this file would kill its own worker before running a
+// single assertion. Nothing imports it today; this keeps that true by accident
+// rather than by luck.
+// Use fileURLToPath, NOT `new URL(import.meta.url).pathname`: the latter leaves
+// the path percent-encoded, so any directory containing a space — which on this
+// machine is most of them ("ProxyWar Workspace", "Crucial X9", "Application
+// Support") — never matches the resolved argv and the script silently stops
+// running. Verified both directions: importing prints nothing and exits 0,
+// invoking directly still prints usage and exits 2.
+if (
+  process.argv[1] &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  main();
+}
