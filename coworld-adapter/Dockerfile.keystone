@@ -44,17 +44,33 @@
 # was built against Node 22 semantics; pinning here keeps the recipe faithful
 # to the version that demonstrably boots. Moving to 24 is a separate, tested
 # change — not a silent base bump.
-FROM node:22-bookworm-slim
+# PINNED BY DIGEST, NOT BY TAG. `node:22-bookworm-slim` is a moving target: the
+# 22.x line has already absorbed the very features described above, so a tag
+# that boots today can silently stop booting on the next base push — which is
+# the one failure this file exists to prevent. `npm ci` pins the JS tree; only
+# a digest pins the runtime under it. Digest below is the multi-arch manifest
+# for 22-bookworm-slim as pushed 2026-08-05.
+#
+# To refresh deliberately (never silently):
+#   curl -s https://hub.docker.com/v2/repositories/library/node/tags/22-bookworm-slim | jq -r .digest
+# then rebuild and re-verify the boot banner before shipping the new digest.
+FROM --platform=linux/amd64 node:22-bookworm-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436
 
-ENV NODE_ENV=production \
-    PROXYWAR_REPO=/app/proxywar
+ENV PROXYWAR_REPO=/app/proxywar
 
 # --- repo tree: the brain keystone loads at runtime -------------------------
 WORKDIR /app/proxywar
 COPY package.json package-lock.json ./
-# tsx is a devDependency, but it is a RUNTIME requirement here: the entrypoint
-# is TypeScript and the agent modules are imported as .ts. `--omit=dev` alone
-# would produce an image that builds clean and dies on boot.
+# NODE_ENV IS DELIBERATELY NOT SET UNTIL AFTER THIS INSTALL. npm derives `omit`
+# from NODE_ENV, so `ENV NODE_ENV=production` above this line silently turns
+# every `npm ci` below it into `--omit=dev` (verify: `NODE_ENV=production npm
+# config get omit` prints `dev`). This file used to do exactly that while
+# carrying a comment claiming tsx was a devDependency that `--omit=dev` would
+# strip. Both halves were wrong: tsx@^4 and ws@^8 are in `dependencies`, which
+# is the only reason the image booted at all. The guard was pointing at a trap
+# the file had already stepped into and survived by luck. Keep the install
+# unfiltered and set NODE_ENV at the end, where it only affects runtime.
+#
 # NOT --omit=optional: esbuild ships its native binary as an OPTIONAL
 # dependency (@esbuild/linux-x64), and tsx is built on esbuild. Omitting them
 # yields an image whose first `--import tsx/esm` dies with "could not be
@@ -90,5 +106,11 @@ COPY coworld-adapter/src /app/integration/src
 # boot with ERR_MODULE_NOT_FOUND (verified: that was this file's first draft).
 # The entrypoint is referenced absolutely, so cwd costs the player nothing.
 WORKDIR /app/proxywar
+
+# Set LAST, on purpose: every `npm ci` above must run with a full dependency
+# tree, and npm reads `omit` from NODE_ENV. Placed here it does what it is
+# actually for — telling the running player it is in production — without
+# quietly filtering the installs.
+ENV NODE_ENV=production
 
 CMD ["sh", "-c", "PROXYWAR_PLAYER_POST_FINAL_LINGER_MS=120000 exec node --import tsx /app/integration/src/keystone-player.ts"]
