@@ -94,6 +94,8 @@ import type { PlayerStrategySpec } from "../server/agents/PlayerStrategySpec";
 import { loadPlayerStrategySpecFromEnv } from "../server/agents/PlayerStrategySpec";
 import { RuleAgentBrain } from "../server/agents/RuleAgentBrain";
 import { StarterBotAgentBrain } from "../server/agents/StarterBotAgentBrain";
+import { StrategicCommanderBrain } from "../server/agents/StrategicCommanderBrain";
+import { StrategicCommanderCaller } from "../server/agents/StrategicCommanderCaller";
 import { GameServer } from "../server/GameServer";
 
 const log = winston.createLogger({
@@ -178,6 +180,12 @@ export interface AgentLeagueSmokeRunOptions {
   };
   planEveryDecisionSteps?: number;
   allowEnvironmentStrategySpec?: boolean;
+  /**
+   * Bounded test seam for --brain=strategic-commander only: replaces the
+   * OpenRouter Commander provider so verification needs no network credentials
+   * or live model. Rejected with any other brain mode.
+   */
+  commanderProviderForTesting?: LlmProvider;
   deterministicSource?: {
     seed: string;
     createdAtMs: number;
@@ -261,6 +269,15 @@ export async function runAgentLeagueSmoke(
   const openRouterProvider = usesOpenRouter
     ? createOpenRouterLlmProviderFromEnv()
     : null;
+  // Stage 6 StrategicCommander smoke mode: Commander calls ride the existing
+  // OpenRouter provider path and fail loud here when it is not configured. The
+  // injected test provider is the only alternative, so verification never
+  // silently downgrades to an unconfigured or fake manual run.
+  const strategicCommanderProvider =
+    brainMode === "strategic-commander"
+      ? (options.commanderProviderForTesting ??
+        createOpenRouterLlmProviderFromEnv())
+      : null;
   // Promo mode: one Claude model per agent (e.g. --models=claude-fable-5,opus,sonnet),
   // optional display names (--names=Fable 5,Opus 4.8,Sonnet 4.6). Each agent gets its own
   // provider bound to its model; the provider serializes CLI calls globally so concurrent
@@ -443,6 +460,9 @@ export async function runAgentLeagueSmoke(
     }
     if (mode === "openrouter" || mode === "planner-openrouter") {
       return openRouterProvider;
+    }
+    if (mode === "strategic-commander") {
+      return strategicCommanderProvider;
     }
     return realLlmProvider;
   };
@@ -966,6 +986,16 @@ function validateAgentLeagueSmokeRunOptions(
   ) {
     throw new Error("agent league smoke planner cadence must be from 1 to 10");
   }
+  if (
+    options.commanderProviderForTesting !== undefined &&
+    !(options.args ?? process.argv.slice(2)).includes(
+      "--brain=strategic-commander",
+    )
+  ) {
+    throw new Error(
+      "a Commander test provider can only be injected into --brain=strategic-commander runs",
+    );
+  }
   if (options.injectedManifests !== undefined) {
     for (const entry of options.injectedManifests) {
       const rawManifest = Buffer.from(entry.rawManifestBase64, "base64");
@@ -1267,6 +1297,9 @@ function brainModeFromArgs(
   }
   if (args.includes("--brain=mock-llm")) {
     return "mock-llm";
+  }
+  if (args.includes("--brain=strategic-commander")) {
+    return "strategic-commander";
   }
   return scenario === "attack" || scenario === "actions" ? "mock-llm" : "rule";
 }
@@ -1583,6 +1616,20 @@ function createBrainForMode(
   if (brainMode === "mock-llm") {
     return createMockLlmBrain(spec, scenario, providerTimeoutMs);
   }
+  if (brainMode === "strategic-commander") {
+    if (provider === null) {
+      throw new LlmProviderConfigError(
+        "strategic-commander smoke requested but no Commander provider was configured.",
+      );
+    }
+    // Stage 6 opt-in smoke wiring only: the accepted Stage 5 adapter wraps the
+    // deterministic RuleAgentBrain tactical policy. Primary decisions only —
+    // no support batches, deal slots, or message slots ride this mode.
+    return new StrategicCommanderBrain(
+      new StrategicCommanderCaller(provider),
+      new RuleAgentBrain(spec.profile),
+    );
+  }
   if (brainMode === "planner") {
     return new PlannerExecutorAgentBrain({
       profile: spec.profile,
@@ -1816,7 +1863,8 @@ type SmokeBrainMode =
   | "planner-claude-cli"
   | "action-claude-cli"
   | "openrouter"
-  | "planner-openrouter";
+  | "planner-openrouter"
+  | "strategic-commander";
 type SmokeRunnerMode = "realtime" | "step-locked";
 
 function defaultRunID(
@@ -1837,6 +1885,11 @@ function artifactBrainMode(brainMode: SmokeBrainMode): AgentBrainType {
   }
   if (brainMode === "starter-bot") {
     // StarterBotAgentBrain.brainType === "rule" (a deterministic rule policy).
+    return "rule";
+  }
+  if (brainMode === "strategic-commander") {
+    // StrategicCommanderBrain reports its wrapped tactical brain's type, and
+    // this mode always wraps RuleAgentBrain.
     return "rule";
   }
   return brainMode === "planner" ||
@@ -1979,7 +2032,11 @@ function assertRequiredExternalBrainSucceeded(input: {
           ? "codex-cli"
           : // starter-bot is a deterministic rule policy (no external calls) — same
             // cleanliness class as "rule".
-            input.brainMode === "starter-bot"
+            // strategic-commander decisions are RuleAgentBrain decisions; a
+            // Commander provider failure is absorbed by the plan lifecycle's
+            // own fallback, not by the decision-record cleanliness surface.
+            input.brainMode === "starter-bot" ||
+              input.brainMode === "strategic-commander"
             ? "rule"
             : input.brainMode,
     records: input.records,
