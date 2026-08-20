@@ -558,6 +558,30 @@ export function freeTextMessagesEnabled(): boolean {
 }
 
 /**
+ * In-house social prompt arm (`PROXYWAR_TUNE_INHOUSE_SOCIAL_PROMPT`).
+ * DEFAULT OFF.
+ *
+ * `LlmAgentBrain` forwards the deal and comms selections the parser accepts,
+ * but the in-house PROMPT deliberately never taught the model those reply
+ * slots exist, so an in-house LLM seat could not use them however it replied
+ * (2026-08-16 decision, recorded in `LlmPromptBuilder`). Teaching the prompt
+ * is a prompt change, and the 2026-08-07 menu-cut reversal requires a hosted
+ * A/B before any in-house prompt change ships.
+ *
+ * This flag IS that A/B arm. It is the only thing that turns on the reply-slot
+ * instructions, the reply-shape fields, and the `deals` observation block a
+ * model needs to read a `deal_accept:` id it is being offered. With the flag
+ * off, the prompt is byte-identical to shipped behavior even when structured
+ * deals and free text are armed, so merging this can change nothing hosted.
+ *
+ * The underlying feature flags still bound what exists at all: this flag never
+ * invents a deal or message id, it only describes ids the menu already offers.
+ */
+export function inhouseSocialPromptEnabled(): boolean {
+  return tunedNumber("INHOUSE_SOCIAL_PROMPT", 0) >= 1;
+}
+
+/**
  * Hard cap on message length, in characters, enforced by
  * `AgentDecisionValidator` before any text reaches an intent. Over-cap text is
  * REJECTED, never silently truncated: a trimmed promise is a different promise,
