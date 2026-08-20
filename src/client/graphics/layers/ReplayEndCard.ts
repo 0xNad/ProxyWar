@@ -84,13 +84,24 @@ const DEFAULT_MAX_ROWS = 16;
  */
 const REWIND_TOLERANCE_TICKS = 20;
 /**
- * Frames the replay must sit at/after its final recorded turn with no `Win`
- * before the card declares a no-winner result. This layer ticks every frame,
- * so ~0.5s at 60Hz — long enough that a real victory arriving a tick late
- * still wins the race, short enough that a viewer does not watch a frozen
- * clock wondering whether the page broke.
+ * Ticks the replay must sit at/after its final recorded turn with no `Win`
+ * before the card declares a no-winner result.
+ *
+ * This MUST be 1, and the counter is here only to reject a stray call that
+ * arrives before the replay is genuinely exhausted. `Layer.tick()` is driven
+ * once per GAME TURN, not once per animation frame — the same warning is on
+ * `TradeAttackLanes.ts` — and `game.ticks() >= totalTurns` first becomes true
+ * on the final delivered update. `LocalServer` ends the game at exactly that
+ * point and stops dispatching turns, so no tick ever follows it. Any value
+ * above 1 therefore makes this counter unreachable and the card never appears,
+ * leaving the viewer on a frozen clock: the bug this constant caused when it
+ * was 30 under the belief that it counted 60Hz frames.
+ *
+ * A real victory arriving late cannot lose the race either. A `Win` in the
+ * same update batch installs a snapshot, and `tick()` returns early on an
+ * existing snapshot before this check runs.
  */
-const END_CARD_EXHAUSTION_FRAMES = 30;
+const END_CARD_EXHAUSTION_TICKS = 1;
 
 /**
  * Trend guards for the verdict. A collapse claim ("X fell from 135K tiles to
@@ -205,7 +216,7 @@ export class ReplayEndCard extends LitElement implements Layer {
   private readonly everAlive = new Set<number>();
   private sampleCount = 0;
   /** Consecutive frames spent at/after the final recorded turn without a Win. */
-  private exhaustedFrames = 0;
+  private exhaustedTicks = 0;
 
   /**
    * Light DOM. MANDATORY: Tailwind's global stylesheet and the broadcast
@@ -322,15 +333,15 @@ export class ReplayEndCard extends LitElement implements Layer {
   private showResultIfReplayExhausted(game: GameView): void {
     const totalTurns = Number(document.body.dataset.pwReplayTotalTurns);
     if (!Number.isFinite(totalTurns) || totalTurns <= 0) {
-      this.exhaustedFrames = 0;
+      this.exhaustedTicks = 0;
       return;
     }
     if (game.ticks() < totalTurns) {
-      this.exhaustedFrames = 0;
+      this.exhaustedTicks = 0;
       return;
     }
-    this.exhaustedFrames += 1;
-    if (this.exhaustedFrames < END_CARD_EXHAUSTION_FRAMES) return;
+    this.exhaustedTicks += 1;
+    if (this.exhaustedTicks < END_CARD_EXHAUSTION_TICKS) return;
     this.showResult(game, undefined);
   }
 

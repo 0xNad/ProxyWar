@@ -11,7 +11,28 @@ import type { GameView } from "../../src/core/game/GameView";
  * came — the replay had no terminal event to end on.
  */
 const TOTAL_TURNS = 11_500;
-const EXHAUSTION_FRAMES = 30;
+
+/**
+ * THE NUMBER THAT MATTERS IS ONE.
+ *
+ * `Layer.tick()` is driven once per GAME TURN (`ClientGameRunner` calls
+ * `renderer.tick()` inside the game-update handler; `TradeAttackLanes` carries
+ * the same warning), and `game.ticks() >= totalTurns` first becomes true on the
+ * final delivered update — after which `LocalServer.endGame()` clears the turn
+ * interval and nothing ticks again. So production delivers EXACTLY ONE
+ * exhausted tick, ever.
+ *
+ * An earlier version of this suite looped `card.tick()` thirty times to satisfy
+ * a thirty-"frame" delay. It passed while the shipped card could never appear:
+ * the loop was supplying ticks the client does not send, so the test measured
+ * the harness rather than the client. Any test here that needs more than one
+ * exhausted tick to make the card fire is testing a cadence that does not
+ * exist — that is the regression this file exists to prevent.
+ */
+const EXHAUSTED_TICKS_IN_PRODUCTION = 1;
+
+/** Far more ticks than production could ever deliver, for negative cases. */
+const MANY_TICKS = 90;
 
 function playerView(name: string, tiles: number) {
   return {
@@ -70,10 +91,16 @@ describe("ReplayEndCard end-of-replay exhaustion", () => {
     delete document.body.dataset.pwReplayTotalTurns;
   });
 
-  it("closes out a turn-limited match that never produced a winner", () => {
+  /**
+   * THE REGRESSION TEST. Give the card exactly what the client gives it — one
+   * tick, at the final turn, and then silence, because `LocalServer` has ended
+   * the game and will never tick again. If this needs a second tick to pass,
+   * the shipped card is unreachable and the viewer sits on a frozen clock.
+   */
+  it("closes out a turn-limited match on the single tick production delivers", () => {
     const card = cardFor(gameAt(TOTAL_TURNS));
-    for (let frame = 0; frame < EXHAUSTION_FRAMES; frame += 1) {
-      expect(card.snapshot).toBeNull();
+    expect(card.snapshot).toBeNull();
+    for (let tick = 0; tick < EXHAUSTED_TICKS_IN_PRODUCTION; tick += 1) {
       card.tick();
     }
     expect(card.snapshot).not.toBeNull();
@@ -82,29 +109,30 @@ describe("ReplayEndCard end-of-replay exhaustion", () => {
 
   it("does not fire while turns remain", () => {
     const card = cardFor(gameAt(TOTAL_TURNS - 1));
-    for (let frame = 0; frame < EXHAUSTION_FRAMES * 3; frame += 1) card.tick();
+    for (let tick = 0; tick < MANY_TICKS; tick += 1) card.tick();
     expect(card.snapshot).toBeNull();
   });
 
-  it("resets its patience if the viewer rewinds before it fires", () => {
-    const card = cardFor(gameAt(TOTAL_TURNS));
-    for (let frame = 0; frame < EXHAUSTION_FRAMES - 1; frame += 1) card.tick();
-    // Scrub back: the counter must start over, not resume one frame short.
-    card.game = gameAt(TOTAL_TURNS - 500);
-    card.tick();
-    card.game = gameAt(TOTAL_TURNS);
-    card.tick();
+  /**
+   * A rewound clock is BELOW the final turn, so the exhaustion counter zeroes
+   * and stays zeroed however long the viewer watches from there. This is the
+   * property that keeps a scrubbed-back viewer from being handed a result card
+   * mid-match.
+   */
+  it("stays closed for a viewer who has rewound into the match", () => {
+    const card = cardFor(gameAt(TOTAL_TURNS - 500));
+    for (let tick = 0; tick < MANY_TICKS; tick += 1) card.tick();
     expect(card.snapshot).toBeNull();
   });
 
-  // The race the delay exists for: a real victory can land a tick after the
-  // final turn is reached, and firing instantly would freeze "No winner" over
-  // a match somebody actually won.
-  it("lets a late-arriving real victory win the race", () => {
-    const card = cardFor(gameAt(TOTAL_TURNS));
-    for (let frame = 0; frame < EXHAUSTION_FRAMES - 2; frame += 1) card.tick();
-    expect(card.snapshot).toBeNull();
-    card.game = gameAt(TOTAL_TURNS, { winner: ["nation", "Auri"] });
+  /**
+   * The no-winner path must never pre-empt a real victory. In production the
+   * two cannot race: a `Win` rides in the same update batch as the final tick,
+   * installs a snapshot, and `tick()` returns early on an existing snapshot
+   * before the exhaustion check runs. Pin the outcome — the winner is named.
+   */
+  it("announces a real winner rather than declaring no result", () => {
+    const card = cardFor(gameAt(TOTAL_TURNS, { winner: ["nation", "Auri"] }));
     card.tick();
     expect(card.snapshot).not.toBeNull();
     expect(JSON.stringify(card.snapshot)).toContain("Auri");
@@ -113,7 +141,7 @@ describe("ReplayEndCard end-of-replay exhaustion", () => {
   it("never fires in live play, where the replay key is absent", () => {
     delete document.body.dataset.pwReplayTotalTurns;
     const card = cardFor(gameAt(TOTAL_TURNS));
-    for (let frame = 0; frame < EXHAUSTION_FRAMES * 3; frame += 1) card.tick();
+    for (let tick = 0; tick < MANY_TICKS; tick += 1) card.tick();
     expect(card.snapshot).toBeNull();
   });
 });
