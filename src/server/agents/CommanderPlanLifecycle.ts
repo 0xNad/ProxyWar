@@ -1,4 +1,5 @@
 import {
+  fingerprintExposedOptionSet,
   MAX_COMMANDER_OPTION_ID_LENGTH,
   MAX_COMMANDER_PLAN_ATTACKER_IDS,
   MAX_COMMANDER_PLAYER_ID_LENGTH,
@@ -238,7 +239,8 @@ export class CommanderPlanLifecycle {
 /**
  * Normalizes and bounds the identity a Commander call is bound to. The exposed
  * ids are preserved in their exposed order; the option-set fingerprint is the
- * separate order-insensitive binding.
+ * separate order-insensitive binding, recomputed here from the exposed options
+ * so a claimed fingerprint that does not match them can never bind a plan.
  */
 export function commanderRequestIdentity(
   request: CommanderPlanRequest,
@@ -259,6 +261,19 @@ export function commanderRequestIdentity(
   );
   if (new Set(exposedOptionIDs).size !== exposedOptionIDs.length) {
     throw new Error("Commander request exposes a duplicate option id");
+  }
+  const exposedOptionSetFingerprint = boundedIdentifier(
+    request.exposedOptionSetFingerprint,
+    "request.exposedOptionSetFingerprint",
+    MAX_COMMANDER_FINGERPRINT_LENGTH,
+  );
+  if (
+    exposedOptionSetFingerprint !==
+    fingerprintExposedOptionSet(request.exposedOptions)
+  ) {
+    throw new Error(
+      "Commander request option-set fingerprint does not match its exposed options",
+    );
   }
   return {
     gameID: boundedIdentifier(
@@ -281,11 +296,7 @@ export function commanderRequestIdentity(
         ? null
         : nonNegativeInteger(request.tick, "request.tick"),
     exposedOptionIDs,
-    exposedOptionSetFingerprint: boundedIdentifier(
-      request.exposedOptionSetFingerprint,
-      "request.exposedOptionSetFingerprint",
-      MAX_COMMANDER_FINGERPRINT_LENGTH,
-    ),
+    exposedOptionSetFingerprint,
     materialStateFingerprint: boundedIdentifier(
       request.materialStateFingerprint,
       "request.materialStateFingerprint",

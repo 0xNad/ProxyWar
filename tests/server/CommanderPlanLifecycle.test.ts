@@ -707,6 +707,106 @@ describe("CommanderPlanLifecycle Stage 3 — request-binding rejection", () => {
   });
 });
 
+describe("CommanderPlanLifecycle Stage 3 — request option-set fingerprint validation", () => {
+  const MISMATCH = /option-set fingerprint does not match its exposed options/;
+
+  it("rejects a request whose claimed fingerprint does not match its exposed options", () => {
+    const forged = makeRequest({
+      exposedOptionSetFingerprint: "0000000000000000",
+    });
+    expect(() => commanderRequestIdentity(forged)).toThrow(MISMATCH);
+    expect(() =>
+      advanceCommanderPlan({
+        active: null,
+        request: forged,
+        material: makeMaterial(),
+        response: null,
+      }),
+    ).toThrow(MISMATCH);
+  });
+
+  it("rejects a genuine fingerprint of a different option set", () => {
+    const fewer = fixtureOptions().slice(0, 2);
+    const request = makeRequest({
+      exposedOptions: fewer,
+      exposedOptionSetFingerprint: fingerprintExposedOptionSet(
+        fixtureOptions(),
+      ),
+    });
+    expect(() =>
+      advanceCommanderPlan({
+        active: null,
+        request,
+        material: makeMaterial(),
+        response: null,
+      }),
+    ).toThrow(MISMATCH);
+  });
+
+  it("cannot install a Commander result through a mismatched request fingerprint", () => {
+    const identity = commanderRequestIdentity(makeRequest());
+    const forged = makeRequest({
+      exposedOptionSetFingerprint: "0000000000000000",
+    });
+    expect(() =>
+      advanceCommanderPlan({
+        active: null,
+        request: forged,
+        material: makeMaterial(),
+        response: makeResponse(
+          { ...identity, exposedOptionSetFingerprint: "0000000000000000" },
+          { selectedStrategicOptionId: "survive" },
+        ),
+      }),
+    ).toThrow(MISMATCH);
+  });
+
+  it("cannot replace or mutate the active plan through a mismatched request fingerprint", () => {
+    const plan = installedPlan({
+      selectedStrategicOptionId: "expand",
+      horizonDecisions: 3,
+    });
+    const before = JSON.stringify(plan);
+    // Past the horizon a matching request would replan; the forged one may not.
+    const forged = makeRequest({
+      decisionSequence: BASE_DECISION + 3,
+      exposedOptionSetFingerprint: "0000000000000000",
+    });
+    const lifecycle = new CommanderPlanLifecycle();
+
+    expect(() =>
+      lifecycle.advance({
+        active: plan,
+        request: forged,
+        material: makeMaterial(),
+        response: null,
+      }),
+    ).toThrow(MISMATCH);
+    expect(() =>
+      lifecycle.evaluate({ plan, request: forged, material: makeMaterial() }),
+    ).toThrow(MISMATCH);
+    expect(JSON.stringify(plan)).toBe(before);
+    expect(plan.selectedStrategicOptionId).toBe("expand");
+  });
+
+  it("preserves current behavior when the fingerprint matches, in any exposure order", () => {
+    const reordered = [...fixtureOptions()].reverse();
+    const request = makeRequest({ exposedOptions: reordered });
+    const cycle = advanceCommanderPlan({
+      active: null,
+      request,
+      material: makeMaterial(),
+      response: makeResponse(commanderRequestIdentity(request), {
+        selectedStrategicOptionId: "survive",
+      }),
+    });
+
+    expect(cycle.rejection).toBeNull();
+    expect(cycle.selector).toBe("commander");
+    expect(cycle.plan?.selectedStrategicOptionId).toBe("survive");
+  });
+});
+
 describe("CommanderPlanLifecycle Stage 3 — fingerprint stability and sensitivity", () => {
   it("accepts a result whose fingerprints were rebuilt from identical inputs", () => {
     const request = makeRequest();
