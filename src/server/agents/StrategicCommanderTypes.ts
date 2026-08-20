@@ -1,3 +1,5 @@
+import type { AgentGamePhase, AgentStrategyProfile } from "./AgentTypes";
+
 export const strategicOptionFamilies = [
   "expand",
   "develop_economy",
@@ -99,3 +101,136 @@ export interface BuiltStrategicOptions {
   exposed: ExposedStrategicOption[];
   record: StrategicOptionSetRecord;
 }
+
+export const commanderReplanTriggers = [
+  "horizon_expiry",
+  "option_not_executable",
+  "target_eliminated",
+  "home_danger_high",
+  "option_appeared",
+] as const;
+
+export type CommanderReplanTrigger = (typeof commanderReplanTriggers)[number];
+
+export const MIN_COMMANDER_HORIZON_DECISIONS = 2;
+export const MAX_COMMANDER_HORIZON_DECISIONS = 6;
+export const DEFAULT_COMMANDER_HORIZON_DECISIONS = 3;
+export const MAX_COMMANDER_INTENT_LENGTH = 160;
+
+export interface CommanderStructureCounts {
+  cities: number;
+  factories: number;
+  ports: number;
+  defensePosts: number;
+  samLaunchers: number;
+}
+
+export interface CommanderSelfState {
+  name: string;
+  profile: AgentStrategyProfile;
+  phase: AgentGamePhase;
+  turnNumber: number;
+  tick: number | null;
+  decisionSequence: number;
+  territoryRank: number;
+  alivePlayerCount: number;
+  troops: number;
+  maxTroops: number | null;
+  troopRatio: number | null;
+  gold: string;
+  tilesOwned: number;
+  tileShare: number | null;
+  borderTiles: number;
+  incomingAttacks: number;
+  outgoingAttacks: number;
+  structures: CommanderStructureCounts;
+}
+
+export interface CommanderRivalState {
+  playerID: string;
+  name: string;
+  isAlive: boolean;
+  isDisconnected: boolean;
+  troops: number;
+  tilesOwned: number;
+  tileShare: number | null;
+  sharesBorder: boolean;
+  isAllied: boolean;
+  attackedMeRecently: boolean;
+  iAmAttackingThem: boolean;
+}
+
+export interface CommanderPlanProgressSnapshot {
+  decisionsExecuted: number;
+  tilesDelta: number;
+  troopsDelta: number;
+  newIncomingAttackerIDs: string[];
+}
+
+/**
+ * Stage 2 only defines this bounded snapshot shape. Stage 3 owns persistence,
+ * progress calculation, and every plan transition.
+ */
+export interface CommanderPlanSnapshot {
+  selectedStrategicOptionId: StrategicOptionId;
+  family: StrategicOptionFamily;
+  targetPlayerID: string | null;
+  horizonDecisions: number;
+  replanTriggers: CommanderReplanTrigger[];
+  progress: CommanderPlanProgressSnapshot;
+}
+
+/**
+ * Typed factual inputs for the fixed recent-event templates. Stage 3 may
+ * derive these events; Stage 2 only bounds and renders them.
+ */
+export type CommanderRecentEvent =
+  | {
+      kind: "territory_changed";
+      fromTiles: number;
+      toTiles: number;
+    }
+  | {
+      kind: "troops_changed";
+      fromTroops: number;
+      toTroops: number;
+    }
+  | {
+      kind: "incoming_attacker";
+      playerID: string;
+    }
+  | {
+      kind: "rival_eliminated";
+      playerID: string;
+    };
+
+/** The complete and only object serialized into a Commander prompt. */
+export interface CommanderState {
+  self: CommanderSelfState;
+  rivals: CommanderRivalState[];
+  plan: CommanderPlanSnapshot | null;
+  recentEvents: string[];
+  options: ExposedStrategicOption[];
+}
+
+export interface CommanderFingerprints {
+  exposedOptionSet: string;
+  materialState: string;
+}
+
+export interface BuiltCommanderState {
+  state: CommanderState;
+  fingerprints: CommanderFingerprints;
+}
+
+export interface CommanderResponse {
+  selectedStrategicOptionId: StrategicOptionId;
+  horizonDecisions: number;
+  intent: string;
+  replanTriggers: CommanderReplanTrigger[];
+  confidence?: number;
+}
+
+export type CommanderResponseParseResult =
+  | ({ ok: true; raw: string } & CommanderResponse)
+  | { ok: false; reason: string; raw: string };
