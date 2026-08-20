@@ -86,7 +86,15 @@ function createBedrockComplete() {
     if (!client) {
       const mod = await import("@anthropic-ai/bedrock-sdk");
       const AnthropicBedrock = mod.default ?? mod.AnthropicBedrock;
-      client = new AnthropicBedrock({ awsRegion: REGION });
+      // Same sidecar contract as keystone: hosted pods proxy Bedrock through
+      // AWS_ENDPOINT_URL_BEDROCK_RUNTIME and ship placeholder AWS creds, so a
+      // direct call 403s with "Invalid API Key format". Builders copy this file
+      // as their starter, so the fix belongs here too.
+      const sidecarEndpoint = process.env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME?.trim();
+      client = new AnthropicBedrock({
+        awsRegion: REGION,
+        ...(sidecarEndpoint ? { baseURL: sidecarEndpoint } : {}),
+      });
     }
     const startIndex = lockedIndex ?? 0;
     let lastError = null;

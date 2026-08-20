@@ -13,6 +13,7 @@ import {
 import { ReplayPremiereEventStore } from "../../../src/server/replay-premiere/ReplayPremiereEventStore";
 import { sha256Hex } from "../../../src/server/replay-premiere/ReplayPremiereIntegrity";
 import { DEFAULT_REPLAY_PREMIERE_EVENT_STORE_LIMITS } from "../../../src/server/replay-premiere/ReplayPremiereStartup";
+import { AMPLE_DISK } from "./ReplayPremiereFixtures";
 import {
   PREMIERE_ID,
   verifiedPublicationFixture,
@@ -48,6 +49,7 @@ describe("Replay Premiere legacy projection preparation CLI", () => {
     servedRoot = path.join(root, "served");
     const fixture = await verifiedPublicationFixture(root);
     const catalog = await ReplayPremiereAdmissionCatalog.open({
+      statfs: AMPLE_DISK,
       privateStateRoot,
       servedRoots: [servedRoot],
     });
@@ -148,6 +150,7 @@ describe("Replay Premiere legacy projection preparation CLI", () => {
         checkpointProjector: {
           async project(options) {
             const concurrent = await ReplayPremiereAdmissionCatalog.open({
+              statfs: AMPLE_DISK,
               privateStateRoot,
               servedRoots: [servedRoot],
             });

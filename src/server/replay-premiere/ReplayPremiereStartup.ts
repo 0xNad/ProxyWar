@@ -1,3 +1,4 @@
+import type { promises as fs } from "node:fs";
 import type { ReplayPremiereArchiveStore } from "./ReplayPremiereArchiveIndex";
 import type { ReplayPremiereArchivedClipPromoter } from "./ReplayPremiereArchivedClipPromoter";
 import {
@@ -182,6 +183,12 @@ export interface ReplayPremiereProductionStartupOptions {
   eventStoreLimits?: ReplayPremiereEventStoreLimits;
   interactionLimits?: Partial<ReplayPremiereInteractionLimits>;
   clock?: ReplayPremiereRuntimeClock;
+  /**
+   * Free-space probe for the durable-write floor, forwarded to the catalog and
+   * the event store. Production omits it and gets the real `fs.statfs`; suites
+   * inject so they assert startup behaviour instead of the host's spare disk.
+   */
+  statfs?: typeof fs.statfs;
   maxStartupMs?: number;
   /**
    * Wall-clock budget for the single deferred background assembly a
@@ -608,6 +615,7 @@ export async function startReplayPremiereProduction(
     servedRoots: options.servedRoots,
     limits: catalogLimits,
     writerWaitMs: Math.min(1_000, maxStartupMs),
+    statfs: options.statfs,
   });
   const privateStateRoot = catalog.privateStateRoot;
   let read: ReplayPremiereCatalogReadResult;
@@ -667,6 +675,7 @@ export async function startReplayPremiereProduction(
       servedRoots: options.servedRoots,
       limits: eventStoreLimits,
       now: () => clock.now(),
+      statfs: options.statfs,
     });
     const activeEventStore = eventStore;
     const recoveredAtStartup = activeEventStore.recovered;

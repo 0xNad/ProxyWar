@@ -1,0 +1,94 @@
+# Keystone house-agent policy image.
+#
+# WHY THIS FILE EXISTS: every keystone version before v51 was built ad hoc,
+# with no recipe in the repo. That is the root of a recurring class of
+# incident — v45 booted degraded and was burned, v49/v50 shipped with no
+# recorded configuration, and reconstructing what a live version actually ran
+# required reading a boot banner out of an exhibition we owned (2026-08-19,
+# `ereq_968d4279…`). A policy that plays on the public ladder should be
+# rebuildable from source by anyone, so this is now a checked-in artifact.
+#
+# LAYOUT IS LOAD-BEARING. `keystone-player.ts` is a THIN policy container
+# entrypoint that loads the real agent brain from the repo AT RUNTIME through
+# tsx (`loadKeystoneModules` imports `src/server/agents/AgentPlannerExecutor.ts`
+# by path). So the image needs two trees, and the paths are the ones the live
+# policy already uses:
+#   /app/integration/src  — the player entrypoint (`PROXYWAR_REPO` default is
+#                           `/app/proxywar`, so this tree is NOT the repo)
+#   /app/proxywar         — the repo, providing src/server/agents/**, the
+#                           `ws` module keystone requires by absolute path,
+#                           and tsx itself
+# Getting this wrong does not fail the build — it fails at the first decision,
+# in production, which is exactly how the "value import of src/" class of bug
+# reached a champion before.
+#
+# Run command (must match what the policy version declares):
+#   sh -c "PROXYWAR_PLAYER_POST_FINAL_LINGER_MS=120000 \
+#          exec node --import tsx /app/integration/src/keystone-player.ts"
+# NOTE the specifier: `--import tsx`, NOT the `--import tsx/esm` the live v51
+# policy declares. On a current Node 22 base, `tsx/esm` registers only the ESM
+# loader and the entry still dies on a TypeScript parameter property; `tsx`
+# registers the full loader and boots. v51 works because its image pins an
+# older Node — so copying its run command forward onto a fresh base yields a
+# champion that dies on its first decision. Verified both ways here.
+#
+# Build from the REPO ROOT so both trees are in context:
+#   docker build --platform linux/amd64 \
+#     -f coworld-adapter/Dockerfile.keystone -t proxywar-agent-keystone:<tag> .
+# NODE 22, DELIBERATELY, NOT 24. On Node 24 this exact run command dies twice
+# over: native type-stripping claims the .ts entry before tsx can transform it
+# ("TypeScript parameter property is not supported in strip-only mode"), and
+# disabling that only exposes Node 24's require(esm) cycle rule
+# (ERR_REQUIRE_CYCLE_MODULE) in the agent module graph. Both verified in this
+# image on 2026-08-19. The live champion's run command is unchanged since it
+# was built against Node 22 semantics; pinning here keeps the recipe faithful
+# to the version that demonstrably boots. Moving to 24 is a separate, tested
+# change — not a silent base bump.
+FROM node:22-bookworm-slim
+
+ENV NODE_ENV=production \
+    PROXYWAR_REPO=/app/proxywar
+
+# --- repo tree: the brain keystone loads at runtime -------------------------
+WORKDIR /app/proxywar
+COPY package.json package-lock.json ./
+# tsx is a devDependency, but it is a RUNTIME requirement here: the entrypoint
+# is TypeScript and the agent modules are imported as .ts. `--omit=dev` alone
+# would produce an image that builds clean and dies on boot.
+# NOT --omit=optional: esbuild ships its native binary as an OPTIONAL
+# dependency (@esbuild/linux-x64), and tsx is built on esbuild. Omitting them
+# yields an image whose first `--import tsx/esm` dies with "could not be
+# found, and is needed by esbuild" (verified). Scripts stay off per repo rule.
+RUN npm ci --ignore-scripts \
+    && npm cache clean --force
+COPY tsconfig.json ./
+COPY src ./src
+# Config/map loading in the agent path reads from resources at runtime.
+COPY resources ./resources
+
+# --- player tree: the policy entrypoint ------------------------------------
+# The adapter's OWN dependencies must be installed here, not just its source.
+# `createBedrockProvider` resolves `@anthropic-ai/bedrock-sdk` by BARE specifier
+# through a dynamic import at first model call, and that package is declared in
+# coworld-adapter/package.json — NOT in the root manifest installed above. Ship
+# the source alone and the image builds clean, boots clean, prints a healthy
+# banner, and then fails EVERY model call with "Cannot find package
+# '@anthropic-ai/bedrock-sdk'" — silently degrading to the rule planner.
+# Verified 2026-08-19 by the in-pod diagnostic (PROXYWAR_KEYSTONE_BEDROCK_DIAG=1):
+# `key=set AWS_REGION=us-east-1 probe=Cannot find package '@anthropic-ai/bedrock-sdk'`
+# — credentials were fine all along; the library was simply absent.
+WORKDIR /app/integration
+COPY coworld-adapter/package.json coworld-adapter/package-lock.json ./
+RUN npm ci --ignore-scripts --omit=dev \
+    && npm cache clean --force
+COPY coworld-adapter/src /app/integration/src
+
+# WORKDIR IS LOAD-BEARING, NOT COSMETIC. The run command imports tsx by BARE
+# specifier (`--import tsx/esm`), which Node resolves from the working
+# directory's node_modules chain — and tsx lives under the repo tree. Ending
+# in /app/integration builds a perfectly clean image that dies on its first
+# boot with ERR_MODULE_NOT_FOUND (verified: that was this file's first draft).
+# The entrypoint is referenced absolutely, so cwd costs the player nothing.
+WORKDIR /app/proxywar
+
+CMD ["sh", "-c", "PROXYWAR_PLAYER_POST_FINAL_LINGER_MS=120000 exec node --import tsx /app/integration/src/keystone-player.ts"]

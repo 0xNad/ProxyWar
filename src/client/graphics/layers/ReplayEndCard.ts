@@ -83,6 +83,14 @@ const DEFAULT_MAX_ROWS = 16;
  * jitter of a paused/stepping clock so a still frame can never flicker it off.
  */
 const REWIND_TOLERANCE_TICKS = 20;
+/**
+ * Frames the replay must sit at/after its final recorded turn with no `Win`
+ * before the card declares a no-winner result. This layer ticks every frame,
+ * so ~0.5s at 60Hz — long enough that a real victory arriving a tick late
+ * still wins the race, short enough that a viewer does not watch a frozen
+ * clock wondering whether the page broke.
+ */
+const END_CARD_EXHAUSTION_FRAMES = 30;
 
 /**
  * Trend guards for the verdict. A collapse claim ("X fell from 135K tiles to
@@ -196,6 +204,8 @@ export class ReplayEndCard extends LitElement implements Layer {
    */
   private readonly everAlive = new Set<number>();
   private sampleCount = 0;
+  /** Consecutive frames spent at/after the final recorded turn without a Win. */
+  private exhaustedFrames = 0;
 
   /**
    * Light DOM. MANDATORY: Tailwind's global stylesheet and the broadcast
@@ -278,10 +288,50 @@ export class ReplayEndCard extends LitElement implements Layer {
 
     const updates = game.updatesSinceLastTick();
     const winUpdates = updates !== null ? updates[GameUpdateType.Win] : [];
-    if (winUpdates.length === 0) return;
+    if (winUpdates.length === 0) {
+      this.showResultIfReplayExhausted(game);
+      return;
+    }
 
     // Only one match can end, and only once. Take the first Win update.
     this.showResult(game, winUpdates[0].winner);
+  }
+
+  /**
+   * END-01: a match that ends WITHOUT an in-simulation victory.
+   *
+   * League episodes are cut off by the commissioner's turn budget, and the
+   * standings are decided on territory — nobody is eliminated, so
+   * `GameImpl.setWinner` is never called and no `Win` update ever reaches this
+   * layer. Observed live 2026-08-19: the transport froze at "00:07 ·
+   * 11500/11500", the board micro-animated forever, and the end card never
+   * came. The replay simply had no terminal event to end on.
+   *
+   * `buildSnapshot` already renders the honest no-winner case ("Result / No
+   * winner", ranked by largest holding), so all that was missing was the
+   * trigger. Exhaustion is read from the same `pwReplayTotalTurns` body key
+   * the broadcast clock uses, so this cannot fire in live play (the key is
+   * absent) and stays correct across a rewind (the key is republished).
+   *
+   * The confirmation delay matters: a Win update for a genuine victory can
+   * arrive on the tick AFTER the final turn is reached, and firing instantly
+   * would freeze "No winner" over a match somebody actually won. Waiting a
+   * few frames lets the real ending win the race; `showResult` is idempotent
+   * because `tick()` returns early once a snapshot exists.
+   */
+  private showResultIfReplayExhausted(game: GameView): void {
+    const totalTurns = Number(document.body.dataset.pwReplayTotalTurns);
+    if (!Number.isFinite(totalTurns) || totalTurns <= 0) {
+      this.exhaustedFrames = 0;
+      return;
+    }
+    if (game.ticks() < totalTurns) {
+      this.exhaustedFrames = 0;
+      return;
+    }
+    this.exhaustedFrames += 1;
+    if (this.exhaustedFrames < END_CARD_EXHAUSTION_FRAMES) return;
+    this.showResult(game, undefined);
   }
 
   /**
