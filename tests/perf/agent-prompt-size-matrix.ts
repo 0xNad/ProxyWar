@@ -106,6 +106,19 @@ export interface ArmSpec {
 export const ARMS: ArmSpec[] = [
   { name: "base_no_warships", env: {}, stripWarships: true },
   { name: "warships", env: {} },
+  // The in-house social prompt arm gates a prompt block AND the `deals`
+  // observation block, so without an arm here every OTHER arm measures both as
+  // zero bytes — verbatim the failure this file's own header records happening
+  // twice before. Free text is on because the arm teaches a message slot, and a
+  // slot the menu never offers would understate the block's real cost.
+  {
+    name: "inhouse_social",
+    env: {
+      PROXYWAR_TUNE_INHOUSE_SOCIAL_PROMPT: "1",
+      PROXYWAR_TUNE_FREETEXT_MESSAGES: "1",
+    },
+    inboxMessages: 3,
+  },
   { name: "spatial", env: { PROXYWAR_TUNE_SPATIAL_OBSERVATION: "1" } },
   {
     name: "spatial_minimap",
