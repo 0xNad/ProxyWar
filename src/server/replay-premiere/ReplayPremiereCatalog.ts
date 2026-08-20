@@ -551,6 +551,11 @@ export class ReplayPremiereAdmissionCatalog {
           servedRoots: this.servedRoots,
           limits: this.limits,
           writerWaitMs: 1_000,
+          // Carry the injected seam across the reopen. Dropping it silently
+          // reverts this path to the host's real free space, which is the exact
+          // host dependence the seam exists to remove — a suite injecting AMPLE
+          // would still fail on a full disk, and only on the post-close path.
+          statfs: this.statfs,
           checkpointProjectionPublicationFaultInjector:
             this.checkpointProjectionPublicationFaultInjector,
         });
@@ -579,6 +584,11 @@ export class ReplayPremiereAdmissionCatalog {
           servedRoots: this.servedRoots,
           limits: this.limits,
           writerWaitMs: 1_000,
+          // Carry the injected seam across the reopen. Dropping it silently
+          // reverts this path to the host's real free space, which is the exact
+          // host dependence the seam exists to remove — a suite injecting AMPLE
+          // would still fail on a full disk, and only on the post-close path.
+          statfs: this.statfs,
           checkpointProjectionPublicationFaultInjector:
             this.checkpointProjectionPublicationFaultInjector,
         });
