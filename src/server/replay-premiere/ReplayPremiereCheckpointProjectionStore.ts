@@ -92,17 +92,21 @@ export class ReplayPremiereCheckpointProjectionStore {
   private readonly catalogEntriesRoot: string;
   private readonly maxTotalBytes: number;
   private readonly publicationFaultInjector?: ReplayPremiereCheckpointProjectionPublicationFaultInjector;
+  /** See the catalog's `statfs` note: production omits it, tests inject. */
+  private readonly statfs?: typeof fs.statfs;
 
   private constructor(
     root: string,
     catalogEntriesRoot: string,
     maxTotalBytes: number,
     publicationFaultInjector?: ReplayPremiereCheckpointProjectionPublicationFaultInjector,
+    statfs?: typeof fs.statfs,
   ) {
     this.root = root;
     this.catalogEntriesRoot = catalogEntriesRoot;
     this.maxTotalBytes = maxTotalBytes;
     this.publicationFaultInjector = publicationFaultInjector;
+    this.statfs = statfs;
   }
 
   static async open(options: {
@@ -110,6 +114,7 @@ export class ReplayPremiereCheckpointProjectionStore {
     catalogEntriesRoot: string;
     maxTotalBytes: number;
     publicationFaultInjector?: ReplayPremiereCheckpointProjectionPublicationFaultInjector;
+    statfs?: typeof fs.statfs;
   }): Promise<ReplayPremiereCheckpointProjectionStore> {
     const root = await ensurePrivateArtifactDirectory(
       path.join(options.catalogRoot, ARTIFACT_DIRECTORY),
@@ -120,6 +125,7 @@ export class ReplayPremiereCheckpointProjectionStore {
       options.catalogEntriesRoot,
       options.maxTotalBytes,
       options.publicationFaultInjector,
+      options.statfs,
     );
   }
 
@@ -209,6 +215,7 @@ export class ReplayPremiereCheckpointProjectionStore {
       );
     }
     await assertPremiereDurableWriteAdmission({
+      statfs: this.statfs,
       destinationPath: this.root,
       pendingBytes: bytes.byteLength,
     });
