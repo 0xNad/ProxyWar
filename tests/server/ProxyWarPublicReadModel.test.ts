@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { ReadModelSchema } from "../../src/client/publicapp/ReadModelSchema";
 import { buildProxyWarPublicReadModel } from "../../src/server/ProxyWarPublicReadModel";
 import type { CoworldLeagueArchivedReplayHrefs } from "../../src/server/agents/CoworldLeagueArtifactRetention";
 import type { CoworldLeagueMirrorData } from "../../src/server/agents/CoworldLeagueSiteWriter";
@@ -217,10 +218,12 @@ describe("buildProxyWarPublicReadModel", () => {
     expect(model.lastGoodSyncAt).toBe("2026-07-30T20:00:00.000Z");
   });
 
-  test("feedStates default to false when the mirror omits championFeedStale/replayFeedStale", () => {
+  test("feedStates default independently and round integrity defaults to unavailable", () => {
     const mirror = baseMirror({
       championFeedStale: undefined,
       replayFeedStale: undefined,
+      roundIntegrityFeedStale: undefined,
+      roundIntegrity: undefined,
     });
     const model = buildProxyWarPublicReadModel(
       mirror,
@@ -230,7 +233,9 @@ describe("buildProxyWarPublicReadModel", () => {
     expect(model.feedStates).toEqual({
       championFeedStale: false,
       replayFeedStale: false,
+      roundIntegrityFeedStale: false,
     });
+    expect(model.roundIntegrity).toBeNull();
   });
 
   test("a stale champion feed is carried through feedStates without touching the overall stale flag", () => {
@@ -242,6 +247,58 @@ describe("buildProxyWarPublicReadModel", () => {
     );
     expect(model.stale).toBe(false);
     expect(model.feedStates.championFeedStale).toBe(true);
+  });
+
+  test("projects retained round-integrity evidence separately from replay freshness", () => {
+    const assessment = {
+      roundId: "round_1897",
+      roundNumber: 1897,
+      completedAt: "2026-08-21T19:19:43.947983Z",
+      expectedEpisodeCount: 25,
+      observedEpisodeCount: 25,
+      scoreBearingCount: 11,
+      effectiveFailureCount: 14,
+      phantomFailureCount: 14,
+      otherFailureCount: 0,
+      allowedFailureCount: 1,
+      allowedFailureRate: 0.05,
+      verdict: "breach" as const,
+      evidenceHash: "b".repeat(64),
+    };
+    const roundIntegrity = {
+      status: "degraded" as const,
+      checkedAt: "2026-08-21T19:21:00.000Z",
+      settings: {
+        expectedEpisodesPerRound: 25,
+        roundIntervalMinutes: 25,
+        allowedFailureRate: 0.05,
+        allowedFailureCount: 1,
+      },
+      latestCompletedRound: assessment,
+      lastConfirmedBreach: assessment,
+      breachObservations: [
+        {
+          roundId: assessment.roundId,
+          evidenceHash: assessment.evidenceHash,
+          firstObservedAt: "2026-08-21T19:20:00.000Z",
+        },
+      ],
+    };
+    const model = buildProxyWarPublicReadModel(
+      baseMirror({
+        replayFeedStale: false,
+        roundIntegrityFeedStale: true,
+        roundIntegrity,
+      }),
+      identitySnapshot(),
+      featuredMatchStoreOf(),
+    );
+    expect(model.feedStates).toMatchObject({
+      replayFeedStale: false,
+      roundIntegrityFeedStale: true,
+    });
+    expect(model.roundIntegrity).toEqual(roundIntegrity);
+    expect(ReadModelSchema.parse(model).roundIntegrity).toEqual(roundIntegrity);
   });
 
   test("a registered agent resolves full identity: slug, displayName, emblem, short code, standing, active version", () => {

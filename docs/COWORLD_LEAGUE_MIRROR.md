@@ -15,8 +15,9 @@ npm run league:prune -- --apply              # archive summaries, then delete ca
 ```
 
 Requires a logged-in `coworld` CLI (`uvx coworld status`). The mirror only ever
-calls read verbs (`leagues`, `results`, `memberships`, `rounds`, `replays`) plus
-public S3 replay downloads. It never uploads, submits, or creates hosted work.
+calls read verbs (`leagues`, `results`, `memberships`, `rounds`, `episodes`,
+`replays`) plus public S3 replay downloads. It never uploads, submits, or
+creates hosted work.
 
 The standings preserve the policy label returned by `results` as the rating-row
 provenance, then show the player's current active champion from the read-only
@@ -25,6 +26,40 @@ whose inherited rating row still names `v7`), the page shows both. Rank, score,
 and **rated rounds** remain explicitly attached to the rating row instead of
 being assigned to the newer policy. House ownership is shown only when a current
 champion has the exact `proxywar-keystone:vN` policy name.
+
+## Round integrity
+
+The canonical detector is
+`src/server/agents/CoworldLeagueRoundIntegrity.ts`. It reads the live ladder
+contract from `settings.ladder.scheduler.num_episodes`,
+`settings.round_interval_minutes`, and
+`settings.ladder.fulfillment.allowed_failures`; checks only terminal completed
+rounds after every expected episode-request row is present and terminal; and
+counts a request as score-bearing only when it has an episode id, a running
+timestamp, no error, and one finite unique score for every scheduled policy.
+The exact completed-without-running/no-score phantom is reported separately.
+
+A breach first appears as confirmation-pending. Identical episode evidence must
+persist for 60 seconds before the state becomes degraded. A later healthy round
+clears current degradation while retaining the last confirmed breach. Missing
+or partial episode evidence retains the last verified assessment and marks only
+the round-integrity feed delayed; replay-only failures remain isolated under
+`replayFeedStale`.
+
+The installed `pw-league-sentinel.mjs` is machine-local operating code, not a
+tracked repository source. Its next installer revision must stage the exact
+tested detector above rather than copying a second set of predicates:
+
+```bash
+node scripts/build-pw-league-round-integrity.mjs \
+  --output /absolute/staging/path/pw-league-round-integrity.mjs
+```
+
+The generated module exports the evaluator and
+`coworldRoundIntegrityCriticalSignal()`. The sentinel can feed that signal into
+its existing 60-second recheck before alert/autofix action. The build refuses a
+relative path or an existing target unless explicitly passed `--overwrite`;
+installation/replacement remains a separate operator-authorized action.
 
 ## Output
 

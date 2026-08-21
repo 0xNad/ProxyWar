@@ -226,6 +226,21 @@ describe("CoworldLeagueMirrorCore", () => {
     expect(league?.name).toBe("Proxywar");
   });
 
+  test("parseLeagueSummary prefers current settings.ladder truth over legacy commissioner fields", () => {
+    const league = parseLeagueSummary({
+      ...leagueFixture,
+      settings: {
+        round_interval_minutes: 25,
+        ladder: {
+          scheduler: { num_episodes: 25 },
+          fulfillment: { allowed_failures: 0.05 },
+        },
+      },
+    });
+    expect(league?.roundIntervalMinutes).toBe(25);
+    expect(league?.episodesPerRound).toBe(25);
+  });
+
   test("pickCompetitionDivision prefers the populated top-level division", () => {
     const division = pickCompetitionDivision(divisionsFixture);
     expect(division?.id).toBe("div_competition");
