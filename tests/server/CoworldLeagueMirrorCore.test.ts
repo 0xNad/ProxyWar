@@ -1233,6 +1233,35 @@ describe("mirrored decisions.jsonl economy/deal stamp projection (economy-negoti
     });
   });
 
+  test("a mirrored line preserves only a bounded runtime mode", () => {
+    const acceptedRuntimeModes = [
+      "local-policy-baseline",
+      "mock-policy-planner",
+      "llm-policy-planner",
+      "llm-action-selector",
+      "autopilot-executor",
+    ] as const;
+    for (const runtimeMode of acceptedRuntimeModes) {
+      const { records } = agentDecisionRecordsFromMirroredDecisionsLog(
+        `${JSON.stringify({ ...bareLine, runtimeMode })}\n`,
+      );
+      expect(records[0].decisionMetadata).toMatchObject({ runtimeMode });
+    }
+
+    for (const runtimeMode of [
+      "untrusted-mode",
+      "",
+      7,
+      null,
+      { forged: true },
+    ]) {
+      const { records } = agentDecisionRecordsFromMirroredDecisionsLog(
+        `${JSON.stringify({ ...bareLine, runtimeMode })}\n`,
+      );
+      expect(records[0].decisionMetadata).toBeUndefined();
+    }
+  });
+
   test("a mirrored line round-trips a bounded degradedCause and rejects an unrecognized one", () => {
     // This projection is the last hop to the only league-wide feed a census can
     // read: other builders' decision logs are 403, so a cause that does not survive
