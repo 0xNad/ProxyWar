@@ -1,6 +1,19 @@
 import { isDealActionKind } from "./AgentDealManager";
 import { FREETEXT_MESSAGE_MAX_CHARS } from "./AgentTunables";
-import { AgentDecision, LegalAction } from "./AgentTypes";
+import {
+  AgentDecision,
+  AgentPrimaryActionValidationPolicy,
+  LegalAction,
+} from "./AgentTypes";
+
+export interface AgentDecisionValidationOptions {
+  /**
+   * Defaults to the documented legacy protocol, where a structured deal may
+   * occupy the primary slot. The in-house social prompt opts into the stricter
+   * ordinary-only contract through server-owned validation context.
+   */
+  primaryActionPolicy?: AgentPrimaryActionValidationPolicy;
+}
 
 export type AgentDecisionValidation =
   | { ok: true; action: LegalAction }
@@ -208,6 +221,7 @@ export interface AgentDecisionBatchValidation {
 export function validateAgentDecision(
   decision: AgentDecision,
   legalActions: LegalAction[],
+  options: AgentDecisionValidationOptions = {},
 ): AgentDecisionValidation {
   const action = legalActions.find(
     (candidate) => candidate.id === decision.actionID,
@@ -215,17 +229,14 @@ export function validateAgentDecision(
   const fallback =
     legalActions.find((candidate) => candidate.kind === "hold") ?? null;
   if (action !== undefined) {
-    // A `message` id is offered, but it belongs in the COMMS slot. Selected as
-    // the game action it would submit no intent and send no message — the
-    // agent would silently forfeit its move and believe it had spoken. Deal
-    // meta-actions survive this path because the runner routes them to the
-    // deal manager; messages have no such route, so refuse loudly instead of
-    // failing quietly.
-    if (action.kind === "message") {
+    const primarySlotRejection = primarySlotRejectionReason(
+      action,
+      options.primaryActionPolicy ?? "legacy-deal-compatible",
+    );
+    if (primarySlotRejection !== null) {
       return {
         ok: false,
-        reason:
-          "message actions belong in the comms slot (messageActionID + messageText), not the game action slot; nothing was sent",
+        reason: primarySlotRejection,
         fallback,
       };
     }
@@ -242,18 +253,29 @@ export function validateAgentDecision(
 export function validateAgentDecisionBatch(
   decision: AgentDecision,
   legalActions: LegalAction[],
+  options: AgentDecisionValidationOptions = {},
 ): AgentDecisionBatchValidation {
   const requestedActionIDs = requestedBatchActionIDs(decision);
   const actions: LegalAction[] = [];
   const rejectedActionIDs: string[] = [];
+  const unknownActionIDs: string[] = [];
+  const primarySlotRejectedActionIDs: string[] = [];
+  const primaryActionPolicy =
+    options.primaryActionPolicy ?? "legacy-deal-compatible";
 
   for (const actionID of requestedActionIDs) {
     const action = legalActions.find((candidate) => candidate.id === actionID);
-    if (action !== undefined) {
-      actions.push(action);
-    } else {
+    if (action === undefined) {
       rejectedActionIDs.push(actionID);
+      unknownActionIDs.push(actionID);
+      continue;
     }
+    if (primarySlotRejectionReason(action, primaryActionPolicy) !== null) {
+      rejectedActionIDs.push(actionID);
+      primarySlotRejectedActionIDs.push(actionID);
+      continue;
+    }
+    actions.push(action);
   }
 
   if (actions.length > 0) {
@@ -265,7 +287,11 @@ export function validateAgentDecisionBatch(
       reason:
         rejectedActionIDs.length === 0
           ? "all requested action ids are legal"
-          : `ignored unknown action ids: ${rejectedActionIDs.join(",")}`,
+          : batchRejectionReason(
+              "ignored",
+              unknownActionIDs,
+              primarySlotRejectedActionIDs,
+            ),
     };
   }
 
@@ -278,9 +304,69 @@ export function validateAgentDecisionBatch(
     fallback,
     reason:
       rejectedActionIDs.length > 0
-        ? `decision selected no known action ids: ${rejectedActionIDs.join(",")}`
+        ? batchRejectionReason(
+            "decision selected no eligible",
+            unknownActionIDs,
+            primarySlotRejectedActionIDs,
+          )
         : "decision selected no action ids",
   };
+}
+
+function primarySlotRejectionReason(
+  action: LegalAction,
+  policy: AgentPrimaryActionValidationPolicy,
+): string | null {
+  // A `message` id is offered, but it belongs in the COMMS slot. Selected as
+  // the game action it would submit no intent and send no message — the agent
+  // would silently forfeit its move and believe it had spoken. Refuse it in
+  // every contract, including the legacy one.
+  if (action.kind === "message") {
+    return "message actions belong in the comms slot (messageActionID + messageText), not the game action slot; nothing was sent";
+  }
+  // Existing external policies may still play one deal as their primary
+  // action. Only the armed in-house social prompt promises that deals live in
+  // the separate diplomacy slot and therefore opts into this stricter rule.
+  if (policy === "ordinary-only" && isDealActionKind(action.kind)) {
+    return "deal actions belong in the diplomacy slot (dealActionID), not the ordinary game action slot under the in-house social prompt contract";
+  }
+  return null;
+}
+
+function batchRejectionReason(
+  prefix: "ignored" | "decision selected no eligible",
+  unknownActionIDs: string[],
+  primarySlotRejectedActionIDs: string[],
+): string {
+  if (prefix === "ignored") {
+    if (primarySlotRejectedActionIDs.length === 0) {
+      // Preserve the legacy unknown-only wording byte for byte.
+      return `ignored unknown action ids: ${unknownActionIDs.join(",")}`;
+    }
+    if (unknownActionIDs.length === 0) {
+      return `ignored primary-slot-forbidden action ids: ${primarySlotRejectedActionIDs.join(",")}`;
+    }
+    return `ignored unknown action ids: ${unknownActionIDs.join(",")}; primary-slot-forbidden action ids: ${primarySlotRejectedActionIDs.join(",")}`;
+  }
+  if (prefix === "decision selected no eligible") {
+    if (primarySlotRejectedActionIDs.length === 0) {
+      // Preserve the legacy unknown-only wording byte for byte.
+      return `decision selected no known action ids: ${unknownActionIDs.join(",")}`;
+    }
+    if (unknownActionIDs.length === 0) {
+      return `decision selected no primary-slot-eligible action ids: ${primarySlotRejectedActionIDs.join(",")}`;
+    }
+  }
+  const parts: string[] = [];
+  if (unknownActionIDs.length > 0) {
+    parts.push(`unknown action ids: ${unknownActionIDs.join(",")}`);
+  }
+  if (primarySlotRejectedActionIDs.length > 0) {
+    parts.push(
+      `primary-slot-forbidden action ids: ${primarySlotRejectedActionIDs.join(",")}`,
+    );
+  }
+  return `${prefix} action ids; ${parts.join("; ")}`;
 }
 
 function requestedBatchActionIDs(decision: AgentDecision): string[] {

@@ -450,6 +450,16 @@ export class AgentLeagueMatchRunner {
         };
         const observationSummary =
           this.observationBuilder.summarize(observation);
+        // Resolve the primary-slot contract from the local brain implementation
+        // and this server-built observation/menu BEFORE dispatch. Model JSON,
+        // wire fields, decision metadata, and runtime attribution have no
+        // authority over it. Brains without this capability retain the
+        // documented legacy deal-primary contract.
+        const primaryActionPolicy =
+          participant.brain.primaryActionValidationPolicy?.({
+            observation,
+            legalActions,
+          }) ?? "legacy-deal-compatible";
         // Dispatch only after this seat's complete observation and menu exist.
         // The batch remains synchronous even though its result carries Promises.
         assertInnerDecisionTimeoutBelowOuter(
@@ -466,6 +476,7 @@ export class AgentLeagueMatchRunner {
           observation,
           observationSummary,
           legalActions,
+          primaryActionPolicy,
           decisionPromise,
         };
       });
@@ -561,6 +572,7 @@ export class AgentLeagueMatchRunner {
         const validation = this.decisionValidator(
           actionDecision,
           submissionLegalActions,
+          { primaryActionPolicy: input.primaryActionPolicy },
         );
         if (validation.ok) {
           selectedActions.push({
@@ -602,6 +614,7 @@ export class AgentLeagueMatchRunner {
         const validation = this.decisionValidator(
           decision,
           submissionLegalActions,
+          { primaryActionPolicy: input.primaryActionPolicy },
         );
         const action = actionFromValidation(validation);
         // The policy's requested action id(s) were all invalid; the validator

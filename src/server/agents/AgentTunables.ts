@@ -571,8 +571,10 @@ export function freeTextMessagesEnabled(): boolean {
  * This flag IS that A/B arm. It is the only thing that turns on the reply-slot
  * instructions, the reply-shape fields, and the `deals` observation block a
  * model needs to read a `deal_accept:` id it is being offered. With the flag
- * off, the prompt is byte-identical to shipped behavior even when structured
- * deals and free text are armed, so merging this can change nothing hosted.
+ * off, those arm-specific prompt bytes remain absent even when structured
+ * deals and free text are armed. That does not claim byte identity with an
+ * older commit: universal security hardening of untrusted prompt copies may
+ * deliberately change adversarial display strings in either arm.
  *
  * The underlying feature flags still bound what exists at all: this flag never
  * invents a deal or message id, it only describes ids the menu already offers.

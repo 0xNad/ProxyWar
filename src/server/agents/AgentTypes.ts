@@ -1356,6 +1356,19 @@ export interface LegalAction {
   metadata?: Record<string, string | number | boolean | null>;
 }
 
+/**
+ * Server-owned primary-slot contract. The legacy contract keeps structured
+ * deal meta-actions playable in the primary slot for existing external
+ * policies. `ordinary-only` is the stricter in-house social-prompt contract:
+ * deal and message ids belong only in their dedicated side slots.
+ *
+ * This is validation context, never policy output. A model response, wire
+ * payload, or decision metadata value cannot select the policy.
+ */
+export type AgentPrimaryActionValidationPolicy =
+  | "legacy-deal-compatible"
+  | "ordinary-only";
+
 export interface AgentDecision {
   actionID: string;
   actionIDs?: string[];
@@ -1459,6 +1472,14 @@ export interface AgentBrain {
   readonly brainType?: AgentBrainType;
   /** When present, must be strictly below the league's outer decision budget. */
   readonly internalDecisionTimeoutMs?: number;
+  /**
+   * Optional server implementation capability that tightens primary-action
+   * validation for this exact observation/menu. `AgentLeagueMatch` resolves it
+   * before dispatch and passes it beside, never inside, the policy decision.
+   */
+  primaryActionValidationPolicy?(
+    input: AgentBrainInput,
+  ): AgentPrimaryActionValidationPolicy;
   decide(input: AgentBrainInput): AgentBrainDecision;
   failClosed?(input: AgentBrainFailureInput): AgentBrainDecision;
   onActionResult?(feedback: AgentBrainActionResultFeedback): void;

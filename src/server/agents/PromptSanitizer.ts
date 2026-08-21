@@ -30,7 +30,7 @@ const STRIP_PATTERN = new RegExp(
     "\\u200b-\\u200f" + // zero-width space/joiners, LRM/RLM
     "\\u2028\\u2029" + // line/paragraph separators
     "\\u202a-\\u202e" + // directional embedding/override
-    "\\u2060-\\u2064" + // word joiner + invisible operators
+    "\\u2060-\\u206f" + // word joiner, invisible operators, bidi isolates/formats
     "\\ufeff" + // BOM / zero-width no-break space
     "]",
   "g",
@@ -43,10 +43,7 @@ export function sanitizeUntrustedDisplayString(
   if (typeof value !== "string") {
     return "";
   }
-  const cleaned = value
-    .replace(STRIP_PATTERN, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  const cleaned = value.replace(STRIP_PATTERN, " ").replace(/\s+/g, " ").trim();
   if (cleaned.length <= maxLength) {
     return cleaned;
   }
