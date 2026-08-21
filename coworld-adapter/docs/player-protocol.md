@@ -48,6 +48,7 @@ The player replies:
   "type": "decision_response",
   "requestID": "req_...",
   "selectedLegalActionId": "hold",
+  "runtimeMode": "llm-policy-planner",
   "reason": "No better legal action was available.",
   "confidence": 0.5
 }
@@ -84,6 +85,27 @@ ignored, so a decision that reports health can never carry failure evidence.
 `brain-timeout` and `brain-error` belong to the same vocabulary but are stamped by the
 GAME when it never hears from a policy, or when a brain throws. They are rejected on
 the inbound wire: a policy cannot attribute its own failure to the server.
+
+### Reporting the runtime path
+
+`"runtimeMode"` is optional, self-reported attribution for the policy runtime
+under which this decision was produced. It must exactly equal one of these
+values:
+
+- `local-policy-baseline`
+- `mock-policy-planner`
+- `llm-policy-planner`
+- `llm-action-selector`
+- `autopilot-executor`
+
+The parser does not trim, case-fold, or infer a mode from the policy name. An
+omitted or unrecognized value is recorded as `unknown`; existing third-party
+policies therefore remain unknown unless they report one of the exact bounded
+values themselves. A runtime mode does not claim that a provider call occurred
+on that exact decision; the separate external-call and degradation fields carry
+that evidence. Runtime-mode counts are safe aggregate telemetry in
+`match-summary.json`. The per-decision record remains in the private
+`decisions.jsonl` artifact and is not included in the public replay bundle.
 
 ## Spawn preference round (active v1)
 

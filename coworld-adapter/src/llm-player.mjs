@@ -76,6 +76,14 @@ const TIMEOUT_MS = Number(process.env.PROXYWAR_LLM_TIMEOUT_MS ?? 12000);
 const USE_BEDROCK =
   process.env.USE_BEDROCK === "true" && process.env.PROXYWAR_LLM_MOCK !== "1";
 
+/** Exact hosted-sidecar routing options, kept pure for release verification. */
+export function bedrockClientOptions(region = REGION, env = process.env) {
+  const sidecarEndpoint = env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME?.trim();
+  return sidecarEndpoint
+    ? { awsRegion: region, baseURL: sidecarEndpoint }
+    : { awsRegion: region };
+}
+
 // The ONLY provider-specific code: an llmComplete (prompt) => text on Bedrock,
 // with model-id autodetect across MODEL_ID_CANDIDATES (locks onto the first
 // id that answers; loud log either way).
@@ -86,7 +94,11 @@ function createBedrockComplete() {
     if (!client) {
       const mod = await import("@anthropic-ai/bedrock-sdk");
       const AnthropicBedrock = mod.default ?? mod.AnthropicBedrock;
-      client = new AnthropicBedrock({ awsRegion: REGION });
+      // Same sidecar contract as keystone: hosted pods proxy Bedrock through
+      // AWS_ENDPOINT_URL_BEDROCK_RUNTIME and ship placeholder AWS creds, so a
+      // direct call 403s with "Invalid API Key format". Builders copy this file
+      // as their starter, so the fix belongs here too.
+      client = new AnthropicBedrock(bedrockClientOptions());
     }
     const startIndex = lockedIndex ?? 0;
     let lastError = null;
@@ -274,6 +286,7 @@ async function main() {
           type: "decision_response",
           requestID: message.requestID,
           selectedLegalActionId: spawnPreferences[0].id,
+          runtimeMode: "llm-action-selector",
           spawnPreferenceLegalActionIds: spawnPreferences.map(
             (preference) => preference.id,
           ),
@@ -312,6 +325,7 @@ async function main() {
         type: "decision_response",
         requestID: message.requestID,
         selectedLegalActionId: decision.selectedLegalActionId,
+        runtimeMode: "llm-action-selector",
         reason: decision.reason ?? "starter-agent",
         confidence: decision.confidence ?? 0.7,
         ...(degraded ? { fallbackUsed: true, llmPlannerDegraded: true } : {}),

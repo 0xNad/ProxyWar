@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { AGENT_MATCH_RECAP_SCHEMA_VERSION } from "../../src/server/agents/AgentMatchRecap";
+import { agentRuntimeModes } from "../../src/server/agents/AgentTypes";
 import {
   activeChampionPolicyLabelsByPlayerId,
   agentDecisionRecordsFromMirroredDecisionsLog,
@@ -1234,14 +1235,7 @@ describe("mirrored decisions.jsonl economy/deal stamp projection (economy-negoti
   });
 
   test("a mirrored line preserves only a bounded runtime mode", () => {
-    const acceptedRuntimeModes = [
-      "local-policy-baseline",
-      "mock-policy-planner",
-      "llm-policy-planner",
-      "llm-action-selector",
-      "autopilot-executor",
-    ] as const;
-    for (const runtimeMode of acceptedRuntimeModes) {
+    for (const runtimeMode of agentRuntimeModes) {
       const { records } = agentDecisionRecordsFromMirroredDecisionsLog(
         `${JSON.stringify({ ...bareLine, runtimeMode })}\n`,
       );

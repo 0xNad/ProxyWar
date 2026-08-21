@@ -308,9 +308,9 @@ describe("keystone treaty compliance guard", () => {
   });
 
   it("identifies the partners we owe abstention to", () => {
-    expect([...keystoneAbstentionPartners(pactObservation).partners]).toEqual([
-      "partner",
-    ]);
+    const abstention = keystoneAbstentionPartners(pactObservation);
+    expect([...abstention.partners]).toEqual(["partner"]);
+    expect([...abstention.tradeSecurityPartners]).toEqual([]);
   });
 
   it("withholds attacks on a pact partner while leaving every other action", () => {

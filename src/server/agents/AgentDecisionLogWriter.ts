@@ -53,6 +53,7 @@ import {
   AgentTacticalAffordances,
   AgentTransportTroopBankingAffordance,
   LegalActionKind,
+  normalizeAgentRuntimeMode,
 } from "./AgentTypes";
 import {
   asAgentDegradationCause,
@@ -625,6 +626,7 @@ function decisionLogEntry(
 ): DecisionLogEntry {
   const metadata = record.decisionMetadata ?? {};
   const audit = record.audit ?? fallbackAudit(record);
+  const runtimeMode = normalizeAgentRuntimeMode(metadata.runtimeMode);
   return {
     runID: input.runID,
     matchID: input.matchID,
@@ -635,14 +637,7 @@ function decisionLogEntry(
     username: record.username,
     profile: record.profile,
     brainType: record.brainType,
-    ...(stringMetadata(metadata, "runtimeMode") !== undefined
-      ? {
-          runtimeMode: stringMetadata(
-            metadata,
-            "runtimeMode",
-          ) as AgentRuntimeMode,
-        }
-      : {}),
+    ...(runtimeMode !== undefined ? { runtimeMode } : {}),
     ...(stringMetadata(metadata, "plannerSource") !== undefined
       ? { plannerSource: stringMetadata(metadata, "plannerSource") }
       : {}),

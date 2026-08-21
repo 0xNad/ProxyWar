@@ -25,6 +25,7 @@ import {
 import { ReplayPremiereRuntimeRegistry } from "../../../src/server/replay-premiere/ReplayPremiereRuntimeCoordinator";
 import { startReplayPremiereProduction } from "../../../src/server/replay-premiere/ReplayPremiereStartup";
 import {
+  AMPLE_DISK,
   controlledSourceBytes,
   eligibilityFixture,
   NOW,
@@ -171,6 +172,7 @@ describe("Replay Premiere operator admission command", () => {
       checkpointProjector: {
         async project(options) {
           const concurrent = await ReplayPremiereAdmissionCatalog.open({
+            statfs: AMPLE_DISK,
             privateStateRoot: harness.privateStateRoot,
             servedRoots: [harness.servedRoot],
           });
@@ -386,6 +388,7 @@ describe("Replay Premiere operator admission command", () => {
     const httpRegistry = new ReplayPremiereHttpRegistry(limiter.admit);
     const runtimeRegistry = new ReplayPremiereRuntimeRegistry();
     const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
       privateStateRoot: harness.privateStateRoot,
       servedRoots: [harness.servedRoot],
       publicOrigin: EXPECTED_ORIGIN,
@@ -818,6 +821,7 @@ describe("Replay Premiere operator admission command", () => {
   test("reports catalog lock contention with a fixed operator code and no entry", async () => {
     const harness = await createHarness(root);
     const catalog = await ReplayPremiereAdmissionCatalog.open({
+      statfs: AMPLE_DISK,
       privateStateRoot: harness.privateStateRoot,
       servedRoots: [harness.servedRoot],
     });

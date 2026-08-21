@@ -39,6 +39,29 @@
 export const MAX_WIRE_ACTIONS_PER_DECISION = 5;
 
 /**
+ * Runtime-safe mirror of AgentTypes.agentRuntimeModes. The deployed adapter
+ * cannot value-import from src/ (integration and engine have different image
+ * roots), so the parity test pins this finite vocabulary to the canonical one.
+ */
+export const COWORLD_AGENT_RUNTIME_MODES = [
+  "local-policy-baseline",
+  "mock-policy-planner",
+  "llm-policy-planner",
+  "llm-action-selector",
+  "autopilot-executor",
+] as const;
+
+export type CoworldAgentRuntimeMode =
+  (typeof COWORLD_AGENT_RUNTIME_MODES)[number];
+
+/** Strict equality only; unrecognized/self-invented attribution is unknown. */
+export function normalizeRuntimeMode(
+  value: unknown,
+): CoworldAgentRuntimeMode | undefined {
+  return COWORLD_AGENT_RUNTIME_MODES.find((mode) => mode === value);
+}
+
+/**
  * Mirror of the SELF-REPORTED half of `AGENT_DEGRADATION_CAUSES`
  * (src/server/agents/AgentWireProtocol.ts). Duplicated as a literal for the same
  * reason the action cap is: the deployed player image cannot value-import from
@@ -356,6 +379,7 @@ export function composeCoworldDecision(input: {
 }): ComposedCoworldDecision {
   const { normalized, message, slot, requestID, offeredLegalActionCount } =
     input;
+  const runtimeMode = normalizeRuntimeMode(message.runtimeMode);
   return {
     ...normalized,
     metadata: {
@@ -367,6 +391,7 @@ export function composeCoworldDecision(input: {
       // and replays (the v1 bedrock seat failed silently for 60+ rounds
       // because this was hardcoded false).
       fallbackUsed: message.fallbackUsed === true,
+      ...(runtimeMode !== undefined ? { runtimeMode } : {}),
       ...(message.llmPlannerDegraded === true
         ? { llmPlannerDegraded: true }
         : {}),
