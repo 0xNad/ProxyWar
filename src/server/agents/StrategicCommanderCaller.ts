@@ -1,4 +1,3 @@
-import { withDeferredDecisionTimeout } from "./AgentDecisionTimeout";
 import type { AgentObservation } from "./AgentTypes";
 import {
   advanceCommanderPlan,
@@ -14,11 +13,12 @@ import {
   type CommanderPlanRequest,
   type CommanderPlanResponseEnvelope,
 } from "./CommanderPlanLifecycle";
-import { buildCommanderPrompt } from "./CommanderPromptBuilder";
-import { parseCommanderResponse } from "./CommanderResponseParser";
 import { buildCommanderState } from "./CommanderStateBuilder";
+import {
+  DEFAULT_LLM_OPTION_SELECTOR_TIMEOUT_MS,
+  LlmOptionSelector,
+} from "./LlmOptionSelector";
 import type { LlmProvider } from "./LlmProvider";
-import { sanitizeUntrustedDisplayString } from "./PromptSanitizer";
 import type {
   BuiltCommanderState,
   BuiltStrategicOptions,
@@ -30,11 +30,16 @@ import type {
 } from "./StrategicCommanderTypes";
 import {
   DeterministicOptionSelector,
+  deterministicSelectorTelemetry,
+  selectDeterministicStrategicOption,
+  type StrategicOptionSelectionAttempt,
   type StrategicOptionSelector,
+  type StrategicOptionSelectorSource,
+  type StrategicOptionSelectorTelemetry,
 } from "./StrategicOptionSelectors";
 
-export const MAX_COMMANDER_PROVIDER_FAILURE_LENGTH = 200;
-export const DEFAULT_COMMANDER_PROVIDER_TIMEOUT_MS = 12_000;
+export const DEFAULT_COMMANDER_PROVIDER_TIMEOUT_MS =
+  DEFAULT_LLM_OPTION_SELECTOR_TIMEOUT_MS;
 
 export interface StrategicCommanderCycleInput {
   observation: AgentObservation;
@@ -70,15 +75,20 @@ export interface StrategicCommanderCycleOutcome {
   /** Bounded provider error summary; null unless the provider call threw. */
   providerFailure: string | null;
   resolution: StrategicCommanderBindingResolution;
+  primarySelectorSource: StrategicOptionSelectorSource;
+  selectionTelemetry: StrategicOptionSelectorTelemetry;
+  deterministicPreferredStrategicOptionId: StrategicOptionId | null;
+  deterministicPreferredOptionAbsent: boolean;
 }
 
 /**
- * Stage 4 caller. Composes the Stage 1-3 modules into one decision cycle and
+ * Shared Arm B/C caller. Composes the Stage 1-3 modules into one decision cycle and
  * owns exactly two boundaries:
  *
- * 1. The provider boundary: the injected LlmProvider is consulted only at a
- *    genuine replan boundary — never while the lifecycle continues a valid
- *    installed plan and never when no strategic options are exposed.
+ * 1. The typed selector boundary: the injected selector is consulted only at
+ *    a genuine replan boundary and receives the exact locked Commander state
+ *    and exposed options — never observations, bindings, LegalAction ids, or
+ *    Arm B's counterfactual answer.
  * 2. The executable boundary: the lifecycle-selected StrategicOptionId is
  *    resolved only to the currently offered candidate's existing binding. An
  *    option whose binding is missing or empty is not exposed at all, so a plan
@@ -87,30 +97,47 @@ export interface StrategicCommanderCycleOutcome {
  *    executable output.
  */
 export class StrategicCommanderCaller {
+  private readonly primarySelector: StrategicOptionSelector;
+  readonly providerTimeoutMs: number | undefined;
+
   constructor(
-    private readonly provider: LlmProvider,
-    readonly providerTimeoutMs = DEFAULT_COMMANDER_PROVIDER_TIMEOUT_MS,
+    primarySelectorOrProvider: StrategicOptionSelector | LlmProvider,
+    providerTimeoutMs = DEFAULT_COMMANDER_PROVIDER_TIMEOUT_MS,
     private readonly fallbackSelector: StrategicOptionSelector = new DeterministicOptionSelector(),
-  ) {}
+  ) {
+    if (isStrategicOptionSelector(primarySelectorOrProvider)) {
+      assertSupportedPrimarySelector(primarySelectorOrProvider);
+      this.primarySelector = primarySelectorOrProvider;
+      this.providerTimeoutMs =
+        primarySelectorOrProvider.selectorSource === "llm"
+          ? providerTimeoutMs
+          : undefined;
+    } else {
+      this.primarySelector = new LlmOptionSelector({
+        provider: primarySelectorOrProvider,
+        timeoutMs: providerTimeoutMs,
+      });
+      this.providerTimeoutMs = providerTimeoutMs;
+    }
+  }
 
   runCycle(
     input: StrategicCommanderCycleInput,
   ): Promise<StrategicCommanderCycleOutcome> {
     return runStrategicCommanderCycle(
-      this.provider,
+      this.primarySelector,
       input,
-      this.providerTimeoutMs,
       this.fallbackSelector,
     );
   }
 }
 
 export async function runStrategicCommanderCycle(
-  provider: LlmProvider,
+  primarySelector: StrategicOptionSelector,
   input: StrategicCommanderCycleInput,
-  providerTimeoutMs = DEFAULT_COMMANDER_PROVIDER_TIMEOUT_MS,
   fallbackSelector: StrategicOptionSelector = new DeterministicOptionSelector(),
 ): Promise<StrategicCommanderCycleOutcome> {
+  assertSupportedPrimarySelector(primarySelector);
   if (fallbackSelector.selectorSource !== "deterministic") {
     throw new Error(
       "Commander fallback selector must be the deterministic Arm B selector",
@@ -176,43 +203,69 @@ export async function runStrategicCommanderCycle(
       })
     : null;
 
-  let providerCalled = false;
-  let providerFailure: string | null = null;
+  let selectionAttempt: StrategicOptionSelectionAttempt | null = null;
   let response: CommanderPlanResponseEnvelope | null = null;
   if (lockedSelectionState !== null) {
-    const prompt = buildCommanderPrompt(lockedSelectionState);
-    providerCalled = true;
-    try {
-      const providerPromise = Promise.resolve().then(() =>
-        provider.complete(prompt),
-      );
-      const raw = await withDeferredDecisionTimeout(
-        providerPromise,
-        providerTimeoutMs,
-        () =>
-          new Error(
-            `Commander provider timed out after ${providerTimeoutMs}ms`,
-          ),
-      ).promise;
+    selectionAttempt = await primarySelector.select(
+      lockedSelectionState,
+      lockedSelectionState.options,
+    );
+    if (selectionAttempt.ok) {
       response = {
         identity,
-        parsed: parseCommanderResponse(raw, identity.exposedOptionIDs),
+        parsed: {
+          ok: true,
+          raw: "",
+          ...selectionAttempt.selection,
+        },
       };
-    } catch (error) {
-      // A null response drives the existing commander_result_absent fallback,
-      // so a provider outage can never stall the cycle or leak an exception.
-      providerFailure = boundedProviderFailure(error);
+    } else if (
+      selectionAttempt.telemetry.failureKind === "parse" ||
+      selectionAttempt.telemetry.failureKind === "invalid-option"
+    ) {
+      response = {
+        identity,
+        parsed: {
+          ok: false,
+          raw: "",
+          reason: selectionAttempt.telemetry.failureDetail,
+        },
+      };
+    } else if (primarySelector.selectorSource !== "llm") {
+      throw new Error(
+        `Primary ${primarySelector.selectorSource} Commander selector failed: ${selectionAttempt.telemetry.failureDetail}`,
+      );
     }
   }
 
-  const fallbackSelection =
+  const needsFallback =
     lockedSelectionState !== null &&
-    (response === null || response.parsed.ok === false)
+    (selectionAttempt === null || selectionAttempt.ok === false);
+  const fallbackAttempt =
+    needsFallback && lockedSelectionState !== null
       ? await fallbackSelector.select(
           lockedSelectionState,
           lockedSelectionState.options,
         )
       : null;
+  if (fallbackAttempt !== null && !fallbackAttempt.ok) {
+    throw new Error(
+      `Deterministic Commander fallback failed: ${fallbackAttempt.telemetry.failureDetail}`,
+    );
+  }
+  const fallbackSelection = fallbackAttempt?.selection ?? null;
+  const selectionTelemetry =
+    selectionAttempt?.telemetry ?? noSelectionTelemetry(primarySelector);
+  const providerFailure =
+    selectionTelemetry.failureKind === "timeout" ||
+    selectionTelemetry.failureKind === "transport"
+      ? selectionTelemetry.failureDetail
+      : null;
+  const deterministicPreference = deterministicPreferenceForAccounting({
+    state: lockedSelectionState ?? builtState.state,
+    candidates: input.options.candidates,
+    exposedOptions,
+  });
 
   const cycle = advanceCommanderPlan({
     active: input.activePlan,
@@ -220,28 +273,37 @@ export async function runStrategicCommanderCycle(
     material,
     response,
     fallbackSelection,
+    primarySelector:
+      primarySelector.selectorSource === "deterministic"
+        ? "deterministic"
+        : "commander",
     forcedReplanReason: input.forcedReplanReason,
     fallbackDegradationCause: cycleFallbackDegradationCause({
-      providerFailure,
+      failureKind: selectionTelemetry.failureKind,
       response,
     }),
   });
   return {
     cycle,
-    providerCalled,
+    providerCalled: selectionTelemetry.providerCalled,
     providerFailure,
     resolution: resolveCyclePlanBinding(cycle, input.options.candidates),
+    primarySelectorSource: primarySelector.selectorSource,
+    selectionTelemetry,
+    deterministicPreferredStrategicOptionId: deterministicPreference.optionId,
+    deterministicPreferredOptionAbsent: deterministicPreference.absent,
   };
 }
 
 function cycleFallbackDegradationCause(input: {
-  providerFailure: string | null;
+  failureKind: StrategicOptionSelectorTelemetry["failureKind"];
   response: CommanderPlanResponseEnvelope | null;
 }): CommanderPlanFallbackDegradationCause | null {
-  if (input.providerFailure !== null) {
-    return /timed out/i.test(input.providerFailure)
-      ? "plan-timeout"
-      : "policy-error";
+  if (input.failureKind === "timeout") {
+    return "plan-timeout";
+  }
+  if (input.failureKind === "transport") {
+    return "policy-error";
   }
   return input.response?.parsed.ok === false ? "plan-parse" : null;
 }
@@ -379,10 +441,64 @@ function resolveCyclePlanBinding(
   };
 }
 
-function boundedProviderFailure(error: unknown): string {
-  const message = sanitizeUntrustedDisplayString(
-    error instanceof Error ? error.message : String(error),
-    MAX_COMMANDER_PROVIDER_FAILURE_LENGTH,
+function noSelectionTelemetry(
+  selector: StrategicOptionSelector,
+): StrategicOptionSelectorTelemetry {
+  return {
+    ...deterministicSelectorTelemetry(),
+    providerCalled: false,
+    parseOk: null,
+    provider: selector.selectorSource === "llm" ? "not-called" : null,
+  };
+}
+
+function deterministicPreferenceForAccounting(input: {
+  state: CommanderState;
+  candidates: readonly StrategicOptionCandidate[];
+  exposedOptions: readonly ExposedStrategicOption[];
+}): { optionId: StrategicOptionId | null; absent: boolean } {
+  const allEligibleOptions: ExposedStrategicOption[] = input.candidates.map(
+    ({ binding: _binding, ...visible }) => ({
+      ...visible,
+      evidence: { ...visible.evidence },
+    }),
   );
-  return message.length === 0 ? "Commander provider call failed" : message;
+  if (allEligibleOptions.length === 0) {
+    return { optionId: null, absent: false };
+  }
+  const accountingState: CommanderState = {
+    ...input.state,
+    options: allEligibleOptions,
+  };
+  const optionId = selectDeterministicStrategicOption(
+    accountingState,
+    accountingState.options,
+  ).selectedStrategicOptionId;
+  return {
+    optionId,
+    absent: !input.exposedOptions.some((option) => option.id === optionId),
+  };
+}
+
+function isStrategicOptionSelector(
+  value: StrategicOptionSelector | LlmProvider,
+): value is StrategicOptionSelector {
+  return (
+    typeof (value as Partial<StrategicOptionSelector>).selectorSource ===
+      "string" &&
+    typeof (value as Partial<StrategicOptionSelector>).select === "function"
+  );
+}
+
+function assertSupportedPrimarySelector(
+  selector: StrategicOptionSelector,
+): void {
+  if (
+    selector.selectorSource !== "llm" &&
+    selector.selectorSource !== "deterministic"
+  ) {
+    throw new Error(
+      `Unsupported Stage 5 primary selector source: ${selector.selectorSource}`,
+    );
+  }
 }

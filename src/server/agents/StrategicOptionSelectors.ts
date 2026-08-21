@@ -24,6 +24,58 @@ export interface StrategicOptionSelectorResult {
   replanTriggers: CommanderReplanTrigger[];
 }
 
+export const strategicOptionSelectionFailureKinds = [
+  "timeout",
+  "transport",
+  "parse",
+  "invalid-option",
+] as const;
+
+export type StrategicOptionSelectionFailureKind =
+  (typeof strategicOptionSelectionFailureKinds)[number];
+
+export const strategicOptionSelectionFailureDescriptions: Readonly<
+  Record<StrategicOptionSelectionFailureKind, string>
+> = {
+  timeout: "Commander selector timed out",
+  transport: "Commander selector transport failed",
+  parse: "Commander selector response could not be parsed",
+  "invalid-option":
+    "Commander selector selected an option outside the locked set",
+};
+
+/**
+ * Bounded, artifact-safe accounting for a selector attempt. Raw provider text
+ * and the prompt itself deliberately never cross this seam.
+ */
+export interface StrategicOptionSelectorTelemetry {
+  providerCalled: boolean;
+  promptCharacters: number;
+  planningLatencyMs: number;
+  rawOutputPresent: boolean;
+  parseOk: boolean | null;
+  failureKind: StrategicOptionSelectionFailureKind | null;
+  failureDetail: string | null;
+  provider: string | null;
+  model: string | null;
+  promptVersion: string | null;
+}
+
+export type StrategicOptionSelectionAttempt =
+  | {
+      ok: true;
+      selection: StrategicOptionSelectorResult;
+      telemetry: StrategicOptionSelectorTelemetry;
+    }
+  | {
+      ok: false;
+      selection: null;
+      telemetry: StrategicOptionSelectorTelemetry & {
+        failureKind: StrategicOptionSelectionFailureKind;
+        failureDetail: string;
+      };
+    };
+
 /**
  * The selector authority boundary. Implementations see only the bounded state
  * and binding-free exposed options, never AgentObservation, LegalAction ids,
@@ -34,7 +86,7 @@ export interface StrategicOptionSelector {
   select(
     state: CommanderState,
     options: readonly ExposedStrategicOption[],
-  ): Promise<StrategicOptionSelectorResult>;
+  ): Promise<StrategicOptionSelectionAttempt>;
 }
 
 /**
@@ -47,9 +99,28 @@ export class DeterministicOptionSelector implements StrategicOptionSelector {
   async select(
     state: CommanderState,
     options: readonly ExposedStrategicOption[],
-  ): Promise<StrategicOptionSelectorResult> {
-    return selectDeterministicStrategicOption(state, options);
+  ): Promise<StrategicOptionSelectionAttempt> {
+    return {
+      ok: true,
+      selection: selectDeterministicStrategicOption(state, options),
+      telemetry: deterministicSelectorTelemetry(),
+    };
   }
+}
+
+export function deterministicSelectorTelemetry(): StrategicOptionSelectorTelemetry {
+  return {
+    providerCalled: false,
+    promptCharacters: 0,
+    planningLatencyMs: 0,
+    rawOutputPresent: false,
+    parseOk: null,
+    failureKind: null,
+    failureDetail: null,
+    provider: null,
+    model: null,
+    promptVersion: null,
+  };
 }
 
 export function selectDeterministicStrategicOption(

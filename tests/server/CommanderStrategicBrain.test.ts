@@ -355,7 +355,7 @@ describe("StrategicCommanderBrain — active authority", () => {
       plannerFallbackUsed: true,
       llmPlannerDegraded: true,
       degradedCause: "policy-error",
-      plannerParseFailureReason: "provider unavailable",
+      plannerParseFailureReason: "Commander selector transport failed",
     });
     expect(
       decision.metadata?.commanderSelectedStrategicOptionId,

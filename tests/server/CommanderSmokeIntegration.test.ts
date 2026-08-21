@@ -1,3 +1,6 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../../src/core/configuration/ConfigLoader", async (importOriginal) => {
@@ -23,7 +26,12 @@ import {
   AgentLeagueSmokeArtifactWriterInput,
   runAgentLeagueSmoke,
 } from "../../src/scripts/ai-agent-league-smoke";
+import { writeAgentLeagueRunArtifacts } from "../../src/server/agents/AgentDecisionLogWriter";
 import type { AgentDecisionRecord } from "../../src/server/agents/AgentTypes";
+import {
+  COMMANDER_GAME_ID_DERIVATION_VERSION,
+  commanderGameIDFromSeed,
+} from "../../src/server/agents/CommanderExperimentIdentity";
 import { MAX_COMMANDER_OPTION_ID_LENGTH } from "../../src/server/agents/CommanderStateBuilder";
 import {
   LlmProvider,
@@ -82,6 +90,33 @@ class AlwaysRejectingCommanderProvider implements LlmProvider {
   }
 }
 
+class PrivateTransportCanaryProvider implements LlmProvider {
+  readonly providerType = "custom" as const;
+
+  constructor(private readonly canary: string) {}
+
+  async complete(): Promise<string> {
+    throw new Error(`transport body: ${this.canary}`);
+  }
+}
+
+class PrivateUnknownKeyCanaryProvider implements LlmProvider {
+  readonly providerType = "custom" as const;
+
+  constructor(private readonly canary: string) {}
+
+  async complete(prompt: string): Promise<string> {
+    const state = commanderStateFromPrompt(prompt);
+    return JSON.stringify({
+      selectedStrategicOptionId: state.options[0]!.id,
+      horizonDecisions: 3,
+      intent: "bounded fallback test",
+      replanTriggers: [],
+      unknownTransportBody: this.canary,
+    });
+  }
+}
+
 function commanderStateFromPrompt(prompt: string): CommanderState {
   const startMarker = "COMMANDER_STATE_JSON:\n";
   const endMarker = "\nEND_COMMANDER_STATE_JSON";
@@ -124,6 +159,76 @@ function commanderStampedRecords(
 }
 
 describe("StrategicCommander Stage 6 — step-locked smoke integration", () => {
+  it("persists an authoritative finished phase for a bounded require-winner step-locked run", async () => {
+    const rootDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), "commander-require-winner-"),
+    );
+    const captured: AgentLeagueSmokeArtifactWriterInput[] = [];
+    const executionSeed = "commander-require-winner-seed";
+    const executionGameID = commanderGameIDFromSeed(executionSeed);
+    try {
+      await runAgentLeagueSmoke({
+        args: [
+          "--brain=commander-v0-det",
+          "--runner=step-locked",
+          "--turns-per-decision-step=100",
+          "--max-decision-ms=5000",
+          "--agents=1",
+          "--max-steps=30",
+          "--require-winner",
+          "--run-id=commander-require-winner-finished",
+        ],
+        deterministicSource: {
+          seed: executionSeed,
+          gameID: executionGameID,
+          gameIDDerivation: COMMANDER_GAME_ID_DERIVATION_VERSION,
+          createdAtMs: 1_700_000_000_000,
+          playbackTurnIntervalMs: 1,
+        },
+        forceOfferedOrderSpawnBallotForExperiment: true,
+        commanderExperimentProvenance: {
+          provider: null,
+          model: null,
+          promptVersion: null,
+        },
+        allowEnvironmentStrategySpec: false,
+        artifactWriter: async (input) => {
+          captured.push(input);
+          return {};
+        },
+      });
+      expect(captured).toHaveLength(1);
+      const smoke = captured[0]!;
+      expect(smoke.winner).toBeDefined();
+      expect(smoke.artifactInput.winner).toEqual(smoke.winner);
+      expect(smoke.artifactInput.finalState?.phase).toBe("finished");
+      expect(smoke.artifactInput.runnerConfig).toMatchObject({
+        requireWinner: true,
+        executionSeed,
+        executionGameID,
+        executionGameIDDerivation: COMMANDER_GAME_ID_DERIVATION_VERSION,
+      });
+
+      const paths = await writeAgentLeagueRunArtifacts({
+        ...smoke.artifactInput,
+        rootDir,
+      });
+      const summary = JSON.parse(
+        await fs.readFile(paths.summaryPath, "utf8"),
+      ) as Record<string, unknown>;
+      expect(summary.winner).toEqual(smoke.winner);
+      expect(summary.finalState).toMatchObject({ phase: "finished" });
+      expect(summary.runnerConfig).toMatchObject({
+        requireWinner: true,
+        executionSeed,
+        executionGameID,
+        executionGameIDDerivation: COMMANDER_GAME_ID_DERIVATION_VERSION,
+      });
+    } finally {
+      await fs.rm(rootDir, { recursive: true, force: true });
+    }
+  }, 600_000);
+
   it("consults the Commander only in active play and stamps bounded metadata on primary decisions", async () => {
     const provider = new FirstOptionCommanderProvider();
     const smoke = await runSmoke(
@@ -235,6 +340,79 @@ describe("StrategicCommander Stage 6 — step-locked smoke integration", () => {
     expect(fallbackStamped.length).toBeGreaterThan(0);
   }, 600_000);
 
+  it("never persists private transport bodies or unknown response keys through selector, brain, and writer", async () => {
+    const rootDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), "commander-private-canary-"),
+    );
+    const cases = [
+      {
+        runID: "commander-private-transport",
+        canary: "PRIVATE_TRANSPORT_BODY_CANARY_7f31",
+        provider: new PrivateTransportCanaryProvider(
+          "PRIVATE_TRANSPORT_BODY_CANARY_7f31",
+        ),
+        failureKind: "transport",
+        failureDetail: "Commander selector transport failed",
+      },
+      {
+        runID: "commander-private-unknown-key",
+        canary: "PRIVATE_UNKNOWN_KEY_CANARY_29ac",
+        provider: new PrivateUnknownKeyCanaryProvider(
+          "PRIVATE_UNKNOWN_KEY_CANARY_29ac",
+        ),
+        failureKind: "parse",
+        failureDetail: "Commander selector response could not be parsed",
+      },
+    ] as const;
+    try {
+      for (const testCase of cases) {
+        const captured: AgentLeagueSmokeArtifactWriterInput[] = [];
+        await expect(
+          runAgentLeagueSmoke({
+            args: [
+              "--brain=strategic-commander",
+              ...STEP_LOCKED_ARGS,
+              "--max-steps=1",
+              `--run-id=${testCase.runID}`,
+            ],
+            artifactWriter: async (input) => {
+              captured.push(input);
+              return {};
+            },
+            commanderProviderForTesting: testCase.provider,
+          }),
+        ).rejects.toThrow(
+          "strategic-commander smoke failed certification: no decision carries commanderSelectedStrategicOptionId",
+        );
+        expect(captured).toHaveLength(1);
+        const paths = await writeAgentLeagueRunArtifacts({
+          ...captured[0]!.artifactInput,
+          rootDir,
+        });
+        const decisionsJsonl = await fs.readFile(paths.decisionsPath, "utf8");
+        const entries = decisionsJsonl
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as Record<string, unknown>);
+
+        expect(decisionsJsonl).not.toContain(testCase.canary);
+        expect(
+          JSON.stringify(captured[0]!.artifactInput.records),
+        ).not.toContain(testCase.canary);
+        expect(entries).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              commanderSelectionFailureKind: testCase.failureKind,
+              plannerParseFailureReason: testCase.failureDetail,
+            }),
+          ]),
+        );
+      }
+    } finally {
+      await fs.rm(rootDir, { recursive: true, force: true });
+    }
+  }, 600_000);
+
   it("leaves the default --brain=rule run untouched when the mode is absent", async () => {
     const smoke = await runSmoke([
       ...STEP_LOCKED_ARGS,
@@ -259,7 +437,7 @@ describe("StrategicCommander Stage 6 — step-locked smoke integration", () => {
         new FirstOptionCommanderProvider(),
       ),
     ).rejects.toThrow(
-      "a Commander test provider can only be injected into --brain=strategic-commander runs",
+      "a Commander test provider can only be injected into Commander LLM runs",
     );
   });
 

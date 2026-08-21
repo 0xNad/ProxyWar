@@ -215,6 +215,38 @@ describe("CommanderPlanLifecycle Stage 3 — installation and provenance", () =>
     });
   });
 
+  it("keeps the provider default unchanged and stamps deterministic provenance only when explicitly requested", () => {
+    const request = makeRequest();
+    const response = makeResponse(commanderRequestIdentity(request), {
+      selectedStrategicOptionId: "pressure_rival:P7",
+    });
+    const existingProviderPath = advanceCommanderPlanWithoutFallback({
+      active: null,
+      request,
+      material: makeMaterial(),
+      response,
+    });
+    const deterministicArm = advanceCommanderPlanWithoutFallback({
+      active: null,
+      request,
+      material: makeMaterial(),
+      response,
+      primarySelector: "deterministic",
+    });
+
+    expect(existingProviderPath.plan).toMatchObject({
+      selector: "commander",
+      fallbackReason: null,
+    });
+    expect(deterministicArm.plan).toMatchObject({
+      selector: "deterministic",
+      fallbackReason: null,
+    });
+    expect(deterministicArm.plan?.selectedStrategicOptionId).toBe(
+      existingProviderPath.plan?.selectedStrategicOptionId,
+    );
+  });
+
   it("keeps plan state factual: no scores, confidence, evidence, or LegalAction ids", () => {
     const cycle = advanceCommanderPlan({
       active: null,

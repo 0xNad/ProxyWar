@@ -37,6 +37,7 @@ interface PromptStrategicSkillScore {
 
 export class MockLlmProvider implements LlmProvider {
   readonly providerType = "mock";
+  readonly model = "mock-llm-provider-v1";
   readonly prompts: string[] = [];
   readonly responses: string[] = [];
 
@@ -143,7 +144,9 @@ export class MockLlmProvider implements LlmProvider {
     const ranked = scores
       .filter((score) => actionIDs.has(score.id))
       .sort((a, b) => b.totalScore - a.totalScore || a.id.localeCompare(b.id));
-    return ranked.find((score) => score.kind !== "hold")?.id ?? ranked[0]?.id ?? null;
+    return (
+      ranked.find((score) => score.kind !== "hold")?.id ?? ranked[0]?.id ?? null
+    );
   }
 
   private objectiveLegalActionId(
@@ -207,7 +210,9 @@ function legalActionsFromPrompt(prompt: string): PromptLegalAction[] {
   }
 }
 
-function rankedCandidatesFromPrompt(prompt: string): PromptStrategicSkillScore[] {
+function rankedCandidatesFromPrompt(
+  prompt: string,
+): PromptStrategicSkillScore[] {
   const match = prompt.match(
     /RANKED_CANDIDATES_JSON:\s*([\s\S]*?)\s*END_RANKED_CANDIDATES_JSON/,
   );

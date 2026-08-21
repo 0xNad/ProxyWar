@@ -123,9 +123,15 @@ function withClaudeCliLock<T>(task: () => Promise<T>): Promise<T> {
 
 export class ClaudeCliLlmProvider implements LlmProvider {
   readonly providerType = "claude-cli";
+  readonly model: string | null;
   private readonly commandRunner: ClaudeCliCommandRunner;
 
   constructor(private readonly config: ClaudeCliLlmProviderConfig = {}) {
+    const configuredModel = config.model?.trim();
+    this.model =
+      configuredModel === undefined || configuredModel === ""
+        ? null
+        : configuredModel;
     this.commandRunner = config.commandRunner ?? runClaudeCliCommand;
   }
 

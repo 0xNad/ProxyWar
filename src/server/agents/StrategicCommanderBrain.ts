@@ -27,6 +27,10 @@ import {
   type CommanderExecutedAction,
   type StrategicOptionExecution,
 } from "./StrategicOptionExecutor";
+import type {
+  StrategicOptionSelectorSource,
+  StrategicOptionSelectorTelemetry,
+} from "./StrategicOptionSelectors";
 
 /**
  * StrategicCommanderV0 owns active, alive play. The injected tactical brain is
@@ -57,7 +61,7 @@ export class StrategicCommanderBrain implements AgentBrain {
     return "strategic-commander";
   }
 
-  get internalDecisionTimeoutMs(): number {
+  get internalDecisionTimeoutMs(): number | undefined {
     return this.caller.providerTimeoutMs;
   }
 
@@ -79,7 +83,6 @@ export class StrategicCommanderBrain implements AgentBrain {
     const forcedReplanReason = this.forcedReplanReason;
     this.forcedReplanReason = null;
     const decisionEpoch = this.decisionEpoch;
-    const planningStartedAt = Date.now();
     const outcome = await this.caller.runCycle({
       observation: input.observation,
       options,
@@ -96,9 +99,7 @@ export class StrategicCommanderBrain implements AgentBrain {
       );
     }
     this.clearInFlightDecision(decisionSequence);
-    const plannerLatencyMs = outcome.providerCalled
-      ? Math.max(0, Date.now() - planningStartedAt)
-      : 0;
+    const plannerLatencyMs = outcome.selectionTelemetry.planningLatencyMs;
     this.activePlan = outcome.cycle.plan;
 
     if (outcome.cycle.plan === null) {
@@ -117,6 +118,14 @@ export class StrategicCommanderBrain implements AgentBrain {
         rejectionCode: outcome.cycle.rejection?.code ?? null,
         rejectionDetail: outcome.cycle.rejection?.detail ?? null,
         replanReason: outcome.cycle.evaluation.reason,
+        selectorSource: outcome.primarySelectorSource,
+        selectionTelemetry: outcome.selectionTelemetry,
+        deterministicPreferredStrategicOptionId:
+          outcome.deterministicPreferredStrategicOptionId,
+        deterministicPreferredOptionAbsent:
+          outcome.deterministicPreferredOptionAbsent,
+        ownTiles: input.observation.ownState?.tilesOwned ?? null,
+        ownTroops: input.observation.ownState?.troops ?? null,
       });
       this.rememberIssuedDecision(decision, execution);
       return decision;
@@ -150,6 +159,14 @@ export class StrategicCommanderBrain implements AgentBrain {
       rejectionCode: outcome.cycle.rejection?.code ?? null,
       rejectionDetail: outcome.cycle.rejection?.detail ?? null,
       replanReason: outcome.cycle.evaluation.reason,
+      selectorSource: outcome.primarySelectorSource,
+      selectionTelemetry: outcome.selectionTelemetry,
+      deterministicPreferredStrategicOptionId:
+        outcome.deterministicPreferredStrategicOptionId,
+      deterministicPreferredOptionAbsent:
+        outcome.deterministicPreferredOptionAbsent,
+      ownTiles: input.observation.ownState?.tilesOwned ?? null,
+      ownTroops: input.observation.ownState?.troops ?? null,
       planAgeDecisions,
     });
     this.rememberIssuedDecision(decision, execution);
@@ -188,6 +205,12 @@ export class StrategicCommanderBrain implements AgentBrain {
       rejectionCode: null,
       rejectionDetail: null,
       replanReason: "hold_streak_blocked",
+      selectorSource: null,
+      selectionTelemetry: null,
+      deterministicPreferredStrategicOptionId: null,
+      deterministicPreferredOptionAbsent: false,
+      ownTiles: input.observation.ownState?.tilesOwned ?? null,
+      ownTroops: input.observation.ownState?.troops ?? null,
       planAgeDecisions,
     });
     this.rememberIssuedDecision(decision, execution);
@@ -285,6 +308,12 @@ function invalidatedCycleDecision(
     rejectionCode: null,
     rejectionDetail: "Commander cycle result arrived after invalidation",
     replanReason: "hold_streak_blocked",
+    selectorSource: null,
+    selectionTelemetry: null,
+    deterministicPreferredStrategicOptionId: null,
+    deterministicPreferredOptionAbsent: false,
+    ownTiles: null,
+    ownTroops: null,
     planAgeDecisions:
       plan === null
         ? undefined
@@ -354,6 +383,12 @@ function commanderDecision(args: {
   rejectionCode: string | null;
   rejectionDetail: string | null;
   replanReason: CommanderPlanReplanReason | string;
+  selectorSource: StrategicOptionSelectorSource | null;
+  selectionTelemetry: StrategicOptionSelectorTelemetry | null;
+  deterministicPreferredStrategicOptionId: string | null;
+  deterministicPreferredOptionAbsent: boolean;
+  ownTiles: number | null;
+  ownTroops: number | null;
   planAgeDecisions?: number;
 }): AgentDecision {
   const { execution, plan } = args;
@@ -365,7 +400,9 @@ function commanderDecision(args: {
     const key =
       plan.selector === "commander"
         ? "commanderSelectedStrategicOptionId"
-        : "commanderFallbackSelectedStrategicOptionId";
+        : plan.selector === "deterministic"
+          ? "commanderDeterministicSelectedStrategicOptionId"
+          : "commanderFallbackSelectedStrategicOptionId";
     optionEvidence[key] = sanitizeUntrustedDisplayString(
       optionID,
       MAX_COMMANDER_OPTION_ID_LENGTH,
@@ -376,8 +413,7 @@ function commanderDecision(args: {
     (plan === null || args.previousPlan.planID !== plan.planID)
       ? args.previousPlan.planID
       : null;
-  const parseSucceeded =
-    args.providerCalled === true && args.responseDisposition === "applied";
+  const parseSucceeded = args.selectionTelemetry?.parseOk === true;
   const plannerFailure = args.providerFailure ?? args.rejectionDetail;
   const degradedCause = plan?.fallbackDegradationCause ?? null;
   return {
@@ -393,7 +429,8 @@ function commanderDecision(args: {
         ? {}
         : { externalPlannerCall: args.providerCalled }),
       externalActionCall: false,
-      rawProviderOutputPresent: false,
+      rawProviderOutputPresent:
+        args.selectionTelemetry?.rawOutputPresent ?? false,
       ...optionEvidence,
       planID: plan?.planID ?? null,
       planObjective: optionID,
@@ -408,10 +445,17 @@ function commanderDecision(args: {
             plannerLatencyMs: args.plannerLatencyMs ?? 0,
           }),
       plannerFallbackUsed: plan?.selector === "fallback",
-      ...(args.providerCalled === true
-        ? { plannerParseOk: parseSucceeded }
+      ...(args.selectionTelemetry?.parseOk === null ||
+      args.selectionTelemetry === null
+        ? {}
+        : { plannerParseOk: parseSucceeded }),
+      ...(args.selectionTelemetry?.failureDetail !== null &&
+      args.selectionTelemetry !== null
+        ? { plannerParseFailureReason: args.selectionTelemetry.failureDetail }
         : {}),
-      ...(plannerFailure !== null
+      ...(plannerFailure !== null &&
+      (args.selectionTelemetry === null ||
+        args.selectionTelemetry.failureDetail === null)
         ? { plannerParseFailureReason: plannerFailure }
         : {}),
       llmPlannerDegraded: plan?.selector === "fallback",
@@ -421,11 +465,16 @@ function commanderDecision(args: {
           ? "none"
           : plan.selector === "commander"
             ? "llm"
-            : "fallback-deterministic",
+            : plan.selector === "deterministic"
+              ? "deterministic"
+              : "fallback-deterministic",
+      commanderPrimarySelectorSource: args.selectorSource,
       commanderFingerprint:
         plan === null
           ? null
           : `${plan.origin.exposedOptionSetFingerprint}:${plan.origin.materialStateFingerprint}`,
+      commanderEligibleOptionIds:
+        args.options.record.eligibleOptionIds.join(","),
       commanderExposedOptionIds: args.options.record.exposedOptionIds.join(","),
       commanderOmittedOptions: args.options.record.omitted
         .map((entry) => `${entry.id}:${entry.reason}`)
@@ -433,12 +482,30 @@ function commanderDecision(args: {
       commanderFidelity: firstFidelity,
       commanderBatchFidelities: commanderBatchFidelityStamp(execution.actions),
       commanderReplanReason: args.replanReason,
+      commanderResponseDisposition: args.responseDisposition,
+      commanderRejectionCode: args.rejectionCode,
       commanderPreviousPlanID: previousPlanID,
+      commanderPlanInstalled:
+        plan !== null &&
+        (args.previousPlan === null ||
+          args.previousPlan.planID !== plan.planID),
       commanderHorizonDecisions: plan?.horizonDecisions ?? null,
       commanderPlanAgeDecisions: args.planAgeDecisions ?? 0,
       commanderBlockedReason: execution.blockedReason,
       commanderImmediateReplan: execution.immediateReplan,
       commanderEmergencyCondition: null,
+      commanderDeterministicPreferredOptionId:
+        args.deterministicPreferredStrategicOptionId,
+      commanderDeterministicPreferredOptionAbsent:
+        args.deterministicPreferredOptionAbsent,
+      commanderPromptCharacters: args.selectionTelemetry?.promptCharacters ?? 0,
+      commanderSelectionFailureKind:
+        args.selectionTelemetry?.failureKind ?? null,
+      commanderSelectorProvider: args.selectionTelemetry?.provider ?? null,
+      commanderSelectorModel: args.selectionTelemetry?.model ?? null,
+      commanderPromptVersion: args.selectionTelemetry?.promptVersion ?? null,
+      commanderSelfTiles: args.ownTiles,
+      commanderSelfTroops: args.ownTroops,
     },
   };
 }

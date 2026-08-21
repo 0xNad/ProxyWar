@@ -82,7 +82,11 @@ export type CommanderPlanEvaluationReason =
   | CommanderPlanReplanReason
   | CommanderPlanTerminateReason;
 
-export const commanderPlanSelectors = ["commander", "fallback"] as const;
+export const commanderPlanSelectors = [
+  "commander",
+  "deterministic",
+  "fallback",
+] as const;
 
 export type CommanderPlanSelector = (typeof commanderPlanSelectors)[number];
 
@@ -241,6 +245,8 @@ export interface AdvanceCommanderPlanInput {
   response?: CommanderPlanResponseEnvelope | null;
   forcedReplanReason?: "option_not_executable" | "hold_streak_blocked" | null;
   fallbackDegradationCause?: CommanderPlanFallbackDegradationCause | null;
+  /** Primary selector that authored a valid response; defaults to Arm C. */
+  primarySelector?: Exclude<CommanderPlanSelector, "fallback">;
   /** Arm B's selector result over this exact request's locked state/options. */
   fallbackSelection?: CommanderFallbackSelection | null;
 }
@@ -501,7 +507,7 @@ export function advanceCommanderPlan(
         horizonDecisions: validation.horizonDecisions,
         replanTriggers: validation.replanTriggers,
         intent: validation.intent,
-        selector: "commander",
+        selector: input.primarySelector ?? "commander",
         fallbackReason: null,
         fallbackDegradationCause: null,
       })

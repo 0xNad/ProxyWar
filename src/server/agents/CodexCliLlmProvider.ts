@@ -394,12 +394,18 @@ const codexResearcherSchema = {
 
 export class CodexCliLlmProvider implements LlmProvider {
   readonly providerType = "codex-cli";
+  readonly model: string | null;
   private readonly commandRunner: CodexCliCommandRunner;
   private readonly configuredAppServerClient: CodexAppServerCompletionClient | null;
   private appServerClient: CodexAppServerCompletionClient | null = null;
   private appServerDisabledReason: string | null = null;
 
   constructor(private readonly config: CodexCliLlmProviderConfig) {
+    const configuredModel = config.model?.trim();
+    this.model =
+      configuredModel === undefined || configuredModel === ""
+        ? null
+        : configuredModel;
     this.commandRunner = config.commandRunner ?? runCodexCliCommand;
     this.configuredAppServerClient = config.appServerClient ?? null;
   }

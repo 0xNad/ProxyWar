@@ -58,9 +58,11 @@ interface OpenRouterResponseBody {
 
 export class OpenRouterLlmProvider implements LlmProvider {
   readonly providerType = "openrouter";
+  readonly model: string;
   private readonly fetchFn: FetchLike;
 
   constructor(private readonly config: OpenRouterLlmProviderConfig) {
+    this.model = config.model;
     this.fetchFn = config.fetchFn ?? globalThis.fetch.bind(globalThis);
   }
 
@@ -219,8 +221,7 @@ export function loadOpenRouterLlmProviderConfig(
     reasoningEnabled:
       (env.AI_LEAGUE_OPENROUTER_REASONING?.trim().toLowerCase() ?? "off") ===
       "on",
-    referer:
-      env.AI_LEAGUE_OPENROUTER_REFERER?.trim() || "https://proxywar.xyz",
+    referer: env.AI_LEAGUE_OPENROUTER_REFERER?.trim() || "https://proxywar.xyz",
     title: env.AI_LEAGUE_OPENROUTER_TITLE?.trim() || "Proxy War",
   };
 }

@@ -14,7 +14,10 @@ import type {
   StrategicOptionId,
 } from "../../src/server/agents/StrategicCommanderTypes";
 import { buildStrategicOptions } from "../../src/server/agents/StrategicOptionBuilder";
-import type { StrategicOptionSelector } from "../../src/server/agents/StrategicOptionSelectors";
+import {
+  DeterministicOptionSelector,
+  type StrategicOptionSelector,
+} from "../../src/server/agents/StrategicOptionSelectors";
 import {
   makeCommanderStage2Fixture,
   RAW_ATTACK_ACTION_ID,
@@ -128,6 +131,35 @@ describe("StrategicCommanderCaller Stage 4 — provider-call boundary", () => {
       "pressure_rival:P7",
     );
     expect(outcome.cycle.plan?.origin.exposedOptionIDs).toEqual(EXPOSED_IDS);
+  });
+
+  it("opts Arm B into deterministic primary provenance without a provider call", async () => {
+    const fixture = makeCommanderStage2Fixture();
+    const outcome = await new StrategicCommanderCaller(
+      new DeterministicOptionSelector(),
+    ).runCycle(cycleInput(fixture));
+
+    expect(outcome.providerCalled).toBe(false);
+    expect(outcome.primarySelectorSource).toBe("deterministic");
+    expect(outcome.selectionTelemetry).toMatchObject({
+      providerCalled: false,
+      promptCharacters: 0,
+      rawOutputPresent: false,
+    });
+    expect(outcome.cycle.selector).toBe("deterministic");
+    expect(outcome.cycle.plan?.selectedStrategicOptionId).toBe(FALLBACK_ID);
+  });
+
+  it("rejects unimplemented selector sources instead of mislabeling them", () => {
+    const unsupported: StrategicOptionSelector = {
+      selectorSource: "random",
+      select: vi.fn(),
+    };
+
+    expect(() => new StrategicCommanderCaller(unsupported)).toThrow(
+      "Unsupported Stage 5 primary selector source: random",
+    );
+    expect(unsupported.select).not.toHaveBeenCalled();
   });
 
   it("continues a valid installed plan without calling the provider", async () => {
@@ -374,10 +406,25 @@ describe("StrategicCommanderCaller Stage 4 — provider and response safety", ()
         expect(JSON.stringify(state)).not.toContain(RAW_ATTACK_ACTION_ID);
         expect(JSON.stringify(state)).not.toContain(RAW_BUILD_ACTION_ID);
         return {
-          selectedStrategicOptionId: "pressure_rival:P7" as const,
-          horizonDecisions: 3,
-          intent: "deterministic control selected pressure_rival",
-          replanTriggers: [],
+          ok: true as const,
+          selection: {
+            selectedStrategicOptionId: "pressure_rival:P7" as const,
+            horizonDecisions: 3,
+            intent: "deterministic control selected pressure_rival",
+            replanTriggers: [],
+          },
+          telemetry: {
+            providerCalled: false,
+            promptCharacters: 0,
+            planningLatencyMs: 0,
+            rawOutputPresent: false,
+            parseOk: null,
+            failureKind: null,
+            failureDetail: null,
+            provider: null,
+            model: null,
+            promptVersion: null,
+          },
         };
       },
     );
@@ -410,21 +457,19 @@ describe("StrategicCommanderCaller Stage 4 — provider and response safety", ()
       cycleInput(fixture),
     );
 
-    expect(outcome.providerFailure).toBe(
-      "Commander provider timed out after 5ms",
-    );
+    expect(outcome.providerFailure).toBe("Commander selector timed out");
     expect(outcome.cycle.selector).toBe("fallback");
     expect(outcome.cycle.fallbackReason).toBe("commander_result_absent");
     expect(outcome.resolution.status).toBe("executable");
   });
 
   it("installs the fallback plan when the provider throws and never propagates", async () => {
-    const provider = new ThrowingProvider("provider  down\n now");
+    const provider = new ThrowingProvider("provider\0 down\n now");
     const outcome = await runCycle(provider);
 
     expect(provider.calls).toBe(1);
     expect(outcome.providerCalled).toBe(true);
-    expect(outcome.providerFailure).toBe("provider down now");
+    expect(outcome.providerFailure).toBe("Commander selector transport failed");
     expect(outcome.cycle.responseDisposition).toBe("absent");
     expect(outcome.cycle.selector).toBe("fallback");
     expect(outcome.cycle.fallbackReason).toBe("commander_result_absent");
@@ -478,7 +523,19 @@ describe("StrategicCommanderCaller Stage 4 — determinism", () => {
 
     const first = await run();
     const second = await run();
-    expect(second.outcome).toEqual(first.outcome);
+    const withoutMetricsOnlyLatency = (value: typeof first) => ({
+      ...value,
+      outcome: {
+        ...value.outcome,
+        selectionTelemetry: {
+          ...value.outcome.selectionTelemetry,
+          planningLatencyMs: 0,
+        },
+      },
+    });
+    expect(withoutMetricsOnlyLatency(second)).toEqual(
+      withoutMetricsOnlyLatency(first),
+    );
     expect(second.prompts).toEqual(first.prompts);
   });
 
@@ -497,7 +554,16 @@ describe("StrategicCommanderCaller Stage 4 — determinism", () => {
 
     const forward = await run(false);
     const reversed = await run(true);
-    expect(reversed.outcome).toEqual(forward.outcome);
+    const withoutMetricsOnlyLatency = (value: typeof forward.outcome) => ({
+      ...value,
+      selectionTelemetry: {
+        ...value.selectionTelemetry,
+        planningLatencyMs: 0,
+      },
+    });
+    expect(withoutMetricsOnlyLatency(reversed.outcome)).toEqual(
+      withoutMetricsOnlyLatency(forward.outcome),
+    );
     expect(reversed.prompts).toEqual(forward.prompts);
   });
 });
