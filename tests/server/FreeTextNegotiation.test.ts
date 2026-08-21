@@ -442,6 +442,46 @@ describe("comms-slot validation", () => {
     }
   });
 
+  it("rejects every U+2060-U+206F invisible formatting code point", () => {
+    const reason =
+      "messageText contained invisible formatting or bidi-override characters";
+
+    for (let codePoint = 0x2060; codePoint <= 0x206f; codePoint += 1) {
+      const label = `U+${codePoint
+        .toString(16)
+        .toUpperCase()
+        .padStart(4, "0")}`;
+      const result = validateAgentMessageDecision(
+        decision({
+          messageActionID: "message:P1",
+          messageText: `before${String.fromCodePoint(codePoint)}after`,
+        }),
+        menu,
+      );
+
+      expect(result, `${label} slipped through`).toMatchObject({
+        ok: false,
+        reason,
+      });
+    }
+  });
+
+  it("rejects repeated U+2065 invisible padding", () => {
+    const result = validateAgentMessageDecision(
+      decision({
+        messageActionID: "message:P1",
+        messageText: `a${String.fromCodePoint(0x2065).repeat(100)}b`,
+      }),
+      menu,
+    );
+
+    expect(result, "U+2065 repeated padding slipped through").toMatchObject({
+      ok: false,
+      reason:
+        "messageText contained invisible formatting or bidi-override characters",
+    });
+  });
+
   it("rejects zero-width padding that inflates prompt cost invisibly", () => {
     // U+FEFF is included now: the invisible-character check runs on the RAW
     // text, before whitespace normalization, so JS `\s` matching U+FEFF no

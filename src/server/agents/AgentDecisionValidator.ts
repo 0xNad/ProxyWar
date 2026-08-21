@@ -156,7 +156,7 @@ export function validateAgentMessageDecision(
   // the check runs on the raw string. (The other listed characters are not JS
   // whitespace, so their behaviour is unchanged.)
   if (
-    /[\u00AD\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF\uFFF9-\uFFFB]/u.test(
+    /[\u00AD\u061C\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF\uFFF9-\uFFFB]/u.test(
       decision.messageText,
     )
   ) {
