@@ -51,6 +51,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   MAX_WIRE_SPAWN_PREFERENCE_ACTION_IDS,
   normalizeDegradedCause,
+  normalizeRuntimeMode,
 } from "./coworld-decision-wire";
 
 import type {
@@ -398,16 +399,13 @@ function keystoneDealMetadata(action: LegalAction): {
 export function keystoneAbstentionPartners(observation: AgentObservation): {
   /** Partners protected from targeted aggression (both pact kinds). */
   partners: Set<string>;
-  /**
-   * True while ANY pending `trade_security` obligation is ours. `embargo_all`
-   * is judged target-independently, so one such pact bans it outright.
-   */
-  tradeSecurityHeld: boolean;
+  /** Partners protected from targeted manual embargoes. */
+  tradeSecurityPartners: Set<string>;
 } {
   const ownID = observation.ownState?.playerID;
   const partners = new Set<string>();
-  let tradeSecurityHeld = false;
-  if (typeof ownID !== "string") return { partners, tradeSecurityHeld };
+  const tradeSecurityPartners = new Set<string>();
+  if (typeof ownID !== "string") return { partners, tradeSecurityPartners };
   for (const deal of observation.deals?.activeDeals ?? []) {
     for (const obligation of deal.obligations ?? []) {
       if (
@@ -416,16 +414,18 @@ export function keystoneAbstentionPartners(observation: AgentObservation): {
         (obligation.kind === "non_aggression" ||
           obligation.kind === "trade_security")
       ) {
-        partners.add(
+        const partnerID =
           deal.proposerPlayerID === ownID
             ? deal.recipientPlayerID
-            : deal.proposerPlayerID,
-        );
-        if (obligation.kind === "trade_security") tradeSecurityHeld = true;
+            : deal.proposerPlayerID;
+        partners.add(partnerID);
+        if (obligation.kind === "trade_security") {
+          tradeSecurityPartners.add(partnerID);
+        }
       }
     }
   }
-  return { partners, tradeSecurityHeld };
+  return { partners, tradeSecurityPartners };
 }
 
 /**
@@ -455,7 +455,7 @@ export function withoutKeystoneTreatyBreaches(
   legalActions: LegalAction[],
   observation: AgentObservation,
 ): LegalAction[] {
-  const { partners, tradeSecurityHeld } =
+  const { partners, tradeSecurityPartners } =
     keystoneAbstentionPartners(observation);
   if (partners.size === 0) return legalActions;
   const kept = legalActions.filter((action) => {
@@ -486,13 +486,15 @@ export function withoutKeystoneTreatyBreaches(
         // obligation (`validatedManualEmbargoAgainst` is gated on it), so a
         // plain non-aggression pact must not cost the Commander this move.
         return !(
-          tradeSecurityHeld &&
-          aimedAtPartner &&
+          targetID !== undefined &&
+          tradeSecurityPartners.has(targetID) &&
           metadata?.action === "start"
         );
       case "embargo_all":
         // Target-independent: one pending trade-security pact bans it.
-        return !(tradeSecurityHeld && metadata?.action === "start");
+        return !(
+          tradeSecurityPartners.size > 0 && metadata?.action === "start"
+        );
       default:
         return true;
     }
@@ -666,6 +668,10 @@ export function decisionToResponse(
     ? normalizeDegradedCause(decision.metadata?.degradedCause)
     : undefined;
   const plannerFallbackUsed = decision.metadata?.plannerFallbackUsed === true;
+  // The typed in-house brain already stamps the exact runtime path it used.
+  // Forward only that bounded value; spawn/transport paths without a genuine
+  // brain attribution remain unknown instead of inheriting the seat label.
+  const runtimeMode = normalizeRuntimeMode(decision.metadata?.runtimeMode);
   // The executor's cascade, normalized for the wire: primary first, deduped,
   // then capped to whatever the game advertised it will carry. Emitting more
   // than the advertisement would be silently truncated game-side, so the
@@ -737,6 +743,7 @@ export function decisionToResponse(
       : {}),
     reason: wireReason,
     confidence,
+    ...(runtimeMode !== undefined ? { runtimeMode } : {}),
     ...(llmPlannerDegraded ? { llmPlannerDegraded: true } : {}),
     ...(plannerFallbackUsed ? { fallbackUsed: true } : {}),
     // The cause has to be forwarded EXPLICITLY: this function picks fields rather
@@ -1112,6 +1119,25 @@ type BedrockClientLike = {
   };
 };
 
+interface BedrockClientOptions {
+  awsRegion: string;
+  baseURL?: string;
+}
+
+/** Exact hosted-sidecar routing options, kept pure for release verification. */
+export function keystoneBedrockClientOptions(
+  region: string,
+  env: NodeJS.ProcessEnv = process.env,
+): BedrockClientOptions {
+  const sidecarEndpoint = env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME?.trim();
+  return {
+    awsRegion: region,
+    ...(sidecarEndpoint !== undefined && sidecarEndpoint.length > 0
+      ? { baseURL: sidecarEndpoint }
+      : {}),
+  };
+}
+
 function createBedrockProvider(
   env: NodeJS.ProcessEnv = process.env,
 ): LlmProvider {
@@ -1128,16 +1154,27 @@ function createBedrockProvider(
         // vite/vitest never try to bundle it.
         const bedrockSpecifier = "@anthropic-ai/bedrock-sdk";
         const mod = (await import(/* @vite-ignore */ bedrockSpecifier)) as {
-          default?: new (options: { awsRegion: string }) => BedrockClientLike;
-          AnthropicBedrock?: new (options: {
-            awsRegion: string;
-          }) => BedrockClientLike;
+          default?: new (options: BedrockClientOptions) => BedrockClientLike;
+          AnthropicBedrock?: new (
+            options: BedrockClientOptions,
+          ) => BedrockClientLike;
         };
         const AnthropicBedrock = mod.default ?? mod.AnthropicBedrock;
         if (AnthropicBedrock === undefined) {
           throw new Error("@anthropic-ai/bedrock-sdk did not export a client");
         }
-        client = new AnthropicBedrock({ awsRegion: region });
+        // SIDECAR ENDPOINT (platform change 2026-07-30). Hosted pods do NOT
+        // reach AWS directly: they get a per-pod proxy at
+        // AWS_ENDPOINT_URL_BEDROCK_RUNTIME plus DELIBERATELY FAKE placeholder
+        // credentials. Calling the real Bedrock host with those placeholders
+        // returns `403 {"Message":"Invalid API Key format: Must start with
+        // pre-defined prefix"}` and the seat silently degrades to the rule
+        // planner — which is what the league has been ranking. Verified in-pod
+        // 2026-08-19 via PROXYWAR_KEYSTONE_BEDROCK_DIAG=1. Absent variable
+        // falls back to the SDK default, so local runs are unchanged.
+        client = new AnthropicBedrock(
+          keystoneBedrockClientOptions(region, env),
+        );
       }
       const startIndex = lockedIndex ?? 0;
       let lastError: unknown = null;

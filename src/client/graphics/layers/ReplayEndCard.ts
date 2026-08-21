@@ -55,8 +55,9 @@ import { Layer } from "./Layer";
  *    skips `tick()` entirely for any layer whose wall-clock interval has not
  *    elapsed, so a throttled layer that happened to be skipped on the winning
  *    tick would lose the Win update permanently and the card would never
- *    appear. Ticking every frame is the price of not missing the one update
- *    that matters. The per-tick work is 16 field reads; it is free.
+ *    appear. Ticking on every delivered game turn is the price of not missing
+ *    the one update that matters. The per-turn work is 16 field reads; it is
+ *    free.
  *
  * 3. FINAL STANDINGS COME FROM `game.playerViews()`, NOT THE REPLAY FRAME.
  *    `GameView._players` is insert-only — there is no delete path — so an
@@ -83,6 +84,25 @@ const DEFAULT_MAX_ROWS = 16;
  * jitter of a paused/stepping clock so a still frame can never flicker it off.
  */
 const REWIND_TOLERANCE_TICKS = 20;
+/**
+ * Ticks the replay must sit at/after its final recorded turn with no `Win`
+ * before the card declares a no-winner result.
+ *
+ * This MUST be 1, and the counter is here only to reject a stray call that
+ * arrives before the replay is genuinely exhausted. `Layer.tick()` is driven
+ * once per GAME TURN, not once per animation frame — the same warning is on
+ * `TradeAttackLanes.ts` — and `game.ticks() >= totalTurns` first becomes true
+ * on the final delivered update. `LocalServer` ends the game at exactly that
+ * point and stops dispatching turns, so no tick ever follows it. Any value
+ * above 1 therefore makes this counter unreachable and the card never appears,
+ * leaving the viewer on a frozen clock: the bug this constant caused when it
+ * was 30 under the belief that it counted 60Hz frames.
+ *
+ * A real victory arriving late cannot lose the race either. A `Win` in the
+ * same update batch installs a snapshot, and `tick()` returns early on an
+ * existing snapshot before this check runs.
+ */
+const END_CARD_EXHAUSTION_TICKS = 1;
 
 /**
  * Trend guards for the verdict. A collapse claim ("X fell from 135K tiles to
@@ -196,6 +216,8 @@ export class ReplayEndCard extends LitElement implements Layer {
    */
   private readonly everAlive = new Set<number>();
   private sampleCount = 0;
+  /** Game-turn renderer ticks at/after the final recorded turn without a Win. */
+  private exhaustedTicks = 0;
 
   /**
    * Light DOM. MANDATORY: Tailwind's global stylesheet and the broadcast
@@ -278,10 +300,49 @@ export class ReplayEndCard extends LitElement implements Layer {
 
     const updates = game.updatesSinceLastTick();
     const winUpdates = updates !== null ? updates[GameUpdateType.Win] : [];
-    if (winUpdates.length === 0) return;
+    if (winUpdates.length === 0) {
+      this.showResultIfReplayExhausted(game);
+      return;
+    }
 
     // Only one match can end, and only once. Take the first Win update.
     this.showResult(game, winUpdates[0].winner);
+  }
+
+  /**
+   * END-01: a match that ends WITHOUT an in-simulation victory.
+   *
+   * League episodes are cut off by the commissioner's turn budget, and the
+   * standings are decided on territory — nobody is eliminated, so
+   * `GameImpl.setWinner` is never called and no `Win` update ever reaches this
+   * layer. Observed live 2026-08-19: the transport froze at "00:07 ·
+   * 11500/11500", the board micro-animated forever, and the end card never
+   * came. The replay simply had no terminal event to end on.
+   *
+   * `buildSnapshot` already renders the honest no-winner case ("Result / No
+   * winner", ranked by largest holding), so all that was missing was the
+   * trigger. Exhaustion is read from the same `pwReplayTotalTurns` body key
+   * the broadcast clock uses, so this cannot fire in live play (the key is
+   * absent) and stays correct across a rewind (the key is republished).
+   *
+   * The renderer ticks once per delivered game turn, and the turn loop stops
+   * after the final update. Therefore the exhausted replay gets exactly one
+   * chance to trigger this path. A genuine victory's `Win` update is read
+   * first in `tick()`, so it still wins over the no-winner exhaustion result.
+   */
+  private showResultIfReplayExhausted(game: GameView): void {
+    const totalTurns = Number(document.body.dataset.pwReplayTotalTurns);
+    if (!Number.isFinite(totalTurns) || totalTurns <= 0) {
+      this.exhaustedTicks = 0;
+      return;
+    }
+    if (game.ticks() < totalTurns) {
+      this.exhaustedTicks = 0;
+      return;
+    }
+    this.exhaustedTicks += 1;
+    if (this.exhaustedTicks < END_CARD_EXHAUSTION_TICKS) return;
+    this.showResult(game, undefined);
   }
 
   /**

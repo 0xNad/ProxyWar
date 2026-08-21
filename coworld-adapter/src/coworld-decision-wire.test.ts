@@ -3,6 +3,10 @@ import { describe, expect, it } from "vitest";
 import { validateAgentMessageDecision } from "../../src/server/agents/AgentDecisionValidator.ts";
 import { FREETEXT_MESSAGE_MAX_CHARS } from "../../src/server/agents/AgentTunables.ts";
 import {
+  agentRuntimeModes,
+  normalizeAgentRuntimeMode,
+} from "../../src/server/agents/AgentTypes.ts";
+import {
   AGENT_DEGRADATION_CAUSES,
   MAX_WIRE_ACTIONS_PER_DECISION as CANONICAL_MAX,
   MAX_SPAWN_PREFERENCE_ACTION_IDS as CANONICAL_MAX_SPAWN_PREFERENCES,
@@ -10,6 +14,7 @@ import {
 } from "../../src/server/agents/AgentWireProtocol.ts";
 import {
   composeCoworldDecision,
+  COWORLD_AGENT_RUNTIME_MODES,
   decisionRequestEnvelope,
   MAX_WIRE_ACTION_ID_LENGTH,
   MAX_WIRE_ACTIONS_PER_DECISION,
@@ -17,6 +22,7 @@ import {
   MAX_WIRE_SPAWN_PREFERENCE_ACTION_IDS,
   normalizeDecisionResponse,
   normalizeDegradedCause,
+  normalizeRuntimeMode,
 } from "./coworld-decision-wire.ts";
 
 describe("wire constant parity", () => {
@@ -31,6 +37,10 @@ describe("wire constant parity", () => {
     expect(MAX_WIRE_SPAWN_PREFERENCE_ACTION_IDS).toBe(
       CANONICAL_MAX_SPAWN_PREFERENCES,
     );
+  });
+
+  it("mirrors the five canonical runtime modes exactly", () => {
+    expect(COWORLD_AGENT_RUNTIME_MODES).toEqual(agentRuntimeModes);
   });
 
   it("keeps the comms transport bound STRICTLY above the validator's cap", () => {
@@ -558,6 +568,44 @@ describe("composeCoworldDecision", () => {
     });
     expect(degraded.metadata.fallbackUsed).toBe(true);
     expect(degraded.metadata.llmPlannerDegraded).toBe(true);
+  });
+
+  it("forwards all five exact runtime modes and rejects near-miss or forged values", () => {
+    for (const runtimeMode of agentRuntimeModes) {
+      expect(normalizeAgentRuntimeMode(runtimeMode)).toBe(runtimeMode);
+      expect(normalizeRuntimeMode(runtimeMode)).toBe(runtimeMode);
+      const composed = composeCoworldDecision({
+        normalized,
+        message: { runtimeMode },
+        slot: 0,
+        requestID: `req_${runtimeMode}`,
+        offeredLegalActionCount: 1,
+      });
+      expect(composed.metadata.runtimeMode).toBe(runtimeMode);
+    }
+
+    for (const runtimeMode of [
+      " llm-policy-planner",
+      "LLM-POLICY-PLANNER",
+      "llm-policy-planner-extra",
+      "",
+      7,
+      null,
+      { mode: "llm-policy-planner" },
+      ["llm-policy-planner"],
+      "x".repeat(3_000),
+    ]) {
+      expect(normalizeAgentRuntimeMode(runtimeMode)).toBeUndefined();
+      expect(normalizeRuntimeMode(runtimeMode)).toBeUndefined();
+      const composed = composeCoworldDecision({
+        normalized,
+        message: { runtimeMode },
+        slot: 0,
+        requestID: "req_forged_mode",
+        offeredLegalActionCount: 1,
+      });
+      expect(composed.metadata).not.toHaveProperty("runtimeMode");
+    }
   });
 
   it("bounds the raw frame it stamps as evidence", () => {

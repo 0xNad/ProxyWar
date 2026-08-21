@@ -26,6 +26,7 @@ type DecisionResponse = {
   selectedLegalActionId: string;
   spawnPreferenceLegalActionIds?: string[];
   selectedDealActionId?: string;
+  runtimeMode?: string;
   reason: string;
   confidence?: number;
 };
@@ -34,6 +35,7 @@ const STARTER_AGENTS: Array<{
   label: string;
   scriptPath: string;
   extraEnv?: Record<string, string>;
+  runtimeMode: string;
 }> = [
   {
     label: "canonical (coworld-adapter/src/starter-player.mjs)",
@@ -41,6 +43,7 @@ const STARTER_AGENTS: Array<{
     // The canonical file resolves `ws` via `${PROXYWAR_REPO}/node_modules/ws`
     // (its production container-mount layout); point it at this checkout.
     extraEnv: { PROXYWAR_REPO: repoRoot },
+    runtimeMode: "local-policy-baseline",
   },
   {
     label: "tester-starter (rule-based quick-start twin)",
@@ -48,6 +51,7 @@ const STARTER_AGENTS: Array<{
       repoRoot,
       "coworld-adapter/tester-starter/starter-player.mjs",
     ),
+    runtimeMode: "local-policy-baseline",
   },
   {
     label: "tester-starter-llm (no-LLM fallback companion to llm-player.mjs)",
@@ -55,6 +59,7 @@ const STARTER_AGENTS: Array<{
       repoRoot,
       "coworld-adapter/tester-starter-llm/starter-player.mjs",
     ),
+    runtimeMode: "local-policy-baseline",
   },
 ];
 
@@ -67,6 +72,7 @@ const SPAWN_PREFERENCE_AGENTS = [
       PROXYWAR_REPO: repoRoot,
       PROXYWAR_LLM_MOCK: "1",
     },
+    runtimeMode: "llm-action-selector",
   },
 ];
 
@@ -199,6 +205,7 @@ describe.each(STARTER_AGENTS)(
         ),
       ]);
       expect(response.selectedLegalActionId).toBe(ATTACK.id);
+      expect(response.runtimeMode).toBe(agent.runtimeMode);
       expect(response.selectedDealActionId).toBe(
         "deal_accept:deal:P_B:P_A:non_aggression_pact:1",
       );
@@ -322,6 +329,7 @@ describe.each(SPAWN_PREFERENCE_AGENTS)(
         "spawn:10",
       ]);
       expect(response.selectedLegalActionId).toBe("spawn:30");
+      expect(response.runtimeMode).toBe(agent.runtimeMode);
       expect(response.reason).toContain("ranked 3 offered spawn actions");
       expect(response).not.toHaveProperty("selectedLegalActionIds");
       expect(response).not.toHaveProperty("selectedDealActionId");
@@ -335,10 +343,7 @@ it("public LLM starter returns its spawn ballot before planning cadence or gamep
   // control-flow ordering here; the same ranking is exercised over a real
   // websocket by the canonical LLM wrapper above.
   const source = await readFile(
-    path.join(
-      repoRoot,
-      "coworld-adapter/tester-starter-llm/llm-player.mjs",
-    ),
+    path.join(repoRoot, "coworld-adapter/tester-starter-llm/llm-player.mjs"),
     "utf8",
   );
   const spawnBranch = source.indexOf(
@@ -349,6 +354,9 @@ it("public LLM starter returns its spawn ballot before planning cadence or gamep
   const appendHistory = source.indexOf("history.push", spawnBranch);
   expect(spawnBranch).toBeGreaterThan(-1);
   expect(source.slice(spawnBranch, buildState)).toContain("return;");
+  expect(source.slice(spawnBranch, buildState)).toContain(
+    'runtimeMode: "llm-policy-planner"',
+  );
   expect(buildState).toBeGreaterThan(spawnBranch);
   expect(agePlan).toBeGreaterThan(buildState);
   expect(appendHistory).toBeGreaterThan(agePlan);

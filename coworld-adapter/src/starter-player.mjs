@@ -52,6 +52,7 @@ socket.on("message", (data) => {
       type: "decision_response",
       requestID: message.requestID,
       selectedLegalActionId: action.id,
+      runtimeMode: "local-policy-baseline",
       ...(spawnPreferences !== null
         ? {
             spawnPreferenceLegalActionIds: spawnPreferences.map(

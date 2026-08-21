@@ -183,6 +183,7 @@ export class ReplayPremiereAdmissionCatalog {
   private readonly writerId: string;
   private readonly admissionPublicationFaultInjector?: ReplayPremiereAdmissionPublicationFaultInjector;
   private readonly checkpointProjectionPublicationFaultInjector?: ReplayPremiereCheckpointProjectionPublicationFaultInjector;
+  private readonly statfs?: typeof fs.statfs;
   private closed = false;
   private writeQueue: Promise<void> = Promise.resolve();
   private postCloseProjectionQueue: Promise<void> = Promise.resolve();
@@ -198,6 +199,7 @@ export class ReplayPremiereAdmissionCatalog {
     writerId: string;
     admissionPublicationFaultInjector?: ReplayPremiereAdmissionPublicationFaultInjector;
     checkpointProjectionPublicationFaultInjector?: ReplayPremiereCheckpointProjectionPublicationFaultInjector;
+    statfs?: typeof fs.statfs;
   }) {
     this.privateStateRoot = options.privateStateRoot;
     this.catalogRoot = options.catalogRoot;
@@ -211,6 +213,7 @@ export class ReplayPremiereAdmissionCatalog {
       options.admissionPublicationFaultInjector;
     this.checkpointProjectionPublicationFaultInjector =
       options.checkpointProjectionPublicationFaultInjector;
+    this.statfs = options.statfs;
   }
 
   static async open(options: {
@@ -223,6 +226,15 @@ export class ReplayPremiereAdmissionCatalog {
     checkpointProjectionPublicationFaultInjector?: ReplayPremiereCheckpointProjectionPublicationFaultInjector;
     /** Test-only failure injection at admission-record durability seams. */
     admissionPublicationFaultInjector?: ReplayPremiereAdmissionPublicationFaultInjector;
+    /**
+     * Free-space probe for the durable-write floor. Production omits it and
+     * gets the real `fs.statfs`; tests inject so a suite asserts catalog
+     * behaviour rather than the host machine's spare capacity. Staging, the
+     * event store and clips already expose this seam — the catalog and the
+     * projection store were the outliers, which is why a full host turned
+     * their suites red wholesale on 2026-08-19.
+     */
+    statfs?: typeof fs.statfs;
   }): Promise<ReplayPremiereAdmissionCatalog> {
     const limits = validateCatalogLimits(
       options.limits ?? DEFAULT_REPLAY_PREMIERE_CATALOG_LIMITS,
@@ -248,6 +260,7 @@ export class ReplayPremiereAdmissionCatalog {
         maxTotalBytes: limits.maxTotalEntryBytes,
         publicationFaultInjector:
           options.checkpointProjectionPublicationFaultInjector,
+        statfs: options.statfs,
       });
     const lockPath = path.join(canonicalCatalogRoot, "write-owner.json");
     const writerId = randomUUID();
@@ -283,6 +296,7 @@ export class ReplayPremiereAdmissionCatalog {
           options.admissionPublicationFaultInjector,
         checkpointProjectionPublicationFaultInjector:
           options.checkpointProjectionPublicationFaultInjector,
+        statfs: options.statfs,
       });
     } catch (error) {
       activeCatalogRoots.delete(canonicalCatalogRoot);
@@ -471,6 +485,7 @@ export class ReplayPremiereAdmissionCatalog {
         await assertPremiereDurableWriteAdmission({
           destinationPath: this.entriesRoot,
           pendingBytes: bytes.byteLength,
+          statfs: this.statfs,
         });
         assertCheckpointProjectionSignalActive(
           options.checkpointProjectionSignal,
@@ -536,6 +551,11 @@ export class ReplayPremiereAdmissionCatalog {
           servedRoots: this.servedRoots,
           limits: this.limits,
           writerWaitMs: 1_000,
+          // Carry the injected seam across the reopen. Dropping it silently
+          // reverts this path to the host's real free space, which is the exact
+          // host dependence the seam exists to remove — a suite injecting AMPLE
+          // would still fail on a full disk, and only on the post-close path.
+          statfs: this.statfs,
           checkpointProjectionPublicationFaultInjector:
             this.checkpointProjectionPublicationFaultInjector,
         });
@@ -564,6 +584,11 @@ export class ReplayPremiereAdmissionCatalog {
           servedRoots: this.servedRoots,
           limits: this.limits,
           writerWaitMs: 1_000,
+          // Carry the injected seam across the reopen. Dropping it silently
+          // reverts this path to the host's real free space, which is the exact
+          // host dependence the seam exists to remove — a suite injecting AMPLE
+          // would still fail on a full disk, and only on the post-close path.
+          statfs: this.statfs,
           checkpointProjectionPublicationFaultInjector:
             this.checkpointProjectionPublicationFaultInjector,
         });
