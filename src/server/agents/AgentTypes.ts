@@ -19,6 +19,7 @@ export type AgentBrainType =
   | "external-http"
   | "external-relay"
   | "planner-executor"
+  | "strategic-commander"
   | "llm";
 
 export type AgentRuntimeMode =
@@ -26,6 +27,7 @@ export type AgentRuntimeMode =
   | "mock-policy-planner"
   | "llm-policy-planner"
   | "llm-action-selector"
+  | "commander-v0-selector"
   /** Labeled deterministic autopilot that plays out a capped endgame; decisions
    * under this mode are never model play and must never be presented as such. */
   | "autopilot-executor";
@@ -1409,9 +1411,36 @@ export interface AgentBrainInput {
 
 export type AgentBrainDecision = AgentDecision | Promise<AgentDecision>;
 
+export type AgentBrainFailureCause = "brain-timeout" | "brain-error";
+
+/**
+ * Narrow server-to-brain failure boundary. Brains that own a constrained
+ * execution policy can fail closed without letting the league substitute an
+ * unrelated global policy over the full action menu.
+ */
+export interface AgentBrainFailureInput extends AgentBrainInput {
+  cause: AgentBrainFailureCause;
+  detail: string;
+}
+
+/**
+ * Final canonical-path result for one requested action. Optional feedback is
+ * deliberately post-validation/post-submission; it is not an alternate action
+ * path and cannot change the result that the GameServer already returned.
+ */
+export interface AgentBrainActionResultFeedback {
+  decision: AgentDecision;
+  requestedActionID: string;
+  result: AgentActionResult;
+}
+
 export interface AgentBrain {
   readonly brainType?: AgentBrainType;
+  /** When present, must be strictly below the league's outer decision budget. */
+  readonly internalDecisionTimeoutMs?: number;
   decide(input: AgentBrainInput): AgentBrainDecision;
+  failClosed?(input: AgentBrainFailureInput): AgentBrainDecision;
+  onActionResult?(feedback: AgentBrainActionResultFeedback): void;
 }
 
 export interface AgentActionResult {

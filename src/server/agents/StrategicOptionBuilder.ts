@@ -1,4 +1,3 @@
-import { UnitType } from "../../core/game/Game";
 import type { AgentBrainInput, LegalAction } from "./AgentTypes";
 import { sanitizeUntrustedDisplayString } from "./PromptSanitizer";
 import {
@@ -9,23 +8,19 @@ import {
   type StrategicOptionFamily,
   type StrategicOptionOmission,
 } from "./StrategicCommanderTypes";
+import {
+  compareCommanderStrings,
+  isEconomicBuildAction,
+  isEconomicUpgradeAction,
+  isLandExpansionAction,
+  isNeutralBoatAction,
+  isPressurePrimaryAction,
+  isPressureSupportAction,
+  isSurvivalPrimaryAction,
+} from "./StrategicOptionCompatibility";
 
 export const MAX_EXPOSED_STRATEGIC_OPTIONS = 8;
 export const MAX_EXPOSED_PRESSURE_TARGETS = 2;
-
-const economicUnits = new Set<string>([
-  UnitType.City,
-  UnitType.Factory,
-  UnitType.Port,
-]);
-const defensiveUnits = new Set<string>([
-  UnitType.DefensePost,
-  UnitType.SAMLauncher,
-]);
-const economyExcludedUnits = new Set<string>([
-  UnitType.MissileSilo,
-  UnitType.SAMLauncher,
-]);
 
 /** Pure Stage 1 construction. Calling it has no effect on any existing brain. */
 export function buildStrategicOptions(
@@ -37,9 +32,11 @@ export function buildStrategicOptions(
   ) {
     return emptyStrategicOptions();
   }
-  const legalActions = [...input.legalActions].sort(compareActionsById);
+  const legalActions = firstActionsByID(
+    [...input.legalActions].sort(compareActionsById),
+  );
   const visiblePlayers = [...input.observation.visiblePlayers].sort((a, b) =>
-    compareStrings(a.playerID, b.playerID),
+    compareCommanderStrings(a.playerID, b.playerID),
   );
   const ownState = input.observation.ownState;
   const ownTroops = ownState?.troops ?? input.observation.combat.ownTroops ?? 0;
@@ -47,7 +44,9 @@ export function buildStrategicOptions(
   const candidates: StrategicOptionCandidate[] = [];
 
   const landExpansionActions = legalActions.filter(isLandExpansionAction);
-  const neutralBoatActions = legalActions.filter(isNeutralBoatAction);
+  const neutralBoatActions = legalActions.filter((action) =>
+    isNeutralBoatAction(action, input.observation),
+  );
   if (landExpansionActions.length > 0 || neutralBoatActions.length > 0) {
     candidates.push({
       id: "expand",
@@ -91,6 +90,7 @@ export function buildStrategicOptions(
   for (const rival of visiblePlayers) {
     if (
       !rival.isAlive ||
+      rival.isDisconnected ||
       rival.isAllied ||
       rival.isFriendly ||
       rival.isTeammate === true
@@ -98,7 +98,7 @@ export function buildStrategicOptions(
       continue;
     }
     const pressurePrimaryActions = legalActions.filter((action) =>
-      isPressurePrimaryAction(action, rival.playerID),
+      isPressurePrimaryAction(action, rival.playerID, input.observation),
     );
     if (pressurePrimaryActions.length === 0) {
       continue;
@@ -157,7 +157,7 @@ export function buildStrategicOptions(
     boundStrategicOptionExposure(retained);
   const exposed = exposedCandidates.map(toExposedStrategicOption);
   const omitted = [...pressureOmissions, ...exposureOmissions].sort((a, b) =>
-    compareStrings(a.id, b.id),
+    compareCommanderStrings(a.id, b.id),
   );
 
   return {
@@ -166,72 +166,11 @@ export function buildStrategicOptions(
     record: {
       eligibleOptionIds: canonicalCandidates
         .map((candidate) => candidate.id)
-        .sort(compareStrings),
+        .sort(compareCommanderStrings),
       exposedOptionIds: exposed.map((option) => option.id),
       omitted,
     },
   };
-}
-
-function isLandExpansionAction(action: LegalAction): boolean {
-  return action.kind === "attack" && action.metadata?.expansion === true;
-}
-
-function isNeutralBoatAction(action: LegalAction): boolean {
-  return action.kind === "boat" && action.metadata?.targetID === null;
-}
-
-function isEconomicBuildAction(action: LegalAction): boolean {
-  if (action.kind !== "build") {
-    return false;
-  }
-  const unit = String(action.metadata?.unit ?? "");
-  if (economyExcludedUnits.has(unit)) {
-    return false;
-  }
-  return action.metadata?.role === "economic" || economicUnits.has(unit);
-}
-
-function isEconomicUpgradeAction(action: LegalAction): boolean {
-  return (
-    action.kind === "upgrade_structure" &&
-    economicUnits.has(String(action.metadata?.unit ?? ""))
-  );
-}
-
-function isPressurePrimaryAction(
-  action: LegalAction,
-  targetPlayerID: string,
-): boolean {
-  const targetsRival = action.metadata?.targetID === targetPlayerID;
-  return (
-    (action.kind === "attack" &&
-      action.metadata?.expansion !== true &&
-      targetsRival) ||
-    (action.kind === "boat" &&
-      action.metadata?.navalInvasion === true &&
-      targetsRival)
-  );
-}
-
-function isPressureSupportAction(
-  action: LegalAction,
-  targetPlayerID: string,
-): boolean {
-  return (
-    (action.kind === "embargo" || action.kind === "target_player") &&
-    action.metadata?.targetID === targetPlayerID
-  );
-}
-
-function isSurvivalPrimaryAction(action: LegalAction): boolean {
-  return (
-    action.kind === "hold" ||
-    action.kind === "retreat" ||
-    ((action.kind === "build" || action.kind === "upgrade_structure") &&
-      (action.metadata?.role === "defensive" ||
-        defensiveUnits.has(String(action.metadata?.unit ?? ""))))
-  );
 }
 
 function emptyStrategicOptions(): BuiltStrategicOptions {
@@ -257,7 +196,25 @@ function binding(
 }
 
 function stableUniqueActionIds(actions: readonly LegalAction[]): string[] {
-  return [...new Set(actions.map((action) => action.id))].sort(compareStrings);
+  return [...new Set(actions.map((action) => action.id))].sort(
+    compareCommanderStrings,
+  );
+}
+
+/**
+ * AgentDecisionValidator resolves duplicate ids with Array.find(), so the
+ * canonical action authority is the first offered object. JavaScript's stable
+ * sort preserves duplicate-id order; deduplicating after the id sort therefore
+ * makes option construction use that same object instead of exposing two
+ * incompatible payloads behind one id.
+ */
+function firstActionsByID(actions: readonly LegalAction[]): LegalAction[] {
+  const seen = new Set<string>();
+  return actions.filter((action) => {
+    if (seen.has(action.id)) return false;
+    seen.add(action.id);
+    return true;
+  });
 }
 
 function orderCandidates(
@@ -270,7 +227,7 @@ function orderCandidates(
     (a, b) =>
       (familyOrder.get(a.family) ?? Number.MAX_SAFE_INTEGER) -
         (familyOrder.get(b.family) ?? Number.MAX_SAFE_INTEGER) ||
-      compareStrings(a.id, b.id),
+      compareCommanderStrings(a.id, b.id),
   );
 }
 
@@ -389,12 +346,5 @@ function toExposedStrategicOption(
 }
 
 function compareActionsById(a: LegalAction, b: LegalAction): number {
-  return compareStrings(a.id, b.id);
-}
-
-function compareStrings(a: string, b: string): number {
-  if (a === b) {
-    return 0;
-  }
-  return a < b ? -1 : 1;
+  return compareCommanderStrings(a.id, b.id);
 }

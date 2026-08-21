@@ -196,9 +196,22 @@ interface DecisionLogEntry {
   objectiveKind?: AgentObjectiveKind;
   objectiveSummary?: string;
   objectiveAligned?: boolean;
+  planID?: string;
   planObjective?: string;
   planRationale?: string;
   planFollowed?: boolean;
+  commanderSelectorSource?: string;
+  commanderFingerprint?: string;
+  commanderExposedOptionIds?: string;
+  commanderOmittedOptions?: string;
+  commanderFidelity?: string;
+  commanderReplanReason?: string;
+  commanderPreviousPlanID?: string;
+  commanderHorizonDecisions?: number;
+  commanderPlanAgeDecisions?: number;
+  commanderBlockedReason?: string;
+  commanderImmediateReplan?: boolean;
+  commanderEmergencyCondition?: string;
   plannerRan?: boolean;
   plannerLatencyMs?: number;
   plannerFallbackUsed?: boolean;
@@ -689,6 +702,9 @@ function decisionLogEntry(
     ...(record.objectiveAligned !== undefined
       ? { objectiveAligned: record.objectiveAligned }
       : {}),
+    ...(stringMetadata(metadata, "planID") !== undefined
+      ? { planID: stringMetadata(metadata, "planID") }
+      : {}),
     ...(stringMetadata(metadata, "planObjective") !== undefined
       ? { planObjective: stringMetadata(metadata, "planObjective") }
       : {}),
@@ -697,6 +713,99 @@ function decisionLogEntry(
       : {}),
     ...(booleanMetadata(metadata, "planFollowed") !== undefined
       ? { planFollowed: booleanMetadata(metadata, "planFollowed") }
+      : {}),
+    ...(stringMetadata(metadata, "commanderSelectorSource") !== undefined
+      ? {
+          commanderSelectorSource: stringMetadata(
+            metadata,
+            "commanderSelectorSource",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commanderFingerprint") !== undefined
+      ? {
+          commanderFingerprint: stringMetadata(
+            metadata,
+            "commanderFingerprint",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commanderExposedOptionIds") !== undefined
+      ? {
+          commanderExposedOptionIds: stringMetadata(
+            metadata,
+            "commanderExposedOptionIds",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commanderOmittedOptions") !== undefined
+      ? {
+          commanderOmittedOptions: stringMetadata(
+            metadata,
+            "commanderOmittedOptions",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commanderFidelity") !== undefined
+      ? {
+          commanderFidelity: stringMetadata(metadata, "commanderFidelity"),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commanderReplanReason") !== undefined
+      ? {
+          commanderReplanReason: stringMetadata(
+            metadata,
+            "commanderReplanReason",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commanderPreviousPlanID") !== undefined
+      ? {
+          commanderPreviousPlanID: stringMetadata(
+            metadata,
+            "commanderPreviousPlanID",
+          ),
+        }
+      : {}),
+    ...(numberMetadata(metadata, "commanderHorizonDecisions") !== undefined
+      ? {
+          commanderHorizonDecisions: numberMetadata(
+            metadata,
+            "commanderHorizonDecisions",
+          ),
+        }
+      : {}),
+    ...(numberMetadata(metadata, "commanderPlanAgeDecisions") !== undefined
+      ? {
+          commanderPlanAgeDecisions: numberMetadata(
+            metadata,
+            "commanderPlanAgeDecisions",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commanderBlockedReason") !== undefined
+      ? {
+          commanderBlockedReason: stringMetadata(
+            metadata,
+            "commanderBlockedReason",
+          ),
+        }
+      : {}),
+    ...(booleanMetadata(metadata, "commanderImmediateReplan") !== undefined
+      ? {
+          commanderImmediateReplan: booleanMetadata(
+            metadata,
+            "commanderImmediateReplan",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commanderEmergencyCondition") !== undefined
+      ? {
+          commanderEmergencyCondition: stringMetadata(
+            metadata,
+            "commanderEmergencyCondition",
+          ),
+        }
       : {}),
     ...(stringMetadata(metadata, "planPlannerSource") !== undefined &&
     stringMetadata(metadata, "plannerSource") === undefined

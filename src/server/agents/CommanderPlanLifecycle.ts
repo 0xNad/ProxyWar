@@ -1,3 +1,11 @@
+import { createHash } from "node:crypto";
+import {
+  boundedCommanderPlayerIDs,
+  boundedCommanderIdentifier as boundedIdentifier,
+  nonNegativeCommanderFinite as nonNegativeFinite,
+  nonNegativeCommanderInteger as nonNegativeInteger,
+  compareCommanderStrings as stableStringCompare,
+} from "./CommanderPrimitives";
 import {
   fingerprintExposedOptionSet,
   MAX_COMMANDER_OPTION_ID_LENGTH,
@@ -28,8 +36,6 @@ export const MAX_COMMANDER_FINGERPRINT_LENGTH = 64;
  * Alive ids are a membership probe that is never persisted into plan state, so
  * this bound only rejects pathological input rather than shaping the snapshot.
  */
-export const MAX_COMMANDER_ALIVE_PLAYERS = 256;
-
 /**
  * Nothing here reads a clock. Plan age is measured purely in decision cycles so
  * the lifecycle stays reproducible under replay and step-locked evaluation.
@@ -51,6 +57,8 @@ export type CommanderPlanContinueReason =
 export const commanderPlanReplanReasons = [
   "no_active_plan",
   "horizon_expiry",
+  "option_not_executable",
+  "hold_streak_blocked",
   "home_danger_high",
   "option_appeared",
 ] as const;
@@ -63,7 +71,6 @@ export const commanderPlanTerminateReasons = [
   "game_mismatch",
   "agent_mismatch",
   "decision_sequence_regressed",
-  "option_no_longer_offered",
   "target_eliminated",
 ] as const;
 
@@ -91,9 +98,20 @@ export const commanderPlanFallbackReasons = [
 export type CommanderPlanFallbackReason =
   (typeof commanderPlanFallbackReasons)[number];
 
+export const commanderPlanFallbackDegradationCauses = [
+  "plan-timeout",
+  "plan-parse",
+  "plan-stale",
+  "policy-error",
+] as const;
+
+export type CommanderPlanFallbackDegradationCause =
+  (typeof commanderPlanFallbackDegradationCauses)[number];
+
 /** The specific binding that failed, checked before any plan replacement. */
 export const commanderPlanRejectionCodes = [
   "response_invalid",
+  "identity_malformed",
   "game_id_mismatch",
   "agent_id_mismatch",
   "decision_sequence_stale",
@@ -155,7 +173,7 @@ export interface CommanderPlanMaterial {
   tilesOwned: number;
   troops: number;
   incomingAttackerIDs: readonly string[];
-  alivePlayerIDs: readonly string[];
+  alivePlayerIDs: readonly string[] | ReadonlySet<string>;
 }
 
 export interface CommanderPlanStartSnapshot {
@@ -175,6 +193,7 @@ export interface CommanderPlanStartSnapshot {
  * carries facts and provenance only, never a score.
  */
 export interface ActiveCommanderPlan {
+  planID: string;
   selectedStrategicOptionId: StrategicOptionId;
   family: StrategicOptionFamily;
   targetPlayerID: string | null;
@@ -183,6 +202,8 @@ export interface ActiveCommanderPlan {
   intent: string | null;
   selector: CommanderPlanSelector;
   fallbackReason: CommanderPlanFallbackReason | null;
+  /** Immutable attribution for every decision authored under this plan. */
+  fallbackDegradationCause: CommanderPlanFallbackDegradationCause | null;
   origin: CommanderRequestIdentity;
   start: CommanderPlanStartSnapshot;
 }
@@ -218,12 +239,24 @@ export interface AdvanceCommanderPlanInput {
   request: CommanderPlanRequest;
   material: CommanderPlanMaterial;
   response?: CommanderPlanResponseEnvelope | null;
+  forcedReplanReason?: "option_not_executable" | "hold_streak_blocked" | null;
+  fallbackDegradationCause?: CommanderPlanFallbackDegradationCause | null;
+  /** Arm B's selector result over this exact request's locked state/options. */
+  fallbackSelection?: CommanderFallbackSelection | null;
+}
+
+export interface CommanderFallbackSelection {
+  selectedStrategicOptionId: StrategicOptionId;
+  horizonDecisions: number;
+  replanTriggers: CommanderReplanTrigger[];
+  intent: string;
 }
 
 export interface EvaluateCommanderPlanInput {
   plan: ActiveCommanderPlan | null;
   request: CommanderPlanRequest;
   material: CommanderPlanMaterial;
+  forcedReplanReason?: "option_not_executable" | "hold_streak_blocked" | null;
 }
 
 export class CommanderPlanLifecycle {
@@ -309,9 +342,9 @@ export function commanderRequestIdentity(
  * Decides whether the active plan may continue. Checks run in a fixed order so
  * the reason is deterministic when several conditions hold at once.
  *
- * `option_no_longer_offered` and `target_eliminated` terminate unconditionally,
- * not only when the Commander declared the matching replan trigger: a plan whose
- * selected option is not exposed has no authority left to continue under.
+ * `option_not_executable` is always armed: a plan whose selected option is not
+ * exposed has no authority to continue, but its replacement remains an
+ * explicit replan with prior-plan provenance rather than a silent termination.
  */
 export function evaluateCommanderPlan(
   input: EvaluateCommanderPlanInput,
@@ -342,7 +375,7 @@ export function evaluateCommanderPlan(
     return terminate("decision_sequence_regressed", plan, identity);
   }
   if (!identity.exposedOptionIDs.includes(plan.selectedStrategicOptionId)) {
-    return terminate("option_no_longer_offered", plan, identity);
+    return replan("option_not_executable", plan, planAge(plan, identity));
   }
   if (
     plan.targetPlayerID !== null &&
@@ -352,6 +385,12 @@ export function evaluateCommanderPlan(
   }
 
   const age = planAge(plan, identity);
+  if (
+    input.forcedReplanReason !== undefined &&
+    input.forcedReplanReason !== null
+  ) {
+    return replan(input.forcedReplanReason, plan, age);
+  }
   if (age >= plan.horizonDecisions) {
     return {
       disposition: "replan",
@@ -398,11 +437,15 @@ export function advanceCommanderPlan(
     plan: input.active,
     request: input.request,
     material: input.material,
+    forcedReplanReason: input.forcedReplanReason,
   });
   const response = input.response ?? null;
   const validation = validateCommanderResponse(identity, response);
 
   if (evaluation.reason === "no_exposed_options") {
+    const active = input.active;
+    const progress =
+      active === null ? null : planProgress(active, identity, material);
     return {
       evaluation,
       responseDisposition: response === null ? "absent" : "rejected",
@@ -413,12 +456,15 @@ export function advanceCommanderPlan(
               code: "option_not_exposed",
               detail: "the request exposed no strategic options",
             }),
-      plan: null,
-      selector: null,
-      fallbackReason: null,
-      planPreserved: false,
-      progress: null,
-      snapshot: null,
+      plan: active,
+      selector: active?.selector ?? null,
+      fallbackReason: active?.fallbackReason ?? null,
+      planPreserved: active !== null,
+      progress,
+      snapshot:
+        active === null || progress === null
+          ? null
+          : commanderPlanSnapshot(active, progress),
     };
   }
 
@@ -457,12 +503,20 @@ export function advanceCommanderPlan(
         intent: validation.intent,
         selector: "commander",
         fallbackReason: null,
+        fallbackDegradationCause: null,
       })
     : installFallbackPlan({
         request: input.request,
         identity,
         material,
+        selection: normalizeFallbackSelection(
+          identity,
+          input.fallbackSelection,
+        ),
         fallbackReason: validation.fallbackReason,
+        fallbackDegradationCause:
+          input.fallbackDegradationCause ??
+          degradationCauseForRejectedResponse(validation),
       });
 
   const progress = planProgress(installed, identity, material);
@@ -558,7 +612,7 @@ function validateCommanderResponse(
   const seen = response.identity;
   if (!isComparableIdentity(seen)) {
     return mismatch(
-      "exposed_option_ids_mismatch",
+      "identity_malformed",
       "commander_request_mismatch",
       "the response carries no comparable request identity",
     );
@@ -637,6 +691,13 @@ function validateCommanderResponse(
       "the Commander response failed the response contract",
     );
   }
+  if (typeof parsed.selectedStrategicOptionId !== "string") {
+    return mismatch(
+      "response_invalid",
+      "commander_response_invalid",
+      "the Commander selected option id is malformed",
+    );
+  }
   if (!identity.exposedOptionIDs.includes(parsed.selectedStrategicOptionId)) {
     return mismatch(
       "option_not_exposed",
@@ -644,16 +705,27 @@ function validateCommanderResponse(
       "the selected option was not exposed by this request",
     );
   }
-  return {
-    ok: true,
-    selectedStrategicOptionId: parsed.selectedStrategicOptionId,
-    horizonDecisions: boundedHorizon(parsed.horizonDecisions),
-    replanTriggers: normalizeTriggers(parsed.replanTriggers),
-    intent: sanitizeUntrustedDisplayString(
-      parsed.intent,
-      MAX_COMMANDER_INTENT_LENGTH,
-    ),
-  };
+  try {
+    if (typeof parsed.intent !== "string") {
+      throw new Error("Commander intent must be a string");
+    }
+    return {
+      ok: true,
+      selectedStrategicOptionId: parsed.selectedStrategicOptionId,
+      horizonDecisions: boundedHorizon(parsed.horizonDecisions),
+      replanTriggers: normalizeTriggers(parsed.replanTriggers),
+      intent: sanitizeUntrustedDisplayString(
+        parsed.intent,
+        MAX_COMMANDER_INTENT_LENGTH,
+      ),
+    };
+  } catch {
+    return mismatch(
+      "response_invalid",
+      "commander_response_invalid",
+      "the Commander response payload is malformed",
+    );
+  }
 }
 
 /**
@@ -698,6 +770,7 @@ interface InstallCommanderPlanInput {
   intent: string | null;
   selector: CommanderPlanSelector;
   fallbackReason: CommanderPlanFallbackReason | null;
+  fallbackDegradationCause: CommanderPlanFallbackDegradationCause | null;
 }
 
 function installCommanderPlan(
@@ -719,6 +792,7 @@ function installCommanderPlan(
         );
   assertStrategicIdentity(option.id, option.family, targetPlayerID);
   return {
+    planID: commanderPlanID(input.identity, option.id, input.selector),
     selectedStrategicOptionId: option.id,
     family: option.family,
     targetPlayerID,
@@ -727,6 +801,7 @@ function installCommanderPlan(
     intent: input.intent,
     selector: input.selector,
     fallbackReason: input.fallbackReason,
+    fallbackDegradationCause: input.fallbackDegradationCause,
     origin: input.identity,
     start: {
       decisionSequence: input.identity.decisionSequence,
@@ -743,33 +818,79 @@ function installCommanderPlan(
 }
 
 /**
- * The fallback selects the lexicographically first id exposed by this exact
- * request. It never inspects evidence, so it introduces no hidden ranking, and
- * it is stable when the exposed options arrive in a different order.
+ * Installs the already-computed Arm B selector result. The lifecycle validates
+ * exact locked-set membership and bounds again, but never authors a different
+ * strategic choice or reads hidden action data.
  */
 function installFallbackPlan(input: {
   request: CommanderPlanRequest;
   identity: CommanderRequestIdentity;
   material: NormalizedCommanderPlanMaterial;
+  selection: CommanderFallbackSelection;
   fallbackReason: CommanderPlanFallbackReason;
+  fallbackDegradationCause: CommanderPlanFallbackDegradationCause;
 }): ActiveCommanderPlan {
-  const selectedStrategicOptionId = [...input.identity.exposedOptionIDs].sort(
-    stableStringCompare,
-  )[0];
-  if (selectedStrategicOptionId === undefined) {
-    throw new Error("Fallback selection requires at least one exposed option");
-  }
   return installCommanderPlan({
     request: input.request,
     identity: input.identity,
     material: input.material,
-    selectedStrategicOptionId,
-    horizonDecisions: MIN_COMMANDER_HORIZON_DECISIONS,
-    replanTriggers: [],
-    intent: null,
+    selectedStrategicOptionId: input.selection.selectedStrategicOptionId,
+    horizonDecisions: input.selection.horizonDecisions,
+    replanTriggers: input.selection.replanTriggers,
+    intent: input.selection.intent,
     selector: "fallback",
     fallbackReason: input.fallbackReason,
+    fallbackDegradationCause: input.fallbackDegradationCause,
   });
+}
+
+function normalizeFallbackSelection(
+  identity: CommanderRequestIdentity,
+  selection: CommanderFallbackSelection | null | undefined,
+): CommanderFallbackSelection {
+  if (selection === null || selection === undefined) {
+    throw new Error(
+      "Fallback plan requires the deterministic selector result for the locked request",
+    );
+  }
+  if (
+    typeof selection.selectedStrategicOptionId !== "string" ||
+    !identity.exposedOptionIDs.includes(selection.selectedStrategicOptionId)
+  ) {
+    throw new Error(
+      "Deterministic fallback selected an option outside the locked request",
+    );
+  }
+  if (typeof selection.intent !== "string") {
+    throw new Error("Deterministic fallback intent must be a string");
+  }
+  return {
+    selectedStrategicOptionId: selection.selectedStrategicOptionId,
+    horizonDecisions: boundedHorizon(selection.horizonDecisions),
+    replanTriggers: normalizeTriggers(selection.replanTriggers),
+    intent: sanitizeUntrustedDisplayString(
+      selection.intent,
+      MAX_COMMANDER_INTENT_LENGTH,
+    ),
+  };
+}
+
+function degradationCauseForRejectedResponse(
+  validation: Extract<CommanderResponseValidation, { ok: false }>,
+): CommanderPlanFallbackDegradationCause {
+  if (
+    validation.fallbackReason === "commander_result_stale" ||
+    validation.fallbackReason === "commander_request_mismatch"
+  ) {
+    return "plan-stale";
+  }
+  if (
+    validation.fallbackReason === "commander_response_invalid" ||
+    validation.fallbackReason === "commander_option_not_exposed"
+  ) {
+    return "plan-parse";
+  }
+  return "policy-error";
 }
 
 export interface NormalizedCommanderPlanMaterial {
@@ -786,7 +907,10 @@ function normalizeMaterial(
     material === null ||
     typeof material !== "object" ||
     !Array.isArray(material.incomingAttackerIDs) ||
-    !Array.isArray(material.alivePlayerIDs)
+    !(
+      Array.isArray(material.alivePlayerIDs) ||
+      material.alivePlayerIDs instanceof Set
+    )
   ) {
     throw new Error("Commander plan material is malformed");
   }
@@ -798,10 +922,11 @@ function normalizeMaterial(
       "material.incomingAttackerIDs",
     ),
     alivePlayerIDs: new Set(
-      boundedPlayerIDs(material.alivePlayerIDs, "material.alivePlayerIDs", {
-        limit: MAX_COMMANDER_ALIVE_PLAYERS,
-        overflow: "throw",
-      }),
+      boundedCommanderPlayerIDs(
+        material.alivePlayerIDs,
+        "material.alivePlayerIDs",
+        MAX_COMMANDER_PLAYER_ID_LENGTH,
+      ),
     ),
   };
 }
@@ -895,13 +1020,11 @@ function boundedPlayerIDs(
     overflow: "truncate",
   },
 ): string[] {
-  const unique = [
-    ...new Set(
-      values.map((value) =>
-        boundedIdentifier(value, field, MAX_COMMANDER_PLAYER_ID_LENGTH),
-      ),
-    ),
-  ].sort(stableStringCompare);
+  const unique = boundedCommanderPlayerIDs(
+    values,
+    field,
+    MAX_COMMANDER_PLAYER_ID_LENGTH,
+  );
   if (unique.length > options.limit && options.overflow === "throw") {
     throw new Error(`${field} exceeds its bound`);
   }
@@ -935,36 +1058,24 @@ function assertStrategicIdentity(
   }
 }
 
-function boundedIdentifier(
-  value: unknown,
-  field: string,
-  maxLength: number,
+function commanderPlanID(
+  identity: CommanderRequestIdentity,
+  optionID: StrategicOptionId,
+  selector: CommanderPlanSelector,
 ): string {
-  if (
-    typeof value !== "string" ||
-    value.length === 0 ||
-    value.length > maxLength ||
-    sanitizeUntrustedDisplayString(value, maxLength) !== value
-  ) {
-    throw new Error(`${field} must be a bounded stable identifier`);
-  }
-  return value;
-}
-
-function nonNegativeInteger(value: number, field: string): number {
-  if (!Number.isSafeInteger(value) || value < 0) {
-    throw new Error(`${field} must be a non-negative integer`);
-  }
-  return value;
-}
-
-function nonNegativeFinite(value: number, field: string): number {
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
-    throw new Error(`${field} must be a non-negative finite number`);
-  }
-  return value;
-}
-
-function stableStringCompare(a: string, b: string): number {
-  return a < b ? -1 : a > b ? 1 : 0;
+  const digest = createHash("sha256")
+    .update(
+      JSON.stringify([
+        identity.gameID,
+        identity.agentID,
+        identity.decisionSequence,
+        identity.exposedOptionSetFingerprint,
+        identity.materialStateFingerprint,
+        selector,
+        optionID,
+      ]),
+    )
+    .digest("hex")
+    .slice(0, 16);
+  return `commander:${identity.decisionSequence}:${digest}`;
 }

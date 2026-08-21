@@ -1,3 +1,4 @@
+import { withDeferredDecisionTimeout } from "./AgentDecisionTimeout";
 import type { AgentObservation } from "./AgentTypes";
 import {
   advanceCommanderPlan,
@@ -8,6 +9,7 @@ import {
   type ActiveCommanderPlan,
   type CommanderPlanCycle,
   type CommanderPlanEvaluation,
+  type CommanderPlanFallbackDegradationCause,
   type CommanderPlanMaterial,
   type CommanderPlanRequest,
   type CommanderPlanResponseEnvelope,
@@ -26,8 +28,13 @@ import type {
   StrategicOptionCandidate,
   StrategicOptionId,
 } from "./StrategicCommanderTypes";
+import {
+  DeterministicOptionSelector,
+  type StrategicOptionSelector,
+} from "./StrategicOptionSelectors";
 
 export const MAX_COMMANDER_PROVIDER_FAILURE_LENGTH = 200;
+export const DEFAULT_COMMANDER_PROVIDER_TIMEOUT_MS = 12_000;
 
 export interface StrategicCommanderCycleInput {
   observation: AgentObservation;
@@ -35,6 +42,7 @@ export interface StrategicCommanderCycleInput {
   options: BuiltStrategicOptions;
   decisionSequence: number;
   activePlan: ActiveCommanderPlan | null;
+  forcedReplanReason?: "option_not_executable" | "hold_streak_blocked" | null;
   recentEvents?: readonly CommanderRecentEvent[];
 }
 
@@ -75,23 +83,39 @@ export interface StrategicCommanderCycleOutcome {
  *    resolved only to the currently offered candidate's existing binding. An
  *    option whose binding is missing or empty is not exposed at all, so a plan
  *    that selected it hits the existing lifecycle replan/fallback machinery
- *    (`option_no_longer_offered` / `option_not_exposed`) instead of leaking as
+ *    (`option_not_executable` / `option_not_exposed`) instead of leaking as
  *    executable output.
  */
 export class StrategicCommanderCaller {
-  constructor(private readonly provider: LlmProvider) {}
+  constructor(
+    private readonly provider: LlmProvider,
+    readonly providerTimeoutMs = DEFAULT_COMMANDER_PROVIDER_TIMEOUT_MS,
+    private readonly fallbackSelector: StrategicOptionSelector = new DeterministicOptionSelector(),
+  ) {}
 
   runCycle(
     input: StrategicCommanderCycleInput,
   ): Promise<StrategicCommanderCycleOutcome> {
-    return runStrategicCommanderCycle(this.provider, input);
+    return runStrategicCommanderCycle(
+      this.provider,
+      input,
+      this.providerTimeoutMs,
+      this.fallbackSelector,
+    );
   }
 }
 
 export async function runStrategicCommanderCycle(
   provider: LlmProvider,
   input: StrategicCommanderCycleInput,
+  providerTimeoutMs = DEFAULT_COMMANDER_PROVIDER_TIMEOUT_MS,
+  fallbackSelector: StrategicOptionSelector = new DeterministicOptionSelector(),
 ): Promise<StrategicCommanderCycleOutcome> {
+  if (fallbackSelector.selectorSource !== "deterministic") {
+    throw new Error(
+      "Commander fallback selector must be the deterministic Arm B selector",
+    );
+  }
   const own = input.observation.ownState;
   if (own === null) {
     throw new Error("Commander cycle requires available own player state");
@@ -117,9 +141,11 @@ export async function runStrategicCommanderCycle(
       input.observation.combat.incomingAttackPlayerIDs.filter((playerID) =>
         visiblePlayerIDs.has(playerID),
       ),
-    alivePlayerIDs: input.observation.visiblePlayers
-      .filter((player) => player.isAlive)
-      .map((player) => player.playerID),
+    alivePlayerIDs: new Set(
+      input.observation.visiblePlayers
+        .filter((player) => player.isAlive)
+        .map((player) => player.playerID),
+    ),
   };
   const request: CommanderPlanRequest = {
     gameID: input.observation.gameID,
@@ -136,14 +162,10 @@ export async function runStrategicCommanderCycle(
     plan: input.activePlan,
     request,
     material,
+    forcedReplanReason: input.forcedReplanReason,
   });
-
-  let providerCalled = false;
-  let providerFailure: string | null = null;
-  let response: CommanderPlanResponseEnvelope | null = null;
-  if (isReplanBoundary(evaluation)) {
-    const prompt = buildCommanderPrompt(
-      promptCommanderState({
+  const lockedSelectionState = isReplanBoundary(evaluation)
+    ? promptCommanderState({
         input,
         exposedOptions,
         recentEvents,
@@ -151,11 +173,27 @@ export async function runStrategicCommanderCycle(
         builtState,
         request,
         material,
-      }),
-    );
+      })
+    : null;
+
+  let providerCalled = false;
+  let providerFailure: string | null = null;
+  let response: CommanderPlanResponseEnvelope | null = null;
+  if (lockedSelectionState !== null) {
+    const prompt = buildCommanderPrompt(lockedSelectionState);
     providerCalled = true;
     try {
-      const raw = await provider.complete(prompt);
+      const providerPromise = Promise.resolve().then(() =>
+        provider.complete(prompt),
+      );
+      const raw = await withDeferredDecisionTimeout(
+        providerPromise,
+        providerTimeoutMs,
+        () =>
+          new Error(
+            `Commander provider timed out after ${providerTimeoutMs}ms`,
+          ),
+      ).promise;
       response = {
         identity,
         parsed: parseCommanderResponse(raw, identity.exposedOptionIDs),
@@ -167,11 +205,26 @@ export async function runStrategicCommanderCycle(
     }
   }
 
+  const fallbackSelection =
+    lockedSelectionState !== null &&
+    (response === null || response.parsed.ok === false)
+      ? await fallbackSelector.select(
+          lockedSelectionState,
+          lockedSelectionState.options,
+        )
+      : null;
+
   const cycle = advanceCommanderPlan({
     active: input.activePlan,
     request,
     material,
     response,
+    fallbackSelection,
+    forcedReplanReason: input.forcedReplanReason,
+    fallbackDegradationCause: cycleFallbackDegradationCause({
+      providerFailure,
+      response,
+    }),
   });
   return {
     cycle,
@@ -181,11 +234,23 @@ export async function runStrategicCommanderCycle(
   };
 }
 
+function cycleFallbackDegradationCause(input: {
+  providerFailure: string | null;
+  response: CommanderPlanResponseEnvelope | null;
+}): CommanderPlanFallbackDegradationCause | null {
+  if (input.providerFailure !== null) {
+    return /timed out/i.test(input.providerFailure)
+      ? "plan-timeout"
+      : "policy-error";
+  }
+  return input.response?.parsed.ok === false ? "plan-parse" : null;
+}
+
 /**
  * The commander-visible option set: exactly the Stage 1 exposure, minus any
  * option whose candidate binding cannot execute right now. Filtering here is
- * what routes a stale plan for such an option into the lifecycle's existing
- * `option_no_longer_offered` termination, and a Commander response naming one
+ * what routes a stale plan for such an option into the lifecycle's explicit
+ * `option_not_executable` replan, and a Commander response naming one
  * into the existing `option_not_exposed` rejection and fallback.
  */
 export function executableExposedStrategicOptions(
@@ -278,9 +343,10 @@ function promptCommanderState(args: {
     withPlan.fingerprints.materialState !==
       args.builtState.fingerprints.materialState
   ) {
-    throw new Error(
-      "Commander prompt state diverged from the request fingerprints",
-    );
+    // The request identity remains the execution authority. If a future state
+    // projection change makes the explanatory plan snapshot diverge, omit the
+    // snapshot rather than throwing into an unrelated tactical fallback.
+    return args.builtState.state;
   }
   return withPlan.state;
 }

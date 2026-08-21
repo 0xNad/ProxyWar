@@ -1,5 +1,7 @@
 import type {
   AgentBrain,
+  AgentBrainActionResultFeedback,
+  AgentBrainFailureInput,
   AgentBrainInput,
   AgentBrainType,
   AgentDecision,
@@ -8,48 +10,55 @@ import type {
 } from "./AgentTypes";
 import type {
   ActiveCommanderPlan,
-  CommanderPlanSelector,
+  CommanderPlanReplanReason,
 } from "./CommanderPlanLifecycle";
 import { MAX_COMMANDER_OPTION_ID_LENGTH } from "./CommanderStateBuilder";
 import { sanitizeUntrustedDisplayString } from "./PromptSanitizer";
 import type { StrategicCommanderCaller } from "./StrategicCommanderCaller";
-import type { StrategicOptionId } from "./StrategicCommanderTypes";
+import type {
+  BuiltStrategicOptions,
+  StrategicOptionCandidate,
+} from "./StrategicCommanderTypes";
 import { buildStrategicOptions } from "./StrategicOptionBuilder";
+import {
+  commanderBatchFidelityStamp,
+  executeStrategicOption,
+  type CommanderBlockedReason,
+  type CommanderExecutedAction,
+  type StrategicOptionExecution,
+} from "./StrategicOptionExecutor";
 
 /**
- * A tactical id is decision-scoped and normally short; this bound only keeps a
- * misbehaving tactical brain from inflating the stamped fallback evidence.
- */
-export const MAX_COMMANDER_STAMPED_ACTION_ID_LENGTH = 120;
-
-/**
- * Stage 5 opt-in adapter. Wraps an injected tactical AgentBrain with the
- * StrategicCommanderV0 cycle (Stage 1 `buildStrategicOptions` + the Stage 4
- * `StrategicCommanderCaller`) and owns the only durable Commander state: the
- * active plan and a monotonic decision sequence, both scoped to one
- * gameID/agentID identity and reset when either changes.
- *
- * The Commander runs only during active, alive play. When its resolution is
- * executable, the tactical brain chooses among the currently offered aligned
- * PRIMARY actions and the adapter returns a single primary action id — no
- * support actions, batches, deal slots, or message slots at this stage. In
- * every other situation the tactical brain decides on the original menu,
- * unchanged. This stage proves opt-in plumbing only; it claims no behavioral
- * improvement over the wrapped brain.
+ * StrategicCommanderV0 owns active, alive play. The injected tactical brain is
+ * retained only for phases outside the V0 strategy contract (notably spawn).
+ * Active play is binding-first and can never escape to a globally scoring
+ * tactical policy when the selected plan is blocked.
  */
 export class StrategicCommanderBrain implements AgentBrain {
   private identity: { gameID: string; agentID: string } | null = null;
   private activePlan: ActiveCommanderPlan | null = null;
   private nextDecisionSequence = 0;
+  private decisionEpoch = 0;
+  private pendingDecision: AgentDecision | null = null;
+  private pendingPrimaryActionID: string | null = null;
+  private inFlightOptions: BuiltStrategicOptions | null = null;
+  private inFlightDecisionSequence: number | null = null;
+  private forcedReplanReason:
+    | "option_not_executable"
+    | "hold_streak_blocked"
+    | null = null;
 
   constructor(
     private readonly caller: StrategicCommanderCaller,
     private readonly tactical: AgentBrain,
   ) {}
 
-  /** The tactical brain remains the acting policy; report its type. */
-  get brainType(): AgentBrainType | undefined {
-    return this.tactical.brainType;
+  get brainType(): AgentBrainType {
+    return "strategic-commander";
+  }
+
+  get internalDecisionTimeoutMs(): number {
+    return this.caller.providerTimeoutMs;
   }
 
   async decide(input: AgentBrainInput): Promise<AgentDecision> {
@@ -64,40 +73,156 @@ export class StrategicCommanderBrain implements AgentBrain {
     const options = buildStrategicOptions(input);
     const decisionSequence = this.nextDecisionSequence;
     this.nextDecisionSequence += 1;
+    this.inFlightOptions = options;
+    this.inFlightDecisionSequence = decisionSequence;
+    const previousPlan = this.activePlan;
+    const forcedReplanReason = this.forcedReplanReason;
+    this.forcedReplanReason = null;
+    const decisionEpoch = this.decisionEpoch;
+    const planningStartedAt = Date.now();
     const outcome = await this.caller.runCycle({
       observation: input.observation,
       options,
       decisionSequence,
-      activePlan: this.activePlan,
+      activePlan: previousPlan,
+      forcedReplanReason,
     });
+    if (decisionEpoch !== this.decisionEpoch) {
+      this.clearInFlightDecision(decisionSequence);
+      return invalidatedCycleDecision(
+        input.legalActions,
+        this.activePlan,
+        decisionSequence,
+      );
+    }
+    this.clearInFlightDecision(decisionSequence);
+    const plannerLatencyMs = outcome.providerCalled
+      ? Math.max(0, Date.now() - planningStartedAt)
+      : 0;
     this.activePlan = outcome.cycle.plan;
 
-    if (outcome.resolution.status !== "executable") {
-      return this.tactical.decide(input);
+    if (outcome.cycle.plan === null) {
+      const execution = blockedWithoutPlan(input.legalActions);
+      this.forcedReplanReason = "hold_streak_blocked";
+      const decision = commanderDecision({
+        execution,
+        options,
+        plan: null,
+        previousPlan,
+        providerCalled: outcome.providerCalled,
+        providerFailure: outcome.providerFailure,
+        responseDisposition: outcome.cycle.responseDisposition,
+        plannerLatencyMs,
+        fallbackReason: outcome.cycle.fallbackReason,
+        rejectionCode: outcome.cycle.rejection?.code ?? null,
+        rejectionDetail: outcome.cycle.rejection?.detail ?? null,
+        replanReason: outcome.cycle.evaluation.reason,
+      });
+      this.rememberIssuedDecision(decision, execution);
+      return decision;
     }
-    const alignedIDs = new Set(outcome.resolution.alignedPrimaryActionIDs);
-    const alignedActions = input.legalActions.filter((action) =>
-      alignedIDs.has(action.id),
+
+    const plan = outcome.cycle.plan;
+    const candidate = currentCandidate(options, plan);
+    const planAgeDecisions = Math.max(
+      0,
+      decisionSequence - plan.start.decisionSequence,
     );
-    if (alignedActions.length === 0) {
-      // Binding ids are verbatim copies of the current menu, so this cannot
-      // happen from this adapter's own inputs; delegate rather than invent.
-      return this.tactical.decide(input);
-    }
-    const tacticalDecision = await this.tactical.decide({
-      observation: input.observation,
-      legalActions: alignedActions,
+    const execution = executeStrategicOption({
+      brainInput: input,
+      plan,
+      candidate,
+      planAgeDecisions,
     });
-    // An executable resolution always comes from an installed plan; if that
-    // invariant ever broke, "fallback" is the safe, non-certifying stamp.
-    const planSelector: CommanderPlanSelector =
-      outcome.cycle.plan?.selector ?? "fallback";
-    return primaryOnlyDecision(
-      tacticalDecision,
-      alignedActions,
-      outcome.resolution.selectedStrategicOptionId,
-      planSelector,
-    );
+    if (execution.immediateReplan) {
+      this.forcedReplanReason = "hold_streak_blocked";
+    }
+    const decision = commanderDecision({
+      execution,
+      options,
+      plan,
+      previousPlan,
+      providerCalled: outcome.providerCalled,
+      providerFailure: outcome.providerFailure,
+      responseDisposition: outcome.cycle.responseDisposition,
+      plannerLatencyMs,
+      fallbackReason: outcome.cycle.fallbackReason,
+      rejectionCode: outcome.cycle.rejection?.code ?? null,
+      rejectionDetail: outcome.cycle.rejection?.detail ?? null,
+      replanReason: outcome.cycle.evaluation.reason,
+      planAgeDecisions,
+    });
+    this.rememberIssuedDecision(decision, execution);
+    return decision;
+  }
+
+  failClosed(input: AgentBrainFailureInput): AgentDecision {
+    // Invalidate any still-running provider/cycle promise before producing the
+    // server fallback. A late completion may resolve, but it cannot install or
+    // replace plan state after this epoch advances.
+    const failedDecisionSequence =
+      this.inFlightDecisionSequence ?? this.nextDecisionSequence;
+    const planAgeDecisions =
+      this.activePlan === null
+        ? undefined
+        : Math.max(
+            0,
+            failedDecisionSequence - this.activePlan.start.decisionSequence,
+          );
+    this.decisionEpoch += 1;
+    this.forcedReplanReason = "hold_streak_blocked";
+    const options = this.inFlightOptions ?? emptyBuiltOptions();
+    this.inFlightOptions = null;
+    this.inFlightDecisionSequence = null;
+    const execution = blockedForOuterFailure(input.legalActions, input.cause);
+    const decision = commanderDecision({
+      execution,
+      options,
+      plan: this.activePlan,
+      previousPlan: this.activePlan,
+      providerCalled: null,
+      providerFailure: null,
+      responseDisposition: "rejected",
+      plannerLatencyMs: null,
+      fallbackReason: this.activePlan?.fallbackReason ?? null,
+      rejectionCode: null,
+      rejectionDetail: null,
+      replanReason: "hold_streak_blocked",
+      planAgeDecisions,
+    });
+    this.rememberIssuedDecision(decision, execution);
+    return decision;
+  }
+
+  onActionResult(feedback: AgentBrainActionResultFeedback): void {
+    if (
+      feedback.decision !== this.pendingDecision ||
+      feedback.requestedActionID !== this.pendingPrimaryActionID
+    ) {
+      return;
+    }
+    this.pendingDecision = null;
+    this.pendingPrimaryActionID = null;
+    if (!feedback.result.accepted) {
+      this.decisionEpoch += 1;
+      this.forcedReplanReason = "option_not_executable";
+    }
+  }
+
+  private rememberIssuedDecision(
+    decision: AgentDecision,
+    execution: StrategicOptionExecution,
+  ): void {
+    this.pendingDecision = decision;
+    this.pendingPrimaryActionID =
+      execution.actions.find((entry) => entry.fidelity === "aligned_primary")
+        ?.actionID ?? null;
+  }
+
+  private clearInFlightDecision(decisionSequence: number): void {
+    if (this.inFlightDecisionSequence !== decisionSequence) return;
+    this.inFlightOptions = null;
+    this.inFlightDecisionSequence = null;
   }
 
   private resetOnIdentityChange(observation: AgentObservation): void {
@@ -114,73 +239,208 @@ export class StrategicCommanderBrain implements AgentBrain {
     };
     this.activePlan = null;
     this.nextDecisionSequence = 0;
+    this.decisionEpoch += 1;
+    this.pendingDecision = null;
+    this.pendingPrimaryActionID = null;
+    this.inFlightOptions = null;
+    this.inFlightDecisionSequence = null;
+    this.forcedReplanReason = null;
   }
 }
 
-/**
- * Binds the tactical decision to the current aligned primary binding. The
- * tactical action id is preserved only when it is one of the currently offered
- * aligned primary ids; a stale or off-binding id is replaced by the
- * lexicographically first offered aligned id, with the substitution stamped as
- * bounded scalar metadata. Only `actionID` ever carries an executable id — the
- * batch, deal, and message channels of the tactical decision are dropped.
- *
- * `commanderSelectedStrategicOptionId` is the smoke certification's success
- * evidence, so only a Commander-authored plan may stamp it. A lifecycle
- * fallback plan (e.g. a provider outage) executes identically but stamps its
- * selection under `commanderFallbackSelectedStrategicOptionId`, so a
- * fallback-only run can never present itself as Commander play.
- */
-function primaryOnlyDecision(
-  tacticalDecision: AgentDecision,
-  alignedActions: readonly LegalAction[],
-  selectedStrategicOptionId: StrategicOptionId,
-  planSelector: CommanderPlanSelector,
-): AgentDecision {
-  const offeredAlignedIDs = alignedActions.map((action) => action.id);
-  const stampedOptionId = sanitizeUntrustedDisplayString(
-    selectedStrategicOptionId,
-    MAX_COMMANDER_OPTION_ID_LENGTH,
+function currentCandidate(
+  options: BuiltStrategicOptions,
+  plan: ActiveCommanderPlan,
+): StrategicOptionCandidate | null {
+  return (
+    options.candidates.find(
+      (candidate) => candidate.id === plan.selectedStrategicOptionId,
+    ) ?? null
   );
-  const planEvidence: Record<string, string> =
-    planSelector === "commander"
-      ? { commanderSelectedStrategicOptionId: stampedOptionId }
-      : { commanderFallbackSelectedStrategicOptionId: stampedOptionId };
-  const tacticalActionID = tacticalDecision.actionID;
-  if (
-    typeof tacticalActionID === "string" &&
-    offeredAlignedIDs.includes(tacticalActionID)
-  ) {
-    return {
-      actionID: tacticalActionID,
-      reason: tacticalDecision.reason ?? null,
-      metadata: {
-        ...tacticalDecision.metadata,
-        ...planEvidence,
-        commanderExecutionFallback: false,
-      },
-    };
-  }
-  const fallbackActionID = [...offeredAlignedIDs].sort(stableStringCompare)[0]!;
+}
+
+function emptyBuiltOptions(): BuiltStrategicOptions {
   return {
-    actionID: fallbackActionID,
-    // The tactical brain's stated reason described a different action; per the
-    // AgentDecision contract a fallback substitution reports no reason.
-    reason: null,
+    candidates: [],
+    exposed: [],
+    record: { eligibleOptionIds: [], exposedOptionIds: [], omitted: [] },
+  };
+}
+
+function invalidatedCycleDecision(
+  legalActions: readonly LegalAction[],
+  plan: ActiveCommanderPlan | null,
+  decisionSequence: number,
+): AgentDecision {
+  return commanderDecision({
+    execution: blockedForOuterFailure(legalActions, "brain-error"),
+    options: emptyBuiltOptions(),
+    plan,
+    previousPlan: plan,
+    providerCalled: false,
+    providerFailure: "Commander cycle result arrived after invalidation",
+    responseDisposition: "rejected",
+    plannerLatencyMs: 0,
+    fallbackReason: plan?.fallbackReason ?? null,
+    rejectionCode: null,
+    rejectionDetail: "Commander cycle result arrived after invalidation",
+    replanReason: "hold_streak_blocked",
+    planAgeDecisions:
+      plan === null
+        ? undefined
+        : Math.max(0, decisionSequence - plan.start.decisionSequence),
+  });
+}
+
+function blockedForOuterFailure(
+  legalActions: readonly LegalAction[],
+  cause: AgentBrainFailureInput["cause"],
+): StrategicOptionExecution {
+  const hold = legalActions.find((action) => action.kind === "hold");
+  if (hold === undefined) {
+    throw new Error(
+      "Commander fail-closed path requires an offered hold action",
+    );
+  }
+  return {
+    actionID: hold.id,
+    actions: [
+      {
+        actionID: hold.id,
+        fidelity: "hold_plan_blocked",
+        emergencyCondition: null,
+      },
+    ],
+    blockedReason:
+      cause === "brain-timeout" ? "outer_brain_timeout" : "outer_brain_error",
+    immediateReplan: true,
+    reason: `hold: ${cause}`,
+  };
+}
+
+function blockedWithoutPlan(
+  legalActions: readonly LegalAction[],
+): StrategicOptionExecution {
+  const hold = legalActions.find((action) => action.kind === "hold");
+  if (hold === undefined) {
+    throw new Error("Commander active play requires an offered hold action");
+  }
+  const actions: CommanderExecutedAction[] = [
+    {
+      actionID: hold.id,
+      fidelity: "hold_plan_blocked",
+      emergencyCondition: null,
+    },
+  ];
+  return {
+    actionID: hold.id,
+    actions,
+    blockedReason: "candidate_missing",
+    immediateReplan: true,
+    reason: "hold: no active Commander plan",
+  };
+}
+
+function commanderDecision(args: {
+  execution: StrategicOptionExecution;
+  options: BuiltStrategicOptions;
+  plan: ActiveCommanderPlan | null;
+  previousPlan: ActiveCommanderPlan | null;
+  providerCalled: boolean | null;
+  providerFailure: string | null;
+  responseDisposition: string;
+  plannerLatencyMs: number | null;
+  fallbackReason: string | null;
+  rejectionCode: string | null;
+  rejectionDetail: string | null;
+  replanReason: CommanderPlanReplanReason | string;
+  planAgeDecisions?: number;
+}): AgentDecision {
+  const { execution, plan } = args;
+  const firstFidelity = execution.actions[0]!.fidelity;
+  const actionIDs = execution.actions.map((action) => action.actionID);
+  const optionID = plan?.selectedStrategicOptionId ?? null;
+  const optionEvidence: Record<string, string | number | boolean | null> = {};
+  if (optionID !== null && plan !== null) {
+    const key =
+      plan.selector === "commander"
+        ? "commanderSelectedStrategicOptionId"
+        : "commanderFallbackSelectedStrategicOptionId";
+    optionEvidence[key] = sanitizeUntrustedDisplayString(
+      optionID,
+      MAX_COMMANDER_OPTION_ID_LENGTH,
+    );
+  }
+  const previousPlanID =
+    args.previousPlan !== null &&
+    (plan === null || args.previousPlan.planID !== plan.planID)
+      ? args.previousPlan.planID
+      : null;
+  const parseSucceeded =
+    args.providerCalled === true && args.responseDisposition === "applied";
+  const plannerFailure = args.providerFailure ?? args.rejectionDetail;
+  const degradedCause = plan?.fallbackDegradationCause ?? null;
+  return {
+    actionID: execution.actionID,
+    ...(actionIDs.length > 1 ? { actionIDs } : {}),
+    reason: execution.reason,
     metadata: {
-      ...planEvidence,
-      commanderExecutionFallback: true,
-      commanderRejectedTacticalActionID:
-        typeof tacticalActionID === "string"
-          ? sanitizeUntrustedDisplayString(
-              tacticalActionID,
-              MAX_COMMANDER_STAMPED_ACTION_ID_LENGTH,
-            )
-          : null,
+      runtimeMode: "commander-v0-selector",
+      plannerSource: "strategic-commander-v0",
+      executorSource: "strategic-option-executor-v0",
+      actionSelectionSource: "strategic-option-binding",
+      ...(args.providerCalled === null
+        ? {}
+        : { externalPlannerCall: args.providerCalled }),
+      externalActionCall: false,
+      rawProviderOutputPresent: false,
+      ...optionEvidence,
+      planID: plan?.planID ?? null,
+      planObjective: optionID,
+      planRationale: plan?.intent ?? null,
+      planFollowed:
+        firstFidelity === "aligned_primary" ||
+        firstFidelity === "aligned_support",
+      ...(args.providerCalled === null
+        ? {}
+        : {
+            plannerRan: args.providerCalled,
+            plannerLatencyMs: args.plannerLatencyMs ?? 0,
+          }),
+      plannerFallbackUsed: plan?.selector === "fallback",
+      ...(args.providerCalled === true
+        ? { plannerParseOk: parseSucceeded }
+        : {}),
+      ...(plannerFailure !== null
+        ? { plannerParseFailureReason: plannerFailure }
+        : {}),
+      llmPlannerDegraded: plan?.selector === "fallback",
+      ...(degradedCause === null ? {} : { degradedCause }),
+      commanderSelectorSource:
+        plan === null
+          ? "none"
+          : plan.selector === "commander"
+            ? "llm"
+            : "fallback-deterministic",
+      commanderFingerprint:
+        plan === null
+          ? null
+          : `${plan.origin.exposedOptionSetFingerprint}:${plan.origin.materialStateFingerprint}`,
+      commanderExposedOptionIds: args.options.record.exposedOptionIds.join(","),
+      commanderOmittedOptions: args.options.record.omitted
+        .map((entry) => `${entry.id}:${entry.reason}`)
+        .join(","),
+      commanderFidelity: firstFidelity,
+      commanderBatchFidelities: commanderBatchFidelityStamp(execution.actions),
+      commanderReplanReason: args.replanReason,
+      commanderPreviousPlanID: previousPlanID,
+      commanderHorizonDecisions: plan?.horizonDecisions ?? null,
+      commanderPlanAgeDecisions: args.planAgeDecisions ?? 0,
+      commanderBlockedReason: execution.blockedReason,
+      commanderImmediateReplan: execution.immediateReplan,
+      commanderEmergencyCondition: null,
     },
   };
 }
 
-function stableStringCompare(a: string, b: string): number {
-  return a < b ? -1 : a > b ? 1 : 0;
-}
+export type { CommanderBlockedReason };

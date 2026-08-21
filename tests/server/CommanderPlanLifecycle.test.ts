@@ -1,9 +1,11 @@
 import {
-  advanceCommanderPlan,
+  advanceCommanderPlan as advanceCommanderPlanWithoutFallback,
   CommanderPlanLifecycle,
   commanderPlanProgress,
   commanderRequestIdentity,
   type ActiveCommanderPlan,
+  type AdvanceCommanderPlanInput,
+  type CommanderFallbackSelection,
   type CommanderPlanMaterial,
   type CommanderPlanRejectionCode,
   type CommanderPlanRequest,
@@ -22,6 +24,7 @@ import type {
   StrategicOptionId,
 } from "../../src/server/agents/StrategicCommanderTypes";
 import { MAX_EXPOSED_STRATEGIC_OPTIONS } from "../../src/server/agents/StrategicOptionBuilder";
+import { selectDeterministicStrategicOption } from "../../src/server/agents/StrategicOptionSelectors";
 import {
   EVIDENCE_LEAK_CANARY,
   makeCommanderStage2Fixture,
@@ -47,8 +50,8 @@ const EXPOSED_IDS: StrategicOptionId[] = [
   "pressure_rival:P8",
 ];
 
-/** Lexicographically first exposed id, which is what the fallback must pick. */
-const FALLBACK_ID: StrategicOptionId = "develop_economy";
+/** The fixed Arm B selector's choice for the shared locked fixture. */
+const FALLBACK_ID: StrategicOptionId = "pressure_rival:P7";
 
 function fixtureOptions(): ExposedStrategicOption[] {
   return makeCommanderStage2Fixture().builtState.state.options;
@@ -83,6 +86,31 @@ function makeRequest(
     materialStateFingerprint: fixture.builtState.fingerprints.materialState,
     ...overrides,
   };
+}
+
+function deterministicFallbackSelection(
+  request: CommanderPlanRequest,
+): CommanderFallbackSelection | null {
+  if (request.exposedOptions.length === 0) return null;
+  const state = {
+    ...makeCommanderStage2Fixture().builtState.state,
+    options: [...request.exposedOptions],
+  };
+  return selectDeterministicStrategicOption(state, request.exposedOptions);
+}
+
+/**
+ * Stage 3 tests exercise lifecycle behavior with the same deterministic
+ * selection that the Stage 4 caller must supply at every fallback boundary.
+ */
+function advanceCommanderPlan(input: AdvanceCommanderPlanInput) {
+  return advanceCommanderPlanWithoutFallback({
+    ...input,
+    fallbackSelection:
+      input.fallbackSelection === undefined
+        ? deterministicFallbackSelection(input.request)
+        : input.fallbackSelection,
+  });
 }
 
 /** Builds a response through the real Stage 2 parser, bound to `identity`. */
@@ -205,11 +233,13 @@ describe("CommanderPlanLifecycle Stage 3 — installation and provenance", () =>
     expect(serialized).not.toContain(EVIDENCE_LEAK_CANARY);
     expect(serialized).not.toContain("totalScore");
     expect(Object.keys(cycle.plan ?? {}).sort()).toEqual([
+      "fallbackDegradationCause",
       "fallbackReason",
       "family",
       "horizonDecisions",
       "intent",
       "origin",
+      "planID",
       "replanTriggers",
       "selectedStrategicOptionId",
       "selector",
@@ -374,7 +404,7 @@ describe("CommanderPlanLifecycle Stage 3 — explicit replan and terminate reaso
     }
   });
 
-  it("terminates when the selected option is no longer offered", () => {
+  it("explicitly replans when the selected option is no longer executable", () => {
     const plan = installedPlan({ selectedStrategicOptionId: "survive" });
     const withoutSurvive = fixtureOptions().filter(
       (option) => option.id !== "survive",
@@ -386,8 +416,8 @@ describe("CommanderPlanLifecycle Stage 3 — explicit replan and terminate reaso
       response: null,
     });
 
-    expect(cycle.evaluation.disposition).toBe("terminate");
-    expect(cycle.evaluation.reason).toBe("option_no_longer_offered");
+    expect(cycle.evaluation.disposition).toBe("replan");
+    expect(cycle.evaluation.reason).toBe("option_not_executable");
     expect(cycle.plan?.selectedStrategicOptionId).not.toBe("survive");
   });
 
@@ -408,7 +438,7 @@ describe("CommanderPlanLifecycle Stage 3 — explicit replan and terminate reaso
     expect(cycle.evaluation.reason).toBe("target_eliminated");
   });
 
-  it("terminates with no plan at all when nothing is exposed", () => {
+  it("preserves plan provenance when an active menu transiently exposes no options", () => {
     const plan = installedPlan();
     const cycle = advanceCommanderPlan({
       active: plan,
@@ -421,10 +451,13 @@ describe("CommanderPlanLifecycle Stage 3 — explicit replan and terminate reaso
     });
 
     expect(cycle.evaluation.reason).toBe("no_exposed_options");
-    expect(cycle.plan).toBeNull();
-    expect(cycle.snapshot).toBeNull();
-    expect(cycle.progress).toBeNull();
-    expect(cycle.selector).toBeNull();
+    expect(cycle.plan).toBe(plan);
+    expect(cycle.snapshot?.selectedStrategicOptionId).toBe(
+      plan.selectedStrategicOptionId,
+    );
+    expect(cycle.progress).not.toBeNull();
+    expect(cycle.selector).toBe(plan.selector);
+    expect(cycle.planPreserved).toBe(true);
   });
 
   it("fires declared danger and new-option triggers, and only when declared", () => {
@@ -565,6 +598,36 @@ describe("CommanderPlanLifecycle Stage 3 — request-binding rejection", () => {
     },
   );
 
+  it("stores stale-response degradation on the fallback plan for its full lifetime", () => {
+    const request = makeRequest();
+    const identity = commanderRequestIdentity(request);
+    const installed = advanceCommanderPlan({
+      active: null,
+      request,
+      material: makeMaterial(),
+      response: makeResponse(
+        { ...identity, decisionSequence: BASE_DECISION - 1 },
+        { selectedStrategicOptionId: "survive" },
+      ),
+    });
+    expect(installed.plan).toMatchObject({
+      selector: "fallback",
+      fallbackDegradationCause: "plan-stale",
+    });
+
+    const continued = advanceCommanderPlan({
+      active: installed.plan,
+      request: makeRequest({ decisionSequence: BASE_DECISION + 1 }),
+      material: makeMaterial(),
+      response: null,
+    });
+    expect(continued.evaluation.disposition).toBe("continue");
+    expect(continued.plan).toMatchObject({
+      planID: installed.plan?.planID,
+      fallbackDegradationCause: "plan-stale",
+    });
+  });
+
   it("rejects an unparsable Commander response", () => {
     const request = makeRequest();
     const identity = commanderRequestIdentity(request);
@@ -581,6 +644,7 @@ describe("CommanderPlanLifecycle Stage 3 — request-binding rejection", () => {
     expect(cycle.rejection?.code).toBe("response_invalid");
     expect(cycle.fallbackReason).toBe("commander_response_invalid");
     expect(cycle.plan?.selectedStrategicOptionId).toBe(FALLBACK_ID);
+    expect(cycle.plan?.fallbackDegradationCause).toBe("plan-parse");
   });
 
   it("rejects a selection outside this request's exact exposed ids", () => {
@@ -638,7 +702,7 @@ describe("CommanderPlanLifecycle Stage 3 — request-binding rejection", () => {
           ),
         },
       });
-      expect(cycle.rejection?.code).toBe("exposed_option_ids_mismatch");
+      expect(cycle.rejection?.code).toBe("identity_malformed");
       expect(cycle.plan?.selectedStrategicOptionId).toBe(FALLBACK_ID);
     }
   });
@@ -664,20 +728,81 @@ describe("CommanderPlanLifecycle Stage 3 — request-binding rejection", () => {
     expect(cycle.rejection?.code).toBe("game_id_mismatch");
   });
 
-  it("refuses a pathological alive-player list", () => {
-    expect(() =>
-      advanceCommanderPlan({
-        active: null,
-        request: makeRequest(),
-        material: makeMaterial({
-          alivePlayerIDs: Array.from(
-            { length: 300 },
-            (_unused, index) => `Z${index}`,
-          ),
-        }),
-        response: null,
+  it("keeps complete membership truth beyond the former 256-player cap", () => {
+    const cycle = advanceCommanderPlan({
+      active: null,
+      request: makeRequest(),
+      material: makeMaterial({
+        alivePlayerIDs: new Set(
+          Array.from({ length: 300 }, (_unused, index) => `Z${index}`),
+        ),
       }),
-    ).toThrow(/material.alivePlayerIDs exceeds its bound/);
+      response: null,
+    });
+    expect(cycle.plan).not.toBeNull();
+  });
+
+  it("rejects malformed parsed payloads without throwing", () => {
+    const request = makeRequest();
+    const identity = commanderRequestIdentity(request);
+    const malformed = [
+      {
+        ok: true,
+        selectedStrategicOptionId: 7,
+        horizonDecisions: 3,
+        intent: "x",
+        replanTriggers: [],
+      },
+      {
+        ok: true,
+        selectedStrategicOptionId: "expand",
+        horizonDecisions: "3",
+        intent: "x",
+        replanTriggers: [],
+      },
+      {
+        ok: true,
+        selectedStrategicOptionId: "expand",
+        horizonDecisions: 3,
+        intent: 7,
+        replanTriggers: [],
+      },
+      {
+        ok: true,
+        selectedStrategicOptionId: "expand",
+        horizonDecisions: 3,
+        intent: "x",
+        replanTriggers: "horizon_expiry",
+      },
+    ];
+    for (const parsed of malformed) {
+      const cycle = advanceCommanderPlan({
+        active: null,
+        request,
+        material: makeMaterial(),
+        response: {
+          identity,
+          parsed: parsed as unknown as CommanderPlanResponseEnvelope["parsed"],
+        },
+      });
+      expect(cycle.rejection?.code).toBe("response_invalid");
+      expect(cycle.selector).toBe("fallback");
+    }
+  });
+
+  it("always replans after a blocked hold", () => {
+    const plan = installedPlan({ horizonDecisions: 6 });
+    const evaluation = new CommanderPlanLifecycle().evaluate({
+      plan,
+      request: makeRequest({ decisionSequence: BASE_DECISION + 1 }),
+      material: makeMaterial(),
+      forcedReplanReason: "hold_streak_blocked",
+    });
+    expect(evaluation).toMatchObject({
+      disposition: "replan",
+      reason: "hold_streak_blocked",
+      ageDecisions: 1,
+    });
   });
 
   it("leaves a continuing plan completely unchanged when a response is rejected", () => {
@@ -729,9 +854,8 @@ describe("CommanderPlanLifecycle Stage 3 — request option-set fingerprint vali
     const fewer = fixtureOptions().slice(0, 2);
     const request = makeRequest({
       exposedOptions: fewer,
-      exposedOptionSetFingerprint: fingerprintExposedOptionSet(
-        fixtureOptions(),
-      ),
+      exposedOptionSetFingerprint:
+        fingerprintExposedOptionSet(fixtureOptions()),
     });
     expect(() =>
       advanceCommanderPlan({
@@ -882,7 +1006,7 @@ describe("CommanderPlanLifecycle Stage 3 — fingerprint stability and sensitivi
 });
 
 describe("CommanderPlanLifecycle Stage 3 — deterministic exposed-only fallback", () => {
-  it("selects the same exposed option regardless of exposure order", () => {
+  it("uses Arm B's fixed rule rather than lexicographic option-id order", () => {
     const options = fixtureOptions();
     const orders = [
       options,
@@ -898,8 +1022,12 @@ describe("CommanderPlanLifecycle Stage 3 — deterministic exposed-only fallback
       });
       expect(cycle.selector).toBe("fallback");
       expect(cycle.plan?.selectedStrategicOptionId).toBe(FALLBACK_ID);
-      expect(cycle.plan?.family).toBe("develop_economy");
-      expect(cycle.plan?.targetPlayerID).toBeNull();
+      expect(cycle.plan?.family).toBe("pressure_rival");
+      expect(cycle.plan?.targetPlayerID).toBe("P7");
+      expect(cycle.plan?.horizonDecisions).toBe(3);
+      expect(cycle.plan?.intent).toBe(
+        "deterministic control selected pressure_rival",
+      );
     }
   });
 
@@ -917,7 +1045,7 @@ describe("CommanderPlanLifecycle Stage 3 — deterministic exposed-only fallback
     });
 
     const selected = cycle.plan?.selectedStrategicOptionId;
-    expect(selected).toBe("expand");
+    expect(selected).toBe("pressure_rival:P7");
     expect(exposedOptions.map((option) => option.id)).toContain(selected);
     expect(
       omittedFromStage1.omitted.map((omission) => omission.id),
@@ -962,9 +1090,38 @@ describe("CommanderPlanLifecycle Stage 3 — deterministic exposed-only fallback
       expect(cycle.fallbackReason).toBe(fallbackReason);
       expect(cycle.plan?.selector).toBe("fallback");
       expect(cycle.plan?.fallbackReason).toBe(fallbackReason);
-      expect(cycle.plan?.intent).toBeNull();
+      expect(cycle.plan?.intent).toBe(
+        "deterministic control selected pressure_rival",
+      );
       expect(cycle.plan?.replanTriggers).toEqual([]);
     }
+  });
+
+  it("fails closed when fallback has no exact deterministic selection", () => {
+    const request = makeRequest();
+    expect(() =>
+      advanceCommanderPlanWithoutFallback({
+        active: null,
+        request,
+        material: makeMaterial(),
+        response: null,
+      }),
+    ).toThrow(/requires the deterministic selector result/);
+
+    expect(() =>
+      advanceCommanderPlanWithoutFallback({
+        active: null,
+        request,
+        material: makeMaterial(),
+        response: null,
+        fallbackSelection: {
+          selectedStrategicOptionId: "pressure_rival:P999",
+          horizonDecisions: 3,
+          intent: "must not install",
+          replanTriggers: [],
+        },
+      }),
+    ).toThrow(/outside the locked request/);
   });
 });
 
@@ -1044,6 +1201,7 @@ describe("CommanderPlanLifecycle Stage 3 — bounded start and progress", () => 
       request,
       material: makeMaterial(),
       response: null,
+      fallbackSelection: deterministicFallbackSelection(request),
     });
 
     expect(evaluation.reason).toBe("no_active_plan");

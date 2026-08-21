@@ -9,9 +9,12 @@ import {
 } from "../../src/server/agents/StrategicCommanderCaller";
 import type {
   BuiltStrategicOptions,
+  CommanderState,
+  ExposedStrategicOption,
   StrategicOptionId,
 } from "../../src/server/agents/StrategicCommanderTypes";
 import { buildStrategicOptions } from "../../src/server/agents/StrategicOptionBuilder";
+import type { StrategicOptionSelector } from "../../src/server/agents/StrategicOptionSelectors";
 import {
   makeCommanderStage2Fixture,
   RAW_ATTACK_ACTION_ID,
@@ -31,8 +34,8 @@ const EXPOSED_IDS: StrategicOptionId[] = [
   "pressure_rival:P8",
 ];
 
-/** Lexicographically first exposed id, which is what the fallback must pick. */
-const FALLBACK_ID: StrategicOptionId = "develop_economy";
+/** The fixed Arm B selector's choice for the shared locked fixture. */
+const FALLBACK_ID: StrategicOptionId = "pressure_rival:P7";
 
 class ScriptedProvider implements LlmProvider {
   readonly prompts: string[] = [];
@@ -292,8 +295,8 @@ describe("StrategicCommanderCaller Stage 4 — option_not_executable handling", 
     });
 
     expect(outcome.cycle.evaluation).toMatchObject({
-      disposition: "terminate",
-      reason: "option_no_longer_offered",
+      disposition: "replan",
+      reason: "option_not_executable",
     });
     expect(outcome.providerCalled).toBe(true);
     expect(outcome.cycle.plan?.selectedStrategicOptionId).toBe("survive");
@@ -322,8 +325,8 @@ describe("StrategicCommanderCaller Stage 4 — option_not_executable handling", 
     );
 
     expect(outcome.cycle.evaluation).toMatchObject({
-      disposition: "terminate",
-      reason: "option_no_longer_offered",
+      disposition: "replan",
+      reason: "option_not_executable",
     });
     expect(outcome.providerCalled).toBe(true);
     expect(outcome.cycle.plan?.selectedStrategicOptionId).toBe("expand");
@@ -351,7 +354,7 @@ describe("StrategicCommanderCaller Stage 4 — option_not_executable handling", 
     expect(outcome.resolution).toMatchObject({
       status: "executable",
       selectedStrategicOptionId: FALLBACK_ID,
-      alignedPrimaryActionIDs: [RAW_BUILD_ACTION_ID],
+      alignedPrimaryActionIDs: [RAW_ATTACK_ACTION_ID],
     });
     expect(JSON.stringify(outcome.resolution)).not.toContain(
       RAW_EXPANSION_ACTION_ID,
@@ -360,6 +363,61 @@ describe("StrategicCommanderCaller Stage 4 — option_not_executable handling", 
 });
 
 describe("StrategicCommanderCaller Stage 4 — provider and response safety", () => {
+  it("runs fallback through the deterministic selector on the exact locked state and options", async () => {
+    const selected = vi.fn(
+      async (
+        state: CommanderState,
+        options: readonly ExposedStrategicOption[],
+      ) => {
+        expect(options).toBe(state.options);
+        expect(options.map((option) => option.id)).toEqual(EXPOSED_IDS);
+        expect(JSON.stringify(state)).not.toContain(RAW_ATTACK_ACTION_ID);
+        expect(JSON.stringify(state)).not.toContain(RAW_BUILD_ACTION_ID);
+        return {
+          selectedStrategicOptionId: "pressure_rival:P7" as const,
+          horizonDecisions: 3,
+          intent: "deterministic control selected pressure_rival",
+          replanTriggers: [],
+        };
+      },
+    );
+    const selector: StrategicOptionSelector = {
+      selectorSource: "deterministic",
+      select: selected,
+    };
+    const provider = new ScriptedProvider(() => "not valid JSON");
+
+    const outcome = await new StrategicCommanderCaller(
+      provider,
+      100,
+      selector,
+    ).runCycle(cycleInput(makeCommanderStage2Fixture()));
+
+    expect(selected).toHaveBeenCalledTimes(1);
+    expect(outcome.cycle.plan).toMatchObject({
+      selectedStrategicOptionId: "pressure_rival:P7",
+      selector: "fallback",
+      fallbackDegradationCause: "plan-parse",
+    });
+  });
+
+  it("times out internally and installs a fallback plan before league safety can escape tactically", async () => {
+    const provider: LlmProvider = {
+      complete: () => new Promise<string>(() => undefined),
+    };
+    const fixture = makeCommanderStage2Fixture();
+    const outcome = await new StrategicCommanderCaller(provider, 5).runCycle(
+      cycleInput(fixture),
+    );
+
+    expect(outcome.providerFailure).toBe(
+      "Commander provider timed out after 5ms",
+    );
+    expect(outcome.cycle.selector).toBe("fallback");
+    expect(outcome.cycle.fallbackReason).toBe("commander_result_absent");
+    expect(outcome.resolution.status).toBe("executable");
+  });
+
   it("installs the fallback plan when the provider throws and never propagates", async () => {
     const provider = new ThrowingProvider("provider  down\n now");
     const outcome = await runCycle(provider);

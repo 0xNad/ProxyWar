@@ -6,6 +6,12 @@ import {
   type AgentGamePhase,
   type AgentObservation,
 } from "./AgentTypes";
+import {
+  boundedCommanderIdentifier as boundedIdentifier,
+  nonNegativeCommanderFinite as nonNegativeFinite,
+  nonNegativeCommanderInteger as nonNegativeInteger,
+  compareCommanderStrings as stableStringCompare,
+} from "./CommanderPrimitives";
 import { sanitizeUntrustedDisplayString } from "./PromptSanitizer";
 import {
   commanderReplanTriggers,
@@ -809,23 +815,6 @@ function knownRivalIdentifier(
   return playerID;
 }
 
-function boundedIdentifier(
-  value: unknown,
-  field: string,
-  maxLength: number,
-): string {
-  if (
-    typeof value !== "string" ||
-    value.length === 0 ||
-    value.length > maxLength ||
-    Buffer.byteLength(value, "utf8") > maxLength ||
-    sanitizeUntrustedDisplayString(value, maxLength) !== value
-  ) {
-    throw new Error(`${field} must be a bounded stable identifier`);
-  }
-  return value;
-}
-
 function boundedGold(value: unknown, field: string): string {
   if (
     typeof value !== "string" ||
@@ -887,26 +876,11 @@ function optionalUnitInterval(
   return normalized;
 }
 
-function nonNegativeFinite(value: number, field: string): number {
-  const normalized = finiteNumber(value, field);
-  if (normalized < 0) {
-    throw new Error(`${field} must be non-negative`);
-  }
-  return normalized;
-}
-
 function optionalNonNegativeFinite(
   value: number | undefined,
   field: string,
 ): number | null {
   return value === undefined ? null : nonNegativeFinite(value, field);
-}
-
-function nonNegativeInteger(value: number, field: string): number {
-  if (!Number.isSafeInteger(value) || value < 0) {
-    throw new Error(`${field} must be a non-negative integer`);
-  }
-  return value;
 }
 
 function assertNonNegativeInteger(value: number, field: string): void {
@@ -980,8 +954,4 @@ function canonicalize(
       )}`;
     })
     .join(",")}}`;
-}
-
-function stableStringCompare(a: string, b: string): number {
-  return a < b ? -1 : a > b ? 1 : 0;
 }

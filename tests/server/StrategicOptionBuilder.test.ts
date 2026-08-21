@@ -196,6 +196,45 @@ describe("StrategicOptionBuilder Stage 1", () => {
     expect(result.record.eligibleOptionIds).not.toContain("develop_economy");
   });
 
+  it("preserves role-based build eligibility while requiring intent and metadata to agree", () => {
+    const roleEconomic = economyBuild(
+      "build:Defense Post:economic",
+      UnitType.DefensePost,
+      "economic",
+    );
+    const roleDefensive = economyBuild(
+      "build:City:defensive",
+      UnitType.City,
+      "defensive",
+    );
+    const mismatched = {
+      ...economyBuild("build:City:spoofed", UnitType.City, "economic"),
+      intent: {
+        type: "build_unit" as const,
+        unit: UnitType.MissileSilo,
+        tile: 101,
+      },
+    };
+    const result = buildStrategicOptions({
+      observation: activeObservation([]),
+      legalActions: [roleEconomic, roleDefensive, mismatched, hold()],
+    });
+
+    expect(
+      candidatesByID(result.candidates).get("develop_economy")?.binding
+        .alignedPrimaryActionIDs,
+    ).toEqual(["build:City:defensive", "build:Defense Post:economic"]);
+    expect(
+      candidatesByID(result.candidates).get("survive")?.binding
+        .alignedPrimaryActionIDs,
+    ).toEqual(["build:City:defensive", "build:Defense Post:economic", "hold"]);
+    expect(
+      result.candidates.flatMap(
+        (candidate) => candidate.binding.alignedPrimaryActionIDs,
+      ),
+    ).not.toContain("build:City:spoofed");
+  });
+
   it("does not pressure allies, friendly players, dead players, or expansion targets", () => {
     const ally = visiblePlayer("ALLY", { isAllied: true });
     const friendly = visiblePlayer("FRIEND", { isFriendly: true });
@@ -222,7 +261,7 @@ describe("StrategicOptionBuilder Stage 1", () => {
     ).toEqual([]);
   });
 
-  it("keeps an alive disconnected rival eligible when a hostile primary is offered", () => {
+  it("excludes a disconnected rival even when a stale hostile primary is offered", () => {
     const rival = visiblePlayer("DISCONNECTED", {
       isDisconnected: true,
       troops: 30_000,
@@ -232,7 +271,7 @@ describe("StrategicOptionBuilder Stage 1", () => {
       legalActions: [hostileAttack(rival.playerID), hold()],
     });
 
-    expect(result.record.eligibleOptionIds).toContain(
+    expect(result.record.eligibleOptionIds).not.toContain(
       "pressure_rival:DISCONNECTED",
     );
     expect(exposedByFamily(result.exposed, "survive").evidence).toMatchObject({
@@ -651,7 +690,7 @@ describe("StrategicOptionBuilder Stage 1", () => {
     );
   });
 
-  it("keeps distinct pressure candidates when boat action ids collide", () => {
+  it("uses the validator-first action when boat action ids collide", () => {
     const rivals = [
       visiblePlayer("BOAT_A", { sharesBorder: false }),
       visiblePlayer("BOAT_B", { sharesBorder: false }),
@@ -673,10 +712,7 @@ describe("StrategicOptionBuilder Stage 1", () => {
           id: candidate.id,
           primary: candidate.binding.alignedPrimaryActionIDs,
         })),
-    ).toEqual([
-      { id: "pressure_rival:BOAT_A", primary: [collidingID] },
-      { id: "pressure_rival:BOAT_B", primary: [collidingID] },
-    ]);
+    ).toEqual([{ id: "pressure_rival:BOAT_A", primary: [collidingID] }]);
   });
 
   it("sanitizes opponent-controlled names with the shared prompt convention", () => {
@@ -892,6 +928,7 @@ function neutralBoat(id = "boat:900:10"): LegalAction {
     intent: { type: "boat", troops: 2_000, dst: 900 },
     risk: { level: "low", score: 0.1 },
     metadata: {
+      targetTile: 900,
       targetID: null,
       navalInvasion: false,
       expansion: true,
@@ -926,6 +963,7 @@ function hostileBoat(targetID: string, id = "boat:701:10"): LegalAction {
     intent: { type: "boat", troops: 2_000, dst: 701 },
     risk: { level: "medium", score: 0.4 },
     metadata: {
+      targetTile: 701,
       targetID,
       navalInvasion: true,
       expansion: false,

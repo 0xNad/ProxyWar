@@ -11,75 +11,50 @@ import {
   makeCommanderStage2Fixture,
   RAW_ATTACK_ACTION_ID,
   RAW_BUILD_ACTION_ID,
-  RAW_EXPANSION_ACTION_ID,
   type CommanderStage2Fixture,
 } from "./StrategicCommanderStage2TestHarness";
 
-/** Current P7 pressure binding after this test renames the offered attack. */
 const RENAMED_ATTACK_ACTION_ID = "raw-attack-P7-41-percent";
 
 class QueueProvider implements LlmProvider {
   readonly prompts: string[] = [];
-  private readonly responses: string[];
-
-  constructor(...responses: string[]) {
-    this.responses = responses;
-  }
+  constructor(private readonly responses: Array<string | Error>) {}
 
   async complete(prompt: string): Promise<string> {
     this.prompts.push(prompt);
-    const next =
+    const value =
       this.responses[
         Math.min(this.prompts.length - 1, this.responses.length - 1)
       ];
-    if (next === undefined) {
-      throw new Error("the provider was consulted without a scripted response");
-    }
-    return next;
+    if (value === undefined) throw new Error("unscripted provider call");
+    if (value instanceof Error) throw value;
+    return value;
   }
 }
 
-class ScriptedTacticalBrain implements AgentBrain {
+class TacticalProbe implements AgentBrain {
   readonly brainType = "rule";
-  readonly menus: LegalAction[][] = [];
-  readonly decisions: AgentDecision[] = [];
-
-  constructor(
-    private readonly script: (input: AgentBrainInput) => AgentDecision,
-  ) {}
-
+  readonly inputs: AgentBrainInput[] = [];
+  constructor(private readonly decision: AgentDecision) {}
   decide(input: AgentBrainInput): AgentDecision {
-    this.menus.push(input.legalActions);
-    const decision = this.script(input);
-    this.decisions.push(decision);
-    return decision;
+    this.inputs.push(input);
+    return this.decision;
   }
 }
 
-function commanderResponse(
+function response(
   selectedStrategicOptionId: string,
-  overrides: Record<string, unknown> = {},
+  horizonDecisions = 4,
 ): string {
   return JSON.stringify({
     selectedStrategicOptionId,
-    horizonDecisions: 4,
-    intent: "press the weakest border while the economy compounds",
+    horizonDecisions,
+    intent: "execute the selected strategic option",
     replanTriggers: [],
-    ...overrides,
   });
 }
 
-function firstOfferedTactical(): ScriptedTacticalBrain {
-  return new ScriptedTacticalBrain((input) => ({
-    actionID: input.legalActions[0]!.id,
-    reason: "tactical pick",
-  }));
-}
-
-function makeBrain(
-  provider: LlmProvider,
-  tactical: AgentBrain,
-): StrategicCommanderBrain {
+function makeBrain(provider: LlmProvider, tactical: AgentBrain) {
   return new StrategicCommanderBrain(
     new StrategicCommanderCaller(provider),
     tactical,
@@ -93,71 +68,84 @@ function brainInput(
   return { observation: fixture.observation, legalActions };
 }
 
-function nonStrategicMenu(): LegalAction[] {
+function holdOnlyMenu(): LegalAction[] {
   return [
     {
-      id: "raw-emoji-wave",
+      id: "hold",
+      kind: "hold",
+      label: "hold",
+      intent: null,
+      risk: { level: "none", score: 0 },
+    },
+    {
+      id: "emoji-wave",
       kind: "emoji",
-      label: "emoji: wave",
+      label: "wave",
       intent: null,
       risk: { level: "none", score: 0 },
     },
   ];
 }
 
-describe("StrategicCommanderBrain Stage 5 — plan installation and reuse", () => {
-  it("installs the initial plan and executes only the current aligned primary binding", async () => {
-    const provider = new QueueProvider(commanderResponse("pressure_rival:P7"));
-    const tactical = firstOfferedTactical();
+describe("StrategicCommanderBrain — active authority", () => {
+  it("executes a Commander plan without consulting the tactical brain", async () => {
+    const provider = new QueueProvider([response("pressure_rival:P7")]);
+    const tactical = new TacticalProbe({ actionID: "hold", reason: "escape" });
     const brain = makeBrain(provider, tactical);
-    const fixture = makeCommanderStage2Fixture();
-
-    const decision = await brain.decide(brainInput(fixture));
-
-    expect(brain.brainType).toBe("rule");
-    expect(provider.prompts).toHaveLength(1);
-    expect(provider.prompts[0]).toContain('"decisionSequence":0');
-    expect(tactical.menus).toHaveLength(1);
-    expect(tactical.menus[0]!.map((action) => action.id)).toEqual([
-      RAW_ATTACK_ACTION_ID,
-    ]);
-    expect(decision).toEqual({
-      actionID: RAW_ATTACK_ACTION_ID,
-      reason: "tactical pick",
-      metadata: {
-        commanderSelectedStrategicOptionId: "pressure_rival:P7",
-        commanderExecutionFallback: false,
-      },
-    });
-  });
-
-  it("returns a single primary action id and drops batch, deal, and message channels", async () => {
-    const provider = new QueueProvider(commanderResponse("pressure_rival:P7"));
-    const tactical = new ScriptedTacticalBrain(() => ({
-      actionID: RAW_ATTACK_ACTION_ID,
-      actionIDs: [RAW_ATTACK_ACTION_ID, RAW_BUILD_ACTION_ID],
-      dealActionID: "raw-deal-propose-P7",
-      messageActionID: "raw-message-P7",
-      messageText: "smuggled negotiation",
-      reason: "tactical pick with extra channels",
-    }));
-    const brain = makeBrain(provider, tactical);
-
     const decision = await brain.decide(
       brainInput(makeCommanderStage2Fixture()),
     );
 
+    expect(brain.brainType).toBe("strategic-commander");
+    expect(tactical.inputs).toHaveLength(0);
+    expect(provider.prompts).toHaveLength(1);
     expect(decision.actionID).toBe(RAW_ATTACK_ACTION_ID);
-    expect(decision.actionIDs).toBeUndefined();
-    expect(decision.spawnPreferenceActionIDs).toBeUndefined();
-    expect(decision.dealActionID).toBeUndefined();
-    expect(decision.messageActionID).toBeUndefined();
-    expect(decision.messageText).toBeUndefined();
+    expect(decision.metadata).toMatchObject({
+      runtimeMode: "commander-v0-selector",
+      commanderSelectedStrategicOptionId: "pressure_rival:P7",
+      commanderFidelity: "aligned_primary",
+      commanderSelectorSource: "llm",
+      commanderPlanAgeDecisions: 0,
+      commanderImmediateReplan: false,
+      planFollowed: true,
+      plannerFallbackUsed: false,
+    });
+    expect(decision.metadata?.planID).toEqual(expect.any(String));
   });
 
-  it("continues the installed plan without another provider call", async () => {
-    const provider = new QueueProvider(commanderResponse("pressure_rival:P7"));
-    const tactical = firstOfferedTactical();
+  it("emits a classified same-target support batch only on the first plan decision", async () => {
+    const fixture = makeCommanderStage2Fixture();
+    const support: LegalAction = {
+      id: "embargo-p7-start",
+      kind: "embargo",
+      label: "embargo P7",
+      intent: { type: "embargo", targetID: "P7", action: "start" },
+      risk: { level: "none", score: 0 },
+      metadata: { action: "start", targetID: "P7" },
+    };
+    fixture.legalActions.push(support);
+    const provider = new QueueProvider([response("pressure_rival:P7")]);
+    const tactical = new TacticalProbe({ actionID: "hold", reason: null });
+    const brain = makeBrain(provider, tactical);
+
+    const first = await brain.decide(brainInput(fixture));
+    const second = await brain.decide(brainInput(fixture));
+
+    expect(first.actionIDs).toEqual([RAW_ATTACK_ACTION_ID, support.id]);
+    expect(
+      JSON.parse(String(first.metadata?.commanderBatchFidelities)),
+    ).toEqual({
+      [RAW_ATTACK_ACTION_ID]: "aligned_primary",
+      [support.id]: "aligned_support",
+    });
+    expect(second.actionIDs).toBeUndefined();
+    expect(provider.prompts).toHaveLength(1);
+    expect(tactical.inputs).toHaveLength(0);
+  });
+
+  it("continues a durable plan and records age without another provider call", async () => {
+    const provider = new QueueProvider([response("pressure_rival:P7")]);
+    const tactical = new TacticalProbe({ actionID: "hold", reason: null });
     const brain = makeBrain(provider, tactical);
     const fixture = makeCommanderStage2Fixture();
 
@@ -165,198 +153,289 @@ describe("StrategicCommanderBrain Stage 5 — plan installation and reuse", () =
     const second = await brain.decide(brainInput(fixture));
 
     expect(provider.prompts).toHaveLength(1);
-    expect(first.actionID).toBe(RAW_ATTACK_ACTION_ID);
     expect(second.actionID).toBe(RAW_ATTACK_ACTION_ID);
-    expect(tactical.menus).toHaveLength(2);
-    expect(tactical.menus[1]!.map((action) => action.id)).toEqual([
-      RAW_ATTACK_ACTION_ID,
-    ]);
+    expect(second.metadata?.planID).toBe(first.metadata?.planID);
+    expect(second.metadata?.commanderPlanAgeDecisions).toBe(1);
+    expect(tactical.inputs).toHaveLength(0);
   });
 
-  it("consults the provider again at a real replan boundary and shows the expiring plan", async () => {
-    const provider = new QueueProvider(
-      commanderResponse("pressure_rival:P7"),
-      commanderResponse("develop_economy"),
+  it("retains truthful plan age when an outer failure interrupts a later replan", async () => {
+    let providerCalls = 0;
+    let resolveReplan: (value: string) => void = () => undefined;
+    const pendingReplan = new Promise<string>((resolve) => {
+      resolveReplan = resolve;
+    });
+    const provider: LlmProvider = {
+      complete: () => {
+        providerCalls += 1;
+        return providerCalls === 1
+          ? Promise.resolve(response("pressure_rival:P7", 2))
+          : pendingReplan;
+      },
+    };
+    const brain = makeBrain(
+      provider,
+      new TacticalProbe({ actionID: "hold", reason: null }),
     );
-    const tactical = firstOfferedTactical();
-    const brain = makeBrain(provider, tactical);
     const fixture = makeCommanderStage2Fixture();
+    const first = await brain.decide(brainInput(fixture));
+    await brain.decide(brainInput(fixture));
+    const interruptedCycle = brain.decide(brainInput(fixture));
+    await vi.waitFor(() => expect(providerCalls).toBe(2));
 
-    const decisions: AgentDecision[] = [];
-    for (let call = 0; call < 5; call++) {
-      decisions.push(await brain.decide(brainInput(fixture)));
-    }
+    const failed = brain.failClosed({
+      ...brainInput(fixture),
+      cause: "brain-timeout",
+      detail: "outer decision timeout",
+    });
+    expect(failed.metadata).toMatchObject({
+      planID: first.metadata?.planID,
+      commanderPlanAgeDecisions: 2,
+      commanderFidelity: "hold_plan_blocked",
+      commanderImmediateReplan: true,
+    });
+    expect(failed.metadata).not.toHaveProperty("externalPlannerCall");
+    expect(failed.metadata).not.toHaveProperty("plannerRan");
+    expect(failed.metadata).not.toHaveProperty("plannerLatencyMs");
+    expect(failed.metadata).not.toHaveProperty("plannerParseOk");
+    expect(failed.metadata).not.toHaveProperty("plannerParseFailureReason");
 
-    // horizonDecisions is 4: sequences 1-3 continue, sequence 4 expires.
-    expect(provider.prompts).toHaveLength(2);
-    expect(provider.prompts[1]).toContain('"decisionSequence":4');
-    expect(provider.prompts[1]).toContain(
-      '"selectedStrategicOptionId":"pressure_rival:P7"',
-    );
-    expect(decisions.slice(0, 4).map((decision) => decision.actionID)).toEqual(
-      Array.from({ length: 4 }, () => RAW_ATTACK_ACTION_ID),
-    );
-    expect(decisions[4]!.actionID).toBe(RAW_BUILD_ACTION_ID);
-    expect(decisions[4]!.metadata).toMatchObject({
-      commanderSelectedStrategicOptionId: "develop_economy",
-      commanderExecutionFallback: false,
+    resolveReplan(response("develop_economy", 2));
+    const invalidated = await interruptedCycle;
+    expect(invalidated.metadata).toMatchObject({
+      planID: first.metadata?.planID,
+      commanderPlanAgeDecisions: 2,
+      commanderFidelity: "hold_plan_blocked",
     });
   });
-});
 
-describe("StrategicCommanderBrain Stage 5 — identity reset", () => {
-  it.each([["gameID"], ["agentID"]] as const)(
-    "resets the plan and decision sequence when the %s changes",
-    async (field) => {
-      const provider = new QueueProvider(
-        commanderResponse("pressure_rival:P7"),
-      );
-      const brain = makeBrain(provider, firstOfferedTactical());
-
-      await brain.decide(brainInput(makeCommanderStage2Fixture()));
-      expect(provider.prompts).toHaveLength(1);
-
-      const other = makeCommanderStage2Fixture();
-      other.observation[field] = `COMMANDER_STAGE_5_OTHER_${field}`;
-      await brain.decide(brainInput(other));
-
-      // A fresh identity starts a fresh cycle: the sequence restarts at 0 and
-      // there is no continuing plan, so the provider is consulted again.
-      expect(provider.prompts).toHaveLength(2);
-      expect(provider.prompts[1]).toContain('"decisionSequence":0');
-
-      // The plan installed under the new identity then continues normally.
-      await brain.decide(brainInput(other));
-      expect(provider.prompts).toHaveLength(2);
-    },
-  );
-});
-
-describe("StrategicCommanderBrain Stage 5 — tactical delegation boundaries", () => {
-  it("delegates unchanged outside the active phase without consulting the Commander", async () => {
-    const provider = new QueueProvider();
-    const tacticalDecision: AgentDecision = {
-      actionID: "raw-spawn-tile-7",
-      spawnPreferenceActionIDs: ["raw-spawn-tile-7"],
-      reason: "spawn pick",
-    };
-    const tactical = new ScriptedTacticalBrain(() => tacticalDecision);
-    const brain = makeBrain(provider, tactical);
-    const fixture = makeCommanderStage2Fixture();
-    fixture.observation.phase = "spawn";
-    const input = brainInput(fixture);
-
-    const decision = await brain.decide(input);
-
-    expect(provider.prompts).toHaveLength(0);
-    expect(tactical.menus[0]).toBe(input.legalActions);
-    expect(decision).toBe(tacticalDecision);
-  });
-
-  it("delegates unchanged while dead and consumes no decision sequence", async () => {
-    const provider = new QueueProvider(commanderResponse("pressure_rival:P7"));
-    const tactical = firstOfferedTactical();
-    const brain = makeBrain(provider, tactical);
-
-    const dead = makeCommanderStage2Fixture();
-    dead.observation.ownState!.isAlive = false;
-    const deadInput = brainInput(dead);
-    const bypassed = await brain.decide(deadInput);
-
-    expect(provider.prompts).toHaveLength(0);
-    expect(tactical.menus[0]).toBe(deadInput.legalActions);
-    expect(bypassed).toBe(tactical.decisions[0]);
-
-    // The bypass never advanced the Commander: the first real cycle is 0.
-    await brain.decide(brainInput(makeCommanderStage2Fixture()));
-    expect(provider.prompts).toHaveLength(1);
-    expect(provider.prompts[0]).toContain('"decisionSequence":0');
-  });
-
-  it("delegates on the original menu when the Commander has no executable resolution", async () => {
-    const provider = new QueueProvider();
-    const tactical = firstOfferedTactical();
-    const brain = makeBrain(provider, tactical);
-    const fixture = makeCommanderStage2Fixture();
-    const input = brainInput(fixture, nonStrategicMenu());
-
-    const decision = await brain.decide(input);
-
-    expect(provider.prompts).toHaveLength(0);
-    expect(tactical.menus[0]).toBe(input.legalActions);
-    expect(decision).toBe(tactical.decisions[0]);
-    expect(decision.actionID).toBe("raw-emoji-wave");
-  });
-});
-
-describe("StrategicCommanderBrain Stage 5 — stale and off-binding tactical ids", () => {
-  it("replaces an off-binding tactical id with the lexicographically first aligned id", async () => {
-    const provider = new QueueProvider(commanderResponse("expand"));
-    const tactical = new ScriptedTacticalBrain(() => ({
-      actionID: "hold",
-      reason: "off-binding tactical pick",
-    }));
-    const brain = makeBrain(provider, tactical);
-    const fixture = makeCommanderStage2Fixture();
-    const secondExpansion: LegalAction = {
-      ...fixture.legalActions.find(
-        (action) => action.id === RAW_EXPANSION_ACTION_ID,
-      )!,
-      id: "raw-expand-tile-100",
-    };
-
-    const decision = await brain.decide(
-      brainInput(fixture, [...fixture.legalActions, secondExpansion]),
-    );
-
-    expect(tactical.menus[0]!.map((action) => action.id)).toEqual([
-      RAW_EXPANSION_ACTION_ID,
-      "raw-expand-tile-100",
+  it("replans after canonical execution rejects the issued primary", async () => {
+    const provider = new QueueProvider([
+      response("pressure_rival:P7"),
+      response("develop_economy"),
     ]);
-    expect(decision).toEqual({
-      actionID: "raw-expand-tile-100",
-      reason: null,
-      metadata: {
-        commanderSelectedStrategicOptionId: "expand",
-        commanderExecutionFallback: true,
-        commanderRejectedTacticalActionID: "hold",
+    const brain = makeBrain(
+      provider,
+      new TacticalProbe({ actionID: "hold", reason: null }),
+    );
+    const fixture = makeCommanderStage2Fixture();
+    const first = await brain.decide(brainInput(fixture));
+
+    brain.onActionResult({
+      decision: first,
+      requestedActionID: first.actionID,
+      result: {
+        accepted: false,
+        reason: "core rejected the offered primary",
+        submittedIntent: null,
       },
     });
+    const second = await brain.decide(brainInput(fixture));
+
+    expect(provider.prompts).toHaveLength(2);
+    expect(second.actionID).toBe(RAW_BUILD_ACTION_ID);
+    expect(second.metadata).toMatchObject({
+      commanderReplanReason: "option_not_executable",
+      commanderPreviousPlanID: first.metadata?.planID,
+      commanderSelectedStrategicOptionId: "develop_economy",
+    });
   });
 
-  it("rejects a stale tactical id from a previous decision's menu", async () => {
-    const provider = new QueueProvider(commanderResponse("pressure_rival:P7"));
-    const tactical = new ScriptedTacticalBrain(() => ({
-      actionID: RAW_ATTACK_ACTION_ID,
-      reason: "tactical pick",
-    }));
-    const brain = makeBrain(provider, tactical);
+  it("replans without attacking when the selected rival disconnects", async () => {
+    const provider = new QueueProvider([
+      response("pressure_rival:P7"),
+      response("develop_economy"),
+    ]);
+    const brain = makeBrain(
+      provider,
+      new TacticalProbe({ actionID: "hold", reason: null }),
+    );
+    const fixture = makeCommanderStage2Fixture();
+    const first = await brain.decide(brainInput(fixture));
+    fixture.observation.visiblePlayers.find(
+      (player) => player.playerID === "P7",
+    )!.isDisconnected = true;
+
+    const second = await brain.decide(brainInput(fixture));
+
+    expect(provider.prompts).toHaveLength(2);
+    expect(second.actionID).toBe(RAW_BUILD_ACTION_ID);
+    expect(second.actionID).not.toBe(RAW_ATTACK_ACTION_ID);
+    expect(second.metadata).toMatchObject({
+      commanderReplanReason: "option_not_executable",
+      commanderPreviousPlanID: first.metadata?.planID,
+    });
+  });
+
+  it("replans at horizon expiry and records the replaced plan", async () => {
+    const provider = new QueueProvider([
+      response("pressure_rival:P7", 2),
+      response("develop_economy", 2),
+    ]);
+    const brain = makeBrain(
+      provider,
+      new TacticalProbe({ actionID: "hold", reason: null }),
+    );
     const fixture = makeCommanderStage2Fixture();
 
     const first = await brain.decide(brainInput(fixture));
-    expect(first.actionID).toBe(RAW_ATTACK_ACTION_ID);
+    await brain.decide(brainInput(fixture));
+    const third = await brain.decide(brainInput(fixture));
 
-    // Decision-scoped ids rotate: the same P7 pressure option now binds a
-    // differently named attack, and the plan continues without a provider call.
-    const renamedMenu = fixture.legalActions.map((action) =>
+    expect(provider.prompts).toHaveLength(2);
+    expect(third.actionID).toBe(RAW_BUILD_ACTION_ID);
+    expect(third.metadata).toMatchObject({
+      commanderSelectedStrategicOptionId: "develop_economy",
+      commanderReplanReason: "horizon_expiry",
+      commanderPreviousPlanID: first.metadata?.planID,
+    });
+  });
+
+  it("uses only the current decision's rotated action IDs", async () => {
+    const provider = new QueueProvider([response("pressure_rival:P7")]);
+    const tactical = new TacticalProbe({
+      actionID: RAW_ATTACK_ACTION_ID,
+      reason: "stale tactical output",
+    });
+    const brain = makeBrain(provider, tactical);
+    const fixture = makeCommanderStage2Fixture();
+    await brain.decide(brainInput(fixture));
+
+    const rotated = fixture.legalActions.map((action) =>
       action.id === RAW_ATTACK_ACTION_ID
         ? { ...action, id: RENAMED_ATTACK_ACTION_ID }
         : action,
     );
-    const second = await brain.decide(brainInput(fixture, renamedMenu));
+    const second = await brain.decide(brainInput(fixture, rotated));
+
+    expect(second.actionID).toBe(RENAMED_ATTACK_ACTION_ID);
+    expect(provider.prompts).toHaveLength(1);
+    expect(tactical.inputs).toHaveLength(0);
+  });
+
+  it("keeps active hold-only play Commander-owned rather than escaping tactically", async () => {
+    const provider = new QueueProvider([response("expand")]);
+    const tactical = new TacticalProbe({
+      actionID: "emoji-wave",
+      reason: "off-plan escape",
+    });
+    const brain = makeBrain(provider, tactical);
+    const fixture = makeCommanderStage2Fixture();
+
+    const blocked = await brain.decide(brainInput(fixture, holdOnlyMenu()));
 
     expect(provider.prompts).toHaveLength(1);
-    expect(tactical.menus[1]!.map((action) => action.id)).toEqual([
-      RENAMED_ATTACK_ACTION_ID,
-    ]);
-    expect(second).toEqual({
-      actionID: RENAMED_ATTACK_ACTION_ID,
-      reason: null,
+    expect(tactical.inputs).toHaveLength(0);
+    expect(blocked).toMatchObject({
+      actionID: "hold",
       metadata: {
-        commanderSelectedStrategicOptionId: "pressure_rival:P7",
-        commanderExecutionFallback: true,
-        commanderRejectedTacticalActionID: RAW_ATTACK_ACTION_ID,
+        commanderFidelity: "aligned_primary",
+        commanderImmediateReplan: false,
+        commanderBlockedReason: null,
+        planFollowed: true,
+        commanderSelectorSource: "fallback-deterministic",
       },
     });
   });
+
+  it("marks provider failure as a fallback-authored plan without tactical escape", async () => {
+    const provider = new QueueProvider([new Error("provider unavailable")]);
+    const tactical = new TacticalProbe({
+      actionID: RAW_ATTACK_ACTION_ID,
+      reason: "should not run",
+    });
+    const brain = makeBrain(provider, tactical);
+    const decision = await brain.decide(
+      brainInput(makeCommanderStage2Fixture()),
+    );
+
+    expect(tactical.inputs).toHaveLength(0);
+    expect(decision.metadata).toMatchObject({
+      commanderSelectorSource: "fallback-deterministic",
+      plannerFallbackUsed: true,
+      llmPlannerDegraded: true,
+      degradedCause: "policy-error",
+      plannerParseFailureReason: "provider unavailable",
+    });
+    expect(
+      decision.metadata?.commanderSelectedStrategicOptionId,
+    ).toBeUndefined();
+    expect(
+      decision.metadata?.commanderFallbackSelectedStrategicOptionId,
+    ).toEqual(expect.any(String));
+  });
+
+  it("retains a timeout-authored plan's degradation origin while it continues", async () => {
+    const never = new Promise<string>(() => undefined);
+    const provider: LlmProvider = { complete: () => never };
+    const brain = new StrategicCommanderBrain(
+      new StrategicCommanderCaller(provider, 2),
+      new TacticalProbe({ actionID: "hold", reason: null }),
+    );
+    const fixture = makeCommanderStage2Fixture();
+
+    const first = await brain.decide(brainInput(fixture));
+    const second = await brain.decide(brainInput(fixture));
+
+    expect(first.metadata).toMatchObject({
+      degradedCause: "plan-timeout",
+      plannerFallbackUsed: true,
+    });
+    expect(second.metadata).toMatchObject({
+      planID: first.metadata?.planID,
+      degradedCause: "plan-timeout",
+      plannerFallbackUsed: true,
+    });
+  });
+});
+
+describe("StrategicCommanderBrain — phase and identity boundaries", () => {
+  it("delegates spawn unchanged and consumes no Commander sequence", async () => {
+    const provider = new QueueProvider([response("expand")]);
+    const spawnDecision: AgentDecision = {
+      actionID: "spawn-7",
+      spawnPreferenceActionIDs: ["spawn-7"],
+      reason: "spawn",
+    };
+    const tactical = new TacticalProbe(spawnDecision);
+    const brain = makeBrain(provider, tactical);
+    const fixture = makeCommanderStage2Fixture();
+    fixture.observation.phase = "spawn";
+
+    expect(await brain.decide(brainInput(fixture))).toBe(spawnDecision);
+    fixture.observation.phase = "active";
+    await brain.decide(brainInput(fixture));
+    expect(provider.prompts[0]).toContain('"decisionSequence":0');
+  });
+
+  it("delegates dead play unchanged", async () => {
+    const provider = new QueueProvider([response("expand")]);
+    const deadDecision: AgentDecision = { actionID: "hold", reason: "dead" };
+    const tactical = new TacticalProbe(deadDecision);
+    const brain = makeBrain(provider, tactical);
+    const fixture = makeCommanderStage2Fixture();
+    fixture.observation.ownState!.isAlive = false;
+
+    expect(await brain.decide(brainInput(fixture))).toBe(deadDecision);
+    expect(provider.prompts).toHaveLength(0);
+  });
+
+  it.each(["gameID", "agentID"] as const)(
+    "resets the plan and sequence when %s changes",
+    async (field) => {
+      const provider = new QueueProvider([response("expand")]);
+      const brain = makeBrain(
+        provider,
+        new TacticalProbe({ actionID: "hold", reason: null }),
+      );
+      const first = makeCommanderStage2Fixture();
+      await brain.decide(brainInput(first));
+      const second = makeCommanderStage2Fixture();
+      second.observation[field] = `OTHER_${field}`;
+      await brain.decide(brainInput(second));
+
+      expect(provider.prompts).toHaveLength(2);
+      expect(provider.prompts[1]).toContain('"decisionSequence":0');
+    },
+  );
 });

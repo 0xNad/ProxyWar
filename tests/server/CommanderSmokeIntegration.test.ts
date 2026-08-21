@@ -33,8 +33,8 @@ import type { CommanderState } from "../../src/server/agents/StrategicCommanderT
 
 // Stage 6 end to end: the real step-locked runAgentLeagueSmoke path, from the
 // sealed spawn ballot through genuine active-play decision steps, with the
-// opt-in --brain=strategic-commander mode wrapping the RuleAgentBrain tactical
-// policy. The injected Commander provider is the bounded test seam — no network
+// opt-in --brain=strategic-commander mode using the binding-first executor for
+// active play. The injected Commander provider is the bounded test seam — no network
 // credentials or live model are consulted anywhere in this suite.
 
 const STEP_LOCKED_ARGS = [
@@ -137,8 +137,7 @@ describe("StrategicCommander Stage 6 — step-locked smoke integration", () => {
     );
 
     expect(smoke.executionConfig.brainMode).toBe("strategic-commander");
-    // The adapter reports its wrapped RuleAgentBrain tactical policy.
-    expect(smoke.artifactInput.brainMode).toBe("rule");
+    expect(smoke.artifactInput.brainMode).toBe("strategic-commander");
 
     // Active play consulted the Commander through the real cycle.
     expect(provider.promptStates.length).toBeGreaterThan(0);
@@ -158,9 +157,7 @@ describe("StrategicCommander Stage 6 — step-locked smoke integration", () => {
       expect(
         record.decisionMetadata?.commanderSelectedStrategicOptionId,
       ).toBeUndefined();
-      expect(
-        record.decisionMetadata?.commanderExecutionFallback,
-      ).toBeUndefined();
+      expect(record.decisionMetadata?.commanderFidelity).toBeUndefined();
     }
 
     // Executable plans stamped bounded scalar metadata onto real primary
@@ -176,11 +173,27 @@ describe("StrategicCommander Stage 6 — step-locked smoke integration", () => {
         MAX_COMMANDER_OPTION_ID_LENGTH,
       );
       expect(provider.selectedOptionIds).toContain(selected);
-      expect(typeof record.decisionMetadata?.commanderExecutionFallback).toBe(
-        "boolean",
+      expect(record.decisionMetadata?.commanderFidelity).toMatch(
+        /^aligned_(primary|support)$/,
       );
       expect(record.chosenActionKind).not.toBe("spawn");
       expect(record.legalActionIDs).toContain(record.chosenActionID);
+    }
+
+    // runAgentLeagueSmoke has already passed auditDecisionEffects after the
+    // next delivered core turn. Require at least one non-hold primary that the
+    // validator, AgentRunner, and GameServer actually accepted with a submitted
+    // canonical intent; offered-id evidence alone would be vacuous.
+    const acceptedPrimaries = stamped.filter(
+      (record) =>
+        record.decisionMetadata?.commanderFidelity === "aligned_primary" &&
+        record.chosenActionKind !== "hold" &&
+        record.result.accepted &&
+        record.result.submittedIntent !== null,
+    );
+    expect(acceptedPrimaries.length).toBeGreaterThan(0);
+    for (const record of acceptedPrimaries) {
+      expect(record.result.submittedIntent).toEqual(record.intent);
     }
   }, 600_000);
 

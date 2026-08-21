@@ -79,6 +79,10 @@ import {
   SpawnCandidate,
 } from "./LegalActionBuilder";
 import { RuleAgentBrain } from "./RuleAgentBrain";
+import {
+  commanderFidelityClasses,
+  type CommanderFidelityClass,
+} from "./StrategicOptionExecutor";
 
 export { buildAttackScenarioSpawnPlan } from "./AgentAttackScenario";
 export { agentStrategyProfiles, buildSpawnCandidates };
@@ -448,6 +452,10 @@ export class AgentLeagueMatchRunner {
           this.observationBuilder.summarize(observation);
         // Dispatch only after this seat's complete observation and menu exist.
         // The batch remains synchronous even though its result carries Promises.
+        assertInnerDecisionTimeoutBelowOuter(
+          participant.brain,
+          options.maxDecisionMs,
+        );
         const decisionPromise = dispatchBrainDecision({
           brain: participant.brain,
           observation,
@@ -519,6 +527,8 @@ export class AgentLeagueMatchRunner {
       rejectedActionIDs: string[];
       validationFallbackUsed: boolean;
       actionSlotPlayedDeal: boolean;
+      commanderPrimaryID: string | null;
+      commanderPrimaryAccepted: boolean | null;
     }
 
     const validateParticipantBatch = (
@@ -561,6 +571,30 @@ export class AgentLeagueMatchRunner {
         } else {
           rejectedActionIDs.push(actionID);
         }
+      }
+
+      const commanderFidelities = commanderBatchFidelities(decision.metadata);
+      const commanderPrimary =
+        typeof decision.actionID === "string" &&
+        commanderFidelities.get(decision.actionID) === "aligned_primary"
+          ? decision.actionID
+          : null;
+      if (
+        commanderPrimary !== null &&
+        !selectedActions.some(
+          (entry) => entry.requestedActionID === commanderPrimary,
+        )
+      ) {
+        // A support action has no independent authority. If the plan primary
+        // failed exact-id validation, discard every otherwise-valid support
+        // layer and route the whole Commander decision through the existing
+        // validator hold fallback.
+        for (const entry of selectedActions) {
+          if (!rejectedActionIDs.includes(entry.requestedActionID)) {
+            rejectedActionIDs.push(entry.requestedActionID);
+          }
+        }
+        selectedActions.length = 0;
       }
 
       let validationFallbackUsed = false;
@@ -606,6 +640,8 @@ export class AgentLeagueMatchRunner {
         rejectedActionIDs,
         validationFallbackUsed,
         actionSlotPlayedDeal,
+        commanderPrimaryID: commanderPrimary,
+        commanderPrimaryAccepted: null,
       };
     };
 
@@ -629,6 +665,7 @@ export class AgentLeagueMatchRunner {
         actionID: selected.requestedActionID,
         metadata: batchDecisionMetadata({
           metadata: decision.metadata,
+          requestedActionID: selected.requestedActionID,
           batchIndex,
           batchSize: submission.selected.length,
           requestedActionIDs,
@@ -645,8 +682,15 @@ export class AgentLeagueMatchRunner {
       // earlier, so the gate is skipped and scalar play is untouched. A gated
       // entry records accepted:false with the conflict named and reserves
       // nothing (a phantom reservation would poison later layers).
-      let staleReason: string | null = null;
-      if (batchIndex > 0 && selected.action !== null) {
+      const selectedCommanderFidelity = commanderBatchFidelities(
+        decision.metadata,
+      ).get(selected.requestedActionID);
+      let staleReason: string | null =
+        selectedCommanderFidelity === "aligned_support" &&
+        submission.commanderPrimaryAccepted !== true
+          ? `commander support blocked: primary ${submission.commanderPrimaryID ?? "unknown"} was not accepted`
+          : null;
+      if (staleReason === null && batchIndex > 0 && selected.action !== null) {
         const action = selected.action;
         if (
           this.filterSameTurnDiplomacyActions(
@@ -706,6 +750,9 @@ export class AgentLeagueMatchRunner {
                   reason: "no legal fallback action available",
                   submittedIntent: null,
                 };
+      if (selected.requestedActionID === submission.commanderPrimaryID) {
+        submission.commanderPrimaryAccepted = result.accepted;
+      }
       // Diplomacy slot: the OPTIONAL second selection, applied exactly once
       // per decision (at batch index 0, i.e. at this agent's layer-0 slot in
       // the round-robin — before any participant's layer-1 action) so the
@@ -737,7 +784,15 @@ export class AgentLeagueMatchRunner {
         this.dealManager?.takePendingComplianceStamp(
           participant.runner.agentID,
         ) ?? null;
+      const commanderResultMetadata = commanderPostResultMetadata({
+        fidelity: selectedCommanderFidelity,
+        accepted: result.accepted,
+        supportBlocked:
+          selectedCommanderFidelity === "aligned_support" &&
+          staleReason?.startsWith("commander support blocked:") === true,
+      });
       const dealMetadata: AgentDecision["metadata"] = {
+        ...commanderResultMetadata,
         ...(dealOutcome?.stamps ?? {}),
         ...(dealSlotApplication?.stamps ?? {}),
         ...(commsSlotStamps ?? {}),
@@ -765,6 +820,27 @@ export class AgentLeagueMatchRunner {
         result,
         dealSlotEvidence: dealSlotApplication?.evidence,
       });
+      if (
+        validationFallbackUsed &&
+        batchIndex === 0 &&
+        submission.commanderPrimaryID !== null
+      ) {
+        participant.brain.onActionResult?.({
+          decision,
+          requestedActionID: submission.commanderPrimaryID,
+          result: {
+            accepted: false,
+            reason: "Commander primary rejected by exact-id validation",
+            submittedIntent: null,
+          },
+        });
+      } else if (selected.requestedActionID === submission.commanderPrimaryID) {
+        participant.brain.onActionResult?.({
+          decision,
+          requestedActionID: selected.requestedActionID,
+          result,
+        });
+      }
 
       // A gated action never executed — reserving it would poison later
       // layers with phantom reservations. Engine-rejected submissions still
@@ -1914,7 +1990,24 @@ const LLM_DEGRADABLE_BRAIN_TYPES = new Set<string>([
   "codex-cli",
   "claude-cli",
   "llm",
+  "strategic-commander",
 ]);
+
+function assertInnerDecisionTimeoutBelowOuter(
+  brain: AgentBrain,
+  outerTimeoutMs: number | undefined,
+): void {
+  const innerTimeoutMs = brain.internalDecisionTimeoutMs;
+  if (
+    outerTimeoutMs !== undefined &&
+    innerTimeoutMs !== undefined &&
+    innerTimeoutMs >= outerTimeoutMs
+  ) {
+    throw new Error(
+      `Agent brain ${brain.brainType ?? "unknown"} internal timeout ${innerTimeoutMs}ms must be below outer timeout ${outerTimeoutMs}ms`,
+    );
+  }
+}
 
 class AgentSpawnBallotTimeoutError extends Error {}
 
@@ -2109,12 +2202,18 @@ async function decideWithSafetyFallback(input: {
     // timeout marker, so this distinguishes "never answered" from "answered with
     // an exception" without parsing arbitrary provider text.
     const isDecisionTimeout = error instanceof AgentDecisionTimeoutError;
-    const fallbackDecision = await new RuleAgentBrain(
-      input.fallbackProfile,
-    ).decide({
-      observation: input.observation,
-      legalActions: input.legalActions,
-    });
+    const failureCause = isDecisionTimeout ? "brain-timeout" : "brain-error";
+    const fallbackDecision = input.brain.failClosed
+      ? await input.brain.failClosed({
+          observation: input.observation,
+          legalActions: input.legalActions,
+          cause: failureCause,
+          detail: reason,
+        })
+      : await new RuleAgentBrain(input.fallbackProfile).decide({
+          observation: input.observation,
+          legalActions: input.legalActions,
+        });
     // 2026-08-01 P0 fix (see LlmAgentBrain.ts's fallback() for the original
     // incident): this used to fold the brain-error text into `reason` —
     // `"Agent brain failed (${reason}); fallback: ${fallbackDecision.reason}"`
@@ -2138,7 +2237,7 @@ async function decideWithSafetyFallback(input: {
         // the server failed to hear from it. Note league seats are `external-http`,
         // which LLM_DEGRADABLE_BRAIN_TYPES deliberately excludes, so for them this
         // attributes a FALLBACK rather than a `degraded_count` entry.
-        degradedCause: isDecisionTimeout ? "brain-timeout" : "brain-error",
+        degradedCause: failureCause,
         fallbackUsed: true,
         // An LLM-backed brain that THREW degraded the LLM specifically — flag it
         // so auditors keyed on llmPlannerDegraded (Coworld result contract, the
@@ -2325,6 +2424,7 @@ function stringOrNull(value: unknown): string | null {
 
 function batchDecisionMetadata(input: {
   metadata: AgentDecision["metadata"];
+  requestedActionID: string;
   batchIndex: number;
   batchSize: number;
   requestedActionIDs: string[];
@@ -2339,6 +2439,13 @@ function batchDecisionMetadata(input: {
     batchActionIDs: input.requestedActionIDs.join(","),
     batchRejectedActionIDs: input.rejectedActionIDs.join(","),
   };
+
+  const commanderFidelity = commanderBatchFidelities(input.metadata).get(
+    input.requestedActionID,
+  );
+  if (commanderFidelity !== undefined) {
+    metadata.commanderFidelity = commanderFidelity;
+  }
 
   // Stamped ONLY when the wire cap actually cut ids, so every pre-cap record
   // stays byte-identical. Honest-drop discipline: the record must show what
@@ -2356,12 +2463,24 @@ function batchDecisionMetadata(input: {
     // Coworld result contract never read an unusable policy as a healthy hold.
     metadata.fallbackUsed = true;
     metadata.validationFallbackUsed = true;
+    if (commanderFidelity !== undefined) {
+      metadata.commanderFidelity = "hold_plan_blocked";
+      metadata.commanderBlockedReason = "validator_fallback";
+      metadata.commanderImmediateReplan = true;
+      metadata.planFollowed = false;
+    }
   }
 
   if (input.batchIndex > 0) {
     metadata.plannerRan = false;
     metadata.plannerLatencyMs = 0;
-    metadata.plannerFallbackUsed = false;
+    // A fallback-authored Commander PLAN remains fallback-authored for every
+    // action executed under it. Later batch layers did not make another
+    // planner call, but clearing this marker would corrupt plan-level
+    // provenance and let support actions leak into LLM-authored metrics.
+    metadata.plannerFallbackUsed =
+      metadata.commanderSelectorSource === "fallback-deterministic" &&
+      metadata.plannerFallbackUsed === true;
     metadata.plannerPromptLength = 0;
     metadata.externalPlannerCall = false;
     metadata.rawProviderOutputPresent = false;
@@ -2370,6 +2489,60 @@ function batchDecisionMetadata(input: {
     }
   }
   return metadata;
+}
+
+function commanderPostResultMetadata(input: {
+  fidelity: CommanderFidelityClass | undefined;
+  accepted: boolean;
+  supportBlocked: boolean;
+}): AgentDecision["metadata"] {
+  if (input.fidelity === undefined || input.accepted) return {};
+  const immediateReplan =
+    input.fidelity === "aligned_primary" || input.supportBlocked;
+  return {
+    planFollowed: false,
+    commanderImmediateReplan: immediateReplan,
+    commanderBlockedReason: input.supportBlocked
+      ? "support_blocked"
+      : "engine_rejected",
+  };
+}
+
+function commanderBatchFidelities(
+  metadata: AgentDecision["metadata"],
+): ReadonlyMap<string, CommanderFidelityClass> {
+  const raw = metadata?.commanderBatchFidelities;
+  if (typeof raw !== "string" || raw.length === 0 || raw.length > 4_096) {
+    return new Map();
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      parsed === null ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed)
+    ) {
+      return new Map();
+    }
+    const entries = Object.entries(parsed);
+    if (
+      entries.length === 0 ||
+      entries.length > 5 ||
+      entries.some(
+        ([actionID, fidelity]) =>
+          actionID.length === 0 ||
+          typeof fidelity !== "string" ||
+          !commanderFidelityClasses.includes(
+            fidelity as CommanderFidelityClass,
+          ),
+      )
+    ) {
+      return new Map();
+    }
+    return new Map(entries as Array<[string, CommanderFidelityClass]>);
+  } catch {
+    return new Map();
+  }
 }
 
 function actionFromValidation(

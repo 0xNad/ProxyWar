@@ -1630,11 +1630,14 @@ function createBrainForMode(
         "strategic-commander smoke requested but no Commander provider was configured.",
       );
     }
-    // Stage 6 opt-in smoke wiring only: the accepted Stage 5 adapter wraps the
-    // deterministic RuleAgentBrain tactical policy. Primary decisions only —
-    // no support batches, deal slots, or message slots ride this mode.
+    // The tactical brain owns spawn/non-active phases only. Active play is
+    // executed binding-first by StrategicOptionExecutor, including its narrow
+    // same-target support batch; it never escapes to RuleAgentBrain.
     return new StrategicCommanderBrain(
-      new StrategicCommanderCaller(provider),
+      new StrategicCommanderCaller(
+        provider,
+        commanderProviderTimeoutBelowOuter(providerTimeoutMs),
+      ),
       new RuleAgentBrain(spec.profile),
     );
   }
@@ -1786,6 +1789,18 @@ function createBrainForMode(
   throw new Error(`Unsupported brain mode: ${brainMode}`);
 }
 
+function commanderProviderTimeoutBelowOuter(
+  outerTimeoutMs: number | undefined,
+): number | undefined {
+  if (outerTimeoutMs === undefined) return undefined;
+  if (!Number.isSafeInteger(outerTimeoutMs) || outerTimeoutMs <= 1) {
+    throw new Error(
+      "Strategic Commander requires an outer decision timeout above 1ms",
+    );
+  }
+  return Math.min(12_000, outerTimeoutMs - 1);
+}
+
 function assertAttackSmokeSucceeded(
   records: Awaited<ReturnType<AgentLeagueMatchRunner["runDecisionTurn"]>>,
   gameState: Game,
@@ -1896,9 +1911,7 @@ function artifactBrainMode(brainMode: SmokeBrainMode): AgentBrainType {
     return "rule";
   }
   if (brainMode === "strategic-commander") {
-    // StrategicCommanderBrain reports its wrapped tactical brain's type, and
-    // this mode always wraps RuleAgentBrain.
-    return "rule";
+    return "strategic-commander";
   }
   return brainMode === "planner" ||
     brainMode === "planner-codex-cli" ||
@@ -2040,9 +2053,8 @@ function assertRequiredExternalBrainSucceeded(input: {
           ? "codex-cli"
           : // starter-bot is a deterministic rule policy (no external calls) — same
             // cleanliness class as "rule".
-            // strategic-commander decisions are RuleAgentBrain decisions; a
-            // Commander provider failure is absorbed by the plan lifecycle's
-            // own fallback, not by the decision-record cleanliness surface.
+            // Commander provider failures are absorbed by an attributable
+            // same-option-set fallback plan and certified separately below.
             input.brainMode === "starter-bot" ||
               input.brainMode === "strategic-commander"
             ? "rule"
@@ -2092,8 +2104,8 @@ function assertRequiredExternalBrainSucceeded(input: {
 /**
  * Stage 7 certification: a strategic-commander smoke must carry positive
  * evidence that the Commander actually commanded. A provider failure during
- * the match is still absorbed by the plan lifecycle (the tactical
- * RuleAgentBrain keeps playing), but a run where NO decision carries
+ * the match is still absorbed by the plan lifecycle's deterministic option
+ * fallback, but a run where NO decision carries
  * commanderSelectedStrategicOptionId ran entirely on that fallback and must
  * never certify as Commander play.
  */
@@ -2114,7 +2126,7 @@ function assertCommanderSmokeSelectedStrategicOption(input: {
   throw new Error(
     "strategic-commander smoke failed certification: no decision carries " +
       "commanderSelectedStrategicOptionId, so no Commander-authored plan was " +
-      "ever executed and the whole match ran on the tactical/fallback policy. " +
+      "ever executed and the whole match ran on fallback-authored plans. " +
       "Refusing to present a fallback-only run as Commander play.",
   );
 }
