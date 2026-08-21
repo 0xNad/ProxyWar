@@ -88,12 +88,6 @@ describe("AgentStatsArtifact", () => {
 
   it("rejects malformed nested metrics instead of exposing invalid data", async () => {
     const career = validSlice();
-    career.fingerprint.aggression = {
-      value: 0.5,
-      sampleSize: 50,
-      threshold: 50,
-      methodology: "event ratio",
-    };
     const malformed = {
       schemaVersion: 1,
       generatedAt: "2026-08-21T17:00:00.000Z",
@@ -119,7 +113,9 @@ describe("AgentStatsArtifact", () => {
   });
 
   it("degrades missing and malformed JSON files to null", async () => {
-    expect(await readAgentStatsArtifact("/definitely/missing/agent-stats.json")).toBeNull();
+    expect(
+      await readAgentStatsArtifact("/definitely/missing/agent-stats.json"),
+    ).toBeNull();
 
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-stats-artifact-"));
     const filePath = path.join(root, "agent-stats.json");
