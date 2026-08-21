@@ -1,15 +1,25 @@
 import { createHash } from "node:crypto";
+import { UnitType } from "../../core/game/Game";
 import type { Winner } from "../../core/Schemas";
 import type {
   AgentRunFinalState,
   AgentRunRosterEntry,
 } from "./AgentDecisionLogWriter";
-import type { AgentDecisionRecord } from "./AgentTypes";
+import type {
+  AgentActionAuditSnapshot,
+  AgentDecisionRecord,
+} from "./AgentTypes";
 import {
   commanderGameIDFromSeed,
   parseCommanderCanonicalGameConfig,
   type CommanderCanonicalGameConfig,
 } from "./CommanderExperimentIdentity";
+import {
+  COMMANDER_BLOCKED_CYCLE_THRESHOLD,
+  COMMANDER_OPTION_NOT_EXECUTABLE_DOMINANCE_THRESHOLD,
+  summarizeCommanderFidelity,
+  type CommanderFidelitySummary,
+} from "./StrategicOptionFidelity";
 
 export const COMMANDER_EXPERIMENT_SCHEMA_VERSION = 3;
 export const COMMANDER_FIDELITY_THRESHOLD = 0.95;
@@ -17,6 +27,7 @@ export const COMMANDER_PREFERRED_ABSENCE_THRESHOLD = 0.05;
 export const MIN_COMMANDER_PERFORMANCE_TRIPLETS = 2;
 export const MAX_COMMANDER_EXPOSED_OPTIONS = 8;
 export const MAX_COMMANDER_EXPOSED_PRESSURE_OPTIONS = 2;
+export const COMMANDER_DELAYED_EFFECT_AUDIT_BOUND_CYCLES = 2;
 
 export interface CommanderComponentHashes {
   sharedArchitecture: string;
@@ -160,6 +171,24 @@ export interface CommanderArmMetrics {
     emergency: number;
     blocked: number;
   };
+  blockedDecisionCycles: {
+    count: number;
+    opportunities: number;
+    rate: number | null;
+  };
+  supportActionCount: number;
+  offFamilyActionViolations: number;
+  laterLayerActionViolations: number;
+  zeroPrimaryDecisionCycles: number;
+  planIdentityViolations: number;
+  batchPositionViolations: number;
+  fidelityStampViolations: number;
+  optionNotExecutableReplans: {
+    count: number;
+    opportunities: number;
+    rate: number | null;
+    dominates: boolean;
+  };
   plansWithZeroAlignedActions: number;
   silentlyAbandonedPlans: number;
   planTransitions: {
@@ -191,11 +220,23 @@ export interface CommanderArmMetrics {
     autopilotDecisionCycles: number;
   };
   canonicalPathViolations: number;
+  effectAudit: {
+    immediateViolations: number;
+    delayedConfirmed: number;
+    delayedPending: number;
+    delayedExpired: number;
+    delayedFailed: number;
+  };
 }
 
 export interface CommanderArmTripletReport {
   tripletID: string;
   integrity: { valid: boolean; invalidationReasons: string[] };
+  terminalPerformanceEligibility: {
+    estimand: "per-protocol";
+    eligible: boolean;
+    ineligibilityReasons: string[];
+  };
   localSmoke: boolean;
   arms: Record<
     CommanderExperimentArm,
@@ -275,6 +316,9 @@ export interface CommanderArmReport {
   tripletCount: number;
   triplets: CommanderArmTripletReport[];
   aggregate: {
+    estimand: "per-protocol";
+    includedTripletIDs: string[];
+    excludedTripletIDs: string[];
     arms: Record<CommanderExperimentArm, CommanderAggregateArmMetrics>;
     comparisons: {
       A_vs_B: CommanderPairwiseComparison;
@@ -313,10 +357,17 @@ export function buildCommanderArmReport(
   const valid = invalidationReasons.length === 0;
   const performanceReasons = performanceIneligibilityReasons(runs, triplets);
   const performanceClaimsAllowed = valid && performanceReasons.length === 0;
+  const perProtocolTriplets = triplets.filter(isPerProtocolTripletEligible);
   const aggregateArms = {
-    A: aggregateArmMetrics(triplets.map((triplet) => triplet.arms.A.metrics)),
-    B: aggregateArmMetrics(triplets.map((triplet) => triplet.arms.B.metrics)),
-    C: aggregateArmMetrics(triplets.map((triplet) => triplet.arms.C.metrics)),
+    A: aggregateArmMetrics(
+      perProtocolTriplets.map((triplet) => triplet.arms.A.metrics),
+    ),
+    B: aggregateArmMetrics(
+      perProtocolTriplets.map((triplet) => triplet.arms.B.metrics),
+    ),
+    C: aggregateArmMetrics(
+      perProtocolTriplets.map((triplet) => triplet.arms.C.metrics),
+    ),
   } satisfies Record<CommanderExperimentArm, CommanderAggregateArmMetrics>;
   return {
     schemaVersion: COMMANDER_EXPERIMENT_SCHEMA_VERSION,
@@ -331,7 +382,7 @@ export function buildCommanderArmReport(
       A_vs_B:
         "Abstraction and executor effect; in real-model runs this also includes removing Arm A's LLM planner.",
       B_vs_C:
-        "Primary causal comparison: LLM strategic selector contribution with the Commander architecture held fixed.",
+        "Per-protocol causal comparison: LLM strategic selector contribution with the Commander architecture held fixed. Any C fallback, stale, timeout, parse, or transport plan excludes the entire matched triplet; no intention-to-treat claim is produced.",
       A_vs_C:
         "Overall product comparison; V0 Commander arms intentionally lack diplomacy and must not be treated as feature-equivalent.",
     },
@@ -345,6 +396,13 @@ export function buildCommanderArmReport(
     tripletCount: triplets.length,
     triplets,
     aggregate: {
+      estimand: "per-protocol",
+      includedTripletIDs: perProtocolTriplets.map(
+        (triplet) => triplet.tripletID,
+      ),
+      excludedTripletIDs: triplets
+        .filter((triplet) => !isPerProtocolTripletEligible(triplet))
+        .map((triplet) => triplet.tripletID),
       arms: aggregateArms,
       comparisons: {
         A_vs_B: aggregatePairwise(
@@ -381,11 +439,21 @@ function buildCommanderArmTripletReport(
     C: publicArm(byArm.C),
   } satisfies CommanderArmTripletReport["arms"];
   const invalidationReasons = integrityInvalidations(arms, byArm);
+  const integrity = {
+    valid: invalidationReasons.length === 0,
+    invalidationReasons,
+  };
+  const terminalIneligibilityReasons = terminalTripletIneligibilityReasons(
+    arms,
+    integrity.valid,
+  );
   return {
     tripletID,
-    integrity: {
-      valid: invalidationReasons.length === 0,
-      invalidationReasons,
+    integrity,
+    terminalPerformanceEligibility: {
+      estimand: "per-protocol",
+      eligible: integrity.valid && terminalIneligibilityReasons.length === 0,
+      ineligibilityReasons: terminalIneligibilityReasons,
     },
     localSmoke: runs.some((run) => run.localSmoke),
     arms,
@@ -511,6 +579,7 @@ export function commanderArmReportMarkdown(report: CommanderArmReport): string {
       : report.performanceEligibility.reasons.map((reason) => `- ${reason}`)),
     "",
     `Matched triplets: ${report.tripletCount}`,
+    `Per-protocol aggregate triplets: ${report.aggregate.includedTripletIDs.length}; excluded: ${inlineJson(report.aggregate.excludedTripletIDs)}`,
     "",
     "## Aggregate arm metrics",
     "",
@@ -546,6 +615,12 @@ function commanderTripletMarkdown(
     ...(triplet.integrity.invalidationReasons.length === 0
       ? ["Invalidation reasons: none"]
       : triplet.integrity.invalidationReasons.map((reason) => `- ${reason}`)),
+    `Terminal per-protocol eligibility: **${triplet.terminalPerformanceEligibility.eligible ? "eligible" : "excluded"}**`,
+    ...(triplet.terminalPerformanceEligibility.ineligibilityReasons.length === 0
+      ? ["Terminal exclusion reasons: none"]
+      : triplet.terminalPerformanceEligibility.ineligibilityReasons.map(
+          (reason) => `- ${reason}`,
+        )),
     "",
     "| Arm | Selector | Provider / model | Plans | Cycles | Actions | Fidelity | Fallback plans | Failures |",
     "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
@@ -574,8 +649,8 @@ function commanderTripletMarkdown(
       `- Plans: count=${metrics.planCount}; duration=${inlineJson(metrics.planDurationDecisions)}; replans=${inlineJson(metrics.replanReasons)}; transitions=${inlineJson(metrics.planTransitions)}; fallbackAuthored=${metrics.fallbackAuthoredPlans}`,
       `- Options: eligible=${inlineJson(metrics.eligibleOptionCount)}; exposed=${inlineJson(metrics.exposedOptionCount)}; familyCoverage=${inlineJson(metrics.optionFamilyCoverage)}; omitted=${metrics.omittedCandidateCount} ${inlineJson(metrics.omittedReasons)}; accountingViolations=${metrics.optionAccountingViolations}`,
       `- Selection: distribution=${inlineJson(metrics.selectedOptionDistribution)}; preferredAbsent=${inlineJson(metrics.deterministicPreferredOptionAbsent)}; disagreement=${inlineJson(metrics.selectorDisagreement)}`,
-      `- Fidelity: ${percent(metrics.strategicFidelity)}; counts=${inlineJson(metrics.fidelityCounts)}; zeroAlignedPlans=${metrics.plansWithZeroAlignedActions}; missingPrimaryPlans=${metrics.planPrimaryActionViolations}; excessSupportPlans=${metrics.planSupportActionViolations}; silentAbandonments=${metrics.silentlyAbandonedPlans}`,
-      `- Exclusions: ${inlineJson(metrics.excludedFromLlmContribution)}; staleRejected=${metrics.staleRejectedAttempts}; staleAuthorityViolations=${metrics.staleAuthorityViolations}; canonicalPathViolations=${metrics.canonicalPathViolations}`,
+      `- Fidelity: cyclePrimary=${percent(metrics.strategicFidelity)}; counts=${inlineJson(metrics.fidelityCounts)}; blockedCycles=${inlineJson(metrics.blockedDecisionCycles)}; supportActions=${metrics.supportActionCount}; offFamily=${metrics.offFamilyActionViolations}; laterLayer=${metrics.laterLayerActionViolations}; zeroPrimaryCycles=${metrics.zeroPrimaryDecisionCycles}; planIdentityViolations=${metrics.planIdentityViolations}; batchPositionViolations=${metrics.batchPositionViolations}; stampViolations=${metrics.fidelityStampViolations}; optionNotExecutable=${inlineJson(metrics.optionNotExecutableReplans)}; zeroAlignedPlans=${metrics.plansWithZeroAlignedActions}; missingPrimaryPlans=${metrics.planPrimaryActionViolations}; excessSupportPlans=${metrics.planSupportActionViolations}; silentAbandonments=${metrics.silentlyAbandonedPlans}`,
+      `- Exclusions: ${inlineJson(metrics.excludedFromLlmContribution)}; staleRejected=${metrics.staleRejectedAttempts}; staleAuthorityViolations=${metrics.staleAuthorityViolations}; canonicalPathViolations=${metrics.canonicalPathViolations}; effectAudit=${inlineJson(metrics.effectAudit)}`,
       `- Bounded post-disagreement deltas: ${inlineJson(metrics.boundedOutcomeDeltasAfterDisagreement)}`,
       "",
     );
@@ -651,9 +726,12 @@ function armMetrics(run: CommanderArmRunInput): CommanderArmMetrics {
     omittedEntries(metadataString(record, "commanderOmittedOptions")),
   );
   const preference = deterministicPreferenceAudit(planStarts);
-  const fidelity = fidelityMetrics(actions);
-  const durations = planDurations(cycles);
   const commanderArm = run.arm !== "A";
+  const fidelity = commanderArm
+    ? summarizeCommanderFidelity(actions)
+    : emptyCommanderFidelitySummary();
+  const effectAudit = effectAuditMetrics(run, canonicalRows);
+  const durations = planDurations(cycles);
   const transitions = commanderArm
     ? planTransitionAudit(cycles)
     : { count: 0, proven: 0, violations: 0 };
@@ -661,7 +739,10 @@ function armMetrics(run: CommanderArmRunInput): CommanderArmMetrics {
     ? sum(cycles.map(optionAccountingViolationCount))
     : 0;
   const planActions = commanderArm
-    ? planActionAudit(actions, planIDs)
+    ? {
+        primaryViolations: fidelity.zeroPrimaryDecisionCycles,
+        supportViolations: fidelity.supportPerPlanViolations,
+      }
     : { primaryViolations: 0, supportViolations: 0 };
   const fallbackStampViolations = commanderArm
     ? fallbackPlanStampViolations(actions, planIDs, fallbackSets)
@@ -767,10 +848,28 @@ function armMetrics(run: CommanderArmRunInput): CommanderArmMetrics {
     replanReasons: countStrings(
       cycles.map((record) => metadataString(record, "commanderReplanReason")),
     ),
-    strategicFidelity: fidelity.rate,
-    fidelityCounts: fidelity.counts,
+    strategicFidelity: fidelity.fidelityRate,
+    fidelityCounts: {
+      alignedPrimary: fidelity.counts.aligned_primary,
+      alignedSupport: fidelity.counts.aligned_support,
+      emergency: fidelity.counts.hard_emergency_override,
+      blocked: fidelity.counts.hold_plan_blocked,
+    },
+    blockedDecisionCycles: {
+      count: fidelity.blockedDecisionCycles,
+      opportunities: fidelity.primaryDecisionCycles,
+      rate: fidelity.blockedCycleRate,
+    },
+    supportActionCount: fidelity.supportActions,
+    offFamilyActionViolations: fidelity.offFamilyActionViolations,
+    laterLayerActionViolations: fidelity.laterLayerActionViolations,
+    zeroPrimaryDecisionCycles: fidelity.zeroPrimaryDecisionCycles,
+    planIdentityViolations: fidelity.planIdentityViolations,
+    batchPositionViolations: fidelity.batchPositionViolations,
+    fidelityStampViolations: fidelity.fidelityStampViolations,
+    optionNotExecutableReplans: fidelity.optionNotExecutableReplans,
     plansWithZeroAlignedActions: commanderArm
-      ? zeroAlignedPlans(actions, planIDs)
+      ? fidelity.plansWithZeroAlignedActions
       : 0,
     silentlyAbandonedPlans: transitions.violations,
     planTransitions: transitions,
@@ -795,6 +894,7 @@ function armMetrics(run: CommanderArmRunInput): CommanderArmMetrics {
       (total, record) => total + canonicalActionViolationCount(run, record),
       0,
     ),
+    effectAudit,
   };
 }
 
@@ -1006,7 +1106,16 @@ function integrityInvalidations(
     }
     if (arm.metrics.canonicalPathViolations > 0) {
       reasons.push(
-        `Arm ${arm.arm} failed offered-id, acceptance, submitted-intent, or step-locked audit proof`,
+        `Arm ${arm.arm} failed offered-id, acceptance, or submitted-intent proof`,
+      );
+    }
+    if (
+      arm.metrics.effectAudit.immediateViolations > 0 ||
+      arm.metrics.effectAudit.delayedExpired > 0 ||
+      arm.metrics.effectAudit.delayedFailed > 0
+    ) {
+      reasons.push(
+        `Arm ${arm.arm} failed immediate or bounded delayed-effect audit proof`,
       );
     }
     const artifact = arm.artifactProvenance;
@@ -1050,14 +1159,6 @@ function integrityInvalidations(
   }
   for (const arm of [arms.B, arms.C]) {
     const metrics = arm.metrics;
-    const classifiedActions =
-      metrics.fidelityCounts.alignedPrimary +
-      metrics.fidelityCounts.alignedSupport +
-      metrics.fidelityCounts.emergency +
-      metrics.fidelityCounts.blocked;
-    if (classifiedActions !== metrics.actionCount) {
-      reasons.push(`Arm ${arm.arm} fidelity accounting is incomplete`);
-    }
     if (
       metrics.strategicFidelity === null ||
       metrics.strategicFidelity < COMMANDER_FIDELITY_THRESHOLD
@@ -1075,6 +1176,32 @@ function integrityInvalidations(
     if (metrics.fidelityCounts.emergency > 0) {
       reasons.push(`Arm ${arm.arm} used a forbidden V0 emergency action`);
     }
+    if (metrics.offFamilyActionViolations > 0) {
+      reasons.push(
+        `Arm ${arm.arm} executed an action incompatible with its Commander plan`,
+      );
+    }
+    if (metrics.laterLayerActionViolations > 0) {
+      reasons.push(
+        `Arm ${arm.arm} executed an invalid later-layer Commander action`,
+      );
+    }
+    if (metrics.zeroPrimaryDecisionCycles > 0) {
+      reasons.push(
+        `Arm ${arm.arm} has a Commander cycle without one compatible primary`,
+      );
+    }
+    if (metrics.planIdentityViolations > 0) {
+      reasons.push(`Arm ${arm.arm} plan identity changed within a plan`);
+    }
+    if (metrics.batchPositionViolations > 0) {
+      reasons.push(`Arm ${arm.arm} Commander batch position is invalid`);
+    }
+    if (metrics.fidelityStampViolations > 0) {
+      reasons.push(
+        `Arm ${arm.arm} Commander fidelity stamp disagrees with recomputation`,
+      );
+    }
     if (metrics.plansWithZeroAlignedActions > 0) {
       reasons.push(`Arm ${arm.arm} has a plan with zero aligned actions`);
     }
@@ -1082,7 +1209,9 @@ function integrityInvalidations(
       reasons.push(`Arm ${arm.arm} option accounting is invalid`);
     }
     if (metrics.planPrimaryActionViolations > 0) {
-      reasons.push(`Arm ${arm.arm} has a plan without a primary action`);
+      reasons.push(
+        `Arm ${arm.arm} has a Commander cycle without a primary action`,
+      );
     }
     if (metrics.planSupportActionViolations > 0) {
       reasons.push(`Arm ${arm.arm} has more than one support action in a plan`);
@@ -1551,14 +1680,15 @@ function aggregateArmMetrics(
     .map((entry) => entry.finalRank)
     .filter((value): value is number => value !== null);
   const aligned = sum(
+    metrics.map((entry) => entry.fidelityCounts.alignedPrimary),
+  );
+  const classifiedNonEmergency = sum(
     metrics.map(
       (entry) =>
-        entry.fidelityCounts.alignedPrimary +
-        entry.fidelityCounts.alignedSupport,
+        entry.blockedDecisionCycles.opportunities -
+        entry.fidelityCounts.emergency,
     ),
   );
-  const classifiedNonEmergency =
-    aligned + sum(metrics.map((entry) => entry.fidelityCounts.blocked));
   return {
     runs: metrics.length,
     wins: {
@@ -1648,10 +1778,17 @@ function performanceIneligibilityReasons(
   triplets: readonly CommanderArmTripletReport[],
 ): string[] {
   const reasons: string[] = [];
-  if (triplets.length < MIN_COMMANDER_PERFORMANCE_TRIPLETS) {
+  const perProtocolTriplets = triplets.filter(isPerProtocolTripletEligible);
+  if (perProtocolTriplets.length < MIN_COMMANDER_PERFORMANCE_TRIPLETS) {
     reasons.push(
-      `fewer than ${MIN_COMMANDER_PERFORMANCE_TRIPLETS} replicated matched triplets`,
+      `fewer than ${MIN_COMMANDER_PERFORMANCE_TRIPLETS} uncontaminated per-protocol matched triplets`,
     );
+  }
+  for (const triplet of triplets) {
+    for (const reason of triplet.terminalPerformanceEligibility
+      .ineligibilityReasons) {
+      reasons.push(`${triplet.tripletID}: ${reason}`);
+    }
   }
   if (runs.some((run) => run.localSmoke)) {
     reasons.push("local-smoke evidence cannot support performance claims");
@@ -1748,47 +1885,139 @@ function performanceIneligibilityReasons(
   ) {
     reasons.push("Arm A and C do not use comparable provider/model parameters");
   }
-  if (
-    triplets.some(
-      (triplet) =>
-        triplet.arms.C.metrics.fallbackAuthoredPlans >
-        triplet.arms.C.metrics.planCount * 0.1,
-    )
-  ) {
-    reasons.push("Arm C fallback-authored plan rate exceeds 10 percent");
+  for (const triplet of triplets) {
+    for (const armName of ["B", "C"] as const) {
+      const metrics = triplet.arms[armName].metrics;
+      if (
+        metrics.blockedDecisionCycles.rate !== null &&
+        metrics.blockedDecisionCycles.rate > COMMANDER_BLOCKED_CYCLE_THRESHOLD
+      ) {
+        reasons.push(
+          `${triplet.tripletID}: Arm ${armName} blocked Commander cycles exceed 5 percent`,
+        );
+      }
+      if (metrics.optionNotExecutableReplans.dominates) {
+        reasons.push(
+          `${triplet.tripletID}: Arm ${armName} option_not_executable reaches the preregistered ${COMMANDER_OPTION_NOT_EXECUTABLE_DOMINANCE_THRESHOLD * 100} percent non-bootstrap replan threshold`,
+        );
+      }
+      if (
+        metrics.fidelityCounts.emergency > 0 ||
+        metrics.offFamilyActionViolations > 0 ||
+        metrics.laterLayerActionViolations > 0 ||
+        metrics.zeroPrimaryDecisionCycles > 0
+      ) {
+        reasons.push(
+          `${triplet.tripletID}: Arm ${armName} has a forbidden fidelity violation`,
+        );
+      }
+    }
+    for (const armName of ["A", "B", "C"] as const) {
+      if (triplet.arms[armName].metrics.effectAudit.delayedPending > 0) {
+        reasons.push(
+          `${triplet.tripletID}: Arm ${armName} has an unresolved bounded delayed-effect audit`,
+        );
+      }
+    }
   }
   reasons.push(...replicatedCorpusInvalidations(runs, triplets));
   return [...new Set(reasons)];
+}
+
+function terminalTripletIneligibilityReasons(
+  arms: CommanderArmTripletReport["arms"],
+  integrityValid: boolean,
+): string[] {
+  const metrics = arms.C.metrics;
+  const reasons: string[] = [];
+  if (!integrityValid) {
+    reasons.push(
+      "triplet integrity is invalid; per-protocol terminal outcomes require structurally valid evidence",
+    );
+  }
+  if (metrics.fallbackAuthoredPlans > 0) {
+    reasons.push(
+      "Arm C contains a fallback-authored plan; per-protocol terminal outcomes require zero",
+    );
+  }
+  if (metrics.staleRejectedAttempts > 0) {
+    reasons.push(
+      "Arm C contains a stale selector attempt; per-protocol terminal outcomes require zero",
+    );
+  }
+  if (metrics.staleAuthorityViolations > 0) {
+    reasons.push(
+      "Arm C applied or retained stale selector authority; per-protocol terminal outcomes require zero",
+    );
+  }
+  if (metrics.failures.timeout > 0) {
+    reasons.push(
+      "Arm C contains a selector timeout; per-protocol terminal outcomes require zero",
+    );
+  }
+  if (metrics.failures.parse > 0) {
+    reasons.push(
+      "Arm C contains a selector parse failure; per-protocol terminal outcomes require zero",
+    );
+  }
+  if (metrics.failures.transport > 0) {
+    reasons.push(
+      "Arm C contains a selector transport failure; per-protocol terminal outcomes require zero",
+    );
+  }
+  return reasons;
+}
+
+function isPerProtocolTripletEligible(
+  triplet: CommanderArmTripletReport,
+): boolean {
+  return (
+    triplet.integrity.valid && triplet.terminalPerformanceEligibility.eligible
+  );
 }
 
 function isMockLike(value: string): boolean {
   return /mock|fake|scripted|test|local/i.test(value);
 }
 
-function fidelityMetrics(records: readonly AgentDecisionRecord[]): {
-  rate: number | null;
-  counts: CommanderArmMetrics["fidelityCounts"];
-} {
-  const counts = {
-    alignedPrimary: countMetadata(
-      records,
-      "commanderFidelity",
-      "aligned_primary",
-    ),
-    alignedSupport: countMetadata(
-      records,
-      "commanderFidelity",
-      "aligned_support",
-    ),
-    emergency: countMetadata(
-      records,
-      "commanderFidelity",
-      "hard_emergency_override",
-    ),
-    blocked: countMetadata(records, "commanderFidelity", "hold_plan_blocked"),
+function emptyCommanderFidelitySummary(): CommanderFidelitySummary {
+  return {
+    counts: {
+      aligned_primary: 0,
+      aligned_support: 0,
+      hard_emergency_override: 0,
+      hold_plan_blocked: 0,
+    },
+    actionsUnderCommanderPlans: 0,
+    classifiedDecisions: 0,
+    unknownDecisions: 0,
+    rejectedDecisions: 0,
+    unattributedDecisions: 0,
+    planCount: 0,
+    plansWithZeroAlignedActions: 0,
+    planTransitions: 0,
+    silentlyAbandonedPlans: 0,
+    primaryDecisionCycles: 0,
+    alignedPrimaryCycles: 0,
+    blockedDecisionCycles: 0,
+    blockedCycleRate: null,
+    supportActions: 0,
+    offFamilyActionViolations: 0,
+    laterLayerActionViolations: 0,
+    zeroPrimaryDecisionCycles: 0,
+    planIdentityViolations: 0,
+    batchPositionViolations: 0,
+    fidelityStampViolations: 0,
+    supportPerPlanViolations: 0,
+    optionNotExecutableReplans: {
+      count: 0,
+      opportunities: 0,
+      rate: null,
+      dominates: false,
+    },
+    fidelityRate: null,
+    interpretable: false,
   };
-  const aligned = counts.alignedPrimary + counts.alignedSupport;
-  return { rate: ratio(aligned, aligned + counts.blocked), counts };
 }
 
 function planDurations(
@@ -1800,21 +2029,6 @@ function planDurations(
     if (planID !== null) byPlan[planID] = (byPlan[planID] ?? 0) + 1;
   }
   return { mean: mean(Object.values(byPlan)), byPlan };
-}
-
-function zeroAlignedPlans(
-  records: readonly AgentDecisionRecord[],
-  planIDs: readonly string[],
-): number {
-  return planIDs.filter(
-    (planID) =>
-      !records.some(
-        (record) =>
-          metadataString(record, "planID") === planID &&
-          (metadataString(record, "commanderFidelity") === "aligned_primary" ||
-            metadataString(record, "commanderFidelity") === "aligned_support"),
-      ),
-  ).length;
 }
 
 function planTransitionAudit(
@@ -1868,32 +2082,6 @@ function planTransitionAudit(
     }
   }
   return { count, proven, violations };
-}
-
-function planActionAudit(
-  records: readonly AgentDecisionRecord[],
-  planIDs: readonly string[],
-): { primaryViolations: number; supportViolations: number } {
-  let primaryViolations = 0;
-  let supportViolations = 0;
-  for (const planID of planIDs) {
-    const planRecords = records.filter(
-      (record) => metadataString(record, "planID") === planID,
-    );
-    const primaryCount = countMetadata(
-      planRecords,
-      "commanderFidelity",
-      "aligned_primary",
-    );
-    const supportCount = countMetadata(
-      planRecords,
-      "commanderFidelity",
-      "aligned_support",
-    );
-    if (primaryCount < 1) primaryViolations += 1;
-    if (supportCount > 1) supportViolations += 1;
-  }
-  return { primaryViolations, supportViolations };
 }
 
 interface CommanderFallbackPlanSets {
@@ -2020,7 +2208,7 @@ function deterministicPreferenceAudit(
 }
 
 function canonicalActionViolationCount(
-  run: CommanderArmRunInput,
+  _run: CommanderArmRunInput,
   record: AgentDecisionRecord,
 ): number {
   if (!record.legalActionIDs.includes(record.chosenActionID)) return 1;
@@ -2041,13 +2229,116 @@ function canonicalActionViolationCount(
   if (stableJson(record.intent) !== stableJson(record.result.submittedIntent)) {
     return 1;
   }
-  if (
-    run.gameConfiguration.runnerMode === "step-locked" &&
-    record.audit?.auditStatus !== "confirmed"
-  ) {
-    return 1;
-  }
   return 0;
+}
+
+function effectAuditMetrics(
+  run: CommanderArmRunInput,
+  records: readonly AgentDecisionRecord[],
+): CommanderArmMetrics["effectAudit"] {
+  const result: CommanderArmMetrics["effectAudit"] = {
+    immediateViolations: 0,
+    delayedConfirmed: 0,
+    delayedPending: 0,
+    delayedExpired: 0,
+    delayedFailed: 0,
+  };
+  if (run.gameConfiguration.runnerMode !== "step-locked") return result;
+  const ordered = [...records].sort(
+    (left, right) => left.sequence - right.sequence,
+  );
+  for (let index = 0; index < ordered.length; index++) {
+    const record = ordered[index]!;
+    if (
+      record.chosenActionKind === "hold" ||
+      record.result.accepted !== true ||
+      record.intent === null ||
+      record.result.submittedIntent === null ||
+      stableJson(record.intent) !== stableJson(record.result.submittedIntent)
+    ) {
+      continue;
+    }
+    const status = record.audit?.auditStatus;
+    if (!isDelayedEffectAction(record)) {
+      if (status !== "confirmed") result.immediateViolations += 1;
+      continue;
+    }
+    if (status === "failed" || status === "not_applicable") {
+      result.delayedFailed += 1;
+      continue;
+    }
+    if (status === "confirmed") {
+      result.delayedConfirmed += 1;
+      continue;
+    }
+    const later = ordered
+      .slice(index + 1)
+      .filter(
+        (candidate) =>
+          candidate.agentID === record.agentID &&
+          candidate.chosenActionKind !== "spawn" &&
+          isPrimaryBatchRow(candidate),
+      )
+      .slice(0, COMMANDER_DELAYED_EFFECT_AUDIT_BOUND_CYCLES);
+    if (later.some((candidate) => delayedEffectVisible(record, candidate))) {
+      result.delayedConfirmed += 1;
+    } else if (later.length >= COMMANDER_DELAYED_EFFECT_AUDIT_BOUND_CYCLES) {
+      result.delayedExpired += 1;
+    } else {
+      result.delayedPending += 1;
+    }
+  }
+  return result;
+}
+
+function isDelayedEffectAction(record: AgentDecisionRecord): boolean {
+  return (
+    record.chosenActionKind === "boat" ||
+    record.chosenActionKind === "boat_retreat"
+  );
+}
+
+function delayedEffectVisible(
+  source: AgentDecisionRecord,
+  later: AgentDecisionRecord,
+): boolean {
+  const baseline = source.audit?.before ?? null;
+  const snapshots = [later.audit?.before, later.audit?.after].filter(
+    (snapshot): snapshot is AgentActionAuditSnapshot =>
+      snapshot !== null && snapshot !== undefined,
+  );
+  return snapshots.some((snapshot) =>
+    source.intent?.type === "boat"
+      ? boatEffectVisible(baseline, snapshot)
+      : source.intent?.type === "cancel_boat"
+        ? cancelBoatEffectVisible(baseline, snapshot, source.intent.unitID)
+        : false,
+  );
+}
+
+function boatEffectVisible(
+  baseline: AgentActionAuditSnapshot | null,
+  candidate: AgentActionAuditSnapshot,
+): boolean {
+  const beforeCount = baseline?.unitCounts[UnitType.TransportShip] ?? 0;
+  const afterCount = candidate.unitCounts[UnitType.TransportShip] ?? 0;
+  // Troop loss is not transport-specific: an unrelated attack or core event
+  // can lower the same balance. Only direct transport evidence can close this
+  // delayed audit.
+  return afterCount > beforeCount;
+}
+
+function cancelBoatEffectVisible(
+  baseline: AgentActionAuditSnapshot | null,
+  candidate: AgentActionAuditSnapshot,
+  unitID: number,
+): boolean {
+  const key = `${UnitType.TransportShip}:${unitID}`;
+  const existed = baseline?.unitTiles?.[key] !== undefined;
+  const exists = candidate.unitTiles?.[key] !== undefined;
+  const retreating =
+    candidate.transportRetreatingUnitIDs?.includes(unitID) ?? false;
+  return (existed && !exists) || retreating;
 }
 
 function optionAccountingViolationCount(record: AgentDecisionRecord): number {

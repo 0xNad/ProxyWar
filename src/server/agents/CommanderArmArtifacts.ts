@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { UnitType } from "../../core/game/Game";
 import type { Winner } from "../../core/Schemas";
 import {
   writeAgentLeagueRunArtifacts,
@@ -8,7 +9,10 @@ import {
   type AgentRunRosterEntry,
   type WriteAgentLeagueRunArtifactsInput,
 } from "./AgentDecisionLogWriter";
-import type { AgentDecisionRecord } from "./AgentTypes";
+import type {
+  AgentActionAuditSnapshot,
+  AgentDecisionRecord,
+} from "./AgentTypes";
 import {
   buildCommanderArmReport,
   commanderArmReportJson,
@@ -450,6 +454,8 @@ type PersistedDecisionEntry = Record<string, unknown> & {
   reason: string | null;
   generatedIntent: AgentDecisionRecord["intent"];
   result: AgentDecisionRecord["result"];
+  auditBefore?: AgentActionAuditSnapshot | null;
+  auditAfter?: AgentActionAuditSnapshot | null;
 };
 
 const decisionMetadataKeys = [
@@ -515,6 +521,17 @@ function decisionRecordFromEntry(
       metadata[key] = value;
     }
   }
+  if (
+    Array.isArray(entry.batchActionIDs) &&
+    entry.batchActionIDs.length > 0 &&
+    entry.batchActionIDs.every(
+      (actionID): actionID is string =>
+        typeof actionID === "string" && actionID.length > 0,
+    )
+  ) {
+    metadata.batchActionIDs = entry.batchActionIDs.join(",");
+    metadata.batchSize = entry.batchActionIDs.length;
+  }
   if (typeof entry.plannerParseSuccess === "boolean") {
     metadata.plannerParseOk = entry.plannerParseSuccess;
   }
@@ -572,6 +589,8 @@ function decisionRecordFromEntry(
         typeof entry.auditReason === "string"
           ? entry.auditReason
           : "loaded from Commander decisions artifact",
+      ...(entry.auditBefore !== undefined ? { before: entry.auditBefore } : {}),
+      ...(entry.auditAfter !== undefined ? { after: entry.auditAfter } : {}),
     },
   };
 }
@@ -1047,6 +1066,14 @@ function parseDecisionEntry(
 ): PersistedDecisionEntry {
   const entry = requiredRecord(value, `Commander decision row ${index}`);
   const result = isRecord(entry.result) ? entry.result : null;
+  const auditBefore = parseOptionalAuditSnapshot(
+    entry.auditBefore,
+    `Commander decision row ${index} auditBefore`,
+  );
+  const auditAfter = parseOptionalAuditSnapshot(
+    entry.auditAfter,
+    `Commander decision row ${index} auditAfter`,
+  );
   if (
     typeof entry.runID !== "string" ||
     typeof entry.matchID !== "string" ||
@@ -1068,13 +1095,212 @@ function parseDecisionEntry(
     typeof result.accepted !== "boolean" ||
     typeof result.reason !== "string" ||
     !isIntentOrNull(result.submittedIntent) ||
+    typeof entry.auditReason !== "string" ||
     !["confirmed", "unknown", "failed", "not_applicable"].includes(
       String(entry.auditStatus),
     )
   ) {
     throw new Error(`Commander decision row ${index} is malformed`);
   }
-  return entry as PersistedDecisionEntry;
+  return {
+    ...entry,
+    ...(entry.auditBefore !== undefined ? { auditBefore } : {}),
+    ...(entry.auditAfter !== undefined ? { auditAfter } : {}),
+  } as PersistedDecisionEntry;
+}
+
+const auditSnapshotRequiredKeys = [
+  "tick",
+  "playerID",
+  "isAlive",
+  "hasSpawned",
+  "tilesOwned",
+  "troops",
+  "gold",
+  "unitCounts",
+  "outgoingAttackTargetIDs",
+  "outgoingAllianceRequestRecipientIDs",
+  "outgoingEmbargoTargetIDs",
+] as const;
+
+const auditSnapshotOptionalKeys = [
+  "unitLevels",
+  "unitTiles",
+  "outgoingAttackIDs",
+  "alliedPlayerIDs",
+  "targetPlayerIDs",
+  "transportRetreatingUnitIDs",
+  "sentDonationCount",
+] as const;
+
+function parseOptionalAuditSnapshot(
+  value: unknown,
+  label: string,
+): AgentActionAuditSnapshot | null | undefined {
+  if (value === undefined || value === null) return value;
+  const snapshot = requiredRecord(value, label);
+  const allowedKeys = new Set<string>([
+    ...auditSnapshotRequiredKeys,
+    ...auditSnapshotOptionalKeys,
+  ]);
+  if (Object.keys(snapshot).some((key) => !allowedKeys.has(key))) {
+    throw new Error(`${label} has unknown fields`);
+  }
+  if (
+    auditSnapshotRequiredKeys.some(
+      (key) => !Object.prototype.hasOwnProperty.call(snapshot, key),
+    )
+  ) {
+    throw new Error(`${label} is missing required fields`);
+  }
+  const unitCounts = numericRecord(
+    snapshot.unitCounts,
+    `${label} unitCounts`,
+    new Set<string>(Object.values(UnitType)),
+  ) as Partial<Record<UnitType, number>>;
+  return {
+    tick: nullableSnapshotNumber(snapshot.tick, `${label} tick`),
+    playerID: nullableSnapshotString(snapshot.playerID, `${label} playerID`),
+    isAlive: nullableSnapshotBoolean(snapshot.isAlive, `${label} isAlive`),
+    hasSpawned: nullableSnapshotBoolean(
+      snapshot.hasSpawned,
+      `${label} hasSpawned`,
+    ),
+    tilesOwned: nullableSnapshotNumber(
+      snapshot.tilesOwned,
+      `${label} tilesOwned`,
+    ),
+    troops: nullableSnapshotNumber(snapshot.troops, `${label} troops`),
+    gold: nullableSnapshotString(snapshot.gold, `${label} gold`),
+    unitCounts,
+    ...(snapshot.unitLevels !== undefined
+      ? {
+          unitLevels: numericRecord(snapshot.unitLevels, `${label} unitLevels`),
+        }
+      : {}),
+    ...(snapshot.unitTiles !== undefined
+      ? {
+          unitTiles: numericRecord(snapshot.unitTiles, `${label} unitTiles`),
+        }
+      : {}),
+    outgoingAttackTargetIDs: stringArray(
+      snapshot.outgoingAttackTargetIDs,
+      `${label} outgoingAttackTargetIDs`,
+    ),
+    ...(snapshot.outgoingAttackIDs !== undefined
+      ? {
+          outgoingAttackIDs: stringArray(
+            snapshot.outgoingAttackIDs,
+            `${label} outgoingAttackIDs`,
+          ),
+        }
+      : {}),
+    outgoingAllianceRequestRecipientIDs: stringArray(
+      snapshot.outgoingAllianceRequestRecipientIDs,
+      `${label} outgoingAllianceRequestRecipientIDs`,
+    ),
+    ...(snapshot.alliedPlayerIDs !== undefined
+      ? {
+          alliedPlayerIDs: stringArray(
+            snapshot.alliedPlayerIDs,
+            `${label} alliedPlayerIDs`,
+          ),
+        }
+      : {}),
+    outgoingEmbargoTargetIDs: stringArray(
+      snapshot.outgoingEmbargoTargetIDs,
+      `${label} outgoingEmbargoTargetIDs`,
+    ),
+    ...(snapshot.targetPlayerIDs !== undefined
+      ? {
+          targetPlayerIDs: stringArray(
+            snapshot.targetPlayerIDs,
+            `${label} targetPlayerIDs`,
+          ),
+        }
+      : {}),
+    ...(snapshot.transportRetreatingUnitIDs !== undefined
+      ? {
+          transportRetreatingUnitIDs: safeIntegerArray(
+            snapshot.transportRetreatingUnitIDs,
+            `${label} transportRetreatingUnitIDs`,
+          ),
+        }
+      : {}),
+    ...(snapshot.sentDonationCount !== undefined
+      ? {
+          sentDonationCount: requiredNonNegativeSafeInteger(
+            snapshot.sentDonationCount,
+            `${label} sentDonationCount`,
+          ),
+        }
+      : {}),
+  };
+}
+
+function numericRecord(
+  value: unknown,
+  label: string,
+  permittedKeys?: ReadonlySet<string>,
+): Record<string, number> {
+  const record = requiredRecord(value, label);
+  if (
+    Object.entries(record).some(
+      ([key, entry]) =>
+        (permittedKeys !== undefined && !permittedKeys.has(key)) ||
+        typeof entry !== "number" ||
+        !Number.isFinite(entry) ||
+        entry < 0,
+    )
+  ) {
+    throw new Error(`${label} is malformed`);
+  }
+  return Object.fromEntries(
+    Object.entries(record).map(([key, entry]) => [key, entry as number]),
+  );
+}
+
+function nullableSnapshotNumber(value: unknown, label: string): number | null {
+  if (value === null) return null;
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`${label} is malformed`);
+  }
+  return value;
+}
+
+function nullableSnapshotString(value: unknown, label: string): string | null {
+  if (value === null) return null;
+  if (typeof value !== "string") throw new Error(`${label} is malformed`);
+  return value;
+}
+
+function nullableSnapshotBoolean(
+  value: unknown,
+  label: string,
+): boolean | null {
+  if (value === null) return null;
+  if (typeof value !== "boolean") throw new Error(`${label} is malformed`);
+  return value;
+}
+
+function safeIntegerArray(value: unknown, label: string): number[] {
+  if (
+    !Array.isArray(value) ||
+    value.some(
+      (entry) =>
+        typeof entry !== "number" || !Number.isSafeInteger(entry) || entry < 0,
+    )
+  ) {
+    throw new Error(`${label} is malformed`);
+  }
+  return [...value];
+}
+
+function requiredNonNegativeSafeInteger(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${label} is malformed`);
+  }
+  return value;
 }
 
 function isLegalActionIDsByKind(

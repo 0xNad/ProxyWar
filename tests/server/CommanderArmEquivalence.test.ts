@@ -264,7 +264,7 @@ describe("StrategicCommander Stage 5 matched three-arm gate", () => {
     const result = await runCommanderArmGate({
       sourceSha: "b".repeat(40),
       sourceTreeDirty: false,
-      maxSteps: 2,
+      maxSteps: 3,
       writeReport: false,
     });
 
@@ -288,6 +288,20 @@ describe("StrategicCommander Stage 5 matched three-arm gate", () => {
     const triplet = result.report.triplets[0]!;
     const b = triplet.arms.B;
     const c = triplet.arms.C;
+    const a = triplet.arms.A;
+    const delayedBoatRows = result.runs.A.artifactInput.records.filter(
+      (record) =>
+        record.agentID === a.subjectAgentID &&
+        record.chosenActionKind === "boat" &&
+        record.audit?.auditStatus === "unknown",
+    );
+    expect(delayedBoatRows.length).toBeGreaterThan(0);
+    expect(a.metrics.canonicalPathViolations).toBe(0);
+    expect(
+      a.metrics.effectAudit.delayedPending +
+        a.metrics.effectAudit.delayedConfirmed,
+    ).toBeGreaterThan(0);
+    expect(a.metrics.effectAudit.delayedExpired).toBe(0);
     expect(b.gameConfigurationFingerprint).toBe(c.gameConfigurationFingerprint);
     expect(triplet.arms.A.spawnAssignments).toEqual(b.spawnAssignments);
     expect(b.spawnAssignments).toEqual(c.spawnAssignments);

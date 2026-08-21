@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { UnitType } from "../../src/core/game/Game";
 import type { AgentDecisionRecord } from "../../src/server/agents/AgentTypes";
 import {
   loadCommanderArmRunFromArtifacts,
@@ -122,21 +123,80 @@ function commanderRecord(input: {
   const selected = input.selected ?? "expand";
   const deterministic = input.deterministic ?? "expand";
   const fidelity = input.fidelity ?? "aligned_primary";
+  const targetPlayerID = selected.startsWith("pressure_rival:")
+    ? selected.slice("pressure_rival:".length)
+    : null;
+  const action: {
+    id: string;
+    kind: AgentDecisionRecord["chosenActionKind"];
+    intent: AgentDecisionRecord["intent"];
+    metadata: Record<string, string | number | boolean | null>;
+  } =
+    fidelity === "hold_plan_blocked"
+      ? {
+          id: "hold",
+          kind: "hold" as const,
+          intent: null,
+          metadata: {},
+        }
+      : selected === "develop_economy"
+        ? {
+            id: "build:City:100",
+            kind: "build" as const,
+            intent: {
+              type: "build_unit" as const,
+              unit: UnitType.City,
+              tile: 100,
+            },
+            metadata: { unit: UnitType.City, role: "economic" },
+          }
+        : selected === "survive"
+          ? {
+              id: "retreat:attack-1",
+              kind: "retreat" as const,
+              intent: { type: "cancel_attack" as const, attackID: "attack-1" },
+              metadata: { attackID: "attack-1" },
+            }
+          : targetPlayerID !== null
+            ? {
+                id: `attack:${targetPlayerID}:25`,
+                kind: "attack" as const,
+                intent: {
+                  type: "attack" as const,
+                  targetID: targetPlayerID,
+                  troops: 100,
+                },
+                metadata: {
+                  targetID: targetPlayerID,
+                  expansion: false,
+                },
+              }
+            : {
+                id: "attack:neutral",
+                kind: "attack" as const,
+                intent: {
+                  type: "attack" as const,
+                  targetID: null,
+                  troops: 100,
+                },
+                metadata: { targetID: null, expansion: true },
+              };
   const record = fabricatedRecord({
     sequence: input.sequence,
     agentID: "SUBJECT",
     playerID: "P1",
     username: "Subject",
     turnNumber: 10 + input.sequence,
-    actionID: fidelity === "hold_plan_blocked" ? "hold" : "attack:neutral",
-    kind: fidelity === "hold_plan_blocked" ? "hold" : "attack",
+    actionID: action.id,
+    kind: action.kind,
     auditStatus:
       fidelity === "hold_plan_blocked" ? "not_applicable" : "confirmed",
   });
   record.brainType = "strategic-commander";
   record.legalActionIDs = [record.chosenActionID];
+  record.chosenActionMetadata = action.metadata;
   if (record.chosenActionKind !== "hold") {
-    record.intent = { type: "attack", targetID: null, troops: 100 };
+    record.intent = action.intent;
     record.result = {
       accepted: true,
       reason: "submitted",
@@ -182,8 +242,138 @@ function commanderRecord(input: {
     commanderExperimentPromptVersion: input.arm === "C" ? "stage2" : null,
     commanderSelfTiles: 100 + input.sequence,
     commanderSelfTroops: 1_000 + input.sequence * 10,
+    batchIndex: 0,
+    batchSize: 1,
+    batchActionIDs: record.chosenActionID,
   };
   return record;
+}
+
+function commanderBoatRecord(input: {
+  sequence: number;
+  arm: "B" | "C";
+  planID?: string;
+  planInstalled?: boolean;
+}): AgentDecisionRecord {
+  const record = commanderRecord({
+    sequence: input.sequence,
+    arm: input.arm,
+    planID: input.planID,
+    planInstalled: input.planInstalled,
+    replanReason: input.planInstalled ? "no_active_plan" : "within_horizon",
+    selected: "expand",
+  });
+  const intent = { type: "boat" as const, troops: 100, dst: 100 };
+  record.chosenActionID = "boat:100:8";
+  record.chosenActionKind = "boat";
+  record.chosenActionMetadata = {
+    targetID: null,
+    targetTile: 100,
+    navalInvasion: false,
+    expansion: true,
+  };
+  record.legalActionIDs = [record.chosenActionID];
+  record.legalActionIDsByKind = { boat: [record.chosenActionID] };
+  record.intent = intent;
+  record.result = {
+    accepted: true,
+    reason: "submitted",
+    submittedIntent: intent,
+  };
+  record.decisionMetadata!.batchIndex = 0;
+  record.decisionMetadata!.batchSize = 1;
+  record.decisionMetadata!.batchActionIDs = record.chosenActionID;
+  record.audit!.auditStatus = "unknown";
+  record.audit!.auditReason =
+    "boat was accepted, but transport launch was not visible yet";
+  for (const snapshot of [record.audit!.before, record.audit!.after]) {
+    if (snapshot !== null && snapshot !== undefined) {
+      snapshot.troops = 10_000;
+      snapshot.unitCounts[UnitType.TransportShip] = 0;
+    }
+  }
+  return record;
+}
+
+function showTransport(record: AgentDecisionRecord, count: number): void {
+  for (const snapshot of [record.audit?.before, record.audit?.after]) {
+    if (snapshot !== null && snapshot !== undefined) {
+      snapshot.troops = 10_000;
+      snapshot.unitCounts[UnitType.TransportShip] = count;
+    }
+  }
+}
+
+function showUnrelatedTroopLossWithoutTransport(
+  record: AgentDecisionRecord,
+  troops: number,
+): void {
+  for (const snapshot of [record.audit?.before, record.audit?.after]) {
+    if (snapshot !== null && snapshot !== undefined) {
+      snapshot.troops = troops;
+      snapshot.unitCounts[UnitType.TransportShip] = 0;
+    }
+  }
+}
+
+function commanderPressureCycle(input: {
+  sequence: number;
+  arm: "B" | "C";
+  planID: string;
+  targetPlayerID?: string;
+  supportTargetPlayerID?: string;
+  previousPlanID?: string | null;
+  replanReason?: string;
+}): AgentDecisionRecord[] {
+  const target = input.targetPlayerID ?? "P7";
+  const supportTarget = input.supportTargetPlayerID ?? target;
+  const objective = `pressure_rival:${target}`;
+  const primary = commanderRecord({
+    sequence: input.sequence,
+    arm: input.arm,
+    planID: input.planID,
+    planInstalled: true,
+    selected: objective,
+    previousPlanID: input.previousPlanID,
+    replanReason: input.replanReason ?? "no_active_plan",
+  });
+  const support = commanderRecord({
+    sequence: input.sequence + 1,
+    arm: input.arm,
+    planID: input.planID,
+    selected: objective,
+  });
+  support.chosenActionID = `embargo:${supportTarget}:start`;
+  support.chosenActionKind = "embargo";
+  support.chosenActionMetadata = {
+    targetID: supportTarget,
+    action: "start",
+  };
+  support.intent = {
+    type: "embargo",
+    targetID: supportTarget,
+    action: "start",
+  };
+  support.result = {
+    accepted: true,
+    reason: "submitted",
+    submittedIntent: support.intent,
+  };
+  support.audit!.auditStatus = "confirmed";
+  support.decisionMetadata!.commanderFidelity = "aligned_support";
+  support.decisionMetadata!.commanderPlanAgeDecisions = 0;
+  const actionIDs = [primary.chosenActionID, support.chosenActionID];
+  for (const [index, record] of [primary, support].entries()) {
+    record.legalActionIDs = [...actionIDs];
+    record.legalActionIDsByKind = {
+      attack: [primary.chosenActionID],
+      embargo: [support.chosenActionID],
+    };
+    record.decisionMetadata!.batchIndex = index;
+    record.decisionMetadata!.batchSize = 2;
+    record.decisionMetadata!.batchActionIDs = actionIDs.join(",");
+  }
+  return [primary, support];
 }
 
 function armRun(
@@ -757,7 +947,353 @@ describe("CommanderArmReport Stage 5 arithmetic and invalidation", () => {
 
     expect(firstTriplet(report).arms.B.metrics.strategicFidelity).toBe(1);
     expect(tripletInvalidations(report)).toContain(
-      "Arm B fidelity accounting is incomplete",
+      "Arm B Commander fidelity stamp disagrees with recomputation",
+    );
+  });
+
+  it("keeps canonical boat submission separate from bounded delayed effect confirmation", () => {
+    const planID = "B-boat-plan";
+    const boat = commanderBoatRecord({
+      sequence: 1,
+      arm: "B",
+      planID,
+      planInstalled: true,
+    });
+    const later = commanderRecord({ sequence: 2, arm: "B", planID });
+    const final = commanderRecord({ sequence: 3, arm: "B", planID });
+    showTransport(later, 1);
+    const confirmed = buildCommanderArmReport([
+      armRun("A"),
+      armRun("B", [boat, later, final]),
+      armRun("C"),
+    ]);
+    expect(firstTriplet(confirmed).arms.B.metrics.canonicalPathViolations).toBe(
+      0,
+    );
+    expect(firstTriplet(confirmed).arms.B.metrics.effectAudit).toMatchObject({
+      delayedConfirmed: 1,
+      delayedPending: 0,
+      delayedExpired: 0,
+      delayedFailed: 0,
+    });
+    expect(firstTriplet(confirmed).integrity.valid).toBe(true);
+
+    const pendingBoat = commanderBoatRecord({
+      sequence: 1,
+      arm: "B",
+      planID,
+      planInstalled: true,
+    });
+    const pending = buildCommanderArmReport([
+      armRun("A"),
+      armRun("B", [
+        pendingBoat,
+        commanderRecord({ sequence: 2, arm: "B", planID }),
+      ]),
+      armRun("C"),
+    ]);
+    expect(
+      firstTriplet(pending).arms.B.metrics.effectAudit.delayedPending,
+    ).toBe(1);
+    expect(firstTriplet(pending).integrity.valid).toBe(true);
+    expect(pending.performanceEligibility.reasons).toContain(
+      "triplet-1: Arm B has an unresolved bounded delayed-effect audit",
+    );
+
+    const expiredBoat = commanderBoatRecord({
+      sequence: 1,
+      arm: "B",
+      planID,
+      planInstalled: true,
+    });
+    const expired = buildCommanderArmReport([
+      armRun("A"),
+      armRun("B", [
+        expiredBoat,
+        commanderRecord({ sequence: 2, arm: "B", planID }),
+        commanderRecord({ sequence: 3, arm: "B", planID }),
+      ]),
+      armRun("C"),
+    ]);
+    expect(
+      firstTriplet(expired).arms.B.metrics.effectAudit.delayedExpired,
+    ).toBe(1);
+    expect(tripletInvalidations(expired)).toContain(
+      "Arm B failed immediate or bounded delayed-effect audit proof",
+    );
+  });
+
+  it("does not confirm a boat from unrelated later troop loss", () => {
+    const planID = "B-boat-plan";
+    const pendingBoat = commanderBoatRecord({
+      sequence: 1,
+      arm: "B",
+      planID,
+      planInstalled: true,
+    });
+    const unrelatedAttack = commanderRecord({
+      sequence: 2,
+      arm: "B",
+      planID,
+    });
+    showUnrelatedTroopLossWithoutTransport(unrelatedAttack, 9_000);
+    const pending = buildCommanderArmReport([
+      armRun("A"),
+      armRun("B", [pendingBoat, unrelatedAttack]),
+      armRun("C"),
+    ]);
+    expect(firstTriplet(pending).arms.B.metrics.effectAudit).toMatchObject({
+      delayedConfirmed: 0,
+      delayedPending: 1,
+      delayedExpired: 0,
+    });
+
+    const secondUnrelatedAttack = commanderRecord({
+      sequence: 3,
+      arm: "B",
+      planID,
+    });
+    showUnrelatedTroopLossWithoutTransport(secondUnrelatedAttack, 8_000);
+    const expired = buildCommanderArmReport([
+      armRun("A"),
+      armRun("B", [pendingBoat, unrelatedAttack, secondUnrelatedAttack]),
+      armRun("C"),
+    ]);
+    expect(firstTriplet(expired).arms.B.metrics.effectAudit).toMatchObject({
+      delayedConfirmed: 0,
+      delayedPending: 0,
+      delayedExpired: 1,
+    });
+  });
+
+  it("still rejects a rejected, mutated-intent, or explicitly failed delayed boat", () => {
+    const variants = [
+      {
+        label: "rejected",
+        mutate: (record: AgentDecisionRecord) => {
+          record.result.accepted = false;
+        },
+        reason:
+          "Arm B failed offered-id, acceptance, or submitted-intent proof",
+      },
+      {
+        label: "mutated intent",
+        mutate: (record: AgentDecisionRecord) => {
+          record.result.submittedIntent = {
+            type: "boat",
+            troops: 100,
+            dst: 999,
+          };
+        },
+        reason:
+          "Arm B failed offered-id, acceptance, or submitted-intent proof",
+      },
+      {
+        label: "failed effect",
+        mutate: (record: AgentDecisionRecord) => {
+          record.audit!.auditStatus = "failed";
+        },
+        reason: "Arm B failed immediate or bounded delayed-effect audit proof",
+      },
+    ];
+    for (const variant of variants) {
+      const boat = commanderBoatRecord({
+        sequence: 1,
+        arm: "B",
+        planID: "B-boat-plan",
+        planInstalled: true,
+      });
+      variant.mutate(boat);
+      const report = buildCommanderArmReport([
+        armRun("A"),
+        armRun("B", [
+          boat,
+          commanderRecord({
+            sequence: 2,
+            arm: "B",
+            planID: "B-boat-plan",
+          }),
+          commanderRecord({
+            sequence: 3,
+            arm: "B",
+            planID: "B-boat-plan",
+          }),
+        ]),
+        armRun("C"),
+      ]);
+      expect(tripletInvalidations(report), variant.label).toContain(
+        variant.reason,
+      );
+    }
+  });
+
+  it("invalidates forged aligned metadata for every off-family or off-target action shape", () => {
+    const cases = [
+      { label: "off-target pressure", objective: "pressure_rival:P7" },
+      { label: "economy hostility", objective: "develop_economy" },
+      { label: "expand hostility", objective: "expand" },
+      { label: "survive hostility", objective: "survive" },
+    ];
+    for (const entry of cases) {
+      const record = commanderRecord({
+        sequence: 1,
+        arm: "B",
+        planInstalled: true,
+        replanReason: "no_active_plan",
+        selected: entry.objective,
+      });
+      record.chosenActionID = "attack:P3:25";
+      record.chosenActionKind = "attack";
+      record.chosenActionMetadata = {
+        targetID: "P3",
+        expansion: false,
+      };
+      record.intent = { type: "attack", targetID: "P3", troops: 100 };
+      record.result.submittedIntent = record.intent;
+      record.legalActionIDs = [record.chosenActionID];
+      record.legalActionIDsByKind = { attack: [record.chosenActionID] };
+      record.decisionMetadata!.batchActionIDs = record.chosenActionID;
+      const report = buildCommanderArmReport([
+        armRun("A"),
+        armRun("B", [record]),
+        armRun("C"),
+      ]);
+      expect(
+        firstTriplet(report).arms.B.metrics.offFamilyActionViolations,
+        entry.label,
+      ).toBe(1);
+      expect(
+        firstTriplet(report).arms.B.metrics.zeroPrimaryDecisionCycles,
+        entry.label,
+      ).toBe(1);
+      expect(tripletInvalidations(report), entry.label).toContain(
+        "Arm B executed an action incompatible with its Commander plan",
+      );
+      expect(
+        firstTriplet(report).terminalPerformanceEligibility
+          .ineligibilityReasons,
+        entry.label,
+      ).toContain(
+        "triplet integrity is invalid; per-protocol terminal outcomes require structurally valid evidence",
+      );
+      expect(report.aggregate.includedTripletIDs, entry.label).toEqual([]);
+      expect(report.aggregate.excludedTripletIDs, entry.label).toEqual([
+        "triplet-1",
+      ]);
+    }
+
+    const unrelatedSupport = commanderPressureCycle({
+      sequence: 1,
+      arm: "B",
+      planID: "B-pressure-plan",
+      supportTargetPlayerID: "P3",
+    });
+    const unrelatedReport = buildCommanderArmReport([
+      armRun("A"),
+      armRun("B", unrelatedSupport),
+      armRun("C"),
+    ]);
+    expect(
+      firstTriplet(unrelatedReport).arms.B.metrics.laterLayerActionViolations,
+    ).toBe(1);
+    expect(
+      firstTriplet(unrelatedReport).arms.B.metrics.supportActionCount,
+    ).toBe(0);
+    expect(tripletInvalidations(unrelatedReport)).toContain(
+      "Arm B executed an invalid later-layer Commander action",
+    );
+  });
+
+  it("uses cycle-level fidelity so support cannot dilute blocked cycles above five percent", () => {
+    const records: AgentDecisionRecord[] = [];
+    let sequence = 1;
+    let previousPlanID: string | null = null;
+    for (let index = 0; index < 37; index++) {
+      const planID = `B-pressure-${index}`;
+      records.push(
+        ...commanderPressureCycle({
+          sequence,
+          arm: "B",
+          planID,
+          previousPlanID,
+          replanReason: index === 0 ? "no_active_plan" : "horizon_expiry",
+        }),
+      );
+      sequence += 2;
+      previousPlanID = planID;
+    }
+    for (let index = 0; index < 2; index++) {
+      const planID = `B-blocked-${index}`;
+      records.push(
+        commanderRecord({
+          sequence: sequence++,
+          arm: "B",
+          planID,
+          planInstalled: true,
+          selected: "pressure_rival:P7",
+          fidelity: "hold_plan_blocked",
+          previousPlanID,
+          replanReason: "horizon_expiry",
+        }),
+      );
+      previousPlanID = planID;
+    }
+    const report = buildCommanderArmReport([
+      armRun("A"),
+      armRun("B", records),
+      armRun("C"),
+    ]);
+    const metrics = firstTriplet(report).arms.B.metrics;
+    expect(metrics.supportActionCount).toBe(37);
+    expect(metrics.blockedDecisionCycles).toEqual({
+      count: 2,
+      opportunities: 39,
+      rate: 2 / 39,
+    });
+    expect(metrics.strategicFidelity).toBe(37 / 39);
+    expect(report.performanceEligibility.reasons).toContain(
+      "triplet-1: Arm B blocked Commander cycles exceed 5 percent",
+    );
+  });
+
+  it("applies the 50 percent option_not_executable dominance falsifier", () => {
+    const optionNotExecutableBatch = commanderPressureCycle({
+      sequence: 2,
+      arm: "B",
+      planID: "B-plan-2",
+      previousPlanID: "B-plan-1",
+      replanReason: "option_not_executable",
+    });
+    optionNotExecutableBatch[1]!.decisionMetadata!.commanderReplanReason =
+      "option_not_executable";
+    const records = [
+      commanderRecord({
+        sequence: 1,
+        arm: "B",
+        planID: "B-plan-1",
+        planInstalled: true,
+        replanReason: "no_active_plan",
+      }),
+      ...optionNotExecutableBatch,
+      commanderRecord({
+        sequence: 4,
+        arm: "B",
+        planID: "B-plan-3",
+        planInstalled: true,
+        previousPlanID: "B-plan-2",
+        replanReason: "horizon_expiry",
+      }),
+    ];
+    const report = buildCommanderArmReport([
+      armRun("A"),
+      armRun("B", records),
+      armRun("C"),
+    ]);
+    expect(
+      firstTriplet(report).arms.B.metrics.optionNotExecutableReplans,
+    ).toEqual({ count: 1, opportunities: 2, rate: 0.5, dominates: true });
+    expect(report.performanceEligibility.reasons).toContain(
+      "triplet-1: Arm B option_not_executable reaches the preregistered 50 percent non-bootstrap replan threshold",
     );
   });
 
@@ -767,6 +1303,27 @@ describe("CommanderArmReport Stage 5 arithmetic and invalidation", () => {
     );
     try {
       const runs = [armRun("A"), armRun("B"), armRun("C")];
+      const durableBoat = commanderBoatRecord({
+        sequence: 1,
+        arm: "B",
+        planID: "B-durable-boat-plan",
+        planInstalled: true,
+      });
+      const durableBoatConfirmation = commanderRecord({
+        sequence: 2,
+        arm: "B",
+        planID: "B-durable-boat-plan",
+      });
+      showTransport(durableBoatConfirmation, 1);
+      runs[1] = armRun("B", [
+        durableBoat,
+        durableBoatConfirmation,
+        commanderRecord({
+          sequence: 3,
+          arm: "B",
+          planID: "B-durable-boat-plan",
+        }),
+      ]);
       const matchID = commanderGameIDFromSeed(runs[0]!.seed);
       const manifestPaths = await Promise.all(
         runs.map((run) =>
@@ -830,7 +1387,24 @@ describe("CommanderArmReport Stage 5 arithmetic and invalidation", () => {
       ) as CommanderArmReport;
 
       expect(parsed).toEqual(persisted.report);
-      expect(parsed.integrity.valid).toBe(true);
+      expect(parsed.integrity).toEqual({
+        valid: true,
+        invalidationReasons: [],
+      });
+      expect(parsed.triplets[0]!.arms.B.metrics.effectAudit).toMatchObject({
+        delayedConfirmed: 1,
+        delayedPending: 0,
+        delayedExpired: 0,
+      });
+      const reloadedArmB = await loadCommanderArmRunFromArtifacts(
+        manifestPaths[1]!,
+        comparisonDirectory,
+      );
+      const reloadedBoat = reloadedArmB.records.find(
+        (record) => record.chosenActionKind === "boat",
+      );
+      expect(reloadedBoat?.audit?.before).toEqual(durableBoat.audit?.before);
+      expect(reloadedBoat?.audit?.after).toEqual(durableBoat.audit?.after);
       expect(parsed.triplets[0]!.arms.C.artifactProvenance).toMatchObject({
         writer: "AgentDecisionLogWriter.writeAgentLeagueRunArtifacts",
         decisionsSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
@@ -891,6 +1465,21 @@ describe("CommanderArmReport Stage 5 arithmetic and invalidation", () => {
       };
       const selectActive = (entry: Record<string, unknown>) =>
         entry.selectedActionKind !== "spawn";
+      const restoreUnknownAuditField = await mutatePersistedDecision(
+        manifestPaths[1]!,
+        (entry) => entry.selectedActionKind === "boat",
+        (entry) => {
+          const snapshot = entry.auditAfter as Record<string, unknown>;
+          snapshot.privateCanary = "must-not-project";
+        },
+      );
+      await expect(
+        loadCommanderArmRunFromArtifacts(
+          manifestPaths[1]!,
+          comparisonDirectory,
+        ),
+      ).rejects.toThrow("auditAfter has unknown fields");
+      await restoreUnknownAuditField();
       const restoreRejectedActive = await mutatePersistedDecision(
         manifestPaths[1]!,
         selectActive,
@@ -923,8 +1512,8 @@ describe("CommanderArmReport Stage 5 arithmetic and invalidation", () => {
         forgedArtifactReport.triplets[0]!.integrity.invalidationReasons,
       ).toEqual(
         expect.arrayContaining([
-          "Arm B failed offered-id, acceptance, submitted-intent, or step-locked audit proof",
-          "Arm C failed offered-id, acceptance, submitted-intent, or step-locked audit proof",
+          "Arm B failed offered-id, acceptance, or submitted-intent proof",
+          "Arm C failed offered-id, acceptance, or submitted-intent proof",
         ]),
       );
       await Promise.all([restoreRejectedActive(), restoreNullActive()]);
@@ -982,12 +1571,19 @@ describe("CommanderArmReport Stage 5 arithmetic and invalidation", () => {
         expect(
           mutatedReport.triplets[0]!.arms.A.metrics.canonicalPathViolations,
           mutation.label,
-        ).toBe(1);
+        ).toBe(mutation.label === "unknown audit" ? 0 : 1);
+        expect(
+          mutatedReport.triplets[0]!.arms.A.metrics.effectAudit
+            .immediateViolations,
+          mutation.label,
+        ).toBe(mutation.label === "unknown audit" ? 1 : 0);
         expect(
           mutatedReport.triplets[0]!.integrity.invalidationReasons,
           mutation.label,
         ).toContain(
-          "Arm A failed offered-id, acceptance, submitted-intent, or step-locked audit proof",
+          mutation.label === "unknown audit"
+            ? "Arm A failed immediate or bounded delayed-effect audit proof"
+            : "Arm A failed offered-id, acceptance, or submitted-intent proof",
         );
         await restore();
       }
@@ -1262,6 +1858,72 @@ describe("CommanderArmReport Stage 5 arithmetic and invalidation", () => {
     });
   });
 
+  it("excludes an entire triplet for one early C fallback even below the old ten-percent rate", () => {
+    const first = performanceTriplet({
+      tripletID: "replica-1",
+      seed: "seed-1",
+      subjectWins: {},
+    });
+    const second = performanceTriplet({
+      tripletID: "replica-2",
+      seed: "seed-2",
+      subjectWins: {},
+    });
+    const c = first.find((run) => run.arm === "C")!;
+    const spawnRows = c.records.filter(
+      (record) => record.chosenActionKind === "spawn",
+    );
+    const records: AgentDecisionRecord[] = [];
+    let previousPlanID: string | null = null;
+    for (let index = 0; index < 11; index++) {
+      const planID = `C-plan-${index}`;
+      records.push(
+        commanderRecord({
+          sequence: index + 1,
+          arm: "C",
+          planID,
+          planInstalled: true,
+          fallback: index === 0,
+          failureKind: index === 0 ? "timeout" : null,
+          previousPlanID,
+          replanReason: index === 0 ? "no_active_plan" : "horizon_expiry",
+        }),
+      );
+      previousPlanID = planID;
+    }
+    for (const record of records) {
+      record.decisionMetadata!.commanderSelectorProvider = c.provider;
+      record.decisionMetadata!.commanderSelectorModel = c.model;
+      record.decisionMetadata!.commanderPromptVersion = c.promptVersion;
+      record.decisionMetadata!.commanderExperimentProvider = c.provider;
+      record.decisionMetadata!.commanderExperimentModel = c.model;
+      record.decisionMetadata!.commanderExperimentPromptVersion =
+        c.promptVersion;
+    }
+    c.records = [...spawnRows, ...records];
+
+    const report = buildCommanderArmReport([...first, ...second]);
+    const triplet = report.triplets.find(
+      (candidate) => candidate.tripletID === "replica-1",
+    )!;
+    expect(triplet.arms.C.metrics.fallbackAuthoredPlans).toBe(1);
+    expect(
+      triplet.arms.C.metrics.fallbackAuthoredPlans /
+        triplet.arms.C.metrics.planCount,
+    ).toBeLessThan(0.1);
+    expect(triplet.terminalPerformanceEligibility).toEqual({
+      estimand: "per-protocol",
+      eligible: false,
+      ineligibilityReasons: expect.arrayContaining([
+        "Arm C contains a fallback-authored plan; per-protocol terminal outcomes require zero",
+        "Arm C contains a selector timeout; per-protocol terminal outcomes require zero",
+      ]),
+    });
+    expect(report.aggregate.includedTripletIDs).toEqual(["replica-2"]);
+    expect(report.aggregate.excludedTripletIDs).toEqual(["replica-1"]);
+    expect(report.performanceClaimsAllowed).toBe(false);
+  });
+
   it("keeps relabeled mock, partial, single-triplet, and autopilot outcomes ineligible", () => {
     const single = performanceTriplet({
       tripletID: "replica-1",
@@ -1291,7 +1953,7 @@ describe("CommanderArmReport Stage 5 arithmetic and invalidation", () => {
     );
     expect(report.performanceEligibility.reasons).toEqual(
       expect.arrayContaining([
-        "fewer than 2 replicated matched triplets",
+        "fewer than 2 uncontaminated per-protocol matched triplets",
         "one or more arms lack a completed winner-determined match",
         "one or more final outcomes were contaminated by autopilot",
         "provider/model provenance is missing, mock, or scripted",
@@ -1334,18 +1996,12 @@ describe("CommanderArmReport Stage 5 arithmetic and invalidation", () => {
     expect(firstTriplet(report).arms.B.metrics.fidelityCounts.emergency).toBe(
       1,
     );
-    expect(
-      firstTriplet(report).arms.C.metrics.planPrimaryActionViolations,
-    ).toBe(1);
-    expect(
-      firstTriplet(report).arms.C.metrics.planSupportActionViolations,
-    ).toBe(1);
+    expect(firstTriplet(report).arms.C.metrics.fidelityStampViolations).toBe(2);
     expect(tripletInvalidations(report)).toEqual(
       expect.arrayContaining([
         "Arm B used a forbidden V0 emergency action",
         "Arm B option accounting is invalid",
-        "Arm C has a plan without a primary action",
-        "Arm C has more than one support action in a plan",
+        "Arm C Commander fidelity stamp disagrees with recomputation",
       ]),
     );
   });
@@ -1432,6 +2088,39 @@ describe("CommanderArmReport Stage 5 arithmetic and invalidation", () => {
     expect(tripletInvalidations(invalid)).toContain(
       "Arm C applied or retained stale-response evidence",
     );
+
+    const continuingAppliedStale = commanderRecord({
+      sequence: 2,
+      arm: "C",
+      planID: "C-live",
+      replanReason: "within_horizon",
+    });
+    continuingAppliedStale.decisionMetadata!.commanderResponseDisposition =
+      "applied";
+    continuingAppliedStale.decisionMetadata!.commanderRejectionCode =
+      "decision_sequence_stale";
+    const continuingInvalid = buildCommanderArmReport([
+      armRun("A"),
+      armRun("B"),
+      armRun("C", [live, continuingAppliedStale]),
+    ]);
+    const continuingTriplet = firstTriplet(continuingInvalid);
+    expect(continuingTriplet.arms.C.metrics.fallbackAuthoredPlans).toBe(0);
+    expect(continuingTriplet.arms.C.metrics.staleRejectedAttempts).toBe(0);
+    expect(continuingTriplet.arms.C.metrics.staleAuthorityViolations).toBe(1);
+    expect(continuingTriplet.integrity.valid).toBe(false);
+    expect(continuingTriplet.terminalPerformanceEligibility).toEqual({
+      estimand: "per-protocol",
+      eligible: false,
+      ineligibilityReasons: expect.arrayContaining([
+        "triplet integrity is invalid; per-protocol terminal outcomes require structurally valid evidence",
+        "Arm C applied or retained stale selector authority; per-protocol terminal outcomes require zero",
+      ]),
+    });
+    expect(continuingInvalid.aggregate.includedTripletIDs).toEqual([]);
+    expect(continuingInvalid.aggregate.excludedTripletIDs).toEqual([
+      "triplet-1",
+    ]);
   });
 
   it("classifies a real stale fallback lifecycle continuation as fallback, not retained stale authority", () => {
@@ -1523,6 +2212,14 @@ describe("CommanderArmReport Stage 5 arithmetic and invalidation", () => {
     expect(tripletInvalidations(report)).not.toContain(
       "Arm C applied or retained stale-response evidence",
     );
+    expect(
+      firstTriplet(report).terminalPerformanceEligibility.ineligibilityReasons,
+    ).toEqual(
+      expect.arrayContaining([
+        "Arm C contains a fallback-authored plan; per-protocol terminal outcomes require zero",
+        "Arm C contains a stale selector attempt; per-protocol terminal outcomes require zero",
+      ]),
+    );
 
     for (const record of records) {
       record.decisionMetadata!.plannerFallbackUsed = false;
@@ -1551,10 +2248,23 @@ describe("CommanderArmReport Stage 5 arithmetic and invalidation", () => {
     );
   });
 
-  it("independently excludes timeout and parse fallback plans when both fallback stamps are forged off", () => {
-    for (const [failureKind, degradedCause] of [
-      ["timeout", "plan-timeout"],
-      ["parse", "plan-parse"],
+  it("independently excludes timeout, parse, and transport fallback plans when both fallback stamps are forged off", () => {
+    for (const [failureKind, degradedCause, terminalReason] of [
+      [
+        "timeout",
+        "plan-timeout",
+        "Arm C contains a selector timeout; per-protocol terminal outcomes require zero",
+      ],
+      [
+        "parse",
+        "plan-parse",
+        "Arm C contains a selector parse failure; per-protocol terminal outcomes require zero",
+      ],
+      [
+        "transport",
+        "plan-transport",
+        "Arm C contains a selector transport failure; per-protocol terminal outcomes require zero",
+      ],
     ] as const) {
       const record = commanderRecord({
         sequence: 1,
@@ -1584,6 +2294,11 @@ describe("CommanderArmReport Stage 5 arithmetic and invalidation", () => {
       expect(tripletInvalidations(report), failureKind).toContain(
         "Arm C fallback plan provenance is inconsistent",
       );
+      expect(
+        firstTriplet(report).terminalPerformanceEligibility
+          .ineligibilityReasons,
+        failureKind,
+      ).toContain(terminalReason);
     }
   });
 
@@ -1692,8 +2407,8 @@ describe("CommanderArmReport Stage 5 arithmetic and invalidation", () => {
     expect(firstTriplet(report).arms.C.metrics.canonicalPathViolations).toBe(1);
     expect(tripletInvalidations(report)).toEqual(
       expect.arrayContaining([
-        "Arm B failed offered-id, acceptance, submitted-intent, or step-locked audit proof",
-        "Arm C failed offered-id, acceptance, submitted-intent, or step-locked audit proof",
+        "Arm B failed offered-id, acceptance, or submitted-intent proof",
+        "Arm C failed offered-id, acceptance, or submitted-intent proof",
       ]),
     );
   });

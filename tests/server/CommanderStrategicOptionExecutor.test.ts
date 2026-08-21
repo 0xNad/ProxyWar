@@ -13,7 +13,10 @@ import {
   commanderHardEmergencyConditions,
   executeStrategicOption,
 } from "../../src/server/agents/StrategicOptionExecutor";
-import { summarizeCommanderFidelity } from "../../src/server/agents/StrategicOptionFidelity";
+import {
+  summarizeCommanderFidelity,
+  type CommanderFidelityRecord,
+} from "../../src/server/agents/StrategicOptionFidelity";
 import {
   makeCommanderStage2Fixture,
   RAW_ATTACK_ACTION_ID,
@@ -470,40 +473,102 @@ describe("StrategicOptionExecutor — binding-first authority", () => {
   });
 });
 
+function fidelityRecord(input: {
+  sequence: number;
+  planID?: string;
+  objective?: string;
+  action: LegalAction;
+  batchIndex?: number;
+  batchActions?: LegalAction[];
+  planAge?: number;
+  stamp?: string;
+  accepted?: boolean;
+  previousPlanID?: string | null;
+  replanReason?: string;
+}): CommanderFidelityRecord {
+  const batchActions = input.batchActions ?? [input.action];
+  return {
+    agentID: "agent-a",
+    sequence: input.sequence,
+    legalActionIDs: batchActions.map((action) => action.id),
+    chosenActionID: input.action.id,
+    chosenActionKind: input.action.kind,
+    chosenActionMetadata: input.action.metadata,
+    intent: input.action.intent,
+    result: {
+      accepted: input.accepted ?? true,
+      submittedIntent: input.accepted === false ? null : input.action.intent,
+    },
+    decisionMetadata: {
+      planID: input.planID ?? "plan-a",
+      planObjective: input.objective ?? "expand",
+      commanderFidelity: input.stamp ?? "aligned_primary",
+      commanderPlanAgeDecisions: input.planAge ?? 0,
+      batchIndex: input.batchIndex ?? 0,
+      batchSize: batchActions.length,
+      batchActionIDs: batchActions.map((action) => action.id).join(","),
+      commanderPreviousPlanID: input.previousPlanID ?? null,
+      commanderReplanReason: input.replanReason ?? "within_horizon",
+    },
+  };
+}
+
 describe("StrategicOptionFidelity", () => {
-  it("fails closed on missing or unknown classifications and excludes emergencies", () => {
+  const expansion = () =>
+    input().legalActions.find(
+      (action) => action.id === RAW_EXPANSION_ACTION_ID,
+    )!;
+  const pressure = () =>
+    input().legalActions.find((action) => action.id === RAW_ATTACK_ACTION_ID)!;
+  const economy = () =>
+    input().legalActions.find((action) => action.id === RAW_BUILD_ACTION_ID)!;
+  const hold = () =>
+    input().legalActions.find((action) => action.id === HOLD_ID)!;
+  const support = (): LegalAction => ({
+    id: "embargo:P7:start",
+    kind: "embargo",
+    label: "embargo P7",
+    intent: { type: "embargo", targetID: "P7", action: "start" },
+    risk: { level: "low" },
+    metadata: { targetID: "P7", action: "start" },
+  });
+
+  it("recomputes primary, support, blocked, and emergency classes without trusting stamps", () => {
+    const primary = pressure();
+    const sameTargetSupport = support();
     const summary = summarizeCommanderFidelity([
-      {
-        decisionMetadata: {
-          planID: "plan-a",
-          commanderFidelity: "aligned_primary",
-        },
-      },
-      {
-        decisionMetadata: {
-          planID: "plan-a",
-          commanderFidelity: "aligned_support",
-        },
-      },
-      {
-        decisionMetadata: {
-          planID: "plan-a",
-          commanderFidelity: "hold_plan_blocked",
-        },
-      },
-      {
-        decisionMetadata: {
-          planID: "plan-a",
-          commanderFidelity: "hard_emergency_override",
-        },
-      },
-      {
-        decisionMetadata: {
-          planID: "plan-a",
-          commanderFidelity: "invented",
-        },
-      },
-      { decisionMetadata: { planID: "plan-a" } },
+      fidelityRecord({
+        sequence: 1,
+        objective: "pressure_rival:P7",
+        action: primary,
+        batchActions: [primary, sameTargetSupport],
+      }),
+      fidelityRecord({
+        sequence: 2,
+        objective: "pressure_rival:P7",
+        action: sameTargetSupport,
+        batchIndex: 1,
+        batchActions: [primary, sameTargetSupport],
+        stamp: "aligned_support",
+      }),
+      fidelityRecord({
+        sequence: 3,
+        planID: "plan-b",
+        objective: "expand",
+        action: hold(),
+        stamp: "hold_plan_blocked",
+        previousPlanID: "plan-a",
+        replanReason: "horizon_expiry",
+      }),
+      fidelityRecord({
+        sequence: 4,
+        planID: "plan-c",
+        objective: "develop_economy",
+        action: economy(),
+        stamp: "hard_emergency_override",
+        previousPlanID: "plan-b",
+        replanReason: "horizon_expiry",
+      }),
     ]);
     expect(summary.counts).toEqual({
       aligned_primary: 1,
@@ -511,122 +576,162 @@ describe("StrategicOptionFidelity", () => {
       hard_emergency_override: 1,
       hold_plan_blocked: 1,
     });
-    expect(summary.fidelityRate).toBeCloseTo(2 / 3);
-    expect(summary.unknownDecisions).toBe(2);
+    expect(summary.primaryDecisionCycles).toBe(3);
+    expect(summary.supportActions).toBe(1);
+    expect(summary.fidelityRate).toBe(0.5);
     expect(summary.interpretable).toBe(false);
   });
 
-  it("treats zero denominator as unknown rather than perfect", () => {
-    expect(
-      summarizeCommanderFidelity([
-        {
-          decisionMetadata: {
-            planID: "plan-a",
-            commanderFidelity: "hard_emergency_override",
-          },
-        },
-      ]),
-    ).toMatchObject({ fidelityRate: null, interpretable: false });
+  it("rejects forged aligned stamps on off-target and off-family actions", () => {
+    const offTarget = hostileAttack("attack:P3", "P3", 999);
+    const cases = [
+      fidelityRecord({
+        sequence: 1,
+        objective: "pressure_rival:P7",
+        action: offTarget,
+      }),
+      fidelityRecord({
+        sequence: 2,
+        planID: "economy",
+        objective: "develop_economy",
+        action: offTarget,
+      }),
+      fidelityRecord({
+        sequence: 3,
+        planID: "expand",
+        objective: "expand",
+        action: offTarget,
+      }),
+      fidelityRecord({
+        sequence: 4,
+        planID: "survive",
+        objective: "survive",
+        action: offTarget,
+      }),
+    ];
+    const summary = summarizeCommanderFidelity(cases);
+    expect(summary.counts.aligned_primary).toBe(0);
+    expect(summary.offFamilyActionViolations).toBe(4);
+    expect(summary.zeroPrimaryDecisionCycles).toBe(4);
+    expect(summary.fidelityStampViolations).toBe(4);
+    expect(summary.interpretable).toBe(false);
   });
 
-  it("counts zero-aligned plans and fails closed on silent replacement", () => {
+  it("rejects unrelated or late support and detects support dilution", () => {
+    const primary = pressure();
+    const unrelated = {
+      ...support(),
+      id: "embargo:P3:start",
+      intent: { type: "embargo", targetID: "P3", action: "start" } as const,
+      metadata: { targetID: "P3", action: "start" },
+    } satisfies LegalAction;
+    const records = [
+      fidelityRecord({
+        sequence: 1,
+        objective: "pressure_rival:P7",
+        action: primary,
+        batchActions: [primary, unrelated],
+      }),
+      fidelityRecord({
+        sequence: 2,
+        objective: "pressure_rival:P7",
+        action: unrelated,
+        batchIndex: 1,
+        batchActions: [primary, unrelated],
+        stamp: "aligned_support",
+      }),
+    ];
+    const summary = summarizeCommanderFidelity(records);
+    expect(summary.laterLayerActionViolations).toBe(1);
+    expect(summary.offFamilyActionViolations).toBe(1);
+    expect(summary.supportActions).toBe(0);
+    expect(summary.interpretable).toBe(false);
+  });
+
+  it("counts cycles, blocked rate, and option_not_executable dominance", () => {
+    const records = Array.from({ length: 20 }, (_unused, index) =>
+      fidelityRecord({
+        sequence: index + 1,
+        action: index < 18 ? expansion() : hold(),
+        stamp: index < 18 ? "aligned_primary" : "hold_plan_blocked",
+        replanReason:
+          index === 18
+            ? "option_not_executable"
+            : index === 19
+              ? "horizon_expiry"
+              : "within_horizon",
+      }),
+    );
+    const summary = summarizeCommanderFidelity(records);
+    expect(summary.fidelityRate).toBe(0.9);
+    expect(summary.blockedCycleRate).toBe(0.1);
+    expect(summary.optionNotExecutableReplans).toEqual({
+      count: 1,
+      opportunities: 2,
+      rate: 0.5,
+      dominates: true,
+    });
+    expect(summary.interpretable).toBe(false);
+  });
+
+  it("counts a multi-action batch once in option_not_executable dominance", () => {
+    const primary = pressure();
+    const sameTargetSupport = support();
+    const batch = [primary, sameTargetSupport];
     const summary = summarizeCommanderFidelity([
-      {
-        decisionMetadata: {
-          planID: "plan-a",
-          commanderFidelity: "aligned_primary",
-        },
-      },
-      {
-        decisionMetadata: {
-          planID: "plan-b",
-          commanderPreviousPlanID: "plan-a",
-          commanderReplanReason: "horizon_expiry",
-          commanderFidelity: "hold_plan_blocked",
-        },
-      },
-      {
-        decisionMetadata: {
-          planID: "plan-c",
-          commanderPreviousPlanID: "plan-b",
-          commanderFidelity: "aligned_primary",
-        },
-      },
+      fidelityRecord({
+        sequence: 1,
+        objective: "pressure_rival:P7",
+        action: primary,
+        batchActions: batch,
+        replanReason: "option_not_executable",
+      }),
+      fidelityRecord({
+        sequence: 2,
+        objective: "pressure_rival:P7",
+        action: sameTargetSupport,
+        batchIndex: 1,
+        batchActions: batch,
+        stamp: "aligned_support",
+        replanReason: "option_not_executable",
+      }),
+      fidelityRecord({
+        sequence: 3,
+        planID: "plan-b",
+        action: expansion(),
+        previousPlanID: "plan-a",
+        replanReason: "horizon_expiry",
+      }),
     ]);
-    expect(summary).toMatchObject({
-      actionsUnderCommanderPlans: 3,
-      planCount: 3,
-      plansWithZeroAlignedActions: 1,
-      planTransitions: 2,
-      silentlyAbandonedPlans: 1,
-      interpretable: false,
+
+    expect(summary.optionNotExecutableReplans).toEqual({
+      count: 1,
+      opportunities: 2,
+      rate: 0.5,
+      dominates: true,
     });
   });
 
   it("does not count engine-rejected actions as executed fidelity", () => {
     const summary = summarizeCommanderFidelity([
-      {
-        decisionMetadata: {
-          planID: "plan-a",
-          commanderFidelity: "aligned_primary",
-        },
-        result: { accepted: false },
-      },
-      {
-        decisionMetadata: {
-          planID: "plan-a",
-          commanderFidelity: "aligned_support",
-        },
-        result: { accepted: false },
-      },
-    ]);
-    expect(summary).toMatchObject({
-      actionsUnderCommanderPlans: 0,
-      classifiedDecisions: 0,
-      rejectedDecisions: 2,
-      planCount: 1,
-      plansWithZeroAlignedActions: 1,
-      fidelityRate: null,
-      interpretable: false,
-    });
-  });
-
-  it("never derives a negative action count from rejected unattributed records", () => {
-    const summary = summarizeCommanderFidelity([
-      {
-        agentID: "agent-a",
-        sequence: 1,
-        decisionMetadata: { commanderFidelity: "aligned_primary" },
-        result: { accepted: false },
-      },
+      fidelityRecord({ sequence: 1, action: expansion(), accepted: false }),
     ]);
     expect(summary).toMatchObject({
       actionsUnderCommanderPlans: 0,
       classifiedDecisions: 0,
       rejectedDecisions: 1,
-      unattributedDecisions: 1,
+      planCount: 1,
+      plansWithZeroAlignedActions: 1,
+      fidelityRate: 0,
+      zeroPrimaryDecisionCycles: 1,
       interpretable: false,
     });
   });
 
   it("detects an unstamped direct plan switch from ordered records", () => {
     const summary = summarizeCommanderFidelity([
-      {
-        agentID: "agent-a",
-        sequence: 10,
-        decisionMetadata: {
-          planID: "plan-a",
-          commanderFidelity: "aligned_primary",
-        },
-      },
-      {
-        agentID: "agent-a",
-        sequence: 11,
-        decisionMetadata: {
-          planID: "plan-b",
-          commanderFidelity: "aligned_primary",
-        },
-      },
+      fidelityRecord({ sequence: 10, planID: "plan-a", action: expansion() }),
+      fidelityRecord({ sequence: 11, planID: "plan-b", action: expansion() }),
     ]);
     expect(summary).toMatchObject({
       planTransitions: 1,
