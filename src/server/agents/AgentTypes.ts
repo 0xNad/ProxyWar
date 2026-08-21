@@ -21,14 +21,28 @@ export type AgentBrainType =
   | "planner-executor"
   | "llm";
 
-export type AgentRuntimeMode =
-  | "local-policy-baseline"
-  | "mock-policy-planner"
-  | "llm-policy-planner"
-  | "llm-action-selector"
+export const agentRuntimeModes = [
+  "local-policy-baseline",
+  "mock-policy-planner",
+  "llm-policy-planner",
+  "llm-action-selector",
   /** Labeled deterministic autopilot that plays out a capped endgame; decisions
    * under this mode are never model play and must never be presented as such. */
-  | "autopilot-executor";
+  "autopilot-executor",
+] as const;
+
+export type AgentRuntimeMode = (typeof agentRuntimeModes)[number];
+
+/**
+ * Strict parser for runtime attribution crossing an untrusted metadata or
+ * wire boundary. Deliberately no trimming, case folding, or coercion: an
+ * almost-right label is unknown, not evidence for one of the five modes.
+ */
+export function normalizeAgentRuntimeMode(
+  value: unknown,
+): AgentRuntimeMode | undefined {
+  return agentRuntimeModes.find((mode) => mode === value);
+}
 
 export type AgentGamePhase =
   | "lobby"

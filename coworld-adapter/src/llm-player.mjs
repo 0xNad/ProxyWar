@@ -274,6 +274,7 @@ async function main() {
           type: "decision_response",
           requestID: message.requestID,
           selectedLegalActionId: spawnPreferences[0].id,
+          runtimeMode: "llm-action-selector",
           spawnPreferenceLegalActionIds: spawnPreferences.map(
             (preference) => preference.id,
           ),
@@ -312,6 +313,7 @@ async function main() {
         type: "decision_response",
         requestID: message.requestID,
         selectedLegalActionId: decision.selectedLegalActionId,
+        runtimeMode: "llm-action-selector",
         reason: decision.reason ?? "starter-agent",
         confidence: decision.confidence ?? 0.7,
         ...(degraded ? { fallbackUsed: true, llmPlannerDegraded: true } : {}),

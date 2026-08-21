@@ -188,6 +188,10 @@ describe("Coworld keystone player", () => {
     const elapsedMs = Date.now() - startedAt;
 
     expect(["spawn:10", "hold:wait"]).toContain(decision.actionID);
+    expect(decision.metadata?.runtimeMode).toBe("mock-policy-planner");
+    expect(decisionToResponse("req_mock", decision).runtimeMode).toBe(
+      "mock-policy-planner",
+    );
     expect(elapsedMs).toBeLessThan(2000);
   });
 
@@ -405,16 +409,24 @@ describe("Coworld keystone player", () => {
     const response = decisionToResponse("req_1", {
       actionID: "attack:rival",
       reason: longReason,
-      metadata: { confidence: 0.85 },
+      metadata: { confidence: 0.85, runtimeMode: "llm-policy-planner" },
     });
 
     expect(response).toMatchObject({
       type: "decision_response",
       requestID: "req_1",
       selectedLegalActionId: "attack:rival",
+      runtimeMode: "llm-policy-planner",
       confidence: 0.85,
     });
     expect((response.reason as string).length).toBe(500);
+
+    const forged = decisionToResponse("req_forged", {
+      actionID: "hold",
+      reason: "unknown runtime",
+      metadata: { runtimeMode: "llm-policy-planner " },
+    });
+    expect(forged).not.toHaveProperty("runtimeMode");
   });
 
   it("ranks an all-spawn menu locally and carries the independent preference field", () => {

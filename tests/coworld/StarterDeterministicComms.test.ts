@@ -806,16 +806,18 @@ describe("the shipped reply frame carries the comms pair", () => {
       expect(frames).toHaveLength(3);
 
       const silent = JSON.parse(frames[0]);
-      // Byte-level: the pre-comms reply shape, in the pre-comms key order,
-      // with no comms substrings anywhere in the frame.
+      // Byte-level: the ordinary reply shape plus its bounded runtime
+      // attribution, with no comms substrings anywhere in the frame.
       expect(Object.keys(silent)).toEqual([
         "type",
         "requestID",
         "selectedLegalActionId",
+        "runtimeMode",
         "reason",
         "confidence",
       ]);
       expect(silent.selectedLegalActionId).toBe(attackAction.id);
+      expect(silent.runtimeMode).toBe("local-policy-baseline");
       expect(frames[0].includes("selectedMessageActionId")).toBe(false);
       expect(frames[0].includes("messageText")).toBe(false);
 
