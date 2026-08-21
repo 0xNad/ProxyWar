@@ -51,6 +51,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   MAX_WIRE_SPAWN_PREFERENCE_ACTION_IDS,
   normalizeDegradedCause,
+  normalizeRuntimeMode,
 } from "./coworld-decision-wire";
 
 import type {
@@ -667,6 +668,10 @@ export function decisionToResponse(
     ? normalizeDegradedCause(decision.metadata?.degradedCause)
     : undefined;
   const plannerFallbackUsed = decision.metadata?.plannerFallbackUsed === true;
+  // The typed in-house brain already stamps the exact runtime path it used.
+  // Forward only that bounded value; spawn/transport paths without a genuine
+  // brain attribution remain unknown instead of inheriting the seat label.
+  const runtimeMode = normalizeRuntimeMode(decision.metadata?.runtimeMode);
   // The executor's cascade, normalized for the wire: primary first, deduped,
   // then capped to whatever the game advertised it will carry. Emitting more
   // than the advertisement would be silently truncated game-side, so the
@@ -738,6 +743,7 @@ export function decisionToResponse(
       : {}),
     reason: wireReason,
     confidence,
+    ...(runtimeMode !== undefined ? { runtimeMode } : {}),
     ...(llmPlannerDegraded ? { llmPlannerDegraded: true } : {}),
     ...(plannerFallbackUsed ? { fallbackUsed: true } : {}),
     // The cause has to be forwarded EXPLICITLY: this function picks fields rather

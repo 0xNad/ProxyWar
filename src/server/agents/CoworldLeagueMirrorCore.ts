@@ -18,9 +18,9 @@ import {
 import type {
   AgentActionAuditStatus,
   AgentDecisionRecord,
-  AgentRuntimeMode,
   LegalActionKind,
 } from "./AgentTypes";
+import { normalizeAgentRuntimeMode } from "./AgentTypes";
 import { asAgentDegradationCause } from "./AgentWireProtocol";
 import {
   filterSuppressedEpisodeRows,
@@ -76,16 +76,6 @@ function asArray(value: unknown): unknown[] {
 
 function asString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
-}
-
-function asAgentRuntimeMode(value: unknown): AgentRuntimeMode | undefined {
-  return value === "local-policy-baseline" ||
-    value === "mock-policy-planner" ||
-    value === "llm-policy-planner" ||
-    value === "llm-action-selector" ||
-    value === "autopilot-executor"
-    ? value
-    : undefined;
 }
 
 function asNumber(value: unknown): number | null {
@@ -1444,7 +1434,7 @@ function decisionRecordFromMirroredLogLine(
   const playerID = auditAfter === null ? null : asString(auditAfter.playerID);
   const economyFacts = asRecord(record.economyFacts);
   const decisionMetadata = dealDecisionMetadata(record) ?? {};
-  const runtimeMode = asAgentRuntimeMode(record.runtimeMode);
+  const runtimeMode = normalizeAgentRuntimeMode(record.runtimeMode);
   if (runtimeMode !== undefined) {
     decisionMetadata.runtimeMode = runtimeMode;
   }
