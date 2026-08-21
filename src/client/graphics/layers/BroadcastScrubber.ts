@@ -779,21 +779,37 @@ export class BroadcastScrubber implements Layer {
     if (!Number.isFinite(markTurn) || this.totalTurns <= 0) return;
     const earliestReachable =
       this.currentTurn + REPLAY_SEEK_DEAD_ZONE_TURNS + 1;
-    if (markTurn <= earliestReachable) {
-      // Nowhere to go: playback reaches this mark inside ~6 seconds and any
-      // seek that could move would land PAST it. Say that, rather than
-      // absorbing the click into silence.
-      this.flashStatus(
-        translateText(
-          "ai_league_replay.already_arriving",
-          undefined,
-          "ALREADY ARRIVING — KEEP WATCHING",
-        ),
-      );
+    const leadTarget = Math.max(0, markTurn - MARK_SEEK_LEAD_TURNS);
+    if (markTurn > earliestReachable) {
+      this.seekToTurn(Math.max(earliestReachable, leadTarget));
       return;
     }
-    this.seekToTurn(
-      Math.max(earliestReachable, markTurn - MARK_SEEK_LEAD_TURNS),
+    // BEHIND the playhead. The original dead-zone test is symmetric, so every
+    // mark a viewer had already passed answered "ALREADY ARRIVING — KEEP
+    // WATCHING" — false for a beat that is over, and at the end of a match
+    // EVERY mark is in that state, so the feed went dead exactly when a
+    // viewer wants to look back.
+    //
+    // The `markTurn <= currentTurn` test is load-bearing and NOT implied by
+    // falling through the branch above: a mark just AHEAD but inside the dead
+    // zone also lands here, and rewinding for it would throw the viewer ~300
+    // turns backwards for a beat they were about to reach anyway (caught by
+    // test, not by reading).
+    const latestBackwardReachable =
+      this.currentTurn - REPLAY_SEEK_DEAD_ZONE_TURNS - 1;
+    if (markTurn <= this.currentTurn && leadTarget <= latestBackwardReachable) {
+      this.seekToTurn(leadTarget);
+      return;
+    }
+    // Genuinely unreachable in either direction: the mark sits inside the
+    // engine's dead zone, so playback arrives within seconds and no seek can
+    // land closer. Here the message is true.
+    this.flashStatus(
+      translateText(
+        "ai_league_replay.already_arriving",
+        undefined,
+        "ALREADY ARRIVING — KEEP WATCHING",
+      ),
     );
   }
 

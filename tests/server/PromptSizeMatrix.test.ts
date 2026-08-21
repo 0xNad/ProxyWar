@@ -33,6 +33,7 @@ const TUNABLES = [
   "PROXYWAR_TUNE_SPATIAL_MINIMAP",
   "PROXYWAR_TUNE_FREETEXT_MESSAGES",
   "PROXYWAR_TUNE_STRUCTURED_DEALS",
+  "PROXYWAR_TUNE_INHOUSE_SOCIAL_PROMPT",
 ];
 
 function arm(name: string) {
@@ -51,6 +52,13 @@ describe("prompt size matrix arms", () => {
     const board = await buildBoard("world", 8, "mid");
 
     const base = measureArm(board, arm("warships"), starterBuildState);
+    // Measure this before the legacy free-text arms on purpose: a leaked
+    // in-house flag used to add its slot instructions to every later row.
+    const inhouseSocial = measureArm(
+      board,
+      arm("inhouse_social"),
+      starterBuildState,
+    );
     const spatial = measureArm(board, arm("spatial"), starterBuildState);
     const minimap = measureArm(
       board,
@@ -67,12 +75,28 @@ describe("prompt size matrix arms", () => {
       arm("freetext_8"),
       starterBuildState,
     );
+    const allOn = measureArm(board, arm("all_on"), starterBuildState);
 
     // Baseline carries no flag-gated block at all.
     expect(base.spatialChars).toBe(0);
     expect(base.minimapChars).toBe(0);
     expect(base.inboxChars).toBe(0);
     expect(base.actionKinds.message ?? 0).toBe(0);
+    // The hosted baseline arms structured deals. The matrix must inject the
+    // canonical manager-owned block or every row silently measures zero deal
+    // actions and the social prompt arm never exercises its deal slot.
+    expect(base.dealObservationChars).toBeGreaterThan(0);
+    expect(base.dealSlotActionCount).toBeGreaterThan(0);
+    expect(base.socialSlotInstructionChars).toBe(0);
+
+    expect(inhouseSocial.dealSlotActionCount).toBe(base.dealSlotActionCount);
+    expect(inhouseSocial.messageSlotActionCount).toBeGreaterThan(0);
+    expect(inhouseSocial.socialSlotInstructionChars).toBeGreaterThan(0);
+    expect(
+      inhouseSocial.primaryActionCount +
+        inhouseSocial.dealSlotActionCount +
+        inhouseSocial.messageSlotActionCount,
+    ).toBe(inhouseSocial.actionCount);
 
     // Spatial adds an observation block; the minimap is a strictly larger child.
     expect(spatial.spatialChars).toBeGreaterThan(0);
@@ -90,6 +114,8 @@ describe("prompt size matrix arms", () => {
       base.legalActionsBlockChars,
     );
     expect(freetextEmpty.inboxChars).toBe(0);
+    // The preceding inhouse_social measurement must not contaminate this arm.
+    expect(freetextEmpty.socialSlotInstructionChars).toBe(0);
 
     // A full inbox is charged on top of that floor, in the observation block.
     expect(freetextFull.inboundMessages).toBeGreaterThan(0);
@@ -104,6 +130,14 @@ describe("prompt size matrix arms", () => {
       base.starterStateChars,
     );
     expect(minimap.starterStateChars).toBeGreaterThan(base.starterStateChars);
+
+    // all_on means all on, including the new prompt arm. It measures both
+    // separate social slots and the spatial/minimap/inbox payload together.
+    expect(allOn.socialSlotInstructionChars).toBeGreaterThan(0);
+    expect(allOn.dealSlotActionCount).toBeGreaterThan(0);
+    expect(allOn.messageSlotActionCount).toBeGreaterThan(0);
+    expect(allOn.minimapChars).toBeGreaterThan(0);
+    expect(allOn.inboxChars).toBeGreaterThan(0);
   }, 120_000);
 
   it("charges warship affordances to the menu, and leaves no tunable env behind", async () => {
@@ -130,6 +164,8 @@ describe("prompt size matrix arms", () => {
     // (and any test that runs after this file in the same worker).
     expect(process.env.PROXYWAR_TUNE_SPATIAL_OBSERVATION).toBeUndefined();
     expect(process.env.PROXYWAR_TUNE_FREETEXT_MESSAGES).toBeUndefined();
+    expect(process.env.PROXYWAR_TUNE_STRUCTURED_DEALS).toBeUndefined();
+    expect(process.env.PROXYWAR_TUNE_INHOUSE_SOCIAL_PROMPT).toBeUndefined();
   }, 120_000);
 
   it("registers the dedicated Commander prompt and state byte budgets", () => {

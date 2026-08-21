@@ -8,6 +8,7 @@ import { economyRecordFacts } from "../../src/server/agents/AgentEconomyNetwork"
 import {
   AgentDecisionRecord,
   AgentEconomyObservation,
+  agentRuntimeModes,
 } from "../../src/server/agents/AgentTypes";
 import {
   DEALS_FLAG,
@@ -1055,6 +1056,70 @@ async function writeAndParseEntries(
     await fs.rm(rootDir, { recursive: true, force: true });
   }
 }
+
+describe("decisions.jsonl bounded runtime attribution", () => {
+  it("persists all six exact modes and counts a forged label as unknown", async () => {
+    const rootDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), "ai-league-runtime-mode-"),
+    );
+    try {
+      const records = [
+        ...agentRuntimeModes.map((runtimeMode, index) => ({
+          ...fabricatedRecord({
+            sequence: index + 1,
+            agentID: `runtime-agent-${index}`,
+            playerID: `P_${index}`,
+            username: `Runtime Agent ${index}`,
+            turnNumber: 5,
+          }),
+          decisionMetadata: { runtimeMode },
+        })),
+        {
+          ...fabricatedRecord({
+            sequence: agentRuntimeModes.length + 1,
+            agentID: "runtime-agent-forged",
+            playerID: "P_FORGED",
+            username: "Forged Runtime Agent",
+            turnNumber: 5,
+          }),
+          decisionMetadata: { runtimeMode: "llm-policy-planner " },
+        },
+      ];
+      const paths = await writeAgentLeagueRunArtifacts({
+        rootDir,
+        runID: "runtime-mode-run",
+        matchID: "RUNTIMEMODE",
+        scenario: "coworld",
+        brainMode: "external-http",
+        startedAt: Date.UTC(2026, 0, 1),
+        completedAt: Date.UTC(2026, 0, 1, 0, 0, 1),
+        records,
+        roster: [],
+      });
+
+      const entries = (await fs.readFile(paths.decisionsPath, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(entries.slice(0, agentRuntimeModes.length)).toEqual(
+        agentRuntimeModes.map((runtimeMode) =>
+          expect.objectContaining({ runtimeMode }),
+        ),
+      );
+      expect(entries.at(-1)).not.toHaveProperty("runtimeMode");
+
+      const summary = JSON.parse(
+        await fs.readFile(paths.summaryPath, "utf8"),
+      ) as Record<string, unknown>;
+      expect(summary.runtimeModes).toEqual({
+        ...Object.fromEntries(agentRuntimeModes.map((mode) => [mode, 1])),
+        unknown: 1,
+      });
+    } finally {
+      await fs.rm(rootDir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("decisions.jsonl sealed spawn evidence", () => {
   it("copies bounded structured spawn-selection evidence verbatim", async () => {

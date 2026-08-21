@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { AGENT_MATCH_RECAP_SCHEMA_VERSION } from "../../src/server/agents/AgentMatchRecap";
+import { agentRuntimeModes } from "../../src/server/agents/AgentTypes";
 import {
   activeChampionPolicyLabelsByPlayerId,
   agentDecisionRecordsFromMirroredDecisionsLog,
@@ -1231,6 +1232,28 @@ describe("mirrored decisions.jsonl economy/deal stamp projection (economy-negoti
         auditReason: "outgoing attack was visible after execution",
       },
     });
+  });
+
+  test("a mirrored line preserves only a bounded runtime mode", () => {
+    for (const runtimeMode of agentRuntimeModes) {
+      const { records } = agentDecisionRecordsFromMirroredDecisionsLog(
+        `${JSON.stringify({ ...bareLine, runtimeMode })}\n`,
+      );
+      expect(records[0].decisionMetadata).toMatchObject({ runtimeMode });
+    }
+
+    for (const runtimeMode of [
+      "untrusted-mode",
+      "",
+      7,
+      null,
+      { forged: true },
+    ]) {
+      const { records } = agentDecisionRecordsFromMirroredDecisionsLog(
+        `${JSON.stringify({ ...bareLine, runtimeMode })}\n`,
+      );
+      expect(records[0].decisionMetadata).toBeUndefined();
+    }
   });
 
   test("a mirrored line round-trips a bounded degradedCause and rejects an unrecognized one", () => {

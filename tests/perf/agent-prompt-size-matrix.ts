@@ -30,11 +30,14 @@
  *                         nonCombat.warshipMoveOptions; labelled emulation,
  *                         not a flag arm).
  *  - `warships`           0.1.48 shipped baseline.
+ *  - `inhouse_social`     + the default-off in-house social prompt arm, with
+ *                         both canonical deal and message slots populated
  *  - `spatial`            + PROXYWAR_TUNE_SPATIAL_OBSERVATION=1
  *  - `spatial_minimap`    + PROXYWAR_TUNE_SPATIAL_MINIMAP=1 (child flag)
  *  - `freetext_0/3/8`     + PROXYWAR_TUNE_FREETEXT_MESSAGES=1 with 0/3/8
  *                         inbound messages at FREETEXT_MESSAGE_MAX_CHARS
- *  - `all_on`             spatial + minimap + free-text with a full inbox
+ *  - `all_on`             spatial + minimap + free-text + in-house social
+ *                         prompt with a full inbox
  *
  * PROXYWAR_TUNE_STRUCTURED_DEALS=1 in every arm: that is the hosted 0.1.48
  * package env (`game.runnable.env`), so a deals-off arm would not be a
@@ -51,6 +54,10 @@ import { SpawnExecution } from "../../src/core/execution/SpawnExecution";
 import type { Game, Player } from "../../src/core/game/Game";
 import { PlayerInfo, PlayerType, UnitType } from "../../src/core/game/Game";
 import type { TileRef } from "../../src/core/game/GameMap";
+import {
+  AgentDealManager,
+  isDealActionKind,
+} from "../../src/server/agents/AgentDealManager";
 import { selectInboxWindow } from "../../src/server/agents/AgentLeagueMatch";
 import { AgentObservationBuilder } from "../../src/server/agents/AgentObservationBuilder";
 import { selectSpawnSlots } from "../../src/server/agents/AgentSpawnAssignment";
@@ -106,6 +113,19 @@ export interface ArmSpec {
 export const ARMS: ArmSpec[] = [
   { name: "base_no_warships", env: {}, stripWarships: true },
   { name: "warships", env: {} },
+  // The in-house social prompt arm gates a prompt block AND the `deals`
+  // observation block, so without an arm here every OTHER arm measures both as
+  // zero bytes — verbatim the failure this file's own header records happening
+  // twice before. Free text is on because the arm teaches a message slot, and a
+  // slot the menu never offers would understate the block's real cost.
+  {
+    name: "inhouse_social",
+    env: {
+      PROXYWAR_TUNE_INHOUSE_SOCIAL_PROMPT: "1",
+      PROXYWAR_TUNE_FREETEXT_MESSAGES: "1",
+    },
+    inboxMessages: 3,
+  },
   { name: "spatial", env: { PROXYWAR_TUNE_SPATIAL_OBSERVATION: "1" } },
   {
     name: "spatial_minimap",
@@ -135,6 +155,7 @@ export const ARMS: ArmSpec[] = [
       PROXYWAR_TUNE_SPATIAL_OBSERVATION: "1",
       PROXYWAR_TUNE_SPATIAL_MINIMAP: "1",
       PROXYWAR_TUNE_FREETEXT_MESSAGES: "1",
+      PROXYWAR_TUNE_INHOUSE_SOCIAL_PROMPT: "1",
     },
     inboxMessages: FREETEXT_INBOX_MAX_MESSAGES,
   },
@@ -144,6 +165,8 @@ const TUNABLE_ENV_KEYS = [
   "PROXYWAR_TUNE_SPATIAL_OBSERVATION",
   "PROXYWAR_TUNE_SPATIAL_MINIMAP",
   "PROXYWAR_TUNE_FREETEXT_MESSAGES",
+  "PROXYWAR_TUNE_STRUCTURED_DEALS",
+  "PROXYWAR_TUNE_INHOUSE_SOCIAL_PROMPT",
 ] as const;
 
 function applyArmEnv(arm: ArmSpec): void {
@@ -449,6 +472,9 @@ export interface ArmMeasurement {
   phase: PhaseName;
   actionCount: number;
   actionKinds: Record<string, number>;
+  primaryActionCount: number;
+  dealSlotActionCount: number;
+  messageSlotActionCount: number;
   inboundMessages: number;
   promptChars: number;
   observationBlockChars: number;
@@ -459,6 +485,8 @@ export interface ArmMeasurement {
   minimapChars: number;
   spatialChars: number;
   inboxChars: number;
+  dealObservationChars: number;
+  socialSlotInstructionChars: number;
   starterStateChars: number;
   estTokensHigh: number;
   estTokensLow: number;
@@ -477,8 +505,28 @@ export function measureArm(
   arm: ArmSpec,
   starterBuildState: StarterBuildState,
 ): ArmMeasurement {
-  applyArmEnv(arm);
+  // A measurement must be order-independent and must not alter the worker that
+  // called it. Snapshot every tunable this harness touches, apply the arm, and
+  // restore the exact prior state even if board/menu/prompt construction throws.
+  const priorEnv = new Map(
+    TUNABLE_ENV_KEYS.map((key) => [key, process.env[key]] as const),
+  );
+  try {
+    applyArmEnv(arm);
+    return measureArmWithAppliedEnvironment(board, arm, starterBuildState);
+  } finally {
+    for (const [key, value] of priorEnv) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
 
+function measureArmWithAppliedEnvironment(
+  board: Board,
+  arm: ArmSpec,
+  starterBuildState: StarterBuildState,
+): ArmMeasurement {
   const observationBuilder = new AgentObservationBuilder();
   const observation = observationBuilder.build({
     agentID: `agent-${board.observer.id}`,
@@ -490,6 +538,21 @@ export function measureArm(
     gameState: board.game,
     ...(board.phase === "spawn" ? { phaseOverride: "spawn" as const } : {}),
   });
+
+  // `AgentObservationBuilder` intentionally does not own the match-scoped deal
+  // ledger. Production injects `AgentDealManager.observationFor()` immediately
+  // afterwards, so the matrix must do the same; a handwritten empty block can
+  // miss canonical proposal options and silently measure zero deal actions.
+  const dealManager = new AgentDealManager();
+  dealManager.beginDecisionStep({
+    turnNumber: observation.turnNumber,
+    records: [],
+  });
+  const deals = dealManager.observationFor({
+    agentID: observation.agentID,
+    observation,
+  });
+  if (deals !== undefined) observation.deals = deals;
 
   if (arm.stripWarships === true) stripWarshipAffordances(observation);
 
@@ -534,6 +597,27 @@ export function measureArm(
   const spatialChars =
     spatial === undefined ? 0 : JSON.stringify(spatial).length;
   const inboxChars = inbox.length === 0 ? 0 : JSON.stringify(inbox).length;
+  const dealObservationChars =
+    observation.deals === undefined
+      ? 0
+      : JSON.stringify(observation.deals).length;
+  const socialSlotInstructionChars = prompt
+    .split("\n")
+    .filter(
+      (line) =>
+        line.startsWith("PRIMARY ACTION SLOT:") ||
+        line.startsWith("SEPARATE DEAL SLOT:") ||
+        line.startsWith("SEPARATE MESSAGE SLOT:"),
+    )
+    .reduce((total, line) => total + line.length + 1, 0);
+  const dealSlotActionCount = actions.filter((action) =>
+    isDealActionKind(action.kind),
+  ).length;
+  const messageSlotActionCount = actions.filter(
+    (action) => action.kind === "message",
+  ).length;
+  const primaryActionCount =
+    actions.length - dealSlotActionCount - messageSlotActionCount;
 
   const starterState = starterBuildState(observation, actions);
   const starterStateChars = JSON.stringify(starterState).length;
@@ -544,6 +628,9 @@ export function measureArm(
     phase: board.phase,
     actionCount: actions.length,
     actionKinds: countKinds(actions),
+    primaryActionCount,
+    dealSlotActionCount,
+    messageSlotActionCount,
     inboundMessages: inbox.length,
     promptChars: prompt.length,
     observationBlockChars,
@@ -559,6 +646,8 @@ export function measureArm(
     minimapChars,
     spatialChars,
     inboxChars,
+    dealObservationChars,
+    socialSlotInstructionChars,
     starterStateChars,
     estTokensLow: Math.round(prompt.length / CHARS_PER_TOKEN_HIGH),
     estTokensHigh: Math.round(prompt.length / CHARS_PER_TOKEN_LOW),
@@ -591,8 +680,6 @@ async function main(): Promise<void> {
       );
     }
   }
-  for (const key of TUNABLE_ENV_KEYS) delete process.env[key];
-
   const report = {
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
@@ -621,6 +708,9 @@ async function main(): Promise<void> {
     "phase",
     "arm",
     "actions",
+    "primaryActions",
+    "dealSlotActions",
+    "messageSlotActions",
     "promptChars",
     "estTokens(3.5-4.0)",
     "observation",
@@ -631,6 +721,8 @@ async function main(): Promise<void> {
     "spatial",
     "minimap",
     "inbox",
+    "deals",
+    "socialInstructions",
     "starterState",
   ].join("\t");
   console.log(header);
@@ -641,6 +733,9 @@ async function main(): Promise<void> {
         row.phase,
         row.arm,
         row.actionCount,
+        row.primaryActionCount,
+        row.dealSlotActionCount,
+        row.messageSlotActionCount,
         row.promptChars,
         `${row.estTokensLow}-${row.estTokensHigh}`,
         row.observationBlockChars,
@@ -651,6 +746,8 @@ async function main(): Promise<void> {
         row.spatialChars,
         row.minimapChars,
         row.inboxChars,
+        row.dealObservationChars,
+        row.socialSlotInstructionChars,
         row.starterStateChars,
       ].join("\t"),
     );

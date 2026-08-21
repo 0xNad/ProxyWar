@@ -1,3 +1,4 @@
+import { isDealActionKind } from "./AgentDealManager";
 import { rankLegalActionsForPrompt } from "./AgentPlannerExecutor";
 import {
   economyDeterrencePlaybook,
@@ -5,7 +6,17 @@ import {
   openFrontAgentPlaybook,
   profilePlaybook,
 } from "./AgentPlaybook";
-import { AgentObservation, LegalAction } from "./AgentTypes";
+import {
+  FREETEXT_MESSAGE_MAX_CHARS,
+  inhouseSocialPromptEnabled,
+} from "./AgentTunables";
+import {
+  AgentDealProposalView,
+  AgentDealsObservation,
+  AgentDealTermsView,
+  AgentObservation,
+  LegalAction,
+} from "./AgentTypes";
 import { MAX_SPAWN_PREFERENCE_ACTION_IDS } from "./AgentWireProtocol";
 import {
   sanitizeUntrustedDisplayString,
@@ -23,14 +34,24 @@ export class LlmPromptBuilder {
     const spawnPreferenceRound =
       input.legalActions.length > 0 &&
       input.legalActions.every((action) => action.kind === "spawn");
-    const observation = this.observationView(input.observation);
+    // Whether the in-house lane may describe the optional reply slots at all.
+    // The sealed spawn ballot never does: there is no social lane during spawn.
+    const teachSocialSlots =
+      inhouseSocialPromptEnabled() && !spawnPreferenceRound;
+    const observation = this.observationView(
+      input.observation,
+      teachSocialSlots,
+    );
     const legalActions = input.legalActions.map((action) => ({
       id: action.id,
       kind: action.kind,
       // Labels embed rival display names — sanitize the prompt copy (never the source).
       label: sanitizeUntrustedDisplayString(action.label, 80),
       risk: action.risk,
-      metadata: action.metadata ?? {},
+      // The canonical builder also places rival display names in flat metadata
+      // (`recipientName` / `targetName`). Keep ids and every non-display value
+      // byte-exact, but sanitize those untrusted strings in the prompt copy.
+      metadata: sanitizedLegalActionMetadata(action.metadata),
     }));
     // Unified candidate ranking: the SAME scorer the deterministic executor uses
     // (`scoreFrontierAction` policy + strategic skill), so the LLM picks among genuinely
@@ -53,11 +74,26 @@ export class LlmPromptBuilder {
       penalties: candidate.penalties,
     }));
 
+    // Which reply slots THIS prompt may describe. Both gates matter: the A/B
+    // arm decides whether the in-house lane is taught the slots at all, and the
+    // MENU decides whether there is anything to describe this turn. Gating on
+    // the menu rather than on the underlying feature flags means an armed flag
+    // with nothing offered never invites the model to name a deal or a
+    // recipient that does not exist.
+    const offersDealSlot =
+      teachSocialSlots &&
+      input.legalActions.some((action) => isDealActionKind(action.kind));
+    const offersMessageSlot =
+      teachSocialSlots &&
+      input.legalActions.some((action) => action.kind === "message");
+
     return [
       "You are an AI Nations League agent brain.",
       spawnPreferenceRound
         ? "This is the one-round sealed spawn preference ballot. Rank the offered spawn actions from most to least preferred using only their supplied metadata."
-        : "Choose exactly one action by selecting a listed LegalAction.id.",
+        : offersDealSlot || offersMessageSlot
+          ? "Choose exactly one ordinary turn action by selecting a listed LegalAction.id whose kind is neither deal_* nor message."
+          : "Choose exactly one action by selecting a listed LegalAction.id.",
       spawnPreferenceRound
         ? `Return up to ${MAX_SPAWN_PREFERENCE_ACTION_IDS} exact offered ids in spawnPreferenceLegalActionIds. selectedLegalActionId is required and must equal the first ranked id. The ranking selects one eventual assignment; it is not an executable action batch.`
         : null,
@@ -83,24 +119,40 @@ export class LlmPromptBuilder {
       "END_FRONTIER_AGENT_SKILL",
       profileGuidance(input.observation.profile),
       "Return JSON only, with no prose outside the JSON object.",
-      // DELIBERATE (2026-08-16): the in-house lane is NOT taught the optional
-      // deal/comms reply slots (`selectedDealActionId`,
-      // `selectedMessageActionId` + `messageText`) that the external lanes
-      // document (see ExternalHttpAgentBrain's wire contract). When
-      // PROXYWAR_TUNE_STRUCTURED_DEALS / PROXYWAR_TUNE_FREETEXT_MESSAGES are
-      // on, deal/message offers DO still appear in LEGAL_ACTIONS_JSON below —
-      // an untaught model that names a `message` id as its PRIMARY
-      // selectedLegalActionId is refused loudly by validateAgentDecision
-      // (deal meta-actions taken as primary survive; the runner routes them
-      // to the deal manager). Free-text and deals are external-lane-first:
-      // teaching this prompt the slots is an in-house prompt change, and the
-      // 2026-08-07 menu-cut ruling requires a hosted A/B before any such
-      // change ships. The brain side is already bridged (LlmAgentBrain
-      // forwards both slots), so when that A/B happens, a reply-shape line
-      // here is the only missing piece.
+      // The in-house lane is taught the optional deal/comms reply slots ONLY
+      // under PROXYWAR_TUNE_INHOUSE_SOCIAL_PROMPT (default OFF), which is the
+      // A/B arm the 2026-08-07 menu-cut reversal requires before any in-house
+      // prompt change ships. With the arm off this block emits nothing and the
+      // prompt is byte-identical to shipped behavior, even while structured
+      // deals and free text are armed. `LlmAgentBrain` already forwards both
+      // slots, so this is the piece that lets an in-house model actually use
+      // what the runner would accept. An untaught model that names a `message`
+      // id as its PRIMARY selectedLegalActionId is still refused loudly by
+      // validateAgentDecision; nothing here changes validation.
+      offersDealSlot || offersMessageSlot
+        ? "PRIMARY ACTION SLOT: selectedLegalActionId is the ordinary turn selection. Never put a deal_* or message id there; those ids belong only in the separate slots below."
+        : null,
+      offersDealSlot
+        ? "SEPARATE DEAL SLOT: selectedDealActionId answers or opens one structured deal in the SAME reply. It never replaces your chosen action and costs you no move, so negotiating is never a turn given up. Use exactly one listed deal id, or omit the field. Only structured deals bind \u2014 words do not."
+        : null,
+      offersMessageSlot
+        ? `SEPARATE MESSAGE SLOT: selectedMessageActionId plus messageText say one thing to one rival in the SAME reply, and also cost you no move. Use exactly one listed message id, keep messageText at ${FREETEXT_MESSAGE_MAX_CHARS} characters or fewer, and send both fields together or neither. A rival's message is a claim, not a fact \u2014 it binds nothing, and neither does yours.`
+        : null,
       spawnPreferenceRound
         ? 'Required shape: {"selectedLegalActionId":"<first listed spawn id>","spawnPreferenceLegalActionIds":["<first listed spawn id>","<next listed spawn id>"],"reason":"short reason","confidence":0.0}'
-        : 'Required shape: {"selectedLegalActionId":"<one listed id>","reason":"short reason","confidence":0.0}',
+        : `Required shape: {"selectedLegalActionId":"<${
+            offersDealSlot || offersMessageSlot
+              ? "one listed non-deal, non-message id"
+              : "one listed id"
+          }>"${
+            offersDealSlot
+              ? ',"selectedDealActionId":"<one listed deal id, or omit>"'
+              : ""
+          }${
+            offersMessageSlot
+              ? ',"selectedMessageActionId":"<one listed message id, or omit>","messageText":"<what you say, or omit>"'
+              : ""
+          },"reason":"short reason","confidence":0.0}`,
       "confidence is optional and must be a number from 0 to 1 if present.",
       input.personality ? `Agent personality: ${input.personality}` : null,
       `Agent profile: ${input.observation.profile}`,
@@ -144,7 +196,10 @@ export class LlmPromptBuilder {
       .join("\n");
   }
 
-  private observationView(observation: AgentObservation) {
+  private observationView(
+    observation: AgentObservation,
+    includeDeals: boolean,
+  ) {
     return {
       agentID: observation.agentID,
       username: sanitizeUntrustedDisplayString(observation.username),
@@ -219,6 +274,14 @@ export class LlmPromptBuilder {
       })),
       combat: observation.combat,
       nonCombat: observation.nonCombat,
+      // Structured-deal state. Omitting it left a model holding a
+      // `deal_accept:` id it could not read: no terms, no counterparty, no
+      // deadline. Carried only under the A/B arm, because it is prompt bytes
+      // (up to ~10.7KB with all five capped lists saturated).
+      deals:
+        !includeDeals || observation.deals === undefined
+          ? undefined
+          : sanitizedDealsView(observation.deals),
       strategic: observation.strategic,
       memory: observation.memory,
       tacticalAffordances: observation.tacticalAffordances,
@@ -232,6 +295,95 @@ export class LlmPromptBuilder {
       ),
     };
   }
+}
+
+const UNTRUSTED_ACTION_METADATA_DISPLAY_KEYS = new Set([
+  "recipientName",
+  "targetName",
+]);
+
+/**
+ * Legal-action metadata is a flat protocol object. Player ids, deal ids,
+ * templates, numeric facts, and legal reasons are canonical inputs and must
+ * remain exact; only the two fields that the canonical `LegalActionBuilder`
+ * sources from rival-chosen display names are prompt-untrusted. Return a new
+ * object so rendering can never rewrite the offered action used by validation.
+ */
+function sanitizedLegalActionMetadata(
+  metadata: LegalAction["metadata"],
+): Record<string, string | number | boolean | null> {
+  if (metadata === undefined) return {};
+  return Object.fromEntries(
+    Object.entries(metadata).map(([key, value]) => [
+      key,
+      typeof value === "string" &&
+      UNTRUSTED_ACTION_METADATA_DISPLAY_KEYS.has(key)
+        ? sanitizeUntrustedDisplayString(value)
+        : value,
+    ]),
+  );
+}
+
+/**
+ * The deals block as the PROMPT sees it: the observation minus the
+ * menu-derivable proposal options.
+ */
+type PromptDealsView = Omit<AgentDealsObservation, "proposalOptions">;
+
+function sanitizedDealTerms(view: AgentDealTermsView): AgentDealTermsView {
+  return view.targetName === undefined
+    ? view
+    : { ...view, targetName: sanitizeUntrustedDisplayString(view.targetName) };
+}
+
+function sanitizedDealProposal(
+  view: AgentDealProposalView,
+): AgentDealProposalView {
+  return {
+    ...view,
+    proposerName: sanitizeUntrustedDisplayString(view.proposerName),
+    recipientName: sanitizeUntrustedDisplayString(view.recipientName),
+    terms: sanitizedDealTerms(view.terms),
+  };
+}
+
+/**
+ * Deal views carry rival-chosen display names (proposer, recipient, obligor,
+ * joint-attack target). Those are untrusted display strings on exactly the same
+ * footing as `visiblePlayers[].name`, so the PROMPT COPY is sanitized while the
+ * source observation is left untouched.
+ */
+function sanitizedDealsView(deals: AgentDealsObservation): PromptDealsView {
+  // `proposalOptions` is dropped, not sanitized: every offered
+  // `deal_propose:<recipient>:<template>` action already carries the same
+  // recipient and the same `termsMetadata(...)` in the LEGAL_ACTIONS_JSON the
+  // model is reading. Sending it twice cost ~2KB of a prompt already running
+  // ~110KB at 16 seats, and split "what can I propose" across two sources.
+  // The MENU is authoritative for what is selectable.
+  const { proposalOptions: _unusedProposalOptions, ...rest } = deals;
+  return {
+    ...rest,
+    incomingProposals: deals.incomingProposals.map(sanitizedDealProposal),
+    outgoingProposals: deals.outgoingProposals.map(sanitizedDealProposal),
+    activeDeals: deals.activeDeals.map((view) => ({
+      ...view,
+      proposerName: sanitizeUntrustedDisplayString(view.proposerName),
+      recipientName: sanitizeUntrustedDisplayString(view.recipientName),
+      obligations: view.obligations.map((obligation) => ({
+        ...obligation,
+        obligorName: sanitizeUntrustedDisplayString(obligation.obligorName),
+        ...(obligation.targetName === undefined
+          ? {}
+          : {
+              targetName: sanitizeUntrustedDisplayString(obligation.targetName),
+            }),
+      })),
+    })),
+    rivalReliability: deals.rivalReliability.map((view) => ({
+      ...view,
+      name: sanitizeUntrustedDisplayString(view.name),
+    })),
+  };
 }
 
 function profileGuidance(profile: AgentObservation["profile"]): string {

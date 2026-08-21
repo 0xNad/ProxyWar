@@ -241,6 +241,7 @@ describe("tester-starter-llm hardened runtime arm", () => {
       type: "decision_response",
       requestID: "req-2",
       selectedLegalActionId: "attack:auri:40",
+      runtimeMode: "llm-policy-planner",
       fallbackUsed: false,
       llmPlannerDegraded: false,
     });

@@ -24,6 +24,7 @@ import {
   VerifiedPremiereEligibilityGate,
 } from "../../../src/server/replay-premiere/ReplayPremierePublication";
 import {
+  AMPLE_DISK,
   PREMIERE_ID,
   verifiedPublicationFixture,
 } from "./ReplayPremiereFixtures";
@@ -230,6 +231,7 @@ describe("ReplayPremiereAdmissionCatalog", () => {
     catalogs.splice(catalogs.indexOf(catalog), 1);
 
     const bounded = await ReplayPremiereAdmissionCatalog.open({
+      statfs: AMPLE_DISK,
       privateStateRoot: path.join(root, "bounded-private"),
       servedRoots: [path.join(root, "bounded-served")],
       limits: {
@@ -255,6 +257,7 @@ describe("ReplayPremiereAdmissionCatalog", () => {
     const fixture = await verifiedPublicationFixture(root);
     const alternate = alternateAdmission(fixture);
     const catalog = await ReplayPremiereAdmissionCatalog.open({
+      statfs: AMPLE_DISK,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
       limits: {
@@ -327,6 +330,7 @@ describe("ReplayPremiereAdmissionCatalog", () => {
     });
     const maxEntryBytes = firstBytes + 4_096;
     const catalog = await ReplayPremiereAdmissionCatalog.open({
+      statfs: AMPLE_DISK,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
       limits: {
@@ -400,6 +404,7 @@ describe("ReplayPremiereAdmissionCatalog", () => {
     });
 
     const bounded = await ReplayPremiereAdmissionCatalog.open({
+      statfs: AMPLE_DISK,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
       limits: {
@@ -442,6 +447,7 @@ describe("ReplayPremiereAdmissionCatalog", () => {
       const fixture = await verifiedPublicationFixture(root);
       let injected = false;
       const catalog = await ReplayPremiereAdmissionCatalog.open({
+        statfs: AMPLE_DISK,
         privateStateRoot: path.join(root, "private"),
         servedRoots: [path.join(root, "served")],
         checkpointProjectionPublicationFaultInjector: (observed) => {
@@ -521,6 +527,7 @@ describe("ReplayPremiereAdmissionCatalog", () => {
       const controller = new AbortController();
       let aborted = false;
       const catalog = await ReplayPremiereAdmissionCatalog.open({
+        statfs: AMPLE_DISK,
         privateStateRoot: path.join(root, "private"),
         servedRoots: [path.join(root, "served")],
         admissionPublicationFaultInjector: (phase) => {
@@ -580,6 +587,7 @@ describe("ReplayPremiereAdmissionCatalog", () => {
       );
       let mutated = false;
       const catalog = await ReplayPremiereAdmissionCatalog.open({
+        statfs: AMPLE_DISK,
         privateStateRoot: path.join(root, "private"),
         servedRoots: [path.join(root, "served")],
         checkpointProjectionPublicationFaultInjector: async (phase) => {
@@ -630,6 +638,7 @@ describe("ReplayPremiereAdmissionCatalog", () => {
       const fixture = await verifiedPublicationFixture(root);
       let injected = false;
       const catalog = await ReplayPremiereAdmissionCatalog.open({
+        statfs: AMPLE_DISK,
         privateStateRoot: path.join(root, "private"),
         servedRoots: [path.join(root, "served")],
         admissionPublicationFaultInjector: (observed) => {
@@ -685,6 +694,7 @@ describe("ReplayPremiereAdmissionCatalog", () => {
     let publicationFailed = false;
     let cleanupFailed = false;
     const catalog = await ReplayPremiereAdmissionCatalog.open({
+      statfs: AMPLE_DISK,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
       admissionPublicationFaultInjector: (phase) => {
@@ -742,6 +752,7 @@ describe("ReplayPremiereAdmissionCatalog", () => {
     let publicationFailed = false;
     let cleanupFailed = false;
     const catalog = await ReplayPremiereAdmissionCatalog.open({
+      statfs: AMPLE_DISK,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
       admissionPublicationFaultInjector: (phase) => {
@@ -788,6 +799,7 @@ describe("ReplayPremiereAdmissionCatalog", () => {
       let publicationFailed = false;
       let absenceUncertain = false;
       const catalog = await ReplayPremiereAdmissionCatalog.open({
+        statfs: AMPLE_DISK,
         privateStateRoot: path.join(root, "private"),
         servedRoots: [path.join(root, "served")],
         admissionPublicationFaultInjector: (phase) => {
@@ -847,6 +859,7 @@ describe("ReplayPremiereAdmissionCatalog", () => {
     let publicationFailed = false;
     let cleanupSyncFailed = false;
     const catalog = await ReplayPremiereAdmissionCatalog.open({
+      statfs: AMPLE_DISK,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
       admissionPublicationFaultInjector: (phase) => {
@@ -1150,6 +1163,7 @@ describe("ReplayPremiereAdmissionCatalog", () => {
       firstEntryBytes +
       Math.max(firstArtifactBytes, secondEntryBytes + secondArtifactBytes);
     const bounded = await ReplayPremiereAdmissionCatalog.open({
+      statfs: AMPLE_DISK,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
       limits: {
@@ -1381,6 +1395,7 @@ describe("ReplayPremiereAdmissionCatalog", () => {
 
   test("bounds entry count and individual entry bytes before parsing", async () => {
     const catalog = await ReplayPremiereAdmissionCatalog.open({
+      statfs: AMPLE_DISK,
       privateStateRoot: path.join(root, "private"),
       servedRoots: [path.join(root, "served")],
       limits: {
@@ -1496,6 +1511,7 @@ describe("ReplayPremiereAdmissionCatalog", () => {
 
     await expect(
       ReplayPremiereAdmissionCatalog.open({
+        statfs: AMPLE_DISK,
         privateStateRoot: privateRoot,
         servedRoots: [servedRoot],
       }),
@@ -1529,6 +1545,7 @@ async function openCatalog(
   root: string,
 ): Promise<ReplayPremiereAdmissionCatalog> {
   return ReplayPremiereAdmissionCatalog.open({
+    statfs: AMPLE_DISK,
     privateStateRoot: path.join(root, "private"),
     servedRoots: [path.join(root, "served")],
   });

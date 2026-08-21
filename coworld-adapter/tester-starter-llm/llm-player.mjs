@@ -1871,6 +1871,7 @@ export function startLlmPlayer({
           type: "decision_response",
           requestID: message.requestID,
           selectedLegalActionId: spawnPreferences[0].id,
+          runtimeMode: "llm-policy-planner",
           spawnPreferenceLegalActionIds: spawnPreferences.map(
             (preference) => preference.id,
           ),
@@ -1927,6 +1928,7 @@ export function startLlmPlayer({
         type: "decision_response",
         requestID: message.requestID,
         selectedLegalActionId: chosen.id,
+        runtimeMode: "llm-policy-planner",
         ...(dealMove ? { selectedDealActionId: dealMove.id } : {}),
         ...(messageMove
           ? {

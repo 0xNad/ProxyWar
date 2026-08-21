@@ -32,7 +32,10 @@ async function artifactPaths(includeLedger: boolean) {
   };
   await Promise.all([
     fs.writeFile(paths.decisionsPath, '{"sequence":1}\n'),
-    fs.writeFile(paths.summaryPath, '{"decisionCount":1}\n'),
+    fs.writeFile(
+      paths.summaryPath,
+      '{"decisionCount":1,"runtimeModes":{"local-policy-baseline":1}}\n',
+    ),
     fs.writeFile(paths.spectatorTelemetryPath, '{"events":[]}\n'),
     ...(paths.dealLedgerPath === undefined
       ? []
@@ -78,6 +81,9 @@ describe("Coworld inline run-artifact bundle", () => {
     ]);
     expect(artifacts).not.toHaveProperty("deal-ledger.json");
     expect(artifacts).not.toHaveProperty("decisions.jsonl");
+    expect(JSON.parse(artifacts["match-summary.json"])).toMatchObject({
+      runtimeModes: { "local-policy-baseline": 1 },
+    });
     expect(await fs.readFile(paths.decisionsPath, "utf8")).toBe(
       '{"sequence":1}\n',
     );

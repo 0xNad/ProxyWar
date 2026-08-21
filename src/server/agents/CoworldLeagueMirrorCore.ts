@@ -20,6 +20,7 @@ import type {
   AgentDecisionRecord,
   LegalActionKind,
 } from "./AgentTypes";
+import { normalizeAgentRuntimeMode } from "./AgentTypes";
 import { asAgentDegradationCause } from "./AgentWireProtocol";
 import {
   filterSuppressedEpisodeRows,
@@ -1433,6 +1434,10 @@ function decisionRecordFromMirroredLogLine(
   const playerID = auditAfter === null ? null : asString(auditAfter.playerID);
   const economyFacts = asRecord(record.economyFacts);
   const decisionMetadata = dealDecisionMetadata(record) ?? {};
+  const runtimeMode = normalizeAgentRuntimeMode(record.runtimeMode);
+  if (runtimeMode !== undefined) {
+    decisionMetadata.runtimeMode = runtimeMode;
+  }
   if (record.fallbackUsed === true) {
     decisionMetadata.fallbackUsed = true;
   }
