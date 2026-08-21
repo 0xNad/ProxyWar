@@ -7,6 +7,7 @@ import {
   DEFAULT_CLAUDE_DISALLOWED_TOOLS,
   DEFAULT_CLAUDE_TIMEOUT_MS,
   loadClaudeCliLlmProviderConfig,
+  runClaudeCliCommand,
 } from "../../src/server/agents/ClaudeCliLlmProvider";
 
 // Records every command invocation and returns a canned result, so the
@@ -93,6 +94,23 @@ describe("ClaudeCliLlmProvider", () => {
     ]);
   });
 
+  it("passes an exact no-tools policy and sanitized child environment", async () => {
+    const { runner, calls } = recordingRunner({ stdout: "ok" });
+    const env = { HOME: "/tmp/sealed-home", PATH: "/opt/bin" };
+    const provider = new ClaudeCliLlmProvider({
+      command: "/opt/bin/claude",
+      model: "claude-fable-5-20260821",
+      allowedTools: [],
+      env,
+      commandRunner: runner,
+    });
+
+    await expect(provider.complete("p")).resolves.toBe("ok");
+    expect(calls[0].env).toBe(env);
+    expect(calls[0].args).toContain("--tools");
+    expect(calls[0].args[calls[0].args.indexOf("--tools") + 1]).toBe("");
+  });
+
   it("defaults the command and timeout when none are provided", async () => {
     const { runner, calls } = recordingRunner({ stdout: "ok" });
     const provider = new ClaudeCliLlmProvider({ commandRunner: runner });
@@ -107,7 +125,67 @@ describe("ClaudeCliLlmProvider", () => {
       timeoutMs: 10,
       commandRunner: runner,
     });
-    await expect(provider.complete("p")).rejects.toThrow(/timed out after 10ms/);
+    await expect(provider.complete("p")).rejects.toThrow(
+      /timed out after 10ms/,
+    );
+  });
+
+  it("kills a timed-out subprocess below the provider boundary", async () => {
+    const result = await runClaudeCliCommand({
+      command: process.execPath,
+      args: ["-e", "setInterval(() => undefined, 1000)"],
+      stdin: "",
+      timeoutMs: 50,
+      env: process.env,
+    });
+
+    expect(result.timedOut).toBe(true);
+    expect(result.code).not.toBe(0);
+  });
+
+  it("aborts a slow request, releases the global lock, and lets the next request succeed", async () => {
+    let calls = 0;
+    let active = 0;
+    let maximumActive = 0;
+    const runner: ClaudeCliCommandRunner = (input) => {
+      calls += 1;
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      if (calls === 2) {
+        active -= 1;
+        return Promise.resolve({
+          stdout: "next succeeded",
+          stderr: "",
+          code: 0,
+          timedOut: false,
+        });
+      }
+      return new Promise((resolve) => {
+        const finish = () => {
+          active -= 1;
+          resolve({
+            stdout: "",
+            stderr: "",
+            code: null,
+            timedOut: false,
+            aborted: true,
+          });
+        };
+        if (input.signal?.aborted === true) finish();
+        else input.signal?.addEventListener("abort", finish, { once: true });
+      });
+    };
+    const provider = new ClaudeCliLlmProvider({ commandRunner: runner });
+    const controller = new AbortController();
+    const first = provider.complete("slow", { signal: controller.signal });
+    await Promise.resolve();
+    controller.abort();
+
+    await expect(first).rejects.toThrow(/request aborted/);
+    await expect(provider.complete("next")).resolves.toBe("next succeeded");
+    expect(calls).toBe(2);
+    expect(active).toBe(0);
+    expect(maximumActive).toBe(1);
   });
 
   it("reports a not-logged-in CLI clearly from stderr (before the exit-code branch)", async () => {
@@ -136,6 +214,24 @@ describe("ClaudeCliLlmProvider", () => {
     });
     const provider = new ClaudeCliLlmProvider({ commandRunner: runner });
     await expect(provider.complete("p")).rejects.toThrow(/exited with code 2/);
+  });
+
+  it("never carries raw provider diagnostics into planner metadata or logs", async () => {
+    const sentinel = "PRIVATE_CLAUDE_STDERR_SENTINEL_8f32";
+    const { runner } = recordingRunner({
+      code: 2,
+      stdout: `partial ${sentinel}`,
+      stderr: `failure ${sentinel}`,
+    });
+    const provider = new ClaudeCliLlmProvider({ commandRunner: runner });
+    const error = await provider.complete("p").catch((value: unknown) => value);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain("diagnosticSha256=");
+    expect((error as Error).message).toContain("diagnosticBytes=");
+    expect((error as Error).message).not.toContain(sentinel);
+    expect((error as Error).message).not.toContain("partial");
+    expect((error as Error).message).not.toContain("failure");
   });
 
   it("throws on empty output", async () => {

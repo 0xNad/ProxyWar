@@ -92,6 +92,8 @@ export interface CommanderArmRunInput {
   arm: CommanderExperimentArm;
   sourceSha: string;
   sourceTreeDirty: boolean;
+  /** Full sealed provider/environment/tunable treatment identity. */
+  runtimeIdentitySha256: string;
   seed: string;
   runID: string;
   selectorSource:
@@ -473,6 +475,7 @@ function assertCommanderPublicInputShape(run: CommanderArmRunInput): void {
       "arm",
       "sourceSha",
       "sourceTreeDirty",
+      "runtimeIdentitySha256",
       "seed",
       "runID",
       "selectorSource",
@@ -640,6 +643,7 @@ function commanderTripletMarkdown(
       `#### Arm ${armName}`,
       "",
       `- Source: \`${arm.sourceSha}\`; dirty: ${String(arm.sourceTreeDirty)}; seed: \`${markdownCell(arm.seed)}\`; run: \`${markdownCell(arm.runID)}\``,
+      `- Runtime treatment identity: \`${arm.runtimeIdentitySha256}\``,
       `- Selector provenance: ${inlineJson(arm.derivedProvenance)}; declared prompt: \`${markdownCell(arm.promptVersion ?? "n/a")}\``,
       `- Component hashes: ${inlineJson(arm.componentHashes)}`,
       `- Input artifacts: ${inlineJson(arm.artifactProvenance)}`,
@@ -952,6 +956,14 @@ function integrityInvalidations(
   if (new Set(allArms.map((arm) => arm.sourceSha)).size !== 1) {
     reasons.push("source SHA differs across arms");
   }
+  if (
+    allArms.some((arm) => !/^[a-f0-9]{64}$/i.test(arm.runtimeIdentitySha256))
+  ) {
+    reasons.push("runtime treatment identity is missing or malformed");
+  }
+  if (new Set(allArms.map((arm) => arm.runtimeIdentitySha256)).size !== 1) {
+    reasons.push("runtime treatment identity differs across arms");
+  }
   if (new Set(allArms.map((arm) => arm.seed)).size !== 1) {
     reasons.push("seed differs across arms");
   }
@@ -1251,6 +1263,7 @@ function publicArm(
     arm: run.arm,
     sourceSha: run.sourceSha,
     sourceTreeDirty: run.sourceTreeDirty,
+    runtimeIdentitySha256: run.runtimeIdentitySha256,
     seed: run.seed,
     runID: run.runID,
     selectorSource: run.selectorSource,
@@ -1801,6 +1814,14 @@ function performanceIneligibilityReasons(
   }
   if (new Set(runs.map((run) => run.sourceSha)).size !== 1) {
     reasons.push("replicated triplets do not share one source SHA");
+  }
+  if (
+    runs.some((run) => !/^[a-f0-9]{64}$/i.test(run.runtimeIdentitySha256)) ||
+    new Set(runs.map((run) => run.runtimeIdentitySha256)).size !== 1
+  ) {
+    reasons.push(
+      "replicated triplets do not share one valid runtime treatment identity",
+    );
   }
   if (runs.some((run) => !run.requireWinner)) {
     reasons.push("require-winner was not enabled for every arm");

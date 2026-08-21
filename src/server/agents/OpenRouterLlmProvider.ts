@@ -1,5 +1,9 @@
 import { createAbortableRequestAttempt } from "./AgentDecisionTimeout";
-import { LlmProvider, LlmProviderConfigError } from "./LlmProvider";
+import {
+  type LlmCompletionOptions,
+  LlmProvider,
+  LlmProviderConfigError,
+} from "./LlmProvider";
 
 export { LlmProviderConfigError } from "./LlmProvider";
 
@@ -58,6 +62,7 @@ interface OpenRouterResponseBody {
 
 export class OpenRouterLlmProvider implements LlmProvider {
   readonly providerType = "openrouter";
+  readonly cancellationBehavior = "settles-after-abort" as const;
   readonly model: string;
   private readonly fetchFn: FetchLike;
 
@@ -66,13 +71,18 @@ export class OpenRouterLlmProvider implements LlmProvider {
     this.fetchFn = config.fetchFn ?? globalThis.fetch.bind(globalThis);
   }
 
-  async complete(prompt: string): Promise<string> {
+  async complete(
+    prompt: string,
+    options: LlmCompletionOptions = {},
+  ): Promise<string> {
+    throwIfExternallyAborted(options.signal);
     let lastError: unknown;
     for (let attempt = 0; attempt <= this.config.maxRetries; attempt++) {
       try {
-        return await this.completeOnce(prompt);
+        return await this.completeOnce(prompt, options.signal);
       } catch (error) {
         lastError = error;
+        throwIfExternallyAborted(options.signal, error);
         if (attempt >= this.config.maxRetries) {
           break;
         }
@@ -81,10 +91,22 @@ export class OpenRouterLlmProvider implements LlmProvider {
     throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
 
-  private async completeOnce(prompt: string): Promise<string> {
+  private async completeOnce(
+    prompt: string,
+    externalSignal?: AbortSignal,
+  ): Promise<string> {
     const { controller, timeout } = createAbortableRequestAttempt(
       this.config.timeoutMs,
     );
+    const abortFromCaller = (): void =>
+      controller.abort(externalSignal?.reason);
+    if (externalSignal?.aborted === true) {
+      abortFromCaller();
+    } else {
+      externalSignal?.addEventListener("abort", abortFromCaller, {
+        once: true,
+      });
+    }
     // Microtask arming: a request dispatched during the synchronous
     // observation batch does not have its window consumed by later builds.
     queueMicrotask(timeout.arm);
@@ -146,6 +168,9 @@ export class OpenRouterLlmProvider implements LlmProvider {
       return extractOpenRouterText(body);
     } catch (error) {
       if (isAbortError(error)) {
+        if (externalSignal?.aborted === true) {
+          throw errorWithCause("OpenRouter request aborted by caller", error);
+        }
         throw errorWithCause(
           `OpenRouter request timed out after ${this.config.timeoutMs}ms`,
           error,
@@ -154,7 +179,17 @@ export class OpenRouterLlmProvider implements LlmProvider {
       throw error;
     } finally {
       timeout.clear();
+      externalSignal?.removeEventListener("abort", abortFromCaller);
     }
+  }
+}
+
+function throwIfExternallyAborted(
+  signal: AbortSignal | undefined,
+  cause?: unknown,
+): void {
+  if (signal?.aborted === true) {
+    throw errorWithCause("OpenRouter request aborted by caller", cause);
   }
 }
 

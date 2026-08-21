@@ -135,6 +135,10 @@ export interface WriteAgentLeagueRunArtifactsInput {
     disabledActionKinds?: string[] | null;
     opponentBrainMode?: string | null;
     rosterPolicy?: string | null;
+    /** Zero-based subject seat for matched Commander rotation. */
+    subjectSeatIndex?: number | null;
+    /** Spawn allocator episode ordinal for matched Commander rotation. */
+    episodeIndex?: number | null;
     /** Seed actually bound to deterministic smoke identities and GameServer. */
     executionSeed?: string | null;
     /** Actual GameServer identity deterministically derived for this run. */

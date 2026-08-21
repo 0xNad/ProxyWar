@@ -1,6 +1,10 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import {
+  ClaudeCliLlmProvider,
+  type ClaudeCliCommandRunner,
+} from "../../src/server/agents/ClaudeCliLlmProvider";
+import {
   COMMANDER_PROMPT_VERSION,
   LlmOptionSelector,
 } from "../../src/server/agents/LlmOptionSelector";
@@ -100,6 +104,129 @@ describe("LlmOptionSelector Stage 5 authority and telemetry", () => {
         ...fixture.builtState.state.options,
       ]),
     ).rejects.toThrow(/exact locked state option surface/);
+  });
+
+  it("aborts the provider transport when its 12-second-class selector budget expires", async () => {
+    const fixture = makeCommanderStage2Fixture();
+    let aborted = false;
+    const provider: LlmProvider = {
+      providerType: "custom",
+      model: "slow-test-model",
+      complete: (_prompt, options) =>
+        new Promise((_resolve, reject) => {
+          const fail = () => {
+            aborted = true;
+            reject(new Error("transport aborted"));
+          };
+          if (options?.signal?.aborted === true) fail();
+          else options?.signal?.addEventListener("abort", fail, { once: true });
+        }),
+    };
+    const selector = new LlmOptionSelector({ provider, timeoutMs: 20 });
+
+    await expect(
+      selector.select(
+        fixture.builtState.state,
+        fixture.builtState.state.options,
+      ),
+    ).resolves.toMatchObject({
+      ok: false,
+      telemetry: { failureKind: "timeout", rawOutputPresent: false },
+    });
+    expect(aborted).toBe(true);
+  });
+
+  it("returns at the selector deadline when a custom provider ignores cancellation", async () => {
+    const fixture = makeCommanderStage2Fixture();
+    const provider: LlmProvider = {
+      providerType: "custom",
+      model: "non-cooperative-test-model",
+      complete: () => new Promise<string>(() => undefined),
+    };
+    const selector = new LlmOptionSelector({ provider, timeoutMs: 20 });
+    const startedAt = Date.now();
+
+    await expect(
+      selector.select(
+        fixture.builtState.state,
+        fixture.builtState.state.options,
+      ),
+    ).resolves.toMatchObject({
+      ok: false,
+      telemetry: { failureKind: "timeout" },
+    });
+    expect(Date.now() - startedAt).toBeLessThan(150);
+  });
+
+  it("waits for aborted provider cleanup before a following selector uses the global lock", async () => {
+    const fixture = makeCommanderStage2Fixture();
+    let calls = 0;
+    let active = 0;
+    let maximumActive = 0;
+    const runner: ClaudeCliCommandRunner = (input) => {
+      calls += 1;
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      if (calls === 2) {
+        active -= 1;
+        return Promise.resolve({
+          stdout: JSON.stringify({
+            selectedStrategicOptionId: "pressure_rival:P8",
+            horizonDecisions: 4,
+            intent: "continue after the prior process is gone",
+            replanTriggers: [],
+          }),
+          stderr: "",
+          code: 0,
+          timedOut: false,
+        });
+      }
+      return new Promise((resolve) => {
+        const finishCleanup = () => {
+          setTimeout(() => {
+            active -= 1;
+            resolve({
+              stdout: "",
+              stderr: "",
+              code: null,
+              timedOut: false,
+              aborted: true,
+            });
+          }, 80);
+        };
+        if (input.signal?.aborted === true) finishCleanup();
+        else
+          input.signal?.addEventListener("abort", finishCleanup, {
+            once: true,
+          });
+      });
+    };
+    const selector = new LlmOptionSelector({
+      provider: new ClaudeCliLlmProvider({ commandRunner: runner }),
+      timeoutMs: 20,
+    });
+
+    await expect(
+      selector.select(
+        fixture.builtState.state,
+        fixture.builtState.state.options,
+      ),
+    ).resolves.toMatchObject({
+      ok: false,
+      telemetry: { failureKind: "timeout" },
+    });
+    await expect(
+      selector.select(
+        fixture.builtState.state,
+        fixture.builtState.state.options,
+      ),
+    ).resolves.toMatchObject({
+      ok: true,
+      selection: { selectedStrategicOptionId: "pressure_rival:P8" },
+    });
+    expect(calls).toBe(2);
+    expect(active).toBe(0);
+    expect(maximumActive).toBe(1);
   });
 
   it("has no deterministic selector implementation dependency", () => {

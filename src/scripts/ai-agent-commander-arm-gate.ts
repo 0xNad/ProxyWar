@@ -1,16 +1,20 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync, lstatSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   freeTextMessagesEnabled,
   structuredDealsEnabled,
 } from "../server/agents/AgentTunables";
-import { createClaudeCliLlmProviderFromEnv } from "../server/agents/ClaudeCliLlmProvider";
+import { ClaudeCliLlmProvider } from "../server/agents/ClaudeCliLlmProvider";
 import {
+  commanderArmTripletPathSegment,
   computeCommanderComponentHashes,
   writeCommanderArmInputArtifacts,
   writeCommanderArmReport,
 } from "../server/agents/CommanderArmArtifacts";
+import { assertScriptedCommanderBCEquivalence } from "../server/agents/CommanderArmEquivalence";
 import {
   buildCommanderArmReport,
   deriveCommanderPlanStartProvenance,
@@ -25,11 +29,30 @@ import {
   COMMANDER_GAME_ID_DERIVATION_VERSION,
   commanderGameIDFromSeed,
 } from "../server/agents/CommanderExperimentIdentity";
+import {
+  assertCommanderExperimentID,
+  assertCommanderIdentityUnchanged,
+  assertResolvedCommanderRuntime,
+  captureCommanderSourceIdentity,
+  COMMANDER_OUTER_DECISION_TIMEOUT_MS,
+  commanderExperimentOutputDirectory,
+  newCommanderExperimentID,
+  prepareCommanderProviderCwd,
+  reserveCommanderExperimentOutput,
+  resolveRealCommanderRuntime,
+  resolveScriptedCommanderRuntime,
+  withCommanderExperimentEnvironment,
+  writeCommanderExperimentSeal,
+  type CommanderExperimentPreRegistration,
+  type CommanderSourceIdentity,
+  type ResolvedCommanderRuntime,
+} from "../server/agents/CommanderExperimentProtocol";
 import { COMMANDER_PROMPT_VERSION } from "../server/agents/LlmOptionSelector";
 import type { LlmProvider } from "../server/agents/LlmProvider";
 import type { CommanderState } from "../server/agents/StrategicCommanderTypes";
 import { selectDeterministicStrategicOption } from "../server/agents/StrategicOptionSelectors";
 import {
+  agentLeagueSmokeSelectedGameConfig,
   PLANNER_RUNTIME_PROMPT_VERSION,
   runAgentLeagueSmoke,
   type AgentLeagueSmokeArtifactWriterInput,
@@ -55,6 +78,18 @@ export interface CommanderArmGateOptions {
   sourceSha?: string;
   sourceTreeDirty?: boolean;
   writeReport?: boolean;
+  /** Optional replay ID; omitted runs generate and preregister a fresh UUIDv4. */
+  experimentID?: string;
+  /** Bounded fault-injection seam for evidence-integrity tests only. */
+  verificationHooks?: {
+    afterArmPersisted?: (input: {
+      arm: CommanderExperimentArm;
+      replicaIndex: number;
+      manifestPath: string | null;
+    }) => void | Promise<void>;
+    captureSourceIdentity?: () => Promise<CommanderSourceIdentity>;
+    resolveRuntime?: () => ResolvedCommanderRuntime;
+  };
 }
 
 export interface CommanderArmGateResult {
@@ -65,6 +100,9 @@ export interface CommanderArmGateResult {
   replicas: Array<
     Record<CommanderExperimentArm, AgentLeagueSmokeArtifactWriterInput>
   >;
+  experimentID: string | null;
+  preRegistrationManifestPath: string | null;
+  sealPath: string | null;
 }
 
 interface CommanderArmMode {
@@ -90,11 +128,20 @@ interface CommanderArmMode {
 export async function runCommanderArmGate(
   options: CommanderArmGateOptions = {},
 ): Promise<CommanderArmGateResult> {
-  process.env.GAME_ENV ??= "dev";
+  const sourceRoot = commanderGateSourceRoot();
+  assertCommanderGateSourceRoot(process.cwd(), sourceRoot);
   const socialFlags = assertSocialExperimentFlagsOff();
   const baseSeed = options.seed ?? COMMANDER_LOCAL_SMOKE_DEFAULT_SEED;
   const baseRunID = options.runID ?? COMMANDER_LOCAL_SMOKE_DEFAULT_RUN_ID;
   const providerMode = options.providerMode ?? "scripted";
+  if (
+    providerMode === "claude-cli" &&
+    options.verificationHooks !== undefined
+  ) {
+    throw new Error(
+      "real-provider Commander experiments reject verification-hook runtime substitution",
+    );
+  }
   const replicaCount = boundedPositive(options.runs ?? 1, "runs");
   const startIndex = boundedNonNegative(options.startIndex ?? 0, "startIndex");
   if (providerMode === "claude-cli" && replicaCount < 2) {
@@ -115,8 +162,32 @@ export async function runCommanderArmGate(
     options.turnsPerDecisionStep ?? (providerMode === "claude-cli" ? 100 : 25),
     "turnsPerDecisionStep",
   );
-  const actualSourceSha = currentSourceSha();
-  const actualSourceTreeDirty = currentSourceTreeDirty();
+  if (providerMode === "claude-cli" && options.writeReport === false) {
+    throw new Error(
+      "real-provider Commander experiments require durable evidence output",
+    );
+  }
+  const experimentID = options.experimentID ?? newCommanderExperimentID();
+  assertCommanderExperimentID(experimentID);
+  const canonicalOutputDirectory = commanderExperimentOutputDirectory(
+    sourceRoot,
+    experimentID,
+  );
+  if (
+    providerMode === "claude-cli" &&
+    options.outputDirectory !== undefined &&
+    path.resolve(options.outputDirectory) !== canonicalOutputDirectory
+  ) {
+    throw new Error(
+      "real-provider Commander evidence must use the canonical UUID output root",
+    );
+  }
+  const outputDirectory =
+    providerMode === "claude-cli"
+      ? canonicalOutputDirectory
+      : path.resolve(options.outputDirectory ?? canonicalOutputDirectory);
+  const actualSourceSha = currentSourceSha(sourceRoot);
+  const actualSourceTreeDirty = currentSourceTreeDirty(sourceRoot);
   if (
     providerMode === "claude-cli" &&
     options.sourceSha !== undefined &&
@@ -148,128 +219,351 @@ export async function runCommanderArmGate(
       "real-provider Commander experiments require a clean source tree",
     );
   }
-  const componentHashes = await computeCommanderComponentHashes();
+  const captureSource =
+    options.verificationHooks?.captureSourceIdentity ??
+    (() => captureCommanderSourceIdentity(sourceRoot));
+  const providerCwd =
+    providerMode === "claude-cli"
+      ? prepareCommanderProviderCwd(experimentID)
+      : null;
+  const resolveRuntime =
+    options.verificationHooks?.resolveRuntime ??
+    (providerMode === "claude-cli"
+      ? () =>
+          resolveRealCommanderRuntime(process.env, {}, providerCwd!, sourceRoot)
+      : () => resolveScriptedCommanderRuntime(process.env, sourceRoot));
+  const initialSourceIdentity = await captureSource();
+  if (
+    providerMode === "claude-cli" &&
+    (!initialSourceIdentity.clean ||
+      initialSourceIdentity.sourceSha !== actualSourceSha)
+  ) {
+    throw new Error(
+      "real-provider Commander source identity is not the clean git HEAD",
+    );
+  }
+  const initialRuntime = resolveRuntime();
+  assertResolvedCommanderRuntime(initialRuntime);
+  const modes = commanderArmModes(providerMode, initialRuntime);
+  const componentHashes = await computeCommanderComponentHashes(sourceRoot);
+  const schedule = Array.from({ length: replicaCount }, (_unused, offset) => {
+    const index = startIndex + offset;
+    const runID = replicatedIdentity(baseRunID, index, replicaCount);
+    const seed = replicatedIdentity(baseSeed, index, replicaCount);
+    return {
+      replicaIndex: index,
+      runID,
+      seed,
+      gameID: commanderGameIDFromSeed(seed),
+      subjectSeatIndex: index % 4,
+      episodeIndex: index % 4,
+      armOrder: ["A", "B", "C"] as const,
+    };
+  });
+  if (new Set(schedule.map((entry) => entry.gameID)).size !== schedule.length) {
+    throw new Error(
+      "replicated Commander seeds collide on the same GameServer identity",
+    );
+  }
+  const tripletPathSegments = schedule.map((entry) =>
+    commanderArmTripletPathSegment(entry.runID),
+  );
+  if (new Set(tripletPathSegments).size !== schedule.length) {
+    throw new Error("replicated Commander run IDs collide on an evidence path");
+  }
+  const sharedArgs = [
+    "--runner=step-locked",
+    `--turns-per-decision-step=${turnsPerDecisionStep}`,
+    `--max-decision-ms=${COMMANDER_OUTER_DECISION_TIMEOUT_MS}`,
+    `--max-steps=${maxSteps}`,
+    "--agents=4",
+    "--opponent-brain=starter-bot",
+    ...(options.requireWinner === true ? ["--require-winner"] : []),
+  ];
+  const preRegistration: CommanderExperimentPreRegistration = {
+    schemaVersion: 1,
+    experimentKind: "strategic-commander-three-arm",
+    experimentID,
+    createdAt: new Date().toISOString(),
+    source: initialSourceIdentity,
+    runtime: initialRuntime.identity,
+    configuration: {
+      baseRunID,
+      baseSeed,
+      providerMode,
+      replicaCount,
+      startIndex,
+      maxSteps,
+      turnsPerDecisionStep,
+      requireWinner: options.requireWinner === true,
+      planEveryDecisionSteps: 3,
+      sharedArgs,
+      selectedGameConfig: agentLeagueSmokeSelectedGameConfig(sharedArgs),
+      socialFlags,
+      legacyComponentHashes: componentHashes,
+      arms: modes.map((mode) => ({
+        arm: mode.arm,
+        brain: mode.brain,
+        provenance: mode.provenance,
+      })),
+    },
+    seeds: schedule,
+    expectedArmManifestPaths: schedule.flatMap((entry) =>
+      entry.armOrder.map(
+        (arm) =>
+          `inputs/${commanderArmTripletPathSegment(entry.runID)}/${arm}/commander-arm-manifest.json`,
+      ),
+    ),
+  };
+  const writeEvidence = options.writeReport !== false;
+  let preRegistrationManifestPath: string | null = null;
+  let preRegistrationManifestSha256: string | null = null;
+  if (writeEvidence) {
+    const reservation = await reserveCommanderExperimentOutput({
+      outputDirectory,
+      manifest: preRegistration,
+      ...(providerMode === "claude-cli" ? { containmentRoot: sourceRoot } : {}),
+    });
+    preRegistrationManifestPath = reservation.manifestPath;
+    preRegistrationManifestSha256 = reservation.envelope.manifestSha256;
+  }
   const replicas: Array<
     Record<CommanderExperimentArm, AgentLeagueSmokeArtifactWriterInput>
   > = [];
-  const executedGameIDs = new Set<string>();
   const persistedInputs: Array<{
     run: CommanderArmRunInput;
     captured: AgentLeagueSmokeArtifactWriterInput;
   }> = [];
-  for (let offset = 0; offset < replicaCount; offset++) {
-    const index = startIndex + offset;
-    const runID = replicatedIdentity(baseRunID, index, replicaCount);
-    const seed = replicatedIdentity(baseSeed, index, replicaCount);
-    const gameID = commanderGameIDFromSeed(seed);
-    if (executedGameIDs.has(gameID)) {
-      throw new Error(
-        "replicated Commander seeds collide on the same GameServer identity",
-      );
-    }
-    executedGameIDs.add(gameID);
-    const deterministicSource = {
-      seed,
-      gameID,
-      gameIDDerivation: COMMANDER_GAME_ID_DERIVATION_VERSION,
-      createdAtMs: 1_700_000_000_000 + index,
-      playbackTurnIntervalMs: 1,
-    };
-    const sharedArgs = [
-      "--runner=step-locked",
-      `--turns-per-decision-step=${turnsPerDecisionStep}`,
-      "--max-decision-ms=5000",
-      `--max-steps=${maxSteps}`,
-      "--agents=4",
-      "--opponent-brain=starter-bot",
-      `--run-id=${runID}`,
-      ...(options.requireWinner === true ? ["--require-winner"] : []),
-    ];
-    const modes = commanderArmModes(providerMode);
-    const captured = {} as Record<
-      CommanderExperimentArm,
-      AgentLeagueSmokeArtifactWriterInput
-    >;
-    for (const mode of modes) {
-      const writes: AgentLeagueSmokeArtifactWriterInput[] = [];
-      await runAgentLeagueSmoke({
-        args: [`--brain=${mode.brain}`, ...sharedArgs],
-        deterministicSource,
-        forceOfferedOrderSpawnBallotForExperiment: true,
-        commanderExperimentProvenance: mode.provenance,
-        allowEnvironmentStrategySpec: false,
-        ...(mode.provider === undefined
-          ? {}
-          : providerMode === "claude-cli"
-            ? { commanderProviderForExperiment: mode.provider }
-            : { commanderProviderForTesting: mode.provider }),
-        artifactWriter: async (input) => {
-          writes.push(input);
-          return {};
-        },
-      });
-      if (writes.length !== 1) {
-        throw new Error(
-          `Arm ${mode.arm} emitted ${writes.length} artifact writes`,
-        );
-      }
-      captured[mode.arm] = writes[0]!;
-      persistedInputs.push({
-        run: armRunInput({
-          arm: mode.arm,
-          captured: writes[0]!,
-          seed,
-          runID,
-          sourceSha,
-          sourceTreeDirty,
-          componentHashes,
-          socialFlags,
-          localSmoke: providerMode === "scripted",
-        }),
-        captured: writes[0]!,
-      });
-    }
-    replicas.push(captured);
-  }
-
-  const runInputs = persistedInputs.map((entry) => entry.run);
-  const outputDirectory = path.resolve(
-    options.outputDirectory ??
-      path.join(
-        process.cwd(),
-        "artifacts",
-        "ai-learning-comparisons",
-        safeComparisonID(baseRunID),
-      ),
-  );
-  let report = buildCommanderArmReport(runInputs);
   let jsonPath: string | null = null;
   let markdownPath: string | null = null;
-  if (options.writeReport !== false) {
-    const manifestPaths = await Promise.all(
-      persistedInputs.map(({ run, captured }) =>
-        writeCommanderArmInputArtifacts({
-          comparisonDirectory: outputDirectory,
-          run,
-          artifactInput: captured.artifactInput,
-        }),
-      ),
+  let sealPath: string | null = null;
+  const manifestPaths: string[] = [];
+  try {
+    await withCommanderExperimentEnvironment(
+      initialRuntime.behaviorEnvironment,
+      async () => {
+        for (const entry of schedule) {
+          const deterministicSource = {
+            seed: entry.seed,
+            gameID: entry.gameID,
+            gameIDDerivation: COMMANDER_GAME_ID_DERIVATION_VERSION,
+            createdAtMs: 1_700_000_000_000 + entry.replicaIndex,
+            playbackTurnIntervalMs: 1,
+          };
+          const captured = {} as Record<
+            CommanderExperimentArm,
+            AgentLeagueSmokeArtifactWriterInput
+          >;
+          for (const mode of modes) {
+            const writes: AgentLeagueSmokeArtifactWriterInput[] = [];
+            await runAgentLeagueSmoke({
+              args: [
+                `--brain=${mode.brain}`,
+                ...sharedArgs,
+                `--run-id=${entry.runID}`,
+              ],
+              deterministicSource,
+              planEveryDecisionSteps: 3,
+              forceOfferedOrderSpawnBallotForExperiment: true,
+              subjectSeatIndexForExperiment: entry.subjectSeatIndex,
+              episodeIndexForExperiment: entry.episodeIndex,
+              commanderExperimentProvenance: mode.provenance,
+              allowEnvironmentStrategySpec: false,
+              ...(mode.provider === undefined
+                ? {}
+                : mode.brain === "planner-claude-cli"
+                  ? { claudeProviderForExperiment: mode.provider }
+                  : providerMode === "claude-cli"
+                    ? { commanderProviderForExperiment: mode.provider }
+                    : { commanderProviderForTesting: mode.provider }),
+              artifactWriter: async (input) => {
+                writes.push(input);
+                return {};
+              },
+            });
+            if (writes.length !== 1) {
+              throw new Error(
+                `Arm ${mode.arm} emitted ${writes.length} artifact writes`,
+              );
+            }
+            const capturedArm = writes[0]!;
+            captured[mode.arm] = capturedArm;
+            const persistedInput = {
+              run: armRunInput({
+                arm: mode.arm,
+                captured: capturedArm,
+                seed: entry.seed,
+                runID: entry.runID,
+                subjectSeatIndex: entry.subjectSeatIndex,
+                sourceSha,
+                sourceTreeDirty,
+                runtimeIdentitySha256: initialRuntime.identity.identitySha256,
+                componentHashes,
+                socialFlags,
+                localSmoke: providerMode === "scripted",
+              }),
+              captured: capturedArm,
+            };
+            persistedInputs.push(persistedInput);
+            let manifestPath: string | null = null;
+            if (writeEvidence) {
+              manifestPath = await writeCommanderArmInputArtifacts({
+                comparisonDirectory: outputDirectory,
+                ...(providerMode === "claude-cli"
+                  ? { containmentRoot: sourceRoot }
+                  : {}),
+                run: persistedInput.run,
+                artifactInput: persistedInput.captured.artifactInput,
+              });
+              manifestPaths.push(manifestPath);
+            }
+            await options.verificationHooks?.afterArmPersisted?.({
+              arm: mode.arm,
+              replicaIndex: entry.replicaIndex,
+              manifestPath,
+            });
+            const currentRuntime = resolveRuntime();
+            assertResolvedCommanderRuntime(currentRuntime);
+            assertCommanderIdentityUnchanged({
+              initialSource: initialSourceIdentity,
+              currentSource: await captureSource(),
+              initialRuntime: initialRuntime.identity,
+              currentRuntime: currentRuntime.identity,
+            });
+          }
+          if (providerMode === "scripted") {
+            const bSubject = fixedSubject(captured.B, entry.subjectSeatIndex);
+            const cSubject = fixedSubject(captured.C, entry.subjectSeatIndex);
+            assertScriptedCommanderBCEquivalence({
+              bSubjectAgentID: bSubject.agentID,
+              bRecords: captured.B.artifactInput.records,
+              cSubjectAgentID: cSubject.agentID,
+              cRecords: captured.C.artifactInput.records,
+              minimumActiveCycles: maxSteps >= 7 ? 7 : 0,
+              minimumInstalledPlans: maxSteps >= 7 ? 3 : 0,
+            });
+          }
+          replicas.push(captured);
+        }
+      },
     );
-    const persisted = await writeCommanderArmReport({
-      comparisonDirectory: outputDirectory,
-      manifestPaths,
+
+    if (writeEvidence) {
+      assertExpectedArmManifests(
+        outputDirectory,
+        preRegistration.expectedArmManifestPaths,
+        manifestPaths,
+      );
+    }
+    let report = buildCommanderArmReport(
+      persistedInputs.map((entry) => entry.run),
+    );
+    // Evidence is not publishable until the final source/runtime recapture is
+    // successful and matches the preregistered identities.
+    const finalSource = await captureSource();
+    const finalRuntime = resolveRuntime();
+    assertResolvedCommanderRuntime(finalRuntime);
+    assertCommanderIdentityUnchanged({
+      initialSource: initialSourceIdentity,
+      currentSource: finalSource,
+      initialRuntime: initialRuntime.identity,
+      currentRuntime: finalRuntime.identity,
     });
-    report = persisted.report;
-    jsonPath = persisted.jsonPath;
-    markdownPath = persisted.markdownPath;
+    if (writeEvidence) {
+      jsonPath = path.join(outputDirectory, "commander-three-arm.json");
+      markdownPath = path.join(outputDirectory, "commander-three-arm.md");
+      const persisted = await writeCommanderArmReport({
+        comparisonDirectory: outputDirectory,
+        ...(providerMode === "claude-cli"
+          ? { containmentRoot: sourceRoot }
+          : {}),
+        manifestPaths,
+      });
+      report = persisted.report;
+      jsonPath = persisted.jsonPath;
+      markdownPath = persisted.markdownPath;
+      const sealed = await writeCommanderExperimentSeal({
+        outputDirectory,
+        ...(providerMode === "claude-cli"
+          ? { containmentRoot: sourceRoot }
+          : {}),
+        seal: {
+          schemaVersion: 1,
+          experimentKind: "strategic-commander-three-arm-seal",
+          experimentID,
+          status: "complete",
+          reasons: [],
+          preRegistrationManifestSha256: preRegistrationManifestSha256!,
+          finalSource,
+          finalRuntime: finalRuntime.identity,
+          recapture: {
+            source: "captured",
+            runtime: "captured",
+            sourceFailure: null,
+            runtimeFailure: null,
+          },
+        },
+        artifactPaths: [
+          preRegistrationManifestPath!,
+          ...manifestPaths,
+          jsonPath!,
+          markdownPath!,
+        ],
+      });
+      sealPath = sealed.sealPath;
+    }
+    return {
+      report,
+      jsonPath,
+      markdownPath,
+      runs: replicas[0]!,
+      replicas,
+      experimentID,
+      preRegistrationManifestPath,
+      sealPath,
+    };
+  } catch (error) {
+    if (writeEvidence && preRegistrationManifestSha256 !== null) {
+      const reason = boundedExperimentFailure(error);
+      const recaptured = await recaptureInvalidExperimentIdentity(
+        captureSource,
+        resolveRuntime,
+      );
+      try {
+        const sealed = await writeCommanderExperimentSeal({
+          outputDirectory,
+          ...(providerMode === "claude-cli"
+            ? { containmentRoot: sourceRoot }
+            : {}),
+          seal: {
+            schemaVersion: 1,
+            experimentKind: "strategic-commander-three-arm-seal",
+            experimentID,
+            status: "invalid",
+            reasons: [reason],
+            preRegistrationManifestSha256,
+            finalSource: recaptured.source,
+            finalRuntime: recaptured.runtime?.identity ?? null,
+            recapture: recaptured.status,
+          },
+          artifactPaths: [
+            preRegistrationManifestPath!,
+            ...manifestPaths,
+            ...(jsonPath === null ? [] : [jsonPath]),
+            ...(markdownPath === null ? [] : [markdownPath]),
+          ].filter(existingRealFile),
+        });
+        sealPath = sealed.sealPath;
+      } catch (sealError) {
+        throw new AggregateError(
+          [error, sealError],
+          "Commander experiment failed and its invalid seal could not be written",
+          { cause: sealError },
+        );
+      }
+    }
+    throw error;
   }
-  return {
-    report,
-    jsonPath,
-    markdownPath,
-    runs: replicas[0]!,
-    replicas,
-  };
 }
 
 class ScriptedDeterministicCommanderProvider implements LlmProvider {
@@ -285,6 +579,7 @@ class ScriptedDeterministicCommanderProvider implements LlmProvider {
 
 function commanderArmModes(
   providerMode: CommanderArmGateProviderMode,
+  runtime: ResolvedCommanderRuntime,
 ): CommanderArmMode[] {
   if (providerMode === "scripted") {
     return [
@@ -314,7 +609,10 @@ function commanderArmModes(
       },
     ];
   }
-  const provider = createClaudeCliLlmProviderFromEnv();
+  if (runtime.providerConfig === null) {
+    throw new Error("real-provider Commander runtime has no provider config");
+  }
+  const provider = new ClaudeCliLlmProvider(runtime.providerConfig);
   if (provider.model === null) {
     throw new Error(
       "real-provider Commander experiments require an explicit AI_LEAGUE_CLAUDE_MODEL",
@@ -328,6 +626,7 @@ function commanderArmModes(
     {
       arm: "A",
       brain: "planner-claude-cli",
+      provider,
       provenance: {
         ...realProvenance,
         promptVersion: PLANNER_RUNTIME_PROMPT_VERSION,
@@ -370,8 +669,10 @@ function armRunInput(input: {
   captured: AgentLeagueSmokeArtifactWriterInput;
   seed: string;
   runID: string;
+  subjectSeatIndex: number;
   sourceSha: string;
   sourceTreeDirty: boolean;
+  runtimeIdentitySha256: string;
   componentHashes: Awaited<ReturnType<typeof computeCommanderComponentHashes>>;
   socialFlags: Pick<
     CommanderExperimentFlags,
@@ -380,7 +681,7 @@ function armRunInput(input: {
   localSmoke: boolean;
 }): CommanderArmRunInput {
   const artifact = input.captured.artifactInput;
-  const subject = artifact.roster[0];
+  const subject = artifact.roster[input.subjectSeatIndex];
   if (subject === undefined) {
     throw new Error(`Arm ${input.arm} has no subject seat`);
   }
@@ -392,6 +693,7 @@ function armRunInput(input: {
     arm: input.arm,
     sourceSha: input.sourceSha,
     sourceTreeDirty: input.sourceTreeDirty,
+    runtimeIdentitySha256: input.runtimeIdentitySha256,
     seed: input.seed,
     runID: input.runID,
     selectorSource: null,
@@ -478,11 +780,114 @@ function sharedGameConfiguration(
     disabledActionKinds: [...config.disabledActionKinds],
     rosterPolicy:
       config.opponentBrainMode === "starter-bot"
-        ? "subject-seat-0-vs-starter-bot"
+        ? config.subjectSeatIndex === undefined
+          ? "subject-seat-0-vs-starter-bot"
+          : "rotating-subject-vs-starter-bot"
         : config.opponentBrainMode === null
           ? "uniform-brain"
-          : "subject-seat-0-vs-opponent-brain",
+          : config.subjectSeatIndex === undefined
+            ? "subject-seat-0-vs-opponent-brain"
+            : "rotating-subject-vs-opponent-brain",
   };
+}
+
+function fixedSubject(
+  captured: AgentLeagueSmokeArtifactWriterInput,
+  subjectSeatIndex: number,
+) {
+  const subject = captured.artifactInput.roster[subjectSeatIndex];
+  if (subject === undefined) {
+    throw new Error(
+      "Commander matched subject seat is missing from the roster",
+    );
+  }
+  return subject;
+}
+
+async function recaptureInvalidExperimentIdentity(
+  capture: () => Promise<CommanderSourceIdentity>,
+  resolve: () => ResolvedCommanderRuntime,
+): Promise<{
+  source: CommanderSourceIdentity | null;
+  runtime: ResolvedCommanderRuntime | null;
+  status: {
+    source: "captured" | "unavailable";
+    runtime: "captured" | "unavailable";
+    sourceFailure: string | null;
+    runtimeFailure: string | null;
+  };
+}> {
+  let source: CommanderSourceIdentity | null = null;
+  let sourceFailure: string | null = null;
+  try {
+    source = await capture();
+  } catch (error) {
+    sourceFailure = boundedExperimentFailure(error);
+  }
+  let runtime: ResolvedCommanderRuntime | null = null;
+  let runtimeFailure: string | null = null;
+  try {
+    runtime = resolve();
+    assertResolvedCommanderRuntime(runtime);
+  } catch (error) {
+    runtimeFailure = boundedExperimentFailure(error);
+  }
+  return {
+    source,
+    runtime,
+    status: {
+      source: source === null ? "unavailable" : "captured",
+      runtime: runtime === null ? "unavailable" : "captured",
+      sourceFailure,
+      runtimeFailure,
+    },
+  };
+}
+
+function boundedExperimentFailure(error: unknown): string {
+  const name = error instanceof Error ? error.name : typeof error;
+  const message = error instanceof Error ? error.message : String(error);
+  const category = /source identity drifted/i.test(message)
+    ? "source_identity_drift"
+    : /runtime identity drifted/i.test(message)
+      ? "runtime_identity_drift"
+      : /timed out/i.test(message)
+        ? "timeout"
+        : "experiment_failure";
+  return [
+    `category=${category}`,
+    `errorType=${name.replace(/[^A-Za-z0-9_.-]/g, "_")}`,
+    `diagnosticBytes=${Buffer.byteLength(message, "utf8")}`,
+    `diagnosticSha256=${createHash("sha256").update(message).digest("hex")}`,
+  ].join(" ");
+}
+
+function existingRealFile(value: string): boolean {
+  if (!existsSync(value)) return false;
+  const stat = lstatSync(value);
+  return stat.isFile() && !stat.isSymbolicLink();
+}
+
+function assertExpectedArmManifests(
+  outputDirectory: string,
+  expected: readonly string[],
+  actual: readonly string[],
+): void {
+  const canonicalOutputDirectory = realpathSync(outputDirectory);
+  const normalizedActual = actual
+    .map((entry) =>
+      path
+        .relative(canonicalOutputDirectory, realpathSync(entry))
+        .split(path.sep)
+        .join("/"),
+    )
+    .sort();
+  const normalizedExpected = [...expected].sort();
+  if (JSON.stringify(normalizedActual) !== JSON.stringify(normalizedExpected)) {
+    throw new Error(
+      "Commander persisted arm manifests disagree with pre-registration",
+    );
+  }
 }
 
 export function commanderSocialExperimentFlags(): Pick<
@@ -530,25 +935,34 @@ function replicatedIdentity(
     : `${base}-r${String(index).padStart(4, "0")}`;
 }
 
-function safeComparisonID(value: string): string {
-  const sanitized = value.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120);
-  if (sanitized === "" || sanitized === "." || sanitized === "..") {
-    throw new Error("runID cannot form a safe comparison directory");
-  }
-  return sanitized;
+export function commanderGateSourceRoot(): string {
+  return realpathSync(
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../.."),
+  );
 }
 
-function currentSourceSha(): string {
+export function assertCommanderGateSourceRoot(
+  workingDirectory: string,
+  moduleSourceRoot: string = commanderGateSourceRoot(),
+): void {
+  if (realpathSync(workingDirectory) !== realpathSync(moduleSourceRoot)) {
+    throw new Error(
+      "Commander arm gate must run from the exact checkout that owns the executed module",
+    );
+  }
+}
+
+function currentSourceSha(sourceRoot: string): string {
   return execFileSync("git", ["rev-parse", "HEAD"], {
-    cwd: process.cwd(),
+    cwd: sourceRoot,
     encoding: "utf8",
   }).trim();
 }
 
-function currentSourceTreeDirty(): boolean {
+function currentSourceTreeDirty(sourceRoot: string): boolean {
   return (
     execFileSync("git", ["status", "--porcelain"], {
-      cwd: process.cwd(),
+      cwd: sourceRoot,
       encoding: "utf8",
     }).trim().length > 0
   );
@@ -596,12 +1010,15 @@ if (
     runs: numberArg(args, "--runs="),
     startIndex: numberArg(args, "--start-index="),
     providerMode: providerModeArg(args),
+    experimentID: stringArg(args, "--experiment-id="),
   });
   console.log("StrategicCommanderV0 three-arm plumbing gate", {
     status: result.report.status,
     integrity: result.report.integrity,
     jsonPath: result.jsonPath,
     markdownPath: result.markdownPath,
+    experimentID: result.experimentID,
+    sealPath: result.sealPath,
   });
   if (!result.report.integrity.valid) {
     process.exitCode = 1;

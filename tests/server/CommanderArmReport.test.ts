@@ -461,6 +461,7 @@ function armRun(
     arm,
     sourceSha: "a".repeat(40),
     sourceTreeDirty: false,
+    runtimeIdentitySha256: "9".repeat(64),
     seed: "matched-seed",
     runID: "matched-run",
     selectorSource:
@@ -707,6 +708,21 @@ function lifecycleMaterial(): CommanderPlanMaterial {
 }
 
 describe("CommanderArmReport Stage 5 arithmetic and invalidation", () => {
+  it("invalidates a triplet whose sealed runtime treatment identities differ", () => {
+    const c = armRun("C");
+    c.runtimeIdentitySha256 = "8".repeat(64);
+
+    const report = buildCommanderArmReport([armRun("A"), armRun("B"), c]);
+
+    expect(report.integrity.valid).toBe(false);
+    expect(report.integrity.invalidationReasons).toContain(
+      "triplet-1: runtime treatment identity differs across arms",
+    );
+    expect(report.performanceEligibility.reasons).toContain(
+      "replicated triplets do not share one valid runtime treatment identity",
+    );
+  });
+
   it("keeps the exact 95 percent fidelity boundary valid", () => {
     const b = Array.from({ length: 20 }, (_unused, index) =>
       commanderRecord({
@@ -1428,6 +1444,14 @@ describe("CommanderArmReport Stage 5 arithmetic and invalidation", () => {
       await expect(fs.readFile(manifestPaths[0]!, "utf8")).resolves.toContain(
         '"decisionsPath"',
       );
+      const linkedInputPath = path.join(comparisonDirectory, "linked-input");
+      await fs.symlink(path.dirname(manifestPaths[0]!), linkedInputPath);
+      await expect(
+        loadCommanderArmRunFromArtifacts(
+          path.join(linkedInputPath, "commander-arm-manifest.json"),
+          comparisonDirectory,
+        ),
+      ).rejects.toThrow(/artifact path contains a symlink/);
       const mutatePersistedDecision = async (
         manifestPath: string,
         select: (entry: Record<string, unknown>) => boolean,

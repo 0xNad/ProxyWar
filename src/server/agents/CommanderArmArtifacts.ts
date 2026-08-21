@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { UnitType } from "../../core/game/Game";
@@ -31,6 +31,7 @@ import {
   commanderGameIDFromSeed,
   parseCommanderCanonicalGameConfig,
 } from "./CommanderExperimentIdentity";
+import { assertCommanderContainedRealDirectory } from "./CommanderExperimentProtocol";
 
 const componentFiles = {
   sharedArchitecture: [
@@ -65,7 +66,7 @@ export async function computeCommanderComponentHashes(
   return Object.fromEntries(entries) as unknown as CommanderComponentHashes;
 }
 
-export const COMMANDER_ARM_ARTIFACT_MANIFEST_SCHEMA_VERSION = 2;
+export const COMMANDER_ARM_ARTIFACT_MANIFEST_SCHEMA_VERSION = 3;
 
 type CommanderArmManifestRun = Omit<
   CommanderArmRunInput,
@@ -73,7 +74,7 @@ type CommanderArmManifestRun = Omit<
 >;
 
 export interface CommanderArmArtifactManifest {
-  schemaVersion: 2;
+  schemaVersion: 3;
   experimentKind: "strategic-commander-arm-input";
   run: CommanderArmManifestRun;
   artifacts: {
@@ -87,12 +88,14 @@ export interface CommanderArmArtifactManifest {
 
 export interface WriteCommanderArmInputArtifactsInput {
   comparisonDirectory: string;
+  containmentRoot?: string;
   run: CommanderArmRunInput;
   artifactInput: WriteAgentLeagueRunArtifactsInput;
 }
 
 export interface WriteCommanderArmReportInput {
   comparisonDirectory: string;
+  containmentRoot?: string;
   manifestPaths: readonly string[];
 }
 
@@ -126,13 +129,21 @@ export async function writeCommanderArmInputArtifacts(
       "Commander arm winner disagrees with artifact writer input",
     );
   }
-  const armDirectory = path.join(
-    path.resolve(input.comparisonDirectory),
+  const requestedComparisonDirectory = path.resolve(input.comparisonDirectory);
+  const comparisonDirectory =
+    input.containmentRoot === undefined
+      ? await canonicalRealDirectory(requestedComparisonDirectory)
+      : await assertCommanderContainedRealDirectory(
+          input.containmentRoot,
+          requestedComparisonDirectory,
+        );
+  const relativeArmDirectory = path.join(
     "inputs",
-    safePathSegment(input.run.tripletID),
+    commanderArmTripletPathSegment(input.run.tripletID),
     input.run.arm,
   );
-  await fs.mkdir(armDirectory, { recursive: true });
+  const armDirectory = path.join(comparisonDirectory, relativeArmDirectory);
+  await createContainedExclusiveDirectory(comparisonDirectory, armDirectory);
   const artifactPaths = await writeAgentLeagueRunArtifacts({
     ...input.artifactInput,
     rootDir: armDirectory,
@@ -158,7 +169,11 @@ export async function writeCommanderArmInputArtifacts(
     manifestPath,
     `${JSON.stringify(manifest, null, 2)}\n`,
   );
-  return manifestPath;
+  return path.join(
+    requestedComparisonDirectory,
+    relativeArmDirectory,
+    path.basename(manifestPath),
+  );
 }
 
 /** Loads only allowlisted report fields from canonical persisted artifacts. */
@@ -166,16 +181,34 @@ export async function loadCommanderArmRunFromArtifacts(
   manifestPath: string,
   provenanceRoot = path.dirname(path.resolve(manifestPath)),
 ): Promise<CommanderArmRunInput> {
-  const absoluteManifestPath = path.resolve(manifestPath);
+  const requestedProvenanceRoot = path.resolve(provenanceRoot);
+  const canonicalProvenanceRoot = await canonicalRealDirectory(
+    requestedProvenanceRoot,
+  );
+  const requestedManifestPath = path.resolve(manifestPath);
+  let manifestRelativePath = path.relative(
+    requestedProvenanceRoot,
+    requestedManifestPath,
+  );
+  if (escapesRoot(manifestRelativePath)) {
+    manifestRelativePath = path.relative(
+      canonicalProvenanceRoot,
+      requestedManifestPath,
+    );
+  }
+  const absoluteManifestPath = await containedRealFile(
+    canonicalProvenanceRoot,
+    path.join(canonicalProvenanceRoot, manifestRelativePath),
+  );
   const manifest = parseManifest(
     JSON.parse(await fs.readFile(absoluteManifestPath, "utf8")) as unknown,
   );
   const manifestDirectory = path.dirname(absoluteManifestPath);
-  const decisionsPath = resolveContainedArtifactPath(
+  const decisionsPath = await resolveContainedArtifactPath(
     manifestDirectory,
     manifest.artifacts.decisionsPath,
   );
-  const summaryPath = resolveContainedArtifactPath(
+  const summaryPath = await resolveContainedArtifactPath(
     manifestDirectory,
     manifest.artifacts.summaryPath,
   );
@@ -308,10 +341,13 @@ export async function loadCommanderArmRunFromArtifacts(
   }
   const provenance: CommanderArtifactProvenance = {
     writer: manifest.artifacts.writer,
-    manifestPath: relativeArtifactPath(provenanceRoot, absoluteManifestPath),
-    decisionsPath: relativeArtifactPath(provenanceRoot, decisionsPath),
+    manifestPath: relativeArtifactPath(
+      canonicalProvenanceRoot,
+      absoluteManifestPath,
+    ),
+    decisionsPath: relativeArtifactPath(canonicalProvenanceRoot, decisionsPath),
     decisionsSha256,
-    summaryPath: relativeArtifactPath(provenanceRoot, summaryPath),
+    summaryPath: relativeArtifactPath(canonicalProvenanceRoot, summaryPath),
     summarySha256,
     executedRunID: summary.runID,
     executedMatchID: summary.matchID,
@@ -324,6 +360,7 @@ export async function loadCommanderArmRunFromArtifacts(
     arm: manifest.run.arm,
     sourceSha: manifest.run.sourceSha,
     sourceTreeDirty: manifest.run.sourceTreeDirty,
+    runtimeIdentitySha256: manifest.run.runtimeIdentitySha256,
     seed: manifest.run.seed,
     runID: manifest.run.runID,
     selectorSource: manifest.run.selectorSource,
@@ -366,20 +403,35 @@ export async function loadCommanderArmRunsFromArtifacts(
 export async function writeCommanderArmReport(
   input: WriteCommanderArmReportInput,
 ): Promise<CommanderArmReportArtifactPaths> {
-  const comparisonDirectory = path.resolve(input.comparisonDirectory);
-  await fs.mkdir(comparisonDirectory, { recursive: true });
+  const requestedComparisonDirectory = path.resolve(input.comparisonDirectory);
+  const comparisonDirectory =
+    input.containmentRoot === undefined
+      ? await canonicalRealDirectory(requestedComparisonDirectory)
+      : await assertCommanderContainedRealDirectory(
+          input.containmentRoot,
+          requestedComparisonDirectory,
+        );
   const manifestPaths = input.manifestPaths.map((entry) => path.resolve(entry));
   const runs = await loadCommanderArmRunsFromArtifacts(
     manifestPaths,
-    comparisonDirectory,
+    requestedComparisonDirectory,
   );
   const report = buildCommanderArmReport(runs);
   const jsonPath = path.join(comparisonDirectory, "commander-three-arm.json");
   const markdownPath = path.join(comparisonDirectory, "commander-three-arm.md");
-  await Promise.all([
+  const writes = await Promise.allSettled([
     writeTextAtomically(jsonPath, commanderArmReportJson(report)),
     writeTextAtomically(markdownPath, commanderArmReportMarkdown(report)),
   ]);
+  const writeFailures = writes.flatMap((result) =>
+    result.status === "rejected" ? [result.reason] : [],
+  );
+  if (writeFailures.length > 0) {
+    throw new AggregateError(
+      writeFailures,
+      "Commander report publication failed after preserving completed files",
+    );
+  }
   return { report, jsonPath, markdownPath, manifestPaths };
 }
 
@@ -389,6 +441,7 @@ function manifestRun(run: CommanderArmRunInput): CommanderArmManifestRun {
     arm: run.arm,
     sourceSha: run.sourceSha,
     sourceTreeDirty: run.sourceTreeDirty,
+    runtimeIdentitySha256: run.runtimeIdentitySha256,
     seed: run.seed,
     runID: run.runID,
     selectorSource: run.selectorSource,
@@ -616,6 +669,7 @@ function parseManifest(value: unknown): CommanderArmArtifactManifest {
       "arm",
       "sourceSha",
       "sourceTreeDirty",
+      "runtimeIdentitySha256",
       "seed",
       "runID",
       "selectorSource",
@@ -640,6 +694,7 @@ function parseManifest(value: unknown): CommanderArmArtifactManifest {
     !isNonEmptyString(run.tripletID) ||
     !/^[0-9a-f]{40,64}$/i.test(String(run.sourceSha)) ||
     typeof run.sourceTreeDirty !== "boolean" ||
+    !/^[0-9a-f]{64}$/i.test(String(run.runtimeIdentitySha256)) ||
     !isNonEmptyString(run.seed) ||
     !isNonEmptyString(run.runID) ||
     !isSelectorSource(run.selectorSource) ||
@@ -695,6 +750,7 @@ function parseManifest(value: unknown): CommanderArmArtifactManifest {
       arm: run.arm,
       sourceSha: run.sourceSha as string,
       sourceTreeDirty: run.sourceTreeDirty as boolean,
+      runtimeIdentitySha256: run.runtimeIdentitySha256 as string,
       seed: run.seed as string,
       runID: run.runID as string,
       selectorSource: run.selectorSource,
@@ -1428,10 +1484,10 @@ function stringArray(value: unknown, label: string): string[] {
   return [...value];
 }
 
-function resolveContainedArtifactPath(
+async function resolveContainedArtifactPath(
   baseDirectory: string,
   relativePath: string,
-): string {
+): Promise<string> {
   if (path.isAbsolute(relativePath)) {
     throw new Error("Commander manifest artifact path must be relative");
   }
@@ -1440,7 +1496,7 @@ function resolveContainedArtifactPath(
   if (relative === ".." || relative.startsWith(`..${path.sep}`)) {
     throw new Error("Commander manifest artifact path escapes its input root");
   }
-  return resolved;
+  return containedRealFile(baseDirectory, resolved);
 }
 
 function relativeArtifactPath(root: string, target: string): string {
@@ -1451,12 +1507,14 @@ function relativeArtifactPath(root: string, target: string): string {
   return relative.split(path.sep).join("/");
 }
 
-function safePathSegment(value: string): string {
-  const sanitized = value.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120);
+export function commanderArmTripletPathSegment(value: string): string {
+  const sanitized = value.replace(/[^A-Za-z0-9._-]/g, "_");
   if (sanitized === "" || sanitized === "." || sanitized === "..") {
     throw new Error("Commander triplet identity cannot form a safe path");
   }
-  return sanitized;
+  const prefix = sanitized.slice(0, 95);
+  const digest = createHash("sha256").update(value).digest("hex").slice(0, 24);
+  return `${prefix}-${digest}`;
 }
 
 async function sha256File(filePath: string): Promise<string> {
@@ -1469,7 +1527,142 @@ async function writeTextAtomically(
   filePath: string,
   content: string,
 ): Promise<void> {
-  const temporaryPath = `${filePath}.tmp-${process.pid}`;
-  await fs.writeFile(temporaryPath, content, "utf8");
-  await fs.rename(temporaryPath, filePath);
+  const directory = await canonicalRealDirectory(path.dirname(filePath));
+  const finalPath = path.join(directory, path.basename(filePath));
+  const temporaryPath = path.join(
+    directory,
+    `.${path.basename(filePath)}.${randomUUID()}.tmp`,
+  );
+  let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
+  try {
+    handle = await fs.open(temporaryPath, "wx", 0o600);
+    await handle.writeFile(content, "utf8");
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    await fs.link(temporaryPath, finalPath);
+    await syncDirectory(directory);
+  } finally {
+    if (handle !== null) await handle.close().catch(() => undefined);
+    await fs.unlink(temporaryPath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+    });
+    await syncDirectory(directory);
+  }
+}
+
+async function createContainedExclusiveDirectory(
+  rootDirectory: string,
+  targetDirectory: string,
+): Promise<void> {
+  const root = await canonicalRealDirectory(rootDirectory);
+  const target = path.resolve(targetDirectory);
+  const relative = path.relative(root, target);
+  if (
+    relative === "" ||
+    relative === ".." ||
+    relative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relative)
+  ) {
+    throw new Error("Commander arm directory escapes comparison root");
+  }
+  const segments = relative.split(path.sep).filter((entry) => entry !== "");
+  let cursor = root;
+  for (const [index, segment] of segments.entries()) {
+    cursor = path.join(cursor, segment);
+    const final = index === segments.length - 1;
+    try {
+      const stat = await fs.lstat(cursor);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) {
+        throw new Error(
+          "Commander arm path contains a symlink or non-directory",
+        );
+      }
+      if (final) {
+        throw new Error(
+          "Commander arm artifact directory already exists; refusing overwrite",
+        );
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      try {
+        await fs.mkdir(cursor, { mode: 0o700 });
+      } catch (mkdirError) {
+        if ((mkdirError as NodeJS.ErrnoException).code !== "EEXIST") {
+          throw mkdirError;
+        }
+        const raced = await fs.lstat(cursor);
+        if (final || raced.isSymbolicLink() || !raced.isDirectory()) {
+          throw new Error(
+            final
+              ? "Commander arm artifact directory already exists; refusing overwrite"
+              : "Commander arm path creation raced with a non-directory",
+            { cause: mkdirError },
+          );
+        }
+      }
+      const created = await fs.lstat(cursor);
+      if (created.isSymbolicLink() || !created.isDirectory()) {
+        throw new Error("Commander arm path creation was redirected", {
+          cause: error,
+        });
+      }
+    }
+  }
+  if ((await fs.realpath(target)) !== target) {
+    throw new Error("Commander arm artifact path contains a symlink");
+  }
+}
+
+async function containedRealFile(
+  rootDirectory: string,
+  targetPath: string,
+): Promise<string> {
+  const root = await canonicalRealDirectory(rootDirectory);
+  const lexicalTarget = path.resolve(targetPath);
+  const stat = await fs.lstat(lexicalTarget);
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    throw new Error("Commander artifact path is not a real file");
+  }
+  const realTarget = await fs.realpath(lexicalTarget);
+  const relative = path.relative(root, realTarget);
+  if (
+    relative === "" ||
+    relative === ".." ||
+    relative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relative)
+  ) {
+    throw new Error("Commander artifact path escapes its evidence root");
+  }
+  if (realTarget !== lexicalTarget) {
+    throw new Error("Commander artifact path contains a symlink");
+  }
+  return realTarget;
+}
+
+function escapesRoot(relative: string): boolean {
+  return (
+    relative === "" ||
+    relative === ".." ||
+    relative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relative)
+  );
+}
+
+async function canonicalRealDirectory(value: string): Promise<string> {
+  const lexical = path.resolve(value);
+  const stat = await fs.lstat(lexical);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw new Error("Commander evidence root is not a real directory");
+  }
+  return fs.realpath(lexical);
+}
+
+async function syncDirectory(value: string): Promise<void> {
+  const handle = await fs.open(value, "r");
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
 }

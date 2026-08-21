@@ -51,15 +51,33 @@ export class LlmOptionSelector implements StrategicOptionSelector {
     assertExactLockedSurface(state, options);
     const prompt = buildCommanderPrompt(state);
     const startedAt = Date.now();
+    const controller = new AbortController();
+    const providerPromise = Promise.resolve().then(() =>
+      this.options.provider.complete(prompt, {
+        signal: controller.signal,
+      }),
+    );
     let raw: string;
     try {
       raw = await withDeferredDecisionTimeout(
-        Promise.resolve().then(() => this.options.provider.complete(prompt)),
+        providerPromise,
         this.timeoutMs,
         () =>
           new Error(`Commander provider timed out after ${this.timeoutMs}ms`),
+        () => controller.abort(),
       ).promise;
     } catch (error) {
+      // A selector timeout must not return a fallback while a provider is still
+      // tearing down behind its process-wide lock. The Claude transport
+      // resolves/rejects only after its killed subprocess closes, so awaiting
+      // the original request here prevents one slow call from cascading into
+      // queued selector timeouts in later decisions.
+      if (
+        controller.signal.aborted &&
+        this.options.provider.cancellationBehavior === "settles-after-abort"
+      ) {
+        await providerPromise.catch(() => undefined);
+      }
       const failureKind =
         error instanceof Error && /timed out/i.test(error.message)
           ? "timeout"

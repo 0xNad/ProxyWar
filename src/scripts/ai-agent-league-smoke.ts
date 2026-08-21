@@ -167,6 +167,10 @@ export interface AgentLeagueSmokeExecutionConfig {
   opponentBrainMode?: string | null;
   /** Persisted by matched Commander runs; optional for legacy callers. */
   executionSeed?: string | null;
+  /** Stage 5 matched subject seat; optional for legacy/default callers. */
+  subjectSeatIndex?: number;
+  /** Spawn-priority rotation ordinal actually passed to the league runner. */
+  episodeIndex?: number;
   /** Exact normalized GameConfig; required by Stage 5 persisted comparisons. */
   selectedGameConfig?: CommanderCanonicalGameConfig;
   planEveryDecisionSteps: number;
@@ -211,8 +215,14 @@ export interface AgentLeagueSmokeRunOptions {
   commanderProviderForTesting?: LlmProvider;
   /** Explicit provider for an offered-order matched real experiment. */
   commanderProviderForExperiment?: LlmProvider;
+  /** Exact sealed provider used by Arm A's planner in a matched experiment. */
+  claudeProviderForExperiment?: LlmProvider;
   /** Stage 5-only matched experiment seam; production/default runs never set it. */
   forceOfferedOrderSpawnBallotForExperiment?: boolean;
+  /** Move the fixed subject identity from seat 0 to this matched seat. */
+  subjectSeatIndexForExperiment?: number;
+  /** Explicit sealed-spawn priority rotation ordinal. */
+  episodeIndexForExperiment?: number;
   /** Artifact-only provenance stamped by the Stage 5 harness. */
   commanderExperimentProvenance?: {
     provider: string | null;
@@ -248,7 +258,7 @@ export async function runAgentLeagueSmoke(
   const args = options.args ?? process.argv.slice(2);
   const scenario = scenarioFromArgs(args);
   const brainMode = brainModeFromArgs(args, scenario);
-  // --opponent-brain=<mode>: seat 0 (the subject) uses --brain; seats 1+ use this.
+  // --opponent-brain=<mode>: the configured subject uses --brain; other seats use this.
   // Enables the realigned eval — Keystone (seat 0) vs N starter-bot opponents — the
   // held-out Coworld field, instead of a uniform brain across all seats.
   const opponentBrainArg = args.find((arg) =>
@@ -303,7 +313,8 @@ export async function runAgentLeagueSmoke(
   const usesClaudeCli =
     brainMode === "planner-claude-cli" || brainMode === "action-claude-cli";
   const claudeCliProvider = usesClaudeCli
-    ? createClaudeCliLlmProviderFromEnv()
+    ? (options.claudeProviderForExperiment ??
+      createClaudeCliLlmProviderFromEnv())
     : null;
   const usesOpenRouter =
     brainMode === "openrouter" || brainMode === "planner-openrouter";
@@ -413,8 +424,14 @@ export async function runAgentLeagueSmoke(
   if (playerAgentName && explicitAgentCount && houseSpecs.length > 0) {
     houseSpecs[0].username = playerAgentName.slice(0, 27);
   }
-  const unresolvedSpecs =
+  const unresolvedSpecsUnrotated =
     manifests === null ? houseSpecs : [...manifestSpecs, ...houseSpecs];
+  const subjectSeatIndex = options.subjectSeatIndexForExperiment ?? 0;
+  const episodeIndex = options.episodeIndexForExperiment ?? 0;
+  const unresolvedSpecs =
+    options.subjectSeatIndexForExperiment === undefined
+      ? unresolvedSpecsUnrotated
+      : moveFirstSpecToSeat(unresolvedSpecsUnrotated, subjectSeatIndex);
   const specs =
     options.deterministicSource === undefined
       ? unresolvedSpecs
@@ -456,6 +473,8 @@ export async function runAgentLeagueSmoke(
     agents: specs.length,
     opponentBrainMode,
     executionSeed: options.deterministicSource?.seed ?? null,
+    subjectSeatIndex: options.subjectSeatIndexForExperiment,
+    episodeIndex: options.episodeIndexForExperiment,
   });
   const game = new GameServer(
     options.deterministicSource?.gameID ?? "AGENT002",
@@ -520,7 +539,7 @@ export async function runAgentLeagueSmoke(
         ? undefined
         : (spec, index) => {
             const mode =
-              opponentBrainMode !== null && index > 0
+              opponentBrainMode !== null && index !== subjectSeatIndex
                 ? opponentBrainMode
                 : brainMode;
             const brain = createBrainForManifestOrMode(
@@ -537,7 +556,7 @@ export async function runAgentLeagueSmoke(
             return options.forceOfferedOrderSpawnBallotForExperiment === true
               ? withOfferedOrderSpawnBallot(
                   brain,
-                  index === 0
+                  index === subjectSeatIndex
                     ? options.commanderExperimentProvenance
                     : undefined,
                   runtimeProvenanceForBrainMode(
@@ -557,6 +576,7 @@ export async function runAgentLeagueSmoke(
     spawnCandidates,
     log,
     disabledActionKinds,
+    episodeIndex,
   });
 
   try {
@@ -710,7 +730,17 @@ export async function runAgentLeagueSmoke(
             options.forceOfferedOrderSpawnBallotForExperiment === true,
           disabledActionKinds,
           opponentBrainMode,
-          rosterPolicy: rosterPolicyForOpponent(opponentBrainMode),
+          rosterPolicy: rosterPolicyForOpponent(
+            opponentBrainMode,
+            subjectSeatIndex,
+            options.subjectSeatIndexForExperiment !== undefined,
+          ),
+          ...(options.subjectSeatIndexForExperiment === undefined
+            ? {}
+            : { subjectSeatIndex }),
+          ...(options.episodeIndexForExperiment === undefined
+            ? {}
+            : { episodeIndex }),
           executionSeed: options.deterministicSource?.seed ?? null,
           executionGameID: game.id,
           executionGameIDDerivation:
@@ -941,7 +971,17 @@ export async function runAgentLeagueSmoke(
           options.forceOfferedOrderSpawnBallotForExperiment === true,
         disabledActionKinds,
         opponentBrainMode,
-        rosterPolicy: rosterPolicyForOpponent(opponentBrainMode),
+        rosterPolicy: rosterPolicyForOpponent(
+          opponentBrainMode,
+          subjectSeatIndex,
+          options.subjectSeatIndexForExperiment !== undefined,
+        ),
+        ...(options.subjectSeatIndexForExperiment === undefined
+          ? {}
+          : { subjectSeatIndex }),
+        ...(options.episodeIndexForExperiment === undefined
+          ? {}
+          : { episodeIndex }),
         executionSeed: options.deterministicSource?.seed ?? null,
         executionGameID: game.id,
         executionGameIDDerivation:
@@ -1136,6 +1176,35 @@ function validateAgentLeagueSmokeRunOptions(
       "Commander experiment provenance requires the matched experiment seam",
     );
   }
+  if (
+    options.claudeProviderForExperiment !== undefined &&
+    (requestedBrainMode !== "planner-claude-cli" ||
+      options.forceOfferedOrderSpawnBallotForExperiment !== true)
+  ) {
+    throw new Error(
+      "a Claude experiment provider requires planner-claude-cli and the matched experiment seam",
+    );
+  }
+  for (const [label, value] of [
+    ["subject seat", options.subjectSeatIndexForExperiment],
+    ["episode index", options.episodeIndexForExperiment],
+  ] as const) {
+    if (
+      value !== undefined &&
+      (!Number.isSafeInteger(value) || value < 0 || value > 7)
+    ) {
+      throw new Error(`Commander experiment ${label} must be from 0 to 7`);
+    }
+  }
+  if (
+    (options.subjectSeatIndexForExperiment !== undefined ||
+      options.episodeIndexForExperiment !== undefined) &&
+    options.forceOfferedOrderSpawnBallotForExperiment !== true
+  ) {
+    throw new Error(
+      "Commander experiment seat and priority rotation require the matched experiment seam",
+    );
+  }
   if (options.injectedManifests !== undefined) {
     for (const entry of options.injectedManifests) {
       const rawManifest = Buffer.from(entry.rawManifestBase64, "base64");
@@ -1196,6 +1265,8 @@ function buildAgentLeagueSmokeExecutionConfig(input: {
   agents: number;
   opponentBrainMode: SmokeBrainMode | null;
   executionSeed: string | null;
+  subjectSeatIndex?: number;
+  episodeIndex?: number;
 }): AgentLeagueSmokeExecutionConfig {
   return {
     schemaVersion: 1,
@@ -1205,6 +1276,12 @@ function buildAgentLeagueSmokeExecutionConfig(input: {
     agents: input.agents,
     opponentBrainMode: input.opponentBrainMode,
     executionSeed: input.executionSeed,
+    ...(input.subjectSeatIndex === undefined
+      ? {}
+      : { subjectSeatIndex: input.subjectSeatIndex }),
+    ...(input.episodeIndex === undefined
+      ? {}
+      : { episodeIndex: input.episodeIndex }),
     selectedGameConfig: normalizeCommanderGameConfig(input.selectedGameConfig),
     planEveryDecisionSteps: input.planEveryDecisionSteps,
     runner: {
@@ -1238,12 +1315,50 @@ function buildAgentLeagueSmokeExecutionConfig(input: {
 
 function rosterPolicyForOpponent(
   opponentBrainMode: SmokeBrainMode | null,
+  subjectSeatIndex = 0,
+  rotatingSubject = false,
 ): string {
   return opponentBrainMode === null
     ? "uniform-brain"
     : opponentBrainMode === "starter-bot"
-      ? "subject-seat-0-vs-starter-bot"
-      : "subject-seat-0-vs-opponent-brain";
+      ? rotatingSubject
+        ? "rotating-subject-vs-starter-bot"
+        : `subject-seat-${subjectSeatIndex}-vs-starter-bot`
+      : rotatingSubject
+        ? "rotating-subject-vs-opponent-brain"
+        : `subject-seat-${subjectSeatIndex}-vs-opponent-brain`;
+}
+
+function moveFirstSpecToSeat<T>(specs: readonly T[], seatIndex: number): T[] {
+  if (
+    !Number.isSafeInteger(seatIndex) ||
+    seatIndex < 0 ||
+    seatIndex >= specs.length
+  ) {
+    throw new Error("Commander experiment subject seat is outside the roster");
+  }
+  const [subject, ...opponents] = specs;
+  if (subject === undefined) {
+    throw new Error("Commander experiment requires a subject participant");
+  }
+  const rotated = [...opponents];
+  rotated.splice(seatIndex, 0, subject);
+  return rotated;
+}
+
+/** Exact normalized game configuration used by a manifest-free smoke run. */
+export function agentLeagueSmokeSelectedGameConfig(
+  args: string[],
+): CommanderCanonicalGameConfig {
+  const scenario = scenarioFromArgs(args);
+  const base = gameConfigForScenario(scenario, args);
+  const agents = positiveIntegerArg(args, "--agents=", 4);
+  return normalizeCommanderGameConfig({
+    ...base,
+    bots: nonNegativeIntegerArg(args, "--bots=", 0),
+    nations: nationsArg(args, "disabled"),
+    maxPlayers: Math.max(base.maxPlayers ?? 4, agents),
+  });
 }
 
 async function advanceReplayTail(input: {
