@@ -73,7 +73,7 @@ export function validateAgentDealDecision(
  *    second game action per decision;
  * 3. the body must be present, non-blank, and within
  *    FREETEXT_MESSAGE_MAX_CHARS after normalization;
- * 4. the body must contain no control characters.
+ * 4. the body must contain no forbidden control characters.
  *
  * Violations are REJECTED, never repaired. Truncating or stripping would put
  * words the agent did not write in its mouth, and every negotiation claim we
@@ -113,6 +113,21 @@ export function validateAgentMessageDecision(
     return {
       ok: false,
       reason: `message selection ${loggableActionID(requestedID)} carried no messageText`,
+    };
+  }
+  // C0 controls (except HT, LF, and CR), DEL, and C1 controls are checked on
+  // the RAW text, before whitespace normalization. JavaScript `\s` includes
+  // vertical tab and form feed, so checking the collapsed text would silently
+  // rewrite those terminal/framing controls into ordinary spaces.
+  if (
+    // eslint-disable-next-line no-control-regex
+    /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/u.test(
+      decision.messageText,
+    )
+  ) {
+    return {
+      ok: false,
+      reason: "messageText contained control characters",
     };
   }
   // Invisible formatting characters are checked on the RAW text, BEFORE any
@@ -157,8 +172,9 @@ export function validateAgentMessageDecision(
   // message cannot smuggle in layout that breaks the chat rendering or pads
   // the prompt. This normalizes SPACING only — never wording — and the length
   // gate below is applied to the normalized text that will actually be sent.
-  // Tabs and newlines are deliberately normalized rather than rejected: they
-  // are layout, not content, and a wrapped sentence is still the same sentence.
+  // Horizontal tabs and line breaks are deliberately normalized rather than
+  // rejected: they are layout, not content, and a wrapped sentence is still
+  // the same sentence.
   const text = decision.messageText.replace(/\s+/gu, " ").trim();
   if (text.length === 0) {
     return {
@@ -170,15 +186,6 @@ export function validateAgentMessageDecision(
     return {
       ok: false,
       reason: `messageText is ${text.length} chars, over the ${FREETEXT_MESSAGE_MAX_CHARS}-char cap (rejected, not truncated)`,
-    };
-  }
-  // C0 controls, DEL, and C1 controls: terminal escapes and framing. Bidi
-  // overrides are NOT in these ranges and are handled separately below.
-  // eslint-disable-next-line no-control-regex
-  if (/[\u0000-\u001F\u007F-\u009F]/u.test(text)) {
-    return {
-      ok: false,
-      reason: "messageText contained control characters",
     };
   }
   return { ok: true, action, text };

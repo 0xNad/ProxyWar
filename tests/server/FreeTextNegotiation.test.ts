@@ -416,6 +416,23 @@ describe("comms-slot validation", () => {
     expect((result as { reason: string }).reason).toContain("control");
   });
 
+  it("rejects vertical tab and form feed before whitespace normalization", () => {
+    for (const [name, control] of [
+      ["U+000B VERTICAL TAB", "\u000B"],
+      ["U+000C FORM FEED", "\u000C"],
+    ] as const) {
+      const result = validateAgentMessageDecision(
+        decision({
+          messageActionID: "message:P1",
+          messageText: `hold${control}the line`,
+        }),
+        menu,
+      );
+      expect(result, `${name} slipped through`).toMatchObject({ ok: false });
+      expect((result as { reason: string }).reason).toContain("control");
+    }
+  });
+
   it("rejects bidi overrides that could spoof transcript attribution", () => {
     // The rendered line is "{sender} → {recipient}: {msg}" as a single text
     // node. RLO inside {msg} can visually reorder the line, and non-English
@@ -506,6 +523,18 @@ describe("comms-slot validation", () => {
         `layout whitespace ${JSON.stringify(input)} must normalize, not reject`,
       ).toMatchObject({ ok: true, text: expected });
     }
+  });
+
+  it("normalizes carriage returns to ordinary spaces", () => {
+    expect(
+      validateAgentMessageDecision(
+        decision({
+          messageActionID: "message:P1",
+          messageText: "hold\rthe\rline",
+        }),
+        menu,
+      ),
+    ).toMatchObject({ ok: true, text: "hold the line" });
   });
 
   it("still accepts ordinary non-ASCII text", () => {
