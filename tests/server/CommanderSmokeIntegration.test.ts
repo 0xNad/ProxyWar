@@ -69,6 +69,19 @@ class FirstOptionCommanderProvider implements LlmProvider {
   }
 }
 
+/**
+ * Simulated live-provider outage: every Commander consultation rejects, so the
+ * plan lifecycle's commander_result_absent fallback carries the whole match.
+ */
+class AlwaysRejectingCommanderProvider implements LlmProvider {
+  callCount = 0;
+
+  async complete(): Promise<string> {
+    this.callCount += 1;
+    throw new Error("simulated Commander provider outage");
+  }
+}
+
 function commanderStateFromPrompt(prompt: string): CommanderState {
   const startMarker = "COMMANDER_STATE_JSON:\n";
   const endMarker = "\nEND_COMMANDER_STATE_JSON";
@@ -169,6 +182,44 @@ describe("StrategicCommander Stage 6 — step-locked smoke integration", () => {
       expect(record.chosenActionKind).not.toBe("spawn");
       expect(record.legalActionIDs).toContain(record.chosenActionID);
     }
+  }, 600_000);
+
+  it("fails post-run certification when the Commander provider always rejects, while the tactical fallback still plays the match", async () => {
+    const provider = new AlwaysRejectingCommanderProvider();
+    const captured: AgentLeagueSmokeArtifactWriterInput[] = [];
+    await expect(
+      runAgentLeagueSmoke({
+        args: [
+          "--brain=strategic-commander",
+          ...STEP_LOCKED_ARGS,
+          "--max-steps=2",
+          "--run-id=commander-stage7-outage-test",
+        ],
+        artifactWriter: async (input) => {
+          captured.push(input);
+          return {};
+        },
+        commanderProviderForTesting: provider,
+      }),
+    ).rejects.toThrow(
+      "strategic-commander smoke failed certification: no decision carries commanderSelectedStrategicOptionId",
+    );
+
+    // The Commander was genuinely consulted and every call failed, yet the
+    // match itself completed on the lifecycle's fallback plans: artifacts
+    // recorded real decisions stamped as fallback selections, and none carries
+    // the Commander success evidence.
+    expect(provider.callCount).toBeGreaterThan(0);
+    expect(captured).toHaveLength(1);
+    const records = captured[0]!.artifactInput.records;
+    expect(records.length).toBeGreaterThan(0);
+    expect(commanderStampedRecords(records)).toEqual([]);
+    const fallbackStamped = records.filter(
+      (record) =>
+        record.decisionMetadata?.commanderFallbackSelectedStrategicOptionId !==
+        undefined,
+    );
+    expect(fallbackStamped.length).toBeGreaterThan(0);
   }, 600_000);
 
   it("leaves the default --brain=rule run untouched when the mode is absent", async () => {

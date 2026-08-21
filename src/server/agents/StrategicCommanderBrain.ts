@@ -6,7 +6,10 @@ import type {
   AgentObservation,
   LegalAction,
 } from "./AgentTypes";
-import type { ActiveCommanderPlan } from "./CommanderPlanLifecycle";
+import type {
+  ActiveCommanderPlan,
+  CommanderPlanSelector,
+} from "./CommanderPlanLifecycle";
 import { MAX_COMMANDER_OPTION_ID_LENGTH } from "./CommanderStateBuilder";
 import { sanitizeUntrustedDisplayString } from "./PromptSanitizer";
 import type { StrategicCommanderCaller } from "./StrategicCommanderCaller";
@@ -85,10 +88,15 @@ export class StrategicCommanderBrain implements AgentBrain {
       observation: input.observation,
       legalActions: alignedActions,
     });
+    // An executable resolution always comes from an installed plan; if that
+    // invariant ever broke, "fallback" is the safe, non-certifying stamp.
+    const planSelector: CommanderPlanSelector =
+      outcome.cycle.plan?.selector ?? "fallback";
     return primaryOnlyDecision(
       tacticalDecision,
       alignedActions,
       outcome.resolution.selectedStrategicOptionId,
+      planSelector,
     );
   }
 
@@ -116,13 +124,28 @@ export class StrategicCommanderBrain implements AgentBrain {
  * lexicographically first offered aligned id, with the substitution stamped as
  * bounded scalar metadata. Only `actionID` ever carries an executable id — the
  * batch, deal, and message channels of the tactical decision are dropped.
+ *
+ * `commanderSelectedStrategicOptionId` is the smoke certification's success
+ * evidence, so only a Commander-authored plan may stamp it. A lifecycle
+ * fallback plan (e.g. a provider outage) executes identically but stamps its
+ * selection under `commanderFallbackSelectedStrategicOptionId`, so a
+ * fallback-only run can never present itself as Commander play.
  */
 function primaryOnlyDecision(
   tacticalDecision: AgentDecision,
   alignedActions: readonly LegalAction[],
   selectedStrategicOptionId: StrategicOptionId,
+  planSelector: CommanderPlanSelector,
 ): AgentDecision {
   const offeredAlignedIDs = alignedActions.map((action) => action.id);
+  const stampedOptionId = sanitizeUntrustedDisplayString(
+    selectedStrategicOptionId,
+    MAX_COMMANDER_OPTION_ID_LENGTH,
+  );
+  const planEvidence: Record<string, string> =
+    planSelector === "commander"
+      ? { commanderSelectedStrategicOptionId: stampedOptionId }
+      : { commanderFallbackSelectedStrategicOptionId: stampedOptionId };
   const tacticalActionID = tacticalDecision.actionID;
   if (
     typeof tacticalActionID === "string" &&
@@ -133,10 +156,7 @@ function primaryOnlyDecision(
       reason: tacticalDecision.reason ?? null,
       metadata: {
         ...tacticalDecision.metadata,
-        commanderSelectedStrategicOptionId: sanitizeUntrustedDisplayString(
-          selectedStrategicOptionId,
-          MAX_COMMANDER_OPTION_ID_LENGTH,
-        ),
+        ...planEvidence,
         commanderExecutionFallback: false,
       },
     };
@@ -148,10 +168,7 @@ function primaryOnlyDecision(
     // AgentDecision contract a fallback substitution reports no reason.
     reason: null,
     metadata: {
-      commanderSelectedStrategicOptionId: sanitizeUntrustedDisplayString(
-        selectedStrategicOptionId,
-        MAX_COMMANDER_OPTION_ID_LENGTH,
-      ),
+      ...planEvidence,
       commanderExecutionFallback: true,
       commanderRejectedTacticalActionID:
         typeof tacticalActionID === "string"

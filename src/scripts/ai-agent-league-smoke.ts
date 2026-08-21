@@ -678,6 +678,10 @@ export async function runAgentLeagueSmoke(
         brainMode,
         records: allRecords,
       });
+      assertCommanderSmokeSelectedStrategicOption({
+        brainMode,
+        records: allRecords,
+      });
       console.log("Proxy War multi-agent smoke result", {
         scenario,
         runnerMode,
@@ -873,6 +877,10 @@ export async function runAgentLeagueSmoke(
       await writeAgentDemoIndex();
     }
     assertRequiredExternalBrainSucceeded({
+      brainMode,
+      records: league.decisionRecords(),
+    });
+    assertCommanderSmokeSelectedStrategicOption({
       brainMode,
       records: league.decisionRecords(),
     });
@@ -2078,6 +2086,36 @@ function assertRequiredExternalBrainSucceeded(input: {
       `rejectedIntents=${report.rejectedIntents}`,
       `firstFailure=${report.firstFailureReason}`,
     ].join(" "),
+  );
+}
+
+/**
+ * Stage 7 certification: a strategic-commander smoke must carry positive
+ * evidence that the Commander actually commanded. A provider failure during
+ * the match is still absorbed by the plan lifecycle (the tactical
+ * RuleAgentBrain keeps playing), but a run where NO decision carries
+ * commanderSelectedStrategicOptionId ran entirely on that fallback and must
+ * never certify as Commander play.
+ */
+function assertCommanderSmokeSelectedStrategicOption(input: {
+  brainMode: SmokeBrainMode;
+  records: AgentDecisionRecord[];
+}): void {
+  if (input.brainMode !== "strategic-commander") {
+    return;
+  }
+  const hasCommanderEvidence = input.records.some(
+    (record) =>
+      record.decisionMetadata?.commanderSelectedStrategicOptionId !== undefined,
+  );
+  if (hasCommanderEvidence) {
+    return;
+  }
+  throw new Error(
+    "strategic-commander smoke failed certification: no decision carries " +
+      "commanderSelectedStrategicOptionId, so no Commander-authored plan was " +
+      "ever executed and the whole match ran on the tactical/fallback policy. " +
+      "Refusing to present a fallback-only run as Commander play.",
   );
 }
 
