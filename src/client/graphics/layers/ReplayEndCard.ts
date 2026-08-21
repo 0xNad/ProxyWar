@@ -55,8 +55,9 @@ import { Layer } from "./Layer";
  *    skips `tick()` entirely for any layer whose wall-clock interval has not
  *    elapsed, so a throttled layer that happened to be skipped on the winning
  *    tick would lose the Win update permanently and the card would never
- *    appear. Ticking every frame is the price of not missing the one update
- *    that matters. The per-tick work is 16 field reads; it is free.
+ *    appear. Ticking on every delivered game turn is the price of not missing
+ *    the one update that matters. The per-turn work is 16 field reads; it is
+ *    free.
  *
  * 3. FINAL STANDINGS COME FROM `game.playerViews()`, NOT THE REPLAY FRAME.
  *    `GameView._players` is insert-only — there is no delete path — so an

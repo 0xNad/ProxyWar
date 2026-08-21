@@ -73,7 +73,7 @@ COPY package.json package-lock.json ./
 #
 # NOT --omit=optional: esbuild ships its native binary as an OPTIONAL
 # dependency (@esbuild/linux-x64), and tsx is built on esbuild. Omitting them
-# yields an image whose first `--import tsx/esm` dies with "could not be
+# yields an image whose first `--import tsx` dies with "could not be
 # found, and is needed by esbuild" (verified). Scripts stay off per repo rule.
 RUN npm ci --ignore-scripts \
     && npm cache clean --force
