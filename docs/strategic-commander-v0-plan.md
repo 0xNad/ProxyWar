@@ -13,7 +13,7 @@ betrayals below the plan every decision; `allowPlannerForbidden` call sites
 execute action kinds the LLM explicitly forbade; and the replan triggers kill
 LLM plans whenever deterministic scorers disagree with them. StrategicCommanderV0
 is not "give the LLM strategy for the first time" — it is the first architecture
-in this repo where the deterministic layer would be _prohibited_ from taking
+in this repo where the deterministic layer would be *prohibited* from taking
 strategy back. The plan below is written around that fact: most of the work is
 not building the new lane, it is proving the old machinery cannot leak into it.
 
@@ -195,7 +195,7 @@ Why not a new `AgentPlanner` + `AgentExecutor` inside `PlannerExecutorAgentBrain
    `AgentPlanner` level, where parse/repair/fallback/merge code paths
    (`parsePlannerOutput`, `mustFollowControlViolation`,
    `mergePlayerConstraintsIntoPlan`) differ between deterministic and LLM
-   planners. Under the new-brain design, both arms are the _same class_ with a
+   planners. Under the new-brain design, both arms are the *same class* with a
    single injected `StrategicOptionSelector`; symmetry is enforced by the
    constructor signature, not by review.
 4. **Operator precedent.** keystone-player.ts records a standing operator rule
@@ -223,7 +223,7 @@ and fallback semantics are wrong; (b) "external policy behind
 `ExternalHttpAgentBrain`" — right for hosted later, wrong for V0 because the
 experiment needs in-process determinism and shared-component proof;
 (c) "generalize `thinPlanExecutionCandidate` (:6557)" — it is the closest
-existing _executor_ prototype (named intent executed literally) and its tests
+existing *executor* prototype (named intent executed literally) and its tests
 (tests/server/ThinExecutor.test.ts:119–263) are the template to clone, but it
 lives below the directive leaves and stands down whenever
 `warModeInvaderIDs(observation).size > 0` (:6571), i.e. inside exactly the
@@ -243,8 +243,8 @@ Planner/prompt layer:
 
 - **[P/X]** `plannerRecommendedControls` (AgentPlannerExecutor.ts:22125) +
   `mustFollowControlViolation` (:22386) + `plannerRepairPrompt` (:22429) —
-  deterministic code authors the objective/turnIntent/target and _rejects and
-  repairs_ a valid LLM plan that disagrees, in four `must_follow` regimes
+  deterministic code authors the objective/turnIntent/target and *rejects and
+  repairs* a valid LLM plan that disagrees, in four `must_follow` regimes
   (spawn; homeDanger high → survive; tile share < `PROXYWAR_TUNE_BASE_TILESHARE_FLOOR`
   (0.1) → expand; economy window). The in-code 2026-06-19 comment (:22275-22283)
   records that `pressure-ready` was demoted from must_follow because it
@@ -266,7 +266,7 @@ Planner/prompt layer:
   `bestSocialActionID`, `bestAllyTargetID`, `backstabTargetID`,
   `bestAttackID`/`bestTargetID`), two with imperative prose ("Ally <name> …
   NOW" :54-74; "BACKSTAB <name>" :108-125). Injected verbatim into prompts
-  (LlmPromptBuilder.ts:224) _and_ consumed as score bonuses
+  (LlmPromptBuilder.ts:224) *and* consumed as score bonuses
   (AgentStrategicSkills.ts:194/208/317: +52/+34/+36 when `action.id` equals
   the affordance's best id). Note: `FrontierPolicyExecutor` does **not** read
   `observation.tacticalAffordances` — it recomputes them at ~15 call sites
@@ -291,7 +291,7 @@ Planner/prompt layer:
 Executor layer:
 
 - **[X]** `selectFrontierActionBatch` (:2945) — the cascade's ~15 strategy
-  leaves fire _above_ the plan-driven scheduler and mostly ignore
+  leaves fire *above* the plan-driven scheduler and mostly ignore
   `plan.objective`/`targetPlayerId`: `dominantEliminationLockCandidate`
   (:3080), `backstabAllyBreakCandidate` (:3095 — in-code comment: "the LLM
   Commander won't break a protective alliance off the JSON signal, so the
@@ -300,7 +300,7 @@ Executor layer:
   `behindAndFallingStrikeCandidate` (:3141), `goldPressureSpendCandidate`
   (:3066), `economyBootstrapStructureCandidate` (:3155), plus ~45 `hardNation*`
   and `demoQuality*`/`political*` leaves. Leaves match on exact
-  policy-contribution _reason strings_ (`hasPolicyContribution`) — load-bearing
+  policy-contribution *reason strings* (`hasPolicyContribution`) — load-bearing
   string coupling.
 - **[X]** `directSelectionCandidate` `{allowPlannerForbidden: true}` (:15031;
   call sites e.g. :3170/:3183/:3205/:3233) and
@@ -345,7 +345,7 @@ Fallback authorship (three stacked layers on every seat):
   `LlmAgentPlanner.fallback` (:2110), `ExternalHttpAgentBrain.fallback`
   (:309), `ExternalRelayAgentBrain` (:211), `RuleAgentExecutor`'s
   no-aligned-action fallback (AgentPlannerExecutor.ts:1043, `planFollowed:false`
-  but a _different strategy_ executes) — all substitute `RuleAgentBrain`
+  but a *different strategy* executes) — all substitute `RuleAgentBrain`
   output.
 - **[F]** league-level: `decideWithSafetyFallback` (AgentLeagueMatch.ts:2090)
   substitutes a full `RuleAgentBrain` decision on timeout/throw.
@@ -375,7 +375,7 @@ Menu shaping before any brain:
   (:1230), donation amounts fixed to `suggestedGold`/`suggestedTroops` — the
   menu itself encodes sizing and curation policy. V0 accepts these as
   deterministic-owned mechanics (attack intensity is explicitly
-  executor-owned), but they must never be _presented to the LLM as rankings_.
+  executor-owned), but they must never be *presented to the LLM as rankings*.
 - **[M]** `filterDisabledActionKinds` / same-turn diplomacy/build filters
   (AgentLeagueMatch.ts:1770/527) — harness-level availability gating.
 
@@ -388,7 +388,7 @@ V0 consequences drawn from this audit (binding on the design in §4–§8):
 2. The Commander lane must not call `selectFrontierActionBatch`,
    `promoteArgmaxPrimary`, `resolvedPlanTurnIntent`, `targetForPlan`,
    `mergePlayerConstraintsIntoPlan`, or any `plannerRecommendedControls`
-   machinery. Scoring reuse is limited to _inside_ the option filter (§8).
+   machinery. Scoring reuse is limited to *inside* the option filter (§8).
 3. Fallback layers cannot all be removed (the league harness owns two of
    them); they must instead be attributed and excluded (§10).
 4. `profileRepairReRankEnabled` must be forced off in the option executor's
@@ -419,13 +419,13 @@ export type StrategicOptionId = string;
 export interface StrategicOptionCandidate {
   id: StrategicOptionId;
   family: StrategicOptionFamily;
-  targetPlayerID: string | null; // pressure_rival only
+  targetPlayerID: string | null;          // pressure_rival only
   /** Executor binding: exact offered LegalAction.ids proving executability,
    *  partitioned by fidelity class. Rebuilt every decision from the live menu —
    *  action ids are NOT stable across decisions; only option ids are. */
   binding: {
-    alignedPrimaryActionIDs: string[]; // sorted by id (localeCompare)
-    alignedSupportActionIDs: string[]; // sorted by id
+    alignedPrimaryActionIDs: string[];    // sorted by id (localeCompare)
+    alignedSupportActionIDs: string[];    // sorted by id
   };
   /** LLM-visible factual evidence (see per-family tables, §5). */
   evidence: StrategicOptionEvidence;
@@ -436,20 +436,20 @@ export interface ExposedStrategicOption {
   id: StrategicOptionId;
   family: StrategicOptionFamily;
   targetPlayerID: string | null;
-  targetName: string | null; // sanitized (PromptSanitizer)
-  evidence: StrategicOptionEvidence; // facts + counts only
+  targetName: string | null;              // sanitized (PromptSanitizer)
+  evidence: StrategicOptionEvidence;      // facts + counts only
 }
 
 export type StrategicOptionOmissionReason =
-  | "family_cap" // duplicate-family candidate beyond coverage
-  | "pressure_target_cap" // beyond the 2-target cap
-  | "exposure_cap"; // beyond the 8-option cap
+  | "family_cap"            // duplicate-family candidate beyond coverage
+  | "pressure_target_cap"   // beyond the 2-target cap
+  | "exposure_cap";         // beyond the 8-option cap
 
 export interface StrategicOptionSetRecord {
-  eligibleOptionIds: StrategicOptionId[]; // all candidates, sorted
-  exposedOptionIds: StrategicOptionId[]; // ≤ 8, exposure order
+  eligibleOptionIds: StrategicOptionId[];     // all candidates, sorted
+  exposedOptionIds: StrategicOptionId[];      // ≤ 8, exposure order
   omitted: { id: StrategicOptionId; reason: StrategicOptionOmissionReason }[];
-  fingerprint: string; // see §6.5
+  fingerprint: string;                        // see §6.5
 }
 ```
 
@@ -545,7 +545,7 @@ menu), LLM-visible evidence (facts only), and the executor-only binding.
   presence is the proof; never re-derive), OR kind `boat` with
   `metadata.targetID === null` (neutral transport).
 - **LLM-visible evidence**: `{ neutralLandReachable: boolean,
-neutralBoatReachable: boolean, ownTroops: number, ownTiles: number }`.
+  neutralBoatReachable: boolean, ownTroops: number, ownTiles: number }`.
 - **Aligned primary (executor-only)**: `attack` with
   `metadata.expansion === true`; `boat` with `metadata.targetID === null`.
 - **Aligned support**: none in V0.
@@ -559,10 +559,10 @@ neutralBoatReachable: boolean, ownTroops: number, ownTiles: number }`.
   with the skills-evaluator variant against the ObjectiveManager variant;
   nuclear strategy is out of V0 scope).
 - **LLM-visible evidence**: `{ economicBuildAvailable: boolean,
-economicUpgradeAvailable: boolean, gold: string, ownTiles: number }`
+  economicUpgradeAvailable: boolean, gold: string, ownTiles: number }`
   (gold is already a bigint string in `AgentOwnState.gold`).
 - **Aligned primary**: the qualifying `build` / `upgrade_structure` actions.
-- **Aligned support**: none in V0. (Embargoes are trade _pressure_, not
+- **Aligned support**: none in V0. (Embargoes are trade *pressure*, not
   development; they belong to pressure_rival support.)
 
 ### 5.3 `pressure_rival:<playerID>`
@@ -572,8 +572,8 @@ economicUpgradeAvailable: boolean, gold: string, ownTiles: number }`
   `metadata.targetID === R.playerID`, OR kind `boat` with
   `metadata.navalInvasion === true` and `metadata.targetID === R.playerID`.
 - **LLM-visible evidence**: `{ targetName (sanitized), sharesBorder: boolean,
-targetTroops: number, targetTiles: number, ownTroops: number,
-targetIsAllied: boolean, targetAttackedMeRecently: boolean }` (last field
+  targetTroops: number, targetTiles: number, ownTroops: number,
+  targetIsAllied: boolean, targetAttackedMeRecently: boolean }` (last field
   from `combat.incomingAttackPlayerIDs` membership — a fact, not a
   recommendation). Deliberately absent: `relativeTroopRatio` as a named
   comparison field is defensible as a fact but reads as a precomputed verdict;
@@ -596,7 +596,7 @@ targetIsAllied: boolean, targetAttackedMeRecently: boolean }` (last field
   `hold` action — i.e. `survive` is eligible whenever the seat is alive. This
   is deliberate: the option set must never be empty post-spawn.
 - **LLM-visible evidence**: `{ incomingAttackCount: number,
-strongerBorderRivalCount: number, ownTroops: number, borderTiles: number }`
+  strongerBorderRivalCount: number, ownTroops: number, borderTiles: number }`
   (stronger-border count computed from raw troops comparison of bordering
   non-friendly rivals — a count of facts; the 1.15 threshold used by
   `strategicScores` is a tunable heuristic, so V0 uses plain `>`).
@@ -607,7 +607,7 @@ strongerBorderRivalCount: number, ownTroops: number, borderTiles: number }`
   acceptance are **excluded** — alliance strategy is an excluded option family,
   and admitting its actions as "survival support" is precisely the generic
   escape hatch the spec forbids. Cost acknowledged: V0 Commander seats cannot
-  ally, which handicaps Arms B _and_ C equally vs Arm A (whose planner allies);
+  ally, which handicaps Arms B *and* C equally vs Arm A (whose planner allies);
   this is a known interpretation constraint on A-vs-C (§10.5, §14).
 
 ### 5.5 Out-of-family kinds
@@ -663,7 +663,7 @@ order, (1) all rivals currently attacking me, (2) all rivals I am attacking,
 (3) all border rivals, (4) remaining rivals by `tilesOwned` descending — each
 group internally sorted by `playerID` localeCompare, dedupe across groups,
 truncate at 6. Size ordering in group 4 is a factual ordering used for
-_inclusion_, not a strategy label; it is the same "relevance" any observer
+*inclusion*, not a strategy label; it is the same "relevance" any observer
 would use and is disclosed here as the one judgment call in the state builder.
 
 **Must-not-contain (enforced by the state builder's field-by-field
@@ -738,7 +738,7 @@ example uses the placeholder `"<one offered option id>"`).
   `{"horizon_expiry","option_not_executable","target_dead","home_attacked","option_appeared"}`;
   unknown entries are a parse failure (not silently dropped — dropping would
   be semantic repair). `horizon_expiry` and `option_not_executable` are always
-  active regardless (safety floor, §7.3); the field lets the Commander _add_
+  active regardless (safety floor, §7.3); the field lets the Commander *add*
   the optional two.
 - `confidence`: optional, finite, 0–1, else dropped (existing parser
   precedent: invalid confidence is dropped in robust mode, rejected in
@@ -777,20 +777,20 @@ the plan-id scheme must not copy the existing collision:
 
 ```ts
 export interface CommanderPlan {
-  planID: string; // §6.5 scheme
-  optionId: StrategicOptionId; // durable authority
+  planID: string;                      // §6.5 scheme
+  optionId: StrategicOptionId;         // durable authority
   family: StrategicOptionFamily;
   targetPlayerID: string | null;
-  horizonDecisions: number; // 2..6
-  intent: string; // bounded, viewer-only
-  extraReplanTriggers: CommanderReplanTrigger[]; // from the response
+  horizonDecisions: number;            // 2..6
+  intent: string;                      // bounded, viewer-only
+  extraReplanTriggers: CommanderReplanTrigger[];  // from the response
   confidence: number | null;
   selectorSource: "llm" | "deterministic" | "fallback-deterministic" | "random";
   createdTurn: number;
   createdDecisionSequence: number;
   decisionsExecuted: number;
   requestFingerprint: string;
-  baseline: { tilesOwned: number; troops: number }; // for progress deltas
+  baseline: { tilesOwned: number; troops: number };   // for progress deltas
 }
 ```
 
@@ -829,7 +829,7 @@ replans, and its name is stamped as `commanderReplanReason`:
 1. `no_active_plan` — bootstrap.
 2. `horizon_expiry` — `decisionsExecuted >= horizonDecisions`.
 3. `option_not_executable` — the plan's option id is no longer in the current
-   _eligible_ candidate set (rebuilt every decision).
+   *eligible* candidate set (rebuilt every decision).
 4. `target_dead` — plan is `pressure_rival:<R>` and R is not alive / not
    visible (subsumes disconnect: `isDisconnected || !isAlive`). Only if the
    Commander opted into it — otherwise case 3 catches it one step later when
@@ -896,7 +896,7 @@ executeOption(input: AgentBrainInput, plan: CommanderPlan,
 ```
 
 The executor receives the **binding**, not the full menu, as its selection
-universe — the option filter is a single chokepoint _before_ any scoring, not
+universe — the option filter is a single chokepoint *before* any scoring, not
 a per-module check. This is the direct lesson of the audit: the current
 executor's `forbiddenActionKinds` filtering is scattered across ~30 sites
 with at least three bypass mechanisms (§3), which is unreviewable. A
@@ -918,6 +918,7 @@ implementation options were considered:
 - (b) **Chosen: small per-family deterministic pickers** built on the same
   primitive facts the menu already carries, in the style of
   `thinPlanExecutionCandidate` / `StrategyAgentBrain.pick`:
+
   - `expand`: prefer land expansion over neutral boat; among
     `expand:terra-nullius:<pct>` variants pick the middle commitment (0.2) when
     own troops ≥ 3× the intent's troop cost, else the smallest (0.1); tie-break
@@ -1094,12 +1095,10 @@ losses are documented in that file): `commanderSelectorSource`,
 ```ts
 export interface StrategicOptionSelector {
   readonly selectorSource: "llm" | "deterministic" | "random";
-  select(
-    state: CommanderState,
-    options: ExposedStrategicOption[],
-  ): Promise<SelectorResult>; // { optionId, horizonDecisions, intent,
-  //   extraReplanTriggers, confidence,
-  //   raw?: string, parseOk?: boolean, ... }
+  select(state: CommanderState, options: ExposedStrategicOption[]):
+    Promise<SelectorResult>;   // { optionId, horizonDecisions, intent,
+                               //   extraReplanTriggers, confidence,
+                               //   raw?: string, parseOk?: boolean, ... }
 }
 ```
 
@@ -1127,8 +1126,8 @@ Three mechanisms, all cheap:
    `selector` instance. One code path, reviewed once.
 2. **Mock-equivalence test (the strong one)**: run a step-locked match twice —
    Arm B, and Arm C with a `MockLlmProvider`-style scripted provider whose
-   reply is computed by _running the deterministic selector on the same
-   locked request_ and serializing its result as JSON. Assert the two
+   reply is computed by *running the deterministic selector on the same
+   locked request* and serializing its result as JSON. Assert the two
    decision streams are **identical records** (same actionIDs, same plans,
    same fingerprints; only `selectorSource`/`plannerRawOutput`-class metadata
    may differ). Also assert zero fallbacks occurred in either run (a
@@ -1165,7 +1164,7 @@ starting point.
   reliability, not intelligence).
 - **A vs B**: effect of the abstraction + executor change (both non-LLM-
   selected in the sense that B's selector is deterministic; but note A's
-  planner is an LLM — A vs B conflates architecture change _and_ removing
+  planner is an LLM — A vs B conflates architecture change *and* removing
   the LLM planner; this is inherent to the requested design and must be
   reported as such, not spun).
 - **A vs C**: product-level bottom line. Interpretation caveat that must ship
@@ -1202,32 +1201,32 @@ its two-side type — pairwise sections instead.
 
 ### New files (all under `src/server/agents/` unless noted)
 
-| File                                                                                                                                                                                                                                                                                                   | Contents                                                                                                                                       |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `StrategicCommanderTypes.ts`                                                                                                                                                                                                                                                                           | §4 types, `CommanderState`, `CommanderPlan`, replan/fidelity/omission enums, selector interfaces. Pure types + tiny pure helpers.              |
-| `StrategicOptionBuilder.ts`                                                                                                                                                                                                                                                                            | eligibility predicates, candidate build, caps, omission record, input normalization.                                                           |
-| `CommanderStateBuilder.ts`                                                                                                                                                                                                                                                                             | field-by-field state construction, rival selection, recentEvents derivation, fingerprint.                                                      |
-| `CommanderPromptBuilder.ts`                                                                                                                                                                                                                                                                            | §6.3 prompt.                                                                                                                                   |
-| `CommanderResponseParser.ts`                                                                                                                                                                                                                                                                           | §6.4 parser (syntax-only repair, locked-set validation).                                                                                       |
-| `StrategicOptionSelectors.ts`                                                                                                                                                                                                                                                                          | `StrategicOptionSelector` interface impls: `DeterministicOptionSelector`, `RandomOptionSelector`.                                              |
-| `LlmOptionSelector.ts`                                                                                                                                                                                                                                                                                 | provider-backed selector (uses `LlmProvider`, `withDeferredDecisionTimeout`).                                                                  |
-| `CommanderPlanLifecycle.ts`                                                                                                                                                                                                                                                                            | §7: plan store, replan evaluation, request lock, fallback, progress snapshots.                                                                 |
-| `StrategicOptionExecutor.ts`                                                                                                                                                                                                                                                                           | §8 pickers + blocked-plan behavior.                                                                                                            |
-| `StrategicOptionFidelity.ts`                                                                                                                                                                                                                                                                           | §8.6 classifier + per-match aggregation.                                                                                                       |
-| `StrategicCommanderBrain.ts`                                                                                                                                                                                                                                                                           | the `AgentBrain`: wires builder → state → lifecycle → selector → executor → `AgentDecision` with full metadata stamps; spawn-phase delegation. |
-| `src/scripts/ai-agent-commander-arm-gate.ts`                                                                                                                                                                                                                                                           | N-arm matched runner (benchmark invocations per arm, shared seeds/ids).                                                                        |
-| `src/server/agents/CommanderArmReport.ts`                                                                                                                                                                                                                                                              | `writeCommanderArmReport` (§10.7).                                                                                                             |
-| Tests: `tests/server/StrategicOptionBuilder.test.ts`, `CommanderStateBuilder.test.ts`, `CommanderResponseParser.test.ts`, `CommanderPlanLifecycle.test.ts`, `StrategicOptionExecutor.test.ts`, `StrategicCommanderBrain.test.ts`, `CommanderArmEquivalence.test.ts`, `CommanderArtifactStamps.test.ts` | §13 matrix.                                                                                                                                    |
+| File | Contents |
+| --- | --- |
+| `StrategicCommanderTypes.ts` | §4 types, `CommanderState`, `CommanderPlan`, replan/fidelity/omission enums, selector interfaces. Pure types + tiny pure helpers. |
+| `StrategicOptionBuilder.ts` | eligibility predicates, candidate build, caps, omission record, input normalization. |
+| `CommanderStateBuilder.ts` | field-by-field state construction, rival selection, recentEvents derivation, fingerprint. |
+| `CommanderPromptBuilder.ts` | §6.3 prompt. |
+| `CommanderResponseParser.ts` | §6.4 parser (syntax-only repair, locked-set validation). |
+| `StrategicOptionSelectors.ts` | `StrategicOptionSelector` interface impls: `DeterministicOptionSelector`, `RandomOptionSelector`. |
+| `LlmOptionSelector.ts` | provider-backed selector (uses `LlmProvider`, `withDeferredDecisionTimeout`). |
+| `CommanderPlanLifecycle.ts` | §7: plan store, replan evaluation, request lock, fallback, progress snapshots. |
+| `StrategicOptionExecutor.ts` | §8 pickers + blocked-plan behavior. |
+| `StrategicOptionFidelity.ts` | §8.6 classifier + per-match aggregation. |
+| `StrategicCommanderBrain.ts` | the `AgentBrain`: wires builder → state → lifecycle → selector → executor → `AgentDecision` with full metadata stamps; spawn-phase delegation. |
+| `src/scripts/ai-agent-commander-arm-gate.ts` | N-arm matched runner (benchmark invocations per arm, shared seeds/ids). |
+| `src/server/agents/CommanderArmReport.ts` | `writeCommanderArmReport` (§10.7). |
+| Tests: `tests/server/StrategicOptionBuilder.test.ts`, `CommanderStateBuilder.test.ts`, `CommanderResponseParser.test.ts`, `CommanderPlanLifecycle.test.ts`, `StrategicOptionExecutor.test.ts`, `StrategicCommanderBrain.test.ts`, `CommanderArmEquivalence.test.ts`, `CommanderArtifactStamps.test.ts` | §13 matrix. |
 
 ### Modified files (each small, each reviewed against its trap)
 
-| File                                         | Change                                                                                                                                                                                   | Trap                                                                                                                                                                                                    |
-| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `AgentTypes.ts`                              | add `"strategic-commander"` to `AgentBrainType` (:14); add `"commander-v0-selector"` to `AgentRuntimeMode` (:24). No `AgentDecision` changes.                                            | `LLM_DEGRADABLE_BRAIN_TYPES` (AgentLeagueMatch.ts:1912) membership decides degradation attribution — add `"strategic-commander"` there too so league-level fallbacks on Arm C count as LLM degradation. |
-| `AgentDecisionLogWriter.ts`                  | hoist the 8 new `commander*` keys into `DecisionLogEntry` (:173) and `decisionLogEntry` (:615).                                                                                          | The allowlist is the only path to artifacts; unhoisted keys vanish silently.                                                                                                                            |
-| `src/scripts/ai-agent-league-smoke.ts`       | add `commander-v0-det` / `commander-v0-llm` / `commander-v0-random` to `SmokeBrainMode` (:1808), `brainModeFromArgs` (:1240), `createBrainForMode` (:1574), `artifactBrainMode` (:1834). | Four hand-written dispatch chains; there is no registry — all four must change together (also fix nothing else: `starter-bot`'s missing `--brain=` branch is a pre-existing quirk, out of scope).       |
-| `src/scripts/ai-agent-frontier-benchmark.ts` | accept the three new `--brain` modes in its brain construction (:605-703 region).                                                                                                        | keep `FrontierBenchmarkConfig` shape additive.                                                                                                                                                          |
-| `tests/server/PromptSizeMatrix.test.ts`      | register the Commander prompt arm's byte cost; follow the env-hygiene delete pattern (:101).                                                                                             | test unsets every env it sets or the suite fails.                                                                                                                                                       |
+| File | Change | Trap |
+| --- | --- | --- |
+| `AgentTypes.ts` | add `"strategic-commander"` to `AgentBrainType` (:14); add `"commander-v0-selector"` to `AgentRuntimeMode` (:24). No `AgentDecision` changes. | `LLM_DEGRADABLE_BRAIN_TYPES` (AgentLeagueMatch.ts:1912) membership decides degradation attribution — add `"strategic-commander"` there too so league-level fallbacks on Arm C count as LLM degradation. |
+| `AgentDecisionLogWriter.ts` | hoist the 8 new `commander*` keys into `DecisionLogEntry` (:173) and `decisionLogEntry` (:615). | The allowlist is the only path to artifacts; unhoisted keys vanish silently. |
+| `src/scripts/ai-agent-league-smoke.ts` | add `commander-v0-det` / `commander-v0-llm` / `commander-v0-random` to `SmokeBrainMode` (:1808), `brainModeFromArgs` (:1240), `createBrainForMode` (:1574), `artifactBrainMode` (:1834). | Four hand-written dispatch chains; there is no registry — all four must change together (also fix nothing else: `starter-bot`'s missing `--brain=` branch is a pre-existing quirk, out of scope). |
+| `src/scripts/ai-agent-frontier-benchmark.ts` | accept the three new `--brain` modes in its brain construction (:605-703 region). | keep `FrontierBenchmarkConfig` shape additive. |
+| `tests/server/PromptSizeMatrix.test.ts` | register the Commander prompt arm's byte cost; follow the env-hygiene delete pattern (:101). | test unsets every env it sets or the suite fails. |
 
 ### High-risk files (touched or depended on)
 
@@ -1251,7 +1250,7 @@ its two-side type — pairwise sections instead.
 `GameServer.ts`; `AgentLeagueMatch.ts` (brain injection already exists);
 `AgentStepLockedLeague.ts`; `AgentWireProtocol.ts` (no new degradation cause
 in V0); all of `coworld-adapter/` (V0 is not hosted); the starter mirrors
-(`tester-starter-llm/`, tests/coworld/StarterLlmPlanner\*); all viewer code
+(`tester-starter-llm/`, tests/coworld/StarterLlmPlanner*); all viewer code
 (beat cards work via existing `planObjective` keys); all deal/message/economy/
 spatial subsystems (flags stay OFF in the experiment).
 
@@ -1368,27 +1367,27 @@ spatial subsystems (flags stay OFF in the experiment).
 
 Invariant → biting test (→ vacuous-pass risk and its counter):
 
-| Invariant                               | Test                                                                                                                                                        | Vacuous-pass risk → counter                                                                       |
-| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| Exposure ≤ 8, one per executable family | builder test, adversarial 12-rival fixture                                                                                                                  | fixture too small exposes < cap → assert fixture eligibility count > 8 pre-cap                    |
-| Pressure cap 2, coverage by reach class | builder test with border + boat-only targets                                                                                                                | all targets same class → two fixtures, one per partition shape                                    |
-| Order invariance (menu + players)       | shuffled-input equality test (new; no current test covers this anywhere — the closest, SpatialDecisionInertness.test.ts:163, covers ranking stability only) | shuffle is identity on 1-element lists → fixtures with ≥ 4 rivals, ≥ 10 actions                   |
-| Omission completeness                   | eligible = exposed ∪ omitted with reasons                                                                                                                   | trivially true when nothing omitted → fixture forcing `pressure_target_cap`                       |
-| No answer key in LLM-visible data       | (a) exact key-set allowlist per type; (b) serialized banned-substring scan (`score`, `recommended`, `best`, `priority`, `rank`, action-id prefixes)         | (b) is dodgeable by renaming → (a) is the primary; (b) is defense-in-depth                        |
-| Parser repairs syntax only              | mutation-property test (§12 stage 2)                                                                                                                        | mutation corpus too tame → include fence+prose+trailing-junk+duplicate-key cases                  |
-| Off-set / stale response rejected       | lifecycle lock tests                                                                                                                                        | sync path makes stale unreachable → test drives `applyResponse` directly with a stale fingerprint |
-| Replans only on the closed list         | adversarial non-trigger fixtures (repeat-action, priority-flip, affordance-ready)                                                                           | forgetting a heuristic → fixture list mirrors §3's [R] inventory item-by-item                     |
-| Zero silent abandonment                 | plan-transition count == replan-reason count over a long scripted run                                                                                       | short run → ≥ 20 transitions in fixture                                                           |
-| Executor alignment only                 | ThinExecutor-style: off-option high-value action offered, never chosen                                                                                      | binding accidentally includes it → assert binding contents first                                  |
-| Target fidelity (no retarget)           | pressure_rival:R with juicier rival S present                                                                                                               | S not attackable in fixture → make S strictly dominant                                            |
-| hold_plan_blocked once + replan         | two-decision scripted sequence                                                                                                                              | menu refills between decisions → fixture keeps it empty                                           |
-| Emergency count zero (V0)               | aggregate assert over harness runs + unit assert in executor                                                                                                | vacuous by construction (set is empty) — that is the point; documented                            |
-| Fidelity ≥ 95% gate                     | report-level computation test at 94.9/95.1 fixtures                                                                                                         | unit-fixture fidelity is always 100% → gate tested in the report, not the executor                |
-| Every id offered / spine intact         | game-level `setup()`+GameServer test (§9.2)                                                                                                                 | mock-only tests → this one uses the real core                                                     |
-| B ≡ C except selector                   | mock-equivalence with zero-fallback guard (§10.3)                                                                                                           | both arms fall back → the guard                                                                   |
-| Fallback marking + exclusion keys       | lifecycle stamps + report exclusion test keyed on `plannerFallbackUsed` (`fallbackUsed` is the wrong key and defaults false-when-absent)                    | report test on synthetic rows including absent-metadata rows                                      |
-| Artifact survival of new keys           | `CommanderArtifactStamps.test.ts` through the real writer                                                                                                   | asserting on the record instead of the written line → parse the emitted decisions.jsonl           |
-| Existing lanes untouched                | full existing suite + PromptSizeMatrix env hygiene + no-diff on out-of-scope files in review                                                                | —                                                                                                 |
+| Invariant | Test | Vacuous-pass risk → counter |
+| --- | --- | --- |
+| Exposure ≤ 8, one per executable family | builder test, adversarial 12-rival fixture | fixture too small exposes < cap → assert fixture eligibility count > 8 pre-cap |
+| Pressure cap 2, coverage by reach class | builder test with border + boat-only targets | all targets same class → two fixtures, one per partition shape |
+| Order invariance (menu + players) | shuffled-input equality test (new; no current test covers this anywhere — the closest, SpatialDecisionInertness.test.ts:163, covers ranking stability only) | shuffle is identity on 1-element lists → fixtures with ≥ 4 rivals, ≥ 10 actions |
+| Omission completeness | eligible = exposed ∪ omitted with reasons | trivially true when nothing omitted → fixture forcing `pressure_target_cap` |
+| No answer key in LLM-visible data | (a) exact key-set allowlist per type; (b) serialized banned-substring scan (`score`, `recommended`, `best`, `priority`, `rank`, action-id prefixes) | (b) is dodgeable by renaming → (a) is the primary; (b) is defense-in-depth |
+| Parser repairs syntax only | mutation-property test (§12 stage 2) | mutation corpus too tame → include fence+prose+trailing-junk+duplicate-key cases |
+| Off-set / stale response rejected | lifecycle lock tests | sync path makes stale unreachable → test drives `applyResponse` directly with a stale fingerprint |
+| Replans only on the closed list | adversarial non-trigger fixtures (repeat-action, priority-flip, affordance-ready) | forgetting a heuristic → fixture list mirrors §3's [R] inventory item-by-item |
+| Zero silent abandonment | plan-transition count == replan-reason count over a long scripted run | short run → ≥ 20 transitions in fixture |
+| Executor alignment only | ThinExecutor-style: off-option high-value action offered, never chosen | binding accidentally includes it → assert binding contents first |
+| Target fidelity (no retarget) | pressure_rival:R with juicier rival S present | S not attackable in fixture → make S strictly dominant |
+| hold_plan_blocked once + replan | two-decision scripted sequence | menu refills between decisions → fixture keeps it empty |
+| Emergency count zero (V0) | aggregate assert over harness runs + unit assert in executor | vacuous by construction (set is empty) — that is the point; documented |
+| Fidelity ≥ 95% gate | report-level computation test at 94.9/95.1 fixtures | unit-fixture fidelity is always 100% → gate tested in the report, not the executor |
+| Every id offered / spine intact | game-level `setup()`+GameServer test (§9.2) | mock-only tests → this one uses the real core |
+| B ≡ C except selector | mock-equivalence with zero-fallback guard (§10.3) | both arms fall back → the guard |
+| Fallback marking + exclusion keys | lifecycle stamps + report exclusion test keyed on `plannerFallbackUsed` (`fallbackUsed` is the wrong key and defaults false-when-absent) | report test on synthetic rows including absent-metadata rows |
+| Artifact survival of new keys | `CommanderArtifactStamps.test.ts` through the real writer | asserting on the record instead of the written line → parse the emitted decisions.jsonl |
+| Existing lanes untouched | full existing suite + PromptSizeMatrix env hygiene + no-diff on out-of-scope files in review | — |
 
 Existing tests that will collide and how: none should — the new lane adds
 files and additive union members. The three watchpoints: (1)
@@ -1396,7 +1395,7 @@ files and additive union members. The three watchpoints: (1)
 added (design avoids this); (2) `PromptSizeMatrix.test.ts:101` fails if any
 new test leaks env vars (follow its delete pattern); (3) prompt-content
 pinning suites (LlmAgentBrain.test.ts:167, AgentPlannerExecutor.test.ts:92,
-FrontierAgentActions.test.ts:411/422, tests/coworld/StarterLlmPlanner\*) are
+FrontierAgentActions.test.ts:411/422, tests/coworld/StarterLlmPlanner*) are
 untouched because their builders are untouched.
 
 ---
@@ -1411,7 +1410,7 @@ fidelity-gated.
    (random selector) ≈ Arm B ≈ Arm C on win/survival/tile-share within noise,
    selection among the exposed options carries no signal — the builder's
    eligibility gating plus the executor are the whole policy. The
-   architecture might still be _useful_, but the causal claim "the LLM's
+   architecture might still be *useful*, but the causal claim "the LLM's
    choice matters" is falsified. (Without Arm R, B ≈ C alone cannot
    distinguish "curation did it" from "the deterministic selector is as good
    as the LLM" — which is why R is recommended.)
@@ -1475,11 +1474,11 @@ that preserves the experiment:
 4. **"At most eight options" vs V0 families.** With four families and the
    2-target cap the ceiling is five; the 8-cap machinery is built and tested
    but unreachable. Smallest interpretation: keep the cap code (coverage rule
-   - omission reasons) so V1 families don't rediscover it.
+   + omission reasons) so V1 families don't rediscover it.
 5. **"Commander must not see the raw LegalAction menu" vs "options must prove
    executability".** Resolved by the two-tier candidate/exposed split (§4):
    bindings hold ids, evidence holds facts. The one purist wrinkle: evidence
-   counts (e.g. `economicBuildAvailable`) are _derived from_ the menu; that
+   counts (e.g. `economicBuildAvailable`) are *derived from* the menu; that
    is unavoidable — executability proof is the point — and is not an
    answer-key leak because no ordering or scoring survives the projection.
 6. **Free-text `intent` vs "no unbounded notes".** `intent` is bounded
@@ -1502,14 +1501,14 @@ that preserves the experiment:
    hosted A/B before in-house prompt changes ship. The Commander prompt is a
    new lane behind new brain modes, not a change to any shipped prompt; the
    existing prompts are byte-identical. The ruling's spirit still binds the
-   _hosted_ future of this work: no hosted Commander seat without its own
+   *hosted* future of this work: no hosted Commander seat without its own
    hosted A/B, and no deterministic hosted seat ever (operator rule
    2026-06-10, recorded in keystone-player.ts).
 10. **The proposal's background claim about the failed prompt-slimming
     experiment.** Verified: no code remnants remain (the slim variant was
     reverted); the only in-force reductions are compact JSON and the top-12
     shortlist. The V0 prompt does not re-run that experiment — it replaces
-    the _decision surface_ (options instead of actions), it does not compress
+    the *decision surface* (options instead of actions), it does not compress
     the action menu. This distinction is worth keeping sharp in any writeup,
     because "we made the prompt small again" is exactly the reading the
     2026-08-07 ruling would reject.
