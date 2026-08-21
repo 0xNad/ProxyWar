@@ -215,7 +215,7 @@ export class ReplayEndCard extends LitElement implements Layer {
    */
   private readonly everAlive = new Set<number>();
   private sampleCount = 0;
-  /** Consecutive frames spent at/after the final recorded turn without a Win. */
+  /** Game-turn renderer ticks at/after the final recorded turn without a Win. */
   private exhaustedTicks = 0;
 
   /**

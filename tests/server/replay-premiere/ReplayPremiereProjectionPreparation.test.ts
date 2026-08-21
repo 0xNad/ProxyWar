@@ -13,8 +13,8 @@ import {
 import { ReplayPremiereEventStore } from "../../../src/server/replay-premiere/ReplayPremiereEventStore";
 import { sha256Hex } from "../../../src/server/replay-premiere/ReplayPremiereIntegrity";
 import { DEFAULT_REPLAY_PREMIERE_EVENT_STORE_LIMITS } from "../../../src/server/replay-premiere/ReplayPremiereStartup";
-import { AMPLE_DISK } from "./ReplayPremiereFixtures";
 import {
+  AMPLE_DISK,
   PREMIERE_ID,
   verifiedPublicationFixture,
 } from "./ReplayPremiereFixtures";

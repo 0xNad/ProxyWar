@@ -46,8 +46,8 @@ import {
   type ReplayPremiereProductionService,
 } from "../../../src/server/replay-premiere/ReplayPremiereStartup";
 import { ReplayPremiereTerminalReclaimer } from "../../../src/server/replay-premiere/ReplayPremiereTerminalReclamation";
-import { AMPLE_DISK } from "./ReplayPremiereFixtures";
 import {
+  AMPLE_DISK,
   NOW,
   PREMIERE_ID,
   verifiedPublicationFixture,

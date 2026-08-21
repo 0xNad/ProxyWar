@@ -100,17 +100,18 @@ RUN npm ci --ignore-scripts --omit=dev \
 COPY coworld-adapter/src /app/integration/src
 
 # WORKDIR IS LOAD-BEARING, NOT COSMETIC. The run command imports tsx by BARE
-# specifier (`--import tsx/esm`), which Node resolves from the working
+# specifier (`--import tsx`), which Node resolves from the working
 # directory's node_modules chain — and tsx lives under the repo tree. Ending
 # in /app/integration builds a perfectly clean image that dies on its first
 # boot with ERR_MODULE_NOT_FOUND (verified: that was this file's first draft).
 # The entrypoint is referenced absolutely, so cwd costs the player nothing.
 WORKDIR /app/proxywar
 
-# Set LAST, on purpose: every `npm ci` above must run with a full dependency
-# tree, and npm reads `omit` from NODE_ENV. Placed here it does what it is
-# actually for — telling the running player it is in production — without
-# quietly filtering the installs.
+# Set LAST, on purpose: the repo install above needs its full dependency tree,
+# while the adapter install explicitly requests `--omit=dev`. Neither install
+# should inherit an implicit omission from NODE_ENV. Placed here it only tells
+# the running player it is in production; the adapter's explicit omission stays
+# visible at its own install step.
 ENV NODE_ENV=production
 
 CMD ["sh", "-c", "PROXYWAR_PLAYER_POST_FINAL_LINGER_MS=120000 exec node --import tsx /app/integration/src/keystone-player.ts"]

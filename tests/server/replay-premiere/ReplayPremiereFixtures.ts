@@ -56,7 +56,10 @@ import {
 // `fs.statfs` is overloaded (StatsFs | BigIntStatsFs), so the double cast is
 // what lets one stub satisfy the declared `typeof fs.statfs` seam.
 export const AMPLE_DISK = (async () =>
-  ({ bavail: 100 * 1024 ** 3, bsize: 1 }) as StatsFs) as unknown as typeof fs.statfs;
+  ({
+    bavail: 100 * 1024 ** 3,
+    bsize: 1,
+  }) as StatsFs) as unknown as typeof fs.statfs;
 
 export const PREMIERE_ID = "prem_0123456789abcdef";
 export const NOW = new Date("2026-07-20T18:00:00.000Z");

@@ -13,7 +13,6 @@ import {
 } from "../../../src/server/replay-premiere/ReplayPremiereCheckpointProjection";
 import { buildPremiereChunks } from "../../../src/server/replay-premiere/ReplayPremiereChunks";
 import { ReplayPremiereError } from "../../../src/server/replay-premiere/ReplayPremiereErrors";
-import { AMPLE_DISK } from "./ReplayPremiereFixtures";
 import {
   canonicalReplayPremiereJson,
   hashReplayPremiereJson,
@@ -25,6 +24,7 @@ import {
   VerifiedPremiereEligibilityGate,
 } from "../../../src/server/replay-premiere/ReplayPremierePublication";
 import {
+  AMPLE_DISK,
   PREMIERE_ID,
   verifiedPublicationFixture,
 } from "./ReplayPremiereFixtures";

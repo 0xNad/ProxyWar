@@ -22,8 +22,8 @@ import {
 } from "../../../src/server/replay-premiere/ReplayPremiereIntegrity";
 import { ReplayPremiereRuntimeRegistry } from "../../../src/server/replay-premiere/ReplayPremiereRuntimeCoordinator";
 import { startReplayPremiereProduction } from "../../../src/server/replay-premiere/ReplayPremiereStartup";
-import { AMPLE_DISK } from "./ReplayPremiereFixtures";
 import {
+  AMPLE_DISK,
   NOW,
   RATED_COWORLD_ID,
   RATED_DIVISION_ID,
