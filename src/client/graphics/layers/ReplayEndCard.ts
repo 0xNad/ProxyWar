@@ -324,11 +324,10 @@ export class ReplayEndCard extends LitElement implements Layer {
    * the broadcast clock uses, so this cannot fire in live play (the key is
    * absent) and stays correct across a rewind (the key is republished).
    *
-   * The confirmation delay matters: a Win update for a genuine victory can
-   * arrive on the tick AFTER the final turn is reached, and firing instantly
-   * would freeze "No winner" over a match somebody actually won. Waiting a
-   * few frames lets the real ending win the race; `showResult` is idempotent
-   * because `tick()` returns early once a snapshot exists.
+   * The renderer ticks once per delivered game turn, and the turn loop stops
+   * after the final update. Therefore the exhausted replay gets exactly one
+   * chance to trigger this path. A genuine victory's `Win` update is read
+   * first in `tick()`, so it still wins over the no-winner exhaustion result.
    */
   private showResultIfReplayExhausted(game: GameView): void {
     const totalTurns = Number(document.body.dataset.pwReplayTotalTurns);

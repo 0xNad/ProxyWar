@@ -68,9 +68,7 @@ function pactWith(partner: string, kind: string): AgentObservation {
           dealID: "d1",
           proposerPlayerID: "me",
           recipientPlayerID: partner,
-          obligations: [
-            { obligorPlayerID: "me", kind, status: "pending" },
-          ],
+          obligations: [{ obligorPlayerID: "me", kind, status: "pending" }],
         },
       ],
       proposalOptions: [],
@@ -201,6 +199,57 @@ describe("keystone treaty guard mirrors the referee", () => {
     ]);
   });
 
+  it("scopes a targeted embargo to the partner protected by trade security", () => {
+    const mixedPacts = {
+      ownState: { playerID: "me" },
+      visiblePlayers: [],
+      deals: {
+        incomingProposals: [],
+        outgoingProposals: [],
+        activeDeals: [
+          {
+            dealID: "trade",
+            proposerPlayerID: "me",
+            recipientPlayerID: "trade-partner",
+            obligations: [
+              {
+                obligorPlayerID: "me",
+                kind: "trade_security",
+                status: "pending",
+              },
+            ],
+          },
+          {
+            dealID: "peace",
+            proposerPlayerID: "me",
+            recipientPlayerID: "peace-partner",
+            obligations: [
+              {
+                obligorPlayerID: "me",
+                kind: "non_aggression",
+                status: "pending",
+              },
+            ],
+          },
+        ],
+        proposalOptions: [],
+      },
+    } as unknown as AgentObservation;
+    const tradeEmbargo = action("embargo", "emb:trade", {
+      targetID: "trade-partner",
+      action: "start",
+    });
+    const peaceEmbargo = action("embargo", "emb:peace", {
+      targetID: "peace-partner",
+      action: "start",
+    });
+
+    expect(kept([tradeEmbargo, peaceEmbargo, HOLD], mixedPacts)).toEqual([
+      "emb:peace",
+      "hold",
+    ]);
+  });
+
   it("leaves every action alone when no pact is held", () => {
     const noPact = {
       ownState: { playerID: "me" },
@@ -230,7 +279,11 @@ describe("keystone treaty guard mirrors the referee", () => {
             recipientPlayerID: "p",
             obligations: [
               // Obligor is THEM: our own hands stay free.
-              { obligorPlayerID: "p", kind: "non_aggression", status: "pending" },
+              {
+                obligorPlayerID: "p",
+                kind: "non_aggression",
+                status: "pending",
+              },
             ],
           },
         ],
@@ -265,7 +318,10 @@ describe("keystone treaty guard mirrors the referee", () => {
       "validatedManualEmbargoAgainst",
     ]) {
       const start = referee.indexOf(`function ${fnName}(`);
-      expect(start, `${fnName} not found — did the referee rename it?`).toBeGreaterThan(-1);
+      expect(
+        start,
+        `${fnName} not found — did the referee rename it?`,
+      ).toBeGreaterThan(-1);
       // Body ends at the next top-level `\n}` after the signature.
       const end = referee.indexOf("\n}", start);
       const body = referee.slice(start, end);
@@ -278,7 +334,9 @@ describe("keystone treaty guard mirrors the referee", () => {
     expect(judged.size).toBeGreaterThan(0);
 
     const guard = readFileSync(GUARD_SOURCE, "utf8");
-    const guardStart = guard.indexOf("export function withoutKeystoneTreatyBreaches");
+    const guardStart = guard.indexOf(
+      "export function withoutKeystoneTreatyBreaches",
+    );
     expect(guardStart).toBeGreaterThan(-1);
     const guardBody = guard.slice(guardStart, guard.indexOf("\n}", guardStart));
     const handled = new Set(

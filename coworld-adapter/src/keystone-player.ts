@@ -213,74 +213,6 @@ const KEYSTONE_OPENER_BORDER =
 type KeystoneMessageMove = { id: string; text: string };
 
 /**
- * WITHIN-POLICY VOICE EXPERIMENT.
- *
- * Why this exists: on 2026-08-19 the league produced its first real
- * conversations, and the obvious question — do messaged proposals get accepted
- * more? — turned out to be UNANSWERABLE from observation. Measured naively,
- * messaged pairs accepted at 22.9% vs 15.1% unmessaged (p≈0.04); but agents
- * that talk talk to EVERYONE (166 of 168 answerable counterparties), so the
- * comparison is between different policies, not between treatments. The
- * apparent effect is that talkers are newer builds, and the largest
- * deal-withdrawer never talks at all.
- *
- * The only design that can answer it is a within-policy contrast: the SAME
- * agent, in the SAME episode, messaging a seeded subset of its rivals and
- * staying silent to the rest. Deal outcomes are then compared inside one
- * policy, which controls for agent quality, map, seat and opponent pool.
- *
- * Assignment is a pure function of (gameID, own id, rival id), so an analysis
- * script can RECOMPUTE which rivals were in the control arm without any extra
- * plumbing in the artifacts — absence of a message is otherwise ambiguous
- * (no opportunity vs assigned silent). Seeding on gameID also reshuffles the
- * split every episode, so no rival is permanently silenced.
- *
- * OFF unless `PROXYWAR_KEYSTONE_VOICE_AB` is set to a share in (0,1): with no
- * env the agent talks to everyone exactly as before.
- */
-const KEYSTONE_VOICE_AB_ENV = "PROXYWAR_KEYSTONE_VOICE_AB";
-
-/**
- * FNV-1a, duplicated deliberately. `stableFraction` lives in
- * `AgentPlannerExecutor.ts`, and keystone may only ever `import type` from
- * `src/` — a value import resolves to nothing in the deployed container
- * (the player sits at /app/integration/src, the repo at /app/proxywar). Six
- * lines of pure arithmetic is the cheap side of that trade; the algorithm is
- * pinned by a test that reproduces the planner's own values.
- */
-export function keystoneStableFraction(seed: string): number {
-  let hash = 2166136261;
-  for (let index = 0; index < seed.length; index += 1) {
-    hash ^= seed.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0) / 4_294_967_295;
-}
-
-/** The configured treatment share, or null when the experiment is off. */
-export function keystoneVoiceAbShare(
-  env: NodeJS.ProcessEnv = process.env,
-): number | null {
-  const raw = Number(env[KEYSTONE_VOICE_AB_ENV] ?? "");
-  return Number.isFinite(raw) && raw > 0 && raw < 1 ? raw : null;
-}
-
-/**
- * True when this rival is in the TALK arm for this episode. Deterministic and
- * recomputable: `keystoneVoiceCohort(gameID, ownID, rivalID, share)`.
- */
-export function keystoneVoiceCohort(
-  gameID: string,
-  ownID: string,
-  rivalID: string,
-  share: number,
-): boolean {
-  return (
-    keystoneStableFraction(`voice-ab:${gameID}:${ownID}:${rivalID}`) < share
-  );
-}
-
-/**
  * At most one rival per decision, and only when there is something to answer
  * or a concrete border to settle. Silence is the default: an agent that talks
  * every step is noise, not negotiation.
@@ -295,7 +227,7 @@ export function chooseKeystoneMessageMove(
   observation: AgentObservation,
   answered: Set<string>,
 ): KeystoneMessageMove | null {
-  let offers = legalActions.filter((action) => action.kind === "message");
+  const offers = legalActions.filter((action) => action.kind === "message");
   if (offers.length === 0) return null;
   const recipientOf = (action: LegalAction): string | undefined => {
     const metadata = action.metadata as { recipientID?: unknown } | undefined;
@@ -303,23 +235,6 @@ export function chooseKeystoneMessageMove(
       ? metadata.recipientID
       : undefined;
   };
-  // Experiment arm, when configured: drop the control cohort's offers up
-  // front, so BOTH the reply path and the opener path fall silent for those
-  // rivals. Filtering here rather than at each branch is what makes "silent"
-  // mean the same thing in both, which the analysis depends on.
-  const share = keystoneVoiceAbShare();
-  const ownID = observation.ownState?.playerID;
-  if (share !== null && typeof ownID === "string") {
-    const gameID = observation.gameID ?? "";
-    offers = offers.filter((action) => {
-      const rivalID = recipientOf(action);
-      return (
-        rivalID === undefined ||
-        keystoneVoiceCohort(gameID, ownID, rivalID, share)
-      );
-    });
-    if (offers.length === 0) return null;
-  }
   const inbound = observation.nonCombat?.inboundMessages ?? [];
 
   if (inbound.length > 0) {
@@ -483,16 +398,13 @@ function keystoneDealMetadata(action: LegalAction): {
 export function keystoneAbstentionPartners(observation: AgentObservation): {
   /** Partners protected from targeted aggression (both pact kinds). */
   partners: Set<string>;
-  /**
-   * True while ANY pending `trade_security` obligation is ours. `embargo_all`
-   * is judged target-independently, so one such pact bans it outright.
-   */
-  tradeSecurityHeld: boolean;
+  /** Partners protected from targeted manual embargoes. */
+  tradeSecurityPartners: Set<string>;
 } {
   const ownID = observation.ownState?.playerID;
   const partners = new Set<string>();
-  let tradeSecurityHeld = false;
-  if (typeof ownID !== "string") return { partners, tradeSecurityHeld };
+  const tradeSecurityPartners = new Set<string>();
+  if (typeof ownID !== "string") return { partners, tradeSecurityPartners };
   for (const deal of observation.deals?.activeDeals ?? []) {
     for (const obligation of deal.obligations ?? []) {
       if (
@@ -501,16 +413,18 @@ export function keystoneAbstentionPartners(observation: AgentObservation): {
         (obligation.kind === "non_aggression" ||
           obligation.kind === "trade_security")
       ) {
-        partners.add(
+        const partnerID =
           deal.proposerPlayerID === ownID
             ? deal.recipientPlayerID
-            : deal.proposerPlayerID,
-        );
-        if (obligation.kind === "trade_security") tradeSecurityHeld = true;
+            : deal.proposerPlayerID;
+        partners.add(partnerID);
+        if (obligation.kind === "trade_security") {
+          tradeSecurityPartners.add(partnerID);
+        }
       }
     }
   }
-  return { partners, tradeSecurityHeld };
+  return { partners, tradeSecurityPartners };
 }
 
 /**
@@ -540,7 +454,7 @@ export function withoutKeystoneTreatyBreaches(
   legalActions: LegalAction[],
   observation: AgentObservation,
 ): LegalAction[] {
-  const { partners, tradeSecurityHeld } =
+  const { partners, tradeSecurityPartners } =
     keystoneAbstentionPartners(observation);
   if (partners.size === 0) return legalActions;
   const kept = legalActions.filter((action) => {
@@ -571,13 +485,15 @@ export function withoutKeystoneTreatyBreaches(
         // obligation (`validatedManualEmbargoAgainst` is gated on it), so a
         // plain non-aggression pact must not cost the Commander this move.
         return !(
-          tradeSecurityHeld &&
-          aimedAtPartner &&
+          targetID !== undefined &&
+          tradeSecurityPartners.has(targetID) &&
           metadata?.action === "start"
         );
       case "embargo_all":
         // Target-independent: one pending trade-security pact bans it.
-        return !(tradeSecurityHeld && metadata?.action === "start");
+        return !(
+          tradeSecurityPartners.size > 0 && metadata?.action === "start"
+        );
       default:
         return true;
     }
@@ -1197,6 +1113,25 @@ type BedrockClientLike = {
   };
 };
 
+interface BedrockClientOptions {
+  awsRegion: string;
+  baseURL?: string;
+}
+
+/** Exact hosted-sidecar routing options, kept pure for release verification. */
+export function keystoneBedrockClientOptions(
+  region: string,
+  env: NodeJS.ProcessEnv = process.env,
+): BedrockClientOptions {
+  const sidecarEndpoint = env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME?.trim();
+  return {
+    awsRegion: region,
+    ...(sidecarEndpoint !== undefined && sidecarEndpoint.length > 0
+      ? { baseURL: sidecarEndpoint }
+      : {}),
+  };
+}
+
 function createBedrockProvider(
   env: NodeJS.ProcessEnv = process.env,
 ): LlmProvider {
@@ -1213,10 +1148,10 @@ function createBedrockProvider(
         // vite/vitest never try to bundle it.
         const bedrockSpecifier = "@anthropic-ai/bedrock-sdk";
         const mod = (await import(/* @vite-ignore */ bedrockSpecifier)) as {
-          default?: new (options: { awsRegion: string }) => BedrockClientLike;
-          AnthropicBedrock?: new (options: {
-            awsRegion: string;
-          }) => BedrockClientLike;
+          default?: new (options: BedrockClientOptions) => BedrockClientLike;
+          AnthropicBedrock?: new (
+            options: BedrockClientOptions,
+          ) => BedrockClientLike;
         };
         const AnthropicBedrock = mod.default ?? mod.AnthropicBedrock;
         if (AnthropicBedrock === undefined) {
@@ -1231,14 +1166,9 @@ function createBedrockProvider(
         // planner — which is what the league has been ranking. Verified in-pod
         // 2026-08-19 via PROXYWAR_KEYSTONE_BEDROCK_DIAG=1. Absent variable
         // falls back to the SDK default, so local runs are unchanged.
-        const sidecarEndpoint =
-          process.env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME?.trim();
-        client = new AnthropicBedrock({
-          awsRegion: region,
-          ...(sidecarEndpoint !== undefined && sidecarEndpoint.length > 0
-            ? { baseURL: sidecarEndpoint }
-            : {}),
-        });
+        client = new AnthropicBedrock(
+          keystoneBedrockClientOptions(region, env),
+        );
       }
       const startIndex = lockedIndex ?? 0;
       let lastError: unknown = null;

@@ -1,5 +1,5 @@
-import type fs from "node:fs/promises";
 import type { StatsFs } from "node:fs";
+import type fs from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import {
   PREMIERE_BOUNDED_WRITE_FLOOR_BYTES,
@@ -29,7 +29,10 @@ import {
 /** `fs.statfs` is overloaded, so the double cast is what satisfies the seam. */
 const diskWith = (availableBytes: number) =>
   (async () =>
-    ({ bavail: availableBytes, bsize: 1 }) as StatsFs) as unknown as typeof fs.statfs;
+    ({
+      bavail: availableBytes,
+      bsize: 1,
+    }) as StatsFs) as unknown as typeof fs.statfs;
 
 const GIB = 1024 ** 3;
 
@@ -63,7 +66,8 @@ describe("premiere durable-write floor", () => {
    */
   it("counts the pending bytes on top of the mirror reserve, not just the floor", async () => {
     const pendingBytes = 20 * GIB;
-    const available = PREMIERE_IMMUTABLE_MIRROR_RESERVE_BYTES + pendingBytes - 1;
+    const available =
+      PREMIERE_IMMUTABLE_MIRROR_RESERVE_BYTES + pendingBytes - 1;
     expect(available).toBeGreaterThan(PREMIERE_BOUNDED_WRITE_FLOOR_BYTES);
 
     await expect(
@@ -87,7 +91,12 @@ describe("premiere durable-write floor", () => {
     const exploded = () => {
       throw new Error("statfs must not be reached for an invalid request");
     };
-    for (const pendingBytes of [-1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 2]) {
+    for (const pendingBytes of [
+      -1,
+      1.5,
+      Number.NaN,
+      Number.MAX_SAFE_INTEGER + 2,
+    ]) {
       await expect(
         assertPremiereDurableWriteAdmission({
           destinationPath: "/does/not/need/to/exist",
