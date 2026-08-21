@@ -27,4 +27,12 @@ describe("episodeIndexFromConfig (real runtime wiring: runProxyWarEpisode -> Age
     expect(episodeIndexFromConfig(baseConfig({ episodeIndex: 1 }))).toBe(1);
     expect(episodeIndexFromConfig(baseConfig({ episodeIndex: 7 }))).toBe(7);
   });
+
+  it("fails closed when a rated episode omits the ordinal", () => {
+    expect(() =>
+      episodeIndexFromConfig(
+        baseConfig({ rated_play: true, player_ids: ["ply-a", "ply-b"] }),
+      ),
+    ).toThrow(/requires per-episode episodeIndex/);
+  });
 });

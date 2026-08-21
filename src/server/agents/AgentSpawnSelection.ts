@@ -21,7 +21,7 @@ export type {
  * new version: retained decisions.jsonl evidence must remain replayable.
  */
 export const AGENT_SPAWN_SELECTION_ALGORITHM_VERSION =
-  "sealed-ranked-serial-dictatorship-v1";
+  "sealed-ranked-serial-dictatorship-v2";
 
 export const MAX_SPAWN_PREFERENCES = MAX_SPAWN_PREFERENCE_ACTION_IDS;
 
@@ -99,17 +99,16 @@ export interface AgentSpawnPriorityParticipant {
 }
 
 /**
- * Report-independent priority: display usernames are code-unit sorted, with a
- * stable participant id as the duplicate-name tie-breaker, then rotated by
- * episodeIndex. It does not read participant array order, response arrival,
- * ballot contents, provider metadata, or mutable game state.
- *
- * The string form is retained for unique-username callers and returns those
- * usernames. Identity-bearing callers receive participant ids in priority
- * order, allowing duplicate display names without ambiguous map keys.
+ * Report-independent priority: immutable participant ids are code-unit sorted,
+ * then rotated by episodeIndex. Display usernames are retained only for
+ * bounded operator-facing evidence and never influence allocation power. The
+ * allocator does not read participant array order, response arrival, ballot
+ * contents, provider metadata, or mutable game state.
+ * The return value is participant ids in priority order, allowing duplicate
+ * display names without ambiguous map keys.
  */
 export function buildAgentSpawnPriority(
-  participants: readonly (string | AgentSpawnPriorityParticipant)[],
+  participants: readonly AgentSpawnPriorityParticipant[],
   episodeIndex: number,
 ): string[] {
   if (!Number.isSafeInteger(episodeIndex) || episodeIndex < 0) {
@@ -126,13 +125,8 @@ export function buildAgentSpawnPriority(
     );
   }
 
-  const normalized = participants.map((participant) =>
-    typeof participant === "string"
-      ? { participantID: participant, username: participant }
-      : participant,
-  );
   const seenParticipantIDs = new Set<string>();
-  for (const { participantID, username } of normalized) {
+  for (const { participantID, username } of participants) {
     if (
       typeof username !== "string" ||
       username.length === 0 ||
@@ -159,10 +153,8 @@ export function buildAgentSpawnPriority(
     seenParticipantIDs.add(participantID);
   }
 
-  const stable = [...normalized].sort(
-    (left, right) =>
-      compareCodeUnits(left.username, right.username) ||
-      compareCodeUnits(left.participantID, right.participantID),
+  const stable = [...participants].sort((left, right) =>
+    compareCodeUnits(left.participantID, right.participantID),
   );
   const offset = episodeIndex % stable.length;
   return [...stable.slice(offset), ...stable.slice(0, offset)].map(

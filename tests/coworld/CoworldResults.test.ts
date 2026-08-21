@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   coworldResults,
+  coworldSpawnPriorityResult,
   resolveWinnerSlot,
   type CoworldDecisionRecord,
   type CoworldResultsFinalState,
+  type CoworldSpawnPriorityResult,
   type ResolvedPlayerIdentity,
 } from "../../coworld-adapter/src/coworld-results";
 
@@ -113,7 +115,95 @@ describe("resolveWinnerSlot (Coworld result contract, ADAPTER-02)", () => {
   });
 });
 
+describe("coworldSpawnPriorityResult (rated runtime proof)", () => {
+  it("proves 25 consecutive indices apply 25 genuinely rotating identity orders", () => {
+    const participantIDs = Array.from(
+      { length: 25 },
+      (_, index) => `participant-${String(index).padStart(2, "0")}`,
+    ).reverse();
+    const playerIDs = participantIDs.map((id) => `ply-${id}`);
+    const ranksByParticipant = new Map<string, number[]>();
+    const appliedOrders = new Set<string>();
+
+    for (let episodeIndex = 0; episodeIndex < 25; episodeIndex += 1) {
+      const base = [...participantIDs].sort();
+      const priority = [
+        ...base.slice(episodeIndex),
+        ...base.slice(0, episodeIndex),
+      ];
+      const records: CoworldDecisionRecord[] = priority.map(
+        (participantID, index) => ({
+          result: { accepted: true },
+          spawnSelectionEvidence: {
+            algorithmVersion: "sealed-ranked-serial-dictatorship-v2",
+            participantID,
+            priorityParticipantIDs: priority,
+            priorityRank: index + 1,
+          },
+        }),
+      );
+      const proof = coworldSpawnPriorityResult({
+        ratedPlay: true,
+        episodeIndex,
+        playerIDs,
+        participantIDsBySlot: participantIDs,
+        records,
+      });
+
+      expect(proof.episode_index).toBe(episodeIndex);
+      expect(proof.priority_participant_ids).toEqual(priority);
+      appliedOrders.add(proof.priority_participant_ids.join("|"));
+      proof.priority_participant_ids.forEach((participantID, rank) => {
+        ranksByParticipant.set(participantID, [
+          ...(ranksByParticipant.get(participantID) ?? []),
+          rank,
+        ]);
+      });
+    }
+
+    expect(appliedOrders.size).toBe(25);
+    expect(
+      [...ranksByParticipant.values()].every(
+        (ranks) =>
+          [...ranks].sort((left, right) => left - right).join(",") ===
+          Array.from({ length: 25 }, (_, index) => index).join(","),
+      ),
+    ).toBe(true);
+  });
+
+  it("fails rated results closed when recorded priority disagrees with the index", () => {
+    expect(() =>
+      coworldSpawnPriorityResult({
+        ratedPlay: true,
+        episodeIndex: 1,
+        playerIDs: ["ply-a", "ply-b"],
+        participantIDsBySlot: ["participant-a", "participant-b"],
+        records: ["participant-a", "participant-b"].map(
+          (participantID, index) => ({
+            result: { accepted: true },
+            spawnSelectionEvidence: {
+              algorithmVersion: "sealed-ranked-serial-dictatorship-v2",
+              participantID,
+              priorityParticipantIDs: ["participant-a", "participant-b"],
+              priorityRank: index + 1,
+            },
+          }),
+        ),
+      }),
+    ).toThrow(/does not match the identity-only rotation/);
+  });
+});
+
 describe("coworldResults (Coworld results.json contract)", () => {
+  const spawnPriorityResult: CoworldSpawnPriorityResult = {
+    rated_play: false,
+    algorithm_version: "sealed-ranked-serial-dictatorship-v2",
+    episode_index: 0,
+    player_ids: null,
+    participant_ids_by_slot: ["participant-a", "participant-b"],
+    base_priority_participant_ids: ["participant-a", "participant-b"],
+    priority_participant_ids: ["participant-a", "participant-b"],
+  };
   // Minimal finalState fixture: two players, second one alive with more tiles.
   const finalState = (
     winnerSlot: number | null,
@@ -143,6 +233,7 @@ describe("coworldResults (Coworld results.json contract)", () => {
       seed: null,
       players: [{ name: "Alice" }, { name: "Bob" }],
       finalState: finalState(1),
+      spawnPriority: spawnPriorityResult,
       records: [],
     });
     expect(result.game_id).toBe("COWRLD01");
@@ -156,6 +247,7 @@ describe("coworldResults (Coworld results.json contract)", () => {
       seed: null,
       players: [{ name: "Alice" }, { name: "Bob" }],
       finalState: finalState(null),
+      spawnPriority: spawnPriorityResult,
       records: [],
     });
     // results_schema.properties.seed.type allows ["integer", "null"].
@@ -168,6 +260,7 @@ describe("coworldResults (Coworld results.json contract)", () => {
       seed: 424242,
       players: [{ name: "Alice" }, { name: "Bob" }],
       finalState: finalState(null),
+      spawnPriority: spawnPriorityResult,
       records: [],
     });
     expect(result).toMatchObject({ game_id: "PWSAYDPA", seed: 424242 });
@@ -179,6 +272,7 @@ describe("coworldResults (Coworld results.json contract)", () => {
       seed: null,
       players: [{ name: "Alice" }, { name: "Bob" }],
       finalState: finalState(1),
+      spawnPriority: spawnPriorityResult,
       records: [],
     });
     expect(result.winner_slot).toBe(1);
@@ -191,6 +285,7 @@ describe("coworldResults (Coworld results.json contract)", () => {
       seed: null,
       players: [{ name: "Alice" }, { name: "Bob" }],
       finalState: finalState(null, [4, 6]),
+      spawnPriority: spawnPriorityResult,
       records: [],
     });
     expect(result.winner_slot).toBeNull();
@@ -203,6 +298,7 @@ describe("coworldResults (Coworld results.json contract)", () => {
       seed: null,
       players: [{ name: "Alice" }, { name: "Bob" }],
       finalState: finalState(1),
+      spawnPriority: spawnPriorityResult,
       records: [
         record(true, false, false),
         record(false, true, false),
@@ -222,6 +318,7 @@ describe("coworldResults (Coworld results.json contract)", () => {
       seed: null,
       players: [{ name: "Alice" }],
       finalState: finalState(0),
+      spawnPriority: spawnPriorityResult,
       records: [],
     });
     expect(result.players).toEqual([

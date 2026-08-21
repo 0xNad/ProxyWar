@@ -128,6 +128,24 @@ export function deterministicCoworldPersistentID(
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+/** Stable ProxyWar UUID derived from Coworld's immutable cross-policy player id. */
+export function deterministicCoworldPlayerPersistentID(
+  coworldPlayerID: string,
+): string {
+  if (typeof coworldPlayerID !== "string" || coworldPlayerID.length === 0) {
+    throw new Error("Coworld player id must be a non-empty string");
+  }
+  const digest = createHash("sha1")
+    .update(coworldPlayerUUIDNamespace)
+    .update("proxywar-coworld-player-id-v2:", "utf8")
+    .update(coworldPlayerID, "utf8")
+    .digest();
+  digest[6] = (digest[6] & 0x0f) | 0x50;
+  digest[8] = (digest[8] & 0x3f) | 0x80;
+  const hex = digest.subarray(0, 16).toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 export function competitiveSeatSpecs(
   players: Array<{ name: string }>,
   maxLength: number,
@@ -135,7 +153,15 @@ export function competitiveSeatSpecs(
     authoredName: string,
     authoredNameOccurrence: number,
   ) => string = deterministicCoworldPersistentID,
+  coworldPlayerIDs?: readonly string[] | null,
 ): CoworldSeatSpec[] {
+  if (
+    coworldPlayerIDs !== undefined &&
+    coworldPlayerIDs !== null &&
+    coworldPlayerIDs.length !== players.length
+  ) {
+    throw new Error("Coworld player ids must align with player seats");
+  }
   const usernames = proxyWarUsernames(players, maxLength);
   const authoredNameOccurrences = new Map<string, number>();
   return usernames.map((username, index) => {
@@ -146,7 +172,10 @@ export function competitiveSeatSpecs(
     return {
       username,
       profile: "opportunistic",
-      persistentID: createPersistentID(authoredName, authoredNameOccurrence),
+      persistentID:
+        coworldPlayerIDs === undefined || coworldPlayerIDs === null
+          ? createPersistentID(authoredName, authoredNameOccurrence)
+          : deterministicCoworldPlayerPersistentID(coworldPlayerIDs[index]),
     };
   });
 }

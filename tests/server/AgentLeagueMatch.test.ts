@@ -173,9 +173,9 @@ describe("AgentLeagueMatchRunner", () => {
       const records = await match.runOpeningTurn();
 
       expect(records).toHaveLength(4);
-      expect(records.map((record) => record.profile)).toEqual([
-        ...agentStrategyProfiles,
-      ]);
+      expect(records.map((record) => record.profile).sort()).toEqual(
+        [...agentStrategyProfiles].sort(),
+      );
       expect(records.every((record) => record.result.accepted)).toBe(true);
       expect(
         records.every(
@@ -287,8 +287,16 @@ describe("AgentLeagueMatchRunner", () => {
       maxCandidates: 500,
     });
     const specs: AgentSpec[] = [
-      { username: "Zulu", profile: "aggressive" },
-      { username: "Alpha", profile: "defensive" },
+      {
+        username: "Zulu",
+        profile: "aggressive",
+        persistentID: "00000000-0000-4000-8000-000000000002",
+      },
+      {
+        username: "Alpha",
+        profile: "defensive",
+        persistentID: "00000000-0000-4000-8000-000000000001",
+      },
     ];
     async function runWithCompletionOrder(
       completionOrder: readonly string[],
@@ -2669,7 +2677,10 @@ describe("AgentLeagueMatchRunner", () => {
     const spawnCandidates = buildSpawnCandidates(candidateGame.map(), {
       maxCandidates: 500,
     });
-    const specs = createDefaultAgentSpecs(4);
+    const specs = createDefaultAgentSpecs(4).map((spec, index) => ({
+      ...spec,
+      persistentID: `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+    }));
     const participants = createAgentParticipants(specs, log, {
       brainFactory: () => ({
         brainType: "rule",

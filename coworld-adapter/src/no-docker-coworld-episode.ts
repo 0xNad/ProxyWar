@@ -19,9 +19,9 @@ import {
   normalizeDecisionResponse,
   type ComposedCoworldDecision,
 } from "./coworld-decision-wire.ts";
-import { episodeIndexFromConfig } from "./coworld-episode-index.ts";
 import {
   coworldResults,
+  coworldSpawnPriorityResult,
   resolveWinnerSlot,
   type CoworldResults,
   type WinnerRef,
@@ -32,6 +32,10 @@ import {
 } from "./coworld-run-artifact-bundle.ts";
 import { competitiveSeatSpecs } from "./coworld-seat-specs.ts";
 import { coworldEpisodeIdentity } from "./coworld-seed.ts";
+import {
+  coworldSpawnPriorityMetadataFromConfig,
+  type CoworldSpawnPriorityMetadata,
+} from "./coworld-spawn-priority-metadata.ts";
 import { coworldPublicRunArtifacts } from "./proxywar-public-run-artifacts.ts";
 import {
   createSnapshotRetention,
@@ -125,10 +129,14 @@ export type CoworldConfig = {
    * Zero-based episode ordinal within the commissioner's same-variant
    * recurrence blocks (AgentLeagueMatchOptions.episodeIndex). The sealed
    * spawn allocator uses it to rotate report-independent priority/default
-   * order; ballots and response arrival never influence that order. Defaults
-   * to 0 for a standalone/first occurrence when omitted.
+   * order; ballots and response arrival never influence that order. Required
+   * when rated_play is true; unrated standalone fixtures default to 0.
    */
   episodeIndex?: number;
+  /** True on league/tournament variants; incomplete fairness metadata fails closed. */
+  rated_play?: boolean;
+  /** Immutable Coworld player ids aligned index-for-index with players/tokens. */
+  player_ids?: string[];
 };
 
 class CoworldProtocolServer {
@@ -692,6 +700,7 @@ async function runCoworldPrewarm(): Promise<void> {
 
 async function runStandaloneNoDockerProof(): Promise<void> {
   const config = await loadConfig();
+  const spawnPriorityMetadata = coworldSpawnPriorityMetadataFromConfig(config);
   const workspace = await createWorkspace("no-docker-runs");
   const server = new CoworldProtocolServer(config);
   const port = await server.listen();
@@ -701,7 +710,12 @@ async function runStandaloneNoDockerProof(): Promise<void> {
       await runRouteChecks(port, config);
     }
     await server.waitForPlayers();
-    const result = await runProxyWarEpisode(config, workspace, server);
+    const result = await runProxyWarEpisode(
+      config,
+      spawnPriorityMetadata,
+      workspace,
+      server,
+    );
     server.setReplayPayload(result.replayPayload);
     await fs.writeFile(
       path.join(workspace, "results.json"),
@@ -751,6 +765,10 @@ async function runStandaloneNoDockerProof(): Promise<void> {
 
 async function runCoworldGameContainer(): Promise<void> {
   const config = await loadConfig();
+  // Validate the rated-play fairness contract before opening the protocol
+  // server. Missing scheduler metadata must never become a playable or rated
+  // episode, even when every policy container would otherwise connect.
+  const spawnPriorityMetadata = coworldSpawnPriorityMetadataFromConfig(config);
   const workspace = await createCoworldWorkspace();
   const server = new CoworldProtocolServer(config);
   const host = process.env.COGAME_HOST ?? "0.0.0.0";
@@ -758,7 +776,12 @@ async function runCoworldGameContainer(): Promise<void> {
   await server.listen(host, port);
   try {
     await server.waitForPlayers();
-    const result = await runProxyWarEpisode(config, workspace, server);
+    const result = await runProxyWarEpisode(
+      config,
+      spawnPriorityMetadata,
+      workspace,
+      server,
+    );
     server.setReplayPayload(result.replayPayload);
     await writeUri(
       requiredEnv("COGAME_RESULTS_URI"),
@@ -827,6 +850,7 @@ async function runCoworldReplayContainer(): Promise<void> {
 
 async function runProxyWarEpisode(
   config: CoworldConfig,
+  spawnPriorityMetadata: CoworldSpawnPriorityMetadata,
   workspace: string,
   protocolServer: CoworldProtocolServer,
 ): Promise<{
@@ -916,6 +940,8 @@ async function runProxyWarEpisode(
   const specs = competitiveSeatSpecs(
     config.players,
     modules.proxyWarGameUsernameMaxLength ?? 27,
+    undefined,
+    spawnPriorityMetadata.playerIDs,
   );
   const participants = modules.createAgentParticipants(specs, log, {
     brainFactory: (spec: unknown, index: number) =>
@@ -977,7 +1003,7 @@ async function runProxyWarEpisode(
     participants,
     spawnCandidates,
     log,
-    episodeIndex: episodeIndexFromConfig(config),
+    episodeIndex: spawnPriorityMetadata.episodeIndex,
     // World 12P OOM fix: skip the ~8 KB/record tacticalAffordances summary (not
     // part of the hosted result contract) so the FULL decision log stays small
     // and complete. Simulation, decisions, and decision telemetry are
@@ -1079,6 +1105,14 @@ async function runProxyWarEpisode(
     const dealLedger = league.dealLedgerEnabled()
       ? league.dealLedger()
       : undefined;
+    const decisionRecords = league.decisionRecords();
+    const spawnPriority = coworldSpawnPriorityResult({
+      ratedPlay: spawnPriorityMetadata.ratedPlay,
+      episodeIndex: spawnPriorityMetadata.episodeIndex,
+      playerIDs: spawnPriorityMetadata.playerIDs,
+      participantIDsBySlot: specs.map((spec) => spec.persistentID),
+      records: decisionRecords,
+    });
     const artifacts = await modules.writeAgentLeagueRunArtifacts({
       runID,
       matchID: game.id,
@@ -1100,10 +1134,14 @@ async function runProxyWarEpisode(
         difficulty: selectedGameConfig.difficulty,
         variedSpawns: false,
         spawnSelectionMode: "sealed-ranked-v1",
+        episodeIndex: spawnPriority.episode_index,
+        ratedPlay: spawnPriority.rated_play,
+        spawnPriorityAlgorithmVersion: spawnPriority.algorithm_version,
+        spawnPriorityParticipantIDs: spawnPriority.priority_participant_ids,
       },
       startedAt,
       completedAt,
-      records: league.decisionRecords(),
+      records: decisionRecords,
       ...(dealLedger !== undefined ? { dealLedger } : {}),
       roster,
       finalState,
@@ -1121,7 +1159,8 @@ async function runProxyWarEpisode(
       seed: episodeIdentity.seed,
       players: config.players,
       finalState,
-      records: league.decisionRecords(),
+      records: decisionRecords,
+      spawnPriority,
     });
     return {
       results,

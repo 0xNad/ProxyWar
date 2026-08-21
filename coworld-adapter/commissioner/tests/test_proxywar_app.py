@@ -692,6 +692,10 @@ def test_competition_schedule_stamps_episode_index_overrides() -> None:
     round_start.round_number = 1
 
     scheduled = commissioner().schedule_episodes_for_round_start(round_start)
+    player_id_by_policy = {
+        membership.policy_version_id: membership.player_id
+        for membership in round_start.memberships
+    }
 
     assert len(scheduled.episodes) > 0
     for episode in scheduled.episodes:
@@ -699,6 +703,29 @@ def test_competition_schedule_stamps_episode_index_overrides() -> None:
         assert isinstance(episode.game_config_overrides["episodeIndex"], int)
         assert episode.game_config_overrides["episodeIndex"] >= 0
         assert episode.game_config_overrides["seed"] == episode.seed
+        assert episode.game_config_overrides["rated_play"] is True
+        assert len(episode.game_config_overrides["player_ids"]) == len(
+            episode.policy_version_ids
+        )
+        assert len(set(episode.game_config_overrides["player_ids"])) == len(
+            episode.policy_version_ids
+        )
+        assert episode.game_config_overrides["player_ids"] == [
+            player_id_by_policy[policy_version_id]
+            for policy_version_id in episode.policy_version_ids
+        ]
+
+
+def test_competition_schedule_fails_closed_without_immutable_player_id() -> None:
+    round_start = _with_full_ladder(competition_round_start(4))
+    round_start.round_number = 1
+    round_start.memberships[0].player_id = None
+
+    with pytest.raises(
+        ValueError,
+        match="requires one immutable player id per policy",
+    ):
+        commissioner().schedule_episodes_for_round_start(round_start)
 
 
 def test_qualifier_schedule_stamps_episode_index_overrides() -> None:
@@ -712,6 +739,8 @@ def test_qualifier_schedule_stamps_episode_index_overrides() -> None:
         assert isinstance(episode.game_config_overrides["episodeIndex"], int)
         assert episode.game_config_overrides["episodeIndex"] >= 0
         assert episode.game_config_overrides["seed"] == episode.seed
+        assert episode.game_config_overrides["rated_play"] is False
+        assert "player_ids" not in episode.game_config_overrides
 
 
 @pytest.mark.parametrize("path", ["competition", "qualifier"])
@@ -789,7 +818,7 @@ def test_same_variant_indices_balance_username_priority_for_fixed_16p_roster(
     ]
     monkeypatch.setattr(ruleset_scheduling, "_round_shuffle_seed", lambda: 1234)
 
-    # AgentSpawnSelection.buildAgentSpawnPriority code-unit sorts usernames,
+    # AgentSpawnSelection.buildAgentSpawnPriority code-unit sorts identities,
     # then rotates that stable order by episodeIndex. Four episodes per round
     # and five maps mean Pangaea's first four occurrences span indices 0..15.
     # That is one full priority cycle for a fixed 16-player roster, regardless
@@ -899,8 +928,10 @@ def test_every_manifest_declares_episode_index_in_config_schema() -> None:
         assert episode_index_schema["type"] == "integer", manifest_path
         assert episode_index_schema["minimum"] == 0, manifest_path
         assert "episodeIndex" not in schema.get("required", []), (
-            f"{manifest_path}: episodeIndex must stay optional (default 0)"
+            f"{manifest_path}: episodeIndex is dynamically required only for rated play"
         )
+        assert properties["rated_play"]["type"] == "boolean", manifest_path
+        assert properties["player_ids"]["type"] == "array", manifest_path
 
 
 def test_current_manifests_match_the_commissioner_seed_range() -> None:

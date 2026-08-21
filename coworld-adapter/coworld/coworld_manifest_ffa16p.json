@@ -1,10 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/Metta-AI/coworld/main/src/coworld/coworld_manifest_schema.json",
-  "tags": [
-    "strategy",
-    "multiplayer",
-    "ai-agents"
-  ],
+  "tags": ["strategy", "multiplayer", "ai-agents"],
   "game": {
     "name": "proxywar-ffa-16p",
     "version": "0.0.2",
@@ -53,9 +49,7 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": [
-              "name"
-            ],
+            "required": ["name"],
             "properties": {
               "name": {
                 "type": "string",
@@ -94,17 +88,11 @@
         },
         "map_size": {
           "type": "string",
-          "enum": [
-            "Compact",
-            "Normal"
-          ]
+          "enum": ["Compact", "Normal"]
         },
         "difficulty": {
           "type": "string",
-          "enum": [
-            "Easy",
-            "Medium"
-          ]
+          "enum": ["Easy", "Medium"]
         },
         "replay_tail_turns": {
           "type": "integer",
@@ -116,7 +104,22 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 9007199254740991,
-          "description": "Zero-based episode ordinal within deterministic same-variant recurrence blocks. The commissioner advances it once per scheduled episode; ProxyWar uses it only for report-independent spawn priority and fallback rotation. Defaults to 0 when omitted."
+          "description": "Zero-based episode ordinal used to rotate immutable-identity spawn priority. Required at runtime when rated_play is true."
+        },
+        "rated_play": {
+          "type": "boolean",
+          "description": "True for league/tournament episodes. ProxyWar fails closed unless episodeIndex and one unique immutable player_id per slot are also present."
+        },
+        "player_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 25,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "description": "Immutable Coworld player ids aligned index-for-index with players and tokens. Required at runtime when rated_play is true."
         },
         "player_connect_timeout_seconds": {
           "type": "number",
@@ -140,14 +143,12 @@
         "decision_count",
         "accepted_decision_count",
         "fallback_count",
+        "spawn_priority",
         "players"
       ],
       "properties": {
         "seed": {
-          "type": [
-            "integer",
-            "null"
-          ],
+          "type": ["integer", "null"],
           "minimum": 0,
           "maximum": 11881375
         },
@@ -164,25 +165,16 @@
           }
         },
         "winner_slot": {
-          "type": [
-            "integer",
-            "null"
-          ],
+          "type": ["integer", "null"],
           "minimum": 0,
           "maximum": 15
         },
         "turn_count": {
-          "type": [
-            "integer",
-            "null"
-          ],
+          "type": ["integer", "null"],
           "minimum": 0
         },
         "tick": {
-          "type": [
-            "integer",
-            "null"
-          ],
+          "type": ["integer", "null"],
           "minimum": 0
         },
         "decision_count": {
@@ -201,6 +193,73 @@
           "type": "integer",
           "minimum": 0
         },
+        "spawn_priority": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "rated_play",
+            "algorithm_version",
+            "episode_index",
+            "player_ids",
+            "participant_ids_by_slot",
+            "base_priority_participant_ids",
+            "priority_participant_ids"
+          ],
+          "properties": {
+            "rated_play": {
+              "type": "boolean"
+            },
+            "algorithm_version": {
+              "type": "string",
+              "const": "sealed-ranked-serial-dictatorship-v2"
+            },
+            "episode_index": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "player_ids": {
+              "type": ["array", "null"],
+              "minItems": 1,
+              "maxItems": 25,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              }
+            },
+            "participant_ids_by_slot": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 25,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "format": "uuid"
+              }
+            },
+            "base_priority_participant_ids": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 25,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "format": "uuid"
+              }
+            },
+            "priority_participant_ids": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 25,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "format": "uuid"
+              }
+            }
+          }
+        },
         "players": {
           "type": "array",
           "minItems": 8,
@@ -208,13 +267,7 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": [
-              "slot",
-              "name",
-              "score",
-              "tiles_owned",
-              "is_alive"
-            ],
+            "required": ["slot", "name", "score", "tiles_owned", "is_alive"],
             "properties": {
               "slot": {
                 "type": "integer",
@@ -228,17 +281,11 @@
                 "type": "number"
               },
               "tiles_owned": {
-                "type": [
-                  "integer",
-                  "null"
-                ],
+                "type": ["integer", "null"],
                 "minimum": 0
               },
               "is_alive": {
-                "type": [
-                  "boolean",
-                  "null"
-                ]
+                "type": ["boolean", "null"]
               }
             }
           }
@@ -271,10 +318,7 @@
       "name": "Proxy War Starter Websocket Player",
       "type": "player",
       "image": "proxywar-coworld-local:latest",
-      "run": [
-        "node",
-        "/app/integration/src/starter-player.mjs"
-      ],
+      "run": ["node", "/app/integration/src/starter-player.mjs"],
       "description": "Minimal websocket player that chooses one offered LegalAction.id."
     }
   ],

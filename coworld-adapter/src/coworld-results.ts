@@ -81,6 +81,24 @@ export interface CoworldDecisionRecord {
     readonly fallbackUsed?: boolean;
     readonly llmPlannerDegraded?: boolean;
   };
+  readonly spawnSelectionEvidence?: {
+    readonly algorithmVersion: string;
+    readonly participantID: string;
+    readonly priorityParticipantIDs: readonly string[];
+    readonly priorityRank: number;
+  };
+}
+
+export interface CoworldSpawnPriorityResult {
+  readonly rated_play: boolean;
+  readonly algorithm_version: string;
+  readonly episode_index: number;
+  /** Public Coworld identities aligned with the scheduled slots; null when unrated. */
+  readonly player_ids: string[] | null;
+  /** ProxyWar UUID identities aligned with the scheduled slots. */
+  readonly participant_ids_by_slot: string[];
+  readonly base_priority_participant_ids: string[];
+  readonly priority_participant_ids: string[];
 }
 
 /** Coworld's game-written results.json contract (coworld_manifest.json's
@@ -103,6 +121,7 @@ export interface CoworldResults {
   readonly accepted_decision_count: number;
   readonly fallback_count: number;
   readonly degraded_count: number;
+  readonly spawn_priority: CoworldSpawnPriorityResult;
   /**
    * Deliberately NOT extended with a per-cause breakdown. `degradedCause` (see
    * AgentWireProtocol) reaches `decisions.jsonl` and the spectator telemetry, which
@@ -136,6 +155,7 @@ export function coworldResults(input: {
   players: ReadonlyArray<{ readonly name: string }>;
   finalState: CoworldResultsFinalState;
   records: readonly CoworldDecisionRecord[];
+  spawnPriority: CoworldSpawnPriorityResult;
 }): CoworldResults {
   const totalTiles = input.finalState.players.reduce(
     (sum, player) => sum + Math.max(0, player.tilesOwned ?? 0),
@@ -174,6 +194,7 @@ export function coworldResults(input: {
     degraded_count: input.records.filter(
       (record) => record.decisionMetadata?.llmPlannerDegraded === true,
     ).length,
+    spawn_priority: input.spawnPriority,
     players: input.finalState.players.map((player, slot) => ({
       slot,
       name: input.players[slot]?.name ?? player.username,
@@ -182,4 +203,112 @@ export function coworldResults(input: {
       is_alive: player.isAlive,
     })),
   };
+}
+
+/**
+ * Build public proof from the allocator evidence that was actually recorded at
+ * spawn time. Rated episodes fail before producing results if the evidence is
+ * missing, inconsistent, or does not equal the identity-only cyclic rotation.
+ */
+export function coworldSpawnPriorityResult(input: {
+  ratedPlay: boolean;
+  episodeIndex: number;
+  playerIDs: readonly string[] | null;
+  participantIDsBySlot: readonly string[];
+  records: readonly CoworldDecisionRecord[];
+}): CoworldSpawnPriorityResult {
+  const participantIDsBySlot = [...input.participantIDsBySlot];
+  if (participantIDsBySlot.length === 0) {
+    throw new Error("Coworld spawn priority proof requires participants");
+  }
+  if (new Set(participantIDsBySlot).size !== participantIDsBySlot.length) {
+    throw new Error("Coworld spawn priority participant ids must be unique");
+  }
+  if (
+    input.playerIDs !== null &&
+    input.playerIDs.length !== participantIDsBySlot.length
+  ) {
+    throw new Error("Coworld player ids must align with participant ids");
+  }
+  if (input.ratedPlay && input.playerIDs === null) {
+    throw new Error("Coworld rated spawn priority proof requires player ids");
+  }
+  if (!Number.isSafeInteger(input.episodeIndex) || input.episodeIndex < 0) {
+    throw new Error(
+      "Coworld spawn priority proof requires a valid episode index",
+    );
+  }
+
+  const spawnRecords = input.records.filter(
+    (record) => record.spawnSelectionEvidence !== undefined,
+  );
+  if (spawnRecords.length !== participantIDsBySlot.length) {
+    throw new Error(
+      `Coworld spawn priority proof requires one evidence row per participant (${spawnRecords.length} != ${participantIDsBySlot.length})`,
+    );
+  }
+  const basePriorityParticipantIDs = [...participantIDsBySlot].sort(
+    compareCodeUnits,
+  );
+  const offset = input.episodeIndex % basePriorityParticipantIDs.length;
+  const expectedPriorityParticipantIDs = [
+    ...basePriorityParticipantIDs.slice(offset),
+    ...basePriorityParticipantIDs.slice(0, offset),
+  ];
+  const firstEvidence = spawnRecords[0].spawnSelectionEvidence!;
+  const algorithmVersion = firstEvidence.algorithmVersion;
+  if (typeof algorithmVersion !== "string" || algorithmVersion.length === 0) {
+    throw new Error(
+      "Coworld spawn priority proof requires an algorithm version",
+    );
+  }
+  for (const record of spawnRecords) {
+    const evidence = record.spawnSelectionEvidence!;
+    if (
+      evidence.algorithmVersion !== algorithmVersion ||
+      !sameStrings(
+        evidence.priorityParticipantIDs,
+        expectedPriorityParticipantIDs,
+      ) ||
+      expectedPriorityParticipantIDs[evidence.priorityRank - 1] !==
+        evidence.participantID
+    ) {
+      throw new Error(
+        "Coworld spawn priority evidence does not match the identity-only rotation",
+      );
+    }
+  }
+  if (
+    new Set(
+      spawnRecords.map(
+        (record) => record.spawnSelectionEvidence!.participantID,
+      ),
+    ).size !== participantIDsBySlot.length
+  ) {
+    throw new Error("Coworld spawn priority evidence repeats a participant");
+  }
+
+  return {
+    rated_play: input.ratedPlay,
+    algorithm_version: algorithmVersion,
+    episode_index: input.episodeIndex,
+    player_ids: input.playerIDs === null ? null : [...input.playerIDs],
+    participant_ids_by_slot: participantIDsBySlot,
+    base_priority_participant_ids: basePriorityParticipantIDs,
+    priority_participant_ids: expectedPriorityParticipantIDs,
+  };
+}
+
+function compareCodeUnits(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function sameStrings(
+  left: readonly string[],
+  right: readonly string[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
+  );
 }

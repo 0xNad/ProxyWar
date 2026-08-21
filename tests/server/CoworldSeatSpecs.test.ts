@@ -3,6 +3,7 @@ import { Logger } from "winston";
 import {
   competitiveSeatSpecs,
   deterministicCoworldPersistentID,
+  deterministicCoworldPlayerPersistentID,
   proxyWarUsernames,
 } from "../../coworld-adapter/src/coworld-seat-specs";
 import { PersistentIdSchema } from "../../src/core/Schemas";
@@ -135,6 +136,30 @@ describe("Coworld competitive seat specs", () => {
     expect(deterministicCoworldPersistentID("Foo", 1)).not.toBe(
       deterministicCoworldPersistentID("Foo", 2),
     );
+  });
+
+  it("derives persistent identity from immutable Coworld player ids, never display names", () => {
+    const ids = ["ply_a", "ply_b"];
+    const original = competitiveSeatSpecs(
+      [{ name: "alpha" }, { name: "bravo" }],
+      12,
+      undefined,
+      ids,
+    );
+    const renamed = competitiveSeatSpecs(
+      [{ name: "zzz" }, { name: "aaa" }],
+      12,
+      undefined,
+      ids,
+    );
+
+    expect(renamed.map((seat) => seat.persistentID)).toEqual(
+      original.map((seat) => seat.persistentID),
+    );
+    expect(original.map((seat) => seat.persistentID)).toEqual(
+      ids.map(deterministicCoworldPlayerPersistentID),
+    );
+    expect(original[0].persistentID).not.toBe(original[1].persistentID);
   });
 });
 

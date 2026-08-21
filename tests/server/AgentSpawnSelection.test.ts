@@ -8,7 +8,7 @@ import {
 } from "../../src/server/agents/AgentSpawnSelection";
 import { AgentDecision, LegalAction } from "../../src/server/agents/AgentTypes";
 
-describe("sealed ranked spawn selection v1", () => {
+describe("sealed ranked spawn selection v2", () => {
   it.each([2, 4, 8, 12, 16, 17, 25])(
     "allocates exactly one unique offered spawn for %i participants",
     (participantCount) => {
@@ -18,7 +18,10 @@ describe("sealed ranked spawn selection v1", () => {
         (_, index) =>
           `seat-${String(participantCount - index).padStart(2, "0")}`,
       );
-      const priorityOrder = buildAgentSpawnPriority(usernames, 3);
+      const priorityOrder = buildAgentSpawnPriority(
+        priorityParticipants(usernames),
+        3,
+      );
       const preference = offeredActions
         .map((action) => action.id)
         .reverse()
@@ -60,7 +63,10 @@ describe("sealed ranked spawn selection v1", () => {
   it("is invariant to ballot array/arrival order", () => {
     const offeredActions = spawnActions(4);
     const usernames = ["zulu", "alpha", "mike", "bravo"];
-    const priorityOrder = buildAgentSpawnPriority(usernames, 1);
+    const priorityOrder = buildAgentSpawnPriority(
+      priorityParticipants(usernames),
+      1,
+    );
     const ballots = usernames.map((username, index) => {
       const ranked = rotate(
         offeredActions.map((action) => action.id),
@@ -268,20 +274,48 @@ describe("sealed ranked spawn selection v1", () => {
     });
   });
 
-  it("requires stable unique usernames and rotates priority by episode", () => {
-    expect(buildAgentSpawnPriority(["charlie", "alpha", "bravo"], 0)).toEqual([
+  it("requires stable unique identities and rotates priority by episode", () => {
+    const participants = priorityParticipants(["charlie", "alpha", "bravo"]);
+    expect(buildAgentSpawnPriority(participants, 0)).toEqual([
       "alpha",
       "bravo",
       "charlie",
     ]);
-    expect(buildAgentSpawnPriority(["charlie", "alpha", "bravo"], 1)).toEqual([
+    expect(buildAgentSpawnPriority(participants, 1)).toEqual([
       "bravo",
       "charlie",
       "alpha",
     ]);
-    expect(() => buildAgentSpawnPriority(["same", "same"], 0)).toThrow(
-      /participant ids must be unique/,
+    expect(() =>
+      buildAgentSpawnPriority(
+        [
+          { participantID: "same", username: "first" },
+          { participantID: "same", username: "second" },
+        ],
+        0,
+      ),
+    ).toThrow(/participant ids must be unique/);
+  });
+
+  it("never lets a display-name change alter immutable-identity priority", () => {
+    const identities = ["player-c", "player-a", "player-b"];
+    const original = buildAgentSpawnPriority(
+      identities.map((participantID, index) => ({
+        participantID,
+        username: ["alpha", "bravo", "charlie"][index],
+      })),
+      1,
     );
+    const renamed = buildAgentSpawnPriority(
+      identities.map((participantID, index) => ({
+        participantID,
+        username: ["zzz", "aaa", "mmm"][index],
+      })),
+      1,
+    );
+
+    expect(original).toEqual(["player-b", "player-c", "player-a"]);
+    expect(renamed).toEqual(original);
   });
 
   it("supports the canonical 25-seat ceiling independently of the 16-entry ballot cap", () => {
@@ -290,11 +324,18 @@ describe("sealed ranked spawn selection v1", () => {
       (_, index) => `seat-${String(index + 1).padStart(2, "0")}`,
     );
 
-    expect(buildAgentSpawnPriority(usernames.slice(0, 17), 0)).toHaveLength(17);
-    expect(buildAgentSpawnPriority(usernames, 24)).toHaveLength(25);
-    expect(() => buildAgentSpawnPriority([...usernames, "seat-26"], 0)).toThrow(
-      /expected 1-25 participants/,
-    );
+    expect(
+      buildAgentSpawnPriority(priorityParticipants(usernames.slice(0, 17)), 0),
+    ).toHaveLength(17);
+    expect(
+      buildAgentSpawnPriority(priorityParticipants(usernames), 24),
+    ).toHaveLength(25);
+    expect(() =>
+      buildAgentSpawnPriority(
+        priorityParticipants([...usernames, "seat-26"]),
+        0,
+      ),
+    ).toThrow(/expected 1-25 participants/);
 
     const offeredActions = spawnActions(MAX_AGENT_SPAWN_PARTICIPANTS);
     const authored = offeredActions
@@ -303,7 +344,10 @@ describe("sealed ranked spawn selection v1", () => {
       .slice(0, MAX_SPAWN_PREFERENCES);
     const assignments = resolveAgentSpawnSelection({
       offeredActions,
-      priorityOrder: buildAgentSpawnPriority(usernames, 0),
+      priorityOrder: buildAgentSpawnPriority(
+        priorityParticipants(usernames),
+        0,
+      ),
       ballots: usernames.map((username) =>
         ballot(username, {
           actionID: authored[0],
@@ -365,6 +409,15 @@ function spawnActions(count: number): LegalAction[] {
     label: `Spawn ${index + 1}`,
     intent: { type: "spawn" as const, tile: index + 1 },
     risk: { level: "medium" as const },
+  }));
+}
+
+function priorityParticipants(
+  participantIDs: readonly string[],
+): Array<{ participantID: string; username: string }> {
+  return participantIDs.map((participantID) => ({
+    participantID,
+    username: `display-${participantID}`,
   }));
 }
 
