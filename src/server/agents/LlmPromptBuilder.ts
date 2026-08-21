@@ -48,7 +48,10 @@ export class LlmPromptBuilder {
       // Labels embed rival display names — sanitize the prompt copy (never the source).
       label: sanitizeUntrustedDisplayString(action.label, 80),
       risk: action.risk,
-      metadata: action.metadata ?? {},
+      // The canonical builder also places rival display names in flat metadata
+      // (`recipientName` / `targetName`). Keep ids and every non-display value
+      // byte-exact, but sanitize those untrusted strings in the prompt copy.
+      metadata: sanitizedLegalActionMetadata(action.metadata),
     }));
     // Unified candidate ranking: the SAME scorer the deterministic executor uses
     // (`scoreFrontierAction` policy + strategic skill), so the LLM picks among genuinely
@@ -88,7 +91,9 @@ export class LlmPromptBuilder {
       "You are an AI Nations League agent brain.",
       spawnPreferenceRound
         ? "This is the one-round sealed spawn preference ballot. Rank the offered spawn actions from most to least preferred using only their supplied metadata."
-        : "Choose exactly one action by selecting a listed LegalAction.id.",
+        : offersDealSlot || offersMessageSlot
+          ? "Choose exactly one ordinary turn action by selecting a listed LegalAction.id whose kind is neither deal_* nor message."
+          : "Choose exactly one action by selecting a listed LegalAction.id.",
       spawnPreferenceRound
         ? `Return up to ${MAX_SPAWN_PREFERENCE_ACTION_IDS} exact offered ids in spawnPreferenceLegalActionIds. selectedLegalActionId is required and must equal the first ranked id. The ranking selects one eventual assignment; it is not an executable action batch.`
         : null,
@@ -124,6 +129,9 @@ export class LlmPromptBuilder {
       // what the runner would accept. An untaught model that names a `message`
       // id as its PRIMARY selectedLegalActionId is still refused loudly by
       // validateAgentDecision; nothing here changes validation.
+      offersDealSlot || offersMessageSlot
+        ? "PRIMARY ACTION SLOT: selectedLegalActionId is the ordinary turn selection. Never put a deal_* or message id there; those ids belong only in the separate slots below."
+        : null,
       offersDealSlot
         ? "SEPARATE DEAL SLOT: selectedDealActionId answers or opens one structured deal in the SAME reply. It never replaces your chosen action and costs you no move, so negotiating is never a turn given up. Use exactly one listed deal id, or omit the field. Only structured deals bind \u2014 words do not."
         : null,
@@ -132,7 +140,11 @@ export class LlmPromptBuilder {
         : null,
       spawnPreferenceRound
         ? 'Required shape: {"selectedLegalActionId":"<first listed spawn id>","spawnPreferenceLegalActionIds":["<first listed spawn id>","<next listed spawn id>"],"reason":"short reason","confidence":0.0}'
-        : `Required shape: {"selectedLegalActionId":"<one listed id>"${
+        : `Required shape: {"selectedLegalActionId":"<${
+            offersDealSlot || offersMessageSlot
+              ? "one listed non-deal, non-message id"
+              : "one listed id"
+          }>"${
             offersDealSlot
               ? ',"selectedDealActionId":"<one listed deal id, or omit>"'
               : ""
@@ -283,6 +295,33 @@ export class LlmPromptBuilder {
       ),
     };
   }
+}
+
+const UNTRUSTED_ACTION_METADATA_DISPLAY_KEYS = new Set([
+  "recipientName",
+  "targetName",
+]);
+
+/**
+ * Legal-action metadata is a flat protocol object. Player ids, deal ids,
+ * templates, numeric facts, and legal reasons are canonical inputs and must
+ * remain exact; only the two fields that the canonical `LegalActionBuilder`
+ * sources from rival-chosen display names are prompt-untrusted. Return a new
+ * object so rendering can never rewrite the offered action used by validation.
+ */
+function sanitizedLegalActionMetadata(
+  metadata: LegalAction["metadata"],
+): Record<string, string | number | boolean | null> {
+  if (metadata === undefined) return {};
+  return Object.fromEntries(
+    Object.entries(metadata).map(([key, value]) => [
+      key,
+      typeof value === "string" &&
+      UNTRUSTED_ACTION_METADATA_DISPLAY_KEYS.has(key)
+        ? sanitizeUntrustedDisplayString(value)
+        : value,
+    ]),
+  );
 }
 
 /**
