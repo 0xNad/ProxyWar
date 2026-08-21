@@ -133,6 +133,32 @@ const gameConfig: GameConfig = {
 };
 
 describe("AgentLeagueMatchRunner", () => {
+  it("assigns stable name-independent identities to unrated local specs", () => {
+    const log = makeLogger();
+    const first = createAgentParticipants(
+      [
+        { username: "alpha", profile: "aggressive" },
+        { username: "bravo", profile: "defensive" },
+      ],
+      log,
+    );
+    const renamed = createAgentParticipants(
+      [
+        { username: "zzz", profile: "aggressive" },
+        { username: "aaa", profile: "defensive" },
+      ],
+      log,
+    );
+
+    expect(first.map((participant) => participant.runner.persistentID)).toEqual(
+      renamed.map((participant) => participant.runner.persistentID),
+    );
+    expect(first.map((participant) => participant.spec.persistentID)).toEqual([
+      "00000000-0000-4000-8000-000000000001",
+      "00000000-0000-4000-8000-000000000002",
+    ]);
+  });
+
   it("runs four strategy profiles and records accepted opening decisions", async () => {
     const log = makeLogger();
     const candidateGame = await setup("big_plains", { nations: "disabled" });

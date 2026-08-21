@@ -190,7 +190,7 @@ export function createDefaultAgentSpecs(count = 4): AgentSpec[] {
       // Local/default agents also need an immutable identity: random UUIDs made
       // priority nondeterministic across repeated episodes after display names
       // stopped being an ordering key.
-      persistentID: `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+      persistentID: localAgentPersistentID(index),
     };
   });
 }
@@ -200,21 +200,35 @@ export function createAgentParticipants(
   log: Logger,
   options: CreateAgentParticipantsOptions = {},
 ): AgentParticipant[] {
-  return specs.map((spec, index) => ({
-    spec,
-    brain:
-      options.brainFactory?.(spec, index) ?? new RuleAgentBrain(spec.profile),
-    runner: new AgentRunner({
-      agentID: `${spec.profile}-agent-${index + 1}`,
-      clientID: spec.clientID,
-      username: spec.username,
-      persistentID: spec.persistentID,
-      log,
-      ...(options.retainTurnMessagesPrimaryOnly === true
-        ? { retainTurnMessages: index === 0 }
-        : {}),
-    }),
-  }));
+  return specs.map((spec, index) => {
+    // Rated/hosted callers must supply their immutable cross-episode identity.
+    // Local fixtures historically omitted it; give those callers a stable,
+    // name-independent seat identity instead of AgentRunner's random fallback
+    // so paired deterministic simulations remain comparable.
+    const persistentID = spec.persistentID ?? localAgentPersistentID(index);
+    const participantSpec =
+      spec.persistentID === undefined ? { ...spec, persistentID } : spec;
+    return {
+      spec: participantSpec,
+      brain:
+        options.brainFactory?.(participantSpec, index) ??
+        new RuleAgentBrain(participantSpec.profile),
+      runner: new AgentRunner({
+        agentID: `${participantSpec.profile}-agent-${index + 1}`,
+        clientID: participantSpec.clientID,
+        username: participantSpec.username,
+        persistentID,
+        log,
+        ...(options.retainTurnMessagesPrimaryOnly === true
+          ? { retainTurnMessages: index === 0 }
+          : {}),
+      }),
+    };
+  });
+}
+
+function localAgentPersistentID(index: number): string {
+  return `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`;
 }
 
 export class AgentLeagueMatchRunner {
