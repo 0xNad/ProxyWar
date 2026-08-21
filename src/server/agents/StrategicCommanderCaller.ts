@@ -19,14 +19,16 @@ import {
   LlmOptionSelector,
 } from "./LlmOptionSelector";
 import type { LlmProvider } from "./LlmProvider";
-import type {
-  BuiltCommanderState,
-  BuiltStrategicOptions,
-  CommanderRecentEvent,
-  CommanderState,
-  ExposedStrategicOption,
-  StrategicOptionCandidate,
-  StrategicOptionId,
+import {
+  strategicOptionFamilies,
+  type BuiltCommanderState,
+  type BuiltStrategicOptions,
+  type CommanderRecentEvent,
+  type CommanderState,
+  type ExposedStrategicOption,
+  type StrategicOptionCandidate,
+  type StrategicOptionFamily,
+  type StrategicOptionId,
 } from "./StrategicCommanderTypes";
 import {
   DeterministicOptionSelector,
@@ -148,6 +150,7 @@ export async function runStrategicCommanderCycle(
     throw new Error("Commander cycle requires available own player state");
   }
   const exposedOptions = executableExposedStrategicOptions(input.options);
+  const eligibility = executableStrategicOptionEligibility(input.options);
   const recentEvents = input.recentEvents ?? [];
   const builtState = buildCommanderState({
     observation: input.observation,
@@ -170,7 +173,7 @@ export async function runStrategicCommanderCycle(
       ),
     alivePlayerIDs: new Set(
       input.observation.visiblePlayers
-        .filter((player) => player.isAlive)
+        .filter((player) => player.isAlive && !player.isDisconnected)
         .map((player) => player.playerID),
     ),
   };
@@ -180,6 +183,8 @@ export async function runStrategicCommanderCycle(
     decisionSequence: input.decisionSequence,
     turnNumber: input.observation.turnNumber,
     tick: input.observation.tick,
+    eligibleOptionIDs: eligibility.optionIDs,
+    eligibleFamilies: eligibility.families,
     exposedOptions,
     exposedOptionSetFingerprint: builtState.fingerprints.exposedOptionSet,
     materialStateFingerprint: builtState.fingerprints.materialState,
@@ -324,6 +329,31 @@ export function executableExposedStrategicOptions(
   );
 }
 
+/** Hidden all-current eligibility used only by lifecycle continuation. */
+export function executableStrategicOptionEligibility(
+  options: BuiltStrategicOptions,
+): { optionIDs: StrategicOptionId[]; families: StrategicOptionFamily[] } {
+  const executableIDs = new Set(
+    options.candidates
+      .filter(
+        (candidate) =>
+          resolveStrategicOptionBinding(candidate.id, options.candidates) !==
+          null,
+      )
+      .map((candidate) => candidate.id),
+  );
+  const optionIDs = options.record.eligibleOptionIds.filter((optionID) =>
+    executableIDs.has(optionID),
+  );
+  const families = strategicOptionFamilies.filter((family) =>
+    options.candidates.some(
+      (candidate) =>
+        candidate.family === family && executableIDs.has(candidate.id),
+    ),
+  );
+  return { optionIDs, families };
+}
+
 /**
  * Resolves a StrategicOptionId to verbatim copies of its current candidate
  * binding, or null when the option is missing or has no primary action to
@@ -384,6 +414,14 @@ function promptCommanderState(args: {
     activePlan === null ||
     args.evaluation.disposition !== "replan" ||
     args.evaluation.reason === "no_active_plan"
+  ) {
+    return args.builtState.state;
+  }
+  if (
+    activePlan.targetPlayerID !== null &&
+    !args.input.observation.visiblePlayers.some(
+      (player) => player.playerID === activePlan.targetPlayerID,
+    )
   ) {
     return args.builtState.state;
   }

@@ -27,23 +27,30 @@ export const agentRuntimeModes = [
   "mock-policy-planner",
   "llm-policy-planner",
   "llm-action-selector",
-  "commander-v0-selector",
   /** Labeled deterministic autopilot that plays out a capped endgame; decisions
    * under this mode are never model play and must never be presented as such. */
   "autopilot-executor",
 ] as const;
 
-export type AgentRuntimeMode = (typeof agentRuntimeModes)[number];
+/** Local experiment attribution. This is intentionally not Coworld protocol. */
+export const internalAgentRuntimeModes = ["commander-v0-selector"] as const;
+
+const recognizedAgentRuntimeModes = [
+  ...agentRuntimeModes,
+  ...internalAgentRuntimeModes,
+] as const;
+
+export type AgentRuntimeMode = (typeof recognizedAgentRuntimeModes)[number];
 
 /**
  * Strict parser for runtime attribution crossing an untrusted metadata or
  * wire boundary. Deliberately no trimming, case folding, or coercion: an
- * almost-right label is unknown, not evidence for one of the six modes.
+ * almost-right label is unknown, not evidence for a recognized mode.
  */
 export function normalizeAgentRuntimeMode(
   value: unknown,
 ): AgentRuntimeMode | undefined {
-  return agentRuntimeModes.find((mode) => mode === value);
+  return recognizedAgentRuntimeModes.find((mode) => mode === value);
 }
 
 export type AgentGamePhase =

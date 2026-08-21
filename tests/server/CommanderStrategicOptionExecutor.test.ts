@@ -52,6 +52,10 @@ function plan(
       exposedOptionSetFingerprint: "aaaaaaaaaaaaaaaa",
       materialStateFingerprint: "bbbbbbbbbbbbbbbb",
     },
+    eligibilityAtStart: {
+      optionIDs: [selectedStrategicOptionId],
+      families: [family],
+    },
     start: {
       decisionSequence: 0,
       turnNumber: 1,

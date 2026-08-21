@@ -105,8 +105,8 @@ export interface BuiltStrategicOptions {
 export const commanderReplanTriggers = [
   "horizon_expiry",
   "option_not_executable",
-  "target_eliminated",
-  "home_danger_high",
+  "target_dead",
+  "home_attacked",
   "option_appeared",
 ] as const;
 
@@ -117,40 +117,26 @@ export const MAX_COMMANDER_HORIZON_DECISIONS = 6;
 export const DEFAULT_COMMANDER_HORIZON_DECISIONS = 3;
 export const MAX_COMMANDER_INTENT_LENGTH = 160;
 
-export interface CommanderStructureCounts {
-  cities: number;
-  factories: number;
-  ports: number;
-  defensePosts: number;
-  samLaunchers: number;
-}
-
 export interface CommanderSelfState {
   name: string;
   profile: AgentStrategyProfile;
   phase: AgentGamePhase;
   turnNumber: number;
-  tick: number | null;
-  decisionSequence: number;
-  territoryRank: number;
-  alivePlayerCount: number;
   troops: number;
   maxTroops: number | null;
-  troopRatio: number | null;
   gold: string;
   tilesOwned: number;
   tileShare: number | null;
   borderTiles: number;
   incomingAttacks: number;
   outgoingAttacks: number;
-  structures: CommanderStructureCounts;
+  alivePlayerCount: number;
 }
 
 export interface CommanderRivalState {
   playerID: string;
   name: string;
   isAlive: boolean;
-  isDisconnected: boolean;
   troops: number;
   tilesOwned: number;
   tileShare: number | null;
@@ -202,6 +188,11 @@ export type CommanderRecentEvent =
   | {
       kind: "rival_eliminated";
       playerID: string;
+    }
+  | {
+      kind: "tiles_lost";
+      fromTiles: number;
+      toTiles: number;
     };
 
 /** The complete and only object serialized into a Commander prompt. */

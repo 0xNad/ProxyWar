@@ -39,7 +39,7 @@ describe("wire constant parity", () => {
     );
   });
 
-  it("mirrors the six canonical runtime modes exactly", () => {
+  it("mirrors the five canonical runtime modes exactly", () => {
     expect(COWORLD_AGENT_RUNTIME_MODES).toEqual(agentRuntimeModes);
   });
 
@@ -570,7 +570,7 @@ describe("composeCoworldDecision", () => {
     expect(degraded.metadata.llmPlannerDegraded).toBe(true);
   });
 
-  it("forwards all six exact runtime modes and rejects near-miss or forged values", () => {
+  it("forwards all five exact runtime modes and rejects near-miss or forged values", () => {
     for (const runtimeMode of agentRuntimeModes) {
       expect(normalizeAgentRuntimeMode(runtimeMode)).toBe(runtimeMode);
       expect(normalizeRuntimeMode(runtimeMode)).toBe(runtimeMode);

@@ -12,11 +12,16 @@ import type {
   ActiveCommanderPlan,
   CommanderPlanReplanReason,
 } from "./CommanderPlanLifecycle";
-import { MAX_COMMANDER_OPTION_ID_LENGTH } from "./CommanderStateBuilder";
+import { compareCommanderStrings } from "./CommanderPrimitives";
+import {
+  MAX_COMMANDER_OPTION_ID_LENGTH,
+  MAX_COMMANDER_RECENT_EVENTS,
+} from "./CommanderStateBuilder";
 import { sanitizeUntrustedDisplayString } from "./PromptSanitizer";
 import type { StrategicCommanderCaller } from "./StrategicCommanderCaller";
 import type {
   BuiltStrategicOptions,
+  CommanderRecentEvent,
   StrategicOptionCandidate,
 } from "./StrategicCommanderTypes";
 import { buildStrategicOptions } from "./StrategicOptionBuilder";
@@ -47,6 +52,8 @@ export class StrategicCommanderBrain implements AgentBrain {
   private pendingPrimaryActionID: string | null = null;
   private inFlightOptions: BuiltStrategicOptions | null = null;
   private inFlightDecisionSequence: number | null = null;
+  private previousDecisionFacts: CommanderDecisionFacts | null = null;
+  private pendingRecentEvents: CommanderRecentEvent[] = [];
   private forcedReplanReason:
     | "option_not_executable"
     | "hold_streak_blocked"
@@ -80,6 +87,29 @@ export class StrategicCommanderBrain implements AgentBrain {
     this.inFlightOptions = options;
     this.inFlightDecisionSequence = decisionSequence;
     const previousPlan = this.activePlan;
+    const decisionEvents = deriveCommanderRecentEvents(
+      input.observation,
+      previousPlan,
+      this.previousDecisionFacts,
+    );
+    const planDeltaEvents = decisionEvents.filter(
+      (event) =>
+        event.kind === "territory_changed" || event.kind === "troops_changed",
+    );
+    this.pendingRecentEvents = [
+      ...this.pendingRecentEvents,
+      ...decisionEvents.filter(
+        (event) =>
+          event.kind !== "territory_changed" && event.kind !== "troops_changed",
+      ),
+    ].slice(-MAX_COMMANDER_RECENT_EVENTS);
+    const recentEvents = [
+      ...planDeltaEvents,
+      ...this.pendingRecentEvents.slice(
+        -(MAX_COMMANDER_RECENT_EVENTS - planDeltaEvents.length),
+      ),
+    ];
+    this.previousDecisionFacts = commanderDecisionFacts(input.observation);
     const forcedReplanReason = this.forcedReplanReason;
     this.forcedReplanReason = null;
     const decisionEpoch = this.decisionEpoch;
@@ -89,6 +119,7 @@ export class StrategicCommanderBrain implements AgentBrain {
       decisionSequence,
       activePlan: previousPlan,
       forcedReplanReason,
+      recentEvents,
     });
     if (decisionEpoch !== this.decisionEpoch) {
       this.clearInFlightDecision(decisionSequence);
@@ -97,6 +128,12 @@ export class StrategicCommanderBrain implements AgentBrain {
         this.activePlan,
         decisionSequence,
       );
+    }
+    if (
+      outcome.cycle.evaluation.disposition !== "continue" &&
+      outcome.cycle.evaluation.reason !== "no_exposed_options"
+    ) {
+      this.pendingRecentEvents = [];
     }
     this.clearInFlightDecision(decisionSequence);
     const plannerLatencyMs = outcome.selectionTelemetry.planningLatencyMs;
@@ -267,8 +304,91 @@ export class StrategicCommanderBrain implements AgentBrain {
     this.pendingPrimaryActionID = null;
     this.inFlightOptions = null;
     this.inFlightDecisionSequence = null;
+    this.previousDecisionFacts = null;
+    this.pendingRecentEvents = [];
     this.forcedReplanReason = null;
   }
+}
+
+interface CommanderDecisionFacts {
+  tilesOwned: number;
+  troops: number;
+  incomingAttackerIDs: string[];
+  rivalAliveByID: ReadonlyMap<string, boolean>;
+}
+
+function commanderDecisionFacts(
+  observation: AgentObservation,
+): CommanderDecisionFacts | null {
+  const own = observation.ownState;
+  if (own === null) return null;
+  const visiblePlayerIDs = new Set(
+    observation.visiblePlayers.map((player) => player.playerID),
+  );
+  return {
+    tilesOwned: own.tilesOwned,
+    troops: own.troops,
+    incomingAttackerIDs: [
+      ...new Set(
+        observation.combat.incomingAttackPlayerIDs.filter((playerID) =>
+          visiblePlayerIDs.has(playerID),
+        ),
+      ),
+    ].sort(compareCommanderStrings),
+    rivalAliveByID: new Map(
+      observation.visiblePlayers
+        .map((player) => [player.playerID, player.isAlive] as const)
+        .sort(([left], [right]) => compareCommanderStrings(left, right)),
+    ),
+  };
+}
+
+/** Fixed-template facts only; no raw recent-decision prose is consulted. */
+function deriveCommanderRecentEvents(
+  observation: AgentObservation,
+  activePlan: ActiveCommanderPlan | null,
+  previous: CommanderDecisionFacts | null,
+): CommanderRecentEvent[] {
+  const current = commanderDecisionFacts(observation);
+  if (current === null) return [];
+  const events: CommanderRecentEvent[] = [];
+  if (activePlan !== null) {
+    if (current.tilesOwned !== activePlan.start.tilesOwned) {
+      events.push({
+        kind: "territory_changed",
+        fromTiles: activePlan.start.tilesOwned,
+        toTiles: current.tilesOwned,
+      });
+    }
+    if (current.troops !== activePlan.start.troops) {
+      events.push({
+        kind: "troops_changed",
+        fromTroops: activePlan.start.troops,
+        toTroops: current.troops,
+      });
+    }
+  }
+  if (previous !== null) {
+    if (current.tilesOwned < previous.tilesOwned) {
+      events.push({
+        kind: "tiles_lost",
+        fromTiles: previous.tilesOwned,
+        toTiles: current.tilesOwned,
+      });
+    }
+    const priorAttackers = new Set(previous.incomingAttackerIDs);
+    for (const playerID of current.incomingAttackerIDs) {
+      if (!priorAttackers.has(playerID)) {
+        events.push({ kind: "incoming_attacker", playerID });
+      }
+    }
+    for (const [playerID, wasAlive] of previous.rivalAliveByID) {
+      if (wasAlive && current.rivalAliveByID.get(playerID) === false) {
+        events.push({ kind: "rival_eliminated", playerID });
+      }
+    }
+  }
+  return events.slice(0, MAX_COMMANDER_RECENT_EVENTS);
 }
 
 function currentCandidate(

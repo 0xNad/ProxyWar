@@ -3,6 +3,7 @@ import {
   CommanderPlanLifecycle,
   commanderPlanProgress,
   commanderRequestIdentity,
+  MAX_COMMANDER_ELIGIBLE_OPTION_IDS,
   type ActiveCommanderPlan,
   type AdvanceCommanderPlanInput,
   type CommanderFallbackSelection,
@@ -19,9 +20,11 @@ import {
   fingerprintExposedOptionSet,
   MAX_COMMANDER_PLAN_ATTACKER_IDS,
 } from "../../src/server/agents/CommanderStateBuilder";
-import type {
-  ExposedStrategicOption,
-  StrategicOptionId,
+import {
+  strategicOptionFamilies,
+  type ExposedStrategicOption,
+  type StrategicOptionFamily,
+  type StrategicOptionId,
 } from "../../src/server/agents/StrategicCommanderTypes";
 import { MAX_EXPOSED_STRATEGIC_OPTIONS } from "../../src/server/agents/StrategicOptionBuilder";
 import { selectDeterministicStrategicOption } from "../../src/server/agents/StrategicOptionSelectors";
@@ -57,6 +60,16 @@ function fixtureOptions(): ExposedStrategicOption[] {
   return makeCommanderStage2Fixture().builtState.state.options;
 }
 
+function fixtureOption(id: StrategicOptionId): ExposedStrategicOption {
+  const candidate =
+    makeCommanderStage2Fixture().strategicOptions.candidates.find(
+      (entry) => entry.id === id,
+    );
+  if (candidate === undefined) throw new Error(`missing candidate ${id}`);
+  const { binding: _binding, ...exposed } = candidate;
+  return exposed;
+}
+
 function makeMaterial(
   overrides: Partial<CommanderPlanMaterial> = {},
 ): CommanderPlanMaterial {
@@ -72,20 +85,40 @@ function makeMaterial(
 function makeRequest(
   overrides: Partial<CommanderPlanRequest> = {},
 ): CommanderPlanRequest {
-  const fixture = makeCommanderStage2Fixture();
+  const decisionSequence = overrides.decisionSequence ?? BASE_DECISION;
+  const fixture = makeCommanderStage2Fixture({ decisionSequence });
   const exposedOptions =
     overrides.exposedOptions ?? fixture.builtState.state.options;
+  const eligibleOptionIDs =
+    overrides.eligibleOptionIDs ??
+    fixture.strategicOptions.record.eligibleOptionIds;
+  const eligibleFamilies =
+    overrides.eligibleFamilies ?? eligibleFamiliesFor(eligibleOptionIDs);
   return {
     gameID: GAME_ID,
     agentID: AGENT_ID,
-    decisionSequence: BASE_DECISION,
+    decisionSequence,
     turnNumber: BASE_TURN,
     tick: BASE_TICK,
+    eligibleOptionIDs,
+    eligibleFamilies,
     exposedOptions,
     exposedOptionSetFingerprint: fingerprintExposedOptionSet(exposedOptions),
     materialStateFingerprint: fixture.builtState.fingerprints.materialState,
     ...overrides,
   };
+}
+
+function eligibleFamiliesFor(
+  optionIDs: readonly StrategicOptionId[],
+): StrategicOptionFamily[] {
+  return strategicOptionFamilies.filter((family) =>
+    optionIDs.some((optionID) =>
+      family === "pressure_rival"
+        ? optionID.startsWith("pressure_rival:")
+        : optionID === family,
+    ),
+  );
 }
 
 function deterministicFallbackSelection(
@@ -184,6 +217,45 @@ describe("CommanderPlanLifecycle Stage 3 — request identity", () => {
       commanderRequestIdentity(makeRequest({ exposedOptions: oversized })),
     ).toThrow(/exposure bound/);
   });
+
+  it("bounds and cross-checks hidden all-current eligibility separately", () => {
+    expect(() =>
+      commanderRequestIdentity(
+        makeRequest({
+          eligibleOptionIDs: ["expand", "expand"],
+          eligibleFamilies: ["expand"],
+          exposedOptions: [],
+          exposedOptionSetFingerprint: fingerprintExposedOptionSet([]),
+        }),
+      ),
+    ).toThrow(/duplicate eligible option id/);
+
+    expect(() =>
+      commanderRequestIdentity(
+        makeRequest({
+          eligibleOptionIDs: ["expand"],
+          eligibleFamilies: ["survive"],
+          exposedOptions: [],
+          exposedOptionSetFingerprint: fingerprintExposedOptionSet([]),
+        }),
+      ),
+    ).toThrow(/families do not match/);
+
+    expect(() =>
+      commanderRequestIdentity(
+        makeRequest({
+          eligibleOptionIDs: Array.from(
+            { length: MAX_COMMANDER_ELIGIBLE_OPTION_IDS + 1 },
+            (_unused, index) =>
+              `pressure_rival:BOUND_${index}` as StrategicOptionId,
+          ),
+          eligibleFamilies: ["pressure_rival"],
+          exposedOptions: [],
+          exposedOptionSetFingerprint: fingerprintExposedOptionSet([]),
+        }),
+      ),
+    ).toThrow(/eligible-option bound/);
+  });
 });
 
 describe("CommanderPlanLifecycle Stage 3 — installation and provenance", () => {
@@ -191,20 +263,28 @@ describe("CommanderPlanLifecycle Stage 3 — installation and provenance", () =>
     const plan = installedPlan({
       selectedStrategicOptionId: "pressure_rival:P7",
       horizonDecisions: 5,
-      replanTriggers: ["target_eliminated", "home_danger_high"],
+      replanTriggers: ["target_dead", "home_attacked"],
     });
 
     expect(plan.selectedStrategicOptionId).toBe("pressure_rival:P7");
     expect(plan.family).toBe("pressure_rival");
     expect(plan.targetPlayerID).toBe("P7");
     expect(plan.horizonDecisions).toBe(5);
-    expect(plan.replanTriggers).toEqual([
-      "home_danger_high",
-      "target_eliminated",
-    ]);
+    expect(plan.replanTriggers).toEqual(["home_attacked", "target_dead"]);
     expect(plan.selector).toBe("commander");
     expect(plan.fallbackReason).toBeNull();
     expect(plan.origin.exposedOptionIDs).toEqual(EXPOSED_IDS);
+    expect(plan.eligibilityAtStart).toEqual({
+      optionIDs: [
+        "develop_economy",
+        "expand",
+        "pressure_rival:P7",
+        "pressure_rival:P8",
+        "pressure_rival:P9",
+        "survive",
+      ],
+      families: ["expand", "develop_economy", "pressure_rival", "survive"],
+    });
     expect(plan.start).toEqual({
       decisionSequence: BASE_DECISION,
       turnNumber: BASE_TURN,
@@ -265,6 +345,7 @@ describe("CommanderPlanLifecycle Stage 3 — installation and provenance", () =>
     expect(serialized).not.toContain(EVIDENCE_LEAK_CANARY);
     expect(serialized).not.toContain("totalScore");
     expect(Object.keys(cycle.plan ?? {}).sort()).toEqual([
+      "eligibilityAtStart",
       "fallbackDegradationCause",
       "fallbackReason",
       "family",
@@ -277,6 +358,10 @@ describe("CommanderPlanLifecycle Stage 3 — installation and provenance", () =>
       "selector",
       "start",
       "targetPlayerID",
+    ]);
+    expect(Object.keys(cycle.plan?.eligibilityAtStart ?? {}).sort()).toEqual([
+      "families",
+      "optionIDs",
     ]);
     expect(Object.keys(cycle.snapshot ?? {}).sort()).toEqual([
       "family",
@@ -441,9 +526,16 @@ describe("CommanderPlanLifecycle Stage 3 — explicit replan and terminate reaso
     const withoutSurvive = fixtureOptions().filter(
       (option) => option.id !== "survive",
     );
+    const eligibleOptionIDs = makeRequest().eligibleOptionIDs.filter(
+      (optionID) => optionID !== "survive",
+    );
     const cycle = advanceCommanderPlan({
       active: plan,
-      request: makeRequest({ exposedOptions: withoutSurvive }),
+      request: makeRequest({
+        eligibleOptionIDs,
+        eligibleFamilies: eligibleFamiliesFor(eligibleOptionIDs),
+        exposedOptions: withoutSurvive,
+      }),
       material: makeMaterial(),
       response: null,
     });
@@ -453,21 +545,81 @@ describe("CommanderPlanLifecycle Stage 3 — explicit replan and terminate reaso
     expect(cycle.plan?.selectedStrategicOptionId).not.toBe("survive");
   });
 
-  it("terminates when the plan target is eliminated", () => {
-    const plan = installedPlan({
+  it("distinguishes opted-in target death from ordinary non-executability", () => {
+    const optedIn = installedPlan({
+      selectedStrategicOptionId: "pressure_rival:P7",
+      replanTriggers: ["target_dead"],
+    });
+    const ordinary = installedPlan({
       selectedStrategicOptionId: "pressure_rival:P7",
     });
-    const cycle = advanceCommanderPlan({
-      active: plan,
-      request: makeRequest({ decisionSequence: BASE_DECISION + 1 }),
-      material: makeMaterial({
-        alivePlayerIDs: ["P1", "P4", "P5", "P6", "P8"],
-      }),
-      response: null,
+    const exposedOptions = fixtureOptions().filter(
+      (option) => option.id !== "pressure_rival:P7",
+    );
+    const eligibleOptionIDs = makeRequest().eligibleOptionIDs.filter(
+      (optionID) => optionID !== "pressure_rival:P7",
+    );
+    const request = makeRequest({
+      decisionSequence: BASE_DECISION + 1,
+      eligibleOptionIDs,
+      eligibleFamilies: eligibleFamiliesFor(eligibleOptionIDs),
+      exposedOptions,
+    });
+    const material = makeMaterial({
+      alivePlayerIDs: ["P1", "P4", "P5", "P6", "P8"],
     });
 
-    expect(cycle.evaluation.disposition).toBe("terminate");
-    expect(cycle.evaluation.reason).toBe("target_eliminated");
+    expect(
+      new CommanderPlanLifecycle().evaluate({
+        plan: optedIn,
+        request,
+        material,
+      }),
+    ).toMatchObject({ disposition: "replan", reason: "target_dead" });
+    expect(
+      new CommanderPlanLifecycle().evaluate({
+        plan: ordinary,
+        request,
+        material,
+      }),
+    ).toMatchObject({
+      disposition: "replan",
+      reason: "option_not_executable",
+    });
+  });
+
+  it("keeps a capped-out pressure plan while its option remains eligible", () => {
+    const initialExposed = fixtureOptions()
+      .filter((option) => option.id !== "pressure_rival:P8")
+      .concat(fixtureOption("pressure_rival:P9"));
+    const initialRequest = makeRequest({ exposedOptions: initialExposed });
+    const plan = installedPlan(
+      {
+        selectedStrategicOptionId: "pressure_rival:P9",
+        horizonDecisions: 6,
+      },
+      initialRequest,
+    );
+    const churned = makeRequest({
+      decisionSequence: BASE_DECISION + 1,
+      // P9 is omitted by the two-pressure exposure cap but remains in the
+      // separately bounded eligible set and still has an executable binding.
+      exposedOptions: fixtureOptions(),
+    });
+
+    const evaluation = new CommanderPlanLifecycle().evaluate({
+      plan,
+      request: churned,
+      material: makeMaterial(),
+    });
+    expect(churned.exposedOptions.map((option) => option.id)).not.toContain(
+      "pressure_rival:P9",
+    );
+    expect(churned.eligibleOptionIDs).toContain("pressure_rival:P9");
+    expect(evaluation).toMatchObject({
+      disposition: "continue",
+      reason: "within_horizon",
+    });
   });
 
   it("preserves plan provenance when an active menu transiently exposes no options", () => {
@@ -492,10 +644,10 @@ describe("CommanderPlanLifecycle Stage 3 — explicit replan and terminate reaso
     expect(cycle.planPreserved).toBe(true);
   });
 
-  it("fires declared danger and new-option triggers, and only when declared", () => {
+  it("fires declared danger and newly eligible family triggers only", () => {
     const declared = installedPlan({
       horizonDecisions: 6,
-      replanTriggers: ["home_danger_high", "option_appeared"],
+      replanTriggers: ["home_attacked", "option_appeared"],
     });
     const undeclared = installedPlan({ horizonDecisions: 6 });
     const material = makeMaterial({
@@ -509,7 +661,7 @@ describe("CommanderPlanLifecycle Stage 3 — explicit replan and terminate reaso
       response: null,
     });
     expect(danger.evaluation.disposition).toBe("replan");
-    expect(danger.evaluation.reason).toBe("home_danger_high");
+    expect(danger.evaluation.reason).toBe("home_attacked");
 
     const quiet = advanceCommanderPlan({
       active: undeclared,
@@ -519,25 +671,51 @@ describe("CommanderPlanLifecycle Stage 3 — explicit replan and terminate reaso
     });
     expect(quiet.evaluation.disposition).toBe("continue");
 
-    const appeared = advanceCommanderPlan({
-      active: declared,
+    const startEligible = makeRequest().eligibleOptionIDs.filter(
+      (optionID) =>
+        optionID !== "develop_economy" && optionID !== "pressure_rival:P9",
+    );
+    const familyPlan = installedPlan(
+      {
+        selectedStrategicOptionId: "expand",
+        horizonDecisions: 6,
+        replanTriggers: ["option_appeared"],
+      },
+      makeRequest({
+        eligibleOptionIDs: startEligible,
+        eligibleFamilies: eligibleFamiliesFor(startEligible),
+        exposedOptions: fixtureOptions().filter(
+          (option) => option.id !== "develop_economy",
+        ),
+      }),
+    );
+    const newPressureID = [...startEligible, "pressure_rival:P9" as const];
+    const sameFamily = new CommanderPlanLifecycle().evaluate({
+      plan: familyPlan,
       request: makeRequest({
         decisionSequence: BASE_DECISION + 1,
-        exposedOptions: [
-          ...fixtureOptions(),
-          {
-            ...fixtureOptions()[0],
-            id: "pressure_rival:P1",
-            family: "pressure_rival",
-            targetPlayerID: "P1",
-          } as ExposedStrategicOption,
-        ],
+        eligibleOptionIDs: newPressureID,
+        eligibleFamilies: eligibleFamiliesFor(newPressureID),
+        exposedOptions: fixtureOptions().filter(
+          (option) => option.id !== "develop_economy",
+        ),
       }),
       material: makeMaterial(),
-      response: null,
     });
-    expect(appeared.evaluation.disposition).toBe("replan");
-    expect(appeared.evaluation.reason).toBe("option_appeared");
+    expect(sameFamily).toMatchObject({
+      disposition: "continue",
+      reason: "within_horizon",
+    });
+
+    const appeared = new CommanderPlanLifecycle().evaluate({
+      plan: familyPlan,
+      request: makeRequest({ decisionSequence: BASE_DECISION + 1 }),
+      material: makeMaterial(),
+    });
+    expect(appeared).toMatchObject({
+      disposition: "replan",
+      reason: "option_appeared",
+    });
   });
 });
 
@@ -1026,6 +1204,7 @@ describe("CommanderPlanLifecycle Stage 3 — fingerprint stability and sensitivi
     const changedMaterial = fingerprintCommanderMaterialState({
       gameID: GAME_ID,
       agentID: AGENT_ID,
+      decisionSequence: BASE_DECISION,
       state: {
         ...base.builtState.state,
         self: { ...base.builtState.state.self, tilesOwned: BASE_TILES + 1 },

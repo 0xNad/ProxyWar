@@ -2038,11 +2038,11 @@ function planTransitionAudit(
     "horizon_expiry",
     "option_not_executable",
     "hold_streak_blocked",
-    "home_danger_high",
+    "target_dead",
+    "home_attacked",
     "option_appeared",
   ]);
   const terminateReasons = new Set([
-    "target_eliminated",
     "no_exposed_options",
     "game_mismatch",
     "agent_mismatch",

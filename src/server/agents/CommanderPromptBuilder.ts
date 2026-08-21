@@ -37,7 +37,7 @@ export function buildCommanderPrompt(state: CommanderState): string {
     `Allowed replanTriggers: ${commanderReplanTriggers.join(", ")}.`,
     "horizonDecisions defaults to 3 when omitted; integer values are clamped from 2 through 6.",
     "intent is required and nonempty; whitespace and controls are normalized and the result is capped at 160 characters.",
-    "replanTriggers is a required array using only the allowed values, without duplicates.",
+    "replanTriggers is optional; when present it must be an array using only the allowed values, without duplicates.",
     "confidence is optional; invalid values outside the finite range from 0 through 1 are ignored.",
     "Return one JSON object only, with no prose or markdown.",
     "Required response shape:",

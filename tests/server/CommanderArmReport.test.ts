@@ -682,6 +682,14 @@ function lifecycleRequest(decisionSequence: number): CommanderPlanRequest {
     decisionSequence,
     turnNumber: fixture.observation.turnNumber,
     tick: fixture.observation.tick,
+    eligibleOptionIDs: fixture.strategicOptions.record.eligibleOptionIds,
+    eligibleFamilies: [
+      ...new Set(
+        fixture.strategicOptions.candidates.map(
+          (candidate) => candidate.family,
+        ),
+      ),
+    ],
     exposedOptions: fixture.builtState.state.options,
     exposedOptionSetFingerprint:
       fixture.builtState.fingerprints.exposedOptionSet,
@@ -2035,6 +2043,57 @@ describe("CommanderArmReport Stage 5 arithmetic and invalidation", () => {
     expect(tripletInvalidations(report)).toContain(
       "Arm B silently abandoned a plan",
     );
+  });
+
+  it("treats target_dead as a replan reason, never a termination reason", () => {
+    const replanned = armRun("B", [
+      commanderRecord({
+        sequence: 1,
+        arm: "B",
+        planID: "B-plan-1",
+        planInstalled: true,
+        replanReason: "no_active_plan",
+      }),
+      commanderRecord({
+        sequence: 2,
+        arm: "B",
+        planID: "B-plan-2",
+        planInstalled: true,
+        previousPlanID: "B-plan-1",
+        replanReason: "target_dead",
+      }),
+    ]);
+    const replannedReport = buildCommanderArmReport([
+      armRun("A"),
+      replanned,
+      armRun("C"),
+    ]);
+    expect(
+      firstTriplet(replannedReport).arms.B.metrics.planTransitions,
+    ).toEqual({
+      count: 2,
+      proven: 2,
+      violations: 0,
+    });
+
+    const terminatedRecord = commanderRecord({
+      sequence: 2,
+      arm: "B",
+      planID: "B-plan-2",
+      planInstalled: false,
+      previousPlanID: "B-plan-1",
+      replanReason: "target_dead",
+    });
+    terminatedRecord.decisionMetadata!.planID = null;
+    const terminated = armRun("B", [replanned.records[1]!, terminatedRecord]);
+    const terminatedReport = buildCommanderArmReport([
+      armRun("A"),
+      terminated,
+      armRun("C"),
+    ]);
+    expect(
+      firstTriplet(terminatedReport).arms.B.metrics.planTransitions,
+    ).toEqual({ count: 2, proven: 1, violations: 1 });
   });
 
   it("excludes rejected stale attempts but invalidates stale authority", () => {

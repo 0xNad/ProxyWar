@@ -57,34 +57,21 @@ describe("CommanderStateBuilder Stage 2", () => {
       "profile",
       "phase",
       "turnNumber",
-      "tick",
-      "decisionSequence",
-      "territoryRank",
-      "alivePlayerCount",
       "troops",
       "maxTroops",
-      "troopRatio",
       "gold",
       "tilesOwned",
       "tileShare",
       "borderTiles",
       "incomingAttacks",
       "outgoingAttacks",
-      "structures",
-    ]);
-    expectExactKeys(fixture.builtState.state.self.structures, [
-      "cities",
-      "factories",
-      "ports",
-      "defensePosts",
-      "samLaunchers",
+      "alivePlayerCount",
     ]);
     for (const rival of fixture.builtState.state.rivals) {
       expectExactKeys(rival, [
         "playerID",
         "name",
         "isAlive",
-        "isDisconnected",
         "troops",
         "tilesOwned",
         "tileShare",
@@ -180,10 +167,30 @@ describe("CommanderStateBuilder Stage 2", () => {
       "recentDecisions",
       "deals",
       "economy",
+      "tick",
+      "decisionSequence",
+      "territoryRank",
+      "troopRatio",
+      "structures",
+      "isDisconnected",
     ]) {
       expect(keys, `must exclude key ${forbiddenKey}`).not.toContain(
         forbiddenKey,
       );
+    }
+    const lowerKeys = keys.map((key) => key.toLowerCase());
+    for (const forbiddenFragment of [
+      "rank",
+      "score",
+      "priority",
+      "recommended",
+      "best",
+      "risk",
+    ]) {
+      expect(
+        lowerKeys.some((key) => key.includes(forbiddenFragment)),
+        `must exclude recursive key fragment ${forbiddenFragment}`,
+      ).toBe(false);
     }
   });
 
@@ -195,19 +202,14 @@ describe("CommanderStateBuilder Stage 2", () => {
     );
   });
 
-  it("keeps every exposed target identifiable while bounding and canonically ordering rivals", () => {
+  it("orders rivals attacker, attacked target, border, then territory even when option targets compete", () => {
     const fixture = makeCommanderStage2Fixture();
     const { rivals, options } = fixture.builtState.state;
     const rivalIDs = rivals.map((rival) => rival.playerID);
-    const targetIDs = options
-      .map((option) => option.targetPlayerID)
-      .filter((id): id is string => id !== null);
-
     expect(rivals).toHaveLength(MAX_COMMANDER_RIVALS);
-    expect(rivalIDs).toEqual(["P1", "P4", "P5", "P6", "P7", "P8"]);
-    for (const targetID of targetIDs) {
-      expect(rivalIDs).toContain(targetID);
-    }
+    expect(options.map((option) => option.targetPlayerID)).toContain("P8");
+    expect(rivalIDs).toEqual(["P5", "P6", "P4", "P7", "P1", "P2"]);
+    expect(rivalIDs).not.toContain("P8");
     expect(rivalIDs).not.toContain("P9");
     expect(rivals.find((rival) => rival.playerID === "P7")?.name).toBe(
       `Rival ${"N".repeat(41)}…`,
@@ -220,18 +222,9 @@ describe("CommanderStateBuilder Stage 2", () => {
     );
   });
 
-  it("bounds structures, strategic event arrays, and display strings", () => {
+  it("bounds strategic event arrays and display strings", () => {
     const fixture = makeCommanderStage2Fixture();
-    const { self, recentEvents } = fixture.builtState.state;
-
-    expect(self.structures).toEqual({
-      cities: 2,
-      factories: 3,
-      ports: 1,
-      defensePosts: 4,
-      samLaunchers: 1,
-    });
-    expect(Object.keys(self.structures)).not.toContain("missileSilos");
+    const { recentEvents } = fixture.builtState.state;
     expect(recentEvents).toHaveLength(MAX_COMMANDER_RECENT_EVENTS);
     expect(
       recentEvents.every(
@@ -299,7 +292,9 @@ describe("CommanderStateBuilder Stage 2", () => {
       "newIncomingAttackerIDs",
     ]);
     expect(recursiveKeys(rebuilt.state.plan)).not.toContain("intent");
-    expect(rebuilt.state.rivals.map((rival) => rival.playerID)).toContain("P9");
+    expect(rebuilt.state.rivals.map((rival) => rival.playerID)).not.toContain(
+      "P9",
+    );
   });
 
   it("is deterministic under irrelevant player, action, and combat-array ordering", () => {
@@ -357,7 +352,7 @@ describe("CommanderStateBuilder Stage 2", () => {
       fingerprints.materialState,
     );
     const eventChange = structuredClone(state);
-    eventChange.recentEvents[0] = "territory 1→2 since plan start";
+    eventChange.recentEvents[0] = "tiles 1→2 since plan start";
     expect(materialFingerprint(eventChange, fixture)).toBe(
       fingerprints.materialState,
     );
@@ -371,16 +366,13 @@ describe("CommanderStateBuilder Stage 2", () => {
 
     const irrelevantMutations: Array<(value: CommanderState) => void> = [
       (value) => {
-        value.self.tick = (value.self.tick ?? 0) + 1;
-      },
-      (value) => {
         value.self.gold = `${value.self.gold}0`;
       },
       (value) => {
         value.self.profile = "defensive";
       },
       (value) => {
-        value.recentEvents[0] = "territory 1→2 since plan start";
+        value.recentEvents[0] = "tiles 1→2 since plan start";
       },
       (value) => {
         const expand = value.options.find(
@@ -420,9 +412,6 @@ describe("CommanderStateBuilder Stage 2", () => {
         value.self.turnNumber += 1;
       },
       (value) => {
-        value.self.decisionSequence += 1;
-      },
-      (value) => {
         value.self.troops += 1;
       },
       (value) => {
@@ -456,6 +445,7 @@ describe("CommanderStateBuilder Stage 2", () => {
       fingerprintCommanderMaterialState({
         gameID: `${fixture.observation.gameID}_CHANGED`,
         agentID: fixture.observation.agentID,
+        decisionSequence: 7,
         state,
       }),
     ).not.toBe(fingerprints.materialState);
@@ -463,6 +453,7 @@ describe("CommanderStateBuilder Stage 2", () => {
       fingerprintCommanderMaterialState({
         gameID: fixture.observation.gameID,
         agentID: `${fixture.observation.agentID}_CHANGED`,
+        decisionSequence: 7,
         state,
       }),
     ).not.toBe(fingerprints.materialState);
@@ -527,6 +518,7 @@ function materialFingerprint(
   return fingerprintCommanderMaterialState({
     gameID: fixture.observation.gameID,
     agentID: fixture.observation.agentID,
+    decisionSequence: 7,
     state,
   });
 }

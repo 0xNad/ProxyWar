@@ -2,7 +2,12 @@ import fs from "fs/promises";
 import os from "os";
 import path from "path";
 import { writeAgentLeagueRunArtifacts } from "../../src/server/agents/AgentDecisionLogWriter";
-import type { AgentDecisionRecord } from "../../src/server/agents/AgentTypes";
+import {
+  agentRuntimeModes,
+  internalAgentRuntimeModes,
+  normalizeAgentRuntimeMode,
+  type AgentDecisionRecord,
+} from "../../src/server/agents/AgentTypes";
 import { fabricatedRecord } from "./DealTestHarness";
 
 function commanderRecord(
@@ -70,6 +75,14 @@ function commanderRecord(
 }
 
 describe("Commander artifact stamps", () => {
+  it("keeps Commander attribution local without widening Coworld runtime modes", () => {
+    expect(agentRuntimeModes).not.toContain("commander-v0-selector");
+    expect(internalAgentRuntimeModes).toEqual(["commander-v0-selector"]);
+    expect(normalizeAgentRuntimeMode("commander-v0-selector")).toBe(
+      "commander-v0-selector",
+    );
+  });
+
   it("hoists every public scalar with distinct per-action fidelity", async () => {
     const rootDir = await fs.mkdtemp(
       path.join(os.tmpdir(), "commander-artifact-"),

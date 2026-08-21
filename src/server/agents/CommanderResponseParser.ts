@@ -120,14 +120,15 @@ export function parseCommanderResponse(
 
   const rawTriggers = parsed.replanTriggers;
   if (
-    !Array.isArray(rawTriggers) ||
-    rawTriggers.length > commanderReplanTriggers.length
+    rawTriggers !== undefined &&
+    (!Array.isArray(rawTriggers) ||
+      rawTriggers.length > commanderReplanTriggers.length)
   ) {
     return failure(raw, "replanTriggers must be a bounded array");
   }
   const triggers: CommanderReplanTrigger[] = [];
   const seenTriggers = new Set<string>();
-  for (const trigger of rawTriggers) {
+  for (const trigger of rawTriggers ?? []) {
     if (
       typeof trigger !== "string" ||
       !commanderReplanTriggers.includes(trigger as CommanderReplanTrigger) ||

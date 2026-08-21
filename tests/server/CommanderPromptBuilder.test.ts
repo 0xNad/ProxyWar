@@ -39,6 +39,7 @@ describe("CommanderPromptBuilder Stage 2", () => {
     expect(prompt).toContain("clamped from 2 through 6");
     expect(prompt).toContain("normalized");
     expect(prompt).toContain("capped at 160 characters");
+    expect(prompt).toContain("replanTriggers is optional");
     expect(prompt).toContain("without duplicates");
     expect(prompt).toContain("finite range from 0 through 1 are ignored");
     expect(prompt).toContain(UNTRUSTED_DISPLAY_RULE);
@@ -68,6 +69,12 @@ describe("CommanderPromptBuilder Stage 2", () => {
       "skillScore",
       "recommendedActionKinds",
       '"priority":',
+      '"territoryRank":',
+      '"tick":',
+      '"decisionSequence":',
+      '"troopRatio":',
+      '"structures":',
+      '"isDisconnected":',
       "preferredModules",
       "tacticalAffordances",
       "OPENFRONT_PLAYBOOK",
@@ -84,6 +91,23 @@ describe("CommanderPromptBuilder Stage 2", () => {
     expect(prompt).toContain("LegalAction IDs");
     expect(prompt).not.toContain("raw-expand-tile");
     expect(prompt).not.toContain("buildTile");
+
+    const lowerPrompt = prompt.toLowerCase();
+    for (const banned of [
+      "rank",
+      "score",
+      "priority",
+      "recommended",
+      "best",
+      "risk",
+    ]) {
+      expect(lowerPrompt, `must exclude ${banned} recursively`).not.toContain(
+        banned,
+      );
+    }
+    expect(prompt).not.toMatch(
+      /(?:attack|expand|build|boat|alliance|embargo|donate_|upgrade|target|spawn|hold):/i,
+    );
   });
 
   it("is byte-deterministic across irrelevant source ordering", () => {

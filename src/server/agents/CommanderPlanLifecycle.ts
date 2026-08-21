@@ -19,6 +19,7 @@ import {
   MAX_COMMANDER_HORIZON_DECISIONS,
   MAX_COMMANDER_INTENT_LENGTH,
   MIN_COMMANDER_HORIZON_DECISIONS,
+  strategicOptionFamilies,
   type CommanderPlanProgressSnapshot,
   type CommanderPlanSnapshot,
   type CommanderReplanTrigger,
@@ -31,6 +32,8 @@ import { MAX_EXPOSED_STRATEGIC_OPTIONS } from "./StrategicOptionBuilder";
 
 /** Stage 2 fingerprints are 16 hex characters; the bound stays generous. */
 export const MAX_COMMANDER_FINGERPRINT_LENGTH = 64;
+/** Three non-pressure options plus every possible rival in a 125-seat game. */
+export const MAX_COMMANDER_ELIGIBLE_OPTION_IDS = 128;
 
 /**
  * Alive ids are a membership probe that is never persisted into plan state, so
@@ -59,7 +62,8 @@ export const commanderPlanReplanReasons = [
   "horizon_expiry",
   "option_not_executable",
   "hold_streak_blocked",
-  "home_danger_high",
+  "target_dead",
+  "home_attacked",
   "option_appeared",
 ] as const;
 
@@ -71,7 +75,6 @@ export const commanderPlanTerminateReasons = [
   "game_mismatch",
   "agent_mismatch",
   "decision_sequence_regressed",
-  "target_eliminated",
 ] as const;
 
 export type CommanderPlanTerminateReason =
@@ -167,6 +170,10 @@ export interface CommanderPlanRequest {
   decisionSequence: number;
   turnNumber: number;
   tick: number | null;
+  /** Internal lifecycle truth; never serialized into the Commander prompt. */
+  eligibleOptionIDs: readonly StrategicOptionId[];
+  /** Exact family coverage for `option_appeared`; independent of exposure. */
+  eligibleFamilies: readonly StrategicOptionFamily[];
   exposedOptions: readonly ExposedStrategicOption[];
   exposedOptionSetFingerprint: string;
   materialStateFingerprint: string;
@@ -189,6 +196,11 @@ export interface CommanderPlanStartSnapshot {
   incomingAttackerIDs: string[];
 }
 
+export interface CommanderPlanEligibilitySnapshot {
+  optionIDs: StrategicOptionId[];
+  families: StrategicOptionFamily[];
+}
+
 /**
  * The durable plan. Its authority is `selectedStrategicOptionId`, which is
  * always one of the exact ids exposed by the request that produced it.
@@ -209,6 +221,8 @@ export interface ActiveCommanderPlan {
   /** Immutable attribution for every decision authored under this plan. */
   fallbackDegradationCause: CommanderPlanFallbackDegradationCause | null;
   origin: CommanderRequestIdentity;
+  /** Hidden eligibility at plan creation, unaffected by prompt exposure caps. */
+  eligibilityAtStart: CommanderPlanEligibilitySnapshot;
   start: CommanderPlanStartSnapshot;
 }
 
@@ -301,6 +315,16 @@ export function commanderRequestIdentity(
   if (new Set(exposedOptionIDs).size !== exposedOptionIDs.length) {
     throw new Error("Commander request exposes a duplicate option id");
   }
+  const eligibility = normalizeRequestEligibility(request);
+  if (
+    exposedOptionIDs.some(
+      (optionID) => !eligibility.optionIDs.includes(optionID),
+    )
+  ) {
+    throw new Error(
+      "Commander request exposes an option that is not currently eligible",
+    );
+  }
   const exposedOptionSetFingerprint = boundedIdentifier(
     request.exposedOptionSetFingerprint,
     "request.exposedOptionSetFingerprint",
@@ -348,14 +372,15 @@ export function commanderRequestIdentity(
  * Decides whether the active plan may continue. Checks run in a fixed order so
  * the reason is deterministic when several conditions hold at once.
  *
- * `option_not_executable` is always armed: a plan whose selected option is not
- * exposed has no authority to continue, but its replacement remains an
- * explicit replan with prior-plan provenance rather than a silent termination.
+ * `option_not_executable` is always armed against the separately bounded full
+ * eligible set. Prompt curation is not lifecycle authority: an option may fall
+ * out of the capped exposure while remaining executable and durable.
  */
 export function evaluateCommanderPlan(
   input: EvaluateCommanderPlanInput,
 ): CommanderPlanEvaluation {
   const identity = commanderRequestIdentity(input.request);
+  const eligibility = normalizeRequestEligibility(input.request);
   const material = normalizeMaterial(input.material);
   const plan = input.plan;
 
@@ -380,14 +405,15 @@ export function evaluateCommanderPlan(
   if (identity.decisionSequence < plan.start.decisionSequence) {
     return terminate("decision_sequence_regressed", plan, identity);
   }
-  if (!identity.exposedOptionIDs.includes(plan.selectedStrategicOptionId)) {
-    return replan("option_not_executable", plan, planAge(plan, identity));
-  }
   if (
     plan.targetPlayerID !== null &&
+    plan.replanTriggers.includes("target_dead") &&
     !material.alivePlayerIDs.has(plan.targetPlayerID)
   ) {
-    return terminate("target_eliminated", plan, identity);
+    return replan("target_dead", plan, planAge(plan, identity));
+  }
+  if (!eligibility.optionIDs.includes(plan.selectedStrategicOptionId)) {
+    return replan("option_not_executable", plan, planAge(plan, identity));
   }
 
   const age = planAge(plan, identity);
@@ -407,15 +433,15 @@ export function evaluateCommanderPlan(
     };
   }
   if (
-    plan.replanTriggers.includes("home_danger_high") &&
+    plan.replanTriggers.includes("home_attacked") &&
     newIncomingAttackerIDs(plan, material).length > 0
   ) {
-    return replan("home_danger_high", plan, age);
+    return replan("home_attacked", plan, age);
   }
   if (
     plan.replanTriggers.includes("option_appeared") &&
-    identity.exposedOptionIDs.some(
-      (id) => !plan.origin.exposedOptionIDs.includes(id),
+    eligibility.families.some(
+      (family) => !plan.eligibilityAtStart.families.includes(family),
     )
   ) {
     return replan("option_appeared", plan, age);
@@ -809,6 +835,7 @@ function installCommanderPlan(
     fallbackReason: input.fallbackReason,
     fallbackDegradationCause: input.fallbackDegradationCause,
     origin: input.identity,
+    eligibilityAtStart: normalizeRequestEligibility(input.request),
     start: {
       decisionSequence: input.identity.decisionSequence,
       turnNumber: input.identity.turnNumber,
@@ -904,6 +931,80 @@ export interface NormalizedCommanderPlanMaterial {
   troops: number;
   incomingAttackerIDs: string[];
   alivePlayerIDs: ReadonlySet<string>;
+}
+
+function normalizeRequestEligibility(
+  request: CommanderPlanRequest,
+): CommanderPlanEligibilitySnapshot {
+  if (
+    !Array.isArray(request.eligibleOptionIDs) ||
+    !Array.isArray(request.eligibleFamilies)
+  ) {
+    throw new Error("Commander request eligibility is malformed");
+  }
+  if (request.eligibleOptionIDs.length > MAX_COMMANDER_ELIGIBLE_OPTION_IDS) {
+    throw new Error("Commander request exceeds the eligible-option bound");
+  }
+  const optionIDs = request.eligibleOptionIDs
+    .map(
+      (optionID) =>
+        boundedIdentifier(
+          optionID,
+          "request.eligibleOptionIDs[]",
+          MAX_COMMANDER_OPTION_ID_LENGTH,
+        ) as StrategicOptionId,
+    )
+    .sort(stableStringCompare);
+  if (new Set(optionIDs).size !== optionIDs.length) {
+    throw new Error(
+      "Commander request contains a duplicate eligible option id",
+    );
+  }
+
+  const providedFamilies = request.eligibleFamilies.map((family) => {
+    if (!strategicOptionFamilies.includes(family)) {
+      throw new Error("Commander request contains an invalid eligible family");
+    }
+    return family;
+  });
+  if (new Set(providedFamilies).size !== providedFamilies.length) {
+    throw new Error("Commander request contains a duplicate eligible family");
+  }
+  const families = strategicOptionFamilies.filter((family) =>
+    optionIDs.some(
+      (optionID) => strategicFamilyForOptionID(optionID) === family,
+    ),
+  );
+  const canonicalProvidedFamilies = strategicOptionFamilies.filter((family) =>
+    providedFamilies.includes(family),
+  );
+  if (!sameOrderedIDs(families, canonicalProvidedFamilies)) {
+    throw new Error(
+      "Commander request eligible families do not match eligible option ids",
+    );
+  }
+  return { optionIDs, families: [...families] };
+}
+
+function strategicFamilyForOptionID(
+  optionID: StrategicOptionId,
+): StrategicOptionFamily {
+  if (
+    optionID === "expand" ||
+    optionID === "develop_economy" ||
+    optionID === "survive"
+  ) {
+    return optionID;
+  }
+  if (
+    optionID.startsWith("pressure_rival:") &&
+    optionID.length > "pressure_rival:".length
+  ) {
+    return "pressure_rival";
+  }
+  throw new Error(
+    `Commander request has invalid eligible option id: ${optionID}`,
+  );
 }
 
 function normalizeMaterial(

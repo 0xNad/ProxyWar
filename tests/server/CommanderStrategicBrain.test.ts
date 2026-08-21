@@ -7,6 +7,7 @@ import type {
 import type { LlmProvider } from "../../src/server/agents/LlmProvider";
 import { StrategicCommanderBrain } from "../../src/server/agents/StrategicCommanderBrain";
 import { StrategicCommanderCaller } from "../../src/server/agents/StrategicCommanderCaller";
+import type { CommanderState } from "../../src/server/agents/StrategicCommanderTypes";
 import {
   makeCommanderStage2Fixture,
   RAW_ATTACK_ACTION_ID,
@@ -45,12 +46,13 @@ class TacticalProbe implements AgentBrain {
 function response(
   selectedStrategicOptionId: string,
   horizonDecisions = 4,
+  replanTriggers: string[] = [],
 ): string {
   return JSON.stringify({
     selectedStrategicOptionId,
     horizonDecisions,
     intent: "execute the selected strategic option",
-    replanTriggers: [],
+    replanTriggers,
   });
 }
 
@@ -85,6 +87,19 @@ function holdOnlyMenu(): LegalAction[] {
       risk: { level: "none", score: 0 },
     },
   ];
+}
+
+function commanderStateFromPrompt(prompt: string): CommanderState {
+  const start = "COMMANDER_STATE_JSON:\n";
+  const end = "\nEND_COMMANDER_STATE_JSON";
+  const startIndex = prompt.indexOf(start);
+  const endIndex = prompt.indexOf(end, startIndex + start.length);
+  if (startIndex < 0 || endIndex < 0) {
+    throw new Error("Commander prompt is missing its state envelope");
+  }
+  return JSON.parse(
+    prompt.slice(startIndex + start.length, endIndex),
+  ) as CommanderState;
 }
 
 describe("StrategicCommanderBrain — active authority", () => {
@@ -157,6 +172,33 @@ describe("StrategicCommanderBrain — active authority", () => {
     expect(second.metadata?.planID).toBe(first.metadata?.planID);
     expect(second.metadata?.commanderPlanAgeDecisions).toBe(1);
     expect(tactical.inputs).toHaveLength(0);
+  });
+
+  it("keeps an executable pressure plan through two-target exposure-cap churn", async () => {
+    const provider = new QueueProvider([response("pressure_rival:P9")]);
+    const brain = makeBrain(
+      provider,
+      new TacticalProbe({ actionID: "hold", reason: null }),
+    );
+    const fixture = makeCommanderStage2Fixture();
+    const initialMenu = fixture.legalActions.filter(
+      (action) => action.metadata?.targetID !== "P8",
+    );
+
+    const first = await brain.decide(brainInput(fixture, initialMenu));
+    const second = await brain.decide(brainInput(fixture));
+
+    expect(first.actionID).toBe("raw-attack-P9-11-percent");
+    expect(second.actionID).toBe("raw-attack-P9-11-percent");
+    expect(second.metadata).toMatchObject({
+      planID: first.metadata?.planID,
+      commanderReplanReason: "within_horizon",
+      commanderEligibleOptionIds: expect.stringContaining("pressure_rival:P9"),
+    });
+    expect(String(second.metadata?.commanderExposedOptionIds)).not.toContain(
+      "pressure_rival:P9",
+    );
+    expect(provider.prompts).toHaveLength(1);
   });
 
   it("retains truthful plan age when an outer failure interrupts a later replan", async () => {
@@ -265,6 +307,72 @@ describe("StrategicCommanderBrain — active authority", () => {
       commanderReplanReason: "option_not_executable",
       commanderPreviousPlanID: first.metadata?.planID,
     });
+  });
+
+  it("attributes an opted-in disconnected target as target_dead", async () => {
+    const provider = new QueueProvider([
+      response("pressure_rival:P7", 4, ["target_dead"]),
+      response("develop_economy"),
+    ]);
+    const brain = makeBrain(
+      provider,
+      new TacticalProbe({ actionID: "hold", reason: null }),
+    );
+    const fixture = makeCommanderStage2Fixture();
+    const first = await brain.decide(brainInput(fixture));
+    fixture.observation.visiblePlayers.find(
+      (player) => player.playerID === "P7",
+    )!.isDisconnected = true;
+
+    const second = await brain.decide(brainInput(fixture));
+
+    expect(second.metadata).toMatchObject({
+      commanderReplanReason: "target_dead",
+      commanderPreviousPlanID: first.metadata?.planID,
+      commanderSelectedStrategicOptionId: "develop_economy",
+    });
+  });
+
+  it("derives bounded factual events across real Commander decisions", async () => {
+    const provider = new QueueProvider([
+      response("expand", 2),
+      response("develop_economy", 2),
+    ]);
+    const brain = makeBrain(
+      provider,
+      new TacticalProbe({ actionID: "hold", reason: null }),
+    );
+    const fixture = makeCommanderStage2Fixture();
+    await brain.decide(brainInput(fixture));
+
+    fixture.observation.ownState!.tilesOwned = 290;
+    fixture.observation.ownState!.troops = 19_000;
+    fixture.observation.ownState!.incomingAttacks = 3;
+    fixture.observation.combat.incomingAttackPlayerIDs.push("P4", "P_UNSEEN");
+    fixture.observation.visiblePlayers.find(
+      (player) => player.playerID === "P9",
+    )!.isAlive = false;
+    await brain.decide(brainInput(fixture));
+
+    fixture.observation.ownState!.tilesOwned = 280;
+    fixture.observation.ownState!.troops = 18_000;
+    await brain.decide(brainInput(fixture));
+
+    expect(provider.prompts).toHaveLength(2);
+    expect(commanderStateFromPrompt(provider.prompts[1]!).recentEvents).toEqual(
+      [
+        "tiles 300→280 since plan start",
+        "troops 20000→18000 since plan start",
+        "tiles 300→290 since previous decision",
+        "P4 began attacking you",
+        "P9 was eliminated",
+        "tiles 290→280 since previous decision",
+      ],
+    );
+    expect(provider.prompts[1]).not.toContain("P_UNSEEN");
+    expect(provider.prompts[1]).not.toContain(
+      "UNBOUNDED_RECENT_DECISION_CANARY",
+    );
   });
 
   it("replans at horizon expiry and records the replaced plan", async () => {
@@ -404,8 +512,9 @@ describe("StrategicCommanderBrain — phase and identity boundaries", () => {
 
     expect(await brain.decide(brainInput(fixture))).toBe(spawnDecision);
     fixture.observation.phase = "active";
-    await brain.decide(brainInput(fixture));
-    expect(provider.prompts[0]).toContain('"decisionSequence":0');
+    const active = await brain.decide(brainInput(fixture));
+    expect(active.metadata?.planID).toMatch(/^commander:0:/);
+    expect(provider.prompts[0]).not.toContain('"decisionSequence"');
   });
 
   it("delegates dead play unchanged", async () => {
@@ -432,10 +541,11 @@ describe("StrategicCommanderBrain — phase and identity boundaries", () => {
       await brain.decide(brainInput(first));
       const second = makeCommanderStage2Fixture();
       second.observation[field] = `OTHER_${field}`;
-      await brain.decide(brainInput(second));
+      const reset = await brain.decide(brainInput(second));
 
       expect(provider.prompts).toHaveLength(2);
-      expect(provider.prompts[1]).toContain('"decisionSequence":0');
+      expect(reset.metadata?.planID).toMatch(/^commander:0:/);
+      expect(provider.prompts[1]).not.toContain('"decisionSequence"');
     },
   );
 });

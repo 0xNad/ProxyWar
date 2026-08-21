@@ -96,7 +96,6 @@ values:
 - `mock-policy-planner`
 - `llm-policy-planner`
 - `llm-action-selector`
-- `commander-v0-selector`
 - `autopilot-executor`
 
 The parser does not trim, case-fold, or infer a mode from the policy name. An

@@ -1,6 +1,5 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
-import { UnitType } from "../../core/game/Game";
 import {
   agentStrategyProfiles,
   type AgentGamePhase,
@@ -43,7 +42,6 @@ export const MAX_COMMANDER_CANONICAL_STRING_LENGTH = 256;
 export const MAX_COMMANDER_CANONICAL_JSON_BYTES = 32_768;
 
 const MAX_GOLD_DIGITS = 40;
-const MAX_STRUCTURE_COUNT = 9_999;
 const OPTION_SET_FINGERPRINT_DOMAIN =
   "proxywar-strategic-commander-option-set-v1";
 const MATERIAL_STATE_FINGERPRINT_DOMAIN =
@@ -67,6 +65,7 @@ export interface BuildCommanderStateInput {
 export interface CommanderMaterialFingerprintInput {
   gameID: string;
   agentID: string;
+  decisionSequence: number;
   state: CommanderState;
 }
 
@@ -90,6 +89,19 @@ export function buildCommanderState(
   assertNonNegativeInteger(input.decisionSequence, "decisionSequence");
 
   const options = normalizeExposedOptions(input.exposedOptions);
+  const visiblePlayerIDs = new Set(
+    input.observation.visiblePlayers.map((player) => player.playerID),
+  );
+  for (const option of options) {
+    if (
+      option.targetPlayerID !== null &&
+      !visiblePlayerIDs.has(option.targetPlayerID)
+    ) {
+      throw new Error(
+        `Commander target is not visible: ${option.targetPlayerID}`,
+      );
+    }
+  }
   const incomingAttackers = new Set(
     input.observation.combat.incomingAttackPlayerIDs,
   );
@@ -98,8 +110,6 @@ export function buildCommanderState(
   );
   const rivals = selectRivals({
     observation: input.observation,
-    options,
-    planTargetPlayerID: input.plan?.targetPlayerID ?? null,
     incomingAttackers,
     outgoingTargets,
   });
@@ -125,23 +135,8 @@ export function buildCommanderState(
         input.observation.turnNumber,
         "observation.turnNumber",
       ),
-      tick:
-        input.observation.tick === null
-          ? null
-          : nonNegativeInteger(input.observation.tick, "observation.tick"),
-      decisionSequence: input.decisionSequence,
-      territoryRank:
-        1 +
-        input.observation.visiblePlayers.filter(
-          (player) => player.isAlive && player.tilesOwned > own.tilesOwned,
-        ).length,
-      alivePlayerCount: nonNegativeInteger(
-        alivePlayerCount,
-        "observation.alivePlayerCount",
-      ),
       troops: nonNegativeFinite(own.troops, "ownState.troops"),
       maxTroops: optionalNonNegativeFinite(own.maxTroops, "ownState.maxTroops"),
-      troopRatio: optionalUnitInterval(own.troopRatio, "ownState.troopRatio"),
       gold: boundedGold(own.gold, "ownState.gold"),
       tilesOwned: nonNegativeInteger(own.tilesOwned, "ownState.tilesOwned"),
       tileShare: optionalUnitInterval(own.tileShare, "ownState.tileShare"),
@@ -154,30 +149,16 @@ export function buildCommanderState(
         own.outgoingAttacks,
         "ownState.outgoingAttacks",
       ),
-      structures: {
-        cities: boundedStructureCount(own.unitCounts?.[UnitType.City]),
-        factories: boundedStructureCount(own.unitCounts?.[UnitType.Factory]),
-        ports: boundedStructureCount(own.unitCounts?.[UnitType.Port]),
-        defensePosts: boundedStructureCount(
-          own.unitCounts?.[UnitType.DefensePost],
-        ),
-        samLaunchers: boundedStructureCount(
-          own.unitCounts?.[UnitType.SAMLauncher],
-        ),
-      },
+      alivePlayerCount: nonNegativeInteger(
+        alivePlayerCount,
+        "observation.alivePlayerCount",
+      ),
     },
     rivals,
-    plan: normalizePlan(
-      input.plan ?? null,
-      new Set(
-        input.observation.visiblePlayers.map((player) => player.playerID),
-      ),
-    ),
+    plan: normalizePlan(input.plan ?? null, visiblePlayerIDs),
     recentEvents: normalizeRecentEvents(
       input.recentEvents ?? [],
-      new Set(
-        input.observation.visiblePlayers.map((player) => player.playerID),
-      ),
+      visiblePlayerIDs,
     ),
     options,
   };
@@ -189,6 +170,7 @@ export function buildCommanderState(
       materialState: fingerprintCommanderMaterialState({
         gameID: input.observation.gameID,
         agentID: input.observation.agentID,
+        decisionSequence: input.decisionSequence,
         state,
       }),
     },
@@ -232,7 +214,7 @@ export function fingerprintCommanderMaterialState(
       MAX_COMMANDER_REQUEST_ID_LENGTH,
     ),
     state.self.turnNumber,
-    state.self.decisionSequence,
+    nonNegativeInteger(input.decisionSequence, "fingerprint.decisionSequence"),
     [...state.options].map((option) => option.id).sort(stableStringCompare),
     [state.self.troops, state.self.tilesOwned, state.self.incomingAttacks],
     [...state.rivals]
@@ -334,8 +316,6 @@ export function canonicalCommanderJson(value: unknown): string {
 
 function selectRivals(input: {
   observation: AgentObservation;
-  options: readonly ExposedStrategicOption[];
-  planTargetPlayerID: string | null;
   incomingAttackers: ReadonlySet<string>;
   outgoingTargets: ReadonlySet<string>;
 }): CommanderRivalState[] {
@@ -350,10 +330,6 @@ function selectRivals(input: {
         playerID,
         name: sanitizeUntrustedDisplayString(player.name),
         isAlive: booleanValue(player.isAlive, `rival ${playerID} isAlive`),
-        isDisconnected: booleanValue(
-          player.isDisconnected,
-          `rival ${playerID} isDisconnected`,
-        ),
         troops: nonNegativeFinite(player.troops, `rival ${playerID} troops`),
         tilesOwned: nonNegativeInteger(
           player.tilesOwned,
@@ -383,47 +359,18 @@ function selectRivals(input: {
     byID.set(rival.playerID, rival);
   }
 
-  const mandatoryTargetIDs = [
-    ...new Set([
-      ...input.options
-        .map((option) => option.targetPlayerID)
-        .filter((id): id is string => id !== null),
-      ...(input.planTargetPlayerID === null
-        ? []
-        : [
-            boundedIdentifier(
-              input.planTargetPlayerID,
-              "plan.targetPlayerID",
-              MAX_COMMANDER_PLAYER_ID_LENGTH,
-            ),
-          ]),
-    ]),
-  ].sort(stableStringCompare);
-  if (mandatoryTargetIDs.length > MAX_COMMANDER_RIVALS) {
-    throw new Error(
-      "Commander option and plan targets exceed the rival-state bound",
-    );
-  }
-  for (const id of mandatoryTargetIDs) {
-    if (!byID.has(id)) {
-      throw new Error(`Commander target is not visible: ${id}`);
-    }
-  }
-
   const byPlayerID = (ids: Iterable<string>) =>
     [...new Set(ids)].sort(stableStringCompare);
-  const aliveRivals = [...byID.values()].filter((rival) => rival.isAlive);
-  const remainingByTerritory = aliveRivals.sort(
+  const remainingByTerritory = [...byID.values()].sort(
     (a, b) =>
       b.tilesOwned - a.tilesOwned ||
       stableStringCompare(a.playerID, b.playerID),
   );
   const selectionGroups: string[][] = [
-    mandatoryTargetIDs,
     byPlayerID(input.incomingAttackers),
     byPlayerID(input.outgoingTargets),
     byPlayerID(
-      aliveRivals
+      [...byID.values()]
         .filter((rival) => rival.sharesBorder)
         .map((rival) => rival.playerID),
     ),
@@ -445,7 +392,7 @@ function selectRivals(input: {
     }
   }
 
-  return [...selected].sort(stableStringCompare).map((id) => byID.get(id)!);
+  return [...selected].map((id) => byID.get(id)!);
 }
 
 function normalizeExposedOptions(
@@ -709,7 +656,7 @@ function normalizeRecentEvents(
     let rendered: string;
     switch (event.kind) {
       case "territory_changed":
-        rendered = `territory ${nonNegativeInteger(
+        rendered = `tiles ${nonNegativeInteger(
           event.fromTiles,
           "recentEvents.fromTiles",
         )}→${nonNegativeInteger(
@@ -739,6 +686,15 @@ function normalizeRecentEvents(
           knownRivalIDs,
           "recentEvents.rival_eliminated.playerID",
         )} was eliminated`;
+        break;
+      case "tiles_lost":
+        rendered = `tiles ${nonNegativeInteger(
+          event.fromTiles,
+          "recentEvents.fromTiles",
+        )}→${nonNegativeInteger(
+          event.toTiles,
+          "recentEvents.toTiles",
+        )} since previous decision`;
         break;
       default:
         throw new Error("Commander recent event has an unsupported kind");
@@ -825,16 +781,6 @@ function boundedGold(value: unknown, field: string): string {
     throw new Error(`${field} must be a bounded decimal string`);
   }
   return value;
-}
-
-function boundedStructureCount(value: number | undefined): number {
-  if (value === undefined) {
-    return 0;
-  }
-  return Math.min(
-    MAX_STRUCTURE_COUNT,
-    nonNegativeInteger(value, "ownState.unitCounts"),
-  );
 }
 
 function booleanValue(value: unknown, field: string): boolean {

@@ -30,7 +30,7 @@ describe("CommanderResponseParser Stage 2", () => {
       selectedStrategicOptionId: selected,
       horizonDecisions: 4,
       intent: "Exploit the opening before another rival absorbs it.",
-      replanTriggers: ["target_eliminated", "home_danger_high"],
+      replanTriggers: ["target_dead", "home_attacked"],
       confidence: 0.73,
     });
   });
@@ -130,20 +130,34 @@ describe("CommanderResponseParser Stage 2", () => {
     },
   );
 
-  it("rejects missing, malformed, unknown, duplicate, and unbounded triggers", () => {
+  it("defaults an omitted trigger list to empty", () => {
+    const fixture = makeCommanderStage2Fixture();
+    const response = {
+      ...validResponse(fixture.exposedOptions[0]!.id),
+    } as Record<string, unknown>;
+    delete response.replanTriggers;
+
+    expect(
+      parseCommanderResponse(
+        JSON.stringify(response),
+        lockedOptionIDs(fixture.exposedOptions),
+      ),
+    ).toMatchObject({ ok: true, replanTriggers: [] });
+  });
+
+  it("rejects malformed, unknown, duplicate, and unbounded triggers", () => {
     const fixture = makeCommanderStage2Fixture();
     const base = validResponse(fixture.exposedOptions[0]!.id);
     for (const replanTriggers of [
-      undefined,
       null,
-      "target_eliminated",
-      ["target_dead"],
-      ["target_eliminated", "target_eliminated"],
+      "target_dead",
+      ["target_eliminated"],
+      ["target_dead", "target_dead"],
       [
         "horizon_expiry",
         "option_not_executable",
-        "target_eliminated",
-        "home_danger_high",
+        "target_dead",
+        "home_attacked",
         "option_appeared",
         "unknown_trigger",
       ],
@@ -308,7 +322,7 @@ function validResponse(
     selectedStrategicOptionId,
     horizonDecisions: 4,
     intent: "Exploit the opening before another rival absorbs it.",
-    replanTriggers: ["target_eliminated", "home_danger_high"],
+    replanTriggers: ["target_dead", "home_attacked"],
     confidence: 0.73,
   };
 }

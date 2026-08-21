@@ -48,7 +48,6 @@ export const COWORLD_AGENT_RUNTIME_MODES = [
   "mock-policy-planner",
   "llm-policy-planner",
   "llm-action-selector",
-  "commander-v0-selector",
   "autopilot-executor",
 ] as const;
 
