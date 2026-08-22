@@ -162,6 +162,18 @@ function sampleData(): CoworldLeagueMirrorData {
 }
 
 describe("coworldLeagueIndexHtml", () => {
+  test("discloses a hosted scheduling pause without claiming an active cadence", () => {
+    const data = sampleData();
+    data.league.roundsPausedAt = "2026-08-22T07:20:08.448Z";
+    const html = coworldLeagueIndexHtml(data);
+    expect(html).toContain(
+      "Round scheduling is paused. Completed results and replays remain available.",
+    );
+    expect(html).toContain("round scheduling is currently paused");
+    expect(html).toContain("<span>Round cadence</span><strong>Paused</strong>");
+    expect(html).not.toContain("a new round every 30 minutes");
+  });
+
   test("escapes hostile player names", () => {
     const html = coworldLeagueIndexHtml(sampleData());
     expect(html).not.toContain('<script>alert("x")</script>');

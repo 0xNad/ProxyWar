@@ -200,6 +200,8 @@ export interface CoworldLeagueMirrorData {
     name: string;
     description: string | null;
     divisionName: string;
+    /** Canonical hosted pause instant. Optional for archived pre-field data. */
+    roundsPausedAt?: string | null;
     roundIntervalMinutes: number | null;
     episodesPerRound: number | null;
     currentRoundNumber: number | null;
@@ -799,6 +801,8 @@ export function coworldLeagueIndexHtml(
   identity: IdentityRegistrySnapshot = EMPTY_LEAGUE_IDENTITY_SNAPSHOT,
 ): string {
   const league = data.league;
+  const schedulingPaused =
+    league.roundsPausedAt !== null && league.roundsPausedAt !== undefined;
   const roundChip =
     league.currentRoundNumber === null
       ? "ROUND —"
@@ -834,6 +838,11 @@ export function coworldLeagueIndexHtml(
           translateText("coworld_league.round_integrity_feed_delayed"),
         )}</div>`
       : "";
+  const schedulingPausedBanner = schedulingPaused
+    ? `<div class="stale-banner">${escapeHtml(
+        translateText("coworld_league.scheduling_paused"),
+      )}</div>`
+    : "";
   const watchLatest = data.episodes.find((episode) => episode.fullRenderHref);
   // The LIVE premiere card always takes precedence; the compact latest-revealed
   // card fills the same slot ONLY when nothing is currently premiering, so the
@@ -1032,6 +1041,7 @@ ${leagueSocialMetaHtml()}
       </div>
     </header>
     ${staleBanner}
+    ${schedulingPausedBanner}
     ${roundIntegrityBanner}
     ${roundIntegrityFeedBanner}
     ${championFeedBanner}
@@ -1043,11 +1053,15 @@ ${leagueSocialMetaHtml()}
       <h1>Agents are fighting a war right now.</h1>
       <p class="lede">Autonomous agents wage full territorial wars on the ${escapeHtml(
         league.divisionName,
-      )} ladder — expansion, alliances, betrayals, nukes — a new round every ${
-        league.roundIntervalMinutes === null
-          ? "few"
-          : escapeHtml(String(league.roundIntervalMinutes))
-      } minutes. No humans at the controls. Replays below are the real matches, straight from the arena.</p>
+      )} ladder — expansion, alliances, betrayals, nukes — ${
+        schedulingPaused
+          ? escapeHtml(translateText("coworld_league.scheduling_paused_hero"))
+          : `a new round every ${
+              league.roundIntervalMinutes === null
+                ? "few"
+                : escapeHtml(String(league.roundIntervalMinutes))
+            } minutes`
+      }. No humans at the controls. Replays below are the real matches, straight from the arena.</p>
       <div class="actions">
         <a class="button primary" href="${escapeHtml(data.links.enterTheLeagueUrl)}">Enter your agent</a>
         ${
@@ -1065,9 +1079,11 @@ ${leagueSocialMetaHtml()}
       }</strong></div>
       <div class="metric"><span>Warlords</span><strong>${escapeHtml(String(data.standings.length))}</strong></div>
       <div class="metric"><span>Round cadence</span><strong>${
-        league.roundIntervalMinutes === null
-          ? "—"
-          : `${escapeHtml(String(league.roundIntervalMinutes))}m`
+        schedulingPaused
+          ? escapeHtml(translateText("coworld_league.scheduling_paused_short"))
+          : league.roundIntervalMinutes === null
+            ? "—"
+            : `${escapeHtml(String(league.roundIntervalMinutes))}m`
       }</strong></div>
       <div class="metric"><span>Battles rendered</span><strong>${escapeHtml(
         String(

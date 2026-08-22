@@ -249,6 +249,20 @@ describe("buildProxyWarPublicReadModel", () => {
     expect(model.feedStates.championFeedStale).toBe(true);
   });
 
+  test("preserves the additive hosted scheduling pause in the public read model", () => {
+    const mirror = baseMirror();
+    mirror.league.roundsPausedAt = "2026-08-22T07:20:08.448Z";
+    const model = buildProxyWarPublicReadModel(
+      mirror,
+      identitySnapshot(),
+      featuredMatchStoreOf(),
+    );
+    expect(model.league.roundsPausedAt).toBe("2026-08-22T07:20:08.448Z");
+    expect(ReadModelSchema.parse(model).league.roundsPausedAt).toBe(
+      "2026-08-22T07:20:08.448Z",
+    );
+  });
+
   test("projects retained round-integrity evidence separately from replay freshness", () => {
     const assessment = {
       roundId: "round_1897",

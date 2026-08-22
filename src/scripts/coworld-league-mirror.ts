@@ -1366,6 +1366,7 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
       name: league.name,
       description: league.description,
       divisionName: division.name,
+      roundsPausedAt: league.roundsPausedAt,
       roundIntervalMinutes: league.roundIntervalMinutes,
       episodesPerRound: league.episodesPerRound,
       currentRoundNumber: rounds[0]?.roundNumber ?? null,
