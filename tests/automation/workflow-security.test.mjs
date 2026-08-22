@@ -18,6 +18,9 @@ const leagueSourceGuard = readFileSync(
   "scripts/verify-league-source.mjs",
   "utf8",
 );
+const trustedReleasePolicy = JSON.parse(
+  readFileSync(".github/automation/trusted-release-policy.json", "utf8"),
+);
 
 test("privileged admission executes only protected main metadata code", () => {
   assert.match(admission, /pull_request_target:/);
@@ -98,8 +101,20 @@ test("release ledger batches every eligible merge after a quiet window", () => {
   assert.match(queue, /git\/ref\/heads\/main/);
 });
 
-test("Coworld release is pinned, template-built, collision-checked, and fully certified", () => {
-  assert.match(production, /COWORLD_CLI_VERSION: "0\.1\.38"/);
+test("Coworld release is pinned to the replay-bundle readiness contract, template-built, collision-checked, and fully certified", () => {
+  assert.equal(trustedReleasePolicy.coworld.cliVersion, "0.1.42");
+  assert.match(
+    production,
+    new RegExp(
+      `COWORLD_CLI_VERSION: "${trustedReleasePolicy.coworld.cliVersion.replaceAll(".", "\\.")}"`,
+    ),
+  );
+  assert.equal(
+    production.match(
+      /uv tool install --force "coworld==\$COWORLD_CLI_VERSION"/g,
+    )?.length,
+    3,
+  );
   assert.match(production, /"\$COWORLD_BIN" build --version/);
   assert.match(production, /coworld_manifest_template\.json/);
   assert.match(production, /coworld-authenticated-command\.mjs list --json/);
