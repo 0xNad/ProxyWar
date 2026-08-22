@@ -29,6 +29,10 @@ interface ManifestProtocolText {
       properties: Record<string, unknown>;
     };
   };
+  variants?: Array<{
+    id: string;
+    game_config: Record<string, unknown>;
+  }>;
 }
 
 const CANONICAL_RESULT_REQUIRED = [
@@ -41,6 +45,7 @@ const CANONICAL_RESULT_REQUIRED = [
   "decision_count",
   "accepted_decision_count",
   "fallback_count",
+  "spawn_priority",
   "players",
 ] as const;
 
@@ -53,6 +58,7 @@ const CANONICAL_RESULT_PROPERTIES = [
   "players",
   "scores",
   "seed",
+  "spawn_priority",
   "tick",
   "turn_count",
   "winner_slot",
@@ -93,11 +99,19 @@ describe("Coworld manifest spawn-preference protocol", () => {
       const readme = manifest.game.docs.readme.value;
       const episodeIndexSchema =
         manifest.game.config_schema.properties.episodeIndex;
+      const ratedPlaySchema = manifest.game.config_schema.properties.rated_play;
+      const playerIDsSchema = manifest.game.config_schema.properties.player_ids;
 
       expect(episodeIndexSchema).toMatchObject({
         type: "integer",
         minimum: 0,
         maximum: Number.MAX_SAFE_INTEGER,
+      });
+      expect(ratedPlaySchema).toMatchObject({ type: "boolean" });
+      expect(playerIDsSchema).toMatchObject({
+        type: "array",
+        minItems: 1,
+        maxItems: 25,
       });
 
       expect(machineProtocol).toContain(
@@ -146,6 +160,36 @@ describe("Coworld manifest spawn-preference protocol", () => {
       );
       expect(resultSchema.properties.seed).toEqual(CANONICAL_SEED_SCHEMA);
       expect(resultSchema.properties.game_id).toEqual(CANONICAL_GAME_ID_SCHEMA);
+      expect(resultSchema.properties.spawn_priority).toMatchObject({
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          algorithm_version: {
+            const: "sealed-ranked-serial-dictatorship-v2",
+          },
+        },
+      });
     },
   );
+
+  it("marks every production tournament variant rated while keeping the qualifier unrated", () => {
+    const manifest = JSON.parse(
+      readFileSync(
+        `${manifestDirectory}/coworld_manifest_template.json`,
+        "utf8",
+      ),
+    ) as ManifestProtocolText;
+    const variants = manifest.variants ?? [];
+
+    expect(variants.length).toBeGreaterThan(0);
+    expect(
+      variants.find((variant) => variant.id === "qualifier")?.game_config
+        .rated_play,
+    ).toBe(false);
+    expect(
+      variants
+        .filter((variant) => variant.id.startsWith("tournament-"))
+        .every((variant) => variant.game_config.rated_play === true),
+    ).toBe(true);
+  });
 });

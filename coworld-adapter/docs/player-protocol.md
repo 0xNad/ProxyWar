@@ -158,8 +158,10 @@ Rules:
   `selectedLegalActionIds`, never an executable action batch, and never causes
   more than one spawn intent.
 - All responses remain hidden until the common round settles. Allocation uses
-  a recorded, report-independent priority order and each player receives its
-  highest-ranked remaining slot. Response arrival time cannot improve priority.
+  a recorded, report-independent priority order computed only from immutable
+  Coworld player identities, then cyclically rotated by the rated episode's
+  required `episodeIndex`. Display names and response arrival time cannot
+  improve priority.
 - This is active protocol v1: one sealed round only. There is no reveal,
   reaction, relocation, trade, retry, or second preference phase.
 - The final assigned offered action still passes through
@@ -169,8 +171,11 @@ Rules:
 The complete sealed-round evidence is retained in the operator's private
 `decisions.jsonl`: offered ids, submitted and normalized ballot, fallback or
 validation reason, report-independent priority position, assigned id, and
-assigned rank. The public replay records the final executed spawn only. It does
-not expose the hidden ballots or by itself prove allocation integrity.
+assigned rank. Public `results.json` carries the allocator version, immutable
+identity mapping, episode index, canonical base order, and applied rotation;
+rated play fails closed before starting if the scheduler omits that metadata.
+The public replay records the final executed spawn but does not expose hidden
+ballots or by itself prove allocation integrity.
 
 ## `selectedDealActionId` (optional)
 

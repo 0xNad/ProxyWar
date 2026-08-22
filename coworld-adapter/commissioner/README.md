@@ -21,17 +21,26 @@ present.
 
 A second custom piece: every episode `ProxyWarCommissioner` schedules (both the Competition
 ladder path and the stock qualifier path it delegates to `super()` for) is stamped with a
-deterministic `episodeIndex` in `game_config_overrides` before it is returned. Competition uses
-the zero-based occurrence of the selected map within its rung's map rotation (never a hash,
-never random, never the simulation `seed`) as a round block, then advances the index once per
-scheduled episode. ProxyWar code-unit-sorts participant identities and rotates that stable
-order by the precommitted index, so response arrival and commissioner seat order cannot affect
+deterministic `episodeIndex` in `game_config_overrides` before it is returned. Competition also
+sets `rated_play=true` and supplies immutable Coworld `player_ids` aligned with the scheduled
+policy slots; missing or duplicate identities fail scheduling. The zero-based occurrence of the
+selected map within its rung's map rotation (never a hash, never random, never the simulation
+`seed`) forms a round block, then the index advances once per scheduled episode. ProxyWar
+code-unit-sorts identities derived from those player ids and rotates that stable order by the
+precommitted index, so renames, response arrival, and commissioner seat order cannot affect
 priority. Fixed-roster, same-width recurrences traverse the complete priority cycle; dynamic
-rosters remain deterministic but cannot promise a complete permutation. `episodeIndex` is
-declared in every shipped manifest's `game.config_schema` as an optional non-negative integer
-defaulting to 0. See `ProxyWarCommissioner._with_episode_index` in `proxywar_app.py`, and `EpisodeRequest.
-game_config_overrides` in `commissioners/common/protocol.py` for the upstream
-(`Metta-AI/coworld` `commissioner/protocol.py`) wire field this is additive against.
+rosters remain deterministic but cannot promise a complete permutation.
+
+All three fields are declared in every shipped manifest's `game.config_schema`. Tournament
+variants statically set `rated_play=true`, so the game exits before opening its protocol server
+or starting the simulation when a scheduler omits either dynamic field; unrated
+certification/qualifier fixtures may omit them and default to episode index 0. See
+`ProxyWarCommissioner._with_episode_index` in
+`proxywar_app.py`, and `EpisodeRequest.game_config_overrides` in
+`commissioners/common/protocol.py` for the upstream (`Metta-AI/coworld`
+`commissioner/protocol.py`) wire field this is additive against. A league owned by Coworld's
+`commissioner_key=platform` does not execute this embedded commissioner; its platform planner
+must stamp the same metadata contract before a rated package can be bound safely.
 
 Built and bundled by `coworld build` as this coworld's `commissioner` runnable (see
 `../coworld_compose.yaml`), so the league doesn't depend on a centrally-published commissioner

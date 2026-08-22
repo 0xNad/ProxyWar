@@ -1,4 +1,3 @@
-import { randomUUID } from "crypto";
 import { Logger } from "winston";
 import { Game } from "../../core/game/Game";
 import {
@@ -121,7 +120,7 @@ export interface AgentLeagueMatchOptions {
   /**
    * Zero-based ordinal for this episode among repeated episodes, used by the
    * sealed spawn allocator to rotate the report-independent priority computed
-   * from stable participant usernames and persistent identities. No single existing
+   * exclusively from immutable persistent identities. No single existing
    * "episode ordinal" field exists elsewhere in this codebase (the closest
    * is a season's `eventSlots` array position) - callers running a sequence
    * of episodes on one map should pass their own zero-based position (e.g.
@@ -192,7 +191,10 @@ export function createDefaultAgentSpecs(count = 4): AgentSpec[] {
     return {
       username: `${capitalize(profile)} Agent ${index + 1}`,
       profile,
-      persistentID: randomUUID(),
+      // Local/default agents also need an immutable identity: random UUIDs made
+      // priority nondeterministic across repeated episodes after display names
+      // stopped being an ordering key.
+      persistentID: localAgentPersistentID(index),
     };
   });
 }
@@ -202,21 +204,35 @@ export function createAgentParticipants(
   log: Logger,
   options: CreateAgentParticipantsOptions = {},
 ): AgentParticipant[] {
-  return specs.map((spec, index) => ({
-    spec,
-    brain:
-      options.brainFactory?.(spec, index) ?? new RuleAgentBrain(spec.profile),
-    runner: new AgentRunner({
-      agentID: `${spec.profile}-agent-${index + 1}`,
-      clientID: spec.clientID,
-      username: spec.username,
-      persistentID: spec.persistentID,
-      log,
-      ...(options.retainTurnMessagesPrimaryOnly === true
-        ? { retainTurnMessages: index === 0 }
-        : {}),
-    }),
-  }));
+  return specs.map((spec, index) => {
+    // Rated/hosted callers must supply their immutable cross-episode identity.
+    // Local fixtures historically omitted it; give those callers a stable,
+    // name-independent seat identity instead of AgentRunner's random fallback
+    // so paired deterministic simulations remain comparable.
+    const persistentID = spec.persistentID ?? localAgentPersistentID(index);
+    const participantSpec =
+      spec.persistentID === undefined ? { ...spec, persistentID } : spec;
+    return {
+      spec: participantSpec,
+      brain:
+        options.brainFactory?.(participantSpec, index) ??
+        new RuleAgentBrain(participantSpec.profile),
+      runner: new AgentRunner({
+        agentID: `${participantSpec.profile}-agent-${index + 1}`,
+        clientID: participantSpec.clientID,
+        username: participantSpec.username,
+        persistentID,
+        log,
+        ...(options.retainTurnMessagesPrimaryOnly === true
+          ? { retainTurnMessages: index === 0 }
+          : {}),
+      }),
+    };
+  });
+}
+
+function localAgentPersistentID(index: number): string {
+  return `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`;
 }
 
 export class AgentLeagueMatchRunner {
@@ -1357,10 +1373,10 @@ export class AgentLeagueMatchRunner {
     }
     const offeredActions = immutableSpawnMenu(slots.map(buildSpawnLegalAction));
 
-    // Priority is fixed before a single ballot is dispatched. Stable display
-    // usernames are the ordering key; stable participant ids disambiguate the
-    // defensive duplicate-name case. Neither mutable participant array order
-    // nor provider arrival can change allocation power.
+    // Priority is fixed before a single ballot is dispatched. Immutable
+    // participant ids are the only ordering key; display usernames are evidence
+    // labels only. Neither renaming, mutable participant array order, nor
+    // provider arrival can change allocation power.
     const priorityOrder = buildAgentSpawnPriority(
       participants.map((participant) => ({
         participantID: participant.runner.persistentID,

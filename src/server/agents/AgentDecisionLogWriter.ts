@@ -151,6 +151,13 @@ export interface WriteAgentLeagueRunArtifactsInput {
     freeTextMessagesEnabled?: boolean | null;
     /** Spawn allocation contract; independent of variedSpawns map/scenario semantics. */
     spawnSelectionMode?: "deterministic" | "sealed-ranked-v1" | null;
+    /** Exact scheduler ordinal used by the sealed allocator. */
+    episodeIndex?: number | null;
+    /** Whether missing fairness metadata would reject this episode. */
+    ratedPlay?: boolean | null;
+    /** Allocator version and applied immutable-identity priority for runtime proof. */
+    spawnPriorityAlgorithmVersion?: string | null;
+    spawnPriorityParticipantIDs?: string[] | null;
   };
   startedAt: number;
   completedAt: number;

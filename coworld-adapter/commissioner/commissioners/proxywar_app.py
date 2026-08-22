@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from uuid import UUID
+
 from commissioners.common.app import commissioner_app, run
 from commissioners.common.commissioners import register_commissioner
 from commissioners.common.protocol import RoundStart as CommissionerRoundStart
@@ -105,6 +107,7 @@ class ProxyWarCommissioner(RulesetStrategyCommissioner):
             return self._with_episode_index(
                 super().schedule_episodes_for_round_start(round_start),
                 max(round_number, 1) - 1,
+                rated_play=False,
             )
 
         rule = select_rule(config, view.current_division, view.memberships)
@@ -138,16 +141,25 @@ class ProxyWarCommissioner(RulesetStrategyCommissioner):
                 recent_results=round_start.recent_results,
             ),
             variant_round_occurrence_index,
+            player_id_by_policy={
+                membership.policy_version_id: membership.player_id
+                for membership in round_start.memberships
+            },
+            rated_play=True,
         )
 
     @staticmethod
     def _with_episode_index(
-        schedule: CommissionerScheduleEpisodes, variant_round_occurrence_index: int
+        schedule: CommissionerScheduleEpisodes,
+        variant_round_occurrence_index: int,
+        *,
+        player_id_by_policy: dict[UUID, str | None] | None = None,
+        rated_play: bool | None = None,
     ) -> CommissionerScheduleEpisodes:
         """Stamp consecutive same-variant spawn-priority occurrence indices.
 
-        Spawn priority is computed from sorted unique usernames, not seat
-        position, so every scheduled episode can advance the report-independent
+        Spawn priority is computed from sorted immutable player identities, not
+        display names or seat position, so every scheduled episode can advance the
         rotation without aliasing against shuffled-window seating. For a fixed
         roster and map, same-variant round occurrence `k` begins at
         `k * episode_count`; the episodes in that round then receive the next
@@ -163,22 +175,40 @@ class ProxyWarCommissioner(RulesetStrategyCommissioner):
         if episode_count == 0:
             return schedule
         first_episode_index = variant_round_occurrence_index * episode_count
-        return schedule.model_copy(
-            update={
-                "episodes": [
-                    episode.model_copy(
-                        update={
-                            "game_config_overrides": {
-                                **episode.game_config_overrides,
-                                "episodeIndex": first_episode_index + position,
-                                "seed": episode.seed,
-                            }
-                        }
-                    )
-                    for position, episode in enumerate(schedule.episodes)
-                ]
+        stamped_episodes = []
+        for position, episode in enumerate(schedule.episodes):
+            overrides = {
+                **episode.game_config_overrides,
+                "episodeIndex": first_episode_index + position,
+                "seed": episode.seed,
             }
-        )
+            if rated_play is not None:
+                overrides["rated_play"] = rated_play
+            if rated_play:
+                if player_id_by_policy is None:
+                    raise ValueError(
+                        "rated ProxyWar scheduling requires immutable player ids"
+                    )
+                player_ids = [
+                    player_id_by_policy.get(policy_version_id)
+                    for policy_version_id in episode.policy_version_ids
+                ]
+                if any(
+                    not isinstance(player_id, str) or not player_id
+                    for player_id in player_ids
+                ):
+                    raise ValueError(
+                        "rated ProxyWar scheduling requires one immutable player id per policy"
+                    )
+                if len(player_ids) != len(set(player_ids)):
+                    raise ValueError(
+                        "rated ProxyWar scheduling requires unique player ids per episode"
+                    )
+                overrides["player_ids"] = player_ids
+            stamped_episodes.append(
+                episode.model_copy(update={"game_config_overrides": overrides})
+            )
+        return schedule.model_copy(update={"episodes": stamped_episodes})
 
     def _fit_ladder_rung(
         self, champion_count: int, available_variant_ids: set[str], round_number: int
