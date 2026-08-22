@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import zlib from "node:zlib";
 
 import { commanderXpEvalEvidenceEnabled } from "../../src/server/agents/CommanderXpGameEvidence.ts";
+import { CommanderXpFinalizationBarrier } from "./commander-xp-finalization.ts";
 import {
   coworldAppShellRoute,
   injectCoworldSplash,
@@ -31,7 +32,10 @@ import {
   coworldInlineRunArtifacts,
   coworldPublicReplayPayload,
 } from "./coworld-run-artifact-bundle.ts";
-import { competitiveSeatSpecs } from "./coworld-seat-specs.ts";
+import {
+  commanderXpArmInvariantSeatPlayers,
+  competitiveSeatSpecs,
+} from "./coworld-seat-specs.ts";
 import { coworldEpisodeIdentity } from "./coworld-seed.ts";
 import { coworldPublicRunArtifacts } from "./proxywar-public-run-artifacts.ts";
 import {
@@ -170,6 +174,7 @@ class CoworldProtocolServer {
   // free text is off, so the flag-off envelope is byte-identical to shipped
   // behavior. Set before the first decision (see runProxyWarEpisode).
   private maxMessageChars: number | null = null;
+  private finalizationBarrier: CommanderXpFinalizationBarrier | null = null;
 
   constructor(private readonly config: CoworldConfig) {
     this.server.on("upgrade", (request, socket, head) => {
@@ -313,9 +318,29 @@ class CoworldProtocolServer {
     );
   }
 
-  sendFinal(): void {
+  async sendFinal(): Promise<void> {
+    const requiresFinalizationAck =
+      this.config.commander_xp_phase !== undefined;
+    if (requiresFinalizationAck) {
+      if (this.players.size !== this.config.tokens.length) {
+        throw new Error(
+          "Commander XP finalization requires every player connection",
+        );
+      }
+      this.finalizationBarrier = new CommanderXpFinalizationBarrier([
+        ...this.players.keys(),
+      ]);
+    }
     for (const [slot, websocket] of this.players.entries()) {
-      websocket.send(JSON.stringify({ type: "final", slot }));
+      websocket.send(
+        JSON.stringify({ type: "final", slot, requiresFinalizationAck }),
+      );
+    }
+    if (this.finalizationBarrier !== null) {
+      await this.finalizationBarrier.wait();
+      for (const [slot, websocket] of this.players.entries()) {
+        websocket.send(JSON.stringify({ type: "finalization_complete", slot }));
+      }
     }
   }
 
@@ -432,6 +457,7 @@ class CoworldProtocolServer {
       this.players.set(slot, websocket);
       websocket.on("message", (data) => this.handlePlayerMessage(slot, data));
       websocket.on("close", () => {
+        this.finalizationBarrier?.disconnected(slot);
         if (this.players.get(slot) === websocket) {
           this.players.delete(slot);
         }
@@ -462,6 +488,10 @@ class CoworldProtocolServer {
           error instanceof Error ? error.message : String(error)
         }`,
       );
+      return;
+    }
+    if (message.type === "finalization_ack") {
+      this.finalizationBarrier?.acknowledge(slot, message);
       return;
     }
     if (message.type !== "decision_response") {
@@ -722,7 +752,7 @@ async function runStandaloneNoDockerProof(): Promise<void> {
     if (process.env.PROXYWAR_SKIP_ROUTE_CHECKS !== "1") {
       await runReplayChecks(port);
     }
-    server.sendFinal();
+    await server.sendFinal();
     await waitForPlayersToExit(playerProcesses);
     await fs.writeFile(
       path.join(workspace, "coworld-report.md"),
@@ -778,8 +808,7 @@ async function runCoworldGameContainer(): Promise<void> {
       `${JSON.stringify(result.replayPayload, null, 2)}\n`,
       "application/json",
     );
-    server.sendFinal();
-    await sleep(Number(process.env.COWORLD_POSTGAME_SERVER_MS ?? 1500));
+    await server.sendFinal();
     console.log(
       JSON.stringify(
         {
@@ -948,8 +977,11 @@ async function runProxyWarEpisode(
   // A/B (verified across 3 keystone builds). All competitive seats now get the
   // same neutral profile; skill differences come from the POLICIES, not from
   // which chair they drew.
+  const identityPlayers = config.commander_xp_phase
+    ? commanderXpArmInvariantSeatPlayers(config.players)
+    : config.players;
   const specs = competitiveSeatSpecs(
-    config.players,
+    identityPlayers,
     modules.proxyWarGameUsernameMaxLength ?? 27,
   );
   const participants = modules.createAgentParticipants(specs, log, {

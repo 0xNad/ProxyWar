@@ -35,12 +35,29 @@ describe("Commander XP game-owned evidence", () => {
       decisionMetadata: {
         coworldRequestID: "req_exact",
         coworldSlot: 2,
+        commanderExecutionSha256: "4".repeat(64),
+        planID: "plan-pressure-fixture",
+        planObjective: "pressure_rival:rival",
+        commanderOptionSurfaceSha256: "5".repeat(64),
+        commanderPreviousPlanID: null,
+        commanderReplanReason: "no_active_plan",
+        commanderPlanAgeDecisions: 0,
+        commanderEmergencyCondition: null,
+        commanderFidelity: "aligned_primary",
+        batchIndex: 0,
+        batchSize: 1,
+        batchActionIDs: "attack:2",
         externalRawOutput: "RAW PROVIDER OUTPUT",
         commsSlotActionID: "message:3",
         commsSlotRecipientID: "rival",
         commsSlotText: "PRIVATE MESSAGE BODY",
         commsSlotAccepted: true,
         commsSlotResult: "accepted",
+      },
+      chosenActionMetadata: {
+        targetID: "rival",
+        expansion: false,
+        privatePlannerNote: "PRIVATE ACTION NOTE",
       },
       intent: { type: "attack", targetID: "rival", troops: 10 },
       result: {
@@ -54,7 +71,26 @@ describe("Commander XP game-owned evidence", () => {
     const evidence = projectCommanderXpGameEvidence(record, runKey);
     expect(evidence).not.toBeNull();
     expect(evidence?.requestID).toBe("req_exact");
-    expect(evidence?.chosen).toEqual({ id: "attack:2", kind: "attack" });
+    expect(evidence?.chosen).toEqual({
+      id: "attack:2",
+      kind: "attack",
+      metadata: { targetID: "rival", expansion: false },
+    });
+    expect(evidence?.generatedIntent).toEqual({
+      type: "attack",
+      sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      canonical: { type: "attack", targetID: "rival", troops: 10 },
+    });
+    expect(evidence?.commander).toMatchObject({
+      commanderExecutionSha256: "4".repeat(64),
+      planID: "plan-pressure-fixture",
+      planObjective: "pressure_rival:rival",
+      commanderOptionSurfaceSha256: "5".repeat(64),
+      commanderFidelity: "aligned_primary",
+      batchIndex: 0,
+      batchSize: 1,
+      batchActionIDs: "attack:2",
+    });
     expect(evidence?.comms).toEqual({
       requestedID: null,
       actionID: "message:3",
@@ -68,6 +104,7 @@ describe("Commander XP game-owned evidence", () => {
     expect(line).not.toContain("externalRawOutput");
     expect(line).not.toContain("commsSlotText");
     expect(line).not.toContain("submittedReason");
+    expect(line).not.toContain("privatePlannerNote");
   });
 
   it("rejects records without a joinable Coworld request identity", () => {

@@ -13,6 +13,21 @@ export type CoworldSeatSpec = {
   persistentID: string;
 };
 
+/**
+ * Commander XP policy names are distinct hosted policy identities, but they
+ * must not become game-visible treatment.  The game derives both username and
+ * persistentID from these authored names, so matched B/C episodes instead use
+ * a fixed seat-only identity surface.  XP participant evidence remains the
+ * authority for the distinct policy_version_id assigned to each slot.
+ */
+export function commanderXpArmInvariantSeatPlayers(
+  players: readonly { name: string }[],
+): Array<{ name: string }> {
+  return players.map((_, index) => ({
+    name: `Commander XP Seat ${index + 1}`,
+  }));
+}
+
 export function proxyWarUsernames(
   players: Array<{ name: string }>,
   maxLength: number,

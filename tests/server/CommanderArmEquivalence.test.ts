@@ -269,15 +269,22 @@ describe("StrategicCommander Stage 5 matched three-arm gate", () => {
     expect(source).toContain("createClaudeCliLlmProviderFromEnv()");
     expect(source).toContain('return "commander-v0-selector"');
     expect(source).not.toContain('"commander-v0-random"');
-    for (const relativePath of [
-      "coworld-adapter/src/coworld-decision-wire.ts",
-      "coworld-adapter/docs/player-protocol.md",
-    ]) {
-      expect(
-        readFileSync(path.join(process.cwd(), relativePath), "utf8"),
-        `${relativePath} must not expose the local-only Commander mode`,
-      ).not.toContain("commander-v0-selector");
-    }
+    expect(
+      readFileSync(
+        path.join(
+          process.cwd(),
+          "coworld-adapter/src/coworld-decision-wire.ts",
+        ),
+        "utf8",
+      ),
+    ).toContain('metadata?.runtimeMode !== "commander-v0-selector"');
+    expect(
+      readFileSync(
+        path.join(process.cwd(), "coworld-adapter/docs/player-protocol.md"),
+        "utf8",
+      ),
+      "the public player protocol must not advertise the eval-only Commander mode",
+    ).not.toContain("commander-v0-selector");
     const packageJson = JSON.parse(
       readFileSync(path.join(process.cwd(), "package.json"), "utf8"),
     ) as { scripts: Record<string, string> };

@@ -20,7 +20,18 @@ socket.on("open", () => {
 socket.on("message", (data) => {
   const message = JSON.parse(String(data));
   if (message.type === "final") {
-    console.log("episode final; exiting");
+    if (message.requiresFinalizationAck === true) {
+      socket.send(
+        JSON.stringify({ type: "finalization_ack", status: "succeeded" }),
+      );
+      console.log("episode final; acknowledged");
+    } else {
+      console.log("episode final; exiting");
+      socket.close();
+    }
+    return;
+  }
+  if (message.type === "finalization_complete") {
     socket.close();
     return;
   }

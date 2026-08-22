@@ -9,6 +9,7 @@ import { runCommanderXpPlanCli } from "../../src/scripts/ai-agent-commander-xp-p
 import {
   buildCommanderXpPreRegistration,
   COMMANDER_XP_GAMEPLAY_MAX_DECISION_STEPS,
+  COMMANDER_XP_OPENAPI_SHA256,
   COMMANDER_XP_SPAWN_EXIT_TICK,
   COMMANDER_XP_TERMINAL_TIEBREAK_TICK,
   COMMANDER_XP_TURNS_PER_DECISION_STEP,
@@ -36,8 +37,7 @@ const input: CommanderXpPlanInput = {
   canonicalLeagueBindingSnapshotSha256: "8".repeat(64),
   imageDigest: `sha256:${"4".repeat(64)}`,
   bedrockModel: "us.anthropic.claude-sonnet-4-6",
-  xpOpenApiSha256:
-    "dc32022f7e2850e65232c6f51c7490011483e8948269e975bc177d71f29a3e4f",
+  xpOpenApiSha256: COMMANDER_XP_OPENAPI_SHA256,
   armPolicyVersionIDs: { A: "pvid-a", B: "pvid-b", C: "pvid-c" },
   opponentPolicyVersionIDs: ["pvid-o1", "pvid-o2", "pvid-o3"],
 };
@@ -174,12 +174,18 @@ describe("Commander XP preregistration v2", () => {
       });
     }
     expect(plan.fixedFlags).toEqual({
-      STRUCTURED_DEALS: "1",
-      FREETEXT_MESSAGES: "1",
+      STRUCTURED_DEALS: "0",
+      FREETEXT_MESSAGES: "0",
       SPATIAL_OBSERVATION: "0",
       SPATIAL_MINIMAP: "0",
       KEYSTONE_PROFILE: "aggressive",
       LLM_TIMEOUT_MS: "12000",
+    });
+    expect(plan.featureScope).toEqual({
+      evaluatedFeature: "selector-only-b-vs-c",
+      hardEmergencyOverride: "excluded-empty-v0-set",
+      hardEmergencyEvidence: "forbidden-zero-observed",
+      fullStage5CompletionClaim: "not-authorized",
     });
   });
 

@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   buildCommanderXpPreRegistration,
+  COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT,
   COMMANDER_XP_BEHAVIOR_SOURCE_SHA,
   COMMANDER_XP_BEHAVIOR_SOURCE_TREE_SHA,
   COMMANDER_XP_OPENAPI_SHA256,
@@ -87,7 +88,7 @@ async function fixtureRoot(): Promise<string> {
     coworldGameImageDigest: `sha256:${"8".repeat(64)}`,
     canonicalLeagueBindingSnapshotSha256: "9".repeat(64),
     imageDigest: `sha256:${"a".repeat(64)}`,
-    bedrockModel: "bedrock-refetch-fixture",
+    bedrockModel: COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.modelID,
     xpOpenApiSha256: COMMANDER_XP_OPENAPI_SHA256,
     armPolicyVersionIDs: {
       A: "pvid_refetch_a",

@@ -4,14 +4,24 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { CommanderXpPlannedRequest } from "../../src/server/agents/CommanderXpProtocol";
+import type {
+  CommanderXpConfirmatoryAnalysisEvidence,
+  CommanderXpVerifiedOutcome,
+} from "../../src/server/agents/CommanderXpAnalysis";
+import {
+  sha256Canonical,
+  type CommanderXpPlannedRequest,
+} from "../../src/server/agents/CommanderXpProtocol";
+import { verifyCommanderXpConfirmatoryAnalysisArtifacts } from "../../src/server/agents/CommanderXpVerifier";
 import {
   buildCollectorNamespaceRegistry,
   collectorPriorLedgerFilename,
+  commanderXpNormalizedRequestReadback,
   commanderXpReplayEvidenceProjection,
   copyCollectorPhaseAuthority,
   createCollectorEvidenceOutput,
   exactCollectorRequestMapping,
+  writeCommanderXpConfirmatoryAnalysisArtifacts,
 } from "./commander-xp-collect";
 
 const temporaryDirectories: string[] = [];
@@ -25,6 +35,52 @@ afterEach(async () => {
 });
 
 describe("Commander XP collector namespace registry", () => {
+  it("projects the real Coworld 0.1.42 requested roster shape as non-authoritative", () => {
+    expect(
+      commanderXpNormalizedRequestReadback({
+        notes: "commander-xp-v2/fixture/canary/r00/A",
+        num_episodes: 1,
+        roster: [0, 1, 2, 3].map((slot) => ({
+          slot,
+          player: { policy_ref: `pvid_${slot}` },
+        })),
+      }),
+    ).toEqual({
+      schemaVersion: 2,
+      authority: "coworld-xp-request-readback-non-authoritative-v1",
+      source: "xp-request-get.requested",
+      available: true,
+      notes: "commander-xp-v2/fixture/canary/r00/A",
+      numEpisodes: 1,
+      roster: [0, 1, 2, 3].map((slot) => ({
+        slot,
+        policyRef: `pvid_${slot}`,
+      })),
+    });
+  });
+
+  it("does not promote missing or arbitrary requested echoes to authority", () => {
+    const unavailable = {
+      schemaVersion: 2,
+      authority: "coworld-xp-request-readback-non-authoritative-v1",
+      source: "xp-request-get.requested",
+      available: false,
+      notes: null,
+      numEpisodes: null,
+      roster: null,
+    };
+    expect(commanderXpNormalizedRequestReadback(undefined)).toEqual(
+      unavailable,
+    );
+    expect(
+      commanderXpNormalizedRequestReadback({
+        notes: "attacker",
+        num_episodes: 1,
+        roster: [{ slot: 0, policy: "attacker-policy" }],
+      }),
+    ).toEqual(unavailable);
+  });
+
   it("projects replay identity without retaining embedded private artifacts", () => {
     const raw = new TextEncoder().encode(
       JSON.stringify({
@@ -233,6 +289,59 @@ describe("Commander XP collector namespace registry", () => {
       buildCollectorNamespaceRegistry(root, [first, second], null),
     ).rejects.toThrow("collector namespace providerRequestID is reused");
   });
+
+  it("writes deterministic exact 48-pair confirmatory JSON and Markdown artifacts", async () => {
+    const preregistration = confirmatoryAnalysisPreregistration();
+    const planned = confirmatoryAnalysisRequests();
+    const first = await temporaryDirectory();
+    const second = await temporaryDirectory();
+    let firstOutcomes: CommanderXpVerifiedOutcome[] = [];
+    for (const root of [first, second]) {
+      const outcomes = await writeConfirmatoryResults(root, planned);
+      if (root === first) firstOutcomes = outcomes;
+      await writeCommanderXpConfirmatoryAnalysisArtifacts(
+        root,
+        preregistration,
+        root === first ? outcomes : structuredClone(outcomes).reverse(),
+      );
+    }
+    const firstJson = await fs.readFile(
+      path.join(first, "commander-xp-confirmatory-analysis-v2.json"),
+      "utf8",
+    );
+    const secondJson = await fs.readFile(
+      path.join(second, "commander-xp-confirmatory-analysis-v2.json"),
+      "utf8",
+    );
+    const firstMarkdown = await fs.readFile(
+      path.join(first, "commander-xp-confirmatory-analysis-v2.md"),
+      "utf8",
+    );
+    expect(secondJson).toBe(firstJson);
+    expect(
+      await fs.readFile(
+        path.join(second, "commander-xp-confirmatory-analysis-v2.md"),
+        "utf8",
+      ),
+    ).toBe(firstMarkdown);
+    const analysis = JSON.parse(
+      firstJson,
+    ) as CommanderXpConfirmatoryAnalysisEvidence;
+    const { analysisSha256, ...body } = analysis;
+    expect(analysis.completePairCount).toBe(48);
+    expect(analysis.pairs).toHaveLength(48);
+    expect(analysisSha256).toBe(sha256Canonical(body));
+    expect(firstMarkdown).toContain("Performance claim authorized: false");
+    expect(firstJson).toBe(`${JSON.stringify(analysis, null, 2)}\n`);
+    expect(() =>
+      verifyCommanderXpConfirmatoryAnalysisArtifacts(
+        preregistration,
+        firstOutcomes,
+        analysis,
+        firstMarkdown,
+      ),
+    ).not.toThrow();
+  });
 });
 
 async function temporaryDirectory(): Promise<string> {
@@ -289,4 +398,111 @@ async function writeRun(
       sequence: 0,
     })}\n`,
   );
+}
+
+function confirmatoryAnalysisPreregistration() {
+  return {
+    experimentID: "commander-xp-collector-analysis",
+    preRegistrationSha256: "1".repeat(64),
+    analysis: {
+      analysisID: "strategic-commander-xp-b-vs-c-paired-v3",
+      population: "48-complete-preregistered-bc-pairs",
+      alternative: "C-superior-to-B",
+      alpha: 0.05,
+      confidenceLevel: 0.95,
+      missingnessPolicy: "no-missing-pairs",
+      primaryEndpoint: "subject-win",
+      scoreRole: "redundant-descriptive-only",
+      multiplicityPolicy: "single-primary-no-adjustment",
+      minimumWinRateEffectCMinusB: 0.1,
+      winMethod: "exact-two-sided-mcnemar",
+      intervalMethod: "seeded-paired-bootstrap-percentile",
+      resamplingSeed: "strategic-commander-xp-b-vs-c-analysis-v3",
+      bootstrapIterations: 4096,
+      decisionRule:
+        "all-48-complete-and-integrity-green-and-win-estimate-gt-minimum-and-p-lte-alpha-and-ci-lower-gt-minimum",
+      canaryClaimGate: "never",
+      performanceClaimGate: "external-seal-independent-review-required",
+    },
+  } as const;
+}
+
+function confirmatoryAnalysisRequests(): CommanderXpPlannedRequest[] {
+  return Array.from({ length: 48 }, (_unused, replicaIndex) =>
+    (["B", "C"] as const).map(
+      (arm) =>
+        ({
+          phase: "confirmatory",
+          replicaIndex,
+          orderIndex: arm === "B" ? 0 : 1,
+          arm,
+          seed: 20_000 + replicaIndex,
+          subjectSeat: replicaIndex % 4,
+        }) as CommanderXpPlannedRequest,
+    ),
+  ).flat();
+}
+
+async function writeConfirmatoryResults(
+  root: string,
+  planned: readonly CommanderXpPlannedRequest[],
+): Promise<CommanderXpVerifiedOutcome[]> {
+  const outcomes: CommanderXpVerifiedOutcome[] = [];
+  for (const request of planned) {
+    const subjectWon =
+      request.arm === "B"
+        ? request.replicaIndex % 4 === 0
+        : request.replicaIndex % 3 === 0;
+    const scores = [0, 0, 0, 0];
+    scores[request.subjectSeat] = subjectWon ? 1 : 0;
+    const directory = path.join(
+      root,
+      `runs/confirmatory/r${String(request.replicaIndex).padStart(2, "0")}/${request.arm}`,
+    );
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(
+      path.join(directory, "episode-results.json"),
+      JSON.stringify({
+        xpRequestID: `xreq_collect-${request.arm}-${request.replicaIndex}`,
+        episodeRequestID: `ereq_collect-${request.arm}-${request.replicaIndex}`,
+        jobID: `job_collect-${request.arm}-${request.replicaIndex}`,
+        episodeID: `episode_collect-${request.arm}-${request.replicaIndex}`,
+        winnerSlot: subjectWon
+          ? request.subjectSeat
+          : (request.subjectSeat + 1) % 4,
+        subjectWon,
+        scores,
+      }),
+    );
+    outcomes.push({
+      replicaIndex: request.replicaIndex,
+      arm: request.arm,
+      seed: request.seed,
+      xpRequestID: `xreq_collect-${request.arm}-${request.replicaIndex}`,
+      episodeRequestID: `ereq_collect-${request.arm}-${request.replicaIndex}`,
+      jobID: `job_collect-${request.arm}-${request.replicaIndex}`,
+      episodeID: `episode_collect-${request.arm}-${request.replicaIndex}`,
+      subjectSeat: request.subjectSeat,
+      winnerSlot: subjectWon
+        ? request.subjectSeat
+        : (request.subjectSeat + 1) % 4,
+      subjectWon,
+      score: scores[request.subjectSeat]!,
+      selectorAudit: selectorAuditFixture(request.arm),
+    });
+  }
+  return outcomes;
+}
+
+function selectorAuditFixture(arm: "A" | "B" | "C") {
+  return {
+    installedPlanCount: 1,
+    selectedOptionDistribution: { survive: 1 },
+    selectedOptionFamilyDistribution: { survive: 1 },
+    deterministicPreferredAbsent: { count: 0, opportunities: 1 },
+    selectorDisagreement: {
+      count: 0,
+      opportunities: arm === "C" ? 1 : 0,
+    },
+  };
 }

@@ -29,11 +29,29 @@ export const COMMANDER_XP_CONFIRMATORY_SEED_BASE =
 export const COMMANDER_XP_PROVIDER_PREFLIGHT_SEED_BASE =
   "strategic-commander-xp-provider-preflight-v1";
 export const COMMANDER_XP_OPENAPI_SHA256 =
-  "dc32022f7e2850e65232c6f51c7490011483e8948269e975bc177d71f29a3e4f";
+  "13204636cff43a3725d0886f2a43c8d9e45a1e859add15f2fcad336129e4409d";
 export const COMMANDER_XP_CREATE_REQUEST_SCHEMA_SHA256 =
   "3d1b9e7969455eb92f2ee97164ce153517a1d6909bcbb1031b6141bb5050b25a";
 export const COMMANDER_XP_ROSTER_SCHEMAS_SHA256 =
   "edfa02dc9fcd7513ce91d4f5bbc6517f1a56d086da32ca37590ab2c29cf255c1";
+export const COMMANDER_XP_COMMANDER_PROMPT_VERSION =
+  "strategic-commander-v0-stage2";
+export const COMMANDER_XP_COMMANDER_PROMPT_VERSION_SHA256 =
+  "00db34a7939d9d27a3370decf1e3f3f5895b0a3e3676c2e043ec426b5e199094";
+export const COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT = {
+  provider: "bedrock-sidecar",
+  routingAuthority: "coworld-xp-llm-routing-override-bedrock-v1",
+  endpointAuthority: "coworld-injected-loopback-bedrock-runtime-sidecar-v1",
+  modelID: "us.anthropic.claude-sonnet-4-6",
+  region: "us-west-2",
+  sdkPackage: "@anthropic-ai/bedrock-sdk",
+  sdkVersion: "0.29.2",
+  timeoutMs: 12_000,
+  maxTokens: 1_024,
+  temperature: 0,
+  topP: 1,
+  backendRevision: "unattested-provider-residual",
+} as const;
 export const COMMANDER_XP_CANARY_ORDERS = [
   ["A", "B", "C"],
   ["A", "C", "B"],
@@ -63,9 +81,13 @@ export const COMMANDER_XP_COMMANDER_METADATA_ALLOWLIST = [
   "commanderSelectorSource",
   "commanderPrimarySelectorSource",
   "planID",
+  "planObjective",
+  "commanderSelectedOptionID",
+  "commanderSelectedOptionFamily",
   "commanderPreviousPlanID",
   "commanderFingerprint",
   "commanderEligibleOptionIds",
+  "commanderOptionSurfaceSha256",
   "commanderExposedOptionIds",
   "commanderOmittedOptions",
   "commanderFidelity",
@@ -76,14 +98,20 @@ export const COMMANDER_XP_COMMANDER_METADATA_ALLOWLIST = [
   "commanderPlanInstalled",
   "commanderHorizonDecisions",
   "commanderPlanAgeDecisions",
+  "commanderEmergencyCondition",
   "commanderBlockedReason",
   "commanderImmediateReplan",
+  "commanderDeterministicPreferredOptionId",
   "commanderDeterministicPreferredOptionAbsent",
   "commanderPromptCharacters",
   "commanderSelectionFailureKind",
   "commanderSelectorProvider",
   "commanderSelectorModel",
   "commanderPromptVersion",
+  "commanderPromptSha256",
+  "batchIndex",
+  "batchSize",
+  "batchActionIDs",
 ] as const;
 
 export type CommanderXpArm = "A" | "B" | "C";
@@ -175,6 +203,12 @@ export interface CommanderXpPreRegistrationV2 {
     canary: "4-complete-abc-triplets";
     confirmatory: "48-complete-bc-pairs";
   };
+  featureScope: {
+    evaluatedFeature: "selector-only-b-vs-c";
+    hardEmergencyOverride: "excluded-empty-v0-set";
+    hardEmergencyEvidence: "forbidden-zero-observed";
+    fullStage5CompletionClaim: "not-authorized";
+  };
   identities: {
     behaviorSourceSha: string;
     behaviorSourceTreeSha: string;
@@ -197,7 +231,10 @@ export interface CommanderXpPreRegistrationV2 {
     canonicalLeagueBindingSnapshotSha256: string;
     variantID: typeof COMMANDER_XP_VARIANT_ID;
     imageDigest: string;
-    bedrockModel: string;
+    bedrockModel: typeof COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.modelID;
+    providerContract: typeof COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT;
+    commanderPromptVersion: typeof COMMANDER_XP_COMMANDER_PROMPT_VERSION;
+    commanderPromptVersionSha256: typeof COMMANDER_XP_COMMANDER_PROMPT_VERSION_SHA256;
     xpOpenApiSha256: string;
     xpCreateRequestSchemaSha256: typeof COMMANDER_XP_CREATE_REQUEST_SCHEMA_SHA256;
     xpRosterSchemasSha256: typeof COMMANDER_XP_ROSTER_SCHEMAS_SHA256;
@@ -206,8 +243,8 @@ export interface CommanderXpPreRegistrationV2 {
     runArgv: Record<CommanderXpArm, string[]>;
   };
   fixedFlags: {
-    STRUCTURED_DEALS: "1";
-    FREETEXT_MESSAGES: "1";
+    STRUCTURED_DEALS: "0";
+    FREETEXT_MESSAGES: "0";
     SPATIAL_OBSERVATION: "0";
     SPATIAL_MINIMAP: "0";
     KEYSTONE_PROFILE: "aggressive";
@@ -221,7 +258,9 @@ export interface CommanderXpPreRegistrationV2 {
     parseFailure: "fatal";
     timeout: "fatal";
     rejection: "fatal";
-    nonWinner: "fatal";
+    subjectLoss: "retained-valid-outcome";
+    winnerless: "fatal";
+    invalidRosterWinner: "fatal";
     missingReplayOrResult: "fatal";
     missingOrUnjoinedEvidence: "fatal";
     identityOrConfigMismatch: "fatal";
@@ -250,20 +289,23 @@ export interface CommanderXpPreRegistrationV2 {
     confirmatorySeeds: number[];
   };
   analysis: {
-    analysisID: "strategic-commander-xp-b-vs-c-paired-v2";
+    analysisID: "strategic-commander-xp-b-vs-c-paired-v3";
     population: "48-complete-preregistered-bc-pairs";
-    alternative: "two-sided";
+    alternative: "C-superior-to-B";
     alpha: 0.05;
     confidenceLevel: 0.95;
     missingnessPolicy: "no-missing-pairs";
-    primaryMetrics: readonly ["win", "score"];
+    primaryEndpoint: "subject-win";
+    scoreRole: "redundant-descriptive-only";
+    multiplicityPolicy: "single-primary-no-adjustment";
+    minimumWinRateEffectCMinusB: 0.1;
     winMethod: "exact-two-sided-mcnemar";
-    scoreMethod: "seeded-paired-sign-randomization";
     intervalMethod: "seeded-paired-bootstrap-percentile";
-    resamplingSeed: "strategic-commander-xp-b-vs-c-analysis-v2";
+    resamplingSeed: "strategic-commander-xp-b-vs-c-analysis-v3";
     bootstrapIterations: 4096;
-    randomizationIterations: 4096;
-    performanceClaimGate: "reviewed-verifier-and-preregistered-analysis-only";
+    decisionRule: "all-48-complete-and-integrity-green-and-win-estimate-gt-minimum-and-p-lte-alpha-and-ci-lower-gt-minimum";
+    canaryClaimGate: "never";
+    performanceClaimGate: "external-seal-independent-review-required";
   };
   providerPreflightRequests: [
     CommanderXpPlannedRequest,
@@ -359,6 +401,12 @@ export function buildCommanderXpPreRegistration(
       canary: "4-complete-abc-triplets",
       confirmatory: "48-complete-bc-pairs",
     },
+    featureScope: {
+      evaluatedFeature: "selector-only-b-vs-c",
+      hardEmergencyOverride: "excluded-empty-v0-set",
+      hardEmergencyEvidence: "forbidden-zero-observed",
+      fullStage5CompletionClaim: "not-authorized",
+    },
     identities: {
       behaviorSourceSha: input.behaviorSourceSha,
       behaviorSourceTreeSha: input.behaviorSourceTreeSha,
@@ -382,7 +430,11 @@ export function buildCommanderXpPreRegistration(
         input.canonicalLeagueBindingSnapshotSha256,
       variantID: COMMANDER_XP_VARIANT_ID,
       imageDigest: input.imageDigest,
-      bedrockModel: input.bedrockModel,
+      bedrockModel: COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.modelID,
+      providerContract: structuredClone(COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT),
+      commanderPromptVersion: COMMANDER_XP_COMMANDER_PROMPT_VERSION,
+      commanderPromptVersionSha256:
+        COMMANDER_XP_COMMANDER_PROMPT_VERSION_SHA256,
       xpOpenApiSha256: input.xpOpenApiSha256,
       xpCreateRequestSchemaSha256: COMMANDER_XP_CREATE_REQUEST_SCHEMA_SHA256,
       xpRosterSchemasSha256: COMMANDER_XP_ROSTER_SCHEMAS_SHA256,
@@ -399,9 +451,11 @@ export function buildCommanderXpPreRegistration(
         ]),
       ) as Record<CommanderXpArm, string[]>,
     },
+    // Freeze Stage-5 selector-only scope. Production social features remain
+    // unchanged; this eval excludes them identically from A/B/C.
     fixedFlags: {
-      STRUCTURED_DEALS: "1",
-      FREETEXT_MESSAGES: "1",
+      STRUCTURED_DEALS: "0",
+      FREETEXT_MESSAGES: "0",
       SPATIAL_OBSERVATION: "0",
       SPATIAL_MINIMAP: "0",
       KEYSTONE_PROFILE: "aggressive",
@@ -415,7 +469,9 @@ export function buildCommanderXpPreRegistration(
       parseFailure: "fatal",
       timeout: "fatal",
       rejection: "fatal",
-      nonWinner: "fatal",
+      subjectLoss: "retained-valid-outcome",
+      winnerless: "fatal",
+      invalidRosterWinner: "fatal",
       missingReplayOrResult: "fatal",
       missingOrUnjoinedEvidence: "fatal",
       identityOrConfigMismatch: "fatal",
@@ -446,20 +502,24 @@ export function buildCommanderXpPreRegistration(
       confirmatorySeeds,
     },
     analysis: {
-      analysisID: "strategic-commander-xp-b-vs-c-paired-v2",
+      analysisID: "strategic-commander-xp-b-vs-c-paired-v3",
       population: "48-complete-preregistered-bc-pairs",
-      alternative: "two-sided",
+      alternative: "C-superior-to-B",
       alpha: 0.05,
       confidenceLevel: 0.95,
       missingnessPolicy: "no-missing-pairs",
-      primaryMetrics: ["win", "score"],
+      primaryEndpoint: "subject-win",
+      scoreRole: "redundant-descriptive-only",
+      multiplicityPolicy: "single-primary-no-adjustment",
+      minimumWinRateEffectCMinusB: 0.1,
       winMethod: "exact-two-sided-mcnemar",
-      scoreMethod: "seeded-paired-sign-randomization",
       intervalMethod: "seeded-paired-bootstrap-percentile",
-      resamplingSeed: "strategic-commander-xp-b-vs-c-analysis-v2",
+      resamplingSeed: "strategic-commander-xp-b-vs-c-analysis-v3",
       bootstrapIterations: 4096,
-      randomizationIterations: 4096,
-      performanceClaimGate: "reviewed-verifier-and-preregistered-analysis-only",
+      decisionRule:
+        "all-48-complete-and-integrity-green-and-win-estimate-gt-minimum-and-p-lte-alpha-and-ci-lower-gt-minimum",
+      canaryClaimGate: "never",
+      performanceClaimGate: "external-seal-independent-review-required",
     },
     providerPreflightRequests,
     requests,
@@ -673,9 +733,7 @@ function assertPlanInput(input: CommanderXpPlanInput): void {
     input.coworldID.trim() === "" ||
     input.coworldID === COMMANDER_XP_CANONICAL_COWORLD_ID ||
     input.coworldVersion.trim() === "" ||
-    input.bedrockModel.trim() !== input.bedrockModel ||
-    input.bedrockModel.length < 8 ||
-    /\s/.test(input.bedrockModel)
+    input.bedrockModel !== COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.modelID
   ) {
     throw new Error("Commander XP hosted identity is incomplete");
   }

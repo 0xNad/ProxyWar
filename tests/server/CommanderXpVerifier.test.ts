@@ -13,16 +13,28 @@ import * as externalSealLib from "../../.github/scripts/commander-xp-external-se
 import { coworldEpisodeIdentity } from "../../coworld-adapter/src/coworld-seed";
 import { buildCommanderXpAuthorityRequest } from "../../src/scripts/ai-agent-commander-xp-authority-request";
 import {
+  buildCommanderXpConfirmatoryAnalysisEvidence,
+  renderCommanderXpConfirmatoryAnalysisMarkdown,
+  type CommanderXpVerifiedOutcome,
+} from "../../src/server/agents/CommanderXpAnalysis";
+import {
   buildCommanderXpPreRegistration,
+  COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT,
+  COMMANDER_XP_COMMANDER_METADATA_ALLOWLIST,
+  COMMANDER_XP_OPENAPI_SHA256,
   commanderXpProviderPreflightRequestID,
   sha256Canonical,
   type CommanderXpPlanInput,
 } from "../../src/server/agents/CommanderXpProtocol";
 import {
   assertCommanderXpExternalPhaseReceiptDocument,
+  verifyCommanderXpConfirmatoryAnalysisArtifacts,
   verifyCommanderXpCoworldBundleProjection,
   verifyCommanderXpEvidence,
   verifyCommanderXpJoinedGameplayEvidence,
+  verifyCommanderXpJoinedGameplayEvidenceAudit,
+  verifyCommanderXpMatchedInitialSelectorSurfaces,
+  verifyCommanderXpMatchedRequestOrder,
   type CommanderXpExternalPhaseReceipt,
   type PlayerRuntimeManifest,
 } from "../../src/server/agents/CommanderXpVerifier";
@@ -39,6 +51,45 @@ afterEach(async () => {
 });
 
 describe("Commander XP evidence verifier v2", () => {
+  it("uses server timestamps for pair chronology despite runner clock skew", () => {
+    expect(() =>
+      verifyCommanderXpMatchedRequestOrder("confirmatory", [
+        {
+          replicaIndex: 0,
+          orderIndex: 0,
+          submittedAt: "2026-08-22T14:05:00.000Z",
+          createdAt: "2026-08-22T14:00:00.000Z",
+          completedAt: "2026-08-22T14:01:00.000Z",
+        },
+        {
+          replicaIndex: 0,
+          orderIndex: 1,
+          submittedAt: "2026-08-22T13:55:00.000Z",
+          createdAt: "2026-08-22T14:02:00.000Z",
+          completedAt: "2026-08-22T14:03:00.000Z",
+        },
+      ]),
+    ).not.toThrow();
+    expect(() =>
+      verifyCommanderXpMatchedRequestOrder("confirmatory", [
+        {
+          replicaIndex: 0,
+          orderIndex: 0,
+          submittedAt: "2026-08-22T14:00:00.000Z",
+          createdAt: "2026-08-22T14:00:00.000Z",
+          completedAt: "2026-08-22T14:03:00.000Z",
+        },
+        {
+          replicaIndex: 0,
+          orderIndex: 1,
+          submittedAt: "2026-08-22T14:01:00.000Z",
+          createdAt: "2026-08-22T14:02:00.000Z",
+          completedAt: "2026-08-22T14:04:00.000Z",
+        },
+      ]),
+    ).toThrow(/MATCHED_REQUEST_TIMESTAMP_ORDER_MISMATCH/);
+  });
+
   it("accepts a complete no-run preregistration evidence tree before authority upload", async () => {
     const fixture = await buildPreregistrationFixture();
 
@@ -188,6 +239,7 @@ describe("Commander XP evidence verifier v2", () => {
     const fixture = gameplayJoinFixture(preregistration, "B");
     expect(verifyCommanderXpJoinedGameplayEvidence(fixture)).toEqual([
       fixture.requestID,
+      fixture.spawnRequestID,
     ]);
 
     const tampered = gameplayJoinFixture(preregistration, "B", {
@@ -195,6 +247,342 @@ describe("Commander XP evidence verifier v2", () => {
     });
     expect(() => verifyCommanderXpJoinedGameplayEvidence(tampered)).toThrow(
       /ARM_B_GAMEPLAY_PROVIDER_CALL_PRESENT/,
+    );
+
+    const continued = gameplayJoinFixture(preregistration, "B", {
+      includeCachedContinuation: true,
+    });
+    expect(verifyCommanderXpJoinedGameplayEvidence(continued)).toEqual([
+      continued.requestID,
+      `${continued.requestID}-cached`,
+      continued.spawnRequestID,
+    ]);
+    const switched = gameplayJoinFixture(preregistration, "B", {
+      includeCachedContinuation: true,
+      breakCachedPlanChain: true,
+    });
+    expect(() => verifyCommanderXpJoinedGameplayEvidence(switched)).toThrow(
+      /ARM_B_PLAN_CONTINUITY_MISMATCH/,
+    );
+  });
+
+  it("rejects every model, region, routing, endpoint, SDK and sampling contract mismatch", async () => {
+    const { preregistration } = await buildPreregistrationFixture();
+    for (const [key, value] of [
+      ["modelID", "anthropic.claude-sonnet-4-6"],
+      ["region", "us-east-1"],
+      ["routingAuthority", "direct-aws"],
+      ["endpointAuthority", "public-bedrock-runtime"],
+      ["sdkVersion", "0.29.1"],
+      ["maxTokens", 2048],
+      ["temperature", 0.2],
+      ["topP", 0.9],
+    ] as const) {
+      const fixture = gameplayJoinFixture(preregistration, "B");
+      (fixture.runtimeManifest.providerContract as Record<string, unknown>)[
+        key
+      ] = value;
+      expect(
+        () => verifyCommanderXpJoinedGameplayEvidence(fixture),
+        key,
+      ).toThrow(/PLAYER_RUNTIME_IDENTITY_MISMATCH/);
+    }
+    const promptVersion = gameplayJoinFixture(preregistration, "C");
+    promptVersion.runtimeManifest.commanderPromptVersion =
+      "strategic-commander-unreviewed";
+    expect(() =>
+      verifyCommanderXpJoinedGameplayEvidence(promptVersion),
+    ).toThrow(/PLAYER_RUNTIME_IDENTITY_MISMATCH/);
+  });
+
+  it("joins the exact C prompt hash and provider contract to game-owned execution evidence", async () => {
+    const { preregistration } = await buildPreregistrationFixture();
+    const fixture = gameplayJoinFixture(preregistration, "C");
+    expect(() =>
+      verifyCommanderXpJoinedGameplayEvidence(fixture),
+    ).not.toThrow();
+
+    const trace = fixture.playerTraceJsonl
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const selectorProvider = trace.find(
+      (entry) => entry.recordType === "provider" && entry.stage === "selector",
+    )!;
+    selectorProvider.providerContractSha256 = "0".repeat(64);
+    fixture.playerTraceJsonl = `${trace
+      .map((entry) => JSON.stringify(entry))
+      .join("\n")}\n`;
+    expect(() => verifyCommanderXpJoinedGameplayEvidence(fixture)).toThrow(
+      /PROVIDER_FIDELITY_EXCLUSION/,
+    );
+
+    const promptTamper = gameplayJoinFixture(preregistration, "C");
+    const promptTrace = promptTamper.playerTraceJsonl
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const decision = promptTrace.find(
+      (entry) =>
+        entry.recordType === "decision" &&
+        entry.runtimeMode === "commander-v0-selector",
+    )!;
+    decision.commander.commanderPromptSha256 = "9".repeat(64);
+    decision.commanderExecutionSha256 = sha256Canonical(decision.commander);
+    const games = promptTamper.gameEvidenceJsonl
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const game = games.find((entry) => entry.chosen.kind !== "spawn")!;
+    game.commander.commanderPromptSha256 = "9".repeat(64);
+    game.commander.commanderExecutionSha256 = decision.commanderExecutionSha256;
+    game.commander.commanderSelectionSha256 = commanderSelectionSha256(
+      decision.commander,
+    );
+    promptTamper.playerTraceJsonl = `${promptTrace
+      .map((entry) => JSON.stringify(entry))
+      .join("\n")}\n`;
+    promptTamper.gameEvidenceJsonl = `${games
+      .map((entry) => JSON.stringify(entry))
+      .join("\n")}\n`;
+    expect(() => verifyCommanderXpJoinedGameplayEvidence(promptTamper)).toThrow(
+      /ARM_C_SELECTOR_MISMATCH/,
+    );
+  });
+
+  it("rejects a self-stamped aligned hold without canonical option identity", async () => {
+    const { preregistration } = await buildPreregistrationFixture();
+    const fixture = gameplayJoinFixture(preregistration, "B");
+    const trace = fixture.playerTraceJsonl
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const decision = trace.find((entry) => entry.recordType === "decision")!;
+    decision.commander.planObjective = null;
+    decision.commanderExecutionSha256 = sha256Canonical(decision.commander);
+    const games = fixture.gameEvidenceJsonl
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    games[0].commander.planObjective = null;
+    games[0].commander.commanderExecutionSha256 =
+      decision.commanderExecutionSha256;
+    fixture.playerTraceJsonl = `${trace
+      .map((entry) => JSON.stringify(entry))
+      .join("\n")}\n`;
+    fixture.gameEvidenceJsonl = `${games
+      .map((entry) => JSON.stringify(entry))
+      .join("\n")}\n`;
+
+    expect(() => verifyCommanderXpJoinedGameplayEvidence(fixture)).toThrow(
+      /ARM_B_OPTION_IDENTITY_MISMATCH/,
+    );
+  });
+
+  it("forbids hard-emergency evidence in the preregistered selector-only scope", async () => {
+    const { preregistration } = await buildPreregistrationFixture();
+    expect(preregistration.featureScope).toEqual({
+      evaluatedFeature: "selector-only-b-vs-c",
+      hardEmergencyOverride: "excluded-empty-v0-set",
+      hardEmergencyEvidence: "forbidden-zero-observed",
+      fullStage5CompletionClaim: "not-authorized",
+    });
+    const fixture = gameplayJoinFixture(preregistration, "B");
+    const trace = fixture.playerTraceJsonl
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const decision = trace.find(
+      (entry) =>
+        entry.recordType === "decision" &&
+        entry.runtimeMode === "commander-v0-selector",
+    )!;
+    decision.commander.commanderEmergencyCondition = "home_attacked";
+    decision.commander.commanderFidelity = "hard_emergency_override";
+    decision.commander.commanderBatchFidelities = JSON.stringify({
+      "hold:fixture": "hard_emergency_override",
+    });
+    decision.commanderExecutionSha256 = sha256Canonical(decision.commander);
+    const games = fixture.gameEvidenceJsonl
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const game = games.find((entry) => entry.chosen.kind !== "spawn")!;
+    game.commander.commanderExecutionSha256 = decision.commanderExecutionSha256;
+    game.commander.commanderEmergencyCondition = "home_attacked";
+    game.commander.commanderFidelity = "hard_emergency_override";
+    fixture.playerTraceJsonl = `${trace
+      .map((entry) => JSON.stringify(entry))
+      .join("\n")}\n`;
+    fixture.gameEvidenceJsonl = `${games
+      .map((entry) => JSON.stringify(entry))
+      .join("\n")}\n`;
+
+    expect(() => verifyCommanderXpJoinedGameplayEvidence(fixture)).toThrow(
+      /COMMANDER_FIDELITY_RECOMPUTATION_MISMATCH/,
+    );
+  });
+
+  it("rejects player-authored Commander metadata that diverges from game-owned wire evidence", async () => {
+    const { preregistration } = await buildPreregistrationFixture();
+    const fixture = gameplayJoinFixture(preregistration, "C");
+    const trace = fixture.playerTraceJsonl
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const decision = trace.find((entry) => entry.recordType === "decision")!;
+    decision.commander.planObjective = "pressure_rival:forged";
+    decision.commander.commanderSelectedOptionID = "pressure_rival:forged";
+    decision.commander.commanderSelectedOptionFamily = "pressure_rival";
+    decision.commander.commanderEligibleOptionIds = "pressure_rival:forged";
+    decision.commander.commanderExposedOptionIds = "pressure_rival:forged";
+    decision.commander.commanderDeterministicPreferredOptionId =
+      "pressure_rival:forged";
+    decision.commander.commanderDeterministicPreferredOptionAbsent = false;
+    decision.commanderExecutionSha256 = sha256Canonical(decision.commander);
+    fixture.playerTraceJsonl = `${trace
+      .map((entry) => JSON.stringify(entry))
+      .join("\n")}\n`;
+
+    expect(() => verifyCommanderXpJoinedGameplayEvidence(fixture)).toThrow(
+      /COMMANDER_EXECUTION_WIRE_JOIN_MISMATCH/,
+    );
+  });
+
+  it("requires matched B/C pre-selector surfaces while preserving distinct hosted pvids", () => {
+    const surface = {
+      observationSha256: "a".repeat(64),
+      legalActionSurfaceSha256: "b".repeat(64),
+      optionSurfaceSha256: "c".repeat(64),
+      spawnAssignmentSha256: "e".repeat(64),
+    };
+    const matched = [
+      {
+        replicaIndex: 0,
+        arm: "B" as const,
+        subjectPolicyVersionID: "pvid_commander_b",
+        surface,
+      },
+      {
+        replicaIndex: 0,
+        arm: "C" as const,
+        subjectPolicyVersionID: "pvid_commander_c",
+        surface: structuredClone(surface),
+      },
+    ];
+    expect(() =>
+      verifyCommanderXpMatchedInitialSelectorSurfaces(matched),
+    ).not.toThrow();
+
+    for (const key of [
+      "observationSha256",
+      "legalActionSurfaceSha256",
+      "optionSurfaceSha256",
+      "spawnAssignmentSha256",
+    ] as const) {
+      const tampered = structuredClone(matched);
+      tampered[1]!.surface[key] = "d".repeat(64);
+      expect(() =>
+        verifyCommanderXpMatchedInitialSelectorSurfaces(tampered),
+      ).toThrow(/MATCHED_INITIAL_SURFACE_MISMATCH/);
+    }
+    const aliasedPolicy = structuredClone(matched);
+    aliasedPolicy[1]!.subjectPolicyVersionID = "pvid_commander_b";
+    expect(() =>
+      verifyCommanderXpMatchedInitialSelectorSurfaces(aliasedPolicy),
+    ).toThrow(/MATCHED_INITIAL_SURFACE_MISMATCH/);
+  });
+
+  it("binds selected option identity and audits an eligible deterministic preference omitted from exposure", async () => {
+    const { preregistration } = await buildPreregistrationFixture();
+    const fixture = gameplayJoinFixture(preregistration, "C");
+    const trace = fixture.playerTraceJsonl
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const decision = trace.find(
+      (entry) =>
+        entry.recordType === "decision" &&
+        entry.runtimeMode === "commander-v0-selector",
+    )!;
+    decision.commander.commanderEligibleOptionIds = "survive,expand";
+    decision.commander.commanderExposedOptionIds = "survive";
+    decision.commander.commanderDeterministicPreferredOptionId = "expand";
+    decision.commander.commanderDeterministicPreferredOptionAbsent = true;
+    decision.commanderExecutionSha256 = sha256Canonical(decision.commander);
+    const games = fixture.gameEvidenceJsonl
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const game = games.find((entry) => entry.chosen.kind !== "spawn")!;
+    game.commander.commanderExecutionSha256 = decision.commanderExecutionSha256;
+    game.commander.commanderDeterministicPreferredOptionId = "expand";
+    game.commander.commanderDeterministicPreferredOptionAbsent = true;
+    game.commander.commanderSelectionSha256 = commanderSelectionSha256(
+      decision.commander,
+    );
+    fixture.playerTraceJsonl = `${trace
+      .map((entry) => JSON.stringify(entry))
+      .join("\n")}\n`;
+    fixture.gameEvidenceJsonl = `${games
+      .map((entry) => JSON.stringify(entry))
+      .join("\n")}\n`;
+    expect(() =>
+      verifyCommanderXpJoinedGameplayEvidence(fixture),
+    ).not.toThrow();
+    expect(
+      verifyCommanderXpJoinedGameplayEvidenceAudit(fixture).selectorAudit,
+    ).toEqual({
+      installedPlanCount: 1,
+      selectedOptionDistribution: { survive: 1 },
+      selectedOptionFamilyDistribution: { survive: 1 },
+      deterministicPreferredAbsent: { count: 1, opportunities: 1 },
+      selectorDisagreement: { count: 1, opportunities: 1 },
+    });
+
+    game.commander.commanderDeterministicPreferredOptionId = "develop_economy";
+    fixture.gameEvidenceJsonl = `${games
+      .map((entry) => JSON.stringify(entry))
+      .join("\n")}\n`;
+    expect(() => verifyCommanderXpJoinedGameplayEvidence(fixture)).toThrow(
+      /COMMANDER_FIDELITY_INPUT_JOIN_MISMATCH/,
+    );
+
+    const falseAbsence = gameplayJoinFixture(preregistration, "C");
+    const falseTrace = falseAbsence.playerTraceJsonl
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const falseDecision = falseTrace.find(
+      (entry) =>
+        entry.recordType === "decision" &&
+        entry.runtimeMode === "commander-v0-selector",
+    )!;
+    falseDecision.commander.commanderDeterministicPreferredOptionAbsent = true;
+    falseDecision.commanderExecutionSha256 = sha256Canonical(
+      falseDecision.commander,
+    );
+    const falseGames = falseAbsence.gameEvidenceJsonl
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const falseGame = falseGames.find(
+      (entry) => entry.chosen.kind !== "spawn",
+    )!;
+    falseGame.commander.commanderExecutionSha256 =
+      falseDecision.commanderExecutionSha256;
+    falseGame.commander.commanderSelectionSha256 = commanderSelectionSha256(
+      falseDecision.commander,
+    );
+    falseGame.commander.commanderDeterministicPreferredOptionAbsent = true;
+    falseAbsence.playerTraceJsonl = `${falseTrace
+      .map((entry) => JSON.stringify(entry))
+      .join("\n")}\n`;
+    falseAbsence.gameEvidenceJsonl = `${falseGames
+      .map((entry) => JSON.stringify(entry))
+      .join("\n")}\n`;
+    expect(() => verifyCommanderXpJoinedGameplayEvidence(falseAbsence)).toThrow(
+      /ARM_C_OPTION_IDENTITY_MISMATCH/,
     );
   });
 
@@ -206,6 +594,7 @@ describe("Commander XP evidence verifier v2", () => {
     expect(verifyCommanderXpJoinedGameplayEvidence(fixture)).toEqual([
       fixture.requestID,
       `${fixture.requestID}-cached`,
+      fixture.spawnRequestID,
     ]);
 
     const tampered = gameplayJoinFixture(preregistration, "C", {
@@ -221,6 +610,269 @@ describe("Commander XP evidence verifier v2", () => {
     });
     expect(() => verifyCommanderXpJoinedGameplayEvidence(forged)).toThrow(
       /ARM_C_PLAN_CONTINUITY_MISMATCH/,
+    );
+
+    const beyondHorizon = gameplayJoinFixture(preregistration, "C", {
+      includeCachedContinuation: true,
+    });
+    const trace = beyondHorizon.playerTraceJsonl
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const games = beyondHorizon.gameEvidenceJsonl
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    let traceTemplate = [...trace]
+      .reverse()
+      .find(
+        (entry) =>
+          entry.recordType === "decision" &&
+          entry.runtimeMode === "commander-v0-selector",
+      )!;
+    let gameTemplate = [...games]
+      .reverse()
+      .find((entry) => entry.chosen.kind !== "spawn")!;
+    for (let age = 2; age <= 6; age += 1) {
+      const nextTrace = {
+        ...structuredClone(traceTemplate),
+        requestID: `${beyondHorizon.requestID}-cached-${age}`,
+        sequence: Math.max(...trace.map((entry) => entry.sequence)) + 1,
+        commander: {
+          ...structuredClone(traceTemplate.commander),
+          commanderPlanAgeDecisions: age,
+        },
+      };
+      nextTrace.commanderExecutionSha256 = sha256Canonical(nextTrace.commander);
+      trace.push(nextTrace);
+      const nextGame = {
+        ...structuredClone(gameTemplate),
+        requestID: `${beyondHorizon.requestID}-cached-${age}`,
+        sequence: Math.max(...games.map((entry) => entry.sequence)) + 1,
+        turnNumber: gameTemplate.turnNumber + 1,
+        commander: {
+          ...structuredClone(gameTemplate.commander),
+          commanderPlanAgeDecisions: age,
+        },
+      };
+      nextGame.commander.commanderExecutionSha256 =
+        nextTrace.commanderExecutionSha256;
+      games.push(nextGame);
+      traceTemplate = nextTrace;
+      gameTemplate = nextGame;
+    }
+    beyondHorizon.playerTraceJsonl = `${trace
+      .map((entry) => JSON.stringify(entry))
+      .join("\n")}\n`;
+    beyondHorizon.gameEvidenceJsonl = `${games
+      .map((entry) => JSON.stringify(entry))
+      .join("\n")}\n`;
+    expect(() =>
+      verifyCommanderXpJoinedGameplayEvidence(beyondHorizon),
+    ).toThrow(/ARM_C_PLAN_CONTINUITY_MISMATCH/);
+  });
+
+  it("validates every batch stamp while gating fidelity per primary cycle", async () => {
+    const { preregistration } = await buildPreregistrationFixture();
+    const fixture = gameplayJoinFixture(preregistration, "B");
+    const trace = fixture.playerTraceJsonl
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const decision = trace.find((entry) => entry.recordType === "decision");
+    const targetID = "RIVAL001";
+    const legalActions = [
+      { id: "attack:fixture", kind: "attack" },
+      { id: "embargo:followup", kind: "embargo" },
+    ];
+    decision.offeredLegalActions = legalActions;
+    decision.offeredLegalActionSetSha256 = sha256Canonical(legalActions);
+    decision.selectedLegalActionID = "attack:fixture";
+    decision.selectedLegalActionIDs = ["attack:fixture", "embargo:followup"];
+    decision.commander.planObjective = `pressure_rival:${targetID}`;
+    decision.commander.commanderSelectedOptionID = `pressure_rival:${targetID}`;
+    decision.commander.commanderSelectedOptionFamily = "pressure_rival";
+    decision.commander.commanderEligibleOptionIds = `pressure_rival:${targetID}`;
+    decision.commander.commanderExposedOptionIds = `pressure_rival:${targetID}`;
+    decision.commander.commanderDeterministicPreferredOptionId = `pressure_rival:${targetID}`;
+    decision.commander.batchIndex = 0;
+    decision.commander.batchSize = 2;
+    decision.commander.batchActionIDs = "attack:fixture,embargo:followup";
+    decision.commander.commanderBatchFidelities = JSON.stringify({
+      "attack:fixture": "aligned_primary",
+      "embargo:followup": "aligned_support",
+    });
+    const games = fixture.gameEvidenceJsonl
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const gameplayGames = games.filter(
+      (entry) => entry.requestID === fixture.requestID,
+    );
+    gameplayGames[0].legalActions = legalActions;
+    gameplayGames[0].offeredLegalActionSetSha256 =
+      sha256Canonical(legalActions);
+    gameplayGames[0].chosen = {
+      id: "attack:fixture",
+      kind: "attack",
+      metadata: { targetID, expansion: false },
+    };
+    const attackIntent = { type: "attack", targetID, troops: 10 };
+    gameplayGames[0].generatedIntent = {
+      type: "attack",
+      sha256: sha256Canonical(attackIntent),
+      canonical: attackIntent,
+    };
+    gameplayGames[0].result.submittedIntent = structuredClone(
+      gameplayGames[0].generatedIntent,
+    );
+    gameplayGames[0].commander = {
+      ...gameplayGames[0].commander,
+      planObjective: `pressure_rival:${targetID}`,
+      commanderSelectedOptionID: `pressure_rival:${targetID}`,
+      commanderSelectedOptionFamily: "pressure_rival",
+      commanderDeterministicPreferredOptionId: `pressure_rival:${targetID}`,
+      commanderDeterministicPreferredOptionAbsent: false,
+      commanderFidelity: "aligned_primary",
+      batchIndex: 0,
+      batchSize: 2,
+      batchActionIDs: "attack:fixture,embargo:followup",
+    };
+    const embargoIntent = { type: "embargo", targetID, action: "start" };
+    const supportGame = {
+      ...structuredClone(gameplayGames[0]),
+      sequence: Math.max(...games.map((entry) => entry.sequence)) + 1,
+      chosen: {
+        id: "embargo:followup",
+        kind: "embargo",
+        metadata: { targetID, action: "start" },
+      },
+      generatedIntent: {
+        type: "embargo",
+        sha256: sha256Canonical(embargoIntent),
+        canonical: embargoIntent,
+      },
+      result: {
+        accepted: true,
+        submittedIntent: {
+          type: "embargo",
+          sha256: sha256Canonical(embargoIntent),
+          canonical: embargoIntent,
+        },
+      },
+      commander: {
+        ...structuredClone(gameplayGames[0].commander),
+        commanderFidelity: "aligned_support",
+        batchIndex: 1,
+      },
+    };
+    games.push(supportGame);
+    gameplayGames.push(supportGame);
+    const syncExecutionHash = () => {
+      decision.commanderExecutionSha256 = sha256Canonical(decision.commander);
+      for (const game of gameplayGames) {
+        game.commander.commanderExecutionSha256 =
+          decision.commanderExecutionSha256;
+        game.commander.commanderSelectionSha256 = commanderSelectionSha256(
+          decision.commander,
+        );
+      }
+      fixture.playerTraceJsonl = `${trace
+        .map((entry) => JSON.stringify(entry))
+        .join("\n")}\n`;
+      fixture.gameEvidenceJsonl = `${games
+        .map((entry) => JSON.stringify(entry))
+        .join("\n")}\n`;
+    };
+    syncExecutionHash();
+    fixture.playerTraceJsonl = `${trace
+      .map((entry) => JSON.stringify(entry))
+      .join("\n")}\n`;
+    fixture.gameEvidenceJsonl = `${games
+      .map((entry) => JSON.stringify(entry))
+      .join("\n")}\n`;
+    expect(verifyCommanderXpJoinedGameplayEvidence(fixture)).toEqual([
+      fixture.requestID,
+      fixture.spawnRequestID,
+    ]);
+
+    decision.commander.commanderBatchFidelities = JSON.stringify({
+      "attack:fixture": "aligned_primary",
+    });
+    syncExecutionHash();
+    fixture.playerTraceJsonl = `${trace
+      .map((entry) => JSON.stringify(entry))
+      .join("\n")}\n`;
+    expect(() => verifyCommanderXpJoinedGameplayEvidence(fixture)).toThrow(
+      /COMMANDER_BATCH_FIDELITY_MISMATCH/,
+    );
+
+    decision.commander.commanderBatchFidelities = JSON.stringify({
+      "attack:fixture": "aligned_primary",
+      "embargo:followup": "hold_plan_blocked",
+    });
+    syncExecutionHash();
+    fixture.playerTraceJsonl = `${trace
+      .map((entry) => JSON.stringify(entry))
+      .join("\n")}\n`;
+    expect(() => verifyCommanderXpJoinedGameplayEvidence(fixture)).toThrow(
+      /COMMANDER_FIDELITY_RECOMPUTATION_MISMATCH/,
+    );
+
+    decision.commander.commanderBatchFidelities = JSON.stringify({
+      "attack:fixture": "aligned_primary",
+      "embargo:followup": "invented_fidelity_class",
+    });
+    syncExecutionHash();
+    fixture.playerTraceJsonl = `${trace
+      .map((entry) => JSON.stringify(entry))
+      .join("\n")}\n`;
+    expect(() => verifyCommanderXpJoinedGameplayEvidence(fixture)).toThrow(
+      /COMMANDER_BATCH_FIDELITY_MISMATCH/,
+    );
+
+    decision.commander.commanderFidelity = "aligned_primary";
+    decision.commander.commanderBatchFidelities = JSON.stringify({
+      "attack:fixture": "aligned_primary",
+      "embargo:followup": "aligned_support",
+    });
+    syncExecutionHash();
+    const forgedIntent = {
+      type: "build_unit",
+      unit: "City",
+      tile: 1,
+    };
+    const forgedLegalActions = [
+      legalActions[0],
+      { id: "embargo:followup", kind: "build" },
+    ];
+    decision.offeredLegalActions = forgedLegalActions;
+    decision.offeredLegalActionSetSha256 = sha256Canonical(forgedLegalActions);
+    for (const game of gameplayGames) {
+      game.legalActions = forgedLegalActions;
+      game.offeredLegalActionSetSha256 = sha256Canonical(forgedLegalActions);
+    }
+    gameplayGames[1].chosen = {
+      id: "embargo:followup",
+      kind: "build",
+      metadata: { unit: "City", role: "economic" },
+    };
+    gameplayGames[1].generatedIntent = {
+      type: "build_unit",
+      sha256: sha256Canonical(forgedIntent),
+      canonical: forgedIntent,
+    };
+    gameplayGames[1].result.submittedIntent = structuredClone(
+      gameplayGames[1].generatedIntent,
+    );
+    fixture.gameEvidenceJsonl = `${games
+      .map((entry) => JSON.stringify(entry))
+      .join("\n")}\n`;
+    fixture.playerTraceJsonl = `${trace
+      .map((entry) => JSON.stringify(entry))
+      .join("\n")}\n`;
+    expect(() => verifyCommanderXpJoinedGameplayEvidence(fixture)).toThrow(
+      /COMMANDER_FIDELITY_RECOMPUTATION_MISMATCH/,
     );
   });
 
@@ -278,6 +930,149 @@ describe("Commander XP evidence verifier v2", () => {
     ).rejects.toThrow(/COWORLD_BUNDLE_RECEIPT_MISMATCH/);
   });
 
+  it("recomputes the exact 48-pair analysis and rejects identity, outcome, JSON, and Markdown tampering", async () => {
+    const { preregistration } = await buildPreregistrationFixture();
+    const outcomes = confirmatoryAnalysisOutcomes(preregistration);
+    expect(outcomes.some((outcome) => !outcome.subjectWon)).toBe(true);
+    const analysis = buildCommanderXpConfirmatoryAnalysisEvidence(
+      preregistration,
+      outcomes,
+    );
+    const markdown = renderCommanderXpConfirmatoryAnalysisMarkdown(analysis);
+    expect(() =>
+      verifyCommanderXpConfirmatoryAnalysisArtifacts(
+        preregistration,
+        outcomes,
+        analysis,
+        markdown,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      verifyCommanderXpConfirmatoryAnalysisArtifacts(
+        preregistration,
+        structuredClone(outcomes).reverse(),
+        analysis,
+        markdown,
+      ),
+    ).not.toThrow();
+
+    expect(() =>
+      buildCommanderXpConfirmatoryAnalysisEvidence(
+        preregistration,
+        outcomes.slice(0, -1),
+      ),
+    ).toThrow(/outcomes are invalid/);
+    expect(() =>
+      buildCommanderXpConfirmatoryAnalysisEvidence(preregistration, [
+        ...outcomes,
+        structuredClone(outcomes[0]!),
+      ]),
+    ).toThrow(/outcomes are invalid/);
+
+    const duplicatePair = structuredClone(outcomes);
+    duplicatePair[3] = structuredClone(duplicatePair[1]!);
+    expect(() =>
+      buildCommanderXpConfirmatoryAnalysisEvidence(
+        preregistration,
+        duplicatePair,
+      ),
+    ).toThrow(/duplicated|incomplete|reused/);
+
+    const duplicateID = structuredClone(outcomes);
+    duplicateID[2]!.xpRequestID = duplicateID[0]!.xpRequestID;
+    expect(() =>
+      buildCommanderXpConfirmatoryAnalysisEvidence(
+        preregistration,
+        duplicateID,
+      ),
+    ).toThrow(/identity is reused/);
+
+    const seedMismatch = structuredClone(outcomes);
+    seedMismatch[1]!.seed += 1;
+    expect(() =>
+      buildCommanderXpConfirmatoryAnalysisEvidence(
+        preregistration,
+        seedMismatch,
+      ),
+    ).toThrow(/pair is incomplete/);
+
+    const seedReuse = structuredClone(outcomes);
+    seedReuse[2]!.seed = seedReuse[0]!.seed;
+    seedReuse[3]!.seed = seedReuse[0]!.seed;
+    expect(() =>
+      buildCommanderXpConfirmatoryAnalysisEvidence(preregistration, seedReuse),
+    ).toThrow(/pair seed is reused/);
+
+    const subjectWonMismatch = structuredClone(outcomes);
+    subjectWonMismatch[0]!.subjectWon = !subjectWonMismatch[0]!.subjectWon;
+    expect(() =>
+      buildCommanderXpConfirmatoryAnalysisEvidence(
+        preregistration,
+        subjectWonMismatch,
+      ),
+    ).toThrow(/outcomes are invalid/);
+
+    const scoreTamper = structuredClone(outcomes);
+    scoreTamper[0]!.score += 0.5;
+    expect(() =>
+      verifyCommanderXpConfirmatoryAnalysisArtifacts(
+        preregistration,
+        scoreTamper,
+        analysis,
+        markdown,
+      ),
+    ).toThrow(/CONFIRMATORY_ANALYSIS_ARTIFACT_MISMATCH/);
+
+    const jsonTamper = structuredClone(analysis);
+    jsonTamper.pairs[0]!.B.score += 1;
+    expect(() =>
+      verifyCommanderXpConfirmatoryAnalysisArtifacts(
+        preregistration,
+        outcomes,
+        jsonTamper,
+        markdown,
+      ),
+    ).toThrow(/CONFIRMATORY_ANALYSIS_ARTIFACT_MISMATCH/);
+    const jsonHashTamper = structuredClone(analysis);
+    jsonHashTamper.analysisSha256 = "f".repeat(64);
+    expect(() =>
+      verifyCommanderXpConfirmatoryAnalysisArtifacts(
+        preregistration,
+        outcomes,
+        jsonHashTamper,
+        markdown,
+      ),
+    ).toThrow(/CONFIRMATORY_ANALYSIS_ARTIFACT_MISMATCH/);
+    const missingJsonPair = structuredClone(analysis);
+    missingJsonPair.pairs.pop();
+    expect(() =>
+      verifyCommanderXpConfirmatoryAnalysisArtifacts(
+        preregistration,
+        outcomes,
+        missingJsonPair,
+        markdown,
+      ),
+    ).toThrow(/CONFIRMATORY_ANALYSIS_ARTIFACT_MISMATCH/);
+    const extraJsonPair = structuredClone(analysis);
+    extraJsonPair.pairs.push(structuredClone(extraJsonPair.pairs[0]!));
+    expect(() =>
+      verifyCommanderXpConfirmatoryAnalysisArtifacts(
+        preregistration,
+        outcomes,
+        extraJsonPair,
+        markdown,
+      ),
+    ).toThrow(/CONFIRMATORY_ANALYSIS_ARTIFACT_MISMATCH/);
+    expect(() =>
+      verifyCommanderXpConfirmatoryAnalysisArtifacts(
+        preregistration,
+        outcomes,
+        analysis,
+        `${markdown}tampered\n`,
+      ),
+    ).toThrow(/CONFIRMATORY_ANALYSIS_ARTIFACT_MISMATCH/);
+  });
+
   it("consumes the external-seal preregistration and provider ledger schema exactly", async () => {
     const { preregistration } = await buildPreregistrationFixture();
     const root = await fs.mkdtemp(
@@ -287,6 +1082,20 @@ describe("Commander XP evidence verifier v2", () => {
     const preregistrationReceipt = externalPhaseLedgerFixture(
       preregistration,
       "preregistration",
+    );
+    preregistrationReceipt.signerSourceSha = "9".repeat(40);
+    preregistrationReceipt.attestationPolicy.sourceDigest =
+      preregistrationReceipt.signerSourceSha;
+    preregistrationReceipt.attestationPolicy.signerDigest =
+      preregistrationReceipt.signerSourceSha;
+    preregistrationReceipt.ledgerSha256 = sha256(
+      externalCanonicalJson(
+        Object.fromEntries(
+          Object.entries(preregistrationReceipt).filter(
+            ([key]) => key !== "ledgerSha256",
+          ),
+        ),
+      ),
     );
     const preregistrationPath = path.join(root, "preregistration.json");
     await fs.writeFile(
@@ -428,6 +1237,7 @@ function externalPhaseLedgerFixture(
     },
     runId: phase === "preregistration" ? "700" : "701",
     attempt: 1,
+    signerSourceSha: preregistration.identities.adapterSourceSha,
     headSha: preregistration.identities.adapterSourceSha,
     treeSha: preregistration.identities.adapterSourceTreeSha,
     phase,
@@ -440,6 +1250,7 @@ function externalPhaseLedgerFixture(
     priorPhaseReceipt: null,
     canaryReceipt: null,
     namespaceRegistry,
+    confirmatoryAnalysis: null,
     evidenceArtifact: {
       id: phase === "preregistration" ? "701" : "711",
       digest: `sha256:${"b".repeat(64)}`,
@@ -454,6 +1265,9 @@ function externalPhaseLedgerFixture(
       receiptSha256: "1".repeat(64),
       attestedSubjectDigest: "1".repeat(64),
     },
+    integrityVerified: true as const,
+    experimentUsable: false,
+    performanceClaimAuthorized: false,
   };
   return {
     ...body,
@@ -497,6 +1311,7 @@ function externalPhaseReceiptBinding(
     },
     localSealSha256: ledger.evidenceArtifact.localSealSha256,
     namespaceRegistrySha256: ledger.namespaceRegistry.registrySha256,
+    signerSourceSha: ledger.signerSourceSha,
     workflowPath: ledger.workflowPath,
     workflowID: ledger.workflowID,
     workflowName: ledger.workflowName,
@@ -602,8 +1417,7 @@ async function buildPreregistrationFixture(): Promise<{
     canonicalLeagueBindingSnapshotSha256: "8".repeat(64),
     imageDigest: `sha256:${"4".repeat(64)}`,
     bedrockModel: "us.anthropic.claude-sonnet-4-6",
-    xpOpenApiSha256:
-      "dc32022f7e2850e65232c6f51c7490011483e8948269e975bc177d71f29a3e4f",
+    xpOpenApiSha256: COMMANDER_XP_OPENAPI_SHA256,
     armPolicyVersionIDs: { A: "pvid-a", B: "pvid-b", C: "pvid-c" },
     opponentPolicyVersionIDs: ["pvid-o1", "pvid-o2", "pvid-o3"],
   };
@@ -677,8 +1491,9 @@ async function buildPreregistrationFixture(): Promise<{
           bedrockModel: planInput.bedrockModel,
           environmentConfiguration: {
             attached: true,
-            keys: ["BEDROCK_MODEL", "USE_BEDROCK"],
+            keys: ["providerRegion", "modelID", "providerEnabled"],
             valuesSha256: sha256Canonical({
+              AWS_REGION: COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.region,
               BEDROCK_MODEL: planInput.bedrockModel,
               USE_BEDROCK: "true",
             }),
@@ -786,8 +1601,8 @@ async function buildPreregistrationFixture(): Promise<{
     gameBuildProvenanceDigest: planInput.gameBuildProvenanceDigest,
     gameRunnableEnv: {
       PROXYWAR_COMMANDER_XP_GAME_EVIDENCE: "1",
-      PROXYWAR_TUNE_STRUCTURED_DEALS: "1",
-      PROXYWAR_TUNE_FREETEXT_MESSAGES: "1",
+      PROXYWAR_TUNE_STRUCTURED_DEALS: "0",
+      PROXYWAR_TUNE_FREETEXT_MESSAGES: "0",
       PROXYWAR_TUNE_SPATIAL_OBSERVATION: "0",
       PROXYWAR_TUNE_SPATIAL_MINIMAP: "0",
     },
@@ -806,6 +1621,26 @@ async function buildPreregistrationFixture(): Promise<{
     integrityExpected: true,
     experimentUsable: false,
     authenticity: "external-seal-receipt-required",
+  };
+  const openApiContractBody = {
+    schemaVersion: 2,
+    authority: "softmax-public-openapi-exact-bytes-v1",
+    url: "https://softmax.com/api/observatory/openapi.json",
+    fetchedAt: "2026-08-22T13:00:30.000Z",
+    byteLength: 418_415,
+    rawSha256: prereg.identities.xpOpenApiSha256,
+    coworldClientVersion: "0.1.42",
+    createRequestSchema: {
+      name: "V2CreateExperienceRequestRequest",
+      encoding: "jq-cS-utf8-compact-sorted-json-with-terminal-lf",
+      sha256: prereg.identities.xpCreateRequestSchemaSha256,
+    },
+    rosterSchemas: {
+      names: ["V2RosterParticipant", "V2RosterPlayer"],
+      encoding:
+        "ordered-concatenation-of-two-jq-cS-utf8-records-with-terminal-lf",
+      sha256: prereg.identities.xpRosterSchemasSha256,
+    },
   };
 
   const artifacts = new Map<string, string>([
@@ -826,6 +1661,13 @@ async function buildPreregistrationFixture(): Promise<{
     ["eval-coworld-inspect.json", evalInspectText],
     ["eval-coworld-manifest-v2.json", evalManifestText],
     ["eval-coworld-terminal-proof-v2.json", terminalProofText],
+    [
+      "xp-openapi-contract-v2.json",
+      JSON.stringify({
+        ...openApiContractBody,
+        receiptSha256: sha256Canonical(openApiContractBody),
+      }),
+    ],
     [
       "xp-openapi.sha256",
       `${planInput.xpOpenApiSha256}  https://softmax.com/api/observatory/openapi.json\n`,
@@ -955,6 +1797,30 @@ async function buildPreregistrationFixture(): Promise<{
   return { envelopeRoot, evidenceRoot, preregistration: prereg };
 }
 
+function exactCommanderWireMetadata(
+  overrides: Record<string, string | number | boolean | null>,
+): Record<string, string | number | boolean | null> {
+  return Object.fromEntries(
+    COMMANDER_XP_COMMANDER_METADATA_ALLOWLIST.map((key) => [
+      key,
+      overrides[key] ?? null,
+    ]),
+  );
+}
+
+function commanderSelectionSha256(commander: Record<string, unknown>): string {
+  return sha256Canonical({
+    planID: commander.planID ?? null,
+    selectedOptionID: commander.commanderSelectedOptionID ?? null,
+    selectedOptionFamily: commander.commanderSelectedOptionFamily ?? null,
+    selectorSource: commander.commanderSelectorSource ?? null,
+    deterministicPreferredOptionID:
+      commander.commanderDeterministicPreferredOptionId ?? null,
+    deterministicPreferredOptionAbsent:
+      commander.commanderDeterministicPreferredOptionAbsent ?? null,
+  });
+}
+
 function gameplayJoinFixture(
   preregistration: ReturnType<typeof buildCommanderXpPreRegistration>,
   arm: "B" | "C",
@@ -966,6 +1832,7 @@ function gameplayJoinFixture(
   } = {},
 ): Parameters<typeof verifyCommanderXpJoinedGameplayEvidence>[0] & {
   requestID: string;
+  spawnRequestID: string;
 } {
   const plannedRequest = preregistration.requests.find(
     (request) =>
@@ -986,6 +1853,17 @@ function gameplayJoinFixture(
     stage: input.stage,
     sequence: input.sequence,
     provider: "bedrock-sidecar",
+    providerContractSha256: sha256Canonical(
+      preregistration.identities.providerContract,
+    ),
+    promptVersion:
+      arm === "C" && input.stage === "selector"
+        ? preregistration.identities.commanderPromptVersion
+        : null,
+    promptVersionSha256:
+      arm === "C" && input.stage === "selector"
+        ? preregistration.identities.commanderPromptVersionSha256
+        : null,
     requestedModel: preregistration.identities.bedrockModel,
     responseModel: preregistration.identities.bedrockModel,
     promptSha256: "1".repeat(64),
@@ -1011,12 +1889,71 @@ function gameplayJoinFixture(
     );
   }
   const legalActions = [{ id: "hold:fixture", kind: "hold" }];
+  const initialObservationSha256 = sha256Canonical({
+    gameID: expectedGameID,
+    subjectSeat: plannedRequest.subjectSeat,
+    phase: "active",
+  });
+  const initialLegalActionSurfaceSha256 = sha256Canonical([
+    {
+      id: "hold:fixture",
+      kind: "hold",
+      label: "Hold",
+      intent: null,
+      risk: { level: "none" },
+    },
+  ]);
+  const optionSurfaceSha256 = sha256Canonical({
+    candidates: [{ id: "survive", primaryActionIDs: ["hold:fixture"] }],
+  });
+  const primaryCommander = exactCommanderWireMetadata({
+    runtimeMode: "commander-v0-selector",
+    plannerSource: "strategic-commander-v0",
+    executorSource: "strategic-option-executor-v0",
+    actionSelectionSource: "strategic-option-binding",
+    externalPlannerCall: arm === "C",
+    commanderPrimarySelectorSource: arm === "B" ? "deterministic" : "llm",
+    commanderSelectorSource: arm === "B" ? "deterministic" : "llm",
+    commanderSelectorProvider: arm === "B" ? null : "custom",
+    commanderSelectorModel:
+      arm === "B" ? null : preregistration.identities.bedrockModel,
+    commanderPromptVersion:
+      arm === "C" ? preregistration.identities.commanderPromptVersion : null,
+    commanderPromptSha256: arm === "C" ? "1".repeat(64) : null,
+    commanderEligibleOptionIds: "survive",
+    commanderExposedOptionIds: "survive",
+    commanderOptionSurfaceSha256: optionSurfaceSha256,
+    commanderFidelity: "aligned_primary",
+    commanderBatchFidelities: JSON.stringify({
+      "hold:fixture": "aligned_primary",
+    }),
+    planID: arm === "C" ? "plan-c-fixture" : "plan-b-fixture",
+    planObjective: "survive",
+    commanderSelectedOptionID: "survive",
+    commanderSelectedOptionFamily: "survive",
+    commanderPreviousPlanID: null,
+    commanderFingerprint: "options:state",
+    commanderPlanInstalled: true,
+    commanderHorizonDecisions: 3,
+    commanderPlanAgeDecisions: 0,
+    commanderReplanReason: "no_active_plan",
+    commanderEmergencyCondition: null,
+    commanderDeterministicPreferredOptionId: "survive",
+    commanderDeterministicPreferredOptionAbsent: false,
+    batchIndex: 0,
+    batchSize: 1,
+    batchActionIDs: "hold:fixture",
+  });
+  const commanderExecutionSha256 = sha256Canonical(primaryCommander);
   trace.push({
     recordType: "decision",
     schemaVersion: 2,
     requestID,
     sequence: trace.length,
     arm,
+    preSelectorObservationSha256: initialObservationSha256,
+    preSelectorLegalActionSurfaceSha256: initialLegalActionSurfaceSha256,
+    commanderExecutionSha256,
     offeredLegalActions: legalActions,
     offeredLegalActionSetSha256: sha256Canonical(legalActions),
     selectedLegalActionID: "hold:fixture",
@@ -1028,25 +1965,7 @@ function gameplayJoinFixture(
     fallbackUsed: false,
     llmPlannerDegraded: false,
     degradedCause: null,
-    commander: {
-      plannerSource: "strategic-commander-v0",
-      executorSource: "strategic-option-executor-v0",
-      actionSelectionSource: "strategic-option-binding",
-      externalPlannerCall: arm === "C",
-      commanderPrimarySelectorSource: arm === "B" ? "deterministic" : "llm",
-      commanderSelectorSource: arm === "B" ? "deterministic" : "llm",
-      commanderSelectorProvider: arm === "B" ? null : "custom",
-      commanderSelectorModel:
-        arm === "B" ? null : preregistration.identities.bedrockModel,
-      commanderEligibleOptionIds: "option:fixture",
-      commanderFidelity: "aligned_primary",
-      planID: arm === "C" ? "plan-c-fixture" : "plan-b-fixture",
-      commanderPreviousPlanID: null,
-      commanderFingerprint: "options:state",
-      commanderPlanInstalled: true,
-      commanderPlanAgeDecisions: 0,
-      commanderReplanReason: "initial",
-    },
+    commander: primaryCommander,
   });
   const gameEvidence: Array<Record<string, unknown>> = [
     {
@@ -1060,7 +1979,7 @@ function gameplayJoinFixture(
       turnNumber: 1,
       legalActions,
       offeredLegalActionSetSha256: sha256Canonical(legalActions),
-      chosen: { id: "hold:fixture", kind: "hold" },
+      chosen: { id: "hold:fixture", kind: "hold", metadata: {} },
       generatedIntent: null,
       result: { accepted: true, submittedIntent: null },
       audit: { status: "not_applicable", reasonSha256: null },
@@ -1073,16 +1992,61 @@ function gameplayJoinFixture(
         accepted: null,
         rejected: null,
       },
+      commander: {
+        commanderExecutionSha256,
+        commanderSelectionSha256: commanderSelectionSha256(primaryCommander),
+        planID: arm === "C" ? "plan-c-fixture" : "plan-b-fixture",
+        planObjective: "survive",
+        commanderSelectedOptionID: "survive",
+        commanderSelectedOptionFamily: "survive",
+        commanderOptionSurfaceSha256: optionSurfaceSha256,
+        commanderPreviousPlanID: null,
+        commanderReplanReason: "no_active_plan",
+        commanderPlanAgeDecisions: 0,
+        commanderEmergencyCondition: null,
+        commanderPromptVersion:
+          arm === "C"
+            ? preregistration.identities.commanderPromptVersion
+            : null,
+        commanderPromptSha256: arm === "C" ? "1".repeat(64) : null,
+        commanderDeterministicPreferredOptionId: "survive",
+        commanderDeterministicPreferredOptionAbsent: false,
+        commanderFidelity: "aligned_primary",
+        batchIndex: 0,
+        batchSize: 1,
+        batchActionIDs: "hold:fixture",
+      },
     },
   ];
-  if (arm === "C" && options.includeCachedContinuation) {
+  if (options.includeCachedContinuation) {
     const cachedRequestID = `${requestID}-cached`;
+    const cachedCommander = exactCommanderWireMetadata({
+      ...primaryCommander,
+      externalPlannerCall: false,
+      commanderSelectorProvider: null,
+      commanderSelectorModel: null,
+      planID: options.breakCachedPlanChain
+        ? `plan-${arm.toLowerCase()}-forged`
+        : `plan-${arm.toLowerCase()}-fixture`,
+      commanderPlanInstalled: false,
+      commanderPlanAgeDecisions: 1,
+      commanderReplanReason: "within_horizon",
+      commanderPromptVersion: null,
+      commanderPromptSha256: null,
+    });
+    const cachedExecutionSha256 = sha256Canonical(cachedCommander);
     trace.push({
       recordType: "decision",
       schemaVersion: 2,
       requestID: cachedRequestID,
       sequence: trace.length,
       arm,
+      preSelectorObservationSha256: sha256Canonical({
+        prior: initialObservationSha256,
+        turn: 2,
+      }),
+      preSelectorLegalActionSurfaceSha256: initialLegalActionSurfaceSha256,
+      commanderExecutionSha256: cachedExecutionSha256,
       offeredLegalActions: legalActions,
       offeredLegalActionSetSha256: sha256Canonical(legalActions),
       selectedLegalActionID: "hold:fixture",
@@ -1094,34 +2058,120 @@ function gameplayJoinFixture(
       fallbackUsed: false,
       llmPlannerDegraded: false,
       degradedCause: null,
-      commander: {
-        plannerSource: "strategic-commander-v0",
-        executorSource: "strategic-option-executor-v0",
-        actionSelectionSource: "strategic-option-binding",
-        externalPlannerCall: false,
-        commanderPrimarySelectorSource: "llm",
-        commanderSelectorSource: "llm",
-        commanderSelectorProvider: null,
-        commanderSelectorModel: null,
-        commanderEligibleOptionIds: "option:fixture",
-        commanderFidelity: "aligned_primary",
-        planID: options.breakCachedPlanChain
-          ? "plan-c-forged"
-          : "plan-c-fixture",
-        commanderPreviousPlanID: null,
-        commanderFingerprint: "options:state",
-        commanderPlanInstalled: false,
-        commanderPlanAgeDecisions: 1,
-        commanderReplanReason: "within_horizon",
-      },
+      commander: cachedCommander,
     });
     gameEvidence.push({
       ...gameEvidence[0],
       requestID: cachedRequestID,
       sequence: 1,
       turnNumber: 2,
+      commander: {
+        ...structuredClone(
+          gameEvidence[0]!.commander as Record<string, unknown>,
+        ),
+        commanderExecutionSha256: cachedExecutionSha256,
+        commanderSelectionSha256: commanderSelectionSha256(cachedCommander),
+        planID: options.breakCachedPlanChain
+          ? `plan-${arm.toLowerCase()}-forged`
+          : `plan-${arm.toLowerCase()}-fixture`,
+        commanderReplanReason: "within_horizon",
+        commanderPlanAgeDecisions: 1,
+        commanderPromptVersion: null,
+        commanderPromptSha256: null,
+      },
     });
   }
+  const spawnRequestID = `${requestID}-spawn`;
+  const spawnLegalActions = [{ id: "spawn:fixture", kind: "spawn" }];
+  trace.push({
+    recordType: "decision",
+    schemaVersion: 2,
+    requestID: spawnRequestID,
+    sequence: trace.length,
+    arm,
+    preSelectorObservationSha256: sha256Canonical({
+      gameID: expectedGameID,
+      subjectSeat: plannedRequest.subjectSeat,
+      phase: "spawn",
+    }),
+    preSelectorLegalActionSurfaceSha256: sha256Canonical(spawnLegalActions),
+    commanderExecutionSha256: null,
+    offeredLegalActions: spawnLegalActions,
+    offeredLegalActionSetSha256: sha256Canonical(spawnLegalActions),
+    selectedLegalActionID: "spawn:fixture",
+    selectedLegalActionIDs: ["spawn:fixture"],
+    selectedDealActionID: null,
+    selectedMessageActionID: null,
+    spawnPreferenceLegalActionIDs: ["spawn:fixture"],
+    runtimeMode: null,
+    fallbackUsed: false,
+    llmPlannerDegraded: false,
+    degradedCause: null,
+    commander: {},
+  });
+  gameEvidence.push({
+    schemaVersion: 2,
+    runKey: plannedRequest.runKey,
+    requestID: spawnRequestID,
+    sequence: gameEvidence.length,
+    gameID: expectedGameID,
+    coworldSlot: plannedRequest.subjectSeat,
+    agentID: `agent-${arm.toLowerCase()}`,
+    turnNumber: 0,
+    legalActions: spawnLegalActions,
+    offeredLegalActionSetSha256: sha256Canonical(spawnLegalActions),
+    chosen: { id: "spawn:fixture", kind: "spawn", metadata: {} },
+    generatedIntent: null,
+    result: { accepted: true, submittedIntent: null },
+    audit: { status: "not_applicable", reasonSha256: null },
+    spawn: {
+      algorithmVersion: "sealed-ranked-v1",
+      offeredActionIDs: ["spawn:fixture"],
+      ballotSource: "submitted",
+      submittedBallotActionIDs: ["spawn:fixture"],
+      submittedBallotCount: 1,
+      submittedBallotTruncated: false,
+      normalizedBallotActionIDs: ["spawn:fixture"],
+      ballotValid: true,
+      ballotInvalidReason: null,
+      defaultReason: null,
+      priorityRank: 2,
+      assignedActionID: "spawn:fixture",
+      assignedPreferenceRank: 1,
+      assignedSubmittedPreferenceRank: 1,
+      stageFallbackUsed: false,
+      stageDegraded: false,
+    },
+    deal: null,
+    comms: {
+      requestedID: null,
+      actionID: null,
+      recipientID: null,
+      accepted: null,
+      rejected: null,
+    },
+    commander: {
+      commanderExecutionSha256: null,
+      commanderSelectionSha256: null,
+      planID: null,
+      planObjective: null,
+      commanderSelectedOptionID: null,
+      commanderSelectedOptionFamily: null,
+      commanderOptionSurfaceSha256: null,
+      commanderPreviousPlanID: null,
+      commanderReplanReason: null,
+      commanderPlanAgeDecisions: null,
+      commanderEmergencyCondition: null,
+      commanderPromptVersion: null,
+      commanderPromptSha256: null,
+      commanderDeterministicPreferredOptionId: null,
+      commanderDeterministicPreferredOptionAbsent: null,
+      commanderFidelity: null,
+      batchIndex: null,
+      batchSize: null,
+      batchActionIDs: null,
+    },
+  });
   const runtimeManifest: PlayerRuntimeManifest = {
     schemaVersion: 2,
     artifactKind: "commander-xp-policy-evidence",
@@ -1138,6 +2188,10 @@ function gameplayJoinFixture(
     policyIdentityAuthority:
       "external-policy-inspect-and-xp-participant-metadata",
     requestedModel: preregistration.identities.bedrockModel,
+    providerContract: structuredClone(COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT),
+    commanderPromptVersion: preregistration.identities.commanderPromptVersion,
+    commanderPromptVersionSha256:
+      preregistration.identities.commanderPromptVersionSha256,
     runArgv: preregistration.identities.runArgv[arm],
     flags: preregistration.fixedFlags,
     providerPreflight: {
@@ -1157,7 +2211,46 @@ function gameplayJoinFixture(
     gameEvidenceJsonl: `${gameEvidence.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
     expectedGameID,
     requestID,
+    spawnRequestID,
   };
+}
+
+function confirmatoryAnalysisOutcomes(
+  preregistration: ReturnType<typeof buildCommanderXpPreRegistration>,
+): CommanderXpVerifiedOutcome[] {
+  return preregistration.requests
+    .filter((request) => request.phase === "confirmatory")
+    .map((request) => {
+      const subjectWon =
+        request.arm === "B"
+          ? request.replicaIndex % 4 === 0
+          : request.replicaIndex % 3 === 0;
+      return {
+        replicaIndex: request.replicaIndex,
+        arm: request.arm,
+        seed: request.seed,
+        xpRequestID: `xreq_analysis-${request.arm}-${request.replicaIndex}`,
+        episodeRequestID: `ereq_analysis-${request.arm}-${request.replicaIndex}`,
+        jobID: `job_analysis-${request.arm}-${request.replicaIndex}`,
+        episodeID: `episode_analysis-${request.arm}-${request.replicaIndex}`,
+        subjectSeat: request.subjectSeat,
+        winnerSlot: subjectWon
+          ? request.subjectSeat
+          : (request.subjectSeat + 1) % 4,
+        subjectWon,
+        score: subjectWon ? 1 : 0,
+        selectorAudit: {
+          installedPlanCount: 1,
+          selectedOptionDistribution: { survive: 1 },
+          selectedOptionFamilyDistribution: { survive: 1 },
+          deterministicPreferredAbsent: { count: 0, opportunities: 1 },
+          selectorDisagreement: {
+            count: 0,
+            opportunities: request.arm === "C" ? 1 : 0,
+          },
+        },
+      };
+    });
 }
 
 async function buildCoworldProjectionFixture(

@@ -14,6 +14,30 @@ export function commanderXpEvalEvidenceEnabled(
 export interface CommanderXpIntentEvidence {
   type: string;
   sha256: string;
+  /** Exact privacy-safe intent fields needed by StrategicOptionFidelity. */
+  canonical: Record<string, string | number | boolean | null> | null;
+}
+
+export interface CommanderXpFidelityEvidence {
+  commanderExecutionSha256: string | null;
+  commanderSelectionSha256: string | null;
+  planID: string | null;
+  planObjective: string | null;
+  commanderSelectedOptionID: string | null;
+  commanderSelectedOptionFamily: string | null;
+  commanderOptionSurfaceSha256: string | null;
+  commanderPreviousPlanID: string | null;
+  commanderReplanReason: string | null;
+  commanderPlanAgeDecisions: number | null;
+  commanderEmergencyCondition: string | null;
+  commanderPromptVersion: string | null;
+  commanderPromptSha256: string | null;
+  commanderDeterministicPreferredOptionId: string | null;
+  commanderDeterministicPreferredOptionAbsent: boolean | null;
+  commanderFidelity: string | null;
+  batchIndex: number | null;
+  batchSize: number | null;
+  batchActionIDs: string | null;
 }
 
 export interface CommanderXpSpawnEvidence {
@@ -69,7 +93,11 @@ export interface CommanderXpGameEvidence {
   turnNumber: number;
   legalActions: Array<{ id: string; kind: LegalActionKind }>;
   offeredLegalActionSetSha256: string;
-  chosen: { id: string; kind: LegalActionKind };
+  chosen: {
+    id: string;
+    kind: LegalActionKind;
+    metadata: Record<string, string | number | boolean | null>;
+  };
   generatedIntent: CommanderXpIntentEvidence | null;
   result: {
     accepted: boolean;
@@ -92,6 +120,7 @@ export interface CommanderXpGameEvidence {
     accepted: boolean | null;
     rejected: boolean | null;
   };
+  commander: CommanderXpFidelityEvidence;
 }
 
 export function projectCommanderXpGameEvidence(
@@ -137,7 +166,11 @@ export function projectCommanderXpGameEvidence(
     turnNumber: record.turnNumber,
     legalActions,
     offeredLegalActionSetSha256: sha256Canonical(legalActions),
-    chosen: { id: record.chosenActionID, kind: record.chosenActionKind },
+    chosen: {
+      id: record.chosenActionID,
+      kind: record.chosenActionKind,
+      metadata: projectFidelityActionMetadata(record.chosenActionMetadata),
+    },
     generatedIntent: projectIntent(record.intent),
     result: {
       accepted: record.result.accepted,
@@ -160,6 +193,60 @@ export function projectCommanderXpGameEvidence(
       rejected:
         stringMetadata(metadata, "commsSlotRejected") === null ? null : true,
     },
+    commander: {
+      commanderExecutionSha256: stringMetadata(
+        metadata,
+        "commanderExecutionSha256",
+      ),
+      commanderSelectionSha256: stringMetadata(
+        metadata,
+        "commanderSelectionSha256",
+      ),
+      planID: stringMetadata(metadata, "planID"),
+      planObjective: stringMetadata(metadata, "planObjective"),
+      commanderSelectedOptionID: stringMetadata(
+        metadata,
+        "commanderSelectedOptionID",
+      ),
+      commanderSelectedOptionFamily: stringMetadata(
+        metadata,
+        "commanderSelectedOptionFamily",
+      ),
+      commanderOptionSurfaceSha256: stringMetadata(
+        metadata,
+        "commanderOptionSurfaceSha256",
+      ),
+      commanderPreviousPlanID: stringMetadata(
+        metadata,
+        "commanderPreviousPlanID",
+      ),
+      commanderReplanReason: stringMetadata(metadata, "commanderReplanReason"),
+      commanderPlanAgeDecisions: numberMetadata(
+        metadata,
+        "commanderPlanAgeDecisions",
+      ),
+      commanderEmergencyCondition: stringMetadata(
+        metadata,
+        "commanderEmergencyCondition",
+      ),
+      commanderPromptVersion: stringMetadata(
+        metadata,
+        "commanderPromptVersion",
+      ),
+      commanderPromptSha256: stringMetadata(metadata, "commanderPromptSha256"),
+      commanderDeterministicPreferredOptionId: stringMetadata(
+        metadata,
+        "commanderDeterministicPreferredOptionId",
+      ),
+      commanderDeterministicPreferredOptionAbsent: booleanMetadata(
+        metadata,
+        "commanderDeterministicPreferredOptionAbsent",
+      ),
+      commanderFidelity: stringMetadata(metadata, "commanderFidelity"),
+      batchIndex: numberMetadata(metadata, "batchIndex"),
+      batchSize: numberMetadata(metadata, "batchSize"),
+      batchActionIDs: stringMetadata(metadata, "batchActionIDs"),
+    },
   };
 }
 
@@ -167,7 +254,71 @@ function projectIntent(
   intent: AgentDecisionRecord["intent"],
 ): CommanderXpIntentEvidence | null {
   if (intent === null) return null;
-  return { type: intent.type, sha256: sha256Canonical(intent) };
+  return {
+    type: intent.type,
+    sha256: sha256Canonical(intent),
+    canonical: projectFidelityIntent(intent),
+  };
+}
+
+function projectFidelityIntent(
+  intent: NonNullable<AgentDecisionRecord["intent"]>,
+): Record<string, string | number | boolean | null> | null {
+  switch (intent.type) {
+    case "attack":
+      return {
+        type: intent.type,
+        targetID: intent.targetID,
+        troops: intent.troops,
+      };
+    case "boat":
+      return { type: intent.type, troops: intent.troops, dst: intent.dst };
+    case "targetPlayer":
+      return { type: intent.type, target: intent.target };
+    case "embargo":
+      return {
+        type: intent.type,
+        targetID: intent.targetID,
+        action: intent.action,
+      };
+    case "build_unit":
+      return {
+        type: intent.type,
+        unit: intent.unit,
+        tile: intent.tile,
+        ...(intent.rocketDirectionUp === undefined
+          ? {}
+          : { rocketDirectionUp: intent.rocketDirectionUp }),
+      };
+    case "upgrade_structure":
+      return { type: intent.type, unit: intent.unit, unitId: intent.unitId };
+    case "cancel_attack":
+      return { type: intent.type, attackID: intent.attackID };
+    default:
+      return null;
+  }
+}
+
+const fidelityActionMetadataKeys = [
+  "expansion",
+  "targetID",
+  "navalInvasion",
+  "targetTile",
+  "unit",
+  "role",
+  "action",
+  "attackID",
+] as const;
+
+function projectFidelityActionMetadata(
+  metadata: AgentDecisionRecord["chosenActionMetadata"],
+): Record<string, string | number | boolean | null> {
+  if (metadata === undefined) return {};
+  return Object.fromEntries(
+    fidelityActionMetadataKeys.flatMap((key) =>
+      Object.hasOwn(metadata, key) ? [[key, metadata[key]!] as const] : [],
+    ),
+  );
 }
 
 function projectSpawn(
@@ -236,6 +387,14 @@ function booleanMetadata(
 ): boolean | null {
   const value = metadata[key];
   return typeof value === "boolean" ? value : null;
+}
+
+function numberMetadata(
+  metadata: Record<string, string | number | boolean | null>,
+  key: string,
+): number | null {
+  const value = metadata[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function sha256Canonical(value: unknown): string {

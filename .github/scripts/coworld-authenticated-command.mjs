@@ -9,17 +9,17 @@ import {
   statSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 const allowedCommands = new Set([
   "commander-xp-episode-bundle",
   "commander-xp-policy-provision",
+  "commander-xp-run-episode",
+  "commander-xp-certify",
   "episode-logs",
-  "episodes",
   "leagues",
   "list",
   "next-version",
-  "replay-open",
   "status",
   "upload-coworld",
   "xp-request",
@@ -45,6 +45,33 @@ function exactRunnerTempInput(value) {
   }
 }
 
+function exactRunnerTempOutput(value) {
+  if (typeof value !== "string" || resolve(value) !== value) return false;
+  try {
+    try {
+      lstatSync(value);
+      return false;
+    } catch (error) {
+      if (error?.code !== "ENOENT") return false;
+    }
+    const declaredParent = dirname(value);
+    const parent = realpathSync(declaredParent);
+    const parentStat = lstatSync(declaredParent);
+    if (
+      parent !== declaredParent ||
+      dirname(parent) !== runnerTemp ||
+      parentStat.isSymbolicLink() ||
+      !parentStat.isDirectory() ||
+      (parentStat.mode & 0o077) !== 0
+    ) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 if (!allowedCommands.has(command)) {
   throw new Error(
     `authenticated Coworld command is not allowlisted: ${command}`,
@@ -61,7 +88,15 @@ if (
       args[0] === "create" &&
       exactRunnerTempInput(args[1]) &&
       args[1].endsWith(".json") &&
-      args[2] === "--json")
+      args[2] === "--json") ||
+    (args.length === 7 &&
+      args[0] === "list" &&
+      args[1] === "--mine" &&
+      args[2] === "--limit" &&
+      args[3] === "1000" &&
+      args[4] === "--offset" &&
+      /^(?:0|[1-9][0-9]*)$/.test(args[5] ?? "") &&
+      args[6] === "--json")
   )
 ) {
   throw new Error("authenticated Coworld xp-request mode is malformed");
@@ -76,7 +111,7 @@ if (
     args[3] === "--artifact" &&
     args[4] === "--output" &&
     typeof args[5] === "string" &&
-    resolve(args[5]) === args[5]
+    exactRunnerTempOutput(args[5])
   )
 ) {
   throw new Error("authenticated Coworld episode-logs mode is malformed");
@@ -87,10 +122,54 @@ if (
     args.length === 2 &&
     /^ereq_[A-Za-z0-9-]+$/.test(args[0] ?? "") &&
     typeof args[1] === "string" &&
-    resolve(args[1]) === args[1]
+    exactRunnerTempOutput(args[1])
   )
 ) {
   throw new Error("authenticated Coworld episode bundle mode is malformed");
+}
+if (command === "commander-xp-run-episode") {
+  const [manifest, ...tail] = args;
+  const images = tail.slice(0, 4);
+  const output = tail[14];
+  if (
+    args.length !== 16 ||
+    !exactRunnerTempInput(manifest) ||
+    !manifest.endsWith(".json") ||
+    images.length !== 4 ||
+    new Set(images).size !== 1 ||
+    images.some(
+      (image) =>
+        !/^ghcr\.io\/0xnad\/proxywar-commander-xp-game@sha256:[0-9a-f]{64}$/.test(
+          image,
+        ),
+    ) ||
+    tail[4] !== "--run" ||
+    tail[5] !== "node" ||
+    tail[6] !== "--run" ||
+    tail[7] !== "/app/integration/src/starter-player.mjs" ||
+    tail[8] !== "--variant" ||
+    tail[9] !== "tournament-4p-pangaea" ||
+    tail[10] !== "--timeout-seconds" ||
+    tail[11] !== "6000" ||
+    tail[12] !== "--verify-replay" ||
+    tail[13] !== "--output-dir" ||
+    !exactRunnerTempOutput(output)
+  ) {
+    throw new Error("authenticated Coworld run-episode mode is malformed");
+  }
+}
+if (
+  command === "commander-xp-certify" &&
+  !(
+    args.length === 4 &&
+    exactRunnerTempInput(args[0]) &&
+    args[0].endsWith(".json") &&
+    args[1] === "--timeout-seconds" &&
+    args[2] === "600" &&
+    args[3] === "--no-open-report"
+  )
+) {
+  throw new Error("authenticated Coworld certify mode is malformed");
 }
 if (command === "commander-xp-policy-provision") {
   const [mode, ...options] = args;
@@ -132,10 +211,7 @@ if (command === "commander-xp-policy-provision") {
       parsed.get("source-provenance-digest"),
       parsed.get("build-provenance-digest"),
     ].some((value) => !/^sha256:[0-9a-f]{64}$/.test(value ?? "")) ||
-    (mode === "upload" &&
-      (typeof output !== "string" ||
-        resolve(output) !== output ||
-        !resolve(output).startsWith(`${runnerTemp}/`)))
+    (mode === "upload" && !exactRunnerTempOutput(output))
   ) {
     throw new Error(
       "authenticated Coworld Commander XP policy provision mode is malformed",
@@ -152,6 +228,43 @@ if (
 ) {
   throw new Error("authenticated Coworld status mode is malformed");
 }
+if (
+  command === "leagues" &&
+  !(
+    args.length === 2 &&
+    /^league_[A-Za-z0-9-]+$/.test(args[0] ?? "") &&
+    args[1] === "--json"
+  )
+) {
+  throw new Error("authenticated Coworld leagues mode is malformed");
+}
+if (command === "list" && !(args.length === 1 && args[0] === "--json")) {
+  throw new Error("authenticated Coworld list mode is malformed");
+}
+if (
+  command === "next-version" &&
+  !(args.length === 1 && /^[a-z0-9][a-z0-9-]{7,119}$/.test(args[0] ?? ""))
+) {
+  throw new Error("authenticated Coworld next-version mode is malformed");
+}
+if (
+  command === "upload-coworld" &&
+  !(
+    args.length === 9 &&
+    exactRunnerTempInput(args[0]) &&
+    args[0].endsWith(".json") &&
+    args[1] === "--wait-hosted-smoke" &&
+    args[2] === "--wait-certification" &&
+    args[3] === "--timeout-seconds" &&
+    args[4] === "600" &&
+    args[5] === "--hosted-smoke-timeout-seconds" &&
+    args[6] === "1800" &&
+    args[7] === "--certification-timeout-seconds" &&
+    args[8] === "1800"
+  )
+) {
+  throw new Error("authenticated Coworld upload mode is malformed");
+}
 if (!token || !python || !coworld) {
   throw new Error(
     "COWORLD_API_TOKEN, COWORLD_PYTHON, and COWORLD_BIN are required",
@@ -162,8 +275,20 @@ const authHome = mkdtempSync(join(runnerTemp, "coworld-auth-"));
 if (!resolve(authHome).startsWith(`${runnerTemp}/`)) {
   throw new Error(`unexpected credential directory: ${authHome}`);
 }
-const childEnv = { ...process.env, HOME: authHome };
-delete childEnv.COWORLD_API_TOKEN;
+const childEnv = {
+  HOME: authHome,
+  LANG: process.env.LANG ?? "C.UTF-8",
+  LC_ALL: process.env.LC_ALL ?? "C.UTF-8",
+  PATH: process.env.PATH ?? "",
+  PYTHONUNBUFFERED: "1",
+  TEMP: runnerTemp,
+  TMP: runnerTemp,
+  TMPDIR: runnerTemp,
+  TZ: "UTC",
+};
+if (!childEnv.PATH) {
+  throw new Error("authenticated Coworld child PATH is unavailable");
+}
 
 try {
   const install = spawnSync(
@@ -204,7 +329,11 @@ try {
             ),
             ...args,
           ]
-        : [command, ...args];
+        : command === "commander-xp-run-episode"
+          ? ["run-episode", ...args]
+          : command === "commander-xp-certify"
+            ? ["certify", ...args]
+            : [command, ...args];
   const result = spawnSync(executable, executableArgs, {
     env: childEnv,
     // Hosted `coworld list --json` grows with immutable release history and is

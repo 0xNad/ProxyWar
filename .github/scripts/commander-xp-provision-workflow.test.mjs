@@ -22,7 +22,7 @@ test("provision workflow has no duplicate YAML mapping keys", () => {
 
 test("provision runs only on protected exact main and successful push CI", () => {
   assert.match(workflow, /^name: Commander XP immutable eval provision$/m);
-  assert.match(workflow, /environment: commander-xp-eval/);
+  assert.match(workflow, /environment: coworld-production/);
   assert.match(workflow, /GITHUB_ACTOR" = 0xNad/);
   assert.match(workflow, /GITHUB_TRIGGERING_ACTOR" = 0xNad/);
   assert.match(workflow, /GITHUB_REF" = refs\/heads\/main/);
@@ -51,6 +51,26 @@ test("provision builds both images from one clean archive with exact provenance"
   assert.match(workflow, /--source-digest "\$SOURCE_SHA"/);
   assert.match(workflow, /--signer-digest "\$SOURCE_SHA"/);
   assert.match(workflow, /--deny-self-hosted-runners/);
+  assert.match(workflow, /docker run --rm --entrypoint \/bin\/sh "\$GAME_TAG"/);
+});
+
+test("game image builds with development tools and runs with production dependencies only", () => {
+  const dockerfile = fs.readFileSync(
+    new URL(
+      "../../coworld-adapter/Dockerfile.commander-xp-game",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.match(dockerfile, /AS commander-xp-game-builder/);
+  assert.match(dockerfile, /npm ci --include=dev --ignore-scripts/);
+  assert.ok(
+    dockerfile.indexOf("npm ci --include=dev --ignore-scripts") <
+      dockerfile.indexOf("npm run build-prod"),
+  );
+  assert.match(dockerfile, /AS commander-xp-game-runtime/);
+  assert.match(dockerfile, /npm ci --omit=dev --ignore-scripts/);
+  assert.match(dockerfile, /COPY --from=commander-xp-game-builder/);
 });
 
 test("provision authenticates before its durable fence and mutates no XP", () => {
@@ -73,8 +93,19 @@ test("provision authenticates before its durable fence and mutates no XP", () =>
   assert.doesNotMatch(workflow, /xp-request create/);
 });
 
+test("provision serializes the complete Commander regression group before mutation", () => {
+  assert.match(workflow, /tests\/server\/Commander\*\.test\.ts/);
+  assert.match(workflow, /--run --maxWorkers=1/);
+  assert.ok(
+    workflow.indexOf("Run exact-source repository and workflow gates") <
+      workflow.indexOf("Create durable provision fence"),
+  );
+});
+
 test("provision proves exact 360x100 terminality and preserves product binding", () => {
-  assert.match(workflow, /run-episode/);
+  assert.match(workflow, /commander-xp-run-episode/);
+  assert.match(workflow, /commander-xp-certify/);
+  assert.doesNotMatch(workflow, /"\$COWORLD_BIN" (?:run-episode|certify)/);
   assert.match(workflow, /tournament-4p-pangaea/);
   assert.match(workflow, /\.turn_count <= 36400/);
   assert.match(workflow, /\.tick <= 36400/);

@@ -57,6 +57,285 @@ export const COWORLD_AGENT_RUNTIME_MODES = [
 export type CoworldAgentRuntimeMode =
   (typeof COWORLD_AGENT_RUNTIME_MODES)[number];
 
+/**
+ * Exact privacy-safe Commander execution metadata permitted across the
+ * untrusted player -> game wire.  This literal is parity-tested against the
+ * canonical XP allowlist because the deployed adapter cannot value-import
+ * server source.
+ */
+export const COWORLD_COMMANDER_EXECUTION_METADATA_KEYS = [
+  "runtimeMode",
+  "plannerSource",
+  "executorSource",
+  "actionSelectionSource",
+  "externalPlannerCall",
+  "plannerRan",
+  "plannerLatencyMs",
+  "plannerFallbackUsed",
+  "plannerParseOk",
+  "llmPlannerDegraded",
+  "degradedCause",
+  "commanderSelectorSource",
+  "commanderPrimarySelectorSource",
+  "planID",
+  "planObjective",
+  "commanderSelectedOptionID",
+  "commanderSelectedOptionFamily",
+  "commanderPreviousPlanID",
+  "commanderFingerprint",
+  "commanderEligibleOptionIds",
+  "commanderOptionSurfaceSha256",
+  "commanderExposedOptionIds",
+  "commanderOmittedOptions",
+  "commanderFidelity",
+  "commanderBatchFidelities",
+  "commanderReplanReason",
+  "commanderResponseDisposition",
+  "commanderRejectionCode",
+  "commanderPlanInstalled",
+  "commanderHorizonDecisions",
+  "commanderPlanAgeDecisions",
+  "commanderEmergencyCondition",
+  "commanderBlockedReason",
+  "commanderImmediateReplan",
+  "commanderDeterministicPreferredOptionId",
+  "commanderDeterministicPreferredOptionAbsent",
+  "commanderPromptCharacters",
+  "commanderSelectionFailureKind",
+  "commanderSelectorProvider",
+  "commanderSelectorModel",
+  "commanderPromptVersion",
+  "commanderPromptSha256",
+  "batchIndex",
+  "batchSize",
+  "batchActionIDs",
+] as const;
+
+export interface CoworldCommanderExecutionEnvelope {
+  schemaVersion: 2;
+  selection: CoworldCommanderSelectionEnvelope;
+  selectionSha256: string;
+  metadata: Record<string, string | number | boolean | null>;
+  metadataSha256: string;
+}
+
+export interface CoworldCommanderSelectionEnvelope {
+  planID: string | null;
+  selectedOptionID: string | null;
+  selectedOptionFamily:
+    | "expand"
+    | "develop_economy"
+    | "pressure_rival"
+    | "survive"
+    | null;
+  selectorSource:
+    | "llm"
+    | "deterministic"
+    | "fallback-deterministic"
+    | "none"
+    | null;
+  deterministicPreferredOptionID: string | null;
+  deterministicPreferredOptionAbsent: boolean | null;
+}
+
+export function commanderExecutionEnvelope(
+  metadata: Record<string, unknown> | undefined,
+): CoworldCommanderExecutionEnvelope | undefined {
+  if (metadata?.runtimeMode !== "commander-v0-selector") return undefined;
+  const normalized = Object.fromEntries(
+    COWORLD_COMMANDER_EXECUTION_METADATA_KEYS.map((key) => [
+      key,
+      boundedCommanderMetadataScalar(metadata[key]),
+    ]),
+  );
+  const selection = commanderSelectionEnvelope(normalized);
+  return {
+    schemaVersion: 2,
+    selection,
+    selectionSha256: commanderWireSha256(selection),
+    metadata: normalized,
+    metadataSha256: commanderWireSha256(normalized),
+  };
+}
+
+export function normalizeCommanderExecutionEnvelope(
+  value: unknown,
+): CoworldCommanderExecutionEnvelope | null {
+  if (
+    !isRecord(value) ||
+    !sameKeys(value, [
+      "schemaVersion",
+      "selection",
+      "selectionSha256",
+      "metadata",
+      "metadataSha256",
+    ])
+  ) {
+    return null;
+  }
+  if (
+    value.schemaVersion !== 2 ||
+    !isRecord(value.selection) ||
+    !sameKeys(value.selection, [
+      "planID",
+      "selectedOptionID",
+      "selectedOptionFamily",
+      "selectorSource",
+      "deterministicPreferredOptionID",
+      "deterministicPreferredOptionAbsent",
+    ]) ||
+    typeof value.selectionSha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(value.selectionSha256) ||
+    !isRecord(value.metadata) ||
+    !sameKeys(value.metadata, COWORLD_COMMANDER_EXECUTION_METADATA_KEYS) ||
+    typeof value.metadataSha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(value.metadataSha256)
+  ) {
+    return null;
+  }
+  const metadata: Record<string, string | number | boolean | null> = {};
+  for (const key of COWORLD_COMMANDER_EXECUTION_METADATA_KEYS) {
+    const raw = value.metadata[key];
+    const normalized = boundedCommanderMetadataScalar(raw);
+    if (normalized !== raw) return null;
+    metadata[key] = normalized;
+  }
+  if (
+    metadata.runtimeMode !== "commander-v0-selector" ||
+    !isCommanderSelectionEnvelope(value.selection) ||
+    commanderWireSha256(value.selection) !== value.selectionSha256 ||
+    commanderWireSha256(commanderSelectionEnvelope(metadata)) !==
+      value.selectionSha256 ||
+    commanderWireSha256(metadata) !== value.metadataSha256
+  ) {
+    return null;
+  }
+  return {
+    schemaVersion: 2,
+    selection: value.selection,
+    selectionSha256: value.selectionSha256,
+    metadata,
+    metadataSha256: value.metadataSha256,
+  };
+}
+
+function commanderSelectionEnvelope(
+  metadata: Record<string, string | number | boolean | null>,
+): CoworldCommanderSelectionEnvelope {
+  return {
+    planID: nullableMetadataString(metadata.planID),
+    selectedOptionID: nullableMetadataString(
+      metadata.commanderSelectedOptionID,
+    ),
+    selectedOptionFamily: isCommanderOptionFamily(
+      metadata.commanderSelectedOptionFamily,
+    )
+      ? metadata.commanderSelectedOptionFamily
+      : null,
+    selectorSource: isCommanderSelectorSource(metadata.commanderSelectorSource)
+      ? metadata.commanderSelectorSource
+      : null,
+    deterministicPreferredOptionID: nullableMetadataString(
+      metadata.commanderDeterministicPreferredOptionId,
+    ),
+    deterministicPreferredOptionAbsent:
+      typeof metadata.commanderDeterministicPreferredOptionAbsent === "boolean"
+        ? metadata.commanderDeterministicPreferredOptionAbsent
+        : null,
+  };
+}
+
+function isCommanderSelectionEnvelope(
+  value: Record<string, unknown>,
+): value is Record<string, unknown> & CoworldCommanderSelectionEnvelope {
+  return (
+    (value.planID === null || typeof value.planID === "string") &&
+    (value.selectedOptionID === null ||
+      typeof value.selectedOptionID === "string") &&
+    (value.selectedOptionFamily === null ||
+      isCommanderOptionFamily(value.selectedOptionFamily)) &&
+    (value.selectorSource === null ||
+      isCommanderSelectorSource(value.selectorSource)) &&
+    (value.deterministicPreferredOptionID === null ||
+      typeof value.deterministicPreferredOptionID === "string") &&
+    (value.deterministicPreferredOptionAbsent === null ||
+      typeof value.deterministicPreferredOptionAbsent === "boolean")
+  );
+}
+
+function nullableMetadataString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function isCommanderOptionFamily(
+  value: unknown,
+): value is NonNullable<
+  CoworldCommanderSelectionEnvelope["selectedOptionFamily"]
+> {
+  return ["expand", "develop_economy", "pressure_rival", "survive"].includes(
+    String(value),
+  );
+}
+
+function isCommanderSelectorSource(
+  value: unknown,
+): value is NonNullable<CoworldCommanderSelectionEnvelope["selectorSource"]> {
+  return ["llm", "deterministic", "fallback-deterministic", "none"].includes(
+    String(value),
+  );
+}
+
+function boundedCommanderMetadataScalar(
+  value: unknown,
+): string | number | boolean | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    return Number.isFinite(value) && Number.isSafeInteger(value) && value >= 0
+      ? value
+      : null;
+  }
+  return typeof value === "string" &&
+    value.length <= 8_192 &&
+    Buffer.byteLength(value, "utf8") <= 8_192
+    ? value
+    : null;
+}
+
+function commanderWireSha256(value: unknown): string {
+  return createHash("sha256")
+    .update(JSON.stringify(canonicalWireValue(value)))
+    .digest("hex");
+}
+
+function canonicalWireValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalWireValue);
+  if (isRecord(value)) {
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+        .map(([key, entry]) => [key, canonicalWireValue(entry)]),
+    );
+  }
+  return value;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function sameKeys(
+  value: Record<string, unknown>,
+  expected: readonly string[],
+): boolean {
+  const actual = Object.keys(value).sort();
+  const sortedExpected = [...expected].sort();
+  return (
+    actual.length === sortedExpected.length &&
+    actual.every((key, index) => key === sortedExpected[index])
+  );
+}
+
 /** Strict equality only; unrecognized/self-invented attribution is unknown. */
 export function normalizeRuntimeMode(
   value: unknown,
@@ -430,7 +709,12 @@ export function composeCoworldDecision(input: {
 }): ComposedCoworldDecision {
   const { normalized, message, slot, requestID, offeredLegalActionCount } =
     input;
-  const runtimeMode = normalizeRuntimeMode(message.runtimeMode);
+  const commanderExecution = normalizeCommanderExecutionEnvelope(
+    message.commanderExecution,
+  );
+  const runtimeMode =
+    commanderExecution?.metadata.runtimeMode ??
+    normalizeRuntimeMode(message.runtimeMode);
   return {
     ...normalized,
     metadata: {
@@ -443,6 +727,13 @@ export function composeCoworldDecision(input: {
       // because this was hardcoded false).
       fallbackUsed: message.fallbackUsed === true,
       ...(runtimeMode !== undefined ? { runtimeMode } : {}),
+      ...(commanderExecution === null
+        ? {}
+        : {
+            ...commanderExecution.metadata,
+            commanderExecutionSha256: commanderExecution.metadataSha256,
+            commanderSelectionSha256: commanderExecution.selectionSha256,
+          }),
       ...(message.llmPlannerDegraded === true
         ? { llmPlannerDegraded: true }
         : {}),
@@ -466,3 +757,4 @@ export function composeCoworldDecision(input: {
     },
   };
 }
+import { createHash } from "node:crypto";

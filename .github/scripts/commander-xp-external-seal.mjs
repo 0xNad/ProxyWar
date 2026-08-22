@@ -37,6 +37,7 @@ export async function runCommanderXpExternalSealCli(argv, env = process.env) {
       ),
       sourceCIMetadataPath: requiredPath(options, "source-ci-metadata"),
       verifierAggregatePath: requiredPath(options, "verifier-aggregate"),
+      workflowAuthorizationSha: required(options, "workflow-authorization-sha"),
       createdAt: required(options, "created-at"),
     });
     process.stdout.write(`${JSON.stringify(manifest)}\n`);
@@ -46,6 +47,7 @@ export async function runCommanderXpExternalSealCli(argv, env = process.env) {
     const manifest = await verifyBundle(requiredPath(options, "bundle-root"), {
       repository: requiredPath(options, "repository"),
       sourceSha: required(options, "source-sha"),
+      workflowAuthorizationSha: required(options, "workflow-authorization-sha"),
       workflowRunID: positiveInteger(
         required(options, "workflow-run-id"),
         "workflow-run-id",

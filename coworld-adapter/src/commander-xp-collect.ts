@@ -18,13 +18,22 @@ import { promisify } from "node:util";
 import JSZip from "jszip";
 
 import {
+  buildCommanderXpConfirmatoryAnalysisEvidence,
+  renderCommanderXpConfirmatoryAnalysisMarkdown,
+  type CommanderXpVerifiedOutcome,
+} from "../../src/server/agents/CommanderXpAnalysis";
+import {
   sha256Canonical,
   type CommanderXpArm,
   type CommanderXpPlannedRequest,
   type CommanderXpPreRegistrationV2,
   type CommanderXpProtocolPhase,
 } from "../../src/server/agents/CommanderXpProtocol";
-import { verifyCommanderXpEvidence } from "../../src/server/agents/CommanderXpVerifier";
+import {
+  verifyCommanderXpEvidence,
+  verifyCommanderXpJoinedGameplayEvidenceAudit,
+  type PlayerRuntimeManifest,
+} from "../../src/server/agents/CommanderXpVerifier";
 import { commanderXpGameEvidenceFromRawGameLog } from "./commander-xp-game-log";
 import { coworldEpisodeIdentity } from "./coworld-seed";
 
@@ -35,6 +44,7 @@ export interface CollectorInput {
   schemaVersion: 2;
   phase: "preregistration" | "provider-preflight" | "canary" | "confirmatory";
   preRegistrationPath: string;
+  xpOpenApiContractPath: string;
   sourceProvenancePath: string;
   sourceTreeDiffPath: string;
   policyIdentitiesPath: string;
@@ -83,6 +93,10 @@ export async function collectCommanderXpEvidence(
     "utf8",
   );
   const prereg = JSON.parse(preregText) as CommanderXpPreRegistrationV2;
+  const openApiContractText = await fs.readFile(
+    path.resolve(input.xpOpenApiContractPath),
+    "utf8",
+  );
   const sourceProvenanceText = await fs.readFile(
     path.resolve(input.sourceProvenancePath),
     "utf8",
@@ -111,6 +125,11 @@ export async function collectCommanderXpEvidence(
     fs.writeFile(
       path.join(outputDirectory, "commander-xp-preregistration-v2.json"),
       preregText,
+      { flag: "wx" },
+    ),
+    fs.writeFile(
+      path.join(outputDirectory, "xp-openapi-contract-v2.json"),
+      openApiContractText,
       { flag: "wx" },
     ),
     fs.writeFile(
@@ -162,12 +181,17 @@ export async function collectCommanderXpEvidence(
   if (!openApiResponse.ok) {
     throw new Error(`XP OpenAPI returned HTTP ${openApiResponse.status}`);
   }
-  const openApiHash = sha256(
-    new Uint8Array(await openApiResponse.arrayBuffer()),
-  );
+  const openApiBytes = new Uint8Array(await openApiResponse.arrayBuffer());
+  const openApiHash = sha256(openApiBytes);
   if (openApiHash !== prereg.identities.xpOpenApiSha256) {
     throw new Error("XP OpenAPI hash changed after preregistration");
   }
+  verifyCollectorOpenApiContract(
+    openApiContractText,
+    prereg,
+    openApiHash,
+    openApiBytes.byteLength,
+  );
   await fs.writeFile(
     path.join(outputDirectory, "xp-openapi.sha256"),
     `${openApiHash}  ${XP_OPENAPI_URL}\n`,
@@ -194,6 +218,18 @@ export async function collectCommanderXpEvidence(
       coworldCommandPath,
     );
   }
+  if (input.phase === "confirmatory") {
+    const outcomes = await confirmatoryOutcomesFromCollectedEvidence(
+      outputDirectory,
+      prereg,
+      planned,
+    );
+    await writeCommanderXpConfirmatoryAnalysisArtifacts(
+      outputDirectory,
+      prereg,
+      outcomes,
+    );
+  }
   await writeJsonExclusive(
     path.join(outputDirectory, "commander-xp-local-verification-v2.json"),
     {
@@ -218,8 +254,15 @@ export async function collectCommanderXpEvidence(
     "eval-coworld-inspect.json",
     "eval-coworld-manifest-v2.json",
     "eval-coworld-terminal-proof-v2.json",
+    "xp-openapi-contract-v2.json",
     "xp-openapi.sha256",
     "commander-xp-local-verification-v2.json",
+    ...(input.phase === "confirmatory"
+      ? [
+          "commander-xp-confirmatory-analysis-v2.json",
+          "commander-xp-confirmatory-analysis-v2.md",
+        ]
+      : []),
     ...planned.flatMap((request) => {
       const directory = runDirectory(request);
       const suffixes =
@@ -312,6 +355,91 @@ export async function collectCommanderXpEvidence(
   };
 }
 
+export async function writeCommanderXpConfirmatoryAnalysisArtifacts(
+  outputDirectory: string,
+  preregistration: Pick<
+    CommanderXpPreRegistrationV2,
+    "experimentID" | "preRegistrationSha256" | "analysis"
+  >,
+  outcomes: readonly CommanderXpVerifiedOutcome[],
+): Promise<void> {
+  const analysis = buildCommanderXpConfirmatoryAnalysisEvidence(
+    preregistration,
+    outcomes,
+  );
+  await Promise.all([
+    writeJsonExclusive(
+      path.join(outputDirectory, "commander-xp-confirmatory-analysis-v2.json"),
+      analysis,
+    ),
+    fs.writeFile(
+      path.join(outputDirectory, "commander-xp-confirmatory-analysis-v2.md"),
+      renderCommanderXpConfirmatoryAnalysisMarkdown(analysis),
+      { flag: "wx" },
+    ),
+  ]);
+}
+
+async function confirmatoryOutcomesFromCollectedEvidence(
+  outputDirectory: string,
+  preregistration: CommanderXpPreRegistrationV2,
+  planned: readonly CommanderXpPlannedRequest[],
+): Promise<CommanderXpVerifiedOutcome[]> {
+  return Promise.all(
+    planned.map(async (request): Promise<CommanderXpVerifiedOutcome> => {
+      const directory = path.join(outputDirectory, runDirectory(request));
+      const result = JSON.parse(
+        await fs.readFile(path.join(directory, "episode-results.json"), "utf8"),
+      ) as {
+        xpRequestID: string;
+        episodeRequestID: string;
+        jobID: string;
+        episodeID: string;
+        gameID: string;
+        winnerSlot: number;
+        subjectWon: boolean;
+        scores: number[];
+      };
+      const runtimeManifest = JSON.parse(
+        await fs.readFile(
+          path.join(directory, "player-artifact/runtime-manifest.json"),
+          "utf8",
+        ),
+      ) as PlayerRuntimeManifest;
+      const playerTraceJsonl = await fs.readFile(
+        path.join(directory, "player-artifact/trace.jsonl"),
+        "utf8",
+      );
+      const gameEvidenceJsonl = await fs.readFile(
+        path.join(directory, "game-evidence.jsonl"),
+        "utf8",
+      );
+      const { selectorAudit } = verifyCommanderXpJoinedGameplayEvidenceAudit({
+        preregistration,
+        plannedRequest: request,
+        runtimeManifest,
+        playerTraceJsonl,
+        gameEvidenceJsonl,
+        expectedGameID: result.gameID,
+      });
+      return {
+        replicaIndex: request.replicaIndex,
+        arm: request.arm,
+        seed: request.seed,
+        xpRequestID: result.xpRequestID,
+        episodeRequestID: result.episodeRequestID,
+        jobID: result.jobID,
+        episodeID: result.episodeID,
+        subjectSeat: request.subjectSeat,
+        winnerSlot: result.winnerSlot,
+        subjectWon: result.subjectWon,
+        score: result.scores[request.subjectSeat]!,
+        selectorAudit,
+      };
+    }),
+  );
+}
+
 export async function createCollectorEvidenceOutput(
   requestedOutputDirectory: string,
 ): Promise<string> {
@@ -372,15 +500,7 @@ async function collectRun(
   const participants = Array.isArray(episode.participants)
     ? episode.participants
     : [];
-  const rawRequestedReadback = raw.requested;
-  if (
-    rawRequestedReadback === null ||
-    typeof rawRequestedReadback !== "object"
-  ) {
-    throw new Error("XP request readback omitted its normalized projection");
-  }
-  const requestedReadback =
-    commanderXpNormalizedRequestReadback(rawRequestedReadback);
+  const requestedReadback = commanderXpNormalizedRequestReadback(raw.requested);
   const replayURL = String(episode.replay_url ?? "");
   let replayPath: string;
   try {
@@ -401,8 +521,8 @@ async function collectRun(
   const directory = path.join(root, runDirectory(planned));
   const artifactDirectory = path.join(directory, "player-artifact");
   await fs.mkdir(artifactDirectory, { recursive: true });
-  const bundleTempDirectory = await fs.mkdtemp(
-    path.join(os.tmpdir(), "proxywar-commander-xp-bundle-"),
+  const bundleTempDirectory = await privateRunnerTempDirectory(
+    "proxywar-commander-xp-bundle-",
   );
   const bundlePath = path.join(
     bundleTempDirectory,
@@ -480,7 +600,10 @@ async function collectRun(
     path.join(directory, "replay-evidence.json"),
     replayEvidence,
   );
-  const zipPath = path.join(directory, "player-artifact.zip.tmp");
+  const playerTempDirectory = await privateRunnerTempDirectory(
+    "proxywar-commander-xp-player-artifact-",
+  );
+  const zipPath = path.join(playerTempDirectory, "player-artifact.zip");
   try {
     const playerArtifactArgs = [
       "episode-logs",
@@ -520,7 +643,7 @@ async function collectRun(
       );
     }
   } finally {
-    await fs.rm(zipPath, { force: true });
+    await fs.rm(playerTempDirectory, { recursive: true, force: true });
   }
   const commandReceipt = {
     schemaVersion: 2,
@@ -576,18 +699,70 @@ async function collectRun(
 }
 
 export function commanderXpNormalizedRequestReadback(
-  value: object,
+  value: unknown,
 ): Record<string, unknown> {
+  const unavailable = {
+    schemaVersion: 2,
+    authority: "coworld-xp-request-readback-non-authoritative-v1",
+    source: "xp-request-get.requested",
+    available: false,
+    notes: null,
+    numEpisodes: null,
+    roster: null,
+  };
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return unavailable;
+  }
   const raw = value as Record<string, unknown>;
-  const roster = Array.isArray(raw.roster) ? raw.roster : [];
+  if (
+    typeof raw.notes !== "string" ||
+    raw.notes.length > 200 ||
+    raw.num_episodes !== 1 ||
+    !Array.isArray(raw.roster) ||
+    raw.roster.length !== 4
+  ) {
+    return unavailable;
+  }
+  const roster = raw.roster.map((entry) => {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      return null;
+    }
+    const participant = entry as Record<string, unknown>;
+    const player = participant.player;
+    const slot = participant.slot;
+    if (
+      typeof slot !== "number" ||
+      !Number.isInteger(slot) ||
+      slot < 0 ||
+      slot > 3 ||
+      player === null ||
+      typeof player !== "object" ||
+      Array.isArray(player) ||
+      typeof (player as Record<string, unknown>).policy_ref !== "string" ||
+      !(player as Record<string, string>).policy_ref.trim() ||
+      (player as Record<string, string>).policy_ref.length > 200
+    ) {
+      return null;
+    }
+    return {
+      slot,
+      policyRef: (player as Record<string, string>).policy_ref,
+    };
+  });
+  if (
+    roster.some((entry) => entry === null) ||
+    new Set(roster.map((entry) => entry!.slot)).size !== 4
+  ) {
+    return unavailable;
+  }
   return {
     schemaVersion: 2,
+    authority: "coworld-xp-request-readback-non-authoritative-v1",
+    source: "xp-request-get.requested",
+    available: true,
     notes: raw.notes,
     numEpisodes: raw.num_episodes,
-    roster: roster.map((entry) => {
-      const participant = entry as Record<string, unknown>;
-      return { slot: participant.slot, policy: participant.policy };
-    }),
+    roster,
   };
 }
 
@@ -1206,6 +1381,63 @@ function validateCollectorNamespaceRegistry(value: unknown): NamespaceRegistry {
   return registry as NamespaceRegistry;
 }
 
+function verifyCollectorOpenApiContract(
+  text: string,
+  prereg: CommanderXpPreRegistrationV2,
+  liveRawSha256: string,
+  liveByteLength: number,
+): void {
+  const receipt = JSON.parse(text) as Record<string, unknown>;
+  const exact = (value: unknown, keys: string[]): boolean =>
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    JSON.stringify(Object.keys(value).sort()) ===
+      JSON.stringify([...keys].sort());
+  if (
+    !exact(receipt, [
+      "schemaVersion",
+      "authority",
+      "url",
+      "fetchedAt",
+      "byteLength",
+      "rawSha256",
+      "coworldClientVersion",
+      "createRequestSchema",
+      "rosterSchemas",
+      "receiptSha256",
+    ]) ||
+    !exact(receipt.createRequestSchema, ["name", "encoding", "sha256"]) ||
+    !exact(receipt.rosterSchemas, ["names", "encoding", "sha256"])
+  ) {
+    throw new Error("XP OpenAPI contract schema mismatch");
+  }
+  const create = receipt.createRequestSchema as Record<string, unknown>;
+  const roster = receipt.rosterSchemas as Record<string, unknown>;
+  const { receiptSha256, ...body } = receipt;
+  if (
+    receipt.schemaVersion !== 2 ||
+    receipt.authority !== "softmax-public-openapi-exact-bytes-v1" ||
+    receipt.url !== XP_OPENAPI_URL ||
+    !Number.isFinite(Date.parse(String(receipt.fetchedAt))) ||
+    receipt.byteLength !== liveByteLength ||
+    receipt.rawSha256 !== liveRawSha256 ||
+    receipt.rawSha256 !== prereg.identities.xpOpenApiSha256 ||
+    receipt.coworldClientVersion !== "0.1.42" ||
+    create.name !== "V2CreateExperienceRequestRequest" ||
+    create.encoding !== "jq-cS-utf8-compact-sorted-json-with-terminal-lf" ||
+    create.sha256 !== prereg.identities.xpCreateRequestSchemaSha256 ||
+    JSON.stringify(roster.names) !==
+      JSON.stringify(["V2RosterParticipant", "V2RosterPlayer"]) ||
+    roster.encoding !==
+      "ordered-concatenation-of-two-jq-cS-utf8-records-with-terminal-lf" ||
+    roster.sha256 !== prereg.identities.xpRosterSchemasSha256 ||
+    receiptSha256 !== sha256Canonical(body)
+  ) {
+    throw new Error("XP OpenAPI contract identity mismatch");
+  }
+}
+
 function externalCanonicalJson(value: unknown): string {
   const sort = (entry: unknown): unknown => {
     if (Array.isArray(entry)) return entry.map(sort);
@@ -1237,6 +1469,13 @@ function assertPrivacySafeArtifact(text: string, artifact: string): void {
       throw new Error(`${artifact} contains forbidden private material`);
     }
   }
+}
+
+async function privateRunnerTempDirectory(prefix: string): Promise<string> {
+  const root = await fs.realpath(process.env.RUNNER_TEMP ?? os.tmpdir());
+  const directory = await fs.mkdtemp(path.join(root, prefix));
+  await fs.chmod(directory, 0o700);
+  return directory;
 }
 
 async function runCli(): Promise<void> {

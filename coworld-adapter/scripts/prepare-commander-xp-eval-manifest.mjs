@@ -84,8 +84,8 @@ export function commanderXpEvalManifest(base, { image, version }) {
       image,
       env: {
         PROXYWAR_COMMANDER_XP_GAME_EVIDENCE: "1",
-        PROXYWAR_TUNE_STRUCTURED_DEALS: "1",
-        PROXYWAR_TUNE_FREETEXT_MESSAGES: "1",
+        PROXYWAR_TUNE_STRUCTURED_DEALS: "0",
+        PROXYWAR_TUNE_FREETEXT_MESSAGES: "0",
         PROXYWAR_TUNE_SPATIAL_OBSERVATION: "0",
         PROXYWAR_TUNE_SPATIAL_MINIMAP: "0",
       },

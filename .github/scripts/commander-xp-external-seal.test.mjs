@@ -102,15 +102,38 @@ test("workflow is completion-triggered, GitHub-hosted, full-SHA pinned, immutabl
     9,
   );
   assert.equal(
-    (workflow.match(/--source-digest "\$SOURCE_SHA"/g) ?? []).length,
-    9,
+    (workflow.match(/--source-digest "\$WORKFLOW_AUTHORIZATION_SHA"/g) ?? [])
+      .length,
+    7,
   );
   assert.equal(
-    (workflow.match(/--signer-digest "\$SOURCE_SHA"/g) ?? []).length,
-    9,
+    (workflow.match(/--signer-digest "\$WORKFLOW_AUTHORIZATION_SHA"/g) ?? [])
+      .length,
+    7,
   );
-  assert.match(workflow, /environment: commander-xp-eval/);
+  assert.equal(
+    (
+      workflow.match(/--source-digest "\$PRIOR_WORKFLOW_AUTHORIZATION_SHA"/g) ??
+      []
+    ).length,
+    2,
+  );
+  assert.equal(
+    (
+      workflow.match(/--signer-digest "\$PRIOR_WORKFLOW_AUTHORIZATION_SHA"/g) ??
+      []
+    ).length,
+    2,
+  );
+  assert.equal(
+    (workflow.match(/commander-xp-external-workflow-authorization\.mjs/g) ?? [])
+      .length,
+    2,
+  );
+  assert.match(workflow, /environment: coworld-production/);
   assert.match(workflow, /coworld==0\.1\.42/);
+  assert.match(workflow, /version: "0\.8\.12"/);
+  assert.match(workflow, /test "\$\(uv --version\)" = "uv 0\.8\.12"/);
   assert.match(workflow, /agent:commander:xp:external-refetch/);
   assert.match(workflow, /commander-xp-independent-platform-refetch-v2\.json/);
   assert.equal(
@@ -145,6 +168,22 @@ test("workflow is completion-triggered, GitHub-hosted, full-SHA pinned, immutabl
   assert.match(workflow, /\.expired .* = "false"/);
   assert.match(workflow, /bound prior artifact is expired/);
   assert.match(workflow, /commander-xp-terminal-authority-envelope-v2\.json/);
+  assert.match(
+    workflow,
+    /confirmatoryAnalysis:\$ledger\[0\]\.confirmatoryAnalysis/,
+  );
+  assert.match(
+    workflow,
+    /confirmatoryAnalysis:\$receipt\[0\]\.confirmatoryAnalysis/,
+  );
+  assert.match(
+    workflow,
+    /performanceClaimAuthorized:\$ledger\[0\]\.performanceClaimAuthorized/,
+  );
+  assert.match(
+    workflow,
+    /performanceClaimAuthorized:\$receipt\[0\]\.performanceClaimAuthorized/,
+  );
   assert.match(workflow, /envelopeSha256:\$envelopeSha256/);
   assert.equal((workflow.match(/check_artifact '/g) ?? []).length, 3);
   assert.match(
@@ -157,12 +196,15 @@ test("workflow is completion-triggered, GitHub-hosted, full-SHA pinned, immutabl
       .length,
     2,
   );
+  assert.doesNotMatch(workflow, /branches\/main" --jq \.protected/);
+  assert.match(workflow, /test "\$GITHUB_REF" = "refs\/heads\/main"/);
   assert.equal(
-    (workflow.match(/branches\/main" --jq \.protected/g) ?? []).length,
+    (
+      workflow.match(/test "\$GITHUB_SHA" = "\$WORKFLOW_AUTHORIZATION_SHA"/g) ??
+      []
+    ).length,
     2,
   );
-  assert.match(workflow, /test "\$GITHUB_REF" = "refs\/heads\/main"/);
-  assert.match(workflow, /test "\$GITHUB_SHA" = "\$SOURCE_SHA"/);
 });
 
 test("tree diff records exact blobs, modes, and content hashes", async (t) => {
@@ -474,6 +516,7 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
   await git(fixture.root, ["add", "commander.mjs"]);
   await git(fixture.root, ["commit", "-m", "commander"]);
   const source = await sourceIdentity(fixture, ["commander.mjs"]);
+  const workflowAuthorizationSha = "9".repeat(40);
   const evidenceRoot = await temporaryDirectory(t);
   const experimentID = "commander-xp-canary-test";
   const prereg = {
@@ -520,6 +563,14 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
       { code: "EXTERNAL_IMMUTABLE_SEAL_RECEIPT_REQUIRED", path: null },
     ],
     performanceClaimAuthorized: false,
+    providerProvenance: {
+      commanderPromptVersion: "strategic-commander-v0-stage2",
+      commanderPromptVersionSha256:
+        "00db34a7939d9d27a3370decf1e3f3f5895b0a3e3676c2e043ec426b5e199094",
+      providerContractSha256:
+        "6927ba56e53fb71300e708379b59b71b38c54b1656da826e2a786b9505fccaf4",
+    },
+    confirmatoryAnalysis: null,
     authenticity: {
       verified: false,
       status: "external-seal-receipt-required",
@@ -693,6 +744,28 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
       verifierAggregatePath: privateAggregatePath,
     }),
     hasCode("PRIVACY_KEY_FORBIDDEN"),
+  );
+  const substitutedProviderProvenancePath = path.join(
+    supportRoot,
+    "substituted-provider-provenance.json",
+  );
+  await fs.writeFile(
+    substitutedProviderProvenancePath,
+    JSON.stringify({
+      ...aggregate,
+      providerProvenance: {
+        ...aggregate.providerProvenance,
+        commanderPromptVersionSha256: "f".repeat(64),
+      },
+    }),
+  );
+  await assert.rejects(
+    verifyEvidenceBindings({
+      evidenceRoot,
+      request,
+      verifierAggregatePath: substitutedProviderProvenancePath,
+    }),
+    hasCode("VERIFIER_AGGREGATE_PROVIDER_PROVENANCE_INVALID"),
   );
   for (const encodedPath of [
     '{"password":"private"}',
@@ -869,12 +942,14 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
         sourceArtifactMetadataPath: metadataPath,
         sourceCIMetadataPath,
         verifierAggregatePath,
+        workflowAuthorizationSha,
         createdAt: "2026-08-22T14:00:00Z",
       }),
   );
   const manifest = await verifyBundle(outputRoot, {
     repository: fixture.root,
     sourceSha: source.workflowSourceSha,
+    workflowAuthorizationSha,
     workflowRunID: 333,
     workflowRunAttempt: 2,
   });
@@ -928,7 +1003,7 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
   await fs.writeFile(
     bundleMetadataPath,
     canonicalJson(
-      artifactMetadata(bundleArtifact, source.workflowSourceSha, {
+      artifactMetadata(bundleArtifact, workflowAuthorizationSha, {
         status: "in_progress",
         conclusion: null,
         event: "workflow_run",
@@ -1000,6 +1075,7 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
     phase: "canary",
   });
   assert.equal(receipt.bundleArtifact.artifactID, 444);
+  assert.equal(receipt.workflow.authorizationSha, workflowAuthorizationSha);
   assert.equal(
     receipt.evidence.platformRefetchSha256,
     await sha256File(platformRefetchPath),
@@ -1017,7 +1093,7 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
   await fs.writeFile(
     receiptMetadataPath,
     canonicalJson(
-      artifactMetadata(receiptArtifact, source.workflowSourceSha, {
+      artifactMetadata(receiptArtifact, workflowAuthorizationSha, {
         status: "in_progress",
         conclusion: null,
         event: "workflow_run",
@@ -1048,6 +1124,7 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
     treeSha: source.workflowSourceTreeSha,
   });
   assert.equal(ledger.experimentID, experimentID);
+  assert.equal(ledger.signerSourceSha, workflowAuthorizationSha);
   assert.equal(ledger.behaviorBaseSha, source.behaviorBaseSha);
   assert.equal(ledger.evidenceArtifact.localSealSha256, "1".repeat(64));
   assert.equal(
@@ -1118,6 +1195,15 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
   const confirmAggregate = {
     ...aggregate,
     phase: "confirmatory",
+    verifiedRunCount: 96,
+    completePairCount: 48,
+    confirmatoryAnalysis: {
+      analysisSha256: "3".repeat(64),
+      jsonSha256: "4".repeat(64),
+      markdownSha256: "5".repeat(64),
+      ruleSatisfied: true,
+      eligibleForExternalReview: true,
+    },
     authenticity: { ...aggregate.authenticity, sealSha256: "2".repeat(64) },
   };
   for (const [name, value] of [
@@ -1136,9 +1222,32 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
     path.join(confirmRoot, "commander-xp-provider-preflight-ledger-v2.json"),
   );
   await fs.copyFile(ledgerPath, path.join(confirmRoot, canaryBinding.path));
+  const confirmAnalysisJsonPath = path.join(
+    confirmRoot,
+    "commander-xp-confirmatory-analysis-v2.json",
+  );
+  const confirmAnalysisMarkdownPath = path.join(
+    confirmRoot,
+    "commander-xp-confirmatory-analysis-v2.md",
+  );
+  await fs.writeFile(
+    confirmAnalysisJsonPath,
+    canonicalJson({ schemaVersion: 2, ruleSatisfied: true }),
+  );
+  await fs.writeFile(
+    confirmAnalysisMarkdownPath,
+    "# Confirmatory analysis\n\nRule satisfied.\n",
+  );
+  confirmAggregate.confirmatoryAnalysis.jsonSha256 = (
+    await sha256File(confirmAnalysisJsonPath)
+  ).slice(7);
+  confirmAggregate.confirmatoryAnalysis.markdownSha256 = (
+    await sha256File(confirmAnalysisMarkdownPath)
+  ).slice(7);
   const confirmRequest = {
     ...request,
     phase: "confirmatory",
+    priorPhaseReceipt: canaryBinding,
     canaryReceipt: canaryBinding,
     evidence: {
       preRegistrationPath: "commander-xp-preregistration-v2.json",
@@ -1162,6 +1271,243 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
     request: confirmRequest,
     verifierAggregatePath: confirmVerifierAggregate,
   });
+  const confirmAuthorityRoot = await temporaryDirectory(t);
+  await fs.writeFile(
+    path.join(confirmAuthorityRoot, SEAL_REQUEST_FILE),
+    canonicalJson(confirmRequest),
+  );
+  const confirmRequestSha = await sha256File(
+    path.join(confirmAuthorityRoot, SEAL_REQUEST_FILE),
+  );
+  const confirmBundleRoot = path.join(
+    await temporaryDirectory(t),
+    "confirm-bundle",
+  );
+  await withProcessEnvironment(
+    { GITHUB_RUN_ID: "333", GITHUB_RUN_ATTEMPT: "2" },
+    () =>
+      buildBundle({
+        repository: fixture.root,
+        evidenceRoot: confirmRoot,
+        sealRequestRoot: confirmAuthorityRoot,
+        outputRoot: confirmBundleRoot,
+        expectedRequestSha256: confirmRequestSha,
+        sourceArtifactMetadataPath: metadataPath,
+        sourceCIMetadataPath,
+        verifierAggregatePath: confirmVerifierAggregate,
+        workflowAuthorizationSha,
+        createdAt: "2026-08-22T15:00:00Z",
+      }),
+  );
+  const confirmManifest = await verifyBundle(confirmBundleRoot);
+  assert.deepEqual(
+    confirmManifest.verifier.confirmatoryAnalysis,
+    confirmAggregate.confirmatoryAnalysis,
+  );
+  const confirmRefetchBody = {
+    ...refetchBody,
+    phase: "confirmatory",
+    verifiedAt: "2026-08-22T15:29:00Z",
+    runCount: 96,
+    runs: Array.from({ length: 48 }, (_unused, replicaIndex) =>
+      ["B", "C"].map((arm) => ({
+        runPath: `runs/confirmatory/r${String(replicaIndex).padStart(2, "0")}/${arm}`,
+        xpRequestID: `xreq_confirm_${replicaIndex}${arm}`,
+        episodeRequestID: `ereq_confirm_${replicaIndex}${arm}`,
+        memberSetSha256: "1".repeat(64),
+        xpEvidenceSha256: "2".repeat(64),
+        normalizedReadbackSha256: "3".repeat(64),
+        replayEvidenceSha256: "4".repeat(64),
+        episodeResultsSha256: "5".repeat(64),
+        gameEvidenceSha256: "6".repeat(64),
+        playerArtifactSha256: "7".repeat(64),
+      })),
+    ).flat(),
+  };
+  const confirmPlatformRefetchPath = path.join(
+    supportRoot,
+    "commander-xp-confirmatory-platform-refetch-v2.json",
+  );
+  await fs.writeFile(
+    confirmPlatformRefetchPath,
+    canonicalJson({
+      ...confirmRefetchBody,
+      refetchSha256: sha256Bytes(
+        Buffer.from(canonicalJson(confirmRefetchBody)),
+      ).slice(7),
+    }),
+  );
+  const confirmReceiptPath = path.join(
+    await temporaryDirectory(t),
+    EXTERNAL_RECEIPT_FILE,
+  );
+  await withProcessEnvironment(
+    {
+      GITHUB_RUN_ID: "333",
+      GITHUB_RUN_ATTEMPT: "2",
+      BUNDLE_ARTIFACT_ID: "444",
+      BUNDLE_ARTIFACT_NAME: bundleArtifact.artifactName,
+      BUNDLE_ARTIFACT_DIGEST: bundleArtifact.artifactDigest,
+    },
+    () =>
+      createExternalReceipt({
+        bundleRoot: confirmBundleRoot,
+        sealedBundlePath,
+        platformRefetchPath: confirmPlatformRefetchPath,
+        outputPath: confirmReceiptPath,
+        bundleArtifactMetadataPath: bundleMetadataPath,
+        completedAt: "2026-08-22T15:30:00Z",
+      }),
+  );
+  const confirmReceipt = await verifyExternalReceipt(confirmReceiptPath, {
+    experimentID,
+    phase: "confirmatory",
+  });
+  assert.equal(confirmReceipt.experimentUsable, true);
+  assert.equal(confirmReceipt.performanceClaimAuthorized, true);
+  assert.equal(
+    confirmReceipt.status,
+    "sealed-confirmatory-analysis-performance-authorized",
+  );
+  const createConfirmatoryLedger = async (
+    receiptPath,
+    bundleRoot,
+    artifactID,
+    completedAt,
+  ) => {
+    const receiptArtifact = {
+      artifactID,
+      artifactName: `commander-xp-confirmatory-receipt-${artifactID}`,
+      artifactDigest: `sha256:${String(artifactID).padStart(64, "0")}`,
+      workflowRunID: 333,
+      workflowRunAttempt: 2,
+    };
+    const metadataPath = await writeSupportJson(
+      t,
+      artifactMetadata(receiptArtifact, workflowAuthorizationSha, {
+        status: "in_progress",
+        conclusion: null,
+        event: "workflow_run",
+      }),
+    );
+    const ledgerPath = path.join(
+      await temporaryDirectory(t),
+      EXTERNAL_PHASE_LEDGER_FILE,
+    );
+    await withProcessEnvironment(
+      {
+        GITHUB_RUN_ID: "333",
+        GITHUB_RUN_ATTEMPT: "2",
+        RECEIPT_ARTIFACT_ID: String(artifactID),
+        RECEIPT_ARTIFACT_NAME: receiptArtifact.artifactName,
+        RECEIPT_ARTIFACT_DIGEST: receiptArtifact.artifactDigest,
+      },
+      () =>
+        createExternalPhaseLedger({
+          bundleRoot,
+          receiptPath,
+          receiptArtifactMetadataPath: metadataPath,
+          outputPath: ledgerPath,
+          completedAt,
+        }),
+    );
+    return { ledgerPath, ledger: await verifyExternalPhaseLedger(ledgerPath) };
+  };
+  const confirmedLedger = await createConfirmatoryLedger(
+    confirmReceiptPath,
+    confirmBundleRoot,
+    446,
+    "2026-08-22T15:35:00Z",
+  );
+  assert.equal(confirmedLedger.ledger.experimentUsable, true);
+  assert.equal(confirmedLedger.ledger.performanceClaimAuthorized, true);
+  assert.deepEqual(
+    confirmedLedger.ledger.confirmatoryAnalysis,
+    confirmReceipt.confirmatoryAnalysis,
+  );
+  const tamperedConfirmReceipt = structuredClone(confirmReceipt);
+  tamperedConfirmReceipt.performanceClaimAuthorized = false;
+  const tamperedConfirmReceiptPath = await writeSupportJson(
+    t,
+    tamperedConfirmReceipt,
+  );
+  await assert.rejects(
+    verifyExternalReceipt(tamperedConfirmReceiptPath),
+    hasCode("EXTERNAL_RECEIPT_ANALYSIS_AUTHORIZATION_INVALID"),
+  );
+  const adverseAggregate = {
+    ...confirmAggregate,
+    confirmatoryAnalysis: {
+      ...confirmAggregate.confirmatoryAnalysis,
+      ruleSatisfied: false,
+      eligibleForExternalReview: false,
+    },
+  };
+  const adverseAggregatePath = await writeSupportJson(t, adverseAggregate);
+  const adverseBundleRoot = path.join(
+    await temporaryDirectory(t),
+    "adverse-confirm-bundle",
+  );
+  await withProcessEnvironment(
+    { GITHUB_RUN_ID: "333", GITHUB_RUN_ATTEMPT: "2" },
+    () =>
+      buildBundle({
+        repository: fixture.root,
+        evidenceRoot: confirmRoot,
+        sealRequestRoot: confirmAuthorityRoot,
+        outputRoot: adverseBundleRoot,
+        expectedRequestSha256: confirmRequestSha,
+        sourceArtifactMetadataPath: metadataPath,
+        sourceCIMetadataPath,
+        verifierAggregatePath: adverseAggregatePath,
+        workflowAuthorizationSha,
+        createdAt: "2026-08-22T15:40:00Z",
+      }),
+  );
+  const adverseReceiptPath = path.join(
+    await temporaryDirectory(t),
+    EXTERNAL_RECEIPT_FILE,
+  );
+  await withProcessEnvironment(
+    {
+      GITHUB_RUN_ID: "333",
+      GITHUB_RUN_ATTEMPT: "2",
+      BUNDLE_ARTIFACT_ID: "444",
+      BUNDLE_ARTIFACT_NAME: bundleArtifact.artifactName,
+      BUNDLE_ARTIFACT_DIGEST: bundleArtifact.artifactDigest,
+    },
+    () =>
+      createExternalReceipt({
+        bundleRoot: adverseBundleRoot,
+        sealedBundlePath,
+        platformRefetchPath: confirmPlatformRefetchPath,
+        outputPath: adverseReceiptPath,
+        bundleArtifactMetadataPath: bundleMetadataPath,
+        completedAt: "2026-08-22T15:45:00Z",
+      }),
+  );
+  const adverseReceipt = await verifyExternalReceipt(adverseReceiptPath);
+  assert.equal(adverseReceipt.experimentUsable, true);
+  assert.equal(adverseReceipt.performanceClaimAuthorized, false);
+  assert.equal(
+    adverseReceipt.status,
+    "sealed-confirmatory-analysis-performance-unauthorized",
+  );
+  const adverseLedger = await createConfirmatoryLedger(
+    adverseReceiptPath,
+    adverseBundleRoot,
+    447,
+    "2026-08-22T15:50:00Z",
+  );
+  assert.equal(adverseLedger.ledger.experimentUsable, true);
+  assert.equal(adverseLedger.ledger.performanceClaimAuthorized, false);
+  const tamperedLedger = structuredClone(adverseLedger.ledger);
+  tamperedLedger.confirmatoryAnalysis.jsonSha256 = "0".repeat(64);
+  const tamperedLedgerPath = await writeSupportJson(t, tamperedLedger);
+  await assert.rejects(
+    verifyExternalPhaseLedger(tamperedLedgerPath),
+    hasCode("EXTERNAL_PHASE_LEDGER_INVALID"),
+  );
   confirmIndex.canarySealSha256 = "9".repeat(64);
   await fs.writeFile(
     path.join(confirmRoot, "commander-xp-evidence-index-v2.json"),
@@ -1302,6 +1648,7 @@ function externalLedgerFixture({
     collector: sourceArtifact,
     runId: "700",
     attempt: 1,
+    signerSourceSha: source.workflowSourceSha,
     headSha: source.workflowSourceSha,
     treeSha: source.workflowSourceTreeSha,
     phase,
@@ -1311,6 +1658,7 @@ function externalLedgerFixture({
     priorPhaseReceipt,
     canaryReceipt,
     namespaceRegistry,
+    confirmatoryAnalysis: null,
     evidenceArtifact: {
       id: "701",
       digest: `sha256:${"a".repeat(64)}`,
@@ -1325,6 +1673,9 @@ function externalLedgerFixture({
       receiptSha256: "e".repeat(64),
       attestedSubjectDigest: "e".repeat(64),
     },
+    integrityVerified: true,
+    experimentUsable: false,
+    performanceClaimAuthorized: false,
   };
   return {
     ...body,
@@ -1364,6 +1715,7 @@ function phaseReceiptBinding(ledger, relativePath, fileSha256) {
     },
     localSealSha256: ledger.evidenceArtifact.localSealSha256,
     namespaceRegistrySha256: ledger.namespaceRegistry.registrySha256,
+    signerSourceSha: ledger.signerSourceSha,
     workflowPath: ledger.workflowPath,
     workflowID: ledger.workflowID,
     workflowName: ledger.workflowName,
@@ -1418,6 +1770,7 @@ async function retainedAuthorityFixture(root, ledgerPath, ledger, binding) {
     experimentID: ledger.experimentID,
     runId: ledger.runId,
     attempt: ledger.attempt,
+    signerSourceSha: ledger.signerSourceSha,
     headSha: ledger.headSha,
     treeSha: ledger.treeSha,
     behaviorBaseSha: ledger.behaviorBaseSha,
@@ -1451,9 +1804,10 @@ async function retainedAuthorityFixture(root, ledgerPath, ledger, binding) {
         provenanceSha256: "d".repeat(64),
       },
     },
-    integrityVerified: true,
-    experimentUsable: false,
-    performanceClaimAuthorized: false,
+    confirmatoryAnalysis: ledger.confirmatoryAnalysis,
+    integrityVerified: ledger.integrityVerified,
+    experimentUsable: ledger.experimentUsable,
+    performanceClaimAuthorized: ledger.performanceClaimAuthorized,
   };
   const authorityPath = path.join(root, "authority.json");
   await fs.writeFile(authorityPath, canonicalJson(authority));
@@ -1472,6 +1826,7 @@ async function retainedAuthorityFixture(root, ledgerPath, ledger, binding) {
     experimentID: authority.experimentID,
     runId: authority.runId,
     attempt: authority.attempt,
+    signerSourceSha: authority.signerSourceSha,
     headSha: authority.headSha,
     treeSha: authority.treeSha,
     behaviorBaseSha: authority.behaviorBaseSha,
@@ -1495,9 +1850,10 @@ async function retainedAuthorityFixture(root, ledgerPath, ledger, binding) {
       bundleSha256: "e".repeat(64),
       provenanceSha256: "f".repeat(64),
     },
-    integrityVerified: true,
-    experimentUsable: false,
-    performanceClaimAuthorized: false,
+    confirmatoryAnalysis: authority.confirmatoryAnalysis,
+    integrityVerified: authority.integrityVerified,
+    experimentUsable: authority.experimentUsable,
+    performanceClaimAuthorized: authority.performanceClaimAuthorized,
   };
   const terminal = {
     ...terminalBody,

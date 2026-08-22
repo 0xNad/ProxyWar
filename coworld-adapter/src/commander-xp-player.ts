@@ -11,6 +11,7 @@
  * gameplay.
  */
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -25,7 +26,13 @@ import {
   COMMANDER_XP_BEHAVIOR_SOURCE_SHA,
   COMMANDER_XP_BEHAVIOR_SOURCE_TREE_SHA,
 } from "../../src/server/agents/CommanderXpBehaviorIdentity";
-import { commanderXpProviderPreflightRequestID } from "../../src/server/agents/CommanderXpProtocol";
+import {
+  COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT,
+  COMMANDER_XP_COMMANDER_PROMPT_VERSION,
+  COMMANDER_XP_COMMANDER_PROMPT_VERSION_SHA256,
+  commanderXpProviderPreflightRequestID,
+  sha256Canonical,
+} from "../../src/server/agents/CommanderXpProtocol";
 import type {
   LlmCompletionOptions,
   LlmProvider,
@@ -36,9 +43,8 @@ import {
   type CommanderXpArm,
   type CommanderXpRuntimeManifest,
 } from "./commander-xp-artifact";
+import { finalizeCommanderXpPlayer } from "./commander-xp-finalization";
 import {
-  chooseKeystoneDealMove,
-  chooseKeystoneMessageMove,
   createKeystoneBrain,
   decisionToResponse,
   keystoneTunableFlagSummary,
@@ -48,8 +54,6 @@ import {
   transportFallbackResponse,
   wireMaxActionsPerDecision,
   wireMaxSpawnPreferences,
-  withKeystoneDeal,
-  withKeystoneMessage,
   withoutKeystoneTreatyBreaches,
 } from "./keystone-player";
 
@@ -64,8 +68,8 @@ type CommanderLlmSelectorModule =
 type RuleBrainModule = typeof import("../../src/server/agents/RuleAgentBrain");
 
 const REQUIRED_FLAGS = {
-  PROXYWAR_TUNE_STRUCTURED_DEALS: "1",
-  PROXYWAR_TUNE_FREETEXT_MESSAGES: "1",
+  PROXYWAR_TUNE_STRUCTURED_DEALS: "0",
+  PROXYWAR_TUNE_FREETEXT_MESSAGES: "0",
   PROXYWAR_TUNE_SPATIAL_OBSERVATION: "0",
   PROXYWAR_TUNE_SPATIAL_MINIMAP: "0",
   PROXYWAR_KEYSTONE_PROFILE: "aggressive",
@@ -78,6 +82,18 @@ export function commanderXpProviderPreflightRequired(
   _arm: CommanderXpArm,
 ): true {
   return true;
+}
+
+export function withoutCommanderXpSocialSlots(
+  decision: AgentDecision,
+): AgentDecision {
+  const {
+    dealActionID: _dealActionID,
+    messageActionID: _messageActionID,
+    messageText: _messageText,
+    ...ordinaryDecision
+  } = decision;
+  return ordinaryDecision;
 }
 
 interface BedrockResponse {
@@ -97,14 +113,14 @@ interface BedrockClient {
 class ExactBedrockProvider implements LlmProvider {
   readonly providerType = "custom" as const;
   readonly cancellationBehavior = "settles-after-abort" as const;
-  readonly model: string;
+  readonly model: typeof COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.modelID;
   private client: BedrockClient | null = null;
   private currentRequestID = "uninitialized-preflight";
   private currentStage: "preflight" | "planner" | "selector" = "preflight";
   private readonly active = new Set<Promise<unknown>>();
 
   constructor(
-    model: string,
+    model: typeof COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.modelID,
     private readonly arm: CommanderXpArm,
     private readonly collector: CommanderXpTraceCollector,
     private readonly timeoutMs: number,
@@ -128,6 +144,17 @@ class ExactBedrockProvider implements LlmProvider {
   ): Promise<string> {
     const requestID = this.currentRequestID;
     const promptSha256 = sha256(prompt);
+    const providerContractSha256 = sha256Canonical(
+      COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT,
+    );
+    const promptVersion =
+      this.currentStage === "selector"
+        ? COMMANDER_XP_COMMANDER_PROMPT_VERSION
+        : null;
+    const promptVersionSha256 =
+      this.currentStage === "selector"
+        ? COMMANDER_XP_COMMANDER_PROMPT_VERSION_SHA256
+        : null;
     const operation = this.completeInternal(prompt, options);
     this.active.add(operation);
     try {
@@ -139,6 +166,9 @@ class ExactBedrockProvider implements LlmProvider {
           requestID,
           stage: this.currentStage,
           provider: "bedrock-sidecar",
+          providerContractSha256,
+          promptVersion,
+          promptVersionSha256,
           requestedModel: this.model,
           responseModel,
           promptSha256,
@@ -158,6 +188,9 @@ class ExactBedrockProvider implements LlmProvider {
         requestID,
         stage: this.currentStage,
         provider: "bedrock-sidecar",
+        providerContractSha256,
+        promptVersion,
+        promptVersionSha256,
         requestedModel: this.model,
         responseModel,
         promptSha256,
@@ -176,6 +209,9 @@ class ExactBedrockProvider implements LlmProvider {
           requestID,
           stage: this.currentStage,
           provider: "bedrock-sidecar",
+          providerContractSha256,
+          promptVersion,
+          promptVersionSha256,
           requestedModel: this.model,
           responseModel: null,
           promptSha256,
@@ -208,21 +244,14 @@ class ExactBedrockProvider implements LlmProvider {
   ): Promise<BedrockResponse> {
     const client = await this.bedrockClient();
     return await client.messages.create(
-      {
-        model: this.model,
-        max_tokens: 1024,
-        messages: [{ role: "user", content: prompt }],
-      },
+      commanderXpBedrockRequest(this.model, prompt),
       { timeout: this.timeoutMs, signal: options.signal },
     );
   }
 
   private async bedrockClient(): Promise<BedrockClient> {
     if (this.client !== null) return this.client;
-    const baseURL = this.env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME?.trim();
-    if (baseURL === undefined || !/^https?:\/\//.test(baseURL)) {
-      throw new Error("bedrock-sidecar-endpoint-missing");
-    }
+    const baseURL = commanderXpBedrockSidecarEndpoint(this.env);
     const specifier = "@anthropic-ai/bedrock-sdk";
     const imported = (await import(/* @vite-ignore */ specifier)) as {
       default?: new (options: Record<string, unknown>) => BedrockClient;
@@ -235,8 +264,7 @@ class ExactBedrockProvider implements LlmProvider {
       throw new Error("bedrock-sidecar-client-missing");
     }
     this.client = new Constructor({
-      awsRegion:
-        this.env.AWS_REGION ?? this.env.AWS_DEFAULT_REGION ?? "us-west-2",
+      awsRegion: COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.region,
       baseURL,
     });
     return this.client;
@@ -256,21 +284,100 @@ export function commanderXpArmFromArgv(
 
 export function assertCommanderXpEnvironment(
   env: NodeJS.ProcessEnv = process.env,
-): { model: string; profile: AgentStrategyProfile; timeoutMs: number } {
+  resolvedSdkVersion = commanderXpResolvedBedrockSdkVersion(),
+): {
+  model: typeof COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.modelID;
+  profile: AgentStrategyProfile;
+  timeoutMs: number;
+} {
   for (const [key, expected] of Object.entries(REQUIRED_FLAGS)) {
     if (env[key] !== expected) {
       throw new Error(`Commander XP requires ${key}=${expected}`);
     }
   }
   const model = env.BEDROCK_MODEL?.trim();
-  if (model === undefined || model.length < 8 || /\s/.test(model)) {
-    throw new Error("Commander XP requires one exact BEDROCK_MODEL");
+  if (model !== COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.modelID) {
+    throw new Error("Commander XP requires the exact Bedrock model ID");
+  }
+  if (
+    env.AWS_REGION !== COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.region ||
+    (env.AWS_DEFAULT_REGION !== undefined &&
+      env.AWS_DEFAULT_REGION !== COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.region)
+  ) {
+    throw new Error("Commander XP requires the exact Bedrock region");
+  }
+  commanderXpBedrockSidecarEndpoint(env);
+  if (
+    resolvedSdkVersion !== COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.sdkVersion
+  ) {
+    throw new Error("Commander XP requires the exact Bedrock SDK version");
   }
   return {
     model,
     profile: "aggressive",
-    timeoutMs: 12_000,
+    timeoutMs: COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.timeoutMs,
   };
+}
+
+export function commanderXpBedrockRequest(
+  model: typeof COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.modelID,
+  prompt: string,
+): {
+  model: typeof COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.modelID;
+  max_tokens: 1024;
+  temperature: 0;
+  top_p: 1;
+  messages: Array<{ role: "user"; content: string }>;
+} {
+  return {
+    model,
+    max_tokens: COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.maxTokens,
+    temperature: COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.temperature,
+    top_p: COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.topP,
+    messages: [{ role: "user", content: prompt }],
+  };
+}
+
+export function commanderXpResolvedBedrockSdkVersion(): string {
+  const require = createRequire(import.meta.url);
+  const entry = require.resolve(
+    COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.sdkPackage,
+  );
+  const parsed = JSON.parse(
+    readFileSync(path.join(path.dirname(entry), "package.json"), "utf8"),
+  ) as { version?: unknown };
+  if (typeof parsed.version !== "string") {
+    throw new Error("Commander XP Bedrock SDK package metadata is invalid");
+  }
+  return parsed.version;
+}
+
+export function commanderXpBedrockSidecarEndpoint(
+  env: NodeJS.ProcessEnv,
+): string {
+  const raw = env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME?.trim();
+  if (raw === undefined || raw.length === 0) {
+    throw new Error("bedrock-sidecar-endpoint-missing");
+  }
+  let endpoint: URL;
+  try {
+    endpoint = new URL(raw);
+  } catch {
+    throw new Error("bedrock-sidecar-endpoint-invalid");
+  }
+  if (
+    endpoint.protocol !== "http:" ||
+    !["127.0.0.1", "localhost"].includes(endpoint.hostname) ||
+    endpoint.username !== "" ||
+    endpoint.password !== "" ||
+    endpoint.pathname !== "/" ||
+    endpoint.search !== "" ||
+    endpoint.hash !== "" ||
+    endpoint.port === ""
+  ) {
+    throw new Error("bedrock-sidecar-endpoint-invalid");
+  }
+  return endpoint.toString().replace(/\/$/, "");
 }
 
 async function loadStrategicModules(repoRoot: string) {
@@ -355,9 +462,8 @@ async function main(): Promise<void> {
   const socket = new WebSocket(url);
   let decisionChain: Promise<void> = Promise.resolve();
   let sawFinal = false;
+  let finalizationAcknowledged = false;
   let observedGameID: string | null = null;
-  const answeredMessages = new Set<string>();
-  const proposedDeals = new Set<string>();
   socket.on("open", () => {
     console.log(
       `commander-xp connected (arm=${arm}, model=${model}, profile=${profile}, ${keystoneTunableFlagSummary()})`,
@@ -388,19 +494,41 @@ async function main(): Promise<void> {
         ) {
           throw new Error("Commander XP received incomplete runtime identity");
         }
-        await provider.drain();
-        await uploadCommanderXpPlayerArtifact({
-          uploadURL,
-          manifest: runtimeManifest({
-            arm,
-            gameID: observedGameID,
-            runKey: observedRunKey,
-            model,
-            preflightRequestID,
-            preflightResponseModel,
-          }),
-          trace: collector.records(),
+        const finalGameID = observedGameID;
+        const finalRunKey = observedRunKey;
+        const finalPreflightRequestID = preflightRequestID;
+        const finalPreflightResponseModel = preflightResponseModel;
+        await finalizeCommanderXpPlayer({
+          drain: () => provider.drain(),
+          upload: async () => {
+            await uploadCommanderXpPlayerArtifact({
+              uploadURL,
+              manifest: runtimeManifest({
+                arm,
+                gameID: finalGameID,
+                runKey: finalRunKey,
+                model,
+                preflightRequestID: finalPreflightRequestID,
+                preflightResponseModel: finalPreflightResponseModel,
+              }),
+              trace: collector.records(),
+            });
+          },
+          acknowledge: (acknowledgement) => {
+            socket.send(JSON.stringify(acknowledgement));
+            finalizationAcknowledged = true;
+          },
         });
+      });
+      return;
+    }
+    if (message.type === "finalization_complete") {
+      decisionChain = decisionChain.then(() => {
+        if (!sawFinal || !finalizationAcknowledged) {
+          throw new Error(
+            "Commander XP finalization completed without acknowledgement",
+          );
+        }
         socket.close();
       });
       return;
@@ -468,23 +596,10 @@ async function main(): Promise<void> {
           } catch {
             console.error("commander-xp treaty menu guard failed");
           }
-          const decided = await brain.decide({
-            ...input,
-            legalActions: compliantActions,
-          });
-          decision = withKeystoneDeal(
-            withKeystoneMessage(
-              decided,
-              chooseKeystoneMessageMove(
-                input.legalActions,
-                input.observation,
-                answeredMessages,
-              ),
-            ),
-            chooseKeystoneDealMove({
-              observation: input.observation,
-              legalActions: input.legalActions,
-              proposed: proposedDeals,
+          decision = withoutCommanderXpSocialSlots(
+            await brain.decide({
+              ...input,
+              legalActions: compliantActions,
             }),
           );
         }
@@ -497,6 +612,12 @@ async function main(): Promise<void> {
         collector.decision({
           requestID,
           arm,
+          preSelectorObservationSha256: sha256Canonical(
+            commanderXpSelectorRelevantObservation(input.observation),
+          ),
+          preSelectorLegalActionSurfaceSha256: sha256Canonical(
+            input.legalActions,
+          ),
           legalActions: input.legalActions,
           decision,
           response,
@@ -517,12 +638,29 @@ async function main(): Promise<void> {
     });
   });
   socket.on("close", () => {
-    process.exit(sawFinal ? 0 : 1);
+    void decisionChain.then(
+      () => process.exit(sawFinal && finalizationAcknowledged ? 0 : 1),
+      () => process.exit(1),
+    );
   });
   socket.on("error", () => {
     console.error("commander-xp websocket error");
     process.exit(1);
   });
+}
+
+/**
+ * Exact pre-selector observation surface. The game has already normalized the
+ * seat username; retaining it here is deliberate because CommanderStateBuilder
+ * serializes it as `self.name` into the C-arm prompt. Only the transport-local
+ * client ID is excluded. Matched B/C verification compares this full hash
+ * before either selector runs.
+ */
+export function commanderXpSelectorRelevantObservation(
+  observation: AgentBrainInput["observation"],
+): Omit<AgentBrainInput["observation"], "clientID"> {
+  const { clientID: _transportIdentity, ...selectorInput } = observation;
+  return selectorInput;
 }
 
 function runtimeManifest(input: {
@@ -554,6 +692,9 @@ function runtimeManifest(input: {
     policyIdentityAuthority:
       "external-policy-inspect-and-xp-participant-metadata",
     requestedModel: input.model,
+    providerContract: structuredClone(COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT),
+    commanderPromptVersion: COMMANDER_XP_COMMANDER_PROMPT_VERSION,
+    commanderPromptVersionSha256: COMMANDER_XP_COMMANDER_PROMPT_VERSION_SHA256,
     runArgv: [
       "node",
       "--import",
@@ -562,8 +703,8 @@ function runtimeManifest(input: {
       `--arm=${input.arm}`,
     ],
     flags: {
-      STRUCTURED_DEALS: "1",
-      FREETEXT_MESSAGES: "1",
+      STRUCTURED_DEALS: "0",
+      FREETEXT_MESSAGES: "0",
       SPATIAL_OBSERVATION: "0",
       SPATIAL_MINIMAP: "0",
       KEYSTONE_PROFILE: "aggressive",

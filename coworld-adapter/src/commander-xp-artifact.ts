@@ -2,7 +2,13 @@ import { createHash } from "node:crypto";
 
 import JSZip from "jszip";
 
-import { COMMANDER_XP_COMMANDER_METADATA_ALLOWLIST } from "../../src/server/agents/CommanderXpProtocol";
+import {
+  COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT,
+  COMMANDER_XP_COMMANDER_METADATA_ALLOWLIST,
+  COMMANDER_XP_COMMANDER_PROMPT_VERSION,
+  COMMANDER_XP_COMMANDER_PROMPT_VERSION_SHA256,
+} from "../../src/server/agents/CommanderXpProtocol";
+import { normalizeCommanderExecutionEnvelope } from "./coworld-decision-wire";
 
 export const COMMANDER_XP_PLAYER_ARTIFACT_SCHEMA_VERSION = 2;
 export const COMMANDER_XP_PLAYER_ARTIFACT_MAX_BYTES = 200 * 1024 * 1024;
@@ -16,6 +22,11 @@ export interface CommanderXpProviderTrace {
   stage: "preflight" | "planner" | "selector";
   sequence: number;
   provider: "bedrock-sidecar";
+  providerContractSha256: string;
+  promptVersion: typeof COMMANDER_XP_COMMANDER_PROMPT_VERSION | null;
+  promptVersionSha256:
+    | typeof COMMANDER_XP_COMMANDER_PROMPT_VERSION_SHA256
+    | null;
   requestedModel: string;
   responseModel: string | null;
   promptSha256: string;
@@ -32,6 +43,9 @@ export interface CommanderXpDecisionTrace {
   requestID: string;
   sequence: number;
   arm: CommanderXpArm;
+  preSelectorObservationSha256: string;
+  preSelectorLegalActionSurfaceSha256: string;
+  commanderExecutionSha256: string | null;
   offeredLegalActions: Array<{ id: string; kind: string }>;
   offeredLegalActionSetSha256: string;
   selectedLegalActionID: string;
@@ -67,10 +81,13 @@ export interface CommanderXpRuntimeManifest {
   policyVersionID: string | null;
   policyIdentityAuthority: "external-policy-inspect-and-xp-participant-metadata";
   requestedModel: string;
+  providerContract: typeof COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT;
+  commanderPromptVersion: typeof COMMANDER_XP_COMMANDER_PROMPT_VERSION;
+  commanderPromptVersionSha256: typeof COMMANDER_XP_COMMANDER_PROMPT_VERSION_SHA256;
   runArgv: string[];
   flags: {
-    STRUCTURED_DEALS: "1";
-    FREETEXT_MESSAGES: "1";
+    STRUCTURED_DEALS: "0";
+    FREETEXT_MESSAGES: "0";
     SPATIAL_OBSERVATION: "0";
     SPATIAL_MINIMAP: "0";
     KEYSTONE_PROFILE: "aggressive";
@@ -107,6 +124,8 @@ export class CommanderXpTraceCollector {
   decision(input: {
     requestID: string;
     arm: CommanderXpArm;
+    preSelectorObservationSha256: string;
+    preSelectorLegalActionSurfaceSha256: string;
     legalActions: Array<{ id: string; kind: string }>;
     decision: {
       actionID: string;
@@ -121,7 +140,7 @@ export class CommanderXpTraceCollector {
     response: Record<string, unknown>;
   }): void {
     const metadata = input.decision.metadata ?? {};
-    const commander = Object.fromEntries(
+    const authoredCommander = Object.fromEntries(
       COMMANDER_XP_COMMANDER_METADATA_ALLOWLIST.flatMap((key) => {
         const value = metadata[key];
         return value === null ||
@@ -132,6 +151,25 @@ export class CommanderXpTraceCollector {
           : [];
       }),
     );
+    const commanderExecution = normalizeCommanderExecutionEnvelope(
+      input.response.commanderExecution,
+    );
+    if (
+      input.response.commanderExecution !== undefined &&
+      commanderExecution === null
+    ) {
+      throw new Error("Commander XP wire execution envelope is malformed");
+    }
+    const commander = commanderExecution?.metadata ?? authoredCommander;
+    if (
+      commanderExecution !== null &&
+      COMMANDER_XP_COMMANDER_METADATA_ALLOWLIST.some(
+        (key) =>
+          (authoredCommander[key] ?? null) !== commanderExecution.metadata[key],
+      )
+    ) {
+      throw new Error("Commander XP wire execution envelope diverged");
+    }
     const offeredLegalActions = input.legalActions.map(({ id, kind }) => ({
       id,
       kind,
@@ -163,6 +201,15 @@ export class CommanderXpTraceCollector {
       requestID: input.requestID,
       sequence: this.nextSequence++,
       arm: input.arm,
+      preSelectorObservationSha256: requiredSha256(
+        input.preSelectorObservationSha256,
+        "preSelectorObservationSha256",
+      ),
+      preSelectorLegalActionSurfaceSha256: requiredSha256(
+        input.preSelectorLegalActionSurfaceSha256,
+        "preSelectorLegalActionSurfaceSha256",
+      ),
+      commanderExecutionSha256: commanderExecution?.metadataSha256 ?? null,
       offeredLegalActions,
       offeredLegalActionSetSha256: sha256Canonical(offeredLegalActions),
       selectedLegalActionID,
@@ -193,6 +240,13 @@ export class CommanderXpTraceCollector {
   records(): readonly CommanderXpPlayerTrace[] {
     return this.trace;
   }
+}
+
+function requiredSha256(value: string, field: string): string {
+  if (!/^[a-f0-9]{64}$/.test(value)) {
+    throw new Error(`Commander XP ${field} is invalid`);
+  }
+  return value;
 }
 
 function stringField(
@@ -296,8 +350,8 @@ function assertRuntimeManifest(manifest: CommanderXpRuntimeManifest): void {
       manifest.runKey,
     ) ||
     !manifest.runKey.endsWith(`/${manifest.arm}`) ||
-    manifest.flags.STRUCTURED_DEALS !== "1" ||
-    manifest.flags.FREETEXT_MESSAGES !== "1" ||
+    manifest.flags.STRUCTURED_DEALS !== "0" ||
+    manifest.flags.FREETEXT_MESSAGES !== "0" ||
     manifest.flags.SPATIAL_OBSERVATION !== "0" ||
     manifest.flags.SPATIAL_MINIMAP !== "0" ||
     manifest.flags.KEYSTONE_PROFILE !== "aggressive" ||
@@ -306,6 +360,11 @@ function assertRuntimeManifest(manifest: CommanderXpRuntimeManifest): void {
       !/^sha256:[0-9a-f]{64}$/.test(manifest.imageDigest)) ||
     manifest.policyIdentityAuthority !==
       "external-policy-inspect-and-xp-participant-metadata" ||
+    JSON.stringify(manifest.providerContract) !==
+      JSON.stringify(COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT) ||
+    manifest.commanderPromptVersion !== COMMANDER_XP_COMMANDER_PROMPT_VERSION ||
+    manifest.commanderPromptVersionSha256 !==
+      COMMANDER_XP_COMMANDER_PROMPT_VERSION_SHA256 ||
     manifest.providerPreflight.required !== true ||
     manifest.providerPreflight.status !== "succeeded" ||
     !/^provider-preflight-[0-9a-f]{24}$/.test(

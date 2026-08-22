@@ -15,14 +15,18 @@ import {
   MAX_SPAWN_PREFERENCE_ACTION_IDS as CANONICAL_MAX_SPAWN_PREFERENCES,
   isSelfReportedDegradationCause,
 } from "../../src/server/agents/AgentWireProtocol.ts";
+import { COMMANDER_XP_COMMANDER_METADATA_ALLOWLIST } from "../../src/server/agents/CommanderXpProtocol.ts";
 import {
+  commanderExecutionEnvelope,
   composeCoworldDecision,
   COWORLD_AGENT_RUNTIME_MODES,
+  COWORLD_COMMANDER_EXECUTION_METADATA_KEYS,
   decisionRequestEnvelope,
   MAX_WIRE_ACTION_ID_LENGTH,
   MAX_WIRE_ACTIONS_PER_DECISION,
   MAX_WIRE_MESSAGE_TEXT_LENGTH,
   MAX_WIRE_SPAWN_PREFERENCE_ACTION_IDS,
+  normalizeCommanderExecutionEnvelope,
   normalizeDecisionResponse,
   normalizeDegradedCause,
   normalizeRecordedDegradationCause,
@@ -45,6 +49,12 @@ describe("wire constant parity", () => {
 
   it("mirrors the five canonical runtime modes exactly", () => {
     expect(COWORLD_AGENT_RUNTIME_MODES).toEqual(agentRuntimeModes);
+  });
+
+  it("mirrors the canonical Commander execution metadata allowlist exactly", () => {
+    expect(COWORLD_COMMANDER_EXECUTION_METADATA_KEYS).toEqual(
+      COMMANDER_XP_COMMANDER_METADATA_ALLOWLIST,
+    );
   });
 
   it("keeps the comms transport bound STRICTLY above the validator's cap", () => {
@@ -855,6 +865,75 @@ describe("composeCoworldDecision", () => {
     });
     expect(degraded.metadata.fallbackUsed).toBe(true);
     expect(degraded.metadata.llmPlannerDegraded).toBe(true);
+  });
+
+  it("carries one hashed Commander execution envelope into game-owned metadata", () => {
+    const envelope = commanderExecutionEnvelope({
+      runtimeMode: "commander-v0-selector",
+      plannerSource: "strategic-commander-v0",
+      planID: "plan-wire-fixture",
+      planObjective: "survive",
+      commanderSelectedOptionID: "survive",
+      commanderSelectedOptionFamily: "survive",
+      commanderSelectorSource: "fallback-deterministic",
+      commanderDeterministicPreferredOptionId: "expand",
+      commanderDeterministicPreferredOptionAbsent: true,
+      commanderFidelity: "aligned_primary",
+      commanderBatchFidelities: JSON.stringify({
+        "hold:fixture": "aligned_primary",
+      }),
+      batchIndex: 0,
+      batchSize: 1,
+      batchActionIDs: "hold:fixture",
+    });
+    expect(envelope).toBeDefined();
+    expect(normalizeCommanderExecutionEnvelope(envelope)).toEqual(envelope);
+    expect(envelope?.selection).toEqual({
+      planID: "plan-wire-fixture",
+      selectedOptionID: "survive",
+      selectedOptionFamily: "survive",
+      selectorSource: "fallback-deterministic",
+      deterministicPreferredOptionID: "expand",
+      deterministicPreferredOptionAbsent: true,
+    });
+    expect(envelope?.selectionSha256).toMatch(/^[0-9a-f]{64}$/);
+
+    const composed = composeCoworldDecision({
+      normalized,
+      message: {
+        runtimeMode: "commander-v0-selector",
+        commanderExecution: envelope,
+      },
+      slot: 1,
+      requestID: "req_commander_wire",
+      offeredLegalActionCount: 1,
+    });
+    expect(composed.actionID).toBe(normalized.actionID);
+    expect(composed.metadata).toMatchObject({
+      runtimeMode: "commander-v0-selector",
+      planID: "plan-wire-fixture",
+      planObjective: "survive",
+      commanderFidelity: "aligned_primary",
+      commanderExecutionSha256: envelope?.metadataSha256,
+      commanderSelectionSha256: envelope?.selectionSha256,
+    });
+
+    const tampered = structuredClone(envelope!);
+    tampered.metadata.planObjective = "pressure_rival:forged";
+    expect(normalizeCommanderExecutionEnvelope(tampered)).toBeNull();
+    const ignored = composeCoworldDecision({
+      normalized,
+      message: { commanderExecution: tampered },
+      slot: 1,
+      requestID: "req_commander_wire_tampered",
+      offeredLegalActionCount: 1,
+    });
+    expect(ignored.metadata).not.toHaveProperty("commanderExecutionSha256");
+    expect(ignored.metadata).not.toHaveProperty("planObjective");
+
+    const divergentSelection = structuredClone(envelope!);
+    divergentSelection.selection.selectedOptionID = "expand";
+    expect(normalizeCommanderExecutionEnvelope(divergentSelection)).toBeNull();
   });
 
   it("forwards all five exact runtime modes and rejects near-miss or forged values", () => {

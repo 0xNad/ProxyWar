@@ -24,7 +24,10 @@ import type {
   CommanderRecentEvent,
   StrategicOptionCandidate,
 } from "./StrategicCommanderTypes";
-import { buildStrategicOptions } from "./StrategicOptionBuilder";
+import {
+  buildStrategicOptions,
+  strategicOptionSurfaceSha256,
+} from "./StrategicOptionBuilder";
 import {
   commanderBatchFidelityStamp,
   executeStrategicOption,
@@ -554,6 +557,8 @@ function commanderDecision(args: {
       ...optionEvidence,
       planID: plan?.planID ?? null,
       planObjective: optionID,
+      commanderSelectedOptionID: optionID,
+      commanderSelectedOptionFamily: plan?.family ?? null,
       planRationale: plan?.intent ?? null,
       planFollowed:
         firstFidelity === "aligned_primary" ||
@@ -595,6 +600,7 @@ function commanderDecision(args: {
           : `${plan.origin.exposedOptionSetFingerprint}:${plan.origin.materialStateFingerprint}`,
       commanderEligibleOptionIds:
         args.options.record.eligibleOptionIds.join(","),
+      commanderOptionSurfaceSha256: strategicOptionSurfaceSha256(args.options),
       commanderExposedOptionIds: args.options.record.exposedOptionIds.join(","),
       commanderOmittedOptions: args.options.record.omitted
         .map((entry) => `${entry.id}:${entry.reason}`)
@@ -624,6 +630,7 @@ function commanderDecision(args: {
       commanderSelectorProvider: args.selectionTelemetry?.provider ?? null,
       commanderSelectorModel: args.selectionTelemetry?.model ?? null,
       commanderPromptVersion: args.selectionTelemetry?.promptVersion ?? null,
+      commanderPromptSha256: args.selectionTelemetry?.promptSha256 ?? null,
       commanderSelfTiles: args.ownTiles,
       commanderSelfTroops: args.ownTroops,
     },

@@ -31,3 +31,26 @@ test("control workflow binds exact protected source and attests immutable output
     assert.match(uses[1], /@[0-9a-f]{40}$/);
   }
 });
+
+test("control workflow mints one annotated preregistration fence and only recovers identical bytes", () => {
+  assert.match(workflow, /recover_existing_preregistration_fence:/);
+  assert.match(workflow, /commander-xp-preregistration-fence-v1/);
+  assert.match(workflow, /github-annotated-preregistration-fence-v1/);
+  assert.match(workflow, /preregistrationFenceGitRef/);
+  assert.match(workflow, /PROVISION_COMPLETED_AT/);
+  assert.match(workflow, /CREATED_AT="\$PROVISION_COMPLETED_AT"/);
+  assert.match(workflow, /repos\/\$GITHUB_REPOSITORY\/git\/tags/);
+  assert.match(workflow, /repos\/\$GITHUB_REPOSITORY\/git\/refs/);
+  assert.match(
+    workflow,
+    /test "\$RECOVER_EXISTING_PREREGISTRATION_FENCE" = true/,
+  );
+  const build = workflow.indexOf(
+    "Build and validate the immutable control packet",
+  );
+  const fence = workflow.indexOf(
+    "Atomically create or verify the single preregistration fence",
+  );
+  const upload = workflow.indexOf("Upload immutable control packet");
+  assert.ok(build > 0 && build < fence && fence < upload);
+});

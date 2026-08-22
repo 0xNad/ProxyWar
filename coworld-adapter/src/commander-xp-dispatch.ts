@@ -40,6 +40,8 @@ export interface CommanderXpDispatchInput {
   dispatchAuthorizationPath: string;
   coworldCommandPath: string;
   outputDirectory: string;
+  recoveryDirectory?: string;
+  confirmatoryDispatchMode?: "first-wave-only";
 }
 
 interface CommanderXpDispatchAuthorization {
@@ -72,10 +74,13 @@ interface CommanderXpDispatchProgressEntry {
   runPath: string;
   requestBodySha256: string;
   submittedRequestSha256: string;
-  status: "prepared" | "submitted" | "failed";
+  wave: 1 | 2;
+  status: "prepared" | "submitted" | "terminal" | "failed";
   xpRequestID: string | null;
   rawResponseSha256: string | null;
   rawResponseByteLength: number | null;
+  terminalAt: string | null;
+  terminalReadbackSha256: string | null;
   failureCode: string | null;
 }
 
@@ -101,6 +106,201 @@ export interface CommanderXpDispatchedRequest {
   submittedRequestPath: string;
   createResponsePath: string;
   createResponseRawPath: string;
+}
+
+export interface CommanderXpRecoveryCandidate {
+  id: string;
+  created_at: string;
+  status: string;
+  requested: unknown;
+  rawReadback: string;
+}
+
+export function selectCommanderXpRecoveryCandidate(
+  planned: CommanderXpPlannedRequest,
+  candidates: readonly CommanderXpRecoveryCandidate[],
+): CommanderXpRecoveryCandidate {
+  const matchingKey = candidates.filter((candidate) => {
+    if (
+      candidate.requested === null ||
+      typeof candidate.requested !== "object" ||
+      Array.isArray(candidate.requested)
+    ) {
+      return false;
+    }
+    return (
+      (candidate.requested as Record<string, unknown>).idempotency_key ===
+      planned.runKey
+    );
+  });
+  if (matchingKey.length !== 1) {
+    throw new Error("Commander XP recovery identity is ambiguous or missing");
+  }
+  const selected = matchingKey[0]!;
+  if (
+    !/^xreq_[A-Za-z0-9-]+$/.test(selected.id) ||
+    !Number.isFinite(Date.parse(selected.created_at)) ||
+    !["submitted", "pending", "running", "completed"].includes(
+      selected.status,
+    ) ||
+    sha256Canonical(selected.requested) !== planned.requestBodySha256 ||
+    selected.rawReadback.length === 0
+  ) {
+    throw new Error("Commander XP recovery candidate does not match the slot");
+  }
+  return selected;
+}
+
+export async function discoverCommanderXpRecoveryCandidate(
+  commandPath: string,
+  planned: CommanderXpPlannedRequest,
+): Promise<CommanderXpRecoveryCandidate> {
+  return selectCommanderXpRecoveryCandidate(
+    planned,
+    await listCommanderXpRecoveryCandidates(commandPath),
+  );
+}
+
+function selectCommanderXpRecoveryCandidateIfPresent(
+  planned: CommanderXpPlannedRequest,
+  candidates: readonly CommanderXpRecoveryCandidate[],
+): Promise<CommanderXpRecoveryCandidate | null> {
+  const matching = candidates.filter(
+    (candidate) =>
+      candidate.requested !== null &&
+      typeof candidate.requested === "object" &&
+      !Array.isArray(candidate.requested) &&
+      (candidate.requested as Record<string, unknown>).idempotency_key ===
+        planned.runKey,
+  );
+  return Promise.resolve(
+    matching.length === 0
+      ? null
+      : selectCommanderXpRecoveryCandidate(planned, candidates),
+  );
+}
+
+async function listCommanderXpRecoveryCandidates(
+  commandPath: string,
+): Promise<CommanderXpRecoveryCandidate[]> {
+  const entries: Array<{ id: string }> = [];
+  let offset = 0;
+  let totalCount: number | null = null;
+  do {
+    const { stdout } = await execFileAsync(
+      commandPath,
+      [
+        "xp-request",
+        "list",
+        "--mine",
+        "--limit",
+        "1000",
+        "--offset",
+        String(offset),
+        "--json",
+      ],
+      { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 },
+    );
+    const page = JSON.parse(stdout) as {
+      entries?: unknown;
+      total_count?: unknown;
+      limit?: unknown;
+      offset?: unknown;
+    };
+    if (
+      !Array.isArray(page.entries) ||
+      !Number.isInteger(page.total_count) ||
+      Number(page.total_count) < 0 ||
+      Number(page.total_count) > 10_000 ||
+      page.limit !== 1000 ||
+      page.offset !== offset ||
+      (totalCount !== null && page.total_count !== totalCount)
+    ) {
+      throw new Error("Commander XP recovery inventory is invalid");
+    }
+    totalCount = Number(page.total_count);
+    for (const entry of page.entries) {
+      if (
+        entry === null ||
+        typeof entry !== "object" ||
+        Array.isArray(entry) ||
+        !/^xreq_[A-Za-z0-9-]+$/.test(
+          String((entry as Record<string, unknown>).id ?? ""),
+        )
+      ) {
+        throw new Error("Commander XP recovery inventory row is invalid");
+      }
+      entries.push({ id: String((entry as Record<string, unknown>).id) });
+    }
+    offset += page.entries.length;
+    if (page.entries.length === 0 && offset < totalCount) {
+      throw new Error("Commander XP recovery inventory is incomplete");
+    }
+  } while (totalCount !== null && offset < totalCount);
+  if (new Set(entries.map((entry) => entry.id)).size !== entries.length) {
+    throw new Error("Commander XP recovery inventory repeats an ID");
+  }
+  const candidates: CommanderXpRecoveryCandidate[] = [];
+  for (const entry of entries) {
+    const { stdout } = await execFileAsync(
+      commandPath,
+      ["xp-request", "get", entry.id, "--json"],
+      { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 },
+    );
+    const detail = JSON.parse(stdout) as Record<string, unknown>;
+    if (detail.id !== entry.id) {
+      throw new Error("Commander XP recovery readback identity is invalid");
+    }
+    candidates.push({
+      id: entry.id,
+      created_at: String(detail.created_at ?? ""),
+      status: String(detail.status ?? ""),
+      requested: detail.requested,
+      rawReadback: stdout,
+    });
+  }
+  return candidates;
+}
+
+export async function dispatchCommanderXpConfirmatoryWaves<T>(
+  planned: readonly CommanderXpPlannedRequest[],
+  submit: (request: CommanderXpPlannedRequest) => Promise<T>,
+  awaitFirstWaveTerminal: (
+    submitted: readonly {
+      request: CommanderXpPlannedRequest;
+      result: T;
+    }[],
+  ) => Promise<void>,
+): Promise<void> {
+  const firstWave = planned.filter((request) => request.orderIndex === 0);
+  const secondWave = planned.filter((request) => request.orderIndex === 1);
+  const replicas = new Set(planned.map((request) => request.replicaIndex));
+  if (
+    planned.length !== 96 ||
+    firstWave.length !== 48 ||
+    secondWave.length !== 48 ||
+    replicas.size !== 48 ||
+    [...replicas].some(
+      (replicaIndex) =>
+        firstWave.filter((request) => request.replicaIndex === replicaIndex)
+          .length !== 1 ||
+        secondWave.filter((request) => request.replicaIndex === replicaIndex)
+          .length !== 1,
+    )
+  ) {
+    throw new Error("confirmatory dispatch waves are incomplete");
+  }
+  const submitted: Array<{
+    request: CommanderXpPlannedRequest;
+    result: T;
+  }> = [];
+  for (const request of firstWave) {
+    submitted.push({ request, result: await submit(request) });
+  }
+  await awaitFirstWaveTerminal(submitted);
+  for (const request of secondWave) {
+    await submit(request);
+  }
 }
 
 export async function dispatchCommanderXpRequests(
@@ -136,6 +336,22 @@ export async function dispatchCommanderXpRequests(
   if (planned.length !== expectedCount) {
     throw new Error("dispatch request schedule is incomplete");
   }
+  if (
+    (input.confirmatoryDispatchMode !== undefined &&
+      (input.phase !== "confirmatory" ||
+        input.confirmatoryDispatchMode !== "first-wave-only")) ||
+    (input.phase !== "confirmatory" &&
+      input.confirmatoryDispatchMode !== undefined)
+  ) {
+    throw new Error("dispatch wave mode is invalid");
+  }
+  const recovery = await loadRecoveryState(
+    input.recoveryDirectory,
+    input.phase,
+    expectedCount,
+    dispatchAuthorization.dispatchAuthorizationSha256,
+    planned,
+  );
   const outputDirectory = path.resolve(input.outputDirectory);
   await fs.mkdir(outputDirectory, { recursive: false });
   const requests: CommanderXpDispatchedRequest[] = [];
@@ -150,10 +366,215 @@ export async function dispatchCommanderXpRequests(
     "running",
     [],
   );
+  let recoveryInventory: CommanderXpRecoveryCandidate[] | null = null;
   await writeDispatchProgress(outputDirectory, progress, true);
-  for (const request of planned) {
+  const submitRequest = async (
+    request: CommanderXpPlannedRequest,
+  ): Promise<CommanderXpDispatchedRequest> => {
     const directory = path.join(outputDirectory, runDirectory(request));
     await fs.mkdir(directory, { recursive: true });
+    const recovered = recovery?.entries.get(runDirectory(request));
+    const persistAdoption = async (
+      candidate: CommanderXpRecoveryCandidate,
+      submittedRequest: {
+        schemaVersion: 2;
+        coworldClient: "0.1.42";
+        submittedAt: string;
+        requestBody: unknown;
+        requestBodySha256: string;
+        submittedRequestSha256: string;
+      },
+      progressEntry: CommanderXpDispatchProgressEntry,
+      priorSubmittedPath?: string,
+    ): Promise<CommanderXpDispatchedRequest> => {
+      if (xpRequestIDs.has(candidate.id)) {
+        throw new Error("Commander XP recovery repeats an XP request ID");
+      }
+      xpRequestIDs.add(candidate.id);
+      const requestBodyPath = path.join(directory, "request-body.json");
+      const submittedRequestPath = path.join(
+        directory,
+        "submitted-request.json",
+      );
+      await writeJsonExclusive(requestBodyPath, request.requestBody);
+      if (priorSubmittedPath === undefined) {
+        await writeJsonExclusive(submittedRequestPath, submittedRequest);
+      } else {
+        await fs.copyFile(
+          priorSubmittedPath,
+          submittedRequestPath,
+          fs.constants.COPYFILE_EXCL,
+        );
+      }
+      const createResponseRawPath = await persistRawCreateResponse(
+        directory,
+        candidate.rawReadback,
+      );
+      const receivedAt = new Date().toISOString();
+      const createBody = {
+        schemaVersion: 2 as const,
+        authority: "coworld-0.1.42-xp-create-boundary-v1" as const,
+        mode: "authoritative-adoption" as const,
+        coworldClient: "0.1.42" as const,
+        xpRequestID: candidate.id,
+        createdAt: candidate.created_at,
+        status: candidate.status as
+          | "submitted"
+          | "pending"
+          | "running"
+          | "completed",
+        receivedAt,
+        submittedRequestSha256: submittedRequest.submittedRequestSha256,
+        rawResponseSha256: sha256Bytes(candidate.rawReadback),
+        rawResponseByteLength: Buffer.byteLength(candidate.rawReadback),
+      };
+      const createResponsePath = path.join(directory, "create-response.json");
+      await writeJsonExclusive(createResponsePath, {
+        ...createBody,
+        createResponseSha256: sha256Canonical(createBody),
+      });
+      const dispatched = {
+        phase: request.phase,
+        replicaIndex: request.replicaIndex,
+        arm: request.arm,
+        xpRequestID: candidate.id,
+        submittedRequestPath,
+        createResponsePath,
+        createResponseRawPath,
+      };
+      requests.push(dispatched);
+      progress = buildProgress(
+        input.phase,
+        expectedCount,
+        dispatchAuthorization.dispatchAuthorizationSha256,
+        startedAt,
+        null,
+        "running",
+        [
+          ...progress.requests,
+          {
+            ...progressEntry,
+            status: "submitted",
+            xpRequestID: candidate.id,
+            rawResponseSha256: createBody.rawResponseSha256,
+            rawResponseByteLength: createBody.rawResponseByteLength,
+            terminalAt: null,
+            terminalReadbackSha256: null,
+            failureCode: null,
+          },
+        ],
+      );
+      await writeDispatchProgress(outputDirectory, progress);
+      return dispatched;
+    };
+    if (recovered !== undefined && recovery !== null) {
+      const previousDirectory = path.join(recovery.root, runDirectory(request));
+      const priorSubmittedPath = path.join(
+        previousDirectory,
+        "submitted-request.json",
+      );
+      const submittedRequest = JSON.parse(
+        await fs.readFile(priorSubmittedPath, "utf8"),
+      ) as {
+        schemaVersion: unknown;
+        coworldClient: unknown;
+        submittedAt: unknown;
+        requestBody: unknown;
+        requestBodySha256: unknown;
+        submittedRequestSha256: unknown;
+      };
+      const { submittedRequestSha256, ...submittedBody } = submittedRequest;
+      exactKeys(
+        submittedRequest,
+        [
+          "schemaVersion",
+          "coworldClient",
+          "submittedAt",
+          "requestBody",
+          "requestBodySha256",
+          "submittedRequestSha256",
+        ],
+        "recovery submitted request",
+      );
+      if (
+        submittedRequest.schemaVersion !== 2 ||
+        submittedRequest.coworldClient !== "0.1.42" ||
+        !Number.isFinite(Date.parse(String(submittedRequest.submittedAt))) ||
+        submittedRequest.requestBodySha256 !== request.requestBodySha256 ||
+        sha256Canonical(submittedRequest.requestBody) !==
+          request.requestBodySha256 ||
+        submittedRequestSha256 !== sha256Canonical(submittedBody) ||
+        submittedRequestSha256 !== recovered.submittedRequestSha256
+      ) {
+        throw new Error(
+          `Commander XP recovery submitted body is invalid at ${runDirectory(request)}`,
+        );
+      }
+      let candidate: CommanderXpRecoveryCandidate | null;
+      if (recovered.xpRequestID === null) {
+        recoveryInventory ??=
+          await listCommanderXpRecoveryCandidates(commandPath);
+        candidate = await selectCommanderXpRecoveryCandidateIfPresent(
+          request,
+          recoveryInventory,
+        );
+        if (candidate === null) {
+          throw new Error(
+            "Commander XP recovery identity is ambiguous or missing",
+          );
+        }
+      } else {
+        candidate = await getCommanderXpRecoveryCandidate(
+          commandPath,
+          request,
+          recovered.xpRequestID,
+        );
+      }
+      return persistAdoption(
+        candidate,
+        submittedRequest as Parameters<typeof persistAdoption>[1],
+        recovered,
+        priorSubmittedPath,
+      );
+    }
+    if (recovery !== null) {
+      recoveryInventory ??=
+        await listCommanderXpRecoveryCandidates(commandPath);
+      const candidate = await selectCommanderXpRecoveryCandidateIfPresent(
+        request,
+        recoveryInventory,
+      );
+      if (candidate !== null) {
+        const submittedBody = {
+          schemaVersion: 2 as const,
+          coworldClient: "0.1.42" as const,
+          submittedAt: candidate.created_at,
+          requestBody: request.requestBody,
+          requestBodySha256: request.requestBodySha256,
+        };
+        const submittedRequest = {
+          ...submittedBody,
+          submittedRequestSha256: sha256Canonical(submittedBody),
+        };
+        return persistAdoption(candidate, submittedRequest, {
+          phase: request.phase,
+          replicaIndex: request.replicaIndex,
+          arm: request.arm,
+          runPath: runDirectory(request),
+          requestBodySha256: request.requestBodySha256,
+          submittedRequestSha256: submittedRequest.submittedRequestSha256,
+          wave:
+            input.phase === "confirmatory" && request.orderIndex === 1 ? 2 : 1,
+          status: "prepared",
+          xpRequestID: null,
+          rawResponseSha256: null,
+          rawResponseByteLength: null,
+          terminalAt: null,
+          terminalReadbackSha256: null,
+          failureCode: null,
+        });
+      }
+    }
     const submittedAt = new Date().toISOString();
     const submittedBody = {
       schemaVersion: 2 as const,
@@ -173,10 +594,13 @@ export async function dispatchCommanderXpRequests(
       runPath: runDirectory(request),
       requestBodySha256: request.requestBodySha256,
       submittedRequestSha256: submittedRequest.submittedRequestSha256,
+      wave: input.phase === "confirmatory" && request.orderIndex === 1 ? 2 : 1,
       status: "prepared",
       xpRequestID: null,
       rawResponseSha256: null,
       rawResponseByteLength: null,
+      terminalAt: null,
+      terminalReadbackSha256: null,
       failureCode: null,
     };
     progress = buildProgress(
@@ -245,13 +669,13 @@ export async function dispatchCommanderXpRequests(
     const xpRequestID = String(rawResponse.id ?? "");
     const createdAt = String(rawResponse.created_at ?? "");
     const status = String(rawResponse.status ?? "");
+    // submittedAt/receivedAt are runner observations. Do not order Softmax's
+    // server-owned created_at against a potentially skewed runner clock.
     if (
       !/^xreq_[A-Za-z0-9-]+$/.test(xpRequestID) ||
       !Number.isFinite(Date.parse(createdAt)) ||
-      status !== "submitted" ||
-      xpRequestIDs.has(xpRequestID) ||
-      Date.parse(createdAt) < Date.parse(submittedAt) ||
-      Date.parse(receivedAt) < Date.parse(createdAt)
+      !["submitted", "pending"].includes(status) ||
+      xpRequestIDs.has(xpRequestID)
     ) {
       await persistCreateFailure(
         directory,
@@ -269,6 +693,8 @@ export async function dispatchCommanderXpRequests(
     xpRequestIDs.add(xpRequestID);
     const createBody = {
       schemaVersion: 2 as const,
+      authority: "coworld-0.1.42-xp-create-boundary-v1" as const,
+      mode: "direct-response" as const,
       coworldClient: "0.1.42" as const,
       xpRequestID,
       createdAt,
@@ -283,7 +709,7 @@ export async function dispatchCommanderXpRequests(
       ...createBody,
       createResponseSha256: sha256Canonical(createBody),
     });
-    requests.push({
+    const dispatched = {
       phase: request.phase,
       replicaIndex: request.replicaIndex,
       arm: request.arm,
@@ -291,7 +717,8 @@ export async function dispatchCommanderXpRequests(
       submittedRequestPath,
       createResponsePath,
       createResponseRawPath,
-    });
+    };
+    requests.push(dispatched);
     progress = buildProgress(
       input.phase,
       expectedCount,
@@ -311,6 +738,48 @@ export async function dispatchCommanderXpRequests(
       ],
     );
     await writeDispatchProgress(outputDirectory, progress);
+    return dispatched;
+  };
+  if (
+    input.phase === "confirmatory" &&
+    input.confirmatoryDispatchMode === "first-wave-only"
+  ) {
+    const dispatchOrder = [
+      ...planned.filter((request) => request.orderIndex === 0),
+      ...planned.filter((request) => request.orderIndex === 1),
+    ];
+    const targetCount = Math.max(48, recovery?.entries.size ?? 0);
+    if (targetCount > planned.length) {
+      throw new Error("confirmatory recovery prefix is too long");
+    }
+    for (const request of dispatchOrder.slice(0, targetCount)) {
+      await submitRequest(request);
+    }
+    return {
+      phase: input.phase,
+      requestCount: requests.length,
+      dispatchAuthorizationSha256:
+        dispatchAuthorization.dispatchAuthorizationSha256,
+      requests,
+    };
+  }
+  if (input.phase === "confirmatory") {
+    await dispatchCommanderXpConfirmatoryWaves(
+      planned,
+      submitRequest,
+      async (submitted) => {
+        progress = await waitForConfirmatoryFirstWave({
+          commandPath,
+          outputDirectory,
+          progress,
+          submitted,
+        });
+      },
+    );
+  } else {
+    for (const request of planned) {
+      await submitRequest(request);
+    }
   }
   const result = {
     phase: input.phase,
@@ -335,6 +804,131 @@ export async function dispatchCommanderXpRequests(
   );
   await writeDispatchProgress(outputDirectory, progress);
   return result;
+}
+
+async function waitForConfirmatoryFirstWave(input: {
+  commandPath: string;
+  outputDirectory: string;
+  progress: CommanderXpDispatchProgress;
+  submitted: readonly {
+    request: CommanderXpPlannedRequest;
+    result: CommanderXpDispatchedRequest;
+  }[];
+}): Promise<CommanderXpDispatchProgress> {
+  const deadline = Date.now() + 21_600_000;
+  const pending = new Map(
+    input.submitted.map((entry) => [entry.result.xpRequestID, entry]),
+  );
+  let progress = input.progress;
+  while (pending.size > 0) {
+    for (const [xpRequestID, submitted] of [...pending]) {
+      let stdout: string;
+      try {
+        ({ stdout } = await execFileAsync(
+          input.commandPath,
+          ["xp-request", "get", xpRequestID, "--json"],
+          { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 },
+        ));
+      } catch (error) {
+        throw new Error(
+          `confirmatory first-wave readback failed at ${runDirectory(submitted.request)}`,
+          { cause: error },
+        );
+      }
+      const parsed = JSON.parse(stdout) as {
+        id?: unknown;
+        episodes?: unknown;
+      };
+      const episodes = Array.isArray(parsed.episodes) ? parsed.episodes : [];
+      const episode = episodes.length === 1 ? episodes[0] : null;
+      if (
+        parsed.id !== xpRequestID ||
+        episode === null ||
+        typeof episode !== "object" ||
+        Array.isArray(episode)
+      ) {
+        throw new Error(
+          `confirmatory first-wave readback invalid at ${runDirectory(submitted.request)}`,
+        );
+      }
+      const record = episode as Record<string, unknown>;
+      const status = String(record.status ?? "");
+      if (["submitted", "pending", "running"].includes(status)) continue;
+      if (status !== "completed") {
+        const failedAt = new Date().toISOString();
+        progress = buildProgress(
+          progress.phase,
+          progress.expectedRequestCount,
+          progress.dispatchAuthorizationSha256,
+          progress.startedAt,
+          failedAt,
+          "failed",
+          progress.requests.map((entry) =>
+            entry.xpRequestID === xpRequestID
+              ? { ...entry, status: "failed", failureCode: "FIRST_WAVE_FAILED" }
+              : entry,
+          ),
+        );
+        await writeDispatchProgress(input.outputDirectory, progress);
+        throw new Error(
+          `confirmatory first wave failed at ${runDirectory(submitted.request)}`,
+        );
+      }
+      const terminalAt = String(record.completed_at ?? "");
+      if (!Number.isFinite(Date.parse(terminalAt))) {
+        throw new Error(
+          `confirmatory first-wave completion invalid at ${runDirectory(submitted.request)}`,
+        );
+      }
+      const terminalBody = {
+        schemaVersion: 2 as const,
+        authority: "coworld-0.1.42-first-wave-terminal-readback-v1" as const,
+        xpRequestID,
+        status: "completed" as const,
+        completedAt: terminalAt,
+        rawReadbackSha256: sha256Bytes(stdout),
+        rawReadbackByteLength: Buffer.byteLength(stdout),
+      };
+      await writeJsonExclusive(
+        path.join(
+          input.outputDirectory,
+          runDirectory(submitted.request),
+          "first-wave-terminal.json",
+        ),
+        {
+          ...terminalBody,
+          terminalReceiptSha256: sha256Canonical(terminalBody),
+        },
+      );
+      progress = buildProgress(
+        progress.phase,
+        progress.expectedRequestCount,
+        progress.dispatchAuthorizationSha256,
+        progress.startedAt,
+        null,
+        "running",
+        progress.requests.map((entry) =>
+          entry.xpRequestID === xpRequestID
+            ? {
+                ...entry,
+                status: "terminal",
+                terminalAt,
+                terminalReadbackSha256: terminalBody.rawReadbackSha256,
+              }
+            : entry,
+        ),
+      );
+      await writeDispatchProgress(input.outputDirectory, progress);
+      pending.delete(xpRequestID);
+    }
+    if (pending.size > 0) {
+      if (Date.now() >= deadline) {
+        throw new Error("confirmatory first-wave terminal wait expired");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 30_000));
+    }
+  }
+  return progress;
 }
 
 async function verifyDispatchAuthorization(
@@ -483,6 +1077,154 @@ async function verifyDispatchAuthorization(
     throw new Error("dispatch authorization is invalid");
   }
   return authorization;
+}
+
+async function getCommanderXpRecoveryCandidate(
+  commandPath: string,
+  planned: CommanderXpPlannedRequest,
+  xpRequestID: string,
+): Promise<CommanderXpRecoveryCandidate> {
+  const { stdout } = await execFileAsync(
+    commandPath,
+    ["xp-request", "get", xpRequestID, "--json"],
+    { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 },
+  );
+  const detail = JSON.parse(stdout) as Record<string, unknown>;
+  if (detail.id !== xpRequestID) {
+    throw new Error("Commander XP recovery readback identity is invalid");
+  }
+  return selectCommanderXpRecoveryCandidate(planned, [
+    {
+      id: xpRequestID,
+      created_at: String(detail.created_at ?? ""),
+      status: String(detail.status ?? ""),
+      requested: detail.requested,
+      rawReadback: stdout,
+    },
+  ]);
+}
+
+async function loadRecoveryState(
+  requestedDirectory: string | undefined,
+  phase: CommanderXpProtocolPhase,
+  expectedRequestCount: number,
+  dispatchAuthorizationSha256: string,
+  planned: readonly CommanderXpPlannedRequest[],
+): Promise<{
+  root: string;
+  entries: Map<string, CommanderXpDispatchProgressEntry>;
+} | null> {
+  if (requestedDirectory === undefined) return null;
+  const requestedRoot = path.resolve(requestedDirectory);
+  const root = await fs.realpath(requestedRoot);
+  if (root !== requestedRoot || !(await fs.stat(root)).isDirectory()) {
+    throw new Error("Commander XP recovery directory is invalid");
+  }
+  const progress = JSON.parse(
+    await fs.readFile(
+      path.join(root, "commander-xp-dispatch-progress-v2.json"),
+      "utf8",
+    ),
+  ) as CommanderXpDispatchProgress;
+  exactKeys(
+    progress,
+    [
+      "schemaVersion",
+      "authority",
+      "phase",
+      "expectedRequestCount",
+      "dispatchAuthorizationSha256",
+      "startedAt",
+      "updatedAt",
+      "completedAt",
+      "status",
+      "requests",
+      "progressSha256",
+    ],
+    "recovery progress",
+  );
+  const { progressSha256, ...body } = progress;
+  if (
+    progress.schemaVersion !== 2 ||
+    progress.authority !== "commander-xp-write-through-dispatch-progress-v2" ||
+    progress.phase !== phase ||
+    progress.expectedRequestCount !== expectedRequestCount ||
+    progress.dispatchAuthorizationSha256 !== dispatchAuthorizationSha256 ||
+    !Number.isFinite(Date.parse(progress.startedAt)) ||
+    !Number.isFinite(Date.parse(progress.updatedAt)) ||
+    !["running", "failed", "completed"].includes(progress.status) ||
+    !Array.isArray(progress.requests) ||
+    progress.requests.length > expectedRequestCount ||
+    progressSha256 !== sha256Canonical(body)
+  ) {
+    throw new Error("Commander XP recovery progress is invalid");
+  }
+  const plannedByPath = new Map(
+    planned.map((request) => [runDirectory(request), request] as const),
+  );
+  const entries = new Map<string, CommanderXpDispatchProgressEntry>();
+  for (const entry of progress.requests) {
+    exactKeys(
+      entry,
+      [
+        "phase",
+        "replicaIndex",
+        "arm",
+        "runPath",
+        "requestBodySha256",
+        "submittedRequestSha256",
+        "wave",
+        "status",
+        "xpRequestID",
+        "rawResponseSha256",
+        "rawResponseByteLength",
+        "terminalAt",
+        "terminalReadbackSha256",
+        "failureCode",
+      ],
+      "recovery progress entry",
+    );
+    const request = plannedByPath.get(entry.runPath);
+    if (
+      request === undefined ||
+      entries.has(entry.runPath) ||
+      entry.phase !== request.phase ||
+      entry.replicaIndex !== request.replicaIndex ||
+      entry.arm !== request.arm ||
+      entry.requestBodySha256 !== request.requestBodySha256 ||
+      !/^[0-9a-f]{64}$/.test(entry.submittedRequestSha256) ||
+      entry.wave !==
+        (phase === "confirmatory" && request.orderIndex === 1 ? 2 : 1) ||
+      !["prepared", "submitted", "terminal", "failed"].includes(entry.status) ||
+      !(
+        entry.xpRequestID === null ||
+        /^xreq_[A-Za-z0-9-]+$/.test(entry.xpRequestID)
+      ) ||
+      (["submitted", "terminal"].includes(entry.status) &&
+        entry.xpRequestID === null) ||
+      (entry.status === "terminal" &&
+        (!Number.isFinite(Date.parse(String(entry.terminalAt))) ||
+          !/^[0-9a-f]{64}$/.test(String(entry.terminalReadbackSha256))))
+    ) {
+      throw new Error("Commander XP recovery progress entry is invalid");
+    }
+    entries.set(entry.runPath, entry);
+  }
+  const dispatchOrder =
+    phase === "confirmatory"
+      ? [
+          ...planned.filter((request) => request.orderIndex === 0),
+          ...planned.filter((request) => request.orderIndex === 1),
+        ]
+      : [...planned];
+  if (
+    progress.requests.some(
+      (entry, index) => entry.runPath !== runDirectory(dispatchOrder[index]!),
+    )
+  ) {
+    throw new Error("Commander XP recovery progress is not an exact prefix");
+  }
+  return { root, entries };
 }
 
 async function readExternalReceipt(

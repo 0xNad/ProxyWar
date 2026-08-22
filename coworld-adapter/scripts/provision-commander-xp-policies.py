@@ -45,6 +45,7 @@ ROLES = ("A", "B", "C", "opponent-1", "opponent-2", "opponent-3")
 SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 SOURCE_SHA = re.compile(r"^[0-9a-f]{40}$")
 SAFE_NAME_PREFIX = re.compile(r"^[a-z0-9][a-z0-9-]{7,119}$")
+BEDROCK_MODEL_ID = "us.anthropic.claude-sonnet-4-6"
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -95,8 +96,8 @@ def validate_args(args: argparse.Namespace) -> None:
             raise RuntimeError("Commander XP policy digest is invalid")
     if not re.fullmatch(r"ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}", args.image):
         raise RuntimeError("Commander XP policy image must be an exact GHCR digest")
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,199}", args.bedrock_model):
-        raise RuntimeError("Commander XP Bedrock model is invalid")
+    if args.bedrock_model != BEDROCK_MODEL_ID:
+        raise RuntimeError("Commander XP Bedrock model ID is not exact")
     if args.command == "upload":
         output = args.output.resolve()
         if output.exists() or not output.parent.is_dir():
@@ -175,7 +176,13 @@ def create_policy(
     name = policy_name(prefix, role)
     commander = role in {"A", "B", "C"}
     environment_values = (
-        {"BEDROCK_MODEL": bedrock_model, "USE_BEDROCK": "true"} if commander else {}
+        {
+            "AWS_REGION": "us-west-2",
+            "BEDROCK_MODEL": bedrock_model,
+            "USE_BEDROCK": "true",
+        }
+        if commander
+        else {}
     )
     secret_env_id: str | None = None
     secret_response_sha256: str | None = None
@@ -241,7 +248,9 @@ def create_policy(
         "bedrockModel": bedrock_model if commander else None,
         "environmentConfiguration": {
             "attached": secret_env_id is not None,
-            "keys": ["BEDROCK_MODEL", "USE_BEDROCK"] if commander else [],
+            "keys": ["providerRegion", "modelID", "providerEnabled"]
+            if commander
+            else [],
             "valuesSha256": sha256_bytes(canonical_bytes(environment_values)),
             "attachmentResponseSha256": secret_response_sha256,
         },

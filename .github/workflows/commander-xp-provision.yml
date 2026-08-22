@@ -57,7 +57,7 @@ jobs:
     name: Build, prove and upload the isolated eval namespace
     runs-on: ubuntu-24.04
     timeout-minutes: 360
-    environment: commander-xp-eval
+    environment: coworld-production
     steps:
       - name: Checkout exact protected source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -77,11 +77,13 @@ jobs:
           test "$GITHUB_TRIGGERING_ACTOR" = 0xNad
           test "$GITHUB_REF" = refs/heads/main
           test "$GITHUB_REPOSITORY" = 0xNad/ProxyWar
+          test "$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)" = public
+          test "$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq .protected)" = true
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$SOURCE_CI_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$SOURCE_CI_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
           [[ "$EVAL_VERSION" =~ ^0\.[0-9]+\.[0-9]+([+-][A-Za-z0-9.-]+)?$ ]]
-          [[ "$BEDROCK_MODEL" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$ ]]
+          test "$BEDROCK_MODEL" = us.anthropic.claude-sonnet-4-6
           test "$GITHUB_SHA" = "$SOURCE_SHA"
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           test "$(git rev-parse "$BEHAVIOR_BASE_SHA^{tree}")" = "$BEHAVIOR_BASE_TREE_SHA"
@@ -123,6 +125,28 @@ jobs:
             echo "COWORLD_PYTHON=$UV_TOOL_DIR/coworld/bin/python"
             echo "XDG_CACHE_HOME=$CACHE"
           } >> "$GITHUB_ENV"
+
+      - name: Freeze the exact public XP OpenAPI contract before mutation
+        run: |
+          set -euo pipefail
+          FETCHED_AT=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+          curl --fail --silent --show-error --location \
+            https://softmax.com/api/observatory/openapi.json \
+            --output "$RUNNER_TEMP/xp-openapi.json"
+          node .github/scripts/commander-xp-openapi-contract.mjs \
+            "$RUNNER_TEMP/xp-openapi.json" \
+            "$RUNNER_TEMP/xp-openapi-contract-v2.json" \
+            "$FETCHED_AT" > "$RUNNER_TEMP/xp-openapi-contract-result.json"
+          jq -e '
+            .schemaVersion == 2 and
+            .authority == "softmax-public-openapi-exact-bytes-v1" and
+            .rawSha256 == "13204636cff43a3725d0886f2a43c8d9e45a1e859add15f2fcad336129e4409d" and
+            .byteLength == 418415 and
+            .coworldClientVersion == "0.1.42" and
+            .createRequestSchema.sha256 == "3d1b9e7969455eb92f2ee97164ce153517a1d6909bcbb1031b6141bb5050b25a" and
+            .rosterSchemas.sha256 == "edfa02dc9fcd7513ce91d4f5bbc6517f1a56d086da32ca37590ab2c29cf255c1"
+          ' "$RUNNER_TEMP/xp-openapi-contract-v2.json" >/dev/null
+          echo "XP_OPENAPI_SHA256=$(jq -r .rawSha256 "$RUNNER_TEMP/xp-openapi-contract-v2.json")" >> "$GITHUB_ENV"
 
       - name: Rebuild exact source diff and provenance
         run: |
@@ -173,12 +197,12 @@ jobs:
           node --test \
             .github/scripts/commander-xp-control-workflow.test.mjs \
             .github/scripts/commander-xp-evidence-workflow.test.mjs \
+            .github/scripts/commander-xp-openapi-contract.test.mjs \
             .github/scripts/commander-xp-external-seal.test.mjs \
             .github/scripts/coworld-authenticated-command.test.mjs
           npx vitest \
             coworld-adapter/scripts/prepare-commander-xp-eval-manifest.test.ts \
-            tests/server/CommanderXpProtocol.test.ts \
-            tests/server/CommanderXpVerifier.test.ts \
+            tests/server/Commander*.test.ts \
             --run --maxWorkers=1
 
       - name: Build both exact linux/amd64 images from the clean archive
@@ -201,6 +225,10 @@ jobs:
             -t "$GAME_TAG" "$BUILD_SOURCE"
           test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$POLICY_TAG")" = linux/amd64
           test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$GAME_TAG")" = linux/amd64
+          docker run --rm --entrypoint /bin/sh "$GAME_TAG" -ec '
+            test -f /app/proxywar/static/index.html
+            node --import tsx/esm -e '\''Promise.all([import("/app/integration/src/coworld-decision-wire.ts"),import("/app/proxywar/src/server/agents/CommanderXpProtocol.ts")])'\''
+          '
           {
             echo "POLICY_TAG=$POLICY_TAG"
             echo "GAME_TAG=$GAME_TAG"
@@ -245,6 +273,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          node .github/scripts/commander-xp-main-authorization.mjs "$SOURCE_SHA" > "$RUNNER_TEMP/provision-fence-main-authorization.json"
           FENCE_HASH=$(printf '%s\n%s\n' "$SOURCE_SHA" "$EVAL_VERSION" | sha256sum | cut -d' ' -f1)
           FENCE_REF="refs/tags/commander-xp-provision-v2/$FENCE_HASH"
           if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/commander-xp-provision-v2/$FENCE_HASH" > "$RUNNER_TEMP/existing-fence.json" 2>/dev/null; then
@@ -260,6 +289,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          node .github/scripts/commander-xp-main-authorization.mjs "$SOURCE_SHA" > "$RUNNER_TEMP/ghcr-push-main-authorization.json"
           printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           docker push "$POLICY_TAG" > "$RUNNER_TEMP/policy-push.txt"
           docker push "$GAME_TAG" > "$RUNNER_TEMP/game-push.txt"
@@ -317,9 +347,13 @@ jobs:
       - name: Upload six immutable policy versions from one image
         env:
           COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          POLICY_ROOT="$RUNNER_TEMP/commander-xp-policy-receipts"
+          node .github/scripts/commander-xp-main-authorization.mjs "$SOURCE_SHA" > "$RUNNER_TEMP/policy-upload-main-authorization.json"
+          POLICY_OUTPUT_PARENT=$(mktemp -d "$RUNNER_TEMP/commander-xp-policy-output.XXXXXX")
+          chmod 700 "$POLICY_OUTPUT_PARENT"
+          POLICY_ROOT="$POLICY_OUTPUT_PARENT/policy-receipts"
           node .github/scripts/coworld-authenticated-command.mjs commander-xp-policy-provision upload \
             --image="$POLICY_REPO_DIGEST" --name-prefix="$NAME_PREFIX" \
             --bedrock-model="$BEDROCK_MODEL" --source-sha="$SOURCE_SHA" \
@@ -333,6 +367,8 @@ jobs:
           echo "POLICY_ROOT=$POLICY_ROOT" >> "$GITHUB_ENV"
 
       - name: Build eval-only manifest and prove exact-image terminality
+        env:
+          COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
         run: |
           set -euo pipefail
           EVAL_ROOT="$RUNNER_TEMP/commander-xp-eval"
@@ -342,8 +378,10 @@ jobs:
             --output="$EVAL_ROOT/eval-coworld-manifest-v2.json" \
             --image="$GAME_REPO_DIGEST" --version="$EVAL_VERSION" \
             > "$RUNNER_TEMP/eval-manifest-result.json"
-          PROOF_ROOT="$RUNNER_TEMP/commander-xp-terminal-proof"
-          "$COWORLD_BIN" run-episode "$EVAL_ROOT/eval-coworld-manifest-v2.json" \
+          PROOF_OUTPUT_PARENT=$(mktemp -d "$RUNNER_TEMP/commander-xp-terminal-output.XXXXXX")
+          chmod 700 "$PROOF_OUTPUT_PARENT"
+          PROOF_ROOT="$PROOF_OUTPUT_PARENT/terminal-proof"
+          node .github/scripts/coworld-authenticated-command.mjs commander-xp-run-episode "$EVAL_ROOT/eval-coworld-manifest-v2.json" \
             "$GAME_REPO_DIGEST" "$GAME_REPO_DIGEST" "$GAME_REPO_DIGEST" "$GAME_REPO_DIGEST" \
             --run node --run /app/integration/src/starter-player.mjs \
             --variant tournament-4p-pangaea --timeout-seconds 6000 \
@@ -371,7 +409,7 @@ jobs:
           NODE
           TERMINAL_PROOF_SHA256=$(sha256sum "$RUNNER_TEMP/eval-coworld-terminal-proof-v2.json" | cut -d' ' -f1)
           mkdir -p "$XDG_CACHE_HOME/coworld"
-          TMPDIR="$RUNNER_TEMP" "$COWORLD_BIN" certify "$EVAL_ROOT/eval-coworld-manifest-v2.json" --timeout-seconds 600 --no-open-report
+          node .github/scripts/coworld-authenticated-command.mjs commander-xp-certify "$EVAL_ROOT/eval-coworld-manifest-v2.json" --timeout-seconds 600 --no-open-report
           {
             echo "EVAL_ROOT=$EVAL_ROOT"
             echo "TERMINAL_PROOF_SHA256=$TERMINAL_PROOF_SHA256"
@@ -380,8 +418,10 @@ jobs:
       - name: Upload and inspect the noncanonical eval Coworld
         env:
           COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          node .github/scripts/commander-xp-main-authorization.mjs "$SOURCE_SHA" > "$RUNNER_TEMP/eval-upload-main-authorization.json"
           OUTPUT="$RUNNER_TEMP/eval-upload.txt"
           node .github/scripts/coworld-authenticated-command.mjs upload-coworld "$EVAL_ROOT/eval-coworld-manifest-v2.json" --wait-hosted-smoke --wait-certification --timeout-seconds 600 --hosted-smoke-timeout-seconds 1800 --certification-timeout-seconds 1800 | tee "$OUTPUT"
           EVAL_COWORLD_ID=$(sed -n 's/^Coworld: //p' "$OUTPUT" | tail -1)
@@ -428,6 +468,7 @@ jobs:
           cp "$RUNNER_TEMP/eval-coworld-terminal-proof-v2.json" "$PROVISION_ROOT/eval-coworld-terminal-proof-v2.json"
           cp "$SOURCE_ROOT/commander-xp-source-tree-diff-v1.json" "$PROVISION_ROOT/commander-xp-source-tree-diff-v1.json"
           cp "$SOURCE_ROOT/commander-xp-source-provenance-v2.json" "$PROVISION_ROOT/commander-xp-source-provenance-v2.json"
+          cp "$RUNNER_TEMP/xp-openapi-contract-v2.json" "$PROVISION_ROOT/xp-openapi-contract-v2.json"
           cp "$POLICY_ROOT/policy-identities-v2.json" "$PROVISION_ROOT/policy-identities-v2.json"
           cp "$POLICY_ROOT/A.json" "$PROVISION_ROOT/policy-inspect/A.json"
           cp "$POLICY_ROOT/B.json" "$PROVISION_ROOT/policy-inspect/B.json"
@@ -442,7 +483,7 @@ jobs:
             --arg gameImageDigest "$GAME_DIGEST" --arg gameBuildProvenanceDigest "$GAME_BUILD_PROVENANCE_DIGEST" \
             --arg canonicalID "$CANONICAL_COWORLD_ID" --arg canonicalVersion "$CANONICAL_COWORLD_VERSION" \
             --arg canonicalSnapshot "$CANONICAL_BINDING_SHA256" --arg terminalProofSha256 "$TERMINAL_PROOF_SHA256" \
-            '{schemaVersion:2,authority:"coworld-0.1.42-coworld-inspect-v1",inspectedAt:$inspectedAt,inspectResponseSha256:$inspectResponseSha256,evalOnly:true,publicLeagueBound:false,coworldName:"proxywar-commander-xp-eval",coworldID:$coworldID,coworldVersion:$coworldVersion,manifestSha256:$manifestSha256,hostedManifestSha256:$hostedManifestSha256,gameImageID:$gameImageID,gameImageDigest:$gameImageDigest,gameBuildProvenanceDigest:$gameBuildProvenanceDigest,gameRunnableEnv:{PROXYWAR_COMMANDER_XP_GAME_EVIDENCE:"1",PROXYWAR_TUNE_STRUCTURED_DEALS:"1",PROXYWAR_TUNE_FREETEXT_MESSAGES:"1",PROXYWAR_TUNE_SPATIAL_OBSERVATION:"0",PROXYWAR_TUNE_SPATIAL_MINIMAP:"0"},canonicalProduct:{coworldID:$canonicalID,coworldVersion:$canonicalVersion,leagueBindingBeforeSha256:$canonicalSnapshot,leagueBindingAfterSha256:$canonicalSnapshot},terminalProofSha256:$terminalProofSha256}' \
+            '{schemaVersion:2,authority:"coworld-0.1.42-coworld-inspect-v1",inspectedAt:$inspectedAt,inspectResponseSha256:$inspectResponseSha256,evalOnly:true,publicLeagueBound:false,coworldName:"proxywar-commander-xp-eval",coworldID:$coworldID,coworldVersion:$coworldVersion,manifestSha256:$manifestSha256,hostedManifestSha256:$hostedManifestSha256,gameImageID:$gameImageID,gameImageDigest:$gameImageDigest,gameBuildProvenanceDigest:$gameBuildProvenanceDigest,gameRunnableEnv:{PROXYWAR_COMMANDER_XP_GAME_EVIDENCE:"1",PROXYWAR_TUNE_STRUCTURED_DEALS:"0",PROXYWAR_TUNE_FREETEXT_MESSAGES:"0",PROXYWAR_TUNE_SPATIAL_OBSERVATION:"0",PROXYWAR_TUNE_SPATIAL_MINIMAP:"0"},canonicalProduct:{coworldID:$canonicalID,coworldVersion:$canonicalVersion,leagueBindingBeforeSha256:$canonicalSnapshot,leagueBindingAfterSha256:$canonicalSnapshot},terminalProofSha256:$terminalProofSha256}' \
             > "$RUNNER_TEMP/eval-coworld-identity-body.json"
           RECEIPT_SHA=$(jq -cS . "$RUNNER_TEMP/eval-coworld-identity-body.json" | sha256sum | cut -d' ' -f1)
           jq --arg receiptSha256 "$RECEIPT_SHA" '. + {receiptSha256:$receiptSha256}' "$RUNNER_TEMP/eval-coworld-identity-body.json" > "$PROVISION_ROOT/eval-coworld-identity-v2.json"
@@ -455,14 +496,14 @@ jobs:
             --arg coworldID "$EVAL_COWORLD_ID" --arg coworldVersion "$EVAL_VERSION" --arg coworldManifestSha256 "$MANIFEST_SHA" --arg coworldHostedManifestSha256 "$EVAL_HOSTED_MANIFEST_SHA256" \
             --arg coworldGameImageID "$EVAL_GAME_IMAGE_ID" --arg coworldGameImageDigest "$GAME_DIGEST" \
             --arg canonicalLeagueBindingSnapshotSha256 "$CANONICAL_BINDING_SHA256" --arg imageDigest "$POLICY_IMAGE_DIGEST" \
-            --arg bedrockModel "$BEDROCK_MODEL" \
+            --arg bedrockModel "$BEDROCK_MODEL" --arg xpOpenApiSha256 "$XP_OPENAPI_SHA256" \
             --arg armA "$(jq -r .arms.A.policyVersionID "$PROVISION_ROOT/policy-identities-v2.json")" \
             --arg armB "$(jq -r .arms.B.policyVersionID "$PROVISION_ROOT/policy-identities-v2.json")" \
             --arg armC "$(jq -r .arms.C.policyVersionID "$PROVISION_ROOT/policy-identities-v2.json")" \
             --arg opponent1 "$(jq -r .opponentPolicyVersionIDs[0] "$PROVISION_ROOT/policy-identities-v2.json")" \
             --arg opponent2 "$(jq -r .opponentPolicyVersionIDs[1] "$PROVISION_ROOT/policy-identities-v2.json")" \
             --arg opponent3 "$(jq -r .opponentPolicyVersionIDs[2] "$PROVISION_ROOT/policy-identities-v2.json")" \
-            '{behaviorSourceSha:$behaviorSourceSha,behaviorSourceTreeSha:$behaviorSourceTreeSha,adapterSourceSha:$adapterSourceSha,adapterSourceTreeSha:$adapterSourceTreeSha,sourceDiffManifestSha256:$sourceDiffManifestSha256,sourceProvenanceSha256:$sourceProvenanceSha256,policyBuildProvenanceDigest:$policyBuildProvenanceDigest,gameBuildProvenanceDigest:$gameBuildProvenanceDigest,coworldID:$coworldID,coworldVersion:$coworldVersion,coworldManifestSha256:$coworldManifestSha256,coworldHostedManifestSha256:$coworldHostedManifestSha256,coworldGameImageID:$coworldGameImageID,coworldGameImageDigest:$coworldGameImageDigest,canonicalLeagueBindingSnapshotSha256:$canonicalLeagueBindingSnapshotSha256,imageDigest:$imageDigest,bedrockModel:$bedrockModel,xpOpenApiSha256:"dc32022f7e2850e65232c6f51c7490011483e8948269e975bc177d71f29a3e4f",armPolicyVersionIDs:{A:$armA,B:$armB,C:$armC},opponentPolicyVersionIDs:[$opponent1,$opponent2,$opponent3]}' \
+            '{behaviorSourceSha:$behaviorSourceSha,behaviorSourceTreeSha:$behaviorSourceTreeSha,adapterSourceSha:$adapterSourceSha,adapterSourceTreeSha:$adapterSourceTreeSha,sourceDiffManifestSha256:$sourceDiffManifestSha256,sourceProvenanceSha256:$sourceProvenanceSha256,policyBuildProvenanceDigest:$policyBuildProvenanceDigest,gameBuildProvenanceDigest:$gameBuildProvenanceDigest,coworldID:$coworldID,coworldVersion:$coworldVersion,coworldManifestSha256:$coworldManifestSha256,coworldHostedManifestSha256:$coworldHostedManifestSha256,coworldGameImageID:$coworldGameImageID,coworldGameImageDigest:$coworldGameImageDigest,canonicalLeagueBindingSnapshotSha256:$canonicalLeagueBindingSnapshotSha256,imageDigest:$imageDigest,bedrockModel:$bedrockModel,xpOpenApiSha256:$xpOpenApiSha256,armPolicyVersionIDs:{A:$armA,B:$armB,C:$armC},opponentPolicyVersionIDs:[$opponent1,$opponent2,$opponent3]}' \
             > "$PROVISION_ROOT/commander-xp-plan-input-base-v2.json"
           node --input-type=module - "$PROVISION_ROOT" <<'NODE'
           import { createHash } from "node:crypto";
@@ -471,12 +512,12 @@ jobs:
           const root = process.argv[2];
           const sha = (value) => createHash("sha256").update(value).digest("hex");
           const sort = (value) => Array.isArray(value) ? value.map(sort) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, sort(value[key])])) : value;
-          const paths = ["commander-xp-plan-input-base-v2.json","commander-xp-source-provenance-v2.json","commander-xp-source-tree-diff-v1.json","eval-coworld-identity-v2.json","eval-coworld-inspect.json","eval-coworld-manifest-v2.json","eval-coworld-terminal-proof-v2.json","policy-identities-v2.json","policy-inspect/A.json","policy-inspect/B.json","policy-inspect/C.json"].sort();
+          const paths = ["commander-xp-plan-input-base-v2.json","commander-xp-source-provenance-v2.json","commander-xp-source-tree-diff-v1.json","eval-coworld-identity-v2.json","eval-coworld-inspect.json","eval-coworld-manifest-v2.json","eval-coworld-terminal-proof-v2.json","policy-identities-v2.json","policy-inspect/A.json","policy-inspect/B.json","policy-inspect/C.json","xp-openapi-contract-v2.json"].sort();
           const files = paths.map((relative) => ({path:relative,sha256:sha(fs.readFileSync(path.join(root, relative)))}));
           const body = {schemaVersion:2,authority:"github-actions-attested-provision-packet-v1",repository:"0xNad/ProxyWar",workflowPath:".github/workflows/commander-xp-provision.yml",sourceSha:process.env.SOURCE_SHA,sourceTreeSha:process.env.SOURCE_TREE_SHA,createdAt:new Date().toISOString(),files};
           fs.writeFileSync(path.join(root, "commander-xp-provision-manifest-v2.json"), `${JSON.stringify({...body,manifestSha256:sha(JSON.stringify(sort(body)))}, null, 2)}\n`, {flag:"wx"});
           NODE
-          test "$(find "$PROVISION_ROOT" -type f | wc -l | tr -d ' ')" = 12
+          test "$(find "$PROVISION_ROOT" -type f | wc -l | tr -d ' ')" = 13
           echo "PROVISION_ROOT=$PROVISION_ROOT" >> "$GITHUB_ENV"
 
       - name: Attest immutable provision manifest

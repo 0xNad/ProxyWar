@@ -2,10 +2,17 @@ import JSZip from "jszip";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT,
+  COMMANDER_XP_COMMANDER_PROMPT_VERSION,
+  COMMANDER_XP_COMMANDER_PROMPT_VERSION_SHA256,
+  sha256Canonical,
+} from "../../src/server/agents/CommanderXpProtocol";
+import {
   CommanderXpTraceCollector,
   uploadCommanderXpPlayerArtifact,
   type CommanderXpRuntimeManifest,
 } from "./commander-xp-artifact";
+import { commanderExecutionEnvelope } from "./coworld-decision-wire";
 
 const manifest: CommanderXpRuntimeManifest = {
   schemaVersion: 2,
@@ -23,10 +30,13 @@ const manifest: CommanderXpRuntimeManifest = {
   policyIdentityAuthority:
     "external-policy-inspect-and-xp-participant-metadata",
   requestedModel: "us.anthropic.claude-sonnet-4-6",
+  providerContract: structuredClone(COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT),
+  commanderPromptVersion: COMMANDER_XP_COMMANDER_PROMPT_VERSION,
+  commanderPromptVersionSha256: COMMANDER_XP_COMMANDER_PROMPT_VERSION_SHA256,
   runArgv: ["node", "commander-xp-player.ts", "--arm=C"],
   flags: {
-    STRUCTURED_DEALS: "1",
-    FREETEXT_MESSAGES: "1",
+    STRUCTURED_DEALS: "0",
+    FREETEXT_MESSAGES: "0",
     SPATIAL_OBSERVATION: "0",
     SPATIAL_MINIMAP: "0",
     KEYSTONE_PROFILE: "aggressive",
@@ -49,6 +59,11 @@ describe("Commander XP player artifact", () => {
       requestID: "req-1",
       stage: "selector",
       provider: "bedrock-sidecar",
+      providerContractSha256: sha256Canonical(
+        COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT,
+      ),
+      promptVersion: COMMANDER_XP_COMMANDER_PROMPT_VERSION,
+      promptVersionSha256: COMMANDER_XP_COMMANDER_PROMPT_VERSION_SHA256,
       requestedModel: manifest.requestedModel,
       responseModel: manifest.requestedModel,
       promptSha256: "1".repeat(64),
@@ -58,9 +73,17 @@ describe("Commander XP player artifact", () => {
       succeeded: true,
       failureKind: null,
     });
+    const commanderMetadata = {
+      runtimeMode: "commander-v0-selector",
+      commanderFidelity: "aligned_primary",
+      externalRawOutput: "PRIVATE RAW",
+    };
+    const commanderExecution = commanderExecutionEnvelope(commanderMetadata)!;
     collector.decision({
       requestID: "req-1",
       arm: "C",
+      preSelectorObservationSha256: "3".repeat(64),
+      preSelectorLegalActionSurfaceSha256: "4".repeat(64),
       legalActions: [
         { id: "hold:1", kind: "hold" },
         { id: "message:2", kind: "message" },
@@ -70,11 +93,7 @@ describe("Commander XP player artifact", () => {
         actionIDs: ["hold:1", "unsent:3"],
         messageActionID: "message:2",
         messageText: "PRIVATE BODY",
-        metadata: {
-          runtimeMode: "commander-v0-selector",
-          commanderFidelity: "aligned_primary",
-          externalRawOutput: "PRIVATE RAW",
-        },
+        metadata: commanderMetadata,
       },
       response: {
         type: "decision_response",
@@ -83,6 +102,7 @@ describe("Commander XP player artifact", () => {
         selectedMessageActionId: "message:2",
         messageText: "PRIVATE BODY",
         runtimeMode: "commander-v0-selector",
+        commanderExecution,
       },
     });
     let uploaded: Uint8Array | null = null;
@@ -101,10 +121,46 @@ describe("Commander XP player artifact", () => {
     const zip = await JSZip.loadAsync(uploaded!);
     const trace = await zip.file("trace.jsonl")!.async("string");
     expect(trace).toContain("message:2");
+    expect(trace).toContain(
+      `"preSelectorObservationSha256":"${"3".repeat(64)}"`,
+    );
+    expect(trace).toContain(
+      `"preSelectorLegalActionSurfaceSha256":"${"4".repeat(64)}"`,
+    );
     expect(trace).not.toContain("PRIVATE");
     expect(trace).not.toContain("messageText");
     expect(trace).not.toContain("externalRawOutput");
     expect(trace).not.toContain("unsent:3");
+    expect(trace).toContain(
+      `"commanderExecutionSha256":"${commanderExecution.metadataSha256}"`,
+    );
     vi.unstubAllGlobals();
+  });
+
+  it("rejects a wire Commander envelope that diverges from the authored decision", () => {
+    const collector = new CommanderXpTraceCollector();
+    const authored = {
+      runtimeMode: "commander-v0-selector",
+      planID: "plan-authored",
+      planObjective: "survive",
+    };
+    const wire = commanderExecutionEnvelope({
+      ...authored,
+      planObjective: "pressure_rival:forged",
+    });
+    expect(() =>
+      collector.decision({
+        requestID: "req-diverged",
+        arm: "C",
+        preSelectorObservationSha256: "1".repeat(64),
+        preSelectorLegalActionSurfaceSha256: "2".repeat(64),
+        legalActions: [{ id: "hold:1", kind: "hold" }],
+        decision: { actionID: "hold:1", metadata: authored },
+        response: {
+          selectedLegalActionId: "hold:1",
+          commanderExecution: wire,
+        },
+      }),
+    ).toThrow(/wire execution envelope diverged/);
   });
 });

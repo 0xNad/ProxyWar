@@ -157,8 +157,8 @@ async function refetchRun(
     `${relativeRoot}/normalized-request-readback`,
   );
 
-  const temporary = await fs.mkdtemp(
-    path.join(os.tmpdir(), "commander-xp-independent-refetch-"),
+  const temporary = await privateRunnerTempDirectory(
+    "commander-xp-independent-refetch-",
   );
   try {
     const bundlePath = path.join(temporary, "bundle.zip");
@@ -405,6 +405,13 @@ function externalCanonicalSha256(value: unknown): string {
   return sha256Bytes(
     new TextEncoder().encode(`${JSON.stringify(sort(value))}\n`),
   );
+}
+
+async function privateRunnerTempDirectory(prefix: string): Promise<string> {
+  const root = await fs.realpath(process.env.RUNNER_TEMP ?? os.tmpdir());
+  const directory = await fs.mkdtemp(path.join(root, prefix));
+  await fs.chmod(directory, 0o700);
+  return directory;
 }
 
 async function runCli(): Promise<void> {

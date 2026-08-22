@@ -1,6 +1,28 @@
 # Eval-only ProxyWar game image. The protected provision workflow builds this
 # file from a clean `git archive` of the exact reviewed source commit.
-FROM --platform=linux/amd64 node:24-bookworm-slim@sha256:65932751ed4073ed02f5c04e494e4b2572a891b7dbea0568a863dc80341bf848
+FROM --platform=linux/amd64 node:24-bookworm-slim@sha256:65932751ed4073ed02f5c04e494e4b2572a891b7dbea0568a863dc80341bf848 AS commander-xp-game-builder
+
+ENV HUSKY=0 \
+    NODE_ENV=development
+
+WORKDIR /app/proxywar
+COPY package.json package-lock.json ./
+RUN npm ci --include=dev --ignore-scripts
+COPY index.html public.html tsconfig.json vite.config.ts ./
+COPY src ./src
+COPY resources ./resources
+COPY examples ./examples
+COPY scripts ./scripts
+WORKDIR /app/proxywar/coworld-adapter
+COPY coworld-adapter/package.json coworld-adapter/package-lock.json ./
+RUN npm ci --ignore-scripts
+COPY coworld-adapter/src ./src
+WORKDIR /app/proxywar
+# The eval image intentionally excludes private product assets. Vite expects
+# the directory to exist, so provide an empty directory instead.
+RUN mkdir proprietary && npm run build-prod
+
+FROM --platform=linux/amd64 node:24-bookworm-slim@sha256:65932751ed4073ed02f5c04e494e4b2572a891b7dbea0568a863dc80341bf848 AS commander-xp-game-runtime
 
 ARG COMMANDER_XP_BEHAVIOR_SOURCE_SHA=a69175a30577b3e516f09a2cb0960d4d129b3f33
 ARG COMMANDER_XP_BEHAVIOR_SOURCE_TREE_SHA=b1b88e4a447acb885ed554592d3865af0178314f
@@ -22,15 +44,12 @@ ENV GAME_ENV=production \
 
 WORKDIR /app/proxywar
 COPY package.json package-lock.json ./
-RUN npm ci --ignore-scripts
-COPY index.html public.html tsconfig.json vite.config.ts ./
-COPY src ./src
-COPY resources ./resources
-COPY examples ./examples
-COPY scripts ./scripts
-# The eval image intentionally excludes private product assets. Vite expects
-# the directory to exist, so provide an empty directory instead.
-RUN mkdir proprietary && npm run build-prod
+RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
+COPY --from=commander-xp-game-builder /app/proxywar/static ./static
+COPY --from=commander-xp-game-builder /app/proxywar/src ./src
+COPY --from=commander-xp-game-builder /app/proxywar/resources ./resources
+COPY --from=commander-xp-game-builder /app/proxywar/examples ./examples
+COPY --from=commander-xp-game-builder /app/proxywar/scripts ./scripts
 
 WORKDIR /app/integration
 COPY coworld-adapter/package.json coworld-adapter/package-lock.json ./

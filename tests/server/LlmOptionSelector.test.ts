@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import {
@@ -58,6 +59,9 @@ describe("LlmOptionSelector Stage 5 authority and telemetry", () => {
     });
     expect(attempt.telemetry.promptCharacters).toBe(
       provider.prompts[0]!.length,
+    );
+    expect(attempt.telemetry.promptSha256).toBe(
+      createHash("sha256").update(provider.prompts[0]!).digest("hex"),
     );
     expect(provider.prompts[0]).not.toContain(
       "deterministic control selected pressure_rival",

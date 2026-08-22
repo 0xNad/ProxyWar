@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   buildCommanderXpPreRegistration,
+  COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT,
   COMMANDER_XP_BEHAVIOR_SOURCE_SHA,
   COMMANDER_XP_BEHAVIOR_SOURCE_TREE_SHA,
   COMMANDER_XP_OPENAPI_SHA256,
@@ -14,7 +15,11 @@ import {
   type CommanderXpPlanInput,
   type CommanderXpPreRegistrationV2,
 } from "../../src/server/agents/CommanderXpProtocol";
-import { dispatchCommanderXpRequests } from "./commander-xp-dispatch";
+import {
+  dispatchCommanderXpConfirmatoryWaves,
+  dispatchCommanderXpRequests,
+  selectCommanderXpRecoveryCandidate,
+} from "./commander-xp-dispatch";
 
 const temporaryDirectories: string[] = [];
 
@@ -27,6 +32,106 @@ afterEach(async () => {
 });
 
 describe("Commander XP protected dispatcher", () => {
+  it("adopts exactly one authoritative lost-ack candidate and rejects ambiguity", async () => {
+    const root = await temporaryDirectory();
+    const preregistrationPath = await writePreRegistration(root);
+    const preregistration = JSON.parse(
+      await fs.readFile(preregistrationPath, "utf8"),
+    ) as CommanderXpPreRegistrationV2;
+    const planned = preregistration.providerPreflightRequests[0]!;
+    const candidate = {
+      id: "xreq_recovered-1",
+      created_at: new Date().toISOString(),
+      status: "submitted",
+      requested: planned.requestBody,
+      rawReadback: "{}\n",
+    };
+    expect(selectCommanderXpRecoveryCandidate(planned, [candidate])).toEqual(
+      candidate,
+    );
+    expect(() => selectCommanderXpRecoveryCandidate(planned, [])).toThrow(
+      /ambiguous or missing/,
+    );
+    expect(() =>
+      selectCommanderXpRecoveryCandidate(planned, [candidate, candidate]),
+    ).toThrow(/ambiguous or missing/);
+    expect(() =>
+      selectCommanderXpRecoveryCandidate(planned, [
+        {
+          ...candidate,
+          requested: { ...planned.requestBody, num_episodes: 2 },
+        },
+      ]),
+    ).toThrow(/does not match/);
+  });
+
+  it("submits 48 first arms, waits for terminality, then submits 48 second arms", async () => {
+    const root = await temporaryDirectory();
+    const preregistrationPath = await writePreRegistration(root);
+    const preregistration = JSON.parse(
+      await fs.readFile(preregistrationPath, "utf8"),
+    ) as CommanderXpPreRegistrationV2;
+    const planned = preregistration.requests.filter(
+      (request) => request.phase === "confirmatory",
+    );
+    const events: Array<{
+      kind: "create" | "terminal";
+      replicaIndex: number;
+      orderIndex: number;
+      at: number;
+    }> = [];
+    await dispatchCommanderXpConfirmatoryWaves(
+      planned,
+      async (request) => {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        events.push({
+          kind: "create",
+          replicaIndex: request.replicaIndex,
+          orderIndex: request.orderIndex,
+          at: Date.now(),
+        });
+        return request.runKey;
+      },
+      async (submitted) => {
+        expect(submitted).toHaveLength(48);
+        for (const { request } of submitted) {
+          await new Promise((resolve) => setTimeout(resolve, 1));
+          events.push({
+            kind: "terminal",
+            replicaIndex: request.replicaIndex,
+            orderIndex: request.orderIndex,
+            at: Date.now(),
+          });
+        }
+      },
+    );
+    expect(events).toHaveLength(144);
+    expect(events.slice(0, 48).every((entry) => entry.kind === "create")).toBe(
+      true,
+    );
+    expect(
+      events.slice(48, 96).every((entry) => entry.kind === "terminal"),
+    ).toBe(true);
+    expect(
+      events
+        .slice(96)
+        .every((entry) => entry.kind === "create" && entry.orderIndex === 1),
+    ).toBe(true);
+    for (let replicaIndex = 0; replicaIndex < 48; replicaIndex += 1) {
+      const terminal = events.find(
+        (entry) =>
+          entry.kind === "terminal" && entry.replicaIndex === replicaIndex,
+      )!;
+      const second = events.find(
+        (entry) =>
+          entry.kind === "create" &&
+          entry.replicaIndex === replicaIndex &&
+          entry.orderIndex === 1,
+      )!;
+      expect(terminal.at).toBeLessThanOrEqual(second.at);
+    }
+  });
+
   it("submits the three preregistered preflights once in exact A/B/C order", async () => {
     const root = await temporaryDirectory();
     const preregistrationPath = await writePreRegistration(root);
@@ -111,6 +216,72 @@ describe("Commander XP protected dispatcher", () => {
     ).toBe(true);
   });
 
+  it("retains runner times as observations and accepts a skewed server created_at", async () => {
+    const root = await temporaryDirectory();
+    const preregistrationPath = await writePreRegistration(root);
+    const capturePath = path.join(root, "capture.jsonl");
+    const serverCreatedAt = "2026-08-22T12:00:00.000Z";
+    const commandPath = await fakeCoworld(root, capturePath, null, {
+      createdAt: serverCreatedAt,
+    });
+    const authority = await writeDispatchAuthority(root, preregistrationPath);
+    const outputDirectory = path.join(root, "dispatch");
+    await dispatchCommanderXpRequests({
+      schemaVersion: 2,
+      phase: "provider-preflight",
+      preRegistrationPath: preregistrationPath,
+      ...authority,
+      coworldCommandPath: commandPath,
+      outputDirectory,
+    });
+    const response = JSON.parse(
+      await fs.readFile(
+        path.join(
+          outputDirectory,
+          "runs/provider-preflight/r00/A/create-response.json",
+        ),
+        "utf8",
+      ),
+    ) as { createdAt: string; receivedAt: string };
+    expect(response.createdAt).toBe(serverCreatedAt);
+    expect(Date.parse(response.receivedAt)).toBeGreaterThan(
+      Date.parse(serverCreatedAt),
+    );
+  });
+
+  it("accepts and raw-binds the documented pending create response", async () => {
+    const root = await temporaryDirectory();
+    const preregistrationPath = await writePreRegistration(root);
+    const capturePath = path.join(root, "capture.jsonl");
+    const commandPath = await fakeCoworld(root, capturePath, null, {
+      initialStatus: "pending",
+    });
+    const outputDirectory = path.join(root, "pending-dispatch");
+    const authority = await writeDispatchAuthority(root, preregistrationPath);
+    await dispatchCommanderXpRequests({
+      schemaVersion: 2,
+      phase: "provider-preflight",
+      preRegistrationPath: preregistrationPath,
+      ...authority,
+      coworldCommandPath: commandPath,
+      outputDirectory,
+    });
+    const runRoot = path.join(outputDirectory, "runs/provider-preflight/r00/A");
+    const projected = JSON.parse(
+      await fs.readFile(path.join(runRoot, "create-response.json"), "utf8"),
+    ) as Record<string, unknown>;
+    const raw = JSON.parse(
+      await fs.readFile(path.join(runRoot, "create-response-raw.json"), "utf8"),
+    ) as Record<string, unknown>;
+    expect(projected.status).toBe("pending");
+    expect(raw.status).toBe("pending");
+    expect(projected.rawResponseSha256).toBe(
+      createHash("sha256")
+        .update(`${JSON.stringify(raw)}\n`)
+        .digest("hex"),
+    );
+  });
+
   it("does not retry or advance after one create fails", async () => {
     const root = await temporaryDirectory();
     const preregistrationPath = await writePreRegistration(root);
@@ -153,6 +324,77 @@ describe("Commander XP protected dispatcher", () => {
       (progress.requests as Array<Record<string, unknown>>)[1]?.failureCode,
     ).toBe("COMMAND_EXIT_NONZERO");
     expect(JSON.stringify(progress)).not.toContain("private model response");
+  });
+
+  it("recovers a lost acknowledgement by exact authoritative adoption and advances only unseen slots", async () => {
+    const root = await temporaryDirectory();
+    const preregistrationPath = await writePreRegistration(root);
+    const authority = await writeDispatchAuthority(root, preregistrationPath);
+    const firstCapture = path.join(root, "initial-capture.jsonl");
+    const initialCommand = await fakeCoworld(root, firstCapture, 2);
+    const priorDirectory = path.join(root, "prior-dispatch");
+    await expect(
+      dispatchCommanderXpRequests({
+        schemaVersion: 2,
+        phase: "provider-preflight",
+        preRegistrationPath: preregistrationPath,
+        ...authority,
+        coworldCommandPath: initialCommand,
+        outputDirectory: priorDirectory,
+      }),
+    ).rejects.toThrow(/dispatch failed/);
+
+    const preregistration = JSON.parse(
+      await fs.readFile(preregistrationPath, "utf8"),
+    ) as CommanderXpPreRegistrationV2;
+    const recoveryCapture = path.join(root, "recovery-capture.jsonl");
+    const recoveryCommand = await fakeRecoveryCoworld(
+      root,
+      recoveryCapture,
+      preregistration,
+      priorDirectory,
+    );
+    const outputDirectory = path.join(root, "recovered-dispatch");
+    const recovered = await dispatchCommanderXpRequests({
+      schemaVersion: 2,
+      phase: "provider-preflight",
+      preRegistrationPath: preregistrationPath,
+      ...authority,
+      coworldCommandPath: recoveryCommand,
+      outputDirectory,
+      recoveryDirectory: await fs.realpath(priorDirectory),
+    });
+    expect(recovered.requests.map((request) => request.xpRequestID)).toEqual([
+      "xreq_fixture-1",
+      "xreq_recovered-2",
+      "xreq_recovery-new-3",
+    ]);
+    const modes = await Promise.all(
+      (["A", "B", "C"] as const).map(async (arm) => {
+        const response = JSON.parse(
+          await fs.readFile(
+            path.join(
+              outputDirectory,
+              `runs/provider-preflight/r00/${arm}/create-response.json`,
+            ),
+            "utf8",
+          ),
+        ) as { mode: string };
+        return response.mode;
+      }),
+    );
+    expect(modes).toEqual([
+      "authoritative-adoption",
+      "authoritative-adoption",
+      "direct-response",
+    ]);
+    const recoveryEvents = (await fs.readFile(recoveryCapture, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { command: string });
+    expect(
+      recoveryEvents.filter((event) => event.command === "create"),
+    ).toHaveLength(1);
   });
 
   it("rejects a tampered preregistration before invoking Coworld", async () => {
@@ -284,7 +526,7 @@ async function writePreRegistration(root: string): Promise<string> {
     coworldGameImageDigest: `sha256:${"8".repeat(64)}`,
     canonicalLeagueBindingSnapshotSha256: "9".repeat(64),
     imageDigest: `sha256:${"a".repeat(64)}`,
-    bedrockModel: "bedrock-fixture-model",
+    bedrockModel: COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.modelID,
     xpOpenApiSha256: COMMANDER_XP_OPENAPI_SHA256,
     armPolicyVersionIDs: {
       A: "pvid_arm_a",
@@ -367,6 +609,7 @@ async function writeDispatchAuthority(
     preRegistrationSha256: preregistration.preRegistrationSha256,
     runId: "88",
     attempt: 1,
+    signerSourceSha: preregistration.identities.adapterSourceSha,
     headSha: preregistration.identities.adapterSourceSha,
     treeSha: preregistration.identities.adapterSourceTreeSha,
     behaviorBaseSha: preregistration.identities.behaviorSourceSha,
@@ -404,8 +647,12 @@ async function writeDispatchAuthority(
     priorPhaseReceipt: null,
     canaryReceipt: null,
     namespaceRegistry,
+    confirmatoryAnalysis: null,
     evidenceArtifact,
     receiptArtifact,
+    integrityVerified: true as const,
+    experimentUsable: false,
+    performanceClaimAuthorized: false,
   };
   const receipt = {
     ...receiptBody,
@@ -479,7 +726,12 @@ async function fakeCoworld(
   root: string,
   capturePath: string,
   failAt: number | null,
-  options: { failedStatusAt?: number; duplicateIDs?: boolean } = {},
+  options: {
+    failedStatusAt?: number;
+    duplicateIDs?: boolean;
+    createdAt?: string;
+    initialStatus?: "submitted" | "pending";
+  } = {},
 ): Promise<string> {
   const counterPath = path.join(root, "counter.txt");
   const target = path.join(root, "fake-coworld.mjs");
@@ -493,7 +745,67 @@ fs.writeFileSync(${JSON.stringify(counterPath)}, String(count));
 const body = JSON.parse(fs.readFileSync(bodyPath, "utf8"));
 fs.appendFileSync(${JSON.stringify(capturePath)}, JSON.stringify({phase: body.game_config_overrides.commander_xp_phase, notes: body.notes}) + "\\n");
 ${failAt === null ? "" : `if (count === ${failAt}) process.exit(9);`}
-console.log(JSON.stringify({id: "xreq_fixture-" + (${options.duplicateIDs === true ? "1" : "count"}), created_at: new Date().toISOString(), status: count === ${options.failedStatusAt ?? -1} ? "failed" : "submitted"}));
+console.log(JSON.stringify({id: "xreq_fixture-" + (${options.duplicateIDs === true ? "1" : "count"}), created_at: ${options.createdAt === undefined ? "new Date().toISOString()" : JSON.stringify(options.createdAt)}, status: count === ${options.failedStatusAt ?? -1} ? "failed" : ${JSON.stringify(options.initialStatus ?? "submitted")}}));
+`,
+    { mode: 0o700 },
+  );
+  return target;
+}
+
+async function fakeRecoveryCoworld(
+  root: string,
+  capturePath: string,
+  preregistration: CommanderXpPreRegistrationV2,
+  priorDirectory: string,
+): Promise<string> {
+  const submittedAt = async (arm: "A" | "B"): Promise<string> => {
+    const submitted = JSON.parse(
+      await fs.readFile(
+        path.join(
+          priorDirectory,
+          `runs/provider-preflight/r00/${arm}/submitted-request.json`,
+        ),
+        "utf8",
+      ),
+    ) as { submittedAt: string };
+    return submitted.submittedAt;
+  };
+  const database = [
+    {
+      id: "xreq_fixture-1",
+      created_at: await submittedAt("A"),
+      status: "completed",
+      requested: preregistration.providerPreflightRequests[0]!.requestBody,
+    },
+    {
+      id: "xreq_recovered-2",
+      created_at: await submittedAt("B"),
+      status: "completed",
+      requested: preregistration.providerPreflightRequests[1]!.requestBody,
+    },
+  ];
+  const databasePath = path.join(root, "recovery-database.json");
+  const target = path.join(root, "fake-recovery-coworld.mjs");
+  await fs.writeFile(databasePath, JSON.stringify(database));
+  await fs.writeFile(
+    target,
+    `#!/usr/bin/env node
+import fs from "node:fs";
+const args = process.argv.slice(2);
+const database = JSON.parse(fs.readFileSync(${JSON.stringify(databasePath)}, "utf8"));
+const command = args[1];
+fs.appendFileSync(${JSON.stringify(capturePath)}, JSON.stringify({command,args}) + "\\n");
+if (command === "list") {
+  console.log(JSON.stringify({entries:database.map(({requested,...entry}) => entry),total_count:database.length,limit:1000,offset:Number(args[6])}));
+} else if (command === "get") {
+  const entry = database.find((candidate) => candidate.id === args[2]);
+  if (!entry) process.exit(4);
+  console.log(JSON.stringify(entry));
+} else if (command === "create") {
+  console.log(JSON.stringify({id:"xreq_recovery-new-3",created_at:new Date().toISOString(),status:"submitted"}));
+} else {
+  process.exit(5);
+}
 `,
     { mode: 0o700 },
   );

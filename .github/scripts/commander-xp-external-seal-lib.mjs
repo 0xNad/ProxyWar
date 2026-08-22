@@ -33,7 +33,7 @@ const PHASES = new Set([
   "canary",
   "confirmatory",
 ]);
-const ALLOWED_TEXT_EXTENSIONS = new Set([".json", ".jsonl", ".sha256"]);
+const ALLOWED_TEXT_EXTENSIONS = new Set([".json", ".jsonl", ".md", ".sha256"]);
 const ALLOWED_TOP_LEVEL_EVIDENCE = new Set([
   "commander-xp-preregistration-v2.json",
   "commander-xp-evidence-index-v2.json",
@@ -46,11 +46,14 @@ const ALLOWED_TOP_LEVEL_EVIDENCE = new Set([
   "eval-coworld-inspect.json",
   "eval-coworld-manifest-v2.json",
   "eval-coworld-terminal-proof-v2.json",
+  "xp-openapi-contract-v2.json",
   "xp-openapi.sha256",
   "commander-xp-prereg-ledger-v2.json",
   "commander-xp-provider-preflight-ledger-v2.json",
   "commander-xp-canary-ledger-v2.json",
   "commander-xp-confirmatory-activation-v2.json",
+  "commander-xp-confirmatory-analysis-v2.json",
+  "commander-xp-confirmatory-analysis-v2.md",
 ]);
 const ALLOWED_RUN_SUFFIXES = new Set([
   "xp-evidence.json",
@@ -625,6 +628,7 @@ function validatePhaseReceiptBinding(binding, expectedPhase) {
       "ledgerSha256",
       "runId",
       "attempt",
+      "signerSourceSha",
       "evidenceArtifact",
       "receiptArtifact",
       "ledgerArtifact",
@@ -659,6 +663,8 @@ function validatePhaseReceiptBinding(binding, expectedPhase) {
   normalizeRawSha256(binding.ledgerSha256, `${expectedPhase} ledger SHA-256`);
   if (!/^\d+$/.test(binding.runId)) fail("PHASE_RECEIPT_RUN_ID_INVALID");
   positiveInteger(binding.attempt, `${expectedPhase} workflow run attempt`);
+  if (!SHA1.test(binding.signerSourceSha))
+    fail("PHASE_RECEIPT_WORKFLOW_AUTHORIZATION_INVALID");
   validateLedgerEvidenceArtifact(binding.evidenceArtifact);
   validateLedgerReceiptArtifact(binding.receiptArtifact);
   validateRetainedPhaseArtifact(binding.ledgerArtifact, "ledgerSha256");
@@ -1184,6 +1190,8 @@ function validateVerifierAggregate(aggregate, expectedPhase) {
       "completePairCount",
       "diagnostics",
       "performanceClaimAuthorized",
+      "providerProvenance",
+      "confirmatoryAnalysis",
       "authenticity",
     ],
     "VERIFIER_AGGREGATE_SCHEMA_INVALID",
@@ -1208,6 +1216,12 @@ function validateVerifierAggregate(aggregate, expectedPhase) {
     aggregate.authenticity.status !== "external-seal-receipt-required"
   )
     fail("VERIFIER_AGGREGATE_SCHEMA_INVALID");
+  validateConfirmatoryAnalysisBinding(
+    aggregate.confirmatoryAnalysis,
+    expectedPhase,
+    "VERIFIER_AGGREGATE_ANALYSIS_INVALID",
+  );
+  validateProviderProvenanceBinding(aggregate.providerProvenance);
   normalizeRawSha256(
     aggregate.authenticity.sealSha256,
     "verifier aggregate seal SHA-256",
@@ -1224,6 +1238,57 @@ function validateVerifierAggregate(aggregate, expectedPhase) {
     )
       fail("VERIFIER_AGGREGATE_SCHEMA_INVALID");
   }
+}
+
+function validateProviderProvenanceBinding(value) {
+  exactKeys(
+    value,
+    [
+      "commanderPromptVersion",
+      "commanderPromptVersionSha256",
+      "providerContractSha256",
+    ],
+    "VERIFIER_AGGREGATE_PROVIDER_PROVENANCE_INVALID",
+  );
+  if (
+    value.commanderPromptVersion !== "strategic-commander-v0-stage2" ||
+    value.commanderPromptVersionSha256 !==
+      "00db34a7939d9d27a3370decf1e3f3f5895b0a3e3676c2e043ec426b5e199094" ||
+    value.providerContractSha256 !==
+      "6927ba56e53fb71300e708379b59b71b38c54b1656da826e2a786b9505fccaf4"
+  ) {
+    fail("VERIFIER_AGGREGATE_PROVIDER_PROVENANCE_INVALID");
+  }
+  return value;
+}
+
+function validateConfirmatoryAnalysisBinding(value, phase, code) {
+  if (phase !== "confirmatory") {
+    if (value !== null) fail(code);
+    return null;
+  }
+  exactKeys(
+    value,
+    [
+      "analysisSha256",
+      "jsonSha256",
+      "markdownSha256",
+      "ruleSatisfied",
+      "eligibleForExternalReview",
+    ],
+    code,
+  );
+  normalizeRawSha256(value.analysisSha256, "analysis canonical SHA-256");
+  normalizeRawSha256(value.jsonSha256, "analysis JSON SHA-256");
+  normalizeRawSha256(value.markdownSha256, "analysis Markdown SHA-256");
+  if (
+    typeof value.ruleSatisfied !== "boolean" ||
+    typeof value.eligibleForExternalReview !== "boolean" ||
+    value.eligibleForExternalReview !== value.ruleSatisfied
+  ) {
+    fail(code);
+  }
+  return value;
 }
 
 async function verifyBoundPhaseReceipt(
@@ -1950,6 +2015,7 @@ export async function buildBundle({
   sourceArtifactMetadataPath,
   sourceCIMetadataPath,
   verifierAggregatePath,
+  workflowAuthorizationSha,
   createdAt,
 }) {
   const existing = await fs.stat(outputRoot).catch(() => null);
@@ -1977,6 +2043,8 @@ export async function buildBundle({
     verifierAggregatePath,
   });
   const normalizedCreatedAt = isoTimestamp(createdAt, "createdAt");
+  if (!SHA1.test(workflowAuthorizationSha))
+    fail("WORKFLOW_AUTHORIZATION_SHA_INVALID");
   if (Date.parse(normalizedCreatedAt) < Date.parse(bindings.prereg.createdAt))
     fail("SEAL_BEFORE_PREREGISTRATION");
   if (
@@ -2027,6 +2095,27 @@ export async function buildBundle({
     request.phase,
     priorRegistry,
   );
+  const confirmatoryAnalysis = bindings.aggregate.confirmatoryAnalysis;
+  const analysisJson = inventory.files.find(
+    (entry) => entry.path === "commander-xp-confirmatory-analysis-v2.json",
+  );
+  const analysisMarkdown = inventory.files.find(
+    (entry) => entry.path === "commander-xp-confirmatory-analysis-v2.md",
+  );
+  if (
+    request.phase === "confirmatory"
+      ? normalizeRawSha256(
+          analysisJson?.sha256,
+          "confirmatory analysis JSON SHA-256",
+        ) !== confirmatoryAnalysis.jsonSha256 ||
+        normalizeRawSha256(
+          analysisMarkdown?.sha256,
+          "confirmatory analysis Markdown SHA-256",
+        ) !== confirmatoryAnalysis.markdownSha256
+      : analysisJson !== undefined || analysisMarkdown !== undefined
+  ) {
+    fail("CONFIRMATORY_ANALYSIS_FILE_BINDING_INVALID");
+  }
   const manifest = {
     schemaVersion: 1,
     artifactKind: "commander-xp-external-seal-bundle",
@@ -2035,6 +2124,7 @@ export async function buildBundle({
     createdAt: normalizedCreatedAt,
     workflow: {
       repository: sourceMetadata.repository.full_name,
+      authorizationSha: workflowAuthorizationSha,
       runID: positiveInteger(process.env.GITHUB_RUN_ID, "GITHUB_RUN_ID"),
       runAttempt: positiveInteger(
         process.env.GITHUB_RUN_ATTEMPT,
@@ -2100,6 +2190,8 @@ export async function buildBundle({
       integrityVerified: true,
       experimentUsable: false,
       performanceClaimAuthorized: false,
+      providerProvenance: bindings.aggregate.providerProvenance,
+      confirmatoryAnalysis: bindings.aggregate.confirmatoryAnalysis,
       externalSealRequired: true,
     },
   };
@@ -2109,6 +2201,7 @@ export async function buildBundle({
   await verifyBundle(outputRoot, {
     repository,
     sourceSha: request.source.workflowSourceSha,
+    workflowAuthorizationSha,
     workflowRunID: positiveInteger(process.env.GITHUB_RUN_ID, "GITHUB_RUN_ID"),
     workflowRunAttempt: positiveInteger(
       process.env.GITHUB_RUN_ATTEMPT,
@@ -2192,6 +2285,11 @@ export async function verifyBundle(root, expected = {}) {
     manifest.source.workflowSourceSha !== expected.sourceSha
   )
     fail("BUNDLE_SOURCE_SHA_MISMATCH");
+  if (
+    expected.workflowAuthorizationSha !== undefined &&
+    manifest.workflow.authorizationSha !== expected.workflowAuthorizationSha
+  )
+    fail("BUNDLE_WORKFLOW_AUTHORIZATION_SHA_MISMATCH");
   if (
     expected.workflowRunID !== undefined &&
     manifest.workflow.runID !== expected.workflowRunID
@@ -2332,11 +2430,12 @@ async function verifyBundleRequestBinding(root, manifest) {
 function validateBundleManifest(manifest) {
   exactKeys(
     manifest.workflow,
-    ["repository", "runID", "runAttempt"],
+    ["repository", "authorizationSha", "runID", "runAttempt"],
     "BUNDLE_WORKFLOW_SCHEMA_INVALID",
   );
   if (
     manifest.workflow.repository !== "0xNad/ProxyWar" ||
+    !SHA1.test(manifest.workflow.authorizationSha) ||
     positiveInteger(manifest.workflow.runID, "bundle workflow run ID") < 1 ||
     positiveInteger(
       manifest.workflow.runAttempt,
@@ -2436,6 +2535,8 @@ function validateBundleManifest(manifest) {
       "integrityVerified",
       "experimentUsable",
       "performanceClaimAuthorized",
+      "providerProvenance",
+      "confirmatoryAnalysis",
       "externalSealRequired",
     ],
     "BUNDLE_VERIFIER_SCHEMA_INVALID",
@@ -2451,6 +2552,12 @@ function validateBundleManifest(manifest) {
     manifest.verifier.externalSealRequired !== true
   )
     fail("BUNDLE_VERIFIER_SCHEMA_INVALID");
+  validateConfirmatoryAnalysisBinding(
+    manifest.verifier.confirmatoryAnalysis,
+    manifest.phase,
+    "BUNDLE_VERIFIER_ANALYSIS_INVALID",
+  );
+  validateProviderProvenanceBinding(manifest.verifier.providerProvenance);
   if (!Array.isArray(manifest.files) || manifest.files.length < 1)
     fail("BUNDLE_FILE_LEDGER_INVALID");
   if (
@@ -2598,7 +2705,7 @@ export async function createExternalReceipt({
   };
   await verifyArtifactMetadata(metadata, {
     ...expectedArtifact,
-    headSha: manifest.source.workflowSourceSha,
+    headSha: manifest.workflow.authorizationSha,
     repository: "0xNad/ProxyWar",
     minRetentionDays: 89,
     allowCurrentRunInProgress: true,
@@ -2609,10 +2716,20 @@ export async function createExternalReceipt({
     manifest.workflow.runAttempt !== expectedArtifact.workflowRunAttempt
   )
     fail("RECEIPT_BUNDLE_WORKFLOW_MISMATCH");
+  const confirmatoryAnalysis = manifest.verifier.confirmatoryAnalysis;
+  const experimentUsable = manifest.phase === "confirmatory";
+  const performanceClaimAuthorized =
+    experimentUsable &&
+    confirmatoryAnalysis.ruleSatisfied === true &&
+    confirmatoryAnalysis.eligibleForExternalReview === true;
   const receipt = {
     schemaVersion: 1,
     artifactKind: "commander-xp-external-seal-receipt",
-    status: "sealed-integrity-only-performance-unauthorized",
+    status: experimentUsable
+      ? performanceClaimAuthorized
+        ? "sealed-confirmatory-analysis-performance-authorized"
+        : "sealed-confirmatory-analysis-performance-unauthorized"
+      : "sealed-integrity-only-performance-unauthorized",
     experimentID: manifest.experimentID,
     phase: manifest.phase,
     completedAt: normalizedCompletedAt,
@@ -2622,6 +2739,7 @@ export async function createExternalReceipt({
       sourceTreeSha: manifest.source.workflowSourceTreeSha,
       behaviorBaseSha: manifest.source.behaviorBaseSha,
       behaviorBaseTreeSha: manifest.source.behaviorBaseTreeSha,
+      authorizationSha: manifest.workflow.authorizationSha,
       runID: expectedArtifact.workflowRunID,
       runAttempt: expectedArtifact.workflowRunAttempt,
     },
@@ -2631,6 +2749,7 @@ export async function createExternalReceipt({
     priorPhaseReceipt: manifest.priorPhaseReceipt,
     canaryReceipt: manifest.canaryReceipt,
     namespaceRegistry: manifest.namespaceRegistry,
+    confirmatoryAnalysis,
     bundleArtifact: {
       artifactID: expectedArtifact.artifactID,
       artifactName: expectedArtifact.artifactName,
@@ -2665,8 +2784,8 @@ export async function createExternalReceipt({
       ],
     },
     integrityVerified: true,
-    experimentUsable: false,
-    performanceClaimAuthorized: false,
+    experimentUsable,
+    performanceClaimAuthorized,
   };
   await writeJsonExclusive(outputPath, receipt);
   await verifyExternalReceipt(outputPath, {
@@ -2695,6 +2814,7 @@ export async function verifyExternalReceipt(filePath, expected = {}) {
       "priorPhaseReceipt",
       "canaryReceipt",
       "namespaceRegistry",
+      "confirmatoryAnalysis",
       "bundleArtifact",
       "evidence",
       "attestation",
@@ -2707,12 +2827,9 @@ export async function verifyExternalReceipt(filePath, expected = {}) {
   if (
     receipt.schemaVersion !== 1 ||
     receipt.artifactKind !== "commander-xp-external-seal-receipt" ||
-    receipt.status !== "sealed-integrity-only-performance-unauthorized" ||
     !SAFE_ID.test(receipt.experimentID) ||
     !PHASES.has(receipt.phase) ||
     receipt.integrityVerified !== true ||
-    receipt.experimentUsable !== false ||
-    receipt.performanceClaimAuthorized !== false ||
     receipt.attestation?.required !== true ||
     receipt.attestation?.issuer !==
       "GitHub Actions OIDC / Sigstore public-good instance" ||
@@ -2724,6 +2841,28 @@ export async function verifyExternalReceipt(filePath, expected = {}) {
       ])
   )
     fail("EXTERNAL_RECEIPT_IDENTITY_INVALID");
+  validateConfirmatoryAnalysisBinding(
+    receipt.confirmatoryAnalysis,
+    receipt.phase,
+    "EXTERNAL_RECEIPT_ANALYSIS_INVALID",
+  );
+  const expectedExperimentUsable = receipt.phase === "confirmatory";
+  const expectedPerformanceClaimAuthorized =
+    expectedExperimentUsable &&
+    receipt.confirmatoryAnalysis.ruleSatisfied === true &&
+    receipt.confirmatoryAnalysis.eligibleForExternalReview === true;
+  const expectedStatus = expectedExperimentUsable
+    ? expectedPerformanceClaimAuthorized
+      ? "sealed-confirmatory-analysis-performance-authorized"
+      : "sealed-confirmatory-analysis-performance-unauthorized"
+    : "sealed-integrity-only-performance-unauthorized";
+  if (
+    receipt.status !== expectedStatus ||
+    receipt.experimentUsable !== expectedExperimentUsable ||
+    receipt.performanceClaimAuthorized !== expectedPerformanceClaimAuthorized
+  ) {
+    fail("EXTERNAL_RECEIPT_ANALYSIS_AUTHORIZATION_INVALID");
+  }
   exactKeys(
     receipt.workflow,
     [
@@ -2731,11 +2870,14 @@ export async function verifyExternalReceipt(filePath, expected = {}) {
       "sourceTreeSha",
       "behaviorBaseSha",
       "behaviorBaseTreeSha",
+      "authorizationSha",
       "runID",
       "runAttempt",
     ],
     "EXTERNAL_RECEIPT_WORKFLOW_INVALID",
   );
+  if (!SHA1.test(receipt.workflow.authorizationSha))
+    fail("EXTERNAL_RECEIPT_WORKFLOW_INVALID");
   validateSourceCIBinding(receipt.sourceCI);
   validatePhaseAuthoritySet(receipt);
   validateNamespaceRegistryChain(receipt);
@@ -2843,6 +2985,12 @@ export async function createExternalPhaseLedger({
     if (canonicalJson(receipt[field]) !== canonicalJson(manifest[field]))
       fail("LEDGER_RECEIPT_BUNDLE_AUTHORITY_MISMATCH", field);
   }
+  if (
+    canonicalJson(receipt.confirmatoryAnalysis) !==
+    canonicalJson(manifest.verifier.confirmatoryAnalysis)
+  ) {
+    fail("LEDGER_RECEIPT_BUNDLE_ANALYSIS_MISMATCH");
+  }
   const normalizedCompletedAt = isoTimestamp(completedAt, "completedAt");
   if (Date.parse(normalizedCompletedAt) < Date.parse(receipt.completedAt))
     fail("LEDGER_BEFORE_RECEIPT");
@@ -2865,7 +3013,7 @@ export async function createExternalPhaseLedger({
   };
   await verifyArtifactMetadata(metadata, {
     ...expectedArtifact,
-    headSha: manifest.source.workflowSourceSha,
+    headSha: manifest.workflow.authorizationSha,
     repository: "0xNad/ProxyWar",
     minRetentionDays: 89,
     allowCurrentRunInProgress: true,
@@ -2899,13 +3047,14 @@ export async function createExternalPhaseLedger({
       signerWorkflow:
         "0xNad/ProxyWar/.github/workflows/commander-xp-external-seal.yml",
       sourceRef: "refs/heads/main",
-      sourceDigest: manifest.source.workflowSourceSha,
-      signerDigest: manifest.source.workflowSourceSha,
+      sourceDigest: manifest.workflow.authorizationSha,
+      signerDigest: manifest.workflow.authorizationSha,
       denySelfHostedRunners: true,
     },
     collector: manifest.sourceArtifact,
     runId: String(expectedArtifact.workflowRunID),
     attempt: expectedArtifact.workflowRunAttempt,
+    signerSourceSha: manifest.workflow.authorizationSha,
     headSha: manifest.source.workflowSourceSha,
     treeSha: manifest.source.workflowSourceTreeSha,
     phase: manifest.phase,
@@ -2915,6 +3064,7 @@ export async function createExternalPhaseLedger({
     priorPhaseReceipt: manifest.priorPhaseReceipt,
     canaryReceipt: manifest.canaryReceipt,
     namespaceRegistry: manifest.namespaceRegistry,
+    confirmatoryAnalysis: receipt.confirmatoryAnalysis,
     evidenceArtifact: {
       id: String(receipt.bundleArtifact.artifactID),
       digest: normalizeSha256(receipt.bundleArtifact.artifactDigest),
@@ -2941,6 +3091,9 @@ export async function createExternalPhaseLedger({
       receiptSha256,
       attestedSubjectDigest: receiptSha256,
     },
+    integrityVerified: receipt.integrityVerified,
+    experimentUsable: receipt.experimentUsable,
+    performanceClaimAuthorized: receipt.performanceClaimAuthorized,
   };
   const ledger = {
     ...body,
@@ -2985,6 +3138,7 @@ export async function verifyExternalPhaseLedger(filePath, expected = {}) {
       "collector",
       "runId",
       "attempt",
+      "signerSourceSha",
       "headSha",
       "treeSha",
       "phase",
@@ -2994,8 +3148,12 @@ export async function verifyExternalPhaseLedger(filePath, expected = {}) {
       "priorPhaseReceipt",
       "canaryReceipt",
       "namespaceRegistry",
+      "confirmatoryAnalysis",
       "evidenceArtifact",
       "receiptArtifact",
+      "integrityVerified",
+      "experimentUsable",
+      "performanceClaimAuthorized",
       "ledgerSha256",
     ],
     "EXTERNAL_PHASE_LEDGER_SCHEMA_INVALID",
@@ -3004,6 +3162,11 @@ export async function verifyExternalPhaseLedger(filePath, expected = {}) {
   validateLedgerReceiptArtifact(ledger.receiptArtifact);
   validatePhaseAuthoritySet(ledger);
   validateNamespaceRegistryChain(ledger);
+  validateConfirmatoryAnalysisBinding(
+    ledger.confirmatoryAnalysis,
+    ledger.phase,
+    "LEDGER_CONFIRMATORY_ANALYSIS_INVALID",
+  );
   validateSourceArtifactBinding(ledger.collector);
   exactKeys(
     ledger.attestationPolicy,
@@ -3042,8 +3205,9 @@ export async function verifyExternalPhaseLedger(filePath, expected = {}) {
     ledger.attestationPolicy.signerWorkflow !==
       "0xNad/ProxyWar/.github/workflows/commander-xp-external-seal.yml" ||
     ledger.attestationPolicy.sourceRef !== "refs/heads/main" ||
-    ledger.attestationPolicy.sourceDigest !== ledger.headSha ||
-    ledger.attestationPolicy.signerDigest !== ledger.headSha ||
+    !SHA1.test(ledger.signerSourceSha) ||
+    ledger.attestationPolicy.sourceDigest !== ledger.signerSourceSha ||
+    ledger.attestationPolicy.signerDigest !== ledger.signerSourceSha ||
     ledger.attestationPolicy.denySelfHostedRunners !== true ||
     !/^\d+$/.test(ledger.runId) ||
     !Number.isSafeInteger(ledger.attempt) ||
@@ -3051,6 +3215,12 @@ export async function verifyExternalPhaseLedger(filePath, expected = {}) {
     !SHA1.test(ledger.headSha) ||
     !SHA1.test(ledger.treeSha) ||
     !PHASES.has(ledger.phase) ||
+    ledger.integrityVerified !== true ||
+    ledger.experimentUsable !== (ledger.phase === "confirmatory") ||
+    ledger.performanceClaimAuthorized !==
+      (ledger.phase === "confirmatory" &&
+        ledger.confirmatoryAnalysis.ruleSatisfied === true &&
+        ledger.confirmatoryAnalysis.eligibleForExternalReview === true) ||
     (expected.phase !== undefined && ledger.phase !== expected.phase) ||
     (expected.experimentID !== undefined &&
       ledger.experimentID !== expected.experimentID) ||
@@ -3111,6 +3281,7 @@ export async function verifyRetainedPhaseAuthority({
       "experimentID",
       "runId",
       "attempt",
+      "signerSourceSha",
       "headSha",
       "treeSha",
       "behaviorBaseSha",
@@ -3123,6 +3294,7 @@ export async function verifyRetainedPhaseAuthority({
       "receiptArtifact",
       "ledgerArtifact",
       "attestations",
+      "confirmatoryAnalysis",
       "integrityVerified",
       "experimentUsable",
       "performanceClaimAuthorized",
@@ -3146,6 +3318,7 @@ export async function verifyRetainedPhaseAuthority({
     authority.experimentID !== ledger.experimentID ||
     authority.runId !== ledger.runId ||
     authority.attempt !== ledger.attempt ||
+    authority.signerSourceSha !== ledger.signerSourceSha ||
     authority.headSha !== ledger.headSha ||
     authority.treeSha !== ledger.treeSha ||
     authority.behaviorBaseSha !== ledger.behaviorBaseSha ||
@@ -3154,6 +3327,8 @@ export async function verifyRetainedPhaseAuthority({
     authority.phase !== ledger.phase ||
     canonicalJson(authority.collectorArtifact) !==
       canonicalJson(ledger.collector) ||
+    canonicalJson(authority.confirmatoryAnalysis) !==
+      canonicalJson(ledger.confirmatoryAnalysis) ||
     String(authority.bundleArtifact?.id) !== ledger.evidenceArtifact.id ||
     normalizeSha256(authority.bundleArtifact?.digest) !==
       normalizeSha256(ledger.evidenceArtifact.digest) ||
@@ -3166,9 +3341,9 @@ export async function verifyRetainedPhaseAuthority({
     authority.ledgerArtifact?.ledgerSha256 !== ledger.ledgerSha256 ||
     String(authority.attestations?.ledger?.id) !==
       binding.ledgerArtifact.attestationID ||
-    authority.integrityVerified !== true ||
-    authority.experimentUsable !== false ||
-    authority.performanceClaimAuthorized !== false
+    authority.integrityVerified !== ledger.integrityVerified ||
+    authority.experimentUsable !== ledger.experimentUsable ||
+    authority.performanceClaimAuthorized !== ledger.performanceClaimAuthorized
   ) {
     fail("RETAINED_AUTHORITY_CROSS_BINDING_MISMATCH", phase);
   }
@@ -3189,6 +3364,7 @@ export async function verifyRetainedPhaseAuthority({
       "experimentID",
       "runId",
       "attempt",
+      "signerSourceSha",
       "headSha",
       "treeSha",
       "behaviorBaseSha",
@@ -3204,6 +3380,7 @@ export async function verifyRetainedPhaseAuthority({
       "ledgerAttestation",
       "authorityArtifact",
       "authorityAttestation",
+      "confirmatoryAnalysis",
       "integrityVerified",
       "experimentUsable",
       "performanceClaimAuthorized",
@@ -3232,6 +3409,7 @@ export async function verifyRetainedPhaseAuthority({
     terminal.experimentID !== authority.experimentID ||
     terminal.runId !== authority.runId ||
     terminal.attempt !== authority.attempt ||
+    terminal.signerSourceSha !== authority.signerSourceSha ||
     terminal.headSha !== authority.headSha ||
     terminal.treeSha !== authority.treeSha ||
     terminal.behaviorBaseSha !== authority.behaviorBaseSha ||
@@ -3251,6 +3429,8 @@ export async function verifyRetainedPhaseAuthority({
       canonicalJson(authority.attestations.subject) ||
     canonicalJson(terminal.ledgerAttestation) !==
       canonicalJson(authority.attestations.ledger) ||
+    canonicalJson(terminal.confirmatoryAnalysis) !==
+      canonicalJson(authority.confirmatoryAnalysis) ||
     String(terminal.authorityArtifact?.id) !== binding.authorityArtifact.id ||
     normalizeSha256(terminal.authorityArtifact?.digest) !==
       normalizeSha256(binding.authorityArtifact.digest) ||
@@ -3258,9 +3438,9 @@ export async function verifyRetainedPhaseAuthority({
       normalizeSha256(binding.authorityArtifact.receiptSha256) ||
     String(terminal.authorityAttestation?.id) !==
       binding.authorityArtifact.attestationID ||
-    terminal.integrityVerified !== true ||
-    terminal.experimentUsable !== false ||
-    terminal.performanceClaimAuthorized !== false
+    terminal.integrityVerified !== authority.integrityVerified ||
+    terminal.experimentUsable !== authority.experimentUsable ||
+    terminal.performanceClaimAuthorized !== authority.performanceClaimAuthorized
   ) {
     fail("RETAINED_TERMINAL_CROSS_BINDING_MISMATCH", phase);
   }

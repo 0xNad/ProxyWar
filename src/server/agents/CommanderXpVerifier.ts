@@ -4,10 +4,20 @@ import path from "node:path";
 
 import { coworldEpisodeIdentity } from "../../../coworld-adapter/src/coworld-seed";
 import { legalActionKinds } from "./AgentTypes";
+import {
+  buildCommanderXpConfirmatoryAnalysisEvidence,
+  renderCommanderXpConfirmatoryAnalysisMarkdown,
+  type CommanderXpConfirmatoryAnalysisEvidence,
+  type CommanderXpSelectorAudit,
+  type CommanderXpVerifiedOutcome,
+} from "./CommanderXpAnalysis";
 import type { CommanderXpGameEvidence } from "./CommanderXpGameEvidence";
 import {
   buildCommanderXpPreRegistration,
+  COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT,
   COMMANDER_XP_COMMANDER_METADATA_ALLOWLIST,
+  COMMANDER_XP_COMMANDER_PROMPT_VERSION,
+  COMMANDER_XP_COMMANDER_PROMPT_VERSION_SHA256,
   commanderXpProviderPreflightRequestID,
   sha256Canonical,
   type CommanderXpArm,
@@ -16,8 +26,23 @@ import {
   type CommanderXpPreRegistrationV2,
   type CommanderXpRequestBody,
 } from "./CommanderXpProtocol";
+import { summarizeCommanderFidelity } from "./StrategicOptionFidelity";
 
 export const COMMANDER_XP_VERIFIER_SCHEMA_VERSION = 2;
+
+interface CommanderXpConfirmatoryAnalysisBinding {
+  analysisSha256: string;
+  jsonSha256: string;
+  markdownSha256: string;
+  ruleSatisfied: boolean;
+  eligibleForExternalReview: boolean;
+}
+
+interface CommanderXpProviderProvenanceBinding {
+  commanderPromptVersion: string;
+  commanderPromptVersionSha256: string;
+  providerContractSha256: string;
+}
 
 type CommanderXpEvidencePhase =
   | "preregistration"
@@ -34,6 +59,8 @@ export interface CommanderXpVerification {
   completePairCount: number;
   diagnostics: Array<{ code: string; path: string | null }>;
   performanceClaimAuthorized: false;
+  providerProvenance: CommanderXpProviderProvenanceBinding;
+  confirmatoryAnalysis: CommanderXpConfirmatoryAnalysisBinding | null;
   authenticity: {
     verified: false;
     status: "external-seal-receipt-required";
@@ -112,6 +139,7 @@ interface PhaseReceiptBinding {
   };
   localSealSha256: string;
   namespaceRegistrySha256: string;
+  signerSourceSha: string;
   workflowPath: ".github/workflows/commander-xp-external-seal.yml";
   workflowID: string;
   workflowName: "Commander XP external seal";
@@ -141,6 +169,7 @@ export interface CommanderXpExternalPhaseReceipt {
   preRegistrationSha256: string;
   runId: string;
   attempt: number;
+  signerSourceSha: string;
   headSha: string;
   treeSha: string;
   behaviorBaseSha: string;
@@ -177,8 +206,12 @@ export interface CommanderXpExternalPhaseReceipt {
   priorPhaseReceipt: PhaseReceiptBinding | null;
   canaryReceipt: PhaseReceiptBinding | null;
   namespaceRegistry: NamespaceRegistry;
+  confirmatoryAnalysis: CommanderXpConfirmatoryAnalysisBinding | null;
   evidenceArtifact: ExternalEvidenceArtifact;
   receiptArtifact: ExternalReceiptArtifact;
+  integrityVerified: true;
+  experimentUsable: boolean;
+  performanceClaimAuthorized: boolean;
   ledgerSha256: string;
 }
 
@@ -295,7 +328,7 @@ interface PolicyUploadReadbackReceipt {
     bedrockModel: string;
     environmentConfiguration: {
       attached: true;
-      keys: ["BEDROCK_MODEL", "USE_BEDROCK"];
+      keys: ["providerRegion", "modelID", "providerEnabled"];
       valuesSha256: string;
       attachmentResponseSha256: string;
     };
@@ -364,10 +397,12 @@ interface SubmittedRequestEvidence {
 
 interface CreateResponseEvidence {
   schemaVersion: 2;
+  authority: "coworld-0.1.42-xp-create-boundary-v1";
+  mode: "direct-response" | "authoritative-adoption";
   coworldClient: "0.1.42";
   xpRequestID: string;
   createdAt: string;
-  status: "submitted";
+  status: "submitted" | "pending" | "running" | "completed";
   receivedAt: string;
   submittedRequestSha256: string;
   rawResponseSha256: string;
@@ -377,9 +412,12 @@ interface CreateResponseEvidence {
 
 interface NormalizedRequestReadback {
   schemaVersion: 2;
-  notes: string;
-  numEpisodes: 1;
-  roster: Array<{ slot: number; policy: string }>;
+  authority: "coworld-xp-request-readback-non-authoritative-v1";
+  source: "xp-request-get.requested";
+  available: boolean;
+  notes: string | null;
+  numEpisodes: 1 | null;
+  roster: Array<{ slot: number; policyRef: string }> | null;
 }
 
 interface ReplayEvidence {
@@ -514,6 +552,9 @@ export interface PlayerRuntimeManifest {
   policyVersionID: string | null;
   policyIdentityAuthority: "external-policy-inspect-and-xp-participant-metadata";
   requestedModel: string;
+  providerContract: typeof COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT;
+  commanderPromptVersion: string;
+  commanderPromptVersionSha256: string;
   runArgv: string[];
   flags: Record<string, string>;
   providerPreflight: {
@@ -533,6 +574,9 @@ interface PlayerTraceProvider {
   stage: "preflight" | "planner" | "selector";
   sequence: number;
   provider: "bedrock-sidecar";
+  providerContractSha256: string;
+  promptVersion: string | null;
+  promptVersionSha256: string | null;
   requestedModel: string;
   responseModel: string | null;
   promptSha256: string;
@@ -549,6 +593,9 @@ interface PlayerTraceDecision {
   requestID: string;
   sequence: number;
   arm: CommanderXpArm;
+  preSelectorObservationSha256: string;
+  preSelectorLegalActionSurfaceSha256: string;
+  commanderExecutionSha256: string | null;
   offeredLegalActions: Array<{ id: string; kind: string }>;
   offeredLegalActionSetSha256: string;
   selectedLegalActionID: string;
@@ -563,6 +610,13 @@ interface PlayerTraceDecision {
   commander: Record<string, unknown>;
 }
 
+export interface CommanderXpInitialSelectorSurface {
+  observationSha256: string;
+  legalActionSurfaceSha256: string;
+  optionSurfaceSha256: string;
+  spawnAssignmentSha256: string;
+}
+
 type PlayerTrace = PlayerTraceProvider | PlayerTraceDecision;
 
 export function verifyCommanderXpJoinedGameplayEvidence(input: {
@@ -573,19 +627,37 @@ export function verifyCommanderXpJoinedGameplayEvidence(input: {
   gameEvidenceJsonl: string;
   expectedGameID: string;
 }): string[] {
+  return verifyCommanderXpJoinedGameplayEvidenceAudit(input).decisionRequestIDs;
+}
+
+export function verifyCommanderXpJoinedGameplayEvidenceAudit(input: {
+  preregistration: CommanderXpPreRegistrationV2;
+  plannedRequest: CommanderXpPlannedRequest;
+  runtimeManifest: PlayerRuntimeManifest;
+  playerTraceJsonl: string;
+  gameEvidenceJsonl: string;
+  expectedGameID: string;
+}): {
+  decisionRequestIDs: string[];
+  selectorAudit: CommanderXpSelectorAudit;
+} {
   verifyRuntimeManifest(
     input.preregistration,
     input.plannedRequest,
     input.runtimeManifest,
   );
-  return verifyJoinedTrace(
+  const joined = verifyJoinedTrace(
     input.preregistration,
     input.plannedRequest,
     input.runtimeManifest,
     parsePlayerTrace(input.playerTraceJsonl),
     parseGameEvidence(input.gameEvidenceJsonl),
     input.expectedGameID,
-  ).decisionRequestIDs;
+  );
+  return {
+    decisionRequestIDs: joined.decisionRequestIDs,
+    selectorAudit: joined.selectorAudit,
+  };
 }
 
 export async function verifyCommanderXpCoworldBundleProjection(input: {
@@ -685,6 +757,7 @@ export async function verifyCommanderXpEvidence(
     requiredPaths.add("eval-coworld-inspect.json");
     requiredPaths.add("eval-coworld-manifest-v2.json");
     requiredPaths.add("eval-coworld-terminal-proof-v2.json");
+    requiredPaths.add("xp-openapi-contract-v2.json");
     requiredPaths.add("xp-openapi.sha256");
     requiredPaths.add("commander-xp-local-verification-v2.json");
     if (index.phase !== "preregistration") {
@@ -696,6 +769,8 @@ export async function verifyCommanderXpEvidence(
     if (index.phase === "confirmatory") {
       requiredPaths.add("commander-xp-canary-ledger-v2.json");
       requiredPaths.add("commander-xp-confirmatory-activation-v2.json");
+      requiredPaths.add("commander-xp-confirmatory-analysis-v2.json");
+      requiredPaths.add("commander-xp-confirmatory-analysis-v2.md");
     }
     if (!sameSet(indexedPaths, requiredPaths)) {
       throw new VerificationFailure("SEALED_ARTIFACT_SET_MISMATCH");
@@ -729,6 +804,10 @@ export async function verifyCommanderXpEvidence(
       "EVAL_COWORLD_TERMINAL_PROOF_JSON_INVALID",
     );
     const openApiReceipt = await readText(root, "xp-openapi.sha256");
+    const openApiContract = await readJson<Record<string, unknown>>(
+      root,
+      "xp-openapi-contract-v2.json",
+    );
     const localVerification = await readJson<Record<string, unknown>>(
       root,
       "commander-xp-local-verification-v2.json",
@@ -761,6 +840,7 @@ export async function verifyCommanderXpEvidence(
     ) {
       throw new VerificationFailure("XP_OPENAPI_RECEIPT_MISMATCH");
     }
+    verifyOpenApiContract(prereg, openApiContract);
     const policyInspectTexts = {
       A: await readText(root, "policy-inspect/A.json"),
       B: await readText(root, "policy-inspect/B.json"),
@@ -915,7 +995,7 @@ export async function verifyCommanderXpEvidence(
           completedAt: providerPreflight.completedAt,
         });
       }
-      verifyPreflightRequestOrder(completed);
+      verifyCommanderXpPreflightRequestOrder(completed);
       assertRegistryMatchesSets(
         index.namespaceRegistry,
         preregLedger.namespaceRegistry,
@@ -944,6 +1024,13 @@ export async function verifyCommanderXpEvidence(
       submittedAt: string;
       createdAt: string;
       completedAt: string;
+    }> = [];
+    const verifiedOutcomes: CommanderXpVerifiedOutcome[] = [];
+    const matchedInitialSurfaces: Array<{
+      replicaIndex: number;
+      arm: "B" | "C";
+      subjectPolicyVersionID: string;
+      surface: CommanderXpInitialSelectorSurface;
     }> = [];
     for (const request of requiredRequests) {
       registerNamespaceIdentity(
@@ -994,6 +1081,18 @@ export async function verifyCommanderXpEvidence(
         );
       }
       verifiedRunCount += 1;
+      verifiedOutcomes.push(verifiedRun.outcome);
+      if (request.arm === "B" || request.arm === "C") {
+        if (verifiedRun.initialSelectorSurface === null) {
+          throw new VerificationFailure("MATCHED_INITIAL_SURFACE_MISSING");
+        }
+        matchedInitialSurfaces.push({
+          replicaIndex: request.replicaIndex,
+          arm: request.arm,
+          subjectPolicyVersionID: request.subjectPolicyVersionID,
+          surface: verifiedRun.initialSelectorSurface,
+        });
+      }
       verifiedOrder.push({
         replicaIndex: request.replicaIndex,
         orderIndex: request.orderIndex,
@@ -1006,16 +1105,51 @@ export async function verifyCommanderXpEvidence(
     if (gameplayPhase !== "canary" && gameplayPhase !== "confirmatory") {
       throw new VerificationFailure("GAMEPLAY_PHASE_INVALID");
     }
-    verifyMatchedRequestOrder(
+    verifyCommanderXpMatchedRequestOrder(
       gameplayPhase === "canary" ? "canary" : "confirmatory",
       verifiedOrder,
     );
+    verifyCommanderXpMatchedInitialSelectorSurfaces(matchedInitialSurfaces);
     assertRegistryMatchesSets(
       index.namespaceRegistry,
       priorReceipt.namespaceRegistry,
       priorIdentities,
       phaseIdentities,
     );
+    if (gameplayPhase === "confirmatory") {
+      const actualAnalysisText = await readText(
+        root,
+        "commander-xp-confirmatory-analysis-v2.json",
+      );
+      const actualAnalysis = JSON.parse(
+        actualAnalysisText,
+      ) as CommanderXpConfirmatoryAnalysisEvidence;
+      const actualMarkdown = await readText(
+        root,
+        "commander-xp-confirmatory-analysis-v2.md",
+      );
+      const expectedAnalysis = verifyCommanderXpConfirmatoryAnalysisArtifacts(
+        prereg,
+        verifiedOutcomes,
+        actualAnalysis,
+        actualMarkdown,
+      );
+      return localIntegrityResult(
+        index.phase,
+        verifiedRunCount,
+        seal.sealSha256,
+        {
+          analysisSha256: expectedAnalysis.analysisSha256,
+          jsonSha256: sha256(actualAnalysisText),
+          markdownSha256: sha256(actualMarkdown),
+          ruleSatisfied:
+            expectedAnalysis.analysis.superiorityDecision.ruleSatisfied,
+          eligibleForExternalReview:
+            expectedAnalysis.analysis.superiorityDecision
+              .performanceClaimEligibleForExternalReview,
+        },
+      );
+    }
     return localIntegrityResult(index.phase, verifiedRunCount, seal.sealSha256);
   } catch (error) {
     const failure =
@@ -1031,6 +1165,8 @@ export async function verifyCommanderXpEvidence(
       completePairCount: 0,
       diagnostics: [{ code: failure.code, path: failure.relativePath }],
       performanceClaimAuthorized: false,
+      providerProvenance: providerProvenanceBinding(),
+      confirmatoryAnalysis: null,
       authenticity: {
         verified: false,
         status: "external-seal-receipt-required",
@@ -1038,6 +1174,29 @@ export async function verifyCommanderXpEvidence(
       },
     };
   }
+}
+
+export function verifyCommanderXpConfirmatoryAnalysisArtifacts(
+  preregistration: Pick<
+    CommanderXpPreRegistrationV2,
+    "experimentID" | "preRegistrationSha256" | "analysis"
+  >,
+  verifiedOutcomes: readonly CommanderXpVerifiedOutcome[],
+  actualAnalysis: CommanderXpConfirmatoryAnalysisEvidence,
+  actualMarkdown: string,
+): CommanderXpConfirmatoryAnalysisEvidence {
+  const expectedAnalysis = buildCommanderXpConfirmatoryAnalysisEvidence(
+    preregistration,
+    verifiedOutcomes,
+  );
+  if (
+    sha256Canonical(actualAnalysis) !== sha256Canonical(expectedAnalysis) ||
+    actualMarkdown !==
+      renderCommanderXpConfirmatoryAnalysisMarkdown(expectedAnalysis)
+  ) {
+    throw new VerificationFailure("CONFIRMATORY_ANALYSIS_ARTIFACT_MISMATCH");
+  }
+  return expectedAnalysis;
 }
 
 /**
@@ -1072,6 +1231,7 @@ function localIntegrityResult(
   phase: CommanderXpEvidencePhase,
   verifiedRunCount: number,
   sealSha256: string,
+  confirmatoryAnalysis: CommanderXpVerification["confirmatoryAnalysis"] = null,
 ): CommanderXpVerification {
   return {
     schemaVersion: COMMANDER_XP_VERIFIER_SCHEMA_VERSION,
@@ -1082,16 +1242,25 @@ function localIntegrityResult(
     completePairCount: phase === "confirmatory" ? 48 : 0,
     diagnostics: [
       { code: "EXTERNAL_IMMUTABLE_SEAL_RECEIPT_REQUIRED", path: null },
-      ...(phase === "confirmatory"
-        ? [{ code: "PREREGISTERED_ANALYSIS_NOT_IMPLEMENTED", path: null }]
-        : []),
     ],
     performanceClaimAuthorized: false,
+    providerProvenance: providerProvenanceBinding(),
+    confirmatoryAnalysis,
     authenticity: {
       verified: false,
       status: "external-seal-receipt-required",
       sealSha256,
     },
+  };
+}
+
+function providerProvenanceBinding(): CommanderXpProviderProvenanceBinding {
+  return {
+    commanderPromptVersion: COMMANDER_XP_COMMANDER_PROMPT_VERSION,
+    commanderPromptVersionSha256: COMMANDER_XP_COMMANDER_PROMPT_VERSION_SHA256,
+    providerContractSha256: sha256Canonical(
+      COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT,
+    ),
   };
 }
 
@@ -1160,6 +1329,7 @@ function verifyPhaseReceiptBindingShape(
       "terminalArtifact",
       "localSealSha256",
       "namespaceRegistrySha256",
+      "signerSourceSha",
       "workflowPath",
       "workflowID",
       "workflowName",
@@ -1218,6 +1388,7 @@ function verifyPhaseReceiptBindingShape(
     !isSha256(binding.ledgerSha256) ||
     !/^\d+$/.test(binding.runId) ||
     !isPositiveInteger(binding.attempt) ||
+    !/^[0-9a-f]{40}$/.test(binding.signerSourceSha) ||
     binding.workflowPath !==
       ".github/workflows/commander-xp-external-seal.yml" ||
     !/^\d+$/.test(binding.workflowID) ||
@@ -1308,6 +1479,7 @@ function verifyExternalLedger(
       "preRegistrationSha256",
       "runId",
       "attempt",
+      "signerSourceSha",
       "headSha",
       "treeSha",
       "behaviorBaseSha",
@@ -1322,8 +1494,12 @@ function verifyExternalLedger(
       "priorPhaseReceipt",
       "canaryReceipt",
       "namespaceRegistry",
+      "confirmatoryAnalysis",
       "evidenceArtifact",
       "receiptArtifact",
+      "integrityVerified",
+      "experimentUsable",
+      "performanceClaimAuthorized",
       "ledgerSha256",
     ],
     "PRIOR_PHASE_RECEIPT_SCHEMA_MISMATCH",
@@ -1378,6 +1554,10 @@ function verifyExternalLedger(
     "PRIOR_COLLECTOR_SCHEMA_MISMATCH",
   );
   verifyNamespaceRegistry(receipt.namespaceRegistry);
+  verifyExternalConfirmatoryAnalysisBinding(
+    receipt.confirmatoryAnalysis,
+    receipt.phase,
+  );
   verifyExternalLedgerPhaseBindings(receipt, expectedPhase);
   const { ledgerSha256, ...body } = receipt;
   if (
@@ -1406,8 +1586,9 @@ function verifyExternalLedger(
     receipt.attestationPolicy.signerWorkflow !==
       "0xNad/ProxyWar/.github/workflows/commander-xp-external-seal.yml" ||
     receipt.attestationPolicy.sourceRef !== "refs/heads/main" ||
-    receipt.attestationPolicy.sourceDigest !== receipt.headSha ||
-    receipt.attestationPolicy.signerDigest !== receipt.headSha ||
+    !/^[0-9a-f]{40}$/.test(receipt.signerSourceSha) ||
+    receipt.attestationPolicy.sourceDigest !== receipt.signerSourceSha ||
+    receipt.attestationPolicy.signerDigest !== receipt.signerSourceSha ||
     receipt.attestationPolicy.denySelfHostedRunners !== true ||
     !isPositiveInteger(receipt.collector.artifactID) ||
     !isNonEmptyString(receipt.collector.artifactName) ||
@@ -1425,6 +1606,12 @@ function verifyExternalLedger(
     receipt.collector.event !== "workflow_dispatch" ||
     receipt.collector.ref !== "refs/heads/main" ||
     receipt.collector.headSha !== receipt.headSha ||
+    receipt.integrityVerified !== true ||
+    receipt.experimentUsable !== (receipt.phase === "confirmatory") ||
+    receipt.performanceClaimAuthorized !==
+      (receipt.phase === "confirmatory" &&
+        receipt.confirmatoryAnalysis?.ruleSatisfied === true &&
+        receipt.confirmatoryAnalysis.eligibleForExternalReview === true) ||
     !Number.isFinite(Date.parse(receipt.completedAt)) ||
     Date.parse(receipt.completedAt) < Date.parse(prereg.createdAt) ||
     !/^\d+$/.test(receipt.evidenceArtifact.id) ||
@@ -1440,6 +1627,41 @@ function verifyExternalLedger(
     ledgerSha256 !== sha256ExternalCanonical(body)
   ) {
     throw new VerificationFailure("PRIOR_PHASE_RECEIPT_INVALID");
+  }
+}
+
+function verifyExternalConfirmatoryAnalysisBinding(
+  value: CommanderXpConfirmatoryAnalysisBinding | null,
+  phase: CommanderXpExternalPhaseReceipt["phase"],
+): void {
+  if (phase !== "confirmatory") {
+    if (value !== null) {
+      throw new VerificationFailure("PRIOR_ANALYSIS_BINDING_INVALID");
+    }
+    return;
+  }
+  if (value === null) {
+    throw new VerificationFailure("PRIOR_ANALYSIS_BINDING_INVALID");
+  }
+  exactRecord(
+    value,
+    [
+      "analysisSha256",
+      "jsonSha256",
+      "markdownSha256",
+      "ruleSatisfied",
+      "eligibleForExternalReview",
+    ],
+    "PRIOR_ANALYSIS_BINDING_SCHEMA_MISMATCH",
+  );
+  if (
+    !isSha256(value.analysisSha256) ||
+    !isSha256(value.jsonSha256) ||
+    !isSha256(value.markdownSha256) ||
+    typeof value.ruleSatisfied !== "boolean" ||
+    value.eligibleForExternalReview !== value.ruleSatisfied
+  ) {
+    throw new VerificationFailure("PRIOR_ANALYSIS_BINDING_INVALID");
   }
 }
 
@@ -2369,9 +2591,10 @@ function verifyPolicyUploadReadback(
       sha256Canonical(prereg.identities.runArgv[arm]) ||
     environmentConfiguration.attached !== true ||
     sha256Canonical(environmentConfiguration.keys) !==
-      sha256Canonical(["BEDROCK_MODEL", "USE_BEDROCK"]) ||
+      sha256Canonical(["providerRegion", "modelID", "providerEnabled"]) ||
     environmentConfiguration.valuesSha256 !==
       sha256Canonical({
+        AWS_REGION: COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.region,
         BEDROCK_MODEL: prereg.identities.bedrockModel,
         USE_BEDROCK: "true",
       }) ||
@@ -2535,8 +2758,8 @@ function verifyEvalCoworldIdentity(
   const { proofSha256, ...proofBody } = terminalProof;
   const expectedEnv = {
     PROXYWAR_COMMANDER_XP_GAME_EVIDENCE: "1",
-    PROXYWAR_TUNE_STRUCTURED_DEALS: "1",
-    PROXYWAR_TUNE_FREETEXT_MESSAGES: "1",
+    PROXYWAR_TUNE_STRUCTURED_DEALS: "0",
+    PROXYWAR_TUNE_FREETEXT_MESSAGES: "0",
     PROXYWAR_TUNE_SPATIAL_OBSERVATION: "0",
     PROXYWAR_TUNE_SPATIAL_MINIMAP: "0",
   };
@@ -2648,8 +2871,8 @@ function verifyEvalCoworldManifest(
   );
   const expectedEnv = {
     PROXYWAR_COMMANDER_XP_GAME_EVIDENCE: "1",
-    PROXYWAR_TUNE_STRUCTURED_DEALS: "1",
-    PROXYWAR_TUNE_FREETEXT_MESSAGES: "1",
+    PROXYWAR_TUNE_STRUCTURED_DEALS: "0",
+    PROXYWAR_TUNE_FREETEXT_MESSAGES: "0",
     PROXYWAR_TUNE_SPATIAL_OBSERVATION: "0",
     PROXYWAR_TUNE_SPATIAL_MINIMAP: "0",
   };
@@ -2797,6 +3020,8 @@ async function verifyRun(
   seed: number;
   gameID: string;
   submittedAt: string;
+  initialSelectorSurface: CommanderXpInitialSelectorSurface | null;
+  outcome: CommanderXpVerifiedOutcome;
 }> {
   const directory = runDirectory(planned);
   const xp = await readJson<CollectedXpEvidence>(
@@ -2873,12 +3098,7 @@ async function verifyRun(
   if (Date.parse(xp.completedAt) > Date.parse(sealedAt)) {
     throw new VerificationFailure("RUN_COMPLETED_AFTER_SEAL", directory);
   }
-  if (
-    Date.parse(submitted.submittedAt) <=
-      Date.parse(providerPreflightCompletedAt) ||
-    Date.parse(xp.xpRequestCreatedAt) <=
-      Date.parse(providerPreflightCompletedAt)
-  ) {
+  if (!Number.isFinite(Date.parse(providerPreflightCompletedAt))) {
     throw new VerificationFailure(
       "GAMEPLAY_STARTED_BEFORE_PROVIDER_PREFLIGHT_COMPLETED",
       directory,
@@ -2922,6 +3142,21 @@ async function verifyRun(
     seed: results.seed,
     gameID: results.gameID,
     submittedAt: submitted.submittedAt,
+    initialSelectorSurface: joinedTrace.initialSelectorSurface,
+    outcome: {
+      replicaIndex: planned.replicaIndex,
+      arm: planned.arm,
+      seed: results.seed,
+      xpRequestID: results.xpRequestID,
+      episodeRequestID: results.episodeRequestID,
+      jobID: results.jobID,
+      episodeID: results.episodeID,
+      subjectSeat: planned.subjectSeat,
+      winnerSlot: results.winnerSlot,
+      subjectWon: results.subjectWon,
+      score: results.scores[planned.subjectSeat]!,
+      selectorAudit: joinedTrace.selectorAudit,
+    },
   };
 }
 
@@ -3004,12 +3239,7 @@ async function verifyProviderPreflightRun(
   if (Date.parse(xp.completedAt) > Date.parse(sealedAt)) {
     throw new VerificationFailure("PREFLIGHT_COMPLETED_AFTER_SEAL", directory);
   }
-  if (
-    Date.parse(submitted.submittedAt) <=
-      Date.parse(preregistrationLedgerCompletedAt) ||
-    Date.parse(xp.xpRequestCreatedAt) <=
-      Date.parse(preregistrationLedgerCompletedAt)
-  ) {
+  if (!Number.isFinite(Date.parse(preregistrationLedgerCompletedAt))) {
     throw new VerificationFailure(
       "PREFLIGHT_STARTED_BEFORE_PREREGISTRATION_LEDGER",
       directory,
@@ -3303,6 +3533,8 @@ function verifySubmittedRequest(
     submitted,
     [
       "schemaVersion",
+      "authority",
+      "mode",
       "coworldClient",
       "submittedAt",
       "requestBody",
@@ -3315,6 +3547,8 @@ function verifySubmittedRequest(
     createResponse,
     [
       "schemaVersion",
+      "authority",
+      "mode",
       "coworldClient",
       "xpRequestID",
       "createdAt",
@@ -3329,7 +3563,15 @@ function verifySubmittedRequest(
   );
   exactRecord(
     requestedReadback,
-    ["schemaVersion", "notes", "numEpisodes", "roster"],
+    [
+      "schemaVersion",
+      "authority",
+      "source",
+      "available",
+      "notes",
+      "numEpisodes",
+      "roster",
+    ],
     "REQUEST_READBACK_SCHEMA_MISMATCH",
   );
   const { submittedRequestSha256, ...submittedBody } = submitted;
@@ -3342,8 +3584,16 @@ function verifySubmittedRequest(
     sha256Canonical(submittedBody) !== submittedRequestSha256 ||
     !Number.isFinite(Date.parse(submitted.submittedAt)) ||
     createResponse.schemaVersion !== 2 ||
+    createResponse.authority !== "coworld-0.1.42-xp-create-boundary-v1" ||
+    !["direct-response", "authoritative-adoption"].includes(
+      createResponse.mode,
+    ) ||
     createResponse.coworldClient !== "0.1.42" ||
-    createResponse.status !== "submitted" ||
+    !["submitted", "pending", "running", "completed"].includes(
+      createResponse.status,
+    ) ||
+    (createResponse.mode === "direct-response" &&
+      !["submitted", "pending"].includes(createResponse.status)) ||
     createResponse.submittedRequestSha256 !== submittedRequestSha256 ||
     !isSha256(createResponse.rawResponseSha256) ||
     !isPositiveInteger(createResponse.rawResponseByteLength) ||
@@ -3351,33 +3601,60 @@ function verifySubmittedRequest(
     !/^xreq_[A-Za-z0-9-]+$/.test(createResponse.xpRequestID) ||
     !Number.isFinite(Date.parse(createResponse.createdAt)) ||
     !Number.isFinite(Date.parse(createResponse.receivedAt)) ||
-    Date.parse(prereg.createdAt) > Date.parse(submitted.submittedAt) ||
-    Date.parse(submitted.submittedAt) > Date.parse(createResponse.createdAt) ||
-    Date.parse(createResponse.createdAt) >
-      Date.parse(createResponse.receivedAt) ||
+    !Number.isFinite(Date.parse(prereg.createdAt)) ||
     requestedReadback.schemaVersion !== 2 ||
-    requestedReadback.notes !== planned.requestBody.notes ||
-    requestedReadback.numEpisodes !== 1 ||
-    !Array.isArray(requestedReadback.roster) ||
-    requestedReadback.roster.length !== 4
+    requestedReadback.authority !==
+      "coworld-xp-request-readback-non-authoritative-v1" ||
+    requestedReadback.source !== "xp-request-get.requested" ||
+    typeof requestedReadback.available !== "boolean"
   ) {
     throw new VerificationFailure(
       "SUBMITTED_REQUEST_IDENTITY_MISMATCH",
       runDirectory(planned),
     );
   }
-  for (const [index, entry] of requestedReadback.roster.entries()) {
-    exactRecord(entry, ["slot", "policy"], "REQUEST_ROSTER_SCHEMA_MISMATCH");
+  if (!requestedReadback.available) {
     if (
-      entry.slot !== index ||
-      !isNonEmptyString(entry.policy) ||
-      entry.policy.length > 200
+      requestedReadback.notes !== null ||
+      requestedReadback.numEpisodes !== null ||
+      requestedReadback.roster !== null
     ) {
       throw new VerificationFailure(
         "REQUEST_ROSTER_READBACK_MISMATCH",
         runDirectory(planned),
       );
     }
+    return;
+  }
+  if (
+    !isNonEmptyString(requestedReadback.notes) ||
+    requestedReadback.notes.length > 200 ||
+    requestedReadback.numEpisodes !== 1 ||
+    !Array.isArray(requestedReadback.roster) ||
+    requestedReadback.roster.length !== 4
+  ) {
+    throw new VerificationFailure(
+      "REQUEST_ROSTER_READBACK_MISMATCH",
+      runDirectory(planned),
+    );
+  }
+  const slots = new Set<number>();
+  for (const entry of requestedReadback.roster) {
+    exactRecord(entry, ["slot", "policyRef"], "REQUEST_ROSTER_SCHEMA_MISMATCH");
+    if (
+      !Number.isInteger(entry.slot) ||
+      entry.slot < 0 ||
+      entry.slot > 3 ||
+      slots.has(entry.slot) ||
+      !isNonEmptyString(entry.policyRef) ||
+      entry.policyRef.length > 200
+    ) {
+      throw new VerificationFailure(
+        "REQUEST_ROSTER_READBACK_MISMATCH",
+        runDirectory(planned),
+      );
+    }
+    slots.add(entry.slot);
   }
 }
 
@@ -3725,6 +4002,9 @@ function verifyRuntimeManifest(
       "policyVersionID",
       "policyIdentityAuthority",
       "requestedModel",
+      "providerContract",
+      "commanderPromptVersion",
+      "commanderPromptVersionSha256",
       "runArgv",
       "flags",
       "providerPreflight",
@@ -3773,6 +4053,17 @@ function verifyRuntimeManifest(
     manifest.policyIdentityAuthority !==
       "external-policy-inspect-and-xp-participant-metadata" ||
     manifest.requestedModel !== prereg.identities.bedrockModel ||
+    sha256Canonical(manifest.providerContract) !==
+      sha256Canonical(prereg.identities.providerContract) ||
+    sha256Canonical(manifest.providerContract) !==
+      sha256Canonical(COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT) ||
+    manifest.commanderPromptVersion !==
+      prereg.identities.commanderPromptVersion ||
+    manifest.commanderPromptVersionSha256 !==
+      prereg.identities.commanderPromptVersionSha256 ||
+    manifest.commanderPromptVersion !== COMMANDER_XP_COMMANDER_PROMPT_VERSION ||
+    manifest.commanderPromptVersionSha256 !==
+      COMMANDER_XP_COMMANDER_PROMPT_VERSION_SHA256 ||
     sha256Canonical(manifest.runArgv) !==
       sha256Canonical(prereg.identities.runArgv[planned.arm]) ||
     sha256Canonical(manifest.flags) !== sha256Canonical(prereg.fixedFlags) ||
@@ -3954,7 +4245,7 @@ function registerUniqueXpIdentity(
   }
 }
 
-function verifyMatchedRequestOrder(
+export function verifyCommanderXpMatchedRequestOrder(
   phase: "canary" | "confirmatory",
   runs: readonly {
     replicaIndex: number;
@@ -3986,10 +4277,11 @@ function verifyMatchedRequestOrder(
       const prior = ordered[index - 1]!;
       const current = ordered[index]!;
       if (
-        Date.parse(prior.submittedAt) >= Date.parse(current.submittedAt) ||
+        // Cross-run causality is proved only with Softmax-owned timestamps.
+        // Runner submittedAt remains retained observation, not an authority.
         Date.parse(prior.createdAt) >= Date.parse(current.createdAt) ||
         (phase === "confirmatory" &&
-          (Date.parse(prior.completedAt) > Date.parse(current.submittedAt) ||
+          (Date.parse(prior.completedAt) > Date.parse(current.createdAt) ||
             Date.parse(prior.completedAt) >= Date.parse(current.completedAt)))
       ) {
         throw new VerificationFailure(
@@ -4000,7 +4292,64 @@ function verifyMatchedRequestOrder(
   }
 }
 
-function verifyPreflightRequestOrder(
+export function verifyCommanderXpMatchedInitialSelectorSurfaces(
+  entries: readonly {
+    replicaIndex: number;
+    arm: "B" | "C";
+    subjectPolicyVersionID: string;
+    surface: CommanderXpInitialSelectorSurface;
+  }[],
+): void {
+  const byReplica = new Map<
+    number,
+    Partial<
+      Record<
+        "B" | "C",
+        {
+          subjectPolicyVersionID: string;
+          surface: CommanderXpInitialSelectorSurface;
+        }
+      >
+    >
+  >();
+  for (const entry of entries) {
+    if (
+      !isNonNegativeInteger(entry.replicaIndex) ||
+      !["B", "C"].includes(entry.arm) ||
+      !isNonEmptyString(entry.subjectPolicyVersionID) ||
+      !isSha256(entry.surface.observationSha256) ||
+      !isSha256(entry.surface.legalActionSurfaceSha256) ||
+      !isSha256(entry.surface.optionSurfaceSha256) ||
+      !isSha256(entry.surface.spawnAssignmentSha256)
+    ) {
+      throw new VerificationFailure("MATCHED_INITIAL_SURFACE_INVALID");
+    }
+    const pair = byReplica.get(entry.replicaIndex) ?? {};
+    if (pair[entry.arm] !== undefined) {
+      throw new VerificationFailure("MATCHED_INITIAL_SURFACE_DUPLICATE");
+    }
+    pair[entry.arm] = {
+      subjectPolicyVersionID: entry.subjectPolicyVersionID,
+      surface: entry.surface,
+    };
+    byReplica.set(entry.replicaIndex, pair);
+  }
+  if (byReplica.size === 0) {
+    throw new VerificationFailure("MATCHED_INITIAL_SURFACE_MISSING");
+  }
+  for (const pair of byReplica.values()) {
+    if (
+      pair.B === undefined ||
+      pair.C === undefined ||
+      pair.B.subjectPolicyVersionID === pair.C.subjectPolicyVersionID ||
+      sha256Canonical(pair.B.surface) !== sha256Canonical(pair.C.surface)
+    ) {
+      throw new VerificationFailure("MATCHED_INITIAL_SURFACE_MISMATCH");
+    }
+  }
+}
+
+export function verifyCommanderXpPreflightRequestOrder(
   runs: readonly {
     orderIndex: number;
     submittedAt: string;
@@ -4021,7 +4370,7 @@ function verifyPreflightRequestOrder(
     const prior = ordered[index - 1]!;
     const current = ordered[index]!;
     if (
-      Date.parse(prior.submittedAt) >= Date.parse(current.submittedAt) ||
+      // Both values are Softmax XP request created_at timestamps.
       Date.parse(prior.createdAt) >= Date.parse(current.createdAt)
     ) {
       throw new VerificationFailure(
@@ -4038,7 +4387,12 @@ function verifyJoinedTrace(
   trace: PlayerTrace[],
   gameEvidence: CommanderXpGameEvidence[],
   expectedGameID: string,
-): { decisionRequestIDs: string[]; providerRequestIDs: string[] } {
+): {
+  decisionRequestIDs: string[];
+  providerRequestIDs: string[];
+  initialSelectorSurface: CommanderXpInitialSelectorSurface | null;
+  selectorAudit: CommanderXpSelectorAudit;
+} {
   const providers = trace.filter(
     (entry): entry is PlayerTraceProvider => entry.recordType === "provider",
   );
@@ -4097,10 +4451,22 @@ function verifyJoinedTrace(
       runDirectory(planned),
     );
   }
-  let commanderEligible = 0;
-  let commanderAligned = 0;
+  let commanderPrimaryCycles = 0;
+  let commanderAlignedPrimaryCycles = 0;
   let armAExternalPlannerDecisions = 0;
-  let armCPlan: CommanderPlanContinuity | null = null;
+  let commanderPlan: CommanderPlanContinuity | null = null;
+  let initialSelectorSurfaceBase: Omit<
+    CommanderXpInitialSelectorSurface,
+    "spawnAssignmentSha256"
+  > | null = null;
+  let spawnAssignmentSha256: string | null = null;
+  const selectorAudit: CommanderXpSelectorAudit = {
+    installedPlanCount: 0,
+    selectedOptionDistribution: {},
+    selectedOptionFamilyDistribution: {},
+    deterministicPreferredAbsent: { count: 0, opportunities: 0 },
+    selectorDisagreement: { count: 0, opportunities: 0 },
+  };
   for (const [requestID, decision] of decisionByID) {
     const games = gameByID
       .get(requestID)!
@@ -4170,6 +4536,20 @@ function verifyJoinedTrace(
         runDirectory(planned),
       );
     }
+    if (spawn !== null) {
+      if (spawnAssignmentSha256 !== null) {
+        throw new VerificationFailure(
+          "SPAWN_ASSIGNMENT_WITNESS_DUPLICATE",
+          runDirectory(planned),
+        );
+      }
+      spawnAssignmentSha256 = sha256Canonical({
+        assignedActionID: spawn.assignedActionID,
+        priorityRank: spawn.priorityRank,
+        assignedPreferenceRank: spawn.assignedPreferenceRank,
+        assignedSubmittedPreferenceRank: spawn.assignedSubmittedPreferenceRank,
+      });
+    }
     const dealGame = games.find((entry) => entry.deal !== null);
     if (
       (decision.selectedDealActionID === null && dealGame !== undefined) ||
@@ -4198,34 +4578,146 @@ function verifyJoinedTrace(
         runDirectory(planned),
       );
     }
-    armCPlan = verifyArmRuntime(
-      prereg,
-      planned,
-      decision,
-      gameplayProviders,
-      armCPlan,
-    );
+    if (!spawnRequired) {
+      commanderPlan = verifyArmRuntime(
+        prereg,
+        planned,
+        decision,
+        gameplayProviders,
+        commanderPlan,
+      );
+      if (
+        (planned.arm === "B" || planned.arm === "C") &&
+        decision.commander.commanderPlanInstalled === true
+      ) {
+        const selected = String(decision.commander.commanderSelectedOptionID);
+        const family = String(decision.commander.commanderSelectedOptionFamily);
+        selectorAudit.installedPlanCount += 1;
+        selectorAudit.selectedOptionDistribution[selected] =
+          (selectorAudit.selectedOptionDistribution[selected] ?? 0) + 1;
+        selectorAudit.selectedOptionFamilyDistribution[family] =
+          (selectorAudit.selectedOptionFamilyDistribution[family] ?? 0) + 1;
+        const preferred = String(
+          decision.commander.commanderDeterministicPreferredOptionId,
+        );
+        selectorAudit.deterministicPreferredAbsent.opportunities += 1;
+        if (
+          decision.commander.commanderDeterministicPreferredOptionAbsent ===
+          true
+        ) {
+          selectorAudit.deterministicPreferredAbsent.count += 1;
+        }
+        if (
+          planned.arm === "C" &&
+          decision.commander.commanderSelectorSource === "llm"
+        ) {
+          selectorAudit.selectorDisagreement.opportunities += 1;
+          if (selected !== preferred) {
+            selectorAudit.selectorDisagreement.count += 1;
+          }
+        }
+      }
+    }
     if (
       planned.arm === "A" &&
       decision.commander.externalPlannerCall === true
     ) {
       armAExternalPlannerDecisions += 1;
     }
-    const spawnOnly = decision.offeredLegalActions.every(
-      (action) => action.kind === "spawn",
+    const ordinaryGames = games.filter(
+      (entry) => entry.chosen.kind !== "spawn",
     );
-    if ((planned.arm === "B" || planned.arm === "C") && !spawnOnly) {
-      commanderEligible += 1;
-      const fidelity = decision.commander.commanderFidelity;
-      if (fidelity === "aligned_primary" || fidelity === "aligned_support") {
-        commanderAligned += 1;
+    if (
+      (planned.arm === "B" || planned.arm === "C") &&
+      ordinaryGames.length > 0 &&
+      (!isSha256(decision.commanderExecutionSha256) ||
+        sha256Canonical(
+          Object.fromEntries(
+            COMMANDER_XP_COMMANDER_METADATA_ALLOWLIST.map((key) => [
+              key,
+              decision.commander[key] ?? null,
+            ]),
+          ),
+        ) !== decision.commanderExecutionSha256 ||
+        ordinaryGames.some(
+          (game) =>
+            game.commander.commanderExecutionSha256 !==
+            decision.commanderExecutionSha256,
+        ))
+    ) {
+      throw new VerificationFailure(
+        "COMMANDER_EXECUTION_WIRE_JOIN_MISMATCH",
+        runDirectory(planned),
+      );
+    }
+    if (
+      initialSelectorSurfaceBase === null &&
+      ordinaryGames.length > 0 &&
+      (planned.arm === "B" || planned.arm === "C")
+    ) {
+      const optionSurfaceSha256 =
+        decision.commander.commanderOptionSurfaceSha256;
+      if (
+        typeof optionSurfaceSha256 !== "string" ||
+        !isSha256(optionSurfaceSha256)
+      ) {
+        throw new VerificationFailure(
+          "COMMANDER_OPTION_SURFACE_MISSING",
+          runDirectory(planned),
+        );
+      }
+      initialSelectorSurfaceBase = {
+        observationSha256: decision.preSelectorObservationSha256,
+        legalActionSurfaceSha256: decision.preSelectorLegalActionSurfaceSha256,
+        optionSurfaceSha256,
+      };
+    }
+    if (
+      (planned.arm === "B" || planned.arm === "C") &&
+      ordinaryGames.length > 0
+    ) {
+      const fidelities = exactCommanderBatchFidelities(
+        decision,
+        ordinaryGames.map((entry) => entry.chosen.id),
+      );
+      const recomputedFidelities = recomputeCommanderBatchFidelities(
+        decision,
+        ordinaryGames,
+      );
+      if (
+        Object.entries(fidelities).some(
+          ([actionID, fidelity]) => recomputedFidelities[actionID] !== fidelity,
+        )
+      ) {
+        throw new VerificationFailure(
+          "COMMANDER_FIDELITY_RECOMPUTATION_MISMATCH",
+          runDirectory(planned),
+        );
+      }
+      if (
+        ordinaryGames
+          .slice(1)
+          .some((game) => fidelities[game.chosen.id] !== "aligned_support") ||
+        fidelities[decision.selectedLegalActionID] === "aligned_support"
+      ) {
+        throw new VerificationFailure(
+          "COMMANDER_BATCH_POSITION_MISMATCH",
+          runDirectory(planned),
+        );
+      }
+      const primaryFidelity = fidelities[decision.selectedLegalActionID];
+      if (primaryFidelity !== "hard_emergency_override") {
+        commanderPrimaryCycles += 1;
+        if (primaryFidelity === "aligned_primary") {
+          commanderAlignedPrimaryCycles += 1;
+        }
       }
     }
   }
   if (
     (planned.arm === "B" || planned.arm === "C") &&
-    (commanderEligible === 0 ||
-      commanderAligned / commanderEligible <
+    (commanderPrimaryCycles === 0 ||
+      commanderAlignedPrimaryCycles / commanderPrimaryCycles <
         prereg.exclusionPolicy.commanderFidelityMinimum)
   ) {
     throw new VerificationFailure(
@@ -4246,6 +4738,19 @@ function verifyJoinedTrace(
     );
   }
   if (
+    (planned.arm === "B" || planned.arm === "C") &&
+    (initialSelectorSurfaceBase === null || spawnAssignmentSha256 === null)
+  ) {
+    throw new VerificationFailure(
+      "MATCHED_INITIAL_SURFACE_MISSING",
+      runDirectory(planned),
+    );
+  }
+  const initialSelectorSurface =
+    initialSelectorSurfaceBase === null || spawnAssignmentSha256 === null
+      ? null
+      : { ...initialSelectorSurfaceBase, spawnAssignmentSha256 };
+  if (
     manifest.providerPreflight.required &&
     !providers.some(
       (provider) =>
@@ -4260,6 +4765,8 @@ function verifyJoinedTrace(
   return {
     decisionRequestIDs: [...decisionByID.keys()],
     providerRequestIDs: [...new Set(providers.map((entry) => entry.requestID))],
+    initialSelectorSurface,
+    selectorAudit,
   };
 }
 
@@ -4291,6 +4798,146 @@ interface CommanderPlanContinuity {
   planID: string;
   fingerprint: string;
   age: number;
+  horizon: number;
+  promptVersion: string | null;
+  promptSha256: string | null;
+}
+
+function exactCommanderBatchFidelities(
+  decision: PlayerTraceDecision,
+  selectedActionIDs: readonly string[],
+): Record<string, string> {
+  const raw = decision.commander.commanderBatchFidelities;
+  if (typeof raw !== "string") {
+    throw new VerificationFailure("COMMANDER_BATCH_FIDELITY_MISMATCH");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new VerificationFailure("COMMANDER_BATCH_FIDELITY_MISMATCH");
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new VerificationFailure("COMMANDER_BATCH_FIDELITY_MISMATCH");
+  }
+  const fidelities = parsed as Record<string, unknown>;
+  const allowed = new Set([
+    "aligned_primary",
+    "aligned_support",
+    "hard_emergency_override",
+    "hold_plan_blocked",
+  ]);
+  if (
+    !sameSet(new Set(Object.keys(fidelities)), new Set(selectedActionIDs)) ||
+    Object.values(fidelities).some(
+      (value) => typeof value !== "string" || !allowed.has(value),
+    ) ||
+    fidelities[decision.selectedLegalActionID] !==
+      decision.commander.commanderFidelity
+  ) {
+    throw new VerificationFailure("COMMANDER_BATCH_FIDELITY_MISMATCH");
+  }
+  return fidelities as Record<string, string>;
+}
+
+function recomputeCommanderBatchFidelities(
+  decision: PlayerTraceDecision,
+  games: readonly CommanderXpGameEvidence[],
+): Record<string, string> {
+  const selectedActionIDs = games.map((game) => game.chosen.id);
+  const batchActionIDs = selectedActionIDs.join(",");
+  const primaryCommander = games[0]?.commander;
+  if (
+    primaryCommander === undefined ||
+    games.some(
+      (game, index) =>
+        game.commander.commanderSelectionSha256 !==
+          sha256Canonical({
+            planID: decision.commander.planID ?? null,
+            selectedOptionID:
+              decision.commander.commanderSelectedOptionID ?? null,
+            selectedOptionFamily:
+              decision.commander.commanderSelectedOptionFamily ?? null,
+            selectorSource: decision.commander.commanderSelectorSource ?? null,
+            deterministicPreferredOptionID:
+              decision.commander.commanderDeterministicPreferredOptionId ??
+              null,
+            deterministicPreferredOptionAbsent:
+              decision.commander.commanderDeterministicPreferredOptionAbsent ??
+              null,
+          }) ||
+        game.commander.planID !== decision.commander.planID ||
+        game.commander.planObjective !== decision.commander.planObjective ||
+        game.commander.commanderSelectedOptionID !==
+          decision.commander.commanderSelectedOptionID ||
+        game.commander.commanderSelectedOptionFamily !==
+          decision.commander.commanderSelectedOptionFamily ||
+        game.commander.commanderPreviousPlanID !==
+          decision.commander.commanderPreviousPlanID ||
+        game.commander.commanderReplanReason !==
+          decision.commander.commanderReplanReason ||
+        game.commander.commanderPlanAgeDecisions !==
+          decision.commander.commanderPlanAgeDecisions ||
+        game.commander.commanderEmergencyCondition !==
+          (decision.commander.commanderEmergencyCondition ?? null) ||
+        game.commander.commanderPromptVersion !==
+          (decision.commander.commanderPromptVersion ?? null) ||
+        game.commander.commanderPromptSha256 !==
+          (decision.commander.commanderPromptSha256 ?? null) ||
+        game.commander.commanderDeterministicPreferredOptionId !==
+          (decision.commander.commanderDeterministicPreferredOptionId ??
+            null) ||
+        game.commander.commanderDeterministicPreferredOptionAbsent !==
+          (decision.commander.commanderDeterministicPreferredOptionAbsent ??
+            null) ||
+        game.commander.batchIndex !== index ||
+        game.commander.batchSize !== games.length ||
+        game.commander.batchActionIDs !== batchActionIDs,
+    )
+  ) {
+    throw new VerificationFailure("COMMANDER_FIDELITY_INPUT_JOIN_MISMATCH");
+  }
+  const records = games.map((game) => ({
+    agentID: game.agentID,
+    sequence: game.sequence,
+    legalActionIDs: game.legalActions.map((action) => action.id),
+    chosenActionID: game.chosen.id,
+    chosenActionKind: game.chosen.kind,
+    chosenActionMetadata: game.chosen.metadata,
+    intent:
+      game.generatedIntent === null
+        ? null
+        : (game.generatedIntent.canonical as never),
+    result: {
+      accepted: game.result.accepted,
+      submittedIntent:
+        game.result.submittedIntent === null
+          ? null
+          : (game.result.submittedIntent.canonical as never),
+    },
+    decisionMetadata: { ...game.commander } as Record<
+      string,
+      string | number | boolean | null
+    >,
+  }));
+  const summary = summarizeCommanderFidelity(records);
+  if (
+    summary.classifiedDecisions !== games.length ||
+    summary.unknownDecisions !== 0 ||
+    summary.rejectedDecisions !== 0 ||
+    summary.unattributedDecisions !== 0 ||
+    summary.offFamilyActionViolations !== 0 ||
+    summary.laterLayerActionViolations !== 0 ||
+    summary.planIdentityViolations !== 0 ||
+    summary.batchPositionViolations !== 0 ||
+    summary.fidelityStampViolations !== 0 ||
+    summary.counts.hard_emergency_override !== 0
+  ) {
+    throw new VerificationFailure("COMMANDER_FIDELITY_RECOMPUTATION_MISMATCH");
+  }
+  return Object.fromEntries(
+    games.map((game) => [game.chosen.id, game.commander.commanderFidelity!]),
+  );
 }
 
 function verifyArmRuntime(
@@ -4343,22 +4990,12 @@ function verifyArmRuntime(
       runDirectory(planned),
     );
   }
-  if (planned.arm === "B") {
-    if (
-      externalPlannerCall ||
-      joined.length !== 0 ||
-      commander.commanderSelectorProvider !== null ||
-      commander.commanderSelectorModel !== null
-    ) {
-      throw new VerificationFailure(
-        "ARM_B_SELECTOR_MISMATCH",
-        runDirectory(planned),
-      );
-    }
-    return null;
-  }
   const eligibleOptionIDs = commander.commanderEligibleOptionIds;
-  if (typeof eligibleOptionIDs !== "string") {
+  const exposedOptionIDs = commander.commanderExposedOptionIds;
+  if (
+    typeof eligibleOptionIDs !== "string" ||
+    typeof exposedOptionIDs !== "string"
+  ) {
     throw new VerificationFailure(
       "ARM_C_ELIGIBLE_OPTIONS_MISSING",
       runDirectory(planned),
@@ -4366,35 +5003,58 @@ function verifyArmRuntime(
   }
   const selectorSource = commander.commanderSelectorSource;
   const planID = commander.planID;
+  const selectedOptionID = commander.commanderSelectedOptionID;
+  const selectedOptionFamily = commander.commanderSelectedOptionFamily;
+  const deterministicPreferredOptionID =
+    commander.commanderDeterministicPreferredOptionId;
+  const deterministicPreferredOptionAbsent =
+    commander.commanderDeterministicPreferredOptionAbsent;
   const previousPlanID = commander.commanderPreviousPlanID;
   const fingerprint = commander.commanderFingerprint;
   const planInstalled = commander.commanderPlanInstalled;
   const planAge = commander.commanderPlanAgeDecisions;
-  if (externalPlannerCall) {
+  const planHorizon = commander.commanderHorizonDecisions;
+  const selectorProvider = commander.commanderSelectorProvider;
+  const selectorModel = commander.commanderSelectorModel;
+  const promptVersion = commander.commanderPromptVersion;
+  const promptSha256 = commander.commanderPromptSha256;
+  if (
+    planned.arm === "B" &&
+    (externalPlannerCall ||
+      joined.length !== 0 ||
+      selectorProvider !== null ||
+      selectorModel !== null ||
+      promptVersion !== null ||
+      promptSha256 !== null)
+  ) {
+    throw new VerificationFailure(
+      "ARM_B_SELECTOR_MISMATCH",
+      runDirectory(planned),
+    );
+  }
+  if (planned.arm === "C" && externalPlannerCall) {
     if (
       eligibleOptionIDs.length === 0 ||
       joined.length !== 1 ||
       joined[0]?.stage !== "selector" ||
-      commander.commanderSelectorProvider !== "custom" ||
-      commander.commanderSelectorModel !== prereg.identities.bedrockModel ||
-      selectorSource !== "llm" ||
-      !isNonEmptyString(planID) ||
-      !isNonEmptyString(fingerprint) ||
-      planInstalled !== true ||
-      planAge !== 0 ||
-      previousPlanID !== (priorPlan?.planID ?? null)
+      selectorProvider !== "custom" ||
+      selectorModel !== prereg.identities.bedrockModel ||
+      promptVersion !== prereg.identities.commanderPromptVersion ||
+      !isSha256(promptSha256) ||
+      joined[0]?.promptSha256 !== promptSha256
     ) {
       throw new VerificationFailure(
         "ARM_C_SELECTOR_MISMATCH",
         runDirectory(planned),
       );
     }
-    return { planID, fingerprint, age: 0 };
-  }
-  if (
-    joined.length !== 0 ||
-    commander.commanderSelectorProvider !== null ||
-    commander.commanderSelectorModel !== null
+  } else if (
+    planned.arm === "C" &&
+    (joined.length !== 0 ||
+      selectorProvider !== null ||
+      selectorModel !== null ||
+      promptVersion !== null ||
+      promptSha256 !== null)
   ) {
     throw new VerificationFailure(
       "ARM_C_SELECTOR_MISMATCH",
@@ -4404,9 +5064,14 @@ function verifyArmRuntime(
   if (selectorSource === "none") {
     if (
       planID !== null ||
+      selectedOptionID !== null ||
+      selectedOptionFamily !== null ||
       fingerprint !== null ||
       planInstalled !== false ||
       planAge !== 0 ||
+      planHorizon !== null ||
+      promptVersion !== null ||
+      promptSha256 !== null ||
       !(previousPlanID === null || previousPlanID === priorPlan?.planID)
     ) {
       throw new VerificationFailure(
@@ -4416,18 +5081,87 @@ function verifyArmRuntime(
     }
     return null;
   }
+  const eligible = eligibleOptionIDs.split(",").filter(Boolean);
+  const exposed = exposedOptionIDs.split(",").filter(Boolean);
+  const derivedFamily =
+    typeof selectedOptionID === "string" &&
+    selectedOptionID.startsWith("pressure_rival:")
+      ? "pressure_rival"
+      : selectedOptionID;
   if (
-    selectorSource !== "llm" ||
+    !isNonEmptyString(selectedOptionID) ||
+    !["expand", "develop_economy", "pressure_rival", "survive"].includes(
+      String(selectedOptionFamily),
+    ) ||
+    derivedFamily !== selectedOptionFamily ||
+    selectedOptionID !== commander.planObjective ||
+    !eligible.includes(selectedOptionID) ||
+    !exposed.includes(selectedOptionID) ||
+    !isNonEmptyString(deterministicPreferredOptionID) ||
+    !eligible.includes(deterministicPreferredOptionID) ||
+    typeof deterministicPreferredOptionAbsent !== "boolean" ||
+    deterministicPreferredOptionAbsent !==
+      !exposed.includes(deterministicPreferredOptionID)
+  ) {
+    throw new VerificationFailure(
+      `ARM_${planned.arm}_OPTION_IDENTITY_MISMATCH`,
+      runDirectory(planned),
+    );
+  }
+  if (planInstalled === true) {
+    const replanReason = commander.commanderReplanReason;
+    if (
+      selectorSource !== expectedSelector ||
+      !isNonEmptyString(planID) ||
+      !isNonEmptyString(fingerprint) ||
+      !isPositiveInteger(planHorizon) ||
+      planHorizon < 2 ||
+      planHorizon > 6 ||
+      planAge !== 0 ||
+      previousPlanID !== (priorPlan?.planID ?? null) ||
+      ![
+        "no_active_plan",
+        "horizon_expiry",
+        "option_not_executable",
+        "hold_streak_blocked",
+        "target_dead",
+        "home_attacked",
+        "option_appeared",
+      ].includes(String(replanReason)) ||
+      (priorPlan === null) !== (replanReason === "no_active_plan") ||
+      (planned.arm === "C" && !externalPlannerCall)
+    ) {
+      throw new VerificationFailure(
+        `ARM_${planned.arm}_PLAN_INSTALL_MISMATCH`,
+        runDirectory(planned),
+      );
+    }
+    return {
+      planID,
+      fingerprint,
+      age: 0,
+      horizon: planHorizon,
+      promptVersion:
+        planned.arm === "C" ? prereg.identities.commanderPromptVersion : null,
+      promptSha256: planned.arm === "C" ? String(promptSha256) : null,
+    };
+  }
+  if (
+    externalPlannerCall ||
+    selectorSource !== expectedSelector ||
     priorPlan === null ||
     planID !== priorPlan.planID ||
     fingerprint !== priorPlan.fingerprint ||
     previousPlanID !== null ||
     planInstalled !== false ||
     planAge !== priorPlan.age + 1 ||
+    planHorizon !== priorPlan.horizon ||
+    !isPositiveInteger(planAge) ||
+    planAge >= priorPlan.horizon ||
     commander.commanderReplanReason !== "within_horizon"
   ) {
     throw new VerificationFailure(
-      "ARM_C_PLAN_CONTINUITY_MISMATCH",
+      `ARM_${planned.arm}_PLAN_CONTINUITY_MISMATCH`,
       runDirectory(planned),
     );
   }
@@ -4439,8 +5173,22 @@ function verifyProviderRecord(
   planned: CommanderXpPlannedRequest,
   provider: PlayerTraceProvider,
 ): void {
+  const commanderSelectorPrompt =
+    planned.arm === "C" && provider.stage === "selector";
   if (
     provider.schemaVersion !== 2 ||
+    provider.providerContractSha256 !==
+      sha256Canonical(prereg.identities.providerContract) ||
+    provider.providerContractSha256 !==
+      sha256Canonical(COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT) ||
+    provider.promptVersion !==
+      (commanderSelectorPrompt
+        ? prereg.identities.commanderPromptVersion
+        : null) ||
+    provider.promptVersionSha256 !==
+      (commanderSelectorPrompt
+        ? prereg.identities.commanderPromptVersionSha256
+        : null) ||
     provider.requestedModel !== prereg.identities.bedrockModel ||
     provider.responseModel !== prereg.identities.bedrockModel ||
     provider.succeeded !== true ||
@@ -4460,6 +5208,61 @@ function verifyProviderRecord(
       "PROVIDER_FIDELITY_EXCLUSION",
       runDirectory(planned),
     );
+  }
+}
+
+function verifyOpenApiContract(
+  prereg: CommanderXpPreRegistrationV2,
+  receipt: Record<string, unknown>,
+): void {
+  exactRecord(
+    receipt,
+    [
+      "schemaVersion",
+      "authority",
+      "url",
+      "fetchedAt",
+      "byteLength",
+      "rawSha256",
+      "coworldClientVersion",
+      "createRequestSchema",
+      "rosterSchemas",
+      "receiptSha256",
+    ],
+    "XP_OPENAPI_CONTRACT_SCHEMA_MISMATCH",
+  );
+  const create = receipt.createRequestSchema as Record<string, unknown>;
+  const roster = receipt.rosterSchemas as Record<string, unknown>;
+  exactRecord(
+    create,
+    ["name", "encoding", "sha256"],
+    "XP_OPENAPI_CONTRACT_SCHEMA_MISMATCH",
+  );
+  exactRecord(
+    roster,
+    ["names", "encoding", "sha256"],
+    "XP_OPENAPI_CONTRACT_SCHEMA_MISMATCH",
+  );
+  const { receiptSha256, ...body } = receipt;
+  if (
+    receipt.schemaVersion !== 2 ||
+    receipt.authority !== "softmax-public-openapi-exact-bytes-v1" ||
+    receipt.url !== "https://softmax.com/api/observatory/openapi.json" ||
+    !Number.isFinite(Date.parse(String(receipt.fetchedAt))) ||
+    receipt.byteLength !== 418_415 ||
+    receipt.rawSha256 !== prereg.identities.xpOpenApiSha256 ||
+    receipt.coworldClientVersion !== "0.1.42" ||
+    create.name !== "V2CreateExperienceRequestRequest" ||
+    create.encoding !== "jq-cS-utf8-compact-sorted-json-with-terminal-lf" ||
+    create.sha256 !== prereg.identities.xpCreateRequestSchemaSha256 ||
+    JSON.stringify(roster.names) !==
+      JSON.stringify(["V2RosterParticipant", "V2RosterPlayer"]) ||
+    roster.encoding !==
+      "ordered-concatenation-of-two-jq-cS-utf8-records-with-terminal-lf" ||
+    roster.sha256 !== prereg.identities.xpRosterSchemasSha256 ||
+    receiptSha256 !== sha256Canonical(body)
+  ) {
+    throw new VerificationFailure("XP_OPENAPI_CONTRACT_MISMATCH");
   }
 }
 
@@ -4571,6 +5374,9 @@ function parsePlayerTrace(text: string): PlayerTrace[] {
             "stage",
             "sequence",
             "provider",
+            "providerContractSha256",
+            "promptVersion",
+            "promptVersionSha256",
             "requestedModel",
             "responseModel",
             "promptSha256",
@@ -4586,6 +5392,9 @@ function parsePlayerTrace(text: string): PlayerTrace[] {
             "requestID",
             "sequence",
             "arm",
+            "preSelectorObservationSha256",
+            "preSelectorLegalActionSurfaceSha256",
+            "commanderExecutionSha256",
             "offeredLegalActions",
             "offeredLegalActionSetSha256",
             "selectedLegalActionID",
@@ -4604,6 +5413,9 @@ function parsePlayerTrace(text: string): PlayerTrace[] {
     if (record.recordType === "provider") {
       if (
         record.provider !== "bedrock-sidecar" ||
+        !isSha256(record.providerContractSha256) ||
+        !isNullableString(record.promptVersion) ||
+        !isNullableString(record.promptVersionSha256) ||
         !["preflight", "planner", "selector"].includes(String(record.stage)) ||
         !isNonEmptyString(record.requestID) ||
         !isNonNegativeInteger(record.sequence) ||
@@ -4635,6 +5447,12 @@ function parsePlayerTrace(text: string): PlayerTrace[] {
       !isNonEmptyString(record.requestID) ||
       !isNonNegativeInteger(record.sequence) ||
       !["A", "B", "C"].includes(String(record.arm)) ||
+      !isSha256(record.preSelectorObservationSha256) ||
+      !isSha256(record.preSelectorLegalActionSurfaceSha256) ||
+      !(
+        record.commanderExecutionSha256 === null ||
+        isSha256(record.commanderExecutionSha256)
+      ) ||
       !isLegalActionArray(record.offeredLegalActions) ||
       !isSha256(record.offeredLegalActionSetSha256) ||
       record.offeredLegalActionSetSha256 !==
@@ -4714,13 +5532,19 @@ function parseGameEvidence(text: string): CommanderXpGameEvidence[] {
         "spawn",
         "deal",
         "comms",
+        "commander",
       ],
       "GAME_EVIDENCE_EXACT_SCHEMA_MISMATCH",
     );
     const chosen = exactRecord(
       record.chosen,
-      ["id", "kind"],
+      ["id", "kind", "metadata"],
       "GAME_CHOSEN_SCHEMA_MISMATCH",
+    );
+    const chosenMetadata = exactRecordSubset(
+      chosen.metadata,
+      fidelityActionMetadataKeys,
+      "GAME_CHOSEN_METADATA_SCHEMA_MISMATCH",
     );
     const result = exactRecord(
       record.result,
@@ -4737,6 +5561,31 @@ function parseGameEvidence(text: string): CommanderXpGameEvidence[] {
       ["requestedID", "actionID", "recipientID", "accepted", "rejected"],
       "GAME_COMMS_SCHEMA_MISMATCH",
     );
+    const commander = exactRecord(
+      record.commander,
+      [
+        "commanderExecutionSha256",
+        "commanderSelectionSha256",
+        "planID",
+        "planObjective",
+        "commanderSelectedOptionID",
+        "commanderSelectedOptionFamily",
+        "commanderOptionSurfaceSha256",
+        "commanderPreviousPlanID",
+        "commanderReplanReason",
+        "commanderPlanAgeDecisions",
+        "commanderEmergencyCondition",
+        "commanderPromptVersion",
+        "commanderPromptSha256",
+        "commanderDeterministicPreferredOptionId",
+        "commanderDeterministicPreferredOptionAbsent",
+        "commanderFidelity",
+        "batchIndex",
+        "batchSize",
+        "batchActionIDs",
+      ],
+      "GAME_COMMANDER_SCHEMA_MISMATCH",
+    );
     if (
       record.schemaVersion !== 2 ||
       !isNonEmptyString(record.runKey) ||
@@ -4752,6 +5601,13 @@ function parseGameEvidence(text: string): CommanderXpGameEvidence[] {
         sha256Canonical(record.legalActions) ||
       !isNonEmptyString(chosen.id) ||
       !isLegalActionKind(chosen.kind) ||
+      Object.values(chosenMetadata).some(
+        (value) =>
+          value !== null &&
+          typeof value !== "string" &&
+          typeof value !== "number" &&
+          typeof value !== "boolean",
+      ) ||
       !isIntentEvidence(record.generatedIntent) ||
       typeof result.accepted !== "boolean" ||
       !isIntentEvidence(result.submittedIntent) ||
@@ -4763,7 +5619,47 @@ function parseGameEvidence(text: string): CommanderXpGameEvidence[] {
       !isNullableString(comms.actionID) ||
       !isNullableString(comms.recipientID) ||
       !(comms.accepted === null || typeof comms.accepted === "boolean") ||
-      !(comms.rejected === null || typeof comms.rejected === "boolean")
+      !(comms.rejected === null || typeof comms.rejected === "boolean") ||
+      !(
+        commander.commanderExecutionSha256 === null ||
+        isSha256(commander.commanderExecutionSha256)
+      ) ||
+      !(
+        commander.commanderSelectionSha256 === null ||
+        isSha256(commander.commanderSelectionSha256)
+      ) ||
+      !isNullableString(commander.planID) ||
+      !isNullableString(commander.planObjective) ||
+      !isNullableString(commander.commanderSelectedOptionID) ||
+      !isNullableString(commander.commanderSelectedOptionFamily) ||
+      !(
+        commander.commanderOptionSurfaceSha256 === null ||
+        isSha256(commander.commanderOptionSurfaceSha256)
+      ) ||
+      !isNullableString(commander.commanderPreviousPlanID) ||
+      !isNullableString(commander.commanderReplanReason) ||
+      !(
+        commander.commanderPlanAgeDecisions === null ||
+        isNonNegativeInteger(commander.commanderPlanAgeDecisions)
+      ) ||
+      !isNullableString(commander.commanderEmergencyCondition) ||
+      !isNullableString(commander.commanderPromptVersion) ||
+      !isNullableString(commander.commanderPromptSha256) ||
+      !isNullableString(commander.commanderDeterministicPreferredOptionId) ||
+      !(
+        commander.commanderDeterministicPreferredOptionAbsent === null ||
+        typeof commander.commanderDeterministicPreferredOptionAbsent ===
+          "boolean"
+      ) ||
+      !isNullableString(commander.commanderFidelity) ||
+      !(
+        commander.batchIndex === null ||
+        isNonNegativeInteger(commander.batchIndex)
+      ) ||
+      !(
+        commander.batchSize === null || isPositiveInteger(commander.batchSize)
+      ) ||
+      !isNullableString(commander.batchActionIDs)
     ) {
       throw new VerificationFailure("GAME_EVIDENCE_VALUE_INVALID");
     }
@@ -4911,10 +5807,79 @@ function isIntentEvidence(value: unknown): boolean {
   if (value === null) return true;
   const intent = exactRecord(
     value,
-    ["type", "sha256"],
+    ["type", "sha256", "canonical"],
     "GAME_INTENT_SCHEMA_MISMATCH",
   );
-  return isNonEmptyString(intent.type) && isSha256(intent.sha256);
+  return (
+    isNonEmptyString(intent.type) &&
+    isSha256(intent.sha256) &&
+    (intent.canonical === null ||
+      (isCommanderFidelityIntent(intent.canonical) &&
+        intent.type === intent.canonical.type &&
+        intent.sha256 === sha256Canonical(intent.canonical)))
+  );
+}
+
+const fidelityActionMetadataKeys = [
+  "expansion",
+  "targetID",
+  "navalInvasion",
+  "targetTile",
+  "unit",
+  "role",
+  "action",
+  "attackID",
+] as const;
+
+function isCommanderFidelityIntent(
+  value: unknown,
+): value is Record<string, unknown> {
+  if (!isRecord(value) || !isNonEmptyString(value.type)) return false;
+  const exact = (keys: readonly string[]): boolean =>
+    sameSet(new Set(Object.keys(value)), new Set(keys));
+  switch (value.type) {
+    case "attack":
+      return (
+        exact(["type", "targetID", "troops"]) &&
+        (value.targetID === null || isNonEmptyString(value.targetID)) &&
+        (value.troops === null ||
+          (typeof value.troops === "number" && value.troops >= 0))
+      );
+    case "boat":
+      return (
+        exact(["type", "troops", "dst"]) &&
+        typeof value.troops === "number" &&
+        value.troops >= 0 &&
+        isNonNegativeInteger(value.dst)
+      );
+    case "targetPlayer":
+      return exact(["type", "target"]) && isNonEmptyString(value.target);
+    case "embargo":
+      return (
+        exact(["type", "targetID", "action"]) &&
+        isNonEmptyString(value.targetID) &&
+        ["start", "stop"].includes(String(value.action))
+      );
+    case "build_unit":
+      return (
+        (exact(["type", "unit", "tile"]) ||
+          exact(["type", "unit", "tile", "rocketDirectionUp"])) &&
+        isNonEmptyString(value.unit) &&
+        isNonNegativeInteger(value.tile) &&
+        (value.rocketDirectionUp === undefined ||
+          typeof value.rocketDirectionUp === "boolean")
+      );
+    case "upgrade_structure":
+      return (
+        exact(["type", "unit", "unitId"]) &&
+        isNonEmptyString(value.unit) &&
+        isNonNegativeInteger(value.unitId)
+      );
+    case "cancel_attack":
+      return exact(["type", "attackID"]) && isNonEmptyString(value.attackID);
+    default:
+      return false;
+  }
 }
 
 function isLegalActionKind(value: unknown): boolean {

@@ -74,6 +74,34 @@ class FakeReadClient:
 
 
 class PolicyProvisionReceiptTest(unittest.TestCase):
+    def test_coworld_0_1_42_create_request_preserves_exact_json_body(self) -> None:
+        body = {
+            "name": "commander-xp-fixture",
+            "game": {"name": "proxywar-commander-xp-eval-v2"},
+            "game_config": {
+                "commander_xp_run_key": "cxp_fixture_preflight_a_0001",
+                "seed": 12345,
+            },
+            "participants": [
+                {"policy_version_id": "pvid_fixture_a", "position": 0},
+                {"policy_version_id": "pvid_fixture_o1", "position": 1},
+            ],
+        }
+        client = object.__new__(MODULE.CoworldApiClient)
+        sentinel = object()
+        with patch.object(client, "_post", return_value=sentinel) as post:
+            result = client.create_experience_request(body)
+
+        self.assertIs(result, sentinel)
+        args, kwargs = post.call_args
+        self.assertEqual(args[0], "/v2/experience-requests")
+        self.assertEqual(args[1].__name__, "ExperienceRequestDetail")
+        self.assertEqual(kwargs, {"json": body, "timeout": 120.0})
+        self.assertEqual(
+            MODULE.canonical_bytes(kwargs["json"]),
+            MODULE.canonical_bytes(body),
+        )
+
     def test_commander_upload_retains_only_the_safe_environment_projection(
         self,
     ) -> None:
@@ -103,10 +131,11 @@ class PolicyProvisionReceiptTest(unittest.TestCase):
             receipt["environmentConfiguration"],
             {
                 "attached": True,
-                "keys": ["BEDROCK_MODEL", "USE_BEDROCK"],
+                "keys": ["providerRegion", "modelID", "providerEnabled"],
                 "valuesSha256": MODULE.sha256_bytes(
                     MODULE.canonical_bytes(
                         {
+                            "AWS_REGION": "us-west-2",
                             "BEDROCK_MODEL": "us.anthropic.claude-sonnet-4-6",
                             "USE_BEDROCK": "true",
                         }

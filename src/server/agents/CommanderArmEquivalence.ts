@@ -7,6 +7,7 @@ const SELECTOR_PROVENANCE_METADATA_KEYS = new Set([
   "commanderExperimentProvider",
   "commanderPrimarySelectorSource",
   "commanderPromptCharacters",
+  "commanderPromptSha256",
   "commanderPromptVersion",
   "commanderRuntimeModel",
   "commanderRuntimePromptVersion",
