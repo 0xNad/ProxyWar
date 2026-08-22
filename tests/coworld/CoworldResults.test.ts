@@ -132,9 +132,10 @@ describe("coworldResults (Coworld results.json contract)", () => {
     accepted: boolean,
     fallbackUsed = false,
     llmPlannerDegraded = false,
+    degradedCause?: string,
   ): CoworldDecisionRecord => ({
     result: { accepted },
-    decisionMetadata: { fallbackUsed, llmPlannerDegraded },
+    decisionMetadata: { fallbackUsed, llmPlannerDegraded, degradedCause },
   });
 
   it("stamps the authoritative game_id from the caller's game.id, never recomputing it", () => {
@@ -228,5 +229,78 @@ describe("coworldResults (Coworld results.json contract)", () => {
       { slot: 0, name: "Alice", score: 1, tiles_owned: 4, is_alive: true },
       { slot: 1, name: "seat-1", score: 0, tiles_owned: 6, is_alive: true },
     ]);
+  });
+
+  it("counts each bounded cause for degraded records", () => {
+    const result = coworldResults({
+      gameId: "COWRLD01",
+      seed: null,
+      players: [{ name: "Alice" }, { name: "Bob" }],
+      finalState: finalState(1),
+      records: [
+        record(true, false, true, "plan-parse"),
+        record(false, false, true, "plan-rejected"),
+        record(true, false, true, "brain-timeout"),
+        record(true, false, true, "plan-parse"),
+      ],
+    });
+
+    expect(result.degraded_causes).toEqual({
+      "plan-parse": 2,
+      "plan-rejected": 1,
+      "brain-timeout": 1,
+    });
+    expect(
+      Object.values(result.degraded_causes).reduce(
+        (sum, count) => sum + count,
+        0,
+      ),
+    ).toBe(result.degraded_count);
+  });
+
+  it("maps missing, empty, and unknown degraded causes only to unreported", () => {
+    const result = coworldResults({
+      gameId: "COWRLD01",
+      seed: null,
+      players: [{ name: "Alice" }, { name: "Bob" }],
+      finalState: finalState(1),
+      records: [
+        record(true, false, true),
+        record(true, false, true, ""),
+        record(true, false, true, "plan-parse-ish"),
+      ],
+    });
+
+    expect(result.degraded_causes).toEqual({ unreported: 3 });
+    expect(result.degraded_count).toBe(3);
+  });
+
+  it("emits an empty cause map for a healthy run", () => {
+    const result = coworldResults({
+      gameId: "COWRLD01",
+      seed: null,
+      players: [{ name: "Alice" }, { name: "Bob" }],
+      finalState: finalState(1),
+      records: [record(true), record(false)],
+    });
+
+    expect(result.degraded_causes).toEqual({});
+  });
+
+  it("never counts a non-degraded record even when it carries a cause", () => {
+    const result = coworldResults({
+      gameId: "COWRLD01",
+      seed: null,
+      players: [{ name: "Alice" }, { name: "Bob" }],
+      finalState: finalState(1),
+      records: [
+        record(true, false, true, "plan-parse"),
+        record(false, false, false, "plan-rejected"),
+        record(false, false, false, "unknown"),
+      ],
+    });
+
+    expect(result.degraded_causes).toEqual({ "plan-parse": 1 });
+    expect(result.degraded_count).toBe(1);
   });
 });

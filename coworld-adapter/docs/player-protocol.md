@@ -70,17 +70,22 @@ report a dead brain as a healthy one.
 vocabulary and silently dropped otherwise — an invented cause in an attribution field
 is worse than no cause at all:
 
-| value              | meaning                                                               |
-| ------------------ | --------------------------------------------------------------------- |
-| `plan-warmup`      | No plan yet; the first refresh is still in flight. Benign.            |
-| `plan-stale`       | A plan exists, but the latest refresh failed; acting on stale intent. |
-| `plan-unavailable` | No plan at all, and the refresh failed.                               |
-| `plan-timeout`     | The planner's provider call exceeded the policy's own budget.         |
-| `plan-parse`       | The model answered, but its output could not be parsed.               |
-| `policy-error`     | The policy's own code threw before it could decide.                   |
+| value              | meaning                                                                |
+| ------------------ | ---------------------------------------------------------------------- |
+| `plan-warmup`      | No plan yet; the first refresh is still in flight. Benign.             |
+| `plan-stale`       | A plan exists, but the latest refresh failed; acting on stale intent.  |
+| `plan-unavailable` | No plan at all, and the refresh failed.                                |
+| `plan-timeout`     | The planner's provider call exceeded the policy's own budget.          |
+| `plan-parse`       | The model answered, but its output could not be parsed.                |
+| `plan-rejected`    | The model answered and parsed, but the policy's validation refused it. |
+| `policy-error`     | The policy's own code threw before it could decide.                    |
 
 A cause is only recorded alongside `"llmPlannerDegraded": true`; sent on its own it is
 ignored, so a decision that reports health can never carry failure evidence.
+
+The optional `results.json.degraded_causes` object aggregates these causes for
+degraded decisions. Missing, empty, or unrecognized causes count as
+`unreported`; non-degraded decisions are excluded.
 
 `brain-timeout` and `brain-error` belong to the same vocabulary but are stamped by the
 GAME when it never hears from a policy, or when a brain throws. They are rejected on

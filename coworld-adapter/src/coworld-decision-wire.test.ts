@@ -25,6 +25,7 @@ import {
   MAX_WIRE_SPAWN_PREFERENCE_ACTION_IDS,
   normalizeDecisionResponse,
   normalizeDegradedCause,
+  normalizeRecordedDegradationCause,
   normalizeRuntimeMode,
 } from "./coworld-decision-wire.ts";
 
@@ -944,6 +945,18 @@ describe("degraded cause on the wire", () => {
         normalizeDegradedCause(cause),
         `${cause} is a SERVER observation and must not be accepted from a player`,
       ).toBeUndefined();
+    }
+  });
+
+  it("mirrors the complete canonical vocabulary for trusted decision records", () => {
+    for (const cause of AGENT_DEGRADATION_CAUSES) {
+      expect(
+        normalizeRecordedDegradationCause(cause),
+        `${cause} is canonical but the trusted-record parser rejects it`,
+      ).toBe(cause);
+    }
+    for (const unknown of ["", "plan-parse-ish", " brain-timeout", null]) {
+      expect(normalizeRecordedDegradationCause(unknown)).toBeUndefined();
     }
   });
 

@@ -19232,8 +19232,8 @@ describe("Betray late: deterministic backstab of an overmatched ally", () => {
     expect(decision.metadata?.plannerRepairReason).toContain(
       "still contradicted must-follow control",
     );
-    // No cause is claimed: the bounded vocabulary has no member for a refused answer.
-    expect(decision.metadata?.degradedCause).toBeUndefined();
+    // The parseable-but-refused content gets its own honest cause.
+    expect(decision.metadata?.degradedCause).toBe("plan-rejected");
 
     // The report outcome for this shape is pinned in
     // AgentExternalBrainCleanliness.test.ts, using that suite's own record builder.

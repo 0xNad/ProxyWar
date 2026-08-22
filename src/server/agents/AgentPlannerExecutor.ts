@@ -2019,12 +2019,9 @@ export class LlmAgentPlanner implements AgentPlanner {
               `planner repair still contradicted must-follow control: ${repairedViolation}`,
               prompt.length + repairPrompt.length,
               // The planner ANSWERED and our own validation refused the content. The
-              // bounded vocabulary has no member for that - `plan-parse` would claim a
-              // malformed answer, `policy-error` would blame our code for throwing - so
-              // the honest record is no cause at all. The degraded flag still stands.
-              // A `plan-rejected` member would fit; that is a wire-contract change and
-              // is recorded as a follow-up rather than slipped in here.
-              undefined,
+              // fallback plan carries degradedOriginCause, so inherited decisions report
+              // the same rejection just like every other known degradation cause.
+              "plan-rejected",
               // NOT a parse failure: the repaired output parsed, and our control
               // validation refused its content. Stamping `parseOk: false` here would
               // recreate exactly the parse/content conflation this file just removed,

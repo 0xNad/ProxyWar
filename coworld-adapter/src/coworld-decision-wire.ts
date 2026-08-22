@@ -72,10 +72,11 @@ export function normalizeRuntimeMode(
  * server's, so drift fails a test rather than silently dropping a cause the
  * league is emitting.
  *
- * The `brain-*` causes are deliberately ABSENT. They are the server's own
- * observations, and a policy able to send them could forge provenance - a seat
- * that answered fine could stamp itself `brain-timeout` and the artifact would
- * read as though the server never heard from it.
+ * The `brain-*` causes are deliberately absent from this player-accepted set.
+ * They are the server's own observations, and a policy able to send them could
+ * forge provenance - a seat that answered fine could stamp itself
+ * `brain-timeout` and the artifact would read as though the server never heard
+ * from it. The separate server set below is used only for trusted records.
  */
 const SELF_REPORTED_DEGRADATION_CAUSES: ReadonlySet<string> = new Set([
   "plan-warmup",
@@ -83,8 +84,29 @@ const SELF_REPORTED_DEGRADATION_CAUSES: ReadonlySet<string> = new Set([
   "plan-unavailable",
   "plan-timeout",
   "plan-parse",
+  "plan-rejected",
   "policy-error",
 ]);
+
+const SERVER_REPORTED_DEGRADATION_CAUSES: ReadonlySet<string> = new Set([
+  "brain-timeout",
+  "brain-error",
+]);
+
+/**
+ * Strict equality parse for a degradation cause already present on a trusted
+ * decision record. Unlike the player-frame parser below, this accepts the
+ * server-observed causes that AgentLeagueMatch stamps itself.
+ */
+export function normalizeRecordedDegradationCause(
+  value: unknown,
+): string | undefined {
+  return typeof value === "string" &&
+    (SELF_REPORTED_DEGRADATION_CAUSES.has(value) ||
+      SERVER_REPORTED_DEGRADATION_CAUSES.has(value))
+    ? value
+    : undefined;
+}
 
 /**
  * Strict equality parse of an untrusted `degradedCause`, restricted to the
@@ -93,9 +115,9 @@ const SELF_REPORTED_DEGRADATION_CAUSES: ReadonlySet<string> = new Set([
  * honest record.
  */
 export function normalizeDegradedCause(value: unknown): string | undefined {
-  return typeof value === "string" &&
-    SELF_REPORTED_DEGRADATION_CAUSES.has(value)
-    ? value
+  const cause = normalizeRecordedDegradationCause(value);
+  return cause !== undefined && SELF_REPORTED_DEGRADATION_CAUSES.has(cause)
+    ? cause
     : undefined;
 }
 

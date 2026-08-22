@@ -47,6 +47,7 @@ const CANONICAL_RESULT_REQUIRED = [
 const CANONICAL_RESULT_PROPERTIES = [
   "accepted_decision_count",
   "decision_count",
+  "degraded_causes",
   "degraded_count",
   "fallback_count",
   "game_id",
@@ -67,6 +68,14 @@ const CANONICAL_SEED_SCHEMA = {
 const CANONICAL_GAME_ID_SCHEMA = {
   type: "string",
   pattern: "^[A-Za-z0-9]{8}$",
+} as const;
+
+const CANONICAL_DEGRADED_CAUSES_SCHEMA = {
+  type: "object",
+  additionalProperties: {
+    type: "integer",
+    minimum: 0,
+  },
 } as const;
 
 const adapterDirectory = existsSync(resolve(process.cwd(), "coworld"))
@@ -146,6 +155,10 @@ describe("Coworld manifest spawn-preference protocol", () => {
       );
       expect(resultSchema.properties.seed).toEqual(CANONICAL_SEED_SCHEMA);
       expect(resultSchema.properties.game_id).toEqual(CANONICAL_GAME_ID_SCHEMA);
+      expect(resultSchema.properties.degraded_causes).toEqual(
+        CANONICAL_DEGRADED_CAUSES_SCHEMA,
+      );
+      expect(resultSchema.required).not.toContain("degraded_causes");
     },
   );
 });
