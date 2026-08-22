@@ -268,7 +268,7 @@ export function createOwnerCapabilityEvidenceLogger({
     }
 
     if (!spawn && !spatialRecorded) {
-      const spatial = boundedSpatialV1(observation);
+      const spatial = boundedSpatialObservation(observation);
       record("spatial_observation", {
         ...base,
         present: spatial !== null,
@@ -403,6 +403,284 @@ function boundedMinimap(minimap) {
     legend,
   };
   return bounded;
+}
+
+function boundedSpatialMapInfo(mapInfo) {
+  if (
+    !isRecord(mapInfo) ||
+    !isBoundedVisibleString(mapInfo.name, 120) ||
+    !Number.isSafeInteger(mapInfo.width) ||
+    mapInfo.width <= 0 ||
+    mapInfo.width > 100_000 ||
+    !Number.isSafeInteger(mapInfo.height) ||
+    mapInfo.height <= 0 ||
+    mapInfo.height > 100_000 ||
+    !Number.isSafeInteger(mapInfo.width * mapInfo.height) ||
+    mapInfo.tileRefEncoding !== "row-major-y-width-plus-x" ||
+    !isRecord(mapInfo.coordinateFrame) ||
+    mapInfo.coordinateFrame.origin !== "top_left" ||
+    mapInfo.coordinateFrame.xIncreases !== "east" ||
+    mapInfo.coordinateFrame.yIncreases !== "south"
+  ) {
+    return null;
+  }
+  return {
+    name: mapInfo.name,
+    width: mapInfo.width,
+    height: mapInfo.height,
+    tileRefEncoding: "row-major-y-width-plus-x",
+    coordinateFrame: {
+      origin: "top_left",
+      xIncreases: "east",
+      yIncreases: "south",
+    },
+  };
+}
+
+function boundedSpatialOwnShape(ownShape) {
+  const quadrants = new Set([
+    "northwest",
+    "north",
+    "northeast",
+    "west",
+    "center",
+    "east",
+    "southwest",
+    "south",
+    "southeast",
+  ]);
+  if (
+    !isRecord(ownShape) ||
+    !quadrants.has(ownShape.quadrant) ||
+    !["complete", "omitted_budget"].includes(ownShape.regionAnalysis) ||
+    !["largest_region_border", "all_border_budget_fallback"].includes(
+      ownShape.centroidBasis,
+    ) ||
+    (ownShape.compactness !== undefined &&
+      !["compact", "stretched", "fragmented"].includes(ownShape.compactness)) ||
+    (ownShape.regionCount !== undefined &&
+      boundedNonnegativeInteger(ownShape.regionCount) === null) ||
+    (ownShape.largestRegionShare !== undefined &&
+      boundedPercent(ownShape.largestRegionShare) === null) ||
+    boundedPercent(ownShape.coastShare) === null ||
+    boundedPercent(ownShape.centroid?.xPct) === null ||
+    boundedPercent(ownShape.centroid?.yPct) === null
+  ) {
+    return null;
+  }
+  return {
+    quadrant: ownShape.quadrant,
+    ...(ownShape.compactness !== undefined
+      ? { compactness: ownShape.compactness }
+      : {}),
+    ...(ownShape.regionCount !== undefined
+      ? { regionCount: ownShape.regionCount }
+      : {}),
+    ...(ownShape.largestRegionShare !== undefined
+      ? { largestRegionShare: ownShape.largestRegionShare }
+      : {}),
+    regionAnalysis: ownShape.regionAnalysis,
+    centroidBasis: ownShape.centroidBasis,
+    coastShare: ownShape.coastShare,
+    centroid: {
+      xPct: ownShape.centroid.xPct,
+      yPct: ownShape.centroid.yPct,
+    },
+  };
+}
+
+function boundedSpatialV3Rivals(visiblePlayers) {
+  if (!Array.isArray(visiblePlayers) || visiblePlayers.length > 64) return null;
+  const bearings = new Set([
+    "north",
+    "northeast",
+    "east",
+    "southeast",
+    "south",
+    "southwest",
+    "west",
+    "northwest",
+  ]);
+  const distances = new Set(["adjacent", "near", "far"]);
+  const rivals = [];
+  for (const player of visiblePlayers) {
+    if (!isBoundedVisibleString(player?.playerID, 200)) return null;
+    let borderWithYou;
+    if (player.borderWithYou !== undefined) {
+      const border = player.borderWithYou;
+      const terrain = border?.terrainBreakdown;
+      const coverage = border?.defensePostFrontCoverage;
+      if (
+        !isRecord(border) ||
+        boundedNonnegativeInteger(border.tiles) === null ||
+        boundedPercent(border.shareOfYourBorder) === null ||
+        !["land", "coastal", "mixed"].includes(border.terrain) ||
+        boundedNonnegativeInteger(border.defensePostsCovering) === null ||
+        typeof border.underAttackHere !== "boolean" ||
+        !isRecord(terrain) ||
+        boundedNonnegativeInteger(terrain.plains) === null ||
+        boundedNonnegativeInteger(terrain.highland) === null ||
+        boundedNonnegativeInteger(terrain.mountain) === null ||
+        boundedNonnegativeInteger(terrain.shore) === null ||
+        terrain.plains + terrain.highland + terrain.mountain !== border.tiles ||
+        terrain.shore > border.tiles ||
+        !isRecord(coverage) ||
+        boundedNonnegativeInteger(coverage.covered) === null ||
+        boundedNonnegativeInteger(coverage.uncovered) === null ||
+        coverage.covered + coverage.uncovered !== border.tiles
+      ) {
+        return null;
+      }
+      borderWithYou = {
+        tiles: border.tiles,
+        shareOfYourBorder: border.shareOfYourBorder,
+        terrain: border.terrain,
+        terrainBreakdown: {
+          plains: terrain.plains,
+          highland: terrain.highland,
+          mountain: terrain.mountain,
+          shore: terrain.shore,
+        },
+        defensePostsCovering: border.defensePostsCovering,
+        defensePostFrontCoverage: {
+          covered: coverage.covered,
+          uncovered: coverage.uncovered,
+        },
+        underAttackHere: border.underAttackHere,
+      };
+    }
+    let bordersWith;
+    if (player.bordersWith !== undefined) {
+      if (!Array.isArray(player.bordersWith) || player.bordersWith.length > 64)
+        return null;
+      bordersWith = [];
+      for (const edge of player.bordersWith) {
+        if (
+          !isBoundedVisibleString(edge?.playerID, 200) ||
+          !["minor", "major"].includes(edge?.sizeClass)
+        ) {
+          return null;
+        }
+        bordersWith.push({
+          playerID: edge.playerID,
+          sizeClass: edge.sizeClass,
+        });
+      }
+    }
+    if (
+      (player.bearing !== undefined && !bearings.has(player.bearing)) ||
+      (player.distanceClass !== undefined &&
+        !distances.has(player.distanceClass))
+    ) {
+      return null;
+    }
+    rivals.push({
+      playerID: player.playerID,
+      ...(bearings.has(player.bearing) ? { bearing: player.bearing } : {}),
+      ...(distances.has(player.distanceClass)
+        ? { distanceClass: player.distanceClass }
+        : {}),
+      ...(borderWithYou ? { borderWithYou } : {}),
+      ...(bordersWith ? { bordersWith } : {}),
+    });
+  }
+  return rivals;
+}
+
+function boundedPositionedAssets(positioned, mapInfo, allowedPlayerIDs) {
+  if (
+    !isRecord(positioned) ||
+    !["complete", "capped"].includes(positioned.analysis) ||
+    !Array.isArray(positioned.structures) ||
+    positioned.structures.length > 48 ||
+    !Array.isArray(positioned.warships) ||
+    positioned.warships.length > 48 ||
+    boundedNonnegativeInteger(positioned.structuresTotal) === null ||
+    positioned.structuresReturned !== positioned.structures.length ||
+    typeof positioned.structuresTruncated !== "boolean" ||
+    boundedNonnegativeInteger(positioned.warshipsTotal) === null ||
+    positioned.warshipsReturned !== positioned.warships.length ||
+    typeof positioned.warshipsTruncated !== "boolean"
+  ) {
+    return null;
+  }
+  if (
+    positioned.structuresTotal < positioned.structures.length ||
+    positioned.warshipsTotal < positioned.warships.length ||
+    positioned.structuresTruncated !==
+      positioned.structures.length < positioned.structuresTotal ||
+    positioned.warshipsTruncated !==
+      positioned.warships.length < positioned.warshipsTotal ||
+    (positioned.analysis === "complete" &&
+      (positioned.structuresTruncated || positioned.warshipsTruncated)) ||
+    (positioned.analysis === "capped" &&
+      !positioned.structuresTruncated &&
+      !positioned.warshipsTruncated)
+  ) {
+    return null;
+  }
+
+  const seen = new Set();
+  const perPlayerStructures = new Map();
+  const perPlayerWarships = new Map();
+  const parse = (items, kinds, perPlayer) => {
+    const result = [];
+    for (const asset of items) {
+      if (
+        !isRecord(asset) ||
+        !allowedPlayerIDs.has(asset.ownerPlayerID) ||
+        !kinds.has(asset.type) ||
+        !Number.isSafeInteger(asset.tile) ||
+        asset.tile < 0 ||
+        asset.tile >= mapInfo.width * mapInfo.height ||
+        !Number.isSafeInteger(asset.x) ||
+        !Number.isSafeInteger(asset.y) ||
+        asset.x < 0 ||
+        asset.x >= mapInfo.width ||
+        asset.y < 0 ||
+        asset.y >= mapInfo.height ||
+        asset.tile !== asset.y * mapInfo.width + asset.x
+      ) {
+        return null;
+      }
+      const key = `${asset.ownerPlayerID}\u0000${asset.type}\u0000${asset.tile}`;
+      if (seen.has(key)) return null;
+      seen.add(key);
+      const count = (perPlayer.get(asset.ownerPlayerID) ?? 0) + 1;
+      if (count > 8) return null;
+      perPlayer.set(asset.ownerPlayerID, count);
+      result.push({
+        ownerPlayerID: asset.ownerPlayerID,
+        type: asset.type,
+        tile: asset.tile,
+        x: asset.x,
+        y: asset.y,
+      });
+    }
+    return result;
+  };
+  const structures = parse(
+    positioned.structures,
+    new Set(["Defense Post", "City", "Port"]),
+    perPlayerStructures,
+  );
+  const warships = parse(
+    positioned.warships,
+    new Set(["Warship"]),
+    perPlayerWarships,
+  );
+  if (!structures || !warships) return null;
+  return {
+    analysis: positioned.analysis,
+    structures,
+    structuresTotal: positioned.structuresTotal,
+    structuresReturned: structures.length,
+    structuresTruncated: positioned.structuresTruncated,
+    warships,
+    warshipsTotal: positioned.warshipsTotal,
+    warshipsReturned: warships.length,
+    warshipsTruncated: positioned.warshipsTruncated,
+  };
 }
 
 /**
@@ -554,13 +832,83 @@ export function boundedSpatialV1(observation) {
 }
 
 /**
+ * Accept only the complete L1-L3 spatial schema. Coordinates and public asset
+ * positions fail closed as one unit: no clamping, cropping, inferred owner,
+ * partial container, or unknown visibility provenance reaches policy code.
+ */
+export function boundedSpatialV3(observation) {
+  const spatial = observation?.spatial;
+  if (
+    spatial?.schemaVersion !== 3 ||
+    spatial.visibilityModel !== SPATIAL_VISIBILITY_MODEL
+  ) {
+    return null;
+  }
+  const mapInfo = boundedSpatialMapInfo(observation?.mapInfo);
+  const ownShape = boundedSpatialOwnShape(spatial.ownShape);
+  const rivals = boundedSpatialV3Rivals(observation?.visiblePlayers);
+  const ownPlayerID = observation?.ownState?.playerID;
+  if (
+    !mapInfo ||
+    !ownShape ||
+    !rivals ||
+    !isBoundedVisibleString(ownPlayerID, 200)
+  ) {
+    return null;
+  }
+  const allowedPlayerIDs = new Set([
+    ownPlayerID,
+    ...rivals.map((rival) => rival.playerID),
+  ]);
+  if (
+    allowedPlayerIDs.size !== rivals.length + 1 ||
+    rivals.some((rival) =>
+      (rival.bordersWith ?? []).some(
+        (edge) => !allowedPlayerIDs.has(edge.playerID),
+      ),
+    )
+  ) {
+    return null;
+  }
+  const positionedAssets = boundedPositionedAssets(
+    spatial.positionedAssets,
+    mapInfo,
+    allowedPlayerIDs,
+  );
+  if (!positionedAssets) return null;
+  const minimap = boundedMinimap(spatial.minimap);
+  const bounded = {
+    schemaVersion: 3,
+    visibilityModel: SPATIAL_VISIBILITY_MODEL,
+    mapInfo,
+    ownShape,
+    rivals,
+    positionedAssets,
+    ...(minimap ? { minimap } : {}),
+  };
+  return isWithinOwnerSpatialSerializationCeiling(bounded) ? bounded : null;
+}
+
+/** Backward-compatible feature detection for the public starter. */
+export function boundedSpatialObservation(observation) {
+  if (observation?.spatial?.schemaVersion === 3) {
+    return boundedSpatialV3(observation);
+  }
+  if (observation?.spatial?.schemaVersion === 1) {
+    return boundedSpatialV1(observation);
+  }
+  return null;
+}
+
+/**
  * Stable ranking of the caller's already-offered actions. With spatial absent
- * or unusable it returns the original order. With v1 present it can change only
- * which existing action object comes first; it cannot create an id or intent.
+ * or unusable it returns the original order. With a supported bounded schema
+ * it can change only which existing action object comes first; it cannot
+ * create an id or intent.
  */
 export function rankOfferedActionsWithSpatial(actions, observation) {
   if (!Array.isArray(actions)) return [];
-  const spatial = boundedSpatialV1(observation);
+  const spatial = boundedSpatialObservation(observation);
   if (!spatial) return [...actions];
 
   const glyphByPlayer = new Map(
@@ -578,6 +926,17 @@ export function rankOfferedActionsWithSpatial(actions, observation) {
   const rivalByID = new Map(
     spatial.rivals.map((rival) => [rival.playerID, rival]),
   );
+  const positionedPressureByPlayer = new Map();
+  for (const asset of [
+    ...(spatial.positionedAssets?.structures ?? []),
+    ...(spatial.positionedAssets?.warships ?? []),
+  ]) {
+    positionedPressureByPlayer.set(
+      asset.ownerPlayerID,
+      (positionedPressureByPlayer.get(asset.ownerPlayerID) ?? 0) +
+        (asset.type === "Warship" ? 4 : 1),
+    );
+  }
 
   return actions
     .map((action, index) => {
@@ -592,7 +951,12 @@ export function rankOfferedActionsWithSpatial(actions, observation) {
               : 0) +
           (rival.borderWithYou?.shareOfYourBorder ?? 0) +
           (rival.borderWithYou?.underAttackHere ? 30 : 0) +
-          (glyphArea.get(glyph) ?? 0) / 12
+          (glyphArea.get(glyph) ?? 0) / 12 +
+          (rival.borderWithYou?.defensePostFrontCoverage?.uncovered ?? 0) / 4 +
+          ((rival.borderWithYou?.terrainBreakdown?.plains ?? 0) -
+            (rival.borderWithYou?.terrainBreakdown?.mountain ?? 0)) /
+            4 +
+          (positionedPressureByPlayer.get(targetID) ?? 0)
         : 0;
       return { action, index, score };
     })

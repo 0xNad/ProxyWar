@@ -1,7 +1,7 @@
 import fs from "fs/promises";
 import path from "path";
 import { describe, expect, it } from "vitest";
-import { boundedSpatialV1 } from "../../coworld-adapter/tester-starter-llm/owner-capabilities.mjs";
+import { boundedSpatialObservation } from "../../coworld-adapter/tester-starter-llm/owner-capabilities.mjs";
 
 const STARTER_FILE = path.join(
   process.cwd(),
@@ -28,7 +28,7 @@ async function loadBuildState(): Promise<
   return new Function(
     "boundedSpatialV1",
     `function avoidActionIDs() { return []; }\n${clean}\n${cleanID}\n${buildState}\nreturn buildState;`,
-  )(boundedSpatialV1) as (
+  )(boundedSpatialObservation) as (
     obs: Record<string, unknown>,
     actions: unknown[],
   ) => Record<string, unknown>;
@@ -257,6 +257,128 @@ describe("tester-starter-llm spatial state renderer", () => {
       expect(state).not.toHaveProperty("spatial");
       expect(
         (state.rivals as Array<Record<string, unknown>>)[0],
+      ).not.toHaveProperty("playerID");
+    }
+  });
+
+  it("consumes strict L3 map, terrain-front, and positioned-asset fields", async () => {
+    const buildState = await loadBuildState();
+    const mapInfo = {
+      name: "Pangaea",
+      width: 100,
+      height: 80,
+      tileRefEncoding: "row-major-y-width-plus-x",
+      coordinateFrame: {
+        origin: "top_left",
+        xIncreases: "east",
+        yIncreases: "south",
+      },
+    };
+    const observation = {
+      ...BASE_OBSERVATION,
+      mapInfo,
+      visiblePlayers: [
+        {
+          ...BASE_OBSERVATION.visiblePlayers[0],
+          bearing: "east",
+          distanceClass: "adjacent",
+          borderWithYou: {
+            tiles: 10,
+            shareOfYourBorder: 25,
+            terrain: "mixed",
+            terrainBreakdown: {
+              plains: 4,
+              highland: 3,
+              mountain: 3,
+              shore: 2,
+            },
+            defensePostsCovering: 1,
+            defensePostFrontCoverage: { covered: 6, uncovered: 4 },
+            underAttackHere: false,
+          },
+          bordersWith: [],
+        },
+      ],
+      spatial: {
+        schemaVersion: 3,
+        visibilityModel: "global-lockstep-public-map-v1",
+        ownShape: {
+          quadrant: "west",
+          regionAnalysis: "complete",
+          centroidBasis: "largest_region_border",
+          coastShare: 20,
+          centroid: { xPct: 25, yPct: 50 },
+        },
+        positionedAssets: {
+          analysis: "complete",
+          structures: [
+            {
+              ownerPlayerID: "P_AGENT",
+              type: "Defense Post",
+              tile: 3025,
+              x: 25,
+              y: 30,
+            },
+          ],
+          structuresTotal: 1,
+          structuresReturned: 1,
+          structuresTruncated: false,
+          warships: [
+            {
+              ownerPlayerID: "P_RIVAL",
+              type: "Warship",
+              tile: 3060,
+              x: 60,
+              y: 30,
+            },
+          ],
+          warshipsTotal: 1,
+          warshipsReturned: 1,
+          warshipsTruncated: false,
+        },
+      },
+    };
+
+    const state = buildState(observation, []);
+    expect(state.spatial).toMatchObject({
+      schemaVersion: 3,
+      mapInfo,
+      positionedAssets: observation.spatial.positionedAssets,
+    });
+    expect((state.rivals as Array<Record<string, unknown>>)[0]).toMatchObject({
+      playerID: "P_RIVAL",
+      borderWithYou: {
+        tiles: 10,
+        terrainBreakdown: {
+          plains: 4,
+          highland: 3,
+          mountain: 3,
+          shore: 2,
+        },
+        defensePostFrontCoverage: { covered: 6, uncovered: 4 },
+      },
+    });
+
+    for (const mutate of [
+      (value: any) => {
+        value.mapInfo.coordinateFrame.origin = "bottom_left";
+      },
+      (value: any) => {
+        value.spatial.positionedAssets.warships[0].tile = 999_999;
+      },
+      (value: any) => {
+        value.spatial.positionedAssets.structures[0].type = "Missile Silo";
+      },
+      (value: any) => {
+        value.visiblePlayers[0].borderWithYou.terrainBreakdown.plains = 5;
+      },
+    ]) {
+      const malformed = structuredClone(observation);
+      mutate(malformed);
+      const rejected = buildState(malformed, []);
+      expect(rejected).not.toHaveProperty("spatial");
+      expect(
+        (rejected.rivals as Array<Record<string, unknown>>)[0],
       ).not.toHaveProperty("playerID");
     }
   });

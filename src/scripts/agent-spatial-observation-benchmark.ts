@@ -431,6 +431,19 @@ function payloadSizes(game: Game, players: readonly BenchmarkPlayer[]) {
   delete process.env.PROXYWAR_TUNE_SPATIAL_MINIMAP;
 
   return {
+    spatialSchemaVersion: stageOne?.spatial.schemaVersion ?? null,
+    positionedAssets:
+      stageOne === undefined
+        ? null
+        : {
+            analysis: stageOne.spatial.positionedAssets.analysis,
+            structuresTotal: stageOne.spatial.positionedAssets.structuresTotal,
+            structuresReturned:
+              stageOne.spatial.positionedAssets.structuresReturned,
+            warshipsTotal: stageOne.spatial.positionedAssets.warshipsTotal,
+            warshipsReturned:
+              stageOne.spatial.positionedAssets.warshipsReturned,
+          },
     stageOneIncrementalSerializedBytes: stageOneBytes - baselineBytes,
     minimapIncrementalSerializedBytes: stageTwoBytes - stageOneBytes,
     estimatedMinimapTokenDeltaAtFourCharsPerToken: Math.ceil(

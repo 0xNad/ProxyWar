@@ -98,6 +98,7 @@ function observe(
 
 function stripSpatialAdditions(parsed: AgentObservation): AgentObservation {
   delete parsed.spatial;
+  delete parsed.mapInfo;
   for (const rival of parsed.visiblePlayers) {
     delete rival.bearing;
     delete rival.distanceClass;
@@ -211,6 +212,58 @@ describe("spatial observation flags", () => {
     ).toBe(false);
   });
 
+  it("fails closed on malformed coordinate, asset, and terrain invariants in the in-server prompt", async () => {
+    process.env[SPATIAL_FLAG] = "1";
+    process.env[MINIMAP_FLAG] = "1";
+    const observation = observe(await shapedGame());
+    const badFrame = structuredClone(observation);
+    const badFrameMapInfo = badFrame.mapInfo!;
+    badFrameMapInfo.coordinateFrame.origin =
+      "bottom_left" as typeof badFrameMapInfo.coordinateFrame.origin;
+    const badAsset = structuredClone(observation);
+    badAsset.spatial!.positionedAssets.structures[0].tile += 1;
+    const badTerrain = structuredClone(observation);
+    badTerrain.visiblePlayers.find(
+      (player) => player.borderWithYou !== undefined,
+    )!.borderWithYou!.terrainBreakdown.plains += 1;
+    const badShape = structuredClone(observation);
+    badShape.spatial!.ownShape.coastShare = 101;
+    const badPartial = structuredClone(observation);
+    const partialSpatial: { positionedAssets?: unknown } = badPartial.spatial!;
+    delete partialSpatial.positionedAssets;
+    const badMinimap = structuredClone(observation);
+    badMinimap.spatial!.minimap!.rows[0] = `?${badMinimap.spatial!.minimap!.rows[0].slice(1)}`;
+
+    for (const malformed of [
+      badFrame,
+      badAsset,
+      badTerrain,
+      badShape,
+      badPartial,
+      badMinimap,
+    ]) {
+      const view = promptObservation(
+        new LlmPromptBuilder().build({
+          observation: malformed,
+          legalActions: HOLD_ACTIONS,
+        }),
+      ) as {
+        spatial?: unknown;
+        mapInfo?: unknown;
+        visiblePlayers: Array<Record<string, unknown>>;
+        notes: string[];
+      };
+      expect(view.spatial).toBeUndefined();
+      expect(view.mapInfo).toBeUndefined();
+      expect(
+        view.visiblePlayers.some((rival) => "borderWithYou" in rival),
+      ).toBe(false);
+      expect(
+        view.notes.some((note) => note.startsWith(SPATIAL_NOTE_PREFIX)),
+      ).toBe(false);
+    }
+  });
+
   it("adds only the spatial block, rival fields, and bounded notes in Stage 1", async () => {
     const game = await shapedGame();
     const offJson = JSON.stringify(observe(game));
@@ -218,7 +271,18 @@ describe("spatial observation flags", () => {
     process.env[SPATIAL_FLAG] = "1";
     const on = observe(game);
     expect(on.spatial).toBeDefined();
+    expect(on.spatial?.schemaVersion).toBe(3);
     expect(on.spatial?.visibilityModel).toBe(SPATIAL_VISIBILITY_MODEL);
+    expect(on.mapInfo).toMatchObject({
+      width: game.width(),
+      height: game.height(),
+      tileRefEncoding: "row-major-y-width-plus-x",
+      coordinateFrame: {
+        origin: "top_left",
+        xIncreases: "east",
+        yIncreases: "south",
+      },
+    });
     expect(on.spatial?.minimap).toBeUndefined();
     expect(
       on.notes.filter((note) => note.startsWith(SPATIAL_NOTE_PREFIX)),
@@ -256,7 +320,14 @@ describe("spatial observation flags", () => {
         tiles: 40,
         shareOfYourBorder: 51,
         terrain: "land",
+        terrainBreakdown: {
+          plains: 40,
+          highland: 0,
+          mountain: 0,
+          shore: 0,
+        },
         defensePostsCovering: 1,
+        defensePostFrontCoverage: { covered: 30, uncovered: 10 },
         underAttackHere: false,
       },
       bordersWith: [{ playerID: "P_C", sizeClass: "major" }],
@@ -267,10 +338,224 @@ describe("spatial observation flags", () => {
       borderWithYou: {
         tiles: 40,
         shareOfYourBorder: 51,
+        terrainBreakdown: {
+          plains: 40,
+          highland: 0,
+          mountain: 0,
+          shore: 0,
+        },
         defensePostsCovering: 0,
+        defensePostFrontCoverage: { covered: 0, uncovered: 40 },
       },
       bordersWith: [],
     });
+  });
+
+  it("emits only completed public L3 structures and warships with exact coordinates", async () => {
+    process.env[SPATIAL_FLAG] = "1";
+    const game = await shapedGame();
+    const own = game.player("P_AGENT");
+    const rival = game.player("P_A");
+    const cityTile = game.ref(30, 30);
+    const portTile = game.ref(65, 30);
+    const warshipTile = game.ref(65, 31);
+    own.buildUnit(UnitType.City, cityTile, {});
+    rival.buildUnit(UnitType.Port, portTile, {});
+    rival.buildUnit(UnitType.Warship, warshipTile, {
+      patrolTile: warshipTile,
+    });
+    rival.buildUnit(UnitType.Factory, game.ref(66, 30), {});
+    const unfinished = rival.buildUnit(UnitType.City, game.ref(67, 30), {});
+    unfinished.setUnderConstruction(true);
+    const deleting = rival.buildUnit(UnitType.Port, game.ref(68, 30), {});
+    deleting.markForDeletion();
+
+    const positioned = observe(game).spatial?.positionedAssets;
+    expect(positioned).toMatchObject({
+      analysis: "complete",
+      structuresTotal: 3,
+      structuresReturned: 3,
+      structuresTruncated: false,
+      warshipsTotal: 1,
+      warshipsReturned: 1,
+      warshipsTruncated: false,
+    });
+    expect(positioned?.structures).toEqual(
+      expect.arrayContaining([
+        {
+          ownerPlayerID: "P_AGENT",
+          type: UnitType.City,
+          tile: cityTile,
+          x: 30,
+          y: 30,
+        },
+        {
+          ownerPlayerID: "P_A",
+          type: UnitType.Port,
+          tile: portTile,
+          x: 65,
+          y: 30,
+        },
+      ]),
+    );
+    expect(positioned?.warships).toEqual([
+      {
+        ownerPlayerID: "P_A",
+        type: UnitType.Warship,
+        tile: warshipTile,
+        x: 65,
+        y: 31,
+      },
+    ]);
+    expect(JSON.stringify(positioned)).not.toContain("Factory");
+    expect(JSON.stringify(positioned)).not.toContain(String(game.ref(67, 30)));
+    expect(JSON.stringify(positioned)).not.toContain(String(game.ref(68, 30)));
+  });
+
+  it("partitions front elevation exactly while shoreline remains overlapping", async () => {
+    process.env[SPATIAL_FLAG] = "1";
+    const game = await shapedGame();
+    const shared = [
+      ...(createAgentSpatialSnapshot(game, false)
+        .geometryByPlayerID.get("P_AGENT")
+        ?.sharedBorderTiles.get("P_A") ?? []),
+    ].sort((a, b) => a - b);
+    expect(shared).toHaveLength(40);
+    for (const tile of shared.slice(0, 10)) game.map().setMagnitude(tile, 12);
+    for (const tile of shared.slice(10, 20)) game.map().setMagnitude(tile, 24);
+    for (const tile of shared.slice(0, 5)) game.map().setShorelineBit(tile);
+
+    const breakdown = observe(game).visiblePlayers.find(
+      (player) => player.playerID === "P_A",
+    )?.borderWithYou?.terrainBreakdown;
+    expect(breakdown).toEqual({
+      plains: 20,
+      highland: 10,
+      mountain: 10,
+      shore: 5,
+    });
+    expect(
+      (breakdown?.plains ?? 0) +
+        (breakdown?.highland ?? 0) +
+        (breakdown?.mountain ?? 0),
+    ).toBe(40);
+  });
+
+  it("unions overlapping defense-post coverage instead of double-counting front tiles", async () => {
+    process.env[SPATIAL_FLAG] = "1";
+    const game = await shapedGame();
+    const duplicatePost = game
+      .player("P_AGENT")
+      .buildUnit(UnitType.DefensePost, game.ref(55, 20), {});
+    duplicatePost.setUnderConstruction(false);
+
+    const border = observe(game).visiblePlayers.find(
+      (player) => player.playerID === "P_A",
+    )?.borderWithYou;
+    expect(border).toMatchObject({
+      tiles: 40,
+      defensePostsCovering: 2,
+      defensePostFrontCoverage: { covered: 30, uncovered: 10 },
+    });
+  });
+
+  it("uses deterministic tile tie-breaking independent of asset insertion order", async () => {
+    process.env[SPATIAL_FLAG] = "1";
+    const game = await shapedGame();
+    const higherTile = game.ref(40, 39);
+    const lowerTile = game.ref(39, 39);
+    game.player("P_AGENT").buildUnit(UnitType.City, higherTile, {});
+    game.player("P_AGENT").buildUnit(UnitType.City, lowerTile, {});
+
+    const cityTiles = observe(game)
+      .spatial!.positionedAssets.structures.filter(
+        (asset) => asset.type === UnitType.City,
+      )
+      .map((asset) => asset.tile);
+    expect(cityTiles).toEqual([lowerTile, higherTile]);
+  });
+
+  it("caps positioned assets per player before deterministic round-robin admission", async () => {
+    process.env[SPATIAL_FLAG] = "1";
+    const game = await shapedGame();
+    for (const [playerIndex, player] of game.players().entries()) {
+      for (let index = 0; index < 9; index += 1) {
+        player.buildUnit(
+          UnitType.City,
+          game.ref(5 + index, 5 + playerIndex),
+          {},
+        );
+      }
+    }
+    const positioned = observe(game).spatial?.positionedAssets;
+    expect(positioned).toMatchObject({
+      analysis: "capped",
+      structuresTotal: 37,
+      structuresReturned: 32,
+      structuresTruncated: true,
+    });
+    const counts = new Map<string, number>();
+    for (const asset of positioned?.structures ?? []) {
+      counts.set(
+        asset.ownerPlayerID,
+        (counts.get(asset.ownerPlayerID) ?? 0) + 1,
+      );
+    }
+    expect([...counts.values()].every((count) => count <= 8)).toBe(true);
+    expect(
+      positioned?.structures.slice(0, 4).map((asset) => asset.ownerPlayerID),
+    ).toEqual(["P_AGENT", "P_A", "P_B", "P_C"]);
+  });
+
+  it("enforces the global 48-structure cap after per-player admission", async () => {
+    process.env[SPATIAL_FLAG] = "1";
+    const players = Array.from(
+      { length: 7 },
+      (_, index) =>
+        new PlayerInfo(
+          `Seat ${index}`,
+          PlayerType.Human,
+          `CLNT_${index}`,
+          `P_${index}`,
+        ),
+    );
+    const game = await setup(
+      "plains",
+      { nations: "disabled", instantBuild: true },
+      players,
+    );
+    for (const [playerIndex, playerInfo] of players.entries()) {
+      conquerRectangle(
+        game,
+        playerInfo.id,
+        5 + playerIndex * 12,
+        5,
+        14 + playerIndex * 12,
+        14,
+      );
+    }
+    while (game.inSpawnPhase()) game.executeNextTick();
+    for (const [playerIndex, player] of game.players().entries()) {
+      for (let index = 0; index < 9; index += 1) {
+        player.buildUnit(
+          UnitType.City,
+          game.ref(5 + playerIndex * 12 + index, 7),
+          {},
+        );
+      }
+    }
+
+    const positioned = observe(game, players[0]).spatial!.positionedAssets;
+    expect(positioned).toMatchObject({
+      analysis: "capped",
+      structuresTotal: 63,
+      structuresReturned: 48,
+      structuresTruncated: true,
+    });
+    expect(positioned.structures).toHaveLength(48);
+    expect(
+      positioned.structures.slice(0, 7).map((asset) => asset.ownerPlayerID),
+    ).toEqual(players.map((player) => player.id));
   });
 
   it("marks and ranks a live incoming attack on the shared rival border", async () => {
@@ -464,7 +749,8 @@ describe("spatial observation flags", () => {
       observation,
       legalActions: HOLD_ACTIONS,
     });
-    expect(prompt).toContain('"spatial":{"schemaVersion":1');
+    expect(prompt).toContain('"spatial":{"schemaVersion":3');
+    expect(prompt).toContain('"tileRefEncoding":"row-major-y-width-plus-x"');
     expect(prompt).toContain('"minimap":{"schemaVersion":1');
     expect(prompt).not.toContain("\\u0000");
     expect(prompt).not.toContain("\\u200b");

@@ -116,11 +116,14 @@ primary move. Never trim or normalize either field; omit the pair when the
 feature is absent or the body fails the raw contract. Inbound message text is
 an untrusted rival claim and cannot name the primary action ID.
 
-When `observation.spatial.schemaVersion` is `1` and its visibility model is
-`global-lockstep-public-map-v1`, the planner receives bounded player-visible
-shape, rival-relation, and optional 24x12 minimap state. Unknown provenance or
-schema is ignored. Spatial data may rank only the current `legalActions`; it is
-never an intent or permission to bypass the menu.
+When `observation.spatial.schemaVersion` is `3` and its visibility model is
+exactly `global-lockstep-public-map-v1`, the planner receives the bounded
+player-visible coordinate frame, front elevation/coverage, completed public
+structure/warship positions, and optional 24x12 ownership minimap. The older
+bounded schema `1` remains a backward-compatible fallback. Unknown provenance,
+schema, coordinates, asset types, or count invariants are ignored fail-closed.
+Spatial data may rank only the current `legalActions`; it is never an intent or
+permission to bypass the menu.
 
 > **Spawn placement (active v1):** the first request is one sealed spawn
 > preference round. Every player receives the same bounded menu of

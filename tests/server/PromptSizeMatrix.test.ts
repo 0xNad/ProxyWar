@@ -4,6 +4,7 @@ import {
   SPATIAL_MINIMAP_SERIALIZED_MAX_BYTES,
   SPATIAL_PROMPT_INCREMENT_MAX_BYTES,
   SPATIAL_PROMPT_INCREMENT_MAX_ESTIMATED_TOKENS,
+  SPATIAL_PROMPT_INCREMENT_MAX_RATIO_AT_16_SEATS,
   SPATIAL_STAGE_ONE_SERIALIZED_MAX_BYTES,
 } from "../../src/server/agents/AgentSpatialObservation";
 import {
@@ -205,5 +206,19 @@ describe("prompt size matrix arms", () => {
     expect(stateBytes).toBeLessThanOrEqual(MAX_COMMANDER_STATE_JSON_BYTES);
     expect(promptBytes).toBeLessThanOrEqual(MAX_COMMANDER_PROMPT_BYTES);
     expect(promptBytes - stateBytes).toBeLessThan(4_000);
+  });
+
+  it("keeps the all-on spatial prompt increment within ten percent at 16 seats", async () => {
+    const starterBuildState = await loadStarterBuildState();
+    const board = await buildBoard("world", 16, "mid");
+    const base = measureArm(board, arm("warships"), starterBuildState);
+    const minimap = measureArm(
+      board,
+      arm("spatial_minimap"),
+      starterBuildState,
+    );
+    expect(
+      (minimap.promptBytes - base.promptBytes) / base.promptBytes,
+    ).toBeLessThanOrEqual(SPATIAL_PROMPT_INCREMENT_MAX_RATIO_AT_16_SEATS);
   });
 });

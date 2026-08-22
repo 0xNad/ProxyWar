@@ -123,22 +123,74 @@ export interface AgentSpatialMinimap {
   }>;
 }
 
+export interface AgentSpatialMapInfo {
+  name: string;
+  width: number;
+  height: number;
+  tileRefEncoding: "row-major-y-width-plus-x";
+  coordinateFrame: {
+    origin: "top_left";
+    xIncreases: "east";
+    yIncreases: "south";
+  };
+}
+
+export type AgentSpatialPositionedAssetType =
+  | UnitType.DefensePost
+  | UnitType.City
+  | UnitType.Port
+  | UnitType.Warship;
+
+export interface AgentSpatialPositionedAsset {
+  ownerPlayerID: string;
+  type: AgentSpatialPositionedAssetType;
+  tile: TileRef;
+  x: number;
+  y: number;
+}
+
+export interface AgentSpatialPositionedAssets {
+  analysis: "complete" | "capped";
+  structures: AgentSpatialPositionedAsset[];
+  structuresTotal: number;
+  structuresReturned: number;
+  structuresTruncated: boolean;
+  warships: AgentSpatialPositionedAsset[];
+  warshipsTotal: number;
+  warshipsReturned: number;
+  warshipsTruncated: boolean;
+}
+
 export interface AgentSpatialObservation {
-  schemaVersion: 1;
+  /** L1 map frame + L2 terrain fronts + L3 positioned public assets. */
+  schemaVersion: 3;
   /**
    * Required by XP consumers; optional here only for backward wire decoding.
-   * Current builders always emit the exact global-lockstep contract.
+   * Current builders emit schema 3 only for the exact global-lockstep contract.
    */
   visibilityModel?: "global-lockstep-public-map-v1";
   ownShape: AgentOwnShape;
+  positionedAssets: AgentSpatialPositionedAssets;
   minimap?: AgentSpatialMinimap;
+}
+
+export interface AgentBorderTerrainBreakdown {
+  plains: number;
+  highland: number;
+  mountain: number;
+  shore: number;
 }
 
 export interface AgentBorderWithYou {
   tiles: number;
   shareOfYourBorder: number;
   terrain: "land" | "coastal" | "mixed";
+  terrainBreakdown: AgentBorderTerrainBreakdown;
   defensePostsCovering: number;
+  defensePostFrontCoverage: {
+    covered: number;
+    uncovered: number;
+  };
   underAttackHere: boolean;
 }
 
@@ -1230,7 +1282,7 @@ export interface AgentObservation {
    * metadata); this field is optional context and is not an alternate raw
    * coordinate or terrain-query channel.
    */
-  mapInfo?: { name: string; width: number; height: number };
+  mapInfo?: AgentSpatialMapInfo;
   /** Persistent per-rival belief state (theory of mind). Populated by the brain. */
   opponentModel?: AgentOpponentModelEntry[];
   /**

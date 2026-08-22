@@ -108,7 +108,7 @@ export function makeCommanderStage2Fixture(
       rows: [MINIMAP_CANARY, ...Array.from({ length: 11 }, () => "")],
       legend: [],
     },
-  };
+  } as unknown as AgentObservation["spatial"];
   observation.recentDecisions = [
     {
       canary: "UNBOUNDED_RECENT_DECISION_CANARY",

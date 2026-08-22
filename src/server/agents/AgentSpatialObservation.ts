@@ -1,13 +1,23 @@
-import { Game, Player, Unit, UnitType } from "../../core/game/Game";
+import {
+  Game,
+  Player,
+  TerrainType,
+  Unit,
+  UnitType,
+} from "../../core/game/Game";
 import {
   spatialMinimapEnabled,
   spatialObservationEnabled,
 } from "./AgentTunables";
 import {
+  AgentBorderTerrainBreakdown,
   AgentOwnShape,
   AgentSpatialBearing,
+  AgentSpatialMapInfo,
   AgentSpatialMinimap,
   AgentSpatialObservation,
+  AgentSpatialPositionedAsset,
+  AgentSpatialPositionedAssets,
   AgentSpatialQuadrant,
   AgentVisiblePlayer,
 } from "./AgentTypes";
@@ -17,6 +27,24 @@ export const SPATIAL_REGION_RUN_BUDGET = 25_000;
 export const SPATIAL_MINIMAP_WIDTH = 24 as const;
 export const SPATIAL_MINIMAP_HEIGHT = 12 as const;
 export const SPATIAL_NOTE_PREFIX = "Spatial ";
+export const SPATIAL_SCHEMA_VERSION = 3 as const;
+export const SPATIAL_STRUCTURE_LIMIT = 48;
+export const SPATIAL_NAVAL_UNIT_LIMIT = 48;
+export const SPATIAL_STRUCTURES_PER_PLAYER_LIMIT = 8;
+export const SPATIAL_NAVAL_UNITS_PER_PLAYER_LIMIT = 8;
+
+const POSITIONED_STRUCTURE_TYPES = [
+  UnitType.DefensePost,
+  UnitType.City,
+  UnitType.Port,
+] as const;
+const POSITIONED_WARSHIP_TYPES = [UnitType.Warship] as const;
+const POSITIONED_TYPE_ORDER = new Map<UnitType, number>([
+  [UnitType.DefensePost, 0],
+  [UnitType.City, 1],
+  [UnitType.Port, 2],
+  [UnitType.Warship, 3],
+]);
 /**
  * Spatial facts are legal only because current ProxyWar/OpenFront matches are
  * global-lockstep and have no fog-of-war/private tile layer: every human
@@ -37,6 +65,7 @@ export const SPATIAL_STAGE_ONE_SERIALIZED_MAX_BYTES = 16 * 1024;
 export const SPATIAL_MINIMAP_SERIALIZED_MAX_BYTES = 2 * 1024;
 export const SPATIAL_PROMPT_INCREMENT_MAX_BYTES = 24 * 1024;
 export const SPATIAL_PROMPT_INCREMENT_MAX_ESTIMATED_TOKENS = 8 * 1024;
+export const SPATIAL_PROMPT_INCREMENT_MAX_RATIO_AT_16_SEATS = 0.1;
 
 const MINIMAP_GLYPHS =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@#";
@@ -112,6 +141,7 @@ export interface BuildSpatialObservationInput {
 
 export interface SpatialObservationExtension {
   spatial: AgentSpatialObservation;
+  mapInfo: AgentSpatialMapInfo;
   notes: string[];
 }
 
@@ -124,7 +154,7 @@ export function createAgentSpatialSnapshot(
   includeMinimap: boolean = spatialMinimapEnabled(),
 ): AgentSpatialSnapshot {
   const players = [...gameState.players()].sort(
-    (a, b) => a.smallID() - b.smallID() || a.id().localeCompare(b.id()),
+    (a, b) => a.smallID() - b.smallID() || compareCodeUnits(a.id(), b.id()),
   );
   const metrics: AgentSpatialSnapshotMetrics = {
     borderTilesVisited: 0,
@@ -218,7 +248,12 @@ export function buildSpatialObservationExtension(
 
   const defensePosts = input.player
     .units(UnitType.DefensePost)
-    .filter((unit) => unit.isActive() && !unit.isUnderConstruction());
+    .filter(
+      (unit) =>
+        unit.isActive() &&
+        !unit.isMarkedForDeletion() &&
+        !unit.isUnderConstruction(),
+    );
   const defenseRangeSquared = input.gameState.config().defensePostRange() ** 2;
 
   for (const visible of input.visiblePlayers) {
@@ -234,6 +269,12 @@ export function buildSpatialObservationExtension(
     Object.assign(visible, centroidRelation);
 
     if (sharedTiles !== undefined && sharedTiles.size > 0) {
+      const postCoverage = defensePostFrontCoverage(
+        input.gameState,
+        defensePosts,
+        sharedTiles,
+        defenseRangeSquared,
+      );
       visible.borderWithYou = {
         tiles: sharedTiles.size,
         shareOfYourBorder: percentage(
@@ -244,12 +285,15 @@ export function buildSpatialObservationExtension(
           sharedTiles,
           ownGeometry.coastalBorderTiles,
         ),
-        defensePostsCovering: countPostsCovering(
+        terrainBreakdown: sharedBorderTerrainBreakdown(
           input.gameState,
-          defensePosts,
           sharedTiles,
-          defenseRangeSquared,
         ),
+        defensePostsCovering: postCoverage.postsCovering,
+        defensePostFrontCoverage: {
+          covered: postCoverage.covered,
+          uncovered: sharedTiles.size - postCoverage.covered,
+        },
         // OpenFront attacks are pooled by player. This is observer-relative
         // live combat, not a claim about a finer sub-segment of the front.
         underAttackHere: visible.incomingAttack,
@@ -279,15 +323,32 @@ export function buildSpatialObservationExtension(
         };
       })
       .sort(
-        (a, b) => a.smallID - b.smallID || a.playerID.localeCompare(b.playerID),
+        (a, b) =>
+          a.smallID - b.smallID || compareCodeUnits(a.playerID, b.playerID),
       )
       .map(({ playerID, sizeClass }) => ({ playerID, sizeClass }));
   }
 
+  const mapInfo: AgentSpatialMapInfo = {
+    name: String(input.gameState.config().gameConfig().gameMap),
+    width: input.gameState.width(),
+    height: input.gameState.height(),
+    tileRefEncoding: "row-major-y-width-plus-x",
+    coordinateFrame: {
+      origin: "top_left",
+      xIncreases: "east",
+      yIncreases: "south",
+    },
+  };
   const spatial: AgentSpatialObservation = {
-    schemaVersion: 1,
+    schemaVersion: SPATIAL_SCHEMA_VERSION,
     visibilityModel: SPATIAL_VISIBILITY_MODEL,
     ownShape: ownGeometry.ownShape,
+    positionedAssets: positionedAssets(
+      snapshot,
+      input.player,
+      input.visiblePlayers,
+    ),
     ...(includeMinimap && snapshot.minimap !== undefined
       ? {
           minimap: {
@@ -306,6 +367,7 @@ export function buildSpatialObservationExtension(
   spatialExtensionsEmitted += 1;
   return {
     spatial,
+    mapInfo,
     notes: spatialBriefing(input.player, input.visiblePlayers),
   };
 }
@@ -633,23 +695,194 @@ function relationBetweenCentroids(
  * array copy of the whole shared border once per post, which is the term that
  * grows with both late-game build-out and front length.
  */
-function countPostsCovering(
+function defensePostFrontCoverage(
   gameState: Game,
   posts: readonly Unit[],
   sharedTiles: ReadonlySet<number>,
   rangeSquared: number,
-): number {
-  let covering = 0;
+): { postsCovering: number; covered: number } {
+  let postsCovering = 0;
+  const coveredTiles = new Set<number>();
   for (const post of posts) {
     const postTile = post.tile();
+    let coversFront = false;
     for (const tile of sharedTiles) {
       if (gameState.euclideanDistSquared(postTile, tile) <= rangeSquared) {
-        covering += 1;
-        break;
+        coveredTiles.add(tile);
+        coversFront = true;
       }
     }
+    if (coversFront) postsCovering += 1;
   }
-  return covering;
+  return { postsCovering, covered: coveredTiles.size };
+}
+
+interface RankedSpatialAsset {
+  asset: AgentSpatialPositionedAsset;
+  distanceSquared: number;
+  unitID: number;
+}
+
+/**
+ * Exact positions for public map assets, nearest to the observer first and
+ * hard-capped globally. Current OpenFront clients receive these same units in
+ * the global lockstep update stream; this is a bounded summary of that public
+ * state, not a player-relative visibility query or hidden-map scan.
+ */
+function positionedAssets(
+  snapshot: AgentSpatialSnapshot,
+  observer: Player,
+  visiblePlayers: readonly AgentVisiblePlayer[],
+): AgentSpatialPositionedAssets {
+  const observerGeometry = snapshot.geometryByPlayerID.get(observer.id());
+  const origin = observerGeometry?.centroid ?? {
+    x: (snapshot.gameState.width() - 1) / 2,
+    y: (snapshot.gameState.height() - 1) / 2,
+  };
+  const visiblePlayerIDs = new Set([
+    observer.id(),
+    ...visiblePlayers.map((player) => player.playerID),
+  ]);
+  const structuresByPlayer: RankedSpatialAsset[][] = [];
+  const warshipsByPlayer: RankedSpatialAsset[][] = [];
+  let structuresTotal = 0;
+  let warshipsTotal = 0;
+
+  for (const player of snapshot.players) {
+    if (!visiblePlayerIDs.has(player.id())) continue;
+    const structures = player
+      .units(...POSITIONED_STRUCTURE_TYPES)
+      .filter(isCompletedPublicAsset)
+      .map((unit) => rankedSpatialAsset(snapshot.gameState, unit, origin));
+    const warships = player
+      .units(...POSITIONED_WARSHIP_TYPES)
+      .filter(isCompletedPublicAsset)
+      .map((unit) => rankedSpatialAsset(snapshot.gameState, unit, origin));
+    structuresTotal += structures.length;
+    warshipsTotal += warships.length;
+    structures.sort(compareRankedSpatialAsset);
+    warships.sort(compareRankedSpatialAsset);
+    structuresByPlayer.push(
+      structures.slice(0, SPATIAL_STRUCTURES_PER_PLAYER_LIMIT),
+    );
+    warshipsByPlayer.push(
+      warships.slice(0, SPATIAL_NAVAL_UNITS_PER_PLAYER_LIMIT),
+    );
+  }
+
+  const structures = roundRobinAssets(
+    structuresByPlayer,
+    SPATIAL_STRUCTURE_LIMIT,
+  );
+  const warships = roundRobinAssets(warshipsByPlayer, SPATIAL_NAVAL_UNIT_LIMIT);
+  const structuresTruncated = structures.length < structuresTotal;
+  const warshipsTruncated = warships.length < warshipsTotal;
+
+  return {
+    analysis: structuresTruncated || warshipsTruncated ? "capped" : "complete",
+    structures,
+    structuresTotal,
+    structuresReturned: structures.length,
+    structuresTruncated,
+    warships,
+    warshipsTotal,
+    warshipsReturned: warships.length,
+    warshipsTruncated,
+  };
+}
+
+function isCompletedPublicAsset(unit: Unit): boolean {
+  return (
+    unit.isActive() &&
+    !unit.isMarkedForDeletion() &&
+    !unit.isUnderConstruction()
+  );
+}
+
+function compareRankedSpatialAsset(
+  a: RankedSpatialAsset,
+  b: RankedSpatialAsset,
+): number {
+  return (
+    a.distanceSquared - b.distanceSquared ||
+    a.asset.tile - b.asset.tile ||
+    (POSITIONED_TYPE_ORDER.get(a.asset.type) ?? Number.MAX_SAFE_INTEGER) -
+      (POSITIONED_TYPE_ORDER.get(b.asset.type) ?? Number.MAX_SAFE_INTEGER) ||
+    a.unitID - b.unitID
+  );
+}
+
+function roundRobinAssets(
+  byPlayer: readonly (readonly RankedSpatialAsset[])[],
+  limit: number,
+): AgentSpatialPositionedAsset[] {
+  const result: AgentSpatialPositionedAsset[] = [];
+  for (let rank = 0; result.length < limit; rank += 1) {
+    let added = false;
+    for (const assets of byPlayer) {
+      const entry = assets[rank];
+      if (entry === undefined) continue;
+      result.push(entry.asset);
+      added = true;
+      if (result.length === limit) break;
+    }
+    if (!added) break;
+  }
+  return result;
+}
+
+function compareCodeUnits(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function rankedSpatialAsset(
+  gameState: Game,
+  unit: Unit,
+  origin: SpatialCentroid,
+): RankedSpatialAsset {
+  const tile = unit.tile();
+  const x = gameState.x(tile);
+  const y = gameState.y(tile);
+  const dx = x - origin.x;
+  const dy = y - origin.y;
+  return {
+    asset: {
+      ownerPlayerID: unit.owner().id(),
+      type: unit.type() as AgentSpatialPositionedAsset["type"],
+      tile,
+      x,
+      y,
+    },
+    distanceSquared: dx * dx + dy * dy,
+    unitID: unit.id(),
+  };
+}
+
+function sharedBorderTerrainBreakdown(
+  gameState: Game,
+  sharedTiles: ReadonlySet<number>,
+): {
+  plains: number;
+  highland: number;
+  mountain: number;
+  shore: number;
+} {
+  const counts = { plains: 0, highland: 0, mountain: 0, shore: 0 };
+  for (const tile of sharedTiles) {
+    if (gameState.isShore(tile)) counts.shore += 1;
+    switch (gameState.terrainType(tile)) {
+      case TerrainType.Highland:
+        counts.highland += 1;
+        break;
+      case TerrainType.Mountain:
+        counts.mountain += 1;
+        break;
+      default:
+        counts.plains += 1;
+        break;
+    }
+  }
+  return counts;
 }
 
 function sharedBorderTerrain(
@@ -681,13 +914,14 @@ function spatialBriefing(
         b.border.shareOfYourBorder - a.border.shareOfYourBorder ||
         a.border.defensePostsCovering - b.border.defensePostsCovering ||
         b.troopMultiple - a.troopMultiple ||
-        a.visible.playerID.localeCompare(b.visible.playerID),
+        compareCodeUnits(a.visible.playerID, b.visible.playerID),
     );
   const notes = exposures.slice(0, 3).map(({ visible, border }, index) => {
     const direction = visible.bearing ? `${visible.bearing} ` : "";
     const troopText = troopComparison(player.troops(), visible.troops);
     const attackText = border.underAttackHere ? ", active incoming attack" : "";
-    return `Spatial exposure ${index + 1}: your ${direction}border with ${visible.name} spans ${border.tiles} tiles (${border.shareOfYourBorder}% of your player frontier, ${border.defensePostsCovering} defense posts${attackText}; ${troopText}).`;
+    const terrain = dominantFrontTerrain(border.terrainBreakdown);
+    return `Spatial exposure ${index + 1}: your ${direction}border with ${visible.name} spans ${border.tiles} tiles (${border.shareOfYourBorder}% of your player frontier, mostly ${terrain}, ${border.defensePostsCovering} defense posts${attackText}; ${troopText}).`;
   });
 
   if (notes.length < 3) {
@@ -700,7 +934,8 @@ function spatialBriefing(
       )
       .sort(
         (a, b) =>
-          b.tilesOwned - a.tilesOwned || a.playerID.localeCompare(b.playerID),
+          b.tilesOwned - a.tilesOwned ||
+          compareCodeUnits(a.playerID, b.playerID),
       )[0];
     if (leader !== undefined) {
       notes.push(
@@ -709,6 +944,15 @@ function spatialBriefing(
     }
   }
   return notes.slice(0, 3);
+}
+
+function dominantFrontTerrain(
+  terrain: AgentBorderTerrainBreakdown,
+): "plains" | "highland" | "mountain" | "shore" {
+  const ordered = ["plains", "highland", "mountain", "shore"] as const;
+  return ordered.reduce((best, candidate) =>
+    terrain[candidate] > terrain[best] ? candidate : best,
+  );
 }
 
 function troopComparison(ownTroops: number, rivalTroops: number): string {

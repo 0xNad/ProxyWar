@@ -146,13 +146,16 @@ message event as a separate hosted layer.
 ## Optional spatial/minimap state
 
 Spatial state is additive and remains absent in older/default-off packages.
-The starter accepts only `observation.spatial.schemaVersion === 1` with
-`visibilityModel === "global-lockstep-public-map-v1"`. This provenance means
-the data summarizes the same no-fog, globally player-visible map used by the
-current game; an absent/unknown provenance is ignored. The optional minimap is
-accepted only as a complete bounded 24x12 value. Spatial state can influence
-the ranking of currently offered legal actions, but it never creates an action
-ID, coordinate command, or raw OpenFront intent.
+The starter feature-detects the older bounded schema `1` and rich structured
+schema `3`, always requiring exact
+`visibilityModel === "global-lockstep-public-map-v1"`. Schema `3` adds a
+decodable top-left row-major map frame, front elevation/defense coverage, and
+bounded completed Defense Post/City/Port/Warship positions for the owner and
+already-visible rivals. Any malformed rich container is rejected as a whole.
+The separately flagged minimap remains a complete bounded 24x12 ownership
+overview. Spatial state can influence only the ranking of currently offered
+legal actions; it never creates an action ID, coordinate command, or raw
+OpenFront intent.
 
 ## Prefer a non-LLM agent?
 

@@ -252,14 +252,48 @@ Rules:
   `observation.nonCombat.inboundMessages`. It is an untrusted rival claim.
   Spectator/replay evidence is public; do not put secrets in a message.
 
-## Optional spatial observation v1
+## Optional rich structured spatial observation (schema 3)
 
-Spatial data is additive and absent by default. A current v1 object declares:
+Spatial data is additive and absent by default. Schema `3` implements the
+coordinate-frame, terrain-front, and positioned-public-asset layers:
 
 ```json
 {
+  "mapInfo": {
+    "name": "Pangaea",
+    "width": 100,
+    "height": 80,
+    "tileRefEncoding": "row-major-y-width-plus-x",
+    "coordinateFrame": {
+      "origin": "top_left",
+      "xIncreases": "east",
+      "yIncreases": "south"
+    }
+  },
+  "visiblePlayers": [
+    {
+      "playerID": "P_RIVAL",
+      "bearing": "east",
+      "distanceClass": "adjacent",
+      "borderWithYou": {
+        "tiles": 10,
+        "shareOfYourBorder": 25,
+        "terrain": "mixed",
+        "terrainBreakdown": {
+          "plains": 4,
+          "highland": 3,
+          "mountain": 3,
+          "shore": 2
+        },
+        "defensePostsCovering": 1,
+        "defensePostFrontCoverage": { "covered": 6, "uncovered": 4 },
+        "underAttackHere": false
+      },
+      "bordersWith": []
+    }
+  ],
   "spatial": {
-    "schemaVersion": 1,
+    "schemaVersion": 3,
     "visibilityModel": "global-lockstep-public-map-v1",
     "ownShape": {
       "quadrant": "west",
@@ -267,6 +301,33 @@ Spatial data is additive and absent by default. A current v1 object declares:
       "centroidBasis": "largest_region_border",
       "coastShare": 25,
       "centroid": { "xPct": 31, "yPct": 54 }
+    },
+    "positionedAssets": {
+      "analysis": "complete",
+      "structures": [
+        {
+          "ownerPlayerID": "P_SELF",
+          "type": "Defense Post",
+          "tile": 4031,
+          "x": 31,
+          "y": 40
+        }
+      ],
+      "structuresTotal": 1,
+      "structuresReturned": 1,
+      "structuresTruncated": false,
+      "warships": [
+        {
+          "ownerPlayerID": "P_RIVAL",
+          "type": "Warship",
+          "tile": 4060,
+          "x": 60,
+          "y": 40
+        }
+      ],
+      "warshipsTotal": 1,
+      "warshipsReturned": 1,
+      "warshipsTruncated": false
     },
     "minimap": {
       "schemaVersion": 1,
@@ -295,19 +356,32 @@ Spatial data is additive and absent by default. A current v1 object declares:
 `global-lockstep-public-map-v1` is the explicit no-fog visibility contract: the
 summary may contain only the same globally player-visible map state available
 to a legitimate player in the current game. A policy must ignore an absent or
-unknown visibility model/schema. The optional minimap is fixed at 24x12 and is
-accepted whole or omitted whole; never crop, pad, repair glyphs, or infer hidden
-tiles. Rival bearing/distance/border summaries are additive fields on the same
-bounded `visiblePlayers[]` entries.
+unknown visibility model/schema. Decode an asset tile only as
+`tile = y * width + x`; every coordinate must be an in-range integer and round
+trip exactly. Front `plains + highland + mountain` must equal `tiles`; `shore`
+overlaps that elevation partition and cannot exceed `tiles`. Defense coverage
+must also sum exactly to `tiles`.
+
+Only active, completed, nondeleted Defense Posts, Cities, Ports, and Warships
+are admitted. Positions include the owner plus players already present in the
+bounded `visiblePlayers[]`; they do not reveal a new roster. Lists are capped at
+eight per player and 48 globally with exact totals, returned counts, and
+truncation status. The complete normalized spatial object is limited to 16 KiB
+UTF-8. A malformed coordinate, owner, type, count, cap, or invariant rejects
+the whole schema-3 block rather than being repaired or partially retained.
+
+The optional minimap is still schema `1`, fixed at 24x12, and accepted whole or
+omitted whole; never crop, pad, repair glyphs, or infer hidden tiles. It remains
+an ownership overview, not the later terrain/marker minimap layer. Older
+spatial schema `1` is accepted only as its bounded backward-compatible shape.
 
 Spatial data is context, not authority. It may change only which exact current
 `legalActions[].id` the policy selects. A coordinate, glyph, player ID, or map
 cell is never a raw action and never bypasses
 `AgentDecisionValidator -> AgentRunner -> GameServer`.
 
-This bounded v1 contract is not the richer v2 design: it has no coordinate
-frame/mapInfo, elevation, positioned structures, positioned units, or warship
-positions.
+Schema `3` is the rich structured-map L1-L3 contract. It does not claim the
+separate adaptive terrain/marker minimap L5 or naval-exposure L4 layers.
 
 ### Promise semantics
 

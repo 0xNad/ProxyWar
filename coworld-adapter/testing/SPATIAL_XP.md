@@ -71,6 +71,13 @@ summarize only that common state:
 - public player identities, ownership borders, relative bearing and distance,
   public alliances, and observer-relative live attack state already present in
   the observation;
+- the public map name/dimensions and exact top-left row-major coordinate frame;
+- plains/highland/mountain counts plus overlapping shore count on each shared
+  front, and exact covered/uncovered front counts from completed own defense
+  posts;
+- active, completed, nondeleted Defense Posts, Cities, Ports, and Warships for
+  the owner plus players already in `visiblePlayers`, capped at eight per
+  player and 48 per asset class with explicit totals/truncation;
 - the same public ownership/terrain grid reduced deterministically to a 24 by
   12 minimap.
 
@@ -80,6 +87,12 @@ It deliberately omits redundant display names: the observing name remains in
 exact player ID. IDs and glyphs are never truncated or rewritten. This keeps a
 25-seat boundary fixture with eight-character IDs below the 2 KiB minimap cap
 without losing identity linkage.
+
+This candidate is a rich **structured map** plus the existing ownership
+minimap. It does not implement the separately designed terrain/structure-marker
+minimap L5. An unqualified rich-minimap claim remains blocked until that child
+schema has its own serialization cap, 25-seat boundary, prompt/memory gate, and
+hosted matched-use proof.
 
 It must not expose seeds, command queues, private agent memory or prompts,
 future intents, hidden server state, or any field from a future fog/private
@@ -105,11 +118,14 @@ The checked-in benchmark and prompt matrix enforce these exact ceilings:
 | Serialized minimap               |        2 KiB |
 | Spatial prompt increment         |       24 KiB |
 | Estimated prompt-token increment | 8,192 tokens |
+| 16-seat all-on prompt growth     |          10% |
 
 The off arm must remain byte-identical to pre-spatial observation and starter
 telemetry. The on arm must be deterministic for the same state, bounded under
 the table above, and accepted by the public-source-of-truth starter only when
-both `schemaVersion: 1` and the exact visibility model are present.
+schema `3` and the exact visibility model are present. The starter also retains
+strict schema-`1` backward compatibility, but only schema `3` carries the rich
+map frame, terrain fronts, and positioned assets.
 
 ## Hosted matched proof gate
 
@@ -117,8 +133,9 @@ Use identical map, seed, player roster, frozen policy versions, episode index,
 and balanced seats in both arms. Before claiming a useful behavioral effect,
 retain evidence that:
 
-1. the off arm reports no spatial state, while the on arm reports schema 1,
-   the exact visibility model, and a minimap;
+1. the off arm reports no spatial state, while the on arm reports schema `3`,
+   the exact visibility model, coordinate frame, terrain/coverage, completed
+   public positioned assets, and the ownership minimap;
 2. both arms receive the same offered legal-action IDs at each matched state;
 3. any changed choice is still an exact offered ID and is accepted through the
    canonical validator/runner path;

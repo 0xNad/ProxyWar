@@ -58,6 +58,12 @@ export function isWithinOwnerSpatialSerializationCeiling(
 export function boundedSpatialV1(
   observation: unknown,
 ): Record<string, unknown> | null;
+export function boundedSpatialV3(
+  observation: unknown,
+): Record<string, unknown> | null;
+export function boundedSpatialObservation(
+  observation: unknown,
+): Record<string, unknown> | null;
 export function rankOfferedActionsWithSpatial<T>(
   actions: T[],
   observation: unknown,

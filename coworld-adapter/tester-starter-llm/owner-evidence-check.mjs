@@ -323,7 +323,7 @@ function spatialChecks(events, required) {
     (candidate) => candidate.present === true,
   )) {
     if (
-      event.schemaVersion !== 1 ||
+      ![1, 3].includes(event.schemaVersion) ||
       event.visibilityModel !== "global-lockstep-public-map-v1" ||
       !Number.isSafeInteger(event.serializedUTF8Bytes) ||
       event.serializedUTF8Bytes < 1 ||

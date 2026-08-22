@@ -7,7 +7,10 @@ import {
   profilePlaybook,
 } from "./AgentPlaybook";
 import {
+  SPATIAL_MINIMAP_HEIGHT,
+  SPATIAL_MINIMAP_WIDTH,
   SPATIAL_NOTE_PREFIX,
+  SPATIAL_STAGE_ONE_SERIALIZED_MAX_BYTES,
   SPATIAL_VISIBILITY_MODEL,
 } from "./AgentSpatialObservation";
 import {
@@ -32,6 +35,277 @@ export interface BuildLlmPromptInput {
   observation: AgentObservation;
   legalActions: LegalAction[];
   personality?: string;
+}
+
+function isNonnegativeSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function isPercentage(value: unknown): value is number {
+  return isNonnegativeSafeInteger(value) && value <= 100;
+}
+
+function isBoundedID(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 200;
+}
+
+function isAcceptedMinimapV1(minimap: unknown): boolean {
+  if (minimap === undefined) return true;
+  const candidate = minimap as {
+    schemaVersion?: unknown;
+    width?: unknown;
+    height?: unknown;
+    rows?: unknown;
+    legend?: unknown;
+  };
+  if (
+    candidate.schemaVersion !== 1 ||
+    candidate.width !== SPATIAL_MINIMAP_WIDTH ||
+    candidate.height !== SPATIAL_MINIMAP_HEIGHT ||
+    !Array.isArray(candidate.rows) ||
+    candidate.rows.length !== SPATIAL_MINIMAP_HEIGHT ||
+    !candidate.rows.every(
+      (row) =>
+        typeof row === "string" &&
+        row.length === SPATIAL_MINIMAP_WIDTH &&
+        /^[.~A-Za-z0-9@#]+$/.test(row),
+    ) ||
+    !Array.isArray(candidate.legend) ||
+    candidate.legend.length > 64
+  ) {
+    return false;
+  }
+  const glyphs = new Set<string>();
+  const playerIDs = new Set<string>();
+  for (const rawEntry of candidate.legend) {
+    const entry = rawEntry as {
+      glyph?: unknown;
+      playerID?: unknown;
+      isYou?: unknown;
+    };
+    if (
+      typeof entry.glyph !== "string" ||
+      !/^[A-Za-z0-9@#]$/.test(entry.glyph) ||
+      !isBoundedID(entry.playerID) ||
+      typeof entry.isYou !== "boolean" ||
+      glyphs.has(entry.glyph) ||
+      playerIDs.has(entry.playerID)
+    ) {
+      return false;
+    }
+    glyphs.add(entry.glyph);
+    playerIDs.add(entry.playerID);
+  }
+  return candidate.rows.every((row) =>
+    [...(row as string)].every(
+      (glyph) => glyph === "." || glyph === "~" || glyphs.has(glyph),
+    ),
+  );
+}
+
+function isAcceptedSpatialV3(observation: AgentObservation): boolean {
+  const spatial = observation.spatial;
+  const mapInfo = observation.mapInfo;
+  try {
+    if (
+      spatial?.schemaVersion !== 3 ||
+      spatial.visibilityModel !== SPATIAL_VISIBILITY_MODEL ||
+      typeof mapInfo?.name !== "string" ||
+      mapInfo.name.length === 0 ||
+      mapInfo.name.length > 120 ||
+      !Number.isSafeInteger(mapInfo.width) ||
+      mapInfo.width <= 0 ||
+      mapInfo.width > 100_000 ||
+      !Number.isSafeInteger(mapInfo.height) ||
+      mapInfo.height <= 0 ||
+      mapInfo.height > 100_000 ||
+      !Number.isSafeInteger(mapInfo.width * mapInfo.height) ||
+      mapInfo.tileRefEncoding !== "row-major-y-width-plus-x" ||
+      mapInfo.coordinateFrame?.origin !== "top_left" ||
+      mapInfo.coordinateFrame.xIncreases !== "east" ||
+      mapInfo.coordinateFrame.yIncreases !== "south" ||
+      !isBoundedID(observation.ownState?.playerID) ||
+      observation.visiblePlayers.length > 64 ||
+      !isAcceptedMinimapV1(spatial.minimap)
+    ) {
+      return false;
+    }
+
+    const ownShape = spatial.ownShape;
+    if (
+      ![
+        "northwest",
+        "north",
+        "northeast",
+        "west",
+        "center",
+        "east",
+        "southwest",
+        "south",
+        "southeast",
+      ].includes(ownShape.quadrant) ||
+      !["complete", "omitted_budget"].includes(ownShape.regionAnalysis) ||
+      !["largest_region_border", "all_border_budget_fallback"].includes(
+        ownShape.centroidBasis,
+      ) ||
+      (ownShape.compactness !== undefined &&
+        !["compact", "stretched", "fragmented"].includes(
+          ownShape.compactness,
+        )) ||
+      (ownShape.regionCount !== undefined &&
+        !isNonnegativeSafeInteger(ownShape.regionCount)) ||
+      (ownShape.largestRegionShare !== undefined &&
+        !isPercentage(ownShape.largestRegionShare)) ||
+      !isPercentage(ownShape.coastShare) ||
+      !isPercentage(ownShape.centroid?.xPct) ||
+      !isPercentage(ownShape.centroid?.yPct)
+    ) {
+      return false;
+    }
+
+    const positioned = spatial.positionedAssets;
+    if (
+      positioned === undefined ||
+      !Array.isArray(positioned.structures) ||
+      !Array.isArray(positioned.warships) ||
+      !["complete", "capped"].includes(positioned.analysis) ||
+      positioned.structures.length > 48 ||
+      positioned.warships.length > 48 ||
+      positioned.structuresReturned !== positioned.structures.length ||
+      positioned.warshipsReturned !== positioned.warships.length ||
+      positioned.structuresTotal < positioned.structures.length ||
+      positioned.warshipsTotal < positioned.warships.length ||
+      positioned.structuresTruncated !==
+        positioned.structures.length < positioned.structuresTotal ||
+      positioned.warshipsTruncated !==
+        positioned.warships.length < positioned.warshipsTotal ||
+      (positioned.analysis === "complete" &&
+        (positioned.structuresTruncated || positioned.warshipsTruncated)) ||
+      (positioned.analysis === "capped" &&
+        !positioned.structuresTruncated &&
+        !positioned.warshipsTruncated)
+    ) {
+      return false;
+    }
+    const allowedPlayerIDs = new Set([
+      observation.ownState.playerID,
+      ...observation.visiblePlayers.map((player) => player.playerID),
+    ]);
+    if (
+      allowedPlayerIDs.size !== observation.visiblePlayers.length + 1 ||
+      ![...allowedPlayerIDs].every(isBoundedID)
+    ) {
+      return false;
+    }
+    const seenAssets = new Set<string>();
+    const perPlayerStructures = new Map<string, number>();
+    const perPlayerWarships = new Map<string, number>();
+    const validateAssets = (
+      assets: typeof positioned.structures,
+      allowedTypes: ReadonlySet<string>,
+      counts: Map<string, number>,
+    ): boolean =>
+      assets.every((asset) => {
+        const count = (counts.get(asset.ownerPlayerID) ?? 0) + 1;
+        counts.set(asset.ownerPlayerID, count);
+        const key = `${asset.ownerPlayerID}\u0000${asset.type}\u0000${asset.tile}`;
+        const valid =
+          allowedPlayerIDs.has(asset.ownerPlayerID) &&
+          allowedTypes.has(asset.type) &&
+          count <= 8 &&
+          isNonnegativeSafeInteger(asset.tile) &&
+          asset.tile < mapInfo.width * mapInfo.height &&
+          isNonnegativeSafeInteger(asset.x) &&
+          asset.x < mapInfo.width &&
+          isNonnegativeSafeInteger(asset.y) &&
+          asset.y < mapInfo.height &&
+          asset.tile === asset.y * mapInfo.width + asset.x &&
+          !seenAssets.has(key);
+        seenAssets.add(key);
+        return valid;
+      });
+    if (
+      !validateAssets(
+        positioned.structures,
+        new Set(["Defense Post", "City", "Port"]),
+        perPlayerStructures,
+      ) ||
+      !validateAssets(
+        positioned.warships,
+        new Set(["Warship"]),
+        perPlayerWarships,
+      )
+    ) {
+      return false;
+    }
+
+    const validBearings = new Set([
+      "north",
+      "northeast",
+      "east",
+      "southeast",
+      "south",
+      "southwest",
+      "west",
+      "northwest",
+    ]);
+    for (const player of observation.visiblePlayers) {
+      if (
+        (player.bearing !== undefined && !validBearings.has(player.bearing)) ||
+        (player.distanceClass !== undefined &&
+          !["adjacent", "near", "far"].includes(player.distanceClass)) ||
+        (player.bordersWith !== undefined &&
+          (!Array.isArray(player.bordersWith) ||
+            player.bordersWith.length > 64 ||
+            !player.bordersWith.every(
+              (edge) =>
+                isBoundedID(edge.playerID) &&
+                allowedPlayerIDs.has(edge.playerID) &&
+                ["minor", "major"].includes(edge.sizeClass),
+            )))
+      ) {
+        return false;
+      }
+      const border = player.borderWithYou;
+      if (border === undefined) continue;
+      const terrain = border.terrainBreakdown;
+      const coverage = border.defensePostFrontCoverage;
+      if (
+        !isNonnegativeSafeInteger(border.tiles) ||
+        !isPercentage(border.shareOfYourBorder) ||
+        !["land", "coastal", "mixed"].includes(border.terrain) ||
+        !isNonnegativeSafeInteger(border.defensePostsCovering) ||
+        typeof border.underAttackHere !== "boolean" ||
+        !isNonnegativeSafeInteger(terrain?.plains) ||
+        !isNonnegativeSafeInteger(terrain?.highland) ||
+        !isNonnegativeSafeInteger(terrain?.mountain) ||
+        !isNonnegativeSafeInteger(terrain?.shore) ||
+        terrain.plains + terrain.highland + terrain.mountain !== border.tiles ||
+        terrain.shore > border.tiles ||
+        !isNonnegativeSafeInteger(coverage?.covered) ||
+        !isNonnegativeSafeInteger(coverage?.uncovered) ||
+        coverage.covered + coverage.uncovered !== border.tiles
+      ) {
+        return false;
+      }
+    }
+    const stageOneBytes = new TextEncoder().encode(
+      JSON.stringify({
+        mapInfo,
+        spatial: { ...spatial, minimap: undefined },
+        visiblePlayers: observation.visiblePlayers.map((player) => ({
+          playerID: player.playerID,
+          bearing: player.bearing,
+          distanceClass: player.distanceClass,
+          borderWithYou: player.borderWithYou,
+          bordersWith: player.bordersWith,
+        })),
+      }),
+    ).byteLength;
+    return stageOneBytes <= SPATIAL_STAGE_ONE_SERIALIZED_MAX_BYTES;
+  } catch {
+    return false;
+  }
 }
 
 export class LlmPromptBuilder {
@@ -206,9 +480,7 @@ export class LlmPromptBuilder {
     observation: AgentObservation,
     includeDeals: boolean,
   ) {
-    const spatialAccepted =
-      observation.spatial?.schemaVersion === 1 &&
-      observation.spatial.visibilityModel === SPATIAL_VISIBILITY_MODEL;
+    const spatialAccepted = isAcceptedSpatialV3(observation);
     return {
       agentID: observation.agentID,
       username: sanitizeUntrustedDisplayString(observation.username),
@@ -218,6 +490,10 @@ export class LlmPromptBuilder {
       turnNumber: observation.turnNumber,
       tick: observation.tick,
       ownState: observation.ownState,
+      mapInfo:
+        spatialAccepted && observation.mapInfo !== undefined
+          ? { ...observation.mapInfo }
+          : undefined,
       spatial:
         !spatialAccepted || observation.spatial === undefined
           ? undefined
@@ -225,6 +501,15 @@ export class LlmPromptBuilder {
               schemaVersion: observation.spatial.schemaVersion,
               visibilityModel: observation.spatial.visibilityModel,
               ownShape: observation.spatial.ownShape,
+              positionedAssets: {
+                ...observation.spatial.positionedAssets,
+                structures: observation.spatial.positionedAssets.structures.map(
+                  (asset) => ({ ...asset }),
+                ),
+                warships: observation.spatial.positionedAssets.warships.map(
+                  (asset) => ({ ...asset }),
+                ),
+              },
               ...(observation.spatial.minimap !== undefined
                 ? {
                     minimap: {

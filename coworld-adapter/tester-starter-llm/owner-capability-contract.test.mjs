@@ -6,7 +6,9 @@ import {
   OWNER_SPATIAL_SERIALIZED_MAX_BYTES,
   SPATIAL_VISIBILITY_MODEL,
   advertisedMessageLimit,
+  boundedSpatialObservation,
   boundedSpatialV1,
+  boundedSpatialV3,
   createOwnerCapabilityEvidenceLogger,
   dealResponseFields,
   isWithinOwnerSpatialSerializationCeiling,
@@ -204,6 +206,83 @@ function spatialObservation(minimap = undefined) {
           defensePostsCovering: 2,
           underAttackHere: true,
         },
+      },
+    ],
+  };
+}
+
+function richSpatialObservation() {
+  return {
+    ownState: { playerID: "P_SELF" },
+    mapInfo: {
+      name: "Pangaea",
+      width: 100,
+      height: 80,
+      tileRefEncoding: "row-major-y-width-plus-x",
+      coordinateFrame: {
+        origin: "top_left",
+        xIncreases: "east",
+        yIncreases: "south",
+      },
+    },
+    spatial: {
+      schemaVersion: 3,
+      visibilityModel: SPATIAL_VISIBILITY_MODEL,
+      ownShape: {
+        quadrant: "west",
+        regionAnalysis: "complete",
+        centroidBasis: "largest_region_border",
+        coastShare: 25,
+        centroid: { xPct: 30, yPct: 50 },
+      },
+      positionedAssets: {
+        analysis: "complete",
+        structures: [
+          {
+            ownerPlayerID: "P_SELF",
+            type: "Defense Post",
+            tile: 3025,
+            x: 25,
+            y: 30,
+          },
+        ],
+        structuresTotal: 1,
+        structuresReturned: 1,
+        structuresTruncated: false,
+        warships: [
+          {
+            ownerPlayerID: "P_A",
+            type: "Warship",
+            tile: 3060,
+            x: 60,
+            y: 30,
+          },
+        ],
+        warshipsTotal: 1,
+        warshipsReturned: 1,
+        warshipsTruncated: false,
+      },
+    },
+    visiblePlayers: [
+      {
+        playerID: "P_A",
+        bearing: "east",
+        distanceClass: "adjacent",
+        borderWithYou: {
+          tiles: 10,
+          shareOfYourBorder: 25,
+          terrain: "mixed",
+          terrainBreakdown: {
+            plains: 4,
+            highland: 3,
+            mountain: 3,
+            shore: 2,
+          },
+          defensePostsCovering: 1,
+          defensePostFrontCoverage: { covered: 6, uncovered: 4 },
+          underAttackHere: false,
+        },
+        bordersWith: [],
       },
     ],
   };
@@ -408,6 +487,125 @@ test("spatial serialization has an exact UTF-8 byte ceiling", () => {
     })),
   }));
   assert.equal(boundedSpatialV1(oversized), null);
+});
+
+test("rich spatial L3 is exact, bounded, and fails closed atomically", () => {
+  const valid = richSpatialObservation();
+  const bounded = boundedSpatialV3(valid);
+  assert.ok(bounded);
+  assert.equal(bounded.schemaVersion, 3);
+  assert.deepEqual(bounded.mapInfo, valid.mapInfo);
+  assert.deepEqual(bounded.positionedAssets, valid.spatial.positionedAssets);
+  assert.deepEqual(boundedSpatialObservation(valid), bounded);
+  assert.equal(
+    boundedSpatialObservation(spatialObservation()).schemaVersion,
+    1,
+  );
+
+  const mutations = [
+    (value) => {
+      value.mapInfo.coordinateFrame.origin = "bottom_left";
+    },
+    (value) => {
+      value.spatial.positionedAssets.warships[0].tile = 3_061;
+    },
+    (value) => {
+      value.spatial.positionedAssets.structures[0].type = "Missile Silo";
+    },
+    (value) => {
+      value.spatial.positionedAssets.structuresReturned = 0;
+    },
+    (value) => {
+      value.spatial.positionedAssets.analysis = "capped";
+    },
+    (value) => {
+      value.visiblePlayers[0].borderWithYou.terrainBreakdown.plains = 5;
+    },
+    (value) => {
+      value.visiblePlayers[0].borderWithYou.defensePostFrontCoverage.covered = 7;
+    },
+    (value) => {
+      value.visiblePlayers.push(structuredClone(value.visiblePlayers[0]));
+    },
+    (value) => {
+      value.visiblePlayers[0].bordersWith = [
+        { playerID: "P_HIDDEN", sizeClass: "minor" },
+      ];
+    },
+  ];
+  for (const mutate of mutations) {
+    const malformed = structuredClone(valid);
+    mutate(malformed);
+    assert.equal(boundedSpatialV3(malformed), null);
+  }
+
+  const tooManyPerPlayer = structuredClone(valid);
+  tooManyPerPlayer.spatial.positionedAssets.structures = Array.from(
+    { length: 9 },
+    (_, index) => ({
+      ownerPlayerID: "P_SELF",
+      type: "City",
+      tile: index,
+      x: index,
+      y: 0,
+    }),
+  );
+  tooManyPerPlayer.spatial.positionedAssets.structuresTotal = 9;
+  tooManyPerPlayer.spatial.positionedAssets.structuresReturned = 9;
+  assert.equal(boundedSpatialV3(tooManyPerPlayer), null);
+
+  const malformedMinimap = structuredClone(valid);
+  malformedMinimap.spatial.minimap = {
+    schemaVersion: 1,
+    width: 24,
+    height: 12,
+    rows: Array.from({ length: 12 }, () => "A".repeat(24)),
+    legend: [{ glyph: "A", playerID: "P_A", isYou: false }],
+  };
+  malformedMinimap.spatial.minimap.rows[0] = `?${malformedMinimap.spatial.minimap.rows[0].slice(1)}`;
+  assert.ok(boundedSpatialV3(malformedMinimap));
+  assert.equal("minimap" in boundedSpatialV3(malformedMinimap), false);
+});
+
+test("rich spatial facts can only rerank exact offered legal action ids", () => {
+  const observation = richSpatialObservation();
+  observation.visiblePlayers.push({
+    ...structuredClone(observation.visiblePlayers[0]),
+    playerID: "P_B",
+  });
+  observation.spatial.positionedAssets.warships = [];
+  observation.spatial.positionedAssets.warshipsTotal = 0;
+  observation.spatial.positionedAssets.warshipsReturned = 0;
+  const actions = [
+    { id: "attack:P_A", kind: "attack", metadata: { targetID: "P_A" } },
+    { id: "attack:P_B", kind: "attack", metadata: { targetID: "P_B" } },
+  ];
+  assert.equal(
+    rankOfferedActionsWithSpatial(actions, observation)[0],
+    actions[0],
+  );
+
+  observation.spatial.positionedAssets.warships = Array.from(
+    { length: 8 },
+    (_, index) => ({
+      ownerPlayerID: "P_B",
+      type: "Warship",
+      tile: 4_000 + index,
+      x: index,
+      y: 40,
+    }),
+  );
+  observation.spatial.positionedAssets.warshipsTotal = 8;
+  observation.spatial.positionedAssets.warshipsReturned = 8;
+  assert.equal(
+    rankOfferedActionsWithSpatial(actions, observation)[0],
+    actions[1],
+  );
+  assert.ok(
+    rankOfferedActionsWithSpatial(actions, observation).every((action) =>
+      actions.includes(action),
+    ),
+  );
 });
 
 test("capability evidence is bounded, joinable, and contains no raw body", () => {

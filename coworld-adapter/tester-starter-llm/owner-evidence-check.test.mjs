@@ -63,7 +63,7 @@ function validEvents() {
   ];
 }
 
-function runChecker(events) {
+function runChecker(events, spatial = "absent") {
   const directory = mkdtempSync(
     path.join(tmpdir(), "proxywar-owner-evidence-"),
   );
@@ -79,7 +79,7 @@ function runChecker(events) {
       CHECKER,
       "--deals=required",
       "--messages=required",
-      "--spatial=absent",
+      `--spatial=${spatial}`,
       log,
     ],
     {
@@ -89,6 +89,20 @@ function runChecker(events) {
   rmSync(directory, { recursive: true, force: true });
   return result;
 }
+
+test("owner evidence checker accepts bounded rich spatial provenance", () => {
+  const events = validEvents();
+  Object.assign(events[2], {
+    present: true,
+    schemaVersion: 3,
+    visibilityModel: "global-lockstep-public-map-v1",
+    minimapPresent: true,
+    serializedUTF8Bytes: 8_192,
+  });
+  const result = runChecker(events, "present");
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).spatial, "present");
+});
 
 test("owner evidence checker accepts exact bounded joined evidence", () => {
   const result = runChecker(validEvents());

@@ -51,7 +51,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { boundedSpatialV1 } from "../../coworld-adapter/tester-starter-llm/owner-capabilities.mjs";
+import { boundedSpatialObservation } from "../../coworld-adapter/tester-starter-llm/owner-capabilities.mjs";
 import { SpawnExecution } from "../../src/core/execution/SpawnExecution";
 import type { Game, Player } from "../../src/core/game/Game";
 import { PlayerInfo, PlayerType, UnitType } from "../../src/core/game/Game";
@@ -66,6 +66,7 @@ import {
   SPATIAL_MINIMAP_SERIALIZED_MAX_BYTES,
   SPATIAL_PROMPT_INCREMENT_MAX_BYTES,
   SPATIAL_PROMPT_INCREMENT_MAX_ESTIMATED_TOKENS,
+  SPATIAL_PROMPT_INCREMENT_MAX_RATIO_AT_16_SEATS,
   SPATIAL_STAGE_ONE_SERIALIZED_MAX_BYTES,
 } from "../../src/server/agents/AgentSpatialObservation";
 import { selectSpawnSlots } from "../../src/server/agents/AgentSpawnAssignment";
@@ -473,7 +474,7 @@ ${extract("normalizeDealPolicies")}
 ${extract("buildState")}
 return buildState;`,
   );
-  return factory(boundedSpatialV1) as StarterBuildState;
+  return factory(boundedSpatialObservation) as StarterBuildState;
 }
 
 export interface ArmMeasurement {
@@ -756,11 +757,15 @@ async function main(): Promise<void> {
         spatialBlockBytes: spatial.spatialBytes,
         minimapBlockBytes: minimap.minimapBytes,
         promptIncrementBytes: minimap.promptBytes - measurement.promptBytes,
+        promptGrowthRatio:
+          (minimap.promptBytes - measurement.promptBytes) /
+          measurement.promptBytes,
         estimatedTokenIncrement:
           minimap.estTokensHigh - measurement.estTokensHigh,
       },
     ];
   });
+  const spatialRowsAt16Seats = spatialRows.filter((row) => row.seats === 16);
   const spatialGate = {
     rows: spatialRows,
     maxima: {
@@ -779,6 +784,12 @@ async function main(): Promise<void> {
       promptIncrementBytes: Math.max(
         ...spatialRows.map((row) => row.promptIncrementBytes),
       ),
+      promptGrowthRatioAt16Seats:
+        spatialRowsAt16Seats.length === 0
+          ? null
+          : Math.max(
+              ...spatialRowsAt16Seats.map((row) => row.promptGrowthRatio),
+            ),
       estimatedTokenIncrement: Math.max(
         ...spatialRows.map((row) => row.estimatedTokenIncrement),
       ),
@@ -802,6 +813,13 @@ async function main(): Promise<void> {
           row.estimatedTokenIncrement <=
           SPATIAL_PROMPT_INCREMENT_MAX_ESTIMATED_TOKENS,
       ),
+      promptGrowthAt16Seats:
+        spatialRowsAt16Seats.length > 0 &&
+        spatialRowsAt16Seats.every(
+          (row) =>
+            row.promptGrowthRatio <=
+            SPATIAL_PROMPT_INCREMENT_MAX_RATIO_AT_16_SEATS,
+        ),
     },
   };
   const targetMet =
@@ -820,6 +838,8 @@ async function main(): Promise<void> {
       spatialPromptIncrementMaxBytes: SPATIAL_PROMPT_INCREMENT_MAX_BYTES,
       spatialPromptIncrementMaxEstimatedTokens:
         SPATIAL_PROMPT_INCREMENT_MAX_ESTIMATED_TOKENS,
+      spatialPromptIncrementMaxRatioAt16Seats:
+        SPATIAL_PROMPT_INCREMENT_MAX_RATIO_AT_16_SEATS,
     },
     note:
       "Character counts are exact. Token counts are an estimated RANGE: no " +

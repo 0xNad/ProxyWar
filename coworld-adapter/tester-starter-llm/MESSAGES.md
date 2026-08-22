@@ -106,12 +106,14 @@ what a message is allowed to do:
    **claims**, never merged into `rivals`. A claim cannot be mistaken for
    something the agent actually observed.
 2. The security instruction restricts what a claim may move: deal posture
-   (who to deal with, and whether to break a deal) and nothing else. It may
-   never change what the agent attacks, builds, or targets.
+   (who to deal with, and whether to break a deal). It cannot name or raw-emit
+   an action, and cannot alter `focus`, `preferKinds`, or `target`. Bounded
+   `breakDealIDs` may still change breach posture and thereby change which
+   exact offered action ID the policy selects.
 3. **The planner cannot name an action ID at all.** It returns a posture —
    focus, preferred kinds, deal policies — and the code picks the exact
-   offered ID. So no message can choose your move no matter what the model is
-   talked into.
+   offered ID. A message therefore has no raw-intent or direct action-ID path;
+   any indirect posture effect remains constrained to the offered menu.
 4. Replies come from fixed templates, so a rival can never author your words.
 
 Point 3 is the one that matters. Keep it if you change anything: it is what

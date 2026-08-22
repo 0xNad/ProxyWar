@@ -22,7 +22,7 @@ import { pathToFileURL } from "node:url";
 import { WebSocket } from "ws";
 import {
   advertisedMessageLimit,
-  boundedSpatialV1,
+  boundedSpatialObservation as boundedSpatialV1,
   createOwnerCapabilityEvidenceLogger,
   dealResponseFields,
   messageResponseFields,
@@ -429,9 +429,13 @@ function buildState(obs, actions) {
       .slice(0, 3)
       .map((note) => clean(note, 240));
     spatial = {
-      schemaVersion: 1,
+      schemaVersion: boundedSpatial.schemaVersion,
       visibilityModel: boundedSpatial.visibilityModel,
+      ...(boundedSpatial.mapInfo ? { mapInfo: boundedSpatial.mapInfo } : {}),
       ownShape: boundedSpatial.ownShape,
+      ...(boundedSpatial.positionedAssets
+        ? { positionedAssets: boundedSpatial.positionedAssets }
+        : {}),
       ...(briefing.length ? { briefing } : {}),
       ...(boundedSpatial.minimap ? { minimap: boundedSpatial.minimap } : {}),
     };
@@ -848,7 +852,9 @@ function refreshPlanInBackground(state) {
   if (planRefreshInFlight) return;
   planRefreshInFlight = true;
   plannerSpatialSchemaVersion =
-    state?.spatial?.schemaVersion === 1 ? state.spatial.schemaVersion : 0;
+    state?.spatial?.schemaVersion === 1 || state?.spatial?.schemaVersion === 3
+      ? state.spatial.schemaVersion
+      : 0;
   plannerSpatialMinimap = state?.spatial?.minimap?.schemaVersion === 1;
   plannerSpatialVisibilityModel =
     state?.spatial?.visibilityModel === "global-lockstep-public-map-v1"
