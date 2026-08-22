@@ -336,9 +336,7 @@ function boundedActiveDeal(deal, ownPlayerID, decisionStep) {
       expected.kind === "trade_security") &&
     obligations.some(
       (obligation) =>
-        obligation.status !== "pending" &&
-        obligation.status !== "violated" &&
-        obligation.status !== "moot",
+        obligation.status !== "pending" && obligation.status !== "violated",
     )
   ) {
     return null;

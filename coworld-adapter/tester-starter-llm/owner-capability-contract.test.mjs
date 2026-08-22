@@ -294,6 +294,18 @@ test("deal capability rejects malformed nested state without emitting a slot", (
         {
           ...nap,
           obligations: [
+            { ...nap.obligations[0], status: "moot" },
+            nap.obligations[1],
+          ],
+        },
+      ],
+    },
+    {
+      ...valid,
+      activeDeals: [
+        {
+          ...nap,
+          obligations: [
             { ...nap.obligations[0], status: "fulfilled" },
             nap.obligations[1],
           ],
