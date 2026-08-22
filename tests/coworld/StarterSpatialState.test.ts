@@ -102,13 +102,17 @@ describe("tester-starter-llm spatial state renderer", () => {
       observation: Record<string, unknown>;
     };
     expect(
-      boundedDealsObservation(ownerRequest.observation.deals),
+      boundedDealsObservation(
+        ownerRequest.observation.deals,
+        (ownerRequest.observation.ownState as { playerID: string }).playerID,
+      ),
     ).toMatchObject({
       decisionStep: 42,
       incomingProposals: [
         {
-          dealID: "deal:P_A:P_B:non_aggression_pact:4",
-          proposedAtStep: 42,
+          dealID: "deal:P_B:P_A:non_aggression_pact:41",
+          proposedAtStep: 41,
+          answerableThroughStep: 45,
         },
       ],
     });

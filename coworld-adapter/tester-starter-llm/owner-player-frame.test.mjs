@@ -19,7 +19,7 @@ function holdAction() {
 }
 
 function capabilityRequest() {
-  const dealID = "deal:P_A:P_B:non_aggression_pact:4";
+  const dealID = "deal:P_B:P_A:non_aggression_pact:41";
   return {
     type: "decision_request",
     requestID: "req_owner_contract",
@@ -79,8 +79,8 @@ function capabilityRequest() {
                 template: "non_aggression_pact",
                 durationSteps: 12,
               },
-              proposedAtStep: 42,
-              answerableThroughStep: 43,
+              proposedAtStep: 41,
+              answerableThroughStep: 45,
             },
           ],
           outgoingProposals: [],

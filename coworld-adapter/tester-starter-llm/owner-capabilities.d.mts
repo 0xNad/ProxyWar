@@ -27,6 +27,7 @@ export function isSafeAgentMessageText(
 ): boolean;
 export function boundedDealsObservation(
   deals: unknown,
+  ownPlayerID: unknown,
 ): Record<string, unknown> | null;
 export function boundedInboundMessages(
   observation: unknown,

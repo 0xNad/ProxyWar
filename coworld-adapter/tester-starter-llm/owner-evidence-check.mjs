@@ -191,11 +191,25 @@ function parseArgs(argv) {
     (arg) => arg.startsWith("--") && !knownOptions.has(arg),
   );
   if (unknownOption) fail(`unknown option ${unknownOption}`);
-  const files = argv.filter((arg) => !arg.startsWith("--"));
-  if (files.length === 0)
+  const requestedFiles = argv.filter((arg) => !arg.startsWith("--"));
+  if (requestedFiles.length === 0)
     fail("at least one downloaded policy log is required");
-  if (files.length > MAX_FILES)
+  if (requestedFiles.length > MAX_FILES)
     fail(`at most ${MAX_FILES} policy logs are allowed`);
+  const canonicalFiles = requestedFiles.map((file) => {
+    const canonicalPath = fs.realpathSync(file);
+    const fileStat = fs.statSync(canonicalPath);
+    return {
+      canonicalPath,
+      identity: `${fileStat.dev}:${fileStat.ino}`,
+    };
+  });
+  if (
+    new Set(canonicalFiles.map((file) => file.identity)).size !==
+    canonicalFiles.length
+  )
+    fail("each downloaded policy log must resolve to a unique file");
+  const files = canonicalFiles.map((file) => file.canonicalPath);
   return { deals, files, messages, spatial };
 }
 
@@ -243,7 +257,8 @@ function exactSelectionChecks(events) {
     if (
       (event.kind === "deal_selection" ||
         event.kind === "message_selection" ||
-        event.kind === "message_observation") &&
+        event.kind === "message_observation" ||
+        event.kind === "spatial_observation") &&
       event.selectedLegalActionOffered !== true
     ) {
       fail(`${event.sourceFile}: primary action was not recorded as offered`);
@@ -311,7 +326,7 @@ function joinedMessageChecks(events) {
   }
 }
 
-function spatialChecks(events, required) {
+function spatialChecks(events, required, files) {
   const spatial = events.filter(
     (event) => event.kind === "spatial_observation",
   );
@@ -326,6 +341,13 @@ function spatialChecks(events, required) {
     !spatial.every((event) => event.present === true)
   ) {
     fail("rich spatial evidence included an absent policy observation");
+  }
+  if (["rich-v3", "rich-v3-minimap"].includes(required)) {
+    for (const file of files) {
+      if (!spatial.some((event) => event.sourceFile === file)) {
+        fail(`${file}: rich spatial evidence record is missing`);
+      }
+    }
   }
   if (
     required === "absent" &&
@@ -385,7 +407,7 @@ function main() {
   }
   exactSelectionChecks(events);
   if (messages === "required") joinedMessageChecks(events);
-  spatialChecks(events, spatial);
+  spatialChecks(events, spatial, files);
   process.stdout.write(
     `${JSON.stringify({
       verdict: "PASS",

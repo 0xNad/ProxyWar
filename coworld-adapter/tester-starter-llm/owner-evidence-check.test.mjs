@@ -63,16 +63,23 @@ function validEvents() {
   ];
 }
 
-function runChecker(events, spatial = "absent") {
+function runCheckerFiles(
+  eventSets,
+  spatial = "absent",
+  { aliasFirst = false, duplicateFirst = false } = {},
+) {
   const directory = mkdtempSync(
     path.join(tmpdir(), "proxywar-owner-evidence-"),
   );
-  const log = path.join(directory, "policy.log");
-  writeFileSync(
-    log,
-    `${events.map((event) => `${PREFIX}${JSON.stringify(event)}`).join("\n")}\n`,
-    "utf8",
-  );
+  const logs = eventSets.map((events, index) => {
+    const log = path.join(directory, `policy-${index}.log`);
+    writeFileSync(
+      log,
+      `${events.map((event) => `${PREFIX}${JSON.stringify(event)}`).join("\n")}\n`,
+      "utf8",
+    );
+    return log;
+  });
   const result = spawnSync(
     process.execPath,
     [
@@ -80,7 +87,9 @@ function runChecker(events, spatial = "absent") {
       "--deals=required",
       "--messages=required",
       `--spatial=${spatial}`,
-      log,
+      ...logs,
+      ...(duplicateFirst ? [logs[0]] : []),
+      ...(aliasFirst ? [`${directory}/./policy-0.log`] : []),
     ],
     {
       encoding: "utf8",
@@ -88,6 +97,10 @@ function runChecker(events, spatial = "absent") {
   );
   rmSync(directory, { recursive: true, force: true });
   return result;
+}
+
+function runChecker(events, spatial = "absent") {
+  return runCheckerFiles([events], spatial);
 }
 
 test("owner evidence checker accepts bounded rich spatial provenance", () => {
@@ -152,6 +165,47 @@ test("owner evidence checker rejects incomplete or downgraded rich spatial evide
       /malformed spatial|absent policy|bounded minimap|non-v3|provenance/u,
     );
   }
+});
+
+test("owner evidence checker requires rich spatial evidence in every supplied file", () => {
+  const events = validEvents();
+  for (const event of events.filter(
+    (candidate) => candidate.kind === "spatial_observation",
+  )) {
+    Object.assign(event, {
+      present: true,
+      schemaVersion: 3,
+      visibilityModel: "global-lockstep-public-map-v1",
+      minimapPresent: true,
+      serializedUTF8Bytes: 8_192,
+    });
+  }
+  const missing = runCheckerFiles([events, []], "rich-v3-minimap");
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /record is missing/u);
+
+  const forged = structuredClone(events);
+  forged.find(
+    (event) => event.kind === "spatial_observation",
+  ).selectedLegalActionOffered = false;
+  const notOffered = runChecker(forged, "rich-v3-minimap");
+  assert.equal(notOffered.status, 1);
+  assert.match(
+    notOffered.stderr,
+    /primary action was not recorded as offered/u,
+  );
+
+  const duplicate = runCheckerFiles([events], "rich-v3-minimap", {
+    duplicateFirst: true,
+  });
+  assert.equal(duplicate.status, 1);
+  assert.match(duplicate.stderr, /resolve to a unique file/u);
+
+  const alias = runCheckerFiles([events], "rich-v3-minimap", {
+    aliasFirst: true,
+  });
+  assert.equal(alias.status, 1);
+  assert.match(alias.stderr, /resolve to a unique file/u);
 });
 
 test("owner evidence checker accepts exact bounded joined evidence", () => {

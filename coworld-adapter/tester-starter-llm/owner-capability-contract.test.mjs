@@ -33,6 +33,7 @@ test("deal slot requires observation capability and an exact offered deal id", (
   const args = {
     actions: [primary, deal],
     observation: {
+      ownState: { playerID: "P_A" },
       deals: {
         decisionStep: 4,
         incomingProposals: [],
@@ -65,7 +66,7 @@ test("deal slot requires observation capability and an exact offered deal id", (
   assert.deepEqual(
     dealResponseFields({
       ...args,
-      observation: { deals: [] },
+      observation: { ...args.observation, deals: [] },
       dealMove: deal,
     }),
     {},
@@ -87,7 +88,7 @@ test("deal slot requires observation capability and an exact offered deal id", (
     assert.deepEqual(
       dealResponseFields({
         ...args,
-        observation: { deals: malformed },
+        observation: { ...args.observation, deals: malformed },
         dealMove: deal,
       }),
       {},
@@ -109,7 +110,7 @@ test("deal capability rejects malformed nested state without emitting a slot", (
       troopAmount: 5000,
     },
     proposedAtStep: 4,
-    answerableThroughStep: 6,
+    answerableThroughStep: 8,
   };
   const active = {
     dealID: "deal:P_A:P_B:joint_attack:2",
@@ -132,11 +133,74 @@ test("deal capability rejects malformed nested state without emitting a slot", (
       },
     ],
   };
+  const nap = {
+    dealID: "deal:P_A:P_B:non_aggression_pact:1",
+    template: "non_aggression_pact",
+    proposerPlayerID: "P_A",
+    proposerName: "Agent A",
+    recipientPlayerID: "P_B",
+    recipientName: "Agent B",
+    activeFromStep: 2,
+    expiresAfterStep: 13,
+    stepsRemaining: 7,
+    obligations: [
+      {
+        obligorPlayerID: "P_A",
+        obligorName: "Agent A",
+        kind: "non_aggression",
+        status: "fulfilled",
+      },
+      {
+        obligorPlayerID: "P_B",
+        obligorName: "Agent B",
+        kind: "non_aggression",
+        status: "pending",
+      },
+    ],
+  };
+  const support = {
+    dealID: "deal:P_A:P_B:support_request:0",
+    template: "support_request",
+    proposerPlayerID: "P_A",
+    proposerName: "Agent A",
+    recipientPlayerID: "P_B",
+    recipientName: "Agent B",
+    activeFromStep: 5,
+    expiresAfterStep: 10,
+    stepsRemaining: 4,
+    obligations: [
+      {
+        obligorPlayerID: "P_B",
+        obligorName: "Agent B",
+        kind: "send_support",
+        status: "pending",
+        goldAmount: "50000",
+        troopAmount: 5000,
+        donatedGold: "0",
+        donatedTroops: 0,
+      },
+    ],
+  };
   const valid = {
     decisionStep: 7,
     incomingProposals: [proposal],
-    outgoingProposals: [],
-    activeDeals: [active],
+    outgoingProposals: [
+      {
+        ...proposal,
+        dealID: "deal:P_B:P_D:trade_security_pact:5",
+        proposerPlayerID: "P_B",
+        proposerName: "Agent B",
+        recipientPlayerID: "P_D",
+        recipientName: "Agent D",
+        terms: {
+          template: "trade_security_pact",
+          durationSteps: 12,
+        },
+        proposedAtStep: 5,
+        answerableThroughStep: 9,
+      },
+    ],
+    activeDeals: [active, nap, support],
     proposalOptions: [
       {
         recipientPlayerID: "P_C",
@@ -157,7 +221,7 @@ test("deal capability rejects malformed nested state without emitting a slot", (
       },
     ],
   };
-  assert.deepEqual(boundedDealsObservation(valid), valid);
+  assert.deepEqual(boundedDealsObservation(valid, "P_B"), valid);
 
   const selected = {
     id: `deal_accept:${proposal.dealID}`,
@@ -180,6 +244,34 @@ test("deal capability rejects malformed nested state without emitting a slot", (
     },
     {
       ...valid,
+      incomingProposals: [
+        { ...proposal, recipientPlayerID: "P_C", recipientName: "Agent C" },
+      ],
+    },
+    {
+      ...valid,
+      incomingProposals: [{ ...proposal, answerableThroughStep: 7 }],
+    },
+    {
+      ...valid,
+      incomingProposals: [
+        {
+          ...proposal,
+          terms: {
+            template: "joint_attack",
+            durationSteps: 8,
+            targetPlayerID: "P_A",
+            targetName: "Agent A",
+          },
+        },
+      ],
+    },
+    {
+      ...valid,
+      decisionStep: 9,
+    },
+    {
+      ...valid,
       activeDeals: [
         {
           ...active,
@@ -189,22 +281,127 @@ test("deal capability rejects malformed nested state without emitting a slot", (
     },
     {
       ...valid,
+      activeDeals: [
+        {
+          ...nap,
+          obligations: [nap.obligations[0], { ...nap.obligations[0] }],
+        },
+      ],
+    },
+    {
+      ...valid,
+      activeDeals: [
+        {
+          ...support,
+          obligations: [
+            {
+              ...support.obligations[0],
+              obligorPlayerID: "P_A",
+              obligorName: "Agent A",
+            },
+          ],
+        },
+      ],
+    },
+    {
+      ...valid,
       activeDeals: [{ ...active, activeFromStep: undefined }],
+    },
+    {
+      ...valid,
+      activeDeals: [{ ...active, stepsRemaining: 7 }],
+    },
+    {
+      ...valid,
+      activeDeals: [{ ...active, expiresAfterStep: 30, stepsRemaining: 24 }],
+    },
+    {
+      ...valid,
+      activeDeals: [
+        {
+          ...active,
+          obligations: [
+            {
+              ...active.obligations[0],
+              obligorPlayerID: "P_B",
+              obligorName: "Agent B",
+            },
+          ],
+        },
+      ],
+    },
+    {
+      ...valid,
+      activeDeals: [
+        {
+          ...active,
+          obligations: [{ ...active.obligations[0], status: "fulfilled" }],
+        },
+      ],
+    },
+    {
+      ...valid,
+      activeDeals: [
+        {
+          ...active,
+          proposerPlayerID: "P_C",
+          proposerName: "Agent C",
+          recipientPlayerID: "P_D",
+          recipientName: "Agent D",
+          obligations: [
+            {
+              ...active.obligations[0],
+              obligorPlayerID: "P_C",
+              obligorName: "Agent C",
+            },
+          ],
+        },
+      ],
+    },
+    {
+      ...valid,
+      proposalOptions: [
+        {
+          recipientPlayerID: "P_B",
+          recipientName: "Agent B",
+          terms: {
+            template: "non_aggression_pact",
+            durationSteps: 12,
+          },
+        },
+      ],
+    },
+    {
+      ...valid,
+      rivalReliability: [
+        {
+          playerID: "P_B",
+          name: "Agent B",
+          fulfilled: 0,
+          terminalNonMoot: 0,
+          reliability: null,
+        },
+      ],
     },
     { ...valid, privateDealNotes: "must not enter policy state" },
   ];
   for (const deals of malformed) {
-    assert.equal(boundedDealsObservation(deals), null);
+    assert.equal(boundedDealsObservation(deals, "P_B"), null);
     assert.deepEqual(
       dealResponseFields({
         actions: [primary, selected],
-        observation: { deals },
+        observation: { ownState: { playerID: "P_B" }, deals },
         dealMove: selected,
       }),
       {},
     );
     assert.equal(
-      "deals" in ownerCapabilityObservation({ deals, visiblePlayers: [] }),
+      "deals" in
+        ownerCapabilityObservation({
+          ownState: { playerID: "P_B" },
+          deals,
+          visiblePlayers: [],
+        }),
       false,
     );
   }
@@ -472,6 +669,7 @@ test("malformed optional containers disappear without crashing primary state", (
   assert.equal("inboundMessages" in (malformed.nonCombat ?? {}), false);
 
   const valid = ownerCapabilityObservation({
+    ownState: { playerID: "P_A" },
     visiblePlayers: [],
     deals: {
       decisionStep: 1,

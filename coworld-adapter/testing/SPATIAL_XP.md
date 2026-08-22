@@ -162,9 +162,11 @@ node owner-evidence-check.mjs --deals=optional --messages=optional \
   --spatial=rich-v3-minimap owner-evidence/spatial-owner.log
 ```
 
-Every supplied spatial record must be present, schema `3`, carry the exact
-visibility model, stay within 16 KiB, and report the bounded minimap. One good
-record cannot mask an absent or downgraded record from another supplied policy
-log. This is policy-authored evidence, not an external Coworld seal; retain the
-independently joined request, episode, game, replay, package, image, source, and
-policy identities separately.
+Each supplied policy log must contain a spatial record, and every supplied
+spatial record must be present, schema `3`, carry the exact visibility model,
+stay within 16 KiB, report the bounded minimap, and record that its primary
+selected legal action was offered. One good record cannot mask an absent,
+missing, or downgraded record from another supplied policy log. This is
+policy-authored evidence, not an external Coworld seal; retain the independently
+joined request, episode, game, replay, package, image, source, and policy
+identities separately.

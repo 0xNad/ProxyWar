@@ -147,7 +147,7 @@ response-contract nesting below are exact and internally consistent:
         "decisionStep": 42,
         "incomingProposals": [
           {
-            "dealID": "deal:P_A:P_B:non_aggression_pact:4",
+            "dealID": "deal:P_B:P_A:non_aggression_pact:41",
             "proposerPlayerID": "P_B",
             "proposerName": "Rival B",
             "recipientPlayerID": "P_A",
@@ -156,8 +156,8 @@ response-contract nesting below are exact and internally consistent:
               "template": "non_aggression_pact",
               "durationSteps": 12
             },
-            "proposedAtStep": 42,
-            "answerableThroughStep": 43
+            "proposedAtStep": 41,
+            "answerableThroughStep": 45
           }
         ],
         "outgoingProposals": [],
@@ -276,12 +276,12 @@ response-contract nesting below are exact and internally consistent:
         "risk": { "level": "none", "score": 0 }
       },
       {
-        "id": "deal_accept:deal:P_A:P_B:non_aggression_pact:4",
+        "id": "deal_accept:deal:P_B:P_A:non_aggression_pact:41",
         "kind": "deal_accept",
         "label": "Accept Rival B's non-aggression pact",
         "risk": { "level": "medium", "score": 0.35 },
         "metadata": {
-          "dealID": "deal:P_A:P_B:non_aggression_pact:4",
+          "dealID": "deal:P_B:P_A:non_aggression_pact:41",
           "recipientID": "P_B",
           "recipientName": "Rival B",
           "template": "non_aggression_pact",
@@ -349,7 +349,7 @@ The policy reply keeps three independent slots:
   "type": "decision_response",
   "requestID": "req_...",
   "selectedLegalActionId": "hold",
-  "selectedDealActionId": "deal_accept:deal:P_A:P_B:non_aggression_pact:4",
+  "selectedDealActionId": "deal_accept:deal:P_B:P_A:non_aggression_pact:41",
   "selectedMessageActionId": "message:P_B",
   "messageText": "Truce on our shared border until turn 300.",
   "runtimeMode": "llm-policy-planner",
@@ -540,9 +540,10 @@ node owner-evidence-check.mjs --deals=optional --messages=optional --spatial=ric
 ```
 
 Each verifier invocation must print one JSON object with `"verdict":"PASS"`.
-The rich-spatial mode requires every supplied spatial record to be present,
-schema `3`, and minimap-bearing; one good record cannot mask an absent or
-downgraded record in the same evidence corpus.
+The rich-spatial mode requires each supplied policy log to contain a spatial
+record and every such record to be present, schema `3`, minimap-bearing, and
+joined to a primary action the policy recorded as offered. One good record
+cannot mask an absent, missing, or downgraded record elsewhere in the corpus.
 The deal check verifies the upgraded policy's self-report of exact
 offered/selected IDs; manager application and follow-through still require the
 game-owned ledger/replay. The message check requires a one-to-one
