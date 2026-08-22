@@ -12,7 +12,7 @@ index ee204db1c835fad9aab08c3a8813720b323b10e9..088370445a3f20ce9ee0032fe794d82b
  ARG PROXYWAR_PROMPT_CACHE=0
  ARG PLAN_EVERY=6
 diff --git a/MESSAGES.md b/MESSAGES.md
-index ef039b22910d6fe06b2f3184cefbd18437af54aa..21049e3c0704bb915d075b18553c8edaead8ac9d 100644
+index ef039b22910d6fe06b2f3184cefbd18437af54aa..ed9b51e38e71244c01e70ffdc278221d8cbd3199 100644
 --- a/MESSAGES.md
 +++ b/MESSAGES.md
 @@ -2,11 +2,11 @@
@@ -70,7 +70,26 @@ index ef039b22910d6fe06b2f3184cefbd18437af54aa..21049e3c0704bb915d075b18553c8eda
  ## What you receive
  
  `observation.nonCombat.inboundMessages` holds messages other agents wrote to
-@@ -105,9 +122,10 @@ handed your agent to your opponents.
+@@ -89,12 +106,14 @@ what a message is allowed to do:
+    **claims**, never merged into `rivals`. A claim cannot be mistaken for
+    something the agent actually observed.
+ 2. The security instruction restricts what a claim may move: deal posture
+-   (who to deal with, and whether to break a deal) and nothing else. It may
+-   never change what the agent attacks, builds, or targets.
++   (who to deal with, and whether to break a deal). It cannot name or raw-emit
++   an action, and cannot alter `focus`, `preferKinds`, or `target`. Bounded
++   `breakDealIDs` may still change breach posture and thereby change which
++   exact offered action ID the policy selects.
+ 3. **The planner cannot name an action ID at all.** It returns a posture —
+    focus, preferred kinds, deal policies — and the code picks the exact
+-   offered ID. So no message can choose your move no matter what the model is
+-   talked into.
++   offered ID. A message therefore has no raw-intent or direct action-ID path;
++   any indirect posture effect remains constrained to the offered menu.
+ 4. Replies come from fixed templates, so a rival can never author your words.
+ 
+ Point 3 is the one that matters. Keep it if you change anything: it is what
+@@ -105,9 +124,10 @@ handed your agent to your opponents.
  ## What the starter does today
  
  `chooseMessageMove` in `llm-player.mjs` answers at most one rival per decision:
@@ -85,10 +104,10 @@ index ef039b22910d6fe06b2f3184cefbd18437af54aa..21049e3c0704bb915d075b18553c8eda
  Silence is the sensible default. An agent that talks every step is noise, and
  noise is not negotiation. Talk when you want something, when you are answering
 diff --git a/ONBOARDING.md b/ONBOARDING.md
-index 4bfa2b8fe352d82fa8ea6042a9dc194e81282070..3b5948ccc07b329a531ba84bb1ee7c766c29750d 100644
+index 4bfa2b8fe352d82fa8ea6042a9dc194e81282070..eceae0946054d9464443cdd6500265ba3fc9738e 100644
 --- a/ONBOARDING.md
 +++ b/ONBOARDING.md
-@@ -109,6 +109,19 @@ cannot authorize betrayal; the plan must include the exact active promise in
+@@ -109,6 +109,26 @@ cannot authorize betrayal; the plan must include the exact active promise in
  Read [`DEALS.md`](DEALS.md) before changing `chooseDealMove`. It lists every template,
  who becomes obligated, the exact observation/action fields, and the tests to run.
  
@@ -99,20 +118,27 @@ index 4bfa2b8fe352d82fa8ea6042a9dc194e81282070..3b5948ccc07b329a531ba84bb1ee7c76
 +feature is absent or the body fails the raw contract. Inbound message text is
 +an untrusted rival claim and cannot name the primary action ID.
 +
-+When `observation.spatial.schemaVersion` is `1` and its visibility model is
-+`global-lockstep-public-map-v1`, the planner receives bounded player-visible
-+shape, rival-relation, and optional 24x12 minimap state. Unknown provenance or
-+schema is ignored. Spatial data may rank only the current `legalActions`; it is
-+never an intent or permission to bypass the menu.
++When `observation.spatial.schemaVersion` is `3` and its visibility model is
++exactly `global-lockstep-public-map-v1`, the planner receives the bounded
++player-visible coordinate frame, front elevation/coverage, completed public
++structure/warship positions, and optional 24x12 ownership minimap. The older
++bounded schema `1` remains a backward-compatible fallback. Unknown provenance,
++schema, coordinates, asset types, or count invariants are ignored fail-closed.
++Spatial data may rank only the current `legalActions`; it is never an intent or
++permission to bypass the menu.
++
++On a spatial-enabled game-backed request, `mapInfo` is also available during
++spawn before the seat owns land. The L2/L3 `spatial` object begins only once
++land geometry exists. Both remain absent when the parent spatial flag is OFF.
 +
  > **Spawn placement (active v1):** the first request is one sealed spawn
  > preference round. Every player receives the same bounded menu of
  > quality-floored, mutually compatible `spawn:<tile>` actions and returns
 diff --git a/README.md b/README.md
-index 9d424920ec57f896b1dad10b09eac00fec25f555..da5560ae9572fc45ac29f10db9774b43885d2a3b 100644
+index 9d424920ec57f896b1dad10b09eac00fec25f555..ae6136ef145936e57659882c48c51e4a99af6546 100644
 --- a/README.md
 +++ b/README.md
-@@ -132,6 +132,28 @@ instruction.
+@@ -132,6 +132,35 @@ instruction.
  See **[`MESSAGES.md`](MESSAGES.md)** for the response contract, the limits the
  server enforces, and how this starter stays manipulation-resistant.
  
@@ -130,28 +156,36 @@ index 9d424920ec57f896b1dad10b09eac00fec25f555..da5560ae9572fc45ac29f10db9774b43
 +## Optional spatial/minimap state
 +
 +Spatial state is additive and remains absent in older/default-off packages.
-+The starter accepts only `observation.spatial.schemaVersion === 1` with
-+`visibilityModel === "global-lockstep-public-map-v1"`. This provenance means
-+the data summarizes the same no-fog, globally player-visible map used by the
-+current game; an absent/unknown provenance is ignored. The optional minimap is
-+accepted only as a complete bounded 24x12 value. Spatial state can influence
-+the ranking of currently offered legal actions, but it never creates an action
-+ID, coordinate command, or raw OpenFront intent.
++The starter feature-detects the older bounded schema `1` and rich structured
++schema `3`, always requiring exact
++`visibilityModel === "global-lockstep-public-map-v1"`. Schema `3` adds a
++decodable top-left row-major map frame, front elevation/defense coverage, and
++bounded completed Defense Post/City/Port/Warship positions for the owner and
++already-visible rivals. With the parent flag ON, the map frame is also present
++during spawn/no-land requests; L2/L3 geometry begins once the seat owns land.
++Any malformed required rich container is rejected as a whole. A malformed
++optional minimap is omitted without discarding valid map/front/asset context.
++The separately flagged minimap remains a complete bounded 24x12 ownership
++overview with an exact 2 KiB normalized ceiling and owner/visible-roster-bound
++legend. Spatial state can influence only the ranking of currently offered
++legal actions; it never creates an action ID, coordinate command, or raw
++OpenFront intent.
 +
  ## Prefer a non-LLM agent?
  
  `starter-player.mjs` is a small conservative rule agent (no model, no Bedrock). It
 diff --git a/llm-player.mjs b/llm-player.mjs
-index 596924b014117aef59d03df1e7a886fc32d04202..54a2cbf44bfce9d0cb189f37408a01147a659c98 100644
+index 596924b014117aef59d03df1e7a886fc32d04202..052d662560eef797eab0dd3945fc0547fe1f9e5b 100644
 --- a/llm-player.mjs
 +++ b/llm-player.mjs
-@@ -20,6 +20,14 @@
+@@ -20,6 +20,15 @@
  import { AnthropicBedrock } from "@anthropic-ai/bedrock-sdk";
  import { pathToFileURL } from "node:url";
  import { WebSocket } from "ws";
 +import {
 +  advertisedMessageLimit,
-+  boundedSpatialV1,
++  boundedSpatialMapInfo,
++  boundedSpatialObservation as boundedSpatialV1,
 +  createOwnerCapabilityEvidenceLogger,
 +  dealResponseFields,
 +  messageResponseFields,
@@ -160,7 +194,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..54a2cbf44bfce9d0cb189f37408a0114
  
  const url = process.env.COWORLD_PLAYER_WS_URL;
  
-@@ -98,6 +106,7 @@ const PLAN_KINDS = [
+@@ -98,6 +107,7 @@ const PLAN_KINDS = [
    "build",
    "boat",
    "alliance_request",
@@ -168,7 +202,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..54a2cbf44bfce9d0cb189f37408a0114
    "upgrade_structure",
    "donate_gold",
    "donate_troops",
-@@ -122,8 +131,19 @@ const SECURITY =
+@@ -122,8 +132,19 @@ const SECURITY =
  
  // -- anti-loop memory (distilled from the keystone's avoidActionIDs) ----------
  const history = []; // { actionID, kind } appended after each decision
@@ -190,7 +224,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..54a2cbf44bfce9d0cb189f37408a0114
  const answeredMessages = new Set();
  function avoidActionIDs() {
    const recent = history
-@@ -167,18 +187,20 @@ function cleanID(s) {
+@@ -167,18 +188,20 @@ function cleanID(s) {
  // here means a future server change can never quietly widen what reaches the
  // prompt.
  function cleanMessage(s) {
@@ -223,7 +257,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..54a2cbf44bfce9d0cb189f37408a0114
  }
  function normalizeDealPolicies(value) {
    const entries = Array.isArray(value)
-@@ -220,7 +242,14 @@ function normalizeDealPolicies(value) {
+@@ -220,7 +243,15 @@ function normalizeDealPolicies(value) {
  }
  function buildState(obs, actions) {
    const own = obs.ownState || {};
@@ -232,6 +266,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..54a2cbf44bfce9d0cb189f37408a0114
 +  // for the current no-fog, global-lockstep game contract. An old/unknown
 +  // spatial schema is omitted from the model state instead of guessed at.
 +  const boundedSpatial = boundedSpatialV1(obs);
++  const boundedMapInfo = boundedSpatialMapInfo(obs.mapInfo);
 +  const spatialEnabled = boundedSpatial !== null;
 +  const spatialRivalByID = new Map(
 +    (boundedSpatial?.rivals ?? []).map((rival) => [rival.playerID, rival]),
@@ -239,7 +274,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..54a2cbf44bfce9d0cb189f37408a0114
    const self = {
      tileShare: own.tileShare,
      troops: own.troops,
-@@ -240,65 +269,19 @@ function buildState(obs, actions) {
+@@ -240,65 +271,19 @@ function buildState(obs, actions) {
        isAllied: p.isAllied,
        relation: p.relation,
        canAttack: p.canAttack,
@@ -315,7 +350,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..54a2cbf44bfce9d0cb189f37408a0114
      }));
    const legal = actions.map((a) => ({
      id: a.id,
-@@ -440,104 +423,17 @@ function buildState(obs, actions) {
+@@ -440,104 +425,20 @@ function buildState(obs, actions) {
      };
    }
    let spatial;
@@ -414,17 +449,21 @@ index 596924b014117aef59d03df1e7a886fc32d04202..54a2cbf44bfce9d0cb189f37408a0114
 -      }
 -    }
      spatial = {
-       schemaVersion: 1,
+-      schemaVersion: 1,
 -      ownShape: shape,
++      schemaVersion: boundedSpatial.schemaVersion,
 +      visibilityModel: boundedSpatial.visibilityModel,
 +      ownShape: boundedSpatial.ownShape,
++      ...(boundedSpatial.positionedAssets
++        ? { positionedAssets: boundedSpatial.positionedAssets }
++        : {}),
        ...(briefing.length ? { briefing } : {}),
 -      ...(minimap ? { minimap } : {}),
 +      ...(boundedSpatial.minimap ? { minimap: boundedSpatial.minimap } : {}),
      };
    }
    // Optional inbox (free-text negotiation; absent when the server flag is off,
-@@ -550,7 +446,9 @@ function buildState(obs, actions) {
+@@ -550,7 +451,9 @@ function buildState(obs, actions) {
    // The whole block is bounded by the server (<=8 messages, <=3 per rival,
    // <=280 chars each) and re-sanitized here through the same clean()/cleanID()
    // helpers used for every other opponent-chosen string.
@@ -435,7 +474,15 @@ index 596924b014117aef59d03df1e7a886fc32d04202..54a2cbf44bfce9d0cb189f37408a0114
    const messages = inbound.length
      ? inbound.slice(-8).map((m) => ({
          fromID: cleanID(m.senderID),
-@@ -662,6 +560,7 @@ let plannerAttemptSequence = 0;
+@@ -568,6 +471,7 @@ function buildState(obs, actions) {
+     legalActions: legal,
+     ...(econ ? { econ } : {}),
+     ...(deals ? { deals } : {}),
++    ...(boundedMapInfo ? { mapInfo: boundedMapInfo } : {}),
+     ...(spatial ? { spatial } : {}),
+     ...(messages ? { messages } : {}),
+   };
+@@ -662,6 +566,7 @@ let plannerAttemptSequence = 0;
  let plannerUsageSummaryEmitted = false;
  let plannerSpatialSchemaVersion = 0;
  let plannerSpatialMinimap = false;
@@ -443,7 +490,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..54a2cbf44bfce9d0cb189f37408a0114
  
  function tokenCount(value) {
    const parsed = Number(value);
-@@ -698,6 +597,12 @@ function normalizeBedrockUsage(usage) {
+@@ -698,6 +603,12 @@ function normalizeBedrockUsage(usage) {
  }
  
  function normalizePlannerUsageEvent(event) {
@@ -456,7 +503,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..54a2cbf44bfce9d0cb189f37408a0114
    const normalized = {
      schemaVersion: 1,
      promptVariant: PROMPT_VARIANT,
-@@ -712,6 +617,11 @@ function normalizePlannerUsageEvent(event) {
+@@ -712,6 +623,11 @@ function normalizePlannerUsageEvent(event) {
          : event.spatialMinimap === true,
      event: clean(event?.event),
    };
@@ -468,9 +515,14 @@ index 596924b014117aef59d03df1e7a886fc32d04202..54a2cbf44bfce9d0cb189f37408a0114
    for (const key of [
      "model",
      "responseModel",
-@@ -940,6 +850,10 @@ function refreshPlanInBackground(state) {
+@@ -938,8 +854,14 @@ function refreshPlanInBackground(state) {
+   if (planRefreshInFlight) return;
+   planRefreshInFlight = true;
    plannerSpatialSchemaVersion =
-     state?.spatial?.schemaVersion === 1 ? state.spatial.schemaVersion : 0;
+-    state?.spatial?.schemaVersion === 1 ? state.spatial.schemaVersion : 0;
++    state?.spatial?.schemaVersion === 1 || state?.spatial?.schemaVersion === 3
++      ? state.spatial.schemaVersion
++      : 0;
    plannerSpatialMinimap = state?.spatial?.minimap?.schemaVersion === 1;
 +  plannerSpatialVisibilityModel =
 +    state?.spatial?.visibilityModel === "global-lockstep-public-map-v1"
@@ -479,7 +531,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..54a2cbf44bfce9d0cb189f37408a0114
    withTimeout(askBedrock(state), 20000)
      .then(({ attempt, text, model }) => {
        const parsed = extractJson(text, PROMPT_HARDENING);
-@@ -1144,13 +1058,19 @@ const MESSAGE_OPENERS = {
+@@ -1144,13 +1066,19 @@ const MESSAGE_OPENERS = {
  // Answers at most one rival per decision: the one who most recently wrote to
  // us and has not already been answered since. Silence is the default — an
  // agent that talks every step is noise, not negotiation.
@@ -501,7 +553,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..54a2cbf44bfce9d0cb189f37408a0114
    }
  
    const newest = [...inbound].sort(
-@@ -1158,10 +1078,23 @@ function chooseMessageMove(actions, obs, answered, dealMove) {
+@@ -1158,10 +1086,23 @@ function chooseMessageMove(actions, obs, answered, dealMove) {
    )[inbound.length - 1];
    const senderID = newest?.senderID;
    if (!senderID) return null;
@@ -526,7 +578,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..54a2cbf44bfce9d0cb189f37408a0114
    const offer = offers.find(
      (action) => action.metadata?.recipientID === senderID,
    );
-@@ -1176,7 +1109,8 @@ function chooseMessageMove(actions, obs, answered, dealMove) {
+@@ -1176,7 +1117,8 @@ function chooseMessageMove(actions, obs, answered, dealMove) {
      ...(obs?.deals?.activeDeals || []),
    ].some(
      (view) =>
@@ -536,7 +588,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..54a2cbf44bfce9d0cb189f37408a0114
    );
  
    let text;
-@@ -1185,8 +1119,12 @@ function chooseMessageMove(actions, obs, answered, dealMove) {
+@@ -1185,8 +1127,12 @@ function chooseMessageMove(actions, obs, answered, dealMove) {
    else if (hasOpenDeal) text = MESSAGE_REPLIES.dealOpen;
    else text = MESSAGE_REPLIES.neutral;
  
@@ -550,7 +602,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..54a2cbf44bfce9d0cb189f37408a0114
  }
  
  // Speaks first, but rarely and only when there is something to say. Two
-@@ -1195,7 +1133,13 @@ function chooseMessageMove(actions, obs, answered, dealMove) {
+@@ -1195,7 +1141,13 @@ function chooseMessageMove(actions, obs, answered, dealMove) {
  //       message is the reason to accept, which the bare template lacks;
  //   (b) we share a border with a rival we have never written to.
  // At most one opener per counterparty per match.
@@ -565,7 +617,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..54a2cbf44bfce9d0cb189f37408a0114
    const dealRecipient =
      dealMove?.kind === "deal_propose" ? dealMove?.metadata?.recipientID : null;
    if (dealRecipient) {
-@@ -1203,11 +1147,15 @@ function chooseMessageOpener(offers, obs, answered, dealMove) {
+@@ -1203,11 +1155,15 @@ function chooseMessageOpener(offers, obs, answered, dealMove) {
        (action) => action.metadata?.recipientID === dealRecipient,
      );
      const key = `opener:${dealRecipient}`;
@@ -583,7 +635,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..54a2cbf44bfce9d0cb189f37408a0114
        };
      }
    }
-@@ -1222,10 +1170,11 @@ function chooseMessageOpener(offers, obs, answered, dealMove) {
+@@ -1222,10 +1178,11 @@ function chooseMessageOpener(offers, obs, answered, dealMove) {
      // Only borderers, and never someone already proven unreliable.
      if (!rival?.sharesBorder || rival.isAllied) continue;
      if (failedReliabilityGate(obs, recipientID)) continue;
@@ -596,7 +648,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..54a2cbf44bfce9d0cb189f37408a0114
      };
    }
    return null;
-@@ -1487,7 +1436,59 @@ function socialActionNote(chosen, dealMove, obs) {
+@@ -1487,7 +1444,59 @@ function socialActionNote(chosen, dealMove, obs) {
  }
  // The GAME move. Deal actions are never returned here — they ride the
  // separate deal slot — so the agent always spends its action on the map.
@@ -656,7 +708,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..54a2cbf44bfce9d0cb189f37408a0114
    const cons = dealConstraints(obs);
    const authorizedBreaks = new Set(plan?.breakDealIDs || []);
    const allAuthorized = (dealIDs) =>
-@@ -1611,6 +1612,13 @@ function choose(actions, obs) {
+@@ -1611,6 +1620,13 @@ function choose(actions, obs) {
          !violatesPact(c),
      );
      if (candidates.length === 0) continue;
@@ -670,7 +722,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..54a2cbf44bfce9d0cb189f37408a0114
      // Within the kind, prefer the plan's named target when one is offered.
      if (plan?.target) {
        const targeted = candidates.find(matchesPlanTarget);
-@@ -1684,6 +1692,30 @@ function spawnPreferenceScore(action) {
+@@ -1684,6 +1700,30 @@ function spawnPreferenceScore(action) {
    );
  }
  
@@ -701,7 +753,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..54a2cbf44bfce9d0cb189f37408a0114
  function withTimeout(promise, ms) {
    return Promise.race([
      promise,
-@@ -1717,6 +1749,7 @@ export function startLlmPlayer({
+@@ -1717,6 +1757,7 @@ export function startLlmPlayer({
        "COWORLD_PLAYER_WS_URL is required (the match provides it)",
      );
    bedrock = bedrockClient ?? createBedrockClient();
@@ -709,7 +761,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..54a2cbf44bfce9d0cb189f37408a0114
    const socket = new WebSocketCtor(url);
    socket.on("open", () =>
      console.log(
-@@ -1739,7 +1772,9 @@ export function startLlmPlayer({
+@@ -1739,7 +1780,9 @@ export function startLlmPlayer({
      }
      if (message.type !== "decision_request") return;
  
@@ -720,7 +772,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..54a2cbf44bfce9d0cb189f37408a0114
      const spawnPreferences = spawnPreferenceRanking(message, actions);
      if (spawnPreferences !== null) {
        socket.send(
-@@ -1747,6 +1782,7 @@ export function startLlmPlayer({
+@@ -1747,6 +1790,7 @@ export function startLlmPlayer({
            type: "decision_response",
            requestID: message.requestID,
            selectedLegalActionId: spawnPreferences[0].id,
@@ -728,7 +780,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..54a2cbf44bfce9d0cb189f37408a0114
            spawnPreferenceLegalActionIds: spawnPreferences.map(
              (preference) => preference.id,
            ),
-@@ -1759,7 +1795,7 @@ export function startLlmPlayer({
+@@ -1759,7 +1803,7 @@ export function startLlmPlayer({
        // gameplay decision and has no reaction phase.
        return;
      }
@@ -737,7 +789,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..54a2cbf44bfce9d0cb189f37408a0114
      const state = buildState(obs, actions);
  
      // Keep the plan fresh WITHOUT blocking — the answer below never waits on Bedrock.
-@@ -1774,12 +1810,16 @@ export function startLlmPlayer({
+@@ -1774,12 +1818,16 @@ export function startLlmPlayer({
      // Comms slot: independent of the game action and the deal action, so
      // answering a rival never costs a move. Returns null (silence) unless
      // someone actually wrote to us.
@@ -760,7 +812,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..54a2cbf44bfce9d0cb189f37408a0114
      const degraded = lastPlanError !== null;
      let reason;
      if (plan !== null) {
-@@ -1798,24 +1838,37 @@ export function startLlmPlayer({
+@@ -1798,24 +1846,37 @@ export function startLlmPlayer({
      if (socialNote) reason = `${socialNote}; ${reason}`;
  
      history.push({ actionID: chosen.id, kind: chosen.kind });
@@ -817,12 +869,13 @@ index 596924b014117aef59d03df1e7a886fc32d04202..54a2cbf44bfce9d0cb189f37408a0114
    process.on("SIGTERM", () => process.exit(0));
 diff --git a/owner-capabilities.d.mts b/owner-capabilities.d.mts
 new file mode 100644
-index 0000000000000000000000000000000000000000..a9b919d9e515fd7f666cd7f8de8a69a24d86bd2b
+index 0000000000000000000000000000000000000000..a2af5c8203368edcc1e3ba18135dc0b971786059
 --- /dev/null
 +++ b/owner-capabilities.d.mts
-@@ -0,0 +1,64 @@
+@@ -0,0 +1,75 @@
 +export const OWNER_MESSAGE_MAX_CHARS: 280;
 +export const OWNER_SPATIAL_SERIALIZED_MAX_BYTES: number;
++export const OWNER_MINIMAP_SERIALIZED_MAX_BYTES: number;
 +export const OWNER_EVIDENCE_MAX_EVENTS_PER_KIND: number;
 +export const SPATIAL_VISIBILITY_MODEL: "global-lockstep-public-map-v1";
 +
@@ -849,6 +902,7 @@ index 0000000000000000000000000000000000000000..a9b919d9e515fd7f666cd7f8de8a69a2
 +): boolean;
 +export function boundedDealsObservation(
 +  deals: unknown,
++  ownPlayerID: unknown,
 +): Record<string, unknown> | null;
 +export function boundedInboundMessages(
 +  observation: unknown,
@@ -878,7 +932,16 @@ index 0000000000000000000000000000000000000000..a9b919d9e515fd7f666cd7f8de8a69a2
 +export function isWithinOwnerSpatialSerializationCeiling(
 +  value: unknown,
 +): boolean;
++export function boundedSpatialMapInfo(
++  mapInfo: unknown,
++): Record<string, unknown> | null;
 +export function boundedSpatialV1(
++  observation: unknown,
++): Record<string, unknown> | null;
++export function boundedSpatialV3(
++  observation: unknown,
++): Record<string, unknown> | null;
++export function boundedSpatialObservation(
 +  observation: unknown,
 +): Record<string, unknown> | null;
 +export function rankOfferedActionsWithSpatial<T>(
@@ -887,10 +950,10 @@ index 0000000000000000000000000000000000000000..a9b919d9e515fd7f666cd7f8de8a69a2
 +): T[];
 diff --git a/owner-capabilities.mjs b/owner-capabilities.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..b0796a8adbb7d8dd8503ac134578d24beb7841b5
+index 0000000000000000000000000000000000000000..a25b934015ce29ac5536c84c251f5ca192ed4075
 --- /dev/null
 +++ b/owner-capabilities.mjs
-@@ -0,0 +1,601 @@
+@@ -0,0 +1,1474 @@
 +import { createHash } from "node:crypto";
 +
 +/**
@@ -903,6 +966,7 @@ index 0000000000000000000000000000000000000000..b0796a8adbb7d8dd8503ac134578d24b
 +
 +export const OWNER_MESSAGE_MAX_CHARS = 280;
 +export const OWNER_SPATIAL_SERIALIZED_MAX_BYTES = 16 * 1024;
++export const OWNER_MINIMAP_SERIALIZED_MAX_BYTES = 2 * 1024;
 +export const OWNER_EVIDENCE_MAX_EVENTS_PER_KIND = 64;
 +export const SPATIAL_VISIBILITY_MODEL = "global-lockstep-public-map-v1";
 +
@@ -919,13 +983,34 @@ index 0000000000000000000000000000000000000000..b0796a8adbb7d8dd8503ac134578d24b
 +const CONTROL = /[\u0000-\u001F\u007F-\u009F]/u;
 +const MINIMAP_ROW = /^[A-Za-z0-9.@#~]{24}$/u;
 +const MINIMAP_GLYPH = /^[A-Za-z0-9@#]$/u;
-+const DEAL_ARRAY_FIELDS = [
-+  "incomingProposals",
-+  "outgoingProposals",
-+  "activeDeals",
-+  "proposalOptions",
-+  "rivalReliability",
-+];
++const DEAL_TEMPLATES = new Set([
++  "non_aggression_pact",
++  "trade_security_pact",
++  "joint_attack",
++  "support_request",
++]);
++const DEAL_OBLIGATION_KINDS = new Set([
++  "non_aggression",
++  "trade_security",
++  "confirmed_attack_on_target",
++  "send_support",
++]);
++const DEAL_OBLIGATION_STATUSES = new Set([
++  "pending",
++  "fulfilled",
++  "violated",
++  "expired_unfulfilled",
++  "unverified",
++  "moot",
++]);
++const DEAL_OBLIGATION_SHAPE = new Map([
++  ["non_aggression_pact", { kind: "non_aggression", count: 2 }],
++  ["trade_security_pact", { kind: "trade_security", count: 2 }],
++  ["joint_attack", { kind: "confirmed_attack_on_target", count: 1 }],
++  ["support_request", { kind: "send_support", count: 1 }],
++]);
++const MAX_DEAL_OBSERVATION_ROWS = 64;
++const DEAL_PROPOSAL_TTL_STEPS = 4;
 +
 +function isRecord(value) {
 +  return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -937,6 +1022,377 @@ index 0000000000000000000000000000000000000000..b0796a8adbb7d8dd8503ac134578d24b
 +    value.length <= maxLength &&
 +    value.every((entry) => isRecord(entry))
 +  );
++}
++
++function hasExactKeys(value, required, optional = []) {
++  if (!isRecord(value)) return false;
++  const allowed = new Set([...required, ...optional]);
++  return (
++    required.every((key) => Object.hasOwn(value, key)) &&
++    Object.keys(value).every((key) => allowed.has(key))
++  );
++}
++
++function isStrictOpaqueID(value) {
++  return (
++    isBoundedVisibleString(value, 200) &&
++    value.trim() === value &&
++    !/\s/u.test(value)
++  );
++}
++
++function isStrictPlayerID(value) {
++  return isStrictOpaqueID(value) && !value.includes(":");
++}
++
++function isBoundedName(value) {
++  return isBoundedVisibleString(value, 120);
++}
++
++function isNonnegativeSafeInteger(value) {
++  return Number.isSafeInteger(value) && value >= 0;
++}
++
++function isPositiveIntegerString(value) {
++  return (
++    typeof value === "string" &&
++    value.length > 0 &&
++    value.length <= 40 &&
++    /^(?:0|[1-9][0-9]*)$/u.test(value) &&
++    BigInt(value) > 0n
++  );
++}
++
++function boundedDealTerms(terms) {
++  if (
++    !hasExactKeys(
++      terms,
++      ["template", "durationSteps"],
++      ["targetPlayerID", "targetName", "goldAmount", "troopAmount"],
++    ) ||
++    !DEAL_TEMPLATES.has(terms.template) ||
++    !Number.isSafeInteger(terms.durationSteps) ||
++    terms.durationSteps < 3 ||
++    terms.durationSteps > 20
++  ) {
++    return null;
++  }
++
++  const targetPresent =
++    Object.hasOwn(terms, "targetPlayerID") ||
++    Object.hasOwn(terms, "targetName");
++  const supportPresent =
++    Object.hasOwn(terms, "goldAmount") || Object.hasOwn(terms, "troopAmount");
++  const bounded = {
++    template: terms.template,
++    durationSteps: terms.durationSteps,
++  };
++  if (terms.template === "joint_attack") {
++    if (
++      supportPresent ||
++      !isStrictPlayerID(terms.targetPlayerID) ||
++      !isBoundedName(terms.targetName)
++    ) {
++      return null;
++    }
++    return {
++      ...bounded,
++      targetPlayerID: terms.targetPlayerID,
++      targetName: terms.targetName,
++    };
++  }
++  if (terms.template === "support_request") {
++    if (
++      targetPresent ||
++      !isPositiveIntegerString(terms.goldAmount) ||
++      !Number.isSafeInteger(terms.troopAmount) ||
++      terms.troopAmount <= 0
++    ) {
++      return null;
++    }
++    return {
++      ...bounded,
++      goldAmount: terms.goldAmount,
++      troopAmount: terms.troopAmount,
++    };
++  }
++  return targetPresent || supportPresent ? null : bounded;
++}
++
++function boundedDealProposal(proposal, ownPlayerID, decisionStep, direction) {
++  if (
++    !hasExactKeys(proposal, [
++      "dealID",
++      "proposerPlayerID",
++      "proposerName",
++      "recipientPlayerID",
++      "recipientName",
++      "terms",
++      "proposedAtStep",
++      "answerableThroughStep",
++    ]) ||
++    !isStrictPlayerID(proposal.proposerPlayerID) ||
++    !isBoundedName(proposal.proposerName) ||
++    !isStrictPlayerID(proposal.recipientPlayerID) ||
++    !isBoundedName(proposal.recipientName) ||
++    proposal.proposerPlayerID === proposal.recipientPlayerID ||
++    !isNonnegativeSafeInteger(proposal.proposedAtStep) ||
++    !isNonnegativeSafeInteger(proposal.answerableThroughStep) ||
++    proposal.answerableThroughStep !==
++      proposal.proposedAtStep + DEAL_PROPOSAL_TTL_STEPS ||
++    proposal.proposedAtStep >= decisionStep ||
++    decisionStep > proposal.answerableThroughStep ||
++    (direction === "incoming" && proposal.recipientPlayerID !== ownPlayerID) ||
++    (direction === "outgoing" && proposal.proposerPlayerID !== ownPlayerID)
++  ) {
++    return null;
++  }
++  const terms = boundedDealTerms(proposal.terms);
++  return terms === null ||
++    !isStrictOpaqueID(proposal.dealID) ||
++    (terms.template === "joint_attack" &&
++      (terms.targetPlayerID === proposal.proposerPlayerID ||
++        terms.targetPlayerID === proposal.recipientPlayerID))
++    ? null
++    : {
++        dealID: proposal.dealID,
++        proposerPlayerID: proposal.proposerPlayerID,
++        proposerName: proposal.proposerName,
++        recipientPlayerID: proposal.recipientPlayerID,
++        recipientName: proposal.recipientName,
++        terms,
++        proposedAtStep: proposal.proposedAtStep,
++        answerableThroughStep: proposal.answerableThroughStep,
++      };
++}
++
++function boundedDealObligation(obligation) {
++  if (
++    !hasExactKeys(
++      obligation,
++      ["obligorPlayerID", "obligorName", "kind", "status"],
++      [
++        "targetPlayerID",
++        "targetName",
++        "goldAmount",
++        "troopAmount",
++        "donatedGold",
++        "donatedTroops",
++      ],
++    ) ||
++    !isStrictPlayerID(obligation.obligorPlayerID) ||
++    !isBoundedName(obligation.obligorName) ||
++    !DEAL_OBLIGATION_KINDS.has(obligation.kind) ||
++    !DEAL_OBLIGATION_STATUSES.has(obligation.status)
++  ) {
++    return null;
++  }
++  const targetPresent =
++    Object.hasOwn(obligation, "targetPlayerID") ||
++    Object.hasOwn(obligation, "targetName");
++  const supportPresent = [
++    "goldAmount",
++    "troopAmount",
++    "donatedGold",
++    "donatedTroops",
++  ].some((key) => Object.hasOwn(obligation, key));
++  const bounded = {
++    obligorPlayerID: obligation.obligorPlayerID,
++    obligorName: obligation.obligorName,
++    kind: obligation.kind,
++    status: obligation.status,
++  };
++  if (obligation.kind === "confirmed_attack_on_target") {
++    if (
++      supportPresent ||
++      !isStrictPlayerID(obligation.targetPlayerID) ||
++      !isBoundedName(obligation.targetName)
++    ) {
++      return null;
++    }
++    return {
++      ...bounded,
++      targetPlayerID: obligation.targetPlayerID,
++      targetName: obligation.targetName,
++    };
++  }
++  if (obligation.kind === "send_support") {
++    if (
++      targetPresent ||
++      !isPositiveIntegerString(obligation.goldAmount) ||
++      !Number.isSafeInteger(obligation.troopAmount) ||
++      obligation.troopAmount <= 0 ||
++      typeof obligation.donatedGold !== "string" ||
++      obligation.donatedGold.length === 0 ||
++      obligation.donatedGold.length > 40 ||
++      !/^(?:0|[1-9][0-9]*)$/u.test(obligation.donatedGold) ||
++      !Number.isSafeInteger(obligation.donatedTroops) ||
++      obligation.donatedTroops < 0
++    ) {
++      return null;
++    }
++    return {
++      ...bounded,
++      goldAmount: obligation.goldAmount,
++      troopAmount: obligation.troopAmount,
++      donatedGold: obligation.donatedGold,
++      donatedTroops: obligation.donatedTroops,
++    };
++  }
++  return targetPresent || supportPresent ? null : bounded;
++}
++
++function boundedActiveDeal(deal, ownPlayerID, decisionStep) {
++  if (
++    !hasExactKeys(deal, [
++      "dealID",
++      "template",
++      "proposerPlayerID",
++      "proposerName",
++      "recipientPlayerID",
++      "recipientName",
++      "activeFromStep",
++      "expiresAfterStep",
++      "stepsRemaining",
++      "obligations",
++    ]) ||
++    !DEAL_TEMPLATES.has(deal.template) ||
++    !isStrictPlayerID(deal.proposerPlayerID) ||
++    !isBoundedName(deal.proposerName) ||
++    !isStrictPlayerID(deal.recipientPlayerID) ||
++    !isBoundedName(deal.recipientName) ||
++    deal.proposerPlayerID === deal.recipientPlayerID ||
++    !isNonnegativeSafeInteger(deal.activeFromStep) ||
++    !isNonnegativeSafeInteger(deal.expiresAfterStep) ||
++    deal.expiresAfterStep < deal.activeFromStep ||
++    deal.expiresAfterStep - deal.activeFromStep + 1 < 3 ||
++    deal.expiresAfterStep - deal.activeFromStep + 1 > 20 ||
++    decisionStep < deal.activeFromStep ||
++    decisionStep > deal.expiresAfterStep ||
++    !isNonnegativeSafeInteger(deal.stepsRemaining) ||
++    deal.stepsRemaining !== deal.expiresAfterStep - decisionStep + 1 ||
++    (deal.proposerPlayerID !== ownPlayerID &&
++      deal.recipientPlayerID !== ownPlayerID) ||
++    !isBoundedRecordArray(deal.obligations, MAX_DEAL_OBSERVATION_ROWS)
++  ) {
++    return null;
++  }
++  const expected = DEAL_OBLIGATION_SHAPE.get(deal.template);
++  if (!isStrictOpaqueID(deal.dealID)) return null;
++  if (deal.obligations.length !== expected.count) return null;
++  const obligations = deal.obligations.map(boundedDealObligation);
++  if (
++    obligations.some((obligation) => obligation === null) ||
++    obligations.some((obligation) => obligation.kind !== expected.kind)
++  ) {
++    return null;
++  }
++  if (!obligations.some((obligation) => obligation.status === "pending")) {
++    return null;
++  }
++  const seenObligors = new Set();
++  for (const obligation of obligations) {
++    if (seenObligors.has(obligation.obligorPlayerID)) return null;
++    seenObligors.add(obligation.obligorPlayerID);
++  }
++  const partyNames = new Map([
++    [deal.proposerPlayerID, deal.proposerName],
++    [deal.recipientPlayerID, deal.recipientName],
++  ]);
++  if (
++    obligations.some(
++      (obligation) =>
++        partyNames.get(obligation.obligorPlayerID) !== obligation.obligorName,
++    )
++  ) {
++    return null;
++  }
++  if (
++    (deal.template === "non_aggression_pact" ||
++      deal.template === "trade_security_pact") &&
++    (seenObligors.size !== 2 ||
++      !seenObligors.has(deal.proposerPlayerID) ||
++      !seenObligors.has(deal.recipientPlayerID))
++  ) {
++    return null;
++  }
++  if (
++    deal.template === "joint_attack" &&
++    (obligations[0].obligorPlayerID !== deal.proposerPlayerID ||
++      obligations[0].targetPlayerID === deal.proposerPlayerID ||
++      obligations[0].targetPlayerID === deal.recipientPlayerID)
++  ) {
++    return null;
++  }
++  if (
++    deal.template === "support_request" &&
++    obligations[0].obligorPlayerID !== deal.recipientPlayerID
++  ) {
++    return null;
++  }
++  return {
++    dealID: deal.dealID,
++    template: deal.template,
++    proposerPlayerID: deal.proposerPlayerID,
++    proposerName: deal.proposerName,
++    recipientPlayerID: deal.recipientPlayerID,
++    recipientName: deal.recipientName,
++    activeFromStep: deal.activeFromStep,
++    expiresAfterStep: deal.expiresAfterStep,
++    stepsRemaining: deal.stepsRemaining,
++    obligations,
++  };
++}
++
++function boundedProposalOption(option) {
++  if (
++    !hasExactKeys(option, ["recipientPlayerID", "recipientName", "terms"]) ||
++    !isStrictPlayerID(option.recipientPlayerID) ||
++    !isBoundedName(option.recipientName)
++  ) {
++    return null;
++  }
++  const terms = boundedDealTerms(option.terms);
++  return terms === null
++    ? null
++    : {
++        recipientPlayerID: option.recipientPlayerID,
++        recipientName: option.recipientName,
++        terms,
++      };
++}
++
++function boundedRivalReliability(reliability) {
++  if (
++    !hasExactKeys(reliability, [
++      "playerID",
++      "name",
++      "fulfilled",
++      "terminalNonMoot",
++      "reliability",
++    ]) ||
++    !isStrictPlayerID(reliability.playerID) ||
++    !isBoundedName(reliability.name) ||
++    !isNonnegativeSafeInteger(reliability.fulfilled) ||
++    !isNonnegativeSafeInteger(reliability.terminalNonMoot) ||
++    reliability.fulfilled > reliability.terminalNonMoot
++  ) {
++    return null;
++  }
++  const expected =
++    reliability.terminalNonMoot === 0
++      ? null
++      : Math.round(
++          (reliability.fulfilled / reliability.terminalNonMoot) * 100,
++        ) / 100;
++  if (reliability.reliability !== expected) return null;
++  return {
++    playerID: reliability.playerID,
++    name: reliability.name,
++    fulfilled: reliability.fulfilled,
++    terminalNonMoot: reliability.terminalNonMoot,
++    reliability: reliability.reliability,
++  };
 +}
 +
 +export function advertisedMessageLimit(protocol) {
@@ -973,21 +1429,105 @@ index 0000000000000000000000000000000000000000..b0796a8adbb7d8dd8503ac134578d24b
 +  );
 +}
 +
-+export function boundedDealsObservation(deals) {
++export function boundedDealsObservation(deals, ownPlayerID) {
 +  if (
-+    !isRecord(deals) ||
++    !hasExactKeys(deals, [
++      "decisionStep",
++      "incomingProposals",
++      "outgoingProposals",
++      "activeDeals",
++      "proposalOptions",
++      "rivalReliability",
++    ]) ||
++    !isStrictPlayerID(ownPlayerID) ||
 +    !Number.isSafeInteger(deals.decisionStep) ||
 +    deals.decisionStep < 0
 +  ) {
 +    return null;
 +  }
-+  for (const field of DEAL_ARRAY_FIELDS) {
-+    if (!isBoundedRecordArray(deals[field], 64)) return null;
++  for (const field of [
++    "incomingProposals",
++    "outgoingProposals",
++    "activeDeals",
++    "proposalOptions",
++    "rivalReliability",
++  ]) {
++    if (!isBoundedRecordArray(deals[field], MAX_DEAL_OBSERVATION_ROWS)) {
++      return null;
++    }
 +  }
-+  for (const deal of deals.activeDeals) {
-+    if (!isBoundedRecordArray(deal.obligations, 64)) return null;
++  const bounded = {
++    decisionStep: deals.decisionStep,
++    incomingProposals: deals.incomingProposals.map((proposal) =>
++      boundedDealProposal(
++        proposal,
++        ownPlayerID,
++        deals.decisionStep,
++        "incoming",
++      ),
++    ),
++    outgoingProposals: deals.outgoingProposals.map((proposal) =>
++      boundedDealProposal(
++        proposal,
++        ownPlayerID,
++        deals.decisionStep,
++        "outgoing",
++      ),
++    ),
++    activeDeals: deals.activeDeals.map((deal) =>
++      boundedActiveDeal(deal, ownPlayerID, deals.decisionStep),
++    ),
++    proposalOptions: deals.proposalOptions.map(boundedProposalOption),
++    rivalReliability: deals.rivalReliability.map(boundedRivalReliability),
++  };
++  if (
++    [
++      ...bounded.incomingProposals,
++      ...bounded.outgoingProposals,
++      ...bounded.activeDeals,
++      ...bounded.proposalOptions,
++      ...bounded.rivalReliability,
++    ].some((row) => row === null)
++  ) {
++    return null;
 +  }
-+  return deals;
++
++  const seenDealIDs = new Set();
++  for (const proposal of [
++    ...bounded.incomingProposals,
++    ...bounded.outgoingProposals,
++  ]) {
++    if (seenDealIDs.has(proposal.dealID)) return null;
++    seenDealIDs.add(proposal.dealID);
++  }
++  for (const deal of bounded.activeDeals) {
++    if (seenDealIDs.has(deal.dealID)) return null;
++    seenDealIDs.add(deal.dealID);
++  }
++  const optionKeys = new Set();
++  for (const option of bounded.proposalOptions) {
++    if (
++      option.recipientPlayerID === ownPlayerID ||
++      (option.terms.template === "joint_attack" &&
++        (option.terms.targetPlayerID === ownPlayerID ||
++          option.terms.targetPlayerID === option.recipientPlayerID))
++    ) {
++      return null;
++    }
++    const key = `${option.recipientPlayerID}\u0000${option.terms.template}`;
++    if (optionKeys.has(key)) return null;
++    optionKeys.add(key);
++  }
++  const reliabilityPlayerIDs = new Set();
++  for (const entry of bounded.rivalReliability) {
++    if (
++      entry.playerID === ownPlayerID ||
++      reliabilityPlayerIDs.has(entry.playerID)
++    )
++      return null;
++    reliabilityPlayerIDs.add(entry.playerID);
++  }
++  return bounded;
 +}
 +
 +export function boundedInboundMessages(observation) {
@@ -1022,7 +1562,7 @@ index 0000000000000000000000000000000000000000..b0796a8adbb7d8dd8503ac134578d24b
 +    visiblePlayers,
 +    ...rest
 +  } = input;
-+  const deals = boundedDealsObservation(rawDeals);
++  const deals = boundedDealsObservation(rawDeals, input.ownState?.playerID);
 +  const inboundMessages = boundedInboundMessages(input);
 +  const safeVisiblePlayers = isBoundedRecordArray(visiblePlayers, 64)
 +    ? visiblePlayers
@@ -1161,7 +1701,7 @@ index 0000000000000000000000000000000000000000..b0796a8adbb7d8dd8503ac134578d24b
 +    }
 +
 +    if (!spawn && !spatialRecorded) {
-+      const spatial = boundedSpatialV1(observation);
++      const spatial = boundedSpatialObservation(observation);
 +      record("spatial_observation", {
 +        ...base,
 +        present: spatial !== null,
@@ -1190,7 +1730,13 @@ index 0000000000000000000000000000000000000000..b0796a8adbb7d8dd8503ac134578d24b
 +}
 +
 +export function dealResponseFields({ actions, observation, dealMove }) {
-+  if (boundedDealsObservation(observation?.deals) === null) return {};
++  if (
++    boundedDealsObservation(
++      observation?.deals,
++      observation?.ownState?.playerID,
++    ) === null
++  )
++    return {};
 +  const action = exactOfferedAction(actions, dealMove?.id, DEAL_KINDS);
 +  return action ? { selectedDealActionId: action.id } : {};
 +}
@@ -1244,7 +1790,7 @@ index 0000000000000000000000000000000000000000..b0796a8adbb7d8dd8503ac134578d24b
 +  );
 +}
 +
-+function boundedMinimap(minimap) {
++function boundedMinimap(minimap, allowedPlayerIDs, ownPlayerID) {
 +  if (
 +    minimap?.schemaVersion !== 1 ||
 +    minimap.width !== 24 ||
@@ -1266,7 +1812,9 @@ index 0000000000000000000000000000000000000000..b0796a8adbb7d8dd8503ac134578d24b
 +    if (
 +      !MINIMAP_GLYPH.test(entry?.glyph ?? "") ||
 +      !isBoundedVisibleString(entry?.playerID, 200) ||
++      !allowedPlayerIDs.has(entry.playerID) ||
 +      typeof entry?.isYou !== "boolean" ||
++      entry.isYou !== (entry.playerID === ownPlayerID) ||
 +      seenGlyphs.has(entry.glyph) ||
 +      seenPlayerIDs.has(entry.playerID)
 +    ) {
@@ -1280,6 +1828,7 @@ index 0000000000000000000000000000000000000000..b0796a8adbb7d8dd8503ac134578d24b
 +      isYou: entry.isYou,
 +    });
 +  }
++  if (!legend.some((entry) => entry.isYou)) return null;
 +  const allowedGlyphs = new Set([".", "~", ...seenGlyphs]);
 +  if (
 +    minimap.rows.some((row) =>
@@ -1295,7 +1844,284 @@ index 0000000000000000000000000000000000000000..b0796a8adbb7d8dd8503ac134578d24b
 +    rows: [...minimap.rows],
 +    legend,
 +  };
-+  return bounded;
++  return new TextEncoder().encode(JSON.stringify(bounded)).byteLength <=
++    OWNER_MINIMAP_SERIALIZED_MAX_BYTES
++    ? bounded
++    : null;
++}
++
++export function boundedSpatialMapInfo(mapInfo) {
++  if (
++    !isRecord(mapInfo) ||
++    !isBoundedVisibleString(mapInfo.name, 120) ||
++    !Number.isSafeInteger(mapInfo.width) ||
++    mapInfo.width <= 0 ||
++    mapInfo.width > 100_000 ||
++    !Number.isSafeInteger(mapInfo.height) ||
++    mapInfo.height <= 0 ||
++    mapInfo.height > 100_000 ||
++    !Number.isSafeInteger(mapInfo.width * mapInfo.height) ||
++    mapInfo.tileRefEncoding !== "row-major-y-width-plus-x" ||
++    !isRecord(mapInfo.coordinateFrame) ||
++    mapInfo.coordinateFrame.origin !== "top_left" ||
++    mapInfo.coordinateFrame.xIncreases !== "east" ||
++    mapInfo.coordinateFrame.yIncreases !== "south"
++  ) {
++    return null;
++  }
++  return {
++    name: mapInfo.name,
++    width: mapInfo.width,
++    height: mapInfo.height,
++    tileRefEncoding: "row-major-y-width-plus-x",
++    coordinateFrame: {
++      origin: "top_left",
++      xIncreases: "east",
++      yIncreases: "south",
++    },
++  };
++}
++
++function boundedSpatialOwnShape(ownShape) {
++  const quadrants = new Set([
++    "northwest",
++    "north",
++    "northeast",
++    "west",
++    "center",
++    "east",
++    "southwest",
++    "south",
++    "southeast",
++  ]);
++  if (
++    !isRecord(ownShape) ||
++    !quadrants.has(ownShape.quadrant) ||
++    !["complete", "omitted_budget"].includes(ownShape.regionAnalysis) ||
++    !["largest_region_border", "all_border_budget_fallback"].includes(
++      ownShape.centroidBasis,
++    ) ||
++    (ownShape.compactness !== undefined &&
++      !["compact", "stretched", "fragmented"].includes(ownShape.compactness)) ||
++    (ownShape.regionCount !== undefined &&
++      boundedNonnegativeInteger(ownShape.regionCount) === null) ||
++    (ownShape.largestRegionShare !== undefined &&
++      boundedPercent(ownShape.largestRegionShare) === null) ||
++    boundedPercent(ownShape.coastShare) === null ||
++    boundedPercent(ownShape.centroid?.xPct) === null ||
++    boundedPercent(ownShape.centroid?.yPct) === null
++  ) {
++    return null;
++  }
++  return {
++    quadrant: ownShape.quadrant,
++    ...(ownShape.compactness !== undefined
++      ? { compactness: ownShape.compactness }
++      : {}),
++    ...(ownShape.regionCount !== undefined
++      ? { regionCount: ownShape.regionCount }
++      : {}),
++    ...(ownShape.largestRegionShare !== undefined
++      ? { largestRegionShare: ownShape.largestRegionShare }
++      : {}),
++    regionAnalysis: ownShape.regionAnalysis,
++    centroidBasis: ownShape.centroidBasis,
++    coastShare: ownShape.coastShare,
++    centroid: {
++      xPct: ownShape.centroid.xPct,
++      yPct: ownShape.centroid.yPct,
++    },
++  };
++}
++
++function boundedSpatialV3Rivals(visiblePlayers) {
++  if (!Array.isArray(visiblePlayers) || visiblePlayers.length > 64) return null;
++  const bearings = new Set([
++    "north",
++    "northeast",
++    "east",
++    "southeast",
++    "south",
++    "southwest",
++    "west",
++    "northwest",
++  ]);
++  const distances = new Set(["adjacent", "near", "far"]);
++  const rivals = [];
++  for (const player of visiblePlayers) {
++    if (!isBoundedVisibleString(player?.playerID, 200)) return null;
++    let borderWithYou;
++    if (player.borderWithYou !== undefined) {
++      const border = player.borderWithYou;
++      const terrain = border?.terrainBreakdown;
++      const coverage = border?.defensePostFrontCoverage;
++      if (
++        !isRecord(border) ||
++        boundedNonnegativeInteger(border.tiles) === null ||
++        boundedPercent(border.shareOfYourBorder) === null ||
++        !["land", "coastal", "mixed"].includes(border.terrain) ||
++        boundedNonnegativeInteger(border.defensePostsCovering) === null ||
++        typeof border.underAttackHere !== "boolean" ||
++        !isRecord(terrain) ||
++        boundedNonnegativeInteger(terrain.plains) === null ||
++        boundedNonnegativeInteger(terrain.highland) === null ||
++        boundedNonnegativeInteger(terrain.mountain) === null ||
++        boundedNonnegativeInteger(terrain.shore) === null ||
++        terrain.plains + terrain.highland + terrain.mountain !== border.tiles ||
++        terrain.shore > border.tiles ||
++        !isRecord(coverage) ||
++        boundedNonnegativeInteger(coverage.covered) === null ||
++        boundedNonnegativeInteger(coverage.uncovered) === null ||
++        coverage.covered + coverage.uncovered !== border.tiles
++      ) {
++        return null;
++      }
++      borderWithYou = {
++        tiles: border.tiles,
++        shareOfYourBorder: border.shareOfYourBorder,
++        terrain: border.terrain,
++        terrainBreakdown: {
++          plains: terrain.plains,
++          highland: terrain.highland,
++          mountain: terrain.mountain,
++          shore: terrain.shore,
++        },
++        defensePostsCovering: border.defensePostsCovering,
++        defensePostFrontCoverage: {
++          covered: coverage.covered,
++          uncovered: coverage.uncovered,
++        },
++        underAttackHere: border.underAttackHere,
++      };
++    }
++    let bordersWith;
++    if (player.bordersWith !== undefined) {
++      if (!Array.isArray(player.bordersWith) || player.bordersWith.length > 64)
++        return null;
++      bordersWith = [];
++      for (const edge of player.bordersWith) {
++        if (
++          !isBoundedVisibleString(edge?.playerID, 200) ||
++          !["minor", "major"].includes(edge?.sizeClass)
++        ) {
++          return null;
++        }
++        bordersWith.push({
++          playerID: edge.playerID,
++          sizeClass: edge.sizeClass,
++        });
++      }
++    }
++    if (
++      (player.bearing !== undefined && !bearings.has(player.bearing)) ||
++      (player.distanceClass !== undefined &&
++        !distances.has(player.distanceClass))
++    ) {
++      return null;
++    }
++    rivals.push({
++      playerID: player.playerID,
++      ...(bearings.has(player.bearing) ? { bearing: player.bearing } : {}),
++      ...(distances.has(player.distanceClass)
++        ? { distanceClass: player.distanceClass }
++        : {}),
++      ...(borderWithYou ? { borderWithYou } : {}),
++      ...(bordersWith ? { bordersWith } : {}),
++    });
++  }
++  return rivals;
++}
++
++function boundedPositionedAssets(positioned, mapInfo, allowedPlayerIDs) {
++  if (
++    !isRecord(positioned) ||
++    !["complete", "capped"].includes(positioned.analysis) ||
++    !Array.isArray(positioned.structures) ||
++    positioned.structures.length > 48 ||
++    !Array.isArray(positioned.warships) ||
++    positioned.warships.length > 48 ||
++    boundedNonnegativeInteger(positioned.structuresTotal) === null ||
++    positioned.structuresReturned !== positioned.structures.length ||
++    typeof positioned.structuresTruncated !== "boolean" ||
++    boundedNonnegativeInteger(positioned.warshipsTotal) === null ||
++    positioned.warshipsReturned !== positioned.warships.length ||
++    typeof positioned.warshipsTruncated !== "boolean"
++  ) {
++    return null;
++  }
++  if (
++    positioned.structuresTotal < positioned.structures.length ||
++    positioned.warshipsTotal < positioned.warships.length ||
++    positioned.structuresTruncated !==
++      positioned.structures.length < positioned.structuresTotal ||
++    positioned.warshipsTruncated !==
++      positioned.warships.length < positioned.warshipsTotal ||
++    (positioned.analysis === "complete" &&
++      (positioned.structuresTruncated || positioned.warshipsTruncated)) ||
++    (positioned.analysis === "capped" &&
++      !positioned.structuresTruncated &&
++      !positioned.warshipsTruncated)
++  ) {
++    return null;
++  }
++
++  const perPlayerStructures = new Map();
++  const perPlayerWarships = new Map();
++  const parse = (items, kinds, perPlayer) => {
++    const result = [];
++    for (const asset of items) {
++      if (
++        !isRecord(asset) ||
++        !allowedPlayerIDs.has(asset.ownerPlayerID) ||
++        !kinds.has(asset.type) ||
++        !Number.isSafeInteger(asset.tile) ||
++        asset.tile < 0 ||
++        asset.tile >= mapInfo.width * mapInfo.height ||
++        !Number.isSafeInteger(asset.x) ||
++        !Number.isSafeInteger(asset.y) ||
++        asset.x < 0 ||
++        asset.x >= mapInfo.width ||
++        asset.y < 0 ||
++        asset.y >= mapInfo.height ||
++        asset.tile !== asset.y * mapInfo.width + asset.x
++      ) {
++        return null;
++      }
++      const count = (perPlayer.get(asset.ownerPlayerID) ?? 0) + 1;
++      if (count > 8) return null;
++      perPlayer.set(asset.ownerPlayerID, count);
++      result.push({
++        ownerPlayerID: asset.ownerPlayerID,
++        type: asset.type,
++        tile: asset.tile,
++        x: asset.x,
++        y: asset.y,
++      });
++    }
++    return result;
++  };
++  const structures = parse(
++    positioned.structures,
++    new Set(["Defense Post", "City", "Port"]),
++    perPlayerStructures,
++  );
++  const warships = parse(
++    positioned.warships,
++    new Set(["Warship"]),
++    perPlayerWarships,
++  );
++  if (!structures || !warships) return null;
++  return {
++    analysis: positioned.analysis,
++    structures,
++    structuresTotal: positioned.structuresTotal,
++    structuresReturned: structures.length,
++    structuresTruncated: positioned.structuresTruncated,
++    warships,
++    warshipsTotal: positioned.warshipsTotal,
++    warshipsReturned: warships.length,
++    warshipsTruncated: positioned.warshipsTruncated,
++  };
 +}
 +
 +/**
@@ -1345,6 +2171,8 @@ index 0000000000000000000000000000000000000000..b0796a8adbb7d8dd8503ac134578d24b
 +  )
 +    return null;
 +  const rivals = [];
++  const ownPlayerID = observation?.ownState?.playerID;
++  if (!isBoundedVisibleString(ownPlayerID, 200)) return null;
 +  const bearings = new Set([
 +    "north",
 +    "northeast",
@@ -1417,7 +2245,25 @@ index 0000000000000000000000000000000000000000..b0796a8adbb7d8dd8503ac134578d24b
 +    });
 +  }
 +
-+  const minimap = boundedMinimap(spatial.minimap);
++  const allowedPlayerIDs = new Set([
++    ownPlayerID,
++    ...rivals.map((rival) => rival.playerID),
++  ]);
++  if (
++    allowedPlayerIDs.size !== rivals.length + 1 ||
++    rivals.some((rival) =>
++      (rival.bordersWith ?? []).some(
++        (edge) => !allowedPlayerIDs.has(edge.playerID),
++      ),
++    )
++  ) {
++    return null;
++  }
++  const minimap = boundedMinimap(
++    spatial.minimap,
++    allowedPlayerIDs,
++    ownPlayerID,
++  );
 +  const bounded = {
 +    schemaVersion: 1,
 +    visibilityModel: SPATIAL_VISIBILITY_MODEL,
@@ -1447,13 +2293,87 @@ index 0000000000000000000000000000000000000000..b0796a8adbb7d8dd8503ac134578d24b
 +}
 +
 +/**
++ * Accept only the complete L1-L3 spatial schema. Coordinates and public asset
++ * positions fail closed as one unit: no clamping, cropping, inferred owner,
++ * partial container, or unknown visibility provenance reaches policy code.
++ */
++export function boundedSpatialV3(observation) {
++  const spatial = observation?.spatial;
++  if (
++    spatial?.schemaVersion !== 3 ||
++    spatial.visibilityModel !== SPATIAL_VISIBILITY_MODEL
++  ) {
++    return null;
++  }
++  const mapInfo = boundedSpatialMapInfo(observation?.mapInfo);
++  const ownShape = boundedSpatialOwnShape(spatial.ownShape);
++  const rivals = boundedSpatialV3Rivals(observation?.visiblePlayers);
++  const ownPlayerID = observation?.ownState?.playerID;
++  if (
++    !mapInfo ||
++    !ownShape ||
++    !rivals ||
++    !isBoundedVisibleString(ownPlayerID, 200)
++  ) {
++    return null;
++  }
++  const allowedPlayerIDs = new Set([
++    ownPlayerID,
++    ...rivals.map((rival) => rival.playerID),
++  ]);
++  if (
++    allowedPlayerIDs.size !== rivals.length + 1 ||
++    rivals.some((rival) =>
++      (rival.bordersWith ?? []).some(
++        (edge) => !allowedPlayerIDs.has(edge.playerID),
++      ),
++    )
++  ) {
++    return null;
++  }
++  const positionedAssets = boundedPositionedAssets(
++    spatial.positionedAssets,
++    mapInfo,
++    allowedPlayerIDs,
++  );
++  if (!positionedAssets) return null;
++  const minimap = boundedMinimap(
++    spatial.minimap,
++    allowedPlayerIDs,
++    ownPlayerID,
++  );
++  const bounded = {
++    schemaVersion: 3,
++    visibilityModel: SPATIAL_VISIBILITY_MODEL,
++    mapInfo,
++    ownShape,
++    rivals,
++    positionedAssets,
++    ...(minimap ? { minimap } : {}),
++  };
++  return isWithinOwnerSpatialSerializationCeiling(bounded) ? bounded : null;
++}
++
++/** Backward-compatible feature detection for the public starter. */
++export function boundedSpatialObservation(observation) {
++  if (observation?.spatial?.schemaVersion === 3) {
++    return boundedSpatialV3(observation);
++  }
++  if (observation?.spatial?.schemaVersion === 1) {
++    return boundedSpatialV1(observation);
++  }
++  return null;
++}
++
++/**
 + * Stable ranking of the caller's already-offered actions. With spatial absent
-+ * or unusable it returns the original order. With v1 present it can change only
-+ * which existing action object comes first; it cannot create an id or intent.
++ * or unusable it returns the original order. With a supported bounded schema
++ * it can change only which existing action object comes first; it cannot
++ * create an id or intent.
 + */
 +export function rankOfferedActionsWithSpatial(actions, observation) {
 +  if (!Array.isArray(actions)) return [];
-+  const spatial = boundedSpatialV1(observation);
++  const spatial = boundedSpatialObservation(observation);
 +  if (!spatial) return [...actions];
 +
 +  const glyphByPlayer = new Map(
@@ -1471,6 +2391,17 @@ index 0000000000000000000000000000000000000000..b0796a8adbb7d8dd8503ac134578d24b
 +  const rivalByID = new Map(
 +    spatial.rivals.map((rival) => [rival.playerID, rival]),
 +  );
++  const positionedPressureByPlayer = new Map();
++  for (const asset of [
++    ...(spatial.positionedAssets?.structures ?? []),
++    ...(spatial.positionedAssets?.warships ?? []),
++  ]) {
++    positionedPressureByPlayer.set(
++      asset.ownerPlayerID,
++      (positionedPressureByPlayer.get(asset.ownerPlayerID) ?? 0) +
++        (asset.type === "Warship" ? 4 : 1),
++    );
++  }
 +
 +  return actions
 +    .map((action, index) => {
@@ -1485,7 +2416,12 @@ index 0000000000000000000000000000000000000000..b0796a8adbb7d8dd8503ac134578d24b
 +              : 0) +
 +          (rival.borderWithYou?.shareOfYourBorder ?? 0) +
 +          (rival.borderWithYou?.underAttackHere ? 30 : 0) +
-+          (glyphArea.get(glyph) ?? 0) / 12
++          (glyphArea.get(glyph) ?? 0) / 12 +
++          (rival.borderWithYou?.defensePostFrontCoverage?.uncovered ?? 0) / 4 +
++          ((rival.borderWithYou?.terrainBreakdown?.plains ?? 0) -
++            (rival.borderWithYou?.terrainBreakdown?.mountain ?? 0)) /
++            4 +
++          (positionedPressureByPlayer.get(targetID) ?? 0)
 +        : 0;
 +      return { action, index, score };
 +    })
@@ -1494,10 +2430,10 @@ index 0000000000000000000000000000000000000000..b0796a8adbb7d8dd8503ac134578d24b
 +}
 diff --git a/owner-capability-contract.test.mjs b/owner-capability-contract.test.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..e34d14cb22695da9113e656f05092c475fde44ad
+index 0000000000000000000000000000000000000000..5efbc4ef814e3df0b8596d00f4ca389f8b0280cb
 --- /dev/null
 +++ b/owner-capability-contract.test.mjs
-@@ -0,0 +1,481 @@
+@@ -0,0 +1,1044 @@
 +import assert from "node:assert/strict";
 +import { createHash } from "node:crypto";
 +import test from "node:test";
@@ -1506,7 +2442,10 @@ index 0000000000000000000000000000000000000000..e34d14cb22695da9113e656f05092c47
 +  OWNER_SPATIAL_SERIALIZED_MAX_BYTES,
 +  SPATIAL_VISIBILITY_MODEL,
 +  advertisedMessageLimit,
++  boundedDealsObservation,
++  boundedSpatialObservation,
 +  boundedSpatialV1,
++  boundedSpatialV3,
 +  createOwnerCapabilityEvidenceLogger,
 +  dealResponseFields,
 +  isWithinOwnerSpatialSerializationCeiling,
@@ -1530,6 +2469,7 @@ index 0000000000000000000000000000000000000000..e34d14cb22695da9113e656f05092c47
 +  const args = {
 +    actions: [primary, deal],
 +    observation: {
++      ownState: { playerID: "P_A" },
 +      deals: {
 +        decisionStep: 4,
 +        incomingProposals: [],
@@ -1562,7 +2502,7 @@ index 0000000000000000000000000000000000000000..e34d14cb22695da9113e656f05092c47
 +  assert.deepEqual(
 +    dealResponseFields({
 +      ...args,
-+      observation: { deals: [] },
++      observation: { ...args.observation, deals: [] },
 +      dealMove: deal,
 +    }),
 +    {},
@@ -1584,10 +2524,321 @@ index 0000000000000000000000000000000000000000..e34d14cb22695da9113e656f05092c47
 +    assert.deepEqual(
 +      dealResponseFields({
 +        ...args,
-+        observation: { deals: malformed },
++        observation: { ...args.observation, deals: malformed },
 +        dealMove: deal,
 +      }),
 +      {},
++    );
++  }
++});
++
++test("deal capability rejects malformed nested state without emitting a slot", () => {
++  const proposal = {
++    dealID: "deal:P_A:P_B:support_request:4",
++    proposerPlayerID: "P_A",
++    proposerName: "Agent A",
++    recipientPlayerID: "P_B",
++    recipientName: "Agent B",
++    terms: {
++      template: "support_request",
++      durationSteps: 6,
++      goldAmount: "50000",
++      troopAmount: 5000,
++    },
++    proposedAtStep: 4,
++    answerableThroughStep: 8,
++  };
++  const active = {
++    dealID: "deal:P_A:P_B:joint_attack:2",
++    template: "joint_attack",
++    proposerPlayerID: "P_A",
++    proposerName: "Agent A",
++    recipientPlayerID: "P_B",
++    recipientName: "Agent B",
++    activeFromStep: 3,
++    expiresAfterStep: 14,
++    stepsRemaining: 8,
++    obligations: [
++      {
++        obligorPlayerID: "P_A",
++        obligorName: "Agent A",
++        kind: "confirmed_attack_on_target",
++        status: "pending",
++        targetPlayerID: "P_C",
++        targetName: "Agent C",
++      },
++    ],
++  };
++  const nap = {
++    dealID: "deal:P_A:P_B:non_aggression_pact:1",
++    template: "non_aggression_pact",
++    proposerPlayerID: "P_A",
++    proposerName: "Agent A",
++    recipientPlayerID: "P_B",
++    recipientName: "Agent B",
++    activeFromStep: 2,
++    expiresAfterStep: 13,
++    stepsRemaining: 7,
++    obligations: [
++      {
++        obligorPlayerID: "P_A",
++        obligorName: "Agent A",
++        kind: "non_aggression",
++        status: "fulfilled",
++      },
++      {
++        obligorPlayerID: "P_B",
++        obligorName: "Agent B",
++        kind: "non_aggression",
++        status: "pending",
++      },
++    ],
++  };
++  const support = {
++    dealID: "deal:P_A:P_B:support_request:0",
++    template: "support_request",
++    proposerPlayerID: "P_A",
++    proposerName: "Agent A",
++    recipientPlayerID: "P_B",
++    recipientName: "Agent B",
++    activeFromStep: 5,
++    expiresAfterStep: 10,
++    stepsRemaining: 4,
++    obligations: [
++      {
++        obligorPlayerID: "P_B",
++        obligorName: "Agent B",
++        kind: "send_support",
++        status: "pending",
++        goldAmount: "50000",
++        troopAmount: 5000,
++        donatedGold: "0",
++        donatedTroops: 0,
++      },
++    ],
++  };
++  const valid = {
++    decisionStep: 7,
++    incomingProposals: [proposal],
++    outgoingProposals: [
++      {
++        ...proposal,
++        dealID: "deal:P_B:P_D:trade_security_pact:5",
++        proposerPlayerID: "P_B",
++        proposerName: "Agent B",
++        recipientPlayerID: "P_D",
++        recipientName: "Agent D",
++        terms: {
++          template: "trade_security_pact",
++          durationSteps: 12,
++        },
++        proposedAtStep: 5,
++        answerableThroughStep: 9,
++      },
++    ],
++    activeDeals: [active, nap, support],
++    proposalOptions: [
++      {
++        recipientPlayerID: "P_C",
++        recipientName: "Agent C",
++        terms: {
++          template: "non_aggression_pact",
++          durationSteps: 12,
++        },
++      },
++    ],
++    rivalReliability: [
++      {
++        playerID: "P_C",
++        name: "Agent C",
++        fulfilled: 2,
++        terminalNonMoot: 3,
++        reliability: 0.67,
++      },
++    ],
++  };
++  assert.deepEqual(boundedDealsObservation(valid, "P_B"), valid);
++
++  const selected = {
++    id: `deal_accept:${proposal.dealID}`,
++    kind: "deal_accept",
++  };
++  const malformed = [
++    { ...valid, incomingProposals: [{ dealID: 7 }] },
++    { ...valid, incomingProposals: [{}] },
++    {
++      ...valid,
++      incomingProposals: [{ ...proposal, terms: [] }],
++    },
++    {
++      ...valid,
++      incomingProposals: [{ ...proposal, dealID: ` ${proposal.dealID}` }],
++    },
++    {
++      ...valid,
++      outgoingProposals: [{ ...proposal }],
++    },
++    {
++      ...valid,
++      incomingProposals: [
++        { ...proposal, recipientPlayerID: "P_C", recipientName: "Agent C" },
++      ],
++    },
++    {
++      ...valid,
++      incomingProposals: [{ ...proposal, answerableThroughStep: 7 }],
++    },
++    {
++      ...valid,
++      incomingProposals: [
++        {
++          ...proposal,
++          terms: {
++            template: "joint_attack",
++            durationSteps: 8,
++            targetPlayerID: "P_A",
++            targetName: "Agent A",
++          },
++        },
++      ],
++    },
++    {
++      ...valid,
++      decisionStep: 9,
++    },
++    {
++      ...valid,
++      activeDeals: [
++        {
++          ...active,
++          obligations: [{ ...active.obligations[0], status: 7 }],
++        },
++      ],
++    },
++    {
++      ...valid,
++      activeDeals: [
++        {
++          ...nap,
++          obligations: [nap.obligations[0], { ...nap.obligations[0] }],
++        },
++      ],
++    },
++    {
++      ...valid,
++      activeDeals: [
++        {
++          ...support,
++          obligations: [
++            {
++              ...support.obligations[0],
++              obligorPlayerID: "P_A",
++              obligorName: "Agent A",
++            },
++          ],
++        },
++      ],
++    },
++    {
++      ...valid,
++      activeDeals: [{ ...active, activeFromStep: undefined }],
++    },
++    {
++      ...valid,
++      activeDeals: [{ ...active, stepsRemaining: 7 }],
++    },
++    {
++      ...valid,
++      activeDeals: [{ ...active, expiresAfterStep: 30, stepsRemaining: 24 }],
++    },
++    {
++      ...valid,
++      activeDeals: [
++        {
++          ...active,
++          obligations: [
++            {
++              ...active.obligations[0],
++              obligorPlayerID: "P_B",
++              obligorName: "Agent B",
++            },
++          ],
++        },
++      ],
++    },
++    {
++      ...valid,
++      activeDeals: [
++        {
++          ...active,
++          obligations: [{ ...active.obligations[0], status: "fulfilled" }],
++        },
++      ],
++    },
++    {
++      ...valid,
++      activeDeals: [
++        {
++          ...active,
++          proposerPlayerID: "P_C",
++          proposerName: "Agent C",
++          recipientPlayerID: "P_D",
++          recipientName: "Agent D",
++          obligations: [
++            {
++              ...active.obligations[0],
++              obligorPlayerID: "P_C",
++              obligorName: "Agent C",
++            },
++          ],
++        },
++      ],
++    },
++    {
++      ...valid,
++      proposalOptions: [
++        {
++          recipientPlayerID: "P_B",
++          recipientName: "Agent B",
++          terms: {
++            template: "non_aggression_pact",
++            durationSteps: 12,
++          },
++        },
++      ],
++    },
++    {
++      ...valid,
++      rivalReliability: [
++        {
++          playerID: "P_B",
++          name: "Agent B",
++          fulfilled: 0,
++          terminalNonMoot: 0,
++          reliability: null,
++        },
++      ],
++    },
++    { ...valid, privateDealNotes: "must not enter policy state" },
++  ];
++  for (const deals of malformed) {
++    assert.equal(boundedDealsObservation(deals, "P_B"), null);
++    assert.deepEqual(
++      dealResponseFields({
++        actions: [primary, selected],
++        observation: { ownState: { playerID: "P_B" }, deals },
++        dealMove: selected,
++      }),
++      {},
++    );
++    assert.equal(
++      "deals" in
++        ownerCapabilityObservation({
++          ownState: { playerID: "P_B" },
++          deals,
++          visiblePlayers: [],
++        }),
++      false,
 +    );
 +  }
 +});
@@ -1670,6 +2921,7 @@ index 0000000000000000000000000000000000000000..e34d14cb22695da9113e656f05092c47
 +
 +function spatialObservation(minimap = undefined) {
 +  return {
++    ownState: { playerID: "P_SELF" },
 +    spatial: {
 +      schemaVersion: 1,
 +      visibilityModel: SPATIAL_VISIBILITY_MODEL,
@@ -1704,6 +2956,83 @@ index 0000000000000000000000000000000000000000..e34d14cb22695da9113e656f05092c47
 +          defensePostsCovering: 2,
 +          underAttackHere: true,
 +        },
++      },
++    ],
++  };
++}
++
++function richSpatialObservation() {
++  return {
++    ownState: { playerID: "P_SELF" },
++    mapInfo: {
++      name: "Pangaea",
++      width: 100,
++      height: 80,
++      tileRefEncoding: "row-major-y-width-plus-x",
++      coordinateFrame: {
++        origin: "top_left",
++        xIncreases: "east",
++        yIncreases: "south",
++      },
++    },
++    spatial: {
++      schemaVersion: 3,
++      visibilityModel: SPATIAL_VISIBILITY_MODEL,
++      ownShape: {
++        quadrant: "west",
++        regionAnalysis: "complete",
++        centroidBasis: "largest_region_border",
++        coastShare: 25,
++        centroid: { xPct: 30, yPct: 50 },
++      },
++      positionedAssets: {
++        analysis: "complete",
++        structures: [
++          {
++            ownerPlayerID: "P_SELF",
++            type: "Defense Post",
++            tile: 3025,
++            x: 25,
++            y: 30,
++          },
++        ],
++        structuresTotal: 1,
++        structuresReturned: 1,
++        structuresTruncated: false,
++        warships: [
++          {
++            ownerPlayerID: "P_A",
++            type: "Warship",
++            tile: 3060,
++            x: 60,
++            y: 30,
++          },
++        ],
++        warshipsTotal: 1,
++        warshipsReturned: 1,
++        warshipsTruncated: false,
++      },
++    },
++    visiblePlayers: [
++      {
++        playerID: "P_A",
++        bearing: "east",
++        distanceClass: "adjacent",
++        borderWithYou: {
++          tiles: 10,
++          shareOfYourBorder: 25,
++          terrain: "mixed",
++          terrainBreakdown: {
++            plains: 4,
++            highland: 3,
++            mountain: 3,
++            shore: 2,
++          },
++          defensePostsCovering: 1,
++          defensePostFrontCoverage: { covered: 6, uncovered: 4 },
++          underAttackHere: false,
++        },
++        bordersWith: [],
 +      },
 +    ],
 +  };
@@ -1776,6 +3105,7 @@ index 0000000000000000000000000000000000000000..e34d14cb22695da9113e656f05092c47
 +  assert.equal("inboundMessages" in (malformed.nonCombat ?? {}), false);
 +
 +  const valid = ownerCapabilityObservation({
++    ownState: { playerID: "P_A" },
 +    visiblePlayers: [],
 +    deals: {
 +      decisionStep: 1,
@@ -1808,6 +3138,11 @@ index 0000000000000000000000000000000000000000..e34d14cb22695da9113e656f05092c47
 +    rows: Array.from({ length: 12 }, () => "A".repeat(24)),
 +    legend: [
 +      {
++        glyph: "S",
++        playerID: "P_SELF",
++        isYou: true,
++      },
++      {
 +        glyph: "A",
 +        playerID: "P_A",
 +        name: "legacy redundant name is not retained",
@@ -1817,7 +3152,10 @@ index 0000000000000000000000000000000000000000..e34d14cb22695da9113e656f05092c47
 +  };
 +  assert.deepEqual(boundedSpatialV1(spatialObservation(valid)).minimap, {
 +    ...valid,
-+    legend: [{ glyph: "A", playerID: "P_A", isYou: false }],
++    legend: [
++      { glyph: "S", playerID: "P_SELF", isYou: true },
++      { glyph: "A", playerID: "P_A", isYou: false },
++    ],
 +  });
 +  for (const minimap of [
 +    { ...valid, width: 23 },
@@ -1830,6 +3168,7 @@ index 0000000000000000000000000000000000000000..e34d14cb22695da9113e656f05092c47
 +    {
 +      ...valid,
 +      legend: [
++        { glyph: "S", playerID: "P_SELF", isYou: true },
 +        { glyph: "A", playerID: "P_A", isYou: false },
 +        { glyph: "B", playerID: "P_A", isYou: false },
 +      ],
@@ -1839,11 +3178,44 @@ index 0000000000000000000000000000000000000000..e34d14cb22695da9113e656f05092c47
 +      rows: ["Z".repeat(24), ...valid.rows.slice(1)],
 +      legend: [],
 +    },
++    {
++      ...valid,
++      legend: [
++        { glyph: "S", playerID: "P_HIDDEN", isYou: true },
++        { glyph: "A", playerID: "P_A", isYou: false },
++      ],
++    },
++    {
++      ...valid,
++      legend: [
++        { glyph: "S", playerID: "P_SELF", isYou: false },
++        { glyph: "A", playerID: "P_A", isYou: true },
++      ],
++    },
 +  ]) {
 +    const bounded = boundedSpatialV1(spatialObservation(minimap));
 +    assert.ok(bounded);
 +    assert.equal("minimap" in bounded, false);
 +  }
++
++  const oversizedMinimapObservation = spatialObservation();
++  oversizedMinimapObservation.visiblePlayers = Array.from(
++    { length: 63 },
++    (_, index) => ({ playerID: `P_${index}` }),
++  );
++  oversizedMinimapObservation.spatial.minimap = {
++    ...valid,
++    legend: Array.from({ length: 64 }, (_, index) => ({
++      glyph: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@#"[
++        index
++      ],
++      playerID: index === 0 ? "P_SELF" : `P_${index - 1}`,
++      isYou: index === 0,
++    })),
++  };
++  const oversizedMinimap = boundedSpatialV1(oversizedMinimapObservation);
++  assert.ok(oversizedMinimap);
++  assert.equal("minimap" in oversizedMinimap, false);
 +  assert.equal(
 +    boundedSpatialV1({
 +      ...spatialObservation(valid),
@@ -1908,6 +3280,133 @@ index 0000000000000000000000000000000000000000..e34d14cb22695da9113e656f05092c47
 +    })),
 +  }));
 +  assert.equal(boundedSpatialV1(oversized), null);
++});
++
++test("rich spatial L3 is exact, bounded, and fails closed atomically", () => {
++  const valid = richSpatialObservation();
++  const bounded = boundedSpatialV3(valid);
++  assert.ok(bounded);
++  assert.equal(bounded.schemaVersion, 3);
++  assert.deepEqual(bounded.mapInfo, valid.mapInfo);
++  assert.deepEqual(bounded.positionedAssets, valid.spatial.positionedAssets);
++  assert.deepEqual(boundedSpatialObservation(valid), bounded);
++  assert.equal(
++    boundedSpatialObservation(spatialObservation()).schemaVersion,
++    1,
++  );
++
++  const mutations = [
++    (value) => {
++      value.mapInfo.coordinateFrame.origin = "bottom_left";
++    },
++    (value) => {
++      value.spatial.positionedAssets.warships[0].tile = 3_061;
++    },
++    (value) => {
++      value.spatial.positionedAssets.structures[0].type = "Missile Silo";
++    },
++    (value) => {
++      value.spatial.positionedAssets.structuresReturned = 0;
++    },
++    (value) => {
++      value.spatial.positionedAssets.analysis = "capped";
++    },
++    (value) => {
++      value.visiblePlayers[0].borderWithYou.terrainBreakdown.plains = 5;
++    },
++    (value) => {
++      value.visiblePlayers[0].borderWithYou.defensePostFrontCoverage.covered = 7;
++    },
++    (value) => {
++      value.visiblePlayers.push(structuredClone(value.visiblePlayers[0]));
++    },
++    (value) => {
++      value.visiblePlayers[0].bordersWith = [
++        { playerID: "P_HIDDEN", sizeClass: "minor" },
++      ];
++    },
++  ];
++  for (const mutate of mutations) {
++    const malformed = structuredClone(valid);
++    mutate(malformed);
++    assert.equal(boundedSpatialV3(malformed), null);
++  }
++
++  const tooManyPerPlayer = structuredClone(valid);
++  tooManyPerPlayer.spatial.positionedAssets.structures = Array.from(
++    { length: 9 },
++    (_, index) => ({
++      ownerPlayerID: "P_SELF",
++      type: "City",
++      tile: index,
++      x: index,
++      y: 0,
++    }),
++  );
++  tooManyPerPlayer.spatial.positionedAssets.structuresTotal = 9;
++  tooManyPerPlayer.spatial.positionedAssets.structuresReturned = 9;
++  assert.equal(boundedSpatialV3(tooManyPerPlayer), null);
++
++  const colocated = structuredClone(valid);
++  colocated.spatial.positionedAssets.warships.push(
++    structuredClone(colocated.spatial.positionedAssets.warships[0]),
++  );
++  colocated.spatial.positionedAssets.warshipsTotal = 2;
++  colocated.spatial.positionedAssets.warshipsReturned = 2;
++  assert.equal(boundedSpatialV3(colocated).positionedAssets.warships.length, 2);
++
++  const malformedMinimap = structuredClone(valid);
++  malformedMinimap.spatial.minimap = {
++    schemaVersion: 1,
++    width: 24,
++    height: 12,
++    rows: Array.from({ length: 12 }, () => "A".repeat(24)),
++    legend: [{ glyph: "A", playerID: "P_A", isYou: false }],
++  };
++  malformedMinimap.spatial.minimap.rows[0] = `?${malformedMinimap.spatial.minimap.rows[0].slice(1)}`;
++  assert.ok(boundedSpatialV3(malformedMinimap));
++  assert.equal("minimap" in boundedSpatialV3(malformedMinimap), false);
++});
++
++test("rich spatial facts can only rerank exact offered legal action ids", () => {
++  const observation = richSpatialObservation();
++  observation.visiblePlayers.push({
++    ...structuredClone(observation.visiblePlayers[0]),
++    playerID: "P_B",
++  });
++  observation.spatial.positionedAssets.warships = [];
++  observation.spatial.positionedAssets.warshipsTotal = 0;
++  observation.spatial.positionedAssets.warshipsReturned = 0;
++  const actions = [
++    { id: "attack:P_A", kind: "attack", metadata: { targetID: "P_A" } },
++    { id: "attack:P_B", kind: "attack", metadata: { targetID: "P_B" } },
++  ];
++  assert.equal(
++    rankOfferedActionsWithSpatial(actions, observation)[0],
++    actions[0],
++  );
++
++  observation.spatial.positionedAssets.warships = Array.from(
++    { length: 8 },
++    (_, index) => ({
++      ownerPlayerID: "P_B",
++      type: "Warship",
++      tile: 4_000 + index,
++      x: index,
++      y: 40,
++    }),
++  );
++  observation.spatial.positionedAssets.warshipsTotal = 8;
++  observation.spatial.positionedAssets.warshipsReturned = 8;
++  assert.equal(
++    rankOfferedActionsWithSpatial(actions, observation)[0],
++    actions[1],
++  );
++  assert.ok(
++    rankOfferedActionsWithSpatial(actions, observation).every((action) =>
++      actions.includes(action),
++    ),
++  );
 +});
 +
 +test("capability evidence is bounded, joinable, and contains no raw body", () => {
@@ -1981,10 +3480,10 @@ index 0000000000000000000000000000000000000000..e34d14cb22695da9113e656f05092c47
 +});
 diff --git a/owner-evidence-check.mjs b/owner-evidence-check.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..0256ed47646706ebcfd7d307ba28cf1fb3ad17c2
+index 0000000000000000000000000000000000000000..cc7743edd1bb6175e354f991ca513b85260cdf75
 --- /dev/null
 +++ b/owner-evidence-check.mjs
-@@ -0,0 +1,389 @@
+@@ -0,0 +1,437 @@
 +import fs from "node:fs";
 +
 +const PREFIX = "PROXYWAR_OWNER_CAPABILITY_EVIDENCE ";
@@ -2129,7 +3628,10 @@ index 0000000000000000000000000000000000000000..0256ed47646706ebcfd7d307ba28cf1f
 +    ) {
 +      fail(`${file}: malformed message-observation evidence fields`);
 +    }
-+  } else if (typeof event.present !== "boolean") {
++  } else if (
++    typeof event.present !== "boolean" ||
++    (event.present === true && typeof event.minimapPresent !== "boolean")
++  ) {
 +    fail(`${file}: malformed spatial evidence fields`);
 +  }
 +}
@@ -2149,9 +3651,13 @@ index 0000000000000000000000000000000000000000..0256ed47646706ebcfd7d307ba28cf1f
 +function parseArgs(argv) {
 +  const spatialArg = argv.find((arg) => arg.startsWith("--spatial="));
 +  const spatial = spatialArg?.slice("--spatial=".length);
-+  if (!new Set(["absent", "present", "either"]).has(spatial)) {
++  if (
++    !new Set(["absent", "present", "rich-v3", "rich-v3-minimap", "either"]).has(
++      spatial,
++    )
++  ) {
 +    fail(
-+      "usage: node owner-evidence-check.mjs --deals=required|optional --messages=required|optional --spatial=absent|present|either LOG [LOG ...]",
++      "usage: node owner-evidence-check.mjs --deals=required|optional --messages=required|optional --spatial=absent|present|rich-v3|rich-v3-minimap|either LOG [LOG ...]",
 +    );
 +  }
 +  const dealsArg = argv.find((arg) => arg.startsWith("--deals="));
@@ -2163,7 +3669,7 @@ index 0000000000000000000000000000000000000000..0256ed47646706ebcfd7d307ba28cf1f
 +    !new Set(["required", "optional"]).has(messages)
 +  ) {
 +    fail(
-+      "usage: node owner-evidence-check.mjs --deals=required|optional --messages=required|optional --spatial=absent|present|either LOG [LOG ...]",
++      "usage: node owner-evidence-check.mjs --deals=required|optional --messages=required|optional --spatial=absent|present|rich-v3|rich-v3-minimap|either LOG [LOG ...]",
 +    );
 +  }
 +  const knownOptions = new Set([spatialArg, dealsArg, messagesArg]);
@@ -2171,11 +3677,25 @@ index 0000000000000000000000000000000000000000..0256ed47646706ebcfd7d307ba28cf1f
 +    (arg) => arg.startsWith("--") && !knownOptions.has(arg),
 +  );
 +  if (unknownOption) fail(`unknown option ${unknownOption}`);
-+  const files = argv.filter((arg) => !arg.startsWith("--"));
-+  if (files.length === 0)
++  const requestedFiles = argv.filter((arg) => !arg.startsWith("--"));
++  if (requestedFiles.length === 0)
 +    fail("at least one downloaded policy log is required");
-+  if (files.length > MAX_FILES)
++  if (requestedFiles.length > MAX_FILES)
 +    fail(`at most ${MAX_FILES} policy logs are allowed`);
++  const canonicalFiles = requestedFiles.map((file) => {
++    const canonicalPath = fs.realpathSync(file);
++    const fileStat = fs.statSync(canonicalPath);
++    return {
++      canonicalPath,
++      identity: `${fileStat.dev}:${fileStat.ino}`,
++    };
++  });
++  if (
++    new Set(canonicalFiles.map((file) => file.identity)).size !==
++    canonicalFiles.length
++  )
++    fail("each downloaded policy log must resolve to a unique file");
++  const files = canonicalFiles.map((file) => file.canonicalPath);
 +  return { deals, files, messages, spatial };
 +}
 +
@@ -2223,7 +3743,8 @@ index 0000000000000000000000000000000000000000..0256ed47646706ebcfd7d307ba28cf1f
 +    if (
 +      (event.kind === "deal_selection" ||
 +        event.kind === "message_selection" ||
-+        event.kind === "message_observation") &&
++        event.kind === "message_observation" ||
++        event.kind === "spatial_observation") &&
 +      event.selectedLegalActionOffered !== true
 +    ) {
 +      fail(`${event.sourceFile}: primary action was not recorded as offered`);
@@ -2291,27 +3812,53 @@ index 0000000000000000000000000000000000000000..0256ed47646706ebcfd7d307ba28cf1f
 +  }
 +}
 +
-+function spatialChecks(events, required) {
++function spatialChecks(events, required, files) {
 +  const spatial = events.filter(
 +    (event) => event.kind === "spatial_observation",
 +  );
 +  if (spatial.length === 0) fail("spatial observation evidence is required");
 +  if (
-+    required === "present" &&
++    ["present", "rich-v3", "rich-v3-minimap"].includes(required) &&
 +    !spatial.some((event) => event.present === true)
 +  )
 +    fail("no policy recorded a valid spatial observation");
++  if (
++    ["rich-v3", "rich-v3-minimap"].includes(required) &&
++    !spatial.every((event) => event.present === true)
++  ) {
++    fail("rich spatial evidence included an absent policy observation");
++  }
++  if (["rich-v3", "rich-v3-minimap"].includes(required)) {
++    for (const file of files) {
++      if (!spatial.some((event) => event.sourceFile === file)) {
++        fail(`${file}: rich spatial evidence record is missing`);
++      }
++    }
++  }
 +  if (
 +    required === "absent" &&
 +    !spatial.every((event) => event.present === false)
 +  )
 +    fail("canonical social XP unexpectedly contained spatial state");
++  if (
++    ["rich-v3", "rich-v3-minimap"].includes(required) &&
++    !spatial.every((event) => event.schemaVersion === 3)
++  ) {
++    fail("rich spatial evidence included a non-v3 observation");
++  }
++  if (
++    required === "rich-v3-minimap" &&
++    !spatial.every((event) => event.minimapPresent === true)
++  ) {
++    fail("a rich v3 policy observation omitted the bounded minimap");
++  }
 +  for (const event of spatial.filter(
 +    (candidate) => candidate.present === true,
 +  )) {
 +    if (
-+      event.schemaVersion !== 1 ||
++      ![1, 3].includes(event.schemaVersion) ||
 +      event.visibilityModel !== "global-lockstep-public-map-v1" ||
++      typeof event.minimapPresent !== "boolean" ||
 +      !Number.isSafeInteger(event.serializedUTF8Bytes) ||
 +      event.serializedUTF8Bytes < 1 ||
 +      event.serializedUTF8Bytes > 16 * 1024
@@ -2346,7 +3893,7 @@ index 0000000000000000000000000000000000000000..0256ed47646706ebcfd7d307ba28cf1f
 +  }
 +  exactSelectionChecks(events);
 +  if (messages === "required") joinedMessageChecks(events);
-+  spatialChecks(events, spatial);
++  spatialChecks(events, spatial, files);
 +  process.stdout.write(
 +    `${JSON.stringify({
 +      verdict: "PASS",
@@ -2376,10 +3923,10 @@ index 0000000000000000000000000000000000000000..0256ed47646706ebcfd7d307ba28cf1f
 +}
 diff --git a/owner-evidence-check.test.mjs b/owner-evidence-check.test.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..85c9017feac0fe827b3efd8f0d9845068428756c
+index 0000000000000000000000000000000000000000..72f96c91755a0a3b5f668840aed991fd9a94f968
 --- /dev/null
 +++ b/owner-evidence-check.test.mjs
-@@ -0,0 +1,131 @@
+@@ -0,0 +1,249 @@
 +import assert from "node:assert/strict";
 +import { spawnSync } from "node:child_process";
 +import { createHash } from "node:crypto";
@@ -2445,24 +3992,33 @@ index 0000000000000000000000000000000000000000..85c9017feac0fe827b3efd8f0d984506
 +  ];
 +}
 +
-+function runChecker(events) {
++function runCheckerFiles(
++  eventSets,
++  spatial = "absent",
++  { aliasFirst = false, duplicateFirst = false } = {},
++) {
 +  const directory = mkdtempSync(
 +    path.join(tmpdir(), "proxywar-owner-evidence-"),
 +  );
-+  const log = path.join(directory, "policy.log");
-+  writeFileSync(
-+    log,
-+    `${events.map((event) => `${PREFIX}${JSON.stringify(event)}`).join("\n")}\n`,
-+    "utf8",
-+  );
++  const logs = eventSets.map((events, index) => {
++    const log = path.join(directory, `policy-${index}.log`);
++    writeFileSync(
++      log,
++      `${events.map((event) => `${PREFIX}${JSON.stringify(event)}`).join("\n")}\n`,
++      "utf8",
++    );
++    return log;
++  });
 +  const result = spawnSync(
 +    process.execPath,
 +    [
 +      CHECKER,
 +      "--deals=required",
 +      "--messages=required",
-+      "--spatial=absent",
-+      log,
++      `--spatial=${spatial}`,
++      ...logs,
++      ...(duplicateFirst ? [logs[0]] : []),
++      ...(aliasFirst ? [`${directory}/./policy-0.log`] : []),
 +    ],
 +    {
 +      encoding: "utf8",
@@ -2471,6 +4027,115 @@ index 0000000000000000000000000000000000000000..85c9017feac0fe827b3efd8f0d984506
 +  rmSync(directory, { recursive: true, force: true });
 +  return result;
 +}
++
++function runChecker(events, spatial = "absent") {
++  return runCheckerFiles([events], spatial);
++}
++
++test("owner evidence checker accepts bounded rich spatial provenance", () => {
++  const events = validEvents();
++  for (const event of events.filter(
++    (candidate) => candidate.kind === "spatial_observation",
++  )) {
++    Object.assign(event, {
++      present: true,
++      schemaVersion: 3,
++      visibilityModel: "global-lockstep-public-map-v1",
++      minimapPresent: true,
++      serializedUTF8Bytes: 8_192,
++    });
++  }
++  const result = runChecker(events, "rich-v3-minimap");
++  assert.equal(result.status, 0, result.stderr);
++  assert.equal(JSON.parse(result.stdout).spatial, "rich-v3-minimap");
++});
++
++test("owner evidence checker rejects incomplete or downgraded rich spatial evidence", () => {
++  for (const mutation of [
++    (event) => {
++      for (const key of [
++        "schemaVersion",
++        "visibilityModel",
++        "minimapPresent",
++        "serializedUTF8Bytes",
++      ]) {
++        delete event[key];
++      }
++      event.present = false;
++    },
++    (event) => delete event.minimapPresent,
++    (event) => {
++      event.minimapPresent = "yes";
++    },
++    (event) => {
++      event.minimapPresent = false;
++    },
++    (event) => {
++      event.schemaVersion = 1;
++    },
++  ]) {
++    const events = validEvents();
++    for (const event of events.filter(
++      (candidate) => candidate.kind === "spatial_observation",
++    )) {
++      Object.assign(event, {
++        present: true,
++        schemaVersion: 3,
++        visibilityModel: "global-lockstep-public-map-v1",
++        minimapPresent: true,
++        serializedUTF8Bytes: 8_192,
++      });
++    }
++    mutation(events[2]);
++    const result = runChecker(events, "rich-v3-minimap");
++    assert.equal(result.status, 1);
++    assert.match(
++      result.stderr,
++      /malformed spatial|absent policy|bounded minimap|non-v3|provenance/u,
++    );
++  }
++});
++
++test("owner evidence checker requires rich spatial evidence in every supplied file", () => {
++  const events = validEvents();
++  for (const event of events.filter(
++    (candidate) => candidate.kind === "spatial_observation",
++  )) {
++    Object.assign(event, {
++      present: true,
++      schemaVersion: 3,
++      visibilityModel: "global-lockstep-public-map-v1",
++      minimapPresent: true,
++      serializedUTF8Bytes: 8_192,
++    });
++  }
++  const missing = runCheckerFiles([events, []], "rich-v3-minimap");
++  assert.equal(missing.status, 1);
++  assert.match(missing.stderr, /record is missing/u);
++
++  const forged = structuredClone(events);
++  forged.find(
++    (event) => event.kind === "spatial_observation",
++  ).selectedLegalActionOffered = false;
++  const notOffered = runChecker(forged, "rich-v3-minimap");
++  assert.equal(notOffered.status, 1);
++  assert.match(
++    notOffered.stderr,
++    /primary action was not recorded as offered/u,
++  );
++
++  const duplicate = runCheckerFiles([events], "rich-v3-minimap", {
++    duplicateFirst: true,
++  });
++  assert.equal(duplicate.status, 1);
++  assert.match(duplicate.stderr, /resolve to a unique file/u);
++
++  const alias = runCheckerFiles([events], "rich-v3-minimap", {
++    aliasFirst: true,
++  });
++  assert.equal(alias.status, 1);
++  assert.match(alias.stderr, /resolve to a unique file/u);
++});
 +
 +test("owner evidence checker accepts exact bounded joined evidence", () => {
 +  const result = runChecker(validEvents());
@@ -2513,10 +4178,10 @@ index 0000000000000000000000000000000000000000..85c9017feac0fe827b3efd8f0d984506
 +});
 diff --git a/owner-player-frame.test.mjs b/owner-player-frame.test.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..a08e6e748e3f9a78a63f8247d919747a335f280c
+index 0000000000000000000000000000000000000000..0340b6c4e39d253a3ace350e4535b227fcaa2d06
 --- /dev/null
 +++ b/owner-player-frame.test.mjs
-@@ -0,0 +1,279 @@
+@@ -0,0 +1,280 @@
 +import assert from "node:assert/strict";
 +import { spawn } from "node:child_process";
 +import { once } from "node:events";
@@ -2538,7 +4203,7 @@ index 0000000000000000000000000000000000000000..a08e6e748e3f9a78a63f8247d919747a
 +}
 +
 +function capabilityRequest() {
-+  const dealID = "deal:P_A:P_B:non_aggression_pact:4";
++  const dealID = "deal:P_B:P_A:non_aggression_pact:41";
 +  return {
 +    type: "decision_request",
 +    requestID: "req_owner_contract",
@@ -2598,7 +4263,8 @@ index 0000000000000000000000000000000000000000..a08e6e748e3f9a78a63f8247d919747a
 +                template: "non_aggression_pact",
 +                durationSteps: 12,
 +              },
-+              answerableThroughStep: 43,
++              proposedAtStep: 41,
++              answerableThroughStep: 45,
 +            },
 +          ],
 +          outgoingProposals: [],
