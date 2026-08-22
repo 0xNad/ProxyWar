@@ -35,6 +35,8 @@ import {
   assertResolvedCommanderRuntime,
   captureCommanderSourceIdentity,
   COMMANDER_OUTER_DECISION_TIMEOUT_MS,
+  commanderArmOrderForReplica,
+  commanderConfirmatoryAnalysisSpecification,
   commanderExperimentOutputDirectory,
   newCommanderExperimentID,
   prepareCommanderProviderCwd,
@@ -43,6 +45,8 @@ import {
   resolveScriptedCommanderRuntime,
   withCommanderExperimentEnvironment,
   writeCommanderExperimentSeal,
+  type CommanderArmOrder,
+  type CommanderEvidenceProtocol,
   type CommanderExperimentPreRegistration,
   type CommanderSourceIdentity,
   type ResolvedCommanderRuntime,
@@ -75,6 +79,7 @@ export interface CommanderArmGateOptions {
   runs?: number;
   startIndex?: number;
   providerMode?: CommanderArmGateProviderMode;
+  protocol?: CommanderEvidenceProtocol;
   sourceSha?: string;
   sourceTreeDirty?: boolean;
   writeReport?: boolean;
@@ -103,6 +108,11 @@ export interface CommanderArmGateResult {
   experimentID: string | null;
   preRegistrationManifestPath: string | null;
   sealPath: string | null;
+  armExecutionOrders: Array<{
+    replicaIndex: number;
+    preregistered: CommanderArmOrder;
+    executed: CommanderArmOrder;
+  }>;
 }
 
 interface CommanderArmMode {
@@ -128,12 +138,23 @@ interface CommanderArmMode {
 export async function runCommanderArmGate(
   options: CommanderArmGateOptions = {},
 ): Promise<CommanderArmGateResult> {
+  const providerMode = options.providerMode ?? "scripted";
+  const protocol =
+    options.protocol ??
+    (providerMode === "claude-cli" ? "technical-canary" : "plumbing");
+  if (providerMode === "claude-cli" && protocol === "plumbing") {
+    throw new Error(
+      "real-provider Commander gates require technical-canary or confirmatory protocol",
+    );
+  }
   const sourceRoot = commanderGateSourceRoot();
   assertCommanderGateSourceRoot(process.cwd(), sourceRoot);
   const socialFlags = assertSocialExperimentFlagsOff();
   const baseSeed = options.seed ?? COMMANDER_LOCAL_SMOKE_DEFAULT_SEED;
   const baseRunID = options.runID ?? COMMANDER_LOCAL_SMOKE_DEFAULT_RUN_ID;
-  const providerMode = options.providerMode ?? "scripted";
+  if (providerMode === "scripted" && protocol !== "plumbing") {
+    throw new Error("scripted Commander gates are plumbing protocol only");
+  }
   if (
     providerMode === "claude-cli" &&
     options.verificationHooks !== undefined
@@ -144,11 +165,6 @@ export async function runCommanderArmGate(
   }
   const replicaCount = boundedPositive(options.runs ?? 1, "runs");
   const startIndex = boundedNonNegative(options.startIndex ?? 0, "startIndex");
-  if (providerMode === "claude-cli" && replicaCount < 2) {
-    throw new Error(
-      "real-provider Commander experiments require at least 2 matched triplets",
-    );
-  }
   if (providerMode === "claude-cli" && options.requireWinner !== true) {
     throw new Error(
       "real-provider Commander experiments require --require-winner",
@@ -162,6 +178,20 @@ export async function runCommanderArmGate(
     options.turnsPerDecisionStep ?? (providerMode === "claude-cli" ? 100 : 25),
     "turnsPerDecisionStep",
   );
+  if (
+    providerMode === "claude-cli" &&
+    ((protocol === "technical-canary" && replicaCount !== 4) ||
+      (protocol === "confirmatory" && replicaCount !== 48) ||
+      startIndex !== 0 ||
+      maxSteps !== 60 ||
+      turnsPerDecisionStep !== 100)
+  ) {
+    throw new Error(
+      protocol === "technical-canary"
+        ? "real technical canary requires runs=4, start-index=0, max-steps=60, and turns-per-decision-step=100"
+        : "real confirmatory protocol requires runs=48, start-index=0, max-steps=60, and turns-per-decision-step=100",
+    );
+  }
   if (providerMode === "claude-cli" && options.writeReport === false) {
     throw new Error(
       "real-provider Commander experiments require durable evidence output",
@@ -245,6 +275,9 @@ export async function runCommanderArmGate(
   const initialRuntime = resolveRuntime();
   assertResolvedCommanderRuntime(initialRuntime);
   const modes = commanderArmModes(providerMode, initialRuntime);
+  const modeByArm = Object.fromEntries(
+    modes.map((mode) => [mode.arm, mode]),
+  ) as Record<CommanderExperimentArm, CommanderArmMode>;
   const componentHashes = await computeCommanderComponentHashes(sourceRoot);
   const schedule = Array.from({ length: replicaCount }, (_unused, offset) => {
     const index = startIndex + offset;
@@ -256,8 +289,9 @@ export async function runCommanderArmGate(
       seed,
       gameID: commanderGameIDFromSeed(seed),
       subjectSeatIndex: index % 4,
-      episodeIndex: index % 4,
-      armOrder: ["A", "B", "C"] as const,
+      episodeIndex:
+        protocol === "confirmatory" ? Math.floor(index / 4) % 4 : index % 4,
+      armOrder: commanderArmOrderForReplica(index),
     };
   });
   if (new Set(schedule.map((entry) => entry.gameID)).size !== schedule.length) {
@@ -290,6 +324,7 @@ export async function runCommanderArmGate(
     configuration: {
       baseRunID,
       baseSeed,
+      protocol,
       providerMode,
       replicaCount,
       startIndex,
@@ -301,6 +336,10 @@ export async function runCommanderArmGate(
       selectedGameConfig: agentLeagueSmokeSelectedGameConfig(sharedArgs),
       socialFlags,
       legacyComponentHashes: componentHashes,
+      analysisSpecification:
+        protocol === "confirmatory"
+          ? commanderConfirmatoryAnalysisSpecification()
+          : null,
       arms: modes.map((mode) => ({
         arm: mode.arm,
         brain: mode.brain,
@@ -338,6 +377,7 @@ export async function runCommanderArmGate(
   let markdownPath: string | null = null;
   let sealPath: string | null = null;
   const manifestPaths: string[] = [];
+  const armExecutionOrders: CommanderArmGateResult["armExecutionOrders"] = [];
   try {
     await withCommanderExperimentEnvironment(
       initialRuntime.behaviorEnvironment,
@@ -354,7 +394,10 @@ export async function runCommanderArmGate(
             CommanderExperimentArm,
             AgentLeagueSmokeArtifactWriterInput
           >;
-          for (const mode of modes) {
+          const executedOrder: CommanderExperimentArm[] = [];
+          for (const arm of entry.armOrder) {
+            const mode = modeByArm[arm];
+            executedOrder.push(arm);
             const writes: AgentLeagueSmokeArtifactWriterInput[] = [];
             await runAgentLeagueSmoke({
               args: [
@@ -394,10 +437,20 @@ export async function runCommanderArmGate(
                 captured: capturedArm,
                 seed: entry.seed,
                 runID: entry.runID,
+                protocol,
+                replicaIndex: entry.replicaIndex,
+                armOrder: entry.armOrder,
+                armExecutionIndex: executedOrder.length - 1,
                 subjectSeatIndex: entry.subjectSeatIndex,
+                episodeIndex: entry.episodeIndex,
+                analysisSpecification:
+                  protocol === "confirmatory"
+                    ? commanderConfirmatoryAnalysisSpecification()
+                    : null,
                 sourceSha,
                 sourceTreeDirty,
                 runtimeIdentitySha256: initialRuntime.identity.identitySha256,
+                preRegistrationManifestSha256,
                 componentHashes,
                 socialFlags,
                 localSmoke: providerMode === "scripted",
@@ -431,6 +484,18 @@ export async function runCommanderArmGate(
               currentRuntime: currentRuntime.identity,
             });
           }
+          if (
+            JSON.stringify(executedOrder) !== JSON.stringify(entry.armOrder)
+          ) {
+            throw new Error(
+              "Commander executed arm order drifted from preregistration",
+            );
+          }
+          armExecutionOrders.push({
+            replicaIndex: entry.replicaIndex,
+            preregistered: entry.armOrder,
+            executed: [...executedOrder] as unknown as CommanderArmOrder,
+          });
           if (providerMode === "scripted") {
             const bSubject = fixedSubject(captured.B, entry.subjectSeatIndex);
             const cSubject = fixedSubject(captured.C, entry.subjectSeatIndex);
@@ -458,6 +523,19 @@ export async function runCommanderArmGate(
     let report = buildCommanderArmReport(
       persistedInputs.map((entry) => entry.run),
     );
+    if (
+      options.requireWinner === true &&
+      persistedInputs.some(
+        ({ run }) =>
+          !run.completed ||
+          run.winner === undefined ||
+          run.finalState?.phase !== "finished",
+      )
+    ) {
+      throw new Error(
+        "Commander require-winner experiment ended without a terminal winner in every arm",
+      );
+    }
     // Evidence is not publishable until the final source/runtime recapture is
     // successful and matches the preregistered identities.
     const finalSource = await captureSource();
@@ -482,6 +560,17 @@ export async function runCommanderArmGate(
       report = persisted.report;
       jsonPath = persisted.jsonPath;
       markdownPath = persisted.markdownPath;
+      if (providerMode === "claude-cli") {
+        const protocolEligible =
+          protocol === "technical-canary"
+            ? report.technicalCanaryEligibility.eligible
+            : report.performanceClaimsAllowed;
+        if (!report.integrity.valid || !protocolEligible) {
+          throw new Error(
+            "Commander real-provider evidence failed its preregistered report gates",
+          );
+        }
+      }
       const sealed = await writeCommanderExperimentSeal({
         outputDirectory,
         ...(providerMode === "claude-cli"
@@ -521,6 +610,7 @@ export async function runCommanderArmGate(
       experimentID,
       preRegistrationManifestPath,
       sealPath,
+      armExecutionOrders,
     };
   } catch (error) {
     if (writeEvidence && preRegistrationManifestSha256 !== null) {
@@ -669,10 +759,17 @@ function armRunInput(input: {
   captured: AgentLeagueSmokeArtifactWriterInput;
   seed: string;
   runID: string;
+  protocol: CommanderEvidenceProtocol;
+  replicaIndex: number;
+  armOrder: CommanderArmOrder;
+  armExecutionIndex: number;
   subjectSeatIndex: number;
+  episodeIndex: number;
+  analysisSpecification: CommanderArmRunInput["analysisSpecification"];
   sourceSha: string;
   sourceTreeDirty: boolean;
   runtimeIdentitySha256: string;
+  preRegistrationManifestSha256: string | null;
   componentHashes: Awaited<ReturnType<typeof computeCommanderComponentHashes>>;
   socialFlags: Pick<
     CommanderExperimentFlags,
@@ -691,15 +788,23 @@ function armRunInput(input: {
   const provisional: CommanderArmRunInput = {
     tripletID: input.runID,
     arm: input.arm,
+    protocol: input.protocol,
+    replicaIndex: input.replicaIndex,
+    subjectSeatIndex: input.subjectSeatIndex,
+    episodeIndex: input.episodeIndex,
+    armOrder: input.armOrder,
+    armExecutionIndex: input.armExecutionIndex,
     sourceSha: input.sourceSha,
     sourceTreeDirty: input.sourceTreeDirty,
     runtimeIdentitySha256: input.runtimeIdentitySha256,
+    preRegistrationManifestSha256: input.preRegistrationManifestSha256,
     seed: input.seed,
     runID: input.runID,
     selectorSource: null,
     provider: null,
     model: null,
     promptVersion: null,
+    analysisSpecification: input.analysisSpecification,
     componentHashes: input.componentHashes,
     artifactProvenance: null,
     experimentFlags: {
@@ -995,6 +1100,23 @@ function providerModeArg(
   return value;
 }
 
+function protocolArg(
+  args: readonly string[],
+): CommanderEvidenceProtocol | undefined {
+  const value = stringArg(args, "--protocol=");
+  if (value === undefined) return undefined;
+  if (
+    value !== "plumbing" &&
+    value !== "technical-canary" &&
+    value !== "confirmatory"
+  ) {
+    throw new Error(
+      "--protocol must be plumbing, technical-canary, or confirmatory",
+    );
+  }
+  return value;
+}
+
 if (
   process.argv[1] !== undefined &&
   path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))
@@ -1010,6 +1132,7 @@ if (
     runs: numberArg(args, "--runs="),
     startIndex: numberArg(args, "--start-index="),
     providerMode: providerModeArg(args),
+    protocol: protocolArg(args),
     experimentID: stringArg(args, "--experiment-id="),
   });
   console.log("StrategicCommanderV0 three-arm plumbing gate", {

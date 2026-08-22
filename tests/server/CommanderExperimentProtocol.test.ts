@@ -17,9 +17,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   assertResolvedCommanderRuntime,
   captureCommanderSourceIdentity,
+  COMMANDER_ARM_ORDER_CYCLE,
   COMMANDER_OUTER_DECISION_TIMEOUT_MS,
   COMMANDER_PROVIDER_KILL_TIMEOUT_MS,
   COMMANDER_SELECTOR_TIMEOUT_MS,
+  commanderArmOrderForReplica,
   commanderExperimentOutputDirectory,
   commanderTrustedClaudeBinaryCandidates,
   prepareCommanderProviderCwd,
@@ -31,6 +33,33 @@ import {
 } from "../../src/server/agents/CommanderExperimentProtocol";
 
 const temporaryRoots: string[] = [];
+
+describe("Commander counterbalanced arm-order protocol", () => {
+  it("balances the first four and covers all six permutations through 48 replicas", () => {
+    const firstFour = Array.from({ length: 4 }, (_unused, index) =>
+      commanderArmOrderForReplica(index),
+    );
+    expect(
+      firstFour.filter((order) => order.indexOf("B") < order.indexOf("C")),
+    ).toHaveLength(2);
+    expect(
+      new Set(COMMANDER_ARM_ORDER_CYCLE.map((order) => JSON.stringify(order))),
+    ).toHaveLength(6);
+
+    const fortyEight = Array.from({ length: 48 }, (_unused, index) =>
+      commanderArmOrderForReplica(index),
+    );
+    const counts = new Map<string, number>();
+    for (const order of fortyEight) {
+      const key = JSON.stringify(order);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    expect([...counts.values()]).toEqual([8, 8, 8, 8, 8, 8]);
+    expect(
+      fortyEight.filter((order) => order.indexOf("B") < order.indexOf("C")),
+    ).toHaveLength(24);
+  });
+});
 
 function emptyProviderCwd(): string {
   const root = mkdtempSync(path.join(os.tmpdir(), "commander-provider-cwd-"));

@@ -31,9 +31,17 @@ import {
   commanderGameIDFromSeed,
   parseCommanderCanonicalGameConfig,
 } from "./CommanderExperimentIdentity";
-import { assertCommanderContainedRealDirectory } from "./CommanderExperimentProtocol";
+import {
+  assertCommanderArmOrder,
+  assertCommanderContainedRealDirectory,
+  isCommanderConfirmatoryAnalysisSpecification,
+  sha256Canonical,
+  type CommanderArmOrder,
+  type CommanderConfirmatoryAnalysisSpecification,
+  type CommanderEvidenceProtocol,
+} from "./CommanderExperimentProtocol";
 
-const componentFiles = {
+export const COMMANDER_COMPONENT_FILES = {
   sharedArchitecture: [
     "src/server/agents/StrategicCommanderBrain.ts",
     "src/server/agents/StrategicCommanderCaller.ts",
@@ -52,21 +60,40 @@ export async function computeCommanderComponentHashes(
   sourceRoot = process.cwd(),
 ): Promise<CommanderComponentHashes> {
   const entries = await Promise.all(
-    Object.entries(componentFiles).map(async ([key, files]) => {
-      const hash = createHash("sha256");
-      for (const relativePath of files) {
-        hash.update(relativePath);
-        hash.update("\0");
-        hash.update(await fs.readFile(path.join(sourceRoot, relativePath)));
-        hash.update("\0");
-      }
-      return [key, hash.digest("hex")] as const;
+    Object.entries(COMMANDER_COMPONENT_FILES).map(async ([key, files]) => {
+      const evidence = await Promise.all(
+        files.map(async (relativePath) => ({
+          path: relativePath,
+          sha256: createHash("sha256")
+            .update(await fs.readFile(path.join(sourceRoot, relativePath)))
+            .digest("hex"),
+        })),
+      );
+      return [key, sha256Canonical(evidence)] as const;
     }),
   );
   return Object.fromEntries(entries) as unknown as CommanderComponentHashes;
 }
 
-export const COMMANDER_ARM_ARTIFACT_MANIFEST_SCHEMA_VERSION = 3;
+export function commanderComponentHashesFromFileEvidence(
+  files: readonly { path: string; sha256: string }[],
+): CommanderComponentHashes | null {
+  const byPath = new Map(files.map((entry) => [entry.path, entry.sha256]));
+  const result: Partial<CommanderComponentHashes> = {};
+  for (const [key, paths] of Object.entries(COMMANDER_COMPONENT_FILES)) {
+    const evidence = paths.map((relativePath) => ({
+      path: relativePath,
+      sha256: byPath.get(relativePath) ?? "",
+    }));
+    if (evidence.some((entry) => !/^[0-9a-f]{64}$/i.test(entry.sha256))) {
+      return null;
+    }
+    result[key as keyof CommanderComponentHashes] = sha256Canonical(evidence);
+  }
+  return result as CommanderComponentHashes;
+}
+
+export const COMMANDER_ARM_ARTIFACT_MANIFEST_SCHEMA_VERSION = 5;
 
 type CommanderArmManifestRun = Omit<
   CommanderArmRunInput,
@@ -74,7 +101,7 @@ type CommanderArmManifestRun = Omit<
 >;
 
 export interface CommanderArmArtifactManifest {
-  schemaVersion: 3;
+  schemaVersion: 5;
   experimentKind: "strategic-commander-arm-input";
   run: CommanderArmManifestRun;
   artifacts: {
@@ -120,6 +147,15 @@ export async function writeCommanderArmInputArtifacts(
   }
   if (input.artifactInput.runnerConfig?.executionSeed !== input.run.seed) {
     throw new Error("Commander arm seed disagrees with artifact writer input");
+  }
+  if (
+    input.artifactInput.runnerConfig?.subjectSeatIndex !==
+      input.run.subjectSeatIndex ||
+    input.artifactInput.runnerConfig?.episodeIndex !== input.run.episodeIndex
+  ) {
+    throw new Error(
+      "Commander executed subject seat or episode disagrees with artifact writer input",
+    );
   }
   if (
     JSON.stringify(input.artifactInput.winner) !==
@@ -322,6 +358,22 @@ export async function loadCommanderArmRunFromArtifacts(
       "Commander require-winner label disagrees with match-summary runnerConfig",
     );
   }
+  const derivedSubjectSeatIndex = requiredNonNegativeInteger(
+    summary.runnerConfig?.subjectSeatIndex,
+    "Commander executed subject seat index",
+  );
+  const derivedEpisodeIndex = requiredNonNegativeInteger(
+    summary.runnerConfig?.episodeIndex,
+    "Commander executed episode index",
+  );
+  if (
+    derivedSubjectSeatIndex !== manifest.run.subjectSeatIndex ||
+    derivedEpisodeIndex !== manifest.run.episodeIndex
+  ) {
+    throw new Error(
+      "Commander executed subject seat or episode disagrees with manifest",
+    );
+  }
   const finalState = summary.finalState ?? undefined;
   const winner = summary.winner;
   const completed = winner !== undefined && finalState?.phase === "finished";
@@ -358,15 +410,23 @@ export async function loadCommanderArmRunFromArtifacts(
   return {
     tripletID: manifest.run.tripletID,
     arm: manifest.run.arm,
+    protocol: manifest.run.protocol,
+    replicaIndex: manifest.run.replicaIndex,
+    subjectSeatIndex: derivedSubjectSeatIndex,
+    episodeIndex: derivedEpisodeIndex,
+    armOrder: manifest.run.armOrder,
+    armExecutionIndex: manifest.run.armExecutionIndex,
     sourceSha: manifest.run.sourceSha,
     sourceTreeDirty: manifest.run.sourceTreeDirty,
     runtimeIdentitySha256: manifest.run.runtimeIdentitySha256,
+    preRegistrationManifestSha256: manifest.run.preRegistrationManifestSha256,
     seed: manifest.run.seed,
     runID: manifest.run.runID,
     selectorSource: manifest.run.selectorSource,
     provider: manifest.run.provider,
     model: manifest.run.model,
     promptVersion: manifest.run.promptVersion,
+    analysisSpecification: manifest.run.analysisSpecification,
     componentHashes: manifest.run.componentHashes,
     gameConfiguration,
     gameConfigurationFingerprint,
@@ -439,15 +499,26 @@ function manifestRun(run: CommanderArmRunInput): CommanderArmManifestRun {
   return {
     tripletID: run.tripletID,
     arm: run.arm,
+    protocol: run.protocol,
+    replicaIndex: run.replicaIndex,
+    subjectSeatIndex: run.subjectSeatIndex,
+    episodeIndex: run.episodeIndex,
+    armOrder: [...run.armOrder] as unknown as CommanderArmOrder,
+    armExecutionIndex: run.armExecutionIndex,
     sourceSha: run.sourceSha,
     sourceTreeDirty: run.sourceTreeDirty,
     runtimeIdentitySha256: run.runtimeIdentitySha256,
+    preRegistrationManifestSha256: run.preRegistrationManifestSha256,
     seed: run.seed,
     runID: run.runID,
     selectorSource: run.selectorSource,
     provider: run.provider,
     model: run.model,
     promptVersion: run.promptVersion,
+    analysisSpecification:
+      run.analysisSpecification === null
+        ? null
+        : structuredClone(run.analysisSpecification),
     componentHashes: {
       sharedArchitecture: run.componentHashes.sharedArchitecture,
       optionBuilder: run.componentHashes.optionBuilder,
@@ -667,15 +738,23 @@ function parseManifest(value: unknown): CommanderArmArtifactManifest {
     [
       "tripletID",
       "arm",
+      "protocol",
+      "replicaIndex",
+      "subjectSeatIndex",
+      "episodeIndex",
+      "armOrder",
+      "armExecutionIndex",
       "sourceSha",
       "sourceTreeDirty",
       "runtimeIdentitySha256",
+      "preRegistrationManifestSha256",
       "seed",
       "runID",
       "selectorSource",
       "provider",
       "model",
       "promptVersion",
+      "analysisSpecification",
       "componentHashes",
       "experimentFlags",
       "gameConfiguration",
@@ -691,16 +770,32 @@ function parseManifest(value: unknown): CommanderArmArtifactManifest {
   );
   if (
     !isArm(run.arm) ||
+    !isEvidenceProtocol(run.protocol) ||
+    !Number.isSafeInteger(run.replicaIndex) ||
+    Number(run.replicaIndex) < 0 ||
+    !Number.isSafeInteger(run.subjectSeatIndex) ||
+    Number(run.subjectSeatIndex) < 0 ||
+    !Number.isSafeInteger(run.episodeIndex) ||
+    Number(run.episodeIndex) < 0 ||
+    !Array.isArray(run.armOrder) ||
+    !Number.isSafeInteger(run.armExecutionIndex) ||
+    Number(run.armExecutionIndex) < 0 ||
+    Number(run.armExecutionIndex) > 2 ||
     !isNonEmptyString(run.tripletID) ||
     !/^[0-9a-f]{40,64}$/i.test(String(run.sourceSha)) ||
     typeof run.sourceTreeDirty !== "boolean" ||
     !/^[0-9a-f]{64}$/i.test(String(run.runtimeIdentitySha256)) ||
+    !isNullableSha256(run.preRegistrationManifestSha256) ||
     !isNonEmptyString(run.seed) ||
     !isNonEmptyString(run.runID) ||
     !isSelectorSource(run.selectorSource) ||
     !isNullableString(run.provider) ||
     !isNullableString(run.model) ||
     !isNullableString(run.promptVersion) ||
+    (run.analysisSpecification !== null &&
+      !isCommanderConfirmatoryAnalysisSpecification(
+        run.analysisSpecification,
+      )) ||
     !/^[0-9a-f]{24}$/i.test(String(run.gameConfigurationFingerprint)) ||
     !isNonEmptyString(run.subjectAgentID) ||
     typeof run.turnCount !== "number" ||
@@ -711,6 +806,10 @@ function parseManifest(value: unknown): CommanderArmArtifactManifest {
     !isNullableFiniteNumber(run.autopilotEngagedAtStep)
   ) {
     throw new Error("Commander arm manifest run is malformed");
+  }
+  assertCommanderArmOrder(run.armOrder as string[]);
+  if (run.armOrder[Number(run.armExecutionIndex)] !== run.arm) {
+    throw new Error("Commander arm manifest execution order is inconsistent");
   }
   const componentHashes = parseComponentHashes(run.componentHashes);
   const experimentFlags = parseExperimentFlags(run.experimentFlags);
@@ -748,15 +847,30 @@ function parseManifest(value: unknown): CommanderArmArtifactManifest {
     run: {
       tripletID: run.tripletID as string,
       arm: run.arm,
+      protocol: run.protocol,
+      replicaIndex: Number(run.replicaIndex),
+      subjectSeatIndex: Number(run.subjectSeatIndex),
+      episodeIndex: Number(run.episodeIndex),
+      armOrder: [...run.armOrder] as unknown as CommanderArmOrder,
+      armExecutionIndex: Number(run.armExecutionIndex),
       sourceSha: run.sourceSha as string,
       sourceTreeDirty: run.sourceTreeDirty as boolean,
       runtimeIdentitySha256: run.runtimeIdentitySha256 as string,
+      preRegistrationManifestSha256: run.preRegistrationManifestSha256 as
+        | string
+        | null,
       seed: run.seed as string,
       runID: run.runID as string,
       selectorSource: run.selectorSource,
       provider: run.provider as string | null,
       model: run.model as string | null,
       promptVersion: run.promptVersion as string | null,
+      analysisSpecification:
+        run.analysisSpecification === null
+          ? null
+          : (structuredClone(
+              run.analysisSpecification,
+            ) as CommanderConfirmatoryAnalysisSpecification),
       componentHashes,
       experimentFlags,
       gameConfiguration,
@@ -1393,6 +1507,16 @@ function isArm(value: unknown): value is CommanderExperimentArm {
   return value === "A" || value === "B" || value === "C";
 }
 
+function isEvidenceProtocol(
+  value: unknown,
+): value is CommanderEvidenceProtocol {
+  return (
+    value === "plumbing" ||
+    value === "technical-canary" ||
+    value === "confirmatory"
+  );
+}
+
 function isSelectorSource(
   value: unknown,
 ): value is CommanderArmRunInput["selectorSource"] {
@@ -1438,6 +1562,10 @@ function isSha256(value: unknown): value is string {
   return typeof value === "string" && /^[0-9a-f]{64}$/i.test(value);
 }
 
+function isNullableSha256(value: unknown): value is string | null {
+  return value === null || isSha256(value);
+}
+
 function nullableFiniteNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
@@ -1447,6 +1575,13 @@ function requiredFiniteNumber(value: unknown, label: string): number {
     throw new Error(`${label} is missing or malformed`);
   }
   return value;
+}
+
+function requiredNonNegativeInteger(value: unknown, label: string): number {
+  if (!Number.isSafeInteger(value) || Number(value) < 0) {
+    throw new Error(`${label} is missing or malformed`);
+  }
+  return Number(value);
 }
 
 function requiredBoolean(value: unknown, label: string): boolean {

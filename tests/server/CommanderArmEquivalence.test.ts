@@ -171,6 +171,24 @@ describe("StrategicCommander Stage 5 matched three-arm gate", () => {
   it("fails before construction when a real-provider request lacks replication, winner, or clean-source gates", async () => {
     const providerFactory = vi.mocked(createClaudeCliLlmProviderFromEnv);
     providerFactory.mockClear();
+    const rejectedPlumbingOutput = path.join(
+      os.tmpdir(),
+      `commander-real-plumbing-${process.pid}-${Date.now()}`,
+    );
+    await expect(
+      runCommanderArmGate({
+        providerMode: "claude-cli",
+        protocol: "plumbing",
+        runs: 4,
+        requireWinner: true,
+        maxSteps: 60,
+        turnsPerDecisionStep: 100,
+        outputDirectory: rejectedPlumbingOutput,
+      }),
+    ).rejects.toThrow(
+      "real-provider Commander gates require technical-canary or confirmatory protocol",
+    );
+    expect(existsSync(rejectedPlumbingOutput)).toBe(false);
     await expect(
       runCommanderArmGate({
         providerMode: "claude-cli",
@@ -179,9 +197,7 @@ describe("StrategicCommander Stage 5 matched three-arm gate", () => {
         sourceTreeDirty: false,
         writeReport: false,
       }),
-    ).rejects.toThrow(
-      "real-provider Commander experiments require at least 2 matched triplets",
-    );
+    ).rejects.toThrow("real technical canary requires runs=4");
     await expect(
       runCommanderArmGate({
         providerMode: "claude-cli",
@@ -201,8 +217,10 @@ describe("StrategicCommander Stage 5 matched three-arm gate", () => {
       await expect(
         runCommanderArmGate({
           providerMode: "claude-cli",
-          runs: 2,
+          runs: 4,
           requireWinner: true,
+          maxSteps: 60,
+          turnsPerDecisionStep: 100,
           sourceSha: "not-the-actual-git-head",
           sourceTreeDirty: true,
           writeReport: true,
@@ -213,8 +231,10 @@ describe("StrategicCommander Stage 5 matched three-arm gate", () => {
       await expect(
         runCommanderArmGate({
           providerMode: "claude-cli",
-          runs: 2,
+          runs: 4,
           requireWinner: true,
+          maxSteps: 60,
+          turnsPerDecisionStep: 100,
           sourceTreeDirty: false,
           writeReport: true,
         }),
@@ -232,8 +252,10 @@ describe("StrategicCommander Stage 5 matched three-arm gate", () => {
     await expect(
       runCommanderArmGate({
         providerMode: "claude-cli",
-        runs: 2,
+        runs: 4,
         requireWinner: true,
+        maxSteps: 60,
+        turnsPerDecisionStep: 100,
         experimentID,
         verificationHooks: {
           resolveRuntime: () => resolveScriptedCommanderRuntime(),
@@ -243,8 +265,10 @@ describe("StrategicCommander Stage 5 matched three-arm gate", () => {
     await expect(
       runCommanderArmGate({
         providerMode: "claude-cli",
-        runs: 2,
+        runs: 4,
         requireWinner: true,
+        maxSteps: 60,
+        turnsPerDecisionStep: 100,
         experimentID,
         outputDirectory: path.join(os.tmpdir(), "relocated-commander-evidence"),
       }),
@@ -275,11 +299,19 @@ describe("StrategicCommander Stage 5 matched three-arm gate", () => {
     const packageJson = JSON.parse(
       readFileSync(path.join(process.cwd(), "package.json"), "utf8"),
     ) as { scripts: Record<string, string> };
-    expect(packageJson.scripts["agent:commander:three-arm-real"]).toContain(
-      "--provider-mode=claude-cli --runs=2",
+    expect(packageJson.scripts["agent:commander:three-arm-canary"]).toContain(
+      "--provider-mode=claude-cli --protocol=technical-canary --runs=4",
     );
-    expect(packageJson.scripts["agent:commander:three-arm-real"]).toContain(
-      "--require-winner",
+    expect(packageJson.scripts["agent:commander:three-arm-canary"]).toContain(
+      "--require-winner --max-steps=60 --turns-per-decision-step=100",
+    );
+    expect(
+      packageJson.scripts["agent:commander:three-arm-confirmatory"],
+    ).toContain("--protocol=confirmatory --runs=48");
+    expect(
+      packageJson.scripts["agent:commander:three-arm-confirmatory"],
+    ).toContain(
+      "--require-winner --max-steps=60 --turns-per-decision-step=100",
     );
   });
 
@@ -295,7 +327,19 @@ describe("StrategicCommander Stage 5 matched three-arm gate", () => {
 
     expect(result.replicas).toHaveLength(2);
     expect(result.report.tripletCount).toBe(2);
-    expect(result.report.status).toBe("plumbing-only");
+    expect(result.report.status).toBe("mechanically-valid");
+    expect(result.armExecutionOrders).toEqual([
+      {
+        replicaIndex: 7,
+        preregistered: ["A", "C", "B"],
+        executed: ["A", "C", "B"],
+      },
+      {
+        replicaIndex: 8,
+        preregistered: ["B", "A", "C"],
+        executed: ["B", "A", "C"],
+      },
+    ]);
     const identities = result.replicas.map((replica) => {
       const arms = Object.values(replica);
       expect(new Set(arms.map((arm) => arm.artifactInput.runID)).size).toBe(1);
@@ -341,7 +385,7 @@ describe("StrategicCommander Stage 5 matched three-arm gate", () => {
       writeReport: false,
     });
 
-    expect(result.report.status).toBe("plumbing-only");
+    expect(result.report.status).toBe("mechanically-valid");
     expect(result.report.integrity).toEqual({
       valid: true,
       invalidationReasons: [],
@@ -370,11 +414,8 @@ describe("StrategicCommander Stage 5 matched three-arm gate", () => {
     );
     expect(delayedBoatRows.length).toBeGreaterThan(0);
     expect(a.metrics.canonicalPathViolations).toBe(0);
-    expect(
-      a.metrics.effectAudit.delayedPending +
-        a.metrics.effectAudit.delayedConfirmed,
-    ).toBeGreaterThan(0);
-    expect(a.metrics.effectAudit.delayedExpired).toBe(0);
+    expect(a.metrics.effectAudit.causalInferenceSupported).toBe(false);
+    expect(a.metrics.effectAudit.explicitFailures).toBe(0);
     expect(b.gameConfigurationFingerprint).toBe(c.gameConfigurationFingerprint);
     expect(triplet.arms.A.spawnAssignments).toEqual(b.spawnAssignments);
     expect(b.spawnAssignments).toEqual(c.spawnAssignments);
@@ -442,6 +483,16 @@ describe("StrategicCommander Stage 5 matched three-arm gate", () => {
       runID: "stage5-full-record-equivalence",
     });
     const triplet = result.report.triplets[0]!;
+    expect(result.report.integrity).toEqual({
+      valid: true,
+      invalidationReasons: [],
+    });
+    for (const arm of ["A", "B", "C"] as const) {
+      expect(triplet.arms[arm].metrics.effectAudit).toMatchObject({
+        causalInferenceSupported: false,
+        explicitFailures: 0,
+      });
+    }
 
     expect(
       assertScriptedCommanderBCEquivalence({

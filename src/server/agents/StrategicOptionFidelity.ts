@@ -203,6 +203,18 @@ export function summarizeCommanderFidelity(
     }
     if (planID === null || identity === null) {
       unknownDecisions += 1;
+      offFamilyActionViolations += 1;
+      if (isPrimary) {
+        zeroPrimaryDecisionCycles += 1;
+        if (record.chosenActionKind === "hold") {
+          blockedDecisionCycles += 1;
+        }
+      } else if (rawBatchIndex !== null && rawBatchIndex > 0) {
+        laterLayerActionViolations += 1;
+      }
+      if (metadataString(record, "commanderFidelity") !== null) {
+        fidelityStampViolations += 1;
+      }
       continue;
     }
     actionsUnderCommanderPlans += 1;

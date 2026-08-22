@@ -1,33 +1,46 @@
 import { createHash } from "node:crypto";
-import { UnitType } from "../../core/game/Game";
 import type { Winner } from "../../core/Schemas";
 import type {
   AgentRunFinalState,
   AgentRunRosterEntry,
 } from "./AgentDecisionLogWriter";
-import type {
-  AgentActionAuditSnapshot,
-  AgentDecisionRecord,
-} from "./AgentTypes";
+import type { AgentDecisionRecord } from "./AgentTypes";
 import {
   commanderGameIDFromSeed,
   parseCommanderCanonicalGameConfig,
   type CommanderCanonicalGameConfig,
 } from "./CommanderExperimentIdentity";
 import {
+  assertCommanderArmOrder,
+  COMMANDER_ARM_ORDER_CYCLE,
+  commanderArmOrderForReplica,
+  isCommanderConfirmatoryAnalysisSpecification,
+  type CommanderArmOrder,
+  type CommanderConfirmatoryAnalysisSpecification,
+  type CommanderConfirmatoryMetricID,
+  type CommanderEvidenceProtocol,
+} from "./CommanderExperimentProtocol";
+import {
+  commanderPlanRejectionCodes,
+  commanderResponseDispositions,
+} from "./CommanderPlanLifecycle";
+import {
   COMMANDER_BLOCKED_CYCLE_THRESHOLD,
   COMMANDER_OPTION_NOT_EXECUTABLE_DOMINANCE_THRESHOLD,
   summarizeCommanderFidelity,
   type CommanderFidelitySummary,
 } from "./StrategicOptionFidelity";
+import { strategicOptionSelectionFailureKinds } from "./StrategicOptionSelectors";
 
-export const COMMANDER_EXPERIMENT_SCHEMA_VERSION = 3;
+export const COMMANDER_EXPERIMENT_SCHEMA_VERSION = 5;
 export const COMMANDER_FIDELITY_THRESHOLD = 0.95;
 export const COMMANDER_PREFERRED_ABSENCE_THRESHOLD = 0.05;
-export const MIN_COMMANDER_PERFORMANCE_TRIPLETS = 2;
+export const COMMANDER_TECHNICAL_CANARY_TRIPLETS = 4;
+export const MIN_COMMANDER_PERFORMANCE_TRIPLETS = 48;
+export const MIN_COMMANDER_C_PLAN_STARTS = 20;
+export const MIN_COMMANDER_SELECTOR_DISAGREEMENTS = 12;
 export const MAX_COMMANDER_EXPOSED_OPTIONS = 8;
 export const MAX_COMMANDER_EXPOSED_PRESSURE_OPTIONS = 2;
-export const COMMANDER_DELAYED_EFFECT_AUDIT_BOUND_CYCLES = 2;
 
 export interface CommanderComponentHashes {
   sharedArchitecture: string;
@@ -90,10 +103,20 @@ export interface CommanderMatchedGameConfiguration {
 export interface CommanderArmRunInput {
   tripletID: string;
   arm: CommanderExperimentArm;
+  protocol: CommanderEvidenceProtocol;
+  replicaIndex: number;
+  /** Executed canonical seat from match-summary runnerConfig. */
+  subjectSeatIndex: number;
+  /** Executed canonical episode/spawn-priority index from match-summary. */
+  episodeIndex: number;
+  armOrder: CommanderArmOrder;
+  armExecutionIndex: number;
   sourceSha: string;
   sourceTreeDirty: boolean;
   /** Full sealed provider/environment/tunable treatment identity. */
   runtimeIdentitySha256: string;
+  /** SHA-256 of the exclusive preregistration envelope written before calls. */
+  preRegistrationManifestSha256: string | null;
   seed: string;
   runID: string;
   selectorSource:
@@ -105,6 +128,8 @@ export interface CommanderArmRunInput {
   provider: string | null;
   model: string | null;
   promptVersion: string | null;
+  /** Null for plumbing/canary; fixed and sealed before confirmatory calls. */
+  analysisSpecification: CommanderConfirmatoryAnalysisSpecification | null;
   componentHashes: CommanderComponentHashes;
   /** Null only for an explicitly in-memory plumbing check. */
   artifactProvenance: CommanderArtifactProvenance | null;
@@ -129,6 +154,7 @@ export interface CommanderArmMetrics {
   normalizedFinalTerritory: number | null;
   finalRank: number | null;
   survived: boolean | null;
+  turnsSurvived: number | null;
   modelCalls: number;
   promptCharacters: number;
   planningLatencyMs: { total: number; mean: number | null };
@@ -167,6 +193,12 @@ export interface CommanderArmMetrics {
   };
   replanReasons: Record<string, number>;
   strategicFidelity: number | null;
+  fidelity: {
+    rate: number | null;
+    interpretable: boolean;
+    unknownDecisions: number;
+    unattributedDecisions: number;
+  };
   fidelityCounts: {
     alignedPrimary: number;
     alignedSupport: number;
@@ -222,12 +254,11 @@ export interface CommanderArmMetrics {
     autopilotDecisionCycles: number;
   };
   canonicalPathViolations: number;
+  responseEvidenceViolations: number;
+  rejectedOrFailedAttempts: number;
   effectAudit: {
-    immediateViolations: number;
-    delayedConfirmed: number;
-    delayedPending: number;
-    delayedExpired: number;
-    delayedFailed: number;
+    causalInferenceSupported: false;
+    explicitFailures: number;
   };
 }
 
@@ -283,6 +314,7 @@ export interface CommanderAggregateArmMetrics {
     mean: number | null;
   };
   finalRank: { sum: number; observations: number; mean: number | null };
+  turnsSurvived: { sum: number; observations: number; mean: number | null };
   modelCalls: number;
   planCount: number;
   decisionCycleCount: number;
@@ -292,6 +324,9 @@ export interface CommanderAggregateArmMetrics {
     aligned: number;
     classifiedNonEmergency: number;
     rate: number | null;
+    interpretable: boolean;
+    unknownDecisions: number;
+    unattributedDecisions: number;
   };
   staleRejectedAttempts: number;
   staleAuthorityViolations: number;
@@ -299,12 +334,14 @@ export interface CommanderAggregateArmMetrics {
 }
 
 export interface CommanderArmReport {
-  schemaVersion: 3;
+  schemaVersion: 5;
   experimentKind: "strategic-commander-three-arm";
   status:
-    | "plumbing-only"
-    | "eligible-for-performance-interpretation"
-    | "invalid";
+    | "invalid"
+    | "mechanically-valid"
+    | "technical-canary-passed"
+    | "confirmatory-analysis-ready"
+    | "confirmatory-performance-eligible";
   primaryCausalComparison: "B_vs_C";
   interpretation: {
     A_vs_B: string;
@@ -312,8 +349,14 @@ export interface CommanderArmReport {
     A_vs_C: string;
   };
   integrity: { valid: boolean; invalidationReasons: string[] };
+  technicalCanaryEligibility: { eligible: boolean; reasons: string[] };
   performanceEligibility: { eligible: boolean; reasons: string[] };
   performanceClaimsAllowed: boolean;
+  authenticity: {
+    status: "external-seal-receipt-required";
+    externalImmutableSealHashReceiptRequired: true;
+    rootAloneAuthenticatesProducerOrTime: false;
+  };
   localSmoke: boolean;
   tripletCount: number;
   triplets: CommanderArmTripletReport[];
@@ -327,7 +370,44 @@ export interface CommanderArmReport {
       B_vs_C: CommanderPairwiseComparison;
       A_vs_C: CommanderPairwiseComparison;
     };
+    pairedAnalysis: {
+      ready: boolean;
+      completePairs: number;
+      B_vs_C: Array<{
+        tripletID: string;
+        winDelta: number;
+        normalizedTerritoryDelta: number;
+        finalRankDelta: number;
+        survivalDelta: number;
+        turnsSurvivedDelta: number;
+      }>;
+    };
+    confirmatoryAnalysis: CommanderConfirmatoryAnalysis;
   };
+}
+
+export interface CommanderConfirmatoryMetricAnalysis {
+  metric: CommanderConfirmatoryMetricID;
+  direction: "higher-is-better" | "lower-is-better";
+  pairCount: number;
+  estimateCMinusB: number;
+  confidenceInterval95: { lower: number; upper: number };
+  pValue: number;
+  holmBonferroniAdjustedPValue: number;
+  rejectNullAtAlpha05: boolean;
+  pValueMethod: "exact-two-sided-mcnemar" | "seeded-paired-sign-randomization";
+  intervalMethod: "seeded-paired-bootstrap-percentile";
+}
+
+export interface CommanderConfirmatoryAnalysis {
+  status: "not-ready" | "analysis-ready" | "complete";
+  specification: CommanderConfirmatoryAnalysisSpecification | null;
+  specificationSha256: string | null;
+  completePairs: number;
+  requiredPairs: 48;
+  missingPairs: number;
+  missingnessPolicy: "no-missing-pairs";
+  results: CommanderConfirmatoryMetricAnalysis[];
 }
 
 export interface CommanderPairwiseComparison {
@@ -336,6 +416,7 @@ export interface CommanderPairwiseComparison {
   normalizedTerritoryDelta: number | null;
   finalRankDelta: number | null;
   survivalDelta: number | null;
+  turnsSurvivedDelta: number | null;
   caveat: string;
 }
 
@@ -357,6 +438,11 @@ export function buildCommanderArmReport(
   ];
   const localSmoke = runs.some((run) => run.localSmoke);
   const valid = invalidationReasons.length === 0;
+  const technicalCanaryReasons = technicalCanaryIneligibilityReasons(
+    runs,
+    triplets,
+  );
+  const technicalCanaryPassed = valid && technicalCanaryReasons.length === 0;
   const performanceReasons = performanceIneligibilityReasons(runs, triplets);
   const performanceClaimsAllowed = valid && performanceReasons.length === 0;
   const perProtocolTriplets = triplets.filter(isPerProtocolTripletEligible);
@@ -371,14 +457,23 @@ export function buildCommanderArmReport(
       perProtocolTriplets.map((triplet) => triplet.arms.C.metrics),
     ),
   } satisfies Record<CommanderExperimentArm, CommanderAggregateArmMetrics>;
+  const paired = pairedAnalysis(perProtocolTriplets);
+  const confirmatoryAnalysis = computeCommanderConfirmatoryAnalysis(
+    runs,
+    paired,
+  );
   return {
     schemaVersion: COMMANDER_EXPERIMENT_SCHEMA_VERSION,
     experimentKind: "strategic-commander-three-arm",
     status: !valid
       ? "invalid"
       : performanceClaimsAllowed
-        ? "eligible-for-performance-interpretation"
-        : "plumbing-only",
+        ? "confirmatory-performance-eligible"
+        : confirmatoryAnalysis.status === "analysis-ready"
+          ? "confirmatory-analysis-ready"
+          : technicalCanaryPassed
+            ? "technical-canary-passed"
+            : "mechanically-valid",
     primaryCausalComparison: "B_vs_C",
     interpretation: {
       A_vs_B:
@@ -389,11 +484,20 @@ export function buildCommanderArmReport(
         "Overall product comparison; V0 Commander arms intentionally lack diplomacy and must not be treated as feature-equivalent.",
     },
     integrity: { valid, invalidationReasons },
+    technicalCanaryEligibility: {
+      eligible: technicalCanaryPassed,
+      reasons: technicalCanaryReasons,
+    },
     performanceEligibility: {
       eligible: performanceClaimsAllowed,
       reasons: performanceReasons,
     },
     performanceClaimsAllowed,
+    authenticity: {
+      status: "external-seal-receipt-required",
+      externalImmutableSealHashReceiptRequired: true,
+      rootAloneAuthenticatesProducerOrTime: false,
+    },
     localSmoke,
     tripletCount: triplets.length,
     triplets,
@@ -423,6 +527,8 @@ export function buildCommanderArmReport(
           "overall-product",
         ),
       },
+      pairedAnalysis: paired,
+      confirmatoryAnalysis,
     },
   };
 }
@@ -473,15 +579,23 @@ function assertCommanderPublicInputShape(run: CommanderArmRunInput): void {
     [
       "tripletID",
       "arm",
+      "protocol",
+      "replicaIndex",
+      "subjectSeatIndex",
+      "episodeIndex",
+      "armOrder",
+      "armExecutionIndex",
       "sourceSha",
       "sourceTreeDirty",
       "runtimeIdentitySha256",
+      "preRegistrationManifestSha256",
       "seed",
       "runID",
       "selectorSource",
       "provider",
       "model",
       "promptVersion",
+      "analysisSpecification",
       "componentHashes",
       "artifactProvenance",
       "experimentFlags",
@@ -500,6 +614,36 @@ function assertCommanderPublicInputShape(run: CommanderArmRunInput): void {
     ],
     "Commander run has unknown or missing fields",
   );
+  if (
+    !["plumbing", "technical-canary", "confirmatory"].includes(run.protocol) ||
+    !Number.isSafeInteger(run.replicaIndex) ||
+    run.replicaIndex < 0 ||
+    !Number.isSafeInteger(run.subjectSeatIndex) ||
+    run.subjectSeatIndex < 0 ||
+    !Number.isSafeInteger(run.episodeIndex) ||
+    run.episodeIndex < 0 ||
+    !Number.isSafeInteger(run.armExecutionIndex) ||
+    run.armExecutionIndex < 0 ||
+    run.armExecutionIndex > 2
+  ) {
+    throw new Error("Commander run protocol or execution index is malformed");
+  }
+  if (
+    run.analysisSpecification !== null &&
+    !isCommanderConfirmatoryAnalysisSpecification(run.analysisSpecification)
+  ) {
+    throw new Error("Commander analysis specification is malformed");
+  }
+  if (
+    run.preRegistrationManifestSha256 !== null &&
+    !/^[0-9a-f]{64}$/i.test(run.preRegistrationManifestSha256)
+  ) {
+    throw new Error("Commander preregistration receipt is malformed");
+  }
+  assertCommanderArmOrder(run.armOrder);
+  if (run.armOrder[run.armExecutionIndex] !== run.arm) {
+    throw new Error("Commander run arm disagrees with its executed arm order");
+  }
   assertExactObjectKeys(
     run.experimentFlags as unknown as Record<string, unknown>,
     [
@@ -562,10 +706,14 @@ export function commanderArmReportMarkdown(report: CommanderArmReport): string {
     `Status: **${report.status}**`,
     "",
     report.performanceClaimsAllowed
-      ? "Performance interpretation is permitted because every structural and replicated-evidence gate is green."
-      : "This is plumbing evidence only. It is not evidence of strategic performance or LLM value.",
+      ? "Confirmatory performance interpretation is permitted because every structural and preregistered evidence gate is green."
+      : report.technicalCanaryEligibility.eligible
+        ? "The technical canary passed. It proves mechanics and evidence capture only, not strategic performance or LLM value."
+        : "This is mechanically valid plumbing evidence only. It is not evidence of strategic performance or LLM value.",
     "",
     `Primary causal comparison: **${report.primaryCausalComparison}**`,
+    "",
+    "Authenticity: this report and its root-only seal prove internal consistency only. An immutable seal-hash receipt published outside the experiment root is required to authenticate producer and time.",
     "",
     "## Integrity",
     "",
@@ -581,8 +729,18 @@ export function commanderArmReportMarkdown(report: CommanderArmReport): string {
       ? ["Ineligibility reasons: none"]
       : report.performanceEligibility.reasons.map((reason) => `- ${reason}`)),
     "",
+    "## Technical canary eligibility",
+    "",
+    `Eligible: ${String(report.technicalCanaryEligibility.eligible)}`,
+    ...(report.technicalCanaryEligibility.reasons.length === 0
+      ? ["Ineligibility reasons: none"]
+      : report.technicalCanaryEligibility.reasons.map(
+          (reason) => `- ${reason}`,
+        )),
+    "",
     `Matched triplets: ${report.tripletCount}`,
     `Per-protocol aggregate triplets: ${report.aggregate.includedTripletIDs.length}; excluded: ${inlineJson(report.aggregate.excludedTripletIDs)}`,
+    `Confirmatory analysis: ${report.aggregate.confirmatoryAnalysis.status}; complete pairs: ${report.aggregate.confirmatoryAnalysis.completePairs}/${report.aggregate.confirmatoryAnalysis.requiredPairs}; specification SHA-256: ${report.aggregate.confirmatoryAnalysis.specificationSha256 ?? "none"}`,
     "",
     "## Aggregate arm metrics",
     "",
@@ -592,6 +750,17 @@ export function commanderArmReportMarkdown(report: CommanderArmReport): string {
       const metrics = report.aggregate.arms[arm];
       return `| ${arm} | ${metrics.runs} | ${metrics.wins.count}/${metrics.wins.opportunities} (${percent(metrics.wins.rate)}) | ${metrics.survival.count}/${metrics.survival.opportunities} (${percent(metrics.survival.rate)}) | ${metrics.normalizedFinalTerritory.sum}/${metrics.normalizedFinalTerritory.observations} (${decimal(metrics.normalizedFinalTerritory.mean)}) | ${metrics.planCount} | ${metrics.decisionCycleCount} | ${metrics.actionCount} | ${metrics.fidelity.aligned}/${metrics.fidelity.classifiedNonEmergency} (${percent(metrics.fidelity.rate)}) | ${metrics.fallbackAuthoredPlans} |`;
     }),
+    "",
+    "## Confirmatory paired analysis",
+    "",
+    "| Metric | C-B estimate | 95% interval | p | Holm adjusted p | Reject at 0.05 |",
+    "| --- | ---: | ---: | ---: | ---: | --- |",
+    ...(report.aggregate.confirmatoryAnalysis.results.length === 0
+      ? ["| none | — | — | — | — | false |"]
+      : report.aggregate.confirmatoryAnalysis.results.map(
+          (result) =>
+            `| ${result.metric} | ${result.estimateCMinusB} | [${result.confidenceInterval95.lower}, ${result.confidenceInterval95.upper}] | ${result.pValue} | ${result.holmBonferroniAdjustedPValue} | ${String(result.rejectNullAtAlpha05)} |`,
+        )),
     "",
     "## Matched triplets",
     "",
@@ -653,8 +822,8 @@ function commanderTripletMarkdown(
       `- Plans: count=${metrics.planCount}; duration=${inlineJson(metrics.planDurationDecisions)}; replans=${inlineJson(metrics.replanReasons)}; transitions=${inlineJson(metrics.planTransitions)}; fallbackAuthored=${metrics.fallbackAuthoredPlans}`,
       `- Options: eligible=${inlineJson(metrics.eligibleOptionCount)}; exposed=${inlineJson(metrics.exposedOptionCount)}; familyCoverage=${inlineJson(metrics.optionFamilyCoverage)}; omitted=${metrics.omittedCandidateCount} ${inlineJson(metrics.omittedReasons)}; accountingViolations=${metrics.optionAccountingViolations}`,
       `- Selection: distribution=${inlineJson(metrics.selectedOptionDistribution)}; preferredAbsent=${inlineJson(metrics.deterministicPreferredOptionAbsent)}; disagreement=${inlineJson(metrics.selectorDisagreement)}`,
-      `- Fidelity: cyclePrimary=${percent(metrics.strategicFidelity)}; counts=${inlineJson(metrics.fidelityCounts)}; blockedCycles=${inlineJson(metrics.blockedDecisionCycles)}; supportActions=${metrics.supportActionCount}; offFamily=${metrics.offFamilyActionViolations}; laterLayer=${metrics.laterLayerActionViolations}; zeroPrimaryCycles=${metrics.zeroPrimaryDecisionCycles}; planIdentityViolations=${metrics.planIdentityViolations}; batchPositionViolations=${metrics.batchPositionViolations}; stampViolations=${metrics.fidelityStampViolations}; optionNotExecutable=${inlineJson(metrics.optionNotExecutableReplans)}; zeroAlignedPlans=${metrics.plansWithZeroAlignedActions}; missingPrimaryPlans=${metrics.planPrimaryActionViolations}; excessSupportPlans=${metrics.planSupportActionViolations}; silentAbandonments=${metrics.silentlyAbandonedPlans}`,
-      `- Exclusions: ${inlineJson(metrics.excludedFromLlmContribution)}; staleRejected=${metrics.staleRejectedAttempts}; staleAuthorityViolations=${metrics.staleAuthorityViolations}; canonicalPathViolations=${metrics.canonicalPathViolations}; effectAudit=${inlineJson(metrics.effectAudit)}`,
+      `- Fidelity: ${inlineJson(metrics.fidelity)}; counts=${inlineJson(metrics.fidelityCounts)}; blockedCycles=${inlineJson(metrics.blockedDecisionCycles)}; supportActions=${metrics.supportActionCount}; offFamily=${metrics.offFamilyActionViolations}; laterLayer=${metrics.laterLayerActionViolations}; zeroPrimaryCycles=${metrics.zeroPrimaryDecisionCycles}; planIdentityViolations=${metrics.planIdentityViolations}; batchPositionViolations=${metrics.batchPositionViolations}; stampViolations=${metrics.fidelityStampViolations}; optionNotExecutable=${inlineJson(metrics.optionNotExecutableReplans)}; zeroAlignedPlans=${metrics.plansWithZeroAlignedActions}; missingPrimaryPlans=${metrics.planPrimaryActionViolations}; excessSupportPlans=${metrics.planSupportActionViolations}; silentAbandonments=${metrics.silentlyAbandonedPlans}`,
+      `- Exclusions: ${inlineJson(metrics.excludedFromLlmContribution)}; staleRejected=${metrics.staleRejectedAttempts}; staleAuthorityViolations=${metrics.staleAuthorityViolations}; rejectedOrFailed=${metrics.rejectedOrFailedAttempts}; responseEvidenceViolations=${metrics.responseEvidenceViolations}; canonicalPathViolations=${metrics.canonicalPathViolations}; effectAuditDiagnostic=${inlineJson(metrics.effectAudit)}`,
       `- Bounded post-disagreement deltas: ${inlineJson(metrics.boundedOutcomeDeltasAfterDisagreement)}`,
       "",
     );
@@ -734,6 +903,12 @@ function armMetrics(run: CommanderArmRunInput): CommanderArmMetrics {
   const fidelity = commanderArm
     ? summarizeCommanderFidelity(actions)
     : emptyCommanderFidelitySummary();
+  const responseEvidenceViolations = commanderArm
+    ? sum(cycles.map(responseEvidenceViolationCount))
+    : 0;
+  const rejectedOrFailedAttempts = commanderArm
+    ? cycles.filter(isRejectedOrFailedAttempt).length
+    : 0;
   const effectAudit = effectAuditMetrics(run, canonicalRows);
   const durations = planDurations(cycles);
   const transitions = commanderArm
@@ -783,12 +958,19 @@ function armMetrics(run: CommanderArmRunInput): CommanderArmMetrics {
     ),
   );
   const final = finalOutcome(run);
+  const turnsSurvived =
+    final.survived === null
+      ? null
+      : final.survived
+        ? run.turnCount
+        : Math.max(0, ...allSubject.map((record) => record.turnNumber));
   return {
     wins: final.won ? 1 : 0,
     winnerDetermined: final.winnerDetermined,
     normalizedFinalTerritory: final.normalizedTerritory,
     finalRank: final.rank,
     survived: final.survived,
+    turnsSurvived,
     modelCalls: cycles.filter(
       (record) => metadataBoolean(record, "externalPlannerCall") === true,
     ).length,
@@ -853,6 +1035,12 @@ function armMetrics(run: CommanderArmRunInput): CommanderArmMetrics {
       cycles.map((record) => metadataString(record, "commanderReplanReason")),
     ),
     strategicFidelity: fidelity.fidelityRate,
+    fidelity: {
+      rate: fidelity.fidelityRate,
+      interpretable: fidelity.interpretable,
+      unknownDecisions: fidelity.unknownDecisions,
+      unattributedDecisions: fidelity.unattributedDecisions,
+    },
     fidelityCounts: {
       alignedPrimary: fidelity.counts.aligned_primary,
       alignedSupport: fidelity.counts.aligned_support,
@@ -898,6 +1086,8 @@ function armMetrics(run: CommanderArmRunInput): CommanderArmMetrics {
       (total, record) => total + canonicalActionViolationCount(run, record),
       0,
     ),
+    responseEvidenceViolations,
+    rejectedOrFailedAttempts,
     effectAudit,
   };
 }
@@ -964,11 +1154,39 @@ function integrityInvalidations(
   if (new Set(allArms.map((arm) => arm.runtimeIdentitySha256)).size !== 1) {
     reasons.push("runtime treatment identity differs across arms");
   }
+  if (
+    new Set(allArms.map((arm) => arm.preRegistrationManifestSha256)).size !== 1
+  ) {
+    reasons.push("preregistration receipt differs across arms");
+  }
   if (new Set(allArms.map((arm) => arm.seed)).size !== 1) {
     reasons.push("seed differs across arms");
   }
   if (new Set(allArms.map((arm) => arm.runID)).size !== 1) {
     reasons.push("matched run identity differs across arms");
+  }
+  if (
+    new Set(allArms.map((arm) => arm.protocol)).size !== 1 ||
+    new Set(allArms.map((arm) => arm.replicaIndex)).size !== 1 ||
+    new Set(allArms.map((arm) => arm.subjectSeatIndex)).size !== 1 ||
+    new Set(allArms.map((arm) => arm.episodeIndex)).size !== 1 ||
+    new Set(allArms.map((arm) => JSON.stringify(arm.armOrder))).size !== 1
+  ) {
+    reasons.push(
+      "matched protocol, replica, seat, episode, or arm-order identity differs",
+    );
+  }
+  if (
+    new Set(allArms.map((arm) => stableJson(arm.analysisSpecification)))
+      .size !== 1
+  ) {
+    reasons.push("matched confirmatory analysis specification differs");
+  }
+  if (
+    allArms.some((arm) => arm.armOrder[arm.armExecutionIndex] !== arm.arm) ||
+    new Set(allArms.map((arm) => arm.armExecutionIndex)).size !== 3
+  ) {
+    reasons.push("captured arm execution order is inconsistent");
   }
   const artifactBackedArms = allArms.filter(
     (arm) => arm.artifactProvenance !== null,
@@ -1093,6 +1311,16 @@ function integrityInvalidations(
       "roster, seat, profile, or stable participant identity differs",
     );
   }
+  for (const arm of allArms) {
+    if (
+      arm.roster[arm.subjectSeatIndex]?.agentID !== arm.subjectAgentID ||
+      subjectRosterEntry(arm) === undefined
+    ) {
+      reasons.push(
+        `Arm ${arm.arm} executed subject seat does not identify the subject roster entry`,
+      );
+    }
+  }
   if (
     !sameRecord(arms.A.spawnAssignments, arms.B.spawnAssignments) ||
     !sameRecord(arms.B.spawnAssignments, arms.C.spawnAssignments)
@@ -1121,13 +1349,9 @@ function integrityInvalidations(
         `Arm ${arm.arm} failed offered-id, acceptance, or submitted-intent proof`,
       );
     }
-    if (
-      arm.metrics.effectAudit.immediateViolations > 0 ||
-      arm.metrics.effectAudit.delayedExpired > 0 ||
-      arm.metrics.effectAudit.delayedFailed > 0
-    ) {
+    if (arm.metrics.effectAudit.explicitFailures > 0) {
       reasons.push(
-        `Arm ${arm.arm} failed immediate or bounded delayed-effect audit proof`,
+        `Arm ${arm.arm} contains an explicit action-effect audit failure`,
       );
     }
     const artifact = arm.artifactProvenance;
@@ -1176,6 +1400,20 @@ function integrityInvalidations(
       metrics.strategicFidelity < COMMANDER_FIDELITY_THRESHOLD
     ) {
       reasons.push(`Arm ${arm.arm} strategic fidelity is below 95 percent`);
+    }
+    if (
+      !metrics.fidelity.interpretable ||
+      metrics.fidelity.unknownDecisions > 0 ||
+      metrics.fidelity.unattributedDecisions > 0
+    ) {
+      reasons.push(
+        `Arm ${arm.arm} has unknown or unattributed Commander fidelity decisions`,
+      );
+    }
+    if (metrics.responseEvidenceViolations > 0) {
+      reasons.push(
+        `Arm ${arm.arm} response disposition or rejection evidence is inconsistent`,
+      );
     }
     if (metrics.silentlyAbandonedPlans > 0) {
       reasons.push(`Arm ${arm.arm} silently abandoned a plan`);
@@ -1261,15 +1499,26 @@ function publicArm(
   return {
     tripletID: run.tripletID,
     arm: run.arm,
+    protocol: run.protocol,
+    replicaIndex: run.replicaIndex,
+    subjectSeatIndex: run.subjectSeatIndex,
+    episodeIndex: run.episodeIndex,
+    armOrder: run.armOrder,
+    armExecutionIndex: run.armExecutionIndex,
     sourceSha: run.sourceSha,
     sourceTreeDirty: run.sourceTreeDirty,
     runtimeIdentitySha256: run.runtimeIdentitySha256,
+    preRegistrationManifestSha256: run.preRegistrationManifestSha256,
     seed: run.seed,
     runID: run.runID,
     selectorSource: run.selectorSource,
     provider: run.provider,
     model: run.model,
     promptVersion: run.promptVersion,
+    analysisSpecification:
+      run.analysisSpecification === null
+        ? null
+        : structuredClone(run.analysisSpecification),
     componentHashes: {
       sharedArchitecture: run.componentHashes.sharedArchitecture,
       optionBuilder: run.componentHashes.optionBuilder,
@@ -1442,7 +1691,7 @@ export function deriveCommanderPlanStartProvenance(
     const planID = metadataString(record, "planID");
     if (
       (planID !== null && fallbackPlanIDs.has(planID)) ||
-      isRejectedOrFailedAttempt(record)
+      (run.arm !== "A" && isRejectedOrFailedAttempt(record))
     ) {
       return false;
     }
@@ -1612,6 +1861,63 @@ function replicatedCorpusInvalidations(
   if (new Set(tripletRunIDs).size !== tripletRunIDs.length) {
     reasons.push("replicated triplets reuse an executed run identity");
   }
+  const replicaIndices = triplets.map((triplet) => triplet.arms.A.replicaIndex);
+  if (new Set(replicaIndices).size !== replicaIndices.length) {
+    reasons.push("replicated triplets reuse a replica index");
+  }
+  const protocols = new Set(triplets.map((triplet) => triplet.arms.A.protocol));
+  if (protocols.size !== 1) {
+    reasons.push("replicated triplets mix evidence protocols");
+  } else {
+    const protocol = triplets[0]?.arms.A.protocol;
+    const expectedCount =
+      protocol === "technical-canary"
+        ? COMMANDER_TECHNICAL_CANARY_TRIPLETS
+        : protocol === "confirmatory"
+          ? MIN_COMMANDER_PERFORMANCE_TRIPLETS
+          : null;
+    if (
+      expectedCount !== null &&
+      stableJson([...replicaIndices].sort((left, right) => left - right)) !==
+        stableJson(Array.from({ length: expectedCount }, (_unused, i) => i))
+    ) {
+      reasons.push(
+        `${protocol} evidence requires exact contiguous replica indices 0-${expectedCount - 1}`,
+      );
+    }
+    if (
+      expectedCount !== null &&
+      triplets.some((triplet) => {
+        const index = triplet.arms.A.replicaIndex;
+        const expectedSeat = index % 4;
+        const expectedEpisode =
+          protocol === "confirmatory" ? Math.floor(index / 4) % 4 : index % 4;
+        return (
+          triplet.arms.A.subjectSeatIndex !== expectedSeat ||
+          triplet.arms.A.episodeIndex !== expectedEpisode
+        );
+      })
+    ) {
+      reasons.push(
+        `${protocol} evidence does not prove the preregistered seat and episode rotation`,
+      );
+    }
+    if (protocol === "confirmatory" && triplets.length === expectedCount) {
+      const cellCounts = new Map<string, number>();
+      for (const triplet of triplets) {
+        const key = `${triplet.arms.A.subjectSeatIndex}:${triplet.arms.A.episodeIndex}`;
+        cellCounts.set(key, (cellCounts.get(key) ?? 0) + 1);
+      }
+      if (
+        cellCounts.size !== 16 ||
+        [...cellCounts.values()].some((count) => count !== 3)
+      ) {
+        reasons.push(
+          "confirmatory evidence does not cover each seat-by-episode cell exactly three times",
+        );
+      }
+    }
+  }
   const artifactRuns = runs.filter(
     (
       run,
@@ -1677,6 +1983,10 @@ function pairwise(
       control.metrics.survived === null || treatment.metrics.survived === null
         ? null
         : Number(treatment.metrics.survived) - Number(control.metrics.survived),
+    turnsSurvivedDelta: nullableDelta(
+      control.metrics.turnsSurvived,
+      treatment.metrics.turnsSurvived,
+    ),
     caveat:
       "A single run or short local smoke has no performance evidentiary weight; pairwise deltas require replicated matched games.",
   };
@@ -1691,6 +2001,9 @@ function aggregateArmMetrics(
     .filter((value): value is number => value !== null);
   const ranks = metrics
     .map((entry) => entry.finalRank)
+    .filter((value): value is number => value !== null);
+  const turnsSurvived = metrics
+    .map((entry) => entry.turnsSurvived)
     .filter((value): value is number => value !== null);
   const aligned = sum(
     metrics.map((entry) => entry.fidelityCounts.alignedPrimary),
@@ -1735,6 +2048,11 @@ function aggregateArmMetrics(
       observations: ranks.length,
       mean: mean(ranks),
     },
+    turnsSurvived: {
+      sum: sum(turnsSurvived),
+      observations: turnsSurvived.length,
+      mean: mean(turnsSurvived),
+    },
     modelCalls: sum(metrics.map((entry) => entry.modelCalls)),
     planCount: sum(metrics.map((entry) => entry.planCount)),
     decisionCycleCount: sum(metrics.map((entry) => entry.decisionCycleCount)),
@@ -1746,6 +2064,15 @@ function aggregateArmMetrics(
       aligned,
       classifiedNonEmergency,
       rate: ratio(aligned, classifiedNonEmergency),
+      interpretable:
+        metrics.length > 0 &&
+        metrics.every((entry) => entry.fidelity.interpretable),
+      unknownDecisions: sum(
+        metrics.map((entry) => entry.fidelity.unknownDecisions),
+      ),
+      unattributedDecisions: sum(
+        metrics.map((entry) => entry.fidelity.unattributedDecisions),
+      ),
     },
     staleRejectedAttempts: sum(
       metrics.map((entry) => entry.staleRejectedAttempts),
@@ -1781,22 +2108,391 @@ function aggregatePairwise(
       control.survival.rate,
       treatment.survival.rate,
     ),
+    turnsSurvivedDelta: nullableDelta(
+      control.turnsSurvived.mean,
+      treatment.turnsSurvived.mean,
+    ),
     caveat:
       "Raw counts and rates are aggregated over matched triplets; eligibility does not establish statistical power or strategic value.",
   };
+}
+
+function pairedAnalysis(
+  triplets: readonly CommanderArmTripletReport[],
+): CommanderArmReport["aggregate"]["pairedAnalysis"] {
+  const pairs = triplets.flatMap((triplet) => {
+    const comparison = triplet.comparisons.B_vs_C;
+    if (
+      comparison.normalizedTerritoryDelta === null ||
+      comparison.finalRankDelta === null ||
+      comparison.survivalDelta === null ||
+      comparison.turnsSurvivedDelta === null ||
+      !triplet.arms.B.metrics.winnerDetermined ||
+      !triplet.arms.C.metrics.winnerDetermined
+    ) {
+      return [];
+    }
+    return [
+      {
+        tripletID: triplet.tripletID,
+        winDelta: comparison.winDelta,
+        normalizedTerritoryDelta: comparison.normalizedTerritoryDelta,
+        finalRankDelta: comparison.finalRankDelta,
+        survivalDelta: comparison.survivalDelta,
+        turnsSurvivedDelta: comparison.turnsSurvivedDelta,
+      },
+    ];
+  });
+  return {
+    ready: pairs.length === triplets.length && triplets.length > 0,
+    completePairs: pairs.length,
+    B_vs_C: pairs,
+  };
+}
+
+/** Fixed, preregistered B/C paired analysis; no outcome-dependent switching. */
+export function computeCommanderConfirmatoryAnalysis(
+  runs: readonly CommanderArmRunInput[],
+  paired: CommanderArmReport["aggregate"]["pairedAnalysis"],
+): CommanderConfirmatoryAnalysis {
+  const rawReady =
+    paired.ready &&
+    paired.completePairs === MIN_COMMANDER_PERFORMANCE_TRIPLETS &&
+    runs.length === MIN_COMMANDER_PERFORMANCE_TRIPLETS * 3 &&
+    runs.every((run) => run.protocol === "confirmatory");
+  const specifications = runs.map((run) => run.analysisSpecification);
+  const specification = specifications[0] ?? null;
+  const canonicalSpecification =
+    specification !== null &&
+    isCommanderConfirmatoryAnalysisSpecification(specification) &&
+    specifications.every(
+      (candidate) => stableJson(candidate) === stableJson(specification),
+    );
+  const base = {
+    specification:
+      canonicalSpecification && specification !== null
+        ? structuredClone(specification)
+        : null,
+    specificationSha256:
+      canonicalSpecification && specification !== null
+        ? sha256StableJson(specification)
+        : null,
+    completePairs: paired.completePairs,
+    requiredPairs: MIN_COMMANDER_PERFORMANCE_TRIPLETS as 48,
+    missingPairs: Math.max(
+      0,
+      MIN_COMMANDER_PERFORMANCE_TRIPLETS - paired.completePairs,
+    ),
+    missingnessPolicy: "no-missing-pairs" as const,
+  };
+  if (!rawReady) return { status: "not-ready", ...base, results: [] };
+  if (!canonicalSpecification || specification === null) {
+    return { status: "analysis-ready", ...base, results: [] };
+  }
+
+  const values: Record<CommanderConfirmatoryMetricID, number[]> = {
+    win: paired.B_vs_C.map((entry) => entry.winDelta),
+    survival: paired.B_vs_C.map((entry) => entry.survivalDelta),
+    "normalized-final-territory": paired.B_vs_C.map(
+      (entry) => entry.normalizedTerritoryDelta,
+    ),
+    "turns-survived": paired.B_vs_C.map((entry) => entry.turnsSurvivedDelta),
+    "final-rank": paired.B_vs_C.map((entry) => entry.finalRankDelta),
+  };
+  const provisional = specification.primaryMetrics.map((metric) => {
+    const deltas = values[metric.id];
+    const pValue =
+      metric.pValueMethod === "exact-two-sided-mcnemar"
+        ? exactTwoSidedMcNemarPValue(deltas)
+        : pairedSignRandomizationPValue(
+            deltas,
+            `${specification.resampling.seed}:${metric.id}:randomization`,
+            specification.resampling.randomizationIterations,
+          );
+    const [lower, upper] = pairedBootstrapInterval(
+      deltas,
+      `${specification.resampling.seed}:${metric.id}:bootstrap`,
+      specification.resampling.bootstrapIterations,
+      specification.confidenceLevel,
+    );
+    return {
+      metric: metric.id,
+      direction: metric.direction,
+      pairCount: deltas.length,
+      estimateCMinusB: mean(deltas) ?? 0,
+      confidenceInterval95: { lower, upper },
+      pValue,
+      holmBonferroniAdjustedPValue: 1,
+      rejectNullAtAlpha05: false,
+      pValueMethod: metric.pValueMethod,
+      intervalMethod: metric.intervalMethod,
+    } satisfies CommanderConfirmatoryMetricAnalysis;
+  });
+  const adjusted = holmBonferroniAdjustedPValues(
+    provisional.map((entry) => entry.pValue),
+  );
+  const results = provisional.map((entry, index) => ({
+    ...entry,
+    holmBonferroniAdjustedPValue: adjusted[index]!,
+    rejectNullAtAlpha05: adjusted[index]! <= specification.alpha,
+  }));
+  return { status: "complete", ...base, results };
+}
+
+function sha256StableJson(value: unknown): string {
+  return createHash("sha256").update(stableJson(value)).digest("hex");
+}
+
+function pairedBootstrapInterval(
+  deltas: readonly number[],
+  seed: string,
+  iterations: number,
+  confidenceLevel: number,
+): [number, number] {
+  const random = deterministicRandom(seed);
+  const estimates: number[] = [];
+  for (let iteration = 0; iteration < iterations; iteration += 1) {
+    let total = 0;
+    for (let pair = 0; pair < deltas.length; pair += 1) {
+      total += deltas[Math.floor(random() * deltas.length)]!;
+    }
+    estimates.push(total / deltas.length);
+  }
+  estimates.sort((left, right) => left - right);
+  const tail = (1 - confidenceLevel) / 2;
+  return [percentile(estimates, tail), percentile(estimates, 1 - tail)];
+}
+
+function pairedSignRandomizationPValue(
+  deltas: readonly number[],
+  seed: string,
+  iterations: number,
+): number {
+  const observed = Math.abs(mean(deltas) ?? 0);
+  const random = deterministicRandom(seed);
+  let atLeastObserved = 0;
+  for (let iteration = 0; iteration < iterations; iteration += 1) {
+    let total = 0;
+    for (const delta of deltas) total += random() < 0.5 ? -delta : delta;
+    if (Math.abs(total / deltas.length) + Number.EPSILON >= observed) {
+      atLeastObserved += 1;
+    }
+  }
+  return (atLeastObserved + 1) / (iterations + 1);
+}
+
+function exactTwoSidedMcNemarPValue(deltas: readonly number[]): number {
+  const positive = deltas.filter((delta) => delta > 0).length;
+  const negative = deltas.filter((delta) => delta < 0).length;
+  const discordant = positive + negative;
+  if (discordant === 0) return 1;
+  const tailThrough = Math.min(positive, negative);
+  let probability = 2 ** -discordant;
+  let cumulative = probability;
+  for (let successes = 1; successes <= tailThrough; successes += 1) {
+    probability *= (discordant - successes + 1) / successes;
+    cumulative += probability;
+  }
+  return Math.min(1, 2 * cumulative);
+}
+
+function holmBonferroniAdjustedPValues(pValues: readonly number[]): number[] {
+  const ordered = pValues
+    .map((pValue, index) => ({ pValue, index }))
+    .sort(
+      (left, right) => left.pValue - right.pValue || left.index - right.index,
+    );
+  const adjusted = Array<number>(pValues.length).fill(1);
+  let previous = 0;
+  for (const [rank, entry] of ordered.entries()) {
+    const candidate = Math.min(1, (pValues.length - rank) * entry.pValue);
+    previous = Math.max(previous, candidate);
+    adjusted[entry.index] = previous;
+  }
+  return adjusted;
+}
+
+function deterministicRandom(seed: string): () => number {
+  let state = createHash("sha256").update(seed).digest().readUInt32BE(0);
+  if (state === 0) state = 0x9e3779b9;
+  return () => {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    return (state >>> 0) / 0x1_0000_0000;
+  };
+}
+
+function percentile(sorted: readonly number[], probability: number): number {
+  if (sorted.length === 0) return 0;
+  const position = (sorted.length - 1) * probability;
+  const lower = Math.floor(position);
+  const upper = Math.ceil(position);
+  if (lower === upper) return sorted[lower]!;
+  const weight = position - lower;
+  return sorted[lower]! * (1 - weight) + sorted[upper]! * weight;
+}
+
+function technicalCanaryIneligibilityReasons(
+  runs: readonly CommanderArmRunInput[],
+  triplets: readonly CommanderArmTripletReport[],
+): string[] {
+  const reasons = evidenceQualityIneligibilityReasons(runs, triplets);
+  if (triplets.length !== COMMANDER_TECHNICAL_CANARY_TRIPLETS) {
+    reasons.push(
+      `technical canary requires exactly ${COMMANDER_TECHNICAL_CANARY_TRIPLETS} matched triplets`,
+    );
+  }
+  if (runs.some((run) => run.protocol !== "technical-canary")) {
+    reasons.push(
+      "technical canary protocol was not preregistered for every arm",
+    );
+  }
+  if (
+    runs.some(
+      (run) =>
+        run.gameConfiguration.runner.maxSteps !== 60 ||
+        run.gameConfiguration.runner.turnsPerDecisionStep !== 100 ||
+        !run.requireWinner,
+    )
+  ) {
+    reasons.push(
+      "technical canary requires max-steps 60, turns-per-decision-step 100, and a winner",
+    );
+  }
+  const ordered = [...triplets].sort(
+    (left, right) => left.arms.A.replicaIndex - right.arms.A.replicaIndex,
+  );
+  if (
+    ordered.some(
+      (triplet) =>
+        stableJson(triplet.arms.A.armOrder) !==
+        stableJson(commanderArmOrderForReplica(triplet.arms.A.replicaIndex)),
+    )
+  ) {
+    reasons.push(
+      "technical canary arm execution order disagrees with protocol",
+    );
+  }
+  const bBeforeC = ordered.filter((triplet) =>
+    isArmBefore(triplet.arms.A.armOrder, "B", "C"),
+  ).length;
+  if (
+    ordered.length === COMMANDER_TECHNICAL_CANARY_TRIPLETS &&
+    bBeforeC !== 2
+  ) {
+    reasons.push("technical canary does not balance B-before-C two versus two");
+  }
+  return [...new Set(reasons)];
 }
 
 function performanceIneligibilityReasons(
   runs: readonly CommanderArmRunInput[],
   triplets: readonly CommanderArmTripletReport[],
 ): string[] {
-  const reasons: string[] = [];
+  const reasons = evidenceQualityIneligibilityReasons(runs, triplets);
   const perProtocolTriplets = triplets.filter(isPerProtocolTripletEligible);
   if (perProtocolTriplets.length < MIN_COMMANDER_PERFORMANCE_TRIPLETS) {
     reasons.push(
       `fewer than ${MIN_COMMANDER_PERFORMANCE_TRIPLETS} uncontaminated per-protocol matched triplets`,
     );
   }
+  if (runs.some((run) => run.protocol !== "confirmatory")) {
+    reasons.push("confirmatory protocol was not preregistered for every arm");
+  }
+  if (
+    runs.some(
+      (run) =>
+        run.gameConfiguration.runner.maxSteps !== 60 ||
+        run.gameConfiguration.runner.turnsPerDecisionStep !== 100 ||
+        !run.requireWinner,
+    )
+  ) {
+    reasons.push(
+      "confirmatory protocol requires max-steps 60, turns-per-decision-step 100, and a winner",
+    );
+  }
+  const cPlanStarts = sum(
+    perProtocolTriplets.map(
+      (triplet) => triplet.arms.C.derivedProvenance.nonFallbackPlanStarts,
+    ),
+  );
+  if (cPlanStarts < MIN_COMMANDER_C_PLAN_STARTS) {
+    reasons.push(
+      `fewer than ${MIN_COMMANDER_C_PLAN_STARTS} non-fallback Arm C plan starts`,
+    );
+  }
+  const disagreements = sum(
+    perProtocolTriplets.map(
+      (triplet) => triplet.arms.C.metrics.selectorDisagreement.count,
+    ),
+  );
+  if (disagreements < MIN_COMMANDER_SELECTOR_DISAGREEMENTS) {
+    reasons.push(
+      `fewer than ${MIN_COMMANDER_SELECTOR_DISAGREEMENTS} genuine B/C selector disagreements`,
+    );
+  }
+  const paired = pairedAnalysis(perProtocolTriplets);
+  if (!paired.ready || paired.completePairs !== perProtocolTriplets.length) {
+    reasons.push("paired B/C outcome analysis is incomplete");
+  }
+  const analysis = computeCommanderConfirmatoryAnalysis(runs, paired);
+  if (analysis.status !== "complete") {
+    reasons.push(
+      analysis.status === "analysis-ready"
+        ? "confirmatory paired outcomes are analysis-ready but lack the exact sealed analysis specification"
+        : "confirmatory paired analysis is not ready",
+    );
+  }
+  reasons.push(...confirmatoryArmOrderReasons(perProtocolTriplets));
+  return [...new Set(reasons)];
+}
+
+function confirmatoryArmOrderReasons(
+  triplets: readonly CommanderArmTripletReport[],
+): string[] {
+  if (triplets.length === 0)
+    return ["confirmatory arm-order evidence is empty"];
+  const keys = COMMANDER_ARM_ORDER_CYCLE.map((order) => stableJson(order));
+  const counts = new Map(keys.map((key) => [key, 0]));
+  let bBeforeC = 0;
+  for (const triplet of triplets) {
+    const order = triplet.arms.A.armOrder;
+    if (
+      stableJson(order) !==
+      stableJson(commanderArmOrderForReplica(triplet.arms.A.replicaIndex))
+    ) {
+      return ["confirmatory arm execution order disagrees with protocol"];
+    }
+    const key = stableJson(order);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+    if (isArmBefore(order, "B", "C")) bBeforeC += 1;
+  }
+  if (
+    triplets.length % COMMANDER_ARM_ORDER_CYCLE.length !== 0 ||
+    new Set(counts.values()).size !== 1
+  ) {
+    return ["confirmatory evidence does not cover all six arm orders evenly"];
+  }
+  if (bBeforeC * 2 !== triplets.length) {
+    return ["confirmatory evidence does not balance B-before-C and C-before-B"];
+  }
+  return [];
+}
+
+function isArmBefore(
+  order: CommanderArmOrder,
+  left: CommanderExperimentArm,
+  right: CommanderExperimentArm,
+): boolean {
+  return order.indexOf(left) < order.indexOf(right);
+}
+
+function evidenceQualityIneligibilityReasons(
+  runs: readonly CommanderArmRunInput[],
+  triplets: readonly CommanderArmTripletReport[],
+): string[] {
+  const reasons: string[] = [];
   for (const triplet of triplets) {
     for (const reason of triplet.terminalPerformanceEligibility
       .ineligibilityReasons) {
@@ -1821,6 +2517,18 @@ function performanceIneligibilityReasons(
   ) {
     reasons.push(
       "replicated triplets do not share one valid runtime treatment identity",
+    );
+  }
+  if (
+    runs.some(
+      (run) =>
+        run.preRegistrationManifestSha256 === null ||
+        !/^[a-f0-9]{64}$/i.test(run.preRegistrationManifestSha256),
+    ) ||
+    new Set(runs.map((run) => run.preRegistrationManifestSha256)).size !== 1
+  ) {
+    reasons.push(
+      "confirmatory analysis lacks one sealed preregistration receipt",
     );
   }
   if (runs.some((run) => !run.requireWinner)) {
@@ -1932,11 +2640,9 @@ function performanceIneligibilityReasons(
           `${triplet.tripletID}: Arm ${armName} has a forbidden fidelity violation`,
         );
       }
-    }
-    for (const armName of ["A", "B", "C"] as const) {
-      if (triplet.arms[armName].metrics.effectAudit.delayedPending > 0) {
+      if (metrics.rejectedOrFailedAttempts > 0) {
         reasons.push(
-          `${triplet.tripletID}: Arm ${armName} has an unresolved bounded delayed-effect audit`,
+          `${triplet.tripletID}: Arm ${armName} contains a failed or rejected selector attempt`,
         );
       }
     }
@@ -1969,6 +2675,11 @@ function terminalTripletIneligibilityReasons(
   if (metrics.staleAuthorityViolations > 0) {
     reasons.push(
       "Arm C applied or retained stale selector authority; per-protocol terminal outcomes require zero",
+    );
+  }
+  if (metrics.rejectedOrFailedAttempts > 0) {
+    reasons.push(
+      "Arm C contains a failed or rejected selector attempt; per-protocol terminal outcomes require zero",
     );
   }
   if (metrics.failures.timeout > 0) {
@@ -2149,12 +2860,47 @@ function independentlyRequiresFallbackPlan(
 }
 
 function isRejectedOrFailedAttempt(record: AgentDecisionRecord): boolean {
+  const disposition = metadataString(record, "commanderResponseDisposition");
   return (
-    metadataString(record, "commanderResponseDisposition") === "rejected" ||
+    disposition === null ||
+    !commanderResponseDispositions.includes(
+      disposition as (typeof commanderResponseDispositions)[number],
+    ) ||
+    disposition === "rejected" ||
     metadataString(record, "commanderRejectionCode") !== null ||
     metadataString(record, "commanderSelectionFailureKind") !== null ||
     metadataString(record, "plannerParseFailureReason") !== null
   );
+}
+
+function responseEvidenceViolationCount(record: AgentDecisionRecord): number {
+  const disposition = metadataString(record, "commanderResponseDisposition");
+  const rejectionCode = metadataString(record, "commanderRejectionCode");
+  const failureKind = metadataString(record, "commanderSelectionFailureKind");
+  const validDisposition =
+    disposition !== null &&
+    commanderResponseDispositions.includes(
+      disposition as (typeof commanderResponseDispositions)[number],
+    );
+  const validRejectionCode =
+    rejectionCode !== null &&
+    commanderPlanRejectionCodes.includes(
+      rejectionCode as (typeof commanderPlanRejectionCodes)[number],
+    );
+  const validFailureKind =
+    failureKind !== null &&
+    strategicOptionSelectionFailureKinds.includes(
+      failureKind as (typeof strategicOptionSelectionFailureKinds)[number],
+    );
+  let violations = 0;
+  if (!validDisposition) violations += 1;
+  if (rejectionCode !== null && !validRejectionCode) violations += 1;
+  if (failureKind !== null && !validFailureKind) violations += 1;
+  if (rejectionCode !== null && disposition !== "rejected") violations += 1;
+  if (disposition === "rejected" && !validRejectionCode && !validFailureKind) {
+    violations += 1;
+  }
+  return violations;
 }
 
 function fallbackPlanStampViolations(
@@ -2254,112 +3000,28 @@ function canonicalActionViolationCount(
 }
 
 function effectAuditMetrics(
-  run: CommanderArmRunInput,
+  _run: CommanderArmRunInput,
   records: readonly AgentDecisionRecord[],
 ): CommanderArmMetrics["effectAudit"] {
-  const result: CommanderArmMetrics["effectAudit"] = {
-    immediateViolations: 0,
-    delayedConfirmed: 0,
-    delayedPending: 0,
-    delayedExpired: 0,
-    delayedFailed: 0,
+  const canonical = records.filter(
+    (record) =>
+      record.result.accepted === true &&
+      record.legalActionIDs.includes(record.chosenActionID) &&
+      (record.chosenActionKind === "hold" ||
+        (record.intent !== null &&
+          record.result.submittedIntent !== null &&
+          stableJson(record.intent) ===
+            stableJson(record.result.submittedIntent))),
+  );
+  return {
+    // Current decision snapshots prove canonical submission, not downstream
+    // game causality. In particular, transport counts may be shared by
+    // several boat intents and can never confirm or double-credit one here.
+    causalInferenceSupported: false,
+    explicitFailures: canonical.filter(
+      (record) => record.audit?.auditStatus === "failed",
+    ).length,
   };
-  if (run.gameConfiguration.runnerMode !== "step-locked") return result;
-  const ordered = [...records].sort(
-    (left, right) => left.sequence - right.sequence,
-  );
-  for (let index = 0; index < ordered.length; index++) {
-    const record = ordered[index]!;
-    if (
-      record.chosenActionKind === "hold" ||
-      record.result.accepted !== true ||
-      record.intent === null ||
-      record.result.submittedIntent === null ||
-      stableJson(record.intent) !== stableJson(record.result.submittedIntent)
-    ) {
-      continue;
-    }
-    const status = record.audit?.auditStatus;
-    if (!isDelayedEffectAction(record)) {
-      if (status !== "confirmed") result.immediateViolations += 1;
-      continue;
-    }
-    if (status === "failed" || status === "not_applicable") {
-      result.delayedFailed += 1;
-      continue;
-    }
-    if (status === "confirmed") {
-      result.delayedConfirmed += 1;
-      continue;
-    }
-    const later = ordered
-      .slice(index + 1)
-      .filter(
-        (candidate) =>
-          candidate.agentID === record.agentID &&
-          candidate.chosenActionKind !== "spawn" &&
-          isPrimaryBatchRow(candidate),
-      )
-      .slice(0, COMMANDER_DELAYED_EFFECT_AUDIT_BOUND_CYCLES);
-    if (later.some((candidate) => delayedEffectVisible(record, candidate))) {
-      result.delayedConfirmed += 1;
-    } else if (later.length >= COMMANDER_DELAYED_EFFECT_AUDIT_BOUND_CYCLES) {
-      result.delayedExpired += 1;
-    } else {
-      result.delayedPending += 1;
-    }
-  }
-  return result;
-}
-
-function isDelayedEffectAction(record: AgentDecisionRecord): boolean {
-  return (
-    record.chosenActionKind === "boat" ||
-    record.chosenActionKind === "boat_retreat"
-  );
-}
-
-function delayedEffectVisible(
-  source: AgentDecisionRecord,
-  later: AgentDecisionRecord,
-): boolean {
-  const baseline = source.audit?.before ?? null;
-  const snapshots = [later.audit?.before, later.audit?.after].filter(
-    (snapshot): snapshot is AgentActionAuditSnapshot =>
-      snapshot !== null && snapshot !== undefined,
-  );
-  return snapshots.some((snapshot) =>
-    source.intent?.type === "boat"
-      ? boatEffectVisible(baseline, snapshot)
-      : source.intent?.type === "cancel_boat"
-        ? cancelBoatEffectVisible(baseline, snapshot, source.intent.unitID)
-        : false,
-  );
-}
-
-function boatEffectVisible(
-  baseline: AgentActionAuditSnapshot | null,
-  candidate: AgentActionAuditSnapshot,
-): boolean {
-  const beforeCount = baseline?.unitCounts[UnitType.TransportShip] ?? 0;
-  const afterCount = candidate.unitCounts[UnitType.TransportShip] ?? 0;
-  // Troop loss is not transport-specific: an unrelated attack or core event
-  // can lower the same balance. Only direct transport evidence can close this
-  // delayed audit.
-  return afterCount > beforeCount;
-}
-
-function cancelBoatEffectVisible(
-  baseline: AgentActionAuditSnapshot | null,
-  candidate: AgentActionAuditSnapshot,
-  unitID: number,
-): boolean {
-  const key = `${UnitType.TransportShip}:${unitID}`;
-  const existed = baseline?.unitTiles?.[key] !== undefined;
-  const exists = candidate.unitTiles?.[key] !== undefined;
-  const retreating =
-    candidate.transportRetreatingUnitIDs?.includes(unitID) ?? false;
-  return (existed && !exists) || retreating;
 }
 
 function optionAccountingViolationCount(record: AgentDecisionRecord): number {

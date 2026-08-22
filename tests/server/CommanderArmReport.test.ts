@@ -25,13 +25,22 @@ import {
   commanderGameIDFromSeed,
 } from "../../src/server/agents/CommanderExperimentIdentity";
 import {
+  commanderArmOrderForReplica,
+  commanderConfirmatoryAnalysisSpecification,
+} from "../../src/server/agents/CommanderExperimentProtocol";
+import {
   advanceCommanderPlan,
+  commanderPlanRejectionCodes,
   commanderRequestIdentity,
+  commanderResponseDispositions,
   type CommanderPlanMaterial,
   type CommanderPlanRequest,
 } from "../../src/server/agents/CommanderPlanLifecycle";
 import { parseCommanderResponse } from "../../src/server/agents/CommanderResponseParser";
-import { selectDeterministicStrategicOption } from "../../src/server/agents/StrategicOptionSelectors";
+import {
+  selectDeterministicStrategicOption,
+  strategicOptionSelectionFailureKinds,
+} from "../../src/server/agents/StrategicOptionSelectors";
 import { fabricatedRecord } from "./DealTestHarness";
 import { makeCommanderStage2Fixture } from "./StrategicCommanderStage2TestHarness";
 
@@ -229,6 +238,7 @@ function commanderRecord(input: {
     commanderReplanReason: input.replanReason ?? "within_horizon",
     commanderPreviousPlanID: input.previousPlanID ?? null,
     commanderPlanInstalled: input.planInstalled ?? false,
+    commanderResponseDisposition: "applied",
     commanderHorizonDecisions: 3,
     commanderPlanAgeDecisions: input.sequence - 1,
     commanderDeterministicPreferredOptionId: deterministic,
@@ -459,9 +469,16 @@ function armRun(
   return {
     tripletID: "triplet-1",
     arm,
+    protocol: "plumbing",
+    replicaIndex: 0,
+    subjectSeatIndex: 0,
+    episodeIndex: 0,
+    armOrder: ["A", "B", "C"],
+    armExecutionIndex: arm === "A" ? 0 : arm === "B" ? 1 : 2,
     sourceSha: "a".repeat(40),
     sourceTreeDirty: false,
     runtimeIdentitySha256: "9".repeat(64),
+    preRegistrationManifestSha256: null,
     seed: "matched-seed",
     runID: "matched-run",
     selectorSource:
@@ -469,6 +486,7 @@ function armRun(
     provider: arm === "C" ? "test" : null,
     model: arm === "C" ? "test-model" : null,
     promptVersion: arm === "C" ? "stage2" : null,
+    analysisSpecification: null,
     componentHashes: { ...COMPONENT_HASHES },
     artifactProvenance: null,
     experimentFlags: {
@@ -601,11 +619,21 @@ function promoteToPerformanceRun(input: {
   tripletID: string;
   seed: string;
   subjectWon: boolean;
+  replicaIndex: number;
 }): CommanderArmRunInput {
   const run = input.run;
   run.tripletID = input.tripletID;
   run.runID = input.tripletID;
   run.seed = input.seed;
+  run.protocol = "confirmatory";
+  run.replicaIndex = input.replicaIndex;
+  run.subjectSeatIndex = input.replicaIndex % 4;
+  run.episodeIndex = Math.floor(input.replicaIndex / 4) % 4;
+  installPerformanceRoster(run, run.subjectSeatIndex);
+  run.analysisSpecification = commanderConfirmatoryAnalysisSpecification();
+  run.preRegistrationManifestSha256 = "8".repeat(64);
+  run.armOrder = commanderArmOrderForReplica(input.replicaIndex);
+  run.armExecutionIndex = run.armOrder.indexOf(run.arm);
   run.localSmoke = false;
   run.requireWinner = true;
   run.completed = true;
@@ -615,6 +643,8 @@ function promoteToPerformanceRun(input: {
   run.winner = ["player", input.subjectWon ? "CLIENT-1" : "OPPONENT-CLIENT"];
   const runner = run.gameConfiguration.runner as Record<string, unknown>;
   runner.requireWinner = true;
+  runner.maxSteps = 60;
+  runner.turnsPerDecisionStep = 100;
   run.gameConfigurationFingerprint = fingerprintCommanderExperimentValue(
     run.gameConfiguration,
   );
@@ -660,17 +690,91 @@ function promoteToPerformanceRun(input: {
   return run;
 }
 
+function installPerformanceRoster(
+  run: CommanderArmRunInput,
+  subjectSeatIndex: number,
+): void {
+  const subject = run.roster.find(
+    (entry) => entry.agentID === run.subjectAgentID,
+  )!;
+  const opponents = Array.from({ length: 3 }, (_unused, index) => ({
+    agentID: `PERFORMANCE-OPPONENT-${index + 1}`,
+    username: `Performance Opponent ${index + 1}`,
+    profile: "opportunistic" as const,
+    clientID: `PERFORMANCE-CLIENT-${index + 1}`,
+    brainType: "planner-executor" as const,
+  }));
+  const roster: CommanderArmRunInput["roster"] = [...opponents];
+  roster.splice(subjectSeatIndex, 0, subject);
+  run.roster = roster;
+  const priorityParticipantIDs = roster.map((entry) => entry.agentID);
+  const priorityOrder = roster.map((entry) => entry.username);
+  for (const [index, opponent] of opponents.entries()) {
+    const actionID = `spawn:${200 + index * 100}`;
+    const record = fabricatedRecord({
+      sequence: -3 + index,
+      agentID: opponent.agentID,
+      playerID: `P${index + 2}`,
+      username: opponent.username,
+      turnNumber: 0,
+      actionID,
+      kind: "spawn",
+    });
+    record.profile = opponent.profile;
+    record.brainType = opponent.brainType;
+    record.legalActionIDs = [actionID];
+    record.intent = { type: "spawn", tile: 200 + index * 100 };
+    record.result = {
+      accepted: true,
+      reason: "submitted",
+      submittedIntent: record.intent,
+    };
+    record.audit = { auditStatus: "confirmed", auditReason: "spawn applied" };
+    record.spawnSelectionEvidence = {
+      algorithmVersion: "sealed-ranked-v1",
+      offeredActionIDs: [actionID],
+      ballotSource: "explicit-ranked",
+      submittedBallotActionIDs: [actionID],
+      submittedBallotEntryTypes: ["string"],
+      submittedBallotCount: 1,
+      submittedBallotTruncated: false,
+      submittedReason: "matched performance fixture",
+      normalizedBallotActionIDs: [actionID],
+      ballotValid: true,
+      ballotInvalidReason: null,
+      defaultReason: null,
+      participantID: opponent.agentID,
+      priorityParticipantIDs,
+      priorityOrder,
+      priorityRank:
+        roster.findIndex((entry) => entry.agentID === opponent.agentID) + 1,
+      assignedActionID: actionID,
+      assignedPreferenceRank: 1,
+      assignedSubmittedPreferenceRank: 1,
+      stageLatencyMs: 0,
+      stageFallbackUsed: false,
+      stageDegradationReason: null,
+    };
+    run.records.unshift(record);
+  }
+  run.gameConfiguration.agents = 4;
+}
+
 function performanceTriplet(input: {
   tripletID: string;
   seed: string;
   subjectWins: Partial<Record<CommanderExperimentArm, boolean>>;
 }): CommanderArmRunInput[] {
+  const suffix = /([0-9]+)$/.exec(input.tripletID)?.[1];
+  const replicaIndex =
+    suffix === undefined ? 0 : Math.max(0, Number(suffix) - 1);
   return (["A", "B", "C"] as const).map((arm) =>
     promoteToPerformanceRun({
       run: armRun(arm),
       tripletID: input.tripletID,
       seed: input.seed,
       subjectWon: input.subjectWins[arm] ?? false,
+      replicaIndex,
     }),
   );
 }
@@ -747,7 +851,7 @@ describe("CommanderArmReport Stage 5 arithmetic and invalidation", () => {
       pressure_target_cap: 20,
     });
     expect(report.integrity.valid).toBe(true);
-    expect(report.status).toBe("plumbing-only");
+    expect(report.status).toBe("mechanically-valid");
     expect(report.performanceClaimsAllowed).toBe(false);
   });
 
@@ -975,79 +1079,35 @@ describe("CommanderArmReport Stage 5 arithmetic and invalidation", () => {
     );
   });
 
-  it("keeps canonical boat submission separate from bounded delayed effect confirmation", () => {
+  it("keeps canonical boat submission separate from unsupported causal effect claims", () => {
     const planID = "B-boat-plan";
-    const boat = commanderBoatRecord({
+    const firstBoat = commanderBoatRecord({
       sequence: 1,
       arm: "B",
       planID,
       planInstalled: true,
     });
-    const later = commanderRecord({ sequence: 2, arm: "B", planID });
+    const secondBoat = commanderBoatRecord({
+      sequence: 2,
+      arm: "B",
+      planID,
+    });
     const final = commanderRecord({ sequence: 3, arm: "B", planID });
-    showTransport(later, 1);
-    const confirmed = buildCommanderArmReport([
+    showTransport(final, 1);
+    const report = buildCommanderArmReport([
       armRun("A"),
-      armRun("B", [boat, later, final]),
+      armRun("B", [firstBoat, secondBoat, final]),
       armRun("C"),
     ]);
-    expect(firstTriplet(confirmed).arms.B.metrics.canonicalPathViolations).toBe(
-      0,
-    );
-    expect(firstTriplet(confirmed).arms.B.metrics.effectAudit).toMatchObject({
-      delayedConfirmed: 1,
-      delayedPending: 0,
-      delayedExpired: 0,
-      delayedFailed: 0,
+    expect(firstTriplet(report).arms.B.metrics.canonicalPathViolations).toBe(0);
+    expect(firstTriplet(report).arms.B.metrics.effectAudit).toEqual({
+      causalInferenceSupported: false,
+      explicitFailures: 0,
     });
-    expect(firstTriplet(confirmed).integrity.valid).toBe(true);
-
-    const pendingBoat = commanderBoatRecord({
-      sequence: 1,
-      arm: "B",
-      planID,
-      planInstalled: true,
-    });
-    const pending = buildCommanderArmReport([
-      armRun("A"),
-      armRun("B", [
-        pendingBoat,
-        commanderRecord({ sequence: 2, arm: "B", planID }),
-      ]),
-      armRun("C"),
-    ]);
-    expect(
-      firstTriplet(pending).arms.B.metrics.effectAudit.delayedPending,
-    ).toBe(1);
-    expect(firstTriplet(pending).integrity.valid).toBe(true);
-    expect(pending.performanceEligibility.reasons).toContain(
-      "triplet-1: Arm B has an unresolved bounded delayed-effect audit",
-    );
-
-    const expiredBoat = commanderBoatRecord({
-      sequence: 1,
-      arm: "B",
-      planID,
-      planInstalled: true,
-    });
-    const expired = buildCommanderArmReport([
-      armRun("A"),
-      armRun("B", [
-        expiredBoat,
-        commanderRecord({ sequence: 2, arm: "B", planID }),
-        commanderRecord({ sequence: 3, arm: "B", planID }),
-      ]),
-      armRun("C"),
-    ]);
-    expect(
-      firstTriplet(expired).arms.B.metrics.effectAudit.delayedExpired,
-    ).toBe(1);
-    expect(tripletInvalidations(expired)).toContain(
-      "Arm B failed immediate or bounded delayed-effect audit proof",
-    );
+    expect(firstTriplet(report).integrity.valid).toBe(true);
   });
 
-  it("does not confirm a boat from unrelated later troop loss", () => {
+  it("does not infer a boat effect from unrelated later troop loss", () => {
     const planID = "B-boat-plan";
     const pendingBoat = commanderBoatRecord({
       sequence: 1,
@@ -1066,10 +1126,9 @@ describe("CommanderArmReport Stage 5 arithmetic and invalidation", () => {
       armRun("B", [pendingBoat, unrelatedAttack]),
       armRun("C"),
     ]);
-    expect(firstTriplet(pending).arms.B.metrics.effectAudit).toMatchObject({
-      delayedConfirmed: 0,
-      delayedPending: 1,
-      delayedExpired: 0,
+    expect(firstTriplet(pending).arms.B.metrics.effectAudit).toEqual({
+      causalInferenceSupported: false,
+      explicitFailures: 0,
     });
 
     const secondUnrelatedAttack = commanderRecord({
@@ -1083,10 +1142,9 @@ describe("CommanderArmReport Stage 5 arithmetic and invalidation", () => {
       armRun("B", [pendingBoat, unrelatedAttack, secondUnrelatedAttack]),
       armRun("C"),
     ]);
-    expect(firstTriplet(expired).arms.B.metrics.effectAudit).toMatchObject({
-      delayedConfirmed: 0,
-      delayedPending: 0,
-      delayedExpired: 1,
+    expect(firstTriplet(expired).arms.B.metrics.effectAudit).toEqual({
+      causalInferenceSupported: false,
+      explicitFailures: 0,
     });
   });
 
@@ -1117,7 +1175,7 @@ describe("CommanderArmReport Stage 5 arithmetic and invalidation", () => {
         mutate: (record: AgentDecisionRecord) => {
           record.audit!.auditStatus = "failed";
         },
-        reason: "Arm B failed immediate or bounded delayed-effect audit proof",
+        reason: "Arm B contains an explicit action-effect audit failure",
       },
     ];
     for (const variant of variants) {
@@ -1385,6 +1443,8 @@ describe("CommanderArmReport Stage 5 arithmetic and invalidation", () => {
                 disabledActionKinds: [],
                 opponentBrainMode: "starter-bot",
                 rosterPolicy: "subject-seat-0-vs-starter-bot",
+                subjectSeatIndex: run.subjectSeatIndex,
+                episodeIndex: run.episodeIndex,
                 executionSeed: run.seed,
                 executionGameID: matchID,
                 executionGameIDDerivation: COMMANDER_GAME_ID_DERIVATION_VERSION,
@@ -1415,10 +1475,9 @@ describe("CommanderArmReport Stage 5 arithmetic and invalidation", () => {
         valid: true,
         invalidationReasons: [],
       });
-      expect(parsed.triplets[0]!.arms.B.metrics.effectAudit).toMatchObject({
-        delayedConfirmed: 1,
-        delayedPending: 0,
-        delayedExpired: 0,
+      expect(parsed.triplets[0]!.arms.B.metrics.effectAudit).toEqual({
+        causalInferenceSupported: false,
+        explicitFailures: 0,
       });
       const reloadedArmB = await loadCommanderArmRunFromArtifacts(
         manifestPaths[1]!,
@@ -1497,6 +1556,83 @@ describe("CommanderArmReport Stage 5 arithmetic and invalidation", () => {
       };
       const selectActive = (entry: Record<string, unknown>) =>
         entry.selectedActionKind !== "spawn";
+
+      const bManifestPath = manifestPaths[1]!;
+      const originalBManifestText = await fs.readFile(bManifestPath, "utf8");
+      const bManifest = JSON.parse(originalBManifestText) as {
+        artifacts: { decisionsPath: string; decisionsSha256: string };
+      };
+      const bDecisionsPath = path.resolve(
+        path.dirname(bManifestPath),
+        bManifest.artifacts.decisionsPath,
+      );
+      const originalBDecisionsText = await fs.readFile(bDecisionsPath, "utf8");
+      const originalBEntries = originalBDecisionsText
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      const spawnEntries = originalBEntries.filter(
+        (entry) => entry.selectedActionKind === "spawn",
+      );
+      const activeTemplate = originalBEntries.find(selectActive)!;
+      const good = Array.from({ length: 20 }, (_unused, index) => ({
+        ...structuredClone(activeTemplate),
+        sequence: index + 1,
+        turnNumber: 10 + index,
+        commanderPlanInstalled: index === 0,
+        commanderReplanReason:
+          index === 0 ? "no_active_plan" : "within_horizon",
+        commanderPlanAgeDecisions: index,
+        batchIndex: 0,
+      }));
+      const planless: Record<string, unknown> = {
+        ...structuredClone(activeTemplate),
+        sequence: 21,
+        turnNumber: 31,
+        commanderPlanInstalled: false,
+        commanderReplanReason: "within_horizon",
+        commanderPlanAgeDecisions: 20,
+        batchIndex: 0,
+      };
+      delete planless.planID;
+      delete planless.planObjective;
+      delete planless.commanderFidelity;
+      const planlessCorpusText = `${[...spawnEntries, ...good, planless]
+        .map((entry) => JSON.stringify(entry))
+        .join("\n")}\n`;
+      await fs.writeFile(bDecisionsPath, planlessCorpusText, "utf8");
+      bManifest.artifacts.decisionsSha256 = createHash("sha256")
+        .update(planlessCorpusText)
+        .digest("hex");
+      await fs.writeFile(
+        bManifestPath,
+        `${JSON.stringify(bManifest, null, 2)}\n`,
+        "utf8",
+      );
+      const planlessRuns = await Promise.all(
+        manifestPaths.map((manifestPath) =>
+          loadCommanderArmRunFromArtifacts(manifestPath, comparisonDirectory),
+        ),
+      );
+      const planlessReport = buildCommanderArmReport(planlessRuns);
+      expect(planlessReport.triplets[0]!.arms.B.metrics.fidelity).toEqual({
+        rate: 20 / 21,
+        interpretable: false,
+        unknownDecisions: 1,
+        unattributedDecisions: 1,
+      });
+      expect(planlessReport.integrity.valid).toBe(false);
+      expect(planlessReport.integrity.invalidationReasons).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining(
+            "Arm B has unknown or unattributed Commander fidelity decisions",
+          ),
+        ]),
+      );
+      await Promise.all([
+        fs.writeFile(bDecisionsPath, originalBDecisionsText, "utf8"),
+        fs.writeFile(bManifestPath, originalBManifestText, "utf8"),
+      ]);
       const restoreUnknownAuditField = await mutatePersistedDecision(
         manifestPaths[1]!,
         (entry) => entry.selectedActionKind === "boat",
@@ -1606,17 +1742,19 @@ describe("CommanderArmReport Stage 5 arithmetic and invalidation", () => {
         ).toBe(mutation.label === "unknown audit" ? 0 : 1);
         expect(
           mutatedReport.triplets[0]!.arms.A.metrics.effectAudit
-            .immediateViolations,
+            .explicitFailures,
           mutation.label,
-        ).toBe(mutation.label === "unknown audit" ? 1 : 0);
-        expect(
-          mutatedReport.triplets[0]!.integrity.invalidationReasons,
-          mutation.label,
-        ).toContain(
-          mutation.label === "unknown audit"
-            ? "Arm A failed immediate or bounded delayed-effect audit proof"
-            : "Arm A failed offered-id, acceptance, or submitted-intent proof",
-        );
+        ).toBe(0);
+        if (mutation.label === "unknown audit") {
+          expect(mutatedReport.triplets[0]!.integrity.valid).toBe(true);
+        } else {
+          expect(
+            mutatedReport.triplets[0]!.integrity.invalidationReasons,
+            mutation.label,
+          ).toContain(
+            "Arm A failed offered-id, acceptance, or submitted-intent proof",
+          );
+        }
         await restore();
       }
       const manifestText = await fs.readFile(manifestPaths[0]!, "utf8");
@@ -1854,25 +1992,33 @@ describe("CommanderArmReport Stage 5 arithmetic and invalidation", () => {
     }
   });
 
-  it("permits performance interpretation only for replicated completed artifact-backed triplets", () => {
+  it("keeps two replicated completed artifact-backed triplets below confirmatory performance", () => {
     const report = buildCommanderArmReport([
       ...performanceTriplet({
         tripletID: "replica-1",
         seed: "seed-1",
         subjectWins: { C: true },
-      }),
+      }).map((run) => ({
+        ...run,
+        protocol: "plumbing" as const,
+        analysisSpecification: null,
+      })),
       ...performanceTriplet({
         tripletID: "replica-2",
         seed: "seed-2",
         subjectWins: { B: true, C: true },
-      }),
+      }).map((run) => ({
+        ...run,
+        protocol: "plumbing" as const,
+        analysisSpecification: null,
+      })),
     ]);
 
-    expect(report.status).toBe("eligible-for-performance-interpretation");
-    expect(report.performanceEligibility).toEqual({
-      eligible: true,
-      reasons: [],
-    });
+    expect(report.status).toBe("mechanically-valid");
+    expect(report.performanceEligibility.eligible).toBe(false);
+    expect(report.performanceEligibility.reasons).toContain(
+      "fewer than 48 uncontaminated per-protocol matched triplets",
+    );
     expect(report.aggregate.arms.A.wins).toEqual({
       count: 0,
       opportunities: 2,
@@ -1888,6 +2034,124 @@ describe("CommanderArmReport Stage 5 arithmetic and invalidation", () => {
       opportunities: 2,
       rate: 1,
     });
+  });
+
+  it("separates the exact four-triplet technical canary from confirmatory claims", () => {
+    const runs = Array.from({ length: 4 }, (_unused, index) =>
+      performanceTriplet({
+        tripletID: `replica-${index + 1}`,
+        seed: `seed-${index + 1}`,
+        subjectWins: { C: true },
+      }).map((run) => ({
+        ...run,
+        protocol: "technical-canary" as const,
+        episodeIndex: index,
+        analysisSpecification: null,
+      })),
+    ).flat();
+    const report = buildCommanderArmReport(runs);
+    expect(report.integrity.valid).toBe(true);
+    expect(report.status).toBe("technical-canary-passed");
+    expect(report.technicalCanaryEligibility).toEqual({
+      eligible: true,
+      reasons: [],
+    });
+    expect(report.performanceClaimsAllowed).toBe(false);
+    expect(report.performanceEligibility.reasons).toEqual(
+      expect.arrayContaining([
+        "fewer than 48 uncontaminated per-protocol matched triplets",
+        "confirmatory protocol was not preregistered for every arm",
+      ]),
+    );
+  });
+
+  it("requires all 48 paired, counterbalanced, winner-determined triplets and preregistered floors", () => {
+    const runs = Array.from({ length: 48 }, (_unused, index) => {
+      const triplet = performanceTriplet({
+        tripletID: `replica-${index + 1}`,
+        seed: `seed-${index + 1}`,
+        subjectWins: { B: index % 3 === 0, C: index % 2 === 0 },
+      });
+      if (index < 12) {
+        const c = triplet.find((run) => run.arm === "C")!;
+        const active = c.records.find(
+          (record) => record.chosenActionKind !== "spawn",
+        )!;
+        active.decisionMetadata!.commanderDeterministicPreferredOptionId =
+          "survive";
+        active.decisionMetadata!.commanderDeterministicPreferredOptionAbsent = false;
+      }
+      return triplet;
+    }).flat();
+    const report = buildCommanderArmReport(runs);
+    expect(report.integrity.valid).toBe(true);
+    expect(report.status).toBe("confirmatory-performance-eligible");
+    expect(report.performanceEligibility).toEqual({
+      eligible: true,
+      reasons: [],
+    });
+    expect(report.performanceClaimsAllowed).toBe(true);
+    expect(report.aggregate.pairedAnalysis).toMatchObject({
+      ready: true,
+      completePairs: 48,
+    });
+    expect(report.aggregate.pairedAnalysis.B_vs_C).toHaveLength(48);
+    expect(report.aggregate.confirmatoryAnalysis).toMatchObject({
+      status: "complete",
+      completePairs: 48,
+      requiredPairs: 48,
+      missingPairs: 0,
+      missingnessPolicy: "no-missing-pairs",
+      specificationSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    expect(report.aggregate.confirmatoryAnalysis.results).toHaveLength(5);
+    expect(
+      report.aggregate.confirmatoryAnalysis.results.map((entry) => [
+        entry.metric,
+        entry.pValueMethod,
+      ]),
+    ).toEqual([
+      ["win", "exact-two-sided-mcnemar"],
+      ["survival", "exact-two-sided-mcnemar"],
+      ["normalized-final-territory", "seeded-paired-sign-randomization"],
+      ["turns-survived", "seeded-paired-sign-randomization"],
+      ["final-rank", "seeded-paired-sign-randomization"],
+    ]);
+    expect(
+      buildCommanderArmReport(structuredClone(runs)).aggregate
+        .confirmatoryAnalysis,
+    ).toEqual(report.aggregate.confirmatoryAnalysis);
+    expect(
+      report.triplets.reduce(
+        (total, triplet) =>
+          total + triplet.arms.C.metrics.selectorDisagreement.count,
+        0,
+      ),
+    ).toBe(12);
+
+    const analysisReadyRuns = structuredClone(runs);
+    for (const run of analysisReadyRuns) run.analysisSpecification = null;
+    const analysisReady = buildCommanderArmReport(analysisReadyRuns);
+    expect(analysisReady.integrity.valid).toBe(true);
+    expect(analysisReady.status).toBe("confirmatory-analysis-ready");
+    expect(analysisReady.aggregate.confirmatoryAnalysis).toMatchObject({
+      status: "analysis-ready",
+      results: [],
+    });
+    expect(analysisReady.performanceClaimsAllowed).toBe(false);
+
+    const noWinnerRuns = structuredClone(runs);
+    const noWinner = noWinnerRuns.find(
+      (run) => run.tripletID === "replica-48" && run.arm === "C",
+    )!;
+    noWinner.winner = undefined;
+    noWinner.finalState = { ...noWinner.finalState!, phase: "active" };
+    noWinner.completed = false;
+    const noWinnerReport = buildCommanderArmReport(noWinnerRuns);
+    expect(noWinnerReport.performanceClaimsAllowed).toBe(false);
+    expect(noWinnerReport.performanceEligibility.reasons).toContain(
+      "one or more arms lack a completed winner-determined match",
+    );
   });
 
   it("excludes an entire triplet for one early C fallback even below the old ten-percent rate", () => {
@@ -1956,6 +2220,48 @@ describe("CommanderArmReport Stage 5 arithmetic and invalidation", () => {
     expect(report.performanceClaimsAllowed).toBe(false);
   });
 
+  it("rejects reused replica indices and any broken confirmatory seat-by-episode crossing", () => {
+    const runs = Array.from({ length: 48 }, (_unused, index) =>
+      performanceTriplet({
+        tripletID: `replica-${index + 1}`,
+        seed: `seed-${index + 1}`,
+        subjectWins: { C: true },
+      }),
+    ).flat();
+    const reused = structuredClone(runs);
+    for (const run of reused) {
+      const index = run.replicaIndex % 6;
+      run.replicaIndex = index;
+      run.armOrder = commanderArmOrderForReplica(index);
+      run.armExecutionIndex = run.armOrder.indexOf(run.arm);
+      run.subjectSeatIndex = index % 4;
+      run.episodeIndex = Math.floor(index / 4) % 4;
+    }
+    expect(
+      buildCommanderArmReport(reused).integrity.invalidationReasons,
+    ).toEqual(
+      expect.arrayContaining([
+        "replicated triplets reuse a replica index",
+        "confirmatory evidence requires exact contiguous replica indices 0-47",
+      ]),
+    );
+
+    const brokenCrossing = structuredClone(runs);
+    for (const run of brokenCrossing.filter(
+      (candidate) => candidate.replicaIndex === 0,
+    )) {
+      run.subjectSeatIndex = 1;
+    }
+    expect(
+      buildCommanderArmReport(brokenCrossing).integrity.invalidationReasons,
+    ).toEqual(
+      expect.arrayContaining([
+        "confirmatory evidence does not prove the preregistered seat and episode rotation",
+        "confirmatory evidence does not cover each seat-by-episode cell exactly three times",
+      ]),
+    );
+  });
+
   it("keeps relabeled mock, partial, single-triplet, and autopilot outcomes ineligible", () => {
     const single = performanceTriplet({
       tripletID: "replica-1",
@@ -1964,13 +2270,15 @@ describe("CommanderArmReport Stage 5 arithmetic and invalidation", () => {
     });
     single[2]!.provider = "mock-provider";
     single[2]!.model = "scripted-mock-model";
-    single[2]!.records[1]!.decisionMetadata!.commanderSelectorProvider =
-      "mock-provider";
-    single[2]!.records[1]!.decisionMetadata!.commanderSelectorModel =
+    const singleCActive = single[2]!.records.find(
+      (record) => record.chosenActionKind !== "spawn",
+    )!;
+    singleCActive.decisionMetadata!.commanderSelectorProvider = "mock-provider";
+    singleCActive.decisionMetadata!.commanderSelectorModel =
       "scripted-mock-model";
-    single[2]!.records[1]!.decisionMetadata!.commanderExperimentProvider =
+    singleCActive.decisionMetadata!.commanderExperimentProvider =
       "mock-provider";
-    single[2]!.records[1]!.decisionMetadata!.commanderExperimentModel =
+    singleCActive.decisionMetadata!.commanderExperimentModel =
       "scripted-mock-model";
     single[1]!.completed = false;
     single[1]!.winner = undefined;
@@ -1985,12 +2293,155 @@ describe("CommanderArmReport Stage 5 arithmetic and invalidation", () => {
     );
     expect(report.performanceEligibility.reasons).toEqual(
       expect.arrayContaining([
-        "fewer than 2 uncontaminated per-protocol matched triplets",
+        "fewer than 48 uncontaminated per-protocol matched triplets",
         "one or more arms lack a completed winner-determined match",
         "one or more final outcomes were contaminated by autopilot",
         "provider/model provenance is missing, mock, or scripted",
       ]),
     );
+  });
+
+  it("fails closed on every rejection-code/disposition mismatch and contaminates every rejected attempt", () => {
+    for (const disposition of commanderResponseDispositions) {
+      const c = armRun("C");
+      const active = c.records.find(
+        (record) => record.chosenActionKind !== "spawn",
+      )!;
+      active.decisionMetadata!.commanderResponseDisposition = disposition;
+      active.decisionMetadata!.commanderRejectionCode =
+        disposition === "rejected" ? "response_invalid" : null;
+      const report = buildCommanderArmReport([armRun("A"), armRun("B"), c]);
+      expect(
+        firstTriplet(report).arms.C.metrics.responseEvidenceViolations,
+        disposition,
+      ).toBe(0);
+    }
+
+    for (const code of commanderPlanRejectionCodes) {
+      const c = armRun("C");
+      const active = c.records.find(
+        (record) => record.chosenActionKind !== "spawn",
+      )!;
+      active.decisionMetadata!.commanderResponseDisposition = "rejected";
+      active.decisionMetadata!.commanderRejectionCode = code;
+      const report = buildCommanderArmReport([armRun("A"), armRun("B"), c]);
+      expect(
+        firstTriplet(report).arms.C.metrics.responseEvidenceViolations,
+        code,
+      ).toBe(0);
+      expect(firstTriplet(report).arms.C.metrics.rejectedOrFailedAttempts).toBe(
+        1,
+      );
+    }
+
+    for (const failureKind of strategicOptionSelectionFailureKinds) {
+      const c = armRun("C");
+      const active = c.records.find(
+        (record) => record.chosenActionKind !== "spawn",
+      )!;
+      active.decisionMetadata!.commanderResponseDisposition = "rejected";
+      active.decisionMetadata!.commanderRejectionCode = null;
+      active.decisionMetadata!.commanderSelectionFailureKind = failureKind;
+      const report = buildCommanderArmReport([armRun("A"), armRun("B"), c]);
+      expect(
+        firstTriplet(report).arms.C.metrics.responseEvidenceViolations,
+        failureKind,
+      ).toBe(0);
+      expect(firstTriplet(report).arms.C.metrics.rejectedOrFailedAttempts).toBe(
+        1,
+      );
+    }
+
+    for (const disposition of [
+      undefined,
+      null,
+      "unknown-disposition",
+    ] as const) {
+      const c = armRun("C");
+      const active = c.records.find(
+        (record) => record.chosenActionKind !== "spawn",
+      )!;
+      if (disposition === undefined) {
+        delete active.decisionMetadata!.commanderResponseDisposition;
+      } else {
+        active.decisionMetadata!.commanderResponseDisposition = disposition;
+      }
+      const report = buildCommanderArmReport([armRun("A"), armRun("B"), c]);
+      expect(
+        firstTriplet(report).arms.C.metrics.responseEvidenceViolations,
+        String(disposition),
+      ).toBeGreaterThan(0);
+      expect(firstTriplet(report).arms.C.metrics.rejectedOrFailedAttempts).toBe(
+        1,
+      );
+      expect(report.integrity.valid).toBe(false);
+      expect(firstTriplet(report).terminalPerformanceEligibility.eligible).toBe(
+        false,
+      );
+    }
+
+    for (const code of commanderPlanRejectionCodes) {
+      for (const disposition of commanderResponseDispositions.filter(
+        (entry) => entry !== "rejected",
+      )) {
+        const c = armRun("C");
+        const active = c.records.find(
+          (record) => record.chosenActionKind !== "spawn",
+        )!;
+        active.decisionMetadata!.commanderPlanInstalled = false;
+        active.decisionMetadata!.commanderRejectionCode = code;
+        active.decisionMetadata!.commanderResponseDisposition = disposition;
+        const report = buildCommanderArmReport([armRun("A"), armRun("B"), c]);
+        expect(
+          firstTriplet(report).arms.C.metrics.responseEvidenceViolations,
+          `${code}/${disposition}`,
+        ).toBeGreaterThan(0);
+        expect(report.integrity.valid, `${code}/${disposition}`).toBe(false);
+      }
+    }
+
+    const rejected = armRun("C");
+    const rejectedActive = rejected.records.find(
+      (record) => record.chosenActionKind !== "spawn",
+    )!;
+    rejectedActive.decisionMetadata!.commanderPlanInstalled = false;
+    rejectedActive.decisionMetadata!.commanderResponseDisposition = "rejected";
+    rejectedActive.decisionMetadata!.commanderRejectionCode =
+      "response_invalid";
+    const rejectedReport = buildCommanderArmReport([
+      armRun("A"),
+      armRun("B"),
+      rejected,
+    ]);
+    expect(
+      firstTriplet(rejectedReport).arms.C.metrics.responseEvidenceViolations,
+    ).toBe(0);
+    expect(
+      firstTriplet(rejectedReport).arms.C.metrics.rejectedOrFailedAttempts,
+    ).toBe(1);
+    expect(
+      firstTriplet(rejectedReport).terminalPerformanceEligibility.eligible,
+    ).toBe(false);
+
+    for (const mutate of [
+      (record: AgentDecisionRecord) => {
+        record.decisionMetadata!.commanderResponseDisposition = "rejected";
+        record.decisionMetadata!.commanderRejectionCode = null;
+        record.decisionMetadata!.commanderSelectionFailureKind = null;
+      },
+      (record: AgentDecisionRecord) => {
+        record.decisionMetadata!.commanderResponseDisposition = "rejected";
+        record.decisionMetadata!.commanderRejectionCode = "unknown-code";
+      },
+    ]) {
+      const c = armRun("C");
+      mutate(c.records.find((record) => record.chosenActionKind !== "spawn")!);
+      const report = buildCommanderArmReport([armRun("A"), armRun("B"), c]);
+      expect(
+        firstTriplet(report).arms.C.metrics.responseEvidenceViolations,
+      ).toBeGreaterThan(0);
+      expect(report.integrity.valid).toBe(false);
+    }
   });
 
   it("invalidates adversarial option accounting, emergencies, and action-plan shape", () => {

@@ -150,6 +150,162 @@ export interface CommanderSourceIdentity {
   identitySha256: string;
 }
 
+export type CommanderExperimentArm = "A" | "B" | "C";
+export type CommanderArmOrder = readonly [
+  CommanderExperimentArm,
+  CommanderExperimentArm,
+  CommanderExperimentArm,
+];
+export type CommanderEvidenceProtocol =
+  | "plumbing"
+  | "technical-canary"
+  | "confirmatory";
+
+export type CommanderConfirmatoryMetricID =
+  | "win"
+  | "survival"
+  | "normalized-final-territory"
+  | "turns-survived"
+  | "final-rank";
+
+export interface CommanderConfirmatoryAnalysisSpecification {
+  schemaVersion: 1;
+  analysisID: "strategic-commander-b-vs-c-confirmatory-v1";
+  alternative: "two-sided";
+  alpha: 0.05;
+  confidenceLevel: 0.95;
+  requiredCompletePairs: 48;
+  missingnessPolicy: "no-missing-pairs";
+  multiplicityMethod: "holm-bonferroni";
+  resampling: {
+    algorithm: "xorshift32-paired-v1";
+    seed: "strategic-commander-b-vs-c-analysis-v1";
+    bootstrapIterations: 4096;
+    randomizationIterations: 4096;
+  };
+  primaryMetrics: Array<{
+    id: CommanderConfirmatoryMetricID;
+    kind: "binary" | "continuous" | "ordinal";
+    direction: "higher-is-better" | "lower-is-better";
+    pValueMethod:
+      | "exact-two-sided-mcnemar"
+      | "seeded-paired-sign-randomization";
+    intervalMethod: "seeded-paired-bootstrap-percentile";
+  }>;
+}
+
+/**
+ * Sealed before any confirmatory model call. The methods, seed, family, and
+ * missingness rule are deliberately fixed so outcomes cannot select analysis.
+ */
+export const COMMANDER_CONFIRMATORY_ANALYSIS_SPECIFICATION: CommanderConfirmatoryAnalysisSpecification =
+  {
+    schemaVersion: 1,
+    analysisID: "strategic-commander-b-vs-c-confirmatory-v1",
+    alternative: "two-sided",
+    alpha: 0.05,
+    confidenceLevel: 0.95,
+    requiredCompletePairs: 48,
+    missingnessPolicy: "no-missing-pairs",
+    multiplicityMethod: "holm-bonferroni",
+    resampling: {
+      algorithm: "xorshift32-paired-v1",
+      seed: "strategic-commander-b-vs-c-analysis-v1",
+      bootstrapIterations: 4096,
+      randomizationIterations: 4096,
+    },
+    primaryMetrics: [
+      {
+        id: "win",
+        kind: "binary",
+        direction: "higher-is-better",
+        pValueMethod: "exact-two-sided-mcnemar",
+        intervalMethod: "seeded-paired-bootstrap-percentile",
+      },
+      {
+        id: "survival",
+        kind: "binary",
+        direction: "higher-is-better",
+        pValueMethod: "exact-two-sided-mcnemar",
+        intervalMethod: "seeded-paired-bootstrap-percentile",
+      },
+      {
+        id: "normalized-final-territory",
+        kind: "continuous",
+        direction: "higher-is-better",
+        pValueMethod: "seeded-paired-sign-randomization",
+        intervalMethod: "seeded-paired-bootstrap-percentile",
+      },
+      {
+        id: "turns-survived",
+        kind: "continuous",
+        direction: "higher-is-better",
+        pValueMethod: "seeded-paired-sign-randomization",
+        intervalMethod: "seeded-paired-bootstrap-percentile",
+      },
+      {
+        id: "final-rank",
+        kind: "ordinal",
+        direction: "lower-is-better",
+        pValueMethod: "seeded-paired-sign-randomization",
+        intervalMethod: "seeded-paired-bootstrap-percentile",
+      },
+    ],
+  };
+
+export function commanderConfirmatoryAnalysisSpecification(): CommanderConfirmatoryAnalysisSpecification {
+  return structuredClone(COMMANDER_CONFIRMATORY_ANALYSIS_SPECIFICATION);
+}
+
+export function isCommanderConfirmatoryAnalysisSpecification(
+  value: unknown,
+): value is CommanderConfirmatoryAnalysisSpecification {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    sha256Canonical(value) ===
+      sha256Canonical(COMMANDER_CONFIRMATORY_ANALYSIS_SPECIFICATION)
+  );
+}
+
+/**
+ * The preregistered six-period carryover schedule. The first four periods are
+ * already balanced for the primary B/C comparison; a complete period covers
+ * every possible three-arm order exactly once.
+ */
+export const COMMANDER_ARM_ORDER_CYCLE: readonly CommanderArmOrder[] = [
+  ["A", "B", "C"],
+  ["A", "C", "B"],
+  ["B", "A", "C"],
+  ["C", "A", "B"],
+  ["B", "C", "A"],
+  ["C", "B", "A"],
+] as const;
+
+export function commanderArmOrderForReplica(
+  replicaIndex: number,
+): CommanderArmOrder {
+  if (!Number.isSafeInteger(replicaIndex) || replicaIndex < 0) {
+    throw new Error("Commander replica index must be a non-negative integer");
+  }
+  return COMMANDER_ARM_ORDER_CYCLE[
+    replicaIndex % COMMANDER_ARM_ORDER_CYCLE.length
+  ]!;
+}
+
+export function assertCommanderArmOrder(
+  value: readonly string[],
+): asserts value is CommanderArmOrder {
+  if (
+    value.length !== 3 ||
+    new Set(value).size !== 3 ||
+    value.some((arm) => arm !== "A" && arm !== "B" && arm !== "C")
+  ) {
+    throw new Error("Commander arm order must be a permutation of A, B, and C");
+  }
+}
+
 export interface CommanderSeedManifestEntry {
   replicaIndex: number;
   runID: string;
@@ -157,7 +313,7 @@ export interface CommanderSeedManifestEntry {
   gameID: string;
   subjectSeatIndex: number;
   episodeIndex: number;
-  armOrder: readonly ["A", "B", "C"];
+  armOrder: CommanderArmOrder;
 }
 
 export interface CommanderExperimentPreRegistration {
@@ -519,7 +675,10 @@ export async function captureCommanderSourceIdentity(
     ),
   );
   const componentHashes = Object.fromEntries(
-    componentEntries.map(([key, snapshot]) => [key, snapshot.treeSha256]),
+    componentEntries.map(([key, snapshot]) => [
+      key,
+      sha256Canonical(snapshot.files),
+    ]),
   ) as Record<keyof typeof SOURCE_COMPONENT_PATHS, string>;
   const componentFiles = Object.fromEntries(
     componentEntries.map(([key, snapshot]) => [key, snapshot.files]),
