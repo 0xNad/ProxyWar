@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmod,
@@ -38,6 +39,14 @@ const {
 } = sentinelInstaller;
 
 const temporaryDirectories: string[] = [];
+const repositoryHead = execFileSync("git", ["rev-parse", "HEAD"], {
+  cwd: path.resolve("."),
+  encoding: "utf8",
+}).trim();
+const cleanRepositoryIdentity = async () => ({
+  head: repositoryHead,
+  trackedStatus: "",
+});
 
 afterEach(async () => {
   await Promise.all(
@@ -247,6 +256,19 @@ async function temporarySentinel() {
   return { directory, sentinelPath, source };
 }
 
+async function installTemporarySentinel(
+  fixture: Awaited<ReturnType<typeof temporarySentinel>>,
+) {
+  return installPwLeagueSentinelRoundIntegrity(
+    {
+      sentinelPath: fixture.sentinelPath,
+      expectedSentinelSha256: sha256(fixture.source),
+      expectedRepositorySha: repositoryHead,
+    },
+    { readIdentity: cleanRepositoryIdentity },
+  );
+}
+
 test("building and copying the detector is explicitly insufficient until the sentinel is wired", async () => {
   const fixture = await temporarySentinel();
   await buildPwLeagueRoundIntegrityArtifact({
@@ -303,18 +325,8 @@ test("dry-run self-tests staged bytes without changing the target", async () => 
 
 test("installs with a hash-pinned activation barrier and restores exact prior bytes", async () => {
   const fixture = await temporarySentinel();
-  const repositoryHead = (await import("node:child_process"))
-    .execFileSync("git", ["rev-parse", "HEAD"], {
-      cwd: path.resolve("."),
-      encoding: "utf8",
-    })
-    .trim();
   const beforeHash = sha256(fixture.source);
-  const installed = await installPwLeagueSentinelRoundIntegrity({
-    sentinelPath: fixture.sentinelPath,
-    expectedSentinelSha256: beforeHash,
-    expectedRepositorySha: repositoryHead,
-  });
+  const installed = await installTemporarySentinel(fixture);
   expect(installed).toMatchObject({
     ok: true,
     mode: "install",
@@ -325,9 +337,13 @@ test("installs with a hash-pinned activation barrier and restores exact prior by
     "collectConfirmedCoworldRoundIntegrity({",
   );
   await expect(
-    verifyPwLeagueSentinelRoundIntegrity({
-      sentinelPath: fixture.sentinelPath,
-    }),
+    verifyPwLeagueSentinelRoundIntegrity(
+      {
+        sentinelPath: fixture.sentinelPath,
+        receiptPath: installed.receiptPath,
+      },
+      { readIdentity: cleanRepositoryIdentity },
+    ),
   ).resolves.toMatchObject({
     ok: true,
     mode: "verify",
@@ -345,4 +361,219 @@ test("installs with a hash-pinned activation barrier and restores exact prior by
     restoredHashes: { sentinel: beforeHash, detector: null, adapter: null },
   });
   expect(await readFile(fixture.sentinelPath, "utf8")).toBe(fixture.source);
+});
+
+test("aborts on sentinel or repository drift immediately before activation", async () => {
+  const sentinelDrift = await temporarySentinel();
+  const externalBytes = "external sentinel update\n";
+  await expect(
+    installPwLeagueSentinelRoundIntegrity(
+      {
+        sentinelPath: sentinelDrift.sentinelPath,
+        expectedSentinelSha256: sha256(sentinelDrift.source),
+        expectedRepositorySha: repositoryHead,
+      },
+      {
+        readIdentity: cleanRepositoryIdentity,
+        beforeSentinelActivate: async () => {
+          await writeFile(sentinelDrift.sentinelPath, externalBytes);
+        },
+      },
+    ),
+  ).rejects.toThrow("pre-sentinel-activation sentinel hash drift");
+  expect(await readFile(sentinelDrift.sentinelPath, "utf8")).toBe(
+    externalBytes,
+  );
+  await expect(
+    readFile(path.join(sentinelDrift.directory, INSTALLED_DETECTOR_BASENAME)),
+  ).rejects.toMatchObject({ code: "ENOENT" });
+
+  const repositoryDrift = await temporarySentinel();
+  let identityRead = 0;
+  await expect(
+    installPwLeagueSentinelRoundIntegrity(
+      {
+        sentinelPath: repositoryDrift.sentinelPath,
+        expectedSentinelSha256: sha256(repositoryDrift.source),
+        expectedRepositorySha: repositoryHead,
+      },
+      {
+        readIdentity: async () => {
+          identityRead += 1;
+          return {
+            head: identityRead >= 3 ? "f".repeat(40) : repositoryHead,
+            trackedStatus: "",
+          };
+        },
+      },
+    ),
+  ).rejects.toThrow("pre-activation repository SHA drift");
+  expect(await readFile(repositoryDrift.sentinelPath, "utf8")).toBe(
+    repositoryDrift.source,
+  );
+});
+
+test("surfaces and records automatic rollback failure after partial activation", async () => {
+  const fixture = await temporarySentinel();
+  let thrown: unknown;
+  try {
+    await installPwLeagueSentinelRoundIntegrity(
+      {
+        sentinelPath: fixture.sentinelPath,
+        expectedSentinelSha256: sha256(fixture.source),
+        expectedRepositorySha: repositoryHead,
+      },
+      {
+        readIdentity: cleanRepositoryIdentity,
+        beforeSentinelActivate: async () => {
+          throw new Error("injected activation failure");
+        },
+        beforeAutomaticRestoreKey: async ({ key }: { key: string }) => {
+          if (key === "detector") {
+            throw new Error("injected automatic detector restore failure");
+          }
+        },
+      },
+    );
+  } catch (error) {
+    thrown = error;
+  }
+  expect(thrown).toMatchObject({ name: "AggregateError" });
+  expect(String((thrown as Error).message)).toContain(
+    "injected automatic detector restore failure",
+  );
+  const backupRoot = path.join(fixture.directory, "pw-league-sentinel-backups");
+  const backupEntries = await import("node:fs/promises").then(({ readdir }) =>
+    readdir(backupRoot),
+  );
+  expect(backupEntries).toHaveLength(1);
+  const pendingReceiptPath = path.join(
+    backupRoot,
+    backupEntries[0],
+    "receipt.pending.json",
+  );
+  const failedReceipt = JSON.parse(await readFile(pendingReceiptPath, "utf8"));
+  expect(failedReceipt).toMatchObject({
+    status: "rollback_failed",
+    installError: "injected activation failure",
+    rollbackError: "injected automatic detector restore failure",
+  });
+  await expect(
+    readFile(path.join(fixture.directory, INSTALLED_ADAPTER_BASENAME)),
+  ).rejects.toMatchObject({ code: "ENOENT" });
+  expect(
+    await readFile(
+      path.join(fixture.directory, INSTALLED_DETECTOR_BASENAME),
+      "utf8",
+    ),
+  ).toContain("evaluateCoworldRoundIntegrity");
+});
+
+test("rejects malicious receipt target and backup path escapes", async () => {
+  const fixture = await temporarySentinel();
+  const installed = await installTemporarySentinel(fixture);
+  const receiptBytes = await readFile(installed.receiptPath);
+  const receipt = JSON.parse(receiptBytes.toString("utf8"));
+  const targetEscapePath = path.join(fixture.directory, "escaped-target.mjs");
+  const targetEscapeReceipt = structuredClone(receipt);
+  targetEscapeReceipt.files.detector.targetPath = targetEscapePath;
+  await writeFile(
+    installed.receiptPath,
+    `${JSON.stringify(targetEscapeReceipt)}\n`,
+    { mode: 0o600 },
+  );
+  await expect(
+    rollbackPwLeagueSentinelRoundIntegrity({
+      receiptPath: installed.receiptPath,
+    }),
+  ).rejects.toThrow("targetPath is not the exact target");
+  await expect(readFile(targetEscapePath)).rejects.toMatchObject({
+    code: "ENOENT",
+  });
+
+  const backupEscapeReceipt = structuredClone(receipt);
+  backupEscapeReceipt.files.sentinel.backupPath = path.join(
+    fixture.directory,
+    "outside.previous",
+  );
+  await writeFile(
+    installed.receiptPath,
+    `${JSON.stringify(backupEscapeReceipt)}\n`,
+    { mode: 0o600 },
+  );
+  await expect(
+    rollbackPwLeagueSentinelRoundIntegrity({
+      receiptPath: installed.receiptPath,
+    }),
+  ).rejects.toThrow("backupPath is not the exact backup");
+
+  await writeFile(installed.receiptPath, receiptBytes, { mode: 0o600 });
+  await rollbackPwLeagueSentinelRoundIntegrity({
+    receiptPath: installed.receiptPath,
+  });
+});
+
+test("records rollback_failed, surfaces the composite error, and resumes safely", async () => {
+  const fixture = await temporarySentinel();
+  const installed = await installTemporarySentinel(fixture);
+  await expect(
+    rollbackPwLeagueSentinelRoundIntegrity(
+      { receiptPath: installed.receiptPath },
+      {
+        beforeRestoreKey: async ({ key }: { key: string }) => {
+          if (key === "adapter")
+            throw new Error("injected adapter restore failure");
+        },
+      },
+    ),
+  ).rejects.toMatchObject({ name: "AggregateError" });
+  const failedReceipt = JSON.parse(
+    await readFile(installed.receiptPath, "utf8"),
+  );
+  expect(failedReceipt).toMatchObject({
+    status: "rollback_failed",
+    rollbackError: "injected adapter restore failure",
+  });
+  expect(await readFile(fixture.sentinelPath, "utf8")).toBe(fixture.source);
+  expect(
+    await readFile(
+      path.join(fixture.directory, INSTALLED_ADAPTER_BASENAME),
+      "utf8",
+    ),
+  ).toContain("collectConfirmedCoworldRoundIntegrity");
+
+  await expect(
+    rollbackPwLeagueSentinelRoundIntegrity({
+      receiptPath: installed.receiptPath,
+    }),
+  ).resolves.toMatchObject({
+    ok: true,
+    restored: expect.arrayContaining([
+      { key: "sentinel", status: "already_restored" },
+    ]),
+  });
+});
+
+test("receipt-bound verify rejects installed hash drift", async () => {
+  const fixture = await temporarySentinel();
+  const installed = await installTemporarySentinel(fixture);
+  const detectorPath = path.join(
+    fixture.directory,
+    INSTALLED_DETECTOR_BASENAME,
+  );
+  const detectorBytes = await readFile(detectorPath);
+  await writeFile(detectorPath, "drifted detector\n");
+  await expect(
+    verifyPwLeagueSentinelRoundIntegrity(
+      {
+        sentinelPath: fixture.sentinelPath,
+        receiptPath: installed.receiptPath,
+      },
+      { readIdentity: cleanRepositoryIdentity },
+    ),
+  ).rejects.toThrow("verify detector hash does not match receipt");
+  await writeFile(detectorPath, detectorBytes);
+  await rollbackPwLeagueSentinelRoundIntegrity({
+    receiptPath: installed.receiptPath,
+  });
 });

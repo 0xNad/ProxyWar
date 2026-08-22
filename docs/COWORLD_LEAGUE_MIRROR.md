@@ -66,7 +66,8 @@ node scripts/install-pw-league-round-integrity-sentinel.mjs install \
   --expected-repository-sha "$REPOSITORY_SHA"
 
 node scripts/install-pw-league-round-integrity-sentinel.mjs verify \
-  --sentinel "$SENTINEL"
+  --sentinel "$SENTINEL" \
+  --receipt '/exact/receiptPath/from-install-output/receipt.json'
 ```
 
 The adapter evaluates the latest completed round directly from read-only
@@ -78,9 +79,12 @@ The class is deliberately absent from the sentinel's autofix allow-list.
 Installation creates a timestamped receipt and exact backups beside the
 sentinel, installs the detector and adapter first, then atomically replaces the
 sentinel as the activation barrier. It does not restart launchd. The install
-fails closed on sentinel or repository SHA drift, any tracked repository
-modification, syntax/self-test failure, or partial integration. Roll back using
-the exact `receiptPath` printed by the install (also without restarting):
+fails closed on sentinel or repository SHA drift at staging and immediately
+before activation, any tracked repository modification, syntax/self-test
+failure, or partial integration. `verify` requires that install receipt and
+rebuilds the detector from the receipt-bound clean repository SHA; marker-only
+wiring is not proof. Roll back using the exact `receiptPath` printed by the
+install (also without restarting):
 
 ```bash
 node scripts/install-pw-league-round-integrity-sentinel.mjs rollback \
