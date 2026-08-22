@@ -196,9 +196,49 @@
         },
         "degraded_causes": {
           "type": "object",
-          "additionalProperties": {
-            "type": "integer",
-            "minimum": 0
+          "maxProperties": 10,
+          "additionalProperties": false,
+          "properties": {
+            "plan-warmup": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "plan-stale": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "plan-unavailable": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "plan-timeout": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "plan-parse": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "plan-rejected": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "policy-error": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "brain-timeout": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "brain-error": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "unreported": {
+              "type": "integer",
+              "minimum": 0
+            }
           }
         },
         "players": {
