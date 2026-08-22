@@ -55,6 +55,7 @@ import {
   canBuildTransportShip,
 } from "./TransportShipUtils";
 import { UnitImpl } from "./UnitImpl";
+import { validateAndSnapshotUnitParams } from "./UnitParamsValidation";
 
 interface Target {
   tick: Tick;
@@ -1030,6 +1031,11 @@ export class PlayerImpl implements Player {
       );
     }
 
+    const validatedParams = validateAndSnapshotUnitParams(
+      type,
+      this.mg,
+      params,
+    );
     const cost = this.mg.unitInfo(type).cost(this.mg, this);
     const b = new UnitImpl(
       type,
@@ -1037,12 +1043,14 @@ export class PlayerImpl implements Player {
       spawnTile,
       this.mg.nextUnitID(),
       this,
-      params,
+      validatedParams,
     );
     this._units.push(b);
     this.recordUnitConstructed(type);
     this.removeGold(cost);
-    this.removeTroops("troops" in params ? (params.troops ?? 0) : 0);
+    this.removeTroops(
+      "troops" in validatedParams ? (validatedParams.troops ?? 0) : 0,
+    );
     this.mg.addUpdate(b.toUpdate());
     this.mg.addUnit(b);
 

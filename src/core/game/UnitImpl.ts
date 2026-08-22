@@ -16,6 +16,7 @@ import { GameImpl } from "./GameImpl";
 import { TileRef } from "./GameMap";
 import { GameUpdateType, UnitUpdate } from "./GameUpdates";
 import { PlayerImpl } from "./PlayerImpl";
+import { validateAndSnapshotUnitParams } from "./UnitParamsValidation";
 
 export class UnitImpl implements Unit {
   private _active = true;
@@ -53,24 +54,7 @@ export class UnitImpl implements Unit {
     public _owner: PlayerImpl,
     params: AllUnitParams = {},
   ) {
-    const hasOwnPatrolTile = Object.prototype.hasOwnProperty.call(
-      params,
-      "patrolTile",
-    );
-    const patrolTile: unknown = hasOwnPatrolTile
-      ? (params as { patrolTile?: unknown }).patrolTile
-      : undefined;
-    if (
-      this._type === UnitType.Warship &&
-      (!hasOwnPatrolTile ||
-        typeof patrolTile !== "number" ||
-        !Number.isSafeInteger(patrolTile) ||
-        !this.mg.isValidRef(patrolTile))
-    ) {
-      throw new Error(
-        "Warship constructed with invalid patrolTile: expected an own, safe-integer, in-map TileRef",
-      );
-    }
+    params = validateAndSnapshotUnitParams(this._type, this.mg, params);
     this._lastTile = _tile;
     this._health = toInt(this.mg.unitInfo(_type).maxHealth ?? 1);
     this._targetTile =

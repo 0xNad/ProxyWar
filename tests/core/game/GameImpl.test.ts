@@ -182,4 +182,56 @@ describe("GameImpl", () => {
     expect(first.warshipState().patrolTile).toBe(0);
     expect(last.warshipState().patrolTile).toBe(lastTile);
   });
+
+  test("invalid Warship patrolTile does not consume deterministic state", () => {
+    const gameWithUnitIDs = game as Game & { nextUnitID(): number };
+    const lastIssuedUnitID = gameWithUnitIDs.nextUnitID();
+    const nextUnitID = vi.spyOn(gameWithUnitIDs, "nextUnitID");
+    const unitBuild = vi.spyOn(game.stats(), "unitBuild");
+    const addUpdate = vi.spyOn(game, "addUpdate");
+    const goldBefore = attacker.gold();
+    const troopsBefore = attacker.troops();
+    const unitsBefore = attacker.units().length;
+
+    expect(() =>
+      attacker.buildUnit(UnitType.Warship, attackerSpawn, {
+        patrolTile: game.width() * game.height(),
+      }),
+    ).toThrow(/Warship constructed with invalid patrolTile/);
+
+    expect(nextUnitID).not.toHaveBeenCalled();
+    expect(unitBuild).not.toHaveBeenCalled();
+    expect(addUpdate).not.toHaveBeenCalled();
+    expect(attacker.gold()).toBe(goldBefore);
+    expect(attacker.troops()).toBe(troopsBefore);
+    expect(attacker.units()).toHaveLength(unitsBefore);
+
+    const valid = attacker.buildUnit(UnitType.Warship, attackerSpawn, {
+      patrolTile: attackerSpawn,
+    });
+    expect(valid.id()).toBe(lastIssuedUnitID + 1);
+    expect(nextUnitID).toHaveBeenCalledTimes(1);
+  });
+
+  test("Warship construction snapshots patrolTile before allocating state", () => {
+    let patrolTileReads = 0;
+    const changingParams = Object.defineProperty({}, "patrolTile", {
+      enumerable: true,
+      get: () => {
+        patrolTileReads += 1;
+        return patrolTileReads === 1
+          ? attackerSpawn
+          : game.width() * game.height();
+      },
+    });
+
+    const warship = attacker.buildUnit(
+      UnitType.Warship,
+      attackerSpawn,
+      changingParams as { patrolTile: TileRef },
+    );
+
+    expect(patrolTileReads).toBe(1);
+    expect(warship.warshipState().patrolTile).toBe(attackerSpawn);
+  });
 });
