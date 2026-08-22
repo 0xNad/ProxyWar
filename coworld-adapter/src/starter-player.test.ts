@@ -143,6 +143,7 @@ async function decisionResponseFor(
                   ),
               )
                 ? {
+                    ownState: { playerID: "P_A" },
                     deals: {
                       decisionStep: 1,
                       incomingProposals: [],
