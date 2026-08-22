@@ -66,6 +66,105 @@ const PUBLIC_INLINE_JSON_ARTIFACTS = new Set([
   "match-summary.json",
   "spectator-telemetry.json",
 ]);
+const PUBLIC_INLINE_ROOT_KEYS = new Map([
+  [
+    "game-record.json",
+    new Set(["domain", "gitCommit", "info", "subdomain", "turns", "version"]),
+  ],
+  [
+    "deal-ledger.json",
+    new Set([
+      "actionEvidence",
+      "deals",
+      "decisionSteps",
+      "events",
+      "finalizedAtStep",
+      "finalizedAtTurn",
+      "matchID",
+      "runID",
+      "schemaVersion",
+    ]),
+  ],
+  [
+    "spectator-telemetry.json",
+    new Set([
+      "agents",
+      "communicationThreads",
+      "events",
+      "generatedAt",
+      "relationships",
+      "runID",
+      "timelineBuckets",
+      "version",
+    ]),
+  ],
+  [
+    "match-summary.json",
+    new Set([
+      "acceptedCount",
+      "actionCounts",
+      "averageDecisionLatencyMs",
+      "behaviorQuality",
+      "behaviorQualityMarkdownPath",
+      "behaviorQualityPath",
+      "brainDecisionCount",
+      "brainFallbackCount",
+      "brainMode",
+      "completedAt",
+      "confirmedEffectCount",
+      "decisionCount",
+      "durationMs",
+      "externalActionCallCount",
+      "externalAgentCount",
+      "externalAgentFeedbackMarkdownPath",
+      "externalAgentFeedbackPath",
+      "externalAgentFeedbackSummary",
+      "externalAgentReadyForDeveloperReview",
+      "externalAgentTopSuggestions",
+      "externalPlannerCallCount",
+      "failedEffectCount",
+      "fallbackCount",
+      "finalState",
+      "matchID",
+      "matchPackageHtmlPath",
+      "matchPackageMarkdownPath",
+      "matchPackagePath",
+      "matchStory",
+      "matchStoryMarkdownPath",
+      "matchStoryPath",
+      "notApplicableEffectCount",
+      "notes",
+      "objectiveAlignedDecisionCount",
+      "objectiveAlignmentRate",
+      "objectiveCounts",
+      "objectiveScore",
+      "objectiveScoreGrade",
+      "objectiveScoreSummary",
+      "objectiveScorecardMarkdownPath",
+      "objectiveScorecardPath",
+      "parseFailureCount",
+      "planFollowedCount",
+      "plannerFallbackCount",
+      "plannerRunCount",
+      "postSpawnNonHoldActionCount",
+      "rawProviderOutputRecordCount",
+      "rejectedCount",
+      "roster",
+      "runID",
+      "runnerConfig",
+      "runnerMode",
+      "runtimeModes",
+      "scenario",
+      "spectator",
+      "spectatorTelemetry",
+      "spectatorTelemetryPath",
+      "startedAt",
+      "strategicPriorityCounts",
+      "tacticalAffordances",
+      "unknownEffectCount",
+    ]),
+  ],
+]);
 const FORBIDDEN_PRIVACY_KEYS = [
   "accesstoken",
   "apikey",
@@ -76,10 +175,12 @@ const FORBIDDEN_PRIVACY_KEYS = [
   "messagetext",
   "modeltranscript",
   "password",
+  "passphrase",
   "presigned",
   "privatekey",
   "providerrequestbody",
   "providerresponsebody",
+  "providertranscript",
   "provideroutput",
   "prompttext",
   "rawprompt",
@@ -941,9 +1042,24 @@ function allowedEvidencePath(filePath) {
   return match !== null && ALLOWED_RUN_SUFFIXES.has(match[1]);
 }
 
-function inspectJsonPrivacy(value, filePath) {
+function inspectJsonPrivacy(
+  value,
+  filePath,
+  rejectJsonEncodedString = false,
+  allowJsonEncodedString = false,
+) {
+  if (typeof value === "string") {
+    if (
+      rejectJsonEncodedString &&
+      !allowJsonEncodedString &&
+      isJsonEncodedEnvelope(value)
+    )
+      fail("INLINE_NESTED_JSON_ENVELOPE_FORBIDDEN", filePath);
+    return;
+  }
   if (Array.isArray(value)) {
-    for (const item of value) inspectJsonPrivacy(item, filePath);
+    for (const item of value)
+      inspectJsonPrivacy(item, filePath, rejectJsonEncodedString);
     return;
   }
   if (!isRecord(value)) return;
@@ -964,7 +1080,12 @@ function inspectJsonPrivacy(value, filePath) {
       FORBIDDEN_PRIVACY_KEYS.some((forbidden) => normalized.includes(forbidden))
     )
       fail("PRIVACY_KEY_FORBIDDEN", `${filePath}:${key}`);
-    inspectJsonPrivacy(item, filePath);
+    inspectJsonPrivacy(
+      item,
+      filePath,
+      rejectJsonEncodedString,
+      key === "text" && value.type === "agent_message",
+    );
   }
 }
 
@@ -979,7 +1100,37 @@ function inspectInlineRunArtifacts(value, filePath) {
     }
     const label = `${filePath}#inlineRunArtifacts/${artifactName}`;
     const decoded = parseJsonText(encoded, label);
-    inspectJsonPrivacy(decoded, label);
+    validateInlineArtifactRoot(artifactName, decoded, label);
+    inspectJsonPrivacy(decoded, label, true);
+  }
+}
+
+function validateInlineArtifactRoot(artifactName, value, label) {
+  if (!isRecord(value)) fail("INLINE_ARTIFACT_ROOT_SCHEMA_INVALID", label);
+  const allowed = PUBLIC_INLINE_ROOT_KEYS.get(artifactName);
+  if (
+    allowed === undefined ||
+    Object.keys(value).some((key) => !allowed.has(key))
+  ) {
+    fail("INLINE_ARTIFACT_ROOT_SCHEMA_INVALID", label);
+  }
+}
+
+function isJsonEncodedEnvelope(value) {
+  const trimmed = value.trim();
+  if (
+    !(
+      (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+      (trimmed.startsWith("[") && trimmed.endsWith("]"))
+    )
+  ) {
+    return false;
+  }
+  try {
+    const decoded = JSON.parse(trimmed);
+    return decoded !== null && typeof decoded === "object";
+  } catch {
+    return false;
   }
 }
 

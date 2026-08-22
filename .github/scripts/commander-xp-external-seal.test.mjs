@@ -267,11 +267,17 @@ test("privacy inventory seals exact Coworld projections and rejects raw bytes, p
     inlineRunArtifacts: {
       "match-summary.json": JSON.stringify({
         rawProviderOutputRecordCount: 1204,
-        events: [
+      }),
+      "game-record.json": JSON.stringify({
+        turns: [
           {
-            type: "agent_message",
-            recipient: "PLAYER02",
-            text: "Hold the eastern border until turn 900.",
+            intents: [
+              {
+                type: "agent_message",
+                recipient: "PLAYER02",
+                text: "Hold the eastern border until turn 900.",
+              },
+            ],
           },
         ],
       }),
@@ -285,7 +291,7 @@ test("privacy inventory seals exact Coworld projections and rejects raw bytes, p
 
   replayWithInlineArtifact.inlineRunArtifacts["match-summary.json"] =
     JSON.stringify({
-      unexpectedEnvelope: {
+      finalState: {
         conversation: {
           rawProviderOutput: {
             providerResponseBody: "private transcript",
@@ -304,8 +310,10 @@ test("privacy inventory seals exact Coworld projections and rejects raw bytes, p
 
   replayWithInlineArtifact.inlineRunArtifacts["match-summary.json"] =
     JSON.stringify({
-      renamedWrapper: {
-        conversation: { modelTranscript: "private body" },
+      finalState: {
+        renamedWrapper: {
+          conversation: { providerTranscript: "private body" },
+        },
       },
     });
   await fs.writeFile(
@@ -315,6 +323,49 @@ test("privacy inventory seals exact Coworld projections and rejects raw bytes, p
   await assert.rejects(
     scanPrivacyAndInventory(root),
     hasCode("PRIVACY_KEY_FORBIDDEN"),
+  );
+
+  replayWithInlineArtifact.inlineRunArtifacts["match-summary.json"] =
+    JSON.stringify({
+      finalState: {
+        renamedWrapper: { passphrase: "correct horse battery staple" },
+      },
+    });
+  await fs.writeFile(
+    path.join(runRoot, "replay.json"),
+    canonicalJson(replayWithInlineArtifact),
+  );
+  await assert.rejects(
+    scanPrivacyAndInventory(root),
+    hasCode("PRIVACY_KEY_FORBIDDEN"),
+  );
+
+  replayWithInlineArtifact.inlineRunArtifacts["match-summary.json"] =
+    JSON.stringify({
+      notes: [
+        JSON.stringify({
+          renamedWrapper: { rawProviderOutput: "private transcript" },
+        }),
+      ],
+    });
+  await fs.writeFile(
+    path.join(runRoot, "replay.json"),
+    canonicalJson(replayWithInlineArtifact),
+  );
+  await assert.rejects(
+    scanPrivacyAndInventory(root),
+    hasCode("INLINE_NESTED_JSON_ENVELOPE_FORBIDDEN"),
+  );
+
+  replayWithInlineArtifact.inlineRunArtifacts["match-summary.json"] =
+    JSON.stringify({ renamedEnvelope: { harmlessLookingKey: "private" } });
+  await fs.writeFile(
+    path.join(runRoot, "replay.json"),
+    canonicalJson(replayWithInlineArtifact),
+  );
+  await assert.rejects(
+    scanPrivacyAndInventory(root),
+    hasCode("INLINE_ARTIFACT_ROOT_SCHEMA_INVALID"),
   );
 
   replayWithInlineArtifact.inlineRunArtifacts = {
