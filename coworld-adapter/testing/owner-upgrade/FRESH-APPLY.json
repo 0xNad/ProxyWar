@@ -1,6 +1,6 @@
 {
   "schemaVersion": "proxywar-owner-upgrade-fresh-apply-v1",
-  "generatedAt": "2026-08-22T16:09:30Z",
+  "generatedAt": "2026-08-22T16:21:13Z",
   "verdict": "PASS",
   "publicStarter": {
     "repository": "https://github.com/0xNad/proxywar-coworld-starter.git",
@@ -30,9 +30,9 @@
     "doctor": "PASS_UV_DOCKER_SOFTMAX_READY"
   },
   "spatialLocalArtifacts": {
-    "sourceCommit": "c329cf3743945d0af9f9bc070a14c356f090be88",
-    "benchmarkSha256": "5ed621601be943a05948cb1dd894dde0492848b73b70d78af3b427e8f70cf241",
-    "promptMatrixSha256": "e8aea93c645429d5026198218e0ef43d4f1a9504198d507f6596b932c448d46f",
+    "sourceCommit": "38bc71ad75fc1b267e15a7cbf289f17b45c0e549",
+    "benchmarkSha256": "64bee50255bb61af93950aeda1ed0dacf4e9ae7dfcb8efc25d00d61f2ce5b271",
+    "promptMatrixSha256": "6c0b06aea5589196a2cce09daed99607134e06f333d90e5d22bb56ea84f9a31b",
     "benchmarkTargetMet": true,
     "promptMatrixTargetMet": true
   },
