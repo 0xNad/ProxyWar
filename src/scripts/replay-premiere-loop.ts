@@ -2320,16 +2320,20 @@ async function claimRound(
   config: LoopConfig,
   journal: JournalWriter,
   now: Date,
+  coordination: {
+    gate: ForeignRegisteredPremiereGate;
+    supersededRoundIds: readonly LoopRoundRef[];
+  },
+  dependencies: ClaimRoundDependencies = {},
 ): Promise<void> {
-  const replays = await fetchDivisionReplays(config);
+  const replays = await (
+    dependencies.fetchDivisionReplays ?? fetchDivisionReplays
+  )(config);
   const candidates = orderEpisodesForClaim(round, replays.rows);
-  if (candidates.length === 0) {
-    await journal.appendRoundSkipped(
-      { id: round.id, roundNumber: round.roundNumber },
-      "no_eligible_episode",
-    );
-    return;
-  }
+  let skipReason: Extract<
+    LoopSkipReason,
+    "no_eligible_episode" | "projection_over_budget" | "already_public"
+  > | null = candidates.length === 0 ? "no_eligible_episode" : null;
 
   let selected: {
     row: LoopReplayRow;
@@ -2337,12 +2341,11 @@ async function claimRound(
     rawReplayPath: string;
     facts: RawReplayFacts;
   } | null = null;
-  const attempted: string[] = [];
   for (const candidate of candidates.slice(
     0,
     PREMIERE_LOOP_MAX_REPLAY_DOWNLOADS,
   )) {
-    if (!(await hasStorageFloor(config))) {
+    if (!(await (dependencies.hasStorageFloor ?? hasStorageFloor)(config))) {
       log("storage floor reached mid-selection; stopping downloads");
       break;
     }
@@ -2355,7 +2358,11 @@ async function claimRound(
       `${candidate.episodeRequestId}-${randomUUID()}.replay`,
     );
     try {
-      await downloadRawReplay(candidate.replayUrl, rawReplayPath, config);
+      await (dependencies.downloadRawReplay ?? downloadRawReplay)(
+        candidate.replayUrl,
+        rawReplayPath,
+        config,
+      );
     } catch (error) {
       log(
         `download failed for ${candidate.episodeRequestId}: ${errorMessage(error)}`,
@@ -2363,7 +2370,6 @@ async function claimRound(
       await fs.rm(rawReplayPath, { force: true }).catch(() => undefined);
       continue;
     }
-    attempted.push(candidate.episodeRequestId);
     const facts = parseRawReplayFacts(
       await fs.readFile(rawReplayPath),
       typeof rawRow.coworld_name === "string"
@@ -2381,12 +2387,8 @@ async function claimRound(
     break;
   }
 
-  if (selected === null) {
-    await journal.appendRoundSkipped(
-      { id: round.id, roundNumber: round.roundNumber },
-      "projection_over_budget",
-    );
-    return;
+  if (selected === null && skipReason === null) {
+    skipReason = "projection_over_budget";
   }
 
   // Pre-admission already-public check. The mirror can publish a completed
@@ -2394,21 +2396,79 @@ async function claimRound(
   // is active), so a within-window round may still be on the public origin. A
   // published outcome can no longer be sealed, and admitting it would drive the
   // leak collector to fetch (and abort) the multi-MB public replay. Probe the
-  // origin BEFORE pin/contract/admit; skip terminally if it is already public.
-  const publicRunKey = publicRunKeyForSourceRunId(selected.facts.runId);
-  if (await isEpisodeAlreadyPublic(publicRunKey, config)) {
+  // origin during PREPARATION, before any claim-side mutation.
+  const publicRunKey =
+    selected === null ? null : publicRunKeyForSourceRunId(selected.facts.runId);
+  if (
+    selected !== null &&
+    publicRunKey !== null &&
+    (await (dependencies.isEpisodeAlreadyPublic ?? isEpisodeAlreadyPublic)(
+      publicRunKey,
+      config,
+    ))
+  ) {
     log(
       `round ${round.roundNumber ?? "?"} episode ${selected.row.episodeRequestId} already public (${publicRunKey}); skipping pre-admission`,
     );
-    await fs.rm(selected.rawReplayPath, { force: true }).catch(() => undefined);
-    await journal.appendRoundSkipped(
-      { id: round.id, roundNumber: round.roundNumber },
-      "already_public",
+    skipReason = "already_public";
+  }
+
+  // COMMIT BARRIER: all remote/list/download/parse/public-probe work above is
+  // claim-mutation-free. Re-bind it to the exact live server startup receipt
+  // immediately before the first superseded/claim journal transition or
+  // pin/contract/hold mutation. A replacement receipt can select a foreign
+  // nonterminal premiere while preparation is in flight; that must leave both
+  // the candidate and every superseded round unconsumed.
+  await dependencies.beforeClaimCommit?.({
+    round,
+    selectedRawReplayPath: selected?.rawReplayPath ?? null,
+  });
+  try {
+    await (
+      dependencies.assertForeignPremiereGateUnchanged ??
+      assertForeignPremiereGateUnchanged
+    )(config, coordination.gate);
+  } catch (error) {
+    if (selected !== null) {
+      await fs.rm(selected.rawReplayPath, { force: true });
+    }
+    await journal.appendDecision({
+      decision: "claim_blocked_coordination_changed",
+      operatorCode: operatorCodeOf(error),
+    });
+    log(
+      `claim blocked: server premiere selection changed after candidate preparation (${operatorCodeOf(error)})`,
     );
     return;
   }
 
-  await pruneRawReplayCache(config, selected.rawReplayPath);
+  for (const ref of coordination.supersededRoundIds) {
+    await journal.appendRoundSkipped(ref, "skipped_superseded");
+  }
+  await journal.appendDecision({
+    decision: "claim",
+    round: round.roundNumber,
+    superseded: coordination.supersededRoundIds.map((ref) => ref.roundNumber),
+  });
+
+  if (skipReason !== null) {
+    if (selected !== null) {
+      await fs.rm(selected.rawReplayPath, { force: true });
+    }
+    await journal.appendRoundSkipped(
+      { id: round.id, roundNumber: round.roundNumber },
+      skipReason,
+    );
+    return;
+  }
+  if (selected === null || publicRunKey === null) {
+    throw new Error("claim preparation invariant failed");
+  }
+
+  await (dependencies.pruneRawReplayCache ?? pruneRawReplayCache)(
+    config,
+    selected.rawReplayPath,
+  );
   const scheduledAt = scheduledAtForClaim(now);
   const hold: LoopHoldState = {
     episodeRequestId: selected.row.episodeRequestId,
@@ -2435,15 +2495,21 @@ async function claimRound(
 
   // CLAIM: protect the episode from the league page and pin its bundle BEFORE
   // ingest/admit, so the admission leak audit sees a clean /league.
-  await pinHoldArtifacts(hold, config);
-  await writeContractForHold(hold, config, now);
+  await (dependencies.pinHoldArtifacts ?? pinHoldArtifacts)(hold, config);
+  await (dependencies.writeContractForHold ?? writeContractForHold)(
+    hold,
+    config,
+    now,
+  );
   await journal.appendHoldUpdate(hold);
   log(
     `claimed round ${round.roundNumber ?? "?"} episode ${hold.episodeRequestId} -> ${hold.premiereId} (${hold.turnCount} turns, ${hold.playbackRate}x)`,
   );
 
-  const divisionFile = await stageDivisionFile(config);
-  await progressHold(
+  const divisionFile = await (
+    dependencies.stageDivisionFile ?? stageDivisionFile
+  )(config);
+  await (dependencies.progressHold ?? progressHold)(
     hold,
     {
       rawRow: selected.rawRow,
@@ -2455,6 +2521,23 @@ async function claimRound(
     journal,
     now,
   );
+}
+
+interface ClaimRoundDependencies {
+  fetchDivisionReplays?: typeof fetchDivisionReplays;
+  hasStorageFloor?: typeof hasStorageFloor;
+  downloadRawReplay?: typeof downloadRawReplay;
+  isEpisodeAlreadyPublic?: typeof isEpisodeAlreadyPublic;
+  beforeClaimCommit?: (prepared: {
+    round: LoopRound;
+    selectedRawReplayPath: string | null;
+  }) => Promise<void>;
+  assertForeignPremiereGateUnchanged?: typeof assertForeignPremiereGateUnchanged;
+  pruneRawReplayCache?: typeof pruneRawReplayCache;
+  pinHoldArtifacts?: typeof pinHoldArtifacts;
+  writeContractForHold?: typeof writeContractForHold;
+  stageDivisionFile?: typeof stageDivisionFile;
+  progressHold?: typeof progressHold;
 }
 
 async function pruneRawReplayCache(
@@ -2796,27 +2879,10 @@ async function runLiveIteration(config: LoopConfig): Promise<void> {
     log("below storage floor; skipping claim this tick");
     return;
   }
-  try {
-    await assertForeignPremiereGateUnchanged(config, foreignGate);
-  } catch (error) {
-    await journal.appendDecision({
-      decision: "claim_blocked_coordination_changed",
-      operatorCode: operatorCodeOf(error),
-    });
-    log(
-      `claim blocked: server premiere selection changed before claim (${operatorCodeOf(error)})`,
-    );
-    return;
-  }
-  for (const ref of decision.supersededRoundIds) {
-    await journal.appendRoundSkipped(ref, "skipped_superseded");
-  }
-  await journal.appendDecision({
-    decision: "claim",
-    round: decision.round.roundNumber,
-    superseded: decision.supersededRoundIds.map((ref) => ref.roundNumber),
+  await claimRound(decision.round, config, journal, now, {
+    gate: foreignGate,
+    supersededRoundIds: decision.supersededRoundIds,
   });
-  await claimRound(decision.round, config, journal, now);
 }
 
 async function runTerminalTombstoneBackfill(config: LoopConfig): Promise<void> {
@@ -2970,6 +3036,7 @@ if (invokedDirectly) {
 export {
   activateHold,
   assertForeignPremiereGateUnchanged,
+  claimRound,
   foreignRegisteredPremiereGate,
   isEpisodeAlreadyPublic,
   main,

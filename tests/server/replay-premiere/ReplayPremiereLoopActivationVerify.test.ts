@@ -5,6 +5,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  realpath,
   rm,
   stat,
   writeFile,
@@ -16,6 +17,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   activateHold,
   assertForeignPremiereGateUnchanged,
+  claimRound,
   compactJournalIfNeeded,
   createJournalWriter,
   foreignRegisteredPremiereGate,
@@ -29,8 +31,13 @@ import {
   type RetainedAdmissionTransaction,
 } from "../../../src/scripts/replay-premiere-loop";
 import type { ReplayPremiereAdmissionRecordV1 } from "../../../src/server/replay-premiere/ReplayPremiereCatalog";
-import type { ReplayPremiereStartupSelectionReceiptV1 } from "../../../src/server/replay-premiere/ReplayPremiereCoordination";
+import {
+  createReplayPremiereServerStartupIdentity,
+  writeReplayPremiereStartupSelection,
+  type ReplayPremiereStartupSelectionReceiptV1,
+} from "../../../src/server/replay-premiere/ReplayPremiereCoordination";
 import { ReplayPremiereError } from "../../../src/server/replay-premiere/ReplayPremiereErrors";
+import { ReplayPremiereEventStore } from "../../../src/server/replay-premiere/ReplayPremiereEventStore";
 import {
   PREMIERE_LOOP_ACTIVATION_BACKOFF_MS,
   PREMIERE_LOOP_ACTIVATION_VERIFY_MS,
@@ -43,9 +50,13 @@ import {
   type LoopHoldState,
   type LoopJournalRecord,
   type LoopReleaseOutcome,
+  type LoopReplayRow,
+  type LoopRound,
   type LoopRoundRef,
   type LoopSkipReason,
 } from "../../../src/server/replay-premiere/ReplayPremiereLoopCore";
+import { DEFAULT_REPLAY_PREMIERE_EVENT_STORE_LIMITS } from "../../../src/server/replay-premiere/ReplayPremiereStartup";
+import { AMPLE_DISK } from "./ReplayPremiereFixtures";
 
 /**
  * The activation-zombie fix (2026-07-22, round 644 / prem_105c…): a controlled
@@ -69,6 +80,8 @@ let stateDir: string;
 interface JournalCapture {
   writer: JournalWriter;
   holdUpdates: LoopHoldState[];
+  skipped: { ref: LoopRoundRef; reason: LoopSkipReason }[];
+  decisions: Record<string, unknown>[];
   released: {
     hold: LoopHoldState;
     outcome: LoopReleaseOutcome;
@@ -78,6 +91,8 @@ interface JournalCapture {
 
 function captureJournal(): JournalCapture {
   const holdUpdates: LoopHoldState[] = [];
+  const skipped: JournalCapture["skipped"] = [];
+  const decisions: Record<string, unknown>[] = [];
   const released: JournalCapture["released"] = [];
   const writer: JournalWriter = {
     async appendHoldUpdate(hold: LoopHoldState) {
@@ -90,10 +105,14 @@ function captureJournal(): JournalCapture {
     ) {
       released.push({ hold, outcome, terminal });
     },
-    async appendRoundSkipped(_ref: LoopRoundRef, _reason: LoopSkipReason) {},
-    async appendDecision(_decision: Record<string, unknown>) {},
+    async appendRoundSkipped(ref: LoopRoundRef, reason: LoopSkipReason) {
+      skipped.push({ ref, reason });
+    },
+    async appendDecision(decision: Record<string, unknown>) {
+      decisions.push(decision);
+    },
   };
-  return { writer, holdUpdates, released };
+  return { writer, holdUpdates, skipped, decisions, released };
 }
 
 function config(): LoopConfig {
@@ -262,6 +281,161 @@ describe("foreign registered Premiere claim exclusion", () => {
         async () => replacement,
       ),
     ).rejects.toThrow("changed before claim commit");
+  });
+
+  test("receipt replacement after candidate preparation leaves every round unconsumed and removes scratch", async () => {
+    const loopConfig = config();
+    await mkdir(loopConfig.privateStateRoot, { recursive: true });
+    loopConfig.privateStateRoot = await realpath(loopConfig.privateStateRoot);
+    await Promise.all(
+      loopConfig.servedRoots.map((root) => mkdir(root, { recursive: true })),
+    );
+    const store = await ReplayPremiereEventStore.open({
+      privateStateRoot: loopConfig.privateStateRoot,
+      servedRoots: loopConfig.servedRoots,
+      limits: DEFAULT_REPLAY_PREMIERE_EVENT_STORE_LIMITS,
+      statfs: AMPLE_DISK,
+    });
+    try {
+      const server = await createReplayPremiereServerStartupIdentity({
+        privateStateRoot: loopConfig.privateStateRoot,
+      });
+      await writeReplayPremiereStartupSelection({
+        privateStateRoot: loopConfig.privateStateRoot,
+        phase: "ready",
+        server,
+        selected: [],
+        registeredPremiereIds: [],
+      });
+      const gate = await foreignRegisteredPremiereGate(loopConfig);
+      expect(gate.busyPremiereIds).toEqual([]);
+
+      const currentRound: LoopRound = {
+        id: "round_1927",
+        roundNumber: 1927,
+        status: "completed",
+        completedAt: "2026-08-22T08:00:00.000Z",
+      };
+      const supersededRound: LoopRoundRef = {
+        id: "round_1926",
+        roundNumber: 1926,
+      };
+      const episodeRequestId = "ereq_00000000-0000-4000-8000-000000001927";
+      const replay: LoopReplayRow = {
+        episodeRequestId,
+        roundId: currentRound.id,
+        status: "completed",
+        completedAt: "2026-08-22T08:00:00.000Z",
+        replayUrl: "https://example.invalid/1927.replay",
+        variantName: "Tournament 12P - World",
+      };
+      const rawRow = { id: episodeRequestId, coworld_name: "proxywar" };
+      const replayBytes = Buffer.from(
+        JSON.stringify({
+          runID: "coworld-2026-08-22T08-00-00-000Z-race1927",
+          inlineRunArtifacts: {
+            "game-record.json": JSON.stringify({
+              info: {
+                num_turns: 17_000,
+                players: Array.from({ length: 12 }, (_, index) => ({ index })),
+                config: {
+                  gameMap: "World",
+                  gameMapSize: "Medium",
+                  difficulty: "Normal",
+                },
+              },
+            }),
+          },
+        }),
+        "utf8",
+      );
+      const journal = captureJournal();
+      const pin = vi.fn(async () => undefined);
+      const writeContract = vi.fn(async () => undefined);
+      const prune = vi.fn(async () => undefined);
+      const stageDivision = vi.fn(async () =>
+        path.join(loopConfig.ingestScratchDir, "divisions.json"),
+      );
+      const progress = vi.fn(async () => undefined);
+
+      await claimRound(
+        currentRound,
+        loopConfig,
+        journal.writer,
+        NOW,
+        { gate, supersededRoundIds: [supersededRound] },
+        {
+          fetchDivisionReplays: async () => ({
+            rows: [replay],
+            rawById: new Map([[episodeRequestId, rawRow]]),
+          }),
+          hasStorageFloor: async () => true,
+          downloadRawReplay: async (_url, destinationPath) => {
+            await mkdir(path.dirname(destinationPath), { recursive: true });
+            await writeFile(destinationPath, replayBytes);
+          },
+          isEpisodeAlreadyPublic: async () => false,
+          beforeClaimCommit: async ({ selectedRawReplayPath }) => {
+            expect(selectedRawReplayPath).not.toBeNull();
+            expect((await stat(selectedRawReplayPath ?? "")).isFile()).toBe(
+              true,
+            );
+            await writeReplayPremiereStartupSelection({
+              privateStateRoot: loopConfig.privateStateRoot,
+              phase: "ready",
+              server,
+              selected: [
+                {
+                  premiereId: "prem_1111111111111111",
+                  admissionRecordHash: "b".repeat(64),
+                  projectionState: "playing",
+                },
+                {
+                  premiereId: "prem_2222222222222222",
+                  admissionRecordHash: "c".repeat(64),
+                  projectionState: "checkpoint",
+                },
+              ],
+              registeredPremiereIds: [
+                "prem_1111111111111111",
+                "prem_2222222222222222",
+              ],
+            });
+          },
+          pruneRawReplayCache: prune,
+          pinHoldArtifacts: pin,
+          writeContractForHold: writeContract,
+          stageDivisionFile: stageDivision,
+          progressHold: progress,
+        },
+      );
+
+      expect(journal.skipped).toEqual([]);
+      expect(journal.holdUpdates).toEqual([]);
+      expect(journal.released).toEqual([]);
+      expect(journal.decisions).toEqual([
+        expect.objectContaining({
+          decision: "claim_blocked_coordination_changed",
+        }),
+      ]);
+      expect(
+        journal.decisions.some((decision) => decision.decision === "claim"),
+      ).toBe(false);
+      expect(prune).not.toHaveBeenCalled();
+      expect(pin).not.toHaveBeenCalled();
+      expect(writeContract).not.toHaveBeenCalled();
+      expect(stageDivision).not.toHaveBeenCalled();
+      expect(progress).not.toHaveBeenCalled();
+      expect(await readdir(loopConfig.ingestScratchDir)).toEqual([]);
+      await expect(stat(loopConfig.pinManifestPath)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      await expect(stat(loopConfig.contractPath)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      await store.close();
+    }
   });
 
   test("selected nonterminal target missing from ready registration fails closed", async () => {
