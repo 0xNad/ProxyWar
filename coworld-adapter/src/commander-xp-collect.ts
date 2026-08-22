@@ -162,17 +162,7 @@ export async function collectCommanderXpEvidence(
     path.join(authorityDirectory, "commander-xp-external-seal-request-v1.json"),
     fs.constants.COPYFILE_EXCL,
   );
-  const mapping = new Map(
-    input.requests.map((entry) => [mappingKey(entry), entry]),
-  );
-  if (
-    mapping.size !== planned.length ||
-    planned.some((request) => !mapping.has(mappingKey(request)))
-  ) {
-    throw new Error(
-      "collector mapping does not exactly cover the sealed phase",
-    );
-  }
+  const mapping = exactCollectorRequestMapping(input.requests, planned);
   for (const request of planned) {
     await collectRun(
       outputDirectory,
@@ -816,6 +806,25 @@ function mappingKey(input: {
   arm: string;
 }): string {
   return `${input.phase}:${input.replicaIndex}:${input.arm}`;
+}
+
+export function exactCollectorRequestMapping(
+  requests: CollectorInput["requests"],
+  planned: readonly CommanderXpPlannedRequest[],
+): Map<string, CollectorInput["requests"][number]> {
+  const mapping = new Map(
+    requests.map((entry) => [mappingKey(entry), entry] as const),
+  );
+  if (
+    requests.length !== planned.length ||
+    mapping.size !== planned.length ||
+    planned.some((request) => !mapping.has(mappingKey(request)))
+  ) {
+    throw new Error(
+      "collector mapping does not exactly cover the sealed phase",
+    );
+  }
+  return mapping;
 }
 
 function runDirectory(request: CommanderXpPlannedRequest): string {

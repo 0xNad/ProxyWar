@@ -9,6 +9,7 @@ import {
   buildCollectorNamespaceRegistry,
   collectorPriorLedgerFilename,
   copyCollectorPhaseAuthority,
+  exactCollectorRequestMapping,
 } from "./commander-xp-collect";
 
 const temporaryDirectories: string[] = [];
@@ -98,6 +99,28 @@ describe("Commander XP collector namespace registry", () => {
         await temporaryDirectory(),
       ),
     ).rejects.toThrow("collector confirmatory activation is required");
+  });
+
+  it("rejects duplicate mappings that collapse one preregistered slot", () => {
+    const first = plannedRequest("A", "run-a");
+    const second = plannedRequest("B", "run-b");
+    const mapped = (
+      request: CommanderXpPlannedRequest,
+      xpRequestID: string,
+    ) => ({
+      phase: request.phase,
+      replicaIndex: request.replicaIndex,
+      arm: request.arm,
+      xpRequestID,
+      submittedRequestPath: "/submitted.json",
+      createResponsePath: "/created.json",
+    });
+    expect(() =>
+      exactCollectorRequestMapping(
+        [mapped(first, "xreq_one"), mapped(first, "xreq_replacement")],
+        [first, second],
+      ),
+    ).toThrow("collector mapping does not exactly cover the sealed phase");
   });
 
   it("creates the empty preregistration registry without a prior ledger", async () => {
