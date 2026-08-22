@@ -1,6 +1,12 @@
 import { Buffer } from "node:buffer";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  SPATIAL_MINIMAP_SERIALIZED_MAX_BYTES,
+  SPATIAL_PROMPT_INCREMENT_MAX_BYTES,
+  SPATIAL_PROMPT_INCREMENT_MAX_ESTIMATED_TOKENS,
+  SPATIAL_STAGE_ONE_SERIALIZED_MAX_BYTES,
+} from "../../src/server/agents/AgentSpatialObservation";
+import {
   buildCommanderPrompt,
   MAX_COMMANDER_PROMPT_BYTES,
   MAX_COMMANDER_STATE_JSON_BYTES,
@@ -105,6 +111,18 @@ describe("prompt size matrix arms", () => {
     expect(minimap.spatialChars).toBeGreaterThan(spatial.spatialChars);
     expect(minimap.promptChars).toBeGreaterThan(spatial.promptChars);
     expect(spatial.promptChars).toBeGreaterThan(base.promptChars);
+    expect(spatial.spatialBytes).toBeLessThanOrEqual(
+      SPATIAL_STAGE_ONE_SERIALIZED_MAX_BYTES,
+    );
+    expect(minimap.minimapBytes).toBeLessThanOrEqual(
+      SPATIAL_MINIMAP_SERIALIZED_MAX_BYTES,
+    );
+    expect(minimap.promptBytes - base.promptBytes).toBeLessThanOrEqual(
+      SPATIAL_PROMPT_INCREMENT_MAX_BYTES,
+    );
+    expect(minimap.estTokensHigh - base.estTokensHigh).toBeLessThanOrEqual(
+      SPATIAL_PROMPT_INCREMENT_MAX_ESTIMATED_TOKENS,
+    );
 
     // The comms lane costs menu bytes even with an EMPTY inbox: the message
     // actions themselves are the floor. This is the assertion that failed

@@ -15,6 +15,7 @@ import {
   SPATIAL_NOTE_PREFIX,
   SPATIAL_REGION_RUN_BUDGET,
   SPATIAL_REGION_TILE_BUDGET,
+  SPATIAL_VISIBILITY_MODEL,
   spatialObservationEmissionCount,
 } from "../../src/server/agents/AgentSpatialObservation";
 import type {
@@ -180,6 +181,7 @@ describe("spatial observation flags", () => {
     process.env[SPATIAL_FLAG] = "1";
     const on = observe(game);
     expect(on.spatial).toBeDefined();
+    expect(on.spatial?.visibilityModel).toBe(SPATIAL_VISIBILITY_MODEL);
     expect(on.spatial?.minimap).toBeUndefined();
     expect(
       on.notes.filter((note) => note.startsWith(SPATIAL_NOTE_PREFIX)),

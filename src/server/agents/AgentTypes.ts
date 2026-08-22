@@ -126,6 +126,11 @@ export interface AgentSpatialMinimap {
 
 export interface AgentSpatialObservation {
   schemaVersion: 1;
+  /**
+   * Required by XP consumers; optional here only for backward wire decoding.
+   * Current builders always emit the exact global-lockstep contract.
+   */
+  visibilityModel?: "global-lockstep-public-map-v1";
   ownShape: AgentOwnShape;
   minimap?: AgentSpatialMinimap;
 }

@@ -98,6 +98,7 @@ describe("tester-starter-llm spatial state renderer", () => {
         notes: ["ordinary note is not forwarded", rawBriefing],
         spatial: {
           schemaVersion: 1,
+          visibilityModel: "global-lockstep-public-map-v1",
           ownShape: {
             quadrant: "west",
             compactness: "compact",
@@ -129,6 +130,7 @@ describe("tester-starter-llm spatial state renderer", () => {
 
     expect(state.spatial).toEqual({
       schemaVersion: 1,
+      visibilityModel: "global-lockstep-public-map-v1",
       ownShape: {
         quadrant: "west",
         compactness: "compact",
@@ -173,5 +175,30 @@ describe("tester-starter-llm spatial state renderer", () => {
     expect((state.spatial as { briefing: string[] }).briefing[0]).toHaveLength(
       240,
     );
+  });
+
+  it("fails closed on absent or unknown spatial visibility provenance", async () => {
+    const buildState = await loadBuildState();
+    const spatialWithoutProvenance = {
+      schemaVersion: 1,
+      ownShape: {
+        quadrant: "west",
+        regionAnalysis: "complete",
+        centroidBasis: "largest_region_border",
+        coastShare: 0,
+        centroid: { xPct: 25, yPct: 50 },
+      },
+    };
+
+    for (const spatial of [
+      spatialWithoutProvenance,
+      { ...spatialWithoutProvenance, visibilityModel: "private-fog-bypass" },
+    ]) {
+      const state = buildState({ ...BASE_OBSERVATION, spatial }, []);
+      expect(state).not.toHaveProperty("spatial");
+      expect(
+        (state.rivals as Array<Record<string, unknown>>)[0],
+      ).not.toHaveProperty("playerID");
+    }
   });
 });

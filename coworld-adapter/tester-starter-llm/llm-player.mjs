@@ -234,7 +234,15 @@ function normalizeDealPolicies(value) {
 }
 function buildState(obs, actions) {
   const own = obs.ownState || {};
-  const spatialEnabled = obs.spatial?.schemaVersion === 1;
+  // Fail closed on provenance. The server may summarize the global map only
+  // for the current no-fog, global-lockstep game contract. An old/unknown
+  // spatial schema is omitted from the model state instead of guessed at.
+  const spatialVisibilityModel =
+    obs.spatial?.schemaVersion === 1 &&
+    obs.spatial?.visibilityModel === "global-lockstep-public-map-v1"
+      ? "global-lockstep-public-map-v1"
+      : null;
+  const spatialEnabled = spatialVisibilityModel !== null;
   const self = {
     tileShare: own.tileShare,
     troops: own.troops,
@@ -561,6 +569,7 @@ function buildState(obs, actions) {
     }
     spatial = {
       schemaVersion: 1,
+      visibilityModel: spatialVisibilityModel,
       ownShape: shape,
       ...(briefing.length ? { briefing } : {}),
       ...(minimap ? { minimap } : {}),
@@ -688,6 +697,7 @@ let plannerAttemptSequence = 0;
 let plannerUsageSummaryEmitted = false;
 let plannerSpatialSchemaVersion = 0;
 let plannerSpatialMinimap = false;
+let plannerSpatialVisibilityModel = null;
 
 function tokenCount(value) {
   const parsed = Number(value);
@@ -724,6 +734,12 @@ function normalizeBedrockUsage(usage) {
 }
 
 function normalizePlannerUsageEvent(event) {
+  const spatialVisibilityModel =
+    event?.spatialVisibilityModel === "global-lockstep-public-map-v1" ||
+    (event?.spatialVisibilityModel === undefined &&
+      plannerSpatialVisibilityModel === "global-lockstep-public-map-v1")
+      ? "global-lockstep-public-map-v1"
+      : null;
   const normalized = {
     schemaVersion: 1,
     promptVariant: PROMPT_VARIANT,
@@ -738,6 +754,11 @@ function normalizePlannerUsageEvent(event) {
         : event.spatialMinimap === true,
     event: clean(event?.event),
   };
+  // Preserve flag-off telemetry bytes. The field exists only when a model
+  // actually consumed spatial state under the exact visibility contract.
+  if (spatialVisibilityModel !== null) {
+    normalized.spatialVisibilityModel = spatialVisibilityModel;
+  }
   for (const key of [
     "model",
     "responseModel",
@@ -966,6 +987,10 @@ function refreshPlanInBackground(state) {
   plannerSpatialSchemaVersion =
     state?.spatial?.schemaVersion === 1 ? state.spatial.schemaVersion : 0;
   plannerSpatialMinimap = state?.spatial?.minimap?.schemaVersion === 1;
+  plannerSpatialVisibilityModel =
+    state?.spatial?.visibilityModel === "global-lockstep-public-map-v1"
+      ? "global-lockstep-public-map-v1"
+      : null;
   withTimeout(askBedrock(state), 20000)
     .then(({ attempt, text, model }) => {
       const parsed = extractJson(text, PROMPT_HARDENING);

@@ -216,6 +216,7 @@ export class LlmPromptBuilder {
           ? undefined
           : {
               schemaVersion: observation.spatial.schemaVersion,
+              visibilityModel: observation.spatial.visibilityModel,
               ownShape: observation.spatial.ownShape,
               ...(observation.spatial.minimap !== undefined
                 ? {

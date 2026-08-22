@@ -477,17 +477,21 @@ export interface ArmMeasurement {
   messageSlotActionCount: number;
   inboundMessages: number;
   promptChars: number;
+  promptBytes: number;
   observationBlockChars: number;
   legalActionsBlockChars: number;
   rankedCandidatesBlockChars: number;
   opponentModelBlockChars: number;
   staticFrameChars: number;
   minimapChars: number;
+  minimapBytes: number;
   spatialChars: number;
+  spatialBytes: number;
   inboxChars: number;
   dealObservationChars: number;
   socialSlotInstructionChars: number;
   starterStateChars: number;
+  starterStateBytes: number;
   estTokensHigh: number;
   estTokensLow: number;
 }
@@ -596,6 +600,14 @@ function measureArmWithAppliedEnvironment(
     spatial?.minimap === undefined ? 0 : JSON.stringify(spatial.minimap).length;
   const spatialChars =
     spatial === undefined ? 0 : JSON.stringify(spatial).length;
+  const minimapBytes =
+    spatial?.minimap === undefined
+      ? 0
+      : Buffer.byteLength(JSON.stringify(spatial.minimap), "utf8");
+  const spatialBytes =
+    spatial === undefined
+      ? 0
+      : Buffer.byteLength(JSON.stringify(spatial), "utf8");
   const inboxChars = inbox.length === 0 ? 0 : JSON.stringify(inbox).length;
   const dealObservationChars =
     observation.deals === undefined
@@ -620,7 +632,8 @@ function measureArmWithAppliedEnvironment(
     actions.length - dealSlotActionCount - messageSlotActionCount;
 
   const starterState = starterBuildState(observation, actions);
-  const starterStateChars = JSON.stringify(starterState).length;
+  const starterStateJson = JSON.stringify(starterState);
+  const starterStateChars = starterStateJson.length;
 
   return {
     arm: arm.name,
@@ -633,6 +646,7 @@ function measureArmWithAppliedEnvironment(
     messageSlotActionCount,
     inboundMessages: inbox.length,
     promptChars: prompt.length,
+    promptBytes: Buffer.byteLength(prompt, "utf8"),
     observationBlockChars,
     legalActionsBlockChars,
     rankedCandidatesBlockChars,
@@ -644,11 +658,14 @@ function measureArmWithAppliedEnvironment(
       rankedCandidatesBlockChars -
       opponentModelBlockChars,
     minimapChars,
+    minimapBytes,
     spatialChars,
+    spatialBytes,
     inboxChars,
     dealObservationChars,
     socialSlotInstructionChars,
     starterStateChars,
+    starterStateBytes: Buffer.byteLength(starterStateJson, "utf8"),
     estTokensLow: Math.round(prompt.length / CHARS_PER_TOKEN_HIGH),
     estTokensHigh: Math.round(prompt.length / CHARS_PER_TOKEN_LOW),
   };

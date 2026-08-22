@@ -1,0 +1,11 @@
+export type SpatialXpArm = "off" | "on";
+
+export const SPATIAL_XP_GAME_NAMES: Readonly<Record<SpatialXpArm, string>>;
+export const SPATIAL_XP_VISIBILITY_MODEL: string;
+export const SPATIAL_XP_ENV: Readonly<Record<string, string>>;
+export const SPATIAL_XP_PROTOCOL_APPENDIX: string;
+
+export function buildSpatialXpManifest<T extends object>(
+  canonicalManifest: T,
+  arm: SpatialXpArm,
+): T;

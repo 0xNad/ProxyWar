@@ -17,6 +17,26 @@ export const SPATIAL_REGION_RUN_BUDGET = 25_000;
 export const SPATIAL_MINIMAP_WIDTH = 24 as const;
 export const SPATIAL_MINIMAP_HEIGHT = 12 as const;
 export const SPATIAL_NOTE_PREFIX = "Spatial ";
+/**
+ * Spatial facts are legal only because current ProxyWar/OpenFront matches are
+ * global-lockstep and have no fog-of-war/private tile layer: every human
+ * client receives the same ownership, terrain, structures, and combat state.
+ *
+ * If a player-relative visibility mode is ever introduced, it must use a new
+ * contract and adapter. Reusing this identifier would turn a legitimate
+ * summary into a hidden-map leak.
+ */
+export const SPATIAL_VISIBILITY_MODEL =
+  "global-lockstep-public-map-v1" as const;
+
+/** Exact pre-XP ceilings. The benchmark and prompt matrix import these. */
+export const SPATIAL_SNAPSHOT_P95_MAX_MS = 25;
+export const SPATIAL_SNAPSHOT_TRANSIENT_MAX_BYTES = 32 * 1024 * 1024;
+export const SPATIAL_SNAPSHOT_RETAINED_MAX_BYTES = 1024 * 1024;
+export const SPATIAL_STAGE_ONE_SERIALIZED_MAX_BYTES = 16 * 1024;
+export const SPATIAL_MINIMAP_SERIALIZED_MAX_BYTES = 2 * 1024;
+export const SPATIAL_PROMPT_INCREMENT_MAX_BYTES = 24 * 1024;
+export const SPATIAL_PROMPT_INCREMENT_MAX_ESTIMATED_TOKENS = 8 * 1024;
 
 const MINIMAP_GLYPHS =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@#";
@@ -267,6 +287,7 @@ export function buildSpatialObservationExtension(
 
   const spatial: AgentSpatialObservation = {
     schemaVersion: 1,
+    visibilityModel: SPATIAL_VISIBILITY_MODEL,
     ownShape: ownGeometry.ownShape,
     ...(includeMinimap && snapshot.minimap !== undefined
       ? {

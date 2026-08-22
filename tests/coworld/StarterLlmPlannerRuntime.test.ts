@@ -97,6 +97,7 @@ function decisionRequest(requestID: string) {
           },
           spatial: {
             schemaVersion: 1,
+            visibilityModel: "global-lockstep-public-map-v1",
             ownShape: {
               quadrant: "west",
               compactness: "compact",
@@ -282,6 +283,7 @@ describe("tester-starter-llm hardened runtime arm", () => {
         promptCache: false,
         spatialSchemaVersion: 1,
         spatialMinimap: true,
+        spatialVisibilityModel: "global-lockstep-public-map-v1",
         model: "test.sonnet-full",
         responseModel: "test.sonnet-full",
         stopReason: "end_turn",
@@ -296,6 +298,7 @@ describe("tester-starter-llm hardened runtime arm", () => {
         event: "summary",
         spatialSchemaVersion: 1,
         spatialMinimap: true,
+        spatialVisibilityModel: "global-lockstep-public-map-v1",
         attempts: 2,
         responses: 1,
         errors: 0,
