@@ -148,14 +148,6 @@ function pendingRenewalAction(actions, obs) {
   return null;
 }
 
-// A pending incoming alliance request gets one narrow priority override: when
-// this starter would otherwise ATTACK, answer the rival who already asked.
-// The caller deliberately invokes this only for an eligible attack candidate,
-// so spawn/build/boat/etc keep their existing order and appetite is unchanged.
-function pendingAllianceRequestAction(actions, obs) {
-  return preferReciprocalAlliance(actions, obs, "alliance_request");
-}
-
 function chooseAction(actions, obs) {
   if (!Array.isArray(actions) || actions.length === 0) {
     throw new Error("decision_request had no legalActions");
@@ -189,17 +181,6 @@ function chooseAction(actions, obs) {
         candidate.risk?.level !== "high" &&
         !String(candidate.id).includes("avoid"),
     );
-    if (kind === "attack" && action) {
-      const pendingRequest = pendingAllianceRequestAction(
-        actions.filter(
-          (candidate) =>
-            candidate.risk?.level !== "high" &&
-            !String(candidate.id).includes("avoid"),
-        ),
-        obs,
-      );
-      if (pendingRequest) return pendingRequest;
-    }
     if (action) return action;
   }
 
