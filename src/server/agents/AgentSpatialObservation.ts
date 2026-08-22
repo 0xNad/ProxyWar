@@ -729,72 +729,60 @@ function buildMinimap(
   metrics: AgentSpatialSnapshotMetrics,
 ): SpatialMinimapBase | undefined {
   if (players.length > MINIMAP_GLYPHS.length) return undefined;
-  const glyphBySmallID = new Map<number, string>();
+  const categoryBySmallID = new Map<number, number>();
   const legend = players.map((player, index) => {
     const glyph = MINIMAP_GLYPHS[index];
-    glyphBySmallID.set(player.smallID(), glyph);
+    categoryBySmallID.set(player.smallID(), index);
     return {
       glyph,
       playerID: player.id(),
       name: player.name(),
     };
   });
-  const smallIDByGlyph = new Map(
-    legend.map((entry, index) => [entry.glyph, players[index].smallID()]),
-  );
+  // Categories preserve the existing deterministic tie priority: players are
+  // already sorted by smallID, followed by neutral land, then water.
+  const neutralCategory = players.length;
+  const waterCategory = players.length + 1;
+  const categoryCounts = new Uint32Array(players.length + 2);
+  const mapWidth = gameState.width();
+  const mapHeight = gameState.height();
   const rows: string[] = [];
   for (let cy = 0; cy < SPATIAL_MINIMAP_HEIGHT; cy++) {
-    const yStart = Math.floor(
-      (cy * gameState.height()) / SPATIAL_MINIMAP_HEIGHT,
-    );
-    const yEnd = Math.floor(
-      ((cy + 1) * gameState.height()) / SPATIAL_MINIMAP_HEIGHT,
-    );
+    const yStart = Math.floor((cy * mapHeight) / SPATIAL_MINIMAP_HEIGHT);
+    const yEnd = Math.floor(((cy + 1) * mapHeight) / SPATIAL_MINIMAP_HEIGHT);
     let row = "";
     for (let cx = 0; cx < SPATIAL_MINIMAP_WIDTH; cx++) {
-      const xStart = Math.floor(
-        (cx * gameState.width()) / SPATIAL_MINIMAP_WIDTH,
-      );
-      const xEnd = Math.floor(
-        ((cx + 1) * gameState.width()) / SPATIAL_MINIMAP_WIDTH,
-      );
-      const counts = new Map<string, number>();
+      const xStart = Math.floor((cx * mapWidth) / SPATIAL_MINIMAP_WIDTH);
+      const xEnd = Math.floor(((cx + 1) * mapWidth) / SPATIAL_MINIMAP_WIDTH);
+      categoryCounts.fill(0);
       for (let y = yStart; y < yEnd; y++) {
+        const rowOffset = y * mapWidth;
         for (let x = xStart; x < xEnd; x++) {
           metrics.minimapTilesVisited += 1;
-          const tile = gameState.ref(x, y);
-          let glyph: string;
-          if (gameState.isWater(tile)) {
-            glyph = "~";
-          } else {
-            const owner = gameState.owner(tile);
-            glyph = owner.isPlayer()
-              ? (glyphBySmallID.get(owner.smallID()) ?? ".")
-              : ".";
-          }
-          counts.set(glyph, (counts.get(glyph) ?? 0) + 1);
+          const tile = rowOffset + x;
+          const category = gameState.isWater(tile)
+            ? waterCategory
+            : (categoryBySmallID.get(gameState.ownerID(tile)) ??
+              neutralCategory);
+          categoryCounts[category] += 1;
+        }
+      }
+      let dominantCategory = 0;
+      for (let category = 1; category < categoryCounts.length; category++) {
+        if (categoryCounts[category] > categoryCounts[dominantCategory]) {
+          dominantCategory = category;
         }
       }
       row +=
-        [...counts.entries()].sort(
-          (a, b) =>
-            b[1] - a[1] ||
-            minimapTiePriority(a[0], smallIDByGlyph) -
-              minimapTiePriority(b[0], smallIDByGlyph),
-        )[0]?.[0] ?? "~";
+        dominantCategory < players.length
+          ? MINIMAP_GLYPHS[dominantCategory]
+          : dominantCategory === neutralCategory
+            ? "."
+            : "~";
     }
     rows.push(row);
   }
   return { rows, legend };
-}
-
-function minimapTiePriority(
-  glyph: string,
-  smallIDByGlyph: ReadonlyMap<string, number>,
-): number {
-  if (smallIDByGlyph.has(glyph)) return smallIDByGlyph.get(glyph)!;
-  if (glyph === ".") return Number.MAX_SAFE_INTEGER - 1;
-  return Number.MAX_SAFE_INTEGER;
 }
 
 function percentage(numerator: number, denominator: number): number {
