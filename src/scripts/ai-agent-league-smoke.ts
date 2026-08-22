@@ -470,6 +470,8 @@ export async function runAgentLeagueSmoke(
     varySpawns: args.includes("--vary-spawns"),
     matchedOfferedOrderSpawnBallot:
       options.forceOfferedOrderSpawnBallotForExperiment === true,
+    matchedExperiment:
+      options.forceOfferedOrderSpawnBallotForExperiment === true,
     agents: specs.length,
     opponentBrainMode,
     executionSeed: options.deterministicSource?.seed ?? null,
@@ -1262,6 +1264,7 @@ function buildAgentLeagueSmokeExecutionConfig(input: {
   disabledActionKinds: LegalActionKind[];
   varySpawns: boolean;
   matchedOfferedOrderSpawnBallot: boolean;
+  matchedExperiment: boolean;
   agents: number;
   opponentBrainMode: SmokeBrainMode | null;
   executionSeed: string | null;
@@ -1273,16 +1276,22 @@ function buildAgentLeagueSmokeExecutionConfig(input: {
     scenario: input.scenario,
     brainMode: input.brainMode,
     runnerMode: input.runnerMode,
-    agents: input.agents,
-    opponentBrainMode: input.opponentBrainMode,
-    executionSeed: input.executionSeed,
-    ...(input.subjectSeatIndex === undefined
-      ? {}
-      : { subjectSeatIndex: input.subjectSeatIndex }),
-    ...(input.episodeIndex === undefined
-      ? {}
-      : { episodeIndex: input.episodeIndex }),
-    selectedGameConfig: normalizeCommanderGameConfig(input.selectedGameConfig),
+    ...(input.matchedExperiment
+      ? {
+          agents: input.agents,
+          opponentBrainMode: input.opponentBrainMode,
+          executionSeed: input.executionSeed,
+          ...(input.subjectSeatIndex === undefined
+            ? {}
+            : { subjectSeatIndex: input.subjectSeatIndex }),
+          ...(input.episodeIndex === undefined
+            ? {}
+            : { episodeIndex: input.episodeIndex }),
+          selectedGameConfig: normalizeCommanderGameConfig(
+            input.selectedGameConfig,
+          ),
+        }
+      : {}),
     planEveryDecisionSteps: input.planEveryDecisionSteps,
     runner: {
       turnsPerDecisionStep: input.stepLockedConfig.turnsPerDecisionStep,
@@ -1297,7 +1306,12 @@ function buildAgentLeagueSmokeExecutionConfig(input: {
       waitForMirrorCatchup: input.stepLockedConfig.waitForMirrorCatchup,
       autopilotEndgameSteps: input.stepLockedConfig.autopilotExtraSteps,
       replayTailTurns: input.replayTailTurns,
-      matchedOfferedOrderSpawnBallot: input.matchedOfferedOrderSpawnBallot,
+      ...(input.matchedExperiment
+        ? {
+            matchedOfferedOrderSpawnBallot:
+              input.matchedOfferedOrderSpawnBallot,
+          }
+        : {}),
     },
     game: {
       bots: input.selectedGameConfig.bots ?? 0,

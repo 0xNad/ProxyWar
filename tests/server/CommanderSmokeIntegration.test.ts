@@ -208,6 +208,15 @@ describe("StrategicCommander Stage 6 — step-locked smoke integration", () => {
         executionGameID,
         executionGameIDDerivation: COMMANDER_GAME_ID_DERIVATION_VERSION,
       });
+      expect(smoke.executionConfig).toMatchObject({
+        agents: 1,
+        opponentBrainMode: null,
+        executionSeed,
+        selectedGameConfig: expect.objectContaining({ maxPlayers: 4 }),
+        runner: expect.objectContaining({
+          matchedOfferedOrderSpawnBallot: true,
+        }),
+      });
 
       const paths = await writeAgentLeagueRunArtifacts({
         ...smoke.artifactInput,
@@ -422,6 +431,15 @@ describe("StrategicCommander Stage 6 — step-locked smoke integration", () => {
 
     expect(smoke.executionConfig.brainMode).toBe("rule");
     expect(smoke.artifactInput.brainMode).toBe("rule");
+    expect(smoke.executionConfig).not.toHaveProperty("agents");
+    expect(smoke.executionConfig).not.toHaveProperty("opponentBrainMode");
+    expect(smoke.executionConfig).not.toHaveProperty("executionSeed");
+    expect(smoke.executionConfig).not.toHaveProperty("subjectSeatIndex");
+    expect(smoke.executionConfig).not.toHaveProperty("episodeIndex");
+    expect(smoke.executionConfig).not.toHaveProperty("selectedGameConfig");
+    expect(smoke.executionConfig.runner).not.toHaveProperty(
+      "matchedOfferedOrderSpawnBallot",
+    );
     for (const record of smoke.artifactInput.records) {
       const metadataKeys = Object.keys(record.decisionMetadata ?? {});
       expect(metadataKeys.filter((key) => key.startsWith("commander"))).toEqual(
