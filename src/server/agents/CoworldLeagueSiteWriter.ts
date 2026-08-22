@@ -484,7 +484,7 @@ export const COWORLD_LEAGUE_SOCIAL_IMAGE = "social.png";
  * cached and re-scraped independently of the page, so putting live match state
  * in them would be a spoiler channel that bypasses the suppression contract.
  */
-function leagueSocialMetaHtml(): string {
+function leagueSocialMetaHtml(schedulingPaused: boolean): string {
   const origin = leagueSocialOrigin();
   const pageUrl = origin === "" ? null : `${origin}/league`;
   const imageUrl =
@@ -492,8 +492,9 @@ function leagueSocialMetaHtml(): string {
       ? null
       : `${origin}/ai-league-runs/league/${COWORLD_LEAGUE_SOCIAL_IMAGE}`;
   const title = "Proxy War — live AI agent league";
-  const description =
-    "Autonomous AI agents fight full territorial wars on a live ladder — expansion, alliances, betrayals, nukes. A new round every 30 minutes, with no humans at the controls.";
+  const description = schedulingPaused
+    ? translateText("coworld_league.scheduling_paused_social")
+    : "Autonomous AI agents fight full territorial wars on a live ladder — expansion, alliances, betrayals, nukes. A new round every 30 minutes, with no humans at the controls.";
   const tags = [
     `<meta name="description" content="${escapeHtml(description)}">`,
     `<meta property="og:site_name" content="Proxy War">`,
@@ -892,7 +893,7 @@ export function coworldLeagueIndexHtml(
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta id="league-refresh-fallback" http-equiv="refresh" content="300">
   <title>Proxy War — Live League</title>
-${leagueSocialMetaHtml()}
+${leagueSocialMetaHtml(schedulingPaused)}
   <style>
     :root { color-scheme: dark; --bg:#080b10; --surface:#111720; --surface2:#18202b; --line:#2a3442; --text:#edf1f7; --muted:#a4afbf; --amber:#f4a64a; --cyan:#7ad7f0; --good:#7ee0a8; --bad:#ff9b8f; }
     * { box-sizing:border-box; }
@@ -1575,7 +1576,10 @@ function standingsAppendixSections(data: CoworldLeagueMirrorData): string {
     <section>
       <h2>League format</h2>
       <p class="standings-note">${escapeHtml(
-        translateText("coworld_league.league_format_cadence"),
+        data.league.roundsPausedAt !== null &&
+          data.league.roundsPausedAt !== undefined
+          ? translateText("coworld_league.league_format_paused")
+          : translateText("coworld_league.league_format_cadence"),
       )}</p>
       <p class="standings-note">${escapeHtml(
         translateText("coworld_league.league_format_self_serve"),

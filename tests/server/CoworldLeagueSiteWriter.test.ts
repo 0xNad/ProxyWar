@@ -171,7 +171,15 @@ describe("coworldLeagueIndexHtml", () => {
     );
     expect(html).toContain("round scheduling is currently paused");
     expect(html).toContain("<span>Round cadence</span><strong>Paused</strong>");
-    expect(html).not.toContain("a new round every 30 minutes");
+    expect(html).toContain(
+      "Round scheduling is currently paused. Completed rounds, standings, and replays remain available.",
+    );
+    expect(html).toContain(
+      "Round scheduling is currently paused; completed results and replays remain available.",
+    );
+    expect(html).not.toMatch(
+      /a new round every|every ~30 minutes a new round/i,
+    );
   });
 
   test("escapes hostile player names", () => {
