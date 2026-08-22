@@ -40,7 +40,7 @@
     "id": 15368
   },
   "coworld": {
-    "cliVersion": "0.1.38",
+    "cliVersion": "0.1.42",
     "name": "proxywar",
     "productionEnvironment": "coworld-production",
     "expectedLeagueId": "league_cb60d526-ecfd-4836-ab3a-81fc6cf7dc42"

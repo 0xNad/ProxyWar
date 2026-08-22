@@ -30,7 +30,10 @@ permissions:
   pull-requests: write
 
 env:
-  COWORLD_CLI_VERSION: "0.1.38"
+  # 0.1.40+ waits for asynchronous replay-viewer bundle expansion before the
+  # package upload. 0.1.42 also preserves sibling replay_viewer fields while
+  # replacing the local bundle path with its hosted digest.
+  COWORLD_CLI_VERSION: "0.1.42"
   COWORLD_NAME: proxywar
   EXPECTED_LEAGUE_ID: league_cb60d526-ecfd-4836-ab3a-81fc6cf7dc42
 
