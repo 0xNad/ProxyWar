@@ -8,6 +8,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import zlib from "node:zlib";
 
+import { commanderXpEvalEvidenceEnabled } from "../../src/server/agents/CommanderXpGameEvidence.ts";
 import {
   coworldAppShellRoute,
   injectCoworldSplash,
@@ -38,7 +39,6 @@ import {
   finalizeSnapshotRetention,
   offerSnapshot,
 } from "./spectator-snapshot-retention.ts";
-import { commanderXpEvalEvidenceEnabled } from "../../src/server/agents/CommanderXpGameEvidence.ts";
 
 const localRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -349,6 +349,9 @@ class CoworldProtocolServer {
             requestID,
             slot,
             request,
+            ...(this.config.commander_xp_run_key !== undefined
+              ? { commanderXpRunKey: this.config.commander_xp_run_key }
+              : {}),
             ...(this.maxMessageChars !== null
               ? { maxMessageChars: this.maxMessageChars }
               : {}),
@@ -852,7 +855,9 @@ async function runProxyWarEpisode(
       ) ||
       !config.commander_xp_run_key.includes(`/${commanderXpPhase}/`))
   ) {
-    throw new Error("Commander XP eval config requires exact phase/run identity");
+    throw new Error(
+      "Commander XP eval config requires exact phase/run identity",
+    );
   }
   const commanderXpGameplay =
     commanderXpEval && commanderXpPhase !== "provider-preflight";

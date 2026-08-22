@@ -54,6 +54,8 @@ export interface CommanderXpRuntimeManifest {
   schemaVersion: 2;
   artifactKind: "commander-xp-policy-evidence";
   arm: CommanderXpArm;
+  gameID: string;
+  runKey: string;
   behaviorSourceSha: string;
   behaviorSourceTreeSha: string;
   adapterSourceSha: string;
@@ -71,13 +73,16 @@ export interface CommanderXpRuntimeManifest {
     FREETEXT_MESSAGES: "1";
     SPATIAL_OBSERVATION: "0";
     SPATIAL_MINIMAP: "0";
+    KEYSTONE_PROFILE: "aggressive";
+    LLM_TIMEOUT_MS: "12000";
   };
   providerPreflight: {
-    required: boolean;
-    requestID: "provider-preflight";
+    required: true;
+    status: "succeeded";
+    requestID: string;
     requestedModel: string;
-    responseModel: string | null;
-    succeeded: boolean;
+    responseModel: string;
+    succeeded: true;
   };
 }
 
@@ -139,17 +144,19 @@ export class CommanderXpTraceCollector {
       throw new Error("Commander XP wire response omitted its primary action");
     }
     const responseBatch = input.response.selectedLegalActionIds;
-    const selectedLegalActionIDs = responseBatch !== undefined
-      ? exactWireStringArray(responseBatch, "selectedLegalActionIds", false)
-      : [selectedLegalActionID];
+    const selectedLegalActionIDs =
+      responseBatch !== undefined
+        ? exactWireStringArray(responseBatch, "selectedLegalActionIds", false)
+        : [selectedLegalActionID];
     const responseSpawn = input.response.spawnPreferenceLegalActionIds;
-    const spawnPreferenceLegalActionIDs = responseSpawn !== undefined
-      ? exactWireStringArray(
-          responseSpawn,
-          "spawnPreferenceLegalActionIds",
-          true,
-        )
-      : [];
+    const spawnPreferenceLegalActionIDs =
+      responseSpawn !== undefined
+        ? exactWireStringArray(
+            responseSpawn,
+            "spawnPreferenceLegalActionIds",
+            true,
+          )
+        : [];
     this.trace.push({
       recordType: "decision",
       schemaVersion: COMMANDER_XP_PLAYER_ARTIFACT_SCHEMA_VERSION,
@@ -173,8 +180,7 @@ export class CommanderXpTraceCollector {
         typeof input.response.runtimeMode === "string"
           ? input.response.runtimeMode
           : null,
-      fallbackUsed:
-        input.response.fallbackUsed === true,
+      fallbackUsed: input.response.fallbackUsed === true,
       llmPlannerDegraded: input.response.llmPlannerDegraded === true,
       degradedCause:
         typeof metadata.degradedCause === "string"
@@ -285,14 +291,29 @@ function assertRuntimeManifest(manifest: CommanderXpRuntimeManifest): void {
     manifest.schemaVersion !== 2 ||
     manifest.artifactKind !== "commander-xp-policy-evidence" ||
     !["A", "B", "C"].includes(manifest.arm) ||
+    !/^PWS[A-Z]{5}$/.test(manifest.gameID) ||
+    !/^commander-xp-v2\/[A-Za-z0-9._-]+\/(?:provider-preflight|canary|confirmatory)\/r\d{2}\/(?:A|B|C)$/.test(
+      manifest.runKey,
+    ) ||
+    !manifest.runKey.endsWith(`/${manifest.arm}`) ||
     manifest.flags.STRUCTURED_DEALS !== "1" ||
     manifest.flags.FREETEXT_MESSAGES !== "1" ||
     manifest.flags.SPATIAL_OBSERVATION !== "0" ||
     manifest.flags.SPATIAL_MINIMAP !== "0" ||
+    manifest.flags.KEYSTONE_PROFILE !== "aggressive" ||
+    manifest.flags.LLM_TIMEOUT_MS !== "12000" ||
     (manifest.imageDigest !== null &&
       !/^sha256:[0-9a-f]{64}$/.test(manifest.imageDigest)) ||
     manifest.policyIdentityAuthority !==
-      "external-policy-inspect-and-xp-participant-metadata"
+      "external-policy-inspect-and-xp-participant-metadata" ||
+    manifest.providerPreflight.required !== true ||
+    manifest.providerPreflight.status !== "succeeded" ||
+    !/^provider-preflight-[0-9a-f]{24}$/.test(
+      manifest.providerPreflight.requestID,
+    ) ||
+    manifest.providerPreflight.succeeded !== true ||
+    manifest.providerPreflight.responseModel !==
+      manifest.providerPreflight.requestedModel
   ) {
     throw new Error("Commander XP runtime manifest is invalid");
   }

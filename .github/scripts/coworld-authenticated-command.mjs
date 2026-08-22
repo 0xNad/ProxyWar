@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const allowedCommands = new Set([
+  "commander-xp-episode-bundle",
+  "episode-logs",
   "episodes",
   "leagues",
   "list",
@@ -13,6 +15,7 @@ const allowedCommands = new Set([
   "replay-open",
   "status",
   "upload-coworld",
+  "xp-request",
 ]);
 
 const [command, ...args] = process.argv.slice(2);
@@ -25,6 +28,43 @@ if (!allowedCommands.has(command)) {
   throw new Error(
     `authenticated Coworld command is not allowlisted: ${command}`,
   );
+}
+if (
+  command === "xp-request" &&
+  !(
+    args.length === 3 &&
+    args[0] === "get" &&
+    /^xreq_[A-Za-z0-9-]+$/.test(args[1] ?? "") &&
+    args[2] === "--json"
+  )
+) {
+  throw new Error("authenticated Coworld xp-request mode is malformed");
+}
+if (
+  command === "episode-logs" &&
+  !(
+    args.length === 6 &&
+    /^ereq_[A-Za-z0-9-]+$/.test(args[0] ?? "") &&
+    args[1] === "--agent" &&
+    /^[0-3]$/.test(args[2] ?? "") &&
+    args[3] === "--artifact" &&
+    args[4] === "--output" &&
+    typeof args[5] === "string" &&
+    resolve(args[5]) === args[5]
+  )
+) {
+  throw new Error("authenticated Coworld episode-logs mode is malformed");
+}
+if (
+  command === "commander-xp-episode-bundle" &&
+  !(
+    args.length === 2 &&
+    /^ereq_[A-Za-z0-9-]+$/.test(args[0] ?? "") &&
+    typeof args[1] === "string" &&
+    resolve(args[1]) === args[1]
+  )
+) {
+  throw new Error("authenticated Coworld episode bundle mode is malformed");
 }
 if (!token || !python || !coworld) {
   throw new Error(
@@ -56,7 +96,19 @@ try {
     throw new Error("failed to install ephemeral Coworld credential");
   }
 
-  const result = spawnSync(coworld, [command, ...args], {
+  const executable =
+    command === "commander-xp-episode-bundle" ? python : coworld;
+  const executableArgs =
+    command === "commander-xp-episode-bundle"
+      ? [
+          resolve(
+            import.meta.dirname,
+            "../../coworld-adapter/scripts/fetch-commander-xp-episode-bundle.py",
+          ),
+          ...args,
+        ]
+      : [command, ...args];
+  const result = spawnSync(executable, executableArgs, {
     env: childEnv,
     // Hosted `coworld list --json` grows with immutable release history and is
     // already larger than Node's 1 MiB spawnSync buffer. Stream the trusted

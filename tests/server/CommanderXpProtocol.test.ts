@@ -44,16 +44,22 @@ describe("Commander XP preregistration v2", () => {
 
   it("plans exactly four ABC triplets then 48 balanced BC pairs", () => {
     const plan = buildCommanderXpPreRegistration(input);
-    expect(plan.providerPreflightRequest).toMatchObject({
-      phase: "provider-preflight",
-      arm: "C",
-      subjectSeat: 0,
-      episodeIndex: 0,
-    });
+    expect(plan.providerPreflightRequests).toHaveLength(3);
     expect(
-      plan.providerPreflightRequest.requestBody.game_config_overrides,
-    ).toMatchObject({ max_decision_steps: 1, turns_per_decision_step: 1 });
-    expect(plan.schedule.preflightRequestCount).toBe(1);
+      plan.providerPreflightRequests.map((request) => request.arm),
+    ).toEqual(["A", "B", "C"]);
+    expect(
+      plan.providerPreflightRequests.every(
+        (request) =>
+          request.subjectSeat === 0 &&
+          request.episodeIndex === 0 &&
+          request.requestBody.game_config_overrides.max_decision_steps === 1 &&
+          request.requestBody.game_config_overrides.turns_per_decision_step ===
+            1,
+      ),
+    ).toBe(true);
+    expect(new Set(plan.schedule.preflightSeeds).size).toBe(3);
+    expect(plan.schedule.preflightRequestCount).toBe(3);
     const canary = plan.requests.filter((entry) => entry.phase === "canary");
     const confirmatory = plan.requests.filter(
       (entry) => entry.phase === "confirmatory",
@@ -131,6 +137,8 @@ describe("Commander XP preregistration v2", () => {
       FREETEXT_MESSAGES: "1",
       SPATIAL_OBSERVATION: "0",
       SPATIAL_MINIMAP: "0",
+      KEYSTONE_PROFILE: "aggressive",
+      LLM_TIMEOUT_MS: "12000",
     });
   });
 

@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+// @ts-expect-error The executable MJS helper intentionally has no emitted TS declarations.
 import { commanderXpEvalManifest } from "./prepare-commander-xp-eval-manifest.mjs";
 
 const base = JSON.parse(
@@ -33,9 +34,7 @@ describe("Commander XP eval-only Coworld manifest", () => {
     expect(manifest.game.config_schema.required).toContain(
       "commander_xp_phase",
     );
-    expect(
-      manifest.game.config_schema.properties.commander_xp_phase,
-    ).toEqual({
+    expect(manifest.game.config_schema.properties.commander_xp_phase).toEqual({
       type: "string",
       enum: ["provider-preflight", "canary", "confirmatory"],
     });

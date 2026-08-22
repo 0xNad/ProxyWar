@@ -41,7 +41,7 @@ export async function runCommanderXpPlanCli(
     }),
     fs.writeFile(
       requestsPath,
-      `${[plan.providerPreflightRequest, ...plan.requests]
+      `${[...plan.providerPreflightRequests, ...plan.requests]
         .map((entry) => JSON.stringify(entry))
         .join("\n")}\n`,
       { flag: "wx" },
@@ -57,7 +57,7 @@ export async function runCommanderXpPlanCli(
       ok: true,
       mode: "plan-only-no-requests-created",
       preRegistrationSha256: plan.preRegistrationSha256,
-      providerPreflightRequestCount: 1,
+      providerPreflightRequestCount: plan.providerPreflightRequests.length,
       gameplayRequestCount: plan.requests.length,
       requestCount: plan.requests.length + 1,
       outputDirectory,

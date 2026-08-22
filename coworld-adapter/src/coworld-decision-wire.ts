@@ -212,6 +212,8 @@ export function decisionRequestEnvelope(input: {
   requestID: string;
   slot: number;
   request: unknown;
+  /** Eval-only identity nonce. It is never copied into the observation. */
+  commanderXpRunKey?: string;
   /**
    * The live FREETEXT_MESSAGE_MAX_CHARS, supplied by the caller ONLY while the
    * free-text flag is on. Injected rather than imported on purpose: this module
@@ -232,6 +234,9 @@ export function decisionRequestEnvelope(input: {
     type: "decision_request",
     requestID: input.requestID,
     slot: input.slot,
+    ...(input.commanderXpRunKey !== undefined
+      ? { commanderXpRunKey: input.commanderXpRunKey }
+      : {}),
     protocol: {
       maxActionsPerDecision: MAX_WIRE_ACTIONS_PER_DECISION,
       maxSpawnPreferences: MAX_WIRE_SPAWN_PREFERENCE_ACTION_IDS,

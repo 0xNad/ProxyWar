@@ -62,6 +62,8 @@ export const COMMANDER_XP_COMMANDER_METADATA_ALLOWLIST = [
   "degradedCause",
   "commanderSelectorSource",
   "commanderPrimarySelectorSource",
+  "planID",
+  "commanderPreviousPlanID",
   "commanderFingerprint",
   "commanderEligibleOptionIds",
   "commanderExposedOptionIds",
@@ -206,6 +208,8 @@ export interface CommanderXpPreRegistrationV2 {
     FREETEXT_MESSAGES: "1";
     SPATIAL_OBSERVATION: "0";
     SPATIAL_MINIMAP: "0";
+    KEYSTONE_PROFILE: "aggressive";
+    LLM_TIMEOUT_MS: "12000";
   };
   exclusionPolicy: {
     fallback: "fatal";
@@ -233,8 +237,8 @@ export interface CommanderXpPreRegistrationV2 {
   };
   schedule: {
     seedDerivation: typeof COMMANDER_XP_SEED_DERIVATION;
-    preflightRequestCount: 1;
-    preflightSeed: number;
+    preflightRequestCount: 3;
+    preflightSeeds: [number, number, number];
     canaryOrders: Array<CommanderXpArm[]>;
     confirmatoryOrderCycle: Array<Array<"B" | "C">>;
     canaryRequestCount: 12;
@@ -259,7 +263,11 @@ export interface CommanderXpPreRegistrationV2 {
     randomizationIterations: 4096;
     performanceClaimGate: "reviewed-verifier-and-preregistered-analysis-only";
   };
-  providerPreflightRequest: CommanderXpPlannedRequest;
+  providerPreflightRequests: [
+    CommanderXpPlannedRequest,
+    CommanderXpPlannedRequest,
+    CommanderXpPlannedRequest,
+  ];
   requests: CommanderXpPlannedRequest[];
   preRegistrationSha256: string;
 }
@@ -280,23 +288,27 @@ export function buildCommanderXpPreRegistration(
     COMMANDER_XP_CONFIRMATORY_SEED_BASE,
     48,
   );
-  const preflightSeed = deriveCommanderXpSeeds(
+  const preflightSeeds = deriveCommanderXpSeeds(
     COMMANDER_XP_PROVIDER_PREFLIGHT_SEED_BASE,
-    1,
-  )[0]!;
+    3,
+  ) as [number, number, number];
   if (
-    new Set([preflightSeed, ...canarySeeds, ...confirmatorySeeds]).size !== 53
+    new Set([...preflightSeeds, ...canarySeeds, ...confirmatorySeeds]).size !==
+    55
   ) {
     throw new Error("Commander XP seed sets overlap");
   }
-  const providerPreflightRequest = plannedRequest({
-    input,
-    phase: "provider-preflight",
-    replicaIndex: 0,
-    arm: "C",
-    orderIndex: 0,
-    seed: preflightSeed,
-  });
+  const providerPreflightRequests = (["A", "B", "C"] as const).map(
+    (arm, orderIndex) =>
+      plannedRequest({
+        input,
+        phase: "provider-preflight",
+        replicaIndex: 0,
+        arm,
+        orderIndex,
+        seed: preflightSeeds[orderIndex]!,
+      }),
+  ) as CommanderXpPreRegistrationV2["providerPreflightRequests"];
   const requests: CommanderXpPlannedRequest[] = [];
   for (let replicaIndex = 0; replicaIndex < 4; replicaIndex += 1) {
     const order = COMMANDER_XP_CANARY_ORDERS[replicaIndex]!;
@@ -389,6 +401,8 @@ export function buildCommanderXpPreRegistration(
       FREETEXT_MESSAGES: "1",
       SPATIAL_OBSERVATION: "0",
       SPATIAL_MINIMAP: "0",
+      KEYSTONE_PROFILE: "aggressive",
+      LLM_TIMEOUT_MS: "12000",
     },
     exclusionPolicy: {
       fallback: "fatal",
@@ -416,8 +430,8 @@ export function buildCommanderXpPreRegistration(
     },
     schedule: {
       seedDerivation: COMMANDER_XP_SEED_DERIVATION,
-      preflightRequestCount: 1,
-      preflightSeed,
+      preflightRequestCount: 3,
+      preflightSeeds,
       canaryOrders: COMMANDER_XP_CANARY_ORDERS.map((order) => [...order]),
       confirmatoryOrderCycle: COMMANDER_XP_CONFIRMATORY_ORDER_CYCLE.map(
         (order) => [...order],
@@ -444,7 +458,7 @@ export function buildCommanderXpPreRegistration(
       randomizationIterations: 4096,
       performanceClaimGate: "reviewed-verifier-and-preregistered-analysis-only",
     },
-    providerPreflightRequest,
+    providerPreflightRequests,
     requests,
   } as const;
   return {
@@ -491,6 +505,20 @@ export function sha256Canonical(value: unknown): string {
     .digest("hex");
 }
 
+export function commanderXpProviderPreflightRequestID(runKey: string): string {
+  if (
+    !/^commander-xp-v2\/[A-Za-z0-9._-]+\/(?:provider-preflight|canary|confirmatory)\/r\d{2}\/(?:A|B|C)$/.test(
+      runKey,
+    )
+  ) {
+    throw new Error("Commander XP preflight run key is invalid");
+  }
+  return `provider-preflight-${createHash("sha256")
+    .update(runKey)
+    .digest("hex")
+    .slice(0, 24)}`;
+}
+
 function plannedRequest(input: {
   input: CommanderXpPlanInput;
   phase: CommanderXpProtocolPhase;
@@ -508,12 +536,12 @@ function plannedRequest(input: {
     opponentPolicyVersionIDs: input.input.opponentPolicyVersionIDs,
   });
   const runKey = [
-      "commander-xp-v2",
-      input.input.experimentID,
-      input.phase,
-      `r${String(input.replicaIndex).padStart(2, "0")}`,
-      input.arm,
-    ].join("/");
+    "commander-xp-v2",
+    input.input.experimentID,
+    input.phase,
+    `r${String(input.replicaIndex).padStart(2, "0")}`,
+    input.arm,
+  ].join("/");
   const requestBody: CommanderXpRequestBody = {
     idempotency_key: runKey,
     llm_routing_override: "bedrock",

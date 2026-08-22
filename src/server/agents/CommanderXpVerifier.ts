@@ -8,6 +8,7 @@ import type { CommanderXpGameEvidence } from "./CommanderXpGameEvidence";
 import {
   buildCommanderXpPreRegistration,
   COMMANDER_XP_COMMANDER_METADATA_ALLOWLIST,
+  commanderXpProviderPreflightRequestID,
   sha256Canonical,
   type CommanderXpArm,
   type CommanderXpPlanInput,
@@ -139,6 +140,7 @@ interface ExternalPhaseReceipt {
   phase: "preregistration" | "provider-preflight" | "canary" | "confirmatory";
   completedAt: string;
   preregistrationReceipt: PhaseReceiptBinding | null;
+  providerPreflightReceipt: PhaseReceiptBinding | null;
   priorPhaseReceipt: PhaseReceiptBinding | null;
   canaryReceipt: PhaseReceiptBinding | null;
   namespaceRegistry: NamespaceRegistry;
@@ -156,6 +158,7 @@ interface NamespaceRegistry {
     episodeID: string[];
     episodeRequestID: string[];
     jobID: string[];
+    providerRequestID: string[];
     replayPath: string[];
     replayURLSha256: string[];
     runKey: string[];
@@ -283,21 +286,33 @@ interface ReplayEvidence {
 
 interface CoworldBundleReceipt {
   schemaVersion: 2;
-  authority: "coworld-0.1.42-episode-bundle-projection-v1";
-  collectedAt: string;
+  authority: "coworld-authenticated-bundle-projection-v2";
+  downloadedAt: string;
+  xpRequestID: string;
   episodeRequestID: string;
   jobID: string;
   episodeID: string;
   gameID: string;
   seed: number;
+  coworldID: string;
+  coworldVersion: string;
+  variantID: string;
   include: ["results", "replay", "game_logs"];
   manifestSha256: string;
-  outerZipSha256: string;
-  members: Array<{ path: string; size: number; sha256: string }>;
-  resultProjectionSha256: string | null;
-  replayProjectionSha256: string;
-  gameEvidenceProjectionSha256: string | null;
-  receiptSha256: string;
+  outerBundleSha256: string;
+  members: Array<{ path: string; bytes: number; sha256: string }>;
+  projections: {
+    episodeResultsSha256: string | null;
+    gameEvidenceSha256: string | null;
+    replayEvidenceSha256: string;
+    commandReceiptsSha256: string;
+  };
+}
+
+interface CoworldCommandReceipts {
+  schemaVersion: 2;
+  coworldClient: "0.1.42";
+  commands: Array<{ command: string[]; resultSha256: string }>;
 }
 
 interface EvalCoworldIdentityReceipt {
@@ -350,10 +365,12 @@ interface EpisodeResultsEvidence {
   }>;
 }
 
-interface PlayerRuntimeManifest {
+export interface PlayerRuntimeManifest {
   schemaVersion: 2;
   artifactKind: "commander-xp-policy-evidence";
   arm: CommanderXpArm;
+  gameID: string;
+  runKey: string;
   behaviorSourceSha: string;
   behaviorSourceTreeSha: string;
   adapterSourceSha: string;
@@ -366,11 +383,12 @@ interface PlayerRuntimeManifest {
   runArgv: string[];
   flags: Record<string, string>;
   providerPreflight: {
-    required: boolean;
-    requestID: "provider-preflight";
+    required: true;
+    status: "succeeded";
+    requestID: string;
     requestedModel: string;
-    responseModel: string | null;
-    succeeded: boolean;
+    responseModel: string;
+    succeeded: true;
   };
 }
 
@@ -412,6 +430,69 @@ interface PlayerTraceDecision {
 }
 
 type PlayerTrace = PlayerTraceProvider | PlayerTraceDecision;
+
+export function verifyCommanderXpJoinedGameplayEvidence(input: {
+  preregistration: CommanderXpPreRegistrationV2;
+  plannedRequest: CommanderXpPlannedRequest;
+  runtimeManifest: PlayerRuntimeManifest;
+  playerTraceJsonl: string;
+  gameEvidenceJsonl: string;
+  expectedGameID: string;
+}): string[] {
+  verifyRuntimeManifest(
+    input.preregistration,
+    input.plannedRequest,
+    input.runtimeManifest,
+  );
+  return verifyJoinedTrace(
+    input.preregistration,
+    input.plannedRequest,
+    input.runtimeManifest,
+    parsePlayerTrace(input.playerTraceJsonl),
+    parseGameEvidence(input.gameEvidenceJsonl),
+    input.expectedGameID,
+  ).decisionRequestIDs;
+}
+
+export async function verifyCommanderXpCoworldBundleProjection(input: {
+  evidenceRoot: string;
+  runDirectory: string;
+  plannedRequest: CommanderXpPlannedRequest;
+}): Promise<void> {
+  const root = await canonicalDirectory(input.evidenceRoot);
+  const xp = await readJson<CollectedXpEvidence>(
+    root,
+    `${input.runDirectory}/xp-evidence.json`,
+  );
+  const replay = await readJson<ReplayEvidence>(
+    root,
+    `${input.runDirectory}/replay-evidence.json`,
+  );
+  const receipt = await readJson<CoworldBundleReceipt>(
+    root,
+    `${input.runDirectory}/coworld-bundle-receipt.json`,
+  );
+  const isPreflight = input.plannedRequest.phase === "provider-preflight";
+  const results = isPreflight
+    ? null
+    : await readJson<EpisodeResultsEvidence>(
+        root,
+        `${input.runDirectory}/episode-results.json`,
+      );
+  const gameEvidenceText = isPreflight
+    ? null
+    : await readText(root, `${input.runDirectory}/game-evidence.jsonl`);
+  await verifyCoworldBundleReceipt(
+    root,
+    input.runDirectory,
+    input.plannedRequest,
+    xp,
+    receipt,
+    replay,
+    results,
+    gameEvidenceText,
+  );
+}
 
 class VerificationFailure extends Error {
   constructor(
@@ -456,8 +537,8 @@ export async function verifyCommanderXpEvidence(
       index.phase === "preregistration"
         ? new Set<string>()
         : index.phase === "provider-preflight"
-        ? requiredPreflightArtifactPaths(prereg.providerPreflightRequest)
-        : requiredArtifactPaths(requiredRequests);
+          ? requiredPreflightArtifactPaths(prereg.providerPreflightRequests)
+          : requiredArtifactPaths(requiredRequests);
     requiredPaths.add(preregPath);
     requiredPaths.add("policy-identities-v2.json");
     requiredPaths.add("policy-inspect/A.json");
@@ -468,6 +549,16 @@ export async function verifyCommanderXpEvidence(
     requiredPaths.add("eval-coworld-manifest-v2.json");
     requiredPaths.add("xp-openapi.sha256");
     requiredPaths.add("commander-xp-local-verification-v2.json");
+    if (index.phase !== "preregistration") {
+      requiredPaths.add("commander-xp-prereg-ledger-v2.json");
+    }
+    if (index.phase === "canary" || index.phase === "confirmatory") {
+      requiredPaths.add("commander-xp-provider-preflight-ledger-v2.json");
+    }
+    if (index.phase === "confirmatory") {
+      requiredPaths.add("commander-xp-canary-ledger-v2.json");
+      requiredPaths.add("commander-xp-confirmatory-activation-v2.json");
+    }
     if (!sameSet(indexedPaths, requiredPaths)) {
       throw new VerificationFailure("SEALED_ARTIFACT_SET_MISMATCH");
     }
@@ -539,7 +630,13 @@ export async function verifyCommanderXpEvidence(
     const authorityRoot = await canonicalDirectory(
       path.join(envelopeRoot, "authority"),
     );
-    await verifyAuthorityTree(authorityRoot, index.phase, prereg, index, seal);
+    const authority = await verifyAuthorityTree(
+      authorityRoot,
+      index.phase,
+      prereg,
+      index,
+      seal,
+    );
     verifyNamespaceRegistry(index.namespaceRegistry);
     if (index.phase === "preregistration") {
       if (!namespaceRegistryIsEmpty(index.namespaceRegistry)) {
@@ -547,35 +644,66 @@ export async function verifyCommanderXpEvidence(
       }
       return localIntegrityResult(index.phase, 0, seal.sealSha256);
     }
-    throw new VerificationFailure(
-      "EXTERNAL_SEAL_SUCCESSOR_PHASE_CHAIN_REQUIRED",
-    );
-    /* istanbul ignore next -- gameplay unlocks only after the shared external
-     * seal producer supplies the cumulative phase-chain + namespace registry. */
     const preregLedger = await readJson<ExternalPhaseReceipt>(
-      authorityRoot,
+      root,
       "commander-xp-prereg-ledger-v2.json",
     );
     verifyExternalLedger(prereg, preregLedger, "preregistration");
+    await verifyReceiptBinding(
+      root,
+      prereg,
+      authority.preregistrationReceipt,
+      preregLedger,
+      "preregistration",
+      "commander-xp-prereg-ledger-v2.json",
+    );
+    const providerReceipt =
+      index.phase === "provider-preflight"
+        ? null
+        : await readJson<ExternalPhaseReceipt>(
+            root,
+            "commander-xp-provider-preflight-ledger-v2.json",
+          );
+    if (providerReceipt !== null) {
+      verifyExternalLedger(prereg, providerReceipt, "provider-preflight");
+      await verifyReceiptBinding(
+        root,
+        prereg,
+        authority.providerPreflightReceipt,
+        providerReceipt,
+        "provider-preflight",
+        "commander-xp-provider-preflight-ledger-v2.json",
+      );
+    }
+    const canaryReceipt =
+      index.phase === "confirmatory"
+        ? await readJson<ExternalPhaseReceipt>(
+            root,
+            "commander-xp-canary-ledger-v2.json",
+          )
+        : null;
+    if (canaryReceipt !== null) {
+      verifyExternalLedger(prereg, canaryReceipt, "canary");
+      await verifyReceiptBinding(
+        root,
+        prereg,
+        authority.canaryReceipt,
+        canaryReceipt,
+        "canary",
+        "commander-xp-canary-ledger-v2.json",
+      );
+    }
     const priorReceipt =
       index.phase === "provider-preflight"
         ? preregLedger
-        : await readJson<ExternalPhaseReceipt>(
-            authorityRoot,
-            "commander-xp-prior-phase-ledger-v2.json",
-          );
-    if (index.phase !== "provider-preflight") {
-      verifyExternalLedger(
-        prereg,
-        priorReceipt,
-        index.phase === "canary" ? "provider-preflight" : "canary",
-      );
-      if (
-        Date.parse(priorReceipt.completedAt) <
-        Date.parse(preregLedger.completedAt)
-      ) {
-        throw new VerificationFailure("PHASE_LEDGER_BEFORE_PREREG_LEDGER");
-      }
+        : index.phase === "canary"
+          ? providerReceipt!
+          : canaryReceipt!;
+    if (
+      Date.parse(priorReceipt.completedAt) <
+      Date.parse(preregLedger.completedAt)
+    ) {
+      throw new VerificationFailure("PHASE_LEDGER_BEFORE_PREREG_LEDGER");
     }
     const priorIdentities = namespaceSetsFromRegistry(
       index.phase === "provider-preflight"
@@ -586,47 +714,69 @@ export async function verifyCommanderXpEvidence(
     const gameIDBySeed = new Map<number, string>();
     const seedByGameID = new Map<string, number>();
     if (index.phase === "provider-preflight") {
-      const providerPreflight = await verifyProviderPreflightRun(
-        root,
-        prereg,
-        prereg.providerPreflightRequest,
-        seal.sealedAt,
-        preregLedger.completedAt,
-      );
-      registerUniqueXpIdentity(
-        priorIdentities,
-        phaseIdentities,
-        providerPreflight.xp,
-      );
+      const completed: Array<{
+        orderIndex: number;
+        submittedAt: string;
+        createdAt: string;
+        completedAt: string;
+      }> = [];
+      for (const planned of prereg.providerPreflightRequests) {
+        registerNamespaceIdentity(
+          priorIdentities,
+          phaseIdentities,
+          "runKey",
+          planned.runKey,
+          "GLOBAL_RUN_KEY_DUPLICATE",
+        );
+        const providerPreflight = await verifyProviderPreflightRun(
+          root,
+          prereg,
+          planned,
+          seal.sealedAt,
+          preregLedger.completedAt,
+        );
+        registerUniqueXpIdentity(
+          priorIdentities,
+          phaseIdentities,
+          providerPreflight.xp,
+        );
+        for (const requestID of providerPreflight.providerRequestIDs) {
+          registerNamespaceIdentity(
+            priorIdentities,
+            phaseIdentities,
+            "providerRequestID",
+            requestID,
+            "GLOBAL_PROVIDER_REQUEST_ID_DUPLICATE",
+          );
+        }
+        completed.push({
+          orderIndex: planned.orderIndex,
+          submittedAt: providerPreflight.submittedAt,
+          createdAt: providerPreflight.xp.xpRequestCreatedAt,
+          completedAt: providerPreflight.completedAt,
+        });
+      }
+      verifyPreflightRequestOrder(completed);
       assertRegistryMatchesSets(
         index.namespaceRegistry,
         preregLedger.namespaceRegistry,
         priorIdentities,
         phaseIdentities,
       );
-      return localIntegrityResult(
-        index.phase,
-        1,
-        seal.sealSha256,
-      );
+      return localIntegrityResult(index.phase, 3, seal.sealSha256);
     }
     let phaseAuthorizedAt = priorReceipt.completedAt;
     if (index.phase === "confirmatory") {
       if (
-        index.canarySealSha256 !==
-        priorReceipt.evidenceArtifact.localSealSha256
+        index.canarySealSha256 !== priorReceipt.evidenceArtifact.localSealSha256
       ) {
         throw new VerificationFailure("CONFIRMATORY_CANARY_RECEIPT_MISMATCH");
       }
       const activation = await readJson<ConfirmatoryActivation>(
-        authorityRoot,
+        root,
         "commander-xp-confirmatory-activation-v2.json",
       );
-      verifyConfirmatoryActivation(
-        prereg,
-        priorReceipt,
-        activation,
-      );
+      verifyConfirmatoryActivation(prereg, priorReceipt, activation);
       phaseAuthorizedAt = activation.createdAt;
     }
     const verifiedOrder: Array<{
@@ -673,6 +823,15 @@ export async function verifyCommanderXpEvidence(
           "decisionRequestID",
           requestID,
           "GLOBAL_DECISION_REQUEST_ID_DUPLICATE",
+        );
+      }
+      for (const requestID of verifiedRun.providerRequestIDs) {
+        registerNamespaceIdentity(
+          priorIdentities,
+          phaseIdentities,
+          "providerRequestID",
+          requestID,
+          "GLOBAL_PROVIDER_REQUEST_ID_DUPLICATE",
         );
       }
       verifiedRunCount += 1;
@@ -749,6 +908,107 @@ function localIntegrityResult(
   };
 }
 
+async function verifyReceiptBinding(
+  root: string,
+  prereg: CommanderXpPreRegistrationV2,
+  binding: PhaseReceiptBinding | null,
+  receipt: ExternalPhaseReceipt,
+  expectedPhase: PhaseReceiptBinding["phase"],
+  expectedPath: string,
+): Promise<void> {
+  if (binding === null) {
+    throw new VerificationFailure("PRIOR_PHASE_BINDING_MISSING");
+  }
+  verifyPhaseReceiptBindingShape(binding, expectedPhase);
+  const fileText = await readText(root, expectedPath);
+  if (
+    binding.path !== expectedPath ||
+    normalizeSha256(binding.sha256) !== sha256(fileText) ||
+    binding.ledgerSha256 !== receipt.ledgerSha256 ||
+    binding.runId !== receipt.runId ||
+    binding.attempt !== receipt.attempt ||
+    sha256Canonical(binding.evidenceArtifact) !==
+      sha256Canonical(receipt.evidenceArtifact) ||
+    sha256Canonical(binding.receiptArtifact) !==
+      sha256Canonical(receipt.receiptArtifact) ||
+    binding.localSealSha256 !== receipt.evidenceArtifact.localSealSha256 ||
+    binding.namespaceRegistrySha256 !==
+      receipt.namespaceRegistry.registrySha256 ||
+    binding.experimentID !== prereg.experimentID ||
+    binding.experimentID !== receipt.experimentID ||
+    binding.behaviorBaseSha !== prereg.identities.behaviorSourceSha ||
+    binding.behaviorBaseTreeSha !== prereg.identities.behaviorSourceTreeSha ||
+    binding.headSha !== prereg.identities.adapterSourceSha ||
+    binding.treeSha !== prereg.identities.adapterSourceTreeSha ||
+    receipt.phase !== expectedPhase
+  ) {
+    throw new VerificationFailure("PRIOR_PHASE_BINDING_MISMATCH", expectedPath);
+  }
+}
+
+function verifyPhaseReceiptBindingShape(
+  binding: PhaseReceiptBinding,
+  expectedPhase: PhaseReceiptBinding["phase"],
+): void {
+  exactRecord(
+    binding,
+    [
+      "phase",
+      "path",
+      "sha256",
+      "ledgerSha256",
+      "runId",
+      "attempt",
+      "evidenceArtifact",
+      "receiptArtifact",
+      "localSealSha256",
+      "namespaceRegistrySha256",
+      "workflowPath",
+      "experimentID",
+      "behaviorBaseSha",
+      "behaviorBaseTreeSha",
+      "headSha",
+      "treeSha",
+    ],
+    "PRIOR_PHASE_BINDING_SCHEMA_MISMATCH",
+  );
+  exactRecord(
+    binding.evidenceArtifact,
+    [
+      "id",
+      "digest",
+      "aggregateSha256",
+      "attestedSubjectDigest",
+      "localSealSha256",
+    ],
+    "PRIOR_PHASE_BINDING_EVIDENCE_SCHEMA_MISMATCH",
+  );
+  exactRecord(
+    binding.receiptArtifact,
+    ["id", "digest", "receiptSha256", "attestedSubjectDigest"],
+    "PRIOR_PHASE_BINDING_RECEIPT_SCHEMA_MISMATCH",
+  );
+  if (
+    binding.phase !== expectedPhase ||
+    !safeRelativePath(binding.path) ||
+    !isSha256(normalizeSha256(binding.sha256)) ||
+    !isSha256(binding.ledgerSha256) ||
+    !/^\d+$/.test(binding.runId) ||
+    !isPositiveInteger(binding.attempt) ||
+    binding.workflowPath !==
+      ".github/workflows/commander-xp-external-seal.yml" ||
+    !/^[0-9a-f]{40}$/.test(binding.behaviorBaseSha) ||
+    !/^[0-9a-f]{40}$/.test(binding.behaviorBaseTreeSha) ||
+    !/^[0-9a-f]{40}$/.test(binding.headSha) ||
+    !/^[0-9a-f]{40}$/.test(binding.treeSha) ||
+    !isSha256(binding.localSealSha256) ||
+    binding.localSealSha256 !== binding.evidenceArtifact.localSealSha256 ||
+    !isSha256(binding.namespaceRegistrySha256)
+  ) {
+    throw new VerificationFailure("PRIOR_PHASE_BINDING_INVALID");
+  }
+}
+
 function verifyExternalLedger(
   prereg: CommanderXpPreRegistrationV2,
   receipt: ExternalPhaseReceipt,
@@ -783,6 +1043,10 @@ function verifyExternalLedger(
       "collector",
       "phase",
       "completedAt",
+      "preregistrationReceipt",
+      "providerPreflightReceipt",
+      "priorPhaseReceipt",
+      "canaryReceipt",
       "namespaceRegistry",
       "evidenceArtifact",
       "receiptArtifact",
@@ -837,6 +1101,7 @@ function verifyExternalLedger(
     "PRIOR_COLLECTOR_SCHEMA_MISMATCH",
   );
   verifyNamespaceRegistry(receipt.namespaceRegistry);
+  verifyExternalLedgerPhaseBindings(receipt, expectedPhase);
   const { ledgerSha256, ...body } = receipt;
   if (
     receipt.schemaVersion !== 2 ||
@@ -886,9 +1151,7 @@ function verifyExternalLedger(
     !/^sha256:[0-9a-f]{64}$/.test(receipt.evidenceArtifact.digest) ||
     !isSha256(receipt.evidenceArtifact.aggregateSha256) ||
     !isSha256(receipt.evidenceArtifact.attestedSubjectDigest) ||
-    (expectedPhase === "preregistration"
-      ? receipt.evidenceArtifact.localSealSha256 !== null
-      : !isSha256(receipt.evidenceArtifact.localSealSha256)) ||
+    !isSha256(receipt.evidenceArtifact.localSealSha256) ||
     !/^\d+$/.test(receipt.receiptArtifact.id) ||
     !/^sha256:[0-9a-f]{64}$/.test(receipt.receiptArtifact.digest) ||
     !isSha256(receipt.receiptArtifact.receiptSha256) ||
@@ -896,6 +1159,70 @@ function verifyExternalLedger(
     ledgerSha256 !== sha256Canonical(body)
   ) {
     throw new VerificationFailure("PRIOR_PHASE_RECEIPT_INVALID");
+  }
+}
+
+function verifyExternalLedgerPhaseBindings(
+  receipt: ExternalPhaseReceipt,
+  phase: ExternalPhaseReceipt["phase"],
+): void {
+  const preregistration = receipt.preregistrationReceipt;
+  const provider = receipt.providerPreflightReceipt;
+  const prior = receipt.priorPhaseReceipt;
+  const canary = receipt.canaryReceipt;
+  if (phase === "preregistration") {
+    if (
+      preregistration !== null ||
+      provider !== null ||
+      prior !== null ||
+      canary !== null ||
+      receipt.namespaceRegistry.priorRegistrySha256 !== null
+    ) {
+      throw new VerificationFailure("PRIOR_PHASE_CHAIN_INVALID");
+    }
+    return;
+  }
+  if (preregistration === null) {
+    throw new VerificationFailure("PRIOR_PHASE_CHAIN_INVALID");
+  }
+  verifyPhaseReceiptBindingShape(preregistration, "preregistration");
+  if (phase === "provider-preflight") {
+    if (provider !== null || prior !== null || canary !== null) {
+      throw new VerificationFailure("PRIOR_PHASE_CHAIN_INVALID");
+    }
+    if (
+      receipt.namespaceRegistry.priorRegistrySha256 !==
+      preregistration.namespaceRegistrySha256
+    ) {
+      throw new VerificationFailure("PRIOR_PHASE_REGISTRY_CHAIN_INVALID");
+    }
+    return;
+  }
+  if (provider === null || prior === null) {
+    throw new VerificationFailure("PRIOR_PHASE_CHAIN_INVALID");
+  }
+  verifyPhaseReceiptBindingShape(provider, "provider-preflight");
+  if (phase === "canary") {
+    if (
+      canary !== null ||
+      sha256Canonical(provider) !== sha256Canonical(prior) ||
+      receipt.namespaceRegistry.priorRegistrySha256 !==
+        provider.namespaceRegistrySha256
+    ) {
+      throw new VerificationFailure("PRIOR_PHASE_CHAIN_INVALID");
+    }
+    return;
+  }
+  if (canary === null) {
+    throw new VerificationFailure("PRIOR_PHASE_CHAIN_INVALID");
+  }
+  verifyPhaseReceiptBindingShape(canary, "canary");
+  if (
+    sha256Canonical(canary) !== sha256Canonical(prior) ||
+    receipt.namespaceRegistry.priorRegistrySha256 !==
+      canary.namespaceRegistrySha256
+  ) {
+    throw new VerificationFailure("PRIOR_PHASE_CHAIN_INVALID");
   }
 }
 
@@ -986,8 +1313,7 @@ function verifyPreRegistration(prereg: CommanderXpPreRegistrationV2): void {
     adapterSourceTreeSha: prereg.identities.adapterSourceTreeSha,
     sourceDiffManifestSha256: prereg.identities.sourceDiffManifestSha256,
     sourceProvenanceSha256: prereg.identities.sourceProvenanceSha256,
-    policyBuildProvenanceDigest:
-      prereg.identities.policyBuildProvenanceDigest,
+    policyBuildProvenanceDigest: prereg.identities.policyBuildProvenanceDigest,
     gameBuildProvenanceDigest: prereg.identities.gameBuildProvenanceDigest,
     coworldID: prereg.identities.coworldID,
     coworldVersion: prereg.identities.coworldVersion,
@@ -1141,7 +1467,10 @@ async function verifyEvidenceTreeAllowlist(
   }
   const missing = [...indexedPaths].find((entry) => !files.includes(entry));
   if (missing !== undefined) {
-    throw new VerificationFailure("EVIDENCE_TREE_INDEXED_FILE_MISSING", missing);
+    throw new VerificationFailure(
+      "EVIDENCE_TREE_INDEXED_FILE_MISSING",
+      missing,
+    );
   }
 }
 
@@ -1151,7 +1480,12 @@ async function verifyAuthorityTree(
   prereg: CommanderXpPreRegistrationV2,
   index: EvidenceIndex,
   seal: EvidenceSeal,
-): Promise<void> {
+): Promise<{
+  preregistrationReceipt: PhaseReceiptBinding | null;
+  providerPreflightReceipt: PhaseReceiptBinding | null;
+  priorPhaseReceipt: PhaseReceiptBinding | null;
+  canaryReceipt: PhaseReceiptBinding | null;
+}> {
   const files = await fs.readdir(authorityRoot, { withFileTypes: true });
   if (
     files.length !== 1 ||
@@ -1175,13 +1509,26 @@ async function verifyAuthorityTree(
       "source",
       "evidence",
       "preregistrationReceipt",
+      "providerPreflightReceipt",
+      "priorPhaseReceipt",
       "canaryReceipt",
     ],
     "AUTHORITY_REQUEST_SCHEMA_MISMATCH",
   );
   const sourceCI = exactRecord(
     request.sourceCI,
-    ["workflowID", "workflowPath", "runID", "runAttempt", "headSha"],
+    [
+      "workflowID",
+      "workflowPath",
+      "runID",
+      "runAttempt",
+      "headSha",
+      "actor",
+      "triggeringActor",
+      "headRepository",
+      "event",
+      "ref",
+    ],
     "AUTHORITY_SOURCE_CI_SCHEMA_MISMATCH",
   );
   const sourceArtifact = exactRecord(
@@ -1196,9 +1543,11 @@ async function verifyAuthorityTree(
       "workflowPath",
       "workflowName",
       "actor",
+      "triggeringActor",
       "headRepository",
       "event",
       "ref",
+      "headSha",
     ],
     "AUTHORITY_SOURCE_ARTIFACT_SCHEMA_MISMATCH",
   );
@@ -1228,7 +1577,9 @@ async function verifyAuthorityTree(
     ],
     "AUTHORITY_EVIDENCE_SCHEMA_MISMATCH",
   );
-  const evidenceRoot = await canonicalDirectory(path.join(authorityRoot, "..", "evidence"));
+  const evidenceRoot = await canonicalDirectory(
+    path.join(authorityRoot, "..", "evidence"),
+  );
   const boundFiles = [
     [evidence.preRegistrationPath, evidence.preRegistrationSha256],
     [evidence.localIndexPath, evidence.localIndexSha256],
@@ -1241,7 +1592,9 @@ async function verifyAuthorityTree(
       !safeRelativePath(relativePath) ||
       typeof expectedSha !== "string" ||
       normalizeSha256(expectedSha) !==
-        sha256(await fs.readFile(await containedFile(evidenceRoot, relativePath)))
+        sha256(
+          await fs.readFile(await containedFile(evidenceRoot, relativePath)),
+        )
     ) {
       throw new VerificationFailure("AUTHORITY_EVIDENCE_BINDING_MISMATCH");
     }
@@ -1255,14 +1608,21 @@ async function verifyAuthorityTree(
     !isPositiveInteger(sourceCI.runID) ||
     !isPositiveInteger(sourceCI.runAttempt) ||
     sourceCI.headSha !== prereg.identities.adapterSourceSha ||
+    sourceCI.actor !== "0xNad" ||
+    sourceCI.triggeringActor !== "0xNad" ||
+    sourceCI.headRepository !== "0xNad/ProxyWar" ||
+    !["push", "workflow_dispatch"].includes(String(sourceCI.event)) ||
+    sourceCI.ref !== "refs/heads/main" ||
     sourceArtifact.workflowPath !==
       ".github/workflows/commander-xp-evidence.yml" ||
     sourceArtifact.workflowName !==
       "Commander XP protected experiment evidence" ||
     sourceArtifact.actor !== "0xNad" ||
+    sourceArtifact.triggeringActor !== "0xNad" ||
     sourceArtifact.headRepository !== "0xNad/ProxyWar" ||
     sourceArtifact.event !== "workflow_dispatch" ||
     sourceArtifact.ref !== "refs/heads/main" ||
+    sourceArtifact.headSha !== prereg.identities.adapterSourceSha ||
     !isPositiveInteger(sourceArtifact.artifactID) ||
     !isPositiveInteger(sourceArtifact.workflowRunID) ||
     !isPositiveInteger(sourceArtifact.workflowRunAttempt) ||
@@ -1274,17 +1634,56 @@ async function verifyAuthorityTree(
     source.workflowSourceTreeSha !== prereg.identities.adapterSourceTreeSha ||
     !Array.isArray(source.sourceAllowlist) ||
     source.sourceAllowlist.length === 0 ||
-    evidence.preRegistrationPath !==
-      "commander-xp-preregistration-v2.json" ||
+    evidence.preRegistrationPath !== "commander-xp-preregistration-v2.json" ||
     evidence.localIndexPath !== "commander-xp-evidence-index-v2.json" ||
     evidence.localSealPath !== "commander-xp-evidence-seal-v2.json" ||
     normalizeSha256(String(evidence.localSealSha256)) !== seal.sealSha256 ||
-    (phase === "preregistration" &&
-      (request.preregistrationReceipt !== null ||
-        request.canaryReceipt !== null))
+    !authorityReceiptShapeMatchesPhase(request, phase)
   ) {
     throw new VerificationFailure("AUTHORITY_REQUEST_IDENTITY_MISMATCH");
   }
+  return {
+    preregistrationReceipt:
+      request.preregistrationReceipt as PhaseReceiptBinding | null,
+    providerPreflightReceipt:
+      request.providerPreflightReceipt as PhaseReceiptBinding | null,
+    priorPhaseReceipt: request.priorPhaseReceipt as PhaseReceiptBinding | null,
+    canaryReceipt: request.canaryReceipt as PhaseReceiptBinding | null,
+  };
+}
+
+function authorityReceiptShapeMatchesPhase(
+  request: Record<string, unknown>,
+  phase: CommanderXpEvidencePhase,
+): boolean {
+  const preregistrationReceipt = request.preregistrationReceipt;
+  const providerPreflightReceipt = request.providerPreflightReceipt;
+  const priorPhaseReceipt = request.priorPhaseReceipt;
+  const canaryReceipt = request.canaryReceipt;
+  if (phase === "preregistration") {
+    return (
+      preregistrationReceipt === null &&
+      providerPreflightReceipt === null &&
+      priorPhaseReceipt === null &&
+      canaryReceipt === null
+    );
+  }
+  if (preregistrationReceipt === null) return false;
+  if (phase === "provider-preflight") {
+    return (
+      providerPreflightReceipt === null &&
+      priorPhaseReceipt === null &&
+      canaryReceipt === null
+    );
+  }
+  if (providerPreflightReceipt === null || priorPhaseReceipt === null) {
+    return false;
+  }
+  if (phase === "canary") return canaryReceipt === null;
+  return (
+    canaryReceipt !== null &&
+    sha256Canonical(canaryReceipt) === sha256Canonical(priorPhaseReceipt)
+  );
 }
 
 function normalizeSha256(value: string): string {
@@ -1617,6 +2016,7 @@ async function verifyRun(
 ): Promise<{
   xp: CollectedXpEvidence;
   decisionRequestIDs: string[];
+  providerRequestIDs: string[];
   seed: number;
   gameID: string;
   submittedAt: string;
@@ -1683,7 +2083,9 @@ async function verifyRun(
     requestedReadback,
     replay,
   );
-  verifyCoworldBundleReceipt(
+  await verifyCoworldBundleReceipt(
+    root,
+    directory,
     planned,
     xp,
     bundleReceipt,
@@ -1695,8 +2097,10 @@ async function verifyRun(
     throw new VerificationFailure("RUN_COMPLETED_AFTER_SEAL", directory);
   }
   if (
+    Date.parse(submitted.submittedAt) <=
+      Date.parse(providerPreflightCompletedAt) ||
     Date.parse(xp.xpRequestCreatedAt) <=
-    Date.parse(providerPreflightCompletedAt)
+      Date.parse(providerPreflightCompletedAt)
   ) {
     throw new VerificationFailure(
       "GAMEPLAY_STARTED_BEFORE_PROVIDER_PREFLIGHT_COMPLETED",
@@ -1725,7 +2129,7 @@ async function verifyRun(
     throw new VerificationFailure("PLAYER_TRACE_COUNT_MISMATCH", directory);
   }
   const gameEvidence = parseGameEvidence(gameEvidenceText);
-  const decisionRequestIDs = verifyJoinedTrace(
+  const joinedTrace = verifyJoinedTrace(
     prereg,
     planned,
     manifest,
@@ -1736,7 +2140,8 @@ async function verifyRun(
   verifyPrivacy(`${traceText}\n${gameEvidenceText}`, manifest);
   return {
     xp,
-    decisionRequestIDs,
+    decisionRequestIDs: joinedTrace.decisionRequestIDs,
+    providerRequestIDs: joinedTrace.providerRequestIDs,
     seed: results.seed,
     gameID: results.gameID,
     submittedAt: submitted.submittedAt,
@@ -1749,9 +2154,14 @@ async function verifyProviderPreflightRun(
   planned: CommanderXpPlannedRequest,
   sealedAt: string,
   preregistrationLedgerCompletedAt: string,
-): Promise<{ completedAt: string; xp: CollectedXpEvidence }> {
+): Promise<{
+  completedAt: string;
+  xp: CollectedXpEvidence;
+  providerRequestIDs: string[];
+  submittedAt: string;
+}> {
   const directory = runDirectory(planned);
-  if (planned.phase !== "provider-preflight" || planned.arm !== "C") {
+  if (planned.phase !== "provider-preflight") {
     throw new VerificationFailure("PROVIDER_PREFLIGHT_PLAN_INVALID", directory);
   }
   const xp = await readJson<CollectedXpEvidence>(
@@ -1804,7 +2214,9 @@ async function verifyProviderPreflightRun(
     replay,
     null,
   );
-  verifyCoworldBundleReceipt(
+  await verifyCoworldBundleReceipt(
+    root,
+    directory,
     planned,
     xp,
     bundleReceipt,
@@ -1813,14 +2225,13 @@ async function verifyProviderPreflightRun(
     null,
   );
   if (Date.parse(xp.completedAt) > Date.parse(sealedAt)) {
-    throw new VerificationFailure(
-      "PREFLIGHT_COMPLETED_AFTER_SEAL",
-      directory,
-    );
+    throw new VerificationFailure("PREFLIGHT_COMPLETED_AFTER_SEAL", directory);
   }
   if (
+    Date.parse(submitted.submittedAt) <=
+      Date.parse(preregistrationLedgerCompletedAt) ||
     Date.parse(xp.xpRequestCreatedAt) <=
-    Date.parse(preregistrationLedgerCompletedAt)
+      Date.parse(preregistrationLedgerCompletedAt)
   ) {
     throw new VerificationFailure(
       "PREFLIGHT_STARTED_BEFORE_PREREGISTRATION_LEDGER",
@@ -1851,8 +2262,11 @@ async function verifyProviderPreflightRun(
   const providers = trace.filter(
     (entry): entry is PlayerTraceProvider => entry.recordType === "provider",
   );
+  const expectedPreflightRequestID = commanderXpProviderPreflightRequestID(
+    planned.runKey,
+  );
   const preflight = providers.filter(
-    (entry) => entry.requestID === "provider-preflight",
+    (entry) => entry.requestID === expectedPreflightRequestID,
   );
   if (preflight.length !== 1) {
     throw new VerificationFailure(
@@ -1868,7 +2282,7 @@ async function verifyProviderPreflightRun(
   )) {
     if (
       decision.schemaVersion !== 2 ||
-      decision.arm !== "C" ||
+      decision.arm !== planned.arm ||
       decision.fallbackUsed ||
       decision.llmPlannerDegraded ||
       decision.degradedCause !== null
@@ -1880,7 +2294,12 @@ async function verifyProviderPreflightRun(
     }
   }
   verifyPrivacy(traceText, manifest);
-  return { completedAt: xp.completedAt, xp };
+  return {
+    completedAt: xp.completedAt,
+    xp,
+    providerRequestIDs: [...new Set(providers.map((entry) => entry.requestID))],
+    submittedAt: submitted.submittedAt,
+  };
 }
 
 function verifyXpIdentity(
@@ -1972,7 +2391,9 @@ function verifyXpIdentity(
       slots.has(player.slot) ||
       !isNonEmptyString(player.name) ||
       player.score !== results.scores[player.slot] ||
-      !(player.tilesOwned === null || isNonNegativeInteger(player.tilesOwned)) ||
+      !(
+        player.tilesOwned === null || isNonNegativeInteger(player.tilesOwned)
+      ) ||
       !(player.isAlive === null || typeof player.isAlive === "boolean")
     ) {
       throw new VerificationFailure(
@@ -2150,7 +2571,8 @@ function verifySubmittedRequest(
     !Number.isFinite(Date.parse(createResponse.receivedAt)) ||
     Date.parse(prereg.createdAt) > Date.parse(submitted.submittedAt) ||
     Date.parse(submitted.submittedAt) > Date.parse(createResponse.createdAt) ||
-    Date.parse(createResponse.createdAt) > Date.parse(createResponse.receivedAt) ||
+    Date.parse(createResponse.createdAt) >
+      Date.parse(createResponse.receivedAt) ||
     requestedReadback.schemaVersion !== 2 ||
     requestedReadback.notes !== planned.requestBody.notes ||
     requestedReadback.numEpisodes !== 1 ||
@@ -2317,76 +2739,180 @@ function verifyReplayEvidence(
   }
 }
 
-function verifyCoworldBundleReceipt(
+async function verifyCoworldBundleReceipt(
+  root: string,
+  directory: string,
   planned: CommanderXpPlannedRequest,
   xp: CollectedXpEvidence,
   receipt: CoworldBundleReceipt,
   replay: ReplayEvidence,
   results: EpisodeResultsEvidence | null,
   gameEvidenceText: string | null,
-): void {
+): Promise<void> {
   exactRecord(
     receipt,
     [
       "schemaVersion",
       "authority",
-      "collectedAt",
+      "downloadedAt",
+      "xpRequestID",
       "episodeRequestID",
       "jobID",
       "episodeID",
       "gameID",
       "seed",
+      "coworldID",
+      "coworldVersion",
+      "variantID",
       "include",
       "manifestSha256",
-      "outerZipSha256",
+      "outerBundleSha256",
       "members",
-      "resultProjectionSha256",
-      "replayProjectionSha256",
-      "gameEvidenceProjectionSha256",
-      "receiptSha256",
+      "projections",
     ],
     "COWORLD_BUNDLE_RECEIPT_SCHEMA_MISMATCH",
   );
-  const { receiptSha256, ...body } = receipt;
-  const expectedMembers = ["logs/game.log", "manifest.json", "replay", "results.json"];
+  exactRecord(
+    receipt.projections,
+    [
+      "episodeResultsSha256",
+      "gameEvidenceSha256",
+      "replayEvidenceSha256",
+      "commandReceiptsSha256",
+    ],
+    "COWORLD_BUNDLE_PROJECTION_SCHEMA_MISMATCH",
+  );
+  const expectedMembers = [
+    "logs/game.log",
+    "manifest.json",
+    "replay",
+    "results.json",
+  ];
+  const expectedProjectionHashes = {
+    episodeResultsSha256:
+      results === null
+        ? null
+        : sha256(
+            await fs.readFile(
+              await containedFile(root, `${directory}/episode-results.json`),
+            ),
+          ),
+    gameEvidenceSha256:
+      gameEvidenceText === null
+        ? null
+        : sha256(
+            await fs.readFile(
+              await containedFile(root, `${directory}/game-evidence.jsonl`),
+            ),
+          ),
+    replayEvidenceSha256: sha256(
+      await fs.readFile(
+        await containedFile(root, `${directory}/replay-evidence.json`),
+      ),
+    ),
+    commandReceiptsSha256: sha256(
+      await fs.readFile(
+        await containedFile(root, `${directory}/command-receipts.json`),
+      ),
+    ),
+  };
+  const commandReceipts = await readJson<CoworldCommandReceipts>(
+    root,
+    `${directory}/command-receipts.json`,
+  );
+  verifyCommandReceipts(planned, xp, receipt, commandReceipts);
   if (
     receipt.schemaVersion !== 2 ||
-    receipt.authority !== "coworld-0.1.42-episode-bundle-projection-v1" ||
-    !Number.isFinite(Date.parse(receipt.collectedAt)) ||
+    receipt.authority !== "coworld-authenticated-bundle-projection-v2" ||
+    !Number.isFinite(Date.parse(receipt.downloadedAt)) ||
+    receipt.xpRequestID !== xp.xpRequestID ||
     receipt.episodeRequestID !== xp.episodeRequestID ||
     receipt.jobID !== xp.jobID ||
     receipt.episodeID !== xp.episodeID ||
     receipt.gameID !== coworldEpisodeIdentity(planned.seed).gameId ||
     receipt.seed !== planned.seed ||
+    receipt.coworldID !== xp.coworldID ||
+    receipt.coworldVersion !== xp.coworldVersion ||
+    receipt.variantID !== xp.variantID ||
     sha256Canonical(receipt.include) !==
       sha256Canonical(["results", "replay", "game_logs"]) ||
     !isSha256(receipt.manifestSha256) ||
-    !isSha256(receipt.outerZipSha256) ||
+    !isSha256(receipt.outerBundleSha256) ||
     !Array.isArray(receipt.members) ||
     receipt.members.length !== expectedMembers.length ||
     receipt.members.some((member, index) => {
       const exact = exactRecord(
         member,
-        ["path", "size", "sha256"],
+        ["path", "bytes", "sha256"],
         "COWORLD_BUNDLE_MEMBER_SCHEMA_MISMATCH",
       );
       return (
         exact.path !== expectedMembers[index] ||
-        !isPositiveInteger(exact.size) ||
+        !isPositiveInteger(exact.bytes) ||
         !isSha256(exact.sha256)
       );
     }) ||
     replay.contentSha256 !==
       receipt.members.find((member) => member.path === "replay")?.sha256 ||
-    receipt.replayProjectionSha256 !== sha256Canonical(replay) ||
-    receipt.resultProjectionSha256 !==
-      (results === null ? null : sha256Canonical(results)) ||
-    receipt.gameEvidenceProjectionSha256 !==
-      (gameEvidenceText === null ? null : sha256(gameEvidenceText)) ||
-    receiptSha256 !== sha256Canonical(body)
+    receipt.projections.episodeResultsSha256 !==
+      expectedProjectionHashes.episodeResultsSha256 ||
+    receipt.projections.gameEvidenceSha256 !==
+      expectedProjectionHashes.gameEvidenceSha256 ||
+    receipt.projections.replayEvidenceSha256 !==
+      expectedProjectionHashes.replayEvidenceSha256 ||
+    receipt.projections.commandReceiptsSha256 !==
+      expectedProjectionHashes.commandReceiptsSha256
   ) {
     throw new VerificationFailure(
       "COWORLD_BUNDLE_RECEIPT_MISMATCH",
+      runDirectory(planned),
+    );
+  }
+}
+
+function verifyCommandReceipts(
+  planned: CommanderXpPlannedRequest,
+  xp: CollectedXpEvidence,
+  receipt: CoworldBundleReceipt,
+  commandReceipts: CoworldCommandReceipts,
+): void {
+  exactRecord(
+    commandReceipts,
+    ["schemaVersion", "coworldClient", "commands"],
+    "COWORLD_COMMAND_RECEIPTS_SCHEMA_MISMATCH",
+  );
+  const expectedCommands = [
+    ["xp-request", "get", xp.xpRequestID, "--json"],
+    ["commander-xp-episode-bundle", xp.episodeRequestID],
+    [
+      "episode-logs",
+      xp.episodeRequestID,
+      "--agent",
+      String(planned.subjectSeat),
+      "--artifact",
+    ],
+  ];
+  if (
+    commandReceipts.schemaVersion !== 2 ||
+    commandReceipts.coworldClient !== "0.1.42" ||
+    !Array.isArray(commandReceipts.commands) ||
+    commandReceipts.commands.length !== expectedCommands.length ||
+    commandReceipts.commands.some((entry, index) => {
+      exactRecord(
+        entry,
+        ["command", "resultSha256"],
+        "COWORLD_COMMAND_RECEIPT_SCHEMA_MISMATCH",
+      );
+      return (
+        sha256Canonical(entry.command) !==
+          sha256Canonical(expectedCommands[index]) ||
+        !isSha256(entry.resultSha256)
+      );
+    }) ||
+    commandReceipts.commands[1]?.resultSha256 !== receipt.outerBundleSha256
+  ) {
+    throw new VerificationFailure(
+      "COWORLD_COMMAND_RECEIPTS_MISMATCH",
       runDirectory(planned),
     );
   }
@@ -2397,13 +2923,14 @@ function verifyRuntimeManifest(
   planned: CommanderXpPlannedRequest,
   manifest: PlayerRuntimeManifest,
 ): void {
-  const preflightRequired = planned.arm !== "B";
   exactRecord(
     manifest,
     [
       "schemaVersion",
       "artifactKind",
       "arm",
+      "gameID",
+      "runKey",
       "behaviorSourceSha",
       "behaviorSourceTreeSha",
       "adapterSourceSha",
@@ -2426,6 +2953,8 @@ function verifyRuntimeManifest(
       "FREETEXT_MESSAGES",
       "SPATIAL_OBSERVATION",
       "SPATIAL_MINIMAP",
+      "KEYSTONE_PROFILE",
+      "LLM_TIMEOUT_MS",
     ],
     "PLAYER_RUNTIME_FLAGS_SCHEMA_MISMATCH",
   );
@@ -2433,6 +2962,7 @@ function verifyRuntimeManifest(
     manifest.providerPreflight,
     [
       "required",
+      "status",
       "requestID",
       "requestedModel",
       "responseModel",
@@ -2444,6 +2974,8 @@ function verifyRuntimeManifest(
     manifest.schemaVersion !== 2 ||
     manifest.artifactKind !== "commander-xp-policy-evidence" ||
     manifest.arm !== planned.arm ||
+    manifest.gameID !== coworldEpisodeIdentity(planned.seed).gameId ||
+    manifest.runKey !== planned.runKey ||
     manifest.behaviorSourceSha !== prereg.identities.behaviorSourceSha ||
     manifest.behaviorSourceTreeSha !==
       prereg.identities.behaviorSourceTreeSha ||
@@ -2459,16 +2991,14 @@ function verifyRuntimeManifest(
     sha256Canonical(manifest.runArgv) !==
       sha256Canonical(prereg.identities.runArgv[planned.arm]) ||
     sha256Canonical(manifest.flags) !== sha256Canonical(prereg.fixedFlags) ||
-    manifest.providerPreflight.required !== preflightRequired ||
+    manifest.providerPreflight.required !== true ||
+    manifest.providerPreflight.status !== "succeeded" ||
+    manifest.providerPreflight.requestID !==
+      commanderXpProviderPreflightRequestID(planned.runKey) ||
     manifest.providerPreflight.requestedModel !==
       prereg.identities.bedrockModel ||
-    (preflightRequired &&
-      (!manifest.providerPreflight.succeeded ||
-        manifest.providerPreflight.responseModel !==
-          prereg.identities.bedrockModel)) ||
-    (!preflightRequired &&
-      (manifest.providerPreflight.responseModel !== null ||
-        !manifest.providerPreflight.succeeded))
+    !manifest.providerPreflight.succeeded ||
+    manifest.providerPreflight.responseModel !== prereg.identities.bedrockModel
   ) {
     throw new VerificationFailure(
       "PLAYER_RUNTIME_IDENTITY_MISMATCH",
@@ -2486,6 +3016,7 @@ function emptyNamespaceSets(): NamespaceSets {
     episodeID: new Set(),
     episodeRequestID: new Set(),
     jobID: new Set(),
+    providerRequestID: new Set(),
     replayPath: new Set(),
     replayURLSha256: new Set(),
     runKey: new Set(),
@@ -2512,6 +3043,7 @@ function verifyNamespaceRegistry(registry: NamespaceRegistry): void {
       "episodeID",
       "episodeRequestID",
       "jobID",
+      "providerRequestID",
       "replayPath",
       "replayURLSha256",
       "runKey",
@@ -2523,8 +3055,10 @@ function verifyNamespaceRegistry(registry: NamespaceRegistry): void {
   if (
     registry.schemaVersion !== 2 ||
     registry.mode !== "cumulative-per-namespace" ||
-    !(registry.priorRegistrySha256 === null ||
-      isSha256(registry.priorRegistrySha256)) ||
+    !(
+      registry.priorRegistrySha256 === null ||
+      isSha256(registry.priorRegistrySha256)
+    ) ||
     registrySha256 !== sha256ExternalCanonical(body)
   ) {
     throw new VerificationFailure("NAMESPACE_REGISTRY_HASH_MISMATCH");
@@ -2572,10 +3106,7 @@ function namespaceRegistryFromSets(
     mode: "cumulative-per-namespace" as const,
     priorRegistrySha256: priorRegistry?.registrySha256 ?? null,
     namespaces: Object.fromEntries(
-      Object.entries(merged).map(([key, values]) => [
-        key,
-        [...values].sort(),
-      ]),
+      Object.entries(merged).map(([key, values]) => [key, [...values].sort()]),
     ) as NamespaceRegistry["namespaces"],
   };
   return { ...body, registrySha256: sha256ExternalCanonical(body) };
@@ -2631,16 +3162,8 @@ function registerUniqueXpIdentity(
     ],
     ["episodeID", xp.episodeID, "GLOBAL_EPISODE_DUPLICATE"],
     ["jobID", xp.jobID, "GLOBAL_JOB_DUPLICATE"],
-    [
-      "replayPath",
-      xp.replayPath,
-      "GLOBAL_REPLAY_PATH_DUPLICATE",
-    ],
-    [
-      "replayURLSha256",
-      xp.replayURLSha256,
-      "GLOBAL_REPLAY_URL_DUPLICATE",
-    ],
+    ["replayPath", xp.replayPath, "GLOBAL_REPLAY_PATH_DUPLICATE"],
+    ["replayURLSha256", xp.replayURLSha256, "GLOBAL_REPLAY_URL_DUPLICATE"],
   ] as const) {
     registerNamespaceIdentity(prior, current, namespace, value, code);
   }
@@ -2682,22 +3205,45 @@ function verifyMatchedRequestOrder(
         Date.parse(prior.createdAt) >= Date.parse(current.createdAt) ||
         (phase === "confirmatory" &&
           (Date.parse(prior.completedAt) > Date.parse(current.submittedAt) ||
-            Date.parse(prior.completedAt) >=
-              Date.parse(current.completedAt)))
+            Date.parse(prior.completedAt) >= Date.parse(current.completedAt)))
       ) {
-        throw new VerificationFailure("MATCHED_REQUEST_TIMESTAMP_ORDER_MISMATCH");
+        throw new VerificationFailure(
+          "MATCHED_REQUEST_TIMESTAMP_ORDER_MISMATCH",
+        );
       }
     }
   }
 }
 
-function registerUniqueIdentity(
-  seen: Set<string>,
-  value: string,
-  code: string,
+function verifyPreflightRequestOrder(
+  runs: readonly {
+    orderIndex: number;
+    submittedAt: string;
+    createdAt: string;
+    completedAt: string;
+  }[],
 ): void {
-  if (seen.has(value)) throw new VerificationFailure(code);
-  seen.add(value);
+  const ordered = [...runs].sort(
+    (left, right) => left.orderIndex - right.orderIndex,
+  );
+  if (
+    ordered.length !== 3 ||
+    ordered.some((entry, index) => entry.orderIndex !== index)
+  ) {
+    throw new VerificationFailure("PREFLIGHT_REQUEST_ORDER_INDEX_MISMATCH");
+  }
+  for (let index = 1; index < ordered.length; index += 1) {
+    const prior = ordered[index - 1]!;
+    const current = ordered[index]!;
+    if (
+      Date.parse(prior.submittedAt) >= Date.parse(current.submittedAt) ||
+      Date.parse(prior.createdAt) >= Date.parse(current.createdAt)
+    ) {
+      throw new VerificationFailure(
+        "PREFLIGHT_REQUEST_TIMESTAMP_ORDER_MISMATCH",
+      );
+    }
+  }
 }
 
 function verifyJoinedTrace(
@@ -2707,7 +3253,7 @@ function verifyJoinedTrace(
   trace: PlayerTrace[],
   gameEvidence: CommanderXpGameEvidence[],
   expectedGameID: string,
-): string[] {
+): { decisionRequestIDs: string[]; providerRequestIDs: string[] } {
   const providers = trace.filter(
     (entry): entry is PlayerTraceProvider => entry.recordType === "provider",
   );
@@ -2720,15 +3266,24 @@ function verifyJoinedTrace(
   const gameplayProviders = providers.filter(
     (entry) => entry.stage !== "preflight",
   );
-  if (planned.arm === "B" && providers.length !== 0) {
+  if (preflightProviders.length !== 1) {
     throw new VerificationFailure(
-      "ARM_B_PROVIDER_CALL_PRESENT",
+      "PROVIDER_PREFLIGHT_TRACE_MISSING",
       runDirectory(planned),
     );
   }
-  if (planned.arm !== "B" && preflightProviders.length !== 1) {
+  const expectedPreflightRequestID = commanderXpProviderPreflightRequestID(
+    planned.runKey,
+  );
+  if (preflightProviders[0]?.requestID !== expectedPreflightRequestID) {
     throw new VerificationFailure(
-      "REAL_PROVIDER_GAMEPLAY_CALL_MISSING",
+      "PROVIDER_PREFLIGHT_IDENTITY_MISMATCH",
+      runDirectory(planned),
+    );
+  }
+  if (planned.arm === "B" && gameplayProviders.length !== 0) {
+    throw new VerificationFailure(
+      "ARM_B_GAMEPLAY_PROVIDER_CALL_PRESENT",
       runDirectory(planned),
     );
   }
@@ -2760,10 +3315,11 @@ function verifyJoinedTrace(
   let commanderEligible = 0;
   let commanderAligned = 0;
   let armAExternalPlannerDecisions = 0;
+  let armCPlan: CommanderPlanContinuity | null = null;
   for (const [requestID, decision] of decisionByID) {
-    const games = gameByID.get(requestID)!.sort(
-      (left, right) => left.sequence - right.sequence,
-    );
+    const games = gameByID
+      .get(requestID)!
+      .sort((left, right) => left.sequence - right.sequence);
     const selectedIDs = games.map((entry) => entry.chosen.id);
     if (
       sha256Canonical(selectedIDs) !==
@@ -2777,31 +3333,31 @@ function verifyJoinedTrace(
     }
     for (const game of games) {
       if (
-      decision.schemaVersion !== 2 ||
-      decision.arm !== planned.arm ||
-      decision.fallbackUsed ||
-      decision.llmPlannerDegraded ||
-      decision.degradedCause !== null ||
-      game.schemaVersion !== 2 ||
-      game.runKey !== planned.runKey ||
-      game.gameID !== expectedGameID ||
-      game.coworldSlot !== planned.subjectSeat ||
-      game.result.accepted !== true ||
-      !["confirmed", "not_applicable"].includes(String(game.audit.status)) ||
-      !decision.selectedLegalActionIDs.includes(game.chosen.id) ||
-      !game.legalActions.some(
-        (action) =>
-          action.id === game.chosen.id && action.kind === game.chosen.kind,
-      ) ||
-      sha256Canonical(game.legalActions) !==
-        sha256Canonical(decision.offeredLegalActions) ||
-      game.offeredLegalActionSetSha256 !==
-        decision.offeredLegalActionSetSha256 ||
-      !decision.offeredLegalActions.some(
-        (action) => action.id === decision.selectedLegalActionID,
-      ) ||
-      sha256Canonical(game.generatedIntent) !==
-        sha256Canonical(game.result.submittedIntent)
+        decision.schemaVersion !== 2 ||
+        decision.arm !== planned.arm ||
+        decision.fallbackUsed ||
+        decision.llmPlannerDegraded ||
+        decision.degradedCause !== null ||
+        game.schemaVersion !== 2 ||
+        game.runKey !== planned.runKey ||
+        game.gameID !== expectedGameID ||
+        game.coworldSlot !== planned.subjectSeat ||
+        game.result.accepted !== true ||
+        !["confirmed", "not_applicable"].includes(String(game.audit.status)) ||
+        !decision.selectedLegalActionIDs.includes(game.chosen.id) ||
+        !game.legalActions.some(
+          (action) =>
+            action.id === game.chosen.id && action.kind === game.chosen.kind,
+        ) ||
+        sha256Canonical(game.legalActions) !==
+          sha256Canonical(decision.offeredLegalActions) ||
+        game.offeredLegalActionSetSha256 !==
+          decision.offeredLegalActionSetSha256 ||
+        !decision.offeredLegalActions.some(
+          (action) => action.id === decision.selectedLegalActionID,
+        ) ||
+        sha256Canonical(game.generatedIntent) !==
+          sha256Canonical(game.result.submittedIntent)
       ) {
         throw new VerificationFailure(
           "DECISION_EXECUTION_EXCLUSION",
@@ -2817,12 +3373,12 @@ function verifyJoinedTrace(
       (spawnRequired && spawn === null) ||
       (!spawnRequired && spawn !== null) ||
       (spawn !== null &&
-      (!spawn.ballotValid ||
-        spawn.stageFallbackUsed ||
-        spawn.stageDegraded ||
-        spawn.assignedActionID !== decision.selectedLegalActionID ||
-        sha256Canonical(spawn.submittedBallotActionIDs) !==
-          sha256Canonical(decision.spawnPreferenceLegalActionIDs)))
+        (!spawn.ballotValid ||
+          spawn.stageFallbackUsed ||
+          spawn.stageDegraded ||
+          spawn.assignedActionID !== decision.selectedLegalActionID ||
+          sha256Canonical(spawn.submittedBallotActionIDs) !==
+            sha256Canonical(decision.spawnPreferenceLegalActionIDs)))
     ) {
       throw new VerificationFailure(
         "SPAWN_EXECUTION_EXCLUSION",
@@ -2833,11 +3389,11 @@ function verifyJoinedTrace(
     if (
       (decision.selectedDealActionID === null && dealGame !== undefined) ||
       (decision.selectedDealActionID !== null &&
-      (dealGame?.deal?.requestedActionID !== decision.selectedDealActionID ||
-        !dealGame.deal.validation.accepted ||
-        dealGame.deal.validation.actionID !== decision.selectedDealActionID ||
-        !dealGame.deal.application.attempted ||
-        dealGame.deal.application.accepted !== true))
+        (dealGame?.deal?.requestedActionID !== decision.selectedDealActionID ||
+          !dealGame.deal.validation.accepted ||
+          dealGame.deal.validation.actionID !== decision.selectedDealActionID ||
+          !dealGame.deal.application.attempted ||
+          dealGame.deal.application.accepted !== true))
     ) {
       throw new VerificationFailure(
         "DEAL_SLOT_JOIN_MISMATCH",
@@ -2848,16 +3404,22 @@ function verifyJoinedTrace(
     if (
       (decision.selectedMessageActionID === null && commsGame !== undefined) ||
       (decision.selectedMessageActionID !== null &&
-      (commsGame?.comms.actionID !== decision.selectedMessageActionID ||
-        commsGame.comms.accepted !== true ||
-        commsGame.comms.rejected === true))
+        (commsGame?.comms.actionID !== decision.selectedMessageActionID ||
+          commsGame.comms.accepted !== true ||
+          commsGame.comms.rejected === true))
     ) {
       throw new VerificationFailure(
         "COMMS_SLOT_JOIN_MISMATCH",
         runDirectory(planned),
       );
     }
-    verifyArmRuntime(prereg, planned, decision, gameplayProviders);
+    armCPlan = verifyArmRuntime(
+      prereg,
+      planned,
+      decision,
+      gameplayProviders,
+      armCPlan,
+    );
     if (
       planned.arm === "A" &&
       decision.commander.externalPlannerCall === true
@@ -2886,9 +3448,7 @@ function verifyJoinedTrace(
       runDirectory(planned),
     );
   }
-  if (
-    planned.arm === "C" && gameplayProviders.length === 0
-  ) {
+  if (planned.arm === "C" && gameplayProviders.length === 0) {
     throw new VerificationFailure(
       "ARM_C_SELECTOR_PROVIDER_UNUSED",
       runDirectory(planned),
@@ -2904,7 +3464,7 @@ function verifyJoinedTrace(
     manifest.providerPreflight.required &&
     !providers.some(
       (provider) =>
-        provider.requestID === "provider-preflight" && provider.succeeded,
+        provider.requestID === expectedPreflightRequestID && provider.succeeded,
     )
   ) {
     throw new VerificationFailure(
@@ -2912,7 +3472,10 @@ function verifyJoinedTrace(
       runDirectory(planned),
     );
   }
-  return [...decisionByID.keys()];
+  return {
+    decisionRequestIDs: [...decisionByID.keys()],
+    providerRequestIDs: [...new Set(providers.map((entry) => entry.requestID))],
+  };
 }
 
 function groupByRequestID<T extends { requestID: string; sequence: number }>(
@@ -2939,13 +3502,26 @@ function groupByRequestID<T extends { requestID: string; sequence: number }>(
   return result;
 }
 
+interface CommanderPlanContinuity {
+  planID: string;
+  fingerprint: string;
+  age: number;
+}
+
 function verifyArmRuntime(
   prereg: CommanderXpPreRegistrationV2,
   planned: CommanderXpPlannedRequest,
   decision: PlayerTraceDecision,
   providers: readonly PlayerTraceProvider[],
-): void {
+  priorPlan: CommanderPlanContinuity | null,
+): CommanderPlanContinuity | null {
   const commander = decision.commander;
+  if (typeof commander.externalPlannerCall !== "boolean") {
+    throw new VerificationFailure(
+      `ARM_${planned.arm}_PLANNER_CALL_FLAG_MISSING`,
+      runDirectory(planned),
+    );
+  }
   const externalPlannerCall = commander.externalPlannerCall === true;
   const joined = providers.filter(
     (provider) => provider.requestID === decision.requestID,
@@ -2959,9 +3535,12 @@ function verifyArmRuntime(
       joined.some((provider) => provider.stage !== "planner") ||
       (externalPlannerCall ? joined.length < 1 : joined.length !== 0)
     ) {
-      throw new VerificationFailure("ARM_A_RUNTIME_MISMATCH", runDirectory(planned));
+      throw new VerificationFailure(
+        "ARM_A_RUNTIME_MISMATCH",
+        runDirectory(planned),
+      );
     }
-    return;
+    return null;
   }
   const expectedSelector = planned.arm === "B" ? "deterministic" : "llm";
   if (
@@ -2986,24 +3565,88 @@ function verifyArmRuntime(
       commander.commanderSelectorProvider !== null ||
       commander.commanderSelectorModel !== null
     ) {
-      throw new VerificationFailure("ARM_B_SELECTOR_MISMATCH", runDirectory(planned));
+      throw new VerificationFailure(
+        "ARM_B_SELECTOR_MISMATCH",
+        runDirectory(planned),
+      );
     }
-    return;
+    return null;
   }
-  const providerExpected = externalPlannerCall;
+  const eligibleOptionIDs = commander.commanderEligibleOptionIds;
+  if (typeof eligibleOptionIDs !== "string") {
+    throw new VerificationFailure(
+      "ARM_C_ELIGIBLE_OPTIONS_MISSING",
+      runDirectory(planned),
+    );
+  }
+  const selectorSource = commander.commanderSelectorSource;
+  const planID = commander.planID;
+  const previousPlanID = commander.commanderPreviousPlanID;
+  const fingerprint = commander.commanderFingerprint;
+  const planInstalled = commander.commanderPlanInstalled;
+  const planAge = commander.commanderPlanAgeDecisions;
+  if (externalPlannerCall) {
+    if (
+      eligibleOptionIDs.length === 0 ||
+      joined.length !== 1 ||
+      joined[0]?.stage !== "selector" ||
+      commander.commanderSelectorProvider !== "custom" ||
+      commander.commanderSelectorModel !== prereg.identities.bedrockModel ||
+      selectorSource !== "llm" ||
+      !isNonEmptyString(planID) ||
+      !isNonEmptyString(fingerprint) ||
+      planInstalled !== true ||
+      planAge !== 0 ||
+      previousPlanID !== (priorPlan?.planID ?? null)
+    ) {
+      throw new VerificationFailure(
+        "ARM_C_SELECTOR_MISMATCH",
+        runDirectory(planned),
+      );
+    }
+    return { planID, fingerprint, age: 0 };
+  }
   if (
-    joined.some((provider) => provider.stage !== "selector") ||
-    (providerExpected ? joined.length < 1 : joined.length !== 0) ||
-    (providerExpected && commander.commanderSelectorProvider !== "custom") ||
-    (providerExpected &&
-      commander.commanderSelectorModel !== prereg.identities.bedrockModel) ||
-    (providerExpected && commander.commanderSelectorSource !== "llm") ||
-    (!providerExpected && commander.commanderSelectorSource !== "none") ||
-    (!providerExpected && commander.commanderSelectorProvider !== null) ||
-    (!providerExpected && commander.commanderSelectorModel !== null)
+    joined.length !== 0 ||
+    commander.commanderSelectorProvider !== null ||
+    commander.commanderSelectorModel !== null
   ) {
-    throw new VerificationFailure("ARM_C_SELECTOR_MISMATCH", runDirectory(planned));
+    throw new VerificationFailure(
+      "ARM_C_SELECTOR_MISMATCH",
+      runDirectory(planned),
+    );
   }
+  if (selectorSource === "none") {
+    if (
+      planID !== null ||
+      fingerprint !== null ||
+      planInstalled !== false ||
+      planAge !== 0 ||
+      !(previousPlanID === null || previousPlanID === priorPlan?.planID)
+    ) {
+      throw new VerificationFailure(
+        "ARM_C_EMPTY_PLAN_MISMATCH",
+        runDirectory(planned),
+      );
+    }
+    return null;
+  }
+  if (
+    selectorSource !== "llm" ||
+    priorPlan === null ||
+    planID !== priorPlan.planID ||
+    fingerprint !== priorPlan.fingerprint ||
+    previousPlanID !== null ||
+    planInstalled !== false ||
+    planAge !== priorPlan.age + 1 ||
+    commander.commanderReplanReason !== "within_horizon"
+  ) {
+    throw new VerificationFailure(
+      "ARM_C_PLAN_CONTINUITY_MISMATCH",
+      runDirectory(planned),
+    );
+  }
+  return { ...priorPlan, age: planAge };
 }
 
 function verifyProviderRecord(
@@ -3017,11 +3660,14 @@ function verifyProviderRecord(
     provider.responseModel !== prereg.identities.bedrockModel ||
     provider.succeeded !== true ||
     provider.failureKind !== null ||
-    (provider.requestID === "provider-preflight"
-      ? provider.stage !== "preflight"
-      : planned.arm === "A"
-        ? provider.stage !== "planner"
-        : provider.stage !== "selector") ||
+    (provider.stage === "preflight"
+      ? provider.requestID !==
+        commanderXpProviderPreflightRequestID(planned.runKey)
+      : provider.requestID ===
+          commanderXpProviderPreflightRequestID(planned.runKey) ||
+        (planned.arm === "A"
+          ? provider.stage !== "planner"
+          : provider.stage !== "selector")) ||
     !isSha256(provider.promptSha256) ||
     !isSha256(provider.outputSha256)
   ) {
@@ -3083,22 +3729,24 @@ function requiredArtifactPaths(
 }
 
 function requiredPreflightArtifactPaths(
-  request: CommanderXpPlannedRequest,
+  requests: readonly CommanderXpPlannedRequest[],
 ): Set<string> {
-  const directory = runDirectory(request);
   return new Set(
-    [
-      "xp-evidence.json",
-      "submitted-request.json",
-      "create-response.json",
-      "normalized-request-readback.json",
-      "replay-evidence.json",
-      "coworld-bundle-receipt.json",
-      "command-receipts.json",
-      "player-artifact/runtime-manifest.json",
-      "player-artifact/trace.jsonl",
-      "player-artifact/hashes.json",
-    ].map((suffix) => `${directory}/${suffix}`),
+    requests.flatMap((request) => {
+      const directory = runDirectory(request);
+      return [
+        "xp-evidence.json",
+        "submitted-request.json",
+        "create-response.json",
+        "normalized-request-readback.json",
+        "replay-evidence.json",
+        "coworld-bundle-receipt.json",
+        "command-receipts.json",
+        "player-artifact/runtime-manifest.json",
+        "player-artifact/trace.jsonl",
+        "player-artifact/hashes.json",
+      ].map((suffix) => `${directory}/${suffix}`);
+    }),
   );
 }
 
@@ -3171,9 +3819,7 @@ function parsePlayerTrace(text: string): PlayerTrace[] {
     if (record.recordType === "provider") {
       if (
         record.provider !== "bedrock-sidecar" ||
-        !["preflight", "planner", "selector"].includes(
-          String(record.stage),
-        ) ||
+        !["preflight", "planner", "selector"].includes(String(record.stage)) ||
         !isNonEmptyString(record.requestID) ||
         !isNonNegativeInteger(record.sequence) ||
         !isNonEmptyString(record.requestedModel) ||
@@ -3456,22 +4102,24 @@ function exactRecordSubset(
 function isLegalActionArray(value: unknown): boolean {
   if (
     !(
-    Array.isArray(value) &&
-    value.length > 0 &&
-    value.every((entry) => {
-      const action = exactRecord(
-        entry,
-        ["id", "kind"],
-        "LEGAL_ACTION_SCHEMA_MISMATCH",
-      );
-      return isNonEmptyString(action.id) && isLegalActionKind(action.kind);
-    })
+      Array.isArray(value) &&
+      value.length > 0 &&
+      value.every((entry) => {
+        const action = exactRecord(
+          entry,
+          ["id", "kind"],
+          "LEGAL_ACTION_SCHEMA_MISMATCH",
+        );
+        return isNonEmptyString(action.id) && isLegalActionKind(action.kind);
+      })
     )
   ) {
     return false;
   }
-  return new Set(value.map((entry) => (entry as { id: string }).id)).size ===
-    value.length;
+  return (
+    new Set(value.map((entry) => (entry as { id: string }).id)).size ===
+    value.length
+  );
 }
 
 function isIntentEvidence(value: unknown): boolean {
@@ -3557,13 +4205,6 @@ async function readJson<T>(root: string, relativePath: string): Promise<T> {
 
 async function readText(root: string, relativePath: string): Promise<string> {
   return await fs.readFile(await containedFile(root, relativePath), "utf8");
-}
-
-async function readBytes(
-  root: string,
-  relativePath: string,
-): Promise<Uint8Array> {
-  return await fs.readFile(await containedFile(root, relativePath));
 }
 
 async function containedFile(

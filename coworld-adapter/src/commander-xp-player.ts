@@ -6,7 +6,9 @@
  * exact Bedrock model/sidecar configuration; Arm B constructs no provider call.
  * This file reuses the Keystone websocket/social boundary, but Arm B/C execute
  * the actual StrategicCommander binding-first brain rather than treating
- * Keystone as a performance proxy.
+ * Keystone as a performance proxy. All three immutable policy arms perform
+ * the same exact-model provider preflight; Arm B makes no provider call during
+ * gameplay.
  */
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
@@ -19,14 +21,15 @@ import type {
   AgentDecision,
   AgentStrategyProfile,
 } from "../../src/server/agents/AgentTypes";
-import type {
-  LlmCompletionOptions,
-  LlmProvider,
-} from "../../src/server/agents/LlmProvider";
 import {
   COMMANDER_XP_BEHAVIOR_SOURCE_SHA,
   COMMANDER_XP_BEHAVIOR_SOURCE_TREE_SHA,
 } from "../../src/server/agents/CommanderXpBehaviorIdentity";
+import { commanderXpProviderPreflightRequestID } from "../../src/server/agents/CommanderXpProtocol";
+import type {
+  LlmCompletionOptions,
+  LlmProvider,
+} from "../../src/server/agents/LlmProvider";
 import {
   CommanderXpTraceCollector,
   uploadCommanderXpPlayerArtifact,
@@ -65,10 +68,17 @@ const REQUIRED_FLAGS = {
   PROXYWAR_TUNE_FREETEXT_MESSAGES: "1",
   PROXYWAR_TUNE_SPATIAL_OBSERVATION: "0",
   PROXYWAR_TUNE_SPATIAL_MINIMAP: "0",
+  PROXYWAR_KEYSTONE_PROFILE: "aggressive",
+  PROXYWAR_LLM_TIMEOUT_MS: "12000",
 } as const;
-const PROVIDER_PREFLIGHT_REQUEST_ID = "provider-preflight";
 const PROVIDER_PREFLIGHT_PROMPT =
   "Return exactly the single uppercase token OK and nothing else.";
+
+export function commanderXpProviderPreflightRequired(
+  _arm: CommanderXpArm,
+): true {
+  return true;
+}
 
 interface BedrockResponse {
   model?: unknown;
@@ -89,7 +99,7 @@ class ExactBedrockProvider implements LlmProvider {
   readonly cancellationBehavior = "settles-after-abort" as const;
   readonly model: string;
   private client: BedrockClient | null = null;
-  private currentRequestID = PROVIDER_PREFLIGHT_REQUEST_ID;
+  private currentRequestID = "uninitialized-preflight";
   private currentStage: "preflight" | "planner" | "selector" = "preflight";
   private readonly active = new Set<Promise<unknown>>();
 
@@ -105,7 +115,7 @@ class ExactBedrockProvider implements LlmProvider {
 
   setRequestID(requestID: string): void {
     this.currentRequestID = requestID;
-    this.currentStage = requestID === PROVIDER_PREFLIGHT_REQUEST_ID
+    this.currentStage = requestID.startsWith("provider-preflight-")
       ? "preflight"
       : this.arm === "A"
         ? "planner"
@@ -256,17 +266,10 @@ export function assertCommanderXpEnvironment(
   if (model === undefined || model.length < 8 || /\s/.test(model)) {
     throw new Error("Commander XP requires one exact BEDROCK_MODEL");
   }
-  const timeoutMs = Number(env.PROXYWAR_LLM_TIMEOUT_MS ?? "12000");
-  if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 119000) {
-    throw new Error("Commander XP provider timeout is invalid");
-  }
-  const configuredProfile = env.PROXYWAR_KEYSTONE_PROFILE?.trim();
   return {
     model,
-    profile: (configuredProfile === undefined || configuredProfile === ""
-      ? "aggressive"
-      : configuredProfile) as AgentStrategyProfile,
-    timeoutMs,
+    profile: "aggressive",
+    timeoutMs: 12_000,
   };
 }
 
@@ -332,25 +335,8 @@ async function main(): Promise<void> {
   const collector = new CommanderXpTraceCollector();
   const provider = new ExactBedrockProvider(model, arm, collector, timeoutMs);
   let preflightResponseModel: string | null = null;
-  if (arm !== "B") {
-    provider.setRequestID(PROVIDER_PREFLIGHT_REQUEST_ID);
-    await provider.complete(PROVIDER_PREFLIGHT_PROMPT);
-    const preflight = [...collector.records()]
-      .reverse()
-      .find(
-        (entry) =>
-          entry.recordType === "provider" &&
-          entry.requestID === PROVIDER_PREFLIGHT_REQUEST_ID,
-      );
-    if (
-      preflight?.recordType !== "provider" ||
-      !preflight.succeeded ||
-      preflight.responseModel !== model
-    ) {
-      throw new Error("Commander XP Bedrock preflight failed");
-    }
-    preflightResponseModel = preflight.responseModel;
-  }
+  let preflightRequestID: string | null = null;
+  let observedRunKey: string | null = null;
   const brain = await createCommanderXpBrain({
     arm,
     repoRoot,
@@ -369,6 +355,7 @@ async function main(): Promise<void> {
   const socket = new WebSocket(url);
   let decisionChain: Promise<void> = Promise.resolve();
   let sawFinal = false;
+  let observedGameID: string | null = null;
   const answeredMessages = new Set<string>();
   const proposedDeals = new Set<string>();
   socket.on("open", () => {
@@ -382,6 +369,7 @@ async function main(): Promise<void> {
       requestID?: unknown;
       request?: unknown;
       protocol?: unknown;
+      commanderXpRunKey?: unknown;
     };
     try {
       message = JSON.parse(String(data));
@@ -392,12 +380,23 @@ async function main(): Promise<void> {
     if (message.type === "final") {
       sawFinal = true;
       decisionChain = decisionChain.then(async () => {
+        if (
+          observedGameID === null ||
+          observedRunKey === null ||
+          preflightRequestID === null ||
+          preflightResponseModel === null
+        ) {
+          throw new Error("Commander XP received incomplete runtime identity");
+        }
         await provider.drain();
         await uploadCommanderXpPlayerArtifact({
           uploadURL,
           manifest: runtimeManifest({
             arm,
+            gameID: observedGameID,
+            runKey: observedRunKey,
             model,
+            preflightRequestID,
             preflightResponseModel,
           }),
           trace: collector.records(),
@@ -409,12 +408,49 @@ async function main(): Promise<void> {
     if (message.type !== "decision_request") return;
     decisionChain = decisionChain.then(async () => {
       const requestID = String(message.requestID ?? "");
-      provider.setRequestID(requestID);
       try {
+        const runKey = commanderXpRunKeyFromMessage(
+          message.commanderXpRunKey,
+          arm,
+        );
+        if (observedRunKey !== null && observedRunKey !== runKey) {
+          throw new Error("Commander XP run identity changed mid-episode");
+        }
+        observedRunKey = runKey;
+        if (preflightRequestID === null) {
+          preflightRequestID = commanderXpProviderPreflightRequestID(runKey);
+          provider.setRequestID(preflightRequestID);
+          await provider.complete(PROVIDER_PREFLIGHT_PROMPT);
+          const preflight = [...collector.records()]
+            .reverse()
+            .find(
+              (entry) =>
+                entry.recordType === "provider" &&
+                entry.requestID === preflightRequestID,
+            );
+          if (
+            preflight?.recordType !== "provider" ||
+            !preflight.succeeded ||
+            preflight.responseModel !== model
+          ) {
+            throw new Error("Commander XP Bedrock preflight failed");
+          }
+          preflightResponseModel = preflight.responseModel;
+        }
+        provider.setRequestID(requestID);
         const input: AgentBrainInput = requestToBrainInput(
           message.request,
           profile,
         );
+        const requestGameID = input.observation.gameID;
+        if (
+          typeof requestGameID !== "string" ||
+          requestGameID.length === 0 ||
+          (observedGameID !== null && observedGameID !== requestGameID)
+        ) {
+          throw new Error("Commander XP game identity changed mid-episode");
+        }
+        observedGameID = requestGameID;
         const spawnDecision = spawnPreferenceDecision(
           input,
           wireMaxSpawnPreferences(message),
@@ -491,13 +527,18 @@ async function main(): Promise<void> {
 
 function runtimeManifest(input: {
   arm: CommanderXpArm;
+  gameID: string;
+  runKey: string;
   model: string;
-  preflightResponseModel: string | null;
+  preflightRequestID: string;
+  preflightResponseModel: string;
 }): CommanderXpRuntimeManifest {
   return {
     schemaVersion: 2,
     artifactKind: "commander-xp-policy-evidence",
     arm: input.arm,
+    gameID: input.gameID,
+    runKey: input.runKey,
     behaviorSourceSha: COMMANDER_XP_BEHAVIOR_SOURCE_SHA,
     behaviorSourceTreeSha: COMMANDER_XP_BEHAVIOR_SOURCE_TREE_SHA,
     adapterSourceSha: requiredEnv("COMMANDER_XP_ADAPTER_SOURCE_SHA"),
@@ -525,16 +566,34 @@ function runtimeManifest(input: {
       FREETEXT_MESSAGES: "1",
       SPATIAL_OBSERVATION: "0",
       SPATIAL_MINIMAP: "0",
+      KEYSTONE_PROFILE: "aggressive",
+      LLM_TIMEOUT_MS: "12000",
     },
     providerPreflight: {
-      required: input.arm !== "B",
-      requestID: PROVIDER_PREFLIGHT_REQUEST_ID,
+      required: true,
+      status: "succeeded",
+      requestID: input.preflightRequestID,
       requestedModel: input.model,
       responseModel: input.preflightResponseModel,
-      succeeded:
-        input.arm === "B" || input.preflightResponseModel === input.model,
+      succeeded: true,
     },
   };
+}
+
+function commanderXpRunKeyFromMessage(
+  value: unknown,
+  arm: CommanderXpArm,
+): string {
+  if (
+    typeof value !== "string" ||
+    !/^commander-xp-v2\/[A-Za-z0-9._-]+\/(?:provider-preflight|canary|confirmatory)\/r\d{2}\/(?:A|B|C)$/.test(
+      value,
+    ) ||
+    !value.endsWith(`/${arm}`)
+  ) {
+    throw new Error("Commander XP decision envelope run identity is invalid");
+  }
+  return value;
 }
 
 function requiredEnv(name: string): string {
@@ -543,11 +602,6 @@ function requiredEnv(name: string): string {
     throw new Error(`Commander XP requires ${name}`);
   }
   return value;
-}
-
-function optionalEnv(name: string): string | null {
-  const value = process.env[name]?.trim();
-  return value === undefined || value === "" ? null : value;
 }
 
 function sha256(value: string): string {
