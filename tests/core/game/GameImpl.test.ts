@@ -149,6 +149,11 @@ describe("GameImpl", () => {
     }).toThrow(/Warship constructed with invalid patrolTile/);
     for (const patrolTile of [
       undefined,
+      null,
+      false,
+      "0",
+      0n,
+      {},
       Number.NaN,
       Number.POSITIVE_INFINITY,
       1.5,
