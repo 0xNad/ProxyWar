@@ -119,6 +119,7 @@ async function chooseActionFor(
       optionalFunction(source, "wouldBreakPromise"),
       extractFunction(source, "preferReciprocalAlliance"),
       extractFunction(source, "pendingRenewalAction"),
+      extractFunction(source, "pendingAllianceRequestAction"),
       extractFunction(source, "chooseAction"),
       "return chooseAction;",
     ].join("\n"),

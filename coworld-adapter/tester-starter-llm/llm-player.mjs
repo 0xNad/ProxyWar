@@ -1574,6 +1574,14 @@ function pendingRenewalAction(actions, obs) {
   return null;
 }
 
+// A pending incoming alliance request gets one narrow priority override: when
+// this starter would otherwise ATTACK, answer the rival who already asked.
+// The caller deliberately invokes this only for an eligible attack candidate,
+// so spawn/build/boat/etc keep their existing order and appetite is unchanged.
+function pendingAllianceRequestAction(actions, obs) {
+  return preferReciprocalAlliance(actions, obs, "alliance_request");
+}
+
 function choose(actions, obs) {
   // An ally already asked to renew: answer before consulting the plan, because
   // the window is short and one-shot and the plan refreshes only every
@@ -1704,6 +1712,22 @@ function choose(actions, obs) {
         !violatesPact(c),
     );
     if (candidates.length === 0) continue;
+    if (kind === "attack") {
+      const pendingAuthorized = planned.includes("alliance_request");
+      const pendingRequest = pendingAllianceRequestAction(
+        actions.filter(
+          (candidate) =>
+            candidate.kind === "alliance_request" &&
+            (candidate.risk?.level !== "high" ||
+              (pendingAuthorized && matchesPlanTarget(candidate))) &&
+            !avoid.has(candidate.id) &&
+            !matchesAvoidedTarget(candidate) &&
+            !violatesPact(candidate),
+        ),
+        obs,
+      );
+      if (pendingRequest) return pendingRequest;
+    }
     // Same appetite, better aim: when this decision is going to ask for an
     // alliance anyway, ask the rival who already asked us. Acceptance is a
     // returning request, so this is the difference between a formed alliance and

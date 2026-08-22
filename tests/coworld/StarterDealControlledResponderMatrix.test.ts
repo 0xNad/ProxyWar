@@ -142,6 +142,7 @@ async function loadStarterExecutor(): Promise<StarterExecutor> {
      ${extractFunction(source, "socialActionNote")}
      ${extractFunction(source, "preferReciprocalAlliance")}
      ${extractFunction(source, "pendingRenewalAction")}
+     ${extractFunction(source, "pendingAllianceRequestAction")}
      ${extractFunction(source, "choose")}
      return {
        choose: (nextPlan, actions, observation) => {
