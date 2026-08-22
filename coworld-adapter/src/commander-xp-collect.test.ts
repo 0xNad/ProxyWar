@@ -36,6 +36,12 @@ describe("Commander XP collector namespace registry", () => {
           commander_xp_phase: "canary",
           commander_xp_run_key: "commander-xp-v2/fixture/canary/r00/A",
           seed: 123,
+          players: [
+            { name: "A", rawPrompt: "must-not-survive" },
+            { name: "B" },
+            { name: "C" },
+            { name: "D" },
+          ],
           privateProviderTranscript: "must-not-survive",
         },
         inlineRunArtifacts: {
@@ -69,6 +75,7 @@ describe("Commander XP collector namespace registry", () => {
         commander_xp_phase: "canary",
         commander_xp_run_key: "commander-xp-v2/fixture/canary/r00/A",
         seed: 123,
+        players: [{ name: "A" }, { name: "B" }, { name: "C" }, { name: "D" }],
       },
       results: null,
     });
@@ -175,6 +182,7 @@ describe("Commander XP collector namespace registry", () => {
       xpRequestID,
       submittedRequestPath: "/submitted.json",
       createResponsePath: "/created.json",
+      createResponseRawPath: "/created-raw.json",
     });
     expect(() =>
       exactCollectorRequestMapping(

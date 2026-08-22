@@ -100,7 +100,7 @@ export async function buildCommanderXpAuthorityRequest(
     input.sourceAllowlist.some(
       (entry, index) =>
         typeof entry !== "string" ||
-        entry.length === 0 ||
+        !safeSourcePath(entry) ||
         entry !== [...input.sourceAllowlist].sort()[index],
     )
   ) {
@@ -151,6 +151,38 @@ export async function buildCommanderXpAuthorityRequest(
     );
   }
   return { requestPath, requestSha256: await sha256File(requestPath) };
+}
+
+function safeSourcePath(value: string): boolean {
+  if (
+    value.length === 0 ||
+    value.length > 500 ||
+    value.includes("\\") ||
+    value.includes("\0") ||
+    [...value].some((character) => {
+      const code = character.charCodeAt(0);
+      return code <= 0x1f || code === 0x7f;
+    })
+  ) {
+    return false;
+  }
+  const normalized = path.posix.normalize(value);
+  return (
+    normalized === value &&
+    !normalized.startsWith("/") &&
+    normalized !== "." &&
+    normalized !== ".." &&
+    !normalized.startsWith("../") &&
+    !normalized
+      .split("/")
+      .some(
+        (part, index) =>
+          part === "" ||
+          part === "." ||
+          part === ".." ||
+          (part.startsWith(".") && !(index === 0 && part === ".github")),
+      )
+  );
 }
 
 async function canonicalDirectory(requested: string): Promise<string> {

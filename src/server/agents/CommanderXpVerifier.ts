@@ -77,6 +77,17 @@ interface ExternalReceiptArtifact {
   attestedSubjectDigest: string;
 }
 
+interface ExternalRetainedArtifact {
+  id: string;
+  name: string;
+  digest: string;
+  attestationID?: string;
+  ledgerSha256?: string;
+  receiptSha256?: string;
+  envelopeSha256?: string;
+  subjectSha256?: string;
+}
+
 interface PhaseReceiptBinding {
   phase: "preregistration" | "provider-preflight" | "canary";
   path: string;
@@ -86,9 +97,27 @@ interface PhaseReceiptBinding {
   attempt: number;
   evidenceArtifact: ExternalEvidenceArtifact;
   receiptArtifact: ExternalReceiptArtifact;
+  ledgerArtifact: ExternalRetainedArtifact & {
+    attestationID: string;
+    ledgerSha256: string;
+  };
+  authorityArtifact: ExternalRetainedArtifact & {
+    attestationID: string;
+    receiptSha256: string;
+  };
+  terminalArtifact: ExternalRetainedArtifact & {
+    envelopeSha256: string;
+    subjectSha256: string;
+  };
   localSealSha256: string;
   namespaceRegistrySha256: string;
   workflowPath: ".github/workflows/commander-xp-external-seal.yml";
+  workflowID: string;
+  workflowName: "Commander XP external seal";
+  actor: "0xNad";
+  triggeringActor: "0xNad";
+  event: "workflow_dispatch";
+  ref: "refs/heads/main";
   experimentID: string;
   behaviorBaseSha: string;
   behaviorBaseTreeSha: string;
@@ -96,7 +125,7 @@ interface PhaseReceiptBinding {
   treeSha: string;
 }
 
-interface ExternalPhaseReceipt {
+export interface CommanderXpExternalPhaseReceipt {
   schemaVersion: 2;
   authority: "github-actions-attested-ledger-v1";
   repository: "0xNad/ProxyWar";
@@ -104,6 +133,7 @@ interface ExternalPhaseReceipt {
   workflowID: string;
   workflowName: string;
   actor: "0xNad";
+  triggeringActor: "0xNad";
   event: "workflow_dispatch";
   ref: "refs/heads/main";
   experimentID: string;
@@ -133,9 +163,11 @@ interface ExternalPhaseReceipt {
     workflowPath: ".github/workflows/commander-xp-evidence.yml";
     workflowName: "Commander XP protected experiment evidence";
     actor: "0xNad";
+    triggeringActor: "0xNad";
     headRepository: "0xNad/ProxyWar";
     event: "workflow_dispatch";
     ref: "refs/heads/main";
+    headSha: string;
   };
   phase: "preregistration" | "provider-preflight" | "canary" | "confirmatory";
   completedAt: string;
@@ -167,7 +199,7 @@ interface NamespaceRegistry {
   registrySha256: string;
 }
 
-interface ConfirmatoryActivation {
+export interface CommanderXpConfirmatoryActivation {
   schemaVersion: 2;
   experimentID: string;
   phase: "confirmatory";
@@ -176,8 +208,8 @@ interface ConfirmatoryActivation {
   priorCanaryLedgerSha256: string;
   priorCanaryRunId: string;
   priorCanaryAttempt: number;
-  priorCanaryEvidenceArtifact: ExternalPhaseReceipt["evidenceArtifact"];
-  priorCanaryReceiptArtifact: ExternalPhaseReceipt["receiptArtifact"];
+  priorCanaryEvidenceArtifact: CommanderXpExternalPhaseReceipt["evidenceArtifact"];
+  priorCanaryReceiptArtifact: CommanderXpExternalPhaseReceipt["receiptArtifact"];
   priorCanaryLocalSealSha256: string;
   confirmatoryRequestPlanSha256: string;
   activationSha256: string;
@@ -251,9 +283,11 @@ interface CreateResponseEvidence {
   coworldClient: "0.1.42";
   xpRequestID: string;
   createdAt: string;
-  status: string;
+  status: "submitted";
   receivedAt: string;
   submittedRequestSha256: string;
+  rawResponseSha256: string;
+  rawResponseByteLength: number;
   createResponseSha256: string;
 }
 
@@ -641,7 +675,7 @@ export async function verifyCommanderXpEvidence(
       }
       return localIntegrityResult(index.phase, 0, seal.sealSha256);
     }
-    const preregLedger = await readJson<ExternalPhaseReceipt>(
+    const preregLedger = await readJson<CommanderXpExternalPhaseReceipt>(
       root,
       "commander-xp-prereg-ledger-v2.json",
     );
@@ -659,7 +693,7 @@ export async function verifyCommanderXpEvidence(
     const providerReceipt =
       index.phase === "provider-preflight"
         ? null
-        : await readJson<ExternalPhaseReceipt>(
+        : await readJson<CommanderXpExternalPhaseReceipt>(
             root,
             "commander-xp-provider-preflight-ledger-v2.json",
           );
@@ -678,7 +712,7 @@ export async function verifyCommanderXpEvidence(
     }
     const canaryReceipt =
       index.phase === "confirmatory"
-        ? await readJson<ExternalPhaseReceipt>(
+        ? await readJson<CommanderXpExternalPhaseReceipt>(
             root,
             "commander-xp-canary-ledger-v2.json",
           )
@@ -775,7 +809,7 @@ export async function verifyCommanderXpEvidence(
       ) {
         throw new VerificationFailure("CONFIRMATORY_CANARY_RECEIPT_MISMATCH");
       }
-      const activation = await readJson<ConfirmatoryActivation>(
+      const activation = await readJson<CommanderXpConfirmatoryActivation>(
         root,
         "commander-xp-confirmatory-activation-v2.json",
       );
@@ -884,6 +918,34 @@ export async function verifyCommanderXpEvidence(
   }
 }
 
+/**
+ * Mutation-boundary validation shared by the protected XP dispatcher. These
+ * helpers intentionally reuse the exact evidence-verifier contracts so an
+ * irreversible create cannot run against a weaker preregistration or phase
+ * receipt parser.
+ */
+export function assertCommanderXpPreRegistrationDocument(
+  value: CommanderXpPreRegistrationV2,
+): void {
+  verifyPreRegistration(value);
+}
+
+export function assertCommanderXpExternalPhaseReceiptDocument(
+  preregistration: CommanderXpPreRegistrationV2,
+  value: CommanderXpExternalPhaseReceipt,
+  expectedPhase: CommanderXpExternalPhaseReceipt["phase"],
+): void {
+  verifyExternalLedger(preregistration, value, expectedPhase);
+}
+
+export function assertCommanderXpConfirmatoryActivationDocument(
+  preregistration: CommanderXpPreRegistrationV2,
+  canaryReceipt: CommanderXpExternalPhaseReceipt,
+  value: CommanderXpConfirmatoryActivation,
+): void {
+  verifyConfirmatoryActivation(preregistration, canaryReceipt, value);
+}
+
 function localIntegrityResult(
   phase: CommanderXpEvidencePhase,
   verifiedRunCount: number,
@@ -915,7 +977,7 @@ async function verifyReceiptBinding(
   root: string,
   prereg: CommanderXpPreRegistrationV2,
   binding: PhaseReceiptBinding | null,
-  receipt: ExternalPhaseReceipt,
+  receipt: CommanderXpExternalPhaseReceipt,
   expectedPhase: PhaseReceiptBinding["phase"],
   expectedPath: string,
 ): Promise<void> {
@@ -937,6 +999,13 @@ async function verifyReceiptBinding(
     binding.localSealSha256 !== receipt.evidenceArtifact.localSealSha256 ||
     binding.namespaceRegistrySha256 !==
       receipt.namespaceRegistry.registrySha256 ||
+    binding.workflowPath !== receipt.workflowPath ||
+    binding.workflowID !== receipt.workflowID ||
+    binding.workflowName !== receipt.workflowName ||
+    binding.actor !== receipt.actor ||
+    binding.triggeringActor !== receipt.triggeringActor ||
+    binding.event !== receipt.event ||
+    binding.ref !== receipt.ref ||
     binding.experimentID !== prereg.experimentID ||
     binding.experimentID !== receipt.experimentID ||
     binding.behaviorBaseSha !== prereg.identities.behaviorSourceSha ||
@@ -964,9 +1033,18 @@ function verifyPhaseReceiptBindingShape(
       "attempt",
       "evidenceArtifact",
       "receiptArtifact",
+      "ledgerArtifact",
+      "authorityArtifact",
+      "terminalArtifact",
       "localSealSha256",
       "namespaceRegistrySha256",
       "workflowPath",
+      "workflowID",
+      "workflowName",
+      "actor",
+      "triggeringActor",
+      "event",
+      "ref",
       "experimentID",
       "behaviorBaseSha",
       "behaviorBaseTreeSha",
@@ -991,6 +1069,25 @@ function verifyPhaseReceiptBindingShape(
     ["id", "digest", "receiptSha256", "attestedSubjectDigest"],
     "PRIOR_PHASE_BINDING_RECEIPT_SCHEMA_MISMATCH",
   );
+  verifyRetainedArtifact(
+    binding.ledgerArtifact,
+    "ledgerSha256",
+    true,
+    "PRIOR_PHASE_BINDING_LEDGER_ARTIFACT_SCHEMA_MISMATCH",
+  );
+  verifyRetainedArtifact(
+    binding.authorityArtifact,
+    "receiptSha256",
+    true,
+    "PRIOR_PHASE_BINDING_AUTHORITY_ARTIFACT_SCHEMA_MISMATCH",
+  );
+  verifyRetainedArtifact(
+    binding.terminalArtifact,
+    "envelopeSha256",
+    false,
+    "PRIOR_PHASE_BINDING_TERMINAL_ARTIFACT_SCHEMA_MISMATCH",
+  );
+  const artifactPrefix = `${expectedPhase}-${binding.headSha}-${binding.runId}-${binding.attempt}`;
   if (
     binding.phase !== expectedPhase ||
     !safeRelativePath(binding.path) ||
@@ -1000,6 +1097,12 @@ function verifyPhaseReceiptBindingShape(
     !isPositiveInteger(binding.attempt) ||
     binding.workflowPath !==
       ".github/workflows/commander-xp-external-seal.yml" ||
+    !/^\d+$/.test(binding.workflowID) ||
+    binding.workflowName !== "Commander XP external seal" ||
+    binding.actor !== "0xNad" ||
+    binding.triggeringActor !== "0xNad" ||
+    binding.event !== "workflow_dispatch" ||
+    binding.ref !== "refs/heads/main" ||
     !/^[0-9a-f]{40}$/.test(binding.behaviorBaseSha) ||
     !/^[0-9a-f]{40}$/.test(binding.behaviorBaseTreeSha) ||
     !/^[0-9a-f]{40}$/.test(binding.headSha) ||
@@ -1010,11 +1113,55 @@ function verifyPhaseReceiptBindingShape(
   ) {
     throw new VerificationFailure("PRIOR_PHASE_BINDING_INVALID");
   }
+  if (
+    binding.ledgerArtifact.ledgerSha256 !== binding.ledgerSha256 ||
+    binding.ledgerArtifact.name !==
+      `commander-xp-phase-ledger-${artifactPrefix}` ||
+    binding.authorityArtifact.name !==
+      `commander-xp-authority-${artifactPrefix}` ||
+    binding.terminalArtifact.name !==
+      `commander-xp-terminal-authority-${artifactPrefix}` ||
+    new Set([
+      binding.evidenceArtifact.id,
+      binding.receiptArtifact.id,
+      binding.ledgerArtifact.id,
+      binding.authorityArtifact.id,
+      binding.terminalArtifact.id,
+    ]).size !== 5 ||
+    binding.ledgerArtifact.attestationID ===
+      binding.authorityArtifact.attestationID
+  ) {
+    throw new VerificationFailure("PRIOR_PHASE_BINDING_ARTIFACT_CHAIN_INVALID");
+  }
+}
+
+function verifyRetainedArtifact(
+  artifact: ExternalRetainedArtifact,
+  contentHashField: "ledgerSha256" | "receiptSha256" | "envelopeSha256",
+  requiresAttestationID: boolean,
+  code: string,
+): void {
+  const exact = ["id", "name", "digest", contentHashField];
+  if (requiresAttestationID) exact.push("attestationID");
+  if (contentHashField === "envelopeSha256") exact.push("subjectSha256");
+  exactRecord(artifact, exact, code);
+  const contentHash = artifact[contentHashField];
+  if (
+    !/^\d+$/.test(artifact.id) ||
+    !isNonEmptyString(artifact.name) ||
+    !/^sha256:[0-9a-f]{64}$/.test(artifact.digest) ||
+    !isSha256(normalizeSha256(String(contentHash))) ||
+    (requiresAttestationID && !/^\d+$/.test(String(artifact.attestationID))) ||
+    (contentHashField === "envelopeSha256" &&
+      !isSha256(normalizeSha256(String(artifact.subjectSha256))))
+  ) {
+    throw new VerificationFailure(code);
+  }
 }
 
 function verifyExternalLedger(
   prereg: CommanderXpPreRegistrationV2,
-  receipt: ExternalPhaseReceipt,
+  receipt: CommanderXpExternalPhaseReceipt,
   expectedPhase:
     | "preregistration"
     | "provider-preflight"
@@ -1031,6 +1178,7 @@ function verifyExternalLedger(
       "workflowID",
       "workflowName",
       "actor",
+      "triggeringActor",
       "event",
       "ref",
       "experimentID",
@@ -1097,9 +1245,11 @@ function verifyExternalLedger(
       "workflowPath",
       "workflowName",
       "actor",
+      "triggeringActor",
       "headRepository",
       "event",
       "ref",
+      "headSha",
     ],
     "PRIOR_COLLECTOR_SCHEMA_MISMATCH",
   );
@@ -1115,6 +1265,7 @@ function verifyExternalLedger(
     !/^\d+$/.test(receipt.workflowID) ||
     receipt.workflowName !== "Commander XP external seal" ||
     receipt.actor !== "0xNad" ||
+    receipt.triggeringActor !== "0xNad" ||
     receipt.event !== "workflow_dispatch" ||
     receipt.ref !== "refs/heads/main" ||
     receipt.experimentID !== prereg.experimentID ||
@@ -1145,9 +1296,11 @@ function verifyExternalLedger(
     receipt.collector.workflowName !==
       "Commander XP protected experiment evidence" ||
     receipt.collector.actor !== "0xNad" ||
+    receipt.collector.triggeringActor !== "0xNad" ||
     receipt.collector.headRepository !== "0xNad/ProxyWar" ||
     receipt.collector.event !== "workflow_dispatch" ||
     receipt.collector.ref !== "refs/heads/main" ||
+    receipt.collector.headSha !== receipt.headSha ||
     !Number.isFinite(Date.parse(receipt.completedAt)) ||
     Date.parse(receipt.completedAt) < Date.parse(prereg.createdAt) ||
     !/^\d+$/.test(receipt.evidenceArtifact.id) ||
@@ -1159,15 +1312,15 @@ function verifyExternalLedger(
     !/^sha256:[0-9a-f]{64}$/.test(receipt.receiptArtifact.digest) ||
     !isSha256(receipt.receiptArtifact.receiptSha256) ||
     !isSha256(receipt.receiptArtifact.attestedSubjectDigest) ||
-    ledgerSha256 !== sha256Canonical(body)
+    ledgerSha256 !== sha256ExternalCanonical(body)
   ) {
     throw new VerificationFailure("PRIOR_PHASE_RECEIPT_INVALID");
   }
 }
 
 function verifyExternalLedgerPhaseBindings(
-  receipt: ExternalPhaseReceipt,
-  phase: ExternalPhaseReceipt["phase"],
+  receipt: CommanderXpExternalPhaseReceipt,
+  phase: CommanderXpExternalPhaseReceipt["phase"],
 ): void {
   const preregistration = receipt.preregistrationReceipt;
   const provider = receipt.providerPreflightReceipt;
@@ -1231,8 +1384,8 @@ function verifyExternalLedgerPhaseBindings(
 
 function verifyConfirmatoryActivation(
   prereg: CommanderXpPreRegistrationV2,
-  receipt: ExternalPhaseReceipt,
-  activation: ConfirmatoryActivation,
+  receipt: CommanderXpExternalPhaseReceipt,
+  activation: CommanderXpConfirmatoryActivation,
 ): void {
   exactRecord(
     activation,
@@ -2547,6 +2700,8 @@ function verifySubmittedRequest(
       "status",
       "receivedAt",
       "submittedRequestSha256",
+      "rawResponseSha256",
+      "rawResponseByteLength",
       "createResponseSha256",
     ],
     "CREATE_RESPONSE_SCHEMA_MISMATCH",
@@ -2567,7 +2722,10 @@ function verifySubmittedRequest(
     !Number.isFinite(Date.parse(submitted.submittedAt)) ||
     createResponse.schemaVersion !== 2 ||
     createResponse.coworldClient !== "0.1.42" ||
+    createResponse.status !== "submitted" ||
     createResponse.submittedRequestSha256 !== submittedRequestSha256 ||
+    !isSha256(createResponse.rawResponseSha256) ||
+    !isPositiveInteger(createResponse.rawResponseByteLength) ||
     sha256Canonical(createBody) !== createResponseSha256 ||
     !/^xreq_[A-Za-z0-9-]+$/.test(createResponse.xpRequestID) ||
     !Number.isFinite(Date.parse(createResponse.createdAt)) ||

@@ -50,6 +50,24 @@ test("runs an exact absolute-file XP create without exposing the token", () => {
   });
 });
 
+test("rejects symlinked and missing XP create bodies before authentication", () => {
+  withFakeRuntime(({ env, capture, root }) => {
+    const body = path.join(root, "request.json");
+    const link = path.join(root, "request-link.json");
+    fs.writeFileSync(body, "{}\n");
+    fs.symlinkSync(body, link);
+    for (const candidate of [link, path.join(root, "missing.json")]) {
+      const result = spawnSync(
+        process.execPath,
+        [wrapper, "xp-request", "create", candidate, "--json"],
+        { encoding: "utf8", env },
+      );
+      assert.notEqual(result.status, 0);
+    }
+    assert.equal(fs.existsSync(capture), false);
+  });
+});
+
 test("maps the episode bundle mode to the pinned Python helper without a token", () => {
   withFakeRuntime(({ env, capture, root }) => {
     const output = path.join(root, "bundle.zip");
@@ -91,7 +109,7 @@ function withFakeRuntime(callback) {
   const coworld = path.join(root, "coworld");
   fs.writeFileSync(
     python,
-    `#!/bin/sh\nif [ "$1" = "-c" ]; then\n  printf 'install|%s|%s\\n' "$HOME" "\${COWORLD_API_TOKEN:+token}" >> "$CAPTURE"\nelse\n  printf 'python|%s|%s|%s\\n' "$*" "$HOME" "\${COWORLD_API_TOKEN:+token}" >> "$CAPTURE"\nfi\n`,
+    `#!/bin/sh\nif [ "$1" = "-c" ]; then\n  case "$2" in *"importlib.metadata.version('coworld') == '0.1.42'"*) ;; *) exit 17 ;; esac\n  printf 'install|%s|%s\\n' "$HOME" "\${COWORLD_API_TOKEN:+token}" >> "$CAPTURE"\nelse\n  printf 'python|%s|%s|%s\\n' "$*" "$HOME" "\${COWORLD_API_TOKEN:+token}" >> "$CAPTURE"\nfi\n`,
     { mode: 0o700 },
   );
   fs.writeFileSync(

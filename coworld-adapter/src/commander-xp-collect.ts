@@ -55,6 +55,7 @@ export interface CollectorInput {
     xpRequestID: string;
     submittedRequestPath: string;
     createResponsePath: string;
+    createResponseRawPath: string;
   }>;
 }
 
@@ -312,7 +313,21 @@ async function collectRun(
     path.resolve(mapping.createResponsePath),
     "utf8",
   );
-  JSON.parse(createResponseText);
+  const createResponse = JSON.parse(createResponseText) as Record<
+    string,
+    unknown
+  >;
+  const createResponseRaw = await fs.readFile(
+    path.resolve(mapping.createResponseRawPath),
+    "utf8",
+  );
+  if (
+    createResponse.rawResponseSha256 !== sha256(createResponseRaw) ||
+    createResponse.rawResponseByteLength !==
+      Buffer.byteLength(createResponseRaw)
+  ) {
+    throw new Error("XP create response raw hash mismatch");
+  }
   const episodes = Array.isArray(raw.episodes) ? raw.episodes : [];
   if (episodes.length !== 1)
     throw new Error("XP request is not single-episode");
@@ -640,11 +655,10 @@ function publicReplayConfig(value: unknown): Record<string, unknown> {
     throw new Error("XP replay config is invalid");
   }
   const input = value as Record<string, unknown>;
-  return Object.fromEntries(
+  const projection = Object.fromEntries(
     [
       "commander_xp_phase",
       "commander_xp_run_key",
-      "players",
       "max_decision_steps",
       "turns_per_decision_step",
       "max_decision_ms",
@@ -660,6 +674,18 @@ function publicReplayConfig(value: unknown): Record<string, unknown> {
       "episode_timeout_seconds",
     ].flatMap((key) => (key in input ? [[key, input[key]]] : [])),
   );
+  if ("players" in input) {
+    if (!Array.isArray(input.players) || input.players.length !== 4) {
+      throw new Error("XP replay config players are invalid");
+    }
+    projection.players = input.players.map((entry) => {
+      if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+        throw new Error("XP replay config player is invalid");
+      }
+      return { name: (entry as Record<string, unknown>).name };
+    });
+  }
+  return projection;
 }
 
 function publicReplayResults(value: unknown): Record<string, unknown> {

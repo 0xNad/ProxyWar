@@ -710,6 +710,15 @@ function validatePhaseReceiptBinding(binding, expectedPhase) {
   }
 }
 
+export function verifyPhaseReceiptBindingDocument(binding, expectedPhase) {
+  if (
+    !["preregistration", "provider-preflight", "canary"].includes(expectedPhase)
+  )
+    fail("PHASE_RECEIPT_BINDING_INVALID", expectedPhase);
+  validatePhaseReceiptBinding(binding, expectedPhase);
+  return binding;
+}
+
 function validateRetainedPhaseArtifact(value, contentHashField) {
   const extraFields =
     contentHashField === "envelopeSha256" ? ["subjectSha256"] : [];
@@ -1283,7 +1292,10 @@ async function verifyBoundCanaryReceipt(evidenceRoot, request, index) {
   return ledger;
 }
 
-export async function scanPrivacyAndInventory(root) {
+export async function scanPrivacyAndInventory(
+  root,
+  { validateCoworldReceipts = true } = {},
+) {
   const files = await inventoryRegularFiles(root);
   let totalBytes = 0;
   const inventory = [];
@@ -1327,7 +1339,9 @@ export async function scanPrivacyAndInventory(root) {
       sha256: sha256Bytes(bytes),
     });
   }
-  await validateCoworldProjectionReceipts(root, inventory);
+  if (validateCoworldReceipts) {
+    await validateCoworldProjectionReceipts(root, inventory);
+  }
   return { fileCount: inventory.length, totalBytes, files: inventory };
 }
 
@@ -1544,6 +1558,7 @@ const REGISTRY_NAMESPACE_KEYS = [
   "episodeID",
   "episodeRequestID",
   "jobID",
+  "providerRequestID",
   "replayPath",
   "replayURLSha256",
   "runKey",
@@ -1606,6 +1621,21 @@ export async function buildNamespaceRegistry(
             entry.path,
             true,
           );
+        }
+      } else if (entry.path.endsWith("/player-artifact/trace.jsonl")) {
+        const text = await fs.readFile(absolute, "utf8");
+        for (const [index, line] of text.split(/\r?\n/).entries()) {
+          if (line === "") continue;
+          const record = parseJsonText(line, `${entry.path}:${index + 1}`);
+          if (record.recordType === "provider") {
+            registerNamespace(
+              current.providerRequestID,
+              record.requestID,
+              "providerRequestID",
+              entry.path,
+              true,
+            );
+          }
         }
       }
     }

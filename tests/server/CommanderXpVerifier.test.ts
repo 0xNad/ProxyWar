@@ -8,6 +8,10 @@ import { afterEach, describe, expect, it } from "vitest";
 // @ts-expect-error The manifest builder is an executable ESM helper without a
 // declaration file; its own focused test verifies the same exported function.
 import { commanderXpEvalManifest } from "../../coworld-adapter/scripts/prepare-commander-xp-eval-manifest.mjs";
+// @ts-expect-error The protected external-seal helper is executable ESM without
+// a declaration file. This test deliberately sends its exact ledger bytes to
+// the TypeScript verifier so producer and consumer cannot drift independently.
+import { verifyExternalPhaseLedger } from "../../.github/scripts/commander-xp-external-seal-lib.mjs";
 import { coworldEpisodeIdentity } from "../../coworld-adapter/src/coworld-seed";
 import { buildCommanderXpAuthorityRequest } from "../../src/scripts/ai-agent-commander-xp-authority-request";
 import {
@@ -17,9 +21,11 @@ import {
   type CommanderXpPlanInput,
 } from "../../src/server/agents/CommanderXpProtocol";
 import {
+  assertCommanderXpExternalPhaseReceiptDocument,
   verifyCommanderXpCoworldBundleProjection,
   verifyCommanderXpEvidence,
   verifyCommanderXpJoinedGameplayEvidence,
+  type CommanderXpExternalPhaseReceipt,
   type PlayerRuntimeManifest,
 } from "../../src/server/agents/CommanderXpVerifier";
 
@@ -267,7 +273,240 @@ describe("Commander XP evidence verifier v2", () => {
       }),
     ).rejects.toThrow(/COWORLD_BUNDLE_RECEIPT_MISMATCH/);
   });
+
+  it("consumes the external-seal preregistration and provider ledger schema exactly", async () => {
+    const { preregistration } = await buildPreregistrationFixture();
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "proxywar-commander-xp-ledger-golden-"),
+    );
+    temporaryRoots.push(root);
+    const preregistrationReceipt = externalPhaseLedgerFixture(
+      preregistration,
+      "preregistration",
+    );
+    const preregistrationPath = path.join(root, "preregistration.json");
+    await fs.writeFile(
+      preregistrationPath,
+      externalCanonicalJson(preregistrationReceipt),
+    );
+    await expect(
+      verifyExternalPhaseLedger(preregistrationPath, {
+        phase: "preregistration",
+        experimentID: preregistration.experimentID,
+      }),
+    ).resolves.toMatchObject({ phase: "preregistration" });
+    expect(() =>
+      assertCommanderXpExternalPhaseReceiptDocument(
+        preregistration,
+        preregistrationReceipt,
+        "preregistration",
+      ),
+    ).not.toThrow();
+
+    const preregistrationBinding = externalPhaseReceiptBinding(
+      preregistrationReceipt,
+      "commander-xp-prereg-ledger-v2.json",
+    );
+    const providerReceipt = externalPhaseLedgerFixture(
+      preregistration,
+      "provider-preflight",
+      preregistrationBinding,
+    );
+    const providerPath = path.join(root, "provider-preflight.json");
+    await fs.writeFile(providerPath, externalCanonicalJson(providerReceipt));
+    await expect(
+      verifyExternalPhaseLedger(providerPath, {
+        phase: "provider-preflight",
+        experimentID: preregistration.experimentID,
+      }),
+    ).resolves.toMatchObject({ phase: "provider-preflight" });
+    expect(() =>
+      assertCommanderXpExternalPhaseReceiptDocument(
+        preregistration,
+        providerReceipt,
+        "provider-preflight",
+      ),
+    ).not.toThrow();
+
+    const collapsed = structuredClone(providerReceipt);
+    collapsed.preregistrationReceipt!.authorityArtifact.id =
+      collapsed.preregistrationReceipt!.ledgerArtifact.id;
+    expect(() =>
+      assertCommanderXpExternalPhaseReceiptDocument(
+        preregistration,
+        collapsed,
+        "provider-preflight",
+      ),
+    ).toThrow(/PRIOR_PHASE_BINDING_ARTIFACT_CHAIN_INVALID/);
+  });
 });
+
+function externalPhaseLedgerFixture(
+  preregistration: ReturnType<typeof buildCommanderXpPreRegistration>,
+  phase: "preregistration" | "provider-preflight",
+  preregistrationReceipt: Record<string, any> | null = null,
+): CommanderXpExternalPhaseReceipt {
+  const registryBody = {
+    schemaVersion: 2,
+    mode: "cumulative-per-namespace",
+    priorRegistrySha256:
+      phase === "preregistration"
+        ? null
+        : preregistrationReceipt!.namespaceRegistrySha256,
+    namespaces: {
+      decisionRequestID: [],
+      episodeID: [],
+      episodeRequestID: [],
+      jobID: [],
+      providerRequestID:
+        phase === "provider-preflight"
+          ? preregistration.providerPreflightRequests
+              .map((request) =>
+                commanderXpProviderPreflightRequestID(request.runKey),
+              )
+              .sort()
+          : [],
+      replayPath: [],
+      replayURLSha256: [],
+      runKey:
+        phase === "provider-preflight"
+          ? preregistration.providerPreflightRequests.map(
+              (request) => request.runKey,
+            )
+          : [],
+      xpRequestID: [],
+    },
+  };
+  const namespaceRegistry = {
+    ...registryBody,
+    registrySha256: sha256(externalCanonicalJson(registryBody)),
+  };
+  const body = {
+    schemaVersion: 2,
+    authority: "github-actions-attested-ledger-v1",
+    repository: "0xNad/ProxyWar",
+    workflowPath: ".github/workflows/commander-xp-external-seal.yml",
+    workflowID: "777",
+    workflowName: "Commander XP external seal",
+    actor: "0xNad",
+    triggeringActor: "0xNad",
+    event: "workflow_dispatch",
+    ref: "refs/heads/main",
+    experimentID: preregistration.experimentID,
+    preRegistrationSha256: preregistration.preRegistrationSha256,
+    behaviorBaseSha: preregistration.identities.behaviorSourceSha,
+    behaviorBaseTreeSha: preregistration.identities.behaviorSourceTreeSha,
+    runnerEnvironment: "github-hosted",
+    attestationPolicy: {
+      repository: "0xNad/ProxyWar",
+      signerWorkflow:
+        "0xNad/ProxyWar/.github/workflows/commander-xp-external-seal.yml",
+      sourceRef: "refs/heads/main",
+      sourceDigest: preregistration.identities.adapterSourceSha,
+      signerDigest: preregistration.identities.adapterSourceSha,
+      denySelfHostedRunners: true,
+    },
+    collector: {
+      artifactID: 111,
+      artifactName: "commander-xp-evidence-222-1",
+      artifactDigest: `sha256:${"a".repeat(64)}`,
+      workflowRunID: 222,
+      workflowRunAttempt: 1,
+      workflowID: 999,
+      workflowPath: ".github/workflows/commander-xp-evidence.yml",
+      workflowName: "Commander XP protected experiment evidence",
+      actor: "0xNad",
+      triggeringActor: "0xNad",
+      headRepository: "0xNad/ProxyWar",
+      event: "workflow_dispatch",
+      ref: "refs/heads/main",
+      headSha: preregistration.identities.adapterSourceSha,
+    },
+    runId: phase === "preregistration" ? "700" : "701",
+    attempt: 1,
+    headSha: preregistration.identities.adapterSourceSha,
+    treeSha: preregistration.identities.adapterSourceTreeSha,
+    phase,
+    completedAt:
+      phase === "preregistration"
+        ? "2026-08-22T13:30:00.000Z"
+        : "2026-08-22T13:40:00.000Z",
+    preregistrationReceipt,
+    providerPreflightReceipt: null,
+    priorPhaseReceipt: null,
+    canaryReceipt: null,
+    namespaceRegistry,
+    evidenceArtifact: {
+      id: phase === "preregistration" ? "701" : "711",
+      digest: `sha256:${"b".repeat(64)}`,
+      aggregateSha256: "c".repeat(64),
+      attestedSubjectDigest: "d".repeat(64),
+      localSealSha256: "e".repeat(64),
+    },
+    receiptArtifact: {
+      id: phase === "preregistration" ? "702" : "712",
+      digest: `sha256:${"f".repeat(64)}`,
+      receiptSha256: "1".repeat(64),
+      attestedSubjectDigest: "1".repeat(64),
+    },
+  };
+  return {
+    ...body,
+    ledgerSha256: sha256(externalCanonicalJson(body)),
+  } as CommanderXpExternalPhaseReceipt;
+}
+
+function externalPhaseReceiptBinding(
+  ledger: Record<string, any>,
+  relativePath: string,
+): Record<string, any> {
+  const artifactPrefix = `${ledger.phase}-${ledger.headSha}-${ledger.runId}-${ledger.attempt}`;
+  return {
+    path: relativePath,
+    sha256: sha256(externalCanonicalJson(ledger)),
+    ledgerSha256: ledger.ledgerSha256,
+    runId: ledger.runId,
+    attempt: ledger.attempt,
+    evidenceArtifact: ledger.evidenceArtifact,
+    receiptArtifact: ledger.receiptArtifact,
+    ledgerArtifact: {
+      id: "703",
+      name: `commander-xp-phase-ledger-${artifactPrefix}`,
+      digest: `sha256:${"2".repeat(64)}`,
+      ledgerSha256: ledger.ledgerSha256,
+      attestationID: "803",
+    },
+    authorityArtifact: {
+      id: "704",
+      name: `commander-xp-authority-${artifactPrefix}`,
+      digest: `sha256:${"3".repeat(64)}`,
+      receiptSha256: "4".repeat(64),
+      attestationID: "804",
+    },
+    terminalArtifact: {
+      id: "705",
+      name: `commander-xp-terminal-authority-${artifactPrefix}`,
+      digest: `sha256:${"5".repeat(64)}`,
+      envelopeSha256: "6".repeat(64),
+      subjectSha256: "7".repeat(64),
+    },
+    localSealSha256: ledger.evidenceArtifact.localSealSha256,
+    namespaceRegistrySha256: ledger.namespaceRegistry.registrySha256,
+    workflowPath: ledger.workflowPath,
+    workflowID: ledger.workflowID,
+    workflowName: ledger.workflowName,
+    actor: ledger.actor,
+    triggeringActor: ledger.triggeringActor,
+    event: ledger.event,
+    ref: ledger.ref,
+    phase: ledger.phase,
+    experimentID: ledger.experimentID,
+    behaviorBaseSha: ledger.behaviorBaseSha,
+    behaviorBaseTreeSha: ledger.behaviorBaseTreeSha,
+    headSha: ledger.headSha,
+    treeSha: ledger.treeSha,
+  };
+}
 
 async function buildPreregistrationFixture(): Promise<{
   envelopeRoot: string;

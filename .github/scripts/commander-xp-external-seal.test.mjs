@@ -29,6 +29,7 @@ import {
   verifyEvidenceBindings,
   verifyExternalPhaseLedger,
   verifyExternalReceipt,
+  verifyPhaseReceiptBindingDocument,
   verifyRetainedPhaseAuthority,
 } from "./commander-xp-external-seal-lib.mjs";
 
@@ -53,35 +54,51 @@ test("workflow is manual, GitHub-hosted, full-SHA pinned, immutable, and atteste
   assert.match(workflow, /^on:\n {2}workflow_dispatch:/m);
   assert.doesNotMatch(workflow, /\bpull_request\b|\bpush:\s*$/m);
   assert.doesNotMatch(workflow, /runs-on:\s*(?:self-hosted|\[.*self-hosted)/);
-  assert.equal([...workflow.matchAll(/uses:\s*([^\s#]+)/g)].length, 15);
+  assert.equal([...workflow.matchAll(/uses:\s*([^\s#]+)/g)].length, 18);
   for (const match of workflow.matchAll(/uses:\s*([^\s#]+)/g)) {
     assert.match(match[1], /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+@[0-9a-f]{40}$/);
   }
-  assert.equal((workflow.match(/retention-days:\s*90/g) ?? []).length, 5);
-  assert.equal((workflow.match(/overwrite:\s*false/g) ?? []).length, 5);
+  assert.equal((workflow.match(/retention-days:\s*90/g) ?? []).length, 6);
+  assert.equal((workflow.match(/overwrite:\s*false/g) ?? []).length, 6);
   assert.match(
     workflow,
     /artifact-ids:\s*\$\{\{ inputs\.evidence_artifact_id \}\}/,
   );
   assert.match(
     workflow,
+    /artifact-ids:\s*\$\{\{ inputs\.authority_request_artifact_id \}\}/,
+  );
+  assert.match(
+    workflow,
+    /path:\s*\$\{\{ runner\.temp \}\}\/commander-xp-envelope\/evidence/,
+  );
+  assert.match(
+    workflow,
+    /path:\s*\$\{\{ runner\.temp \}\}\/commander-xp-envelope\/authority/,
+  );
+  assert.match(
+    workflow,
+    /--authority-request \\\n\s+"\$RUNNER_TEMP\/commander-xp-envelope\/authority\/commander-xp-external-seal-request-v1\.json"/,
+  );
+  assert.match(
+    workflow,
     /artifact-ids:\s*\$\{\{ needs\.normalize\.outputs\.artifact_id \}\}/,
   );
   assert.match(workflow, /actions\/attest@[0-9a-f]{40}/);
-  assert.equal((workflow.match(/gh attestation verify/g) ?? []).length, 7);
-  assert.equal((workflow.match(/--deny-self-hosted-runners/g) ?? []).length, 7);
-  assert.equal((workflow.match(/--cert-identity/g) ?? []).length, 7);
+  assert.equal((workflow.match(/gh attestation verify/g) ?? []).length, 8);
+  assert.equal((workflow.match(/--deny-self-hosted-runners/g) ?? []).length, 8);
+  assert.equal((workflow.match(/--cert-identity/g) ?? []).length, 8);
   assert.equal(
     (workflow.match(/--source-ref "refs\/heads\/main"/g) ?? []).length,
-    7,
+    8,
   );
   assert.equal(
     (workflow.match(/--source-digest "\$SOURCE_SHA"/g) ?? []).length,
-    7,
+    8,
   );
   assert.equal(
     (workflow.match(/--signer-digest "\$SOURCE_SHA"/g) ?? []).length,
-    7,
+    8,
   );
   assert.equal(
     (workflow.match(/npm-ci-with-retry\.mjs --ignore-scripts/g) ?? []).length,
@@ -943,6 +960,10 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
     ledger,
     canaryBinding,
   );
+  assert.equal(
+    verifyPhaseReceiptBindingDocument(retained.binding, "canary").phase,
+    "canary",
+  );
   await verifyRetainedPhaseAuthority({
     ledgerPath: retained.ledgerPath,
     authorityReceiptPath: retained.authorityPath,
@@ -1257,6 +1278,7 @@ function namespaceRegistryFixture(priorRegistrySha256) {
       episodeID: [],
       episodeRequestID: [],
       jobID: [],
+      providerRequestID: [],
       replayPath: [],
       replayURLSha256: [],
       runKey: [],

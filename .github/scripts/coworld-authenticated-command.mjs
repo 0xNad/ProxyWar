@@ -1,7 +1,13 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import {
+  lstatSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -22,7 +28,21 @@ const [command, ...args] = process.argv.slice(2);
 const token = process.env.COWORLD_API_TOKEN;
 const python = process.env.COWORLD_PYTHON;
 const coworld = process.env.COWORLD_BIN;
-const runnerTemp = resolve(process.env.RUNNER_TEMP ?? tmpdir());
+const runnerTemp = realpathSync(resolve(process.env.RUNNER_TEMP ?? tmpdir()));
+
+function exactRunnerTempInput(value) {
+  if (typeof value !== "string" || resolve(value) !== value) return false;
+  try {
+    const real = realpathSync(value);
+    return (
+      real.startsWith(`${runnerTemp}/`) &&
+      !lstatSync(value).isSymbolicLink() &&
+      statSync(real).isFile()
+    );
+  } catch {
+    return false;
+  }
+}
 
 if (!allowedCommands.has(command)) {
   throw new Error(
@@ -38,9 +58,7 @@ if (
       args[2] === "--json") ||
     (args.length === 3 &&
       args[0] === "create" &&
-      typeof args[1] === "string" &&
-      resolve(args[1]) === args[1] &&
-      resolve(args[1]).startsWith(`${runnerTemp}/`) &&
+      exactRunnerTempInput(args[1]) &&
       args[1].endsWith(".json") &&
       args[2] === "--json")
   )
@@ -91,7 +109,7 @@ try {
     python,
     [
       "-c",
-      "import os; from softmax.auth import save_user_token; save_user_token(server='https://softmax.com/api', token=os.environ['COWORLD_API_TOKEN'])",
+      "import importlib.metadata, os; assert importlib.metadata.version('coworld') == '0.1.42'; from softmax.auth import save_user_token; save_user_token(server='https://softmax.com/api', token=os.environ['COWORLD_API_TOKEN'])",
     ],
     {
       env: { ...childEnv, COWORLD_API_TOKEN: token },
