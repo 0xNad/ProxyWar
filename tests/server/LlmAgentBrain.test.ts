@@ -928,6 +928,34 @@ describe("comms/deal slot pass-through (in-house lane parity)", () => {
     expect(decision.metadata?.llmParseOk).toBe(true);
   });
 
+  it("forwards raw present side-slot strings for validator authority", async () => {
+    process.env[MESSAGES_FLAG] = "1";
+    process.env[DEALS_FLAG] = "1";
+    const brain = new LlmAgentBrain({
+      provider: providerReturning({
+        selectedLegalActionId: "alliance:PLAYER02",
+        selectedDealActionId: " deal_propose:PLAYER02:non_aggression ",
+        selectedMessageActionId: " message:PLAYER02 ",
+        messageText: "\u0007",
+        reason: "validator must see the exact invalid pair",
+      }),
+      profile: "diplomatic",
+    });
+
+    const decision = await brain.decide({
+      observation,
+      legalActions: commsLegalActions,
+    });
+
+    expect(decision.dealActionID).toBe(
+      " deal_propose:PLAYER02:non_aggression ",
+    );
+    expect(decision.messageActionID).toBe(" message:PLAYER02 ");
+    expect(decision.messageText).toBe("\u0007");
+    expect(decision.metadata?.llmParseOk).toBe(true);
+    expect(decision.metadata?.fallbackUsed).toBe(false);
+  });
+
   it("keeps both slots absent when the flags are off, even if the reply carries them", async () => {
     const brain = new LlmAgentBrain({
       provider: providerReturning({

@@ -1150,7 +1150,7 @@ export class AgentLeagueMatchRunner {
    * SAFETY: `validateAgentMessageDecision` is the only entry point. It requires
    * an exact id match against the SAME offered menu AND the `message` kind, so
    * no game intent can reach the game through this field. The text it returns
-   * is already length-, whitespace- and control-character-validated; this
+   * is already length-, blank-, and unsafe-character-validated; this
    * method never repairs text, and a rejected message is stamped onto the
    * record and dropped with no fallback substitution.
    *
@@ -1175,10 +1175,13 @@ export class AgentLeagueMatchRunner {
     if (validation === null) {
       return null;
     }
-    const requestedID = `${input.decision.messageActionID}`.slice(
-      0,
-      MAX_STAMPED_DEAL_ACTION_ID_LENGTH,
-    );
+    const requestedID =
+      typeof input.decision.messageActionID === "string"
+        ? input.decision.messageActionID.slice(
+            0,
+            MAX_STAMPED_DEAL_ACTION_ID_LENGTH,
+          )
+        : undefined;
     if (!validation.ok) {
       const reason = validation.reason.slice(
         0,
@@ -1190,13 +1193,20 @@ export class AgentLeagueMatchRunner {
         messageActionID: requestedID,
         reason,
       });
-      return { commsSlotRequestedID: requestedID, commsSlotRejected: reason };
+      return {
+        ...(requestedID === undefined
+          ? {}
+          : { commsSlotRequestedID: requestedID }),
+        commsSlotRejected: reason,
+      };
     }
     const recipientID = validation.action.metadata?.recipientID;
     const senderID = input.observation.ownState?.playerID ?? null;
     if (typeof recipientID !== "string" || senderID === null) {
       return {
-        commsSlotRequestedID: requestedID,
+        ...(requestedID === undefined
+          ? {}
+          : { commsSlotRequestedID: requestedID }),
         commsSlotRejected: "message action carried no resolvable recipient",
       };
     }

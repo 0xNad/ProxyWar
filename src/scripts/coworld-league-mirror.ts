@@ -78,8 +78,8 @@ import {
  * Read-only Coworld league mirror.
  *
  * Pulls hosted league state through the `coworld` CLI's read verbs
- * (`leagues`, `results`, `memberships`, `rounds`, `replays`) plus public S3
- * replay downloads, then writes a static league site into
+ * (`leagues`, `results`, `memberships`, `rounds`, `episodes`, `replays`) plus
+ * public S3 replay downloads, then writes a static league site into
  * `artifacts/ai-league-runs/league/` and unpacks each mirrored episode into a
  * standard `artifacts/ai-league-runs/<runID>/` bundle (self-contained
  * spectator.html + the inline artifacts the real-client renderer needs).

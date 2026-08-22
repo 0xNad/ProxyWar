@@ -399,7 +399,15 @@ function laterAssessment(
 ): CoworldRoundIntegrityAssessment | null {
   if (left === null) return right;
   if (right === null) return left;
-  return right.roundNumber > left.roundNumber ? right : left;
+  if (right.roundNumber > left.roundNumber) return right;
+  if (
+    right.roundNumber === left.roundNumber &&
+    right.roundId === left.roundId &&
+    right.evidenceHash !== left.evidenceHash
+  ) {
+    return right;
+  }
+  return left;
 }
 
 /**
@@ -462,10 +470,16 @@ export function reconcileCoworldRoundIntegrity(args: {
   for (const assessment of confirmedThisCycle) {
     lastConfirmedBreach = laterAssessment(lastConfirmedBreach, assessment);
   }
+  const previous = args.previous;
   const latestStillPreviouslyConfirmed =
     latestCompletedRound.verdict === "breach" &&
-    args.previous?.lastConfirmedBreach?.roundId ===
-      latestCompletedRound.roundId;
+    previous?.status === "degraded" &&
+    previous.latestCompletedRound.roundId === latestCompletedRound.roundId &&
+    previous.latestCompletedRound.evidenceHash ===
+      latestCompletedRound.evidenceHash &&
+    previous.lastConfirmedBreach?.roundId === latestCompletedRound.roundId &&
+    previous.lastConfirmedBreach.evidenceHash ===
+      latestCompletedRound.evidenceHash;
   const latestConfirmed =
     latestStillPreviouslyConfirmed ||
     confirmedThisCycle.some(

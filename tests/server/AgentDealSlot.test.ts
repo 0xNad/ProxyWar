@@ -96,10 +96,22 @@ describe("deal slot — the raw-intent-bypass guard", () => {
     ...(dealActionID !== undefined ? { dealActionID } : {}),
   });
 
-  it("returns null (shipped path untouched) when the field is absent or blank", () => {
+  it("returns null (shipped path untouched) only when the field is absent", () => {
     expect(validateAgentDealDecision(decision(), menu)).toBeNull();
     expect(validateAgentDealDecision(decision(null), menu)).toBeNull();
-    expect(validateAgentDealDecision(decision("   "), menu)).toBeNull();
+  });
+
+  it("rejects blank and padded ids without rewriting them", () => {
+    const blank = validateAgentDealDecision(decision("   "), menu);
+    expect(blank).toMatchObject({ ok: false });
+    if (blank === null || blank.ok) return;
+    expect(blank.reason).toBe("deal selection named unknown action id:    ");
+
+    const paddedID = ` deal_accept:${NAP_A_TO_B} `;
+    expect(validateAgentDealDecision(decision(paddedID), menu)).toEqual({
+      ok: false,
+      reason: `deal selection named unknown action id: ${paddedID}`,
+    });
   });
 
   it("accepts exactly one offered deal id", () => {
@@ -188,6 +200,26 @@ describe("deal slot — league submission pass", () => {
     expect(record.decisionMetadata?.dealSlotRejected).toBe(
       "deal selection named unknown action id: deal_accept:deal:invented",
     );
+    expect(harness.league.dealLedger().deals).toEqual([]);
+  });
+
+  it("rejects a padded offered deal id and applies no deal", async () => {
+    const paddedID = ` ${PROPOSE_B_NAP} `;
+    const harness = dealLeagueHarness({
+      seats: [A, B, C],
+      scripts: [[pickWithDeal(null, paddedID)], [], []],
+    });
+    const record = recordFor(
+      await harness.league.runDecisionTurn({ turnNumber: 0 }),
+      A,
+    );
+
+    expect(record.decisionMetadata?.dealSlotRequestedID).toBe(paddedID);
+    expect(record.decisionMetadata?.dealSlotRejected).toBe(
+      `deal selection named unknown action id: ${paddedID}`,
+    );
+    expect(record.decisionMetadata?.dealAction).toBeUndefined();
+    expect(record.dealSlotEvidence?.application.attempted).toBe(false);
     expect(harness.league.dealLedger().deals).toEqual([]);
   });
 

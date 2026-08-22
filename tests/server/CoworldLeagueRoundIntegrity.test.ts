@@ -319,6 +319,131 @@ describe("Coworld ladder round integrity", () => {
     expect(changed?.lastConfirmedBreach).toBeNull();
   });
 
+  test("changed evidence for a confirmed round must reconfirm before replacing the last breach", () => {
+    const firstBreach = assessmentFor(rows(11, 14));
+    const firstPending = reconcileCoworldRoundIntegrity({
+      previous: null,
+      settings,
+      assessments: [firstBreach],
+      checkedAt: "2026-08-21T20:00:00.000Z",
+    });
+    const firstDegraded = reconcileCoworldRoundIntegrity({
+      previous: firstPending,
+      settings,
+      assessments: [firstBreach],
+      checkedAt: "2026-08-21T20:01:00.000Z",
+    });
+    expect(firstDegraded?.status).toBe("degraded");
+    expect(firstDegraded?.lastConfirmedBreach).toEqual(firstBreach);
+
+    const changedBreach = assessmentFor(rows(19, 6));
+    const changedPending = reconcileCoworldRoundIntegrity({
+      previous: firstDegraded,
+      settings,
+      assessments: [changedBreach],
+      checkedAt: "2026-08-21T20:01:01.000Z",
+    });
+    expect(changedPending?.status).toBe("confirmation_pending");
+    expect(changedPending?.lastConfirmedBreach).toEqual(firstBreach);
+    expect(changedPending?.breachObservations).toContainEqual({
+      roundId: changedBreach.roundId,
+      evidenceHash: changedBreach.evidenceHash,
+      firstObservedAt: "2026-08-21T20:01:01.000Z",
+    });
+
+    const changedEarly = reconcileCoworldRoundIntegrity({
+      previous: changedPending,
+      settings,
+      assessments: [changedBreach],
+      checkedAt: "2026-08-21T20:02:00.999Z",
+    });
+    expect(changedEarly?.status).toBe("confirmation_pending");
+    expect(changedEarly?.lastConfirmedBreach).toEqual(firstBreach);
+
+    const changedDegraded = reconcileCoworldRoundIntegrity({
+      previous: changedEarly,
+      settings,
+      assessments: [changedBreach],
+      checkedAt: "2026-08-21T20:02:01.000Z",
+    });
+    expect(changedDegraded?.status).toBe("degraded");
+    expect(changedDegraded?.lastConfirmedBreach).toEqual(changedBreach);
+
+    const healthy = {
+      ...assessmentFor(rows(25, 0)),
+      roundId: "round_1898",
+      roundNumber: 1898,
+      completedAt: "2026-08-21T20:20:00.000Z",
+    };
+    const cleared = reconcileCoworldRoundIntegrity({
+      previous: changedDegraded,
+      settings,
+      assessments: [healthy, changedBreach],
+      checkedAt: "2026-08-21T20:21:00.000Z",
+    });
+    expect(cleared?.status).toBe("healthy");
+    expect(cleared?.lastConfirmedBreach).toEqual(changedBreach);
+  });
+
+  test("returning to a historically confirmed hash after an intervening hash must reconfirm", () => {
+    const firstBreach = assessmentFor(rows(11, 14));
+    const firstPending = reconcileCoworldRoundIntegrity({
+      previous: null,
+      settings,
+      assessments: [firstBreach],
+      checkedAt: "2026-08-21T20:00:00.000Z",
+    });
+    const firstDegraded = reconcileCoworldRoundIntegrity({
+      previous: firstPending,
+      settings,
+      assessments: [firstBreach],
+      checkedAt: "2026-08-21T20:01:00.000Z",
+    });
+    expect(firstDegraded?.status).toBe("degraded");
+
+    const interveningBreach = assessmentFor(rows(19, 6));
+    const interveningPending = reconcileCoworldRoundIntegrity({
+      previous: firstDegraded,
+      settings,
+      assessments: [interveningBreach],
+      checkedAt: "2026-08-21T20:01:01.000Z",
+    });
+    expect(interveningPending?.status).toBe("confirmation_pending");
+
+    const returnedPending = reconcileCoworldRoundIntegrity({
+      previous: interveningPending,
+      settings,
+      assessments: [firstBreach],
+      checkedAt: "2026-08-21T20:01:02.000Z",
+    });
+    expect(returnedPending?.status).toBe("confirmation_pending");
+    expect(returnedPending?.lastConfirmedBreach).toEqual(firstBreach);
+    expect(returnedPending?.breachObservations).toEqual([
+      {
+        roundId: firstBreach.roundId,
+        evidenceHash: firstBreach.evidenceHash,
+        firstObservedAt: "2026-08-21T20:01:02.000Z",
+      },
+    ]);
+
+    const returnedEarly = reconcileCoworldRoundIntegrity({
+      previous: returnedPending,
+      settings,
+      assessments: [firstBreach],
+      checkedAt: "2026-08-21T20:02:01.999Z",
+    });
+    expect(returnedEarly?.status).toBe("confirmation_pending");
+
+    const returnedDegraded = reconcileCoworldRoundIntegrity({
+      previous: returnedEarly,
+      settings,
+      assessments: [firstBreach],
+      checkedAt: "2026-08-21T20:02:02.000Z",
+    });
+    expect(returnedDegraded?.status).toBe("degraded");
+    expect(returnedDegraded?.lastConfirmedBreach).toEqual(firstBreach);
+  });
+
   test("a later healthy terminal round clears current degradation but retains last breach", () => {
     const breach = assessmentFor(rows(11, 14));
     const pending = reconcileCoworldRoundIntegrity({
