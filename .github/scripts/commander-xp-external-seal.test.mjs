@@ -262,6 +262,74 @@ test("privacy inventory seals exact Coworld projections and rejects raw bytes, p
   );
   await fs.unlink(path.join(runRoot, "replay.json"));
 
+  const replayWithInlineArtifact = {
+    schemaVersion: 1,
+    inlineRunArtifacts: {
+      "match-summary.json": JSON.stringify({
+        rawProviderOutputRecordCount: 1204,
+        events: [
+          {
+            type: "agent_message",
+            recipient: "PLAYER02",
+            text: "Hold the eastern border until turn 900.",
+          },
+        ],
+      }),
+    },
+  };
+  await fs.writeFile(
+    path.join(runRoot, "replay.json"),
+    canonicalJson(replayWithInlineArtifact),
+  );
+  assert.equal((await scanPrivacyAndInventory(root)).fileCount, 5);
+
+  replayWithInlineArtifact.inlineRunArtifacts["match-summary.json"] =
+    JSON.stringify({
+      unexpectedEnvelope: {
+        conversation: {
+          rawProviderOutput: {
+            providerResponseBody: "private transcript",
+          },
+        },
+      },
+    });
+  await fs.writeFile(
+    path.join(runRoot, "replay.json"),
+    canonicalJson(replayWithInlineArtifact),
+  );
+  await assert.rejects(
+    scanPrivacyAndInventory(root),
+    hasCode("PRIVACY_KEY_FORBIDDEN"),
+  );
+
+  replayWithInlineArtifact.inlineRunArtifacts["match-summary.json"] =
+    JSON.stringify({
+      renamedWrapper: {
+        conversation: { modelTranscript: "private body" },
+      },
+    });
+  await fs.writeFile(
+    path.join(runRoot, "replay.json"),
+    canonicalJson(replayWithInlineArtifact),
+  );
+  await assert.rejects(
+    scanPrivacyAndInventory(root),
+    hasCode("PRIVACY_KEY_FORBIDDEN"),
+  );
+
+  replayWithInlineArtifact.inlineRunArtifacts = {
+    "renamed-private.json": JSON.stringify({ transcript: "private" }),
+  };
+  await fs.writeFile(
+    path.join(runRoot, "replay.json"),
+    canonicalJson(replayWithInlineArtifact),
+  );
+  await assert.rejects(
+    scanPrivacyAndInventory(root),
+    hasCode("INLINE_RUN_ARTIFACT_FORBIDDEN"),
+  );
+  await fs.unlink(path.join(runRoot, "replay.json"));
+
   const receipt = JSON.parse(
     await fs.readFile(
       path.join(runRoot, "coworld-bundle-receipt.json"),

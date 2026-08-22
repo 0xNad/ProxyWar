@@ -60,6 +60,12 @@ const ALLOWED_RUN_SUFFIXES = new Set([
   "player-artifact/trace.jsonl",
   "player-artifact/hashes.json",
 ]);
+const PUBLIC_INLINE_JSON_ARTIFACTS = new Set([
+  "game-record.json",
+  "deal-ledger.json",
+  "match-summary.json",
+  "spectator-telemetry.json",
+]);
 const FORBIDDEN_PRIVACY_KEYS = [
   "accesstoken",
   "apikey",
@@ -943,6 +949,10 @@ function inspectJsonPrivacy(value, filePath) {
   if (!isRecord(value)) return;
   for (const [key, item] of Object.entries(value)) {
     const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (key === "inlineRunArtifacts") {
+      inspectInlineRunArtifacts(item, filePath);
+      continue;
+    }
     if (
       key === "rawProviderOutputRecordCount" &&
       Number.isSafeInteger(item) &&
@@ -955,6 +965,21 @@ function inspectJsonPrivacy(value, filePath) {
     )
       fail("PRIVACY_KEY_FORBIDDEN", `${filePath}:${key}`);
     inspectJsonPrivacy(item, filePath);
+  }
+}
+
+function inspectInlineRunArtifacts(value, filePath) {
+  if (!isRecord(value)) fail("INLINE_RUN_ARTIFACTS_SCHEMA_INVALID", filePath);
+  for (const [artifactName, encoded] of Object.entries(value)) {
+    if (
+      !PUBLIC_INLINE_JSON_ARTIFACTS.has(artifactName) ||
+      typeof encoded !== "string"
+    ) {
+      fail("INLINE_RUN_ARTIFACT_FORBIDDEN", `${filePath}:${artifactName}`);
+    }
+    const label = `${filePath}#inlineRunArtifacts/${artifactName}`;
+    const decoded = parseJsonText(encoded, label);
+    inspectJsonPrivacy(decoded, label);
   }
 }
 
