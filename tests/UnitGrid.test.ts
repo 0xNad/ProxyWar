@@ -38,7 +38,13 @@ async function nearbyUnits(
   );
   const unitTile = game.map().ref(unitPosX, 0);
   for (const unitType of unitTypes) {
-    grid.addUnit(player.buildUnit(unitType, unitTile, {}));
+    const unit =
+      unitType === UnitType.Warship
+        ? player.buildUnit(UnitType.Warship, unitTile, {
+            patrolTile: unitTile,
+          })
+        : player.buildUnit(unitType, unitTile, {});
+    grid.addUnit(unit);
   }
   const tileToCheck = game.map().ref(rangeCheck, 0);
   return grid.nearbyUnits(tileToCheck, range, unitTypes);

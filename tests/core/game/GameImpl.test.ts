@@ -8,6 +8,7 @@ import {
   Player,
   PlayerInfo,
   PlayerType,
+  UnitType,
 } from "../../../src/core/game/Game";
 import { TileRef } from "../../../src/core/game/GameMap";
 import { setup } from "../../util/Setup";
@@ -131,5 +132,106 @@ describe("GameImpl", () => {
 
     expect(attacker.isTraitor()).toBe(true);
     expect(attacker.allianceWith(defender)).toBeFalsy();
+  });
+
+  test("Warship patrolTile rejects missing, malformed, inherited, and out-of-map values", () => {
+    const lastTile = game.ref(game.width() - 1, game.height() - 1);
+    const buildWith = (params: unknown) =>
+      attacker.buildUnit(
+        UnitType.Warship,
+        attackerSpawn,
+        params as { patrolTile: TileRef },
+      );
+
+    expect(() => {
+      // @ts-expect-error Runtime callers can bypass the compile-time requirement.
+      attacker.buildUnit(UnitType.Warship, attackerSpawn, {});
+    }).toThrow(/Warship constructed with invalid patrolTile/);
+    for (const patrolTile of [
+      undefined,
+      null,
+      false,
+      "0",
+      0n,
+      {},
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      1.5,
+      -1,
+      lastTile + 1,
+    ]) {
+      expect(() => buildWith({ patrolTile })).toThrow(
+        /Warship constructed with invalid patrolTile/,
+      );
+    }
+    expect(() =>
+      buildWith(Object.create({ patrolTile: attackerSpawn })),
+    ).toThrow(/Warship constructed with invalid patrolTile/);
+    expect(attacker.units(UnitType.Warship)).toHaveLength(0);
+  });
+
+  test("Warship patrolTile accepts the first and last valid map references", () => {
+    const lastTile = game.ref(game.width() - 1, game.height() - 1);
+    const first = attacker.buildUnit(UnitType.Warship, attackerSpawn, {
+      patrolTile: 0,
+    });
+    const last = attacker.buildUnit(UnitType.Warship, attackerSpawn, {
+      patrolTile: lastTile,
+    });
+
+    expect(first.warshipState().patrolTile).toBe(0);
+    expect(last.warshipState().patrolTile).toBe(lastTile);
+  });
+
+  test("invalid Warship patrolTile does not consume deterministic state", () => {
+    const gameWithUnitIDs = game as Game & { nextUnitID(): number };
+    const lastIssuedUnitID = gameWithUnitIDs.nextUnitID();
+    const nextUnitID = vi.spyOn(gameWithUnitIDs, "nextUnitID");
+    const unitBuild = vi.spyOn(game.stats(), "unitBuild");
+    const addUpdate = vi.spyOn(game, "addUpdate");
+    const goldBefore = attacker.gold();
+    const troopsBefore = attacker.troops();
+    const unitsBefore = attacker.units().length;
+
+    expect(() =>
+      attacker.buildUnit(UnitType.Warship, attackerSpawn, {
+        patrolTile: game.width() * game.height(),
+      }),
+    ).toThrow(/Warship constructed with invalid patrolTile/);
+
+    expect(nextUnitID).not.toHaveBeenCalled();
+    expect(unitBuild).not.toHaveBeenCalled();
+    expect(addUpdate).not.toHaveBeenCalled();
+    expect(attacker.gold()).toBe(goldBefore);
+    expect(attacker.troops()).toBe(troopsBefore);
+    expect(attacker.units()).toHaveLength(unitsBefore);
+
+    const valid = attacker.buildUnit(UnitType.Warship, attackerSpawn, {
+      patrolTile: attackerSpawn,
+    });
+    expect(valid.id()).toBe(lastIssuedUnitID + 1);
+    expect(nextUnitID).toHaveBeenCalledTimes(1);
+  });
+
+  test("Warship construction snapshots patrolTile before allocating state", () => {
+    let patrolTileReads = 0;
+    const changingParams = Object.defineProperty({}, "patrolTile", {
+      enumerable: true,
+      get: () => {
+        patrolTileReads += 1;
+        return patrolTileReads === 1
+          ? attackerSpawn
+          : game.width() * game.height();
+      },
+    });
+
+    const warship = attacker.buildUnit(
+      UnitType.Warship,
+      attackerSpawn,
+      changingParams as { patrolTile: TileRef },
+    );
+
+    expect(patrolTileReads).toBe(1);
+    expect(warship.warshipState().patrolTile).toBe(attackerSpawn);
   });
 });
