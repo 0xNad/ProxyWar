@@ -447,7 +447,9 @@ async function readValidatedReceipt({ receiptPath, allowedStatuses }) {
   try {
     receipt = JSON.parse(await fs.readFile(receiptPath, "utf8"));
   } catch (error) {
-    throw new Error(`receipt is not valid JSON: ${boundedError(error)}`);
+    throw new Error(`receipt is not valid JSON: ${boundedError(error)}`, {
+      cause: error,
+    });
   }
   assertExactKeys(
     receipt,
@@ -971,6 +973,7 @@ export async function installPwLeagueSentinelRoundIntegrity(
               (candidate) => candidate !== null,
             ),
             `Sentinel install failed; automatic rollback or receipt recording also failed: install=${boundedError(error)} rollback=${rollbackError === null ? "none" : boundedError(rollbackError)} receipt=${receiptWriteError === null ? "none" : boundedError(receiptWriteError)}`,
+            { cause: error },
           );
         }
       }
@@ -1030,6 +1033,7 @@ export async function rollbackPwLeagueSentinelRoundIntegrity(
           (candidate) => candidate !== null,
         ),
         `Sentinel rollback failed: restore=${boundedError(restoreError)} receipt=${receiptWriteError === null ? "recorded" : boundedError(receiptWriteError)}`,
+        { cause: restoreError },
       );
     }
   });
