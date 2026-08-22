@@ -31,15 +31,23 @@ describe("Coworld 0.1.42 Commander XP game-log framing", () => {
   });
 
   it.each([
-    ["duplicate game", "===== container: game =====\nb''\n\n===== container: game =====\nb''"],
+    [
+      "duplicate game",
+      "===== container: game =====\nb''\n\n===== container: game =====\nb''",
+    ],
     ["concatenated literals", "===== container: game =====\nb'' b''"],
     ["malformed escape", "===== container: game =====\nb'\\x0z'"],
-    ["embedded non-column-zero prefix", "===== container: game =====\nb'xCOMMANDER_XP_GAME_EVIDENCE {}\\n'"],
+    [
+      "embedded non-column-zero prefix",
+      "===== container: game =====\nb'xCOMMANDER_XP_GAME_EVIDENCE {}\\n'",
+    ],
   ])("rejects or ignores %s", (_label, output) => {
     if (_label === "embedded non-column-zero prefix") {
       expect(commanderXpGameEvidenceFromCoworld042Output(output)).toEqual([]);
     } else {
-      expect(() => commanderXpGameEvidenceFromCoworld042Output(output)).toThrow();
+      expect(() =>
+        commanderXpGameEvidenceFromCoworld042Output(output),
+      ).toThrow();
     }
   });
 });

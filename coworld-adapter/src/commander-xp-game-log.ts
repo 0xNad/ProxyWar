@@ -15,11 +15,13 @@ export function commanderXpGameEvidenceFromCoworld042Output(
   if (game === undefined) {
     throw new Error("Coworld game-log output has no game container");
   }
-  return game.split(/\r?\n/).flatMap((line) =>
-    line.startsWith(COMMANDER_XP_GAME_EVIDENCE_PREFIX)
-      ? [line.slice(COMMANDER_XP_GAME_EVIDENCE_PREFIX.length)]
-      : [],
-  );
+  return game
+    .split(/\r?\n/)
+    .flatMap((line) =>
+      line.startsWith(COMMANDER_XP_GAME_EVIDENCE_PREFIX)
+        ? [line.slice(COMMANDER_XP_GAME_EVIDENCE_PREFIX.length)]
+        : [],
+    );
 }
 
 /** Extract evidence from the platform-issued bundle's decoded game.log. */
@@ -27,11 +29,13 @@ export function commanderXpGameEvidenceFromRawGameLog(log: string): string[] {
   if (Buffer.byteLength(log, "utf8") > MAX_LOG_OUTPUT_BYTES) {
     throw new Error("Coworld game log exceeds bounded parser limit");
   }
-  return log.split(/\r?\n/).flatMap((line) =>
-    line.startsWith(COMMANDER_XP_GAME_EVIDENCE_PREFIX)
-      ? [line.slice(COMMANDER_XP_GAME_EVIDENCE_PREFIX.length)]
-      : [],
-  );
+  return log
+    .split(/\r?\n/)
+    .flatMap((line) =>
+      line.startsWith(COMMANDER_XP_GAME_EVIDENCE_PREFIX)
+        ? [line.slice(COMMANDER_XP_GAME_EVIDENCE_PREFIX.length)]
+        : [],
+    );
 }
 
 function parseContainers(output: string): Map<string, string> {
@@ -50,13 +54,16 @@ function parseContainers(output: string): Map<string, string> {
     }
     const name = output.slice(cursor + CONTAINER_HEADER.length, headerEnd);
     if (!/^[A-Za-z0-9._-]+$/.test(name) || result.has(name)) {
-      throw new Error("Coworld game-log container name is invalid or duplicate");
+      throw new Error(
+        "Coworld game-log container name is invalid or duplicate",
+      );
     }
     const literalStart = headerEnd + " =====\n".length;
     const nextHeader = output.indexOf(`\n\n${CONTAINER_HEADER}`, literalStart);
     const literalEnd = nextHeader < 0 ? output.length : nextHeader;
     let literal = output.slice(literalStart, literalEnd);
-    if (nextHeader < 0 && literal.endsWith("\n")) literal = literal.slice(0, -1);
+    if (nextHeader < 0 && literal.endsWith("\n"))
+      literal = literal.slice(0, -1);
     if (literal.includes("\n")) {
       throw new Error("Coworld game-log container has multiple literal lines");
     }

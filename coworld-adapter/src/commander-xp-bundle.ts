@@ -27,7 +27,10 @@ export async function parseCommanderXpEpisodeBundleBytes(
   outerBytes: Uint8Array,
   episodeRequestID: string,
 ): Promise<CommanderXpParsedEpisodeBundle> {
-  if (outerBytes.byteLength === 0 || outerBytes.byteLength > 512 * 1024 * 1024) {
+  if (
+    outerBytes.byteLength === 0 ||
+    outerBytes.byteLength > 512 * 1024 * 1024
+  ) {
     throw new Error("episode bundle byte length is invalid");
   }
   const zip = await JSZip.loadAsync(outerBytes, {

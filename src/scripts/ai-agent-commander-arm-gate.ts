@@ -1000,10 +1000,7 @@ function assertExpectedArmManifests(
 
 export function commanderSocialExperimentFlags(
   env: NodeJS.ProcessEnv = process.env,
-): Pick<
-  CommanderExperimentFlags,
-  "structuredDeals" | "freeTextMessages"
-> {
+): Pick<CommanderExperimentFlags, "structuredDeals" | "freeTextMessages"> {
   return {
     structuredDeals: numericFlag(env.PROXYWAR_TUNE_STRUCTURED_DEALS),
     freeTextMessages: numericFlag(env.PROXYWAR_TUNE_FREETEXT_MESSAGES),
@@ -1011,14 +1008,8 @@ export function commanderSocialExperimentFlags(
 }
 
 function assertSocialExperimentFlagsOff(
-  flags: Pick<
-    CommanderExperimentFlags,
-    "structuredDeals" | "freeTextMessages"
-  >,
-): Pick<
-  CommanderExperimentFlags,
-  "structuredDeals" | "freeTextMessages"
-> {
+  flags: Pick<CommanderExperimentFlags, "structuredDeals" | "freeTextMessages">,
+): Pick<CommanderExperimentFlags, "structuredDeals" | "freeTextMessages"> {
   if (flags.structuredDeals || flags.freeTextMessages) {
     throw new Error("Commander arm gate requires social experiment flags OFF");
   }

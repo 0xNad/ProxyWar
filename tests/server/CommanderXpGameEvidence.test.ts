@@ -72,9 +72,12 @@ describe("Commander XP game-owned evidence", () => {
 
   it("rejects records without a joinable Coworld request identity", () => {
     expect(
-      projectCommanderXpGameEvidence({
-        decisionMetadata: {},
-      } as unknown as AgentDecisionRecord, runKey),
+      projectCommanderXpGameEvidence(
+        {
+          decisionMetadata: {},
+        } as unknown as AgentDecisionRecord,
+        runKey,
+      ),
     ).toBeNull();
   });
 });
