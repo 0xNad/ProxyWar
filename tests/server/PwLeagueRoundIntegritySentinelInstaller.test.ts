@@ -3,9 +3,12 @@ import { createHash } from "node:crypto";
 import {
   chmod,
   copyFile,
+  lstat,
   mkdtemp,
   readFile,
   rm,
+  stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -269,6 +272,42 @@ async function installTemporarySentinel(
   );
 }
 
+async function seedPreviousDependencies(
+  fixture: Awaited<ReturnType<typeof temporarySentinel>>,
+) {
+  const detectorPath = path.join(
+    fixture.directory,
+    INSTALLED_DETECTOR_BASENAME,
+  );
+  const adapterPath = path.join(fixture.directory, INSTALLED_ADAPTER_BASENAME);
+  const detectorBytes = Buffer.from("previous detector bytes\n");
+  const adapterBytes = Buffer.from("previous adapter bytes\n");
+  await Promise.all([
+    writeFile(detectorPath, detectorBytes, { mode: 0o600 }),
+    writeFile(adapterPath, adapterBytes, { mode: 0o640 }),
+  ]);
+  await Promise.all([chmod(detectorPath, 0o600), chmod(adapterPath, 0o640)]);
+  return {
+    detector: { path: detectorPath, bytes: detectorBytes, mode: 0o600 },
+    adapter: { path: adapterPath, bytes: adapterBytes, mode: 0o640 },
+  };
+}
+
+async function expectExactPreviousDependencies(
+  previous: Awaited<ReturnType<typeof seedPreviousDependencies>>,
+) {
+  for (const dependency of Object.values(previous)) {
+    expect(await readFile(dependency.path)).toEqual(dependency.bytes);
+    expect((await stat(dependency.path)).mode & 0o777).toBe(dependency.mode);
+    expect((await lstat(dependency.path)).isSymbolicLink()).toBe(false);
+  }
+}
+
+type ActivationHookState = {
+  stage: { stagedPaths: { sentinel: string } };
+  targets: { sentinel: string; detector: string; adapter: string };
+};
+
 test("building and copying the detector is explicitly insufficient until the sentinel is wired", async () => {
   const fixture = await temporarySentinel();
   await buildPwLeagueRoundIntegrityArtifact({
@@ -412,6 +451,73 @@ test("aborts on sentinel or repository drift immediately before activation", asy
     repositoryDrift.source,
   );
 });
+
+test.each([
+  {
+    name: "staged sentinel byte drift",
+    expectedError: "staged sentinel hash drift",
+    mutate: async ({ stage }: ActivationHookState) => {
+      await writeFile(stage.stagedPaths.sentinel, "drifted staged sentinel\n");
+    },
+  },
+  {
+    name: "staged sentinel symlink",
+    expectedError: "staged sentinel must be a regular non-symlink file",
+    mutate: async ({ stage }: ActivationHookState) => {
+      const decoyPath = `${stage.stagedPaths.sentinel}.decoy`;
+      await writeFile(decoyPath, "symlinked staged sentinel\n");
+      await rm(stage.stagedPaths.sentinel, { force: true });
+      await symlink(decoyPath, stage.stagedPaths.sentinel);
+    },
+  },
+  {
+    name: "installed detector byte drift",
+    expectedError: "installed detector hash drift",
+    mutate: async ({ targets }: ActivationHookState) => {
+      await writeFile(targets.detector, "drifted installed detector\n");
+    },
+  },
+  {
+    name: "installed adapter symlink",
+    expectedError: "installed adapter must be a regular non-symlink file",
+    mutate: async ({ targets }: ActivationHookState) => {
+      const decoyPath = `${targets.adapter}.decoy`;
+      await writeFile(decoyPath, "symlinked installed adapter\n");
+      await rm(targets.adapter, { force: true });
+      await symlink(decoyPath, targets.adapter);
+    },
+  },
+])(
+  "blocks $name at the sentinel activation barrier and restores exact dependencies",
+  async ({ expectedError, mutate }) => {
+    const fixture = await temporarySentinel();
+    const previous = await seedPreviousDependencies(fixture);
+    await expect(
+      installPwLeagueSentinelRoundIntegrity(
+        {
+          sentinelPath: fixture.sentinelPath,
+          expectedSentinelSha256: sha256(fixture.source),
+          expectedRepositorySha: repositoryHead,
+        },
+        {
+          readIdentity: cleanRepositoryIdentity,
+          beforeSentinelActivate: mutate,
+        },
+      ),
+    ).rejects.toThrow(expectedError);
+
+    expect(await readFile(fixture.sentinelPath, "utf8")).toBe(fixture.source);
+    expect(await readFile(fixture.sentinelPath, "utf8")).not.toContain(
+      "PROXYWAR ROUND INTEGRITY",
+    );
+    await expectExactPreviousDependencies(previous);
+    await expect(
+      inspectPwLeagueSentinelRoundIntegrity({
+        sentinelPath: fixture.sentinelPath,
+      }),
+    ).resolves.toMatchObject({ active: false, callWired: false });
+  },
+);
 
 test("surfaces and records automatic rollback failure after partial activation", async () => {
   const fixture = await temporarySentinel();

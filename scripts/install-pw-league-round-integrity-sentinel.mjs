@@ -605,14 +605,24 @@ async function readValidatedReceipt({ receiptPath, allowedStatuses }) {
 
 async function restoreReceiptFiles(
   receipt,
-  { keys = RESTORE_ORDER, beforeRestoreKey } = {},
+  {
+    keys = RESTORE_ORDER,
+    beforeRestoreKey,
+    restoreTransactionOwnedTargets = false,
+  } = {},
 ) {
   const requested = new Set(keys);
   const restored = [];
   for (const key of RESTORE_ORDER) {
     if (!requested.has(key)) continue;
     const file = receipt.files[key];
-    const current = await optionalFileState(file.targetPath);
+    let current;
+    try {
+      current = await optionalFileState(file.targetPath);
+    } catch (error) {
+      if (!restoreTransactionOwnedTargets) throw error;
+      current = { exists: true, mode: null, sha256: null };
+    }
     const alreadyRestored = file.existed
       ? current.exists && current.sha256 === file.previousSha256
       : !current.exists;
@@ -620,7 +630,10 @@ async function restoreReceiptFiles(
       restored.push({ key, status: "already_restored" });
       continue;
     }
-    if (!current.exists || current.sha256 !== file.installedSha256) {
+    if (
+      !restoreTransactionOwnedTargets &&
+      (!current.exists || current.sha256 !== file.installedSha256)
+    ) {
       throw new Error(
         `Refusing rollback: ${key} is neither installed nor already restored`,
       );
@@ -705,6 +718,42 @@ async function assertStagedHashes(stage, receipt) {
       throw new Error(`staged ${key} hash drifted before activation`);
     }
   }
+}
+
+async function assertExactRegularFileHash({ filePath, expectedSha256, label }) {
+  try {
+    await assertRegularFile(filePath, label);
+  } catch (error) {
+    throw new Error(`${label} must be a regular non-symlink file`, {
+      cause: error,
+    });
+  }
+  const actualSha256 = await fileSha256(filePath);
+  if (actualSha256 !== expectedSha256) {
+    throw new Error(
+      `${label} hash drift: expected ${expectedSha256}, found ${actualSha256}`,
+    );
+  }
+}
+
+async function assertSentinelActivationFiles({ stage, targets, receipt }) {
+  await Promise.all([
+    assertExactRegularFileHash({
+      filePath: stage.stagedPaths.sentinel,
+      expectedSha256: receipt.files.sentinel.installedSha256,
+      label: "staged sentinel",
+    }),
+    assertExactRegularFileHash({
+      filePath: targets.detector,
+      expectedSha256: receipt.files.detector.installedSha256,
+      label: "installed detector",
+    }),
+    assertExactRegularFileHash({
+      filePath: targets.adapter,
+      expectedSha256: receipt.files.adapter.installedSha256,
+      label: "installed adapter",
+    }),
+  ]);
 }
 
 export async function dryRunPwLeagueSentinelRoundIntegrity({ sentinelPath }) {
@@ -898,14 +947,17 @@ export async function installPwLeagueSentinelRoundIntegrity(
         stage,
         pendingReceiptPath,
       });
-      await assertActivationIdentity({
-        sentinelPath,
-        expectedSentinelSha256,
-        expectedRepositorySha,
-        stagedHashes: stage.hashes,
-        readIdentity,
-        label: "pre-sentinel-activation",
-      });
+      await Promise.all([
+        assertActivationIdentity({
+          sentinelPath,
+          expectedSentinelSha256,
+          expectedRepositorySha,
+          stagedHashes: stage.hashes,
+          readIdentity,
+          label: "pre-sentinel-activation",
+        }),
+        assertSentinelActivationFiles({ stage, targets, receipt }),
+      ]);
       await fs.rename(stage.stagedPaths.sentinel, targets.sentinel);
       replacedKeys.push("sentinel");
       const inspection = await inspectPwLeagueSentinelRoundIntegrity({
@@ -953,6 +1005,7 @@ export async function installPwLeagueSentinelRoundIntegrity(
             await restoreReceiptFiles(receipt, {
               keys: replacedKeys,
               beforeRestoreKey: beforeAutomaticRestoreKey,
+              restoreTransactionOwnedTargets: true,
             });
             receipt.status = "rolled_back_after_install_failure";
           } catch (restoreError) {
