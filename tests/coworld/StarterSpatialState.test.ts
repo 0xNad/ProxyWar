@@ -70,7 +70,7 @@ describe("tester-starter-llm spatial state renderer", () => {
     );
   });
 
-  it("retains strictly bounded spatial facts and sanitizes generated briefings", async () => {
+  it("retains bounded spatial facts and omits redundant legend names", async () => {
     const buildState = await loadBuildState();
     const rawBriefing = `Spatial exposure 1:\u0000 Rival is east across a long frontier with zero posts; active incoming attack. ${"pressure ".repeat(40)}`;
     const expectedBriefing = rawBriefing

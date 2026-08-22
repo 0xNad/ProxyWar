@@ -231,10 +231,7 @@ export class LlmPromptBuilder {
                       ...observation.spatial.minimap,
                       rows: [...observation.spatial.minimap.rows],
                       legend: observation.spatial.minimap.legend.map(
-                        (entry) => ({
-                          ...entry,
-                          name: sanitizeUntrustedDisplayString(entry.name),
-                        }),
+                        (entry) => ({ ...entry }),
                       ),
                     },
                   }

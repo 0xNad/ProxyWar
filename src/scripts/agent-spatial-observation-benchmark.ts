@@ -64,7 +64,10 @@ interface FixtureGrid {
   landTiles: number;
 }
 
-function buildGrid(config: FixtureConfig): FixtureGrid {
+function buildGrid(
+  config: FixtureConfig,
+  playerCount: number = PLAYER_COUNT,
+): FixtureGrid {
   const random = mulberry32(0x5a71a1);
   const ownerIDs = new Uint16Array(WIDTH * HEIGHT);
   const water = new Uint8Array(WIDTH * HEIGHT);
@@ -139,7 +142,7 @@ function buildGrid(config: FixtureConfig): FixtureGrid {
           band += 1;
         }
       }
-      ownerIDs[tile] = (band % PLAYER_COUNT) + 1;
+      ownerIDs[tile] = (band % playerCount) + 1;
     }
   }
   return { ownerIDs, water, landTiles };
@@ -160,6 +163,9 @@ class BenchmarkPlayer {
     private readonly index: number,
     grid: FixtureGrid,
     defensePostCount: number,
+    private readonly identityProfile:
+      | "benchmark"
+      | "coworld_25_seat_boundary" = "benchmark",
   ) {
     const smallID = index + 1;
     for (let y = 0; y < HEIGHT; y++) {
@@ -196,6 +202,9 @@ class BenchmarkPlayer {
   }
 
   id(): string {
+    if (this.identityProfile === "coworld_25_seat_boundary") {
+      return `P${this.index.toString().padStart(7, "0")}`;
+    }
     return `P_${this.index.toString().padStart(2, "0")}`;
   }
 
@@ -208,6 +217,9 @@ class BenchmarkPlayer {
   }
 
   name(): string {
+    if (this.identityProfile === "coworld_25_seat_boundary") {
+      return `Candidate Seat ${(this.index + 1).toString().padStart(2, "0")} NNNNNNNNN`;
+    }
     return `Player ${this.index + 1}`;
   }
 
@@ -234,16 +246,25 @@ const TERRA_NULLIUS = {
   smallID: () => 0,
 };
 
-function benchmarkGame(config: FixtureConfig): {
+function benchmarkGame(
+  config: FixtureConfig,
+  playerCount: number = PLAYER_COUNT,
+  identityProfile: "benchmark" | "coworld_25_seat_boundary" = "benchmark",
+): {
   game: Game;
   players: BenchmarkPlayer[];
   landTiles: number;
 } {
-  const grid = buildGrid(config);
+  const grid = buildGrid(config, playerCount);
   const players = Array.from(
-    { length: PLAYER_COUNT },
+    { length: playerCount },
     (_, index) =>
-      new BenchmarkPlayer(index, grid, config.defensePostsPerPlayer),
+      new BenchmarkPlayer(
+        index,
+        grid,
+        config.defensePostsPerPlayer,
+        identityProfile,
+      ),
   );
   const game = {
     players: () => players as unknown as Player[],
@@ -418,6 +439,76 @@ function payloadSizes(game: Game, players: readonly BenchmarkPlayer[]) {
   };
 }
 
+function minimapSerializationBoundary() {
+  const { game, players } = benchmarkGame(
+    {
+      layout: "contiguous_vertical_stripes",
+      bandCount: 25,
+      gateRole: "acceptance",
+      boundaryJitter: 0,
+      water: false,
+      defensePostsPerPlayer: 0,
+    },
+    25,
+    "coworld_25_seat_boundary",
+  );
+  const snapshot = createAgentSpatialSnapshot(game, true);
+  if (snapshot.minimap === undefined) {
+    throw new Error("25-seat serialization fixture did not build a minimap");
+  }
+  const minimap = {
+    schemaVersion: 1,
+    width: 24,
+    height: 12,
+    rows: [...snapshot.minimap.rows],
+    legend: snapshot.minimap.legend.map((entry) => ({
+      ...entry,
+      isYou: entry.playerID === players[0].id(),
+    })),
+  };
+  const serializedBytes = Buffer.byteLength(JSON.stringify(minimap), "utf8");
+  const legacyNamefulMinimap = {
+    ...minimap,
+    legend: minimap.legend.map((entry, index) => ({
+      ...entry,
+      name: players[index].name(),
+    })),
+  };
+  const legacyNamefulSerializedBytes = Buffer.byteLength(
+    JSON.stringify(legacyNamefulMinimap),
+    "utf8",
+  );
+  const idsAndGlyphsExact = minimap.legend.every(
+    (entry, index) =>
+      entry.playerID === players[index].id() &&
+      entry.glyph ===
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@#"[
+          index
+        ],
+  );
+  const namesOmitted = minimap.legend.every(
+    (entry) => !Object.hasOwn(entry, "name"),
+  );
+  return {
+    players: players.length,
+    playerIDLengths: [...new Set(players.map((player) => player.id().length))],
+    playerNameLengths: [
+      ...new Set(players.map((player) => player.name().length)),
+    ],
+    serializedBytes,
+    legacyNamefulSerializedBytes,
+    namesOmitted,
+    idsAndGlyphsExact,
+    checks: {
+      reproducedLegacyOverflow:
+        legacyNamefulSerializedBytes > TARGET_MINIMAP_BYTES,
+      payload: serializedBytes <= TARGET_MINIMAP_BYTES,
+      namesOmitted,
+      idsAndGlyphsExact,
+    },
+  };
+}
+
 function timeStage(
   game: Game,
   players: readonly BenchmarkPlayer[],
@@ -455,6 +546,7 @@ function benchmarkFixture(config: FixtureConfig) {
   const minimapMemoryMeasurement = measurePostCallMemory(game, players, true);
   globalThis.gc?.();
   globalThis.gc?.();
+  const minimapMemoryAfterRelease = process.memoryUsage();
 
   const postCallMemoryDeltaBytes = Math.max(
     0,
@@ -471,6 +563,11 @@ function benchmarkFixture(config: FixtureConfig) {
     combinedMemory(minimapMemoryMeasurement.after) -
       combinedMemory(minimapMemoryMeasurement.before),
   );
+  const minimapRetainedMemoryDeltaBytes = Math.max(
+    0,
+    combinedMemory(minimapMemoryAfterRelease) -
+      combinedMemory(minimapMemoryMeasurement.before),
+  );
   const sizes = payloadSizes(game, players);
   const checks = {
     latency: stageOne.p95Ms < TARGET_P95_MS,
@@ -478,6 +575,8 @@ function benchmarkFixture(config: FixtureConfig) {
     memory: postCallMemoryDeltaBytes < TARGET_MEMORY_DELTA_BYTES,
     minimapMemory: minimapPostCallMemoryDeltaBytes < TARGET_MEMORY_DELTA_BYTES,
     retainedMemory: retainedMemoryDeltaBytes < TARGET_RETAINED_DELTA_BYTES,
+    minimapRetainedMemory:
+      minimapRetainedMemoryDeltaBytes < TARGET_RETAINED_DELTA_BYTES,
     stageOnePayload:
       sizes.stageOneIncrementalSerializedBytes <= TARGET_STAGE_ONE_BYTES,
     minimapPayload:
@@ -507,6 +606,7 @@ function benchmarkFixture(config: FixtureConfig) {
     postCallMemoryDeltaBytes,
     minimapPostCallMemoryDeltaBytes,
     retainedMemoryDeltaBytes,
+    minimapRetainedMemoryDeltaBytes,
     measuredGeometryPlayers: memoryMeasurement.measuredGeometryPlayers,
     metrics: memoryMeasurement.metrics,
     minimapMetrics: minimapMemoryMeasurement.metrics,
@@ -546,6 +646,7 @@ delete process.env.PROXYWAR_TUNE_SPATIAL_MINIMAP;
 const cpuCount = os.availableParallelism();
 const loadAverage1mBefore = os.loadavg()[0];
 const normalizedLoad1mBefore = loadAverage1mBefore / Math.max(cpuCount, 1);
+const serializationBoundary = minimapSerializationBoundary();
 const fixtures = [
   // Gating fixture: World dimensions, 16 players, jagged land borders, real
   // coastline and lakes, and late-game defense-post build-out. This is the
@@ -590,7 +691,7 @@ const hostPreconditionMet =
   Math.max(normalizedLoad1mBefore, normalizedLoad1mAfter) <=
   TARGET_NORMALIZED_LOAD_1M;
 const report = {
-  schemaVersion: 4,
+  schemaVersion: 5,
   source,
   referenceRuntime: {
     platform: process.platform,
@@ -608,10 +709,12 @@ const report = {
     p95Ms: TARGET_P95_MS,
     postCallHeapAndArrayBufferDeltaBytes: TARGET_MEMORY_DELTA_BYTES,
     retainedHeapAndArrayBufferDeltaBytes: TARGET_RETAINED_DELTA_BYTES,
+    minimapRetainedHeapAndArrayBufferDeltaBytes: TARGET_RETAINED_DELTA_BYTES,
     stageOneIncrementalSerializedBytes: TARGET_STAGE_ONE_BYTES,
     minimapIncrementalSerializedBytes: TARGET_MINIMAP_BYTES,
   },
   fixtures,
+  serializationBoundary,
   attributionMet,
   hostPreconditionMet,
   targetMet:
@@ -619,7 +722,8 @@ const report = {
     hostPreconditionMet &&
     fixtures
       .filter((fixture) => fixture.fixture.gateRole === "acceptance")
-      .every((fixture) => fixture.acceptanceTargetMet === true),
+      .every((fixture) => fixture.acceptanceTargetMet === true) &&
+    Object.values(serializationBoundary.checks).every(Boolean),
 };
 console.log(JSON.stringify(report, null, 2));
 const artifactPath = path.resolve(

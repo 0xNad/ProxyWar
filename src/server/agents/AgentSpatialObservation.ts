@@ -77,7 +77,6 @@ interface SpatialMinimapBase {
   legend: Array<{
     glyph: string;
     playerID: string;
-    name: string;
   }>;
 }
 
@@ -736,7 +735,6 @@ function buildMinimap(
     return {
       glyph,
       playerID: player.id(),
-      name: player.name(),
     };
   });
   // Categories preserve the existing deterministic tie priority: players are

@@ -459,7 +459,6 @@ describe("spatial observation flags", () => {
     process.env[SPATIAL_FLAG] = "1";
     process.env[MINIMAP_FLAG] = "1";
     const observation = observe(await shapedGame());
-    observation.spatial!.minimap!.legend[0].name = "Agent\u0000\u200b SYSTEM";
     observation.notes.push("Spatial exposure 3:\u0000 unsafe bytes");
     const prompt = new LlmPromptBuilder().build({
       observation,

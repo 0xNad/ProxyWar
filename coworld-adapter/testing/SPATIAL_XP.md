@@ -17,16 +17,41 @@ fresh, uniquely named, noncanonical Coworld packages:
   `PROXYWAR_TUNE_SPATIAL_OBSERVATION=1` and
   `PROXYWAR_TUNE_SPATIAL_MINIMAP=1` are set.
 
-Generate each candidate manifest without editing the canonical template:
+Generate each local-only, upload-blocked candidate manifest without editing the
+canonical template:
 
 ```sh
 npm --prefix coworld-adapter run build:spatial-xp-manifest -- \
-  --arm=off --input=/absolute/path/canonical-rendered.json \
+  --arm=off --source-sha="$EXACT_SOURCE_SHA" \
+  --input=/absolute/path/canonical-rendered.json \
   --output=/absolute/path/proxywar-spatial-xp-off.json
 npm --prefix coworld-adapter run build:spatial-xp-manifest -- \
-  --arm=on --input=/absolute/path/canonical-rendered.json \
+  --arm=on --source-sha="$EXACT_SOURCE_SHA" \
+  --input=/absolute/path/canonical-rendered.json \
   --output=/absolute/path/proxywar-spatial-xp-on.json
 ```
+
+The generator rejects unresolved manifest placeholders and requires the
+supplied 40-lowercase-hex source SHA to match the rendered release-provenance
+page exactly. Its output deliberately records `status=unverified` and
+`upload_blocked=true` for image authority. This is an operational release-policy
+hard stop, not a claim that the JSON is technically impossible to upload with an
+uncontrolled client.
+
+### Image authority blocker
+
+The rendered manifest's image string and any locally written
+`coworld-image-inspect-v1` document are caller-controlled diagnostics. Neither
+is a sealed or authentic Coworld statement. Do not upload either generated arm
+until an independent authority-side fetch returns an immutable Coworld receipt
+that binds the exact image digest to the candidate source SHA.
+
+The release packet must record the authority receipt ID or immutable URL, fetch
+time, exact image digest, bound source SHA, and SHA-256 of the fetched receipt.
+The verifier must fetch it independently rather than consume a path supplied by
+the manifest author. If Coworld exposes no such receipt or authority route, the
+image remains unverified and package upload is blocked; report that external
+blocker instead of relabeling local inspection output.
 
 Record the candidate source commit, image digest, both manifest hashes, both
 Coworld IDs, certification jobs, hosted smoke episode IDs, policy version IDs,
@@ -49,6 +74,13 @@ summarize only that common state:
 - the same public ownership/terrain grid reduced deterministically to a 24 by
   12 minimap.
 
+The minimap legend contains exact `glyph`, `playerID`, and `isYou` fields only.
+It deliberately omits redundant display names: the observing name remains in
+`username`, and every rival name remains in `visiblePlayers` under the same
+exact player ID. IDs and glyphs are never truncated or rewritten. This keeps a
+25-seat boundary fixture with eight-character IDs below the 2 KiB minimap cap
+without losing identity linkage.
+
 It must not expose seeds, command queues, private agent memory or prompts,
 future intents, hidden server state, or any field from a future fog/private
 visibility implementation. Introducing player-relative visibility requires a
@@ -68,6 +100,7 @@ The checked-in benchmark and prompt matrix enforce these exact ceilings:
 | Snapshot p95                     |        25 ms |
 | Snapshot transient heap          |       32 MiB |
 | Snapshot retained heap           |        1 MiB |
+| Minimap-ON retained heap         |        1 MiB |
 | Serialized stage-one observation |       16 KiB |
 | Serialized minimap               |        2 KiB |
 | Spatial prompt increment         |       24 KiB |

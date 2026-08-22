@@ -17,6 +17,7 @@ import {
   buildBoard,
   loadStarterBuildState,
   measureArm,
+  parseSeatCounts,
 } from "../perf/agent-prompt-size-matrix";
 import { makeCommanderStage2Fixture } from "./StrategicCommanderStage2TestHarness";
 
@@ -51,6 +52,14 @@ function arm(name: string) {
 describe("prompt size matrix arms", () => {
   afterEach(() => {
     for (const key of TUNABLES) delete process.env[key];
+  });
+
+  it("rejects an empty or malformed prompt gate seat matrix", () => {
+    expect(() => parseSeatCounts("")).toThrow(/positive integers/);
+    expect(() => parseSeatCounts("foo")).toThrow(/positive integers/);
+    expect(() => parseSeatCounts("0")).toThrow(/positive integers/);
+    expect(() => parseSeatCounts("26")).toThrow(/supported count/);
+    expect(parseSeatCounts("4, 8,4,25")).toEqual([4, 8, 25]);
   });
 
   it("separates every feature arm on a real 8-seat mid-game board", async () => {
@@ -111,12 +120,12 @@ describe("prompt size matrix arms", () => {
     expect(minimap.spatialChars).toBeGreaterThan(spatial.spatialChars);
     expect(minimap.promptChars).toBeGreaterThan(spatial.promptChars);
     expect(spatial.promptChars).toBeGreaterThan(base.promptChars);
-    expect(spatial.spatialBytes).toBeLessThanOrEqual(
-      SPATIAL_STAGE_ONE_SERIALIZED_MAX_BYTES,
-    );
-    expect(minimap.minimapBytes).toBeLessThanOrEqual(
-      SPATIAL_MINIMAP_SERIALIZED_MAX_BYTES,
-    );
+    expect(
+      spatial.observationBytes - base.observationBytes,
+    ).toBeLessThanOrEqual(SPATIAL_STAGE_ONE_SERIALIZED_MAX_BYTES);
+    expect(
+      minimap.observationBytes - spatial.observationBytes,
+    ).toBeLessThanOrEqual(SPATIAL_MINIMAP_SERIALIZED_MAX_BYTES);
     expect(minimap.promptBytes - base.promptBytes).toBeLessThanOrEqual(
       SPATIAL_PROMPT_INCREMENT_MAX_BYTES,
     );

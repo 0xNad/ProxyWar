@@ -119,7 +119,6 @@ export interface AgentSpatialMinimap {
   legend: Array<{
     glyph: string;
     playerID: string;
-    name: string;
     isYou: boolean;
   }>;
 }
