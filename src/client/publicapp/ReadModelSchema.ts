@@ -273,7 +273,7 @@ export const ReadModelSchema = z.object({
     divisionName: z.string(),
     // Additive for cached/pre-upgrade read models. New mirrors always publish
     // the canonical hosted scheduling pause instant or null.
-    roundsPausedAt: z.string().nullable().optional(),
+    roundsPausedAt: z.iso.datetime().nullable().optional(),
     roundIntervalMinutes: z.number().nullable(),
     episodesPerRound: z.number().nullable(),
     currentRoundNumber: z.number().nullable(),

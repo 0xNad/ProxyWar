@@ -22,6 +22,7 @@ import type {
 } from "./AgentTypes";
 import { normalizeAgentRuntimeMode } from "./AgentTypes";
 import { asAgentDegradationCause } from "./AgentWireProtocol";
+import { canonicalCoworldLeaguePauseTimestamp } from "./CoworldLeaguePause";
 import {
   filterSuppressedEpisodeRows,
   type LatestPremierePointer,
@@ -87,34 +88,6 @@ function asBoolean(value: unknown): boolean | null {
   return typeof value === "boolean" ? value : null;
 }
 
-const COWORLD_UTC_TIMESTAMP_PATTERN =
-  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?Z$/;
-
-function asCanonicalTimestamp(value: unknown): string | null {
-  const text = asString(value);
-  if (text === null || text.length > 64) {
-    return null;
-  }
-  const match = COWORLD_UTC_TIMESTAMP_PATTERN.exec(text);
-  if (match === null) return null;
-  const parsed = Date.parse(text);
-  if (!Number.isFinite(parsed)) return null;
-  const instant = new Date(parsed);
-  const components = [
-    instant.getUTCFullYear(),
-    instant.getUTCMonth() + 1,
-    instant.getUTCDate(),
-    instant.getUTCHours(),
-    instant.getUTCMinutes(),
-    instant.getUTCSeconds(),
-  ];
-  return components.every(
-    (component, index) => component === Number(match[index + 1]),
-  )
-    ? text
-    : null;
-}
-
 function boundedString(
   value: unknown,
   limit = replayUiTextLimit,
@@ -154,7 +127,9 @@ export function parseLeagueSummary(
     // Hosted scheduling authority is top-level on the league response. Keep a
     // canonical nullable timestamp so public consumers can distinguish an
     // intentional pause from scheduler silence or a stale mirror.
-    roundsPausedAt: asCanonicalTimestamp(league.rounds_paused_at),
+    roundsPausedAt: canonicalCoworldLeaguePauseTimestamp(
+      league.rounds_paused_at,
+    ),
     // Observatory moved these live controls to settings.ladder. Prefer the
     // current authoritative shape while retaining the legacy commissioner
     // fallback for old fixtures and archived league payloads.

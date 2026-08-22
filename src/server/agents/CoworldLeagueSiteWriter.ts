@@ -24,6 +24,7 @@ import {
   resolveArchivedEpisodeReplayHrefs,
   type CoworldLeagueArchivedReplayHrefs,
 } from "./CoworldLeagueArtifactRetention";
+import { canonicalCoworldLeaguePauseTimestamp } from "./CoworldLeaguePause";
 import type { CoworldRoundIntegrityState } from "./CoworldLeagueRoundIntegrity";
 import {
   appendStandingsHistorySnapshot,
@@ -567,6 +568,19 @@ async function writeCoworldLeagueSiteUnlocked(
    */
   summaryArchiveDir?: string,
 ): Promise<CoworldLeagueSitePaths> {
+  // Stale republishes read data.json through an untyped JSON boundary. Never
+  // let a corrupt/additive value fabricate a pause in HTML or the public read
+  // model; normalize it through the same authority parser as fresh Coworld
+  // input before producing any artifact.
+  data = {
+    ...data,
+    league: {
+      ...data.league,
+      roundsPausedAt: canonicalCoworldLeaguePauseTimestamp(
+        data.league.roundsPausedAt,
+      ),
+    },
+  };
   await fs.mkdir(siteDir, { recursive: true });
   const indexPath = path.join(siteDir, "index.html");
   const clientPath = path.join(siteDir, "client.js");
@@ -803,7 +817,7 @@ export function coworldLeagueIndexHtml(
 ): string {
   const league = data.league;
   const schedulingPaused =
-    league.roundsPausedAt !== null && league.roundsPausedAt !== undefined;
+    canonicalCoworldLeaguePauseTimestamp(league.roundsPausedAt) !== null;
   const roundChip =
     league.currentRoundNumber === null
       ? "ROUND —"
@@ -1576,8 +1590,8 @@ function standingsAppendixSections(data: CoworldLeagueMirrorData): string {
     <section>
       <h2>League format</h2>
       <p class="standings-note">${escapeHtml(
-        data.league.roundsPausedAt !== null &&
-          data.league.roundsPausedAt !== undefined
+        canonicalCoworldLeaguePauseTimestamp(data.league.roundsPausedAt) !==
+          null
           ? translateText("coworld_league.league_format_paused")
           : translateText("coworld_league.league_format_cadence"),
       )}</p>

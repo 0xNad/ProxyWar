@@ -251,16 +251,22 @@ describe("buildProxyWarPublicReadModel", () => {
 
   test("preserves the additive hosted scheduling pause in the public read model", () => {
     const mirror = baseMirror();
-    mirror.league.roundsPausedAt = "2026-08-22T07:20:08.448Z";
+    mirror.league.roundsPausedAt = "2026-08-22T07:20:08.448114Z";
     const model = buildProxyWarPublicReadModel(
       mirror,
       identitySnapshot(),
       featuredMatchStoreOf(),
     );
-    expect(model.league.roundsPausedAt).toBe("2026-08-22T07:20:08.448Z");
+    expect(model.league.roundsPausedAt).toBe("2026-08-22T07:20:08.448114Z");
     expect(ReadModelSchema.parse(model).league.roundsPausedAt).toBe(
-      "2026-08-22T07:20:08.448Z",
+      "2026-08-22T07:20:08.448114Z",
     );
+    expect(() =>
+      ReadModelSchema.parse({
+        ...model,
+        league: { ...model.league, roundsPausedAt: "not-a-timestamp" },
+      }),
+    ).toThrow();
   });
 
   test("projects retained round-integrity evidence separately from replay freshness", () => {
