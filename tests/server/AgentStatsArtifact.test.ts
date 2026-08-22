@@ -34,7 +34,9 @@ function validSlice() {
 }
 
 async function writeArtifact(value: unknown): Promise<string> {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-stats-artifact-"));
+  const root = await fs.mkdtemp(
+    path.join(os.tmpdir(), "agent-stats-artifact-"),
+  );
   const filePath = path.join(root, "agent-stats.json");
   await fs.writeFile(filePath, JSON.stringify(value), "utf8");
   return filePath;
@@ -61,9 +63,9 @@ describe("AgentStatsArtifact", () => {
     const parsed = await readAgentStatsArtifact(await writeArtifact(artifact));
 
     expect(parsed).not.toBeNull();
-    expect(findPlayerStats(parsed, "Builder Agent")?.currentVersion?.versionLabel).toBe(
-      "v2",
-    );
+    expect(
+      findPlayerStats(parsed, "Builder Agent")?.currentVersion?.versionLabel,
+    ).toBe("v2");
     expect(findPlayerStats(parsed, "builder agent")).toBeNull();
   });
 
@@ -117,7 +119,9 @@ describe("AgentStatsArtifact", () => {
       await readAgentStatsArtifact("/definitely/missing/agent-stats.json"),
     ).toBeNull();
 
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-stats-artifact-"));
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "agent-stats-artifact-"),
+    );
     const filePath = path.join(root, "agent-stats.json");
     await fs.writeFile(filePath, "{not-json", "utf8");
 
