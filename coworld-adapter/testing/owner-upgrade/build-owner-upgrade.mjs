@@ -119,6 +119,7 @@ async function main() {
         "--binary",
         "--full-index",
         "--no-ext-diff",
+        "--unified=0",
         `--output=${patchPath}`,
         "--",
         ...FILES,
