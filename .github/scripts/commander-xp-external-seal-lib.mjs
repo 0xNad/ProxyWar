@@ -359,7 +359,7 @@ async function readPrivacyValidatedJsonFile(filePath, label) {
       fail("PRIVACY_TEXT_FORBIDDEN", `${label}:${forbidden}`);
   }
   const parsed = parseJsonText(text, label);
-  inspectJsonPrivacy(parsed, label);
+  inspectJsonPrivacy(parsed, label, true);
   return parsed;
 }
 

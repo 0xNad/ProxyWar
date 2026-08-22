@@ -613,6 +613,30 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
     }),
     hasCode("PRIVACY_KEY_FORBIDDEN"),
   );
+  for (const encodedPath of [
+    '{"password":"private"}',
+    '{"modelTranscript":"provider prose"}',
+  ]) {
+    const encodedAggregatePath = path.join(
+      supportRoot,
+      `encoded-${sha256Bytes(Buffer.from(encodedPath)).slice(-8)}.json`,
+    );
+    await fs.writeFile(
+      encodedAggregatePath,
+      JSON.stringify({
+        ...aggregate,
+        diagnostics: [{ code: "PRIVATE_ENVELOPE", path: encodedPath }],
+      }),
+    );
+    await assert.rejects(
+      verifyEvidenceBindings({
+        evidenceRoot,
+        request,
+        verifierAggregatePath: encodedAggregatePath,
+      }),
+      hasCode("INLINE_NESTED_JSON_ENVELOPE_FORBIDDEN"),
+    );
+  }
   const earlyPreregLedger = externalLedgerFixture({
     experimentID,
     phase: "preregistration",
