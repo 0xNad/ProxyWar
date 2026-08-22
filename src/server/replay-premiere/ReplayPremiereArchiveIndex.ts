@@ -416,6 +416,29 @@ export class ReplayPremiereArchiveStore {
   }
 }
 
+/**
+ * Read-only proof for a cross-process retirement migration. It never compacts
+ * or writes the archive index; only a fully parsed durable pointer counts.
+ */
+export async function readReplayPremiereArchivePointer(options: {
+  privateStateRoot: string;
+  premiereId: string;
+}): Promise<PremiereArchivePointerV1 | null> {
+  if (!PREMIERE_ID_PATTERN.test(options.premiereId)) {
+    throw archiveIntegrity("archive_lookup_invalid_premiere_id");
+  }
+  const indexPath = path.join(
+    path.resolve(options.privateStateRoot),
+    REPLAY_PREMIERE_ARCHIVE_DIRECTORY,
+    ARCHIVE_INDEX_FILE,
+  );
+  const { pointers, sawInvalidOrDuplicate } = await readArchiveIndex(indexPath);
+  if (sawInvalidOrDuplicate) {
+    throw archiveIntegrity("archive_lookup_index_ambiguous");
+  }
+  return pointers.get(options.premiereId) ?? null;
+}
+
 async function readArchiveIndex(indexPath: string): Promise<{
   pointers: Map<string, PremiereArchivePointerV1>;
   sawInvalidOrDuplicate: boolean;

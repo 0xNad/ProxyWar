@@ -288,6 +288,7 @@ describe("releaseHold — latest-premiere pointer (via the real trackHold)", () 
       journal.writer,
       NOW,
       async () => true,
+      async () => null,
     );
     expect(journal.released[0]?.outcome).toBe("activation_lost");
     await expect(readPointerRaw(loopConfig)).rejects.toMatchObject({

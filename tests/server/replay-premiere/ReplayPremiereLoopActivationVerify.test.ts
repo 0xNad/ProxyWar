@@ -15,8 +15,10 @@ import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   activateHold,
+  assertForeignPremiereGateUnchanged,
   compactJournalIfNeeded,
   createJournalWriter,
+  foreignRegisteredPremiereGate,
   persistRetainedAdmissionTransaction,
   progressHold,
   runLoopReplayPremiereAdmission,
@@ -26,6 +28,8 @@ import {
   type LoopConfig,
   type RetainedAdmissionTransaction,
 } from "../../../src/scripts/replay-premiere-loop";
+import type { ReplayPremiereAdmissionRecordV1 } from "../../../src/server/replay-premiere/ReplayPremiereCatalog";
+import type { ReplayPremiereStartupSelectionReceiptV1 } from "../../../src/server/replay-premiere/ReplayPremiereCoordination";
 import { ReplayPremiereError } from "../../../src/server/replay-premiere/ReplayPremiereErrors";
 import {
   PREMIERE_LOOP_ACTIVATION_BACKOFF_MS,
@@ -133,6 +137,194 @@ function hold(overrides: Partial<LoopHoldState> = {}): LoopHoldState {
     reactivationAttempts: 0,
     createdAt: NOW.toISOString(),
     ...overrides,
+  };
+}
+
+describe("foreign registered Premiere claim exclusion", () => {
+  test("404 blocks without exact archive proof and clears only with it", async () => {
+    const receipt = selectionReceipt();
+    const readSelection = vi.fn(async () => receipt);
+    await expect(
+      foreignRegisteredPremiereGate(config(), {
+        readSelection,
+        readState: async () => null,
+        readArchivePointer: async () => null,
+      }),
+    ).rejects.toThrow("absent without archive proof");
+
+    const clear = await foreignRegisteredPremiereGate(config(), {
+      readSelection,
+      readState: async () => null,
+      readAdmission: async () => null,
+      readArchivePointer: async ({ premiereId }) => ({
+        schemaVersion: 1,
+        premiereId,
+        sourceRunId: "source_run_1",
+        sourceKind: "rated_coworld",
+        terminalState: "cancelled",
+        revealedAt: null,
+        publicationCommitmentHash: "b".repeat(64),
+        sourceReplaySha256: "c".repeat(64),
+        summaryHash: "d".repeat(64),
+        summaryRelPath: `summaries/${premiereId}.summary.json`,
+        reclaimedAt: "2026-08-22T07:01:00.000Z",
+      }),
+    });
+    expect(clear.busyPremiereIds).toEqual([]);
+  });
+
+  test("404 archive proof must bind the selected admission hash and source", async () => {
+    const receipt = selectionReceipt();
+    const pointer = {
+      schemaVersion: 1 as const,
+      premiereId: receipt.selected[0].premiereId,
+      sourceRunId: "source_run_1",
+      sourceKind: "rated_coworld" as const,
+      terminalState: "cancelled" as const,
+      revealedAt: null,
+      publicationCommitmentHash: "b".repeat(64),
+      sourceReplaySha256: "c".repeat(64),
+      summaryHash: "d".repeat(64),
+      summaryRelPath: `summaries/${receipt.selected[0].premiereId}.summary.json`,
+      reclaimedAt: "2026-08-22T07:01:00.000Z",
+    };
+    const admission = {
+      recordHash: receipt.selected[0].admissionRecordHash,
+      eligibilityRecord: {
+        sourceKind: "rated_coworld",
+        sourceRunId: pointer.sourceRunId,
+      },
+      stagedSource: { sourceReplaySha256: pointer.sourceReplaySha256 },
+    } as unknown as ReplayPremiereAdmissionRecordV1;
+    const dependencies = {
+      readSelection: async () => receipt,
+      readState: async () => null,
+      readArchivePointer: async () => pointer,
+    };
+
+    await expect(
+      foreignRegisteredPremiereGate(config(), {
+        ...dependencies,
+        readAdmission: async () => ({
+          ...admission,
+          recordHash: "e".repeat(64),
+        }),
+      }),
+    ).rejects.toThrow("does not bind selected admission");
+    await expect(
+      foreignRegisteredPremiereGate(config(), {
+        ...dependencies,
+        readAdmission: async () => admission,
+      }),
+    ).resolves.toMatchObject({ busyPremiereIds: [] });
+  });
+
+  test("nonterminal manifests block while terminal manifests clear", async () => {
+    const receipt = selectionReceipt();
+    const dependencies = { readSelection: async () => receipt };
+    await expect(
+      foreignRegisteredPremiereGate(config(), {
+        ...dependencies,
+        readState: async () => "playing",
+      }),
+    ).resolves.toMatchObject({
+      busyPremiereIds: [receipt.selected[0].premiereId],
+    });
+    await expect(
+      foreignRegisteredPremiereGate(config(), {
+        ...dependencies,
+        readState: async () => "revealed",
+      }),
+    ).resolves.toMatchObject({ busyPremiereIds: [] });
+  });
+
+  test("receipt replacement during probes or immediately before commit fails closed", async () => {
+    const first = selectionReceipt();
+    const replacement = selectionReceipt(
+      "00000000-0000-4000-8000-000000000099",
+    );
+    let reads = 0;
+    await expect(
+      foreignRegisteredPremiereGate(config(), {
+        readSelection: async () => (reads++ === 0 ? first : replacement),
+        readState: async () => "revealed",
+      }),
+    ).rejects.toThrow("changed during manifest probes");
+
+    const gate = await foreignRegisteredPremiereGate(config(), {
+      readSelection: async () => first,
+      readState: async () => "revealed",
+    });
+    await expect(
+      assertForeignPremiereGateUnchanged(
+        config(),
+        gate,
+        async () => replacement,
+      ),
+    ).rejects.toThrow("changed before claim commit");
+  });
+
+  test("selected nonterminal target missing from ready registration fails closed", async () => {
+    const incomplete = {
+      ...selectionReceipt(),
+      registeredPremiereIds: [],
+    };
+
+    await expect(
+      foreignRegisteredPremiereGate(config(), {
+        readSelection: async () => incomplete,
+        readState: async () => "playing",
+      }),
+    ).rejects.toThrow();
+  });
+
+  test("unregistered terminal fallback is receipt-proven and does not block a new claim", async () => {
+    const terminal = {
+      ...selectionReceipt(),
+      selected: [
+        {
+          ...selectionReceipt().selected[0],
+          projectionState: "revealed" as const,
+        },
+      ],
+      registeredPremiereIds: [],
+    };
+    const readState = vi.fn();
+
+    await expect(
+      foreignRegisteredPremiereGate(config(), {
+        readSelection: async () => terminal,
+        readState,
+      }),
+    ).resolves.toMatchObject({ busyPremiereIds: [] });
+    expect(readState).not.toHaveBeenCalled();
+  });
+});
+
+function selectionReceipt(
+  startupId = "00000000-0000-4000-8000-000000000002",
+): ReplayPremiereStartupSelectionReceiptV1 {
+  const premiereId = "prem_0123456789abcdef";
+  return {
+    schemaVersion: 1,
+    kind: "replay_premiere_startup_selection_v1",
+    phase: "ready",
+    server: {
+      pid: process.pid,
+      writerId: "00000000-0000-4000-8000-000000000001",
+      writerAcquiredAt: "2026-08-22T07:00:00.000Z",
+      startupId,
+      startupStartedAt: "2026-08-22T07:00:01.000Z",
+    },
+    selected: [
+      {
+        premiereId,
+        admissionRecordHash: "a".repeat(64),
+        projectionState: "playing",
+      },
+    ],
+    registeredPremiereIds: [premiereId],
+    writtenAt: "2026-08-22T07:00:02.000Z",
   };
 }
 
@@ -292,6 +484,49 @@ describe("private journal compaction durability", () => {
     );
     expect((await stat(archivePath)).mode & 0o777).toBe(0o600);
     expect(await compactionTemporaryNames(loopConfig)).toEqual([]);
+  });
+
+  test("never splits a terminal release from the exact hold phase required by strict backfill", async () => {
+    const loopConfig = config();
+    const activated = hold({ phase: "activated" });
+    const skipped = (index: number): LoopJournalRecord => ({
+      kind: "round_skipped",
+      ts: NOW.toISOString(),
+      roundId: `round_boundary_${index}`,
+      roundNumber: index,
+      reason: "skipped_busy",
+    });
+    const records: LoopJournalRecord[] = [
+      ...Array.from({ length: 3_001 }, (_value, index) => skipped(index)),
+      { kind: "hold_update", ts: NOW.toISOString(), hold: activated },
+      {
+        kind: "hold_released",
+        ts: new Date(NOW.getTime() + 1_000).toISOString(),
+        episodeRequestId: activated.episodeRequestId,
+        premiereId: activated.premiereId,
+        roundId: activated.roundId,
+        outcome: "activation_lost",
+        terminal: true,
+      },
+      ...Array.from({ length: 1_999 }, (_value, index) =>
+        skipped(4_000 + index),
+      ),
+    ];
+    await writeFile(loopConfig.journalPath, serializeJournal(records), {
+      mode: 0o600,
+    });
+
+    const compacted = await compactJournalIfNeeded(loopConfig, records);
+
+    expect(compacted.slice(0, 2)).toEqual([
+      { kind: "hold_update", ts: NOW.toISOString(), hold: activated },
+      expect.objectContaining({
+        kind: "hold_released",
+        episodeRequestId: activated.episodeRequestId,
+        outcome: "activation_lost",
+      }),
+    ]);
+    expect(compacted).toHaveLength(2_001);
   });
 
   test.each([
@@ -929,6 +1164,7 @@ describe("trackHold — post-activation registration verification", () => {
       journal.writer,
       NOW,
       restart,
+      async () => null,
     );
     expect(restart).not.toHaveBeenCalled();
     expect(journal.released).toHaveLength(0);
@@ -950,6 +1186,7 @@ describe("trackHold — post-activation registration verification", () => {
       journal.writer,
       NOW,
       restart,
+      async () => null,
     );
     expect(restart).toHaveBeenCalledTimes(1);
     expect(journal.released).toHaveLength(0);
@@ -972,6 +1209,7 @@ describe("trackHold — post-activation registration verification", () => {
       journal.writer,
       NOW,
       restart,
+      async () => null,
     );
     expect(restart).toHaveBeenCalledTimes(1);
     expect(journal.released).toHaveLength(1);
@@ -998,6 +1236,7 @@ describe("trackHold — post-activation registration verification", () => {
       journal.writer,
       NOW,
       restart,
+      async () => null,
     );
     expect(restart).not.toHaveBeenCalled();
     expect(journal.released).toHaveLength(1);
@@ -1019,6 +1258,7 @@ describe("trackHold — post-activation registration verification", () => {
       journal.writer,
       NOW,
       restart,
+      async () => null,
     );
     expect(restart).not.toHaveBeenCalled();
     expect(journal.released).toHaveLength(0);
@@ -1110,11 +1350,40 @@ describe("activateHold — helper-refusal backoff (2026-07-22 round-649 outage)"
       journal.writer,
       NOW,
       restart,
+      async () => null,
     );
     expect(restart).toHaveBeenCalledTimes(1);
     expect(result.kind).toBe("released");
     expect(journal.released).toHaveLength(1);
     expect(journal.released[0].outcome).toBe("activation_refused");
     expect(journal.released[0].terminal).toBe(true);
+  });
+
+  test("terminal release aborts before journal release when tombstone persistence fails", async () => {
+    stubPremiereState(null);
+    const journal = captureJournal();
+    const restart = vi.fn(async () => false);
+    const persistRetirement = vi.fn(async () => {
+      throw new Error("injected tombstone durability failure");
+    });
+    const nearCeiling = hold({
+      phase: "admitted",
+      activatedAt: null,
+      activationAttempts: PREMIERE_LOOP_MAX_ACTIVATION_ATTEMPTS - 1,
+      activationBackoffUntil: new Date(NOW.getTime() - 1_000).toISOString(),
+    });
+
+    await expect(
+      activateHold(
+        nearCeiling,
+        config(),
+        journal.writer,
+        NOW,
+        restart,
+        persistRetirement,
+      ),
+    ).rejects.toThrow("injected tombstone durability failure");
+    expect(persistRetirement).toHaveBeenCalledTimes(1);
+    expect(journal.released).toEqual([]);
   });
 });

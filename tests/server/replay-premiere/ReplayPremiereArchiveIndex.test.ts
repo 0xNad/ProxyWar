@@ -2,7 +2,10 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ReplayPremiereArchiveStore } from "../../../src/server/replay-premiere/ReplayPremiereArchiveIndex";
+import {
+  readReplayPremiereArchivePointer,
+  ReplayPremiereArchiveStore,
+} from "../../../src/server/replay-premiere/ReplayPremiereArchiveIndex";
 import { sha256Hex } from "../../../src/server/replay-premiere/ReplayPremiereIntegrity";
 import {
   buildPremiereResultSummary,
@@ -156,5 +159,34 @@ describe("ReplayPremiereArchiveStore", () => {
     // Compaction rewrote the index to a single clean line.
     const compacted = await fs.readFile(indexPath, "utf8");
     expect(compacted.trim().split("\n")).toHaveLength(1);
+  });
+
+  it("refuses an ambiguous index as read-only terminal proof until normal store recovery compacts it", async () => {
+    const premiereId = "prem_exactproof0000001";
+    const store = await ReplayPremiereArchiveStore.open({
+      privateStateRoot: root,
+    });
+    const pointer = await store.recordReclaimed(
+      summaryFor(premiereId),
+      SOURCE_SHA,
+    );
+    const indexPath = path.join(root, "archive-v1", "archive-index.jsonl");
+    const existing = await fs.readFile(indexPath, "utf8");
+    await fs.appendFile(indexPath, `${existing.trim()}\n{"torn":`, "utf8");
+
+    await expect(
+      readReplayPremiereArchivePointer({
+        privateStateRoot: root,
+        premiereId,
+      }),
+    ).rejects.toMatchObject({ operatorCode: "archive_lookup_index_ambiguous" });
+
+    await ReplayPremiereArchiveStore.open({ privateStateRoot: root });
+    await expect(
+      readReplayPremiereArchivePointer({
+        privateStateRoot: root,
+        premiereId,
+      }),
+    ).resolves.toEqual(pointer);
   });
 });

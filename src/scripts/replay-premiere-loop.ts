@@ -21,7 +21,16 @@ import {
   buildProxyWarDemoServerUrls,
   loadProxyWarDemoServerNetworkConfig,
 } from "../server/agents/ProxyWarDemoServerConfig";
+import { readReplayPremiereArchivePointer } from "../server/replay-premiere/ReplayPremiereArchiveIndex";
+import { readReplayPremiereAdmissionRecord } from "../server/replay-premiere/ReplayPremiereCatalog";
 import { PREMIERE_REAL_TURN_INTERVAL_MS } from "../server/replay-premiere/ReplayPremiereContracts";
+import {
+  backfillReplayPremiereTerminalTombstones,
+  persistReplayPremiereTerminalTombstone,
+  readActiveReplayPremiereStartupSelection,
+  replayPremiereStartupSelectionFingerprint,
+  type ReplayPremiereStartupSelectionReceiptV1,
+} from "../server/replay-premiere/ReplayPremiereCoordination";
 import { formatReplayPremiereErrorCauseChain } from "../server/replay-premiere/ReplayPremiereErrorTelemetry";
 import { ReplayPremiereError } from "../server/replay-premiere/ReplayPremiereErrors";
 import {
@@ -310,6 +319,15 @@ async function readJournal(journalPath: string): Promise<LoopJournalRecord[]> {
 // ~40-round watch window.
 const MAX_JOURNAL_RECORDS = 5_000;
 const KEEP_JOURNAL_RECORDS = 2_000;
+const TOMBSTONED_TERMINAL_RELEASE_OUTCOMES = new Set<LoopReleaseOutcome>([
+  "expired",
+  "leak_audit_refused",
+  "activation_refused",
+  "activation_lost",
+  "ingest_failed",
+  "admit_failed",
+  "projection_over_budget",
+]);
 
 export type LoopJournalCompactionPhase =
   | "after_archive_sync"
@@ -336,8 +354,16 @@ export async function compactJournalIfNeeded(
     return records;
   }
   const folded = foldLoopJournal(records);
-  const dropped = records.slice(0, records.length - KEEP_JOURNAL_RECORDS);
-  const kept = records.slice(records.length - KEEP_JOURNAL_RECORDS);
+  const keepStart = records.length - KEEP_JOURNAL_RECORDS;
+  const dropped = records.slice(0, keepStart);
+  // Strict tombstone backfill needs the exact hold phase preceding a terminal
+  // release. Never split that association across the archive/active boundary:
+  // the archive may grow without bound and is deliberately not scanned by
+  // each minute loop iteration.
+  const kept = [
+    ...terminalReleaseHoldUpdatesCrossingBoundary(records, keepStart),
+    ...records.slice(keepStart),
+  ];
   if (
     folded.activeHold !== null &&
     !kept.some(
@@ -430,6 +456,44 @@ export async function compactJournalIfNeeded(
   return kept;
 }
 
+function terminalReleaseHoldUpdatesCrossingBoundary(
+  records: readonly LoopJournalRecord[],
+  keepStart: number,
+): LoopJournalRecord[] {
+  const active = new Map<
+    string,
+    {
+      index: number;
+      record: Extract<LoopJournalRecord, { kind: "hold_update" }>;
+    }
+  >();
+  const preserved = new Map<
+    number,
+    Extract<LoopJournalRecord, { kind: "hold_update" }>
+  >();
+  for (const [index, record] of records.entries()) {
+    if (record.kind === "hold_update") {
+      active.set(record.hold.episodeRequestId, { index, record });
+      continue;
+    }
+    if (record.kind !== "hold_released") continue;
+    const hold = active.get(record.episodeRequestId);
+    if (
+      index >= keepStart &&
+      record.terminal &&
+      TOMBSTONED_TERMINAL_RELEASE_OUTCOMES.has(record.outcome) &&
+      hold !== undefined &&
+      hold.index < keepStart
+    ) {
+      preserved.set(hold.index, hold.record);
+    }
+    active.delete(record.episodeRequestId);
+  }
+  return [...preserved.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([, record]) => record);
+}
+
 async function appendDurablePrivateBytes(
   filePath: string,
   contents: string,
@@ -482,6 +546,7 @@ interface JournalWriter {
     hold: LoopHoldState,
     outcome: LoopReleaseOutcome,
     terminal: boolean,
+    releasedAt?: string,
   ): Promise<void>;
   appendRoundSkipped(ref: LoopRoundRef, reason: LoopSkipReason): Promise<void>;
   appendDecision(decision: Record<string, unknown>): Promise<void>;
@@ -505,10 +570,10 @@ export function createJournalWriter(
         faultInjector,
       );
     },
-    async appendHoldReleased(hold, outcome, terminal) {
+    async appendHoldReleased(hold, outcome, terminal, releasedAt) {
       const record = {
         kind: "hold_released",
-        ts: now(),
+        ts: releasedAt ?? now(),
         episodeRequestId: hold.episodeRequestId,
         premiereId: hold.premiereId,
         roundId: hold.roundId,
@@ -899,6 +964,161 @@ async function readPremiereState(
   } catch {
     return null;
   }
+}
+
+const COORDINATION_NONTERMINAL_STATES = new Set([
+  "draft",
+  "scheduled",
+  "playing",
+  "checkpoint",
+]);
+const COORDINATION_TERMINAL_STATES = new Set([
+  "revealed",
+  "archived",
+  "failed",
+  "cancelled",
+]);
+
+export interface ForeignRegisteredPremiereGate {
+  busyPremiereIds: readonly string[];
+  receiptFingerprint: string;
+}
+
+export interface ForeignRegisteredPremiereGateDependencies {
+  readSelection?: (
+    privateStateRoot: string,
+  ) => Promise<ReplayPremiereStartupSelectionReceiptV1>;
+  readState?: (
+    config: LoopConfig,
+    premiereId: string,
+  ) => Promise<string | null>;
+  readArchivePointer?: typeof readReplayPremiereArchivePointer;
+  readAdmission?: typeof readReplayPremiereAdmissionRecord;
+}
+
+async function foreignRegisteredPremiereGate(
+  config: LoopConfig,
+  dependencies: ForeignRegisteredPremiereGateDependencies = {},
+): Promise<ForeignRegisteredPremiereGate> {
+  const readSelection =
+    dependencies.readSelection ?? readActiveReplayPremiereStartupSelection;
+  const receipt = await readSelection(config.privateStateRoot);
+  const receiptFingerprint = replayPremiereStartupSelectionFingerprint(receipt);
+  const busy: string[] = [];
+  const registeredIds = new Set(receipt.registeredPremiereIds);
+  for (const entry of receipt.selected) {
+    const premiereId = entry.premiereId;
+    if (!registeredIds.has(premiereId)) {
+      if (COORDINATION_TERMINAL_STATES.has(entry.projectionState)) continue;
+      throw new Error(
+        `coordination selected nonterminal premiere is unregistered: ${premiereId}`,
+      );
+    }
+    const state = await (dependencies.readState ?? readPremiereStateStrict)(
+      config,
+      premiereId,
+    );
+    if (state === null) {
+      const pointer = await (
+        dependencies.readArchivePointer ?? readReplayPremiereArchivePointer
+      )({
+        privateStateRoot: config.privateStateRoot,
+        premiereId,
+      });
+      if (pointer === null || pointer.premiereId !== premiereId) {
+        throw new Error(
+          `coordination manifest absent without archive proof for ${premiereId}`,
+        );
+      }
+      const admission = await (
+        dependencies.readAdmission ?? readReplayPremiereAdmissionRecord
+      )({
+        privateStateRoot: config.privateStateRoot,
+        premiereId,
+      });
+      if (
+        admission !== null &&
+        (admission.recordHash !== entry.admissionRecordHash ||
+          admission.eligibilityRecord.sourceKind !== pointer.sourceKind ||
+          admission.eligibilityRecord.sourceRunId !== pointer.sourceRunId ||
+          admission.stagedSource.sourceReplaySha256 !==
+            pointer.sourceReplaySha256)
+      ) {
+        throw new Error(
+          `coordination archive proof does not bind selected admission for ${premiereId}`,
+        );
+      }
+      continue;
+    }
+    if (COORDINATION_TERMINAL_STATES.has(state)) continue;
+    if (!COORDINATION_NONTERMINAL_STATES.has(state)) {
+      throw new Error(`coordination manifest state invalid for ${premiereId}`);
+    }
+    busy.push(premiereId);
+  }
+  const afterProbe = await readSelection(config.privateStateRoot);
+  if (
+    replayPremiereStartupSelectionFingerprint(afterProbe) !== receiptFingerprint
+  ) {
+    throw new Error("coordination selection changed during manifest probes");
+  }
+  return { busyPremiereIds: busy, receiptFingerprint };
+}
+
+async function assertForeignPremiereGateUnchanged(
+  config: LoopConfig,
+  gate: ForeignRegisteredPremiereGate,
+  readSelection: (
+    privateStateRoot: string,
+  ) => Promise<ReplayPremiereStartupSelectionReceiptV1> = readActiveReplayPremiereStartupSelection,
+): Promise<void> {
+  const current = await readSelection(config.privateStateRoot);
+  if (
+    replayPremiereStartupSelectionFingerprint(current) !==
+    gate.receiptFingerprint
+  ) {
+    throw new Error("coordination selection changed before claim commit");
+  }
+}
+
+/**
+ * Strict loopback-only state probe for the claim exclusion gate. Unlike the
+ * tracker probe above, transport/HTTP/schema failures are not collapsed into
+ * 404: uncertainty must block a new claim, never authorize one.
+ */
+async function readPremiereStateStrict(
+  config: LoopConfig,
+  premiereId: string,
+): Promise<string | null> {
+  const url = `${config.loopbackBaseUrl}/api/premieres/${encodeURIComponent(premiereId)}/manifest`;
+  const response = await fetch(url, {
+    signal: AbortSignal.timeout(5_000),
+    redirect: "error",
+  });
+  if (response.status === 404) {
+    await response.body?.cancel();
+    return null;
+  }
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new Error(
+      `coordination manifest probe failed (${response.status}) for ${premiereId}`,
+    );
+  }
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (bytes.byteLength <= 0 || bytes.byteLength > MIB) {
+    throw new Error(`coordination manifest size invalid for ${premiereId}`);
+  }
+  let body: unknown;
+  try {
+    body = JSON.parse(bytes.toString("utf8"));
+  } catch {
+    throw new Error(`coordination manifest JSON invalid for ${premiereId}`);
+  }
+  if (!isRecord(body) || typeof body.state !== "string") {
+    throw new Error(`coordination manifest schema invalid for ${premiereId}`);
+  }
+  return body.state;
 }
 
 /**
@@ -1573,6 +1793,7 @@ async function activateHold(
   journal: JournalWriter,
   now: Date,
   restart: () => Promise<boolean> = () => fireRestartHelper(config),
+  persistRetirement: typeof persistReplayPremiereTerminalTombstone = persistReplayPremiereTerminalTombstone,
 ): Promise<ActivateResult> {
   const liveState = await readPremiereState(config, hold.premiereId);
   if (liveState !== null) {
@@ -1625,6 +1846,7 @@ async function activateHold(
       config,
       journal,
       now,
+      persistRetirement,
     );
     return { kind: "released" };
   }
@@ -1668,14 +1890,31 @@ async function trackHold(
   journal: JournalWriter,
   now: Date,
   restart: () => Promise<boolean> = () => fireRestartHelper(config),
+  persistRetirement: typeof persistReplayPremiereTerminalTombstone = persistReplayPremiereTerminalTombstone,
 ): Promise<void> {
   const state = await readPremiereState(config, hold.premiereId);
   if (state === "revealed" || state === "archived") {
-    await releaseHold(hold, "revealed", true, config, journal, now);
+    await releaseHold(
+      hold,
+      "revealed",
+      true,
+      config,
+      journal,
+      now,
+      persistRetirement,
+    );
     return;
   }
   if (state === "failed" || state === "cancelled") {
-    await releaseHold(hold, "failed_or_cancelled", true, config, journal, now);
+    await releaseHold(
+      hold,
+      "failed_or_cancelled",
+      true,
+      config,
+      journal,
+      now,
+      persistRetirement,
+    );
     return;
   }
   if (
@@ -1728,14 +1967,30 @@ async function trackHold(
     // The single retry could not even restart the server; release immediately
     // rather than holding the card for a premiere that cannot register.
     log(`re-activation refused for ${hold.premiereId}; releasing`);
-    await releaseHold(attempted, "activation_lost", true, config, journal, now);
+    await releaseHold(
+      attempted,
+      "activation_lost",
+      true,
+      config,
+      journal,
+      now,
+      persistRetirement,
+    );
     return;
   }
   if (verification.kind === "activation_lost") {
     log(
       `premiere ${hold.premiereId} never registered after re-activation; releasing`,
     );
-    await releaseHold(hold, "activation_lost", true, config, journal, now);
+    await releaseHold(
+      hold,
+      "activation_lost",
+      true,
+      config,
+      journal,
+      now,
+      persistRetirement,
+    );
     return;
   }
 
@@ -1751,7 +2006,25 @@ async function releaseHold(
   config: LoopConfig,
   journal: JournalWriter,
   now: Date,
+  persistRetirement: typeof persistReplayPremiereTerminalTombstone = persistReplayPremiereTerminalTombstone,
 ): Promise<void> {
+  // Once an admission exists, a terminal loop release must retire that exact
+  // immutable admission before suppression or retention is relaxed. Without
+  // this private tombstone, a later server startup can select its surviving
+  // draft/scheduled projection and resurrect a release the loop already made
+  // terminal. Tombstone failure deliberately aborts here, preserving the
+  // active contract, pin, and journal hold for a bounded retry.
+  const retired = await persistRetirement({
+    privateStateRoot: config.privateStateRoot,
+    episodeRequestId: hold.episodeRequestId,
+    premiereId: hold.premiereId,
+    roundId: hold.roundId,
+    phase: hold.phase,
+    outcome,
+    terminal,
+    releasedAt: now.toISOString(),
+  });
+  const releasedAt = retired?.releasedAt ?? now.toISOString();
   // Latest-premiere pointer: ONLY a `revealed` release rewrites it, so the
   // league mirror's between-premieres card always names the most recent
   // premiere whose outcome is already public. Every other outcome (expired,
@@ -1771,7 +2044,7 @@ async function releaseHold(
   // so the loop keeps winning the publish race for the next round.
   await writeStandingContract(config, now);
   await unpinHoldArtifacts(hold, config);
-  await journal.appendHoldReleased(hold, outcome, terminal);
+  await journal.appendHoldReleased(hold, outcome, terminal, releasedAt);
   log(
     `released ${hold.premiereId} (${outcome}); episode publishes at quarantine expiry`,
   );
@@ -1819,6 +2092,7 @@ export interface ProgressHoldDependencies {
   hasStorageFloor?: typeof hasStorageFloor;
   activateHold?: typeof activateHold;
   trackHold?: typeof trackHold;
+  persistRetirement?: typeof persistReplayPremiereTerminalTombstone;
   /** Refreshes timestamps after the potentially long admission projection. */
   now?: () => Date;
 }
@@ -1835,6 +2109,8 @@ export async function progressHold(
   await writeContractForHold(hold, config, now);
   const loadRetained =
     dependencies.loadRetainedAdmission ?? loadRetainedAdmissionTransaction;
+  const persistRetirement =
+    dependencies.persistRetirement ?? persistReplayPremiereTerminalTombstone;
   const claimedTransaction =
     hold.phase === "claimed" ? await loadRetained(hold, config) : null;
   if (isHoldExpired(hold, now)) {
@@ -1842,7 +2118,15 @@ export async function progressHold(
       await preserveUncertainAdmissionHold(hold, config, journal, now);
       return;
     }
-    await releaseHold(hold, "expired", true, config, journal, now);
+    await releaseHold(
+      hold,
+      "expired",
+      true,
+      config,
+      journal,
+      now,
+      persistRetirement,
+    );
     return;
   }
 
@@ -1896,6 +2180,7 @@ export async function progressHold(
           config,
           journal,
           dependencies.now?.() ?? new Date(),
+          persistRetirement,
         );
         return;
       }
@@ -1917,6 +2202,7 @@ export async function progressHold(
         config,
         journal,
         operationNow,
+        persistRetirement,
       );
       return;
     }
@@ -1945,6 +2231,8 @@ export async function progressHold(
       config,
       journal,
       operationNow,
+      undefined,
+      persistRetirement,
     );
     if (activation.kind === "released") {
       return;
@@ -1961,6 +2249,8 @@ export async function progressHold(
     config,
     journal,
     operationNow,
+    undefined,
+    persistRetirement,
   );
 }
 
@@ -2346,10 +2636,16 @@ async function runShadowIteration(config: LoopConfig): Promise<void> {
 
 async function runLiveIteration(config: LoopConfig): Promise<void> {
   const journal = createJournalWriter(config);
-  const records = await compactJournalIfNeeded(
-    config,
-    await readJournal(config.journalPath),
-  );
+  const loadedRecords = await readJournal(config.journalPath);
+  // Migration runs before compaction so a pre-tombstone terminal release can
+  // never fall into the archived prefix without first retiring its immutable
+  // admission. Exact release identities/outcomes are revalidated by the
+  // coordination boundary; ambiguous history aborts before any claim.
+  await backfillReplayPremiereTerminalTombstones({
+    privateStateRoot: config.privateStateRoot,
+    records: loadedRecords,
+  });
+  const records = await compactJournalIfNeeded(config, loadedRecords);
   const folded = foldLoopJournal(records);
   const now = new Date();
   const retainedClaimMayExist =
@@ -2428,8 +2724,51 @@ async function runLiveIteration(config: LoopConfig): Promise<void> {
   }
 
   // claim
-  for (const ref of decision.supersededRoundIds) {
-    await journal.appendRoundSkipped(ref, "skipped_superseded");
+  let foreignGate: ForeignRegisteredPremiereGate;
+  try {
+    foreignGate = await foreignRegisteredPremiereGate(config);
+  } catch (error) {
+    await journal.appendDecision({
+      decision: "claim_blocked_coordination_unavailable",
+      operatorCode: operatorCodeOf(error),
+    });
+    log(
+      `claim blocked: active server premiere selection is unavailable (${operatorCodeOf(error)})`,
+    );
+    return;
+  }
+  if (foreignGate.busyPremiereIds.length > 0) {
+    const busyRounds = [
+      { id: decision.round.id, roundNumber: decision.round.roundNumber },
+      ...decision.supersededRoundIds,
+    ];
+    for (const ref of busyRounds) {
+      await journal.appendRoundSkipped(ref, "skipped_busy");
+    }
+    await journal.appendDecision({
+      decision: "claim_skipped_foreign_premiere_busy",
+      premiereIds: foreignGate.busyPremiereIds,
+      skippedBusy: busyRounds.map((ref) => ref.roundNumber),
+    });
+    log(
+      `foreign premiere busy (${foreignGate.busyPremiereIds.join(", ")}); ${busyRounds.length} completed round(s) publish normally`,
+    );
+    return;
+  }
+  try {
+    // Final identity barrier immediately before the first terminal journal or
+    // claim-side mutation. A restart/selection replacement during the probes
+    // invalidates the evidence even when both receipts individually validate.
+    await assertForeignPremiereGateUnchanged(config, foreignGate);
+  } catch (error) {
+    await journal.appendDecision({
+      decision: "claim_blocked_coordination_changed",
+      operatorCode: operatorCodeOf(error),
+    });
+    log(
+      `claim blocked: server premiere selection changed before commit (${operatorCodeOf(error)})`,
+    );
+    return;
   }
   // Cold-start / gap-recovery guard. The newest completed unpremiered round can
   // itself be older than the seal window (e.g. the loop was down or in shadow
@@ -2457,12 +2796,37 @@ async function runLiveIteration(config: LoopConfig): Promise<void> {
     log("below storage floor; skipping claim this tick");
     return;
   }
+  try {
+    await assertForeignPremiereGateUnchanged(config, foreignGate);
+  } catch (error) {
+    await journal.appendDecision({
+      decision: "claim_blocked_coordination_changed",
+      operatorCode: operatorCodeOf(error),
+    });
+    log(
+      `claim blocked: server premiere selection changed before claim (${operatorCodeOf(error)})`,
+    );
+    return;
+  }
+  for (const ref of decision.supersededRoundIds) {
+    await journal.appendRoundSkipped(ref, "skipped_superseded");
+  }
   await journal.appendDecision({
     decision: "claim",
     round: decision.round.roundNumber,
     superseded: decision.supersededRoundIds.map((ref) => ref.roundNumber),
   });
   await claimRound(decision.round, config, journal, now);
+}
+
+async function runTerminalTombstoneBackfill(config: LoopConfig): Promise<void> {
+  const created = await backfillReplayPremiereTerminalTombstones({
+    privateStateRoot: config.privateStateRoot,
+    records: await readJournal(config.journalPath),
+  });
+  log(
+    `terminal tombstone backfill complete (${created.length} matched release record(s))`,
+  );
 }
 
 async function hasStorageFloor(config: LoopConfig): Promise<boolean> {
@@ -2549,9 +2913,17 @@ function isIneligible(error: unknown): boolean {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const shadow = args.includes("--shadow");
-  const unknown = args.filter((arg) => arg !== "--shadow");
+  const backfillOnly = args.includes("--backfill-terminal-tombstones");
+  const unknown = args.filter(
+    (arg) => arg !== "--shadow" && arg !== "--backfill-terminal-tombstones",
+  );
   if (unknown.length > 0) {
     throw new Error(`unknown premiere-loop argument(s): ${unknown.join(", ")}`);
+  }
+  if (shadow && backfillOnly) {
+    throw new Error(
+      "--shadow and --backfill-terminal-tombstones are mutually exclusive",
+    );
   }
   const config = resolveLoopConfig(process.env);
   await fs.mkdir(config.loopStateDir, { recursive: true });
@@ -2559,6 +2931,17 @@ async function main(): Promise<void> {
   if (shadow) {
     // Shadow never takes the mutating lock path; it only observes.
     await runShadowIteration(config);
+    return;
+  }
+
+  if (backfillOnly) {
+    const outcome = await withSingleInstanceLock(config.lockDir, async () => {
+      await runTerminalTombstoneBackfill(config);
+      return true;
+    });
+    if (outcome === null) {
+      throw new Error("premiere loop is active; tombstone backfill refused");
+    }
     return;
   }
 
@@ -2586,9 +2969,12 @@ if (invokedDirectly) {
 
 export {
   activateHold,
+  assertForeignPremiereGateUnchanged,
+  foreignRegisteredPremiereGate,
   isEpisodeAlreadyPublic,
   main,
   resolveLoopConfig,
+  runTerminalTombstoneBackfill,
   trackHold,
 };
 export type { JournalWriter, LoopConfig };

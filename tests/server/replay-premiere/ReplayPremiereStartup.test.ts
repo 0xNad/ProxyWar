@@ -13,6 +13,7 @@ import {
 } from "../../../src/server/replay-premiere/ReplayPremiereCheckpointProjection";
 import { buildPremiereChunks } from "../../../src/server/replay-premiere/ReplayPremiereChunks";
 import { REPLAY_PREMIERE_CHECKPOINT_PAUSE_MS } from "../../../src/server/replay-premiere/ReplayPremiereContracts";
+import { readActiveReplayPremiereStartupSelection } from "../../../src/server/replay-premiere/ReplayPremiereCoordination";
 import { ReplayPremiereError } from "../../../src/server/replay-premiere/ReplayPremiereErrors";
 import {
   ReplayPremiereEventStore,
@@ -1747,6 +1748,64 @@ describe("ReplayPremiere production startup", () => {
     expect(started.service.readActiveTimerCount()).toBe(0);
   });
 
+  test("a selected terminal fallback may fail recovery without taking beta down or authorizing an ambiguous receipt", async () => {
+    vi.useFakeTimers({ now: NOW });
+    await writeAdmission(root);
+    const firstContext = startupContext(() => new Date());
+    const first = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
+      ...firstContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+    });
+    services.push(first.service);
+    const firstRuntime = firstContext.runtimeRegistry.get(PREMIERE_ID)!;
+    for (const advanceMs of [100, 60_000, 100, 60_000, 50]) {
+      await vi.advanceTimersByTimeAsync(advanceMs);
+      await first.service.waitForRuntimeTimersIdle();
+    }
+    expect(firstRuntime.readLifecycleState()).toBe("revealed");
+    await first.service.close();
+    services.splice(services.indexOf(first.service), 1);
+
+    const rebootContext = startupContext(() => new Date());
+    const rebooted = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
+      ...rebootContext,
+      privateStateRoot: path.join(root, "private"),
+      servedRoots: [path.join(root, "served")],
+      beforeTargetRecovery: async () => {
+        throw new ReplayPremiereError(
+          "test_terminal_fallback_recovery_refused",
+          "PREMIERE_INTEGRITY_FAILURE",
+          409,
+          "Injected terminal fallback failure",
+        );
+      },
+    });
+    services.push(rebooted.service);
+
+    expect(rebooted.registeredPremiereIds).toEqual([]);
+    expect(rebooted.diagnostics).toContainEqual({
+      target: `${PREMIERE_ID}.admission.json`,
+      premiereId: PREMIERE_ID,
+      operatorCode: "test_terminal_fallback_recovery_refused",
+    });
+    const receipt = await readActiveReplayPremiereStartupSelection(
+      path.join(root, "private"),
+    );
+    expect(receipt).toMatchObject({
+      phase: "ready",
+      selected: [
+        {
+          premiereId: PREMIERE_ID,
+          projectionState: "revealed",
+        },
+      ],
+      registeredPremiereIds: [],
+    });
+  });
+
   test("fails a bad nearest target closed without probing another scheduled target", async () => {
     const premiereIds = await writeTwoAdmissions(root);
     const badPath = admissionPath(root, premiereIds.primary);
@@ -2629,6 +2688,12 @@ describe("ReplayPremiere production startup", () => {
     expect(recoveryCalls).toHaveBeenCalledTimes(1);
     expect(context.httpRegistry.get(PREMIERE_ID)).toBeNull();
     expect(context.runtimeRegistry.get(PREMIERE_ID)).toBeNull();
+    await expect(
+      readActiveReplayPremiereStartupSelection(path.join(root, "private")),
+    ).rejects.toMatchObject({
+      operatorCode: "coordination_selection_not_ready",
+    });
+    expect(lines).toContain("startup_coordination_selection_incomplete");
   });
 
   test("deferredFreshAssemblyBudgetMs: 0 disables the deferred lane entirely", async () => {

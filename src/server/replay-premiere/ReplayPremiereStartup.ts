@@ -14,6 +14,13 @@ import type {
   PremiereChunkDraft,
   PremiereState,
 } from "./ReplayPremiereContracts";
+import {
+  createReplayPremiereServerStartupIdentity,
+  garbageCollectReplayPremiereTerminalTombstone,
+  reconcileReplayPremiereTerminalTombstones,
+  writeReplayPremiereStartupSelection,
+  type ReplayPremiereStartupSelectionEntryV1,
+} from "./ReplayPremiereCoordination";
 import { ReplayPremiereError } from "./ReplayPremiereErrors";
 import {
   ReplayPremiereEventStore,
@@ -60,6 +67,7 @@ import {
   DEFAULT_REPLAY_PREMIERE_RECLAMATION_GRACE_MS,
   ReplayPremiereTerminalReclaimer,
   type ReplayPremiereOrphanCandidate,
+  type ReplayPremiereReclamationResult,
 } from "./ReplayPremiereTerminalReclamation";
 
 const DEFAULT_RECLAMATION_SWEEP_MS = 60_000;
@@ -275,6 +283,10 @@ export interface ReplayPremiereReclamationConfig {
    * that becomes a live registered runtime is handed back to the live path.
    */
   orphanCandidates: ReplayPremiereOrphanCandidate[];
+  /** Runs only after pointer commit and catalog/snapshot bulk deletion. */
+  onReclaimed: (
+    result: ReplayPremiereReclamationResult,
+  ) => void | Promise<void>;
 }
 
 export class ReplayPremiereProductionService {
@@ -457,6 +469,15 @@ export class ReplayPremiereProductionService {
           return null;
         });
       if (result === null || !result.reclaimed) continue;
+      await Promise.resolve(reclamation.onReclaimed(result)).catch(
+        (error: unknown) => {
+          reclamation.report({
+            target: `${assembled.runtime.premiereId}.coordination-gc`,
+            premiereId: assembled.runtime.premiereId,
+            operatorCode: operatorCode(error),
+          });
+        },
+      );
       this.supervisor.remove(assembled.runtime);
       this.httpRegistry.unregister(assembled.target);
       this.runtimeRegistry.unregister(assembled.runtime);
@@ -494,6 +515,7 @@ export class ReplayPremiereProductionService {
         const result =
           await reclamation.reclaimer.reclaimOrphanIfEligible(candidate);
         if (result.reclaimed) {
+          await reclamation.onReclaimed(result);
           drop(candidate);
           reclamation.report({
             target: `${candidate.premiereId}.orphan`,
@@ -678,6 +700,10 @@ export async function startReplayPremiereProduction(
       statfs: options.statfs,
     });
     const activeEventStore = eventStore;
+    const serverStartupIdentity =
+      await createReplayPremiereServerStartupIdentity({
+        privateStateRoot,
+      });
     const recoveredAtStartup = activeEventStore.recovered;
     const latestEventsByAggregate = indexLatestEventsByAggregate(
       recoveredAtStartup.events,
@@ -717,6 +743,14 @@ export async function startReplayPremiereProduction(
             sweepMs: boundedReclamationSweepMs(options.reclamationSweepMs),
             report: reportRuntime,
             orphanCandidates: [],
+            onReclaimed: async (result) => {
+              if (result.pointer === null) return;
+              await garbageCollectReplayPremiereTerminalTombstone({
+                privateStateRoot,
+                premiereId: result.premiereId,
+                archivePointer: result.pointer,
+              });
+            },
           };
     const service = new ReplayPremiereProductionService(
       eventStore,
@@ -752,6 +786,33 @@ export async function startReplayPremiereProduction(
         });
       }
     }
+    const terminalTombstones = await reconcileReplayPremiereTerminalTombstones({
+      privateStateRoot,
+      admissionRecords: read.entries,
+      archivePointerFor: (premiereId) =>
+        options.archiveStore?.lookup(premiereId) ?? null,
+    });
+    // A terminal loop release is a private cancellation authority only for a
+    // dormant draft/scheduled projection. Active playing/checkpoint recovery
+    // remains authoritative so an in-flight audience is never interrupted.
+    // Dormant retired plans become neutral cancelled ORPHAN candidates below,
+    // which uses the existing pointer-then-bulk-delete lifecycle instead of
+    // deleting raw catalog state here.
+    const retiredDormantPremiereIds = new Set<string>();
+    const coordinatedStartupPlans = startupPlans.map((plan) => {
+      if (
+        terminalTombstones.has(plan.record.premiereId) &&
+        (plan.projection.state === "draft" ||
+          plan.projection.state === "scheduled")
+      ) {
+        retiredDormantPremiereIds.add(plan.record.premiereId);
+        return {
+          ...plan,
+          projection: { ...plan.projection, state: "cancelled" as const },
+        };
+      }
+      return plan;
+    });
     const startupOrderingNowMs = clock.now().getTime();
     // A durable archive pointer is an irreversible write-admission fence. A
     // crash may leave the old catalog admission behind after pointer commit;
@@ -762,8 +823,10 @@ export async function startReplayPremiereProduction(
     const alreadyArchivedPremiereIds = new Set(
       options.archiveStore?.reclaimedPremiereIds() ?? [],
     );
-    const liveStartupPlans = startupPlans.filter(
-      (plan) => !alreadyArchivedPremiereIds.has(plan.record.premiereId),
+    const liveStartupPlans = coordinatedStartupPlans.filter(
+      (plan) =>
+        !alreadyArchivedPremiereIds.has(plan.record.premiereId) &&
+        !retiredDormantPremiereIds.has(plan.record.premiereId),
     );
     // Belt-and-suspenders (2026-07-22 round-649 outage class): ordering and
     // selection are pure and should never throw, but no admission may crash
@@ -786,7 +849,24 @@ export async function startReplayPremiereProduction(
       });
       criticalPlans = [];
     }
+    const selectionEntries: ReplayPremiereStartupSelectionEntryV1[] =
+      criticalPlans.map((plan) => ({
+        premiereId: plan.record.premiereId,
+        admissionRecordHash: plan.record.recordHash,
+        projectionState: plan.projection.state,
+      }));
+    // Publish an assembling receipt before any target can register. The loop
+    // treats it as unavailable, closing the boot-time window in which a 404
+    // could otherwise be mistaken for proof that no premiere is active.
+    await writeReplayPremiereStartupSelection({
+      privateStateRoot,
+      phase: "assembling",
+      server: serverStartupIdentity,
+      selected: selectionEntries,
+      registeredPremiereIds: [],
+    });
     const registered: string[] = [];
+    const coordinationRegisteredPremiereIds = new Set<string>();
     // Plans the shared boot budget could not fit: reported (unchanged) AND
     // collected so a FRESH admission among them can get its single deferred
     // background assembly after startup returns.
@@ -861,6 +941,7 @@ export async function startReplayPremiereProduction(
         );
         ownedTargets.push(assembled);
         registered.push(record.premiereId);
+        coordinationRegisteredPremiereIds.add(record.premiereId);
       } catch (error) {
         report({
           target: `${record.premiereId}.admission.json`,
@@ -878,6 +959,7 @@ export async function startReplayPremiereProduction(
     // keyed exclusively on the hash-covered `admittedAt`, so a stale premiere
     // can never self-activate after a restart.
     const deferredPremiereIds = new Set<string>();
+    const deferredCoordinationTasks: Promise<void>[] = [];
     if (deferredBudgetMs > 0) {
       const freshNowMs = clock.now().getTime();
       for (const plan of deadlineMissedPlans) {
@@ -923,6 +1005,9 @@ export async function startReplayPremiereProduction(
             });
             if (outcome.status === "fulfilled") {
               const accepted = service.registerDeferredTarget(outcome.value);
+              if (accepted) {
+                coordinationRegisteredPremiereIds.add(record.premiereId);
+              }
               reportRuntime({
                 target: `${record.premiereId}.admission.json`,
                 premiereId: record.premiereId,
@@ -948,9 +1033,69 @@ export async function startReplayPremiereProduction(
             });
           }
         })();
+        deferredCoordinationTasks.push(deferred);
         pendingAssemblies.add(deferred);
         void deferred.finally(() => pendingAssemblies.delete(deferred));
       }
+    }
+    const publishReadySelection = async (): Promise<void> => {
+      const missingRegistration = selectionEntries.find(
+        (entry) =>
+          (entry.projectionState === "draft" ||
+            entry.projectionState === "scheduled" ||
+            entry.projectionState === "playing" ||
+            entry.projectionState === "checkpoint") &&
+          !coordinationRegisteredPremiereIds.has(entry.premiereId),
+      );
+      if (missingRegistration !== undefined) {
+        // Keep the initial `assembling` receipt in place. A selected target
+        // that failed synchronous or deferred assembly is still a resurrection
+        // risk on the next restart, so the loop must fail closed rather than
+        // treating registered=[] as proof that no foreign premiere exists.
+        reportRuntime({
+          target: "startup_coordination_receipt",
+          premiereId: missingRegistration.premiereId,
+          operatorCode: "startup_coordination_selection_incomplete",
+        });
+        return;
+      }
+      await writeReplayPremiereStartupSelection({
+        privateStateRoot,
+        phase: "ready",
+        server: serverStartupIdentity,
+        selected: selectionEntries,
+        registeredPremiereIds: selectionEntries
+          .map((entry) => entry.premiereId)
+          .filter((premiereId) =>
+            coordinationRegisteredPremiereIds.has(premiereId),
+          ),
+      });
+    };
+    if (deferredCoordinationTasks.length === 0) {
+      await publishReadySelection().catch((error: unknown) => {
+        // The assembling receipt was durable before registration. Preserve the
+        // available beta service but leave the loop fail-closed on that receipt
+        // if final publication cannot be proven.
+        reportRuntime({
+          target: "startup_coordination_receipt",
+          premiereId: null,
+          operatorCode: operatorCode(error),
+        });
+      });
+    } else {
+      const readyPublication = Promise.allSettled(deferredCoordinationTasks)
+        .then(publishReadySelection)
+        .catch((error: unknown) => {
+          reportRuntime({
+            target: "startup_coordination_receipt",
+            premiereId: null,
+            operatorCode: operatorCode(error),
+          });
+        });
+      pendingAssemblies.add(readyPublication);
+      void readyPublication.finally(() =>
+        pendingAssemblies.delete(readyPublication),
+      );
     }
     // ORPHAN CANDIDATES (2026-07-22): terminal premieres with durable
     // evidence but no live runtime — a reveal whose reclamation grace spans a
@@ -962,7 +1107,7 @@ export async function startReplayPremiereProduction(
     if (reclamation !== null) {
       reclamation.orphanCandidates.push(
         ...deriveOrphanCandidates({
-          plans: startupPlans,
+          plans: coordinatedStartupPlans,
           registeredPremiereIds: new Set(registered),
           deferredPremiereIds,
           excludedPremiereIds: new Set(
