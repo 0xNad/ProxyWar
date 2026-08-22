@@ -341,6 +341,28 @@ export async function readJsonFile(filePath) {
   return parsed;
 }
 
+async function readPrivacyValidatedJsonFile(filePath, label) {
+  const bytes = await fs.readFile(filePath);
+  if (bytes.length > MAX_FILE_BYTES)
+    fail("EVIDENCE_SIZE_LIMIT_EXCEEDED", label);
+  let text;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    fail("EVIDENCE_UTF8_INVALID", label);
+  }
+  for (const pattern of FORBIDDEN_VALUE_PATTERNS) {
+    if (pattern.test(text)) fail("PRIVACY_VALUE_FORBIDDEN", label);
+  }
+  for (const forbidden of FORBIDDEN_PRIVACY_TEXT) {
+    if (text.includes(forbidden))
+      fail("PRIVACY_TEXT_FORBIDDEN", `${label}:${forbidden}`);
+  }
+  const parsed = parseJsonText(text, label);
+  inspectJsonPrivacy(parsed, label);
+  return parsed;
+}
+
 export async function writeJsonExclusive(filePath, value) {
   await fs.writeFile(filePath, canonicalJson(value), {
     encoding: "utf8",
@@ -1020,9 +1042,17 @@ export async function verifyEvidenceBindings({
   const prereg = await readJsonFile(boundFiles.preRegistrationPath);
   const index = await readJsonFile(boundFiles.localIndexPath);
   const localSeal = await readJsonFile(boundFiles.localSealPath);
-  const aggregate = await readJsonFile(verifierAggregatePath);
+  const aggregate = await readPrivacyValidatedJsonFile(
+    verifierAggregatePath,
+    "verifier aggregate",
+  );
+  validateVerifierAggregate(aggregate, request.phase);
   if (boundVerifierAggregatePath !== null) {
-    const boundAggregate = await readJsonFile(boundVerifierAggregatePath);
+    const boundAggregate = await readPrivacyValidatedJsonFile(
+      boundVerifierAggregatePath,
+      "bound verifier aggregate",
+    );
+    validateVerifierAggregate(boundAggregate, request.phase);
     if (canonicalJson(aggregate) !== canonicalJson(boundAggregate))
       fail("VERIFIER_AGGREGATE_RERUN_MISMATCH");
   }
@@ -1126,6 +1156,60 @@ export async function verifyEvidenceBindings({
     providerPreflightLedger,
     priorPhaseLedger,
   };
+}
+
+function validateVerifierAggregate(aggregate, expectedPhase) {
+  exactKeys(
+    aggregate,
+    [
+      "schemaVersion",
+      "integrityVerified",
+      "experimentUsable",
+      "phase",
+      "verifiedRunCount",
+      "completePairCount",
+      "diagnostics",
+      "performanceClaimAuthorized",
+      "authenticity",
+    ],
+    "VERIFIER_AGGREGATE_SCHEMA_INVALID",
+  );
+  exactKeys(
+    aggregate.authenticity,
+    ["verified", "status", "sealSha256"],
+    "VERIFIER_AGGREGATE_SCHEMA_INVALID",
+  );
+  if (
+    aggregate.schemaVersion !== 2 ||
+    aggregate.integrityVerified !== true ||
+    aggregate.experimentUsable !== false ||
+    aggregate.phase !== expectedPhase ||
+    !Number.isSafeInteger(aggregate.verifiedRunCount) ||
+    aggregate.verifiedRunCount < 0 ||
+    !Number.isSafeInteger(aggregate.completePairCount) ||
+    aggregate.completePairCount < 0 ||
+    !Array.isArray(aggregate.diagnostics) ||
+    aggregate.performanceClaimAuthorized !== false ||
+    aggregate.authenticity.verified !== false ||
+    aggregate.authenticity.status !== "external-seal-receipt-required"
+  )
+    fail("VERIFIER_AGGREGATE_SCHEMA_INVALID");
+  normalizeRawSha256(
+    aggregate.authenticity.sealSha256,
+    "verifier aggregate seal SHA-256",
+  );
+  for (const diagnostic of aggregate.diagnostics) {
+    exactKeys(
+      diagnostic,
+      ["code", "path"],
+      "VERIFIER_AGGREGATE_SCHEMA_INVALID",
+    );
+    if (
+      !SAFE_ID.test(diagnostic.code) ||
+      (diagnostic.path !== null && !safeRelativePath(diagnostic.path))
+    )
+      fail("VERIFIER_AGGREGATE_SCHEMA_INVALID");
+  }
 }
 
 async function verifyBoundPhaseReceipt(

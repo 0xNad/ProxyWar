@@ -433,6 +433,11 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
     integrityVerified: true,
     experimentUsable: false,
     phase: "canary",
+    verifiedRunCount: 12,
+    completePairCount: 0,
+    diagnostics: [
+      { code: "EXTERNAL_IMMUTABLE_SEAL_RECEIPT_REQUIRED", path: null },
+    ],
     performanceClaimAuthorized: false,
     authenticity: {
       verified: false,
@@ -589,6 +594,25 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
     request,
     verifierAggregatePath,
   });
+  const privateAggregatePath = path.join(supportRoot, "private-aggregate.json");
+  await fs.writeFile(
+    privateAggregatePath,
+    JSON.stringify({
+      ...aggregate,
+      renamedEnvelope: {
+        password: "private",
+        modelTranscript: "provider prose",
+      },
+    }),
+  );
+  await assert.rejects(
+    verifyEvidenceBindings({
+      evidenceRoot,
+      request,
+      verifierAggregatePath: privateAggregatePath,
+    }),
+    hasCode("PRIVACY_KEY_FORBIDDEN"),
+  );
   const earlyPreregLedger = externalLedgerFixture({
     experimentID,
     phase: "preregistration",
@@ -759,7 +783,7 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
   const divergentRerunPath = path.join(supportRoot, "divergent-rerun.json");
   await fs.writeFile(
     divergentRerunPath,
-    JSON.stringify({ ...aggregate, downstreamNonce: "changed-after-request" }),
+    JSON.stringify({ ...aggregate, completePairCount: 1 }),
   );
   await assert.rejects(
     verifyEvidenceBindings({
