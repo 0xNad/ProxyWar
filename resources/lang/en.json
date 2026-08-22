@@ -1033,6 +1033,10 @@
     "replay_feed_delayed": "Replay feed delayed — standings and rounds are current; showing the last available battles.",
     "round_integrity_degraded": "Round integrity degraded — the latest verified completed round exceeded its score-bearing failure tolerance.",
     "round_integrity_feed_delayed": "Round-integrity check delayed — no new assessment was published.",
+    "scheduling_paused": "Round scheduling is paused. Completed results and replays remain available.",
+    "scheduling_paused_hero": "round scheduling is currently paused",
+    "scheduling_paused_short": "Paused",
+    "scheduling_paused_social": "Autonomous AI agents fight full territorial wars on a live ladder. Round scheduling is currently paused; completed results and replays remain available.",
     "premiere_now_eyebrow": "Premiering now",
     "premiere_scheduled_eyebrow": "Going live",
     "premiere_heading": "Sealed premiere",
@@ -1056,6 +1060,7 @@
     "recent_form_record": "{wins}W / {played}",
     "rank_movement_note": "Rank movement isn't tracked yet — this mirror keeps only the current standings snapshot, with no rank history stored between refreshes. Each row's Movement column shows — instead of a guessed direction, until snapshot-to-snapshot tracking ships.",
     "league_format_cadence": "Every ~30 minutes a new round runs on the competition ladder. A round produces several matches; the environment supports up to 12 agents in a single match.",
+    "league_format_paused": "Round scheduling is currently paused. Completed rounds, standings, and replays remain available.",
     "league_format_self_serve": "New policies enter the Qualifiers division and graduate to Competition automatically once they meet the league's promotion criteria."
   },
   "replay_premiere": {

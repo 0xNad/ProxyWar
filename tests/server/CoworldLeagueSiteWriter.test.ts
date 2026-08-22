@@ -162,6 +162,34 @@ function sampleData(): CoworldLeagueMirrorData {
 }
 
 describe("coworldLeagueIndexHtml", () => {
+  test("discloses a hosted scheduling pause without claiming an active cadence", () => {
+    const data = sampleData();
+    data.league.roundsPausedAt = "2026-08-22T07:20:08.448Z";
+    const html = coworldLeagueIndexHtml(data);
+    expect(html).toContain(
+      "Round scheduling is paused. Completed results and replays remain available.",
+    );
+    expect(html).toContain("round scheduling is currently paused");
+    expect(html).toContain("<span>Round cadence</span><strong>Paused</strong>");
+    expect(html).toContain(
+      "Round scheduling is currently paused. Completed rounds, standings, and replays remain available.",
+    );
+    expect(html).toContain(
+      "Round scheduling is currently paused; completed results and replays remain available.",
+    );
+    expect(html).not.toMatch(
+      /a new round every|every ~30 minutes a new round/i,
+    );
+  });
+
+  test("does not fabricate a pause from malformed direct site-writer data", () => {
+    const data = sampleData();
+    data.league.roundsPausedAt = "not-a-timestamp";
+    const html = coworldLeagueIndexHtml(data);
+    expect(html).not.toContain("Round scheduling is paused");
+    expect(html).toContain("a new round every 30 minutes");
+  });
+
   test("escapes hostile player names", () => {
     const html = coworldLeagueIndexHtml(sampleData());
     expect(html).not.toContain('<script>alert("x")</script>');
@@ -751,6 +779,7 @@ describe("writeCoworldLeagueSite", () => {
   test("marks both artifacts stale while retaining the last good sync", async () => {
     siteDir = await mkdtemp(path.join(tmpdir(), "league-site-"));
     const data = sampleData();
+    data.league.roundsPausedAt = "2026-08-22T07:20:08.448114Z";
     await writeCoworldLeagueSite(siteDir, data);
 
     const paths = await markCoworldLeagueSiteStale(
@@ -761,10 +790,12 @@ describe("writeCoworldLeagueSite", () => {
     const staleData = JSON.parse(await readFile(paths.dataPath, "utf8"));
 
     expect(staleHtml).toContain("Live sync degraded");
+    expect(staleHtml).toContain("Round scheduling is paused");
     expect(staleHtml).toContain('data-stale="true"');
     expect(staleData.generatedAt).toBe("2026-07-13T12:05:00.000Z");
     expect(staleData.lastGoodSyncAt).toBe(data.lastGoodSyncAt);
     expect(staleData.stale).toBe(true);
+    expect(staleData.league.roundsPausedAt).toBe("2026-08-22T07:20:08.448114Z");
 
     const inodeBefore = (await stat(paths.dataPath)).ino;
 

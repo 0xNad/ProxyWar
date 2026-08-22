@@ -24,6 +24,7 @@ import {
   resolveArchivedEpisodeReplayHrefs,
   type CoworldLeagueArchivedReplayHrefs,
 } from "./CoworldLeagueArtifactRetention";
+import { canonicalCoworldLeaguePauseTimestamp } from "./CoworldLeaguePause";
 import type { CoworldRoundIntegrityState } from "./CoworldLeagueRoundIntegrity";
 import {
   appendStandingsHistorySnapshot,
@@ -200,6 +201,8 @@ export interface CoworldLeagueMirrorData {
     name: string;
     description: string | null;
     divisionName: string;
+    /** Canonical hosted pause instant. Optional for archived pre-field data. */
+    roundsPausedAt?: string | null;
     roundIntervalMinutes: number | null;
     episodesPerRound: number | null;
     currentRoundNumber: number | null;
@@ -482,7 +485,7 @@ export const COWORLD_LEAGUE_SOCIAL_IMAGE = "social.png";
  * cached and re-scraped independently of the page, so putting live match state
  * in them would be a spoiler channel that bypasses the suppression contract.
  */
-function leagueSocialMetaHtml(): string {
+function leagueSocialMetaHtml(schedulingPaused: boolean): string {
   const origin = leagueSocialOrigin();
   const pageUrl = origin === "" ? null : `${origin}/league`;
   const imageUrl =
@@ -490,8 +493,9 @@ function leagueSocialMetaHtml(): string {
       ? null
       : `${origin}/ai-league-runs/league/${COWORLD_LEAGUE_SOCIAL_IMAGE}`;
   const title = "Proxy War — live AI agent league";
-  const description =
-    "Autonomous AI agents fight full territorial wars on a live ladder — expansion, alliances, betrayals, nukes. A new round every 30 minutes, with no humans at the controls.";
+  const description = schedulingPaused
+    ? translateText("coworld_league.scheduling_paused_social")
+    : "Autonomous AI agents fight full territorial wars on a live ladder — expansion, alliances, betrayals, nukes. A new round every 30 minutes, with no humans at the controls.";
   const tags = [
     `<meta name="description" content="${escapeHtml(description)}">`,
     `<meta property="og:site_name" content="Proxy War">`,
@@ -564,6 +568,19 @@ async function writeCoworldLeagueSiteUnlocked(
    */
   summaryArchiveDir?: string,
 ): Promise<CoworldLeagueSitePaths> {
+  // Stale republishes read data.json through an untyped JSON boundary. Never
+  // let a corrupt/additive value fabricate a pause in HTML or the public read
+  // model; normalize it through the same authority parser as fresh Coworld
+  // input before producing any artifact.
+  data = {
+    ...data,
+    league: {
+      ...data.league,
+      roundsPausedAt: canonicalCoworldLeaguePauseTimestamp(
+        data.league.roundsPausedAt,
+      ),
+    },
+  };
   await fs.mkdir(siteDir, { recursive: true });
   const indexPath = path.join(siteDir, "index.html");
   const clientPath = path.join(siteDir, "client.js");
@@ -799,6 +816,8 @@ export function coworldLeagueIndexHtml(
   identity: IdentityRegistrySnapshot = EMPTY_LEAGUE_IDENTITY_SNAPSHOT,
 ): string {
   const league = data.league;
+  const schedulingPaused =
+    canonicalCoworldLeaguePauseTimestamp(league.roundsPausedAt) !== null;
   const roundChip =
     league.currentRoundNumber === null
       ? "ROUND —"
@@ -834,6 +853,11 @@ export function coworldLeagueIndexHtml(
           translateText("coworld_league.round_integrity_feed_delayed"),
         )}</div>`
       : "";
+  const schedulingPausedBanner = schedulingPaused
+    ? `<div class="stale-banner">${escapeHtml(
+        translateText("coworld_league.scheduling_paused"),
+      )}</div>`
+    : "";
   const watchLatest = data.episodes.find((episode) => episode.fullRenderHref);
   // The LIVE premiere card always takes precedence; the compact latest-revealed
   // card fills the same slot ONLY when nothing is currently premiering, so the
@@ -883,7 +907,7 @@ export function coworldLeagueIndexHtml(
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta id="league-refresh-fallback" http-equiv="refresh" content="300">
   <title>Proxy War — Live League</title>
-${leagueSocialMetaHtml()}
+${leagueSocialMetaHtml(schedulingPaused)}
   <style>
     :root { color-scheme: dark; --bg:#080b10; --surface:#111720; --surface2:#18202b; --line:#2a3442; --text:#edf1f7; --muted:#a4afbf; --amber:#f4a64a; --cyan:#7ad7f0; --good:#7ee0a8; --bad:#ff9b8f; }
     * { box-sizing:border-box; }
@@ -1032,6 +1056,7 @@ ${leagueSocialMetaHtml()}
       </div>
     </header>
     ${staleBanner}
+    ${schedulingPausedBanner}
     ${roundIntegrityBanner}
     ${roundIntegrityFeedBanner}
     ${championFeedBanner}
@@ -1043,11 +1068,15 @@ ${leagueSocialMetaHtml()}
       <h1>Agents are fighting a war right now.</h1>
       <p class="lede">Autonomous agents wage full territorial wars on the ${escapeHtml(
         league.divisionName,
-      )} ladder — expansion, alliances, betrayals, nukes — a new round every ${
-        league.roundIntervalMinutes === null
-          ? "few"
-          : escapeHtml(String(league.roundIntervalMinutes))
-      } minutes. No humans at the controls. Replays below are the real matches, straight from the arena.</p>
+      )} ladder — expansion, alliances, betrayals, nukes — ${
+        schedulingPaused
+          ? escapeHtml(translateText("coworld_league.scheduling_paused_hero"))
+          : `a new round every ${
+              league.roundIntervalMinutes === null
+                ? "few"
+                : escapeHtml(String(league.roundIntervalMinutes))
+            } minutes`
+      }. No humans at the controls. Replays below are the real matches, straight from the arena.</p>
       <div class="actions">
         <a class="button primary" href="${escapeHtml(data.links.enterTheLeagueUrl)}">Enter your agent</a>
         ${
@@ -1065,9 +1094,11 @@ ${leagueSocialMetaHtml()}
       }</strong></div>
       <div class="metric"><span>Warlords</span><strong>${escapeHtml(String(data.standings.length))}</strong></div>
       <div class="metric"><span>Round cadence</span><strong>${
-        league.roundIntervalMinutes === null
-          ? "—"
-          : `${escapeHtml(String(league.roundIntervalMinutes))}m`
+        schedulingPaused
+          ? escapeHtml(translateText("coworld_league.scheduling_paused_short"))
+          : league.roundIntervalMinutes === null
+            ? "—"
+            : `${escapeHtml(String(league.roundIntervalMinutes))}m`
       }</strong></div>
       <div class="metric"><span>Battles rendered</span><strong>${escapeHtml(
         String(
@@ -1559,7 +1590,10 @@ function standingsAppendixSections(data: CoworldLeagueMirrorData): string {
     <section>
       <h2>League format</h2>
       <p class="standings-note">${escapeHtml(
-        translateText("coworld_league.league_format_cadence"),
+        canonicalCoworldLeaguePauseTimestamp(data.league.roundsPausedAt) !==
+          null
+          ? translateText("coworld_league.league_format_paused")
+          : translateText("coworld_league.league_format_cadence"),
       )}</p>
       <p class="standings-note">${escapeHtml(
         translateText("coworld_league.league_format_self_serve"),

@@ -22,6 +22,7 @@ import type {
 } from "./AgentTypes";
 import { normalizeAgentRuntimeMode } from "./AgentTypes";
 import { asAgentDegradationCause } from "./AgentWireProtocol";
+import { canonicalCoworldLeaguePauseTimestamp } from "./CoworldLeaguePause";
 import {
   filterSuppressedEpisodeRows,
   type LatestPremierePointer,
@@ -99,6 +100,7 @@ export interface CoworldLeagueSummary {
   id: string;
   name: string;
   description: string | null;
+  roundsPausedAt: string | null;
   roundIntervalMinutes: number | null;
   episodesPerRound: number | null;
 }
@@ -122,6 +124,12 @@ export function parseLeagueSummary(
     id,
     name: asString(league.name) ?? "Coworld league",
     description: asString(league.description),
+    // Hosted scheduling authority is top-level on the league response. Keep a
+    // canonical nullable timestamp so public consumers can distinguish an
+    // intentional pause from scheduler silence or a stale mirror.
+    roundsPausedAt: canonicalCoworldLeaguePauseTimestamp(
+      league.rounds_paused_at,
+    ),
     // Observatory moved these live controls to settings.ladder. Prefer the
     // current authoritative shape while retaining the legacy commissioner
     // fallback for old fixtures and archived league payloads.

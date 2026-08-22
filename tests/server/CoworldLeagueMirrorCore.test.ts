@@ -224,6 +224,34 @@ describe("CoworldLeagueMirrorCore", () => {
     expect(league?.roundIntervalMinutes).toBe(30);
     expect(league?.episodesPerRound).toBe(8);
     expect(league?.name).toBe("Proxywar");
+    expect(league?.roundsPausedAt).toBeNull();
+  });
+
+  test("parseLeagueSummary publishes a canonical hosted pause instant", () => {
+    expect(
+      parseLeagueSummary({
+        ...leagueFixture,
+        rounds_paused_at: "2026-08-22T07:20:08.448114Z",
+      })?.roundsPausedAt,
+    ).toBe("2026-08-22T07:20:08.448114Z");
+    expect(
+      parseLeagueSummary({
+        ...leagueFixture,
+        rounds_paused_at: "not-a-timestamp",
+      })?.roundsPausedAt,
+    ).toBeNull();
+    expect(
+      parseLeagueSummary({
+        ...leagueFixture,
+        rounds_paused_at: "2026-08-22T07:20:08+00:00",
+      })?.roundsPausedAt,
+    ).toBeNull();
+    expect(
+      parseLeagueSummary({
+        ...leagueFixture,
+        rounds_paused_at: "2026-02-31T07:20:08Z",
+      })?.roundsPausedAt,
+    ).toBeNull();
   });
 
   test("parseLeagueSummary prefers current settings.ladder truth over legacy commissioner fields", () => {
