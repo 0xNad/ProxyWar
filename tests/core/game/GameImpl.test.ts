@@ -8,6 +8,7 @@ import {
   Player,
   PlayerInfo,
   PlayerType,
+  UnitType,
 } from "../../../src/core/game/Game";
 import { TileRef } from "../../../src/core/game/GameMap";
 import { setup } from "../../util/Setup";
@@ -131,5 +132,49 @@ describe("GameImpl", () => {
 
     expect(attacker.isTraitor()).toBe(true);
     expect(attacker.allianceWith(defender)).toBeFalsy();
+  });
+
+  test("Warship patrolTile rejects missing, malformed, inherited, and out-of-map values", () => {
+    const lastTile = game.ref(game.width() - 1, game.height() - 1);
+    const buildWith = (params: unknown) =>
+      attacker.buildUnit(
+        UnitType.Warship,
+        attackerSpawn,
+        params as { patrolTile: TileRef },
+      );
+
+    expect(() => {
+      // @ts-expect-error Runtime callers can bypass the compile-time requirement.
+      attacker.buildUnit(UnitType.Warship, attackerSpawn, {});
+    }).toThrow(/Warship constructed with invalid patrolTile/);
+    for (const patrolTile of [
+      undefined,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      1.5,
+      -1,
+      lastTile + 1,
+    ]) {
+      expect(() => buildWith({ patrolTile })).toThrow(
+        /Warship constructed with invalid patrolTile/,
+      );
+    }
+    expect(() =>
+      buildWith(Object.create({ patrolTile: attackerSpawn })),
+    ).toThrow(/Warship constructed with invalid patrolTile/);
+    expect(attacker.units(UnitType.Warship)).toHaveLength(0);
+  });
+
+  test("Warship patrolTile accepts the first and last valid map references", () => {
+    const lastTile = game.ref(game.width() - 1, game.height() - 1);
+    const first = attacker.buildUnit(UnitType.Warship, attackerSpawn, {
+      patrolTile: 0,
+    });
+    const last = attacker.buildUnit(UnitType.Warship, attackerSpawn, {
+      patrolTile: lastTile,
+    });
+
+    expect(first.warshipState().patrolTile).toBe(0);
+    expect(last.warshipState().patrolTile).toBe(lastTile);
   });
 });
