@@ -148,7 +148,7 @@ test("deal capability rejects malformed nested state without emitting a slot", (
         obligorPlayerID: "P_A",
         obligorName: "Agent A",
         kind: "non_aggression",
-        status: "fulfilled",
+        status: "pending",
       },
       {
         obligorPlayerID: "P_B",
@@ -285,6 +285,18 @@ test("deal capability rejects malformed nested state without emitting a slot", (
         {
           ...nap,
           obligations: [nap.obligations[0], { ...nap.obligations[0] }],
+        },
+      ],
+    },
+    {
+      ...valid,
+      activeDeals: [
+        {
+          ...nap,
+          obligations: [
+            { ...nap.obligations[0], status: "fulfilled" },
+            nap.obligations[1],
+          ],
         },
       ],
     },

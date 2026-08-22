@@ -331,6 +331,18 @@ function boundedActiveDeal(deal, ownPlayerID, decisionStep) {
   ) {
     return null;
   }
+  if (
+    (expected.kind === "non_aggression" ||
+      expected.kind === "trade_security") &&
+    obligations.some(
+      (obligation) =>
+        obligation.status !== "pending" &&
+        obligation.status !== "violated" &&
+        obligation.status !== "moot",
+    )
+  ) {
+    return null;
+  }
   if (!obligations.some((obligation) => obligation.status === "pending")) {
     return null;
   }
