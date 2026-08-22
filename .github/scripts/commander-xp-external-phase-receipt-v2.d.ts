@@ -39,7 +39,7 @@ export interface CommanderXpExternalPhaseReceiptV2 {
   attempt: number;
   headSha: string;
   treeSha: string;
-  phase: "provider-preflight" | "canary" | "confirmatory";
+  phase: "preregistration" | "provider-preflight" | "canary" | "confirmatory";
   completedAt: string;
   evidenceArtifact: {
     id: string;

@@ -24,7 +24,13 @@ const MAX_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_BUNDLE_BYTES = 2 * 1024 * 1024 * 1024;
 const CI_WORKFLOW_PATH = ".github/workflows/ci.yml";
 const COLLECTOR_WORKFLOW_PATH = ".github/workflows/commander-xp-evidence.yml";
-const ALLOWED_TEXT_EXTENSIONS = new Set([".json", ".jsonl", ".sha256", ".txt"]);
+const PHASES = new Set([
+  "preregistration",
+  "provider-preflight",
+  "canary",
+  "confirmatory",
+]);
+const ALLOWED_TEXT_EXTENSIONS = new Set([".json", ".jsonl", ".sha256"]);
 const ALLOWED_TOP_LEVEL_EVIDENCE = new Set([
   "commander-xp-preregistration-v2.json",
   "commander-xp-evidence-index-v2.json",
@@ -47,10 +53,9 @@ const ALLOWED_RUN_SUFFIXES = new Set([
   "replay-evidence.json",
   "replay.json",
   "episode-results.json",
-  "episode-results-raw.json",
   "game-evidence.jsonl",
-  "game-logs-raw.txt",
   "command-receipts.json",
+  "coworld-bundle-receipt.json",
   "player-artifact/runtime-manifest.json",
   "player-artifact/trace.jsonl",
   "player-artifact/hashes.json",
@@ -89,7 +94,6 @@ const FORBIDDEN_PRIVACY_TEXT = [
   "messageText",
   "commsSlotText",
   "externalRawOutput",
-  "rawProviderOutput",
   "rawPrompt",
   "presigned",
   "AWS_",
@@ -228,6 +232,7 @@ export async function loadAndVerifySealRequest(
       "sourceArtifact",
       "source",
       "evidence",
+      "preregistrationReceipt",
       "canaryReceipt",
     ],
     "SEAL_REQUEST_SCHEMA_INVALID",
@@ -235,7 +240,7 @@ export async function loadAndVerifySealRequest(
   if (
     request.schemaVersion !== 1 ||
     !SAFE_ID.test(request.experimentID) ||
-    !["provider-preflight", "canary", "confirmatory"].includes(request.phase)
+    !PHASES.has(request.phase)
   ) {
     fail("SEAL_REQUEST_IDENTITY_INVALID");
   }
@@ -243,6 +248,15 @@ export async function loadAndVerifySealRequest(
   validateSourceArtifactBinding(request.sourceArtifact);
   validateSourceBinding(request.source);
   validateEvidenceBinding(request.evidence);
+  if (request.phase === "preregistration") {
+    if (request.preregistrationReceipt !== null)
+      fail("PREREGISTRATION_REQUEST_MUST_NOT_BIND_PRIOR_RECEIPT");
+  } else {
+    validatePhaseReceiptBinding(
+      request.preregistrationReceipt,
+      "preregistration",
+    );
+  }
   if (request.phase !== "confirmatory") {
     if (request.canaryReceipt !== null)
       fail("CANARY_REQUEST_MUST_NOT_BIND_PRIOR_RECEIPT");
@@ -373,7 +387,7 @@ function validateEvidenceBinding(evidence) {
   }
 }
 
-function validateCanaryReceiptBinding(binding) {
+function validatePhaseReceiptBinding(binding, expectedPhase) {
   exactKeys(
     binding,
     [
@@ -392,16 +406,24 @@ function validateCanaryReceiptBinding(binding) {
       "headSha",
       "treeSha",
     ],
-    "CANARY_RECEIPT_BINDING_INVALID",
+    "PHASE_RECEIPT_BINDING_INVALID",
   );
-  if (!safeRelativePath(binding.path)) fail("CANARY_RECEIPT_PATH_INVALID");
-  normalizeSha256(binding.sha256, "canary receipt SHA-256");
-  normalizeRawSha256(binding.ledgerSha256, "canary ledger SHA-256");
-  if (!/^\d+$/.test(binding.runId)) fail("CANARY_RUN_ID_INVALID");
-  positiveInteger(binding.attempt, "canary workflow run attempt");
+  const expectedPath =
+    expectedPhase === "preregistration"
+      ? "commander-xp-prereg-ledger-v2.json"
+      : "commander-xp-prior-phase-ledger-v2.json";
+  if (binding.path !== expectedPath)
+    fail("PHASE_RECEIPT_PATH_INVALID", expectedPhase);
+  normalizeSha256(binding.sha256, `${expectedPhase} receipt SHA-256`);
+  normalizeRawSha256(binding.ledgerSha256, `${expectedPhase} ledger SHA-256`);
+  if (!/^\d+$/.test(binding.runId)) fail("PHASE_RECEIPT_RUN_ID_INVALID");
+  positiveInteger(binding.attempt, `${expectedPhase} workflow run attempt`);
   validateLedgerEvidenceArtifact(binding.evidenceArtifact);
   validateLedgerReceiptArtifact(binding.receiptArtifact);
-  normalizeRawSha256(binding.localSealSha256, "canary local seal SHA-256");
+  normalizeRawSha256(
+    binding.localSealSha256,
+    `${expectedPhase} local seal SHA-256`,
+  );
   if (
     binding.workflowPath !==
       ".github/workflows/commander-xp-external-seal.yml" ||
@@ -411,7 +433,11 @@ function validateCanaryReceiptBinding(binding) {
     !SHA1.test(binding.headSha) ||
     !SHA1.test(binding.treeSha)
   )
-    fail("CANARY_RECEIPT_SOURCE_INVALID");
+    fail("PHASE_RECEIPT_SOURCE_INVALID");
+}
+
+function validateCanaryReceiptBinding(binding) {
+  validatePhaseReceiptBinding(binding, "canary");
 }
 
 export async function verifyGitSourceIdentity({ repository, source }) {
@@ -640,6 +666,9 @@ export async function verifyEvidenceBindings({
   const localSeal = await readJsonFile(boundFiles.localSealPath);
   const aggregate = await readJsonFile(boundFiles.aggregatePath);
   const rerunAggregate = await readJsonFile(verifierAggregatePath);
+  const preregCreatedAt = Date.parse(prereg.createdAt ?? "");
+  if (!Number.isFinite(preregCreatedAt))
+    fail("PREREGISTRATION_CREATED_AT_INVALID");
   if (canonicalJson(aggregate) !== canonicalJson(rerunAggregate))
     fail("VERIFIER_AGGREGATE_RERUN_MISMATCH");
   if (
@@ -680,16 +709,41 @@ export async function verifyEvidenceBindings({
   if (request.phase === "confirmatory") {
     await verifyBoundCanaryReceipt(evidenceRoot, request, index);
   }
+  if (request.phase === "preregistration") {
+    const actualFiles = await inventoryRegularFiles(evidenceRoot);
+    if (
+      !Array.isArray(index.artifacts) ||
+      index.artifacts.some((artifact) =>
+        String(artifact?.path ?? "").startsWith("runs/"),
+      ) ||
+      actualFiles.some((artifact) => artifact.path.startsWith("runs/"))
+    ) {
+      fail("PREREGISTRATION_RUN_EVIDENCE_FORBIDDEN");
+    }
+  } else {
+    const preregLedger = await verifyBoundPhaseReceipt(
+      evidenceRoot,
+      request,
+      request.preregistrationReceipt,
+      "preregistration",
+    );
+    if (Date.parse(preregLedger.completedAt) < preregCreatedAt)
+      fail("PREREGISTRATION_LEDGER_CHRONOLOGY_INVALID");
+  }
   return { prereg, index, localSeal, aggregate };
 }
 
-async function verifyBoundCanaryReceipt(evidenceRoot, request, index) {
-  const binding = request.canaryReceipt;
+async function verifyBoundPhaseReceipt(
+  evidenceRoot,
+  request,
+  binding,
+  expectedPhase,
+) {
   const ledgerPath = await containedRegularFile(evidenceRoot, binding.path);
   if ((await sha256File(ledgerPath)) !== normalizeSha256(binding.sha256))
-    fail("CANARY_RECEIPT_HASH_MISMATCH");
+    fail("PHASE_RECEIPT_HASH_MISMATCH", expectedPhase);
   const ledger = await verifyExternalPhaseLedger(ledgerPath, {
-    phase: "canary",
+    phase: expectedPhase,
     experimentID: request.experimentID,
     behaviorBaseSha: request.source.behaviorBaseSha,
     behaviorBaseTreeSha: request.source.behaviorBaseTreeSha,
@@ -710,10 +764,21 @@ async function verifyBoundCanaryReceipt(evidenceRoot, request, index) {
     binding.behaviorBaseSha !== request.source.behaviorBaseSha ||
     binding.behaviorBaseTreeSha !== request.source.behaviorBaseTreeSha ||
     binding.headSha !== request.source.workflowSourceSha ||
-    binding.treeSha !== request.source.workflowSourceTreeSha
+    binding.treeSha !== request.source.workflowSourceTreeSha ||
+    ledger.preRegistrationSha256 !==
+      normalizeRawSha256(
+        request.evidence.preRegistrationSha256,
+        "bound preregistration SHA-256",
+      )
   ) {
-    fail("CANARY_RECEIPT_BINDING_MISMATCH");
+    fail("PHASE_RECEIPT_BINDING_MISMATCH", expectedPhase);
   }
+  return ledger;
+}
+
+async function verifyBoundCanaryReceipt(evidenceRoot, request, index) {
+  const binding = request.canaryReceipt;
+  await verifyBoundPhaseReceipt(evidenceRoot, request, binding, "canary");
   if (
     normalizeRawSha256(
       index.canarySealSha256,
@@ -768,7 +833,97 @@ export async function scanPrivacyAndInventory(root) {
       sha256: sha256Bytes(bytes),
     });
   }
+  await validateCoworldProjectionReceipts(root, inventory);
   return { fileCount: inventory.length, totalBytes, files: inventory };
+}
+
+async function validateCoworldProjectionReceipts(root, inventory) {
+  const runRoots = new Set();
+  for (const entry of inventory) {
+    const match = entry.path.match(
+      /^(runs\/(?:provider-preflight|canary|confirmatory)\/r\d{2}\/(?:A|B|C))\//,
+    );
+    if (match) runRoots.add(match[1]);
+  }
+  const hashes = new Map(inventory.map((entry) => [entry.path, entry.sha256]));
+  for (const runRoot of runRoots) {
+    const receiptPath = `${runRoot}/coworld-bundle-receipt.json`;
+    const receipt = await readJsonFile(path.join(root, receiptPath));
+    exactKeys(
+      receipt,
+      [
+        "schemaVersion",
+        "authority",
+        "downloadedAt",
+        "xpRequestID",
+        "episodeRequestID",
+        "jobID",
+        "episodeID",
+        "outerBundleSha256",
+        "members",
+        "projections",
+      ],
+      "COWORLD_BUNDLE_RECEIPT_SCHEMA_INVALID",
+    );
+    if (
+      receipt.schemaVersion !== 2 ||
+      receipt.authority !== "coworld-authenticated-bundle-projection-v1" ||
+      !Number.isFinite(Date.parse(receipt.downloadedAt)) ||
+      [
+        receipt.xpRequestID,
+        receipt.episodeRequestID,
+        receipt.jobID,
+        receipt.episodeID,
+      ].some((value) => !SAFE_ID.test(value)) ||
+      !Array.isArray(receipt.members) ||
+      receipt.members.length < 1
+    ) {
+      fail("COWORLD_BUNDLE_RECEIPT_IDENTITY_INVALID", receiptPath);
+    }
+    normalizeRawSha256(
+      receipt.outerBundleSha256,
+      "Coworld outer bundle SHA-256",
+    );
+    const memberPaths = new Set();
+    for (const member of receipt.members) {
+      exactKeys(
+        member,
+        ["path", "bytes", "sha256"],
+        "COWORLD_BUNDLE_MEMBER_SCHEMA_INVALID",
+      );
+      if (
+        !safeRelativePath(member.path) ||
+        memberPaths.has(member.path) ||
+        !Number.isSafeInteger(member.bytes) ||
+        member.bytes < 0
+      ) {
+        fail("COWORLD_BUNDLE_MEMBER_INVALID", receiptPath);
+      }
+      normalizeRawSha256(member.sha256, "Coworld bundle member SHA-256");
+      memberPaths.add(member.path);
+    }
+    exactKeys(
+      receipt.projections,
+      ["episodeResultsSha256", "gameEvidenceSha256", "commandReceiptsSha256"],
+      "COWORLD_BUNDLE_PROJECTION_SCHEMA_INVALID",
+    );
+    for (const [field, suffix] of [
+      ["episodeResultsSha256", "episode-results.json"],
+      ["gameEvidenceSha256", "game-evidence.jsonl"],
+      ["commandReceiptsSha256", "command-receipts.json"],
+    ]) {
+      const actual = hashes.get(`${runRoot}/${suffix}`);
+      if (
+        actual === undefined ||
+        normalizeSha256(receipt.projections[field], field) !== actual
+      ) {
+        fail(
+          "COWORLD_BUNDLE_PROJECTION_HASH_MISMATCH",
+          `${receiptPath}:${field}`,
+        );
+      }
+    }
+  }
 }
 
 function allowedEvidencePath(filePath) {
@@ -788,6 +943,13 @@ function inspectJsonPrivacy(value, filePath) {
   if (!isRecord(value)) return;
   for (const [key, item] of Object.entries(value)) {
     const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (
+      key === "rawProviderOutputRecordCount" &&
+      Number.isSafeInteger(item) &&
+      item >= 0
+    ) {
+      continue;
+    }
     if (
       FORBIDDEN_PRIVACY_KEYS.some((forbidden) => normalized.includes(forbidden))
     )
@@ -853,7 +1015,15 @@ export async function buildBundle({
     request,
     verifierAggregatePath,
   });
+  const normalizedCreatedAt = isoTimestamp(createdAt, "createdAt");
+  if (Date.parse(normalizedCreatedAt) < Date.parse(bindings.prereg.createdAt))
+    fail("SEAL_BEFORE_PREREGISTRATION");
   const inventory = await scanPrivacyAndInventory(evidenceRoot);
+  if (
+    request.phase === "preregistration" &&
+    inventory.files.some((entry) => entry.path.startsWith("runs/"))
+  )
+    fail("PREREGISTRATION_RUN_EVIDENCE_FORBIDDEN");
   await fs.mkdir(outputRoot, { recursive: false, mode: 0o700 });
   await copyInventory(
     path.resolve(evidenceRoot),
@@ -880,7 +1050,7 @@ export async function buildBundle({
     artifactKind: "commander-xp-external-seal-bundle",
     experimentID: request.experimentID,
     phase: request.phase,
-    createdAt: isoTimestamp(createdAt, "createdAt"),
+    createdAt: normalizedCreatedAt,
     workflow: {
       repository: sourceMetadata.repository.full_name,
       runID: positiveInteger(process.env.GITHUB_RUN_ID, "GITHUB_RUN_ID"),
@@ -908,6 +1078,10 @@ export async function buildBundle({
       ),
       localSealSha256: normalizeSha256(request.evidence.localSealSha256),
       aggregateSha256: normalizeSha256(request.evidence.aggregateSha256),
+      preregistrationReceiptSha256:
+        request.preregistrationReceipt === null
+          ? null
+          : normalizeSha256(request.preregistrationReceipt.sha256),
       canaryReceiptSha256:
         request.canaryReceipt === null
           ? null
@@ -995,9 +1169,7 @@ export async function verifyBundle(root, expected = {}) {
   if (
     manifest.schemaVersion !== 1 ||
     manifest.artifactKind !== "commander-xp-external-seal-bundle" ||
-    !["provider-preflight", "canary", "confirmatory"].includes(
-      manifest.phase,
-    ) ||
+    !PHASES.has(manifest.phase) ||
     !SAFE_ID.test(manifest.experimentID)
   ) {
     fail("BUNDLE_MANIFEST_IDENTITY_INVALID");
@@ -1090,6 +1262,10 @@ async function verifyBundleRequestBinding(root, manifest) {
     localSealFileSha256: normalizeSha256(request.evidence.localSealFileSha256),
     localSealSha256: normalizeSha256(request.evidence.localSealSha256),
     aggregateSha256: normalizeSha256(request.evidence.aggregateSha256),
+    preregistrationReceiptSha256:
+      request.preregistrationReceipt === null
+        ? null
+        : normalizeSha256(request.preregistrationReceipt.sha256),
     canaryReceiptSha256:
       request.canaryReceipt === null
         ? null
@@ -1101,6 +1277,8 @@ async function verifyBundleRequestBinding(root, manifest) {
     localSealFileSha256: manifest.evidence.localSealFileSha256,
     localSealSha256: manifest.evidence.localSealSha256,
     aggregateSha256: manifest.evidence.aggregateSha256,
+    preregistrationReceiptSha256:
+      manifest.evidence.preregistrationReceiptSha256,
     canaryReceiptSha256: manifest.evidence.canaryReceiptSha256,
   };
   if (
@@ -1168,6 +1346,7 @@ function validateBundleManifest(manifest) {
       "localSealFileSha256",
       "localSealSha256",
       "aggregateSha256",
+      "preregistrationReceiptSha256",
       "canaryReceiptSha256",
     ],
     "BUNDLE_EVIDENCE_SCHEMA_INVALID",
@@ -1177,7 +1356,8 @@ function validateBundleManifest(manifest) {
   for (const [key, value] of Object.entries(manifest.evidence)) {
     if (
       key === "requestPath" ||
-      (key === "canaryReceiptSha256" && value === null)
+      (["preregistrationReceiptSha256", "canaryReceiptSha256"].includes(key) &&
+        value === null)
     )
       continue;
     normalizeSha256(value, `bundle evidence ${key}`);
@@ -1225,6 +1405,13 @@ function validateBundleManifest(manifest) {
     fail("BUNDLE_VERIFIER_SCHEMA_INVALID");
   if (!Array.isArray(manifest.files) || manifest.files.length < 1)
     fail("BUNDLE_FILE_LEDGER_INVALID");
+  if (
+    manifest.phase === "preregistration" &&
+    manifest.files.some((entry) =>
+      String(entry?.path ?? "").startsWith("evidence/runs/"),
+    )
+  )
+    fail("PREREGISTRATION_RUN_EVIDENCE_FORBIDDEN");
   const paths = new Set();
   for (const entry of manifest.files) {
     exactKeys(entry, ["path", "bytes", "sha256"], "BUNDLE_FILE_LEDGER_INVALID");
@@ -1339,6 +1526,9 @@ export async function createExternalReceipt({
   completedAt,
 }) {
   const manifest = await verifyBundle(bundleRoot);
+  const normalizedCompletedAt = isoTimestamp(completedAt, "completedAt");
+  if (Date.parse(normalizedCompletedAt) < Date.parse(manifest.createdAt))
+    fail("RECEIPT_BEFORE_BUNDLE");
   const metadata = await readJsonFile(bundleArtifactMetadataPath);
   const expectedArtifact = {
     artifactID: positiveInteger(
@@ -1374,7 +1564,7 @@ export async function createExternalReceipt({
     status: "sealed-integrity-only-performance-unauthorized",
     experimentID: manifest.experimentID,
     phase: manifest.phase,
-    completedAt: isoTimestamp(completedAt, "completedAt"),
+    completedAt: normalizedCompletedAt,
     repository: metadata.repository.full_name,
     workflow: {
       sourceSha: manifest.source.workflowSourceSha,
@@ -1398,6 +1588,8 @@ export async function createExternalReceipt({
       localSealFileSha256: manifest.evidence.localSealFileSha256,
       localSealSha256: manifest.evidence.localSealSha256,
       aggregateSha256: manifest.evidence.aggregateSha256,
+      preregistrationReceiptSha256:
+        manifest.evidence.preregistrationReceiptSha256,
       canaryReceiptSha256: manifest.evidence.canaryReceiptSha256,
       treeDiffSha256: manifest.source.treeDiffSha256,
       privacyInventorySha256: manifest.privacy.inventorySha256,
@@ -1447,7 +1639,7 @@ export async function verifyExternalReceipt(filePath, expected = {}) {
     receipt.artifactKind !== "commander-xp-external-seal-receipt" ||
     receipt.status !== "sealed-integrity-only-performance-unauthorized" ||
     !SAFE_ID.test(receipt.experimentID) ||
-    !["provider-preflight", "canary", "confirmatory"].includes(receipt.phase) ||
+    !PHASES.has(receipt.phase) ||
     receipt.integrityVerified !== true ||
     receipt.experimentUsable !== false ||
     receipt.performanceClaimAuthorized !== false ||
@@ -1490,6 +1682,7 @@ export async function verifyExternalReceipt(filePath, expected = {}) {
       "localSealFileSha256",
       "localSealSha256",
       "aggregateSha256",
+      "preregistrationReceiptSha256",
       "canaryReceiptSha256",
       "treeDiffSha256",
       "privacyInventorySha256",
@@ -1541,6 +1734,9 @@ export async function createExternalPhaseLedger({
     experimentID: manifest.experimentID,
     phase: manifest.phase,
   });
+  const normalizedCompletedAt = isoTimestamp(completedAt, "completedAt");
+  if (Date.parse(normalizedCompletedAt) < Date.parse(receipt.completedAt))
+    fail("LEDGER_BEFORE_RECEIPT");
   const metadata = await readJsonFile(receiptArtifactMetadataPath);
   const expectedArtifact = {
     artifactID: positiveInteger(
@@ -1602,7 +1798,7 @@ export async function createExternalPhaseLedger({
     headSha: manifest.source.workflowSourceSha,
     treeSha: manifest.source.workflowSourceTreeSha,
     phase: manifest.phase,
-    completedAt: isoTimestamp(completedAt, "completedAt"),
+    completedAt: normalizedCompletedAt,
     evidenceArtifact: {
       id: String(receipt.bundleArtifact.artifactID),
       digest: normalizeSha256(receipt.bundleArtifact.artifactDigest),
@@ -1725,7 +1921,7 @@ export async function verifyExternalPhaseLedger(filePath, expected = {}) {
     ledger.attempt < 1 ||
     !SHA1.test(ledger.headSha) ||
     !SHA1.test(ledger.treeSha) ||
-    !["provider-preflight", "canary", "confirmatory"].includes(ledger.phase) ||
+    !PHASES.has(ledger.phase) ||
     (expected.phase !== undefined && ledger.phase !== expected.phase) ||
     (expected.experimentID !== undefined &&
       ledger.experimentID !== expected.experimentID) ||

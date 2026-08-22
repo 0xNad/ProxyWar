@@ -79,9 +79,11 @@ test("workflow is manual, GitHub-hosted, full-SHA pinned, immutable, and atteste
       .length,
     2,
   );
-  assert.match(workflow, /\.canaryReceipt\.\$\{KIND\}Artifact\.id/);
+  assert.match(workflow, /PRIOR_KEYS=\(preregistrationReceipt\)/);
+  assert.match(workflow, /PRIOR_KEYS=\(preregistrationReceipt canaryReceipt\)/);
+  assert.match(workflow, /\.\$\{PRIOR_KEY\}\.\$\{KIND\}Artifact\.id/);
   assert.match(workflow, /\.expired .* = "false"/);
-  assert.match(workflow, /bound canary artifact is expired/);
+  assert.match(workflow, /bound prior artifact is expired/);
   assert.match(workflow, /commander-xp-terminal-authority-index-v1\.json/);
   assert.match(
     workflow,
@@ -187,27 +189,41 @@ test("tree diff fails closed on dirty, out-of-allowlist, deletion, and symlink",
   );
 });
 
-test("privacy inventory rejects raw provider material, tokens, binary, and links", async (t) => {
+test("privacy inventory seals exact Coworld projections and rejects raw bytes, private material, binary, and links", async (t) => {
   const root = await temporaryDirectory(t);
   const runRoot = path.join(root, "runs", "canary", "r00", "A");
   await fs.mkdir(runRoot, { recursive: true });
   await fs.writeFile(
     path.join(runRoot, "game-evidence.jsonl"),
-    '{"promptSha256":"abc"}\n',
+    '{"promptSha256":"abc","rawProviderOutputRecordCount":1204}\n',
   );
   await fs.writeFile(
-    path.join(runRoot, "episode-results-raw.json"),
+    path.join(runRoot, "episode-results.json"),
     '{"game_id":"game-1","winner_slot":0}\n',
-  );
-  await fs.writeFile(
-    path.join(runRoot, "game-logs-raw.txt"),
-    'COMMANDER_XP_GAME_EVIDENCE {"offeredIDs":["a"]}\n',
   );
   await fs.writeFile(
     path.join(runRoot, "command-receipts.json"),
     '{"schemaVersion":2,"coworldClient":"0.1.42","commands":[]}\n',
   );
+  await writeCoworldBundleReceipt(runRoot);
   assert.equal((await scanPrivacyAndInventory(root)).fileCount, 4);
+
+  await fs.writeFile(path.join(runRoot, "game-logs-raw.txt"), "private\n");
+  await assert.rejects(
+    scanPrivacyAndInventory(root),
+    hasCode("EVIDENCE_PATH_NOT_IN_PROTOCOL_ALLOWLIST"),
+  );
+  await fs.unlink(path.join(runRoot, "game-logs-raw.txt"));
+
+  await fs.writeFile(
+    path.join(runRoot, "episode-results-raw.json"),
+    '{"game_id":"game-1"}\n',
+  );
+  await assert.rejects(
+    scanPrivacyAndInventory(root),
+    hasCode("EVIDENCE_PATH_NOT_IN_PROTOCOL_ALLOWLIST"),
+  );
+  await fs.unlink(path.join(runRoot, "episode-results-raw.json"));
 
   await fs.writeFile(
     path.join(runRoot, "xp-evidence.json"),
@@ -218,19 +234,6 @@ test("privacy inventory rejects raw provider material, tokens, binary, and links
     hasCode("PRIVACY_TEXT_FORBIDDEN"),
   );
   await fs.unlink(path.join(runRoot, "xp-evidence.json"));
-
-  await fs.writeFile(
-    path.join(runRoot, "game-logs-raw.txt"),
-    "private messageText leaked\n",
-  );
-  await assert.rejects(
-    scanPrivacyAndInventory(root),
-    hasCode("PRIVACY_TEXT_FORBIDDEN"),
-  );
-  await fs.writeFile(
-    path.join(runRoot, "game-logs-raw.txt"),
-    'COMMANDER_XP_GAME_EVIDENCE {"offeredIDs":["a"]}\n',
-  );
 
   await fs.writeFile(
     path.join(root, "commander-xp-preregistration-v2.json"),
@@ -259,6 +262,23 @@ test("privacy inventory rejects raw provider material, tokens, binary, and links
   );
   await fs.unlink(path.join(runRoot, "replay.json"));
 
+  const receipt = JSON.parse(
+    await fs.readFile(
+      path.join(runRoot, "coworld-bundle-receipt.json"),
+      "utf8",
+    ),
+  );
+  receipt.projections.gameEvidenceSha256 = "9".repeat(64);
+  await fs.writeFile(
+    path.join(runRoot, "coworld-bundle-receipt.json"),
+    canonicalJson(receipt),
+  );
+  await assert.rejects(
+    scanPrivacyAndInventory(root),
+    hasCode("COWORLD_BUNDLE_PROJECTION_HASH_MISMATCH"),
+  );
+  await writeCoworldBundleReceipt(runRoot);
+
   await fs.symlink("game-evidence.jsonl", path.join(runRoot, "trace.jsonl"));
   await assert.rejects(
     scanPrivacyAndInventory(root),
@@ -280,6 +300,7 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
   const prereg = {
     schemaVersion: 2,
     experimentID,
+    createdAt: "2026-08-22T13:00:00Z",
     identities: {
       behaviorSourceSha: source.behaviorBaseSha,
       behaviorSourceTreeSha: source.behaviorBaseTreeSha,
@@ -341,6 +362,29 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
     runAttempt: 1,
     headSha: source.workflowSourceSha,
   };
+  const preregLedgerPath = path.join(
+    evidenceRoot,
+    "commander-xp-prereg-ledger-v2.json",
+  );
+  const preregLedger = externalLedgerFixture({
+    experimentID,
+    phase: "preregistration",
+    source,
+    sourceArtifact,
+    completedAt: "2026-08-22T13:30:00Z",
+    localSealSha256: "0".repeat(64),
+    preRegistrationSha256: (
+      await sha256File(
+        path.join(evidenceRoot, "commander-xp-preregistration-v2.json"),
+      )
+    ).slice(7),
+  });
+  await fs.writeFile(preregLedgerPath, canonicalJson(preregLedger));
+  const preregistrationReceipt = phaseReceiptBinding(
+    preregLedger,
+    "commander-xp-prereg-ledger-v2.json",
+    await sha256File(preregLedgerPath),
+  );
   const request = {
     schemaVersion: 1,
     experimentID,
@@ -367,6 +411,7 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
         path.join(evidenceRoot, "commander-xp-local-verification-v2.json"),
       ),
     },
+    preregistrationReceipt,
     canaryReceipt: null,
   };
   const authorityRoot = await temporaryDirectory(t);
@@ -380,6 +425,130 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
   const supportRoot = await temporaryDirectory(t);
   const verifierAggregatePath = path.join(supportRoot, "rerun.json");
   await fs.writeFile(verifierAggregatePath, JSON.stringify(aggregate));
+  await verifyEvidenceBindings({
+    evidenceRoot,
+    request,
+    verifierAggregatePath,
+  });
+  const earlyPreregLedger = externalLedgerFixture({
+    experimentID,
+    phase: "preregistration",
+    source,
+    sourceArtifact,
+    completedAt: "2026-08-22T12:59:59Z",
+    localSealSha256: "0".repeat(64),
+    preRegistrationSha256: request.evidence.preRegistrationSha256.slice(7),
+  });
+  await fs.writeFile(preregLedgerPath, canonicalJson(earlyPreregLedger));
+  request.preregistrationReceipt = phaseReceiptBinding(
+    earlyPreregLedger,
+    "commander-xp-prereg-ledger-v2.json",
+    await sha256File(preregLedgerPath),
+  );
+  await assert.rejects(
+    verifyEvidenceBindings({ evidenceRoot, request, verifierAggregatePath }),
+    hasCode("PREREGISTRATION_LEDGER_CHRONOLOGY_INVALID"),
+  );
+  await fs.writeFile(preregLedgerPath, canonicalJson(preregLedger));
+  request.preregistrationReceipt = preregistrationReceipt;
+
+  const preregEvidenceRoot = await temporaryDirectory(t);
+  const preregIndex = { ...index, phase: "preregistration", artifacts: [] };
+  const preregSeal = { ...localSeal, phase: "preregistration" };
+  const preregAggregate = {
+    ...aggregate,
+    phase: "preregistration",
+  };
+  for (const [name, value] of [
+    ["commander-xp-preregistration-v2.json", prereg],
+    ["commander-xp-evidence-index-v2.json", preregIndex],
+    ["commander-xp-evidence-seal-v2.json", preregSeal],
+    ["commander-xp-local-verification-v2.json", preregAggregate],
+  ]) {
+    await fs.writeFile(
+      path.join(preregEvidenceRoot, name),
+      canonicalJson(value),
+    );
+  }
+  const preregRequest = {
+    ...request,
+    phase: "preregistration",
+    preregistrationReceipt: null,
+    canaryReceipt: null,
+    evidence: {
+      preRegistrationPath: "commander-xp-preregistration-v2.json",
+      preRegistrationSha256: await sha256File(
+        path.join(preregEvidenceRoot, "commander-xp-preregistration-v2.json"),
+      ),
+      localIndexPath: "commander-xp-evidence-index-v2.json",
+      localIndexSha256: await sha256File(
+        path.join(preregEvidenceRoot, "commander-xp-evidence-index-v2.json"),
+      ),
+      localSealPath: "commander-xp-evidence-seal-v2.json",
+      localSealFileSha256: await sha256File(
+        path.join(preregEvidenceRoot, "commander-xp-evidence-seal-v2.json"),
+      ),
+      localSealSha256: preregSeal.sealSha256,
+      aggregatePath: "commander-xp-local-verification-v2.json",
+      aggregateSha256: await sha256File(
+        path.join(
+          preregEvidenceRoot,
+          "commander-xp-local-verification-v2.json",
+        ),
+      ),
+    },
+  };
+  const preregVerifierAggregate = await writeSupportJson(t, preregAggregate);
+  const preregAuthorityRoot = await temporaryDirectory(t);
+  await fs.writeFile(
+    path.join(preregAuthorityRoot, SEAL_REQUEST_FILE),
+    canonicalJson(preregRequest),
+  );
+  const loadedPrereg = await loadAndVerifySealRequest(
+    preregAuthorityRoot,
+    await sha256File(path.join(preregAuthorityRoot, SEAL_REQUEST_FILE)),
+  );
+  assert.equal(loadedPrereg.request.phase, "preregistration");
+  await verifyEvidenceBindings({
+    evidenceRoot: preregEvidenceRoot,
+    request: preregRequest,
+    verifierAggregatePath: preregVerifierAggregate,
+  });
+  preregIndex.artifacts.push({ path: "runs/canary/r00/A/xp-evidence.json" });
+  await fs.writeFile(
+    path.join(preregEvidenceRoot, "commander-xp-evidence-index-v2.json"),
+    canonicalJson(preregIndex),
+  );
+  preregRequest.evidence.localIndexSha256 = await sha256File(
+    path.join(preregEvidenceRoot, "commander-xp-evidence-index-v2.json"),
+  );
+  await assert.rejects(
+    verifyEvidenceBindings({
+      evidenceRoot: preregEvidenceRoot,
+      request: preregRequest,
+      verifierAggregatePath: preregVerifierAggregate,
+    }),
+    hasCode("PREREGISTRATION_RUN_EVIDENCE_FORBIDDEN"),
+  );
+  preregIndex.artifacts = [];
+  await fs.writeFile(
+    path.join(preregEvidenceRoot, "commander-xp-evidence-index-v2.json"),
+    canonicalJson(preregIndex),
+  );
+  preregRequest.evidence.localIndexSha256 = await sha256File(
+    path.join(preregEvidenceRoot, "commander-xp-evidence-index-v2.json"),
+  );
+  const hiddenRun = path.join(preregEvidenceRoot, "runs", "canary", "r00", "A");
+  await fs.mkdir(hiddenRun, { recursive: true });
+  await fs.writeFile(path.join(hiddenRun, "xp-evidence.json"), "{}\n");
+  await assert.rejects(
+    verifyEvidenceBindings({
+      evidenceRoot: preregEvidenceRoot,
+      request: preregRequest,
+      verifierAggregatePath: preregVerifierAggregate,
+    }),
+    hasCode("PREREGISTRATION_RUN_EVIDENCE_FORBIDDEN"),
+  );
   const metadata = artifactMetadata(sourceArtifact, source.workflowSourceSha);
   await assert.rejects(
     verifyArtifactMetadata(
@@ -423,7 +592,7 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
   });
   assert.equal(manifest.verifier.externalSealRequired, true);
   assert.equal(manifest.verifier.experimentUsable, false);
-  assert.equal(manifest.files.length, 4);
+  assert.equal(manifest.files.length, 5);
   assert.ok(await fs.stat(path.join(outputRoot, BUNDLE_MANIFEST_FILE)));
 
   await fs.writeFile(
@@ -586,6 +755,10 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
   ]) {
     await fs.writeFile(path.join(confirmRoot, name), canonicalJson(value));
   }
+  await fs.copyFile(
+    preregLedgerPath,
+    path.join(confirmRoot, "commander-xp-prereg-ledger-v2.json"),
+  );
   await fs.copyFile(ledgerPath, path.join(confirmRoot, canaryBinding.path));
   const confirmRequest = {
     ...request,
@@ -644,6 +817,7 @@ test("seal request hash and exact schema reject substitution and extra fields", 
     sourceArtifact: {},
     source: {},
     evidence: {},
+    preregistrationReceipt: null,
     canaryReceipt: null,
     unexpected: true,
   };
@@ -661,6 +835,113 @@ test("seal request hash and exact schema reject substitution and extra fields", 
     hasCode("SEAL_REQUEST_SCHEMA_INVALID"),
   );
 });
+
+async function writeCoworldBundleReceipt(runRoot) {
+  const projection = async (name) =>
+    (await sha256File(path.join(runRoot, name))).slice(7);
+  const receipt = {
+    schemaVersion: 2,
+    authority: "coworld-authenticated-bundle-projection-v1",
+    downloadedAt: "2026-08-22T13:30:00Z",
+    xpRequestID: "xreq_11111111-1111-4111-8111-111111111111",
+    episodeRequestID: "ereq_22222222-2222-4222-8222-222222222222",
+    jobID: "33333333-3333-4333-8333-333333333333",
+    episodeID: "44444444-4444-4444-8444-444444444444",
+    outerBundleSha256: "5".repeat(64),
+    members: [
+      { path: "episode/results.json", bytes: 42, sha256: "6".repeat(64) },
+      { path: "game/logs.txt", bytes: 84, sha256: "7".repeat(64) },
+    ],
+    projections: {
+      episodeResultsSha256: await projection("episode-results.json"),
+      gameEvidenceSha256: await projection("game-evidence.jsonl"),
+      commandReceiptsSha256: await projection("command-receipts.json"),
+    },
+  };
+  await fs.writeFile(
+    path.join(runRoot, "coworld-bundle-receipt.json"),
+    canonicalJson(receipt),
+  );
+}
+
+function externalLedgerFixture({
+  experimentID,
+  phase,
+  source,
+  sourceArtifact,
+  completedAt,
+  localSealSha256,
+  preRegistrationSha256,
+}) {
+  const body = {
+    schemaVersion: 2,
+    authority: "github-actions-attested-ledger-v1",
+    repository: "0xNad/ProxyWar",
+    workflowPath: ".github/workflows/commander-xp-external-seal.yml",
+    workflowID: "777",
+    workflowName: "Commander XP external seal",
+    actor: "0xNad",
+    event: "workflow_dispatch",
+    ref: "refs/heads/main",
+    experimentID,
+    preRegistrationSha256,
+    behaviorBaseSha: source.behaviorBaseSha,
+    behaviorBaseTreeSha: source.behaviorBaseTreeSha,
+    runnerEnvironment: "github-hosted",
+    attestationPolicy: {
+      repository: "0xNad/ProxyWar",
+      signerWorkflow:
+        "0xNad/ProxyWar/.github/workflows/commander-xp-external-seal.yml",
+      sourceRef: "refs/heads/main",
+      sourceDigest: source.workflowSourceSha,
+      signerDigest: source.workflowSourceSha,
+      denySelfHostedRunners: true,
+    },
+    collector: sourceArtifact,
+    runId: "700",
+    attempt: 1,
+    headSha: source.workflowSourceSha,
+    treeSha: source.workflowSourceTreeSha,
+    phase,
+    completedAt,
+    evidenceArtifact: {
+      id: "701",
+      digest: `sha256:${"a".repeat(64)}`,
+      aggregateSha256: "b".repeat(64),
+      attestedSubjectDigest: "c".repeat(64),
+      localSealSha256,
+    },
+    receiptArtifact: {
+      id: "702",
+      digest: `sha256:${"d".repeat(64)}`,
+      receiptSha256: "e".repeat(64),
+      attestedSubjectDigest: "e".repeat(64),
+    },
+  };
+  return {
+    ...body,
+    ledgerSha256: sha256Bytes(Buffer.from(canonicalJson(body))).slice(7),
+  };
+}
+
+function phaseReceiptBinding(ledger, relativePath, fileSha256) {
+  return {
+    path: relativePath,
+    sha256: fileSha256,
+    ledgerSha256: ledger.ledgerSha256,
+    runId: ledger.runId,
+    attempt: ledger.attempt,
+    evidenceArtifact: ledger.evidenceArtifact,
+    receiptArtifact: ledger.receiptArtifact,
+    localSealSha256: ledger.evidenceArtifact.localSealSha256,
+    workflowPath: ledger.workflowPath,
+    experimentID: ledger.experimentID,
+    behaviorBaseSha: ledger.behaviorBaseSha,
+    behaviorBaseTreeSha: ledger.behaviorBaseTreeSha,
+    headSha: ledger.headSha,
+    treeSha: ledger.treeSha,
+  };
+}
 
 function artifactMetadata(
   binding,

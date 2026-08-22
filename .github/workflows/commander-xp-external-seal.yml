@@ -180,36 +180,42 @@ jobs:
             .authenticity.status == "external-seal-receipt-required"
           ' "$RUNNER_TEMP/commander-xp-verification.json" >/dev/null
 
-      - name: Verify the prior canary receipt attestation when confirmatory
+      - name: Verify required prior phase attestations and retained artifacts
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          PHASE=$(jq -r .phase "$RUNNER_TEMP/commander-xp-envelope/authority/commander-xp-external-seal-request-v1.json")
+          REQUEST="$RUNNER_TEMP/commander-xp-envelope/authority/commander-xp-external-seal-request-v1.json"
+          PHASE=$(jq -r .phase "$REQUEST")
           case "$PHASE" in
-            provider-preflight|canary) ;;
-            confirmatory)
-              RECEIPT_PATH=$(jq -r .canaryReceipt.path "$RUNNER_TEMP/commander-xp-envelope/authority/commander-xp-external-seal-request-v1.json")
+            preregistration) PRIOR_KEYS=() ;;
+            provider-preflight|canary) PRIOR_KEYS=(preregistrationReceipt) ;;
+            confirmatory) PRIOR_KEYS=(preregistrationReceipt canaryReceipt) ;;
+            *) exit 1 ;;
+          esac
+          for PRIOR_KEY in "${PRIOR_KEYS[@]}"; do
+              RECEIPT_PATH=$(jq -r ".${PRIOR_KEY}.path" "$REQUEST")
               test -f "$RUNNER_TEMP/commander-xp-envelope/evidence/$RECEIPT_PATH"
               gh attestation verify \
                 "$RUNNER_TEMP/commander-xp-envelope/evidence/$RECEIPT_PATH" \
                 --repo "$GITHUB_REPOSITORY" \
                 --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/commander-xp-external-seal.yml@refs/heads/main" \
+                --source-digest "$SOURCE_SHA" \
+                --signer-digest "$SOURCE_SHA" \
                 --deny-self-hosted-runners
               for KIND in evidence receipt; do
-                ARTIFACT_ID=$(jq -r ".canaryReceipt.${KIND}Artifact.id" "$RUNNER_TEMP/commander-xp-envelope/authority/commander-xp-external-seal-request-v1.json")
-                EXPECTED_DIGEST=$(jq -r ".canaryReceipt.${KIND}Artifact.digest" "$RUNNER_TEMP/commander-xp-envelope/authority/commander-xp-external-seal-request-v1.json")
-                CANARY_RUN_ID=$(jq -r .canaryReceipt.runId "$RUNNER_TEMP/commander-xp-envelope/authority/commander-xp-external-seal-request-v1.json")
-                gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > "$RUNNER_TEMP/canary-$KIND-artifact.json"
-                test "$(jq -r .expired "$RUNNER_TEMP/canary-$KIND-artifact.json")" = "false"
-                test "$(jq -r .workflow_run.id "$RUNNER_TEMP/canary-$KIND-artifact.json")" = "$CANARY_RUN_ID"
-                ACTUAL_DIGEST=$(jq -r .digest "$RUNNER_TEMP/canary-$KIND-artifact.json")
+                ARTIFACT_ID=$(jq -r ".${PRIOR_KEY}.${KIND}Artifact.id" "$REQUEST")
+                EXPECTED_DIGEST=$(jq -r ".${PRIOR_KEY}.${KIND}Artifact.digest" "$REQUEST")
+                PRIOR_RUN_ID=$(jq -r ".${PRIOR_KEY}.runId" "$REQUEST")
+                METADATA="$RUNNER_TEMP/$PRIOR_KEY-$KIND-artifact.json"
+                gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > "$METADATA"
+                test "$(jq -r .expired "$METADATA")" = "false"
+                test "$(jq -r .workflow_run.id "$METADATA")" = "$PRIOR_RUN_ID"
+                ACTUAL_DIGEST=$(jq -r .digest "$METADATA")
                 test "${ACTUAL_DIGEST#sha256:}" = "${EXPECTED_DIGEST#sha256:}"
-                python -c 'import datetime,json,pathlib,sys; artifact=json.loads(pathlib.Path(sys.argv[1]).read_text()); expires=datetime.datetime.fromisoformat(artifact["expires_at"].replace("Z","+00:00")); assert expires > datetime.datetime.now(datetime.timezone.utc), "bound canary artifact is expired"' "$RUNNER_TEMP/canary-$KIND-artifact.json"
+                python -c 'import datetime,json,pathlib,sys; artifact=json.loads(pathlib.Path(sys.argv[1]).read_text()); expires=datetime.datetime.fromisoformat(artifact["expires_at"].replace("Z","+00:00")); assert expires > datetime.datetime.now(datetime.timezone.utc), "bound prior artifact is expired"' "$METADATA"
               done
-              ;;
-            *) exit 1 ;;
-          esac
+          done
 
       - name: Build and self-verify the normalized seal bundle
         id: identity
@@ -229,7 +235,7 @@ jobs:
             > "$RUNNER_TEMP/seal-prepare-result.json"
           PHASE=$(jq -r .phase "$RUNNER_TEMP/seal-prepare-result.json")
           EXPERIMENT_ID=$(jq -r .experimentID "$RUNNER_TEMP/seal-prepare-result.json")
-          [[ "$PHASE" =~ ^(provider-preflight|canary|confirmatory)$ ]]
+          [[ "$PHASE" =~ ^(preregistration|provider-preflight|canary|confirmatory)$ ]]
           [[ "$EXPERIMENT_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$ ]]
           ARTIFACT_NAME="commander-xp-seal-$PHASE-$SOURCE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           {
