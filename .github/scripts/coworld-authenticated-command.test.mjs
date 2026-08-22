@@ -30,6 +30,26 @@ test("runs allowlisted XP reads inside a removed credential home", () => {
   });
 });
 
+test("runs an exact absolute-file XP create without exposing the token", () => {
+  withFakeRuntime(({ env, capture, root }) => {
+    const body = path.join(root, "request.json");
+    fs.writeFileSync(body, "{}\n");
+    const result = spawnSync(
+      process.execPath,
+      [wrapper, "xp-request", "create", body, "--json"],
+      { encoding: "utf8", env },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const lines = fs.readFileSync(capture, "utf8").trim().split("\n");
+    assert.match(
+      lines[1],
+      new RegExp(
+        `^coworld\\|xp-request create ${escapeRegex(body)} --json\\|.+\\|$`,
+      ),
+    );
+  });
+});
+
 test("maps the episode bundle mode to the pinned Python helper without a token", () => {
   withFakeRuntime(({ env, capture, root }) => {
     const output = path.join(root, "bundle.zip");
@@ -51,6 +71,8 @@ test("rejects unsupported and malformed command modes before authentication", ()
   for (const args of [
     ["delete-everything"],
     ["xp-request", "get", "bad", "--json"],
+    ["xp-request", "create", "relative.json", "--json"],
+    ["xp-request", "create", "/etc/outside-runner.json", "--json"],
     ["episode-logs", "ereq_fixture", "--agent", "4", "--artifact"],
     ["commander-xp-episode-bundle", "ereq_fixture", "relative.zip"],
   ]) {
@@ -90,4 +112,8 @@ function withFakeRuntime(callback) {
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+}
+
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

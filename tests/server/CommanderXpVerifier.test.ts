@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from "vitest";
 // declaration file; its own focused test verifies the same exported function.
 import { commanderXpEvalManifest } from "../../coworld-adapter/scripts/prepare-commander-xp-eval-manifest.mjs";
 import { coworldEpisodeIdentity } from "../../coworld-adapter/src/coworld-seed";
+import { buildCommanderXpAuthorityRequest } from "../../src/scripts/ai-agent-commander-xp-authority-request";
 import {
   buildCommanderXpPreRegistration,
   commanderXpProviderPreflightRequestID,
@@ -33,7 +34,7 @@ afterEach(async () => {
 });
 
 describe("Commander XP evidence verifier v2", () => {
-  it("accepts a complete no-run preregistration envelope", async () => {
+  it("accepts a complete no-run preregistration evidence tree before authority upload", async () => {
     const fixture = await buildPreregistrationFixture();
 
     await expect(
@@ -50,6 +51,86 @@ describe("Commander XP evidence verifier v2", () => {
         ],
       }),
     );
+  });
+
+  it("accepts the separately stored authority request after evidence upload", async () => {
+    const fixture = await buildPreregistrationFixture();
+    const authorityPath = path.join(
+      fixture.envelopeRoot,
+      "authority/commander-xp-external-seal-request-v1.json",
+    );
+
+    await expect(
+      verifyCommanderXpEvidence(fixture.evidenceRoot, authorityPath),
+    ).resolves.toMatchObject({
+      integrityVerified: true,
+      experimentUsable: false,
+      phase: "preregistration",
+    });
+  });
+
+  it("builds the authority artifact only after the evidence index and seal exist", async () => {
+    const fixture = await buildPreregistrationFixture();
+    const authorityDirectory = path.join(fixture.envelopeRoot, "authority");
+    const original = JSON.parse(
+      await fs.readFile(
+        path.join(
+          authorityDirectory,
+          "commander-xp-external-seal-request-v1.json",
+        ),
+        "utf8",
+      ),
+    );
+    await fs.rm(authorityDirectory, { recursive: true });
+
+    const built = await buildCommanderXpAuthorityRequest(
+      {
+        schemaVersion: 1,
+        phase: "preregistration",
+        sourceCI: original.sourceCI,
+        sourceArtifact: original.sourceArtifact,
+        sourceAllowlist: original.source.sourceAllowlist,
+        preregistrationReceipt: null,
+        providerPreflightReceipt: null,
+        priorPhaseReceipt: null,
+        canaryReceipt: null,
+      },
+      fixture.evidenceRoot,
+      authorityDirectory,
+    );
+    const request = JSON.parse(await fs.readFile(built.requestPath, "utf8"));
+    expect(request.evidence).toEqual({
+      preRegistrationPath: "commander-xp-preregistration-v2.json",
+      preRegistrationSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      localIndexPath: "commander-xp-evidence-index-v2.json",
+      localIndexSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      localSealPath: "commander-xp-evidence-seal-v2.json",
+      localSealFileSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      localSealSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+    });
+    expect(built.requestSha256).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("rejects extra files in the separate authority artifact", async () => {
+    const fixture = await buildPreregistrationFixture();
+    const authorityPath = path.join(
+      fixture.envelopeRoot,
+      "authority/commander-xp-external-seal-request-v1.json",
+    );
+    await fs.writeFile(
+      path.join(path.dirname(authorityPath), "unexpected.json"),
+      "{}\n",
+      { flag: "wx" },
+    );
+
+    const verification = await verifyCommanderXpEvidence(
+      fixture.evidenceRoot,
+      authorityPath,
+    );
+    expect(verification).toMatchObject({
+      integrityVerified: false,
+      diagnostics: [{ code: "AUTHORITY_TREE_MISMATCH" }],
+    });
   });
 
   it("rejects unindexed run material in a preregistration envelope", async () => {
@@ -80,7 +161,10 @@ describe("Commander XP evidence verifier v2", () => {
     };
     await fs.writeFile(authorityPath, JSON.stringify(authority));
 
-    const verification = await verifyCommanderXpEvidence(fixture.evidenceRoot);
+    const verification = await verifyCommanderXpEvidence(
+      fixture.evidenceRoot,
+      authorityPath,
+    );
     expect(verification).toMatchObject({
       integrityVerified: false,
       experimentUsable: false,
@@ -439,8 +523,6 @@ async function buildPreregistrationFixture(): Promise<{
       localSealPath: "commander-xp-evidence-seal-v2.json",
       localSealFileSha256: sha256(JSON.stringify(seal)),
       localSealSha256: seal.sealSha256,
-      aggregatePath: "commander-xp-preregistration-v2.json",
-      aggregateSha256: sha256(preregText),
     },
     preregistrationReceipt: null,
     providerPreflightReceipt: null,

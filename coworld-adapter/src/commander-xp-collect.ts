@@ -44,7 +44,6 @@ export interface CollectorInput {
   coworldCommandPath: string;
   outputDirectory: string;
   canaryLocalSealSha256: string | null;
-  externalSealRequestPath: string;
   preregistrationLedgerPath?: string;
   providerPreflightLedgerPath?: string;
   canaryLedgerPath?: string;
@@ -73,11 +72,8 @@ export async function collectCommanderXpEvidence(
   if (!(await fs.stat(coworldCommandPath)).isFile()) {
     throw new Error("collector Coworld command wrapper is invalid");
   }
-  await fs.mkdir(envelopeDirectory, { recursive: false });
-  const outputDirectory = path.join(envelopeDirectory, "evidence");
-  const authorityDirectory = path.join(envelopeDirectory, "authority");
-  await fs.mkdir(outputDirectory, { recursive: false });
-  await fs.mkdir(authorityDirectory, { recursive: false });
+  const outputDirectory =
+    await createCollectorEvidenceOutput(envelopeDirectory);
   const preregText = await fs.readFile(
     path.resolve(input.preRegistrationPath),
     "utf8",
@@ -156,11 +152,6 @@ export async function collectCommanderXpEvidence(
   const phaseAuthorityArtifactPaths = await copyCollectorPhaseAuthority(
     input,
     outputDirectory,
-  );
-  await fs.copyFile(
-    path.resolve(input.externalSealRequestPath),
-    path.join(authorityDirectory, "commander-xp-external-seal-request-v1.json"),
-    fs.constants.COPYFILE_EXCL,
   );
   const mapping = exactCollectorRequestMapping(input.requests, planned);
   for (const request of planned) {
@@ -285,6 +276,16 @@ export async function collectCommanderXpEvidence(
     integrityVerified: true,
     experimentUsable: false,
   };
+}
+
+export async function createCollectorEvidenceOutput(
+  requestedOutputDirectory: string,
+): Promise<string> {
+  const outputDirectory = path.resolve(requestedOutputDirectory);
+  await fs.mkdir(outputDirectory, { recursive: false });
+  const evidenceDirectory = path.join(outputDirectory, "evidence");
+  await fs.mkdir(evidenceDirectory, { recursive: false });
+  return evidenceDirectory;
 }
 
 async function collectRun(
@@ -478,7 +479,7 @@ async function collectRun(
       { flag: "wx" },
     );
   }
-  const replay = replayEvidence(
+  const replayEvidence = commanderXpReplayEvidenceProjection(
     replayURL,
     xpEvidence,
     projectedResults,
@@ -486,7 +487,7 @@ async function collectRun(
   );
   await writeJsonExclusive(
     path.join(directory, "replay-evidence.json"),
-    replay.evidence,
+    replayEvidence,
   );
   const zipPath = path.join(directory, "player-artifact.zip.tmp");
   try {
@@ -597,12 +598,12 @@ function normalizedRequestReadback(value: object): Record<string, unknown> {
   };
 }
 
-function replayEvidence(
+export function commanderXpReplayEvidenceProjection(
   replayURL: string,
   xp: Record<string, unknown>,
   projectedResults: Record<string, unknown> | null,
   bytes: Uint8Array,
-): { evidence: Record<string, unknown>; bytes: Uint8Array } {
+): Record<string, unknown> {
   if (bytes.byteLength === 0 || bytes.byteLength > 256 * 1024 * 1024) {
     throw new Error("XP replay byte length is invalid");
   }
@@ -612,7 +613,7 @@ function replayEvidence(
   const config = publicReplayConfig(raw.config);
   const replayResults =
     projectedResults === null ? null : publicReplayResults(raw.results);
-  const evidence = {
+  return {
     schemaVersion: 2,
     xpRequestID: xp.xpRequestID,
     episodeRequestID: xp.episodeRequestID,
@@ -632,7 +633,6 @@ function replayEvidence(
     resultsSha256:
       replayResults === null ? null : sha256Canonical(replayResults),
   };
-  return { evidence, bytes };
 }
 
 function publicReplayConfig(value: unknown): Record<string, unknown> {

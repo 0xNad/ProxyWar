@@ -8,7 +8,9 @@ import type { CommanderXpPlannedRequest } from "../../src/server/agents/Commande
 import {
   buildCollectorNamespaceRegistry,
   collectorPriorLedgerFilename,
+  commanderXpReplayEvidenceProjection,
   copyCollectorPhaseAuthority,
+  createCollectorEvidenceOutput,
   exactCollectorRequestMapping,
 } from "./commander-xp-collect";
 
@@ -23,6 +25,65 @@ afterEach(async () => {
 });
 
 describe("Commander XP collector namespace registry", () => {
+  it("projects replay identity without retaining embedded private artifacts", () => {
+    const raw = new TextEncoder().encode(
+      JSON.stringify({
+        schemaVersion: 1,
+        replayKind: "proxywar-coworld-local-poc",
+        runID: "run-public",
+        matchID: "PWSABCDE",
+        config: {
+          commander_xp_phase: "canary",
+          commander_xp_run_key: "commander-xp-v2/fixture/canary/r00/A",
+          seed: 123,
+          privateProviderTranscript: "must-not-survive",
+        },
+        inlineRunArtifacts: {
+          "match-summary.json": JSON.stringify({
+            rawProviderOutput: "must-not-survive",
+          }),
+        },
+        proxyWarArtifacts: { providerTranscript: "must-not-survive" },
+        spectatorReplay: "must-not-survive",
+      }),
+    );
+    const projection = commanderXpReplayEvidenceProjection(
+      "https://example.invalid/replays/job.replay",
+      {
+        xpRequestID: "xreq_fixture",
+        episodeRequestID: "ereq_fixture",
+        jobID: "job_fixture",
+        episodeID: "episode_fixture",
+        replayPath: "/replays/job.replay",
+        replayURLSha256: "a".repeat(64),
+      },
+      null,
+      raw,
+    );
+    expect(projection).toMatchObject({
+      sourceSchemaVersion: 1,
+      replayKind: "proxywar-coworld-local-poc",
+      runID: "run-public",
+      matchID: "PWSABCDE",
+      config: {
+        commander_xp_phase: "canary",
+        commander_xp_run_key: "commander-xp-v2/fixture/canary/r00/A",
+        seed: 123,
+      },
+      results: null,
+    });
+    expect(JSON.stringify(projection)).not.toContain("must-not-survive");
+  });
+
+  it("creates only an evidence tree before the post-upload authority request exists", async () => {
+    const parent = await temporaryDirectory();
+    const output = path.join(parent, "collector-output");
+    await expect(createCollectorEvidenceOutput(output)).resolves.toBe(
+      path.join(output, "evidence"),
+    );
+    await expect(fs.readdir(output)).resolves.toEqual(["evidence"]);
+  });
+
   it("selects the exact retained predecessor for every evidence phase", () => {
     expect(collectorPriorLedgerFilename("preregistration")).toBeNull();
     expect(collectorPriorLedgerFilename("provider-preflight")).toBe(

@@ -505,6 +505,7 @@ class VerificationFailure extends Error {
 
 export async function verifyCommanderXpEvidence(
   evidenceRoot: string,
+  authorityRequestPath?: string,
 ): Promise<CommanderXpVerification> {
   let sealSha256: string | null = null;
   let phase: CommanderXpEvidencePhase | null = null;
@@ -623,20 +624,16 @@ export async function verifyCommanderXpEvidence(
       evalCoworldManifestText,
       evalCoworldInspectText,
     );
-    const envelopeRoot = await canonicalDirectory(path.dirname(root));
-    if (path.basename(root) !== "evidence") {
-      throw new VerificationFailure("EVIDENCE_ROOT_NOT_ENVELOPED");
-    }
-    const authorityRoot = await canonicalDirectory(
-      path.join(envelopeRoot, "authority"),
-    );
-    const authority = await verifyAuthorityTree(
-      authorityRoot,
-      index.phase,
-      prereg,
-      index,
-      seal,
-    );
+    const authority =
+      authorityRequestPath === undefined
+        ? null
+        : await verifyAuthorityRequestArtifact(
+            authorityRequestPath,
+            index.phase,
+            prereg,
+            index,
+            seal,
+          );
     verifyNamespaceRegistry(index.namespaceRegistry);
     if (index.phase === "preregistration") {
       if (!namespaceRegistryIsEmpty(index.namespaceRegistry)) {
@@ -649,14 +646,16 @@ export async function verifyCommanderXpEvidence(
       "commander-xp-prereg-ledger-v2.json",
     );
     verifyExternalLedger(prereg, preregLedger, "preregistration");
-    await verifyReceiptBinding(
-      root,
-      prereg,
-      authority.preregistrationReceipt,
-      preregLedger,
-      "preregistration",
-      "commander-xp-prereg-ledger-v2.json",
-    );
+    if (authority !== null) {
+      await verifyReceiptBinding(
+        root,
+        prereg,
+        authority.preregistrationReceipt,
+        preregLedger,
+        "preregistration",
+        "commander-xp-prereg-ledger-v2.json",
+      );
+    }
     const providerReceipt =
       index.phase === "provider-preflight"
         ? null
@@ -666,14 +665,16 @@ export async function verifyCommanderXpEvidence(
           );
     if (providerReceipt !== null) {
       verifyExternalLedger(prereg, providerReceipt, "provider-preflight");
-      await verifyReceiptBinding(
-        root,
-        prereg,
-        authority.providerPreflightReceipt,
-        providerReceipt,
-        "provider-preflight",
-        "commander-xp-provider-preflight-ledger-v2.json",
-      );
+      if (authority !== null) {
+        await verifyReceiptBinding(
+          root,
+          prereg,
+          authority.providerPreflightReceipt,
+          providerReceipt,
+          "provider-preflight",
+          "commander-xp-provider-preflight-ledger-v2.json",
+        );
+      }
     }
     const canaryReceipt =
       index.phase === "confirmatory"
@@ -684,14 +685,16 @@ export async function verifyCommanderXpEvidence(
         : null;
     if (canaryReceipt !== null) {
       verifyExternalLedger(prereg, canaryReceipt, "canary");
-      await verifyReceiptBinding(
-        root,
-        prereg,
-        authority.canaryReceipt,
-        canaryReceipt,
-        "canary",
-        "commander-xp-canary-ledger-v2.json",
-      );
+      if (authority !== null) {
+        await verifyReceiptBinding(
+          root,
+          prereg,
+          authority.canaryReceipt,
+          canaryReceipt,
+          "canary",
+          "commander-xp-canary-ledger-v2.json",
+        );
+      }
     }
     const priorReceipt =
       index.phase === "provider-preflight"
@@ -1474,8 +1477,8 @@ async function verifyEvidenceTreeAllowlist(
   }
 }
 
-async function verifyAuthorityTree(
-  authorityRoot: string,
+async function verifyAuthorityRequestArtifact(
+  authorityRequestPath: string,
   phase: CommanderXpEvidencePhase,
   prereg: CommanderXpPreRegistrationV2,
   index: EvidenceIndex,
@@ -1486,11 +1489,14 @@ async function verifyAuthorityTree(
   priorPhaseReceipt: PhaseReceiptBinding | null;
   canaryReceipt: PhaseReceiptBinding | null;
 }> {
+  const requestPath = await canonicalFile(authorityRequestPath);
+  const authorityRoot = await canonicalDirectory(path.dirname(requestPath));
   const files = await fs.readdir(authorityRoot, { withFileTypes: true });
   if (
     files.length !== 1 ||
     !files[0]!.isFile() ||
-    files[0]!.name !== "commander-xp-external-seal-request-v1.json"
+    files[0]!.name !== "commander-xp-external-seal-request-v1.json" ||
+    path.join(authorityRoot, files[0]!.name) !== requestPath
   ) {
     throw new VerificationFailure("AUTHORITY_TREE_MISMATCH");
   }
@@ -1572,8 +1578,6 @@ async function verifyAuthorityTree(
       "localSealPath",
       "localSealFileSha256",
       "localSealSha256",
-      "aggregatePath",
-      "aggregateSha256",
     ],
     "AUTHORITY_EVIDENCE_SCHEMA_MISMATCH",
   );
@@ -1584,7 +1588,6 @@ async function verifyAuthorityTree(
     [evidence.preRegistrationPath, evidence.preRegistrationSha256],
     [evidence.localIndexPath, evidence.localIndexSha256],
     [evidence.localSealPath, evidence.localSealFileSha256],
-    [evidence.aggregatePath, evidence.aggregateSha256],
   ] as const;
   for (const [relativePath, expectedSha] of boundFiles) {
     if (
@@ -4194,6 +4197,20 @@ async function canonicalDirectory(requested: string): Promise<string> {
     return real;
   } catch {
     throw new VerificationFailure("ROOT_INVALID");
+  }
+}
+
+async function canonicalFile(requested: string): Promise<string> {
+  try {
+    const absolute = path.resolve(requested);
+    const real = await fs.realpath(absolute);
+    if (!(await fs.stat(real)).isFile()) throw new Error("not file");
+    if ((await fs.lstat(absolute)).isSymbolicLink()) {
+      throw new Error("symlink");
+    }
+    return real;
+  } catch {
+    throw new VerificationFailure("AUTHORITY_REQUEST_INVALID");
   }
 }
 

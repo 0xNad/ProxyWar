@@ -32,10 +32,17 @@ if (!allowedCommands.has(command)) {
 if (
   command === "xp-request" &&
   !(
-    args.length === 3 &&
-    args[0] === "get" &&
-    /^xreq_[A-Za-z0-9-]+$/.test(args[1] ?? "") &&
-    args[2] === "--json"
+    (args.length === 3 &&
+      args[0] === "get" &&
+      /^xreq_[A-Za-z0-9-]+$/.test(args[1] ?? "") &&
+      args[2] === "--json") ||
+    (args.length === 3 &&
+      args[0] === "create" &&
+      typeof args[1] === "string" &&
+      resolve(args[1]) === args[1] &&
+      resolve(args[1]).startsWith(`${runnerTemp}/`) &&
+      args[1].endsWith(".json") &&
+      args[2] === "--json")
   )
 ) {
   throw new Error("authenticated Coworld xp-request mode is malformed");

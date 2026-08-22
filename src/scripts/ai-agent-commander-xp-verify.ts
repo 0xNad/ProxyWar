@@ -6,7 +6,13 @@ import { verifyCommanderXpEvidence } from "../server/agents/CommanderXpVerifier"
 export async function runCommanderXpVerifierCli(
   args: readonly string[],
 ): Promise<number> {
-  if (args.length !== 1 || args[0]?.trim() === "") {
+  const valid =
+    (args.length === 1 && args[0]?.trim() !== "") ||
+    (args.length === 3 &&
+      args[0]?.trim() !== "" &&
+      args[1] === "--authority-request" &&
+      args[2]?.trim() !== "");
+  if (!valid) {
     console.error(
       JSON.stringify({
         schemaVersion: 2,
@@ -18,7 +24,7 @@ export async function runCommanderXpVerifierCli(
     );
     return 2;
   }
-  const verification = await verifyCommanderXpEvidence(args[0]!);
+  const verification = await verifyCommanderXpEvidence(args[0]!, args[2]);
   console.log(JSON.stringify(verification));
   return verification.experimentUsable ? 0 : 1;
 }
