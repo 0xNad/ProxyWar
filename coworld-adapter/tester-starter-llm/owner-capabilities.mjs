@@ -10,6 +10,7 @@ import { createHash } from "node:crypto";
 
 export const OWNER_MESSAGE_MAX_CHARS = 280;
 export const OWNER_SPATIAL_SERIALIZED_MAX_BYTES = 16 * 1024;
+export const OWNER_MINIMAP_SERIALIZED_MAX_BYTES = 2 * 1024;
 export const OWNER_EVIDENCE_MAX_EVENTS_PER_KIND = 64;
 export const SPATIAL_VISIBILITY_MODEL = "global-lockstep-public-map-v1";
 
@@ -351,7 +352,7 @@ export function isWithinOwnerSpatialSerializationCeiling(value) {
   );
 }
 
-function boundedMinimap(minimap) {
+function boundedMinimap(minimap, allowedPlayerIDs, ownPlayerID) {
   if (
     minimap?.schemaVersion !== 1 ||
     minimap.width !== 24 ||
@@ -373,7 +374,9 @@ function boundedMinimap(minimap) {
     if (
       !MINIMAP_GLYPH.test(entry?.glyph ?? "") ||
       !isBoundedVisibleString(entry?.playerID, 200) ||
+      !allowedPlayerIDs.has(entry.playerID) ||
       typeof entry?.isYou !== "boolean" ||
+      entry.isYou !== (entry.playerID === ownPlayerID) ||
       seenGlyphs.has(entry.glyph) ||
       seenPlayerIDs.has(entry.playerID)
     ) {
@@ -387,6 +390,7 @@ function boundedMinimap(minimap) {
       isYou: entry.isYou,
     });
   }
+  if (!legend.some((entry) => entry.isYou)) return null;
   const allowedGlyphs = new Set([".", "~", ...seenGlyphs]);
   if (
     minimap.rows.some((row) =>
@@ -402,10 +406,13 @@ function boundedMinimap(minimap) {
     rows: [...minimap.rows],
     legend,
   };
-  return bounded;
+  return new TextEncoder().encode(JSON.stringify(bounded)).byteLength <=
+    OWNER_MINIMAP_SERIALIZED_MAX_BYTES
+    ? bounded
+    : null;
 }
 
-function boundedSpatialMapInfo(mapInfo) {
+export function boundedSpatialMapInfo(mapInfo) {
   if (
     !isRecord(mapInfo) ||
     !isBoundedVisibleString(mapInfo.name, 120) ||
@@ -620,7 +627,6 @@ function boundedPositionedAssets(positioned, mapInfo, allowedPlayerIDs) {
     return null;
   }
 
-  const seen = new Set();
   const perPlayerStructures = new Map();
   const perPlayerWarships = new Map();
   const parse = (items, kinds, perPlayer) => {
@@ -643,9 +649,6 @@ function boundedPositionedAssets(positioned, mapInfo, allowedPlayerIDs) {
       ) {
         return null;
       }
-      const key = `${asset.ownerPlayerID}\u0000${asset.type}\u0000${asset.tile}`;
-      if (seen.has(key)) return null;
-      seen.add(key);
       const count = (perPlayer.get(asset.ownerPlayerID) ?? 0) + 1;
       if (count > 8) return null;
       perPlayer.set(asset.ownerPlayerID, count);
@@ -730,6 +733,8 @@ export function boundedSpatialV1(observation) {
   )
     return null;
   const rivals = [];
+  const ownPlayerID = observation?.ownState?.playerID;
+  if (!isBoundedVisibleString(ownPlayerID, 200)) return null;
   const bearings = new Set([
     "north",
     "northeast",
@@ -802,7 +807,25 @@ export function boundedSpatialV1(observation) {
     });
   }
 
-  const minimap = boundedMinimap(spatial.minimap);
+  const allowedPlayerIDs = new Set([
+    ownPlayerID,
+    ...rivals.map((rival) => rival.playerID),
+  ]);
+  if (
+    allowedPlayerIDs.size !== rivals.length + 1 ||
+    rivals.some((rival) =>
+      (rival.bordersWith ?? []).some(
+        (edge) => !allowedPlayerIDs.has(edge.playerID),
+      ),
+    )
+  ) {
+    return null;
+  }
+  const minimap = boundedMinimap(
+    spatial.minimap,
+    allowedPlayerIDs,
+    ownPlayerID,
+  );
   const bounded = {
     schemaVersion: 1,
     visibilityModel: SPATIAL_VISIBILITY_MODEL,
@@ -876,7 +899,11 @@ export function boundedSpatialV3(observation) {
     allowedPlayerIDs,
   );
   if (!positionedAssets) return null;
-  const minimap = boundedMinimap(spatial.minimap);
+  const minimap = boundedMinimap(
+    spatial.minimap,
+    allowedPlayerIDs,
+    ownPlayerID,
+  );
   const bounded = {
     schemaVersion: 3,
     visibilityModel: SPATIAL_VISIBILITY_MODEL,

@@ -2,7 +2,10 @@ import fs from "fs/promises";
 import path from "path";
 import { describe, expect, it } from "vitest";
 
-import { boundedSpatialV1 } from "../../coworld-adapter/tester-starter-llm/owner-capabilities.mjs";
+import {
+  boundedSpatialMapInfo,
+  boundedSpatialV1,
+} from "../../coworld-adapter/tester-starter-llm/owner-capabilities.mjs";
 
 /**
  * Phase A starter surface: `buildState` in
@@ -46,8 +49,9 @@ async function loadBuildState(): Promise<
   // legacy and economy paths share the stub, so byte-shape comparisons hold.
   return new Function(
     "boundedSpatialV1",
+    "boundedSpatialMapInfo",
     `function avoidActionIDs() { return []; }\n${cleanSrc}\n${buildStateSrc}\nreturn buildState;`,
-  )(boundedSpatialV1) as (
+  )(boundedSpatialV1, boundedSpatialMapInfo) as (
     obs: unknown,
     actions: unknown[],
   ) => Record<string, unknown>;

@@ -28,6 +28,7 @@ async function loadBuildState(): Promise<
   return new Function(
     `function avoidActionIDs() { return []; }
      function boundedSpatialV1() { return null; }
+     function boundedSpatialMapInfo() { return null; }
      ${extractFunction(source, "clean")}
      ${extractFunction(source, "cleanID")}
      ${extractFunction(source, "buildState")}

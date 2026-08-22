@@ -17,6 +17,12 @@ fresh, uniquely named, noncanonical Coworld packages:
   `PROXYWAR_TUNE_SPATIAL_OBSERVATION=1` and
   `PROXYWAR_TUNE_SPATIAL_MINIMAP=1` are set.
 
+Release-contract amendment: the 2026-08-16 design draft proposed unflagged L1
+`mapInfo`, but this train's newer default-OFF/Commander-isolation requirement
+controls. L1 remains behind the parent spatial flag so the OFF arm stays
+byte-identical. In the ON arm every game-backed request, including spawn/no-land,
+must carry `mapInfo`; L2/L3 geometry begins only after land exists.
+
 Generate each local-only, upload-blocked candidate manifest without editing the
 canonical template:
 
@@ -146,3 +152,17 @@ retain evidence that:
 Local serialization, inertness, and starter tests are necessary but are not a
 substitute for fresh certification, hosted smoke, or a real-model matched
 gameplay result. A null or harmful result must be retained and reported.
+
+For the hosted ON-arm policy log, the owner packet's bounded self-report check
+must use the rich/minimap-specific mode; generic `present` can also admit the
+backward-compatible schema `1` and is not sufficient for this release:
+
+```sh
+node owner-evidence-check.mjs --deals=optional --messages=optional \
+  --spatial=rich-v3-minimap owner-evidence/spatial-owner.log
+```
+
+Every present record must be schema `3`, carry the exact visibility model, stay
+within 16 KiB, and report the bounded minimap. This is policy-authored evidence,
+not an external Coworld seal; retain the independently joined request, episode,
+game, replay, package, image, source, and policy identities separately.

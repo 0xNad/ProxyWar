@@ -151,9 +151,13 @@ schema `3`, always requiring exact
 `visibilityModel === "global-lockstep-public-map-v1"`. Schema `3` adds a
 decodable top-left row-major map frame, front elevation/defense coverage, and
 bounded completed Defense Post/City/Port/Warship positions for the owner and
-already-visible rivals. Any malformed rich container is rejected as a whole.
+already-visible rivals. With the parent flag ON, the map frame is also present
+during spawn/no-land requests; L2/L3 geometry begins once the seat owns land.
+Any malformed required rich container is rejected as a whole. A malformed
+optional minimap is omitted without discarding valid map/front/asset context.
 The separately flagged minimap remains a complete bounded 24x12 ownership
-overview. Spatial state can influence only the ranking of currently offered
+overview with an exact 2 KiB normalized ceiling and owner/visible-roster-bound
+legend. Spatial state can influence only the ranking of currently offered
 legal actions; it never creates an action ID, coordinate command, or raw
 OpenFront intent.
 

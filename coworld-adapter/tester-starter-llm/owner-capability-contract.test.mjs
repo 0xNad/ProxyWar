@@ -172,6 +172,7 @@ test("message slot preserves valid raw text and rejects every unsafe boundary", 
 
 function spatialObservation(minimap = undefined) {
   return {
+    ownState: { playerID: "P_SELF" },
     spatial: {
       schemaVersion: 1,
       visibilityModel: SPATIAL_VISIBILITY_MODEL,
@@ -387,6 +388,11 @@ test("minimap is accepted whole or omitted whole without repair", () => {
     rows: Array.from({ length: 12 }, () => "A".repeat(24)),
     legend: [
       {
+        glyph: "S",
+        playerID: "P_SELF",
+        isYou: true,
+      },
+      {
         glyph: "A",
         playerID: "P_A",
         name: "legacy redundant name is not retained",
@@ -396,7 +402,10 @@ test("minimap is accepted whole or omitted whole without repair", () => {
   };
   assert.deepEqual(boundedSpatialV1(spatialObservation(valid)).minimap, {
     ...valid,
-    legend: [{ glyph: "A", playerID: "P_A", isYou: false }],
+    legend: [
+      { glyph: "S", playerID: "P_SELF", isYou: true },
+      { glyph: "A", playerID: "P_A", isYou: false },
+    ],
   });
   for (const minimap of [
     { ...valid, width: 23 },
@@ -409,6 +418,7 @@ test("minimap is accepted whole or omitted whole without repair", () => {
     {
       ...valid,
       legend: [
+        { glyph: "S", playerID: "P_SELF", isYou: true },
         { glyph: "A", playerID: "P_A", isYou: false },
         { glyph: "B", playerID: "P_A", isYou: false },
       ],
@@ -418,11 +428,44 @@ test("minimap is accepted whole or omitted whole without repair", () => {
       rows: ["Z".repeat(24), ...valid.rows.slice(1)],
       legend: [],
     },
+    {
+      ...valid,
+      legend: [
+        { glyph: "S", playerID: "P_HIDDEN", isYou: true },
+        { glyph: "A", playerID: "P_A", isYou: false },
+      ],
+    },
+    {
+      ...valid,
+      legend: [
+        { glyph: "S", playerID: "P_SELF", isYou: false },
+        { glyph: "A", playerID: "P_A", isYou: true },
+      ],
+    },
   ]) {
     const bounded = boundedSpatialV1(spatialObservation(minimap));
     assert.ok(bounded);
     assert.equal("minimap" in bounded, false);
   }
+
+  const oversizedMinimapObservation = spatialObservation();
+  oversizedMinimapObservation.visiblePlayers = Array.from(
+    { length: 63 },
+    (_, index) => ({ playerID: `P_${index}` }),
+  );
+  oversizedMinimapObservation.spatial.minimap = {
+    ...valid,
+    legend: Array.from({ length: 64 }, (_, index) => ({
+      glyph: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@#"[
+        index
+      ],
+      playerID: index === 0 ? "P_SELF" : `P_${index - 1}`,
+      isYou: index === 0,
+    })),
+  };
+  const oversizedMinimap = boundedSpatialV1(oversizedMinimapObservation);
+  assert.ok(oversizedMinimap);
+  assert.equal("minimap" in oversizedMinimap, false);
   assert.equal(
     boundedSpatialV1({
       ...spatialObservation(valid),
@@ -553,6 +596,14 @@ test("rich spatial L3 is exact, bounded, and fails closed atomically", () => {
   tooManyPerPlayer.spatial.positionedAssets.structuresTotal = 9;
   tooManyPerPlayer.spatial.positionedAssets.structuresReturned = 9;
   assert.equal(boundedSpatialV3(tooManyPerPlayer), null);
+
+  const colocated = structuredClone(valid);
+  colocated.spatial.positionedAssets.warships.push(
+    structuredClone(colocated.spatial.positionedAssets.warships[0]),
+  );
+  colocated.spatial.positionedAssets.warshipsTotal = 2;
+  colocated.spatial.positionedAssets.warshipsReturned = 2;
+  assert.equal(boundedSpatialV3(colocated).positionedAssets.warships.length, 2);
 
   const malformedMinimap = structuredClone(valid);
   malformedMinimap.spatial.minimap = {

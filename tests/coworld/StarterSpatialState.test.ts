@@ -1,7 +1,10 @@
 import fs from "fs/promises";
 import path from "path";
 import { describe, expect, it } from "vitest";
-import { boundedSpatialObservation } from "../../coworld-adapter/tester-starter-llm/owner-capabilities.mjs";
+import {
+  boundedSpatialMapInfo,
+  boundedSpatialObservation,
+} from "../../coworld-adapter/tester-starter-llm/owner-capabilities.mjs";
 
 const STARTER_FILE = path.join(
   process.cwd(),
@@ -27,8 +30,9 @@ async function loadBuildState(): Promise<
   const buildState = extractFunction(source, "buildState");
   return new Function(
     "boundedSpatialV1",
+    "boundedSpatialMapInfo",
     `function avoidActionIDs() { return []; }\n${clean}\n${cleanID}\n${buildState}\nreturn buildState;`,
-  )(boundedSpatialObservation) as (
+  )(boundedSpatialObservation, boundedSpatialMapInfo) as (
     obs: Record<string, unknown>,
     actions: unknown[],
   ) => Record<string, unknown>;
@@ -95,6 +99,12 @@ describe("tester-starter-llm spatial state renderer", () => {
               underAttackHere: true,
             },
             bordersWith: [{ playerID: "P_THIRD", sizeClass: "major" }],
+          },
+          {
+            ...BASE_OBSERVATION.visiblePlayers[0],
+            playerID: "P_THIRD",
+            name: "Third",
+            isAlive: false,
           },
         ],
         notes: ["ordinary note is not forwarded", rawBriefing],
@@ -331,18 +341,25 @@ describe("tester-starter-llm spatial state renderer", () => {
               x: 60,
               y: 30,
             },
+            {
+              ownerPlayerID: "P_RIVAL",
+              type: "Warship",
+              tile: 3060,
+              x: 60,
+              y: 30,
+            },
           ],
-          warshipsTotal: 1,
-          warshipsReturned: 1,
+          warshipsTotal: 2,
+          warshipsReturned: 2,
           warshipsTruncated: false,
         },
       },
     };
 
     const state = buildState(observation, []);
+    expect(state.mapInfo).toEqual(mapInfo);
     expect(state.spatial).toMatchObject({
       schemaVersion: 3,
-      mapInfo,
       positionedAssets: observation.spatial.positionedAssets,
     });
     expect((state.rivals as Array<Record<string, unknown>>)[0]).toMatchObject({
@@ -381,5 +398,35 @@ describe("tester-starter-llm spatial state renderer", () => {
         (rejected.rivals as Array<Record<string, unknown>>)[0],
       ).not.toHaveProperty("playerID");
     }
+  });
+
+  it("preserves a validated standalone spawn coordinate frame", async () => {
+    const buildState = await loadBuildState();
+    const mapInfo = {
+      name: "Pangaea",
+      width: 100,
+      height: 80,
+      tileRefEncoding: "row-major-y-width-plus-x",
+      coordinateFrame: {
+        origin: "top_left",
+        xIncreases: "east",
+        yIncreases: "south",
+      },
+    };
+    const state = buildState(
+      { ...BASE_OBSERVATION, phase: "spawn", mapInfo },
+      [],
+    );
+    expect(state.mapInfo).toEqual(mapInfo);
+    expect(state).not.toHaveProperty("spatial");
+
+    const malformed = structuredClone(mapInfo);
+    malformed.coordinateFrame.origin = "bottom_left";
+    expect(
+      buildState(
+        { ...BASE_OBSERVATION, phase: "spawn", mapInfo: malformed },
+        [],
+      ),
+    ).not.toHaveProperty("mapInfo");
   });
 });

@@ -297,6 +297,9 @@ coordinate-frame, terrain-front, and positioned-public-asset layers:
     "visibilityModel": "global-lockstep-public-map-v1",
     "ownShape": {
       "quadrant": "west",
+      "compactness": "compact",
+      "regionCount": 1,
+      "largestRegionShare": 100,
       "regionAnalysis": "complete",
       "centroidBasis": "largest_region_border",
       "coastShare": 25,
@@ -371,9 +374,19 @@ UTF-8. A malformed coordinate, owner, type, count, cap, or invariant rejects
 the whole schema-3 block rather than being repaired or partially retained.
 
 The optional minimap is still schema `1`, fixed at 24x12, and accepted whole or
-omitted whole; never crop, pad, repair glyphs, or infer hidden tiles. It remains
-an ownership overview, not the later terrain/marker minimap layer. Older
-spatial schema `1` is accepted only as its bounded backward-compatible shape.
+omitted whole; never crop, pad, repair glyphs, or infer hidden tiles. Its
+normalized UTF-8 form is capped at 2 KiB, every legend ID must already be the
+owner or a `visiblePlayers[]` ID, and exactly the owner has `isYou:true`.
+Malformed minimap data omits only that optional child; it does not discard an
+otherwise valid schema-3 map/front/asset block. It remains an ownership
+overview, not the later terrain/marker minimap layer. Older spatial schema `1`
+is accepted only as its bounded backward-compatible shape.
+
+`mapInfo` is bundled behind the parent default-OFF spatial flag for this
+release. Once that flag is ON it is present on every game-backed request,
+including spawn/no-land requests; the `spatial` L2/L3 geometry object begins
+only after the seat owns land. This preserves exact OFF-arm bytes and explicitly
+supersedes the older draft's unflagged-L1 sentence.
 
 Spatial data is context, not authority. It may change only which exact current
 `legalActions[].id` the policy selects. A coordinate, glyph, player ID, or map

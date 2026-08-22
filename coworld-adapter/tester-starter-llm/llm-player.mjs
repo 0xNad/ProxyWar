@@ -22,6 +22,7 @@ import { pathToFileURL } from "node:url";
 import { WebSocket } from "ws";
 import {
   advertisedMessageLimit,
+  boundedSpatialMapInfo,
   boundedSpatialObservation as boundedSpatialV1,
   createOwnerCapabilityEvidenceLogger,
   dealResponseFields,
@@ -246,6 +247,7 @@ function buildState(obs, actions) {
   // for the current no-fog, global-lockstep game contract. An old/unknown
   // spatial schema is omitted from the model state instead of guessed at.
   const boundedSpatial = boundedSpatialV1(obs);
+  const boundedMapInfo = boundedSpatialMapInfo(obs.mapInfo);
   const spatialEnabled = boundedSpatial !== null;
   const spatialRivalByID = new Map(
     (boundedSpatial?.rivals ?? []).map((rival) => [rival.playerID, rival]),
@@ -431,7 +433,6 @@ function buildState(obs, actions) {
     spatial = {
       schemaVersion: boundedSpatial.schemaVersion,
       visibilityModel: boundedSpatial.visibilityModel,
-      ...(boundedSpatial.mapInfo ? { mapInfo: boundedSpatial.mapInfo } : {}),
       ownShape: boundedSpatial.ownShape,
       ...(boundedSpatial.positionedAssets
         ? { positionedAssets: boundedSpatial.positionedAssets }
@@ -470,6 +471,7 @@ function buildState(obs, actions) {
     legalActions: legal,
     ...(econ ? { econ } : {}),
     ...(deals ? { deals } : {}),
+    ...(boundedMapInfo ? { mapInfo: boundedMapInfo } : {}),
     ...(spatial ? { spatial } : {}),
     ...(messages ? { messages } : {}),
   };

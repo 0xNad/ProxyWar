@@ -1,5 +1,6 @@
 export const OWNER_MESSAGE_MAX_CHARS: 280;
 export const OWNER_SPATIAL_SERIALIZED_MAX_BYTES: number;
+export const OWNER_MINIMAP_SERIALIZED_MAX_BYTES: number;
 export const OWNER_EVIDENCE_MAX_EVENTS_PER_KIND: number;
 export const SPATIAL_VISIBILITY_MODEL: "global-lockstep-public-map-v1";
 
@@ -55,6 +56,9 @@ export function messageResponseFields(input: {
 export function isWithinOwnerSpatialSerializationCeiling(
   value: unknown,
 ): boolean;
+export function boundedSpatialMapInfo(
+  mapInfo: unknown,
+): Record<string, unknown> | null;
 export function boundedSpatialV1(
   observation: unknown,
 ): Record<string, unknown> | null;

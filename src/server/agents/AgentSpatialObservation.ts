@@ -146,6 +146,25 @@ export interface SpatialObservationExtension {
 }
 
 /**
+ * L1 public coordinate frame. This is useful during spawn before a seat owns
+ * land, so AgentObservationBuilder emits it independently of the L2/L3
+ * geometry block whenever the parent spatial flag is enabled.
+ */
+export function buildSpatialMapInfo(gameState: Game): AgentSpatialMapInfo {
+  return {
+    name: String(gameState.config().gameConfig().gameMap),
+    width: gameState.width(),
+    height: gameState.height(),
+    tileRefEncoding: "row-major-y-width-plus-x",
+    coordinateFrame: {
+      origin: "top_left",
+      xIncreases: "east",
+      yIncreases: "south",
+    },
+  };
+}
+
+/**
  * Build one immutable read-side geometry snapshot. Callers may share it only
  * inside AgentObservationBuilder.withObservationBatch's synchronous boundary.
  */
@@ -329,17 +348,7 @@ export function buildSpatialObservationExtension(
       .map(({ playerID, sizeClass }) => ({ playerID, sizeClass }));
   }
 
-  const mapInfo: AgentSpatialMapInfo = {
-    name: String(input.gameState.config().gameConfig().gameMap),
-    width: input.gameState.width(),
-    height: input.gameState.height(),
-    tileRefEncoding: "row-major-y-width-plus-x",
-    coordinateFrame: {
-      origin: "top_left",
-      xIncreases: "east",
-      yIncreases: "south",
-    },
-  };
+  const mapInfo = buildSpatialMapInfo(input.gameState);
   const spatial: AgentSpatialObservation = {
     schemaVersion: SPATIAL_SCHEMA_VERSION,
     visibilityModel: SPATIAL_VISIBILITY_MODEL,

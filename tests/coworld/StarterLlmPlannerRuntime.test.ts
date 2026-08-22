@@ -86,6 +86,7 @@ function decisionRequest(requestID: string) {
         observation: {
           phase: "active",
           ownState: {
+            playerID: "P_ME",
             name: "Me",
             tileShare: 0.2,
             troops: 100_000,

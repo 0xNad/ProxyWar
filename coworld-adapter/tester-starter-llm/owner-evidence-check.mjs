@@ -142,7 +142,10 @@ function exactEventSchema(event, file) {
     ) {
       fail(`${file}: malformed message-observation evidence fields`);
     }
-  } else if (typeof event.present !== "boolean") {
+  } else if (
+    typeof event.present !== "boolean" ||
+    (event.present === true && typeof event.minimapPresent !== "boolean")
+  ) {
     fail(`${file}: malformed spatial evidence fields`);
   }
 }
@@ -162,9 +165,13 @@ function exactMessageDigestFields(event) {
 function parseArgs(argv) {
   const spatialArg = argv.find((arg) => arg.startsWith("--spatial="));
   const spatial = spatialArg?.slice("--spatial=".length);
-  if (!new Set(["absent", "present", "either"]).has(spatial)) {
+  if (
+    !new Set(["absent", "present", "rich-v3", "rich-v3-minimap", "either"]).has(
+      spatial,
+    )
+  ) {
     fail(
-      "usage: node owner-evidence-check.mjs --deals=required|optional --messages=required|optional --spatial=absent|present|either LOG [LOG ...]",
+      "usage: node owner-evidence-check.mjs --deals=required|optional --messages=required|optional --spatial=absent|present|rich-v3|rich-v3-minimap|either LOG [LOG ...]",
     );
   }
   const dealsArg = argv.find((arg) => arg.startsWith("--deals="));
@@ -176,7 +183,7 @@ function parseArgs(argv) {
     !new Set(["required", "optional"]).has(messages)
   ) {
     fail(
-      "usage: node owner-evidence-check.mjs --deals=required|optional --messages=required|optional --spatial=absent|present|either LOG [LOG ...]",
+      "usage: node owner-evidence-check.mjs --deals=required|optional --messages=required|optional --spatial=absent|present|rich-v3|rich-v3-minimap|either LOG [LOG ...]",
     );
   }
   const knownOptions = new Set([spatialArg, dealsArg, messagesArg]);
@@ -310,7 +317,7 @@ function spatialChecks(events, required) {
   );
   if (spatial.length === 0) fail("spatial observation evidence is required");
   if (
-    required === "present" &&
+    ["present", "rich-v3", "rich-v3-minimap"].includes(required) &&
     !spatial.some((event) => event.present === true)
   )
     fail("no policy recorded a valid spatial observation");
@@ -319,12 +326,29 @@ function spatialChecks(events, required) {
     !spatial.every((event) => event.present === false)
   )
     fail("canonical social XP unexpectedly contained spatial state");
+  if (
+    ["rich-v3", "rich-v3-minimap"].includes(required) &&
+    !spatial
+      .filter((event) => event.present === true)
+      .every((event) => event.schemaVersion === 3)
+  ) {
+    fail("rich spatial evidence included a non-v3 observation");
+  }
+  if (
+    required === "rich-v3-minimap" &&
+    !spatial
+      .filter((event) => event.present === true)
+      .every((event) => event.minimapPresent === true)
+  ) {
+    fail("a rich v3 policy observation omitted the bounded minimap");
+  }
   for (const event of spatial.filter(
     (candidate) => candidate.present === true,
   )) {
     if (
       ![1, 3].includes(event.schemaVersion) ||
       event.visibilityModel !== "global-lockstep-public-map-v1" ||
+      typeof event.minimapPresent !== "boolean" ||
       !Number.isSafeInteger(event.serializedUTF8Bytes) ||
       event.serializedUTF8Bytes < 1 ||
       event.serializedUTF8Bytes > 16 * 1024

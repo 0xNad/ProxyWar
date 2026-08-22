@@ -51,7 +51,10 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { boundedSpatialObservation } from "../../coworld-adapter/tester-starter-llm/owner-capabilities.mjs";
+import {
+  boundedSpatialMapInfo,
+  boundedSpatialObservation,
+} from "../../coworld-adapter/tester-starter-llm/owner-capabilities.mjs";
 import { SpawnExecution } from "../../src/core/execution/SpawnExecution";
 import type { Game, Player } from "../../src/core/game/Game";
 import { PlayerInfo, PlayerType, UnitType } from "../../src/core/game/Game";
@@ -466,6 +469,7 @@ export async function loadStarterBuildState(): Promise<StarterBuildState> {
   // legacy (message-free) shape happened to touch.
   const factory = new Function(
     "boundedSpatialV1",
+    "boundedSpatialMapInfo",
     `function avoidActionIDs() { return []; }
 ${extract("clean")}
 ${extract("cleanID")}
@@ -474,7 +478,10 @@ ${extract("normalizeDealPolicies")}
 ${extract("buildState")}
 return buildState;`,
   );
-  return factory(boundedSpatialObservation) as StarterBuildState;
+  return factory(
+    boundedSpatialObservation,
+    boundedSpatialMapInfo,
+  ) as StarterBuildState;
 }
 
 export interface ArmMeasurement {

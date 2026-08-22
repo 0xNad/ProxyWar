@@ -125,6 +125,10 @@ schema, coordinates, asset types, or count invariants are ignored fail-closed.
 Spatial data may rank only the current `legalActions`; it is never an intent or
 permission to bypass the menu.
 
+On a spatial-enabled game-backed request, `mapInfo` is also available during
+spawn before the seat owns land. The L2/L3 `spatial` object begins only once
+land geometry exists. Both remain absent when the parent spatial flag is OFF.
+
 > **Spawn placement (active v1):** the first request is one sealed spawn
 > preference round. Every player receives the same bounded menu of
 > quality-floored, mutually compatible `spawn:<tile>` actions and returns

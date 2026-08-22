@@ -151,6 +151,44 @@ describe("spatial observation flags", () => {
     expect(landlessObservation.ownState).not.toBeNull();
     expect(landlessObservation.ownState?.tilesOwned).toBe(0);
     expect(landlessObservation.spatial).toBeUndefined();
+    expect(landlessObservation.mapInfo).toMatchObject({
+      width: game.width(),
+      height: game.height(),
+      tileRefEncoding: "row-major-y-width-plus-x",
+    });
+    const landlessPrompt = promptObservation(
+      new LlmPromptBuilder().build({
+        observation: landlessObservation,
+        legalActions: HOLD_ACTIONS,
+      }),
+    );
+    expect(landlessPrompt.mapInfo).toEqual(landlessObservation.mapInfo);
+    expect(landlessPrompt.spatial).toBeUndefined();
+    const mapInfo = landlessObservation.mapInfo!;
+    for (const [tile, x, y] of [
+      [0, 0, 0],
+      [mapInfo.width - 1, mapInfo.width - 1, 0],
+      [(mapInfo.height - 1) * mapInfo.width, 0, mapInfo.height - 1],
+      [
+        mapInfo.width * mapInfo.height - 1,
+        mapInfo.width - 1,
+        mapInfo.height - 1,
+      ],
+    ] as const) {
+      expect(tile % mapInfo.width).toBe(x);
+      expect(Math.floor(tile / mapInfo.width)).toBe(y);
+      expect(y * mapInfo.width + x).toBe(tile);
+    }
+
+    const noGameObservation = new AgentObservationBuilder().build({
+      agentID: "agent-no-game",
+      clientID: null,
+      username: "No game",
+      profile: "aggressive",
+      gameID: "NO_GAME",
+      turnNumber: 0,
+    });
+    expect(noGameObservation.mapInfo).toBeUndefined();
     expect(spatialObservationEmissionCount()).toBe(2);
   });
 
@@ -228,20 +266,28 @@ describe("spatial observation flags", () => {
     )!.borderWithYou!.terrainBreakdown.plains += 1;
     const badShape = structuredClone(observation);
     badShape.spatial!.ownShape.coastShare = 101;
+    const badTotals = structuredClone(observation);
+    badTotals.spatial!.positionedAssets.structuresTotal =
+      Number.POSITIVE_INFINITY;
     const badPartial = structuredClone(observation);
     const partialSpatial: { positionedAssets?: unknown } = badPartial.spatial!;
     delete partialSpatial.positionedAssets;
     const badMinimap = structuredClone(observation);
     badMinimap.spatial!.minimap!.rows[0] = `?${badMinimap.spatial!.minimap!.rows[0].slice(1)}`;
+    const hiddenLegend = structuredClone(observation);
+    hiddenLegend.spatial!.minimap!.legend[0].playerID = "P_HIDDEN";
+    const wrongSelfLegend = structuredClone(observation);
+    wrongSelfLegend.spatial!.minimap!.legend[0].isYou =
+      !wrongSelfLegend.spatial!.minimap!.legend[0].isYou;
 
-    for (const malformed of [
-      badFrame,
-      badAsset,
-      badTerrain,
-      badShape,
-      badPartial,
-      badMinimap,
-    ]) {
+    for (const [malformed, mapInfoExpected] of [
+      [badFrame, false],
+      [badAsset, true],
+      [badTerrain, true],
+      [badShape, true],
+      [badTotals, true],
+      [badPartial, true],
+    ] as const) {
       const view = promptObservation(
         new LlmPromptBuilder().build({
           observation: malformed,
@@ -254,7 +300,8 @@ describe("spatial observation flags", () => {
         notes: string[];
       };
       expect(view.spatial).toBeUndefined();
-      expect(view.mapInfo).toBeUndefined();
+      if (mapInfoExpected) expect(view.mapInfo).toBeDefined();
+      else expect(view.mapInfo).toBeUndefined();
       expect(
         view.visiblePlayers.some((rival) => "borderWithYou" in rival),
       ).toBe(false);
@@ -262,6 +309,130 @@ describe("spatial observation flags", () => {
         view.notes.some((note) => note.startsWith(SPATIAL_NOTE_PREFIX)),
       ).toBe(false);
     }
+
+    for (const malformedMinimap of [
+      badMinimap,
+      hiddenLegend,
+      wrongSelfLegend,
+    ]) {
+      const minimapView = promptObservation(
+        new LlmPromptBuilder().build({
+          observation: malformedMinimap,
+          legalActions: HOLD_ACTIONS,
+        }),
+      ) as {
+        spatial?: { minimap?: unknown };
+        mapInfo?: unknown;
+        visiblePlayers: Array<Record<string, unknown>>;
+      };
+      expect(minimapView.spatial).toBeDefined();
+      expect(minimapView.spatial?.minimap).toBeUndefined();
+      expect(minimapView.mapInfo).toBeDefined();
+      expect(
+        minimapView.visiblePlayers.some((rival) => "borderWithYou" in rival),
+      ).toBe(true);
+    }
+  });
+
+  it("normalizes the exact public schema and never forwards unknown nested fields", async () => {
+    process.env[SPATIAL_FLAG] = "1";
+    process.env[MINIMAP_FLAG] = "1";
+    const observation = observe(await shapedGame());
+    const sentinel = "PRIVATE_SENTINEL";
+    Object.assign(observation.mapInfo!, { futureMapSecret: sentinel });
+    Object.assign(observation.mapInfo!.coordinateFrame, {
+      futureFrameSecret: sentinel,
+    });
+    Object.assign(observation.spatial!.ownShape, {
+      futureShapeSecret: sentinel,
+    });
+    Object.assign(observation.spatial!.positionedAssets, {
+      futurePrivateUnits: [{ secret: sentinel }],
+    });
+    Object.assign(observation.spatial!.positionedAssets.structures[0], {
+      futureAssetSecret: sentinel,
+    });
+    Object.assign(observation.spatial!.minimap!, {
+      futureMinimapSecret: sentinel,
+    });
+    Object.assign(observation.spatial!.minimap!.legend[0], {
+      futureLegendSecret: sentinel,
+    });
+    const rival = observation.visiblePlayers.find(
+      (player) => player.borderWithYou !== undefined,
+    )!;
+    Object.assign(rival, { futureRivalSecret: sentinel });
+    Object.assign(rival.borderWithYou!, { futureBorderSecret: sentinel });
+    Object.assign(rival.borderWithYou!.terrainBreakdown, {
+      futureTerrainSecret: sentinel,
+    });
+    Object.assign(rival.borderWithYou!.defensePostFrontCoverage, {
+      futureCoverageSecret: sentinel,
+    });
+    Object.assign(rival.bordersWith![0], { futureEdgeSecret: sentinel });
+
+    const prompt = new LlmPromptBuilder().build({
+      observation,
+      legalActions: HOLD_ACTIONS,
+    });
+    const view = promptObservation(prompt) as { spatial?: unknown };
+    expect(view.spatial).toBeDefined();
+    expect(prompt).not.toContain(sentinel);
+    expect(prompt).not.toContain("futurePrivateUnits");
+  });
+
+  it("omits a structurally valid minimap above 2 KiB without dropping rich spatial state", async () => {
+    process.env[SPATIAL_FLAG] = "1";
+    process.env[MINIMAP_FLAG] = "1";
+    const observation = observe(await shapedGame());
+    const originalVisiblePlayers = structuredClone(observation.visiblePlayers);
+    const template = originalVisiblePlayers[0];
+    observation.visiblePlayers = [
+      ...originalVisiblePlayers,
+      ...Array.from({ length: 60 }, (_, index) => ({
+        ...structuredClone(template),
+        playerID: `P_${String(index).padStart(2, "0")}_${"x".repeat(18)}`,
+        bearing: undefined,
+        distanceClass: undefined,
+        borderWithYou: undefined,
+        bordersWith: [],
+      })),
+    ];
+    const glyphs =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@#";
+    observation.spatial!.minimap = {
+      schemaVersion: 1,
+      width: SPATIAL_MINIMAP_WIDTH,
+      height: SPATIAL_MINIMAP_HEIGHT,
+      rows: Array.from({ length: SPATIAL_MINIMAP_HEIGHT }, () =>
+        glyphs[0].repeat(SPATIAL_MINIMAP_WIDTH),
+      ),
+      legend: [
+        {
+          glyph: glyphs[0],
+          playerID: observation.ownState!.playerID,
+          isYou: true,
+        },
+        ...observation.visiblePlayers.map((player, index) => ({
+          glyph: glyphs[index + 1],
+          playerID: player.playerID,
+          isYou: false,
+        })),
+      ],
+    };
+    expect(
+      new TextEncoder().encode(JSON.stringify(observation.spatial!.minimap))
+        .byteLength,
+    ).toBeGreaterThan(2 * 1024);
+
+    const view = promptObservation(
+      new LlmPromptBuilder().build({
+        observation,
+        legalActions: HOLD_ACTIONS,
+      }),
+    ) as { spatial?: { minimap?: unknown } };
+    expect(view.spatial).toBeDefined();
+    expect(view.spatial?.minimap).toBeUndefined();
   });
 
   it("adds only the spatial block, rival fields, and bounded notes in Stage 1", async () => {
@@ -364,20 +535,42 @@ describe("spatial observation flags", () => {
     rival.buildUnit(UnitType.Warship, warshipTile, {
       patrolTile: warshipTile,
     });
+    const unfinishedWarship = rival.buildUnit(
+      UnitType.Warship,
+      game.ref(65, 32),
+      { patrolTile: game.ref(65, 32) },
+    );
+    unfinishedWarship.setUnderConstruction(true);
+    const deletingWarship = rival.buildUnit(
+      UnitType.Warship,
+      game.ref(65, 33),
+      { patrolTile: game.ref(65, 33) },
+    );
+    deletingWarship.markForDeletion();
+    const inactiveWarship = rival.buildUnit(
+      UnitType.Warship,
+      game.ref(65, 34),
+      { patrolTile: game.ref(65, 34) },
+    );
+    (inactiveWarship as unknown as { _active: boolean })._active = false;
+    rival.buildUnit(UnitType.Warship, warshipTile, {
+      patrolTile: warshipTile,
+    });
     rival.buildUnit(UnitType.Factory, game.ref(66, 30), {});
     const unfinished = rival.buildUnit(UnitType.City, game.ref(67, 30), {});
     unfinished.setUnderConstruction(true);
     const deleting = rival.buildUnit(UnitType.Port, game.ref(68, 30), {});
     deleting.markForDeletion();
 
-    const positioned = observe(game).spatial?.positionedAssets;
+    const observation = observe(game);
+    const positioned = observation.spatial?.positionedAssets;
     expect(positioned).toMatchObject({
       analysis: "complete",
       structuresTotal: 3,
       structuresReturned: 3,
       structuresTruncated: false,
-      warshipsTotal: 1,
-      warshipsReturned: 1,
+      warshipsTotal: 2,
+      warshipsReturned: 2,
       warshipsTruncated: false,
     });
     expect(positioned?.structures).toEqual(
@@ -398,15 +591,22 @@ describe("spatial observation flags", () => {
         },
       ]),
     );
-    expect(positioned?.warships).toEqual([
-      {
+    expect(positioned?.warships).toEqual(
+      Array.from({ length: 2 }, () => ({
         ownerPlayerID: "P_A",
         type: UnitType.Warship,
         tile: warshipTile,
         x: 65,
         y: 31,
-      },
-    ]);
+      })),
+    );
+    const promptView = promptObservation(
+      new LlmPromptBuilder().build({
+        observation,
+        legalActions: HOLD_ACTIONS,
+      }),
+    ) as { spatial?: { positionedAssets?: { warships?: unknown[] } } };
+    expect(promptView.spatial?.positionedAssets?.warships).toHaveLength(2);
     expect(JSON.stringify(positioned)).not.toContain("Factory");
     expect(JSON.stringify(positioned)).not.toContain(String(game.ref(67, 30)));
     expect(JSON.stringify(positioned)).not.toContain(String(game.ref(68, 30)));
@@ -448,6 +648,18 @@ describe("spatial observation flags", () => {
       .player("P_AGENT")
       .buildUnit(UnitType.DefensePost, game.ref(55, 20), {});
     duplicatePost.setUnderConstruction(false);
+    const unfinishedPost = game
+      .player("P_AGENT")
+      .buildUnit(UnitType.DefensePost, game.ref(54, 20), {});
+    unfinishedPost.setUnderConstruction(true);
+    const deletingPost = game
+      .player("P_AGENT")
+      .buildUnit(UnitType.DefensePost, game.ref(53, 20), {});
+    deletingPost.markForDeletion();
+    const inactivePost = game
+      .player("P_AGENT")
+      .buildUnit(UnitType.DefensePost, game.ref(52, 20), {});
+    (inactivePost as unknown as { _active: boolean })._active = false;
 
     const border = observe(game).visiblePlayers.find(
       (player) => player.playerID === "P_A",
@@ -555,6 +767,62 @@ describe("spatial observation flags", () => {
     expect(positioned.structures).toHaveLength(48);
     expect(
       positioned.structures.slice(0, 7).map((asset) => asset.ownerPlayerID),
+    ).toEqual(players.map((player) => player.id));
+  });
+
+  it("enforces the independent per-player and global warship caps", async () => {
+    process.env[SPATIAL_FLAG] = "1";
+    const players = Array.from(
+      { length: 7 },
+      (_, index) =>
+        new PlayerInfo(
+          `Fleet ${index}`,
+          PlayerType.Human,
+          `CLNT_FLEET_${index}`,
+          `P_FLEET_${index}`,
+        ),
+    );
+    const game = await setup(
+      "plains",
+      { nations: "disabled", instantBuild: true },
+      players,
+    );
+    for (const [playerIndex, playerInfo] of players.entries()) {
+      conquerRectangle(
+        game,
+        playerInfo.id,
+        5 + playerIndex * 12,
+        5,
+        14 + playerIndex * 12,
+        14,
+      );
+    }
+    while (game.inSpawnPhase()) game.executeNextTick();
+    for (const [playerIndex, player] of game.players().entries()) {
+      for (let index = 0; index < 9; index += 1) {
+        const tile = game.ref(5 + playerIndex * 12 + index, 15);
+        player.buildUnit(UnitType.Warship, tile, { patrolTile: tile });
+      }
+    }
+
+    const positioned = observe(game, players[0]).spatial!.positionedAssets;
+    expect(positioned).toMatchObject({
+      analysis: "capped",
+      warshipsTotal: 63,
+      warshipsReturned: 48,
+      warshipsTruncated: true,
+    });
+    expect(positioned.warships).toHaveLength(48);
+    const counts = new Map<string, number>();
+    for (const asset of positioned.warships) {
+      counts.set(
+        asset.ownerPlayerID,
+        (counts.get(asset.ownerPlayerID) ?? 0) + 1,
+      );
+    }
+    expect([...counts.values()].every((count) => count <= 8)).toBe(true);
+    expect(
+      positioned.warships.slice(0, 7).map((asset) => asset.ownerPlayerID),
     ).toEqual(players.map((player) => player.id));
   });
 

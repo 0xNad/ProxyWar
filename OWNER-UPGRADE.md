@@ -210,6 +210,9 @@ response-contract nesting below are exact and internally consistent:
         "visibilityModel": "global-lockstep-public-map-v1",
         "ownShape": {
           "quadrant": "west",
+          "compactness": "compact",
+          "regionCount": 1,
+          "largestRegionShare": 100,
           "regionAnalysis": "complete",
           "centroidBasis": "largest_region_border",
           "coastShare": 25,
@@ -312,19 +315,31 @@ response-contract nesting below are exact and internally consistent:
 ```
 
 Spatial rows are exactly 12 strings of exactly 24 allowlisted glyphs when the
-minimap child flag is enabled. The implementation rejects/omits the minimap on
-any width, height, row-count, row-width, glyph, legend, or schema mismatch; it
-does not repair a malformed map. Rival spatial relations remain fields on
+minimap child flag is enabled. The normalized minimap must be at most 2 KiB;
+every legend ID must already be the owner or a `visiblePlayers[]` ID, and
+exactly the owner entry has `isYou:true`. The implementation rejects/omits the
+minimap on any width, height, row-count, row-width, glyph, legend, identity,
+byte-cap, or schema mismatch; it does not repair a malformed map. A malformed
+optional minimap does not discard an otherwise valid schema-3 map/front/asset
+block. Rival spatial relations remain fields on
 `observation.visiblePlayers[]` and are bounded by the same visible-player list.
-Each legend entry is exactly `{ glyph, playerID, isYou }`; names remain in
-`observation.ownState.name` and `visiblePlayers[].name`, keyed by the same exact
-player ID, rather than being duplicated into the 2 KiB minimap payload.
+Each legend entry is exactly `{ glyph, playerID, isYou }`; the owner display
+name remains at `observation.username`, while rival names remain in
+`visiblePlayers[].name`, keyed by the same exact player ID, rather than being
+duplicated into the 2 KiB minimap payload.
 The complete normalized spatial object must also serialize to at most 16 KiB of
 UTF-8; a one-byte-over object fails as a whole rather than being truncated.
 Each asset tile must round-trip exactly as `tile = y * width + x`. Only active,
 completed, nondeleted Defense Posts, Cities, Ports, and Warships are admitted;
 lists are capped at eight per visible player and 48 globally with exact totals,
 returned counts, and truncation status.
+
+This release deliberately keeps L1 `mapInfo` behind the parent default-OFF
+`PROXYWAR_TUNE_SPATIAL_OBSERVATION` flag to preserve exact OFF-arm and Commander
+baseline bytes. With that flag ON, every game-backed request receives
+`mapInfo`, including spawn/no-land requests; L2/L3 geometry begins only after
+the seat owns land. This explicitly supersedes the older draft sentence that
+proposed unflagged L1 emission.
 
 The policy reply keeps three independent slots:
 
@@ -515,6 +530,8 @@ uvx --from coworld coworld episode-logs YOUR_MESSAGE_EREQ_ID --agent 0 --mine --
 uvx --from coworld coworld episode-logs YOUR_MESSAGE_EREQ_ID --agent 1 --mine --output owner-evidence/message-slot-1.log
 node owner-evidence-check.mjs --deals=required --messages=optional --spatial=absent owner-evidence/deal-owner.log
 node owner-evidence-check.mjs --deals=optional --messages=required --spatial=absent owner-evidence/message-slot-0.log owner-evidence/message-slot-1.log
+# After an authorized rich-spatial candidate XP:
+node owner-evidence-check.mjs --deals=optional --messages=optional --spatial=rich-v3-minimap owner-evidence/spatial-owner.log
 ```
 
 Each verifier invocation must print one JSON object with `"verdict":"PASS"`.

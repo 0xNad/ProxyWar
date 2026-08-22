@@ -99,9 +99,40 @@ test("owner evidence checker accepts bounded rich spatial provenance", () => {
     minimapPresent: true,
     serializedUTF8Bytes: 8_192,
   });
-  const result = runChecker(events, "present");
+  const result = runChecker(events, "rich-v3-minimap");
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(JSON.parse(result.stdout).spatial, "present");
+  assert.equal(JSON.parse(result.stdout).spatial, "rich-v3-minimap");
+});
+
+test("owner evidence checker rejects incomplete or downgraded rich spatial evidence", () => {
+  for (const mutation of [
+    (event) => delete event.minimapPresent,
+    (event) => {
+      event.minimapPresent = "yes";
+    },
+    (event) => {
+      event.minimapPresent = false;
+    },
+    (event) => {
+      event.schemaVersion = 1;
+    },
+  ]) {
+    const events = validEvents();
+    Object.assign(events[2], {
+      present: true,
+      schemaVersion: 3,
+      visibilityModel: "global-lockstep-public-map-v1",
+      minimapPresent: true,
+      serializedUTF8Bytes: 8_192,
+    });
+    mutation(events[2]);
+    const result = runChecker(events, "rich-v3-minimap");
+    assert.equal(result.status, 1);
+    assert.match(
+      result.stderr,
+      /malformed spatial|bounded minimap|non-v3|provenance/u,
+    );
+  }
 });
 
 test("owner evidence checker accepts exact bounded joined evidence", () => {
