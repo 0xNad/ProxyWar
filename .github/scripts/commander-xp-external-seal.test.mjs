@@ -444,7 +444,6 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
     ["commander-xp-preregistration-v2.json", prereg],
     ["commander-xp-evidence-index-v2.json", index],
     ["commander-xp-evidence-seal-v2.json", localSeal],
-    ["commander-xp-local-verification-v2.json", aggregate],
   ]) {
     await fs.writeFile(path.join(evidenceRoot, name), canonicalJson(value));
   }
@@ -543,10 +542,6 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
         path.join(evidenceRoot, "commander-xp-evidence-seal-v2.json"),
       ),
       localSealSha256: "1".repeat(64),
-      aggregatePath: "commander-xp-local-verification-v2.json",
-      aggregateSha256: await sha256File(
-        path.join(evidenceRoot, "commander-xp-local-verification-v2.json"),
-      ),
     },
     preregistrationReceipt,
     providerPreflightReceipt,
@@ -627,7 +622,6 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
     ["commander-xp-preregistration-v2.json", prereg],
     ["commander-xp-evidence-index-v2.json", preregIndex],
     ["commander-xp-evidence-seal-v2.json", preregSeal],
-    ["commander-xp-local-verification-v2.json", preregAggregate],
   ]) {
     await fs.writeFile(
       path.join(preregEvidenceRoot, name),
@@ -655,13 +649,6 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
         path.join(preregEvidenceRoot, "commander-xp-evidence-seal-v2.json"),
       ),
       localSealSha256: preregSeal.sealSha256,
-      aggregatePath: "commander-xp-local-verification-v2.json",
-      aggregateSha256: await sha256File(
-        path.join(
-          preregEvidenceRoot,
-          "commander-xp-local-verification-v2.json",
-        ),
-      ),
     },
   };
   const preregVerifierAggregate = await writeSupportJson(t, preregAggregate);
@@ -764,29 +751,42 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
   });
   assert.equal(manifest.verifier.externalSealRequired, true);
   assert.equal(manifest.verifier.experimentUsable, false);
-  assert.equal(manifest.files.length, 6);
+  assert.equal(manifest.files.length, 5);
   assert.ok(await fs.stat(path.join(outputRoot, BUNDLE_MANIFEST_FILE)));
+  assert.equal("aggregatePath" in request.evidence, false);
+  assert.equal("aggregateSha256" in request.evidence, false);
 
+  const divergentRerunPath = path.join(supportRoot, "divergent-rerun.json");
   await fs.writeFile(
-    path.join(
-      outputRoot,
-      "evidence",
-      "commander-xp-local-verification-v2.json",
-    ),
-    '{"tampered":true}\n',
+    divergentRerunPath,
+    JSON.stringify({ ...aggregate, downstreamNonce: "changed-after-request" }),
   );
   await assert.rejects(
+    verifyEvidenceBindings({
+      evidenceRoot,
+      request,
+      verifierAggregatePath: divergentRerunPath,
+      boundVerifierAggregatePath: path.join(
+        outputRoot,
+        "authority",
+        "commander-xp-verifier-aggregate-v2.json",
+      ),
+    }),
+    hasCode("VERIFIER_AGGREGATE_RERUN_MISMATCH"),
+  );
+
+  const sealedAggregatePath = path.join(
+    outputRoot,
+    "authority",
+    "commander-xp-verifier-aggregate-v2.json",
+  );
+  const sealedAggregateBytes = await fs.readFile(sealedAggregatePath);
+  await fs.writeFile(sealedAggregatePath, JSON.stringify(aggregate, null, 2));
+  await assert.rejects(
     verifyBundle(outputRoot),
-    hasCode("BUNDLE_FILE_HASH_MISMATCH"),
+    hasCode("BUNDLE_VERIFIER_AGGREGATE_HASH_MISMATCH"),
   );
-  await fs.writeFile(
-    path.join(
-      outputRoot,
-      "evidence",
-      "commander-xp-local-verification-v2.json",
-    ),
-    canonicalJson(aggregate),
-  );
+  await fs.writeFile(sealedAggregatePath, sealedAggregateBytes);
 
   const bundleArtifact = {
     artifactID: 444,
@@ -944,7 +944,6 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
     ["commander-xp-preregistration-v2.json", confirmPrereg],
     ["commander-xp-evidence-index-v2.json", confirmIndex],
     ["commander-xp-evidence-seal-v2.json", confirmSeal],
-    ["commander-xp-local-verification-v2.json", confirmAggregate],
   ]) {
     await fs.writeFile(path.join(confirmRoot, name), canonicalJson(value));
   }
@@ -975,10 +974,6 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
         path.join(confirmRoot, "commander-xp-evidence-seal-v2.json"),
       ),
       localSealSha256: "2".repeat(64),
-      aggregatePath: "commander-xp-local-verification-v2.json",
-      aggregateSha256: await sha256File(
-        path.join(confirmRoot, "commander-xp-local-verification-v2.json"),
-      ),
     },
   };
   const confirmVerifierAggregate = await writeSupportJson(t, confirmAggregate);

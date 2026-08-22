@@ -15,7 +15,10 @@ export const EXTERNAL_RECEIPT_FILE =
   "commander-xp-external-seal-receipt-v1.json";
 export const EXTERNAL_PHASE_LEDGER_FILE =
   "commander-xp-external-phase-ledger-v2.json";
+export const VERIFIER_AGGREGATE_FILE =
+  "commander-xp-verifier-aggregate-v2.json";
 const BUNDLE_REQUEST_PATH = `authority/${SEAL_REQUEST_FILE}`;
+const BUNDLE_VERIFIER_AGGREGATE_PATH = `authority/${VERIFIER_AGGREGATE_FILE}`;
 
 const SHA1 = /^[0-9a-f]{40}$/;
 const SHA256 = /^(?:sha256:)?([0-9a-f]{64})$/;
@@ -40,7 +43,6 @@ const ALLOWED_TOP_LEVEL_EVIDENCE = new Set([
   "eval-coworld-inspect.json",
   "eval-coworld-manifest-v2.json",
   "xp-openapi.sha256",
-  "commander-xp-local-verification-v2.json",
   "commander-xp-prereg-ledger-v2.json",
   "commander-xp-provider-preflight-ledger-v2.json",
   "commander-xp-canary-ledger-v2.json",
@@ -566,8 +568,6 @@ function validateEvidenceBinding(evidence) {
       "localSealPath",
       "localSealFileSha256",
       "localSealSha256",
-      "aggregatePath",
-      "aggregateSha256",
     ],
     "EVIDENCE_BINDING_INVALID",
   );
@@ -575,7 +575,6 @@ function validateEvidenceBinding(evidence) {
     "preRegistrationPath",
     "localIndexPath",
     "localSealPath",
-    "aggregatePath",
   ]) {
     if (!safeRelativePath(evidence[field]))
       fail("EVIDENCE_PATH_INVALID", field);
@@ -585,7 +584,6 @@ function validateEvidenceBinding(evidence) {
     "localIndexSha256",
     "localSealFileSha256",
     "localSealSha256",
-    "aggregateSha256",
   ]) {
     normalizeSha256(evidence[field], field);
   }
@@ -1002,13 +1000,13 @@ export async function verifyEvidenceBindings({
   evidenceRoot,
   request,
   verifierAggregatePath,
+  boundVerifierAggregatePath = null,
 }) {
   const boundFiles = {};
   for (const [pathField, hashField] of [
     ["preRegistrationPath", "preRegistrationSha256"],
     ["localIndexPath", "localIndexSha256"],
     ["localSealPath", "localSealFileSha256"],
-    ["aggregatePath", "aggregateSha256"],
   ]) {
     const absolute = await containedRegularFile(
       evidenceRoot,
@@ -1022,13 +1020,15 @@ export async function verifyEvidenceBindings({
   const prereg = await readJsonFile(boundFiles.preRegistrationPath);
   const index = await readJsonFile(boundFiles.localIndexPath);
   const localSeal = await readJsonFile(boundFiles.localSealPath);
-  const aggregate = await readJsonFile(boundFiles.aggregatePath);
-  const rerunAggregate = await readJsonFile(verifierAggregatePath);
+  const aggregate = await readJsonFile(verifierAggregatePath);
+  if (boundVerifierAggregatePath !== null) {
+    const boundAggregate = await readJsonFile(boundVerifierAggregatePath);
+    if (canonicalJson(aggregate) !== canonicalJson(boundAggregate))
+      fail("VERIFIER_AGGREGATE_RERUN_MISMATCH");
+  }
   const preregCreatedAt = Date.parse(prereg.createdAt ?? "");
   if (!Number.isFinite(preregCreatedAt))
     fail("PREREGISTRATION_CREATED_AT_INVALID");
-  if (canonicalJson(aggregate) !== canonicalJson(rerunAggregate))
-    fail("VERIFIER_AGGREGATE_RERUN_MISMATCH");
   if (
     prereg.experimentID !== request.experimentID ||
     prereg.identities?.behaviorSourceSha !== request.source.behaviorBaseSha ||
@@ -1835,6 +1835,12 @@ export async function buildBundle({
     path.join(outputRoot, BUNDLE_REQUEST_PATH),
     fsConstants.COPYFILE_EXCL,
   );
+  await fs.copyFile(
+    verifierAggregatePath,
+    path.join(outputRoot, BUNDLE_VERIFIER_AGGREGATE_PATH),
+    fsConstants.COPYFILE_EXCL,
+  );
+  await fs.chmod(path.join(outputRoot, BUNDLE_VERIFIER_AGGREGATE_PATH), 0o600);
   const treeDiffPath = path.join(outputRoot, TREE_DIFF_FILE);
   await writeJsonExclusive(treeDiffPath, treeDiff);
   const treeDiffSha256 = await sha256File(treeDiffPath);
@@ -1887,7 +1893,8 @@ export async function buildBundle({
         request.evidence.localSealFileSha256,
       ),
       localSealSha256: normalizeSha256(request.evidence.localSealSha256),
-      aggregateSha256: normalizeSha256(request.evidence.aggregateSha256),
+      aggregatePath: BUNDLE_VERIFIER_AGGREGATE_PATH,
+      aggregateSha256: await sha256File(verifierAggregatePath),
       preregistrationReceiptSha256:
         request.preregistrationReceipt === null
           ? null
@@ -1944,6 +1951,10 @@ async function writeChecksums(root, manifest) {
   const entries = [
     ...manifest.files,
     { path: BUNDLE_REQUEST_PATH, sha256: manifest.evidence.requestSha256 },
+    {
+      path: BUNDLE_VERIFIER_AGGREGATE_PATH,
+      sha256: manifest.evidence.aggregateSha256,
+    },
     { path: TREE_DIFF_FILE, sha256: manifest.source.treeDiffSha256 },
     {
       path: BUNDLE_MANIFEST_FILE,
@@ -1998,7 +2009,13 @@ export async function verifyBundle(root, expected = {}) {
     fail("BUNDLE_MANIFEST_IDENTITY_INVALID");
   }
   validateBundleManifest(manifest);
-  await verifyBundleRequestBinding(root, manifest);
+  const request = await verifyBundleRequestBinding(root, manifest);
+  await verifyEvidenceBindings({
+    evidenceRoot: path.join(root, "evidence"),
+    request,
+    verifierAggregatePath: path.join(root, BUNDLE_VERIFIER_AGGREGATE_PATH),
+    boundVerifierAggregatePath: path.join(root, BUNDLE_VERIFIER_AGGREGATE_PATH),
+  });
   if (
     expected.sourceSha !== undefined &&
     manifest.source.workflowSourceSha !== expected.sourceSha
@@ -2028,6 +2045,7 @@ export async function verifyBundle(root, expected = {}) {
   const expectedPaths = new Set([
     ...manifest.files.map((entry) => entry.path),
     BUNDLE_REQUEST_PATH,
+    BUNDLE_VERIFIER_AGGREGATE_PATH,
     TREE_DIFF_FILE,
     BUNDLE_MANIFEST_FILE,
     BUNDLE_CHECKSUM_FILE,
@@ -2052,6 +2070,11 @@ export async function verifyBundle(root, expected = {}) {
     normalizeSha256(manifest.source.treeDiffSha256)
   )
     fail("BUNDLE_TREE_DIFF_HASH_MISMATCH");
+  if (
+    (await sha256File(path.join(root, BUNDLE_VERIFIER_AGGREGATE_PATH))) !==
+    normalizeSha256(manifest.evidence.aggregateSha256)
+  )
+    fail("BUNDLE_VERIFIER_AGGREGATE_HASH_MISMATCH");
   await verifyChecksumFile(root);
   const privacy = await scanPrivacyAndInventory(path.join(root, "evidence"));
   if (
@@ -2084,7 +2107,6 @@ async function verifyBundleRequestBinding(root, manifest) {
     localIndexSha256: normalizeSha256(request.evidence.localIndexSha256),
     localSealFileSha256: normalizeSha256(request.evidence.localSealFileSha256),
     localSealSha256: normalizeSha256(request.evidence.localSealSha256),
-    aggregateSha256: normalizeSha256(request.evidence.aggregateSha256),
     preregistrationReceiptSha256:
       request.preregistrationReceipt === null
         ? null
@@ -2107,7 +2129,6 @@ async function verifyBundleRequestBinding(root, manifest) {
     localIndexSha256: manifest.evidence.localIndexSha256,
     localSealFileSha256: manifest.evidence.localSealFileSha256,
     localSealSha256: manifest.evidence.localSealSha256,
-    aggregateSha256: manifest.evidence.aggregateSha256,
     preregistrationReceiptSha256:
       manifest.evidence.preregistrationReceiptSha256,
     providerPreflightReceiptSha256:
@@ -2134,6 +2155,7 @@ async function verifyBundleRequestBinding(root, manifest) {
   ) {
     fail("BUNDLE_REQUEST_CROSS_BINDING_MISMATCH");
   }
+  return request;
 }
 
 function validateBundleManifest(manifest) {
@@ -2189,6 +2211,7 @@ function validateBundleManifest(manifest) {
       "localIndexSha256",
       "localSealFileSha256",
       "localSealSha256",
+      "aggregatePath",
       "aggregateSha256",
       "preregistrationReceiptSha256",
       "providerPreflightReceiptSha256",
@@ -2199,9 +2222,12 @@ function validateBundleManifest(manifest) {
   );
   if (manifest.evidence.requestPath !== BUNDLE_REQUEST_PATH)
     fail("BUNDLE_REQUEST_PATH_INVALID");
+  if (manifest.evidence.aggregatePath !== BUNDLE_VERIFIER_AGGREGATE_PATH)
+    fail("BUNDLE_VERIFIER_AGGREGATE_PATH_INVALID");
   for (const [key, value] of Object.entries(manifest.evidence)) {
     if (
       key === "requestPath" ||
+      key === "aggregatePath" ||
       ([
         "preregistrationReceiptSha256",
         "providerPreflightReceiptSha256",

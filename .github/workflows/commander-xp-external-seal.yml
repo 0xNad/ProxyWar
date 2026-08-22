@@ -444,7 +444,8 @@ jobs:
             --evidence-root="$RUNNER_TEMP/verified-bundle/evidence" \
             --seal-request-root="$RUNNER_TEMP/verified-bundle/authority" \
             --expected-request-sha256="$SEAL_REQUEST_SHA256" \
-            --verifier-aggregate="$RUNNER_TEMP/second-verification.json"
+            --verifier-aggregate="$RUNNER_TEMP/second-verification.json" \
+            --bound-verifier-aggregate="$RUNNER_TEMP/verified-bundle/authority/commander-xp-verifier-aggregate-v2.json"
           node .github/scripts/commander-xp-external-seal.mjs verify-bundle \
             --bundle-root="$RUNNER_TEMP/verified-bundle" \
             --repository="$GITHUB_WORKSPACE" \

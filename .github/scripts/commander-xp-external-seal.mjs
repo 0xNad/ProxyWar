@@ -74,6 +74,10 @@ export async function runCommanderXpExternalSealCli(argv, env = process.env) {
       evidenceRoot,
       request,
       verifierAggregatePath: requiredPath(options, "verifier-aggregate"),
+      boundVerifierAggregatePath: requiredPath(
+        options,
+        "bound-verifier-aggregate",
+      ),
     });
     process.stdout.write(
       `${JSON.stringify({ ok: true, experimentID: request.experimentID, phase: request.phase })}\n`,
