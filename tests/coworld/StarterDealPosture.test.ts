@@ -85,6 +85,7 @@ async function loadSelectors(): Promise<{
      ${extractFunction(source, "socialActionNote")}
      ${extractFunction(source, "preferReciprocalAlliance")}
      ${extractFunction(source, "pendingRenewalAction")}
+     ${extractFunction(source, "pendingAllianceRequestAction")}
      ${extractFunction(source, "choose")}
      return {
        choose: (p, actions, obs) => { plan = p; return choose(actions, obs); },

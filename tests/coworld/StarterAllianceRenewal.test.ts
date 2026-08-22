@@ -213,6 +213,7 @@ describe("the entry point actually reciprocates", () => {
           optionalFunction(source, "wouldBreakPromise"),
           extractFunction(source, "preferReciprocalAlliance"),
           extractFunction(source, "pendingRenewalAction"),
+          extractFunction(source, "pendingAllianceRequestAction"),
           extractFunction(source, "chooseAction"),
           "return chooseAction;",
         ].join("\n"),
@@ -270,6 +271,7 @@ describe("the entry point actually reciprocates", () => {
         optionalFunction(source, "wouldBreakPromise"),
         extractFunction(source, "preferReciprocalAlliance"),
         extractFunction(source, "pendingRenewalAction"),
+        extractFunction(source, "pendingAllianceRequestAction"),
         extractFunction(source, "choose"),
         "return choose;",
       ].join("\n"),
@@ -383,18 +385,21 @@ describe("alliance requests are aimed at whoever already asked", () => {
           optionalFunction(source, "wouldBreakPromise"),
           extractFunction(source, "preferReciprocalAlliance"),
           extractFunction(source, "pendingRenewalAction"),
+          extractFunction(source, "pendingAllianceRequestAction"),
           extractFunction(source, "chooseAction"),
           "return chooseAction;",
         ].join("\n"),
       )() as (actions: unknown[], obs: unknown) => { id: string; kind: string };
 
-      // Attack outranks alliance_request in preferredKinds, and a pending
-      // request must NOT change that — otherwise this becomes an appetite change.
+      // A pending incoming request now narrowly replaces the attack the starter
+      // would otherwise choose. Appetite remains unchanged: nobody is asked
+      // unless their request is already pending.
       const withAttack = chooseAction(
         [ATTACK_ACTION, STRANGER, ASKED],
         allianceObs("P_ASKED"),
       );
-      expect(withAttack.kind).toBe("attack");
+      expect(withAttack.kind).toBe("alliance_request");
+      expect(withAttack.id).toBe("alliance_request:P_ASKED");
 
       // With no attack available the seat asks anyway — and now aims correctly.
       const asked = chooseAction([STRANGER, ASKED], allianceObs("P_ASKED"));
