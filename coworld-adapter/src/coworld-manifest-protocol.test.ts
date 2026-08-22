@@ -3,6 +3,8 @@ import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { AGENT_DEGRADATION_CAUSES } from "../../src/server/agents/AgentWireProtocol.ts";
+
 const MANIFEST_NAMES = [
   "coworld_manifest.json",
   "coworld_manifest_ffa10p.json",
@@ -47,6 +49,7 @@ const CANONICAL_RESULT_REQUIRED = [
 const CANONICAL_RESULT_PROPERTIES = [
   "accepted_decision_count",
   "decision_count",
+  "degraded_causes",
   "degraded_count",
   "fallback_count",
   "game_id",
@@ -68,6 +71,46 @@ const CANONICAL_GAME_ID_SCHEMA = {
   type: "string",
   pattern: "^[A-Za-z0-9]{8}$",
 } as const;
+
+const CANONICAL_DEGRADED_CAUSE_KEYS = [
+  ...AGENT_DEGRADATION_CAUSES,
+  "unreported",
+].sort();
+
+const CANONICAL_DEGRADED_CAUSE_COUNT_SCHEMA = {
+  type: "integer",
+  minimum: 0,
+} as const;
+
+const CANONICAL_DEGRADED_CAUSES_SCHEMA = {
+  type: "object",
+  maxProperties: CANONICAL_DEGRADED_CAUSE_KEYS.length,
+  additionalProperties: false,
+  properties: Object.fromEntries(
+    CANONICAL_DEGRADED_CAUSE_KEYS.map((cause) => [
+      cause,
+      CANONICAL_DEGRADED_CAUSE_COUNT_SCHEMA,
+    ]),
+  ),
+};
+
+interface FiniteCauseMapSchema {
+  readonly maxProperties: number;
+  readonly additionalProperties: boolean;
+  readonly properties: Record<string, unknown>;
+}
+
+function structurallyAdmitsCauseMap(
+  schema: FiniteCauseMapSchema,
+  value: Record<string, number>,
+): boolean {
+  const keys = Object.keys(value);
+  return (
+    schema.additionalProperties === false &&
+    keys.length <= schema.maxProperties &&
+    keys.every((key) => Object.hasOwn(schema.properties, key))
+  );
+}
 
 const adapterDirectory = existsSync(resolve(process.cwd(), "coworld"))
   ? process.cwd()
@@ -146,6 +189,33 @@ describe("Coworld manifest spawn-preference protocol", () => {
       );
       expect(resultSchema.properties.seed).toEqual(CANONICAL_SEED_SCHEMA);
       expect(resultSchema.properties.game_id).toEqual(CANONICAL_GAME_ID_SCHEMA);
+      expect(resultSchema.properties.degraded_causes).toEqual(
+        CANONICAL_DEGRADED_CAUSES_SCHEMA,
+      );
+      expect(resultSchema.required).not.toContain("degraded_causes");
+    },
+  );
+
+  it.each(MANIFEST_NAMES)(
+    "%s rejects an adversarial unknown degraded cause key",
+    (manifestName) => {
+      const manifest = JSON.parse(
+        readFileSync(`${manifestDirectory}/${manifestName}`, "utf8"),
+      ) as ManifestProtocolText;
+      const causeSchema = manifest.game.results_schema.properties
+        .degraded_causes as FiniteCauseMapSchema;
+
+      expect(
+        structurallyAdmitsCauseMap(causeSchema, {
+          "plan-rejected": 1,
+          unreported: 2,
+        }),
+      ).toBe(true);
+      expect(
+        structurallyAdmitsCauseMap(causeSchema, {
+          "plan-rejected-ish": 1,
+        }),
+      ).toBe(false);
     },
   );
 });

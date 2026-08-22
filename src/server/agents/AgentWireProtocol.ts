@@ -59,6 +59,8 @@ export const AGENT_DEGRADATION_CAUSES = [
   "plan-timeout",
   /** Self-reported: the planner answered, but its output could not be parsed. */
   "plan-parse",
+  /** Self-reported: the planner answered and parsed, but policy validation refused the content. */
+  "plan-rejected",
   /**
    * Self-reported: the policy's own code failed before it could decide - a
    * reconstruction error, a transport failure to its provider, an unexpected
@@ -109,6 +111,7 @@ const SELF_REPORTED_CAUSES: ReadonlySet<AgentDegradationCause> = new Set([
   "plan-unavailable",
   "plan-timeout",
   "plan-parse",
+  "plan-rejected",
   "policy-error",
 ]);
 

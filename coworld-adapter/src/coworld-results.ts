@@ -3,6 +3,8 @@
 // Extracted from no-docker-coworld-episode.ts (ADAPTER-02): the episode winner
 // must be mapped to a player slot by IDENTITY, never by a display-name substring.
 
+import { normalizeRecordedDegradationCause } from "./coworld-decision-wire";
+
 /** Identity of the episode winner. Game.getWinner() returns Player | Team | null,
  *  and Team is a string label (src/core/game/Game.ts), so a team win is a string. */
 export type WinnerRef =
@@ -80,6 +82,7 @@ export interface CoworldDecisionRecord {
   readonly decisionMetadata?: {
     readonly fallbackUsed?: boolean;
     readonly llmPlannerDegraded?: boolean;
+    readonly degradedCause?: string;
   };
 }
 
@@ -103,15 +106,8 @@ export interface CoworldResults {
   readonly accepted_decision_count: number;
   readonly fallback_count: number;
   readonly degraded_count: number;
-  /**
-   * Deliberately NOT extended with a per-cause breakdown. `degradedCause` (see
-   * AgentWireProtocol) reaches `decisions.jsonl` and the spectator telemetry, which
-   * is what a census reads; adding `degraded_causes` HERE would need every
-   * manifest's `results_schema` amended first, because each sets
-   * `additionalProperties: false` - an unschema'd key would fail hosted result
-   * validation for every episode. Worth doing with the next package build, not as
-   * a side effect of a telemetry change.
-   */
+  /** Per-cause count of degraded decisions; absent/invalid causes are unreported. */
+  readonly degraded_causes: Record<string, number>;
 
   readonly players: Array<{
     slot: number;
@@ -174,6 +170,20 @@ export function coworldResults(input: {
     degraded_count: input.records.filter(
       (record) => record.decisionMetadata?.llmPlannerDegraded === true,
     ).length,
+    degraded_causes: input.records.reduce<Record<string, number>>(
+      (causes, record) => {
+        if (record.decisionMetadata?.llmPlannerDegraded !== true) {
+          return causes;
+        }
+        const cause =
+          normalizeRecordedDegradationCause(
+            record.decisionMetadata.degradedCause,
+          ) ?? "unreported";
+        causes[cause] = (causes[cause] ?? 0) + 1;
+        return causes;
+      },
+      {},
+    ),
     players: input.finalState.players.map((player, slot) => ({
       slot,
       name: input.players[slot]?.name ?? player.username,
