@@ -362,6 +362,40 @@ test("dry-run self-tests staged bytes without changing the target", async () => 
   expect(await readFile(fixture.sentinelPath)).toEqual(before);
 });
 
+test("inspect, dry-run, and install reject an exact-byte sentinel symlink", async () => {
+  const fixture = await temporarySentinel();
+  const sentinelBytes = await readFile(fixture.sentinelPath);
+  const decoyPath = path.join(fixture.directory, "same-byte-decoy.mjs");
+  await writeFile(decoyPath, sentinelBytes, { mode: 0o755 });
+  await rm(fixture.sentinelPath, { force: true });
+  await symlink(decoyPath, fixture.sentinelPath);
+  expect(sha256(await readFile(fixture.sentinelPath))).toBe(
+    sha256(sentinelBytes),
+  );
+
+  await expect(
+    inspectPwLeagueSentinelRoundIntegrity({
+      sentinelPath: fixture.sentinelPath,
+    }),
+  ).rejects.toThrow("sentinelPath must be a regular non-symlink file");
+  await expect(
+    dryRunPwLeagueSentinelRoundIntegrity({
+      sentinelPath: fixture.sentinelPath,
+    }),
+  ).rejects.toThrow("sentinelPath must be a regular non-symlink file");
+  await expect(
+    installPwLeagueSentinelRoundIntegrity(
+      {
+        sentinelPath: fixture.sentinelPath,
+        expectedSentinelSha256: sha256(sentinelBytes),
+        expectedRepositorySha: repositoryHead,
+      },
+      { readIdentity: cleanRepositoryIdentity },
+    ),
+  ).rejects.toThrow("sentinelPath must be a regular non-symlink file");
+  expect((await lstat(fixture.sentinelPath)).isSymbolicLink()).toBe(true);
+});
+
 test("installs with a hash-pinned activation barrier and restores exact prior bytes", async () => {
   const fixture = await temporarySentinel();
   const beforeHash = sha256(fixture.source);
@@ -450,6 +484,36 @@ test("aborts on sentinel or repository drift immediately before activation", asy
   expect(await readFile(repositoryDrift.sentinelPath, "utf8")).toBe(
     repositoryDrift.source,
   );
+});
+
+test("rejects an exact-byte live sentinel symlink before activation and restores dependencies", async () => {
+  const fixture = await temporarySentinel();
+  const previous = await seedPreviousDependencies(fixture);
+  await expect(
+    installPwLeagueSentinelRoundIntegrity(
+      {
+        sentinelPath: fixture.sentinelPath,
+        expectedSentinelSha256: sha256(fixture.source),
+        expectedRepositorySha: repositoryHead,
+      },
+      {
+        readIdentity: cleanRepositoryIdentity,
+        beforeSentinelActivate: async () => {
+          const sameBytes = await readFile(fixture.sentinelPath);
+          const decoyPath = path.join(
+            fixture.directory,
+            "pre-activation-sentinel-decoy.mjs",
+          );
+          await writeFile(decoyPath, sameBytes, { mode: 0o755 });
+          await rm(fixture.sentinelPath, { force: true });
+          await symlink(decoyPath, fixture.sentinelPath);
+        },
+      },
+    ),
+  ).rejects.toThrow("sentinelPath must be a regular non-symlink file");
+  expect((await lstat(fixture.sentinelPath)).isSymbolicLink()).toBe(true);
+  expect(await readFile(fixture.sentinelPath, "utf8")).toBe(fixture.source);
+  await expectExactPreviousDependencies(previous);
 });
 
 test.each([
@@ -679,6 +743,41 @@ test("receipt-bound verify rejects installed hash drift", async () => {
     ),
   ).rejects.toThrow("verify detector hash does not match receipt");
   await writeFile(detectorPath, detectorBytes);
+  await rollbackPwLeagueSentinelRoundIntegrity({
+    receiptPath: installed.receiptPath,
+  });
+});
+
+test("receipt-bound verify rejects an exact-installed-byte sentinel symlink", async () => {
+  const fixture = await temporarySentinel();
+  const installed = await installTemporarySentinel(fixture);
+  const installedBytes = await readFile(fixture.sentinelPath);
+  const installedMode = (await stat(fixture.sentinelPath)).mode & 0o777;
+  const decoyPath = path.join(
+    fixture.directory,
+    "same-installed-byte-decoy.mjs",
+  );
+  await writeFile(decoyPath, installedBytes, { mode: installedMode });
+  await rm(fixture.sentinelPath, { force: true });
+  await symlink(decoyPath, fixture.sentinelPath);
+  expect(sha256(await readFile(fixture.sentinelPath))).toBe(
+    sha256(installedBytes),
+  );
+
+  await expect(
+    verifyPwLeagueSentinelRoundIntegrity(
+      {
+        sentinelPath: fixture.sentinelPath,
+        receiptPath: installed.receiptPath,
+      },
+      { readIdentity: cleanRepositoryIdentity },
+    ),
+  ).rejects.toThrow("sentinelPath must be a regular non-symlink file");
+
+  await rm(fixture.sentinelPath, { force: true });
+  await writeFile(fixture.sentinelPath, installedBytes, {
+    mode: installedMode,
+  });
   await rollbackPwLeagueSentinelRoundIntegrity({
     receiptPath: installed.receiptPath,
   });

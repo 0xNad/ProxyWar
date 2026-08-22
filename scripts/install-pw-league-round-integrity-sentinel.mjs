@@ -93,6 +93,17 @@ async function assertRegularFile(filePath, label) {
   return stat;
 }
 
+async function requiredRegularFileState(filePath, label) {
+  const stat = await assertRegularFile(filePath, label);
+  const bytes = await fs.readFile(filePath);
+  return {
+    exists: true,
+    mode: stat.mode & 0o777,
+    sha256: sha256(bytes),
+    bytes,
+  };
+}
+
 async function assertRegularDirectory(directoryPath, label) {
   const stat = await fs.lstat(directoryPath);
   if (stat.isSymbolicLink() || !stat.isDirectory()) {
@@ -171,14 +182,11 @@ function integrationPaths(sentinelPath) {
 
 async function optionalFileState(filePath) {
   try {
-    const stat = await fs.lstat(filePath);
-    if (stat.isSymbolicLink() || !stat.isFile()) {
-      throw new Error(`${filePath} must be a regular non-symlink file`);
-    }
+    const state = await requiredRegularFileState(filePath, filePath);
     return {
-      exists: true,
-      mode: stat.mode & 0o777,
-      sha256: await fileSha256(filePath),
+      exists: state.exists,
+      mode: state.mode,
+      sha256: state.sha256,
     };
   } catch (error) {
     if (error?.code === "ENOENT") {
@@ -191,11 +199,12 @@ async function optionalFileState(filePath) {
 export async function inspectPwLeagueSentinelRoundIntegrity({ sentinelPath }) {
   assertAbsoluteFilePath(sentinelPath, "sentinelPath");
   const paths = integrationPaths(sentinelPath);
-  const [sentinelSource, detector, adapter] = await Promise.all([
-    fs.readFile(sentinelPath, "utf8"),
+  const [sentinel, detector, adapter] = await Promise.all([
+    requiredRegularFileState(sentinelPath, "sentinelPath"),
     optionalFileState(paths.detector),
     optionalFileState(paths.adapter),
   ]);
+  const sentinelSource = sentinel.bytes.toString("utf8");
   const importWired =
     sentinelSource.includes(SENTINEL_INTEGRATION_IMPORT_BEGIN) &&
     sentinelSource.includes(SENTINEL_INTEGRATION_IMPORT_END) &&
@@ -213,7 +222,7 @@ export async function inspectPwLeagueSentinelRoundIntegrity({ sentinelPath }) {
     issues,
     paths,
     hashes: {
-      sentinel: sha256(sentinelSource),
+      sentinel: sentinel.sha256,
       detector: detector.sha256,
       adapter: adapter.sha256,
     },
@@ -345,9 +354,9 @@ async function stageInstallation({
   stageDirectory,
   readIdentity = readRepositoryIdentity,
 }) {
-  const sentinelSource = await fs.readFile(sentinelPath, "utf8");
+  const sentinel = await requiredRegularFileState(sentinelPath, "sentinelPath");
+  const sentinelSource = sentinel.bytes.toString("utf8");
   const transformedSentinel = transformPwLeagueSentinelSource(sentinelSource);
-  const sourceStat = await fs.stat(sentinelPath);
   const stagedPaths = {
     sentinel: path.join(stageDirectory, path.basename(sentinelPath)),
     detector: path.join(stageDirectory, INSTALLED_DETECTOR_BASENAME),
@@ -361,7 +370,7 @@ async function stageInstallation({
   await Promise.all([
     fs.writeFile(stagedPaths.adapter, adapterSource, { mode: 0o644 }),
     fs.writeFile(stagedPaths.sentinel, transformedSentinel, {
-      mode: sourceStat.mode & 0o777,
+      mode: sentinel.mode,
     }),
   ]);
   await Promise.all(Object.values(stagedPaths).map(checkSyntax));
@@ -692,10 +701,11 @@ async function assertActivationIdentity({
   readIdentity,
   label,
 }) {
-  const [sentinelSha, identity] = await Promise.all([
-    fileSha256(sentinelPath),
+  const [sentinel, identity] = await Promise.all([
+    requiredRegularFileState(sentinelPath, "sentinelPath"),
     readIdentity(),
   ]);
+  const sentinelSha = sentinel.sha256;
   if (
     sentinelSha !== expectedSentinelSha256 ||
     sentinelSha !== stagedHashes.sentinelBefore
@@ -721,14 +731,7 @@ async function assertStagedHashes(stage, receipt) {
 }
 
 async function assertExactRegularFileHash({ filePath, expectedSha256, label }) {
-  try {
-    await assertRegularFile(filePath, label);
-  } catch (error) {
-    throw new Error(`${label} must be a regular non-symlink file`, {
-      cause: error,
-    });
-  }
-  const actualSha256 = await fileSha256(filePath);
+  const actualSha256 = (await requiredRegularFileState(filePath, label)).sha256;
   if (actualSha256 !== expectedSha256) {
     throw new Error(
       `${label} hash drift: expected ${expectedSha256}, found ${actualSha256}`,
@@ -866,10 +869,11 @@ export async function installPwLeagueSentinelRoundIntegrity(
   assertGitSha(expectedRepositorySha, "expectedRepositorySha");
   const directory = path.dirname(sentinelPath);
   return withInstallLock(directory, async () => {
-    const [currentSentinelSha, initialIdentity] = await Promise.all([
-      fileSha256(sentinelPath),
+    const [currentSentinel, initialIdentity] = await Promise.all([
+      requiredRegularFileState(sentinelPath, "sentinelPath"),
       readIdentity(),
     ]);
+    const currentSentinelSha = currentSentinel.sha256;
     if (currentSentinelSha !== expectedSentinelSha256) {
       throw new Error(
         `Sentinel hash drift: expected ${expectedSentinelSha256}, found ${currentSentinelSha}`,
