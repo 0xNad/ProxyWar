@@ -6,6 +6,7 @@ export interface CommanderXpExternalPhaseReceiptV2 {
   workflowID: string;
   workflowName: "Commander XP external seal";
   actor: "0xNad";
+  triggeringActor: "0xNad";
   event: "workflow_dispatch";
   ref: "refs/heads/main";
   experimentID: string;
@@ -31,9 +32,11 @@ export interface CommanderXpExternalPhaseReceiptV2 {
     workflowPath: ".github/workflows/commander-xp-evidence.yml";
     workflowName: "Commander XP protected experiment evidence";
     actor: "0xNad";
+    triggeringActor: "0xNad";
     headRepository: "0xNad/ProxyWar";
     event: "workflow_dispatch";
     ref: "refs/heads/main";
+    headSha: string;
   };
   runId: string;
   attempt: number;
@@ -55,4 +58,45 @@ export interface CommanderXpExternalPhaseReceiptV2 {
     attestedSubjectDigest: string;
   };
   ledgerSha256: string;
+}
+
+export interface CommanderXpRetainedPhaseArtifactV2 {
+  id: string;
+  digest: string;
+  attestationID: string;
+}
+
+export interface CommanderXpPriorPhaseReceiptBindingV2 {
+  path:
+    | "commander-xp-prereg-ledger-v2.json"
+    | "commander-xp-provider-preflight-ledger-v2.json"
+    | "commander-xp-canary-ledger-v2.json";
+  sha256: string;
+  ledgerSha256: string;
+  runId: string;
+  attempt: number;
+  evidenceArtifact: CommanderXpExternalPhaseReceiptV2["evidenceArtifact"];
+  receiptArtifact: CommanderXpExternalPhaseReceiptV2["receiptArtifact"];
+  ledgerArtifact: CommanderXpRetainedPhaseArtifactV2 & {
+    ledgerSha256: string;
+  };
+  authorityArtifact: CommanderXpRetainedPhaseArtifactV2 & {
+    receiptSha256: string;
+  };
+  terminalArtifact: CommanderXpRetainedPhaseArtifactV2 & {
+    envelopeSha256: string;
+  };
+  localSealSha256: string;
+  workflowPath: ".github/workflows/commander-xp-external-seal.yml";
+  workflowID: string;
+  workflowName: "Commander XP external seal";
+  actor: "0xNad";
+  triggeringActor: "0xNad";
+  event: "workflow_dispatch";
+  ref: "refs/heads/main";
+  experimentID: string;
+  behaviorBaseSha: string;
+  behaviorBaseTreeSha: string;
+  headSha: string;
+  treeSha: string;
 }

@@ -107,6 +107,8 @@ jobs:
           test "$(jq -r .run_attempt "$RUNNER_TEMP/source-ci.json")" = "$SOURCE_CI_RUN_ATTEMPT"
           test "$(jq -r .path "$RUNNER_TEMP/source-ci.json")" = ".github/workflows/ci.yml"
           test "$(jq -r .actor.login "$RUNNER_TEMP/source-ci.json")" = "0xNad"
+          test "$(jq -r .triggering_actor.login "$RUNNER_TEMP/source-ci.json")" = "0xNad"
+          test "$(jq -r .head_branch "$RUNNER_TEMP/source-ci.json")" = "main"
           test "$(jq -r .head_repository.full_name "$RUNNER_TEMP/source-ci.json")" = "$GITHUB_REPOSITORY"
           test "$(jq -r .repository.full_name "$RUNNER_TEMP/source-ci.json")" = "$GITHUB_REPOSITORY"
           test "$(jq -r .status "$RUNNER_TEMP/source-ci.json")" = "completed"
@@ -143,6 +145,11 @@ jobs:
           test "$(jq -r .workflowRun.id "$RUNNER_TEMP/evidence-artifact-metadata.json")" = "$EVIDENCE_ARTIFACT_RUN_ID"
           test "$(jq -r .workflowRun.run_attempt "$RUNNER_TEMP/evidence-artifact-metadata.json")" = "$EVIDENCE_ARTIFACT_RUN_ATTEMPT"
           test "$(jq -r .workflowRun.head_sha "$RUNNER_TEMP/evidence-artifact-metadata.json")" = "$SOURCE_SHA"
+          test "$(jq -r .workflowRun.head_branch "$RUNNER_TEMP/evidence-artifact-metadata.json")" = "main"
+          test "$(jq -r .workflowRun.actor.login "$RUNNER_TEMP/evidence-artifact-metadata.json")" = "0xNad"
+          test "$(jq -r .workflowRun.triggering_actor.login "$RUNNER_TEMP/evidence-artifact-metadata.json")" = "0xNad"
+          test "$(jq -r .workflowRun.head_repository.full_name "$RUNNER_TEMP/evidence-artifact-metadata.json")" = "$GITHUB_REPOSITORY"
+          test "$(jq -r .workflowRun.event "$RUNNER_TEMP/evidence-artifact-metadata.json")" = "workflow_dispatch"
           COLLECTOR_WORKFLOW_ID=$(jq -r .sourceArtifact.workflowID "$RUNNER_TEMP/commander-xp-envelope/authority/commander-xp-external-seal-request-v1.json")
           test "$(jq -r .workflowRun.workflow_id "$RUNNER_TEMP/evidence-artifact-metadata.json")" = "$COLLECTOR_WORKFLOW_ID"
           test "$(jq -r .workflowRun.path "$RUNNER_TEMP/evidence-artifact-metadata.json")" = ".github/workflows/commander-xp-evidence.yml"
@@ -189,8 +196,9 @@ jobs:
           PHASE=$(jq -r .phase "$REQUEST")
           case "$PHASE" in
             preregistration) PRIOR_KEYS=() ;;
-            provider-preflight|canary) PRIOR_KEYS=(preregistrationReceipt) ;;
-            confirmatory) PRIOR_KEYS=(preregistrationReceipt canaryReceipt) ;;
+            provider-preflight) PRIOR_KEYS=(preregistrationReceipt) ;;
+            canary) PRIOR_KEYS=(preregistrationReceipt providerPreflightReceipt) ;;
+            confirmatory) PRIOR_KEYS=(preregistrationReceipt providerPreflightReceipt canaryReceipt) ;;
             *) exit 1 ;;
           esac
           for PRIOR_KEY in "${PRIOR_KEYS[@]}"; do
@@ -200,10 +208,11 @@ jobs:
                 "$RUNNER_TEMP/commander-xp-envelope/evidence/$RECEIPT_PATH" \
                 --repo "$GITHUB_REPOSITORY" \
                 --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/commander-xp-external-seal.yml@refs/heads/main" \
+                --source-ref "refs/heads/main" \
                 --source-digest "$SOURCE_SHA" \
                 --signer-digest "$SOURCE_SHA" \
                 --deny-self-hosted-runners
-              for KIND in evidence receipt; do
+              for KIND in evidence receipt ledger authority terminal; do
                 ARTIFACT_ID=$(jq -r ".${PRIOR_KEY}.${KIND}Artifact.id" "$REQUEST")
                 EXPECTED_DIGEST=$(jq -r ".${PRIOR_KEY}.${KIND}Artifact.digest" "$REQUEST")
                 PRIOR_RUN_ID=$(jq -r ".${PRIOR_KEY}.runId" "$REQUEST")
@@ -215,6 +224,17 @@ jobs:
                 test "${ACTUAL_DIGEST#sha256:}" = "${EXPECTED_DIGEST#sha256:}"
                 python -c 'import datetime,json,pathlib,sys; artifact=json.loads(pathlib.Path(sys.argv[1]).read_text()); expires=datetime.datetime.fromisoformat(artifact["expires_at"].replace("Z","+00:00")); assert expires > datetime.datetime.now(datetime.timezone.utc), "bound prior artifact is expired"' "$METADATA"
               done
+              PRIOR_RUN_ID=$(jq -r ".${PRIOR_KEY}.runId" "$REQUEST")
+              PRIOR_ATTEMPT=$(jq -r ".${PRIOR_KEY}.attempt" "$REQUEST")
+              gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PRIOR_RUN_ID/attempts/$PRIOR_ATTEMPT" > "$RUNNER_TEMP/$PRIOR_KEY-run.json"
+              jq -e --arg source "$SOURCE_SHA" --argjson attempt "$PRIOR_ATTEMPT" '
+                .status == "completed" and .conclusion == "success" and
+                .run_attempt == $attempt and .head_sha == $source and
+                .head_branch == "main" and .path == ".github/workflows/commander-xp-external-seal.yml" and
+                .actor.login == "0xNad" and .triggering_actor.login == "0xNad" and
+                .head_repository.full_name == "0xNad/ProxyWar" and
+                .event == "workflow_dispatch"
+              ' "$RUNNER_TEMP/$PRIOR_KEY-run.json" >/dev/null
           done
 
       - name: Build and self-verify the normalized seal bundle
@@ -497,18 +517,27 @@ jobs:
             "$RUNNER_TEMP/sealed-download/sealed-bundle.tgz" \
             --repo "$GITHUB_REPOSITORY" \
             --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/commander-xp-external-seal.yml@refs/heads/main" \
+            --source-ref "refs/heads/main" \
+            --source-digest "$SOURCE_SHA" \
+            --signer-digest "$SOURCE_SHA" \
             --deny-self-hosted-runners \
             --format=json > "$AUTHORITY/sealed-bundle-provenance.json"
           gh attestation verify \
             "$RUNNER_TEMP/commander-xp-external-seal-receipt-v1.json" \
             --repo "$GITHUB_REPOSITORY" \
             --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/commander-xp-external-seal.yml@refs/heads/main" \
+            --source-ref "refs/heads/main" \
+            --source-digest "$SOURCE_SHA" \
+            --signer-digest "$SOURCE_SHA" \
             --deny-self-hosted-runners \
             --format=json > "$AUTHORITY/receipt-subject-provenance.json"
           gh attestation verify \
             "$RUNNER_TEMP/commander-xp-external-phase-ledger-v2.json" \
             --repo "$GITHUB_REPOSITORY" \
             --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/commander-xp-external-seal.yml@refs/heads/main" \
+            --source-ref "refs/heads/main" \
+            --source-digest "$SOURCE_SHA" \
+            --signer-digest "$SOURCE_SHA" \
             --deny-self-hosted-runners \
             --format=json > "$AUTHORITY/phase-ledger-provenance.json"
           cp '${{ steps.subject-attest.outputs.bundle-path }}' "$AUTHORITY/subject-attestation-bundle.jsonl"
@@ -531,7 +560,7 @@ jobs:
             --arg bundleProvenanceSha256 "sha256:$(sha256sum "$AUTHORITY/sealed-bundle-provenance.json" | cut -d' ' -f1)" \
             --arg receiptProvenanceSha256 "sha256:$(sha256sum "$AUTHORITY/receipt-subject-provenance.json" | cut -d' ' -f1)" \
             --arg ledgerProvenanceSha256 "sha256:$(sha256sum "$AUTHORITY/phase-ledger-provenance.json" | cut -d' ' -f1)" \
-            '{schemaVersion:1,authority:"github-actions-protected-main-public-sigstore-v1",repository:"0xNad/ProxyWar",workflowPath:".github/workflows/commander-xp-external-seal.yml",workflowRef:"refs/heads/main",experimentID:$ledger[0].experimentID,runId:$ledger[0].runId,attempt:$ledger[0].attempt,headSha:$ledger[0].headSha,treeSha:$ledger[0].treeSha,behaviorBaseSha:$manifest[0].source.behaviorBaseSha,behaviorBaseTreeSha:$manifest[0].source.behaviorBaseTreeSha,localSealSha256:$ledger[0].evidenceArtifact.localSealSha256,phase:$ledger[0].phase,sourceCI:$manifest[0].sourceCI,collectorArtifact:$manifest[0].sourceArtifact,bundleArtifact:{id:$bundleArtifactID,digest:$bundleArtifactDigest},receiptArtifact:{id:$receiptArtifactID,digest:$receiptArtifactDigest},ledgerArtifact:{id:$ledgerArtifactID,digest:$ledgerArtifactDigest,ledgerSha256:$ledger[0].ledgerSha256},attestations:{subject:{id:$subjectAttestationID,bundleSha256:$subjectBundleSha256,provenanceSha256s:[$bundleProvenanceSha256,$receiptProvenanceSha256]},ledger:{id:$ledgerAttestationID,bundleSha256:$ledgerBundleSha256,provenanceSha256:$ledgerProvenanceSha256}},integrityVerified:true,experimentUsable:false,performanceClaimAuthorized:false}' \
+            '{schemaVersion:1,authority:"github-actions-protected-main-public-sigstore-v1",repository:"0xNad/ProxyWar",workflowPath:".github/workflows/commander-xp-external-seal.yml",workflowID:$ledger[0].workflowID,workflowName:$ledger[0].workflowName,actor:$ledger[0].actor,triggeringActor:$ledger[0].triggeringActor,event:$ledger[0].event,workflowRef:$ledger[0].ref,experimentID:$ledger[0].experimentID,runId:$ledger[0].runId,attempt:$ledger[0].attempt,headSha:$ledger[0].headSha,treeSha:$ledger[0].treeSha,behaviorBaseSha:$manifest[0].source.behaviorBaseSha,behaviorBaseTreeSha:$manifest[0].source.behaviorBaseTreeSha,localSealSha256:$ledger[0].evidenceArtifact.localSealSha256,phase:$ledger[0].phase,sourceCI:$manifest[0].sourceCI,collectorArtifact:$manifest[0].sourceArtifact,bundleArtifact:{id:$bundleArtifactID,digest:$bundleArtifactDigest},receiptArtifact:{id:$receiptArtifactID,digest:$receiptArtifactDigest},ledgerArtifact:{id:$ledgerArtifactID,digest:$ledgerArtifactDigest,ledgerSha256:$ledger[0].ledgerSha256},attestations:{subject:{id:$subjectAttestationID,bundleSha256:$subjectBundleSha256,provenanceSha256s:[$bundleProvenanceSha256,$receiptProvenanceSha256]},ledger:{id:$ledgerAttestationID,bundleSha256:$ledgerBundleSha256,provenanceSha256:$ledgerProvenanceSha256}},integrityVerified:true,experimentUsable:false,performanceClaimAuthorized:false}' \
             > "$AUTHORITY/commander-xp-external-authority-receipt-v1.json"
           (cd "$AUTHORITY" && find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
           jq -e '.schemaVersion == 1 and .authority == "github-actions-protected-main-public-sigstore-v1" and .integrityVerified == true and .experimentUsable == false and .performanceClaimAuthorized == false' "$AUTHORITY/commander-xp-external-authority-receipt-v1.json" >/dev/null
@@ -571,6 +600,9 @@ jobs:
             "$RUNNER_TEMP/commander-xp-authority-package/commander-xp-external-authority-receipt-v1.json" \
             --repo "$GITHUB_REPOSITORY" \
             --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/commander-xp-external-seal.yml@refs/heads/main" \
+            --source-ref "refs/heads/main" \
+            --source-digest "$SOURCE_SHA" \
+            --signer-digest "$SOURCE_SHA" \
             --deny-self-hosted-runners \
             --format=json > "$RUNNER_TEMP/authority-receipt-provenance.json"
           cp '${{ steps.authority-attest.outputs.bundle-path }}' "$RUNNER_TEMP/authority-attestation-bundle.jsonl"
@@ -582,15 +614,21 @@ jobs:
             --arg authorityReceiptSha256 "sha256:$(sha256sum "$RUNNER_TEMP/commander-xp-authority-package/commander-xp-external-authority-receipt-v1.json" | cut -d' ' -f1)" \
             --arg authorityBundleSha256 "sha256:$(sha256sum "$RUNNER_TEMP/authority-attestation-bundle.jsonl" | cut -d' ' -f1)" \
             --arg authorityProvenanceSha256 "sha256:$(sha256sum "$RUNNER_TEMP/authority-receipt-provenance.json" | cut -d' ' -f1)" \
-            '{schemaVersion:1,authority:"github-actions-terminal-authority-index-v1",repository:$receipt[0].repository,workflowPath:$receipt[0].workflowPath,workflowRef:$receipt[0].workflowRef,experimentID:$receipt[0].experimentID,runId:$receipt[0].runId,attempt:$receipt[0].attempt,headSha:$receipt[0].headSha,treeSha:$receipt[0].treeSha,behaviorBaseSha:$receipt[0].behaviorBaseSha,behaviorBaseTreeSha:$receipt[0].behaviorBaseTreeSha,localSealSha256:$receipt[0].localSealSha256,phase:$receipt[0].phase,sourceCI:$receipt[0].sourceCI,collectorArtifact:$receipt[0].collectorArtifact,authorityArtifact:{id:$authorityArtifactID,digest:$authorityArtifactDigest,receiptSha256:$authorityReceiptSha256},authorityAttestation:{id:$authorityAttestationID,bundleSha256:$authorityBundleSha256,provenanceSha256:$authorityProvenanceSha256},integrityVerified:true,experimentUsable:false,performanceClaimAuthorized:false}' \
-            > "$RUNNER_TEMP/commander-xp-terminal-authority-index-v1.json"
-          jq -e '.schemaVersion == 1 and .authority == "github-actions-terminal-authority-index-v1" and .integrityVerified == true and .experimentUsable == false and .performanceClaimAuthorized == false' "$RUNNER_TEMP/commander-xp-terminal-authority-index-v1.json" >/dev/null
+            '{schemaVersion:2,authority:"github-actions-terminal-authority-envelope-v2",repository:$receipt[0].repository,workflowPath:$receipt[0].workflowPath,workflowID:$receipt[0].workflowID,workflowName:$receipt[0].workflowName,actor:$receipt[0].actor,triggeringActor:$receipt[0].triggeringActor,event:$receipt[0].event,workflowRef:$receipt[0].workflowRef,experimentID:$receipt[0].experimentID,runId:$receipt[0].runId,attempt:$receipt[0].attempt,headSha:$receipt[0].headSha,treeSha:$receipt[0].treeSha,behaviorBaseSha:$receipt[0].behaviorBaseSha,behaviorBaseTreeSha:$receipt[0].behaviorBaseTreeSha,localSealSha256:$receipt[0].localSealSha256,phase:$receipt[0].phase,sourceCI:$receipt[0].sourceCI,collectorArtifact:$receipt[0].collectorArtifact,bundleArtifact:$receipt[0].bundleArtifact,receiptArtifact:$receipt[0].receiptArtifact,ledgerArtifact:$receipt[0].ledgerArtifact,subjectAttestation:$receipt[0].attestations.subject,ledgerAttestation:$receipt[0].attestations.ledger,authorityArtifact:{id:$authorityArtifactID,digest:$authorityArtifactDigest,receiptSha256:$authorityReceiptSha256},authorityAttestation:{id:$authorityAttestationID,bundleSha256:$authorityBundleSha256,provenanceSha256:$authorityProvenanceSha256},integrityVerified:true,experimentUsable:false,performanceClaimAuthorized:false}' \
+            > "$RUNNER_TEMP/commander-xp-terminal-authority-envelope-v2.body.json"
+          ENVELOPE_SHA256=$(sha256sum "$RUNNER_TEMP/commander-xp-terminal-authority-envelope-v2.body.json" | cut -d' ' -f1)
+          jq --arg envelopeSha256 "sha256:$ENVELOPE_SHA256" '. + {envelopeSha256:$envelopeSha256}' \
+            "$RUNNER_TEMP/commander-xp-terminal-authority-envelope-v2.body.json" \
+            > "$RUNNER_TEMP/commander-xp-terminal-authority-envelope-v2.json"
+          jq -e '.schemaVersion == 2 and .authority == "github-actions-terminal-authority-envelope-v2" and (.envelopeSha256 | test("^sha256:[0-9a-f]{64}$")) and .integrityVerified == true and .experimentUsable == false and .performanceClaimAuthorized == false' "$RUNNER_TEMP/commander-xp-terminal-authority-envelope-v2.json" >/dev/null
+          jq 'del(.envelopeSha256)' "$RUNNER_TEMP/commander-xp-terminal-authority-envelope-v2.json" > "$RUNNER_TEMP/commander-xp-terminal-authority-envelope-v2.rebuilt.json"
+          test "$(sha256sum "$RUNNER_TEMP/commander-xp-terminal-authority-envelope-v2.rebuilt.json" | cut -d' ' -f1)" = "$ENVELOPE_SHA256"
 
       - name: Attest terminal authority index
         id: terminal-attest
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
-          subject-path: ${{ runner.temp }}/commander-xp-terminal-authority-index-v1.json
+          subject-path: ${{ runner.temp }}/commander-xp-terminal-authority-envelope-v2.json
           show-summary: true
 
       - name: Upload unique immutable terminal authority index
@@ -598,7 +636,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: commander-xp-terminal-authority-${{ needs.normalize.outputs.phase }}-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/commander-xp-terminal-authority-index-v1.json
+          path: ${{ runner.temp }}/commander-xp-terminal-authority-envelope-v2.json
           if-no-files-found: error
           retention-days: 90
           compression-level: 0
@@ -614,8 +652,26 @@ jobs:
           [[ '${{ steps.terminal-upload.outputs.artifact-digest }}' =~ ^[0-9a-f]{64}$ ]]
           [[ '${{ steps.terminal-attest.outputs.attestation-id }}' =~ ^[1-9][0-9]*$ ]]
           test -s '${{ steps.terminal-attest.outputs.bundle-path }}'
+          check_artifact() {
+            local artifact_id="$1"
+            local expected_digest="$2"
+            local metadata="$RUNNER_TEMP/final-artifact-$artifact_id.json"
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id" > "$metadata"
+            test "$(jq -r .expired "$metadata")" = "false"
+            test "$(jq -r .workflow_run.id "$metadata")" = "$GITHUB_RUN_ID"
+            local actual_digest
+            actual_digest=$(jq -r .digest "$metadata")
+            test "${actual_digest#sha256:}" = "${expected_digest#sha256:}"
+            python -c 'import datetime,json,pathlib,sys; artifact=json.loads(pathlib.Path(sys.argv[1]).read_text()); expires=datetime.datetime.fromisoformat(artifact["expires_at"].replace("Z","+00:00")); assert expires > datetime.datetime.now(datetime.timezone.utc), "terminal-chain artifact is expired"' "$metadata"
+          }
+          check_artifact '${{ steps.ledger-upload.outputs.artifact-id }}' '${{ steps.ledger-upload.outputs.artifact-digest }}'
+          check_artifact '${{ steps.authority-upload.outputs.artifact-id }}' '${{ steps.authority-upload.outputs.artifact-digest }}'
+          check_artifact '${{ steps.terminal-upload.outputs.artifact-id }}' '${{ steps.terminal-upload.outputs.artifact-digest }}'
           gh attestation verify \
-            "$RUNNER_TEMP/commander-xp-terminal-authority-index-v1.json" \
+            "$RUNNER_TEMP/commander-xp-terminal-authority-envelope-v2.json" \
             --repo "$GITHUB_REPOSITORY" \
             --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/commander-xp-external-seal.yml@refs/heads/main" \
+            --source-ref "refs/heads/main" \
+            --source-digest "$SOURCE_SHA" \
+            --signer-digest "$SOURCE_SHA" \
             --deny-self-hosted-runners
