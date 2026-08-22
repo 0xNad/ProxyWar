@@ -34,6 +34,7 @@ export async function buildPwLeagueRoundIntegrityArtifact({
     }
   }
   const source = await fs.readFile(ROUND_INTEGRITY_SOURCE_PATH, "utf8");
+  const sourceSha256 = createHash("sha256").update(source).digest("hex");
   const compiled = ts.transpileModule(source, {
     fileName: ROUND_INTEGRITY_SOURCE_PATH,
     reportDiagnostics: true,
@@ -60,6 +61,7 @@ export async function buildPwLeagueRoundIntegrityArtifact({
   }
   const body = [
     "// Generated from src/server/agents/CoworldLeagueRoundIntegrity.ts.",
+    `// Source SHA-256: ${sourceSha256}`,
     "// Do not edit this artifact; rebuild it from the tested repository source.",
     compiled.outputText,
   ].join("\n");
@@ -74,6 +76,7 @@ export async function buildPwLeagueRoundIntegrityArtifact({
   }
   return {
     sourcePath: ROUND_INTEGRITY_SOURCE_PATH,
+    sourceSha256,
     outputPath,
     sha256: createHash("sha256").update(body).digest("hex"),
   };

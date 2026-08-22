@@ -47,19 +47,45 @@ the round-integrity feed delayed; replay-only failures remain isolated under
 `replayFeedStale`.
 
 The installed `pw-league-sentinel.mjs` is machine-local operating code, not a
-tracked repository source. Its next installer revision must stage the exact
-tested detector above rather than copying a second set of predicates:
+tracked repository source. Build/copy of the detector alone is not activation:
+the sentinel must also import the adapter and call it from its hosted-round
+collection path. The tracked installer stages the exact tested detector,
+dependency-free adapter, and sentinel patch together:
 
 ```bash
-node scripts/build-pw-league-round-integrity.mjs \
-  --output /absolute/staging/path/pw-league-round-integrity.mjs
+SENTINEL="$HOME/Library/Application Support/ProxyWar/bin/pw-league-sentinel.mjs"
+node scripts/install-pw-league-round-integrity-sentinel.mjs dry-run \
+  --sentinel "$SENTINEL"
+
+# Record these before the authorized install and pass the exact values back.
+REPOSITORY_SHA="$(git rev-parse HEAD)"
+SENTINEL_SHA="$(shasum -a 256 "$SENTINEL" | awk '{print $1}')"
+node scripts/install-pw-league-round-integrity-sentinel.mjs install \
+  --sentinel "$SENTINEL" \
+  --expected-sentinel-sha256 "$SENTINEL_SHA" \
+  --expected-repository-sha "$REPOSITORY_SHA"
+
+node scripts/install-pw-league-round-integrity-sentinel.mjs verify \
+  --sentinel "$SENTINEL"
 ```
 
-The generated module exports the evaluator and
-`coworldRoundIntegrityCriticalSignal()`. The sentinel can feed that signal into
-its existing 60-second recheck before alert/autofix action. The build refuses a
-relative path or an existing target unless explicitly passed `--overwrite`;
-installation/replacement remains a separate operator-authorized action.
+The adapter evaluates the latest completed round directly from read-only
+Coworld league/division/episode reads. It emits
+`round_incomplete_execution:round_<id>` only when the same breached round and
+episode-evidence hash survive a second direct read at least 60 seconds later.
+The class is deliberately absent from the sentinel's autofix allow-list.
+
+Installation creates a timestamped receipt and exact backups beside the
+sentinel, installs the detector and adapter first, then atomically replaces the
+sentinel as the activation barrier. It does not restart launchd. The install
+fails closed on sentinel or repository SHA drift, any tracked repository
+modification, syntax/self-test failure, or partial integration. Roll back using
+the exact `receiptPath` printed by the install (also without restarting):
+
+```bash
+node scripts/install-pw-league-round-integrity-sentinel.mjs rollback \
+  --receipt '/absolute/path/from-install-output/receipt.json'
+```
 
 ## Output
 
