@@ -77,7 +77,7 @@ function decisionRequest(requestID: string) {
             gold: "1000000",
             borderTiles: 12,
             incomingAttacks: 0,
-            units: {},
+            unitCounts: {},
           },
           visiblePlayers: [
             {

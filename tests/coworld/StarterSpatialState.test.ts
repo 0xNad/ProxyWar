@@ -76,6 +76,7 @@ const BASE_OBSERVATION = {
     gold: "1000",
     borderTiles: 40,
     incomingAttacks: 0,
+    unitCounts: { City: 2, Port: 1 },
   },
   visiblePlayers: [
     {
@@ -134,6 +135,10 @@ describe("tester-starter-llm spatial state renderer", () => {
   it("retains the legacy state bytes when spatial is absent", async () => {
     const buildState = await loadBuildState();
     const state = buildState(BASE_OBSERVATION, []);
+    expect((state.self as { structures: unknown }).structures).toEqual({
+      City: 2,
+      Port: 1,
+    });
     expect("spatial" in state).toBe(false);
     expect("playerID" in (state.rivals as Record<string, unknown>[])[0]).toBe(
       false,

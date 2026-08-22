@@ -42,7 +42,7 @@ function capabilityRequest() {
           gold: "1000",
           borderTiles: 10,
           incomingAttacks: 0,
-          units: {},
+          unitCounts: { City: 1 },
         },
         visiblePlayers: [
           {
@@ -154,7 +154,7 @@ function absentRequest() {
       protocolVersion: "proxywar-agent-v1",
       observation: {
         phase: "active",
-        ownState: { playerID: "P_A", units: {} },
+        ownState: { playerID: "P_A", unitCounts: {} },
         visiblePlayers: [],
       },
       legalActions: [holdAction()],

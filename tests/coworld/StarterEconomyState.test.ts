@@ -66,7 +66,7 @@ const BASE_OBS = {
     gold: "1000000",
     borderTiles: 40,
     incomingAttacks: 0,
-    units: { City: 1 },
+    unitCounts: { City: 1 },
   },
   visiblePlayers: [
     {

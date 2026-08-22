@@ -141,7 +141,7 @@ response-contract nesting below are exact and internally consistent:
         "gold": "1000",
         "borderTiles": 10,
         "incomingAttacks": 0,
-        "units": {}
+        "unitCounts": { "City": 1 }
       },
       "deals": {
         "decisionStep": 42,

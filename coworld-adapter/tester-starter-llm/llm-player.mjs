@@ -259,7 +259,7 @@ function buildState(obs, actions) {
     gold: own.gold,
     borderTiles: own.borderTiles,
     incomingAttacks: own.incomingAttacks,
-    structures: own.units, // your buildings (counts) — upgrade these instead of sprawling
+    structures: own.unitCounts, // your buildings (counts) — upgrade these instead of sprawling
   };
   const rivals = (obs.visiblePlayers || [])
     .filter((p) => p && p.isAlive)
