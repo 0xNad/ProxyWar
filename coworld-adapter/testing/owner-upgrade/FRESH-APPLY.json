@@ -1,6 +1,6 @@
 {
   "schemaVersion": "proxywar-owner-upgrade-fresh-apply-v1",
-  "generatedAt": "2026-08-22T16:05:00Z",
+  "generatedAt": "2026-08-22T16:09:30Z",
   "verdict": "PASS",
   "publicStarter": {
     "repository": "https://github.com/0xNad/proxywar-coworld-starter.git",
@@ -8,15 +8,15 @@
     "cleanBeforeApply": true
   },
   "candidate": {
-    "commit": "764813b086334b5732cc3a037c9766a4a09a9978",
-    "tree": "710aa6c07f15cd50a0820620b309bdf1a509dea1",
+    "commit": "e8944d30e6576676ed9b976f6d48e89c5b81837b",
+    "tree": "4be97ef7629488824c39964640428d2f67e7421b",
     "base": "a69175a30577b3e516f09a2cb0960d4d129b3f33"
   },
   "packet": {
     "path": "coworld-adapter/testing/owner-upgrade/proxywar-owner-upgrade.patch",
-    "sha256": "ec72838ff998af61bcd2cfef955b8d017969a7d71a02d7efb73ff2592490f127",
+    "sha256": "469e816b848846c964b78fbbe59136270b946490d3b0416a5d8636fb4c23dd7b",
     "ledgerPath": "coworld-adapter/testing/owner-upgrade/SHA256SUMS",
-    "ledgerSha256": "6f7f4d72bc1bc76806ef223f8fb2e07904d799ff81a367e5803bbfe66d3ea3b0",
+    "ledgerSha256": "75476349a500981326f9543833e252fa61e95adc87f433f0a0f100673f7f097f",
     "verifiedFiles": 13
   },
   "verification": {

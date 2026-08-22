@@ -950,10 +950,10 @@ index 0000000000000000000000000000000000000000..a2af5c8203368edcc1e3ba18135dc0b9
 +): T[];
 diff --git a/owner-capabilities.mjs b/owner-capabilities.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..a25b934015ce29ac5536c84c251f5ca192ed4075
+index 0000000000000000000000000000000000000000..86e44f65423c8df98d69ff084215b7e26d355682
 --- /dev/null
 +++ b/owner-capabilities.mjs
-@@ -0,0 +1,1474 @@
+@@ -0,0 +1,1484 @@
 +import { createHash } from "node:crypto";
 +
 +/**
@@ -1284,6 +1284,16 @@ index 0000000000000000000000000000000000000000..a25b934015ce29ac5536c84c251f5ca1
 +  if (
 +    obligations.some((obligation) => obligation === null) ||
 +    obligations.some((obligation) => obligation.kind !== expected.kind)
++  ) {
++    return null;
++  }
++  if (
++    (expected.kind === "non_aggression" ||
++      expected.kind === "trade_security") &&
++    obligations.some(
++      (obligation) =>
++        obligation.status !== "pending" && obligation.status !== "violated",
++    )
 +  ) {
 +    return null;
 +  }
@@ -2430,10 +2440,10 @@ index 0000000000000000000000000000000000000000..a25b934015ce29ac5536c84c251f5ca1
 +}
 diff --git a/owner-capability-contract.test.mjs b/owner-capability-contract.test.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..5efbc4ef814e3df0b8596d00f4ca389f8b0280cb
+index 0000000000000000000000000000000000000000..52f06ecf2ebc913a1d0c9e13b47a777ef846d654
 --- /dev/null
 +++ b/owner-capability-contract.test.mjs
-@@ -0,0 +1,1044 @@
+@@ -0,0 +1,1083 @@
 +import assert from "node:assert/strict";
 +import { createHash } from "node:crypto";
 +import test from "node:test";
@@ -2584,7 +2594,7 @@ index 0000000000000000000000000000000000000000..5efbc4ef814e3df0b8596d00f4ca389f
 +        obligorPlayerID: "P_A",
 +        obligorName: "Agent A",
 +        kind: "non_aggression",
-+        status: "fulfilled",
++        status: "pending",
 +      },
 +      {
 +        obligorPlayerID: "P_B",
@@ -2658,6 +2668,21 @@ index 0000000000000000000000000000000000000000..5efbc4ef814e3df0b8596d00f4ca389f
 +    ],
 +  };
 +  assert.deepEqual(boundedDealsObservation(valid, "P_B"), valid);
++  const violatedNap = {
++    ...valid,
++    activeDeals: [
++      active,
++      {
++        ...nap,
++        obligations: [
++          { ...nap.obligations[0], status: "violated" },
++          nap.obligations[1],
++        ],
++      },
++      support,
++    ],
++  };
++  assert.deepEqual(boundedDealsObservation(violatedNap, "P_B"), violatedNap);
 +
 +  const selected = {
 +    id: `deal_accept:${proposal.dealID}`,
@@ -2721,6 +2746,30 @@ index 0000000000000000000000000000000000000000..5efbc4ef814e3df0b8596d00f4ca389f
 +        {
 +          ...nap,
 +          obligations: [nap.obligations[0], { ...nap.obligations[0] }],
++        },
++      ],
++    },
++    {
++      ...valid,
++      activeDeals: [
++        {
++          ...nap,
++          obligations: [
++            { ...nap.obligations[0], status: "moot" },
++            nap.obligations[1],
++          ],
++        },
++      ],
++    },
++    {
++      ...valid,
++      activeDeals: [
++        {
++          ...nap,
++          obligations: [
++            { ...nap.obligations[0], status: "fulfilled" },
++            nap.obligations[1],
++          ],
 +        },
 +      ],
 +    },
