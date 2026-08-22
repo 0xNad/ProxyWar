@@ -1,6 +1,6 @@
 import fs from "fs/promises";
 import path from "path";
-import type { GameRecord } from "../../core/Schemas";
+import type { GameRecord, Winner } from "../../core/Schemas";
 import {
   AgentBehaviorQualityReport,
   AgentBehaviorQualityReportPaths,
@@ -59,6 +59,7 @@ import {
   asAgentDegradationCause,
   type AgentDegradationCause,
 } from "./AgentWireProtocol";
+import type { CommanderCanonicalGameConfig } from "./CommanderExperimentIdentity";
 import {
   buildExternalAgentFeedback,
   ExternalAgentFeedback,
@@ -105,11 +106,17 @@ export interface WriteAgentLeagueRunArtifactsInput {
   brainMode: AgentBrainType;
   runnerMode?: "realtime" | "step-locked";
   runnerConfig?: {
+    executionConfigSchemaVersion?: number | null;
     turnsPerDecisionStep?: number | null;
     turnsPerDecisionSchedule?: number[] | null;
     maxDecisionMs?: number | null;
     maxSteps?: number | null;
     stepsCompleted?: number | null;
+    planEveryDecisionSteps?: number | null;
+    maxSpawnAdvanceTurns?: number | null;
+    waitForMirrorCatchup?: boolean | null;
+    /** Whether the invoking experiment required a terminal winner. */
+    requireWinner?: boolean | null;
     mirrorCatchupSucceeded?: boolean | null;
     onlyHoldReason?: string | null;
     /** Labeled autopilot endgame failsafe budget (0 = disabled). */
@@ -124,6 +131,24 @@ export interface WriteAgentLeagueRunArtifactsInput {
     mapSize?: string | null;
     difficulty?: string | null;
     variedSpawns?: boolean | null;
+    matchedOfferedOrderSpawnBallot?: boolean | null;
+    disabledActionKinds?: string[] | null;
+    opponentBrainMode?: string | null;
+    rosterPolicy?: string | null;
+    /** Zero-based subject seat for matched Commander rotation. */
+    subjectSeatIndex?: number | null;
+    /** Spawn allocator episode ordinal for matched Commander rotation. */
+    episodeIndex?: number | null;
+    /** Seed actually bound to deterministic smoke identities and GameServer. */
+    executionSeed?: string | null;
+    /** Actual GameServer identity deterministically derived for this run. */
+    executionGameID?: string | null;
+    /** Versioned derivation binding executionSeed to executionGameID. */
+    executionGameIDDerivation?: string | null;
+    /** Exact normalized simulation-relevant GameConfig used by GameServer. */
+    selectedGameConfig?: CommanderCanonicalGameConfig | null;
+    structuredDealsEnabled?: boolean | null;
+    freeTextMessagesEnabled?: boolean | null;
     /** Spawn allocation contract; independent of variedSpawns map/scenario semantics. */
     spawnSelectionMode?: "deterministic" | "sealed-ranked-v1" | null;
   };
@@ -137,6 +162,8 @@ export interface WriteAgentLeagueRunArtifactsInput {
   dealLedger?: AgentDealLedgerSnapshot;
   roster: AgentRunRosterEntry[];
   finalState?: AgentRunFinalState;
+  /** Canonical terminal winner observed from the same final Game instance. */
+  winner?: Winner;
   spectatorReplay?: AgentSpectatorReplay;
   gameRecord?: GameRecord | null;
   rootDir?: string;
@@ -197,9 +224,42 @@ interface DecisionLogEntry {
   objectiveKind?: AgentObjectiveKind;
   objectiveSummary?: string;
   objectiveAligned?: boolean;
+  planID?: string;
   planObjective?: string;
   planRationale?: string;
   planFollowed?: boolean;
+  commanderSelectorSource?: string;
+  commanderPrimarySelectorSource?: string;
+  commanderFingerprint?: string;
+  commanderEligibleOptionIds?: string;
+  commanderExposedOptionIds?: string;
+  commanderOmittedOptions?: string;
+  commanderFidelity?: string;
+  commanderReplanReason?: string;
+  commanderResponseDisposition?: string;
+  commanderRejectionCode?: string;
+  commanderPreviousPlanID?: string;
+  commanderPlanInstalled?: boolean;
+  commanderHorizonDecisions?: number;
+  commanderPlanAgeDecisions?: number;
+  commanderBlockedReason?: string;
+  commanderImmediateReplan?: boolean;
+  commanderEmergencyCondition?: string;
+  commanderDeterministicPreferredOptionId?: string;
+  commanderDeterministicPreferredOptionAbsent?: boolean;
+  commanderPromptCharacters?: number;
+  commanderSelectionFailureKind?: string;
+  commanderSelectorProvider?: string;
+  commanderSelectorModel?: string;
+  commanderPromptVersion?: string;
+  commanderExperimentProvider?: string;
+  commanderExperimentModel?: string;
+  commanderExperimentPromptVersion?: string;
+  commanderRuntimeProvider?: string;
+  commanderRuntimeModel?: string;
+  commanderRuntimePromptVersion?: string;
+  commanderSelfTiles?: number;
+  commanderSelfTroops?: number;
   plannerRan?: boolean;
   plannerLatencyMs?: number;
   plannerFallbackUsed?: boolean;
@@ -684,6 +744,9 @@ function decisionLogEntry(
     ...(record.objectiveAligned !== undefined
       ? { objectiveAligned: record.objectiveAligned }
       : {}),
+    ...(stringMetadata(metadata, "planID") !== undefined
+      ? { planID: stringMetadata(metadata, "planID") }
+      : {}),
     ...(stringMetadata(metadata, "planObjective") !== undefined
       ? { planObjective: stringMetadata(metadata, "planObjective") }
       : {}),
@@ -692,6 +755,258 @@ function decisionLogEntry(
       : {}),
     ...(booleanMetadata(metadata, "planFollowed") !== undefined
       ? { planFollowed: booleanMetadata(metadata, "planFollowed") }
+      : {}),
+    ...(stringMetadata(metadata, "commanderSelectorSource") !== undefined
+      ? {
+          commanderSelectorSource: stringMetadata(
+            metadata,
+            "commanderSelectorSource",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commanderPrimarySelectorSource") !== undefined
+      ? {
+          commanderPrimarySelectorSource: stringMetadata(
+            metadata,
+            "commanderPrimarySelectorSource",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commanderFingerprint") !== undefined
+      ? {
+          commanderFingerprint: stringMetadata(
+            metadata,
+            "commanderFingerprint",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commanderEligibleOptionIds") !== undefined
+      ? {
+          commanderEligibleOptionIds: stringMetadata(
+            metadata,
+            "commanderEligibleOptionIds",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commanderExposedOptionIds") !== undefined
+      ? {
+          commanderExposedOptionIds: stringMetadata(
+            metadata,
+            "commanderExposedOptionIds",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commanderOmittedOptions") !== undefined
+      ? {
+          commanderOmittedOptions: stringMetadata(
+            metadata,
+            "commanderOmittedOptions",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commanderFidelity") !== undefined
+      ? {
+          commanderFidelity: stringMetadata(metadata, "commanderFidelity"),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commanderReplanReason") !== undefined
+      ? {
+          commanderReplanReason: stringMetadata(
+            metadata,
+            "commanderReplanReason",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commanderResponseDisposition") !== undefined
+      ? {
+          commanderResponseDisposition: stringMetadata(
+            metadata,
+            "commanderResponseDisposition",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commanderRejectionCode") !== undefined
+      ? {
+          commanderRejectionCode: stringMetadata(
+            metadata,
+            "commanderRejectionCode",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commanderPreviousPlanID") !== undefined
+      ? {
+          commanderPreviousPlanID: stringMetadata(
+            metadata,
+            "commanderPreviousPlanID",
+          ),
+        }
+      : {}),
+    ...(booleanMetadata(metadata, "commanderPlanInstalled") !== undefined
+      ? {
+          commanderPlanInstalled: booleanMetadata(
+            metadata,
+            "commanderPlanInstalled",
+          ),
+        }
+      : {}),
+    ...(numberMetadata(metadata, "commanderHorizonDecisions") !== undefined
+      ? {
+          commanderHorizonDecisions: numberMetadata(
+            metadata,
+            "commanderHorizonDecisions",
+          ),
+        }
+      : {}),
+    ...(numberMetadata(metadata, "commanderPlanAgeDecisions") !== undefined
+      ? {
+          commanderPlanAgeDecisions: numberMetadata(
+            metadata,
+            "commanderPlanAgeDecisions",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commanderBlockedReason") !== undefined
+      ? {
+          commanderBlockedReason: stringMetadata(
+            metadata,
+            "commanderBlockedReason",
+          ),
+        }
+      : {}),
+    ...(booleanMetadata(metadata, "commanderImmediateReplan") !== undefined
+      ? {
+          commanderImmediateReplan: booleanMetadata(
+            metadata,
+            "commanderImmediateReplan",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commanderEmergencyCondition") !== undefined
+      ? {
+          commanderEmergencyCondition: stringMetadata(
+            metadata,
+            "commanderEmergencyCondition",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commanderDeterministicPreferredOptionId") !==
+    undefined
+      ? {
+          commanderDeterministicPreferredOptionId: stringMetadata(
+            metadata,
+            "commanderDeterministicPreferredOptionId",
+          ),
+        }
+      : {}),
+    ...(booleanMetadata(
+      metadata,
+      "commanderDeterministicPreferredOptionAbsent",
+    ) !== undefined
+      ? {
+          commanderDeterministicPreferredOptionAbsent: booleanMetadata(
+            metadata,
+            "commanderDeterministicPreferredOptionAbsent",
+          ),
+        }
+      : {}),
+    ...(numberMetadata(metadata, "commanderPromptCharacters") !== undefined
+      ? {
+          commanderPromptCharacters: numberMetadata(
+            metadata,
+            "commanderPromptCharacters",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commanderSelectionFailureKind") !== undefined
+      ? {
+          commanderSelectionFailureKind: stringMetadata(
+            metadata,
+            "commanderSelectionFailureKind",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commanderSelectorProvider") !== undefined
+      ? {
+          commanderSelectorProvider: stringMetadata(
+            metadata,
+            "commanderSelectorProvider",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commanderSelectorModel") !== undefined
+      ? {
+          commanderSelectorModel: stringMetadata(
+            metadata,
+            "commanderSelectorModel",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commanderPromptVersion") !== undefined
+      ? {
+          commanderPromptVersion: stringMetadata(
+            metadata,
+            "commanderPromptVersion",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commanderExperimentProvider") !== undefined
+      ? {
+          commanderExperimentProvider: stringMetadata(
+            metadata,
+            "commanderExperimentProvider",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commanderExperimentModel") !== undefined
+      ? {
+          commanderExperimentModel: stringMetadata(
+            metadata,
+            "commanderExperimentModel",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commanderExperimentPromptVersion") !==
+    undefined
+      ? {
+          commanderExperimentPromptVersion: stringMetadata(
+            metadata,
+            "commanderExperimentPromptVersion",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commanderRuntimeProvider") !== undefined
+      ? {
+          commanderRuntimeProvider: stringMetadata(
+            metadata,
+            "commanderRuntimeProvider",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commanderRuntimeModel") !== undefined
+      ? {
+          commanderRuntimeModel: stringMetadata(
+            metadata,
+            "commanderRuntimeModel",
+          ),
+        }
+      : {}),
+    ...(stringMetadata(metadata, "commanderRuntimePromptVersion") !== undefined
+      ? {
+          commanderRuntimePromptVersion: stringMetadata(
+            metadata,
+            "commanderRuntimePromptVersion",
+          ),
+        }
+      : {}),
+    ...(numberMetadata(metadata, "commanderSelfTiles") !== undefined
+      ? {
+          commanderSelfTiles: numberMetadata(metadata, "commanderSelfTiles"),
+        }
+      : {}),
+    ...(numberMetadata(metadata, "commanderSelfTroops") !== undefined
+      ? {
+          commanderSelfTroops: numberMetadata(metadata, "commanderSelfTroops"),
+        }
       : {}),
     ...(stringMetadata(metadata, "planPlannerSource") !== undefined &&
     stringMetadata(metadata, "plannerSource") === undefined
@@ -1151,6 +1466,7 @@ function matchSummary(
             )}`,
           },
     finalState: input.finalState ?? null,
+    ...(input.winner === undefined ? {} : { winner: input.winner }),
     notes: input.notes ?? [],
   };
 }

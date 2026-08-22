@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 
-import { LlmProvider } from "./LlmProvider";
+import type { LlmCompletionOptions, LlmProvider } from "./LlmProvider";
 
 // Claude CLI house-agent provider. Shells out to the headless `claude -p` print
 // mode (one turn, all tools disallowed) and returns the model's text response,
@@ -15,6 +16,8 @@ export interface ClaudeCliCommandInput {
   stdin: string;
   cwd?: string;
   timeoutMs: number;
+  env?: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
 }
 
 export interface ClaudeCliCommandResult {
@@ -22,6 +25,7 @@ export interface ClaudeCliCommandResult {
   stderr: string;
   code: number | null;
   timedOut: boolean;
+  aborted?: boolean;
 }
 
 export type ClaudeCliCommandRunner = (
@@ -38,6 +42,14 @@ export interface ClaudeCliLlmProviderConfig {
   timeoutMs?: number;
   cwd?: string;
   disallowedTools?: string;
+  /** Undefined preserves the legacy CLI surface; [] is an exact no-tools policy. */
+  allowedTools?: readonly string[];
+  /** Sealed experiments must not copy prompts or responses into CLI session state. */
+  noSessionPersistence?: boolean;
+  /** Disable CLAUDE.md, skills, plugins, hooks, MCP, and other customizations. */
+  safeMode?: boolean;
+  /** Explicit child environment for sealed experiments; undefined inherits. */
+  env?: NodeJS.ProcessEnv;
   commandRunner?: ClaudeCliCommandRunner;
 }
 
@@ -45,6 +57,7 @@ export const runClaudeCliCommand: ClaudeCliCommandRunner = (input) =>
   new Promise<ClaudeCliCommandResult>((resolve, reject) => {
     const child = spawn(input.command, input.args, {
       cwd: input.cwd,
+      env: input.env,
       stdio: ["pipe", "pipe", "pipe"],
       // Own process group so a timeout can kill the WHOLE claude subprocess tree.
       // The claude CLI forks children that hold the stdio pipes; killing only the
@@ -55,13 +68,16 @@ export const runClaudeCliCommand: ClaudeCliCommandRunner = (input) =>
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let aborted = false;
     let settled = false;
+    let cancelRequested = false;
     const settle = (result: ClaudeCliCommandResult): void => {
       if (settled) {
         return;
       }
       settled = true;
       clearTimeout(timer);
+      input.signal?.removeEventListener("abort", abortListener);
       resolve(result);
     };
     const killTree = (): void => {
@@ -77,14 +93,19 @@ export const runClaudeCliCommand: ClaudeCliCommandRunner = (input) =>
     };
     const timer = setTimeout(() => {
       timedOut = true;
+      cancelRequested = true;
       killTree();
-      // Resolve NOW instead of waiting for "close": a wedged claude subprocess tree
-      // may never emit close, and claude calls are serialized (withClaudeCliLock),
-      // so a hung call would block EVERY later Commander call and stall the whole
-      // game (the watchdog then kills it). Returning timedOut lets the planner fall
-      // back for this one decision and the game continues.
-      settle({ stdout, stderr, code: null, timedOut: true });
     }, input.timeoutMs);
+    const abortListener = (): void => {
+      aborted = true;
+      cancelRequested = true;
+      killTree();
+    };
+    if (input.signal?.aborted === true) {
+      abortListener();
+    } else {
+      input.signal?.addEventListener("abort", abortListener, { once: true });
+    }
     child.stdout.on("data", (chunk) => {
       stdout += String(chunk);
     });
@@ -92,15 +113,20 @@ export const runClaudeCliCommand: ClaudeCliCommandRunner = (input) =>
       stderr += String(chunk);
     });
     child.on("error", (error) => {
+      if (cancelRequested) {
+        settle({ stdout, stderr, code: null, timedOut, aborted });
+        return;
+      }
       if (settled) {
         return;
       }
       settled = true;
       clearTimeout(timer);
+      input.signal?.removeEventListener("abort", abortListener);
       reject(error);
     });
     child.on("close", (code) => {
-      settle({ stdout, stderr, code, timedOut });
+      settle({ stdout, stderr, code, timedOut, aborted });
     });
     child.stdin.write(input.stdin);
     child.stdin.end();
@@ -123,53 +149,56 @@ function withClaudeCliLock<T>(task: () => Promise<T>): Promise<T> {
 
 export class ClaudeCliLlmProvider implements LlmProvider {
   readonly providerType = "claude-cli";
+  readonly cancellationBehavior = "settles-after-abort" as const;
+  readonly model: string | null;
   private readonly commandRunner: ClaudeCliCommandRunner;
 
   constructor(private readonly config: ClaudeCliLlmProviderConfig = {}) {
+    const configuredModel = config.model?.trim();
+    this.model =
+      configuredModel === undefined || configuredModel === ""
+        ? null
+        : configuredModel;
     this.commandRunner = config.commandRunner ?? runClaudeCliCommand;
   }
 
-  async complete(prompt: string): Promise<string> {
+  async complete(
+    prompt: string,
+    options: LlmCompletionOptions = {},
+  ): Promise<string> {
     const timeoutMs = this.config.timeoutMs ?? DEFAULT_CLAUDE_TIMEOUT_MS;
-    const args = [
-      "-p",
-      "--max-turns",
-      "1",
-      "--disallowedTools",
-      this.config.disallowedTools ?? DEFAULT_CLAUDE_DISALLOWED_TOOLS,
-      // Ignore the host's personal settings (CLAUDE.md, a global effortLevel like xhigh,
-      // MCP servers) so every game decision runs at the CLI's fast default effort and isn't
-      // biased by the operator's coding-agent config. Per-decision latency dropped from
-      // ~30s to ~8s in testing.
-      "--setting-sources=",
-    ];
-    const model = (this.config.model ?? "").trim();
-    if (model !== "") {
-      args.push("--model", model);
-    }
+    const args = buildClaudeCliCommandArgs(this.config);
 
-    const result = await withClaudeCliLock(() =>
-      this.commandRunner({
+    const result = await withClaudeCliLock(async () => {
+      if (options.signal?.aborted === true) {
+        throw new Error("Claude CLI request aborted before execution");
+      }
+      return this.commandRunner({
         command: this.config.command ?? "claude",
         args,
         stdin: prompt,
         cwd: this.config.cwd,
         timeoutMs,
-      }),
-    );
+        env: this.config.env,
+        signal: options.signal,
+      });
+    });
 
+    if (result.aborted === true) {
+      throw new Error("Claude CLI request aborted");
+    }
     if (result.timedOut) {
       throw new Error(`Claude CLI timed out after ${timeoutMs}ms`);
     }
     const text = result.stdout.trim();
     if (/Not logged in|Please run \/login/i.test(text || result.stderr)) {
       throw new Error(
-        `Claude CLI is not logged in. Run "claude login" before using AI_LEAGUE_LLM_PROVIDER=claude-cli. ${result.stderr || text}`.trim(),
+        `Claude CLI is not logged in. Run "claude login" before using AI_LEAGUE_LLM_PROVIDER=claude-cli. ${boundedClaudeDiagnostic(result)}`,
       );
     }
     if (result.code !== 0) {
       throw new Error(
-        `Claude CLI exited with code ${result.code}: ${result.stderr || text}`.trim(),
+        `Claude CLI exited with code ${result.code}; ${boundedClaudeDiagnostic(result)}`,
       );
     }
     if (text === "") {
@@ -177,6 +206,43 @@ export class ClaudeCliLlmProvider implements LlmProvider {
     }
     return text;
   }
+}
+
+/** One source of truth for the exact CLI treatment surface and its evidence. */
+export function buildClaudeCliCommandArgs(
+  config: ClaudeCliLlmProviderConfig,
+): string[] {
+  const args = [
+    "-p",
+    "--max-turns",
+    "1",
+    "--disallowedTools",
+    config.disallowedTools ?? DEFAULT_CLAUDE_DISALLOWED_TOOLS,
+    // Ignore host settings, effort configuration, and MCP servers.
+    "--setting-sources=",
+  ];
+  if (config.allowedTools !== undefined) {
+    args.push("--tools", config.allowedTools.join(","));
+  }
+  if (config.noSessionPersistence === true) {
+    args.push("--no-session-persistence");
+  }
+  if (config.safeMode === true) {
+    args.push("--safe-mode");
+  }
+  const model = (config.model ?? "").trim();
+  if (model !== "") {
+    args.push("--model", model);
+  }
+  return args;
+}
+
+function boundedClaudeDiagnostic(result: ClaudeCliCommandResult): string {
+  const body = `${result.stderr}\n${result.stdout}`;
+  return [
+    `diagnosticBytes=${Buffer.byteLength(body, "utf8")}`,
+    `diagnosticSha256=${createHash("sha256").update(body).digest("hex")}`,
+  ].join(" ");
 }
 
 export function loadClaudeCliLlmProviderConfig(

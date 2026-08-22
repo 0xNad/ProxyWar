@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
+  DEFAULT_REPLAY_PREMIERE_CATALOG_LIMITS,
   readAdmissionVerifiedSource,
   ReplayPremiereAdmissionCatalog,
   type ReplayPremiereAdmissionRecordV1,
@@ -46,6 +47,9 @@ const COLLECTOR_LIMITS = {
   requestTimeoutMs: 1_000,
   totalTimeoutMs: 10_000,
 } as const;
+
+const MEBIBYTE = 1024 * 1024;
+const OBSERVED_LIVE_CATALOG_BYTES = 67_091_213;
 
 describe("ReplayPremiereAdmissionCatalog", () => {
   let root: string;
@@ -250,6 +254,88 @@ describe("ReplayPremiereAdmissionCatalog", () => {
 
     await expect(bounded.readAll()).rejects.toMatchObject({
       operatorCode: "catalog_total_byte_ceiling_exceeded",
+    });
+  });
+
+  test("admits a normal record beside the observed live catalog under the bounded default", async () => {
+    const fixture = await verifiedPublicationFixture(root, {
+      leakEvidenceBodyBytes: 683_458,
+    });
+    const catalog = await openCatalog(root);
+    catalogs.push(catalog);
+    await writeSparseCatalogBytes(
+      catalog.entriesRoot,
+      OBSERVED_LIVE_CATALOG_BYTES,
+    );
+    expect(await catalogEntryBytes(catalog.entriesRoot)).toBe(
+      OBSERVED_LIVE_CATALOG_BYTES,
+    );
+
+    const record = await catalog.writeVerifiedAdmission({
+      gate: fixture.gate,
+      verification: fixture.verificationOptions,
+      chunkBuildLimits: CHUNK_LIMITS,
+      collectorLimits: COLLECTOR_LIMITS,
+    });
+    const admissionBytes = (
+      await fs.stat(entryPath(catalog, record.premiereId))
+    ).size;
+
+    expect(DEFAULT_REPLAY_PREMIERE_CATALOG_LIMITS).toEqual({
+      maxEntries: 128,
+      maxEntryBytes: 8 * MEBIBYTE,
+      maxTotalEntryBytes: 256 * MEBIBYTE,
+      maxSourceBytes: 256 * MEBIBYTE,
+      maxAuthoritativeResultBytes: 2 * MEBIBYTE,
+    });
+    expect(admissionBytes).toBeGreaterThanOrEqual(1.49 * MEBIBYTE);
+    expect(admissionBytes).toBeLessThanOrEqual(1.51 * MEBIBYTE);
+    expect(OBSERVED_LIVE_CATALOG_BYTES + admissionBytes).toBeGreaterThan(
+      64 * MEBIBYTE,
+    );
+    expect(OBSERVED_LIVE_CATALOG_BYTES + admissionBytes).toBeLessThan(
+      DEFAULT_REPLAY_PREMIERE_CATALOG_LIMITS.maxTotalEntryBytes,
+    );
+  });
+
+  test("fails closed at the 256 MiB aggregate and validator hard ceilings", async () => {
+    const fixture = await verifiedPublicationFixture(root);
+    const catalog = await openCatalog(root);
+    catalogs.push(catalog);
+    await writeSparseCatalogBytes(
+      catalog.entriesRoot,
+      DEFAULT_REPLAY_PREMIERE_CATALOG_LIMITS.maxTotalEntryBytes,
+    );
+    expect(await catalogEntryBytes(catalog.entriesRoot)).toBe(
+      DEFAULT_REPLAY_PREMIERE_CATALOG_LIMITS.maxTotalEntryBytes,
+    );
+
+    await expect(
+      catalog.writeVerifiedAdmission({
+        gate: fixture.gate,
+        verification: fixture.verificationOptions,
+        chunkBuildLimits: CHUNK_LIMITS,
+        collectorLimits: COLLECTOR_LIMITS,
+      }),
+    ).rejects.toMatchObject({
+      operatorCode: "catalog_total_byte_ceiling_exceeded",
+    });
+
+    await catalog.close();
+    catalogs.splice(catalogs.indexOf(catalog), 1);
+    await expect(
+      ReplayPremiereAdmissionCatalog.open({
+        statfs: AMPLE_DISK,
+        privateStateRoot: path.join(root, "over-hard-max-private"),
+        servedRoots: [path.join(root, "over-hard-max-served")],
+        limits: {
+          ...DEFAULT_REPLAY_PREMIERE_CATALOG_LIMITS,
+          maxTotalEntryBytes:
+            DEFAULT_REPLAY_PREMIERE_CATALOG_LIMITS.maxTotalEntryBytes + 1,
+        },
+      }),
+    ).rejects.toMatchObject({
+      operatorCode: "catalog_limits_outside_hard_bounds",
     });
   });
 
@@ -1561,6 +1647,51 @@ async function writeOpaqueEntry(
     "x".repeat(bytes),
     { mode: 0o400 },
   );
+}
+
+async function writeSparseCatalogBytes(
+  entriesRoot: string,
+  totalBytes: number,
+): Promise<void> {
+  let remaining = totalBytes;
+  let index = 0;
+  while (remaining > 0) {
+    const entryBytes = Math.min(
+      remaining,
+      DEFAULT_REPLAY_PREMIERE_CATALOG_LIMITS.maxEntryBytes,
+    );
+    const premiereId = `prem_${(0xf000000000000000n + BigInt(index)).toString(
+      16,
+    )}`;
+    const file = await fs.open(
+      entryPathFromRoot(entriesRoot, premiereId),
+      "wx",
+      0o600,
+    );
+    try {
+      await file.truncate(entryBytes);
+    } finally {
+      await file.close();
+    }
+    await fs.chmod(entryPathFromRoot(entriesRoot, premiereId), 0o400);
+    remaining -= entryBytes;
+    index += 1;
+  }
+}
+
+function entryPathFromRoot(entriesRoot: string, premiereId: string): string {
+  return path.join(entriesRoot, `${premiereId}.admission.json`);
+}
+
+async function catalogEntryBytes(entriesRoot: string): Promise<number> {
+  const entries = await fs.readdir(entriesRoot);
+  return (
+    await Promise.all(
+      entries.map(
+        async (entry) => (await fs.lstat(path.join(entriesRoot, entry))).size,
+      ),
+    )
+  ).reduce((total, bytes) => total + bytes, 0);
 }
 
 function entryPath(

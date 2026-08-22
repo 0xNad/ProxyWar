@@ -9,6 +9,7 @@ import {
   type AgentTimeSeries,
 } from "./agents/AgentTimeSeries";
 import type { CoworldLeagueArchivedReplayHrefs } from "./agents/CoworldLeagueArtifactRetention";
+import type { CoworldRoundIntegrityState } from "./agents/CoworldLeagueRoundIntegrity";
 import type {
   CoworldLeagueEpisodeRow,
   CoworldLeagueLatestPremiereCard,
@@ -367,7 +368,9 @@ export interface ProxyWarPublicReadModel {
   feedStates: {
     championFeedStale: boolean;
     replayFeedStale: boolean;
+    roundIntegrityFeedStale: boolean;
   };
+  roundIntegrity: CoworldRoundIntegrityState | null;
   league: CoworldLeagueMirrorData["league"];
   builders: PublicBuilder[];
   agents: PublicAgent[];
@@ -879,7 +882,9 @@ export function buildProxyWarPublicReadModel(
     feedStates: {
       championFeedStale: mirror.championFeedStale ?? false,
       replayFeedStale: mirror.replayFeedStale ?? false,
+      roundIntegrityFeedStale: mirror.roundIntegrityFeedStale ?? false,
     },
+    roundIntegrity: mirror.roundIntegrity ?? null,
     league: mirror.league,
     builders: identity.builders.map(publicBuilder),
     agents: publicAgents(

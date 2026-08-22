@@ -76,8 +76,11 @@ import {
 import { LlmAgentBrain } from "../../src/server/agents/LlmAgentBrain";
 import { LlmProvider } from "../../src/server/agents/LlmProvider";
 import { MockLlmProvider } from "../../src/server/agents/MockLlmProvider";
+import { StrategicCommanderBrain } from "../../src/server/agents/StrategicCommanderBrain";
+import { StrategicCommanderCaller } from "../../src/server/agents/StrategicCommanderCaller";
 import { GameServer } from "../../src/server/GameServer";
 import { setup } from "../util/Setup";
+import { makeCommanderStage2Fixture } from "./StrategicCommanderStage2TestHarness";
 
 function makeLogger(): Logger {
   return {
@@ -692,6 +695,55 @@ describe("AgentLeagueMatchRunner", () => {
     }
   });
 
+  it("rejects a brain whose advertised inner timeout is not below the outer budget", async () => {
+    const log = makeLogger();
+    const participants = createAgentParticipants(
+      [{ username: "Budgeted Commander", profile: "opportunistic" }],
+      log,
+      {
+        brainFactory: () => ({
+          brainType: "strategic-commander",
+          internalDecisionTimeoutMs: 10,
+          decide: () => ({ actionID: "hold", reason: "must not dispatch" }),
+        }),
+      },
+    );
+    const game = new GameServer(
+      "CMDBUDG1",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: [],
+      log,
+      legalActionBuilder: {
+        build: () => [
+          {
+            id: "hold",
+            kind: "hold",
+            label: "Hold",
+            intent: null,
+            risk: { level: "none", score: 0 },
+          },
+        ],
+      } as unknown as LegalActionBuilder,
+    });
+
+    try {
+      await expect(
+        match.runDecisionTurn({ turnNumber: 2, maxDecisionMs: 10 }),
+      ).rejects.toThrow(
+        "internal timeout 10ms must be below outer timeout 10ms",
+      );
+    } finally {
+      await game.end({ archive: false });
+    }
+  });
+
   it.each(["external-http", "external-relay", "llm", "planner"] as const)(
     "does not let later observation work consume the %s brain timeout",
     async (brainKind) => {
@@ -1023,6 +1075,7 @@ describe("AgentLeagueMatchRunner", () => {
             reason: "run compatible modules",
             metadata: {
               plannerRan: true,
+              plannerFallbackUsed: true,
               plannerLatencyMs: 12,
               plannerPromptLength: 1000,
               planPlannerSource: "codex-cli",
@@ -1063,12 +1116,357 @@ describe("AgentLeagueMatchRunner", () => {
         batchSize: 3,
         batchRejectedActionIDs: "invented:admin:kick",
         plannerRan: true,
+        plannerFallbackUsed: true,
       });
       expect(records[1].decisionMetadata).toMatchObject({
         plannerRan: false,
+        plannerFallbackUsed: false,
         plannerLatencyMs: 0,
         plannerPromptLength: 0,
       });
+      expect(records[2].decisionMetadata?.plannerFallbackUsed).toBe(false);
+    } finally {
+      await game.end({ archive: false });
+    }
+  });
+
+  it("projects per-action Commander fidelity and never executes support after primary rejection", async () => {
+    const log = makeLogger();
+    const legalActions: LegalAction[] = [
+      {
+        id: "attack:p7",
+        kind: "attack",
+        label: "Attack P7",
+        intent: null,
+        risk: { level: "low", score: 0.1 },
+        metadata: { targetID: "P7", expansion: false },
+      },
+      {
+        id: "embargo:p7:start",
+        kind: "embargo",
+        label: "Embargo P7",
+        intent: null,
+        risk: { level: "none", score: 0 },
+        metadata: { targetID: "P7", action: "start" },
+      },
+      {
+        id: "hold",
+        kind: "hold",
+        label: "Hold",
+        intent: null,
+        risk: { level: "none", score: 0 },
+      },
+    ];
+    let primaryID = "attack:p7";
+    const resultFeedback = vi.fn();
+    const participants = createAgentParticipants(
+      [{ username: "Commander", profile: "opportunistic" }],
+      log,
+      {
+        brainFactory: () => ({
+          brainType: "strategic-commander",
+          onActionResult: resultFeedback,
+          decide: () => ({
+            actionID: primaryID,
+            actionIDs: [primaryID, "embargo:p7:start"],
+            reason: "pressure P7",
+            metadata: {
+              commanderBatchFidelities: JSON.stringify({
+                [primaryID]: "aligned_primary",
+                "embargo:p7:start": "aligned_support",
+              }),
+              commanderFidelity: "aligned_primary",
+              commanderImmediateReplan: false,
+              planFollowed: true,
+              plannerFallbackUsed: true,
+              commanderSelectorSource: "fallback-deterministic",
+              degradedCause: "plan-parse",
+              llmPlannerDegraded: true,
+            },
+          }),
+        }),
+      },
+    );
+    const game = new GameServer(
+      "CMDBATCH",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: [],
+      log,
+      legalActionBuilder: {
+        build: () => legalActions,
+      } as unknown as LegalActionBuilder,
+    });
+
+    try {
+      const aligned = await match.runDecisionTurn({ turnNumber: 2 });
+      expect(aligned.map((record) => record.chosenActionID)).toEqual([
+        "attack:p7",
+        "embargo:p7:start",
+      ]);
+      expect(
+        aligned.map((record) => record.decisionMetadata?.commanderFidelity),
+      ).toEqual(["aligned_primary", "aligned_support"]);
+      expect(
+        aligned.map((record) => ({
+          plannerFallbackUsed: record.decisionMetadata?.plannerFallbackUsed,
+          commanderSelectorSource:
+            record.decisionMetadata?.commanderSelectorSource,
+          degradedCause: record.decisionMetadata?.degradedCause,
+          llmPlannerDegraded: record.decisionMetadata?.llmPlannerDegraded,
+        })),
+      ).toEqual([
+        {
+          plannerFallbackUsed: true,
+          commanderSelectorSource: "fallback-deterministic",
+          degradedCause: "plan-parse",
+          llmPlannerDegraded: true,
+        },
+        {
+          plannerFallbackUsed: true,
+          commanderSelectorSource: "fallback-deterministic",
+          degradedCause: "plan-parse",
+          llmPlannerDegraded: true,
+        },
+      ]);
+
+      primaryID = "attack:p7:stale";
+      const blocked = await match.runDecisionTurn({ turnNumber: 3 });
+      expect(blocked).toHaveLength(1);
+      expect(blocked[0]).toMatchObject({
+        chosenActionID: "hold",
+        decisionMetadata: {
+          commanderFidelity: "hold_plan_blocked",
+          commanderBlockedReason: "validator_fallback",
+          commanderImmediateReplan: true,
+          planFollowed: false,
+          validationFallbackUsed: true,
+        },
+      });
+      expect(blocked[0].decisionMetadata?.batchRejectedActionIDs).toContain(
+        "embargo:p7:start",
+      );
+      expect(resultFeedback).toHaveBeenLastCalledWith({
+        decision: expect.objectContaining({
+          actionID: "attack:p7:stale",
+        }),
+        requestedActionID: "attack:p7:stale",
+        result: {
+          accepted: false,
+          reason: "Commander primary rejected by exact-id validation",
+          submittedIntent: null,
+        },
+      });
+
+      primaryID = "attack:p7";
+      legalActions[0]!.intent = {
+        type: "attack",
+        targetID: "P7",
+        troops: 100,
+      };
+      legalActions[1]!.intent = {
+        type: "embargo",
+        targetID: "P7",
+        action: "start",
+      };
+      resultFeedback.mockClear();
+      const supportOnlySubmit = vi
+        .spyOn(participants[0]!.runner, "submitLegalAction")
+        .mockReturnValueOnce({
+          accepted: true,
+          reason: "primary accepted",
+          intent: legalActions[0]!.intent,
+        })
+        .mockReturnValueOnce({
+          accepted: false,
+          reason: "support rejected",
+          intent: null,
+        });
+      const supportRejected = await match.runDecisionTurn({ turnNumber: 4 });
+      expect(supportRejected).toHaveLength(2);
+      expect(supportRejected[0]!.result.accepted).toBe(true);
+      expect(supportRejected[1]!.result.accepted).toBe(false);
+      expect(supportRejected[1]!.decisionMetadata).toMatchObject({
+        commanderFidelity: "aligned_support",
+        commanderBlockedReason: "engine_rejected",
+        commanderImmediateReplan: false,
+        planFollowed: false,
+      });
+      expect(resultFeedback).toHaveBeenCalledTimes(1);
+      expect(resultFeedback).toHaveBeenCalledWith(
+        expect.objectContaining({
+          requestedActionID: "attack:p7",
+          result: expect.objectContaining({ accepted: true }),
+        }),
+      );
+      supportOnlySubmit.mockRestore();
+      resultFeedback.mockClear();
+
+      const submit = vi
+        .spyOn(participants[0]!.runner, "submitLegalAction")
+        .mockReturnValue({
+          accepted: false,
+          reason: "core rejected the primary",
+          intent: null,
+        });
+      const engineRejected = await match.runDecisionTurn({ turnNumber: 5 });
+      expect(engineRejected).toHaveLength(2);
+      expect(engineRejected[0]!.result).toMatchObject({ accepted: false });
+      expect(engineRejected[0]!.decisionMetadata).toMatchObject({
+        commanderFidelity: "aligned_primary",
+        commanderBlockedReason: "engine_rejected",
+        commanderImmediateReplan: true,
+        planFollowed: false,
+      });
+      expect(engineRejected[1]!.result).toMatchObject({
+        accepted: false,
+        reason: expect.stringContaining("commander support blocked"),
+      });
+      expect(engineRejected[1]!.decisionMetadata).toMatchObject({
+        commanderFidelity: "aligned_support",
+        commanderBlockedReason: "support_blocked",
+        commanderImmediateReplan: true,
+        planFollowed: false,
+      });
+      expect(submit).toHaveBeenCalledTimes(1);
+      expect(resultFeedback).toHaveBeenCalledWith(
+        expect.objectContaining({
+          requestedActionID: "attack:p7",
+          result: expect.objectContaining({ accepted: false }),
+        }),
+      );
+    } finally {
+      await game.end({ archive: false });
+    }
+  });
+
+  it("fails a timed-out Commander closed and ignores its late plan result", async () => {
+    const log = makeLogger();
+    const fixture = makeCommanderStage2Fixture();
+    let providerCalls = 0;
+    let resolveFirst: (value: string) => void = () => undefined;
+    const firstResponse = new Promise<string>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const provider: LlmProvider = {
+      complete: () => {
+        providerCalls += 1;
+        return providerCalls === 1
+          ? firstResponse
+          : Promise.resolve(
+              JSON.stringify({
+                selectedStrategicOptionId: "develop_economy",
+                horizonDecisions: 3,
+                intent: "replan after the outer timeout",
+                replanTriggers: [],
+              }),
+            );
+      },
+    };
+    const realCommander = new StrategicCommanderBrain(
+      new StrategicCommanderCaller(provider, 100),
+      {
+        brainType: "rule",
+        decide: () => ({ actionID: "hold", reason: "spawn only" }),
+      },
+    );
+    // Deliberately omit the advertised inner timeout on this wrapper so the
+    // test can exercise the outer-timeout recovery path. Production Commander
+    // construction advertises and enforces inner < outer separately.
+    const commander: AgentBrain = {
+      brainType: "strategic-commander",
+      decide: realCommander.decide.bind(realCommander),
+      failClosed: realCommander.failClosed.bind(realCommander),
+      onActionResult: realCommander.onActionResult.bind(realCommander),
+    };
+    const participants = createAgentParticipants(
+      [{ username: "Commander", profile: "opportunistic" }],
+      log,
+      { brainFactory: () => commander },
+    );
+    const game = new GameServer(
+      "CMDLATE1",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+    );
+    const realObservationBuilder = new AgentObservationBuilder();
+    const match = new AgentLeagueMatchRunner({
+      game,
+      participants,
+      spawnCandidates: [],
+      log,
+      legalActionBuilder: {
+        build: () => fixture.legalActions,
+      } as unknown as LegalActionBuilder,
+      observationBuilder: {
+        withObservationBatch: <T>(_gameState: unknown, callback: () => T): T =>
+          callback(),
+        build: (input: Parameters<AgentObservationBuilder["build"]>[0]) => ({
+          ...fixture.observation,
+          agentID: input.agentID,
+          clientID: input.clientID,
+          username: input.username,
+          recentDecisions: input.recentDecisions ?? [],
+        }),
+        summarize: realObservationBuilder.summarize.bind(
+          realObservationBuilder,
+        ),
+      } as unknown as AgentObservationBuilder,
+    });
+
+    try {
+      const timedOut = await match.runDecisionTurn({
+        turnNumber: 2,
+        maxDecisionMs: 5,
+      });
+      expect(timedOut).toHaveLength(1);
+      expect(timedOut[0]).toMatchObject({
+        chosenActionID: "hold",
+        decisionMetadata: {
+          brainType: "strategic-commander",
+          degradedCause: "brain-timeout",
+          fallbackUsed: true,
+          llmPlannerDegraded: true,
+          commanderFidelity: "hold_plan_blocked",
+          commanderImmediateReplan: true,
+          planFollowed: false,
+        },
+      });
+
+      resolveFirst(
+        JSON.stringify({
+          selectedStrategicOptionId: "pressure_rival:P7",
+          horizonDecisions: 4,
+          intent: "this late plan must never install",
+          replanTriggers: [],
+        }),
+      );
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      const replanned = await match.runDecisionTurn({
+        turnNumber: 3,
+        maxDecisionMs: 500,
+      });
+      expect(providerCalls).toBe(2);
+      expect(replanned[0]?.decisionMetadata).toMatchObject({
+        commanderSelectedStrategicOptionId: "develop_economy",
+        commanderPreviousPlanID: null,
+      });
+      expect(
+        replanned.some(
+          (record) =>
+            record.decisionMetadata?.commanderSelectedStrategicOptionId ===
+            "pressure_rival:P7",
+        ),
+      ).toBe(false);
     } finally {
       await game.end({ archive: false });
     }

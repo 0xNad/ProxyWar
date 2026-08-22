@@ -24,6 +24,7 @@ import {
   resolveArchivedEpisodeReplayHrefs,
   type CoworldLeagueArchivedReplayHrefs,
 } from "./CoworldLeagueArtifactRetention";
+import type { CoworldRoundIntegrityState } from "./CoworldLeagueRoundIntegrity";
 import {
   appendStandingsHistorySnapshot,
   EMPTY_STANDINGS_HISTORY_STORE,
@@ -187,6 +188,13 @@ export interface CoworldLeagueMirrorData {
   /** True when standings are current but the optional replay feed is delayed. */
   replayFeedStale?: boolean;
   lastGoodReplaySyncAt?: string | null;
+  /**
+   * Separate from replay availability: true when complete episode-request rows
+   * could not be proven for the latest terminal round.
+   */
+  roundIntegrityFeedStale?: boolean;
+  /** Last verified/persisted score-bearing round assessment. */
+  roundIntegrity?: CoworldRoundIntegrityState;
   league: {
     id: string;
     name: string;
@@ -814,6 +822,18 @@ export function coworldLeagueIndexHtml(
           translateText("coworld_league.champion_feed_delayed"),
         )}</div>`
       : "";
+  const roundIntegrityBanner =
+    !data.stale && data.roundIntegrity?.status === "degraded"
+      ? `<div class="stale-banner">${escapeHtml(
+          translateText("coworld_league.round_integrity_degraded"),
+        )}</div>`
+      : "";
+  const roundIntegrityFeedBanner =
+    !data.stale && data.roundIntegrityFeedStale === true
+      ? `<div class="stale-banner">${escapeHtml(
+          translateText("coworld_league.round_integrity_feed_delayed"),
+        )}</div>`
+      : "";
   const watchLatest = data.episodes.find((episode) => episode.fullRenderHref);
   // The LIVE premiere card always takes precedence; the compact latest-revealed
   // card fills the same slot ONLY when nothing is currently premiering, so the
@@ -1012,6 +1032,8 @@ ${leagueSocialMetaHtml()}
       </div>
     </header>
     ${staleBanner}
+    ${roundIntegrityBanner}
+    ${roundIntegrityFeedBanner}
     ${championFeedBanner}
     ${replayFeedBanner}
   <div id="live-update-status" class="sync-status" role="status" aria-live="polite" hidden>${escapeHtml(

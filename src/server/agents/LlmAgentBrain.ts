@@ -6,6 +6,7 @@ import {
   AgentBrainInput,
   AgentBrainType,
   AgentDecision,
+  AgentPrimaryActionValidationPolicy,
   AgentRuntimeMode,
   AgentStrategyProfile,
 } from "./AgentTypes";
@@ -48,6 +49,15 @@ export class LlmAgentBrain implements AgentBrain {
     // Robust parsing for the in-house agentic LLM (extract the decision from prose /
     // code fences / extra reasoning fields). External agents keep the strict default.
     this.parser = options.parser ?? new LlmDecisionParser({ strict: false });
+  }
+
+  primaryActionValidationPolicy(
+    input: AgentBrainInput,
+  ): AgentPrimaryActionValidationPolicy {
+    return this.promptBuilder.primaryActionValidationPolicy({
+      ...input,
+      personality: this.options.personality,
+    });
   }
 
   decide(input: AgentBrainInput): AgentBrainDecision {

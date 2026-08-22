@@ -140,6 +140,45 @@ describe("OpenRouterLlmProvider", () => {
     await expect(provider.complete("prompt")).rejects.toThrow(/timed out/);
   });
 
+  it("honors caller cancellation at the fetch boundary without retrying", async () => {
+    let attempts = 0;
+    let transportAborted = false;
+    const provider = new OpenRouterLlmProvider({
+      apiKey: "test-key",
+      model: "m",
+      endpoint: "https://example.test/v1/chat/completions",
+      timeoutMs: 1_000,
+      maxRetries: 2,
+      maxOutputTokens: 600,
+      temperature: 0.2,
+      fetchFn: (_input, init) => {
+        attempts += 1;
+        return new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener(
+            "abort",
+            () => {
+              transportAborted = true;
+              const error = new Error("aborted");
+              error.name = "AbortError";
+              reject(error);
+            },
+            { once: true },
+          );
+        });
+      },
+    });
+    const controller = new AbortController();
+    const completion = provider.complete("prompt", {
+      signal: controller.signal,
+    });
+    await Promise.resolve();
+    controller.abort();
+
+    await expect(completion).rejects.toThrow(/aborted by caller/);
+    expect(transportAborted).toBe(true);
+    expect(attempts).toBe(1);
+  });
+
   it("does not let synchronous work after dispatch consume the timeout", async () => {
     vi.useFakeTimers();
     try {

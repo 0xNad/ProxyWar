@@ -44,6 +44,7 @@ const ROSTER = [A, B, C].map((seat) => ({
 
 const PROPOSE_B_NAP = "deal_propose:P_B:non_aggression_pact";
 const NAP_A_TO_B = "deal:P_A:P_B:non_aggression_pact:0";
+const SOCIAL_PROMPT_FLAG = "PROXYWAR_TUNE_INHOUSE_SOCIAL_PROMPT";
 
 beforeEach(() => {
   process.env[DEALS_FLAG] = "1";
@@ -51,6 +52,7 @@ beforeEach(() => {
 
 afterEach(() => {
   delete process.env[DEALS_FLAG];
+  delete process.env[SOCIAL_PROMPT_FLAG];
 });
 
 function recordFor(
@@ -94,10 +96,22 @@ describe("deal slot — the raw-intent-bypass guard", () => {
     ...(dealActionID !== undefined ? { dealActionID } : {}),
   });
 
-  it("returns null (shipped path untouched) when the field is absent or blank", () => {
+  it("returns null (shipped path untouched) only when the field is absent", () => {
     expect(validateAgentDealDecision(decision(), menu)).toBeNull();
     expect(validateAgentDealDecision(decision(null), menu)).toBeNull();
-    expect(validateAgentDealDecision(decision("   "), menu)).toBeNull();
+  });
+
+  it("rejects blank and padded ids without rewriting them", () => {
+    const blank = validateAgentDealDecision(decision("   "), menu);
+    expect(blank).toMatchObject({ ok: false });
+    if (blank === null || blank.ok) return;
+    expect(blank.reason).toBe("deal selection named unknown action id:    ");
+
+    const paddedID = ` deal_accept:${NAP_A_TO_B} `;
+    expect(validateAgentDealDecision(decision(paddedID), menu)).toEqual({
+      ok: false,
+      reason: `deal selection named unknown action id: ${paddedID}`,
+    });
   });
 
   it("accepts exactly one offered deal id", () => {
@@ -189,6 +203,26 @@ describe("deal slot — league submission pass", () => {
     expect(harness.league.dealLedger().deals).toEqual([]);
   });
 
+  it("rejects a padded offered deal id and applies no deal", async () => {
+    const paddedID = ` ${PROPOSE_B_NAP} `;
+    const harness = dealLeagueHarness({
+      seats: [A, B, C],
+      scripts: [[pickWithDeal(null, paddedID)], [], []],
+    });
+    const record = recordFor(
+      await harness.league.runDecisionTurn({ turnNumber: 0 }),
+      A,
+    );
+
+    expect(record.decisionMetadata?.dealSlotRequestedID).toBe(paddedID);
+    expect(record.decisionMetadata?.dealSlotRejected).toBe(
+      `deal selection named unknown action id: ${paddedID}`,
+    );
+    expect(record.decisionMetadata?.dealAction).toBeUndefined();
+    expect(record.dealSlotEvidence?.application.attempted).toBe(false);
+    expect(harness.league.dealLedger().deals).toEqual([]);
+  });
+
   it("applies the game action AND the deal action in the same step, stamping one record", async () => {
     const harness = dealLeagueHarness({
       seats: [A, B, C],
@@ -240,6 +274,68 @@ describe("deal slot — league submission pass", () => {
       dealSeparateSlot: true,
       dealSlotResult: `deal proposed: ${NAP_A_TO_B}`,
     });
+    expect(
+      harness.league.dealLedger().deals.map((deal) => deal.dealID),
+    ).toEqual([NAP_A_TO_B]);
+  });
+
+  it("rejects an ordinary-only primary deal to hold while applying the same exact deal through its side slot", async () => {
+    process.env[SOCIAL_PROMPT_FLAG] = "1";
+    const harness = dealLeagueHarness({
+      seats: [A, B, C],
+      scripts: [
+        [pickWithDeal(PROPOSE_B_NAP, PROPOSE_B_NAP, "side slot only")],
+        [],
+        [],
+      ],
+    });
+    // This capability belongs to the local brain implementation. The runner
+    // resolves it before dispatch; no field in the scripted decision can arm
+    // or weaken validation.
+    harness.handles[0].brain.primaryActionValidationPolicy = () =>
+      process.env[SOCIAL_PROMPT_FLAG] === "1"
+        ? "ordinary-only"
+        : "legacy-deal-compatible";
+
+    const record = recordFor(
+      await harness.league.runDecisionTurn({ turnNumber: 0 }),
+      A,
+    );
+
+    expect(record.chosenActionID).toBe("hold");
+    expect(record.chosenActionKind).toBe("hold");
+    expect(record.decisionMetadata).toMatchObject({
+      validationFallbackUsed: true,
+      dealAction: "propose",
+      dealSeparateSlot: true,
+      dealApplyAccepted: true,
+    });
+    expect(record.dealSlotEvidence).toMatchObject({
+      requestedActionID: PROPOSE_B_NAP,
+      validation: { accepted: true, actionID: PROPOSE_B_NAP },
+      application: { attempted: true, accepted: true },
+    });
+    expect(
+      harness.league.dealLedger().deals.map((deal) => deal.dealID),
+    ).toEqual([NAP_A_TO_B]);
+  });
+
+  it("keeps a legacy external primary deal valid when the in-house arm is globally on", async () => {
+    process.env[SOCIAL_PROMPT_FLAG] = "1";
+    const harness = dealLeagueHarness({
+      seats: [A, B, C],
+      scripts: [[pickByID(PROPOSE_B_NAP)], [], []],
+      brainType: "external-http",
+    });
+
+    const record = recordFor(
+      await harness.league.runDecisionTurn({ turnNumber: 0 }),
+      A,
+    );
+    expect(record.chosenActionID).toBe(PROPOSE_B_NAP);
+    expect(record.chosenActionKind).toBe("deal_propose");
+    expect(record.decisionMetadata?.validationFallbackUsed).toBeUndefined();
+    expect(record.decisionMetadata?.dealSeparateSlot).toBeUndefined();
     expect(
       harness.league.dealLedger().deals.map((deal) => deal.dealID),
     ).toEqual([NAP_A_TO_B]);

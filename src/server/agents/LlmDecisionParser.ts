@@ -50,20 +50,18 @@ export type LlmDecisionParseResult =
       spawnPreferenceLegalActionIds?: string[];
       /**
        * OPTIONAL second selection — the diplomacy slot
-       * (PROXYWAR_TUNE_STRUCTURED_DEALS). Present only when the reply carried
-       * a non-empty `selectedDealActionId`. It is NOT validated here beyond
-       * being a non-empty string: `validateAgentDealDecision` is the sole
-       * authority and rejects anything that is not an offered deal
+       * (PROXYWAR_TUNE_STRUCTURED_DEALS). When the reply carries the key, its
+       * exact string is preserved: `validateAgentDealDecision` is the sole
+       * authority and rejects anything that is not an exact offered deal
        * meta-action id.
        */
       selectedDealActionId?: string;
       /**
        * OPTIONAL third selection — the comms slot
-       * (PROXYWAR_TUNE_FREETEXT_MESSAGES). Present as a pair only when the
-       * reply carried a non-empty `selectedMessageActionId`. Neither is
-       * validated here beyond being a non-empty string:
-       * `validateAgentMessageDecision` is the sole authority on the id, the
-       * length cap, and the character set.
+       * (PROXYWAR_TUNE_FREETEXT_MESSAGES). The two keys must be present as a
+       * string pair. Their exact strings are preserved so
+       * `validateAgentMessageDecision` remains the sole authority on exact id
+       * equality, blankness, the length cap, and the character set.
        */
       selectedMessageActionId?: string;
       messageText?: string;
@@ -106,16 +104,25 @@ function dealSlotKeyAllowed(): boolean {
   return structuredDealsEnabled();
 }
 
-function parsedDealActionId(decision: LlmDecisionJson): string | undefined {
+type ParsedDealSlot =
+  | { ok: true; actionID?: string }
+  | { ok: false; reason: string };
+
+function parsedDealActionId(decision: LlmDecisionJson): ParsedDealSlot {
   if (!dealSlotKeyAllowed()) {
-    return undefined;
+    return { ok: true };
+  }
+  if (!("selectedDealActionId" in decision)) {
+    return { ok: true };
   }
   const value = decision.selectedDealActionId;
   if (typeof value !== "string") {
-    return undefined;
+    return {
+      ok: false,
+      reason: "selectedDealActionId must be a string when present",
+    };
   }
-  const trimmed = value.trim();
-  return trimmed.length === 0 ? undefined : trimmed;
+  return { ok: true, actionID: value };
 }
 
 /**
@@ -127,27 +134,44 @@ function commsSlotKeysAllowed(): boolean {
   return freeTextMessagesEnabled();
 }
 
-function parsedMessageSlot(
-  decision: LlmDecisionJson,
-): { actionID: string; text: string } | undefined {
+type ParsedMessageSlot =
+  | { ok: true; slot?: { actionID: string; text: string } }
+  | { ok: false; reason: string };
+
+function parsedMessageSlot(decision: LlmDecisionJson): ParsedMessageSlot {
   if (!commsSlotKeysAllowed()) {
-    return undefined;
+    return { ok: true };
+  }
+  const hasID = "selectedMessageActionId" in decision;
+  const hasText = "messageText" in decision;
+  if (!hasID && !hasText) {
+    return { ok: true };
+  }
+  if (hasID !== hasText) {
+    return {
+      ok: false,
+      reason:
+        "selectedMessageActionId and messageText must be provided together",
+    };
   }
   const id = decision.selectedMessageActionId;
   const text = decision.messageText;
-  if (typeof id !== "string" || typeof text !== "string") {
-    return undefined;
+  if (typeof id !== "string") {
+    return {
+      ok: false,
+      reason: "selectedMessageActionId must be a string when present",
+    };
   }
-  const trimmedID = id.trim();
-  if (trimmedID.length === 0) {
-    return undefined;
+  if (typeof text !== "string") {
+    return {
+      ok: false,
+      reason: "messageText must be a string when present",
+    };
   }
-  // The body is passed through UNTRIMMED beyond this emptiness guard: the
-  // validator owns normalization, and doing it twice in two places is how the
-  // stamped text and the delivered text drift apart.
-  return text.trim().length === 0
-    ? undefined
-    : { actionID: trimmedID, text };
+  // Both strings are passed through verbatim. The validator owns exact id
+  // matching and all text safety checks; dropping or repairing a present pair
+  // here would erase the rejection evidence.
+  return { ok: true, slot: { actionID: id, text } };
 }
 
 export class LlmDecisionParser {
@@ -315,8 +339,14 @@ export class LlmDecisionParser {
       }
     }
 
-    const selectedDealActionId = parsedDealActionId(decision);
+    const dealSlot = parsedDealActionId(decision);
+    if (!dealSlot.ok) {
+      return this.fail(raw, dealSlot.reason);
+    }
     const messageSlot = parsedMessageSlot(decision);
+    if (!messageSlot.ok) {
+      return this.fail(raw, messageSlot.reason);
+    }
     return {
       ok: true,
       selectedLegalActionId,
@@ -326,11 +356,13 @@ export class LlmDecisionParser {
       ...(spawnPreferences.value !== undefined
         ? { spawnPreferenceLegalActionIds: spawnPreferences.value }
         : {}),
-      ...(selectedDealActionId !== undefined ? { selectedDealActionId } : {}),
-      ...(messageSlot !== undefined
+      ...(dealSlot.actionID !== undefined
+        ? { selectedDealActionId: dealSlot.actionID }
+        : {}),
+      ...(messageSlot.slot !== undefined
         ? {
-            selectedMessageActionId: messageSlot.actionID,
-            messageText: messageSlot.text,
+            selectedMessageActionId: messageSlot.slot.actionID,
+            messageText: messageSlot.slot.text,
           }
         : {}),
       reason,
@@ -451,8 +483,14 @@ export class LlmDecisionParser {
       return this.fail(raw, spawnPreferences.reason);
     }
 
-    const selectedDealActionId = parsedDealActionId(decision);
+    const dealSlot = parsedDealActionId(decision);
+    if (!dealSlot.ok) {
+      return this.fail(raw, dealSlot.reason);
+    }
     const messageSlot = parsedMessageSlot(decision);
+    if (!messageSlot.ok) {
+      return this.fail(raw, messageSlot.reason);
+    }
     return {
       ok: true,
       selectedLegalActionId,
@@ -462,11 +500,13 @@ export class LlmDecisionParser {
       ...(spawnPreferences.value !== undefined
         ? { spawnPreferenceLegalActionIds: spawnPreferences.value }
         : {}),
-      ...(selectedDealActionId !== undefined ? { selectedDealActionId } : {}),
-      ...(messageSlot !== undefined
+      ...(dealSlot.actionID !== undefined
+        ? { selectedDealActionId: dealSlot.actionID }
+        : {}),
+      ...(messageSlot.slot !== undefined
         ? {
-            selectedMessageActionId: messageSlot.actionID,
-            messageText: messageSlot.text,
+            selectedMessageActionId: messageSlot.slot.actionID,
+            messageText: messageSlot.slot.text,
           }
         : {}),
       reason,

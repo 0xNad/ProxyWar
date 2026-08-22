@@ -313,9 +313,6 @@ describe("comms-slot validation", () => {
 
   it("returns null when no message was selected (shipped path untouched)", () => {
     expect(validateAgentMessageDecision(decision({}), menu)).toBeNull();
-    expect(
-      validateAgentMessageDecision(decision({ messageActionID: "  " }), menu),
-    ).toBeNull();
   });
 
   it("accepts a well-formed message", () => {
@@ -342,6 +339,19 @@ describe("comms-slot validation", () => {
     expect((result as { reason: string }).reason).toContain(
       "unknown action id",
     );
+  });
+
+  it("rejects a padded offered id without rewriting it", () => {
+    const requestedID = " message:P1 ";
+    expect(
+      validateAgentMessageDecision(
+        decision({ messageActionID: requestedID, messageText: "hello" }),
+        menu,
+      ),
+    ).toEqual({
+      ok: false,
+      reason: `message selection named unknown action id: ${requestedID}`,
+    });
   });
 
   it("REJECTS a game action in the comms slot (raw-intent bypass boundary)", () => {
@@ -378,7 +388,18 @@ describe("comms-slot validation", () => {
     expect(result).toMatchObject({ ok: true });
   });
 
-  it("rejects missing and blank bodies", () => {
+  it("applies the character cap to the exact raw quote", () => {
+    const messageText = ` ${"x".repeat(279)} `;
+    expect(messageText).toHaveLength(281);
+    expect(
+      validateAgentMessageDecision(
+        decision({ messageActionID: "message:P1", messageText }),
+        menu,
+      ),
+    ).toMatchObject({ ok: false });
+  });
+
+  it("rejects either partial pair and blank bodies", () => {
     expect(
       validateAgentMessageDecision(
         decision({ messageActionID: "message:P1" }),
@@ -387,21 +408,19 @@ describe("comms-slot validation", () => {
     ).toMatchObject({ ok: false });
     expect(
       validateAgentMessageDecision(
+        decision({ messageText: "present without id" }),
+        menu,
+      ),
+    ).toEqual({
+      ok: false,
+      reason: "messageText was present without a string messageActionID",
+    });
+    expect(
+      validateAgentMessageDecision(
         decision({ messageActionID: "message:P1", messageText: "   " }),
         menu,
       ),
     ).toMatchObject({ ok: false });
-  });
-
-  it("collapses whitespace without altering wording", () => {
-    const result = validateAgentMessageDecision(
-      decision({
-        messageActionID: "message:P1",
-        messageText: "  hold\n\nthe   line  ",
-      }),
-      menu,
-    );
-    expect(result).toMatchObject({ ok: true, text: "hold the line" });
   });
 
   it("rejects control characters", () => {
@@ -415,6 +434,65 @@ describe("comms-slot validation", () => {
     expect(result).toMatchObject({ ok: false });
     expect((result as { reason: string }).reason).toContain("control");
   });
+
+  it.each([
+    ["tab", "hold\tthe line"],
+    ["line feed", "hold\nthen attack"],
+    ["carriage return", "hold\rthen attack"],
+  ])("rejects %s instead of rewriting it", (_, messageText) => {
+    expect(
+      validateAgentMessageDecision(
+        decision({ messageActionID: "message:P1", messageText }),
+        menu,
+      ),
+    ).toEqual({
+      ok: false,
+      reason: "messageText contained control characters",
+    });
+  });
+
+  it("rejects every C0, DEL, and C1 control code point on raw input", () => {
+    const controlCodePoints = [
+      ...Array.from({ length: 0x20 }, (_, index) => index),
+      0x7f,
+      ...Array.from({ length: 0x20 }, (_, index) => 0x80 + index),
+    ];
+    for (const codePoint of controlCodePoints) {
+      const messageText = `before${String.fromCodePoint(codePoint)}after`;
+      expect(
+        validateAgentMessageDecision(
+          decision({ messageActionID: "message:P1", messageText }),
+          menu,
+        ),
+        `control U+${codePoint.toString(16).toUpperCase().padStart(4, "0")} slipped through`,
+      ).toEqual({
+        ok: false,
+        reason: "messageText contained control characters",
+      });
+    }
+  });
+
+  it.each([
+    ["U+2028 LINE SEPARATOR", "\u2028"],
+    ["U+2029 PARAGRAPH SEPARATOR", "\u2029"],
+  ])(
+    "rejects raw %s instead of preserving a layout boundary",
+    (_, separator) => {
+      expect(
+        validateAgentMessageDecision(
+          decision({
+            messageActionID: "message:P1",
+            messageText: `hold${separator}then attack`,
+          }),
+          menu,
+        ),
+      ).toEqual({
+        ok: false,
+        reason:
+          "messageText contained invisible formatting or bidi-override characters",
+      });
+    },
+  );
 
   it("rejects bidi overrides that could spoof transcript attribution", () => {
     // The rendered line is "{sender} → {recipient}: {msg}" as a single text
@@ -442,10 +520,50 @@ describe("comms-slot validation", () => {
     }
   });
 
+  it("rejects every U+2060-U+206F invisible formatting code point", () => {
+    const reason =
+      "messageText contained invisible formatting or bidi-override characters";
+
+    for (let codePoint = 0x2060; codePoint <= 0x206f; codePoint += 1) {
+      const label = `U+${codePoint
+        .toString(16)
+        .toUpperCase()
+        .padStart(4, "0")}`;
+      const result = validateAgentMessageDecision(
+        decision({
+          messageActionID: "message:P1",
+          messageText: `before${String.fromCodePoint(codePoint)}after`,
+        }),
+        menu,
+      );
+
+      expect(result, `${label} slipped through`).toMatchObject({
+        ok: false,
+        reason,
+      });
+    }
+  });
+
+  it("rejects repeated U+2065 invisible padding", () => {
+    const result = validateAgentMessageDecision(
+      decision({
+        messageActionID: "message:P1",
+        messageText: `a${String.fromCodePoint(0x2065).repeat(100)}b`,
+      }),
+      menu,
+    );
+
+    expect(result, "U+2065 repeated padding slipped through").toMatchObject({
+      ok: false,
+      reason:
+        "messageText contained invisible formatting or bidi-override characters",
+    });
+  });
+
   it("rejects zero-width padding that inflates prompt cost invisibly", () => {
     // U+FEFF is included now: the invisible-character check runs on the RAW
-    // text, before whitespace normalization, so JS `\s` matching U+FEFF no
-    // longer makes that arm dead code.
+    // text before any other validation, so JS `\s` matching U+FEFF cannot make
+    // that arm dead code.
     for (const ch of ["​", "‌", "‍", "⁠", "­", "﻿"]) {
       const result = validateAgentMessageDecision(
         decision({
@@ -488,23 +606,19 @@ describe("comms-slot validation", () => {
     expect(boundary).toMatchObject({ ok: false });
   });
 
-  it("still normalizes ordinary layout whitespace instead of rejecting it", () => {
-    // Tabs and newlines are layout, not content: a wrapped sentence is the same
-    // sentence, so these must keep being collapsed and accepted. Without this
-    // the FEFF fix would over-reach into every multi-line message.
-    for (const [input, expected] of [
-      ["hold\tthe\tline", "hold the line"],
-      ["hold\nthe\nline", "hold the line"],
-      ["  hold   the line  ", "hold the line"],
-      ["hold\u00a0the line", "hold the line"],
+  it("preserves valid spacing exactly instead of normalizing the quote", () => {
+    for (const input of [
+      "  hold   the line  ",
+      "hold\u00a0the line",
+      "Wait — then move.",
     ] as const) {
       expect(
         validateAgentMessageDecision(
           decision({ messageActionID: "message:P1", messageText: input }),
           menu,
         ),
-        `layout whitespace ${JSON.stringify(input)} must normalize, not reject`,
-      ).toMatchObject({ ok: true, text: expected });
+        `valid spacing ${JSON.stringify(input)} was rewritten or rejected`,
+      ).toMatchObject({ ok: true, text: input });
     }
   });
 

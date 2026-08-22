@@ -59,6 +59,15 @@ import {
   type PremiereSuppressionState,
 } from "../server/agents/CoworldLeaguePremiereSuppression";
 import {
+  episodeRowsByRoundId,
+  evaluateCoworldRoundIntegrity,
+  parseCoworldLadderIntegritySettings,
+  recentTerminalCompletedRounds,
+  reconcileCoworldRoundIntegrity,
+  retainCoworldRoundIntegrityOnIncompleteProbe,
+  type CoworldRoundIntegrityState,
+} from "../server/agents/CoworldLeagueRoundIntegrity";
+import {
   markCoworldLeagueSiteStale,
   writeCoworldLeagueSite,
   type CoworldLeagueEpisodeRow,
@@ -69,8 +78,8 @@ import {
  * Read-only Coworld league mirror.
  *
  * Pulls hosted league state through the `coworld` CLI's read verbs
- * (`leagues`, `results`, `memberships`, `rounds`, `replays`) plus public S3
- * replay downloads, then writes a static league site into
+ * (`leagues`, `results`, `memberships`, `rounds`, `episodes`, `replays`) plus
+ * public S3 replay downloads, then writes a static league site into
  * `artifacts/ai-league-runs/league/` and unpacks each mirrored episode into a
  * standard `artifacts/ai-league-runs/<runID>/` bundle (self-contained
  * spectator.html + the inline artifacts the real-client renderer needs).
@@ -374,6 +383,7 @@ const readVerbs = new Set([
   "results",
   "memberships",
   "rounds",
+  "episodes",
   "replays",
 ]);
 
@@ -889,45 +899,61 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
   if (division === null) {
     throw new Error(`League ${options.leagueId} has no readable division`);
   }
-  const [standingsRaw, championMembershipRead, replayRead] = await Promise.all([
-    coworldJson(["results", division.id]),
-    // Results retain the policy label that owns the historical rating. Fetch
-    // current champion memberships separately instead of relabeling that score.
-    coworldJson([
-      "memberships",
-      "-d",
-      division.id,
-      "--active-only",
-      "--champions-only",
-      "--limit",
-      "1000",
-    ])
-      .then((value) => ({ ok: true as const, value }))
-      .catch((error: unknown) => {
-        log(
-          `champion memberships unavailable; publishing qualified rating rows only: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-        return { ok: false as const };
-      }),
-    coworldJson([
-      "replays",
-      "-d",
-      division.id,
-      "--limit",
-      String(options.recoverPinnedArtifacts ? 1000 : options.episodeMetaLimit),
-    ])
-      .then((value) => ({ ok: true as const, value }))
-      .catch((error: unknown) => {
-        log(
-          `replay feed unavailable; retaining last published battles: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-        return { ok: false as const };
-      }),
-  ]);
+  const [standingsRaw, championMembershipRead, replayRead, roundIntegrityRead] =
+    await Promise.all([
+      coworldJson(["results", division.id]),
+      // Results retain the policy label that owns the historical rating. Fetch
+      // current champion memberships separately instead of relabeling that score.
+      coworldJson([
+        "memberships",
+        "-d",
+        division.id,
+        "--active-only",
+        "--champions-only",
+        "--limit",
+        "1000",
+      ])
+        .then((value) => ({ ok: true as const, value }))
+        .catch((error: unknown) => {
+          log(
+            `champion memberships unavailable; publishing qualified rating rows only: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+          return { ok: false as const };
+        }),
+      coworldJson([
+        "replays",
+        "-d",
+        division.id,
+        "--limit",
+        String(
+          options.recoverPinnedArtifacts ? 1000 : options.episodeMetaLimit,
+        ),
+      ])
+        .then((value) => ({ ok: true as const, value }))
+        .catch((error: unknown) => {
+          log(
+            `replay feed unavailable; retaining last published battles: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+          return { ok: false as const };
+        }),
+      // Ranking integrity is not a replay property. Read ALL recent
+      // episode-request rows independently so missing replay URLs/downloads stay
+      // quarantined to replayFeedStale.
+      coworldJson(["episodes", "-d", division.id, "--limit", "1000"])
+        .then((value) => ({ ok: true as const, value }))
+        .catch((error: unknown) => {
+          log(
+            `round-integrity episode rows unavailable; retaining last verified assessment: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+          return { ok: false as const };
+        }),
+    ]);
 
   const standings = buildStandingRows(
     standingsRaw,
@@ -935,6 +961,63 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
   );
   const rounds = buildRoundRows(roundsRaw, options.roundsShown);
   const roundNumbers = roundNumberByRoundId(roundsRaw);
+  const roundIntegritySettings = parseCoworldLadderIntegritySettings(leagueRaw);
+  const terminalRounds = recentTerminalCompletedRounds(
+    roundsRaw,
+    options.roundsShown,
+  );
+  let roundIntegrityFeedStale = false;
+  let roundIntegrity: CoworldRoundIntegrityState | undefined;
+  if (
+    roundIntegritySettings === null ||
+    !roundIntegrityRead.ok ||
+    terminalRounds.length === 0
+  ) {
+    roundIntegrityFeedStale = true;
+    roundIntegrity = retainCoworldRoundIntegrityOnIncompleteProbe(
+      previousData?.roundIntegrity,
+    );
+  } else {
+    const episodeRows = episodeRowsByRoundId(roundIntegrityRead.value);
+    const evaluations = terminalRounds.map((round) =>
+      evaluateCoworldRoundIntegrity({
+        round,
+        episodeRows: episodeRows.get(String(round.id)) ?? [],
+        settings: roundIntegritySettings,
+      }),
+    );
+    // The newest terminal round controls current health. A lagging/partial
+    // episode listing is retained as unknown, never converted into failures.
+    if (evaluations[0]?.kind !== "assessed") {
+      roundIntegrityFeedStale = true;
+      roundIntegrity = retainCoworldRoundIntegrityOnIncompleteProbe(
+        previousData?.roundIntegrity,
+      );
+      log(
+        `round-integrity evidence incomplete for latest terminal round; retaining last verified assessment`,
+      );
+    } else {
+      const assessments = evaluations.flatMap((evaluation) =>
+        evaluation.kind === "assessed" ? [evaluation.assessment] : [],
+      );
+      roundIntegrity =
+        reconcileCoworldRoundIntegrity({
+          previous: previousData?.roundIntegrity ?? null,
+          settings: roundIntegritySettings,
+          assessments,
+          checkedAt: new Date().toISOString(),
+        }) ?? undefined;
+      if (roundIntegrity?.status === "confirmation_pending") {
+        log(
+          `round ${roundIntegrity.latestCompletedRound.roundNumber} integrity breach awaiting persistent recheck (${roundIntegrity.latestCompletedRound.scoreBearingCount}/${roundIntegrity.latestCompletedRound.expectedEpisodeCount} score-bearing)`,
+        );
+      } else if (roundIntegrity?.status === "degraded") {
+        log(
+          `round ${roundIntegrity.latestCompletedRound.roundNumber} integrity breach confirmed (${roundIntegrity.latestCompletedRound.scoreBearingCount}/${roundIntegrity.latestCompletedRound.expectedEpisodeCount} score-bearing; ${roundIntegrity.latestCompletedRound.phantomFailureCount} phantom)`,
+        );
+      }
+    }
+  }
   let replayStorageAvailable =
     (await minimumAvailableDiskBytes([
       options.cacheDir,
@@ -1271,6 +1354,8 @@ async function syncOnce(options: MirrorOptions): Promise<void> {
     stale: false,
     championFeedStale: !championMembershipRead.ok,
     replayFeedStale,
+    roundIntegrityFeedStale,
+    ...(roundIntegrity !== undefined ? { roundIntegrity } : {}),
     lastGoodReplaySyncAt: replayFeedStale
       ? (previousData?.lastGoodReplaySyncAt ??
         previousData?.lastGoodSyncAt ??

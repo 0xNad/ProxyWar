@@ -1,10 +1,18 @@
+import { Buffer } from "node:buffer";
 import { afterEach, describe, expect, it } from "vitest";
+import {
+  buildCommanderPrompt,
+  MAX_COMMANDER_PROMPT_BYTES,
+  MAX_COMMANDER_STATE_JSON_BYTES,
+} from "../../src/server/agents/CommanderPromptBuilder";
+import { canonicalCommanderJson } from "../../src/server/agents/CommanderStateBuilder";
 import {
   ARMS,
   buildBoard,
   loadStarterBuildState,
   measureArm,
 } from "../perf/agent-prompt-size-matrix";
+import { makeCommanderStage2Fixture } from "./StrategicCommanderStage2TestHarness";
 
 /**
  * Guards the offline prompt-size matrix (charter item L) against SILENT
@@ -159,4 +167,16 @@ describe("prompt size matrix arms", () => {
     expect(process.env.PROXYWAR_TUNE_STRUCTURED_DEALS).toBeUndefined();
     expect(process.env.PROXYWAR_TUNE_INHOUSE_SOCIAL_PROMPT).toBeUndefined();
   }, 120_000);
+
+  it("registers the dedicated Commander prompt and state byte budgets", () => {
+    const fixture = makeCommanderStage2Fixture();
+    const stateJson = canonicalCommanderJson(fixture.builtState.state);
+    const prompt = buildCommanderPrompt(fixture.builtState.state);
+    const stateBytes = Buffer.byteLength(stateJson, "utf8");
+    const promptBytes = Buffer.byteLength(prompt, "utf8");
+
+    expect(stateBytes).toBeLessThanOrEqual(MAX_COMMANDER_STATE_JSON_BYTES);
+    expect(promptBytes).toBeLessThanOrEqual(MAX_COMMANDER_PROMPT_BYTES);
+    expect(promptBytes - stateBytes).toBeLessThan(4_000);
+  });
 });

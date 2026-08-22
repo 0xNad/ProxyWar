@@ -15,6 +15,7 @@ import {
   AgentDealsObservation,
   AgentDealTermsView,
   AgentObservation,
+  AgentPrimaryActionValidationPolicy,
   LegalAction,
 } from "./AgentTypes";
 import { MAX_SPAWN_PREFERENCE_ACTION_IDS } from "./AgentWireProtocol";
@@ -30,14 +31,29 @@ export interface BuildLlmPromptInput {
 }
 
 export class LlmPromptBuilder {
+  /**
+   * Validation contract corresponding to the exact prompt this builder will
+   * emit for the supplied menu. The runner asks the server-owned brain for
+   * this before dispatch; it is never inferred from model output.
+   */
+  primaryActionValidationPolicy(
+    input: BuildLlmPromptInput,
+  ): AgentPrimaryActionValidationPolicy {
+    const { offersDealSlot, offersMessageSlot } = inhouseSocialPromptContract(
+      input.legalActions,
+    );
+    return offersDealSlot || offersMessageSlot
+      ? "ordinary-only"
+      : "legacy-deal-compatible";
+  }
+
   build(input: BuildLlmPromptInput): string {
-    const spawnPreferenceRound =
-      input.legalActions.length > 0 &&
-      input.legalActions.every((action) => action.kind === "spawn");
-    // Whether the in-house lane may describe the optional reply slots at all.
-    // The sealed spawn ballot never does: there is no social lane during spawn.
-    const teachSocialSlots =
-      inhouseSocialPromptEnabled() && !spawnPreferenceRound;
+    const {
+      spawnPreferenceRound,
+      teachSocialSlots,
+      offersDealSlot,
+      offersMessageSlot,
+    } = inhouseSocialPromptContract(input.legalActions);
     const observation = this.observationView(
       input.observation,
       teachSocialSlots,
@@ -73,19 +89,6 @@ export class LlmPromptBuilder {
       topSkill: candidate.topSkill,
       penalties: candidate.penalties,
     }));
-
-    // Which reply slots THIS prompt may describe. Both gates matter: the A/B
-    // arm decides whether the in-house lane is taught the slots at all, and the
-    // MENU decides whether there is anything to describe this turn. Gating on
-    // the menu rather than on the underlying feature flags means an armed flag
-    // with nothing offered never invites the model to name a deal or a
-    // recipient that does not exist.
-    const offersDealSlot =
-      teachSocialSlots &&
-      input.legalActions.some((action) => isDealActionKind(action.kind));
-    const offersMessageSlot =
-      teachSocialSlots &&
-      input.legalActions.some((action) => action.kind === "message");
 
     return [
       "You are an AI Nations League agent brain.",
@@ -123,12 +126,11 @@ export class LlmPromptBuilder {
       // under PROXYWAR_TUNE_INHOUSE_SOCIAL_PROMPT (default OFF), which is the
       // A/B arm the 2026-08-07 menu-cut reversal requires before any in-house
       // prompt change ships. With the arm off this block emits nothing and the
-      // prompt is byte-identical to shipped behavior, even while structured
-      // deals and free text are armed. `LlmAgentBrain` already forwards both
-      // slots, so this is the piece that lets an in-house model actually use
-      // what the runner would accept. An untaught model that names a `message`
-      // id as its PRIMARY selectedLegalActionId is still refused loudly by
-      // validateAgentDecision; nothing here changes validation.
+      // deals observation stays absent, even while structured deals and free
+      // text are armed. That is an arm-specific invariance claim, not a claim
+      // that universal prompt-sanitization fixes preserve bytes from an older
+      // commit. `LlmAgentBrain` already forwards both slots, so this is the
+      // piece that lets an in-house model actually use what the runner accepts.
       offersDealSlot || offersMessageSlot
         ? "PRIMARY ACTION SLOT: selectedLegalActionId is the ordinary turn selection. Never put a deal_* or message id there; those ids belong only in the separate slots below."
         : null,
@@ -295,6 +297,39 @@ export class LlmPromptBuilder {
       ),
     };
   }
+}
+
+interface InhouseSocialPromptContract {
+  spawnPreferenceRound: boolean;
+  teachSocialSlots: boolean;
+  offersDealSlot: boolean;
+  offersMessageSlot: boolean;
+}
+
+/**
+ * One source of truth for both prompt shape and its server-side primary-slot
+ * validation contract. Both gates matter: the arm decides whether the
+ * in-house lane is taught the slots at all, and the menu decides whether there
+ * is anything to describe this turn. Spawn never has a social lane.
+ */
+function inhouseSocialPromptContract(
+  legalActions: LegalAction[],
+): InhouseSocialPromptContract {
+  const spawnPreferenceRound =
+    legalActions.length > 0 &&
+    legalActions.every((action) => action.kind === "spawn");
+  const teachSocialSlots =
+    inhouseSocialPromptEnabled() && !spawnPreferenceRound;
+  return {
+    spawnPreferenceRound,
+    teachSocialSlots,
+    offersDealSlot:
+      teachSocialSlots &&
+      legalActions.some((action) => isDealActionKind(action.kind)),
+    offersMessageSlot:
+      teachSocialSlots &&
+      legalActions.some((action) => action.kind === "message"),
+  };
 }
 
 const UNTRUSTED_ACTION_METADATA_DISPLAY_KEYS = new Set([

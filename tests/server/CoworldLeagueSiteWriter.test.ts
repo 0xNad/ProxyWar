@@ -450,6 +450,64 @@ describe("coworldLeagueIndexHtml", () => {
       "Replay feed delayed — standings and rounds are current; showing the last available battles.",
     );
     expect(html).not.toContain("Live sync degraded");
+    expect(html).not.toContain("Round-integrity check delayed");
+  });
+
+  test("surfaces a confirmed round-integrity breach without claiming the whole mirror is stale", () => {
+    const assessment = {
+      roundId: "round_1897",
+      roundNumber: 1897,
+      completedAt: "2026-08-21T19:19:43.947983Z",
+      expectedEpisodeCount: 25,
+      observedEpisodeCount: 25,
+      scoreBearingCount: 11,
+      effectiveFailureCount: 14,
+      phantomFailureCount: 14,
+      otherFailureCount: 0,
+      allowedFailureCount: 1,
+      allowedFailureRate: 0.05,
+      verdict: "breach" as const,
+      evidenceHash: "a".repeat(64),
+    };
+    const html = coworldLeagueIndexHtml({
+      ...sampleData(),
+      roundIntegrity: {
+        status: "degraded",
+        checkedAt: "2026-08-21T19:21:00.000Z",
+        settings: {
+          expectedEpisodesPerRound: 25,
+          roundIntervalMinutes: 25,
+          allowedFailureRate: 0.05,
+          allowedFailureCount: 1,
+        },
+        latestCompletedRound: assessment,
+        lastConfirmedBreach: assessment,
+        breachObservations: [
+          {
+            roundId: assessment.roundId,
+            evidenceHash: assessment.evidenceHash,
+            firstObservedAt: "2026-08-21T19:20:00.000Z",
+          },
+        ],
+      },
+    });
+    expect(html).toContain(
+      "Round integrity degraded — the latest verified completed round exceeded its score-bearing failure tolerance.",
+    );
+    expect(html).not.toContain("Live sync degraded");
+    expect(html).not.toContain("Replay feed delayed");
+  });
+
+  test("retained integrity evidence has its own delayed-feed banner", () => {
+    const html = coworldLeagueIndexHtml({
+      ...sampleData(),
+      roundIntegrityFeedStale: true,
+    });
+    expect(html).toContain(
+      "Round-integrity check delayed — no new assessment was published.",
+    );
+    expect(html).not.toContain("Replay feed delayed");
+    expect(html).not.toContain("Live sync degraded");
   });
 
   test("qualifies rating rows when current champion status is unavailable", () => {

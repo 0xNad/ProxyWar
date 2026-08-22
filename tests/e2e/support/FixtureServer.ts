@@ -39,6 +39,109 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const require = createRequire(import.meta.url);
 const REPO_ROOT = path.resolve(__dirname, "../../..");
+const MAX_FIXTURE_DIAGNOSTIC_CHARACTERS = 4_096;
+export const FIXTURE_DIAGNOSTIC_RAW_INPUT_LIMIT = 8_192;
+const FIXTURE_DIAGNOSTIC_EDGE_CHARACTERS =
+  FIXTURE_DIAGNOSTIC_RAW_INPUT_LIMIT / 2;
+const FIXTURE_DIAGNOSTIC_SIGNATURES = [
+  [
+    "controlled execution config contains unknown or missing fields",
+    "controlled_execution_config_unknown_or_missing_fields",
+  ],
+  [
+    "controlled runner config contains unknown or missing fields",
+    "controlled_runner_config_unknown_or_missing_fields",
+  ],
+  [
+    "controlled execution config is outside the allowlist",
+    "controlled_execution_config_outside_allowlist",
+  ],
+  [
+    "controlled exhibition requires a clean committed source checkout",
+    "controlled_exhibition_source_not_clean",
+  ],
+  ["origin never came up", "fixture_origin_start_timeout"],
+  ["Full Replay build-manifest gate", "full_replay_build_manifest_gate"],
+  ["without a winner", "fixture_match_without_winner"],
+  ["EACCES", "fixture_filesystem_access_denied"],
+  ["ENOSPC", "fixture_filesystem_no_space"],
+] as const;
+
+interface FixtureCommandErrorLike {
+  code?: unknown;
+  signal?: unknown;
+  stdout?: unknown;
+  stderr?: unknown;
+  message?: unknown;
+}
+
+/**
+ * Produces fixed canonical failure IDs for CI. Arbitrary child stdout/stderr
+ * is never copied. Only capped edge samples are inspected for exact known-safe
+ * signatures, preventing both credential leakage and oversized-line work.
+ */
+export function boundedFixtureCommandDiagnostics(error: unknown): string {
+  const candidate =
+    error !== null && typeof error === "object"
+      ? (error as FixtureCommandErrorLike)
+      : { message: error };
+  const lines: string[] = [];
+  const code = boundedDiagnosticScalar(candidate.code);
+  const signal = boundedDiagnosticScalar(candidate.signal);
+  if (code !== null) lines.push(`exit code: ${code}`);
+  if (signal !== null) lines.push(`signal: ${signal}`);
+  for (const [label, value] of [
+    ["message", candidate.message],
+    ["stderr", candidate.stderr],
+    ["stdout", candidate.stdout],
+  ] as const) {
+    const sample = boundedDiagnosticInput(value);
+    for (const [signature, diagnosticID] of FIXTURE_DIAGNOSTIC_SIGNATURES) {
+      if (!sample.includes(signature)) continue;
+      const entry = `${label}: ${diagnosticID}`;
+      if (!lines.includes(entry)) lines.push(entry);
+    }
+  }
+  if (lines.length === 0) {
+    lines.push("subprocess produced no canonical diagnostics");
+  }
+  return lines.join("\n").slice(0, MAX_FIXTURE_DIAGNOSTIC_CHARACTERS);
+}
+
+export function fixtureCommandFailureError(error: unknown): Error {
+  // Deliberately do not retain the raw child-process error as `cause`:
+  // reporters may serialize its unbounded stdout/stderr and bypass the
+  // allowlist/redaction above.
+  return new Error(
+    `live-premiere fixture command failed\n${boundedFixtureCommandDiagnostics(error)}`,
+  );
+}
+
+function boundedDiagnosticInput(value: unknown): string {
+  if (typeof value === "string") {
+    if (value.length <= FIXTURE_DIAGNOSTIC_RAW_INPUT_LIMIT) return value;
+    return `${value.slice(0, FIXTURE_DIAGNOSTIC_EDGE_CHARACTERS)}${value.slice(
+      -FIXTURE_DIAGNOSTIC_EDGE_CHARACTERS,
+    )}`;
+  }
+  if (!Buffer.isBuffer(value)) return "";
+  if (value.byteLength <= FIXTURE_DIAGNOSTIC_RAW_INPUT_LIMIT) {
+    return value.toString("utf8");
+  }
+  return `${value.subarray(0, FIXTURE_DIAGNOSTIC_EDGE_CHARACTERS).toString("utf8")}${value
+    .subarray(-FIXTURE_DIAGNOSTIC_EDGE_CHARACTERS)
+    .toString("utf8")}`;
+}
+
+function boundedDiagnosticScalar(value: unknown): string | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+  if (typeof value === "string" && /^[A-Za-z0-9_-]{1,64}$/u.test(value)) {
+    return value;
+  }
+  return null;
+}
 
 export interface FixtureServerHandle {
   origin: string;
@@ -295,20 +398,24 @@ export async function startFixtureServerWithLivePremiere(
   const origin = `http://127.0.0.1:${port}`;
   const pidFile = `/tmp/pw-fixture-origin-${port}.pid`;
   try {
-    await execFileAsync(
-      "bash",
-      ["scripts/fixtures/run-public-product-fixtures.sh"],
-      {
-        cwd: REPO_ROOT,
-        env: {
-          ...process.env,
-          FIXTURE_ROOT: fixtureRoot,
-          FIXTURE_PORT: String(port),
-          FIXTURE_ADMIT_LIVE_PREMIERE: "1",
+    try {
+      await execFileAsync(
+        "bash",
+        ["scripts/fixtures/run-public-product-fixtures.sh"],
+        {
+          cwd: REPO_ROOT,
+          env: {
+            ...process.env,
+            FIXTURE_ROOT: fixtureRoot,
+            FIXTURE_PORT: String(port),
+            FIXTURE_ADMIT_LIVE_PREMIERE: "1",
+          },
+          maxBuffer: 64 * 1024 * 1024,
         },
-        maxBuffer: 64 * 1024 * 1024,
-      },
-    );
+      );
+    } catch (error) {
+      throw fixtureCommandFailureError(error);
+    }
     await waitForOrigin(origin, 15_000);
     return {
       origin,

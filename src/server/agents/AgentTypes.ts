@@ -19,6 +19,7 @@ export type AgentBrainType =
   | "external-http"
   | "external-relay"
   | "planner-executor"
+  | "strategic-commander"
   | "llm";
 
 export const agentRuntimeModes = [
@@ -31,17 +32,25 @@ export const agentRuntimeModes = [
   "autopilot-executor",
 ] as const;
 
-export type AgentRuntimeMode = (typeof agentRuntimeModes)[number];
+/** Local experiment attribution. This is intentionally not Coworld protocol. */
+export const internalAgentRuntimeModes = ["commander-v0-selector"] as const;
+
+const recognizedAgentRuntimeModes = [
+  ...agentRuntimeModes,
+  ...internalAgentRuntimeModes,
+] as const;
+
+export type AgentRuntimeMode = (typeof recognizedAgentRuntimeModes)[number];
 
 /**
  * Strict parser for runtime attribution crossing an untrusted metadata or
  * wire boundary. Deliberately no trimming, case folding, or coercion: an
- * almost-right label is unknown, not evidence for one of the five modes.
+ * almost-right label is unknown, not evidence for a recognized mode.
  */
 export function normalizeAgentRuntimeMode(
   value: unknown,
 ): AgentRuntimeMode | undefined {
-  return agentRuntimeModes.find((mode) => mode === value);
+  return recognizedAgentRuntimeModes.find((mode) => mode === value);
 }
 
 export type AgentGamePhase =
@@ -1347,6 +1356,19 @@ export interface LegalAction {
   metadata?: Record<string, string | number | boolean | null>;
 }
 
+/**
+ * Server-owned primary-slot contract. The legacy contract keeps structured
+ * deal meta-actions playable in the primary slot for existing external
+ * policies. `ordinary-only` is the stricter in-house social-prompt contract:
+ * deal and message ids belong only in their dedicated side slots.
+ *
+ * This is validation context, never policy output. A model response, wire
+ * payload, or decision metadata value cannot select the policy.
+ */
+export type AgentPrimaryActionValidationPolicy =
+  | "legacy-deal-compatible"
+  | "ordinary-only";
+
 export interface AgentDecision {
   actionID: string;
   actionIDs?: string[];
@@ -1423,9 +1445,44 @@ export interface AgentBrainInput {
 
 export type AgentBrainDecision = AgentDecision | Promise<AgentDecision>;
 
+export type AgentBrainFailureCause = "brain-timeout" | "brain-error";
+
+/**
+ * Narrow server-to-brain failure boundary. Brains that own a constrained
+ * execution policy can fail closed without letting the league substitute an
+ * unrelated global policy over the full action menu.
+ */
+export interface AgentBrainFailureInput extends AgentBrainInput {
+  cause: AgentBrainFailureCause;
+  detail: string;
+}
+
+/**
+ * Final canonical-path result for one requested action. Optional feedback is
+ * deliberately post-validation/post-submission; it is not an alternate action
+ * path and cannot change the result that the GameServer already returned.
+ */
+export interface AgentBrainActionResultFeedback {
+  decision: AgentDecision;
+  requestedActionID: string;
+  result: AgentActionResult;
+}
+
 export interface AgentBrain {
   readonly brainType?: AgentBrainType;
+  /** When present, must be strictly below the league's outer decision budget. */
+  readonly internalDecisionTimeoutMs?: number;
+  /**
+   * Optional server implementation capability that tightens primary-action
+   * validation for this exact observation/menu. `AgentLeagueMatch` resolves it
+   * before dispatch and passes it beside, never inside, the policy decision.
+   */
+  primaryActionValidationPolicy?(
+    input: AgentBrainInput,
+  ): AgentPrimaryActionValidationPolicy;
   decide(input: AgentBrainInput): AgentBrainDecision;
+  failClosed?(input: AgentBrainFailureInput): AgentBrainDecision;
+  onActionResult?(feedback: AgentBrainActionResultFeedback): void;
 }
 
 export interface AgentActionResult {

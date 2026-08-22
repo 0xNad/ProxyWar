@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import {
+  composeCoworldDecision,
+  normalizeDecisionResponse,
+} from "../../coworld-adapter/src/coworld-decision-wire";
 import type { AgentInboundMessage } from "../../src/server/agents/AgentTypes";
 import {
   dealLeagueHarness,
@@ -20,7 +24,10 @@ const B: StubSeat = { agentID: "b1", playerID: "P_B", username: "Sefirot" };
 const C: StubSeat = { agentID: "c1", playerID: "P_C", username: "Riven" };
 
 /** Selects hold plus a message to `recipientPlayerID`, if one is offered. */
-function sendMessageTo(recipientPlayerID: string, text: string): ScriptedPicker {
+function sendMessageTo(
+  recipientPlayerID: string,
+  text: string,
+): ScriptedPicker {
   return (input) => {
     const offer = input.legalActions.find(
       (action) =>
@@ -30,6 +37,26 @@ function sendMessageTo(recipientPlayerID: string, text: string): ScriptedPicker 
     return {
       actionID: null,
       ...(offer ? { messageActionID: offer.id, messageText: text } : {}),
+    };
+  };
+}
+
+function rawMessagePairTo(
+  recipientPlayerID: string,
+  buildPair: (offeredID: string) => {
+    messageActionID?: string;
+    messageText?: string;
+  },
+): ScriptedPicker {
+  return (input) => {
+    const offer = input.legalActions.find(
+      (action) =>
+        action.kind === "message" &&
+        action.metadata?.recipientID === recipientPlayerID,
+    );
+    return {
+      actionID: null,
+      ...buildPair(offer?.id ?? `message:${recipientPlayerID}`),
     };
   };
 }
@@ -55,13 +82,17 @@ function inboxOf(
  */
 function stubAcceptedSubmission(
   harness: ReturnType<typeof dealLeagueHarness>,
+  onSubmit?: () => void,
 ): void {
   for (const runner of harness.runners) {
-    runner.submitAgentMessage = () => ({
-      accepted: true,
-      reason: "stubbed transport",
-      intent: null,
-    });
+    runner.submitAgentMessage = () => {
+      onSubmit?.();
+      return {
+        accepted: true,
+        reason: "stubbed transport",
+        intent: null,
+      };
+    };
   }
 }
 
@@ -77,7 +108,10 @@ describe("free-text message delivery and privacy", () => {
     const harness = dealLeagueHarness({
       seats: [A, B, C],
       scripts: [
-        [sendMessageTo("P_B", "Hold the north and I will not touch you."), quiet],
+        [
+          sendMessageTo("P_B", "Hold the north and I will not touch you."),
+          quiet,
+        ],
         [quiet, quiet],
         [quiet, quiet],
       ],
@@ -138,6 +172,192 @@ describe("free-text message delivery and privacy", () => {
       commsSlotRecipientID: "P_B",
       commsSlotText: text,
     });
+  });
+
+  it.each([
+    ["U+2028 LINE SEPARATOR", "\u2028"],
+    ["U+2029 PARAGRAPH SEPARATOR", "\u2029"],
+  ])("rejects %s before recording or delivery", async (_, separator) => {
+    const harness = dealLeagueHarness({
+      seats: [A, B],
+      scripts: [
+        [sendMessageTo("P_B", `hold${separator}then attack`), quiet],
+        [quiet, quiet],
+      ],
+    });
+
+    stubAcceptedSubmission(harness);
+
+    await harness.league.runDecisionTurn({ turnNumber: 0 });
+    const senderRecord = harness
+      .records()
+      .find((record) => record.agentID === "a1");
+    expect(senderRecord?.decisionMetadata).toMatchObject({
+      commsSlotRejected:
+        "messageText contained invisible formatting or bidi-override characters",
+    });
+    expect(senderRecord?.decisionMetadata?.commsSlotText).toBeUndefined();
+
+    await harness.league.runDecisionTurn({ turnNumber: 25 });
+    expect(inboxOf(harness.handles, 1, 1)).toHaveLength(0);
+  });
+
+  it("rejects a padded offered message id without submission or delivery", async () => {
+    let submitCalls = 0;
+    const harness = dealLeagueHarness({
+      seats: [A, B],
+      scripts: [
+        [
+          rawMessagePairTo("P_B", (offeredID) => ({
+            messageActionID: ` ${offeredID} `,
+            messageText: "hold the north",
+          })),
+          quiet,
+        ],
+        [quiet, quiet],
+      ],
+    });
+    stubAcceptedSubmission(harness, () => {
+      submitCalls += 1;
+    });
+
+    await harness.league.runDecisionTurn({ turnNumber: 0 });
+    const senderRecord = harness
+      .records()
+      .find((record) => record.agentID === "a1");
+    expect(senderRecord?.decisionMetadata).toMatchObject({
+      commsSlotRequestedID: " message:P_B ",
+      commsSlotRejected:
+        "message selection named unknown action id:  message:P_B ",
+    });
+    expect(senderRecord?.decisionMetadata?.commsSlotText).toBeUndefined();
+    expect(submitCalls).toBe(0);
+
+    await harness.league.runDecisionTurn({ turnNumber: 25 });
+    expect(inboxOf(harness.handles, 1, 1)).toHaveLength(0);
+  });
+
+  it.each([
+    ["blank", "   ", "carried blank messageText"],
+    ["control-only", "\u0007", "contained control characters"],
+  ])(
+    "rejects a present %s message pair without submission or delivery",
+    async (_case, messageText, expectedReason) => {
+      let submitCalls = 0;
+      const harness = dealLeagueHarness({
+        seats: [A, B],
+        scripts: [
+          [sendMessageTo("P_B", messageText), quiet],
+          [quiet, quiet],
+        ],
+      });
+      stubAcceptedSubmission(harness, () => {
+        submitCalls += 1;
+      });
+
+      await harness.league.runDecisionTurn({ turnNumber: 0 });
+      const senderRecord = harness
+        .records()
+        .find((record) => record.agentID === "a1");
+      expect(senderRecord?.decisionMetadata?.commsSlotRequestedID).toBe(
+        "message:P_B",
+      );
+      expect(senderRecord?.decisionMetadata?.commsSlotRejected).toContain(
+        expectedReason,
+      );
+      expect(senderRecord?.decisionMetadata?.commsSlotText).toBeUndefined();
+      expect(submitCalls).toBe(0);
+
+      await harness.league.runDecisionTurn({ turnNumber: 25 });
+      expect(inboxOf(harness.handles, 1, 1)).toHaveLength(0);
+    },
+  );
+
+  it.each([
+    [
+      "id only",
+      (offeredID: string) => ({ messageActionID: offeredID }),
+      "message:P_B",
+      "carried no messageText",
+    ],
+    [
+      "text only",
+      () => ({ messageText: "present without id" }),
+      undefined,
+      "without a string messageActionID",
+    ],
+  ] as const)(
+    "rejects a partial comms pair (%s) without submission or delivery",
+    async (_case, buildPair, expectedRequestedID, expectedReason) => {
+      let submitCalls = 0;
+      const harness = dealLeagueHarness({
+        seats: [A, B],
+        scripts: [
+          [rawMessagePairTo("P_B", buildPair), quiet],
+          [quiet, quiet],
+        ],
+      });
+      stubAcceptedSubmission(harness, () => {
+        submitCalls += 1;
+      });
+
+      await harness.league.runDecisionTurn({ turnNumber: 0 });
+      const senderRecord = harness
+        .records()
+        .find((record) => record.agentID === "a1");
+      expect(senderRecord?.decisionMetadata?.commsSlotRequestedID).toBe(
+        expectedRequestedID,
+      );
+      expect(senderRecord?.decisionMetadata?.commsSlotRejected).toContain(
+        expectedReason,
+      );
+      expect(senderRecord?.decisionMetadata?.commsSlotText).toBeUndefined();
+      expect(submitCalls).toBe(0);
+
+      await harness.league.runDecisionTurn({ turnNumber: 25 });
+      expect(inboxOf(harness.handles, 1, 1)).toHaveLength(0);
+    },
+  );
+
+  it("stamps a Coworld text-only attempt without fabricating a requested id", async () => {
+    let submitCalls = 0;
+    const wireMessage = {
+      selectedLegalActionId: "hold",
+      messageText: "present without id",
+    };
+    const composed = composeCoworldDecision({
+      normalized: normalizeDecisionResponse(wireMessage),
+      message: wireMessage,
+      slot: 0,
+      requestID: "req_text_only",
+      offeredLegalActionCount: 2,
+    });
+    const harness = dealLeagueHarness({
+      seats: [A, B],
+      scripts: [
+        [() => composed, quiet],
+        [quiet, quiet],
+      ],
+    });
+    stubAcceptedSubmission(harness, () => {
+      submitCalls += 1;
+    });
+
+    await harness.league.runDecisionTurn({ turnNumber: 0 });
+    const senderRecord = harness
+      .records()
+      .find((record) => record.agentID === "a1");
+    expect(
+      senderRecord?.decisionMetadata?.commsSlotRequestedID,
+    ).toBeUndefined();
+    expect(senderRecord?.decisionMetadata?.commsSlotRejected).toBe(
+      "messageText was present without a string messageActionID",
+    );
+    expect(senderRecord?.decisionMetadata?.commsSlotText).toBeUndefined();
+    expect(submitCalls).toBe(0);
+
+    await harness.league.runDecisionTurn({ turnNumber: 25 });
+    expect(inboxOf(harness.handles, 1, 1)).toHaveLength(0);
   });
 
   it("rejects a comms slot naming a non-message action and leaves the game action alone", async () => {

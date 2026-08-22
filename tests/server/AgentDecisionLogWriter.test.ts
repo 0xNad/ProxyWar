@@ -1058,7 +1058,7 @@ async function writeAndParseEntries(
 }
 
 describe("decisions.jsonl bounded runtime attribution", () => {
-  it("persists all five exact modes and counts a forged label as unknown", async () => {
+  it("persists all six exact modes and counts a forged label as unknown", async () => {
     const rootDir = await fs.mkdtemp(
       path.join(os.tmpdir(), "ai-league-runtime-mode-"),
     );

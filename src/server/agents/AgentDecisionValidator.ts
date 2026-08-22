@@ -1,6 +1,19 @@
 import { isDealActionKind } from "./AgentDealManager";
 import { FREETEXT_MESSAGE_MAX_CHARS } from "./AgentTunables";
-import { AgentDecision, LegalAction } from "./AgentTypes";
+import {
+  AgentDecision,
+  AgentPrimaryActionValidationPolicy,
+  LegalAction,
+} from "./AgentTypes";
+
+export interface AgentDecisionValidationOptions {
+  /**
+   * Defaults to the documented legacy protocol, where a structured deal may
+   * occupy the primary slot. The in-house social prompt opts into the stricter
+   * ordinary-only contract through server-owned validation context.
+   */
+  primaryActionPolicy?: AgentPrimaryActionValidationPolicy;
+}
 
 export type AgentDecisionValidation =
   | { ok: true; action: LegalAction }
@@ -16,8 +29,9 @@ export type AgentMessageDecisionValidation =
 
 /**
  * Validates the OPTIONAL second selection, `AgentDecision.dealActionID` (the
- * diplomacy slot). Returns null when the field is absent/blank — the shipped
- * single-action path is then completely untouched.
+ * diplomacy slot). Returns null only when the field is absent — the shipped
+ * single-action path is then completely untouched. A present string is
+ * matched verbatim; whitespace is not authority to rewrite an action id.
  *
  * Two gates, both mandatory:
  * 1. exact-id match against the SAME offered menu as `actionID` (no off-menu
@@ -37,13 +51,7 @@ export function validateAgentDealDecision(
   if (typeof decision.dealActionID !== "string") {
     return null;
   }
-  // Trim ONCE and use the trimmed value for the lookup too — the websocket
-  // adapter and the response parser both trim before this point, so the
-  // untrimmed value was only ever reachable in-process.
-  const requestedID = decision.dealActionID.trim();
-  if (requestedID.length === 0) {
-    return null;
-  }
+  const requestedID = decision.dealActionID;
   const action = legalActions.find((candidate) => candidate.id === requestedID);
   if (action === undefined) {
     return {
@@ -62,8 +70,9 @@ export function validateAgentDealDecision(
 
 /**
  * Validates the OPTIONAL third selection — the comms slot
- * (`AgentDecision.messageActionID` + `messageText`). Returns null when the
- * field is absent/blank, leaving every shipped path untouched.
+ * (`AgentDecision.messageActionID` + `messageText`). Returns null only when
+ * both fields are absent, leaving every shipped path untouched. A partial or
+ * malformed-present pair is rejected rather than erased.
  *
  * This is the ONLY validator that admits agent-authored free text, so it is
  * deliberately the strictest. Four mandatory gates:
@@ -71,9 +80,10 @@ export function validateAgentDealDecision(
  * 2. the action's kind must be `message` — the raw-intent-bypass boundary,
  *    without which a policy could name an attack id here and buy itself a
  *    second game action per decision;
- * 3. the body must be present, non-blank, and within
- *    FREETEXT_MESSAGE_MAX_CHARS after normalization;
- * 4. the body must contain no control characters.
+ * 3. the raw body must be present, non-blank, and within
+ *    FREETEXT_MESSAGE_MAX_CHARS;
+ * 4. the raw body must contain no control, line/paragraph separator, bidi, or
+ *    zero-width characters.
  *
  * Violations are REJECTED, never repaired. Truncating or stripping would put
  * words the agent did not write in its mouth, and every negotiation claim we
@@ -89,12 +99,24 @@ export function validateAgentMessageDecision(
   decision: AgentDecision,
   legalActions: LegalAction[],
 ): AgentMessageDecisionValidation | null {
-  if (typeof decision.messageActionID !== "string") {
+  const requestedID = decision.messageActionID;
+  const text = decision.messageText;
+  const requestedIDAbsent = requestedID === null || requestedID === undefined;
+  const textAbsent = text === null || text === undefined;
+  if (requestedIDAbsent && textAbsent) {
     return null;
   }
-  const requestedID = decision.messageActionID.trim();
-  if (requestedID.length === 0) {
-    return null;
+  if (typeof requestedID !== "string") {
+    return {
+      ok: false,
+      reason: "messageText was present without a string messageActionID",
+    };
+  }
+  if (typeof text !== "string") {
+    return {
+      ok: false,
+      reason: `message selection ${loggableActionID(requestedID)} carried no messageText`,
+    };
   }
   const action = legalActions.find((candidate) => candidate.id === requestedID);
   if (action === undefined) {
@@ -109,14 +131,19 @@ export function validateAgentMessageDecision(
       reason: `message selection named a non-message action kind (${action.kind}): ${loggableActionID(requestedID)}`,
     };
   }
-  if (typeof decision.messageText !== "string") {
+  // C0 controls (including tab, LF, and CR), DEL, and C1 controls can alter
+  // transcript layout, terminal framing, or prompt boundaries. Check the RAW
+  // text before any blank/length handling: accepting then collapsing these
+  // characters would silently rewrite the agent's negotiation evidence.
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001F\u007F-\u009F]/u.test(text)) {
     return {
       ok: false,
-      reason: `message selection ${loggableActionID(requestedID)} carried no messageText`,
+      reason: "messageText contained control characters",
     };
   }
   // Invisible formatting characters are checked on the RAW text, BEFORE any
-  // whitespace normalization. Two distinct abuses:
+  // other validation. Three distinct abuses:
   //
   // 1. BIDI OVERRIDES (U+202A-202E, U+2066-2069, U+200E-200F, U+061C) visually
   //    reorder the rendered line. The transcript renders as
@@ -131,20 +158,22 @@ export function validateAgentMessageDecision(
   //    invisible characters that cost real tokens in every recipient's prompt
   //    and render as a blank chat row.
   //
+  // 3. LINE/PARAGRAPH SEPARATORS (U+2028-2029) create raw layout boundaries
+  //    even though they sit outside the C0/C1 ranges above.
+  //
   // Rejected rather than stripped, like every other violation here: silently
   // removing characters would change what the agent wrote.
   //
-  // ORDER MATTERS, and getting it wrong made the U+FEFF arm DEAD CODE. JS `\s`
-  // matches U+FEFF, so running this check after the collapse below meant FEFF
-  // never reached it: `"deal\uFEFF\uFEFFnow"` was ACCEPTED and silently
+  // ORDER MATTERS, and getting it wrong previously made the U+FEFF arm DEAD
+  // CODE. JS `\s` matches U+FEFF, so the old whitespace collapse removed FEFF
+  // before this check: `"deal\uFEFF\uFEFFnow"` was ACCEPTED and silently
   // rewritten to `"deal now"`, and `commsSlotText` recorded a sentence with a
   // word boundary the agent never wrote. For a feature whose whole purpose is
   // negotiation EVIDENCE, a rewritten quote is worse than a rejected one, so
-  // the check runs on the raw string. (The other listed characters are not JS
-  // whitespace, so their behaviour is unchanged.)
+  // this check remains on the raw string.
   if (
-    /[\u00AD\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF\uFFF9-\uFFFB]/u.test(
-      decision.messageText,
+    /[\u00AD\u061C\u200B-\u200F\u2028-\u202E\u2060-\u206F\uFEFF\uFFF9-\uFFFB]/u.test(
+      text,
     )
   ) {
     return {
@@ -153,14 +182,7 @@ export function validateAgentMessageDecision(
         "messageText contained invisible formatting or bidi-override characters",
     };
   }
-  // Collapse runs of whitespace (including newlines) to single spaces so a
-  // message cannot smuggle in layout that breaks the chat rendering or pads
-  // the prompt. This normalizes SPACING only — never wording — and the length
-  // gate below is applied to the normalized text that will actually be sent.
-  // Tabs and newlines are deliberately normalized rather than rejected: they
-  // are layout, not content, and a wrapped sentence is still the same sentence.
-  const text = decision.messageText.replace(/\s+/gu, " ").trim();
-  if (text.length === 0) {
+  if (text.trim().length === 0) {
     return {
       ok: false,
       reason: `message selection ${loggableActionID(requestedID)} carried blank messageText`,
@@ -170,15 +192,6 @@ export function validateAgentMessageDecision(
     return {
       ok: false,
       reason: `messageText is ${text.length} chars, over the ${FREETEXT_MESSAGE_MAX_CHARS}-char cap (rejected, not truncated)`,
-    };
-  }
-  // C0 controls, DEL, and C1 controls: terminal escapes and framing. Bidi
-  // overrides are NOT in these ranges and are handled separately below.
-  // eslint-disable-next-line no-control-regex
-  if (/[\u0000-\u001F\u007F-\u009F]/u.test(text)) {
-    return {
-      ok: false,
-      reason: "messageText contained control characters",
     };
   }
   return { ok: true, action, text };
@@ -208,6 +221,7 @@ export interface AgentDecisionBatchValidation {
 export function validateAgentDecision(
   decision: AgentDecision,
   legalActions: LegalAction[],
+  options: AgentDecisionValidationOptions = {},
 ): AgentDecisionValidation {
   const action = legalActions.find(
     (candidate) => candidate.id === decision.actionID,
@@ -215,17 +229,14 @@ export function validateAgentDecision(
   const fallback =
     legalActions.find((candidate) => candidate.kind === "hold") ?? null;
   if (action !== undefined) {
-    // A `message` id is offered, but it belongs in the COMMS slot. Selected as
-    // the game action it would submit no intent and send no message — the
-    // agent would silently forfeit its move and believe it had spoken. Deal
-    // meta-actions survive this path because the runner routes them to the
-    // deal manager; messages have no such route, so refuse loudly instead of
-    // failing quietly.
-    if (action.kind === "message") {
+    const primarySlotRejection = primarySlotRejectionReason(
+      action,
+      options.primaryActionPolicy ?? "legacy-deal-compatible",
+    );
+    if (primarySlotRejection !== null) {
       return {
         ok: false,
-        reason:
-          "message actions belong in the comms slot (messageActionID + messageText), not the game action slot; nothing was sent",
+        reason: primarySlotRejection,
         fallback,
       };
     }
@@ -242,18 +253,29 @@ export function validateAgentDecision(
 export function validateAgentDecisionBatch(
   decision: AgentDecision,
   legalActions: LegalAction[],
+  options: AgentDecisionValidationOptions = {},
 ): AgentDecisionBatchValidation {
   const requestedActionIDs = requestedBatchActionIDs(decision);
   const actions: LegalAction[] = [];
   const rejectedActionIDs: string[] = [];
+  const unknownActionIDs: string[] = [];
+  const primarySlotRejectedActionIDs: string[] = [];
+  const primaryActionPolicy =
+    options.primaryActionPolicy ?? "legacy-deal-compatible";
 
   for (const actionID of requestedActionIDs) {
     const action = legalActions.find((candidate) => candidate.id === actionID);
-    if (action !== undefined) {
-      actions.push(action);
-    } else {
+    if (action === undefined) {
       rejectedActionIDs.push(actionID);
+      unknownActionIDs.push(actionID);
+      continue;
     }
+    if (primarySlotRejectionReason(action, primaryActionPolicy) !== null) {
+      rejectedActionIDs.push(actionID);
+      primarySlotRejectedActionIDs.push(actionID);
+      continue;
+    }
+    actions.push(action);
   }
 
   if (actions.length > 0) {
@@ -265,7 +287,11 @@ export function validateAgentDecisionBatch(
       reason:
         rejectedActionIDs.length === 0
           ? "all requested action ids are legal"
-          : `ignored unknown action ids: ${rejectedActionIDs.join(",")}`,
+          : batchRejectionReason(
+              "ignored",
+              unknownActionIDs,
+              primarySlotRejectedActionIDs,
+            ),
     };
   }
 
@@ -278,9 +304,69 @@ export function validateAgentDecisionBatch(
     fallback,
     reason:
       rejectedActionIDs.length > 0
-        ? `decision selected no known action ids: ${rejectedActionIDs.join(",")}`
+        ? batchRejectionReason(
+            "decision selected no eligible",
+            unknownActionIDs,
+            primarySlotRejectedActionIDs,
+          )
         : "decision selected no action ids",
   };
+}
+
+function primarySlotRejectionReason(
+  action: LegalAction,
+  policy: AgentPrimaryActionValidationPolicy,
+): string | null {
+  // A `message` id is offered, but it belongs in the COMMS slot. Selected as
+  // the game action it would submit no intent and send no message — the agent
+  // would silently forfeit its move and believe it had spoken. Refuse it in
+  // every contract, including the legacy one.
+  if (action.kind === "message") {
+    return "message actions belong in the comms slot (messageActionID + messageText), not the game action slot; nothing was sent";
+  }
+  // Existing external policies may still play one deal as their primary
+  // action. Only the armed in-house social prompt promises that deals live in
+  // the separate diplomacy slot and therefore opts into this stricter rule.
+  if (policy === "ordinary-only" && isDealActionKind(action.kind)) {
+    return "deal actions belong in the diplomacy slot (dealActionID), not the ordinary game action slot under the in-house social prompt contract";
+  }
+  return null;
+}
+
+function batchRejectionReason(
+  prefix: "ignored" | "decision selected no eligible",
+  unknownActionIDs: string[],
+  primarySlotRejectedActionIDs: string[],
+): string {
+  if (prefix === "ignored") {
+    if (primarySlotRejectedActionIDs.length === 0) {
+      // Preserve the legacy unknown-only wording byte for byte.
+      return `ignored unknown action ids: ${unknownActionIDs.join(",")}`;
+    }
+    if (unknownActionIDs.length === 0) {
+      return `ignored primary-slot-forbidden action ids: ${primarySlotRejectedActionIDs.join(",")}`;
+    }
+    return `ignored unknown action ids: ${unknownActionIDs.join(",")}; primary-slot-forbidden action ids: ${primarySlotRejectedActionIDs.join(",")}`;
+  }
+  if (prefix === "decision selected no eligible") {
+    if (primarySlotRejectedActionIDs.length === 0) {
+      // Preserve the legacy unknown-only wording byte for byte.
+      return `decision selected no known action ids: ${unknownActionIDs.join(",")}`;
+    }
+    if (unknownActionIDs.length === 0) {
+      return `decision selected no primary-slot-eligible action ids: ${primarySlotRejectedActionIDs.join(",")}`;
+    }
+  }
+  const parts: string[] = [];
+  if (unknownActionIDs.length > 0) {
+    parts.push(`unknown action ids: ${unknownActionIDs.join(",")}`);
+  }
+  if (primarySlotRejectedActionIDs.length > 0) {
+    parts.push(
+      `primary-slot-forbidden action ids: ${primarySlotRejectedActionIDs.join(",")}`,
+    );
+  }
+  return `${prefix} action ids; ${parts.join("; ")}`;
 }
 
 function requestedBatchActionIDs(decision: AgentDecision): string[] {

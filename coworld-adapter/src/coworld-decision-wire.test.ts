@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { validateAgentMessageDecision } from "../../src/server/agents/AgentDecisionValidator.ts";
+import {
+  validateAgentDealDecision,
+  validateAgentMessageDecision,
+} from "../../src/server/agents/AgentDecisionValidator.ts";
 import { FREETEXT_MESSAGE_MAX_CHARS } from "../../src/server/agents/AgentTunables.ts";
 import {
   agentRuntimeModes,
@@ -207,21 +210,86 @@ describe("normalizeDecisionResponse", () => {
     expect(normalized.actionIDs?.[1]).toBe("attack:two");
   });
 
-  it("forwards the deal slot only when non-empty, and defaults the reason", () => {
+  it("preserves a bounded deal id raw and defaults the reason", () => {
     const withDeal = normalizeDecisionResponse({
       selectedLegalActionId: "attack:one",
       selectedDealActionId: " deal_propose:P_B:nap ",
     });
-    expect(withDeal.dealActionID).toBe("deal_propose:P_B:nap");
+    expect(withDeal.dealActionID).toBe(" deal_propose:P_B:nap ");
     expect(withDeal.reason).toBe("Coworld player returned no reason.");
 
     const withoutDeal = normalizeDecisionResponse({
       selectedLegalActionId: "attack:one",
-      selectedDealActionId: "   ",
       reason: "r".repeat(600),
     });
     expect("dealActionID" in withoutDeal).toBe(false);
     expect(withoutDeal.reason).toHaveLength(500);
+  });
+
+  it.each([
+    ["blank", "   ", "   "],
+    ["non-string", 7, ""],
+    ["null", null, ""],
+    ["object", { id: "deal_propose:P_B:nap" }, ""],
+  ])(
+    "keeps a present %s deal attempt visible for backend rejection",
+    (_case, selectedDealActionId, expected) => {
+      const normalized = normalizeDecisionResponse({
+        selectedLegalActionId: "attack:one",
+        selectedDealActionId,
+      });
+      expect(normalized.dealActionID).toBe(expected);
+      expect(
+        validateAgentDealDecision(
+          {
+            actionID: "attack:one",
+            dealActionID: normalized.dealActionID,
+            reason: "wire authority test",
+          },
+          [
+            {
+              id: "deal_propose:P_B:nap",
+              kind: "deal_propose",
+              label: "Offer pact",
+              intent: null,
+              risk: { level: "low", score: 0.1 },
+            },
+          ],
+        )?.ok,
+      ).toBe(false);
+    },
+  );
+
+  it("never truncates an overlong deal id into a valid offered prefix", () => {
+    const offeredID = `deal_propose:${"x".repeat(
+      MAX_WIRE_ACTION_ID_LENGTH - "deal_propose:".length,
+    )}`;
+    expect(offeredID).toHaveLength(MAX_WIRE_ACTION_ID_LENGTH);
+    const normalized = normalizeDecisionResponse({
+      selectedLegalActionId: "attack:one",
+      selectedDealActionId: `${offeredID}:attacker-suffix`,
+    });
+
+    expect(normalized.dealActionID).toBe("");
+    expect(normalized.dealActionID).not.toBe(offeredID);
+    expect(
+      validateAgentDealDecision(
+        {
+          actionID: "attack:one",
+          dealActionID: normalized.dealActionID,
+          reason: "prefix collision",
+        },
+        [
+          {
+            id: offeredID,
+            kind: "deal_propose",
+            label: "Offered exact prefix",
+            intent: null,
+            risk: { level: "low", score: 0.1 },
+          },
+        ],
+      )?.ok,
+    ).toBe(false);
   });
 
   it("maps an explicit spawn ballot to its independent internal field without creating an action batch", () => {
@@ -316,26 +384,54 @@ describe("normalizeDecisionResponse comms slot", () => {
     kind: "message",
     label: "Message P_B",
   } as never;
+  const dealAction = {
+    id: "deal_propose:P_B:nap",
+    kind: "deal_propose",
+    label: "Offer pact",
+    intent: null,
+    risk: { level: "low", score: 0.1 },
+  } as never;
 
   it("carries the comms pair through to the AgentDecision field names", () => {
     // The regression this whole change exists for: before the fix the pair was
     // dropped here, so no league policy could ever speak regardless of flags.
     const normalized = normalizeDecisionResponse({
       selectedLegalActionId: "attack:P_B",
-      selectedDealActionId: "deal_propose:P_B:nap",
+      selectedDealActionId: " deal_propose:P_B:nap ",
       selectedMessageActionId: " message:P_B ",
       messageText: "Truce on our shared border until turn 300.",
       reason: "open negotiation",
     });
 
-    expect(normalized.messageActionID).toBe("message:P_B");
+    expect(normalized.messageActionID).toBe(" message:P_B ");
     expect(normalized.messageText).toBe(
       "Truce on our shared border until turn 300.",
     );
     // The deal slot is untouched by the comms slot: talking costs neither the
     // move nor the negotiation.
     expect(normalized.actionID).toBe("attack:P_B");
-    expect(normalized.dealActionID).toBe("deal_propose:P_B:nap");
+    expect(normalized.dealActionID).toBe(" deal_propose:P_B:nap ");
+    expect(
+      validateAgentDealDecision(
+        {
+          actionID: normalized.actionID,
+          dealActionID: normalized.dealActionID,
+          reason: normalized.reason,
+        },
+        [dealAction],
+      )?.ok,
+    ).toBe(false);
+    expect(
+      validateAgentMessageDecision(
+        {
+          actionID: normalized.actionID,
+          messageActionID: normalized.messageActionID,
+          messageText: normalized.messageText,
+          reason: normalized.reason,
+        },
+        [messageAction],
+      )?.ok,
+    ).toBe(false);
   });
 
   it("keeps comms-free replies byte-identical (no comms keys at all)", () => {
@@ -351,10 +447,10 @@ describe("normalizeDecisionResponse comms slot", () => {
     });
   });
 
-  it("passes the body through verbatim, leaving normalization to the validator", () => {
-    // Untrimmed and uncollapsed on purpose. The validator collapses whitespace
-    // then measures; doing it here too is how the delivered text and the
-    // stamped commsSlotText evidence drift apart.
+  it("passes the body through verbatim, leaving rejection to the validator", () => {
+    // Untrimmed and uncollapsed on purpose. The validator rejects unsafe raw
+    // layout; rewriting here would make the delivered quote and rejection
+    // evidence diverge from what the player authored.
     const text = "  hold\tthe\n\nline  ";
     const normalized = normalizeDecisionResponse({
       selectedLegalActionId: "attack:one",
@@ -362,6 +458,42 @@ describe("normalizeDecisionResponse comms slot", () => {
       messageText: text,
     });
     expect(normalized.messageText).toBe(text);
+    expect(
+      validateAgentMessageDecision(
+        {
+          actionID: normalized.actionID,
+          messageActionID: normalized.messageActionID,
+          messageText: normalized.messageText,
+          reason: normalized.reason,
+        },
+        [messageAction],
+      )?.ok,
+    ).toBe(false);
+  });
+
+  it.each([
+    ["blank", "   "],
+    ["control-only", "\u0007"],
+  ])("keeps a present %s body visible but unaccepted", (_case, text) => {
+    const normalized = normalizeDecisionResponse({
+      selectedLegalActionId: "attack:one",
+      selectedMessageActionId: "message:P_B",
+      messageText: text,
+    });
+
+    expect(normalized.messageActionID).toBe("message:P_B");
+    expect(normalized.messageText).toBe(text);
+    expect(
+      validateAgentMessageDecision(
+        {
+          actionID: normalized.actionID,
+          messageActionID: normalized.messageActionID,
+          messageText: normalized.messageText,
+          reason: normalized.reason,
+        },
+        [messageAction],
+      )?.ok,
+    ).toBe(false);
   });
 
   it("never pre-shortens over-cap text into something the validator would accept", () => {
@@ -405,7 +537,7 @@ describe("normalizeDecisionResponse comms slot", () => {
     expect(normalized.messageText).not.toBe(
       hostile.slice(0, MAX_WIRE_MESSAGE_TEXT_LENGTH),
     );
-    // No whitespace, so it cannot collapse under the cap and sneak through.
+    // Exact sentinel length remains over the validator cap, so it cannot pass.
     expect(/\s/u.test(normalized.messageText ?? "")).toBe(false);
     // The id survives, so the attempt is recorded as a rejection instead of
     // vanishing silently at the adapter.
@@ -423,50 +555,119 @@ describe("normalizeDecisionResponse comms slot", () => {
     expect(validation?.ok).toBe(false);
   });
 
-  it("length-bounds the comms id like every other id on the wire", () => {
+  it("never truncates an overlong comms id into a valid offered prefix", () => {
+    const offeredID = `message:${"m".repeat(
+      MAX_WIRE_ACTION_ID_LENGTH - "message:".length,
+    )}`;
+    expect(offeredID).toHaveLength(MAX_WIRE_ACTION_ID_LENGTH);
     const normalized = normalizeDecisionResponse({
       selectedLegalActionId: "attack:one",
-      selectedMessageActionId: "m".repeat(MAX_WIRE_ACTION_ID_LENGTH + 50),
+      selectedMessageActionId: `${offeredID}:attacker-suffix`,
       messageText: "hi",
     });
-    expect(normalized.messageActionID).toHaveLength(MAX_WIRE_ACTION_ID_LENGTH);
+    expect(normalized.messageActionID).toBe("");
+    expect(normalized.messageActionID).not.toBe(offeredID);
+    expect(
+      validateAgentMessageDecision(
+        {
+          actionID: normalized.actionID,
+          messageActionID: normalized.messageActionID,
+          messageText: normalized.messageText,
+          reason: normalized.reason,
+        },
+        [
+          {
+            id: offeredID,
+            kind: "message",
+            label: "Offered exact prefix",
+            intent: null,
+            risk: { level: "none", score: 0 },
+          } as never,
+        ],
+      )?.ok,
+    ).toBe(false);
   });
 
   it.each([
-    ["id without a body", { selectedMessageActionId: "message:P_B" }],
-    ["body without an id", { messageText: "hello" }],
-    ["non-string id", { selectedMessageActionId: 7, messageText: "hello" }],
+    [
+      "id without a body",
+      { selectedMessageActionId: "message:P_B" },
+      "message:P_B",
+      undefined,
+    ],
+    ["body without an id", { messageText: "hello" }, undefined, "hello"],
+    [
+      "non-string id",
+      { selectedMessageActionId: 7, messageText: "hello" },
+      undefined,
+      "hello",
+    ],
     [
       "non-string body",
       { selectedMessageActionId: "message:P_B", messageText: 7 },
+      "message:P_B",
+      undefined,
     ],
     [
       "null body",
       { selectedMessageActionId: "message:P_B", messageText: null },
+      "message:P_B",
+      undefined,
     ],
     [
       "object body",
       { selectedMessageActionId: "message:P_B", messageText: { a: 1 } },
+      "message:P_B",
+      undefined,
     ],
     [
       "array id",
       { selectedMessageActionId: ["message:P_B"], messageText: "hello" },
+      undefined,
+      "hello",
     ],
-    ["blank id", { selectedMessageActionId: "   ", messageText: "hello" }],
+    [
+      "blank id",
+      { selectedMessageActionId: "   ", messageText: "hello" },
+      "   ",
+      "hello",
+    ],
     [
       "blank body",
       { selectedMessageActionId: "message:P_B", messageText: "   \n " },
+      "message:P_B",
+      "   \n ",
     ],
-  ])("drops the whole pair on a %s", (_case, comms) => {
-    // Pair-or-nothing: an id must never reach the validator without the body
-    // it has to be judged with, and a body must never arrive unattributed.
-    const normalized = normalizeDecisionResponse({
-      selectedLegalActionId: "attack:one",
-      ...comms,
-    });
-    expect("messageActionID" in normalized).toBe(false);
-    expect("messageText" in normalized).toBe(false);
-  });
+    ["non-string id only", { selectedMessageActionId: 7 }, "", undefined],
+    ["non-string body only", { messageText: 7 }, undefined, ""],
+    [
+      "both fields non-string",
+      { selectedMessageActionId: 7, messageText: { hostile: true } },
+      "",
+      undefined,
+    ],
+  ])(
+    "keeps a %s attempt observable as bounded fields that cannot be accepted",
+    (_case, comms, expectedID, expectedText) => {
+      const normalized = normalizeDecisionResponse({
+        selectedLegalActionId: "attack:one",
+        ...comms,
+      });
+      expect(normalized.messageActionID).toBe(expectedID);
+      expect(normalized.messageText).toBe(expectedText);
+      expect(
+        validateAgentMessageDecision(
+          {
+            actionID: normalized.actionID,
+            messageActionID: normalized.messageActionID,
+            messageText: normalized.messageText,
+            reason: normalized.reason,
+          },
+          [messageAction],
+        )?.ok,
+      ).toBe(false);
+    },
+  );
 
   it("does not check menu membership — that stays the validator's job", () => {
     // Mirrors the deal slot: dropping unknown ids here would hide rejections
@@ -502,6 +703,7 @@ describe("normalizeDecisionResponse comms slot", () => {
     // a slot again.
     const normalized = normalizeDecisionResponse({
       selectedLegalActionId: "attack:one",
+      selectedDealActionId: "deal_propose:P_B:nap",
       selectedMessageActionId: "message:P_B",
       messageText: "hello",
     });
@@ -512,8 +714,92 @@ describe("normalizeDecisionResponse comms slot", () => {
       requestID: "req_1",
       offeredLegalActionCount: 4,
     });
+    expect(resolved.dealActionID).toBe("deal_propose:P_B:nap");
     expect(resolved.messageActionID).toBe("message:P_B");
     expect(resolved.messageText).toBe("hello");
+    expect(validateAgentDealDecision(resolved as never, [dealAction])?.ok).toBe(
+      true,
+    );
+    expect(
+      validateAgentMessageDecision(resolved as never, [messageAction])?.ok,
+    ).toBe(true);
+  });
+
+  it.each([
+    [
+      "text only",
+      { messageText: "hello" },
+      undefined,
+      "hello",
+      "without a string messageActionID",
+    ],
+    [
+      "id only",
+      { selectedMessageActionId: "message:P_B" },
+      "message:P_B",
+      undefined,
+      "carried no messageText",
+    ],
+    [
+      "padded id",
+      {
+        selectedMessageActionId: " message:P_B ",
+        messageText: "hello",
+      },
+      " message:P_B ",
+      "hello",
+      "unknown action id",
+    ],
+  ])(
+    "composeCoworldDecision preserves a %s rejection shape",
+    (_case, comms, expectedID, expectedText, expectedReason) => {
+      const normalized = normalizeDecisionResponse({
+        selectedLegalActionId: "attack:one",
+        ...comms,
+      });
+      const resolved = composeCoworldDecision({
+        normalized,
+        message: {
+          selectedLegalActionId: "attack:one",
+          ...comms,
+        },
+        slot: 1,
+        requestID: "req_rejected_shape",
+        offeredLegalActionCount: 2,
+      });
+
+      expect(resolved.messageActionID).toBe(expectedID);
+      expect(resolved.messageText).toBe(expectedText);
+      const validation = validateAgentMessageDecision(resolved as never, [
+        messageAction,
+      ]);
+      expect(validation?.ok).toBe(false);
+      expect(validation && !validation.ok ? validation.reason : "").toContain(
+        expectedReason,
+      );
+    },
+  );
+
+  it("composeCoworldDecision preserves padded deal authority for rejection", () => {
+    const normalized = normalizeDecisionResponse({
+      selectedLegalActionId: "attack:one",
+      selectedDealActionId: " deal_propose:P_B:nap ",
+    });
+    const resolved = composeCoworldDecision({
+      normalized,
+      message: {
+        selectedLegalActionId: "attack:one",
+        selectedDealActionId: " deal_propose:P_B:nap ",
+      },
+      slot: 1,
+      requestID: "req_padded_deal",
+      offeredLegalActionCount: 2,
+    });
+
+    expect(resolved.dealActionID).toBe(" deal_propose:P_B:nap ");
+    expect(validateAgentDealDecision(resolved as never, [dealAction])?.ok).toBe(
+      false,
+    );
   });
 });
 
