@@ -52,7 +52,6 @@ const ALLOWED_RUN_SUFFIXES = new Set([
   "create-response.json",
   "normalized-request-readback.json",
   "replay-evidence.json",
-  "replay.json",
   "episode-results.json",
   "game-evidence.jsonl",
   "command-receipts.json",
@@ -271,6 +270,37 @@ export function safeRelativePath(value) {
   );
 }
 
+export function safeAbsoluteUrlPath(value) {
+  if (
+    typeof value !== "string" ||
+    value.length < 2 ||
+    value.length > 500 ||
+    !value.startsWith("/") ||
+    value.startsWith("//") ||
+    value.includes("\\") ||
+    value.includes("\0") ||
+    value.includes("?") ||
+    value.includes("#") ||
+    hasControlCharacters(value)
+  )
+    return false;
+  try {
+    const parsed = new URL(value, "https://commander-xp.invalid");
+    return (
+      parsed.origin === "https://commander-xp.invalid" &&
+      parsed.pathname === value &&
+      parsed.search === "" &&
+      parsed.hash === "" &&
+      !value
+        .slice(1)
+        .split("/")
+        .some((part) => part === "" || part === "." || part === "..")
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function safeSourcePath(value) {
   if (typeof value !== "string" || value.length === 0 || value.length > 500)
     return false;
@@ -342,6 +372,7 @@ export async function loadAndVerifySealRequest(
       "evidence",
       "preregistrationReceipt",
       "providerPreflightReceipt",
+      "priorPhaseReceipt",
       "canaryReceipt",
     ],
     "SEAL_REQUEST_SCHEMA_INVALID",
@@ -367,6 +398,7 @@ export async function loadAndVerifySealRequest(
     if (
       request.preregistrationReceipt !== null ||
       request.providerPreflightReceipt !== null ||
+      request.priorPhaseReceipt !== null ||
       request.canaryReceipt !== null
     )
       fail("PREREGISTRATION_REQUEST_MUST_NOT_BIND_PRIOR_RECEIPT");
@@ -379,6 +411,7 @@ export async function loadAndVerifySealRequest(
   if (request.phase === "provider-preflight") {
     if (
       request.providerPreflightReceipt !== null ||
+      request.priorPhaseReceipt !== null ||
       request.canaryReceipt !== null
     )
       fail("PROVIDER_PREFLIGHT_REQUEST_PRIOR_RECEIPT_INVALID");
@@ -387,6 +420,15 @@ export async function loadAndVerifySealRequest(
       request.providerPreflightReceipt,
       "provider-preflight",
     );
+    validatePhaseReceiptBinding(
+      request.priorPhaseReceipt,
+      "provider-preflight",
+    );
+    if (
+      canonicalJson(request.providerPreflightReceipt) !==
+      canonicalJson(request.priorPhaseReceipt)
+    )
+      fail("CANARY_PRIOR_PHASE_RECEIPT_MISMATCH");
     if (request.canaryReceipt !== null)
       fail("CANARY_REQUEST_MUST_NOT_BIND_CANARY_RECEIPT");
   } else if (request.phase === "confirmatory") {
@@ -394,7 +436,13 @@ export async function loadAndVerifySealRequest(
       request.providerPreflightReceipt,
       "provider-preflight",
     );
+    validatePhaseReceiptBinding(request.priorPhaseReceipt, "canary");
     validateCanaryReceiptBinding(request.canaryReceipt);
+    if (
+      canonicalJson(request.canaryReceipt) !==
+      canonicalJson(request.priorPhaseReceipt)
+    )
+      fail("CONFIRMATORY_CANARY_RECEIPT_MISMATCH");
   }
   return { request, requestPath, actualRequestSha256 };
 }
@@ -558,6 +606,7 @@ function validatePhaseReceiptBinding(binding, expectedPhase) {
       "authorityArtifact",
       "terminalArtifact",
       "localSealSha256",
+      "namespaceRegistrySha256",
       "workflowPath",
       "workflowID",
       "workflowName",
@@ -565,6 +614,7 @@ function validatePhaseReceiptBinding(binding, expectedPhase) {
       "triggeringActor",
       "event",
       "ref",
+      "phase",
       "experimentID",
       "behaviorBaseSha",
       "behaviorBaseTreeSha",
@@ -593,6 +643,12 @@ function validatePhaseReceiptBinding(binding, expectedPhase) {
     binding.localSealSha256,
     `${expectedPhase} local seal SHA-256`,
   );
+  normalizeRawSha256(
+    binding.namespaceRegistrySha256,
+    `${expectedPhase} namespace registry SHA-256`,
+  );
+  if (binding.localSealSha256 !== binding.evidenceArtifact.localSealSha256)
+    fail("PHASE_RECEIPT_LOCAL_SEAL_MISMATCH", expectedPhase);
   if (binding.ledgerArtifact.ledgerSha256 !== binding.ledgerSha256)
     fail("PHASE_RECEIPT_LEDGER_ARTIFACT_MISMATCH");
   if (
@@ -604,6 +660,7 @@ function validatePhaseReceiptBinding(binding, expectedPhase) {
     binding.triggeringActor !== "0xNad" ||
     binding.event !== "workflow_dispatch" ||
     binding.ref !== "refs/heads/main" ||
+    binding.phase !== expectedPhase ||
     !SAFE_ID.test(binding.experimentID) ||
     !SHA1.test(binding.behaviorBaseSha) ||
     !SHA1.test(binding.behaviorBaseTreeSha) ||
@@ -611,22 +668,126 @@ function validatePhaseReceiptBinding(binding, expectedPhase) {
     !SHA1.test(binding.treeSha)
   )
     fail("PHASE_RECEIPT_SOURCE_INVALID");
+  const artifactPrefix = `${expectedPhase}-${binding.headSha}-${binding.runId}-${binding.attempt}`;
+  if (
+    binding.ledgerArtifact.name !==
+      `commander-xp-phase-ledger-${artifactPrefix}` ||
+    binding.authorityArtifact.name !==
+      `commander-xp-authority-${artifactPrefix}` ||
+    binding.terminalArtifact.name !==
+      `commander-xp-terminal-authority-${artifactPrefix}` ||
+    new Set([
+      binding.evidenceArtifact.id,
+      binding.receiptArtifact.id,
+      binding.ledgerArtifact.id,
+      binding.authorityArtifact.id,
+      binding.terminalArtifact.id,
+    ]).size !== 5 ||
+    binding.ledgerArtifact.attestationID ===
+      binding.authorityArtifact.attestationID
+  ) {
+    fail("PHASE_RECEIPT_ARTIFACT_CHAIN_INVALID", expectedPhase);
+  }
 }
 
 function validateRetainedPhaseArtifact(value, contentHashField) {
+  const extraFields =
+    contentHashField === "envelopeSha256" ? ["subjectSha256"] : [];
+  const attestationFields =
+    contentHashField === "envelopeSha256" ? [] : ["attestationID"];
   exactKeys(
     value,
-    ["id", "digest", contentHashField, "attestationID"],
+    [
+      "id",
+      "name",
+      "digest",
+      contentHashField,
+      ...extraFields,
+      ...attestationFields,
+    ],
     "RETAINED_PHASE_ARTIFACT_INVALID",
   );
-  if (!/^\d+$/.test(value.id) || !/^\d+$/.test(value.attestationID))
+  if (
+    !/^\d+$/.test(value.id) ||
+    (contentHashField !== "envelopeSha256" &&
+      !/^\d+$/.test(value.attestationID))
+  )
     fail("RETAINED_PHASE_ARTIFACT_INVALID");
   normalizeSha256(value.digest, "retained phase artifact digest");
   normalizeSha256(value[contentHashField], "retained phase content hash");
+  if (contentHashField === "envelopeSha256")
+    normalizeSha256(value.subjectSha256, "retained terminal subject hash");
 }
 
 function validateCanaryReceiptBinding(binding) {
   validatePhaseReceiptBinding(binding, "canary");
+}
+
+function validatePhaseAuthoritySet(value) {
+  if (!PHASES.has(value.phase)) fail("PHASE_AUTHORITY_SET_INVALID");
+  if (value.phase === "preregistration") {
+    if (
+      value.preregistrationReceipt !== null ||
+      value.providerPreflightReceipt !== null ||
+      value.priorPhaseReceipt !== null ||
+      value.canaryReceipt !== null
+    )
+      fail("PHASE_AUTHORITY_SET_INVALID", value.phase);
+    return;
+  }
+  validatePhaseReceiptBinding(value.preregistrationReceipt, "preregistration");
+  if (value.phase === "provider-preflight") {
+    if (
+      value.providerPreflightReceipt !== null ||
+      value.priorPhaseReceipt !== null ||
+      value.canaryReceipt !== null
+    )
+      fail("PHASE_AUTHORITY_SET_INVALID", value.phase);
+    return;
+  }
+  validatePhaseReceiptBinding(
+    value.providerPreflightReceipt,
+    "provider-preflight",
+  );
+  validatePhaseReceiptBinding(
+    value.priorPhaseReceipt,
+    value.phase === "canary" ? "provider-preflight" : "canary",
+  );
+  if (value.phase === "canary") {
+    if (
+      value.canaryReceipt !== null ||
+      canonicalJson(value.providerPreflightReceipt) !==
+        canonicalJson(value.priorPhaseReceipt)
+    )
+      fail("PHASE_AUTHORITY_SET_INVALID", value.phase);
+    return;
+  }
+  validateCanaryReceiptBinding(value.canaryReceipt);
+  if (
+    canonicalJson(value.canaryReceipt) !==
+    canonicalJson(value.priorPhaseReceipt)
+  )
+    fail("PHASE_AUTHORITY_SET_INVALID", value.phase);
+}
+
+function validateNamespaceRegistryChain(value) {
+  const registry = validateNamespaceRegistry(value.namespaceRegistry);
+  if (value.phase === "preregistration") {
+    if (
+      registry.priorRegistrySha256 !== null ||
+      REGISTRY_NAMESPACE_KEYS.some(
+        (key) => registry.namespaces[key].length !== 0,
+      )
+    )
+      fail("PREREGISTRATION_NAMESPACE_REGISTRY_INVALID");
+    return;
+  }
+  const priorBinding =
+    value.phase === "provider-preflight"
+      ? value.preregistrationReceipt
+      : value.priorPhaseReceipt;
+  if (registry.priorRegistrySha256 !== priorBinding.namespaceRegistrySha256)
+    fail("NAMESPACE_REGISTRY_PRIOR_BINDING_MISMATCH");
 }
 
 export async function verifyGitSourceIdentity({ repository, source }) {
@@ -903,6 +1064,9 @@ export async function verifyEvidenceBindings({
   ) {
     fail("AGGREGATE_NOT_READY_FOR_EXTERNAL_SEAL");
   }
+  let preregLedger = null;
+  let providerPreflightLedger = null;
+  let priorPhaseLedger = null;
   if (request.phase === "preregistration") {
     const actualFiles = await inventoryRegularFiles(evidenceRoot);
     if (
@@ -915,7 +1079,7 @@ export async function verifyEvidenceBindings({
       fail("PREREGISTRATION_RUN_EVIDENCE_FORBIDDEN");
     }
   } else {
-    const preregLedger = await verifyBoundPhaseReceipt(
+    preregLedger = await verifyBoundPhaseReceipt(
       evidenceRoot,
       request,
       request.preregistrationReceipt,
@@ -924,32 +1088,44 @@ export async function verifyEvidenceBindings({
     if (Date.parse(preregLedger.completedAt) < preregCreatedAt)
       fail("PREREGISTRATION_LEDGER_CHRONOLOGY_INVALID");
     if (request.phase === "canary" || request.phase === "confirmatory") {
-      const providerLedger = await verifyBoundPhaseReceipt(
+      providerPreflightLedger = await verifyBoundPhaseReceipt(
         evidenceRoot,
         request,
         request.providerPreflightReceipt,
         "provider-preflight",
       );
       if (
-        Date.parse(providerLedger.completedAt) <
+        Date.parse(providerPreflightLedger.completedAt) <
         Date.parse(preregLedger.completedAt)
       )
         fail("PROVIDER_PREFLIGHT_LEDGER_CHRONOLOGY_INVALID");
       if (request.phase === "confirmatory") {
-        const canaryLedger = await verifyBoundCanaryReceipt(
+        priorPhaseLedger = await verifyBoundCanaryReceipt(
           evidenceRoot,
           request,
           index,
         );
         if (
-          Date.parse(canaryLedger.completedAt) <
-          Date.parse(providerLedger.completedAt)
+          Date.parse(priorPhaseLedger.completedAt) <
+          Date.parse(providerPreflightLedger.completedAt)
         )
           fail("CANARY_LEDGER_CHRONOLOGY_INVALID");
+      } else {
+        priorPhaseLedger = providerPreflightLedger;
       }
+    } else {
+      priorPhaseLedger = preregLedger;
     }
   }
-  return { prereg, index, localSeal, aggregate };
+  return {
+    prereg,
+    index,
+    localSeal,
+    aggregate,
+    preregLedger,
+    providerPreflightLedger,
+    priorPhaseLedger,
+  };
 }
 
 async function verifyBoundPhaseReceipt(
@@ -978,6 +1154,8 @@ async function verifyBoundPhaseReceipt(
     canonicalJson(ledger.receiptArtifact) !==
       canonicalJson(binding.receiptArtifact) ||
     ledger.evidenceArtifact.localSealSha256 !== binding.localSealSha256 ||
+    ledger.namespaceRegistry.registrySha256 !==
+      binding.namespaceRegistrySha256 ||
     binding.workflowPath !== ledger.workflowPath ||
     binding.workflowID !== ledger.workflowID ||
     binding.workflowName !== ledger.workflowName ||
@@ -985,6 +1163,7 @@ async function verifyBoundPhaseReceipt(
     binding.triggeringActor !== ledger.triggeringActor ||
     binding.event !== ledger.event ||
     binding.ref !== ledger.ref ||
+    binding.phase !== ledger.phase ||
     binding.experimentID !== request.experimentID ||
     binding.behaviorBaseSha !== request.source.behaviorBaseSha ||
     binding.behaviorBaseTreeSha !== request.source.behaviorBaseTreeSha ||
@@ -1092,16 +1271,20 @@ async function validateCoworldProjectionReceipts(root, inventory) {
         "episodeID",
         "gameID",
         "seed",
+        "coworldID",
+        "coworldVersion",
+        "variantID",
+        "include",
+        "manifestSha256",
         "outerBundleSha256",
         "members",
         "projections",
-        "receiptSha256",
       ],
       "COWORLD_BUNDLE_RECEIPT_SCHEMA_INVALID",
     );
     if (
       receipt.schemaVersion !== 2 ||
-      receipt.authority !== "coworld-authenticated-bundle-projection-v1" ||
+      receipt.authority !== "coworld-authenticated-bundle-projection-v2" ||
       !Number.isFinite(Date.parse(receipt.downloadedAt)) ||
       [
         receipt.xpRequestID,
@@ -1112,11 +1295,17 @@ async function validateCoworldProjectionReceipts(root, inventory) {
       ].some((value) => !SAFE_ID.test(value)) ||
       !Number.isSafeInteger(receipt.seed) ||
       receipt.seed < 0 ||
+      !SAFE_ID.test(receipt.coworldID) ||
+      !SAFE_ID.test(receipt.coworldVersion) ||
+      !SAFE_ID.test(receipt.variantID) ||
+      canonicalJson(receipt.include) !==
+        canonicalJson(["results", "replay", "game_logs"]) ||
       !Array.isArray(receipt.members) ||
-      receipt.members.length < 4
+      receipt.members.length !== 4
     ) {
       fail("COWORLD_BUNDLE_RECEIPT_IDENTITY_INVALID", receiptPath);
     }
+    normalizeRawSha256(receipt.manifestSha256, "Coworld manifest SHA-256");
     normalizeRawSha256(
       receipt.outerBundleSha256,
       "Coworld outer bundle SHA-256",
@@ -1139,17 +1328,22 @@ async function validateCoworldProjectionReceipts(root, inventory) {
       normalizeRawSha256(member.sha256, "Coworld bundle member SHA-256");
       memberPaths.add(member.path);
     }
+    const expectedMembers = [
+      "logs/game.log",
+      "manifest.json",
+      "replay",
+      "results.json",
+    ];
     if (
-      [...memberPaths]
-        .sort()
-        .some((entry, index) => entry !== receipt.members[index].path)
+      receipt.members.some(
+        (entry, index) => entry.path !== expectedMembers[index],
+      )
     ) {
       fail("COWORLD_BUNDLE_MEMBER_ORDER_INVALID", receiptPath);
     }
     exactKeys(
       receipt.projections,
       [
-        "xpEvidenceSha256",
         "replayEvidenceSha256",
         "episodeResultsSha256",
         "gameEvidenceSha256",
@@ -1157,15 +1351,34 @@ async function validateCoworldProjectionReceipts(root, inventory) {
       ],
       "COWORLD_BUNDLE_PROJECTION_SCHEMA_INVALID",
     );
+    const isPreflight = runRoot.includes("/provider-preflight/");
     for (const [field, suffix] of [
-      ["xpEvidenceSha256", "xp-evidence.json"],
       ["replayEvidenceSha256", "replay-evidence.json"],
-      ["episodeResultsSha256", "episode-results.json"],
-      ["gameEvidenceSha256", "game-evidence.jsonl"],
       ["commandReceiptsSha256", "command-receipts.json"],
     ]) {
       const actual = hashes.get(`${runRoot}/${suffix}`);
       if (
+        actual === undefined ||
+        normalizeSha256(receipt.projections[field], field) !== actual
+      ) {
+        fail(
+          "COWORLD_BUNDLE_PROJECTION_HASH_MISMATCH",
+          `${receiptPath}:${field}`,
+        );
+      }
+    }
+    for (const [field, suffix] of [
+      ["episodeResultsSha256", "episode-results.json"],
+      ["gameEvidenceSha256", "game-evidence.jsonl"],
+    ]) {
+      const actual = hashes.get(`${runRoot}/${suffix}`);
+      if (isPreflight) {
+        if (receipt.projections[field] !== null || actual !== undefined)
+          fail(
+            "COWORLD_PREFLIGHT_GAMEPLAY_PROJECTION_PRESENT",
+            `${receiptPath}:${field}`,
+          );
+      } else if (
         actual === undefined ||
         normalizeSha256(receipt.projections[field], field) !== actual
       ) {
@@ -1181,16 +1394,19 @@ async function validateCoworldProjectionReceipts(root, inventory) {
     const replay = await readJsonFile(
       path.join(root, `${runRoot}/replay-evidence.json`),
     );
-    const results = await readJsonFile(
-      path.join(root, `${runRoot}/episode-results.json`),
-    );
+    const results = isPreflight
+      ? null
+      : await readJsonFile(path.join(root, `${runRoot}/episode-results.json`));
     const joined = {
       xpRequestID: xp.xpRequestID,
       episodeRequestID: xp.episodeRequestID,
       jobID: xp.jobID,
       episodeID: xp.episodeID,
-      gameID: results.gameID ?? results.game_id,
-      seed: results.seed ?? xp.seed ?? xp.gameConfig?.seed,
+      gameID: replay.matchID,
+      seed: replay.config?.seed,
+      coworldID: xp.coworldID,
+      coworldVersion: xp.coworldVersion,
+      variantID: xp.variantID,
     };
     for (const [field, expected] of Object.entries(joined)) {
       if (receipt[field] !== expected) {
@@ -1212,7 +1428,10 @@ async function validateCoworldProjectionReceipts(root, inventory) {
           `${receiptPath}:${field}`,
         );
     }
-    if (replay.gameID !== receipt.gameID || replay.seed !== receipt.seed) {
+    if (
+      results !== null &&
+      (results.gameID !== receipt.gameID || results.seed !== receipt.seed)
+    ) {
       fail("COWORLD_REPLAY_GAME_JOIN_MISMATCH", receiptPath);
     }
     const replayDigest = replay.contentSha256 ?? replay.replaySha256;
@@ -1225,17 +1444,199 @@ async function validateCoworldProjectionReceipts(root, inventory) {
     ) {
       fail("COWORLD_REPLAY_MEMBER_HASH_MISMATCH", receiptPath);
     }
-    const { receiptSha256, ...receiptBody } = receipt;
-    if (
-      normalizeRawSha256(receiptSha256, "Coworld receipt SHA-256") !==
-      normalizeRawSha256(
-        sha256Bytes(Buffer.from(canonicalJson(receiptBody))),
-        "computed Coworld receipt SHA-256",
-      )
-    ) {
-      fail("COWORLD_BUNDLE_RECEIPT_HASH_MISMATCH", receiptPath);
+  }
+}
+
+const REGISTRY_NAMESPACE_KEYS = [
+  "decisionRequestID",
+  "episodeID",
+  "episodeRequestID",
+  "jobID",
+  "replayPath",
+  "replayURLSha256",
+  "runKey",
+  "xpRequestID",
+];
+
+export async function buildNamespaceRegistry(
+  evidenceRoot,
+  phase,
+  priorRegistry = null,
+) {
+  if (!PHASES.has(phase)) fail("NAMESPACE_REGISTRY_PHASE_INVALID");
+  const current = Object.fromEntries(
+    REGISTRY_NAMESPACE_KEYS.map((key) => [key, new Map()]),
+  );
+  if (phase !== "preregistration") {
+    const prereg = await readJsonFile(
+      path.join(evidenceRoot, "commander-xp-preregistration-v2.json"),
+    );
+    const planned =
+      phase === "provider-preflight"
+        ? Array.isArray(prereg.providerPreflightRequests)
+          ? prereg.providerPreflightRequests
+          : []
+        : Array.isArray(prereg.requests)
+          ? prereg.requests.filter((entry) => entry?.phase === phase)
+          : [];
+    for (const [index, entry] of planned.entries()) {
+      registerNamespace(
+        current.runKey,
+        entry?.runKey,
+        "runKey",
+        `plan:${index}`,
+      );
+    }
+    const inventory = await inventoryRegularFiles(evidenceRoot);
+    for (const entry of inventory) {
+      const absolute = path.join(evidenceRoot, entry.path);
+      if (entry.path.endsWith("/xp-evidence.json")) {
+        const xp = await readJsonFile(absolute);
+        for (const key of [
+          "xpRequestID",
+          "episodeRequestID",
+          "jobID",
+          "episodeID",
+          "replayPath",
+          "replayURLSha256",
+        ]) {
+          registerNamespace(current[key], xp[key], key, entry.path);
+        }
+      } else if (entry.path.endsWith("/game-evidence.jsonl")) {
+        const text = await fs.readFile(absolute, "utf8");
+        for (const [index, line] of text.split(/\r?\n/).entries()) {
+          if (line === "") continue;
+          const record = parseJsonText(line, `${entry.path}:${index + 1}`);
+          registerNamespace(
+            current.decisionRequestID,
+            record.requestID,
+            "decisionRequestID",
+            entry.path,
+            true,
+          );
+        }
+      }
     }
   }
+  const prior =
+    priorRegistry === null
+      ? emptyNamespaceRegistry()
+      : validateNamespaceRegistry(priorRegistry);
+  const namespaces = {};
+  for (const key of REGISTRY_NAMESPACE_KEYS) {
+    const union = new Set(prior.namespaces[key]);
+    for (const value of current[key].keys()) {
+      if (union.has(value))
+        fail("CROSS_PHASE_NAMESPACE_REUSE", `${key}:${value}`);
+      union.add(value);
+    }
+    namespaces[key] = [...union].sort();
+  }
+  const body = {
+    schemaVersion: 2,
+    mode: "cumulative-per-namespace",
+    priorRegistrySha256: priorRegistry === null ? null : prior.registrySha256,
+    namespaces,
+  };
+  return {
+    ...body,
+    registrySha256: normalizeRawSha256(
+      sha256Bytes(Buffer.from(canonicalJson(body))),
+      "namespace registry SHA-256",
+    ),
+  };
+}
+
+function emptyNamespaceRegistry() {
+  return {
+    schemaVersion: 2,
+    mode: "cumulative-per-namespace",
+    priorRegistrySha256: null,
+    namespaces: Object.fromEntries(
+      REGISTRY_NAMESPACE_KEYS.map((key) => [key, []]),
+    ),
+    registrySha256: "",
+  };
+}
+
+function validateNamespaceRegistry(value) {
+  exactKeys(
+    value,
+    [
+      "schemaVersion",
+      "mode",
+      "priorRegistrySha256",
+      "namespaces",
+      "registrySha256",
+    ],
+    "NAMESPACE_REGISTRY_INVALID",
+  );
+  exactKeys(
+    value.namespaces,
+    REGISTRY_NAMESPACE_KEYS,
+    "NAMESPACE_REGISTRY_INVALID",
+  );
+  const { registrySha256, ...body } = value;
+  if (
+    value.schemaVersion !== 2 ||
+    value.mode !== "cumulative-per-namespace" ||
+    (value.priorRegistrySha256 !== null &&
+      normalizeRawSha256(
+        value.priorRegistrySha256,
+        "prior registry SHA-256",
+      ) !== value.priorRegistrySha256) ||
+    normalizeRawSha256(registrySha256, "registry SHA-256") !==
+      normalizeRawSha256(
+        sha256Bytes(Buffer.from(canonicalJson(body))),
+        "computed registry SHA-256",
+      )
+  )
+    fail("NAMESPACE_REGISTRY_INVALID");
+  for (const key of REGISTRY_NAMESPACE_KEYS) {
+    const entries = value.namespaces[key];
+    if (
+      !Array.isArray(entries) ||
+      entries.some((entry) => !validNamespaceValue(key, entry)) ||
+      new Set(entries).size !== entries.length ||
+      entries.some((entry, index) => entry !== [...entries].sort()[index])
+    )
+      fail("NAMESPACE_REGISTRY_INVALID", key);
+  }
+  return value;
+}
+
+function registerNamespace(
+  namespace,
+  value,
+  label,
+  owner,
+  allowSameOwner = false,
+) {
+  if (!validNamespaceValue(label, value)) fail("NAMESPACE_ID_INVALID", label);
+  const previousOwner = namespace.get(value);
+  if (
+    previousOwner !== undefined &&
+    (!allowSameOwner || previousOwner !== owner)
+  )
+    fail("CURRENT_PHASE_NAMESPACE_REUSE", `${label}:${value}`);
+  namespace.set(value, owner);
+}
+
+function validNamespaceValue(namespace, value) {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > 500 ||
+    hasControlCharacters(value)
+  )
+    return false;
+  if (namespace === "xpRequestID") return /^xreq_[A-Za-z0-9-]+$/.test(value);
+  if (namespace === "episodeRequestID")
+    return /^ereq_[A-Za-z0-9-]+$/.test(value);
+  if (namespace === "replayURLSha256") return /^[0-9a-f]{64}$/.test(value);
+  if (namespace === "replayPath") return safeAbsoluteUrlPath(value);
+  if (namespace === "runKey") return safeRelativePath(value);
+  return SAFE_ID.test(value);
 }
 
 function allowedEvidencePath(filePath) {
@@ -1399,6 +1800,12 @@ export async function buildBundle({
   const normalizedCreatedAt = isoTimestamp(createdAt, "createdAt");
   if (Date.parse(normalizedCreatedAt) < Date.parse(bindings.prereg.createdAt))
     fail("SEAL_BEFORE_PREREGISTRATION");
+  if (
+    bindings.priorPhaseLedger !== null &&
+    Date.parse(normalizedCreatedAt) <=
+      Date.parse(bindings.priorPhaseLedger.completedAt)
+  )
+    fail("SEAL_BEFORE_IMMEDIATE_PRIOR_PHASE");
   const inventory = await scanPrivacyAndInventory(evidenceRoot);
   if (
     request.phase === "preregistration" &&
@@ -1426,6 +1833,15 @@ export async function buildBundle({
   const privacyInventorySha256 = sha256Bytes(
     Buffer.from(canonicalJson(inventory.files)),
   );
+  const priorRegistry =
+    bindings.priorPhaseLedger === null
+      ? null
+      : bindings.priorPhaseLedger.namespaceRegistry;
+  const namespaceRegistry = await buildNamespaceRegistry(
+    evidenceRoot,
+    request.phase,
+    priorRegistry,
+  );
   const manifest = {
     schemaVersion: 1,
     artifactKind: "commander-xp-external-seal-bundle",
@@ -1447,6 +1863,11 @@ export async function buildBundle({
       treeDiffSha256,
     },
     sourceArtifact: request.sourceArtifact,
+    preregistrationReceipt: request.preregistrationReceipt,
+    providerPreflightReceipt: request.providerPreflightReceipt,
+    priorPhaseReceipt: request.priorPhaseReceipt,
+    canaryReceipt: request.canaryReceipt,
+    namespaceRegistry,
     evidence: {
       requestPath: BUNDLE_REQUEST_PATH,
       requestSha256: actualRequestSha256,
@@ -1467,6 +1888,10 @@ export async function buildBundle({
         request.providerPreflightReceipt === null
           ? null
           : normalizeSha256(request.providerPreflightReceipt.sha256),
+      priorPhaseReceiptSha256:
+        request.priorPhaseReceipt === null
+          ? null
+          : normalizeSha256(request.priorPhaseReceipt.sha256),
       canaryReceiptSha256:
         request.canaryReceipt === null
           ? null
@@ -1544,6 +1969,11 @@ export async function verifyBundle(root, expected = {}) {
       "sourceCI",
       "source",
       "sourceArtifact",
+      "preregistrationReceipt",
+      "providerPreflightReceipt",
+      "priorPhaseReceipt",
+      "canaryReceipt",
+      "namespaceRegistry",
       "evidence",
       "privacy",
       "files",
@@ -1655,6 +2085,10 @@ async function verifyBundleRequestBinding(root, manifest) {
       request.providerPreflightReceipt === null
         ? null
         : normalizeSha256(request.providerPreflightReceipt.sha256),
+    priorPhaseReceiptSha256:
+      request.priorPhaseReceipt === null
+        ? null
+        : normalizeSha256(request.priorPhaseReceipt.sha256),
     canaryReceiptSha256:
       request.canaryReceipt === null
         ? null
@@ -1670,6 +2104,7 @@ async function verifyBundleRequestBinding(root, manifest) {
       manifest.evidence.preregistrationReceiptSha256,
     providerPreflightReceiptSha256:
       manifest.evidence.providerPreflightReceiptSha256,
+    priorPhaseReceiptSha256: manifest.evidence.priorPhaseReceiptSha256,
     canaryReceiptSha256: manifest.evidence.canaryReceiptSha256,
   };
   if (
@@ -1679,6 +2114,14 @@ async function verifyBundleRequestBinding(root, manifest) {
     canonicalJson(manifestSourceBinding) !== canonicalJson(request.source) ||
     canonicalJson(manifest.sourceArtifact) !==
       canonicalJson(request.sourceArtifact) ||
+    canonicalJson(manifest.preregistrationReceipt) !==
+      canonicalJson(request.preregistrationReceipt) ||
+    canonicalJson(manifest.providerPreflightReceipt) !==
+      canonicalJson(request.providerPreflightReceipt) ||
+    canonicalJson(manifest.priorPhaseReceipt) !==
+      canonicalJson(request.priorPhaseReceipt) ||
+    canonicalJson(manifest.canaryReceipt) !==
+      canonicalJson(request.canaryReceipt) ||
     canonicalJson(actualEvidence) !== canonicalJson(expectedEvidence)
   ) {
     fail("BUNDLE_REQUEST_CROSS_BINDING_MISMATCH");
@@ -1727,6 +2170,8 @@ function validateBundleManifest(manifest) {
     fail("BUNDLE_TREE_DIFF_PATH_INVALID");
   normalizeSha256(manifest.source.treeDiffSha256, "bundle tree diff SHA-256");
   validateSourceArtifactBinding(manifest.sourceArtifact);
+  validatePhaseAuthoritySet(manifest);
+  validateNamespaceRegistryChain(manifest);
   exactKeys(
     manifest.evidence,
     [
@@ -1739,6 +2184,7 @@ function validateBundleManifest(manifest) {
       "aggregateSha256",
       "preregistrationReceiptSha256",
       "providerPreflightReceiptSha256",
+      "priorPhaseReceiptSha256",
       "canaryReceiptSha256",
     ],
     "BUNDLE_EVIDENCE_SCHEMA_INVALID",
@@ -1751,6 +2197,7 @@ function validateBundleManifest(manifest) {
       ([
         "preregistrationReceiptSha256",
         "providerPreflightReceiptSha256",
+        "priorPhaseReceiptSha256",
         "canaryReceiptSha256",
       ].includes(key) &&
         value === null)
@@ -1971,6 +2418,11 @@ export async function createExternalReceipt({
       runAttempt: expectedArtifact.workflowRunAttempt,
     },
     sourceCI: manifest.sourceCI,
+    preregistrationReceipt: manifest.preregistrationReceipt,
+    providerPreflightReceipt: manifest.providerPreflightReceipt,
+    priorPhaseReceipt: manifest.priorPhaseReceipt,
+    canaryReceipt: manifest.canaryReceipt,
+    namespaceRegistry: manifest.namespaceRegistry,
     bundleArtifact: {
       artifactID: expectedArtifact.artifactID,
       artifactName: expectedArtifact.artifactName,
@@ -1988,7 +2440,9 @@ export async function createExternalReceipt({
         manifest.evidence.preregistrationReceiptSha256,
       providerPreflightReceiptSha256:
         manifest.evidence.providerPreflightReceiptSha256,
+      priorPhaseReceiptSha256: manifest.evidence.priorPhaseReceiptSha256,
       canaryReceiptSha256: manifest.evidence.canaryReceiptSha256,
+      namespaceRegistrySha256: manifest.namespaceRegistry.registrySha256,
       treeDiffSha256: manifest.source.treeDiffSha256,
       privacyInventorySha256: manifest.privacy.inventorySha256,
     },
@@ -2023,6 +2477,11 @@ export async function verifyExternalReceipt(filePath, expected = {}) {
       "repository",
       "workflow",
       "sourceCI",
+      "preregistrationReceipt",
+      "providerPreflightReceipt",
+      "priorPhaseReceipt",
+      "canaryReceipt",
+      "namespaceRegistry",
       "bundleArtifact",
       "evidence",
       "attestation",
@@ -2061,6 +2520,8 @@ export async function verifyExternalReceipt(filePath, expected = {}) {
     "EXTERNAL_RECEIPT_WORKFLOW_INVALID",
   );
   validateSourceCIBinding(receipt.sourceCI);
+  validatePhaseAuthoritySet(receipt);
+  validateNamespaceRegistryChain(receipt);
   exactKeys(
     receipt.bundleArtifact,
     [
@@ -2082,7 +2543,9 @@ export async function verifyExternalReceipt(filePath, expected = {}) {
       "aggregateSha256",
       "preregistrationReceiptSha256",
       "providerPreflightReceiptSha256",
+      "priorPhaseReceiptSha256",
       "canaryReceiptSha256",
+      "namespaceRegistrySha256",
       "treeDiffSha256",
       "privacyInventorySha256",
     ],
@@ -2111,6 +2574,25 @@ export async function verifyExternalReceipt(filePath, expected = {}) {
   for (const field of Object.values(receipt.evidence ?? {})) {
     if (field !== null) normalizeSha256(field, "receipt evidence SHA-256");
   }
+  if (
+    receipt.evidence.namespaceRegistrySha256 !==
+    receipt.namespaceRegistry.registrySha256
+  )
+    fail("EXTERNAL_RECEIPT_NAMESPACE_REGISTRY_MISMATCH");
+  for (const [bindingField, hashField] of [
+    ["preregistrationReceipt", "preregistrationReceiptSha256"],
+    ["providerPreflightReceipt", "providerPreflightReceiptSha256"],
+    ["priorPhaseReceipt", "priorPhaseReceiptSha256"],
+    ["canaryReceipt", "canaryReceiptSha256"],
+  ]) {
+    const binding = receipt[bindingField];
+    const digest = receipt.evidence[hashField];
+    if (
+      (binding === null && digest !== null) ||
+      (binding !== null && normalizeSha256(binding.sha256) !== digest)
+    )
+      fail("EXTERNAL_RECEIPT_AUTHORITY_HASH_MISMATCH", bindingField);
+  }
   isoTimestamp(receipt.completedAt, "receipt completedAt");
   const expiresAt = Date.parse(receipt.bundleArtifact?.expiresAt ?? "");
   if (
@@ -2133,6 +2615,16 @@ export async function createExternalPhaseLedger({
     experimentID: manifest.experimentID,
     phase: manifest.phase,
   });
+  for (const field of [
+    "preregistrationReceipt",
+    "providerPreflightReceipt",
+    "priorPhaseReceipt",
+    "canaryReceipt",
+    "namespaceRegistry",
+  ]) {
+    if (canonicalJson(receipt[field]) !== canonicalJson(manifest[field]))
+      fail("LEDGER_RECEIPT_BUNDLE_AUTHORITY_MISMATCH", field);
+  }
   const normalizedCompletedAt = isoTimestamp(completedAt, "completedAt");
   if (Date.parse(normalizedCompletedAt) < Date.parse(receipt.completedAt))
     fail("LEDGER_BEFORE_RECEIPT");
@@ -2199,6 +2691,11 @@ export async function createExternalPhaseLedger({
     treeSha: manifest.source.workflowSourceTreeSha,
     phase: manifest.phase,
     completedAt: normalizedCompletedAt,
+    preregistrationReceipt: manifest.preregistrationReceipt,
+    providerPreflightReceipt: manifest.providerPreflightReceipt,
+    priorPhaseReceipt: manifest.priorPhaseReceipt,
+    canaryReceipt: manifest.canaryReceipt,
+    namespaceRegistry: manifest.namespaceRegistry,
     evidenceArtifact: {
       id: String(receipt.bundleArtifact.artifactID),
       digest: normalizeSha256(receipt.bundleArtifact.artifactDigest),
@@ -2269,6 +2766,11 @@ export async function verifyExternalPhaseLedger(filePath, expected = {}) {
       "treeSha",
       "phase",
       "completedAt",
+      "preregistrationReceipt",
+      "providerPreflightReceipt",
+      "priorPhaseReceipt",
+      "canaryReceipt",
+      "namespaceRegistry",
       "evidenceArtifact",
       "receiptArtifact",
       "ledgerSha256",
@@ -2277,6 +2779,8 @@ export async function verifyExternalPhaseLedger(filePath, expected = {}) {
   );
   validateLedgerEvidenceArtifact(ledger.evidenceArtifact);
   validateLedgerReceiptArtifact(ledger.receiptArtifact);
+  validatePhaseAuthoritySet(ledger);
+  validateNamespaceRegistryChain(ledger);
   validateSourceArtifactBinding(ledger.collector);
   exactKeys(
     ledger.attestationPolicy,
@@ -2343,6 +2847,201 @@ export async function verifyExternalPhaseLedger(filePath, expected = {}) {
   }
   isoTimestamp(ledger.completedAt, "ledger completedAt");
   return ledger;
+}
+
+export async function verifyRetainedPhaseAuthority({
+  ledgerPath,
+  authorityReceiptPath,
+  terminalEnvelopePath,
+  binding,
+  phase,
+}) {
+  validatePhaseReceiptBinding(binding, phase);
+  if (
+    (await sha256File(ledgerPath)) !== normalizeSha256(binding.sha256) ||
+    binding.ledgerArtifact.ledgerSha256 !== binding.ledgerSha256
+  ) {
+    fail("RETAINED_LEDGER_SUBJECT_MISMATCH", phase);
+  }
+  const ledger = await verifyExternalPhaseLedger(ledgerPath, {
+    phase,
+    experimentID: binding.experimentID,
+    behaviorBaseSha: binding.behaviorBaseSha,
+    behaviorBaseTreeSha: binding.behaviorBaseTreeSha,
+    headSha: binding.headSha,
+    treeSha: binding.treeSha,
+  });
+  const authority = await readJsonFile(authorityReceiptPath);
+  exactKeys(
+    authority,
+    [
+      "schemaVersion",
+      "authority",
+      "repository",
+      "workflowPath",
+      "workflowID",
+      "workflowName",
+      "actor",
+      "triggeringActor",
+      "event",
+      "workflowRef",
+      "experimentID",
+      "runId",
+      "attempt",
+      "headSha",
+      "treeSha",
+      "behaviorBaseSha",
+      "behaviorBaseTreeSha",
+      "localSealSha256",
+      "phase",
+      "sourceCI",
+      "collectorArtifact",
+      "bundleArtifact",
+      "receiptArtifact",
+      "ledgerArtifact",
+      "attestations",
+      "integrityVerified",
+      "experimentUsable",
+      "performanceClaimAuthorized",
+    ],
+    "RETAINED_AUTHORITY_SCHEMA_INVALID",
+  );
+  if (
+    (await sha256File(authorityReceiptPath)) !==
+      normalizeSha256(binding.authorityArtifact.receiptSha256) ||
+    authority.schemaVersion !== 1 ||
+    authority.authority !==
+      "github-actions-protected-main-public-sigstore-v1" ||
+    authority.repository !== ledger.repository ||
+    authority.workflowPath !== ledger.workflowPath ||
+    authority.workflowID !== ledger.workflowID ||
+    authority.workflowName !== ledger.workflowName ||
+    authority.actor !== ledger.actor ||
+    authority.triggeringActor !== ledger.triggeringActor ||
+    authority.event !== ledger.event ||
+    authority.workflowRef !== ledger.ref ||
+    authority.experimentID !== ledger.experimentID ||
+    authority.runId !== ledger.runId ||
+    authority.attempt !== ledger.attempt ||
+    authority.headSha !== ledger.headSha ||
+    authority.treeSha !== ledger.treeSha ||
+    authority.behaviorBaseSha !== ledger.behaviorBaseSha ||
+    authority.behaviorBaseTreeSha !== ledger.behaviorBaseTreeSha ||
+    authority.localSealSha256 !== ledger.evidenceArtifact.localSealSha256 ||
+    authority.phase !== ledger.phase ||
+    canonicalJson(authority.collectorArtifact) !==
+      canonicalJson(ledger.collector) ||
+    String(authority.bundleArtifact?.id) !== ledger.evidenceArtifact.id ||
+    normalizeSha256(authority.bundleArtifact?.digest) !==
+      normalizeSha256(ledger.evidenceArtifact.digest) ||
+    String(authority.receiptArtifact?.id) !== ledger.receiptArtifact.id ||
+    normalizeSha256(authority.receiptArtifact?.digest) !==
+      normalizeSha256(ledger.receiptArtifact.digest) ||
+    String(authority.ledgerArtifact?.id) !== binding.ledgerArtifact.id ||
+    normalizeSha256(authority.ledgerArtifact?.digest) !==
+      normalizeSha256(binding.ledgerArtifact.digest) ||
+    authority.ledgerArtifact?.ledgerSha256 !== ledger.ledgerSha256 ||
+    String(authority.attestations?.ledger?.id) !==
+      binding.ledgerArtifact.attestationID ||
+    authority.integrityVerified !== true ||
+    authority.experimentUsable !== false ||
+    authority.performanceClaimAuthorized !== false
+  ) {
+    fail("RETAINED_AUTHORITY_CROSS_BINDING_MISMATCH", phase);
+  }
+  const terminal = await readJsonFile(terminalEnvelopePath);
+  exactKeys(
+    terminal,
+    [
+      "schemaVersion",
+      "authority",
+      "repository",
+      "workflowPath",
+      "workflowID",
+      "workflowName",
+      "actor",
+      "triggeringActor",
+      "event",
+      "workflowRef",
+      "experimentID",
+      "runId",
+      "attempt",
+      "headSha",
+      "treeSha",
+      "behaviorBaseSha",
+      "behaviorBaseTreeSha",
+      "localSealSha256",
+      "phase",
+      "sourceCI",
+      "collectorArtifact",
+      "bundleArtifact",
+      "receiptArtifact",
+      "ledgerArtifact",
+      "subjectAttestation",
+      "ledgerAttestation",
+      "authorityArtifact",
+      "authorityAttestation",
+      "integrityVerified",
+      "experimentUsable",
+      "performanceClaimAuthorized",
+      "envelopeSha256",
+    ],
+    "RETAINED_TERMINAL_SCHEMA_INVALID",
+  );
+  const { envelopeSha256, ...terminalBody } = terminal;
+  if (
+    normalizeSha256(envelopeSha256) !==
+      sha256Bytes(Buffer.from(canonicalJson(terminalBody))) ||
+    normalizeSha256(envelopeSha256) !==
+      normalizeSha256(binding.terminalArtifact.envelopeSha256) ||
+    (await sha256File(terminalEnvelopePath)) !==
+      normalizeSha256(binding.terminalArtifact.subjectSha256) ||
+    terminal.schemaVersion !== 2 ||
+    terminal.authority !== "github-actions-terminal-authority-envelope-v2" ||
+    terminal.repository !== authority.repository ||
+    terminal.workflowPath !== authority.workflowPath ||
+    terminal.workflowID !== authority.workflowID ||
+    terminal.workflowName !== authority.workflowName ||
+    terminal.actor !== authority.actor ||
+    terminal.triggeringActor !== authority.triggeringActor ||
+    terminal.event !== authority.event ||
+    terminal.workflowRef !== authority.workflowRef ||
+    terminal.experimentID !== authority.experimentID ||
+    terminal.runId !== authority.runId ||
+    terminal.attempt !== authority.attempt ||
+    terminal.headSha !== authority.headSha ||
+    terminal.treeSha !== authority.treeSha ||
+    terminal.behaviorBaseSha !== authority.behaviorBaseSha ||
+    terminal.behaviorBaseTreeSha !== authority.behaviorBaseTreeSha ||
+    terminal.localSealSha256 !== authority.localSealSha256 ||
+    terminal.phase !== authority.phase ||
+    canonicalJson(terminal.sourceCI) !== canonicalJson(authority.sourceCI) ||
+    canonicalJson(terminal.collectorArtifact) !==
+      canonicalJson(authority.collectorArtifact) ||
+    canonicalJson(terminal.bundleArtifact) !==
+      canonicalJson(authority.bundleArtifact) ||
+    canonicalJson(terminal.receiptArtifact) !==
+      canonicalJson(authority.receiptArtifact) ||
+    canonicalJson(terminal.ledgerArtifact) !==
+      canonicalJson(authority.ledgerArtifact) ||
+    canonicalJson(terminal.subjectAttestation) !==
+      canonicalJson(authority.attestations.subject) ||
+    canonicalJson(terminal.ledgerAttestation) !==
+      canonicalJson(authority.attestations.ledger) ||
+    String(terminal.authorityArtifact?.id) !== binding.authorityArtifact.id ||
+    normalizeSha256(terminal.authorityArtifact?.digest) !==
+      normalizeSha256(binding.authorityArtifact.digest) ||
+    normalizeSha256(terminal.authorityArtifact?.receiptSha256) !==
+      normalizeSha256(binding.authorityArtifact.receiptSha256) ||
+    String(terminal.authorityAttestation?.id) !==
+      binding.authorityArtifact.attestationID ||
+    terminal.integrityVerified !== true ||
+    terminal.experimentUsable !== false ||
+    terminal.performanceClaimAuthorized !== false
+  ) {
+    fail("RETAINED_TERMINAL_CROSS_BINDING_MISMATCH", phase);
+  }
+  return { ledger, authority, terminal };
 }
 
 function validateLedgerEvidenceArtifact(value) {

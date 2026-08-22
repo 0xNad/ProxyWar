@@ -202,6 +202,8 @@ jobs:
             *) exit 1 ;;
           esac
           for PRIOR_KEY in "${PRIOR_KEYS[@]}"; do
+              BINDING="$RUNNER_TEMP/$PRIOR_KEY-binding.json"
+              jq ".${PRIOR_KEY}" "$REQUEST" > "$BINDING"
               RECEIPT_PATH=$(jq -r ".${PRIOR_KEY}.path" "$REQUEST")
               test -f "$RUNNER_TEMP/commander-xp-envelope/evidence/$RECEIPT_PATH"
               gh attestation verify \
@@ -214,12 +216,16 @@ jobs:
                 --deny-self-hosted-runners
               for KIND in evidence receipt ledger authority terminal; do
                 ARTIFACT_ID=$(jq -r ".${PRIOR_KEY}.${KIND}Artifact.id" "$REQUEST")
+                EXPECTED_NAME=$(jq -r ".${PRIOR_KEY}.${KIND}Artifact.name // empty" "$REQUEST")
                 EXPECTED_DIGEST=$(jq -r ".${PRIOR_KEY}.${KIND}Artifact.digest" "$REQUEST")
                 PRIOR_RUN_ID=$(jq -r ".${PRIOR_KEY}.runId" "$REQUEST")
                 METADATA="$RUNNER_TEMP/$PRIOR_KEY-$KIND-artifact.json"
                 gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > "$METADATA"
                 test "$(jq -r .expired "$METADATA")" = "false"
                 test "$(jq -r .workflow_run.id "$METADATA")" = "$PRIOR_RUN_ID"
+                if [ -n "$EXPECTED_NAME" ]; then
+                  test "$(jq -r .name "$METADATA")" = "$EXPECTED_NAME"
+                fi
                 ACTUAL_DIGEST=$(jq -r .digest "$METADATA")
                 test "${ACTUAL_DIGEST#sha256:}" = "${EXPECTED_DIGEST#sha256:}"
                 python -c 'import datetime,json,pathlib,sys; artifact=json.loads(pathlib.Path(sys.argv[1]).read_text()); expires=datetime.datetime.fromisoformat(artifact["expires_at"].replace("Z","+00:00")); assert expires > datetime.datetime.now(datetime.timezone.utc), "bound prior artifact is expired"' "$METADATA"
@@ -235,6 +241,58 @@ jobs:
                 .head_repository.full_name == "0xNad/ProxyWar" and
                 .event == "workflow_dispatch"
               ' "$RUNNER_TEMP/$PRIOR_KEY-run.json" >/dev/null
+              PRIOR_ROOT="$RUNNER_TEMP/$PRIOR_KEY-retained"
+              mkdir -m 700 "$PRIOR_ROOT"
+              for KIND in ledger authority terminal; do
+                ARTIFACT_ID=$(jq -r ".${PRIOR_KEY}.${KIND}Artifact.id" "$REQUEST")
+                ZIP_PATH="$PRIOR_ROOT/$KIND.zip"
+                DESTINATION="$PRIOR_ROOT/$KIND"
+                mkdir -m 700 "$DESTINATION"
+                gh api -H "Accept: application/vnd.github+json" \
+                  "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$ZIP_PATH"
+                python - "$ZIP_PATH" "$DESTINATION" <<'PY'
+          import pathlib, stat, sys, zipfile
+          archive = pathlib.Path(sys.argv[1])
+          destination = pathlib.Path(sys.argv[2]).resolve()
+          with zipfile.ZipFile(archive) as bundle:
+              for member in bundle.infolist():
+                  candidate = pathlib.PurePosixPath(member.filename)
+                  mode = member.external_attr >> 16
+                  if candidate.is_absolute() or ".." in candidate.parts or stat.S_ISLNK(mode):
+                      raise SystemExit(f"unsafe retained artifact member: {member.filename}")
+                  resolved = (destination / pathlib.Path(*candidate.parts)).resolve()
+                  if destination not in resolved.parents and resolved != destination:
+                      raise SystemExit(f"retained artifact path escape: {member.filename}")
+              bundle.extractall(destination)
+          PY
+              done
+              DOWNLOADED_LEDGER="$PRIOR_ROOT/ledger/commander-xp-external-phase-ledger-v2.json"
+              DOWNLOADED_AUTHORITY="$PRIOR_ROOT/authority/commander-xp-external-authority-receipt-v1.json"
+              DOWNLOADED_TERMINAL="$PRIOR_ROOT/terminal/commander-xp-terminal-authority-envelope-v2.json"
+              test -f "$DOWNLOADED_LEDGER"
+              test -f "$DOWNLOADED_AUTHORITY"
+              test -f "$DOWNLOADED_TERMINAL"
+              test "$(find "$PRIOR_ROOT/ledger" -type f | wc -l | tr -d ' ')" = "1"
+              test "$(find "$PRIOR_ROOT/terminal" -type f | wc -l | tr -d ' ')" = "1"
+              (cd "$PRIOR_ROOT/authority" && sha256sum --check SHA256SUMS)
+              test "$(find "$PRIOR_ROOT/authority" -maxdepth 1 -type f | wc -l | tr -d ' ')" = "9"
+              cmp "$DOWNLOADED_LEDGER" "$RUNNER_TEMP/commander-xp-envelope/evidence/$RECEIPT_PATH"
+              for SUBJECT in "$DOWNLOADED_LEDGER" "$DOWNLOADED_AUTHORITY" "$DOWNLOADED_TERMINAL"; do
+                gh attestation verify \
+                  "$SUBJECT" \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/commander-xp-external-seal.yml@refs/heads/main" \
+                  --source-ref "refs/heads/main" \
+                  --source-digest "$SOURCE_SHA" \
+                  --signer-digest "$SOURCE_SHA" \
+                  --deny-self-hosted-runners
+              done
+              node .github/scripts/commander-xp-external-seal.mjs verify-prior-authority \
+                --ledger="$DOWNLOADED_LEDGER" \
+                --authority-receipt="$DOWNLOADED_AUTHORITY" \
+                --terminal-envelope="$DOWNLOADED_TERMINAL" \
+                --binding="$BINDING" \
+                --phase="$(jq -r ".${PRIOR_KEY}.phase // empty" "$REQUEST")"
           done
 
       - name: Build and self-verify the normalized seal bundle
@@ -616,12 +674,14 @@ jobs:
             --arg authorityProvenanceSha256 "sha256:$(sha256sum "$RUNNER_TEMP/authority-receipt-provenance.json" | cut -d' ' -f1)" \
             '{schemaVersion:2,authority:"github-actions-terminal-authority-envelope-v2",repository:$receipt[0].repository,workflowPath:$receipt[0].workflowPath,workflowID:$receipt[0].workflowID,workflowName:$receipt[0].workflowName,actor:$receipt[0].actor,triggeringActor:$receipt[0].triggeringActor,event:$receipt[0].event,workflowRef:$receipt[0].workflowRef,experimentID:$receipt[0].experimentID,runId:$receipt[0].runId,attempt:$receipt[0].attempt,headSha:$receipt[0].headSha,treeSha:$receipt[0].treeSha,behaviorBaseSha:$receipt[0].behaviorBaseSha,behaviorBaseTreeSha:$receipt[0].behaviorBaseTreeSha,localSealSha256:$receipt[0].localSealSha256,phase:$receipt[0].phase,sourceCI:$receipt[0].sourceCI,collectorArtifact:$receipt[0].collectorArtifact,bundleArtifact:$receipt[0].bundleArtifact,receiptArtifact:$receipt[0].receiptArtifact,ledgerArtifact:$receipt[0].ledgerArtifact,subjectAttestation:$receipt[0].attestations.subject,ledgerAttestation:$receipt[0].attestations.ledger,authorityArtifact:{id:$authorityArtifactID,digest:$authorityArtifactDigest,receiptSha256:$authorityReceiptSha256},authorityAttestation:{id:$authorityAttestationID,bundleSha256:$authorityBundleSha256,provenanceSha256:$authorityProvenanceSha256},integrityVerified:true,experimentUsable:false,performanceClaimAuthorized:false}' \
             > "$RUNNER_TEMP/commander-xp-terminal-authority-envelope-v2.body.json"
+          jq -cS . "$RUNNER_TEMP/commander-xp-terminal-authority-envelope-v2.body.json" > "$RUNNER_TEMP/commander-xp-terminal-authority-envelope-v2.canonical-body.json"
+          mv "$RUNNER_TEMP/commander-xp-terminal-authority-envelope-v2.canonical-body.json" "$RUNNER_TEMP/commander-xp-terminal-authority-envelope-v2.body.json"
           ENVELOPE_SHA256=$(sha256sum "$RUNNER_TEMP/commander-xp-terminal-authority-envelope-v2.body.json" | cut -d' ' -f1)
-          jq --arg envelopeSha256 "sha256:$ENVELOPE_SHA256" '. + {envelopeSha256:$envelopeSha256}' \
+          jq -cS --arg envelopeSha256 "sha256:$ENVELOPE_SHA256" '. + {envelopeSha256:$envelopeSha256}' \
             "$RUNNER_TEMP/commander-xp-terminal-authority-envelope-v2.body.json" \
             > "$RUNNER_TEMP/commander-xp-terminal-authority-envelope-v2.json"
           jq -e '.schemaVersion == 2 and .authority == "github-actions-terminal-authority-envelope-v2" and (.envelopeSha256 | test("^sha256:[0-9a-f]{64}$")) and .integrityVerified == true and .experimentUsable == false and .performanceClaimAuthorized == false' "$RUNNER_TEMP/commander-xp-terminal-authority-envelope-v2.json" >/dev/null
-          jq 'del(.envelopeSha256)' "$RUNNER_TEMP/commander-xp-terminal-authority-envelope-v2.json" > "$RUNNER_TEMP/commander-xp-terminal-authority-envelope-v2.rebuilt.json"
+          jq -cS 'del(.envelopeSha256)' "$RUNNER_TEMP/commander-xp-terminal-authority-envelope-v2.json" > "$RUNNER_TEMP/commander-xp-terminal-authority-envelope-v2.rebuilt.json"
           test "$(sha256sum "$RUNNER_TEMP/commander-xp-terminal-authority-envelope-v2.rebuilt.json" | cut -d' ' -f1)" = "$ENVELOPE_SHA256"
 
       - name: Attest terminal authority index

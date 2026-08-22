@@ -16,6 +16,7 @@ import {
   verifyEvidenceBindings,
   verifyExternalPhaseLedger,
   verifyExternalReceipt,
+  verifyRetainedPhaseAuthority,
   verifySourceCIMetadata,
 } from "./commander-xp-external-seal-lib.mjs";
 
@@ -143,8 +144,20 @@ export async function runCommanderXpExternalSealCli(argv, env = process.env) {
     process.stdout.write(`${JSON.stringify(ledger)}\n`);
     return 0;
   }
+  if (command === "verify-prior-authority") {
+    const binding = await readJsonFile(requiredPath(options, "binding"));
+    await verifyRetainedPhaseAuthority({
+      ledgerPath: requiredPath(options, "ledger"),
+      authorityReceiptPath: requiredPath(options, "authority-receipt"),
+      terminalEnvelopePath: requiredPath(options, "terminal-envelope"),
+      binding,
+      phase: required(options, "phase"),
+    });
+    process.stdout.write(`${JSON.stringify({ ok: true })}\n`);
+    return 0;
+  }
   throw new Error(
-    "usage: commander-xp-external-seal.mjs <prepare|verify-source-ci|verify-evidence|verify-bundle|receipt|verify-receipt|ledger|verify-ledger> [--key=value]",
+    "usage: commander-xp-external-seal.mjs <prepare|verify-source-ci|verify-evidence|verify-bundle|receipt|verify-receipt|ledger|verify-ledger|verify-prior-authority> [--key=value]",
   );
 }
 
