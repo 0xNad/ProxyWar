@@ -132,7 +132,28 @@ async function decisionResponseFor(
             requestID: "req_test1",
             slot: 0,
             protocol: { maxSpawnPreferences: 16 },
-            request: { legalActions, observation: {} },
+            request: {
+              legalActions,
+              observation: legalActions.some(
+                (action) =>
+                  action !== null &&
+                  typeof action === "object" &&
+                  String((action as { kind?: unknown }).kind).startsWith(
+                    "deal_",
+                  ),
+              )
+                ? {
+                    deals: {
+                      decisionStep: 1,
+                      incomingProposals: [],
+                      outgoingProposals: [],
+                      activeDeals: [],
+                      proposalOptions: [],
+                      rivalReliability: [],
+                    },
+                  }
+                : {},
+            },
           }),
         );
       });

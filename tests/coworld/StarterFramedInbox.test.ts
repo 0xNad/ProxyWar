@@ -3,6 +3,8 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { boundedSpatialV1 } from "../../coworld-adapter/tester-starter-llm/owner-capabilities.mjs";
+
 // The framed free-text inbox (operator decision 2026-08-16): inbound rival
 // messages reach the starter's planner as a separate `messages[]` block of
 // labelled untrusted CLAIMS, scoped so a message may move dealPolicies /
@@ -72,7 +74,9 @@ async function loadStarter(): Promise<StarterInboxApi> {
     extractFunction(source, "chooseMessageOpener"),
     "return { cleanMessage, buildState, chooseMessageMove, MESSAGE_REPLIES, MESSAGE_OPENERS };",
   ];
-  return new Function(parts.join("\n"))() as StarterInboxApi;
+  return new Function("boundedSpatialV1", parts.join("\n"))(
+    boundedSpatialV1,
+  ) as StarterInboxApi;
 }
 
 const BASE_OBSERVATION = {
