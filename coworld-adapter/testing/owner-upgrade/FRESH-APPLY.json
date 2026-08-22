@@ -8,15 +8,15 @@
     "cleanBeforeApply": true
   },
   "candidate": {
-    "commit": "e8944d30e6576676ed9b976f6d48e89c5b81837b",
-    "tree": "4be97ef7629488824c39964640428d2f67e7421b",
+    "commit": "f97e1a9a459ca9ad18a2e50068c57d5533c7e65d",
+    "tree": "e0639a4bd64f1d2406499f9dae3f9d5ad445bff3",
     "base": "a69175a30577b3e516f09a2cb0960d4d129b3f33"
   },
   "packet": {
     "path": "coworld-adapter/testing/owner-upgrade/proxywar-owner-upgrade.patch",
-    "sha256": "469e816b848846c964b78fbbe59136270b946490d3b0416a5d8636fb4c23dd7b",
+    "sha256": "797be7d29d7419865b37c699304508cf4fd78221a929674cd91ad7e5df50e822",
     "ledgerPath": "coworld-adapter/testing/owner-upgrade/SHA256SUMS",
-    "ledgerSha256": "75476349a500981326f9543833e252fa61e95adc87f433f0a0f100673f7f097f",
+    "ledgerSha256": "59b1161d210606652abf577239201189db02d1820a2ffee3fe58154c7f44e2f0",
     "verifiedFiles": 13
   },
   "verification": {

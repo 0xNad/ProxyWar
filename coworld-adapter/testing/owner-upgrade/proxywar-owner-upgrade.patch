@@ -175,7 +175,7 @@ index 9d424920ec57f896b1dad10b09eac00fec25f555..ae6136ef145936e57659882c48c51e4a
  
  `starter-player.mjs` is a small conservative rule agent (no model, no Bedrock). It
 diff --git a/llm-player.mjs b/llm-player.mjs
-index 596924b014117aef59d03df1e7a886fc32d04202..052d662560eef797eab0dd3945fc0547fe1f9e5b 100644
+index 596924b014117aef59d03df1e7a886fc32d04202..0404c21e259030b9e9ed1071daf65463a2529b37 100644
 --- a/llm-player.mjs
 +++ b/llm-player.mjs
 @@ -20,6 +20,15 @@
@@ -274,6 +274,15 @@ index 596924b014117aef59d03df1e7a886fc32d04202..052d662560eef797eab0dd3945fc0547
    const self = {
      tileShare: own.tileShare,
      troops: own.troops,
+@@ -228,7 +259,7 @@ function buildState(obs, actions) {
+     gold: own.gold,
+     borderTiles: own.borderTiles,
+     incomingAttacks: own.incomingAttacks,
+-    structures: own.units, // your buildings (counts) — upgrade these instead of sprawling
++    structures: own.unitCounts, // your buildings (counts) — upgrade these instead of sprawling
+   };
+   const rivals = (obs.visiblePlayers || [])
+     .filter((p) => p && p.isAlive)
 @@ -240,65 +271,19 @@ function buildState(obs, actions) {
        isAllied: p.isAllied,
        relation: p.relation,
@@ -4227,7 +4236,7 @@ index 0000000000000000000000000000000000000000..72f96c91755a0a3b5f668840aed991fd
 +});
 diff --git a/owner-player-frame.test.mjs b/owner-player-frame.test.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..0340b6c4e39d253a3ace350e4535b227fcaa2d06
+index 0000000000000000000000000000000000000000..899fcad26de9d16c6cce5ff766fa949be0f6855a
 --- /dev/null
 +++ b/owner-player-frame.test.mjs
 @@ -0,0 +1,280 @@
@@ -4275,7 +4284,7 @@ index 0000000000000000000000000000000000000000..0340b6c4e39d253a3ace350e4535b227
 +          gold: "1000",
 +          borderTiles: 10,
 +          incomingAttacks: 0,
-+          units: {},
++          unitCounts: { City: 1 },
 +        },
 +        visiblePlayers: [
 +          {
@@ -4387,7 +4396,7 @@ index 0000000000000000000000000000000000000000..0340b6c4e39d253a3ace350e4535b227
 +      protocolVersion: "proxywar-agent-v1",
 +      observation: {
 +        phase: "active",
-+        ownState: { playerID: "P_A", units: {} },
++        ownState: { playerID: "P_A", unitCounts: {} },
 +        visiblePlayers: [],
 +      },
 +      legalActions: [holdAction()],

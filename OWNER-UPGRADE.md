@@ -105,8 +105,8 @@ SHA-256 and the exact before/after file hashes are sealed beside it in
 `coworld-adapter/testing/owner-upgrade/SHA256SUMS`. Its base is public starter commit
 `190ea95eda41fbf5d1521d433b3365d87b9cfe57`; the reviewed complete-file source
 is `coworld-adapter/tester-starter-llm/` at candidate source
-`e8944d30e6576676ed9b976f6d48e89c5b81837b` / tree
-`4be97ef7629488824c39964640428d2f67e7421b`. The packet verification script
+`f97e1a9a459ca9ad18a2e50068c57d5533c7e65d` / tree
+`e0639a4bd64f1d2406499f9dae3f9d5ad445bff3`. The packet verification script
 rejects any different public base, ledger schema/cardinality, candidate
 commit/tree/blob, patch byte, or after-apply file byte. The machine-readable
 fresh-apply receipt is
@@ -560,10 +560,12 @@ body/prompt/provider fields, unknown fields, lines over 8 KiB, logs over 16 MiB,
 and more than 64 events of one kind. The body itself is never written by the
 reference evidence logger.
 
-The canonical `proxywar:0.1.54` target proves deals and free text. Do not claim
-spatial from it: spatial is absent there. Until a reviewed spatial Coworld ID is
-published in the evidence table, owners can test spatial only locally and must
-retain absent-field fallback.
+The canonical `proxywar:0.1.54` target proves the full deals ledger and
+free-text transport plus semantic replies; its retained public artifacts do
+not prove the exact free-text offered-ID/selected-ID/recipient-byte join. Do not
+claim spatial from it: spatial is absent there. Until a reviewed spatial
+Coworld ID is published in the evidence table, owners can test spatial only
+locally and must retain absent-field fallback.
 
 ## XP evidence ledger
 
@@ -572,7 +574,7 @@ retain absent-field fallback.
 | Structured deals  | Keeper `xreq_982ce436-8f17-499e-8d46-34235b8226e9` / `ereq_f46d1135-206d-4b1b-b46e-bb6b6a0b9d1d`; breaker `xreq_9e0e43ea-6236-4041-b852-eec4be928d3b` / `ereq_fd6e7b85-65d6-47ac-ad42-8a7f4c48c457`; canonical `proxywar:0.1.54`                                                        | Offered exact deal ID; validated propose plus accept/reject; counterparty; active obligation; terminal fulfilled/non-breach or explicit terminal breach; replay/deal-ledger join      | **PASS for propose/accept/reject/follow-through/breach:** 18/18 exact offered, 18/18 manager-applied, 13 fulfilled + 1 confirmed violation, zero deal-slot fallback/degradation. `deal_withdraw` was not selected and is not claimed live.                                                                                                                                           |
 | Free text         | v1 `xreq_03f0856a-f832-4781-9939-d0677869050f` / `ereq_ef3ea235-b2fb-4326-9d4b-58c412a9f423`; capped v2 `xreq_7195ad67-7a4d-488b-89e2-72579b1e22f3` / `ereq_552b8ff4-4ff9-4b29-aa3d-40be2a31a52c`; canonical `proxywar:0.1.54`                                                          | Offered exact message ID; exact selected ID; byte-identical delivered body; recipient inbox/replay event; unchanged primary action path; bounded artifacts                            | **PARTIAL/FIX:** v2 replay records 23 `agent_message` intents/events (5 openers + 18 replies), all four senders/recipients, max one opener + three replies per pair. Public XP artifacts omit offered/selected comms-slot IDs and raw recipient observations, so the exact offered→selected→recipient byte join is not externally provable from this package.                        |
 | Spatial/map       | source `c329cf3743945d0af9f9bc070a14c356f090be88`; clean spatial benchmark SHA-256 `5ed621601be943a05948cb1dd894dde0492848b73b70d78af3b427e8f70cf241`; prompt matrix SHA-256 `e8aea93c645429d5026198218e0ef43d4f1a9504198d507f6596b932c448d46f`; no Coworld/policy/request identity yet | Independently fetched immutable Coworld authority receipt; bounded wire/prompt/memory; exact offered gameplay ID; matched off/on episodes with identical non-spatial config           | **LOCAL SOURCE/PERF PASS; HOSTED BLOCKED:** schema `3` supplies the coordinate frame, elevation/coverage, and completed public structure/warship positions with the ownership minimap. The clean source-attributed benchmark and prompt matrix meet every acceptance cap. No package authority receipt or hosted XP exists. Full terrain/asset-marker minimap L5 is not implemented. |
-| Fresh owner apply | public base `190ea95eda41fbf5d1521d433b3365d87b9cfe57`; candidate `e8944d30e6576676ed9b976f6d48e89c5b81837b` / tree `4be97ef7629488824c39964640428d2f67e7421b`; exact patch and before/after hashes in `coworld-adapter/testing/owner-upgrade/SHA256SUMS`                               | Exact ledger cardinality, candidate commit/tree/blobs, `git apply --check`, complete-file hashes, install, Node tests, syntax, and check-only doctor from a fresh exact-base checkout | **LOCAL PASS:** verifier returned `PASS` for all 13 required files; patch SHA-256 `469e816b848846c964b78fbbe59136270b946490d3b0416a5d8636fb4c23dd7b`; ledger SHA-256 `75476349a500981326f9543833e252fa61e95adc87f433f0a0f100673f7f097f`; doctor returned ready. Upload and owner XP remain separate owner/operator actions and are not claimed.                                      |
+| Fresh owner apply | public base `190ea95eda41fbf5d1521d433b3365d87b9cfe57`; candidate `f97e1a9a459ca9ad18a2e50068c57d5533c7e65d` / tree `e0639a4bd64f1d2406499f9dae3f9d5ad445bff3`; exact patch and before/after hashes in `coworld-adapter/testing/owner-upgrade/SHA256SUMS`                               | Exact ledger cardinality, candidate commit/tree/blobs, `git apply --check`, complete-file hashes, install, Node tests, syntax, and check-only doctor from a fresh exact-base checkout | **LOCAL PASS:** verifier returned `PASS` for all 13 required files; patch SHA-256 `797be7d29d7419865b37c699304508cf4fd78221a929674cd91ad7e5df50e822`; ledger SHA-256 `59b1161d210606652abf577239201189db02d1820a2ffee3fe58154c7f44e2f0`; doctor returned ready. Upload and owner XP remain separate owner/operator actions and are not claimed.                                      |
 
 ### Known platform-live limits (not owner-fixable)
 
