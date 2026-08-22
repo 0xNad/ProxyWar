@@ -79,6 +79,7 @@ function capabilityRequest() {
                 template: "non_aggression_pact",
                 durationSteps: 12,
               },
+              proposedAtStep: 42,
               answerableThroughStep: 43,
             },
           ],

@@ -6,6 +6,7 @@ import {
   OWNER_SPATIAL_SERIALIZED_MAX_BYTES,
   SPATIAL_VISIBILITY_MODEL,
   advertisedMessageLimit,
+  boundedDealsObservation,
   boundedSpatialObservation,
   boundedSpatialV1,
   boundedSpatialV3,
@@ -90,6 +91,121 @@ test("deal slot requires observation capability and an exact offered deal id", (
         dealMove: deal,
       }),
       {},
+    );
+  }
+});
+
+test("deal capability rejects malformed nested state without emitting a slot", () => {
+  const proposal = {
+    dealID: "deal:P_A:P_B:support_request:4",
+    proposerPlayerID: "P_A",
+    proposerName: "Agent A",
+    recipientPlayerID: "P_B",
+    recipientName: "Agent B",
+    terms: {
+      template: "support_request",
+      durationSteps: 6,
+      goldAmount: "50000",
+      troopAmount: 5000,
+    },
+    proposedAtStep: 4,
+    answerableThroughStep: 6,
+  };
+  const active = {
+    dealID: "deal:P_A:P_B:joint_attack:2",
+    template: "joint_attack",
+    proposerPlayerID: "P_A",
+    proposerName: "Agent A",
+    recipientPlayerID: "P_B",
+    recipientName: "Agent B",
+    activeFromStep: 3,
+    expiresAfterStep: 14,
+    stepsRemaining: 8,
+    obligations: [
+      {
+        obligorPlayerID: "P_A",
+        obligorName: "Agent A",
+        kind: "confirmed_attack_on_target",
+        status: "pending",
+        targetPlayerID: "P_C",
+        targetName: "Agent C",
+      },
+    ],
+  };
+  const valid = {
+    decisionStep: 7,
+    incomingProposals: [proposal],
+    outgoingProposals: [],
+    activeDeals: [active],
+    proposalOptions: [
+      {
+        recipientPlayerID: "P_C",
+        recipientName: "Agent C",
+        terms: {
+          template: "non_aggression_pact",
+          durationSteps: 12,
+        },
+      },
+    ],
+    rivalReliability: [
+      {
+        playerID: "P_C",
+        name: "Agent C",
+        fulfilled: 2,
+        terminalNonMoot: 3,
+        reliability: 0.67,
+      },
+    ],
+  };
+  assert.deepEqual(boundedDealsObservation(valid), valid);
+
+  const selected = {
+    id: `deal_accept:${proposal.dealID}`,
+    kind: "deal_accept",
+  };
+  const malformed = [
+    { ...valid, incomingProposals: [{ dealID: 7 }] },
+    { ...valid, incomingProposals: [{}] },
+    {
+      ...valid,
+      incomingProposals: [{ ...proposal, terms: [] }],
+    },
+    {
+      ...valid,
+      incomingProposals: [{ ...proposal, dealID: ` ${proposal.dealID}` }],
+    },
+    {
+      ...valid,
+      outgoingProposals: [{ ...proposal }],
+    },
+    {
+      ...valid,
+      activeDeals: [
+        {
+          ...active,
+          obligations: [{ ...active.obligations[0], status: 7 }],
+        },
+      ],
+    },
+    {
+      ...valid,
+      activeDeals: [{ ...active, activeFromStep: undefined }],
+    },
+    { ...valid, privateDealNotes: "must not enter policy state" },
+  ];
+  for (const deals of malformed) {
+    assert.equal(boundedDealsObservation(deals), null);
+    assert.deepEqual(
+      dealResponseFields({
+        actions: [primary, selected],
+        observation: { deals },
+        dealMove: selected,
+      }),
+      {},
+    );
+    assert.equal(
+      "deals" in ownerCapabilityObservation({ deals, visiblePlayers: [] }),
+      false,
     );
   }
 });

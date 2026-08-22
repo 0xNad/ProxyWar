@@ -27,13 +27,33 @@ const INVISIBLE_FORMAT_OR_SEPARATOR =
 const CONTROL = /[\u0000-\u001F\u007F-\u009F]/u;
 const MINIMAP_ROW = /^[A-Za-z0-9.@#~]{24}$/u;
 const MINIMAP_GLYPH = /^[A-Za-z0-9@#]$/u;
-const DEAL_ARRAY_FIELDS = [
-  "incomingProposals",
-  "outgoingProposals",
-  "activeDeals",
-  "proposalOptions",
-  "rivalReliability",
-];
+const DEAL_TEMPLATES = new Set([
+  "non_aggression_pact",
+  "trade_security_pact",
+  "joint_attack",
+  "support_request",
+]);
+const DEAL_OBLIGATION_KINDS = new Set([
+  "non_aggression",
+  "trade_security",
+  "confirmed_attack_on_target",
+  "send_support",
+]);
+const DEAL_OBLIGATION_STATUSES = new Set([
+  "pending",
+  "fulfilled",
+  "violated",
+  "expired_unfulfilled",
+  "unverified",
+  "moot",
+]);
+const DEAL_OBLIGATION_SHAPE = new Map([
+  ["non_aggression_pact", { kind: "non_aggression", count: 2 }],
+  ["trade_security_pact", { kind: "trade_security", count: 2 }],
+  ["joint_attack", { kind: "confirmed_attack_on_target", count: 1 }],
+  ["support_request", { kind: "send_support", count: 1 }],
+]);
+const MAX_DEAL_OBSERVATION_ROWS = 64;
 
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -45,6 +65,316 @@ function isBoundedRecordArray(value, maxLength) {
     value.length <= maxLength &&
     value.every((entry) => isRecord(entry))
   );
+}
+
+function hasExactKeys(value, required, optional = []) {
+  if (!isRecord(value)) return false;
+  const allowed = new Set([...required, ...optional]);
+  return (
+    required.every((key) => Object.hasOwn(value, key)) &&
+    Object.keys(value).every((key) => allowed.has(key))
+  );
+}
+
+function isStrictOpaqueID(value) {
+  return (
+    isBoundedVisibleString(value, 200) &&
+    value.trim() === value &&
+    !/\s/u.test(value)
+  );
+}
+
+function isBoundedName(value) {
+  return isBoundedVisibleString(value, 120);
+}
+
+function isNonnegativeSafeInteger(value) {
+  return Number.isSafeInteger(value) && value >= 0;
+}
+
+function isPositiveIntegerString(value) {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 40 &&
+    /^(?:0|[1-9][0-9]*)$/u.test(value) &&
+    BigInt(value) > 0n
+  );
+}
+
+function boundedDealTerms(terms) {
+  if (
+    !hasExactKeys(
+      terms,
+      ["template", "durationSteps"],
+      ["targetPlayerID", "targetName", "goldAmount", "troopAmount"],
+    ) ||
+    !DEAL_TEMPLATES.has(terms.template) ||
+    !Number.isSafeInteger(terms.durationSteps) ||
+    terms.durationSteps < 3 ||
+    terms.durationSteps > 20
+  ) {
+    return null;
+  }
+
+  const targetPresent =
+    Object.hasOwn(terms, "targetPlayerID") ||
+    Object.hasOwn(terms, "targetName");
+  const supportPresent =
+    Object.hasOwn(terms, "goldAmount") || Object.hasOwn(terms, "troopAmount");
+  const bounded = {
+    template: terms.template,
+    durationSteps: terms.durationSteps,
+  };
+  if (terms.template === "joint_attack") {
+    if (
+      supportPresent ||
+      !isStrictOpaqueID(terms.targetPlayerID) ||
+      !isBoundedName(terms.targetName)
+    ) {
+      return null;
+    }
+    return {
+      ...bounded,
+      targetPlayerID: terms.targetPlayerID,
+      targetName: terms.targetName,
+    };
+  }
+  if (terms.template === "support_request") {
+    if (
+      targetPresent ||
+      !isPositiveIntegerString(terms.goldAmount) ||
+      !Number.isSafeInteger(terms.troopAmount) ||
+      terms.troopAmount <= 0
+    ) {
+      return null;
+    }
+    return {
+      ...bounded,
+      goldAmount: terms.goldAmount,
+      troopAmount: terms.troopAmount,
+    };
+  }
+  return targetPresent || supportPresent ? null : bounded;
+}
+
+function boundedDealProposal(proposal) {
+  if (
+    !hasExactKeys(proposal, [
+      "dealID",
+      "proposerPlayerID",
+      "proposerName",
+      "recipientPlayerID",
+      "recipientName",
+      "terms",
+      "proposedAtStep",
+      "answerableThroughStep",
+    ]) ||
+    !isStrictOpaqueID(proposal.dealID) ||
+    !isStrictOpaqueID(proposal.proposerPlayerID) ||
+    !isBoundedName(proposal.proposerName) ||
+    !isStrictOpaqueID(proposal.recipientPlayerID) ||
+    !isBoundedName(proposal.recipientName) ||
+    proposal.proposerPlayerID === proposal.recipientPlayerID ||
+    !isNonnegativeSafeInteger(proposal.proposedAtStep) ||
+    !isNonnegativeSafeInteger(proposal.answerableThroughStep) ||
+    proposal.answerableThroughStep < proposal.proposedAtStep
+  ) {
+    return null;
+  }
+  const terms = boundedDealTerms(proposal.terms);
+  return terms === null
+    ? null
+    : {
+        dealID: proposal.dealID,
+        proposerPlayerID: proposal.proposerPlayerID,
+        proposerName: proposal.proposerName,
+        recipientPlayerID: proposal.recipientPlayerID,
+        recipientName: proposal.recipientName,
+        terms,
+        proposedAtStep: proposal.proposedAtStep,
+        answerableThroughStep: proposal.answerableThroughStep,
+      };
+}
+
+function boundedDealObligation(obligation) {
+  if (
+    !hasExactKeys(
+      obligation,
+      ["obligorPlayerID", "obligorName", "kind", "status"],
+      [
+        "targetPlayerID",
+        "targetName",
+        "goldAmount",
+        "troopAmount",
+        "donatedGold",
+        "donatedTroops",
+      ],
+    ) ||
+    !isStrictOpaqueID(obligation.obligorPlayerID) ||
+    !isBoundedName(obligation.obligorName) ||
+    !DEAL_OBLIGATION_KINDS.has(obligation.kind) ||
+    !DEAL_OBLIGATION_STATUSES.has(obligation.status)
+  ) {
+    return null;
+  }
+  const targetPresent =
+    Object.hasOwn(obligation, "targetPlayerID") ||
+    Object.hasOwn(obligation, "targetName");
+  const supportPresent = [
+    "goldAmount",
+    "troopAmount",
+    "donatedGold",
+    "donatedTroops",
+  ].some((key) => Object.hasOwn(obligation, key));
+  const bounded = {
+    obligorPlayerID: obligation.obligorPlayerID,
+    obligorName: obligation.obligorName,
+    kind: obligation.kind,
+    status: obligation.status,
+  };
+  if (obligation.kind === "confirmed_attack_on_target") {
+    if (
+      supportPresent ||
+      !isStrictOpaqueID(obligation.targetPlayerID) ||
+      !isBoundedName(obligation.targetName)
+    ) {
+      return null;
+    }
+    return {
+      ...bounded,
+      targetPlayerID: obligation.targetPlayerID,
+      targetName: obligation.targetName,
+    };
+  }
+  if (obligation.kind === "send_support") {
+    if (
+      targetPresent ||
+      !isPositiveIntegerString(obligation.goldAmount) ||
+      !Number.isSafeInteger(obligation.troopAmount) ||
+      obligation.troopAmount <= 0 ||
+      typeof obligation.donatedGold !== "string" ||
+      obligation.donatedGold.length === 0 ||
+      obligation.donatedGold.length > 40 ||
+      !/^(?:0|[1-9][0-9]*)$/u.test(obligation.donatedGold) ||
+      !Number.isSafeInteger(obligation.donatedTroops) ||
+      obligation.donatedTroops < 0
+    ) {
+      return null;
+    }
+    return {
+      ...bounded,
+      goldAmount: obligation.goldAmount,
+      troopAmount: obligation.troopAmount,
+      donatedGold: obligation.donatedGold,
+      donatedTroops: obligation.donatedTroops,
+    };
+  }
+  return targetPresent || supportPresent ? null : bounded;
+}
+
+function boundedActiveDeal(deal) {
+  if (
+    !hasExactKeys(deal, [
+      "dealID",
+      "template",
+      "proposerPlayerID",
+      "proposerName",
+      "recipientPlayerID",
+      "recipientName",
+      "activeFromStep",
+      "expiresAfterStep",
+      "stepsRemaining",
+      "obligations",
+    ]) ||
+    !isStrictOpaqueID(deal.dealID) ||
+    !DEAL_TEMPLATES.has(deal.template) ||
+    !isStrictOpaqueID(deal.proposerPlayerID) ||
+    !isBoundedName(deal.proposerName) ||
+    !isStrictOpaqueID(deal.recipientPlayerID) ||
+    !isBoundedName(deal.recipientName) ||
+    deal.proposerPlayerID === deal.recipientPlayerID ||
+    !isNonnegativeSafeInteger(deal.activeFromStep) ||
+    !isNonnegativeSafeInteger(deal.expiresAfterStep) ||
+    deal.expiresAfterStep < deal.activeFromStep ||
+    !isNonnegativeSafeInteger(deal.stepsRemaining) ||
+    deal.stepsRemaining > deal.expiresAfterStep - deal.activeFromStep + 1 ||
+    !isBoundedRecordArray(deal.obligations, MAX_DEAL_OBSERVATION_ROWS)
+  ) {
+    return null;
+  }
+  const expected = DEAL_OBLIGATION_SHAPE.get(deal.template);
+  if (deal.obligations.length !== expected.count) return null;
+  const obligations = deal.obligations.map(boundedDealObligation);
+  if (
+    obligations.some((obligation) => obligation === null) ||
+    obligations.some((obligation) => obligation.kind !== expected.kind)
+  ) {
+    return null;
+  }
+  return {
+    dealID: deal.dealID,
+    template: deal.template,
+    proposerPlayerID: deal.proposerPlayerID,
+    proposerName: deal.proposerName,
+    recipientPlayerID: deal.recipientPlayerID,
+    recipientName: deal.recipientName,
+    activeFromStep: deal.activeFromStep,
+    expiresAfterStep: deal.expiresAfterStep,
+    stepsRemaining: deal.stepsRemaining,
+    obligations,
+  };
+}
+
+function boundedProposalOption(option) {
+  if (
+    !hasExactKeys(option, ["recipientPlayerID", "recipientName", "terms"]) ||
+    !isStrictOpaqueID(option.recipientPlayerID) ||
+    !isBoundedName(option.recipientName)
+  ) {
+    return null;
+  }
+  const terms = boundedDealTerms(option.terms);
+  return terms === null
+    ? null
+    : {
+        recipientPlayerID: option.recipientPlayerID,
+        recipientName: option.recipientName,
+        terms,
+      };
+}
+
+function boundedRivalReliability(reliability) {
+  if (
+    !hasExactKeys(reliability, [
+      "playerID",
+      "name",
+      "fulfilled",
+      "terminalNonMoot",
+      "reliability",
+    ]) ||
+    !isStrictOpaqueID(reliability.playerID) ||
+    !isBoundedName(reliability.name) ||
+    !isNonnegativeSafeInteger(reliability.fulfilled) ||
+    !isNonnegativeSafeInteger(reliability.terminalNonMoot) ||
+    reliability.fulfilled > reliability.terminalNonMoot
+  ) {
+    return null;
+  }
+  const expected =
+    reliability.terminalNonMoot === 0
+      ? null
+      : Math.round(
+          (reliability.fulfilled / reliability.terminalNonMoot) * 100,
+        ) / 100;
+  if (reliability.reliability !== expected) return null;
+  return {
+    playerID: reliability.playerID,
+    name: reliability.name,
+    fulfilled: reliability.fulfilled,
+    terminalNonMoot: reliability.terminalNonMoot,
+    reliability: reliability.reliability,
+  };
 }
 
 export function advertisedMessageLimit(protocol) {
@@ -83,19 +413,60 @@ export function isSafeAgentMessageText(text, maxChars) {
 
 export function boundedDealsObservation(deals) {
   if (
-    !isRecord(deals) ||
+    !hasExactKeys(deals, [
+      "decisionStep",
+      "incomingProposals",
+      "outgoingProposals",
+      "activeDeals",
+      "proposalOptions",
+      "rivalReliability",
+    ]) ||
     !Number.isSafeInteger(deals.decisionStep) ||
     deals.decisionStep < 0
   ) {
     return null;
   }
-  for (const field of DEAL_ARRAY_FIELDS) {
-    if (!isBoundedRecordArray(deals[field], 64)) return null;
+  const normalizers = {
+    incomingProposals: boundedDealProposal,
+    outgoingProposals: boundedDealProposal,
+    activeDeals: boundedActiveDeal,
+    proposalOptions: boundedProposalOption,
+    rivalReliability: boundedRivalReliability,
+  };
+  const bounded = { decisionStep: deals.decisionStep };
+  for (const [field, normalize] of Object.entries(normalizers)) {
+    if (!isBoundedRecordArray(deals[field], MAX_DEAL_OBSERVATION_ROWS)) {
+      return null;
+    }
+    const rows = deals[field].map(normalize);
+    if (rows.some((row) => row === null)) return null;
+    bounded[field] = rows;
   }
-  for (const deal of deals.activeDeals) {
-    if (!isBoundedRecordArray(deal.obligations, 64)) return null;
+
+  const seenDealIDs = new Set();
+  for (const proposal of [
+    ...bounded.incomingProposals,
+    ...bounded.outgoingProposals,
+  ]) {
+    if (seenDealIDs.has(proposal.dealID)) return null;
+    seenDealIDs.add(proposal.dealID);
   }
-  return deals;
+  for (const deal of bounded.activeDeals) {
+    if (seenDealIDs.has(deal.dealID)) return null;
+    seenDealIDs.add(deal.dealID);
+  }
+  const optionKeys = new Set();
+  for (const option of bounded.proposalOptions) {
+    const key = `${option.recipientPlayerID}\u0000${option.terms.template}`;
+    if (optionKeys.has(key)) return null;
+    optionKeys.add(key);
+  }
+  const reliabilityPlayerIDs = new Set();
+  for (const entry of bounded.rivalReliability) {
+    if (reliabilityPlayerIDs.has(entry.playerID)) return null;
+    reliabilityPlayerIDs.add(entry.playerID);
+  }
+  return bounded;
 }
 
 export function boundedInboundMessages(observation) {

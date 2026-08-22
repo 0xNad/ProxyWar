@@ -322,23 +322,25 @@ function spatialChecks(events, required) {
   )
     fail("no policy recorded a valid spatial observation");
   if (
+    ["rich-v3", "rich-v3-minimap"].includes(required) &&
+    !spatial.every((event) => event.present === true)
+  ) {
+    fail("rich spatial evidence included an absent policy observation");
+  }
+  if (
     required === "absent" &&
     !spatial.every((event) => event.present === false)
   )
     fail("canonical social XP unexpectedly contained spatial state");
   if (
     ["rich-v3", "rich-v3-minimap"].includes(required) &&
-    !spatial
-      .filter((event) => event.present === true)
-      .every((event) => event.schemaVersion === 3)
+    !spatial.every((event) => event.schemaVersion === 3)
   ) {
     fail("rich spatial evidence included a non-v3 observation");
   }
   if (
     required === "rich-v3-minimap" &&
-    !spatial
-      .filter((event) => event.present === true)
-      .every((event) => event.minimapPresent === true)
+    !spatial.every((event) => event.minimapPresent === true)
   ) {
     fail("a rich v3 policy observation omitted the bounded minimap");
   }

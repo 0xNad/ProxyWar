@@ -156,6 +156,7 @@ response-contract nesting below are exact and internally consistent:
               "template": "non_aggression_pact",
               "durationSteps": 12
             },
+            "proposedAtStep": 42,
             "answerableThroughStep": 43
           }
         ],
@@ -250,7 +251,7 @@ response-contract nesting below are exact and internally consistent:
           "width": 24,
           "height": 12,
           "rows": [
-            "........................",
+            "A.......................",
             "........................",
             "........................",
             "........................",
@@ -263,7 +264,7 @@ response-contract nesting below are exact and internally consistent:
             "........................",
             "........................"
           ],
-          "legend": []
+          "legend": [{ "glyph": "A", "playerID": "P_A", "isYou": true }]
         }
       }
     },
@@ -363,7 +364,11 @@ Contract invariants:
    `legalActions[].id`.
 2. `selectedDealActionId` is optional and exactly equals one offered action
    whose kind is `deal_propose`, `deal_accept`, `deal_reject`, or
-   `deal_withdraw`. It is not a second game-action slot.
+   `deal_withdraw`. It is not a second game-action slot. The reference helper
+   admits `observation.deals` only when the complete nested proposal, terms,
+   active-obligation, option, and reliability containers are exact and bounded;
+   padded/duplicate IDs, partial records, wrong types, or unknown fields omit
+   the whole optional deal capability rather than being repaired.
 3. `selectedMessageActionId` and `messageText` are optional but emitted as a
    pair. The ID exactly equals an offered `message` action.
 4. The message body is a nonblank string whose raw JavaScript `String.length`
@@ -535,6 +540,9 @@ node owner-evidence-check.mjs --deals=optional --messages=optional --spatial=ric
 ```
 
 Each verifier invocation must print one JSON object with `"verdict":"PASS"`.
+The rich-spatial mode requires every supplied spatial record to be present,
+schema `3`, and minimap-bearing; one good record cannot mask an absent or
+downgraded record in the same evidence corpus.
 The deal check verifies the upgraded policy's self-report of exact
 offered/selected IDs; manager application and follow-through still require the
 game-owned ledger/replay. The message check requires a one-to-one

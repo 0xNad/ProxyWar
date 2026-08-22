@@ -2,6 +2,7 @@ import fs from "fs/promises";
 import path from "path";
 import { describe, expect, it } from "vitest";
 import {
+  boundedDealsObservation,
   boundedSpatialMapInfo,
   boundedSpatialObservation,
 } from "../../coworld-adapter/tester-starter-llm/owner-capabilities.mjs";
@@ -12,6 +13,33 @@ const STARTER_FILE = path.join(
   "tester-starter-llm",
   "llm-player.mjs",
 );
+const OWNER_PACKET_FILE = path.join(process.cwd(), "OWNER-UPGRADE.md");
+const PLAYER_PROTOCOL_FILE = path.join(
+  process.cwd(),
+  "coworld-adapter",
+  "docs",
+  "player-protocol.md",
+);
+
+async function jsonFenceContaining(
+  file: string,
+  needle: string,
+): Promise<Record<string, unknown>> {
+  const source = await fs.readFile(file, "utf8");
+  const needleIndex = source.indexOf(needle);
+  expect(needleIndex, `${needle} missing from ${file}`).toBeGreaterThan(-1);
+  const fenceStart = source.lastIndexOf("```json\n", needleIndex);
+  expect(fenceStart, `JSON fence missing before ${needle}`).toBeGreaterThan(-1);
+  const contentStart = fenceStart + "```json\n".length;
+  const fenceEnd = source.indexOf("\n```", needleIndex);
+  expect(fenceEnd, `JSON fence missing after ${needle}`).toBeGreaterThan(
+    needleIndex,
+  );
+  return JSON.parse(source.slice(contentStart, fenceEnd)) as Record<
+    string,
+    unknown
+  >;
+}
 
 function extractFunction(source: string, name: string): string {
   const start = source.indexOf(`function ${name}(`);
@@ -65,6 +93,40 @@ const BASE_OBSERVATION = {
 };
 
 describe("tester-starter-llm spatial state renderer", () => {
+  it("keeps both published schema-3 JSON examples directly admissible", async () => {
+    const ownerEnvelope = await jsonFenceContaining(
+      OWNER_PACKET_FILE,
+      '"type": "decision_request"',
+    );
+    const ownerRequest = ownerEnvelope.request as {
+      observation: Record<string, unknown>;
+    };
+    expect(
+      boundedDealsObservation(ownerRequest.observation.deals),
+    ).toMatchObject({
+      decisionStep: 42,
+      incomingProposals: [
+        {
+          dealID: "deal:P_A:P_B:non_aggression_pact:4",
+          proposedAtStep: 42,
+        },
+      ],
+    });
+    expect(boundedSpatialObservation(ownerRequest.observation)).toMatchObject({
+      schemaVersion: 3,
+      minimap: { legend: [{ playerID: "P_A", isYou: true }] },
+    });
+
+    const protocolObservation = await jsonFenceContaining(
+      PLAYER_PROTOCOL_FILE,
+      '"ownerPlayerID": "P_SELF"',
+    );
+    expect(boundedSpatialObservation(protocolObservation)).toMatchObject({
+      schemaVersion: 3,
+      minimap: { legend: [{ playerID: "P_SELF", isYou: true }] },
+    });
+  });
+
   it("retains the legacy state bytes when spatial is absent", async () => {
     const buildState = await loadBuildState();
     const state = buildState(BASE_OBSERVATION, []);

@@ -259,6 +259,7 @@ coordinate-frame, terrain-front, and positioned-public-asset layers:
 
 ```json
 {
+  "ownState": { "playerID": "P_SELF" },
   "mapInfo": {
     "name": "Pangaea",
     "width": 100,
@@ -337,7 +338,7 @@ coordinate-frame, terrain-front, and positioned-public-asset layers:
       "width": 24,
       "height": 12,
       "rows": [
-        "........................",
+        "A.......................",
         "........................",
         "........................",
         "........................",
@@ -350,7 +351,7 @@ coordinate-frame, terrain-front, and positioned-public-asset layers:
         "........................",
         "........................"
       ],
-      "legend": []
+      "legend": [{ "glyph": "A", "playerID": "P_SELF", "isYou": true }]
     }
   }
 }
