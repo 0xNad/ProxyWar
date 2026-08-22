@@ -239,11 +239,34 @@ test("privacy inventory seals exact Coworld projections and rejects raw bytes, p
   );
   await fs.writeFile(
     path.join(runRoot, "replay-evidence.json"),
-    `{"xpRequestID":"xreq_11111111-1111-4111-8111-111111111111","episodeRequestID":"ereq_22222222-2222-4222-8222-222222222222","jobID":"33333333-3333-4333-8333-333333333333","episodeID":"44444444-4444-4444-8444-444444444444","matchID":"game-1","config":{"seed":42},"contentSha256":"${"9".repeat(64)}"}\n`,
+    '{"xpRequestID":"xreq_11111111-1111-4111-8111-111111111111","episodeRequestID":"ereq_22222222-2222-4222-8222-222222222222","jobID":"33333333-3333-4333-8333-333333333333","episodeID":"44444444-4444-4444-8444-444444444444","matchID":"game-1","config":{"seed":42},"contentSha256":"d22465aa50b7fedb9ed1f4a664e7c39b81ea1c129fed3410dfbfb33a3d242a93"}\n',
   );
   await fs.writeFile(
     path.join(runRoot, "command-receipts.json"),
     '{"schemaVersion":2,"coworldClient":"0.1.42","commands":[]}\n',
+  );
+  await writeCoworldBundleReceipt(runRoot);
+
+  const receiptPath = path.join(runRoot, "coworld-bundle-receipt.json");
+  const wrongReplayMember = JSON.parse(await fs.readFile(receiptPath, "utf8"));
+  wrongReplayMember.members[0].sha256 =
+    "d22465aa50b7fedb9ed1f4a664e7c39b81ea1c129fed3410dfbfb33a3d242a93";
+  wrongReplayMember.members[2].sha256 = "7".repeat(64);
+  await fs.writeFile(receiptPath, canonicalJson(wrongReplayMember));
+  await assert.rejects(
+    scanPrivacyAndInventory(root),
+    hasCode("COWORLD_REPLAY_MEMBER_HASH_MISMATCH"),
+  );
+  await writeCoworldBundleReceipt(runRoot);
+
+  const wrongManifestMember = JSON.parse(
+    await fs.readFile(receiptPath, "utf8"),
+  );
+  wrongManifestMember.manifestSha256 = "4".repeat(64);
+  await fs.writeFile(receiptPath, canonicalJson(wrongManifestMember));
+  await assert.rejects(
+    scanPrivacyAndInventory(root),
+    hasCode("COWORLD_BUNDLE_MANIFEST_HASH_MISMATCH"),
   );
   await writeCoworldBundleReceipt(runRoot);
 
@@ -272,7 +295,6 @@ test("privacy inventory seals exact Coworld projections and rejects raw bytes, p
   );
   assert.equal((await scanPrivacyAndInventory(root)).fileCount, 10);
 
-  const receiptPath = path.join(runRoot, "coworld-bundle-receipt.json");
   const mismatchedReceipt = JSON.parse(await fs.readFile(receiptPath, "utf8"));
   mismatchedReceipt.seed = 43;
   await fs.writeFile(receiptPath, canonicalJson(mismatchedReceipt));
@@ -1033,12 +1055,17 @@ async function writeCoworldBundleReceipt(runRoot) {
     coworldVersion: "0.1.0",
     variantID: "tournament-4p-pangaea",
     include: ["results", "replay", "game_logs"],
-    manifestSha256: "4".repeat(64),
+    manifestSha256: "8".repeat(64),
     outerBundleSha256: "5".repeat(64),
     members: [
       { path: "logs/game.log", bytes: 84, sha256: "7".repeat(64) },
       { path: "manifest.json", bytes: 96, sha256: "8".repeat(64) },
-      { path: "replay", bytes: 128, sha256: "9".repeat(64) },
+      {
+        path: "replay",
+        bytes: 128,
+        sha256:
+          "d22465aa50b7fedb9ed1f4a664e7c39b81ea1c129fed3410dfbfb33a3d242a93",
+      },
       { path: "results.json", bytes: 42, sha256: "6".repeat(64) },
     ],
     projections: {

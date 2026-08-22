@@ -1341,6 +1341,11 @@ async function validateCoworldProjectionReceipts(root, inventory) {
     ) {
       fail("COWORLD_BUNDLE_MEMBER_ORDER_INVALID", receiptPath);
     }
+    if (
+      receipt.members.find((member) => member.path === "manifest.json")
+        ?.sha256 !== receipt.manifestSha256
+    )
+      fail("COWORLD_BUNDLE_MANIFEST_HASH_MISMATCH", receiptPath);
     exactKeys(
       receipt.projections,
       [
@@ -1435,12 +1440,15 @@ async function validateCoworldProjectionReceipts(root, inventory) {
       fail("COWORLD_REPLAY_GAME_JOIN_MISMATCH", receiptPath);
     }
     const replayDigest = replay.contentSha256 ?? replay.replaySha256;
+    const replayMember = receipt.members.find(
+      (member) => member.path === "replay",
+    );
     if (
-      !receipt.members.some(
-        (member) =>
-          normalizeRawSha256(member.sha256, "Coworld replay member SHA-256") ===
-          normalizeRawSha256(replayDigest, "replay evidence content SHA-256"),
-      )
+      replayMember === undefined ||
+      normalizeRawSha256(
+        replayMember.sha256,
+        "Coworld replay member SHA-256",
+      ) !== normalizeRawSha256(replayDigest, "replay evidence content SHA-256")
     ) {
       fail("COWORLD_REPLAY_MEMBER_HASH_MISMATCH", receiptPath);
     }
