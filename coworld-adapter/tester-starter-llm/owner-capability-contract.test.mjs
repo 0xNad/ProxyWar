@@ -222,6 +222,21 @@ test("deal capability rejects malformed nested state without emitting a slot", (
     ],
   };
   assert.deepEqual(boundedDealsObservation(valid, "P_B"), valid);
+  const violatedNap = {
+    ...valid,
+    activeDeals: [
+      active,
+      {
+        ...nap,
+        obligations: [
+          { ...nap.obligations[0], status: "violated" },
+          nap.obligations[1],
+        ],
+      },
+      support,
+    ],
+  };
+  assert.deepEqual(boundedDealsObservation(violatedNap, "P_B"), violatedNap);
 
   const selected = {
     id: `deal_accept:${proposal.dealID}`,
