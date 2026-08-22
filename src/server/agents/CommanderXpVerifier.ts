@@ -68,6 +68,7 @@ interface ExternalEvidenceArtifact {
   aggregateSha256: string;
   attestedSubjectDigest: string;
   localSealSha256: string;
+  platformRefetchSha256: string;
 }
 
 interface ExternalReceiptArtifact {
@@ -116,7 +117,7 @@ interface PhaseReceiptBinding {
   workflowName: "Commander XP external seal";
   actor: "0xNad";
   triggeringActor: "0xNad";
-  event: "workflow_dispatch";
+  event: "workflow_run";
   ref: "refs/heads/main";
   experimentID: string;
   behaviorBaseSha: string;
@@ -134,7 +135,7 @@ export interface CommanderXpExternalPhaseReceipt {
   workflowName: string;
   actor: "0xNad";
   triggeringActor: "0xNad";
-  event: "workflow_dispatch";
+  event: "workflow_run";
   ref: "refs/heads/main";
   experimentID: string;
   preRegistrationSha256: string;
@@ -217,11 +218,16 @@ export interface CommanderXpConfirmatoryActivation {
 
 interface PolicyIdentityReceipt {
   schemaVersion: 2;
-  authority: "coworld-0.1.42-policy-inspect-v1";
+  authority: "coworld-0.1.42-policy-provision-v2";
   inspectedAt: string;
-  policyImageID: string;
   platform: "linux/amd64";
+  sourceSha: string;
+  sourceTreeSha: string;
+  sourceProvenanceDigest: string;
   policyBuildProvenanceDigest: string;
+  ociImage: string;
+  ociDigest: string;
+  policyImageID: string;
   imageDigest: string;
   bedrockModel: string;
   arms: Record<
@@ -235,6 +241,84 @@ interface PolicyIdentityReceipt {
       inspectResponseSha256: string;
     }
   >;
+  opponentPolicyVersionIDs: [string, string, string];
+  receiptSha256: string;
+}
+
+interface CommanderXpSourceProvenanceReceipt {
+  schemaVersion: 2;
+  authority: "clean-exact-git-archive-v1";
+  repository: "0xNad/ProxyWar";
+  behaviorBaseSha: string;
+  behaviorBaseTreeSha: string;
+  sourceSha: string;
+  sourceTreeSha: string;
+  sourceAllowlist: string[];
+  treeDiffSha256: string;
+  sourceArchiveSha256: string;
+  platform: "linux/amd64";
+  provenanceSha256: string;
+}
+
+interface PolicyUploadReadbackReceipt {
+  schemaVersion: 2;
+  authority: "coworld-0.1.42-policy-upload-readback-v2";
+  inspectedAt: string;
+  platform: "linux/amd64";
+  sourceSha: string;
+  sourceTreeSha: string;
+  sourceProvenanceDigest: string;
+  buildProvenanceDigest: string;
+  ociImage: string;
+  ociDigest: string;
+  containerImage: CoworldContainerImageReceipt;
+  imageUpload: {
+    requestPayload: { name: string; client_hash: string };
+    requestPayloadSha256: string;
+    responseSha256: string;
+    responseBytes: number;
+    responseProjection: {
+      image: CoworldContainerImageReceipt;
+      uploadRequired: boolean;
+    };
+    completePayload: { id: string } | null;
+    completePayloadSha256: string | null;
+    completeResponseSha256: string;
+    completeResponseBytes: number;
+    image: CoworldContainerImageReceipt;
+  };
+  policy: {
+    name: string;
+    role: CommanderXpArm;
+    runArgv: string[];
+    useBedrock: true;
+    bedrockModel: string;
+    environmentConfiguration: {
+      attached: true;
+      keys: ["BEDROCK_MODEL", "USE_BEDROCK"];
+      valuesSha256: string;
+      attachmentResponseSha256: string;
+    };
+    completionPayloadProjection: Record<string, unknown>;
+    completionPayloadSha256: string;
+    completionResponse: Record<string, unknown>;
+    completionResponseSha256: string;
+    completionResponseBytes: number;
+    readback: Record<string, unknown>;
+    readbackSha256: string;
+  };
+  receiptSha256: string;
+}
+
+interface CoworldContainerImageReceipt {
+  id: string;
+  name: string;
+  version: number;
+  client_hash: string | null;
+  status: string;
+  image_uri: string | null;
+  image_digest: string | null;
+  public_image_uri: string | null;
 }
 
 interface CollectedXpEvidence {
@@ -360,6 +444,7 @@ interface EvalCoworldIdentityReceipt {
   coworldID: string;
   coworldVersion: string;
   manifestSha256: string;
+  hostedManifestSha256: string;
   gameImageID: string;
   gameImageDigest: string;
   gameBuildProvenanceDigest: string;
@@ -370,7 +455,22 @@ interface EvalCoworldIdentityReceipt {
     leagueBindingBeforeSha256: string;
     leagueBindingAfterSha256: string;
   };
+  terminalProofSha256: string;
   receiptSha256: string;
+}
+
+interface EvalCoworldTerminalProof {
+  schemaVersion: 2;
+  authority: "exact-image-coworld-0.1.42-run-episode-v1";
+  imageDigest: string;
+  variantID: "tournament-4p-pangaea";
+  winnerSlot: number;
+  turnCount: number;
+  tick: number;
+  rosterSlots: number[];
+  gameID: string;
+  seed: number;
+  proofSha256: string;
 }
 
 interface EpisodeResultsEvidence {
@@ -575,6 +675,8 @@ export async function verifyCommanderXpEvidence(
           ? requiredPreflightArtifactPaths(prereg.providerPreflightRequests)
           : requiredArtifactPaths(requiredRequests);
     requiredPaths.add(preregPath);
+    requiredPaths.add("commander-xp-source-provenance-v2.json");
+    requiredPaths.add("commander-xp-source-tree-diff-v1.json");
     requiredPaths.add("policy-identities-v2.json");
     requiredPaths.add("policy-inspect/A.json");
     requiredPaths.add("policy-inspect/B.json");
@@ -582,6 +684,7 @@ export async function verifyCommanderXpEvidence(
     requiredPaths.add("eval-coworld-identity-v2.json");
     requiredPaths.add("eval-coworld-inspect.json");
     requiredPaths.add("eval-coworld-manifest-v2.json");
+    requiredPaths.add("eval-coworld-terminal-proof-v2.json");
     requiredPaths.add("xp-openapi.sha256");
     requiredPaths.add("commander-xp-local-verification-v2.json");
     if (index.phase !== "preregistration") {
@@ -601,6 +704,14 @@ export async function verifyCommanderXpEvidence(
       root,
       "policy-identities-v2.json",
     );
+    const sourceProvenance = await readJson<CommanderXpSourceProvenanceReceipt>(
+      root,
+      "commander-xp-source-provenance-v2.json",
+    );
+    const sourceTreeDiffText = await readText(
+      root,
+      "commander-xp-source-tree-diff-v1.json",
+    );
     const evalCoworld = await readJson<EvalCoworldIdentityReceipt>(
       root,
       "eval-coworld-identity-v2.json",
@@ -608,6 +719,14 @@ export async function verifyCommanderXpEvidence(
     const evalCoworldManifestText = await readText(
       root,
       "eval-coworld-manifest-v2.json",
+    );
+    const evalCoworldTerminalProofText = await readText(
+      root,
+      "eval-coworld-terminal-proof-v2.json",
+    );
+    const evalCoworldTerminalProof = parseExactJson<EvalCoworldTerminalProof>(
+      evalCoworldTerminalProofText,
+      "EVAL_COWORLD_TERMINAL_PROOF_JSON_INVALID",
     );
     const openApiReceipt = await readText(root, "xp-openapi.sha256");
     const localVerification = await readJson<Record<string, unknown>>(
@@ -652,11 +771,14 @@ export async function verifyCommanderXpEvidence(
       "eval-coworld-inspect.json",
     );
     verifyPolicyIdentities(prereg, policies, policyInspectTexts);
+    verifySourceProvenance(prereg, sourceProvenance, sourceTreeDiffText);
     verifyEvalCoworldIdentity(
       prereg,
       evalCoworld,
       evalCoworldManifestText,
       evalCoworldInspectText,
+      evalCoworldTerminalProof,
+      evalCoworldTerminalProofText,
     );
     const authority =
       authorityRequestPath === undefined
@@ -1061,6 +1183,7 @@ function verifyPhaseReceiptBindingShape(
       "aggregateSha256",
       "attestedSubjectDigest",
       "localSealSha256",
+      "platformRefetchSha256",
     ],
     "PRIOR_PHASE_BINDING_EVIDENCE_SCHEMA_MISMATCH",
   );
@@ -1101,7 +1224,7 @@ function verifyPhaseReceiptBindingShape(
     binding.workflowName !== "Commander XP external seal" ||
     binding.actor !== "0xNad" ||
     binding.triggeringActor !== "0xNad" ||
-    binding.event !== "workflow_dispatch" ||
+    binding.event !== "workflow_run" ||
     binding.ref !== "refs/heads/main" ||
     !/^[0-9a-f]{40}$/.test(binding.behaviorBaseSha) ||
     !/^[0-9a-f]{40}$/.test(binding.behaviorBaseTreeSha) ||
@@ -1213,6 +1336,7 @@ function verifyExternalLedger(
       "aggregateSha256",
       "attestedSubjectDigest",
       "localSealSha256",
+      "platformRefetchSha256",
     ],
     "PRIOR_EVIDENCE_ARTIFACT_SCHEMA_MISMATCH",
   );
@@ -1266,7 +1390,7 @@ function verifyExternalLedger(
     receipt.workflowName !== "Commander XP external seal" ||
     receipt.actor !== "0xNad" ||
     receipt.triggeringActor !== "0xNad" ||
-    receipt.event !== "workflow_dispatch" ||
+    receipt.event !== "workflow_run" ||
     receipt.ref !== "refs/heads/main" ||
     receipt.experimentID !== prereg.experimentID ||
     receipt.preRegistrationSha256 !== prereg.preRegistrationSha256 ||
@@ -1308,6 +1432,7 @@ function verifyExternalLedger(
     !isSha256(receipt.evidenceArtifact.aggregateSha256) ||
     !isSha256(receipt.evidenceArtifact.attestedSubjectDigest) ||
     !isSha256(receipt.evidenceArtifact.localSealSha256) ||
+    !isSha256(receipt.evidenceArtifact.platformRefetchSha256) ||
     !/^\d+$/.test(receipt.receiptArtifact.id) ||
     !/^sha256:[0-9a-f]{64}$/.test(receipt.receiptArtifact.digest) ||
     !isSha256(receipt.receiptArtifact.receiptSha256) ||
@@ -1474,6 +1599,7 @@ function verifyPreRegistration(prereg: CommanderXpPreRegistrationV2): void {
     coworldID: prereg.identities.coworldID,
     coworldVersion: prereg.identities.coworldVersion,
     coworldManifestSha256: prereg.identities.coworldManifestSha256,
+    coworldHostedManifestSha256: prereg.identities.coworldHostedManifestSha256,
     coworldGameImageID: prereg.identities.coworldGameImageID,
     coworldGameImageDigest: prereg.identities.coworldGameImageDigest,
     canonicalLeagueBindingSnapshotSha256:
@@ -1767,7 +1893,7 @@ async function verifyAuthorityRequestArtifact(
     sourceCI.actor !== "0xNad" ||
     sourceCI.triggeringActor !== "0xNad" ||
     sourceCI.headRepository !== "0xNad/ProxyWar" ||
-    !["push", "workflow_dispatch"].includes(String(sourceCI.event)) ||
+    sourceCI.event !== "push" ||
     sourceCI.ref !== "refs/heads/main" ||
     sourceArtifact.workflowPath !==
       ".github/workflows/commander-xp-evidence.yml" ||
@@ -1846,6 +1972,115 @@ function normalizeSha256(value: string): string {
   return value.startsWith("sha256:") ? value.slice(7) : value;
 }
 
+function verifySourceProvenance(
+  prereg: CommanderXpPreRegistrationV2,
+  provenance: CommanderXpSourceProvenanceReceipt,
+  treeDiffText: string,
+): void {
+  exactRecord(
+    provenance,
+    [
+      "schemaVersion",
+      "authority",
+      "repository",
+      "behaviorBaseSha",
+      "behaviorBaseTreeSha",
+      "sourceSha",
+      "sourceTreeSha",
+      "sourceAllowlist",
+      "treeDiffSha256",
+      "sourceArchiveSha256",
+      "platform",
+      "provenanceSha256",
+    ],
+    "SOURCE_PROVENANCE_SCHEMA_MISMATCH",
+  );
+  const { provenanceSha256, ...body } = provenance;
+  const treeDiff = exactRecord(
+    parseExactJson<Record<string, unknown>>(
+      treeDiffText,
+      "SOURCE_TREE_DIFF_JSON_INVALID",
+    ),
+    [
+      "schemaVersion",
+      "behaviorBaseSha",
+      "behaviorBaseTreeSha",
+      "workflowSourceSha",
+      "workflowSourceTreeSha",
+      "allowlistMode",
+      "entries",
+    ],
+    "SOURCE_TREE_DIFF_SCHEMA_MISMATCH",
+  );
+  const treeDiffEntries = Array.isArray(treeDiff.entries)
+    ? treeDiff.entries.map((entry) =>
+        exactRecord(
+          entry,
+          [
+            "status",
+            "path",
+            "baseMode",
+            "headMode",
+            "baseBlob",
+            "headBlob",
+            "contentSha256",
+            "bytes",
+          ],
+          "SOURCE_TREE_DIFF_ENTRY_SCHEMA_MISMATCH",
+        ),
+      )
+    : [];
+  const treeDiffPaths = treeDiffEntries.map((entry) => entry.path);
+  const treeDiffEntriesValid = treeDiffEntries.every(
+    (entry) =>
+      (entry.status === "A" || entry.status === "M") &&
+      isNonEmptyString(entry.path) &&
+      isSafeSourcePath(entry.path) &&
+      (entry.status === "A"
+        ? entry.baseMode === null && entry.baseBlob === null
+        : (entry.baseMode === "100644" || entry.baseMode === "100755") &&
+          typeof entry.baseBlob === "string" &&
+          /^[0-9a-f]{40}$/.test(entry.baseBlob)) &&
+      (entry.headMode === "100644" || entry.headMode === "100755") &&
+      typeof entry.headBlob === "string" &&
+      /^[0-9a-f]{40}$/.test(entry.headBlob) &&
+      isSha256(entry.contentSha256) &&
+      isNonNegativeInteger(entry.bytes),
+  );
+  if (
+    provenance.schemaVersion !== 2 ||
+    provenance.authority !== "clean-exact-git-archive-v1" ||
+    provenance.repository !== "0xNad/ProxyWar" ||
+    provenance.behaviorBaseSha !== prereg.identities.behaviorSourceSha ||
+    provenance.behaviorBaseTreeSha !==
+      prereg.identities.behaviorSourceTreeSha ||
+    provenance.sourceSha !== prereg.identities.adapterSourceSha ||
+    provenance.sourceTreeSha !== prereg.identities.adapterSourceTreeSha ||
+    provenance.platform !== "linux/amd64" ||
+    !isUniqueStringArray(provenance.sourceAllowlist, false) ||
+    sha256Canonical([...provenance.sourceAllowlist].sort()) !==
+      sha256Canonical(provenance.sourceAllowlist) ||
+    !provenance.sourceAllowlist.every(isSafeSourcePath) ||
+    provenance.treeDiffSha256 !== prereg.identities.sourceDiffManifestSha256 ||
+    provenance.treeDiffSha256 !== sha256(treeDiffText) ||
+    !isSha256(provenance.sourceArchiveSha256) ||
+    provenanceSha256 !== prereg.identities.sourceProvenanceSha256 ||
+    provenanceSha256 !== sha256Canonical(body) ||
+    treeDiff.schemaVersion !== 1 ||
+    treeDiff.behaviorBaseSha !== prereg.identities.behaviorSourceSha ||
+    treeDiff.behaviorBaseTreeSha !== prereg.identities.behaviorSourceTreeSha ||
+    treeDiff.workflowSourceSha !== prereg.identities.adapterSourceSha ||
+    treeDiff.workflowSourceTreeSha !== prereg.identities.adapterSourceTreeSha ||
+    treeDiff.allowlistMode !== "exact" ||
+    !Array.isArray(treeDiff.entries) ||
+    !treeDiffEntriesValid ||
+    sha256Canonical(treeDiffPaths) !==
+      sha256Canonical(provenance.sourceAllowlist)
+  ) {
+    throw new VerificationFailure("SOURCE_PROVENANCE_MISMATCH");
+  }
+}
+
 function verifyPolicyIdentities(
   prereg: CommanderXpPreRegistrationV2,
   receipt: PolicyIdentityReceipt,
@@ -1857,26 +2092,44 @@ function verifyPolicyIdentities(
       "schemaVersion",
       "authority",
       "inspectedAt",
-      "policyImageID",
       "platform",
+      "sourceSha",
+      "sourceTreeSha",
+      "sourceProvenanceDigest",
       "policyBuildProvenanceDigest",
+      "ociImage",
+      "ociDigest",
+      "policyImageID",
       "imageDigest",
       "bedrockModel",
       "arms",
+      "opponentPolicyVersionIDs",
+      "receiptSha256",
     ],
     "POLICY_IDENTITY_SCHEMA_MISMATCH",
   );
   exactRecord(receipt.arms, ["A", "B", "C"], "POLICY_ARMS_SCHEMA_MISMATCH");
+  const { receiptSha256, ...body } = receipt;
   if (
     receipt.schemaVersion !== 2 ||
-    receipt.authority !== "coworld-0.1.42-policy-inspect-v1" ||
+    receipt.authority !== "coworld-0.1.42-policy-provision-v2" ||
     !Number.isFinite(Date.parse(receipt.inspectedAt)) ||
-    !/^img_[A-Za-z0-9_-]{8,}$/.test(receipt.policyImageID) ||
     receipt.platform !== "linux/amd64" ||
+    receipt.sourceSha !== prereg.identities.adapterSourceSha ||
+    receipt.sourceTreeSha !== prereg.identities.adapterSourceTreeSha ||
+    normalizeSha256(receipt.sourceProvenanceDigest) !==
+      prereg.identities.sourceProvenanceSha256 ||
     receipt.policyBuildProvenanceDigest !==
       prereg.identities.policyBuildProvenanceDigest ||
+    !/^ghcr\.io\/[a-z0-9._/-]+$/.test(receipt.ociImage) ||
+    receipt.ociDigest !== prereg.identities.imageDigest ||
+    !/^img_[A-Za-z0-9_-]{8,}$/.test(receipt.policyImageID) ||
     receipt.imageDigest !== prereg.identities.imageDigest ||
-    receipt.bedrockModel !== prereg.identities.bedrockModel
+    receipt.bedrockModel !== prereg.identities.bedrockModel ||
+    !isUniqueStringArray(receipt.opponentPolicyVersionIDs, false) ||
+    sha256Canonical(receipt.opponentPolicyVersionIDs) !==
+      sha256Canonical(prereg.identities.opponentPolicyVersionIDs) ||
+    receiptSha256 !== sha256Canonical(body)
   ) {
     throw new VerificationFailure("POLICY_IDENTITY_INVALID");
   }
@@ -1907,6 +2160,15 @@ function verifyPolicyIdentities(
     ) {
       throw new VerificationFailure(`POLICY_IDENTITY_${arm}_MISMATCH`);
     }
+    verifyPolicyUploadReadback(
+      prereg,
+      receipt,
+      arm,
+      parseExactJson<PolicyUploadReadbackReceipt>(
+        inspectTexts[arm],
+        `POLICY_INSPECT_${arm}_JSON_INVALID`,
+      ),
+    );
   }
   const argv = receipt.arms;
   if (
@@ -1919,11 +2181,231 @@ function verifyPolicyIdentities(
   }
 }
 
+function verifyPolicyUploadReadback(
+  prereg: CommanderXpPreRegistrationV2,
+  summary: PolicyIdentityReceipt,
+  arm: CommanderXpArm,
+  upload: PolicyUploadReadbackReceipt,
+): void {
+  exactRecord(
+    upload,
+    [
+      "schemaVersion",
+      "authority",
+      "inspectedAt",
+      "platform",
+      "sourceSha",
+      "sourceTreeSha",
+      "sourceProvenanceDigest",
+      "buildProvenanceDigest",
+      "ociImage",
+      "ociDigest",
+      "containerImage",
+      "imageUpload",
+      "policy",
+      "receiptSha256",
+    ],
+    `POLICY_UPLOAD_${arm}_SCHEMA_MISMATCH`,
+  );
+  const { receiptSha256, ...body } = upload;
+  const container = exactRecord(
+    upload.containerImage,
+    [
+      "id",
+      "name",
+      "version",
+      "client_hash",
+      "status",
+      "image_uri",
+      "image_digest",
+      "public_image_uri",
+    ],
+    `POLICY_UPLOAD_${arm}_IMAGE_SCHEMA_MISMATCH`,
+  );
+  const imageUpload = exactRecord(
+    upload.imageUpload,
+    [
+      "requestPayload",
+      "requestPayloadSha256",
+      "responseSha256",
+      "responseBytes",
+      "responseProjection",
+      "completePayload",
+      "completePayloadSha256",
+      "completeResponseSha256",
+      "completeResponseBytes",
+      "image",
+    ],
+    `POLICY_UPLOAD_${arm}_IMAGE_RECEIPT_SCHEMA_MISMATCH`,
+  );
+  const requestPayload = exactRecord(
+    imageUpload.requestPayload,
+    ["name", "client_hash"],
+    `POLICY_UPLOAD_${arm}_IMAGE_REQUEST_SCHEMA_MISMATCH`,
+  );
+  const responseProjection = exactRecord(
+    imageUpload.responseProjection,
+    ["image", "uploadRequired"],
+    `POLICY_UPLOAD_${arm}_IMAGE_RESPONSE_SCHEMA_MISMATCH`,
+  );
+  const projectedImage = exactRecord(
+    responseProjection.image,
+    [
+      "id",
+      "name",
+      "version",
+      "client_hash",
+      "status",
+      "image_uri",
+      "image_digest",
+      "public_image_uri",
+    ],
+    `POLICY_UPLOAD_${arm}_PROJECTED_IMAGE_SCHEMA_MISMATCH`,
+  );
+  const completedImage = exactRecord(
+    imageUpload.image,
+    [
+      "id",
+      "name",
+      "version",
+      "client_hash",
+      "status",
+      "image_uri",
+      "image_digest",
+      "public_image_uri",
+    ],
+    `POLICY_UPLOAD_${arm}_COMPLETED_IMAGE_SCHEMA_MISMATCH`,
+  );
+  const policy = exactRecord(
+    upload.policy,
+    [
+      "name",
+      "role",
+      "runArgv",
+      "useBedrock",
+      "bedrockModel",
+      "environmentConfiguration",
+      "completionPayloadProjection",
+      "completionPayloadSha256",
+      "completionResponse",
+      "completionResponseSha256",
+      "completionResponseBytes",
+      "readback",
+      "readbackSha256",
+    ],
+    `POLICY_UPLOAD_${arm}_POLICY_SCHEMA_MISMATCH`,
+  );
+  const environmentConfiguration = exactRecord(
+    policy.environmentConfiguration,
+    ["attached", "keys", "valuesSha256", "attachmentResponseSha256"],
+    `POLICY_UPLOAD_${arm}_ENVIRONMENT_SCHEMA_MISMATCH`,
+  );
+  const completionPayload = exactRecord(
+    policy.completionPayloadProjection,
+    ["name", "container_image_id", "run", "tags", "environmentAttached"],
+    `POLICY_UPLOAD_${arm}_COMPLETION_REQUEST_SCHEMA_MISMATCH`,
+  );
+  const tags = exactRecord(
+    completionPayload.tags,
+    ["purpose", "role"],
+    `POLICY_UPLOAD_${arm}_TAGS_SCHEMA_MISMATCH`,
+  );
+  const completionResponse = exactRecord(
+    policy.completionResponse,
+    ["id", "name", "version", "pools", "submit_error"],
+    `POLICY_UPLOAD_${arm}_COMPLETION_RESPONSE_SCHEMA_MISMATCH`,
+  );
+  const readback = exactRecord(
+    policy.readback,
+    ["id", "name", "version"],
+    `POLICY_UPLOAD_${arm}_READBACK_SCHEMA_MISMATCH`,
+  );
+  const completePayload =
+    imageUpload.completePayload === null
+      ? null
+      : exactRecord(
+          imageUpload.completePayload,
+          ["id"],
+          `POLICY_UPLOAD_${arm}_IMAGE_COMPLETE_SCHEMA_MISMATCH`,
+        );
+  if (
+    upload.schemaVersion !== 2 ||
+    upload.authority !== "coworld-0.1.42-policy-upload-readback-v2" ||
+    upload.inspectedAt !== summary.inspectedAt ||
+    upload.platform !== "linux/amd64" ||
+    upload.sourceSha !== prereg.identities.adapterSourceSha ||
+    upload.sourceTreeSha !== prereg.identities.adapterSourceTreeSha ||
+    normalizeSha256(upload.sourceProvenanceDigest) !==
+      prereg.identities.sourceProvenanceSha256 ||
+    upload.buildProvenanceDigest !==
+      prereg.identities.policyBuildProvenanceDigest ||
+    upload.ociImage !== summary.ociImage ||
+    upload.ociDigest !== prereg.identities.imageDigest ||
+    receiptSha256 !== sha256Canonical(body) ||
+    container.id !== summary.policyImageID ||
+    container.status !== "ready" ||
+    container.image_digest !== prereg.identities.imageDigest ||
+    completedImage.id !== summary.policyImageID ||
+    completedImage.status !== "ready" ||
+    completedImage.image_digest !== prereg.identities.imageDigest ||
+    requestPayload.name !== completedImage.name ||
+    requestPayload.client_hash !== completedImage.client_hash ||
+    imageUpload.requestPayloadSha256 !== sha256Canonical(requestPayload) ||
+    !isSha256(imageUpload.responseSha256) ||
+    !isPositiveInteger(imageUpload.responseBytes) ||
+    typeof responseProjection.uploadRequired !== "boolean" ||
+    projectedImage.id !== summary.policyImageID ||
+    (completePayload === null
+      ? imageUpload.completePayloadSha256 !== null
+      : completePayload.id !== summary.policyImageID ||
+        imageUpload.completePayloadSha256 !==
+          sha256Canonical(completePayload)) ||
+    !isSha256(imageUpload.completeResponseSha256) ||
+    !isPositiveInteger(imageUpload.completeResponseBytes) ||
+    policy.role !== arm ||
+    policy.useBedrock !== true ||
+    policy.bedrockModel !== prereg.identities.bedrockModel ||
+    sha256Canonical(policy.runArgv) !==
+      sha256Canonical(prereg.identities.runArgv[arm]) ||
+    environmentConfiguration.attached !== true ||
+    sha256Canonical(environmentConfiguration.keys) !==
+      sha256Canonical(["BEDROCK_MODEL", "USE_BEDROCK"]) ||
+    environmentConfiguration.valuesSha256 !==
+      sha256Canonical({
+        BEDROCK_MODEL: prereg.identities.bedrockModel,
+        USE_BEDROCK: "true",
+      }) ||
+    !isSha256(environmentConfiguration.attachmentResponseSha256) ||
+    completionPayload.name !== policy.name ||
+    completionPayload.container_image_id !== summary.policyImageID ||
+    sha256Canonical(completionPayload.run) !==
+      sha256Canonical(prereg.identities.runArgv[arm]) ||
+    tags.purpose !== "commander-xp-v2" ||
+    tags.role !== arm ||
+    completionPayload.environmentAttached !== true ||
+    !isSha256(policy.completionPayloadSha256) ||
+    completionResponse.id !== prereg.identities.armPolicyVersionIDs[arm] ||
+    completionResponse.name !== policy.name ||
+    !isPositiveInteger(completionResponse.version) ||
+    completionResponse.submit_error !== null ||
+    !isSha256(policy.completionResponseSha256) ||
+    !isPositiveInteger(policy.completionResponseBytes) ||
+    readback.id !== completionResponse.id ||
+    readback.name !== completionResponse.name ||
+    readback.version !== completionResponse.version ||
+    policy.readbackSha256 !== sha256Canonical(readback)
+  ) {
+    throw new VerificationFailure(`POLICY_UPLOAD_${arm}_MISMATCH`);
+  }
+}
+
 function verifyEvalCoworldIdentity(
   prereg: CommanderXpPreRegistrationV2,
   receipt: EvalCoworldIdentityReceipt,
   manifestText: string,
   inspectText: string,
+  terminalProof: EvalCoworldTerminalProof,
+  terminalProofText: string,
 ): void {
   verifyEvalCoworldManifest(prereg, manifestText);
   exactRecord(
@@ -1939,11 +2421,13 @@ function verifyEvalCoworldIdentity(
       "coworldID",
       "coworldVersion",
       "manifestSha256",
+      "hostedManifestSha256",
       "gameImageID",
       "gameImageDigest",
       "gameBuildProvenanceDigest",
       "gameRunnableEnv",
       "canonicalProduct",
+      "terminalProofSha256",
       "receiptSha256",
     ],
     "EVAL_COWORLD_RECEIPT_SCHEMA_MISMATCH",
@@ -1959,6 +2443,96 @@ function verifyEvalCoworldIdentity(
     "EVAL_COWORLD_CANONICAL_SCHEMA_MISMATCH",
   );
   const { receiptSha256, ...body } = receipt;
+  const inspect = exactRecordSubset(
+    parseExactJson<Record<string, unknown>>(
+      inspectText,
+      "EVAL_COWORLD_INSPECT_JSON_INVALID",
+    ),
+    Object.keys(
+      parseExactJson<Record<string, unknown>>(
+        inspectText,
+        "EVAL_COWORLD_INSPECT_JSON_INVALID",
+      ),
+    ),
+    "EVAL_COWORLD_INSPECT_SCHEMA_MISMATCH",
+  );
+  const inspectedCoworld = exactRecordSubset(
+    inspect.coworld,
+    Object.keys(isRecord(inspect.coworld) ? inspect.coworld : {}),
+    "EVAL_COWORLD_INSPECT_COWORLD_SCHEMA_MISMATCH",
+  );
+  const inspectedManifest = exactRecordSubset(
+    inspectedCoworld.manifest,
+    Object.keys(
+      isRecord(inspectedCoworld.manifest) ? inspectedCoworld.manifest : {},
+    ),
+    "EVAL_COWORLD_INSPECT_MANIFEST_SCHEMA_MISMATCH",
+  );
+  const inspectedGame = exactRecordSubset(
+    inspectedManifest.game,
+    Object.keys(isRecord(inspectedManifest.game) ? inspectedManifest.game : {}),
+    "EVAL_COWORLD_INSPECT_GAME_SCHEMA_MISMATCH",
+  );
+  const inspectedRunnable = exactRecordSubset(
+    inspectedGame.runnable,
+    Object.keys(isRecord(inspectedGame.runnable) ? inspectedGame.runnable : {}),
+    "EVAL_COWORLD_INSPECT_RUNNABLE_SCHEMA_MISMATCH",
+  );
+  const certification = exactRecordSubset(
+    inspect.certification,
+    Object.keys(isRecord(inspect.certification) ? inspect.certification : {}),
+    "EVAL_COWORLD_INSPECT_CERTIFICATION_SCHEMA_MISMATCH",
+  );
+  const expectedHostedManifest = structuredClone(
+    parseExactJson<Record<string, unknown>>(
+      manifestText,
+      "EVAL_COWORLD_MANIFEST_JSON_INVALID",
+    ),
+  );
+  const expectedHostedGame = exactRecordSubset(
+    expectedHostedManifest.game,
+    Object.keys(
+      isRecord(expectedHostedManifest.game) ? expectedHostedManifest.game : {},
+    ),
+    "EVAL_COWORLD_HOSTED_GAME_SCHEMA_MISMATCH",
+  );
+  const expectedHostedRunnable = exactRecordSubset(
+    expectedHostedGame.runnable,
+    Object.keys(
+      isRecord(expectedHostedGame.runnable) ? expectedHostedGame.runnable : {},
+    ),
+    "EVAL_COWORLD_HOSTED_RUNNABLE_SCHEMA_MISMATCH",
+  );
+  expectedHostedRunnable.image = receipt.gameImageID;
+  if (!Array.isArray(expectedHostedManifest.player)) {
+    throw new VerificationFailure("EVAL_COWORLD_HOSTED_PLAYER_SCHEMA_MISMATCH");
+  }
+  for (const player of expectedHostedManifest.player) {
+    const expectedHostedPlayer = exactRecordSubset(
+      player,
+      Object.keys(isRecord(player) ? player : {}),
+      "EVAL_COWORLD_HOSTED_PLAYER_SCHEMA_MISMATCH",
+    );
+    expectedHostedPlayer.image = receipt.gameImageID;
+  }
+  exactRecord(
+    terminalProof,
+    [
+      "schemaVersion",
+      "authority",
+      "imageDigest",
+      "variantID",
+      "winnerSlot",
+      "turnCount",
+      "tick",
+      "rosterSlots",
+      "gameID",
+      "seed",
+      "proofSha256",
+    ],
+    "EVAL_COWORLD_TERMINAL_PROOF_SCHEMA_MISMATCH",
+  );
+  const { proofSha256, ...proofBody } = terminalProof;
   const expectedEnv = {
     PROXYWAR_COMMANDER_XP_GAME_EVIDENCE: "1",
     PROXYWAR_TUNE_STRUCTURED_DEALS: "1",
@@ -1977,6 +2551,8 @@ function verifyEvalCoworldIdentity(
     receipt.coworldID !== prereg.identities.coworldID ||
     receipt.coworldVersion !== prereg.identities.coworldVersion ||
     receipt.manifestSha256 !== prereg.identities.coworldManifestSha256 ||
+    receipt.hostedManifestSha256 !==
+      prereg.identities.coworldHostedManifestSha256 ||
     sha256(manifestText) !== receipt.manifestSha256 ||
     receipt.gameImageID !== prereg.identities.coworldGameImageID ||
     receipt.gameImageDigest !== prereg.identities.coworldGameImageDigest ||
@@ -1989,6 +2565,34 @@ function verifyEvalCoworldIdentity(
       prereg.identities.canonicalLeagueBindingSnapshotSha256 ||
     canonical.leagueBindingAfterSha256 !==
       prereg.identities.canonicalLeagueBindingSnapshotSha256 ||
+    inspectedCoworld.id !== receipt.coworldID ||
+    inspectedCoworld.name !== receipt.coworldName ||
+    inspectedCoworld.version !== receipt.coworldVersion ||
+    normalizeSha256(String(inspectedCoworld.manifest_hash)) !==
+      receipt.hostedManifestSha256 ||
+    inspectedCoworld.canonical !== false ||
+    sha256Canonical(inspectedManifest) !==
+      sha256Canonical(expectedHostedManifest) ||
+    inspectedRunnable.image !== receipt.gameImageID ||
+    certification.state !== "certified" ||
+    receipt.terminalProofSha256 !== sha256(terminalProofText) ||
+    terminalProof.schemaVersion !== 2 ||
+    terminalProof.authority !== "exact-image-coworld-0.1.42-run-episode-v1" ||
+    terminalProof.imageDigest !== receipt.gameImageDigest ||
+    terminalProof.variantID !== "tournament-4p-pangaea" ||
+    !isNonNegativeInteger(terminalProof.winnerSlot) ||
+    !isPositiveInteger(terminalProof.turnCount) ||
+    terminalProof.turnCount > 36_400 ||
+    !isPositiveInteger(terminalProof.tick) ||
+    terminalProof.tick > 36_400 ||
+    sha256Canonical(terminalProof.rosterSlots) !==
+      sha256Canonical([0, 1, 2, 3]) ||
+    !terminalProof.rosterSlots.includes(terminalProof.winnerSlot) ||
+    !/^PWS[A-Z]{5}$/.test(terminalProof.gameID) ||
+    !isNonNegativeInteger(terminalProof.seed) ||
+    terminalProof.gameID !==
+      coworldEpisodeIdentity(terminalProof.seed).gameId ||
+    proofSha256 !== sha256Canonical(proofBody) ||
     receiptSha256 !== sha256Canonical(body)
   ) {
     throw new VerificationFailure("EVAL_COWORLD_IDENTITY_MISMATCH");
@@ -2071,6 +2675,7 @@ function verifyEvalCoworldManifest(
       "player_connect_timeout_seconds",
       "num_agents",
       "episode_timeout_seconds",
+      "seed",
       "commander_xp_phase",
       "commander_xp_run_key",
     ],
@@ -2078,12 +2683,20 @@ function verifyEvalCoworldManifest(
   );
   const emptyRoleArrays = [
     manifest.commissioner,
-    manifest.player,
     manifest.reporter,
     manifest.grader,
     manifest.diagnoser,
     manifest.optimizer,
   ];
+  const playerRoles = Array.isArray(manifest.player) ? manifest.player : [];
+  const certificationPlayer =
+    playerRoles.length === 1
+      ? exactRecord(
+          playerRoles[0],
+          ["type", "image", "run", "env", "id", "name", "description"],
+          "EVAL_COWORLD_CERTIFICATION_PLAYER_SCHEMA_MISMATCH",
+        )
+      : null;
   const configSchema = exactRecordSubset(
     game.config_schema,
     ["$schema", "type", "required", "properties", "additionalProperties"],
@@ -2127,6 +2740,7 @@ function verifyEvalCoworldManifest(
     config.turns_per_decision_step !== 100 ||
     config.max_decision_ms !== 15_000 ||
     config.episode_timeout_seconds !== 6_000 ||
+    config.seed !== 17 ||
     config.commander_xp_phase !== "canary" ||
     config.commander_xp_run_key !==
       "commander-xp-v2/manifest-default/canary/r00/A" ||
@@ -2146,6 +2760,13 @@ function verifyEvalCoworldManifest(
       return !isNonEmptyString(entry.name);
     }) ||
     manifest.episode_timeout_minutes !== 100 ||
+    certificationPlayer === null ||
+    certificationPlayer.type !== "player" ||
+    certificationPlayer.id !== "proxywar-starter-websocket" ||
+    certificationPlayer.image !== runnable.image ||
+    sha256Canonical(certificationPlayer.run) !==
+      sha256Canonical(["node", "/app/integration/src/starter-player.mjs"]) ||
+    sha256Canonical(certificationPlayer.env) !== sha256Canonical({}) ||
     emptyRoleArrays.some(
       (roles) => !Array.isArray(roles) || roles.length !== 0,
     ) ||
@@ -4348,6 +4969,14 @@ function parseJsonLines<T>(text: string, code: string): T[] {
   }
 }
 
+function parseExactJson<T>(text: string, code: string): T {
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new VerificationFailure(code);
+  }
+}
+
 async function canonicalDirectory(requested: string): Promise<string> {
   try {
     const real = await fs.realpath(path.resolve(requested));
@@ -4430,6 +5059,22 @@ function sameSet(left: Set<string>, right: Set<string>): boolean {
 
 function isSha256(value: unknown): value is string {
   return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+}
+
+function isSafeSourcePath(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value.length <= 512 &&
+    !value.startsWith("/") &&
+    !value.includes("\\") &&
+    ![...value].some((character) => {
+      const code = character.charCodeAt(0);
+      return code <= 0x1f || code === 0x7f;
+    }) &&
+    value
+      .split("/")
+      .every((part) => part !== "" && part !== "." && part !== "..")
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

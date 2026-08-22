@@ -24,6 +24,7 @@
     "agent:commander:xp:verify": "tsx src/scripts/ai-agent-commander-xp-verify.ts",
     "agent:commander:xp:collect": "tsx coworld-adapter/src/commander-xp-collect.ts",
     "agent:commander:xp:dispatch": "tsx coworld-adapter/src/commander-xp-dispatch.ts",
+    "agent:commander:xp:external-refetch": "tsx coworld-adapter/src/commander-xp-external-refetch.ts",
     "agent:commander:xp:privacy-proof": "tsx src/scripts/ai-agent-commander-xp-replay-privacy-proof.ts",
     "agent:commander:xp:authority-request": "tsx src/scripts/ai-agent-commander-xp-authority-request.ts",
     "premiere:controlled-exhibition": "cross-env GAME_ENV=dev tsx src/scripts/replay-premiere-controlled-exhibition.ts",

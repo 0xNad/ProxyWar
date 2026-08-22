@@ -8,10 +8,8 @@ import { afterEach, describe, expect, it } from "vitest";
 // @ts-expect-error The manifest builder is an executable ESM helper without a
 // declaration file; its own focused test verifies the same exported function.
 import { commanderXpEvalManifest } from "../../coworld-adapter/scripts/prepare-commander-xp-eval-manifest.mjs";
-// @ts-expect-error The protected external-seal helper is executable ESM without
-// a declaration file. This test deliberately sends its exact ledger bytes to
-// the TypeScript verifier so producer and consumer cannot drift independently.
-import { verifyExternalPhaseLedger } from "../../.github/scripts/commander-xp-external-seal-lib.mjs";
+// @ts-expect-error The protected external-seal helper is executable ESM without a declaration file.
+import * as externalSealLib from "../../.github/scripts/commander-xp-external-seal-lib.mjs";
 import { coworldEpisodeIdentity } from "../../coworld-adapter/src/coworld-seed";
 import { buildCommanderXpAuthorityRequest } from "../../src/scripts/ai-agent-commander-xp-authority-request";
 import {
@@ -30,6 +28,7 @@ import {
 } from "../../src/server/agents/CommanderXpVerifier";
 
 const temporaryRoots: string[] = [];
+const { scanPrivacyAndInventory, verifyExternalPhaseLedger } = externalSealLib;
 
 afterEach(async () => {
   await Promise.all(
@@ -56,6 +55,11 @@ describe("Commander XP evidence verifier v2", () => {
           { code: "EXTERNAL_IMMUTABLE_SEAL_RECEIPT_REQUIRED", path: null },
         ],
       }),
+    );
+    await expect(
+      scanPrivacyAndInventory(fixture.evidenceRoot),
+    ).resolves.toEqual(
+      expect.objectContaining({ fileCount: expect.any(Number) }),
     );
   });
 
@@ -390,7 +394,7 @@ function externalPhaseLedgerFixture(
     workflowName: "Commander XP external seal",
     actor: "0xNad",
     triggeringActor: "0xNad",
-    event: "workflow_dispatch",
+    event: "workflow_run",
     ref: "refs/heads/main",
     experimentID: preregistration.experimentID,
     preRegistrationSha256: preregistration.preRegistrationSha256,
@@ -442,6 +446,7 @@ function externalPhaseLedgerFixture(
       aggregateSha256: "c".repeat(64),
       attestedSubjectDigest: "d".repeat(64),
       localSealSha256: "e".repeat(64),
+      platformRefetchSha256: "0".repeat(64),
     },
     receiptArtifact: {
       id: phase === "preregistration" ? "702" : "712",
@@ -537,20 +542,61 @@ async function buildPreregistrationFixture(): Promise<{
     version: "0.0.1",
   });
   const evalManifestText = JSON.stringify(evalManifest);
+  const adapterSourceSha = "2".repeat(40);
+  const adapterSourceTreeSha = "3".repeat(40);
+  const sourceTreeDiffText = JSON.stringify({
+    schemaVersion: 1,
+    behaviorBaseSha: "a69175a30577b3e516f09a2cb0960d4d129b3f33",
+    behaviorBaseTreeSha: "b1b88e4a447acb885ed554592d3865af0178314f",
+    workflowSourceSha: adapterSourceSha,
+    workflowSourceTreeSha: adapterSourceTreeSha,
+    allowlistMode: "exact",
+    entries: [
+      {
+        status: "M",
+        path: "src/server/agents/CommanderXpVerifier.ts",
+        baseMode: "100644",
+        headMode: "100644",
+        baseBlob: "4".repeat(40),
+        headBlob: "5".repeat(40),
+        contentSha256: "6".repeat(64),
+        bytes: 100,
+      },
+    ],
+  });
+  const sourceProvenanceBody = {
+    schemaVersion: 2,
+    authority: "clean-exact-git-archive-v1",
+    repository: "0xNad/ProxyWar",
+    behaviorBaseSha: "a69175a30577b3e516f09a2cb0960d4d129b3f33",
+    behaviorBaseTreeSha: "b1b88e4a447acb885ed554592d3865af0178314f",
+    sourceSha: adapterSourceSha,
+    sourceTreeSha: adapterSourceTreeSha,
+    sourceAllowlist: ["src/server/agents/CommanderXpVerifier.ts"],
+    treeDiffSha256: sha256(sourceTreeDiffText),
+    sourceArchiveSha256: "7".repeat(64),
+    platform: "linux/amd64",
+  };
+  const sourceProvenance = {
+    ...sourceProvenanceBody,
+    provenanceSha256: sha256Canonical(sourceProvenanceBody),
+  };
+  const sourceProvenanceText = JSON.stringify(sourceProvenance);
   const planInput: CommanderXpPlanInput = {
     experimentID: "commander-xp-v2-verifier-fixture",
     createdAt: "2026-08-22T13:00:00.000Z",
     behaviorSourceSha: "a69175a30577b3e516f09a2cb0960d4d129b3f33",
     behaviorSourceTreeSha: "b1b88e4a447acb885ed554592d3865af0178314f",
-    adapterSourceSha: "2".repeat(40),
-    adapterSourceTreeSha: "3".repeat(40),
-    sourceDiffManifestSha256: "9".repeat(64),
-    sourceProvenanceSha256: "a".repeat(64),
+    adapterSourceSha,
+    adapterSourceTreeSha,
+    sourceDiffManifestSha256: sha256(sourceTreeDiffText),
+    sourceProvenanceSha256: sourceProvenance.provenanceSha256,
     policyBuildProvenanceDigest: `sha256:${"b".repeat(64)}`,
     gameBuildProvenanceDigest: `sha256:${"c".repeat(64)}`,
     coworldID: "cow_commander_xp_eval_fixture",
     coworldVersion: "0.0.1",
     coworldManifestSha256: sha256(evalManifestText),
+    coworldHostedManifestSha256: "6".repeat(64),
     coworldGameImageID: "img_eval_game_fixture",
     coworldGameImageDigest: gameDigest,
     canonicalLeagueBindingSnapshotSha256: "8".repeat(64),
@@ -563,18 +609,113 @@ async function buildPreregistrationFixture(): Promise<{
   };
   const prereg = buildCommanderXpPreRegistration(planInput);
 
-  const policyInspectTexts = {
-    A: JSON.stringify({ policyVersionID: "pvid-a", arm: "A" }),
-    B: JSON.stringify({ policyVersionID: "pvid-b", arm: "B" }),
-    C: JSON.stringify({ policyVersionID: "pvid-c", arm: "C" }),
+  const policyImage = {
+    id: "img_policy_fixture",
+    name: "proxywar-commander-xp-policy-fixture",
+    version: 1,
+    client_hash: "fixture-client-hash",
+    status: "ready",
+    image_uri: "registry.example/policy@fixture",
+    image_digest: planInput.imageDigest,
+    public_image_uri: "registry.example/public/policy@fixture",
   };
-  const policyReceipt = {
+  const policyInspects = Object.fromEntries(
+    (["A", "B", "C"] as const).map((arm, index) => {
+      const name = `proxywar-commander-xp-fixture-${arm.toLowerCase()}`;
+      const completionPayload = {
+        name,
+        container_image_id: policyImage.id,
+        run: prereg.identities.runArgv[arm],
+        tags: { purpose: "commander-xp-v2", role: arm },
+        environmentAttached: true,
+      };
+      const completionResponse = {
+        id: planInput.armPolicyVersionIDs[arm],
+        name,
+        version: index + 1,
+        pools: null,
+        submit_error: null,
+      };
+      const readback = {
+        id: completionResponse.id,
+        name,
+        version: completionResponse.version,
+      };
+      const requestPayload = {
+        name: policyImage.name,
+        client_hash: policyImage.client_hash,
+      };
+      const uploadBody = {
+        schemaVersion: 2,
+        authority: "coworld-0.1.42-policy-upload-readback-v2",
+        inspectedAt: "2026-08-22T13:01:00.000Z",
+        platform: "linux/amd64",
+        sourceSha: planInput.adapterSourceSha,
+        sourceTreeSha: planInput.adapterSourceTreeSha,
+        sourceProvenanceDigest: `sha256:${planInput.sourceProvenanceSha256}`,
+        buildProvenanceDigest: planInput.policyBuildProvenanceDigest,
+        ociImage: "ghcr.io/0xnad/proxywar-commander-xp-policy",
+        ociDigest: planInput.imageDigest,
+        containerImage: policyImage,
+        imageUpload: {
+          requestPayload,
+          requestPayloadSha256: sha256Canonical(requestPayload),
+          responseSha256: "d".repeat(64),
+          responseBytes: 123,
+          responseProjection: { image: policyImage, uploadRequired: true },
+          completePayload: { id: policyImage.id },
+          completePayloadSha256: sha256Canonical({ id: policyImage.id }),
+          completeResponseSha256: "e".repeat(64),
+          completeResponseBytes: 124,
+          image: policyImage,
+        },
+        policy: {
+          name,
+          role: arm,
+          runArgv: prereg.identities.runArgv[arm],
+          useBedrock: true,
+          bedrockModel: planInput.bedrockModel,
+          environmentConfiguration: {
+            attached: true,
+            keys: ["BEDROCK_MODEL", "USE_BEDROCK"],
+            valuesSha256: sha256Canonical({
+              BEDROCK_MODEL: planInput.bedrockModel,
+              USE_BEDROCK: "true",
+            }),
+            attachmentResponseSha256: "f".repeat(64),
+          },
+          completionPayloadProjection: completionPayload,
+          completionPayloadSha256: "6".repeat(64),
+          completionResponse,
+          completionResponseSha256: "1".repeat(64),
+          completionResponseBytes: 125,
+          readback,
+          readbackSha256: sha256Canonical(readback),
+        },
+      };
+      return [
+        arm,
+        { ...uploadBody, receiptSha256: sha256Canonical(uploadBody) },
+      ];
+    }),
+  ) as unknown as Record<"A" | "B" | "C", Record<string, unknown>>;
+  const policyInspectTexts = {
+    A: JSON.stringify(policyInspects.A),
+    B: JSON.stringify(policyInspects.B),
+    C: JSON.stringify(policyInspects.C),
+  };
+  const policyReceiptBody = {
     schemaVersion: 2,
-    authority: "coworld-0.1.42-policy-inspect-v1",
+    authority: "coworld-0.1.42-policy-provision-v2",
     inspectedAt: "2026-08-22T13:01:00.000Z",
-    policyImageID: "img_policy_fixture",
     platform: "linux/amd64",
+    sourceSha: planInput.adapterSourceSha,
+    sourceTreeSha: planInput.adapterSourceTreeSha,
+    sourceProvenanceDigest: `sha256:${planInput.sourceProvenanceSha256}`,
     policyBuildProvenanceDigest: planInput.policyBuildProvenanceDigest,
+    ociImage: "ghcr.io/0xnad/proxywar-commander-xp-policy",
+    ociDigest: planInput.imageDigest,
+    policyImageID: policyImage.id,
     imageDigest: planInput.imageDigest,
     bedrockModel: planInput.bedrockModel,
     arms: Object.fromEntries(
@@ -590,10 +731,43 @@ async function buildPreregistrationFixture(): Promise<{
         },
       ]),
     ),
+    opponentPolicyVersionIDs: planInput.opponentPolicyVersionIDs,
   };
+  const policyReceipt = {
+    ...policyReceiptBody,
+    receiptSha256: sha256Canonical(policyReceiptBody),
+  };
+  const hostedEvalManifest = structuredClone(evalManifest);
+  hostedEvalManifest.game.runnable.image = planInput.coworldGameImageID;
+  for (const player of hostedEvalManifest.player) {
+    player.image = planInput.coworldGameImageID;
+  }
   const evalInspectText = JSON.stringify({
-    coworldID: planInput.coworldID,
-    manifestSha256: planInput.coworldManifestSha256,
+    coworld: {
+      id: planInput.coworldID,
+      name: "proxywar-commander-xp-eval",
+      version: planInput.coworldVersion,
+      manifest_hash: `sha256:${planInput.coworldHostedManifestSha256}`,
+      canonical: false,
+      manifest: hostedEvalManifest,
+    },
+    certification: { state: "certified" },
+  });
+  const terminalProofBody = {
+    schemaVersion: 2,
+    authority: "exact-image-coworld-0.1.42-run-episode-v1",
+    imageDigest: planInput.coworldGameImageDigest,
+    variantID: "tournament-4p-pangaea",
+    winnerSlot: 2,
+    turnCount: 36_400,
+    tick: 36_400,
+    rosterSlots: [0, 1, 2, 3],
+    gameID: coworldEpisodeIdentity(17).gameId,
+    seed: 17,
+  };
+  const terminalProofText = JSON.stringify({
+    ...terminalProofBody,
+    proofSha256: sha256Canonical(terminalProofBody),
   });
   const evalReceiptBody = {
     schemaVersion: 2,
@@ -606,6 +780,7 @@ async function buildPreregistrationFixture(): Promise<{
     coworldID: planInput.coworldID,
     coworldVersion: planInput.coworldVersion,
     manifestSha256: planInput.coworldManifestSha256,
+    hostedManifestSha256: planInput.coworldHostedManifestSha256,
     gameImageID: planInput.coworldGameImageID,
     gameImageDigest: planInput.coworldGameImageDigest,
     gameBuildProvenanceDigest: planInput.gameBuildProvenanceDigest,
@@ -622,6 +797,7 @@ async function buildPreregistrationFixture(): Promise<{
       leagueBindingBeforeSha256: planInput.canonicalLeagueBindingSnapshotSha256,
       leagueBindingAfterSha256: planInput.canonicalLeagueBindingSnapshotSha256,
     },
+    terminalProofSha256: sha256(terminalProofText),
   };
   const localVerification = {
     schemaVersion: 2,
@@ -634,6 +810,8 @@ async function buildPreregistrationFixture(): Promise<{
 
   const artifacts = new Map<string, string>([
     ["commander-xp-preregistration-v2.json", JSON.stringify(prereg)],
+    ["commander-xp-source-provenance-v2.json", sourceProvenanceText],
+    ["commander-xp-source-tree-diff-v1.json", sourceTreeDiffText],
     ["policy-identities-v2.json", JSON.stringify(policyReceipt)],
     ["policy-inspect/A.json", policyInspectTexts.A],
     ["policy-inspect/B.json", policyInspectTexts.B],
@@ -647,6 +825,7 @@ async function buildPreregistrationFixture(): Promise<{
     ],
     ["eval-coworld-inspect.json", evalInspectText],
     ["eval-coworld-manifest-v2.json", evalManifestText],
+    ["eval-coworld-terminal-proof-v2.json", terminalProofText],
     [
       "xp-openapi.sha256",
       `${planInput.xpOpenApiSha256}  https://softmax.com/api/observatory/openapi.json\n`,
@@ -728,7 +907,7 @@ async function buildPreregistrationFixture(): Promise<{
       actor: "0xNad",
       triggeringActor: "0xNad",
       headRepository: "0xNad/ProxyWar",
-      event: "workflow_dispatch",
+      event: "push",
       ref: "refs/heads/main",
     },
     sourceArtifact: {

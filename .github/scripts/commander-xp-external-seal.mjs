@@ -93,6 +93,7 @@ export async function runCommanderXpExternalSealCli(argv, env = process.env) {
       createExternalReceipt({
         bundleRoot: requiredPath(options, "bundle-root"),
         sealedBundlePath: requiredPath(options, "sealed-bundle"),
+        platformRefetchPath: requiredPath(options, "platform-refetch"),
         outputPath,
         bundleArtifactMetadataPath: requiredPath(
           options,

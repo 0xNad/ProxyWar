@@ -49,12 +49,17 @@ test("path contracts separate evidence from protected .github source", () => {
   assert.equal(safeRelativePath("runs/../secret.json"), false);
 });
 
-test("workflow is manual, GitHub-hosted, full-SHA pinned, immutable, and attested", async () => {
+test("workflow is completion-triggered, GitHub-hosted, full-SHA pinned, immutable, and attested", async () => {
   const workflow = await fs.readFile(WORKFLOW, "utf8");
-  assert.match(workflow, /^on:\n {2}workflow_dispatch:/m);
+  assert.match(workflow, /^on:\n {2}workflow_run:/m);
+  assert.match(
+    workflow,
+    /workflows:\n\s+- Commander XP protected experiment evidence/,
+  );
+  assert.match(workflow, /types:\n\s+- completed/);
   assert.doesNotMatch(workflow, /\bpull_request\b|\bpush:\s*$/m);
   assert.doesNotMatch(workflow, /runs-on:\s*(?:self-hosted|\[.*self-hosted)/);
-  assert.equal([...workflow.matchAll(/uses:\s*([^\s#]+)/g)].length, 18);
+  assert.equal([...workflow.matchAll(/uses:\s*([^\s#]+)/g)].length, 20);
   for (const match of workflow.matchAll(/uses:\s*([^\s#]+)/g)) {
     assert.match(match[1], /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+@[0-9a-f]{40}$/);
   }
@@ -62,11 +67,15 @@ test("workflow is manual, GitHub-hosted, full-SHA pinned, immutable, and atteste
   assert.equal((workflow.match(/overwrite:\s*false/g) ?? []).length, 6);
   assert.match(
     workflow,
-    /artifact-ids:\s*\$\{\{ inputs\.evidence_artifact_id \}\}/,
+    /artifact-ids:\s*\$\{\{ steps\.resolve\.outputs\.evidence_artifact_id \}\}/,
   );
   assert.match(
     workflow,
-    /artifact-ids:\s*\$\{\{ inputs\.authority_request_artifact_id \}\}/,
+    /artifact-ids:\s*\$\{\{ steps\.resolve\.outputs\.authority_artifact_id \}\}/,
+  );
+  assert.match(
+    workflow,
+    /artifact-ids:\s*\$\{\{ steps\.resolve\.outputs\.handoff_artifact_id \}\}/,
   );
   assert.match(
     workflow,
@@ -85,21 +94,25 @@ test("workflow is manual, GitHub-hosted, full-SHA pinned, immutable, and atteste
     /artifact-ids:\s*\$\{\{ needs\.normalize\.outputs\.artifact_id \}\}/,
   );
   assert.match(workflow, /actions\/attest@[0-9a-f]{40}/);
-  assert.equal((workflow.match(/gh attestation verify/g) ?? []).length, 8);
-  assert.equal((workflow.match(/--deny-self-hosted-runners/g) ?? []).length, 8);
-  assert.equal((workflow.match(/--cert-identity/g) ?? []).length, 8);
+  assert.equal((workflow.match(/gh attestation verify/g) ?? []).length, 9);
+  assert.equal((workflow.match(/--deny-self-hosted-runners/g) ?? []).length, 9);
+  assert.equal((workflow.match(/--cert-identity/g) ?? []).length, 9);
   assert.equal(
     (workflow.match(/--source-ref "refs\/heads\/main"/g) ?? []).length,
-    8,
+    9,
   );
   assert.equal(
     (workflow.match(/--source-digest "\$SOURCE_SHA"/g) ?? []).length,
-    8,
+    9,
   );
   assert.equal(
     (workflow.match(/--signer-digest "\$SOURCE_SHA"/g) ?? []).length,
-    8,
+    9,
   );
+  assert.match(workflow, /environment: commander-xp-eval/);
+  assert.match(workflow, /coworld==0\.1\.42/);
+  assert.match(workflow, /agent:commander:xp:external-refetch/);
+  assert.match(workflow, /commander-xp-independent-platform-refetch-v2\.json/);
   assert.equal(
     (workflow.match(/npm-ci-with-retry\.mjs --ignore-scripts/g) ?? []).length,
     2,
@@ -352,6 +365,28 @@ test("privacy inventory seals exact Coworld projections and rejects raw bytes, p
   );
   await fs.writeFile(path.join(runRoot, "xp-evidence.json"), validXp);
 
+  for (const forbiddenText of ["rawPrompt", "presigned"]) {
+    await fs.writeFile(
+      path.join(runRoot, "xp-evidence.json"),
+      `${JSON.stringify({ note: `public-looking ${forbiddenText} body` })}\n`,
+    );
+    await assert.rejects(
+      scanPrivacyAndInventory(root),
+      hasCode("PRIVACY_TEXT_FORBIDDEN"),
+    );
+  }
+  await fs.writeFile(path.join(runRoot, "xp-evidence.json"), validXp);
+
+  await fs.writeFile(
+    path.join(runRoot, "xp-evidence.json"),
+    '{"COWORLD_PLAYER_ARTIFACT_UPLOAD_URL":"https://example.invalid/upload"}\n',
+  );
+  await assert.rejects(
+    scanPrivacyAndInventory(root),
+    hasCode("PRIVACY_TEXT_FORBIDDEN"),
+  );
+  await fs.writeFile(path.join(runRoot, "xp-evidence.json"), validXp);
+
   await fs.writeFile(
     path.join(root, "commander-xp-preregistration-v2.json"),
     '{"password":"nope","modelTranscript":"private"}\n',
@@ -359,6 +394,26 @@ test("privacy inventory seals exact Coworld projections and rejects raw bytes, p
   await assert.rejects(
     scanPrivacyAndInventory(root),
     hasCode("PRIVACY_KEY_FORBIDDEN"),
+  );
+  await fs.unlink(path.join(root, "commander-xp-preregistration-v2.json"));
+
+  await fs.writeFile(
+    path.join(root, "commander-xp-preregistration-v2.json"),
+    `${JSON.stringify({
+      privacyContract: {
+        promptBodiesRetained: true,
+        providerBodiesRetained: false,
+        inboundCommsBodiesRetained: false,
+        outboundCommsBodiesRetained: false,
+        uploadUrlsRetained: false,
+        environmentValuesRetained: false,
+        promptAndOutputHashesOnly: true,
+      },
+    })}\n`,
+  );
+  await assert.rejects(
+    scanPrivacyAndInventory(root),
+    hasCode("PRIVACY_CONTRACT_INVALID"),
   );
   await fs.unlink(path.join(root, "commander-xp-preregistration-v2.json"));
 
@@ -430,6 +485,15 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
       behaviorSourceTreeSha: source.behaviorBaseTreeSha,
       adapterSourceSha: source.workflowSourceSha,
       adapterSourceTreeSha: source.workflowSourceTreeSha,
+    },
+    privacyContract: {
+      promptBodiesRetained: false,
+      providerBodiesRetained: false,
+      inboundCommsBodiesRetained: false,
+      outboundCommsBodiesRetained: false,
+      uploadUrlsRetained: false,
+      environmentValuesRetained: false,
+      promptAndOutputHashesOnly: true,
     },
   };
   const index = {
@@ -867,6 +931,7 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
       artifactMetadata(bundleArtifact, source.workflowSourceSha, {
         status: "in_progress",
         conclusion: null,
+        event: "workflow_run",
       }),
     ),
   );
@@ -876,6 +941,42 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
   );
   const sealedBundlePath = path.join(supportRoot, "sealed-bundle.tgz");
   await fs.writeFile(sealedBundlePath, "sealed bundle bytes\n");
+  const refetchBody = {
+    schemaVersion: 2,
+    authority: "independent-coworld-0.1.42-refetch-v2",
+    experimentID,
+    phase: "canary",
+    preRegistrationSha256: manifest.evidence.preRegistrationSha256,
+    verifiedAt: "2026-08-22T14:29:00Z",
+    runCount: 12,
+    runs: Array.from({ length: 4 }, (_, replicaIndex) =>
+      ["A", "B", "C"].map((arm) => ({
+        runPath: `runs/canary/r${String(replicaIndex).padStart(2, "0")}/${arm}`,
+        xpRequestID: `xreq_${replicaIndex}${arm}`,
+        episodeRequestID: `ereq_${replicaIndex}${arm}`,
+        memberSetSha256: "1".repeat(64),
+        xpEvidenceSha256: "2".repeat(64),
+        normalizedReadbackSha256: "3".repeat(64),
+        replayEvidenceSha256: "4".repeat(64),
+        episodeResultsSha256: "5".repeat(64),
+        gameEvidenceSha256: "6".repeat(64),
+        playerArtifactSha256: "7".repeat(64),
+      })),
+    ).flat(),
+  };
+  const platformRefetchPath = path.join(
+    supportRoot,
+    "commander-xp-independent-platform-refetch-v2.json",
+  );
+  await fs.writeFile(
+    platformRefetchPath,
+    canonicalJson({
+      ...refetchBody,
+      refetchSha256: sha256Bytes(Buffer.from(canonicalJson(refetchBody))).slice(
+        7,
+      ),
+    }),
+  );
   await withProcessEnvironment(
     {
       GITHUB_RUN_ID: "333",
@@ -888,6 +989,7 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
       createExternalReceipt({
         bundleRoot: outputRoot,
         sealedBundlePath,
+        platformRefetchPath,
         outputPath: receiptPath,
         bundleArtifactMetadataPath: bundleMetadataPath,
         completedAt: "2026-08-22T14:30:00Z",
@@ -898,6 +1000,10 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
     phase: "canary",
   });
   assert.equal(receipt.bundleArtifact.artifactID, 444);
+  assert.equal(
+    receipt.evidence.platformRefetchSha256,
+    await sha256File(platformRefetchPath),
+  );
   assert.equal(receipt.performanceClaimAuthorized, false);
 
   const receiptArtifact = {
@@ -914,6 +1020,7 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
       artifactMetadata(receiptArtifact, source.workflowSourceSha, {
         status: "in_progress",
         conclusion: null,
+        event: "workflow_run",
       }),
     ),
   );
@@ -943,6 +1050,10 @@ test("end-to-end bundle and receipt bind exact source, evidence, artifact, and f
   assert.equal(ledger.experimentID, experimentID);
   assert.equal(ledger.behaviorBaseSha, source.behaviorBaseSha);
   assert.equal(ledger.evidenceArtifact.localSealSha256, "1".repeat(64));
+  assert.equal(
+    ledger.evidenceArtifact.platformRefetchSha256,
+    (await sha256File(platformRefetchPath)).slice(7),
+  );
   await assert.rejects(
     verifyExternalPhaseLedger(ledgerPath, { experimentID: "other-experiment" }),
     hasCode("EXTERNAL_PHASE_LEDGER_INVALID"),
@@ -1172,7 +1283,7 @@ function externalLedgerFixture({
     workflowName: "Commander XP external seal",
     actor: "0xNad",
     triggeringActor: "0xNad",
-    event: "workflow_dispatch",
+    event: "workflow_run",
     ref: "refs/heads/main",
     experimentID,
     preRegistrationSha256,
@@ -1206,6 +1317,7 @@ function externalLedgerFixture({
       aggregateSha256: "b".repeat(64),
       attestedSubjectDigest: "c".repeat(64),
       localSealSha256,
+      platformRefetchSha256: "f".repeat(64),
     },
     receiptArtifact: {
       id: "702",
@@ -1401,7 +1513,11 @@ async function retainedAuthorityFixture(root, ledgerPath, ledger, binding) {
 function artifactMetadata(
   binding,
   headSha,
-  { status = "completed", conclusion = "success" } = {},
+  {
+    status = "completed",
+    conclusion = "success",
+    event = "workflow_dispatch",
+  } = {},
 ) {
   return {
     artifact: {
@@ -1423,7 +1539,7 @@ function artifactMetadata(
       run_attempt: binding.workflowRunAttempt,
       status,
       conclusion,
-      event: "workflow_dispatch",
+      event,
       head_branch: "main",
       head_sha: headSha,
       workflow_id: binding.workflowID ?? 555,

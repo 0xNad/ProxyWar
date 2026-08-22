@@ -6,13 +6,37 @@ import { fileURLToPath } from "node:url";
 export const COMMANDER_XP_BASE_MANIFEST_SHA256 =
   "560648b1e995f981d3c9e6f146065bfcd88f592ba57efae10cfff9f6c22e2095";
 export const COMMANDER_XP_EVAL_COWORLD_NAME = "proxywar-commander-xp-eval";
+export const COMMANDER_XP_TERMINAL_PROOF_SEED = 17;
+
+function publicEvalProtocol(value) {
+  if (typeof value === "string") {
+    return value.replaceAll(
+      "COWORLD_PLAYER_ARTIFACT_UPLOAD_URL",
+      "the Coworld player artifact upload endpoint",
+    );
+  }
+  if (Array.isArray(value)) return value.map(publicEvalProtocol);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [
+        key,
+        publicEvalProtocol(entry),
+      ]),
+    );
+  }
+  return value;
+}
 
 export function commanderXpEvalManifest(base, { image, version }) {
   if (base?.game?.name !== "proxywar") {
-    throw new Error("Commander XP eval manifest base is not canonical proxywar");
+    throw new Error(
+      "Commander XP eval manifest base is not canonical proxywar",
+    );
   }
   if (!/^[a-z0-9._/-]+@sha256:[0-9a-f]{64}$/.test(image)) {
-    throw new Error("Commander XP eval game image must use an immutable digest");
+    throw new Error(
+      "Commander XP eval game image must use an immutable digest",
+    );
   }
   if (!/^0\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$/.test(version)) {
     throw new Error("Commander XP eval version is invalid");
@@ -22,6 +46,12 @@ export function commanderXpEvalManifest(base, { image, version }) {
   );
   if (sourceVariant === undefined) {
     throw new Error("Commander XP eval variant is missing");
+  }
+  const sourcePlayer = base.player.find(
+    (entry) => entry.id === "proxywar-starter-websocket",
+  );
+  if (sourcePlayer === undefined) {
+    throw new Error("Commander XP certification player is missing");
   }
   const configSchema = structuredClone(base.game.config_schema);
   configSchema.required = [
@@ -48,7 +78,7 @@ export function commanderXpEvalManifest(base, { image, version }) {
     owner: base.game.owner,
     config_schema: configSchema,
     results_schema: structuredClone(base.game.results_schema),
-    protocols: structuredClone(base.game.protocols),
+    protocols: publicEvalProtocol(structuredClone(base.game.protocols)),
     runnable: {
       ...structuredClone(base.game.runnable),
       image,
@@ -66,6 +96,7 @@ export function commanderXpEvalManifest(base, { image, version }) {
   variant.game_config.turns_per_decision_step = 100;
   variant.game_config.max_decision_ms = 15_000;
   variant.game_config.episode_timeout_seconds = 6_000;
+  variant.game_config.seed = COMMANDER_XP_TERMINAL_PROOF_SEED;
   variant.game_config.commander_xp_phase = "canary";
   variant.game_config.commander_xp_run_key =
     "commander-xp-v2/manifest-default/canary/r00/A";
@@ -83,7 +114,7 @@ export function commanderXpEvalManifest(base, { image, version }) {
     certification,
     episode_timeout_minutes: 100,
     commissioner: [],
-    player: [],
+    player: [{ ...structuredClone(sourcePlayer), image }],
     reporter: [],
     grader: [],
     diagnoser: [],

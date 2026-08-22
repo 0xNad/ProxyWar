@@ -13,6 +13,7 @@ import { join, resolve } from "node:path";
 
 const allowedCommands = new Set([
   "commander-xp-episode-bundle",
+  "commander-xp-policy-provision",
   "episode-logs",
   "episodes",
   "leagues",
@@ -91,6 +92,66 @@ if (
 ) {
   throw new Error("authenticated Coworld episode bundle mode is malformed");
 }
+if (command === "commander-xp-policy-provision") {
+  const [mode, ...options] = args;
+  const parsed = new Map(
+    options.map((entry) => {
+      const match = entry.match(/^--([a-z][a-z-]*)=(.+)$/);
+      if (!match) return ["", ""];
+      return [match[1], match[2]];
+    }),
+  );
+  const expectedKeys = new Set([
+    "bedrock-model",
+    "build-provenance-digest",
+    "image",
+    "name-prefix",
+    "oci-digest",
+    "source-provenance-digest",
+    "source-sha",
+    "source-tree-sha",
+    ...(mode === "upload" ? ["output"] : []),
+  ]);
+  const output = parsed.get("output");
+  if (
+    !new Set(["check", "upload"]).has(mode) ||
+    parsed.size !== options.length ||
+    parsed.size !== expectedKeys.size ||
+    [...parsed.keys()].some((key) => !expectedKeys.has(key)) ||
+    !/^ghcr\.io\/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$/.test(
+      parsed.get("image") ?? "",
+    ) ||
+    !/^[a-z0-9][a-z0-9-]{7,119}$/.test(parsed.get("name-prefix") ?? "") ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$/.test(
+      parsed.get("bedrock-model") ?? "",
+    ) ||
+    !/^[0-9a-f]{40}$/.test(parsed.get("source-sha") ?? "") ||
+    !/^[0-9a-f]{40}$/.test(parsed.get("source-tree-sha") ?? "") ||
+    [
+      parsed.get("oci-digest"),
+      parsed.get("source-provenance-digest"),
+      parsed.get("build-provenance-digest"),
+    ].some((value) => !/^sha256:[0-9a-f]{64}$/.test(value ?? "")) ||
+    (mode === "upload" &&
+      (typeof output !== "string" ||
+        resolve(output) !== output ||
+        !resolve(output).startsWith(`${runnerTemp}/`)))
+  ) {
+    throw new Error(
+      "authenticated Coworld Commander XP policy provision mode is malformed",
+    );
+  }
+}
+if (
+  command === "status" &&
+  !(
+    args.length === 2 &&
+    /^cow_[A-Za-z0-9-]+$/.test(args[0] ?? "") &&
+    args[1] === "--json"
+  )
+) {
+  throw new Error("authenticated Coworld status mode is malformed");
+}
 if (!token || !python || !coworld) {
   throw new Error(
     "COWORLD_API_TOKEN, COWORLD_PYTHON, and COWORLD_BIN are required",
@@ -122,7 +183,10 @@ try {
   }
 
   const executable =
-    command === "commander-xp-episode-bundle" ? python : coworld;
+    command === "commander-xp-episode-bundle" ||
+    command === "commander-xp-policy-provision"
+      ? python
+      : coworld;
   const executableArgs =
     command === "commander-xp-episode-bundle"
       ? [
@@ -132,7 +196,15 @@ try {
           ),
           ...args,
         ]
-      : [command, ...args];
+      : command === "commander-xp-policy-provision"
+        ? [
+            resolve(
+              import.meta.dirname,
+              "../../coworld-adapter/scripts/provision-commander-xp-policies.py",
+            ),
+            ...args,
+          ]
+        : [command, ...args];
   const result = spawnSync(executable, executableArgs, {
     env: childEnv,
     // Hosted `coworld list --json` grows with immutable release history and is

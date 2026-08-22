@@ -30,6 +30,7 @@ const input: CommanderXpPlanInput = {
   coworldID: "cow_exact",
   coworldVersion: "proxywar-eval:0.1.0",
   coworldManifestSha256: "5".repeat(64),
+  coworldHostedManifestSha256: "6".repeat(64),
   coworldGameImageID: "img_eval_game_12345678",
   coworldGameImageDigest: `sha256:${"7".repeat(64)}`,
   canonicalLeagueBindingSnapshotSha256: "8".repeat(64),

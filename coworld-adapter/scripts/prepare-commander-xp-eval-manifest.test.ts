@@ -26,11 +26,21 @@ describe("Commander XP eval-only Coworld manifest", () => {
     expect(manifest.game.name).not.toBe(base.game.name);
     expect(manifest.game.runnable.image).toMatch(/@sha256:[0-9a-f]{64}$/);
     expect(manifest.commissioner).toEqual([]);
-    expect(manifest.player).toEqual([]);
+    expect(manifest.player).toHaveLength(1);
+    expect(manifest.player[0]).toMatchObject({
+      id: "proxywar-starter-websocket",
+      type: "player",
+      image: `proxywar-coworld-commander-xp-eval@sha256:${"a".repeat(64)}`,
+      run: ["node", "/app/integration/src/starter-player.mjs"],
+      env: {},
+    });
     expect(manifest.variants.map((entry: { id: string }) => entry.id)).toEqual([
       "tournament-4p-pangaea",
     ]);
     expect(manifest.tags).toEqual(["evaluation"]);
+    expect(JSON.stringify(manifest)).not.toContain(
+      "COWORLD_PLAYER_ARTIFACT_UPLOAD_URL",
+    );
     expect(manifest.game.config_schema.required).toContain(
       "commander_xp_phase",
     );
@@ -53,6 +63,7 @@ describe("Commander XP eval-only Coworld manifest", () => {
       turns_per_decision_step: 100,
       max_decision_ms: 15_000,
       episode_timeout_seconds: 6_000,
+      seed: 17,
       commander_xp_phase: "canary",
     });
     expect(manifest.certification.game_config.commander_xp_phase).toBe(

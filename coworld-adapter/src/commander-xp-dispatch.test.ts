@@ -93,6 +93,22 @@ describe("Commander XP protected dispatcher", () => {
       createHash("sha256").update(firstRaw).digest("hex"),
     );
     expect(firstCreate.rawResponseByteLength).toBe(Buffer.byteLength(firstRaw));
+    const progress = JSON.parse(
+      await fs.readFile(
+        path.join(outputDirectory, "commander-xp-dispatch-progress-v2.json"),
+        "utf8",
+      ),
+    ) as Record<string, unknown>;
+    expect(progress.status).toBe("completed");
+    expect(progress.requests).toHaveLength(3);
+    expect(
+      (progress.requests as Array<Record<string, unknown>>).every(
+        (entry) =>
+          entry.status === "submitted" &&
+          typeof entry.xpRequestID === "string" &&
+          !Object.hasOwn(entry, "rawResponse"),
+      ),
+    ).toBe(true);
   });
 
   it("does not retry or advance after one create fails", async () => {
@@ -125,6 +141,18 @@ describe("Commander XP protected dispatcher", () => {
         "utf8",
       ),
     ).resolves.toContain("COMMAND_EXIT_NONZERO");
+    const progress = JSON.parse(
+      await fs.readFile(
+        path.join(root, "dispatch/commander-xp-dispatch-progress-v2.json"),
+        "utf8",
+      ),
+    ) as Record<string, unknown>;
+    expect(progress.status).toBe("failed");
+    expect(progress.requests).toHaveLength(2);
+    expect(
+      (progress.requests as Array<Record<string, unknown>>)[1]?.failureCode,
+    ).toBe("COMMAND_EXIT_NONZERO");
+    expect(JSON.stringify(progress)).not.toContain("private model response");
   });
 
   it("rejects a tampered preregistration before invoking Coworld", async () => {
@@ -251,6 +279,7 @@ async function writePreRegistration(root: string): Promise<string> {
     coworldID: "cow_commander_fixture",
     coworldVersion: "0.1.0",
     coworldManifestSha256: "7".repeat(64),
+    coworldHostedManifestSha256: "6".repeat(64),
     coworldGameImageID: "img_commander_fixture",
     coworldGameImageDigest: `sha256:${"8".repeat(64)}`,
     canonicalLeagueBindingSnapshotSha256: "9".repeat(64),
@@ -315,6 +344,7 @@ async function writeDispatchAuthority(
     aggregateSha256: "2".repeat(64),
     attestedSubjectDigest: "3".repeat(64),
     localSealSha256: "4".repeat(64),
+    platformRefetchSha256: "0".repeat(64),
   };
   const receiptArtifact = {
     id: "102",
@@ -331,7 +361,7 @@ async function writeDispatchAuthority(
     workflowName: "Commander XP external seal",
     actor: "0xNad" as const,
     triggeringActor: "0xNad" as const,
-    event: "workflow_dispatch" as const,
+    event: "workflow_run" as const,
     ref: "refs/heads/main" as const,
     experimentID: preregistration.experimentID,
     preRegistrationSha256: preregistration.preRegistrationSha256,
@@ -404,6 +434,13 @@ async function writeDispatchAuthority(
       workflowRunID: 90,
       workflowRunAttempt: 1,
     },
+    fenceGitRef: `refs/tags/commander-xp-dispatch-fence-v2/${createHash(
+      "sha256",
+    )
+      .update(
+        `${preregistration.experimentID}\nprovider-preflight\n${preregistration.identities.adapterSourceSha}\n`,
+      )
+      .digest("hex")}`,
     createdAt: new Date(Date.parse(completedAt) + 1_000).toISOString(),
   };
   const dispatchAuthorizationPath = path.join(

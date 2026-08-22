@@ -50,6 +50,22 @@ test("runs an exact absolute-file XP create without exposing the token", () => {
   });
 });
 
+test("runs the exact read-only Coworld status preflight", () => {
+  withFakeRuntime(({ env, capture }) => {
+    const result = spawnSync(
+      process.execPath,
+      [wrapper, "status", "cow_f58621db-4a09-47de-bb13-24d61050a837", "--json"],
+      { encoding: "utf8", env },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const lines = fs.readFileSync(capture, "utf8").trim().split("\n");
+    assert.match(
+      lines[1],
+      /^coworld\|status cow_f58621db-4a09-47de-bb13-24d61050a837 --json\|.+\|$/,
+    );
+  });
+});
+
 test("rejects symlinked and missing XP create bodies before authentication", () => {
   withFakeRuntime(({ env, capture, root }) => {
     const body = path.join(root, "request.json");
@@ -85,6 +101,36 @@ test("maps the episode bundle mode to the pinned Python helper without a token",
   });
 });
 
+test("maps exact Commander XP policy provision without exposing the token", () => {
+  withFakeRuntime(({ env, capture, root }) => {
+    const output = path.join(fs.realpathSync(root), "policy-receipts");
+    const args = [
+      "commander-xp-policy-provision",
+      "upload",
+      `--image=ghcr.io/0xnad/proxywar-commander-xp-policy@sha256:${"1".repeat(64)}`,
+      "--name-prefix=proxywar-commander-xp-fixture",
+      "--bedrock-model=us.anthropic.claude-sonnet-4-6",
+      `--source-sha=${"2".repeat(40)}`,
+      `--source-tree-sha=${"3".repeat(40)}`,
+      `--source-provenance-digest=sha256:${"4".repeat(64)}`,
+      `--build-provenance-digest=sha256:${"5".repeat(64)}`,
+      `--oci-digest=sha256:${"6".repeat(64)}`,
+      `--output=${output}`,
+    ];
+    const result = spawnSync(process.execPath, [wrapper, ...args], {
+      encoding: "utf8",
+      env,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const lines = fs.readFileSync(capture, "utf8").trim().split("\n");
+    assert.match(
+      lines[1],
+      /python\|.*provision-commander-xp-policies\.py upload --image=ghcr\.io\/0xnad\/proxywar-commander-xp-policy@sha256:/,
+    );
+    assert.match(lines[1], /\|.+\|$/);
+  });
+});
+
 test("rejects unsupported and malformed command modes before authentication", () => {
   for (const args of [
     ["delete-everything"],
@@ -93,6 +139,21 @@ test("rejects unsupported and malformed command modes before authentication", ()
     ["xp-request", "create", "/etc/outside-runner.json", "--json"],
     ["episode-logs", "ereq_fixture", "--agent", "4", "--artifact"],
     ["commander-xp-episode-bundle", "ereq_fixture", "relative.zip"],
+    ["commander-xp-policy-provision", "upload"],
+    [
+      "commander-xp-policy-provision",
+      "check",
+      `--image=ghcr.io/0xnad/policy@sha256:${"1".repeat(64)}`,
+      "--name-prefix=proxywar-commander-xp-fixture",
+      "--bedrock-model=bad model",
+      `--source-sha=${"2".repeat(40)}`,
+      `--source-tree-sha=${"3".repeat(40)}`,
+      `--source-provenance-digest=sha256:${"4".repeat(64)}`,
+      `--build-provenance-digest=sha256:${"5".repeat(64)}`,
+      `--oci-digest=sha256:${"6".repeat(64)}`,
+    ],
+    ["status", "bad", "--json"],
+    ["status", "cow_eval_fixture"],
   ]) {
     const result = spawnSync(process.execPath, [wrapper, ...args], {
       encoding: "utf8",

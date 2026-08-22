@@ -106,6 +106,7 @@ export interface CommanderXpPlanInput {
   coworldID: string;
   coworldVersion: string;
   coworldManifestSha256: string;
+  coworldHostedManifestSha256: string;
   coworldGameImageID: string;
   coworldGameImageDigest: string;
   canonicalLeagueBindingSnapshotSha256: string;
@@ -188,6 +189,7 @@ export interface CommanderXpPreRegistrationV2 {
     coworldVersion: string;
     coworldName: typeof COMMANDER_XP_EVAL_COWORLD_NAME;
     coworldManifestSha256: string;
+    coworldHostedManifestSha256: string;
     coworldGameImageID: string;
     coworldGameImageDigest: string;
     canonicalCoworldID: typeof COMMANDER_XP_CANONICAL_COWORLD_ID;
@@ -227,12 +229,12 @@ export interface CommanderXpPreRegistrationV2 {
     missingPairs: "fatal";
   };
   privacyContract: {
-    rawPrompts: false;
-    rawProviderOutputs: false;
-    inboundMessageText: false;
-    outboundMessageText: false;
-    presignedUrls: false;
-    environment: false;
+    promptBodiesRetained: false;
+    providerBodiesRetained: false;
+    inboundCommsBodiesRetained: false;
+    outboundCommsBodiesRetained: false;
+    uploadUrlsRetained: false;
+    environmentValuesRetained: false;
     promptAndOutputHashesOnly: true;
   };
   schedule: {
@@ -371,6 +373,7 @@ export function buildCommanderXpPreRegistration(
       coworldVersion: input.coworldVersion,
       coworldName: COMMANDER_XP_EVAL_COWORLD_NAME,
       coworldManifestSha256: input.coworldManifestSha256,
+      coworldHostedManifestSha256: input.coworldHostedManifestSha256,
       coworldGameImageID: input.coworldGameImageID,
       coworldGameImageDigest: input.coworldGameImageDigest,
       canonicalCoworldID: COMMANDER_XP_CANONICAL_COWORLD_ID,
@@ -420,12 +423,12 @@ export function buildCommanderXpPreRegistration(
       missingPairs: "fatal",
     },
     privacyContract: {
-      rawPrompts: false,
-      rawProviderOutputs: false,
-      inboundMessageText: false,
-      outboundMessageText: false,
-      presignedUrls: false,
-      environment: false,
+      promptBodiesRetained: false,
+      providerBodiesRetained: false,
+      inboundCommsBodiesRetained: false,
+      outboundCommsBodiesRetained: false,
+      uploadUrlsRetained: false,
+      environmentValuesRetained: false,
       promptAndOutputHashesOnly: true,
     },
     schedule: {
@@ -653,6 +656,7 @@ function assertPlanInput(input: CommanderXpPlanInput): void {
   }
   if (
     !/^[0-9a-f]{64}$/.test(input.coworldManifestSha256) ||
+    !/^[0-9a-f]{64}$/.test(input.coworldHostedManifestSha256) ||
     !/^img_[A-Za-z0-9_-]{8,}$/.test(input.coworldGameImageID) ||
     !/^sha256:[0-9a-f]{64}$/.test(input.coworldGameImageDigest) ||
     !/^[0-9a-f]{64}$/.test(input.canonicalLeagueBindingSnapshotSha256)

@@ -60,8 +60,37 @@ interface CommanderXpDispatchAuthorization {
     workflowRunID: number;
     workflowRunAttempt: number;
   };
+  fenceGitRef: string;
   createdAt: string;
   dispatchAuthorizationSha256: string;
+}
+
+interface CommanderXpDispatchProgressEntry {
+  phase: CommanderXpProtocolPhase;
+  replicaIndex: number;
+  arm: CommanderXpArm;
+  runPath: string;
+  requestBodySha256: string;
+  submittedRequestSha256: string;
+  status: "prepared" | "submitted" | "failed";
+  xpRequestID: string | null;
+  rawResponseSha256: string | null;
+  rawResponseByteLength: number | null;
+  failureCode: string | null;
+}
+
+interface CommanderXpDispatchProgress {
+  schemaVersion: 2;
+  authority: "commander-xp-write-through-dispatch-progress-v2";
+  phase: CommanderXpProtocolPhase;
+  expectedRequestCount: number;
+  dispatchAuthorizationSha256: string;
+  startedAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  status: "running" | "failed" | "completed";
+  requests: CommanderXpDispatchProgressEntry[];
+  progressSha256: string;
 }
 
 export interface CommanderXpDispatchedRequest {
@@ -111,6 +140,17 @@ export async function dispatchCommanderXpRequests(
   await fs.mkdir(outputDirectory, { recursive: false });
   const requests: CommanderXpDispatchedRequest[] = [];
   const xpRequestIDs = new Set<string>();
+  const startedAt = new Date().toISOString();
+  let progress: CommanderXpDispatchProgress = buildProgress(
+    input.phase,
+    expectedCount,
+    dispatchAuthorization.dispatchAuthorizationSha256,
+    startedAt,
+    null,
+    "running",
+    [],
+  );
+  await writeDispatchProgress(outputDirectory, progress, true);
   for (const request of planned) {
     const directory = path.join(outputDirectory, runDirectory(request));
     await fs.mkdir(directory, { recursive: true });
@@ -126,6 +166,29 @@ export async function dispatchCommanderXpRequests(
       ...submittedBody,
       submittedRequestSha256: sha256Canonical(submittedBody),
     };
+    const progressEntry: CommanderXpDispatchProgressEntry = {
+      phase: request.phase,
+      replicaIndex: request.replicaIndex,
+      arm: request.arm,
+      runPath: runDirectory(request),
+      requestBodySha256: request.requestBodySha256,
+      submittedRequestSha256: submittedRequest.submittedRequestSha256,
+      status: "prepared",
+      xpRequestID: null,
+      rawResponseSha256: null,
+      rawResponseByteLength: null,
+      failureCode: null,
+    };
+    progress = buildProgress(
+      input.phase,
+      expectedCount,
+      dispatchAuthorization.dispatchAuthorizationSha256,
+      startedAt,
+      null,
+      "running",
+      [...progress.requests, progressEntry],
+    );
+    await writeDispatchProgress(outputDirectory, progress);
     const requestBodyPath = path.join(directory, "request-body.json");
     const submittedRequestPath = path.join(directory, "submitted-request.json");
     await Promise.all([
@@ -143,6 +206,12 @@ export async function dispatchCommanderXpRequests(
       stdout = commandStdout(error);
       await persistRawCreateResponse(directory, stdout);
       await persistCreateFailure(directory, "COMMAND_EXIT_NONZERO", stdout);
+      await failDispatchProgress(
+        outputDirectory,
+        progress,
+        "COMMAND_EXIT_NONZERO",
+        stdout,
+      );
       throw new Error(`dispatch failed at ${runDirectory(request)}`, {
         cause: error,
       });
@@ -165,6 +234,12 @@ export async function dispatchCommanderXpRequests(
       rawResponse = parsed as Record<string, unknown>;
     } catch {
       await persistCreateFailure(directory, "RESPONSE_JSON_INVALID", stdout);
+      await failDispatchProgress(
+        outputDirectory,
+        progress,
+        "RESPONSE_JSON_INVALID",
+        stdout,
+      );
       throw new Error(`dispatch response invalid at ${runDirectory(request)}`);
     }
     const xpRequestID = String(rawResponse.id ?? "");
@@ -180,6 +255,12 @@ export async function dispatchCommanderXpRequests(
     ) {
       await persistCreateFailure(
         directory,
+        "RESPONSE_IDENTITY_INVALID",
+        stdout,
+      );
+      await failDispatchProgress(
+        outputDirectory,
+        progress,
         "RESPONSE_IDENTITY_INVALID",
         stdout,
       );
@@ -211,6 +292,25 @@ export async function dispatchCommanderXpRequests(
       createResponsePath,
       createResponseRawPath,
     });
+    progress = buildProgress(
+      input.phase,
+      expectedCount,
+      dispatchAuthorization.dispatchAuthorizationSha256,
+      startedAt,
+      null,
+      "running",
+      [
+        ...progress.requests.slice(0, -1),
+        {
+          ...progress.requests.at(-1)!,
+          status: "submitted",
+          xpRequestID,
+          rawResponseSha256: createBody.rawResponseSha256,
+          rawResponseByteLength: createBody.rawResponseByteLength,
+        },
+      ],
+    );
+    await writeDispatchProgress(outputDirectory, progress);
   }
   const result = {
     phase: input.phase,
@@ -223,6 +323,17 @@ export async function dispatchCommanderXpRequests(
     path.join(outputDirectory, "commander-xp-dispatch-receipt-v2.json"),
     result,
   );
+  const completedAt = new Date().toISOString();
+  progress = buildProgress(
+    input.phase,
+    expectedCount,
+    dispatchAuthorization.dispatchAuthorizationSha256,
+    startedAt,
+    completedAt,
+    "completed",
+    progress.requests,
+  );
+  await writeDispatchProgress(outputDirectory, progress);
   return result;
 }
 
@@ -323,6 +434,7 @@ async function verifyDispatchAuthorization(
       "priorLedgerSha256",
       "activationSha256",
       "fenceArtifact",
+      "fenceGitRef",
       "createdAt",
       "dispatchAuthorizationSha256",
     ],
@@ -364,6 +476,8 @@ async function verifyDispatchAuthorization(
     authorization.fenceArtifact.workflowRunID < 1 ||
     !Number.isSafeInteger(authorization.fenceArtifact.workflowRunAttempt) ||
     authorization.fenceArtifact.workflowRunAttempt < 1 ||
+    authorization.fenceGitRef !==
+      `refs/tags/commander-xp-dispatch-fence-v2/${sha256Bytes(`${preregistration.experimentID}\n${input.phase}\n${preregistration.identities.adapterSourceSha}\n`)}` ||
     dispatchAuthorizationSha256 !== sha256Canonical(body)
   ) {
     throw new Error("dispatch authorization is invalid");
@@ -444,6 +558,79 @@ async function persistCreateFailure(
     rawResponseSha256: sha256Bytes(stdout),
     rawResponseByteLength: Buffer.byteLength(stdout),
   });
+}
+
+function buildProgress(
+  phase: CommanderXpProtocolPhase,
+  expectedRequestCount: number,
+  dispatchAuthorizationSha256: string,
+  startedAt: string,
+  completedAt: string | null,
+  status: CommanderXpDispatchProgress["status"],
+  requests: CommanderXpDispatchProgressEntry[],
+): CommanderXpDispatchProgress {
+  const body = {
+    schemaVersion: 2 as const,
+    authority: "commander-xp-write-through-dispatch-progress-v2" as const,
+    phase,
+    expectedRequestCount,
+    dispatchAuthorizationSha256,
+    startedAt,
+    updatedAt: completedAt ?? new Date().toISOString(),
+    completedAt,
+    status,
+    requests,
+  };
+  return { ...body, progressSha256: sha256Canonical(body) };
+}
+
+async function failDispatchProgress(
+  outputDirectory: string,
+  progress: CommanderXpDispatchProgress,
+  failureCode: string,
+  stdout: string,
+): Promise<CommanderXpDispatchProgress> {
+  const failedAt = new Date().toISOString();
+  const failed = buildProgress(
+    progress.phase,
+    progress.expectedRequestCount,
+    progress.dispatchAuthorizationSha256,
+    progress.startedAt,
+    failedAt,
+    "failed",
+    [
+      ...progress.requests.slice(0, -1),
+      {
+        ...progress.requests.at(-1)!,
+        status: "failed",
+        rawResponseSha256: sha256Bytes(stdout),
+        rawResponseByteLength: Buffer.byteLength(stdout),
+        failureCode,
+      },
+    ],
+  );
+  await writeDispatchProgress(outputDirectory, failed);
+  return failed;
+}
+
+async function writeDispatchProgress(
+  outputDirectory: string,
+  progress: CommanderXpDispatchProgress,
+  exclusive = false,
+): Promise<void> {
+  const target = path.join(
+    outputDirectory,
+    "commander-xp-dispatch-progress-v2.json",
+  );
+  if (exclusive) {
+    await writeJsonExclusive(target, progress);
+    return;
+  }
+  const temporary = `${target}.tmp`;
+  await fs.writeFile(temporary, `${JSON.stringify(progress, null, 2)}\n`, {
+    flag: "wx",
+  });
+  await fs.rename(temporary, target);
 }
 
 function sha256Bytes(value: string): string {

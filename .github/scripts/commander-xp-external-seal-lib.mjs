@@ -38,10 +38,14 @@ const ALLOWED_TOP_LEVEL_EVIDENCE = new Set([
   "commander-xp-preregistration-v2.json",
   "commander-xp-evidence-index-v2.json",
   "commander-xp-evidence-seal-v2.json",
+  "commander-xp-local-verification-v2.json",
+  "commander-xp-source-provenance-v2.json",
+  "commander-xp-source-tree-diff-v1.json",
   "policy-identities-v2.json",
   "eval-coworld-identity-v2.json",
   "eval-coworld-inspect.json",
   "eval-coworld-manifest-v2.json",
+  "eval-coworld-terminal-proof-v2.json",
   "xp-openapi.sha256",
   "commander-xp-prereg-ledger-v2.json",
   "commander-xp-provider-preflight-ledger-v2.json",
@@ -173,6 +177,7 @@ const FORBIDDEN_PRIVACY_KEYS = [
   "authorization",
   "commslottext",
   "credential",
+  "coworldplayerartifactuploadurl",
   "messagebody",
   "messagetext",
   "modeltranscript",
@@ -540,7 +545,7 @@ function validateSourceCIBinding(binding) {
     binding.actor !== "0xNad" ||
     binding.triggeringActor !== "0xNad" ||
     binding.headRepository !== "0xNad/ProxyWar" ||
-    !["push", "workflow_dispatch"].includes(binding.event) ||
+    binding.event !== "push" ||
     binding.ref !== "refs/heads/main"
   )
     fail("SOURCE_CI_BINDING_INVALID");
@@ -678,7 +683,7 @@ function validatePhaseReceiptBinding(binding, expectedPhase) {
     binding.workflowName !== "Commander XP external seal" ||
     binding.actor !== "0xNad" ||
     binding.triggeringActor !== "0xNad" ||
-    binding.event !== "workflow_dispatch" ||
+    binding.event !== "workflow_run" ||
     binding.ref !== "refs/heads/main" ||
     binding.phase !== expectedPhase ||
     !SAFE_ID.test(binding.experimentID) ||
@@ -964,7 +969,7 @@ export async function verifyArtifactMetadata(metadata, expected) {
     run.id !== expected.workflowRunID ||
     run.run_attempt !== expected.workflowRunAttempt ||
     !runStateValid ||
-    run.event !== "workflow_dispatch" ||
+    run.event !== (expected.event ?? "workflow_dispatch") ||
     metadata.repository.visibility !== "public" ||
     (expected.headSha !== undefined && run.head_sha !== expected.headSha) ||
     (expected.repository !== undefined &&
@@ -1020,7 +1025,7 @@ export function verifySourceCIMetadata(metadata, binding) {
     metadata.event !== binding.event ||
     metadata.status !== "completed" ||
     metadata.conclusion !== "success" ||
-    !["push", "workflow_dispatch"].includes(metadata.event)
+    metadata.event !== "push"
   ) {
     fail("SOURCE_CI_METADATA_IDENTITY_MISMATCH");
   }
@@ -1323,7 +1328,59 @@ export async function scanPrivacyAndInventory(
     }
     const extension = path.posix.extname(entry.path);
     if (extension === ".json") {
-      inspectJsonPrivacy(parseJsonText(text, entry.path), entry.path);
+      const parsed = parseJsonText(text, entry.path);
+      inspectJsonPrivacy(parsed, entry.path);
+      if (entry.path === "commander-xp-preregistration-v2.json") {
+        const privacyContract = parsed?.privacyContract;
+        exactKeys(
+          privacyContract,
+          [
+            "promptBodiesRetained",
+            "providerBodiesRetained",
+            "inboundCommsBodiesRetained",
+            "outboundCommsBodiesRetained",
+            "uploadUrlsRetained",
+            "environmentValuesRetained",
+            "promptAndOutputHashesOnly",
+          ],
+          "PRIVACY_CONTRACT_SCHEMA_MISMATCH",
+        );
+        if (
+          privacyContract.promptBodiesRetained !== false ||
+          privacyContract.providerBodiesRetained !== false ||
+          privacyContract.inboundCommsBodiesRetained !== false ||
+          privacyContract.outboundCommsBodiesRetained !== false ||
+          privacyContract.uploadUrlsRetained !== false ||
+          privacyContract.environmentValuesRetained !== false ||
+          privacyContract.promptAndOutputHashesOnly !== true
+        ) {
+          fail("PRIVACY_CONTRACT_INVALID", entry.path);
+        }
+      }
+      if (entry.path === "commander-xp-local-verification-v2.json") {
+        exactKeys(
+          parsed,
+          [
+            "schemaVersion",
+            "verifierSchemaVersion",
+            "phase",
+            "integrityExpected",
+            "experimentUsable",
+            "authenticity",
+          ],
+          "LOCAL_VERIFICATION_SCHEMA_MISMATCH",
+        );
+        if (
+          parsed.schemaVersion !== 2 ||
+          parsed.verifierSchemaVersion !== 2 ||
+          !PHASES.has(parsed.phase) ||
+          parsed.integrityExpected !== true ||
+          parsed.experimentUsable !== false ||
+          parsed.authenticity !== "external-seal-receipt-required"
+        ) {
+          fail("LOCAL_VERIFICATION_DECLARATION_INVALID", entry.path);
+        }
+      }
     } else if (extension === ".jsonl") {
       for (const [index, line] of text.split(/\r?\n/).entries()) {
         if (line === "") continue;
@@ -2512,11 +2569,13 @@ async function verifyChecksumFile(root) {
 export async function createExternalReceipt({
   bundleRoot,
   sealedBundlePath,
+  platformRefetchPath,
   outputPath,
   bundleArtifactMetadataPath,
   completedAt,
 }) {
   const manifest = await verifyBundle(bundleRoot);
+  await verifyPlatformRefetchReceipt(platformRefetchPath, manifest);
   const normalizedCompletedAt = isoTimestamp(completedAt, "completedAt");
   if (Date.parse(normalizedCompletedAt) < Date.parse(manifest.createdAt))
     fail("RECEIPT_BEFORE_BUNDLE");
@@ -2543,6 +2602,7 @@ export async function createExternalReceipt({
     repository: "0xNad/ProxyWar",
     minRetentionDays: 89,
     allowCurrentRunInProgress: true,
+    event: "workflow_run",
   });
   if (
     manifest.workflow.runID !== expectedArtifact.workflowRunID ||
@@ -2593,11 +2653,16 @@ export async function createExternalReceipt({
       namespaceRegistrySha256: manifest.namespaceRegistry.registrySha256,
       treeDiffSha256: manifest.source.treeDiffSha256,
       privacyInventorySha256: manifest.privacy.inventorySha256,
+      platformRefetchSha256: await sha256File(platformRefetchPath),
     },
     attestation: {
       required: true,
       issuer: "GitHub Actions OIDC / Sigstore public-good instance",
-      subjects: ["sealed-bundle", EXTERNAL_RECEIPT_FILE],
+      subjects: [
+        "sealed-bundle",
+        EXTERNAL_RECEIPT_FILE,
+        "commander-xp-independent-platform-refetch-v2.json",
+      ],
     },
     integrityVerified: true,
     experimentUsable: false,
@@ -2652,7 +2717,11 @@ export async function verifyExternalReceipt(filePath, expected = {}) {
     receipt.attestation?.issuer !==
       "GitHub Actions OIDC / Sigstore public-good instance" ||
     canonicalJson(receipt.attestation?.subjects) !==
-      canonicalJson(["sealed-bundle", EXTERNAL_RECEIPT_FILE])
+      canonicalJson([
+        "sealed-bundle",
+        EXTERNAL_RECEIPT_FILE,
+        "commander-xp-independent-platform-refetch-v2.json",
+      ])
   )
     fail("EXTERNAL_RECEIPT_IDENTITY_INVALID");
   exactKeys(
@@ -2696,6 +2765,7 @@ export async function verifyExternalReceipt(filePath, expected = {}) {
       "namespaceRegistrySha256",
       "treeDiffSha256",
       "privacyInventorySha256",
+      "platformRefetchSha256",
     ],
     "EXTERNAL_RECEIPT_EVIDENCE_INVALID",
   );
@@ -2799,6 +2869,7 @@ export async function createExternalPhaseLedger({
     repository: "0xNad/ProxyWar",
     minRetentionDays: 89,
     allowCurrentRunInProgress: true,
+    event: "workflow_run",
   });
   const receiptSha256 = normalizeRawSha256(
     await sha256File(receiptPath),
@@ -2858,6 +2929,10 @@ export async function createExternalPhaseLedger({
       localSealSha256: normalizeRawSha256(
         receipt.evidence.localSealSha256,
         "local seal SHA-256",
+      ),
+      platformRefetchSha256: normalizeRawSha256(
+        receipt.evidence.platformRefetchSha256,
+        "platform refetch SHA-256",
       ),
     },
     receiptArtifact: {
@@ -2953,7 +3028,7 @@ export async function verifyExternalPhaseLedger(filePath, expected = {}) {
     ledger.workflowName !== "Commander XP external seal" ||
     ledger.actor !== "0xNad" ||
     ledger.triggeringActor !== "0xNad" ||
-    ledger.event !== "workflow_dispatch" ||
+    ledger.event !== "workflow_run" ||
     ledger.ref !== "refs/heads/main" ||
     !SAFE_ID.test(ledger.experimentID) ||
     normalizeRawSha256(
@@ -3201,6 +3276,7 @@ function validateLedgerEvidenceArtifact(value) {
       "aggregateSha256",
       "attestedSubjectDigest",
       "localSealSha256",
+      "platformRefetchSha256",
     ],
     "LEDGER_EVIDENCE_ARTIFACT_INVALID",
   );
@@ -3212,6 +3288,100 @@ function validateLedgerEvidenceArtifact(value) {
     "ledger evidence subject digest",
   );
   normalizeRawSha256(value.localSealSha256, "ledger local seal SHA-256");
+  normalizeRawSha256(
+    value.platformRefetchSha256,
+    "ledger platform refetch SHA-256",
+  );
+}
+
+async function verifyPlatformRefetchReceipt(filePath, manifest) {
+  const receipt = await readJsonFile(filePath);
+  exactKeys(
+    receipt,
+    [
+      "schemaVersion",
+      "authority",
+      "experimentID",
+      "phase",
+      "preRegistrationSha256",
+      "verifiedAt",
+      "runCount",
+      "runs",
+      "refetchSha256",
+    ],
+    "PLATFORM_REFETCH_SCHEMA_INVALID",
+  );
+  const { refetchSha256, ...body } = receipt;
+  const expectedCount = {
+    preregistration: 0,
+    "provider-preflight": 3,
+    canary: 12,
+    confirmatory: 96,
+  }[manifest.phase];
+  if (
+    receipt.schemaVersion !== 2 ||
+    receipt.authority !== "independent-coworld-0.1.42-refetch-v2" ||
+    receipt.experimentID !== manifest.experimentID ||
+    receipt.phase !== manifest.phase ||
+    normalizeRawSha256(receipt.preRegistrationSha256) !==
+      normalizeRawSha256(manifest.evidence.preRegistrationSha256) ||
+    !Number.isFinite(Date.parse(receipt.verifiedAt)) ||
+    receipt.runCount !== expectedCount ||
+    !Array.isArray(receipt.runs) ||
+    receipt.runs.length !== expectedCount ||
+    normalizeRawSha256(refetchSha256) !==
+      normalizeRawSha256(sha256Bytes(Buffer.from(canonicalJson(body))))
+  ) {
+    fail("PLATFORM_REFETCH_IDENTITY_INVALID");
+  }
+  const seen = new Set();
+  for (const run of receipt.runs) {
+    exactKeys(
+      run,
+      [
+        "runPath",
+        "xpRequestID",
+        "episodeRequestID",
+        "memberSetSha256",
+        "xpEvidenceSha256",
+        "normalizedReadbackSha256",
+        "replayEvidenceSha256",
+        "episodeResultsSha256",
+        "gameEvidenceSha256",
+        "playerArtifactSha256",
+      ],
+      "PLATFORM_REFETCH_RUN_SCHEMA_INVALID",
+    );
+    if (
+      !/^runs\/(?:provider-preflight|canary|confirmatory)\/r\d{2}\/(?:A|B|C)$/.test(
+        run.runPath,
+      ) ||
+      seen.has(run.runPath) ||
+      !SAFE_ID.test(run.xpRequestID) ||
+      !SAFE_ID.test(run.episodeRequestID)
+    ) {
+      fail("PLATFORM_REFETCH_RUN_IDENTITY_INVALID", run.runPath);
+    }
+    seen.add(run.runPath);
+    for (const field of [
+      "memberSetSha256",
+      "xpEvidenceSha256",
+      "normalizedReadbackSha256",
+      "replayEvidenceSha256",
+      "playerArtifactSha256",
+    ]) {
+      normalizeRawSha256(run[field], `platform refetch ${field}`);
+    }
+    const preflight = manifest.phase === "provider-preflight";
+    for (const field of ["episodeResultsSha256", "gameEvidenceSha256"]) {
+      if (preflight ? run[field] !== null : run[field] === null) {
+        fail("PLATFORM_REFETCH_GAMEPLAY_HASH_INVALID", run.runPath);
+      }
+      if (run[field] !== null)
+        normalizeRawSha256(run[field], `platform refetch ${field}`);
+    }
+  }
+  return receipt;
 }
 
 function validateLedgerReceiptArtifact(value) {

@@ -1,60 +1,17 @@
 name: Commander XP external seal
-run-name: Commander XP external seal ${{ inputs.source_sha }} / evidence ${{ inputs.evidence_artifact_id }} / request ${{ inputs.authority_request_artifact_id }}
+run-name: Commander XP external seal / collector ${{ github.event.workflow_run.id }} / ${{ github.event.workflow_run.head_sha }}
 
 on:
-  workflow_dispatch:
-    inputs:
-      source_sha:
-        description: Exact current main commit containing the reviewed Commander XP adapter
-        required: true
-        type: string
-      source_ci_run_id:
-        description: Successful exact-source CI workflow run ID
-        required: true
-        type: string
-      source_ci_run_attempt:
-        description: Exact-source CI workflow run attempt
-        required: true
-        type: string
-      evidence_artifact_id:
-        description: Immutable collector artifact ID
-        required: true
-        type: string
-      evidence_artifact_name:
-        description: Immutable collector artifact name
-        required: true
-        type: string
-      evidence_artifact_digest:
-        description: Collector artifact SHA-256 digest from upload-artifact
-        required: true
-        type: string
-      evidence_artifact_run_id:
-        description: Collector workflow run ID
-        required: true
-        type: string
-      evidence_artifact_run_attempt:
-        description: Collector workflow run attempt
-        required: true
-        type: string
-      authority_request_artifact_id:
-        description: Post-evidence immutable authority-request artifact ID
-        required: true
-        type: string
-      authority_request_artifact_name:
-        description: Post-evidence immutable authority-request artifact name
-        required: true
-        type: string
-      authority_request_artifact_digest:
-        description: Authority-request artifact SHA-256 digest from upload-artifact
-        required: true
-        type: string
-      seal_request_sha256:
-        description: SHA-256 of commander-xp-external-seal-request-v1.json
-        required: true
-        type: string
+  workflow_run:
+    workflows:
+      - Commander XP protected experiment evidence
+    types:
+      - completed
+    branches:
+      - main
 
 concurrency:
-  group: commander-xp-external-seal-${{ inputs.source_sha }}-${{ inputs.evidence_artifact_id }}-${{ inputs.authority_request_artifact_id }}
+  group: commander-xp-external-seal-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
   cancel-in-progress: false
 
 permissions:
@@ -62,18 +19,9 @@ permissions:
   contents: read
 
 env:
-  SOURCE_SHA: ${{ inputs.source_sha }}
-  SOURCE_CI_RUN_ID: ${{ inputs.source_ci_run_id }}
-  SOURCE_CI_RUN_ATTEMPT: ${{ inputs.source_ci_run_attempt }}
-  EVIDENCE_ARTIFACT_ID: ${{ inputs.evidence_artifact_id }}
-  EVIDENCE_ARTIFACT_NAME: ${{ inputs.evidence_artifact_name }}
-  EVIDENCE_ARTIFACT_DIGEST: ${{ inputs.evidence_artifact_digest }}
-  EVIDENCE_ARTIFACT_RUN_ID: ${{ inputs.evidence_artifact_run_id }}
-  EVIDENCE_ARTIFACT_RUN_ATTEMPT: ${{ inputs.evidence_artifact_run_attempt }}
-  AUTHORITY_REQUEST_ARTIFACT_ID: ${{ inputs.authority_request_artifact_id }}
-  AUTHORITY_REQUEST_ARTIFACT_NAME: ${{ inputs.authority_request_artifact_name }}
-  AUTHORITY_REQUEST_ARTIFACT_DIGEST: ${{ inputs.authority_request_artifact_digest }}
-  SEAL_REQUEST_SHA256: ${{ inputs.seal_request_sha256 }}
+  SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+  EVIDENCE_ARTIFACT_RUN_ID: ${{ github.event.workflow_run.id }}
+  EVIDENCE_ARTIFACT_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
 
 jobs:
   normalize:
@@ -86,83 +34,103 @@ jobs:
       artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
       experiment_id: ${{ steps.identity.outputs.experiment_id }}
       phase: ${{ steps.identity.outputs.phase }}
+      source_ci_run_id: ${{ steps.request.outputs.source_ci_run_id }}
+      source_ci_run_attempt: ${{ steps.request.outputs.source_ci_run_attempt }}
+      seal_request_sha256: ${{ steps.request.outputs.seal_request_sha256 }}
     steps:
       - name: Checkout exact protected source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ inputs.source_sha }}
+          ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
           persist-credentials: false
           submodules: false
 
-      - name: Authorize exact protected-main execution and exact CI
+      - name: Authorize completed protected collector and resolve exact artifacts
+        id: resolve
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+          test "$GITHUB_EVENT_NAME" = "workflow_run"
           test "$GITHUB_ACTOR" = "0xNad"
           test "$GITHUB_TRIGGERING_ACTOR" = "0xNad"
           test "$GITHUB_REF" = "refs/heads/main"
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$SOURCE_CI_RUN_ID" =~ ^[1-9][0-9]*$ ]]
-          [[ "$SOURCE_CI_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
-          [[ "$EVIDENCE_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$EVIDENCE_ARTIFACT_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$EVIDENCE_ARTIFACT_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
-          [[ "$EVIDENCE_ARTIFACT_DIGEST" =~ ^(sha256:)?[0-9a-f]{64}$ ]]
-          [[ "$AUTHORITY_REQUEST_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
-          [[ "$AUTHORITY_REQUEST_ARTIFACT_DIGEST" =~ ^(sha256:)?[0-9a-f]{64}$ ]]
-          test "$AUTHORITY_REQUEST_ARTIFACT_ID" != "$EVIDENCE_ARTIFACT_ID"
-          test "$AUTHORITY_REQUEST_ARTIFACT_NAME" != "$EVIDENCE_ARTIFACT_NAME"
-          [[ "$SEAL_REQUEST_SHA256" =~ ^(sha256:)?[0-9a-f]{64}$ ]]
           test "$GITHUB_SHA" = "$SOURCE_SHA"
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$SOURCE_SHA"
           test "$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)" = "public"
           test "$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq .protected)" = "true"
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_CI_RUN_ID" > "$RUNNER_TEMP/source-ci.json"
-          test "$(jq -r .head_sha "$RUNNER_TEMP/source-ci.json")" = "$SOURCE_SHA"
-          test "$(jq -r .run_attempt "$RUNNER_TEMP/source-ci.json")" = "$SOURCE_CI_RUN_ATTEMPT"
-          test "$(jq -r .path "$RUNNER_TEMP/source-ci.json")" = ".github/workflows/ci.yml"
-          test "$(jq -r .actor.login "$RUNNER_TEMP/source-ci.json")" = "0xNad"
-          test "$(jq -r .triggering_actor.login "$RUNNER_TEMP/source-ci.json")" = "0xNad"
-          test "$(jq -r .head_branch "$RUNNER_TEMP/source-ci.json")" = "main"
-          test "$(jq -r .head_repository.full_name "$RUNNER_TEMP/source-ci.json")" = "$GITHUB_REPOSITORY"
-          test "$(jq -r .repository.full_name "$RUNNER_TEMP/source-ci.json")" = "$GITHUB_REPOSITORY"
-          test "$(jq -r .status "$RUNNER_TEMP/source-ci.json")" = "completed"
-          test "$(jq -r .conclusion "$RUNNER_TEMP/source-ci.json")" = "success"
-          case "$(jq -r .event "$RUNNER_TEMP/source-ci.json")" in
-            push|workflow_dispatch) ;;
-            *) exit 1 ;;
-          esac
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$EVIDENCE_ARTIFACT_RUN_ID" > "$RUNNER_TEMP/evidence-run.json"
+          jq -e --arg source "$SOURCE_SHA" --argjson attempt "$EVIDENCE_ARTIFACT_RUN_ATTEMPT" '
+            .status == "completed" and .conclusion == "success" and
+            .run_attempt == $attempt and .head_sha == $source and
+            .head_branch == "main" and .path == ".github/workflows/commander-xp-evidence.yml" and
+            .name == "Commander XP protected experiment evidence" and
+            .actor.login == "0xNad" and .triggering_actor.login == "0xNad" and
+            .head_repository.full_name == "0xNad/ProxyWar" and
+            .repository.full_name == "0xNad/ProxyWar" and .event == "workflow_dispatch"
+          ' "$RUNNER_TEMP/evidence-run.json" >/dev/null
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$EVIDENCE_ARTIFACT_RUN_ID/artifacts?per_page=100" > "$RUNNER_TEMP/source-artifacts.json"
+          SUFFIX="-$SOURCE_SHA-$EVIDENCE_ARTIFACT_RUN_ID-$EVIDENCE_ARTIFACT_RUN_ATTEMPT"
+          test "$(jq --arg suffix "$SUFFIX" '[.artifacts[] | select((.name | startswith("commander-xp-evidence-")) and (.name | endswith($suffix)) and .expired == false)] | length' "$RUNNER_TEMP/source-artifacts.json")" = "1"
+          test "$(jq --arg suffix "$SUFFIX" '[.artifacts[] | select((.name | startswith("commander-xp-authority-request-")) and (.name | endswith($suffix)) and .expired == false)] | length' "$RUNNER_TEMP/source-artifacts.json")" = "1"
+          test "$(jq --arg suffix "$SUFFIX" '[.artifacts[] | select((.name | startswith("commander-xp-external-seal-handoff-")) and (.name | endswith($suffix)) and .expired == false)] | length' "$RUNNER_TEMP/source-artifacts.json")" = "1"
+          EVIDENCE_ARTIFACT_ID=$(jq -r --arg suffix "$SUFFIX" '.artifacts[] | select((.name | startswith("commander-xp-evidence-")) and (.name | endswith($suffix)) and .expired == false) | .id' "$RUNNER_TEMP/source-artifacts.json")
+          AUTHORITY_REQUEST_ARTIFACT_ID=$(jq -r --arg suffix "$SUFFIX" '.artifacts[] | select((.name | startswith("commander-xp-authority-request-")) and (.name | endswith($suffix)) and .expired == false) | .id' "$RUNNER_TEMP/source-artifacts.json")
+          HANDOFF_ARTIFACT_ID=$(jq -r --arg suffix "$SUFFIX" '.artifacts[] | select((.name | startswith("commander-xp-external-seal-handoff-")) and (.name | endswith($suffix)) and .expired == false) | .id' "$RUNNER_TEMP/source-artifacts.json")
+          test "$(printf '%s\n' "$EVIDENCE_ARTIFACT_ID" "$AUTHORITY_REQUEST_ARTIFACT_ID" "$HANDOFF_ARTIFACT_ID" | sort -u | wc -l | tr -d ' ')" = "3"
+          echo "evidence_artifact_id=$EVIDENCE_ARTIFACT_ID" >> "$GITHUB_OUTPUT"
+          echo "authority_artifact_id=$AUTHORITY_REQUEST_ARTIFACT_ID" >> "$GITHUB_OUTPUT"
+          echo "handoff_artifact_id=$HANDOFF_ARTIFACT_ID" >> "$GITHUB_OUTPUT"
 
       - name: Download exact collector artifact by ID
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
-          artifact-ids: ${{ inputs.evidence_artifact_id }}
+          artifact-ids: ${{ steps.resolve.outputs.evidence_artifact_id }}
           path: ${{ runner.temp }}/commander-xp-envelope/evidence
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
-          run-id: ${{ inputs.evidence_artifact_run_id }}
+          run-id: ${{ github.event.workflow_run.id }}
 
       - name: Download exact post-evidence authority request by ID
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
-          artifact-ids: ${{ inputs.authority_request_artifact_id }}
+          artifact-ids: ${{ steps.resolve.outputs.authority_artifact_id }}
           path: ${{ runner.temp }}/commander-xp-envelope/authority
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
-          run-id: ${{ inputs.evidence_artifact_run_id }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Download exact completion-trigger handoff by ID
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          artifact-ids: ${{ steps.resolve.outputs.handoff_artifact_id }}
+          path: ${{ runner.temp }}/commander-xp-handoff
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.workflow_run.id }}
 
       - name: Fetch immutable collector artifact and workflow metadata
+        id: request
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          REQUEST="$RUNNER_TEMP/commander-xp-envelope/authority/commander-xp-external-seal-request-v1.json"
+          HANDOFF="$RUNNER_TEMP/commander-xp-handoff/commander-xp-external-seal-handoff-v1.json"
+          test -f "$REQUEST"
+          test -f "$HANDOFF"
+          test "$(find "$RUNNER_TEMP/commander-xp-envelope/authority" -maxdepth 1 -type f | wc -l | tr -d ' ')" = "1"
+          EVIDENCE_ARTIFACT_ID='${{ steps.resolve.outputs.evidence_artifact_id }}'
+          AUTHORITY_REQUEST_ARTIFACT_ID='${{ steps.resolve.outputs.authority_artifact_id }}'
+          HANDOFF_ARTIFACT_ID='${{ steps.resolve.outputs.handoff_artifact_id }}'
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$EVIDENCE_ARTIFACT_ID" > "$RUNNER_TEMP/evidence-artifact.json"
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$AUTHORITY_REQUEST_ARTIFACT_ID" > "$RUNNER_TEMP/authority-request-artifact.json"
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$EVIDENCE_ARTIFACT_RUN_ID" > "$RUNNER_TEMP/evidence-run.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$HANDOFF_ARTIFACT_ID" > "$RUNNER_TEMP/handoff-artifact.json"
           gh api "repos/$GITHUB_REPOSITORY" > "$RUNNER_TEMP/repository.json"
           jq -s '{artifact:.[0],workflowRun:.[1],repository:.[2]}' \
             "$RUNNER_TEMP/evidence-artifact.json" \
@@ -170,6 +138,25 @@ jobs:
             "$RUNNER_TEMP/repository.json" \
             > "$RUNNER_TEMP/evidence-artifact-metadata.json"
           test "$(jq -r .artifact.id "$RUNNER_TEMP/evidence-artifact-metadata.json")" = "$EVIDENCE_ARTIFACT_ID"
+          EVIDENCE_ARTIFACT_NAME=$(jq -r .sourceArtifact.artifactName "$REQUEST")
+          EVIDENCE_ARTIFACT_DIGEST=$(jq -r .sourceArtifact.artifactDigest "$REQUEST")
+          AUTHORITY_REQUEST_ARTIFACT_NAME=$(jq -r .name "$RUNNER_TEMP/authority-request-artifact.json")
+          AUTHORITY_REQUEST_ARTIFACT_DIGEST=$(jq -r .digest "$RUNNER_TEMP/authority-request-artifact.json")
+          SEAL_REQUEST_SHA256=$(sha256sum "$REQUEST" | cut -d' ' -f1)
+          jq -cS 'del(.handoffSha256)' "$HANDOFF" > "$RUNNER_TEMP/handoff.body.json"
+          test "$(sha256sum "$RUNNER_TEMP/handoff.body.json" | cut -d' ' -f1)" = "$(jq -r .handoffSha256 "$HANDOFF")"
+          jq -e \
+            --arg source "$SOURCE_SHA" \
+            --argjson runID "$EVIDENCE_ARTIFACT_RUN_ID" \
+            --argjson attempt "$EVIDENCE_ARTIFACT_RUN_ATTEMPT" \
+            --arg evidenceID "$EVIDENCE_ARTIFACT_ID" \
+            --arg authorityID "$AUTHORITY_REQUEST_ARTIFACT_ID" \
+            --arg requestSha "$SEAL_REQUEST_SHA256" '
+            .schemaVersion == 1 and .authority == "github-actions-completed-collector-handoff-v1" and
+            .sourceSha == $source and .collectorRunID == $runID and .collectorRunAttempt == $attempt and
+            .evidenceArtifact.id == $evidenceID and .authorityRequestArtifact.id == $authorityID and
+            .sealRequestSha256 == $requestSha
+          ' "$HANDOFF" >/dev/null
           test "$(jq -r .artifact.name "$RUNNER_TEMP/evidence-artifact-metadata.json")" = "$EVIDENCE_ARTIFACT_NAME"
           test "$(jq -r .workflowRun.id "$RUNNER_TEMP/evidence-artifact-metadata.json")" = "$EVIDENCE_ARTIFACT_RUN_ID"
           test "$(jq -r .workflowRun.run_attempt "$RUNNER_TEMP/evidence-artifact-metadata.json")" = "$EVIDENCE_ARTIFACT_RUN_ATTEMPT"
@@ -191,7 +178,31 @@ jobs:
           test "$(jq -r .expired "$RUNNER_TEMP/authority-request-artifact.json")" = "false"
           AUTHORITY_REQUEST_ACTUAL_DIGEST=$(jq -r .digest "$RUNNER_TEMP/authority-request-artifact.json")
           test "${AUTHORITY_REQUEST_ACTUAL_DIGEST#sha256:}" = "${AUTHORITY_REQUEST_ARTIFACT_DIGEST#sha256:}"
-          test "$(find "$RUNNER_TEMP/commander-xp-envelope/authority" -maxdepth 1 -type f | wc -l | tr -d ' ')" = "1"
+          test "$(jq -r .workflow_run.id "$RUNNER_TEMP/handoff-artifact.json")" = "$EVIDENCE_ARTIFACT_RUN_ID"
+          test "$(jq -r .expired "$RUNNER_TEMP/handoff-artifact.json")" = "false"
+          test "$(jq -r .evidenceArtifact.name "$HANDOFF")" = "$EVIDENCE_ARTIFACT_NAME"
+          test "$(jq -r .evidenceArtifact.digest "$HANDOFF")" = "$EVIDENCE_ARTIFACT_DIGEST"
+          test "$(jq -r .authorityRequestArtifact.name "$HANDOFF")" = "$AUTHORITY_REQUEST_ARTIFACT_NAME"
+          test "$(jq -r .authorityRequestArtifact.digest "$HANDOFF")" = "$AUTHORITY_REQUEST_ARTIFACT_DIGEST"
+          SOURCE_CI_RUN_ID=$(jq -r .sourceCI.runID "$REQUEST")
+          SOURCE_CI_RUN_ATTEMPT=$(jq -r .sourceCI.runAttempt "$REQUEST")
+          [[ "$SOURCE_CI_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$SOURCE_CI_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_CI_RUN_ID" > "$RUNNER_TEMP/source-ci.json"
+          jq -e --arg source "$SOURCE_SHA" --argjson attempt "$SOURCE_CI_RUN_ATTEMPT" '
+            .status == "completed" and .conclusion == "success" and .event == "push" and
+            .head_sha == $source and .run_attempt == $attempt and .head_branch == "main" and
+            .path == ".github/workflows/ci.yml" and .actor.login == "0xNad" and
+            .triggering_actor.login == "0xNad" and .head_repository.full_name == "0xNad/ProxyWar" and
+            .repository.full_name == "0xNad/ProxyWar"
+          ' "$RUNNER_TEMP/source-ci.json" >/dev/null
+          printf 'EVIDENCE_ARTIFACT_ID=%s\nEVIDENCE_ARTIFACT_NAME=%s\nEVIDENCE_ARTIFACT_DIGEST=%s\nAUTHORITY_REQUEST_ARTIFACT_ID=%s\nAUTHORITY_REQUEST_ARTIFACT_NAME=%s\nAUTHORITY_REQUEST_ARTIFACT_DIGEST=%s\nSOURCE_CI_RUN_ID=%s\nSOURCE_CI_RUN_ATTEMPT=%s\nSEAL_REQUEST_SHA256=%s\n' \
+            "$EVIDENCE_ARTIFACT_ID" "$EVIDENCE_ARTIFACT_NAME" "$EVIDENCE_ARTIFACT_DIGEST" \
+            "$AUTHORITY_REQUEST_ARTIFACT_ID" "$AUTHORITY_REQUEST_ARTIFACT_NAME" "$AUTHORITY_REQUEST_ARTIFACT_DIGEST" \
+            "$SOURCE_CI_RUN_ID" "$SOURCE_CI_RUN_ATTEMPT" "$SEAL_REQUEST_SHA256" >> "$GITHUB_ENV"
+          echo "source_ci_run_id=$SOURCE_CI_RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "source_ci_run_attempt=$SOURCE_CI_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+          echo "seal_request_sha256=$SEAL_REQUEST_SHA256" >> "$GITHUB_OUTPUT"
 
       - name: Setup exact Node runtime
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -279,7 +290,7 @@ jobs:
                 .head_branch == "main" and .path == ".github/workflows/commander-xp-external-seal.yml" and
                 .actor.login == "0xNad" and .triggering_actor.login == "0xNad" and
                 .head_repository.full_name == "0xNad/ProxyWar" and
-                .event == "workflow_dispatch"
+                .event == "workflow_run"
               ' "$RUNNER_TEMP/$PRIOR_KEY-run.json" >/dev/null
               PRIOR_ROOT="$RUNNER_TEMP/$PRIOR_KEY-retained"
               mkdir -m 700 "$PRIOR_ROOT"
@@ -391,17 +402,23 @@ jobs:
     needs: normalize
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    environment: commander-xp-eval
     permissions:
       actions: read
       artifact-metadata: write
       attestations: write
       contents: read
       id-token: write
+    env:
+      SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+      SOURCE_CI_RUN_ID: ${{ needs.normalize.outputs.source_ci_run_id }}
+      SOURCE_CI_RUN_ATTEMPT: ${{ needs.normalize.outputs.source_ci_run_attempt }}
+      SEAL_REQUEST_SHA256: ${{ needs.normalize.outputs.seal_request_sha256 }}
     steps:
       - name: Checkout exact protected verifier source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ inputs.source_sha }}
+          ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
           persist-credentials: false
           submodules: false
@@ -411,7 +428,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+          test "$GITHUB_EVENT_NAME" = "workflow_run"
           test "$GITHUB_ACTOR" = "0xNad"
           test "$GITHUB_TRIGGERING_ACTOR" = "0xNad"
           test "$GITHUB_REF" = "refs/heads/main"
@@ -464,8 +481,19 @@ jobs:
         with:
           node-version: 24
 
+      - name: Setup exact uv for independent Coworld reads
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+
       - name: Install exact-source dependencies
-        run: node .github/scripts/npm-ci-with-retry.mjs --ignore-scripts
+        run: |
+          set -euo pipefail
+          node .github/scripts/npm-ci-with-retry.mjs --ignore-scripts
+          node .github/scripts/npm-ci-with-retry.mjs --prefix coworld-adapter --ignore-scripts
+          uv venv "$RUNNER_TEMP/coworld-venv" --python 3.12
+          uv pip install --python "$RUNNER_TEMP/coworld-venv/bin/python" "coworld==0.1.42"
+          test "$($RUNNER_TEMP/coworld-venv/bin/python -c 'import importlib.metadata; print(importlib.metadata.version("coworld"))')" = "0.1.42"
+          echo "COWORLD_PYTHON=$RUNNER_TEMP/coworld-venv/bin/python" >> "$GITHUB_ENV"
+          echo "COWORLD_BIN=$RUNNER_TEMP/coworld-venv/bin/coworld" >> "$GITHUB_ENV"
 
       - name: Re-run exact seal-authority regression tests
         run: node --test .github/scripts/commander-xp-external-seal.test.mjs
@@ -498,6 +526,21 @@ jobs:
             --metadata="$RUNNER_TEMP/second-source-ci.json" \
             --binding="$RUNNER_TEMP/source-ci-binding.json"
 
+      - name: Independently re-fetch Coworld authority and reproduce projections
+        env:
+          COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          npm run --silent agent:commander:xp:external-refetch -- \
+            "$RUNNER_TEMP/verified-bundle/evidence" \
+            "$GITHUB_WORKSPACE/.github/scripts/coworld-authenticated-command.mjs" \
+            "$RUNNER_TEMP/commander-xp-independent-platform-refetch-v2.json" \
+            > "$RUNNER_TEMP/platform-refetch-result.json"
+          EXPECTED_COUNT=$(case '${{ needs.normalize.outputs.phase }}' in preregistration) echo 0 ;; provider-preflight) echo 3 ;; canary) echo 12 ;; confirmatory) echo 96 ;; *) exit 1 ;; esac)
+          jq -e --arg phase '${{ needs.normalize.outputs.phase }}' --argjson count "$EXPECTED_COUNT" \
+            '.schemaVersion == 2 and .authority == "independent-coworld-0.1.42-refetch-v2" and .phase == $phase and .runCount == $count and (.refetchSha256 | test("^[0-9a-f]{64}$"))' \
+            "$RUNNER_TEMP/commander-xp-independent-platform-refetch-v2.json" >/dev/null
+
       - name: Create and verify the external seal receipt
         env:
           BUNDLE_ARTIFACT_ID: ${{ needs.normalize.outputs.artifact_id }}
@@ -509,6 +552,7 @@ jobs:
           node .github/scripts/commander-xp-external-seal.mjs receipt \
             --bundle-root="$RUNNER_TEMP/verified-bundle" \
             --sealed-bundle="$RUNNER_TEMP/sealed-download/sealed-bundle.tgz" \
+            --platform-refetch="$RUNNER_TEMP/commander-xp-independent-platform-refetch-v2.json" \
             --bundle-artifact-metadata="$RUNNER_TEMP/bundle-artifact-metadata.json" \
             --completed-at="$COMPLETED_AT" \
             --output="$RUNNER_TEMP/commander-xp-external-seal-receipt-v1.json"
@@ -524,14 +568,17 @@ jobs:
           subject-path: |
             ${{ runner.temp }}/sealed-download/sealed-bundle.tgz
             ${{ runner.temp }}/commander-xp-external-seal-receipt-v1.json
+            ${{ runner.temp }}/commander-xp-independent-platform-refetch-v2.json
           show-summary: true
 
       - name: Upload unique immutable receipt subject
         id: receipt-upload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: commander-xp-seal-receipt-subject-${{ needs.normalize.outputs.phase }}-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/commander-xp-external-seal-receipt-v1.json
+          name: commander-xp-seal-receipt-subject-${{ needs.normalize.outputs.phase }}-${{ github.event.workflow_run.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/commander-xp-external-seal-receipt-v1.json
+            ${{ runner.temp }}/commander-xp-independent-platform-refetch-v2.json
           if-no-files-found: error
           retention-days: 90
           compression-level: 0
@@ -559,7 +606,7 @@ jobs:
       - name: Create and verify exact verifier-compatible phase ledger
         env:
           RECEIPT_ARTIFACT_ID: ${{ steps.receipt-upload.outputs.artifact-id }}
-          RECEIPT_ARTIFACT_NAME: commander-xp-seal-receipt-subject-${{ needs.normalize.outputs.phase }}-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          RECEIPT_ARTIFACT_NAME: commander-xp-seal-receipt-subject-${{ needs.normalize.outputs.phase }}-${{ github.event.workflow_run.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           RECEIPT_ARTIFACT_DIGEST: ${{ steps.receipt-upload.outputs.artifact-digest }}
         run: |
           set -euo pipefail
@@ -593,7 +640,7 @@ jobs:
         id: ledger-upload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: commander-xp-phase-ledger-${{ needs.normalize.outputs.phase }}-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: commander-xp-phase-ledger-${{ needs.normalize.outputs.phase }}-${{ github.event.workflow_run.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/commander-xp-external-phase-ledger-v2.json
           if-no-files-found: error
           retention-days: 90
@@ -639,9 +686,19 @@ jobs:
             --signer-digest "$SOURCE_SHA" \
             --deny-self-hosted-runners \
             --format=json > "$AUTHORITY/phase-ledger-provenance.json"
+          gh attestation verify \
+            "$RUNNER_TEMP/commander-xp-independent-platform-refetch-v2.json" \
+            --repo "$GITHUB_REPOSITORY" \
+            --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/commander-xp-external-seal.yml@refs/heads/main" \
+            --source-ref "refs/heads/main" \
+            --source-digest "$SOURCE_SHA" \
+            --signer-digest "$SOURCE_SHA" \
+            --deny-self-hosted-runners \
+            --format=json > "$AUTHORITY/platform-refetch-provenance.json"
           cp '${{ steps.subject-attest.outputs.bundle-path }}' "$AUTHORITY/subject-attestation-bundle.jsonl"
           cp '${{ steps.ledger-attest.outputs.bundle-path }}' "$AUTHORITY/ledger-attestation-bundle.jsonl"
           cp "$RUNNER_TEMP/commander-xp-external-seal-receipt-v1.json" "$AUTHORITY/"
+          cp "$RUNNER_TEMP/commander-xp-independent-platform-refetch-v2.json" "$AUTHORITY/"
           cp "$RUNNER_TEMP/commander-xp-external-phase-ledger-v2.json" "$AUTHORITY/"
           jq -n \
             --slurpfile manifest "$RUNNER_TEMP/verified-bundle/commander-xp-external-seal-bundle-v1.json" \
@@ -678,7 +735,7 @@ jobs:
         id: authority-upload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: commander-xp-authority-${{ needs.normalize.outputs.phase }}-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: commander-xp-authority-${{ needs.normalize.outputs.phase }}-${{ github.event.workflow_run.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/commander-xp-authority-package/
           if-no-files-found: error
           retention-days: 90
@@ -736,7 +793,7 @@ jobs:
         id: terminal-upload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: commander-xp-terminal-authority-${{ needs.normalize.outputs.phase }}-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: commander-xp-terminal-authority-${{ needs.normalize.outputs.phase }}-${{ github.event.workflow_run.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/commander-xp-terminal-authority-envelope-v2.json
           if-no-files-found: error
           retention-days: 90
@@ -822,7 +879,7 @@ jobs:
         id: phase-binding-upload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: commander-xp-phase-binding-${{ needs.normalize.outputs.phase }}-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: commander-xp-phase-binding-${{ needs.normalize.outputs.phase }}-${{ github.event.workflow_run.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/commander-xp-phase-receipt-binding-v2.json
           if-no-files-found: error
           retention-days: 90

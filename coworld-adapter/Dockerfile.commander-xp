@@ -5,17 +5,25 @@
 #     -f coworld-adapter/Dockerfile.commander-xp \
 #     -t proxywar-commander-xp:<tag> .
 #
-# Upload this ONE image three times. Use the same --use-bedrock and exact
-# --bedrock-model value for every policy. The --run argv must be byte-identical
-# except for its final --arm=A|B|C token.
+# Upload this image once, then create all six immutable policy versions from the
+# returned Coworld image ID. Commander A/B/C use the same Bedrock model and
+# byte-identical argv except for the final --arm=A|B|C token; the three fixed
+# opponents use the bundled deterministic starter argv.
 ARG COMMANDER_XP_BUILD_PLATFORM=linux/amd64
-FROM --platform=${COMMANDER_XP_BUILD_PLATFORM} node:22-bookworm-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436
+FROM --platform=${COMMANDER_XP_BUILD_PLATFORM} node:24-bookworm-slim@sha256:65932751ed4073ed02f5c04e494e4b2572a891b7dbea0568a863dc80341bf848
 
 ARG COMMANDER_XP_BEHAVIOR_SOURCE_SHA=a69175a30577b3e516f09a2cb0960d4d129b3f33
 ARG COMMANDER_XP_BEHAVIOR_SOURCE_TREE_SHA=b1b88e4a447acb885ed554592d3865af0178314f
 ARG COMMANDER_XP_ADAPTER_SOURCE_SHA
 ARG COMMANDER_XP_ADAPTER_SOURCE_TREE_SHA
 ARG COMMANDER_XP_SOURCE_PROVENANCE_SHA256
+
+LABEL org.opencontainers.image.source="https://github.com/0xNad/ProxyWar" \
+      org.opencontainers.image.revision="${COMMANDER_XP_ADAPTER_SOURCE_SHA}" \
+      com.proxywar.commander-xp.behavior-source-sha="${COMMANDER_XP_BEHAVIOR_SOURCE_SHA}" \
+      com.proxywar.commander-xp.behavior-source-tree-sha="${COMMANDER_XP_BEHAVIOR_SOURCE_TREE_SHA}" \
+      com.proxywar.commander-xp.source-tree-sha="${COMMANDER_XP_ADAPTER_SOURCE_TREE_SHA}" \
+      com.proxywar.commander-xp.source-provenance-sha256="${COMMANDER_XP_SOURCE_PROVENANCE_SHA256}"
 
 ENV PROXYWAR_REPO=/app/proxywar \
     PROXYWAR_KEYSTONE_PLAN_EVERY=3 \

@@ -35,11 +35,14 @@ export interface CollectorInput {
   schemaVersion: 2;
   phase: "preregistration" | "provider-preflight" | "canary" | "confirmatory";
   preRegistrationPath: string;
+  sourceProvenancePath: string;
+  sourceTreeDiffPath: string;
   policyIdentitiesPath: string;
   policyInspectPaths: Record<CommanderXpArm, string>;
   evalCoworldIdentityPath: string;
   evalCoworldInspectPath: string;
   evalCoworldManifestPath: string;
+  evalCoworldTerminalProofPath: string;
   /** Existing authenticated wrapper; workflow pins Coworld 0.1.42 binary. */
   coworldCommandPath: string;
   outputDirectory: string;
@@ -80,6 +83,14 @@ export async function collectCommanderXpEvidence(
     "utf8",
   );
   const prereg = JSON.parse(preregText) as CommanderXpPreRegistrationV2;
+  const sourceProvenanceText = await fs.readFile(
+    path.resolve(input.sourceProvenancePath),
+    "utf8",
+  );
+  const sourceTreeDiffText = await fs.readFile(
+    path.resolve(input.sourceTreeDiffPath),
+    "utf8",
+  );
   const policyText = await fs.readFile(
     path.resolve(input.policyIdentitiesPath),
     "utf8",
@@ -90,6 +101,10 @@ export async function collectCommanderXpEvidence(
   );
   const evalCoworldManifestText = await fs.readFile(
     path.resolve(input.evalCoworldManifestPath),
+    "utf8",
+  );
+  const evalCoworldTerminalProofText = await fs.readFile(
+    path.resolve(input.evalCoworldTerminalProofPath),
     "utf8",
   );
   await Promise.all([
@@ -104,8 +119,23 @@ export async function collectCommanderXpEvidence(
       { flag: "wx" },
     ),
     fs.writeFile(
+      path.join(outputDirectory, "commander-xp-source-provenance-v2.json"),
+      sourceProvenanceText,
+      { flag: "wx" },
+    ),
+    fs.writeFile(
+      path.join(outputDirectory, "commander-xp-source-tree-diff-v1.json"),
+      sourceTreeDiffText,
+      { flag: "wx" },
+    ),
+    fs.writeFile(
       path.join(outputDirectory, "eval-coworld-identity-v2.json"),
       evalCoworldIdentityText,
+      { flag: "wx" },
+    ),
+    fs.writeFile(
+      path.join(outputDirectory, "eval-coworld-terminal-proof-v2.json"),
+      evalCoworldTerminalProofText,
       { flag: "wx" },
     ),
     fs.writeFile(
@@ -177,6 +207,8 @@ export async function collectCommanderXpEvidence(
   );
   const artifactPaths = [
     "commander-xp-preregistration-v2.json",
+    "commander-xp-source-provenance-v2.json",
+    "commander-xp-source-tree-diff-v1.json",
     ...phaseAuthorityArtifactPaths,
     "policy-identities-v2.json",
     "policy-inspect/A.json",
@@ -185,6 +217,7 @@ export async function collectCommanderXpEvidence(
     "eval-coworld-identity-v2.json",
     "eval-coworld-inspect.json",
     "eval-coworld-manifest-v2.json",
+    "eval-coworld-terminal-proof-v2.json",
     "xp-openapi.sha256",
     "commander-xp-local-verification-v2.json",
     ...planned.flatMap((request) => {
@@ -346,7 +379,8 @@ async function collectRun(
   ) {
     throw new Error("XP request readback omitted its normalized projection");
   }
-  const requestedReadback = normalizedRequestReadback(rawRequestedReadback);
+  const requestedReadback =
+    commanderXpNormalizedRequestReadback(rawRequestedReadback);
   const replayURL = String(episode.replay_url ?? "");
   let replayPath: string;
   try {
@@ -356,40 +390,14 @@ async function collectRun(
   } catch {
     throw new Error("XP episode replay URL is invalid");
   }
-  const xpEvidence = {
-    schemaVersion: 2,
+  const xpEvidence = commanderXpXpEvidenceProjection(
+    raw,
     xpRequestID,
-    xpRequestCreatedAt: raw.created_at,
-    xpRequestStartedAt: raw.started_at,
-    xpRequestCompletedAt: raw.completed_at,
-    episodeCount: raw.episode_count,
-    pendingCount: raw.pending_count,
-    submittedCount: raw.submitted_count,
-    runningCount: raw.running_count,
-    completedCount: raw.completed_count,
-    failedCount: raw.failed_count,
-    episodeRequestID,
-    jobID: episode.job_id,
-    status: raw.status,
-    coworldID: episode.coworld_id,
-    coworldVersion: episode.coworld_version,
-    variantID: raw.variant_id,
-    episodeID: episode.episode_id,
+    episode,
+    participants,
+    replayURL,
     replayPath,
-    replayURLSha256: sha256(new TextEncoder().encode(replayURL)),
-    episodeCreatedAt: episode.created_at,
-    dispatchedAt: episode.dispatched_at,
-    runningAt: episode.running_at,
-    completedAt: episode.completed_at,
-    participants: participants.map((entry) => {
-      const participant = entry as Record<string, unknown>;
-      return {
-        position: participant.position,
-        policyVersionID: participant.policy_version_id,
-      };
-    }),
-    gameConfig: episode.game_config,
-  };
+  );
   const directory = path.join(root, runDirectory(planned));
   const artifactDirectory = path.join(directory, "player-artifact");
   await fs.mkdir(artifactDirectory, { recursive: true });
@@ -443,51 +451,19 @@ async function collectRun(
   let gameEvidenceText: string | null = null;
   if (planned.phase !== "provider-preflight") {
     const rawResults = JSON.parse(rawResultsText) as Record<string, unknown>;
-    const rawPlayers = Array.isArray(rawResults.players)
-      ? rawResults.players
-      : [];
-    projectedResults = {
-      schemaVersion: 2,
-      xpRequestID,
-      episodeRequestID,
-      jobID: xpEvidence.jobID,
-      episodeID: xpEvidence.episodeID,
-      gameID: rawResults.game_id,
-      seed: rawResults.seed,
-      scores: rawResults.scores,
-      winnerSlot: rawResults.winner_slot,
-      subjectWon: rawResults.winner_slot === planned.subjectSeat,
-      turnCount: rawResults.turn_count,
-      tick: rawResults.tick,
-      decisionCount: rawResults.decision_count,
-      acceptedDecisionCount: rawResults.accepted_decision_count,
-      fallbackCount: rawResults.fallback_count,
-      degradedCount: rawResults.degraded_count,
-      players: rawPlayers.map((entry) => {
-        const player = entry as Record<string, unknown>;
-        return {
-          slot: player.slot,
-          name: player.name,
-          score: player.score,
-          tilesOwned: player.tiles_owned,
-          isAlive: player.is_alive,
-        };
-      }),
-    };
+    projectedResults = commanderXpEpisodeResultsProjection(
+      rawResults,
+      xpEvidence,
+      planned.subjectSeat,
+    );
     await writeJsonExclusive(
       path.join(directory, "episode-results.json"),
       projectedResults,
     );
-    const gameEvidence = commanderXpGameEvidenceFromRawGameLog(
+    gameEvidenceText = commanderXpGameEvidenceProjection(
       rawGameLogText,
-    ).flatMap((json) => {
-      const parsed = JSON.parse(json) as { coworldSlot?: unknown };
-      return parsed.coworldSlot === planned.subjectSeat ? [json] : [];
-    });
-    if (gameEvidence.length === 0) {
-      throw new Error("game-owned Commander XP evidence is missing");
-    }
-    gameEvidenceText = `${gameEvidence.join("\n")}\n`;
+      planned.subjectSeat,
+    );
     await fs.writeFile(
       path.join(directory, "game-evidence.jsonl"),
       gameEvidenceText,
@@ -599,7 +575,9 @@ async function collectRun(
   );
 }
 
-function normalizedRequestReadback(value: object): Record<string, unknown> {
+export function commanderXpNormalizedRequestReadback(
+  value: object,
+): Record<string, unknown> {
   const raw = value as Record<string, unknown>;
   const roster = Array.isArray(raw.roster) ? raw.roster : [];
   return {
@@ -611,6 +589,104 @@ function normalizedRequestReadback(value: object): Record<string, unknown> {
       return { slot: participant.slot, policy: participant.policy };
     }),
   };
+}
+
+export function commanderXpXpEvidenceProjection(
+  raw: Record<string, unknown>,
+  xpRequestID: string,
+  episode: Record<string, unknown>,
+  participants: unknown[],
+  replayURL: string,
+  replayPath: string,
+): Record<string, unknown> {
+  return {
+    schemaVersion: 2,
+    xpRequestID,
+    xpRequestCreatedAt: raw.created_at,
+    xpRequestStartedAt: raw.started_at,
+    xpRequestCompletedAt: raw.completed_at,
+    episodeCount: raw.episode_count,
+    pendingCount: raw.pending_count,
+    submittedCount: raw.submitted_count,
+    runningCount: raw.running_count,
+    completedCount: raw.completed_count,
+    failedCount: raw.failed_count,
+    episodeRequestID: episode.id,
+    jobID: episode.job_id,
+    status: raw.status,
+    coworldID: episode.coworld_id,
+    coworldVersion: episode.coworld_version,
+    variantID: raw.variant_id,
+    episodeID: episode.episode_id,
+    replayPath,
+    replayURLSha256: sha256(new TextEncoder().encode(replayURL)),
+    episodeCreatedAt: episode.created_at,
+    dispatchedAt: episode.dispatched_at,
+    runningAt: episode.running_at,
+    completedAt: episode.completed_at,
+    participants: participants.map((entry) => {
+      const participant = entry as Record<string, unknown>;
+      return {
+        position: participant.position,
+        policyVersionID: participant.policy_version_id,
+      };
+    }),
+    gameConfig: episode.game_config,
+  };
+}
+
+export function commanderXpEpisodeResultsProjection(
+  rawResults: Record<string, unknown>,
+  xpEvidence: Record<string, unknown>,
+  subjectSeat: number,
+): Record<string, unknown> {
+  const rawPlayers = Array.isArray(rawResults.players)
+    ? rawResults.players
+    : [];
+  return {
+    schemaVersion: 2,
+    xpRequestID: xpEvidence.xpRequestID,
+    episodeRequestID: xpEvidence.episodeRequestID,
+    jobID: xpEvidence.jobID,
+    episodeID: xpEvidence.episodeID,
+    gameID: rawResults.game_id,
+    seed: rawResults.seed,
+    scores: rawResults.scores,
+    winnerSlot: rawResults.winner_slot,
+    subjectWon: rawResults.winner_slot === subjectSeat,
+    turnCount: rawResults.turn_count,
+    tick: rawResults.tick,
+    decisionCount: rawResults.decision_count,
+    acceptedDecisionCount: rawResults.accepted_decision_count,
+    fallbackCount: rawResults.fallback_count,
+    degradedCount: rawResults.degraded_count,
+    players: rawPlayers.map((entry) => {
+      const player = entry as Record<string, unknown>;
+      return {
+        slot: player.slot,
+        name: player.name,
+        score: player.score,
+        tilesOwned: player.tiles_owned,
+        isAlive: player.is_alive,
+      };
+    }),
+  };
+}
+
+export function commanderXpGameEvidenceProjection(
+  rawGameLogText: string,
+  subjectSeat: number,
+): string {
+  const gameEvidence = commanderXpGameEvidenceFromRawGameLog(
+    rawGameLogText,
+  ).flatMap((json) => {
+    const parsed = JSON.parse(json) as { coworldSlot?: unknown };
+    return parsed.coworldSlot === subjectSeat ? [json] : [];
+  });
+  if (gameEvidence.length === 0) {
+    throw new Error("game-owned Commander XP evidence is missing");
+  }
+  return `${gameEvidence.join("\n")}\n`;
 }
 
 export function commanderXpReplayEvidenceProjection(
