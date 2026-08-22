@@ -114,55 +114,37 @@ describe("StrategicCommander Stage 5 matched three-arm gate", () => {
     );
   });
 
-  it("uses the production numeric social flags and fails before any run when either is enabled", async () => {
+  it("uses isolated environments for the production numeric social flags", async () => {
     const names = [
       "PROXYWAR_TUNE_STRUCTURED_DEALS",
       "PROXYWAR_TUNE_FREETEXT_MESSAGES",
     ] as const;
-    const original = Object.fromEntries(
-      names.map((name) => [name, process.env[name]]),
-    );
     const providerFactory = vi.mocked(createClaudeCliLlmProviderFromEnv);
     providerFactory.mockClear();
-    try {
-      for (const name of names) {
-        for (const value of ["1", "2", "1.5", "1e3"]) {
-          delete process.env[names[0]];
-          delete process.env[names[1]];
-          process.env[name] = value;
-          const flags = commanderSocialExperimentFlags();
-          expect(
-            name === names[0] ? flags.structuredDeals : flags.freeTextMessages,
-            `${name}=${value}`,
-          ).toBe(true);
-          await expect(
-            runCommanderArmGate({
-              providerMode: "claude-cli",
-              runs: 2,
-              requireWinner: true,
-              sourceTreeDirty: false,
-              writeReport: false,
-            }),
-          ).rejects.toThrow(
-            "Commander arm gate requires social experiment flags OFF",
-          );
-        }
-        for (const value of [undefined, "0", "-1"]) {
-          delete process.env[names[0]];
-          delete process.env[names[1]];
-          if (value !== undefined) process.env[name] = value;
-          const flags = commanderSocialExperimentFlags();
-          expect(
-            name === names[0] ? flags.structuredDeals : flags.freeTextMessages,
-            `${name}=${String(value)}`,
-          ).toBe(false);
-        }
+    for (const name of names) {
+      for (const value of ["1", "2", "1.5", "1e3"]) {
+        const flags = commanderSocialExperimentFlags({ [name]: value });
+        expect(
+          name === names[0] ? flags.structuredDeals : flags.freeTextMessages,
+          `${name}=${value}`,
+        ).toBe(true);
+        await expect(
+          runCommanderArmGate({
+            providerMode: "scripted",
+            writeReport: false,
+            verificationHooks: { resolveSocialFlags: () => flags },
+          }),
+        ).rejects.toThrow(
+          "Commander arm gate requires social experiment flags OFF",
+        );
       }
-    } finally {
-      for (const name of names) {
-        const value = original[name];
-        if (value === undefined) delete process.env[name];
-        else process.env[name] = value;
+      for (const value of [undefined, "0", "-1"]) {
+        const env = value === undefined ? {} : { [name]: value };
+        const flags = commanderSocialExperimentFlags(env);
+        expect(
+          name === names[0] ? flags.structuredDeals : flags.freeTextMessages,
+          `${name}=${String(value)}`,
+        ).toBe(false);
       }
     }
     expect(providerFactory).not.toHaveBeenCalled();

@@ -3,10 +3,6 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  freeTextMessagesEnabled,
-  structuredDealsEnabled,
-} from "../server/agents/AgentTunables";
 import { ClaudeCliLlmProvider } from "../server/agents/ClaudeCliLlmProvider";
 import {
   commanderArmTripletPathSegment,
@@ -94,6 +90,10 @@ export interface CommanderArmGateOptions {
     }) => void | Promise<void>;
     captureSourceIdentity?: () => Promise<CommanderSourceIdentity>;
     resolveRuntime?: () => ResolvedCommanderRuntime;
+    resolveSocialFlags?: () => Pick<
+      CommanderExperimentFlags,
+      "structuredDeals" | "freeTextMessages"
+    >;
   };
 }
 
@@ -149,7 +149,10 @@ export async function runCommanderArmGate(
   }
   const sourceRoot = commanderGateSourceRoot();
   assertCommanderGateSourceRoot(process.cwd(), sourceRoot);
-  const socialFlags = assertSocialExperimentFlagsOff();
+  const socialFlags = assertSocialExperimentFlagsOff(
+    options.verificationHooks?.resolveSocialFlags?.() ??
+      commanderSocialExperimentFlags(),
+  );
   const baseSeed = options.seed ?? COMMANDER_LOCAL_SMOKE_DEFAULT_SEED;
   const baseRunID = options.runID ?? COMMANDER_LOCAL_SMOKE_DEFAULT_RUN_ID;
   if (providerMode === "scripted" && protocol !== "plumbing") {
@@ -995,25 +998,37 @@ function assertExpectedArmManifests(
   }
 }
 
-export function commanderSocialExperimentFlags(): Pick<
+export function commanderSocialExperimentFlags(
+  env: NodeJS.ProcessEnv = process.env,
+): Pick<
   CommanderExperimentFlags,
   "structuredDeals" | "freeTextMessages"
 > {
   return {
-    structuredDeals: structuredDealsEnabled(),
-    freeTextMessages: freeTextMessagesEnabled(),
+    structuredDeals: numericFlag(env.PROXYWAR_TUNE_STRUCTURED_DEALS),
+    freeTextMessages: numericFlag(env.PROXYWAR_TUNE_FREETEXT_MESSAGES),
   };
 }
 
-function assertSocialExperimentFlagsOff(): Pick<
+function assertSocialExperimentFlagsOff(
+  flags: Pick<
+    CommanderExperimentFlags,
+    "structuredDeals" | "freeTextMessages"
+  >,
+): Pick<
   CommanderExperimentFlags,
   "structuredDeals" | "freeTextMessages"
 > {
-  const flags = commanderSocialExperimentFlags();
   if (flags.structuredDeals || flags.freeTextMessages) {
     throw new Error("Commander arm gate requires social experiment flags OFF");
   }
   return flags;
+}
+
+function numericFlag(raw: string | undefined): boolean {
+  if (raw === undefined || raw.trim() === "") return false;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 1;
 }
 
 function boundedPositive(value: number, label: string): number {
