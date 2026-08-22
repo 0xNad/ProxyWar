@@ -110,6 +110,13 @@ function stripSpatialAdditions(parsed: AgentObservation): AgentObservation {
   return parsed;
 }
 
+function promptObservation(prompt: string): Record<string, unknown> {
+  const lines = prompt.split("\n");
+  const marker = lines.indexOf("OBSERVATION_JSON:");
+  expect(marker).toBeGreaterThanOrEqual(0);
+  return JSON.parse(lines[marker + 1]) as Record<string, unknown>;
+}
+
 describe("spatial observation flags", () => {
   afterEach(() => {
     delete process.env[SPATIAL_FLAG];
@@ -172,6 +179,36 @@ describe("spatial observation flags", () => {
         legalActions: HOLD_ACTIONS,
       }),
     ).toBe(baseline);
+  });
+
+  it("fails closed on unknown spatial provenance in the in-server prompt", async () => {
+    process.env[SPATIAL_FLAG] = "1";
+    process.env[MINIMAP_FLAG] = "1";
+    const observation = observe(await shapedGame());
+    expect(observation.spatial).toBeDefined();
+    (observation.spatial as { visibilityModel?: string }).visibilityModel =
+      "private-fog-bypass";
+
+    const view = promptObservation(
+      new LlmPromptBuilder().build({
+        observation,
+        legalActions: HOLD_ACTIONS,
+      }),
+    ) as {
+      spatial?: unknown;
+      visiblePlayers: Array<Record<string, unknown>>;
+      notes: string[];
+    };
+    expect(view.spatial).toBeUndefined();
+    for (const rival of view.visiblePlayers) {
+      expect(rival).not.toHaveProperty("bearing");
+      expect(rival).not.toHaveProperty("distanceClass");
+      expect(rival).not.toHaveProperty("borderWithYou");
+      expect(rival).not.toHaveProperty("bordersWith");
+    }
+    expect(
+      view.notes.some((note) => note.startsWith(SPATIAL_NOTE_PREFIX)),
+    ).toBe(false);
   });
 
   it("adds only the spatial block, rival fields, and bounded notes in Stage 1", async () => {

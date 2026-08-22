@@ -7,6 +7,10 @@ import {
   profilePlaybook,
 } from "./AgentPlaybook";
 import {
+  SPATIAL_NOTE_PREFIX,
+  SPATIAL_VISIBILITY_MODEL,
+} from "./AgentSpatialObservation";
+import {
   FREETEXT_MESSAGE_MAX_CHARS,
   inhouseSocialPromptEnabled,
 } from "./AgentTunables";
@@ -202,6 +206,9 @@ export class LlmPromptBuilder {
     observation: AgentObservation,
     includeDeals: boolean,
   ) {
+    const spatialAccepted =
+      observation.spatial?.schemaVersion === 1 &&
+      observation.spatial.visibilityModel === SPATIAL_VISIBILITY_MODEL;
     return {
       agentID: observation.agentID,
       username: sanitizeUntrustedDisplayString(observation.username),
@@ -212,7 +219,7 @@ export class LlmPromptBuilder {
       tick: observation.tick,
       ownState: observation.ownState,
       spatial:
-        observation.spatial === undefined
+        !spatialAccepted || observation.spatial === undefined
           ? undefined
           : {
               schemaVersion: observation.spatial.schemaVersion,
@@ -248,10 +255,14 @@ export class LlmPromptBuilder {
         isAllied: player.isAllied,
         isFriendly: player.isFriendly,
         relation: player.relation,
-        bearing: player.bearing,
-        distanceClass: player.distanceClass,
-        borderWithYou: player.borderWithYou,
-        bordersWith: player.bordersWith,
+        ...(spatialAccepted
+          ? {
+              bearing: player.bearing,
+              distanceClass: player.distanceClass,
+              borderWithYou: player.borderWithYou,
+              bordersWith: player.bordersWith,
+            }
+          : {}),
         // Rival-rival coalition edge so the Commander can see a 3v1 forming.
         alliedWithVisibleIds: player.alliedWithVisibleIds,
         canAttack: player.canAttack,
@@ -293,9 +304,11 @@ export class LlmPromptBuilder {
       recentDecisions: observation.recentDecisions,
       // Notes are our own sentences but interpolate rival names — strip any carried
       // control/zero-width bytes without truncating the sentence meaning.
-      notes: observation.notes.map((note) =>
-        sanitizeUntrustedDisplayString(note, 240),
-      ),
+      notes: observation.notes
+        .filter(
+          (note) => spatialAccepted || !note.startsWith(SPATIAL_NOTE_PREFIX),
+        )
+        .map((note) => sanitizeUntrustedDisplayString(note, 240)),
     };
   }
 }
