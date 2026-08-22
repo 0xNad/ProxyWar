@@ -339,7 +339,7 @@ export class ReplayPremiereAdmissionCatalog {
           path.join(this.entriesRoot, entry.name),
           this.limits.maxEntryBytes,
         );
-        const record = parseAdmissionRecord(read);
+        const record = parseReplayPremiereAdmissionRecord(read);
         if (record.premiereId !== expectedPremiereId) {
           throw catalogIntegrity("catalog_filename_premiere_mismatch");
         }
@@ -1033,7 +1033,7 @@ async function createAdmissionRecord(
   );
 }
 
-function parseAdmissionRecord(
+export function parseReplayPremiereAdmissionRecord(
   bytes: Uint8Array,
 ): ReplayPremiereAdmissionRecordV1 {
   let value: unknown;
@@ -1105,6 +1105,64 @@ function parseAdmissionRecord(
   validateReplayPremiereLeakAuditCollectorLimits(record.collectorLimits);
   assertReplayPremiereJsonValue(record, "replay premiere admission record");
   return immutable(record, "parsed replay premiere admission record");
+}
+
+/**
+ * Reads one immutable admission without acquiring the catalog writer lock.
+ * The entry is content/hash validated from an already-open, no-follow handle;
+ * this is used by private cross-process coordination after admission has
+ * committed and never authorizes a catalog mutation.
+ */
+export async function readReplayPremiereAdmissionRecord(options: {
+  privateStateRoot: string;
+  premiereId: string;
+  maxEntryBytes?: number;
+}): Promise<ReplayPremiereAdmissionRecordV1 | null> {
+  if (!isPremiereId(options.premiereId)) {
+    throw catalogIntegrity("catalog_entry_invalid_premiere_id");
+  }
+  const maxEntryBytes =
+    options.maxEntryBytes ??
+    DEFAULT_REPLAY_PREMIERE_CATALOG_LIMITS.maxEntryBytes;
+  if (
+    !Number.isSafeInteger(maxEntryBytes) ||
+    maxEntryBytes <= 0 ||
+    maxEntryBytes > DEFAULT_REPLAY_PREMIERE_CATALOG_LIMITS.maxEntryBytes
+  ) {
+    throw catalogCapacity("catalog_entry_read_limit_invalid");
+  }
+  const entryPath = path.join(
+    path.resolve(options.privateStateRoot),
+    CATALOG_DIRECTORY,
+    ENTRY_DIRECTORY,
+    `${options.premiereId}${ENTRY_SUFFIX}`,
+  );
+  let handle: Awaited<ReturnType<typeof fs.open>>;
+  try {
+    handle = await fs.open(
+      entryPath,
+      constants.O_RDONLY | constants.O_NOFOLLOW,
+    );
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) return null;
+    throw error;
+  }
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw catalogIntegrity("catalog_entry_not_regular_file");
+    }
+    if (stat.size <= 0 || stat.size > maxEntryBytes) {
+      throw catalogCapacity("catalog_entry_size_invalid");
+    }
+    const record = parseReplayPremiereAdmissionRecord(await handle.readFile());
+    if (record.premiereId !== options.premiereId) {
+      throw catalogIntegrity("catalog_entry_filename_identity_mismatch");
+    }
+    return record;
+  } finally {
+    await handle.close();
+  }
 }
 
 function validateSourceRecord(value: ReplayPremiereAdmissionSourceV1): void {
@@ -1681,7 +1739,7 @@ async function readCheckpointProjectionAdmissionBinding(options: {
     return { state: "uncertain" };
   }
   try {
-    const record = parseAdmissionRecord(bytes);
+    const record = parseReplayPremiereAdmissionRecord(bytes);
     if (record.premiereId !== options.premiereId) {
       return { state: "uncertain" };
     }

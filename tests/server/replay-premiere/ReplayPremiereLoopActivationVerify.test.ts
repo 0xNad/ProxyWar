@@ -5,6 +5,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  realpath,
   rm,
   stat,
   writeFile,
@@ -15,10 +16,14 @@ import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   activateHold,
+  assertForeignPremiereGateUnchanged,
+  claimRound,
   compactJournalIfNeeded,
   createJournalWriter,
+  foreignRegisteredPremiereGate,
   persistRetainedAdmissionTransaction,
   progressHold,
+  readTerminalTombstoneBackfillJournal,
   runLoopReplayPremiereAdmission,
   trackHold,
   type IngestMaterials,
@@ -26,7 +31,14 @@ import {
   type LoopConfig,
   type RetainedAdmissionTransaction,
 } from "../../../src/scripts/replay-premiere-loop";
+import type { ReplayPremiereAdmissionRecordV1 } from "../../../src/server/replay-premiere/ReplayPremiereCatalog";
+import {
+  createReplayPremiereServerStartupIdentity,
+  writeReplayPremiereStartupSelection,
+  type ReplayPremiereStartupSelectionReceiptV1,
+} from "../../../src/server/replay-premiere/ReplayPremiereCoordination";
 import { ReplayPremiereError } from "../../../src/server/replay-premiere/ReplayPremiereErrors";
+import { ReplayPremiereEventStore } from "../../../src/server/replay-premiere/ReplayPremiereEventStore";
 import {
   PREMIERE_LOOP_ACTIVATION_BACKOFF_MS,
   PREMIERE_LOOP_ACTIVATION_VERIFY_MS,
@@ -39,9 +51,13 @@ import {
   type LoopHoldState,
   type LoopJournalRecord,
   type LoopReleaseOutcome,
+  type LoopReplayRow,
+  type LoopRound,
   type LoopRoundRef,
   type LoopSkipReason,
 } from "../../../src/server/replay-premiere/ReplayPremiereLoopCore";
+import { DEFAULT_REPLAY_PREMIERE_EVENT_STORE_LIMITS } from "../../../src/server/replay-premiere/ReplayPremiereStartup";
+import { AMPLE_DISK } from "./ReplayPremiereFixtures";
 
 /**
  * The activation-zombie fix (2026-07-22, round 644 / prem_105c…): a controlled
@@ -65,6 +81,8 @@ let stateDir: string;
 interface JournalCapture {
   writer: JournalWriter;
   holdUpdates: LoopHoldState[];
+  skipped: { ref: LoopRoundRef; reason: LoopSkipReason }[];
+  decisions: Record<string, unknown>[];
   released: {
     hold: LoopHoldState;
     outcome: LoopReleaseOutcome;
@@ -74,6 +92,8 @@ interface JournalCapture {
 
 function captureJournal(): JournalCapture {
   const holdUpdates: LoopHoldState[] = [];
+  const skipped: JournalCapture["skipped"] = [];
+  const decisions: Record<string, unknown>[] = [];
   const released: JournalCapture["released"] = [];
   const writer: JournalWriter = {
     async appendHoldUpdate(hold: LoopHoldState) {
@@ -86,10 +106,14 @@ function captureJournal(): JournalCapture {
     ) {
       released.push({ hold, outcome, terminal });
     },
-    async appendRoundSkipped(_ref: LoopRoundRef, _reason: LoopSkipReason) {},
-    async appendDecision(_decision: Record<string, unknown>) {},
+    async appendRoundSkipped(ref: LoopRoundRef, reason: LoopSkipReason) {
+      skipped.push({ ref, reason });
+    },
+    async appendDecision(decision: Record<string, unknown>) {
+      decisions.push(decision);
+    },
   };
-  return { writer, holdUpdates, released };
+  return { writer, holdUpdates, skipped, decisions, released };
 }
 
 function config(): LoopConfig {
@@ -133,6 +157,349 @@ function hold(overrides: Partial<LoopHoldState> = {}): LoopHoldState {
     reactivationAttempts: 0,
     createdAt: NOW.toISOString(),
     ...overrides,
+  };
+}
+
+describe("foreign registered Premiere claim exclusion", () => {
+  test("404 blocks without exact archive proof and clears only with it", async () => {
+    const receipt = selectionReceipt();
+    const readSelection = vi.fn(async () => receipt);
+    await expect(
+      foreignRegisteredPremiereGate(config(), {
+        readSelection,
+        readState: async () => null,
+        readArchivePointer: async () => null,
+      }),
+    ).rejects.toThrow("absent without archive proof");
+
+    const clear = await foreignRegisteredPremiereGate(config(), {
+      readSelection,
+      readState: async () => null,
+      readAdmission: async () => null,
+      readArchivePointer: async ({ premiereId }) => ({
+        schemaVersion: 1,
+        premiereId,
+        sourceRunId: "source_run_1",
+        sourceKind: "rated_coworld",
+        terminalState: "cancelled",
+        revealedAt: null,
+        publicationCommitmentHash: "b".repeat(64),
+        sourceReplaySha256: "c".repeat(64),
+        summaryHash: "d".repeat(64),
+        summaryRelPath: `summaries/${premiereId}.summary.json`,
+        reclaimedAt: "2026-08-22T07:01:00.000Z",
+      }),
+    });
+    expect(clear.busyPremiereIds).toEqual([]);
+  });
+
+  test("404 archive proof must bind the selected admission hash and source", async () => {
+    const receipt = selectionReceipt();
+    const pointer = {
+      schemaVersion: 1 as const,
+      premiereId: receipt.selected[0].premiereId,
+      sourceRunId: "source_run_1",
+      sourceKind: "rated_coworld" as const,
+      terminalState: "cancelled" as const,
+      revealedAt: null,
+      publicationCommitmentHash: "b".repeat(64),
+      sourceReplaySha256: "c".repeat(64),
+      summaryHash: "d".repeat(64),
+      summaryRelPath: `summaries/${receipt.selected[0].premiereId}.summary.json`,
+      reclaimedAt: "2026-08-22T07:01:00.000Z",
+    };
+    const admission = {
+      recordHash: receipt.selected[0].admissionRecordHash,
+      eligibilityRecord: {
+        sourceKind: "rated_coworld",
+        sourceRunId: pointer.sourceRunId,
+      },
+      stagedSource: { sourceReplaySha256: pointer.sourceReplaySha256 },
+    } as unknown as ReplayPremiereAdmissionRecordV1;
+    const dependencies = {
+      readSelection: async () => receipt,
+      readState: async () => null,
+      readArchivePointer: async () => pointer,
+    };
+
+    await expect(
+      foreignRegisteredPremiereGate(config(), {
+        ...dependencies,
+        readAdmission: async () => ({
+          ...admission,
+          recordHash: "e".repeat(64),
+        }),
+      }),
+    ).rejects.toThrow("does not bind selected admission");
+    await expect(
+      foreignRegisteredPremiereGate(config(), {
+        ...dependencies,
+        readAdmission: async () => admission,
+      }),
+    ).resolves.toMatchObject({ busyPremiereIds: [] });
+  });
+
+  test("nonterminal manifests block while terminal manifests clear", async () => {
+    const receipt = selectionReceipt();
+    const dependencies = { readSelection: async () => receipt };
+    await expect(
+      foreignRegisteredPremiereGate(config(), {
+        ...dependencies,
+        readState: async () => "playing",
+      }),
+    ).resolves.toMatchObject({
+      busyPremiereIds: [receipt.selected[0].premiereId],
+    });
+    await expect(
+      foreignRegisteredPremiereGate(config(), {
+        ...dependencies,
+        readState: async () => "revealed",
+      }),
+    ).resolves.toMatchObject({ busyPremiereIds: [] });
+  });
+
+  test("receipt replacement during probes or immediately before commit fails closed", async () => {
+    const first = selectionReceipt();
+    const replacement = selectionReceipt(
+      "00000000-0000-4000-8000-000000000099",
+    );
+    let reads = 0;
+    await expect(
+      foreignRegisteredPremiereGate(config(), {
+        readSelection: async () => (reads++ === 0 ? first : replacement),
+        readState: async () => "revealed",
+      }),
+    ).rejects.toThrow("changed during manifest probes");
+
+    const gate = await foreignRegisteredPremiereGate(config(), {
+      readSelection: async () => first,
+      readState: async () => "revealed",
+    });
+    await expect(
+      assertForeignPremiereGateUnchanged(
+        config(),
+        gate,
+        async () => replacement,
+      ),
+    ).rejects.toThrow("changed before claim commit");
+  });
+
+  test("receipt replacement after candidate preparation leaves every round unconsumed and removes scratch", async () => {
+    const loopConfig = config();
+    await mkdir(loopConfig.privateStateRoot, { recursive: true });
+    loopConfig.privateStateRoot = await realpath(loopConfig.privateStateRoot);
+    await Promise.all(
+      loopConfig.servedRoots.map((root) => mkdir(root, { recursive: true })),
+    );
+    const store = await ReplayPremiereEventStore.open({
+      privateStateRoot: loopConfig.privateStateRoot,
+      servedRoots: loopConfig.servedRoots,
+      limits: DEFAULT_REPLAY_PREMIERE_EVENT_STORE_LIMITS,
+      statfs: AMPLE_DISK,
+    });
+    try {
+      const server = await createReplayPremiereServerStartupIdentity({
+        privateStateRoot: loopConfig.privateStateRoot,
+      });
+      await writeReplayPremiereStartupSelection({
+        privateStateRoot: loopConfig.privateStateRoot,
+        phase: "ready",
+        server,
+        selected: [],
+        registeredPremiereIds: [],
+      });
+      const gate = await foreignRegisteredPremiereGate(loopConfig);
+      expect(gate.busyPremiereIds).toEqual([]);
+
+      const currentRound: LoopRound = {
+        id: "round_1927",
+        roundNumber: 1927,
+        status: "completed",
+        completedAt: "2026-08-22T08:00:00.000Z",
+      };
+      const supersededRound: LoopRoundRef = {
+        id: "round_1926",
+        roundNumber: 1926,
+      };
+      const episodeRequestId = "ereq_00000000-0000-4000-8000-000000001927";
+      const replay: LoopReplayRow = {
+        episodeRequestId,
+        roundId: currentRound.id,
+        status: "completed",
+        completedAt: "2026-08-22T08:00:00.000Z",
+        replayUrl: "https://example.invalid/1927.replay",
+        variantName: "Tournament 12P - World",
+      };
+      const rawRow = { id: episodeRequestId, coworld_name: "proxywar" };
+      const replayBytes = Buffer.from(
+        JSON.stringify({
+          runID: "coworld-2026-08-22T08-00-00-000Z-race1927",
+          inlineRunArtifacts: {
+            "game-record.json": JSON.stringify({
+              info: {
+                num_turns: 17_000,
+                players: Array.from({ length: 12 }, (_, index) => ({ index })),
+                config: {
+                  gameMap: "World",
+                  gameMapSize: "Medium",
+                  difficulty: "Normal",
+                },
+              },
+            }),
+          },
+        }),
+        "utf8",
+      );
+      const journal = captureJournal();
+      const pin = vi.fn(async () => undefined);
+      const writeContract = vi.fn(async () => undefined);
+      const prune = vi.fn(async () => undefined);
+      const stageDivision = vi.fn(async () =>
+        path.join(loopConfig.ingestScratchDir, "divisions.json"),
+      );
+      const progress = vi.fn(async () => undefined);
+
+      await claimRound(
+        currentRound,
+        loopConfig,
+        journal.writer,
+        NOW,
+        { gate, supersededRoundIds: [supersededRound] },
+        {
+          fetchDivisionReplays: async () => ({
+            rows: [replay],
+            rawById: new Map([[episodeRequestId, rawRow]]),
+          }),
+          hasStorageFloor: async () => true,
+          downloadRawReplay: async (_url, destinationPath) => {
+            await mkdir(path.dirname(destinationPath), { recursive: true });
+            await writeFile(destinationPath, replayBytes);
+          },
+          isEpisodeAlreadyPublic: async () => false,
+          beforeClaimCommit: async ({ selectedRawReplayPath }) => {
+            expect(selectedRawReplayPath).not.toBeNull();
+            expect((await stat(selectedRawReplayPath ?? "")).isFile()).toBe(
+              true,
+            );
+            await writeReplayPremiereStartupSelection({
+              privateStateRoot: loopConfig.privateStateRoot,
+              phase: "ready",
+              server,
+              selected: [
+                {
+                  premiereId: "prem_1111111111111111",
+                  admissionRecordHash: "b".repeat(64),
+                  projectionState: "playing",
+                },
+                {
+                  premiereId: "prem_2222222222222222",
+                  admissionRecordHash: "c".repeat(64),
+                  projectionState: "checkpoint",
+                },
+              ],
+              registeredPremiereIds: [
+                "prem_1111111111111111",
+                "prem_2222222222222222",
+              ],
+            });
+          },
+          pruneRawReplayCache: prune,
+          pinHoldArtifacts: pin,
+          writeContractForHold: writeContract,
+          stageDivisionFile: stageDivision,
+          progressHold: progress,
+        },
+      );
+
+      expect(journal.skipped).toEqual([]);
+      expect(journal.holdUpdates).toEqual([]);
+      expect(journal.released).toEqual([]);
+      expect(journal.decisions).toEqual([
+        expect.objectContaining({
+          decision: "claim_blocked_coordination_changed",
+        }),
+      ]);
+      expect(
+        journal.decisions.some((decision) => decision.decision === "claim"),
+      ).toBe(false);
+      expect(prune).not.toHaveBeenCalled();
+      expect(pin).not.toHaveBeenCalled();
+      expect(writeContract).not.toHaveBeenCalled();
+      expect(stageDivision).not.toHaveBeenCalled();
+      expect(progress).not.toHaveBeenCalled();
+      expect(await readdir(loopConfig.ingestScratchDir)).toEqual([]);
+      await expect(stat(loopConfig.pinManifestPath)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      await expect(stat(loopConfig.contractPath)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      await store.close();
+    }
+  });
+
+  test("selected nonterminal target missing from ready registration fails closed", async () => {
+    const incomplete = {
+      ...selectionReceipt(),
+      registeredPremiereIds: [],
+    };
+
+    await expect(
+      foreignRegisteredPremiereGate(config(), {
+        readSelection: async () => incomplete,
+        readState: async () => "playing",
+      }),
+    ).rejects.toThrow();
+  });
+
+  test("unregistered terminal fallback is receipt-proven and does not block a new claim", async () => {
+    const terminal = {
+      ...selectionReceipt(),
+      selected: [
+        {
+          ...selectionReceipt().selected[0],
+          projectionState: "revealed" as const,
+        },
+      ],
+      registeredPremiereIds: [],
+    };
+    const readState = vi.fn();
+
+    await expect(
+      foreignRegisteredPremiereGate(config(), {
+        readSelection: async () => terminal,
+        readState,
+      }),
+    ).resolves.toMatchObject({ busyPremiereIds: [] });
+    expect(readState).not.toHaveBeenCalled();
+  });
+});
+
+function selectionReceipt(
+  startupId = "00000000-0000-4000-8000-000000000002",
+): ReplayPremiereStartupSelectionReceiptV1 {
+  const premiereId = "prem_0123456789abcdef";
+  return {
+    schemaVersion: 1,
+    kind: "replay_premiere_startup_selection_v1",
+    phase: "ready",
+    server: {
+      pid: process.pid,
+      writerId: "00000000-0000-4000-8000-000000000001",
+      writerAcquiredAt: "2026-08-22T07:00:00.000Z",
+      startupId,
+      startupStartedAt: "2026-08-22T07:00:01.000Z",
+    },
+    selected: [
+      {
+        premiereId,
+        admissionRecordHash: "a".repeat(64),
+        projectionState: "playing",
+      },
+    ],
+    registeredPremiereIds: [premiereId],
+    writtenAt: "2026-08-22T07:00:02.000Z",
   };
 }
 
@@ -294,6 +661,49 @@ describe("private journal compaction durability", () => {
     expect(await compactionTemporaryNames(loopConfig)).toEqual([]);
   });
 
+  test("never splits a terminal release from the exact hold phase required by strict backfill", async () => {
+    const loopConfig = config();
+    const activated = hold({ phase: "activated" });
+    const skipped = (index: number): LoopJournalRecord => ({
+      kind: "round_skipped",
+      ts: NOW.toISOString(),
+      roundId: `round_boundary_${index}`,
+      roundNumber: index,
+      reason: "skipped_busy",
+    });
+    const records: LoopJournalRecord[] = [
+      ...Array.from({ length: 3_001 }, (_value, index) => skipped(index)),
+      { kind: "hold_update", ts: NOW.toISOString(), hold: activated },
+      {
+        kind: "hold_released",
+        ts: new Date(NOW.getTime() + 1_000).toISOString(),
+        episodeRequestId: activated.episodeRequestId,
+        premiereId: activated.premiereId,
+        roundId: activated.roundId,
+        outcome: "activation_lost",
+        terminal: true,
+      },
+      ...Array.from({ length: 1_999 }, (_value, index) =>
+        skipped(4_000 + index),
+      ),
+    ];
+    await writeFile(loopConfig.journalPath, serializeJournal(records), {
+      mode: 0o600,
+    });
+
+    const compacted = await compactJournalIfNeeded(loopConfig, records);
+
+    expect(compacted.slice(0, 2)).toEqual([
+      { kind: "hold_update", ts: NOW.toISOString(), hold: activated },
+      expect.objectContaining({
+        kind: "hold_released",
+        episodeRequestId: activated.episodeRequestId,
+        outcome: "activation_lost",
+      }),
+    ]);
+    expect(compacted).toHaveLength(2_001);
+  });
+
   test.each([
     "after_archive_sync",
     "after_temporary_write",
@@ -387,6 +797,88 @@ describe("private journal compaction durability", () => {
     ]);
     expect(await readFile(loopConfig.journalPath, "utf8")).toBe(original);
     expect(await compactionTemporaryNames(loopConfig)).toEqual([]);
+  });
+});
+
+describe("terminal tombstone backfill journal", () => {
+  test("reads archive before active and collapses only exact split duplicates", async () => {
+    const loopConfig = config();
+    const activated = hold({ phase: "activated" });
+    const holdUpdate = {
+      kind: "hold_update",
+      ts: NOW.toISOString(),
+      hold: activated,
+    } satisfies LoopJournalRecord;
+    const release = {
+      kind: "hold_released",
+      ts: new Date(NOW.getTime() + 1_000).toISOString(),
+      episodeRequestId: activated.episodeRequestId,
+      premiereId: activated.premiereId,
+      roundId: activated.roundId,
+      outcome: "activation_lost",
+      terminal: true,
+    } satisfies LoopJournalRecord;
+    const archived = {
+      kind: "round_skipped",
+      ts: NOW.toISOString(),
+      roundId: "round_archived",
+      roundNumber: 643,
+      reason: "skipped_busy",
+    } satisfies LoopJournalRecord;
+    await Promise.all([
+      writeFile(
+        path.join(loopConfig.loopStateDir, "journal.archive.jsonl"),
+        serializeJournal([archived, holdUpdate]),
+        { mode: 0o600 },
+      ),
+      writeFile(
+        loopConfig.journalPath,
+        serializeJournal([holdUpdate, release]),
+        { mode: 0o600 },
+      ),
+    ]);
+
+    const journal = await readTerminalTombstoneBackfillJournal(loopConfig);
+
+    expect(journal.records).toEqual([archived, holdUpdate, release]);
+    expect(journal.exactDuplicateCount).toBe(1);
+    expect(
+      journal.sources.map(({ kind, recordCount }) => ({ kind, recordCount })),
+    ).toEqual([
+      { kind: "archive", recordCount: 2 },
+      { kind: "active", recordCount: 2 },
+    ]);
+    expect(
+      journal.sources.every(({ sha256 }) => /^[a-f0-9]{64}$/.test(sha256)),
+    ).toBe(true);
+  });
+
+  test("rejects malformed persisted lines but tolerates one torn active tail", async () => {
+    const loopConfig = config();
+    const valid = JSON.stringify({ kind: "decision", ts: NOW.toISOString() });
+    await writeFile(
+      loopConfig.journalPath,
+      `${valid}\n{malformed}\n${valid}\n`,
+      { mode: 0o600 },
+    );
+    await expect(
+      readTerminalTombstoneBackfillJournal(loopConfig),
+    ).rejects.toThrow("active journal has malformed line 2");
+
+    await writeFile(loopConfig.journalPath, `${valid}\n{"kind"`, {
+      mode: 0o600,
+    });
+    const journal = await readTerminalTombstoneBackfillJournal(loopConfig);
+    expect(journal.records).toEqual([JSON.parse(valid)]);
+    expect(journal.sources).toEqual([
+      expect.objectContaining({ kind: "active", recordCount: 1 }),
+    ]);
+  });
+
+  test("refuses to report success when both retained journal segments are missing", async () => {
+    await expect(
+      readTerminalTombstoneBackfillJournal(config()),
+    ).rejects.toThrow("terminal backfill journal is missing");
   });
 });
 
@@ -929,6 +1421,7 @@ describe("trackHold — post-activation registration verification", () => {
       journal.writer,
       NOW,
       restart,
+      async () => null,
     );
     expect(restart).not.toHaveBeenCalled();
     expect(journal.released).toHaveLength(0);
@@ -950,6 +1443,7 @@ describe("trackHold — post-activation registration verification", () => {
       journal.writer,
       NOW,
       restart,
+      async () => null,
     );
     expect(restart).toHaveBeenCalledTimes(1);
     expect(journal.released).toHaveLength(0);
@@ -972,6 +1466,7 @@ describe("trackHold — post-activation registration verification", () => {
       journal.writer,
       NOW,
       restart,
+      async () => null,
     );
     expect(restart).toHaveBeenCalledTimes(1);
     expect(journal.released).toHaveLength(1);
@@ -998,6 +1493,7 @@ describe("trackHold — post-activation registration verification", () => {
       journal.writer,
       NOW,
       restart,
+      async () => null,
     );
     expect(restart).not.toHaveBeenCalled();
     expect(journal.released).toHaveLength(1);
@@ -1019,6 +1515,7 @@ describe("trackHold — post-activation registration verification", () => {
       journal.writer,
       NOW,
       restart,
+      async () => null,
     );
     expect(restart).not.toHaveBeenCalled();
     expect(journal.released).toHaveLength(0);
@@ -1110,11 +1607,40 @@ describe("activateHold — helper-refusal backoff (2026-07-22 round-649 outage)"
       journal.writer,
       NOW,
       restart,
+      async () => null,
     );
     expect(restart).toHaveBeenCalledTimes(1);
     expect(result.kind).toBe("released");
     expect(journal.released).toHaveLength(1);
     expect(journal.released[0].outcome).toBe("activation_refused");
     expect(journal.released[0].terminal).toBe(true);
+  });
+
+  test("terminal release aborts before journal release when tombstone persistence fails", async () => {
+    stubPremiereState(null);
+    const journal = captureJournal();
+    const restart = vi.fn(async () => false);
+    const persistRetirement = vi.fn(async () => {
+      throw new Error("injected tombstone durability failure");
+    });
+    const nearCeiling = hold({
+      phase: "admitted",
+      activatedAt: null,
+      activationAttempts: PREMIERE_LOOP_MAX_ACTIVATION_ATTEMPTS - 1,
+      activationBackoffUntil: new Date(NOW.getTime() - 1_000).toISOString(),
+    });
+
+    await expect(
+      activateHold(
+        nearCeiling,
+        config(),
+        journal.writer,
+        NOW,
+        restart,
+        persistRetirement,
+      ),
+    ).rejects.toThrow("injected tombstone durability failure");
+    expect(persistRetirement).toHaveBeenCalledTimes(1);
+    expect(journal.released).toEqual([]);
   });
 });

@@ -21,9 +21,20 @@ import {
   buildProxyWarDemoServerUrls,
   loadProxyWarDemoServerNetworkConfig,
 } from "../server/agents/ProxyWarDemoServerConfig";
+import { readReplayPremiereArchivePointer } from "../server/replay-premiere/ReplayPremiereArchiveIndex";
+import { readReplayPremiereAdmissionRecord } from "../server/replay-premiere/ReplayPremiereCatalog";
 import { PREMIERE_REAL_TURN_INTERVAL_MS } from "../server/replay-premiere/ReplayPremiereContracts";
+import {
+  backfillReplayPremiereTerminalTombstones,
+  backfillReplayPremiereTerminalTombstonesDetailed,
+  persistReplayPremiereTerminalTombstone,
+  readActiveReplayPremiereStartupSelection,
+  replayPremiereStartupSelectionFingerprint,
+  type ReplayPremiereStartupSelectionReceiptV1,
+} from "../server/replay-premiere/ReplayPremiereCoordination";
 import { formatReplayPremiereErrorCauseChain } from "../server/replay-premiere/ReplayPremiereErrorTelemetry";
 import { ReplayPremiereError } from "../server/replay-premiere/ReplayPremiereErrors";
+import { sha256Hex } from "../server/replay-premiere/ReplayPremiereIntegrity";
 import {
   PREMIERE_LOOP_ACTIVATION_BACKOFF_MS,
   PREMIERE_LOOP_ADMISSION_PROJECTION_TIMEOUT_MS,
@@ -106,6 +117,8 @@ const GIB = 1024 * 1024 * 1024;
 const MIB = 1024 * 1024;
 const MAX_REPLAY_BYTES = 256 * MIB;
 const COWORLD_READ_VERBS = new Set(["rounds", "replays", "divisions"]);
+const MAX_TERMINAL_BACKFILL_JOURNAL_BYTES = 64 * MIB;
+const MAX_TERMINAL_BACKFILL_JOURNAL_RECORDS = 100_000;
 
 interface LoopConfig {
   leagueId: string;
@@ -130,6 +143,20 @@ interface LoopConfig {
   coworldTimeoutMs: number;
   restartHelperPath: string;
   nodeBin: string;
+}
+
+interface TerminalBackfillJournalSource {
+  kind: "archive" | "active";
+  path: string;
+  byteLength: number;
+  sha256: string;
+  recordCount: number;
+}
+
+interface TerminalBackfillJournal {
+  records: readonly unknown[];
+  sources: readonly TerminalBackfillJournalSource[];
+  exactDuplicateCount: number;
 }
 
 function resolveLoopConfig(env: NodeJS.ProcessEnv): LoopConfig {
@@ -303,6 +330,123 @@ async function readJournal(journalPath: string): Promise<LoopJournalRecord[]> {
   return records;
 }
 
+/**
+ * One-shot migration input. Unlike the ordinary resilient tick reader, this
+ * reads the retained archive before the active journal, rejects malformed
+ * persisted lines, and ignores only one unterminated malformed tail in the
+ * actively-appended file. Exact split duplicates are collapsed byte-for-byte.
+ */
+export async function readTerminalTombstoneBackfillJournal(
+  config: LoopConfig,
+): Promise<TerminalBackfillJournal> {
+  const archivePath = path.join(config.loopStateDir, "journal.archive.jsonl");
+  const segments = (
+    await Promise.all([
+      readTerminalBackfillJournalSegment(archivePath, "archive", false),
+      readTerminalBackfillJournalSegment(config.journalPath, "active", true),
+    ])
+  ).filter(
+    (segment): segment is NonNullable<typeof segment> => segment !== null,
+  );
+  if (segments.length === 0) {
+    throw new Error("terminal backfill journal is missing");
+  }
+  const seenLines = new Set<string>();
+  const records: unknown[] = [];
+  let exactDuplicateCount = 0;
+  for (const segment of segments) {
+    for (const entry of segment.entries) {
+      if (seenLines.has(entry.line)) {
+        exactDuplicateCount += 1;
+        continue;
+      }
+      seenLines.add(entry.line);
+      records.push(entry.value);
+      if (records.length > MAX_TERMINAL_BACKFILL_JOURNAL_RECORDS) {
+        throw new Error("terminal backfill journal record limit exceeded");
+      }
+    }
+  }
+  return {
+    records,
+    sources: segments.map(({ kind, filePath, bytes, entries }) => ({
+      kind,
+      path: filePath,
+      byteLength: bytes.byteLength,
+      sha256: sha256Hex(bytes),
+      recordCount: entries.length,
+    })),
+    exactDuplicateCount,
+  };
+}
+
+async function readTerminalBackfillJournalSegment(
+  filePath: string,
+  kind: "archive" | "active",
+  allowTornFinalLine: boolean,
+): Promise<{
+  kind: "archive" | "active";
+  filePath: string;
+  bytes: Buffer;
+  entries: Array<{ line: string; value: unknown }>;
+} | null> {
+  let handle: Awaited<ReturnType<typeof fs.open>>;
+  try {
+    handle = await fs.open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (error) {
+    if (isErrno(error, "ENOENT")) return null;
+    throw error;
+  }
+  let bytes: Buffer;
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw new Error(
+        `terminal backfill ${kind} journal is not a regular file`,
+      );
+    }
+    if (stat.size > MAX_TERMINAL_BACKFILL_JOURNAL_BYTES) {
+      throw new Error(`terminal backfill ${kind} journal byte limit exceeded`);
+    }
+    bytes = await handle.readFile();
+  } finally {
+    await handle.close();
+  }
+  const raw = bytes.toString("utf8");
+  const lines = raw.split("\n");
+  const lastContentIndex = raw.endsWith("\n")
+    ? lines.length - 2
+    : lines.length - 1;
+  const entries: Array<{ line: string; value: unknown }> = [];
+  for (const [index, line] of lines.entries()) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    let value: unknown;
+    try {
+      value = JSON.parse(trimmed) as unknown;
+    } catch (error) {
+      if (
+        allowTornFinalLine &&
+        !raw.endsWith("\n") &&
+        index === lastContentIndex
+      ) {
+        continue;
+      }
+      throw new Error(
+        `terminal backfill ${kind} journal has malformed line ${index + 1}`,
+        { cause: error },
+      );
+    }
+    entries.push({ line, value });
+    if (entries.length > MAX_TERMINAL_BACKFILL_JOURNAL_RECORDS) {
+      throw new Error(
+        `terminal backfill ${kind} journal record limit exceeded`,
+      );
+    }
+  }
+  return { kind, filePath, bytes, entries };
+}
+
 // The active journal is kept bounded so a long-lived loop never reads an
 // unbounded file each tick. Rotation archives the dropped prefix rather than
 // deleting it, and always preserves the active hold's latest update so folding
@@ -310,6 +454,15 @@ async function readJournal(journalPath: string): Promise<LoopJournalRecord[]> {
 // ~40-round watch window.
 const MAX_JOURNAL_RECORDS = 5_000;
 const KEEP_JOURNAL_RECORDS = 2_000;
+const TOMBSTONED_TERMINAL_RELEASE_OUTCOMES = new Set<LoopReleaseOutcome>([
+  "expired",
+  "leak_audit_refused",
+  "activation_refused",
+  "activation_lost",
+  "ingest_failed",
+  "admit_failed",
+  "projection_over_budget",
+]);
 
 export type LoopJournalCompactionPhase =
   | "after_archive_sync"
@@ -336,8 +489,16 @@ export async function compactJournalIfNeeded(
     return records;
   }
   const folded = foldLoopJournal(records);
-  const dropped = records.slice(0, records.length - KEEP_JOURNAL_RECORDS);
-  const kept = records.slice(records.length - KEEP_JOURNAL_RECORDS);
+  const keepStart = records.length - KEEP_JOURNAL_RECORDS;
+  const dropped = records.slice(0, keepStart);
+  // Strict tombstone backfill needs the exact hold phase preceding a terminal
+  // release. Never split that association across the archive/active boundary:
+  // the archive may grow without bound and is deliberately not scanned by
+  // each minute loop iteration.
+  const kept = [
+    ...terminalReleaseHoldUpdatesCrossingBoundary(records, keepStart),
+    ...records.slice(keepStart),
+  ];
   if (
     folded.activeHold !== null &&
     !kept.some(
@@ -430,6 +591,44 @@ export async function compactJournalIfNeeded(
   return kept;
 }
 
+function terminalReleaseHoldUpdatesCrossingBoundary(
+  records: readonly LoopJournalRecord[],
+  keepStart: number,
+): LoopJournalRecord[] {
+  const active = new Map<
+    string,
+    {
+      index: number;
+      record: Extract<LoopJournalRecord, { kind: "hold_update" }>;
+    }
+  >();
+  const preserved = new Map<
+    number,
+    Extract<LoopJournalRecord, { kind: "hold_update" }>
+  >();
+  for (const [index, record] of records.entries()) {
+    if (record.kind === "hold_update") {
+      active.set(record.hold.episodeRequestId, { index, record });
+      continue;
+    }
+    if (record.kind !== "hold_released") continue;
+    const hold = active.get(record.episodeRequestId);
+    if (
+      index >= keepStart &&
+      record.terminal &&
+      TOMBSTONED_TERMINAL_RELEASE_OUTCOMES.has(record.outcome) &&
+      hold !== undefined &&
+      hold.index < keepStart
+    ) {
+      preserved.set(hold.index, hold.record);
+    }
+    active.delete(record.episodeRequestId);
+  }
+  return [...preserved.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([, record]) => record);
+}
+
 async function appendDurablePrivateBytes(
   filePath: string,
   contents: string,
@@ -482,6 +681,7 @@ interface JournalWriter {
     hold: LoopHoldState,
     outcome: LoopReleaseOutcome,
     terminal: boolean,
+    releasedAt?: string,
   ): Promise<void>;
   appendRoundSkipped(ref: LoopRoundRef, reason: LoopSkipReason): Promise<void>;
   appendDecision(decision: Record<string, unknown>): Promise<void>;
@@ -505,10 +705,10 @@ export function createJournalWriter(
         faultInjector,
       );
     },
-    async appendHoldReleased(hold, outcome, terminal) {
+    async appendHoldReleased(hold, outcome, terminal, releasedAt) {
       const record = {
         kind: "hold_released",
-        ts: now(),
+        ts: releasedAt ?? now(),
         episodeRequestId: hold.episodeRequestId,
         premiereId: hold.premiereId,
         roundId: hold.roundId,
@@ -899,6 +1099,161 @@ async function readPremiereState(
   } catch {
     return null;
   }
+}
+
+const COORDINATION_NONTERMINAL_STATES = new Set([
+  "draft",
+  "scheduled",
+  "playing",
+  "checkpoint",
+]);
+const COORDINATION_TERMINAL_STATES = new Set([
+  "revealed",
+  "archived",
+  "failed",
+  "cancelled",
+]);
+
+export interface ForeignRegisteredPremiereGate {
+  busyPremiereIds: readonly string[];
+  receiptFingerprint: string;
+}
+
+export interface ForeignRegisteredPremiereGateDependencies {
+  readSelection?: (
+    privateStateRoot: string,
+  ) => Promise<ReplayPremiereStartupSelectionReceiptV1>;
+  readState?: (
+    config: LoopConfig,
+    premiereId: string,
+  ) => Promise<string | null>;
+  readArchivePointer?: typeof readReplayPremiereArchivePointer;
+  readAdmission?: typeof readReplayPremiereAdmissionRecord;
+}
+
+async function foreignRegisteredPremiereGate(
+  config: LoopConfig,
+  dependencies: ForeignRegisteredPremiereGateDependencies = {},
+): Promise<ForeignRegisteredPremiereGate> {
+  const readSelection =
+    dependencies.readSelection ?? readActiveReplayPremiereStartupSelection;
+  const receipt = await readSelection(config.privateStateRoot);
+  const receiptFingerprint = replayPremiereStartupSelectionFingerprint(receipt);
+  const busy: string[] = [];
+  const registeredIds = new Set(receipt.registeredPremiereIds);
+  for (const entry of receipt.selected) {
+    const premiereId = entry.premiereId;
+    if (!registeredIds.has(premiereId)) {
+      if (COORDINATION_TERMINAL_STATES.has(entry.projectionState)) continue;
+      throw new Error(
+        `coordination selected nonterminal premiere is unregistered: ${premiereId}`,
+      );
+    }
+    const state = await (dependencies.readState ?? readPremiereStateStrict)(
+      config,
+      premiereId,
+    );
+    if (state === null) {
+      const pointer = await (
+        dependencies.readArchivePointer ?? readReplayPremiereArchivePointer
+      )({
+        privateStateRoot: config.privateStateRoot,
+        premiereId,
+      });
+      if (pointer === null || pointer.premiereId !== premiereId) {
+        throw new Error(
+          `coordination manifest absent without archive proof for ${premiereId}`,
+        );
+      }
+      const admission = await (
+        dependencies.readAdmission ?? readReplayPremiereAdmissionRecord
+      )({
+        privateStateRoot: config.privateStateRoot,
+        premiereId,
+      });
+      if (
+        admission !== null &&
+        (admission.recordHash !== entry.admissionRecordHash ||
+          admission.eligibilityRecord.sourceKind !== pointer.sourceKind ||
+          admission.eligibilityRecord.sourceRunId !== pointer.sourceRunId ||
+          admission.stagedSource.sourceReplaySha256 !==
+            pointer.sourceReplaySha256)
+      ) {
+        throw new Error(
+          `coordination archive proof does not bind selected admission for ${premiereId}`,
+        );
+      }
+      continue;
+    }
+    if (COORDINATION_TERMINAL_STATES.has(state)) continue;
+    if (!COORDINATION_NONTERMINAL_STATES.has(state)) {
+      throw new Error(`coordination manifest state invalid for ${premiereId}`);
+    }
+    busy.push(premiereId);
+  }
+  const afterProbe = await readSelection(config.privateStateRoot);
+  if (
+    replayPremiereStartupSelectionFingerprint(afterProbe) !== receiptFingerprint
+  ) {
+    throw new Error("coordination selection changed during manifest probes");
+  }
+  return { busyPremiereIds: busy, receiptFingerprint };
+}
+
+async function assertForeignPremiereGateUnchanged(
+  config: LoopConfig,
+  gate: ForeignRegisteredPremiereGate,
+  readSelection: (
+    privateStateRoot: string,
+  ) => Promise<ReplayPremiereStartupSelectionReceiptV1> = readActiveReplayPremiereStartupSelection,
+): Promise<void> {
+  const current = await readSelection(config.privateStateRoot);
+  if (
+    replayPremiereStartupSelectionFingerprint(current) !==
+    gate.receiptFingerprint
+  ) {
+    throw new Error("coordination selection changed before claim commit");
+  }
+}
+
+/**
+ * Strict loopback-only state probe for the claim exclusion gate. Unlike the
+ * tracker probe above, transport/HTTP/schema failures are not collapsed into
+ * 404: uncertainty must block a new claim, never authorize one.
+ */
+async function readPremiereStateStrict(
+  config: LoopConfig,
+  premiereId: string,
+): Promise<string | null> {
+  const url = `${config.loopbackBaseUrl}/api/premieres/${encodeURIComponent(premiereId)}/manifest`;
+  const response = await fetch(url, {
+    signal: AbortSignal.timeout(5_000),
+    redirect: "error",
+  });
+  if (response.status === 404) {
+    await response.body?.cancel();
+    return null;
+  }
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new Error(
+      `coordination manifest probe failed (${response.status}) for ${premiereId}`,
+    );
+  }
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (bytes.byteLength <= 0 || bytes.byteLength > MIB) {
+    throw new Error(`coordination manifest size invalid for ${premiereId}`);
+  }
+  let body: unknown;
+  try {
+    body = JSON.parse(bytes.toString("utf8"));
+  } catch {
+    throw new Error(`coordination manifest JSON invalid for ${premiereId}`);
+  }
+  if (!isRecord(body) || typeof body.state !== "string") {
+    throw new Error(`coordination manifest schema invalid for ${premiereId}`);
+  }
+  return body.state;
 }
 
 /**
@@ -1573,6 +1928,7 @@ async function activateHold(
   journal: JournalWriter,
   now: Date,
   restart: () => Promise<boolean> = () => fireRestartHelper(config),
+  persistRetirement: typeof persistReplayPremiereTerminalTombstone = persistReplayPremiereTerminalTombstone,
 ): Promise<ActivateResult> {
   const liveState = await readPremiereState(config, hold.premiereId);
   if (liveState !== null) {
@@ -1625,6 +1981,7 @@ async function activateHold(
       config,
       journal,
       now,
+      persistRetirement,
     );
     return { kind: "released" };
   }
@@ -1668,14 +2025,31 @@ async function trackHold(
   journal: JournalWriter,
   now: Date,
   restart: () => Promise<boolean> = () => fireRestartHelper(config),
+  persistRetirement: typeof persistReplayPremiereTerminalTombstone = persistReplayPremiereTerminalTombstone,
 ): Promise<void> {
   const state = await readPremiereState(config, hold.premiereId);
   if (state === "revealed" || state === "archived") {
-    await releaseHold(hold, "revealed", true, config, journal, now);
+    await releaseHold(
+      hold,
+      "revealed",
+      true,
+      config,
+      journal,
+      now,
+      persistRetirement,
+    );
     return;
   }
   if (state === "failed" || state === "cancelled") {
-    await releaseHold(hold, "failed_or_cancelled", true, config, journal, now);
+    await releaseHold(
+      hold,
+      "failed_or_cancelled",
+      true,
+      config,
+      journal,
+      now,
+      persistRetirement,
+    );
     return;
   }
   if (
@@ -1728,14 +2102,30 @@ async function trackHold(
     // The single retry could not even restart the server; release immediately
     // rather than holding the card for a premiere that cannot register.
     log(`re-activation refused for ${hold.premiereId}; releasing`);
-    await releaseHold(attempted, "activation_lost", true, config, journal, now);
+    await releaseHold(
+      attempted,
+      "activation_lost",
+      true,
+      config,
+      journal,
+      now,
+      persistRetirement,
+    );
     return;
   }
   if (verification.kind === "activation_lost") {
     log(
       `premiere ${hold.premiereId} never registered after re-activation; releasing`,
     );
-    await releaseHold(hold, "activation_lost", true, config, journal, now);
+    await releaseHold(
+      hold,
+      "activation_lost",
+      true,
+      config,
+      journal,
+      now,
+      persistRetirement,
+    );
     return;
   }
 
@@ -1751,7 +2141,25 @@ async function releaseHold(
   config: LoopConfig,
   journal: JournalWriter,
   now: Date,
+  persistRetirement: typeof persistReplayPremiereTerminalTombstone = persistReplayPremiereTerminalTombstone,
 ): Promise<void> {
+  // Once an admission exists, a terminal loop release must retire that exact
+  // immutable admission before suppression or retention is relaxed. Without
+  // this private tombstone, a later server startup can select its surviving
+  // draft/scheduled projection and resurrect a release the loop already made
+  // terminal. Tombstone failure deliberately aborts here, preserving the
+  // active contract, pin, and journal hold for a bounded retry.
+  const retired = await persistRetirement({
+    privateStateRoot: config.privateStateRoot,
+    episodeRequestId: hold.episodeRequestId,
+    premiereId: hold.premiereId,
+    roundId: hold.roundId,
+    phase: hold.phase,
+    outcome,
+    terminal,
+    releasedAt: now.toISOString(),
+  });
+  const releasedAt = retired?.releasedAt ?? now.toISOString();
   // Latest-premiere pointer: ONLY a `revealed` release rewrites it, so the
   // league mirror's between-premieres card always names the most recent
   // premiere whose outcome is already public. Every other outcome (expired,
@@ -1771,7 +2179,7 @@ async function releaseHold(
   // so the loop keeps winning the publish race for the next round.
   await writeStandingContract(config, now);
   await unpinHoldArtifacts(hold, config);
-  await journal.appendHoldReleased(hold, outcome, terminal);
+  await journal.appendHoldReleased(hold, outcome, terminal, releasedAt);
   log(
     `released ${hold.premiereId} (${outcome}); episode publishes at quarantine expiry`,
   );
@@ -1819,6 +2227,7 @@ export interface ProgressHoldDependencies {
   hasStorageFloor?: typeof hasStorageFloor;
   activateHold?: typeof activateHold;
   trackHold?: typeof trackHold;
+  persistRetirement?: typeof persistReplayPremiereTerminalTombstone;
   /** Refreshes timestamps after the potentially long admission projection. */
   now?: () => Date;
 }
@@ -1835,6 +2244,8 @@ export async function progressHold(
   await writeContractForHold(hold, config, now);
   const loadRetained =
     dependencies.loadRetainedAdmission ?? loadRetainedAdmissionTransaction;
+  const persistRetirement =
+    dependencies.persistRetirement ?? persistReplayPremiereTerminalTombstone;
   const claimedTransaction =
     hold.phase === "claimed" ? await loadRetained(hold, config) : null;
   if (isHoldExpired(hold, now)) {
@@ -1842,7 +2253,15 @@ export async function progressHold(
       await preserveUncertainAdmissionHold(hold, config, journal, now);
       return;
     }
-    await releaseHold(hold, "expired", true, config, journal, now);
+    await releaseHold(
+      hold,
+      "expired",
+      true,
+      config,
+      journal,
+      now,
+      persistRetirement,
+    );
     return;
   }
 
@@ -1896,6 +2315,7 @@ export async function progressHold(
           config,
           journal,
           dependencies.now?.() ?? new Date(),
+          persistRetirement,
         );
         return;
       }
@@ -1917,6 +2337,7 @@ export async function progressHold(
         config,
         journal,
         operationNow,
+        persistRetirement,
       );
       return;
     }
@@ -1945,6 +2366,8 @@ export async function progressHold(
       config,
       journal,
       operationNow,
+      undefined,
+      persistRetirement,
     );
     if (activation.kind === "released") {
       return;
@@ -1961,6 +2384,8 @@ export async function progressHold(
     config,
     journal,
     operationNow,
+    undefined,
+    persistRetirement,
   );
 }
 
@@ -2030,16 +2455,20 @@ async function claimRound(
   config: LoopConfig,
   journal: JournalWriter,
   now: Date,
+  coordination: {
+    gate: ForeignRegisteredPremiereGate;
+    supersededRoundIds: readonly LoopRoundRef[];
+  },
+  dependencies: ClaimRoundDependencies = {},
 ): Promise<void> {
-  const replays = await fetchDivisionReplays(config);
+  const replays = await (
+    dependencies.fetchDivisionReplays ?? fetchDivisionReplays
+  )(config);
   const candidates = orderEpisodesForClaim(round, replays.rows);
-  if (candidates.length === 0) {
-    await journal.appendRoundSkipped(
-      { id: round.id, roundNumber: round.roundNumber },
-      "no_eligible_episode",
-    );
-    return;
-  }
+  let skipReason: Extract<
+    LoopSkipReason,
+    "no_eligible_episode" | "projection_over_budget" | "already_public"
+  > | null = candidates.length === 0 ? "no_eligible_episode" : null;
 
   let selected: {
     row: LoopReplayRow;
@@ -2047,12 +2476,11 @@ async function claimRound(
     rawReplayPath: string;
     facts: RawReplayFacts;
   } | null = null;
-  const attempted: string[] = [];
   for (const candidate of candidates.slice(
     0,
     PREMIERE_LOOP_MAX_REPLAY_DOWNLOADS,
   )) {
-    if (!(await hasStorageFloor(config))) {
+    if (!(await (dependencies.hasStorageFloor ?? hasStorageFloor)(config))) {
       log("storage floor reached mid-selection; stopping downloads");
       break;
     }
@@ -2065,7 +2493,11 @@ async function claimRound(
       `${candidate.episodeRequestId}-${randomUUID()}.replay`,
     );
     try {
-      await downloadRawReplay(candidate.replayUrl, rawReplayPath, config);
+      await (dependencies.downloadRawReplay ?? downloadRawReplay)(
+        candidate.replayUrl,
+        rawReplayPath,
+        config,
+      );
     } catch (error) {
       log(
         `download failed for ${candidate.episodeRequestId}: ${errorMessage(error)}`,
@@ -2073,7 +2505,6 @@ async function claimRound(
       await fs.rm(rawReplayPath, { force: true }).catch(() => undefined);
       continue;
     }
-    attempted.push(candidate.episodeRequestId);
     const facts = parseRawReplayFacts(
       await fs.readFile(rawReplayPath),
       typeof rawRow.coworld_name === "string"
@@ -2091,12 +2522,8 @@ async function claimRound(
     break;
   }
 
-  if (selected === null) {
-    await journal.appendRoundSkipped(
-      { id: round.id, roundNumber: round.roundNumber },
-      "projection_over_budget",
-    );
-    return;
+  if (selected === null && skipReason === null) {
+    skipReason = "projection_over_budget";
   }
 
   // Pre-admission already-public check. The mirror can publish a completed
@@ -2104,21 +2531,79 @@ async function claimRound(
   // is active), so a within-window round may still be on the public origin. A
   // published outcome can no longer be sealed, and admitting it would drive the
   // leak collector to fetch (and abort) the multi-MB public replay. Probe the
-  // origin BEFORE pin/contract/admit; skip terminally if it is already public.
-  const publicRunKey = publicRunKeyForSourceRunId(selected.facts.runId);
-  if (await isEpisodeAlreadyPublic(publicRunKey, config)) {
+  // origin during PREPARATION, before any claim-side mutation.
+  const publicRunKey =
+    selected === null ? null : publicRunKeyForSourceRunId(selected.facts.runId);
+  if (
+    selected !== null &&
+    publicRunKey !== null &&
+    (await (dependencies.isEpisodeAlreadyPublic ?? isEpisodeAlreadyPublic)(
+      publicRunKey,
+      config,
+    ))
+  ) {
     log(
       `round ${round.roundNumber ?? "?"} episode ${selected.row.episodeRequestId} already public (${publicRunKey}); skipping pre-admission`,
     );
-    await fs.rm(selected.rawReplayPath, { force: true }).catch(() => undefined);
-    await journal.appendRoundSkipped(
-      { id: round.id, roundNumber: round.roundNumber },
-      "already_public",
+    skipReason = "already_public";
+  }
+
+  // COMMIT BARRIER: all remote/list/download/parse/public-probe work above is
+  // claim-mutation-free. Re-bind it to the exact live server startup receipt
+  // immediately before the first superseded/claim journal transition or
+  // pin/contract/hold mutation. A replacement receipt can select a foreign
+  // nonterminal premiere while preparation is in flight; that must leave both
+  // the candidate and every superseded round unconsumed.
+  await dependencies.beforeClaimCommit?.({
+    round,
+    selectedRawReplayPath: selected?.rawReplayPath ?? null,
+  });
+  try {
+    await (
+      dependencies.assertForeignPremiereGateUnchanged ??
+      assertForeignPremiereGateUnchanged
+    )(config, coordination.gate);
+  } catch (error) {
+    if (selected !== null) {
+      await fs.rm(selected.rawReplayPath, { force: true });
+    }
+    await journal.appendDecision({
+      decision: "claim_blocked_coordination_changed",
+      operatorCode: operatorCodeOf(error),
+    });
+    log(
+      `claim blocked: server premiere selection changed after candidate preparation (${operatorCodeOf(error)})`,
     );
     return;
   }
 
-  await pruneRawReplayCache(config, selected.rawReplayPath);
+  for (const ref of coordination.supersededRoundIds) {
+    await journal.appendRoundSkipped(ref, "skipped_superseded");
+  }
+  await journal.appendDecision({
+    decision: "claim",
+    round: round.roundNumber,
+    superseded: coordination.supersededRoundIds.map((ref) => ref.roundNumber),
+  });
+
+  if (skipReason !== null) {
+    if (selected !== null) {
+      await fs.rm(selected.rawReplayPath, { force: true });
+    }
+    await journal.appendRoundSkipped(
+      { id: round.id, roundNumber: round.roundNumber },
+      skipReason,
+    );
+    return;
+  }
+  if (selected === null || publicRunKey === null) {
+    throw new Error("claim preparation invariant failed");
+  }
+
+  await (dependencies.pruneRawReplayCache ?? pruneRawReplayCache)(
+    config,
+    selected.rawReplayPath,
+  );
   const scheduledAt = scheduledAtForClaim(now);
   const hold: LoopHoldState = {
     episodeRequestId: selected.row.episodeRequestId,
@@ -2145,15 +2630,21 @@ async function claimRound(
 
   // CLAIM: protect the episode from the league page and pin its bundle BEFORE
   // ingest/admit, so the admission leak audit sees a clean /league.
-  await pinHoldArtifacts(hold, config);
-  await writeContractForHold(hold, config, now);
+  await (dependencies.pinHoldArtifacts ?? pinHoldArtifacts)(hold, config);
+  await (dependencies.writeContractForHold ?? writeContractForHold)(
+    hold,
+    config,
+    now,
+  );
   await journal.appendHoldUpdate(hold);
   log(
     `claimed round ${round.roundNumber ?? "?"} episode ${hold.episodeRequestId} -> ${hold.premiereId} (${hold.turnCount} turns, ${hold.playbackRate}x)`,
   );
 
-  const divisionFile = await stageDivisionFile(config);
-  await progressHold(
+  const divisionFile = await (
+    dependencies.stageDivisionFile ?? stageDivisionFile
+  )(config);
+  await (dependencies.progressHold ?? progressHold)(
     hold,
     {
       rawRow: selected.rawRow,
@@ -2165,6 +2656,23 @@ async function claimRound(
     journal,
     now,
   );
+}
+
+interface ClaimRoundDependencies {
+  fetchDivisionReplays?: typeof fetchDivisionReplays;
+  hasStorageFloor?: typeof hasStorageFloor;
+  downloadRawReplay?: typeof downloadRawReplay;
+  isEpisodeAlreadyPublic?: typeof isEpisodeAlreadyPublic;
+  beforeClaimCommit?: (prepared: {
+    round: LoopRound;
+    selectedRawReplayPath: string | null;
+  }) => Promise<void>;
+  assertForeignPremiereGateUnchanged?: typeof assertForeignPremiereGateUnchanged;
+  pruneRawReplayCache?: typeof pruneRawReplayCache;
+  pinHoldArtifacts?: typeof pinHoldArtifacts;
+  writeContractForHold?: typeof writeContractForHold;
+  stageDivisionFile?: typeof stageDivisionFile;
+  progressHold?: typeof progressHold;
 }
 
 async function pruneRawReplayCache(
@@ -2346,10 +2854,16 @@ async function runShadowIteration(config: LoopConfig): Promise<void> {
 
 async function runLiveIteration(config: LoopConfig): Promise<void> {
   const journal = createJournalWriter(config);
-  const records = await compactJournalIfNeeded(
-    config,
-    await readJournal(config.journalPath),
-  );
+  const loadedRecords = await readJournal(config.journalPath);
+  // Migration runs before compaction so a pre-tombstone terminal release can
+  // never fall into the archived prefix without first retiring its immutable
+  // admission. Exact release identities/outcomes are revalidated by the
+  // coordination boundary; ambiguous history aborts before any claim.
+  await backfillReplayPremiereTerminalTombstones({
+    privateStateRoot: config.privateStateRoot,
+    records: loadedRecords,
+  });
+  const records = await compactJournalIfNeeded(config, loadedRecords);
   const folded = foldLoopJournal(records);
   const now = new Date();
   const retainedClaimMayExist =
@@ -2428,8 +2942,51 @@ async function runLiveIteration(config: LoopConfig): Promise<void> {
   }
 
   // claim
-  for (const ref of decision.supersededRoundIds) {
-    await journal.appendRoundSkipped(ref, "skipped_superseded");
+  let foreignGate: ForeignRegisteredPremiereGate;
+  try {
+    foreignGate = await foreignRegisteredPremiereGate(config);
+  } catch (error) {
+    await journal.appendDecision({
+      decision: "claim_blocked_coordination_unavailable",
+      operatorCode: operatorCodeOf(error),
+    });
+    log(
+      `claim blocked: active server premiere selection is unavailable (${operatorCodeOf(error)})`,
+    );
+    return;
+  }
+  if (foreignGate.busyPremiereIds.length > 0) {
+    const busyRounds = [
+      { id: decision.round.id, roundNumber: decision.round.roundNumber },
+      ...decision.supersededRoundIds,
+    ];
+    for (const ref of busyRounds) {
+      await journal.appendRoundSkipped(ref, "skipped_busy");
+    }
+    await journal.appendDecision({
+      decision: "claim_skipped_foreign_premiere_busy",
+      premiereIds: foreignGate.busyPremiereIds,
+      skippedBusy: busyRounds.map((ref) => ref.roundNumber),
+    });
+    log(
+      `foreign premiere busy (${foreignGate.busyPremiereIds.join(", ")}); ${busyRounds.length} completed round(s) publish normally`,
+    );
+    return;
+  }
+  try {
+    // Final identity barrier immediately before the first terminal journal or
+    // claim-side mutation. A restart/selection replacement during the probes
+    // invalidates the evidence even when both receipts individually validate.
+    await assertForeignPremiereGateUnchanged(config, foreignGate);
+  } catch (error) {
+    await journal.appendDecision({
+      decision: "claim_blocked_coordination_changed",
+      operatorCode: operatorCodeOf(error),
+    });
+    log(
+      `claim blocked: server premiere selection changed before commit (${operatorCodeOf(error)})`,
+    );
+    return;
   }
   // Cold-start / gap-recovery guard. The newest completed unpremiered round can
   // itself be older than the seal window (e.g. the loop was down or in shadow
@@ -2457,12 +3014,34 @@ async function runLiveIteration(config: LoopConfig): Promise<void> {
     log("below storage floor; skipping claim this tick");
     return;
   }
-  await journal.appendDecision({
-    decision: "claim",
-    round: decision.round.roundNumber,
-    superseded: decision.supersededRoundIds.map((ref) => ref.roundNumber),
+  await claimRound(decision.round, config, journal, now, {
+    gate: foreignGate,
+    supersededRoundIds: decision.supersededRoundIds,
   });
-  await claimRound(decision.round, config, journal, now);
+}
+
+async function runTerminalTombstoneBackfill(config: LoopConfig): Promise<void> {
+  const journal = await readTerminalTombstoneBackfillJournal(config);
+  const result = await backfillReplayPremiereTerminalTombstonesDetailed({
+    privateStateRoot: config.privateStateRoot,
+    records: journal.records,
+  });
+  log(
+    `terminal tombstone backfill complete ${JSON.stringify({
+      schemaVersion: 1,
+      sources: journal.sources,
+      exactDuplicateCount: journal.exactDuplicateCount,
+      tombstones: result.tombstones.map((tombstone) => ({
+        premiereId: tombstone.premiereId,
+        sha256: sha256Hex(
+          Buffer.from(`${JSON.stringify(tombstone)}\n`, "utf8"),
+        ),
+      })),
+      catalogAbsentArchivedPremiereIds: result.catalogAbsentArchivedPremiereIds,
+      catalogAbsentUnarchivedPremiereIds:
+        result.catalogAbsentUnarchivedPremiereIds,
+    })}`,
+  );
 }
 
 async function hasStorageFloor(config: LoopConfig): Promise<boolean> {
@@ -2549,9 +3128,17 @@ function isIneligible(error: unknown): boolean {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const shadow = args.includes("--shadow");
-  const unknown = args.filter((arg) => arg !== "--shadow");
+  const backfillOnly = args.includes("--backfill-terminal-tombstones");
+  const unknown = args.filter(
+    (arg) => arg !== "--shadow" && arg !== "--backfill-terminal-tombstones",
+  );
   if (unknown.length > 0) {
     throw new Error(`unknown premiere-loop argument(s): ${unknown.join(", ")}`);
+  }
+  if (shadow && backfillOnly) {
+    throw new Error(
+      "--shadow and --backfill-terminal-tombstones are mutually exclusive",
+    );
   }
   const config = resolveLoopConfig(process.env);
   await fs.mkdir(config.loopStateDir, { recursive: true });
@@ -2559,6 +3146,17 @@ async function main(): Promise<void> {
   if (shadow) {
     // Shadow never takes the mutating lock path; it only observes.
     await runShadowIteration(config);
+    return;
+  }
+
+  if (backfillOnly) {
+    const outcome = await withSingleInstanceLock(config.lockDir, async () => {
+      await runTerminalTombstoneBackfill(config);
+      return true;
+    });
+    if (outcome === null) {
+      throw new Error("premiere loop is active; tombstone backfill refused");
+    }
     return;
   }
 
@@ -2586,9 +3184,13 @@ if (invokedDirectly) {
 
 export {
   activateHold,
+  assertForeignPremiereGateUnchanged,
+  claimRound,
+  foreignRegisteredPremiereGate,
   isEpisodeAlreadyPublic,
   main,
   resolveLoopConfig,
+  runTerminalTombstoneBackfill,
   trackHold,
 };
 export type { JournalWriter, LoopConfig };

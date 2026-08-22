@@ -8,10 +8,15 @@ import {
   runReplayPremiereCoworldIngest,
 } from "../../../src/scripts/replay-premiere-ingest-coworld";
 import { ReplayPremiereAnonymousWriteLimiter } from "../../../src/server/replay-premiere/ReplayPremiereAnonymousWriteLimiter";
+import { ReplayPremiereArchiveStore } from "../../../src/server/replay-premiere/ReplayPremiereArchiveIndex";
 import {
   freezeReplayPremiereCheckpointProjection,
   type ReplayPremiereCheckpointProjector,
 } from "../../../src/server/replay-premiere/ReplayPremiereCheckpointProjection";
+import {
+  backfillReplayPremiereTerminalTombstones,
+  backfillReplayPremiereTerminalTombstonesDetailed,
+} from "../../../src/server/replay-premiere/ReplayPremiereCoordination";
 import { ReplayPremiereError } from "../../../src/server/replay-premiere/ReplayPremiereErrors";
 import { ReplayPremiereGuestSecurity } from "../../../src/server/replay-premiere/ReplayPremiereGuestSecurity";
 import { ReplayPremiereHttpRegistry } from "../../../src/server/replay-premiere/ReplayPremiereHttp";
@@ -40,6 +45,9 @@ import {
 } from "./ReplayPremiereFixtures";
 
 const EXPECTED_ORIGIN = "https://beta.proxywar.xyz";
+const ABSENT_LEGACY_PREMIERE_ID = "prem_0000000000000001";
+const ABSENT_LEGACY_EPISODE_REQUEST_ID =
+  "ereq_00000000-0000-4000-8000-000000000099";
 
 describe("Replay Premiere rated Coworld ingestion", () => {
   let root: string;
@@ -389,7 +397,306 @@ describe("Replay Premiere rated Coworld ingestion", () => {
       await started.service.close();
     }
   });
+
+  test("a terminal loop backfill neutralizes and reclaims a dormant rated admission", async () => {
+    const harness = await createRatedAdmissionHarness(root);
+    await runReplayPremiereAdmission(harness.args, harness.dependencies);
+    const releasedAt = new Date(NOW.getTime() + 1_000).toISOString();
+    const tombstones = await backfillReplayPremiereTerminalTombstones({
+      privateStateRoot: harness.privateStateRoot,
+      records: terminalReleaseJournal("activated", releasedAt),
+    });
+    expect(tombstones).toHaveLength(1);
+    expect(tombstones[0]).toMatchObject({
+      premiereId: RATED_PREMIERE_ID,
+      episodeRequestId: RATED_EPISODE_REQUEST_ID,
+      roundId: RATED_ROUND_ID,
+      releasePhase: "activated",
+      releaseOutcome: "activation_lost",
+    });
+    const retried = await backfillReplayPremiereTerminalTombstones({
+      privateStateRoot: harness.privateStateRoot,
+      records: terminalReleaseJournal(
+        "activated",
+        new Date(NOW.getTime() + 1_001).toISOString(),
+      ),
+    });
+    expect(retried[0]?.releasedAt).toBe(releasedAt);
+    await expectOperatorCode(
+      backfillReplayPremiereTerminalTombstones({
+        privateStateRoot: harness.privateStateRoot,
+        records: terminalReleaseJournal(
+          "activated",
+          releasedAt,
+          "activation_refused",
+        ),
+      }),
+      "coordination_tombstone_is_immutable",
+    );
+
+    const limiter = new ReplayPremiereAnonymousWriteLimiter({
+      now: () => new Date(NOW.getTime() + 2_000),
+    });
+    const httpRegistry = new ReplayPremiereHttpRegistry(limiter.admit);
+    const runtimeRegistry = new ReplayPremiereRuntimeRegistry();
+    const archiveStore = await ReplayPremiereArchiveStore.open({
+      privateStateRoot: harness.privateStateRoot,
+    });
+    const started = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
+      privateStateRoot: harness.privateStateRoot,
+      servedRoots: [harness.servedRoot],
+      publicOrigin: EXPECTED_ORIGIN,
+      security: new ReplayPremiereGuestSecurity({
+        hmacKey: Buffer.alloc(32, 7),
+        expectedOrigin: EXPECTED_ORIGIN,
+        production: true,
+        now: () => new Date(NOW.getTime() + 2_000),
+      }),
+      httpRegistry,
+      runtimeRegistry,
+      archiveStore,
+      reclamationGraceMs: 0,
+      reclamationSweepMs: 0,
+      checkpointProjector: ratedFixtureCheckpointProjector(),
+      clock: { now: () => new Date(NOW.getTime() + 2_000) },
+    });
+    try {
+      expect(started.registeredPremiereIds).toEqual([]);
+      expect(httpRegistry.get(RATED_PREMIERE_ID)).toBeNull();
+      expect(runtimeRegistry.get(RATED_PREMIERE_ID)).toBeNull();
+      await viWaitForArchive(archiveStore, RATED_PREMIERE_ID);
+      expect(archiveStore.lookup(RATED_PREMIERE_ID)).toMatchObject({
+        premiereId: RATED_PREMIERE_ID,
+        terminalState: "cancelled",
+      });
+      expect(
+        (await archiveStore.loadSummary(RATED_PREMIERE_ID))?.terminalState,
+      ).toBe("cancelled");
+      await expect(
+        fs.stat(ratedAdmissionPath(harness.privateStateRoot)),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(
+        fs.stat(ratedTombstonePath(harness.privateStateRoot)),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await started.service.close();
+    }
+  });
+
+  test("historical backfill skips an absent legacy admission and still retires a later present admission", async () => {
+    const harness = await createRatedAdmissionHarness(root);
+    await runReplayPremiereAdmission(harness.args, harness.dependencies);
+    const releasedAt = new Date(NOW.getTime() + 1_000).toISOString();
+    const absentRelease = [
+      {
+        kind: "hold_update",
+        ts: NOW.toISOString(),
+        hold: {
+          episodeRequestId: ABSENT_LEGACY_EPISODE_REQUEST_ID,
+          premiereId: ABSENT_LEGACY_PREMIERE_ID,
+          roundId: "round_absent_legacy",
+          phase: "activated",
+        },
+      },
+      {
+        kind: "hold_released",
+        ts: releasedAt,
+        episodeRequestId: ABSENT_LEGACY_EPISODE_REQUEST_ID,
+        premiereId: ABSENT_LEGACY_PREMIERE_ID,
+        roundId: "round_absent_legacy",
+        outcome: "activation_refused",
+        terminal: true,
+      },
+    ] as const;
+
+    const result = await backfillReplayPremiereTerminalTombstonesDetailed({
+      privateStateRoot: harness.privateStateRoot,
+      records: [
+        ...absentRelease,
+        ...terminalReleaseJournal("activated", releasedAt),
+      ],
+    });
+
+    expect(result.catalogAbsentArchivedPremiereIds).toEqual([]);
+    expect(result.catalogAbsentUnarchivedPremiereIds).toEqual([
+      ABSENT_LEGACY_PREMIERE_ID,
+    ]);
+    expect(result.tombstones.map(({ premiereId }) => premiereId)).toEqual([
+      RATED_PREMIERE_ID,
+    ]);
+    await expect(
+      fs.stat(ratedTombstonePath(harness.privateStateRoot)),
+    ).resolves.toBeDefined();
+  });
+
+  test("historical backfill validates the complete history before creating a tombstone", async () => {
+    const harness = await createRatedAdmissionHarness(root);
+    await runReplayPremiereAdmission(harness.args, harness.dependencies);
+    const releasedAt = new Date(NOW.getTime() + 1_000).toISOString();
+
+    await expectOperatorCode(
+      backfillReplayPremiereTerminalTombstonesDetailed({
+        privateStateRoot: harness.privateStateRoot,
+        records: [
+          ...terminalReleaseJournal("activated", releasedAt),
+          {
+            kind: "hold_released",
+            ts: releasedAt,
+            episodeRequestId: ABSENT_LEGACY_EPISODE_REQUEST_ID,
+            premiereId: ABSENT_LEGACY_PREMIERE_ID,
+            roundId: "round_absent_legacy",
+            outcome: "activation_refused",
+            terminal: true,
+            ambiguous: true,
+          },
+        ],
+      }),
+      "coordination_object_keys_invalid",
+    );
+    await expect(
+      fs.stat(ratedTombstonePath(harness.privateStateRoot)),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  test("a tombstone never cancels an already-playing rated premiere on restart", async () => {
+    const harness = await createRatedAdmissionHarness(root);
+    await runReplayPremiereAdmission(harness.args, harness.dependencies);
+    const firstLimiter = new ReplayPremiereAnonymousWriteLimiter({
+      now: () => NOW,
+    });
+    const firstHttp = new ReplayPremiereHttpRegistry(firstLimiter.admit);
+    const firstRuntime = new ReplayPremiereRuntimeRegistry();
+    const first = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
+      privateStateRoot: harness.privateStateRoot,
+      servedRoots: [harness.servedRoot],
+      publicOrigin: EXPECTED_ORIGIN,
+      security: new ReplayPremiereGuestSecurity({
+        hmacKey: Buffer.alloc(32, 7),
+        expectedOrigin: EXPECTED_ORIGIN,
+        production: true,
+        now: () => NOW,
+      }),
+      httpRegistry: firstHttp,
+      runtimeRegistry: firstRuntime,
+      checkpointProjector: ratedFixtureCheckpointProjector(),
+      clock: { now: () => new Date(NOW) },
+    });
+    expect(firstRuntime.get(RATED_PREMIERE_ID)?.readLifecycleState()).toBe(
+      "playing",
+    );
+    await first.service.close();
+
+    await backfillReplayPremiereTerminalTombstones({
+      privateStateRoot: harness.privateStateRoot,
+      records: terminalReleaseJournal(
+        "activated",
+        new Date(NOW.getTime() + 1_000).toISOString(),
+      ),
+    });
+    const secondLimiter = new ReplayPremiereAnonymousWriteLimiter({
+      now: () => NOW,
+    });
+    const secondHttp = new ReplayPremiereHttpRegistry(secondLimiter.admit);
+    const secondRuntime = new ReplayPremiereRuntimeRegistry();
+    const archiveStore = await ReplayPremiereArchiveStore.open({
+      privateStateRoot: harness.privateStateRoot,
+    });
+    const second = await startReplayPremiereProduction({
+      statfs: AMPLE_DISK,
+      privateStateRoot: harness.privateStateRoot,
+      servedRoots: [harness.servedRoot],
+      publicOrigin: EXPECTED_ORIGIN,
+      security: new ReplayPremiereGuestSecurity({
+        hmacKey: Buffer.alloc(32, 7),
+        expectedOrigin: EXPECTED_ORIGIN,
+        production: true,
+        now: () => NOW,
+      }),
+      httpRegistry: secondHttp,
+      runtimeRegistry: secondRuntime,
+      archiveStore,
+      reclamationGraceMs: 0,
+      reclamationSweepMs: 0,
+      checkpointProjector: ratedFixtureCheckpointProjector(),
+      clock: { now: () => new Date(NOW) },
+    });
+    try {
+      expect(second.registeredPremiereIds).toEqual([RATED_PREMIERE_ID]);
+      expect(secondRuntime.get(RATED_PREMIERE_ID)?.readLifecycleState()).toBe(
+        "playing",
+      );
+      expect(secondHttp.get(RATED_PREMIERE_ID)).not.toBeNull();
+      expect(archiveStore.lookup(RATED_PREMIERE_ID)).toBeNull();
+      await expect(
+        fs.stat(ratedAdmissionPath(harness.privateStateRoot)),
+      ).resolves.toBeDefined();
+      await expect(
+        fs.stat(ratedTombstonePath(harness.privateStateRoot)),
+      ).resolves.toBeDefined();
+    } finally {
+      await second.service.close();
+    }
+  });
 });
+
+function terminalReleaseJournal(
+  phase: "admitted" | "activated" | "live",
+  releasedAt: string,
+  outcome: "activation_lost" | "activation_refused" = "activation_lost",
+): readonly unknown[] {
+  return [
+    {
+      kind: "hold_update",
+      ts: NOW.toISOString(),
+      hold: {
+        episodeRequestId: RATED_EPISODE_REQUEST_ID,
+        premiereId: RATED_PREMIERE_ID,
+        roundId: RATED_ROUND_ID,
+        phase,
+      },
+    },
+    {
+      kind: "hold_released",
+      ts: releasedAt,
+      episodeRequestId: RATED_EPISODE_REQUEST_ID,
+      premiereId: RATED_PREMIERE_ID,
+      roundId: RATED_ROUND_ID,
+      outcome,
+      terminal: true,
+    },
+  ];
+}
+
+function ratedAdmissionPath(privateStateRoot: string): string {
+  return path.join(
+    privateStateRoot,
+    "catalog-v1",
+    "entries",
+    `${RATED_PREMIERE_ID}.admission.json`,
+  );
+}
+
+function ratedTombstonePath(privateStateRoot: string): string {
+  return path.join(
+    privateStateRoot,
+    "coordination-v1",
+    "terminal-tombstones",
+    `${RATED_PREMIERE_ID}.terminal.json`,
+  );
+}
+
+async function viWaitForArchive(
+  archiveStore: ReplayPremiereArchiveStore,
+  premiereId: string,
+): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (archiveStore.lookup(premiereId) !== null) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`archive pointer did not appear for ${premiereId}`);
+}
 
 interface IngestMaterial {
   rawReplay: Record<string, unknown>;
