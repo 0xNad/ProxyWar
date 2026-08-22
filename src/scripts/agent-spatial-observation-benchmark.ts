@@ -3,7 +3,12 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
-import type { Game, Player } from "../core/game/Game";
+import {
+  TerrainType,
+  UnitType,
+  type Game,
+  type Player,
+} from "../core/game/Game";
 import {
   buildSpatialObservationExtension,
   createAgentSpatialSnapshot,
@@ -149,8 +154,12 @@ function buildGrid(
 }
 
 interface BenchmarkPost {
+  id(): number;
   tile(): number;
+  owner(): BenchmarkPlayer;
+  type(): UnitType;
   isActive(): boolean;
+  isMarkedForDeletion(): boolean;
   isUnderConstruction(): boolean;
 }
 
@@ -194,8 +203,12 @@ class BenchmarkPlayer {
           Math.floor((post * frontier.length) / Math.max(defensePostCount, 1))
         ];
       this.posts.push({
+        id: () => this.index * 10_000 + post,
         tile: () => tile,
+        owner: () => this,
+        type: () => UnitType.DefensePost,
         isActive: () => true,
+        isMarkedForDeletion: () => false,
         isUnderConstruction: () => false,
       });
     }
@@ -231,8 +244,10 @@ class BenchmarkPlayer {
     return this.frontierTiles;
   }
 
-  units(): BenchmarkPost[] {
-    return this.posts;
+  units(...types: UnitType[]): BenchmarkPost[] {
+    return this.posts.filter(
+      (post) => types.length === 0 || types.includes(post.type()),
+    );
   }
 
   troops(): number {
@@ -275,6 +290,23 @@ function benchmarkGame(
     ref: (x: number, y: number) => y * WIDTH + x,
     isLand: (tile: number) => grid.water[tile] === 0,
     isWater: (tile: number) => grid.water[tile] === 1,
+    isShore: (tile: number) => {
+      if (grid.water[tile] === 1) return false;
+      const x = tile % WIDTH;
+      const y = Math.floor(tile / WIDTH);
+      return (
+        (x > 0 && grid.water[tile - 1] === 1) ||
+        (x + 1 < WIDTH && grid.water[tile + 1] === 1) ||
+        (y > 0 && grid.water[tile - WIDTH] === 1) ||
+        (y + 1 < HEIGHT && grid.water[tile + WIDTH] === 1)
+      );
+    },
+    terrainType: (tile: number) =>
+      tile % 19 === 0
+        ? TerrainType.Mountain
+        : tile % 7 === 0
+          ? TerrainType.Highland
+          : TerrainType.Plains,
     ownerID: (tile: number) => grid.ownerIDs[tile],
     owner: (tile: number) => {
       const smallID = grid.ownerIDs[tile];
@@ -295,7 +327,10 @@ function benchmarkGame(
       const dy = Math.floor(a / WIDTH) - Math.floor(b / WIDTH);
       return dx * dx + dy * dy;
     },
-    config: () => ({ defensePostRange: () => 30 }),
+    config: () => ({
+      defensePostRange: () => 30,
+      gameConfig: () => ({ gameMap: "World" }),
+    }),
   };
   return {
     game: game as unknown as Game,
