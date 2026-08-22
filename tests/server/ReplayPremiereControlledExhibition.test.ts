@@ -33,6 +33,7 @@ import {
   type ControlledPolicyProvenance,
 } from "../../src/scripts/replay-premiere-controlled-exhibition";
 import { deterministicAgentClientID } from "../../src/server/agents/AgentDeterministicIdentity";
+import { validateReplayPremiereControlledExecutionConfig } from "../../src/server/replay-premiere/ReplayPremiereControlledExecution";
 import {
   hashReplayPremiereJson,
   sha256Hex,
@@ -42,6 +43,24 @@ const execFileAsync = promisify(execFile);
 const GIB = 1024 * 1024 * 1024;
 
 describe("Replay Premiere controlled exhibition source", () => {
+  it("rejects Commander experiment fields instead of widening its persisted config contract", () => {
+    expect(() =>
+      validateReplayPremiereControlledExecutionConfig({
+        ...executionConfigFixture(),
+        agents: 2,
+      }),
+    ).toThrow("controlled execution config contains unknown or missing fields");
+    expect(() =>
+      validateReplayPremiereControlledExecutionConfig({
+        ...executionConfigFixture(),
+        runner: {
+          ...executionConfigFixture().runner,
+          matchedOfferedOrderSpawnBallot: true,
+        },
+      }),
+    ).toThrow("controlled runner config contains unknown or missing fields");
+  });
+
   it("derives deterministic client IDs accepted by the replay schema", () => {
     const ids = Array.from({ length: 8 }, (_, index) =>
       deterministicAgentClientID(

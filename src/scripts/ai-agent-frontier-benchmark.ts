@@ -90,7 +90,12 @@ import {
   SpawnCandidate,
 } from "../server/agents/LegalActionBuilder";
 import { LlmAgentBrain } from "../server/agents/LlmAgentBrain";
+import { LlmOptionSelector } from "../server/agents/LlmOptionSelector";
 import { LlmProviderConfigError } from "../server/agents/LlmProvider";
+import { RuleAgentBrain } from "../server/agents/RuleAgentBrain";
+import { StrategicCommanderBrain } from "../server/agents/StrategicCommanderBrain";
+import { StrategicCommanderCaller } from "../server/agents/StrategicCommanderCaller";
+import { DeterministicOptionSelector } from "../server/agents/StrategicOptionSelectors";
 import { StrategyAgentBrain } from "../server/agents/StrategyAgentBrain";
 import { GameServer } from "../server/GameServer";
 
@@ -103,7 +108,9 @@ type FrontierBrainMode =
   | "rule-planner"
   | "strategy"
   | "codex-cli"
-  | "external-http";
+  | "external-http"
+  | "commander-v0-det"
+  | "commander-v0-llm";
 
 type FrontierBenchmarkProfile = AgentStrategyProfile | "all";
 
@@ -616,6 +623,23 @@ function createBrain(
       profile,
     });
   }
+  if (
+    config.brainMode === "commander-v0-det" ||
+    config.brainMode === "commander-v0-llm"
+  ) {
+    const timeoutMs = Math.max(1, config.maxDecisionMs - 250);
+    const selector =
+      config.brainMode === "commander-v0-det"
+        ? new DeterministicOptionSelector()
+        : new LlmOptionSelector({
+            provider: createClaudeCliLlmProviderFromEnv(),
+            timeoutMs,
+          });
+    return new StrategicCommanderBrain(
+      new StrategicCommanderCaller(selector, timeoutMs),
+      new RuleAgentBrain(profile),
+    );
+  }
   if (config.brainMode === "planner-claude-cli") {
     // Run the Claude CLI from an empty dir OUTSIDE the repo so each per-decision
     // call does not reload this project's large CLAUDE.md / .claude settings / MCP
@@ -835,6 +859,12 @@ async function writeFrontierReplayArtifacts(input: {
 }
 
 function artifactBrainType(config: FrontierBenchmarkConfig): AgentBrainType {
+  if (
+    config.brainMode === "commander-v0-det" ||
+    config.brainMode === "commander-v0-llm"
+  ) {
+    return "strategic-commander";
+  }
   if (config.brainMode === "external-http") {
     return "external-http";
   }
@@ -1650,6 +1680,8 @@ const supportedBrainModes: readonly FrontierBrainMode[] = [
   "action-claude-cli",
   "codex-cli",
   "external-http",
+  "commander-v0-det",
+  "commander-v0-llm",
 ];
 
 function normalizeRuntimeMode(brainMode: FrontierBrainMode): AgentRuntimeMode {
@@ -1670,6 +1702,9 @@ function normalizeRuntimeMode(brainMode: FrontierBrainMode): AgentRuntimeMode {
       return "llm-action-selector";
     case "external-http":
       return "llm-action-selector";
+    case "commander-v0-det":
+    case "commander-v0-llm":
+      return "commander-v0-selector";
     default:
       return brainMode;
   }
@@ -1737,6 +1772,9 @@ function assertRequiredExternalBrainSucceeded(input: {
 
 function requiresExternalBrainSuccess(brainMode: FrontierBrainMode): boolean {
   if (brainMode === "external-http") {
+    return true;
+  }
+  if (brainMode === "commander-v0-llm") {
     return true;
   }
   if (brainMode !== "codex-cli" && brainMode !== "planner-codex-cli") {

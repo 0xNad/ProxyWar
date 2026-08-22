@@ -56,6 +56,7 @@ export function withDeferredDecisionTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number,
   timeoutError: () => Error,
+  onTimeout: () => void = () => undefined,
 ): { promise: Promise<T>; timeout: DeferredDecisionTimeout } {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     return {
@@ -68,6 +69,7 @@ export function withDeferredDecisionTimeout<T>(
     rejectTimeout = reject;
   });
   const timeout = createDeferredDecisionTimeout(timeoutMs, () => {
+    onTimeout();
     rejectTimeout(timeoutError());
   });
   const timedPromise = Promise.race([promise, timeoutPromise]);

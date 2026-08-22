@@ -63,12 +63,17 @@ import {
   AgentStepLockedLeagueConfig,
   runAgentStepLockedLeague,
 } from "../server/agents/AgentStepLockedLeague";
+import {
+  freeTextMessagesEnabled,
+  structuredDealsEnabled,
+} from "../server/agents/AgentTunables";
 import type {
   AgentBrain,
   AgentBrainType,
   AgentDecisionRecord,
   LegalActionKind,
 } from "../server/agents/AgentTypes";
+import { MAX_SPAWN_PREFERENCE_ACTION_IDS } from "../server/agents/AgentWireProtocol";
 import {
   ClaudeCliLlmProvider,
   createClaudeCliLlmProviderFromEnv,
@@ -78,10 +83,18 @@ import {
   CodexCliLlmProvider,
   loadCodexCliLlmProviderConfig,
 } from "../server/agents/CodexCliLlmProvider";
+import {
+  normalizeCommanderGameConfig,
+  type CommanderCanonicalGameConfig,
+} from "../server/agents/CommanderExperimentIdentity";
 import { resolveExternalAgentToken } from "../server/agents/ExternalAgentSecrets";
 import { ExternalHttpAgentBrain } from "../server/agents/ExternalHttpAgentBrain";
 import { ExternalRelayAgentBrain } from "../server/agents/ExternalRelayAgentBrain";
 import { LlmAgentBrain } from "../server/agents/LlmAgentBrain";
+import {
+  COMMANDER_PROMPT_VERSION,
+  LlmOptionSelector,
+} from "../server/agents/LlmOptionSelector";
 import { LlmProvider } from "../server/agents/LlmProvider";
 import { MockLlmProvider } from "../server/agents/MockLlmProvider";
 import {
@@ -94,6 +107,9 @@ import type { PlayerStrategySpec } from "../server/agents/PlayerStrategySpec";
 import { loadPlayerStrategySpecFromEnv } from "../server/agents/PlayerStrategySpec";
 import { RuleAgentBrain } from "../server/agents/RuleAgentBrain";
 import { StarterBotAgentBrain } from "../server/agents/StarterBotAgentBrain";
+import { StrategicCommanderBrain } from "../server/agents/StrategicCommanderBrain";
+import { StrategicCommanderCaller } from "../server/agents/StrategicCommanderCaller";
+import { DeterministicOptionSelector } from "../server/agents/StrategicOptionSelectors";
 import { GameServer } from "../server/GameServer";
 
 const log = winston.createLogger({
@@ -145,6 +161,18 @@ export interface AgentLeagueSmokeExecutionConfig {
   scenario: "league" | "attack" | "actions";
   brainMode: string;
   runnerMode: "realtime" | "step-locked";
+  /** Persisted by matched Commander runs; optional for legacy callers. */
+  agents?: number;
+  /** Persisted by matched Commander runs; optional for legacy callers. */
+  opponentBrainMode?: string | null;
+  /** Persisted by matched Commander runs; optional for legacy callers. */
+  executionSeed?: string | null;
+  /** Stage 5 matched subject seat; optional for legacy/default callers. */
+  subjectSeatIndex?: number;
+  /** Spawn-priority rotation ordinal actually passed to the league runner. */
+  episodeIndex?: number;
+  /** Exact normalized GameConfig; required by Stage 5 persisted comparisons. */
+  selectedGameConfig?: CommanderCanonicalGameConfig;
   planEveryDecisionSteps: number;
   runner: {
     turnsPerDecisionStep: number;
@@ -156,6 +184,7 @@ export interface AgentLeagueSmokeExecutionConfig {
     waitForMirrorCatchup: boolean;
     autopilotEndgameSteps: number;
     replayTailTurns: number;
+    matchedOfferedOrderSpawnBallot?: boolean;
   };
   game: {
     bots: number;
@@ -178,8 +207,34 @@ export interface AgentLeagueSmokeRunOptions {
   };
   planEveryDecisionSteps?: number;
   allowEnvironmentStrategySpec?: boolean;
+  /**
+   * Bounded test seam for --brain=strategic-commander only: replaces the
+   * OpenRouter Commander provider so verification needs no network credentials
+   * or live model. Rejected with any other brain mode.
+   */
+  commanderProviderForTesting?: LlmProvider;
+  /** Explicit provider for an offered-order matched real experiment. */
+  commanderProviderForExperiment?: LlmProvider;
+  /** Exact sealed provider used by Arm A's planner in a matched experiment. */
+  claudeProviderForExperiment?: LlmProvider;
+  /** Stage 5-only matched experiment seam; production/default runs never set it. */
+  forceOfferedOrderSpawnBallotForExperiment?: boolean;
+  /** Move the fixed subject identity from seat 0 to this matched seat. */
+  subjectSeatIndexForExperiment?: number;
+  /** Explicit sealed-spawn priority rotation ordinal. */
+  episodeIndexForExperiment?: number;
+  /** Artifact-only provenance stamped by the Stage 5 harness. */
+  commanderExperimentProvenance?: {
+    provider: string | null;
+    model: string | null;
+    promptVersion: string | null;
+  };
   deterministicSource?: {
     seed: string;
+    /** Optional deterministic GameServer id; identical matched arms share it. */
+    gameID?: string;
+    /** Versioned seed-to-game identity derivation used by matched experiments. */
+    gameIDDerivation?: string;
     createdAtMs: number;
     playbackTurnIntervalMs: number;
   };
@@ -195,11 +250,15 @@ export async function runAgentLeagueSmoke(
   options: AgentLeagueSmokeRunOptions = {},
 ) {
   validateAgentLeagueSmokeRunOptions(options);
+  const runtimeSocialExperimentFlags = {
+    structuredDeals: structuredDealsEnabled(),
+    freeTextMessages: freeTextMessagesEnabled(),
+  };
   const startedAt = options.deterministicSource?.createdAtMs ?? Date.now();
   const args = options.args ?? process.argv.slice(2);
   const scenario = scenarioFromArgs(args);
   const brainMode = brainModeFromArgs(args, scenario);
-  // --opponent-brain=<mode>: seat 0 (the subject) uses --brain; seats 1+ use this.
+  // --opponent-brain=<mode>: the configured subject uses --brain; other seats use this.
   // Enables the realigned eval — Keystone (seat 0) vs N starter-bot opponents — the
   // held-out Coworld field, instead of a uniform brain across all seats.
   const opponentBrainArg = args.find((arg) =>
@@ -254,12 +313,22 @@ export async function runAgentLeagueSmoke(
   const usesClaudeCli =
     brainMode === "planner-claude-cli" || brainMode === "action-claude-cli";
   const claudeCliProvider = usesClaudeCli
-    ? createClaudeCliLlmProviderFromEnv()
+    ? (options.claudeProviderForExperiment ??
+      createClaudeCliLlmProviderFromEnv())
     : null;
   const usesOpenRouter =
     brainMode === "openrouter" || brainMode === "planner-openrouter";
   const openRouterProvider = usesOpenRouter
     ? createOpenRouterLlmProviderFromEnv()
+    : null;
+  // Stage 6 StrategicCommander smoke mode: Commander calls ride the existing
+  // OpenRouter provider path and fail loud here when it is not configured. The
+  // injected test provider is the only alternative, so verification never
+  // silently downgrades to an unconfigured or fake manual run.
+  const strategicCommanderProvider = isCommanderLlmMode(brainMode)
+    ? (options.commanderProviderForTesting ??
+      options.commanderProviderForExperiment ??
+      createOpenRouterLlmProviderFromEnv())
     : null;
   // Promo mode: one Claude model per agent (e.g. --models=claude-fable-5,opus,sonnet),
   // optional display names (--names=Fable 5,Opus 4.8,Sonnet 4.6). Each agent gets its own
@@ -355,8 +424,14 @@ export async function runAgentLeagueSmoke(
   if (playerAgentName && explicitAgentCount && houseSpecs.length > 0) {
     houseSpecs[0].username = playerAgentName.slice(0, 27);
   }
-  const unresolvedSpecs =
+  const unresolvedSpecsUnrotated =
     manifests === null ? houseSpecs : [...manifestSpecs, ...houseSpecs];
+  const subjectSeatIndex = options.subjectSeatIndexForExperiment ?? 0;
+  const episodeIndex = options.episodeIndexForExperiment ?? 0;
+  const unresolvedSpecs =
+    options.subjectSeatIndexForExperiment === undefined
+      ? unresolvedSpecsUnrotated
+      : moveFirstSpecToSeat(unresolvedSpecsUnrotated, subjectSeatIndex);
   const specs =
     options.deterministicSource === undefined
       ? unresolvedSpecs
@@ -393,9 +468,18 @@ export async function runAgentLeagueSmoke(
     selectedGameConfig,
     disabledActionKinds,
     varySpawns: args.includes("--vary-spawns"),
+    matchedOfferedOrderSpawnBallot:
+      options.forceOfferedOrderSpawnBallotForExperiment === true,
+    matchedExperiment:
+      options.forceOfferedOrderSpawnBallotForExperiment === true,
+    agents: specs.length,
+    opponentBrainMode,
+    executionSeed: options.deterministicSource?.seed ?? null,
+    subjectSeatIndex: options.subjectSeatIndexForExperiment,
+    episodeIndex: options.episodeIndexForExperiment,
   });
   const game = new GameServer(
-    "AGENT002",
+    options.deterministicSource?.gameID ?? "AGENT002",
     log,
     options.deterministicSource?.createdAtMs ?? Date.now(),
     serverConfigForRunnerMode(runnerMode),
@@ -444,6 +528,9 @@ export async function runAgentLeagueSmoke(
     if (mode === "openrouter" || mode === "planner-openrouter") {
       return openRouterProvider;
     }
+    if (isCommanderLlmMode(mode)) {
+      return strategicCommanderProvider;
+    }
     return realLlmProvider;
   };
   const participants = createAgentParticipants(specs, log, {
@@ -454,10 +541,10 @@ export async function runAgentLeagueSmoke(
         ? undefined
         : (spec, index) => {
             const mode =
-              opponentBrainMode !== null && index > 0
+              opponentBrainMode !== null && index !== subjectSeatIndex
                 ? opponentBrainMode
                 : brainMode;
-            return createBrainForManifestOrMode(
+            const brain = createBrainForManifestOrMode(
               index < manifestCount ? manifests?.[index] : undefined,
               spec,
               scenario,
@@ -468,6 +555,18 @@ export async function runAgentLeagueSmoke(
               planEveryDecisionSteps,
               options.allowEnvironmentStrategySpec !== false,
             );
+            return options.forceOfferedOrderSpawnBallotForExperiment === true
+              ? withOfferedOrderSpawnBallot(
+                  brain,
+                  index === subjectSeatIndex
+                    ? options.commanderExperimentProvenance
+                    : undefined,
+                  runtimeProvenanceForBrainMode(
+                    mode,
+                    providerForBrainMode(mode, index),
+                  ),
+                )
+              : brain;
           },
   });
   const spectatorSnapshots: AgentSpectatorSnapshot[] = [];
@@ -479,6 +578,7 @@ export async function runAgentLeagueSmoke(
     spawnCandidates,
     log,
     disabledActionKinds,
+    episodeIndex,
   });
 
   try {
@@ -598,6 +698,7 @@ export async function runAgentLeagueSmoke(
         snapshots: spectatorSnapshots,
         notes: artifactNotes(scenario, brainMode, runnerMode),
       });
+      const terminalWinner = winnerFromGame(finalGameState);
       const artifactInput: WriteAgentLeagueRunArtifactsInput = {
         runID,
         matchID: game.id,
@@ -605,11 +706,16 @@ export async function runAgentLeagueSmoke(
         brainMode: artifactBrainMode(brainMode),
         runnerMode,
         runnerConfig: {
+          executionConfigSchemaVersion: executionConfig.schemaVersion,
           turnsPerDecisionStep: stepResult.turnsPerDecisionStep,
           turnsPerDecisionSchedule: stepResult.turnsPerDecisionSchedule,
           maxDecisionMs: stepResult.maxDecisionMs,
           maxSteps: stepLockedConfig.maxSteps,
           stepsCompleted: stepResult.stepsCompleted,
+          planEveryDecisionSteps,
+          maxSpawnAdvanceTurns: stepLockedConfig.maxSpawnAdvanceTurns,
+          waitForMirrorCatchup: stepLockedConfig.waitForMirrorCatchup,
+          requireWinner: stepLockedConfig.requireWinner,
           mirrorCatchupSucceeded: stepResult.mirrorCatchupSucceeded,
           onlyHoldReason: stepResult.onlyHoldReason,
           autopilotEndgameSteps: stepLockedConfig.autopilotExtraSteps,
@@ -622,6 +728,29 @@ export async function runAgentLeagueSmoke(
           mapSize: selectedGameConfig.gameMapSize,
           difficulty: selectedGameConfig.difficulty,
           variedSpawns: args.includes("--vary-spawns"),
+          matchedOfferedOrderSpawnBallot:
+            options.forceOfferedOrderSpawnBallotForExperiment === true,
+          disabledActionKinds,
+          opponentBrainMode,
+          rosterPolicy: rosterPolicyForOpponent(
+            opponentBrainMode,
+            subjectSeatIndex,
+            options.subjectSeatIndexForExperiment !== undefined,
+          ),
+          ...(options.subjectSeatIndexForExperiment === undefined
+            ? {}
+            : { subjectSeatIndex }),
+          ...(options.episodeIndexForExperiment === undefined
+            ? {}
+            : { episodeIndex }),
+          executionSeed: options.deterministicSource?.seed ?? null,
+          executionGameID: game.id,
+          executionGameIDDerivation:
+            options.deterministicSource?.gameIDDerivation ?? null,
+          selectedGameConfig: executionConfig.selectedGameConfig ?? null,
+          structuredDealsEnabled: runtimeSocialExperimentFlags.structuredDeals,
+          freeTextMessagesEnabled:
+            runtimeSocialExperimentFlags.freeTextMessages,
           spawnSelectionMode: "sealed-ranked-v1",
         },
         startedAt,
@@ -629,13 +758,14 @@ export async function runAgentLeagueSmoke(
         records: league.decisionRecords(),
         roster,
         finalState,
+        winner: terminalWinner,
         spectatorReplay,
         gameRecord,
         notes: artifactNotes(scenario, brainMode, runnerMode),
       };
       const artifacts = await writeSmokeRunArtifacts(options, {
         artifactInput,
-        winner: winnerFromGame(finalGameState),
+        winner: terminalWinner,
         turnCount: mirror.turnCount(),
         playbackTurnIntervalMs:
           options.deterministicSource?.playbackTurnIntervalMs ?? 1,
@@ -655,6 +785,10 @@ export async function runAgentLeagueSmoke(
 
       const allRecords = league.decisionRecords();
       assertRequiredExternalBrainSucceeded({
+        brainMode,
+        records: allRecords,
+      });
+      assertCommanderSmokeSelectedStrategicOption({
         brainMode,
         records: allRecords,
       });
@@ -807,6 +941,7 @@ export async function runAgentLeagueSmoke(
       snapshots: spectatorSnapshots,
       notes: artifactNotes(scenario, brainMode, runnerMode),
     });
+    const terminalWinner = winnerFromGame(finalGameState);
     const artifactInput: WriteAgentLeagueRunArtifactsInput = {
       runID,
       matchID: game.id,
@@ -814,7 +949,19 @@ export async function runAgentLeagueSmoke(
       brainMode: artifactBrainMode(brainMode),
       runnerMode,
       runnerConfig: {
-        ...(replayTailTurns > 0 ? { replayTailTurns } : {}),
+        executionConfigSchemaVersion: executionConfig.schemaVersion,
+        turnsPerDecisionStep: executionConfig.runner.turnsPerDecisionStep,
+        turnsPerDecisionSchedule:
+          executionConfig.runner.turnsPerDecisionSchedule,
+        maxDecisionMs: executionConfig.runner.maxDecisionMs,
+        maxSteps: executionConfig.runner.maxSteps,
+        planEveryDecisionSteps,
+        maxSpawnAdvanceTurns: executionConfig.runner.maxSpawnAdvanceTurns,
+        waitForMirrorCatchup: executionConfig.runner.waitForMirrorCatchup,
+        requireWinner: executionConfig.runner.requireWinner,
+        autopilotEndgameSteps: executionConfig.runner.autopilotEndgameSteps,
+        autopilotEngagedAtStep: null,
+        replayTailTurns,
         agents: specs.length,
         bots: botCount,
         nations: nationCount,
@@ -822,6 +969,28 @@ export async function runAgentLeagueSmoke(
         mapSize: selectedGameConfig.gameMapSize,
         difficulty: selectedGameConfig.difficulty,
         variedSpawns: args.includes("--vary-spawns"),
+        matchedOfferedOrderSpawnBallot:
+          options.forceOfferedOrderSpawnBallotForExperiment === true,
+        disabledActionKinds,
+        opponentBrainMode,
+        rosterPolicy: rosterPolicyForOpponent(
+          opponentBrainMode,
+          subjectSeatIndex,
+          options.subjectSeatIndexForExperiment !== undefined,
+        ),
+        ...(options.subjectSeatIndexForExperiment === undefined
+          ? {}
+          : { subjectSeatIndex }),
+        ...(options.episodeIndexForExperiment === undefined
+          ? {}
+          : { episodeIndex }),
+        executionSeed: options.deterministicSource?.seed ?? null,
+        executionGameID: game.id,
+        executionGameIDDerivation:
+          options.deterministicSource?.gameIDDerivation ?? null,
+        selectedGameConfig: executionConfig.selectedGameConfig ?? null,
+        structuredDealsEnabled: runtimeSocialExperimentFlags.structuredDeals,
+        freeTextMessagesEnabled: runtimeSocialExperimentFlags.freeTextMessages,
         spawnSelectionMode: "sealed-ranked-v1",
       },
       startedAt,
@@ -829,13 +998,14 @@ export async function runAgentLeagueSmoke(
       records: league.decisionRecords(),
       roster,
       finalState,
+      winner: terminalWinner,
       spectatorReplay,
       gameRecord,
       notes: artifactNotes(scenario, brainMode, runnerMode),
     };
     const artifacts = await writeSmokeRunArtifacts(options, {
       artifactInput,
-      winner: winnerFromGame(finalGameState),
+      winner: terminalWinner,
       turnCount: mirror.turnCount(),
       playbackTurnIntervalMs:
         options.deterministicSource?.playbackTurnIntervalMs ?? 1,
@@ -853,6 +1023,10 @@ export async function runAgentLeagueSmoke(
       await writeAgentDemoIndex();
     }
     assertRequiredExternalBrainSucceeded({
+      brainMode,
+      records: league.decisionRecords(),
+    });
+    assertCommanderSmokeSelectedStrategicOption({
       brainMode,
       records: league.decisionRecords(),
     });
@@ -966,6 +1140,73 @@ function validateAgentLeagueSmokeRunOptions(
   ) {
     throw new Error("agent league smoke planner cadence must be from 1 to 10");
   }
+  const requestedArgs = options.args ?? process.argv.slice(2);
+  const requestedBrainMode = brainModeFromArgs(
+    requestedArgs,
+    scenarioFromArgs(requestedArgs),
+  );
+  if (
+    options.commanderProviderForTesting !== undefined &&
+    !isCommanderLlmMode(requestedBrainMode)
+  ) {
+    throw new Error(
+      "a Commander test provider can only be injected into Commander LLM runs",
+    );
+  }
+  if (
+    options.commanderProviderForExperiment !== undefined &&
+    (!isCommanderLlmMode(requestedBrainMode) ||
+      options.forceOfferedOrderSpawnBallotForExperiment !== true)
+  ) {
+    throw new Error(
+      "a Commander experiment provider requires a Commander LLM mode and matched experiment seam",
+    );
+  }
+  if (
+    options.commanderProviderForTesting !== undefined &&
+    options.commanderProviderForExperiment !== undefined
+  ) {
+    throw new Error(
+      "Commander test and experiment providers are mutually exclusive",
+    );
+  }
+  if (
+    options.commanderExperimentProvenance !== undefined &&
+    options.forceOfferedOrderSpawnBallotForExperiment !== true
+  ) {
+    throw new Error(
+      "Commander experiment provenance requires the matched experiment seam",
+    );
+  }
+  if (
+    options.claudeProviderForExperiment !== undefined &&
+    (requestedBrainMode !== "planner-claude-cli" ||
+      options.forceOfferedOrderSpawnBallotForExperiment !== true)
+  ) {
+    throw new Error(
+      "a Claude experiment provider requires planner-claude-cli and the matched experiment seam",
+    );
+  }
+  for (const [label, value] of [
+    ["subject seat", options.subjectSeatIndexForExperiment],
+    ["episode index", options.episodeIndexForExperiment],
+  ] as const) {
+    if (
+      value !== undefined &&
+      (!Number.isSafeInteger(value) || value < 0 || value > 7)
+    ) {
+      throw new Error(`Commander experiment ${label} must be from 0 to 7`);
+    }
+  }
+  if (
+    (options.subjectSeatIndexForExperiment !== undefined ||
+      options.episodeIndexForExperiment !== undefined) &&
+    options.forceOfferedOrderSpawnBallotForExperiment !== true
+  ) {
+    throw new Error(
+      "Commander experiment seat and priority rotation require the matched experiment seam",
+    );
+  }
   if (options.injectedManifests !== undefined) {
     for (const entry of options.injectedManifests) {
       const rawManifest = Buffer.from(entry.rawManifestBase64, "base64");
@@ -1022,12 +1263,35 @@ function buildAgentLeagueSmokeExecutionConfig(input: {
   selectedGameConfig: GameConfig;
   disabledActionKinds: LegalActionKind[];
   varySpawns: boolean;
+  matchedOfferedOrderSpawnBallot: boolean;
+  matchedExperiment: boolean;
+  agents: number;
+  opponentBrainMode: SmokeBrainMode | null;
+  executionSeed: string | null;
+  subjectSeatIndex?: number;
+  episodeIndex?: number;
 }): AgentLeagueSmokeExecutionConfig {
   return {
     schemaVersion: 1,
     scenario: input.scenario,
     brainMode: input.brainMode,
     runnerMode: input.runnerMode,
+    ...(input.matchedExperiment
+      ? {
+          agents: input.agents,
+          opponentBrainMode: input.opponentBrainMode,
+          executionSeed: input.executionSeed,
+          ...(input.subjectSeatIndex === undefined
+            ? {}
+            : { subjectSeatIndex: input.subjectSeatIndex }),
+          ...(input.episodeIndex === undefined
+            ? {}
+            : { episodeIndex: input.episodeIndex }),
+          selectedGameConfig: normalizeCommanderGameConfig(
+            input.selectedGameConfig,
+          ),
+        }
+      : {}),
     planEveryDecisionSteps: input.planEveryDecisionSteps,
     runner: {
       turnsPerDecisionStep: input.stepLockedConfig.turnsPerDecisionStep,
@@ -1042,6 +1306,12 @@ function buildAgentLeagueSmokeExecutionConfig(input: {
       waitForMirrorCatchup: input.stepLockedConfig.waitForMirrorCatchup,
       autopilotEndgameSteps: input.stepLockedConfig.autopilotExtraSteps,
       replayTailTurns: input.replayTailTurns,
+      ...(input.matchedExperiment
+        ? {
+            matchedOfferedOrderSpawnBallot:
+              input.matchedOfferedOrderSpawnBallot,
+          }
+        : {}),
     },
     game: {
       bots: input.selectedGameConfig.bots ?? 0,
@@ -1055,6 +1325,54 @@ function buildAgentLeagueSmokeExecutionConfig(input: {
       ...new Set(input.disabledActionKinds),
     ].sort() as LegalActionKind[],
   };
+}
+
+function rosterPolicyForOpponent(
+  opponentBrainMode: SmokeBrainMode | null,
+  subjectSeatIndex = 0,
+  rotatingSubject = false,
+): string {
+  return opponentBrainMode === null
+    ? "uniform-brain"
+    : opponentBrainMode === "starter-bot"
+      ? rotatingSubject
+        ? "rotating-subject-vs-starter-bot"
+        : `subject-seat-${subjectSeatIndex}-vs-starter-bot`
+      : rotatingSubject
+        ? "rotating-subject-vs-opponent-brain"
+        : `subject-seat-${subjectSeatIndex}-vs-opponent-brain`;
+}
+
+function moveFirstSpecToSeat<T>(specs: readonly T[], seatIndex: number): T[] {
+  if (
+    !Number.isSafeInteger(seatIndex) ||
+    seatIndex < 0 ||
+    seatIndex >= specs.length
+  ) {
+    throw new Error("Commander experiment subject seat is outside the roster");
+  }
+  const [subject, ...opponents] = specs;
+  if (subject === undefined) {
+    throw new Error("Commander experiment requires a subject participant");
+  }
+  const rotated = [...opponents];
+  rotated.splice(seatIndex, 0, subject);
+  return rotated;
+}
+
+/** Exact normalized game configuration used by a manifest-free smoke run. */
+export function agentLeagueSmokeSelectedGameConfig(
+  args: string[],
+): CommanderCanonicalGameConfig {
+  const scenario = scenarioFromArgs(args);
+  const base = gameConfigForScenario(scenario, args);
+  const agents = positiveIntegerArg(args, "--agents=", 4);
+  return normalizeCommanderGameConfig({
+    ...base,
+    bots: nonNegativeIntegerArg(args, "--bots=", 0),
+    nations: nationsArg(args, "disabled"),
+    maxPlayers: Math.max(base.maxPlayers ?? 4, agents),
+  });
 }
 
 async function advanceReplayTail(input: {
@@ -1267,6 +1585,15 @@ function brainModeFromArgs(
   }
   if (args.includes("--brain=mock-llm")) {
     return "mock-llm";
+  }
+  if (args.includes("--brain=strategic-commander")) {
+    return "strategic-commander";
+  }
+  if (args.includes("--brain=commander-v0-det")) {
+    return "commander-v0-det";
+  }
+  if (args.includes("--brain=commander-v0-llm")) {
+    return "commander-v0-llm";
   }
   return scenario === "attack" || scenario === "actions" ? "mock-llm" : "rule";
 }
@@ -1516,6 +1843,121 @@ function createBrainForManifestOrMode(
   );
 }
 
+/**
+ * Experiment-only wrapper used by the Stage 5 matched harness. Every arm
+ * submits the same bounded offered-order spawn ballot, while active play and
+ * failure/feedback behavior remain the original brain's exact implementation.
+ */
+function withOfferedOrderSpawnBallot(
+  brain: AgentBrain,
+  assertedProvenance:
+    | AgentLeagueSmokeRunOptions["commanderExperimentProvenance"]
+    | undefined,
+  runtimeProvenance: CommanderRuntimeProvenance,
+): AgentBrain {
+  const wrapped: AgentBrain = {
+    get brainType() {
+      return brain.brainType;
+    },
+    get internalDecisionTimeoutMs() {
+      return brain.internalDecisionTimeoutMs;
+    },
+    decide: async (input) => {
+      if (input.observation.phase !== "spawn") {
+        const decision = await brain.decide(input);
+        return {
+          ...decision,
+          metadata: {
+            ...decision.metadata,
+            ...(assertedProvenance === undefined
+              ? {}
+              : {
+                  commanderExperimentProvider: assertedProvenance.provider,
+                  commanderExperimentModel: assertedProvenance.model,
+                  commanderExperimentPromptVersion:
+                    assertedProvenance.promptVersion,
+                }),
+            commanderRuntimeProvider: runtimeProvenance.provider,
+            commanderRuntimeModel: runtimeProvenance.model,
+            commanderRuntimePromptVersion: runtimeProvenance.promptVersion,
+          },
+        };
+      }
+      const offered = input.legalActions
+        .filter((action) => action.kind === "spawn")
+        .slice(0, MAX_SPAWN_PREFERENCE_ACTION_IDS);
+      if (offered.length === 0) {
+        return brain.decide(input);
+      }
+      return {
+        actionID: offered[0]!.id,
+        spawnPreferenceActionIDs: offered.map((action) => action.id),
+        reason: "Stage 5 matched experiment offered-order spawn ballot",
+        metadata: { commanderExperimentMatchedSpawnBallot: true },
+      };
+    },
+    ...(brain.failClosed === undefined
+      ? {}
+      : { failClosed: (input) => brain.failClosed!(input) }),
+    ...(brain.onActionResult === undefined
+      ? {}
+      : { onActionResult: (feedback) => brain.onActionResult!(feedback) }),
+  };
+  return wrapped;
+}
+
+interface CommanderRuntimeProvenance {
+  provider: string | null;
+  model: string | null;
+  promptVersion: string | null;
+}
+
+export const PLANNER_RUNTIME_PROMPT_VERSION = "planner-executor-current-v1";
+
+/**
+ * Runtime binding evidence comes from the exact constructed mode/provider,
+ * never from the Stage 5 manifest or its asserted experiment labels.
+ */
+function runtimeProvenanceForBrainMode(
+  mode: SmokeBrainMode,
+  provider: LlmProvider | null,
+): CommanderRuntimeProvenance {
+  if (mode === "planner") {
+    return {
+      provider: "mock-llm",
+      model: "mock-planner-v0",
+      promptVersion: PLANNER_RUNTIME_PROMPT_VERSION,
+    };
+  }
+  if (mode === "commander-v0-det") {
+    return { provider: null, model: null, promptVersion: null };
+  }
+  if (mode === "commander-v0-llm" || mode === "strategic-commander") {
+    return {
+      provider: provider?.providerType ?? null,
+      model: normalizedProviderModel(provider),
+      promptVersion: COMMANDER_PROMPT_VERSION,
+    };
+  }
+  if (
+    mode === "planner-claude-cli" ||
+    mode === "planner-codex-cli" ||
+    mode === "planner-openrouter"
+  ) {
+    return {
+      provider: provider?.providerType ?? null,
+      model: normalizedProviderModel(provider),
+      promptVersion: PLANNER_RUNTIME_PROMPT_VERSION,
+    };
+  }
+  return { provider: null, model: null, promptVersion: null };
+}
+
+function normalizedProviderModel(provider: LlmProvider | null): string | null {
+  const model = provider?.model?.trim();
+  return model === undefined || model === "" ? null : model;
+}
+
 function externalAgentTimeoutMs(input: {
   manifestTimeoutMs: number | undefined;
   providerTimeoutMs: number | undefined;
@@ -1582,6 +2024,36 @@ function createBrainForMode(
 ): AgentBrain {
   if (brainMode === "mock-llm") {
     return createMockLlmBrain(spec, scenario, providerTimeoutMs);
+  }
+  if (
+    brainMode === "strategic-commander" ||
+    brainMode === "commander-v0-llm" ||
+    brainMode === "commander-v0-det"
+  ) {
+    const selector =
+      brainMode === "commander-v0-det"
+        ? new DeterministicOptionSelector()
+        : provider === null
+          ? null
+          : new LlmOptionSelector({
+              provider,
+              timeoutMs: commanderProviderTimeoutBelowOuter(providerTimeoutMs),
+            });
+    if (selector === null) {
+      throw new LlmProviderConfigError(
+        `${brainMode} smoke requested but no Commander provider was configured.`,
+      );
+    }
+    // The tactical brain owns spawn/non-active phases only. Active play is
+    // executed binding-first by StrategicOptionExecutor, including its narrow
+    // same-target support batch; it never escapes to RuleAgentBrain.
+    return new StrategicCommanderBrain(
+      new StrategicCommanderCaller(
+        selector,
+        commanderProviderTimeoutBelowOuter(providerTimeoutMs),
+      ),
+      new RuleAgentBrain(spec.profile),
+    );
   }
   if (brainMode === "planner") {
     return new PlannerExecutorAgentBrain({
@@ -1731,6 +2203,18 @@ function createBrainForMode(
   throw new Error(`Unsupported brain mode: ${brainMode}`);
 }
 
+function commanderProviderTimeoutBelowOuter(
+  outerTimeoutMs: number | undefined,
+): number | undefined {
+  if (outerTimeoutMs === undefined) return undefined;
+  if (!Number.isSafeInteger(outerTimeoutMs) || outerTimeoutMs <= 1) {
+    throw new Error(
+      "Strategic Commander requires an outer decision timeout above 1ms",
+    );
+  }
+  return Math.min(12_000, outerTimeoutMs - 1);
+}
+
 function assertAttackSmokeSucceeded(
   records: Awaited<ReturnType<AgentLeagueMatchRunner["runDecisionTurn"]>>,
   gameState: Game,
@@ -1816,7 +2300,10 @@ type SmokeBrainMode =
   | "planner-claude-cli"
   | "action-claude-cli"
   | "openrouter"
-  | "planner-openrouter";
+  | "planner-openrouter"
+  | "strategic-commander"
+  | "commander-v0-det"
+  | "commander-v0-llm";
 type SmokeRunnerMode = "realtime" | "step-locked";
 
 function defaultRunID(
@@ -1838,6 +2325,13 @@ function artifactBrainMode(brainMode: SmokeBrainMode): AgentBrainType {
   if (brainMode === "starter-bot") {
     // StarterBotAgentBrain.brainType === "rule" (a deterministic rule policy).
     return "rule";
+  }
+  if (
+    brainMode === "strategic-commander" ||
+    brainMode === "commander-v0-det" ||
+    brainMode === "commander-v0-llm"
+  ) {
+    return "strategic-commander";
   }
   return brainMode === "planner" ||
     brainMode === "planner-codex-cli" ||
@@ -1895,7 +2389,12 @@ function finalKnownState(input: {
       gold: player.gold().toString(),
     }));
   return {
-    phase: input.gameState.inSpawnPhase() ? "spawn" : "active",
+    phase:
+      input.gameState.getWinner() !== null
+        ? "finished"
+        : input.gameState.inSpawnPhase()
+          ? "spawn"
+          : "active",
     tick: input.gameState.ticks(),
     turnCount: input.turnCount,
     players: input.participants.map((participant) => {
@@ -1979,7 +2478,12 @@ function assertRequiredExternalBrainSucceeded(input: {
           ? "codex-cli"
           : // starter-bot is a deterministic rule policy (no external calls) — same
             // cleanliness class as "rule".
-            input.brainMode === "starter-bot"
+            // Commander provider failures are absorbed by an attributable
+            // same-option-set fallback plan and certified separately below.
+            input.brainMode === "starter-bot" ||
+              input.brainMode === "strategic-commander" ||
+              input.brainMode === "commander-v0-det" ||
+              input.brainMode === "commander-v0-llm"
             ? "rule"
             : input.brainMode,
     records: input.records,
@@ -2021,6 +2525,42 @@ function assertRequiredExternalBrainSucceeded(input: {
       `rejectedIntents=${report.rejectedIntents}`,
       `firstFailure=${report.firstFailureReason}`,
     ].join(" "),
+  );
+}
+
+/**
+ * Stage 7 certification: a strategic-commander smoke must carry positive
+ * evidence that the Commander actually commanded. A provider failure during
+ * the match is still absorbed by the plan lifecycle's deterministic option
+ * fallback, but a run where NO decision carries
+ * commanderSelectedStrategicOptionId ran entirely on that fallback and must
+ * never certify as Commander play.
+ */
+function assertCommanderSmokeSelectedStrategicOption(input: {
+  brainMode: SmokeBrainMode;
+  records: AgentDecisionRecord[];
+}): void {
+  if (!isCommanderLlmMode(input.brainMode)) {
+    return;
+  }
+  const hasCommanderEvidence = input.records.some(
+    (record) =>
+      record.decisionMetadata?.commanderSelectedStrategicOptionId !== undefined,
+  );
+  if (hasCommanderEvidence) {
+    return;
+  }
+  throw new Error(
+    "strategic-commander smoke failed certification: no decision carries " +
+      "commanderSelectedStrategicOptionId, so no Commander-authored plan was " +
+      "ever executed and the whole match ran on fallback-authored plans. " +
+      "Refusing to present a fallback-only run as Commander play.",
+  );
+}
+
+function isCommanderLlmMode(brainMode: SmokeBrainMode): boolean {
+  return (
+    brainMode === "strategic-commander" || brainMode === "commander-v0-llm"
   );
 }
 

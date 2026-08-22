@@ -124,7 +124,7 @@ export const DEFAULT_REPLAY_PREMIERE_CATALOG_LIMITS: ReplayPremiereCatalogLimits
   Object.freeze({
     maxEntries: 128,
     maxEntryBytes: 8 * 1024 * 1024,
-    maxTotalEntryBytes: 64 * 1024 * 1024,
+    maxTotalEntryBytes: 256 * 1024 * 1024,
     maxSourceBytes: 256 * 1024 * 1024,
     maxAuthoritativeResultBytes: 2 * 1024 * 1024,
   });

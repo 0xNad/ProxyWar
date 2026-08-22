@@ -217,6 +217,42 @@ export const PublicSeasonSchema = z.object({
 });
 export type PublicSeason = z.infer<typeof PublicSeasonSchema>;
 
+const RoundIntegrityAssessmentSchema = z.object({
+  roundId: z.string(),
+  roundNumber: z.number(),
+  completedAt: z.string(),
+  expectedEpisodeCount: z.number(),
+  observedEpisodeCount: z.number(),
+  scoreBearingCount: z.number(),
+  effectiveFailureCount: z.number(),
+  phantomFailureCount: z.number(),
+  otherFailureCount: z.number(),
+  allowedFailureCount: z.number(),
+  allowedFailureRate: z.number(),
+  verdict: z.enum(["healthy", "breach"]),
+  evidenceHash: z.string(),
+});
+
+const RoundIntegrityStateSchema = z.object({
+  status: z.enum(["healthy", "confirmation_pending", "degraded"]),
+  checkedAt: z.string(),
+  settings: z.object({
+    expectedEpisodesPerRound: z.number(),
+    roundIntervalMinutes: z.number(),
+    allowedFailureRate: z.number(),
+    allowedFailureCount: z.number(),
+  }),
+  latestCompletedRound: RoundIntegrityAssessmentSchema,
+  lastConfirmedBreach: RoundIntegrityAssessmentSchema.nullable(),
+  breachObservations: z.array(
+    z.object({
+      roundId: z.string(),
+      evidenceHash: z.string(),
+      firstObservedAt: z.string(),
+    }),
+  ),
+});
+
 export const ReadModelSchema = z.object({
   schemaVersion: z.literal(1),
   generatedAt: z.string(),
@@ -225,7 +261,11 @@ export const ReadModelSchema = z.object({
   feedStates: z.object({
     championFeedStale: z.boolean(),
     replayFeedStale: z.boolean(),
+    // Additive for cached/pre-upgrade read models; the server emits it on
+    // every new publication while older snapshots safely parse as absent.
+    roundIntegrityFeedStale: z.boolean().optional(),
   }),
+  roundIntegrity: RoundIntegrityStateSchema.nullable().optional(),
   league: z.object({
     id: z.string(),
     name: z.string(),

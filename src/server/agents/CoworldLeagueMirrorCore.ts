@@ -27,6 +27,7 @@ import {
   type LatestPremierePointer,
   type PremiereSuppressionState,
 } from "./CoworldLeaguePremiereSuppression";
+import { parseCoworldLadderIntegritySettings } from "./CoworldLeagueRoundIntegrity";
 import type {
   CoworldLeagueEpisodePlayerRow,
   CoworldLeagueEpisodeRow,
@@ -116,14 +117,20 @@ export function parseLeagueSummary(
   const commissionerConfig = asRecord(league.commissioner_config);
   const stages = asArray(commissionerConfig?.stages);
   const firstStage = asRecord(stages[0]);
+  const ladderSettings = parseCoworldLadderIntegritySettings(league);
   return {
     id,
     name: asString(league.name) ?? "Coworld league",
     description: asString(league.description),
-    roundIntervalMinutes: asNumber(
-      commissionerConfig?.schedule_interval_minutes,
-    ),
-    episodesPerRound: asNumber(firstStage?.num_episodes),
+    // Observatory moved these live controls to settings.ladder. Prefer the
+    // current authoritative shape while retaining the legacy commissioner
+    // fallback for old fixtures and archived league payloads.
+    roundIntervalMinutes:
+      ladderSettings?.roundIntervalMinutes ??
+      asNumber(commissionerConfig?.schedule_interval_minutes),
+    episodesPerRound:
+      ladderSettings?.expectedEpisodesPerRound ??
+      asNumber(firstStage?.num_episodes),
   };
 }
 

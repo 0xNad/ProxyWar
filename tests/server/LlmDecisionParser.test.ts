@@ -313,6 +313,109 @@ describe("LlmDecisionParser selectedLegalActionIds", () => {
 describe.each([
   ["strict", new LlmDecisionParser()],
   ["robust", new LlmDecisionParser({ strict: false })],
+] as const)("LlmDecisionParser social side slots (%s)", (_mode, parser) => {
+  const dealsFlag = "PROXYWAR_TUNE_STRUCTURED_DEALS";
+  const messagesFlag = "PROXYWAR_TUNE_FREETEXT_MESSAGES";
+  const originalDealsFlag = process.env[dealsFlag];
+  const originalMessagesFlag = process.env[messagesFlag];
+
+  beforeEach(() => {
+    process.env[dealsFlag] = "1";
+    process.env[messagesFlag] = "1";
+  });
+
+  afterEach(() => {
+    if (originalDealsFlag === undefined) {
+      delete process.env[dealsFlag];
+    } else {
+      process.env[dealsFlag] = originalDealsFlag;
+    }
+    if (originalMessagesFlag === undefined) {
+      delete process.env[messagesFlag];
+    } else {
+      process.env[messagesFlag] = originalMessagesFlag;
+    }
+  });
+
+  it.each(["", "   ", "\u0007"])(
+    "preserves raw padded ids and the present message pair %#",
+    (messageText) => {
+      const result = parser.parse(
+        reply({
+          selectedLegalActionId: "attack:one",
+          selectedDealActionId: " deal:exact ",
+          selectedMessageActionId: " message:exact ",
+          messageText,
+        }),
+        MENU,
+      );
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.selectedDealActionId).toBe(" deal:exact ");
+      expect(result.selectedMessageActionId).toBe(" message:exact ");
+      expect(result.messageText).toBe(messageText);
+    },
+  );
+
+  it("preserves exact valid ids and text byte-for-byte", () => {
+    const result = parser.parse(
+      reply({
+        selectedLegalActionId: "attack:one",
+        selectedDealActionId: "deal:exact",
+        selectedMessageActionId: "message:exact",
+        messageText: "  exact words stay padded  ",
+      }),
+      MENU,
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.selectedDealActionId).toBe("deal:exact");
+    expect(result.selectedMessageActionId).toBe("message:exact");
+    expect(result.messageText).toBe("  exact words stay padded  ");
+  });
+
+  it.each([
+    [{ selectedMessageActionId: "message:exact" }],
+    [{ messageText: "present without id" }],
+  ])("rejects a partial comms pair: %j", (sideFields) => {
+    const result = parser.parse(
+      reply({ selectedLegalActionId: "attack:one", ...sideFields }),
+      MENU,
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      reason:
+        "selectedMessageActionId and messageText must be provided together",
+    });
+  });
+
+  it.each([
+    [
+      { selectedDealActionId: 7 },
+      "selectedDealActionId must be a string when present",
+    ],
+    [
+      { selectedMessageActionId: null, messageText: "hello" },
+      "selectedMessageActionId must be a string when present",
+    ],
+    [
+      { selectedMessageActionId: "message:exact", messageText: 7 },
+      "messageText must be a string when present",
+    ],
+  ])("rejects a malformed present side slot: %j", (sideFields, reason) => {
+    const result = parser.parse(
+      reply({ selectedLegalActionId: "attack:one", ...sideFields }),
+      MENU,
+    );
+    expect(result).toMatchObject({ ok: false, reason });
+  });
+});
+
+describe.each([
+  ["strict", new LlmDecisionParser()],
+  ["robust", new LlmDecisionParser({ strict: false })],
 ] as const)("LlmDecisionParser spawn preferences (%s)", (_mode, parser) => {
   it("keeps a legacy scalar-only spawn reply unchanged", () => {
     const result = parser.parse(

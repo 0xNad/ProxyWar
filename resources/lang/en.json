@@ -1031,6 +1031,8 @@
     "standings_provenance": "Score is a rolling rating from recent finishing places — higher is better, and it is not a percentage. Rated rounds is how many rounds it is based on, so a low number means a provisional score. Both come from Coworld's rating row; the active champion is shown separately when it differs.",
     "champion_feed_delayed": "Champion status delayed — standings show rating rows only.",
     "replay_feed_delayed": "Replay feed delayed — standings and rounds are current; showing the last available battles.",
+    "round_integrity_degraded": "Round integrity degraded — the latest verified completed round exceeded its score-bearing failure tolerance.",
+    "round_integrity_feed_delayed": "Round-integrity check delayed — no new assessment was published.",
     "premiere_now_eyebrow": "Premiering now",
     "premiere_scheduled_eyebrow": "Going live",
     "premiere_heading": "Sealed premiere",

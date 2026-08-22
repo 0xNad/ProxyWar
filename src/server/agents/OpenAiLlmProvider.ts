@@ -22,9 +22,11 @@ interface OpenAiResponseBody {
 
 export class OpenAiLlmProvider implements LlmProvider {
   readonly providerType = "openai";
+  readonly model: string;
   private readonly fetchFn: FetchLike;
 
   constructor(private readonly config: OpenAiLlmProviderConfig) {
+    this.model = config.model;
     this.fetchFn = config.fetchFn ?? globalThis.fetch.bind(globalThis);
   }
 

@@ -20,9 +20,12 @@
  *   spawnPreferenceLegalActionIds — OPTIONAL spawn-only ballot, forwarded as
  *     spawnPreferenceActionIDs with malformed/overflow evidence preserved for
  *     whole-ballot backend rejection
- *   selectedDealActionId   — deal side channel (unchanged)
+ *   selectedDealActionId   — OPTIONAL deal side channel, forwarded raw when
+ *     bounded and as an explicit invalid sentinel when malformed/overlong
  *   selectedMessageActionId + messageText — OPTIONAL comms slot, forwarded as
- *     the messageActionID/messageText PAIR the league's AgentDecision declares
+ *     the messageActionID/messageText fields the league's AgentDecision declares;
+ *     raw bounded strings (including blank/control-only strings) survive so
+ *     the backend validator records the rejection
  *
  * Bounds-only discipline: menu membership is deliberately NOT checked here.
  * The league runner's decision validator is the recording authority — dropping
@@ -125,28 +128,35 @@ export const MAX_WIRE_ACTION_ID_LENGTH = 200;
  * it would be introduced HERE, one layer below the code that forbids it.
  *
  * So the bound sits high enough that every text the validator could possibly
- * accept passes through byte-identically. Note the validator collapses
- * whitespace BEFORE measuring, so a legitimately-accepted message can be much
- * longer raw than 280; the headroom covers pretty-printed bodies rather than
- * assuming that policies emit tight text.
+ * accept passes through byte-identically. The validator measures the exact raw
+ * quote and rejects rather than normalizes unsafe layout or excess length.
  */
 export const MAX_WIRE_MESSAGE_TEXT_LENGTH = 4000;
 
 /**
  * Stand-in for a body that overflows the transport bound. Not a truncation:
- * slicing an overlong body could yield text that collapses UNDER the cap and
- * is then accepted as a shorter message the agent never wrote. This sentinel
- * is exactly MAX_WIRE_MESSAGE_TEXT_LENGTH non-whitespace characters, so it
- * cannot collapse below its own length and is therefore guaranteed to fail the
- * validator's cap check (the parity test pins bound > cap).
+ * slicing an overlong body could yield a shorter message the agent never wrote.
+ * This sentinel is exactly MAX_WIRE_MESSAGE_TEXT_LENGTH characters and is
+ * therefore guaranteed to fail the validator's exact raw-length cap (the
+ * parity test pins transport bound > validator cap).
  *
- * The paired id still rides along, so the attempt is recorded as a normal
- * rejection in `commsSlotRequestedID`/`commsSlotRejected` instead of vanishing
- * — the same "preserve an explicit invalid sentinel" discipline the spawn
- * ballot uses, and the reason this is not the silent adapter-side drop the
- * header warns about.
+ * Any independently present id still rides along, so the attempt is recorded
+ * as a rejection instead of vanishing — the same "preserve an explicit invalid
+ * sentinel" discipline the spawn ballot uses, and the reason this is not the
+ * silent adapter-side drop the header warns about.
  */
 const OVERSIZE_MESSAGE_TEXT_SENTINEL = "x".repeat(MAX_WIRE_MESSAGE_TEXT_LENGTH);
+
+/**
+ * Existing wire convention for an authored action-id attempt whose original
+ * value cannot safely be retained. Empty is bounded and cannot equal a legal
+ * offered id, so exact backend lookup must reject it. This is deliberately not
+ * an overlong prefix: truncation could turn an invalid id into a valid one.
+ */
+const INVALID_WIRE_ACTION_ID_SENTINEL = "";
+
+/** Bounded invalid witness for a non-string comms field that would vanish. */
+const INVALID_WIRE_MESSAGE_TEXT_SENTINEL = "";
 
 export interface NormalizedDecisionResponse {
   actionID: string;
@@ -157,11 +167,14 @@ export interface NormalizedDecisionResponse {
    * entries as bounded evidence of a malformed authored ballot.
    */
   spawnPreferenceActionIDs?: unknown;
+  /** Present whenever the wire carried selectedDealActionId, even malformed. */
   dealActionID?: string;
   /**
    * Comms slot, named to match the AgentDecision fields the league reads
-   * (AgentTypes.messageActionID / messageText). Present only as a PAIR — see
-   * normalizeDecisionResponse.
+   * (AgentTypes.messageActionID / messageText). Fields are forwarded
+   * independently so the backend validator can distinguish id-only from
+   * text-only attempts. A bounded invalid sentinel is used only when every
+   * present value would otherwise disappear.
    */
   messageActionID?: string;
   messageText?: string;
@@ -285,43 +298,55 @@ export function normalizeDecisionResponse(
     }
   }
 
-  // Optional second selection (the diplomacy slot). Forwarded only when the
-  // player actually sent a non-empty string; the league runner's
-  // AgentDecisionValidator is the sole authority on whether it is a legal
-  // deal action id.
-  const dealActionID =
-    typeof message.selectedDealActionId === "string" &&
-    message.selectedDealActionId.trim().length > 0
-      ? message.selectedDealActionId.trim().slice(0, MAX_WIRE_ACTION_ID_LENGTH)
-      : undefined;
+  // Optional second selection (the diplomacy slot). Presence is authoritative:
+  // a bounded string rides verbatim (including whitespace), while a malformed
+  // or overlong value becomes an explicit invalid sentinel. Never trim or
+  // truncate: either could turn a rejected attempt into an offered id.
+  const dealActionID = Object.hasOwn(message, "selectedDealActionId")
+    ? typeof message.selectedDealActionId === "string" &&
+      message.selectedDealActionId.length <= MAX_WIRE_ACTION_ID_LENGTH
+      ? message.selectedDealActionId
+      : INVALID_WIRE_ACTION_ID_SENTINEL
+    : undefined;
 
-  // Optional third selection (the comms slot). Forwarded as a PAIR or not at
-  // all, mirroring LlmDecisionParser.parsedMessageSlot: an id must never reach
-  // the validator without the body it has to be judged with. This is a SHAPE
-  // gate, not a menu gate — whether the id is a currently-offered `message:`
-  // action remains AgentDecisionValidator's call alone, as does the 280-char
-  // cap and the control/bidi/zero-width contract.
+  // Optional third selection (the comms slot). Forward the two authored fields
+  // independently so id-only and text-only attempts retain their truthful
+  // backend rejection. Raw bounded strings — including padded ids and
+  // blank/control-only bodies — stay raw. An overlong id always becomes the
+  // explicit invalid-id sentinel. A non-string value is omitted when the
+  // other authored string already preserves the attempt; only when every
+  // present value would otherwise vanish do we retain one invalid sentinel.
+  // This is a bounds/shape gate only, never a menu-membership authority.
   const messageActionIDRaw = message.selectedMessageActionId;
   const messageTextRaw = message.messageText;
+  const messageActionIDPresent = Object.hasOwn(
+    message,
+    "selectedMessageActionId",
+  );
+  const messageTextPresent = Object.hasOwn(message, "messageText");
   let messageActionID: string | undefined;
   let messageText: string | undefined;
+  if (messageActionIDPresent && typeof messageActionIDRaw === "string") {
+    messageActionID =
+      messageActionIDRaw.length <= MAX_WIRE_ACTION_ID_LENGTH
+        ? messageActionIDRaw
+        : INVALID_WIRE_ACTION_ID_SENTINEL;
+  }
+  if (messageTextPresent && typeof messageTextRaw === "string") {
+    messageText =
+      messageTextRaw.length > MAX_WIRE_MESSAGE_TEXT_LENGTH
+        ? OVERSIZE_MESSAGE_TEXT_SENTINEL
+        : messageTextRaw;
+  }
   if (
-    typeof messageActionIDRaw === "string" &&
-    typeof messageTextRaw === "string"
+    messageActionID === undefined &&
+    messageText === undefined &&
+    (messageActionIDPresent || messageTextPresent)
   ) {
-    const trimmedID = messageActionIDRaw
-      .trim()
-      .slice(0, MAX_WIRE_ACTION_ID_LENGTH);
-    if (trimmedID.length > 0 && messageTextRaw.trim().length > 0) {
-      messageActionID = trimmedID;
-      // The body rides UNTRIMMED past the emptiness guard above. The validator
-      // owns normalization (it collapses whitespace, then measures); doing it
-      // here too is how the delivered text and the stamped `commsSlotText`
-      // evidence drift apart.
-      messageText =
-        messageTextRaw.length > MAX_WIRE_MESSAGE_TEXT_LENGTH
-          ? OVERSIZE_MESSAGE_TEXT_SENTINEL
-          : messageTextRaw;
+    if (messageActionIDPresent) {
+      messageActionID = INVALID_WIRE_ACTION_ID_SENTINEL;
+    } else {
+      messageText = INVALID_WIRE_MESSAGE_TEXT_SENTINEL;
     }
   }
 
@@ -332,9 +357,8 @@ export function normalizeDecisionResponse(
       ? { spawnPreferenceActionIDs }
       : {}),
     ...(dealActionID !== undefined ? { dealActionID } : {}),
-    ...(messageActionID !== undefined && messageText !== undefined
-      ? { messageActionID, messageText }
-      : {}),
+    ...(messageActionID !== undefined ? { messageActionID } : {}),
+    ...(messageText !== undefined ? { messageText } : {}),
     reason:
       typeof message.reason === "string"
         ? message.reason.slice(0, 500)
