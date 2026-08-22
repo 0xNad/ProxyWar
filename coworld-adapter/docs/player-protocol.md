@@ -18,7 +18,8 @@ The game sends:
   "slot": 0,
   "protocol": {
     "maxActionsPerDecision": 5,
-    "maxSpawnPreferences": 16
+    "maxSpawnPreferences": 16,
+    "maxMessageChars": 280
   },
   "request": {
     "protocolVersion": "proxywar-agent-v1",
@@ -34,6 +35,8 @@ The game sends:
     "responseContract": {
       "selectedLegalActionId": "must exactly match one offered legalActions[].id",
       "selectedDealActionId": "optional; must exactly match one offered deal_* legalActions[].id",
+      "selectedMessageActionId": "optional; must exactly match one offered message legalActions[].id",
+      "messageText": "required with selectedMessageActionId; raw nonblank text at or below protocol.maxMessageChars",
       "reason": "short human-readable string",
       "confidence": "optional number from 0 to 1"
     }
@@ -211,6 +214,100 @@ Rules:
   offered menu is always enough.
 - The reply's `reason` doubles as the stated rationale attached to the pact or betrayal in
   replays. It is shown to VIEWERS only - it is never sent to any other player.
+
+## `selectedMessageActionId` + `messageText` (optional pair)
+
+Free text uses a third, independent comms slot. The capability is advertised by
+`protocol.maxMessageChars` and one or more offered `message` actions. Send both
+fields or neither:
+
+```json
+{
+  "type": "decision_response",
+  "requestID": "req_...",
+  "selectedLegalActionId": "expand:terra-nullius:10",
+  "selectedMessageActionId": "message:P_B",
+  "messageText": "Truce on our shared border until turn 300.",
+  "reason": "Expand west while answering the eastern rival."
+}
+```
+
+Rules:
+
+- `selectedMessageActionId` must equal one exact currently offered action ID
+  whose kind is `message`. Whitespace padding, partial IDs, prefix/suffix
+  collisions, non-string values, and off-menu IDs are rejected, never repaired.
+- `messageText` must be a nonblank string whose raw JavaScript `String.length`
+  is at most `protocol.maxMessageChars` (currently 280 UTF-16 code units). The
+  adapter preserves every valid character exactly; the server rejects rather
+  than truncates or normalizes an invalid body.
+- Raw C0 controls, DEL, C1 controls, U+2028/U+2029, bidi controls, zero-width
+  formatting, soft hyphen, BOM, and interlinear annotation controls are
+  rejected. Ordinary internal whitespace in an otherwise valid body is not
+  collapsed.
+- A rejected/absent comms slot does not alter the primary game action or deal
+  slot. Text is simulation-inert: no core system reads it as intent, permission,
+  or action authority.
+- Inbound text appears only in the addressed policy's bounded
+  `observation.nonCombat.inboundMessages`. It is an untrusted rival claim.
+  Spectator/replay evidence is public; do not put secrets in a message.
+
+## Optional spatial observation v1
+
+Spatial data is additive and absent by default. A current v1 object declares:
+
+```json
+{
+  "spatial": {
+    "schemaVersion": 1,
+    "visibilityModel": "global-lockstep-public-map-v1",
+    "ownShape": {
+      "quadrant": "west",
+      "regionAnalysis": "complete",
+      "centroidBasis": "largest_region_border",
+      "coastShare": 25,
+      "centroid": { "xPct": 31, "yPct": 54 }
+    },
+    "minimap": {
+      "schemaVersion": 1,
+      "width": 24,
+      "height": 12,
+      "rows": [
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................"
+      ],
+      "legend": []
+    }
+  }
+}
+```
+
+`global-lockstep-public-map-v1` is the explicit no-fog visibility contract: the
+summary may contain only the same globally player-visible map state available
+to a legitimate player in the current game. A policy must ignore an absent or
+unknown visibility model/schema. The optional minimap is fixed at 24x12 and is
+accepted whole or omitted whole; never crop, pad, repair glyphs, or infer hidden
+tiles. Rival bearing/distance/border summaries are additive fields on the same
+bounded `visiblePlayers[]` entries.
+
+Spatial data is context, not authority. It may change only which exact current
+`legalActions[].id` the policy selects. A coordinate, glyph, player ID, or map
+cell is never a raw action and never bypasses
+`AgentDecisionValidator -> AgentRunner -> GameServer`.
+
+This bounded v1 contract is not the richer v2 design: it has no coordinate
+frame/mapInfo, elevation, positioned structures, positioned units, or warship
+positions.
 
 ### Promise semantics
 

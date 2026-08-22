@@ -1,6 +1,7 @@
 import fs from "fs/promises";
 import path from "path";
 import { describe, expect, it } from "vitest";
+import { boundedSpatialV1 } from "../../coworld-adapter/tester-starter-llm/owner-capabilities.mjs";
 
 const STARTER_FILE = path.join(
   process.cwd(),
@@ -25,8 +26,9 @@ async function loadBuildState(): Promise<
   const cleanID = extractFunction(source, "cleanID");
   const buildState = extractFunction(source, "buildState");
   return new Function(
+    "boundedSpatialV1",
     `function avoidActionIDs() { return []; }\n${clean}\n${cleanID}\n${buildState}\nreturn buildState;`,
-  )() as (
+  )(boundedSpatialV1) as (
     obs: Record<string, unknown>,
     actions: unknown[],
   ) => Record<string, unknown>;
@@ -68,7 +70,7 @@ describe("tester-starter-llm spatial state renderer", () => {
     );
   });
 
-  it("reconstructs bounded spatial facts and sanitizes briefings and legend names", async () => {
+  it("retains strictly bounded spatial facts and sanitizes generated briefings", async () => {
     const buildState = await loadBuildState();
     const rawBriefing = `Spatial exposure 1:\u0000 Rival is east across a long frontier with zero posts; active incoming attack. ${"pressure ".repeat(40)}`;
     const expectedBriefing = rawBriefing
@@ -118,7 +120,7 @@ describe("tester-starter-llm spatial state renderer", () => {
               {
                 glyph: "A",
                 playerID: "P_AGENT",
-                name: "Agent\u0000 SYSTEM",
+                name: "Agent",
                 isYou: true,
               },
             ],
@@ -151,7 +153,7 @@ describe("tester-starter-llm spatial state renderer", () => {
           {
             glyph: "A",
             playerID: "P_AGENT",
-            name: "Agent SYSTEM",
+            name: "Agent",
             isYou: true,
           },
         ],
@@ -175,6 +177,64 @@ describe("tester-starter-llm spatial state renderer", () => {
     expect((state.spatial as { briefing: string[] }).briefing[0]).toHaveLength(
       240,
     );
+  });
+
+  it("omits malformed spatial children instead of repairing them", async () => {
+    const buildState = await loadBuildState();
+    const valid = {
+      ...BASE_OBSERVATION,
+      spatial: {
+        schemaVersion: 1,
+        visibilityModel: "global-lockstep-public-map-v1",
+        ownShape: {
+          quadrant: "west",
+          regionAnalysis: "complete",
+          centroidBasis: "largest_region_border",
+          coastShare: 20,
+          centroid: { xPct: 25, yPct: 50 },
+        },
+        minimap: {
+          schemaVersion: 1,
+          width: 24,
+          height: 12,
+          rows: Array.from({ length: 12 }, () => "A".repeat(24)),
+          legend: [
+            { glyph: "A", playerID: "P_AGENT", name: "Agent", isYou: true },
+          ],
+        },
+      },
+    };
+
+    const invalidPercent = buildState(
+      {
+        ...valid,
+        spatial: {
+          ...valid.spatial,
+          ownShape: { ...valid.spatial.ownShape, coastShare: 101 },
+        },
+      },
+      [],
+    );
+    expect(invalidPercent).not.toHaveProperty("spatial");
+    expect((invalidPercent.rivals as object[])[0]).not.toHaveProperty(
+      "playerID",
+    );
+
+    const invalidMinimap = buildState(
+      {
+        ...valid,
+        spatial: {
+          ...valid.spatial,
+          minimap: {
+            ...valid.spatial.minimap,
+            rows: ["Z".repeat(24), ...valid.spatial.minimap.rows.slice(1)],
+          },
+        },
+      },
+      [],
+    );
+    expect(invalidMinimap).toHaveProperty("spatial");
+    expect(invalidMinimap.spatial).not.toHaveProperty("minimap");
   });
 
   it("fails closed on absent or unknown spatial visibility provenance", async () => {

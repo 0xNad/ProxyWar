@@ -126,6 +126,7 @@ function decisionRequest(requestID: string) {
           notes: ["Spatial exposure 1: Auri is east."],
           visiblePlayers: [
             {
+              playerID: "P_AURI",
               name: "Auri",
               isAlive: true,
               tileShare: 0.1,

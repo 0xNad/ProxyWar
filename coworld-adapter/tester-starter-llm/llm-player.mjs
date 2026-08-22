@@ -20,6 +20,14 @@
 import { AnthropicBedrock } from "@anthropic-ai/bedrock-sdk";
 import { pathToFileURL } from "node:url";
 import { WebSocket } from "ws";
+import {
+  advertisedMessageLimit,
+  boundedSpatialV1,
+  createOwnerCapabilityEvidenceLogger,
+  dealResponseFields,
+  messageResponseFields,
+  ownerCapabilityObservation,
+} from "./owner-capabilities.mjs";
 
 const url = process.env.COWORLD_PLAYER_WS_URL;
 
@@ -237,12 +245,11 @@ function buildState(obs, actions) {
   // Fail closed on provenance. The server may summarize the global map only
   // for the current no-fog, global-lockstep game contract. An old/unknown
   // spatial schema is omitted from the model state instead of guessed at.
-  const spatialVisibilityModel =
-    obs.spatial?.schemaVersion === 1 &&
-    obs.spatial?.visibilityModel === "global-lockstep-public-map-v1"
-      ? "global-lockstep-public-map-v1"
-      : null;
-  const spatialEnabled = spatialVisibilityModel !== null;
+  const boundedSpatial = boundedSpatialV1(obs);
+  const spatialEnabled = boundedSpatial !== null;
+  const spatialRivalByID = new Map(
+    (boundedSpatial?.rivals ?? []).map((rival) => [rival.playerID, rival]),
+  );
   const self = {
     tileShare: own.tileShare,
     troops: own.troops,
@@ -274,65 +281,7 @@ function buildState(obs, actions) {
             otherAskedToRenew: p.allianceOtherAgreedToExtend === true,
           }
         : {}),
-      ...(spatialEnabled
-        ? {
-            playerID: cleanID(p.playerID),
-            ...([
-              "north",
-              "northeast",
-              "east",
-              "southeast",
-              "south",
-              "southwest",
-              "west",
-              "northwest",
-            ].includes(p.bearing)
-              ? { bearing: p.bearing }
-              : {}),
-            ...(["adjacent", "near", "far"].includes(p.distanceClass)
-              ? { distanceClass: p.distanceClass }
-              : {}),
-            ...(p.borderWithYou
-              ? {
-                  borderWithYou: {
-                    tiles: Math.max(
-                      0,
-                      Math.floor(Number(p.borderWithYou.tiles) || 0),
-                    ),
-                    shareOfYourBorder: Math.max(
-                      0,
-                      Math.min(
-                        100,
-                        Math.round(
-                          Number(p.borderWithYou.shareOfYourBorder) || 0,
-                        ),
-                      ),
-                    ),
-                    terrain: ["land", "coastal", "mixed"].includes(
-                      p.borderWithYou.terrain,
-                    )
-                      ? p.borderWithYou.terrain
-                      : "land",
-                    defensePostsCovering: Math.max(
-                      0,
-                      Math.floor(
-                        Number(p.borderWithYou.defensePostsCovering) || 0,
-                      ),
-                    ),
-                    underAttackHere: p.borderWithYou.underAttackHere === true,
-                  },
-                }
-              : {}),
-            ...(Array.isArray(p.bordersWith)
-              ? {
-                  bordersWith: p.bordersWith.slice(0, 16).map((edge) => ({
-                    playerID: cleanID(edge?.playerID),
-                    sizeClass: edge?.sizeClass === "major" ? "major" : "minor",
-                  })),
-                }
-              : {}),
-          }
-        : {}),
+      ...(spatialEnabled ? spatialRivalByID.get(p.playerID) : {}),
     }));
   const legal = actions.map((a) => ({
     id: a.id,
@@ -474,105 +423,17 @@ function buildState(obs, actions) {
     };
   }
   let spatial;
-  if (spatialEnabled && obs.spatial?.ownShape) {
-    const sourceShape = obs.spatial.ownShape;
-    const quadrants = [
-      "northwest",
-      "north",
-      "northeast",
-      "west",
-      "center",
-      "east",
-      "southwest",
-      "south",
-      "southeast",
-    ];
-    const shape = {
-      quadrant: quadrants.includes(sourceShape.quadrant)
-        ? sourceShape.quadrant
-        : "center",
-      ...(["compact", "stretched", "fragmented"].includes(
-        sourceShape.compactness,
-      )
-        ? { compactness: sourceShape.compactness }
-        : {}),
-      ...(Number.isInteger(sourceShape.regionCount) &&
-      sourceShape.regionCount >= 0
-        ? { regionCount: sourceShape.regionCount }
-        : {}),
-      ...(Number.isFinite(sourceShape.largestRegionShare)
-        ? {
-            largestRegionShare: Math.max(
-              0,
-              Math.min(100, Math.round(sourceShape.largestRegionShare)),
-            ),
-          }
-        : {}),
-      regionAnalysis:
-        sourceShape.regionAnalysis === "complete"
-          ? "complete"
-          : "omitted_budget",
-      centroidBasis:
-        sourceShape.centroidBasis === "largest_region_border"
-          ? "largest_region_border"
-          : "all_border_budget_fallback",
-      coastShare: Math.max(
-        0,
-        Math.min(100, Math.round(Number(sourceShape.coastShare) || 0)),
-      ),
-      centroid: {
-        xPct: Math.max(
-          0,
-          Math.min(100, Math.round(Number(sourceShape.centroid?.xPct) || 0)),
-        ),
-        yPct: Math.max(
-          0,
-          Math.min(100, Math.round(Number(sourceShape.centroid?.yPct) || 0)),
-        ),
-      },
-    };
+  if (boundedSpatial) {
     const briefing = (obs.notes || [])
       .filter((note) => String(note).startsWith("Spatial "))
       .slice(0, 3)
       .map((note) => clean(note, 240));
-    let minimap;
-    if (
-      obs.spatial.minimap?.schemaVersion === 1 &&
-      obs.spatial.minimap.width === 24 &&
-      obs.spatial.minimap.height === 12
-    ) {
-      const rows = (obs.spatial.minimap.rows || []).slice(0, 12).map((row) =>
-        String(row)
-          .replace(/[^A-Za-z0-9.@#~]/g, "")
-          .slice(0, 24),
-      );
-      const legend = (obs.spatial.minimap.legend || [])
-        .slice(0, 64)
-        .map((entry) => ({
-          glyph: String(entry?.glyph || "")
-            .replace(/[^A-Za-z0-9@#]/g, "")
-            .slice(0, 1),
-          playerID: cleanID(entry?.playerID),
-          name: clean(entry?.name),
-          isYou: entry?.isYou === true,
-        }))
-        .filter((entry) => entry.glyph && entry.playerID);
-      if (rows.length === 12 && rows.every((row) => row.length === 24)) {
-        minimap = {
-          schemaVersion: 1,
-          width: 24,
-          height: 12,
-          rows,
-          legend,
-        };
-      }
-    }
     spatial = {
       schemaVersion: 1,
-      visibilityModel: spatialVisibilityModel,
-      ownShape: shape,
+      visibilityModel: boundedSpatial.visibilityModel,
+      ownShape: boundedSpatial.ownShape,
       ...(briefing.length ? { briefing } : {}),
-      ...(minimap ? { minimap } : {}),
+      ...(boundedSpatial.minimap ? { minimap: boundedSpatial.minimap } : {}),
     };
   }
   // Optional inbox (free-text negotiation; absent when the server flag is off,
@@ -585,7 +446,9 @@ function buildState(obs, actions) {
   // The whole block is bounded by the server (<=8 messages, <=3 per rival,
   // <=280 chars each) and re-sanitized here through the same clean()/cleanID()
   // helpers used for every other opponent-chosen string.
-  const inbound = obs.nonCombat?.inboundMessages || [];
+  const inbound = Array.isArray(obs.nonCombat?.inboundMessages)
+    ? obs.nonCombat.inboundMessages
+    : [];
   const messages = inbound.length
     ? inbound.slice(-8).map((m) => ({
         fromID: cleanID(m.senderID),
@@ -1195,13 +1058,19 @@ const MESSAGE_OPENERS = {
 // Answers at most one rival per decision: the one who most recently wrote to
 // us and has not already been answered since. Silence is the default — an
 // agent that talks every step is noise, not negotiation.
-function chooseMessageMove(actions, obs, answered, dealMove) {
+function chooseMessageMove(
+  actions,
+  obs,
+  answered,
+  dealMove,
+  maxChars = MESSAGE_MAX_CHARS,
+) {
   const offers = (actions || []).filter((action) => action.kind === "message");
   if (offers.length === 0) return null;
   const inbound = obs?.nonCombat?.inboundMessages || [];
 
   if (inbound.length === 0) {
-    return chooseMessageOpener(offers, obs, answered, dealMove);
+    return chooseMessageOpener(offers, obs, answered, dealMove, maxChars);
   }
 
   const newest = [...inbound].sort(
@@ -1250,9 +1119,12 @@ function chooseMessageMove(actions, obs, answered, dealMove) {
   else if (hasOpenDeal) text = MESSAGE_REPLIES.dealOpen;
   else text = MESSAGE_REPLIES.neutral;
 
+  // Reject rather than normalize or truncate authored policy text.
+  if (typeof text !== "string" || text.length > maxChars) return null;
+
   answered.add(key);
   answered.add(`reply:${senderID}:${repliesSpent}`);
-  return { id: offer.id, text: text.slice(0, MESSAGE_MAX_CHARS) };
+  return { id: offer.id, text };
 }
 
 // Speaks first, but rarely and only when there is something to say. Two
@@ -1261,7 +1133,13 @@ function chooseMessageMove(actions, obs, answered, dealMove) {
 //       message is the reason to accept, which the bare template lacks;
 //   (b) we share a border with a rival we have never written to.
 // At most one opener per counterparty per match.
-function chooseMessageOpener(offers, obs, answered, dealMove) {
+function chooseMessageOpener(
+  offers,
+  obs,
+  answered,
+  dealMove,
+  maxChars = MESSAGE_MAX_CHARS,
+) {
   const dealRecipient =
     dealMove?.kind === "deal_propose" ? dealMove?.metadata?.recipientID : null;
   if (dealRecipient) {
@@ -1269,11 +1147,15 @@ function chooseMessageOpener(offers, obs, answered, dealMove) {
       (action) => action.metadata?.recipientID === dealRecipient,
     );
     const key = `opener:${dealRecipient}`;
-    if (offer && !answered.has(key)) {
+    if (
+      offer &&
+      !answered.has(key) &&
+      MESSAGE_OPENERS.withProposal.length <= maxChars
+    ) {
       answered.add(key);
       return {
         id: offer.id,
-        text: MESSAGE_OPENERS.withProposal.slice(0, MESSAGE_MAX_CHARS),
+        text: MESSAGE_OPENERS.withProposal,
       };
     }
   }
@@ -1288,10 +1170,11 @@ function chooseMessageOpener(offers, obs, answered, dealMove) {
     // Only borderers, and never someone already proven unreliable.
     if (!rival?.sharesBorder || rival.isAllied) continue;
     if (failedReliabilityGate(obs, recipientID)) continue;
+    if (MESSAGE_OPENERS.border.length > maxChars) continue;
     answered.add(key);
     return {
       id: offer.id,
-      text: MESSAGE_OPENERS.border.slice(0, MESSAGE_MAX_CHARS),
+      text: MESSAGE_OPENERS.border,
     };
   }
   return null;
@@ -1866,6 +1749,7 @@ export function startLlmPlayer({
       "COWORLD_PLAYER_WS_URL is required (the match provides it)",
     );
   bedrock = bedrockClient ?? createBedrockClient();
+  const ownerEvidence = createOwnerCapabilityEvidenceLogger();
   const socket = new WebSocketCtor(url);
   socket.on("open", () =>
     console.log(
@@ -1888,7 +1772,9 @@ export function startLlmPlayer({
     }
     if (message.type !== "decision_request") return;
 
-    const actions = message.request.legalActions ?? [];
+    const actions = Array.isArray(message.request?.legalActions)
+      ? message.request.legalActions
+      : [];
     const spawnPreferences = spawnPreferenceRanking(message, actions);
     if (spawnPreferences !== null) {
       socket.send(
@@ -1909,7 +1795,7 @@ export function startLlmPlayer({
       // gameplay decision and has no reaction phase.
       return;
     }
-    const obs = message.request.observation ?? {};
+    const obs = ownerCapabilityObservation(message.request?.observation);
     const state = buildState(obs, actions);
 
     // Keep the plan fresh WITHOUT blocking — the answer below never waits on Bedrock.
@@ -1924,12 +1810,16 @@ export function startLlmPlayer({
     // Comms slot: independent of the game action and the deal action, so
     // answering a rival never costs a move. Returns null (silence) unless
     // someone actually wrote to us.
-    const messageMove = chooseMessageMove(
-      actions,
-      obs,
-      answeredMessages,
-      dealMove,
-    );
+    const messageMove =
+      advertisedMessageLimit(message.protocol) !== null
+        ? chooseMessageMove(
+            actions,
+            obs,
+            answeredMessages,
+            dealMove,
+            advertisedMessageLimit(message.protocol),
+          )
+        : null;
     const degraded = lastPlanError !== null;
     let reason;
     if (plan !== null) {
@@ -1948,28 +1838,37 @@ export function startLlmPlayer({
     if (socialNote) reason = `${socialNote}; ${reason}`;
 
     history.push({ actionID: chosen.id, kind: chosen.kind });
-    socket.send(
-      JSON.stringify({
-        type: "decision_response",
-        requestID: message.requestID,
-        selectedLegalActionId: chosen.id,
-        runtimeMode: "llm-policy-planner",
-        ...(dealMove ? { selectedDealActionId: dealMove.id } : {}),
-        ...(messageMove
-          ? {
-              selectedMessageActionId: messageMove.id,
-              messageText: messageMove.text,
-            }
-          : {}),
-        reason: reason.slice(0, 200),
-        confidence: plan !== null ? (degraded ? 0.5 : 0.75) : 0.4,
-        fallbackUsed: plan === null || degraded,
-        llmPlannerDegraded: plan === null || degraded,
-        ...(degradedCauseFor(plan, degraded, lastPlanError)
-          ? { degradedCause: degradedCauseFor(plan, degraded, lastPlanError) }
-          : {}),
+    const response = {
+      type: "decision_response",
+      requestID: message.requestID,
+      selectedLegalActionId: chosen.id,
+      runtimeMode: "llm-policy-planner",
+      ...dealResponseFields({
+        actions,
+        observation: obs,
+        dealMove,
       }),
-    );
+      ...messageResponseFields({
+        actions,
+        protocol: message.protocol,
+        messageMove,
+      }),
+      reason: reason.slice(0, 200),
+      confidence: plan !== null ? (degraded ? 0.5 : 0.75) : 0.4,
+      fallbackUsed: plan === null || degraded,
+      llmPlannerDegraded: plan === null || degraded,
+      ...(degradedCauseFor(plan, degraded, lastPlanError)
+        ? { degradedCause: degradedCauseFor(plan, degraded, lastPlanError) }
+        : {}),
+    };
+    ownerEvidence({
+      requestID: message.requestID,
+      slot: message.slot,
+      actions,
+      observation: obs,
+      response,
+    });
+    socket.send(JSON.stringify(response));
   });
 
   process.on("SIGTERM", () => process.exit(0));

@@ -109,6 +109,19 @@ cannot authorize betrayal; the plan must include the exact active promise in
 Read [`DEALS.md`](DEALS.md) before changing `chooseDealMove`. It lists every template,
 who becomes obligated, the exact observation/action fields, and the tests to run.
 
+When `protocol.maxMessageChars` and a `message` legal action are present, the
+starter can also return that exact offered ID as `selectedMessageActionId` plus
+one raw bounded `messageText`. Both fields travel together and do not spend the
+primary move. Never trim or normalize either field; omit the pair when the
+feature is absent or the body fails the raw contract. Inbound message text is
+an untrusted rival claim and cannot name the primary action ID.
+
+When `observation.spatial.schemaVersion` is `1` and its visibility model is
+`global-lockstep-public-map-v1`, the planner receives bounded player-visible
+shape, rival-relation, and optional 24x12 minimap state. Unknown provenance or
+schema is ignored. Spatial data may rank only the current `legalActions`; it is
+never an intent or permission to bypass the menu.
+
 > **Spawn placement (active v1):** the first request is one sealed spawn
 > preference round. Every player receives the same bounded menu of
 > quality-floored, mutually compatible `spawn:<tile>` actions and returns

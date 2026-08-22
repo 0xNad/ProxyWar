@@ -531,18 +531,17 @@ describe("deterministic comms text obeys the server contract", () => {
       ];
       expect(templates.length).toBe(6);
       for (const [key, text] of templates) {
-        // The validator collapses whitespace BEFORE measuring, so measure the
-        // same way it does.
-        const collapsed = text.replace(/\s+/gu, " ").trim();
-        expect(collapsed.length, `template ${key} blank`).toBeGreaterThan(0);
+        // The validator measures the exact raw string and never collapses or
+        // rewrites it. These fixed templates are already printable and safe.
+        expect(text.trim().length, `template ${key} blank`).toBeGreaterThan(0);
         expect(
-          collapsed.length,
+          text.length,
           `template ${key} over the ${FREETEXT_MESSAGE_MAX_CHARS}-char cap`,
         ).toBeLessThanOrEqual(FREETEXT_MESSAGE_MAX_CHARS);
         // Printable ASCII only: no control, bidi, or zero-width characters can
         // hide in a body the server would then reject outright.
         expect(
-          /^[\x20-\x7E]+$/u.test(collapsed),
+          /^[\x20-\x7E]+$/u.test(text),
           `template ${key} is not plain printable ASCII`,
         ).toBe(true);
       }
