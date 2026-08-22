@@ -48,6 +48,7 @@ export interface CollectorInput {
   preregistrationLedgerPath?: string;
   providerPreflightLedgerPath?: string;
   canaryLedgerPath?: string;
+  confirmatoryActivationPath?: string;
   requests: Array<{
     phase: CommanderXpProtocolPhase;
     replicaIndex: number;
@@ -152,56 +153,10 @@ export async function collectCommanderXpEvidence(
       : input.phase === "provider-preflight"
         ? prereg.providerPreflightRequests
         : prereg.requests.filter((request) => request.phase === input.phase);
-  if (input.phase === "preregistration") {
-    if (
-      input.preregistrationLedgerPath !== undefined ||
-      input.providerPreflightLedgerPath !== undefined ||
-      input.canaryLedgerPath !== undefined
-    ) {
-      throw new Error("preregistration must not accept phase ledgers");
-    }
-  } else {
-    if (input.preregistrationLedgerPath === undefined) {
-      throw new Error("collector preregistration ledger is required");
-    }
-    await fs.copyFile(
-      path.resolve(input.preregistrationLedgerPath),
-      path.join(outputDirectory, "commander-xp-prereg-ledger-v2.json"),
-      fs.constants.COPYFILE_EXCL,
-    );
-  }
-  if (input.phase === "provider-preflight") {
-    if (
-      input.providerPreflightLedgerPath !== undefined ||
-      input.canaryLedgerPath !== undefined
-    ) {
-      throw new Error("provider preflight must not accept later phase ledgers");
-    }
-  } else if (input.phase === "canary" || input.phase === "confirmatory") {
-    if (input.providerPreflightLedgerPath === undefined) {
-      throw new Error("collector provider-preflight ledger is required");
-    }
-    await fs.copyFile(
-      path.resolve(input.providerPreflightLedgerPath),
-      path.join(
-        outputDirectory,
-        "commander-xp-provider-preflight-ledger-v2.json",
-      ),
-      fs.constants.COPYFILE_EXCL,
-    );
-    if (input.phase === "confirmatory") {
-      if (input.canaryLedgerPath === undefined) {
-        throw new Error("collector canary ledger is required");
-      }
-      await fs.copyFile(
-        path.resolve(input.canaryLedgerPath),
-        path.join(outputDirectory, "commander-xp-canary-ledger-v2.json"),
-        fs.constants.COPYFILE_EXCL,
-      );
-    } else if (input.canaryLedgerPath !== undefined) {
-      throw new Error("canary collection must not accept a canary ledger");
-    }
-  }
+  const phaseAuthorityArtifactPaths = await copyCollectorPhaseAuthority(
+    input,
+    outputDirectory,
+  );
   await fs.copyFile(
     path.resolve(input.externalSealRequestPath),
     path.join(authorityDirectory, "commander-xp-external-seal-request-v1.json"),
@@ -240,15 +195,7 @@ export async function collectCommanderXpEvidence(
   );
   const artifactPaths = [
     "commander-xp-preregistration-v2.json",
-    ...(input.phase === "preregistration"
-      ? []
-      : ["commander-xp-prereg-ledger-v2.json"]),
-    ...(input.phase === "canary" || input.phase === "confirmatory"
-      ? ["commander-xp-provider-preflight-ledger-v2.json"]
-      : []),
-    ...(input.phase === "confirmatory"
-      ? ["commander-xp-canary-ledger-v2.json"]
-      : []),
+    ...phaseAuthorityArtifactPaths,
     "policy-identities-v2.json",
     "policy-inspect/A.json",
     "policy-inspect/B.json",
@@ -304,12 +251,9 @@ export async function collectCommanderXpEvidence(
   const namespaceRegistry = await buildCollectorNamespaceRegistry(
     outputDirectory,
     planned,
-    path.join(
-      outputDirectory,
-      input.phase === "provider-preflight"
-        ? "commander-xp-prereg-ledger-v2.json"
-        : "commander-xp-prior-phase-ledger-v2.json",
-    ),
+    collectorPriorLedgerFilename(input.phase) === null
+      ? null
+      : path.join(outputDirectory, collectorPriorLedgerFilename(input.phase)!),
   );
   const index = {
     schemaVersion: 2,
@@ -878,6 +822,104 @@ function runDirectory(request: CommanderXpPlannedRequest): string {
   return `runs/${request.phase}/r${String(request.replicaIndex).padStart(2, "0")}/${request.arm}`;
 }
 
+export function collectorPriorLedgerFilename(
+  phase: CollectorInput["phase"],
+): string | null {
+  switch (phase) {
+    case "preregistration":
+      return null;
+    case "provider-preflight":
+      return "commander-xp-prereg-ledger-v2.json";
+    case "canary":
+      return "commander-xp-provider-preflight-ledger-v2.json";
+    case "confirmatory":
+      return "commander-xp-canary-ledger-v2.json";
+  }
+}
+
+export async function copyCollectorPhaseAuthority(
+  input: Pick<
+    CollectorInput,
+    | "phase"
+    | "preregistrationLedgerPath"
+    | "providerPreflightLedgerPath"
+    | "canaryLedgerPath"
+    | "confirmatoryActivationPath"
+  >,
+  outputDirectory: string,
+): Promise<string[]> {
+  const copy = async (source: string, target: string): Promise<string> => {
+    await fs.copyFile(
+      path.resolve(source),
+      path.join(outputDirectory, target),
+      fs.constants.COPYFILE_EXCL,
+    );
+    return target;
+  };
+  if (input.phase === "preregistration") {
+    if (
+      input.preregistrationLedgerPath !== undefined ||
+      input.providerPreflightLedgerPath !== undefined ||
+      input.canaryLedgerPath !== undefined ||
+      input.confirmatoryActivationPath !== undefined
+    ) {
+      throw new Error("preregistration must not accept phase ledgers");
+    }
+    return [];
+  }
+  if (input.preregistrationLedgerPath === undefined) {
+    throw new Error("collector preregistration ledger is required");
+  }
+  const copied = [
+    await copy(
+      input.preregistrationLedgerPath,
+      "commander-xp-prereg-ledger-v2.json",
+    ),
+  ];
+  if (input.phase === "provider-preflight") {
+    if (
+      input.providerPreflightLedgerPath !== undefined ||
+      input.canaryLedgerPath !== undefined ||
+      input.confirmatoryActivationPath !== undefined
+    ) {
+      throw new Error("provider preflight must not accept later phase ledgers");
+    }
+    return copied;
+  }
+  if (input.providerPreflightLedgerPath === undefined) {
+    throw new Error("collector provider-preflight ledger is required");
+  }
+  copied.push(
+    await copy(
+      input.providerPreflightLedgerPath,
+      "commander-xp-provider-preflight-ledger-v2.json",
+    ),
+  );
+  if (input.phase === "canary") {
+    if (input.canaryLedgerPath !== undefined) {
+      throw new Error("canary collection must not accept a canary ledger");
+    }
+    if (input.confirmatoryActivationPath !== undefined) {
+      throw new Error("canary collection must not accept an activation");
+    }
+    return copied;
+  }
+  if (input.canaryLedgerPath === undefined) {
+    throw new Error("collector canary ledger is required");
+  }
+  if (input.confirmatoryActivationPath === undefined) {
+    throw new Error("collector confirmatory activation is required");
+  }
+  copied.push(
+    await copy(input.canaryLedgerPath, "commander-xp-canary-ledger-v2.json"),
+    await copy(
+      input.confirmatoryActivationPath,
+      "commander-xp-confirmatory-activation-v2.json",
+    ),
+  );
+  return copied;
+}
+
 async function writeJsonExclusive(
   target: string,
   value: unknown,
@@ -896,6 +938,7 @@ const NAMESPACE_KEYS = [
   "episodeID",
   "episodeRequestID",
   "jobID",
+  "providerRequestID",
   "replayPath",
   "replayURLSha256",
   "runKey",
@@ -911,19 +954,21 @@ type NamespaceRegistry = {
   registrySha256: string;
 };
 
-async function buildCollectorNamespaceRegistry(
+export async function buildCollectorNamespaceRegistry(
   evidenceRoot: string,
   planned: readonly CommanderXpPlannedRequest[],
-  priorLedgerPath: string,
+  priorLedgerPath: string | null,
 ): Promise<NamespaceRegistry> {
-  const priorLedger = JSON.parse(
-    await fs.readFile(priorLedgerPath, "utf8"),
-  ) as {
-    namespaceRegistry?: unknown;
-  };
-  const prior = validateCollectorNamespaceRegistry(
-    priorLedger.namespaceRegistry,
-  );
+  const prior =
+    priorLedgerPath === null
+      ? null
+      : validateCollectorNamespaceRegistry(
+          (
+            JSON.parse(await fs.readFile(priorLedgerPath, "utf8")) as {
+              namespaceRegistry?: unknown;
+            }
+          ).namespaceRegistry,
+        );
   const current = Object.fromEntries(
     NAMESPACE_KEYS.map((key) => [key, new Map<string, string>()]),
   ) as Record<NamespaceKey, Map<string, string>>;
@@ -982,10 +1027,23 @@ async function buildCollectorNamespaceRegistry(
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== "ENOENT") throw error;
     }
+    const playerTrace = await fs.readFile(
+      path.join(evidenceRoot, owner, "player-artifact/trace.jsonl"),
+      "utf8",
+    );
+    for (const [index, line] of playerTrace.split(/\r?\n/).entries()) {
+      if (line === "") continue;
+      const record = JSON.parse(line) as Record<string, unknown>;
+      if (record.recordType === "provider") {
+        register("providerRequestID", record.requestID, owner, true);
+      } else if (record.recordType !== "decision") {
+        throw new Error(`collector player trace line ${index + 1} is invalid`);
+      }
+    }
   }
   const namespaces = Object.fromEntries(
     NAMESPACE_KEYS.map((key) => {
-      const union = new Set(prior.namespaces[key]);
+      const union = new Set(prior?.namespaces[key] ?? []);
       for (const value of current[key].keys()) {
         if (union.has(value)) {
           throw new Error(`collector namespace ${key} reuses prior identity`);
@@ -998,7 +1056,7 @@ async function buildCollectorNamespaceRegistry(
   const body = {
     schemaVersion: 2 as const,
     mode: "cumulative-per-namespace" as const,
-    priorRegistrySha256: prior.registrySha256,
+    priorRegistrySha256: prior?.registrySha256 ?? null,
     namespaces,
   };
   return { ...body, registrySha256: sha256(externalCanonicalJson(body)) };

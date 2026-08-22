@@ -1,4 +1,10 @@
-import { describe, expect, it } from "vitest";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+
+import { describe, expect, it, vi } from "vitest";
+
+import { runCommanderXpPlanCli } from "../../src/scripts/ai-agent-commander-xp-plan";
 
 import {
   buildCommanderXpPreRegistration,
@@ -36,6 +42,40 @@ const input: CommanderXpPlanInput = {
 };
 
 describe("Commander XP preregistration v2", () => {
+  it("reports the same 111 requests that it writes", async () => {
+    const temporaryRoot = await fs.mkdtemp(
+      path.join(os.tmpdir(), "commander-xp-plan-"),
+    );
+    try {
+      const inputPath = path.join(temporaryRoot, "input.json");
+      const outputPath = path.join(temporaryRoot, "output");
+      await fs.writeFile(inputPath, JSON.stringify(input));
+      const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      await expect(
+        runCommanderXpPlanCli([inputPath, outputPath]),
+      ).resolves.toBe(0);
+      const summary = JSON.parse(String(log.mock.calls[0]?.[0]));
+      const requestLines = (
+        await fs.readFile(
+          path.join(outputPath, "commander-xp-request-plan-v2.jsonl"),
+          "utf8",
+        )
+      )
+        .trim()
+        .split("\n");
+      expect(summary).toMatchObject({
+        providerPreflightRequestCount: 3,
+        gameplayRequestCount: 108,
+        requestCount: 111,
+      });
+      expect(requestLines).toHaveLength(111);
+      log.mockRestore();
+    } finally {
+      vi.restoreAllMocks();
+      await fs.rm(temporaryRoot, { recursive: true, force: true });
+    }
+  });
+
   it("freezes the golden canary seeds", () => {
     expect(
       deriveCommanderXpSeeds("strategic-commander-xp-canary-v1", 4),

@@ -59,7 +59,8 @@ export async function runCommanderXpPlanCli(
       preRegistrationSha256: plan.preRegistrationSha256,
       providerPreflightRequestCount: plan.providerPreflightRequests.length,
       gameplayRequestCount: plan.requests.length,
-      requestCount: plan.requests.length + 1,
+      requestCount:
+        plan.requests.length + plan.providerPreflightRequests.length,
       outputDirectory,
     }),
   );

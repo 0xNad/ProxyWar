@@ -147,7 +147,26 @@ describe("Commander XP evidence verifier v2", () => {
       }),
     ).resolves.toBeUndefined();
 
+    const gameEvidenceSha256 = fixture.receipt.projections.gameEvidenceSha256;
     fixture.receipt.projections.gameEvidenceSha256 = "f".repeat(64);
+    await writeJson(
+      path.join(
+        fixture.root,
+        fixture.runDirectory,
+        "coworld-bundle-receipt.json",
+      ),
+      fixture.receipt,
+    );
+    await expect(
+      verifyCommanderXpCoworldBundleProjection({
+        evidenceRoot: fixture.root,
+        runDirectory: fixture.runDirectory,
+        plannedRequest,
+      }),
+    ).rejects.toThrow(/COWORLD_BUNDLE_RECEIPT_MISMATCH/);
+
+    fixture.receipt.projections.gameEvidenceSha256 = gameEvidenceSha256;
+    fixture.receipt.manifestSha256 = "f".repeat(64);
     await writeJson(
       path.join(
         fixture.root,
@@ -729,7 +748,7 @@ async function buildCoworldProjectionFixture(
     outerBundleSha256: "2".repeat(64),
     members: [
       { path: "logs/game.log", bytes: 10, sha256: "6".repeat(64) },
-      { path: "manifest.json", bytes: 10, sha256: "7".repeat(64) },
+      { path: "manifest.json", bytes: 10, sha256: "5".repeat(64) },
       { path: "replay", bytes: 10, sha256: replayMemberSha256 },
       { path: "results.json", bytes: 10, sha256: "8".repeat(64) },
     ],

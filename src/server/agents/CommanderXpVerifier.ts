@@ -2852,6 +2852,9 @@ async function verifyCoworldBundleReceipt(
         !isSha256(exact.sha256)
       );
     }) ||
+    receipt.manifestSha256 !==
+      receipt.members.find((member) => member.path === "manifest.json")
+        ?.sha256 ||
     replay.contentSha256 !==
       receipt.members.find((member) => member.path === "replay")?.sha256 ||
     receipt.projections.episodeResultsSha256 !==
