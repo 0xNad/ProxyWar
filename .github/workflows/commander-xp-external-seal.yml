@@ -1,0 +1,615 @@
+name: Commander XP external seal
+run-name: Commander XP external seal ${{ inputs.source_sha }} / artifact ${{ inputs.evidence_artifact_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact current main commit containing the reviewed Commander XP adapter
+        required: true
+        type: string
+      source_ci_run_id:
+        description: Successful exact-source CI workflow run ID
+        required: true
+        type: string
+      source_ci_run_attempt:
+        description: Exact-source CI workflow run attempt
+        required: true
+        type: string
+      evidence_artifact_id:
+        description: Immutable collector artifact ID
+        required: true
+        type: string
+      evidence_artifact_name:
+        description: Immutable collector artifact name
+        required: true
+        type: string
+      evidence_artifact_digest:
+        description: Collector artifact SHA-256 digest from upload-artifact
+        required: true
+        type: string
+      evidence_artifact_run_id:
+        description: Collector workflow run ID
+        required: true
+        type: string
+      evidence_artifact_run_attempt:
+        description: Collector workflow run attempt
+        required: true
+        type: string
+      seal_request_sha256:
+        description: SHA-256 of commander-xp-external-seal-request-v1.json
+        required: true
+        type: string
+
+concurrency:
+  group: commander-xp-external-seal-${{ inputs.source_sha }}-${{ inputs.evidence_artifact_id }}
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  SOURCE_SHA: ${{ inputs.source_sha }}
+  SOURCE_CI_RUN_ID: ${{ inputs.source_ci_run_id }}
+  SOURCE_CI_RUN_ATTEMPT: ${{ inputs.source_ci_run_attempt }}
+  EVIDENCE_ARTIFACT_ID: ${{ inputs.evidence_artifact_id }}
+  EVIDENCE_ARTIFACT_NAME: ${{ inputs.evidence_artifact_name }}
+  EVIDENCE_ARTIFACT_DIGEST: ${{ inputs.evidence_artifact_digest }}
+  EVIDENCE_ARTIFACT_RUN_ID: ${{ inputs.evidence_artifact_run_id }}
+  EVIDENCE_ARTIFACT_RUN_ATTEMPT: ${{ inputs.evidence_artifact_run_attempt }}
+  SEAL_REQUEST_SHA256: ${{ inputs.seal_request_sha256 }}
+
+jobs:
+  normalize:
+    name: Normalize exact evidence into an immutable bundle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      artifact_name: ${{ steps.identity.outputs.artifact_name }}
+      artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
+      experiment_id: ${{ steps.identity.outputs.experiment_id }}
+      phase: ${{ steps.identity.outputs.phase }}
+    steps:
+      - name: Checkout exact protected source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: false
+
+      - name: Authorize exact protected-main execution and exact CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+          test "$GITHUB_ACTOR" = "0xNad"
+          test "$GITHUB_TRIGGERING_ACTOR" = "0xNad"
+          test "$GITHUB_REF" = "refs/heads/main"
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$SOURCE_CI_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$SOURCE_CI_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          [[ "$EVIDENCE_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$EVIDENCE_ARTIFACT_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$EVIDENCE_ARTIFACT_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          [[ "$EVIDENCE_ARTIFACT_DIGEST" =~ ^(sha256:)?[0-9a-f]{64}$ ]]
+          [[ "$SEAL_REQUEST_SHA256" =~ ^(sha256:)?[0-9a-f]{64}$ ]]
+          test "$GITHUB_SHA" = "$SOURCE_SHA"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$SOURCE_SHA"
+          test "$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)" = "public"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq .protected)" = "true"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_CI_RUN_ID" > "$RUNNER_TEMP/source-ci.json"
+          test "$(jq -r .head_sha "$RUNNER_TEMP/source-ci.json")" = "$SOURCE_SHA"
+          test "$(jq -r .run_attempt "$RUNNER_TEMP/source-ci.json")" = "$SOURCE_CI_RUN_ATTEMPT"
+          test "$(jq -r .path "$RUNNER_TEMP/source-ci.json")" = ".github/workflows/ci.yml"
+          test "$(jq -r .actor.login "$RUNNER_TEMP/source-ci.json")" = "0xNad"
+          test "$(jq -r .head_repository.full_name "$RUNNER_TEMP/source-ci.json")" = "$GITHUB_REPOSITORY"
+          test "$(jq -r .repository.full_name "$RUNNER_TEMP/source-ci.json")" = "$GITHUB_REPOSITORY"
+          test "$(jq -r .status "$RUNNER_TEMP/source-ci.json")" = "completed"
+          test "$(jq -r .conclusion "$RUNNER_TEMP/source-ci.json")" = "success"
+          case "$(jq -r .event "$RUNNER_TEMP/source-ci.json")" in
+            push|workflow_dispatch) ;;
+            *) exit 1 ;;
+          esac
+
+      - name: Download exact collector artifact by ID
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          artifact-ids: ${{ inputs.evidence_artifact_id }}
+          path: ${{ runner.temp }}/commander-xp-envelope
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.evidence_artifact_run_id }}
+
+      - name: Fetch immutable collector artifact and workflow metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$EVIDENCE_ARTIFACT_ID" > "$RUNNER_TEMP/evidence-artifact.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$EVIDENCE_ARTIFACT_RUN_ID" > "$RUNNER_TEMP/evidence-run.json"
+          gh api "repos/$GITHUB_REPOSITORY" > "$RUNNER_TEMP/repository.json"
+          jq -s '{artifact:.[0],workflowRun:.[1],repository:.[2]}' \
+            "$RUNNER_TEMP/evidence-artifact.json" \
+            "$RUNNER_TEMP/evidence-run.json" \
+            "$RUNNER_TEMP/repository.json" \
+            > "$RUNNER_TEMP/evidence-artifact-metadata.json"
+          test "$(jq -r .artifact.id "$RUNNER_TEMP/evidence-artifact-metadata.json")" = "$EVIDENCE_ARTIFACT_ID"
+          test "$(jq -r .artifact.name "$RUNNER_TEMP/evidence-artifact-metadata.json")" = "$EVIDENCE_ARTIFACT_NAME"
+          test "$(jq -r .workflowRun.id "$RUNNER_TEMP/evidence-artifact-metadata.json")" = "$EVIDENCE_ARTIFACT_RUN_ID"
+          test "$(jq -r .workflowRun.run_attempt "$RUNNER_TEMP/evidence-artifact-metadata.json")" = "$EVIDENCE_ARTIFACT_RUN_ATTEMPT"
+          test "$(jq -r .workflowRun.head_sha "$RUNNER_TEMP/evidence-artifact-metadata.json")" = "$SOURCE_SHA"
+          COLLECTOR_WORKFLOW_ID=$(jq -r .sourceArtifact.workflowID "$RUNNER_TEMP/commander-xp-envelope/authority/commander-xp-external-seal-request-v1.json")
+          test "$(jq -r .workflowRun.workflow_id "$RUNNER_TEMP/evidence-artifact-metadata.json")" = "$COLLECTOR_WORKFLOW_ID"
+          test "$(jq -r .workflowRun.path "$RUNNER_TEMP/evidence-artifact-metadata.json")" = ".github/workflows/commander-xp-evidence.yml"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$COLLECTOR_WORKFLOW_ID" --jq .name)" = "Commander XP protected experiment evidence"
+          ACTUAL_DIGEST=$(jq -r .artifact.digest "$RUNNER_TEMP/evidence-artifact-metadata.json")
+          test "${ACTUAL_DIGEST#sha256:}" = "${EVIDENCE_ARTIFACT_DIGEST#sha256:}"
+
+      - name: Setup exact Node runtime
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+
+      - name: Install exact-source dependencies
+        run: node .github/scripts/npm-ci-with-retry.mjs --ignore-scripts
+
+      - name: Run exact seal-authority regression tests
+        run: node --test .github/scripts/commander-xp-external-seal.test.mjs
+
+      - name: Re-run the exact-source Commander verifier
+        run: |
+          set -euo pipefail
+          set +e
+          test -d "$RUNNER_TEMP/commander-xp-envelope/evidence"
+          test -f "$RUNNER_TEMP/commander-xp-envelope/authority/commander-xp-external-seal-request-v1.json"
+          npm run --silent agent:commander:xp:verify -- "$RUNNER_TEMP/commander-xp-envelope/evidence" > "$RUNNER_TEMP/commander-xp-verification.json"
+          STATUS=$?
+          set -e
+          test "$STATUS" -eq 1
+          jq -e '
+            .schemaVersion == 2 and
+            .integrityVerified == true and
+            .experimentUsable == false and
+            .performanceClaimAuthorized == false and
+            .authenticity.verified == false and
+            .authenticity.status == "external-seal-receipt-required"
+          ' "$RUNNER_TEMP/commander-xp-verification.json" >/dev/null
+
+      - name: Verify the prior canary receipt attestation when confirmatory
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          PHASE=$(jq -r .phase "$RUNNER_TEMP/commander-xp-envelope/authority/commander-xp-external-seal-request-v1.json")
+          case "$PHASE" in
+            provider-preflight|canary) ;;
+            confirmatory)
+              RECEIPT_PATH=$(jq -r .canaryReceipt.path "$RUNNER_TEMP/commander-xp-envelope/authority/commander-xp-external-seal-request-v1.json")
+              test -f "$RUNNER_TEMP/commander-xp-envelope/evidence/$RECEIPT_PATH"
+              gh attestation verify \
+                "$RUNNER_TEMP/commander-xp-envelope/evidence/$RECEIPT_PATH" \
+                --repo "$GITHUB_REPOSITORY" \
+                --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/commander-xp-external-seal.yml@refs/heads/main" \
+                --deny-self-hosted-runners
+              for KIND in evidence receipt; do
+                ARTIFACT_ID=$(jq -r ".canaryReceipt.${KIND}Artifact.id" "$RUNNER_TEMP/commander-xp-envelope/authority/commander-xp-external-seal-request-v1.json")
+                EXPECTED_DIGEST=$(jq -r ".canaryReceipt.${KIND}Artifact.digest" "$RUNNER_TEMP/commander-xp-envelope/authority/commander-xp-external-seal-request-v1.json")
+                CANARY_RUN_ID=$(jq -r .canaryReceipt.runId "$RUNNER_TEMP/commander-xp-envelope/authority/commander-xp-external-seal-request-v1.json")
+                gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > "$RUNNER_TEMP/canary-$KIND-artifact.json"
+                test "$(jq -r .expired "$RUNNER_TEMP/canary-$KIND-artifact.json")" = "false"
+                test "$(jq -r .workflow_run.id "$RUNNER_TEMP/canary-$KIND-artifact.json")" = "$CANARY_RUN_ID"
+                ACTUAL_DIGEST=$(jq -r .digest "$RUNNER_TEMP/canary-$KIND-artifact.json")
+                test "${ACTUAL_DIGEST#sha256:}" = "${EXPECTED_DIGEST#sha256:}"
+                python -c 'import datetime,json,pathlib,sys; artifact=json.loads(pathlib.Path(sys.argv[1]).read_text()); expires=datetime.datetime.fromisoformat(artifact["expires_at"].replace("Z","+00:00")); assert expires > datetime.datetime.now(datetime.timezone.utc), "bound canary artifact is expired"' "$RUNNER_TEMP/canary-$KIND-artifact.json"
+              done
+              ;;
+            *) exit 1 ;;
+          esac
+
+      - name: Build and self-verify the normalized seal bundle
+        id: identity
+        run: |
+          set -euo pipefail
+          CREATED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          node .github/scripts/commander-xp-external-seal.mjs prepare \
+            --repository="$GITHUB_WORKSPACE" \
+            --evidence-root="$RUNNER_TEMP/commander-xp-envelope/evidence" \
+            --seal-request-root="$RUNNER_TEMP/commander-xp-envelope/authority" \
+            --output-root="$RUNNER_TEMP/sealed-bundle" \
+            --expected-request-sha256="$SEAL_REQUEST_SHA256" \
+            --source-artifact-metadata="$RUNNER_TEMP/evidence-artifact-metadata.json" \
+            --source-ci-metadata="$RUNNER_TEMP/source-ci.json" \
+            --verifier-aggregate="$RUNNER_TEMP/commander-xp-verification.json" \
+            --created-at="$CREATED_AT" \
+            > "$RUNNER_TEMP/seal-prepare-result.json"
+          PHASE=$(jq -r .phase "$RUNNER_TEMP/seal-prepare-result.json")
+          EXPERIMENT_ID=$(jq -r .experimentID "$RUNNER_TEMP/seal-prepare-result.json")
+          [[ "$PHASE" =~ ^(provider-preflight|canary|confirmatory)$ ]]
+          [[ "$EXPERIMENT_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$ ]]
+          ARTIFACT_NAME="commander-xp-seal-$PHASE-$SOURCE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          {
+            echo "phase=$PHASE"
+            echo "experiment_id=$EXPERIMENT_ID"
+            echo "artifact_name=$ARTIFACT_NAME"
+          } >> "$GITHUB_OUTPUT"
+          mkdir -m 700 "$RUNNER_TEMP/sealed-upload"
+          tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
+            -C "$RUNNER_TEMP/sealed-bundle" -czf "$RUNNER_TEMP/sealed-upload/sealed-bundle.tgz" .
+          sha256sum "$RUNNER_TEMP/sealed-upload/sealed-bundle.tgz" \
+            | sed 's#  .*/#  #' \
+            > "$RUNNER_TEMP/sealed-upload/sealed-bundle.tgz.sha256"
+
+      - name: Upload unique immutable seal bundle
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.identity.outputs.artifact_name }}
+          path: ${{ runner.temp }}/sealed-upload/
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+
+      - name: Require immutable upload identity
+        run: |
+          set -euo pipefail
+          [[ '${{ steps.upload.outputs.artifact-id }}' =~ ^[1-9][0-9]*$ ]]
+          [[ '${{ steps.upload.outputs.artifact-digest }}' =~ ^[0-9a-f]{64}$ ]]
+
+  verify-and-attest:
+    name: Independent download, verification, receipt, and public attestation
+    needs: normalize
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout exact protected verifier source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: false
+
+      - name: Re-authorize exact protected-main source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+          test "$GITHUB_ACTOR" = "0xNad"
+          test "$GITHUB_TRIGGERING_ACTOR" = "0xNad"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$GITHUB_SHA" = "$SOURCE_SHA"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$SOURCE_SHA"
+          test "$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)" = "public"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq .protected)" = "true"
+
+      - name: Download immutable bundle by artifact ID
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          artifact-ids: ${{ needs.normalize.outputs.artifact_id }}
+          path: ${{ runner.temp }}/sealed-download
+
+      - name: Fetch bundle artifact and workflow metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/${{ needs.normalize.outputs.artifact_id }}" > "$RUNNER_TEMP/bundle-artifact.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" > "$RUNNER_TEMP/bundle-run.json"
+          gh api "repos/$GITHUB_REPOSITORY" > "$RUNNER_TEMP/repository.json"
+          jq -s '{artifact:.[0],workflowRun:.[1],repository:.[2]}' \
+            "$RUNNER_TEMP/bundle-artifact.json" \
+            "$RUNNER_TEMP/bundle-run.json" \
+            "$RUNNER_TEMP/repository.json" \
+            > "$RUNNER_TEMP/bundle-artifact-metadata.json"
+
+      - name: Check archive bytes and extract without links or path traversal
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/sealed-download"
+          sha256sum --check sealed-bundle.tgz.sha256
+          python - <<'PY'
+          import os, pathlib, tarfile
+          archive = pathlib.Path(os.environ["RUNNER_TEMP"]) / "sealed-download" / "sealed-bundle.tgz"
+          target = pathlib.Path(os.environ["RUNNER_TEMP"]) / "verified-bundle"
+          target.mkdir(mode=0o700)
+          with tarfile.open(archive, "r:gz") as bundle:
+              for member in bundle.getmembers():
+                  candidate = pathlib.PurePosixPath(member.name)
+                  if candidate.is_absolute() or ".." in candidate.parts or not (member.isfile() or member.isdir()):
+                      raise SystemExit(f"unsafe seal bundle member: {member.name}")
+              bundle.extractall(target, filter="data")
+          PY
+
+      - name: Setup exact Node runtime
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+
+      - name: Install exact-source dependencies
+        run: node .github/scripts/npm-ci-with-retry.mjs --ignore-scripts
+
+      - name: Re-run exact seal-authority regression tests
+        run: node --test .github/scripts/commander-xp-external-seal.test.mjs
+
+      - name: Independently re-run Commander joins, privacy, and bundle checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          set +e
+          npm run --silent agent:commander:xp:verify -- "$RUNNER_TEMP/verified-bundle/evidence" > "$RUNNER_TEMP/second-verification.json"
+          STATUS=$?
+          set -e
+          test "$STATUS" -eq 1
+          node .github/scripts/commander-xp-external-seal.mjs verify-evidence \
+            --evidence-root="$RUNNER_TEMP/verified-bundle/evidence" \
+            --seal-request-root="$RUNNER_TEMP/verified-bundle/authority" \
+            --expected-request-sha256="$SEAL_REQUEST_SHA256" \
+            --verifier-aggregate="$RUNNER_TEMP/second-verification.json"
+          node .github/scripts/commander-xp-external-seal.mjs verify-bundle \
+            --bundle-root="$RUNNER_TEMP/verified-bundle" \
+            --repository="$GITHUB_WORKSPACE" \
+            --source-sha="$SOURCE_SHA" \
+            --workflow-run-id="$GITHUB_RUN_ID" \
+            --workflow-run-attempt="$GITHUB_RUN_ATTEMPT"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_CI_RUN_ID" > "$RUNNER_TEMP/second-source-ci.json"
+          jq '.sourceCI' "$RUNNER_TEMP/verified-bundle/commander-xp-external-seal-bundle-v1.json" > "$RUNNER_TEMP/source-ci-binding.json"
+          node .github/scripts/commander-xp-external-seal.mjs verify-source-ci \
+            --metadata="$RUNNER_TEMP/second-source-ci.json" \
+            --binding="$RUNNER_TEMP/source-ci-binding.json"
+
+      - name: Create and verify the external seal receipt
+        env:
+          BUNDLE_ARTIFACT_ID: ${{ needs.normalize.outputs.artifact_id }}
+          BUNDLE_ARTIFACT_NAME: ${{ needs.normalize.outputs.artifact_name }}
+          BUNDLE_ARTIFACT_DIGEST: ${{ needs.normalize.outputs.artifact_digest }}
+        run: |
+          set -euo pipefail
+          COMPLETED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          node .github/scripts/commander-xp-external-seal.mjs receipt \
+            --bundle-root="$RUNNER_TEMP/verified-bundle" \
+            --sealed-bundle="$RUNNER_TEMP/sealed-download/sealed-bundle.tgz" \
+            --bundle-artifact-metadata="$RUNNER_TEMP/bundle-artifact-metadata.json" \
+            --completed-at="$COMPLETED_AT" \
+            --output="$RUNNER_TEMP/commander-xp-external-seal-receipt-v1.json"
+          node .github/scripts/commander-xp-external-seal.mjs verify-receipt \
+            --receipt="$RUNNER_TEMP/commander-xp-external-seal-receipt-v1.json" \
+            --experiment-id="${{ needs.normalize.outputs.experiment_id }}" \
+            --phase="${{ needs.normalize.outputs.phase }}"
+
+      - name: Attest exact bundle and receipt subject through public Sigstore
+        id: subject-attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: |
+            ${{ runner.temp }}/sealed-download/sealed-bundle.tgz
+            ${{ runner.temp }}/commander-xp-external-seal-receipt-v1.json
+          show-summary: true
+
+      - name: Upload unique immutable receipt subject
+        id: receipt-upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: commander-xp-seal-receipt-subject-${{ needs.normalize.outputs.phase }}-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/commander-xp-external-seal-receipt-v1.json
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+
+      - name: Fetch immutable receipt artifact metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ '${{ steps.receipt-upload.outputs.artifact-id }}' =~ ^[1-9][0-9]*$ ]]
+          [[ '${{ steps.receipt-upload.outputs.artifact-digest }}' =~ ^[0-9a-f]{64}$ ]]
+          [[ '${{ steps.subject-attest.outputs.attestation-id }}' =~ ^[1-9][0-9]*$ ]]
+          test -s '${{ steps.subject-attest.outputs.bundle-path }}'
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/${{ steps.receipt-upload.outputs.artifact-id }}" > "$RUNNER_TEMP/receipt-artifact.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" > "$RUNNER_TEMP/receipt-run.json"
+          gh api "repos/$GITHUB_REPOSITORY" > "$RUNNER_TEMP/repository.json"
+          jq -s '{artifact:.[0],workflowRun:.[1],repository:.[2]}' \
+            "$RUNNER_TEMP/receipt-artifact.json" \
+            "$RUNNER_TEMP/receipt-run.json" \
+            "$RUNNER_TEMP/repository.json" \
+            > "$RUNNER_TEMP/receipt-artifact-metadata.json"
+
+      - name: Create and verify exact verifier-compatible phase ledger
+        env:
+          RECEIPT_ARTIFACT_ID: ${{ steps.receipt-upload.outputs.artifact-id }}
+          RECEIPT_ARTIFACT_NAME: commander-xp-seal-receipt-subject-${{ needs.normalize.outputs.phase }}-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          RECEIPT_ARTIFACT_DIGEST: ${{ steps.receipt-upload.outputs.artifact-digest }}
+        run: |
+          set -euo pipefail
+          COMPLETED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          TREE_SHA=$(git rev-parse HEAD^{tree})
+          BEHAVIOR_BASE_SHA=$(jq -r .source.behaviorBaseSha "$RUNNER_TEMP/verified-bundle/commander-xp-external-seal-bundle-v1.json")
+          BEHAVIOR_BASE_TREE_SHA=$(jq -r .source.behaviorBaseTreeSha "$RUNNER_TEMP/verified-bundle/commander-xp-external-seal-bundle-v1.json")
+          node .github/scripts/commander-xp-external-seal.mjs ledger \
+            --bundle-root="$RUNNER_TEMP/verified-bundle" \
+            --receipt="$RUNNER_TEMP/commander-xp-external-seal-receipt-v1.json" \
+            --receipt-artifact-metadata="$RUNNER_TEMP/receipt-artifact-metadata.json" \
+            --completed-at="$COMPLETED_AT" \
+            --output="$RUNNER_TEMP/commander-xp-external-phase-ledger-v2.json"
+          node .github/scripts/commander-xp-external-seal.mjs verify-ledger \
+            --ledger="$RUNNER_TEMP/commander-xp-external-phase-ledger-v2.json" \
+            --phase="${{ needs.normalize.outputs.phase }}" \
+            --experiment-id="${{ needs.normalize.outputs.experiment_id }}" \
+            --behavior-base-sha="$BEHAVIOR_BASE_SHA" \
+            --behavior-base-tree-sha="$BEHAVIOR_BASE_TREE_SHA" \
+            --source-sha="$SOURCE_SHA" \
+            --source-tree-sha="$TREE_SHA"
+
+      - name: Attest final verifier-compatible phase ledger
+        id: ledger-attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: ${{ runner.temp }}/commander-xp-external-phase-ledger-v2.json
+          show-summary: true
+
+      - name: Upload unique immutable phase ledger
+        id: ledger-upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: commander-xp-phase-ledger-${{ needs.normalize.outputs.phase }}-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/commander-xp-external-phase-ledger-v2.json
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+
+      - name: Build signer-constrained final authority package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ '${{ steps.ledger-upload.outputs.artifact-id }}' =~ ^[1-9][0-9]*$ ]]
+          [[ '${{ steps.ledger-upload.outputs.artifact-digest }}' =~ ^[0-9a-f]{64}$ ]]
+          [[ '${{ steps.ledger-attest.outputs.attestation-id }}' =~ ^[1-9][0-9]*$ ]]
+          test -s '${{ steps.ledger-attest.outputs.bundle-path }}'
+          AUTHORITY="$RUNNER_TEMP/commander-xp-authority-package"
+          mkdir -m 700 "$AUTHORITY"
+          gh attestation verify \
+            "$RUNNER_TEMP/sealed-download/sealed-bundle.tgz" \
+            --repo "$GITHUB_REPOSITORY" \
+            --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/commander-xp-external-seal.yml@refs/heads/main" \
+            --deny-self-hosted-runners \
+            --format=json > "$AUTHORITY/sealed-bundle-provenance.json"
+          gh attestation verify \
+            "$RUNNER_TEMP/commander-xp-external-seal-receipt-v1.json" \
+            --repo "$GITHUB_REPOSITORY" \
+            --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/commander-xp-external-seal.yml@refs/heads/main" \
+            --deny-self-hosted-runners \
+            --format=json > "$AUTHORITY/receipt-subject-provenance.json"
+          gh attestation verify \
+            "$RUNNER_TEMP/commander-xp-external-phase-ledger-v2.json" \
+            --repo "$GITHUB_REPOSITORY" \
+            --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/commander-xp-external-seal.yml@refs/heads/main" \
+            --deny-self-hosted-runners \
+            --format=json > "$AUTHORITY/phase-ledger-provenance.json"
+          cp '${{ steps.subject-attest.outputs.bundle-path }}' "$AUTHORITY/subject-attestation-bundle.jsonl"
+          cp '${{ steps.ledger-attest.outputs.bundle-path }}' "$AUTHORITY/ledger-attestation-bundle.jsonl"
+          cp "$RUNNER_TEMP/commander-xp-external-seal-receipt-v1.json" "$AUTHORITY/"
+          cp "$RUNNER_TEMP/commander-xp-external-phase-ledger-v2.json" "$AUTHORITY/"
+          jq -n \
+            --slurpfile manifest "$RUNNER_TEMP/verified-bundle/commander-xp-external-seal-bundle-v1.json" \
+            --slurpfile ledger "$RUNNER_TEMP/commander-xp-external-phase-ledger-v2.json" \
+            --arg subjectAttestationID '${{ steps.subject-attest.outputs.attestation-id }}' \
+            --arg ledgerAttestationID '${{ steps.ledger-attest.outputs.attestation-id }}' \
+            --arg bundleArtifactID '${{ needs.normalize.outputs.artifact_id }}' \
+            --arg bundleArtifactDigest 'sha256:${{ needs.normalize.outputs.artifact_digest }}' \
+            --arg receiptArtifactID '${{ steps.receipt-upload.outputs.artifact-id }}' \
+            --arg receiptArtifactDigest 'sha256:${{ steps.receipt-upload.outputs.artifact-digest }}' \
+            --arg ledgerArtifactID '${{ steps.ledger-upload.outputs.artifact-id }}' \
+            --arg ledgerArtifactDigest 'sha256:${{ steps.ledger-upload.outputs.artifact-digest }}' \
+            --arg subjectBundleSha256 "sha256:$(sha256sum "$AUTHORITY/subject-attestation-bundle.jsonl" | cut -d' ' -f1)" \
+            --arg ledgerBundleSha256 "sha256:$(sha256sum "$AUTHORITY/ledger-attestation-bundle.jsonl" | cut -d' ' -f1)" \
+            --arg bundleProvenanceSha256 "sha256:$(sha256sum "$AUTHORITY/sealed-bundle-provenance.json" | cut -d' ' -f1)" \
+            --arg receiptProvenanceSha256 "sha256:$(sha256sum "$AUTHORITY/receipt-subject-provenance.json" | cut -d' ' -f1)" \
+            --arg ledgerProvenanceSha256 "sha256:$(sha256sum "$AUTHORITY/phase-ledger-provenance.json" | cut -d' ' -f1)" \
+            '{schemaVersion:1,authority:"github-actions-protected-main-public-sigstore-v1",repository:"0xNad/ProxyWar",workflowPath:".github/workflows/commander-xp-external-seal.yml",workflowRef:"refs/heads/main",experimentID:$ledger[0].experimentID,runId:$ledger[0].runId,attempt:$ledger[0].attempt,headSha:$ledger[0].headSha,treeSha:$ledger[0].treeSha,behaviorBaseSha:$manifest[0].source.behaviorBaseSha,behaviorBaseTreeSha:$manifest[0].source.behaviorBaseTreeSha,localSealSha256:$ledger[0].evidenceArtifact.localSealSha256,phase:$ledger[0].phase,sourceCI:$manifest[0].sourceCI,collectorArtifact:$manifest[0].sourceArtifact,bundleArtifact:{id:$bundleArtifactID,digest:$bundleArtifactDigest},receiptArtifact:{id:$receiptArtifactID,digest:$receiptArtifactDigest},ledgerArtifact:{id:$ledgerArtifactID,digest:$ledgerArtifactDigest,ledgerSha256:$ledger[0].ledgerSha256},attestations:{subject:{id:$subjectAttestationID,bundleSha256:$subjectBundleSha256,provenanceSha256s:[$bundleProvenanceSha256,$receiptProvenanceSha256]},ledger:{id:$ledgerAttestationID,bundleSha256:$ledgerBundleSha256,provenanceSha256:$ledgerProvenanceSha256}},integrityVerified:true,experimentUsable:false,performanceClaimAuthorized:false}' \
+            > "$AUTHORITY/commander-xp-external-authority-receipt-v1.json"
+          (cd "$AUTHORITY" && find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
+          jq -e '.schemaVersion == 1 and .authority == "github-actions-protected-main-public-sigstore-v1" and .integrityVerified == true and .experimentUsable == false and .performanceClaimAuthorized == false' "$AUTHORITY/commander-xp-external-authority-receipt-v1.json" >/dev/null
+          (cd "$AUTHORITY" && sha256sum --check SHA256SUMS)
+
+      - name: Attest final authority receipt and retained provenance
+        id: authority-attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: |
+            ${{ runner.temp }}/commander-xp-authority-package/commander-xp-external-authority-receipt-v1.json
+            ${{ runner.temp }}/commander-xp-authority-package/SHA256SUMS
+          show-summary: true
+
+      - name: Upload unique immutable final authority package
+        id: authority-upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: commander-xp-authority-${{ needs.normalize.outputs.phase }}-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/commander-xp-authority-package/
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+
+      - name: Build post-attestation terminal authority index
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ '${{ steps.authority-upload.outputs.artifact-id }}' =~ ^[1-9][0-9]*$ ]]
+          [[ '${{ steps.authority-upload.outputs.artifact-digest }}' =~ ^[0-9a-f]{64}$ ]]
+          [[ '${{ steps.authority-attest.outputs.attestation-id }}' =~ ^[1-9][0-9]*$ ]]
+          test -s '${{ steps.authority-attest.outputs.bundle-path }}'
+          gh attestation verify \
+            "$RUNNER_TEMP/commander-xp-authority-package/commander-xp-external-authority-receipt-v1.json" \
+            --repo "$GITHUB_REPOSITORY" \
+            --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/commander-xp-external-seal.yml@refs/heads/main" \
+            --deny-self-hosted-runners \
+            --format=json > "$RUNNER_TEMP/authority-receipt-provenance.json"
+          cp '${{ steps.authority-attest.outputs.bundle-path }}' "$RUNNER_TEMP/authority-attestation-bundle.jsonl"
+          jq -n \
+            --slurpfile receipt "$RUNNER_TEMP/commander-xp-authority-package/commander-xp-external-authority-receipt-v1.json" \
+            --arg authorityArtifactID '${{ steps.authority-upload.outputs.artifact-id }}' \
+            --arg authorityArtifactDigest 'sha256:${{ steps.authority-upload.outputs.artifact-digest }}' \
+            --arg authorityAttestationID '${{ steps.authority-attest.outputs.attestation-id }}' \
+            --arg authorityReceiptSha256 "sha256:$(sha256sum "$RUNNER_TEMP/commander-xp-authority-package/commander-xp-external-authority-receipt-v1.json" | cut -d' ' -f1)" \
+            --arg authorityBundleSha256 "sha256:$(sha256sum "$RUNNER_TEMP/authority-attestation-bundle.jsonl" | cut -d' ' -f1)" \
+            --arg authorityProvenanceSha256 "sha256:$(sha256sum "$RUNNER_TEMP/authority-receipt-provenance.json" | cut -d' ' -f1)" \
+            '{schemaVersion:1,authority:"github-actions-terminal-authority-index-v1",repository:$receipt[0].repository,workflowPath:$receipt[0].workflowPath,workflowRef:$receipt[0].workflowRef,experimentID:$receipt[0].experimentID,runId:$receipt[0].runId,attempt:$receipt[0].attempt,headSha:$receipt[0].headSha,treeSha:$receipt[0].treeSha,behaviorBaseSha:$receipt[0].behaviorBaseSha,behaviorBaseTreeSha:$receipt[0].behaviorBaseTreeSha,localSealSha256:$receipt[0].localSealSha256,phase:$receipt[0].phase,sourceCI:$receipt[0].sourceCI,collectorArtifact:$receipt[0].collectorArtifact,authorityArtifact:{id:$authorityArtifactID,digest:$authorityArtifactDigest,receiptSha256:$authorityReceiptSha256},authorityAttestation:{id:$authorityAttestationID,bundleSha256:$authorityBundleSha256,provenanceSha256:$authorityProvenanceSha256},integrityVerified:true,experimentUsable:false,performanceClaimAuthorized:false}' \
+            > "$RUNNER_TEMP/commander-xp-terminal-authority-index-v1.json"
+          jq -e '.schemaVersion == 1 and .authority == "github-actions-terminal-authority-index-v1" and .integrityVerified == true and .experimentUsable == false and .performanceClaimAuthorized == false' "$RUNNER_TEMP/commander-xp-terminal-authority-index-v1.json" >/dev/null
+
+      - name: Attest terminal authority index
+        id: terminal-attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: ${{ runner.temp }}/commander-xp-terminal-authority-index-v1.json
+          show-summary: true
+
+      - name: Upload unique immutable terminal authority index
+        id: terminal-upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: commander-xp-terminal-authority-${{ needs.normalize.outputs.phase }}-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/commander-xp-terminal-authority-index-v1.json
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+
+      - name: Verify terminal authority index attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ '${{ steps.terminal-upload.outputs.artifact-id }}' =~ ^[1-9][0-9]*$ ]]
+          [[ '${{ steps.terminal-upload.outputs.artifact-digest }}' =~ ^[0-9a-f]{64}$ ]]
+          [[ '${{ steps.terminal-attest.outputs.attestation-id }}' =~ ^[1-9][0-9]*$ ]]
+          test -s '${{ steps.terminal-attest.outputs.bundle-path }}'
+          gh attestation verify \
+            "$RUNNER_TEMP/commander-xp-terminal-authority-index-v1.json" \
+            --repo "$GITHUB_REPOSITORY" \
+            --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/commander-xp-external-seal.yml@refs/heads/main" \
+            --deny-self-hosted-runners
