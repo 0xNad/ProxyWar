@@ -13,7 +13,10 @@ import {
   freezeReplayPremiereCheckpointProjection,
   type ReplayPremiereCheckpointProjector,
 } from "../../../src/server/replay-premiere/ReplayPremiereCheckpointProjection";
-import { backfillReplayPremiereTerminalTombstones } from "../../../src/server/replay-premiere/ReplayPremiereCoordination";
+import {
+  backfillReplayPremiereTerminalTombstones,
+  backfillReplayPremiereTerminalTombstonesDetailed,
+} from "../../../src/server/replay-premiere/ReplayPremiereCoordination";
 import { ReplayPremiereError } from "../../../src/server/replay-premiere/ReplayPremiereErrors";
 import { ReplayPremiereGuestSecurity } from "../../../src/server/replay-premiere/ReplayPremiereGuestSecurity";
 import { ReplayPremiereHttpRegistry } from "../../../src/server/replay-premiere/ReplayPremiereHttp";
@@ -42,6 +45,9 @@ import {
 } from "./ReplayPremiereFixtures";
 
 const EXPECTED_ORIGIN = "https://beta.proxywar.xyz";
+const ABSENT_LEGACY_PREMIERE_ID = "prem_0000000000000001";
+const ABSENT_LEGACY_EPISODE_REQUEST_ID =
+  "ereq_00000000-0000-4000-8000-000000000099";
 
 describe("Replay Premiere rated Coworld ingestion", () => {
   let root: string;
@@ -476,6 +482,81 @@ describe("Replay Premiere rated Coworld ingestion", () => {
     } finally {
       await started.service.close();
     }
+  });
+
+  test("historical backfill skips an absent legacy admission and still retires a later present admission", async () => {
+    const harness = await createRatedAdmissionHarness(root);
+    await runReplayPremiereAdmission(harness.args, harness.dependencies);
+    const releasedAt = new Date(NOW.getTime() + 1_000).toISOString();
+    const absentRelease = [
+      {
+        kind: "hold_update",
+        ts: NOW.toISOString(),
+        hold: {
+          episodeRequestId: ABSENT_LEGACY_EPISODE_REQUEST_ID,
+          premiereId: ABSENT_LEGACY_PREMIERE_ID,
+          roundId: "round_absent_legacy",
+          phase: "activated",
+        },
+      },
+      {
+        kind: "hold_released",
+        ts: releasedAt,
+        episodeRequestId: ABSENT_LEGACY_EPISODE_REQUEST_ID,
+        premiereId: ABSENT_LEGACY_PREMIERE_ID,
+        roundId: "round_absent_legacy",
+        outcome: "activation_refused",
+        terminal: true,
+      },
+    ] as const;
+
+    const result = await backfillReplayPremiereTerminalTombstonesDetailed({
+      privateStateRoot: harness.privateStateRoot,
+      records: [
+        ...absentRelease,
+        ...terminalReleaseJournal("activated", releasedAt),
+      ],
+    });
+
+    expect(result.catalogAbsentArchivedPremiereIds).toEqual([]);
+    expect(result.catalogAbsentUnarchivedPremiereIds).toEqual([
+      ABSENT_LEGACY_PREMIERE_ID,
+    ]);
+    expect(result.tombstones.map(({ premiereId }) => premiereId)).toEqual([
+      RATED_PREMIERE_ID,
+    ]);
+    await expect(
+      fs.stat(ratedTombstonePath(harness.privateStateRoot)),
+    ).resolves.toBeDefined();
+  });
+
+  test("historical backfill validates the complete history before creating a tombstone", async () => {
+    const harness = await createRatedAdmissionHarness(root);
+    await runReplayPremiereAdmission(harness.args, harness.dependencies);
+    const releasedAt = new Date(NOW.getTime() + 1_000).toISOString();
+
+    await expectOperatorCode(
+      backfillReplayPremiereTerminalTombstonesDetailed({
+        privateStateRoot: harness.privateStateRoot,
+        records: [
+          ...terminalReleaseJournal("activated", releasedAt),
+          {
+            kind: "hold_released",
+            ts: releasedAt,
+            episodeRequestId: ABSENT_LEGACY_EPISODE_REQUEST_ID,
+            premiereId: ABSENT_LEGACY_PREMIERE_ID,
+            roundId: "round_absent_legacy",
+            outcome: "activation_refused",
+            terminal: true,
+            ambiguous: true,
+          },
+        ],
+      }),
+      "coordination_object_keys_invalid",
+    );
+    await expect(
+      fs.stat(ratedTombstonePath(harness.privateStateRoot)),
+    ).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   test("a tombstone never cancels an already-playing rated premiere on restart", async () => {

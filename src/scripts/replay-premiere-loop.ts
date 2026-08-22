@@ -26,6 +26,7 @@ import { readReplayPremiereAdmissionRecord } from "../server/replay-premiere/Rep
 import { PREMIERE_REAL_TURN_INTERVAL_MS } from "../server/replay-premiere/ReplayPremiereContracts";
 import {
   backfillReplayPremiereTerminalTombstones,
+  backfillReplayPremiereTerminalTombstonesDetailed,
   persistReplayPremiereTerminalTombstone,
   readActiveReplayPremiereStartupSelection,
   replayPremiereStartupSelectionFingerprint,
@@ -33,6 +34,7 @@ import {
 } from "../server/replay-premiere/ReplayPremiereCoordination";
 import { formatReplayPremiereErrorCauseChain } from "../server/replay-premiere/ReplayPremiereErrorTelemetry";
 import { ReplayPremiereError } from "../server/replay-premiere/ReplayPremiereErrors";
+import { sha256Hex } from "../server/replay-premiere/ReplayPremiereIntegrity";
 import {
   PREMIERE_LOOP_ACTIVATION_BACKOFF_MS,
   PREMIERE_LOOP_ADMISSION_PROJECTION_TIMEOUT_MS,
@@ -115,6 +117,8 @@ const GIB = 1024 * 1024 * 1024;
 const MIB = 1024 * 1024;
 const MAX_REPLAY_BYTES = 256 * MIB;
 const COWORLD_READ_VERBS = new Set(["rounds", "replays", "divisions"]);
+const MAX_TERMINAL_BACKFILL_JOURNAL_BYTES = 64 * MIB;
+const MAX_TERMINAL_BACKFILL_JOURNAL_RECORDS = 100_000;
 
 interface LoopConfig {
   leagueId: string;
@@ -139,6 +143,20 @@ interface LoopConfig {
   coworldTimeoutMs: number;
   restartHelperPath: string;
   nodeBin: string;
+}
+
+interface TerminalBackfillJournalSource {
+  kind: "archive" | "active";
+  path: string;
+  byteLength: number;
+  sha256: string;
+  recordCount: number;
+}
+
+interface TerminalBackfillJournal {
+  records: readonly unknown[];
+  sources: readonly TerminalBackfillJournalSource[];
+  exactDuplicateCount: number;
 }
 
 function resolveLoopConfig(env: NodeJS.ProcessEnv): LoopConfig {
@@ -310,6 +328,123 @@ async function readJournal(journalPath: string): Promise<LoopJournalRecord[]> {
     }
   }
   return records;
+}
+
+/**
+ * One-shot migration input. Unlike the ordinary resilient tick reader, this
+ * reads the retained archive before the active journal, rejects malformed
+ * persisted lines, and ignores only one unterminated malformed tail in the
+ * actively-appended file. Exact split duplicates are collapsed byte-for-byte.
+ */
+export async function readTerminalTombstoneBackfillJournal(
+  config: LoopConfig,
+): Promise<TerminalBackfillJournal> {
+  const archivePath = path.join(config.loopStateDir, "journal.archive.jsonl");
+  const segments = (
+    await Promise.all([
+      readTerminalBackfillJournalSegment(archivePath, "archive", false),
+      readTerminalBackfillJournalSegment(config.journalPath, "active", true),
+    ])
+  ).filter(
+    (segment): segment is NonNullable<typeof segment> => segment !== null,
+  );
+  if (segments.length === 0) {
+    throw new Error("terminal backfill journal is missing");
+  }
+  const seenLines = new Set<string>();
+  const records: unknown[] = [];
+  let exactDuplicateCount = 0;
+  for (const segment of segments) {
+    for (const entry of segment.entries) {
+      if (seenLines.has(entry.line)) {
+        exactDuplicateCount += 1;
+        continue;
+      }
+      seenLines.add(entry.line);
+      records.push(entry.value);
+      if (records.length > MAX_TERMINAL_BACKFILL_JOURNAL_RECORDS) {
+        throw new Error("terminal backfill journal record limit exceeded");
+      }
+    }
+  }
+  return {
+    records,
+    sources: segments.map(({ kind, filePath, bytes, entries }) => ({
+      kind,
+      path: filePath,
+      byteLength: bytes.byteLength,
+      sha256: sha256Hex(bytes),
+      recordCount: entries.length,
+    })),
+    exactDuplicateCount,
+  };
+}
+
+async function readTerminalBackfillJournalSegment(
+  filePath: string,
+  kind: "archive" | "active",
+  allowTornFinalLine: boolean,
+): Promise<{
+  kind: "archive" | "active";
+  filePath: string;
+  bytes: Buffer;
+  entries: Array<{ line: string; value: unknown }>;
+} | null> {
+  let handle: Awaited<ReturnType<typeof fs.open>>;
+  try {
+    handle = await fs.open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (error) {
+    if (isErrno(error, "ENOENT")) return null;
+    throw error;
+  }
+  let bytes: Buffer;
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw new Error(
+        `terminal backfill ${kind} journal is not a regular file`,
+      );
+    }
+    if (stat.size > MAX_TERMINAL_BACKFILL_JOURNAL_BYTES) {
+      throw new Error(`terminal backfill ${kind} journal byte limit exceeded`);
+    }
+    bytes = await handle.readFile();
+  } finally {
+    await handle.close();
+  }
+  const raw = bytes.toString("utf8");
+  const lines = raw.split("\n");
+  const lastContentIndex = raw.endsWith("\n")
+    ? lines.length - 2
+    : lines.length - 1;
+  const entries: Array<{ line: string; value: unknown }> = [];
+  for (const [index, line] of lines.entries()) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    let value: unknown;
+    try {
+      value = JSON.parse(trimmed) as unknown;
+    } catch (error) {
+      if (
+        allowTornFinalLine &&
+        !raw.endsWith("\n") &&
+        index === lastContentIndex
+      ) {
+        continue;
+      }
+      throw new Error(
+        `terminal backfill ${kind} journal has malformed line ${index + 1}`,
+        { cause: error },
+      );
+    }
+    entries.push({ line, value });
+    if (entries.length > MAX_TERMINAL_BACKFILL_JOURNAL_RECORDS) {
+      throw new Error(
+        `terminal backfill ${kind} journal record limit exceeded`,
+      );
+    }
+  }
+  return { kind, filePath, bytes, entries };
 }
 
 // The active journal is kept bounded so a long-lived loop never reads an
@@ -2886,12 +3021,26 @@ async function runLiveIteration(config: LoopConfig): Promise<void> {
 }
 
 async function runTerminalTombstoneBackfill(config: LoopConfig): Promise<void> {
-  const created = await backfillReplayPremiereTerminalTombstones({
+  const journal = await readTerminalTombstoneBackfillJournal(config);
+  const result = await backfillReplayPremiereTerminalTombstonesDetailed({
     privateStateRoot: config.privateStateRoot,
-    records: await readJournal(config.journalPath),
+    records: journal.records,
   });
   log(
-    `terminal tombstone backfill complete (${created.length} matched release record(s))`,
+    `terminal tombstone backfill complete ${JSON.stringify({
+      schemaVersion: 1,
+      sources: journal.sources,
+      exactDuplicateCount: journal.exactDuplicateCount,
+      tombstones: result.tombstones.map((tombstone) => ({
+        premiereId: tombstone.premiereId,
+        sha256: sha256Hex(
+          Buffer.from(`${JSON.stringify(tombstone)}\n`, "utf8"),
+        ),
+      })),
+      catalogAbsentArchivedPremiereIds: result.catalogAbsentArchivedPremiereIds,
+      catalogAbsentUnarchivedPremiereIds:
+        result.catalogAbsentUnarchivedPremiereIds,
+    })}`,
   );
 }
 

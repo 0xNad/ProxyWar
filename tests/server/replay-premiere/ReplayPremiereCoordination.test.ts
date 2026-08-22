@@ -6,6 +6,7 @@ import {
   backfillReplayPremiereTerminalTombstones,
   createReplayPremiereServerStartupIdentity,
   garbageCollectReplayPremiereTerminalTombstone,
+  persistReplayPremiereTerminalTombstone,
   readActiveReplayPremiereStartupSelection,
   reconcileReplayPremiereTerminalTombstones,
   shouldRetireReplayPremiereRelease,
@@ -201,6 +202,22 @@ describe("Replay Premiere private coordination", () => {
     ]) {
       expect(shouldRetireReplayPremiereRelease(candidate)).toBe(false);
     }
+  });
+
+  test("keeps a live terminal release strict when its expected admission is absent", async () => {
+    await expectOperatorCode(
+      persistReplayPremiereTerminalTombstone({
+        privateStateRoot: root,
+        episodeRequestId: "ereq_00000000-0000-4000-8000-000000000001",
+        premiereId: PREMIERE_ID,
+        roundId: "round_1",
+        phase: "activated",
+        outcome: "activation_lost",
+        terminal: true,
+        releasedAt: "2026-08-22T07:00:00.000Z",
+      }),
+      "coordination_retired_admission_missing",
+    );
   });
 
   test("GC refuses a valid tombstone whose embedded identity differs from its filename and pointer", async () => {

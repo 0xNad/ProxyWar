@@ -23,6 +23,7 @@ import {
   foreignRegisteredPremiereGate,
   persistRetainedAdmissionTransaction,
   progressHold,
+  readTerminalTombstoneBackfillJournal,
   runLoopReplayPremiereAdmission,
   trackHold,
   type IngestMaterials,
@@ -796,6 +797,88 @@ describe("private journal compaction durability", () => {
     ]);
     expect(await readFile(loopConfig.journalPath, "utf8")).toBe(original);
     expect(await compactionTemporaryNames(loopConfig)).toEqual([]);
+  });
+});
+
+describe("terminal tombstone backfill journal", () => {
+  test("reads archive before active and collapses only exact split duplicates", async () => {
+    const loopConfig = config();
+    const activated = hold({ phase: "activated" });
+    const holdUpdate = {
+      kind: "hold_update",
+      ts: NOW.toISOString(),
+      hold: activated,
+    } satisfies LoopJournalRecord;
+    const release = {
+      kind: "hold_released",
+      ts: new Date(NOW.getTime() + 1_000).toISOString(),
+      episodeRequestId: activated.episodeRequestId,
+      premiereId: activated.premiereId,
+      roundId: activated.roundId,
+      outcome: "activation_lost",
+      terminal: true,
+    } satisfies LoopJournalRecord;
+    const archived = {
+      kind: "round_skipped",
+      ts: NOW.toISOString(),
+      roundId: "round_archived",
+      roundNumber: 643,
+      reason: "skipped_busy",
+    } satisfies LoopJournalRecord;
+    await Promise.all([
+      writeFile(
+        path.join(loopConfig.loopStateDir, "journal.archive.jsonl"),
+        serializeJournal([archived, holdUpdate]),
+        { mode: 0o600 },
+      ),
+      writeFile(
+        loopConfig.journalPath,
+        serializeJournal([holdUpdate, release]),
+        { mode: 0o600 },
+      ),
+    ]);
+
+    const journal = await readTerminalTombstoneBackfillJournal(loopConfig);
+
+    expect(journal.records).toEqual([archived, holdUpdate, release]);
+    expect(journal.exactDuplicateCount).toBe(1);
+    expect(
+      journal.sources.map(({ kind, recordCount }) => ({ kind, recordCount })),
+    ).toEqual([
+      { kind: "archive", recordCount: 2 },
+      { kind: "active", recordCount: 2 },
+    ]);
+    expect(
+      journal.sources.every(({ sha256 }) => /^[a-f0-9]{64}$/.test(sha256)),
+    ).toBe(true);
+  });
+
+  test("rejects malformed persisted lines but tolerates one torn active tail", async () => {
+    const loopConfig = config();
+    const valid = JSON.stringify({ kind: "decision", ts: NOW.toISOString() });
+    await writeFile(
+      loopConfig.journalPath,
+      `${valid}\n{malformed}\n${valid}\n`,
+      { mode: 0o600 },
+    );
+    await expect(
+      readTerminalTombstoneBackfillJournal(loopConfig),
+    ).rejects.toThrow("active journal has malformed line 2");
+
+    await writeFile(loopConfig.journalPath, `${valid}\n{"kind"`, {
+      mode: 0o600,
+    });
+    const journal = await readTerminalTombstoneBackfillJournal(loopConfig);
+    expect(journal.records).toEqual([JSON.parse(valid)]);
+    expect(journal.sources).toEqual([
+      expect.objectContaining({ kind: "active", recordCount: 1 }),
+    ]);
+  });
+
+  test("refuses to report success when both retained journal segments are missing", async () => {
+    await expect(
+      readTerminalTombstoneBackfillJournal(config()),
+    ).rejects.toThrow("terminal backfill journal is missing");
   });
 });
 

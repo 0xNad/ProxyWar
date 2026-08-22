@@ -90,6 +90,12 @@ export interface ReplayPremiereHistoricalReleaseRecord {
   terminal: boolean;
 }
 
+export interface ReplayPremiereTerminalTombstoneBackfillResult {
+  tombstones: readonly ReplayPremiereTerminalTombstoneV1[];
+  catalogAbsentArchivedPremiereIds: readonly string[];
+  catalogAbsentUnarchivedPremiereIds: readonly string[];
+}
+
 interface HistoricalHoldIdentity {
   episodeRequestId: string;
   premiereId: string;
@@ -261,8 +267,26 @@ export async function backfillReplayPremiereTerminalTombstones(options: {
   privateStateRoot: string;
   records: readonly unknown[];
 }): Promise<readonly ReplayPremiereTerminalTombstoneV1[]> {
+  return (await backfillReplayPremiereTerminalTombstonesDetailed(options))
+    .tombstones;
+}
+
+/**
+ * Historical migration with a read-only validation pass before any immutable
+ * tombstone is created. An absent catalog admission is already non-selectable,
+ * so it is recorded and skipped; malformed or conflicting present state still
+ * aborts the whole preflight before any new tombstone is written.
+ */
+export async function backfillReplayPremiereTerminalTombstonesDetailed(options: {
+  privateStateRoot: string;
+  records: readonly unknown[];
+}): Promise<ReplayPremiereTerminalTombstoneBackfillResult> {
+  await assertPrivateStateRoot(options.privateStateRoot);
   const activeHolds = new Map<string, HistoricalHoldIdentity>();
-  const created: ReplayPremiereTerminalTombstoneV1[] = [];
+  const releases: Array<{
+    hold: HistoricalHoldIdentity;
+    release: ReplayPremiereHistoricalReleaseRecord;
+  }> = [];
   for (const value of options.records) {
     if (!isRecord(value)) continue;
     if (value.kind === "hold_update") {
@@ -301,8 +325,39 @@ export async function backfillReplayPremiereTerminalTombstones(options: {
     }
     if (hold === undefined)
       throw coordinationIntegrity("coordination_journal_release_phase_missing");
-    const tombstone = await persistReplayPremiereTerminalTombstone({
+    releases.push({ hold, release });
+  }
+  if (releases.length > MAX_COORDINATED_PREMIERES) {
+    throw coordinationCapacity("coordination_backfill_count_exceeded");
+  }
+
+  const planned = new Map<
+    string,
+    {
+      tombstone: ReplayPremiereTerminalTombstoneV1;
+      needsWrite: boolean;
+    }
+  >();
+  const catalogAbsentArchived = new Set<string>();
+  const catalogAbsentUnarchived = new Set<string>();
+
+  for (const { hold, release } of releases) {
+    const record = await readReplayPremiereAdmissionRecord({
       privateStateRoot: options.privateStateRoot,
+      premiereId: release.premiereId,
+    });
+    if (record === null) {
+      const archived = await readReplayPremiereArchivePointer({
+        privateStateRoot: options.privateStateRoot,
+        premiereId: release.premiereId,
+      });
+      (archived === null ? catalogAbsentUnarchived : catalogAbsentArchived).add(
+        release.premiereId,
+      );
+      continue;
+    }
+
+    const expected = tombstoneForRelease(record, {
       episodeRequestId: release.episodeRequestId,
       premiereId: release.premiereId,
       roundId: release.roundId,
@@ -311,9 +366,41 @@ export async function backfillReplayPremiereTerminalTombstones(options: {
       terminal: release.terminal,
       releasedAt: release.ts,
     });
-    if (tombstone !== null) created.push(tombstone);
+    const prior = planned.get(expected.premiereId);
+    if (prior !== undefined) {
+      assertEquivalentTerminalTombstone(prior.tombstone, expected);
+      continue;
+    }
+
+    const existing = await readTerminalTombstoneIfPresent({
+      privateStateRoot: options.privateStateRoot,
+      premiereId: expected.premiereId,
+    });
+    if (existing !== null) {
+      assertTombstoneAdmissionBinding(existing, record);
+      assertEquivalentTerminalTombstone(existing, expected);
+    }
+    planned.set(expected.premiereId, {
+      tombstone: existing ?? expected,
+      needsWrite: existing === null,
+    });
   }
-  return created;
+
+  if ([...planned.values()].some((entry) => entry.needsWrite)) {
+    const layout = await ensureCoordinationLayout(options.privateStateRoot);
+    for (const entry of planned.values()) {
+      if (!entry.needsWrite) continue;
+      await writeImmutableJson(
+        tombstonePath(layout.tombstoneRoot, entry.tombstone.premiereId),
+        entry.tombstone,
+      );
+    }
+  }
+  return {
+    tombstones: [...planned.values()].map((entry) => entry.tombstone),
+    catalogAbsentArchivedPremiereIds: [...catalogAbsentArchived].sort(),
+    catalogAbsentUnarchivedPremiereIds: [...catalogAbsentUnarchived].sort(),
+  };
 }
 
 /**
@@ -468,6 +555,47 @@ function assertTombstoneAdmissionBinding(
     tombstone.roundId !== record.eligibilityRecord.coworld.roundId
   ) {
     throw coordinationIntegrity("coordination_tombstone_admission_mismatch");
+  }
+}
+
+function assertEquivalentTerminalTombstone(
+  existing: ReplayPremiereTerminalTombstoneV1,
+  expected: ReplayPremiereTerminalTombstoneV1,
+): void {
+  if (
+    existing.premiereId !== expected.premiereId ||
+    existing.admissionRecordHash !== expected.admissionRecordHash ||
+    existing.episodeRequestId !== expected.episodeRequestId ||
+    existing.roundId !== expected.roundId ||
+    existing.releasePhase !== expected.releasePhase ||
+    existing.releaseOutcome !== expected.releaseOutcome
+  ) {
+    throw coordinationIntegrity("coordination_tombstone_is_immutable");
+  }
+}
+
+async function readTerminalTombstoneIfPresent(options: {
+  privateStateRoot: string;
+  premiereId: string;
+}): Promise<ReplayPremiereTerminalTombstoneV1 | null> {
+  const destination = tombstonePath(
+    path.join(
+      path.resolve(options.privateStateRoot),
+      COORDINATION_DIRECTORY,
+      TOMBSTONE_DIRECTORY,
+    ),
+    options.premiereId,
+  );
+  try {
+    return parseTerminalTombstone(
+      parseJson(
+        await readBoundedRegularFile(destination, MAX_COORDINATION_FILE_BYTES),
+        "coordination_tombstone_invalid_json",
+      ),
+    );
+  } catch (error) {
+    if (isErrno(error, "ENOENT")) return null;
+    throw error;
   }
 }
 
@@ -725,11 +853,7 @@ async function ensureCoordinationLayout(privateStateRoot: string): Promise<{
   tombstoneRoot: string;
   selectionPath: string;
 }> {
-  const root = path.resolve(privateStateRoot);
-  const rootStat = await fs.lstat(root);
-  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
-    throw coordinationIntegrity("coordination_private_root_invalid");
-  }
+  const root = await assertPrivateStateRoot(privateStateRoot);
   const coordinationRoot = await ensurePrivateDirectory(
     path.join(root, COORDINATION_DIRECTORY),
     root,
@@ -743,6 +867,20 @@ async function ensureCoordinationLayout(privateStateRoot: string): Promise<{
     tombstoneRoot,
     selectionPath: path.join(coordinationRoot, STARTUP_SELECTION_FILE),
   };
+}
+
+async function assertPrivateStateRoot(
+  privateStateRoot: string,
+): Promise<string> {
+  const root = path.resolve(privateStateRoot);
+  const rootStat = await fs.lstat(root);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+    throw coordinationIntegrity("coordination_private_root_invalid");
+  }
+  if ((await fs.realpath(root)) !== root) {
+    throw coordinationIntegrity("coordination_private_root_invalid");
+  }
+  return root;
 }
 
 async function ensurePrivateDirectory(
