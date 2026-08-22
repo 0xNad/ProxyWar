@@ -3,26 +3,12 @@ import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-
-const PUBLIC_BASE = "190ea95eda41fbf5d1521d433b3365d87b9cfe57";
-const EXISTING_FILES = [
-  "Dockerfile",
-  "MESSAGES.md",
-  "ONBOARDING.md",
-  "README.md",
-  "llm-player.mjs",
-  "package.json",
-  "starter-player.mjs",
-];
-const NEW_FILES = [
-  "owner-capabilities.d.mts",
-  "owner-capabilities.mjs",
-  "owner-capability-contract.test.mjs",
-  "owner-evidence-check.mjs",
-  "owner-evidence-check.test.mjs",
-  "owner-player-frame.test.mjs",
-];
-const FILES = [...EXISTING_FILES, ...NEW_FILES].sort();
+import {
+  FILES,
+  NEW_FILES,
+  PUBLIC_BASE,
+  parseOwnerUpgradeLedger,
+} from "./owner-upgrade-contract.mjs";
 const packetRoot = path.dirname(fileURLToPath(import.meta.url));
 const patchPath = path.join(packetRoot, "proxywar-owner-upgrade.patch");
 const ledgerPath = path.join(packetRoot, "SHA256SUMS");
@@ -38,7 +24,23 @@ function run(command, args, cwd) {
       `${command} ${args.join(" ")} failed (${result.status})\n${result.stdout}${result.stderr}`,
     );
   }
-  return result.stdout.trim();
+  // Keep porcelain status's leading XY columns; only terminal newlines are
+  // insignificant. A full trim would remove the first path's status column.
+  return result.stdout.trimEnd();
+}
+
+function runBytes(command, args, cwd) {
+  const result = spawnSync(command, args, {
+    cwd,
+    encoding: null,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (result.status !== 0) {
+    throw new Error(
+      `${command} ${args.join(" ")} failed (${result.status})\n${result.stdout.toString("utf8")}${result.stderr.toString("utf8")}`,
+    );
+  }
+  return result.stdout;
 }
 
 async function sha256(file) {
@@ -47,11 +49,16 @@ async function sha256(file) {
     .digest("hex");
 }
 
+function sha256Bytes(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
 async function main() {
   const starter = path.resolve(process.argv[2] ?? "");
-  if (process.argv.length !== 3) {
+  const platformSource = path.resolve(process.argv[3] ?? "");
+  if (process.argv.length !== 4) {
     throw new Error(
-      "usage: node verify-owner-upgrade.mjs /absolute/path/to/fresh-public-starter",
+      "usage: node verify-owner-upgrade.mjs /absolute/path/to/fresh-public-starter /absolute/path/to/platform-source",
     );
   }
   if (run("git", ["rev-parse", "HEAD"], starter) !== PUBLIC_BASE) {
@@ -61,32 +68,42 @@ async function main() {
     throw new Error("starter checkout must be clean before patch application");
   }
 
-  const lines = (await readFile(ledgerPath, "utf8"))
-    .trim()
-    .split("\n")
-    .map((line) => {
-      const [layer, digest, file] = line.split(" ");
-      return { layer, digest, file };
-    });
-  const publicBase = lines.find(
-    (entry) => entry.layer === "meta" && entry.file === "public-base",
-  );
-  const candidateSource = lines.find(
-    (entry) => entry.layer === "meta" && entry.file === "candidate-source",
-  );
-  if (publicBase?.digest !== PUBLIC_BASE) {
-    throw new Error("sealed ledger public base mismatch");
-  }
-  if (!/^[0-9a-f]{40}$/u.test(candidateSource?.digest ?? "")) {
-    throw new Error("sealed ledger candidate source is missing or malformed");
-  }
-  const packet = lines.find((entry) => entry.layer === "packet");
-  if (!packet || (await sha256(patchPath)) !== packet.digest) {
+  const {
+    baseEntries,
+    candidateSource,
+    candidateTree,
+    expectedEntries,
+    patchDigest,
+    sourceBlobs,
+  } = parseOwnerUpgradeLedger(await readFile(ledgerPath, "utf8"));
+  if ((await sha256(patchPath)) !== patchDigest) {
     throw new Error("owner patch SHA-256 does not match sealed ledger");
   }
-  for (const entry of lines.filter((candidate) => candidate.layer === "base")) {
-    if ((await sha256(path.join(starter, entry.file))) !== entry.digest) {
-      throw new Error(`public base hash mismatch for ${entry.file}`);
+  for (const [file, digest] of baseEntries) {
+    if ((await sha256(path.join(starter, file))) !== digest) {
+      throw new Error(`public base hash mismatch for ${file}`);
+    }
+  }
+  run("git", ["cat-file", "-e", `${candidateSource}^{commit}`], platformSource);
+  if (
+    run("git", ["rev-parse", `${candidateSource}^{tree}`], platformSource) !==
+    candidateTree
+  ) {
+    throw new Error("candidate source tree mismatch");
+  }
+  for (const file of FILES) {
+    const object = `${candidateSource}:coworld-adapter/tester-starter-llm/${file}`;
+    if (
+      run("git", ["rev-parse", object], platformSource) !==
+      sourceBlobs.get(file)
+    ) {
+      throw new Error(`candidate source blob mismatch for ${file}`);
+    }
+    if (
+      sha256Bytes(runBytes("git", ["show", object], platformSource)) !==
+      expectedEntries.get(file)
+    ) {
+      throw new Error(`candidate source content mismatch for ${file}`);
     }
   }
   for (const file of NEW_FILES) {
@@ -110,11 +127,9 @@ async function main() {
       `after-apply file set mismatch: ${JSON.stringify(changedFiles)}`,
     );
   }
-  for (const entry of lines.filter(
-    (candidate) => candidate.layer === "expected",
-  )) {
-    if ((await sha256(path.join(starter, entry.file))) !== entry.digest) {
-      throw new Error(`after-apply hash mismatch for ${entry.file}`);
+  for (const [file, digest] of expectedEntries) {
+    if ((await sha256(path.join(starter, file))) !== digest) {
+      throw new Error(`after-apply hash mismatch for ${file}`);
     }
   }
   run("npm", ["install", "--ignore-scripts", "--package-lock=false"], starter);
@@ -124,7 +139,7 @@ async function main() {
   run("node", ["--check", "owner-capabilities.mjs"], starter);
   run("node", ["--check", "owner-evidence-check.mjs"], starter);
   process.stdout.write(
-    `${JSON.stringify({ verdict: "PASS", publicBase: PUBLIC_BASE, candidateSource: candidateSource.digest, patchSHA256: packet.digest, verifiedFiles: lines.filter((entry) => entry.layer === "expected").length })}\n`,
+    `${JSON.stringify({ verdict: "PASS", publicBase: PUBLIC_BASE, candidateSource, candidateTree, patchSHA256: patchDigest, verifiedFiles: expectedEntries.size })}\n`,
   );
 }
 

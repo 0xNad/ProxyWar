@@ -153,7 +153,6 @@ describe("tester-starter-llm spatial state renderer", () => {
           {
             glyph: "A",
             playerID: "P_AGENT",
-            name: "Agent",
             isYou: true,
           },
         ],

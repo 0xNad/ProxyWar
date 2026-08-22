@@ -12,27 +12,15 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  EXISTING_FILES,
+  FILES,
+  NEW_FILES,
+  PUBLIC_BASE,
+  parseOwnerUpgradeLedger,
+} from "./owner-upgrade-contract.mjs";
 
-const PUBLIC_BASE = "190ea95eda41fbf5d1521d433b3365d87b9cfe57";
 const SOURCE_SHA = /^[0-9a-f]{40}$/u;
-const EXISTING_FILES = [
-  "Dockerfile",
-  "MESSAGES.md",
-  "ONBOARDING.md",
-  "README.md",
-  "llm-player.mjs",
-  "package.json",
-  "starter-player.mjs",
-];
-const NEW_FILES = [
-  "owner-capabilities.d.mts",
-  "owner-capabilities.mjs",
-  "owner-capability-contract.test.mjs",
-  "owner-evidence-check.mjs",
-  "owner-evidence-check.test.mjs",
-  "owner-player-frame.test.mjs",
-];
-const FILES = [...EXISTING_FILES, ...NEW_FILES].sort();
 const packetRoot = path.dirname(fileURLToPath(import.meta.url));
 const patchPath = path.join(packetRoot, "proxywar-owner-upgrade.patch");
 const ledgerPath = path.join(packetRoot, "SHA256SUMS");
@@ -48,7 +36,7 @@ function run(command, args, cwd) {
       `${command} ${args.join(" ")} failed (${result.status})\n${result.stdout}${result.stderr}`,
     );
   }
-  return result.stdout.trim();
+  return result.stdout.trimEnd();
 }
 
 async function sha256(file) {
@@ -144,6 +132,7 @@ async function main() {
   const lines = [
     `meta ${PUBLIC_BASE} public-base`,
     `meta ${sourceSHA} candidate-source`,
+    `meta ${run("git", ["rev-parse", `${sourceSHA}^{tree}`], sourceRoot)} candidate-tree`,
     `packet ${await sha256(patchPath)} proxywar-owner-upgrade.patch`,
   ];
   for (const file of EXISTING_FILES) {
@@ -154,7 +143,14 @@ async function main() {
       `expected ${await sha256(path.join(sourceStarter, file))} ${file}`,
     );
   }
-  await writeFile(ledgerPath, `${lines.join("\n")}\n`, "utf8");
+  for (const file of FILES) {
+    lines.push(
+      `source-blob ${run("git", ["rev-parse", `${sourceSHA}:coworld-adapter/tester-starter-llm/${file}`], sourceRoot)} ${file}`,
+    );
+  }
+  const ledger = `${lines.join("\n")}\n`;
+  parseOwnerUpgradeLedger(ledger);
+  await writeFile(ledgerPath, ledger, "utf8");
   process.stdout.write(
     `${JSON.stringify({ verdict: "BUILT", publicBase: PUBLIC_BASE, candidateSource: sourceSHA, patchSHA256: await sha256(patchPath), files: FILES.length })}\n`,
   );
