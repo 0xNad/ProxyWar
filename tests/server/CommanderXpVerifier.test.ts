@@ -346,7 +346,7 @@ describe("Commander XP evidence verifier v2", () => {
     );
   });
 
-  it("rejects every model, region, routing, endpoint, SDK and sampling contract mismatch", async () => {
+  it("rejects every model, region, routing, endpoint, SDK and token-limit contract mismatch", async () => {
     const { preregistration } = await buildPreregistrationFixture();
     for (const [key, value] of [
       ["modelID", "anthropic.claude-sonnet-4-6"],
@@ -355,8 +355,6 @@ describe("Commander XP evidence verifier v2", () => {
       ["endpointAuthority", "public-bedrock-runtime"],
       ["sdkVersion", "0.29.1"],
       ["maxTokens", 2048],
-      ["temperature", 0.2],
-      ["topP", 0.9],
     ] as const) {
       const fixture = gameplayJoinFixture(preregistration, "B");
       (fixture.runtimeManifest.providerContract as Record<string, unknown>)[

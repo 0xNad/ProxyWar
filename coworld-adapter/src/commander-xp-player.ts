@@ -333,17 +333,23 @@ export function commanderXpBedrockRequest(
 ): {
   model: typeof COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.modelID;
   max_tokens: 1024;
-  temperature: 0;
-  top_p: 1;
   messages: Array<{ role: "user"; content: string }>;
 } {
   return {
     model,
     max_tokens: COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.maxTokens,
-    temperature: COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.temperature,
-    top_p: COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.topP,
     messages: [{ role: "user", content: prompt }],
   };
+}
+
+function commanderXpErrorChain(error: unknown): string {
+  const messages: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current instanceof Error; depth += 1) {
+    messages.push(current.message.slice(0, 240));
+    current = current.cause;
+  }
+  return messages.join(" <- ") || "unknown error";
 }
 
 export function commanderXpResolvedBedrockSdkVersion(): string {
@@ -635,7 +641,7 @@ async function main(): Promise<void> {
       } catch (error) {
         console.error(
           "commander-xp decision failed",
-          error instanceof Error ? error.message : "unknown error",
+          commanderXpErrorChain(error),
         );
         socket.send(
           JSON.stringify(

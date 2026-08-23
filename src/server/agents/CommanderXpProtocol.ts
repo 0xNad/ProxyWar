@@ -49,8 +49,6 @@ export const COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT = {
   sdkVersion: "0.29.2",
   timeoutMs: 12_000,
   maxTokens: 1_024,
-  temperature: 0,
-  topP: 1,
   backendRevision: "unattested-provider-residual",
 } as const;
 export const COMMANDER_XP_CANARY_ORDERS = [

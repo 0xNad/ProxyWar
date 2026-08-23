@@ -165,8 +165,6 @@ describe("Commander XP hosted player", () => {
     ).toEqual({
       model: "us.anthropic.claude-sonnet-4-6",
       max_tokens: 1024,
-      temperature: 0,
-      top_p: 1,
       messages: [{ role: "user", content: "exact prompt" }],
     });
   });
