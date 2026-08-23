@@ -43,6 +43,7 @@ describe("Commander XP eval-only Coworld manifest", () => {
       "agentic-gameplay",
     ]);
     expect(manifest.game.docs).toEqual(base.game.docs);
+    expect(manifest.game.replay_viewer).toEqual(base.game.replay_viewer);
     expect(JSON.stringify(manifest)).not.toContain(
       "COWORLD_PLAYER_ARTIFACT_UPLOAD_URL",
     );

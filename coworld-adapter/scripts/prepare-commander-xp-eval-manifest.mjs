@@ -79,6 +79,7 @@ export function commanderXpEvalManifest(base, { image, version }) {
     docs: structuredClone(base.game.docs),
     config_schema: configSchema,
     results_schema: structuredClone(base.game.results_schema),
+    replay_viewer: structuredClone(base.game.replay_viewer),
     protocols: publicEvalProtocol(structuredClone(base.game.protocols)),
     runnable: {
       ...structuredClone(base.game.runnable),
