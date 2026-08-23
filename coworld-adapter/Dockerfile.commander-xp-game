@@ -37,7 +37,7 @@ LABEL org.opencontainers.image.source="https://github.com/0xNad/ProxyWar" \
       com.proxywar.commander-xp.source-tree-sha="${COMMANDER_XP_ADAPTER_SOURCE_TREE_SHA}" \
       com.proxywar.commander-xp.source-provenance-sha256="${COMMANDER_XP_SOURCE_PROVENANCE_SHA256}"
 
-ENV GAME_ENV=production \
+ENV GAME_ENV=prod \
     HUSKY=0 \
     NODE_ENV=production \
     PROXYWAR_REPO=/app/proxywar
