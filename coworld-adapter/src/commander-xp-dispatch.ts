@@ -13,6 +13,9 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import {
+  COMMANDER_XP_CREATE_REQUEST_SCHEMA_SHA256,
+  COMMANDER_XP_OPENAPI_SHA256,
+  COMMANDER_XP_ROSTER_SCHEMAS_SHA256,
   sha256Canonical,
   type CommanderXpArm,
   type CommanderXpPlannedRequest,
@@ -33,6 +36,7 @@ export interface CommanderXpDispatchInput {
   schemaVersion: 2;
   phase: CommanderXpProtocolPhase;
   preRegistrationPath: string;
+  xpOpenApiContractPath: string;
   preregistrationReceiptPath: string;
   providerPreflightReceiptPath?: string;
   canaryReceiptPath?: string;
@@ -41,7 +45,47 @@ export interface CommanderXpDispatchInput {
   coworldCommandPath: string;
   outputDirectory: string;
   recoveryDirectory?: string;
+  fenceRecoveryMode?: "adopt-or-create-unseen";
   confirmatoryDispatchMode?: "first-wave-only";
+}
+
+interface CommanderXpOpenApiContract {
+  schemaVersion: 2;
+  authority: "softmax-public-openapi-exact-bytes-v1";
+  url: "https://softmax.com/api/observatory/openapi.json";
+  fetchedAt: string;
+  byteLength: number;
+  rawSha256: string;
+  coworldClientVersion: "0.1.42";
+  createRequestSchema: {
+    name: "V2CreateExperienceRequestRequest";
+    encoding: "jq-cS-utf8-compact-sorted-json-with-terminal-lf";
+    sha256: string;
+  };
+  rosterSchemas: {
+    names: ["V2RosterParticipant", "V2RosterPlayer"];
+    encoding: "ordered-concatenation-of-two-jq-cS-utf8-records-with-terminal-lf";
+    sha256: string;
+  };
+  receiptSha256: string;
+}
+
+interface CommanderXpOpenApiLiveCheck {
+  stage:
+    | "request-wave"
+    | "confirmatory-first-wave"
+    | "confirmatory-second-wave";
+  checkedAt: string;
+  byteLength: number;
+  rawSha256: string;
+}
+
+export interface CommanderXpDispatchDependencies {
+  revalidateOpenApi?: () => Promise<{
+    checkedAt: string;
+    byteLength: number;
+    rawSha256: string;
+  }>;
 }
 
 interface CommanderXpDispatchAuthorization {
@@ -271,6 +315,8 @@ export async function dispatchCommanderXpConfirmatoryWaves<T>(
       result: T;
     }[],
   ) => Promise<void>,
+  beforeFirstWave: () => Promise<void> = async () => undefined,
+  beforeSecondWave: () => Promise<void> = async () => undefined,
 ): Promise<void> {
   const firstWave = planned.filter((request) => request.orderIndex === 0);
   const secondWave = planned.filter((request) => request.orderIndex === 1);
@@ -294,10 +340,12 @@ export async function dispatchCommanderXpConfirmatoryWaves<T>(
     request: CommanderXpPlannedRequest;
     result: T;
   }> = [];
+  await beforeFirstWave();
   for (const request of firstWave) {
     submitted.push({ request, result: await submit(request) });
   }
   await awaitFirstWaveTerminal(submitted);
+  await beforeSecondWave();
   for (const request of secondWave) {
     await submit(request);
   }
@@ -305,10 +353,12 @@ export async function dispatchCommanderXpConfirmatoryWaves<T>(
 
 export async function dispatchCommanderXpRequests(
   input: CommanderXpDispatchInput,
+  dependencies: CommanderXpDispatchDependencies = {},
 ): Promise<{
   phase: CommanderXpProtocolPhase;
   requestCount: number;
   dispatchAuthorizationSha256: string;
+  openApiRevalidationSha256: string;
   requests: CommanderXpDispatchedRequest[];
 }> {
   if (input.schemaVersion !== 2) throw new Error("dispatch schema invalid");
@@ -317,6 +367,10 @@ export async function dispatchCommanderXpRequests(
     await fs.readFile(path.resolve(input.preRegistrationPath), "utf8"),
   ) as CommanderXpPreRegistrationV2;
   assertCommanderXpPreRegistrationDocument(preregistration);
+  const openApiContract = await readOpenApiContract(
+    input.xpOpenApiContractPath,
+    preregistration,
+  );
   const dispatchAuthorization = await verifyDispatchAuthorization(
     input,
     preregistration,
@@ -345,6 +399,14 @@ export async function dispatchCommanderXpRequests(
   ) {
     throw new Error("dispatch wave mode is invalid");
   }
+  if (
+    (input.fenceRecoveryMode !== undefined &&
+      input.fenceRecoveryMode !== "adopt-or-create-unseen") ||
+    (input.fenceRecoveryMode !== undefined &&
+      input.recoveryDirectory !== undefined)
+  ) {
+    throw new Error("dispatch fence recovery mode is invalid");
+  }
   const recovery = await loadRecoveryState(
     input.recoveryDirectory,
     input.phase,
@@ -354,6 +416,11 @@ export async function dispatchCommanderXpRequests(
   );
   const outputDirectory = path.resolve(input.outputDirectory);
   await fs.mkdir(outputDirectory, { recursive: false });
+  await fs.copyFile(
+    await canonicalFile(input.xpOpenApiContractPath),
+    path.join(outputDirectory, "xp-openapi-contract-v2.json"),
+    fs.constants.COPYFILE_EXCL,
+  );
   const requests: CommanderXpDispatchedRequest[] = [];
   const xpRequestIDs = new Set<string>();
   const startedAt = new Date().toISOString();
@@ -368,6 +435,36 @@ export async function dispatchCommanderXpRequests(
   );
   let recoveryInventory: CommanderXpRecoveryCandidate[] | null = null;
   await writeDispatchProgress(outputDirectory, progress, true);
+  const openApiChecks: CommanderXpOpenApiLiveCheck[] = [];
+  let openApiRevalidationSha256 = "";
+  const revalidateOpenApi = async (
+    stage: CommanderXpOpenApiLiveCheck["stage"],
+  ): Promise<void> => {
+    const check = await (
+      dependencies.revalidateOpenApi ?? fetchLiveOpenApiIdentity
+    )();
+    if (
+      !Number.isFinite(Date.parse(check.checkedAt)) ||
+      check.byteLength !== openApiContract.byteLength ||
+      check.rawSha256 !== openApiContract.rawSha256
+    ) {
+      throw new Error(
+        "Commander XP live OpenAPI identity changed before dispatch",
+      );
+    }
+    openApiChecks.push({ stage, ...check });
+    const body = {
+      schemaVersion: 2 as const,
+      authority: "commander-xp-pre-dispatch-openapi-revalidation-v2" as const,
+      contractReceiptSha256: openApiContract.receiptSha256,
+      checks: openApiChecks,
+    };
+    openApiRevalidationSha256 = sha256Canonical(body);
+    await writeJsonAtomic(
+      path.join(outputDirectory, "xp-openapi-revalidation-v2.json"),
+      { ...body, openApiRevalidationSha256 },
+    );
+  };
   const submitRequest = async (
     request: CommanderXpPlannedRequest,
   ): Promise<CommanderXpDispatchedRequest> => {
@@ -537,7 +634,10 @@ export async function dispatchCommanderXpRequests(
         priorSubmittedPath,
       );
     }
-    if (recovery !== null) {
+    if (
+      recovery !== null ||
+      input.fenceRecoveryMode === "adopt-or-create-unseen"
+    ) {
       recoveryInventory ??=
         await listCommanderXpRecoveryCandidates(commandPath);
       const candidate = await selectCommanderXpRecoveryCandidateIfPresent(
@@ -674,7 +774,7 @@ export async function dispatchCommanderXpRequests(
     if (
       !/^xreq_[A-Za-z0-9-]+$/.test(xpRequestID) ||
       !Number.isFinite(Date.parse(createdAt)) ||
-      !["submitted", "pending"].includes(status) ||
+      !["submitted", "pending", "running", "completed"].includes(status) ||
       xpRequestIDs.has(xpRequestID)
     ) {
       await persistCreateFailure(
@@ -752,6 +852,7 @@ export async function dispatchCommanderXpRequests(
     if (targetCount > planned.length) {
       throw new Error("confirmatory recovery prefix is too long");
     }
+    await revalidateOpenApi("confirmatory-first-wave");
     for (const request of dispatchOrder.slice(0, targetCount)) {
       await submitRequest(request);
     }
@@ -760,6 +861,7 @@ export async function dispatchCommanderXpRequests(
       requestCount: requests.length,
       dispatchAuthorizationSha256:
         dispatchAuthorization.dispatchAuthorizationSha256,
+      openApiRevalidationSha256,
       requests,
     };
   }
@@ -775,8 +877,11 @@ export async function dispatchCommanderXpRequests(
           submitted,
         });
       },
+      async () => revalidateOpenApi("confirmatory-first-wave"),
+      async () => revalidateOpenApi("confirmatory-second-wave"),
     );
   } else {
+    await revalidateOpenApi("request-wave");
     for (const request of planned) {
       await submitRequest(request);
     }
@@ -786,6 +891,7 @@ export async function dispatchCommanderXpRequests(
     requestCount: requests.length,
     dispatchAuthorizationSha256:
       dispatchAuthorization.dispatchAuthorizationSha256,
+    openApiRevalidationSha256,
     requests,
   };
   await writeJsonExclusive(
@@ -1242,6 +1348,92 @@ async function readExternalReceipt(
   return receipt;
 }
 
+async function readOpenApiContract(
+  requestedPath: string,
+  preregistration: CommanderXpPreRegistrationV2,
+): Promise<CommanderXpOpenApiContract> {
+  const receipt =
+    await readJsonDocument<CommanderXpOpenApiContract>(requestedPath);
+  exactKeys(
+    receipt,
+    [
+      "schemaVersion",
+      "authority",
+      "url",
+      "fetchedAt",
+      "byteLength",
+      "rawSha256",
+      "coworldClientVersion",
+      "createRequestSchema",
+      "rosterSchemas",
+      "receiptSha256",
+    ],
+    "XP OpenAPI contract",
+  );
+  exactKeys(
+    receipt.createRequestSchema,
+    ["name", "encoding", "sha256"],
+    "XP OpenAPI create schema",
+  );
+  exactKeys(
+    receipt.rosterSchemas,
+    ["names", "encoding", "sha256"],
+    "XP OpenAPI roster schemas",
+  );
+  const { receiptSha256, ...body } = receipt;
+  if (
+    receipt.schemaVersion !== 2 ||
+    receipt.authority !== "softmax-public-openapi-exact-bytes-v1" ||
+    receipt.url !== "https://softmax.com/api/observatory/openapi.json" ||
+    !Number.isFinite(Date.parse(receipt.fetchedAt)) ||
+    receipt.byteLength !== 418_415 ||
+    receipt.rawSha256 !== COMMANDER_XP_OPENAPI_SHA256 ||
+    receipt.rawSha256 !== preregistration.identities.xpOpenApiSha256 ||
+    receipt.coworldClientVersion !== "0.1.42" ||
+    receipt.createRequestSchema.name !== "V2CreateExperienceRequestRequest" ||
+    receipt.createRequestSchema.encoding !==
+      "jq-cS-utf8-compact-sorted-json-with-terminal-lf" ||
+    receipt.createRequestSchema.sha256 !==
+      COMMANDER_XP_CREATE_REQUEST_SCHEMA_SHA256 ||
+    receipt.createRequestSchema.sha256 !==
+      preregistration.identities.xpCreateRequestSchemaSha256 ||
+    JSON.stringify(receipt.rosterSchemas.names) !==
+      JSON.stringify(["V2RosterParticipant", "V2RosterPlayer"]) ||
+    receipt.rosterSchemas.encoding !==
+      "ordered-concatenation-of-two-jq-cS-utf8-records-with-terminal-lf" ||
+    receipt.rosterSchemas.sha256 !== COMMANDER_XP_ROSTER_SCHEMAS_SHA256 ||
+    receipt.rosterSchemas.sha256 !==
+      preregistration.identities.xpRosterSchemasSha256 ||
+    receiptSha256 !== sha256Canonical(body)
+  ) {
+    throw new Error("XP OpenAPI contract identity mismatch");
+  }
+  return receipt;
+}
+
+async function fetchLiveOpenApiIdentity(): Promise<{
+  checkedAt: string;
+  byteLength: number;
+  rawSha256: string;
+}> {
+  const response = await fetch(
+    "https://softmax.com/api/observatory/openapi.json",
+    { redirect: "follow", signal: AbortSignal.timeout(30_000) },
+  );
+  if (!response.ok) {
+    throw new Error("Commander XP live OpenAPI request failed");
+  }
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (bytes.byteLength > 4 * 1024 * 1024) {
+    throw new Error("Commander XP live OpenAPI response is oversized");
+  }
+  return {
+    checkedAt: new Date().toISOString(),
+    byteLength: bytes.byteLength,
+    rawSha256: createHash("sha256").update(bytes).digest("hex"),
+  };
+}
+
 async function readJsonDocument<T>(requestedPath: string): Promise<T> {
   const filePath = await canonicalFile(requestedPath);
   const parsed = JSON.parse(await fs.readFile(filePath, "utf8")) as unknown;
@@ -1402,6 +1594,14 @@ async function writeJsonExclusive(
   await fs.writeFile(target, `${JSON.stringify(value, null, 2)}\n`, {
     flag: "wx",
   });
+}
+
+async function writeJsonAtomic(target: string, value: unknown): Promise<void> {
+  const temporary = `${target}.tmp`;
+  await fs.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, {
+    flag: "wx",
+  });
+  await fs.rename(temporary, target);
 }
 
 async function runCli(): Promise<void> {

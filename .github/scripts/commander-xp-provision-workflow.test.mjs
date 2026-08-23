@@ -77,7 +77,9 @@ test("provision authenticates before its durable fence and mutates no XP", () =>
   const preflight = workflow.indexOf(
     "Authenticated no-mutation Coworld and policy preflight",
   );
-  const fence = workflow.indexOf("Create durable provision fence");
+  const fence = workflow.indexOf(
+    "Build immutable recoverable provision fence intent",
+  );
   const imagePush = workflow.indexOf("Push exact immutable GHCR images");
   const policyUpload = workflow.indexOf(
     "Upload six immutable policy versions from one image",
@@ -98,8 +100,46 @@ test("provision serializes the complete Commander regression group before mutati
   assert.match(workflow, /--run --maxWorkers=1/);
   assert.ok(
     workflow.indexOf("Run exact-source repository and workflow gates") <
-      workflow.indexOf("Create durable provision fence"),
+      workflow.indexOf("Build immutable recoverable provision fence intent"),
   );
+});
+
+test("provision recovers only from exact cumulative immutable stage boundaries", () => {
+  assert.match(workflow, /recovery_provision_artifact_id:/);
+  assert.match(workflow, /commander-xp-provision-recovery\.mjs validate/);
+  assert.match(
+    workflow,
+    /\.status == "completed" and \.conclusion != "success"/,
+  );
+  assert.match(workflow, /commander-xp-provision-boundary-fence-intent-/);
+  assert.match(
+    workflow,
+    /Retain immutable provision fence intent before creating the tag/,
+  );
+  assert.ok(
+    workflow.indexOf(
+      "Retain immutable provision fence intent before creating the tag",
+    ) <
+      workflow.indexOf(
+        "Create or recover the durable provision fence before any upload",
+      ),
+  );
+  assert.match(workflow, /test -n "\$RECOVERY_PROVISION_ARTIFACT_ID"/);
+  assert.match(workflow, /test "\$\(jq -r \.object\.sha/);
+  assert.match(workflow, /RECOVERED_GHCR/);
+  assert.match(workflow, /commander-xp-provision-boundary-ghcr-/);
+  assert.match(workflow, /--recovery=\$PROVISION_STATE_ROOT\/policy-receipts/);
+  assert.match(workflow, /policies-partial/);
+  assert.match(workflow, /steps\.policy_upload\.outcome != 'success'/);
+  assert.match(workflow, /commander-xp-provision-boundary-terminal-proof-/);
+  assert.match(
+    workflow,
+    /commander-xp-provision-boundary-\$\{\{ steps\.eval_boundary\.outputs\.stage \}\}-/,
+  );
+  assert.match(workflow, /STAGE=eval-partial/);
+  assert.match(workflow, /cmp "\$EVAL_ROOT\/eval-coworld-manifest-v2\.json"/);
+  assert.match(workflow, /eval-coworld-recovery-readback\.json/);
+  assert.doesNotMatch(workflow, /NAME_PREFIX=.*GITHUB_RUN_ID/);
 });
 
 test("provision proves exact 360x100 terminality and preserves product binding", () => {

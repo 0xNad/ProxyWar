@@ -10,18 +10,30 @@ import {
   COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT,
   COMMANDER_XP_BEHAVIOR_SOURCE_SHA,
   COMMANDER_XP_BEHAVIOR_SOURCE_TREE_SHA,
+  COMMANDER_XP_CREATE_REQUEST_SCHEMA_SHA256,
   COMMANDER_XP_OPENAPI_SHA256,
+  COMMANDER_XP_ROSTER_SCHEMAS_SHA256,
   sha256Canonical,
   type CommanderXpPlanInput,
   type CommanderXpPreRegistrationV2,
 } from "../../src/server/agents/CommanderXpProtocol";
 import {
   dispatchCommanderXpConfirmatoryWaves,
-  dispatchCommanderXpRequests,
+  dispatchCommanderXpRequests as dispatchCommanderXpRequestsImpl,
   selectCommanderXpRecoveryCandidate,
+  type CommanderXpDispatchInput,
 } from "./commander-xp-dispatch";
 
 const temporaryDirectories: string[] = [];
+
+const dispatchCommanderXpRequests = (input: CommanderXpDispatchInput) =>
+  dispatchCommanderXpRequestsImpl(input, {
+    revalidateOpenApi: async () => ({
+      checkedAt: "2026-08-22T14:00:00.000Z",
+      byteLength: 418_415,
+      rawSha256: COMMANDER_XP_OPENAPI_SHA256,
+    }),
+  });
 
 afterEach(async () => {
   await Promise.all(
@@ -80,6 +92,7 @@ describe("Commander XP protected dispatcher", () => {
       orderIndex: number;
       at: number;
     }> = [];
+    const revalidations: string[] = [];
     await dispatchCommanderXpConfirmatoryWaves(
       planned,
       async (request) => {
@@ -104,7 +117,14 @@ describe("Commander XP protected dispatcher", () => {
           });
         }
       },
+      async () => {
+        revalidations.push("first");
+      },
+      async () => {
+        revalidations.push("second");
+      },
     );
+    expect(revalidations).toEqual(["first", "second"]);
     expect(events).toHaveLength(144);
     expect(events.slice(0, 48).every((entry) => entry.kind === "create")).toBe(
       true,
@@ -249,38 +269,47 @@ describe("Commander XP protected dispatcher", () => {
     );
   });
 
-  it("accepts and raw-binds the documented pending create response", async () => {
-    const root = await temporaryDirectory();
-    const preregistrationPath = await writePreRegistration(root);
-    const capturePath = path.join(root, "capture.jsonl");
-    const commandPath = await fakeCoworld(root, capturePath, null, {
-      initialStatus: "pending",
-    });
-    const outputDirectory = path.join(root, "pending-dispatch");
-    const authority = await writeDispatchAuthority(root, preregistrationPath);
-    await dispatchCommanderXpRequests({
-      schemaVersion: 2,
-      phase: "provider-preflight",
-      preRegistrationPath: preregistrationPath,
-      ...authority,
-      coworldCommandPath: commandPath,
-      outputDirectory,
-    });
-    const runRoot = path.join(outputDirectory, "runs/provider-preflight/r00/A");
-    const projected = JSON.parse(
-      await fs.readFile(path.join(runRoot, "create-response.json"), "utf8"),
-    ) as Record<string, unknown>;
-    const raw = JSON.parse(
-      await fs.readFile(path.join(runRoot, "create-response-raw.json"), "utf8"),
-    ) as Record<string, unknown>;
-    expect(projected.status).toBe("pending");
-    expect(raw.status).toBe("pending");
-    expect(projected.rawResponseSha256).toBe(
-      createHash("sha256")
-        .update(`${JSON.stringify(raw)}\n`)
-        .digest("hex"),
-    );
-  });
+  it.each(["pending", "running", "completed"] as const)(
+    "accepts and raw-binds the documented %s create response",
+    async (initialStatus) => {
+      const root = await temporaryDirectory();
+      const preregistrationPath = await writePreRegistration(root);
+      const capturePath = path.join(root, "capture.jsonl");
+      const commandPath = await fakeCoworld(root, capturePath, null, {
+        initialStatus,
+      });
+      const outputDirectory = path.join(root, `${initialStatus}-dispatch`);
+      const authority = await writeDispatchAuthority(root, preregistrationPath);
+      await dispatchCommanderXpRequests({
+        schemaVersion: 2,
+        phase: "provider-preflight",
+        preRegistrationPath: preregistrationPath,
+        ...authority,
+        coworldCommandPath: commandPath,
+        outputDirectory,
+      });
+      const runRoot = path.join(
+        outputDirectory,
+        "runs/provider-preflight/r00/A",
+      );
+      const projected = JSON.parse(
+        await fs.readFile(path.join(runRoot, "create-response.json"), "utf8"),
+      ) as Record<string, unknown>;
+      const raw = JSON.parse(
+        await fs.readFile(
+          path.join(runRoot, "create-response-raw.json"),
+          "utf8",
+        ),
+      ) as Record<string, unknown>;
+      expect(projected.status).toBe(initialStatus);
+      expect(raw.status).toBe(initialStatus);
+      expect(projected.rawResponseSha256).toBe(
+        createHash("sha256")
+          .update(`${JSON.stringify(raw)}\n`)
+          .digest("hex"),
+      );
+    },
+  );
 
   it("does not retry or advance after one create fails", async () => {
     const root = await temporaryDirectory();
@@ -397,6 +426,42 @@ describe("Commander XP protected dispatcher", () => {
     ).toHaveLength(1);
   });
 
+  it("adopts exact requests after a retained fence but before any boundary artifact", async () => {
+    const root = await temporaryDirectory();
+    const preregistrationPath = await writePreRegistration(root);
+    const preregistration = JSON.parse(
+      await fs.readFile(preregistrationPath, "utf8"),
+    ) as CommanderXpPreRegistrationV2;
+    const authority = await writeDispatchAuthority(root, preregistrationPath);
+    const capturePath = path.join(root, "fence-recovery.jsonl");
+    const commandPath = await fakeRecoveryCoworld(
+      root,
+      capturePath,
+      preregistration,
+    );
+    const result = await dispatchCommanderXpRequests({
+      schemaVersion: 2,
+      phase: "provider-preflight",
+      preRegistrationPath: preregistrationPath,
+      ...authority,
+      coworldCommandPath: commandPath,
+      outputDirectory: path.join(root, "fence-recovered-dispatch"),
+      fenceRecoveryMode: "adopt-or-create-unseen",
+    });
+    expect(result.requests.map((request) => request.xpRequestID)).toEqual([
+      "xreq_fixture-1",
+      "xreq_recovered-2",
+      "xreq_recovery-new-3",
+    ]);
+    const events = (await fs.readFile(capturePath, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { command: string });
+    expect(events.filter((event) => event.command === "create")).toHaveLength(
+      1,
+    );
+  });
+
   it("rejects a tampered preregistration before invoking Coworld", async () => {
     const root = await temporaryDirectory();
     const preregistrationPath = await writePreRegistration(root);
@@ -415,6 +480,7 @@ describe("Commander XP protected dispatcher", () => {
         schemaVersion: 2,
         phase: "provider-preflight",
         preRegistrationPath: preregistrationPath,
+        xpOpenApiContractPath: path.join(root, "unused-openapi.json"),
         preregistrationReceiptPath: path.join(root, "unused.json"),
         dispatchAuthorizationPath: path.join(root, "unused-auth.json"),
         coworldCommandPath: commandPath,
@@ -422,6 +488,63 @@ describe("Commander XP protected dispatcher", () => {
       }),
     ).rejects.toThrow();
     await expect(fs.stat(capturePath)).rejects.toThrow();
+  });
+
+  it("rejects OpenAPI drift before invoking Coworld and retains a live check on success", async () => {
+    const root = await temporaryDirectory();
+    const preregistrationPath = await writePreRegistration(root);
+    const authority = await writeDispatchAuthority(root, preregistrationPath);
+    const capturePath = path.join(root, "capture.jsonl");
+    const commandPath = await fakeCoworld(root, capturePath, null);
+    await expect(
+      dispatchCommanderXpRequestsImpl(
+        {
+          schemaVersion: 2,
+          phase: "provider-preflight",
+          preRegistrationPath: preregistrationPath,
+          ...authority,
+          coworldCommandPath: commandPath,
+          outputDirectory: path.join(root, "drifted-dispatch"),
+        },
+        {
+          revalidateOpenApi: async () => ({
+            checkedAt: "2026-08-22T14:00:00.000Z",
+            byteLength: 418_415,
+            rawSha256: "0".repeat(64),
+          }),
+        },
+      ),
+    ).rejects.toThrow(/live OpenAPI identity changed/);
+    await expect(fs.stat(capturePath)).rejects.toThrow();
+
+    const successCapture = path.join(root, "success-capture.jsonl");
+    const successCommand = await fakeCoworld(root, successCapture, null);
+    const outputDirectory = path.join(root, "verified-dispatch");
+    const result = await dispatchCommanderXpRequests({
+      schemaVersion: 2,
+      phase: "provider-preflight",
+      preRegistrationPath: preregistrationPath,
+      ...authority,
+      coworldCommandPath: successCommand,
+      outputDirectory,
+    });
+    const revalidation = JSON.parse(
+      await fs.readFile(
+        path.join(outputDirectory, "xp-openapi-revalidation-v2.json"),
+        "utf8",
+      ),
+    ) as Record<string, unknown>;
+    expect(result.openApiRevalidationSha256).toBe(
+      revalidation.openApiRevalidationSha256,
+    );
+    expect(revalidation.checks).toEqual([
+      {
+        stage: "request-wave",
+        checkedAt: "2026-08-22T14:00:00.000Z",
+        byteLength: 418_415,
+        rawSha256: COMMANDER_XP_OPENAPI_SHA256,
+      },
+    ]);
   });
 
   it("requires the provider-preflight ledger before canary dispatch", async () => {
@@ -553,6 +676,7 @@ async function writeDispatchAuthority(
 ): Promise<{
   preregistrationReceiptPath: string;
   dispatchAuthorizationPath: string;
+  xpOpenApiContractPath: string;
 }> {
   const preregistration = JSON.parse(
     await fs.readFile(preregistrationPath, "utf8"),
@@ -701,7 +825,39 @@ async function writeDispatchAuthority(
       dispatchAuthorizationSha256: sha256Canonical(authorizationBody),
     })}\n`,
   );
-  return { preregistrationReceiptPath, dispatchAuthorizationPath };
+  const openApiBody = {
+    schemaVersion: 2 as const,
+    authority: "softmax-public-openapi-exact-bytes-v1" as const,
+    url: "https://softmax.com/api/observatory/openapi.json" as const,
+    fetchedAt: "2026-08-22T13:59:59.000Z",
+    byteLength: 418_415,
+    rawSha256: COMMANDER_XP_OPENAPI_SHA256,
+    coworldClientVersion: "0.1.42" as const,
+    createRequestSchema: {
+      name: "V2CreateExperienceRequestRequest" as const,
+      encoding: "jq-cS-utf8-compact-sorted-json-with-terminal-lf" as const,
+      sha256: COMMANDER_XP_CREATE_REQUEST_SCHEMA_SHA256,
+    },
+    rosterSchemas: {
+      names: ["V2RosterParticipant", "V2RosterPlayer"],
+      encoding:
+        "ordered-concatenation-of-two-jq-cS-utf8-records-with-terminal-lf" as const,
+      sha256: COMMANDER_XP_ROSTER_SCHEMAS_SHA256,
+    },
+  };
+  const xpOpenApiContractPath = path.join(root, "xp-openapi-contract.json");
+  await fs.writeFile(
+    xpOpenApiContractPath,
+    `${JSON.stringify({
+      ...openApiBody,
+      receiptSha256: sha256Canonical(openApiBody),
+    })}\n`,
+  );
+  return {
+    preregistrationReceiptPath,
+    dispatchAuthorizationPath,
+    xpOpenApiContractPath,
+  };
 }
 
 function externalCanonicalSha256(value: unknown): string {
@@ -730,7 +886,7 @@ async function fakeCoworld(
     failedStatusAt?: number;
     duplicateIDs?: boolean;
     createdAt?: string;
-    initialStatus?: "submitted" | "pending";
+    initialStatus?: "submitted" | "pending" | "running" | "completed";
   } = {},
 ): Promise<string> {
   const counterPath = path.join(root, "counter.txt");
@@ -756,9 +912,14 @@ async function fakeRecoveryCoworld(
   root: string,
   capturePath: string,
   preregistration: CommanderXpPreRegistrationV2,
-  priorDirectory: string,
+  priorDirectory?: string,
 ): Promise<string> {
   const submittedAt = async (arm: "A" | "B"): Promise<string> => {
+    if (priorDirectory === undefined) {
+      return new Date(
+        Date.parse(preregistration.createdAt) + 5_000,
+      ).toISOString();
+    }
     const submitted = JSON.parse(
       await fs.readFile(
         path.join(

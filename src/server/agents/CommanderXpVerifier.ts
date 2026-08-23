@@ -749,6 +749,7 @@ export async function verifyCommanderXpEvidence(
     requiredPaths.add(preregPath);
     requiredPaths.add("commander-xp-source-provenance-v2.json");
     requiredPaths.add("commander-xp-source-tree-diff-v1.json");
+    requiredPaths.add("coworld-runtime-inventory-v1.json");
     requiredPaths.add("policy-identities-v2.json");
     requiredPaths.add("policy-inspect/A.json");
     requiredPaths.add("policy-inspect/B.json");
@@ -808,6 +809,10 @@ export async function verifyCommanderXpEvidence(
       root,
       "xp-openapi-contract-v2.json",
     );
+    const coworldRuntimeInventory = await readJson<Record<string, unknown>>(
+      root,
+      "coworld-runtime-inventory-v1.json",
+    );
     const localVerification = await readJson<Record<string, unknown>>(
       root,
       "commander-xp-local-verification-v2.json",
@@ -841,6 +846,7 @@ export async function verifyCommanderXpEvidence(
       throw new VerificationFailure("XP_OPENAPI_RECEIPT_MISMATCH");
     }
     verifyOpenApiContract(prereg, openApiContract);
+    verifyCoworldRuntimeInventory(prereg, coworldRuntimeInventory);
     const policyInspectTexts = {
       A: await readText(root, "policy-inspect/A.json"),
       B: await readText(root, "policy-inspect/B.json"),
@@ -3098,12 +3104,12 @@ async function verifyRun(
   if (Date.parse(xp.completedAt) > Date.parse(sealedAt)) {
     throw new VerificationFailure("RUN_COMPLETED_AFTER_SEAL", directory);
   }
-  if (!Number.isFinite(Date.parse(providerPreflightCompletedAt))) {
-    throw new VerificationFailure(
-      "GAMEPLAY_STARTED_BEFORE_PROVIDER_PREFLIGHT_COMPLETED",
-      directory,
-    );
-  }
+  verifyCommanderXpServerAuthorizationChronology(
+    "gameplay",
+    providerPreflightCompletedAt,
+    xp.xpRequestCreatedAt,
+    directory,
+  );
   verifyRuntimeManifest(prereg, planned, manifest);
   if (
     hashes.schemaVersion !== 2 ||
@@ -3239,12 +3245,12 @@ async function verifyProviderPreflightRun(
   if (Date.parse(xp.completedAt) > Date.parse(sealedAt)) {
     throw new VerificationFailure("PREFLIGHT_COMPLETED_AFTER_SEAL", directory);
   }
-  if (!Number.isFinite(Date.parse(preregistrationLedgerCompletedAt))) {
-    throw new VerificationFailure(
-      "PREFLIGHT_STARTED_BEFORE_PREREGISTRATION_LEDGER",
-      directory,
-    );
-  }
+  verifyCommanderXpServerAuthorizationChronology(
+    "provider-preflight",
+    preregistrationLedgerCompletedAt,
+    xp.xpRequestCreatedAt,
+    directory,
+  );
   verifyRuntimeManifest(prereg, planned, manifest);
   if (
     hashes.schemaVersion !== 2 ||
@@ -3592,8 +3598,6 @@ function verifySubmittedRequest(
     !["submitted", "pending", "running", "completed"].includes(
       createResponse.status,
     ) ||
-    (createResponse.mode === "direct-response" &&
-      !["submitted", "pending"].includes(createResponse.status)) ||
     createResponse.submittedRequestSha256 !== submittedRequestSha256 ||
     !isSha256(createResponse.rawResponseSha256) ||
     !isPositiveInteger(createResponse.rawResponseByteLength) ||
@@ -4242,6 +4246,26 @@ function registerUniqueXpIdentity(
     ["replayURLSha256", xp.replayURLSha256, "GLOBAL_REPLAY_URL_DUPLICATE"],
   ] as const) {
     registerNamespaceIdentity(prior, current, namespace, value, code);
+  }
+}
+
+export function verifyCommanderXpServerAuthorizationChronology(
+  phase: "provider-preflight" | "gameplay",
+  authorizedAt: string,
+  xpRequestCreatedAt: string,
+  path: string | null = null,
+): void {
+  if (
+    !Number.isFinite(Date.parse(authorizedAt)) ||
+    !Number.isFinite(Date.parse(xpRequestCreatedAt)) ||
+    Date.parse(xpRequestCreatedAt) < Date.parse(authorizedAt)
+  ) {
+    throw new VerificationFailure(
+      phase === "provider-preflight"
+        ? "PREFLIGHT_STARTED_BEFORE_PREREGISTRATION_LEDGER"
+        : "GAMEPLAY_STARTED_BEFORE_PROVIDER_PREFLIGHT_COMPLETED",
+      path,
+    );
   }
 }
 
@@ -5263,6 +5287,52 @@ function verifyOpenApiContract(
     receiptSha256 !== sha256Canonical(body)
   ) {
     throw new VerificationFailure("XP_OPENAPI_CONTRACT_MISMATCH");
+  }
+}
+
+function verifyCoworldRuntimeInventory(
+  prereg: CommanderXpPreRegistrationV2,
+  receipt: Record<string, unknown>,
+): void {
+  exactRecord(
+    receipt,
+    [
+      "schemaVersion",
+      "authority",
+      "sourceSha",
+      "sourceTreeSha",
+      "coworldClientVersion",
+      "uvVersion",
+      "pythonVersion",
+      "platform",
+      "requirementsInputSha256",
+      "requirementsLockSha256",
+      "inventorySha256",
+      "packageCount",
+      "receiptSha256",
+    ],
+    "COWORLD_RUNTIME_INVENTORY_SCHEMA_MISMATCH",
+  );
+  const { receiptSha256, ...body } = receipt;
+  if (
+    receipt.schemaVersion !== 1 ||
+    receipt.authority !== "hash-locked-coworld-runtime-inventory-v1" ||
+    receipt.sourceSha !== prereg.identities.adapterSourceSha ||
+    receipt.sourceTreeSha !== prereg.identities.adapterSourceTreeSha ||
+    receipt.coworldClientVersion !== "0.1.42" ||
+    receipt.uvVersion !== "0.8.12" ||
+    receipt.pythonVersion !== "3.12" ||
+    receipt.platform !== "linux/amd64" ||
+    receipt.requirementsInputSha256 !==
+      "181df809f108068868fe32e487111ca5cfb45477d25f997fa1a8933ad15934ac" ||
+    receipt.requirementsLockSha256 !==
+      "5e83207f5ae2c16871e6dc12077058c8dc8b47ffcce6d81901e2beae69b6a9a2" ||
+    receipt.inventorySha256 !==
+      "796a8827eedc1ce1529003aabc3d6695a5bf34c036c7b23360ca93c6df46e98d" ||
+    receipt.packageCount !== 50 ||
+    receiptSha256 !== sha256Canonical(body)
+  ) {
+    throw new VerificationFailure("COWORLD_RUNTIME_INVENTORY_MISMATCH");
   }
 }
 

@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import {
   lstatSync,
   mkdtempSync,
+  readdirSync,
   realpathSync,
   rmSync,
   statSync,
@@ -40,6 +41,33 @@ function exactRunnerTempInput(value) {
       !lstatSync(value).isSymbolicLink() &&
       statSync(real).isFile()
     );
+  } catch {
+    return false;
+  }
+}
+
+function exactRunnerTempDirectoryInput(value) {
+  if (typeof value !== "string" || resolve(value) !== value) return false;
+  try {
+    const real = realpathSync(value);
+    if (
+      !(
+        real.startsWith(`${runnerTemp}/`) &&
+        !lstatSync(value).isSymbolicLink() &&
+        statSync(real).isDirectory()
+      )
+    )
+      return false;
+    const visit = (directory) =>
+      readdirSync(directory, { withFileTypes: true }).every((entry) => {
+        const target = join(directory, entry.name);
+        const metadata = lstatSync(target);
+        if (metadata.isSymbolicLink()) return false;
+        const resolved = realpathSync(target);
+        if (!resolved.startsWith(`${real}/`)) return false;
+        return entry.isDirectory() ? visit(target) : entry.isFile();
+      });
+    return visit(real);
   } catch {
     return false;
   }
@@ -190,6 +218,7 @@ if (command === "commander-xp-policy-provision") {
     "source-sha",
     "source-tree-sha",
     ...(mode === "upload" ? ["output"] : []),
+    ...(mode === "upload" && parsed.has("recovery") ? ["recovery"] : []),
   ]);
   const output = parsed.get("output");
   if (
@@ -211,7 +240,9 @@ if (command === "commander-xp-policy-provision") {
       parsed.get("source-provenance-digest"),
       parsed.get("build-provenance-digest"),
     ].some((value) => !/^sha256:[0-9a-f]{64}$/.test(value ?? "")) ||
-    (mode === "upload" && !exactRunnerTempOutput(output))
+    (mode === "upload" && !exactRunnerTempOutput(output)) ||
+    (parsed.has("recovery") &&
+      !exactRunnerTempDirectoryInput(parsed.get("recovery")))
   ) {
     throw new Error(
       "authenticated Coworld Commander XP policy provision mode is malformed",

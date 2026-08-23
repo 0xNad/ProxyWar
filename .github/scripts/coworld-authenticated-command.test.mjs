@@ -157,6 +157,35 @@ test("maps exact Commander XP policy provision without exposing the token", () =
   });
 });
 
+test("maps an exact retained policy recovery directory without exposing credentials", () => {
+  withFakeRuntime(({ env, capture, root }) => {
+    const recovery = path.join(root, "policy-recovery");
+    fs.mkdirSync(recovery, { mode: 0o700 });
+    const output = path.join(privateOutputParent(root), "policy-receipts");
+    const args = [
+      "commander-xp-policy-provision",
+      "upload",
+      `--image=ghcr.io/0xnad/proxywar-commander-xp-policy@sha256:${"1".repeat(64)}`,
+      "--name-prefix=proxywar-commander-xp-fixture",
+      "--bedrock-model=us.anthropic.claude-sonnet-4-6",
+      `--source-sha=${"2".repeat(40)}`,
+      `--source-tree-sha=${"3".repeat(40)}`,
+      `--source-provenance-digest=sha256:${"4".repeat(64)}`,
+      `--build-provenance-digest=sha256:${"5".repeat(64)}`,
+      `--oci-digest=sha256:${"6".repeat(64)}`,
+      `--output=${output}`,
+      `--recovery=${recovery}`,
+    ];
+    const result = spawnSync(process.execPath, [wrapper, ...args], {
+      encoding: "utf8",
+      env,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const lines = fs.readFileSync(capture, "utf8").trim().split("\n");
+    assert.ok(lines[1].includes(`--recovery=${recovery}`));
+  });
+});
+
 test("runs only the exact terminal-proof and certification argv in the minimal child environment", () => {
   withFakeRuntime(({ env, capture, root }) => {
     const manifest = path.join(root, "eval-manifest.json");

@@ -35,6 +35,7 @@ import {
   verifyCommanderXpJoinedGameplayEvidenceAudit,
   verifyCommanderXpMatchedInitialSelectorSurfaces,
   verifyCommanderXpMatchedRequestOrder,
+  verifyCommanderXpServerAuthorizationChronology,
   type CommanderXpExternalPhaseReceipt,
   type PlayerRuntimeManifest,
 } from "../../src/server/agents/CommanderXpVerifier";
@@ -51,6 +52,30 @@ afterEach(async () => {
 });
 
 describe("Commander XP evidence verifier v2", () => {
+  it("requires server-created XP requests to follow the sealed phase authority", () => {
+    expect(() =>
+      verifyCommanderXpServerAuthorizationChronology(
+        "provider-preflight",
+        "2026-08-22T14:00:00.000Z",
+        "2026-08-22T14:00:00.000Z",
+      ),
+    ).not.toThrow();
+    expect(() =>
+      verifyCommanderXpServerAuthorizationChronology(
+        "provider-preflight",
+        "2026-08-22T14:00:00.000Z",
+        "2026-08-22T13:59:59.999Z",
+      ),
+    ).toThrow(/PREFLIGHT_STARTED_BEFORE_PREREGISTRATION_LEDGER/);
+    expect(() =>
+      verifyCommanderXpServerAuthorizationChronology(
+        "gameplay",
+        "2026-08-22T15:00:00.000Z",
+        "2026-08-22T14:59:59.999Z",
+      ),
+    ).toThrow(/GAMEPLAY_STARTED_BEFORE_PROVIDER_PREFLIGHT_COMPLETED/);
+  });
+
   it("uses server timestamps for pair chronology despite runner clock skew", () => {
     expect(() =>
       verifyCommanderXpMatchedRequestOrder("confirmatory", [
@@ -112,6 +137,47 @@ describe("Commander XP evidence verifier v2", () => {
     ).resolves.toEqual(
       expect.objectContaining({ fileCount: expect.any(Number) }),
     );
+  });
+
+  it("rejects a self-consistent Coworld runtime receipt for the wrong locked graph", async () => {
+    const fixture = await buildPreregistrationFixture();
+    const receiptPath = path.join(
+      fixture.evidenceRoot,
+      "coworld-runtime-inventory-v1.json",
+    );
+    const receipt = JSON.parse(await fs.readFile(receiptPath, "utf8"));
+    receipt.packageCount = 49;
+    delete receipt.receiptSha256;
+    const body = { ...receipt };
+    receipt.receiptSha256 = sha256Canonical(body);
+    const receiptText = `${JSON.stringify(receipt)}\n`;
+    await fs.writeFile(receiptPath, receiptText);
+    const indexPath = path.join(
+      fixture.evidenceRoot,
+      "commander-xp-evidence-index-v2.json",
+    );
+    const index = JSON.parse(await fs.readFile(indexPath, "utf8"));
+    index.artifacts.find(
+      (artifact: { path: string }) =>
+        artifact.path === "coworld-runtime-inventory-v1.json",
+    ).sha256 = sha256(receiptText);
+    await fs.writeFile(indexPath, JSON.stringify(index));
+    const sealPath = path.join(
+      fixture.evidenceRoot,
+      "commander-xp-evidence-seal-v2.json",
+    );
+    const seal = JSON.parse(await fs.readFile(sealPath, "utf8"));
+    seal.indexSha256 = sha256Canonical(index);
+    delete seal.sealSha256;
+    seal.sealSha256 = sha256Canonical(seal);
+    await fs.writeFile(sealPath, JSON.stringify(seal));
+
+    await expect(
+      verifyCommanderXpEvidence(fixture.evidenceRoot),
+    ).resolves.toMatchObject({
+      integrityVerified: false,
+      diagnostics: [{ code: "COWORLD_RUNTIME_INVENTORY_MISMATCH", path: null }],
+    });
   });
 
   it("accepts the separately stored authority request after evidence upload", async () => {
@@ -1642,11 +1708,35 @@ async function buildPreregistrationFixture(): Promise<{
       sha256: prereg.identities.xpRosterSchemasSha256,
     },
   };
+  const coworldRuntimeInventoryBody = {
+    schemaVersion: 1,
+    authority: "hash-locked-coworld-runtime-inventory-v1",
+    sourceSha: prereg.identities.adapterSourceSha,
+    sourceTreeSha: prereg.identities.adapterSourceTreeSha,
+    coworldClientVersion: "0.1.42",
+    uvVersion: "0.8.12",
+    pythonVersion: "3.12",
+    platform: "linux/amd64",
+    requirementsInputSha256:
+      "181df809f108068868fe32e487111ca5cfb45477d25f997fa1a8933ad15934ac",
+    requirementsLockSha256:
+      "5e83207f5ae2c16871e6dc12077058c8dc8b47ffcce6d81901e2beae69b6a9a2",
+    inventorySha256:
+      "796a8827eedc1ce1529003aabc3d6695a5bf34c036c7b23360ca93c6df46e98d",
+    packageCount: 50,
+  };
 
   const artifacts = new Map<string, string>([
     ["commander-xp-preregistration-v2.json", JSON.stringify(prereg)],
     ["commander-xp-source-provenance-v2.json", sourceProvenanceText],
     ["commander-xp-source-tree-diff-v1.json", sourceTreeDiffText],
+    [
+      "coworld-runtime-inventory-v1.json",
+      JSON.stringify({
+        ...coworldRuntimeInventoryBody,
+        receiptSha256: sha256Canonical(coworldRuntimeInventoryBody),
+      }),
+    ],
     ["policy-identities-v2.json", JSON.stringify(policyReceipt)],
     ["policy-inspect/A.json", policyInspectTexts.A],
     ["policy-inspect/B.json", policyInspectTexts.B],

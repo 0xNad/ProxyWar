@@ -1,5 +1,9 @@
 [
   ".github/scripts/commander-xp-control-workflow.test.mjs",
+  ".github/scripts/commander-xp-coworld-inventory.lock.txt",
+  ".github/scripts/commander-xp-coworld-requirements.in",
+  ".github/scripts/commander-xp-coworld-requirements.lock.txt",
+  ".github/scripts/commander-xp-coworld-runtime.test.mjs",
   ".github/scripts/commander-xp-evidence-workflow.test.mjs",
   ".github/scripts/commander-xp-external-seal-lib.mjs",
   ".github/scripts/commander-xp-external-seal.mjs",
@@ -10,6 +14,8 @@
   ".github/scripts/commander-xp-main-authorization.test.mjs",
   ".github/scripts/commander-xp-openapi-contract.mjs",
   ".github/scripts/commander-xp-openapi-contract.test.mjs",
+  ".github/scripts/commander-xp-provision-recovery.mjs",
+  ".github/scripts/commander-xp-provision-recovery.test.mjs",
   ".github/scripts/commander-xp-provision-workflow.test.mjs",
   ".github/scripts/commander-xp-source-allowlist-v2.json",
   ".github/scripts/commander-xp-workflow-shell-syntax.test.mjs",

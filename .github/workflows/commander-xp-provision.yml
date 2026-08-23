@@ -25,6 +25,11 @@ on:
         required: true
         default: us.anthropic.claude-sonnet-4-6
         type: string
+      recovery_provision_artifact_id:
+        description: Optional immutable failed-run provision boundary artifact ID
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: commander-xp-provision-${{ inputs.source_sha }}-${{ inputs.eval_version }}
@@ -51,6 +56,7 @@ env:
   LEAGUE_ID: league_cb60d526-ecfd-4836-ab3a-81fc6cf7dc42
   COWORLD_CLI_VERSION: 0.1.42
   EVAL_COWORLD_NAME: proxywar-commander-xp-eval
+  RECOVERY_PROVISION_ARTIFACT_ID: ${{ inputs.recovery_provision_artifact_id }}
 
 jobs:
   provision:
@@ -83,6 +89,7 @@ jobs:
           [[ "$SOURCE_CI_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$SOURCE_CI_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
           [[ "$EVAL_VERSION" =~ ^0\.[0-9]+\.[0-9]+([+-][A-Za-z0-9.-]+)?$ ]]
+          test -z "$RECOVERY_PROVISION_ARTIFACT_ID" || [[ "$RECOVERY_PROVISION_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
           test "$BEDROCK_MODEL" = us.anthropic.claude-sonnet-4-6
           test "$GITHUB_SHA" = "$SOURCE_SHA"
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
@@ -98,7 +105,15 @@ jobs:
             .head_repository.full_name == "0xNad/ProxyWar" and .event == "push"
           ' "$RUNNER_TEMP/source-ci.json" >/dev/null
           SOURCE_TREE_SHA=$(git rev-parse HEAD^{tree})
-          echo "SOURCE_TREE_SHA=$SOURCE_TREE_SHA" >> "$GITHUB_ENV"
+          NAME_PREFIX="proxywar-commander-xp-$(printf '%s' "$SOURCE_SHA-$EVAL_VERSION" | sha256sum | cut -c1-20)"
+          FENCE_HASH=$(printf '%s\n%s\n' "$SOURCE_SHA" "$EVAL_VERSION" | sha256sum | cut -d' ' -f1)
+          FENCE_REF="refs/tags/commander-xp-provision-v2/$FENCE_HASH"
+          {
+            echo "SOURCE_TREE_SHA=$SOURCE_TREE_SHA"
+            echo "NAME_PREFIX=$NAME_PREFIX"
+            echo "FENCE_HASH=$FENCE_HASH"
+            echo "FENCE_REF=$FENCE_REF"
+          } >> "$GITHUB_ENV"
 
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
@@ -115,14 +130,23 @@ jobs:
           node .github/scripts/npm-ci-with-retry.mjs --ignore-scripts
           npm ci --ignore-scripts --prefix coworld-adapter
           export UV_NO_CACHE=1
-          export UV_TOOL_DIR="$RUNNER_TEMP/coworld-tools"
-          export UV_TOOL_BIN_DIR="$RUNNER_TEMP/coworld-bin"
-          uv tool install --force "coworld==$COWORLD_CLI_VERSION"
+          uv venv "$RUNNER_TEMP/coworld-venv" --python 3.12
+          test "$(uv --version)" = "uv 0.8.12"
+          uv pip install --python "$RUNNER_TEMP/coworld-venv/bin/python" \
+            --require-hashes \
+            -r .github/scripts/commander-xp-coworld-requirements.lock.txt
+          test "$($RUNNER_TEMP/coworld-venv/bin/python -c 'import importlib.metadata; print(importlib.metadata.version("coworld"))')" = "$COWORLD_CLI_VERSION"
+          uv pip freeze --python "$RUNNER_TEMP/coworld-venv/bin/python" \
+            | LC_ALL=C sort > "$RUNNER_TEMP/coworld-runtime-inventory.txt"
+          cmp .github/scripts/commander-xp-coworld-inventory.lock.txt \
+            "$RUNNER_TEMP/coworld-runtime-inventory.txt"
+          COWORLD_RUNTIME_INVENTORY_SHA256=$(sha256sum "$RUNNER_TEMP/coworld-runtime-inventory.txt" | cut -d' ' -f1)
           CACHE="$RUNNER_TEMP/coworld-certification-cache"
           mkdir -m 700 "$CACHE"
           {
-            echo "COWORLD_BIN=$UV_TOOL_BIN_DIR/coworld"
-            echo "COWORLD_PYTHON=$UV_TOOL_DIR/coworld/bin/python"
+            echo "COWORLD_BIN=$RUNNER_TEMP/coworld-venv/bin/coworld"
+            echo "COWORLD_PYTHON=$RUNNER_TEMP/coworld-venv/bin/python"
+            echo "COWORLD_RUNTIME_INVENTORY_SHA256=$COWORLD_RUNTIME_INVENTORY_SHA256"
             echo "XDG_CACHE_HOME=$CACHE"
           } >> "$GITHUB_ENV"
 
@@ -196,9 +220,13 @@ jobs:
           "$COWORLD_PYTHON" coworld-adapter/scripts/provision-commander-xp-policies.test.py
           node --test \
             .github/scripts/commander-xp-control-workflow.test.mjs \
+            .github/scripts/commander-xp-coworld-runtime.test.mjs \
             .github/scripts/commander-xp-evidence-workflow.test.mjs \
             .github/scripts/commander-xp-openapi-contract.test.mjs \
             .github/scripts/commander-xp-external-seal.test.mjs \
+            .github/scripts/commander-xp-provision-recovery.test.mjs \
+            .github/scripts/commander-xp-provision-workflow.test.mjs \
+            .github/scripts/commander-xp-workflow-shell-syntax.test.mjs \
             .github/scripts/coworld-authenticated-command.test.mjs
           npx vitest \
             coworld-adapter/scripts/prepare-commander-xp-eval-manifest.test.ts \
@@ -234,6 +262,100 @@ jobs:
             echo "GAME_TAG=$GAME_TAG"
           } >> "$GITHUB_ENV"
 
+      - name: Resolve one exact failed-run provision boundary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          PROVISION_STATE_ROOT="$RUNNER_TEMP/commander-xp-provision-state"
+          mkdir -m 700 "$PROVISION_STATE_ROOT"
+          if test -n "$RECOVERY_PROVISION_ARTIFACT_ID"; then
+            METADATA="$RUNNER_TEMP/provision-recovery-artifact.json"
+            ARCHIVE="$RUNNER_TEMP/provision-recovery-artifact.zip"
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$RECOVERY_PROVISION_ARTIFACT_ID" > "$METADATA"
+            test "$(jq -r .id "$METADATA")" = "$RECOVERY_PROVISION_ARTIFACT_ID"
+            test "$(jq -r .expired "$METADATA")" = false
+            RECOVERY_RUN_ID=$(jq -r .workflow_run.id "$METADATA")
+            [[ "$RECOVERY_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RECOVERY_RUN_ID" > "$RUNNER_TEMP/provision-recovery-run.json"
+            RECOVERY_RUN_ATTEMPT=$(jq -r .run_attempt "$RUNNER_TEMP/provision-recovery-run.json")
+            [[ "$RECOVERY_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+            jq -e --arg source "$SOURCE_SHA" '
+              .status == "completed" and .conclusion != "success" and
+              .head_sha == $source and .head_branch == "main" and
+              .path == ".github/workflows/commander-xp-provision.yml" and
+              .actor.login == "0xNad" and .triggering_actor.login == "0xNad" and
+              .head_repository.full_name == "0xNad/ProxyWar" and
+              .repository.full_name == "0xNad/ProxyWar" and .event == "workflow_dispatch"
+            ' "$RUNNER_TEMP/provision-recovery-run.json" >/dev/null
+            RECOVERY_DIGEST=$(jq -r .digest "$METADATA")
+            [[ "$RECOVERY_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+            gh api -H "Accept: application/vnd.github+json" \
+              "repos/$GITHUB_REPOSITORY/actions/artifacts/$RECOVERY_PROVISION_ARTIFACT_ID/zip" \
+              > "$ARCHIVE"
+            python - "$ARCHIVE" "$PROVISION_STATE_ROOT" <<'PY'
+          import pathlib, stat, sys, zipfile
+          archive = pathlib.Path(sys.argv[1])
+          destination = pathlib.Path(sys.argv[2]).resolve()
+          seen = set()
+          with zipfile.ZipFile(archive) as bundle:
+              for member in bundle.infolist():
+                  candidate = pathlib.PurePosixPath(member.filename)
+                  folded = member.filename.casefold()
+                  mode = member.external_attr >> 16
+                  if folded in seen or candidate.is_absolute() or ".." in candidate.parts:
+                      raise SystemExit(f"unsafe provision recovery member: {member.filename}")
+                  seen.add(folded)
+                  if mode and not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+                      raise SystemExit(f"special provision recovery member: {member.filename}")
+                  resolved = (destination / pathlib.Path(*candidate.parts)).resolve()
+                  if destination not in resolved.parents and resolved != destination:
+                      raise SystemExit(f"provision recovery path escape: {member.filename}")
+              bundle.extractall(destination)
+          PY
+            test "$(find "$PROVISION_STATE_ROOT" -type l | wc -l | tr -d ' ')" = 0
+            RECOVERY_RESULT=$(node .github/scripts/commander-xp-provision-recovery.mjs validate \
+              "$PROVISION_STATE_ROOT" "$SOURCE_SHA" "$SOURCE_TREE_SHA" "$EVAL_VERSION" "$NAME_PREFIX" "$FENCE_REF")
+            RECOVERY_STAGE=$(jq -r .stage <<< "$RECOVERY_RESULT")
+            EXPECTED_NAME="commander-xp-provision-boundary-$RECOVERY_STAGE-$SOURCE_SHA-$EVAL_VERSION-$RECOVERY_RUN_ID-$RECOVERY_RUN_ATTEMPT"
+            test "$(jq -r .name "$METADATA")" = "$EXPECTED_NAME"
+            {
+              echo "PROVISION_RECOVERY_STAGE=$RECOVERY_STAGE"
+              echo "PROVISION_RECOVERY_RUN_ID=$RECOVERY_RUN_ID"
+              echo "PROVISION_RECOVERY_RUN_ATTEMPT=$RECOVERY_RUN_ATTEMPT"
+              echo "PROVISION_RECOVERY_ARTIFACT_DIGEST=$RECOVERY_DIGEST"
+              if test -f "$PROVISION_STATE_ROOT/ghcr.json"; then
+                echo "RECOVERED_GHCR=true"
+              else
+                echo "RECOVERED_GHCR=false"
+              fi
+              if test -f "$PROVISION_STATE_ROOT/eval/eval-coworld-inspect.json"; then
+                echo "RECOVERED_EVAL=true"
+              else
+                echo "RECOVERED_EVAL=false"
+              fi
+              if test -f "$PROVISION_STATE_ROOT/eval/eval-coworld-terminal-proof-v2.json"; then
+                echo "RECOVERED_TERMINAL=true"
+              else
+                echo "RECOVERED_TERMINAL=false"
+              fi
+              if test -f "$PROVISION_STATE_ROOT/policy-receipts/policy-identities-v2.json"; then
+                echo "RECOVERED_POLICIES=true"
+              else
+                echo "RECOVERED_POLICIES=false"
+              fi
+            } >> "$GITHUB_ENV"
+          else
+            {
+              echo "PROVISION_RECOVERY_STAGE="
+              echo "RECOVERED_GHCR=false"
+              echo "RECOVERED_EVAL=false"
+              echo "RECOVERED_TERMINAL=false"
+              echo "RECOVERED_POLICIES=false"
+            } >> "$GITHUB_ENV"
+          fi
+          echo "PROVISION_STATE_ROOT=$PROVISION_STATE_ROOT" >> "$GITHUB_ENV"
+
       - name: Authenticated no-mutation Coworld and policy preflight
         env:
           COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
@@ -247,50 +369,85 @@ jobs:
           test "$(jq -r .game.coworld_id "$RUNNER_TEMP/league-before.json")" = "$CANONICAL_COWORLD_ID"
           test "$(jq -r .game.canonical_coworld_id "$RUNNER_TEMP/league-before.json")" = "$CANONICAL_COWORLD_ID"
           node .github/scripts/coworld-authenticated-command.mjs list --json > "$RUNNER_TEMP/coworld-list-before.json"
-          test "$(jq --arg name "$EVAL_COWORLD_NAME" --arg version "$EVAL_VERSION" '[.[] | select(.name==$name and .version==$version)] | length' "$RUNNER_TEMP/coworld-list-before.json")" = 0
-          test "$(node .github/scripts/coworld-authenticated-command.mjs next-version "$EVAL_COWORLD_NAME" | tr -d '\r\n')" = "$EVAL_VERSION"
-          NAME_PREFIX="proxywar-commander-xp-$(printf '%s' "$SOURCE_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" | sha256sum | cut -c1-20)"
-          PLACEHOLDER="sha256:$(printf '0%.0s' {1..64})"
-          node .github/scripts/coworld-authenticated-command.mjs commander-xp-policy-provision check \
-            --image="ghcr.io/0xnad/proxywar-commander-xp-policy@$PLACEHOLDER" \
-            --name-prefix="$NAME_PREFIX" --bedrock-model="$BEDROCK_MODEL" \
-            --source-sha="$SOURCE_SHA" --source-tree-sha="$SOURCE_TREE_SHA" \
-            --source-provenance-digest="sha256:$SOURCE_PROVENANCE_SHA256" \
-            --build-provenance-digest="$PLACEHOLDER" --oci-digest="$PLACEHOLDER" \
-            > "$RUNNER_TEMP/policy-preflight.json"
-          jq -e '.ok == true and .namesAvailable == 6' "$RUNNER_TEMP/policy-preflight.json" >/dev/null
+          EXISTING_EVAL_COUNT=$(jq --arg name "$EVAL_COWORLD_NAME" --arg version "$EVAL_VERSION" '[.[] | select(.name==$name and .version==$version)] | length' "$RUNNER_TEMP/coworld-list-before.json")
+          if test -z "$RECOVERY_PROVISION_ARTIFACT_ID"; then
+            test "$EXISTING_EVAL_COUNT" = 0
+            test "$(node .github/scripts/coworld-authenticated-command.mjs next-version "$EVAL_COWORLD_NAME" | tr -d '\r\n')" = "$EVAL_VERSION"
+            PLACEHOLDER="sha256:$(printf '0%.0s' {1..64})"
+            node .github/scripts/coworld-authenticated-command.mjs commander-xp-policy-provision check \
+              --image="ghcr.io/0xnad/proxywar-commander-xp-policy@$PLACEHOLDER" \
+              --name-prefix="$NAME_PREFIX" --bedrock-model="$BEDROCK_MODEL" \
+              --source-sha="$SOURCE_SHA" --source-tree-sha="$SOURCE_TREE_SHA" \
+              --source-provenance-digest="sha256:$SOURCE_PROVENANCE_SHA256" \
+              --build-provenance-digest="$PLACEHOLDER" --oci-digest="$PLACEHOLDER" \
+              > "$RUNNER_TEMP/policy-preflight.json"
+            jq -e '.ok == true and .namesAvailable == 6' "$RUNNER_TEMP/policy-preflight.json" >/dev/null
+          else
+            test "$EXISTING_EVAL_COUNT" -le 1
+          fi
           jq -cS '{coworld:{id:.coworld.id,version:.coworld.version,manifest_hash:.coworld.manifest_hash,canonical:.coworld.canonical}}' "$RUNNER_TEMP/canonical-before.json" > "$RUNNER_TEMP/canonical-before-projection.json"
           jq -cS '{id,game:{coworld_id:.game.coworld_id,canonical_coworld_id:.game.canonical_coworld_id},commissioner_key,rounds_paused_at}' "$RUNNER_TEMP/league-before.json" > "$RUNNER_TEMP/league-before-projection.json"
           cat "$RUNNER_TEMP/canonical-before-projection.json" "$RUNNER_TEMP/league-before-projection.json" > "$RUNNER_TEMP/canonical-binding-before.jsonl"
           CANONICAL_BINDING_SHA256=$(sha256sum "$RUNNER_TEMP/canonical-binding-before.jsonl" | cut -d' ' -f1)
-          {
-            echo "NAME_PREFIX=$NAME_PREFIX"
-            echo "CANONICAL_BINDING_SHA256=$CANONICAL_BINDING_SHA256"
-          } >> "$GITHUB_ENV"
+          echo "CANONICAL_BINDING_SHA256=$CANONICAL_BINDING_SHA256" >> "$GITHUB_ENV"
 
-      - name: Create durable provision fence before any upload
+      - name: Build immutable recoverable provision fence intent
+        if: inputs.recovery_provision_artifact_id == ''
+        run: |
+          set -euo pipefail
+          CREATED_AT=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+          jq -cS -n \
+            --arg source "$SOURCE_SHA" --arg tree "$SOURCE_TREE_SHA" \
+            --arg version "$EVAL_VERSION" --arg namePrefix "$NAME_PREFIX" \
+            --arg fenceRef "$FENCE_REF" --arg createdAt "$CREATED_AT" \
+            '{schemaVersion:2,authority:"github-actions-provision-fence-intent-v2",repository:"0xNad/ProxyWar",workflowPath:".github/workflows/commander-xp-provision.yml",sourceSha:$source,sourceTreeSha:$tree,evalVersion:$version,namePrefix:$namePrefix,fenceRef:$fenceRef,createdAt:$createdAt}' \
+            > "$PROVISION_STATE_ROOT/fence-intent.json"
+          node .github/scripts/commander-xp-provision-recovery.mjs build \
+            "$PROVISION_STATE_ROOT" fence-intent "$SOURCE_SHA" "$SOURCE_TREE_SHA" \
+            "$EVAL_VERSION" "$NAME_PREFIX" "$FENCE_REF" \
+            > "$RUNNER_TEMP/provision-fence-intent-result.json"
+
+      - name: Retain immutable provision fence intent before creating the tag
+        id: provision_fence_intent_upload
+        if: inputs.recovery_provision_artifact_id == ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: commander-xp-provision-boundary-fence-intent-${{ inputs.source_sha }}-${{ inputs.eval_version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/commander-xp-provision-state/
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+
+      - name: Create or recover the durable provision fence before any upload
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           node .github/scripts/commander-xp-main-authorization.mjs "$SOURCE_SHA" > "$RUNNER_TEMP/provision-fence-main-authorization.json"
-          FENCE_HASH=$(printf '%s\n%s\n' "$SOURCE_SHA" "$EVAL_VERSION" | sha256sum | cut -d' ' -f1)
-          FENCE_REF="refs/tags/commander-xp-provision-v2/$FENCE_HASH"
-          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/commander-xp-provision-v2/$FENCE_HASH" > "$RUNNER_TEMP/existing-fence.json" 2>/dev/null; then
-            echo "::error::Commander XP provision already fenced"
-            exit 1
+          if ! gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="$FENCE_REF" -f sha="$SOURCE_SHA" \
+            > "$RUNNER_TEMP/provision-fence.json" 2> "$RUNNER_TEMP/provision-fence-error.txt"; then
+            test -n "$RECOVERY_PROVISION_ARTIFACT_ID"
+            gh api "repos/$GITHUB_REPOSITORY/git/ref/${FENCE_REF#refs/}" > "$RUNNER_TEMP/provision-fence.json"
           fi
-          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="$FENCE_REF" -f sha="$SOURCE_SHA" > "$RUNNER_TEMP/provision-fence.json"
           test "$(jq -r .ref "$RUNNER_TEMP/provision-fence.json")" = "$FENCE_REF"
-          echo "FENCE_REF=$FENCE_REF" >> "$GITHUB_ENV"
+          test "$(jq -r .object.sha "$RUNNER_TEMP/provision-fence.json")" = "$SOURCE_SHA"
+          rm -f "$RUNNER_TEMP/provision-fence-error.txt"
 
       - name: Push exact immutable GHCR images
+        if: env.RECOVERED_GHCR != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           node .github/scripts/commander-xp-main-authorization.mjs "$SOURCE_SHA" > "$RUNNER_TEMP/ghcr-push-main-authorization.json"
           printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          if docker manifest inspect "$POLICY_TAG" >/dev/null 2>&1 || docker manifest inspect "$GAME_TAG" >/dev/null 2>&1; then
+            echo "::error::Commander XP GHCR tag exists without an adoptable retained boundary"
+            exit 1
+          fi
           docker push "$POLICY_TAG" > "$RUNNER_TEMP/policy-push.txt"
           docker push "$GAME_TAG" > "$RUNNER_TEMP/game-push.txt"
           POLICY_REPO_DIGEST=$(docker image inspect --format '{{index .RepoDigests 0}}' "$POLICY_TAG")
@@ -310,6 +467,7 @@ jobs:
 
       - name: Attest policy image build provenance
         id: policy_provenance
+        if: env.RECOVERED_GHCR != 'true'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
         with:
           subject-name: ghcr.io/0xnad/proxywar-commander-xp-policy
@@ -319,6 +477,7 @@ jobs:
 
       - name: Attest game image build provenance
         id: game_provenance
+        if: env.RECOVERED_GHCR != 'true'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
         with:
           subject-name: ghcr.io/0xnad/proxywar-commander-xp-game
@@ -333,18 +492,84 @@ jobs:
           GAME_BUNDLE: ${{ steps.game_provenance.outputs.bundle-path }}
         run: |
           set -euo pipefail
-          [[ '${{ steps.policy_provenance.outputs.attestation-id }}' =~ ^[1-9][0-9]*$ ]]
-          [[ '${{ steps.game_provenance.outputs.attestation-id }}' =~ ^[1-9][0-9]*$ ]]
-          gh attestation verify "oci://$POLICY_REPO_DIGEST" --repo "$GITHUB_REPOSITORY" --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/commander-xp-provision.yml@refs/heads/main" --source-ref refs/heads/main --source-digest "$SOURCE_SHA" --signer-digest "$SOURCE_SHA" --deny-self-hosted-runners
-          gh attestation verify "oci://$GAME_REPO_DIGEST" --repo "$GITHUB_REPOSITORY" --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/commander-xp-provision.yml@refs/heads/main" --source-ref refs/heads/main --source-digest "$SOURCE_SHA" --signer-digest "$SOURCE_SHA" --deny-self-hosted-runners
-          POLICY_BUILD_PROVENANCE_DIGEST="sha256:$(sha256sum "$POLICY_BUNDLE" | cut -d' ' -f1)"
-          GAME_BUILD_PROVENANCE_DIGEST="sha256:$(sha256sum "$GAME_BUNDLE" | cut -d' ' -f1)"
+          if test "$RECOVERED_GHCR" = true; then
+            jq -e --arg source "$SOURCE_SHA" --arg tree "$SOURCE_TREE_SHA" --arg inventory "$COWORLD_RUNTIME_INVENTORY_SHA256" '
+              (keys | sort) == (["authority","coworldRuntimeInventorySha256","gameAttestationID","gameBuildProvenanceDigest","gameBundleSha256","gameDigest","gameRepoDigest","policyAttestationID","policyBuildProvenanceDigest","policyBundleSha256","policyDigest","policyRepoDigest","schemaVersion","sourceSha","sourceTreeSha"] | sort) and
+              .schemaVersion == 2 and .authority == "github-actions-attested-ghcr-provision-v2" and
+              .sourceSha == $source and .sourceTreeSha == $tree and
+              .coworldRuntimeInventorySha256 == $inventory and
+              (.policyAttestationID | type == "number") and .policyAttestationID > 0 and
+              (.gameAttestationID | type == "number") and .gameAttestationID > 0 and
+              (.policyRepoDigest | test("^ghcr.io/0xnad/proxywar-commander-xp-policy@sha256:[0-9a-f]{64}$")) and
+              (.gameRepoDigest | test("^ghcr.io/0xnad/proxywar-commander-xp-game@sha256:[0-9a-f]{64}$"))
+            ' "$PROVISION_STATE_ROOT/ghcr.json" >/dev/null
+            POLICY_REPO_DIGEST=$(jq -r .policyRepoDigest "$PROVISION_STATE_ROOT/ghcr.json")
+            GAME_REPO_DIGEST=$(jq -r .gameRepoDigest "$PROVISION_STATE_ROOT/ghcr.json")
+            POLICY_DIGEST=$(jq -r .policyDigest "$PROVISION_STATE_ROOT/ghcr.json")
+            GAME_DIGEST=$(jq -r .gameDigest "$PROVISION_STATE_ROOT/ghcr.json")
+            POLICY_BUILD_PROVENANCE_DIGEST=$(jq -r .policyBuildProvenanceDigest "$PROVISION_STATE_ROOT/ghcr.json")
+            GAME_BUILD_PROVENANCE_DIGEST=$(jq -r .gameBuildProvenanceDigest "$PROVISION_STATE_ROOT/ghcr.json")
+            test "$POLICY_DIGEST" = "${POLICY_REPO_DIGEST##*@}"
+            test "$GAME_DIGEST" = "${GAME_REPO_DIGEST##*@}"
+            test "sha256:$(sha256sum "$PROVISION_STATE_ROOT/attestations/policy.jsonl" | cut -d' ' -f1)" = "$POLICY_BUILD_PROVENANCE_DIGEST"
+            test "sha256:$(sha256sum "$PROVISION_STATE_ROOT/attestations/game.jsonl" | cut -d' ' -f1)" = "$GAME_BUILD_PROVENANCE_DIGEST"
+            test "$(jq -r .policyBundleSha256 "$PROVISION_STATE_ROOT/ghcr.json")" = "${POLICY_BUILD_PROVENANCE_DIGEST#sha256:}"
+            test "$(jq -r .gameBundleSha256 "$PROVISION_STATE_ROOT/ghcr.json")" = "${GAME_BUILD_PROVENANCE_DIGEST#sha256:}"
+          else
+            [[ '${{ steps.policy_provenance.outputs.attestation-id }}' =~ ^[1-9][0-9]*$ ]]
+            [[ '${{ steps.game_provenance.outputs.attestation-id }}' =~ ^[1-9][0-9]*$ ]]
+            mkdir -p "$PROVISION_STATE_ROOT/attestations"
+            cp "$POLICY_BUNDLE" "$PROVISION_STATE_ROOT/attestations/policy.jsonl"
+            cp "$GAME_BUNDLE" "$PROVISION_STATE_ROOT/attestations/game.jsonl"
+            POLICY_BUILD_PROVENANCE_DIGEST="sha256:$(sha256sum "$POLICY_BUNDLE" | cut -d' ' -f1)"
+            GAME_BUILD_PROVENANCE_DIGEST="sha256:$(sha256sum "$GAME_BUNDLE" | cut -d' ' -f1)"
+            jq -cS -n \
+              --arg source "$SOURCE_SHA" --arg tree "$SOURCE_TREE_SHA" \
+              --arg policyRepoDigest "$POLICY_REPO_DIGEST" --arg gameRepoDigest "$GAME_REPO_DIGEST" \
+              --arg policyDigest "$POLICY_DIGEST" --arg gameDigest "$GAME_DIGEST" \
+              --arg policyBuild "$POLICY_BUILD_PROVENANCE_DIGEST" --arg gameBuild "$GAME_BUILD_PROVENANCE_DIGEST" \
+              --arg policyBundleSha "${POLICY_BUILD_PROVENANCE_DIGEST#sha256:}" --arg gameBundleSha "${GAME_BUILD_PROVENANCE_DIGEST#sha256:}" \
+              --arg inventory "$COWORLD_RUNTIME_INVENTORY_SHA256" \
+              --argjson policyAttestationID '${{ steps.policy_provenance.outputs.attestation-id }}' \
+              --argjson gameAttestationID '${{ steps.game_provenance.outputs.attestation-id }}' \
+              '{schemaVersion:2,authority:"github-actions-attested-ghcr-provision-v2",sourceSha:$source,sourceTreeSha:$tree,policyRepoDigest:$policyRepoDigest,gameRepoDigest:$gameRepoDigest,policyDigest:$policyDigest,gameDigest:$gameDigest,policyAttestationID:$policyAttestationID,gameAttestationID:$gameAttestationID,policyBuildProvenanceDigest:$policyBuild,gameBuildProvenanceDigest:$gameBuild,policyBundleSha256:$policyBundleSha,gameBundleSha256:$gameBundleSha,coworldRuntimeInventorySha256:$inventory}' \
+              > "$PROVISION_STATE_ROOT/ghcr.json"
+          fi
+          gh attestation verify "oci://$POLICY_REPO_DIGEST" --repo "$GITHUB_REPOSITORY" --bundle "$PROVISION_STATE_ROOT/attestations/policy.jsonl" --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/commander-xp-provision.yml@refs/heads/main" --source-ref refs/heads/main --source-digest "$SOURCE_SHA" --signer-digest "$SOURCE_SHA" --deny-self-hosted-runners
+          gh attestation verify "oci://$GAME_REPO_DIGEST" --repo "$GITHUB_REPOSITORY" --bundle "$PROVISION_STATE_ROOT/attestations/game.jsonl" --cert-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/commander-xp-provision.yml@refs/heads/main" --source-ref refs/heads/main --source-digest "$SOURCE_SHA" --signer-digest "$SOURCE_SHA" --deny-self-hosted-runners
           {
+            echo "POLICY_REPO_DIGEST=$POLICY_REPO_DIGEST"
+            echo "POLICY_DIGEST=$POLICY_DIGEST"
+            echo "GAME_REPO_DIGEST=$GAME_REPO_DIGEST"
+            echo "GAME_DIGEST=$GAME_DIGEST"
             echo "POLICY_BUILD_PROVENANCE_DIGEST=$POLICY_BUILD_PROVENANCE_DIGEST"
             echo "GAME_BUILD_PROVENANCE_DIGEST=$GAME_BUILD_PROVENANCE_DIGEST"
           } >> "$GITHUB_ENV"
 
+      - name: Build immutable GHCR recovery boundary
+        if: env.RECOVERED_GHCR != 'true'
+        run: |
+          set -euo pipefail
+          node .github/scripts/commander-xp-provision-recovery.mjs build \
+            "$PROVISION_STATE_ROOT" ghcr "$SOURCE_SHA" "$SOURCE_TREE_SHA" \
+            "$EVAL_VERSION" "$NAME_PREFIX" "$FENCE_REF" \
+            > "$RUNNER_TEMP/provision-ghcr-boundary-result.json"
+
+      - name: Retain immutable GHCR recovery boundary
+        if: env.RECOVERED_GHCR != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: commander-xp-provision-boundary-ghcr-${{ inputs.source_sha }}-${{ inputs.eval_version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/commander-xp-provision-state/
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+
       - name: Upload six immutable policy versions from one image
+        id: policy_upload
+        continue-on-error: true
         env:
           COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
           GH_TOKEN: ${{ github.token }}
@@ -354,6 +579,11 @@ jobs:
           POLICY_OUTPUT_PARENT=$(mktemp -d "$RUNNER_TEMP/commander-xp-policy-output.XXXXXX")
           chmod 700 "$POLICY_OUTPUT_PARENT"
           POLICY_ROOT="$POLICY_OUTPUT_PARENT/policy-receipts"
+          RECOVERY_ARGS=()
+          if test -d "$PROVISION_STATE_ROOT/policy-receipts"; then
+            RECOVERY_ARGS+=("--recovery=$PROVISION_STATE_ROOT/policy-receipts")
+          fi
+          set +e
           node .github/scripts/coworld-authenticated-command.mjs commander-xp-policy-provision upload \
             --image="$POLICY_REPO_DIGEST" --name-prefix="$NAME_PREFIX" \
             --bedrock-model="$BEDROCK_MODEL" --source-sha="$SOURCE_SHA" \
@@ -361,10 +591,62 @@ jobs:
             --source-provenance-digest="sha256:$SOURCE_PROVENANCE_SHA256" \
             --build-provenance-digest="$POLICY_BUILD_PROVENANCE_DIGEST" \
             --oci-digest="$POLICY_DIGEST" --output="$POLICY_ROOT" \
+            "${RECOVERY_ARGS[@]}" \
             > "$RUNNER_TEMP/policy-provision-result.json"
+          STATUS=$?
+          set -e
+          if test -d "$POLICY_ROOT"; then
+            rm -rf "$PROVISION_STATE_ROOT/policy-receipts"
+            cp -R "$POLICY_ROOT" "$PROVISION_STATE_ROOT/policy-receipts"
+          fi
+          test "$STATUS" = 0 || exit "$STATUS"
           jq -e '.ok == true and .policyCount == 6' "$RUNNER_TEMP/policy-provision-result.json" >/dev/null
-          test "$(find "$POLICY_ROOT" -type f | wc -l | tr -d ' ')" = 4
+          test "$(find "$POLICY_ROOT" -type f | wc -l | tr -d ' ')" = 8
           echo "POLICY_ROOT=$POLICY_ROOT" >> "$GITHUB_ENV"
+
+      - name: Build the exact complete or partial policy recovery boundary
+        id: policy_boundary
+        if: always() && steps.policy_upload.outcome != 'skipped'
+        run: |
+          set -euo pipefail
+          if ! test -f "$PROVISION_STATE_ROOT/policy-receipts/image.json"; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if test "$RECOVERED_POLICIES" = true && test '${{ steps.policy_upload.outcome }}' = success; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if test '${{ steps.policy_upload.outcome }}' = success; then
+            STAGE=policies
+          else
+            rm -f "$PROVISION_STATE_ROOT/policy-receipts/policy-identities-v2.json"
+            STAGE=policies-partial
+          fi
+          node .github/scripts/commander-xp-provision-recovery.mjs build \
+            "$PROVISION_STATE_ROOT" "$STAGE" "$SOURCE_SHA" "$SOURCE_TREE_SHA" \
+            "$EVAL_VERSION" "$NAME_PREFIX" "$FENCE_REF" \
+            > "$RUNNER_TEMP/provision-policy-boundary-result.json"
+          {
+            echo "ready=true"
+            echo "stage=$STAGE"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Retain immutable complete or partial policy recovery boundary
+        if: always() && steps.policy_boundary.outputs.ready == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: commander-xp-provision-boundary-${{ steps.policy_boundary.outputs.stage }}-${{ inputs.source_sha }}-${{ inputs.eval_version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/commander-xp-provision-state/
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+
+      - name: Stop after retaining a partial policy boundary
+        if: steps.policy_upload.outcome != 'success'
+        run: exit 1
 
       - name: Build eval-only manifest and prove exact-image terminality
         env:
@@ -410,26 +692,77 @@ jobs:
           TERMINAL_PROOF_SHA256=$(sha256sum "$RUNNER_TEMP/eval-coworld-terminal-proof-v2.json" | cut -d' ' -f1)
           mkdir -p "$XDG_CACHE_HOME/coworld"
           node .github/scripts/coworld-authenticated-command.mjs commander-xp-certify "$EVAL_ROOT/eval-coworld-manifest-v2.json" --timeout-seconds 600 --no-open-report
+          if test "$RECOVERED_TERMINAL" = true; then
+            cmp "$EVAL_ROOT/eval-coworld-manifest-v2.json" "$PROVISION_STATE_ROOT/eval/eval-coworld-manifest-v2.json"
+            cmp "$RUNNER_TEMP/eval-coworld-terminal-proof-v2.json" "$PROVISION_STATE_ROOT/eval/eval-coworld-terminal-proof-v2.json"
+          else
+            mkdir -p "$PROVISION_STATE_ROOT/eval"
+            cp "$EVAL_ROOT/eval-coworld-manifest-v2.json" "$PROVISION_STATE_ROOT/eval/eval-coworld-manifest-v2.json"
+            cp "$RUNNER_TEMP/eval-coworld-terminal-proof-v2.json" "$PROVISION_STATE_ROOT/eval/eval-coworld-terminal-proof-v2.json"
+            node .github/scripts/commander-xp-provision-recovery.mjs build \
+              "$PROVISION_STATE_ROOT" terminal-proof "$SOURCE_SHA" "$SOURCE_TREE_SHA" \
+              "$EVAL_VERSION" "$NAME_PREFIX" "$FENCE_REF" \
+              > "$RUNNER_TEMP/provision-terminal-boundary-result.json"
+          fi
           {
             echo "EVAL_ROOT=$EVAL_ROOT"
             echo "TERMINAL_PROOF_SHA256=$TERMINAL_PROOF_SHA256"
           } >> "$GITHUB_ENV"
 
+      - name: Retain immutable exact-image terminal-proof recovery boundary
+        if: env.RECOVERED_TERMINAL != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: commander-xp-provision-boundary-terminal-proof-${{ inputs.source_sha }}-${{ inputs.eval_version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/commander-xp-provision-state/
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+
       - name: Upload and inspect the noncanonical eval Coworld
+        id: eval_upload
+        continue-on-error: true
         env:
           COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          retain_eval_readback() {
+            if test -f "$EVAL_ROOT/eval-coworld-inspect.json"; then
+              mkdir -p "$PROVISION_STATE_ROOT/eval"
+              cp "$EVAL_ROOT/eval-coworld-inspect.json" "$PROVISION_STATE_ROOT/eval/eval-coworld-inspect.json"
+            fi
+          }
+          trap retain_eval_readback EXIT
           node .github/scripts/commander-xp-main-authorization.mjs "$SOURCE_SHA" > "$RUNNER_TEMP/eval-upload-main-authorization.json"
-          OUTPUT="$RUNNER_TEMP/eval-upload.txt"
-          node .github/scripts/coworld-authenticated-command.mjs upload-coworld "$EVAL_ROOT/eval-coworld-manifest-v2.json" --wait-hosted-smoke --wait-certification --timeout-seconds 600 --hosted-smoke-timeout-seconds 1800 --certification-timeout-seconds 1800 | tee "$OUTPUT"
-          EVAL_COWORLD_ID=$(sed -n 's/^Coworld: //p' "$OUTPUT" | tail -1)
-          EVAL_HOSTED_MANIFEST_SHA256=$(sed -n 's/^Manifest hash: //p' "$OUTPUT" | tail -1)
-          EVAL_HOSTED_MANIFEST_SHA256=${EVAL_HOSTED_MANIFEST_SHA256#sha256:}
-          [[ "$EVAL_COWORLD_ID" =~ ^cow_[0-9a-f-]{36}$ ]]
-          [[ "$EVAL_HOSTED_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
-          node .github/scripts/coworld-authenticated-command.mjs status "$EVAL_COWORLD_ID" --json > "$EVAL_ROOT/eval-coworld-inspect.json"
+          if test "$RECOVERED_EVAL" = true; then
+            cp "$PROVISION_STATE_ROOT/eval/eval-coworld-inspect.json" "$EVAL_ROOT/eval-coworld-inspect.json"
+            EVAL_COWORLD_ID=$(jq -r .coworld.id "$EVAL_ROOT/eval-coworld-inspect.json")
+            node .github/scripts/coworld-authenticated-command.mjs status "$EVAL_COWORLD_ID" --json > "$RUNNER_TEMP/eval-coworld-recovery-readback.json"
+            jq -e --slurpfile retained "$EVAL_ROOT/eval-coworld-inspect.json" '
+              .coworld.id == $retained[0].coworld.id and
+              .coworld.name == $retained[0].coworld.name and
+              .coworld.version == $retained[0].coworld.version and
+              .coworld.canonical == $retained[0].coworld.canonical and
+              .coworld.manifest_hash == $retained[0].coworld.manifest_hash and
+              .coworld.manifest.game.runnable.image == $retained[0].coworld.manifest.game.runnable.image and
+              .certification.state == $retained[0].certification.state
+            ' "$RUNNER_TEMP/eval-coworld-recovery-readback.json" >/dev/null
+            rm -f "$RUNNER_TEMP/eval-coworld-recovery-readback.json"
+            EVAL_HOSTED_MANIFEST_SHA256=$(jq -r .coworld.manifest_hash "$EVAL_ROOT/eval-coworld-inspect.json")
+            EVAL_HOSTED_MANIFEST_SHA256=${EVAL_HOSTED_MANIFEST_SHA256#sha256:}
+          else
+            OUTPUT="$RUNNER_TEMP/eval-upload.txt"
+            node .github/scripts/coworld-authenticated-command.mjs upload-coworld "$EVAL_ROOT/eval-coworld-manifest-v2.json" --wait-hosted-smoke --wait-certification --timeout-seconds 600 --hosted-smoke-timeout-seconds 1800 --certification-timeout-seconds 1800 | tee "$OUTPUT"
+            EVAL_COWORLD_ID=$(sed -n 's/^Coworld: //p' "$OUTPUT" | tail -1)
+            EVAL_HOSTED_MANIFEST_SHA256=$(sed -n 's/^Manifest hash: //p' "$OUTPUT" | tail -1)
+            EVAL_HOSTED_MANIFEST_SHA256=${EVAL_HOSTED_MANIFEST_SHA256#sha256:}
+            [[ "$EVAL_COWORLD_ID" =~ ^cow_[0-9a-f-]{36}$ ]]
+            [[ "$EVAL_HOSTED_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
+            node .github/scripts/coworld-authenticated-command.mjs status "$EVAL_COWORLD_ID" --json > "$EVAL_ROOT/eval-coworld-inspect.json"
+          fi
           test "$(jq -r .coworld.id "$EVAL_ROOT/eval-coworld-inspect.json")" = "$EVAL_COWORLD_ID"
           test "$(jq -r .coworld.name "$EVAL_ROOT/eval-coworld-inspect.json")" = "$EVAL_COWORLD_NAME"
           test "$(jq -r .coworld.version "$EVAL_ROOT/eval-coworld-inspect.json")" = "$EVAL_VERSION"
@@ -439,11 +772,52 @@ jobs:
           test "${INSPECTED_MANIFEST_SHA256#sha256:}" = "$EVAL_HOSTED_MANIFEST_SHA256"
           EVAL_GAME_IMAGE_ID=$(jq -r .coworld.manifest.game.runnable.image "$EVAL_ROOT/eval-coworld-inspect.json")
           [[ "$EVAL_GAME_IMAGE_ID" =~ ^img_[A-Za-z0-9_-]{8,}$ ]]
+          retain_eval_readback
+          trap - EXIT
           {
             echo "EVAL_COWORLD_ID=$EVAL_COWORLD_ID"
             echo "EVAL_GAME_IMAGE_ID=$EVAL_GAME_IMAGE_ID"
             echo "EVAL_HOSTED_MANIFEST_SHA256=$EVAL_HOSTED_MANIFEST_SHA256"
           } >> "$GITHUB_ENV"
+
+      - name: Build the exact complete or partial eval recovery boundary
+        id: eval_boundary
+        if: always() && steps.eval_upload.outcome != 'skipped'
+        run: |
+          set -euo pipefail
+          if ! test -f "$PROVISION_STATE_ROOT/eval/eval-coworld-inspect.json"; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if test '${{ steps.eval_upload.outcome }}' = success; then
+            STAGE=eval-upload
+          else
+            STAGE=eval-partial
+          fi
+          node .github/scripts/commander-xp-provision-recovery.mjs build \
+            "$PROVISION_STATE_ROOT" "$STAGE" "$SOURCE_SHA" "$SOURCE_TREE_SHA" \
+            "$EVAL_VERSION" "$NAME_PREFIX" "$FENCE_REF" \
+            > "$RUNNER_TEMP/provision-eval-boundary-result.json"
+          {
+            echo "ready=true"
+            echo "stage=$STAGE"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Retain immutable complete or partial eval recovery boundary
+        if: always() && steps.eval_boundary.outputs.ready == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: commander-xp-provision-boundary-${{ steps.eval_boundary.outputs.stage }}-${{ inputs.source_sha }}-${{ inputs.eval_version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/commander-xp-provision-state/
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+
+      - name: Stop after retaining a partial eval boundary
+        if: steps.eval_upload.outcome != 'success'
+        run: exit 1
 
       - name: Reprove canonical product and league binding unchanged
         env:
@@ -469,6 +843,17 @@ jobs:
           cp "$SOURCE_ROOT/commander-xp-source-tree-diff-v1.json" "$PROVISION_ROOT/commander-xp-source-tree-diff-v1.json"
           cp "$SOURCE_ROOT/commander-xp-source-provenance-v2.json" "$PROVISION_ROOT/commander-xp-source-provenance-v2.json"
           cp "$RUNNER_TEMP/xp-openapi-contract-v2.json" "$PROVISION_ROOT/xp-openapi-contract-v2.json"
+          node --input-type=module - "$PROVISION_ROOT/coworld-runtime-inventory-v1.json" <<'NODE'
+          import { createHash } from "node:crypto";
+          import fs from "node:fs";
+          const output = process.argv[2];
+          const sha = (value) => createHash("sha256").update(value).digest("hex");
+          const sort = (value) => Array.isArray(value) ? value.map(sort) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, sort(value[key])])) : value;
+          const inventory = fs.readFileSync(".github/scripts/commander-xp-coworld-inventory.lock.txt");
+          const body = {schemaVersion:1,authority:"hash-locked-coworld-runtime-inventory-v1",sourceSha:process.env.SOURCE_SHA,sourceTreeSha:process.env.SOURCE_TREE_SHA,coworldClientVersion:process.env.COWORLD_CLI_VERSION,uvVersion:"0.8.12",pythonVersion:"3.12",platform:"linux/amd64",requirementsInputSha256:sha(fs.readFileSync(".github/scripts/commander-xp-coworld-requirements.in")),requirementsLockSha256:sha(fs.readFileSync(".github/scripts/commander-xp-coworld-requirements.lock.txt")),inventorySha256:sha(inventory),packageCount:inventory.toString("utf8").trim().split("\n").length};
+          if (body.inventorySha256 !== process.env.COWORLD_RUNTIME_INVENTORY_SHA256 || body.packageCount !== 50) throw new Error("Commander XP Coworld runtime inventory mismatch");
+          fs.writeFileSync(output, `${JSON.stringify({...body,receiptSha256:sha(JSON.stringify(sort(body)))}, null, 2)}\n`, {flag:"wx"});
+          NODE
           cp "$POLICY_ROOT/policy-identities-v2.json" "$PROVISION_ROOT/policy-identities-v2.json"
           cp "$POLICY_ROOT/A.json" "$PROVISION_ROOT/policy-inspect/A.json"
           cp "$POLICY_ROOT/B.json" "$PROVISION_ROOT/policy-inspect/B.json"
@@ -512,12 +897,12 @@ jobs:
           const root = process.argv[2];
           const sha = (value) => createHash("sha256").update(value).digest("hex");
           const sort = (value) => Array.isArray(value) ? value.map(sort) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, sort(value[key])])) : value;
-          const paths = ["commander-xp-plan-input-base-v2.json","commander-xp-source-provenance-v2.json","commander-xp-source-tree-diff-v1.json","eval-coworld-identity-v2.json","eval-coworld-inspect.json","eval-coworld-manifest-v2.json","eval-coworld-terminal-proof-v2.json","policy-identities-v2.json","policy-inspect/A.json","policy-inspect/B.json","policy-inspect/C.json","xp-openapi-contract-v2.json"].sort();
+          const paths = ["commander-xp-plan-input-base-v2.json","commander-xp-source-provenance-v2.json","commander-xp-source-tree-diff-v1.json","coworld-runtime-inventory-v1.json","eval-coworld-identity-v2.json","eval-coworld-inspect.json","eval-coworld-manifest-v2.json","eval-coworld-terminal-proof-v2.json","policy-identities-v2.json","policy-inspect/A.json","policy-inspect/B.json","policy-inspect/C.json","xp-openapi-contract-v2.json"].sort();
           const files = paths.map((relative) => ({path:relative,sha256:sha(fs.readFileSync(path.join(root, relative)))}));
           const body = {schemaVersion:2,authority:"github-actions-attested-provision-packet-v1",repository:"0xNad/ProxyWar",workflowPath:".github/workflows/commander-xp-provision.yml",sourceSha:process.env.SOURCE_SHA,sourceTreeSha:process.env.SOURCE_TREE_SHA,createdAt:new Date().toISOString(),files};
           fs.writeFileSync(path.join(root, "commander-xp-provision-manifest-v2.json"), `${JSON.stringify({...body,manifestSha256:sha(JSON.stringify(sort(body)))}, null, 2)}\n`, {flag:"wx"});
           NODE
-          test "$(find "$PROVISION_ROOT" -type f | wc -l | tr -d ' ')" = 13
+          test "$(find "$PROVISION_ROOT" -type f | wc -l | tr -d ' ')" = 14
           echo "PROVISION_ROOT=$PROVISION_ROOT" >> "$GITHUB_ENV"
 
       - name: Attest immutable provision manifest

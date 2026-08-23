@@ -330,7 +330,7 @@ jobs:
               test "$(find "$PRIOR_ROOT/ledger" -type f | wc -l | tr -d ' ')" = "1"
               test "$(find "$PRIOR_ROOT/terminal" -type f | wc -l | tr -d ' ')" = "1"
               (cd "$PRIOR_ROOT/authority" && sha256sum --check SHA256SUMS)
-              test "$(find "$PRIOR_ROOT/authority" -maxdepth 1 -type f | wc -l | tr -d ' ')" = "9"
+              test "$(find "$PRIOR_ROOT/authority" -maxdepth 1 -type f | wc -l | tr -d ' ')" = "11"
               cmp "$DOWNLOADED_LEDGER" "$RUNNER_TEMP/commander-xp-envelope/evidence/$RECEIPT_PATH"
               for SUBJECT in "$DOWNLOADED_LEDGER" "$DOWNLOADED_AUTHORITY" "$DOWNLOADED_TERMINAL"; do
                 gh attestation verify \
@@ -500,8 +500,17 @@ jobs:
           node .github/scripts/npm-ci-with-retry.mjs --prefix coworld-adapter --ignore-scripts
           uv venv "$RUNNER_TEMP/coworld-venv" --python 3.12
           test "$(uv --version)" = "uv 0.8.12"
-          uv pip install --python "$RUNNER_TEMP/coworld-venv/bin/python" "coworld==0.1.42"
+          uv pip install --python "$RUNNER_TEMP/coworld-venv/bin/python" \
+            --require-hashes \
+            -r .github/scripts/commander-xp-coworld-requirements.lock.txt
           test "$($RUNNER_TEMP/coworld-venv/bin/python -c 'import importlib.metadata; print(importlib.metadata.version("coworld"))')" = "0.1.42"
+          uv pip freeze --python "$RUNNER_TEMP/coworld-venv/bin/python" \
+            | LC_ALL=C sort > "$RUNNER_TEMP/coworld-runtime-inventory.txt"
+          cmp .github/scripts/commander-xp-coworld-inventory.lock.txt \
+            "$RUNNER_TEMP/coworld-runtime-inventory.txt"
+          COWORLD_RUNTIME_INVENTORY_SHA256=$(sha256sum "$RUNNER_TEMP/coworld-runtime-inventory.txt" | cut -d' ' -f1)
+          test "$COWORLD_RUNTIME_INVENTORY_SHA256" = "$(jq -r .inventorySha256 "$RUNNER_TEMP/verified-bundle/evidence/coworld-runtime-inventory-v1.json")"
+          echo "COWORLD_RUNTIME_INVENTORY_SHA256=$COWORLD_RUNTIME_INVENTORY_SHA256" >> "$GITHUB_ENV"
           echo "COWORLD_PYTHON=$RUNNER_TEMP/coworld-venv/bin/python" >> "$GITHUB_ENV"
           echo "COWORLD_BIN=$RUNNER_TEMP/coworld-venv/bin/coworld" >> "$GITHUB_ENV"
 

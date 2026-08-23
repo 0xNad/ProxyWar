@@ -97,6 +97,10 @@ test("workflow is completion-triggered, GitHub-hosted, full-SHA pinned, immutabl
   assert.equal((workflow.match(/gh attestation verify/g) ?? []).length, 9);
   assert.equal((workflow.match(/--deny-self-hosted-runners/g) ?? []).length, 9);
   assert.equal((workflow.match(/--cert-identity/g) ?? []).length, 9);
+  assert.match(
+    workflow,
+    /find "\$PRIOR_ROOT\/authority" -maxdepth 1 -type f \| wc -l \| tr -d ' '\)" = "11"/,
+  );
   assert.equal(
     (workflow.match(/--source-ref "refs\/heads\/main"/g) ?? []).length,
     9,
@@ -131,7 +135,9 @@ test("workflow is completion-triggered, GitHub-hosted, full-SHA pinned, immutabl
     2,
   );
   assert.match(workflow, /environment: coworld-production/);
-  assert.match(workflow, /coworld==0\.1\.42/);
+  assert.match(workflow, /--require-hashes/);
+  assert.match(workflow, /commander-xp-coworld-requirements\.lock\.txt/);
+  assert.match(workflow, /commander-xp-coworld-inventory\.lock\.txt/);
   assert.match(workflow, /version: "0\.8\.12"/);
   assert.match(workflow, /test "\$\(uv --version\)" = "uv 0\.8\.12"/);
   assert.match(workflow, /agent:commander:xp:external-refetch/);
@@ -295,6 +301,59 @@ test("tree diff fails closed on dirty, out-of-allowlist, deletion, and symlink",
 
 test("privacy inventory seals exact Coworld projections and rejects raw bytes, private material, binary, and links", async (t) => {
   const root = await temporaryDirectory(t);
+  const runtimeBody = {
+    schemaVersion: 1,
+    authority: "hash-locked-coworld-runtime-inventory-v1",
+    sourceSha: "a".repeat(40),
+    sourceTreeSha: "b".repeat(40),
+    coworldClientVersion: "0.1.42",
+    uvVersion: "0.8.12",
+    pythonVersion: "3.12",
+    platform: "linux/amd64",
+    requirementsInputSha256:
+      "181df809f108068868fe32e487111ca5cfb45477d25f997fa1a8933ad15934ac",
+    requirementsLockSha256:
+      "5e83207f5ae2c16871e6dc12077058c8dc8b47ffcce6d81901e2beae69b6a9a2",
+    inventorySha256:
+      "796a8827eedc1ce1529003aabc3d6695a5bf34c036c7b23360ca93c6df46e98d",
+    packageCount: 50,
+  };
+  const runtimePath = path.join(root, "coworld-runtime-inventory-v1.json");
+  await fs.writeFile(
+    runtimePath,
+    canonicalJson({
+      ...runtimeBody,
+      receiptSha256: sha256Bytes(canonicalJson(runtimeBody).slice(0, -1)).slice(
+        7,
+      ),
+    }),
+  );
+  const badRuntime = {
+    ...runtimeBody,
+    packageCount: 49,
+  };
+  await fs.writeFile(
+    runtimePath,
+    canonicalJson({
+      ...badRuntime,
+      receiptSha256: sha256Bytes(canonicalJson(badRuntime).slice(0, -1)).slice(
+        7,
+      ),
+    }),
+  );
+  await assert.rejects(
+    scanPrivacyAndInventory(root),
+    hasCode("COWORLD_RUNTIME_INVENTORY_MISMATCH"),
+  );
+  await fs.writeFile(
+    runtimePath,
+    canonicalJson({
+      ...runtimeBody,
+      receiptSha256: sha256Bytes(canonicalJson(runtimeBody).slice(0, -1)).slice(
+        7,
+      ),
+    }),
+  );
   const runRoot = path.join(root, "runs", "canary", "r00", "A");
   await fs.mkdir(runRoot, { recursive: true });
   await fs.writeFile(
@@ -365,7 +424,7 @@ test("privacy inventory seals exact Coworld projections and rejects raw bytes, p
     ),
     false,
   );
-  assert.equal((await scanPrivacyAndInventory(root)).fileCount, 10);
+  assert.equal((await scanPrivacyAndInventory(root)).fileCount, 11);
 
   const mismatchedReceipt = JSON.parse(await fs.readFile(receiptPath, "utf8"));
   mismatchedReceipt.seed = 43;

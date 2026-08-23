@@ -14,6 +14,7 @@ import hashlib
 import importlib.metadata
 import json
 import re
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -110,6 +111,14 @@ def assert_names_absent(prefix: str) -> None:
             name = policy_name(prefix, role)
             if client.lookup_policy_version(name=name) is not None:
                 raise RuntimeError(f"Commander XP policy already exists: {name}")
+
+
+def assert_name_absent(name: str) -> None:
+    with CoworldApiClient.from_login(server_url=SERVER) as client:
+        if client.lookup_policy_version(name=name) is not None:
+            raise RuntimeError(
+                f"Commander XP policy exists without an adoptable receipt: {name}"
+            )
 
 
 def upload_image(client: CoworldUploadClient, image: str) -> dict[str, Any]:
@@ -272,27 +281,160 @@ def write_receipt(path: Path, body: dict[str, Any]) -> dict[str, Any]:
     return receipt
 
 
+def read_receipt(path: Path) -> dict[str, Any]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise RuntimeError(f"Commander XP receipt is invalid: {path.name}")
+    digest = value.pop("receiptSha256", None)
+    if digest != sha256_bytes(canonical_bytes(value)):
+        raise RuntimeError(f"Commander XP receipt hash mismatch: {path.name}")
+    return {**value, "receiptSha256": digest}
+
+
+def exact_keys(value: dict[str, Any], keys: set[str], label: str) -> None:
+    if set(value) != keys:
+        raise RuntimeError(f"Commander XP {label} schema mismatch")
+
+
+def validate_recovered_image(
+    receipt: dict[str, Any], args: argparse.Namespace
+) -> dict[str, Any]:
+    exact_keys(
+        receipt,
+        {
+            "schemaVersion",
+            "authority",
+            "inspectedAt",
+            "platform",
+            "sourceSha",
+            "sourceTreeSha",
+            "sourceProvenanceDigest",
+            "buildProvenanceDigest",
+            "ociImage",
+            "ociDigest",
+            "containerImage",
+            "imageUpload",
+            "receiptSha256",
+        },
+        "recovered image receipt",
+    )
+    if (
+        receipt["schemaVersion"] != 2
+        or receipt["authority"] != "coworld-0.1.42-policy-image-upload-v2"
+        or receipt["platform"] != PLATFORM
+        or receipt["sourceSha"] != args.source_sha
+        or receipt["sourceTreeSha"] != args.source_tree_sha
+        or receipt["sourceProvenanceDigest"] != args.source_provenance_digest
+        or receipt["buildProvenanceDigest"] != args.build_provenance_digest
+        or receipt["ociImage"] != args.image.split("@", 1)[0]
+        or receipt["ociDigest"] != args.oci_digest
+        or receipt["containerImage"].get("image_digest") != args.oci_digest
+    ):
+        raise RuntimeError("Commander XP recovered image identity mismatch")
+    return receipt["containerImage"]
+
+
+def validate_recovered_policy(
+    receipt: dict[str, Any], args: argparse.Namespace, role: str, image: dict[str, Any]
+) -> None:
+    exact_keys(
+        receipt,
+        {
+            "schemaVersion",
+            "authority",
+            "inspectedAt",
+            "platform",
+            "sourceSha",
+            "sourceTreeSha",
+            "sourceProvenanceDigest",
+            "buildProvenanceDigest",
+            "ociImage",
+            "ociDigest",
+            "containerImage",
+            "imageUpload",
+            "policy",
+            "receiptSha256",
+        },
+        f"recovered policy receipt {role}",
+    )
+    policy = receipt["policy"]
+    completed = policy.get("completionResponse")
+    readback = policy.get("readback")
+    expected_name = policy_name(args.name_prefix, role)
+    if (
+        receipt["schemaVersion"] != 2
+        or receipt["authority"] != "coworld-0.1.42-policy-upload-readback-v2"
+        or receipt["platform"] != PLATFORM
+        or receipt["sourceSha"] != args.source_sha
+        or receipt["sourceTreeSha"] != args.source_tree_sha
+        or receipt["sourceProvenanceDigest"] != args.source_provenance_digest
+        or receipt["buildProvenanceDigest"] != args.build_provenance_digest
+        or receipt["ociImage"] != args.image.split("@", 1)[0]
+        or receipt["ociDigest"] != args.oci_digest
+        or receipt["containerImage"] != image
+        or policy.get("name") != expected_name
+        or policy.get("role") != role
+        or policy.get("runArgv") != role_argv(role)
+        or not isinstance(completed, dict)
+        or not isinstance(readback, dict)
+        or completed.get("id") != readback.get("id")
+        or completed.get("name") != expected_name
+        or readback.get("name") != expected_name
+        or completed.get("version") != readback.get("version")
+    ):
+        raise RuntimeError(f"Commander XP recovered policy identity mismatch: {role}")
+    with CoworldApiClient.from_login(server_url=SERVER) as read_client:
+        current = read_client.lookup_policy_version(
+            name=expected_name, version=readback["version"]
+        )
+    if (
+        current is None
+        or str(current.id) != readback["id"]
+        or current.name != expected_name
+        or current.version != readback["version"]
+    ):
+        raise RuntimeError(f"Commander XP recovered policy readback mismatch: {role}")
+
+
 def upload(args: argparse.Namespace) -> None:
-    assert_names_absent(args.name_prefix)
     args.output.mkdir(mode=0o700)
     inspected_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
-    with CoworldUploadClient.from_login(server_url=SERVER) as client:
-        image_upload = upload_image(client, args.image)
+    recovered = args.recovery
+    image_path = args.output / "image.json"
+    if recovered is not None:
+        recovered_image_path = recovered / "image.json"
+        if not recovered_image_path.is_file():
+            raise RuntimeError("Commander XP recovery is missing its image receipt")
+        image_receipt = read_receipt(recovered_image_path)
+        image = validate_recovered_image(image_receipt, args)
+        shutil.copyfile(recovered_image_path, image_path)
+        image_upload = image_receipt["imageUpload"]
+        inspected_at = image_receipt["inspectedAt"]
+    else:
+        with CoworldUploadClient.from_login(server_url=SERVER) as client:
+            image_upload = upload_image(client, args.image)
         image = image_upload["image"]
         if image["image_digest"] != args.oci_digest:
             raise RuntimeError(
                 "Commander XP uploaded image digest does not match the attested OCI digest"
             )
-        policies = [
-            create_policy(
-                client,
-                prefix=args.name_prefix,
-                role=role,
-                image_id=image["id"],
-                bedrock_model=args.bedrock_model,
-            )
-            for role in ROLES
-        ]
+        write_receipt(
+            image_path,
+            {
+                "schemaVersion": 2,
+                "authority": "coworld-0.1.42-policy-image-upload-v2",
+                "inspectedAt": inspected_at,
+                "platform": PLATFORM,
+                "sourceSha": args.source_sha,
+                "sourceTreeSha": args.source_tree_sha,
+                "sourceProvenanceDigest": args.source_provenance_digest,
+                "buildProvenanceDigest": args.build_provenance_digest,
+                "ociImage": args.image.split("@", 1)[0],
+                "ociDigest": args.oci_digest,
+                "containerImage": image,
+                "imageUpload": image_upload,
+            },
+        )
     common = {
         "schemaVersion": 2,
         "authority": "coworld-0.1.42-policy-upload-readback-v2",
@@ -308,16 +450,27 @@ def upload(args: argparse.Namespace) -> None:
         "imageUpload": image_upload,
     }
     receipts: dict[str, dict[str, Any]] = {}
-    for policy in policies:
-        role = policy["role"]
-        body = {**common, "policy": policy}
-        if role in {"A", "B", "C"}:
-            receipts[role] = write_receipt(args.output / f"{role}.json", body)
+    for role in ROLES:
+        receipt_path = args.output / f"{role}.json"
+        recovered_path = None if recovered is None else recovered / f"{role}.json"
+        if recovered_path is not None and recovered_path.is_file():
+            receipt = read_receipt(recovered_path)
+            validate_recovered_policy(receipt, args, role, image)
+            shutil.copyfile(recovered_path, receipt_path)
+            receipts[role] = receipt
         else:
-            receipts[role] = {
-                **body,
-                "receiptSha256": sha256_bytes(canonical_bytes(body)),
-            }
+            assert_name_absent(policy_name(args.name_prefix, role))
+            with CoworldUploadClient.from_login(server_url=SERVER) as client:
+                policy = create_policy(
+                    client,
+                    prefix=args.name_prefix,
+                    role=role,
+                    image_id=image["id"],
+                    bedrock_model=args.bedrock_model,
+                )
+            receipts[role] = write_receipt(
+                receipt_path, {**common, "policy": policy}
+            )
     arm_identities = {
         role: {
             "policyVersionID": receipts[role]["policy"]["completionResponse"]["id"],
@@ -359,6 +512,11 @@ def upload(args: argparse.Namespace) -> None:
                 "imageID": image["id"],
                 "imageDigest": image["image_digest"],
                 "policyCount": 6,
+                "adoptedPolicyCount": sum(
+                    1
+                    for role in ROLES
+                    if recovered is not None and (recovered / f"{role}.json").is_file()
+                ),
             }
         )
     )
@@ -376,6 +534,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--build-provenance-digest", required=True)
     result.add_argument("--oci-digest", required=True)
     result.add_argument("--output", type=Path)
+    result.add_argument("--recovery", type=Path)
     return result
 
 
@@ -390,6 +549,11 @@ def main() -> None:
         raise RuntimeError(
             "Commander XP policy upload requires an absolute output directory"
         )
+    if args.recovery is not None:
+        recovery = args.recovery.resolve()
+        if recovery == args.output.resolve() or not recovery.is_dir():
+            raise RuntimeError("Commander XP policy recovery directory is invalid")
+        args.recovery = recovery
     upload(args)
 
 

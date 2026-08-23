@@ -47,6 +47,7 @@ export interface CollectorInput {
   xpOpenApiContractPath: string;
   sourceProvenancePath: string;
   sourceTreeDiffPath: string;
+  coworldRuntimeInventoryPath: string;
   policyIdentitiesPath: string;
   policyInspectPaths: Record<CommanderXpArm, string>;
   evalCoworldIdentityPath: string;
@@ -105,6 +106,10 @@ export async function collectCommanderXpEvidence(
     path.resolve(input.sourceTreeDiffPath),
     "utf8",
   );
+  const coworldRuntimeInventoryText = await fs.readFile(
+    path.resolve(input.coworldRuntimeInventoryPath),
+    "utf8",
+  );
   const policyText = await fs.readFile(
     path.resolve(input.policyIdentitiesPath),
     "utf8",
@@ -145,6 +150,11 @@ export async function collectCommanderXpEvidence(
     fs.writeFile(
       path.join(outputDirectory, "commander-xp-source-tree-diff-v1.json"),
       sourceTreeDiffText,
+      { flag: "wx" },
+    ),
+    fs.writeFile(
+      path.join(outputDirectory, "coworld-runtime-inventory-v1.json"),
+      coworldRuntimeInventoryText,
       { flag: "wx" },
     ),
     fs.writeFile(
@@ -245,6 +255,7 @@ export async function collectCommanderXpEvidence(
     "commander-xp-preregistration-v2.json",
     "commander-xp-source-provenance-v2.json",
     "commander-xp-source-tree-diff-v1.json",
+    "coworld-runtime-inventory-v1.json",
     ...phaseAuthorityArtifactPaths,
     "policy-identities-v2.json",
     "policy-inspect/A.json",

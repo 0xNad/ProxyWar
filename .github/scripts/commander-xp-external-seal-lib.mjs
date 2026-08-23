@@ -48,6 +48,7 @@ const ALLOWED_TOP_LEVEL_EVIDENCE = new Set([
   "eval-coworld-terminal-proof-v2.json",
   "xp-openapi-contract-v2.json",
   "xp-openapi.sha256",
+  "coworld-runtime-inventory-v1.json",
   "commander-xp-prereg-ledger-v2.json",
   "commander-xp-provider-preflight-ledger-v2.json",
   "commander-xp-canary-ledger-v2.json",
@@ -1444,6 +1445,48 @@ export async function scanPrivacyAndInventory(
           parsed.authenticity !== "external-seal-receipt-required"
         ) {
           fail("LOCAL_VERIFICATION_DECLARATION_INVALID", entry.path);
+        }
+      }
+      if (entry.path === "coworld-runtime-inventory-v1.json") {
+        exactKeys(
+          parsed,
+          [
+            "schemaVersion",
+            "authority",
+            "sourceSha",
+            "sourceTreeSha",
+            "coworldClientVersion",
+            "uvVersion",
+            "pythonVersion",
+            "platform",
+            "requirementsInputSha256",
+            "requirementsLockSha256",
+            "inventorySha256",
+            "packageCount",
+            "receiptSha256",
+          ],
+          "COWORLD_RUNTIME_INVENTORY_SCHEMA_MISMATCH",
+        );
+        const { receiptSha256, ...body } = parsed;
+        if (
+          parsed.schemaVersion !== 1 ||
+          parsed.authority !== "hash-locked-coworld-runtime-inventory-v1" ||
+          !SHA1.test(parsed.sourceSha) ||
+          !SHA1.test(parsed.sourceTreeSha) ||
+          parsed.coworldClientVersion !== "0.1.42" ||
+          parsed.uvVersion !== "0.8.12" ||
+          parsed.pythonVersion !== "3.12" ||
+          parsed.platform !== "linux/amd64" ||
+          parsed.requirementsInputSha256 !==
+            "181df809f108068868fe32e487111ca5cfb45477d25f997fa1a8933ad15934ac" ||
+          parsed.requirementsLockSha256 !==
+            "5e83207f5ae2c16871e6dc12077058c8dc8b47ffcce6d81901e2beae69b6a9a2" ||
+          parsed.inventorySha256 !==
+            "796a8827eedc1ce1529003aabc3d6695a5bf34c036c7b23360ca93c6df46e98d" ||
+          parsed.packageCount !== 50 ||
+          receiptSha256 !== sha256Bytes(JSON.stringify(sortJson(body))).slice(7)
+        ) {
+          fail("COWORLD_RUNTIME_INVENTORY_MISMATCH", entry.path);
         }
       }
     } else if (extension === ".jsonl") {

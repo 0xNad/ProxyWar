@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -71,6 +72,51 @@ class FakeReadClient:
 
     def lookup_policy_version(self, *, name: str, version: int) -> SimpleNamespace:
         return SimpleNamespace(id="pvid_fixture", name=name, version=version)
+
+
+def fixture_args(output: Path, recovery: Path | None = None) -> SimpleNamespace:
+    return SimpleNamespace(
+        image="ghcr.io/0xnad/proxywar-commander-xp-policy@sha256:" + "1" * 64,
+        name_prefix="proxywar-commander-xp-fixture",
+        bedrock_model="us.anthropic.claude-sonnet-4-6",
+        source_sha="2" * 40,
+        source_tree_sha="3" * 40,
+        source_provenance_digest="sha256:" + "4" * 64,
+        build_provenance_digest="sha256:" + "5" * 64,
+        oci_digest="sha256:" + "1" * 64,
+        output=output,
+        recovery=recovery,
+    )
+
+
+def fixture_policy(args: SimpleNamespace, role: str) -> dict[str, object]:
+    name = MODULE.policy_name(args.name_prefix, role)
+    return {
+        "name": name,
+        "role": role,
+        "runArgv": MODULE.role_argv(role),
+        "useBedrock": role in {"A", "B", "C"},
+        "bedrockModel": args.bedrock_model if role in {"A", "B", "C"} else None,
+        "environmentConfiguration": {
+            "attached": role in {"A", "B", "C"},
+            "keys": [],
+            "valuesSha256": "6" * 64,
+            "attachmentResponseSha256": None,
+        },
+        "completionPayloadProjection": {},
+        "completionPayloadSha256": "7" * 64,
+        "completionResponse": {
+            "id": f"pvid_{role.lower()}",
+            "name": name,
+            "version": 1,
+            "pools": None,
+            "submit_error": None,
+        },
+        "completionResponseSha256": "8" * 64,
+        "completionResponseBytes": 1,
+        "readback": {"id": f"pvid_{role.lower()}", "name": name, "version": 1},
+        "readbackSha256": "9" * 64,
+    }
 
 
 class PolicyProvisionReceiptTest(unittest.TestCase):
@@ -155,6 +201,124 @@ class PolicyProvisionReceiptTest(unittest.TestCase):
         self.assertNotIn("policy_secret_env_id", public_bytes)
         self.assertNotIn('"secret', public_bytes.lower())
         self.assertNotIn('"presigned', public_bytes.lower())
+
+    def test_partial_policy_boundary_adopts_exact_receipts_and_creates_only_unseen_roles(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            recovery = root / "recovery"
+            recovery.mkdir()
+            output = root / "output"
+            args = fixture_args(output, recovery)
+            image = {"id": "img_fixture", "image_digest": args.oci_digest}
+            image_upload = {"image": image, "requestPayloadSha256": "a" * 64}
+            image_body = {
+                "schemaVersion": 2,
+                "authority": "coworld-0.1.42-policy-image-upload-v2",
+                "inspectedAt": "2026-08-23T00:00:00Z",
+                "platform": MODULE.PLATFORM,
+                "sourceSha": args.source_sha,
+                "sourceTreeSha": args.source_tree_sha,
+                "sourceProvenanceDigest": args.source_provenance_digest,
+                "buildProvenanceDigest": args.build_provenance_digest,
+                "ociImage": args.image.split("@", 1)[0],
+                "ociDigest": args.oci_digest,
+                "containerImage": image,
+                "imageUpload": image_upload,
+            }
+            MODULE.write_receipt(recovery / "image.json", image_body)
+            common = {
+                **image_body,
+                "authority": "coworld-0.1.42-policy-upload-readback-v2",
+            }
+            MODULE.write_receipt(
+                recovery / "A.json", {**common, "policy": fixture_policy(args, "A")}
+            )
+            created: list[str] = []
+
+            class RecoveryReadClient:
+                def __enter__(self) -> RecoveryReadClient:
+                    return self
+
+                def __exit__(self, *_: object) -> None:
+                    return None
+
+                def lookup_policy_version(
+                    self, *, name: str, version: int
+                ) -> SimpleNamespace:
+                    return SimpleNamespace(id="pvid_a", name=name, version=version)
+
+            def create_policy(*_: object, role: str, **__: object) -> dict[str, object]:
+                created.append(role)
+                return fixture_policy(args, role)
+
+            with (
+                patch.object(
+                    MODULE.CoworldApiClient,
+                    "from_login",
+                    return_value=RecoveryReadClient(),
+                ),
+                patch.object(MODULE, "assert_name_absent"),
+                patch.object(MODULE, "create_policy", side_effect=create_policy),
+            ):
+                MODULE.upload(args)
+
+            self.assertEqual(created, list(MODULE.ROLES[1:]))
+            self.assertEqual(
+                sorted(path.name for path in output.iterdir()),
+                [
+                    "A.json",
+                    "B.json",
+                    "C.json",
+                    "image.json",
+                    "opponent-1.json",
+                    "opponent-2.json",
+                    "opponent-3.json",
+                    "policy-identities-v2.json",
+                ],
+            )
+            self.assertEqual(
+                MODULE.read_receipt(output / "A.json")["policy"][
+                    "completionResponse"
+                ]["id"],
+                "pvid_a",
+            )
+
+    def test_missing_policy_receipt_with_existing_hosted_name_is_never_recreated(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            recovery = root / "recovery"
+            recovery.mkdir()
+            output = root / "output"
+            args = fixture_args(output, recovery)
+            image = {"id": "img_fixture", "image_digest": args.oci_digest}
+            MODULE.write_receipt(
+                recovery / "image.json",
+                {
+                    "schemaVersion": 2,
+                    "authority": "coworld-0.1.42-policy-image-upload-v2",
+                    "inspectedAt": "2026-08-23T00:00:00Z",
+                    "platform": MODULE.PLATFORM,
+                    "sourceSha": args.source_sha,
+                    "sourceTreeSha": args.source_tree_sha,
+                    "sourceProvenanceDigest": args.source_provenance_digest,
+                    "buildProvenanceDigest": args.build_provenance_digest,
+                    "ociImage": args.image.split("@", 1)[0],
+                    "ociDigest": args.oci_digest,
+                    "containerImage": image,
+                    "imageUpload": {"image": image},
+                },
+            )
+            with patch.object(
+                MODULE,
+                "assert_name_absent",
+                side_effect=RuntimeError("exists without an adoptable receipt"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "without an adoptable receipt"):
+                    MODULE.upload(args)
 
 
 if __name__ == "__main__":

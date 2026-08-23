@@ -17,7 +17,9 @@ test("protected Commander evidence workflow fences before dispatch and uploads e
   assert.match(workflow, /^name: Commander XP protected experiment evidence$/m);
   assert.match(workflow, /GITHUB_TRIGGERING_ACTOR" = "0xNad/);
   assert.match(workflow, /GITHUB_REF" = "refs\/heads\/main/);
-  assert.match(workflow, /coworld==0\.1\.42/);
+  assert.match(workflow, /--require-hashes/);
+  assert.match(workflow, /commander-xp-coworld-requirements\.lock\.txt/);
+  assert.match(workflow, /commander-xp-coworld-inventory\.lock\.txt/);
   assert.match(workflow, /environment: coworld-production/);
   assert.match(workflow, /^ {2}contents: write$/m);
   assert.match(workflow, /status "\$EVAL_COWORLD_ID" --json/);
@@ -97,6 +99,73 @@ test("workflow resolves attested prior phases before the irreversible fence", ()
   assert.ok(retained > 0 && retained < activation && activation < fence);
 });
 
+test("workflow revalidates and consumes the exact OpenAPI receipt before every XP fence", () => {
+  const parsed = yaml.load(workflow);
+  const steps = parsed.jobs.collect.steps;
+  const revalidateIndex = steps.findIndex(
+    (step) =>
+      step.name ===
+      "Revalidate exact XP OpenAPI immediately before the irreversible fence",
+  );
+  const fenceIndex = steps.findIndex(
+    (step) => step.name === "Create durable atomic pre-dispatch Git ref",
+  );
+  const dispatchIndex = steps.findIndex(
+    (step) =>
+      step.name === "Build exact dispatch authorization and submit once",
+  );
+  assert.ok(
+    revalidateIndex > 0 &&
+      revalidateIndex < fenceIndex &&
+      fenceIndex < dispatchIndex,
+  );
+  const revalidate = steps[revalidateIndex].run;
+  assert.match(revalidate, /curl --fail --silent --show-error --location/);
+  assert.match(revalidate, /commander-xp-openapi-contract\.mjs/);
+  assert.match(revalidate, /\.rawSha256 == \$frozen\[0\]\.rawSha256/);
+  assert.match(revalidate, /XP_OPENAPI_DISPATCH_CONTRACT_PATH=\$RECEIPT/);
+  const dispatch = steps[dispatchIndex].run;
+  assert.match(
+    dispatch,
+    /--arg xpOpenApiContract "\$XP_OPENAPI_DISPATCH_CONTRACT_PATH"/,
+  );
+  assert.match(dispatch, /xpOpenApiContractPath:\$xpOpenApiContract/);
+  const collect = steps.find(
+    (step) =>
+      step.name ===
+      "Collect only privacy-safe projections and create the local seal",
+  ).run;
+  assert.match(
+    collect,
+    /XP_OPENAPI_EVIDENCE_CONTRACT="\$XP_OPENAPI_DISPATCH_CONTRACT_PATH"/,
+  );
+});
+
+test("next phases consume the external seal signer SHA after a byte-identical workflow advance", () => {
+  const parsed = yaml.load(workflow);
+  const retained = parsed.jobs.collect.steps.find(
+    (step) =>
+      step.name ===
+      "Resolve and verify retained phase authorities before mutation",
+  ).run;
+  assert.match(
+    retained,
+    /PRIOR_SIGNER_SOURCE_SHA=\$\(jq -r \.signerSourceSha "\$BINDING"\)/,
+  );
+  assert.match(
+    retained,
+    /test "\$\(jq -r \.headSha "\$BINDING"\)" = "\$SOURCE_SHA"/,
+  );
+  assert.match(retained, /--source-digest "\$PRIOR_SIGNER_SOURCE_SHA"/);
+  assert.match(retained, /--signer-digest "\$PRIOR_SIGNER_SOURCE_SHA"/);
+  assert.match(
+    retained,
+    /--arg signer "\$PRIOR_SIGNER_SOURCE_SHA"[\s\S]*?\.head_sha == \$signer/,
+  );
+  assert.doesNotMatch(retained, /--source-digest "\$SOURCE_SHA"/);
+  assert.doesNotMatch(retained, /--signer-digest "\$SOURCE_SHA"/);
+});
+
 test("workflow adopts one exact retained partial boundary without replaying its fence", () => {
   assert.match(workflow, /recovery_dispatch_artifact_id:/);
   assert.match(
@@ -112,14 +181,13 @@ test("workflow adopts one exact retained partial boundary without replaying its 
     /commander-xp-dispatch-boundary-\$EXPERIMENT_ID-\$PHASE-\$SOURCE_SHA-\$RECOVERY_RUN_ID-\$RECOVERY_RUN_ATTEMPT/,
   );
   assert.match(workflow, /commander-xp-dispatch-recovery-v1/);
-  assert.match(
-    workflow,
-    /Resume from retained wave one and submit confirmatory wave two[\s\S]+conclusion == "skipped"/,
-  );
+  assert.doesNotMatch(workflow, /\.\[0\]\.conclusion == "skipped"/);
   assert.match(workflow, /EXPECTED_FINAL_NAME/);
   assert.match(workflow, /commander-xp-dispatch-recovery-link-v1\.json/);
   assert.match(workflow, /recoveryDirectory:\$recovery/);
   assert.match(workflow, /cp "\$RECOVERY_AUTH_PATH"/);
+  assert.match(workflow, /git\/ref\/\$\{RECOVERY_GIT_REF#refs\/\}/);
+  assert.match(workflow, /fenceRecoveryMode:"adopt-or-create-unseen"/);
   assert.match(
     workflow,
     /Create durable atomic pre-dispatch Git ref[\s\S]*?inputs\.recovery_dispatch_artifact_id == ''/,
@@ -266,6 +334,8 @@ test("collector input jq compiles with every referenced source argument", () => 
       ...process.env,
       PHASE: "preregistration",
       CONTROL_ROOT: "/immutable-control",
+      XP_OPENAPI_EVIDENCE_CONTRACT:
+        "/immutable-control/xp-openapi-contract-v2.json",
       RUNNER_TEMP: directory,
       GITHUB_WORKSPACE: "/exact-source",
       PREREG_LEDGER_PATH: "",
