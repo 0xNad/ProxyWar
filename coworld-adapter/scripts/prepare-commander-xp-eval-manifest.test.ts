@@ -37,7 +37,12 @@ describe("Commander XP eval-only Coworld manifest", () => {
     expect(manifest.variants.map((entry: { id: string }) => entry.id)).toEqual([
       "tournament-4p-pangaea",
     ]);
-    expect(manifest.tags).toEqual(["evaluation"]);
+    expect(manifest.tags).toEqual([
+      "evaluation",
+      "strategic-commander",
+      "agentic-gameplay",
+    ]);
+    expect(manifest.game.docs).toEqual(base.game.docs);
     expect(JSON.stringify(manifest)).not.toContain(
       "COWORLD_PLAYER_ARTIFACT_UPLOAD_URL",
     );

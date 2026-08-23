@@ -50,6 +50,9 @@ COPY --from=commander-xp-game-builder /app/proxywar/src ./src
 COPY --from=commander-xp-game-builder /app/proxywar/resources ./resources
 COPY --from=commander-xp-game-builder /app/proxywar/examples ./examples
 COPY --from=commander-xp-game-builder /app/proxywar/scripts ./scripts
+# The adapter's source-relative imports expect the repository root two levels
+# above coworld-adapter/src. Preserve that layout for the runtime image.
+RUN ln -s /app/proxywar/src /app/src
 
 WORKDIR /app/integration
 COPY coworld-adapter/package.json coworld-adapter/package-lock.json ./

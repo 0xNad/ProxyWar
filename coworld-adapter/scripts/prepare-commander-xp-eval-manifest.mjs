@@ -76,6 +76,7 @@ export function commanderXpEvalManifest(base, { image, version }) {
     description:
       "Eval-only StrategicCommander matched experiment package. Never bind to a product league.",
     owner: base.game.owner,
+    docs: structuredClone(base.game.docs),
     config_schema: configSchema,
     results_schema: structuredClone(base.game.results_schema),
     protocols: publicEvalProtocol(structuredClone(base.game.protocols)),
@@ -108,7 +109,7 @@ export function commanderXpEvalManifest(base, { image, version }) {
     "commander-xp-v2/manifest-cert/provider-preflight/r00/C";
   const manifest = {
     $schema: base.$schema,
-    tags: ["evaluation"],
+    tags: ["evaluation", "strategic-commander", "agentic-gameplay"],
     game,
     variants: [variant],
     certification,
