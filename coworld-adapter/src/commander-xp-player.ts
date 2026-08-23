@@ -252,6 +252,10 @@ class ExactBedrockProvider implements LlmProvider {
   private async bedrockClient(): Promise<BedrockClient> {
     if (this.client !== null) return this.client;
     const baseURL = commanderXpBedrockSidecarEndpoint(this.env);
+    const runtimeRegion = this.env.AWS_REGION?.trim();
+    if (!runtimeRegion) {
+      throw new Error("bedrock-sidecar-region-missing");
+    }
     const specifier = "@anthropic-ai/bedrock-sdk";
     const imported = (await import(/* @vite-ignore */ specifier)) as {
       default?: new (options: Record<string, unknown>) => BedrockClient;
@@ -264,7 +268,7 @@ class ExactBedrockProvider implements LlmProvider {
       throw new Error("bedrock-sidecar-client-missing");
     }
     this.client = new Constructor({
-      awsRegion: COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.region,
+      awsRegion: runtimeRegion,
       baseURL,
     });
     return this.client;
@@ -624,8 +628,11 @@ async function main(): Promise<void> {
           response,
         });
         socket.send(JSON.stringify(response));
-      } catch {
-        console.error("commander-xp decision failed");
+      } catch (error) {
+        console.error(
+          "commander-xp decision failed",
+          error instanceof Error ? error.message : "unknown error",
+        );
         socket.send(
           JSON.stringify(
             transportFallbackResponse(
