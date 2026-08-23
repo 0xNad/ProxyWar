@@ -43,6 +43,7 @@ export const COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT = {
   routingAuthority: "coworld-xp-llm-routing-override-bedrock-v1",
   endpointAuthority: "coworld-injected-loopback-bedrock-runtime-sidecar-v1",
   modelID: "us.anthropic.claude-sonnet-4-6",
+  responseModelID: "claude-sonnet-4-6",
   region: "us-west-2",
   sdkPackage: "@anthropic-ai/bedrock-sdk",
   sdkVersion: "0.29.2",

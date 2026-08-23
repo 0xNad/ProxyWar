@@ -371,8 +371,10 @@ function assertRuntimeManifest(manifest: CommanderXpRuntimeManifest): void {
       manifest.providerPreflight.requestID,
     ) ||
     manifest.providerPreflight.succeeded !== true ||
+    manifest.providerPreflight.requestedModel !==
+      COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.modelID ||
     manifest.providerPreflight.responseModel !==
-      manifest.providerPreflight.requestedModel
+      COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.responseModelID
   ) {
     throw new Error("Commander XP runtime manifest is invalid");
   }

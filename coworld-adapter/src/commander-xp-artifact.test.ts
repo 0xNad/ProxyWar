@@ -47,7 +47,7 @@ const manifest: CommanderXpRuntimeManifest = {
     status: "succeeded",
     requestID: "provider-preflight-111111111111111111111111",
     requestedModel: "us.anthropic.claude-sonnet-4-6",
-    responseModel: "us.anthropic.claude-sonnet-4-6",
+    responseModel: "claude-sonnet-4-6",
     succeeded: true,
   },
 };
@@ -65,7 +65,7 @@ describe("Commander XP player artifact", () => {
       promptVersion: COMMANDER_XP_COMMANDER_PROMPT_VERSION,
       promptVersionSha256: COMMANDER_XP_COMMANDER_PROMPT_VERSION_SHA256,
       requestedModel: manifest.requestedModel,
-      responseModel: manifest.requestedModel,
+      responseModel: manifest.providerContract.responseModelID,
       promptSha256: "1".repeat(64),
       promptCharacters: 100,
       outputSha256: "2".repeat(64),

@@ -1987,7 +1987,8 @@ function gameplayJoinFixture(
         ? preregistration.identities.commanderPromptVersionSha256
         : null,
     requestedModel: preregistration.identities.bedrockModel,
-    responseModel: preregistration.identities.bedrockModel,
+    responseModel:
+      preregistration.identities.providerContract.responseModelID,
     promptSha256: "1".repeat(64),
     promptCharacters: 20,
     outputSha256: "2".repeat(64),
@@ -2321,7 +2322,8 @@ function gameplayJoinFixture(
       status: "succeeded",
       requestID: commanderXpProviderPreflightRequestID(plannedRequest.runKey),
       requestedModel: preregistration.identities.bedrockModel,
-      responseModel: preregistration.identities.bedrockModel,
+      responseModel:
+        preregistration.identities.providerContract.responseModelID,
       succeeded: true,
     },
   };

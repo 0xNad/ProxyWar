@@ -4105,7 +4105,8 @@ function verifyRuntimeManifest(
     manifest.providerPreflight.requestedModel !==
       prereg.identities.bedrockModel ||
     !manifest.providerPreflight.succeeded ||
-    manifest.providerPreflight.responseModel !== prereg.identities.bedrockModel
+    manifest.providerPreflight.responseModel !==
+      prereg.identities.providerContract.responseModelID
   ) {
     throw new VerificationFailure(
       "PLAYER_RUNTIME_IDENTITY_MISMATCH",
@@ -5241,7 +5242,8 @@ function verifyProviderRecord(
         ? prereg.identities.commanderPromptVersionSha256
         : null) ||
     provider.requestedModel !== prereg.identities.bedrockModel ||
-    provider.responseModel !== prereg.identities.bedrockModel ||
+    provider.responseModel !==
+      prereg.identities.providerContract.responseModelID ||
     provider.succeeded !== true ||
     provider.failureKind !== null ||
     (provider.stage === "preflight"

@@ -161,7 +161,10 @@ class ExactBedrockProvider implements LlmProvider {
       const response = await operation;
       const responseModel =
         typeof response.model === "string" ? response.model : null;
-      if (responseModel !== this.model) {
+      if (
+        responseModel !==
+        COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.responseModelID
+      ) {
         this.collector.provider({
           requestID,
           stage: this.currentStage,
@@ -564,7 +567,8 @@ async function main(): Promise<void> {
           if (
             preflight?.recordType !== "provider" ||
             !preflight.succeeded ||
-            preflight.responseModel !== model
+            preflight.responseModel !==
+              COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.responseModelID
           ) {
             throw new Error("Commander XP Bedrock preflight failed");
           }
