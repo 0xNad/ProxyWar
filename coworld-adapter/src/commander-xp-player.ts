@@ -299,12 +299,13 @@ export function assertCommanderXpEnvironment(
   if (model !== COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.modelID) {
     throw new Error("Commander XP requires the exact Bedrock model ID");
   }
+  const runtimeRegion = env.AWS_REGION?.trim();
   if (
-    env.AWS_REGION !== COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.region ||
+    !runtimeRegion ||
     (env.AWS_DEFAULT_REGION !== undefined &&
-      env.AWS_DEFAULT_REGION !== COMMANDER_XP_BEDROCK_PROVIDER_CONTRACT.region)
+      env.AWS_DEFAULT_REGION !== runtimeRegion)
   ) {
-    throw new Error("Commander XP requires the exact Bedrock region");
+    throw new Error("Commander XP requires a consistent Coworld Bedrock region");
   }
   commanderXpBedrockSidecarEndpoint(env);
   if (

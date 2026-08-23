@@ -125,9 +125,19 @@ describe("Commander XP hosted player", () => {
         BEDROCK_MODEL: "anthropic.claude-sonnet-4-6",
       }),
     ).toThrow(/exact Bedrock model ID/);
+    expect(
+      assertCommanderXpEnvironment({
+        ...exact,
+        AWS_REGION: "us-east-1",
+        AWS_DEFAULT_REGION: "us-east-1",
+      }),
+    ).toMatchObject({ model: "us.anthropic.claude-sonnet-4-6" });
     expect(() =>
-      assertCommanderXpEnvironment({ ...exact, AWS_REGION: "us-east-1" }),
-    ).toThrow(/exact Bedrock region/);
+      assertCommanderXpEnvironment({
+        ...exact,
+        AWS_DEFAULT_REGION: "us-east-1",
+      }),
+    ).toThrow(/consistent Coworld Bedrock region/);
     for (const endpoint of [
       "https://bedrock-runtime.us-west-2.amazonaws.com",
       "http://attacker.invalid:9100",
