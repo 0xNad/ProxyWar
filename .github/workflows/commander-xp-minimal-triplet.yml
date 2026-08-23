@@ -1,0 +1,112 @@
+name: Commander XP minimal hosted triplet
+
+on:
+  push:
+    branches:
+      - codex/commander-xp-recovery-20260823
+
+permissions:
+  contents: read
+
+jobs:
+  triplet:
+    if: github.actor == '0xNad' && github.ref == 'refs/heads/codex/commander-xp-recovery-20260823'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: coworld-production
+    env:
+      COWORLD_API_TOKEN: ${{ secrets.COWORLD_API_TOKEN }}
+      COWORLD_ID: cow_e478e2b6-549d-4670-8a4a-32c48b8e75a2
+      OPPONENT_POLICY: 5fc92e96-6f19-4612-b5df-f1fe287c11f2
+      ARM_A_POLICY: 83d474da-ed73-4552-bbd4-6aaca8c6db4f
+      ARM_B_POLICY: 460324d5-c965-497c-bb6a-8ec669d555ea
+      ARM_C_POLICY: e36110ed-1b32-4d51-a812-513978329029
+    steps:
+      - name: Checkout exact branch
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install Coworld 0.1.42
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: 0.8.12
+
+      - name: Submit the matched A/B/C triplet
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$COWORLD_API_TOKEN"
+          test "$GITHUB_ACTOR" = 0xNad
+          test "$GITHUB_REF" = refs/heads/codex/commander-xp-recovery-20260823
+
+          uv venv "$RUNNER_TEMP/coworld-venv" --python 3.12
+          uv pip install --python "$RUNNER_TEMP/coworld-venv/bin/python" 'coworld==0.1.42'
+          export PATH="$RUNNER_TEMP/coworld-venv/bin:$PATH"
+          export HOME="$RUNNER_TEMP/coworld-home"
+          mkdir -p "$HOME" "$RUNNER_TEMP/triplet"
+          python -c "from softmax.auth import save_user_token; import os; save_user_token(server='https://softmax.com/api', token=os.environ['COWORLD_API_TOKEN'])"
+
+          submit_arm() {
+            local arm="$1"
+            local policy="$2"
+            local request="$RUNNER_TEMP/triplet/${arm}-request.json"
+            local response="$RUNNER_TEMP/triplet/${arm}-response.json"
+            jq -n \
+              --arg arm "$arm" \
+              --arg policy "$policy" \
+              --arg coworld "$COWORLD_ID" \
+              --arg opponent "$OPPONENT_POLICY" \
+              '{
+                idempotency_key:("commander-xp-v2/mintriplet20260824/canary/r00/"+$arm),
+                llm_routing_override:"bedrock",
+                target:{coworld_id:$coworld,variant_id:"tournament-4p-pangaea"},
+                roster:[
+                  {player:{policy_ref:$policy},slot:0},
+                  {player:{policy_ref:$opponent},slot:1},
+                  {player:{policy_ref:$opponent},slot:2},
+                  {player:{policy_ref:$opponent},slot:3}
+                ],
+                num_episodes:1,
+                game_config_overrides:{
+                  commander_xp_phase:"canary",
+                  commander_xp_run_key:("commander-xp-v2/mintriplet20260824/canary/r00/"+$arm),
+                  max_decision_steps:360,
+                  turns_per_decision_step:100,
+                  max_decision_ms:15000,
+                  map:"Pangaea",
+                  map_size:"Compact",
+                  difficulty:"Easy",
+                  seed:17,
+                  episodeIndex:0,
+                  replay_tail_turns:500,
+                  num_agents:4,
+                  episode_timeout_seconds:6000
+                },
+                execution_backend:"k8s",
+                notes:("commander-minimal-triplet/20260824/"+$arm)
+              }' > "$request"
+            coworld --elevated xp-request create "$request" --json > "$response"
+          }
+
+          submit_arm A "$ARM_A_POLICY"
+          submit_arm B "$ARM_B_POLICY"
+          submit_arm C "$ARM_C_POLICY"
+
+          jq -s '[.[] | {
+            id,
+            status,
+            coworld_id,
+            variant_id,
+            created_at,
+            episode_count
+          }]' "$RUNNER_TEMP/triplet/"?-response.json > "$RUNNER_TEMP/triplet-summary.json"
+          jq -e 'length == 3 and all(.[]; (.id | startswith("xreq_")))' "$RUNNER_TEMP/triplet-summary.json"
+          jq . "$RUNNER_TEMP/triplet-summary.json" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Retain safe request IDs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: commander-minimal-triplet-${{ github.sha }}
+          path: ${{ runner.temp }}/triplet-summary.json
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: false
