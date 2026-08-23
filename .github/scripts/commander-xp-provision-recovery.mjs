@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-const STATE_FILE = "commander-xp-provision-recovery-v2.json";
+const STATE_FILE = "commander-xp-provision-recovery-v3.json";
 const stages = new Set([
   "fence-intent",
   "ghcr",
@@ -167,12 +167,13 @@ function validate(root, identity) {
           "stage",
           "createdAt",
           "priorStateSha256",
+          "priorStateSha256s",
           "files",
           "stateSha256",
         ].sort(),
       ) ||
-    state.schemaVersion !== 2 ||
-    state.authority !== "github-actions-provision-recovery-v2" ||
+    state.schemaVersion !== 3 ||
+    state.authority !== "github-actions-provision-recovery-v3" ||
     state.repository !== "0xNad/ProxyWar" ||
     state.workflowPath !== ".github/workflows/commander-xp-provision.yml" ||
     state.sourceSha !== identity.sourceSha ||
@@ -181,6 +182,10 @@ function validate(root, identity) {
     state.namePrefix !== identity.namePrefix ||
     state.fenceRef !== identity.fenceRef ||
     !stages.has(state.stage) ||
+    !Array.isArray(state.priorStateSha256s) ||
+    state.priorStateSha256s.some((value) => !/^[0-9a-f]{64}$/.test(value)) ||
+    new Set(state.priorStateSha256s).size !== state.priorStateSha256s.length ||
+    state.priorStateSha256 !== (state.priorStateSha256s.at(-1) ?? null) ||
     stateSha256 !== canonicalHash(body)
   ) {
     throw new Error("Commander XP provision recovery state is invalid");
@@ -207,19 +212,25 @@ if (command === "build") {
   exactIdentity(sourceSha, sourceTreeSha, evalVersion, namePrefix, fenceRef);
   const priorPath = path.join(root, STATE_FILE);
   let priorStateSha256 = null;
+  let priorStateSha256s = [];
   if (fs.existsSync(priorPath)) {
     const prior = JSON.parse(fs.readFileSync(priorPath, "utf8"));
     priorStateSha256 = prior.stateSha256;
-    if (!/^[0-9a-f]{64}$/.test(priorStateSha256 ?? "")) {
+    if (
+      !/^[0-9a-f]{64}$/.test(priorStateSha256 ?? "") ||
+      !Array.isArray(prior.priorStateSha256s) ||
+      prior.priorStateSha256s.some((value) => !/^[0-9a-f]{64}$/.test(value))
+    ) {
       throw new Error("Commander XP prior recovery state is invalid");
     }
+    priorStateSha256s = [...prior.priorStateSha256s, priorStateSha256];
     fs.rmSync(priorPath);
   }
   const files = inventory(root);
   assertStage(stage, new Set(files.map((file) => file.path)));
   const body = {
-    schemaVersion: 2,
-    authority: "github-actions-provision-recovery-v2",
+    schemaVersion: 3,
+    authority: "github-actions-provision-recovery-v3",
     repository: "0xNad/ProxyWar",
     workflowPath: ".github/workflows/commander-xp-provision.yml",
     sourceSha,
@@ -230,13 +241,20 @@ if (command === "build") {
     stage,
     createdAt: new Date().toISOString(),
     priorStateSha256,
+    priorStateSha256s,
     files,
   };
   const state = { ...body, stateSha256: canonicalHash(body) };
   fs.writeFileSync(priorPath, `${JSON.stringify(state, null, 2)}\n`, {
     flag: "wx",
   });
-  console.log(JSON.stringify({ stage, stateSha256: state.stateSha256 }));
+  console.log(
+    JSON.stringify({
+      stage,
+      stateSha256: state.stateSha256,
+      priorStateSha256s: state.priorStateSha256s,
+    }),
+  );
 } else if (command === "validate") {
   const sourceSha = stageOrSource;
   const [sourceTreeSha, evalVersion, namePrefix, fenceRef] = tail;
@@ -249,7 +267,11 @@ if (command === "build") {
     fenceRef,
   });
   console.log(
-    JSON.stringify({ stage: state.stage, stateSha256: state.stateSha256 }),
+    JSON.stringify({
+      stage: state.stage,
+      stateSha256: state.stateSha256,
+      priorStateSha256s: state.priorStateSha256s,
+    }),
   );
 } else {
   throw new Error("Commander XP provision recovery command is invalid");

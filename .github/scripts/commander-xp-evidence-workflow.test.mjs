@@ -20,6 +20,8 @@ test("protected Commander evidence workflow fences before dispatch and uploads e
   assert.match(workflow, /--require-hashes/);
   assert.match(workflow, /commander-xp-coworld-requirements\.lock\.txt/);
   assert.match(workflow, /commander-xp-coworld-inventory\.lock\.txt/);
+  assert.match(workflow, /commander-xp-provision-recovery-lineage-v1\.json/);
+  assert.match(workflow, /commander-xp-provision-lineage\.mjs validate/);
   assert.match(workflow, /environment: coworld-production/);
   assert.match(workflow, /^ {2}contents: write$/m);
   assert.match(workflow, /status "\$EVAL_COWORLD_ID" --json/);

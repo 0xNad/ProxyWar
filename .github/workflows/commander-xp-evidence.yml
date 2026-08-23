@@ -192,6 +192,8 @@ jobs:
           PY
           COMMON=(
             commander-xp-preregistration-v2.json
+            commander-xp-provision-recovery-lineage-v1.json
+            commander-xp-provision-recovery-v3.json
             commander-xp-source-provenance-v2.json
             commander-xp-source-tree-diff-v1.json
             coworld-runtime-inventory-v1.json
@@ -242,7 +244,7 @@ jobs:
           const exact = (actual, expected) => JSON.stringify(Object.keys(actual).sort()) === JSON.stringify([...expected].sort());
           const sort = (value) => Array.isArray(value) ? value.map(sort) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, sort(value[key])])) : value;
           const sha = (value) => createHash("sha256").update(value).digest("hex");
-          const required = ["commander-xp-preregistration-v2.json","commander-xp-source-provenance-v2.json","commander-xp-source-tree-diff-v1.json","coworld-runtime-inventory-v1.json","eval-coworld-identity-v2.json","eval-coworld-inspect.json","eval-coworld-manifest-v2.json","eval-coworld-terminal-proof-v2.json","policy-identities-v2.json","policy-inspect/A.json","policy-inspect/B.json","policy-inspect/C.json","xp-openapi-contract-v2.json"].sort();
+          const required = ["commander-xp-preregistration-v2.json","commander-xp-provision-recovery-lineage-v1.json","commander-xp-provision-recovery-v3.json","commander-xp-source-provenance-v2.json","commander-xp-source-tree-diff-v1.json","coworld-runtime-inventory-v1.json","eval-coworld-identity-v2.json","eval-coworld-inspect.json","eval-coworld-manifest-v2.json","eval-coworld-terminal-proof-v2.json","policy-identities-v2.json","policy-inspect/A.json","policy-inspect/B.json","policy-inspect/C.json","xp-openapi-contract-v2.json"].sort();
           const { manifestSha256, ...body } = manifest;
           const expectedFenceRef = `refs/tags/commander-xp-preregistration-fence-v1/${sha(`${manifest.experimentID}\n${process.env.SOURCE_SHA}\n`)}`;
           if (!exact(manifest, ["schemaVersion","authority","repository","workflowPath","experimentID","sourceSha","sourceTreeSha","provisionArtifact","preregistrationFenceGitRef","createdAt","files","manifestSha256"]) || !exact(manifest.provisionArtifact, ["id","digest","workflowRunID","workflowRunAttempt"]) || manifest.schemaVersion !== 2 || manifest.authority !== "github-actions-attested-control-packet-v1" || manifest.repository !== "0xNad/ProxyWar" || manifest.workflowPath !== ".github/workflows/commander-xp-control.yml" || manifest.sourceSha !== process.env.SOURCE_SHA || manifest.sourceTreeSha !== sourceTree || !Number.isSafeInteger(manifest.provisionArtifact.id) || manifest.provisionArtifact.id < 1 || !/^sha256:[0-9a-f]{64}$/.test(manifest.provisionArtifact.digest) || !Number.isSafeInteger(manifest.provisionArtifact.workflowRunID) || manifest.provisionArtifact.workflowRunID < 1 || !Number.isSafeInteger(manifest.provisionArtifact.workflowRunAttempt) || manifest.provisionArtifact.workflowRunAttempt < 1 || manifest.preregistrationFenceGitRef !== expectedFenceRef || !Number.isFinite(Date.parse(manifest.createdAt)) || manifestSha256 !== sha(JSON.stringify(sort(body))) || !Array.isArray(manifest.files) || JSON.stringify(manifest.files.map((entry) => entry.path)) !== JSON.stringify(required)) throw new Error("Commander XP control manifest is invalid");
@@ -256,6 +258,16 @@ jobs:
           const {receiptSha256:runtimeReceiptSha256, ...runtimeBody} = runtime;
           if (manifest.experimentID !== prereg.experimentID || prereg.experimentID !== process.env.EXPERIMENT_ID || prereg.identities?.adapterSourceSha !== process.env.SOURCE_SHA || prereg.identities?.adapterSourceTreeSha !== sourceTree || openapi.schemaVersion !== 2 || openapi.authority !== "softmax-public-openapi-exact-bytes-v1" || openapi.url !== "https://softmax.com/api/observatory/openapi.json" || openapi.rawSha256 !== prereg.identities.xpOpenApiSha256 || openapi.createRequestSchema?.sha256 !== prereg.identities.xpCreateRequestSchemaSha256 || openapi.rosterSchemas?.sha256 !== prereg.identities.xpRosterSchemasSha256 || receiptSha256 !== sha(JSON.stringify(sort(openapiBody))) || !exact(runtime, ["schemaVersion","authority","sourceSha","sourceTreeSha","coworldClientVersion","uvVersion","pythonVersion","platform","requirementsInputSha256","requirementsLockSha256","inventorySha256","packageCount","receiptSha256"]) || runtime.schemaVersion !== 1 || runtime.authority !== "hash-locked-coworld-runtime-inventory-v1" || runtime.sourceSha !== process.env.SOURCE_SHA || runtime.sourceTreeSha !== sourceTree || runtime.coworldClientVersion !== "0.1.42" || runtime.uvVersion !== "0.8.12" || runtime.pythonVersion !== "3.12" || runtime.platform !== "linux/amd64" || runtime.requirementsInputSha256 !== sha(fs.readFileSync(".github/scripts/commander-xp-coworld-requirements.in")) || runtime.requirementsLockSha256 !== sha(fs.readFileSync(".github/scripts/commander-xp-coworld-requirements.lock.txt")) || runtime.inventorySha256 !== sha(fs.readFileSync(".github/scripts/commander-xp-coworld-inventory.lock.txt")) || runtime.packageCount !== 50 || runtimeReceiptSha256 !== sha(JSON.stringify(sort(runtimeBody)))) throw new Error("Commander XP control source identity mismatch");
           NODE
+          LINEAGE="$CONTROL_ROOT/commander-xp-provision-recovery-lineage-v1.json"
+          LINEAGE_EVAL_VERSION=$(jq -r .evalVersion "$LINEAGE")
+          LINEAGE_NAME_PREFIX=$(jq -r .namePrefix "$LINEAGE")
+          LINEAGE_FENCE_REF=$(jq -r .fenceRef "$LINEAGE")
+          node .github/scripts/commander-xp-provision-lineage.mjs validate \
+            "$LINEAGE" "$CONTROL_ROOT/commander-xp-provision-recovery-v3.json" \
+            "$SOURCE_SHA" "$(git rev-parse HEAD^{tree})" "$LINEAGE_EVAL_VERSION" \
+            "$LINEAGE_NAME_PREFIX" "$LINEAGE_FENCE_REF" \
+            > "$RUNNER_TEMP/control-provision-recovery-lineage-validation.json"
+          test "$LINEAGE_EVAL_VERSION" = "$(jq -r .coworldVersion "$CONTROL_ROOT/eval-coworld-identity-v2.json")"
           PREREGISTRATION_FENCE_GIT_REF=$(jq -r .preregistrationFenceGitRef "$MANIFEST")
           PROVISION_ARTIFACT_ID=$(jq -r .provisionArtifact.id "$MANIFEST")
           PROVISION_ARTIFACT_DIGEST=$(jq -r .provisionArtifact.digest "$MANIFEST")

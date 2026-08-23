@@ -250,8 +250,8 @@ export interface CommanderXpConfirmatoryActivation {
 }
 
 interface PolicyIdentityReceipt {
-  schemaVersion: 2;
-  authority: "coworld-0.1.42-policy-provision-v2";
+  schemaVersion: 3;
+  authority: "coworld-0.1.42-policy-provision-v3";
   inspectedAt: string;
   platform: "linux/amd64";
   sourceSha: string;
@@ -294,8 +294,8 @@ interface CommanderXpSourceProvenanceReceipt {
 }
 
 interface PolicyUploadReadbackReceipt {
-  schemaVersion: 2;
-  authority: "coworld-0.1.42-policy-upload-readback-v2";
+  schemaVersion: 3;
+  authority: "coworld-0.1.42-policy-upload-readback-v3";
   inspectedAt: string;
   platform: "linux/amd64";
   sourceSha: string;
@@ -330,11 +330,18 @@ interface PolicyUploadReadbackReceipt {
       attached: true;
       keys: ["providerRegion", "modelID", "providerEnabled"];
       valuesSha256: string;
-      attachmentResponseSha256: string;
+      attachmentResponseSha256: string | null;
     };
-    completionPayloadProjection: Record<string, unknown>;
+    creationMode: "immediate-response" | "adopted-after-remote-success";
+    plannedCompletionPayloadProjection: Record<string, unknown>;
     completionPayloadSha256: string;
+    completionPayloadAuthority:
+      | "coworld-request-sent-and-responded-v1"
+      | "source-and-fence-planned-recovery-v1";
     completionResponse: Record<string, unknown>;
+    completionResponseAuthority:
+      | "coworld-immediate-completion-response-v1"
+      | "coworld-current-policy-version-readback-v1";
     completionResponseSha256: string;
     completionResponseBytes: number;
     readback: Record<string, unknown>;
@@ -2339,8 +2346,8 @@ function verifyPolicyIdentities(
   exactRecord(receipt.arms, ["A", "B", "C"], "POLICY_ARMS_SCHEMA_MISMATCH");
   const { receiptSha256, ...body } = receipt;
   if (
-    receipt.schemaVersion !== 2 ||
-    receipt.authority !== "coworld-0.1.42-policy-provision-v2" ||
+    receipt.schemaVersion !== 3 ||
+    receipt.authority !== "coworld-0.1.42-policy-provision-v3" ||
     !Number.isFinite(Date.parse(receipt.inspectedAt)) ||
     receipt.platform !== "linux/amd64" ||
     receipt.sourceSha !== prereg.identities.adapterSourceSha ||
@@ -2513,9 +2520,12 @@ function verifyPolicyUploadReadback(
       "useBedrock",
       "bedrockModel",
       "environmentConfiguration",
-      "completionPayloadProjection",
+      "creationMode",
+      "plannedCompletionPayloadProjection",
       "completionPayloadSha256",
+      "completionPayloadAuthority",
       "completionResponse",
+      "completionResponseAuthority",
       "completionResponseSha256",
       "completionResponseBytes",
       "readback",
@@ -2529,7 +2539,7 @@ function verifyPolicyUploadReadback(
     `POLICY_UPLOAD_${arm}_ENVIRONMENT_SCHEMA_MISMATCH`,
   );
   const completionPayload = exactRecord(
-    policy.completionPayloadProjection,
+    policy.plannedCompletionPayloadProjection,
     ["name", "container_image_id", "run", "tags", "environmentAttached"],
     `POLICY_UPLOAD_${arm}_COMPLETION_REQUEST_SCHEMA_MISMATCH`,
   );
@@ -2540,7 +2550,9 @@ function verifyPolicyUploadReadback(
   );
   const completionResponse = exactRecord(
     policy.completionResponse,
-    ["id", "name", "version", "pools", "submit_error"],
+    policy.creationMode === "immediate-response"
+      ? ["id", "name", "version", "pools", "submit_error"]
+      : ["id", "name", "version"],
     `POLICY_UPLOAD_${arm}_COMPLETION_RESPONSE_SCHEMA_MISMATCH`,
   );
   const readback = exactRecord(
@@ -2557,8 +2569,8 @@ function verifyPolicyUploadReadback(
           `POLICY_UPLOAD_${arm}_IMAGE_COMPLETE_SCHEMA_MISMATCH`,
         );
   if (
-    upload.schemaVersion !== 2 ||
-    upload.authority !== "coworld-0.1.42-policy-upload-readback-v2" ||
+    upload.schemaVersion !== 3 ||
+    upload.authority !== "coworld-0.1.42-policy-upload-readback-v3" ||
     upload.inspectedAt !== summary.inspectedAt ||
     upload.platform !== "linux/amd64" ||
     upload.sourceSha !== prereg.identities.adapterSourceSha ||
@@ -2604,7 +2616,21 @@ function verifyPolicyUploadReadback(
         BEDROCK_MODEL: prereg.identities.bedrockModel,
         USE_BEDROCK: "true",
       }) ||
-    !isSha256(environmentConfiguration.attachmentResponseSha256) ||
+    (policy.creationMode === "immediate-response"
+      ? !isSha256(environmentConfiguration.attachmentResponseSha256) ||
+        policy.completionPayloadAuthority !==
+          "coworld-request-sent-and-responded-v1" ||
+        policy.completionResponseAuthority !==
+          "coworld-immediate-completion-response-v1"
+      : policy.creationMode === "adopted-after-remote-success"
+        ? environmentConfiguration.attachmentResponseSha256 !== null ||
+          policy.completionPayloadAuthority !==
+            "source-and-fence-planned-recovery-v1" ||
+          policy.completionResponseAuthority !==
+            "coworld-current-policy-version-readback-v1" ||
+          policy.completionResponseSha256 !==
+            sha256Canonical(completionResponse)
+        : true) ||
     completionPayload.name !== policy.name ||
     completionPayload.container_image_id !== summary.policyImageID ||
     sha256Canonical(completionPayload.run) !==
@@ -2612,11 +2638,12 @@ function verifyPolicyUploadReadback(
     tags.purpose !== "commander-xp-v2" ||
     tags.role !== arm ||
     completionPayload.environmentAttached !== true ||
-    !isSha256(policy.completionPayloadSha256) ||
+    policy.completionPayloadSha256 !== sha256Canonical(completionPayload) ||
     completionResponse.id !== prereg.identities.armPolicyVersionIDs[arm] ||
     completionResponse.name !== policy.name ||
     !isPositiveInteger(completionResponse.version) ||
-    completionResponse.submit_error !== null ||
+    (policy.creationMode === "immediate-response" &&
+      completionResponse.submit_error !== null) ||
     !isSha256(policy.completionResponseSha256) ||
     !isPositiveInteger(policy.completionResponseBytes) ||
     readback.id !== completionResponse.id ||

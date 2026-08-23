@@ -146,7 +146,7 @@ jobs:
                       raise SystemExit(f"provision path escape: {member.filename}")
               bundle.extractall(destination)
           PY
-          test "$(find "$PROVISION_ROOT" -type f | wc -l | tr -d ' ')" = "14"
+          test "$(find "$PROVISION_ROOT" -type f | wc -l | tr -d ' ')" = "16"
           test "$(find "$PROVISION_ROOT" -type l | wc -l | tr -d ' ')" = "0"
           MANIFEST="$PROVISION_ROOT/commander-xp-provision-manifest-v2.json"
           test -f "$MANIFEST"
@@ -166,7 +166,7 @@ jobs:
           const exact = (actual, expected) => JSON.stringify(Object.keys(actual).sort()) === JSON.stringify([...expected].sort());
           const sort = (value) => Array.isArray(value) ? value.map(sort) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, sort(value[key])])) : value;
           const sha = (value) => createHash("sha256").update(value).digest("hex");
-          const required = ["commander-xp-plan-input-base-v2.json","commander-xp-source-provenance-v2.json","commander-xp-source-tree-diff-v1.json","coworld-runtime-inventory-v1.json","eval-coworld-identity-v2.json","eval-coworld-inspect.json","eval-coworld-manifest-v2.json","eval-coworld-terminal-proof-v2.json","policy-identities-v2.json","policy-inspect/A.json","policy-inspect/B.json","policy-inspect/C.json","xp-openapi-contract-v2.json"].sort();
+          const required = ["commander-xp-plan-input-base-v2.json","commander-xp-provision-recovery-lineage-v1.json","commander-xp-provision-recovery-v3.json","commander-xp-source-provenance-v2.json","commander-xp-source-tree-diff-v1.json","coworld-runtime-inventory-v1.json","eval-coworld-identity-v2.json","eval-coworld-inspect.json","eval-coworld-manifest-v2.json","eval-coworld-terminal-proof-v2.json","policy-identities-v2.json","policy-inspect/A.json","policy-inspect/B.json","policy-inspect/C.json","xp-openapi-contract-v2.json"].sort();
           const { manifestSha256, ...body } = manifest;
           if (!exact(manifest, ["schemaVersion","authority","repository","workflowPath","sourceSha","sourceTreeSha","createdAt","files","manifestSha256"]) || manifest.schemaVersion !== 2 || manifest.authority !== "github-actions-attested-provision-packet-v1" || manifest.repository !== "0xNad/ProxyWar" || manifest.workflowPath !== ".github/workflows/commander-xp-provision.yml" || manifest.sourceSha !== process.env.SOURCE_SHA || manifest.sourceTreeSha !== sourceTree || !Number.isFinite(Date.parse(manifest.createdAt)) || manifestSha256 !== sha(JSON.stringify(sort(body))) || !Array.isArray(manifest.files) || JSON.stringify(manifest.files.map((entry) => entry.path)) !== JSON.stringify(required)) throw new Error("Commander XP provision manifest is invalid");
           for (const entry of manifest.files) {
@@ -176,6 +176,35 @@ jobs:
           const {receiptSha256, ...runtimeBody} = runtime;
           if (!exact(runtime, ["schemaVersion","authority","sourceSha","sourceTreeSha","coworldClientVersion","uvVersion","pythonVersion","platform","requirementsInputSha256","requirementsLockSha256","inventorySha256","packageCount","receiptSha256"]) || runtime.schemaVersion !== 1 || runtime.authority !== "hash-locked-coworld-runtime-inventory-v1" || runtime.sourceSha !== process.env.SOURCE_SHA || runtime.sourceTreeSha !== sourceTree || runtime.coworldClientVersion !== "0.1.42" || runtime.uvVersion !== "0.8.12" || runtime.pythonVersion !== "3.12" || runtime.platform !== "linux/amd64" || runtime.requirementsInputSha256 !== sha(fs.readFileSync(".github/scripts/commander-xp-coworld-requirements.in")) || runtime.requirementsLockSha256 !== sha(fs.readFileSync(".github/scripts/commander-xp-coworld-requirements.lock.txt")) || runtime.inventorySha256 !== sha(fs.readFileSync(".github/scripts/commander-xp-coworld-inventory.lock.txt")) || runtime.packageCount !== 50 || receiptSha256 !== sha(JSON.stringify(sort(runtimeBody)))) throw new Error("Commander XP provision runtime inventory mismatch");
           NODE
+          LINEAGE="$PROVISION_ROOT/commander-xp-provision-recovery-lineage-v1.json"
+          FINAL_STATE="$PROVISION_ROOT/commander-xp-provision-recovery-v3.json"
+          LINEAGE_EVAL_VERSION=$(jq -r .evalVersion "$LINEAGE")
+          LINEAGE_NAME_PREFIX=$(jq -r .namePrefix "$LINEAGE")
+          LINEAGE_FENCE_REF=$(jq -r .fenceRef "$LINEAGE")
+          node .github/scripts/commander-xp-provision-lineage.mjs validate \
+            "$LINEAGE" "$FINAL_STATE" "$SOURCE_SHA" "$(git rev-parse HEAD^{tree})" \
+            "$LINEAGE_EVAL_VERSION" "$LINEAGE_NAME_PREFIX" "$LINEAGE_FENCE_REF" \
+            > "$RUNNER_TEMP/provision-recovery-lineage-validation.json"
+          test "$LINEAGE_EVAL_VERSION" = "$(jq -r .coworldVersion "$PROVISION_ROOT/eval-coworld-identity-v2.json")"
+          if test "$(jq -r .mode "$LINEAGE")" = recovered; then
+            RECOVERY_ARTIFACT_ID=$(jq -r .inputBoundary.artifactID "$LINEAGE")
+            RECOVERY_RUN_ID=$(jq -r .inputBoundary.workflowRunID "$LINEAGE")
+            RECOVERY_RUN_ATTEMPT=$(jq -r .inputBoundary.workflowRunAttempt "$LINEAGE")
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$RECOVERY_ARTIFACT_ID" > "$RUNNER_TEMP/prior-provision-boundary-artifact.json"
+            test "$(jq -r .expired "$RUNNER_TEMP/prior-provision-boundary-artifact.json")" = false
+            test "$(jq -r .name "$RUNNER_TEMP/prior-provision-boundary-artifact.json")" = "$(jq -r .inputBoundary.name "$LINEAGE")"
+            test "$(jq -r .digest "$RUNNER_TEMP/prior-provision-boundary-artifact.json")" = "$(jq -r .inputBoundary.digest "$LINEAGE")"
+            test "$(jq -r .workflow_run.id "$RUNNER_TEMP/prior-provision-boundary-artifact.json")" = "$RECOVERY_RUN_ID"
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RECOVERY_RUN_ID" > "$RUNNER_TEMP/prior-provision-boundary-run.json"
+            jq -e --arg source "$SOURCE_SHA" --argjson attempt "$RECOVERY_RUN_ATTEMPT" '
+              .status == "completed" and .conclusion != "success" and
+              .head_sha == $source and .run_attempt == $attempt and
+              .head_branch == "main" and .path == ".github/workflows/commander-xp-provision.yml" and
+              .actor.login == "0xNad" and .triggering_actor.login == "0xNad" and
+              .head_repository.full_name == "0xNad/ProxyWar" and
+              .repository.full_name == "0xNad/ProxyWar" and .event == "workflow_dispatch"
+            ' "$RUNNER_TEMP/prior-provision-boundary-run.json" >/dev/null
+          fi
           echo "PROVISION_ROOT=$PROVISION_ROOT" >> "$GITHUB_ENV"
 
       - name: Derive the single preregistration fence identity
@@ -226,6 +255,8 @@ jobs:
           cp "$PROVISION_ROOT/commander-xp-source-tree-diff-v1.json" "$CONTROL_ROOT/commander-xp-source-tree-diff-v1.json"
           cp "$PROVISION_ROOT/xp-openapi-contract-v2.json" "$CONTROL_ROOT/xp-openapi-contract-v2.json"
           cp "$PROVISION_ROOT/coworld-runtime-inventory-v1.json" "$CONTROL_ROOT/coworld-runtime-inventory-v1.json"
+          cp "$PROVISION_ROOT/commander-xp-provision-recovery-lineage-v1.json" "$CONTROL_ROOT/commander-xp-provision-recovery-lineage-v1.json"
+          cp "$PROVISION_ROOT/commander-xp-provision-recovery-v3.json" "$CONTROL_ROOT/commander-xp-provision-recovery-v3.json"
           node --input-type=module - "$CONTROL_ROOT" "$(git rev-parse HEAD^{tree})" <<'NODE'
           import { createHash } from "node:crypto";
           import fs from "node:fs";
@@ -233,7 +264,7 @@ jobs:
           const [root, sourceTree] = process.argv.slice(2);
           const sha = (value) => createHash("sha256").update(value).digest("hex");
           const sort = (value) => Array.isArray(value) ? value.map(sort) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, sort(value[key])])) : value;
-          const files = ["commander-xp-preregistration-v2.json","commander-xp-source-provenance-v2.json","commander-xp-source-tree-diff-v1.json","coworld-runtime-inventory-v1.json","eval-coworld-identity-v2.json","eval-coworld-inspect.json","eval-coworld-manifest-v2.json","eval-coworld-terminal-proof-v2.json","policy-identities-v2.json","policy-inspect/A.json","policy-inspect/B.json","policy-inspect/C.json","xp-openapi-contract-v2.json"].sort().map((relative) => ({path:relative,sha256:sha(fs.readFileSync(path.join(root, relative)))}));
+          const files = ["commander-xp-preregistration-v2.json","commander-xp-provision-recovery-lineage-v1.json","commander-xp-provision-recovery-v3.json","commander-xp-source-provenance-v2.json","commander-xp-source-tree-diff-v1.json","coworld-runtime-inventory-v1.json","eval-coworld-identity-v2.json","eval-coworld-inspect.json","eval-coworld-manifest-v2.json","eval-coworld-terminal-proof-v2.json","policy-identities-v2.json","policy-inspect/A.json","policy-inspect/B.json","policy-inspect/C.json","xp-openapi-contract-v2.json"].sort().map((relative) => ({path:relative,sha256:sha(fs.readFileSync(path.join(root, relative)))}));
           const prereg = JSON.parse(fs.readFileSync(path.join(root, "commander-xp-preregistration-v2.json"), "utf8"));
           const body = {schemaVersion:2,authority:"github-actions-attested-control-packet-v1",repository:"0xNad/ProxyWar",workflowPath:".github/workflows/commander-xp-control.yml",experimentID:prereg.experimentID,sourceSha:process.env.SOURCE_SHA,sourceTreeSha:sourceTree,provisionArtifact:{id:Number(process.env.PROVISION_ARTIFACT_ID),digest:process.env.PROVISION_ARTIFACT_DIGEST,workflowRunID:Number(process.env.PROVISION_RUN_ID),workflowRunAttempt:Number(process.env.PROVISION_RUN_ATTEMPT)},preregistrationFenceGitRef:process.env.PREREGISTRATION_FENCE_GIT_REF,createdAt:process.env.CONTROL_CREATED_AT,files};
           fs.writeFileSync(path.join(root, "commander-xp-control-manifest-v2.json"), `${JSON.stringify({...body,manifestSha256:sha(JSON.stringify(sort(body)))}, null, 2)}\n`, {flag:"wx"});

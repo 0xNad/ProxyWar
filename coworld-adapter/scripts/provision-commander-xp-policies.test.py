@@ -86,6 +86,7 @@ def fixture_args(output: Path, recovery: Path | None = None) -> SimpleNamespace:
         oci_digest="sha256:" + "1" * 64,
         output=output,
         recovery=recovery,
+        allow_remote_adoption=False,
     )
 
 
@@ -103,8 +104,10 @@ def fixture_policy(args: SimpleNamespace, role: str) -> dict[str, object]:
             "valuesSha256": "6" * 64,
             "attachmentResponseSha256": None,
         },
-        "completionPayloadProjection": {},
-        "completionPayloadSha256": "7" * 64,
+        "creationMode": "immediate-response",
+        "plannedCompletionPayloadProjection": {},
+        "completionPayloadSha256": MODULE.sha256_bytes(MODULE.canonical_bytes({})),
+        "completionPayloadAuthority": "coworld-request-sent-and-responded-v1",
         "completionResponse": {
             "id": f"pvid_{role.lower()}",
             "name": name,
@@ -112,6 +115,7 @@ def fixture_policy(args: SimpleNamespace, role: str) -> dict[str, object]:
             "pools": None,
             "submit_error": None,
         },
+        "completionResponseAuthority": "coworld-immediate-completion-response-v1",
         "completionResponseSha256": "8" * 64,
         "completionResponseBytes": 1,
         "readback": {"id": f"pvid_{role.lower()}", "name": name, "version": 1},
@@ -171,7 +175,11 @@ class PolicyProvisionReceiptTest(unittest.TestCase):
         self.assertEqual(payload["policy_secret_env_id"], "pse_private_fixture")
         self.assertEqual(
             receipt["completionPayloadSha256"],
-            MODULE.sha256_bytes(MODULE.canonical_bytes(payload)),
+            MODULE.sha256_bytes(
+                    MODULE.canonical_bytes(
+                        receipt["plannedCompletionPayloadProjection"]
+                    )
+            ),
         )
         self.assertEqual(
             receipt["environmentConfiguration"],
@@ -230,7 +238,8 @@ class PolicyProvisionReceiptTest(unittest.TestCase):
             MODULE.write_receipt(recovery / "image.json", image_body)
             common = {
                 **image_body,
-                "authority": "coworld-0.1.42-policy-upload-readback-v2",
+                "schemaVersion": 3,
+                "authority": "coworld-0.1.42-policy-upload-readback-v3",
             }
             MODULE.write_receipt(
                 recovery / "A.json", {**common, "policy": fixture_policy(args, "A")}
@@ -245,9 +254,11 @@ class PolicyProvisionReceiptTest(unittest.TestCase):
                     return None
 
                 def lookup_policy_version(
-                    self, *, name: str, version: int
-                ) -> SimpleNamespace:
-                    return SimpleNamespace(id="pvid_a", name=name, version=version)
+                    self, *, name: str, version: int | None = None
+                ) -> SimpleNamespace | None:
+                    if name.endswith("-a") and version == 1:
+                        return SimpleNamespace(id="pvid_a", name=name, version=1)
+                    return None
 
             def create_policy(*_: object, role: str, **__: object) -> dict[str, object]:
                 created.append(role)
@@ -259,7 +270,6 @@ class PolicyProvisionReceiptTest(unittest.TestCase):
                     "from_login",
                     return_value=RecoveryReadClient(),
                 ),
-                patch.object(MODULE, "assert_name_absent"),
                 patch.object(MODULE, "create_policy", side_effect=create_policy),
             ):
                 MODULE.upload(args)
@@ -285,7 +295,7 @@ class PolicyProvisionReceiptTest(unittest.TestCase):
                 "pvid_a",
             )
 
-    def test_missing_policy_receipt_with_existing_hosted_name_is_never_recreated(
+    def test_missing_policy_receipt_adopts_only_under_explicit_recovery_authority(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -312,13 +322,53 @@ class PolicyProvisionReceiptTest(unittest.TestCase):
                     "imageUpload": {"image": image},
                 },
             )
+            class ExistingReadClient:
+                def __enter__(self) -> ExistingReadClient:
+                    return self
+
+                def __exit__(self, *_: object) -> None:
+                    return None
+
+                def lookup_policy_version(
+                    self, *, name: str, version: int | None = None
+                ) -> SimpleNamespace:
+                    return SimpleNamespace(id=f"pvid_{name[-1]}", name=name, version=1)
+
             with patch.object(
-                MODULE,
-                "assert_name_absent",
-                side_effect=RuntimeError("exists without an adoptable receipt"),
+                MODULE.CoworldApiClient,
+                "from_login",
+                return_value=ExistingReadClient(),
             ):
-                with self.assertRaisesRegex(RuntimeError, "without an adoptable receipt"):
+                with self.assertRaisesRegex(RuntimeError, "without recovery authority"):
                     MODULE.upload(args)
+
+            output = root / "adopted-output"
+            args = fixture_args(output, recovery)
+            args.allow_remote_adoption = True
+            with (
+                patch.object(
+                    MODULE.CoworldApiClient,
+                    "from_login",
+                    return_value=ExistingReadClient(),
+                ),
+                patch.object(
+                    MODULE,
+                    "create_policy",
+                    side_effect=AssertionError("remote adoption must not recreate"),
+                ),
+            ):
+                MODULE.upload(args)
+            adopted = MODULE.read_receipt(output / "A.json")["policy"]
+            self.assertEqual(
+                adopted["creationMode"], "adopted-after-remote-success"
+            )
+            self.assertEqual(
+                adopted["completionResponseAuthority"],
+                "coworld-current-policy-version-readback-v1",
+            )
+            self.assertIsNone(
+                adopted["environmentConfiguration"]["attachmentResponseSha256"]
+            )
 
 
 if __name__ == "__main__":

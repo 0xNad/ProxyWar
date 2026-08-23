@@ -79,6 +79,30 @@ def role_argv(role: str) -> list[str]:
     return list(OPPONENT_ARGV)
 
 
+def policy_environment_values(role: str, bedrock_model: str) -> dict[str, str]:
+    return (
+        {
+            "AWS_REGION": "us-west-2",
+            "BEDROCK_MODEL": bedrock_model,
+            "USE_BEDROCK": "true",
+        }
+        if role in {"A", "B", "C"}
+        else {}
+    )
+
+
+def policy_completion_projection(
+    *, name: str, role: str, image_id: str
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "container_image_id": image_id,
+        "run": role_argv(role),
+        "tags": {"purpose": "commander-xp-v2", "role": role},
+        "environmentAttached": role in {"A", "B", "C"},
+    }
+
+
 def validate_args(args: argparse.Namespace) -> None:
     if importlib.metadata.version("coworld") != "0.1.42":
         raise RuntimeError("Commander XP policy provision requires coworld==0.1.42")
@@ -111,14 +135,6 @@ def assert_names_absent(prefix: str) -> None:
             name = policy_name(prefix, role)
             if client.lookup_policy_version(name=name) is not None:
                 raise RuntimeError(f"Commander XP policy already exists: {name}")
-
-
-def assert_name_absent(name: str) -> None:
-    with CoworldApiClient.from_login(server_url=SERVER) as client:
-        if client.lookup_policy_version(name=name) is not None:
-            raise RuntimeError(
-                f"Commander XP policy exists without an adoptable receipt: {name}"
-            )
 
 
 def upload_image(client: CoworldUploadClient, image: str) -> dict[str, Any]:
@@ -184,15 +200,7 @@ def create_policy(
 ) -> dict[str, Any]:
     name = policy_name(prefix, role)
     commander = role in {"A", "B", "C"}
-    environment_values = (
-        {
-            "AWS_REGION": "us-west-2",
-            "BEDROCK_MODEL": bedrock_model,
-            "USE_BEDROCK": "true",
-        }
-        if commander
-        else {}
-    )
+    environment_values = policy_environment_values(role, bedrock_model)
     secret_env_id: str | None = None
     secret_response_sha256: str | None = None
     if commander:
@@ -219,13 +227,9 @@ def create_policy(
     }
     if secret_env_id is not None:
         payload["policy_secret_env_id"] = secret_env_id
-    completion_projection = {
-        "name": name,
-        "container_image_id": image_id,
-        "run": role_argv(role),
-        "tags": payload["tags"],
-        "environmentAttached": secret_env_id is not None,
-    }
+    completion_projection = policy_completion_projection(
+        name=name, role=role, image_id=image_id
+    )
     response = client._http_client.post(
         "/stats/policies/docker-img/complete",
         headers=client._headers(),
@@ -263,13 +267,67 @@ def create_policy(
             "valuesSha256": sha256_bytes(canonical_bytes(environment_values)),
             "attachmentResponseSha256": secret_response_sha256,
         },
-        "completionPayloadProjection": completion_projection,
-        "completionPayloadSha256": sha256_bytes(canonical_bytes(payload)),
+        "creationMode": "immediate-response",
+        "plannedCompletionPayloadProjection": completion_projection,
+        "completionPayloadSha256": sha256_bytes(
+            canonical_bytes(completion_projection)
+        ),
+        "completionPayloadAuthority": "coworld-request-sent-and-responded-v1",
         "completionResponse": completed.model_dump(mode="json"),
+        "completionResponseAuthority": "coworld-immediate-completion-response-v1",
         "completionResponseSha256": sha256_bytes(response_bytes),
         "completionResponseBytes": len(response_bytes),
         "readback": readback_projection,
         "readbackSha256": sha256_bytes(canonical_bytes(readback_projection)),
+    }
+
+
+def adopt_policy(
+    *,
+    args: argparse.Namespace,
+    role: str,
+    image_id: str,
+    current: Any,
+) -> dict[str, Any]:
+    name = policy_name(args.name_prefix, role)
+    if str(current.name) != name or current.version != 1:
+        raise RuntimeError(
+            f"Commander XP remote policy adoption identity mismatch: {role}"
+        )
+    readback = {"id": str(current.id), "name": name, "version": current.version}
+    completion_response = readback
+    completion_projection = policy_completion_projection(
+        name=name, role=role, image_id=image_id
+    )
+    response_bytes = canonical_bytes(completion_response)
+    environment_values = policy_environment_values(role, args.bedrock_model)
+    commander = role in {"A", "B", "C"}
+    return {
+        "name": name,
+        "role": role,
+        "runArgv": role_argv(role),
+        "useBedrock": commander,
+        "bedrockModel": args.bedrock_model if commander else None,
+        "environmentConfiguration": {
+            "attached": commander,
+            "keys": ["providerRegion", "modelID", "providerEnabled"]
+            if commander
+            else [],
+            "valuesSha256": sha256_bytes(canonical_bytes(environment_values)),
+            "attachmentResponseSha256": None,
+        },
+        "creationMode": "adopted-after-remote-success",
+        "plannedCompletionPayloadProjection": completion_projection,
+        "completionPayloadSha256": sha256_bytes(
+            canonical_bytes(completion_projection)
+        ),
+        "completionPayloadAuthority": "source-and-fence-planned-recovery-v1",
+        "completionResponse": completion_response,
+        "completionResponseAuthority": "coworld-current-policy-version-readback-v1",
+        "completionResponseSha256": sha256_bytes(response_bytes),
+        "completionResponseBytes": len(response_bytes),
+        "readback": readback,
+        "readbackSha256": sha256_bytes(canonical_bytes(readback)),
     }
 
 
@@ -362,8 +420,8 @@ def validate_recovered_policy(
     readback = policy.get("readback")
     expected_name = policy_name(args.name_prefix, role)
     if (
-        receipt["schemaVersion"] != 2
-        or receipt["authority"] != "coworld-0.1.42-policy-upload-readback-v2"
+        receipt["schemaVersion"] != 3
+        or receipt["authority"] != "coworld-0.1.42-policy-upload-readback-v3"
         or receipt["platform"] != PLATFORM
         or receipt["sourceSha"] != args.source_sha
         or receipt["sourceTreeSha"] != args.source_tree_sha
@@ -381,6 +439,40 @@ def validate_recovered_policy(
         or completed.get("name") != expected_name
         or readback.get("name") != expected_name
         or completed.get("version") != readback.get("version")
+        or policy.get("creationMode")
+        not in {"immediate-response", "adopted-after-remote-success"}
+        or policy.get("completionPayloadSha256")
+        != sha256_bytes(
+            canonical_bytes(policy.get("plannedCompletionPayloadProjection"))
+        )
+        or policy.get("completionPayloadAuthority")
+        not in {
+            "coworld-request-sent-and-responded-v1",
+            "source-and-fence-planned-recovery-v1",
+        }
+        or policy.get("completionResponseAuthority")
+        not in {
+            "coworld-immediate-completion-response-v1",
+            "coworld-current-policy-version-readback-v1",
+        }
+        or (
+            policy.get("creationMode") == "immediate-response"
+            and (
+                policy.get("completionPayloadAuthority")
+                != "coworld-request-sent-and-responded-v1"
+                or policy.get("completionResponseAuthority")
+                != "coworld-immediate-completion-response-v1"
+            )
+        )
+        or (
+            policy.get("creationMode") == "adopted-after-remote-success"
+            and (
+                policy.get("completionPayloadAuthority")
+                != "source-and-fence-planned-recovery-v1"
+                or policy.get("completionResponseAuthority")
+                != "coworld-current-policy-version-readback-v1"
+            )
+        )
     ):
         raise RuntimeError(f"Commander XP recovered policy identity mismatch: {role}")
     with CoworldApiClient.from_login(server_url=SERVER) as read_client:
@@ -436,8 +528,8 @@ def upload(args: argparse.Namespace) -> None:
             },
         )
     common = {
-        "schemaVersion": 2,
-        "authority": "coworld-0.1.42-policy-upload-readback-v2",
+        "schemaVersion": 3,
+        "authority": "coworld-0.1.42-policy-upload-readback-v3",
         "inspectedAt": inspected_at,
         "platform": PLATFORM,
         "sourceSha": args.source_sha,
@@ -450,6 +542,7 @@ def upload(args: argparse.Namespace) -> None:
         "imageUpload": image_upload,
     }
     receipts: dict[str, dict[str, Any]] = {}
+    remote_adopted_roles: list[str] = []
     for role in ROLES:
         receipt_path = args.output / f"{role}.json"
         recovered_path = None if recovered is None else recovered / f"{role}.json"
@@ -459,15 +552,31 @@ def upload(args: argparse.Namespace) -> None:
             shutil.copyfile(recovered_path, receipt_path)
             receipts[role] = receipt
         else:
-            assert_name_absent(policy_name(args.name_prefix, role))
-            with CoworldUploadClient.from_login(server_url=SERVER) as client:
-                policy = create_policy(
-                    client,
-                    prefix=args.name_prefix,
+            with CoworldApiClient.from_login(server_url=SERVER) as read_client:
+                current = read_client.lookup_policy_version(
+                    name=policy_name(args.name_prefix, role)
+                )
+            if current is not None:
+                if not args.allow_remote_adoption:
+                    raise RuntimeError(
+                        f"Commander XP policy exists without recovery authority: {policy_name(args.name_prefix, role)}"
+                    )
+                policy = adopt_policy(
+                    args=args,
                     role=role,
                     image_id=image["id"],
-                    bedrock_model=args.bedrock_model,
+                    current=current,
                 )
+                remote_adopted_roles.append(role)
+            else:
+                with CoworldUploadClient.from_login(server_url=SERVER) as client:
+                    policy = create_policy(
+                        client,
+                        prefix=args.name_prefix,
+                        role=role,
+                        image_id=image["id"],
+                        bedrock_model=args.bedrock_model,
+                    )
             receipts[role] = write_receipt(
                 receipt_path, {**common, "policy": policy}
             )
@@ -485,8 +594,8 @@ def upload(args: argparse.Namespace) -> None:
         for role in ("A", "B", "C")
     }
     summary_body = {
-        "schemaVersion": 2,
-        "authority": "coworld-0.1.42-policy-provision-v2",
+        "schemaVersion": 3,
+        "authority": "coworld-0.1.42-policy-provision-v3",
         "inspectedAt": inspected_at,
         "platform": PLATFORM,
         "sourceSha": args.source_sha,
@@ -517,6 +626,8 @@ def upload(args: argparse.Namespace) -> None:
                     for role in ROLES
                     if recovered is not None and (recovered / f"{role}.json").is_file()
                 ),
+                "remoteAdoptedPolicyCount": len(remote_adopted_roles),
+                "remoteAdoptedRoles": remote_adopted_roles,
             }
         )
     )
@@ -535,11 +646,15 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--oci-digest", required=True)
     result.add_argument("--output", type=Path)
     result.add_argument("--recovery", type=Path)
+    result.add_argument(
+        "--allow-remote-adoption", choices=("true", "false"), default="false"
+    )
     return result
 
 
 def main() -> None:
     args = parser().parse_args()
+    args.allow_remote_adoption = args.allow_remote_adoption == "true"
     validate_args(args)
     if args.command == "check":
         assert_names_absent(args.name_prefix)

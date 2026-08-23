@@ -141,6 +141,7 @@ test("maps exact Commander XP policy provision without exposing the token", () =
       `--source-provenance-digest=sha256:${"4".repeat(64)}`,
       `--build-provenance-digest=sha256:${"5".repeat(64)}`,
       `--oci-digest=sha256:${"6".repeat(64)}`,
+      "--allow-remote-adoption=false",
       `--output=${output}`,
     ];
     const result = spawnSync(process.execPath, [wrapper, ...args], {
@@ -173,6 +174,7 @@ test("maps an exact retained policy recovery directory without exposing credenti
       `--source-provenance-digest=sha256:${"4".repeat(64)}`,
       `--build-provenance-digest=sha256:${"5".repeat(64)}`,
       `--oci-digest=sha256:${"6".repeat(64)}`,
+      "--allow-remote-adoption=true",
       `--output=${output}`,
       `--recovery=${recovery}`,
     ];

@@ -217,7 +217,7 @@ if (command === "commander-xp-policy-provision") {
     "source-provenance-digest",
     "source-sha",
     "source-tree-sha",
-    ...(mode === "upload" ? ["output"] : []),
+    ...(mode === "upload" ? ["allow-remote-adoption", "output"] : []),
     ...(mode === "upload" && parsed.has("recovery") ? ["recovery"] : []),
   ]);
   const output = parsed.get("output");
@@ -240,6 +240,10 @@ if (command === "commander-xp-policy-provision") {
       parsed.get("source-provenance-digest"),
       parsed.get("build-provenance-digest"),
     ].some((value) => !/^sha256:[0-9a-f]{64}$/.test(value ?? "")) ||
+    (mode === "upload" &&
+      !new Set(["true", "false"]).has(
+        parsed.get("allow-remote-adoption") ?? "",
+      )) ||
     (mode === "upload" && !exactRunnerTempOutput(output)) ||
     (parsed.has("recovery") &&
       !exactRunnerTempDirectoryInput(parsed.get("recovery")))

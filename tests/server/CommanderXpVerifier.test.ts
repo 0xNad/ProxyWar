@@ -139,6 +139,20 @@ describe("Commander XP evidence verifier v2", () => {
     );
   });
 
+  it("accepts an exact policy adopted from authoritative current readback", async () => {
+    const fixture = await buildPreregistrationFixture({
+      adoptedPolicyArm: "A",
+    });
+    await expect(
+      verifyCommanderXpEvidence(fixture.evidenceRoot),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        integrityVerified: true,
+        phase: "preregistration",
+      }),
+    );
+  });
+
   it("rejects a self-consistent Coworld runtime receipt for the wrong locked graph", async () => {
     const fixture = await buildPreregistrationFixture();
     const receiptPath = path.join(
@@ -1394,7 +1408,11 @@ function externalPhaseReceiptBinding(
   };
 }
 
-async function buildPreregistrationFixture(): Promise<{
+async function buildPreregistrationFixture(
+  options: {
+    adoptedPolicyArm?: "A" | "B" | "C";
+  } = {},
+): Promise<{
   envelopeRoot: string;
   evidenceRoot: string;
   preregistration: ReturnType<typeof buildCommanderXpPreRegistration>;
@@ -1521,13 +1539,14 @@ async function buildPreregistrationFixture(): Promise<{
         name,
         version: completionResponse.version,
       };
+      const adopted = options.adoptedPolicyArm === arm;
       const requestPayload = {
         name: policyImage.name,
         client_hash: policyImage.client_hash,
       };
       const uploadBody = {
-        schemaVersion: 2,
-        authority: "coworld-0.1.42-policy-upload-readback-v2",
+        schemaVersion: 3,
+        authority: "coworld-0.1.42-policy-upload-readback-v3",
         inspectedAt: "2026-08-22T13:01:00.000Z",
         platform: "linux/amd64",
         sourceSha: planInput.adapterSourceSha,
@@ -1563,13 +1582,26 @@ async function buildPreregistrationFixture(): Promise<{
               BEDROCK_MODEL: planInput.bedrockModel,
               USE_BEDROCK: "true",
             }),
-            attachmentResponseSha256: "f".repeat(64),
+            attachmentResponseSha256: adopted ? null : "f".repeat(64),
           },
-          completionPayloadProjection: completionPayload,
-          completionPayloadSha256: "6".repeat(64),
-          completionResponse,
-          completionResponseSha256: "1".repeat(64),
-          completionResponseBytes: 125,
+          creationMode: adopted
+            ? "adopted-after-remote-success"
+            : "immediate-response",
+          plannedCompletionPayloadProjection: completionPayload,
+          completionPayloadSha256: sha256Canonical(completionPayload),
+          completionPayloadAuthority: adopted
+            ? "source-and-fence-planned-recovery-v1"
+            : "coworld-request-sent-and-responded-v1",
+          completionResponse: adopted ? readback : completionResponse,
+          completionResponseAuthority: adopted
+            ? "coworld-current-policy-version-readback-v1"
+            : "coworld-immediate-completion-response-v1",
+          completionResponseSha256: adopted
+            ? sha256Canonical(readback)
+            : "1".repeat(64),
+          completionResponseBytes: adopted
+            ? Buffer.byteLength(JSON.stringify(readback))
+            : 125,
           readback,
           readbackSha256: sha256Canonical(readback),
         },
@@ -1586,8 +1618,8 @@ async function buildPreregistrationFixture(): Promise<{
     C: JSON.stringify(policyInspects.C),
   };
   const policyReceiptBody = {
-    schemaVersion: 2,
-    authority: "coworld-0.1.42-policy-provision-v2",
+    schemaVersion: 3,
+    authority: "coworld-0.1.42-policy-provision-v3",
     inspectedAt: "2026-08-22T13:01:00.000Z",
     platform: "linux/amd64",
     sourceSha: planInput.adapterSourceSha,

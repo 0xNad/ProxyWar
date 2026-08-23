@@ -12,6 +12,9 @@ test("control workflow consumes provision authority without source self-referenc
   assert.match(workflow, /provision_artifact_id:/);
   assert.match(workflow, /commander-xp-provision-manifest-v2\.json/);
   assert.match(workflow, /commander-xp-plan-input-base-v2\.json/);
+  assert.match(workflow, /commander-xp-provision-recovery-lineage-v1\.json/);
+  assert.match(workflow, /commander-xp-provision-lineage\.mjs validate/);
+  assert.match(workflow, /prior-provision-boundary-artifact\.json/);
   assert.match(workflow, /find "\$PROVISION_ROOT" -type f/);
   assert.match(workflow, /find "\$PROVISION_ROOT" -type l/);
   assert.match(workflow, /mode == "plan-only-no-requests-created"/);

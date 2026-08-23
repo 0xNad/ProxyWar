@@ -57,13 +57,17 @@ test("provision recovery advances only through exact cumulative crash boundaries
   );
   try {
     write(root, "fence-intent.json");
-    assert.equal(build(root, "fence-intent").stage, "fence-intent");
+    const fence = build(root, "fence-intent");
+    assert.equal(fence.stage, "fence-intent");
+    assert.deepEqual(fence.priorStateSha256s, []);
     assert.equal(validate(root).stage, "fence-intent");
 
     write(root, "ghcr.json");
     write(root, "attestations/policy.jsonl");
     write(root, "attestations/game.jsonl");
-    assert.equal(build(root, "ghcr").stage, "ghcr");
+    const ghcr = build(root, "ghcr");
+    assert.equal(ghcr.stage, "ghcr");
+    assert.deepEqual(ghcr.priorStateSha256s, [fence.stateSha256]);
 
     write(root, "policy-receipts/image.json");
     write(root, "policy-receipts/A.json");
@@ -80,9 +84,15 @@ test("provision recovery advances only through exact cumulative crash boundaries
     assert.equal(build(root, "terminal-proof").stage, "terminal-proof");
 
     write(root, "eval/eval-coworld-inspect.json");
-    assert.equal(build(root, "eval-partial").stage, "eval-partial");
-    assert.equal(build(root, "eval-upload").stage, "eval-upload");
-    assert.equal(validate(root).stage, "eval-upload");
+    const partialEval = build(root, "eval-partial");
+    assert.equal(partialEval.stage, "eval-partial");
+    const terminal = build(root, "eval-upload");
+    assert.equal(terminal.stage, "eval-upload");
+    assert.equal(terminal.priorStateSha256s.at(-1), partialEval.stateSha256);
+    assert.deepEqual(
+      validate(root).priorStateSha256s,
+      terminal.priorStateSha256s,
+    );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

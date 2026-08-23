@@ -139,6 +139,11 @@ test("provision recovers only from exact cumulative immutable stage boundaries",
   assert.match(workflow, /STAGE=eval-partial/);
   assert.match(workflow, /cmp "\$EVAL_ROOT\/eval-coworld-manifest-v2\.json"/);
   assert.match(workflow, /eval-coworld-recovery-readback\.json/);
+  assert.match(workflow, /commander-xp-ghcr-adoption\.mjs inspect/);
+  assert.match(workflow, /--allow-remote-adoption="\$ALLOW_REMOTE_ADOPTION"/);
+  assert.match(workflow, /eval-coworld-adoption-list\.json/);
+  assert.match(workflow, /commander-xp-provision-recovery-lineage-v1\.json/);
+  assert.match(workflow, /commander-xp-provision-lineage\.mjs seal/);
   assert.doesNotMatch(workflow, /NAME_PREFIX=.*GITHUB_RUN_ID/);
 });
 
@@ -172,7 +177,8 @@ test("provision retains only safe projections of presigned policy upload respons
     policyProvisioner,
     /write_(?:text|bytes)\([^\n]*response_bytes/,
   );
-  assert.match(policyProvisioner, /coworld-0\.1\.42-policy-upload-readback-v2/);
+  assert.match(policyProvisioner, /coworld-0\.1\.42-policy-upload-readback-v3/);
+  assert.match(policyProvisioner, /adopted-after-remote-success/);
   assert.match(
     policyProvisioner,
     /image\["image_digest"\] != args\.oci_digest/,
