@@ -547,7 +547,7 @@ jobs:
         run: |
           set -uo pipefail
           OUTPUT="$RUNNER_TEMP/coworld-upload.txt"
-          node .github/scripts/coworld-authenticated-command.mjs upload-coworld "$RUNNER_TEMP/release/coworld_manifest.json" --wait-hosted-smoke --wait-certification --timeout-seconds 300 --hosted-smoke-timeout-seconds 1800 --certification-timeout-seconds 1800 | tee "$OUTPUT"
+          node .github/scripts/coworld-authenticated-command.mjs upload-coworld "$RUNNER_TEMP/release/coworld_manifest.json" --wait-hosted-smoke --wait-certification --timeout-seconds 600 --hosted-smoke-timeout-seconds 1800 --certification-timeout-seconds 1800 | tee "$OUTPUT"
           UPLOAD_STATUS=${PIPESTATUS[0]}
           COWORLD_ID=$(sed -n 's/^Coworld: //p' "$OUTPUT" | tail -1)
           MANIFEST_HASH=$(sed -n 's/^Manifest hash: //p' "$OUTPUT" | tail -1)

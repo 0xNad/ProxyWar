@@ -121,6 +121,10 @@ test("Coworld release is pinned to the replay-bundle readiness contract, templat
   assert.match(production, /coworld-authenticated-command\.mjs next-version/);
   assert.match(production, /"\$COWORLD_BIN" certify/);
   assert.match(production, /--wait-hosted-smoke --wait-certification/);
+  assert.match(
+    production,
+    /upload-coworld[^\n]+--timeout-seconds 600 --hosted-smoke-timeout-seconds 1800 --certification-timeout-seconds 1800/,
+  );
   assert.match(production, /transcript_summary/);
   assert.match(
     production,
