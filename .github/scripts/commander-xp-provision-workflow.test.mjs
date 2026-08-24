@@ -150,6 +150,14 @@ test("provision recovers only from exact cumulative immutable stage boundaries",
 test("provision proves exact 360x100 terminality and preserves product binding", () => {
   assert.match(workflow, /commander-xp-run-episode/);
   assert.match(workflow, /commander-xp-certify/);
+  assert.match(
+    workflow,
+    /build_replay_viewer\.sh[^\n]*\\\n\s+"\$EVAL_ROOT\/build\/static-replay-viewer"/,
+  );
+  assert.match(
+    workflow,
+    /test -f "\$EVAL_ROOT\/build\/static-replay-viewer\/index\.html"/,
+  );
   assert.doesNotMatch(workflow, /"\$COWORLD_BIN" (?:run-episode|certify)/);
   assert.match(workflow, /tournament-4p-pangaea/);
   assert.match(workflow, /\.turn_count <= 36400/);

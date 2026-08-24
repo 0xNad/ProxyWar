@@ -754,6 +754,9 @@ jobs:
             --output="$EVAL_ROOT/eval-coworld-manifest-v2.json" \
             --image="$GAME_REPO_DIGEST" --version="$EVAL_VERSION" \
             > "$RUNNER_TEMP/eval-manifest-result.json"
+          coworld-adapter/coworld/tools/build_replay_viewer.sh \
+            "$EVAL_ROOT/build/static-replay-viewer"
+          test -f "$EVAL_ROOT/build/static-replay-viewer/index.html"
           PROOF_OUTPUT_PARENT=$(mktemp -d "$RUNNER_TEMP/commander-xp-terminal-output.XXXXXX")
           chmod 700 "$PROOF_OUTPUT_PARENT"
           PROOF_ROOT="$PROOF_OUTPUT_PARENT/terminal-proof"
