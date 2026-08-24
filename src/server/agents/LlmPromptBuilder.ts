@@ -566,7 +566,7 @@ function isAcceptedSpatial(observation: AgentObservation): boolean {
       return false;
     }
     if (
-      positioned.analysis === "complete" &&
+      !positioned.structuresTruncated &&
       (observation.visiblePlayers.some(
         (player) =>
           (player.borderWithYou?.defensePostsCovering ?? 0) >

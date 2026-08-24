@@ -1030,6 +1030,15 @@ test("rich spatial L3 is exact, bounded, and fails closed atomically", () => {
     assert.equal(boundedSpatialV3(malformed), null);
   }
 
+  const cappedWarshipsMissingPost = structuredClone(valid);
+  cappedWarshipsMissingPost.spatial.positionedAssets.analysis = "capped";
+  cappedWarshipsMissingPost.spatial.positionedAssets.structures = [];
+  cappedWarshipsMissingPost.spatial.positionedAssets.structuresTotal = 0;
+  cappedWarshipsMissingPost.spatial.positionedAssets.structuresReturned = 0;
+  cappedWarshipsMissingPost.spatial.positionedAssets.warshipsTotal += 1;
+  cappedWarshipsMissingPost.spatial.positionedAssets.warshipsTruncated = true;
+  assert.equal(boundedSpatialV3(cappedWarshipsMissingPost), null);
+
   const tooManyPerPlayer = structuredClone(valid);
   tooManyPerPlayer.spatial.positionedAssets.structures = Array.from(
     { length: 9 },
@@ -1244,6 +1253,25 @@ test("rich spatial L5 admits weighted exposure and a complete terrain marker min
     mutate(malformed);
     assert.equal(boundedSpatialV5(malformed), null);
   }
+
+  const cappedV5WarshipsMissingPost = structuredClone(valid);
+  cappedV5WarshipsMissingPost.spatial.positionedAssets.analysis = "capped";
+  cappedV5WarshipsMissingPost.spatial.positionedAssets.structures = [];
+  cappedV5WarshipsMissingPost.spatial.positionedAssets.structuresTotal = 0;
+  cappedV5WarshipsMissingPost.spatial.positionedAssets.structuresReturned = 0;
+  cappedV5WarshipsMissingPost.spatial.positionedAssets.warshipsTotal += 1;
+  cappedV5WarshipsMissingPost.spatial.positionedAssets.warshipsTruncated = true;
+  assert.equal(boundedSpatialV5(cappedV5WarshipsMissingPost), null);
+
+  const cappedWarshipsMissingPort = structuredClone(valid);
+  cappedWarshipsMissingPort.spatial.positionedAssets.analysis = "capped";
+  cappedWarshipsMissingPort.spatial.positionedAssets.warshipsTotal += 1;
+  cappedWarshipsMissingPort.spatial.positionedAssets.warshipsTruncated = true;
+  cappedWarshipsMissingPort.visiblePlayers[0].navalExposure.nearestEnemyPort = {
+    bearing: "east",
+    distanceClass: "near",
+  };
+  assert.equal(boundedSpatialV5(cappedWarshipsMissingPort), null);
 
   const duplicateEdge = structuredClone(validWeightedGraph);
   duplicateEdge.visiblePlayers[0].bordersWith.push({

@@ -394,6 +394,19 @@ describe("spatial observation flags", () => {
     excessiveCompletedPostCount.visiblePlayers.find(
       (player) => player.borderWithYou !== undefined,
     )!.borderWithYou!.defensePostsCovering = 2;
+    const cappedWarshipsMissingPost = structuredClone(observation);
+    cappedWarshipsMissingPost.spatial!.positionedAssets.analysis = "capped";
+    cappedWarshipsMissingPost.spatial!.positionedAssets.structures = [];
+    cappedWarshipsMissingPost.spatial!.positionedAssets.structuresTotal = 0;
+    cappedWarshipsMissingPost.spatial!.positionedAssets.structuresReturned = 0;
+    cappedWarshipsMissingPost.spatial!.positionedAssets.warshipsTotal += 1;
+    cappedWarshipsMissingPost.spatial!.positionedAssets.warshipsTruncated = true;
+    const cappedWarshipsMissingPort = structuredClone(observation);
+    cappedWarshipsMissingPort.spatial!.positionedAssets.analysis = "capped";
+    cappedWarshipsMissingPort.spatial!.positionedAssets.warshipsTotal += 1;
+    cappedWarshipsMissingPort.spatial!.positionedAssets.warshipsTruncated = true;
+    cappedWarshipsMissingPort.visiblePlayers[0].navalExposure!.nearestEnemyPort =
+      { bearing: "east", distanceClass: "near" };
     const badTotals = structuredClone(observation);
     badTotals.spatial!.positionedAssets.structuresTotal =
       Number.POSITIVE_INFINITY;
@@ -495,6 +508,8 @@ describe("spatial observation flags", () => {
       [mismatchedAttackState, true],
       [missingPositionedPort, true],
       [excessiveCompletedPostCount, true],
+      [cappedWarshipsMissingPost, true],
+      [cappedWarshipsMissingPort, true],
       [badTotals, true],
       [badPartial, true],
     ] as const) {

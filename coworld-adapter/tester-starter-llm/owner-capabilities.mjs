@@ -1628,7 +1628,7 @@ export function boundedSpatialV3(observation) {
   );
   if (
     !positionedAssets ||
-    (positionedAssets.analysis === "complete" &&
+    (!positionedAssets.structuresTruncated &&
       rivals.some(
         (rival) =>
           (rival.borderWithYou?.defensePostsCovering ?? 0) >
@@ -1736,7 +1736,7 @@ export function boundedSpatialV5(observation) {
   );
   if (
     !positionedAssets ||
-    (positionedAssets.analysis === "complete" &&
+    (!positionedAssets.structuresTruncated &&
       (rivals.some(
         (rival) =>
           (rival.borderWithYou?.defensePostsCovering ?? 0) >
