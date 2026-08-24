@@ -280,7 +280,8 @@
       ],
       "env": {
         "PROXYWAR_TUNE_STRUCTURED_DEALS": "1",
-        "PROXYWAR_TUNE_FREETEXT_MESSAGES": "1"
+        "PROXYWAR_TUNE_FREETEXT_MESSAGES": "1",
+        "PROXYWAR_TUNE_SPATIAL_OBSERVATION": "1"
       }
     },
     "protocols": {

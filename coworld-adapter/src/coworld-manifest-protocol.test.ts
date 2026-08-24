@@ -20,6 +20,7 @@ const MANIFEST_NAMES = [
 
 interface ManifestProtocolText {
   game: {
+    runnable: { env: Record<string, string> };
     protocols: { player: { value: string } };
     docs: { readme: { value: string } };
     config_schema: {
@@ -118,6 +119,22 @@ const adapterDirectory = existsSync(resolve(process.cwd(), "coworld"))
 const manifestDirectory = resolve(adapterDirectory, "coworld");
 
 describe("Coworld manifest spawn-preference protocol", () => {
+  it.each(["coworld_manifest.json", "coworld_manifest_template.json"])(
+    "%s enables structured spatial observation without enabling the minimap",
+    (manifestName) => {
+      const manifest = JSON.parse(
+        readFileSync(`${manifestDirectory}/${manifestName}`, "utf8"),
+      ) as ManifestProtocolText;
+
+      expect(manifest.game.runnable.env).toMatchObject({
+        PROXYWAR_TUNE_SPATIAL_OBSERVATION: "1",
+      });
+      expect(manifest.game.runnable.env).not.toHaveProperty(
+        "PROXYWAR_TUNE_SPATIAL_MINIMAP",
+      );
+    },
+  );
+
   it("covers every canonical, template, and FFA manifest", () => {
     const discovered = readdirSync(manifestDirectory)
       .filter((name) => /^coworld_manifest.*\.json$/.test(name))

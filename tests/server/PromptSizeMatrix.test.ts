@@ -1,6 +1,13 @@
 import { Buffer } from "node:buffer";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  SPATIAL_MINIMAP_SERIALIZED_MAX_BYTES,
+  SPATIAL_PROMPT_INCREMENT_MAX_BYTES,
+  SPATIAL_PROMPT_INCREMENT_MAX_ESTIMATED_TOKENS,
+  SPATIAL_PROMPT_INCREMENT_MAX_RATIO_AT_16_SEATS,
+  SPATIAL_STAGE_ONE_SERIALIZED_MAX_BYTES,
+} from "../../src/server/agents/AgentSpatialObservation";
+import {
   buildCommanderPrompt,
   MAX_COMMANDER_PROMPT_BYTES,
   MAX_COMMANDER_STATE_JSON_BYTES,
@@ -11,6 +18,7 @@ import {
   buildBoard,
   loadStarterBuildState,
   measureArm,
+  parseSeatCounts,
 } from "../perf/agent-prompt-size-matrix";
 import { makeCommanderStage2Fixture } from "./StrategicCommanderStage2TestHarness";
 
@@ -45,6 +53,14 @@ function arm(name: string) {
 describe("prompt size matrix arms", () => {
   afterEach(() => {
     for (const key of TUNABLES) delete process.env[key];
+  });
+
+  it("rejects an empty or malformed prompt gate seat matrix", () => {
+    expect(() => parseSeatCounts("")).toThrow(/positive integers/);
+    expect(() => parseSeatCounts("foo")).toThrow(/positive integers/);
+    expect(() => parseSeatCounts("0")).toThrow(/positive integers/);
+    expect(() => parseSeatCounts("26")).toThrow(/supported count/);
+    expect(parseSeatCounts("4, 8,4,25")).toEqual([4, 8, 25]);
   });
 
   it("separates every feature arm on a real 8-seat mid-game board", async () => {
@@ -105,6 +121,18 @@ describe("prompt size matrix arms", () => {
     expect(minimap.spatialChars).toBeGreaterThan(spatial.spatialChars);
     expect(minimap.promptChars).toBeGreaterThan(spatial.promptChars);
     expect(spatial.promptChars).toBeGreaterThan(base.promptChars);
+    expect(
+      spatial.observationBytes - base.observationBytes,
+    ).toBeLessThanOrEqual(SPATIAL_STAGE_ONE_SERIALIZED_MAX_BYTES);
+    expect(
+      minimap.observationBytes - spatial.observationBytes,
+    ).toBeLessThanOrEqual(SPATIAL_MINIMAP_SERIALIZED_MAX_BYTES);
+    expect(minimap.promptBytes - base.promptBytes).toBeLessThanOrEqual(
+      SPATIAL_PROMPT_INCREMENT_MAX_BYTES,
+    );
+    expect(minimap.estTokensHigh - base.estTokensHigh).toBeLessThanOrEqual(
+      SPATIAL_PROMPT_INCREMENT_MAX_ESTIMATED_TOKENS,
+    );
 
     // The comms lane costs menu bytes even with an EMPTY inbox: the message
     // actions themselves are the floor. This is the assertion that failed
@@ -178,5 +206,19 @@ describe("prompt size matrix arms", () => {
     expect(stateBytes).toBeLessThanOrEqual(MAX_COMMANDER_STATE_JSON_BYTES);
     expect(promptBytes).toBeLessThanOrEqual(MAX_COMMANDER_PROMPT_BYTES);
     expect(promptBytes - stateBytes).toBeLessThan(4_000);
+  });
+
+  it("keeps the all-on spatial prompt increment within ten percent at 16 seats", async () => {
+    const starterBuildState = await loadStarterBuildState();
+    const board = await buildBoard("world", 16, "mid");
+    const base = measureArm(board, arm("warships"), starterBuildState);
+    const minimap = measureArm(
+      board,
+      arm("spatial_minimap"),
+      starterBuildState,
+    );
+    expect(
+      (minimap.promptBytes - base.promptBytes) / base.promptBytes,
+    ).toBeLessThanOrEqual(SPATIAL_PROMPT_INCREMENT_MAX_RATIO_AT_16_SEATS);
   });
 });

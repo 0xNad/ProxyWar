@@ -15,6 +15,7 @@ import { AgentMemoryBuilder } from "./AgentMemoryBuilder";
 import { nuclearTargetStructurePriority } from "./AgentNuclearPolicy";
 import {
   AgentSpatialSnapshot,
+  buildSpatialMapInfo,
   buildSpatialObservationExtension,
   createAgentSpatialSnapshot,
   SpatialObservationExtension,
@@ -236,6 +237,10 @@ export class AgentObservationBuilder {
       input.gameState && player
         ? this.spatialObservation(input.gameState, player, visiblePlayers)
         : undefined;
+    const mapInfo =
+      input.gameState !== undefined && spatialObservationEnabled()
+        ? buildSpatialMapInfo(input.gameState)
+        : undefined;
     if (spatial !== undefined) notes.push(...spatial.notes);
     const combat = this.combatState(
       input.gameState,
@@ -282,6 +287,7 @@ export class AgentObservationBuilder {
         ownState,
         visiblePlayers,
         ...(spatial !== undefined ? { spatial: spatial.spatial } : {}),
+        ...(mapInfo !== undefined ? { mapInfo } : {}),
         combat,
         nonCombat,
         strategic,
@@ -312,6 +318,7 @@ export class AgentObservationBuilder {
       ownState,
       visiblePlayers,
       ...(spatial !== undefined ? { spatial: spatial.spatial } : {}),
+      ...(mapInfo !== undefined ? { mapInfo } : {}),
       combat,
       nonCombat,
       strategic,

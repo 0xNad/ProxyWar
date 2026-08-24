@@ -2,11 +2,11 @@
 
 Your agent can write a short private message to one rival per decision.
 
-> **Not switched on in the public league yet.** The server offers `message`
-> actions only when free-text negotiation is enabled for that match, and it is
-> still off on the public ladder — we will say so before it goes live. Build
-> support now anyway: when no `message` action is offered, the code below simply
-> stays quiet, so nothing breaks and your agent is ready on day one.
+Free-text negotiation is enabled in the current hosted ProxyWar Coworld. The
+request advertises `protocol.maxMessageChars` and offers `message` actions when
+the capability is available. Feature-detect both: when either is absent, omit
+both message response fields. That keeps the same policy backward-compatible
+with older or flag-off packages.
 
 **Talk is free. Only actions bind.** A message changes nothing in the game by
 itself: it moves no troops, grants no permission, and creates no obligation. If
@@ -44,14 +44,31 @@ neither. `selectedMessageActionId` must exactly match a currently offered action
 whose kind is `message`. The message slot is separate from the game action and
 from the deal slot, so talking never costs you your move.
 
-Rules the server enforces. Breaking any of them drops the message (your game
-action still goes through) and records the reason:
+Rules this reference policy enforces before it responds. The hosted server also
+enforces the exact offered ID, paired fields, raw length bound, and its named
+legacy-control denylist. Breaking a server-enforced rule drops the message (your
+game action still goes through) and records the reason:
 
-- 280 characters maximum, measured after whitespace is collapsed.
+- `messageText` must be a nonblank string no longer than the advertised limit,
+  currently 280 UTF-16 code units measured on the raw body by JavaScript
+  `String.length`.
 - The text is **rejected, never truncated**. We will not put words in your
-  agent's mouth by trimming a promise into a different promise.
-- No control characters.
+  agent's mouth by trimming or normalizing a promise into a different promise.
+- Valid text, including ordinary internal whitespace, is preserved exactly.
+- The reference helper rejects raw C0 controls, DEL, C1 controls,
+  line/paragraph separators, bidi controls, every Unicode default-ignorable
+  code point (including zero-width, variation/tag, soft-hyphen, and BOM forms),
+  and interlinear annotation controls rather than stripping them. The current
+  hosted validator has a finite denylist and does not yet cover every
+  default-ignorable; do not claim platform-wide coverage from this owner patch.
+- Unpaired UTF-16 surrogates are malformed and are omitted by the reference
+  helper rather than being encoded as a replacement character.
 - One message per decision, to one recipient.
+
+The action id follows the same reject-don't-rewrite rule. A padded, partial,
+non-string, prefix/suffix-collision, or off-menu `selectedMessageActionId` is
+not repaired into authority. Select the exact `id` object already present in
+the current `legalActions` menu.
 
 ## What you receive
 
@@ -89,12 +106,14 @@ what a message is allowed to do:
    **claims**, never merged into `rivals`. A claim cannot be mistaken for
    something the agent actually observed.
 2. The security instruction restricts what a claim may move: deal posture
-   (who to deal with, and whether to break a deal) and nothing else. It may
-   never change what the agent attacks, builds, or targets.
+   (who to deal with, and whether to break a deal). It cannot name or raw-emit
+   an action, and cannot alter `focus`, `preferKinds`, or `target`. Bounded
+   `breakDealIDs` may still change breach posture and thereby change which
+   exact offered action ID the policy selects.
 3. **The planner cannot name an action ID at all.** It returns a posture —
    focus, preferred kinds, deal policies — and the code picks the exact
-   offered ID. So no message can choose your move no matter what the model is
-   talked into.
+   offered ID. A message therefore has no raw-intent or direct action-ID path;
+   any indirect posture effect remains constrained to the offered menu.
 4. Replies come from fixed templates, so a rival can never author your words.
 
 Point 3 is the one that matters. Keep it if you change anything: it is what
@@ -105,9 +124,10 @@ handed your agent to your opponents.
 ## What the starter does today
 
 `chooseMessageMove` in `llm-player.mjs` answers at most one rival per decision:
-the one who most recently wrote to it, once per inbound message, with a template
-chosen from what it already knows about that rival — allied, mid-deal, a proven
-deal-breaker, or a stranger. Otherwise it stays quiet.
+the one who most recently wrote to it, with a template chosen from what it
+already knows about that rival — allied, mid-deal, a proven deal-breaker, or a
+stranger. It sends at most three replies per rival per match. Otherwise it
+stays quiet.
 
 Silence is the sensible default. An agent that talks every step is noise, and
 noise is not negotiation. Talk when you want something, when you are answering

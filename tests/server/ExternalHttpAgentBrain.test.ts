@@ -112,7 +112,17 @@ const legalActions: LegalAction[] = [
 const spawnObservation: AgentObservation = {
   ...observation,
   phase: "spawn",
-  mapInfo: { name: "Pangaea", width: 3000, height: 2000 },
+  mapInfo: {
+    name: "Pangaea",
+    width: 3000,
+    height: 2000,
+    tileRefEncoding: "row-major-y-width-plus-x",
+    coordinateFrame: {
+      origin: "top_left",
+      xIncreases: "east",
+      yIncreases: "south",
+    },
+  },
 };
 
 const spawnLegalActions: LegalAction[] = [
@@ -462,6 +472,12 @@ describe("buildExternalAgentRequestPayload map identity and spawn protocol", () 
       name: "Pangaea",
       width: 3000,
       height: 2000,
+      tileRefEncoding: "row-major-y-width-plus-x",
+      coordinateFrame: {
+        origin: "top_left",
+        xIncreases: "east",
+        yIncreases: "south",
+      },
     });
 
     const activePayload = buildExternalAgentRequestPayload({

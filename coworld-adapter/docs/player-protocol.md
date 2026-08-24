@@ -18,7 +18,8 @@ The game sends:
   "slot": 0,
   "protocol": {
     "maxActionsPerDecision": 5,
-    "maxSpawnPreferences": 16
+    "maxSpawnPreferences": 16,
+    "maxMessageChars": 280
   },
   "request": {
     "protocolVersion": "proxywar-agent-v1",
@@ -34,6 +35,8 @@ The game sends:
     "responseContract": {
       "selectedLegalActionId": "must exactly match one offered legalActions[].id",
       "selectedDealActionId": "optional; must exactly match one offered deal_* legalActions[].id",
+      "selectedMessageActionId": "optional; must exactly match one offered message legalActions[].id",
+      "messageText": "required with selectedMessageActionId; raw nonblank text at or below protocol.maxMessageChars",
       "reason": "short human-readable string",
       "confidence": "optional number from 0 to 1"
     }
@@ -211,6 +214,225 @@ Rules:
   offered menu is always enough.
 - The reply's `reason` doubles as the stated rationale attached to the pact or betrayal in
   replays. It is shown to VIEWERS only - it is never sent to any other player.
+
+## `selectedMessageActionId` + `messageText` (optional pair)
+
+Free text uses a third, independent comms slot. The capability is advertised by
+`protocol.maxMessageChars` and one or more offered `message` actions. Send both
+fields or neither:
+
+```json
+{
+  "type": "decision_response",
+  "requestID": "req_...",
+  "selectedLegalActionId": "expand:terra-nullius:10",
+  "selectedMessageActionId": "message:P_B",
+  "messageText": "Truce on our shared border until turn 300.",
+  "reason": "Expand west while answering the eastern rival."
+}
+```
+
+Rules:
+
+- `selectedMessageActionId` must equal one exact currently offered action ID
+  whose kind is `message`. Whitespace padding, partial IDs, prefix/suffix
+  collisions, non-string values, and off-menu IDs are rejected, never repaired.
+- `messageText` must be a nonblank string whose raw JavaScript `String.length`
+  is at most `protocol.maxMessageChars` (currently 280 UTF-16 code units). The
+  adapter preserves every valid character exactly; the server rejects rather
+  than truncates or normalizes an invalid body.
+- Raw C0 controls, DEL, C1 controls, U+2028/U+2029, bidi controls, zero-width
+  formatting, soft hyphen, BOM, and interlinear annotation controls are
+  rejected. Ordinary internal whitespace in an otherwise valid body is not
+  collapsed.
+- A rejected/absent comms slot does not alter the primary game action or deal
+  slot. Text is simulation-inert: no core system reads it as intent, permission,
+  or action authority.
+- Inbound text appears only in the addressed policy's bounded
+  `observation.nonCombat.inboundMessages`. It is an untrusted rival claim.
+  Spectator/replay evidence is public; do not put secrets in a message.
+
+## Optional rich structured spatial observation (schema 5)
+
+Spatial data is additive and absent by default. Schema `5` implements the
+complete coordinate, terrain, public-asset, exposure, and minimap layers:
+
+```json
+{
+  "ownState": { "playerID": "P_SELF" },
+  "mapInfo": {
+    "name": "Pangaea",
+    "width": 100,
+    "height": 80,
+    "tileRefEncoding": "row-major-y-width-plus-x",
+    "coordinateFrame": {
+      "origin": "top_left",
+      "xIncreases": "east",
+      "yIncreases": "south"
+    }
+  },
+  "visiblePlayers": [
+    {
+      "playerID": "P_RIVAL",
+      "sharesBorder": true,
+      "incomingAttack": false,
+      "bearing": "east",
+      "distanceClass": "adjacent",
+      "borderWithYou": {
+        "tiles": 10,
+        "shareOfYourBorder": 25,
+        "terrain": "mixed",
+        "terrainBreakdown": {
+          "plains": 4,
+          "highland": 3,
+          "mountain": 3,
+          "shore": 2
+        },
+        "defensePostsCovering": 1,
+        "defensePostFrontCoverage": { "covered": 6, "uncovered": 4 },
+        "underAttackHere": false
+      },
+      "bordersWith": [],
+      "navalExposure": {
+        "transportReachableOwnShoreTiles": 12
+      }
+    }
+  ],
+  "spatial": {
+    "schemaVersion": 5,
+    "visibilityModel": "global-lockstep-public-map-v1",
+    "ownShape": {
+      "quadrant": "west",
+      "compactness": "compact",
+      "regionCount": 1,
+      "largestRegionShare": 100,
+      "regionAnalysis": "complete",
+      "centroidBasis": "largest_region_border",
+      "coastShare": 25,
+      "largestNeighborBorderShare": 25,
+      "centroid": { "xPct": 31, "yPct": 54 }
+    },
+    "positionedAssets": {
+      "analysis": "complete",
+      "structures": [
+        {
+          "ownerPlayerID": "P_SELF",
+          "type": "Defense Post",
+          "tile": 4031,
+          "x": 31,
+          "y": 40
+        }
+      ],
+      "structuresTotal": 1,
+      "structuresReturned": 1,
+      "structuresTruncated": false,
+      "warships": [
+        {
+          "ownerPlayerID": "P_RIVAL",
+          "type": "Warship",
+          "tile": 4060,
+          "x": 60,
+          "y": 40
+        }
+      ],
+      "warshipsTotal": 1,
+      "warshipsReturned": 1,
+      "warshipsTruncated": false
+    },
+    "minimap": {
+      "schemaVersion": 2,
+      "width": 24,
+      "height": 12,
+      "ownershipRows": [
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        ".......A......~.........",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................"
+      ],
+      "terrainRows": [
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "..............~.........",
+        "........................",
+        "........................",
+        "........................",
+        "........................",
+        "........................"
+      ],
+      "legend": [
+        { "glyph": "A", "playerID": "P_SELF", "isYou": true },
+        { "glyph": "B", "playerID": "P_RIVAL", "isYou": false }
+      ],
+      "markers": [
+        { "type": "D", "ownerPlayerID": "P_SELF", "x": 7, "y": 6 },
+        { "type": "W", "ownerPlayerID": "P_RIVAL", "x": 14, "y": 6 }
+      ],
+      "markersTotal": 2,
+      "markersReturned": 2,
+      "markersTruncated": false
+    }
+  }
+}
+```
+
+`global-lockstep-public-map-v1` is the explicit no-fog visibility contract: the
+summary may contain only the same globally player-visible map state available
+to a legitimate player in the current game. A policy must ignore an absent or
+unknown visibility model/schema. Decode an asset tile only as
+`tile = y * width + x`; every coordinate must be an in-range integer and round
+trip exactly. Front `plains + highland + mountain` must equal `tiles`; `shore`
+overlaps that elevation partition and cannot exceed `tiles`. Defense coverage
+must also sum exactly to `tiles`.
+
+Only active, completed, nondeleted Defense Posts, Cities, Ports, and Warships
+are admitted. Positions include the owner plus players already present in the
+bounded `visiblePlayers[]`; they do not reveal a new roster. Lists are capped at
+eight per player and 48 globally with exact totals, returned counts, and
+truncation status. The normalized spatial base excluding its optional minimap
+child is limited to 16 KiB UTF-8; the child has the separate 4 KiB ceiling
+below. A malformed coordinate, owner, type, count, cap, graph, naval, or
+invariant rejects the whole schema-5 block rather than being repaired or
+partially retained.
+
+Schema `5` adds L4 exposure and the L5 minimap. Every rival has exact weighted
+`bordersWith[].tiles`, a bounded naval-reach count, and optional nearest-port
+bearing/distance; `largestNeighborBorderShare` summarizes encirclement. The
+child minimap is schema `2`, 24x12 or adaptive 32x16 on large maps, with
+separate ownership and dominant-terrain rows plus bounded completed-public
+Defense Post (`D`), City (`C`), Port (`P`), and Warship (`W`) markers. It is
+accepted whole or omitted whole; never crop, pad, repair glyphs, or infer
+hidden tiles. Its normalized UTF-8 form is capped at 4 KiB, every legend and
+marker owner ID must already be the owner or a `visiblePlayers[]` ID, and
+exactly the owner has `isYou:true`. Malformed minimap data omits only that
+optional child; it does not discard an otherwise valid schema-5
+map/front/asset/exposure block. Spatial schemas `1` and `3` remain bounded
+backward-compatible shapes, but neither proves the L4/L5 contract.
+
+`mapInfo` is bundled behind the parent default-OFF spatial flag for this
+release. Once that flag is ON it is present on every game-backed request,
+including spawn/no-land requests; the `spatial` L2-L5 geometry object begins
+only after the seat owns land. This preserves exact OFF-arm bytes and explicitly
+supersedes the older draft's unflagged-L1 sentence.
+
+Spatial data is context, not authority. It may change only which exact current
+`legalActions[].id` the policy selects. A coordinate, glyph, player ID, or map
+cell is never a raw action and never bypasses
+`AgentDecisionValidator -> AgentRunner -> GameServer`.
+
+Schema `5` is the complete rich structured-map L1-L5 contract. Schema `3` is
+retained only for backward-compatible L1-L3 consumption.
 
 ### Promise semantics
 
