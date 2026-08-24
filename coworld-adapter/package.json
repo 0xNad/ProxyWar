@@ -7,6 +7,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "build:spatial-xp-manifest": "node src/build-spatial-xp-manifest.mjs",
+    "finalize:spatial-xp-manifest": "node src/finalize-spatial-xp-manifest.mjs",
+    "upload:spatial-xp-manifest": "node src/spatial-xp-upload-transition.mjs",
     "prepare:docker-context": "node scripts/prepare-docker-context.mjs",
     "build:image": "npm run gate:memory && npm run prepare:docker-context && docker build --platform linux/amd64 -f Dockerfile.coworld -t proxywar-coworld-local:latest .docker-context",
     "certify": "mkdir -p tmp && TMPDIR=\"$PWD/tmp\" uvx --from coworld coworld certify coworld/coworld_manifest.json --timeout-seconds 180",

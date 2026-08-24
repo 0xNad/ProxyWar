@@ -7,6 +7,11 @@ export const SPATIAL_XP_GAME_NAMES = Object.freeze({
   structured: "proxywar-spatial-xp-structured",
   on: "proxywar-spatial-xp-on",
 });
+export const SPATIAL_XP_ARM_DESCRIPTIONS = Object.freeze({
+  off: "spatial summary and minimap disabled",
+  structured: "structured spatial summary enabled; minimap disabled",
+  on: "structured spatial summary and minimap enabled",
+});
 export const SPATIAL_XP_VISIBILITY_MODEL = "global-lockstep-public-map-v1";
 export const SPATIAL_XP_STRUCTURED_ENV = Object.freeze({
   PROXYWAR_TUNE_SPATIAL_OBSERVATION: "1",
@@ -19,15 +24,21 @@ export const SPATIAL_XP_IMAGE_AUTHORITY_PAGE_ID =
   "proxywar-spatial-xp-image-authority";
 export const SPATIAL_XP_IMAGE_AUTHORITY_STATUS = "unverified";
 export const SPATIAL_XP_UPLOAD_BLOCKED = true;
+export const SPATIAL_XP_UPLOAD_BLOCKED_DESCRIPTION =
+  "UPLOAD BLOCKED while image authority is unverified";
+export const SPATIAL_XP_UNVERIFIED_AUTHORITY_TEXT =
+  "status=unverified\n" +
+  "upload_blocked=true\n" +
+  "required_evidence=independently_fetched_immutable_coworld_authority_receipt";
+export const SPATIAL_XP_UNVERIFIED_README_SECTION =
+  "## Image Authority Gate\n\n" +
+  "This generated manifest records image authority as unverified and must be treated as upload-blocked by the release procedure. The checked-in finalizer must directly fetch each exact Coworld image record, record Coworld's separate immutable image digest, and join Coworld client_hash to the local linux/amd64 Docker image ID whose exact tag and OCI revision identify this source before Control may produce an upload candidate. Caller-authored inspection output is diagnostic only and cannot satisfy this gate. The marker is evidence for the hard stop; it does not make the JSON technically impossible to upload outside the controlled workflow.\n";
 const SPATIAL_XP_IMAGE_AUTHORITY_PAGE = Object.freeze({
   id: SPATIAL_XP_IMAGE_AUTHORITY_PAGE_ID,
   title: "Spatial XP image authority gate",
   content: {
     type: "text",
-    value:
-      "status=unverified\n" +
-      "upload_blocked=true\n" +
-      "required_evidence=independently_fetched_immutable_coworld_authority_receipt",
+    value: SPATIAL_XP_UNVERIFIED_AUTHORITY_TEXT,
   },
 });
 
@@ -164,16 +175,10 @@ export function buildSpatialXpManifest(
       : arm === "structured"
         ? { ...env, ...SPATIAL_XP_STRUCTURED_ENV }
         : { ...env, ...SPATIAL_XP_ENV };
-  const armDescription =
-    arm === "off"
-      ? "spatial summary and minimap disabled"
-      : arm === "structured"
-        ? "structured spatial summary enabled; minimap disabled"
-        : "structured spatial summary and minimap enabled";
   candidate.game.name = SPATIAL_XP_GAME_NAMES[arm];
   candidate.game.description =
     `${canonicalGame.description} ` +
-    `[NONCANONICAL XP ${arm.toUpperCase()}: ${armDescription}; UPLOAD BLOCKED while image authority is unverified; never league-bind.]`;
+    `[NONCANONICAL XP ${arm.toUpperCase()}: ${SPATIAL_XP_ARM_DESCRIPTIONS[arm]}; ${SPATIAL_XP_UPLOAD_BLOCKED_DESCRIPTION}; never league-bind.]`;
   candidate.game.runnable.env = { ...armEnv };
   candidate.game.protocols.player.value =
     playerProtocol.value + SPATIAL_XP_PROTOCOL_APPENDIX;
@@ -182,8 +187,7 @@ export function buildSpatialXpManifest(
     "\n\n## Noncanonical Spatial XP\n\n" +
     SPATIAL_XP_PROTOCOL_APPENDIX.trim() +
     ` This package is the ${arm} arm and must never replace or bind the canonical Proxy War league package.\n\n` +
-    "## Image Authority Gate\n\n" +
-    "This generated manifest records image authority as unverified and must be treated as upload-blocked by the release procedure. A separate, independently fetched immutable Coworld authority receipt must bind the exact image digest and source SHA before Control may produce an upload candidate. Caller-authored inspection output is diagnostic only and cannot satisfy this gate. The marker is evidence for the hard stop; it does not make the JSON technically impossible to upload outside the controlled workflow.\n";
+    SPATIAL_XP_UNVERIFIED_README_SECTION;
   candidate.game.docs.pages.push(
     structuredClone(SPATIAL_XP_IMAGE_AUTHORITY_PAGE),
   );

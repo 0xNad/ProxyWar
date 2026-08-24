@@ -54,23 +54,139 @@ uncontrolled client.
 
 ### Image authority blocker
 
-The rendered manifest's image string and any locally written
-`coworld-image-inspect-v1` document are caller-controlled diagnostics. Neither
-is a sealed or authentic Coworld statement. Do not upload any generated arm
-until an independent authority-side fetch returns an immutable Coworld receipt
-that binds the exact image digest to the candidate source SHA.
+The rendered manifest's image strings and any locally written Docker inspection
+document are caller-controlled diagnostics. Neither is a sealed or authentic
+Coworld statement. Before package upload, register the exact game, runnables,
+and commissioner OCI images in eval-only, never-seated attestation policies.
+Then fetch all three image records independently from the Coworld authority.
+Each fetched record must have the exact role name and be `ready`. Coworld's
+`client_hash` must equal the local Docker image ID for the exact manifest tag.
+Coworld's `image_digest` is a separate immutable server-side digest: record it,
+but never mislabel it as or require it to equal the local Docker ID. Raw
+Coworld responses do not attest platform or source revision. Those facts come
+from the exact raw `docker image inspect` bytes joined through
+`Docker Id == Coworld client_hash`. A failed or pending image reservation is
+never admissible and must not be referenced.
 
-The release packet must record the authority receipt ID or immutable URL, fetch
-time, exact image digest, bound source SHA, and SHA-256 of the fetched receipt.
-The verifier must fetch it independently rather than consume a path supplied by
-the manifest author. If Coworld exposes no such receipt or authority route, the
-image remains unverified and package upload is blocked; report that external
-blocker instead of relabeling local inspection output.
+The checked-in finalizer first requires its own tracked checkout to be clean and
+its Git `HEAD` to equal `--source-sha`; it records the exact Git tree. It reads
+the canonical manifest template directly from that checkout, requires its exact
+bytes to match the `HEAD` Git blob, decodes them as strict UTF-8, and
+deterministically renders the three source-tagged image names, source revision,
+and eval package version. It never accepts a canonical-manifest path or hash
+from the caller. It then fetches the raw Coworld responses by exact image ID,
+runs Docker inspection against those exact rendered tags, deterministically
+builds all three arms in one process, generates the fetch time, and hashes every
+exact byte stream. It also records the resolved Coworld client package version
+and command vectors. For every verified Docker ID, it derives
+`repository@sha256:<digest>`, independently inspects that exact immutable
+reference, and records the result. It accepts no
+caller-authored response path, response hash, inspection path, inspection hash,
+or fetch timestamp. The generated
+`proxywar-spatial-verified-image-receipt-v1` receipt records the authority split,
+exact source SHA/tree, all three roles, local tag, linux/amd64 platform, OCI
+revision, Coworld image ID/name/version/status/client hash/server digest, local
+Docker ID, raw-artifact hashes, and explicit nonmutation of the canonical
+package/league. It also binds the canonical template Git blob and SHA-256, the
+rendered canonical byte hash, and the exact blocked-manifest byte hash for every
+arm. The verified manifests replace every game, player, optimizer, and
+commissioner source tag with its verified `repository@sha256:<digest>`
+reference; no mutable tag survives into an upload candidate.
+Compute the SHA-256 of the exact receipt bytes; a semantically equivalent
+rewrite is a different receipt.
 
-Record the candidate source commit, image digest, all three manifest hashes,
-all three Coworld IDs, certification jobs, hosted smoke episode IDs, policy
-version IDs, and Experience Request IDs. No package may replace the canonical
-`proxywar` package or be bound to the league.
+Only the checked-in fail-closed finalizer may derive upload-blocked and verified
+upload candidates from the exact checked-in canonical template:
+
+```sh
+npm --prefix coworld-adapter run finalize:spatial-xp-manifest -- \
+  --source-sha="$EXACT_SOURCE_SHA" \
+  --output-dir=/absolute/path/fresh-spatial-xp-output \
+  --evidence-dir=/absolute/path/fresh-spatial-xp-authority-raw \
+  --coworld-game-id="$EXACT_GAME_IMAGE_ID" \
+  --coworld-runnables-id="$EXACT_RUNNABLES_IMAGE_ID" \
+  --coworld-commissioner-id="$EXACT_COMMISSIONER_IMAGE_ID"
+```
+
+One invocation writes all three upload-blocked manifests, all three verified
+manifests, their one shared receipt, and the exact rendered canonical manifest.
+The finalizer reruns parity after immutable-reference substitution and enforces
+the causal arms exactly: OFF has neither spatial flag, STRUCTURED has
+`PROXYWAR_TUNE_SPATIAL_OBSERVATION=1` and no minimap flag, and ON has both
+spatial flags set to `1`. A machine parity gate removes only the exact arm name,
+arm-description suffix, two spatial flags, and exact readme arm marker, then
+requires the remaining manifests to be byte-identical. It rejects stale source,
+wrong role names or requested image IDs, cross-arm environment/variant/protocol/
+result/certification/image drift, non-linux/amd64 images,
+missing/duplicate roles or Coworld image IDs, non-ready status, a local Docker
+ID that differs from Coworld `client_hash`, or an internally generated arm whose
+hard-stop marker is not exact.
+Its output records `status=verified`, `upload_blocked=false`, receipt
+SHA-256/fetch time, and all three Coworld image identities/hashes/digests.
+Manual JSON editing is not an upload path.
+
+Before upload, a second independent actor must rerun the exact one-shot
+finalizer command from its own clean exact-SHA checkout into fresh, previously
+nonexistent output/evidence paths. It must regenerate the canonical rendering
+from its own checked-in template; it must not accept the first actor's rendered
+file, template path, or hash.
+Compare the two receipts after removing only `fetchedAt`: `sourceSha`,
+`sourceTree`, the entire `manifestAuthority` object, the entire `generatedFrom`
+object (including Coworld client version and raw version hash),
+`canonicalPackageOrLeagueMutation`, and every image field—including both raw
+artifact hashes—must be byte-identical. The second actor must also recompute the
+SHA-256 of every raw artifact (including each immutable-reference inspection),
+rendered canonical manifest, blocked manifest, and receipt from disk and match
+the recorded values. Use the independently generated manifest set and receipt
+for upload. Merely accepting paths or hashes supplied by the first actor is not
+independent acceptance. If the fresh fetch differs or Coworld exposes no
+independently fetchable record, report the external blocker instead of
+relabeling local evidence.
+
+Upload each arm only through the checked-in transition wrapper, one arm at a
+time. The evidence directory must be a fresh path under the canonical
+checkout's `coworld-adapter/tmp` directory so local Docker certification uses
+the supported host mount. The wrapper revalidates the clean exact source,
+receipt, canonical template Git blob, all three verified arms, and all
+immutable Docker references. It independently rerenders the canonical bytes
+from the checked-in template and rebuilds every blocked arm, requiring exact
+byte equality rather than trusting the receipt's own hashes.
+It then builds the exact-source replay viewer into a private staging directory
+and runs Coworld certification against the selected digest-reference manifest
+before making any hosted mutation:
+
+```sh
+npm --prefix coworld-adapter run upload:spatial-xp-manifest -- \
+  --arm=off --source-sha="$EXACT_SOURCE_SHA" \
+  --input-dir=/absolute/path/independently-regenerated-spatial-output \
+  --evidence-dir=/Users/claude/Documents/proxywar_main/coworld-adapter/tmp/spatial-off-upload-transition
+```
+
+Repeat only after the prior arm's transition, hosted certification, and hosted
+smoke are accepted. The wrapper pins the exact Coworld client version from the
+receipt. Immediately before upload it re-fetches and requires the exact
+canonical `proxywar` package `cow_f58621db-4a09-47de-bb13-24d61050a837` at
+version `0.1.54` and the paused production league
+`league_cb60d526-ecfd-4836-ab3a-81fc6cf7dc42`, whose `coworld_id` and
+`canonical_coworld_id` must both remain that package. It repeats and
+byte-compares both authority records after the eval package and image checks.
+Thus `canonicalPackageOrLeagueMutation=false` is a verified transition result,
+not a caller assertion.
+
+Immediately after each upload, fetch the stored Coworld package with the same
+pinned Coworld client version. Every stored game/player/optimizer/commissioner
+image field must equal the receipt's exact role-specific `img_...` ID, and fresh
+`coworld images <id> --json` records must match the receipt's name, version,
+ready status, client hash, and Coworld image digest. Persist the exact response
+bytes and hashes. A mismatch leaves that noncanonical package quarantined and
+blocks certification, hosted smoke, policy creation, and XP; it is never
+accepted because upload returned success alone.
+
+Record the candidate source commit, all three image client hashes/config
+digests/immutable digests, receipt hash, all three blocked and verified manifest
+hashes, all three Coworld package IDs, certification jobs, hosted smoke episode
+IDs, policy version IDs, and Experience Request IDs. No package may replace the
+canonical `proxywar` package or be bound to the league.
 
 ## Legitimate player-visible state
 
