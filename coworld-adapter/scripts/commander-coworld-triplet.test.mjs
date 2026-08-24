@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  assertRunRuntime,
   bindResumedRequests,
   buildRequests,
   renderMarkdown,
@@ -90,7 +91,7 @@ test("the hosted selector budget stays inside the working Coworld deadline", asy
   ]);
   assert.match(runtime, /COMMANDER_COWORLD_MAX_DECISION_MS = 15_000/);
   assert.match(runtime, /timeoutMs: 13_500/);
-  assert.match(runtime, /maxTokens: 640/);
+  assert.match(runtime, /maxTokens: 1_024/);
   assert.match(dockerfile, /PROXYWAR_LLM_TIMEOUT_MS=13500/);
 });
 
@@ -144,7 +145,55 @@ test("summarizes provider and Commander runtime evidence", () => {
   assert.equal(summary.llmSelectorDecisions, 1);
   assert.equal(summary.alignedPrimaryDecisions, 1);
   assert.equal(summary.fallbackCount, 0);
+  assert.deepEqual(summary.degradedCauses, {});
   assert.equal(summary.activeNonHoldDecisions, 1);
+});
+
+test("retains active Commander evidence when a transient selector call falls back", () => {
+  assert.doesNotThrow(() =>
+    assertRunRuntime({
+      arm: "C",
+      runKey: "commander-xp-v2/fixture/canary/r00/C",
+      trace: {
+        providerFailures: 1,
+        fallbackCount: 3,
+        degradedCount: 3,
+        providerCalls: {
+          preflight: { count: 1, succeeded: 1 },
+          planner: { count: 0, succeeded: 0 },
+          selector: { count: 13, succeeded: 12 },
+        },
+        externalPlannerCalls: 13,
+        deterministicSelectorDecisions: 0,
+        llmSelectorDecisions: 12,
+        activeNonHoldDecisions: 40,
+        activeNonSurviveDecisions: 37,
+      },
+    }),
+  );
+  assert.throws(
+    () =>
+      assertRunRuntime({
+        arm: "C",
+        runKey: "commander-xp-v2/fixture/canary/r00/C",
+        trace: {
+          providerFailures: 1,
+          fallbackCount: 40,
+          degradedCount: 40,
+          providerCalls: {
+            preflight: { count: 1, succeeded: 1 },
+            planner: { count: 0, succeeded: 0 },
+            selector: { count: 1, succeeded: 0 },
+          },
+          externalPlannerCalls: 1,
+          deterministicSelectorDecisions: 0,
+          llmSelectorDecisions: 0,
+          activeNonHoldDecisions: 40,
+          activeNonSurviveDecisions: 40,
+        },
+      }),
+    /does not prove its declared arm/,
+  );
 });
 
 test("renders an explicitly bounded functional report", () => {
