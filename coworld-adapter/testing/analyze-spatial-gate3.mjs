@@ -1,0 +1,358 @@
+#!/usr/bin/env node
+
+import fs from "node:fs/promises";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+
+const OWNER_PREFIX = "PROXYWAR_OWNER_CAPABILITY_EVIDENCE ";
+const USAGE_PREFIX = "PROXYWAR_LLM_USAGE ";
+const ARMS = ["off", "structured"];
+
+function finite(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function sum(values) {
+  return values.reduce((total, value) => total + (finite(value) ?? 0), 0);
+}
+
+function mean(values) {
+  const selected = values.map(finite).filter((value) => value !== null);
+  return selected.length > 0 ? sum(selected) / selected.length : null;
+}
+
+function rounded(value, digits = 6) {
+  return value === null ? null : Number(value.toFixed(digits));
+}
+
+function sampleStandardDeviation(values) {
+  const selected = values.map(finite).filter((value) => value !== null);
+  if (selected.length < 2) return null;
+  const average = mean(selected);
+  return Math.sqrt(
+    selected.reduce((total, value) => total + (value - average) ** 2, 0) /
+      (selected.length - 1),
+  );
+}
+
+export function pairedSummary(values) {
+  const selected = values.map(finite).filter((value) => value !== null);
+  const average = mean(selected);
+  const standardDeviation = sampleStandardDeviation(selected);
+  const tCritical = selected.length >= 24 ? 2.069 : 2.262;
+  const halfWidth =
+    standardDeviation === null
+      ? null
+      : (tCritical * standardDeviation) / Math.sqrt(selected.length);
+  return {
+    count: selected.length,
+    meanDifference: rounded(average),
+    confidenceInterval95:
+      average === null || halfWidth === null
+        ? null
+        : [rounded(average - halfWidth), rounded(average + halfWidth)],
+    positive: selected.filter((value) => value > 0).length,
+    tied: selected.filter((value) => value === 0).length,
+    negative: selected.filter((value) => value < 0).length,
+  };
+}
+
+function parsePrefixedJSONLines(text, prefix) {
+  const values = [];
+  for (const [lineIndex, line] of text.split(/\r?\n/u).entries()) {
+    const marker = line.indexOf(prefix);
+    if (marker < 0) continue;
+    try {
+      values.push(JSON.parse(line.slice(marker + prefix.length)));
+    } catch (error) {
+      throw new Error(
+        `invalid ${prefix.trim()} JSON on line ${lineIndex + 1}`,
+        {
+          cause: error,
+        },
+      );
+    }
+  }
+  return values;
+}
+
+async function readJSON(file) {
+  return JSON.parse(await fs.readFile(file, "utf8"));
+}
+
+function replaySummary(replay) {
+  const raw = replay.inlineRunArtifacts?.["match-summary.json"];
+  if (typeof raw !== "string") {
+    throw new Error("replay lacks inline match-summary.json");
+  }
+  return JSON.parse(raw);
+}
+
+async function readRun(root, entry) {
+  const directory = path.join(root, "evidence", entry.setID, entry.arm);
+  const [status, results, logText, replay] = await Promise.all([
+    readJSON(path.join(root, "status", entry.filename)),
+    readJSON(path.join(directory, "results.json")),
+    fs.readFile(
+      path.join(directory, `subject-seat-${entry.subjectSlot}.log`),
+      "utf8",
+    ),
+    readJSON(path.join(directory, "episode.replay")),
+  ]);
+  const episode = status.episodes?.[0];
+  if (!episode || status.episodes.length !== 1) {
+    throw new Error(`${entry.setID}/${entry.arm} does not have one episode`);
+  }
+  const player = results.players?.find(
+    (candidate) => candidate.slot === entry.subjectSlot,
+  );
+  if (!player) {
+    throw new Error(`${entry.setID}/${entry.arm} lacks subject result`);
+  }
+  const ownerEvents = parsePrefixedJSONLines(logText, OWNER_PREFIX);
+  const usageEvents = parsePrefixedJSONLines(logText, USAGE_PREFIX);
+  const responseEvents = usageEvents.filter(
+    (event) => event.event === "response",
+  );
+  const usageSummary = usageEvents.findLast(
+    (event) => event.event === "summary",
+  );
+  const spatialEvents = ownerEvents.filter(
+    (event) => event.kind === "spatial_observation",
+  );
+  const selectedEvents = ownerEvents.filter(
+    (event) => typeof event.selectedLegalActionID === "string",
+  );
+  const summary = replaySummary(replay);
+  return {
+    setIndex: entry.setIndex,
+    setID: entry.setID,
+    map: entry.setID.split("-r")[0],
+    arm: entry.arm,
+    subjectSlot: entry.subjectSlot,
+    xreqID: status.id,
+    episodeRequestID: episode.id,
+    jobID: episode.job_id,
+    replayURL: episode.replay_url,
+    costUSD: finite(episode.cost_usd),
+    score: finite(player.score),
+    won: results.winner_slot === entry.subjectSlot,
+    tiles: finite(player.tiles_owned),
+    survived: player.is_alive === true,
+    turnCount: finite(results.turn_count),
+    decisions: finite(results.decision_count),
+    acceptedDecisions: finite(results.accepted_decision_count),
+    degradedDecisions: finite(results.degraded_count),
+    degradedCauses: results.degraded_causes ?? {},
+    ownerEvidenceEvents: ownerEvents.length,
+    selectedEvidenceEvents: selectedEvents.length,
+    selectedOfferedEvents: selectedEvents.filter(
+      (event) => event.selectedLegalActionOffered === true,
+    ).length,
+    actionFidelity:
+      selectedEvents.length > 0 &&
+      selectedEvents.every(
+        (event) => event.selectedLegalActionOffered === true,
+      ),
+    spatialEvidenceEvents: spatialEvents.length,
+    spatialContract:
+      entry.arm === "off"
+        ? spatialEvents.length > 0 &&
+          spatialEvents.every((event) => event.present === false)
+        : spatialEvents.length > 0 &&
+          spatialEvents.every(
+            (event) =>
+              event.present === true &&
+              event.schemaVersion === 5 &&
+              event.minimapPresent === false,
+          ),
+    providerResponses: responseEvents.length,
+    providerErrors: finite(usageSummary?.errors) ?? 0,
+    usageComplete: usageSummary?.usageComplete === true,
+    inFlightRequests: finite(usageSummary?.inFlightRequests) ?? 0,
+    inputTokens: sum(responseEvents.map((event) => event.inputTokens)),
+    outputTokens: sum(responseEvents.map((event) => event.outputTokens)),
+    firstInputTokens: finite(responseEvents[0]?.inputTokens),
+    meanLatencyMs: mean(responseEvents.map((event) => event.latencyMs)),
+    entertainmentScore: finite(summary.matchStory?.entertainmentScore),
+    actionDiversity: finite(summary.matchStory?.actionDiversityCount),
+    majorEvents: finite(summary.spectatorTelemetry?.majorEventCount),
+    behaviorQualityScore: finite(summary.behaviorQuality?.score),
+    behaviorQualityGrade: summary.behaviorQuality?.grade ?? null,
+    replayFallbackCount: finite(summary.fallbackCount),
+    replayRejectedCount: finite(summary.rejectedCount),
+    replayParseFailureCount: finite(summary.parseFailureCount),
+  };
+}
+
+function armSummary(runs, arm) {
+  const rows = runs.filter((run) => run.arm === arm);
+  return {
+    runs: rows.length,
+    wins: rows.filter((run) => run.won).length,
+    meanScore: rounded(mean(rows.map((run) => run.score))),
+    meanTiles: rounded(mean(rows.map((run) => run.tiles))),
+    survivalRate: rounded(mean(rows.map((run) => (run.survived ? 1 : 0)))),
+    totalCostUSD: rounded(sum(rows.map((run) => run.costUSD))),
+    meanCostUSD: rounded(mean(rows.map((run) => run.costUSD))),
+    totalInputTokens: sum(rows.map((run) => run.inputTokens)),
+    totalOutputTokens: sum(rows.map((run) => run.outputTokens)),
+    meanFirstInputTokens: rounded(
+      mean(rows.map((run) => run.firstInputTokens)),
+    ),
+    meanLatencyMs: rounded(mean(rows.map((run) => run.meanLatencyMs))),
+    providerResponses: sum(rows.map((run) => run.providerResponses)),
+    providerErrors: sum(rows.map((run) => run.providerErrors)),
+    incompleteUsageSummaries: rows.filter((run) => !run.usageComplete).length,
+    inFlightAtFinal: sum(rows.map((run) => run.inFlightRequests)),
+    degradedDecisions: sum(rows.map((run) => run.degradedDecisions)),
+    decisions: sum(rows.map((run) => run.decisions)),
+    degradationRate: rounded(
+      sum(rows.map((run) => run.degradedDecisions)) /
+        sum(rows.map((run) => run.decisions)),
+    ),
+    actionFidelityPass: rows.every((run) => run.actionFidelity),
+    spatialContractPass: rows.every((run) => run.spatialContract),
+    selectedEvidenceEvents: sum(rows.map((run) => run.selectedEvidenceEvents)),
+    selectedOfferedEvents: sum(rows.map((run) => run.selectedOfferedEvents)),
+    meanEntertainmentScore: rounded(
+      mean(rows.map((run) => run.entertainmentScore)),
+    ),
+    meanActionDiversity: rounded(mean(rows.map((run) => run.actionDiversity))),
+    meanMajorEvents: rounded(mean(rows.map((run) => run.majorEvents))),
+    meanBehaviorQualityScore: rounded(
+      mean(rows.map((run) => run.behaviorQualityScore)),
+    ),
+  };
+}
+
+function pairedReport(runs) {
+  const rows = [];
+  const bySet = Map.groupBy(runs, (run) => run.setID);
+  for (const [setID, pair] of bySet) {
+    const off = pair.find((run) => run.arm === "off");
+    const structured = pair.find((run) => run.arm === "structured");
+    if (!off || !structured) throw new Error(`${setID} is not a complete pair`);
+    rows.push({
+      setID,
+      map: off.map,
+      score: structured.score - off.score,
+      win: Number(structured.won) - Number(off.won),
+      tiles: structured.tiles - off.tiles,
+      survival: Number(structured.survived) - Number(off.survived),
+      costUSD: structured.costUSD - off.costUSD,
+      inputTokens: structured.inputTokens - off.inputTokens,
+      firstInputTokens: structured.firstInputTokens - off.firstInputTokens,
+      meanLatencyMs: structured.meanLatencyMs - off.meanLatencyMs,
+      entertainmentScore:
+        structured.entertainmentScore - off.entertainmentScore,
+      actionDiversity: structured.actionDiversity - off.actionDiversity,
+      behaviorQualityScore:
+        structured.behaviorQualityScore - off.behaviorQualityScore,
+    });
+  }
+  const metric = (name) => pairedSummary(rows.map((row) => row[name]));
+  return {
+    rows,
+    score: metric("score"),
+    win: metric("win"),
+    tiles: metric("tiles"),
+    survival: metric("survival"),
+    costUSD: metric("costUSD"),
+    inputTokens: metric("inputTokens"),
+    firstInputTokens: metric("firstInputTokens"),
+    meanLatencyMs: metric("meanLatencyMs"),
+    entertainmentScore: metric("entertainmentScore"),
+    actionDiversity: metric("actionDiversity"),
+    behaviorQualityScore: metric("behaviorQualityScore"),
+    byMap: Object.fromEntries(
+      [...new Set(rows.map((row) => row.map))].map((map) => [
+        map,
+        {
+          score: pairedSummary(
+            rows.filter((row) => row.map === map).map((row) => row.score),
+          ),
+          entertainmentScore: pairedSummary(
+            rows
+              .filter((row) => row.map === map)
+              .map((row) => row.entertainmentScore),
+          ),
+        },
+      ]),
+    ),
+  };
+}
+
+export async function analyze(root) {
+  const resolved = path.resolve(root);
+  const index = await readJSON(path.join(resolved, "gate3-index.json"));
+  if (index.entries?.length !== 48) {
+    throw new Error("Gate 3 index must contain 48 requests");
+  }
+  const runs = [];
+  for (const entry of index.entries) runs.push(await readRun(resolved, entry));
+  const arms = Object.fromEntries(
+    ARMS.map((arm) => [arm, armSummary(runs, arm)]),
+  );
+  const paired = pairedReport(runs);
+  const reliabilityPass =
+    ARMS.every(
+      (arm) =>
+        arms[arm].runs === 24 &&
+        arms[arm].actionFidelityPass &&
+        arms[arm].spatialContractPass &&
+        arms[arm].providerErrors === 0,
+    ) && arms.structured.degradationRate <= arms.off.degradationRate;
+  return {
+    schemaVersion: 1,
+    sourceCommit: index.sourceCommit,
+    generatedAt: new Date().toISOString(),
+    complete: runs.length === 48,
+    arms,
+    paired,
+    reliabilityPass,
+    canaryAdvances:
+      runs.length === 48 &&
+      reliabilityPass &&
+      paired.score.meanDifference !== null &&
+      paired.score.meanDifference > 0,
+    watchabilityEvidence: {
+      automatedProxyAvailable: true,
+      blindedHumanReviewComplete: false,
+    },
+    limitations: [
+      "Replay entertainment and behavior-quality scores are automated proxies, not blinded spectator judgments.",
+      "Aggregate token totals are lower bounds when a planner request remained in flight at episode final.",
+      "Gate 3 retained evidence proves exact offered-action fidelity but does not reconstruct a counterfactual spatial-consistency score for each selected action.",
+    ],
+    runs,
+  };
+}
+
+async function main(argv) {
+  const [root, output] = argv;
+  if (!root || !output || argv.length !== 2) {
+    throw new Error(
+      "usage: node analyze-spatial-gate3.mjs EVIDENCE_ROOT OUTPUT_JSON",
+    );
+  }
+  const report = await analyze(root);
+  await fs.writeFile(
+    path.resolve(output),
+    `${JSON.stringify(report, null, 2)}\n`,
+    {
+      flag: "wx",
+    },
+  );
+  process.stdout.write(
+    `${JSON.stringify({ output: path.resolve(output), complete: report.complete, reliabilityPass: report.reliabilityPass, canaryAdvances: report.canaryAdvances })}\n`,
+  );
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main(process.argv.slice(2)).catch((error) => {
+    process.stderr.write(`${error.stack ?? error.message}\n`);
+    process.exitCode = 1;
+  });
+}
