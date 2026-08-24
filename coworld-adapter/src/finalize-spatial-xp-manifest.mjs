@@ -9,6 +9,7 @@ import {
   SPATIAL_XP_ARM_DESCRIPTIONS,
   SPATIAL_XP_GAME_NAMES,
   SPATIAL_XP_IMAGE_AUTHORITY_PAGE_ID,
+  spatialXpPackageVersion,
   SPATIAL_XP_UNVERIFIED_AUTHORITY_TEXT,
   SPATIAL_XP_UNVERIFIED_README_SECTION,
   SPATIAL_XP_UPLOAD_BLOCKED_DESCRIPTION,
@@ -48,7 +49,6 @@ const CANONICAL_TEMPLATE_PATH = path.join(
   REPOSITORY_ROOT,
   CANONICAL_TEMPLATE_RELATIVE_PATH,
 );
-const SPATIAL_XP_PACKAGE_VERSION = "0.1.0";
 const SPATIAL_XP_IMAGE_TAG_SHA_LENGTH = 9;
 
 export const SPATIAL_XP_VERIFIED_AUTHORITY_STATUS = "verified";
@@ -184,7 +184,7 @@ export function renderCanonicalManifest(templateRaw, expectedSourceSha) {
     throw new Error("canonical template is not valid JSON after rendering");
   }
   const game = record(manifest.game, "rendered canonical manifest.game");
-  game.version = SPATIAL_XP_PACKAGE_VERSION;
+  game.version = spatialXpPackageVersion(expectedSourceSha);
   return {
     imageTagRevision,
     manifest,

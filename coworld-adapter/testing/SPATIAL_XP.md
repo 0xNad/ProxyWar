@@ -151,6 +151,10 @@ receipt, canonical template Git blob, all three verified arms, and all
 immutable Docker references. It independently rerenders the canonical bytes
 from the checked-in template and rebuilds every blocked arm, requiring exact
 byte equality rather than trusting the receipt's own hashes.
+Each arm receives the same deterministic PEP 440 post-release version derived
+from all 160 bits of the exact source SHA. This prevents a quarantined partial
+upload from one source revision from occupying the corrected successor's
+name/version while preserving exact cross-arm version parity.
 It then builds the exact-source replay viewer into a private staging directory
 and runs Coworld certification against the selected digest-reference manifest
 from the canonical checkout's adapter working directory before making any

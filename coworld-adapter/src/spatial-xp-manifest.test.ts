@@ -10,6 +10,7 @@ import {
   SPATIAL_XP_IMAGE_AUTHORITY_PAGE_ID,
   SPATIAL_XP_IMAGE_AUTHORITY_STATUS,
   SPATIAL_XP_PROTOCOL_APPENDIX,
+  spatialXpPackageVersion,
   SPATIAL_XP_STRUCTURED_ENV,
   SPATIAL_XP_UPLOAD_BLOCKED,
   SPATIAL_XP_VISIBILITY_MODEL,
@@ -58,6 +59,11 @@ describe("noncanonical spatial XP manifests", () => {
     expect(control.game.name).toBe(SPATIAL_XP_GAME_NAMES.off);
     expect(structured.game.name).toBe(SPATIAL_XP_GAME_NAMES.structured);
     expect(treatment.game.name).toBe(SPATIAL_XP_GAME_NAMES.on);
+    const expectedVersion = spatialXpPackageVersion(SOURCE_SHA);
+    expect(control.game.version).toBe(expectedVersion);
+    expect(structured.game.version).toBe(expectedVersion);
+    expect(treatment.game.version).toBe(expectedVersion);
+    expect(expectedVersion).toMatch(/^0\.1\.0\.post[1-9][0-9]*$/u);
     expect(control.game.runnable.env).toEqual(canonical.game.runnable.env);
     expect(structured.game.runnable.env).toEqual({
       ...canonical.game.runnable.env,
@@ -127,6 +133,15 @@ describe("noncanonical spatial XP manifests", () => {
     });
     expect(normalized[0]).toEqual(normalized[1]);
     expect(normalized[1]).toEqual(normalized[2]);
+  });
+
+  it("derives a distinct exact package version from every source SHA", () => {
+    expect(spatialXpPackageVersion(SOURCE_SHA)).not.toBe(
+      spatialXpPackageVersion(`b${SOURCE_SHA.slice(1)}`),
+    );
+    expect(() => spatialXpPackageVersion(SOURCE_SHA.toUpperCase())).toThrow(
+      /40 lowercase hex/u,
+    );
   });
 
   it("fails closed instead of deriving from an already-armed package", () => {

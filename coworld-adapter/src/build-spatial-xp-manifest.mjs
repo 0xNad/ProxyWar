@@ -24,6 +24,7 @@ export const SPATIAL_XP_IMAGE_AUTHORITY_PAGE_ID =
   "proxywar-spatial-xp-image-authority";
 export const SPATIAL_XP_IMAGE_AUTHORITY_STATUS = "unverified";
 export const SPATIAL_XP_UPLOAD_BLOCKED = true;
+export const SPATIAL_XP_PACKAGE_VERSION_BASE = "0.1.0";
 export const SPATIAL_XP_UPLOAD_BLOCKED_DESCRIPTION =
   "UPLOAD BLOCKED while image authority is unverified";
 export const SPATIAL_XP_UNVERIFIED_AUTHORITY_TEXT =
@@ -65,6 +66,19 @@ function record(value, label) {
 }
 
 /**
+ * Produce one exact, PEP 440-valid package version per source revision. Coworld
+ * rejects a second upload of the same name/equivalent version, so a quarantined
+ * partial transition must not block a corrected successor source. Converting
+ * all 160 SHA bits to decimal keeps the mapping deterministic and collision-free.
+ */
+export function spatialXpPackageVersion(expectedSourceSha) {
+  if (!/^[0-9a-f]{40}$/u.test(expectedSourceSha)) {
+    throw new Error("spatial XP expected source SHA must be 40 lowercase hex");
+  }
+  return `${SPATIAL_XP_PACKAGE_VERSION_BASE}.post${BigInt(`0x${expectedSourceSha}`).toString(10)}`;
+}
+
+/**
  * Derive one noncanonical matched-XP arm from an already-rendered, exact-source
  * canonical manifest. All three arms keep the same image, variant, schema,
  * result, certification, and legal-action protocol. Separate packages are
@@ -80,9 +94,7 @@ export function buildSpatialXpManifest(
       'spatial XP arm must be exactly "off", "structured", or "on"',
     );
   }
-  if (!/^[0-9a-f]{40}$/.test(expectedSourceSha)) {
-    throw new Error("spatial XP expected source SHA must be 40 lowercase hex");
-  }
+  const packageVersion = spatialXpPackageVersion(expectedSourceSha);
   const canonical = record(canonicalManifest, "manifest");
   const unresolvedPlaceholder =
     JSON.stringify(canonical).match(/\{\{[^}]+\}\}/);
@@ -176,6 +188,7 @@ export function buildSpatialXpManifest(
         ? { ...env, ...SPATIAL_XP_STRUCTURED_ENV }
         : { ...env, ...SPATIAL_XP_ENV };
   candidate.game.name = SPATIAL_XP_GAME_NAMES[arm];
+  candidate.game.version = packageVersion;
   candidate.game.description =
     `${canonicalGame.description} ` +
     `[NONCANONICAL XP ${arm.toUpperCase()}: ${SPATIAL_XP_ARM_DESCRIPTIONS[arm]}; ${SPATIAL_XP_UPLOAD_BLOCKED_DESCRIPTION}; never league-bind.]`;

@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildSpatialXpManifest,
+  spatialXpPackageVersion,
   SPATIAL_XP_GAME_NAMES,
   SPATIAL_XP_IMAGE_AUTHORITY_PAGE_ID,
 } from "./build-spatial-xp-manifest.mjs";
@@ -44,7 +45,7 @@ const canonical = JSON.parse(
     )
     .replaceAll("{{SOURCE_SHA}}", SOURCE_SHA),
 );
-canonical.game.version = "0.1.0";
+canonical.game.version = spatialXpPackageVersion(SOURCE_SHA);
 
 function hash(raw: string): string {
   return createHash("sha256").update(raw).digest("hex");
