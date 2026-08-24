@@ -1,13 +1,13 @@
 import { html, LitElement, nothing, TemplateResult } from "lit";
 import { customElement, state } from "lit/decorators.js";
+import { translateText } from "../Utils";
+import { analytics } from "../analytics/AnalyticsClient";
 import {
   APP_SHELL_ROOT_CLASSES,
   appShellFooter,
   appShellHeader,
   requestUpdateWhenTranslationsReady,
 } from "./AppShellChrome";
-import { translateText } from "../Utils";
-import { analytics } from "../analytics/AnalyticsClient";
 
 /**
  * MUST stay in sync with `BuildRegistrationSubmission.ts`'s `claimedGithub`
@@ -37,8 +37,8 @@ function validateClaimedGithub(raw: string): string | null {
  * guided flow, UNIFYING the existing paths rather than forking them:
  *
  * 1. Object model (Builder / Agent / Version) in plain language.
- * 2. Path choice — links to the ONE canonical starter repo
- *    (`proxywar-coworld-starter`), never a forked copy.
+ * 2. Path choice — recommends the production Commander starter while keeping
+ *    the older fully editable Coworld starter available as an explicit path.
  * 3. Identity — generates a validated registration DRAFT (never an instant
  *    publish; see `BuildRegistrationSubmission.ts`'s doc for why).
  * 4. Run locally — exact `coworld run-episode --verify-replay` +
@@ -315,9 +315,7 @@ export class BuildPage extends LitElement {
       ${appShellHeader("/build")}
       <main class="mx-auto w-full max-w-3xl px-4 py-8">
         <header class="mb-6">
-          <p
-            class="text-xs font-bold uppercase tracking-widest text-cyan-400"
-          >
+          <p class="text-xs font-bold uppercase tracking-widest text-cyan-400">
             ${translateText("build_page.eyebrow")}
           </p>
           <h1 class="mt-1 text-3xl font-black text-ink">
@@ -348,9 +346,10 @@ export class BuildPage extends LitElement {
       "build_page.step7.nav_label",
     ];
     return html`
-      <ol class="flex flex-wrap gap-2" aria-label=${translateText(
-        "build_page.stepper_label",
-      )}>
+      <ol
+        class="flex flex-wrap gap-2"
+        aria-label=${translateText("build_page.stepper_label")}
+      >
         ${labels.map(
           (labelKey, index) => html`
             <li>
@@ -359,7 +358,8 @@ export class BuildPage extends LitElement {
                 @click=${() => this.goToStep(index + 1)}
                 aria-current=${this.step === index + 1 ? "step" : "false"}
                 class="rounded-full border px-3 py-1.5 text-xs font-bold uppercase tracking-wide transition-colors ${this
-                  .step === index + 1
+                  .step ===
+                index + 1
                   ? "border-accent bg-accent/10 text-accent"
                   : this.step > index + 1
                     ? "border-line text-ink-muted hover:text-ink"
@@ -470,7 +470,7 @@ export class BuildPage extends LitElement {
             ${translateText("build_page.step2.llm_desc")}
           </p>
           ${this.renderCopyBlock(
-            "git clone https://github.com/0xNad/proxywar-coworld-starter.git\ncd proxywar-coworld-starter",
+            "git clone https://github.com/0xNad/proxywar-commander-starter.git\ncd proxywar-commander-starter",
             "step2-llm-clone",
           )}
         </div>
@@ -513,7 +513,9 @@ export class BuildPage extends LitElement {
         }}
       >
         <div class="grid gap-4 sm:grid-cols-2">
-          <label class="block text-xs font-bold uppercase tracking-wide text-ink-muted">
+          <label
+            class="block text-xs font-bold uppercase tracking-wide text-ink-muted"
+          >
             ${translateText("build_page.step3.agent_name_label")}
             <input
               required
@@ -523,7 +525,9 @@ export class BuildPage extends LitElement {
               class="mt-1 w-full rounded-md border border-line bg-surface-2 px-3 py-2 text-sm text-ink outline-none focus-visible:ring-2 focus-visible:ring-accent"
             />
           </label>
-          <label class="block text-xs font-bold uppercase tracking-wide text-ink-muted">
+          <label
+            class="block text-xs font-bold uppercase tracking-wide text-ink-muted"
+          >
             ${translateText("build_page.step3.short_code_label")}
             <input
               required
@@ -560,7 +564,9 @@ export class BuildPage extends LitElement {
               </div>
             `
           : nothing}
-        <label class="block text-xs font-bold uppercase tracking-wide text-ink-muted">
+        <label
+          class="block text-xs font-bold uppercase tracking-wide text-ink-muted"
+        >
           ${translateText("build_page.step3.tagline_label")}
           <input
             maxlength="120"
@@ -570,7 +576,9 @@ export class BuildPage extends LitElement {
             class="mt-1 w-full rounded-md border border-line bg-surface-2 px-3 py-2 text-sm text-ink outline-none focus-visible:ring-2 focus-visible:ring-accent"
           />
         </label>
-        <label class="block text-xs font-bold uppercase tracking-wide text-ink-muted">
+        <label
+          class="block text-xs font-bold uppercase tracking-wide text-ink-muted"
+        >
           ${translateText("build_page.step3.strategy_desc_label")}
           <textarea
             rows="3"
@@ -584,7 +592,9 @@ export class BuildPage extends LitElement {
           ></textarea>
         </label>
         <div class="grid gap-4 sm:grid-cols-2">
-          <label class="block text-xs font-bold uppercase tracking-wide text-ink-muted">
+          <label
+            class="block text-xs font-bold uppercase tracking-wide text-ink-muted"
+          >
             ${translateText("build_page.step3.builder_name_label")}
             <input
               required
@@ -597,12 +607,16 @@ export class BuildPage extends LitElement {
               class="mt-1 w-full rounded-md border border-line bg-surface-2 px-3 py-2 text-sm text-ink outline-none focus-visible:ring-2 focus-visible:ring-accent"
             />
           </label>
-          <label class="block text-xs font-bold uppercase tracking-wide text-ink-muted">
+          <label
+            class="block text-xs font-bold uppercase tracking-wide text-ink-muted"
+          >
             ${translateText("build_page.step3.github_label")}
             <input
               maxlength="39"
               .value=${this.claimedGithub}
-              aria-invalid=${this.githubUsernameError !== null ? "true" : "false"}
+              aria-invalid=${this.githubUsernameError !== null
+                ? "true"
+                : "false"}
               aria-describedby=${this.githubUsernameError !== null
                 ? "build-step3-github-error"
                 : nothing}
@@ -630,7 +644,9 @@ export class BuildPage extends LitElement {
         <p class="text-xs text-ink-muted">
           ${translateText("build_page.step3.github_note")}
         </p>
-        <label class="block text-xs font-bold uppercase tracking-wide text-ink-muted">
+        <label
+          class="block text-xs font-bold uppercase tracking-wide text-ink-muted"
+        >
           ${translateText("build_page.step3.builder_bio_label")}
           <textarea
             rows="2"
@@ -643,7 +659,9 @@ export class BuildPage extends LitElement {
             class="mt-1 w-full resize-none rounded-md border border-line bg-surface-2 px-3 py-2 text-sm text-ink outline-none focus-visible:ring-2 focus-visible:ring-accent"
           ></textarea>
         </label>
-        <label class="block text-xs font-bold uppercase tracking-wide text-ink-muted">
+        <label
+          class="block text-xs font-bold uppercase tracking-wide text-ink-muted"
+        >
           ${translateText("build_page.step3.links_label")}
           <textarea
             rows="2"
@@ -673,7 +691,9 @@ export class BuildPage extends LitElement {
               >`
             : nothing}
         </label>
-        <label class="block text-xs font-bold uppercase tracking-wide text-ink-muted">
+        <label
+          class="block text-xs font-bold uppercase tracking-wide text-ink-muted"
+        >
           ${translateText("build_page.step3.repo_label")}
           <input
             .value=${this.sourceRepositoryRef}
@@ -845,7 +865,7 @@ export class BuildPage extends LitElement {
         ${translateText("build_page.step5.launch_intro")}
       </p>
       ${this.renderCopyBlock(
-        "git clone https://github.com/0xNad/proxywar-coworld-starter.git\ncd proxywar-coworld-starter\nbash launch.sh my-agent",
+        "git clone https://github.com/0xNad/proxywar-commander-starter.git\ncd proxywar-commander-starter\nbash launch.sh my-agent",
         "step5-launch",
       )}
       <p class="mt-2 text-xs text-ink-muted">
@@ -920,7 +940,9 @@ export class BuildPage extends LitElement {
           `,
         )}
       </ul>
-      <p class="mt-4 rounded-md border border-line bg-surface-2 p-3 text-xs text-ink-muted">
+      <p
+        class="mt-4 rounded-md border border-line bg-surface-2 p-3 text-xs text-ink-muted"
+      >
         ${translateText("build_page.step6.mapping_explainer")}
       </p>
     `;
@@ -963,7 +985,9 @@ export class BuildPage extends LitElement {
       <p class="mt-2 text-sm text-ink-muted">
         ${translateText("build_page.step7.feedback")}
       </p>
-      <p class="mt-4 rounded-md border border-line bg-surface-2 p-3 text-xs text-ink-muted">
+      <p
+        class="mt-4 rounded-md border border-line bg-surface-2 p-3 text-xs text-ink-muted"
+      >
         ${translateText("build_page.step7.next_version")}
       </p>
     `;
