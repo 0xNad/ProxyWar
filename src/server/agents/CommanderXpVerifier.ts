@@ -2823,12 +2823,13 @@ function verifyEvalCoworldIdentity(
       prereg.identities.canonicalLeagueBindingSnapshotSha256 ||
     canonical.leagueBindingAfterSha256 !==
       prereg.identities.canonicalLeagueBindingSnapshotSha256 ||
+    receipt.coworldID === canonical.coworldID ||
     inspectedCoworld.id !== receipt.coworldID ||
     inspectedCoworld.name !== receipt.coworldName ||
     inspectedCoworld.version !== receipt.coworldVersion ||
     normalizeSha256(String(inspectedCoworld.manifest_hash)) !==
       receipt.hostedManifestSha256 ||
-    inspectedCoworld.canonical !== false ||
+    typeof inspectedCoworld.canonical !== "boolean" ||
     sha256Canonical(inspectedManifest) !==
       sha256Canonical(expectedHostedManifest) ||
     inspectedRunnable.image !== receipt.gameImageID ||

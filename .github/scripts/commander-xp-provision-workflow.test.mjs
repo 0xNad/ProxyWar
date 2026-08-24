@@ -102,7 +102,7 @@ test("provision authenticates before its durable fence and mutates no XP", () =>
     "Upload six immutable policy versions from one image",
   );
   const coworldUpload = workflow.indexOf(
-    "Upload and inspect the noncanonical eval Coworld",
+    "Upload and inspect the isolated eval Coworld",
   );
   assert.ok(preflight >= 0 && preflight < fence);
   assert.ok(fence < imagePush && imagePush < policyUpload);
@@ -192,7 +192,11 @@ test("provision proves exact 360x100 terminality and preserves product binding",
   assert.match(workflow, /\.seed == 17 and \.game_id == "PWSAAAAR"/);
   assert.match(workflow, /exact-image-coworld-0\.1\.42-run-episode-v1/);
   assert.match(workflow, /eval-coworld-terminal-proof-v2\.json/);
-  assert.match(workflow, /\.coworld\.canonical[^\n]+false/);
+  assert.match(
+    workflow,
+    /test "\$EVAL_COWORLD_ID" != "\$CANONICAL_COWORLD_ID"/,
+  );
+  assert.match(workflow, /\(\.coworld\.canonical \| type\) == "boolean"/);
   assert.match(
     workflow,
     /cmp "\$RUNNER_TEMP\/canonical-binding-before\.jsonl"/,
