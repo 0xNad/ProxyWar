@@ -324,6 +324,20 @@ const childEnv = {
 if (!childEnv.PATH) {
   throw new Error("authenticated Coworld child PATH is unavailable");
 }
+if (command === "upload-coworld") {
+  const realDocker = process.env.COWORLD_REAL_DOCKER;
+  if (!realDocker || resolve(realDocker) !== realDocker) {
+    throw new Error("upload-coworld requires an absolute COWORLD_REAL_DOCKER");
+  }
+  childEnv.COWORLD_REAL_DOCKER = realDocker;
+  const dockerHost = process.env.DOCKER_HOST;
+  if (dockerHost) {
+    if (!/^unix:\/\/[A-Za-z0-9._/-]+$/.test(dockerHost)) {
+      throw new Error("upload-coworld requires a local Unix DOCKER_HOST");
+    }
+    childEnv.DOCKER_HOST = dockerHost;
+  }
+}
 
 try {
   const install = spawnSync(

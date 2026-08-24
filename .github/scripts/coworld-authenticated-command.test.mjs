@@ -92,6 +92,42 @@ test("runs the exact read-only Coworld status preflight", () => {
   });
 });
 
+test("keeps the fail-closed Docker guard connected during an exact upload", () => {
+  withFakeRuntime(({ env, dockerCapture, root }) => {
+    const manifest = path.join(root, "coworld_manifest.json");
+    fs.writeFileSync(manifest, "{}\n");
+    const result = spawnSync(
+      process.execPath,
+      [
+        wrapper,
+        "upload-coworld",
+        manifest,
+        "--wait-hosted-smoke",
+        "--wait-certification",
+        "--timeout-seconds",
+        "600",
+        "--hosted-smoke-timeout-seconds",
+        "1800",
+        "--certification-timeout-seconds",
+        "1800",
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...env,
+          COWORLD_REAL_DOCKER: "/usr/bin/docker",
+          DOCKER_HOST: "unix:///fixture/docker.sock",
+        },
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(
+      fs.readFileSync(dockerCapture, "utf8"),
+      "docker|/usr/bin/docker|unix:///fixture/docker.sock\n",
+    );
+  });
+});
+
 test("rejects symlinked and missing XP create bodies before authentication", () => {
   withFakeRuntime(({ env, capture, root }) => {
     const body = path.join(root, "request.json");
@@ -344,6 +380,7 @@ function withFakeRuntime(callback) {
   const capture = path.join(root, "capture.txt");
   const python = path.join(root, "python");
   const coworld = path.join(root, "coworld");
+  const dockerCapture = path.join(root, "docker.txt");
   fs.writeFileSync(
     python,
     `#!/bin/sh\ntest -z "$GITHUB_TOKEN$GH_TOKEN$ACTIONS_ID_TOKEN_REQUEST_TOKEN$ACTIONS_RUNTIME_TOKEN$AWS_SECRET_ACCESS_KEY" || exit 19\nif [ "$1" = "-c" ]; then\n  case "$2" in *"importlib.metadata.version('coworld') == '0.1.42'"*) ;; *) exit 17 ;; esac\n  printf 'install|%s|%s\\n' "$HOME" "\${COWORLD_API_TOKEN:+token}" >> ${JSON.stringify(capture)}\nelse\n  printf 'python|%s|%s|%s\\n' "$*" "$HOME" "\${COWORLD_API_TOKEN:+token}" >> ${JSON.stringify(capture)}\nfi\n`,
@@ -351,7 +388,7 @@ function withFakeRuntime(callback) {
   );
   fs.writeFileSync(
     coworld,
-    `#!/bin/sh\ntest -z "$COWORLD_API_TOKEN$GITHUB_TOKEN$GH_TOKEN$ACTIONS_ID_TOKEN_REQUEST_TOKEN$ACTIONS_RUNTIME_TOKEN$AWS_SECRET_ACCESS_KEY" || exit 19\nprintf 'coworld|%s|%s|%s\\n' "$*" "$HOME" "\${COWORLD_API_TOKEN:+token}" >> ${JSON.stringify(capture)}\nprintf 'xp-output\\n'\n`,
+    `#!/bin/sh\ntest -z "$COWORLD_API_TOKEN$GITHUB_TOKEN$GH_TOKEN$ACTIONS_ID_TOKEN_REQUEST_TOKEN$ACTIONS_RUNTIME_TOKEN$AWS_SECRET_ACCESS_KEY" || exit 19\nprintf 'coworld|%s|%s|%s\\n' "$*" "$HOME" "\${COWORLD_API_TOKEN:+token}" >> ${JSON.stringify(capture)}\nprintf 'docker|%s|%s\\n' "$COWORLD_REAL_DOCKER" "$DOCKER_HOST" > ${JSON.stringify(dockerCapture)}\nprintf 'xp-output\\n'\n`,
     { mode: 0o700 },
   );
   const env = {
@@ -367,7 +404,7 @@ function withFakeRuntime(callback) {
     RUNNER_TEMP: root,
   };
   try {
-    callback({ env, capture, root });
+    callback({ env, capture, dockerCapture, root });
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
