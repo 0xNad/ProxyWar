@@ -257,6 +257,23 @@ async function fetchEvidence(root) {
       `subject-seat-${entry.subjectSlot}.log`,
     );
     const replayFile = path.join(evidenceDirectory, "episode.replay");
+    const episodeFile = path.join(evidenceDirectory, "episode.json");
+    const completeFiles = [resultsFile, logFile, replayFile, episodeFile];
+    const alreadyFetched = await Promise.all(
+      completeFiles.map(async (file) => {
+        try {
+          await fs.access(file);
+          return true;
+        } catch (error) {
+          if (error.code === "ENOENT") return false;
+          throw error;
+        }
+      }),
+    );
+    if (alreadyFetched.every(Boolean)) {
+      skipped += 1;
+      continue;
+    }
     coworld(["episode-results", episode.id, "-o", resultsFile]);
     const downloadDirectory = path.join(evidenceDirectory, "downloaded");
     await fs.mkdir(downloadDirectory, { recursive: true });
@@ -293,7 +310,7 @@ async function fetchEvidence(root) {
     await fs.writeFile(replayFile, Buffer.from(await response.arrayBuffer()), {
       flag: "w",
     });
-    await writeJSON(path.join(evidenceDirectory, "episode.json"), episode);
+    await writeJSON(episodeFile, episode);
     fetched += 1;
     process.stdout.write(
       `${JSON.stringify({ event: "fetched", setID: entry.setID, arm: entry.arm, episodeID: episode.id })}\n`,
