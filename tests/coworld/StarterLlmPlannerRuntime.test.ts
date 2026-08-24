@@ -86,6 +86,7 @@ function decisionRequest(requestID: string) {
         observation: {
           phase: "active",
           ownState: {
+            playerID: "P_ME",
             name: "Me",
             tileShare: 0.2,
             troops: 100_000,
@@ -93,10 +94,11 @@ function decisionRequest(requestID: string) {
             gold: "1000000",
             borderTiles: 12,
             incomingAttacks: 0,
-            units: {},
+            unitCounts: {},
           },
           spatial: {
             schemaVersion: 1,
+            visibilityModel: "global-lockstep-public-map-v1",
             ownShape: {
               quadrant: "west",
               compactness: "compact",
@@ -125,6 +127,7 @@ function decisionRequest(requestID: string) {
           notes: ["Spatial exposure 1: Auri is east."],
           visiblePlayers: [
             {
+              playerID: "P_AURI",
               name: "Auri",
               isAlive: true,
               tileShare: 0.1,
@@ -282,6 +285,7 @@ describe("tester-starter-llm hardened runtime arm", () => {
         promptCache: false,
         spatialSchemaVersion: 1,
         spatialMinimap: true,
+        spatialVisibilityModel: "global-lockstep-public-map-v1",
         model: "test.sonnet-full",
         responseModel: "test.sonnet-full",
         stopReason: "end_turn",
@@ -296,6 +300,7 @@ describe("tester-starter-llm hardened runtime arm", () => {
         event: "summary",
         spatialSchemaVersion: 1,
         spatialMinimap: true,
+        spatialVisibilityModel: "global-lockstep-public-map-v1",
         attempts: 2,
         responses: 1,
         errors: 0,

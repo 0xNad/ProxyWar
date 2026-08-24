@@ -47,9 +47,14 @@
  *   node --import tsx/esm src/scripts/agent-prompt-size-matrix.ts
  *   [--seats=4,8,16] [--map=world] [--out=<path>]
  */
+import { execFileSync } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  boundedSpatialMapInfo,
+  boundedSpatialObservation,
+} from "../../coworld-adapter/tester-starter-llm/owner-capabilities.mjs";
 import { SpawnExecution } from "../../src/core/execution/SpawnExecution";
 import type { Game, Player } from "../../src/core/game/Game";
 import { PlayerInfo, PlayerType, UnitType } from "../../src/core/game/Game";
@@ -60,7 +65,15 @@ import {
 } from "../../src/server/agents/AgentDealManager";
 import { selectInboxWindow } from "../../src/server/agents/AgentLeagueMatch";
 import { AgentObservationBuilder } from "../../src/server/agents/AgentObservationBuilder";
+import {
+  SPATIAL_MINIMAP_SERIALIZED_MAX_BYTES,
+  SPATIAL_PROMPT_INCREMENT_MAX_BYTES,
+  SPATIAL_PROMPT_INCREMENT_MAX_ESTIMATED_TOKENS,
+  SPATIAL_PROMPT_INCREMENT_MAX_RATIO_AT_16_SEATS,
+  SPATIAL_STAGE_ONE_SERIALIZED_MAX_BYTES,
+} from "../../src/server/agents/AgentSpatialObservation";
 import { selectSpawnSlots } from "../../src/server/agents/AgentSpawnAssignment";
+import { MAX_AGENT_SPAWN_PARTICIPANTS } from "../../src/server/agents/AgentSpawnSelection";
 import {
   FREETEXT_INBOX_MAX_MESSAGES,
   FREETEXT_MESSAGE_MAX_CHARS,
@@ -455,6 +468,8 @@ export async function loadStarterBuildState(): Promise<StarterBuildState> {
   // inbox path needs all three, so extraction must not stop at the two the
   // legacy (message-free) shape happened to touch.
   const factory = new Function(
+    "boundedSpatialV1",
+    "boundedSpatialMapInfo",
     `function avoidActionIDs() { return []; }
 ${extract("clean")}
 ${extract("cleanID")}
@@ -463,7 +478,10 @@ ${extract("normalizeDealPolicies")}
 ${extract("buildState")}
 return buildState;`,
   );
-  return factory() as StarterBuildState;
+  return factory(
+    boundedSpatialObservation,
+    boundedSpatialMapInfo,
+  ) as StarterBuildState;
 }
 
 export interface ArmMeasurement {
@@ -477,17 +495,22 @@ export interface ArmMeasurement {
   messageSlotActionCount: number;
   inboundMessages: number;
   promptChars: number;
+  promptBytes: number;
+  observationBytes: number;
   observationBlockChars: number;
   legalActionsBlockChars: number;
   rankedCandidatesBlockChars: number;
   opponentModelBlockChars: number;
   staticFrameChars: number;
   minimapChars: number;
+  minimapBytes: number;
   spatialChars: number;
+  spatialBytes: number;
   inboxChars: number;
   dealObservationChars: number;
   socialSlotInstructionChars: number;
   starterStateChars: number;
+  starterStateBytes: number;
   estTokensHigh: number;
   estTokensLow: number;
 }
@@ -596,6 +619,14 @@ function measureArmWithAppliedEnvironment(
     spatial?.minimap === undefined ? 0 : JSON.stringify(spatial.minimap).length;
   const spatialChars =
     spatial === undefined ? 0 : JSON.stringify(spatial).length;
+  const minimapBytes =
+    spatial?.minimap === undefined
+      ? 0
+      : Buffer.byteLength(JSON.stringify(spatial.minimap), "utf8");
+  const spatialBytes =
+    spatial === undefined
+      ? 0
+      : Buffer.byteLength(JSON.stringify(spatial), "utf8");
   const inboxChars = inbox.length === 0 ? 0 : JSON.stringify(inbox).length;
   const dealObservationChars =
     observation.deals === undefined
@@ -620,7 +651,8 @@ function measureArmWithAppliedEnvironment(
     actions.length - dealSlotActionCount - messageSlotActionCount;
 
   const starterState = starterBuildState(observation, actions);
-  const starterStateChars = JSON.stringify(starterState).length;
+  const starterStateJson = JSON.stringify(starterState);
+  const starterStateChars = starterStateJson.length;
 
   return {
     arm: arm.name,
@@ -633,6 +665,8 @@ function measureArmWithAppliedEnvironment(
     messageSlotActionCount,
     inboundMessages: inbox.length,
     promptChars: prompt.length,
+    promptBytes: Buffer.byteLength(prompt, "utf8"),
+    observationBytes: Buffer.byteLength(JSON.stringify(observation), "utf8"),
     observationBlockChars,
     legalActionsBlockChars,
     rankedCandidatesBlockChars,
@@ -644,11 +678,14 @@ function measureArmWithAppliedEnvironment(
       rankedCandidatesBlockChars -
       opponentModelBlockChars,
     minimapChars,
+    minimapBytes,
     spatialChars,
+    spatialBytes,
     inboxChars,
     dealObservationChars,
     socialSlotInstructionChars,
     starterStateChars,
+    starterStateBytes: Buffer.byteLength(starterStateJson, "utf8"),
     estTokensLow: Math.round(prompt.length / CHARS_PER_TOKEN_HIGH),
     estTokensHigh: Math.round(prompt.length / CHARS_PER_TOKEN_LOW),
   };
@@ -660,10 +697,7 @@ function measureArmWithAppliedEnvironment(
 
 async function main(): Promise<void> {
   const mapName = argValue("map") ?? "world";
-  const seatCounts = (argValue("seats") ?? "4,8,16")
-    .split(",")
-    .map((value) => Number.parseInt(value, 10))
-    .filter((value) => Number.isInteger(value) && value > 0);
+  const seatCounts = parseSeatCounts(argValue("seats"));
   const phases: PhaseName[] = ["spawn", "mid", "late"];
   const starterBuildState = await loadStarterBuildState();
 
@@ -680,20 +714,147 @@ async function main(): Promise<void> {
       );
     }
   }
+  let commit = "unavailable";
+  let treeState: "clean" | "dirty" | "unavailable" = "unavailable";
+  try {
+    commit = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+    }).trim();
+    treeState =
+      execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], {
+        cwd: REPO_ROOT,
+        encoding: "utf8",
+      }).trim() === ""
+        ? "clean"
+        : "dirty";
+  } catch {
+    // Source archives may be measured for diagnostics but are not attributable.
+  }
+  const source = {
+    commit,
+    treeState,
+    attributionMet: /^[0-9a-f]{40}$/.test(commit) && treeState === "clean",
+  };
+  const spatialRows = measurements.flatMap((measurement) => {
+    if (measurement.arm !== "warships") return [];
+    const sameBoard = (candidate: ArmMeasurement) =>
+      candidate.seats === measurement.seats &&
+      candidate.phase === measurement.phase;
+    const spatial = measurements.find(
+      (candidate) => sameBoard(candidate) && candidate.arm === "spatial",
+    );
+    const minimap = measurements.find(
+      (candidate) =>
+        sameBoard(candidate) && candidate.arm === "spatial_minimap",
+    );
+    if (spatial === undefined || minimap === undefined) {
+      throw new Error(
+        `missing spatial matrix arm for ${measurement.seats}/${measurement.phase}`,
+      );
+    }
+    return [
+      {
+        seats: measurement.seats,
+        phase: measurement.phase,
+        stageOneIncrementalSerializedBytes:
+          spatial.observationBytes - measurement.observationBytes,
+        minimapIncrementalSerializedBytes:
+          minimap.observationBytes - spatial.observationBytes,
+        spatialBlockBytes: spatial.spatialBytes,
+        minimapBlockBytes: minimap.minimapBytes,
+        promptIncrementBytes: minimap.promptBytes - measurement.promptBytes,
+        promptGrowthRatio:
+          (minimap.promptBytes - measurement.promptBytes) /
+          measurement.promptBytes,
+        estimatedTokenIncrement:
+          minimap.estTokensHigh - measurement.estTokensHigh,
+      },
+    ];
+  });
+  const spatialRowsAt16Seats = spatialRows.filter((row) => row.seats === 16);
+  const spatialGate = {
+    rows: spatialRows,
+    maxima: {
+      stageOneIncrementalSerializedBytes: Math.max(
+        ...spatialRows.map((row) => row.stageOneIncrementalSerializedBytes),
+      ),
+      minimapIncrementalSerializedBytes: Math.max(
+        ...spatialRows.map((row) => row.minimapIncrementalSerializedBytes),
+      ),
+      spatialBlockBytes: Math.max(
+        ...spatialRows.map((row) => row.spatialBlockBytes),
+      ),
+      minimapBlockBytes: Math.max(
+        ...spatialRows.map((row) => row.minimapBlockBytes),
+      ),
+      promptIncrementBytes: Math.max(
+        ...spatialRows.map((row) => row.promptIncrementBytes),
+      ),
+      promptGrowthRatioAt16Seats:
+        spatialRowsAt16Seats.length === 0
+          ? null
+          : Math.max(
+              ...spatialRowsAt16Seats.map((row) => row.promptGrowthRatio),
+            ),
+      estimatedTokenIncrement: Math.max(
+        ...spatialRows.map((row) => row.estimatedTokenIncrement),
+      ),
+    },
+    checks: {
+      stageOne: spatialRows.every(
+        (row) =>
+          row.stageOneIncrementalSerializedBytes <=
+          SPATIAL_STAGE_ONE_SERIALIZED_MAX_BYTES,
+      ),
+      minimap: spatialRows.every(
+        (row) =>
+          row.minimapIncrementalSerializedBytes <=
+          SPATIAL_MINIMAP_SERIALIZED_MAX_BYTES,
+      ),
+      prompt: spatialRows.every(
+        (row) => row.promptIncrementBytes <= SPATIAL_PROMPT_INCREMENT_MAX_BYTES,
+      ),
+      estimatedTokens: spatialRows.every(
+        (row) =>
+          row.estimatedTokenIncrement <=
+          SPATIAL_PROMPT_INCREMENT_MAX_ESTIMATED_TOKENS,
+      ),
+      promptGrowthAt16Seats:
+        spatialRowsAt16Seats.length > 0 &&
+        spatialRowsAt16Seats.every(
+          (row) =>
+            row.promptGrowthRatio <=
+            SPATIAL_PROMPT_INCREMENT_MAX_RATIO_AT_16_SEATS,
+        ),
+    },
+  };
+  const targetMet =
+    source.attributionMet && Object.values(spatialGate.checks).every(Boolean);
   const report = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedAt: new Date().toISOString(),
+    source,
     map: mapName,
     charsPerToken: { low: CHARS_PER_TOKEN_LOW, high: CHARS_PER_TOKEN_HIGH },
     caps: {
       freetextInboxMaxMessages: FREETEXT_INBOX_MAX_MESSAGES,
       freetextMessageMaxChars: FREETEXT_MESSAGE_MAX_CHARS,
+      spatialStageOneMaxBytes: SPATIAL_STAGE_ONE_SERIALIZED_MAX_BYTES,
+      spatialMinimapMaxBytes: SPATIAL_MINIMAP_SERIALIZED_MAX_BYTES,
+      spatialPromptIncrementMaxBytes: SPATIAL_PROMPT_INCREMENT_MAX_BYTES,
+      spatialPromptIncrementMaxEstimatedTokens:
+        SPATIAL_PROMPT_INCREMENT_MAX_ESTIMATED_TOKENS,
+      spatialPromptIncrementMaxRatioAt16Seats:
+        SPATIAL_PROMPT_INCREMENT_MAX_RATIO_AT_16_SEATS,
     },
     note:
       "Character counts are exact. Token counts are an estimated RANGE: no " +
       "Claude tokenizer is available offline. Ground-truth tokens come from " +
       "hosted episodes, where the public starter already records Bedrock usage.",
     measurements,
+    spatialGate,
+    targetMet,
   };
 
   const outPath = path.resolve(
@@ -753,6 +914,27 @@ async function main(): Promise<void> {
     );
   }
   console.error(`[matrix] wrote ${outPath}`);
+  if (!targetMet) process.exitCode = 1;
+}
+
+export function parseSeatCounts(value: string | undefined): number[] {
+  const tokens = (value ?? "4,8,16").split(",").map((token) => token.trim());
+  if (tokens.some((token) => !/^[1-9][0-9]*$/.test(token))) {
+    throw new Error("--seats must contain comma-separated positive integers");
+  }
+  const counts = [...new Set(tokens.map((token) => Number(token)))];
+  if (
+    counts.length === 0 ||
+    counts.some(
+      (count) =>
+        !Number.isSafeInteger(count) || count > MAX_AGENT_SPAWN_PARTICIPANTS,
+    )
+  ) {
+    throw new Error(
+      `--seats must contain at least one supported count from 1 to ${MAX_AGENT_SPAWN_PARTICIPANTS}`,
+    );
+  }
+  return counts;
 }
 
 // Importable as a module (tests pin that the arms genuinely differ); runs the

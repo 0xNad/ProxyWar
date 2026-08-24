@@ -3,6 +3,11 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import {
+  boundedSpatialMapInfo,
+  boundedSpatialV1,
+} from "../../coworld-adapter/tester-starter-llm/owner-capabilities.mjs";
+
 // The framed free-text inbox (operator decision 2026-08-16): inbound rival
 // messages reach the starter's planner as a separate `messages[]` block of
 // labelled untrusted CLAIMS, scoped so a message may move dealPolicies /
@@ -72,7 +77,11 @@ async function loadStarter(): Promise<StarterInboxApi> {
     extractFunction(source, "chooseMessageOpener"),
     "return { cleanMessage, buildState, chooseMessageMove, MESSAGE_REPLIES, MESSAGE_OPENERS };",
   ];
-  return new Function(parts.join("\n"))() as StarterInboxApi;
+  return new Function(
+    "boundedSpatialV1",
+    "boundedSpatialMapInfo",
+    parts.join("\n"),
+  )(boundedSpatialV1, boundedSpatialMapInfo) as StarterInboxApi;
 }
 
 const BASE_OBSERVATION = {
@@ -230,6 +239,7 @@ describe("prompt state framing (messages[] as labelled untrusted claims)", () =>
         nonCombat: {
           inboundMessages: [
             inboundMessage({
+              messageEventID: "msg_00000000-0000-4000-8000-000000000001",
               text: "Peace ‮offer on the 北 border",
               turnNumber: 88,
             }),
@@ -240,6 +250,7 @@ describe("prompt state framing (messages[] as labelled untrusted claims)", () =>
     );
     expect(state.messages).toEqual([
       {
+        eventID: "msg_00000000-0000-4000-8000-000000000001",
         fromID: "P_RIVAL",
         from: "Rival",
         turn: 88,

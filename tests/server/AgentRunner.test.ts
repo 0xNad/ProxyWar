@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { Logger } from "winston";
+import { rankOfferedActionsWithSpatial } from "../../coworld-adapter/tester-starter-llm/owner-capabilities.mjs";
 
 vi.mock("../../src/core/configuration/ConfigLoader", () => ({
   getServerConfigFromServer: () => ({
@@ -154,6 +155,125 @@ describe("AgentRunner", () => {
     expect(
       queuedIntents(game).filter((intent) => intent.type === "spawn"),
     ).toHaveLength(0);
+  });
+
+  it("lets rich spatial state change only which exact offered id reaches validator and runner", () => {
+    const actions: LegalAction[] = [
+      {
+        id: "spawn:10",
+        kind: "spawn",
+        label: "Spawn at tile 10",
+        intent: { type: "spawn", tile: 10 },
+        risk: { level: "none", score: 0 },
+        metadata: { targetID: "P_A" },
+      },
+      {
+        id: "spawn:20",
+        kind: "spawn",
+        label: "Spawn at tile 20",
+        intent: { type: "spawn", tile: 20 },
+        risk: { level: "none", score: 0 },
+        metadata: { targetID: "P_B" },
+      },
+    ];
+    const borderWithYou = {
+      tiles: 10,
+      shareOfYourBorder: 25,
+      terrain: "mixed",
+      terrainBreakdown: {
+        plains: 4,
+        highland: 3,
+        mountain: 3,
+        shore: 2,
+      },
+      defensePostsCovering: 0,
+      defensePostFrontCoverage: { covered: 0, uncovered: 10 },
+      underAttackHere: false,
+    };
+    const observation = {
+      ownState: { playerID: "P_SELF" },
+      mapInfo: {
+        name: "Pangaea",
+        width: 100,
+        height: 80,
+        tileRefEncoding: "row-major-y-width-plus-x",
+        coordinateFrame: {
+          origin: "top_left",
+          xIncreases: "east",
+          yIncreases: "south",
+        },
+      },
+      visiblePlayers: [
+        { playerID: "P_A", distanceClass: "adjacent", borderWithYou },
+        { playerID: "P_B", distanceClass: "adjacent", borderWithYou },
+      ],
+      spatial: {
+        schemaVersion: 3,
+        visibilityModel: "global-lockstep-public-map-v1",
+        ownShape: {
+          quadrant: "west",
+          compactness: "compact",
+          regionCount: 1,
+          largestRegionShare: 100,
+          regionAnalysis: "complete",
+          centroidBasis: "largest_region_border",
+          coastShare: 25,
+          centroid: { xPct: 30, yPct: 50 },
+        },
+        positionedAssets: {
+          analysis: "complete",
+          structures: [],
+          structuresTotal: 0,
+          structuresReturned: 0,
+          structuresTruncated: false,
+          warships: Array.from({ length: 8 }, (_, index) => ({
+            ownerPlayerID: "P_B",
+            type: "Warship",
+            tile: 4_000 + index,
+            x: index,
+            y: 40,
+          })),
+          warshipsTotal: 8,
+          warshipsReturned: 8,
+          warshipsTruncated: false,
+        },
+      },
+    };
+    const ranked = rankOfferedActionsWithSpatial(actions, observation);
+    expect(ranked[0]).toBe(actions[1]);
+    expect(ranked.every((action) => actions.includes(action))).toBe(true);
+
+    const validation = validateAgentDecision(
+      { actionID: ranked[0].id, reason: "Use the bounded public map summary." },
+      actions,
+    );
+    expect(validation.ok).toBe(true);
+    if (!validation.ok) throw new Error(validation.reason);
+
+    const log = makeLogger();
+    const game = new GameServer(
+      "SPATIAL1",
+      log,
+      Date.now(),
+      serverConfig,
+      gameConfig,
+      persistentID,
+    );
+    const agent = new AgentRunner({
+      agentID: "agent-spatial",
+      username: "Spatial Agent",
+      persistentID,
+      log,
+    });
+    expect(agent.attachToGame(game).status).toBe("joined");
+    expect(agent.submitLegalAction(validation.action).accepted).toBe(true);
+    expect(
+      queuedIntents(game).find((intent) => intent.type === "spawn"),
+    ).toMatchObject({
+      type: "spawn",
+      tile: 20,
+      clientID: agent.clientID(),
+    });
   });
 
   it("proves the same stamped spawn intent is legal in core execution", async () => {

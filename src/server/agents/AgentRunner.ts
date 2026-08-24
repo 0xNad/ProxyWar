@@ -174,7 +174,7 @@ export class AgentRunner {
       this.cosmetics,
     );
 
-    const joinResult = game.joinClient(client);
+    const joinResult = game.joinAgentClient(client);
     if (joinResult === "joined") {
       this.client = client;
       this.socket = socket;
@@ -234,6 +234,10 @@ export class AgentRunner {
       type: "agent_message",
       recipient: input.recipient,
       text: input.text,
+      // Generated only inside this trusted in-process runner. It is not part
+      // of AgentDecision or any external policy response, so a policy cannot
+      // spoof the evidence join between decision, replay, and observation.
+      messageEventID: `msg_${randomUUID()}`,
     });
   }
 

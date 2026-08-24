@@ -1,0 +1,46 @@
+{
+  "schemaVersion": "proxywar-owner-upgrade-fresh-apply-v1",
+  "generatedAt": "2026-08-24T04:01:08Z",
+  "verdict": "PASS",
+  "publicStarter": {
+    "repository": "https://github.com/0xNad/proxywar-coworld-starter.git",
+    "commit": "190ea95eda41fbf5d1521d433b3365d87b9cfe57",
+    "cleanBeforeApply": true
+  },
+  "candidate": {
+    "commit": "0b5e658868a39308a7361ebbbe99b33ef4cbc3b6",
+    "tree": "089d15254f28d020857cdebd3da1533425f34461",
+    "productParent": "e390184dba7b04a2b47c2dfdf5d804de613d9090",
+    "spatialParent": "90783a6e652ea9a01a3d18a7d613d8e5e387ec64"
+  },
+  "packet": {
+    "path": "coworld-adapter/testing/owner-upgrade/proxywar-owner-upgrade.patch",
+    "sha256": "1bd2536cd0345b02a2cb912a26490f1ba58e815e8cdebcbc6381926cb9a5ec57",
+    "ledgerPath": "coworld-adapter/testing/owner-upgrade/SHA256SUMS",
+    "ledgerSha256": "8923def272b3617edace5e8e2f9718aa28bdde6f3982d58a44422fe3e3462d84",
+    "verifiedFiles": 13
+  },
+  "verification": {
+    "command": "node coworld-adapter/testing/owner-upgrade/verify-owner-upgrade.mjs /absolute/path/to/fresh-public-starter /absolute/path/to/ProxyWar-platform-source",
+    "gitApplyCheck": "PASS",
+    "afterApplyFileSetAndHashes": "PASS",
+    "candidateCommitTreeBlobAndContentJoin": "PASS",
+    "npmInstallIgnoreScripts": "PASS",
+    "nodeTest": "PASS",
+    "nodeSyntaxChecks": "PASS",
+    "doctor": "PASS_UV_DOCKER_SOFTMAX_READY"
+  },
+  "spatialLocalArtifacts": {
+    "sourceCommit": "0b5e658868a39308a7361ebbbe99b33ef4cbc3b6",
+    "benchmarkSha256": "58460074df2f6f1f4d9546232364ddb698dd1303dd5e842c13eeed44077d104c",
+    "promptMatrixSha256": "1095f1391b13145217232ae42fe53db23b82f78a762c05ac5affa56215d05ff5",
+    "benchmarkTargetMet": true,
+    "promptMatrixTargetMet": true
+  },
+  "claimBoundary": {
+    "ownerEvidenceChecker": "policy-self-report-only",
+    "hostedFreeTextExactSlotAndRecipientByteJoin": "NOT_PROVED",
+    "hostedSpatialPackageOrGameplay": "NOT_PROVED",
+    "mergeUploadDispatchDeploy": "NOT_PERFORMED"
+  }
+}

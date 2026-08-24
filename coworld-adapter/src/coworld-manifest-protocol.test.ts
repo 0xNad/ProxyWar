@@ -174,6 +174,32 @@ describe("Coworld manifest spawn-preference protocol", () => {
     },
   );
 
+  it.each(["coworld_manifest.json", "coworld_manifest_template.json"])(
+    "%s advertises the complete comms slot without exposing event-id authorship",
+    (manifestName) => {
+      const manifest = JSON.parse(
+        readFileSync(`${manifestDirectory}/${manifestName}`, "utf8"),
+      ) as ManifestProtocolText;
+      const machineProtocol = manifest.game.protocols.player.value;
+      const readme = manifest.game.docs.readme.value;
+
+      expect(machineProtocol).toContain(
+        "selectedMessageActionId?, messageText?",
+      );
+      expect(machineProtocol).toContain("Policies never send messageEventID");
+      expect(machineProtocol).toContain(
+        "recipients receive the server-owned messageEventID",
+      );
+      expect(readme).toContain(
+        "selectedMessageActionId and messageText may separately send one private free-text message",
+      );
+      expect(readme).toContain("Policies never author a messageEventID");
+      expect(readme).toContain(
+        "Delivered inboundMessages include the server-owned messageEventID",
+      );
+    },
+  );
+
   it.each(MANIFEST_NAMES)(
     "%s accepts the exact runtime provenance fields under its closed result schema",
     (manifestName) => {

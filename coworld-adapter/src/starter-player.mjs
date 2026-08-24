@@ -394,7 +394,8 @@ const MESSAGE_OPENERS = {
 // the LLM starter's DEAL_TRUST_MIN_RELIABILITY.
 const MESSAGE_TRUST_MIN_RELIABILITY = 0.5;
 
-// Inbound messages already answered, keyed `${senderID}:${turnNumber}`, plus
+// Inbound messages already answered, keyed by server-owned messageEventID
+// (`${senderID}:${turnNumber}` for legacy observations), plus
 // `opener:${recipientID}` for counterparties already opened with and
 // `reply:${senderID}:${n}` for the lifetime reply budget. Module scope, so it
 // is exactly one match's memory.
@@ -454,7 +455,10 @@ function chooseMessageMove(actions, obs, answered, dealMove) {
   // below is what actually ends a conversation. Deliberately NOT falling
   // through to an opener here: having just declined to repeat ourselves,
   // opening a second conversation would be chatter.
-  const key = `${senderID}:${newest.turnNumber}`;
+  const key =
+    typeof newest.messageEventID === "string"
+      ? newest.messageEventID
+      : `${senderID}:${newest.turnNumber}`;
   if (answered.has(key)) return null;
 
   // Lifetime reply budget for this counterparty: sequential slot keys in the

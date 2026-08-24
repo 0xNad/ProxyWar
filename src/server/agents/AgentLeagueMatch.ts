@@ -1214,10 +1214,22 @@ export class AgentLeagueMatchRunner {
       recipient: recipientID,
       text: validation.text,
     });
-    if (result.accepted) {
+    const messageEventID =
+      result.accepted &&
+      result.intent?.type === "agent_message" &&
+      typeof result.intent.messageEventID === "string"
+        ? result.intent.messageEventID
+        : null;
+    const accepted = result.accepted && messageEventID !== null;
+    const resultReason =
+      result.accepted && messageEventID === null
+        ? "accepted agent message returned no server-owned event id"
+        : result.reason;
+    if (accepted) {
       this.deliverMessage({
         recipientPlayerID: recipientID,
         message: {
+          messageEventID,
           senderID,
           senderName:
             input.observation.ownState?.name ?? input.participant.spec.username,
@@ -1229,14 +1241,14 @@ export class AgentLeagueMatchRunner {
     return {
       commsSlotActionID: validation.action.id,
       commsSlotRecipientID: recipientID,
+      ...(messageEventID === null
+        ? {}
+        : { commsSlotMessageEventID: messageEventID }),
       // Stamped verbatim: the negotiation evidence rests on the exact wording,
       // and the validator already bounded the length.
       commsSlotText: validation.text,
-      commsSlotAccepted: result.accepted,
-      commsSlotResult: result.reason.slice(
-        0,
-        MAX_STAMPED_DEAL_REJECTION_LENGTH,
-      ),
+      commsSlotAccepted: accepted,
+      commsSlotResult: resultReason.slice(0, MAX_STAMPED_DEAL_REJECTION_LENGTH),
     };
   }
 
@@ -1590,6 +1602,15 @@ export class AgentLeagueMatchRunner {
       decidedAt: Date.now(),
       decisionLatencyMs: input.decisionLatencyMs,
       observationSummary: input.observationSummary,
+      ...(input.observation.nonCombat.inboundMessages?.some(
+        (message) => message.messageEventID !== undefined,
+      )
+        ? {
+            inboundMessageEventIDs: input.observation.nonCombat.inboundMessages
+              .map((message) => message.messageEventID)
+              .filter((id): id is string => id !== undefined),
+          }
+        : {}),
       strategicPriority: input.observation.strategic.priority,
       strategicUrgency: input.observation.strategic.urgency,
       strategicSummary: input.observation.strategic.summary,
