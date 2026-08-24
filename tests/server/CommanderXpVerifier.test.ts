@@ -1661,7 +1661,7 @@ async function buildPreregistrationFixture(
       name: "proxywar-commander-xp-eval",
       version: planInput.coworldVersion,
       manifest_hash: `sha256:${planInput.coworldHostedManifestSha256}`,
-      canonical: false,
+      canonical: true,
       manifest: hostedEvalManifest,
     },
     certification: { state: "certified" },

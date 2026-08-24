@@ -25,6 +25,11 @@ test("protected Commander evidence workflow fences before dispatch and uploads e
   assert.match(workflow, /environment: coworld-production/);
   assert.match(workflow, /^ {2}contents: write$/m);
   assert.match(workflow, /status "\$EVAL_COWORLD_ID" --json/);
+  assert.match(
+    workflow,
+    /test "\$EVAL_COWORLD_ID" != "\$CANONICAL_COWORLD_ID"/,
+  );
+  assert.match(workflow, /\(\.coworld\.canonical \| type\) == "boolean"/);
   assert.match(workflow, /commander-xp-dispatch-fence-/);
   assert.match(workflow, /commander-xp-dispatch-fence-v2/);
   assert.match(workflow, /Create durable atomic pre-dispatch Git ref/);

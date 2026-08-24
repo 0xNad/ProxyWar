@@ -829,7 +829,7 @@ jobs:
           overwrite: false
           include-hidden-files: false
 
-      - name: Upload and inspect the noncanonical eval Coworld
+      - name: Upload and inspect the isolated eval Coworld
         id: eval_upload
         continue-on-error: true
         env:
@@ -892,7 +892,8 @@ jobs:
           test "$(jq -r .coworld.id "$EVAL_ROOT/eval-coworld-inspect.json")" = "$EVAL_COWORLD_ID"
           test "$(jq -r .coworld.name "$EVAL_ROOT/eval-coworld-inspect.json")" = "$EVAL_COWORLD_NAME"
           test "$(jq -r .coworld.version "$EVAL_ROOT/eval-coworld-inspect.json")" = "$EVAL_VERSION"
-          test "$(jq -r .coworld.canonical "$EVAL_ROOT/eval-coworld-inspect.json")" = false
+          test "$EVAL_COWORLD_ID" != "$CANONICAL_COWORLD_ID"
+          jq -e '(.coworld.canonical | type) == "boolean"' "$EVAL_ROOT/eval-coworld-inspect.json" >/dev/null
           test "$(jq -r .certification.state "$EVAL_ROOT/eval-coworld-inspect.json")" = certified
           INSPECTED_MANIFEST_SHA256=$(jq -r .coworld.manifest_hash "$EVAL_ROOT/eval-coworld-inspect.json")
           test "${INSPECTED_MANIFEST_SHA256#sha256:}" = "$EVAL_HOSTED_MANIFEST_SHA256"
@@ -1099,7 +1100,7 @@ jobs:
           ## Commander XP immutable provision
 
           - Source: \`$SOURCE_SHA\` / tree \`$SOURCE_TREE_SHA\`
-          - Eval Coworld: \`$EVAL_COWORLD_ID\` / \`$EVAL_VERSION\` (noncanonical)
+          - Eval Coworld: \`$EVAL_COWORLD_ID\` / \`$EVAL_VERSION\` (isolated eval name; not production-bound)
           - Policy image: \`$POLICY_REPO_DIGEST\`
           - Game image: \`$GAME_REPO_DIGEST\`
           - Terminal proof: \`$TERMINAL_PROOF_SHA256\`

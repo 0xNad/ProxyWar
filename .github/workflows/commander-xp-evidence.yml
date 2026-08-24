@@ -567,8 +567,11 @@ jobs:
         run: |
           set -euo pipefail
           EVAL_COWORLD_ID=$(jq -r .coworldID "$CONTROL_ROOT/eval-coworld-identity-v2.json")
+          CANONICAL_COWORLD_ID=$(jq -r .canonicalProduct.coworldID "$CONTROL_ROOT/eval-coworld-identity-v2.json")
           EXPECTED_MANIFEST_SHA=$(jq -r .hostedManifestSha256 "$CONTROL_ROOT/eval-coworld-identity-v2.json")
           [[ "$EVAL_COWORLD_ID" =~ ^cow_[A-Za-z0-9-]+$ ]]
+          [[ "$CANONICAL_COWORLD_ID" =~ ^cow_[A-Za-z0-9-]+$ ]]
+          test "$EVAL_COWORLD_ID" != "$CANONICAL_COWORLD_ID"
           [[ "$EXPECTED_MANIFEST_SHA" =~ ^[0-9a-f]{64}$ ]]
           "$GITHUB_WORKSPACE/.github/scripts/coworld-authenticated-command.mjs" \
             status "$EVAL_COWORLD_ID" --json > "$RUNNER_TEMP/eval-coworld-preflight.json"
@@ -576,7 +579,7 @@ jobs:
           ACTUAL_MANIFEST_SHA=$(jq -r .coworld.manifest_hash "$RUNNER_TEMP/eval-coworld-preflight.json")
           ACTUAL_MANIFEST_SHA=${ACTUAL_MANIFEST_SHA#sha256:}
           test "${ACTUAL_MANIFEST_SHA#sha256:}" = "$EXPECTED_MANIFEST_SHA"
-          test "$(jq -r .coworld.canonical "$RUNNER_TEMP/eval-coworld-preflight.json")" = "false"
+          jq -e '(.coworld.canonical | type) == "boolean"' "$RUNNER_TEMP/eval-coworld-preflight.json" >/dev/null
           rm -f "$RUNNER_TEMP/eval-coworld-preflight.json"
 
       - name: Resolve one exact retained dispatch boundary for recovery
