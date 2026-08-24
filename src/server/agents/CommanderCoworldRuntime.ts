@@ -11,7 +11,7 @@ export const COMMANDER_COWORLD_BEHAVIOR_SOURCE_TREE_SHA =
 export const COMMANDER_COWORLD_PROMPT_VERSION = "strategic-commander-v0-stage2";
 export const COMMANDER_COWORLD_PROMPT_VERSION_SHA256 =
   "00db34a7939d9d27a3370decf1e3f3f5895b0a3e3676c2e043ec426b5e199094";
-export const COMMANDER_COWORLD_MAX_DECISION_MS = 25_000;
+export const COMMANDER_COWORLD_MAX_DECISION_MS = 15_000;
 export const COMMANDER_COWORLD_BEDROCK_PROVIDER = {
   provider: "bedrock-sidecar",
   routingAuthority: "coworld-injected-bedrock-sidecar-v1",
@@ -21,8 +21,8 @@ export const COMMANDER_COWORLD_BEDROCK_PROVIDER = {
   region: "us-west-2",
   sdkPackage: "@anthropic-ai/bedrock-sdk",
   sdkVersion: "0.29.2",
-  timeoutMs: 20_000,
-  maxTokens: 1_024,
+  timeoutMs: 13_500,
+  maxTokens: 640,
   backendRevision: "unattested-provider-residual",
 } as const;
 
