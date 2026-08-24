@@ -100,6 +100,53 @@ function parsePrefixedJSONLines(text, prefix) {
   return values;
 }
 
+export function selectedActionUtilization(ownerEvents) {
+  const selectedByRequest = new Map();
+  for (const event of ownerEvents) {
+    if (
+      typeof event.requestID !== "string" ||
+      typeof event.selectedLegalActionID !== "string"
+    ) {
+      continue;
+    }
+    const previous = selectedByRequest.get(event.requestID);
+    if (previous !== undefined && previous !== event.selectedLegalActionID) {
+      throw new Error(
+        `${event.requestID} has conflicting selected legal-action evidence`,
+      );
+    }
+    selectedByRequest.set(event.requestID, event.selectedLegalActionID);
+  }
+
+  const selectedIDs = [...selectedByRequest.values()];
+  const actionKindCounts = {};
+  for (const actionID of selectedIDs) {
+    const actionKind = actionID.split(":", 1)[0];
+    actionKindCounts[actionKind] = (actionKindCounts[actionKind] ?? 0) + 1;
+  }
+  const decisions = selectedIDs.length;
+  const rate = (...kinds) =>
+    decisions === 0
+      ? null
+      : sum(kinds.map((kind) => actionKindCounts[kind] ?? 0)) / decisions;
+  return {
+    decisions,
+    actionKindCounts: Object.fromEntries(
+      Object.entries(actionKindCounts).sort(([left], [right]) =>
+        left.localeCompare(right),
+      ),
+    ),
+    nonHoldRate:
+      decisions === 0
+        ? null
+        : (decisions - (actionKindCounts.hold ?? 0)) / decisions,
+    expandRate: rate("expand"),
+    attackRate: rate("attack"),
+    economyBuildRate: rate("build", "upgrade"),
+    boatRate: rate("boat"),
+  };
+}
+
 async function readJSON(file) {
   return JSON.parse(await fs.readFile(file, "utf8"));
 }
@@ -147,6 +194,7 @@ async function readRun(root, entry) {
   const selectedEvents = ownerEvents.filter(
     (event) => typeof event.selectedLegalActionID === "string",
   );
+  const actionUtilization = selectedActionUtilization(ownerEvents);
   const summary = replaySummary(replay);
   return {
     setIndex: entry.setIndex,
@@ -173,6 +221,13 @@ async function readRun(root, entry) {
     selectedOfferedEvents: selectedEvents.filter(
       (event) => event.selectedLegalActionOffered === true,
     ).length,
+    selectedUniqueDecisions: actionUtilization.decisions,
+    selectedActionKindCounts: actionUtilization.actionKindCounts,
+    selectedNonHoldRate: actionUtilization.nonHoldRate,
+    selectedExpandRate: actionUtilization.expandRate,
+    selectedAttackRate: actionUtilization.attackRate,
+    selectedEconomyBuildRate: actionUtilization.economyBuildRate,
+    selectedBoatRate: actionUtilization.boatRate,
     actionFidelity:
       selectedEvents.length > 0 &&
       selectedEvents.every(
@@ -211,6 +266,21 @@ async function readRun(root, entry) {
 
 function armSummary(runs, arm) {
   const rows = runs.filter((run) => run.arm === arm);
+  const selectedActionKindCounts = {};
+  for (const row of rows) {
+    for (const [kind, count] of Object.entries(row.selectedActionKindCounts)) {
+      selectedActionKindCounts[kind] =
+        (selectedActionKindCounts[kind] ?? 0) + count;
+    }
+  }
+  const selectedUniqueDecisions = sum(
+    rows.map((run) => run.selectedUniqueDecisions),
+  );
+  const selectedRate = (...kinds) =>
+    selectedUniqueDecisions === 0
+      ? null
+      : sum(kinds.map((kind) => selectedActionKindCounts[kind] ?? 0)) /
+        selectedUniqueDecisions;
   return {
     runs: rows.length,
     wins: rows.filter((run) => run.won).length,
@@ -239,6 +309,21 @@ function armSummary(runs, arm) {
     spatialContractPass: rows.every((run) => run.spatialContract),
     selectedEvidenceEvents: sum(rows.map((run) => run.selectedEvidenceEvents)),
     selectedOfferedEvents: sum(rows.map((run) => run.selectedOfferedEvents)),
+    selectedUniqueDecisions,
+    selectedActionKindCounts: Object.fromEntries(
+      Object.entries(selectedActionKindCounts).sort(([left], [right]) =>
+        left.localeCompare(right),
+      ),
+    ),
+    selectedNonHoldRate: rounded(
+      selectedUniqueDecisions === 0
+        ? null
+        : 1 - (selectedActionKindCounts.hold ?? 0) / selectedUniqueDecisions,
+    ),
+    selectedExpandRate: rounded(selectedRate("expand")),
+    selectedAttackRate: rounded(selectedRate("attack")),
+    selectedEconomyBuildRate: rounded(selectedRate("build", "upgrade")),
+    selectedBoatRate: rounded(selectedRate("boat")),
     meanEntertainmentScore: rounded(
       mean(rows.map((run) => run.entertainmentScore)),
     ),
@@ -282,6 +367,15 @@ function pairedReport(runs, options = {}) {
       actionDiversity: structured.actionDiversity - off.actionDiversity,
       behaviorQualityScore:
         structured.behaviorQualityScore - off.behaviorQualityScore,
+      selectedNonHoldRate:
+        structured.selectedNonHoldRate - off.selectedNonHoldRate,
+      selectedExpandRate:
+        structured.selectedExpandRate - off.selectedExpandRate,
+      selectedAttackRate:
+        structured.selectedAttackRate - off.selectedAttackRate,
+      selectedEconomyBuildRate:
+        structured.selectedEconomyBuildRate - off.selectedEconomyBuildRate,
+      selectedBoatRate: structured.selectedBoatRate - off.selectedBoatRate,
     });
   }
   const metric = (name) => pairedSummary(rows.map((row) => row[name]));
@@ -299,6 +393,11 @@ function pairedReport(runs, options = {}) {
     entertainmentScore: metric("entertainmentScore"),
     actionDiversity: metric("actionDiversity"),
     behaviorQualityScore: metric("behaviorQualityScore"),
+    selectedNonHoldRate: metric("selectedNonHoldRate"),
+    selectedExpandRate: metric("selectedExpandRate"),
+    selectedAttackRate: metric("selectedAttackRate"),
+    selectedEconomyBuildRate: metric("selectedEconomyBuildRate"),
+    selectedBoatRate: metric("selectedBoatRate"),
     byMap: Object.fromEntries(
       [...new Set(rows.map((row) => row.map))].map((map) => [
         map,
@@ -416,6 +515,7 @@ export async function analyze(root, options = {}) {
       "Replay entertainment and behavior-quality scores are automated proxies, not blinded spectator judgments.",
       "Aggregate token totals are lower bounds when a planner request remained in flight at episode final.",
       "Gate 3 retained evidence proves exact offered-action fidelity but does not reconstruct a counterfactual spatial-consistency score for each selected action.",
+      "Selected-action utilization rates are post-hoc diagnostics, not preregistered gameplay endpoints.",
     ],
     runs,
   };
