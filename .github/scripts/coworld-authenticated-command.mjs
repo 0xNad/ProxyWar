@@ -330,6 +330,16 @@ if (command === "upload-coworld") {
     throw new Error("upload-coworld requires an absolute COWORLD_REAL_DOCKER");
   }
   childEnv.COWORLD_REAL_DOCKER = realDocker;
+  const certificationCache = process.env.XDG_CACHE_HOME;
+  if (
+    !certificationCache ||
+    !exactRunnerTempDirectoryInput(certificationCache)
+  ) {
+    throw new Error(
+      "upload-coworld requires an exact runner-temp XDG_CACHE_HOME",
+    );
+  }
+  childEnv.XDG_CACHE_HOME = certificationCache;
   const dockerHost = process.env.DOCKER_HOST;
   if (dockerHost) {
     if (!/^unix:\/\/[A-Za-z0-9._/-]+$/.test(dockerHost)) {
