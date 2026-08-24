@@ -123,7 +123,51 @@ def fixture_policy(args: SimpleNamespace, role: str) -> dict[str, object]:
     }
 
 
+def fixture_image_upload(args: SimpleNamespace) -> tuple[dict[str, object], dict[str, object]]:
+    client_hash = "sha256:" + "7" * 64
+    image = {
+        "id": "img_fixture",
+        "name": "proxywar-commander-xp-policy",
+        "version": 1,
+        "client_hash": client_hash,
+        "status": "ready",
+        "image_uri": None,
+        "image_digest": "sha256:" + "8" * 64,
+        "public_image_uri": None,
+    }
+    request_payload = {
+        "name": MODULE._image_upload_name(args.image),
+        "client_hash": client_hash,
+    }
+    return image, {
+        "requestPayload": request_payload,
+        "requestPayloadSha256": MODULE.sha256_bytes(
+            MODULE.canonical_bytes(request_payload)
+        ),
+        "image": image,
+    }
+
+
 class PolicyProvisionReceiptTest(unittest.TestCase):
+    def test_image_binding_keeps_oci_client_and_coworld_digests_distinct(
+        self,
+    ) -> None:
+        args = fixture_args(Path("/tmp/not-used"))
+        image, image_upload = fixture_image_upload(args)
+        MODULE.validate_image_upload_binding(image_upload, image, args)
+        self.assertNotEqual(image["client_hash"], args.oci_digest)
+        self.assertNotEqual(image["image_digest"], args.oci_digest)
+
+        crossed_upload = dict(image_upload)
+        crossed_payload = dict(image_upload["requestPayload"])
+        crossed_payload["client_hash"] = "sha256:" + "9" * 64
+        crossed_upload["requestPayload"] = crossed_payload
+        crossed_upload["requestPayloadSha256"] = MODULE.sha256_bytes(
+            MODULE.canonical_bytes(crossed_payload)
+        )
+        with self.assertRaisesRegex(RuntimeError, "authority binding mismatch"):
+            MODULE.validate_image_upload_binding(crossed_upload, image, args)
+
     def test_coworld_0_1_42_create_request_preserves_exact_json_body(self) -> None:
         body = {
             "name": "commander-xp-fixture",
@@ -219,11 +263,10 @@ class PolicyProvisionReceiptTest(unittest.TestCase):
             recovery.mkdir()
             output = root / "output"
             args = fixture_args(output, recovery)
-            image = {"id": "img_fixture", "image_digest": args.oci_digest}
-            image_upload = {"image": image, "requestPayloadSha256": "a" * 64}
+            image, image_upload = fixture_image_upload(args)
             image_body = {
-                "schemaVersion": 2,
-                "authority": "coworld-0.1.42-policy-image-upload-v2",
+                "schemaVersion": 3,
+                "authority": "coworld-0.1.42-policy-image-upload-v3",
                 "inspectedAt": "2026-08-23T00:00:00Z",
                 "platform": MODULE.PLATFORM,
                 "sourceSha": args.source_sha,
@@ -309,12 +352,12 @@ class PolicyProvisionReceiptTest(unittest.TestCase):
             recovery.mkdir()
             output = root / "output"
             args = fixture_args(output, recovery)
-            image = {"id": "img_fixture", "image_digest": args.oci_digest}
+            image, image_upload = fixture_image_upload(args)
             MODULE.write_receipt(
                 recovery / "image.json",
                 {
-                    "schemaVersion": 2,
-                    "authority": "coworld-0.1.42-policy-image-upload-v2",
+                    "schemaVersion": 3,
+                    "authority": "coworld-0.1.42-policy-image-upload-v3",
                     "inspectedAt": "2026-08-23T00:00:00Z",
                     "platform": MODULE.PLATFORM,
                     "sourceSha": args.source_sha,
@@ -324,7 +367,7 @@ class PolicyProvisionReceiptTest(unittest.TestCase):
                     "ociImage": args.image.split("@", 1)[0],
                     "ociDigest": args.oci_digest,
                     "containerImage": image,
-                    "imageUpload": {"image": image},
+                    "imageUpload": image_upload,
                 },
             )
             class ExistingReadClient:
