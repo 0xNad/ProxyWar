@@ -274,6 +274,12 @@ export default defineConfig(({ mode }) => {
         "**/.docker-context/**",
         "**/deploy/**",
         "**/tests/automation/**",
+        // These owner-packet suites intentionally use Node's built-in
+        // `node:test` runner so the copied public starter needs no Vitest
+        // dependency. They are exercised by the starter's `npm test` and the
+        // packet contract command, not as Vitest suites in the platform run.
+        "**/coworld-adapter/tester-starter-llm/owner-*.test.mjs",
+        "**/coworld-adapter/testing/owner-upgrade/owner-upgrade-contract.test.mjs",
       ],
     },
     root: "./",

@@ -280,7 +280,8 @@
       ],
       "env": {
         "PROXYWAR_TUNE_STRUCTURED_DEALS": "1",
-        "PROXYWAR_TUNE_FREETEXT_MESSAGES": "1"
+        "PROXYWAR_TUNE_FREETEXT_MESSAGES": "1",
+        "PROXYWAR_TUNE_SPATIAL_OBSERVATION": "1"
       }
     },
     "protocols": {
@@ -305,6 +306,14 @@
           "content": {
             "type": "text",
             "value": "source_sha={{SOURCE_SHA}}"
+          }
+        },
+        {
+          "id": "proxywar-structured-spatial-observation",
+          "title": "Structured spatial observation",
+          "content": {
+            "type": "text",
+            "value": "The canonical package enables PROXYWAR_TUNE_SPATIAL_OBSERVATION=1 and leaves PROXYWAR_TUNE_SPATIAL_MINIMAP absent. Each game-backed observation therefore carries mapInfo; after a seat owns land it may also carry the bounded schema-5 spatial block with provenance global-lockstep-public-map-v1, coordinate frame, front terrain and coverage, completed public structures and warships, and weighted rival/naval exposure. The optional minimap child remains disabled. Spatial data is context only: a policy may use it to rank the exact current legalActions[].id values, but coordinates, glyphs, and player IDs are never executable actions or raw intents."
           }
         }
       ]
