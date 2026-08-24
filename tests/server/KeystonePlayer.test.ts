@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   decisionRequestEnvelope,
+  normalizeCommanderExecutionEnvelope,
   normalizeDecisionResponse,
 } from "../../coworld-adapter/src/coworld-decision-wire";
 import {
@@ -552,6 +553,62 @@ describe("Coworld keystone player", () => {
       metadata: { runtimeMode: "llm-policy-planner " },
     });
     expect(forged).not.toHaveProperty("runtimeMode");
+  });
+
+  it("decisionToResponse binds Commander execution metadata without changing selected actions", () => {
+    const response = decisionToResponse(
+      "req_commander",
+      {
+        actionID: "hold:primary",
+        actionIDs: ["hold:primary", "fortify:support"],
+        reason: "execute the bound plan",
+        metadata: {
+          runtimeMode: "commander-v0-selector",
+          plannerSource: "strategic-commander-v0",
+          planID: "plan-keystone-fixture",
+          planObjective: "survive",
+          commanderSelectedOptionID: "survive",
+          commanderSelectedOptionFamily: "survive",
+          commanderSelectorSource: "deterministic",
+          commanderDeterministicPreferredOptionId: "survive",
+          commanderDeterministicPreferredOptionAbsent: false,
+          commanderFidelity: "aligned_primary",
+          commanderBatchFidelities: JSON.stringify({
+            "hold:primary": "aligned_primary",
+            "fortify:support": "aligned_support",
+          }),
+          batchIndex: 0,
+          batchSize: 2,
+          batchActionIDs: "hold:primary,fortify:support",
+        },
+      },
+      5,
+    );
+    const envelope = normalizeCommanderExecutionEnvelope(
+      response.commanderExecution,
+    );
+    expect(response.selectedLegalActionId).toBe("hold:primary");
+    expect(response.selectedLegalActionIds).toEqual([
+      "hold:primary",
+      "fortify:support",
+    ]);
+    expect(envelope).not.toBeNull();
+    expect(envelope?.metadata).toMatchObject({
+      runtimeMode: "commander-v0-selector",
+      planID: "plan-keystone-fixture",
+      planObjective: "survive",
+      commanderFidelity: "aligned_primary",
+      batchSize: 2,
+    });
+    expect(envelope?.metadataSha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(envelope?.selection).toEqual({
+      planID: "plan-keystone-fixture",
+      selectedOptionID: "survive",
+      selectedOptionFamily: "survive",
+      selectorSource: "deterministic",
+      deterministicPreferredOptionID: "survive",
+      deterministicPreferredOptionAbsent: false,
+    });
   });
 
   it("ranks an all-spawn menu locally and carries the independent preference field", () => {

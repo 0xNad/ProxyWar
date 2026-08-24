@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { withDeferredDecisionTimeout } from "./AgentDecisionTimeout";
 import { buildCommanderPrompt } from "./CommanderPromptBuilder";
 import { parseCommanderResponse } from "./CommanderResponseParser";
@@ -14,7 +16,9 @@ import type {
 } from "./StrategicOptionSelectors";
 import { strategicOptionSelectionFailureDescriptions } from "./StrategicOptionSelectors";
 
-export const COMMANDER_PROMPT_VERSION = "strategic-commander-v0-stage2";
+import { COMMANDER_COWORLD_PROMPT_VERSION } from "./CommanderCoworldRuntime";
+
+export const COMMANDER_PROMPT_VERSION = COMMANDER_COWORLD_PROMPT_VERSION;
 export const DEFAULT_LLM_OPTION_SELECTOR_TIMEOUT_MS = 12_000;
 
 export interface LlmOptionSelectorOptions {
@@ -50,6 +54,7 @@ export class LlmOptionSelector implements StrategicOptionSelector {
   ): Promise<StrategicOptionSelectionAttempt> {
     assertExactLockedSurface(state, options);
     const prompt = buildCommanderPrompt(state);
+    const promptSha256 = createHash("sha256").update(prompt).digest("hex");
     const startedAt = Date.now();
     const controller = new AbortController();
     const providerPromise = Promise.resolve().then(() =>
@@ -92,6 +97,7 @@ export class LlmOptionSelector implements StrategicOptionSelector {
           parseOk: false,
           provider: this.providerLabel,
           model: this.modelLabel,
+          promptSha256,
         }),
       );
     }
@@ -113,6 +119,7 @@ export class LlmOptionSelector implements StrategicOptionSelector {
           parseOk: false,
           provider: this.providerLabel,
           model: this.modelLabel,
+          promptSha256,
         }),
       );
     }
@@ -132,6 +139,7 @@ export class LlmOptionSelector implements StrategicOptionSelector {
         parseOk: true,
         provider: this.providerLabel,
         model: this.modelLabel,
+        promptSha256,
       }),
     };
   }
@@ -167,6 +175,7 @@ function telemetry(input: {
   parseOk: boolean;
   provider: string;
   model: string | null;
+  promptSha256: string;
 }): StrategicOptionSelectorTelemetry {
   return {
     providerCalled: true,
@@ -179,6 +188,7 @@ function telemetry(input: {
     provider: input.provider,
     model: input.model,
     promptVersion: COMMANDER_PROMPT_VERSION,
+    promptSha256: input.promptSha256,
   };
 }
 

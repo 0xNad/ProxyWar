@@ -424,6 +424,7 @@ describe("StrategicCommanderCaller Stage 4 — provider and response safety", ()
             provider: null,
             model: null,
             promptVersion: null,
+            promptSha256: null,
           },
         };
       },

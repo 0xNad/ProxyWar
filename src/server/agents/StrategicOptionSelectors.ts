@@ -59,6 +59,7 @@ export interface StrategicOptionSelectorTelemetry {
   provider: string | null;
   model: string | null;
   promptVersion: string | null;
+  promptSha256: string | null;
 }
 
 export type StrategicOptionSelectionAttempt =
@@ -120,6 +121,7 @@ export function deterministicSelectorTelemetry(): StrategicOptionSelectorTelemet
     provider: null,
     model: null,
     promptVersion: null,
+    promptSha256: null,
   };
 }
 
