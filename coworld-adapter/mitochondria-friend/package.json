@@ -6,7 +6,7 @@
   "license": "MIT",
   "description": "A deterministic diplomacy-first ProxyWar league policy.",
   "scripts": {
-    "test": "node --test friendly-policy.test.mjs"
+    "test": "node --test friendly-policy.node-test.mjs"
   },
   "dependencies": {
     "ws": "^8.18.0"

@@ -20,7 +20,7 @@ Behavior:
 Run the pure policy checks with:
 
 ```sh
-node --test friendly-policy.test.mjs
+node --test friendly-policy.node-test.mjs
 ```
 
 Build the hosted linux/amd64 policy image from the repository root with:

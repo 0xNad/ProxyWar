@@ -1,12 +1,11 @@
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-const POLICY_FILE = fileURLToPath(
-  new URL(
-    "../../coworld-adapter/mitochondria-friend/friendly-policy.mjs",
-    import.meta.url,
-  ),
+const POLICY_FILE = resolve(
+  process.cwd(),
+  "coworld-adapter/mitochondria-friend/friendly-policy.mjs",
 );
 
 type Decision = {

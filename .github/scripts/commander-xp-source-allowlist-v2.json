@@ -51,7 +51,7 @@
   "coworld-adapter/mitochondria-friend/README.md",
   "coworld-adapter/mitochondria-friend/friendly-player.mjs",
   "coworld-adapter/mitochondria-friend/friendly-policy.mjs",
-  "coworld-adapter/mitochondria-friend/friendly-policy.test.mjs",
+  "coworld-adapter/mitochondria-friend/friendly-policy.node-test.mjs",
   "coworld-adapter/mitochondria-friend/package.json",
   "coworld-adapter/package.json",
   "coworld-adapter/scripts/fetch-commander-xp-episode-bundle.py",
