@@ -1271,7 +1271,11 @@ function messageActions(observation: AgentObservation): LegalAction[] {
       if (other.sharesBorder) score += 100;
       if (other.incomingAttack || other.outgoingAttack) score += 50;
       if (other.underSiege) score += 25;
-      return { other, score, lastHeard: lastHeardFrom.get(other.playerID) ?? -1 };
+      return {
+        other,
+        score,
+        lastHeard: lastHeardFrom.get(other.playerID) ?? -1,
+      };
     })
     // Deterministic total order: score, then most recent inbound, then a
     // stable id tiebreak so the same observation always yields the same menu.
@@ -1441,6 +1445,19 @@ function dealMetaActions(
   });
 
   for (const proposal of deals.incomingProposals) {
+    // A same-step crossed proposal can remain open after the reverse
+    // direction was accepted first. The manager will still accept a reject
+    // (which truthfully closes the redundant ledger entry), but accepting a
+    // second copy can only fail. Preserve the proposal and its reject action
+    // while suppressing only that now-inadmissible accept action.
+    const equivalentDealActive = deals.activeDeals.some(
+      (deal) =>
+        deal.template === proposal.terms.template &&
+        ((deal.proposerPlayerID === proposal.proposerPlayerID &&
+          deal.recipientPlayerID === proposal.recipientPlayerID) ||
+          (deal.proposerPlayerID === proposal.recipientPlayerID &&
+            deal.recipientPlayerID === proposal.proposerPlayerID)),
+    );
     const supportFeasible = supportAcceptanceFeasible(
       observation,
       primaryActions,
@@ -1448,7 +1465,8 @@ function dealMetaActions(
       proposal.terms,
     );
     const offerAccept =
-      proposal.terms.template !== "support_request" || supportFeasible;
+      !equivalentDealActive &&
+      (proposal.terms.template !== "support_request" || supportFeasible);
     // Feasible proposals keep the atomic accept/reject pair under budget
     // pressure. An infeasible support request deliberately exposes rejection
     // alone: accepting a promise no currently offered transfer can satisfy is
