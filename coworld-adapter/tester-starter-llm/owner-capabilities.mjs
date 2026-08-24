@@ -11,6 +11,7 @@ import { createHash } from "node:crypto";
 export const OWNER_MESSAGE_MAX_CHARS = 280;
 export const OWNER_SPATIAL_SERIALIZED_MAX_BYTES = 16 * 1024;
 export const OWNER_MINIMAP_SERIALIZED_MAX_BYTES = 4 * 1024;
+const OWNER_MINIMAP_LARGE_TILE_THRESHOLD = 256 * 1024;
 export const OWNER_EVIDENCE_MAX_EVENTS_PER_KIND = 64;
 export const SPATIAL_VISIBILITY_MODEL = "global-lockstep-public-map-v1";
 
@@ -453,7 +454,7 @@ function boundedRivalReliability(reliability) {
 
 export function advertisedMessageLimit(protocol) {
   const value = protocol?.maxMessageChars;
-  return Number.isInteger(value) && value > 0
+  return Number.isSafeInteger(value) && value > 0
     ? Math.min(value, OWNER_MESSAGE_MAX_CHARS)
     : null;
 }
@@ -589,6 +590,9 @@ export function boundedDealsObservation(deals, ownPlayerID) {
 export function boundedInboundMessages(observation) {
   const inbound = observation?.nonCombat?.inboundMessages;
   if (!Array.isArray(inbound) || inbound.length > 8) return null;
+  const bounded = [];
+  const messagesPerSender = new Map();
+  let previousTurn = -1;
   for (const entry of inbound) {
     if (
       !isRecord(entry) ||
@@ -596,12 +600,23 @@ export function boundedInboundMessages(observation) {
       !isBoundedVisibleString(entry.senderName, 120, true) ||
       !Number.isSafeInteger(entry.turnNumber) ||
       entry.turnNumber < 0 ||
+      entry.turnNumber < previousTurn ||
       !isSafeAgentMessageText(entry.text, OWNER_MESSAGE_MAX_CHARS)
     ) {
       return null;
     }
+    const senderCount = (messagesPerSender.get(entry.senderID) ?? 0) + 1;
+    if (senderCount > 3) return null;
+    messagesPerSender.set(entry.senderID, senderCount);
+    previousTurn = entry.turnNumber;
+    bounded.push({
+      senderID: entry.senderID,
+      senderName: entry.senderName,
+      text: entry.text,
+      turnNumber: entry.turnNumber,
+    });
   }
-  return inbound;
+  return bounded;
 }
 
 /**
@@ -758,6 +773,25 @@ export function createOwnerCapabilityEvidenceLogger({
 
     if (!spawn && !spatialRecorded) {
       const spatial = boundedSpatialObservation(observation);
+      const spatialBase = spatial
+        ? spatial.schemaVersion === 3 || spatial.schemaVersion === 5
+          ? {
+              mapInfo: spatial.mapInfo,
+              spatial: {
+                schemaVersion: spatial.schemaVersion,
+                visibilityModel: spatial.visibilityModel,
+                ownShape: spatial.ownShape,
+                positionedAssets: spatial.positionedAssets,
+              },
+              visiblePlayers: spatial.rivals,
+            }
+          : {
+              schemaVersion: spatial.schemaVersion,
+              visibilityModel: spatial.visibilityModel,
+              ownShape: spatial.ownShape,
+              rivals: spatial.rivals,
+            }
+        : null;
       record("spatial_observation", {
         ...base,
         present: spatial !== null,
@@ -769,9 +803,16 @@ export function createOwnerCapabilityEvidenceLogger({
               ...(spatial.minimap !== undefined
                 ? { minimapSchemaVersion: spatial.minimap.schemaVersion }
                 : {}),
-              serializedUTF8Bytes: new TextEncoder().encode(
-                JSON.stringify(spatial),
+              baseSerializedUTF8Bytes: new TextEncoder().encode(
+                JSON.stringify(spatialBase),
               ).byteLength,
+              ...(spatial.minimap !== undefined
+                ? {
+                    minimapSerializedUTF8Bytes: new TextEncoder().encode(
+                      JSON.stringify(spatial.minimap),
+                    ).byteLength,
+                  }
+                : {}),
             }
           : {}),
       });
@@ -906,13 +947,23 @@ function boundedMinimapV1(minimap, allowedPlayerIDs, ownPlayerID) {
     : null;
 }
 
-function boundedMinimapV2(minimap, allowedPlayerIDs, ownPlayerID) {
+function boundedMinimapV2(
+  minimap,
+  allowedPlayerIDs,
+  ownPlayerID,
+  mapInfo,
+  expectedMarkersTotal,
+) {
   const dimensionPair =
     (minimap?.width === 24 && minimap?.height === 12) ||
     (minimap?.width === 32 && minimap?.height === 16);
   if (
     minimap?.schemaVersion !== 2 ||
     !dimensionPair ||
+    (mapInfo &&
+      (mapInfo.width * mapInfo.height >= OWNER_MINIMAP_LARGE_TILE_THRESHOLD
+        ? minimap.width !== 32 || minimap.height !== 16
+        : minimap.width !== 24 || minimap.height !== 12)) ||
     !Array.isArray(minimap.ownershipRows) ||
     minimap.ownershipRows.length !== minimap.height ||
     !minimap.ownershipRows.every(
@@ -934,6 +985,8 @@ function boundedMinimapV2(minimap, allowedPlayerIDs, ownPlayerID) {
     !Array.isArray(minimap.markers) ||
     minimap.markers.length > 24 ||
     boundedNonnegativeInteger(minimap.markersTotal) === null ||
+    (expectedMarkersTotal !== undefined &&
+      minimap.markersTotal !== expectedMarkersTotal) ||
     minimap.markersTotal < minimap.markers.length ||
     minimap.markersReturned !== minimap.markers.length ||
     minimap.markersTruncated !== minimap.markers.length < minimap.markersTotal
@@ -1009,16 +1062,6 @@ function boundedMinimapV2(minimap, allowedPlayerIDs, ownPlayerID) {
     OWNER_MINIMAP_SERIALIZED_MAX_BYTES
     ? bounded
     : null;
-}
-
-function boundedMinimap(minimap, allowedPlayerIDs, ownPlayerID) {
-  if (minimap?.schemaVersion === 2) {
-    return boundedMinimapV2(minimap, allowedPlayerIDs, ownPlayerID);
-  }
-  if (minimap?.schemaVersion === 1) {
-    return boundedMinimapV1(minimap, allowedPlayerIDs, ownPlayerID);
-  }
-  return null;
 }
 
 export function boundedSpatialMapInfo(mapInfo) {
@@ -1142,7 +1185,8 @@ function boundedSpatialV3Rivals(
     if (
       !isBoundedVisibleString(player?.playerID, 200) ||
       player.playerID === ownPlayerID ||
-      seenRivalIDs.has(player.playerID)
+      seenRivalIDs.has(player.playerID) ||
+      (requireL4 && typeof player.sharesBorder !== "boolean")
     ) {
       return null;
     }
@@ -1169,10 +1213,15 @@ function boundedSpatialV3Rivals(
         boundedNonnegativeInteger(terrain.shore) === null ||
         terrain.plains + terrain.highland + terrain.mountain !== border.tiles ||
         terrain.shore > border.tiles ||
+        (border.terrain === "land" && terrain.shore !== 0) ||
+        (border.terrain === "coastal" && terrain.shore !== border.tiles) ||
+        (border.terrain === "mixed" &&
+          (terrain.shore === 0 || terrain.shore === border.tiles)) ||
         !isRecord(coverage) ||
         boundedNonnegativeInteger(coverage.covered) === null ||
         boundedNonnegativeInteger(coverage.uncovered) === null ||
-        coverage.covered + coverage.uncovered !== border.tiles
+        coverage.covered + coverage.uncovered !== border.tiles ||
+        (border.defensePostsCovering === 0) !== (coverage.covered === 0)
       ) {
         return null;
       }
@@ -1224,6 +1273,10 @@ function boundedSpatialV3Rivals(
     }
     if (
       (player.bearing !== undefined && !bearings.has(player.bearing)) ||
+      (requireL4 && (borderWithYou !== undefined) !== player.sharesBorder) ||
+      (requireL4 &&
+        borderWithYou !== undefined &&
+        player.distanceClass !== "adjacent") ||
       (requireL4 && !distances.has(player.distanceClass)) ||
       (player.distanceClass !== undefined &&
         !distances.has(player.distanceClass)) ||
@@ -1292,6 +1345,9 @@ function boundedPositionedAssets(positioned, mapInfo, allowedPlayerIDs) {
   if (
     positioned.structuresTotal < positioned.structures.length ||
     positioned.warshipsTotal < positioned.warships.length ||
+    !Number.isSafeInteger(
+      positioned.structuresTotal + positioned.warshipsTotal,
+    ) ||
     positioned.structuresTruncated !==
       positioned.structures.length < positioned.structuresTotal ||
     positioned.warshipsTruncated !==
@@ -1499,7 +1555,7 @@ export function boundedSpatialV1(observation) {
   ) {
     return null;
   }
-  const minimap = boundedMinimap(
+  const minimap = boundedMinimapV1(
     spatial.minimap,
     allowedPlayerIDs,
     ownPlayerID,
@@ -1582,7 +1638,7 @@ export function boundedSpatialV3(observation) {
     allowedPlayerIDs,
   );
   if (!positionedAssets) return null;
-  const minimap = boundedMinimap(
+  const minimap = boundedMinimapV1(
     spatial.minimap,
     allowedPlayerIDs,
     ownPlayerID,
@@ -1595,7 +1651,17 @@ export function boundedSpatialV3(observation) {
     rivals,
     positionedAssets,
   };
-  if (!isWithinOwnerSpatialSerializationCeiling(bounded)) return null;
+  const stageOne = {
+    mapInfo,
+    spatial: {
+      schemaVersion: 3,
+      visibilityModel: SPATIAL_VISIBILITY_MODEL,
+      ownShape,
+      positionedAssets,
+    },
+    visiblePlayers: rivals,
+  };
+  if (!isWithinOwnerSpatialSerializationCeiling(stageOne)) return null;
   return minimap ? { ...bounded, minimap } : bounded;
 }
 
@@ -1666,6 +1732,8 @@ export function boundedSpatialV5(observation) {
     spatial.minimap,
     allowedPlayerIDs,
     ownPlayerID,
+    mapInfo,
+    positionedAssets.structuresTotal + positionedAssets.warshipsTotal,
   );
   const bounded = {
     schemaVersion: 5,
@@ -1675,7 +1743,17 @@ export function boundedSpatialV5(observation) {
     rivals,
     positionedAssets,
   };
-  if (!isWithinOwnerSpatialSerializationCeiling(bounded)) return null;
+  const stageOne = {
+    mapInfo,
+    spatial: {
+      schemaVersion: 5,
+      visibilityModel: SPATIAL_VISIBILITY_MODEL,
+      ownShape,
+      positionedAssets,
+    },
+    visiblePlayers: rivals,
+  };
+  if (!isWithinOwnerSpatialSerializationCeiling(stageOne)) return null;
   return minimap ? { ...bounded, minimap } : bounded;
 }
 

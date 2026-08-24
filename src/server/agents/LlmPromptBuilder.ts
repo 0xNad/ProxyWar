@@ -9,6 +9,7 @@ import {
 import {
   SPATIAL_MINIMAP_HEIGHT,
   SPATIAL_MINIMAP_LARGE_HEIGHT,
+  SPATIAL_MINIMAP_LARGE_TILE_THRESHOLD,
   SPATIAL_MINIMAP_LARGE_WIDTH,
   SPATIAL_MINIMAP_MARKER_LIMIT,
   SPATIAL_MINIMAP_SERIALIZED_MAX_BYTES,
@@ -185,12 +186,17 @@ function normalizedMinimapV2(
   minimap: unknown,
   allowedPlayerIDs: ReadonlySet<string>,
   ownPlayerID: string | undefined,
+  mapInfo?: AgentSpatialMapInfo,
+  expectedMarkersTotal?: number,
 ): AgentSpatialMinimapV2 | undefined {
   if (minimap === undefined) return undefined;
   if (!isRecord(minimap)) return undefined;
   const candidate = minimap;
   const width = candidate.width;
   const height = candidate.height;
+  const expectedLargeDimensions =
+    mapInfo !== undefined &&
+    mapInfo.width * mapInfo.height >= SPATIAL_MINIMAP_LARGE_TILE_THRESHOLD;
   if (
     candidate.schemaVersion !== 2 ||
     !(
@@ -198,6 +204,12 @@ function normalizedMinimapV2(
       (width === SPATIAL_MINIMAP_LARGE_WIDTH &&
         height === SPATIAL_MINIMAP_LARGE_HEIGHT)
     ) ||
+    (mapInfo !== undefined &&
+      (expectedLargeDimensions
+        ? width !== SPATIAL_MINIMAP_LARGE_WIDTH ||
+          height !== SPATIAL_MINIMAP_LARGE_HEIGHT
+        : width !== SPATIAL_MINIMAP_WIDTH ||
+          height !== SPATIAL_MINIMAP_HEIGHT)) ||
     !Array.isArray(candidate.ownershipRows) ||
     candidate.ownershipRows.length !== height ||
     !candidate.ownershipRows.every(
@@ -219,6 +231,8 @@ function normalizedMinimapV2(
     !Array.isArray(candidate.markers) ||
     candidate.markers.length > SPATIAL_MINIMAP_MARKER_LIMIT ||
     !isNonnegativeSafeInteger(candidate.markersTotal) ||
+    (expectedMarkersTotal !== undefined &&
+      candidate.markersTotal !== expectedMarkersTotal) ||
     candidate.markersTotal < candidate.markers.length ||
     candidate.markersReturned !== candidate.markers.length ||
     candidate.markersTruncated !==
@@ -303,22 +317,6 @@ function normalizedMinimapV2(
     : undefined;
 }
 
-function normalizedMinimap(
-  minimap: unknown,
-  allowedPlayerIDs: ReadonlySet<string>,
-  ownPlayerID: string | undefined,
-): AgentSpatialMinimap | undefined {
-  const schemaVersion = (minimap as { schemaVersion?: unknown } | undefined)
-    ?.schemaVersion;
-  if (schemaVersion === 2) {
-    return normalizedMinimapV2(minimap, allowedPlayerIDs, ownPlayerID);
-  }
-  if (schemaVersion === 1) {
-    return normalizedMinimapV1(minimap, allowedPlayerIDs, ownPlayerID);
-  }
-  return undefined;
-}
-
 function isAcceptedSpatial(observation: AgentObservation): boolean {
   const spatial = observation.spatial;
   const mapInfo = observation.mapInfo;
@@ -382,6 +380,9 @@ function isAcceptedSpatial(observation: AgentObservation): boolean {
       positioned.warshipsReturned !== positioned.warships.length ||
       positioned.structuresTotal < positioned.structures.length ||
       positioned.warshipsTotal < positioned.warships.length ||
+      !Number.isSafeInteger(
+        positioned.structuresTotal + positioned.warshipsTotal,
+      ) ||
       positioned.structuresTruncated !==
         positioned.structures.length < positioned.structuresTotal ||
       positioned.warshipsTruncated !==
@@ -458,6 +459,13 @@ function isAcceptedSpatial(observation: AgentObservation): boolean {
       if (
         (player.bearing !== undefined && !validBearings.has(player.bearing)) ||
         (spatial.schemaVersion === 5 &&
+          typeof player.sharesBorder !== "boolean") ||
+        (spatial.schemaVersion === 5 &&
+          (player.borderWithYou !== undefined) !== player.sharesBorder) ||
+        (spatial.schemaVersion === 5 &&
+          player.borderWithYou !== undefined &&
+          player.distanceClass !== "adjacent") ||
+        (spatial.schemaVersion === 5 &&
           !["adjacent", "near", "far"].includes(
             player.distanceClass as string,
           )) ||
@@ -520,9 +528,14 @@ function isAcceptedSpatial(observation: AgentObservation): boolean {
         !isNonnegativeSafeInteger(terrain?.shore) ||
         terrain.plains + terrain.highland + terrain.mountain !== border.tiles ||
         terrain.shore > border.tiles ||
+        (border.terrain === "land" && terrain.shore !== 0) ||
+        (border.terrain === "coastal" && terrain.shore !== border.tiles) ||
+        (border.terrain === "mixed" &&
+          (terrain.shore === 0 || terrain.shore === border.tiles)) ||
         !isNonnegativeSafeInteger(coverage?.covered) ||
         !isNonnegativeSafeInteger(coverage?.uncovered) ||
-        coverage.covered + coverage.uncovered !== border.tiles
+        coverage.covered + coverage.uncovered !== border.tiles ||
+        (border.defensePostsCovering === 0) !== (coverage.covered === 0)
       ) {
         return false;
       }
@@ -757,8 +770,11 @@ export class LlmPromptBuilder {
             observation.spatial?.minimap,
             allowedMinimapPlayerIDs,
             observation.ownState?.playerID,
+            observation.mapInfo,
+            observation.spatial.positionedAssets.structuresTotal +
+              observation.spatial.positionedAssets.warshipsTotal,
           )
-        : normalizedMinimap(
+        : normalizedMinimapV1(
             observation.spatial?.minimap,
             allowedMinimapPlayerIDs,
             observation.ownState?.playerID,

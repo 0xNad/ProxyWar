@@ -114,7 +114,8 @@ test("owner evidence checker accepts bounded rich spatial provenance", () => {
       visibilityModel: "global-lockstep-public-map-v1",
       minimapPresent: true,
       minimapSchemaVersion: 1,
-      serializedUTF8Bytes: 8_192,
+      baseSerializedUTF8Bytes: 8_192,
+      minimapSerializedUTF8Bytes: 1_024,
     });
   }
   const result = runChecker(events, "rich-v3-minimap");
@@ -130,7 +131,8 @@ test("owner evidence checker rejects incomplete or downgraded rich spatial evide
         "visibilityModel",
         "minimapPresent",
         "minimapSchemaVersion",
-        "serializedUTF8Bytes",
+        "baseSerializedUTF8Bytes",
+        "minimapSerializedUTF8Bytes",
       ]) {
         delete event[key];
       }
@@ -157,7 +159,8 @@ test("owner evidence checker rejects incomplete or downgraded rich spatial evide
         visibilityModel: "global-lockstep-public-map-v1",
         minimapPresent: true,
         minimapSchemaVersion: 1,
-        serializedUTF8Bytes: 8_192,
+        baseSerializedUTF8Bytes: 8_192,
+        minimapSerializedUTF8Bytes: 1_024,
       });
     }
     mutation(events[2]);
@@ -181,7 +184,8 @@ test("owner evidence checker requires rich spatial evidence in every supplied fi
       visibilityModel: "global-lockstep-public-map-v1",
       minimapPresent: true,
       minimapSchemaVersion: 1,
-      serializedUTF8Bytes: 8_192,
+      baseSerializedUTF8Bytes: 8_192,
+      minimapSerializedUTF8Bytes: 1_024,
     });
   }
   const missing = runCheckerFiles([events, []], "rich-v3-minimap");
@@ -223,7 +227,8 @@ test("owner evidence checker distinguishes complete rich v5 minimap evidence", (
       visibilityModel: "global-lockstep-public-map-v1",
       minimapPresent: true,
       minimapSchemaVersion: 2,
-      serializedUTF8Bytes: 12_000,
+      baseSerializedUTF8Bytes: 14_328,
+      minimapSerializedUTF8Bytes: 3_099,
     });
   }
   const accepted = runChecker(events, "rich-v5-minimap");
@@ -250,6 +255,59 @@ test("owner evidence checker distinguishes complete rich v5 minimap evidence", (
   }
 });
 
+test("owner evidence checker rejects a minimap from the wrong parent schema", () => {
+  for (const schemaVersion of [1, 3]) {
+    const events = validEvents();
+    for (const event of events.filter(
+      (candidate) => candidate.kind === "spatial_observation",
+    )) {
+      Object.assign(event, {
+        present: true,
+        schemaVersion,
+        visibilityModel: "global-lockstep-public-map-v1",
+        minimapPresent: true,
+        minimapSchemaVersion: 2,
+        baseSerializedUTF8Bytes: 8_192,
+        minimapSerializedUTF8Bytes: 1_024,
+      });
+    }
+    const rejected = runChecker(events, "present");
+    assert.equal(rejected.status, 1);
+    assert.match(rejected.stderr, /provenance or byte bound/u);
+  }
+});
+
+test("owner evidence checker enforces independent rich spatial byte ceilings", () => {
+  const events = validEvents();
+  for (const event of events.filter(
+    (candidate) => candidate.kind === "spatial_observation",
+  )) {
+    Object.assign(event, {
+      present: true,
+      schemaVersion: 5,
+      visibilityModel: "global-lockstep-public-map-v1",
+      minimapPresent: true,
+      minimapSchemaVersion: 2,
+      baseSerializedUTF8Bytes: 14_328,
+      minimapSerializedUTF8Bytes: 3_099,
+    });
+  }
+  const independentlyBounded = runChecker(events, "rich-v5-minimap");
+  assert.equal(independentlyBounded.status, 0, independentlyBounded.stderr);
+
+  for (const [field, value] of [
+    ["baseSerializedUTF8Bytes", 16 * 1024 + 1],
+    ["minimapSerializedUTF8Bytes", 4 * 1024 + 1],
+  ]) {
+    const oversized = structuredClone(events);
+    oversized.find((event) => event.kind === "spatial_observation")[field] =
+      value;
+    const rejected = runChecker(oversized, "rich-v5-minimap");
+    assert.equal(rejected.status, 1);
+    assert.match(rejected.stderr, /provenance or byte bound/u);
+  }
+});
+
 test("owner evidence checker accepts exact bounded joined evidence", () => {
   const result = runChecker(validEvents());
   assert.equal(result.status, 0, result.stderr);
@@ -272,6 +330,25 @@ test("owner evidence checker rejects a missing or tampered recipient join", () =
   const result = runChecker(events);
   assert.equal(result.status, 1);
   assert.match(result.stderr, /no recipient observation joined/u);
+});
+
+test("owner evidence checker rejects impossible UTF-8 and UTF-16 counts", () => {
+  for (const [utf8Bytes, utf16CodeUnits] of [
+    [1, 2],
+    [4, 1],
+    [841, 280],
+  ]) {
+    const events = validEvents();
+    for (const event of events.filter((candidate) =>
+      ["message_selection", "message_observation"].includes(candidate.kind),
+    )) {
+      event.messageBodyUTF8Bytes = utf8Bytes;
+      event.messageBodyUTF16CodeUnits = utf16CodeUnits;
+    }
+    const result = runChecker(events);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /invalid bounded outgoing message digest/u);
+  }
 });
 
 test("owner evidence checker rejects extra fields and private material", () => {

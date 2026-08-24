@@ -268,6 +268,22 @@ describe("spatial observation flags", () => {
     badTerrain.visiblePlayers.find(
       (player) => player.borderWithYou !== undefined,
     )!.borderWithYou!.terrainBreakdown.plains += 1;
+    const inconsistentTerrainClass = structuredClone(observation);
+    const inconsistentTerrainBorder =
+      inconsistentTerrainClass.visiblePlayers.find(
+        (player) => player.borderWithYou !== undefined,
+      )!.borderWithYou!;
+    inconsistentTerrainBorder.terrain = "land";
+    inconsistentTerrainBorder.terrainBreakdown.shore = 1;
+    const inconsistentDefenseCoverage = structuredClone(observation);
+    const inconsistentDefenseBorder =
+      inconsistentDefenseCoverage.visiblePlayers.find(
+        (player) => player.borderWithYou !== undefined,
+      )!.borderWithYou!;
+    inconsistentDefenseBorder.defensePostsCovering = 0;
+    inconsistentDefenseBorder.defensePostFrontCoverage.covered = 1;
+    inconsistentDefenseBorder.defensePostFrontCoverage.uncovered =
+      inconsistentDefenseBorder.tiles - 1;
     const badShape = structuredClone(observation);
     badShape.spatial!.ownShape.coastShare = 101;
     const badEncirclement = structuredClone(observation);
@@ -330,6 +346,25 @@ describe("spatial observation flags", () => {
     delete missingDistanceClass.visiblePlayers[0].distanceClass;
     const missingWeightedGraph = structuredClone(observation);
     delete missingWeightedGraph.visiblePlayers[0].bordersWith;
+    const falseOrdinaryBorder = structuredClone(observation);
+    falseOrdinaryBorder.visiblePlayers.find(
+      (player) => player.borderWithYou !== undefined,
+    )!.sharesBorder = false;
+    const missingDirectBorder = structuredClone(observation);
+    const missingDirectBorderPlayer = missingDirectBorder.visiblePlayers.find(
+      (player) => player.borderWithYou !== undefined,
+    )!;
+    missingDirectBorderPlayer.borderWithYou = undefined;
+    missingDirectBorder.spatial!.ownShape.largestNeighborBorderShare = Math.max(
+      0,
+      ...missingDirectBorder.visiblePlayers.map(
+        (player) => player.borderWithYou?.shareOfYourBorder ?? 0,
+      ),
+    );
+    const nonAdjacentDirectBorder = structuredClone(observation);
+    nonAdjacentDirectBorder.visiblePlayers.find(
+      (player) => player.borderWithYou !== undefined,
+    )!.distanceClass = "near";
     const badTotals = structuredClone(observation);
     badTotals.spatial!.positionedAssets.structuresTotal =
       Number.POSITIVE_INFINITY;
@@ -358,6 +393,26 @@ describe("spatial observation flags", () => {
       throw new Error("expected rich minimap v2");
     }
     markerMinimap.markers[0].ownerPlayerID = "P_HIDDEN";
+    const wrongAdaptiveDimensions = structuredClone(observation);
+    const wrongAdaptiveMinimap = wrongAdaptiveDimensions.spatial!.minimap;
+    if (wrongAdaptiveMinimap?.schemaVersion !== 2) {
+      throw new Error("expected rich minimap v2");
+    }
+    wrongAdaptiveMinimap.width = 32;
+    wrongAdaptiveMinimap.height = 16;
+    wrongAdaptiveMinimap.ownershipRows = Array.from({ length: 16 }, () =>
+      ".".repeat(32),
+    );
+    wrongAdaptiveMinimap.terrainRows = Array.from({ length: 16 }, () =>
+      ".".repeat(32),
+    );
+    const mismatchedMarkerTotal = structuredClone(observation);
+    const mismatchedMarkerMinimap = mismatchedMarkerTotal.spatial!.minimap;
+    if (mismatchedMarkerMinimap?.schemaVersion !== 2) {
+      throw new Error("expected rich minimap v2");
+    }
+    mismatchedMarkerMinimap.markersTotal += 1;
+    mismatchedMarkerMinimap.markersTruncated = true;
     const nullMinimap = structuredClone(observation);
     (nullMinimap.spatial as { minimap?: unknown }).minimap = null;
     const nullLegendEntry = structuredClone(observation);
@@ -383,6 +438,8 @@ describe("spatial observation flags", () => {
       [badFrame, false],
       [badAsset, true],
       [badTerrain, true],
+      [inconsistentTerrainClass, true],
+      [inconsistentDefenseCoverage, true],
       [badShape, true],
       [badEncirclement, true],
       [inconsistentEncirclement, true],
@@ -398,6 +455,9 @@ describe("spatial observation flags", () => {
       [oversizedDefensePostCount, true],
       [missingDistanceClass, true],
       [missingWeightedGraph, true],
+      [falseOrdinaryBorder, true],
+      [missingDirectBorder, true],
+      [nonAdjacentDirectBorder, true],
       [badTotals, true],
       [badPartial, true],
     ] as const) {
@@ -429,6 +489,8 @@ describe("spatial observation flags", () => {
       wrongSelfLegend,
       badTerrainMinimap,
       badMarkerOwner,
+      wrongAdaptiveDimensions,
+      mismatchedMarkerTotal,
       nullMinimap,
       nullLegendEntry,
       nullMarkerEntry,
@@ -451,6 +513,43 @@ describe("spatial observation flags", () => {
         minimapView.visiblePlayers.some((rival) => "borderWithYou" in rival),
       ).toBe(true);
     }
+  });
+
+  it("omits an L5 minimap attached to a downgraded schema-3 parent", async () => {
+    process.env[SPATIAL_FLAG] = "1";
+    process.env[MINIMAP_FLAG] = "1";
+    const observation = observe(await shapedGame());
+    const spatial = observation.spatial! as unknown as {
+      schemaVersion: number;
+      ownShape: { largestNeighborBorderShare?: number };
+    };
+    spatial.schemaVersion = 3;
+    delete spatial.ownShape.largestNeighborBorderShare;
+    for (const rival of observation.visiblePlayers) {
+      const downgradedRival = rival as unknown as {
+        sharesBorder?: boolean;
+        navalExposure?: unknown;
+        bordersWith?: Array<{
+          playerID: string;
+          sizeClass: "minor" | "major";
+          tiles?: number;
+        }>;
+      };
+      delete downgradedRival.sharesBorder;
+      delete downgradedRival.navalExposure;
+      downgradedRival.bordersWith = downgradedRival.bordersWith?.map(
+        ({ tiles: _tiles, ...edge }) => edge,
+      );
+    }
+
+    const view = promptObservation(
+      new LlmPromptBuilder().build({
+        observation,
+        legalActions: HOLD_ACTIONS,
+      }),
+    ) as { spatial?: { schemaVersion?: number; minimap?: unknown } };
+    expect(view.spatial?.schemaVersion).toBe(3);
+    expect(view.spatial?.minimap).toBeUndefined();
   });
 
   it("normalizes the exact public schema and never forwards unknown nested fields", async () => {
@@ -513,6 +612,7 @@ describe("spatial observation flags", () => {
         playerID: `P_${String(index).padStart(2, "0")}_${"x".repeat(60)}`,
         bearing: undefined,
         distanceClass: "far" as const,
+        sharesBorder: false,
         borderWithYou: undefined,
         bordersWith: [],
       })),

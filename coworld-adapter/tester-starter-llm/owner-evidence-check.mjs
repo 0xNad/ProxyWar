@@ -69,7 +69,8 @@ const ALLOWED_KEYS = new Map([
       "visibilityModel",
       "minimapPresent",
       "minimapSchemaVersion",
-      "serializedUTF8Bytes",
+      "baseSerializedUTF8Bytes",
+      "minimapSerializedUTF8Bytes",
     ]),
   ],
 ]);
@@ -164,10 +165,12 @@ function exactMessageDigestFields(event) {
     SHA256.test(event.messageBodySHA256 ?? "") &&
     Number.isSafeInteger(event.messageBodyUTF8Bytes) &&
     event.messageBodyUTF8Bytes >= 1 &&
-    event.messageBodyUTF8Bytes <= 4 * 280 &&
+    event.messageBodyUTF8Bytes <= 3 * 280 &&
     Number.isSafeInteger(event.messageBodyUTF16CodeUnits) &&
     event.messageBodyUTF16CodeUnits >= 1 &&
-    event.messageBodyUTF16CodeUnits <= 280
+    event.messageBodyUTF16CodeUnits <= 280 &&
+    event.messageBodyUTF8Bytes >= event.messageBodyUTF16CodeUnits &&
+    event.messageBodyUTF8Bytes <= 3 * event.messageBodyUTF16CodeUnits
   );
 }
 
@@ -402,10 +405,21 @@ function spatialChecks(events, required, files) {
       typeof event.minimapPresent !== "boolean" ||
       (event.minimapPresent === true &&
         ![1, 2].includes(event.minimapSchemaVersion)) ||
+      (event.minimapPresent === true &&
+        [1, 3].includes(event.schemaVersion) &&
+        event.minimapSchemaVersion !== 1) ||
+      (event.minimapPresent === true &&
+        event.schemaVersion === 5 &&
+        event.minimapSchemaVersion !== 2) ||
       (event.minimapPresent === false && "minimapSchemaVersion" in event) ||
-      !Number.isSafeInteger(event.serializedUTF8Bytes) ||
-      event.serializedUTF8Bytes < 1 ||
-      event.serializedUTF8Bytes > 16 * 1024
+      !Number.isSafeInteger(event.baseSerializedUTF8Bytes) ||
+      event.baseSerializedUTF8Bytes < 1 ||
+      event.baseSerializedUTF8Bytes > 16 * 1024 ||
+      (event.minimapPresent === true &&
+        (!Number.isSafeInteger(event.minimapSerializedUTF8Bytes) ||
+          event.minimapSerializedUTF8Bytes < 1 ||
+          event.minimapSerializedUTF8Bytes > 4 * 1024)) ||
+      (event.minimapPresent === false && "minimapSerializedUTF8Bytes" in event)
     ) {
       fail(`${event.sourceFile}: invalid spatial provenance or byte bound`);
     }
@@ -418,7 +432,8 @@ function spatialChecks(events, required, files) {
       "visibilityModel" in event ||
       "minimapPresent" in event ||
       "minimapSchemaVersion" in event ||
-      "serializedUTF8Bytes" in event
+      "baseSerializedUTF8Bytes" in event ||
+      "minimapSerializedUTF8Bytes" in event
     ) {
       fail(
         `${event.sourceFile}: absent spatial evidence carried present-only fields`,

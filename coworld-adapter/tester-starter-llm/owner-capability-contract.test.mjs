@@ -462,6 +462,7 @@ test("message slot preserves valid raw text and rejects every unsafe boundary", 
   });
   assert.equal(fields.messageText, exact);
   assert.equal(advertisedMessageLimit(protocol), 280);
+  assert.equal(advertisedMessageLimit({ maxMessageChars: 1e20 }), null);
 
   const rejected = [
     "x".repeat(281),
@@ -620,6 +621,7 @@ function richSpatialObservation() {
     visiblePlayers: [
       {
         playerID: "P_A",
+        sharesBorder: true,
         bearing: "east",
         distanceClass: "adjacent",
         borderWithYou: {
@@ -765,6 +767,53 @@ test("malformed optional containers disappear without crashing primary state", (
   });
   assert.ok(valid.deals);
   assert.equal(valid.nonCombat.inboundMessages.length, 1);
+
+  const fourFromOneSender = ownerCapabilityObservation({
+    ownState: { playerID: "P_A" },
+    visiblePlayers: [],
+    nonCombat: {
+      inboundMessages: Array.from({ length: 4 }, (_, index) => ({
+        senderID: "P_B",
+        senderName: "Rival B",
+        turnNumber: index + 1,
+        text: `message ${index + 1}`,
+      })),
+    },
+  });
+  assert.equal("inboundMessages" in (fourFromOneSender.nonCombat ?? {}), false);
+
+  const threePerSender = ownerCapabilityObservation({
+    ownState: { playerID: "P_A" },
+    visiblePlayers: [],
+    nonCombat: {
+      inboundMessages: Array.from({ length: 6 }, (_, index) => ({
+        senderID: index % 2 === 0 ? "P_B" : "P_C",
+        senderName: index % 2 === 0 ? "Rival B" : "Rival C",
+        turnNumber: index + 1,
+        text: `message ${index + 1}`,
+        futurePrivateField: "must not reach the policy prompt",
+      })),
+    },
+  });
+  assert.equal(threePerSender.nonCombat.inboundMessages.length, 6);
+  assert.equal(
+    threePerSender.nonCombat.inboundMessages.some(
+      (entry) => "futurePrivateField" in entry,
+    ),
+    false,
+  );
+
+  const outOfOrder = ownerCapabilityObservation({
+    ownState: { playerID: "P_A" },
+    visiblePlayers: [],
+    nonCombat: {
+      inboundMessages: [
+        { senderID: "P_B", senderName: "B", turnNumber: 8, text: "later" },
+        { senderID: "P_C", senderName: "C", turnNumber: 7, text: "earlier" },
+      ],
+    },
+  });
+  assert.equal("inboundMessages" in (outOfOrder.nonCombat ?? {}), false);
 });
 
 test("minimap is accepted whole or omitted whole without repair", () => {
@@ -1008,6 +1057,16 @@ test("rich spatial L3 is exact, bounded, and fails closed atomically", () => {
   malformedMinimap.spatial.minimap.rows[0] = `?${malformedMinimap.spatial.minimap.rows[0].slice(1)}`;
   assert.ok(boundedSpatialV3(malformedMinimap));
   assert.equal("minimap" in boundedSpatialV3(malformedMinimap), false);
+
+  const downgradedParentWithV2Minimap = structuredClone(valid);
+  downgradedParentWithV2Minimap.spatial.minimap = structuredClone(
+    richSpatialObservationV5().spatial.minimap,
+  );
+  assert.ok(boundedSpatialV3(downgradedParentWithV2Minimap));
+  assert.equal(
+    "minimap" in boundedSpatialV3(downgradedParentWithV2Minimap),
+    false,
+  );
 });
 
 test("rich spatial L5 admits weighted exposure and a complete terrain marker minimap", () => {
@@ -1071,10 +1130,30 @@ test("rich spatial L5 admits weighted exposure and a complete terrain marker min
         Number.MAX_SAFE_INTEGER;
     },
     (value) => {
+      value.visiblePlayers[0].borderWithYou.terrain = "land";
+      value.visiblePlayers[0].borderWithYou.terrainBreakdown.shore = 1;
+    },
+    (value) => {
+      value.visiblePlayers[0].borderWithYou.defensePostsCovering = 0;
+      value.visiblePlayers[0].borderWithYou.defensePostFrontCoverage.covered = 1;
+      value.visiblePlayers[0].borderWithYou.defensePostFrontCoverage.uncovered =
+        value.visiblePlayers[0].borderWithYou.tiles - 1;
+    },
+    (value) => {
       delete value.visiblePlayers[0].distanceClass;
     },
     (value) => {
       delete value.visiblePlayers[0].bordersWith;
+    },
+    (value) => {
+      value.visiblePlayers[0].sharesBorder = false;
+    },
+    (value) => {
+      delete value.visiblePlayers[0].borderWithYou;
+      value.spatial.ownShape.largestNeighborBorderShare = 0;
+    },
+    (value) => {
+      value.visiblePlayers[0].distanceClass = "near";
     },
     (value) => {
       value.visiblePlayers[0].bordersWith = [
@@ -1138,6 +1217,20 @@ test("rich spatial L5 admits weighted exposure and a complete terrain marker min
       value.spatial.minimap.markersReturned = 0;
     },
     (value) => {
+      value.spatial.minimap.width = 32;
+      value.spatial.minimap.height = 16;
+      value.spatial.minimap.ownershipRows = Array.from({ length: 16 }, () =>
+        ".".repeat(32),
+      );
+      value.spatial.minimap.terrainRows = Array.from({ length: 16 }, () =>
+        ".".repeat(32),
+      );
+    },
+    (value) => {
+      value.spatial.minimap.markersTotal += 1;
+      value.spatial.minimap.markersTruncated = true;
+    },
+    (value) => {
       value.spatial.minimap = null;
     },
     (value) => {
@@ -1171,7 +1264,7 @@ test("rich spatial and minimap retain their independent wire byte ceilings", () 
       Array.from({ length: 8 }, (_, assetIndex) => ({
         ownerPlayerID,
         type,
-        tile: playerIndex * 100 + assetIndex,
+        tile: playerIndex * 1000 + assetIndex,
         x: assetIndex,
         y: playerIndex,
       })),
@@ -1180,8 +1273,8 @@ test("rich spatial and minimap retain their independent wire byte ceilings", () 
     ownState: { playerID: ownPlayerID },
     mapInfo: {
       name: "Boundary",
-      width: 100,
-      height: 80,
+      width: 1000,
+      height: 300,
       tileRefEncoding: "row-major-y-width-plus-x",
       coordinateFrame: {
         origin: "top_left",
@@ -1214,6 +1307,7 @@ test("rich spatial and minimap retain their independent wire byte ceilings", () 
     },
     visiblePlayers: rivalIDs.map((playerID) => ({
       playerID,
+      sharesBorder: false,
       distanceClass: "far",
       bordersWith: [],
       navalExposure: { transportReachableOwnShoreTiles: 0 },
@@ -1234,9 +1328,9 @@ test("rich spatial and minimap retain their independent wire byte ceilings", () 
       x: index,
       y: 0,
     })),
-    markersTotal: 24,
+    markersTotal: 96,
     markersReturned: 24,
-    markersTruncated: false,
+    markersTruncated: true,
   };
   const boundedWithMinimap = boundedSpatialV5({
     ...observation,
@@ -1252,6 +1346,26 @@ test("rich spatial and minimap retain their independent wire byte ceilings", () 
     Buffer.byteLength(JSON.stringify(boundedWithMinimap), "utf8") >
       OWNER_SPATIAL_SERIALIZED_MAX_BYTES,
   );
+
+  const oversizedStageOne = structuredClone(observation);
+  const replacementIDs = new Map([
+    [ownPlayerID, "S".repeat(92)],
+    ...rivalIDs.map((playerID, index) => [
+      playerID,
+      `${String.fromCharCode(65 + index).repeat(90)}${String(index).padStart(2, "0")}`,
+    ]),
+  ]);
+  oversizedStageOne.ownState.playerID = replacementIDs.get(ownPlayerID);
+  for (const player of oversizedStageOne.visiblePlayers) {
+    player.playerID = replacementIDs.get(player.playerID);
+  }
+  for (const asset of [
+    ...oversizedStageOne.spatial.positionedAssets.structures,
+    ...oversizedStageOne.spatial.positionedAssets.warships,
+  ]) {
+    asset.ownerPlayerID = replacementIDs.get(asset.ownerPlayerID);
+  }
+  assert.equal(boundedSpatialV5(oversizedStageOne), null);
 });
 
 test("rich spatial facts can only rerank exact offered legal action ids", () => {
@@ -1336,7 +1450,7 @@ test("capability evidence is bounded, joinable, and contains no raw body", () =>
   const body = "Hold the shared border exactly.";
   const digest = createHash("sha256").update(body, "utf8").digest("hex");
   const observation = {
-    ...spatialObservation(),
+    ...richSpatialObservationV5(),
     deals: {
       decisionStep: 4,
       incomingProposals: [],
@@ -1395,4 +1509,12 @@ test("capability evidence is bounded, joinable, and contains no raw body", () =>
   assert.deepEqual(selected.offeredMessageActionIDs, [message.id]);
   assert.equal(selected.selectedMessageActionID, message.id);
   assert.equal(selected.selectedLegalActionOffered, true);
+  const spatial = events.find((event) => event.kind === "spatial_observation");
+  assert.ok(Number.isSafeInteger(spatial.baseSerializedUTF8Bytes));
+  assert.ok(spatial.baseSerializedUTF8Bytes > 0);
+  assert.ok(spatial.baseSerializedUTF8Bytes <= 16 * 1024);
+  assert.ok(Number.isSafeInteger(spatial.minimapSerializedUTF8Bytes));
+  assert.ok(spatial.minimapSerializedUTF8Bytes > 0);
+  assert.ok(spatial.minimapSerializedUTF8Bytes <= 4 * 1024);
+  assert.equal("serializedUTF8Bytes" in spatial, false);
 });
