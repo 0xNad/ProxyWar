@@ -40,7 +40,30 @@ export function pairedSummary(values) {
   const selected = values.map(finite).filter((value) => value !== null);
   const average = mean(selected);
   const standardDeviation = sampleStandardDeviation(selected);
-  const tCritical = selected.length >= 24 ? 2.069 : 2.262;
+  const tCritical =
+    selected.length >= 120
+      ? 1.98
+      : selected.length >= 60
+        ? 2
+        : selected.length >= 40
+          ? 2.011
+          : selected.length >= 30
+            ? 2.045
+            : selected.length >= 24
+              ? 2.069
+              : selected.length >= 20
+                ? 2.093
+                : selected.length >= 10
+                  ? 2.262
+                  : selected.length >= 8
+                    ? 2.365
+                    : selected.length >= 5
+                      ? 2.776
+                      : selected.length >= 4
+                        ? 3.182
+                        : selected.length >= 3
+                          ? 4.303
+                          : 12.706;
   const halfWidth =
     standardDeviation === null
       ? null
@@ -289,8 +312,17 @@ function pairedReport(runs) {
 export async function analyze(root, options = {}) {
   const resolved = path.resolve(root);
   const index = await readJSON(path.join(resolved, "gate3-index.json"));
-  if (index.entries?.length !== 48) {
-    throw new Error("Gate 3 index must contain 48 requests");
+  const phase = index.phase ?? "canary";
+  const expectedSets =
+    phase === "canary" ? 24 : phase === "confirmatory" ? 48 : null;
+  const expectedRequests = expectedSets === null ? null : expectedSets * 2;
+  if (
+    expectedRequests === null ||
+    index.validation?.setCount !== expectedSets ||
+    index.validation?.requestCount !== expectedRequests ||
+    index.entries?.length !== expectedRequests
+  ) {
+    throw new Error(`Gate 3 ${phase} index has invalid cardinality`);
   }
   const runs = [];
   for (const entry of index.entries) {
@@ -305,37 +337,73 @@ export async function analyze(root, options = {}) {
     ARMS.map((arm) => [arm, armSummary(runs, arm)]),
   );
   const paired = pairedReport(runs);
-  const canaryReliabilityPass = ARMS.every(
+  const phaseReliabilityPass = ARMS.every(
     (arm) =>
-      arms[arm].runs === 24 &&
+      arms[arm].runs === expectedSets &&
       arms[arm].actionFidelityPass &&
       arms[arm].spatialContractPass &&
       arms[arm].providerErrors === 0,
   );
   const runtimeEnablementReliabilityPass =
-    canaryReliabilityPass &&
+    phaseReliabilityPass &&
     arms.structured.degradationRate <= arms.off.degradationRate &&
     arms.structured.replayRejectedDecisions <=
       arms.off.replayRejectedDecisions &&
     arms.structured.replayParseFailures <= arms.off.replayParseFailures;
+  const complete = runs.length === expectedRequests;
+  const scoreLowerBound = paired.score.confidenceInterval95?.[0] ?? null;
+  const entertainmentLowerBound =
+    paired.entertainmentScore.confidenceInterval95?.[0] ?? null;
+  const gameplaySuperiorityPass =
+    phase === "confirmatory" &&
+    complete &&
+    phaseReliabilityPass &&
+    scoreLowerBound !== null &&
+    scoreLowerBound > 0;
+  const gameplayNonInferiorityPass =
+    phase === "confirmatory" &&
+    complete &&
+    phaseReliabilityPass &&
+    scoreLowerBound !== null &&
+    scoreLowerBound >= -0.05;
+  const entertainmentNonInferiorityPass =
+    phase === "confirmatory" &&
+    complete &&
+    entertainmentLowerBound !== null &&
+    entertainmentLowerBound >= -2;
+  const watchabilityEvidence = {
+    automatedProxyAvailable: true,
+    automatedNonInferiorityMargin: -2,
+    automatedNonInferiorityPass: entertainmentNonInferiorityPass,
+    blindedHumanReviewComplete: false,
+  };
   return {
     schemaVersion: 1,
+    phase,
     sourceCommit: index.sourceCommit,
     generatedAt: new Date().toISOString(),
-    complete: runs.length === 48,
+    complete,
+    expectedRequests,
+    expectedSets,
     arms,
     paired,
-    canaryReliabilityPass,
+    phaseReliabilityPass,
     runtimeEnablementReliabilityPass,
     canaryAdvances:
-      runs.length === 48 &&
-      canaryReliabilityPass &&
+      phase === "canary" &&
+      complete &&
+      phaseReliabilityPass &&
       paired.score.meanDifference !== null &&
       paired.score.meanDifference > 0,
-    watchabilityEvidence: {
-      automatedProxyAvailable: true,
-      blindedHumanReviewComplete: false,
-    },
+    gameplaySuperiorityPass,
+    gameplayNonInferiorityMargin: -0.05,
+    gameplayNonInferiorityPass,
+    watchabilityEvidence,
+    runtimeEnablementEligible:
+      gameplayNonInferiorityPass &&
+      runtimeEnablementReliabilityPass &&
+      entertainmentNonInferiorityPass &&
+      watchabilityEvidence.blindedHumanReviewComplete,
     limitations: [
       "Replay entertainment and behavior-quality scores are automated proxies, not blinded spectator judgments.",
       "Aggregate token totals are lower bounds when a planner request remained in flight at episode final.",
@@ -372,7 +440,7 @@ async function main(argv) {
     },
   );
   process.stdout.write(
-    `${JSON.stringify({ output: path.resolve(output), complete: report.complete, canaryReliabilityPass: report.canaryReliabilityPass, runtimeEnablementReliabilityPass: report.runtimeEnablementReliabilityPass, canaryAdvances: report.canaryAdvances })}\n`,
+    `${JSON.stringify({ output: path.resolve(output), phase: report.phase, complete: report.complete, phaseReliabilityPass: report.phaseReliabilityPass, runtimeEnablementReliabilityPass: report.runtimeEnablementReliabilityPass, canaryAdvances: report.canaryAdvances, gameplaySuperiorityPass: report.gameplaySuperiorityPass, gameplayNonInferiorityPass: report.gameplayNonInferiorityPass, runtimeEnablementEligible: report.runtimeEnablementEligible })}\n`,
   );
 }
 

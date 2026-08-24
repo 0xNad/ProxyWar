@@ -5,6 +5,7 @@ import {
   ARM_COWORLDS,
   MAP_CLASSES,
   OPPONENT_POLICY,
+  PHASES,
   SUBJECT_POLICY,
   buildGate3Requests,
   normalizedRequest,
@@ -81,5 +82,48 @@ test("stratifies six maps with four seats/seeds each and one subject", () => {
         mapClass.mapSize,
       );
     }
+  }
+});
+
+test("builds 48 new confirmatory pairs with disjoint seeds and balanced order", () => {
+  const canary = buildGate3Requests("canary");
+  const confirmatory = buildGate3Requests("confirmatory");
+  assert.deepEqual(validateGate3Requests(confirmatory, "confirmatory"), {
+    requestCount: 96,
+    setCount: 48,
+    offFirst: 24,
+    structuredFirst: 24,
+  });
+  assert.equal(PHASES.confirmatory.roundsPerMap, 8);
+  assert.equal(new Set(confirmatory.map((entry) => entry.setID)).size, 48);
+  assert.equal(
+    new Set(confirmatory.map((entry) => entry.request.idempotency_key)).size,
+    96,
+  );
+  const canarySeeds = new Set(
+    canary.map((entry) => entry.request.game_config_overrides.seed),
+  );
+  assert.equal(
+    confirmatory.some((entry) =>
+      canarySeeds.has(entry.request.game_config_overrides.seed),
+    ),
+    false,
+  );
+  for (const mapClass of MAP_CLASSES) {
+    const rows = confirmatory.filter((entry) =>
+      entry.setID.startsWith(`${mapClass.slug}-`),
+    );
+    assert.equal(rows.length, 16);
+    assert.equal(
+      new Set(rows.map((entry) => entry.request.game_config_overrides.seed))
+        .size,
+      8,
+    );
+    assert.deepEqual(
+      rows
+        .filter((entry) => entry.arm === "off")
+        .map((entry) => entry.subjectSlot),
+      [0, 1, 2, 3, 0, 1, 2, 3],
+    );
   }
 });

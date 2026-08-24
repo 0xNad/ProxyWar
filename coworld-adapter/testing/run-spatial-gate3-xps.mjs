@@ -109,11 +109,17 @@ async function writeJSON(file, value, options) {
 async function load(root) {
   const resolved = path.resolve(root);
   const index = await readJSON(path.join(resolved, "gate3-index.json"));
+  const phaseCounts = {
+    canary: { requests: 48, sets: 24 },
+    confirmatory: { requests: 96, sets: 48 },
+  };
+  const expected = phaseCounts[index.phase ?? "canary"];
   if (
+    !expected ||
     index.schemaVersion !== 1 ||
-    index.validation?.requestCount !== 48 ||
-    index.validation?.setCount !== 24 ||
-    index.entries?.length !== 48
+    index.validation?.requestCount !== expected.requests ||
+    index.validation?.setCount !== expected.sets ||
+    index.entries?.length !== expected.requests
   ) {
     throw new Error("Gate 3 index failed frozen cardinality checks");
   }

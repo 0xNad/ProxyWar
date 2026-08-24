@@ -135,6 +135,19 @@ interval to exclude a practically harmful effect, no increase in invalid or
 degraded decisions, and an explicit cost/watchability decision. A null or
 negative result keeps the flags OFF.
 
+Before any confirmatory XP call, the practically harmful margins are fixed as
+follows. The 48 confirmatory sets use eight entirely new seeds per map class
+(`940100` through `940607` by class), repeat the 0–3 subject-seat rotation, and
+retain balanced arm order. Gameplay superiority requires the paired 95%
+confidence interval for score to be wholly above zero. Gameplay
+non-inferiority requires its lower bound to be at least `-0.05` on the unit
+score scale. The automated entertainment proxy is non-inferior only if its
+paired lower bound is at least `-2` points. Runtime enablement additionally
+requires exact offered-action fidelity, zero provider/replay parse/rejection
+regression, no increase in the degraded-decision rate, and a completed blinded
+human replay review. Passing gameplay non-inferiority alone is not an enablement
+decision.
+
 ## Retirement rules
 
 - Retire minimap-v2 if it fails either diagnostic gate, or if it passes the

@@ -12,6 +12,21 @@ export const ARM_COWORLDS = Object.freeze({
 export const SUBJECT_POLICY = "c3f81219-74c0-4527-a65c-bd479ed1e5ce";
 export const OPPONENT_POLICY = "582ad94a-9521-4863-8792-813c4553f45f";
 
+export const PHASES = Object.freeze({
+  canary: Object.freeze({
+    roundsPerMap: 4,
+    seedOffset: 0,
+    episodeIndexBase: 400,
+    requestPrefix: "spatial-gate3-b8",
+  }),
+  confirmatory: Object.freeze({
+    roundsPerMap: 8,
+    seedOffset: 10000,
+    episodeIndexBase: 500,
+    requestPrefix: "spatial-gate3-confirm-b8",
+  }),
+});
+
 export const MAP_CLASSES = Object.freeze([
   {
     slug: "pangaea",
@@ -88,12 +103,14 @@ export function normalizedRequest(request) {
   };
 }
 
-export function buildGate3Requests() {
+export function buildGate3Requests(phase = "canary") {
+  const phaseConfig = PHASES[phase];
+  if (!phaseConfig) throw new Error(`unknown Gate 3 phase: ${phase}`);
   const entries = [];
   let setIndex = 0;
   for (const mapClass of MAP_CLASSES) {
-    for (let mapRound = 0; mapRound < 4; mapRound += 1) {
-      const subjectSlot = mapRound;
+    for (let mapRound = 0; mapRound < phaseConfig.roundsPerMap; mapRound += 1) {
+      const subjectSlot = mapRound % 4;
       const setID = `${mapClass.slug}-r${String(mapRound).padStart(2, "0")}`;
       const roster = Array.from({ length: mapClass.players }, (_, slot) => ({
         player: {
@@ -103,7 +120,7 @@ export function buildGate3Requests() {
       }));
       for (const arm of armOrder(setIndex)) {
         const request = {
-          idempotency_key: `spatial-gate3-b8/${setID}/${arm}`,
+          idempotency_key: `${phaseConfig.requestPrefix}/${setID}/${arm}`,
           target: {
             coworld_id: ARM_COWORLDS[arm],
             variant_id: mapClass.variantID,
@@ -117,15 +134,15 @@ export function buildGate3Requests() {
             map: mapClass.map,
             map_size: mapClass.mapSize,
             difficulty: "Easy",
-            seed: mapClass.seedBase + mapRound,
-            episodeIndex: 400 + setIndex,
+            seed: mapClass.seedBase + phaseConfig.seedOffset + mapRound,
+            episodeIndex: phaseConfig.episodeIndexBase + setIndex,
             replay_tail_turns: 500,
             player_connect_timeout_seconds: 120,
             num_agents: mapClass.players,
             episode_timeout_seconds: mapClass.episodeTimeoutSeconds,
           },
           execution_backend: "k8s",
-          notes: `spatial-gate3-b8/${setID}/${arm}`,
+          notes: `${phaseConfig.requestPrefix}/${setID}/${arm}`,
         };
         entries.push({
           setIndex,
@@ -143,9 +160,15 @@ export function buildGate3Requests() {
   return entries;
 }
 
-export function validateGate3Requests(entries) {
-  if (entries.length !== 48) {
-    throw new Error(`expected 48 requests, got ${entries.length}`);
+export function validateGate3Requests(entries, phase = "canary") {
+  const phaseConfig = PHASES[phase];
+  if (!phaseConfig) throw new Error(`unknown Gate 3 phase: ${phase}`);
+  const expectedSets = MAP_CLASSES.length * phaseConfig.roundsPerMap;
+  const expectedRequests = expectedSets * 2;
+  if (entries.length !== expectedRequests) {
+    throw new Error(
+      `expected ${expectedRequests} requests, got ${entries.length}`,
+    );
   }
   const bySet = new Map();
   for (const entry of entries) {
@@ -153,8 +176,8 @@ export function validateGate3Requests(entries) {
     rows.push(entry);
     bySet.set(entry.setID, rows);
   }
-  if (bySet.size !== 24) {
-    throw new Error(`expected 24 matched sets, got ${bySet.size}`);
+  if (bySet.size !== expectedSets) {
+    throw new Error(`expected ${expectedSets} matched sets, got ${bySet.size}`);
   }
   let offFirst = 0;
   let structuredFirst = 0;
@@ -172,7 +195,7 @@ export function validateGate3Requests(entries) {
       throw new Error(`${setID} differs outside the treatment Coworld`);
     }
   }
-  if (offFirst !== 12 || structuredFirst !== 12) {
+  if (offFirst !== expectedSets / 2 || structuredFirst !== expectedSets / 2) {
     throw new Error(
       `arm order is not balanced: OFF first ${offFirst}, STRUCTURED first ${structuredFirst}`,
     );
@@ -186,14 +209,24 @@ export function validateGate3Requests(entries) {
 }
 
 async function main(argv) {
-  const outputDirectory = argv[0];
-  if (!outputDirectory || argv.length !== 1) {
+  const outputDirectory = argv.find((argument) => !argument.startsWith("--"));
+  const phase =
+    argv.find((argument) => argument.startsWith("--phase="))?.slice(8) ??
+    "canary";
+  const unknownOptions = argv.filter(
+    (argument) => argument.startsWith("--") && !argument.startsWith("--phase="),
+  );
+  if (
+    !outputDirectory ||
+    argv.filter((argument) => !argument.startsWith("--")).length !== 1 ||
+    unknownOptions.length > 0
+  ) {
     throw new Error(
-      "usage: node generate-spatial-gate3-requests.mjs OUTPUT_DIRECTORY",
+      "usage: node generate-spatial-gate3-requests.mjs OUTPUT_DIRECTORY [--phase=canary|confirmatory]",
     );
   }
-  const entries = buildGate3Requests();
-  const validation = validateGate3Requests(entries);
+  const entries = buildGate3Requests(phase);
+  const validation = validateGate3Requests(entries, phase);
   const resolved = path.resolve(outputDirectory);
   const requestDirectory = path.join(resolved, "requests");
   await fs.mkdir(requestDirectory, { recursive: true });
@@ -209,6 +242,7 @@ async function main(argv) {
     `${JSON.stringify(
       {
         schemaVersion: 1,
+        phase,
         sourceCommit: "b8c5c70676e1aee0fe0c31a3546e78679d7cc861",
         generatedBy:
           "coworld-adapter/testing/generate-spatial-gate3-requests.mjs",
