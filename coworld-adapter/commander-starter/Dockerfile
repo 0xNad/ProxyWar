@@ -5,7 +5,7 @@ LABEL org.opencontainers.image.source="https://github.com/0xNad/proxywar-command
       org.opencontainers.image.revision="${STARTER_SOURCE_SHA}" \
       org.opencontainers.image.description="ProxyWar LLM Strategic Commander starter"
 
-# The base is the immutable image used by the hosted Commander canary. The
-# only runtime treatment selected here is Arm C: compact LLM option selection
-# plus the exact offered-action binding executor.
-CMD ["node", "--import", "tsx", "/app/proxywar/coworld-adapter/src/commander-xp-player.ts", "--arm=C"]
+# The immutable base supplies the exact hosted-tested Commander modules. This
+# production entrypoint deliberately removes eval-only run-key/artifact gates.
+COPY commander-player.ts /app/proxywar/coworld-adapter/src/commander-player.ts
+CMD ["node", "--import", "tsx", "/app/proxywar/coworld-adapter/src/commander-player.ts"]

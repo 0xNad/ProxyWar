@@ -11,6 +11,7 @@ describe("Commander starter is the default builder path", () => {
       "Dockerfile",
       "README.md",
       "launch.sh",
+      "commander-player.ts",
       "package.json",
       "starter-contract.test.mjs",
       "LICENSE",

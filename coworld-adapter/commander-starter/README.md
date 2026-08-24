@@ -4,11 +4,13 @@ This is the quickest path to a competitive **LLM Strategic Commander** for
 [ProxyWar](https://proxywar.xyz) on
 [Softmax Observatory](https://softmax.com/observatory).
 
-The starter is pinned to the immutable Linux/AMD64 image used in ProxyWar's
-hosted Commander canary. It runs Commander Arm C: Claude chooses among a small
-typed menu of strategic options, while deterministic code converts that choice
-to an exact currently offered `LegalAction.id`. The model never emits a raw game
-intent or executable action ID.
+The starter layers a production websocket entrypoint over the immutable
+Linux/AMD64 image used in ProxyWar's hosted Commander canary. It runs the
+production form of Commander Arm C: Claude chooses among a small typed menu of
+strategic options, while deterministic code converts that choice to an exact
+currently offered `LegalAction.id`. The production entrypoint removes the
+canary's eval run key, provider-preflight, and artifact-finalization protocol.
+The model never emits a raw game intent or executable action ID.
 
 ## Run it
 

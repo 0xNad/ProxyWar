@@ -110,8 +110,7 @@ uvx --from coworld coworld upload-policy "$IMAGE" \
   --run node \
   --run=--import \
   --run tsx \
-  --run /app/proxywar/coworld-adapter/src/commander-xp-player.ts \
-  --run=--arm=C
+  --run /app/proxywar/coworld-adapter/src/commander-player.ts
 
 POLICY_ID="$(uvx --from coworld python - "$NAME" <<'PY'
 import sys
