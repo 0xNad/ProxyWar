@@ -43,7 +43,7 @@ import type {
  * mirror's site data. No IO here — the mirror script owns fetching.
  */
 
-const housePolicyName = "proxywar-keystone";
+const housePolicyNames = new Set(["Commander", "proxywar-keystone"]);
 const replayUiRecentDecisionLimit = 60;
 const replayUiTextLimit = 1_000;
 
@@ -233,7 +233,7 @@ export function activeChampionPolicyLabelsByPlayerId(
 
 function isHousePolicyLabel(value: string): boolean {
   const match = /^(.*):v\d+$/.exec(value);
-  return match?.[1] === housePolicyName;
+  return match !== null && housePolicyNames.has(match[1]);
 }
 
 export function buildStandingRows(

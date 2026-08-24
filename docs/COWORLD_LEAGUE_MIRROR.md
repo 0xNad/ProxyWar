@@ -25,7 +25,8 @@ membership list. When those labels differ (for example, a promoted champion
 whose inherited rating row still names `v7`), the page shows both. Rank, score,
 and **rated rounds** remain explicitly attached to the rating row instead of
 being assigned to the newer policy. House ownership is shown only when a current
-champion has the exact `proxywar-keystone:vN` policy name.
+champion has the exact `Commander:vN` policy name or the retained rollback
+lineage `proxywar-keystone:vN`.
 
 ## Round integrity
 

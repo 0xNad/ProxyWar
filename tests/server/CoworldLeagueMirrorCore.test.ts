@@ -364,6 +364,26 @@ describe("CoworldLeagueMirrorCore", () => {
     expect(rows.find((row) => row.playerName === "Auri")?.isHouse).toBe(false);
   });
 
+  test("treats the new Commander lineage as the current house policy", () => {
+    const rows = buildStandingRows(standingsFixture, [
+      {
+        status: "competing",
+        substatus: "active",
+        is_champion: true,
+        end_time: null,
+        player: { id: "ply_house" },
+        policy_version: {
+          player_id: "ply_house",
+          label: "Commander:v1",
+        },
+      },
+    ]);
+    const house = rows.find((row) => row.playerName === "Auri");
+    expect(house?.isHouse).toBe(true);
+    expect(house?.ratingPolicyLabel).toBe("proxywar-keystone:v7");
+    expect(house?.activeChampionPolicyLabel).toBe("Commander:v1");
+  });
+
   test("scoreLabelFromStandings falls back to Score", () => {
     expect(scoreLabelFromStandings(standingsFixture)).toBe("Score");
     expect(scoreLabelFromStandings([])).toBe("Score");
