@@ -5,6 +5,7 @@ import {
   assertRunRuntime,
   bindResumedRequests,
   buildRequests,
+  exactEpisode,
   renderMarkdown,
   summarizeRuns,
   summarizeTrace,
@@ -107,6 +108,36 @@ test("supports explicit balanced B/C submission order per triplet", () => {
         runID: "invalid-order",
       }),
     /Invalid arm order/,
+  );
+});
+
+test("missing hosted replay or cost is strict by default and explicit NO-GO recovery only", () => {
+  const payload = {
+    status: "completed",
+    completed_count: 1,
+    failed_count: 0,
+    episodes: [
+      {
+        id: "ereq_00000000-0000-4000-8000-000000000001",
+        status: "completed",
+        job_id: "00000000-0000-4000-8000-000000000002",
+        episode_id: "00000000-0000-4000-8000-000000000003",
+        replay_url: null,
+        cost_usd: null,
+        error: null,
+        error_type: null,
+      },
+    ],
+  };
+  assert.throws(
+    () => exactEpisode(payload, "xreq_fixture"),
+    /missing replay or cost evidence/,
+  );
+  assert.equal(
+    exactEpisode(payload, "xreq_fixture", {
+      allowMissingPlatformEvidence: true,
+    }).replay_url,
+    null,
   );
 });
 

@@ -59,5 +59,12 @@ npm run agent:commander:coworld -- \
 The runner compares every persisted request body, arm, seed, seat, and run key
 to the newly constructed plan before it accepts any saved XP request ID.
 
+If Coworld completes the episodes and retains policy artifacts but omits its
+normally required replay URL or exact USD cost, strict collection still fails.
+`--allow-missing-platform-evidence=true` may be used only with
+`--resume-created` to preserve the already-spent policy traces. The resulting
+report is stamped `no-go-missing-platform-evidence`; it cannot promote the arm
+or support cost/watchability claims.
+
 This command produces functional matched evidence. A small number of triplets
 does not establish a statistical performance difference between arms.

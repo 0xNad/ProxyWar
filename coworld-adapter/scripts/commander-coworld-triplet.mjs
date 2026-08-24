@@ -215,7 +215,12 @@ export function summarizeRuns(runs) {
             (sum, run) => sum + run.trace.degradedCount,
             0,
           ),
-          costUsd: selected.reduce((sum, run) => sum + run.costUsd, 0),
+          costUsd: selected.every((run) => Number.isFinite(run.costUsd))
+            ? selected.reduce((sum, run) => sum + run.costUsd, 0)
+            : null,
+          missingPlatformEvidence: selected.filter(
+            (run) => run.costUsd === null || run.replayURL === null,
+          ).length,
         },
       ];
     }),
@@ -287,6 +292,10 @@ export function bindResumedRequests(requests, persisted) {
 }
 
 export function renderMarkdown(report) {
+  const armCost = (arm) =>
+    report.summary.byArm[arm].costUsd === null
+      ? "unavailable"
+      : report.summary.byArm[arm].costUsd.toFixed(6);
   const lines = [
     `# Commander Coworld matched run — ${report.runID}`,
     "",
@@ -294,7 +303,7 @@ export function renderMarkdown(report) {
     "",
     `Triplets: ${report.summary.tripletCount}; runs: ${report.summary.runCount}; subject wins A/B/C: ${report.summary.byArm.A.subjectWins}/${report.summary.byArm.B.subjectWins}/${report.summary.byArm.C.subjectWins}.`,
     `Matched B/C win-rate delta (C-B): ${report.summary.pairedBC.cMinusBWinRate}; identical B/C winner slots: ${report.summary.pairedBC.sameWinnerSlot}/${report.summary.pairedBC.pairs}.`,
-    `Coworld episode cost USD A/B/C: ${report.summary.byArm.A.costUsd.toFixed(6)}/${report.summary.byArm.B.costUsd.toFixed(6)}/${report.summary.byArm.C.costUsd.toFixed(6)}.`,
+    `Coworld episode cost USD A/B/C: ${armCost("A")}/${armCost("B")}/${armCost("C")}.`,
     "",
     "| Triplet | Arm | Subject seat | Winner | Subject won | Decisions | Provider calls | Integrity |",
     "| ---: | --- | ---: | ---: | --- | ---: | --- | --- |",
@@ -409,7 +418,9 @@ async function main() {
 
   const runs = [];
   for (const { request, payload } of terminal) {
-    const episode = exactEpisode(payload, request.xreqID);
+    const episode = exactEpisode(payload, request.xreqID, {
+      allowMissingPlatformEvidence: options.allowMissingPlatformEvidence,
+    });
     const name = runName(request);
     const artifactPath = path.join(options.output, "artifacts", `${name}.zip`);
     await coworld([
@@ -421,11 +432,16 @@ async function main() {
       "--output",
       artifactPath,
     ]);
-    const replayBytes = new Uint8Array(
-      await (await fetchRequired(episode.replay_url)).arrayBuffer(),
-    );
-    const replayPath = path.join(options.output, "replays", `${name}.replay`);
-    await writeFile(replayPath, replayBytes);
+    const replayBytes =
+      typeof episode.replay_url === "string"
+        ? new Uint8Array(
+            await (await fetchRequired(episode.replay_url)).arrayBuffer(),
+          )
+        : null;
+    if (replayBytes !== null) {
+      const replayPath = path.join(options.output, "replays", `${name}.replay`);
+      await writeFile(replayPath, replayBytes);
+    }
     const artifactBytes = await readFile(artifactPath);
     const manifest = parseJson(
       await unzipText(artifactPath, "runtime-manifest.json"),
@@ -457,9 +473,10 @@ async function main() {
       episodeID: episode.episode_id,
       runningAt: episode.running_at,
       completedAt: episode.completed_at,
-      costUsd: episode.cost_usd,
-      replayURL: episode.replay_url,
-      replaySha256: sha256(replayBytes),
+      costUsd: Number.isFinite(episode.cost_usd) ? episode.cost_usd : null,
+      replayURL:
+        typeof episode.replay_url === "string" ? episode.replay_url : null,
+      replaySha256: replayBytes === null ? null : sha256(replayBytes),
       artifactSha256: sha256(artifactBytes),
       traceSha256: sha256(traceText),
       runtimeManifest: manifest,
@@ -475,14 +492,21 @@ async function main() {
       run.trace.fallbackCount > 0 ||
       run.trace.degradedCount > 0,
   );
+  const missingPlatformEvidence = runs.some(
+    (run) => run.costUsd === null || run.replayURL === null,
+  );
   const report = {
     schemaVersion: 1,
     reportKind: "commander-coworld-functional-triplets",
     runID: options.runID,
     generatedAt: new Date().toISOString(),
-    status: hasDegradation ? "passed-with-degradation" : "passed",
+    status: missingPlatformEvidence
+      ? "no-go-missing-platform-evidence"
+      : hasDegradation
+        ? "passed-with-degradation"
+        : "passed",
     claimBoundary:
-      "Matched Coworld functional evidence. Provider failures and deterministic fallbacks are reported as degradation rather than hidden; statistical claims require a larger matched sample.",
+      "Matched Coworld functional evidence. Missing hosted replay or exact cost remains NO-GO; provider failures and deterministic fallbacks are reported as degradation rather than hidden; statistical claims require a larger matched sample.",
     coworldID: options.coworldID,
     variantID: VARIANT_ID,
     policies: options.policies,
@@ -530,6 +554,13 @@ function parseOptions(args) {
   if (armOrders !== undefined && armOrders.length !== seeds.length) {
     throw new Error("--arm-orders must provide one permutation per seed");
   }
+  const allowMissingPlatformEvidence =
+    values["allow-missing-platform-evidence"] === "true";
+  if (allowMissingPlatformEvidence && !values["resume-created"]) {
+    throw new Error(
+      "--allow-missing-platform-evidence requires --resume-created",
+    );
+  }
   return {
     coworldID: required("coworld-id"),
     policies: {
@@ -545,6 +576,7 @@ function parseOptions(args) {
     output: path.resolve(required("output")),
     pollSeconds: Number(values["poll-seconds"] ?? 20),
     timeoutSeconds: Number(values["timeout-seconds"] ?? 6_000),
+    allowMissingPlatformEvidence,
     resumeCreated: values["resume-created"]
       ? path.resolve(values["resume-created"])
       : null,
@@ -580,7 +612,11 @@ async function unzipText(archivePath, member) {
   return stdout;
 }
 
-function exactEpisode(payload, xreqID) {
+export function exactEpisode(
+  payload,
+  xreqID,
+  { allowMissingPlatformEvidence = false } = {},
+) {
   if (
     payload.status !== "completed" ||
     payload.completed_count !== 1 ||
@@ -596,12 +632,17 @@ function exactEpisode(payload, xreqID) {
     typeof episode.id !== "string" ||
     typeof episode.job_id !== "string" ||
     typeof episode.episode_id !== "string" ||
-    typeof episode.replay_url !== "string" ||
-    !Number.isFinite(episode.cost_usd) ||
     episode.error !== null ||
     episode.error_type !== null
   ) {
     throw new Error(`${xreqID} episode is incomplete or errored`);
+  }
+  if (
+    !allowMissingPlatformEvidence &&
+    (typeof episode.replay_url !== "string" ||
+      !Number.isFinite(episode.cost_usd))
+  ) {
+    throw new Error(`${xreqID} episode is missing replay or cost evidence`);
   }
   return episode;
 }
