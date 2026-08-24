@@ -222,6 +222,12 @@ describe("spatial XP immutable upload transition", () => {
     expect(expected.commissioner[0].image).toBe(
       authorityReceipt.images[2].coworldImageID,
     );
+    const storedCommissioner = expected.commissioner[0] as {
+      env?: Record<string, string>;
+      run?: string[];
+    };
+    expect(storedCommissioner.env).toEqual({});
+    expect(storedCommissioner.run).toEqual([]);
 
     const stored = storedPackage(manifest, authorityReceipt);
     expect(() =>
@@ -236,6 +242,39 @@ describe("spatial XP immutable upload transition", () => {
         "off",
       ),
     ).not.toThrow();
+  });
+
+  it("accepts only Coworld's exact empty commissioner storage defaults", () => {
+    const authorityReceipt = receipt();
+    const manifest = verifiedManifest(authorityReceipt);
+    const stored = storedPackage(manifest, authorityReceipt);
+    const storedCommissioner = stored.manifest.commissioner[0] as {
+      env?: Record<string, string>;
+      run?: string[];
+    };
+
+    storedCommissioner.env = { UNRECEIPTED: "1" };
+    expect(() =>
+      validateStoredCoworldUpload(
+        stored,
+        { id: stored.id, manifest_hash: stored.manifest_hash },
+        manifest,
+        authorityReceipt,
+        "off",
+      ),
+    ).toThrow(/does not match the verified upload/u);
+
+    storedCommissioner.env = {};
+    storedCommissioner.run = ["unexpected"];
+    expect(() =>
+      validateStoredCoworldUpload(
+        stored,
+        { id: stored.id, manifest_hash: stored.manifest_hash },
+        manifest,
+        authorityReceipt,
+        "off",
+      ),
+    ).toThrow(/does not match the verified upload/u);
   });
 
   it("rejects reintroduced mutable tags before package upload", () => {

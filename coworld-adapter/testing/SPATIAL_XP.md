@@ -181,7 +181,11 @@ pinned Coworld client version. Every stored game/player/optimizer/commissioner
 image field must equal the receipt's exact role-specific `img_...` ID, and fresh
 `coworld images <id> --json` records must match the receipt's name, version,
 ready status, client hash, and Coworld image digest. Persist the exact response
-bytes and hashes. A mismatch leaves that noncanonical package quarantined and
+bytes and hashes. Stored-manifest equality admits only Coworld's observed exact
+normalizations: digest references become the receipted image IDs, the replay
+bundle path becomes its immutable SHA-256, and commissioner entries acquire
+empty `env` and `run` defaults. Any non-empty or additional mutation fails.
+A mismatch leaves that noncanonical package quarantined and
 blocks certification, hosted smoke, policy creation, and XP; it is never
 accepted because upload returned success alone.
 

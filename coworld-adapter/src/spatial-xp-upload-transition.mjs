@@ -198,6 +198,22 @@ export function expectedStoredManifest(manifest, receipt) {
   if (replayViewer !== undefined) {
     replayViewer.bundle = "<UPLOADED_REPLAY_BUNDLE>";
   }
+  // Coworld 0.1.42 materializes the schema defaults on commissioner entries
+  // when it stores the uploaded manifest. Accept only those exact empty
+  // defaults; the full stable-value comparison below still rejects any
+  // non-empty command or environment mutation.
+  if (Array.isArray(expected.commissioner)) {
+    for (const commissioner of expected.commissioner) {
+      if (
+        commissioner !== null &&
+        typeof commissioner === "object" &&
+        !Array.isArray(commissioner)
+      ) {
+        commissioner.env ??= {};
+        commissioner.run ??= [];
+      }
+    }
+  }
   return expected;
 }
 
