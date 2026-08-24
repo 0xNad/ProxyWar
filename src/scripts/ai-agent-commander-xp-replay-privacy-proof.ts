@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { commanderXpReplayEvidenceProjection } from "../../coworld-adapter/src/commander-xp-collect";
+import { commanderXpReplayEvidenceProjection } from "../server/agents/CommanderXpReplayEvidence";
 // @ts-expect-error The reviewed external-seal helper is executable ESM without
 // a declaration file. This proof intentionally exercises its production
 // privacy scanner while disabling only Commander-specific Coworld joins that

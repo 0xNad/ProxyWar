@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 
-import { coworldEpisodeIdentity } from "../../../coworld-adapter/src/coworld-seed";
 import { legalActionKinds } from "./AgentTypes";
 import {
   buildCommanderXpConfirmatoryAnalysisEvidence,
@@ -11,6 +10,7 @@ import {
   type CommanderXpSelectorAudit,
   type CommanderXpVerifiedOutcome,
 } from "./CommanderXpAnalysis";
+import { coworldEpisodeIdentity } from "./CommanderXpCoworldIdentity";
 import type { CommanderXpGameEvidence } from "./CommanderXpGameEvidence";
 import {
   buildCommanderXpPreRegistration,
