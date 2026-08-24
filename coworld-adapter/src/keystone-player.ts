@@ -590,6 +590,15 @@ export function withKeystoneDeal(
   return { ...decision, dealActionID: move.id };
 }
 
+/**
+ * Reconstructs the canonical AgentBrainInput from the wire payload the game
+ * built with buildExternalAgentRequestPayload. Raw server intents never cross
+ * the policy boundary, but Commander compatibility predicates need the intent
+ * facts already duplicated in server-owned action metadata. We reconstruct
+ * only those bounded facts for in-process planning; the policy still returns
+ * offered LegalAction IDs only, and the game remains the sole owner of
+ * executable intents.
+ */
 export function requestToBrainInput(
   request: unknown,
   pinnedProfile?: AgentStrategyProfile,
@@ -613,14 +622,17 @@ export function requestToBrainInput(
   if (rawActions.length === 0) {
     throw new Error("decision_request payload contained no legalActions");
   }
-  const legalActions: LegalAction[] = rawActions.map((action) => ({
-    id: String(action.id ?? ""),
-    kind: String(action.kind ?? "hold") as LegalAction["kind"],
-    label: String(action.label ?? ""),
-    intent: null,
-    risk: action.risk ?? { level: "medium", score: 0.5 },
-    metadata: action.metadata,
-  }));
+  const legalActions: LegalAction[] = rawActions.map((action) => {
+    const kind = String(action.kind ?? "hold") as LegalAction["kind"];
+    return {
+      id: String(action.id ?? ""),
+      kind,
+      label: String(action.label ?? ""),
+      intent: reconstructWireIntent(kind, action.metadata),
+      risk: action.risk ?? { level: "medium", score: 0.5 },
+      metadata: action.metadata,
+    };
+  });
   // Profile pin (v9 finding, 2026-07-12 A/B game2): the GAME side assigns a
   // strategy profile per seat slot, so the same keystone build played
   // "aggressive" in one slot and "diplomatic" in another — the Commander prompt
@@ -633,6 +645,86 @@ export function requestToBrainInput(
       ? { ...record.observation, profile: pinnedProfile }
       : record.observation;
   return { observation, legalActions };
+}
+
+/**
+ * Rebuilds only the non-secret compatibility projection already duplicated in
+ * game-authored action metadata. This value is never sent back to the game;
+ * execution remains bound to the original offered LegalAction.id there.
+ */
+export function reconstructWireIntent(
+  kind: LegalAction["kind"],
+  metadata: LegalAction["metadata"],
+): LegalAction["intent"] {
+  const value = metadata ?? {};
+  const safeNonNegativeInteger = (candidate: unknown): candidate is number =>
+    typeof candidate === "number" &&
+    Number.isSafeInteger(candidate) &&
+    candidate >= 0;
+  const safePositiveInteger = (candidate: unknown): candidate is number =>
+    safeNonNegativeInteger(candidate) && candidate > 0;
+  const boundedText = (candidate: unknown): candidate is string =>
+    typeof candidate === "string" &&
+    candidate.length > 0 &&
+    candidate.length <= 180;
+
+  if (
+    kind === "attack" &&
+    (value.targetID === null || boundedText(value.targetID)) &&
+    safePositiveInteger(value.troops)
+  ) {
+    return {
+      type: "attack",
+      targetID: value.targetID,
+      troops: value.troops,
+    };
+  }
+  if (
+    kind === "boat" &&
+    safeNonNegativeInteger(value.targetTile) &&
+    safePositiveInteger(value.troops)
+  ) {
+    return { type: "boat", dst: value.targetTile, troops: value.troops };
+  }
+  if (kind === "build" && boundedText(value.unit)) {
+    const tile = safeNonNegativeInteger(value.buildTile)
+      ? value.buildTile
+      : safeNonNegativeInteger(value.targetTile)
+        ? value.targetTile
+        : null;
+    if (tile !== null) {
+      return {
+        type: "build_unit",
+        unit: value.unit,
+        tile,
+      } as LegalAction["intent"];
+    }
+  }
+  if (
+    kind === "upgrade_structure" &&
+    boundedText(value.unit) &&
+    safeNonNegativeInteger(value.unitID)
+  ) {
+    return {
+      type: "upgrade_structure",
+      unit: value.unit,
+      unitId: value.unitID,
+    } as LegalAction["intent"];
+  }
+  if (
+    kind === "embargo" &&
+    boundedText(value.targetID) &&
+    value.action === "start"
+  ) {
+    return { type: "embargo", targetID: value.targetID, action: "start" };
+  }
+  if (kind === "target_player" && boundedText(value.targetID)) {
+    return { type: "targetPlayer", target: value.targetID };
+  }
+  if (kind === "retreat" && boundedText(value.attackID)) {
+    return { type: "cancel_attack", attackID: value.attackID };
+  }
+  return null;
 }
 
 export function decisionToResponse(
