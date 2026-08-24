@@ -252,13 +252,20 @@ function armSummary(runs, arm) {
   };
 }
 
-function pairedReport(runs) {
+function pairedReport(runs, options = {}) {
   const rows = [];
+  const incompleteSetIDs = [];
   const bySet = Map.groupBy(runs, (run) => run.setID);
   for (const [setID, pair] of bySet) {
     const off = pair.find((run) => run.arm === "off");
     const structured = pair.find((run) => run.arm === "structured");
-    if (!off || !structured) throw new Error(`${setID} is not a complete pair`);
+    if (!off || !structured) {
+      if (options.allowPartial === true) {
+        incompleteSetIDs.push(setID);
+        continue;
+      }
+      throw new Error(`${setID} is not a complete pair`);
+    }
     rows.push({
       setID,
       map: off.map,
@@ -280,6 +287,7 @@ function pairedReport(runs) {
   const metric = (name) => pairedSummary(rows.map((row) => row[name]));
   return {
     rows,
+    incompleteSetIDs,
     score: metric("score"),
     win: metric("win"),
     tiles: metric("tiles"),
@@ -336,7 +344,7 @@ export async function analyze(root, options = {}) {
   const arms = Object.fromEntries(
     ARMS.map((arm) => [arm, armSummary(runs, arm)]),
   );
-  const paired = pairedReport(runs);
+  const paired = pairedReport(runs, options);
   const phaseReliabilityPass = ARMS.every(
     (arm) =>
       arms[arm].runs === expectedSets &&
