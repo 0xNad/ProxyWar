@@ -3,6 +3,7 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 const COWORLD = ["--from", "coworld==0.1.42", "coworld"];
 
@@ -28,6 +29,72 @@ function run(command, args, options = {}) {
 
 function coworld(args, options) {
   return run("uvx", [...COWORLD, ...args], options);
+}
+
+export function decodePythonBytesLiteral(raw) {
+  const value = raw.trim();
+  if (
+    value.length < 3 ||
+    value[0] !== "b" ||
+    !["'", '"'].includes(value[1]) ||
+    value.at(-1) !== value[1]
+  ) {
+    throw new Error("Coworld log is not a Python bytes literal");
+  }
+  const bytes = [];
+  const inner = value.slice(2, -1);
+  const simpleEscapes = {
+    a: 0x07,
+    b: 0x08,
+    t: 0x09,
+    n: 0x0a,
+    v: 0x0b,
+    f: 0x0c,
+    r: 0x0d,
+    "\\": 0x5c,
+    "'": 0x27,
+    '"': 0x22,
+  };
+  for (let index = 0; index < inner.length; index += 1) {
+    const character = inner[index];
+    if (character !== "\\") {
+      const code = character.codePointAt(0);
+      if (code > 0x7f) {
+        throw new Error(
+          "Python bytes literal contains an unescaped non-ASCII byte",
+        );
+      }
+      bytes.push(code);
+      continue;
+    }
+    index += 1;
+    const escape = inner[index];
+    if (escape === undefined) throw new Error("truncated Python bytes escape");
+    if (Object.hasOwn(simpleEscapes, escape)) {
+      bytes.push(simpleEscapes[escape]);
+      continue;
+    }
+    if (escape === "x") {
+      const hex = inner.slice(index + 1, index + 3);
+      if (!/^[0-9a-fA-F]{2}$/u.test(hex)) {
+        throw new Error("invalid Python hex escape");
+      }
+      bytes.push(Number.parseInt(hex, 16));
+      index += 2;
+      continue;
+    }
+    if (/^[0-7]$/u.test(escape)) {
+      let octal = escape;
+      while (octal.length < 3 && /^[0-7]$/u.test(inner[index + 1] ?? "")) {
+        index += 1;
+        octal += inner[index];
+      }
+      bytes.push(Number.parseInt(octal, 8));
+      continue;
+    }
+    bytes.push(0x5c, escape.codePointAt(0));
+  }
+  return Buffer.from(bytes);
 }
 
 async function readJSON(file) {
@@ -191,14 +258,29 @@ async function fetchEvidence(root) {
     );
     const replayFile = path.join(evidenceDirectory, "episode.replay");
     coworld(["episode-results", episode.id, "-o", resultsFile]);
+    const downloadDirectory = path.join(evidenceDirectory, "downloaded");
+    await fs.mkdir(downloadDirectory, { recursive: true });
     coworld([
       "episode-logs",
       episode.id,
       "--agent",
       String(entry.subjectSlot),
-      "-o",
-      logFile,
+      "--download-dir",
+      downloadDirectory,
     ]);
+    const downloadedLogs = (await fs.readdir(downloadDirectory)).filter(
+      (file) => file.endsWith(`-policy_agent_${entry.subjectSlot}.log`),
+    );
+    if (downloadedLogs.length !== 1) {
+      throw new Error(
+        `${entry.setID}/${entry.arm} expected one downloaded subject log, found ${downloadedLogs.length}`,
+      );
+    }
+    const encodedLog = await fs.readFile(
+      path.join(downloadDirectory, downloadedLogs[0]),
+      "utf8",
+    );
+    await fs.writeFile(logFile, decodePythonBytesLiteral(encodedLog));
     if (typeof episode.replay_url !== "string") {
       throw new Error(`${entry.setID}/${entry.arm} has no replay URL`);
     }
@@ -244,7 +326,9 @@ async function main(argv) {
   );
 }
 
-main(process.argv.slice(2)).catch((error) => {
-  process.stderr.write(`${error.stack ?? error.message}\n`);
-  process.exitCode = 1;
-});
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main(process.argv.slice(2)).catch((error) => {
+    process.stderr.write(`${error.stack ?? error.message}\n`);
+    process.exitCode = 1;
+  });
+}
