@@ -319,7 +319,7 @@ describe("GameServer agent_message relay (real socket path)", () => {
     expect(agentMessageIntents(turnsSeenBy(observer.ws))).toHaveLength(0);
   });
 
-  it("flag ON: the server stamp overwrites a spoofed clientID", async () => {
+  it("flag ON: a hand-crafted client cannot bypass the offered-id validator", async () => {
     process.env[FLAG] = "1";
     const { observer } = startWithRunnerAndObserver();
     const hand = makeHandClient("HAND0001");
@@ -339,11 +339,36 @@ describe("GameServer agent_message relay (real socket path)", () => {
         },
       }),
     );
+    expect(log.warn).toHaveBeenCalledWith(
+      "agent_message intent refused: client lacks agent message capability",
+      expect.objectContaining({ clientID: "HAND0001" }),
+    );
     game.advanceTurnsForTesting(1);
+    expect(agentMessageIntents(turnsSeenBy(observer.ws))).toHaveLength(0);
+  });
 
-    const intents = agentMessageIntents(turnsSeenBy(observer.ws));
-    expect(intents).toHaveLength(1);
-    expect(intents[0].clientID).toBe("HAND0001");
+  it("flag ON: the server re-applies reject-don't-rewrite text validation", () => {
+    process.env[FLAG] = "1";
+    const { runner, observer } = startWithRunnerAndObserver();
+
+    const result = runner.submitAgentMessage({
+      recipient: RECIPIENT_PLAYER_ID,
+      text: "fake\u202E attribution",
+    });
+    expect(result).toMatchObject({
+      accepted: false,
+      reason: "invalid-agent-message-text",
+    });
+    expect(log.warn).toHaveBeenCalledWith(
+      "agent_message intent refused: invalid text",
+      expect.objectContaining({
+        clientID: runner.clientID(),
+        reason:
+          "messageText contained invisible formatting or bidi-override characters",
+      }),
+    );
+    game.advanceTurnsForTesting(1);
+    expect(agentMessageIntents(turnsSeenBy(observer.ws))).toHaveLength(0);
   });
 
   it("flag ON: the real wire schema still kicks over-cap hand-crafted text", async () => {

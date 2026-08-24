@@ -27,6 +27,10 @@ export type AgentMessageDecisionValidation =
   | { ok: true; action: LegalAction; text: string }
   | { ok: false; reason: string };
 
+export type AgentMessageTextValidation =
+  | { ok: true; text: string }
+  | { ok: false; reason: string };
+
 /**
  * Validates the OPTIONAL second selection, `AgentDecision.dealActionID` (the
  * diplomacy slot). Returns null only when the field is absent — the shipped
@@ -131,6 +135,31 @@ export function validateAgentMessageDecision(
       reason: `message selection named a non-message action kind (${action.kind}): ${loggableActionID(requestedID)}`,
     };
   }
+  const textValidation = validateAgentMessageText(
+    text,
+    `message selection ${loggableActionID(requestedID)} carried blank messageText`,
+  );
+  return textValidation.ok
+    ? { ok: true, action, text: textValidation.text }
+    : textValidation;
+}
+
+/**
+ * Applies the raw-text half of the comms-slot contract independently of an
+ * offered action menu. `GameServer` re-applies it at the socket boundary so a
+ * future bug, direct in-process caller, or hand-crafted wire message cannot
+ * bypass the exact reject-don't-rewrite text rules enforced above the runner.
+ */
+export function validateAgentMessageText(
+  text: unknown,
+  blankReason = "agent message text was blank",
+): AgentMessageTextValidation {
+  if (typeof text !== "string") {
+    return {
+      ok: false,
+      reason: "agent message text was not a string",
+    };
+  }
   // C0 controls (including tab, LF, and CR), DEL, and C1 controls can alter
   // transcript layout, terminal framing, or prompt boundaries. Check the RAW
   // text before any blank/length handling: accepting then collapsing these
@@ -185,7 +214,7 @@ export function validateAgentMessageDecision(
   if (text.trim().length === 0) {
     return {
       ok: false,
-      reason: `message selection ${loggableActionID(requestedID)} carried blank messageText`,
+      reason: blankReason,
     };
   }
   if (text.length > FREETEXT_MESSAGE_MAX_CHARS) {
@@ -194,7 +223,7 @@ export function validateAgentMessageDecision(
       reason: `messageText is ${text.length} chars, over the ${FREETEXT_MESSAGE_MAX_CHARS}-char cap (rejected, not truncated)`,
     };
   }
-  return { ok: true, action, text };
+  return { ok: true, text };
 }
 
 /**

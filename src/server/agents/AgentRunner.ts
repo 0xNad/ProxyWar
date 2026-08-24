@@ -174,7 +174,7 @@ export class AgentRunner {
       this.cosmetics,
     );
 
-    const joinResult = game.joinClient(client);
+    const joinResult = game.joinAgentClient(client);
     if (joinResult === "joined") {
       this.client = client;
       this.socket = socket;

@@ -25,6 +25,7 @@ import {
   Turn,
 } from "../core/Schemas";
 import { createPartialGameRecord } from "../core/Util";
+import { validateAgentMessageText } from "./agents/AgentDecisionValidator";
 import { freeTextMessagesEnabled } from "./agents/AgentTunables";
 import { archive, finalizeGameRecord } from "./Archive";
 import { Client } from "./Client";
@@ -69,6 +70,12 @@ export class GameServer {
   private intents: StampedIntent[] = [];
   public activeClients: Client[] = [];
   private allClients: Map<ClientID, Client> = new Map();
+  /**
+   * Only in-process AgentRunner clients may use the agent-authored prose
+   * intent. Ordinary websocket clients never possess the offered-message-id
+   * capability that AgentDecisionValidator checks before the runner submits.
+   */
+  private agentMessageClients = new WeakSet<Client>();
   // Map persistentID to clientID for reconnection lookup
   private persistentIdToClientId: Map<string, ClientID> = new Map();
   private clientsDisconnectedStatus: Map<ClientID, boolean> = new Map();
@@ -212,6 +219,15 @@ export class GameServer {
     if (!clientID) return null;
     if (this.kickedPersistentIds.has(persistentID)) return null;
     return clientID;
+  }
+
+  /** Join and mark the trusted in-process producer for the comms-slot intent. */
+  public joinAgentClient(client: Client): "joined" | "kicked" | "rejected" {
+    const result = this.joinClient(client);
+    if (result === "joined") {
+      this.agentMessageClients.add(client);
+    }
+    return result;
   }
 
   public joinClient(client: Client): "joined" | "kicked" | "rejected" {
@@ -432,6 +448,39 @@ export class GameServer {
                       clientID: client.clientID,
                       gameID: this.id,
                     },
+                  );
+                  return;
+                }
+                if (!this.agentMessageClients.has(client)) {
+                  this.log.warn(
+                    "agent_message intent refused: client lacks agent message capability",
+                    {
+                      clientID: client.clientID,
+                      gameID: this.id,
+                    },
+                  );
+                  client.ws.send(
+                    JSON.stringify({
+                      type: "error",
+                      error: "agent-message-capability-required",
+                    } satisfies ServerErrorMessage),
+                  );
+                  return;
+                }
+                const textValidation = validateAgentMessageText(
+                  stampedIntent.text,
+                );
+                if (!textValidation.ok) {
+                  this.log.warn("agent_message intent refused: invalid text", {
+                    clientID: client.clientID,
+                    gameID: this.id,
+                    reason: textValidation.reason,
+                  });
+                  client.ws.send(
+                    JSON.stringify({
+                      type: "error",
+                      error: "invalid-agent-message-text",
+                    } satisfies ServerErrorMessage),
                   );
                   return;
                 }
