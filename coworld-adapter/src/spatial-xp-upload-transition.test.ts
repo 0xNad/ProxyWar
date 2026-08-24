@@ -11,6 +11,7 @@ import {
   captureExactCommand,
   expectedStoredManifest,
   validateCanonicalUploadInputs,
+  validateCoworldImageResponse,
   validateProductionState,
   validateStoredCoworldUpload,
   validateUploadAuthorityReceipt,
@@ -324,6 +325,38 @@ describe("spatial XP immutable upload transition", () => {
     expect(() =>
       validateUploadAuthorityReceipt(authorityReceipt, SOURCE_SHA, SOURCE_TREE),
     ).toThrow(/game image identity is malformed/u);
+  });
+
+  it("accepts only the exact ready-to-published Coworld image lifecycle", () => {
+    const expected = receipt().images[0];
+    const response = {
+      id: expected.coworldImageID,
+      name: expected.coworldName,
+      version: expected.coworldVersion,
+      client_hash: expected.coworldClientHash,
+      status: "ready",
+      image_uri: null,
+      image_digest: expected.coworldImageDigest,
+      public_image_uri: null as string | null,
+    };
+    expect(validateCoworldImageResponse(response, expected)).toBe("ready");
+
+    response.status = "published";
+    response.public_image_uri =
+      `public.ecr.aws/q5f4m8t9/cogames@${expected.coworldImageDigest}`;
+    expect(validateCoworldImageResponse(response, expected)).toBe("published");
+
+    response.public_image_uri =
+      `public.ecr.aws/q5f4m8t9/cogames@sha256:${"9".repeat(64)}`;
+    expect(() => validateCoworldImageResponse(response, expected)).toThrow(
+      /does not match the authority receipt/u,
+    );
+
+    response.public_image_uri = null;
+    response.status = "failed";
+    expect(() => validateCoworldImageResponse(response, expected)).toThrow(
+      /does not match the authority receipt/u,
+    );
   });
 
   it("rejects a stored package that substitutes any unreceipted image id", () => {

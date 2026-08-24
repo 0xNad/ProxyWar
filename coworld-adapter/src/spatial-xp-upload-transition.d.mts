@@ -25,6 +25,11 @@ export function expectedStoredManifest<T extends object>(
 
 export function normalizedStoredManifest<T extends object>(manifest: T): T;
 
+export function validateCoworldImageResponse(
+  response: Record<string, unknown>,
+  expected: SpatialXpAuthorityReceipt["images"][number],
+): "ready" | "published";
+
 export function validateUploadAuthorityReceipt(
   receipt: SpatialXpAuthorityReceipt,
   head: string,

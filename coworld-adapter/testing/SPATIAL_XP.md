@@ -184,7 +184,11 @@ Immediately after each upload, fetch the stored Coworld package with the same
 pinned Coworld client version. Every stored game/player/optimizer/commissioner
 image field must equal the receipt's exact role-specific `img_...` ID, and fresh
 `coworld images <id> --json` records must match the receipt's name, version,
-ready status, client hash, and Coworld image digest. Persist the exact response
+client hash, and Coworld image digest. Before the first hosted certification the
+exact receipted `ready` response bytes must still match. Later arms may observe
+only Coworld's exact `published` lifecycle promotion, with a null private URI
+and the fixed public Cogames URI ending in the same receipted image digest.
+Every other status, URI, field, or identity change fails. Persist the exact response
 bytes and hashes. Stored-manifest equality admits only Coworld's observed exact
 normalizations: digest references become the receipted image IDs, the replay
 bundle path becomes its immutable SHA-256, and commissioner entries acquire

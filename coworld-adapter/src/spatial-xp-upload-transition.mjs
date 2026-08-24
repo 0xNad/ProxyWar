@@ -16,6 +16,16 @@ import {
 
 const ARMS = Object.freeze(["off", "structured", "on"]);
 const ROLES = Object.freeze(["game", "runnables", "commissioner"]);
+const COWORLD_IMAGE_RESPONSE_KEYS = Object.freeze([
+  "id",
+  "name",
+  "version",
+  "client_hash",
+  "status",
+  "image_uri",
+  "image_digest",
+  "public_image_uri",
+]);
 const ROLE_TITLES = Object.freeze({
   game: "proxywar-spatial-xp",
   runnables: "proxywar-spatial-runnables",
@@ -241,20 +251,35 @@ function stableValue(value) {
   return value;
 }
 
-function validateCoworldImageResponse(response, expected) {
+export function validateCoworldImageResponse(response, expected) {
   const image = record(response, `${expected.role} Coworld image response`);
+  if (
+    JSON.stringify(Object.keys(image).sort()) !==
+    JSON.stringify([...COWORLD_IMAGE_RESPONSE_KEYS].sort())
+  ) {
+    throw new Error(
+      `${expected.role} Coworld image response fields are not exact`,
+    );
+  }
+  const ready = image.status === "ready" && image.public_image_uri === null;
+  const published =
+    image.status === "published" &&
+    image.public_image_uri ===
+      `public.ecr.aws/q5f4m8t9/cogames@${expected.coworldImageDigest}`;
   if (
     image.id !== expected.coworldImageID ||
     image.name !== expected.coworldName ||
     image.version !== expected.coworldVersion ||
-    image.status !== "ready" ||
     image.client_hash !== expected.coworldClientHash ||
-    image.image_digest !== expected.coworldImageDigest
+    image.image_digest !== expected.coworldImageDigest ||
+    image.image_uri !== null ||
+    (!ready && !published)
   ) {
     throw new Error(
       `${expected.role} Coworld image response does not match the authority receipt`,
     );
   }
+  return image.status;
 }
 
 function validateDockerDigestInspect(raw, expected) {
@@ -678,7 +703,7 @@ async function main(args) {
       ],
       `${image.role} pre-upload Coworld image fetch`,
     );
-    validateCoworldImageResponse(
+    const imageStatus = validateCoworldImageResponse(
       parseJson(coworld.raw, "Coworld image"),
       image,
     );
@@ -689,7 +714,8 @@ async function main(args) {
     );
     validateDockerDigestInspect(inspect.raw, image);
     if (
-      coworld.sha256 !== image.coworldResponseSha256 ||
+      (imageStatus === "ready" &&
+        coworld.sha256 !== image.coworldResponseSha256) ||
       inspect.sha256 !== image.immutableInspectSha256
     ) {
       throw new Error(
