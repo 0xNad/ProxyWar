@@ -2890,8 +2890,10 @@ function verifyEvalCoworldManifest(
       "version",
       "description",
       "owner",
+      "docs",
       "config_schema",
       "results_schema",
+      "replay_viewer",
       "protocols",
       "runnable",
     ],
@@ -2981,7 +2983,12 @@ function verifyEvalCoworldManifest(
   ];
   if (
     manifest.tags === undefined ||
-    sha256Canonical(manifest.tags) !== sha256Canonical(["evaluation"]) ||
+    sha256Canonical(manifest.tags) !==
+      sha256Canonical([
+        "evaluation",
+        "strategic-commander",
+        "agentic-gameplay",
+      ]) ||
     game.name !== prereg.identities.coworldName ||
     game.version !== prereg.identities.coworldVersion ||
     runnable.type !== "game" ||
