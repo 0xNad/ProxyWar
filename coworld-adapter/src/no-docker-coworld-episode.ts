@@ -8,7 +8,6 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import zlib from "node:zlib";
 
-import { commanderXpEvalEvidenceEnabled } from "../../src/server/agents/CommanderXpGameEvidence.ts";
 import { CommanderXpFinalizationBarrier } from "./commander-xp-finalization.ts";
 import {
   coworldAppShellRoute,
@@ -36,7 +35,6 @@ import {
   commanderXpArmInvariantSeatPlayers,
   competitiveSeatSpecs,
 } from "./coworld-seat-specs.ts";
-import { coworldEpisodeIdentity } from "./coworld-seed.ts";
 import { coworldPublicRunArtifacts } from "./proxywar-public-run-artifacts.ts";
 import {
   createSnapshotRetention,
@@ -871,7 +869,8 @@ async function runProxyWarEpisode(
   replayPayload: Record<string, unknown>;
   proxyWarArtifactDir: string;
 }> {
-  const commanderXpEval = commanderXpEvalEvidenceEnabled();
+  const modules = await loadProxyWarModules();
+  const commanderXpEval = modules.commanderXpEvalEvidenceEnabled();
   const commanderXpPhase = config.commander_xp_phase;
   if (
     commanderXpEval &&
@@ -898,7 +897,6 @@ async function runProxyWarEpisode(
   ) {
     throw new Error("Commander XP gameplay cadence mismatch");
   }
-  const modules = await loadProxyWarModules();
   // Publish the comms capability before any decision frame goes out. Resolved
   // from the engine's own tunables so the advertisement can never disagree
   // with the cap the validator actually enforces; null while the flag is off.
@@ -940,7 +938,7 @@ async function runProxyWarEpisode(
   // simpleHash(gameID), so the adapter encodes an explicit Coworld seed into
   // the authoritative game identity. Seedless certification runs retain the
   // historical COWRLD01 identity and report seed:null honestly.
-  const episodeIdentity = coworldEpisodeIdentity(config.seed);
+  const episodeIdentity = modules.coworldEpisodeIdentity(config.seed);
   const game = new modules.GameServer(
     episodeIdentity.gameId,
     log,
@@ -1242,6 +1240,8 @@ async function loadProxyWarModules(): Promise<Record<string, any>> {
     externalMod,
     manifestMod,
     tunablesMod,
+    commanderEvidenceMod,
+    commanderIdentityMod,
   ] = await Promise.all([
     importProxyWar("src/core/configuration/Config.ts"),
     importProxyWar("src/core/game/Game.ts"),
@@ -1255,6 +1255,8 @@ async function loadProxyWarModules(): Promise<Record<string, any>> {
     importProxyWar("src/server/agents/ExternalHttpAgentBrain.ts"),
     importProxyWar("src/server/agents/AgentManifest.ts"),
     importProxyWar("src/server/agents/AgentTunables.ts"),
+    importProxyWar("src/server/agents/CommanderXpGameEvidence.ts"),
+    importProxyWar("src/server/agents/CommanderXpCoworldIdentity.ts"),
   ]);
   return {
     ...configMod,
@@ -1269,6 +1271,8 @@ async function loadProxyWarModules(): Promise<Record<string, any>> {
     ...externalMod,
     ...manifestMod,
     ...tunablesMod,
+    ...commanderEvidenceMod,
+    ...commanderIdentityMod,
   };
 }
 
