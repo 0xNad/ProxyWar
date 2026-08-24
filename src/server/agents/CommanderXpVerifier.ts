@@ -867,6 +867,7 @@ export async function verifyCommanderXpEvidence(
     verifySourceProvenance(prereg, sourceProvenance, sourceTreeDiffText);
     verifyEvalCoworldIdentity(
       prereg,
+      policies,
       evalCoworld,
       evalCoworldManifestText,
       evalCoworldInspectText,
@@ -2657,13 +2658,14 @@ function verifyPolicyUploadReadback(
 
 function verifyEvalCoworldIdentity(
   prereg: CommanderXpPreRegistrationV2,
+  policies: PolicyIdentityReceipt,
   receipt: EvalCoworldIdentityReceipt,
   manifestText: string,
   inspectText: string,
   terminalProof: EvalCoworldTerminalProof,
   terminalProofText: string,
 ): void {
-  verifyEvalCoworldManifest(prereg, manifestText);
+  verifyEvalCoworldManifest(prereg, policies, manifestText);
   exactRecord(
     receipt,
     [
@@ -2769,7 +2771,7 @@ function verifyEvalCoworldIdentity(
       Object.keys(isRecord(player) ? player : {}),
       "EVAL_COWORLD_HOSTED_PLAYER_SCHEMA_MISMATCH",
     );
-    expectedHostedPlayer.image = receipt.gameImageID;
+    expectedHostedPlayer.image = policies.policyImageID;
   }
   exactRecord(
     terminalProof,
@@ -2857,6 +2859,7 @@ function verifyEvalCoworldIdentity(
 
 function verifyEvalCoworldManifest(
   prereg: CommanderXpPreRegistrationV2,
+  policies: PolicyIdentityReceipt,
   manifestText: string,
 ): void {
   let parsed: unknown;
@@ -3026,9 +3029,14 @@ function verifyEvalCoworldManifest(
     certificationPlayer === null ||
     certificationPlayer.type !== "player" ||
     certificationPlayer.id !== "proxywar-starter-websocket" ||
-    certificationPlayer.image !== runnable.image ||
+    certificationPlayer.image !==
+      `${policies.ociImage}@${policies.ociDigest}` ||
+    certificationPlayer.image === runnable.image ||
     sha256Canonical(certificationPlayer.run) !==
-      sha256Canonical(["node", "/app/integration/src/starter-player.mjs"]) ||
+      sha256Canonical([
+        "node",
+        "/app/proxywar/coworld-adapter/src/starter-player.mjs",
+      ]) ||
     sha256Canonical(certificationPlayer.env) !== sha256Canonical({}) ||
     emptyRoleArrays.some(
       (roles) => !Array.isArray(roles) || roles.length !== 0,

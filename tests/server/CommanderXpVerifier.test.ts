@@ -1425,6 +1425,7 @@ async function buildPreregistrationFixture(
   await fs.mkdir(authorityRoot, { recursive: true });
 
   const gameDigest = `sha256:${"7".repeat(64)}`;
+  const policyDigest = `sha256:${"4".repeat(64)}`;
   const baseManifest = JSON.parse(
     await fs.readFile(
       path.resolve(
@@ -1435,7 +1436,8 @@ async function buildPreregistrationFixture(
     ),
   );
   const evalManifest = commanderXpEvalManifest(baseManifest, {
-    image: `proxywar-coworld-commander-xp-eval@${gameDigest}`,
+    gameImage: `proxywar-coworld-commander-xp-game@${gameDigest}`,
+    playerImage: `ghcr.io/0xnad/proxywar-commander-xp-policy@${policyDigest}`,
     version: "0.0.1",
   });
   const evalManifestText = JSON.stringify(evalManifest);
@@ -1497,7 +1499,7 @@ async function buildPreregistrationFixture(
     coworldGameImageID: "img_eval_game_fixture",
     coworldGameImageDigest: gameDigest,
     canonicalLeagueBindingSnapshotSha256: "8".repeat(64),
-    imageDigest: `sha256:${"4".repeat(64)}`,
+    imageDigest: policyDigest,
     bedrockModel: "us.anthropic.claude-sonnet-4-6",
     xpOpenApiSha256: COMMANDER_XP_OPENAPI_SHA256,
     armPolicyVersionIDs: { A: "pvid-a", B: "pvid-b", C: "pvid-c" },
@@ -1651,7 +1653,7 @@ async function buildPreregistrationFixture(
   const hostedEvalManifest = structuredClone(evalManifest);
   hostedEvalManifest.game.runnable.image = planInput.coworldGameImageID;
   for (const player of hostedEvalManifest.player) {
-    player.image = planInput.coworldGameImageID;
+    player.image = policyImage.id;
   }
   const evalInspectText = JSON.stringify({
     coworld: {
@@ -1985,8 +1987,7 @@ function gameplayJoinFixture(
         ? preregistration.identities.commanderPromptVersionSha256
         : null,
     requestedModel: preregistration.identities.bedrockModel,
-    responseModel:
-      preregistration.identities.providerContract.responseModelID,
+    responseModel: preregistration.identities.providerContract.responseModelID,
     promptSha256: "1".repeat(64),
     promptCharacters: 20,
     outputSha256: "2".repeat(64),
