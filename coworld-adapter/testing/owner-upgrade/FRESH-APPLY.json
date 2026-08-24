@@ -1,6 +1,6 @@
 {
   "schemaVersion": "proxywar-owner-upgrade-fresh-apply-v1",
-  "generatedAt": "2026-08-22T16:21:13Z",
+  "generatedAt": "2026-08-24T01:37:51Z",
   "verdict": "PASS",
   "publicStarter": {
     "repository": "https://github.com/0xNad/proxywar-coworld-starter.git",
@@ -8,15 +8,15 @@
     "cleanBeforeApply": true
   },
   "candidate": {
-    "commit": "f97e1a9a459ca9ad18a2e50068c57d5533c7e65d",
-    "tree": "e0639a4bd64f1d2406499f9dae3f9d5ad445bff3",
+    "commit": "d6abb95262cb46c3e840130a066a5aec568266c2",
+    "tree": "7be34719641e1052773a8383604757e5601b9262",
     "base": "a69175a30577b3e516f09a2cb0960d4d129b3f33"
   },
   "packet": {
     "path": "coworld-adapter/testing/owner-upgrade/proxywar-owner-upgrade.patch",
-    "sha256": "797be7d29d7419865b37c699304508cf4fd78221a929674cd91ad7e5df50e822",
+    "sha256": "9f520f33c7d1fd2d4ebd1729f765efc59de0342f4651f7d2331b41bd075e7293",
     "ledgerPath": "coworld-adapter/testing/owner-upgrade/SHA256SUMS",
-    "ledgerSha256": "59b1161d210606652abf577239201189db02d1820a2ffee3fe58154c7f44e2f0",
+    "ledgerSha256": "5004789f5474a4cc8e3108121d7bc0484033a13fa83e3dfa41eb5c6b94c6da06",
     "verifiedFiles": 13
   },
   "verification": {
@@ -30,9 +30,9 @@
     "doctor": "PASS_UV_DOCKER_SOFTMAX_READY"
   },
   "spatialLocalArtifacts": {
-    "sourceCommit": "38bc71ad75fc1b267e15a7cbf289f17b45c0e549",
-    "benchmarkSha256": "64bee50255bb61af93950aeda1ed0dacf4e9ae7dfcb8efc25d00d61f2ce5b271",
-    "promptMatrixSha256": "6c0b06aea5589196a2cce09daed99607134e06f333d90e5d22bb56ea84f9a31b",
+    "sourceCommit": "d6abb95262cb46c3e840130a066a5aec568266c2",
+    "benchmarkSha256": "3000517e10f21c20f3936592bac9ccb7fd08b6d93d7d041e1fa0799c0a41d916",
+    "promptMatrixSha256": "d8ad0e31afcb8139e8c29131e0c07858124ab8b81875f6ce816b5a6466d4055d",
     "benchmarkTargetMet": true,
     "promptMatrixTargetMet": true
   },
