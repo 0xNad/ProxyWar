@@ -42,7 +42,10 @@ uvx --from coworld coworld submit my-commander --league <league_id>
 4. A persistent plan avoids paying for inference on every decision.
 5. The binding executor can choose only an ID attached to that option and
    present in the current legal-action menu.
-6. A provider timeout, transport error, or malformed response uses an explicit
+6. The production wrapper independently uses the offered social slots: it
+   replies to inbound messages, selects structured deals, and reciprocates a
+   visible alliance request with the exact offered alliance action.
+7. A provider timeout, transport error, or malformed response uses an explicit
    deterministic fallback; it is never silent.
 
 The initial four-game hosted canary proved non-hold play, all four strategic
@@ -52,11 +55,11 @@ but this is a real reliability cost rather than a hidden success.
 
 ## Current scope
 
-This first public Commander release is a pinned, deployable reference. It does
-not send structured deals or free-form messages, and its spatial observation
-flags remain off. Those omissions are deliberate: the hosted Commander test
-isolated primary strategic play, so enabling additional treatment bytes here
-would create a different, untested policy.
+This public Commander release is a pinned, deployable reference. Its primary
+strategy remains the tested Commander planner, while the production wrapper
+also uses structured deals and bounded free-form message replies in their
+separate social slots. Its spatial observation flags remain off so Commander
+behavior stays isolated from the separate spatial treatment.
 
 For a fully editable JavaScript policy with strategy text, deal selection, and
 messages, use the original
