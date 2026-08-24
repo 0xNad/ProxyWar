@@ -379,6 +379,14 @@ function spatialChecks(events, required, files) {
     fail("rich spatial evidence included a non-v5 observation");
   }
   if (
+    required === "rich-v5" &&
+    !spatial.every((event) => event.minimapPresent === false)
+  ) {
+    fail(
+      "a rich v5 base-only policy observation unexpectedly included a minimap",
+    );
+  }
+  if (
     required === "rich-v3-minimap" &&
     !spatial.every(
       (event) =>

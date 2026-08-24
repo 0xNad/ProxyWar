@@ -1096,7 +1096,11 @@ export function boundedSpatialMapInfo(mapInfo) {
   };
 }
 
-function boundedSpatialOwnShape(ownShape, requireL4 = false) {
+function boundedSpatialOwnShape(
+  ownShape,
+  requireL4 = false,
+  maxMapTiles = undefined,
+) {
   const quadrants = new Set([
     "northwest",
     "north",
@@ -1111,16 +1115,22 @@ function boundedSpatialOwnShape(ownShape, requireL4 = false) {
   if (
     !isRecord(ownShape) ||
     !quadrants.has(ownShape.quadrant) ||
-    !["complete", "omitted_budget"].includes(ownShape.regionAnalysis) ||
-    !["largest_region_border", "all_border_budget_fallback"].includes(
-      ownShape.centroidBasis,
+    !(
+      (ownShape.regionAnalysis === "complete" &&
+        ownShape.centroidBasis === "largest_region_border" &&
+        ["compact", "stretched", "fragmented"].includes(ownShape.compactness) &&
+        Number.isSafeInteger(ownShape.regionCount) &&
+        ownShape.regionCount > 0 &&
+        (maxMapTiles === undefined || ownShape.regionCount <= maxMapTiles) &&
+        ownShape.regionCount > 1 === (ownShape.compactness === "fragmented") &&
+        (ownShape.regionCount !== 1 || ownShape.largestRegionShare === 100) &&
+        boundedPercent(ownShape.largestRegionShare) !== null) ||
+      (ownShape.regionAnalysis === "omitted_budget" &&
+        ownShape.centroidBasis === "all_border_budget_fallback" &&
+        ownShape.compactness === undefined &&
+        ownShape.regionCount === undefined &&
+        ownShape.largestRegionShare === undefined)
     ) ||
-    (ownShape.compactness !== undefined &&
-      !["compact", "stretched", "fragmented"].includes(ownShape.compactness)) ||
-    (ownShape.regionCount !== undefined &&
-      boundedNonnegativeInteger(ownShape.regionCount) === null) ||
-    (ownShape.largestRegionShare !== undefined &&
-      boundedPercent(ownShape.largestRegionShare) === null) ||
     boundedPercent(ownShape.coastShare) === null ||
     (requireL4 &&
       boundedPercent(ownShape.largestNeighborBorderShare) === null) ||
@@ -1143,7 +1153,7 @@ function boundedSpatialOwnShape(ownShape, requireL4 = false) {
     regionAnalysis: ownShape.regionAnalysis,
     centroidBasis: ownShape.centroidBasis,
     coastShare: ownShape.coastShare,
-    ...(ownShape.largestNeighborBorderShare !== undefined
+    ...(requireL4
       ? {
           largestNeighborBorderShare: ownShape.largestNeighborBorderShare,
         }
@@ -1206,6 +1216,7 @@ function boundedSpatialV3Rivals(
         boundedNonnegativeInteger(border.defensePostsCovering) === null ||
         border.defensePostsCovering > maxMapTiles ||
         typeof border.underAttackHere !== "boolean" ||
+        (requireL4 && border.underAttackHere !== player.incomingAttack) ||
         !isRecord(terrain) ||
         boundedNonnegativeInteger(terrain.plains) === null ||
         boundedNonnegativeInteger(terrain.highland) === null ||
@@ -1267,7 +1278,7 @@ function boundedSpatialV3Rivals(
         bordersWith.push({
           playerID: edge.playerID,
           sizeClass: edge.sizeClass,
-          ...(edge.tiles !== undefined ? { tiles: edge.tiles } : {}),
+          ...(requireL4 ? { tiles: edge.tiles } : {}),
         });
       }
     }
@@ -1275,8 +1286,8 @@ function boundedSpatialV3Rivals(
       (player.bearing !== undefined && !bearings.has(player.bearing)) ||
       (requireL4 && (borderWithYou !== undefined) !== player.sharesBorder) ||
       (requireL4 &&
-        borderWithYou !== undefined &&
-        player.distanceClass !== "adjacent") ||
+        (player.distanceClass === "adjacent") !==
+          (borderWithYou !== undefined)) ||
       (requireL4 && !distances.has(player.distanceClass)) ||
       (player.distanceClass !== undefined &&
         !distances.has(player.distanceClass)) ||
@@ -1427,36 +1438,11 @@ function boundedPositionedAssets(positioned, mapInfo, allowedPlayerIDs) {
  */
 export function boundedSpatialV1(observation) {
   const spatial = observation?.spatial;
-  const ownShape = spatial?.ownShape;
-  const quadrants = new Set([
-    "northwest",
-    "north",
-    "northeast",
-    "west",
-    "center",
-    "east",
-    "southwest",
-    "south",
-    "southeast",
-  ]);
+  const ownShape = boundedSpatialOwnShape(spatial?.ownShape);
   if (
     spatial?.schemaVersion !== 1 ||
     spatial.visibilityModel !== SPATIAL_VISIBILITY_MODEL ||
-    !ownShape ||
-    !quadrants.has(ownShape.quadrant) ||
-    !["complete", "omitted_budget"].includes(ownShape.regionAnalysis) ||
-    !["largest_region_border", "all_border_budget_fallback"].includes(
-      ownShape.centroidBasis,
-    ) ||
-    (ownShape.compactness !== undefined &&
-      !["compact", "stretched", "fragmented"].includes(ownShape.compactness)) ||
-    (ownShape.regionCount !== undefined &&
-      boundedNonnegativeInteger(ownShape.regionCount) === null) ||
-    (ownShape.largestRegionShare !== undefined &&
-      boundedPercent(ownShape.largestRegionShare) === null) ||
-    boundedPercent(ownShape.coastShare) === null ||
-    boundedPercent(ownShape.centroid?.xPct) === null ||
-    boundedPercent(ownShape.centroid?.yPct) === null
+    !ownShape
   ) {
     return null;
   }
@@ -1563,25 +1549,7 @@ export function boundedSpatialV1(observation) {
   const bounded = {
     schemaVersion: 1,
     visibilityModel: SPATIAL_VISIBILITY_MODEL,
-    ownShape: {
-      quadrant: ownShape.quadrant,
-      ...(ownShape.compactness !== undefined
-        ? { compactness: ownShape.compactness }
-        : {}),
-      ...(ownShape.regionCount !== undefined
-        ? { regionCount: ownShape.regionCount }
-        : {}),
-      ...(ownShape.largestRegionShare !== undefined
-        ? { largestRegionShare: ownShape.largestRegionShare }
-        : {}),
-      regionAnalysis: ownShape.regionAnalysis,
-      centroidBasis: ownShape.centroidBasis,
-      coastShare: ownShape.coastShare,
-      centroid: {
-        xPct: ownShape.centroid.xPct,
-        yPct: ownShape.centroid.yPct,
-      },
-    },
+    ownShape,
     rivals,
     ...(minimap ? { minimap } : {}),
   };
@@ -1602,7 +1570,12 @@ export function boundedSpatialV3(observation) {
     return null;
   }
   const mapInfo = boundedSpatialMapInfo(observation?.mapInfo);
-  const ownShape = boundedSpatialOwnShape(spatial.ownShape);
+  if (!mapInfo) return null;
+  const ownShape = boundedSpatialOwnShape(
+    spatial.ownShape,
+    false,
+    mapInfo.width * mapInfo.height,
+  );
   const ownPlayerID = observation?.ownState?.playerID;
   const rivals = boundedSpatialV3Rivals(
     observation?.visiblePlayers,
@@ -1610,12 +1583,7 @@ export function boundedSpatialV3(observation) {
     false,
     mapInfo ? mapInfo.width * mapInfo.height : null,
   );
-  if (
-    !mapInfo ||
-    !ownShape ||
-    !rivals ||
-    !isBoundedVisibleString(ownPlayerID, 200)
-  ) {
+  if (!ownShape || !rivals || !isBoundedVisibleString(ownPlayerID, 200)) {
     return null;
   }
   const allowedPlayerIDs = new Set([
@@ -1637,7 +1605,20 @@ export function boundedSpatialV3(observation) {
     mapInfo,
     allowedPlayerIDs,
   );
-  if (!positionedAssets) return null;
+  if (
+    !positionedAssets ||
+    (positionedAssets.analysis === "complete" &&
+      rivals.some(
+        (rival) =>
+          (rival.borderWithYou?.defensePostsCovering ?? 0) >
+          positionedAssets.structures.filter(
+            (asset) =>
+              asset.ownerPlayerID === ownPlayerID &&
+              asset.type === "Defense Post",
+          ).length,
+      ))
+  )
+    return null;
   const minimap = boundedMinimapV1(
     spatial.minimap,
     allowedPlayerIDs,
@@ -1679,7 +1660,12 @@ export function boundedSpatialV5(observation) {
     return null;
   }
   const mapInfo = boundedSpatialMapInfo(observation?.mapInfo);
-  const ownShape = boundedSpatialOwnShape(spatial.ownShape, true);
+  if (!mapInfo) return null;
+  const ownShape = boundedSpatialOwnShape(
+    spatial.ownShape,
+    true,
+    mapInfo.width * mapInfo.height,
+  );
   const ownPlayerID = observation?.ownState?.playerID;
   const rivals = boundedSpatialV3Rivals(
     observation?.visiblePlayers,
@@ -1727,7 +1713,28 @@ export function boundedSpatialV5(observation) {
     mapInfo,
     allowedPlayerIDs,
   );
-  if (!positionedAssets) return null;
+  if (
+    !positionedAssets ||
+    (positionedAssets.analysis === "complete" &&
+      (rivals.some(
+        (rival) =>
+          (rival.borderWithYou?.defensePostsCovering ?? 0) >
+          positionedAssets.structures.filter(
+            (asset) =>
+              asset.ownerPlayerID === ownPlayerID &&
+              asset.type === "Defense Post",
+          ).length,
+      ) ||
+        rivals.some(
+          (rival) =>
+            rival.navalExposure?.nearestEnemyPort !== undefined &&
+            !positionedAssets.structures.some(
+              (asset) =>
+                asset.ownerPlayerID === rival.playerID && asset.type === "Port",
+            ),
+        )))
+  )
+    return null;
   const minimap = boundedMinimapV2(
     spatial.minimap,
     allowedPlayerIDs,

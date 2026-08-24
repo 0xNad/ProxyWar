@@ -6,13 +6,17 @@ baseline artifacts are sealed.
 
 ## Arms and source identity
 
-Build both arms from one checked-out source commit and one rendered canonical
+Build all three arms from one checked-out source commit and one rendered canonical
 Coworld manifest/image. The Experience Request schema selects a `coworld_id`
-but cannot override runnable environment variables, so the arms must be two
+but cannot override runnable environment variables, so the arms must be three
 fresh, uniquely named, noncanonical Coworld packages:
 
 - `proxywar-spatial-xp-off`: the spatial flags are absent (the production
   default).
+- `proxywar-spatial-xp-structured`:
+  `PROXYWAR_TUNE_SPATIAL_OBSERVATION=1` is set and
+  `PROXYWAR_TUNE_SPATIAL_MINIMAP` is absent. This isolates the structured
+  schema-5 parent from the minimap child.
 - `proxywar-spatial-xp-on`: both
   `PROXYWAR_TUNE_SPATIAL_OBSERVATION=1` and
   `PROXYWAR_TUNE_SPATIAL_MINIMAP=1` are set.
@@ -31,6 +35,10 @@ npm --prefix coworld-adapter run build:spatial-xp-manifest -- \
   --arm=off --source-sha="$EXACT_SOURCE_SHA" \
   --input=/absolute/path/canonical-rendered.json \
   --output=/absolute/path/proxywar-spatial-xp-off.json
+npm --prefix coworld-adapter run build:spatial-xp-manifest -- \
+  --arm=structured --source-sha="$EXACT_SOURCE_SHA" \
+  --input=/absolute/path/canonical-rendered.json \
+  --output=/absolute/path/proxywar-spatial-xp-structured.json
 npm --prefix coworld-adapter run build:spatial-xp-manifest -- \
   --arm=on --source-sha="$EXACT_SOURCE_SHA" \
   --input=/absolute/path/canonical-rendered.json \
@@ -59,9 +67,9 @@ the manifest author. If Coworld exposes no such receipt or authority route, the
 image remains unverified and package upload is blocked; report that external
 blocker instead of relabeling local inspection output.
 
-Record the candidate source commit, image digest, both manifest hashes, both
-Coworld IDs, certification jobs, hosted smoke episode IDs, policy version IDs,
-and Experience Request IDs. Neither package may replace the canonical
+Record the candidate source commit, image digest, all three manifest hashes,
+all three Coworld IDs, certification jobs, hosted smoke episode IDs, policy
+version IDs, and Experience Request IDs. No package may replace the canonical
 `proxywar` package or be bound to the league.
 
 ## Legitimate player-visible state
@@ -126,8 +134,10 @@ The checked-in benchmark and prompt matrix enforce these exact ceilings:
 | 16-seat all-on prompt growth     |          10% |
 
 The off arm must remain byte-identical to pre-spatial observation and starter
-telemetry. The on arm must be deterministic for the same state, bounded under
-the table above, and accepted by the public-source-of-truth starter only when
+telemetry. The structured arm must emit the same deterministic schema-5 parent
+as full ON while omitting its minimap child. The on arm must add only the
+bounded deterministic schema-2 minimap. Both enabled arms must stay within the
+table above and be accepted by the public-source-of-truth starter only when
 schema `5` and the exact visibility model are present. The starter also retains
 strict schemas `1`/`3` backward compatibility, but only schema `5` carries
 weighted/naval L4 and terrain/marker minimap L5.
@@ -135,14 +145,15 @@ weighted/naval L4 and terrain/marker minimap L5.
 ## Hosted matched proof gate
 
 Use identical map, seed, player roster, frozen policy versions, episode index,
-and balanced seats in both arms. Before claiming a useful behavioral effect,
+and balanced seats in all three arms. Before claiming a useful behavioral effect,
 retain evidence that:
 
-1. the off arm reports no spatial state, while the on arm reports schema `5`,
+1. the off arm reports no spatial state; the structured arm reports schema `5`
+   with no minimap; and the on arm reports schema `5`,
    the exact visibility model, coordinate frame, terrain/coverage, completed
    public positioned assets, weighted rival/naval exposure, and the adaptive
    ownership/terrain/marker minimap;
-2. both arms receive the same offered legal-action IDs at each matched state;
+2. all three arms receive the same offered legal-action IDs at each matched state;
 3. any changed choice is still an exact offered ID and is accepted through the
    canonical validator/runner path;
 4. replay/game effects correspond to that validated choice; and
@@ -153,13 +164,16 @@ Local serialization, inertness, and starter tests are necessary but are not a
 substitute for fresh certification, hosted smoke, or a real-model matched
 gameplay result. A null or harmful result must be retained and reported.
 
-For the hosted ON-arm policy log, the owner packet's bounded self-report check
-must use the rich/minimap-specific mode; generic `present` can also admit the
-backward-compatible schema `1` and is not sufficient for this release:
+Each hosted arm must use its exact bounded self-report mode; generic `present`
+can also admit backward-compatible schema `1` and is not sufficient:
 
 ```sh
 node owner-evidence-check.mjs --deals=optional --messages=optional \
-  --spatial=rich-v5-minimap owner-evidence/spatial-owner.log
+  --spatial=absent owner-evidence/spatial-off.log
+node owner-evidence-check.mjs --deals=optional --messages=optional \
+  --spatial=rich-v5 owner-evidence/spatial-structured.log
+node owner-evidence-check.mjs --deals=optional --messages=optional \
+  --spatial=rich-v5-minimap owner-evidence/spatial-on.log
 ```
 
 Each supplied policy log must contain a spatial record, and every supplied

@@ -4,11 +4,15 @@ import { fileURLToPath } from "node:url";
 
 export const SPATIAL_XP_GAME_NAMES = Object.freeze({
   off: "proxywar-spatial-xp-off",
+  structured: "proxywar-spatial-xp-structured",
   on: "proxywar-spatial-xp-on",
 });
 export const SPATIAL_XP_VISIBILITY_MODEL = "global-lockstep-public-map-v1";
-export const SPATIAL_XP_ENV = Object.freeze({
+export const SPATIAL_XP_STRUCTURED_ENV = Object.freeze({
   PROXYWAR_TUNE_SPATIAL_OBSERVATION: "1",
+});
+export const SPATIAL_XP_ENV = Object.freeze({
+  ...SPATIAL_XP_STRUCTURED_ENV,
   PROXYWAR_TUNE_SPATIAL_MINIMAP: "1",
 });
 export const SPATIAL_XP_IMAGE_AUTHORITY_PAGE_ID =
@@ -29,7 +33,9 @@ const SPATIAL_XP_IMAGE_AUTHORITY_PAGE = Object.freeze({
 
 export const SPATIAL_XP_PROTOCOL_APPENDIX =
   " Spatial XP observation contract: the off arm omits observation.spatial; " +
-  "when observation.spatial is present in the on arm, " +
+  "the structured arm enables schema-5 map and spatial context without its " +
+  "minimap child; the on arm enables the same schema-5 context plus minimap " +
+  "schema 2. Whenever observation.spatial is present, " +
   `visibilityModel is exactly ${SPATIAL_XP_VISIBILITY_MODEL}; facts are derived ` +
   "only from the global-lockstep, no-fog map state visible to every human " +
   "client. Schema 5 adds weighted rival/naval exposure. Its child minimap is " +
@@ -49,18 +55,19 @@ function record(value, label) {
 
 /**
  * Derive one noncanonical matched-XP arm from an already-rendered, exact-source
- * canonical manifest. Both arms keep the same image, variant, schema, result,
- * certification, and legal-action protocol. Only the on arm adds spatial env
- * flags; separate packages are required because Experience Requests cannot
- * override a Coworld runnable's environment.
+ * canonical manifest. All three arms keep the same image, variant, schema,
+ * result, certification, and legal-action protocol. Separate packages are
+ * required because Experience Requests cannot override a runnable environment.
  */
 export function buildSpatialXpManifest(
   canonicalManifest,
   arm,
   expectedSourceSha,
 ) {
-  if (arm !== "off" && arm !== "on") {
-    throw new Error('spatial XP arm must be exactly "off" or "on"');
+  if (!Object.hasOwn(SPATIAL_XP_GAME_NAMES, arm)) {
+    throw new Error(
+      'spatial XP arm must be exactly "off", "structured", or "on"',
+    );
   }
   if (!/^[0-9a-f]{40}$/.test(expectedSourceSha)) {
     throw new Error("spatial XP expected source SHA must be 40 lowercase hex");
@@ -151,12 +158,23 @@ export function buildSpatialXpManifest(
   }
 
   const candidate = structuredClone(canonical);
+  const armEnv =
+    arm === "off"
+      ? env
+      : arm === "structured"
+        ? { ...env, ...SPATIAL_XP_STRUCTURED_ENV }
+        : { ...env, ...SPATIAL_XP_ENV };
+  const armDescription =
+    arm === "off"
+      ? "spatial summary and minimap disabled"
+      : arm === "structured"
+        ? "structured spatial summary enabled; minimap disabled"
+        : "structured spatial summary and minimap enabled";
   candidate.game.name = SPATIAL_XP_GAME_NAMES[arm];
   candidate.game.description =
     `${canonicalGame.description} ` +
-    `[NONCANONICAL XP ${arm.toUpperCase()}: spatial summary and minimap ${arm === "on" ? "enabled" : "disabled"}; UPLOAD BLOCKED while image authority is unverified; never league-bind.]`;
-  candidate.game.runnable.env =
-    arm === "on" ? { ...env, ...SPATIAL_XP_ENV } : { ...env };
+    `[NONCANONICAL XP ${arm.toUpperCase()}: ${armDescription}; UPLOAD BLOCKED while image authority is unverified; never league-bind.]`;
+  candidate.game.runnable.env = { ...armEnv };
   candidate.game.protocols.player.value =
     playerProtocol.value + SPATIAL_XP_PROTOCOL_APPENDIX;
   candidate.game.docs.readme.value =
@@ -178,19 +196,19 @@ function parseArgs(args) {
     const match = /^--(input|output|arm|source-sha)=(.+)$/.exec(arg);
     if (match === null || Object.hasOwn(parsed, match[1])) {
       throw new Error(
-        "usage: node src/build-spatial-xp-manifest.mjs --arm=<off|on> --source-sha=<40 lowercase hex> --input=<rendered canonical manifest> --output=<noncanonical manifest>",
+        "usage: node src/build-spatial-xp-manifest.mjs --arm=<off|structured|on> --source-sha=<40 lowercase hex> --input=<rendered canonical manifest> --output=<noncanonical manifest>",
       );
     }
     parsed[match[1]] = match[2];
   }
   if (
-    (parsed.arm !== "off" && parsed.arm !== "on") ||
+    !Object.hasOwn(SPATIAL_XP_GAME_NAMES, parsed.arm) ||
     parsed["source-sha"] === undefined ||
     parsed.input === undefined ||
     parsed.output === undefined
   ) {
     throw new Error(
-      "usage: node src/build-spatial-xp-manifest.mjs --arm=<off|on> --source-sha=<40 lowercase hex> --input=<rendered canonical manifest> --output=<noncanonical manifest>",
+      "usage: node src/build-spatial-xp-manifest.mjs --arm=<off|structured|on> --source-sha=<40 lowercase hex> --input=<rendered canonical manifest> --output=<noncanonical manifest>",
     );
   }
   return parsed;

@@ -255,6 +255,36 @@ test("owner evidence checker distinguishes complete rich v5 minimap evidence", (
   }
 });
 
+test("owner evidence checker distinguishes the rich v5 base-only arm", () => {
+  const events = validEvents();
+  for (const event of events.filter(
+    (candidate) => candidate.kind === "spatial_observation",
+  )) {
+    Object.assign(event, {
+      present: true,
+      schemaVersion: 5,
+      visibilityModel: "global-lockstep-public-map-v1",
+      minimapPresent: false,
+      baseSerializedUTF8Bytes: 14_328,
+    });
+  }
+  const accepted = runChecker(events, "rich-v5");
+  assert.equal(accepted.status, 0, accepted.stderr);
+  assert.equal(JSON.parse(accepted.stdout).spatial, "rich-v5");
+
+  const fullOn = structuredClone(events);
+  for (const event of fullOn.filter(
+    (candidate) => candidate.kind === "spatial_observation",
+  )) {
+    event.minimapPresent = true;
+    event.minimapSchemaVersion = 2;
+    event.minimapSerializedUTF8Bytes = 3_099;
+  }
+  const rejected = runChecker(fullOn, "rich-v5");
+  assert.equal(rejected.status, 1);
+  assert.match(rejected.stderr, /base-only.*minimap/u);
+});
+
 test("owner evidence checker rejects a minimap from the wrong parent schema", () => {
   for (const schemaVersion of [1, 3]) {
     const events = validEvents();

@@ -1,7 +1,8 @@
-export type SpatialXpArm = "off" | "on";
+export type SpatialXpArm = "off" | "structured" | "on";
 
 export const SPATIAL_XP_GAME_NAMES: Readonly<Record<SpatialXpArm, string>>;
 export const SPATIAL_XP_VISIBILITY_MODEL: string;
+export const SPATIAL_XP_STRUCTURED_ENV: Readonly<Record<string, string>>;
 export const SPATIAL_XP_ENV: Readonly<Record<string, string>>;
 export const SPATIAL_XP_IMAGE_AUTHORITY_PAGE_ID: string;
 export const SPATIAL_XP_IMAGE_AUTHORITY_STATUS: "unverified";

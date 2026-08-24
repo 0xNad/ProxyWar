@@ -532,6 +532,9 @@ function spatialObservation(minimap = undefined) {
       visibilityModel: SPATIAL_VISIBILITY_MODEL,
       ownShape: {
         quadrant: "west",
+        compactness: "compact",
+        regionCount: 1,
+        largestRegionShare: 100,
         regionAnalysis: "complete",
         centroidBasis: "largest_region_border",
         coastShare: 25,
@@ -585,6 +588,9 @@ function richSpatialObservation() {
       visibilityModel: SPATIAL_VISIBILITY_MODEL,
       ownShape: {
         quadrant: "west",
+        compactness: "compact",
+        regionCount: 1,
+        largestRegionShare: 100,
         regionAnalysis: "complete",
         centroidBasis: "largest_region_border",
         coastShare: 25,
@@ -622,6 +628,7 @@ function richSpatialObservation() {
       {
         playerID: "P_A",
         sharesBorder: true,
+        incomingAttack: false,
         bearing: "east",
         distanceClass: "adjacent",
         borderWithYou: {
@@ -1067,6 +1074,28 @@ test("rich spatial L3 is exact, bounded, and fails closed atomically", () => {
     "minimap" in boundedSpatialV3(downgradedParentWithV2Minimap),
     false,
   );
+
+  const partialL4 = structuredClone(valid);
+  partialL4.spatial.ownShape.largestNeighborBorderShare = {
+    futurePrivate: "SENTINEL",
+  };
+  partialL4.visiblePlayers.push({
+    playerID: "P_B",
+    distanceClass: "far",
+    bordersWith: [
+      { playerID: "P_A", sizeClass: "minor", tiles: { private: true } },
+    ],
+  });
+  partialL4.visiblePlayers[0].bordersWith = [
+    { playerID: "P_B", sizeClass: "minor", tiles: { private: true } },
+  ];
+  const boundedPartialL4 = boundedSpatialV3(partialL4);
+  assert.ok(boundedPartialL4);
+  assert.equal(
+    "largestNeighborBorderShare" in boundedPartialL4.ownShape,
+    false,
+  );
+  assert.equal("tiles" in boundedPartialL4.rivals[0].bordersWith[0], false);
 });
 
 test("rich spatial L5 admits weighted exposure and a complete terrain marker minimap", () => {
@@ -1112,6 +1141,24 @@ test("rich spatial L5 admits weighted exposure and a complete terrain marker min
       value.visiblePlayers[0].borderWithYou.shareOfYourBorder = 25.5;
     },
     (value) => {
+      delete value.spatial.ownShape.compactness;
+      delete value.spatial.ownShape.regionCount;
+      delete value.spatial.ownShape.largestRegionShare;
+    },
+    (value) => {
+      value.spatial.ownShape.regionAnalysis = "omitted_budget";
+    },
+    (value) => {
+      value.spatial.ownShape.compactness = "fragmented";
+    },
+    (value) => {
+      value.spatial.ownShape.regionCount = 2;
+      value.spatial.ownShape.largestRegionShare = 80;
+    },
+    (value) => {
+      value.spatial.ownShape.regionCount = Number.MAX_SAFE_INTEGER;
+    },
+    (value) => {
       value.visiblePlayers[0].navalExposure.transportReachableOwnShoreTiles =
         -1;
     },
@@ -1154,6 +1201,18 @@ test("rich spatial L5 admits weighted exposure and a complete terrain marker min
     },
     (value) => {
       value.visiblePlayers[0].distanceClass = "near";
+    },
+    (value) => {
+      value.visiblePlayers[0].borderWithYou.underAttackHere = true;
+    },
+    (value) => {
+      value.visiblePlayers[0].borderWithYou.defensePostsCovering = 2;
+    },
+    (value) => {
+      value.visiblePlayers[0].navalExposure.nearestEnemyPort = {
+        bearing: "east",
+        distanceClass: "near",
+      };
     },
     (value) => {
       value.visiblePlayers[0].bordersWith = [
@@ -1287,6 +1346,9 @@ test("rich spatial and minimap retain their independent wire byte ceilings", () 
       visibilityModel: SPATIAL_VISIBILITY_MODEL,
       ownShape: {
         quadrant: "center",
+        compactness: "compact",
+        regionCount: 1,
+        largestRegionShare: 100,
         regionAnalysis: "complete",
         centroidBasis: "largest_region_border",
         coastShare: 0,
@@ -1417,17 +1479,10 @@ test("rich L4 naval exposure changes only the ranking of offered actions", () =>
     bordersWith: [],
     navalExposure: { transportReachableOwnShoreTiles: 0 },
   });
-  observation.spatial.positionedAssets = {
-    analysis: "complete",
-    structures: [],
-    structuresTotal: 0,
-    structuresReturned: 0,
-    structuresTruncated: false,
-    warships: [],
-    warshipsTotal: 0,
-    warshipsReturned: 0,
-    warshipsTruncated: false,
-  };
+  observation.spatial.positionedAssets.warships = [];
+  observation.spatial.positionedAssets.warshipsTotal = 0;
+  observation.spatial.positionedAssets.warshipsReturned = 0;
+  observation.spatial.positionedAssets.warshipsTruncated = false;
   const actions = [
     { id: "attack:P_B", kind: "attack", metadata: { targetID: "P_B" } },
     { id: "attack:P_A", kind: "attack", metadata: { targetID: "P_A" } },

@@ -286,6 +286,20 @@ describe("spatial observation flags", () => {
       inconsistentDefenseBorder.tiles - 1;
     const badShape = structuredClone(observation);
     badShape.spatial!.ownShape.coastShare = 101;
+    const incompleteShapeMetrics = structuredClone(observation);
+    delete incompleteShapeMetrics.spatial!.ownShape.compactness;
+    delete incompleteShapeMetrics.spatial!.ownShape.regionCount;
+    delete incompleteShapeMetrics.spatial!.ownShape.largestRegionShare;
+    const invalidOmittedShape = structuredClone(observation);
+    invalidOmittedShape.spatial!.ownShape.regionAnalysis = "omitted_budget";
+    const fragmentedSingleRegion = structuredClone(observation);
+    fragmentedSingleRegion.spatial!.ownShape.compactness = "fragmented";
+    const compactMultipleRegions = structuredClone(observation);
+    compactMultipleRegions.spatial!.ownShape.regionCount = 2;
+    compactMultipleRegions.spatial!.ownShape.largestRegionShare = 80;
+    const oversizedRegionCount = structuredClone(observation);
+    oversizedRegionCount.spatial!.ownShape.regionCount =
+      Number.MAX_SAFE_INTEGER;
     const badEncirclement = structuredClone(observation);
     badEncirclement.spatial!.ownShape.largestNeighborBorderShare = 101;
     const inconsistentEncirclement = structuredClone(observation);
@@ -365,6 +379,21 @@ describe("spatial observation flags", () => {
     nonAdjacentDirectBorder.visiblePlayers.find(
       (player) => player.borderWithYou !== undefined,
     )!.distanceClass = "near";
+    const mismatchedAttackState = structuredClone(observation);
+    const mismatchedAttackPlayer = mismatchedAttackState.visiblePlayers.find(
+      (player) => player.borderWithYou !== undefined,
+    )!;
+    mismatchedAttackPlayer.borderWithYou!.underAttackHere =
+      !mismatchedAttackPlayer.incomingAttack;
+    const missingPositionedPort = structuredClone(observation);
+    missingPositionedPort.visiblePlayers[0].navalExposure!.nearestEnemyPort = {
+      bearing: "east",
+      distanceClass: "near",
+    };
+    const excessiveCompletedPostCount = structuredClone(observation);
+    excessiveCompletedPostCount.visiblePlayers.find(
+      (player) => player.borderWithYou !== undefined,
+    )!.borderWithYou!.defensePostsCovering = 2;
     const badTotals = structuredClone(observation);
     badTotals.spatial!.positionedAssets.structuresTotal =
       Number.POSITIVE_INFINITY;
@@ -441,6 +470,11 @@ describe("spatial observation flags", () => {
       [inconsistentTerrainClass, true],
       [inconsistentDefenseCoverage, true],
       [badShape, true],
+      [incompleteShapeMetrics, true],
+      [invalidOmittedShape, true],
+      [fragmentedSingleRegion, true],
+      [compactMultipleRegions, true],
+      [oversizedRegionCount, true],
       [badEncirclement, true],
       [inconsistentEncirclement, true],
       [badWeightedEdge, true],
@@ -458,6 +492,9 @@ describe("spatial observation flags", () => {
       [falseOrdinaryBorder, true],
       [missingDirectBorder, true],
       [nonAdjacentDirectBorder, true],
+      [mismatchedAttackState, true],
+      [missingPositionedPort, true],
+      [excessiveCompletedPostCount, true],
       [badTotals, true],
       [badPartial, true],
     ] as const) {
@@ -521,7 +558,7 @@ describe("spatial observation flags", () => {
     const observation = observe(await shapedGame());
     const spatial = observation.spatial! as unknown as {
       schemaVersion: number;
-      ownShape: { largestNeighborBorderShare?: number };
+      ownShape: { largestNeighborBorderShare?: unknown };
     };
     spatial.schemaVersion = 3;
     delete spatial.ownShape.largestNeighborBorderShare;
@@ -541,15 +578,35 @@ describe("spatial observation flags", () => {
         ({ tiles: _tiles, ...edge }) => edge,
       );
     }
+    spatial.ownShape.largestNeighborBorderShare = {
+      futurePrivate: "OWN_L4_SENTINEL",
+    };
+    const downgradedEdge = observation.visiblePlayers.find(
+      (player) => (player.bordersWith?.length ?? 0) > 0,
+    )!.bordersWith![0] as unknown as { tiles?: unknown };
+    downgradedEdge.tiles = { futurePrivate: "EDGE_L4_SENTINEL" };
 
     const view = promptObservation(
       new LlmPromptBuilder().build({
         observation,
         legalActions: HOLD_ACTIONS,
       }),
-    ) as { spatial?: { schemaVersion?: number; minimap?: unknown } };
+    ) as {
+      spatial?: {
+        schemaVersion?: number;
+        minimap?: unknown;
+        ownShape?: Record<string, unknown>;
+      };
+      visiblePlayers: Array<{ bordersWith?: Array<Record<string, unknown>> }>;
+    };
     expect(view.spatial?.schemaVersion).toBe(3);
     expect(view.spatial?.minimap).toBeUndefined();
+    expect(view.spatial?.ownShape).not.toHaveProperty(
+      "largestNeighborBorderShare",
+    );
+    expect(view.visiblePlayers[0]?.bordersWith?.[0]).not.toHaveProperty(
+      "tiles",
+    );
   });
 
   it("normalizes the exact public schema and never forwards unknown nested fields", async () => {
@@ -563,6 +620,9 @@ describe("spatial observation flags", () => {
     });
     Object.assign(observation.spatial!.ownShape, {
       futureShapeSecret: sentinel,
+    });
+    Object.assign(observation.spatial!, {
+      futureStageOnePadding: "x".repeat(17_000),
     });
     Object.assign(observation.spatial!.positionedAssets, {
       futurePrivateUnits: [{ secret: sentinel }],

@@ -317,6 +317,122 @@ function normalizedMinimapV2(
     : undefined;
 }
 
+function normalizedSpatialStageOne(observation: AgentObservation) {
+  const spatial = observation.spatial!;
+  const mapInfo = observation.mapInfo!;
+  const positioned = spatial.positionedAssets;
+  return {
+    mapInfo: normalizedSpatialMapInfo(mapInfo),
+    spatial: {
+      schemaVersion: spatial.schemaVersion,
+      visibilityModel: spatial.visibilityModel,
+      ownShape: {
+        quadrant: spatial.ownShape.quadrant,
+        ...(spatial.ownShape.compactness !== undefined
+          ? { compactness: spatial.ownShape.compactness }
+          : {}),
+        ...(spatial.ownShape.regionCount !== undefined
+          ? { regionCount: spatial.ownShape.regionCount }
+          : {}),
+        ...(spatial.ownShape.largestRegionShare !== undefined
+          ? { largestRegionShare: spatial.ownShape.largestRegionShare }
+          : {}),
+        regionAnalysis: spatial.ownShape.regionAnalysis,
+        centroidBasis: spatial.ownShape.centroidBasis,
+        coastShare: spatial.ownShape.coastShare,
+        ...(spatial.schemaVersion === 5
+          ? {
+              largestNeighborBorderShare:
+                spatial.ownShape.largestNeighborBorderShare!,
+            }
+          : {}),
+        centroid: {
+          xPct: spatial.ownShape.centroid.xPct,
+          yPct: spatial.ownShape.centroid.yPct,
+        },
+      },
+      positionedAssets: {
+        analysis: positioned.analysis,
+        structures: positioned.structures.map((asset) => ({
+          ownerPlayerID: asset.ownerPlayerID,
+          type: asset.type,
+          tile: asset.tile,
+          x: asset.x,
+          y: asset.y,
+        })),
+        structuresTotal: positioned.structuresTotal,
+        structuresReturned: positioned.structuresReturned,
+        structuresTruncated: positioned.structuresTruncated,
+        warships: positioned.warships.map((asset) => ({
+          ownerPlayerID: asset.ownerPlayerID,
+          type: asset.type,
+          tile: asset.tile,
+          x: asset.x,
+          y: asset.y,
+        })),
+        warshipsTotal: positioned.warshipsTotal,
+        warshipsReturned: positioned.warshipsReturned,
+        warshipsTruncated: positioned.warshipsTruncated,
+      },
+    },
+    visiblePlayers: observation.visiblePlayers.map((player) => ({
+      playerID: player.playerID,
+      ...(player.bearing !== undefined ? { bearing: player.bearing } : {}),
+      ...(player.distanceClass !== undefined
+        ? { distanceClass: player.distanceClass }
+        : {}),
+      ...(player.borderWithYou !== undefined
+        ? {
+            borderWithYou: {
+              tiles: player.borderWithYou.tiles,
+              shareOfYourBorder: player.borderWithYou.shareOfYourBorder,
+              terrain: player.borderWithYou.terrain,
+              terrainBreakdown: {
+                plains: player.borderWithYou.terrainBreakdown.plains,
+                highland: player.borderWithYou.terrainBreakdown.highland,
+                mountain: player.borderWithYou.terrainBreakdown.mountain,
+                shore: player.borderWithYou.terrainBreakdown.shore,
+              },
+              defensePostsCovering: player.borderWithYou.defensePostsCovering,
+              defensePostFrontCoverage: {
+                covered: player.borderWithYou.defensePostFrontCoverage.covered,
+                uncovered:
+                  player.borderWithYou.defensePostFrontCoverage.uncovered,
+              },
+              underAttackHere: player.borderWithYou.underAttackHere,
+            },
+          }
+        : {}),
+      ...(player.bordersWith !== undefined
+        ? {
+            bordersWith: player.bordersWith.map((edge) => ({
+              playerID: edge.playerID,
+              sizeClass: edge.sizeClass,
+              ...(spatial.schemaVersion === 5 ? { tiles: edge.tiles! } : {}),
+            })),
+          }
+        : {}),
+      ...(spatial.schemaVersion === 5
+        ? {
+            navalExposure: {
+              transportReachableOwnShoreTiles:
+                player.navalExposure!.transportReachableOwnShoreTiles,
+              ...(player.navalExposure!.nearestEnemyPort !== undefined
+                ? {
+                    nearestEnemyPort: {
+                      bearing: player.navalExposure!.nearestEnemyPort.bearing,
+                      distanceClass:
+                        player.navalExposure!.nearestEnemyPort.distanceClass,
+                    },
+                  }
+                : {}),
+            },
+          }
+        : {}),
+    })),
+  };
+}
+
 function isAcceptedSpatial(observation: AgentObservation): boolean {
   const spatial = observation.spatial;
   const mapInfo = observation.mapInfo;
@@ -345,18 +461,25 @@ function isAcceptedSpatial(observation: AgentObservation): boolean {
         "south",
         "southeast",
       ].includes(ownShape.quadrant) ||
-      !["complete", "omitted_budget"].includes(ownShape.regionAnalysis) ||
-      !["largest_region_border", "all_border_budget_fallback"].includes(
-        ownShape.centroidBasis,
+      !(
+        (ownShape.regionAnalysis === "complete" &&
+          ownShape.centroidBasis === "largest_region_border" &&
+          ["compact", "stretched", "fragmented"].includes(
+            ownShape.compactness as string,
+          ) &&
+          isNonnegativeSafeInteger(ownShape.regionCount) &&
+          ownShape.regionCount > 0 &&
+          ownShape.regionCount <= mapTiles &&
+          ownShape.regionCount > 1 ===
+            (ownShape.compactness === "fragmented") &&
+          (ownShape.regionCount !== 1 || ownShape.largestRegionShare === 100) &&
+          isPercentage(ownShape.largestRegionShare)) ||
+        (ownShape.regionAnalysis === "omitted_budget" &&
+          ownShape.centroidBasis === "all_border_budget_fallback" &&
+          ownShape.compactness === undefined &&
+          ownShape.regionCount === undefined &&
+          ownShape.largestRegionShare === undefined)
       ) ||
-      (ownShape.compactness !== undefined &&
-        !["compact", "stretched", "fragmented"].includes(
-          ownShape.compactness,
-        )) ||
-      (ownShape.regionCount !== undefined &&
-        !isNonnegativeSafeInteger(ownShape.regionCount)) ||
-      (ownShape.largestRegionShare !== undefined &&
-        !isPercentage(ownShape.largestRegionShare)) ||
       !isPercentage(ownShape.coastShare) ||
       (spatial.schemaVersion === 5 &&
         !isPercentage(ownShape.largestNeighborBorderShare)) ||
@@ -442,6 +565,30 @@ function isAcceptedSpatial(observation: AgentObservation): boolean {
     ) {
       return false;
     }
+    if (
+      positioned.analysis === "complete" &&
+      (observation.visiblePlayers.some(
+        (player) =>
+          (player.borderWithYou?.defensePostsCovering ?? 0) >
+          positioned.structures.filter(
+            (asset) =>
+              asset.ownerPlayerID === observation.ownState!.playerID &&
+              asset.type === "Defense Post",
+          ).length,
+      ) ||
+        (spatial.schemaVersion === 5 &&
+          observation.visiblePlayers.some(
+            (player) =>
+              player.navalExposure?.nearestEnemyPort !== undefined &&
+              !positioned.structures.some(
+                (asset) =>
+                  asset.ownerPlayerID === player.playerID &&
+                  asset.type === "Port",
+              ),
+          )))
+    ) {
+      return false;
+    }
 
     const validBearings = new Set([
       "north",
@@ -463,8 +610,8 @@ function isAcceptedSpatial(observation: AgentObservation): boolean {
         (spatial.schemaVersion === 5 &&
           (player.borderWithYou !== undefined) !== player.sharesBorder) ||
         (spatial.schemaVersion === 5 &&
-          player.borderWithYou !== undefined &&
-          player.distanceClass !== "adjacent") ||
+          (player.distanceClass === "adjacent") !==
+            (player.borderWithYou !== undefined)) ||
         (spatial.schemaVersion === 5 &&
           !["adjacent", "near", "far"].includes(
             player.distanceClass as string,
@@ -522,6 +669,8 @@ function isAcceptedSpatial(observation: AgentObservation): boolean {
         !isNonnegativeSafeInteger(border.defensePostsCovering) ||
         border.defensePostsCovering > mapTiles ||
         typeof border.underAttackHere !== "boolean" ||
+        (spatial.schemaVersion === 5 &&
+          border.underAttackHere !== player.incomingAttack) ||
         !isNonnegativeSafeInteger(terrain?.plains) ||
         !isNonnegativeSafeInteger(terrain?.highland) ||
         !isNonnegativeSafeInteger(terrain?.mountain) ||
@@ -566,18 +715,7 @@ function isAcceptedSpatial(observation: AgentObservation): boolean {
       return false;
     }
     const stageOneBytes = new TextEncoder().encode(
-      JSON.stringify({
-        mapInfo,
-        spatial: { ...spatial, minimap: undefined },
-        visiblePlayers: observation.visiblePlayers.map((player) => ({
-          playerID: player.playerID,
-          bearing: player.bearing,
-          distanceClass: player.distanceClass,
-          borderWithYou: player.borderWithYou,
-          bordersWith: player.bordersWith,
-          navalExposure: player.navalExposure,
-        })),
-      }),
+      JSON.stringify(normalizedSpatialStageOne(observation)),
     ).byteLength;
     return stageOneBytes <= SPATIAL_STAGE_ONE_SERIALIZED_MAX_BYTES;
   } catch {
@@ -818,8 +956,7 @@ export class LlmPromptBuilder {
                 regionAnalysis: observation.spatial.ownShape.regionAnalysis,
                 centroidBasis: observation.spatial.ownShape.centroidBasis,
                 coastShare: observation.spatial.ownShape.coastShare,
-                ...(observation.spatial.ownShape.largestNeighborBorderShare !==
-                undefined
+                ...(observation.spatial.schemaVersion === 5
                   ? {
                       largestNeighborBorderShare:
                         observation.spatial.ownShape.largestNeighborBorderShare,
@@ -917,9 +1054,12 @@ export class LlmPromptBuilder {
               bordersWith: player.bordersWith?.map((edge) => ({
                 playerID: edge.playerID,
                 sizeClass: edge.sizeClass,
-                ...(edge.tiles !== undefined ? { tiles: edge.tiles } : {}),
+                ...(observation.spatial?.schemaVersion === 5
+                  ? { tiles: edge.tiles }
+                  : {}),
               })),
               navalExposure:
+                observation.spatial?.schemaVersion !== 5 ||
                 player.navalExposure === undefined
                   ? undefined
                   : {

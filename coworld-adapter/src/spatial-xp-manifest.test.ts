@@ -10,6 +10,7 @@ import {
   SPATIAL_XP_IMAGE_AUTHORITY_PAGE_ID,
   SPATIAL_XP_IMAGE_AUTHORITY_STATUS,
   SPATIAL_XP_PROTOCOL_APPENDIX,
+  SPATIAL_XP_STRUCTURED_ENV,
   SPATIAL_XP_UPLOAD_BLOCKED,
   SPATIAL_XP_VISIBILITY_MODEL,
 } from "./build-spatial-xp-manifest.mjs";
@@ -43,20 +44,32 @@ canonical.game.docs.pages.find(
   "main_ci_run_id=32570402138";
 
 describe("noncanonical spatial XP manifests", () => {
-  it("builds source-identical off and on packages with only the on flags different", () => {
+  it("builds source-identical off, structured, and on packages with only the flags different", () => {
     const before = structuredClone(canonical);
     const control = buildSpatialXpManifest(canonical, "off", SOURCE_SHA);
+    const structured = buildSpatialXpManifest(
+      canonical,
+      "structured",
+      SOURCE_SHA,
+    );
     const treatment = buildSpatialXpManifest(canonical, "on", SOURCE_SHA);
 
     expect(canonical).toEqual(before);
     expect(control.game.name).toBe(SPATIAL_XP_GAME_NAMES.off);
+    expect(structured.game.name).toBe(SPATIAL_XP_GAME_NAMES.structured);
     expect(treatment.game.name).toBe(SPATIAL_XP_GAME_NAMES.on);
     expect(control.game.runnable.env).toEqual(canonical.game.runnable.env);
+    expect(structured.game.runnable.env).toEqual({
+      ...canonical.game.runnable.env,
+      ...SPATIAL_XP_STRUCTURED_ENV,
+    });
     expect(treatment.game.runnable.env).toEqual({
       ...canonical.game.runnable.env,
       ...SPATIAL_XP_ENV,
     });
     expect(control.game.description).toContain("NONCANONICAL XP OFF");
+    expect(structured.game.description).toContain("NONCANONICAL XP STRUCTURED");
+    expect(structured.game.description).toContain("minimap disabled");
     expect(treatment.game.description).toContain("NONCANONICAL XP");
     expect(treatment.game.description).toContain("never league-bind");
     expect(treatment.game.protocols.player.value).toBe(
@@ -104,13 +117,16 @@ describe("noncanonical spatial XP manifests", () => {
     expect(treatment.runnables).toEqual(canonical.runnables);
     expect(treatment.commissioners).toEqual(canonical.commissioners);
 
-    const normalizedControl = structuredClone(control);
-    const normalizedTreatment = structuredClone(treatment);
-    normalizedControl.game.name = normalizedTreatment.game.name;
-    normalizedControl.game.description = normalizedTreatment.game.description;
-    normalizedControl.game.runnable.env = normalizedTreatment.game.runnable.env;
-    normalizedControl.game.docs.readme = normalizedTreatment.game.docs.readme;
-    expect(normalizedControl).toEqual(normalizedTreatment);
+    const normalized = [control, structured, treatment].map((candidate) => {
+      const copy = structuredClone(candidate);
+      copy.game.name = "NORMALIZED";
+      copy.game.description = "NORMALIZED";
+      copy.game.runnable.env = {};
+      copy.game.docs.readme = { ...copy.game.docs.readme, value: "NORMALIZED" };
+      return copy;
+    });
+    expect(normalized[0]).toEqual(normalized[1]);
+    expect(normalized[1]).toEqual(normalized[2]);
   });
 
   it("fails closed instead of deriving from an already-armed package", () => {
@@ -124,7 +140,7 @@ describe("noncanonical spatial XP manifests", () => {
   it("requires an exact arm instead of guessing", () => {
     expect(() =>
       buildSpatialXpManifest(canonical, "treatment" as never, SOURCE_SHA),
-    ).toThrow('arm must be exactly "off" or "on"');
+    ).toThrow('arm must be exactly "off", "structured", or "on"');
   });
 
   it("rejects unresolved templates and stale source provenance", () => {
