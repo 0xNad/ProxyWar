@@ -8,6 +8,7 @@ import { buildSpatialXpManifest } from "./build-spatial-xp-manifest.mjs";
 import type { SpatialXpAuthorityReceipt } from "./finalize-spatial-xp-manifest.mjs";
 import { renderCanonicalManifest } from "./finalize-spatial-xp-manifest.mjs";
 import {
+  captureExactCommand,
   expectedStoredManifest,
   validateCanonicalUploadInputs,
   validateProductionState,
@@ -188,6 +189,23 @@ function canonicalInputs(authorityReceipt = receipt()) {
 }
 
 describe("spatial XP immutable upload transition", () => {
+  it("runs certification helpers from the explicit canonical cwd and preserves stderr", () => {
+    const capture = captureExactCommand(
+      process.execPath,
+      [
+        "-e",
+        'process.stdout.write(process.cwd()); process.stderr.write("diagnostic")',
+      ],
+      "cwd probe",
+      1024,
+      process.env,
+      ADAPTER_ROOT,
+    );
+    expect(capture.status).toBe(0);
+    expect(capture.raw).toBe(ADAPTER_ROOT);
+    expect(capture.stderrRaw).toBe("diagnostic");
+  });
+
   it("accepts an exact receipt and maps digest references to exact Coworld ids", () => {
     const authorityReceipt = receipt();
     const manifest = verifiedManifest(authorityReceipt);

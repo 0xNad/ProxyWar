@@ -153,7 +153,10 @@ from the checked-in template and rebuilds every blocked arm, requiring exact
 byte equality rather than trusting the receipt's own hashes.
 It then builds the exact-source replay viewer into a private staging directory
 and runs Coworld certification against the selected digest-reference manifest
-before making any hosted mutation:
+from the canonical checkout's adapter working directory before making any
+hosted mutation. This working-directory pin is required on the current host:
+Coworld selects its Docker bind-mount root from process cwd rather than
+`TMPDIR`. The wrapper persists certification stdout and stderr even on failure:
 
 ```sh
 npm --prefix coworld-adapter run upload:spatial-xp-manifest -- \

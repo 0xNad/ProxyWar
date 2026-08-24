@@ -1,5 +1,23 @@
 import type { SpatialXpAuthorityReceipt } from "./finalize-spatial-xp-manifest.mjs";
 
+export interface ExactCommandCapture {
+  raw: string;
+  sha256: string;
+  signal: NodeJS.Signals | null;
+  status: number | null;
+  stderrRaw: string;
+  stderrSha256: string;
+}
+
+export function captureExactCommand(
+  command: string,
+  args: string[],
+  label: string,
+  maximumBytes?: number,
+  environment?: NodeJS.ProcessEnv,
+  workingDirectory?: string,
+): ExactCommandCapture;
+
 export function expectedStoredManifest<T extends object>(
   manifest: T,
   receipt: SpatialXpAuthorityReceipt,

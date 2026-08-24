@@ -66,14 +66,16 @@ function exactUtf8Text(raw, label) {
   return text;
 }
 
-function runExactCommand(
+export function captureExactCommand(
   command,
   args,
   label,
   maximumBytes = 16 * 1024 * 1024,
   environment = process.env,
+  workingDirectory,
 ) {
   const result = spawnSync(command, args, {
+    cwd: workingDirectory,
     encoding: "buffer",
     env: environment,
     maxBuffer: maximumBytes,
@@ -81,11 +83,41 @@ function runExactCommand(
   if (result.error !== undefined) {
     throw new Error(`${label} could not start: ${result.error.message}`);
   }
+  const raw = exactUtf8Text(result.stdout, `${label} stdout`);
+  const stderrRaw = exactUtf8Text(result.stderr, `${label} stderr`);
+  return {
+    raw,
+    sha256: sha256(result.stdout),
+    signal: result.signal,
+    status: result.status,
+    stderrRaw,
+    stderrSha256: sha256(result.stderr),
+  };
+}
+
+function runExactCommand(
+  command,
+  args,
+  label,
+  maximumBytes = 16 * 1024 * 1024,
+  environment = process.env,
+  workingDirectory,
+) {
+  const result = captureExactCommand(
+    command,
+    args,
+    label,
+    maximumBytes,
+    environment,
+    workingDirectory,
+  );
   if (result.signal !== null || result.status !== 0) {
-    throw new Error(`${label} failed with status ${String(result.status)}`);
+    const detail = result.stderrRaw.trim().slice(-4096);
+    throw new Error(
+      `${label} failed with status ${String(result.status)}${detail === "" ? "" : `: ${detail}`}`,
+    );
   }
-  const raw = exactUtf8Text(result.stdout, label);
-  return { raw, sha256: sha256(result.stdout) };
+  return result;
 }
 
 function pathIsInside(parent, candidate) {
@@ -508,11 +540,11 @@ async function main(args) {
     "Git common directory verification",
   ).raw.trim();
   const canonicalRepositoryRoot = path.dirname(commonGitDirectory);
-  const certificationTemporaryRoot = path.join(
+  const canonicalAdapterRoot = path.join(
     canonicalRepositoryRoot,
     "coworld-adapter",
-    "tmp",
   );
+  const certificationTemporaryRoot = path.join(canonicalAdapterRoot, "tmp");
   if (!pathIsInside(certificationTemporaryRoot, evidenceDirectory)) {
     throw new Error(
       "upload evidence directory must be inside the canonical Coworld certification tmp root",
@@ -697,7 +729,7 @@ async function main(args) {
     "exact-source replay viewer build",
     64 * 1024 * 1024,
   );
-  const certification = runExactCommand(
+  const certification = captureExactCommand(
     "uvx",
     [
       "--from",
@@ -711,12 +743,24 @@ async function main(args) {
     `Coworld ${arm} immutable manifest certification`,
     64 * 1024 * 1024,
     { ...process.env, TMPDIR: certificationTemporaryRoot },
+    canonicalAdapterRoot,
   );
   await fs.writeFile(
     path.join(evidenceDirectory, "certification-stdout.txt"),
     certification.raw,
     { flag: "wx" },
   );
+  await fs.writeFile(
+    path.join(evidenceDirectory, "certification-stderr.txt"),
+    certification.stderrRaw,
+    { flag: "wx" },
+  );
+  if (certification.signal !== null || certification.status !== 0) {
+    const detail = certification.stderrRaw.trim().slice(-4096);
+    throw new Error(
+      `Coworld ${arm} immutable manifest certification failed with status ${String(certification.status)}${detail === "" ? "" : `: ${detail}`}`,
+    );
+  }
 
   const productionBefore = fetchProductionState(
     coworldPackageSpec,
@@ -849,6 +893,7 @@ async function main(args) {
     authorityReceiptSha256: receiptSha256,
     coworldClientVersion: coworldVersion,
     immutableManifestCertificationSha256: certification.sha256,
+    immutableManifestCertificationStderrSha256: certification.stderrSha256,
     uploadResult,
     storedCoworldResponseSha256: stored.sha256,
     productionBefore: {
