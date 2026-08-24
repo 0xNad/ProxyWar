@@ -18,8 +18,13 @@ import { describe, expect, it } from "vitest";
  * free-text messages in league episodes. Talk binds nothing -- structured
  * deals remain the only commitment path -- and the transport carrying the
  * comms pair is pinned separately by
- * `tests/coworld/DecisionSlotParity.test.ts`. Widening this list again should
- * stay just as conscious: update it only alongside an intended activation.
+ * `tests/coworld/DecisionSlotParity.test.ts`.
+ *
+ * PROXYWAR_TUNE_SPATIAL_OBSERVATION=1 deliberately enables the bounded
+ * schema-5 structured spatial observation in the canonical package. The
+ * optional rendered minimap remains disabled. Widening this list again
+ * should stay just as conscious: update it only alongside an intended
+ * activation.
  *
  * This is a manifest-text pin only. The behavioral guarantee that arming
  * STRUCTURED_DEALS alone (DIPLOMACY_SLOTS left unset) still offers complete
@@ -45,14 +50,17 @@ function readManifest(filename: string): Manifest {
   ) as Manifest;
 }
 
-describe("Coworld manifests: PROXYWAR_TUNE_STRUCTURED_DEALS activation", () => {
+describe("Coworld manifests: canonical production capability activation", () => {
   it.each(["coworld_manifest.json", "coworld_manifest_template.json"])(
-    "%s arms exactly the structured-deals and free-text flags in game.runnable.env",
+    "%s arms exactly deals, free text, and structured spatial observation",
     (filename) => {
-      expect(readManifest(filename).game.runnable.env).toEqual({
+      const env = readManifest(filename).game.runnable.env;
+      expect(env).toEqual({
         PROXYWAR_TUNE_STRUCTURED_DEALS: "1",
         PROXYWAR_TUNE_FREETEXT_MESSAGES: "1",
+        PROXYWAR_TUNE_SPATIAL_OBSERVATION: "1",
       });
+      expect(env).not.toHaveProperty("PROXYWAR_TUNE_SPATIAL_MINIMAP");
     },
   );
 

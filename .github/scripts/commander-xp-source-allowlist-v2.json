@@ -135,6 +135,7 @@
   "tests/server/CommanderXpGameEvidence.test.ts",
   "tests/server/CommanderXpProtocol.test.ts",
   "tests/server/CommanderXpVerifier.test.ts",
+  "tests/server/CoworldManifestStructuredDealsFlag.test.ts",
   "tests/server/ExternalHttpAgentBrain.test.ts",
   "tests/server/KeystonePlayer.test.ts",
   "tests/server/LlmOptionSelector.test.ts",
