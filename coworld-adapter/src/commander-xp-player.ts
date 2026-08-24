@@ -329,7 +329,7 @@ export function commanderXpBedrockRequest(
   prompt: string,
 ): {
   model: typeof COMMANDER_COWORLD_BEDROCK_PROVIDER.modelID;
-  max_tokens: 1024;
+  max_tokens: 768;
   messages: Array<{ role: "user"; content: string }>;
 } {
   return {

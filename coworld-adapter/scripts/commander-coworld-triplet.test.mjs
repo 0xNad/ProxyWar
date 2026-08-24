@@ -166,7 +166,7 @@ test("the hosted selector budget stays inside the working Coworld deadline", asy
   ]);
   assert.match(runtime, /COMMANDER_COWORLD_MAX_DECISION_MS = 15_000/);
   assert.match(runtime, /timeoutMs: 13_500/);
-  assert.match(runtime, /maxTokens: 1_024/);
+  assert.match(runtime, /maxTokens: 768/);
   assert.match(dockerfile, /PROXYWAR_LLM_TIMEOUT_MS=13500/);
 });
 
