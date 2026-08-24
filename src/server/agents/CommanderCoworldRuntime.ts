@@ -22,7 +22,7 @@ export const COMMANDER_COWORLD_BEDROCK_PROVIDER = {
   sdkPackage: "@anthropic-ai/bedrock-sdk",
   sdkVersion: "0.29.2",
   timeoutMs: 13_500,
-  maxTokens: 640,
+  maxTokens: 1_024,
   backendRevision: "unattested-provider-residual",
 } as const;
 

@@ -119,6 +119,17 @@ export function summarizeTrace(text) {
       ).length,
     ]),
   );
+  const degradedCauses = Object.fromEntries(
+    Object.entries(
+      decisions
+        .filter((record) => record.llmPlannerDegraded === true)
+        .reduce((counts, record) => {
+          const cause = record.degradedCause ?? "unknown";
+          counts[cause] = (counts[cause] ?? 0) + 1;
+          return counts;
+        }, {}),
+    ).sort(([left], [right]) => left.localeCompare(right)),
+  );
   return {
     recordCount: records.length,
     decisionCount: decisions.length,
@@ -130,6 +141,7 @@ export function summarizeTrace(text) {
     degradedCount: decisions.filter(
       (record) => record.llmPlannerDegraded === true,
     ).length,
+    degradedCauses,
     externalPlannerCalls: countCommander("externalPlannerCall", true),
     deterministicSelectorDecisions: countCommander(
       "commanderSelectorSource",
@@ -279,7 +291,7 @@ export function renderMarkdown(report) {
       .map(([stage, value]) => `${stage}:${value.succeeded}/${value.count}`)
       .join(", ");
     lines.push(
-      `| ${run.tripletIndex} | ${run.arm} | ${run.subjectSeat} | ${run.winnerSlot} | ${run.subjectWon} | ${run.trace.decisionCount} | ${calls || "none"} | failures=${run.trace.providerFailures}, fallback=${run.trace.fallbackCount}, degraded=${run.trace.degradedCount} |`,
+      `| ${run.tripletIndex} | ${run.arm} | ${run.subjectSeat} | ${run.winnerSlot} | ${run.subjectWon} | ${run.trace.decisionCount} | ${calls || "none"} | failures=${run.trace.providerFailures}, fallback=${run.trace.fallbackCount}, degraded=${run.trace.degradedCount} ${JSON.stringify(run.trace.degradedCauses)} |`,
     );
   }
   lines.push(
@@ -443,14 +455,20 @@ async function main() {
   assertMatchedTriplets(runs, options.seeds.length);
   for (const run of runs) assertRunRuntime(run);
   const summary = summarizeRuns(runs);
+  const hasDegradation = runs.some(
+    (run) =>
+      run.trace.providerFailures > 0 ||
+      run.trace.fallbackCount > 0 ||
+      run.trace.degradedCount > 0,
+  );
   const report = {
     schemaVersion: 1,
     reportKind: "commander-coworld-functional-triplets",
     runID: options.runID,
     generatedAt: new Date().toISOString(),
-    status: "passed",
+    status: hasDegradation ? "passed-with-degradation" : "passed",
     claimBoundary:
-      "Matched Coworld functional evidence; statistical claims require an explicit analysis decision rule.",
+      "Matched Coworld functional evidence. Provider failures and deterministic fallbacks are reported as degradation rather than hidden; statistical claims require a larger matched sample.",
     coworldID: options.coworldID,
     variantID: VARIANT_ID,
     policies: options.policies,
@@ -573,12 +591,9 @@ function assertArtifactIdentity(manifest, request) {
   }
 }
 
-function assertRunRuntime(run) {
+export function assertRunRuntime(run) {
   const trace = run.trace;
   if (
-    trace.providerFailures !== 0 ||
-    trace.fallbackCount !== 0 ||
-    trace.degradedCount !== 0 ||
     trace.providerCalls.preflight.count !== 1 ||
     trace.providerCalls.preflight.succeeded !== 1
   ) {
@@ -587,6 +602,7 @@ function assertRunRuntime(run) {
   const armValid =
     (run.arm === "A" &&
       trace.providerCalls.planner.count > 0 &&
+      trace.providerCalls.planner.succeeded > 0 &&
       trace.externalPlannerCalls > 0 &&
       trace.providerCalls.selector.count === 0) ||
     (run.arm === "B" &&
@@ -598,6 +614,7 @@ function assertRunRuntime(run) {
     (run.arm === "C" &&
       trace.providerCalls.planner.count === 0 &&
       trace.providerCalls.selector.count > 0 &&
+      trace.providerCalls.selector.succeeded > 0 &&
       trace.llmSelectorDecisions > 0 &&
       trace.activeNonHoldDecisions > 0 &&
       trace.activeNonSurviveDecisions > 0);
