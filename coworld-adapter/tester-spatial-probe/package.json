@@ -1,0 +1,11 @@
+{
+  "name": "proxywar-spatial-probe",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/bedrock-sdk": "0.29.2",
+    "ws": "8.18.0"
+  }
+}
