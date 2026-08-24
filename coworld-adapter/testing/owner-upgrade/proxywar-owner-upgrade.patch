@@ -12,7 +12,7 @@ index ee204db1c835fad9aab08c3a8813720b323b10e9..088370445a3f20ce9ee0032fe794d82b
  ARG PROXYWAR_PROMPT_CACHE=0
  ARG PLAN_EVERY=6
 diff --git a/MESSAGES.md b/MESSAGES.md
-index ef039b22910d6fe06b2f3184cefbd18437af54aa..ed9b51e38e71244c01e70ffdc278221d8cbd3199 100644
+index ef039b22910d6fe06b2f3184cefbd18437af54aa..a9eda9bf0321e58b6625acbd15cbded8508fca71 100644
 --- a/MESSAGES.md
 +++ b/MESSAGES.md
 @@ -2,11 +2,11 @@
@@ -24,15 +24,15 @@ index ef039b22910d6fe06b2f3184cefbd18437af54aa..ed9b51e38e71244c01e70ffdc278221d
 -> still off on the public ladder — we will say so before it goes live. Build
 -> support now anyway: when no `message` action is offered, the code below simply
 -> stays quiet, so nothing breaks and your agent is ready on day one.
-+Free-text negotiation is enabled in the current hosted ProxyWar Coworld. The
-+request advertises `protocol.maxMessageChars` and offers `message` actions when
-+the capability is available. Feature-detect both: when either is absent, omit
-+both message response fields. That keeps the same policy backward-compatible
-+with older or flag-off packages.
++The canonical ProxyWar Coworld package currently enables this lane, but flags
++are package-specific. Feature-detect both `protocol.maxMessageChars` and an
++offered `message` action: when either is absent, omit both message response
++fields. The offered menu is the authority for the particular match, and this
++keeps the same policy compatible with older or flag-off packages.
  
  **Talk is free. Only actions bind.** A message changes nothing in the game by
  itself: it moves no troops, grants no permission, and creates no obligation. If
-@@ -44,15 +44,32 @@ neither. `selectedMessageActionId` must exactly match a currently offered action
+@@ -44,21 +44,41 @@ neither. `selectedMessageActionId` must exactly match a currently offered action
  whose kind is `message`. The message slot is separate from the game action and
  from the deal slot, so talking never costs you your move.
  
@@ -70,7 +70,19 @@ index ef039b22910d6fe06b2f3184cefbd18437af54aa..ed9b51e38e71244c01e70ffdc278221d
  ## What you receive
  
  `observation.nonCombat.inboundMessages` holds messages other agents wrote to
-@@ -89,12 +106,14 @@ what a message is allowed to do:
+-you, oldest first: `senderID`, `senderName`, `text`, and `turnNumber`. It is
+-bounded — at most 3 per rival and 8 in total — so no single rival can run up
+-your token bill or take more than its share of your attention.
++you, oldest first: server-owned `messageEventID`, `senderID`, `senderName`,
++`text`, and `turnNumber`. Policies never send or choose `messageEventID`; use it
++to avoid answering the same message twice. Archived observations may lack it,
++so fall back to `senderID:turnNumber`. The inbox is bounded — at most 3 per
++rival and 8 in total — so no single rival can run up your token bill or take
++more than its share of your attention.
+ 
+ Be aware of what that bound does and does not promise. No sender can occupy
+ more than 3 of the 8 slots, so one loud rival cannot monopolise your inbox.
+@@ -89,12 +109,14 @@ what a message is allowed to do:
     **claims**, never merged into `rivals`. A claim cannot be mistaken for
     something the agent actually observed.
  2. The security instruction restricts what a claim may move: deal posture
@@ -89,7 +101,7 @@ index ef039b22910d6fe06b2f3184cefbd18437af54aa..ed9b51e38e71244c01e70ffdc278221d
  4. Replies come from fixed templates, so a rival can never author your words.
  
  Point 3 is the one that matters. Keep it if you change anything: it is what
-@@ -105,9 +124,10 @@ handed your agent to your opponents.
+@@ -105,9 +127,10 @@ handed your agent to your opponents.
  ## What the starter does today
  
  `chooseMessageMove` in `llm-player.mjs` answers at most one rival per decision:
@@ -179,7 +191,7 @@ index 9d424920ec57f896b1dad10b09eac00fec25f555..d517e3a302038bc5a73a8c3e9a60775b
  
  `starter-player.mjs` is a small conservative rule agent (no model, no Bedrock). It
 diff --git a/llm-player.mjs b/llm-player.mjs
-index 596924b014117aef59d03df1e7a886fc32d04202..f9a6733ccca9528221c1cd94b2d2740b46756590 100644
+index 596924b014117aef59d03df1e7a886fc32d04202..4f742d467f42131e6fe70df026ee4c865bee1f7b 100644
 --- a/llm-player.mjs
 +++ b/llm-player.mjs
 @@ -20,6 +20,15 @@
@@ -206,13 +218,14 @@ index 596924b014117aef59d03df1e7a886fc32d04202..f9a6733ccca9528221c1cd94b2d2740b
    "upgrade_structure",
    "donate_gold",
    "donate_troops",
-@@ -122,8 +132,19 @@ const SECURITY =
+@@ -122,8 +132,20 @@ const SECURITY =
  
  // -- anti-loop memory (distilled from the keystone's avoidActionIDs) ----------
  const history = []; // { actionID, kind } appended after each decision
 -// Inbound messages already answered, keyed `${senderID}:${turnNumber}`, so a
 -// rival writing every step cannot pull this agent into an endless exchange.
-+// Inbound messages already answered, keyed `${senderID}:${turnNumber}`, plus
++// Inbound messages already answered, keyed by server-owned messageEventID
++// (`${senderID}:${turnNumber}` for legacy observations), plus
 +// `reply:${senderID}:${n}` for the lifetime reply budget that actually bounds
 +// an exchange.
 +// Lifetime replies per counterparty, per match. The per-inbound-message key
@@ -228,7 +241,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..f9a6733ccca9528221c1cd94b2d2740b
  const answeredMessages = new Set();
  function avoidActionIDs() {
    const recent = history
-@@ -167,18 +188,20 @@ function cleanID(s) {
+@@ -167,18 +189,20 @@ function cleanID(s) {
  // here means a future server change can never quietly widen what reaches the
  // prompt.
  function cleanMessage(s) {
@@ -261,7 +274,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..f9a6733ccca9528221c1cd94b2d2740b
  }
  function normalizeDealPolicies(value) {
    const entries = Array.isArray(value)
-@@ -220,7 +243,15 @@ function normalizeDealPolicies(value) {
+@@ -220,7 +244,15 @@ function normalizeDealPolicies(value) {
  }
  function buildState(obs, actions) {
    const own = obs.ownState || {};
@@ -278,7 +291,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..f9a6733ccca9528221c1cd94b2d2740b
    const self = {
      tileShare: own.tileShare,
      troops: own.troops,
-@@ -228,7 +259,7 @@ function buildState(obs, actions) {
+@@ -228,7 +260,7 @@ function buildState(obs, actions) {
      gold: own.gold,
      borderTiles: own.borderTiles,
      incomingAttacks: own.incomingAttacks,
@@ -287,7 +300,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..f9a6733ccca9528221c1cd94b2d2740b
    };
    const rivals = (obs.visiblePlayers || [])
      .filter((p) => p && p.isAlive)
-@@ -240,65 +271,19 @@ function buildState(obs, actions) {
+@@ -240,65 +272,19 @@ function buildState(obs, actions) {
        isAllied: p.isAllied,
        relation: p.relation,
        canAttack: p.canAttack,
@@ -363,7 +376,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..f9a6733ccca9528221c1cd94b2d2740b
      }));
    const legal = actions.map((a) => ({
      id: a.id,
-@@ -440,104 +425,20 @@ function buildState(obs, actions) {
+@@ -440,104 +426,20 @@ function buildState(obs, actions) {
      };
    }
    let spatial;
@@ -476,7 +489,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..f9a6733ccca9528221c1cd94b2d2740b
      };
    }
    // Optional inbox (free-text negotiation; absent when the server flag is off,
-@@ -550,7 +451,9 @@ function buildState(obs, actions) {
+@@ -550,11 +452,16 @@ function buildState(obs, actions) {
    // The whole block is bounded by the server (<=8 messages, <=3 per rival,
    // <=280 chars each) and re-sanitized here through the same clean()/cleanID()
    // helpers used for every other opponent-chosen string.
@@ -487,7 +500,14 @@ index 596924b014117aef59d03df1e7a886fc32d04202..f9a6733ccca9528221c1cd94b2d2740b
    const messages = inbound.length
      ? inbound.slice(-8).map((m) => ({
          fromID: cleanID(m.senderID),
-@@ -568,6 +471,7 @@ function buildState(obs, actions) {
+         from: clean(m.senderName),
++        ...(typeof m.messageEventID === "string"
++          ? { eventID: cleanID(m.messageEventID) }
++          : {}),
+         turn: m.turnNumber,
+         claim: cleanMessage(m.text),
+       }))
+@@ -568,6 +475,7 @@ function buildState(obs, actions) {
      legalActions: legal,
      ...(econ ? { econ } : {}),
      ...(deals ? { deals } : {}),
@@ -495,7 +515,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..f9a6733ccca9528221c1cd94b2d2740b
      ...(spatial ? { spatial } : {}),
      ...(messages ? { messages } : {}),
    };
-@@ -662,6 +566,7 @@ let plannerAttemptSequence = 0;
+@@ -662,6 +570,7 @@ let plannerAttemptSequence = 0;
  let plannerUsageSummaryEmitted = false;
  let plannerSpatialSchemaVersion = 0;
  let plannerSpatialMinimap = false;
@@ -503,7 +523,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..f9a6733ccca9528221c1cd94b2d2740b
  
  function tokenCount(value) {
    const parsed = Number(value);
-@@ -698,6 +603,12 @@ function normalizeBedrockUsage(usage) {
+@@ -698,6 +607,12 @@ function normalizeBedrockUsage(usage) {
  }
  
  function normalizePlannerUsageEvent(event) {
@@ -516,7 +536,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..f9a6733ccca9528221c1cd94b2d2740b
    const normalized = {
      schemaVersion: 1,
      promptVariant: PROMPT_VARIANT,
-@@ -712,6 +623,11 @@ function normalizePlannerUsageEvent(event) {
+@@ -712,6 +627,11 @@ function normalizePlannerUsageEvent(event) {
          : event.spatialMinimap === true,
      event: clean(event?.event),
    };
@@ -528,7 +548,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..f9a6733ccca9528221c1cd94b2d2740b
    for (const key of [
      "model",
      "responseModel",
-@@ -938,8 +854,18 @@ function refreshPlanInBackground(state) {
+@@ -938,8 +858,18 @@ function refreshPlanInBackground(state) {
    if (planRefreshInFlight) return;
    planRefreshInFlight = true;
    plannerSpatialSchemaVersion =
@@ -549,7 +569,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..f9a6733ccca9528221c1cd94b2d2740b
    withTimeout(askBedrock(state), 20000)
      .then(({ attempt, text, model }) => {
        const parsed = extractJson(text, PROMPT_HARDENING);
-@@ -1144,13 +1070,19 @@ const MESSAGE_OPENERS = {
+@@ -1144,13 +1074,19 @@ const MESSAGE_OPENERS = {
  // Answers at most one rival per decision: the one who most recently wrote to
  // us and has not already been answered since. Silence is the default — an
  // agent that talks every step is noise, not negotiation.
@@ -571,15 +591,19 @@ index 596924b014117aef59d03df1e7a886fc32d04202..f9a6733ccca9528221c1cd94b2d2740b
    }
  
    const newest = [...inbound].sort(
-@@ -1158,10 +1090,23 @@ function chooseMessageMove(actions, obs, answered, dealMove) {
+@@ -1158,10 +1094,26 @@ function chooseMessageMove(actions, obs, answered, dealMove) {
    )[inbound.length - 1];
    const senderID = newest?.senderID;
    if (!senderID) return null;
 -  // One reply per inbound turn, so a spammer cannot pull us into a loop.
+-  const key = `${senderID}:${newest.turnNumber}`;
 +  // One reply per inbound TURN. This alone does not bound an exchange -- it
 +  // only stops us answering the same message twice -- so the lifetime budget
 +  // below is what actually ends a conversation.
-   const key = `${senderID}:${newest.turnNumber}`;
++  const key =
++    typeof newest.messageEventID === "string"
++      ? newest.messageEventID
++      : `${senderID}:${newest.turnNumber}`;
    if (answered.has(key)) return null;
  
 +  // Lifetime reply budget for this counterparty: sequential slot keys in the
@@ -596,7 +620,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..f9a6733ccca9528221c1cd94b2d2740b
    const offer = offers.find(
      (action) => action.metadata?.recipientID === senderID,
    );
-@@ -1176,7 +1121,8 @@ function chooseMessageMove(actions, obs, answered, dealMove) {
+@@ -1176,7 +1128,8 @@ function chooseMessageMove(actions, obs, answered, dealMove) {
      ...(obs?.deals?.activeDeals || []),
    ].some(
      (view) =>
@@ -606,7 +630,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..f9a6733ccca9528221c1cd94b2d2740b
    );
  
    let text;
-@@ -1185,8 +1131,12 @@ function chooseMessageMove(actions, obs, answered, dealMove) {
+@@ -1185,8 +1138,12 @@ function chooseMessageMove(actions, obs, answered, dealMove) {
    else if (hasOpenDeal) text = MESSAGE_REPLIES.dealOpen;
    else text = MESSAGE_REPLIES.neutral;
  
@@ -620,7 +644,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..f9a6733ccca9528221c1cd94b2d2740b
  }
  
  // Speaks first, but rarely and only when there is something to say. Two
-@@ -1195,7 +1145,13 @@ function chooseMessageMove(actions, obs, answered, dealMove) {
+@@ -1195,7 +1152,13 @@ function chooseMessageMove(actions, obs, answered, dealMove) {
  //       message is the reason to accept, which the bare template lacks;
  //   (b) we share a border with a rival we have never written to.
  // At most one opener per counterparty per match.
@@ -635,7 +659,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..f9a6733ccca9528221c1cd94b2d2740b
    const dealRecipient =
      dealMove?.kind === "deal_propose" ? dealMove?.metadata?.recipientID : null;
    if (dealRecipient) {
-@@ -1203,11 +1159,15 @@ function chooseMessageOpener(offers, obs, answered, dealMove) {
+@@ -1203,11 +1166,15 @@ function chooseMessageOpener(offers, obs, answered, dealMove) {
        (action) => action.metadata?.recipientID === dealRecipient,
      );
      const key = `opener:${dealRecipient}`;
@@ -653,7 +677,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..f9a6733ccca9528221c1cd94b2d2740b
        };
      }
    }
-@@ -1222,10 +1182,11 @@ function chooseMessageOpener(offers, obs, answered, dealMove) {
+@@ -1222,10 +1189,11 @@ function chooseMessageOpener(offers, obs, answered, dealMove) {
      // Only borderers, and never someone already proven unreliable.
      if (!rival?.sharesBorder || rival.isAllied) continue;
      if (failedReliabilityGate(obs, recipientID)) continue;
@@ -666,7 +690,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..f9a6733ccca9528221c1cd94b2d2740b
      };
    }
    return null;
-@@ -1487,7 +1448,59 @@ function socialActionNote(chosen, dealMove, obs) {
+@@ -1487,7 +1455,59 @@ function socialActionNote(chosen, dealMove, obs) {
  }
  // The GAME move. Deal actions are never returned here — they ride the
  // separate deal slot — so the agent always spends its action on the map.
@@ -726,7 +750,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..f9a6733ccca9528221c1cd94b2d2740b
    const cons = dealConstraints(obs);
    const authorizedBreaks = new Set(plan?.breakDealIDs || []);
    const allAuthorized = (dealIDs) =>
-@@ -1611,6 +1624,13 @@ function choose(actions, obs) {
+@@ -1611,6 +1631,13 @@ function choose(actions, obs) {
          !violatesPact(c),
      );
      if (candidates.length === 0) continue;
@@ -740,7 +764,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..f9a6733ccca9528221c1cd94b2d2740b
      // Within the kind, prefer the plan's named target when one is offered.
      if (plan?.target) {
        const targeted = candidates.find(matchesPlanTarget);
-@@ -1684,6 +1704,30 @@ function spawnPreferenceScore(action) {
+@@ -1684,6 +1711,30 @@ function spawnPreferenceScore(action) {
    );
  }
  
@@ -771,7 +795,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..f9a6733ccca9528221c1cd94b2d2740b
  function withTimeout(promise, ms) {
    return Promise.race([
      promise,
-@@ -1717,6 +1761,7 @@ export function startLlmPlayer({
+@@ -1717,6 +1768,7 @@ export function startLlmPlayer({
        "COWORLD_PLAYER_WS_URL is required (the match provides it)",
      );
    bedrock = bedrockClient ?? createBedrockClient();
@@ -779,7 +803,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..f9a6733ccca9528221c1cd94b2d2740b
    const socket = new WebSocketCtor(url);
    socket.on("open", () =>
      console.log(
-@@ -1739,7 +1784,9 @@ export function startLlmPlayer({
+@@ -1739,7 +1791,9 @@ export function startLlmPlayer({
      }
      if (message.type !== "decision_request") return;
  
@@ -790,7 +814,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..f9a6733ccca9528221c1cd94b2d2740b
      const spawnPreferences = spawnPreferenceRanking(message, actions);
      if (spawnPreferences !== null) {
        socket.send(
-@@ -1747,6 +1794,7 @@ export function startLlmPlayer({
+@@ -1747,6 +1801,7 @@ export function startLlmPlayer({
            type: "decision_response",
            requestID: message.requestID,
            selectedLegalActionId: spawnPreferences[0].id,
@@ -798,7 +822,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..f9a6733ccca9528221c1cd94b2d2740b
            spawnPreferenceLegalActionIds: spawnPreferences.map(
              (preference) => preference.id,
            ),
-@@ -1759,7 +1807,7 @@ export function startLlmPlayer({
+@@ -1759,7 +1814,7 @@ export function startLlmPlayer({
        // gameplay decision and has no reaction phase.
        return;
      }
@@ -807,7 +831,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..f9a6733ccca9528221c1cd94b2d2740b
      const state = buildState(obs, actions);
  
      // Keep the plan fresh WITHOUT blocking — the answer below never waits on Bedrock.
-@@ -1774,12 +1822,16 @@ export function startLlmPlayer({
+@@ -1774,12 +1829,16 @@ export function startLlmPlayer({
      // Comms slot: independent of the game action and the deal action, so
      // answering a rival never costs a move. Returns null (silence) unless
      // someone actually wrote to us.
@@ -830,7 +854,7 @@ index 596924b014117aef59d03df1e7a886fc32d04202..f9a6733ccca9528221c1cd94b2d2740b
      const degraded = lastPlanError !== null;
      let reason;
      if (plan !== null) {
-@@ -1798,24 +1850,37 @@ export function startLlmPlayer({
+@@ -1798,24 +1857,37 @@ export function startLlmPlayer({
      if (socialNote) reason = `${socialNote}; ${reason}`;
  
      history.push({ actionID: chosen.id, kind: chosen.kind });
@@ -971,10 +995,10 @@ index 0000000000000000000000000000000000000000..45b4366fc8a8abdfc7aa010a13de92ee
 +): T[];
 diff --git a/owner-capabilities.mjs b/owner-capabilities.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..25c8b86c3b2ed49e16897edf913668101f4ec3a3
+index 0000000000000000000000000000000000000000..315dbcd4e44fa68449f35ac297d16371e002eb4d
 --- /dev/null
 +++ b/owner-capabilities.mjs
-@@ -0,0 +1,1734 @@
+@@ -0,0 +1,1877 @@
 +import { createHash } from "node:crypto";
 +
 +/**
@@ -988,6 +1012,7 @@ index 0000000000000000000000000000000000000000..25c8b86c3b2ed49e16897edf91366810
 +export const OWNER_MESSAGE_MAX_CHARS = 280;
 +export const OWNER_SPATIAL_SERIALIZED_MAX_BYTES = 16 * 1024;
 +export const OWNER_MINIMAP_SERIALIZED_MAX_BYTES = 4 * 1024;
++const OWNER_MINIMAP_LARGE_TILE_THRESHOLD = 256 * 1024;
 +export const OWNER_EVIDENCE_MAX_EVENTS_PER_KIND = 64;
 +export const SPATIAL_VISIBILITY_MODEL = "global-lockstep-public-map-v1";
 +
@@ -1430,7 +1455,7 @@ index 0000000000000000000000000000000000000000..25c8b86c3b2ed49e16897edf91366810
 +
 +export function advertisedMessageLimit(protocol) {
 +  const value = protocol?.maxMessageChars;
-+  return Number.isInteger(value) && value > 0
++  return Number.isSafeInteger(value) && value > 0
 +    ? Math.min(value, OWNER_MESSAGE_MAX_CHARS)
 +    : null;
 +}
@@ -1566,19 +1591,37 @@ index 0000000000000000000000000000000000000000..25c8b86c3b2ed49e16897edf91366810
 +export function boundedInboundMessages(observation) {
 +  const inbound = observation?.nonCombat?.inboundMessages;
 +  if (!Array.isArray(inbound) || inbound.length > 8) return null;
++  const bounded = [];
++  const messagesPerSender = new Map();
++  let previousTurn = -1;
 +  for (const entry of inbound) {
++    const hasMessageEventID =
++      isRecord(entry) && Object.hasOwn(entry, "messageEventID");
 +    if (
 +      !isRecord(entry) ||
++      (hasMessageEventID && !isStrictOpaqueID(entry.messageEventID)) ||
 +      !isBoundedVisibleString(entry.senderID, 200) ||
 +      !isBoundedVisibleString(entry.senderName, 120, true) ||
 +      !Number.isSafeInteger(entry.turnNumber) ||
 +      entry.turnNumber < 0 ||
++      entry.turnNumber < previousTurn ||
 +      !isSafeAgentMessageText(entry.text, OWNER_MESSAGE_MAX_CHARS)
 +    ) {
 +      return null;
 +    }
++    const senderCount = (messagesPerSender.get(entry.senderID) ?? 0) + 1;
++    if (senderCount > 3) return null;
++    messagesPerSender.set(entry.senderID, senderCount);
++    previousTurn = entry.turnNumber;
++    bounded.push({
++      ...(hasMessageEventID ? { messageEventID: entry.messageEventID } : {}),
++      senderID: entry.senderID,
++      senderName: entry.senderName,
++      text: entry.text,
++      turnNumber: entry.turnNumber,
++    });
 +  }
-+  return inbound;
++  return bounded;
 +}
 +
 +/**
@@ -1720,10 +1763,16 @@ index 0000000000000000000000000000000000000000..25c8b86c3b2ed49e16897edf91366810
 +
 +    for (const entry of boundedInboundMessages(observation) ?? []) {
 +      const digest = sha256Utf8(entry.text);
-+      const key = `${entry.senderID}\u0000${entry.turnNumber}\u0000${digest}`;
++      const key =
++        typeof entry.messageEventID === "string"
++          ? `event\u0000${entry.messageEventID}`
++          : `legacy\u0000${entry.senderID}\u0000${entry.turnNumber}\u0000${digest}`;
 +      if (seenInbound.has(key)) continue;
 +      const recorded = record("message_observation", {
 +        ...base,
++        ...(typeof entry.messageEventID === "string"
++          ? { messageEventID: entry.messageEventID }
++          : {}),
 +        senderID: entry.senderID,
 +        senderTurn: entry.turnNumber,
 +        messageBodySHA256: digest,
@@ -1735,6 +1784,25 @@ index 0000000000000000000000000000000000000000..25c8b86c3b2ed49e16897edf91366810
 +
 +    if (!spawn && !spatialRecorded) {
 +      const spatial = boundedSpatialObservation(observation);
++      const spatialBase = spatial
++        ? spatial.schemaVersion === 3 || spatial.schemaVersion === 5
++          ? {
++              mapInfo: spatial.mapInfo,
++              spatial: {
++                schemaVersion: spatial.schemaVersion,
++                visibilityModel: spatial.visibilityModel,
++                ownShape: spatial.ownShape,
++                positionedAssets: spatial.positionedAssets,
++              },
++              visiblePlayers: spatial.rivals,
++            }
++          : {
++              schemaVersion: spatial.schemaVersion,
++              visibilityModel: spatial.visibilityModel,
++              ownShape: spatial.ownShape,
++              rivals: spatial.rivals,
++            }
++        : null;
 +      record("spatial_observation", {
 +        ...base,
 +        present: spatial !== null,
@@ -1746,9 +1814,16 @@ index 0000000000000000000000000000000000000000..25c8b86c3b2ed49e16897edf91366810
 +              ...(spatial.minimap !== undefined
 +                ? { minimapSchemaVersion: spatial.minimap.schemaVersion }
 +                : {}),
-+              serializedUTF8Bytes: new TextEncoder().encode(
-+                JSON.stringify(spatial),
++              baseSerializedUTF8Bytes: new TextEncoder().encode(
++                JSON.stringify(spatialBase),
 +              ).byteLength,
++              ...(spatial.minimap !== undefined
++                ? {
++                    minimapSerializedUTF8Bytes: new TextEncoder().encode(
++                      JSON.stringify(spatial.minimap),
++                    ).byteLength,
++                  }
++                : {}),
 +            }
 +          : {}),
 +      });
@@ -1796,10 +1871,7 @@ index 0000000000000000000000000000000000000000..25c8b86c3b2ed49e16897edf91366810
 +}
 +
 +function boundedPercent(value) {
-+  return typeof value === "number" &&
-+    Number.isFinite(value) &&
-+    value >= 0 &&
-+    value <= 100
++  return Number.isSafeInteger(value) && value >= 0 && value <= 100
 +    ? value
 +    : null;
 +}
@@ -1886,13 +1958,23 @@ index 0000000000000000000000000000000000000000..25c8b86c3b2ed49e16897edf91366810
 +    : null;
 +}
 +
-+function boundedMinimapV2(minimap, allowedPlayerIDs, ownPlayerID) {
++function boundedMinimapV2(
++  minimap,
++  allowedPlayerIDs,
++  ownPlayerID,
++  mapInfo,
++  expectedMarkersTotal,
++) {
 +  const dimensionPair =
 +    (minimap?.width === 24 && minimap?.height === 12) ||
 +    (minimap?.width === 32 && minimap?.height === 16);
 +  if (
 +    minimap?.schemaVersion !== 2 ||
 +    !dimensionPair ||
++    (mapInfo &&
++      (mapInfo.width * mapInfo.height >= OWNER_MINIMAP_LARGE_TILE_THRESHOLD
++        ? minimap.width !== 32 || minimap.height !== 16
++        : minimap.width !== 24 || minimap.height !== 12)) ||
 +    !Array.isArray(minimap.ownershipRows) ||
 +    minimap.ownershipRows.length !== minimap.height ||
 +    !minimap.ownershipRows.every(
@@ -1914,6 +1996,8 @@ index 0000000000000000000000000000000000000000..25c8b86c3b2ed49e16897edf91366810
 +    !Array.isArray(minimap.markers) ||
 +    minimap.markers.length > 24 ||
 +    boundedNonnegativeInteger(minimap.markersTotal) === null ||
++    (expectedMarkersTotal !== undefined &&
++      minimap.markersTotal !== expectedMarkersTotal) ||
 +    minimap.markersTotal < minimap.markers.length ||
 +    minimap.markersReturned !== minimap.markers.length ||
 +    minimap.markersTruncated !== minimap.markers.length < minimap.markersTotal
@@ -1991,16 +2075,6 @@ index 0000000000000000000000000000000000000000..25c8b86c3b2ed49e16897edf91366810
 +    : null;
 +}
 +
-+function boundedMinimap(minimap, allowedPlayerIDs, ownPlayerID) {
-+  if (minimap?.schemaVersion === 2) {
-+    return boundedMinimapV2(minimap, allowedPlayerIDs, ownPlayerID);
-+  }
-+  if (minimap?.schemaVersion === 1) {
-+    return boundedMinimapV1(minimap, allowedPlayerIDs, ownPlayerID);
-+  }
-+  return null;
-+}
-+
 +export function boundedSpatialMapInfo(mapInfo) {
 +  if (
 +    !isRecord(mapInfo) ||
@@ -2033,7 +2107,12 @@ index 0000000000000000000000000000000000000000..25c8b86c3b2ed49e16897edf91366810
 +  };
 +}
 +
-+function boundedSpatialOwnShape(ownShape, requireL4 = false) {
++function boundedSpatialOwnShape(
++  ownShape,
++  requireL4 = false,
++  maxMapTiles = undefined,
++  requireExactRegions = true,
++) {
 +  const quadrants = new Set([
 +    "northwest",
 +    "north",
@@ -2048,16 +2127,37 @@ index 0000000000000000000000000000000000000000..25c8b86c3b2ed49e16897edf91366810
 +  if (
 +    !isRecord(ownShape) ||
 +    !quadrants.has(ownShape.quadrant) ||
-+    !["complete", "omitted_budget"].includes(ownShape.regionAnalysis) ||
-+    !["largest_region_border", "all_border_budget_fallback"].includes(
-+      ownShape.centroidBasis,
++    !(
++      (requireExactRegions &&
++        ownShape.regionAnalysis === "complete" &&
++        ownShape.centroidBasis === "largest_region_border" &&
++        ["compact", "stretched", "fragmented"].includes(ownShape.compactness) &&
++        Number.isSafeInteger(ownShape.regionCount) &&
++        ownShape.regionCount > 0 &&
++        (maxMapTiles === undefined || ownShape.regionCount <= maxMapTiles) &&
++        ownShape.regionCount > 1 === (ownShape.compactness === "fragmented") &&
++        (ownShape.regionCount !== 1 || ownShape.largestRegionShare === 100) &&
++        boundedPercent(ownShape.largestRegionShare) !== null) ||
++      (requireExactRegions &&
++        ownShape.regionAnalysis === "omitted_budget" &&
++        ownShape.centroidBasis === "all_border_budget_fallback" &&
++        ownShape.compactness === undefined &&
++        ownShape.regionCount === undefined &&
++        ownShape.largestRegionShare === undefined) ||
++      (!requireExactRegions &&
++        ["complete", "omitted_budget"].includes(ownShape.regionAnalysis) &&
++        ["largest_region_border", "all_border_budget_fallback"].includes(
++          ownShape.centroidBasis,
++        ) &&
++        (ownShape.compactness === undefined ||
++          ["compact", "stretched", "fragmented"].includes(
++            ownShape.compactness,
++          )) &&
++        (ownShape.regionCount === undefined ||
++          boundedNonnegativeInteger(ownShape.regionCount) !== null) &&
++        (ownShape.largestRegionShare === undefined ||
++          boundedPercent(ownShape.largestRegionShare) !== null))
 +    ) ||
-+    (ownShape.compactness !== undefined &&
-+      !["compact", "stretched", "fragmented"].includes(ownShape.compactness)) ||
-+    (ownShape.regionCount !== undefined &&
-+      boundedNonnegativeInteger(ownShape.regionCount) === null) ||
-+    (ownShape.largestRegionShare !== undefined &&
-+      boundedPercent(ownShape.largestRegionShare) === null) ||
 +    boundedPercent(ownShape.coastShare) === null ||
 +    (requireL4 &&
 +      boundedPercent(ownShape.largestNeighborBorderShare) === null) ||
@@ -2080,7 +2180,7 @@ index 0000000000000000000000000000000000000000..25c8b86c3b2ed49e16897edf91366810
 +    regionAnalysis: ownShape.regionAnalysis,
 +    centroidBasis: ownShape.centroidBasis,
 +    coastShare: ownShape.coastShare,
-+    ...(ownShape.largestNeighborBorderShare !== undefined
++    ...(requireL4
 +      ? {
 +          largestNeighborBorderShare: ownShape.largestNeighborBorderShare,
 +        }
@@ -2096,8 +2196,15 @@ index 0000000000000000000000000000000000000000..25c8b86c3b2ed49e16897edf91366810
 +  visiblePlayers,
 +  ownPlayerID,
 +  requireL4 = false,
++  maxMapTiles,
 +) {
-+  if (!Array.isArray(visiblePlayers) || visiblePlayers.length > 64) return null;
++  if (
++    !Array.isArray(visiblePlayers) ||
++    visiblePlayers.length > 64 ||
++    !Number.isSafeInteger(maxMapTiles) ||
++    maxMapTiles <= 0
++  )
++    return null;
 +  const bearings = new Set([
 +    "north",
 +    "northeast",
@@ -2115,7 +2222,8 @@ index 0000000000000000000000000000000000000000..25c8b86c3b2ed49e16897edf91366810
 +    if (
 +      !isBoundedVisibleString(player?.playerID, 200) ||
 +      player.playerID === ownPlayerID ||
-+      seenRivalIDs.has(player.playerID)
++      seenRivalIDs.has(player.playerID) ||
++      (requireL4 && typeof player.sharesBorder !== "boolean")
 +    ) {
 +      return null;
 +    }
@@ -2128,10 +2236,14 @@ index 0000000000000000000000000000000000000000..25c8b86c3b2ed49e16897edf91366810
 +      if (
 +        !isRecord(border) ||
 +        boundedNonnegativeInteger(border.tiles) === null ||
++        border.tiles === 0 ||
++        border.tiles > maxMapTiles ||
 +        boundedPercent(border.shareOfYourBorder) === null ||
 +        !["land", "coastal", "mixed"].includes(border.terrain) ||
 +        boundedNonnegativeInteger(border.defensePostsCovering) === null ||
++        border.defensePostsCovering > maxMapTiles ||
 +        typeof border.underAttackHere !== "boolean" ||
++        (requireL4 && border.underAttackHere !== player.incomingAttack) ||
 +        !isRecord(terrain) ||
 +        boundedNonnegativeInteger(terrain.plains) === null ||
 +        boundedNonnegativeInteger(terrain.highland) === null ||
@@ -2139,10 +2251,15 @@ index 0000000000000000000000000000000000000000..25c8b86c3b2ed49e16897edf91366810
 +        boundedNonnegativeInteger(terrain.shore) === null ||
 +        terrain.plains + terrain.highland + terrain.mountain !== border.tiles ||
 +        terrain.shore > border.tiles ||
++        (border.terrain === "land" && terrain.shore !== 0) ||
++        (border.terrain === "coastal" && terrain.shore !== border.tiles) ||
++        (border.terrain === "mixed" &&
++          (terrain.shore === 0 || terrain.shore === border.tiles)) ||
 +        !isRecord(coverage) ||
 +        boundedNonnegativeInteger(coverage.covered) === null ||
 +        boundedNonnegativeInteger(coverage.uncovered) === null ||
-+        coverage.covered + coverage.uncovered !== border.tiles
++        coverage.covered + coverage.uncovered !== border.tiles ||
++        (border.defensePostsCovering === 0) !== (coverage.covered === 0)
 +      ) {
 +        return null;
 +      }
@@ -2179,7 +2296,8 @@ index 0000000000000000000000000000000000000000..25c8b86c3b2ed49e16897edf91366810
 +          !["minor", "major"].includes(edge?.sizeClass) ||
 +          (requireL4 &&
 +            (boundedNonnegativeInteger(edge?.tiles) === null ||
-+              edge.tiles === 0))
++              edge.tiles === 0 ||
++              edge.tiles > maxMapTiles))
 +        ) {
 +          return null;
 +        }
@@ -2187,14 +2305,20 @@ index 0000000000000000000000000000000000000000..25c8b86c3b2ed49e16897edf91366810
 +        bordersWith.push({
 +          playerID: edge.playerID,
 +          sizeClass: edge.sizeClass,
-+          ...(edge.tiles !== undefined ? { tiles: edge.tiles } : {}),
++          ...(requireL4 ? { tiles: edge.tiles } : {}),
 +        });
 +      }
 +    }
 +    if (
 +      (player.bearing !== undefined && !bearings.has(player.bearing)) ||
++      (requireL4 && (borderWithYou !== undefined) !== player.sharesBorder) ||
++      (requireL4 &&
++        (player.distanceClass === "adjacent") !==
++          (borderWithYou !== undefined)) ||
++      (requireL4 && !distances.has(player.distanceClass)) ||
 +      (player.distanceClass !== undefined &&
-+        !distances.has(player.distanceClass))
++        !distances.has(player.distanceClass)) ||
++      (requireL4 && !Array.isArray(player.bordersWith))
 +    ) {
 +      return null;
 +    }
@@ -2205,6 +2329,7 @@ index 0000000000000000000000000000000000000000..25c8b86c3b2ed49e16897edf91366810
 +        !isRecord(naval) ||
 +        boundedNonnegativeInteger(naval.transportReachableOwnShoreTiles) ===
 +          null ||
++        naval.transportReachableOwnShoreTiles > maxMapTiles ||
 +        (naval.nearestEnemyPort !== undefined &&
 +          (!isRecord(naval.nearestEnemyPort) ||
 +            !bearings.has(naval.nearestEnemyPort.bearing) ||
@@ -2258,6 +2383,9 @@ index 0000000000000000000000000000000000000000..25c8b86c3b2ed49e16897edf91366810
 +  if (
 +    positioned.structuresTotal < positioned.structures.length ||
 +    positioned.warshipsTotal < positioned.warships.length ||
++    !Number.isSafeInteger(
++      positioned.structuresTotal + positioned.warshipsTotal,
++    ) ||
 +    positioned.structuresTruncated !==
 +      positioned.structures.length < positioned.structuresTotal ||
 +    positioned.warshipsTruncated !==
@@ -2337,36 +2465,16 @@ index 0000000000000000000000000000000000000000..25c8b86c3b2ed49e16897edf91366810
 + */
 +export function boundedSpatialV1(observation) {
 +  const spatial = observation?.spatial;
-+  const ownShape = spatial?.ownShape;
-+  const quadrants = new Set([
-+    "northwest",
-+    "north",
-+    "northeast",
-+    "west",
-+    "center",
-+    "east",
-+    "southwest",
-+    "south",
-+    "southeast",
-+  ]);
++  const ownShape = boundedSpatialOwnShape(
++    spatial?.ownShape,
++    false,
++    undefined,
++    false,
++  );
 +  if (
 +    spatial?.schemaVersion !== 1 ||
 +    spatial.visibilityModel !== SPATIAL_VISIBILITY_MODEL ||
-+    !ownShape ||
-+    !quadrants.has(ownShape.quadrant) ||
-+    !["complete", "omitted_budget"].includes(ownShape.regionAnalysis) ||
-+    !["largest_region_border", "all_border_budget_fallback"].includes(
-+      ownShape.centroidBasis,
-+    ) ||
-+    (ownShape.compactness !== undefined &&
-+      !["compact", "stretched", "fragmented"].includes(ownShape.compactness)) ||
-+    (ownShape.regionCount !== undefined &&
-+      boundedNonnegativeInteger(ownShape.regionCount) === null) ||
-+    (ownShape.largestRegionShare !== undefined &&
-+      boundedPercent(ownShape.largestRegionShare) === null) ||
-+    boundedPercent(ownShape.coastShare) === null ||
-+    boundedPercent(ownShape.centroid?.xPct) === null ||
-+    boundedPercent(ownShape.centroid?.yPct) === null
++    !ownShape
 +  ) {
 +    return null;
 +  }
@@ -2465,7 +2573,7 @@ index 0000000000000000000000000000000000000000..25c8b86c3b2ed49e16897edf91366810
 +  ) {
 +    return null;
 +  }
-+  const minimap = boundedMinimap(
++  const minimap = boundedMinimapV1(
 +    spatial.minimap,
 +    allowedPlayerIDs,
 +    ownPlayerID,
@@ -2473,25 +2581,7 @@ index 0000000000000000000000000000000000000000..25c8b86c3b2ed49e16897edf91366810
 +  const bounded = {
 +    schemaVersion: 1,
 +    visibilityModel: SPATIAL_VISIBILITY_MODEL,
-+    ownShape: {
-+      quadrant: ownShape.quadrant,
-+      ...(ownShape.compactness !== undefined
-+        ? { compactness: ownShape.compactness }
-+        : {}),
-+      ...(ownShape.regionCount !== undefined
-+        ? { regionCount: ownShape.regionCount }
-+        : {}),
-+      ...(ownShape.largestRegionShare !== undefined
-+        ? { largestRegionShare: ownShape.largestRegionShare }
-+        : {}),
-+      regionAnalysis: ownShape.regionAnalysis,
-+      centroidBasis: ownShape.centroidBasis,
-+      coastShare: ownShape.coastShare,
-+      centroid: {
-+        xPct: ownShape.centroid.xPct,
-+        yPct: ownShape.centroid.yPct,
-+      },
-+    },
++    ownShape,
 +    rivals,
 +    ...(minimap ? { minimap } : {}),
 +  };
@@ -2512,18 +2602,20 @@ index 0000000000000000000000000000000000000000..25c8b86c3b2ed49e16897edf91366810
 +    return null;
 +  }
 +  const mapInfo = boundedSpatialMapInfo(observation?.mapInfo);
-+  const ownShape = boundedSpatialOwnShape(spatial.ownShape);
++  if (!mapInfo) return null;
++  const ownShape = boundedSpatialOwnShape(
++    spatial.ownShape,
++    false,
++    mapInfo.width * mapInfo.height,
++  );
 +  const ownPlayerID = observation?.ownState?.playerID;
 +  const rivals = boundedSpatialV3Rivals(
 +    observation?.visiblePlayers,
 +    ownPlayerID,
++    false,
++    mapInfo ? mapInfo.width * mapInfo.height : null,
 +  );
-+  if (
-+    !mapInfo ||
-+    !ownShape ||
-+    !rivals ||
-+    !isBoundedVisibleString(ownPlayerID, 200)
-+  ) {
++  if (!ownShape || !rivals || !isBoundedVisibleString(ownPlayerID, 200)) {
 +    return null;
 +  }
 +  const allowedPlayerIDs = new Set([
@@ -2545,8 +2637,21 @@ index 0000000000000000000000000000000000000000..25c8b86c3b2ed49e16897edf91366810
 +    mapInfo,
 +    allowedPlayerIDs,
 +  );
-+  if (!positionedAssets) return null;
-+  const minimap = boundedMinimap(
++  if (
++    !positionedAssets ||
++    (!positionedAssets.structuresTruncated &&
++      rivals.some(
++        (rival) =>
++          (rival.borderWithYou?.defensePostsCovering ?? 0) >
++          positionedAssets.structures.filter(
++            (asset) =>
++              asset.ownerPlayerID === ownPlayerID &&
++              asset.type === "Defense Post",
++          ).length,
++      ))
++  )
++    return null;
++  const minimap = boundedMinimapV1(
 +    spatial.minimap,
 +    allowedPlayerIDs,
 +    ownPlayerID,
@@ -2558,9 +2663,19 @@ index 0000000000000000000000000000000000000000..25c8b86c3b2ed49e16897edf91366810
 +    ownShape,
 +    rivals,
 +    positionedAssets,
-+    ...(minimap ? { minimap } : {}),
 +  };
-+  return isWithinOwnerSpatialSerializationCeiling(bounded) ? bounded : null;
++  const stageOne = {
++    mapInfo,
++    spatial: {
++      schemaVersion: 3,
++      visibilityModel: SPATIAL_VISIBILITY_MODEL,
++      ownShape,
++      positionedAssets,
++    },
++    visiblePlayers: rivals,
++  };
++  if (!isWithinOwnerSpatialSerializationCeiling(stageOne)) return null;
++  return minimap ? { ...bounded, minimap } : bounded;
 +}
 +
 +/**
@@ -2577,12 +2692,18 @@ index 0000000000000000000000000000000000000000..25c8b86c3b2ed49e16897edf91366810
 +    return null;
 +  }
 +  const mapInfo = boundedSpatialMapInfo(observation?.mapInfo);
-+  const ownShape = boundedSpatialOwnShape(spatial.ownShape, true);
++  if (!mapInfo) return null;
++  const ownShape = boundedSpatialOwnShape(
++    spatial.ownShape,
++    true,
++    mapInfo.width * mapInfo.height,
++  );
 +  const ownPlayerID = observation?.ownState?.playerID;
 +  const rivals = boundedSpatialV3Rivals(
 +    observation?.visiblePlayers,
 +    ownPlayerID,
 +    true,
++    mapInfo ? mapInfo.width * mapInfo.height : null,
 +  );
 +  if (
 +    !mapInfo ||
@@ -2598,10 +2719,23 @@ index 0000000000000000000000000000000000000000..25c8b86c3b2ed49e16897edf91366810
 +  ]);
 +  if (
 +    allowedPlayerIDs.size !== rivals.length + 1 ||
++    ownShape.largestNeighborBorderShare !==
++      Math.max(
++        0,
++        ...rivals.map((rival) => rival.borderWithYou?.shareOfYourBorder ?? 0),
++      ) ||
 +    rivals.some((rival) =>
-+      (rival.bordersWith ?? []).some(
-+        (edge) => !allowedPlayerIDs.has(edge.playerID),
-+      ),
++      rival.bordersWith.some((edge) => !allowedPlayerIDs.has(edge.playerID)),
++    ) ||
++    rivals.some((rival) =>
++      rival.bordersWith.some((edge) => {
++        const neighbor = rivals.find(
++          (candidate) => candidate.playerID === edge.playerID,
++        );
++        return !neighbor?.bordersWith.some(
++          (reverse) => reverse.playerID === rival.playerID,
++        );
++      }),
 +    )
 +  ) {
 +    return null;
@@ -2611,11 +2745,34 @@ index 0000000000000000000000000000000000000000..25c8b86c3b2ed49e16897edf91366810
 +    mapInfo,
 +    allowedPlayerIDs,
 +  );
-+  if (!positionedAssets) return null;
++  if (
++    !positionedAssets ||
++    (!positionedAssets.structuresTruncated &&
++      (rivals.some(
++        (rival) =>
++          (rival.borderWithYou?.defensePostsCovering ?? 0) >
++          positionedAssets.structures.filter(
++            (asset) =>
++              asset.ownerPlayerID === ownPlayerID &&
++              asset.type === "Defense Post",
++          ).length,
++      ) ||
++        rivals.some(
++          (rival) =>
++            rival.navalExposure?.nearestEnemyPort !== undefined &&
++            !positionedAssets.structures.some(
++              (asset) =>
++                asset.ownerPlayerID === rival.playerID && asset.type === "Port",
++            ),
++        )))
++  )
++    return null;
 +  const minimap = boundedMinimapV2(
 +    spatial.minimap,
 +    allowedPlayerIDs,
 +    ownPlayerID,
++    mapInfo,
++    positionedAssets.structuresTotal + positionedAssets.warshipsTotal,
 +  );
 +  const bounded = {
 +    schemaVersion: 5,
@@ -2624,9 +2781,19 @@ index 0000000000000000000000000000000000000000..25c8b86c3b2ed49e16897edf91366810
 +    ownShape,
 +    rivals,
 +    positionedAssets,
-+    ...(minimap ? { minimap } : {}),
 +  };
-+  return isWithinOwnerSpatialSerializationCeiling(bounded) ? bounded : null;
++  const stageOne = {
++    mapInfo,
++    spatial: {
++      schemaVersion: 5,
++      visibilityModel: SPATIAL_VISIBILITY_MODEL,
++      ownShape,
++      positionedAssets,
++    },
++    visiblePlayers: rivals,
++  };
++  if (!isWithinOwnerSpatialSerializationCeiling(stageOne)) return null;
++  return minimap ? { ...bounded, minimap } : bounded;
 +}
 +
 +/** Backward-compatible feature detection for the public starter. */
@@ -2711,10 +2878,10 @@ index 0000000000000000000000000000000000000000..25c8b86c3b2ed49e16897edf91366810
 +}
 diff --git a/owner-capability-contract.test.mjs b/owner-capability-contract.test.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..a3b678470825189fdb72d1326b5e92ad519a39c4
+index 0000000000000000000000000000000000000000..1492518d3ff0cbfd3aa587ea905d79aa215c8569
 --- /dev/null
 +++ b/owner-capability-contract.test.mjs
-@@ -0,0 +1,1242 @@
+@@ -0,0 +1,1633 @@
 +import assert from "node:assert/strict";
 +import { createHash } from "node:crypto";
 +import test from "node:test";
@@ -3179,6 +3346,7 @@ index 0000000000000000000000000000000000000000..a3b678470825189fdb72d1326b5e92ad
 +  });
 +  assert.equal(fields.messageText, exact);
 +  assert.equal(advertisedMessageLimit(protocol), 280);
++  assert.equal(advertisedMessageLimit({ maxMessageChars: 1e20 }), null);
 +
 +  const rejected = [
 +    "x".repeat(281),
@@ -3248,6 +3416,9 @@ index 0000000000000000000000000000000000000000..a3b678470825189fdb72d1326b5e92ad
 +      visibilityModel: SPATIAL_VISIBILITY_MODEL,
 +      ownShape: {
 +        quadrant: "west",
++        compactness: "compact",
++        regionCount: 1,
++        largestRegionShare: 100,
 +        regionAnalysis: "complete",
 +        centroidBasis: "largest_region_border",
 +        coastShare: 25,
@@ -3301,6 +3472,9 @@ index 0000000000000000000000000000000000000000..a3b678470825189fdb72d1326b5e92ad
 +      visibilityModel: SPATIAL_VISIBILITY_MODEL,
 +      ownShape: {
 +        quadrant: "west",
++        compactness: "compact",
++        regionCount: 1,
++        largestRegionShare: 100,
 +        regionAnalysis: "complete",
 +        centroidBasis: "largest_region_border",
 +        coastShare: 25,
@@ -3337,6 +3511,8 @@ index 0000000000000000000000000000000000000000..a3b678470825189fdb72d1326b5e92ad
 +    visiblePlayers: [
 +      {
 +        playerID: "P_A",
++        sharesBorder: true,
++        incomingAttack: false,
 +        bearing: "east",
 +        distanceClass: "adjacent",
 +        borderWithYou: {
@@ -3366,21 +3542,27 @@ index 0000000000000000000000000000000000000000..a3b678470825189fdb72d1326b5e92ad
 +  observation.visiblePlayers[0].bordersWith = [];
 +  observation.visiblePlayers[0].navalExposure = {
 +    transportReachableOwnShoreTiles: 12,
-+    nearestEnemyPort: { bearing: "east", distanceClass: "near" },
 +  };
 +  observation.spatial.minimap = {
 +    schemaVersion: 2,
 +    width: 24,
 +    height: 12,
-+    ownershipRows: Array.from({ length: 12 }, () => "A".repeat(24)),
-+    terrainRows: Array.from({ length: 12 }, () => ".".repeat(24)),
++    ownershipRows: Array.from({ length: 12 }, (_, row) =>
++      row === 4 ? "......A.......~........." : ".".repeat(24),
++    ),
++    terrainRows: Array.from({ length: 12 }, (_, row) =>
++      row === 4 ? "..............~........." : ".".repeat(24),
++    ),
 +    legend: [
 +      { glyph: "A", playerID: "P_SELF", isYou: true },
 +      { glyph: "B", playerID: "P_A", isYou: false },
 +    ],
-+    markers: [{ type: "P", ownerPlayerID: "P_A", x: 10, y: 5 }],
-+    markersTotal: 1,
-+    markersReturned: 1,
++    markers: [
++      { type: "D", ownerPlayerID: "P_SELF", x: 6, y: 4 },
++      { type: "W", ownerPlayerID: "P_A", x: 14, y: 4 },
++    ],
++    markersTotal: 2,
++    markersReturned: 2,
 +    markersTruncated: false,
 +  };
 +  return observation;
@@ -3466,6 +3648,7 @@ index 0000000000000000000000000000000000000000..a3b678470825189fdb72d1326b5e92ad
 +    nonCombat: {
 +      inboundMessages: [
 +        {
++          messageEventID: "msg_11111111-1111-4111-8111-111111111111",
 +          senderID: "P_B",
 +          senderName: "Rival B",
 +          turnNumber: 7,
@@ -3476,6 +3659,77 @@ index 0000000000000000000000000000000000000000..a3b678470825189fdb72d1326b5e92ad
 +  });
 +  assert.ok(valid.deals);
 +  assert.equal(valid.nonCombat.inboundMessages.length, 1);
++  assert.equal(
++    valid.nonCombat.inboundMessages[0].messageEventID,
++    "msg_11111111-1111-4111-8111-111111111111",
++  );
++
++  const malformedEventID = ownerCapabilityObservation({
++    ownState: { playerID: "P_A" },
++    visiblePlayers: [],
++    nonCombat: {
++      inboundMessages: [
++        {
++          messageEventID: "bad event id",
++          senderID: "P_B",
++          senderName: "Rival B",
++          turnNumber: 7,
++          text: "hold the border",
++        },
++      ],
++    },
++  });
++  assert.equal(
++    "inboundMessages" in (malformedEventID.nonCombat ?? {}),
++    false,
++  );
++
++  const fourFromOneSender = ownerCapabilityObservation({
++    ownState: { playerID: "P_A" },
++    visiblePlayers: [],
++    nonCombat: {
++      inboundMessages: Array.from({ length: 4 }, (_, index) => ({
++        senderID: "P_B",
++        senderName: "Rival B",
++        turnNumber: index + 1,
++        text: `message ${index + 1}`,
++      })),
++    },
++  });
++  assert.equal("inboundMessages" in (fourFromOneSender.nonCombat ?? {}), false);
++
++  const threePerSender = ownerCapabilityObservation({
++    ownState: { playerID: "P_A" },
++    visiblePlayers: [],
++    nonCombat: {
++      inboundMessages: Array.from({ length: 6 }, (_, index) => ({
++        senderID: index % 2 === 0 ? "P_B" : "P_C",
++        senderName: index % 2 === 0 ? "Rival B" : "Rival C",
++        turnNumber: index + 1,
++        text: `message ${index + 1}`,
++        futurePrivateField: "must not reach the policy prompt",
++      })),
++    },
++  });
++  assert.equal(threePerSender.nonCombat.inboundMessages.length, 6);
++  assert.equal(
++    threePerSender.nonCombat.inboundMessages.some(
++      (entry) => "futurePrivateField" in entry,
++    ),
++    false,
++  );
++
++  const outOfOrder = ownerCapabilityObservation({
++    ownState: { playerID: "P_A" },
++    visiblePlayers: [],
++    nonCombat: {
++      inboundMessages: [
++        { senderID: "P_B", senderName: "B", turnNumber: 8, text: "later" },
++        { senderID: "P_C", senderName: "C", turnNumber: 7, text: "earlier" },
++      ],
++    },
++  });
++  assert.equal("inboundMessages" in (outOfOrder.nonCombat ?? {}), false);
 +});
 +
 +test("minimap is accepted whole or omitted whole without repair", () => {
@@ -3685,6 +3939,15 @@ index 0000000000000000000000000000000000000000..a3b678470825189fdb72d1326b5e92ad
 +    assert.equal(boundedSpatialV3(malformed), null);
 +  }
 +
++  const cappedWarshipsMissingPost = structuredClone(valid);
++  cappedWarshipsMissingPost.spatial.positionedAssets.analysis = "capped";
++  cappedWarshipsMissingPost.spatial.positionedAssets.structures = [];
++  cappedWarshipsMissingPost.spatial.positionedAssets.structuresTotal = 0;
++  cappedWarshipsMissingPost.spatial.positionedAssets.structuresReturned = 0;
++  cappedWarshipsMissingPost.spatial.positionedAssets.warshipsTotal += 1;
++  cappedWarshipsMissingPost.spatial.positionedAssets.warshipsTruncated = true;
++  assert.equal(boundedSpatialV3(cappedWarshipsMissingPost), null);
++
 +  const tooManyPerPlayer = structuredClone(valid);
 +  tooManyPerPlayer.spatial.positionedAssets.structures = Array.from(
 +    { length: 9 },
@@ -3719,6 +3982,38 @@ index 0000000000000000000000000000000000000000..a3b678470825189fdb72d1326b5e92ad
 +  malformedMinimap.spatial.minimap.rows[0] = `?${malformedMinimap.spatial.minimap.rows[0].slice(1)}`;
 +  assert.ok(boundedSpatialV3(malformedMinimap));
 +  assert.equal("minimap" in boundedSpatialV3(malformedMinimap), false);
++
++  const downgradedParentWithV2Minimap = structuredClone(valid);
++  downgradedParentWithV2Minimap.spatial.minimap = structuredClone(
++    richSpatialObservationV5().spatial.minimap,
++  );
++  assert.ok(boundedSpatialV3(downgradedParentWithV2Minimap));
++  assert.equal(
++    "minimap" in boundedSpatialV3(downgradedParentWithV2Minimap),
++    false,
++  );
++
++  const partialL4 = structuredClone(valid);
++  partialL4.spatial.ownShape.largestNeighborBorderShare = {
++    futurePrivate: "SENTINEL",
++  };
++  partialL4.visiblePlayers.push({
++    playerID: "P_B",
++    distanceClass: "far",
++    bordersWith: [
++      { playerID: "P_A", sizeClass: "minor", tiles: { private: true } },
++    ],
++  });
++  partialL4.visiblePlayers[0].bordersWith = [
++    { playerID: "P_B", sizeClass: "minor", tiles: { private: true } },
++  ];
++  const boundedPartialL4 = boundedSpatialV3(partialL4);
++  assert.ok(boundedPartialL4);
++  assert.equal(
++    "largestNeighborBorderShare" in boundedPartialL4.ownShape,
++    false,
++  );
++  assert.equal("tiles" in boundedPartialL4.rivals[0].bordersWith[0], false);
 +});
 +
 +test("rich spatial L5 admits weighted exposure and a complete terrain marker minimap", () => {
@@ -3729,11 +4024,11 @@ index 0000000000000000000000000000000000000000..a3b678470825189fdb72d1326b5e92ad
 +  assert.equal(bounded.ownShape.largestNeighborBorderShare, 25);
 +  assert.deepEqual(bounded.rivals[0].navalExposure, {
 +    transportReachableOwnShoreTiles: 12,
-+    nearestEnemyPort: { bearing: "east", distanceClass: "near" },
 +  });
 +  assert.equal(bounded.minimap.schemaVersion, 2);
 +  assert.deepEqual(bounded.minimap.markers, [
-+    { type: "P", ownerPlayerID: "P_A", x: 10, y: 5 },
++    { type: "D", ownerPlayerID: "P_SELF", x: 6, y: 4 },
++    { type: "W", ownerPlayerID: "P_A", x: 14, y: 4 },
 +  ]);
 +  assert.deepEqual(boundedSpatialObservation(valid), bounded);
 +
@@ -3747,6 +4042,9 @@ index 0000000000000000000000000000000000000000..a3b678470825189fdb72d1326b5e92ad
 +  validWeightedGraph.visiblePlayers[0].bordersWith = [
 +    { playerID: "P_B", sizeClass: "minor", tiles: 3 },
 +  ];
++  validWeightedGraph.visiblePlayers[1].bordersWith = [
++    { playerID: "P_A", sizeClass: "minor", tiles: 4 },
++  ];
 +  assert.ok(boundedSpatialV5(validWeightedGraph));
 +
 +  const mutations = [
@@ -3754,12 +4052,98 @@ index 0000000000000000000000000000000000000000..a3b678470825189fdb72d1326b5e92ad
 +      value.spatial.ownShape.largestNeighborBorderShare = 101;
 +    },
 +    (value) => {
++      value.spatial.ownShape.largestNeighborBorderShare = 0;
++    },
++    (value) => {
++      value.spatial.ownShape.largestNeighborBorderShare = 25.5;
++      value.visiblePlayers[0].borderWithYou.shareOfYourBorder = 25.5;
++    },
++    (value) => {
++      delete value.spatial.ownShape.compactness;
++      delete value.spatial.ownShape.regionCount;
++      delete value.spatial.ownShape.largestRegionShare;
++    },
++    (value) => {
++      value.spatial.ownShape.regionAnalysis = "omitted_budget";
++    },
++    (value) => {
++      value.spatial.ownShape.compactness = "fragmented";
++    },
++    (value) => {
++      value.spatial.ownShape.regionCount = 2;
++      value.spatial.ownShape.largestRegionShare = 80;
++    },
++    (value) => {
++      value.spatial.ownShape.regionCount = Number.MAX_SAFE_INTEGER;
++    },
++    (value) => {
 +      value.visiblePlayers[0].navalExposure.transportReachableOwnShoreTiles =
 +        -1;
 +    },
 +    (value) => {
++      value.visiblePlayers[0].navalExposure.transportReachableOwnShoreTiles =
++        Number.MAX_SAFE_INTEGER;
++    },
++    (value) => {
++      value.visiblePlayers[0].borderWithYou.tiles = Number.MAX_SAFE_INTEGER;
++    },
++    (value) => {
++      value.visiblePlayers[0].borderWithYou.tiles = 0;
++    },
++    (value) => {
++      value.visiblePlayers[0].borderWithYou.defensePostsCovering =
++        Number.MAX_SAFE_INTEGER;
++    },
++    (value) => {
++      value.visiblePlayers[0].borderWithYou.terrain = "land";
++      value.visiblePlayers[0].borderWithYou.terrainBreakdown.shore = 1;
++    },
++    (value) => {
++      value.visiblePlayers[0].borderWithYou.defensePostsCovering = 0;
++      value.visiblePlayers[0].borderWithYou.defensePostFrontCoverage.covered = 1;
++      value.visiblePlayers[0].borderWithYou.defensePostFrontCoverage.uncovered =
++        value.visiblePlayers[0].borderWithYou.tiles - 1;
++    },
++    (value) => {
++      delete value.visiblePlayers[0].distanceClass;
++    },
++    (value) => {
++      delete value.visiblePlayers[0].bordersWith;
++    },
++    (value) => {
++      value.visiblePlayers[0].sharesBorder = false;
++    },
++    (value) => {
++      delete value.visiblePlayers[0].borderWithYou;
++      value.spatial.ownShape.largestNeighborBorderShare = 0;
++    },
++    (value) => {
++      value.visiblePlayers[0].distanceClass = "near";
++    },
++    (value) => {
++      value.visiblePlayers[0].borderWithYou.underAttackHere = true;
++    },
++    (value) => {
++      value.visiblePlayers[0].borderWithYou.defensePostsCovering = 2;
++    },
++    (value) => {
++      value.visiblePlayers[0].navalExposure.nearestEnemyPort = {
++        bearing: "east",
++        distanceClass: "near",
++      };
++    },
++    (value) => {
 +      value.visiblePlayers[0].bordersWith = [
 +        { playerID: "P_A", sizeClass: "minor", tiles: 0 },
++      ];
++    },
++    (value) => {
++      value.visiblePlayers[0].bordersWith = [
++        {
++          playerID: "P_A",
++          sizeClass: "minor",
++          tiles: Number.MAX_SAFE_INTEGER,
++        },
 +      ];
 +    },
 +    (value) => {
@@ -3779,11 +4163,33 @@ index 0000000000000000000000000000000000000000..a3b678470825189fdb72d1326b5e92ad
 +    assert.equal(boundedSpatialV5(malformed), null);
 +  }
 +
++  const cappedV5WarshipsMissingPost = structuredClone(valid);
++  cappedV5WarshipsMissingPost.spatial.positionedAssets.analysis = "capped";
++  cappedV5WarshipsMissingPost.spatial.positionedAssets.structures = [];
++  cappedV5WarshipsMissingPost.spatial.positionedAssets.structuresTotal = 0;
++  cappedV5WarshipsMissingPost.spatial.positionedAssets.structuresReturned = 0;
++  cappedV5WarshipsMissingPost.spatial.positionedAssets.warshipsTotal += 1;
++  cappedV5WarshipsMissingPost.spatial.positionedAssets.warshipsTruncated = true;
++  assert.equal(boundedSpatialV5(cappedV5WarshipsMissingPost), null);
++
++  const cappedWarshipsMissingPort = structuredClone(valid);
++  cappedWarshipsMissingPort.spatial.positionedAssets.analysis = "capped";
++  cappedWarshipsMissingPort.spatial.positionedAssets.warshipsTotal += 1;
++  cappedWarshipsMissingPort.spatial.positionedAssets.warshipsTruncated = true;
++  cappedWarshipsMissingPort.visiblePlayers[0].navalExposure.nearestEnemyPort = {
++    bearing: "east",
++    distanceClass: "near",
++  };
++  assert.equal(boundedSpatialV5(cappedWarshipsMissingPort), null);
++
 +  const duplicateEdge = structuredClone(validWeightedGraph);
 +  duplicateEdge.visiblePlayers[0].bordersWith.push({
 +    ...duplicateEdge.visiblePlayers[0].bordersWith[0],
 +  });
 +  assert.equal(boundedSpatialV5(duplicateEdge), null);
++  const asymmetricEdge = structuredClone(validWeightedGraph);
++  asymmetricEdge.visiblePlayers[1].bordersWith = [];
++  assert.equal(boundedSpatialV5(asymmetricEdge), null);
 +
 +  const legacyMinimap = structuredClone(valid);
 +  legacyMinimap.spatial.minimap = {
@@ -3806,6 +4212,32 @@ index 0000000000000000000000000000000000000000..a3b678470825189fdb72d1326b5e92ad
 +    (value) => {
 +      value.spatial.minimap.markersReturned = 0;
 +    },
++    (value) => {
++      value.spatial.minimap.width = 32;
++      value.spatial.minimap.height = 16;
++      value.spatial.minimap.ownershipRows = Array.from({ length: 16 }, () =>
++        ".".repeat(32),
++      );
++      value.spatial.minimap.terrainRows = Array.from({ length: 16 }, () =>
++        ".".repeat(32),
++      );
++    },
++    (value) => {
++      value.spatial.minimap.markersTotal += 1;
++      value.spatial.minimap.markersTruncated = true;
++    },
++    (value) => {
++      value.spatial.minimap = null;
++    },
++    (value) => {
++      value.spatial.minimap.legend[0] = null;
++    },
++    (value) => {
++      value.spatial.minimap.markers[0] = null;
++    },
++    (value) => {
++      value.spatial.minimap.markers[0].type = ["D"];
++    },
 +  ]) {
 +    const malformed = structuredClone(valid);
 +    mutateMinimap(malformed);
@@ -3813,6 +4245,126 @@ index 0000000000000000000000000000000000000000..a3b678470825189fdb72d1326b5e92ad
 +    assert.ok(stillRich);
 +    assert.equal("minimap" in stillRich, false);
 +  }
++});
++
++test("rich spatial and minimap retain their independent wire byte ceilings", () => {
++  const idLength = 65;
++  const ownPlayerID = "S".repeat(idLength);
++  const rivalIDs = Array.from(
++    { length: 6 },
++    (_, index) =>
++      `${String.fromCharCode(65 + index).repeat(idLength - 2)}${String(index).padStart(2, "0")}`,
++  );
++  const positionedAssets = (type) =>
++    rivalIDs.flatMap((ownerPlayerID, playerIndex) =>
++      Array.from({ length: 8 }, (_, assetIndex) => ({
++        ownerPlayerID,
++        type,
++        tile: playerIndex * 1000 + assetIndex,
++        x: assetIndex,
++        y: playerIndex,
++      })),
++    );
++  const observation = {
++    ownState: { playerID: ownPlayerID },
++    mapInfo: {
++      name: "Boundary",
++      width: 1000,
++      height: 300,
++      tileRefEncoding: "row-major-y-width-plus-x",
++      coordinateFrame: {
++        origin: "top_left",
++        xIncreases: "east",
++        yIncreases: "south",
++      },
++    },
++    spatial: {
++      schemaVersion: 5,
++      visibilityModel: SPATIAL_VISIBILITY_MODEL,
++      ownShape: {
++        quadrant: "center",
++        compactness: "compact",
++        regionCount: 1,
++        largestRegionShare: 100,
++        regionAnalysis: "complete",
++        centroidBasis: "largest_region_border",
++        coastShare: 0,
++        largestNeighborBorderShare: 0,
++        centroid: { xPct: 50, yPct: 50 },
++      },
++      positionedAssets: {
++        analysis: "complete",
++        structures: positionedAssets("City"),
++        structuresTotal: 48,
++        structuresReturned: 48,
++        structuresTruncated: false,
++        warships: positionedAssets("Warship"),
++        warshipsTotal: 48,
++        warshipsReturned: 48,
++        warshipsTruncated: false,
++      },
++    },
++    visiblePlayers: rivalIDs.map((playerID) => ({
++      playerID,
++      sharesBorder: false,
++      distanceClass: "far",
++      bordersWith: [],
++      navalExposure: { transportReachableOwnShoreTiles: 0 },
++    })),
++  };
++  const boundedBase = boundedSpatialV5(observation);
++  assert.ok(boundedBase);
++  const minimap = {
++    schemaVersion: 2,
++    width: 32,
++    height: 16,
++    ownershipRows: Array.from({ length: 16 }, () => "A".repeat(32)),
++    terrainRows: Array.from({ length: 16 }, () => ".".repeat(32)),
++    legend: [{ glyph: "A", playerID: ownPlayerID, isYou: true }],
++    markers: Array.from({ length: 24 }, (_, index) => ({
++      type: "C",
++      ownerPlayerID: ownPlayerID,
++      x: index,
++      y: 0,
++    })),
++    markersTotal: 96,
++    markersReturned: 24,
++    markersTruncated: true,
++  };
++  const boundedWithMinimap = boundedSpatialV5({
++    ...observation,
++    spatial: { ...observation.spatial, minimap },
++  });
++  assert.ok(boundedWithMinimap?.minimap);
++  assert.ok(
++    Buffer.byteLength(JSON.stringify(boundedBase), "utf8") <=
++      OWNER_SPATIAL_SERIALIZED_MAX_BYTES,
++  );
++  assert.ok(Buffer.byteLength(JSON.stringify(minimap), "utf8") <= 4 * 1024);
++  assert.ok(
++    Buffer.byteLength(JSON.stringify(boundedWithMinimap), "utf8") >
++      OWNER_SPATIAL_SERIALIZED_MAX_BYTES,
++  );
++
++  const oversizedStageOne = structuredClone(observation);
++  const replacementIDs = new Map([
++    [ownPlayerID, "S".repeat(92)],
++    ...rivalIDs.map((playerID, index) => [
++      playerID,
++      `${String.fromCharCode(65 + index).repeat(90)}${String(index).padStart(2, "0")}`,
++    ]),
++  ]);
++  oversizedStageOne.ownState.playerID = replacementIDs.get(ownPlayerID);
++  for (const player of oversizedStageOne.visiblePlayers) {
++    player.playerID = replacementIDs.get(player.playerID);
++  }
++  for (const asset of [
++    ...oversizedStageOne.spatial.positionedAssets.structures,
++    ...oversizedStageOne.spatial.positionedAssets.warships,
++  ]) {
++    asset.ownerPlayerID = replacementIDs.get(asset.ownerPlayerID);
++  }
++  assert.equal(boundedSpatialV5(oversizedStageOne), null);
 +});
 +
 +test("rich spatial facts can only rerank exact offered legal action ids", () => {
@@ -3864,17 +4416,10 @@ index 0000000000000000000000000000000000000000..a3b678470825189fdb72d1326b5e92ad
 +    bordersWith: [],
 +    navalExposure: { transportReachableOwnShoreTiles: 0 },
 +  });
-+  observation.spatial.positionedAssets = {
-+    analysis: "complete",
-+    structures: [],
-+    structuresTotal: 0,
-+    structuresReturned: 0,
-+    structuresTruncated: false,
-+    warships: [],
-+    warshipsTotal: 0,
-+    warshipsReturned: 0,
-+    warshipsTruncated: false,
-+  };
++  observation.spatial.positionedAssets.warships = [];
++  observation.spatial.positionedAssets.warshipsTotal = 0;
++  observation.spatial.positionedAssets.warshipsReturned = 0;
++  observation.spatial.positionedAssets.warshipsTruncated = false;
 +  const actions = [
 +    { id: "attack:P_B", kind: "attack", metadata: { targetID: "P_B" } },
 +    { id: "attack:P_A", kind: "attack", metadata: { targetID: "P_A" } },
@@ -3897,7 +4442,7 @@ index 0000000000000000000000000000000000000000..a3b678470825189fdb72d1326b5e92ad
 +  const body = "Hold the shared border exactly.";
 +  const digest = createHash("sha256").update(body, "utf8").digest("hex");
 +  const observation = {
-+    ...spatialObservation(),
++    ...richSpatialObservationV5(),
 +    deals: {
 +      decisionStep: 4,
 +      incomingProposals: [],
@@ -3909,6 +4454,7 @@ index 0000000000000000000000000000000000000000..a3b678470825189fdb72d1326b5e92ad
 +    nonCombat: {
 +      inboundMessages: [
 +        {
++          messageEventID: "msg_22222222-2222-4222-8222-222222222222",
 +          senderID: "P_B",
 +          senderName: "Rival B",
 +          turnNumber: 7,
@@ -3953,16 +4499,28 @@ index 0000000000000000000000000000000000000000..a3b678470825189fdb72d1326b5e92ad
 +  const observed = events.find((event) => event.kind === "message_observation");
 +  assert.equal(selected.messageBodySHA256, digest);
 +  assert.equal(observed.messageBodySHA256, digest);
++  assert.equal(
++    observed.messageEventID,
++    "msg_22222222-2222-4222-8222-222222222222",
++  );
 +  assert.deepEqual(selected.offeredMessageActionIDs, [message.id]);
 +  assert.equal(selected.selectedMessageActionID, message.id);
 +  assert.equal(selected.selectedLegalActionOffered, true);
++  const spatial = events.find((event) => event.kind === "spatial_observation");
++  assert.ok(Number.isSafeInteger(spatial.baseSerializedUTF8Bytes));
++  assert.ok(spatial.baseSerializedUTF8Bytes > 0);
++  assert.ok(spatial.baseSerializedUTF8Bytes <= 16 * 1024);
++  assert.ok(Number.isSafeInteger(spatial.minimapSerializedUTF8Bytes));
++  assert.ok(spatial.minimapSerializedUTF8Bytes > 0);
++  assert.ok(spatial.minimapSerializedUTF8Bytes <= 4 * 1024);
++  assert.equal("serializedUTF8Bytes" in spatial, false);
 +});
 diff --git a/owner-evidence-check.mjs b/owner-evidence-check.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..030d600f1e6a147b27e6f8c1883ba1dd485d4bb0
+index 0000000000000000000000000000000000000000..234f293f119d90864020187fcb35752a874961e7
 --- /dev/null
 +++ b/owner-evidence-check.mjs
-@@ -0,0 +1,468 @@
+@@ -0,0 +1,513 @@
 +import fs from "node:fs";
 +
 +const PREFIX = "PROXYWAR_OWNER_CAPABILITY_EVIDENCE ";
@@ -4018,6 +4576,7 @@ index 0000000000000000000000000000000000000000..030d600f1e6a147b27e6f8c1883ba1dd
 +    "message_observation",
 +    new Set([
 +      ...COMMON_KEYS,
++      "messageEventID",
 +      "senderID",
 +      "senderTurn",
 +      "messageBodySHA256",
@@ -4034,7 +4593,8 @@ index 0000000000000000000000000000000000000000..030d600f1e6a147b27e6f8c1883ba1dd
 +      "visibilityModel",
 +      "minimapPresent",
 +      "minimapSchemaVersion",
-+      "serializedUTF8Bytes",
++      "baseSerializedUTF8Bytes",
++      "minimapSerializedUTF8Bytes",
 +    ]),
 +  ],
 +]);
@@ -4102,6 +4662,8 @@ index 0000000000000000000000000000000000000000..030d600f1e6a147b27e6f8c1883ba1dd
 +    }
 +  } else if (event.kind === "message_observation") {
 +    if (
++      (Object.hasOwn(event, "messageEventID") &&
++        !isBoundedString(event.messageEventID)) ||
 +      !isBoundedString(event.senderID) ||
 +      !Number.isSafeInteger(event.senderTurn) ||
 +      event.senderTurn < 0
@@ -4129,10 +4691,12 @@ index 0000000000000000000000000000000000000000..030d600f1e6a147b27e6f8c1883ba1dd
 +    SHA256.test(event.messageBodySHA256 ?? "") &&
 +    Number.isSafeInteger(event.messageBodyUTF8Bytes) &&
 +    event.messageBodyUTF8Bytes >= 1 &&
-+    event.messageBodyUTF8Bytes <= 4 * 280 &&
++    event.messageBodyUTF8Bytes <= 3 * 280 &&
 +    Number.isSafeInteger(event.messageBodyUTF16CodeUnits) &&
 +    event.messageBodyUTF16CodeUnits >= 1 &&
-+    event.messageBodyUTF16CodeUnits <= 280
++    event.messageBodyUTF16CodeUnits <= 280 &&
++    event.messageBodyUTF8Bytes >= event.messageBodyUTF16CodeUnits &&
++    event.messageBodyUTF8Bytes <= 3 * event.messageBodyUTF16CodeUnits
 +  );
 +}
 +
@@ -4285,6 +4849,19 @@ index 0000000000000000000000000000000000000000..030d600f1e6a147b27e6f8c1883ba1dd
 +      "message selection and recipient-observation evidence are both required",
 +    );
 +  }
++  if (
++    observations.some(
++      (observation) => !isBoundedString(observation.messageEventID),
++    )
++  ) {
++    fail("message observation evidence is missing a server-owned event id");
++  }
++  if (
++    new Set(observations.map((observation) => observation.messageEventID))
++      .size !== observations.length
++  ) {
++    fail("message observation evidence reused a server-owned event id");
++  }
 +  const joinedObservationIndexes = new Set();
 +  for (const selection of selections) {
 +    const joinedIndex = observations.findIndex(
@@ -4322,11 +4899,9 @@ index 0000000000000000000000000000000000000000..030d600f1e6a147b27e6f8c1883ba1dd
 +  if (rich && !spatial.every((event) => event.present === true)) {
 +    fail("rich spatial evidence included an absent policy observation");
 +  }
-+  if (rich) {
-+    for (const file of files) {
-+      if (!spatial.some((event) => event.sourceFile === file)) {
-+        fail(`${file}: rich spatial evidence record is missing`);
-+      }
++  for (const file of files) {
++    if (!spatial.some((event) => event.sourceFile === file)) {
++      fail(`${file}: spatial evidence record is missing`);
 +    }
 +  }
 +  if (
@@ -4339,6 +4914,22 @@ index 0000000000000000000000000000000000000000..030d600f1e6a147b27e6f8c1883ba1dd
 +  }
 +  if (richV5 && !spatial.every((event) => event.schemaVersion === 5)) {
 +    fail("rich spatial evidence included a non-v5 observation");
++  }
++  if (
++    required === "rich-v3" &&
++    !spatial.every((event) => event.minimapPresent === false)
++  ) {
++    fail(
++      "a rich v3 base-only policy observation unexpectedly included a minimap",
++    );
++  }
++  if (
++    required === "rich-v5" &&
++    !spatial.every((event) => event.minimapPresent === false)
++  ) {
++    fail(
++      "a rich v5 base-only policy observation unexpectedly included a minimap",
++    );
 +  }
 +  if (
 +    required === "rich-v3-minimap" &&
@@ -4367,10 +4958,21 @@ index 0000000000000000000000000000000000000000..030d600f1e6a147b27e6f8c1883ba1dd
 +      typeof event.minimapPresent !== "boolean" ||
 +      (event.minimapPresent === true &&
 +        ![1, 2].includes(event.minimapSchemaVersion)) ||
++      (event.minimapPresent === true &&
++        [1, 3].includes(event.schemaVersion) &&
++        event.minimapSchemaVersion !== 1) ||
++      (event.minimapPresent === true &&
++        event.schemaVersion === 5 &&
++        event.minimapSchemaVersion !== 2) ||
 +      (event.minimapPresent === false && "minimapSchemaVersion" in event) ||
-+      !Number.isSafeInteger(event.serializedUTF8Bytes) ||
-+      event.serializedUTF8Bytes < 1 ||
-+      event.serializedUTF8Bytes > 16 * 1024
++      !Number.isSafeInteger(event.baseSerializedUTF8Bytes) ||
++      event.baseSerializedUTF8Bytes < 1 ||
++      event.baseSerializedUTF8Bytes > 16 * 1024 ||
++      (event.minimapPresent === true &&
++        (!Number.isSafeInteger(event.minimapSerializedUTF8Bytes) ||
++          event.minimapSerializedUTF8Bytes < 1 ||
++          event.minimapSerializedUTF8Bytes > 4 * 1024)) ||
++      (event.minimapPresent === false && "minimapSerializedUTF8Bytes" in event)
 +    ) {
 +      fail(`${event.sourceFile}: invalid spatial provenance or byte bound`);
 +    }
@@ -4383,7 +4985,8 @@ index 0000000000000000000000000000000000000000..030d600f1e6a147b27e6f8c1883ba1dd
 +      "visibilityModel" in event ||
 +      "minimapPresent" in event ||
 +      "minimapSchemaVersion" in event ||
-+      "serializedUTF8Bytes" in event
++      "baseSerializedUTF8Bytes" in event ||
++      "minimapSerializedUTF8Bytes" in event
 +    ) {
 +      fail(
 +        `${event.sourceFile}: absent spatial evidence carried present-only fields`,
@@ -4433,10 +5036,10 @@ index 0000000000000000000000000000000000000000..030d600f1e6a147b27e6f8c1883ba1dd
 +}
 diff --git a/owner-evidence-check.test.mjs b/owner-evidence-check.test.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..dee0a13537dd9133de9d28420a38267faf500b4f
+index 0000000000000000000000000000000000000000..27f491a58274fef58cb2b2f96abd9fbd14104b24
 --- /dev/null
 +++ b/owner-evidence-check.test.mjs
-@@ -0,0 +1,291 @@
+@@ -0,0 +1,451 @@
 +import assert from "node:assert/strict";
 +import { spawnSync } from "node:child_process";
 +import { createHash } from "node:crypto";
@@ -4488,6 +5091,7 @@ index 0000000000000000000000000000000000000000..dee0a13537dd9133de9d28420a38267f
 +    {
 +      kind: "message_observation",
 +      ...common("P_B", "req_recipient"),
++      messageEventID: "msg_33333333-3333-4333-8333-333333333333",
 +      senderID: "P_A",
 +      senderTurn: 42,
 +      messageBodySHA256: digest,
@@ -4553,7 +5157,8 @@ index 0000000000000000000000000000000000000000..dee0a13537dd9133de9d28420a38267f
 +      visibilityModel: "global-lockstep-public-map-v1",
 +      minimapPresent: true,
 +      minimapSchemaVersion: 1,
-+      serializedUTF8Bytes: 8_192,
++      baseSerializedUTF8Bytes: 8_192,
++      minimapSerializedUTF8Bytes: 1_024,
 +    });
 +  }
 +  const result = runChecker(events, "rich-v3-minimap");
@@ -4569,7 +5174,8 @@ index 0000000000000000000000000000000000000000..dee0a13537dd9133de9d28420a38267f
 +        "visibilityModel",
 +        "minimapPresent",
 +        "minimapSchemaVersion",
-+        "serializedUTF8Bytes",
++        "baseSerializedUTF8Bytes",
++        "minimapSerializedUTF8Bytes",
 +      ]) {
 +        delete event[key];
 +      }
@@ -4596,7 +5202,8 @@ index 0000000000000000000000000000000000000000..dee0a13537dd9133de9d28420a38267f
 +        visibilityModel: "global-lockstep-public-map-v1",
 +        minimapPresent: true,
 +        minimapSchemaVersion: 1,
-+        serializedUTF8Bytes: 8_192,
++        baseSerializedUTF8Bytes: 8_192,
++        minimapSerializedUTF8Bytes: 1_024,
 +      });
 +    }
 +    mutation(events[2]);
@@ -4620,7 +5227,8 @@ index 0000000000000000000000000000000000000000..dee0a13537dd9133de9d28420a38267f
 +      visibilityModel: "global-lockstep-public-map-v1",
 +      minimapPresent: true,
 +      minimapSchemaVersion: 1,
-+      serializedUTF8Bytes: 8_192,
++      baseSerializedUTF8Bytes: 8_192,
++      minimapSerializedUTF8Bytes: 1_024,
 +    });
 +  }
 +  const missing = runCheckerFiles([events, []], "rich-v3-minimap");
@@ -4651,6 +5259,41 @@ index 0000000000000000000000000000000000000000..dee0a13537dd9133de9d28420a38267f
 +  assert.match(alias.stderr, /resolve to a unique file/u);
 +});
 +
++test("owner evidence checker requires absent evidence in every supplied file", () => {
++  const missing = runCheckerFiles([validEvents(), []], "absent");
++  assert.equal(missing.status, 1);
++  assert.match(missing.stderr, /record is missing/u);
++});
++
++test("owner evidence checker distinguishes the rich v3 base-only mode", () => {
++  const events = validEvents();
++  for (const event of events.filter(
++    (candidate) => candidate.kind === "spatial_observation",
++  )) {
++    Object.assign(event, {
++      present: true,
++      schemaVersion: 3,
++      visibilityModel: "global-lockstep-public-map-v1",
++      minimapPresent: false,
++      baseSerializedUTF8Bytes: 8_192,
++    });
++  }
++  const accepted = runChecker(events, "rich-v3");
++  assert.equal(accepted.status, 0, accepted.stderr);
++
++  const withMinimap = structuredClone(events);
++  for (const event of withMinimap.filter(
++    (candidate) => candidate.kind === "spatial_observation",
++  )) {
++    event.minimapPresent = true;
++    event.minimapSchemaVersion = 1;
++    event.minimapSerializedUTF8Bytes = 1_024;
++  }
++  const rejected = runChecker(withMinimap, "rich-v3");
++  assert.equal(rejected.status, 1);
++  assert.match(rejected.stderr, /base-only.*minimap/u);
++});
++
 +test("owner evidence checker distinguishes complete rich v5 minimap evidence", () => {
 +  const events = validEvents();
 +  for (const event of events.filter(
@@ -4662,7 +5305,8 @@ index 0000000000000000000000000000000000000000..dee0a13537dd9133de9d28420a38267f
 +      visibilityModel: "global-lockstep-public-map-v1",
 +      minimapPresent: true,
 +      minimapSchemaVersion: 2,
-+      serializedUTF8Bytes: 12_000,
++      baseSerializedUTF8Bytes: 14_328,
++      minimapSerializedUTF8Bytes: 3_099,
 +    });
 +  }
 +  const accepted = runChecker(events, "rich-v5-minimap");
@@ -4686,6 +5330,89 @@ index 0000000000000000000000000000000000000000..dee0a13537dd9133de9d28420a38267f
 +    const rejected = runChecker(malformed, "rich-v5-minimap");
 +    assert.equal(rejected.status, 1);
 +    assert.match(rejected.stderr, /non-v5|bounded v2 minimap/u);
++  }
++});
++
++test("owner evidence checker distinguishes the rich v5 base-only arm", () => {
++  const events = validEvents();
++  for (const event of events.filter(
++    (candidate) => candidate.kind === "spatial_observation",
++  )) {
++    Object.assign(event, {
++      present: true,
++      schemaVersion: 5,
++      visibilityModel: "global-lockstep-public-map-v1",
++      minimapPresent: false,
++      baseSerializedUTF8Bytes: 14_328,
++    });
++  }
++  const accepted = runChecker(events, "rich-v5");
++  assert.equal(accepted.status, 0, accepted.stderr);
++  assert.equal(JSON.parse(accepted.stdout).spatial, "rich-v5");
++
++  const fullOn = structuredClone(events);
++  for (const event of fullOn.filter(
++    (candidate) => candidate.kind === "spatial_observation",
++  )) {
++    event.minimapPresent = true;
++    event.minimapSchemaVersion = 2;
++    event.minimapSerializedUTF8Bytes = 3_099;
++  }
++  const rejected = runChecker(fullOn, "rich-v5");
++  assert.equal(rejected.status, 1);
++  assert.match(rejected.stderr, /base-only.*minimap/u);
++});
++
++test("owner evidence checker rejects a minimap from the wrong parent schema", () => {
++  for (const schemaVersion of [1, 3]) {
++    const events = validEvents();
++    for (const event of events.filter(
++      (candidate) => candidate.kind === "spatial_observation",
++    )) {
++      Object.assign(event, {
++        present: true,
++        schemaVersion,
++        visibilityModel: "global-lockstep-public-map-v1",
++        minimapPresent: true,
++        minimapSchemaVersion: 2,
++        baseSerializedUTF8Bytes: 8_192,
++        minimapSerializedUTF8Bytes: 1_024,
++      });
++    }
++    const rejected = runChecker(events, "present");
++    assert.equal(rejected.status, 1);
++    assert.match(rejected.stderr, /provenance or byte bound/u);
++  }
++});
++
++test("owner evidence checker enforces independent rich spatial byte ceilings", () => {
++  const events = validEvents();
++  for (const event of events.filter(
++    (candidate) => candidate.kind === "spatial_observation",
++  )) {
++    Object.assign(event, {
++      present: true,
++      schemaVersion: 5,
++      visibilityModel: "global-lockstep-public-map-v1",
++      minimapPresent: true,
++      minimapSchemaVersion: 2,
++      baseSerializedUTF8Bytes: 14_328,
++      minimapSerializedUTF8Bytes: 3_099,
++    });
++  }
++  const independentlyBounded = runChecker(events, "rich-v5-minimap");
++  assert.equal(independentlyBounded.status, 0, independentlyBounded.stderr);
++
++  for (const [field, value] of [
++    ["baseSerializedUTF8Bytes", 16 * 1024 + 1],
++    ["minimapSerializedUTF8Bytes", 4 * 1024 + 1],
++  ]) {
++    const oversized = structuredClone(events);
++    oversized.find((event) => event.kind === "spatial_observation")[field] =
++      value;
++    const rejected = runChecker(oversized, "rich-v5-minimap");
++    assert.equal(rejected.status, 1);
++    assert.match(rejected.stderr, /provenance or byte bound/u);
 +  }
 +});
 +
@@ -4713,6 +5440,42 @@ index 0000000000000000000000000000000000000000..dee0a13537dd9133de9d28420a38267f
 +  assert.match(result.stderr, /no recipient observation joined/u);
 +});
 +
++test("owner evidence checker requires unique server-owned message event ids", () => {
++  const missing = validEvents();
++  delete missing[3].messageEventID;
++  const missingResult = runChecker(missing);
++  assert.equal(missingResult.status, 1);
++  assert.match(missingResult.stderr, /missing a server-owned event id/u);
++
++  const reused = validEvents();
++  reused.push({
++    ...structuredClone(reused[3]),
++    requestID: "req_recipient_later",
++  });
++  const reusedResult = runChecker(reused);
++  assert.equal(reusedResult.status, 1);
++  assert.match(reusedResult.stderr, /reused a server-owned event id/u);
++});
++
++test("owner evidence checker rejects impossible UTF-8 and UTF-16 counts", () => {
++  for (const [utf8Bytes, utf16CodeUnits] of [
++    [1, 2],
++    [4, 1],
++    [841, 280],
++  ]) {
++    const events = validEvents();
++    for (const event of events.filter((candidate) =>
++      ["message_selection", "message_observation"].includes(candidate.kind),
++    )) {
++      event.messageBodyUTF8Bytes = utf8Bytes;
++      event.messageBodyUTF16CodeUnits = utf16CodeUnits;
++    }
++    const result = runChecker(events);
++    assert.equal(result.status, 1);
++    assert.match(result.stderr, /invalid bounded outgoing message digest/u);
++  }
++});
++
 +test("owner evidence checker rejects extra fields and private material", () => {
 +  for (const extra of [
 +    { unexpected: true },
@@ -4730,10 +5493,10 @@ index 0000000000000000000000000000000000000000..dee0a13537dd9133de9d28420a38267f
 +});
 diff --git a/owner-player-frame.test.mjs b/owner-player-frame.test.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..899fcad26de9d16c6cce5ff766fa949be0f6855a
+index 0000000000000000000000000000000000000000..c9422afe222ee0ea116e4552f53261b3d50cb48d
 --- /dev/null
 +++ b/owner-player-frame.test.mjs
-@@ -0,0 +1,280 @@
+@@ -0,0 +1,348 @@
 +import assert from "node:assert/strict";
 +import { spawn } from "node:child_process";
 +import { once } from "node:events";
@@ -4921,7 +5684,45 @@ index 0000000000000000000000000000000000000000..899fcad26de9d16c6cce5ff766fa949b
 +  return request;
 +}
 +
-+async function runPlayer(playerFile, request) {
++function sameTurnMessageRequest(requestID, messageEventID, text) {
++  const request = absentRequest();
++  request.requestID = requestID;
++  request.protocol.maxMessageChars = 280;
++  request.request.observation.visiblePlayers = [
++    {
++      playerID: "P_B",
++      name: "Rival B",
++      isAlive: true,
++      sharesBorder: true,
++      isAllied: false,
++      isFriendly: false,
++      relation: 0,
++      canAttack: true,
++    },
++  ];
++  request.request.observation.nonCombat = {
++    inboundMessages: [
++      {
++        messageEventID,
++        senderID: "P_B",
++        senderName: "Rival B",
++        turnNumber: 7,
++        text,
++      },
++    ],
++  };
++  request.request.legalActions.push({
++    id: "message:P_B",
++    kind: "message",
++    label: "Send a private message to Rival B",
++    risk: { level: "none", score: 0 },
++    metadata: { recipientID: "P_B" },
++  });
++  return request;
++}
++
++async function runPlayerSequence(playerFile, requests) {
++  assert.ok(requests.length > 0);
 +  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
 +  await once(server, "listening");
 +  const address = server.address();
@@ -4967,19 +5768,29 @@ index 0000000000000000000000000000000000000000..899fcad26de9d16c6cce5ff766fa949b
 +        }
 +      });
 +      server.once("connection", (socket) => {
-+        socket.once("message", (payload) => {
-+          clearTimeout(timer);
-+          const response = JSON.parse(String(payload));
-+          socket.send(JSON.stringify({ type: "final" }));
-+          resolve(response);
++        const responses = [];
++        socket.on("message", (payload) => {
++          responses.push(JSON.parse(String(payload)));
++          if (responses.length === requests.length) {
++            clearTimeout(timer);
++            socket.send(JSON.stringify({ type: "final" }));
++            resolve(responses);
++            return;
++          }
++          socket.send(JSON.stringify(requests[responses.length]));
 +        });
-+        socket.send(JSON.stringify(request));
++        socket.send(JSON.stringify(requests[0]));
 +      });
 +    });
 +  } finally {
 +    child.kill("SIGTERM");
 +    await new Promise((resolve) => server.close(resolve));
 +  }
++}
++
++async function runPlayer(playerFile, request) {
++  const [response] = await runPlayerSequence(playerFile, [request]);
++  return response;
 +}
 +
 +for (const playerFile of PLAYER_FILES) {
@@ -5013,6 +5824,26 @@ index 0000000000000000000000000000000000000000..899fcad26de9d16c6cce5ff766fa949b
 +    assert.equal("selectedMessageActionId" in response, false);
 +    assert.equal("messageText" in response, false);
 +  });
++
++  test(`${playerFile} preserves distinct same-turn message event ids`, async () => {
++    const responses = await runPlayerSequence(playerFile, [
++      sameTurnMessageRequest(
++        "req_same_turn_first",
++        "msg_44444444-4444-4444-8444-444444444444",
++        "First same-turn message",
++      ),
++      sameTurnMessageRequest(
++        "req_same_turn_second",
++        "msg_55555555-5555-4555-8555-555555555555",
++        "Second same-turn message",
++      ),
++    ]);
++    assert.equal(responses.length, 2);
++    for (const response of responses) {
++      assert.equal(response.selectedMessageActionId, "message:P_B");
++      assert.equal(typeof response.messageText, "string");
++    }
++  });
 +}
 diff --git a/package.json b/package.json
 index 82a5d4cceb14c115c435200844f11a57005f211a..33459da84c1825248cc2af8a20142d3f627816e5 100644
@@ -5029,7 +5860,7 @@ index 82a5d4cceb14c115c435200844f11a57005f211a..33459da84c1825248cc2af8a20142d3f
      "ws": "^8.18.0",
      "@anthropic-ai/bedrock-sdk": "^0.29.2"
 diff --git a/starter-player.mjs b/starter-player.mjs
-index f76a42f790bfa9b4e04db41609b046d1a632e862..812f1fc87fde1798c18928b504132d1f5eb83961 100644
+index f76a42f790bfa9b4e04db41609b046d1a632e862..ec0fadfedf3a81c9324d916e20e81869461fb017 100644
 --- a/starter-player.mjs
 +++ b/starter-player.mjs
 @@ -9,6 +9,14 @@
@@ -5278,7 +6109,7 @@ index f76a42f790bfa9b4e04db41609b046d1a632e862..812f1fc87fde1798c18928b504132d1f
    const supported = (action) =>
      action.metadata?.template === "non_aggression_pact" ||
      action.metadata?.template === "trade_security_pact";
-@@ -313,3 +430,237 @@ function chooseDealAction(actions) {
+@@ -313,3 +430,241 @@ function chooseDealAction(actions) {
      null
    );
  }
@@ -5348,7 +6179,8 @@ index f76a42f790bfa9b4e04db41609b046d1a632e862..812f1fc87fde1798c18928b504132d1f
 +// the LLM starter's DEAL_TRUST_MIN_RELIABILITY.
 +const MESSAGE_TRUST_MIN_RELIABILITY = 0.5;
 +
-+// Inbound messages already answered, keyed `${senderID}:${turnNumber}`, plus
++// Inbound messages already answered, keyed by server-owned messageEventID
++// (`${senderID}:${turnNumber}` for legacy observations), plus
 +// `opener:${recipientID}` for counterparties already opened with and
 +// `reply:${senderID}:${n}` for the lifetime reply budget. Module scope, so it
 +// is exactly one match's memory.
@@ -5414,7 +6246,10 @@ index f76a42f790bfa9b4e04db41609b046d1a632e862..812f1fc87fde1798c18928b504132d1f
 +  // below is what actually ends a conversation. Deliberately NOT falling
 +  // through to an opener here: having just declined to repeat ourselves,
 +  // opening a second conversation would be chatter.
-+  const key = `${senderID}:${newest.turnNumber}`;
++  const key =
++    typeof newest.messageEventID === "string"
++      ? newest.messageEventID
++      : `${senderID}:${newest.turnNumber}`;
 +  if (answered.has(key)) return null;
 +
 +  // Lifetime reply budget for this counterparty: sequential slot keys in the
