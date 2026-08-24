@@ -204,8 +204,7 @@ response-contract nesting below are exact and internally consistent:
           },
           "bordersWith": [],
           "navalExposure": {
-            "transportReachableOwnShoreTiles": 12,
-            "nearestEnemyPort": { "bearing": "east", "distanceClass": "near" }
+            "transportReachableOwnShoreTiles": 12
           }
         }
       ],
@@ -255,13 +254,13 @@ response-contract nesting below are exact and internally consistent:
           "width": 24,
           "height": 12,
           "ownershipRows": [
-            "A.......................",
             "........................",
             "........................",
             "........................",
             "........................",
             "........................",
             "........................",
+            ".......A......~.........",
             "........................",
             "........................",
             "........................",
@@ -275,17 +274,23 @@ response-contract nesting below are exact and internally consistent:
             "........................",
             "........................",
             "........................",
-            "........................",
+            "..............~.........",
             "........................",
             "........................",
             "........................",
             "........................",
             "........................"
           ],
-          "legend": [{ "glyph": "A", "playerID": "P_A", "isYou": true }],
-          "markers": [{ "type": "D", "ownerPlayerID": "P_A", "x": 7, "y": 4 }],
-          "markersTotal": 1,
-          "markersReturned": 1,
+          "legend": [
+            { "glyph": "A", "playerID": "P_A", "isYou": true },
+            { "glyph": "B", "playerID": "P_B", "isYou": false }
+          ],
+          "markers": [
+            { "type": "D", "ownerPlayerID": "P_A", "x": 7, "y": 6 },
+            { "type": "W", "ownerPlayerID": "P_B", "x": 14, "y": 6 }
+          ],
+          "markersTotal": 2,
+          "markersReturned": 2,
           "markersTruncated": false
         }
       }
@@ -352,8 +357,11 @@ name remains at `observation.username`, while rival names remain in
 duplicated into the 4 KiB minimap payload. Minimap schema `2` has separate
 ownership and dominant-terrain rows plus at most 24 exact-roster-bound
 completed-public `D`/`C`/`P`/`W` markers with explicit totals/truncation.
-The complete normalized spatial object must also serialize to at most 16 KiB of
-UTF-8; a one-byte-over object fails as a whole rather than being truncated.
+The normalized schema-5 base (map, shape, rivals, and positioned assets,
+excluding the optional minimap child) must serialize to at most 16 KiB of
+UTF-8; a one-byte-over base fails as a whole rather than being truncated. The
+minimap is admitted independently under its 4 KiB child ceiling, so a valid
+child does not consume the base budget.
 Each asset tile must round-trip exactly as `tile = y * width + x`. Only active,
 completed, nondeleted Defense Posts, Cities, Ports, and Warships are admitted;
 lists are capped at eight per visible player and 48 globally with exact totals,

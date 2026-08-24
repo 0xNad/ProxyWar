@@ -48,6 +48,10 @@ function isNonnegativeSafeInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function isPercentage(value: unknown): value is number {
   return isNonnegativeSafeInteger(value) && value <= 100;
 }
@@ -99,6 +103,7 @@ function normalizedMinimapV1(
   ownPlayerID: string | undefined,
 ): AgentSpatialMinimap | undefined {
   if (minimap === undefined) return undefined;
+  if (!isRecord(minimap)) return undefined;
   const candidate = minimap as {
     schemaVersion?: unknown;
     width?: unknown;
@@ -126,6 +131,7 @@ function normalizedMinimapV1(
   const glyphs = new Set<string>();
   const playerIDs = new Set<string>();
   for (const rawEntry of candidate.legend) {
+    if (!isRecord(rawEntry)) return undefined;
     const entry = rawEntry as {
       glyph?: unknown;
       playerID?: unknown;
@@ -181,7 +187,8 @@ function normalizedMinimapV2(
   ownPlayerID: string | undefined,
 ): AgentSpatialMinimapV2 | undefined {
   if (minimap === undefined) return undefined;
-  const candidate = minimap as Record<string, unknown>;
+  if (!isRecord(minimap)) return undefined;
+  const candidate = minimap;
   const width = candidate.width;
   const height = candidate.height;
   if (
@@ -223,7 +230,8 @@ function normalizedMinimapV2(
   const playerIDs = new Set<string>();
   const legend: AgentSpatialMinimapV2["legend"] = [];
   for (const rawEntry of candidate.legend) {
-    const entry = rawEntry as Record<string, unknown>;
+    if (!isRecord(rawEntry)) return undefined;
+    const entry = rawEntry;
     if (
       typeof entry.glyph !== "string" ||
       !/^[A-Za-z0-9@#]$/.test(entry.glyph) ||
@@ -256,9 +264,11 @@ function normalizedMinimapV2(
   }
   const markers: AgentSpatialMinimapV2["markers"] = [];
   for (const rawMarker of candidate.markers) {
-    const marker = rawMarker as Record<string, unknown>;
+    if (!isRecord(rawMarker)) return undefined;
+    const marker = rawMarker;
     if (
-      !["D", "C", "P", "W"].includes(String(marker.type)) ||
+      typeof marker.type !== "string" ||
+      !["D", "C", "P", "W"].includes(marker.type) ||
       !isBoundedID(marker.ownerPlayerID) ||
       !allowedPlayerIDs.has(marker.ownerPlayerID) ||
       !isNonnegativeSafeInteger(marker.x) ||
@@ -324,6 +334,7 @@ function isAcceptedSpatial(observation: AgentObservation): boolean {
     }
 
     const ownShape = spatial.ownShape;
+    const mapTiles = mapInfo.width * mapInfo.height;
     if (
       ![
         "northwest",
@@ -441,12 +452,18 @@ function isAcceptedSpatial(observation: AgentObservation): boolean {
       "west",
       "northwest",
     ]);
+    let largestObservedBorderShare = 0;
     for (const player of observation.visiblePlayers) {
       const seenBorderPlayerIDs = new Set<string>();
       if (
         (player.bearing !== undefined && !validBearings.has(player.bearing)) ||
+        (spatial.schemaVersion === 5 &&
+          !["adjacent", "near", "far"].includes(
+            player.distanceClass as string,
+          )) ||
         (player.distanceClass !== undefined &&
           !["adjacent", "near", "far"].includes(player.distanceClass)) ||
+        (spatial.schemaVersion === 5 && !Array.isArray(player.bordersWith)) ||
         (player.bordersWith !== undefined &&
           (!Array.isArray(player.bordersWith) ||
             player.bordersWith.length > 64 ||
@@ -459,7 +476,9 @@ function isAcceptedSpatial(observation: AgentObservation): boolean {
                 seenBorderPlayerIDs.has(edge.playerID) ||
                 !["minor", "major"].includes(edge.sizeClass) ||
                 (spatial.schemaVersion === 5 &&
-                  (!isNonnegativeSafeInteger(edge.tiles) || edge.tiles <= 0))
+                  (!isNonnegativeSafeInteger(edge.tiles) ||
+                    edge.tiles <= 0 ||
+                    edge.tiles > mapTiles))
               ) {
                 return false;
               }
@@ -474,6 +493,7 @@ function isAcceptedSpatial(observation: AgentObservation): boolean {
         if (
           naval === undefined ||
           !isNonnegativeSafeInteger(naval.transportReachableOwnShoreTiles) ||
+          naval.transportReachableOwnShoreTiles > mapTiles ||
           (naval.nearestEnemyPort !== undefined &&
             (!validBearings.has(naval.nearestEnemyPort.bearing) ||
               !["near", "far"].includes(naval.nearestEnemyPort.distanceClass)))
@@ -487,9 +507,12 @@ function isAcceptedSpatial(observation: AgentObservation): boolean {
       const coverage = border.defensePostFrontCoverage;
       if (
         !isNonnegativeSafeInteger(border.tiles) ||
+        border.tiles === 0 ||
+        border.tiles > mapTiles ||
         !isPercentage(border.shareOfYourBorder) ||
         !["land", "coastal", "mixed"].includes(border.terrain) ||
         !isNonnegativeSafeInteger(border.defensePostsCovering) ||
+        border.defensePostsCovering > mapTiles ||
         typeof border.underAttackHere !== "boolean" ||
         !isNonnegativeSafeInteger(terrain?.plains) ||
         !isNonnegativeSafeInteger(terrain?.highland) ||
@@ -503,6 +526,31 @@ function isAcceptedSpatial(observation: AgentObservation): boolean {
       ) {
         return false;
       }
+      largestObservedBorderShare = Math.max(
+        largestObservedBorderShare,
+        border.shareOfYourBorder,
+      );
+    }
+    if (
+      spatial.schemaVersion === 5 &&
+      spatial.ownShape.largestNeighborBorderShare !== largestObservedBorderShare
+    ) {
+      return false;
+    }
+    if (
+      spatial.schemaVersion === 5 &&
+      observation.visiblePlayers.some((player) =>
+        player.bordersWith!.some((edge) => {
+          const neighbor = observation.visiblePlayers.find(
+            (candidate) => candidate.playerID === edge.playerID,
+          );
+          return !neighbor?.bordersWith?.some(
+            (reverse) => reverse.playerID === player.playerID,
+          );
+        }),
+      )
+    ) {
+      return false;
     }
     const stageOneBytes = new TextEncoder().encode(
       JSON.stringify({
@@ -702,8 +750,9 @@ export class LlmPromptBuilder {
       observation.ownState?.playerID ?? "",
       ...observation.visiblePlayers.map((player) => player.playerID),
     ]);
-    const acceptedMinimap =
-      observation.spatial?.schemaVersion === 5
+    const acceptedMinimap = !spatialAccepted
+      ? undefined
+      : observation.spatial?.schemaVersion === 5
         ? normalizedMinimapV2(
             observation.spatial?.minimap,
             allowedMinimapPlayerIDs,

@@ -292,8 +292,7 @@ complete coordinate, terrain, public-asset, exposure, and minimap layers:
       },
       "bordersWith": [],
       "navalExposure": {
-        "transportReachableOwnShoreTiles": 12,
-        "nearestEnemyPort": { "bearing": "east", "distanceClass": "near" }
+        "transportReachableOwnShoreTiles": 12
       }
     }
   ],
@@ -343,13 +342,13 @@ complete coordinate, terrain, public-asset, exposure, and minimap layers:
       "width": 24,
       "height": 12,
       "ownershipRows": [
-        "A.......................",
         "........................",
         "........................",
         "........................",
         "........................",
         "........................",
         "........................",
+        ".......A......~.........",
         "........................",
         "........................",
         "........................",
@@ -363,17 +362,23 @@ complete coordinate, terrain, public-asset, exposure, and minimap layers:
         "........................",
         "........................",
         "........................",
-        "........................",
+        "..............~.........",
         "........................",
         "........................",
         "........................",
         "........................",
         "........................"
       ],
-      "legend": [{ "glyph": "A", "playerID": "P_SELF", "isYou": true }],
-      "markers": [{ "type": "D", "ownerPlayerID": "P_SELF", "x": 7, "y": 4 }],
-      "markersTotal": 1,
-      "markersReturned": 1,
+      "legend": [
+        { "glyph": "A", "playerID": "P_SELF", "isYou": true },
+        { "glyph": "B", "playerID": "P_RIVAL", "isYou": false }
+      ],
+      "markers": [
+        { "type": "D", "ownerPlayerID": "P_SELF", "x": 7, "y": 6 },
+        { "type": "W", "ownerPlayerID": "P_RIVAL", "x": 14, "y": 6 }
+      ],
+      "markersTotal": 2,
+      "markersReturned": 2,
       "markersTruncated": false
     }
   }
@@ -393,8 +398,9 @@ Only active, completed, nondeleted Defense Posts, Cities, Ports, and Warships
 are admitted. Positions include the owner plus players already present in the
 bounded `visiblePlayers[]`; they do not reveal a new roster. Lists are capped at
 eight per player and 48 globally with exact totals, returned counts, and
-truncation status. The complete normalized spatial object is limited to 16 KiB
-UTF-8. A malformed coordinate, owner, type, count, cap, graph, naval, or
+truncation status. The normalized spatial base excluding its optional minimap
+child is limited to 16 KiB UTF-8; the child has the separate 4 KiB ceiling
+below. A malformed coordinate, owner, type, count, cap, graph, naval, or
 invariant rejects the whole schema-5 block rather than being repaired or
 partially retained.
 

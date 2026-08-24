@@ -649,21 +649,27 @@ function richSpatialObservationV5() {
   observation.visiblePlayers[0].bordersWith = [];
   observation.visiblePlayers[0].navalExposure = {
     transportReachableOwnShoreTiles: 12,
-    nearestEnemyPort: { bearing: "east", distanceClass: "near" },
   };
   observation.spatial.minimap = {
     schemaVersion: 2,
     width: 24,
     height: 12,
-    ownershipRows: Array.from({ length: 12 }, () => "A".repeat(24)),
-    terrainRows: Array.from({ length: 12 }, () => ".".repeat(24)),
+    ownershipRows: Array.from({ length: 12 }, (_, row) =>
+      row === 4 ? "......A.......~........." : ".".repeat(24),
+    ),
+    terrainRows: Array.from({ length: 12 }, (_, row) =>
+      row === 4 ? "..............~........." : ".".repeat(24),
+    ),
     legend: [
       { glyph: "A", playerID: "P_SELF", isYou: true },
       { glyph: "B", playerID: "P_A", isYou: false },
     ],
-    markers: [{ type: "P", ownerPlayerID: "P_A", x: 10, y: 5 }],
-    markersTotal: 1,
-    markersReturned: 1,
+    markers: [
+      { type: "D", ownerPlayerID: "P_SELF", x: 6, y: 4 },
+      { type: "W", ownerPlayerID: "P_A", x: 14, y: 4 },
+    ],
+    markersTotal: 2,
+    markersReturned: 2,
     markersTruncated: false,
   };
   return observation;
@@ -1012,11 +1018,11 @@ test("rich spatial L5 admits weighted exposure and a complete terrain marker min
   assert.equal(bounded.ownShape.largestNeighborBorderShare, 25);
   assert.deepEqual(bounded.rivals[0].navalExposure, {
     transportReachableOwnShoreTiles: 12,
-    nearestEnemyPort: { bearing: "east", distanceClass: "near" },
   });
   assert.equal(bounded.minimap.schemaVersion, 2);
   assert.deepEqual(bounded.minimap.markers, [
-    { type: "P", ownerPlayerID: "P_A", x: 10, y: 5 },
+    { type: "D", ownerPlayerID: "P_SELF", x: 6, y: 4 },
+    { type: "W", ownerPlayerID: "P_A", x: 14, y: 4 },
   ]);
   assert.deepEqual(boundedSpatialObservation(valid), bounded);
 
@@ -1030,6 +1036,9 @@ test("rich spatial L5 admits weighted exposure and a complete terrain marker min
   validWeightedGraph.visiblePlayers[0].bordersWith = [
     { playerID: "P_B", sizeClass: "minor", tiles: 3 },
   ];
+  validWeightedGraph.visiblePlayers[1].bordersWith = [
+    { playerID: "P_A", sizeClass: "minor", tiles: 4 },
+  ];
   assert.ok(boundedSpatialV5(validWeightedGraph));
 
   const mutations = [
@@ -1037,12 +1046,44 @@ test("rich spatial L5 admits weighted exposure and a complete terrain marker min
       value.spatial.ownShape.largestNeighborBorderShare = 101;
     },
     (value) => {
+      value.spatial.ownShape.largestNeighborBorderShare = 0;
+    },
+    (value) => {
       value.visiblePlayers[0].navalExposure.transportReachableOwnShoreTiles =
         -1;
     },
     (value) => {
+      value.visiblePlayers[0].navalExposure.transportReachableOwnShoreTiles =
+        Number.MAX_SAFE_INTEGER;
+    },
+    (value) => {
+      value.visiblePlayers[0].borderWithYou.tiles = Number.MAX_SAFE_INTEGER;
+    },
+    (value) => {
+      value.visiblePlayers[0].borderWithYou.tiles = 0;
+    },
+    (value) => {
+      value.visiblePlayers[0].borderWithYou.defensePostsCovering =
+        Number.MAX_SAFE_INTEGER;
+    },
+    (value) => {
+      delete value.visiblePlayers[0].distanceClass;
+    },
+    (value) => {
+      delete value.visiblePlayers[0].bordersWith;
+    },
+    (value) => {
       value.visiblePlayers[0].bordersWith = [
         { playerID: "P_A", sizeClass: "minor", tiles: 0 },
+      ];
+    },
+    (value) => {
+      value.visiblePlayers[0].bordersWith = [
+        {
+          playerID: "P_A",
+          sizeClass: "minor",
+          tiles: Number.MAX_SAFE_INTEGER,
+        },
       ];
     },
     (value) => {
@@ -1067,6 +1108,9 @@ test("rich spatial L5 admits weighted exposure and a complete terrain marker min
     ...duplicateEdge.visiblePlayers[0].bordersWith[0],
   });
   assert.equal(boundedSpatialV5(duplicateEdge), null);
+  const asymmetricEdge = structuredClone(validWeightedGraph);
+  asymmetricEdge.visiblePlayers[1].bordersWith = [];
+  assert.equal(boundedSpatialV5(asymmetricEdge), null);
 
   const legacyMinimap = structuredClone(valid);
   legacyMinimap.spatial.minimap = {
@@ -1089,6 +1133,18 @@ test("rich spatial L5 admits weighted exposure and a complete terrain marker min
     (value) => {
       value.spatial.minimap.markersReturned = 0;
     },
+    (value) => {
+      value.spatial.minimap = null;
+    },
+    (value) => {
+      value.spatial.minimap.legend[0] = null;
+    },
+    (value) => {
+      value.spatial.minimap.markers[0] = null;
+    },
+    (value) => {
+      value.spatial.minimap.markers[0].type = ["D"];
+    },
   ]) {
     const malformed = structuredClone(valid);
     mutateMinimap(malformed);
@@ -1096,6 +1152,102 @@ test("rich spatial L5 admits weighted exposure and a complete terrain marker min
     assert.ok(stillRich);
     assert.equal("minimap" in stillRich, false);
   }
+});
+
+test("rich spatial and minimap retain their independent wire byte ceilings", () => {
+  const idLength = 65;
+  const ownPlayerID = "S".repeat(idLength);
+  const rivalIDs = Array.from(
+    { length: 6 },
+    (_, index) =>
+      `${String.fromCharCode(65 + index).repeat(idLength - 2)}${String(index).padStart(2, "0")}`,
+  );
+  const positionedAssets = (type) =>
+    rivalIDs.flatMap((ownerPlayerID, playerIndex) =>
+      Array.from({ length: 8 }, (_, assetIndex) => ({
+        ownerPlayerID,
+        type,
+        tile: playerIndex * 100 + assetIndex,
+        x: assetIndex,
+        y: playerIndex,
+      })),
+    );
+  const observation = {
+    ownState: { playerID: ownPlayerID },
+    mapInfo: {
+      name: "Boundary",
+      width: 100,
+      height: 80,
+      tileRefEncoding: "row-major-y-width-plus-x",
+      coordinateFrame: {
+        origin: "top_left",
+        xIncreases: "east",
+        yIncreases: "south",
+      },
+    },
+    spatial: {
+      schemaVersion: 5,
+      visibilityModel: SPATIAL_VISIBILITY_MODEL,
+      ownShape: {
+        quadrant: "center",
+        regionAnalysis: "complete",
+        centroidBasis: "largest_region_border",
+        coastShare: 0,
+        largestNeighborBorderShare: 0,
+        centroid: { xPct: 50, yPct: 50 },
+      },
+      positionedAssets: {
+        analysis: "complete",
+        structures: positionedAssets("City"),
+        structuresTotal: 48,
+        structuresReturned: 48,
+        structuresTruncated: false,
+        warships: positionedAssets("Warship"),
+        warshipsTotal: 48,
+        warshipsReturned: 48,
+        warshipsTruncated: false,
+      },
+    },
+    visiblePlayers: rivalIDs.map((playerID) => ({
+      playerID,
+      distanceClass: "far",
+      bordersWith: [],
+      navalExposure: { transportReachableOwnShoreTiles: 0 },
+    })),
+  };
+  const boundedBase = boundedSpatialV5(observation);
+  assert.ok(boundedBase);
+  const minimap = {
+    schemaVersion: 2,
+    width: 32,
+    height: 16,
+    ownershipRows: Array.from({ length: 16 }, () => "A".repeat(32)),
+    terrainRows: Array.from({ length: 16 }, () => ".".repeat(32)),
+    legend: [{ glyph: "A", playerID: ownPlayerID, isYou: true }],
+    markers: Array.from({ length: 24 }, (_, index) => ({
+      type: "C",
+      ownerPlayerID: ownPlayerID,
+      x: index,
+      y: 0,
+    })),
+    markersTotal: 24,
+    markersReturned: 24,
+    markersTruncated: false,
+  };
+  const boundedWithMinimap = boundedSpatialV5({
+    ...observation,
+    spatial: { ...observation.spatial, minimap },
+  });
+  assert.ok(boundedWithMinimap?.minimap);
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(boundedBase), "utf8") <=
+      OWNER_SPATIAL_SERIALIZED_MAX_BYTES,
+  );
+  assert.ok(Buffer.byteLength(JSON.stringify(minimap), "utf8") <= 4 * 1024);
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(boundedWithMinimap), "utf8") >
+      OWNER_SPATIAL_SERIALIZED_MAX_BYTES,
+  );
 });
 
 test("rich spatial facts can only rerank exact offered legal action ids", () => {

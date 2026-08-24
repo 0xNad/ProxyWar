@@ -122,8 +122,14 @@ describe("tester-starter-llm spatial state renderer", () => {
       ownShape: { largestNeighborBorderShare: 45 },
       minimap: {
         schemaVersion: 2,
-        legend: [{ playerID: "P_A", isYou: true }],
-        markers: [{ type: "D", ownerPlayerID: "P_A", x: 7, y: 4 }],
+        legend: [
+          { playerID: "P_A", isYou: true },
+          { playerID: "P_B", isYou: false },
+        ],
+        markers: [
+          { type: "D", ownerPlayerID: "P_A", x: 7, y: 6 },
+          { type: "W", ownerPlayerID: "P_B", x: 14, y: 6 },
+        ],
       },
     });
     const ownerState = (await loadBuildState())(ownerRequest.observation, []);
@@ -138,7 +144,6 @@ describe("tester-starter-llm spatial state renderer", () => {
       borderWithYou: { tiles: 18 },
       navalExposure: {
         transportReachableOwnShoreTiles: 12,
-        nearestEnemyPort: { bearing: "east", distanceClass: "near" },
       },
     });
 
@@ -150,7 +155,10 @@ describe("tester-starter-llm spatial state renderer", () => {
       schemaVersion: 5,
       minimap: {
         schemaVersion: 2,
-        legend: [{ playerID: "P_SELF", isYou: true }],
+        legend: [
+          { playerID: "P_SELF", isYou: true },
+          { playerID: "P_RIVAL", isYou: false },
+        ],
       },
     });
   });

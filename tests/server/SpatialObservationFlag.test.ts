@@ -272,11 +272,19 @@ describe("spatial observation flags", () => {
     badShape.spatial!.ownShape.coastShare = 101;
     const badEncirclement = structuredClone(observation);
     badEncirclement.spatial!.ownShape.largestNeighborBorderShare = 101;
+    const inconsistentEncirclement = structuredClone(observation);
+    inconsistentEncirclement.spatial!.ownShape.largestNeighborBorderShare = 0;
     const badWeightedEdge = structuredClone(observation);
     const weightedEdgePlayer = badWeightedEdge.visiblePlayers.find(
       (player) => (player.bordersWith?.length ?? 0) > 0,
     )!;
     weightedEdgePlayer.bordersWith![0].tiles = 0;
+    const oversizedWeightedEdge = structuredClone(observation);
+    const oversizedWeightedEdgePlayer =
+      oversizedWeightedEdge.visiblePlayers.find(
+        (player) => (player.bordersWith?.length ?? 0) > 0,
+      )!;
+    oversizedWeightedEdgePlayer.bordersWith![0].tiles = Number.MAX_SAFE_INTEGER;
     const badSelfEdge = structuredClone(observation);
     const selfEdgePlayer = badSelfEdge.visiblePlayers.find(
       (player) => (player.bordersWith?.length ?? 0) > 0,
@@ -289,9 +297,39 @@ describe("spatial observation flags", () => {
     duplicateEdgePlayer.bordersWith!.push({
       ...duplicateEdgePlayer.bordersWith![0],
     });
+    const asymmetricGraph = structuredClone(observation);
+    const asymmetricSource = asymmetricGraph.visiblePlayers.find(
+      (player) => (player.bordersWith?.length ?? 0) > 0,
+    )!;
+    const asymmetricTargetID = asymmetricSource.bordersWith![0].playerID;
+    const asymmetricTarget = asymmetricGraph.visiblePlayers.find(
+      (player) => player.playerID === asymmetricTargetID,
+    )!;
+    asymmetricTarget.bordersWith = asymmetricTarget.bordersWith!.filter(
+      (edge) => edge.playerID !== asymmetricSource.playerID,
+    );
     const badNaval = structuredClone(observation);
     badNaval.visiblePlayers[0].navalExposure!.transportReachableOwnShoreTiles =
       -1;
+    const oversizedNaval = structuredClone(observation);
+    oversizedNaval.visiblePlayers[0].navalExposure!.transportReachableOwnShoreTiles =
+      Number.MAX_SAFE_INTEGER;
+    const oversizedDirectBorder = structuredClone(observation);
+    oversizedDirectBorder.visiblePlayers.find(
+      (player) => player.borderWithYou !== undefined,
+    )!.borderWithYou!.tiles = Number.MAX_SAFE_INTEGER;
+    const emptyDirectBorder = structuredClone(observation);
+    emptyDirectBorder.visiblePlayers.find(
+      (player) => player.borderWithYou !== undefined,
+    )!.borderWithYou!.tiles = 0;
+    const oversizedDefensePostCount = structuredClone(observation);
+    oversizedDefensePostCount.visiblePlayers.find(
+      (player) => player.borderWithYou !== undefined,
+    )!.borderWithYou!.defensePostsCovering = Number.MAX_SAFE_INTEGER;
+    const missingDistanceClass = structuredClone(observation);
+    delete missingDistanceClass.visiblePlayers[0].distanceClass;
+    const missingWeightedGraph = structuredClone(observation);
+    delete missingWeightedGraph.visiblePlayers[0].bordersWith;
     const badTotals = structuredClone(observation);
     badTotals.spatial!.positionedAssets.structuresTotal =
       Number.POSITIVE_INFINITY;
@@ -320,6 +358,26 @@ describe("spatial observation flags", () => {
       throw new Error("expected rich minimap v2");
     }
     markerMinimap.markers[0].ownerPlayerID = "P_HIDDEN";
+    const nullMinimap = structuredClone(observation);
+    (nullMinimap.spatial as { minimap?: unknown }).minimap = null;
+    const nullLegendEntry = structuredClone(observation);
+    const nullLegendMinimap = nullLegendEntry.spatial!.minimap;
+    if (nullLegendMinimap?.schemaVersion !== 2) {
+      throw new Error("expected rich minimap v2");
+    }
+    (nullLegendMinimap.legend as unknown[])[0] = null;
+    const nullMarkerEntry = structuredClone(observation);
+    const nullMarkerMinimap = nullMarkerEntry.spatial!.minimap;
+    if (nullMarkerMinimap?.schemaVersion !== 2) {
+      throw new Error("expected rich minimap v2");
+    }
+    (nullMarkerMinimap.markers as unknown[])[0] = null;
+    const arrayMarkerType = structuredClone(observation);
+    const arrayMarkerMinimap = arrayMarkerType.spatial!.minimap;
+    if (arrayMarkerMinimap?.schemaVersion !== 2) {
+      throw new Error("expected rich minimap v2");
+    }
+    (arrayMarkerMinimap.markers[0] as { type: unknown }).type = ["D"];
 
     for (const [malformed, mapInfoExpected] of [
       [badFrame, false],
@@ -327,10 +385,19 @@ describe("spatial observation flags", () => {
       [badTerrain, true],
       [badShape, true],
       [badEncirclement, true],
+      [inconsistentEncirclement, true],
       [badWeightedEdge, true],
+      [oversizedWeightedEdge, true],
       [badSelfEdge, true],
       [badDuplicateEdge, true],
+      [asymmetricGraph, true],
       [badNaval, true],
+      [oversizedNaval, true],
+      [oversizedDirectBorder, true],
+      [emptyDirectBorder, true],
+      [oversizedDefensePostCount, true],
+      [missingDistanceClass, true],
+      [missingWeightedGraph, true],
       [badTotals, true],
       [badPartial, true],
     ] as const) {
@@ -362,6 +429,10 @@ describe("spatial observation flags", () => {
       wrongSelfLegend,
       badTerrainMinimap,
       badMarkerOwner,
+      nullMinimap,
+      nullLegendEntry,
+      nullMarkerEntry,
+      arrayMarkerType,
     ]) {
       const minimapView = promptObservation(
         new LlmPromptBuilder().build({
@@ -439,9 +510,9 @@ describe("spatial observation flags", () => {
       ...originalVisiblePlayers,
       ...Array.from({ length: 60 }, (_, index) => ({
         ...structuredClone(template),
-        playerID: `P_${String(index).padStart(2, "0")}_${"x".repeat(150)}`,
+        playerID: `P_${String(index).padStart(2, "0")}_${"x".repeat(60)}`,
         bearing: undefined,
-        distanceClass: undefined,
+        distanceClass: "far" as const,
         borderWithYou: undefined,
         bordersWith: [],
       })),

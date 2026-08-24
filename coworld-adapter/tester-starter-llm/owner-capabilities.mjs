@@ -1119,8 +1119,15 @@ function boundedSpatialV3Rivals(
   visiblePlayers,
   ownPlayerID,
   requireL4 = false,
+  maxMapTiles,
 ) {
-  if (!Array.isArray(visiblePlayers) || visiblePlayers.length > 64) return null;
+  if (
+    !Array.isArray(visiblePlayers) ||
+    visiblePlayers.length > 64 ||
+    !Number.isSafeInteger(maxMapTiles) ||
+    maxMapTiles <= 0
+  )
+    return null;
   const bearings = new Set([
     "north",
     "northeast",
@@ -1151,9 +1158,12 @@ function boundedSpatialV3Rivals(
       if (
         !isRecord(border) ||
         boundedNonnegativeInteger(border.tiles) === null ||
+        border.tiles === 0 ||
+        border.tiles > maxMapTiles ||
         boundedPercent(border.shareOfYourBorder) === null ||
         !["land", "coastal", "mixed"].includes(border.terrain) ||
         boundedNonnegativeInteger(border.defensePostsCovering) === null ||
+        border.defensePostsCovering > maxMapTiles ||
         typeof border.underAttackHere !== "boolean" ||
         !isRecord(terrain) ||
         boundedNonnegativeInteger(terrain.plains) === null ||
@@ -1202,7 +1212,8 @@ function boundedSpatialV3Rivals(
           !["minor", "major"].includes(edge?.sizeClass) ||
           (requireL4 &&
             (boundedNonnegativeInteger(edge?.tiles) === null ||
-              edge.tiles === 0))
+              edge.tiles === 0 ||
+              edge.tiles > maxMapTiles))
         ) {
           return null;
         }
@@ -1216,8 +1227,10 @@ function boundedSpatialV3Rivals(
     }
     if (
       (player.bearing !== undefined && !bearings.has(player.bearing)) ||
+      (requireL4 && !distances.has(player.distanceClass)) ||
       (player.distanceClass !== undefined &&
-        !distances.has(player.distanceClass))
+        !distances.has(player.distanceClass)) ||
+      (requireL4 && !Array.isArray(player.bordersWith))
     ) {
       return null;
     }
@@ -1228,6 +1241,7 @@ function boundedSpatialV3Rivals(
         !isRecord(naval) ||
         boundedNonnegativeInteger(naval.transportReachableOwnShoreTiles) ===
           null ||
+        naval.transportReachableOwnShoreTiles > maxMapTiles ||
         (naval.nearestEnemyPort !== undefined &&
           (!isRecord(naval.nearestEnemyPort) ||
             !bearings.has(naval.nearestEnemyPort.bearing) ||
@@ -1540,6 +1554,8 @@ export function boundedSpatialV3(observation) {
   const rivals = boundedSpatialV3Rivals(
     observation?.visiblePlayers,
     ownPlayerID,
+    false,
+    mapInfo ? mapInfo.width * mapInfo.height : null,
   );
   if (
     !mapInfo ||
@@ -1581,9 +1597,9 @@ export function boundedSpatialV3(observation) {
     ownShape,
     rivals,
     positionedAssets,
-    ...(minimap ? { minimap } : {}),
   };
-  return isWithinOwnerSpatialSerializationCeiling(bounded) ? bounded : null;
+  if (!isWithinOwnerSpatialSerializationCeiling(bounded)) return null;
+  return minimap ? { ...bounded, minimap } : bounded;
 }
 
 /**
@@ -1606,6 +1622,7 @@ export function boundedSpatialV5(observation) {
     observation?.visiblePlayers,
     ownPlayerID,
     true,
+    mapInfo ? mapInfo.width * mapInfo.height : null,
   );
   if (
     !mapInfo ||
@@ -1621,10 +1638,23 @@ export function boundedSpatialV5(observation) {
   ]);
   if (
     allowedPlayerIDs.size !== rivals.length + 1 ||
+    ownShape.largestNeighborBorderShare !==
+      Math.max(
+        0,
+        ...rivals.map((rival) => rival.borderWithYou?.shareOfYourBorder ?? 0),
+      ) ||
     rivals.some((rival) =>
-      (rival.bordersWith ?? []).some(
-        (edge) => !allowedPlayerIDs.has(edge.playerID),
-      ),
+      rival.bordersWith.some((edge) => !allowedPlayerIDs.has(edge.playerID)),
+    ) ||
+    rivals.some((rival) =>
+      rival.bordersWith.some((edge) => {
+        const neighbor = rivals.find(
+          (candidate) => candidate.playerID === edge.playerID,
+        );
+        return !neighbor?.bordersWith.some(
+          (reverse) => reverse.playerID === rival.playerID,
+        );
+      }),
     )
   ) {
     return null;
@@ -1647,9 +1677,9 @@ export function boundedSpatialV5(observation) {
     ownShape,
     rivals,
     positionedAssets,
-    ...(minimap ? { minimap } : {}),
   };
-  return isWithinOwnerSpatialSerializationCeiling(bounded) ? bounded : null;
+  if (!isWithinOwnerSpatialSerializationCeiling(bounded)) return null;
+  return minimap ? { ...bounded, minimap } : bounded;
 }
 
 /** Backward-compatible feature detection for the public starter. */
