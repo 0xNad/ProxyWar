@@ -224,6 +224,8 @@ function armSummary(runs, arm) {
     meanBehaviorQualityScore: rounded(
       mean(rows.map((run) => run.behaviorQualityScore)),
     ),
+    replayRejectedDecisions: sum(rows.map((run) => run.replayRejectedCount)),
+    replayParseFailures: sum(rows.map((run) => run.replayParseFailureCount)),
   };
 }
 
@@ -284,26 +286,38 @@ function pairedReport(runs) {
   };
 }
 
-export async function analyze(root) {
+export async function analyze(root, options = {}) {
   const resolved = path.resolve(root);
   const index = await readJSON(path.join(resolved, "gate3-index.json"));
   if (index.entries?.length !== 48) {
     throw new Error("Gate 3 index must contain 48 requests");
   }
   const runs = [];
-  for (const entry of index.entries) runs.push(await readRun(resolved, entry));
+  for (const entry of index.entries) {
+    try {
+      runs.push(await readRun(resolved, entry));
+    } catch (error) {
+      if (options.allowPartial === true && error.code === "ENOENT") continue;
+      throw error;
+    }
+  }
   const arms = Object.fromEntries(
     ARMS.map((arm) => [arm, armSummary(runs, arm)]),
   );
   const paired = pairedReport(runs);
-  const reliabilityPass =
-    ARMS.every(
-      (arm) =>
-        arms[arm].runs === 24 &&
-        arms[arm].actionFidelityPass &&
-        arms[arm].spatialContractPass &&
-        arms[arm].providerErrors === 0,
-    ) && arms.structured.degradationRate <= arms.off.degradationRate;
+  const canaryReliabilityPass = ARMS.every(
+    (arm) =>
+      arms[arm].runs === 24 &&
+      arms[arm].actionFidelityPass &&
+      arms[arm].spatialContractPass &&
+      arms[arm].providerErrors === 0,
+  );
+  const runtimeEnablementReliabilityPass =
+    canaryReliabilityPass &&
+    arms.structured.degradationRate <= arms.off.degradationRate &&
+    arms.structured.replayRejectedDecisions <=
+      arms.off.replayRejectedDecisions &&
+    arms.structured.replayParseFailures <= arms.off.replayParseFailures;
   return {
     schemaVersion: 1,
     sourceCommit: index.sourceCommit,
@@ -311,10 +325,11 @@ export async function analyze(root) {
     complete: runs.length === 48,
     arms,
     paired,
-    reliabilityPass,
+    canaryReliabilityPass,
+    runtimeEnablementReliabilityPass,
     canaryAdvances:
       runs.length === 48 &&
-      reliabilityPass &&
+      canaryReliabilityPass &&
       paired.score.meanDifference !== null &&
       paired.score.meanDifference > 0,
     watchabilityEvidence: {
@@ -331,13 +346,24 @@ export async function analyze(root) {
 }
 
 async function main(argv) {
-  const [root, output] = argv;
-  if (!root || !output || argv.length !== 2) {
+  const positional = argv.filter((argument) => !argument.startsWith("--"));
+  const unknownOptions = argv.filter(
+    (argument) => argument.startsWith("--") && argument !== "--partial",
+  );
+  const [root, output] = positional;
+  if (
+    !root ||
+    !output ||
+    positional.length !== 2 ||
+    unknownOptions.length > 0
+  ) {
     throw new Error(
-      "usage: node analyze-spatial-gate3.mjs EVIDENCE_ROOT OUTPUT_JSON",
+      "usage: node analyze-spatial-gate3.mjs EVIDENCE_ROOT OUTPUT_JSON [--partial]",
     );
   }
-  const report = await analyze(root);
+  const report = await analyze(root, {
+    allowPartial: argv.includes("--partial"),
+  });
   await fs.writeFile(
     path.resolve(output),
     `${JSON.stringify(report, null, 2)}\n`,
@@ -346,7 +372,7 @@ async function main(argv) {
     },
   );
   process.stdout.write(
-    `${JSON.stringify({ output: path.resolve(output), complete: report.complete, reliabilityPass: report.reliabilityPass, canaryAdvances: report.canaryAdvances })}\n`,
+    `${JSON.stringify({ output: path.resolve(output), complete: report.complete, canaryReliabilityPass: report.canaryReliabilityPass, runtimeEnablementReliabilityPass: report.runtimeEnablementReliabilityPass, canaryAdvances: report.canaryAdvances })}\n`,
   );
 }
 
