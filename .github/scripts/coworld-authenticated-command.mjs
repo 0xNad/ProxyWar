@@ -167,14 +167,14 @@ if (command === "commander-xp-run-episode") {
     new Set(images).size !== 1 ||
     images.some(
       (image) =>
-        !/^ghcr\.io\/0xnad\/proxywar-commander-xp-game@sha256:[0-9a-f]{64}$/.test(
+        !/^ghcr\.io\/0xnad\/proxywar-commander-xp-policy@sha256:[0-9a-f]{64}$/.test(
           image,
         ),
     ) ||
     tail[4] !== "--run" ||
     tail[5] !== "node" ||
     tail[6] !== "--run" ||
-    tail[7] !== "/app/integration/src/starter-player.mjs" ||
+    tail[7] !== "/app/proxywar/coworld-adapter/src/starter-player.mjs" ||
     tail[8] !== "--variant" ||
     tail[9] !== "tournament-4p-pangaea" ||
     tail[10] !== "--timeout-seconds" ||

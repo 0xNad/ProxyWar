@@ -192,7 +192,7 @@ test("runs only the exact terminal-proof and certification argv in the minimal c
   withFakeRuntime(({ env, capture, root }) => {
     const manifest = path.join(root, "eval-manifest.json");
     const output = path.join(privateOutputParent(root), "terminal-proof");
-    const image = `ghcr.io/0xnad/proxywar-commander-xp-game@sha256:${"7".repeat(64)}`;
+    const image = `ghcr.io/0xnad/proxywar-commander-xp-policy@sha256:${"7".repeat(64)}`;
     fs.writeFileSync(manifest, "{}\n");
     const episode = spawnSync(
       process.execPath,
@@ -207,7 +207,7 @@ test("runs only the exact terminal-proof and certification argv in the minimal c
         "--run",
         "node",
         "--run",
-        "/app/integration/src/starter-player.mjs",
+        "/app/proxywar/coworld-adapter/src/starter-player.mjs",
         "--variant",
         "tournament-4p-pangaea",
         "--timeout-seconds",
@@ -219,6 +219,30 @@ test("runs only the exact terminal-proof and certification argv in the minimal c
       { encoding: "utf8", env },
     );
     assert.equal(episode.status, 0, episode.stderr);
+    const oversizedRoleReuse = spawnSync(
+      process.execPath,
+      [
+        wrapper,
+        "commander-xp-run-episode",
+        manifest,
+        ...Array(4).fill(
+          `ghcr.io/0xnad/proxywar-commander-xp-game@sha256:${"8".repeat(64)}`,
+        ),
+        "--run",
+        "node",
+        "--run",
+        "/app/proxywar/coworld-adapter/src/starter-player.mjs",
+        "--variant",
+        "tournament-4p-pangaea",
+        "--timeout-seconds",
+        "6000",
+        "--verify-replay",
+        "--output-dir",
+        output,
+      ],
+      { encoding: "utf8", env },
+    );
+    assert.notEqual(oversizedRoleReuse.status, 0);
     const certify = spawnSync(
       process.execPath,
       [

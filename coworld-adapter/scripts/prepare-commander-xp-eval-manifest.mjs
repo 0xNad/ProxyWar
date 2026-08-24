@@ -27,15 +27,28 @@ function publicEvalProtocol(value) {
   return value;
 }
 
-export function commanderXpEvalManifest(base, { image, version }) {
+export function commanderXpEvalManifest(
+  base,
+  { gameImage, playerImage, version },
+) {
   if (base?.game?.name !== "proxywar") {
     throw new Error(
       "Commander XP eval manifest base is not canonical proxywar",
     );
   }
-  if (!/^[a-z0-9._/-]+@sha256:[0-9a-f]{64}$/.test(image)) {
+  if (!/^[a-z0-9._/-]+@sha256:[0-9a-f]{64}$/.test(gameImage)) {
     throw new Error(
       "Commander XP eval game image must use an immutable digest",
+    );
+  }
+  if (!/^[a-z0-9._/-]+@sha256:[0-9a-f]{64}$/.test(playerImage)) {
+    throw new Error(
+      "Commander XP eval player image must use an immutable digest",
+    );
+  }
+  if (gameImage === playerImage) {
+    throw new Error(
+      "Commander XP eval game and player images must be role-specific",
     );
   }
   if (!/^0\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$/.test(version)) {
@@ -83,7 +96,7 @@ export function commanderXpEvalManifest(base, { image, version }) {
     protocols: publicEvalProtocol(structuredClone(base.game.protocols)),
     runnable: {
       ...structuredClone(base.game.runnable),
-      image,
+      image: gameImage,
       env: {
         PROXYWAR_COMMANDER_XP_GAME_EVIDENCE: "1",
         PROXYWAR_TUNE_STRUCTURED_DEALS: "0",
@@ -116,7 +129,13 @@ export function commanderXpEvalManifest(base, { image, version }) {
     certification,
     episode_timeout_minutes: 100,
     commissioner: [],
-    player: [{ ...structuredClone(sourcePlayer), image }],
+    player: [
+      {
+        ...structuredClone(sourcePlayer),
+        image: playerImage,
+        run: ["node", "/app/proxywar/coworld-adapter/src/starter-player.mjs"],
+      },
+    ],
     reporter: [],
     grader: [],
     diagnoser: [],
@@ -144,7 +163,8 @@ async function main() {
     throw new Error("Commander XP base manifest hash mismatch");
   }
   const manifest = commanderXpEvalManifest(JSON.parse(baseBytes.toString()), {
-    image: args.get("--image") ?? "",
+    gameImage: args.get("--game-image") ?? "",
+    playerImage: args.get("--player-image") ?? "",
     version: args.get("--version") ?? "",
   });
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
@@ -157,6 +177,7 @@ async function main() {
       gameName: manifest.game.name,
       gameVersion: manifest.game.version,
       gameImage: manifest.game.runnable.image,
+      playerImage: manifest.player[0].image,
     }),
   );
 }
