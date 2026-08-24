@@ -10,6 +10,17 @@ const STARTER_FILE = path.join(
   "starter-player.mjs",
 );
 
+const DEAL_CAPABILITY_OBSERVATION = {
+  deals: {
+    decisionStep: 1,
+    incomingProposals: [],
+    outgoingProposals: [],
+    activeDeals: [],
+    proposalOptions: [],
+    rivalReliability: [],
+  },
+};
+
 function extractFunction(source: string, name: string): string {
   const start = source.indexOf(`function ${name}(`);
   expect(start, `function ${name} missing`).toBeGreaterThan(-1);
@@ -28,7 +39,10 @@ async function selectors() {
     `${dealKinds}\n${extractFunction(source, "isDealActionKind")}\n${extractFunction(source, "activePromiseConstraints")}\n${extractFunction(source, "wouldBreakPromise")}\n${extractFunction(source, "preferReciprocalAlliance")}\n${extractFunction(source, "pendingRenewalAction")}\n${extractFunction(source, "chooseAction")}\n${extractFunction(source, "chooseDealAction")}\nreturn { chooseAction, chooseDealAction };`,
   )() as {
     chooseAction: (actions: unknown[], obs: unknown) => { id: string };
-    chooseDealAction: (actions: unknown[]) => { id: string } | null;
+    chooseDealAction: (
+      actions: unknown[],
+      obs?: unknown,
+    ) => { id: string } | null;
   };
 }
 
@@ -55,7 +69,10 @@ async function dealSelectorFor(relativePath: string) {
     )?.[0] ?? "";
   return new Function(
     `${kinds}\n${selectionKinds}\n${extractFunction(source, "chooseDealAction")}\nreturn chooseDealAction;`,
-  )() as (actions: unknown[]) => { id: string; kind: string } | null;
+  )() as (
+    actions: unknown[],
+    obs?: unknown,
+  ) => { id: string; kind: string } | null;
 }
 
 describe("minimal starter structured-promise posture", () => {
@@ -118,7 +135,9 @@ describe("minimal starter structured-promise posture", () => {
       kind: "deal_reject",
       metadata: { dealID: "D1", template: "non_aggression_pact" },
     };
-    expect(chooseDealAction([rejectNap, acceptNap])?.id).toBe(acceptNap.id);
+    expect(
+      chooseDealAction([rejectNap, acceptNap], DEAL_CAPABILITY_OBSERVATION)?.id,
+    ).toBe(acceptNap.id);
 
     const acceptSupport = {
       id: "deal_accept:D2",
@@ -130,9 +149,12 @@ describe("minimal starter structured-promise posture", () => {
       kind: "deal_reject",
       metadata: { dealID: "D2", template: "support_request" },
     };
-    expect(chooseDealAction([acceptSupport, rejectSupport])?.id).toBe(
-      rejectSupport.id,
-    );
+    expect(
+      chooseDealAction(
+        [acceptSupport, rejectSupport],
+        DEAL_CAPABILITY_OBSERVATION,
+      )?.id,
+    ).toBe(rejectSupport.id);
 
     const proposeAttack = {
       id: "deal_propose:P_X:joint_attack",
@@ -144,9 +166,10 @@ describe("minimal starter structured-promise posture", () => {
       kind: "deal_propose",
       metadata: { template: "non_aggression_pact" },
     };
-    expect(chooseDealAction([proposeAttack, proposeNap])?.id).toBe(
-      proposeNap.id,
-    );
+    expect(
+      chooseDealAction([proposeAttack, proposeNap], DEAL_CAPABILITY_OBSERVATION)
+        ?.id,
+    ).toBe(proposeNap.id);
   });
 
   it("never withdraws its own offer just because nothing else is on the menu", async () => {
@@ -160,7 +183,9 @@ describe("minimal starter structured-promise posture", () => {
       kind: "deal_withdraw",
       metadata: { dealID: "D9", template: "non_aggression_pact" },
     };
-    expect(chooseDealAction([withdraw])).toBeNull();
+    expect(
+      chooseDealAction([withdraw], DEAL_CAPABILITY_OBSERVATION),
+    ).toBeNull();
 
     // Non-deal actions on the menu change nothing.
     const attack = {
@@ -168,7 +193,9 @@ describe("minimal starter structured-promise posture", () => {
       kind: "attack",
       metadata: { targetID: null, expansion: true },
     };
-    expect(chooseDealAction([attack, withdraw])).toBeNull();
+    expect(
+      chooseDealAction([attack, withdraw], DEAL_CAPABILITY_OBSERVATION),
+    ).toBeNull();
 
     // Answering still outranks everything when an answer is available.
     const acceptNap = {
@@ -176,7 +203,9 @@ describe("minimal starter structured-promise posture", () => {
       kind: "deal_accept",
       metadata: { dealID: "D9", template: "non_aggression_pact" },
     };
-    expect(chooseDealAction([withdraw, acceptNap])?.id).toBe(acceptNap.id);
+    expect(
+      chooseDealAction([withdraw, acceptNap], DEAL_CAPABILITY_OBSERVATION)?.id,
+    ).toBe(acceptNap.id);
 
     // A fresh proposal opportunity is still preferred over withdrawing.
     const proposeNap = {
@@ -184,7 +213,9 @@ describe("minimal starter structured-promise posture", () => {
       kind: "deal_propose",
       metadata: { template: "non_aggression_pact" },
     };
-    expect(chooseDealAction([withdraw, proposeNap])?.id).toBe(proposeNap.id);
+    expect(
+      chooseDealAction([withdraw, proposeNap], DEAL_CAPABILITY_OBSERVATION)?.id,
+    ).toBe(proposeNap.id);
   });
 });
 
@@ -212,9 +243,17 @@ describe("every shipped starter refuses to withdraw as an idle fallback", () => 
       // The step right after proposing: the pair already holds an open deal so
       // no deal_propose is offered for it, and the proposer is inside the
       // 3-step cooldown. Withdraw must not be taken to fill the slot.
-      expect(chooseDealAction([withdraw])).toBeNull();
-      expect(chooseDealAction([withdraw, acceptNap])?.id).toBe(acceptNap.id);
-      expect(chooseDealAction([withdraw, proposeNap])?.id).toBe(proposeNap.id);
+      expect(
+        chooseDealAction([withdraw], DEAL_CAPABILITY_OBSERVATION),
+      ).toBeNull();
+      expect(
+        chooseDealAction([withdraw, acceptNap], DEAL_CAPABILITY_OBSERVATION)
+          ?.id,
+      ).toBe(acceptNap.id);
+      expect(
+        chooseDealAction([withdraw, proposeNap], DEAL_CAPABILITY_OBSERVATION)
+          ?.id,
+      ).toBe(proposeNap.id);
     },
   );
 

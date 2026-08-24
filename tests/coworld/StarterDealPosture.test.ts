@@ -27,6 +27,8 @@ async function loadBuildState(): Promise<
   const source = await fs.readFile(STARTER_FILE, "utf8");
   return new Function(
     `function avoidActionIDs() { return []; }
+     function boundedSpatialV1() { return null; }
+     function boundedSpatialMapInfo() { return null; }
      ${extractFunction(source, "clean")}
      ${extractFunction(source, "cleanID")}
      ${extractFunction(source, "buildState")}
@@ -126,7 +128,7 @@ const BASE_OBS = {
     gold: "1000000",
     borderTiles: 40,
     incomingAttacks: 0,
-    units: { City: 1 },
+    unitCounts: { City: 1 },
   },
   visiblePlayers: [
     {
@@ -381,9 +383,9 @@ describe("tester-starter-llm deal selection", () => {
     expect(source).toContain("const chosen = choose(actions, obs);");
     expect(source).toContain("const dealMove = chooseDealMove(actions, obs);");
     expect(source).toContain("selectedLegalActionId: chosen.id,");
-    expect(source).toContain(
-      "...(dealMove ? { selectedDealActionId: dealMove.id } : {}),",
-    );
+    expect(source).toContain("...dealResponseFields({");
+    expect(source).toContain("observation: obs,");
+    expect(source).toContain("dealMove,");
     expect(source).toContain('"dealPolicies"');
     expect(source).toContain('"breakDealIDs"');
     expect(source).not.toContain('"deal":"<accept|decline');

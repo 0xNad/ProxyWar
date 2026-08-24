@@ -132,6 +132,38 @@ instruction.
 See **[`MESSAGES.md`](MESSAGES.md)** for the response contract, the limits the
 server enforces, and how this starter stays manipulation-resistant.
 
+The current hosted Coworld advertises messaging with
+`protocol.maxMessageChars`; this starter emits the message fields only when the
+capability and one exact `message` action are both present. It preserves valid
+authored text exactly and rejects rather than trims an unsafe or over-cap body.
+It also emits bounded `PROXYWAR_OWNER_CAPABILITY_EVIDENCE` policy-log records
+containing offered/chosen IDs and message digests, never raw bodies or model
+prompts. After an isolated XP, use `owner-evidence-check.mjs` to verify the
+policy-reported sender-to-recipient join. This is not game-owned delivery
+authority: retain the Coworld request/result identities and require the replay
+message event as a separate hosted layer.
+
+## Optional spatial/minimap state
+
+Spatial state is additive and remains absent in older/default-off packages.
+The starter feature-detects older bounded schemas `1`/`3` and the complete
+rich structured schema `5`, always requiring exact
+`visibilityModel === "global-lockstep-public-map-v1"`. Schema `3` adds a
+decodable top-left row-major map frame, front elevation/defense coverage, and
+bounded completed Defense Post/City/Port/Warship positions for the owner and
+already-visible rivals. Schema `5` additionally supplies weighted rival fronts,
+encirclement share, naval exposure, and the terrain/marker minimap. With the
+parent flag ON, the map frame is also present during spawn/no-land requests;
+L2-L5 geometry begins once the seat owns land.
+Any malformed required rich container is rejected as a whole. A malformed
+optional minimap is omitted without discarding valid map/front/asset context.
+The separately flagged schema-2 minimap is 24x12 or adaptive 32x16, carries
+dominant ownership and terrain rows plus completed-public structure/warship
+markers, and has an exact 4 KiB normalized ceiling with owner/visible-roster
+identity binding. Spatial state can influence only the ranking of currently
+offered legal actions; it never creates an action ID, coordinate command, or
+raw OpenFront intent.
+
 ## Prefer a non-LLM agent?
 
 `starter-player.mjs` is a small conservative rule agent (no model, no Bedrock). It

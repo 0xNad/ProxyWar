@@ -1,0 +1,348 @@
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import path from "node:path";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { WebSocketServer } from "ws";
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const PLAYER_FILES = ["starter-player.mjs", "llm-player.mjs"];
+
+function holdAction() {
+  return {
+    id: "hold",
+    kind: "hold",
+    label: "Hold position",
+    risk: { level: "none", score: 0 },
+  };
+}
+
+function capabilityRequest() {
+  const dealID = "deal:P_B:P_A:non_aggression_pact:41";
+  return {
+    type: "decision_request",
+    requestID: "req_owner_contract",
+    slot: 0,
+    protocol: {
+      maxActionsPerDecision: 5,
+      maxSpawnPreferences: 16,
+      maxMessageChars: 280,
+    },
+    request: {
+      protocolVersion: "proxywar-agent-v1",
+      observation: {
+        phase: "active",
+        ownState: {
+          playerID: "P_A",
+          name: "Owner Agent",
+          tileShare: 0.2,
+          troops: 1_000,
+          troopRatio: 1,
+          gold: "1000",
+          borderTiles: 10,
+          incomingAttacks: 0,
+          unitCounts: { City: 1 },
+        },
+        visiblePlayers: [
+          {
+            playerID: "P_B",
+            name: "Rival B",
+            isAlive: true,
+            sharesBorder: true,
+            isAllied: false,
+            isFriendly: true,
+            relation: 0,
+            canAttack: true,
+            bearing: "east",
+            distanceClass: "adjacent",
+            borderWithYou: {
+              tiles: 18,
+              shareOfYourBorder: 45,
+              terrain: "mixed",
+              defensePostsCovering: 1,
+              underAttackHere: false,
+            },
+            bordersWith: [],
+          },
+        ],
+        deals: {
+          decisionStep: 42,
+          incomingProposals: [
+            {
+              dealID,
+              proposerPlayerID: "P_B",
+              proposerName: "Rival B",
+              recipientPlayerID: "P_A",
+              recipientName: "Owner Agent",
+              terms: {
+                template: "non_aggression_pact",
+                durationSteps: 12,
+              },
+              proposedAtStep: 41,
+              answerableThroughStep: 45,
+            },
+          ],
+          outgoingProposals: [],
+          activeDeals: [],
+          proposalOptions: [],
+          rivalReliability: [],
+        },
+        nonCombat: { inboundMessages: [] },
+        spatial: {
+          schemaVersion: 1,
+          visibilityModel: "global-lockstep-public-map-v1",
+          ownShape: {
+            quadrant: "west",
+            regionAnalysis: "complete",
+            centroidBasis: "largest_region_border",
+            coastShare: 25,
+            centroid: { xPct: 31, yPct: 54 },
+          },
+          minimap: {
+            schemaVersion: 1,
+            width: 24,
+            height: 12,
+            rows: Array.from({ length: 12 }, () => ".".repeat(24)),
+            legend: [],
+          },
+        },
+      },
+      legalActions: [
+        holdAction(),
+        {
+          id: `deal_accept:${dealID}`,
+          kind: "deal_accept",
+          label: "Accept Rival B's non-aggression pact",
+          risk: { level: "medium", score: 0.35 },
+          metadata: {
+            dealID,
+            recipientID: "P_B",
+            template: "non_aggression_pact",
+          },
+        },
+        {
+          id: `deal_reject:${dealID}`,
+          kind: "deal_reject",
+          label: "Reject Rival B's non-aggression pact",
+          risk: { level: "none", score: 0 },
+          metadata: {
+            dealID,
+            recipientID: "P_B",
+            template: "non_aggression_pact",
+          },
+        },
+        {
+          id: "message:P_B",
+          kind: "message",
+          label: "Send a private message to Rival B",
+          risk: { level: "none", score: 0 },
+          metadata: { recipientID: "P_B" },
+        },
+      ],
+    },
+  };
+}
+
+function absentRequest() {
+  return {
+    type: "decision_request",
+    requestID: "req_absent_contract",
+    slot: 0,
+    protocol: { maxActionsPerDecision: 5, maxSpawnPreferences: 16 },
+    request: {
+      protocolVersion: "proxywar-agent-v1",
+      observation: {
+        phase: "active",
+        ownState: { playerID: "P_A", unitCounts: {} },
+        visiblePlayers: [],
+      },
+      legalActions: [holdAction()],
+    },
+  };
+}
+
+function malformedOptionalRequest() {
+  const request = absentRequest();
+  request.requestID = "req_malformed_optional";
+  request.protocol.maxMessageChars = 280;
+  request.request.observation.visiblePlayers = {};
+  request.request.observation.deals = {
+    decisionStep: 1,
+    incomingProposals: {},
+    outgoingProposals: [],
+    activeDeals: [],
+    proposalOptions: [],
+    rivalReliability: [],
+  };
+  request.request.observation.nonCombat = {
+    inboundMessages: { senderID: "P_B" },
+  };
+  request.request.observation.spatial = {
+    schemaVersion: 1,
+    visibilityModel: "private-fog-bypass",
+  };
+  return request;
+}
+
+function sameTurnMessageRequest(requestID, messageEventID, text) {
+  const request = absentRequest();
+  request.requestID = requestID;
+  request.protocol.maxMessageChars = 280;
+  request.request.observation.visiblePlayers = [
+    {
+      playerID: "P_B",
+      name: "Rival B",
+      isAlive: true,
+      sharesBorder: true,
+      isAllied: false,
+      isFriendly: false,
+      relation: 0,
+      canAttack: true,
+    },
+  ];
+  request.request.observation.nonCombat = {
+    inboundMessages: [
+      {
+        messageEventID,
+        senderID: "P_B",
+        senderName: "Rival B",
+        turnNumber: 7,
+        text,
+      },
+    ],
+  };
+  request.request.legalActions.push({
+    id: "message:P_B",
+    kind: "message",
+    label: "Send a private message to Rival B",
+    risk: { level: "none", score: 0 },
+    metadata: { recipientID: "P_B" },
+  });
+  return request;
+}
+
+async function runPlayerSequence(playerFile, requests) {
+  assert.ok(requests.length > 0);
+  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await once(server, "listening");
+  const address = server.address();
+  assert.equal(typeof address, "object");
+  const url = `ws://127.0.0.1:${address.port}`;
+  const child = spawn(process.execPath, [path.join(HERE, playerFile)], {
+    cwd: HERE,
+    env: {
+      ...process.env,
+      COWORLD_PLAYER_WS_URL: url,
+      AWS_REGION: "us-east-1",
+      AWS_EC2_METADATA_DISABLED: "true",
+      BEDROCK_MODEL: "owner-contract-no-provider-call",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8").on("data", (chunk) => (stdout += chunk));
+  child.stderr.setEncoding("utf8").on("data", (chunk) => (stderr += chunk));
+
+  try {
+    return await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(
+          new Error(
+            `${playerFile} timed out; stdout=${stdout}; stderr=${stderr}`,
+          ),
+        );
+      }, 8_000);
+      child.once("error", (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+      child.once("exit", (code, signal) => {
+        if (code !== 0 && signal === null) {
+          clearTimeout(timer);
+          reject(
+            new Error(
+              `${playerFile} exited ${code}; stdout=${stdout}; stderr=${stderr}`,
+            ),
+          );
+        }
+      });
+      server.once("connection", (socket) => {
+        const responses = [];
+        socket.on("message", (payload) => {
+          responses.push(JSON.parse(String(payload)));
+          if (responses.length === requests.length) {
+            clearTimeout(timer);
+            socket.send(JSON.stringify({ type: "final" }));
+            resolve(responses);
+            return;
+          }
+          socket.send(JSON.stringify(requests[responses.length]));
+        });
+        socket.send(JSON.stringify(requests[0]));
+      });
+    });
+  } finally {
+    child.kill("SIGTERM");
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
+async function runPlayer(playerFile, request) {
+  const [response] = await runPlayerSequence(playerFile, [request]);
+  return response;
+}
+
+for (const playerFile of PLAYER_FILES) {
+  test(`${playerFile} emits all three independent exact slots`, async () => {
+    const request = capabilityRequest();
+    const response = await runPlayer(playerFile, request);
+    const offered = new Set(
+      request.request.legalActions.map((action) => action.id),
+    );
+    assert.equal(response.type, "decision_response");
+    assert.ok(offered.has(response.selectedLegalActionId));
+    assert.ok(offered.has(response.selectedDealActionId));
+    assert.equal(response.selectedMessageActionId, "message:P_B");
+    assert.equal(typeof response.messageText, "string");
+    assert.ok(response.messageText.length > 0);
+    assert.ok(response.messageText.length <= 280);
+  });
+
+  test(`${playerFile} preserves absent-field compatibility`, async () => {
+    const response = await runPlayer(playerFile, absentRequest());
+    assert.equal(response.selectedLegalActionId, "hold");
+    assert.equal("selectedDealActionId" in response, false);
+    assert.equal("selectedMessageActionId" in response, false);
+    assert.equal("messageText" in response, false);
+  });
+
+  test(`${playerFile} fails malformed optional containers closed`, async () => {
+    const response = await runPlayer(playerFile, malformedOptionalRequest());
+    assert.equal(response.selectedLegalActionId, "hold");
+    assert.equal("selectedDealActionId" in response, false);
+    assert.equal("selectedMessageActionId" in response, false);
+    assert.equal("messageText" in response, false);
+  });
+
+  test(`${playerFile} preserves distinct same-turn message event ids`, async () => {
+    const responses = await runPlayerSequence(playerFile, [
+      sameTurnMessageRequest(
+        "req_same_turn_first",
+        "msg_44444444-4444-4444-8444-444444444444",
+        "First same-turn message",
+      ),
+      sameTurnMessageRequest(
+        "req_same_turn_second",
+        "msg_55555555-5555-4555-8555-555555555555",
+        "Second same-turn message",
+      ),
+    ]);
+    assert.equal(responses.length, 2);
+    for (const response of responses) {
+      assert.equal(response.selectedMessageActionId, "message:P_B");
+      assert.equal(typeof response.messageText, "string");
+    }
+  });
+}

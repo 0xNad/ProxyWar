@@ -1,0 +1,45 @@
+{
+  "schemaVersion": "proxywar-owner-upgrade-fresh-apply-v1",
+  "generatedAt": "2026-08-24T01:37:51Z",
+  "verdict": "PASS",
+  "publicStarter": {
+    "repository": "https://github.com/0xNad/proxywar-coworld-starter.git",
+    "commit": "190ea95eda41fbf5d1521d433b3365d87b9cfe57",
+    "cleanBeforeApply": true
+  },
+  "candidate": {
+    "commit": "d6abb95262cb46c3e840130a066a5aec568266c2",
+    "tree": "7be34719641e1052773a8383604757e5601b9262",
+    "base": "a69175a30577b3e516f09a2cb0960d4d129b3f33"
+  },
+  "packet": {
+    "path": "coworld-adapter/testing/owner-upgrade/proxywar-owner-upgrade.patch",
+    "sha256": "9f520f33c7d1fd2d4ebd1729f765efc59de0342f4651f7d2331b41bd075e7293",
+    "ledgerPath": "coworld-adapter/testing/owner-upgrade/SHA256SUMS",
+    "ledgerSha256": "5004789f5474a4cc8e3108121d7bc0484033a13fa83e3dfa41eb5c6b94c6da06",
+    "verifiedFiles": 13
+  },
+  "verification": {
+    "command": "node coworld-adapter/testing/owner-upgrade/verify-owner-upgrade.mjs /absolute/path/to/fresh-public-starter /absolute/path/to/ProxyWar-platform-source",
+    "gitApplyCheck": "PASS",
+    "afterApplyFileSetAndHashes": "PASS",
+    "candidateCommitTreeBlobAndContentJoin": "PASS",
+    "npmInstallIgnoreScripts": "PASS",
+    "nodeTest": "PASS",
+    "nodeSyntaxChecks": "PASS",
+    "doctor": "PASS_UV_DOCKER_SOFTMAX_READY"
+  },
+  "spatialLocalArtifacts": {
+    "sourceCommit": "d6abb95262cb46c3e840130a066a5aec568266c2",
+    "benchmarkSha256": "3000517e10f21c20f3936592bac9ccb7fd08b6d93d7d041e1fa0799c0a41d916",
+    "promptMatrixSha256": "d8ad0e31afcb8139e8c29131e0c07858124ab8b81875f6ce816b5a6466d4055d",
+    "benchmarkTargetMet": true,
+    "promptMatrixTargetMet": true
+  },
+  "claimBoundary": {
+    "ownerEvidenceChecker": "policy-self-report-only",
+    "hostedFreeTextExactSlotAndRecipientByteJoin": "NOT_PROVED",
+    "hostedSpatialPackageOrGameplay": "NOT_PROVED",
+    "mergeUploadDispatchDeploy": "NOT_PERFORMED"
+  }
+}

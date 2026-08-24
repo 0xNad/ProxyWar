@@ -9,6 +9,14 @@
  * is just the plumbing that talks to the match; you can ignore it.
  */
 import { WebSocket } from "ws";
+import {
+  advertisedMessageLimit,
+  createOwnerCapabilityEvidenceLogger,
+  dealResponseFields,
+  messageResponseFields,
+  ownerCapabilityObservation,
+  rankOfferedActionsWithSpatial,
+} from "./owner-capabilities.mjs";
 
 const url = process.env.COWORLD_PLAYER_WS_URL;
 if (!url) {
@@ -18,6 +26,7 @@ if (!url) {
 }
 
 const socket = new WebSocket(url);
+const ownerEvidence = createOwnerCapabilityEvidenceLogger();
 
 socket.on("open", () => console.log("connected to match"));
 
@@ -29,53 +38,69 @@ socket.on("message", (data) => {
   }
   if (message.type !== "decision_request") return;
 
-  const legalActions = message.request.legalActions ?? [];
+  const legalActions = Array.isArray(message.request.legalActions)
+    ? message.request.legalActions
+    : [];
+  const observation = ownerCapabilityObservation(message.request.observation);
   const spawnPreferences = spawnPreferenceRanking(message, legalActions);
   const action =
-    spawnPreferences?.[0] ??
-    chooseAction(legalActions, message.request.observation ?? {});
+    spawnPreferences?.[0] ?? chooseAction(legalActions, observation);
   const dealAction =
-    spawnPreferences === null ? chooseDealAction(legalActions) : null;
+    spawnPreferences === null
+      ? chooseDealAction(legalActions, observation)
+      : null;
   // Comms slot: independent of both the game action and the deal action, so
   // answering a rival never costs a move. Null (silence) unless there is
   // something concrete to say. See the free-text section at the bottom.
   const messageMove =
-    spawnPreferences === null
+    spawnPreferences === null &&
+    advertisedMessageLimit(message.protocol) !== null
       ? chooseMessageMove(
           legalActions,
-          message.request.observation ?? {},
+          observation,
           answeredMessages,
           dealAction,
+          advertisedMessageLimit(message.protocol),
         )
       : null;
 
-  socket.send(
-    JSON.stringify({
-      type: "decision_response",
-      requestID: message.requestID,
-      selectedLegalActionId: action.id,
-      runtimeMode: "local-policy-baseline",
-      ...(spawnPreferences !== null
-        ? {
-            spawnPreferenceLegalActionIds: spawnPreferences.map(
-              (preference) => preference.id,
-            ),
-          }
-        : {}),
-      ...(dealAction !== null ? { selectedDealActionId: dealAction.id } : {}),
-      ...(messageMove !== null
-        ? {
-            selectedMessageActionId: messageMove.id,
-            messageText: messageMove.text,
-          }
-        : {}),
-      reason:
-        spawnPreferences !== null
-          ? `starter ranked ${spawnPreferences.length} offered spawn actions from metadata`
-          : `starter ${action.kind}: ${action.label}`,
-      confidence: action.kind === "hold" ? 0.45 : 0.72,
+  const response = {
+    type: "decision_response",
+    requestID: message.requestID,
+    selectedLegalActionId: action.id,
+    runtimeMode: "local-policy-baseline",
+    ...(spawnPreferences !== null
+      ? {
+          spawnPreferenceLegalActionIds: spawnPreferences.map(
+            (preference) => preference.id,
+          ),
+        }
+      : {}),
+    ...dealResponseFields({
+      actions: legalActions,
+      observation,
+      dealMove: dealAction,
     }),
-  );
+    ...messageResponseFields({
+      actions: legalActions,
+      protocol: message.protocol,
+      messageMove,
+    }),
+    reason:
+      spawnPreferences !== null
+        ? `starter ranked ${spawnPreferences.length} offered spawn actions from metadata`
+        : `starter ${action.kind}: ${action.label}`,
+    confidence: action.kind === "hold" ? 0.45 : 0.72,
+  };
+  ownerEvidence({
+    requestID: message.requestID,
+    slot: message.slot,
+    actions: legalActions,
+    observation,
+    response,
+    spawn: spawnPreferences !== null,
+  });
+  socket.send(JSON.stringify(response));
 });
 
 // Post-final linger (hosted only, via pod env) — see llm-player.mjs; keeps
@@ -203,13 +228,17 @@ function chooseAction(actions, obs) {
     // the rival who already asked us, so the pair actually forms one.
     const reciprocal = preferReciprocalAlliance(actions, obs, kind);
     if (reciprocal) return reciprocal;
-    const action = actions.find(
+    const candidates = actions.filter(
       (candidate) =>
         candidate.kind === kind &&
         candidate.risk?.level !== "high" &&
         !String(candidate.id).includes("avoid") &&
         !wouldBreakPromise(candidate, promiseConstraints),
     );
+    const action =
+      obs?.spatial?.visibilityModel === "global-lockstep-public-map-v1"
+        ? rankOfferedActionsWithSpatial(candidates, obs)[0]
+        : candidates[0];
     if (action) return action;
   }
 
@@ -381,7 +410,8 @@ function isDealActionKind(kind) {
   return DEAL_ACTION_KINDS.includes(kind);
 }
 
-function chooseDealAction(actions) {
+function chooseDealAction(actions, obs) {
+  if (!obs?.deals || typeof obs.deals !== "object") return null;
   const supported = (action) =>
     action.metadata?.template === "non_aggression_pact" ||
     action.metadata?.template === "trade_security_pact";
@@ -501,7 +531,13 @@ function provenDealBreaker(obs, playerID) {
 // Answers at most ONE rival per decision: whoever wrote most recently and has
 // not been answered yet. Silence is the default - an agent that talks every
 // step is noise, not negotiation.
-function chooseMessageMove(actions, obs, answered, dealMove) {
+function chooseMessageMove(
+  actions,
+  obs,
+  answered,
+  dealMove,
+  maxChars = MESSAGE_MAX_CHARS,
+) {
   const offers = (actions || []).filter((action) => action?.kind === "message");
   if (offers.length === 0) return null;
 
@@ -510,7 +546,7 @@ function chooseMessageMove(actions, obs, answered, dealMove) {
     (entry) => typeof entry?.senderID === "string" && entry.senderID.length > 0,
   );
   if (inbound.length === 0) {
-    return chooseMessageOpener(offers, obs, answered, dealMove);
+    return chooseMessageOpener(offers, obs, answered, dealMove, maxChars);
   }
 
   // Newest by turn; on a tie the later inbox entry wins, since the server
@@ -570,16 +606,26 @@ function chooseMessageMove(actions, obs, answered, dealMove) {
   else if (hasOpenDeal) text = MESSAGE_REPLIES.dealOpen;
   else text = MESSAGE_REPLIES.neutral;
 
+  // Reject rather than slice or normalize. The exact string below is the
+  // string serialized on the wire when it passes.
+  if (typeof text !== "string" || text.length > maxChars) return null;
+
   answered.add(key);
   answered.add(`reply:${senderID}:${repliesSpent}`);
-  return { id: offer.id, text: text.slice(0, MESSAGE_MAX_CHARS) };
+  return { id: offer.id, text };
 }
 
 // Speaks first, but rarely, and only where there is something concrete to say:
 //   (a) we are proposing a deal to this rival on this very decision - the
 //       message is the reason to accept, which the bare template lacks;
 //   (b) we share a border with a rival we have never written to.
-function chooseMessageOpener(offers, obs, answered, dealMove) {
+function chooseMessageOpener(
+  offers,
+  obs,
+  answered,
+  dealMove,
+  maxChars = MESSAGE_MAX_CHARS,
+) {
   const dealRecipient =
     dealMove?.kind === "deal_propose" ? dealMove?.metadata?.recipientID : null;
   if (dealRecipient) {
@@ -587,11 +633,15 @@ function chooseMessageOpener(offers, obs, answered, dealMove) {
       (action) => action.metadata?.recipientID === dealRecipient,
     );
     const key = `opener:${dealRecipient}`;
-    if (offer && !answered.has(key)) {
+    if (
+      offer &&
+      !answered.has(key) &&
+      MESSAGE_OPENERS.withProposal.length <= maxChars
+    ) {
       answered.add(key);
       return {
         id: offer.id,
-        text: MESSAGE_OPENERS.withProposal.slice(0, MESSAGE_MAX_CHARS),
+        text: MESSAGE_OPENERS.withProposal,
       };
     }
   }
@@ -609,10 +659,11 @@ function chooseMessageOpener(offers, obs, answered, dealMove) {
     // already proven unreliable is not worth the opening line.
     if (!rival?.sharesBorder || rival.isAllied) continue;
     if (provenDealBreaker(obs, recipientID)) continue;
+    if (MESSAGE_OPENERS.border.length > maxChars) continue;
     answered.add(key);
     return {
       id: offer.id,
-      text: MESSAGE_OPENERS.border.slice(0, MESSAGE_MAX_CHARS),
+      text: MESSAGE_OPENERS.border,
     };
   }
   return null;

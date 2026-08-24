@@ -2,7 +2,7 @@ FROM node:24-bookworm-slim
 WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev
-COPY llm-player.mjs starter-player.mjs ./
+COPY llm-player.mjs starter-player.mjs owner-capabilities.mjs ./
 ARG PROXYWAR_PROMPT_HARDENING=1
 ARG PROXYWAR_PROMPT_CACHE=0
 ARG PLAN_EVERY=6
