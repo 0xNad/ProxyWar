@@ -95,6 +95,8 @@ test("runs the exact read-only Coworld status preflight", () => {
 test("keeps the fail-closed Docker guard connected during an exact upload", () => {
   withFakeRuntime(({ env, dockerCapture, root }) => {
     const manifest = path.join(root, "coworld_manifest.json");
+    const certificationCache = path.join(root, "certification-cache");
+    fs.mkdirSync(certificationCache);
     fs.writeFileSync(manifest, "{}\n");
     const result = spawnSync(
       process.execPath,
@@ -117,13 +119,14 @@ test("keeps the fail-closed Docker guard connected during an exact upload", () =
           ...env,
           COWORLD_REAL_DOCKER: "/usr/bin/docker",
           DOCKER_HOST: "unix:///fixture/docker.sock",
+          XDG_CACHE_HOME: certificationCache,
         },
       },
     );
     assert.equal(result.status, 0, result.stderr);
     assert.equal(
       fs.readFileSync(dockerCapture, "utf8"),
-      "docker|/usr/bin/docker|unix:///fixture/docker.sock\n",
+      `docker|/usr/bin/docker|unix:///fixture/docker.sock|${certificationCache}\n`,
     );
   });
 });
@@ -388,7 +391,7 @@ function withFakeRuntime(callback) {
   );
   fs.writeFileSync(
     coworld,
-    `#!/bin/sh\ntest -z "$COWORLD_API_TOKEN$GITHUB_TOKEN$GH_TOKEN$ACTIONS_ID_TOKEN_REQUEST_TOKEN$ACTIONS_RUNTIME_TOKEN$AWS_SECRET_ACCESS_KEY" || exit 19\nprintf 'coworld|%s|%s|%s\\n' "$*" "$HOME" "\${COWORLD_API_TOKEN:+token}" >> ${JSON.stringify(capture)}\nprintf 'docker|%s|%s\\n' "$COWORLD_REAL_DOCKER" "$DOCKER_HOST" > ${JSON.stringify(dockerCapture)}\nprintf 'xp-output\\n'\n`,
+    `#!/bin/sh\ntest -z "$COWORLD_API_TOKEN$GITHUB_TOKEN$GH_TOKEN$ACTIONS_ID_TOKEN_REQUEST_TOKEN$ACTIONS_RUNTIME_TOKEN$AWS_SECRET_ACCESS_KEY" || exit 19\nprintf 'coworld|%s|%s|%s\\n' "$*" "$HOME" "\${COWORLD_API_TOKEN:+token}" >> ${JSON.stringify(capture)}\nprintf 'docker|%s|%s|%s\\n' "$COWORLD_REAL_DOCKER" "$DOCKER_HOST" "$XDG_CACHE_HOME" > ${JSON.stringify(dockerCapture)}\nprintf 'xp-output\\n'\n`,
     { mode: 0o700 },
   );
   const env = {
