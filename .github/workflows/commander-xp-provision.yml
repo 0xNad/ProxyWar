@@ -259,6 +259,15 @@ jobs:
           GAME_CONFIG_DIGEST=$(docker image inspect --format '{{.Id}}' "$GAME_TAG")
           [[ "$POLICY_CONFIG_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "$GAME_CONFIG_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          POLICY_ROOTFS_BYTES=$(docker run --rm --entrypoint /usr/bin/du "$POLICY_TAG" -sx -B1 / | awk '{print $1}')
+          [[ "$POLICY_ROOTFS_BYTES" =~ ^[0-9]+$ ]]
+          test "$POLICY_ROOTFS_BYTES" -lt $((512 * 1024 * 1024))
+          docker run --rm --entrypoint /bin/sh "$POLICY_TAG" -ec '
+            test -f /app/proxywar/coworld-adapter/src/commander-xp-player.ts
+            test -f /app/proxywar/coworld-adapter/src/starter-player.mjs
+            test ! -e /app/proxywar/resources
+            node --import tsx -e '\''Promise.all([import("/app/proxywar/coworld-adapter/src/commander-xp-player.ts"),import("/app/proxywar/src/server/agents/StrategicCommanderBrain.ts")])'\''
+          '
           docker run --rm --entrypoint /bin/sh "$GAME_TAG" -ec '
             test -f /app/proxywar/static/index.html
             node --import tsx/esm -e '\''Promise.all([import("/app/integration/src/coworld-decision-wire.ts"),import("/app/proxywar/src/server/agents/CommanderXpProtocol.ts")])'\''
@@ -268,6 +277,7 @@ jobs:
             echo "GAME_TAG=$GAME_TAG"
             echo "POLICY_CONFIG_DIGEST=$POLICY_CONFIG_DIGEST"
             echo "GAME_CONFIG_DIGEST=$GAME_CONFIG_DIGEST"
+            echo "POLICY_ROOTFS_BYTES=$POLICY_ROOTFS_BYTES"
           } >> "$GITHUB_ENV"
 
       - name: Resolve one exact failed-run provision boundary

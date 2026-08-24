@@ -52,6 +52,23 @@ test("provision builds both images from one clean archive with exact provenance"
   assert.match(workflow, /--signer-digest "\$SOURCE_SHA"/);
   assert.match(workflow, /--deny-self-hosted-runners/);
   assert.match(workflow, /docker run --rm --entrypoint \/bin\/sh "\$GAME_TAG"/);
+  assert.match(
+    workflow,
+    /docker run --rm --entrypoint \/bin\/sh "\$POLICY_TAG"/,
+  );
+  assert.match(workflow, /commander-xp-player\.ts/);
+  assert.match(workflow, /StrategicCommanderBrain\.ts/);
+  assert.match(workflow, /POLICY_ROOTFS_BYTES=/);
+  assert.match(workflow, /512 \* 1024 \* 1024/);
+});
+
+test("policy image contains production dependencies and no game resources", () => {
+  const dockerfile = fs.readFileSync(
+    new URL("../../coworld-adapter/Dockerfile.commander-xp", import.meta.url),
+    "utf8",
+  );
+  assert.match(dockerfile, /npm ci --omit=dev --ignore-scripts/g);
+  assert.doesNotMatch(dockerfile, /COPY resources/);
 });
 
 test("game image builds with development tools and runs with production dependencies only", () => {
