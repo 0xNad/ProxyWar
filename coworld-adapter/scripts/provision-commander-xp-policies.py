@@ -354,6 +354,31 @@ def exact_keys(value: dict[str, Any], keys: set[str], label: str) -> None:
         raise RuntimeError(f"Commander XP {label} schema mismatch")
 
 
+def validate_image_upload_binding(
+    image_upload: dict[str, Any], image: dict[str, Any], args: argparse.Namespace
+) -> None:
+    request_payload = image_upload.get("requestPayload")
+    client_hash = None if not isinstance(request_payload, dict) else request_payload.get(
+        "client_hash"
+    )
+    image_digest = image.get("image_digest")
+    if (
+        not isinstance(request_payload, dict)
+        or set(request_payload) != {"name", "client_hash"}
+        or request_payload.get("name") != _image_upload_name(args.image)
+        or not isinstance(client_hash, str)
+        or not SHA256.fullmatch(client_hash)
+        or image.get("client_hash") != client_hash
+        or image.get("status") != "ready"
+        or not isinstance(image_digest, str)
+        or not SHA256.fullmatch(image_digest)
+        or image_upload.get("image") != image
+        or image_upload.get("requestPayloadSha256")
+        != sha256_bytes(canonical_bytes(request_payload))
+    ):
+        raise RuntimeError("Commander XP Coworld image authority binding mismatch")
+
+
 def validate_recovered_image(
     receipt: dict[str, Any], args: argparse.Namespace
 ) -> dict[str, Any]:
@@ -377,8 +402,8 @@ def validate_recovered_image(
         "recovered image receipt",
     )
     if (
-        receipt["schemaVersion"] != 2
-        or receipt["authority"] != "coworld-0.1.42-policy-image-upload-v2"
+        receipt["schemaVersion"] != 3
+        or receipt["authority"] != "coworld-0.1.42-policy-image-upload-v3"
         or receipt["platform"] != PLATFORM
         or receipt["sourceSha"] != args.source_sha
         or receipt["sourceTreeSha"] != args.source_tree_sha
@@ -386,9 +411,11 @@ def validate_recovered_image(
         or receipt["buildProvenanceDigest"] != args.build_provenance_digest
         or receipt["ociImage"] != args.image.split("@", 1)[0]
         or receipt["ociDigest"] != args.oci_digest
-        or receipt["containerImage"].get("image_digest") != args.oci_digest
     ):
         raise RuntimeError("Commander XP recovered image identity mismatch")
+    validate_image_upload_binding(
+        receipt["imageUpload"], receipt["containerImage"], args
+    )
     return receipt["containerImage"]
 
 
@@ -506,15 +533,12 @@ def upload(args: argparse.Namespace) -> None:
         with CoworldUploadClient.from_login(server_url=SERVER) as client:
             image_upload = upload_image(client, args.image)
         image = image_upload["image"]
-        if image["image_digest"] != args.oci_digest:
-            raise RuntimeError(
-                "Commander XP uploaded image digest does not match the attested OCI digest"
-            )
+        validate_image_upload_binding(image_upload, image, args)
         write_receipt(
             image_path,
             {
-                "schemaVersion": 2,
-                "authority": "coworld-0.1.42-policy-image-upload-v2",
+                "schemaVersion": 3,
+                "authority": "coworld-0.1.42-policy-image-upload-v3",
                 "inspectedAt": inspected_at,
                 "platform": PLATFORM,
                 "sourceSha": args.source_sha,

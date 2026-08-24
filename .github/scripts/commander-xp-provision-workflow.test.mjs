@@ -178,8 +178,14 @@ test("provision retains only safe projections of presigned policy upload respons
     /write_(?:text|bytes)\([^\n]*response_bytes/,
   );
   assert.match(policyProvisioner, /coworld-0\.1\.42-policy-upload-readback-v3/);
+  assert.match(policyProvisioner, /coworld-0\.1\.42-policy-image-upload-v3/);
   assert.match(policyProvisioner, /adopted-after-remote-success/);
   assert.match(
+    policyProvisioner,
+    /image\.get\("client_hash"\) != client_hash/,
+  );
+  assert.match(policyProvisioner, /not SHA256\.fullmatch\(image_digest\)/);
+  assert.doesNotMatch(
     policyProvisioner,
     /image\["image_digest"\] != args\.oci_digest/,
   );
