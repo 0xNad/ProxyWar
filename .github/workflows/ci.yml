@@ -145,6 +145,8 @@ jobs:
         with:
           node-version: 24
       - run: node artifacts/trusted-ci-control/.github/scripts/npm-ci-with-retry.mjs
+      - name: Install Coworld adapter test dependencies
+        run: npm ci --ignore-scripts --prefix coworld-adapter
       - name: Download static app shell
         uses: actions/download-artifact@v7
         with:
@@ -318,6 +320,11 @@ jobs:
           node-version: 24
       - name: Run admission and release security tests
         run: node --test tests/automation/*.test.mjs
+      - name: Run Commander XP workflow security tests
+        run: |
+          node --test \
+            .github/scripts/commander-xp-*.test.mjs \
+            .github/scripts/coworld-authenticated-command.test.mjs
       - name: Parse workflow YAML
         run: ruby -e 'require "yaml"; Dir[".github/workflows/*.{yml,yaml}"].each { |f| YAML.parse_file(f) }'
       - name: Validate workflow schema, expressions, and permissions
