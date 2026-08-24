@@ -13,7 +13,7 @@ describe("Commander starter is the default builder path", () => {
       "launch.sh",
       "commander-player.ts",
       "package.json",
-      "starter-contract.test.mjs",
+      "starter-contract.node.mjs",
       "LICENSE",
     ];
     await Promise.all(
