@@ -165,6 +165,10 @@ test("provision recovers only from exact cumulative immutable stage boundaries",
 });
 
 test("provision proves exact 360x100 terminality and preserves product binding", () => {
+  assert.match(
+    workflow,
+    /install -d -m 700 "\$PROVISION_ROOT\/policy-inspect"/,
+  );
   assert.match(workflow, /commander-xp-run-episode/);
   assert.match(workflow, /--game-image="\$GAME_REPO_DIGEST"/);
   assert.match(workflow, /--player-image="\$POLICY_REPO_DIGEST"/);

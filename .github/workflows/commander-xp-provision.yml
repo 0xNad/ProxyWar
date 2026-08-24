@@ -963,7 +963,7 @@ jobs:
         run: |
           set -euo pipefail
           PROVISION_ROOT="$RUNNER_TEMP/commander-xp-provision"
-          mkdir -m 700 "$PROVISION_ROOT/policy-inspect"
+          install -d -m 700 "$PROVISION_ROOT/policy-inspect"
           cp "$EVAL_ROOT/eval-coworld-manifest-v2.json" "$PROVISION_ROOT/eval-coworld-manifest-v2.json"
           cp "$EVAL_ROOT/eval-coworld-inspect.json" "$PROVISION_ROOT/eval-coworld-inspect.json"
           cp "$RUNNER_TEMP/eval-coworld-terminal-proof-v2.json" "$PROVISION_ROOT/eval-coworld-terminal-proof-v2.json"
