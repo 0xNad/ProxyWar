@@ -22,7 +22,13 @@ interface ManifestProtocolText {
   game: {
     runnable: { env: Record<string, string> };
     protocols: { player: { value: string } };
-    docs: { readme: { value: string } };
+    docs: {
+      readme: { value: string };
+      pages: Array<{
+        id: string;
+        content: { value: string };
+      }>;
+    };
     config_schema: {
       properties: Record<string, Record<string, unknown>>;
     };
@@ -131,6 +137,21 @@ describe("Coworld manifest spawn-preference protocol", () => {
       });
       expect(manifest.game.runnable.env).not.toHaveProperty(
         "PROXYWAR_TUNE_SPATIAL_MINIMAP",
+      );
+      const spatialPage = manifest.game.docs.pages.find(
+        (page) => page.id === "proxywar-structured-spatial-observation",
+      );
+      expect(spatialPage?.content.value).toContain(
+        "PROXYWAR_TUNE_SPATIAL_OBSERVATION=1",
+      );
+      expect(spatialPage?.content.value).toContain(
+        "PROXYWAR_TUNE_SPATIAL_MINIMAP absent",
+      );
+      expect(spatialPage?.content.value).toContain(
+        "global-lockstep-public-map-v1",
+      );
+      expect(spatialPage?.content.value).toContain(
+        "coordinates, glyphs, and player IDs are never executable actions",
       );
     },
   );

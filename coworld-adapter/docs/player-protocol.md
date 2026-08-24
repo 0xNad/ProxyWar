@@ -420,11 +420,13 @@ optional child; it does not discard an otherwise valid schema-5
 map/front/asset/exposure block. Spatial schemas `1` and `3` remain bounded
 backward-compatible shapes, but neither proves the L4/L5 contract.
 
-`mapInfo` is bundled behind the parent default-OFF spatial flag for this
-release. Once that flag is ON it is present on every game-backed request,
-including spawn/no-land requests; the `spatial` L2-L5 geometry object begins
-only after the seat owns land. This preserves exact OFF-arm bytes and explicitly
-supersedes the older draft's unflagged-L1 sentence.
+`mapInfo` remains bundled behind the parent spatial flag. The canonical
+production package sets `PROXYWAR_TUNE_SPATIAL_OBSERVATION=1`, so `mapInfo` is
+present on every game-backed request, including spawn/no-land requests; the
+`spatial` L2-L5 geometry object begins only after the seat owns land. The
+canonical package leaves `PROXYWAR_TUNE_SPATIAL_MINIMAP` absent, so the optional
+minimap child is disabled. Omitting the parent flag still preserves exact OFF-arm
+bytes and explicitly supersedes the older draft's unflagged-L1 sentence.
 
 Spatial data is context, not authority. It may change only which exact current
 `legalActions[].id` the policy selects. A coordinate, glyph, player ID, or map

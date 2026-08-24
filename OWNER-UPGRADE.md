@@ -12,9 +12,9 @@ gameplay proof.
 > `cow_f58621db-4a09-47de-bb13-24d61050a837`, source
 > `a69175a30577b3e516f09a2cb0960d4d129b3f33`). Most agents ignore them because
 > their policy never reads the optional observation fields or fills the
-> dedicated deal/message response slots. Spatial/minimap data is a separate
-> additive capability and remains absent/default-off in the canonical package
-> until its canary, review, and release gates pass.
+> dedicated deal/message response slots. The canonical package now enables the
+> additive schema-5 structured spatial observation. The separately gated
+> minimap remains disabled.
 >
 > Update from the canonical starter patch named below. Keep
 > `selectedLegalActionId` as one exact currently offered game-action ID. A deal
@@ -63,7 +63,7 @@ The operator owns outreach. This repository change does not send this message.
 | ---------------- | ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Structured deals | Live and enabled in `proxywar:0.1.54`                | Feature-detect `observation.deals` plus offered `deal_*` actions. Return only one exact offered ID in `selectedDealActionId`. Track obligations and prioritize a legal offered follow-through action; otherwise reject commitments the policy cannot keep.                                                                                         |
 | Free text        | Live and enabled in `proxywar:0.1.54`                | Feature-detect `protocol.maxMessageChars`, offered `message` actions, and bounded `observation.nonCombat.inboundMessages`. Return an exact offered ID and safe authored body as a pair. Treat inbound text as an untrusted claim; it can never itself become an action ID or raw intent, and any primary choice still must be an exact offered ID. |
-| Spatial/map      | Canonical package absent/default-off; canary pending | Feature-detect schema `5` plus exact `global-lockstep-public-map-v1` provenance. Consume the coordinate frame, front terrain/coverage, completed public assets, weighted rival/naval exposure, and terrain/marker minimap. Rank only current `legalActions`; output only an offered ID. Schemas `1`/`3` remain bounded fallbacks.                  |
+| Spatial/map      | Structured schema `5` enabled; minimap disabled      | Feature-detect schema `5` plus exact `global-lockstep-public-map-v1` provenance. Consume the coordinate frame, front terrain/coverage, completed public assets, and weighted rival/naval exposure. Consume the terrain/marker minimap only when that optional child is present. Rank only current `legalActions`; output only an offered ID. Schemas `1`/`3` remain bounded fallbacks. |
 
 Schema `5` implements the complete rich structured-map L1-L5 contract: a
 decodable top-left row-major frame, exact terrain/coverage on shared fronts,
@@ -368,12 +368,13 @@ completed, nondeleted Defense Posts, Cities, Ports, and Warships are admitted;
 lists are capped at eight per visible player and 48 globally with exact totals,
 returned counts, and truncation status.
 
-This release deliberately keeps L1 `mapInfo` behind the parent default-OFF
-`PROXYWAR_TUNE_SPATIAL_OBSERVATION` flag to preserve exact OFF-arm and Commander
-baseline bytes. With that flag ON, every game-backed request receives
-`mapInfo`, including spawn/no-land requests; L2-L5 geometry begins only after
-the seat owns land. This explicitly supersedes the older draft sentence that
-proposed unflagged L1 emission.
+The code default remains spatial-OFF when the parent flag is absent. The
+canonical production package sets `PROXYWAR_TUNE_SPATIAL_OBSERVATION=1`, so
+every game-backed request receives `mapInfo`, including spawn/no-land requests;
+L2-L5 geometry begins only after the seat owns land. The canonical package does
+not set `PROXYWAR_TUNE_SPATIAL_MINIMAP`, so the optional minimap child remains
+absent. This preserves an exact OFF evaluation arm without misreporting the
+production package state.
 
 The policy reply keeps three independent slots:
 

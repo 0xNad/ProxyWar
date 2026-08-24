@@ -11,8 +11,8 @@ Coworld manifest/image. The Experience Request schema selects a `coworld_id`
 but cannot override runnable environment variables, so the arms must be three
 fresh, uniquely named, noncanonical Coworld packages:
 
-- `proxywar-spatial-xp-off`: the spatial flags are absent (the production
-  default).
+- `proxywar-spatial-xp-off`: both spatial flags are absent. This is the exact
+  OFF evaluation arm; production now uses the structured-only arm state.
 - `proxywar-spatial-xp-structured`:
   `PROXYWAR_TUNE_SPATIAL_OBSERVATION=1` is set and
   `PROXYWAR_TUNE_SPATIAL_MINIMAP` is absent. This isolates the structured
@@ -22,10 +22,10 @@ fresh, uniquely named, noncanonical Coworld packages:
   `PROXYWAR_TUNE_SPATIAL_MINIMAP=1` are set.
 
 Release-contract amendment: the 2026-08-16 design draft proposed unflagged L1
-`mapInfo`, but this train's newer default-OFF/Commander-isolation requirement
-controls. L1 remains behind the parent spatial flag so the OFF arm stays
-byte-identical. In both enabled arms every game-backed request, including spawn/no-land,
-must carry `mapInfo`; L2-L5 geometry begins only after land exists.
+`mapInfo`. L1 remains behind the parent spatial flag so the OFF evaluation arm
+stays byte-identical even though production now sets that parent flag. In both
+enabled arms every game-backed request, including spawn/no-land, must carry
+`mapInfo`; L2-L5 geometry begins only after land exists.
 
 Generate each local-only, upload-blocked candidate manifest without editing the
 canonical template:
