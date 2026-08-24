@@ -270,6 +270,11 @@ class PolicyProvisionReceiptTest(unittest.TestCase):
                     "from_login",
                     return_value=RecoveryReadClient(),
                 ),
+                patch.object(
+                    MODULE.CoworldUploadClient,
+                    "from_login",
+                    return_value=RecoveryReadClient(),
+                ),
                 patch.object(MODULE, "create_policy", side_effect=create_policy),
             ):
                 MODULE.upload(args)
