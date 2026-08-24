@@ -210,9 +210,16 @@ async function poll(root) {
       if (error.code === "ENOENT") continue;
       throw error;
     }
+    const statusFile = path.join(resolved, "status", entry.filename);
+    try {
+      const previous = await readJSON(statusFile);
+      if (["completed", "failed"].includes(previous.status)) continue;
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
     const stdout = coworld(["xp-request", "get", receipt.id, "--json"]);
     const status = JSON.parse(stdout);
-    await writeJSON(path.join(resolved, "status", entry.filename), status);
+    await writeJSON(statusFile, status);
     refreshed += 1;
   }
   return { refreshed, ...(await inventory(root)) };
