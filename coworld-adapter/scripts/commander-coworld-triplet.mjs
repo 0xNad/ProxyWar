@@ -16,8 +16,15 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const ARM_NAMES = ["A", "B", "C"];
 
 export function buildRequests(input) {
-  const { coworldID, policies, opponentPolicy, seeds, subjectSeats, runID } =
-    input;
+  const {
+    coworldID,
+    policies,
+    opponentPolicy,
+    seeds,
+    subjectSeats,
+    armOrders,
+    runID,
+  } = input;
   assertUUID(coworldID, "coworld-id", "cow_");
   for (const arm of ARM_NAMES)
     assertUUID(policies[arm], `policy-${arm.toLowerCase()}`);
@@ -33,13 +40,20 @@ export function buildRequests(input) {
 
   return seeds.flatMap((seed, tripletIndex) => {
     const subjectSeat = subjectSeats[tripletIndex];
+    const armOrder = armOrders?.[tripletIndex] ?? ARM_NAMES;
+    if (
+      armOrder.length !== ARM_NAMES.length ||
+      [...armOrder].sort().join("") !== ARM_NAMES.join("")
+    ) {
+      throw new Error(`Invalid arm order for triplet ${tripletIndex}`);
+    }
     if (!Number.isInteger(seed) || seed < 0 || seed >= 11_881_376) {
       throw new Error(`Invalid seed ${seed}`);
     }
     if (!Number.isInteger(subjectSeat) || subjectSeat < 0 || subjectSeat > 3) {
       throw new Error(`Invalid subject seat ${subjectSeat}`);
     }
-    return ARM_NAMES.map((arm) => {
+    return armOrder.map((arm) => {
       const runKey = `commander-xp-v2/${runID}/canary/r${String(tripletIndex).padStart(2, "0")}/${arm}`;
       const roster = Array.from({ length: 4 }, (_, slot) => ({
         player: {
@@ -478,6 +492,9 @@ async function main() {
       turnsPerDecisionStep: 100,
       maxDecisionMs: MAX_DECISION_MS,
       episodeTimeoutSeconds: 6_000,
+      armOrders: options.seeds.map((_, index) =>
+        (options.armOrders?.[index] ?? ARM_NAMES).join(""),
+      ),
     },
     summary,
     runs,
@@ -505,6 +522,14 @@ function parseOptions(args) {
     if (!values[key]) throw new Error(`Missing --${key}`);
     return values[key];
   };
+  const seeds = csvIntegers(required("seeds"));
+  const subjectSeats = csvIntegers(required("subject-seats"));
+  const armOrders = values["arm-orders"]
+    ? values["arm-orders"].split(",").map((entry) => [...entry])
+    : undefined;
+  if (armOrders !== undefined && armOrders.length !== seeds.length) {
+    throw new Error("--arm-orders must provide one permutation per seed");
+  }
   return {
     coworldID: required("coworld-id"),
     policies: {
@@ -513,8 +538,9 @@ function parseOptions(args) {
       C: required("policy-c"),
     },
     opponentPolicy: required("opponent-policy"),
-    seeds: csvIntegers(required("seeds")),
-    subjectSeats: csvIntegers(required("subject-seats")),
+    seeds,
+    subjectSeats,
+    armOrders,
     runID: required("run-id"),
     output: path.resolve(required("output")),
     pollSeconds: Number(values["poll-seconds"] ?? 20),

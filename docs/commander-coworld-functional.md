@@ -14,13 +14,17 @@ npm run agent:commander:coworld -- \
   --opponent-policy=UUID \
   --seeds=18,19,20 \
   --subject-seats=1,2,3 \
+  --arm-orders=ABC,CBA,BAC \
   --run-id=unique-run-name \
   --output=coworld-adapter/tmp/commander-evidence/unique-run-name
 ```
 
 For each seed/seat pair, all three arms receive the same map, gameplay limits,
 opponents, and derived Coworld game ID. The only policy change is the subject
-arm. The request deliberately omits `llm_routing_override`; the hosted policy
+arm. `--arm-orders` is optional; when supplied it must contain one `ABC`
+permutation per seed and controls only submission order, allowing canaries to
+balance B-before-C against C-before-B. The request deliberately omits
+`llm_routing_override`; the hosted policy
 environment provides Bedrock access.
 
 The command fails unless every request yields exactly one completed episode,

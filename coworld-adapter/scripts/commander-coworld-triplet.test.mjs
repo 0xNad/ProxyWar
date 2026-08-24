@@ -66,6 +66,50 @@ test("builds matched direct Coworld requests without a routing override", () => 
   }
 });
 
+test("supports explicit balanced B/C submission order per triplet", () => {
+  const requests = buildRequests({
+    ...ids,
+    seeds: [18, 19, 20, 21],
+    subjectSeats: [0, 1, 2, 3],
+    armOrders: [
+      ["A", "B", "C"],
+      ["C", "B", "A"],
+      ["B", "A", "C"],
+      ["C", "A", "B"],
+    ],
+    runID: "balanced-20260824",
+  });
+  assert.deepEqual(
+    [0, 1, 2, 3].map((tripletIndex) =>
+      requests
+        .filter((request) => request.tripletIndex === tripletIndex)
+        .map((request) => request.arm)
+        .join(""),
+    ),
+    ["ABC", "CBA", "BAC", "CAB"],
+  );
+  assert.equal(
+    [0, 1, 2, 3].filter((tripletIndex) => {
+      const order = requests
+        .filter((request) => request.tripletIndex === tripletIndex)
+        .map((request) => request.arm);
+      return order.indexOf("B") < order.indexOf("C");
+    }).length,
+    2,
+  );
+  assert.throws(
+    () =>
+      buildRequests({
+        ...ids,
+        seeds: [18],
+        subjectSeats: [0],
+        armOrders: [["A", "A", "C"]],
+        runID: "invalid-order",
+      }),
+    /Invalid arm order/,
+  );
+});
+
 test("the runner invokes Coworld with a request path rather than a removed --file flag", async () => {
   const source = await import("node:fs/promises").then(({ readFile }) =>
     readFile(
