@@ -177,6 +177,37 @@ describe("MitochondriaFriend", () => {
     ).toBe(HOLD.id);
   });
 
+  it("retries an unanswered alliance without spending every growth turn", async () => {
+    const { choose } = await createPolicy();
+    const replied = observation({
+      nonCombat: {
+        inboundMessages: [
+          {
+            messageEventID: "msg_retry",
+            senderID: "P_AURI",
+            senderName: "Auri",
+            text: "hello",
+            turnNumber: 4,
+          },
+        ],
+      },
+    });
+    expect(
+      decide(choose, [ALLY_AURI, EXPAND, HOLD, MESSAGE_AURI], replied)
+        .selectedLegalActionId,
+    ).toBe(ALLY_AURI.id);
+    for (let decision = 0; decision < 5; decision += 1) {
+      expect(
+        decide(choose, [ALLY_AURI, EXPAND, HOLD, MESSAGE_AURI])
+          .selectedLegalActionId,
+      ).toBe(EXPAND.id);
+    }
+    expect(
+      decide(choose, [ALLY_AURI, EXPAND, HOLD, MESSAGE_AURI])
+        .selectedLegalActionId,
+    ).toBe(ALLY_AURI.id);
+  });
+
   it("returns an incoming alliance request before ordinary growth", async () => {
     const { choose, messages } = await createPolicy();
     const obs = observation({

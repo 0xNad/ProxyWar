@@ -23,6 +23,8 @@ const MESSAGE_MAX_CHARS = 280;
 const FOLLOW_UP_EVERY_DECISIONS = 8;
 const MAX_OUTBOUND_MESSAGES_PER_RIVAL = 8;
 const DEAL_RETRY_STEPS = 24;
+const ALLIANCE_RETRY_DECISIONS = 6;
+const MAX_ALLIANCE_ATTEMPTS_PER_RIVAL = 4;
 
 export const MITOCHONDRIA_FRIEND_MESSAGES = Object.freeze({
   opener:
@@ -46,6 +48,7 @@ export function createMitochondriaFriendPolicy() {
   const outboundCounts = new Map();
   const lastOutboundDecision = new Map();
   const proposalAttempts = new Map();
+  const allianceAttempts = new Map();
   let decisionNumber = 0;
 
   return function chooseMitochondriaFriendDecision(input = {}) {
@@ -78,7 +81,13 @@ export function createMitochondriaFriendPolicy() {
       };
     }
 
-    const primary = choosePrimary(actions, observation, responders);
+    const primary = choosePrimary(
+      actions,
+      observation,
+      responders,
+      decisionNumber,
+      allianceAttempts,
+    );
     const deal = chooseDeal(
       actions,
       observation,
@@ -163,7 +172,13 @@ function recipientID(action) {
   );
 }
 
-function choosePrimary(actions, observation, responders) {
+function choosePrimary(
+  actions,
+  observation,
+  responders,
+  decisionNumber,
+  allianceAttempts,
+) {
   const primary = actions.filter(
     (action) => !DEAL_KINDS.has(action.kind) && action.kind !== "message",
   );
@@ -183,18 +198,52 @@ function choosePrimary(actions, observation, responders) {
   });
   if (pendingRenewal) return pendingRenewal;
 
-  const reciprocalTargets = new Set([
-    ...players
+  const incomingTargets = new Set(
+    players
       .filter((player) => player.hasIncomingAllianceRequest === true)
       .map((player) => player.playerID),
-    ...responders,
-  ]);
+  );
   const reciprocalAlliance = primary.find(
     (action) =>
       action.kind === "alliance_request" &&
-      reciprocalTargets.has(recipientID(action)),
+      incomingTargets.has(recipientID(action)),
   );
-  if (reciprocalAlliance) return reciprocalAlliance;
+  if (reciprocalAlliance) {
+    recordAllianceAttempt(
+      recipientID(reciprocalAlliance),
+      allianceAttempts,
+      decisionNumber,
+    );
+    return reciprocalAlliance;
+  }
+
+  const responderAlliance = primary.find((action) => {
+    if (action.kind !== "alliance_request") return false;
+    const targetID = recipientID(action);
+    if (!responders.has(targetID)) return false;
+    const rival = playerByID.get(targetID);
+    if (
+      rival?.isAllied === true ||
+      rival?.isFriendly === true ||
+      rival?.hasOutgoingAllianceRequest === true
+    ) {
+      return false;
+    }
+    const previous = allianceAttempts.get(targetID);
+    return (
+      previous === undefined ||
+      (previous.count < MAX_ALLIANCE_ATTEMPTS_PER_RIVAL &&
+        decisionNumber - previous.lastDecision >= ALLIANCE_RETRY_DECISIONS)
+    );
+  });
+  if (responderAlliance) {
+    recordAllianceAttempt(
+      recipientID(responderAlliance),
+      allianceAttempts,
+      decisionNumber,
+    );
+    return responderAlliance;
+  }
 
   if (Number(observation?.ownState?.incomingAttacks ?? 0) > 0) {
     const retreat = primary.find(
@@ -266,6 +315,15 @@ function choosePrimary(actions, observation, responders) {
     primary.find((action) => action.risk?.level !== "high") ??
     primary[0]
   );
+}
+
+function recordAllianceAttempt(targetID, allianceAttempts, decisionNumber) {
+  if (typeof targetID !== "string") return;
+  const previous = allianceAttempts.get(targetID);
+  allianceAttempts.set(targetID, {
+    count: (previous?.count ?? 0) + 1,
+    lastDecision: decisionNumber,
+  });
 }
 
 function protectedPlayerIDs(observation, responders) {

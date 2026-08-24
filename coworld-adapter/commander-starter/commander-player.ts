@@ -21,12 +21,16 @@ import type {
   LlmProvider,
 } from "../../src/server/agents/LlmProvider";
 import {
+  chooseKeystoneDealMove,
+  chooseKeystoneMessageMove,
   decisionToResponse,
   requestToBrainInput,
   spawnPreferenceDecision,
   transportFallbackResponse,
   wireMaxActionsPerDecision,
   wireMaxSpawnPreferences,
+  withKeystoneDeal,
+  withKeystoneMessage,
   withoutKeystoneTreatyBreaches,
 } from "../src/keystone-player";
 
@@ -182,6 +186,69 @@ export async function createProductionCommanderBrain(input: {
   );
 }
 
+/**
+ * Alliance acceptance is a returning alliance_request, not a separate action
+ * kind. When another player is already waiting, reciprocating one exact
+ * offered id is the highest-value social move and must not depend on the LLM
+ * selecting a diplomacy family that turn.
+ */
+export function productionCommanderReciprocalAlliance(
+  input: AgentBrainInput,
+): AgentDecision | null {
+  const incoming = new Set(
+    (input.observation.visiblePlayers ?? [])
+      .filter((player) => player.hasIncomingAllianceRequest === true)
+      .map((player) => player.playerID),
+  );
+  const action = input.legalActions.find((candidate) => {
+    const metadata = candidate.metadata as
+      | { targetID?: unknown; recipientID?: unknown; playerID?: unknown }
+      | undefined;
+    const targetID =
+      metadata?.targetID ?? metadata?.recipientID ?? metadata?.playerID;
+    return (
+      candidate.kind === "alliance_request" &&
+      typeof targetID === "string" &&
+      incoming.has(targetID)
+    );
+  });
+  return action
+    ? {
+        actionID: action.id,
+        reason:
+          "Commander reciprocated an exact offered incoming alliance request",
+        metadata: {
+          runtimeMode: "commander-social-reciprocity",
+          fallbackUsed: false,
+          llmPlannerDegraded: false,
+        },
+      }
+    : null;
+}
+
+export function withProductionCommanderSocial(input: {
+  decision: AgentDecision;
+  brainInput: AgentBrainInput;
+  answeredMessages: Set<string>;
+  proposedDeals: Set<string>;
+}): AgentDecision {
+  return withKeystoneDeal(
+    withKeystoneMessage(
+      input.decision,
+      chooseKeystoneMessageMove(
+        input.brainInput.legalActions,
+        input.brainInput.observation,
+        input.answeredMessages,
+      ),
+    ),
+    chooseKeystoneDealMove({
+      observation: input.brainInput.observation,
+      legalActions: input.brainInput.legalActions,
+      proposed: input.proposedDeals,
+    }),
+  );
+}
+
 function requiredEnv(name: string): string {
   const value = process.env[name]?.trim();
   if (!value) throw new Error(`${name} is required`);
@@ -213,6 +280,8 @@ async function main(): Promise<void> {
   const socket = new WebSocket(url);
   let decisionChain: Promise<void> = Promise.resolve();
   let sawFinal = false;
+  const answeredMessages = new Set<string>();
+  const proposedDeals = new Set<string>();
 
   socket.on("open", () => {
     console.log(
@@ -267,10 +336,25 @@ async function main(): Promise<void> {
               `commander treaty guard skipped: ${error instanceof Error ? error.message : String(error)}`,
             );
           }
-          decision = await brain.decide({
+          const compliantInput = {
             ...input,
             legalActions: compliantActions,
-          });
+          };
+          const reciprocal = productionCommanderReciprocalAlliance(input);
+          const decided = reciprocal ?? (await brain.decide(compliantInput));
+          try {
+            decision = withProductionCommanderSocial({
+              decision: decided,
+              brainInput: input,
+              answeredMessages,
+              proposedDeals,
+            });
+          } catch (socialError) {
+            console.error(
+              `commander social slots skipped: ${socialError instanceof Error ? socialError.message : String(socialError)}`,
+            );
+            decision = decided;
+          }
         }
         socket.send(
           JSON.stringify(

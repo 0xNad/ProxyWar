@@ -116,6 +116,39 @@ test("a responder remains protected when alliance is unavailable", () => {
   );
 });
 
+test("alliance retries are persistent but do not consume every growth turn", () => {
+  const choose = createMitochondriaFriendPolicy();
+  const replied = observation({
+    nonCombat: {
+      inboundMessages: [
+        {
+          messageEventID: "msg_retry",
+          senderID: "A",
+          senderName: "Auri",
+          text: "hello",
+          turnNumber: 2,
+        },
+      ],
+    },
+  });
+  assert.equal(
+    decide(choose, [alliance, expand, hold, message], replied)
+      .selectedLegalActionId,
+    alliance.id,
+  );
+  for (let decision = 0; decision < 5; decision += 1) {
+    assert.equal(
+      decide(choose, [alliance, expand, hold, message])
+        .selectedLegalActionId,
+      expand.id,
+    );
+  }
+  assert.equal(
+    decide(choose, [alliance, expand, hold, message]).selectedLegalActionId,
+    alliance.id,
+  );
+});
+
 test("accepts a non-aggression pact", () => {
   const choose = createMitochondriaFriendPolicy();
   const accept = {
